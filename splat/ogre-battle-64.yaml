@@ -23,9 +23,7 @@ options:
   mips_abi_float_regs: o32
 
   symbol_addrs_path:
-    - symbols/ogre-battle-64/symbol_addrs.txt
-  reloc_addrs_path:
-    - symbols/ogre-battle-64/reloc_addrs.txt
+    - symbols/ogre-battle-64.txt
 
   undefined_funcs_auto_path: build/ogre-battle-64/undefined_funcs_auto.txt
   undefined_syms_auto_path: build/ogre-battle-64/undefined_syms_auto.txt
@@ -34,18 +32,23 @@ options:
 
   rodata_string_guesser_level: 2
   data_string_guesser_level: 2
-  # libultra_symbols: True
-  # hardware_regs: True
+  libultra_symbols: True
+  hardware_regs: True
   # gfx_ucode: # one of [f3d, f3db, f3dex, f3dexb, f3dex2]
+
+# Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:
+  # 0x0000 - 0x0040: Standard 64-byte N64 cartridge header (clock rate, entry PC, game code, title)
   - name: header
     type: header
     start: 0x0
 
+  # 0x0040 - 0x1000: Initial Program Load 3 (IPL3 bootcode copied by PIF hardware to RSP DMEM)
   - name: ipl3
     type: bin
     start: 0x40
 
+  # 0x1000 - 0x1060: Initial bootstrap entrypoint executed in RDRAM at 0x80070C00
   - name: entry
     type: code
     start: 0x1000
@@ -53,6 +56,7 @@ segments:
     subsegments:
       - [0x1000, hasm]
 
+  # 0x1060 - 0x3F1B0: Main game engine code and data loaded into RDRAM
   - name: main
     type: code
     start: 0x1060
@@ -60,12 +64,20 @@ segments:
     follows_vram: entry
     bss_size: 0x3AE70
     subsegments:
+      # MIPS executable CPU instructions.
+      # As you decompile functions into C, split this section into named C files, e.g.:
+      #   - [0x1060, c, boot]
+      # Splat will then expect src/ogre-battle-64/boot.c and stop generating assembly for it.
       - [0x1060, asm]
+      # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0x2E570, data]
+      # Uninitialized memory (.bss section zeroed on boot)
       - { type: bss, vram: 0x800AEDB0 }
 
+  # 0x3F1B0 - 0x2800000: Game assets (LHA compressed archives, portraits, maps, soundbanks)
   - type: bin
     start: 0x3F1B0
     follows_vram: main
 
+  # End of 40 MB cartridge marker (0x2800000 = 41,943,040 bytes)
   - [0x2800000]
