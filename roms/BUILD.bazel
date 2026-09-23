@@ -1,0 +1,6 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "harvest-moon-64.z64",
+    "ogre-battle-64.z64",
+])

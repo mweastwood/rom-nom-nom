@@ -10,5 +10,6 @@ tqdm>=4.67.1
 crunch64>=0.6.2
 n64img>=0.3.3
 pygfxd>=1.0.5
+pypng>=0.20220715.0
 watchdog>=6.0.0
 m2c @ git+https://github.com/matt-kempster/m2c.git@708d2d2cb2698f091a92492b328f73b24209f72d

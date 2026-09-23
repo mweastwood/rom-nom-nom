@@ -10,7 +10,10 @@ rom-nom-nom/
 ├── MODULE.bazel             # Bazel module configuration
 ├── BUILD.bazel              # Top-level Bazel build targets
 ├── requirements.txt         # Python tools (splat, spimdisasm, m2c, etc.)
-├── roms/                    # Local baseroms (untracked)
+├── rules/                   # Starlark rules for hermetic N64 ROM builds (tracked)
+│   └── defs.bzl             # splat_split, n64_rom, and n64_rom_bitexact_test
+├── roms/                    # Local baseroms (binaries untracked, BUILD tracked)
+│   ├── BUILD.bazel
 │   ├── harvest-moon-64.z64
 │   └── ogre-battle-64.z64
 ├── splat/                   # Splat YAML split configurations (tracked)
@@ -19,20 +22,18 @@ rom-nom-nom/
 │   └── ogre-battle-64.yaml
 ├── symbols/                 # Symbol and reloc address maps (tracked)
 │   ├── BUILD.bazel
-│   ├── harvest-moon-64/
-│   └── ogre-battle-64/
+│   ├── harvest-moon-64.txt
+│   └── ogre-battle-64.txt
 ├── src/                     # C/C++ source and header files (tracked)
-│   ├── harvest-moon-64/
-│   └── ogre-battle-64/
-├── asm/                     # Disassembled assembly (untracked)
-│   ├── harvest-moon-64/
-│   └── ogre-battle-64/
-├── build/                   # Compiled ELF, linker scripts, and temp objects (untracked)
-│   ├── harvest-moon-64/
+│   ├── c/harvest-moon-64/
+│   ├── cc/harvest-moon-64/
 │   └── ogre-battle-64/
 └── tools/                   # Helper scripts and reproducible tools (tracked)
     ├── BUILD.bazel
-    └── split.py             # Reproducible ROM splitter & SHA-1 verifier (py_binary)
+    ├── splat_runner.py      # Bazel splat splitting action
+    ├── build_rom.py         # Bazel ROM build & bit-exact verification action
+    ├── install_toolchain.py # GCC 2.7.2 installer
+    └── format.py            # Codebase formatter
 ```
 
 ## Quick Start
@@ -48,34 +49,46 @@ rom-nom-nom/
   pip install -r requirements.txt
   ```
 
-### 2. Disassembling / Splitting a ROM
+### 2. Building ROMs with Bazel
 
-Using **Bazel**:
-
-```bash
-# Split Harvest Moon 64
-bazel run //:split_harvest_moon_64
-
-# Split Ogre Battle 64
-bazel run //:split_ogre_battle_64
-
-# Or pass custom arguments through the tools:split target
-bazel run //tools:split -- harvest-moon-64
-```
-
-Alternatively, you can run the script directly:
-```bash
-python3 tools/split.py harvest-moon-64
-```
-
-The split runner automatically verifies the target ROM's presence and SHA-1 checksum against the configuration before executing splat.
-
-### 3. Decompiling Functions to C/C++
-
-Use `m2c` from `.venv` to assist with decompiling target functions from assembly:
+All assembly files and linker scripts are treated as **generated artifacts** by Bazel. Splat is executed hermetically as a Bazel action whenever YAML split configs or symbols change.
 
 ```bash
-.venv/bin/m2c -t mips-gcc-c -f <function_name> asm/<game>/<file>.s
+# Build matching ROM for Harvest Moon 64
+bazel build //:harvest_moon_64_rom
+
+# Build matching ROM for Ogre Battle 64
+bazel build //:ogre_battle_64_rom
+
+# Build all ROMs
+bazel build //...
 ```
 
-Write and refine the C implementation and headers in `src/<game>/`.
+The resulting ROMs are output to:
+- `bazel-bin/harvest-moon-64.z64`
+- `bazel-bin/ogre-battle-64.z64`
+
+### 3. Generated Disassembly
+
+Because assembly is managed by Bazel, the generated `.s` files and linker scripts are located in:
+- `bazel-bin/asm/harvest-moon-64/`
+- `bazel-bin/asm/ogre-battle-64/`
+
+You can inspect, search, and view them directly in your editor at those paths.
+
+### 4. Running Bit-Exact Matching Tests
+
+```bash
+# Run bit-exact ROM match tests
+bazel test //:harvest_moon_64_rom_bitexact_test
+bazel test //:ogre_battle_64_rom_bitexact_test
+
+# Run all test suites across the repository
+bazel test //...
+```
+
+### 5. Formatting Code
+
+```bash
+bazel run //:format
+```

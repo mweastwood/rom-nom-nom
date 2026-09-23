@@ -1,167 +1,27 @@
-load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("//rules:defs.bzl", "n64_game")
 
 package(default_visibility = ["//visibility:public"])
 
-# Runnable targets for splitting each game via Bazel py_binary
-py_binary(
-    name = "split_harvest_moon_64",
-    srcs = ["//tools:split.py"],
-    args = ["harvest-moon-64"],
-    data = [
-        "//splat:harvest-moon-64",
-        "//symbols:harvest-moon-64",
-    ],
-    deps = [
-        "@pip//pyyaml",
-    ],
-    main = "//tools:split.py",
-)
-
-py_binary(
-    name = "split_ogre_battle_64",
-    srcs = ["//tools:split.py"],
-    args = ["ogre-battle-64"],
-    data = [
-        "//splat:ogre-battle-64",
-        "//symbols:ogre-battle-64",
-    ],
-    deps = [
-        "@pip//pyyaml",
-    ],
-    main = "//tools:split.py",
-)
-
-# Runnable targets for building each game ROM (modern and original toolchains)
-py_binary(
-    name = "build_harvest_moon_64_modern",
+n64_game(
+    name = "harvest_moon_64",
+    game = "harvest-moon-64",
+    config = "//splat:harvest-moon-64",
+    symbols = "//symbols:harvest-moon-64",
+    rom = "//roms:harvest-moon-64.z64",
     srcs = [
-        "//tools:build.py",
-        "//tools:install_toolchain.py",
-    ],
-    args = [
-        "harvest-moon-64",
-        "--toolchain=modern",
-    ],
-    data = [
-        "//splat:harvest-moon-64",
-        "//symbols:harvest-moon-64",
-    ],
-    deps = [
-        "@pip//pyyaml",
-        "@pip//spimdisasm",
-    ],
-    main = "//tools:build.py",
-)
-
-py_binary(
-    name = "build_harvest_moon_64_original",
-    srcs = [
-        "//tools:build.py",
-        "//tools:install_toolchain.py",
-    ],
-    args = [
-        "harvest-moon-64",
-        "--toolchain=original",
-    ],
-    data = [
-        "//splat:harvest-moon-64",
-        "//symbols:harvest-moon-64",
-    ],
-    deps = [
-        "@pip//pyyaml",
-        "@pip//spimdisasm",
-    ],
-    main = "//tools:build.py",
-)
-
-py_binary(
-    name = "build_ogre_battle_64_modern",
-    srcs = [
-        "//tools:build.py",
-        "//tools:install_toolchain.py",
-    ],
-    args = [
-        "ogre-battle-64",
-        "--toolchain=modern",
-    ],
-    data = [
-        "//splat:ogre-battle-64",
-        "//symbols:ogre-battle-64",
-    ],
-    deps = [
-        "@pip//pyyaml",
-        "@pip//spimdisasm",
-    ],
-    main = "//tools:build.py",
-)
-
-py_binary(
-    name = "build_ogre_battle_64_original",
-    srcs = [
-        "//tools:build.py",
-        "//tools:install_toolchain.py",
-    ],
-    args = [
-        "ogre-battle-64",
-        "--toolchain=original",
-    ],
-    data = [
-        "//splat:ogre-battle-64",
-        "//symbols:ogre-battle-64",
-    ],
-    deps = [
-        "@pip//pyyaml",
-        "@pip//spimdisasm",
-    ],
-    main = "//tools:build.py",
-)
-
-# Test targets verifying byte-for-byte exact match against original ROM using original toolchain
-py_test(
-    name = "match_harvest_moon_64_test",
-    size = "small",
-    srcs = [
-        "//tools:build.py",
-        "//tools:install_toolchain.py",
-    ],
-    args = [
-        "harvest-moon-64",
-        "--toolchain=original",
-        "--test",
-    ],
-    data = [
-        "//splat:harvest-moon-64",
-        "//symbols:harvest-moon-64",
-    ],
-    main = "//tools:build.py",
-    tags = ["local"],
-    deps = [
-        "@pip//pyyaml",
-        "@pip//spimdisasm",
+        "//src/c/harvest-moon-64:srcs",
+        "//src/cc/harvest-moon-64:srcs",
     ],
 )
 
-py_test(
-    name = "match_ogre_battle_64_test",
-    size = "small",
+n64_game(
+    name = "ogre_battle_64",
+    game = "ogre-battle-64",
+    config = "//splat:ogre-battle-64",
+    symbols = "//symbols:ogre-battle-64",
+    rom = "//roms:ogre-battle-64.z64",
     srcs = [
-        "//tools:build.py",
-        "//tools:install_toolchain.py",
-    ],
-    args = [
-        "ogre-battle-64",
-        "--toolchain=original",
-        "--test",
-    ],
-    data = [
-        "//splat:ogre-battle-64",
-        "//symbols:ogre-battle-64",
-    ],
-    main = "//tools:build.py",
-    tags = ["local"],
-    deps = [
-        "@pip//pyyaml",
-        "@pip//spimdisasm",
+        "//src/ogre-battle-64:srcs",
     ],
 )
 
@@ -170,4 +30,3 @@ alias(
     name = "format",
     actual = "//tools:format",
 )
-

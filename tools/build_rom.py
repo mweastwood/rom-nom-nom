@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-N64 ROM Builder and Byte-Matching Verification Tool.
+N64 ROM Builder and Bit-Exact Verification Tool for Bazel.
 
-Compiles C++, assembles MIPS assembly, converts binary assets,
-generates linker symbol scripts, links the final ELF, extracts the ROM,
-and verifies byte-for-byte matching against the target ROM and expected SHA-1.
+Compiles C sources using legacy or modern toolchain,
+assembles MIPS assembly from Bazel-generated asm directories,
+converts binary assets, links the final ELF, extracts the ROM,
+and optionally verifies bit-for-byte matching.
 """
 
+import argparse
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,18 +29,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.install_toolchain import GCC_272_DIR, get_gcc_272
 
-SPLAT_DIR = REPO_ROOT / "splat"
-SYMBOLS_DIR = REPO_ROOT / "symbols"
-SRC_DIR = REPO_ROOT / "src"
-ASM_DIR = REPO_ROOT / "asm"
-ASSETS_DIR = REPO_ROOT / "assets"
-BUILD_DIR = REPO_ROOT / "build"
-ROMS_DIR = REPO_ROOT / "roms"
-VENV_BIN = REPO_ROOT / ".venv" / "bin"
-
 
 def compute_sha1(file_path: Path) -> str:
-    """Compute sha1 hash of a file."""
     h = hashlib.sha1()
     with open(file_path, "rb") as f:
         while chunk := f.read(65536):
@@ -46,30 +39,16 @@ def compute_sha1(file_path: Path) -> str:
 
 
 def find_tool(name: str) -> str:
-    """Find a tool executable in virtualenv, PATH, or MIPS prefix."""
-    # Check venv first
-    venv_tool = VENV_BIN / name
+    venv_tool = REPO_ROOT / ".venv" / "bin" / name
     if venv_tool.exists() and os.access(venv_tool, os.X_OK):
         return str(venv_tool)
-    # Check system
     res = subprocess.run(["which", name], capture_output=True, text=True)
     if res.returncode == 0:
         return res.stdout.strip()
     return name
 
 
-def ensure_split(game_name: str, config_path: Path):
-    """Ensure splat split has been performed so LD script and ASM exist."""
-    ld_path = BUILD_DIR / game_name / f"{game_name}.ld"
-    if not ld_path.exists():
-        print(f"[{game_name}] Linker script not found at {ld_path}. Running split first...")
-        splat_exe = find_tool("splat")
-        rel_config = config_path.relative_to(REPO_ROOT)
-        subprocess.check_call([splat_exe, "split", str(rel_config)], cwd=REPO_ROOT)
-
-
-def generate_symbols_ld(game_name: str, config_data: dict, out_file: Path):
-    """Generate linker script for hardware registers, libultra, and custom symbols."""
+def generate_symbols_ld(symbols_file: Path, config_data: dict, out_file: Path):
     ctx = spimdisasm.common.Context()
     opts = config_data.get("options", {})
 
@@ -82,12 +61,9 @@ def generate_symbols_ld(game_name: str, config_data: dict, out_file: Path):
     for vram, sym in ctx.globalSegment.symbols.items():
         symbols[sym.name] = vram
 
-    # Read game-specific symbols.txt
-    symbols_file = SYMBOLS_DIR / f"{game_name}.txt"
     if symbols_file.exists():
         with open(symbols_file, "r", encoding="utf-8") as f:
             for line in f:
-                # Strip comments
                 clean = re.sub(r"//.*", "", line).strip()
                 m = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)\s*;", clean)
                 if m:
@@ -102,10 +78,14 @@ def generate_symbols_ld(game_name: str, config_data: dict, out_file: Path):
             f.write(f"{sym_name} = 0x{vram_val:08X};\n")
 
 
-
-
-def compile_with_gcc_272(src_path: Path, target_obj: Path, game_name: str, as_bin: str, opt_flags: list):
-    """Compile C source using GCC 2.7.2 and assemble with GNU AS."""
+def compile_with_gcc_272(
+    src_path: Path,
+    target_obj: Path,
+    asm_dir: Path,
+    as_bin: str,
+    opt_flags: list,
+    extra_includes: list,
+):
     gcc_bin = get_gcc_272(require_installed=True)
     temp_s = target_obj.with_suffix(".s272")
 
@@ -113,57 +93,95 @@ def compile_with_gcc_272(src_path: Path, target_obj: Path, game_name: str, as_bi
     as_extra_flags = [f[4:] for f in opt_flags if f.startswith("-Wa,")]
 
     cmd = [
-        str(gcc_bin), f"-B{GCC_272_DIR}/", "-x", "c", "-S",
-        *gcc_flags, "-G", "0",
+        str(gcc_bin),
+        f"-B{GCC_272_DIR}/",
+        "-x",
+        "c",
+        "-S",
+        *gcc_flags,
+        "-G",
+        "0",
         f"-I{REPO_ROOT}",
-        f"-I{ASM_DIR / game_name}",
-        f"-I{SRC_DIR / game_name}",
-        f"-I{SRC_DIR / 'c' / game_name}",
-        f"-I{SRC_DIR / 'cc' / game_name}",
-        str(src_path), "-o", str(temp_s)
+        f"-I{asm_dir}",
     ]
+    for inc in extra_includes:
+        cmd.append(f"-I{inc}")
+    cmd.extend([str(src_path), "-o", str(temp_s)])
     subprocess.check_call(cmd, cwd=REPO_ROOT)
 
-    macro_inc = ASM_DIR / game_name / "macro.inc"
+    macro_inc = asm_dir / "macro.inc"
     as_cmd = [
-        as_bin, "-march=vr4300", "-mabi=32", "-EB", "-G", "0",
+        as_bin,
+        "-march=vr4300",
+        "-mabi=32",
+        "-EB",
+        "-G",
+        "0",
         *as_extra_flags,
-        f"-I{ASM_DIR / game_name}",
-        str(macro_inc), str(temp_s), "-o", str(target_obj)
+        f"-I{asm_dir}",
     ]
+    if macro_inc.exists():
+        as_cmd.append(str(macro_inc))
+    as_cmd.extend([str(temp_s), "-o", str(target_obj)])
     subprocess.check_call(as_cmd, cwd=REPO_ROOT)
     temp_s.unlink(missing_ok=True)
 
 
-def build_and_verify(game_name: str, toolchain: str = "original", is_test: bool = False) -> bool:
-    config_path = SPLAT_DIR / f"{game_name}.yaml"
-    if not config_path.exists():
-        print(f"Error: Splat config not found: {config_path}")
-        return False
-
+def build_rom(
+    game_name: str,
+    config_path: Path,
+    symbols_path: Path,
+    asm_dir: Path,
+    build_dir: Path,
+    assets_dir: Path,
+    out_elf: Path,
+    out_rom: Path,
+    toolchain: str = "original",
+    verify_rom: Path = None,
+    is_test: bool = False,
+) -> bool:
     with open(config_path, "r", encoding="utf-8") as f:
         config_data = yaml.safe_load(f)
 
     expected_sha1 = config_data.get("sha1", "").lower()
-    options = config_data.get("options", {})
-    target_rel = options.get("target_path", f"roms/{game_name}.z64")
-    rom_path = (REPO_ROOT / target_rel).resolve()
+    ld_script = build_dir / f"{game_name}.ld"
+    if not ld_script.exists():
+        candidates = list(build_dir.glob("*.ld"))
+        if candidates:
+            ld_script = candidates[0]
+        else:
+            raise FileNotFoundError(f"Linker script not found in {build_dir}")
 
-    ensure_split(game_name, config_path)
+    # Isolated object working directory next to out_elf
+    obj_dir = out_elf.parent / f"_{game_name}_objs"
+    if obj_dir.exists():
+        shutil.rmtree(obj_dir)
+    obj_dir.mkdir(parents=True, exist_ok=True)
 
-    game_build_dir = BUILD_DIR / game_name
-    ld_script = game_build_dir / f"{game_name}.ld"
-    elf_file = game_build_dir / f"{game_name}.{toolchain}.elf"
-    out_rom = game_build_dir / f"{game_name}.{toolchain}.z64"
-    symbols_ld = game_build_dir / "symbols.ld"
+    # 1. Generate symbols.ld in obj_dir
+    symbols_ld = obj_dir / "symbols.ld"
+    generate_symbols_ld(symbols_path, config_data, symbols_ld)
 
-    # 1. Generate linker symbol script
-    generate_symbols_ld(game_name, config_data, symbols_ld)
-
-    # 2. Parse required objects from LD script
+    # 2. Parse needed objects and rewrite LD script
     ld_content = ld_script.read_text(encoding="utf-8")
-    obj_pattern = rf"build/{re.escape(game_name)}/([\w./\-]+/[^\s()]+?\.o)"
-    needed_objs = sorted(set(re.findall(obj_pattern, ld_content)))
+    needed_obj_matches = sorted(set(re.findall(r"([^\s()]+?\.o)", ld_content)))
+
+    # Map object names to destination paths in obj_dir
+    obj_map = {}
+    for obj_match in needed_obj_matches:
+        obj_name = Path(obj_match).name
+        obj_map[obj_match] = (obj_dir / obj_name).resolve()
+
+    # Rewrite linker script pointing to obj_dir
+    def replace_obj_path(m):
+        full_match = m.group(1)
+        if full_match in obj_map:
+            return str(obj_map[full_match])
+        return str(obj_dir / Path(full_match).name)
+
+    rewritten_ld_content = re.sub(r"([^\s()]+\.o)", replace_obj_path, ld_content)
+    rewritten_ld_path = obj_dir / f"{game_name}.ld"
+    rewritten_ld_path.write_text(rewritten_ld_content, encoding="utf-8")
 
     as_bin = find_tool("mips-linux-gnu-as")
     gpp_bin = find_tool("mips-linux-gnu-g++")
@@ -177,144 +195,159 @@ def build_and_verify(game_name: str, toolchain: str = "original", is_test: bool 
     else:
         toolchain_defs = ["-DORIGINAL_TOOLCHAIN=1"]
 
-    # 3. Compile / Assemble each object
-    print(f"=== Building {config_data.get('name', game_name)} [{toolchain} toolchain] ({len(needed_objs)} objects) ===")
-    for rel_obj in needed_objs:
-        target_obj = game_build_dir / rel_obj
-        target_obj.parent.mkdir(parents=True, exist_ok=True)
+    extra_includes = [
+        REPO_ROOT / "src" / game_name,
+        REPO_ROOT / "src" / "c" / game_name,
+        REPO_ROOT / "src" / "cc" / game_name,
+    ]
 
-        base_no_ext = rel_obj[:-2]
-        cc_src = REPO_ROOT / f"{base_no_ext}.cc"
-        cpp_src = REPO_ROOT / f"{base_no_ext}.cpp"
-        c_src = REPO_ROOT / f"{base_no_ext}.c"
-        s_src = REPO_ROOT / f"{base_no_ext}.s"
-        bin_src = REPO_ROOT / f"{base_no_ext}.bin"
+    print(f"=== Building {config_data.get('name', game_name)} [{toolchain} toolchain] ({len(obj_map)} objects) ===")
+    for obj_match, target_obj in obj_map.items():
+        stem = target_obj.stem
 
-        src_to_compile = None
-        if c_src.exists():
-            src_to_compile = c_src
-        elif cc_src.exists():
-            src_to_compile = cc_src
-        elif cpp_src.exists():
-            src_to_compile = cpp_src
+        c_candidates = list((REPO_ROOT / "src").glob(f"**/{stem}.c"))
+        cc_candidates = list((REPO_ROOT / "src").glob(f"**/{stem}.cc")) + list((REPO_ROOT / "src").glob(f"**/{stem}.cpp"))
+        s_candidates = list(asm_dir.glob(f"**/{stem}.s"))
+        bin_candidates = list(assets_dir.glob(f"**/{stem}.bin"))
 
-        if src_to_compile is not None:
+        if c_candidates or cc_candidates:
+            src_file = c_candidates[0] if c_candidates else cc_candidates[0]
             if toolchain == "original":
                 c_flags_cfg = config_data.get("c_flags", {})
-                file_opt = c_flags_cfg.get(src_to_compile.stem, c_flags_cfg.get("default", ["-O2"]))
-                compile_with_gcc_272(src_to_compile, target_obj, game_name, as_bin, file_opt)
+                file_opt = c_flags_cfg.get(src_file.stem, c_flags_cfg.get("default", ["-O2", "-mips2", "-Wa,-O1"]))
+                compile_with_gcc_272(src_file, target_obj, asm_dir, as_bin, file_opt, extra_includes)
             else:
-                compiler = gpp_bin if (cc_src.exists() or cpp_src.exists()) else gcc_bin
+                compiler = gpp_bin if cc_candidates else gcc_bin
                 cmd = [
-                    compiler, "-c", "-march=vr4300", "-mabi=32", "-EB",
-                    "-fno-PIC", "-mno-abicalls", "-ffreestanding",
+                    compiler,
+                    "-c",
+                    "-march=vr4300",
+                    "-mabi=32",
+                    "-EB",
+                    "-fno-PIC",
+                    "-mno-abicalls",
+                    "-ffreestanding",
                     f"-I{REPO_ROOT}",
-                    f"-I{ASM_DIR / game_name}",
-                    f"-I{SRC_DIR / game_name}",
-                    f"-I{SRC_DIR / 'c' / game_name}",
-                    f"-I{SRC_DIR / 'cc' / game_name}",
-                ] + toolchain_defs + [str(src_to_compile), "-o", str(target_obj)]
+                    f"-I{asm_dir}",
+                ]
+                for inc in extra_includes:
+                    cmd.append(f"-I{inc}")
+                cmd.extend(toolchain_defs)
+                cmd.extend([str(src_file), "-o", str(target_obj)])
                 subprocess.check_call(cmd, cwd=REPO_ROOT)
-        elif s_src.exists():
+        elif s_candidates:
+            s_src = s_candidates[0]
             cmd = [
-                as_bin, "-march=vr4300", "-mabi=32", "-EB",
-                f"-I{ASM_DIR / game_name}",
-                f"-I{game_build_dir}",
-                str(s_src), "-o", str(target_obj)
+                as_bin,
+                "-march=vr4300",
+                "-mabi=32",
+                "-EB",
+                f"-I{asm_dir}",
+                f"-I{build_dir}",
+                str(s_src),
+                "-o",
+                str(target_obj),
             ]
             subprocess.check_call(cmd, cwd=REPO_ROOT)
-        elif bin_src.exists():
+        elif bin_candidates:
+            bin_src = bin_candidates[0]
             cmd = [
-                objcopy_bin, "-I", "binary", "-O", "elf32-tradbigmips", "-B", "mips",
-                str(bin_src), str(target_obj)
+                objcopy_bin,
+                "-I",
+                "binary",
+                "-O",
+                "elf32-tradbigmips",
+                "-B",
+                "mips",
+                str(bin_src),
+                str(target_obj),
             ]
             subprocess.check_call(cmd, cwd=REPO_ROOT)
         else:
-            raise FileNotFoundError(f"Source file not found for object: {rel_obj}")
+            raise FileNotFoundError(f"Source file not found for object: {obj_match}")
 
-    # 4. Link
+    # 3. Link ELF
     print("Linking ELF...")
+    out_elf.parent.mkdir(parents=True, exist_ok=True)
     ld_cmd = [ld_bin, "-T", str(symbols_ld)]
-    
-    undef_syms = game_build_dir / "undefined_syms_auto.txt"
+
+    undef_syms = build_dir / "undefined_syms_auto.txt"
     if undef_syms.exists():
         ld_cmd += ["-T", str(undef_syms)]
 
-    undef_funcs = game_build_dir / "undefined_funcs_auto.txt"
+    undef_funcs = build_dir / "undefined_funcs_auto.txt"
     if undef_funcs.exists():
         ld_cmd += ["-T", str(undef_funcs)]
 
-    ld_cmd += [
-        "-T", str(ld_script),
-        "--no-check-sections",
-        "-o", str(elf_file)
-    ]
+    ld_cmd += ["-T", str(rewritten_ld_path), "--no-check-sections", "-o", str(out_elf)]
     subprocess.check_call(ld_cmd, cwd=REPO_ROOT)
 
-    # 5. Extract ROM binary
+    # 4. Extract ROM
     print("Extracting ROM binary...")
-    subprocess.check_call([objcopy_bin, "-O", "binary", str(elf_file), str(out_rom)], cwd=REPO_ROOT)
+    out_rom.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.check_call([objcopy_bin, "-O", "binary", str(out_elf), str(out_rom)], cwd=REPO_ROOT)
 
-    # 6. Verify Matching
     built_sha1 = compute_sha1(out_rom)
-    print(f"\nBuilt ROM ({toolchain}): {out_rom.name}")
+    print(f"\nBuilt ROM: {out_rom.name}")
     print(f"Built ROM SHA-1:    {built_sha1}")
 
     if toolchain == "modern":
-        print(f"[SUCCESS] Modern ROM built successfully!")
+        print("[SUCCESS] Modern ROM built successfully!")
         return True
 
     print(f"Expected ROM SHA-1: {expected_sha1}")
-
     sha1_matches = (built_sha1 == expected_sha1)
     byte_matches = True
 
-    if rom_path.exists():
-        orig_bytes = rom_path.read_bytes()
+    if verify_rom and verify_rom.exists():
+        orig_bytes = verify_rom.read_bytes()
         built_bytes = out_rom.read_bytes()
         if orig_bytes != built_bytes:
             byte_matches = False
             diff_count = sum(1 for a, b in zip(orig_bytes, built_bytes) if a != b)
             diff_count += abs(len(orig_bytes) - len(built_bytes))
-            print(f"[ERROR] Byte mismatch with input ROM ({diff_count} differing bytes)!")
+            print(f"[ERROR] Byte mismatch with target ROM ({diff_count} differing bytes)!")
         else:
-            print("[SUCCESS] Byte-for-byte exact match against input ROM verified!")
-    else:
-        print("[INFO] Input ROM not present locally; verified against pinned SHA-1 hash.")
+            print("[SUCCESS] Byte-for-byte exact match against target ROM verified!")
 
     if sha1_matches and byte_matches:
         print(f"\n*** [MATCH OK] {game_name} matches 100% byte-for-byte! ***\n")
         return True
     else:
         print(f"\n*** [MATCH FAILED] {game_name} does not match! ***\n")
+        if is_test:
+            sys.exit(1)
         return False
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print(f"Usage: {sys.argv[0]} <name-of-game> [--toolchain=modern|original] [--test]")
-        sys.exit(0 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 1)
+    parser = argparse.ArgumentParser(description="Build N64 ROM from generated assembly and C sources.")
+    parser.add_argument("--game", required=True, help="Game name, e.g. harvest-moon-64")
+    parser.add_argument("--config", required=True, type=Path, help="Path to splat YAML config")
+    parser.add_argument("--symbols", required=True, type=Path, help="Path to symbols file")
+    parser.add_argument("--asm-dir", required=True, type=Path, help="Generated assembly directory")
+    parser.add_argument("--build-dir", required=True, type=Path, help="Generated build directory (with LD script)")
+    parser.add_argument("--assets-dir", required=True, type=Path, help="Generated assets directory")
+    parser.add_argument("--out-elf", required=True, type=Path, help="Output ELF file path")
+    parser.add_argument("--out-rom", required=True, type=Path, help="Output ROM (.z64) file path")
+    parser.add_argument("--toolchain", default="original", choices=["original", "modern"], help="Toolchain to use")
+    parser.add_argument("--verify-rom", type=Path, default=None, help="Original ROM to verify match against")
+    parser.add_argument("--test", action="store_true", help="Fail with non-zero exit code if not byte-exact match")
+    args = parser.parse_args()
 
-    game_name = sys.argv[1]
-    if game_name.endswith(".yaml"):
-        game_name = game_name[:-5]
-    if game_name.endswith(".z64"):
-        game_name = game_name[:-4]
-
-    toolchain = "original"
-    is_test = False
-
-    for arg in sys.argv[2:]:
-        if arg == "--test":
-            is_test = True
-        elif arg.startswith("--toolchain="):
-            toolchain = arg.split("=", 1)[1]
-        elif arg == "--modern":
-            toolchain = "modern"
-        elif arg == "--original":
-            toolchain = "original"
-
-    success = build_and_verify(game_name, toolchain=toolchain, is_test=is_test)
+    success = build_rom(
+        game_name=args.game,
+        config_path=args.config,
+        symbols_path=args.symbols,
+        asm_dir=args.asm_dir,
+        build_dir=args.build_dir,
+        assets_dir=args.assets_dir,
+        out_elf=args.out_elf,
+        out_rom=args.out_rom,
+        toolchain=args.toolchain,
+        verify_rom=args.verify_rom,
+        is_test=args.test,
+    )
     sys.exit(0 if success else 1)
 
 

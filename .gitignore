@@ -2,9 +2,11 @@
 *.z64
 *.n64
 *.v64
-baserom*
-roms/
-*.rom
+roms/*.z64
+roms/*.n64
+roms/*.v64
+roms/*.rom
+
 
 # Disassembly & Assembly files (keep assembly strictly untracked)
 *.s

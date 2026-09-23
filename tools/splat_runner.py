@@ -1,137 +1,79 @@
 #!/usr/bin/env python3
 """
-Reproducible ROM splitting wrapper for rom-nom-nom.
-Verifies ROM presence and SHA-1 checksum before invoking splat.
+Splat runner action for Bazel.
+Splits an N64 ROM into Bazel-managed output directories:
+  - out_asm: generated .s assembly files and macros
+  - out_build: linker script (.ld), undefined symbols and funcs
+  - out_assets: extracted binary assets
 """
 
-import hashlib
+import argparse
 import os
-import subprocess
+import shutil
 import sys
 from pathlib import Path
 import yaml
-
-if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
-    os.chdir(os.environ["BUILD_WORKSPACE_DIRECTORY"])
-
-REPO_ROOT = Path(
-    os.environ.get("BUILD_WORKSPACE_DIRECTORY") or Path(__file__).resolve().parent.parent
-).resolve()
-SPLAT_DIR = REPO_ROOT / "splat"
-ROMS_DIR = REPO_ROOT / "roms"
-VENV_BIN = REPO_ROOT / ".venv" / "bin"
-
-
-def get_available_games() -> list[str]:
-    """Find all configured game yaml files in splat/."""
-    if not SPLAT_DIR.exists():
-        return []
-    return sorted(p.stem for p in SPLAT_DIR.glob("*.yaml"))
-
-
-def compute_sha1(file_path: Path) -> str:
-    """Compute sha1 hash of a file."""
-    h = hashlib.sha1()
-    with open(file_path, "rb") as f:
-        while chunk := f.read(65536):
-            h.update(chunk)
-    return h.hexdigest().lower()
-
-
-def find_splat_executable() -> str:
-    """Find splat binary in virtualenv or PATH."""
-    venv_splat = VENV_BIN / "splat"
-    if venv_splat.exists() and os.access(venv_splat, os.X_OK):
-        return str(venv_splat)
-    # Check system PATH
-    sys_splat = subprocess.run(["which", "splat"], capture_output=True, text=True)
-    if sys_splat.returncode == 0:
-        return sys_splat.stdout.strip()
-    return ""
+from splat.scripts import split
 
 
 def main():
-    available = get_available_games()
+    parser = argparse.ArgumentParser(description="Run splat to generate assembly, linker scripts, and assets.")
+    parser.add_argument("--config", required=True, type=Path, help="Input splat YAML config")
+    parser.add_argument("--rom", required=True, type=Path, help="Input target ROM")
+    parser.add_argument("--symbols", required=True, type=Path, help="Symbols text file")
+    parser.add_argument("--out-asm", required=True, type=Path, help="Output asm directory")
+    parser.add_argument("--out-build", required=True, type=Path, help="Output build directory")
+    parser.add_argument("--out-assets", required=True, type=Path, help="Output assets directory")
+    parser.add_argument("--src-dir", type=Path, default=None, help="Root of source directory")
+    parser.add_argument("--extensions-dir", type=Path, default=None, help="Splat extensions directory")
+    args = parser.parse_args()
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print(f"Usage: {sys.argv[0]} <name-of-game> [splat-args...]")
-        print("\nAvailable games:")
-        if available:
-            for g in available:
-                print(f"  - {g}")
-        else:
-            print("  (none found in splat/)")
-        sys.exit(0 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 1)
+    # Determine repo root
+    repo_root = Path(
+        os.environ.get("BUILD_WORKSPACE_DIRECTORY") or Path(__file__).resolve().parent.parent
+    ).resolve()
 
-    game_name = sys.argv[1]
-    extra_args = sys.argv[2:]
+    # Recreate clean output directories
+    for d in [args.out_asm, args.out_build, args.out_assets]:
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
 
-    # Resolve game name (support exact match or stripping extensions)
-    if game_name.endswith(".yaml"):
-        game_name = game_name[:-5]
-    if game_name.endswith(".z64"):
-        game_name = game_name[:-4]
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
 
-    config_path = SPLAT_DIR / f"{game_name}.yaml"
-    if not config_path.exists():
-        print(f"Error: Splat config not found: {config_path}")
-        print(f"Available games: {', '.join(available)}")
-        sys.exit(1)
+    options = cfg.setdefault("options", {})
+    basename = options.get("basename", args.config.stem)
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_data = yaml.safe_load(f)
+    options["asm_path"] = str(args.out_asm.resolve())
+    options["build_path"] = str(args.out_build.resolve())
+    options["asset_path"] = str(args.out_assets.resolve())
+    options["generated_asm_macros_directory"] = str(args.out_asm.resolve())
+    options["ld_script_path"] = str((args.out_build / f"{basename}.ld").resolve())
+    options["elf_path"] = str((args.out_build / f"{basename}.elf").resolve())
+    options["target_path"] = str(args.rom.resolve())
+    options["symbol_addrs_path"] = [str(args.symbols.resolve())]
+    options["undefined_funcs_auto_path"] = str((args.out_build / "undefined_funcs_auto.txt").resolve())
+    options["undefined_syms_auto_path"] = str((args.out_build / "undefined_syms_auto.txt").resolve())
+    options["base_path"] = str(repo_root)
 
-    expected_sha1 = config_data.get("sha1", "").lower()
-    options = config_data.get("options", {})
-    target_rel = options.get("target_path", f"roms/{game_name}.z64")
-    
-    # Resolve ROM path relative to REPO_ROOT
-    rom_path = (REPO_ROOT / target_rel).resolve()
+    if args.extensions_dir and args.extensions_dir.exists():
+        options["extensions_path"] = str(args.extensions_dir.resolve())
+    elif (repo_root / "tools" / "splat_ext").exists():
+        options["extensions_path"] = str((repo_root / "tools" / "splat_ext").resolve())
 
-    print(f"=== Splitting {config_data.get('name', game_name)} ===")
-    print(f"Config:   {config_path.relative_to(REPO_ROOT)}")
-    print(f"ROM:      {rom_path}")
+    if args.src_dir and args.src_dir.exists():
+        options["src_path"] = str(args.src_dir.resolve())
+    elif "src_path" in options:
+        options["src_path"] = str((repo_root / options["src_path"]).resolve())
 
-    if not rom_path.exists():
-        print(f"\n[ERROR] Target ROM not found at: {rom_path}")
-        print(f"Please place the ROM file at: roms/{game_name}.z64")
-        sys.exit(1)
+    options["cache_path"] = str((args.out_build / ".splache").resolve())
 
-    # Verify SHA-1 for reproducibility
-    if expected_sha1:
-        print("Verifying ROM SHA-1 checksum...")
-        actual_sha1 = compute_sha1(rom_path)
-        if actual_sha1 != expected_sha1:
-            print(f"\n[ERROR] ROM SHA-1 mismatch for {rom_path.name}!")
-            print(f"  Expected: {expected_sha1}")
-            print(f"  Actual:   {actual_sha1}")
-            print("This split configuration is pinned to the exact ROM hash above.")
-            sys.exit(1)
-        print(f"SHA-1 verified: {actual_sha1}")
+    tmp_config = args.out_build / f"{basename}_splat.yaml"
+    with open(tmp_config, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f)
 
-    splat_exe = find_splat_executable()
-    if not splat_exe:
-        print("\n[ERROR] 'splat' executable not found!")
-        print("Please activate the virtualenv or run:")
-        print("  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")
-        sys.exit(1)
-
-    # Ensure build and asm output directories exist
-    build_dir = REPO_ROOT / "build" / game_name
-    build_dir.mkdir(parents=True, exist_ok=True)
-
-    rel_config = config_path.relative_to(REPO_ROOT)
-    cmd = [splat_exe, "split", str(rel_config)] + extra_args
-    print(f"Running:  {' '.join(cmd)}\n")
-
-    result = subprocess.run(cmd, cwd=REPO_ROOT)
-    if result.returncode != 0:
-        print(f"\n[ERROR] splat exited with code {result.returncode}")
-        sys.exit(result.returncode)
-
-    print(f"\n[SUCCESS] Split completed successfully for {game_name}.")
-    print(f"Disassembly: asm/{game_name}/")
-    print(f"Build data:  build/{game_name}/")
+    split.main([tmp_config], modes=["all"], verbose=False, use_cache=False)
 
 
 if __name__ == "__main__":
