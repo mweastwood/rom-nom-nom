@@ -49,5 +49,12 @@ alias(
     actual = "//tools:diff",
 )
 
+# Convenient alias to decompile a function with on-the-fly context
+alias(
+    name = "m2c",
+    actual = "//tools:m2c",
+)
+
+
 
 

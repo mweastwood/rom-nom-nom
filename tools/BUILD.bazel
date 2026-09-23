@@ -69,5 +69,12 @@ py_binary(
     main = "diff.py",
 )
 
+py_binary(
+    name = "m2c",
+    srcs = ["m2c.py"],
+    main = "m2c.py",
+)
+
+
 
 
