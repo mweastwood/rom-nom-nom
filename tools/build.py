@@ -140,12 +140,23 @@ def build_and_verify(game_name: str, is_test: bool = False) -> bool:
         target_obj.parent.mkdir(parents=True, exist_ok=True)
 
         base_no_ext = rel_obj[:-2]
+        cc_src = REPO_ROOT / f"{base_no_ext}.cc"
         cpp_src = REPO_ROOT / f"{base_no_ext}.cpp"
         c_src = REPO_ROOT / f"{base_no_ext}.c"
         s_src = REPO_ROOT / f"{base_no_ext}.s"
         bin_src = REPO_ROOT / f"{base_no_ext}.bin"
 
-        if cpp_src.exists():
+        if cc_src.exists():
+            cmd = [
+                gpp_bin, "-c", "-march=vr4300", "-mabi=32", "-EB",
+                "-fno-PIC", "-mno-abicalls",
+                f"-I{REPO_ROOT}",
+                f"-I{ASM_DIR / game_name}",
+                f"-I{SRC_DIR / game_name}",
+                str(cc_src), "-o", str(target_obj)
+            ]
+            subprocess.check_call(cmd, cwd=REPO_ROOT)
+        elif cpp_src.exists():
             cmd = [
                 gpp_bin, "-c", "-march=vr4300", "-mabi=32", "-EB",
                 "-fno-PIC", "-mno-abicalls",

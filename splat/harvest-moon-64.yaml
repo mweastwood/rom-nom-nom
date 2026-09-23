@@ -66,7 +66,7 @@ segments:
     subsegments:
       # MIPS executable CPU instructions.
       # As functions are decompiled into C++, split this section into named C++ files:
-      - [0x1050, cpp, boot]
+      - [0x1050, cc, boot]
       - [0x1190, asm]
       # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0xEBE10, data]
