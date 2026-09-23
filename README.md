@@ -92,3 +92,11 @@ bazel test //...
 ```bash
 bazel run //:format
 ```
+
+### 6. Git Hooks (Automatic Code Formatting)
+
+A pre-commit hook is provided in `.githooks/` to ensure all staged C and C++ files are automatically formatted before every commit:
+
+```bash
+git config core.hooksPath .githooks
+```

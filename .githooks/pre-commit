@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# Git pre-commit hook to guarantee all C and C++ sources are formatted with clang-format.
+#
+set -euo pipefail
+
+# Check if clang-format is installed
+if ! command -v clang-format >/dev/null 2>&1; then
+    echo "[pre-commit] WARNING: clang-format not found in PATH. Skipping formatting check."
+    exit 0
+fi
+
+# Get staged C and C++ files (excluding deleted files)
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cc|cpp|h)$' || true)
+
+if [[ -z "$STAGED_FILES" ]]; then
+    exit 0
+fi
+
+for file in $STAGED_FILES; do
+    if [[ ! -f "$file" ]]; then
+        continue
+    fi
+
+    # Check if file conforms to .clang-format
+    if ! clang-format --dry-run --Werror "$file" >/dev/null 2>&1; then
+        echo "[pre-commit] Formatting $file with clang-format..."
+        clang-format -i "$file"
+        git add "$file"
+    fi
+done
+
+exit 0
