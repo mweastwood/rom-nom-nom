@@ -37,3 +37,10 @@ alias(
     actual = "//tools:tidy",
 )
 
+# Convenient alias to check decompilation progress
+alias(
+    name = "progress",
+    actual = "//tools:progress",
+)
+
+
