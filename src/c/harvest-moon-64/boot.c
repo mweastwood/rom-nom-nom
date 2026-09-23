@@ -1,7 +1,8 @@
 #include "common.h"
 
 void os_initialize(void);
-void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp, OSPri pri);
+void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
+                      OSPri pri);
 void os_start_thread(OSThread* thread);
 void os_set_thread_priority(OSThread* thread, OSPri pri);
 
@@ -19,23 +20,23 @@ extern void (*D_801FD628)(void);
 void idle(void* arg);
 
 void main(void) {
-    os_initialize();
-    os_create_thread(&D_801241C0, 1, idle, NULL, D_80126520, 10);
-    os_start_thread(&D_801241C0);
+  os_initialize();
+  os_create_thread(&D_801241C0, 1, idle, NULL, D_80126520, 10);
+  os_start_thread(&D_801241C0);
 }
 
 void idle(void* arg) {
-    D_801FD628 = NULL;
-    func_800FD5B0();
-    func_800FB140(2, 1);
-    func_80105B00(90);
-    os_create_thread(&D_80124370, 3, mainproc, NULL, D_801C6220, 10);
-    os_start_thread(&D_80124370);
-    os_set_thread_priority(&D_801241C0, 0);
+  D_801FD628 = NULL;
+  func_800FD5B0();
+  func_800FB140(2, 1);
+  func_80105B00(90);
+  os_create_thread(&D_80124370, 3, mainproc, NULL, D_801C6220, 10);
+  os_start_thread(&D_80124370);
+  os_set_thread_priority(&D_801241C0, 0);
 
-    while (1) {
-        if (D_801FD628 != NULL) {
-            D_801FD628();
-        }
+  while (1) {
+    if (D_801FD628 != NULL) {
+      D_801FD628();
     }
+  }
 }

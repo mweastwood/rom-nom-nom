@@ -21,14 +21,14 @@ typedef s32 OSId;
 typedef s32 OSPri;
 
 typedef struct OSThread_s {
-    struct OSThread_s* next;
-    OSPri priority;
-    struct OSThread_s** queue;
-    struct OSThread_s* tlnext;
-    u16 state;
-    u16 flags;
-    OSId id;
-    s32 fp;
+  struct OSThread_s* next;
+  OSPri priority;
+  struct OSThread_s** queue;
+  struct OSThread_s* tlnext;
+  u16 state;
+  u16 flags;
+  OSId id;
+  s32 fp;
 } OSThread;
 
 #endif

@@ -4,20 +4,16 @@
 namespace {
 
 class CcBootAdapter : public IBootTestTarget {
-public:
-    void Main() override {
-        hm64::BootSystem::Main();
-    }
+ public:
+  void Main() override { hm64::BootSystem::Main(); }
 
-    void Idle(void* arg) override {
-        hm64::BootSystem::Idle(arg);
-    }
+  void Idle(void* arg) override { hm64::BootSystem::Idle(arg); }
 };
 
 static CcBootAdapter s_adapter;
 
-} // namespace
+}  // namespace
 
 IBootTestTarget* GetBootTestTarget() {
-    return &s_adapter;
+  return &s_adapter;
 }

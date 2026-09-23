@@ -29,3 +29,9 @@ py_binary(
     srcs = ["install_toolchain.py"],
     main = "install_toolchain.py",
 )
+
+py_binary(
+    name = "format",
+    srcs = ["format.py"],
+    main = "format.py",
+)

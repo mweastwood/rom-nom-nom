@@ -4,20 +4,16 @@
 namespace {
 
 class CBootAdapter : public IBootTestTarget {
-public:
-    void Main() override {
-        boot_main();
-    }
+ public:
+  void Main() override { boot_main(); }
 
-    void Idle(void* arg) override {
-        idle(arg);
-    }
+  void Idle(void* arg) override { idle(arg); }
 };
 
 static CBootAdapter s_adapter;
 
-} // namespace
+}  // namespace
 
 IBootTestTarget* GetBootTestTarget() {
-    return &s_adapter;
+  return &s_adapter;
 }

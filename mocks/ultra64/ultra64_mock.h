@@ -8,37 +8,37 @@ extern "C" {
 #endif
 
 typedef struct {
-    OSThread* thread;
-    OSId id;
-    void (*entry)(void*);
-    void* arg;
-    void* sp;
-    OSPri pri;
+  OSThread* thread;
+  OSId id;
+  void (*entry)(void*);
+  void* arg;
+  void* sp;
+  OSPri pri;
 } MockThreadRecord;
 
 typedef struct {
-    int os_initialize_calls;
-    int os_create_thread_calls;
-    MockThreadRecord created_threads[16];
-    int os_start_thread_calls;
-    OSThread* started_threads[16];
-    int os_set_thread_priority_calls;
-    struct {
-        OSThread* thread;
-        OSPri pri;
-    } priority_changes[16];
+  int os_initialize_calls;
+  int os_create_thread_calls;
+  MockThreadRecord created_threads[16];
+  int os_start_thread_calls;
+  OSThread* started_threads[16];
+  int os_set_thread_priority_calls;
+  struct {
+    OSThread* thread;
+    OSPri pri;
+  } priority_changes[16];
 
-    // Engine function call trackers
-    int func_800FD5B0_calls;
-    int func_800FB140_calls;
-    s32 func_800FB140_last_arg0;
-    s32 func_800FB140_last_arg1;
-    int func_80105B00_calls;
-    s32 func_80105B00_last_arg0;
-    int mainproc_calls;
+  // Engine function call trackers
+  int func_800FD5B0_calls;
+  int func_800FB140_calls;
+  s32 func_800FB140_last_arg0;
+  s32 func_800FB140_last_arg1;
+  int func_80105B00_calls;
+  s32 func_80105B00_last_arg0;
+  int mainproc_calls;
 
-    // Optional test hooks
-    void (*on_set_priority_hook)(OSThread* thread, OSPri pri);
+  // Optional test hooks
+  void (*on_set_priority_hook)(OSThread* thread, OSPri pri);
 } MockUltra64State;
 
 extern MockUltra64State g_mock_state;
@@ -55,7 +55,8 @@ extern void (*D_801FD628)(void);
 
 // N64 OS declarations
 void os_initialize(void);
-void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp, OSPri pri);
+void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
+                      OSPri pri);
 void os_start_thread(OSThread* thread);
 void os_set_thread_priority(OSThread* thread, OSPri pri);
 
@@ -73,4 +74,4 @@ void idle(void* arg);
 }
 #endif
 
-#endif // ULTRA64_MOCK_H
+#endif  // ULTRA64_MOCK_H
