@@ -79,6 +79,8 @@ segments:
       - [0x1050, c, boot]
       - [0x1190, c, main]
       - [0x1AC0, asm]
+      - [0x1E360, c, message]
+      - [0x211E0, asm]
       # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0xEBE10, data]
       # Uninitialized memory (.bss section zeroed on boot)
