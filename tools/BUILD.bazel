@@ -13,5 +13,8 @@ py_binary(
         "//splat:configs",
         "//symbols:all_symbols",
     ],
+    deps = [
+        "@pip//pyyaml",
+    ],
     main = "split.py",
 )

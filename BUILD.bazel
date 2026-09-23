@@ -11,6 +11,9 @@ py_binary(
         "//splat:configs",
         "//symbols:all_symbols",
     ],
+    deps = [
+        "@pip//pyyaml",
+    ],
     main = "//tools:split.py",
 )
 
@@ -21,6 +24,9 @@ py_binary(
     data = [
         "//splat:configs",
         "//symbols:all_symbols",
+    ],
+    deps = [
+        "@pip//pyyaml",
     ],
     main = "//tools:split.py",
 )
