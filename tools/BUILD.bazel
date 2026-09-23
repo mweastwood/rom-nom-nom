@@ -1,28 +1,24 @@
-load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_python//python:defs.bzl", "py_binary")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "create_bps.py",
-    "create_bps.sh",
     "split.py",
-    "split.sh",
 ])
 
-sh_binary(
+py_binary(
     name = "split",
-    srcs = ["split.sh"],
+    srcs = ["split.py"],
     data = [
-        "split.py",
         "//splat:configs",
         "//symbols:all_symbols",
     ],
+    main = "split.py",
 )
 
-sh_binary(
+py_binary(
     name = "create_bps",
-    srcs = ["create_bps.sh"],
-    data = [
-        "create_bps.py",
-    ],
+    srcs = ["create_bps.py"],
+    main = "create_bps.py",
 )

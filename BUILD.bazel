@@ -1,26 +1,26 @@
-load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_python//python:defs.bzl", "py_binary")
 
 package(default_visibility = ["//visibility:public"])
 
-# Runnable targets for splitting each game via Bazel
-sh_binary(
+# Runnable targets for splitting each game via Bazel py_binary
+py_binary(
     name = "split_harvest_moon_64",
-    srcs = ["//tools:split.sh"],
+    srcs = ["//tools:split.py"],
     args = ["harvest-moon-64"],
     data = [
-        "//tools:split.py",
         "//splat:configs",
         "//symbols:all_symbols",
     ],
+    main = "//tools:split.py",
 )
 
-sh_binary(
+py_binary(
     name = "split_ogre_battle_64",
-    srcs = ["//tools:split.sh"],
+    srcs = ["//tools:split.py"],
     args = ["ogre-battle-64"],
     data = [
-        "//tools:split.py",
         "//splat:configs",
         "//symbols:all_symbols",
     ],
+    main = "//tools:split.py",
 )

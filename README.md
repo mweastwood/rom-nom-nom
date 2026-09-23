@@ -35,9 +35,8 @@ rom-nom-nom/
 │   └── ogre-battle-64/
 └── tools/                   # Helper scripts and reproducible tools (tracked)
     ├── BUILD.bazel
-    ├── create_bps.py        # BPS patch generator
-    ├── split.py             # Reproducible ROM splitter & SHA-1 verifier
-    └── split.sh             # Shell wrapper for split.py
+    ├── create_bps.py        # BPS patch generator (py_binary)
+    └── split.py             # Reproducible ROM splitter & SHA-1 verifier (py_binary)
 ```
 
 ## Quick Start
@@ -68,9 +67,9 @@ bazel run //:split_ogre_battle_64
 bazel run //tools:split -- harvest-moon-64
 ```
 
-Alternatively, you can run the tool directly:
+Alternatively, you can run the script directly:
 ```bash
-./tools/split.sh harvest-moon-64
+python3 tools/split.py harvest-moon-64
 ```
 
 The split runner automatically verifies the target ROM's presence and SHA-1 checksum against the configuration before executing splat.

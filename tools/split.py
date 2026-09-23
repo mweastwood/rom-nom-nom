@@ -9,9 +9,42 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-import yaml
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+def load_config(path: Path) -> dict:
+    """Load config with pyyaml if available, or lightweight key-value fallback."""
+    try:
+        import yaml
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except ImportError:
+        data = {"options": {}}
+        with open(path, "r", encoding="utf-8") as f:
+            in_options = False
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if line.startswith("options:"):
+                    in_options = True
+                    continue
+                elif line and not line.startswith(" ") and not line.startswith("\t"):
+                    in_options = False
+                if ":" in stripped:
+                    k, v = stripped.split(":", 1)
+                    k = k.strip()
+                    v = v.split("#")[0].strip().strip('"').strip("'")
+                    if in_options:
+                        data["options"][k] = v
+                    else:
+                        data[k] = v
+        return data
+
+if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
+    os.chdir(os.environ["BUILD_WORKSPACE_DIRECTORY"])
+
+REPO_ROOT = Path(
+    os.environ.get("BUILD_WORKSPACE_DIRECTORY") or Path(__file__).resolve().parent.parent
+).resolve()
 SPLAT_DIR = REPO_ROOT / "splat"
 ROMS_DIR = REPO_ROOT / "roms"
 VENV_BIN = REPO_ROOT / ".venv" / "bin"
@@ -73,8 +106,7 @@ def main():
         print(f"Available games: {', '.join(available)}")
         sys.exit(1)
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_data = yaml.safe_load(f)
+    config_data = load_config(config_path)
 
     expected_sha1 = config_data.get("sha1", "").lower()
     options = config_data.get("options", {})

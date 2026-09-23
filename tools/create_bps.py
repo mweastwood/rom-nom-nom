@@ -4,6 +4,7 @@ Simple and robust BPS (Beat Patch System) patch generator and applier.
 Specification: https://www.romhacking.net/documents/746/
 """
 
+import os
 import sys
 import zlib
 import struct
@@ -170,6 +171,9 @@ def apply_bps(source_bytes: bytes, patch_bytes: bytes) -> bytes:
 
 
 def main():
+    if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
+        os.chdir(os.environ["BUILD_WORKSPACE_DIRECTORY"])
+
     if len(sys.argv) < 4:
         print("Usage: create_bps.py <create|apply> <source.z64> <target.z64|patch.bps> [output]")
         sys.exit(1)
