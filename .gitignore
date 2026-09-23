@@ -25,6 +25,7 @@ assets/
 *.d
 *.ld
 undefined_*_auto.txt
+toolchain/
 
 # Bazel outputs and user configs
 bazel-*

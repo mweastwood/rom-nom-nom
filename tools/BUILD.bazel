@@ -13,10 +13,19 @@ py_binary(
 
 py_binary(
     name = "build",
-    srcs = ["build.py"],
+    srcs = [
+        "build.py",
+        "install_toolchain.py",
+    ],
     deps = [
         "@pip//pyyaml",
         "@pip//spimdisasm",
     ],
     main = "build.py",
+)
+
+py_binary(
+    name = "install_toolchain",
+    srcs = ["install_toolchain.py"],
+    main = "install_toolchain.py",
 )
