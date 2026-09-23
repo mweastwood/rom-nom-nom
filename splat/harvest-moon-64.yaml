@@ -43,7 +43,7 @@ options:
 
 # Compiler options for C decompilation
 c_flags:
-  default: ["-O2", "-Wa,-O1"]
+  default: ["-O2", "-mips2", "-Wa,-O1"]
   boot: ["-O0"]
 
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
