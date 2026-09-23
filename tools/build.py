@@ -223,12 +223,12 @@ def build_and_verify(game_name: str, toolchain: str = "original", is_test: bool 
         bin_src = REPO_ROOT / f"{base_no_ext}.bin"
 
         src_to_compile = None
-        if cc_src.exists():
+        if c_src.exists():
+            src_to_compile = c_src
+        elif cc_src.exists():
             src_to_compile = cc_src
         elif cpp_src.exists():
             src_to_compile = cpp_src
-        elif c_src.exists():
-            src_to_compile = c_src
 
         if src_to_compile is not None:
             if toolchain == "original":

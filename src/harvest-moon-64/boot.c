@@ -1,9 +1,5 @@
 #include "common.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 void os_initialize(void);
 void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp, OSPri pri);
 void os_start_thread(OSThread* thread);
@@ -43,7 +39,3 @@ void idle(void* arg) {
         }
     }
 }
-
-#ifdef __cplusplus
-}
-#endif
