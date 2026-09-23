@@ -1,5 +1,11 @@
+package(default_visibility = ["//visibility:public"])
+
 filegroup(
-    name = "configs",
-    srcs = glob(["*.yaml"]),
-    visibility = ["//visibility:public"],
+    name = "harvest-moon-64",
+    srcs = ["harvest-moon-64.yaml"],
+)
+
+filegroup(
+    name = "ogre-battle-64",
+    srcs = ["ogre-battle-64.yaml"],
 )

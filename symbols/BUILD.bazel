@@ -1,5 +1,11 @@
+package(default_visibility = ["//visibility:public"])
+
 filegroup(
-    name = "all_symbols",
-    srcs = glob(["**/*"]),
-    visibility = ["//visibility:public"],
+    name = "harvest-moon-64",
+    srcs = ["harvest-moon-64.txt"],
+)
+
+filegroup(
+    name = "ogre-battle-64",
+    srcs = ["ogre-battle-64.txt"],
 )

@@ -2,17 +2,9 @@ load("@rules_python//python:defs.bzl", "py_binary")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files([
-    "split.py",
-])
-
 py_binary(
     name = "split",
     srcs = ["split.py"],
-    data = [
-        "//splat:configs",
-        "//symbols:all_symbols",
-    ],
     deps = [
         "@pip//pyyaml",
     ],

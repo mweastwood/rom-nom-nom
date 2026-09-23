@@ -8,8 +8,8 @@ py_binary(
     srcs = ["//tools:split.py"],
     args = ["harvest-moon-64"],
     data = [
-        "//splat:configs",
-        "//symbols:all_symbols",
+        "//splat:harvest-moon-64",
+        "//symbols:harvest-moon-64",
     ],
     deps = [
         "@pip//pyyaml",
@@ -22,8 +22,8 @@ py_binary(
     srcs = ["//tools:split.py"],
     args = ["ogre-battle-64"],
     data = [
-        "//splat:configs",
-        "//symbols:all_symbols",
+        "//splat:ogre-battle-64",
+        "//symbols:ogre-battle-64",
     ],
     deps = [
         "@pip//pyyaml",
