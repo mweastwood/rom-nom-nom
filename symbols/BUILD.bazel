@@ -1,0 +1,5 @@
+filegroup(
+    name = "all_symbols",
+    srcs = glob(["**/*"]),
+    visibility = ["//visibility:public"],
+)

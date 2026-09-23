@@ -1,0 +1,28 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "create_bps.py",
+    "create_bps.sh",
+    "split.py",
+    "split.sh",
+])
+
+sh_binary(
+    name = "split",
+    srcs = ["split.sh"],
+    data = [
+        "split.py",
+        "//splat:configs",
+        "//symbols:all_symbols",
+    ],
+)
+
+sh_binary(
+    name = "create_bps",
+    srcs = ["create_bps.sh"],
+    data = [
+        "create_bps.py",
+    ],
+)

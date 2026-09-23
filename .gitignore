@@ -1,1 +1,51 @@
+# ROM files (Original and modified ROMs)
+*.z64
+*.n64
+*.v64
+baserom*
 roms/
+*.rom
+
+# Disassembly & Assembly files (keep assembly strictly untracked)
+*.s
+*.asm
+asm/
+disasm/
+
+# Build artifacts & binary objects
+build/
+assets/
+*.o
+*.obj
+*.elf
+*.bin
+*.out
+*.mips
+*.dump
+*.d
+*.ld
+undefined_*_auto.txt
+
+# Bazel outputs and user configs
+bazel-*
+MODULE.bazel.lock
+.bazelrc.user
+user.bazelrc
+
+# Python virtual environments & caches
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+.splat_cache/
+.cache/
+
+# Editor, OS & temporary files
+.DS_Store
+*.swp
+*.bak
+*.tmp
+*.orig
+.idea/
+.vscode/

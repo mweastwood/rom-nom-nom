@@ -1,0 +1,26 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# Runnable targets for splitting each game via Bazel
+sh_binary(
+    name = "split_harvest_moon_64",
+    srcs = ["//tools:split.sh"],
+    args = ["harvest-moon-64"],
+    data = [
+        "//tools:split.py",
+        "//splat:configs",
+        "//symbols:all_symbols",
+    ],
+)
+
+sh_binary(
+    name = "split_ogre_battle_64",
+    srcs = ["//tools:split.sh"],
+    args = ["ogre-battle-64"],
+    data = [
+        "//tools:split.py",
+        "//splat:configs",
+        "//symbols:all_symbols",
+    ],
+)

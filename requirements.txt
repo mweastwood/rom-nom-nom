@@ -1,0 +1,7 @@
+splat64>=0.50.0
+spimdisasm>=1.42.0
+crunch64>=0.6.2
+n64img>=0.3.3
+pygfxd>=1.0.5
+watchdog>=6.0.0
+git+https://github.com/matt-kempster/m2c.git
