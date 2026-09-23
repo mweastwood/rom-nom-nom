@@ -10,3 +10,13 @@ py_binary(
     ],
     main = "split.py",
 )
+
+py_binary(
+    name = "build",
+    srcs = ["build.py"],
+    deps = [
+        "@pip//pyyaml",
+        "@pip//spimdisasm",
+    ],
+    main = "build.py",
+)

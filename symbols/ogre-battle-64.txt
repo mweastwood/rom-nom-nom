@@ -1,3 +1,6 @@
 // Visit https://github.com/ethteck/splat/wiki/Adding-Symbols for documentation about this file
 entrypoint = 0x80070C00; // type:func
 main = 0x8007F880; // type:func
+
+// 64DD IPL entry point
+func_840010BC = 0x840010BC; // type:func

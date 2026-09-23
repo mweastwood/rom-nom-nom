@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -29,4 +29,76 @@ py_binary(
         "@pip//pyyaml",
     ],
     main = "//tools:split.py",
+)
+
+# Runnable targets for building each game ROM
+py_binary(
+    name = "build_harvest_moon_64",
+    srcs = ["//tools:build.py"],
+    args = ["harvest-moon-64"],
+    data = [
+        "//splat:harvest-moon-64",
+        "//symbols:harvest-moon-64",
+    ],
+    deps = [
+        "@pip//pyyaml",
+        "@pip//spimdisasm",
+    ],
+    main = "//tools:build.py",
+)
+
+py_binary(
+    name = "build_ogre_battle_64",
+    srcs = ["//tools:build.py"],
+    args = ["ogre-battle-64"],
+    data = [
+        "//splat:ogre-battle-64",
+        "//symbols:ogre-battle-64",
+    ],
+    deps = [
+        "@pip//pyyaml",
+        "@pip//spimdisasm",
+    ],
+    main = "//tools:build.py",
+)
+
+# Test targets verifying byte-for-byte exact match against original ROM
+py_test(
+    name = "match_harvest_moon_64_test",
+    size = "small",
+    srcs = ["//tools:build.py"],
+    args = [
+        "harvest-moon-64",
+        "--test",
+    ],
+    data = [
+        "//splat:harvest-moon-64",
+        "//symbols:harvest-moon-64",
+    ],
+    main = "//tools:build.py",
+    tags = ["local"],
+    deps = [
+        "@pip//pyyaml",
+        "@pip//spimdisasm",
+    ],
+)
+
+py_test(
+    name = "match_ogre_battle_64_test",
+    size = "small",
+    srcs = ["//tools:build.py"],
+    args = [
+        "ogre-battle-64",
+        "--test",
+    ],
+    data = [
+        "//splat:ogre-battle-64",
+        "//symbols:ogre-battle-64",
+    ],
+    main = "//tools:build.py",
+    tags = ["local"],
+    deps = [
+        "@pip//pyyaml",
+        "@pip//spimdisasm",
+    ],
 )

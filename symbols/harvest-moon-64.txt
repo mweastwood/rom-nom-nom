@@ -8,3 +8,8 @@ osCreateThread = 0x800FF630; // type:func
 osSetThreadPriority = 0x800FF960; // type:func
 osStartThread = 0x800FFA30; // type:func
 osInitialize = 0x80106D70; // type:func
+
+// 64DD IPL entry points
+func_84001008 = 0x84001008; // type:func
+func_84001064 = 0x84001064; // type:func
+func_840010BC = 0x840010BC; // type:func
