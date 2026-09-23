@@ -104,14 +104,17 @@ def generate_symbols_ld(game_name: str, config_data: dict, out_file: Path):
 
 
 
-def compile_with_gcc_272(src_path: Path, target_obj: Path, game_name: str, as_bin: str):
-    """Compile C/C++ source using GCC 2.7.2 and post-process assembly for exact hardware match."""
+def compile_with_gcc_272(src_path: Path, target_obj: Path, game_name: str, as_bin: str, opt_flags: list):
+    """Compile C source using GCC 2.7.2 and assemble with GNU AS."""
     gcc_bin = get_gcc_272(require_installed=True)
     temp_s = target_obj.with_suffix(".s272")
 
-    # Run GCC 2.7.2 in C mode to compile functions
+    gcc_flags = [f for f in opt_flags if not f.startswith("-Wa,")]
+    as_extra_flags = [f[4:] for f in opt_flags if f.startswith("-Wa,")]
+
     cmd = [
-        str(gcc_bin), f"-B{GCC_272_DIR}/", "-x", "c", "-S", "-O0",
+        str(gcc_bin), f"-B{GCC_272_DIR}/", "-x", "c", "-S",
+        *gcc_flags, "-G", "0",
         f"-I{REPO_ROOT}",
         f"-I{ASM_DIR / game_name}",
         f"-I{SRC_DIR / game_name}",
@@ -121,49 +124,12 @@ def compile_with_gcc_272(src_path: Path, target_obj: Path, game_name: str, as_bi
     ]
     subprocess.check_call(cmd, cwd=REPO_ROOT)
 
-    with open(temp_s, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    new_lines = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        m_la = re.match(r"^\tla\t(\$[a-z0-9]+),([A-Za-z0-9_]+)\s*$", line)
-        m_sw = re.match(r"^\tsw\t(\$[a-z0-9]+),([A-Za-z0-9_]+)\s*$", line)
-
-        if m_la and i + 1 < len(lines) and lines[i+1].startswith("\tjal\t"):
-            reg, sym = m_la.group(1), m_la.group(2)
-            jal_line = lines[i+1]
-            new_lines.append("\t.set noreorder\n")
-            new_lines.append(f"\tlui\t{reg},%hi({sym})\n")
-            new_lines.append(jal_line)
-            new_lines.append(f"\taddiu\t{reg},{reg},%lo({sym})\n")
-            new_lines.append("\t.set reorder\n")
-            i += 2
-            continue
-        elif m_sw and i + 1 < len(lines) and lines[i+1].startswith("\tjal\t"):
-            reg, sym = m_sw.group(1), m_sw.group(2)
-            jal_line = lines[i+1]
-            new_lines.append("\t.set noreorder\n")
-            new_lines.append(f"\tlui\t$at,%hi({sym})\n")
-            new_lines.append(jal_line)
-            new_lines.append(f"\tsw\t{reg},%lo({sym})($at)\n")
-            new_lines.append("\t.set reorder\n")
-            i += 2
-            continue
-
-        # Replace pseudo move with hardware addu
-        line = re.sub(r"\bmove\s+(\$[a-z0-9]+)\s*,\s*(\$[a-z0-9]+)", r"addu \1, \2, $0", line)
-        new_lines.append(line)
-        i += 1
-
-    with open(temp_s, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
-
+    macro_inc = ASM_DIR / game_name / "macro.inc"
     as_cmd = [
-        as_bin, "-march=vr4300", "-mabi=32", "-EB",
+        as_bin, "-march=vr4300", "-mabi=32", "-EB", "-G", "0",
+        *as_extra_flags,
         f"-I{ASM_DIR / game_name}",
-        str(temp_s), "-o", str(target_obj)
+        str(macro_inc), str(temp_s), "-o", str(target_obj)
     ]
     subprocess.check_call(as_cmd, cwd=REPO_ROOT)
     temp_s.unlink(missing_ok=True)
@@ -234,7 +200,9 @@ def build_and_verify(game_name: str, toolchain: str = "original", is_test: bool 
 
         if src_to_compile is not None:
             if toolchain == "original":
-                compile_with_gcc_272(src_to_compile, target_obj, game_name, as_bin)
+                c_flags_cfg = config_data.get("c_flags", {})
+                file_opt = c_flags_cfg.get(src_to_compile.stem, c_flags_cfg.get("default", ["-O2"]))
+                compile_with_gcc_272(src_to_compile, target_obj, game_name, as_bin, file_opt)
             else:
                 compiler = gpp_bin if (cc_src.exists() or cpp_src.exists()) else gcc_bin
                 cmd = [

@@ -36,6 +36,16 @@ options:
   hardware_regs: True
   # gfx_ucode: # one of [f3d, f3db, f3dex, f3dexb, f3dex2]
 
+  generated_macro_inc_content: |
+    .macro move d, s
+        addu \d, \s, $0
+    .endm
+
+# Compiler options for C decompilation
+c_flags:
+  default: ["-O2", "-Wa,-O1"]
+  boot: ["-O0"]
+
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:
   # 0x0000 - 0x0040: Standard 64-byte N64 cartridge header (clock rate, entry PC, game code, title)
@@ -67,7 +77,8 @@ segments:
       # MIPS executable CPU instructions.
       # As functions are decompiled into C, split this section into named C files:
       - [0x1050, c, boot]
-      - [0x1190, asm]
+      - [0x1190, c, main]
+      - [0x1AC0, asm]
       # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0xEBE10, data]
       # Uninitialized memory (.bss section zeroed on boot)
