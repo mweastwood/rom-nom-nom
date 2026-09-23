@@ -134,4 +134,3 @@ void func_80025F04(void) {
   }
 }
 
-__asm__(".include \"asm/harvest-moon-64/13F0.s\"");

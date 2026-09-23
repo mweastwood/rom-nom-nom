@@ -256,5 +256,3 @@ s32 Message_ClipSpan(s32 pos, s32 size, s32 limit) {
   return size;
 }
 s32 func_80043408(s32 pos, s32 size, s32 limit) __attribute__((alias("Message_ClipSpan")));
-
-__asm__(".include \"asm/harvest-moon-64/1E4DC.s\"");
