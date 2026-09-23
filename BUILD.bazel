@@ -30,3 +30,10 @@ alias(
     name = "format",
     actual = "//tools:format",
 )
+
+# Convenient alias to verify/tidy all C/C++ files across the codebase
+alias(
+    name = "tidy",
+    actual = "//tools:tidy",
+)
+

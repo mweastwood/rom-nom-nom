@@ -1,0 +1,64 @@
+---
+Checks: >
+  -*,
+  google-*,
+  -google-runtime-int,
+  -google-readability-todo,
+  readability-identifier-naming,
+  readability-redundant-*,
+  readability-simplify-*
+
+WarningsAsErrors: 'readability-identifier-naming'
+
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.TypedefCase
+    value: CamelCase
+  - key: readability-identifier-naming.TypedefIgnoredRegexp
+    value: '^(u8|s8|u16|s16|u32|s32|u64|s64|f32|f64|size_t|int[0-9]+_t|uint[0-9]+_t|OS[A-Za-z0-9_]+)$'
+  - key: readability-identifier-naming.TypeAliasCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantPrefix
+    value: 'k'
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: 'k'
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.GlobalConstantPrefix
+    value: 'k'
+  - key: readability-identifier-naming.GlobalConstantIgnoredRegexp
+    value: '^(D_[0-9A-Fa-f]+|g_[a-z0-9_]+|s_[a-z0-9_]+|os[A-Za-z0-9_]*|leo[A-Za-z0-9_]*)$'
+  - key: readability-identifier-naming.GlobalVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalVariableIgnoredRegexp
+    value: '^(D_[0-9A-Fa-f]+|g_[a-z0-9_]+|s_[a-z0-9_]+|os[A-Za-z0-9_]*|leo[A-Za-z0-9_]*)$'
+  - key: readability-identifier-naming.StaticVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.StaticVariableIgnoredRegexp
+    value: '^(s_[a-z0-9_]+|g_[a-z0-9_]+|[a-z0-9_]+)$'
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterIgnoredRegexp
+    value: '^(arg[0-9]+)$'
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.MemberCase
+    value: lower_case
+  - key: readability-identifier-naming.MemberIgnoredRegexp
+    value: '^(unk_[0-9A-Fa-f]+|pad[0-9]*|func_[0-9A-Fa-f]+.*|[a-z0-9_]+)$'
+  - key: readability-identifier-naming.FunctionCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionIgnoredRegexp
+    value: '^(func_[0-9A-Fa-f]+|[A-Z][a-zA-Z0-9]*_[A-Za-z0-9_]+|main|idle|mainproc|boot_main|mock_[a-z0-9_]+|os[A-Za-z0-9_]*|os_[a-z0-9_]+|leo[A-Za-z0-9_]*|TEST|TEST_F)$'
+

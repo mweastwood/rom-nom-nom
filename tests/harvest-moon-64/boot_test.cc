@@ -53,7 +53,7 @@ TEST_F(BootTest, MainInitializesOSAndSpawnsIdleThread) {
 // Test 2: Verify idle thread initializes subsystems, mainproc thread, and executes callback
 TEST_F(BootTest, IdleInitializesSubsystemsAndMainproc) {
   // 1. Set dummy callback to ensure idle() resets it to NULL initially
-  D_801FD628 = (void (*)(void))0x12345678;
+  D_801FD628 = reinterpret_cast<void (*)(void)>(0x12345678);
 
   // 2. Configure hook to arm the callback right when priority drops to 0
   g_mock_state.on_set_priority_hook = OnSetPriorityHook;

@@ -7,8 +7,8 @@ typedef struct {
   u32 b;
   u16 unk_24;
   u16 unk_26;
-  s16 bankId;
-  s16 messageId;
+  s16 bank_id;
+  s16 message_id;
   u8 pad[6];
   u16 active;
   u8 pad2[0xF4 - 0x34];
@@ -24,13 +24,13 @@ extern s16 D_801C3F2A;
 extern u16 D_801C3F32;
 
 typedef struct {
-  s32 romStart;
-  s32 romEnd;
-  s32 ramStart;
-  s32 ramEnd;
+  s32 rom_start;
+  s32 rom_end;
+  s32 ram_start;
+  s32 ram_end;
   s32 flags;
-  s16 bankId;
-  s16 messageCount;
+  s16 bank_id;
+  s16 message_count;
 } MessageBankEntry;
 
 extern MessageBankEntry D_80205760[];
@@ -41,7 +41,7 @@ void Message_Init(void) {
   for (i = 0; i < 1; i++) {
     D_801C3F00[i].unk_24 = 0;
     D_801C3F00[i].unk_26 = 0;
-    D_801C3F00[i].bankId = 0;
+    D_801C3F00[i].bank_id = 0;
     D_801C3F00[i].r = 0xFF;
     D_801C3F00[i].g = 0xFF;
     D_801C3F00[i].b = 0xFF;
@@ -50,45 +50,46 @@ void Message_Init(void) {
 }
 void func_80042F60(void) __attribute__((alias("Message_Init")));
 
-s32 Message_OpenTextBox(s32 boxIndex, s16 bankId, s16 messageId) {
+s32 Message_OpenTextBox(s32 box_index, s16 bank_id, s16 message_id) {
   s32 ret = 0;
 
-  if (!(boxIndex & 0xFFFF) && !(D_801C3F32 & 1)) {
+  if (!(box_index & 0xFFFF) && !(D_801C3F32 & 1)) {
     ret = 1;
     D_801C3F18 = 0xFF;
     D_801C3F1C = 0xFF;
     D_801C3F20 = 0xFF;
-    D_801C3F28 = bankId;
-    D_801C3F2A = messageId;
+    D_801C3F28 = bank_id;
+    D_801C3F2A = message_id;
     D_801C3F32 = 1;
   }
   return ret;
 }
-s32 func_80042FEC(s32 boxIndex, s16 bankId, s16 messageId)
+s32 func_80042FEC(s32 box_index, s16 bank_id, s16 message_id)
     __attribute__((alias("Message_OpenTextBox")));
 
-s32 Message_RegisterBank(u16 index, s16 bankId, s16 messageCount, s32 romStart, s32 romEnd,
-                         s32 ramStart, s32 ramEnd, s32 flags) {
+s32 Message_RegisterBank(u16 index, s16 bank_id, s16 message_count, s32 rom_start, s32 rom_end,
+                         s32 ram_start, s32 ram_end, s32 flags) {
   s32 ret = 0;
 
   if (index < 0x46) {
     ret = 1;
-    D_80205760[index].bankId = bankId;
-    D_80205760[index].messageCount = messageCount;
-    D_80205760[index].romStart = romStart;
-    D_80205760[index].romEnd = romEnd;
-    D_80205760[index].ramStart = ramStart;
-    D_80205760[index].ramEnd = ramEnd;
+    D_80205760[index].bank_id = bank_id;
+    D_80205760[index].message_count = message_count;
+    D_80205760[index].rom_start = rom_start;
+    D_80205760[index].rom_end = rom_end;
+    D_80205760[index].ram_start = ram_start;
+    D_80205760[index].ram_end = ram_end;
     D_80205760[index].flags = flags;
   }
   return ret;
 }
-s32 func_80043050(u16 index, s16 bankId, s16 messageCount, s32 romStart, s32 romEnd, s32 ramStart,
-                  s32 ramEnd, s32 flags) __attribute__((alias("Message_RegisterBank")));
+s32 func_80043050(u16 index, s16 bank_id, s16 message_count, s32 rom_start, s32 rom_end,
+                  s32 ram_start, s32 ram_end, s32 flags)
+    __attribute__((alias("Message_RegisterBank")));
 
 typedef struct {
   void* ptr;
-  s32 maxValue;
+  s32 max_value;
   u8 type;
   u8 pad[3];
 } MessageVariable;
@@ -96,7 +97,7 @@ typedef struct {
 extern MessageVariable D_8013CE08[];
 extern u32* D_8013CE00;
 
-s32 Message_RegisterVariable(u16 index, void* ptr, u8 type, s32 maxValue) {
+s32 Message_RegisterVariable(u16 index, void* ptr, u8 type, s32 max_value) {
   s32 ret = 0;
 
   if (index < 0x50) {
@@ -104,12 +105,12 @@ s32 Message_RegisterVariable(u16 index, void* ptr, u8 type, s32 maxValue) {
       ret = 1;
       D_8013CE08[index].ptr = ptr;
       D_8013CE08[index].type = type;
-      D_8013CE08[index].maxValue = maxValue;
+      D_8013CE08[index].max_value = max_value;
     }
   }
   return ret;
 }
-s32 func_800430DC(u16 index, void* ptr, u8 type, s32 maxValue)
+s32 func_800430DC(u16 index, void* ptr, u8 type, s32 max_value)
     __attribute__((alias("Message_RegisterVariable")));
 
 s32 Message_SetEventFlags(u32* flags) {
@@ -118,10 +119,10 @@ s32 Message_SetEventFlags(u32* flags) {
 }
 s32 func_80043138(u32* flags) __attribute__((alias("Message_SetEventFlags")));
 
-s32 Message_SetTextColor(s32 boxIndex, s32 r, s32 g, s32 b) {
+s32 Message_SetTextColor(s32 box_index, s32 r, s32 g, s32 b) {
   s32 ret = 0;
 
-  if (!(boxIndex & 0xFFFF) && (D_801C3F32 & 1)) {
+  if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
     D_801C3F18 = r;
     D_801C3F1C = g;
@@ -129,7 +130,8 @@ s32 Message_SetTextColor(s32 boxIndex, s32 r, s32 g, s32 b) {
   }
   return ret;
 }
-s32 func_80043148(s32 boxIndex, s32 r, s32 g, s32 b) __attribute__((alias("Message_SetTextColor")));
+s32 func_80043148(s32 box_index, s32 r, s32 g, s32 b)
+    __attribute__((alias("Message_SetTextColor")));
 
 typedef struct {
   void* unk_00;
@@ -141,10 +143,10 @@ typedef struct {
   void* unk_18;
   void* unk_1C;
   void* unk_20;
-  f32 scaleX;
-  f32 scaleY;
-  f32 scaleZ;
-  u16 fontOrTexId;
+  f32 scale_x;
+  f32 scale_y;
+  f32 scale_z;
+  u16 font_or_tex_id;
   u16 unk_32;
   u8 unk_34;
   u8 pad[3];
@@ -152,13 +154,13 @@ typedef struct {
 
 extern TextBoxLayer D_801C3E6C[];
 
-s32 Message_SetBoxBackgroundLayer(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg3, void* arg4,
-                                  void* arg5, void* arg6, void* arg7, void* arg8, void* arg9,
-                                  void* arg10, u16 arg11, u8 arg12, f32 scaleX, f32 scaleY,
-                                  f32 scaleZ) {
+s32 Message_SetBoxBackgroundLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3,
+                                  void* arg4, void* arg5, void* arg6, void* arg7, void* arg8,
+                                  void* arg9, void* arg10, u16 arg11, u8 arg12, f32 scale_x,
+                                  f32 scale_y, f32 scale_z) {
   s32 ret = 0;
 
-  if (!(boxIndex & 0xFFFF) && (D_801C3F32 & 1)) {
+  if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
     D_801C3E6C[0].unk_00 = arg2;
     D_801C3E6C[0].unk_04 = arg3;
@@ -169,26 +171,26 @@ s32 Message_SetBoxBackgroundLayer(s32 boxIndex, u16 fontOrTexId, void* arg2, voi
     D_801C3E6C[0].unk_18 = arg8;
     D_801C3E6C[0].unk_1C = arg9;
     D_801C3E6C[0].unk_20 = arg10;
-    D_801C3E6C[0].fontOrTexId = fontOrTexId;
+    D_801C3E6C[0].font_or_tex_id = font_or_tex_id;
     D_801C3E6C[0].unk_32 = arg11;
     D_801C3E6C[0].unk_34 = arg12;
-    D_801C3E6C[0].scaleX = scaleX;
-    D_801C3E6C[0].scaleY = scaleY;
-    D_801C3E6C[0].scaleZ = scaleZ;
+    D_801C3E6C[0].scale_x = scale_x;
+    D_801C3E6C[0].scale_y = scale_y;
+    D_801C3E6C[0].scale_z = scale_z;
   }
   return ret;
 }
-s32 func_8004318C(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg3, void* arg4, void* arg5,
+s32 func_8004318C(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4, void* arg5,
                   void* arg6, void* arg7, void* arg8, void* arg9, void* arg10, u16 arg11, u8 arg12,
-                  f32 scaleX, f32 scaleY, f32 scaleZ)
+                  f32 scale_x, f32 scale_y, f32 scale_z)
     __attribute__((alias("Message_SetBoxBackgroundLayer")));
 
-s32 Message_SetBoxTextLayer(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg3, void* arg4,
+s32 Message_SetBoxTextLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4,
                             void* arg5, void* arg6, void* arg7, void* arg8, void* arg9, void* arg10,
-                            u16 arg11, u8 arg12, f32 scaleX, f32 scaleY, f32 scaleZ) {
+                            u16 arg11, u8 arg12, f32 scale_x, f32 scale_y, f32 scale_z) {
   s32 ret = 0;
 
-  if (!(boxIndex & 0xFFFF) && (D_801C3F32 & 1)) {
+  if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
     D_801C3E6C[1].unk_00 = arg2;
     D_801C3E6C[1].unk_04 = arg3;
@@ -199,27 +201,27 @@ s32 Message_SetBoxTextLayer(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg
     D_801C3E6C[1].unk_18 = arg8;
     D_801C3E6C[1].unk_1C = arg9;
     D_801C3E6C[1].unk_20 = arg10;
-    D_801C3E6C[1].fontOrTexId = fontOrTexId;
+    D_801C3E6C[1].font_or_tex_id = font_or_tex_id;
     D_801C3E6C[1].unk_32 = arg11;
     D_801C3E6C[1].unk_34 = arg12;
-    D_801C3E6C[1].scaleX = scaleX;
-    D_801C3E6C[1].scaleY = scaleY;
-    D_801C3E6C[1].scaleZ = scaleZ;
+    D_801C3E6C[1].scale_x = scale_x;
+    D_801C3E6C[1].scale_y = scale_y;
+    D_801C3E6C[1].scale_z = scale_z;
   }
   return ret;
 }
-s32 func_80043260(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg3, void* arg4, void* arg5,
+s32 func_80043260(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4, void* arg5,
                   void* arg6, void* arg7, void* arg8, void* arg9, void* arg10, u16 arg11, u8 arg12,
-                  f32 scaleX, f32 scaleY, f32 scaleZ)
+                  f32 scale_x, f32 scale_y, f32 scale_z)
     __attribute__((alias("Message_SetBoxTextLayer")));
 
-s32 Message_SetBoxPromptLayer(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg3, void* arg4,
+s32 Message_SetBoxPromptLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4,
                               void* arg5, void* arg6, void* arg7, void* arg8, void* arg9,
-                              void* arg10, u16 arg11, u8 arg12, f32 scaleX, f32 scaleY,
-                              f32 scaleZ) {
+                              void* arg10, u16 arg11, u8 arg12, f32 scale_x, f32 scale_y,
+                              f32 scale_z) {
   s32 ret = 0;
 
-  if (!(boxIndex & 0xFFFF) && (D_801C3F32 & 1)) {
+  if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
     D_801C3E6C[2].unk_00 = arg2;
     D_801C3E6C[2].unk_04 = arg3;
@@ -230,18 +232,18 @@ s32 Message_SetBoxPromptLayer(s32 boxIndex, u16 fontOrTexId, void* arg2, void* a
     D_801C3E6C[2].unk_18 = arg8;
     D_801C3E6C[2].unk_1C = arg9;
     D_801C3E6C[2].unk_20 = arg10;
-    D_801C3E6C[2].fontOrTexId = fontOrTexId;
+    D_801C3E6C[2].font_or_tex_id = font_or_tex_id;
     D_801C3E6C[2].unk_32 = arg11;
     D_801C3E6C[2].unk_34 = arg12;
-    D_801C3E6C[2].scaleX = scaleX;
-    D_801C3E6C[2].scaleY = scaleY;
-    D_801C3E6C[2].scaleZ = scaleZ;
+    D_801C3E6C[2].scale_x = scale_x;
+    D_801C3E6C[2].scale_y = scale_y;
+    D_801C3E6C[2].scale_z = scale_z;
   }
   return ret;
 }
-s32 func_80043334(s32 boxIndex, u16 fontOrTexId, void* arg2, void* arg3, void* arg4, void* arg5,
+s32 func_80043334(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4, void* arg5,
                   void* arg6, void* arg7, void* arg8, void* arg9, void* arg10, u16 arg11, u8 arg12,
-                  f32 scaleX, f32 scaleY, f32 scaleZ)
+                  f32 scale_x, f32 scale_y, f32 scale_z)
     __attribute__((alias("Message_SetBoxPromptLayer")));
 
 s32 Message_ClipSpan(s32 pos, s32 size, s32 limit) {

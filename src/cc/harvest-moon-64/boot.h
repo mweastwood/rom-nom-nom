@@ -8,14 +8,14 @@
 namespace hm64 {
 
 enum class ThreadId : OSId {
-  Idle = 1,
-  MainProc = 3,
+  kIdle = 1,
+  kMainProc = 3,
 };
 
 enum class Priority : OSPri {
-  IdleActive = 10,
-  IdleDormant = 0,
-  MainProc = 10,
+  kIdleActive = 10,
+  kIdleDormant = 0,
+  kMainProc = 10,
 };
 
 class BootSystem {
