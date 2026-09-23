@@ -30,12 +30,8 @@ rom-nom-nom/
 ├── build/                   # Compiled ELF, linker scripts, and temp objects (untracked)
 │   ├── harvest-moon-64/
 │   └── ogre-battle-64/
-├── patches/                 # Distributable BPS patch files (tracked)
-│   ├── harvest-moon-64/
-│   └── ogre-battle-64/
 └── tools/                   # Helper scripts and reproducible tools (tracked)
     ├── BUILD.bazel
-    ├── create_bps.py        # BPS patch generator (py_binary)
     └── split.py             # Reproducible ROM splitter & SHA-1 verifier (py_binary)
 ```
 
@@ -83,11 +79,3 @@ Use `m2c` from `.venv` to assist with decompiling target functions from assembly
 ```
 
 Write and refine the C implementation and headers in `src/<game>/`.
-
-### 4. Creating Distribution Patches
-
-Using Bazel to invoke the BPS patch generator:
-
-```bash
-bazel run //tools:create_bps -- create roms/harvest-moon-64.z64 build/harvest-moon-64/harvest-moon-64.z64 patches/harvest-moon-64/harvest-moon-64.bps
-```

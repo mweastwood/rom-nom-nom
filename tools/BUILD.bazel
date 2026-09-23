@@ -3,7 +3,6 @@ load("@rules_python//python:defs.bzl", "py_binary")
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
-    "create_bps.py",
     "split.py",
 ])
 
@@ -15,10 +14,4 @@ py_binary(
         "//symbols:all_symbols",
     ],
     main = "split.py",
-)
-
-py_binary(
-    name = "create_bps",
-    srcs = ["create_bps.py"],
-    main = "create_bps.py",
 )
