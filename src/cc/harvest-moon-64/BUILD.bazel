@@ -1,0 +1,14 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "boot",
+    srcs = ["boot.cc"],
+    hdrs = ["boot.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//src/c/harvest-moon-64:common_hdrs",
+        "//mocks/ultra64",
+    ],
+)

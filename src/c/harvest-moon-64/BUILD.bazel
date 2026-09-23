@@ -1,0 +1,19 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "common_hdrs",
+    hdrs = ["common.h"],
+    includes = ["."],
+)
+
+cc_library(
+    name = "boot",
+    srcs = ["boot.c"],
+    copts = ["-Dmain=boot_main"],
+    deps = [
+        ":common_hdrs",
+        "//mocks/ultra64",
+    ],
+)

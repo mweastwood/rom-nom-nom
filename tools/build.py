@@ -115,6 +115,8 @@ def compile_with_gcc_272(src_path: Path, target_obj: Path, game_name: str, as_bi
         f"-I{REPO_ROOT}",
         f"-I{ASM_DIR / game_name}",
         f"-I{SRC_DIR / game_name}",
+        f"-I{SRC_DIR / 'c' / game_name}",
+        f"-I{SRC_DIR / 'cc' / game_name}",
         str(src_path), "-o", str(temp_s)
     ]
     subprocess.check_call(cmd, cwd=REPO_ROOT)
@@ -241,6 +243,8 @@ def build_and_verify(game_name: str, toolchain: str = "original", is_test: bool 
                     f"-I{REPO_ROOT}",
                     f"-I{ASM_DIR / game_name}",
                     f"-I{SRC_DIR / game_name}",
+                    f"-I{SRC_DIR / 'c' / game_name}",
+                    f"-I{SRC_DIR / 'cc' / game_name}",
                 ] + toolchain_defs + [str(src_to_compile), "-o", str(target_obj)]
                 subprocess.check_call(cmd, cwd=REPO_ROOT)
         elif s_src.exists():

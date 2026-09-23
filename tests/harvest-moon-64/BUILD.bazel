@@ -1,0 +1,35 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Unit test running against the matching C implementation
+cc_test(
+    name = "boot_c_test",
+    srcs = [
+        "boot_c_adapter.cc",
+        "boot_test.cc",
+        "boot_test_interface.h",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//mocks/ultra64",
+        "//src/c/harvest-moon-64:boot",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Unit test running against the modern C++ implementation
+cc_test(
+    name = "boot_cc_test",
+    srcs = [
+        "boot_cc_adapter.cc",
+        "boot_test.cc",
+        "boot_test_interface.h",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//mocks/ultra64",
+        "//src/cc/harvest-moon-64:boot",
+        "@googletest//:gtest_main",
+    ],
+)

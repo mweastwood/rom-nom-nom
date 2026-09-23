@@ -7,7 +7,7 @@ options:
   elf_path: build/harvest-moon-64/harvest-moon-64.elf
   ld_script_path: build/harvest-moon-64/harvest-moon-64.ld
   asm_path: asm/harvest-moon-64
-  src_path: src/harvest-moon-64
+  src_path: src/c/harvest-moon-64
   asset_path: assets/harvest-moon-64
   build_path: build/harvest-moon-64
   generated_asm_macros_directory: asm/harvest-moon-64
