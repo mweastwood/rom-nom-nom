@@ -16,7 +16,7 @@ cc_library(
 cc_library(
     name = "boot",
     srcs = ["boot.c"],
-    copts = ["-Dmain=boot_main"],
+    copts = ["-Dmain=BootMain"],
     deps = [
         ":common_hdrs",
         "//mocks/ultra64",

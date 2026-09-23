@@ -23,7 +23,7 @@ static void OnSetPriorityHook(OSThread* thread, OSPri pri) {
 class BootTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    mock_ultra64_reset();
+    MockUltra64Reset();
     s_callback_invocations = 0;
   }
 };

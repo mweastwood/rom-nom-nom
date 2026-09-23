@@ -11,7 +11,7 @@ OSThread D_80124370;
 u8 D_801C6220[0x1000];
 void (*D_801FD628)(void) = NULL;
 
-void mock_ultra64_reset(void) {
+void MockUltra64Reset(void) {
   memset(&g_mock_state, 0, sizeof(g_mock_state));
   memset(&D_801241C0, 0, sizeof(D_801241C0));
   memset(D_80126520, 0, sizeof(D_80126520));

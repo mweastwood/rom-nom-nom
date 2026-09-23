@@ -44,7 +44,7 @@ typedef struct {
 extern MockUltra64State g_mock_state;
 
 // Reset mock state before tests
-void mock_ultra64_reset(void);
+void MockUltra64Reset(void);
 
 // Simulated global BSS buffers from Harvest Moon 64 ROM
 extern OSThread D_801241C0;
@@ -67,7 +67,7 @@ void func_80105B00(s32 arg0);
 void mainproc(void* arg);
 
 // Host declaration of boot's main
-void boot_main(void);
+void BootMain(void);
 void idle(void* arg);
 
 #ifdef __cplusplus

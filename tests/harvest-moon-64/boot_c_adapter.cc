@@ -5,7 +5,7 @@ namespace {
 
 class CBootAdapter : public IBootTestTarget {
  public:
-  void Main() override { boot_main(); }
+  void Main() override { BootMain(); }
 
   void Idle(void* arg) override { idle(arg); }
 };
