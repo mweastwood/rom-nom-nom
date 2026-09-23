@@ -43,4 +43,11 @@ alias(
     actual = "//tools:progress",
 )
 
+# Convenient alias to interactively diff a function
+alias(
+    name = "diff",
+    actual = "//tools:diff",
+)
+
+
 

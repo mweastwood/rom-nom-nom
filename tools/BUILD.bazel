@@ -63,4 +63,11 @@ py_binary(
     main = "progress.py",
 )
 
+py_binary(
+    name = "diff",
+    srcs = ["diff.py"],
+    main = "diff.py",
+)
+
+
 
