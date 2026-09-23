@@ -120,7 +120,8 @@ def main():
     build_dir = REPO_ROOT / "build" / game_name
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [splat_exe, "split", str(config_path)] + extra_args
+    rel_config = config_path.relative_to(REPO_ROOT)
+    cmd = [splat_exe, "split", str(rel_config)] + extra_args
     print(f"Running:  {' '.join(cmd)}\n")
 
     result = subprocess.run(cmd, cwd=REPO_ROOT)

@@ -1,3 +1,10 @@
 // Visit https://github.com/ethteck/splat/wiki/Adding-Symbols for documentation about this file
 entrypoint = 0x80025C00; // type:func
 main = 0x80025C50; // type:func
+idle = 0x80025CB4; // type:func
+mainproc = 0x80025D90; // type:func
+
+osCreateThread = 0x800FF630; // type:func
+osSetThreadPriority = 0x800FF960; // type:func
+osStartThread = 0x800FFA30; // type:func
+osInitialize = 0x80106D70; // type:func

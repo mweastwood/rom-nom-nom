@@ -65,10 +65,9 @@ segments:
     bss_size: 0x113870
     subsegments:
       # MIPS executable CPU instructions.
-      # As you decompile functions into C, split this section into named C files, e.g.:
-      #   - [0x1050, c, boot]
-      # Splat will then expect src/harvest-moon-64/boot.c and stop generating assembly for it.
-      - [0x1050, asm]
+      # As functions are decompiled into C++, split this section into named C++ files:
+      - [0x1050, cpp, boot]
+      - [0x1190, asm]
       # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0xEBE10, data]
       # Uninitialized memory (.bss section zeroed on boot)
