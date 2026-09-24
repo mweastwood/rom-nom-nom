@@ -1,18 +1,4 @@
-#include "common.h"
-
-typedef struct {
-  u32 unk_00[9];
-  u8 pad_24[0x168 - 0x24];
-  u32 dl;
-  u16 flags;
-  u16 pad_16e;
-} RenderEntry;
-
-extern u8 D_80189135[9];
-extern RenderEntry D_8018A850[336];
-extern u16 D_8018A05A;
-
-void RenderResetCount(void);
+#include "display.h"
 
 void RenderInit(void) {
   s32 i = 0;

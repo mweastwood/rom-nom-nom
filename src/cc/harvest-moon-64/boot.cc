@@ -1,7 +1,7 @@
 #include "boot.h"
 
 #ifdef TARGET_N64
-#include "src/c/harvest-moon-64/common.h"
+#include "src/c/harvest-moon-64/types.h"
 #else
 #include "mocks/ultra64/ultra64_mock.h"
 #endif

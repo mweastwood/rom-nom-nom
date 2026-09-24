@@ -1,5 +1,5 @@
-#ifndef COMMON_H
-#define COMMON_H
+#ifndef HARVEST_MOON_64_TYPES_H
+#define HARVEST_MOON_64_TYPES_H
 
 typedef signed char s8;
 typedef unsigned char u8;
@@ -30,5 +30,14 @@ typedef struct OSThread_s {
   OSId id;
   s32 fp;
 } OSThread;
+
+typedef void* OSMesg;
+
+typedef struct {
+  OSMesg* msg;
+  s32 msg_count;
+  s32 first;
+  s32 valid_count;
+} OSMesgQueue;
 
 #endif

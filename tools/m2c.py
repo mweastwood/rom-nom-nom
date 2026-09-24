@@ -41,15 +41,15 @@ def generate_context_string(game: str = "harvest-moon-64") -> str:
         "#define TARGET_N64 1",
     ]
 
-    common_h = src_dir / "common.h"
-    if common_h.exists():
-        lines.append(f'#include "{common_h.resolve()}"')
+    types_h = src_dir / "types.h"
+    if types_h.exists():
+        lines.append(f'#include "{types_h.resolve()}"')
 
     if ultra_mock.exists():
         lines.append(f'#include "{ultra_mock.resolve()}"')
 
     for h in sorted(src_dir.glob("*.h")):
-        if h != common_h:
+        if h != types_h:
             lines.append(f'#include "{h.resolve()}"')
 
     with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:

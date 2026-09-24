@@ -1,4 +1,4 @@
-#include "common.h"
+#include "boot.h"
 
 void os_initialize(void);
 void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
@@ -9,15 +9,12 @@ void os_set_thread_priority(OSThread* thread, OSPri pri);
 void func_800FD5B0(void);
 void func_800FB140(s32 arg0, s32 arg1);
 void func_80105B00(s32 arg0);
-void mainproc(void* arg);
 
 extern OSThread D_801241C0;
 extern u8 D_80126520[];
 extern OSThread D_80124370;
 extern u8 D_801C6220[];
 extern void (*D_801FD628)(void);
-
-void idle(void* arg);
 
 void main(void) {
   os_initialize();

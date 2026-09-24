@@ -1,7 +1,7 @@
 #ifndef ULTRA64_MOCK_H
 #define ULTRA64_MOCK_H
 
-#include "src/c/harvest-moon-64/common.h"
+#include "src/c/harvest-moon-64/types.h"
 
 #ifdef __cplusplus
 extern "C" {

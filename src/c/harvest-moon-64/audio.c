@@ -1,33 +1,4 @@
-#include "common.h"
-
-typedef struct {
-  s32 unk_00;
-  s32 unk_04;
-  u8 unk_08[8];
-  s32 unk_10;
-  s32 unk_14;
-  s32 unk_18;
-  s32 unk_1C;
-  s32 unk_20;
-  s32 unk_24;
-  u8 pad_28;
-  u8 unk_29;
-  u16 flags;
-} AudioChannel;
-
-typedef struct {
-  s32 unk_00;
-  s32 unk_04;
-  s32 unk_08;
-  s32 unk_0C;
-  s32 unk_10;
-  u8 pad_14;
-  u8 unk_15;
-  u16 flags;
-} AudioVoice;
-
-extern AudioChannel D_801FB5D8[4];
-extern AudioVoice D_801FB690[4];
+#include "audio.h"
 
 extern void func_800266C0(void*, s32, s32, s32, s32);
 extern void func_800266F8(void*);

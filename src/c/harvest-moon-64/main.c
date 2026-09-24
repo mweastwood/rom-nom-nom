@@ -1,4 +1,11 @@
-#include "common.h"
+#include "audio.h"
+#include "boot.h"
+#include "display.h"
+#include "dma.h"
+#include "game_time.h"
+#include "layer.h"
+#include "message.h"
+#include "types.h"
 
 extern u32 osTvType;
 extern u8 D_8011D0F0;
@@ -75,7 +82,6 @@ void func_8002D3D4(void);
 void func_800290B8(void);
 void func_8002AE58(void);
 void func_80042634(void);
-void TextBoxUpdate(void);
 void func_800293B8(void);
 void func_80110410(void);
 void func_8004CF68(void);

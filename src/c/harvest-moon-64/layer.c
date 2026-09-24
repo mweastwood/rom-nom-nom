@@ -1,30 +1,4 @@
-#include "src/c/harvest-moon-64/common.h"
-
-typedef struct {
-  u32 unk_0;
-  u32 unk_4;
-  u32 unk_8;
-  u32 unk_C;
-  u32 unk_10;
-  u32 unk_14;
-  u32 unk_18;
-  u32 unk_1C;
-  u32 unk_20;
-  u16 unk_24;
-  u8 unk_26;
-  u8 unk_27;
-  f32 unk_28;
-  f32 unk_2C;
-  f32 unk_30;
-  u32 unk_34;
-  u16 unk_38;
-  u32 unk_3A : 8;
-  u32 pad_3b : 8;
-  u16 flags;
-  u16 pad_3e;
-} LayerEntry;
-
-extern LayerEntry D_80189A50[16];
+#include "layer.h"
 
 void LayerInit(void) {
   u16 i = 0;

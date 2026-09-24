@@ -1,35 +1,4 @@
-#include "common.h"
-
-// Forward declarations of external symbols / functions
-extern s32 D_8013D5E4;
-extern u8 D_80158260;
-extern u8 D_8017027F;
-extern u8 D_80170445;
-extern u8 D_80170446;
-extern u8 D_80170447;
-extern u8 D_80170448;
-extern u8 D_80170449;
-extern u8 D_8017044A;
-extern u8 D_80170458;
-extern u8 D_80182DB1;
-extern s32 D_801891D4;
-extern u8 D_801C3F44;
-extern u8 D_801C3F7E;
-extern u8 D_801F6F30;
-extern u8 D_801FAD90;
-extern u8 D_801FB5CA;
-extern u8 D_801FD620;
-extern u16 D_801FD622;
-extern u8 D_80204FB1;
-extern u8 D_80204FB2;
-extern u8 D_80204FB3;
-extern u8 D_80204FB4;
-extern u8 D_80204FB5;
-extern u8 D_80204FB6;
-extern u8 D_80204FF8;
-extern u8 D_80215DF2;
-extern u8 D_802373A9;
-extern u8 D_80237409;
+#include "game_time.h"
 
 extern void func_8003FBD8(s32, u8, s32);
 extern void func_8005C07C(s32, s32);
@@ -47,9 +16,6 @@ extern void func_800ACB5C(u16);
 extern s32 func_800ACBB8(u16);
 extern void func_800ACBEC(u16, s32);
 
-void TimeAdvance(s32 arg0);
-void TimeYearAdvance(void);
-void TimeResetMonthlyFlags(void);
 void TimeSleep(void);
 s32 TimeCheckFestival(void);
 void TimeUpdateSeason(void);

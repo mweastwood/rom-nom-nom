@@ -9,7 +9,7 @@ filegroup(
 
 cc_library(
     name = "common_hdrs",
-    hdrs = ["common.h"],
+    hdrs = glob(["*.h"]),
     includes = ["."],
 )
 
