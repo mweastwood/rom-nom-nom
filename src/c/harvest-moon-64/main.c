@@ -14,46 +14,32 @@ void func_800FC000(void);
 void func_801002F0(void*);
 void func_80105B00(s32);
 void func_8004DF10(void);
-void func_80025FF0(void);
 void func_8004CDA0(void);
 void func_800268F0(void);
-void func_80029000(void);
-void func_80029170(void);
 void func_80029B30(void);
 void func_8002AFE0(void);
 void func_800337D0(void);
 void func_8003D970(void);
-void func_80042F60(void);
-void func_80045DE0(void);
 void func_80046860(void);
 void func_8004DEB0(void);
 void func_8002DC70(void);
 void func_8003B870(void);
 void func_800FBED0(void*);
 void func_800FBE90(void*);
-s32 func_80026190(u16, u32);
-s32 func_800261CC(u16);
 void func_800FBE50(void*);
 void func_800265CC(void);
 void func_80026624(void);
-void func_80026240(void);
-void func_800262CC(s32);
-void func_80026284(void);
 void func_8004DEC8(void);
 void func_800FC030(void);
 void func_80029CC8(void);
-void func_8003CF38(void);
-void func_80029284(void);
 void func_80046D78(void);
 void func_80033058(void);
 void func_8003C6E4(void);
 void func_8003A1BC(void);
 void func_800467F8(void);
 void func_8002D3D4(void);
-void func_800290B8(void);
 void func_8002AE58(void);
 void func_80042634(void);
-void func_800293B8(void);
 void func_80110410(void);
 void func_8004CF68(void);
 void func_8004DF00(void);
@@ -75,23 +61,23 @@ void mainproc(void* arg) {
   }
 
   func_800FC000();
-  func_80025E24();
+  MainInit();
   func_8004DF10();
-  func_80025FF0();
+  MainLoop();
 }
 
-void func_80025E24(void) {
-  func_80025F04();
+void MainInit(void) {
+  MainReset();
   func_8004CDA0();
   func_800268F0();
-  func_80029000();
-  func_80029170();
+  DmaInit();
+  RenderInit();
   func_80029B30();
   func_8002AFE0();
   func_800337D0();
   func_8003D970();
-  func_80042F60();
-  func_80045DE0();
+  MessageInit();
+  LayerInit();
   func_80046860();
   func_8004DEB0();
   func_8002DC70();
@@ -99,12 +85,12 @@ void func_80025E24(void) {
   func_800FBED0(0);
   func_800FBED0(func_800265CC);
   func_800FBE90(func_80026624);
-  func_80026190(0, (u32)func_80026240);
-  func_800261CC(0);
-  func_800FBE50(func_800262CC);
+  RegisterGameLoopCallback(0, (u32)NoOpCallback);
+  SetCurrentGameLoopCallback(0);
+  func_800FBE50(UpdateFrameCounterAndTicks);
 }
 
-void func_80025F04(void) {
+void MainReset(void) {
   u8 i;
 
   g_vsync_flag = 0;
@@ -139,7 +125,7 @@ void MainLoop(void) {
 
   g_vsync_flag = 0;
   g_main_loop_flags = 1;
-  func_80026284();
+  WaitForSystemReady();
   func_8004DEC8();
   g_frame_rate_divisor = 1;
   g_frame_skip_counter = 0;
@@ -157,19 +143,19 @@ void MainLoop(void) {
       }
       g_frame_skip_counter--;
       func_80029CC8();
-      func_8003CF38();
-      func_80029284();
+      AudioUpdate();
+      RenderResetCount();
       func_80046D78();
       func_80033058();
       func_8003C6E4();
       func_8003A1BC();
       func_800467F8();
       func_8002D3D4();
-      func_800290B8();
+      DmaProcessQueue();
       func_8002AE58();
       func_80042634();
       TextBoxUpdate();
-      func_800293B8();
+      RenderNoOp2();
       g_vsync_flag = 0;
       g_screen_fade_alpha = g_fade_counter;
       func_80110410();
@@ -177,7 +163,6 @@ void MainLoop(void) {
     func_800FC000();
   }
 }
-void func_80025FF0(void) __attribute__((alias("MainLoop")));
 
 s32 RegisterGameLoopCallback(u16 callback_index, u32 callback_ptr) {
   s32 ret = 0;
@@ -189,7 +174,6 @@ s32 RegisterGameLoopCallback(u16 callback_index, u32 callback_ptr) {
   }
   return ret;
 }
-s32 func_80026190(u16, u32) __attribute__((alias("RegisterGameLoopCallback")));
 
 s32 SetCurrentGameLoopCallback(u16 callback_index) {
   s32 ret = 0;
@@ -201,25 +185,20 @@ s32 SetCurrentGameLoopCallback(u16 callback_index) {
   }
   return ret;
 }
-s32 func_800261CC(u16) __attribute__((alias("SetCurrentGameLoopCallback")));
 
 void EnableSystemFlag4B38(void) {
   g_system_flag_4b38 = 1;
 }
-void func_8002620C(void) __attribute__((alias("EnableSystemFlag4B38")));
 
 void DisableSystemFlag4B38(void) {
   g_system_flag_4b38 = 0;
 }
-void func_80026220(void) __attribute__((alias("DisableSystemFlag4B38")));
 
 void SetLoopCounter(u16 counter_val) {
   g_frame_rate_divisor = counter_val;
 }
-void func_80026230(u16) __attribute__((alias("SetLoopCounter")));
 
 void NoOpCallback(void) {}
-void func_80026240(void) __attribute__((alias("NoOpCallback")));
 
 void WaitVsyncFrames(u32 frame_count) {
   u16 i = 1;
@@ -232,7 +211,6 @@ void WaitVsyncFrames(u32 frame_count) {
     } while (i++ < frame_count);
   }
 }
-void func_80026248(u32) __attribute__((alias("WaitVsyncFrames")));
 
 void WaitForSystemReady(void) {
   u16 i;
@@ -245,7 +223,6 @@ void WaitForSystemReady(void) {
     } while (i++ == 0);
   }
 }
-void func_80026284(void) __attribute__((alias("WaitForSystemReady")));
 
 void UpdateFrameCounterAndTicks(s32 arg0) {
   g_audio_tick_delta = arg0;
@@ -262,7 +239,6 @@ void UpdateFrameCounterAndTicks(s32 arg0) {
   g_fade_counter++;
   g_anim_frame_counter++;
 }
-void func_800262CC(s32) __attribute__((alias("UpdateFrameCounterAndTicks")));
 
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800263B0);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800264CC);

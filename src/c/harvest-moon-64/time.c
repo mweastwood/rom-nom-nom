@@ -62,7 +62,6 @@ void TimeUpdate(void) {
   }
   func_800A7AE8(g_weather);
 }
-void func_800D7C20(void) __attribute__((alias("TimeUpdate")));
 
 void TimeAdvance(s32 arg0) {
   s32 temp_a0;
@@ -112,7 +111,6 @@ void TimeAdvance(s32 arg0) {
     g_time_tick_counter = 1;
   }
 }
-void func_800D7E28(s32 arg0) __attribute__((alias("TimeAdvance")));
 
 void TimeYearAdvance(void) {
   u8 temp_v1;
@@ -162,13 +160,11 @@ void TimeYearAdvance(void) {
   func_80065270(0x46);
   func_80065270(0x49);
 }
-void func_800D8004(void) __attribute__((alias("TimeYearAdvance")));
 
 void TimeResetMonthlyFlags(void) {
   func_80065270(0x3C);
   func_80065270(0x40);
 }
-void func_800D8180(void) __attribute__((alias("TimeResetMonthlyFlags")));
 
 void TimeSleep(void) {
   g_hour_of_day = 6;
@@ -178,7 +174,6 @@ void TimeSleep(void) {
   g_total_days += 1;
   TimeAdvance(0);
 }
-void func_800D81A8(void) __attribute__((alias("TimeSleep")));
 
 s32 TimeCheckFestival(void) {
   s32 var_a1;
@@ -211,7 +206,6 @@ s32 TimeCheckFestival(void) {
   }
   return var_a1;
 }
-s32 func_800D820C(void) __attribute__((alias("TimeCheckFestival")));
 
 void TimeUpdateSeason(void) {
   TimeSetSeasonName(g_season);
@@ -223,7 +217,6 @@ void TimeUpdateSeason(void) {
   g_display_season_char_5 = g_season_name_char_5;
   func_8003FBD8(0x15, g_day_of_month, 1);
 }
-void func_800D835C(void) __attribute__((alias("TimeUpdateSeason")));
 
 void TimeSetSeasonName(s32 arg0) {
   switch (arg0 & 0xFF) {
@@ -261,4 +254,3 @@ void TimeSetSeasonName(s32 arg0) {
       break;
   }
 }
-void func_800D83F8(s32 arg0) __attribute__((alias("TimeSetSeasonName")));

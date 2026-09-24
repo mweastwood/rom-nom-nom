@@ -47,7 +47,6 @@ void AudioInit(s32 arg0) {
   func_800F4B68(2, 0x7FFF);
   func_800F4B68(1, 0x7FFF);
 }
-void func_8003CDC0(s32 arg0) __attribute__((alias("AudioInit")));
 
 void AudioUpdate(void) {
   u16 j;
@@ -103,7 +102,6 @@ void AudioUpdate(void) {
     j++;
   } while (j < 4);
 }
-void func_8003CF38(void) __attribute__((alias("AudioUpdate")));
 
 extern void func_800F2500(s32, s32);
 extern void func_800267A4(void*, s16, s16);
@@ -112,7 +110,6 @@ extern void func_800F5130(s32, s32);
 void AudioSetMasterVolume(s32 arg0, s32 arg1) {
   func_800F2500(arg0, arg1 - arg0);
 }
-void func_8003D250(s32 arg0, s32 arg1) __attribute__((alias("AudioSetMasterVolume")));
 
 s32 AudioChannelInit(u16 channel, s32 arg1, s32 arg2) {
   s32 result = 0;
@@ -130,7 +127,6 @@ s32 AudioChannelInit(u16 channel, s32 arg1, s32 arg2) {
   }
   return result;
 }
-s32 func_8003D270(u16 channel, s32 arg1, s32 arg2) __attribute__((alias("AudioChannelInit")));
 
 s32 AudioChannelSetSpeed(u16 channel, s32 arg1) {
   s32 result = 0;
@@ -142,7 +138,6 @@ s32 AudioChannelSetSpeed(u16 channel, s32 arg1) {
   }
   return result;
 }
-s32 func_8003D350(u16 channel, s32 arg1) __attribute__((alias("AudioChannelSetSpeed")));
 
 s32 AudioChannelStop(u16 channel) {
   s32 result = 0;
@@ -156,7 +151,6 @@ s32 AudioChannelStop(u16 channel) {
   }
   return result;
 }
-s32 func_8003D3C0(u16 channel) __attribute__((alias("AudioChannelStop")));
 
 s32 AudioChannelSetPan(u16 channel, s32 arg1, s16 arg2) {
   s32 result = 0;
@@ -174,7 +168,6 @@ s32 AudioChannelSetPan(u16 channel, s32 arg1, s16 arg2) {
   }
   return result;
 }
-s32 func_8003D444(u16 channel, s32 arg1, s16 arg2) __attribute__((alias("AudioChannelSetPan")));
 
 s32 AudioChannelSetVolume(u16 channel, s32 arg1) {
   s32 result = 0;
@@ -191,7 +184,6 @@ s32 AudioChannelSetVolume(u16 channel, s32 arg1) {
   }
   return result;
 }
-s32 func_8003D4E4(u16 channel, s32 arg1) __attribute__((alias("AudioChannelSetVolume")));
 
 s32 AudioChannelSetPitch(u16 channel, s32 arg1) {
   s32 result = 0;
@@ -208,12 +200,10 @@ s32 AudioChannelSetPitch(u16 channel, s32 arg1) {
   }
   return result;
 }
-s32 func_8003D570(u16 channel, s32 arg1) __attribute__((alias("AudioChannelSetPitch")));
 
 void AudioCommandSend(s32 arg0) {
   func_800F5130(2, arg0);
 }
-void func_8003D5FC(s32 arg0) __attribute__((alias("AudioCommandSend")));
 
 s32 AudioVoiceAllocate(s32 arg0) {
   u16 i = 0;
@@ -234,7 +224,6 @@ s32 AudioVoiceAllocate(s32 arg0) {
 
   return result;
 }
-s32 func_8003D620(s32 arg0) __attribute__((alias("AudioVoiceAllocate")));
 
 s32 AudioVoiceStop(s32 arg0) {
   u16 i = 0;
@@ -250,7 +239,6 @@ s32 AudioVoiceStop(s32 arg0) {
 
   return result;
 }
-s32 func_8003D6A8(s32 arg0) __attribute__((alias("AudioVoiceStop")));
 
 s32 AudioVoiceSetVolume(s32 arg0, s32 arg1) {
   u16 i = 0;
@@ -272,7 +260,6 @@ s32 AudioVoiceSetVolume(s32 arg0, s32 arg1) {
 
   return result;
 }
-s32 func_8003D718(s32 arg0, s32 arg1) __attribute__((alias("AudioVoiceSetVolume")));
 
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/audio", func_8003D7C0);
 
@@ -296,9 +283,7 @@ s32 AudioVoiceSetPan(s32 arg0, s32 arg1) {
 
   return result;
 }
-s32 func_8003D8A0(s32 arg0, s32 arg1) __attribute__((alias("AudioVoiceSetPan")));
 
 void AudioCommandReset(void) {
   func_800F5130(1, 0);
 }
-void func_8003D948(void) __attribute__((alias("AudioCommandReset")));

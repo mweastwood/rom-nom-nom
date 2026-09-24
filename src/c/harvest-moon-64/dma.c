@@ -10,7 +10,6 @@ void DmaInit(void) {
   } while ((u32)(i & 0xFFFF) < 40);
   g_dma_pending_count = 0;
 }
-void func_80029000(void) __attribute__((alias("DmaInit")));
 
 s32 DmaQueueTransfer(u32 rom_addr, u32 vram_addr, u32 size) {
   s32 ret = 0;
@@ -29,7 +28,6 @@ s32 DmaQueueTransfer(u32 rom_addr, u32 vram_addr, u32 size) {
 
   return ret;
 }
-s32 func_8002903C(u32 rom_addr, u32 vram_addr, u32 size) __attribute__((alias("DmaQueueTransfer")));
 
 void DmaProcessQueue(void) {
   s32 i = 0;
@@ -43,4 +41,3 @@ void DmaProcessQueue(void) {
   } while ((u32)(i & 0xFFFF) < 40);
   g_dma_pending_count = 0;
 }
-void func_800290B8(void) __attribute__((alias("DmaProcessQueue")));

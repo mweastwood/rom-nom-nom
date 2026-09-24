@@ -31,15 +31,12 @@ void RenderInit(void) {
 
   RenderResetCount();
 }
-void func_80029170(void) __attribute__((alias("RenderInit")));
 
 void RenderResetCount(void) {
   g_render_entry_count = 0;
 }
-void func_80029284(void) __attribute__((alias("RenderResetCount")));
 
 void RenderNoOp(void) {}
-void func_80029294(void) __attribute__((alias("RenderNoOp")));
 
 void RenderAddEntry(u32 dl, u16 flags) {
 #ifdef __clang__
@@ -53,7 +50,6 @@ void RenderAddEntry(u32 dl, u16 flags) {
   g_render_entries[index].flags = flags | 1;
   g_render_entry_count = next;
 }
-void func_8002929C(u32 dl, u16 flags) __attribute__((alias("RenderAddEntry")));
 
 s32 RenderSetTranslation(s32 index, u32 x, u32 y, u32 z) {
   u32 idx = index & 0xFFFF;
@@ -62,7 +58,6 @@ s32 RenderSetTranslation(s32 index, u32 x, u32 y, u32 z) {
   g_render_entries[idx].transform[2] = z;
   return 1;
 }
-s32 func_800292EC(s32 index, u32 x, u32 y, u32 z) __attribute__((alias("RenderSetTranslation")));
 
 s32 RenderSetRotation(s32 index, u32 x, u32 y, u32 z) {
   u32 idx = index & 0xFFFF;
@@ -71,7 +66,6 @@ s32 RenderSetRotation(s32 index, u32 x, u32 y, u32 z) {
   g_render_entries[idx].transform[5] = z;
   return 1;
 }
-s32 func_80029330(s32 index, u32 x, u32 y, u32 z) __attribute__((alias("RenderSetRotation")));
 
 s32 RenderSetScale(s32 index, u32 x, u32 y, u32 z) {
   u32 idx = index & 0xFFFF;
@@ -80,9 +74,7 @@ s32 RenderSetScale(s32 index, u32 x, u32 y, u32 z) {
   g_render_entries[idx].transform[8] = z;
   return 1;
 }
-s32 func_80029374(s32 index, u32 x, u32 y, u32 z) __attribute__((alias("RenderSetScale")));
 
 void RenderNoOp2(void) {}
-void func_800293B8(void) __attribute__((alias("RenderNoOp2")));
 
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/display", func_800293C0);

@@ -65,7 +65,6 @@ void MessageInit(void) {
     g_text_boxes[i].flags = 0;
   }
 }
-void func_80042F60(void) __attribute__((alias("MessageInit")));
 
 s32 MessageOpenTextBox(s32 box_index, s16 bank_id, s16 message_id) {
   s32 ret = 0;
@@ -81,8 +80,6 @@ s32 MessageOpenTextBox(s32 box_index, s16 bank_id, s16 message_id) {
   }
   return ret;
 }
-s32 func_80042FEC(s32 box_index, s16 bank_id, s16 message_id)
-    __attribute__((alias("MessageOpenTextBox")));
 
 s32 MessageRegisterBank(u16 index, s16 bank_id, s16 message_count, s32 rom_start, s32 rom_end,
                         s32 ram_start, s32 ram_end, s32 flags) {
@@ -100,9 +97,6 @@ s32 MessageRegisterBank(u16 index, s16 bank_id, s16 message_count, s32 rom_start
   }
   return ret;
 }
-s32 func_80043050(u16 index, s16 bank_id, s16 message_count, s32 rom_start, s32 rom_end,
-                  s32 ram_start, s32 ram_end, s32 flags)
-    __attribute__((alias("MessageRegisterBank")));
 
 s32 MessageRegisterVariable(u16 index, void* ptr, u8 type, s32 max_value) {
   s32 ret = 0;
@@ -117,14 +111,11 @@ s32 MessageRegisterVariable(u16 index, void* ptr, u8 type, s32 max_value) {
   }
   return ret;
 }
-s32 func_800430DC(u16 index, void* ptr, u8 type, s32 max_value)
-    __attribute__((alias("MessageRegisterVariable")));
 
 s32 MessageSetEventFlags(u32* flags) {
   g_message_event_flags = flags;
   return 0;
 }
-s32 func_80043138(u32* flags) __attribute__((alias("MessageSetEventFlags")));
 
 s32 MessageSetTextColor(s32 box_index, s32 r, s32 g, s32 b) {
   s32 ret = 0;
@@ -137,7 +128,6 @@ s32 MessageSetTextColor(s32 box_index, s32 r, s32 g, s32 b) {
   }
   return ret;
 }
-s32 func_80043148(s32 box_index, s32 r, s32 g, s32 b) __attribute__((alias("MessageSetTextColor")));
 
 s32 MessageSetBoxBackgroundLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3,
                                  void* arg4, void* arg5, void* arg6, void* arg7, void* arg8,
@@ -165,10 +155,6 @@ s32 MessageSetBoxBackgroundLayer(s32 box_index, u16 font_or_tex_id, void* arg2, 
   }
   return ret;
 }
-s32 func_8004318C(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4, void* arg5,
-                  void* arg6, void* arg7, void* arg8, void* arg9, void* arg10, u16 arg11, u8 arg12,
-                  f32 scale_x, f32 scale_y, f32 scale_z)
-    __attribute__((alias("MessageSetBoxBackgroundLayer")));
 
 s32 MessageSetBoxTextLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4,
                            void* arg5, void* arg6, void* arg7, void* arg8, void* arg9, void* arg10,
@@ -195,10 +181,6 @@ s32 MessageSetBoxTextLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* 
   }
   return ret;
 }
-s32 func_80043260(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4, void* arg5,
-                  void* arg6, void* arg7, void* arg8, void* arg9, void* arg10, u16 arg11, u8 arg12,
-                  f32 scale_x, f32 scale_y, f32 scale_z)
-    __attribute__((alias("MessageSetBoxTextLayer")));
 
 s32 MessageSetBoxPromptLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4,
                              void* arg5, void* arg6, void* arg7, void* arg8, void* arg9,
@@ -226,10 +208,6 @@ s32 MessageSetBoxPromptLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void
   }
   return ret;
 }
-s32 func_80043334(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3, void* arg4, void* arg5,
-                  void* arg6, void* arg7, void* arg8, void* arg9, void* arg10, u16 arg11, u8 arg12,
-                  f32 scale_x, f32 scale_y, f32 scale_z)
-    __attribute__((alias("MessageSetBoxPromptLayer")));
 
 s32 MessageClipSpan(s32 pos, s32 size, s32 limit) {
   pos += size;
@@ -242,7 +220,6 @@ s32 MessageClipSpan(s32 pos, s32 size, s32 limit) {
   }
   return size;
 }
-s32 func_80043408(s32 pos, s32 size, s32 limit) __attribute__((alias("MessageClipSpan")));
 
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043430);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043A88);
@@ -287,5 +264,3 @@ void TextBoxUpdate(void) {
     i++;
   } while (i < 1);
 }
-
-void func_80045CB0(void) __attribute__((alias("TextBoxUpdate")));

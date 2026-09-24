@@ -11,8 +11,6 @@ void LayerInit(void) {
   } while (i < 16);
 }
 
-void func_80045DE0(void) __attribute__((alias("LayerInit")));
-
 s32 LayerSet(u16 index, s16 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u32 arg6, u32 arg7,
              u32 arg8, u32 arg9, u32 arg10, u16 arg11, u8 arg12, f32 arg13, f32 arg14, f32 arg15,
              u8 arg16) {
@@ -43,10 +41,6 @@ s32 LayerSet(u16 index, s16 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u32 ar
 
   return success;
 }
-
-s32 func_80045E20(u16 index, s16 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u32 arg6, u32 arg7,
-                  u32 arg8, u32 arg9, u32 arg10, u16 arg11, u8 arg12, f32 arg13, f32 arg14,
-                  f32 arg15, u8 arg16) __attribute__((alias("LayerSet")));
 
 void func_8002B138(u16, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32);
 s32 func_800461D8(u16, u8, u8, u8, u8);
@@ -79,8 +73,6 @@ s32 LayerActivate(u16 index, u32 arg1, s8 arg2, u16 arg3) {
 
   return success;
 }
-
-s32 func_80045F5C(u16 index, u32 arg1, s8 arg2, u16 arg3) __attribute__((alias("LayerActivate")));
 
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/layer", func_80046120);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/layer", func_800461D8);

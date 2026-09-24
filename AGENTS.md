@@ -16,7 +16,8 @@ This document establishes the architecture rules, coding standards, and step-by-
    - **Functions & Methods**: Strict `CamelCase` without underscores (e.g. `MessageInit`, `MessageClipSpan`, `MockUltra64Reset`).
    - **Variables & Members**: `lower_snake_case` (e.g. `box_index`, `bank_id`, `scale_x`).
    - **Constants & Enums**: `kCamelCase` with `k` prefix (e.g. `kIdle`, `kMainProc`).
-   - Exceptions are restricted to N64 hardware/OS entrypoints (`main`, `idle`, `mainproc`, `os*`), assembly labels (`func_*`, `D_*`), and test macros (`TEST`, `TEST_F`).
+   - Exceptions are restricted to N64 hardware/OS entrypoints (`main`, `idle`, `mainproc`, `os*`), undecompiled assembly labels (`func_*`), and test macros (`TEST`, `TEST_F`).
+   - **Symbol Registration**: When a function or global variable is decompiled or identified, it must be registered with its clean semantic name in `symbols/<game>.txt` (e.g. `AudioUpdate = 0x8003CF38; // type:func` or `g_audio_status = 0x801FB690;`). Function aliases (`__attribute__((alias(...)))`) are strictly prohibited; splat automatically propagates registered symbol names across all linker scripts and assembly, preventing code from bypassing readable names.
 4. **Git Protocol**: **NEVER** commit or push changes without explicit user request.
 5. **Clean Room Decompilation & External Reference Policy**:
    - **STRICT PROHIBITION**: Contributors and AI agents are **strictly forbidden** from viewing, fetching, querying, referencing, citing, or deriving code, structures, symbol names, segment names, or documentation from unlicensed third-party decompilation projects, specifically including `harvestwhisperer/hm64-decomp` and any associated forks or mirrors.
@@ -88,11 +89,14 @@ bazel run //:m2c -- func_800266C0
 `m2c` automatically compiles the latest context from `common.h` and project headers in memory, maps struct fields, and auto-formats the C draft with `clang-format`.
 
 ### Step 3: Implement C Code & Iterate with diff
-1. Place or append the C code into the appropriate module file under `src/c/<game>/`.
-2. Name the function using Google `CamelCase`. Add an alias linking it to the ROM symbol name:
+1. Register the target function with its clean Google `CamelCase` name in `symbols/<game>.txt`:
+   ```txt
+   MyFunction = 0x800266C0; // type:func
+   ```
+   This registers the symbol with `splat`, renaming it across all disassembled assembly files, nonmatchings, and linker scripts. Any callers attempting to use the deprecated `func_800266C0` name will fail at link time.
+2. Place or append the C code into the appropriate module file under `src/c/<game>/`. Define the function directly under its Google `CamelCase` name without aliases or wrappers:
    ```c
    s32 MyFunction(s32 arg0) { ... }
-   s32 func_800266C0(s32 arg0) __attribute__((alias("MyFunction")));
    ```
 3. Start the live-reload diff watcher:
    ```bash
@@ -103,7 +107,7 @@ bazel run //:m2c -- func_800266C0
    *** [MATCH 100%] N/N instructions match bit-exact! ***
    ```
 5. **Header File & Global Symbol Hygiene**:
-   - Place struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files.
+   - Place function prototypes, struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files.
    - Define global variable symbols with human-readable semantic names in `symbols/<game>.txt` (e.g. `g_audio_voices = 0x801FB690;`). This prompts splat to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
    - Verify header and symbol completeness using `bazel run //:progress -- -m <module>`, `bazel run //:progress -- -s`, or `bazel run //:progress -- -g`.
 

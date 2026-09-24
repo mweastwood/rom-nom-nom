@@ -18,6 +18,81 @@ leo_boot_resume = 0x840010BC; // type:func absolute:True
 leo_boot_command = 0x84001120; // type:func absolute:True
 leo_boot_status = 0x8400114C; // type:func absolute:True
 
+// --- Decompiled Function Entrypoints ---
+
+// Audio Functions
+AudioInit = 0x8003CDC0; // type:func
+AudioUpdate = 0x8003CF38; // type:func
+AudioSetMasterVolume = 0x8003D250; // type:func
+AudioChannelInit = 0x8003D270; // type:func
+AudioChannelSetSpeed = 0x8003D350; // type:func
+AudioChannelStop = 0x8003D3C0; // type:func
+AudioChannelSetPan = 0x8003D444; // type:func
+AudioChannelSetVolume = 0x8003D4E4; // type:func
+AudioChannelSetPitch = 0x8003D570; // type:func
+AudioCommandSend = 0x8003D5FC; // type:func
+AudioVoiceAllocate = 0x8003D620; // type:func
+AudioVoiceStop = 0x8003D6A8; // type:func
+AudioVoiceSetVolume = 0x8003D718; // type:func
+AudioVoiceSetPan = 0x8003D8A0; // type:func
+AudioCommandReset = 0x8003D948; // type:func
+
+// Display Functions
+RenderInit = 0x80029170; // type:func
+RenderResetCount = 0x80029284; // type:func
+RenderNoOp = 0x80029294; // type:func
+RenderAddEntry = 0x8002929C; // type:func
+RenderSetTranslation = 0x800292EC; // type:func
+RenderSetRotation = 0x80029330; // type:func
+RenderSetScale = 0x80029374; // type:func
+RenderNoOp2 = 0x800293B8; // type:func
+
+// Dma Functions
+DmaInit = 0x80029000; // type:func
+DmaQueueTransfer = 0x8002903C; // type:func
+DmaProcessQueue = 0x800290B8; // type:func
+
+// Layer Functions
+LayerInit = 0x80045DE0; // type:func
+LayerSet = 0x80045E20; // type:func
+LayerActivate = 0x80045F5C; // type:func
+
+// Main Functions
+MainInit = 0x80025E24; // type:func
+MainReset = 0x80025F04; // type:func
+MainLoop = 0x80025FF0; // type:func
+RegisterGameLoopCallback = 0x80026190; // type:func
+SetCurrentGameLoopCallback = 0x800261CC; // type:func
+EnableSystemFlag4B38 = 0x8002620C; // type:func
+DisableSystemFlag4B38 = 0x80026220; // type:func
+SetLoopCounter = 0x80026230; // type:func
+NoOpCallback = 0x80026240; // type:func
+WaitVsyncFrames = 0x80026248; // type:func
+WaitForSystemReady = 0x80026284; // type:func
+UpdateFrameCounterAndTicks = 0x800262CC; // type:func
+
+// Message Functions
+MessageInit = 0x80042F60; // type:func
+MessageOpenTextBox = 0x80042FEC; // type:func
+MessageRegisterBank = 0x80043050; // type:func
+MessageRegisterVariable = 0x800430DC; // type:func
+MessageSetEventFlags = 0x80043138; // type:func
+MessageSetTextColor = 0x80043148; // type:func
+MessageSetBoxBackgroundLayer = 0x8004318C; // type:func
+MessageSetBoxTextLayer = 0x80043260; // type:func
+MessageSetBoxPromptLayer = 0x80043334; // type:func
+MessageClipSpan = 0x80043408; // type:func
+TextBoxUpdate = 0x80045CB0; // type:func
+
+// Time Functions
+TimeUpdate = 0x800D7C20; // type:func
+TimeAdvance = 0x800D7E28; // type:func
+TimeYearAdvance = 0x800D8004; // type:func
+TimeResetMonthlyFlags = 0x800D8180; // type:func
+TimeSleep = 0x800D81A8; // type:func
+TimeCheckFestival = 0x800D820C; // type:func
+TimeUpdateSeason = 0x800D835C; // type:func
+TimeSetSeasonName = 0x800D83F8; // type:func
 // Audio Global Symbols
 kAudioMinPitch = 0x8011EE00;
 kAudioMaxPitch = 0x8011EE08;

@@ -78,7 +78,7 @@ void WaitVsyncFrames(u32 frame_count);
 void WaitForSystemReady(void);
 void UpdateFrameCounterAndTicks(s32 arg0);
 
-void func_80025E24(void);
-void func_80025F04(void);
+void MainInit(void);
+void MainReset(void);
 
 #endif
