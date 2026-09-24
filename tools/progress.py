@@ -172,7 +172,21 @@ def load_game_config(game: str):
     return game_info, subsegs, symbols
 
 
-def parse_data_symbols(game: str) -> dict[str, dict]:
+def load_symbols_file(game: str) -> dict[str, int]:
+    """Load manually defined symbols and their VRAM addresses from symbols/<game>.txt."""
+    sym_path = REPO_ROOT / "symbols" / f"{game}.txt"
+    if not sym_path.exists():
+        return {}
+    defs = {}
+    for line in sym_path.read_text(encoding="utf-8").splitlines():
+        line = re.sub(r"//.*", "", line).strip()
+        m = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)\s*;", line)
+        if m:
+            defs[m.group(1)] = int(m.group(2), 16)
+    return defs
+
+
+def parse_data_symbols(game: str, defined_symbols: dict[str, int] | None = None) -> dict[str, dict]:
     """Parse all data, rodata, and bss symbols from disassembled assembly files."""
     asm_dirs = [
         REPO_ROOT / "bazel-bin" / "asm" / game / "data",
@@ -191,15 +205,31 @@ def parse_data_symbols(game: str) -> dict[str, dict]:
             m_dl = re.match(r"^dlabel\s+([A-Za-z0-9_]+)", line)
             if m_dl:
                 sname = m_dl.group(1)
+                is_named = (
+                    (defined_symbols and sname in defined_symbols)
+                    or (not sname.startswith("D_") and not sname.startswith("jtbl_"))
+                )
+                vram = None
+                if defined_symbols and sname in defined_symbols:
+                    vram = defined_symbols[sname]
+                elif sname.startswith("D_"):
+                    try:
+                        vram = int(sname[2:], 16)
+                    except ValueError:
+                        pass
                 symbols[sname] = {
                     "name": sname,
                     "section": section,
                     "file": p.name,
+                    "is_named": is_named,
+                    "vram": vram,
                 }
     return symbols
 
 
-def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[dict], dict[str, dict]]:
+def parse_c_declarations(
+    game: str, modules: dict | None = None, defined_symbols: dict[str, int] | None = None
+) -> tuple[list[dict], dict[str, dict]]:
     """Parse struct definitions and global variable extern declarations from headers and C sources."""
     src_dirs = [REPO_ROOT / "src" / "c" / game, REPO_ROOT / "src" / game]
     s_dir = next((d for d in src_dirs if d.exists()), None)
@@ -261,7 +291,7 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
             })
 
         # 2. Parse Extern Globals
-        # Function pointers: extern void (*D_801FD628)(void);
+        # Function pointers: extern void (*g_idle_callback)(void);
         fn_ptr_pat = re.compile(
             r"extern\s+([A-Za-z0-9_*\s]+?)\s*\(\s*\*\s*([A-Za-z0-9_]+)\s*\)\s*\([^;]*?\)\s*;",
             re.M,
@@ -269,6 +299,16 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
         for m in fn_ptr_pat.finditer(content):
             ret_type = m.group(1).strip()
             sym_name = m.group(2).strip()
+            vram = None
+            if defined_symbols and sym_name in defined_symbols:
+                vram = defined_symbols[sym_name]
+            elif sym_name.startswith("D_"):
+                try:
+                    vram = int(sym_name[2:], 16)
+                except ValueError:
+                    pass
+            elif sym_name == "osTvType":
+                vram = 0x80000300
             g_item = {
                 "name": sym_name,
                 "type": f"{ret_type} (*)(...)",
@@ -276,6 +316,8 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
                 "module": mod_name,
                 "is_header": is_header,
                 "alias": None,
+                "vram": vram,
+                "in_symbols_file": bool(defined_symbols and sym_name in defined_symbols),
             }
             if sym_name not in globals_map or is_header:
                 globals_map[sym_name] = g_item
@@ -291,6 +333,16 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
             arr = m.group(3) or ""
             if "(" in raw_type or "(" in sym_name:
                 continue
+            vram = None
+            if defined_symbols and sym_name in defined_symbols:
+                vram = defined_symbols[sym_name]
+            elif sym_name.startswith("D_"):
+                try:
+                    vram = int(sym_name[2:], 16)
+                except ValueError:
+                    pass
+            elif sym_name == "osTvType":
+                vram = 0x80000300
             g_item = {
                 "name": sym_name,
                 "type": f"{raw_type}{arr.strip()}",
@@ -298,6 +350,8 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
                 "module": mod_name,
                 "is_header": is_header,
                 "alias": None,
+                "vram": vram,
+                "in_symbols_file": bool(defined_symbols and sym_name in defined_symbols),
             }
             if sym_name not in globals_map or is_header:
                 globals_map[sym_name] = g_item
@@ -318,8 +372,10 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
     return structs, globals_map
 
 
-def get_module_data_refs(game: str, mod_name: str) -> set[str]:
-    """Find all global data/bss symbols (D_XXXXXXXX) referenced in a module's assembly and C files."""
+def get_module_data_refs(
+    game: str, mod_name: str, defined_symbols: dict[str, int] | None = None
+) -> set[str]:
+    """Find all global data/bss symbols referenced in a module's assembly and C files."""
     paths = []
     p1 = REPO_ROOT / "bazel-bin" / "asm" / game / f"{mod_name}.s"
     if p1.exists():
@@ -336,6 +392,10 @@ def get_module_data_refs(game: str, mod_name: str) -> set[str]:
         content = p.read_text(encoding="utf-8", errors="ignore")
         for m in re.finditer(r"\b(D_[0-9A-Fa-f]{8})\b", content):
             refs.add(m.group(1))
+        if defined_symbols:
+            for sname in defined_symbols:
+                if re.search(r"\b" + re.escape(sname) + r"\b", content):
+                    refs.add(sname)
     return refs
 
 
@@ -723,7 +783,13 @@ def format_blocking_target(callee: str, all_funcs: dict, subsegs: list) -> str:
     return callee
 
 
-def print_data_and_structs_summary(data_symbols: dict, structs: list, globals_map: dict):
+def print_data_and_structs_summary(
+    data_symbols: dict,
+    structs: list,
+    globals_map: dict,
+    defined_symbols: dict[str, int] | None = None,
+    game: str = "harvest-moon-64",
+):
     """Print high-level statistics for global variables and data structures."""
     if not data_symbols and not structs and not globals_map:
         return
@@ -733,6 +799,8 @@ def print_data_and_structs_summary(data_symbols: dict, structs: list, globals_ma
     total_data_syms = len(data_symbols)
     total_data_cnt = sum(1 for s in data_symbols.values() if s["section"] == "data")
     total_bss_cnt = sum(1 for s in data_symbols.values() if s["section"] == "bss")
+    named_syms_cnt = sum(1 for s in data_symbols.values() if s.get("is_named"))
+    unnamed_cnt = max(0, total_data_syms - named_syms_cnt)
 
     hdr_structs = sum(1 for s in structs if s["is_header"])
     src_structs = sum(1 for s in structs if not s["is_header"])
@@ -742,15 +810,16 @@ def print_data_and_structs_summary(data_symbols: dict, structs: list, globals_ma
 
     print("\n=== Global Variables (.data & .bss) ===")
     if total_data_syms > 0:
-        undeclared = max(0, total_data_syms - (hdr_globals + src_globals))
+        named_pct = (named_syms_cnt / total_data_syms * 100.0)
         hdr_pct = (hdr_globals / total_data_syms * 100.0)
         src_pct = (src_globals / total_data_syms * 100.0)
-        und_pct = (undeclared / total_data_syms * 100.0)
+        und_pct = (unnamed_cnt / total_data_syms * 100.0)
         print(f"Total Global Symbols:       {total_data_syms:6,d} symbols (.data: {total_data_cnt:,}, .bss: {total_bss_cnt:,})")
+        print(f"Named in symbols/{game}.txt:{named_syms_cnt:6,d} symbols ({named_pct:5.1f}%)")
         print(f"Declared in C Headers:      {hdr_globals:6,d} symbols ({hdr_pct:5.1f}%)")
         migration_note = "  [Candidates for header migration]" if src_globals > 0 else ""
         print(f"Declared in C Sources:      {src_globals:6,d} symbols ({src_pct:5.1f}%){migration_note}")
-        print(f"Remaining in Assembly:      {undeclared:6,d} symbols ({und_pct:5.1f}%)")
+        print(f"Auto-Generated (D_XXXXXXXX):{unnamed_cnt:6,d} symbols ({und_pct:5.1f}%)")
     else:
         print(f"Declared in C Headers:      {hdr_globals:6,d} symbols")
         print(f"Declared in C Sources:      {src_globals:6,d} symbols")
@@ -780,28 +849,41 @@ def print_structs_catalog(structs: list[dict]):
     print(f"\nTotal structs: {len(structs)}")
 
 
-def print_globals_catalog(globals_map: dict[str, dict], data_symbols: dict[str, dict]):
+def print_globals_catalog(
+    globals_map: dict[str, dict],
+    data_symbols: dict[str, dict],
+    defined_symbols: dict[str, int] | None = None,
+    game: str = "harvest-moon-64",
+):
     """Print full catalog of declared global variables."""
     print("\n=== Declared Global Variables ===")
     if not globals_map:
         print("No globals declared.")
         return
 
-    hdr = f"{'SYMBOL':14s} {'SEMANTIC NAME':28s} {'TYPE':22s} {'FILE':14s} {'MODULE':10s} {'LOCATION'}"
+    hdr = f"{'SYMBOL':28s} {'VRAM':12s} {'TYPE':22s} {'FILE':14s} {'MODULE':10s} {'STATUS'}"
     print(hdr)
     print("-" * len(hdr))
 
     for g in sorted(globals_map.values(), key=lambda x: (0 if x["is_header"] else 1, x["name"])):
-        loc = "header" if g["is_header"] else f"MOVE TO {g['module']}.h"
-        alias = g.get("alias") or "-"
-        print(f"{g['name']:14s} {alias:28s} {g['type']:22s} {g['file']:14s} {g['module']:10s} {loc}")
+        vram_str = f"0x{g['vram']:08X}" if g.get("vram") else "-"
+        if defined_symbols and g["name"] in defined_symbols:
+            status = f"symbols/{game}.txt"
+        elif g["is_header"]:
+            status = "header"
+        else:
+            status = f"MOVE TO {g['module']}.h"
+        print(f"{g['name']:28s} {vram_str:12s} {g['type']:22s} {g['file']:14s} {g['module']:10s} {status}")
 
     hdr_cnt = sum(1 for g in globals_map.values() if g["is_header"])
     src_cnt = sum(1 for g in globals_map.values() if not g["is_header"])
-    named_cnt = sum(1 for g in globals_map.values() if g.get("alias"))
-    print(f"\nTotal declared globals: {len(globals_map)} ({hdr_cnt} in headers, {src_cnt} in C sources needing migration, {named_cnt} with semantic names)")
+    named_in_file = sum(1 for g in globals_map.values() if defined_symbols and g["name"] in defined_symbols)
+    print(
+        f"\nTotal declared globals: {len(globals_map)} ({named_in_file} defined in symbols/{game}.txt, {hdr_cnt} in headers, {src_cnt} in C sources)"
+    )
     if data_symbols:
-        print(f"Total global data symbols in ROM: {len(data_symbols):,}")
+        unnamed = sum(1 for s in data_symbols.values() if not s.get("is_named"))
+        print(f"Auto-generated symbols in ROM assembly: {unnamed:,} (D_XXXXXXXX)")
 
 
 def print_module_detail(
@@ -813,6 +895,7 @@ def print_module_detail(
     structs: list | None = None,
     globals_map: dict | None = None,
     data_symbols: dict | None = None,
+    defined_symbols: dict[str, int] | None = None,
 ):
     """Print full function-by-function breakdown for a specific module."""
     if mod_name not in modules:
@@ -875,17 +958,19 @@ def print_module_detail(
 
     # Globals section for this module
     if globals_map is not None:
-        mod_refs = get_module_data_refs(game, mod_name)
+        mod_refs = get_module_data_refs(game, mod_name, defined_symbols)
         mod_hdr_globals = [g for g in globals_map.values() if g["module"] == mod_name and g["is_header"]]
         mod_src_globals = [g for g in globals_map.values() if g["module"] == mod_name and not g["is_header"]]
-        undeclared_refs = sorted([r for r in mod_refs if r not in globals_map])
+        undeclared_refs = sorted(
+            [r for r in mod_refs if r not in globals_map and (not defined_symbols or r not in defined_symbols)]
+        )
 
         print("\nGlobal Variables:")
         print(f"  Declared in Header ({len(mod_hdr_globals)}):")
         if mod_hdr_globals:
             for g in sorted(mod_hdr_globals, key=lambda x: x["name"])[:10]:
-                alias_str = f" ({g['alias']})" if g.get("alias") else ""
-                disp_sym = g["name"] + alias_str
+                vram_str = f" [0x{g['vram']:08X}]" if g.get("vram") else ""
+                disp_sym = g["name"] + vram_str
                 print(f"    {disp_sym:36s} {g['type']}")
             if len(mod_hdr_globals) > 10:
                 print(f"    ... and {len(mod_hdr_globals) - 10} more")
@@ -895,8 +980,8 @@ def print_module_detail(
         if mod_src_globals:
             print(f"\n  Migration Candidates in Source ({len(mod_src_globals)} in {mod_name}.c -> move to {mod_name}.h):")
             for g in sorted(mod_src_globals, key=lambda x: x["name"])[:10]:
-                alias_str = f" ({g['alias']})" if g.get("alias") else ""
-                disp_sym = g["name"] + alias_str
+                vram_str = f" [0x{g['vram']:08X}]" if g.get("vram") else ""
+                disp_sym = g["name"] + vram_str
                 print(f"    {disp_sym:36s} {g['type']}")
             if len(mod_src_globals) > 10:
                 print(f"    ... and {len(mod_src_globals) - 10} more")
@@ -938,22 +1023,23 @@ def main():
     if not game_info:
         return 1
 
+    defined_symbols = load_symbols_file(args.game)
     all_funcs = parse_codebase_and_functions(args.game, subsegs, symbols)
     modules = group_by_logical_module(subsegs, all_funcs, args.game)
-    data_symbols = parse_data_symbols(args.game)
-    structs, globals_map = parse_c_declarations(args.game, modules)
+    data_symbols = parse_data_symbols(args.game, defined_symbols)
+    structs, globals_map = parse_c_declarations(args.game, modules, defined_symbols)
 
     if args.structs:
         print_structs_catalog(structs)
         return 0
 
     if args.globals:
-        print_globals_catalog(globals_map, data_symbols)
+        print_globals_catalog(globals_map, data_symbols, defined_symbols, args.game)
         return 0
 
     if args.module:
         print_module_detail(
-            args.module, modules, all_funcs, subsegs, args.game, structs, globals_map, data_symbols
+            args.module, modules, all_funcs, subsegs, args.game, structs, globals_map, data_symbols, defined_symbols
         )
         return 0
 
@@ -981,7 +1067,7 @@ def main():
     print(render_progress_bar(pct, 50))
 
     if not args.quiet:
-        print_data_and_structs_summary(data_symbols, structs, globals_map)
+        print_data_and_structs_summary(data_symbols, structs, globals_map, defined_symbols, args.game)
 
     if args.ready:
         print("\n=== All Functions Ready to Decompile ===")

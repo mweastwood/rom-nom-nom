@@ -52,7 +52,7 @@ The progress tool provides clean-room, ROM-driven dependency analysis and projec
   - `READY`: Leaf functions whose dependencies are either already decompiled or are Libultra OS/hardware routines. Sorted ascending by size for fast, targeted progress.
   - `BLOCKED`: Functions waiting on other undecompiled functions, explicitly reporting `module:function` blockers.
 - **Data Structures (Structs) & Header Hygiene Auditing**: Scans module headers (`src/c/<game>/*.h`) and C sources (`src/c/<game>/*.c`) for `typedef struct` definitions. Measures reverse-engineering fidelity (named fields vs `unk_`/`pad` placeholders) and flags structs defined inside `.c` files that should be promoted to module headers.
-- **Global Variables & Data Symbol Accounting**: Catalogs all `.data`, `.rodata`, and `.bss` symbols from the ROM disassembly. Detects typed `extern` globals across headers and sources, tracks candidates for header migration, and cross-references global symbol accesses (`D_XXXXXXXX`) per module to identify untyped global dependencies.
+- **Global Variables & Data Symbol Accounting**: Catalogs all `.data`, `.rodata`, and `.bss` symbols from the ROM disassembly. Tracks symbols defined with semantic names in `symbols/<game>.txt` vs auto-generated `D_XXXXXXXX` labels, detects typed `extern` globals across headers and sources, tracks candidates for header migration, and cross-references global symbol accesses per module to identify untyped global dependencies.
 - **Automated Workflow Prioritization**: In-progress compilation units (modules with partial C implementations) are prioritized first, followed by modules with ready candidates.
 
 ---
@@ -102,7 +102,10 @@ bazel run //:m2c -- func_800266C0
    ```
    *** [MATCH 100%] N/N instructions match bit-exact! ***
    ```
-5. **Header File Hygiene**: Place struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files. Verify header completeness using `bazel run //:progress -- -m <module>` or `bazel run //:progress -- -s`.
+5. **Header File & Global Symbol Hygiene**:
+   - Place struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files.
+   - Define global variable symbols with human-readable semantic names in `symbols/<game>.txt` (e.g. `g_audio_voices = 0x801FB690;`). This prompts splat to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
+   - Verify header and symbol completeness using `bazel run //:progress -- -m <module>`, `bazel run //:progress -- -s`, or `bazel run //:progress -- -g`.
 
 ### Step 4: Update Splat Segment Split (When File is Complete)
 When all functions in an assembly split range are decompiled into a C file:

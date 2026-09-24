@@ -11,14 +11,11 @@ typedef struct {
   u16 reserved;
 } RenderEntry;
 
-extern u8 D_80189135[9];
-#define g_display_matrices D_80189135
+extern u8 g_display_matrices[9];
 
-extern RenderEntry D_8018A850[336];
-#define g_render_entries D_8018A850
+extern RenderEntry g_render_entries[336];
 
-extern u16 D_8018A05A;
-#define g_render_entry_count D_8018A05A
+extern u16 g_render_entry_count;
 
 void RenderInit(void);
 void RenderResetCount(void);

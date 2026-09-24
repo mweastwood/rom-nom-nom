@@ -3,21 +3,15 @@
 
 #include "types.h"
 
-extern OSThread D_801241C0;
-#define g_idle_thread D_801241C0
+extern OSThread g_idle_thread;
 
-extern u8 D_80126520[];
-#define g_idle_thread_stack D_80126520
+extern u8 g_idle_thread_stack[];
 
-extern OSThread D_80124370;
-#define g_main_thread D_80124370
+extern OSThread g_main_thread;
 
-extern u8 D_801C6220[];
-#define g_main_thread_stack D_801C6220
+extern u8 g_main_thread_stack[];
 
-extern void (*D_801FD628)(void);
-#define g_idle_callback D_801FD628
-
+extern void (*g_idle_callback)(void);
 void main(void);
 void idle(void* arg);
 void mainproc(void* arg);

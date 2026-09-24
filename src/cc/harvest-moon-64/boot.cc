@@ -12,28 +12,28 @@ static std::function<void()> s_idle_callback = nullptr;
 
 void BootSystem::Main() {
   os_initialize();
-  os_create_thread(&D_801241C0, static_cast<OSId>(ThreadId::kIdle), Idle, nullptr, D_80126520,
-                   static_cast<OSPri>(Priority::kIdleActive));
-  os_start_thread(&D_801241C0);
+  os_create_thread(&g_idle_thread, static_cast<OSId>(ThreadId::kIdle), Idle, nullptr,
+                   g_idle_thread_stack, static_cast<OSPri>(Priority::kIdleActive));
+  os_start_thread(&g_idle_thread);
 }
 
 void BootSystem::Idle(void* arg) {
   (void)arg;
   ClearIdleCallback();
-  D_801FD628 = nullptr;
+  g_idle_callback = nullptr;
 
   func_800FD5B0();
   func_800FB140(2, 1);
   func_80105B00(90);
 
-  os_create_thread(&D_80124370, static_cast<OSId>(ThreadId::kMainProc), mainproc, nullptr,
-                   D_801C6220, static_cast<OSPri>(Priority::kMainProc));
-  os_start_thread(&D_80124370);
-  os_set_thread_priority(&D_801241C0, static_cast<OSPri>(Priority::kIdleDormant));
+  os_create_thread(&g_main_thread, static_cast<OSId>(ThreadId::kMainProc), mainproc, nullptr,
+                   g_main_thread_stack, static_cast<OSPri>(Priority::kMainProc));
+  os_start_thread(&g_main_thread);
+  os_set_thread_priority(&g_idle_thread, static_cast<OSPri>(Priority::kIdleDormant));
 
   while (true) {
-    if (D_801FD628 != nullptr) {
-      D_801FD628();
+    if (g_idle_callback != nullptr) {
+      g_idle_callback();
     } else if (s_idle_callback) {
       s_idle_callback();
     }
@@ -49,12 +49,12 @@ void BootSystem::ClearIdleCallback() {
 }
 
 bool BootSystem::HasIdleCallback() {
-  return s_idle_callback != nullptr || D_801FD628 != nullptr;
+  return s_idle_callback != nullptr || g_idle_callback != nullptr;
 }
 
 void BootSystem::ExecuteIdleCallback() {
-  if (D_801FD628 != nullptr) {
-    D_801FD628();
+  if (g_idle_callback != nullptr) {
+    g_idle_callback();
   } else if (s_idle_callback) {
     s_idle_callback();
   }

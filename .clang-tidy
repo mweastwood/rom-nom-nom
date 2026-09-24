@@ -36,11 +36,11 @@ CheckOptions:
   - key: readability-identifier-naming.GlobalConstantPrefix
     value: 'k'
   - key: readability-identifier-naming.GlobalConstantIgnoredRegexp
-    value: '^(D_[0-9A-Fa-f]+|g_[a-z0-9_]+|s_[a-z0-9_]+|os[A-Za-z0-9_]*|leo[A-Za-z0-9_]*)$'
+    value: '^(g_[a-z0-9_]+|s_[a-z0-9_]+|os[A-Za-z0-9_]*|leo[A-Za-z0-9_]*)$'
   - key: readability-identifier-naming.GlobalVariableCase
     value: lower_case
   - key: readability-identifier-naming.GlobalVariableIgnoredRegexp
-    value: '^(D_[0-9A-Fa-f]+|g_[a-z0-9_]+|s_[a-z0-9_]+|os[A-Za-z0-9_]*|leo[A-Za-z0-9_]*)$'
+    value: '^(g_[a-z0-9_]+|s_[a-z0-9_]+|os[A-Za-z0-9_]*|leo[A-Za-z0-9_]*)$'
   - key: readability-identifier-naming.StaticVariableCase
     value: lower_case
   - key: readability-identifier-naming.StaticVariableIgnoredRegexp

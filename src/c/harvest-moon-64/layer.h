@@ -27,8 +27,7 @@ typedef struct {
   u16 reserved;
 } LayerEntry;
 
-extern LayerEntry D_80189A50[16];
-#define g_layer_entries D_80189A50
+extern LayerEntry g_layer_entries[16];
 
 void LayerInit(void);
 s32 LayerSet(u16 index, s16 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u32 arg6, u32 arg7,

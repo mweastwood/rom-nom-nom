@@ -5,19 +5,19 @@
 MockUltra64State g_mock_state;
 
 // Simulated BSS variables from ROM
-OSThread D_801241C0;
-u8 D_80126520[0x1000];
-OSThread D_80124370;
-u8 D_801C6220[0x1000];
-void (*D_801FD628)(void) = NULL;
+OSThread g_idle_thread;
+u8 g_idle_thread_stack[0x1000];
+OSThread g_main_thread;
+u8 g_main_thread_stack[0x1000];
+void (*g_idle_callback)(void) = NULL;
 
 void MockUltra64Reset(void) {
   memset(&g_mock_state, 0, sizeof(g_mock_state));
-  memset(&D_801241C0, 0, sizeof(D_801241C0));
-  memset(D_80126520, 0, sizeof(D_80126520));
-  memset(&D_80124370, 0, sizeof(D_80124370));
-  memset(D_801C6220, 0, sizeof(D_801C6220));
-  D_801FD628 = NULL;
+  memset(&g_idle_thread, 0, sizeof(g_idle_thread));
+  memset(g_idle_thread_stack, 0, sizeof(g_idle_thread_stack));
+  memset(&g_main_thread, 0, sizeof(g_main_thread));
+  memset(g_main_thread_stack, 0, sizeof(g_main_thread_stack));
+  g_idle_callback = NULL;
 }
 
 void os_initialize(void) {

@@ -29,17 +29,13 @@ typedef struct {
   u16 flags;
 } AudioVoice;
 
-extern AudioChannel D_801FB5D8[4];
-#define g_audio_channels D_801FB5D8
+extern AudioChannel g_audio_channels[4];
 
-extern AudioVoice D_801FB690[4];
-#define g_audio_voices D_801FB690
+extern AudioVoice g_audio_voices[4];
 
-extern const f64 D_8011EE00;
-#define kAudioMinPitch D_8011EE00
+extern const f64 kAudioMinPitch;
 
-extern const f64 D_8011EE08;
-#define kAudioMaxPitch D_8011EE08
+extern const f64 kAudioMaxPitch;
 
 void AudioInit(s32 arg0);
 void AudioUpdate(void);

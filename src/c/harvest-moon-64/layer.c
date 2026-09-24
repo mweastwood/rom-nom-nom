@@ -5,8 +5,8 @@
 void LayerInit(void) {
   u16 i = 0;
   do {
-    D_80189A50[i].base_index = 0;
-    D_80189A50[i].flags = 0;
+    g_layer_entries[i].base_index = 0;
+    g_layer_entries[i].flags = 0;
     i++;
   } while (i < 16);
 }
@@ -19,25 +19,25 @@ s32 LayerSet(u16 index, s16 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u32 ar
   s32 success = 0;
 
   if (index < 16) {
-    if (!(D_80189A50[index].flags & 1)) {
+    if (!(g_layer_entries[index].flags & 1)) {
       success = 1;
-      D_80189A50[index].param_0 = arg2;
-      D_80189A50[index].param_1 = arg3;
-      D_80189A50[index].param_2 = arg4;
-      D_80189A50[index].param_3 = arg5;
-      D_80189A50[index].param_4 = arg6;
-      D_80189A50[index].param_5 = arg7;
-      D_80189A50[index].param_6 = arg8;
-      D_80189A50[index].param_7 = arg9;
-      D_80189A50[index].param_8 = arg10;
-      D_80189A50[index].frame_index = arg11;
-      D_80189A50[index].alpha = arg12;
-      D_80189A50[index].scale_x = arg13;
-      D_80189A50[index].scale_y = arg14;
-      D_80189A50[index].scale_z = arg15;
-      D_80189A50[index].blend_mode = arg16;
-      D_80189A50[index].base_index = arg1;
-      D_80189A50[index].flags = 1;
+      g_layer_entries[index].param_0 = arg2;
+      g_layer_entries[index].param_1 = arg3;
+      g_layer_entries[index].param_2 = arg4;
+      g_layer_entries[index].param_3 = arg5;
+      g_layer_entries[index].param_4 = arg6;
+      g_layer_entries[index].param_5 = arg7;
+      g_layer_entries[index].param_6 = arg8;
+      g_layer_entries[index].param_7 = arg9;
+      g_layer_entries[index].param_8 = arg10;
+      g_layer_entries[index].frame_index = arg11;
+      g_layer_entries[index].alpha = arg12;
+      g_layer_entries[index].scale_x = arg13;
+      g_layer_entries[index].scale_y = arg14;
+      g_layer_entries[index].scale_z = arg15;
+      g_layer_entries[index].blend_mode = arg16;
+      g_layer_entries[index].base_index = arg1;
+      g_layer_entries[index].flags = 1;
     }
   }
 
@@ -56,23 +56,23 @@ s32 LayerActivate(u16 index, u32 arg1, s8 arg2, u16 arg3) {
   u8 count;
 
   if (index < 16) {
-    if (D_80189A50[index].flags & 1) {
-      D_80189A50[index].offset_index = arg2;
-      count = D_80189A50[index].offset_index;
-      D_80189A50[index].callback = arg1;
-      D_80189A50[index].flags |= 2;
+    if (g_layer_entries[index].flags & 1) {
+      g_layer_entries[index].offset_index = arg2;
+      count = g_layer_entries[index].offset_index;
+      g_layer_entries[index].callback = arg1;
+      g_layer_entries[index].flags |= 2;
       do {
-        func_8002B138(D_80189A50[index].base_index + count, D_80189A50[index].param_0,
-                      D_80189A50[index].param_1, D_80189A50[index].param_2,
-                      D_80189A50[index].param_3, 0, 0, D_80189A50[index].param_4, 0,
-                      D_80189A50[index].param_5, D_80189A50[index].param_6,
-                      D_80189A50[index].param_7, D_80189A50[index].param_8, 0, 0);
+        func_8002B138(g_layer_entries[index].base_index + count, g_layer_entries[index].param_0,
+                      g_layer_entries[index].param_1, g_layer_entries[index].param_2,
+                      g_layer_entries[index].param_3, 0, 0, g_layer_entries[index].param_4, 0,
+                      g_layer_entries[index].param_5, g_layer_entries[index].param_6,
+                      g_layer_entries[index].param_7, g_layer_entries[index].param_8, 0, 0);
       } while (count--);
       func_800461D8(index, 0xFF, 0xFF, 0xFF, 0xFF);
 
       success = 1;
       if (arg3 == 3) {
-        D_80189A50[index].flags |= 4;
+        g_layer_entries[index].flags |= 4;
       }
     }
   }

@@ -47,11 +47,11 @@ extern MockUltra64State g_mock_state;
 void MockUltra64Reset(void);
 
 // Simulated global BSS buffers from Harvest Moon 64 ROM
-extern OSThread D_801241C0;
-extern u8 D_80126520[0x1000];
-extern OSThread D_80124370;
-extern u8 D_801C6220[0x1000];
-extern void (*D_801FD628)(void);
+extern OSThread g_idle_thread;
+extern u8 g_idle_thread_stack[0x1000];
+extern OSThread g_main_thread;
+extern u8 g_main_thread_stack[0x1000];
+extern void (*g_idle_callback)(void);
 
 // N64 OS declarations
 void os_initialize(void);
