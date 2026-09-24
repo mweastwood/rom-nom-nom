@@ -28,7 +28,11 @@ This document establishes the architecture rules, coding standards, and step-by-
 
 | Command | Purpose |
 | :--- | :--- |
-| `bazel run //:progress` | Check overall `.text` executable code decompilation progress and module list. |
+| `bazel run //:progress` | Check overall `.text` executable code decompilation progress, compilation unit roadmap, and top recommended functions. |
+| `bazel run //:progress -- -m <module>` | Deep-dive breakdown of a module's functions, ROM ranges, sizes, and caller/callee dependencies (`DONE`, `READY`, `BLOCKED`). |
+| `bazel run //:progress -- -r` | List all unblocked leaf functions across the codebase ready for immediate decompilation. |
+| `bazel run //:progress -- --mermaid` | Generate a Mermaid DAG diagram visualizing inter-module dependency relationships. |
+| `bazel run //:progress -- --game <game>` | Target a specific game configuration (e.g. `harvest-moon-64`, `ogre-battle-64`). |
 | `bazel run //:m2c -- <func_name>` | Decompile a function from assembly to C using dynamic on-the-fly context. |
 | `bazel run //:m2c -- --dump-context` | Export fresh preprocessed C context (e.g. for pasting into [decomp.me](https://decomp.me)). |
 | `bazel run //:diff -- <func_name>` | Side-by-side assembly diff comparing target ROM instructions against compiled C. |
@@ -37,6 +41,16 @@ This document establishes the architecture rules, coding standards, and step-by-
 | `bazel run //:tidy -- --check` | Verify naming conventions and language safety with `clang-tidy`. |
 | `bazel test //...` | Run all bit-exact ROM verification tests and unit test suites. |
 
+### Progress & Dependency Tracking Engine (`progress.py`)
+
+The progress tool provides clean-room, ROM-driven dependency analysis and project roadmaps:
+- **Clean-Room Compilation Unit Detection**: Identifies module boundaries dynamically from `splat/<game>.yaml`, symbol tables, and `.rodata` assertion strings embedded in the retail ROM binary.
+- **Partial Module & `INCLUDE_ASM` Accounting**: Recursively scans nonmatching assembly files (`nonmatchings/<module>/*.s`). Functions under `INCLUDE_ASM` are accurately tracked as undecompiled assembly, ensuring exact byte counts and module percentages without over-counting.
+- **Call Graph & Readiness Engine**: Analyzes MIPS `jal` branches across all functions to determine decompile order:
+  - `READY`: Leaf functions whose dependencies are either already decompiled or are Libultra OS/hardware routines. Sorted ascending by size for fast, targeted progress.
+  - `BLOCKED`: Functions waiting on other undecompiled functions, explicitly reporting `module:function` blockers.
+- **Automated Workflow Prioritization**: In-progress compilation units (modules with partial C implementations) are prioritized first, followed by modules with ready candidates.
+
 ---
 
 ## 3. Step-by-Step Decompilation Workflow
@@ -44,7 +58,18 @@ This document establishes the architecture rules, coding standards, and step-by-
 Follow this procedure when decompiling a new function or module:
 
 ### Step 1: Identify Target Function & Inspect Assembly
-Check current progress with `bazel run //:progress`. Identify the target function in `bazel-bin/asm/<game>/*.s` (e.g. `func_800266C0`).
+Check current progress and candidate functions:
+```bash
+# View top recommended functions for in-progress modules:
+bazel run //:progress
+
+# Or list all unblocked leaf functions ready across the entire codebase:
+bazel run //:progress -- -r
+
+# Or inspect a specific module's functions and blocking dependencies:
+bazel run //:progress -- -m <module>
+```
+Identify the target function in `bazel-bin/asm/<game>/*.s` or `bazel-bin/asm/<game>/nonmatchings/<module>/*.s` (e.g. `func_800266C0`).
 
 Inspect the target instructions and length:
 ```bash

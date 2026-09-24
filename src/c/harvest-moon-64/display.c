@@ -1,5 +1,7 @@
 #include "display.h"
 
+#include "include_asm.h"
+
 void RenderInit(void) {
   s32 i = 0;
 
@@ -82,3 +84,5 @@ s32 func_80029374(s32 index, u32 x, u32 y, u32 z) __attribute__((alias("RenderSe
 
 void RenderNoOp2(void) {}
 void func_800293B8(void) __attribute__((alias("RenderNoOp2")));
+
+INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/display", func_800293C0);
