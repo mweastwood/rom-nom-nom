@@ -275,6 +275,7 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
                 "file": p.name,
                 "module": mod_name,
                 "is_header": is_header,
+                "alias": None,
             }
             if sym_name not in globals_map or is_header:
                 globals_map[sym_name] = g_item
@@ -296,9 +297,23 @@ def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[d
                 "file": p.name,
                 "module": mod_name,
                 "is_header": is_header,
+                "alias": None,
             }
             if sym_name not in globals_map or is_header:
                 globals_map[sym_name] = g_item
+
+    # Second pass: Associate #define aliases with globals
+    alias_pat = re.compile(
+        r"#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)",
+        re.M,
+    )
+    for p in sorted(s_dir.glob("*.[ch]")):
+        content = p.read_text(encoding="utf-8", errors="ignore")
+        for m in alias_pat.finditer(content):
+            alias_name = m.group(1).strip()
+            target_sym = m.group(2).strip()
+            if target_sym in globals_map and not globals_map[target_sym].get("alias"):
+                globals_map[target_sym]["alias"] = alias_name
 
     return structs, globals_map
 
@@ -772,17 +787,19 @@ def print_globals_catalog(globals_map: dict[str, dict], data_symbols: dict[str, 
         print("No globals declared.")
         return
 
-    hdr = f"{'SYMBOL':22s} {'TYPE':28s} {'FILE':16s} {'MODULE':12s} {'LOCATION'}"
+    hdr = f"{'SYMBOL':14s} {'SEMANTIC NAME':28s} {'TYPE':22s} {'FILE':14s} {'MODULE':10s} {'LOCATION'}"
     print(hdr)
     print("-" * len(hdr))
 
     for g in sorted(globals_map.values(), key=lambda x: (0 if x["is_header"] else 1, x["name"])):
         loc = "header" if g["is_header"] else f"MOVE TO {g['module']}.h"
-        print(f"{g['name']:22s} {g['type']:28s} {g['file']:16s} {g['module']:12s} {loc}")
+        alias = g.get("alias") or "-"
+        print(f"{g['name']:14s} {alias:28s} {g['type']:22s} {g['file']:14s} {g['module']:10s} {loc}")
 
     hdr_cnt = sum(1 for g in globals_map.values() if g["is_header"])
     src_cnt = sum(1 for g in globals_map.values() if not g["is_header"])
-    print(f"\nTotal declared globals: {len(globals_map)} ({hdr_cnt} in headers, {src_cnt} in C sources needing migration)")
+    named_cnt = sum(1 for g in globals_map.values() if g.get("alias"))
+    print(f"\nTotal declared globals: {len(globals_map)} ({hdr_cnt} in headers, {src_cnt} in C sources needing migration, {named_cnt} with semantic names)")
     if data_symbols:
         print(f"Total global data symbols in ROM: {len(data_symbols):,}")
 
@@ -867,7 +884,9 @@ def print_module_detail(
         print(f"  Declared in Header ({len(mod_hdr_globals)}):")
         if mod_hdr_globals:
             for g in sorted(mod_hdr_globals, key=lambda x: x["name"])[:10]:
-                print(f"    {g['name']:20s} {g['type']}")
+                alias_str = f" ({g['alias']})" if g.get("alias") else ""
+                disp_sym = g["name"] + alias_str
+                print(f"    {disp_sym:36s} {g['type']}")
             if len(mod_hdr_globals) > 10:
                 print(f"    ... and {len(mod_hdr_globals) - 10} more")
         else:
@@ -876,7 +895,9 @@ def print_module_detail(
         if mod_src_globals:
             print(f"\n  Migration Candidates in Source ({len(mod_src_globals)} in {mod_name}.c -> move to {mod_name}.h):")
             for g in sorted(mod_src_globals, key=lambda x: x["name"])[:10]:
-                print(f"    {g['name']:20s} {g['type']}")
+                alias_str = f" ({g['alias']})" if g.get("alias") else ""
+                disp_sym = g["name"] + alias_str
+                print(f"    {disp_sym:36s} {g['type']}")
             if len(mod_src_globals) > 10:
                 print(f"    ... and {len(mod_src_globals) - 10} more")
 

@@ -30,7 +30,10 @@ typedef struct {
 } AudioVoice;
 
 extern AudioChannel D_801FB5D8[4];
+#define g_audio_channels D_801FB5D8
+
 extern AudioVoice D_801FB690[4];
+#define g_audio_voices D_801FB690
 
 void AudioInit(s32 arg0);
 void AudioUpdate(void);

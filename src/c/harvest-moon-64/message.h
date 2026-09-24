@@ -60,18 +60,40 @@ typedef struct {
 } TextBoxLayer;
 
 extern TextBox D_801C3F00[];
+#define g_text_boxes D_801C3F00
+
 extern MessageBankEntry D_80205760[];
+#define g_message_banks D_80205760
+
 extern MessageConfig D_80188C00[];
+#define g_message_configs D_80188C00
+
 extern MessageVariable D_8013CE08[];
+#define g_message_variables D_8013CE08
+
 extern u32* D_8013CE00;
+#define g_message_event_flags D_8013CE00
+
 extern TextBoxLayer D_801C3E6C[];
+#define g_text_box_layers D_801C3E6C
 
 extern s32 D_801C3F18;
+#define g_message_active_box_index D_801C3F18
+
 extern s32 D_801C3F1C;
+#define g_message_text_offset D_801C3F1C
+
 extern s32 D_801C3F20;
+#define g_message_char_delay D_801C3F20
+
 extern s16 D_801C3F28;
+#define g_message_window_x D_801C3F28
+
 extern s16 D_801C3F2A;
+#define g_message_window_y D_801C3F2A
+
 extern u16 D_801C3F32;
+#define g_message_state_flags D_801C3F32
 
 void MessageInit(void);
 s32 MessageOpenTextBox(s32 box_index, s16 bank_id, s16 message_id);
