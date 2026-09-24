@@ -1,9 +1,7 @@
 #include "audio.h"
 
 #include "include_asm.h"
-
-extern void func_800266C0(void*, s32, s32, s32, s32);
-extern void func_800266F8(void*);
+#include "math.h"
 extern void func_800F2470(s32);
 extern void func_800F268C(s32, s32, s32);
 extern s32 func_800F2704(s32);
@@ -27,7 +25,7 @@ void AudioInit(s32 arg0) {
     g_audio_channels[i].channel_volume = 0;
     g_audio_voices[i].volume = 0;
     g_audio_channels[i].fade_speed = 0;
-    func_800266C0(&g_audio_channels[i].envelope, 0, 0, 0, 0);
+    InterpolateInit((Interpolator*)&g_audio_channels[i].envelope, 0, 0, 0, 0);
     i++;
   } while (i < 4);
 
@@ -65,7 +63,7 @@ void AudioUpdate(void) {
         func_800F5318(g_audio_channels[i].handle, g_audio_channels[i].fade_speed);
         g_audio_channels[i].flags &= ~4;
       }
-      func_800266F8(&g_audio_channels[i].envelope);
+      InterpolateUpdate((Interpolator*)&g_audio_channels[i].envelope);
       func_800F54C0(g_audio_channels[i].handle, g_audio_channels[i].volume);
       g_audio_channels[i].is_active = func_800F5404(g_audio_channels[i].handle);
       if (!g_audio_channels[i].is_active) {
@@ -104,7 +102,6 @@ void AudioUpdate(void) {
 }
 
 extern void func_800F2500(s32, s32);
-extern void func_800267A4(void*, s16, s16);
 extern void func_800F5130(s32, s32);
 
 void AudioSetMasterVolume(s32 arg0, s32 arg1) {
@@ -116,7 +113,7 @@ s32 AudioChannelInit(u16 channel, s32 arg1, s32 arg2) {
 
   if (channel < 4) {
     if (!(g_audio_channels[channel].flags & 1)) {
-      func_800266C0(&g_audio_channels[channel].envelope, 0, 0, 0, 0);
+      InterpolateInit((Interpolator*)&g_audio_channels[channel].envelope, 0, 0, 0, 0);
       result = 1;
       g_audio_channels[channel].master_volume = 0x80;
       g_audio_channels[channel].channel_volume = 0x80;
@@ -163,7 +160,7 @@ s32 AudioChannelSetPan(u16 channel, s32 arg1, s16 arg2) {
       arg1 = 0x100;
     }
     g_audio_channels[channel].tempo = arg1;
-    func_800267A4(&g_audio_channels[channel].envelope, arg2, (s16)arg1);
+    InterpolateStepInit((Interpolator*)&g_audio_channels[channel].envelope, arg2, (s16)arg1);
     result = 1;
   }
   return result;

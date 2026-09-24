@@ -45,6 +45,7 @@ c_flags:
   boot: ["-O0"]
   audio: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
   main: ["-O2", "-mips2", "-Wa,-O0"]
+  math: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
 
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:
@@ -78,7 +79,7 @@ segments:
       # As functions are decompiled into C, split this section into named C files:
       - [0x1050, c, boot]
       - [0x1190, c, main]
-      - [0x1AC0, asm, math]
+      - [0x1AC0, c, math]
       - [0x1CF0, asm, graphic]
       - [0x4400, c, dma]
       - [0x4570, c, display]

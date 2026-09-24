@@ -109,6 +109,13 @@ def find_function_in_c(game: str, func_name: str) -> tuple[Path, str]:
     src_dir = REPO_ROOT / "src" / "c" / game
     for cf in sorted(src_dir.glob("*.c")):
         content = cf.read_text(encoding="utf-8")
+        # First check for function definition: Type FuncName(...) {
+        if re.search(
+            r"^[A-Za-z0-9_*]+\s+[*]*\b" + re.escape(func_name) + r"\s*\([^;]*\)\s*\{",
+            content,
+            re.MULTILINE,
+        ):
+            return cf, func_name
         # Reverse alias: func_800XXXXX(...) __attribute__((alias("MyFunction")));
         rev_pattern = re.compile(
             r"\b" + re.escape(func_name) + r"\b[^\n;]*alias\([\"']([A-Za-z0-9_]+)[\"']\)"
@@ -122,8 +129,6 @@ def find_function_in_c(game: str, func_name: str) -> tuple[Path, str]:
         )
         m = alias_pattern.search(content)
         if m:
-            return cf, func_name
-        if re.search(r"\b" + re.escape(func_name) + r"\b\s*\(", content):
             return cf, func_name
     return None, func_name
 

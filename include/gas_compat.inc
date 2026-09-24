@@ -107,6 +107,42 @@
 
 /*
  * ==============================================================================
+ * 2b. Signed Remainder: `rem d, s, t` (C Modulo Operator `%` on signed integers)
+ * ==============================================================================
+ * PURPOSE:
+ *   When C code evaluates signed modulo (`a % b`), GCC 2.7.2 emits the
+ *   3-operand synthetic instruction `rem $d, $s, $t`.
+ *
+ * HISTORICAL DIFFERENCE:
+ *   Modern GAS emits division-by-zero checks before issuing `div`.
+ *   1996 SDK GAS issued `div $0, \s, \t` first, branched around `break 7` with a NOP,
+ *   checked for 32-bit overflow (-2147483648 % -1) with `break 6`, and added 2 NOPs
+ *   after `mfhi`.
+ */
+.macro rem d, s, t
+    .set noreorder
+    .set noat
+    div $0, \s, \t
+    bnez \t, .Lrem_nz_\@
+    nop
+    break 7
+.Lrem_nz_\@:
+    li $1, -1
+    bne \t, $1, .Lrem_end_\@
+    lui $1, 0x8000
+    bne \s, $1, .Lrem_end_\@
+    nop
+    break 6
+.Lrem_end_\@:
+    mfhi \d
+    nop
+    nop
+    .set at
+    .set reorder
+.endm
+
+/*
+ * ==============================================================================
  * 3. Signed Integer Division: `div d, s, t` (C Division Operator `/`)
  * ==============================================================================
  * PURPOSE:

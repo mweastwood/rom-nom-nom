@@ -77,6 +77,16 @@ MainCallback = 0x800265CC; // type:func
 MainStopThread = 0x80026604; // type:func
 MainShutdown = 0x80026624; // type:func
 
+// Math Functions
+InterpolateInit = 0x800266C0; // type:func
+InterpolateUpdate = 0x800266F8; // type:func
+InterpolateStepInit = 0x800267A4; // type:func
+InterpolateStep = 0x800267B4; // type:func
+InterpolateSetStep = 0x8002683C; // type:func
+InterpolateGetStep = 0x80026844; // type:func
+Abs16 = 0x80026850; // type:func
+RandomRange = 0x80026874; // type:func
+
 // Message Functions
 MessageInit = 0x80042F60; // type:func
 MessageOpenTextBox = 0x80042FEC; // type:func
