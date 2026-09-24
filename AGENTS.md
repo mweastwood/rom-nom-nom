@@ -29,8 +29,10 @@ This document establishes the architecture rules, coding standards, and step-by-
 | Command | Purpose |
 | :--- | :--- |
 | `bazel run //:progress` | Check overall `.text` executable code decompilation progress, compilation unit roadmap, and top recommended functions. |
-| `bazel run //:progress -- -m <module>` | Deep-dive breakdown of a module's functions, ROM ranges, sizes, and caller/callee dependencies (`DONE`, `READY`, `BLOCKED`). |
+| `bazel run //:progress -- -m <module>` | Deep-dive breakdown of a module's functions, structs, declared globals, and caller/callee dependencies (`DONE`, `READY`, `BLOCKED`). |
 | `bazel run //:progress -- -r` | List all unblocked leaf functions across the codebase ready for immediate decompilation. |
+| `bazel run //:progress -- -s` | Catalog all defined data structures (structs), field identification fidelity, and header migration status. |
+| `bazel run //:progress -- -g` | Catalog all declared global variables, types, and undeclared ROM data/BSS symbols. |
 | `bazel run //:progress -- --mermaid` | Generate a Mermaid DAG diagram visualizing inter-module dependency relationships. |
 | `bazel run //:progress -- --game <game>` | Target a specific game configuration (e.g. `harvest-moon-64`, `ogre-battle-64`). |
 | `bazel run //:m2c -- <func_name>` | Decompile a function from assembly to C using dynamic on-the-fly context. |
@@ -49,6 +51,8 @@ The progress tool provides clean-room, ROM-driven dependency analysis and projec
 - **Call Graph & Readiness Engine**: Analyzes MIPS `jal` branches across all functions to determine decompile order:
   - `READY`: Leaf functions whose dependencies are either already decompiled or are Libultra OS/hardware routines. Sorted ascending by size for fast, targeted progress.
   - `BLOCKED`: Functions waiting on other undecompiled functions, explicitly reporting `module:function` blockers.
+- **Data Structures (Structs) & Header Hygiene Auditing**: Scans module headers (`src/c/<game>/*.h`) and C sources (`src/c/<game>/*.c`) for `typedef struct` definitions. Measures reverse-engineering fidelity (named fields vs `unk_`/`pad` placeholders) and flags structs defined inside `.c` files that should be promoted to module headers.
+- **Global Variables & Data Symbol Accounting**: Catalogs all `.data`, `.rodata`, and `.bss` symbols from the ROM disassembly. Detects typed `extern` globals across headers and sources, tracks candidates for header migration, and cross-references global symbol accesses (`D_XXXXXXXX`) per module to identify untyped global dependencies.
 - **Automated Workflow Prioritization**: In-progress compilation units (modules with partial C implementations) are prioritized first, followed by modules with ready candidates.
 
 ---
@@ -98,6 +102,7 @@ bazel run //:m2c -- func_800266C0
    ```
    *** [MATCH 100%] N/N instructions match bit-exact! ***
    ```
+5. **Header File Hygiene**: Place struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files. Verify header completeness using `bazel run //:progress -- -m <module>` or `bazel run //:progress -- -s`.
 
 ### Step 4: Update Splat Segment Split (When File is Complete)
 When all functions in an assembly split range are decompiled into a C file:

@@ -172,6 +172,158 @@ def load_game_config(game: str):
     return game_info, subsegs, symbols
 
 
+def parse_data_symbols(game: str) -> dict[str, dict]:
+    """Parse all data, rodata, and bss symbols from disassembled assembly files."""
+    asm_dirs = [
+        REPO_ROOT / "bazel-bin" / "asm" / game / "data",
+        REPO_ROOT / "asm" / game / "data",
+    ]
+    d_dir = next((d for d in asm_dirs if d.exists()), None)
+    if not d_dir:
+        return {}
+
+    symbols = {}
+    for p in sorted(d_dir.glob("*.s")):
+        section = "bss" if "bss" in p.name else "data"
+        content = p.read_text(encoding="utf-8", errors="ignore")
+        for line in content.splitlines():
+            line = line.strip()
+            m_dl = re.match(r"^dlabel\s+([A-Za-z0-9_]+)", line)
+            if m_dl:
+                sname = m_dl.group(1)
+                symbols[sname] = {
+                    "name": sname,
+                    "section": section,
+                    "file": p.name,
+                }
+    return symbols
+
+
+def parse_c_declarations(game: str, modules: dict | None = None) -> tuple[list[dict], dict[str, dict]]:
+    """Parse struct definitions and global variable extern declarations from headers and C sources."""
+    src_dirs = [REPO_ROOT / "src" / "c" / game, REPO_ROOT / "src" / game]
+    s_dir = next((d for d in src_dirs if d.exists()), None)
+    if not s_dir:
+        return [], {}
+
+    structs = []
+    globals_map = {}
+
+    def get_file_module(file_name: str) -> str:
+        stem = Path(file_name).stem
+        if stem == "game_time":
+            return "time"
+        if modules and stem in modules:
+            return stem
+        m = re.match(r"^([A-Za-z0-9_]+)_segment_", stem)
+        if m and modules and m.group(1) in modules:
+            return m.group(1)
+        return stem
+
+    for p in sorted(s_dir.glob("*.[ch]")):
+        content = p.read_text(encoding="utf-8", errors="ignore")
+        content = re.sub(r"/\*.*?\*/", "", content, flags=re.S)
+        content = re.sub(r"//.*$", "", content, flags=re.M)
+        is_header = p.suffix == ".h"
+        mod_name = get_file_module(p.name)
+
+        # 1. Parse Struct Definitions
+        struct_pattern = re.compile(
+            r"(?:typedef\s+)?struct\s*([A-Za-z0-9_]*)\s*\{([^}]+)\}\s*([A-Za-z0-9_]*);",
+            re.S,
+        )
+        for m in struct_pattern.finditer(content):
+            tag = m.group(1).strip()
+            body = m.group(2).strip()
+            alias = m.group(3).strip()
+            sname = alias if alias else tag
+            if not sname:
+                continue
+
+            raw_fields = [f.strip() for f in body.split(";") if f.strip()]
+            fields = []
+            for rf in raw_fields:
+                is_unk = bool(re.search(r"\b(unk|pad)[0-9A-Za-z_]*\b", rf, re.I))
+                fields.append({"raw": rf, "is_unknown": is_unk})
+
+            named_cnt = sum(1 for f in fields if not f["is_unknown"])
+            structs.append({
+                "name": sname,
+                "tag": tag,
+                "alias": alias,
+                "file": p.name,
+                "module": mod_name,
+                "is_header": is_header,
+                "total_fields": len(fields),
+                "named_fields": named_cnt,
+                "unknown_fields": len(fields) - named_cnt,
+                "fields": fields,
+            })
+
+        # 2. Parse Extern Globals
+        # Function pointers: extern void (*D_801FD628)(void);
+        fn_ptr_pat = re.compile(
+            r"extern\s+([A-Za-z0-9_*\s]+?)\s*\(\s*\*\s*([A-Za-z0-9_]+)\s*\)\s*\([^;]*?\)\s*;",
+            re.M,
+        )
+        for m in fn_ptr_pat.finditer(content):
+            ret_type = m.group(1).strip()
+            sym_name = m.group(2).strip()
+            g_item = {
+                "name": sym_name,
+                "type": f"{ret_type} (*)(...)",
+                "file": p.name,
+                "module": mod_name,
+                "is_header": is_header,
+            }
+            if sym_name not in globals_map or is_header:
+                globals_map[sym_name] = g_item
+
+        # Variable declarations: extern [volatile] Type [*] name [array];
+        var_pat = re.compile(
+            r"extern\s+(?:const\s+|volatile\s+)?([A-Za-z0-9_*]+(?:\s*\*+)?)\s+([A-Za-z0-9_]+)(\s*\[[^;\]]*\])*\s*;",
+            re.M,
+        )
+        for m in var_pat.finditer(content):
+            raw_type = m.group(1).strip()
+            sym_name = m.group(2).strip()
+            arr = m.group(3) or ""
+            if "(" in raw_type or "(" in sym_name:
+                continue
+            g_item = {
+                "name": sym_name,
+                "type": f"{raw_type}{arr.strip()}",
+                "file": p.name,
+                "module": mod_name,
+                "is_header": is_header,
+            }
+            if sym_name not in globals_map or is_header:
+                globals_map[sym_name] = g_item
+
+    return structs, globals_map
+
+
+def get_module_data_refs(game: str, mod_name: str) -> set[str]:
+    """Find all global data/bss symbols (D_XXXXXXXX) referenced in a module's assembly and C files."""
+    paths = []
+    p1 = REPO_ROOT / "bazel-bin" / "asm" / game / f"{mod_name}.s"
+    if p1.exists():
+        paths.append(p1)
+    p2 = REPO_ROOT / "bazel-bin" / "asm" / game / "nonmatchings" / mod_name
+    if p2.exists():
+        paths.extend(p2.glob("*.s"))
+    p3 = REPO_ROOT / "src" / "c" / game / f"{mod_name}.c"
+    if p3.exists():
+        paths.append(p3)
+
+    refs = set()
+    for p in paths:
+        content = p.read_text(encoding="utf-8", errors="ignore")
+        for m in re.finditer(r"\b(D_[0-9A-Fa-f]{8})\b", content):
+            refs.add(m.group(1))
+    return refs
+
+
 def is_sdk_routine(callee: str, callee_vram: int | None = None, sdk_ranges: list | None = None) -> bool:
     """Check if callee is an N64 OS / Libultra / SDK function."""
     if (
@@ -556,7 +708,95 @@ def format_blocking_target(callee: str, all_funcs: dict, subsegs: list) -> str:
     return callee
 
 
-def print_module_detail(mod_name: str, modules: dict, all_funcs: dict, subsegs: list, game: str):
+def print_data_and_structs_summary(data_symbols: dict, structs: list, globals_map: dict):
+    """Print high-level statistics for global variables and data structures."""
+    if not data_symbols and not structs and not globals_map:
+        return
+
+    hdr_globals = sum(1 for g in globals_map.values() if g["is_header"])
+    src_globals = sum(1 for g in globals_map.values() if not g["is_header"])
+    total_data_syms = len(data_symbols)
+    total_data_cnt = sum(1 for s in data_symbols.values() if s["section"] == "data")
+    total_bss_cnt = sum(1 for s in data_symbols.values() if s["section"] == "bss")
+
+    hdr_structs = sum(1 for s in structs if s["is_header"])
+    src_structs = sum(1 for s in structs if not s["is_header"])
+    total_fields = sum(s["total_fields"] for s in structs)
+    named_fields = sum(s["named_fields"] for s in structs)
+    struct_fidelity = (named_fields / total_fields * 100.0) if total_fields else 0.0
+
+    print("\n=== Global Variables (.data & .bss) ===")
+    if total_data_syms > 0:
+        undeclared = max(0, total_data_syms - (hdr_globals + src_globals))
+        hdr_pct = (hdr_globals / total_data_syms * 100.0)
+        src_pct = (src_globals / total_data_syms * 100.0)
+        und_pct = (undeclared / total_data_syms * 100.0)
+        print(f"Total Global Symbols:       {total_data_syms:6,d} symbols (.data: {total_data_cnt:,}, .bss: {total_bss_cnt:,})")
+        print(f"Declared in C Headers:      {hdr_globals:6,d} symbols ({hdr_pct:5.1f}%)")
+        migration_note = "  [Candidates for header migration]" if src_globals > 0 else ""
+        print(f"Declared in C Sources:      {src_globals:6,d} symbols ({src_pct:5.1f}%){migration_note}")
+        print(f"Remaining in Assembly:      {undeclared:6,d} symbols ({und_pct:5.1f}%)")
+    else:
+        print(f"Declared in C Headers:      {hdr_globals:6,d} symbols")
+        print(f"Declared in C Sources:      {src_globals:6,d} symbols")
+
+    print("\n=== Data Structures (Structs) ===")
+    src_struct_note = f" ({hdr_structs} in headers, {src_structs} in C sources)" if src_structs > 0 else f" ({hdr_structs} in headers)"
+    print(f"Total Structs Defined:      {len(structs):6,d} structs{src_struct_note}")
+    if total_fields > 0:
+        print(f"Field Reverse-Engineering:  {named_fields:6,d} / {total_fields:,} named fields ({struct_fidelity:5.1f}% identified)")
+
+
+def print_structs_catalog(structs: list[dict]):
+    """Print full catalog of defined structs across the codebase."""
+    print("\n=== Data Structures Catalog ===")
+    if not structs:
+        print("No structs defined.")
+        return
+
+    hdr = f"{'STRUCT':24s} {'FILE':16s} {'MODULE':12s} {'FIELDS (NAMED/TOTAL)':22s} {'STATUS'}"
+    print(hdr)
+    print("-" * len(hdr))
+
+    for s in sorted(structs, key=lambda x: (0 if x["is_header"] else 1, x["name"])):
+        status = "In header" if s["is_header"] else f"MOVE TO {s['module']}.h"
+        f_str = f"{s['named_fields']:2d} / {s['total_fields']:2d}"
+        print(f"{s['name']:24s} {s['file']:16s} {s['module']:12s} {f_str:^22s} {status}")
+    print(f"\nTotal structs: {len(structs)}")
+
+
+def print_globals_catalog(globals_map: dict[str, dict], data_symbols: dict[str, dict]):
+    """Print full catalog of declared global variables."""
+    print("\n=== Declared Global Variables ===")
+    if not globals_map:
+        print("No globals declared.")
+        return
+
+    hdr = f"{'SYMBOL':22s} {'TYPE':28s} {'FILE':16s} {'MODULE':12s} {'LOCATION'}"
+    print(hdr)
+    print("-" * len(hdr))
+
+    for g in sorted(globals_map.values(), key=lambda x: (0 if x["is_header"] else 1, x["name"])):
+        loc = "header" if g["is_header"] else f"MOVE TO {g['module']}.h"
+        print(f"{g['name']:22s} {g['type']:28s} {g['file']:16s} {g['module']:12s} {loc}")
+
+    hdr_cnt = sum(1 for g in globals_map.values() if g["is_header"])
+    src_cnt = sum(1 for g in globals_map.values() if not g["is_header"])
+    print(f"\nTotal declared globals: {len(globals_map)} ({hdr_cnt} in headers, {src_cnt} in C sources needing migration)")
+    if data_symbols:
+        print(f"Total global data symbols in ROM: {len(data_symbols):,}")
+
+
+def print_module_detail(
+    mod_name: str,
+    modules: dict,
+    all_funcs: dict,
+    subsegs: list,
+    game: str,
+    structs: list | None = None,
+    globals_map: dict | None = None,
+    data_symbols: dict | None = None,
+):
     """Print full function-by-function breakdown for a specific module."""
     if mod_name not in modules:
         print(f"Error: Module '{mod_name}' not found.", file=sys.stderr)
@@ -601,11 +841,58 @@ def print_module_detail(mod_name: str, modules: dict, all_funcs: dict, subsegs: 
 
         print(f"{disp_name:28s} {r_range:21s} {size_str:>8s}  {status}")
 
+    # Structs section for this module
+    if structs is not None:
+        mod_structs = [s for s in structs if s["module"] == mod_name]
+        print("\nData Structures (Structs):")
+        if mod_structs:
+            hdr_s = f"  {'STRUCT':24s} {'FILE':16s} {'FIELDS (NAMED/TOTAL)':22s} {'STATUS'}"
+            print(hdr_s)
+            print("  " + "-" * (len(hdr_s) - 2))
+            for s in mod_structs:
+                status = "In header" if s["is_header"] else f"MOVE TO {mod_name}.h"
+                f_str = f"{s['named_fields']:2d} / {s['total_fields']:2d}"
+                print(f"  {s['name']:24s} {s['file']:16s} {f_str:^22s} {status}")
+        else:
+            print("  None defined.")
+
+    # Globals section for this module
+    if globals_map is not None:
+        mod_refs = get_module_data_refs(game, mod_name)
+        mod_hdr_globals = [g for g in globals_map.values() if g["module"] == mod_name and g["is_header"]]
+        mod_src_globals = [g for g in globals_map.values() if g["module"] == mod_name and not g["is_header"]]
+        undeclared_refs = sorted([r for r in mod_refs if r not in globals_map])
+
+        print("\nGlobal Variables:")
+        print(f"  Declared in Header ({len(mod_hdr_globals)}):")
+        if mod_hdr_globals:
+            for g in sorted(mod_hdr_globals, key=lambda x: x["name"])[:10]:
+                print(f"    {g['name']:20s} {g['type']}")
+            if len(mod_hdr_globals) > 10:
+                print(f"    ... and {len(mod_hdr_globals) - 10} more")
+        else:
+            print("    None declared in header.")
+
+        if mod_src_globals:
+            print(f"\n  Migration Candidates in Source ({len(mod_src_globals)} in {mod_name}.c -> move to {mod_name}.h):")
+            for g in sorted(mod_src_globals, key=lambda x: x["name"])[:10]:
+                print(f"    {g['name']:20s} {g['type']}")
+            if len(mod_src_globals) > 10:
+                print(f"    ... and {len(mod_src_globals) - 10} more")
+
+        if undeclared_refs:
+            print(f"\n  Referenced Undeclared Symbols in Assembly ({len(undeclared_refs)}):")
+            disp_refs = ", ".join(undeclared_refs[:8])
+            if len(undeclared_refs) > 8:
+                disp_refs += f", ... (+{len(undeclared_refs) - 8} more)"
+            print(f"    {disp_refs}")
+
     print("\nWorkflow Guidance:")
-    print(f"  1. Add C implementation:     src/c/{game}/{mod['name']}.c")
-    print(f"  2. Include module header:    #include \"{mod['name']}.h\"")
-    print("  3. Check bit-exact diff:     bazel run //:diff -- <func_name>")
-    print("  4. Generate C draft context: bazel run //:m2c -- <func_name>")
+    print(f"  1. Define structs & globals: src/c/{game}/{mod['name']}.h")
+    print(f"  2. Add C implementation:     src/c/{game}/{mod['name']}.c")
+    print(f"  3. Include module header:    #include \"{mod['name']}.h\"")
+    print("  4. Check bit-exact diff:     bazel run //:diff -- <func_name>")
+    print("  5. Generate C draft context: bazel run //:m2c -- <func_name>")
     print()
 
 
@@ -616,6 +903,12 @@ def main():
     parser.add_argument("--game", default="harvest-moon-64", help="Game identifier.")
     parser.add_argument("--module", "-m", help="Display detailed function breakdown for a specific module.")
     parser.add_argument("--ready", "-r", action="store_true", help="List all functions ready to decompile.")
+    parser.add_argument(
+        "--structs", "-s", action="store_true", help="List all defined structs and their header migration status."
+    )
+    parser.add_argument(
+        "--globals", "-g", action="store_true", help="List all declared and undeclared global variables."
+    )
     parser.add_argument("--mermaid", action="store_true", help="Output Mermaid dependency graph.")
     parser.add_argument("--quiet", action="store_true", help="Hide tables and show summary only.")
     args = parser.parse_args()
@@ -626,9 +919,21 @@ def main():
 
     all_funcs = parse_codebase_and_functions(args.game, subsegs, symbols)
     modules = group_by_logical_module(subsegs, all_funcs, args.game)
+    data_symbols = parse_data_symbols(args.game)
+    structs, globals_map = parse_c_declarations(args.game, modules)
+
+    if args.structs:
+        print_structs_catalog(structs)
+        return 0
+
+    if args.globals:
+        print_globals_catalog(globals_map, data_symbols)
+        return 0
 
     if args.module:
-        print_module_detail(args.module, modules, all_funcs, subsegs, args.game)
+        print_module_detail(
+            args.module, modules, all_funcs, subsegs, args.game, structs, globals_map, data_symbols
+        )
         return 0
 
     if args.mermaid:
@@ -653,6 +958,9 @@ def main():
     print()
     print("Overall .text Progress:")
     print(render_progress_bar(pct, 50))
+
+    if not args.quiet:
+        print_data_and_structs_summary(data_symbols, structs, globals_map)
 
     if args.ready:
         print("\n=== All Functions Ready to Decompile ===")
