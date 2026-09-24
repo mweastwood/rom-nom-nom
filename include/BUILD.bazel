@@ -1,0 +1,6 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "gas_compat",
+    srcs = ["gas_compat.inc"],
+)

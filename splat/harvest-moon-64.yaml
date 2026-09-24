@@ -37,15 +37,14 @@ options:
   # gfx_ucode: # one of [f3d, f3db, f3dex, f3dexb, f3dex2]
 
   generated_macro_inc_content: |
-    .macro move d, s
-        addu \d, \s, $0
-    .endm
+    .include "include/gas_compat.inc"
 
 # Compiler options for C decompilation
 c_flags:
   default: ["-O2", "-mips2", "-Wa,-O1"]
   boot: ["-O0"]
-  audio: ["-O2", "-mips2", "-Wa,-O0"]
+  audio: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
+  main: ["-O2", "-mips2", "-Wa,-O0"]
 
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:

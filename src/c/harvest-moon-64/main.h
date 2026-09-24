@@ -42,7 +42,7 @@ extern volatile u8 g_system_pause_flag;
 
 extern volatile u8 g_event_trigger_flag;
 
-extern u8 g_system_sub_state;
+extern volatile u8 g_system_sub_state;
 
 extern volatile u8 g_audio_enable_flag;
 
@@ -62,6 +62,18 @@ extern u8 g_system_flag_4b38;
 
 extern u16 g_vblank_counter;
 
+extern volatile s32 g_main_callback_arg;
+
+extern OSThread g_system_thread_1;
+
+extern OSThread g_system_thread_2;
+
+extern volatile u8 g_last_frame_count;
+
+extern volatile u8 g_last_scene_frame_count;
+
+extern volatile s8 g_frame_drop_flag;
+
 extern volatile u32 g_game_loop_callbacks[];
 
 /* --- Function Prototypes --- */
@@ -77,8 +89,13 @@ void NoOpCallback(void);
 void WaitVsyncFrames(u32 frame_count);
 void WaitForSystemReady(void);
 void UpdateFrameCounterAndTicks(s32 arg0);
+void UpdateGraphicTiming(s32 arg0);
+void UpdateFrameTiming(s32 arg0);
 
 void MainInit(void);
 void MainReset(void);
+void MainCallback(s32 arg0);
+void MainStopThread(void);
+void MainShutdown(void);
 
 #endif

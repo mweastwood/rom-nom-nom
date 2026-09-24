@@ -27,8 +27,10 @@ void func_8003B870(void);
 void func_800FBED0(void*);
 void func_800FBE90(void*);
 void func_800FBE50(void*);
-void func_800265CC(void);
-void func_80026624(void);
+void func_800FBF10(void);
+void func_800FBF30(void);
+void func_800FFB50(void*);
+void func_80100340(f32);
 void func_8004DEC8(void);
 void func_800FC030(void);
 void func_80029CC8(void);
@@ -42,9 +44,8 @@ void func_8002AE58(void);
 void func_80042634(void);
 void func_80110410(void);
 void func_8004CF68(void);
-void func_8004DF00(void);
-u8 func_800263B0(s32);
-void func_800264CC(s32);
+void func_80026A98(void);
+s32 func_800FFF30(s32);
 
 void mainproc(void* arg) {
   func_800FC000();
@@ -83,8 +84,8 @@ void MainInit(void) {
   func_8002DC70();
   func_8003B870();
   func_800FBED0(0);
-  func_800FBED0(func_800265CC);
-  func_800FBE90(func_80026624);
+  func_800FBED0(MainCallback);
+  func_800FBE90(MainShutdown);
   RegisterGameLoopCallback(0, (u32)NoOpCallback);
   SetCurrentGameLoopCallback(0);
   func_800FBE50(UpdateFrameCounterAndTicks);
@@ -228,8 +229,8 @@ void UpdateFrameCounterAndTicks(s32 arg0) {
   g_audio_tick_delta = arg0;
   g_main_loop_flags &= ~2;
   func_8004CF68();
-  func_800263B0(arg0);
-  func_800264CC(arg0);
+  UpdateGraphicTiming(arg0);
+  UpdateFrameTiming(arg0);
   if (g_tick_counter_60hz >= 60) {
     g_tick_counter_60hz = 0;
     g_main_loop_flags |= 2;
@@ -240,8 +241,71 @@ void UpdateFrameCounterAndTicks(s32 arg0) {
   g_anim_frame_counter++;
 }
 
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800263B0);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800264CC);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800265CC);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_80026604);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_80026624);
+void UpdateGraphicTiming(s32 arg0) {
+  if (g_tick_counter_60hz % (u32)g_system_sub_state == 0) {
+    if (g_tick_counter_60hz >= 60) {
+      g_last_scene_frame_count = g_scene_transition_flag;
+      g_scene_transition_flag = 0;
+      if (g_last_scene_frame_count < 60 / g_system_sub_state) {
+        g_frame_drop_flag = 2;
+      }
+    }
+    if (arg0 < 3) {
+      if (g_vsync_flag == 0) {
+        func_80026A98();
+        g_scene_transition_flag++;
+        g_anim_frame_counter = 0;
+      }
+    }
+  }
+}
+
+void UpdateFrameTiming(s32 arg0) {
+  if (g_tick_counter_60hz % (u32)g_audio_enable_flag == 0) {
+    if (g_tick_counter_60hz >= 60) {
+      g_last_frame_count = g_dialogue_state;
+      g_dialogue_state = 0;
+      if (g_last_frame_count < 60 / g_audio_enable_flag) {
+        g_frame_drop_flag = 1;
+      }
+    }
+    if (g_vsync_flag == 0) {
+      g_vsync_flag = 1;
+      g_fade_counter = 0;
+      g_dialogue_state++;
+    }
+  }
+}
+
+void MainCallback(s32 arg0) {
+  g_main_callback_arg = arg0;
+  func_800FBF10();
+  g_fade_direction = g_anim_frame_counter;
+}
+
+void MainStopThread(void) {
+  func_800FFF30(0);
+}
+
+void MainShutdown(void) {
+  OSThread* thread;
+
+  if (g_game_loop_callbacks[0] != 0) {
+    g_current_game_loop_index = 0;
+  }
+  func_800FBE50(0);
+  func_800FBF30();
+  func_800FC000();
+  thread = &g_system_thread_2;
+  func_800FFB50(thread);
+  func_800FFB50((void*)((u32)thread - 0x1B0));
+  {
+    f32 scale = 1.0f;
+    __asm__("nop" : : "f"(scale));
+    func_80100340(scale);
+  }
+  do {
+  } while (func_800FFF30(0) != 0);
+  while (1) {
+  }
+}

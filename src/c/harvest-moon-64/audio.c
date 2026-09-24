@@ -261,7 +261,26 @@ s32 AudioVoiceSetVolume(s32 arg0, s32 arg1) {
   return result;
 }
 
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/audio", func_8003D7C0);
+s32 AudioVoiceSetPitch(s32 arg0, s32 arg1) {
+  u16 i = 0;
+  s32 result = 0;
+
+  do {
+    if ((g_audio_voices[i].flags & 1) && g_audio_voices[i].sfx_id == arg0) {
+      g_audio_voices[i].pitch = arg1;
+      if ((f64)arg1 < kAudioMinPitch) {
+        g_audio_voices[i].pitch = -6;
+      }
+      result = 1;
+      if (kAudioMaxPitch < (f64)g_audio_voices[i].pitch) {
+        g_audio_voices[i].pitch = 6;
+      }
+    }
+    i++;
+  } while (i < 4);
+
+  return result;
+}
 
 s32 AudioVoiceSetPan(s32 arg0, s32 arg1) {
   u16 i = 0;

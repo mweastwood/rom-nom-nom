@@ -9,6 +9,7 @@ n64_game(
     symbols = "//symbols:harvest-moon-64",
     rom = "//roms:harvest-moon-64.z64",
     srcs = [
+        "//include:gas_compat",
         "//src/c/harvest-moon-64:srcs",
         "//src/cc/harvest-moon-64:srcs",
     ],
@@ -21,6 +22,7 @@ n64_game(
     symbols = "//symbols:ogre-battle-64",
     rom = "//roms:ogre-battle-64.z64",
     srcs = [
+        "//include:gas_compat",
         "//src/ogre-battle-64:srcs",
     ],
 )

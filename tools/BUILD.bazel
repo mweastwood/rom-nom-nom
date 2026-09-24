@@ -66,6 +66,9 @@ py_binary(
 py_binary(
     name = "diff",
     srcs = ["diff.py"],
+    deps = [
+        "@pip//pyyaml",
+    ],
     main = "diff.py",
 )
 
