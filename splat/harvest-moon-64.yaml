@@ -79,7 +79,6 @@ segments:
       # As functions are decompiled into C, split this section into named C files:
       - [0x1050, c, boot]
       - [0x1190, c, main]
-      - [0x17B0, asm]
       - [0x1AC0, asm]
       - [0x4400, c, dma]
       - [0x4570, c, display]
@@ -88,9 +87,7 @@ segments:
       - [0x16C70, asm]
       - [0x181C0, c, audio]
       - [0x18650, c, audio_channel]
-      - [0x18BC0, asm]
-      - [0x1E360, c, message]
-      - [0x1E830, asm]
+      - [0x18BC0, c, message]
       - [0x210B0, c, text_box]
       - [0x211E0, c, layer]
       - [0x21520, asm]

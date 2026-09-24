@@ -3,6 +3,7 @@
 #include "display.h"
 #include "dma.h"
 #include "game_time.h"
+#include "include_asm.h"
 #include "layer.h"
 #include "message.h"
 #include "types.h"
@@ -292,3 +293,9 @@ void UpdateFrameCounterAndTicks(s32 arg0) {
   D_801C3F71++;
 }
 void func_800262CC(s32) __attribute__((alias("UpdateFrameCounterAndTicks")));
+
+INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800263B0);
+INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800264CC);
+INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_800265CC);
+INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_80026604);
+INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/main", func_80026624);

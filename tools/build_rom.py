@@ -119,6 +119,8 @@ def compile_with_gcc_272(
         "0",
         *as_extra_flags,
         f"-I{asm_dir}",
+        f"-I{asm_dir.parent}",
+        f"-I{asm_dir.parent.parent}",
     ]
     if macro_inc.exists():
         as_cmd.append(str(macro_inc))

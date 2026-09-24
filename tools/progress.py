@@ -155,9 +155,6 @@ def load_game_config(game: str):
 
             if found_mod:
                 s["module"] = found_mod
-            elif i > 0 and subsegs[i - 1]["name"] in ("main", "message"):
-                # Contiguous asm tail of a partially decompiled C module (e.g. 17B0 in main, 1E830 in message)
-                s["module"] = subsegs[i - 1]["module"]
             elif len(subsegs) > 1 and i == len(subsegs) - 1 and len(re.findall(r"\bjal\s+os", content)) > 5:
                 # Trailing Libultra OS SDK section
                 s["module"] = "libultra"
@@ -300,8 +297,14 @@ def parse_codebase_and_functions(game: str, subsegs: list, symbols: dict):
 
     asm_funcs = {}
     if asm_dir:
-        for s_path in sorted(asm_dir.glob("*.s")):
-            if s_path.name.startswith("header") or s_path.name.startswith("1000") or s_path.parent.name == "data":
+        for s_path in sorted(asm_dir.rglob("*.s")):
+            if (
+                s_path.name.startswith("header")
+                or s_path.name.startswith("1000")
+                or "data" in s_path.parts
+                or s_path.name.endswith(".data.s")
+                or s_path.name.endswith(".bss.s")
+            ):
                 continue
 
             content = s_path.read_text(encoding="utf-8", errors="ignore")
@@ -337,22 +340,23 @@ def parse_codebase_and_functions(game: str, subsegs: list, symbols: dict):
 
                 m_end = re.match(r"^endlabel\s+([A-Za-z0-9_]+)", line_s)
                 if m_end and cur_func:
-                    end_rom = (last_rom + 4) if last_rom is not None else start_rom
-                    size = (end_rom - start_rom) if (start_rom is not None and end_rom is not None) else 0
-                    sub = find_subseg_by_rom(start_rom) if start_rom is not None else None
-                    fallback_mod = sub["module"] if sub else s_path.stem
-                    asm_funcs[cur_func] = {
-                        "name": cur_func,
-                        "c_name": None,
-                        "module": fallback_mod,
-                        "file": s_path.name,
-                        "vram": vram,
-                        "rom_start": start_rom,
-                        "rom_end": end_rom,
-                        "size": size,
-                        "is_decompiled": False,
-                        "calls": calls,
-                    }
+                    if cur_func not in decompiled_func_names:
+                        end_rom = (last_rom + 4) if last_rom is not None else start_rom
+                        size = (end_rom - start_rom) if (start_rom is not None and end_rom is not None) else 0
+                        sub = find_subseg_by_rom(start_rom) if start_rom is not None else None
+                        fallback_mod = sub["module"] if sub else (s_path.parent.name if s_path.parent.name != "asm" else s_path.stem)
+                        asm_funcs[cur_func] = {
+                            "name": cur_func,
+                            "c_name": None,
+                            "module": fallback_mod,
+                            "file": s_path.name,
+                            "vram": vram,
+                            "rom_start": start_rom,
+                            "rom_end": end_rom,
+                            "size": size,
+                            "is_decompiled": False,
+                            "calls": calls,
+                        }
                     cur_func = None
 
     all_funcs = {}
@@ -451,6 +455,12 @@ def group_by_logical_module(subsegs: list, all_funcs: dict, game: str):
             modules[m_name]["total_funcs"] += 1
             if finfo["is_decompiled"]:
                 modules[m_name]["decompiled_funcs"] += 1
+            else:
+                sub_name = finfo.get("subseg")
+                for s in modules[m_name]["subsegments"]:
+                    if s["name"] == sub_name and s["type"] == "c":
+                        modules[m_name]["decompiled_bytes"] -= finfo["size"]
+                        break
 
             for callee in finfo["calls"]:
                 if callee.startswith("func_"):
@@ -625,8 +635,11 @@ def main():
         print(generate_mermaid_dag(modules))
         return 0
 
+    c_bytes = sum(m["decompiled_bytes"] for m in modules.values())
     total_bytes = game_info["total_text"]
-    c_bytes = game_info["c_bytes"]
+    asm_bytes = total_bytes - c_bytes
+    game_info["c_bytes"] = c_bytes
+    game_info["asm_bytes"] = asm_bytes
     pct = (c_bytes / total_bytes * 100.0) if total_bytes > 0 else 0.0
 
     total_funcs = len(all_funcs)
