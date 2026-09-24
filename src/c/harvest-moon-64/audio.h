@@ -35,6 +35,12 @@ extern AudioChannel D_801FB5D8[4];
 extern AudioVoice D_801FB690[4];
 #define g_audio_voices D_801FB690
 
+extern const f64 D_8011EE00;
+#define kAudioMinPitch D_8011EE00
+
+extern const f64 D_8011EE08;
+#define kAudioMaxPitch D_8011EE08
+
 void AudioInit(s32 arg0);
 void AudioUpdate(void);
 void AudioSetMasterVolume(s32 arg0, s32 arg1);
@@ -43,5 +49,15 @@ s32 AudioChannelSetup(u16 channel, s32 arg1, s32 arg2, s32 arg3, s32 arg4, s32 a
                       s32 arg7);
 s32 AudioChannelStop(u16 channel);
 s32 AudioChannelUpdateVolume(u16 channel, s32 arg1);
+s32 AudioChannelSetPan(u16 channel, s32 arg1, s16 arg2);
+s32 AudioChannelSetVolume(u16 channel, s32 volume);
+s32 AudioChannelSetPitch(u16 channel, s32 pitch);
+void AudioCommandSend(s32 arg0);
+s32 AudioVoiceAllocate(s32 arg0);
+s32 AudioVoiceStop(s32 arg0);
+s32 AudioVoiceSetVolume(s32 arg0, s32 arg1);
+s32 AudioVoiceSetPitch(s32 arg0, s32 arg1);
+s32 AudioVoiceSetPan(s32 arg0, s32 arg1);
+void AudioCommandReset(void);
 
 #endif

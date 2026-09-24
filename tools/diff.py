@@ -109,8 +109,13 @@ def find_function_in_c(game: str, func_name: str) -> tuple[Path, str]:
     src_dir = REPO_ROOT / "src" / "c" / game
     for cf in sorted(src_dir.glob("*.c")):
         content = cf.read_text(encoding="utf-8")
-        if re.search(r"\b" + re.escape(func_name) + r"\b\s*\(", content):
-            return cf, func_name
+        # Reverse alias: func_800XXXXX(...) __attribute__((alias("MyFunction")));
+        rev_pattern = re.compile(
+            r"\b" + re.escape(func_name) + r"\b[^\n;]*alias\([\"']([A-Za-z0-9_]+)[\"']\)"
+        )
+        rev = rev_pattern.search(content)
+        if rev:
+            return cf, rev.group(1)
         # Check alias declarations
         alias_pattern = re.compile(
             r"\b([A-Za-z0-9_]+)\b[^\n;]*alias\([\"']" + re.escape(func_name) + r"[\"']\)"
@@ -118,13 +123,8 @@ def find_function_in_c(game: str, func_name: str) -> tuple[Path, str]:
         m = alias_pattern.search(content)
         if m:
             return cf, func_name
-        # Reverse alias
-        rev_pattern = re.compile(
-            r"\b" + re.escape(func_name) + r"\b[^\n;]*alias\([\"']([A-Za-z0-9_]+)[\"']\)"
-        )
-        rev = rev_pattern.search(content)
-        if rev:
-            return cf, rev.group(1)
+        if re.search(r"\b" + re.escape(func_name) + r"\b\s*\(", content):
+            return cf, func_name
     return None, func_name
 
 
@@ -160,7 +160,7 @@ def disassemble_target_from_rom(rom_path: Path, rom_offset: int, size: int):
     objdump = find_tool("mips-linux-gnu-objdump")
     try:
         res = subprocess.run(
-            [objdump, "-b", "binary", "-m", "mips:4300", "-EB", "-D", str(temp_bin)],
+            [objdump, "-b", "binary", "-m", "mips:4300", "-EB", "-Dz", str(temp_bin)],
             capture_output=True,
             text=True,
             check=True,
@@ -174,6 +174,25 @@ def disassemble_target_from_rom(rom_path: Path, rom_offset: int, size: int):
         return instructions
     finally:
         temp_bin.unlink(missing_ok=True)
+
+
+def load_c_flags(game: str, stem: str) -> tuple[list[str], list[str]]:
+    """Load compiler and assembler flags for a specific C file from splat config."""
+    yaml_path = REPO_ROOT / "splat" / f"{game}.yaml"
+    opt_flags = ["-O2", "-mips2", "-Wa,-O1"]
+    if yaml_path.exists():
+        try:
+            import yaml
+            cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            c_flags = cfg.get("c_flags", {})
+            opt_flags = c_flags.get(stem, c_flags.get("default", opt_flags))
+        except Exception:
+            pass
+    gcc_flags = [f for f in opt_flags if not f.startswith("-Wa,")]
+    as_flags = [f[4:] for f in opt_flags if f.startswith("-Wa,")]
+    if not as_flags:
+        as_flags = ["-O1"]
+    return gcc_flags, as_flags
 
 
 def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: dict[str, int]):
@@ -190,6 +209,8 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
     if not asm_dir.exists():
         asm_dir = REPO_ROOT / "asm" / game
 
+    gcc_flags, as_flags = load_c_flags(game, c_file.stem)
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         temp_s = tmp_path / "temp.s"
@@ -201,11 +222,11 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             "-x",
             "c",
             "-S",
-            "-O2",
-            "-mips2",
+            *gcc_flags,
             "-G",
             "0",
             f"-I{REPO_ROOT}",
+            f"-I{REPO_ROOT / 'bazel-bin'}",
             f"-I{asm_dir}",
             f"-I{REPO_ROOT / 'src' / 'c' / game}",
             str(c_file),
@@ -217,6 +238,7 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             print(f"Compilation error:\n{res.stderr}", file=sys.stderr)
             return []
 
+        macro_inc = asm_dir / "macro.inc"
         as_cmd = [
             as_bin,
             "-march=vr4300",
@@ -224,12 +246,16 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             "-EB",
             "-G",
             "0",
-            "-O1",
+            *as_flags,
+            f"-I{REPO_ROOT}",
+            f"-I{REPO_ROOT / 'bazel-bin'}",
             f"-I{asm_dir}",
-            str(temp_s),
-            "-o",
-            str(temp_o),
+            f"-I{asm_dir.parent}",
+            f"-I{asm_dir.parent.parent}",
         ]
+        if macro_inc.exists():
+            as_cmd.append(str(macro_inc))
+        as_cmd.extend([str(temp_s), "-o", str(temp_o)])
         res = subprocess.run(as_cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if res.returncode != 0:
             print(f"Assembler error:\n{res.stderr}", file=sys.stderr)
@@ -304,13 +330,14 @@ def normalize_instruction(instr: str) -> str:
 
     # Branch target label normalization:
     # 1. With offset: e.g. "beqz v0,4c0 <MessageClipSpan+0x18>" -> "beqz v0,0x18"
+    #                      "bc1f a94 <AudioVoiceSetPitch+0x94>" -> "bc1f 0x94"
     instr = re.sub(
-        r",\s*[0-9a-fA-F]+\s*<[^>]*\+0x([0-9a-fA-F]+)>",
-        lambda m: f",0x{int(m.group(1), 16):x}",
+        r"([,\s])[0-9a-fA-F]+\s*<[^>]*\+0x([0-9a-fA-F]+)>",
+        lambda m: f"{m.group(1)}0x{int(m.group(2), 16):x}",
         instr,
     )
     # 2. To function entry: e.g. "bnez v0,4a8 <MessageClipSpan>" -> "bnez v0,0x0"
-    instr = re.sub(r",\s*[0-9a-fA-F]+\s*<[A-Za-z0-9_]+>", ",0x0", instr)
+    instr = re.sub(r"([,\s])[0-9a-fA-F]+\s*<[A-Za-z0-9_]+>", r"\g<1>0x0", instr)
     # 3. Plain hex address: e.g. "beqz v0,0x18"
     instr = re.sub(r",\s*0x([0-9a-fA-F]+)", lambda m: f",0x{int(m.group(1), 16):x}", instr)
     return instr

@@ -88,7 +88,7 @@ def find_function_asm(game: str, func_name: str) -> tuple[Path, str]:
     for d in asm_dirs:
         if not d.exists():
             continue
-        for sf in sorted(d.glob("*.s")):
+        for sf in sorted(d.rglob("*.s")):
             content = sf.read_text(encoding="utf-8")
             if pattern.search(content):
                 return sf, content

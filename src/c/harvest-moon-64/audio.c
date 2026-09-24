@@ -275,5 +275,30 @@ s32 AudioVoiceSetVolume(s32 arg0, s32 arg1) {
 s32 func_8003D718(s32 arg0, s32 arg1) __attribute__((alias("AudioVoiceSetVolume")));
 
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/audio", func_8003D7C0);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/audio", func_8003D8A0);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/audio", func_8003D948);
+
+s32 AudioVoiceSetPan(s32 arg0, s32 arg1) {
+  u16 i = 0;
+  s32 result = 0;
+
+  do {
+    if ((D_801FB690[i].flags & 1) && D_801FB690[i].sfx_id == arg0) {
+      D_801FB690[i].pan = arg1;
+      if (arg1 < 0) {
+        D_801FB690[i].pan = 0;
+      }
+      result = 1;
+      if (D_801FB690[i].pan >= 0x101) {
+        D_801FB690[i].pan = 0x100;
+      }
+    }
+    i++;
+  } while (i < 4);
+
+  return result;
+}
+s32 func_8003D8A0(s32 arg0, s32 arg1) __attribute__((alias("AudioVoiceSetPan")));
+
+void AudioCommandReset(void) {
+  func_800F5130(1, 0);
+}
+void func_8003D948(void) __attribute__((alias("AudioCommandReset")));
