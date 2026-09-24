@@ -45,6 +45,7 @@ options:
 c_flags:
   default: ["-O2", "-mips2", "-Wa,-O1"]
   boot: ["-O0"]
+  audio: ["-O2", "-mips2", "-Wa,-O0"]
 
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:
@@ -78,11 +79,24 @@ segments:
       # As functions are decompiled into C, split this section into named C files:
       - [0x1050, c, boot]
       - [0x1190, c, main]
-      - [0x13F0, asm]
+      - [0x13F0, c, main_loop]
+      - [0x17B0, asm]
       - [0x1AC0, asm]
+      - [0x4400, c, dma]
+      - [0x4570, c, display]
+      - [0x47C0, asm]
+      - [0x181C0, c, audio]
+      - [0x18650, c, audio_channel]
+      - [0x18BC0, asm]
       - [0x1E360, c, message]
       - [0x1E830, asm]
-      - [0x211E0, asm]
+      - [0x210B0, c, text_box]
+      - [0x211E0, c, layer]
+      - [0x21520, asm]
+
+
+      - [0xB3020, c, time]
+      - [0xB3940, asm]
       # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0xEBE10, data]
       # Uninitialized memory (.bss section zeroed on boot)
