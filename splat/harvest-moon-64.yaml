@@ -79,7 +79,6 @@ segments:
       # As functions are decompiled into C, split this section into named C files:
       - [0x1050, c, boot]
       - [0x1190, c, main]
-      - [0x13F0, c, main_loop]
       - [0x17B0, asm]
       - [0x1AC0, asm]
       - [0x4400, c, dma]
