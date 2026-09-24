@@ -4,27 +4,27 @@
 #include "types.h"
 
 typedef struct {
-  u32 unk_0;
-  u32 unk_4;
-  u32 unk_8;
-  u32 unk_C;
-  u32 unk_10;
-  u32 unk_14;
-  u32 unk_18;
-  u32 unk_1C;
-  u32 unk_20;
-  u16 unk_24;
-  u8 unk_26;
-  u8 unk_27;
-  f32 unk_28;
-  f32 unk_2C;
-  f32 unk_30;
-  u32 unk_34;
-  u16 unk_38;
-  u32 unk_3A : 8;
-  u32 pad_3b : 8;
+  u32 param_0;
+  u32 param_1;
+  u32 param_2;
+  u32 param_3;
+  u32 param_4;
+  u32 param_5;
+  u32 param_6;
+  u32 param_7;
+  u32 param_8;
+  u16 frame_index;
+  u8 alpha;
+  u8 blend_mode;
+  f32 scale_x;
+  f32 scale_y;
+  f32 scale_z;
+  u32 callback;
+  u16 base_index;
+  u32 offset_index : 8;
+  u32 reserved_bits : 8;
   u16 flags;
-  u16 pad_3e;
+  u16 reserved;
 } LayerEntry;
 
 extern LayerEntry D_80189A50[16];

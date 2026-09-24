@@ -4,28 +4,28 @@
 #include "types.h"
 
 typedef struct {
-  s32 unk_00;
-  s32 unk_04;
-  u8 unk_08[8];
-  s32 unk_10;
-  s32 unk_14;
-  s32 unk_18;
-  s32 unk_1C;
-  s32 unk_20;
-  s32 unk_24;
-  u8 pad_28;
-  u8 unk_29;
+  s32 sequence_start;
+  s32 sequence_end;
+  u8 envelope[8];
+  s32 volume;
+  s32 tempo;
+  s32 handle;
+  s32 master_volume;
+  s32 channel_volume;
+  s32 fade_speed;
+  u8 is_active;
+  u8 priority;
   u16 flags;
 } AudioChannel;
 
 typedef struct {
-  s32 unk_00;
-  s32 unk_04;
-  s32 unk_08;
-  s32 unk_0C;
-  s32 unk_10;
-  u8 pad_14;
-  u8 unk_15;
+  s32 sfx_id;
+  s32 handle;
+  s32 pitch;
+  s32 pan;
+  s32 volume;
+  u8 is_active;
+  u8 priority;
   u16 flags;
 } AudioVoice;
 

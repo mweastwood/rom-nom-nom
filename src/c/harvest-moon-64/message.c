@@ -56,8 +56,8 @@ void MessageInit(void) {
   u16 i;
 
   for (i = 0; i < 1; i++) {
-    D_801C3F00[i].unk_24 = 0;
-    D_801C3F00[i].unk_26 = 0;
+    D_801C3F00[i].pos_x = 0;
+    D_801C3F00[i].pos_y = 0;
     D_801C3F00[i].bank_id = 0;
     D_801C3F00[i].r = 0xFF;
     D_801C3F00[i].g = 0xFF;
@@ -104,16 +104,6 @@ s32 func_80043050(u16 index, s16 bank_id, s16 message_count, s32 rom_start, s32 
                   s32 ram_start, s32 ram_end, s32 flags)
     __attribute__((alias("MessageRegisterBank")));
 
-typedef struct {
-  void* ptr;
-  s32 max_value;
-  u8 type;
-  u8 pad[3];
-} MessageVariable;
-
-extern MessageVariable D_8013CE08[];
-extern u32* D_8013CE00;
-
 s32 MessageRegisterVariable(u16 index, void* ptr, u8 type, s32 max_value) {
   s32 ret = 0;
 
@@ -149,27 +139,6 @@ s32 MessageSetTextColor(s32 box_index, s32 r, s32 g, s32 b) {
 }
 s32 func_80043148(s32 box_index, s32 r, s32 g, s32 b) __attribute__((alias("MessageSetTextColor")));
 
-typedef struct {
-  void* unk_00;
-  void* unk_04;
-  void* unk_08;
-  void* unk_0C;
-  void* unk_10;
-  void* unk_14;
-  void* unk_18;
-  void* unk_1C;
-  void* unk_20;
-  f32 scale_x;
-  f32 scale_y;
-  f32 scale_z;
-  u16 font_or_tex_id;
-  u16 unk_32;
-  u8 unk_34;
-  u8 pad[3];
-} TextBoxLayer;
-
-extern TextBoxLayer D_801C3E6C[];
-
 s32 MessageSetBoxBackgroundLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* arg3,
                                  void* arg4, void* arg5, void* arg6, void* arg7, void* arg8,
                                  void* arg9, void* arg10, u16 arg11, u8 arg12, f32 scale_x,
@@ -178,18 +147,18 @@ s32 MessageSetBoxBackgroundLayer(s32 box_index, u16 font_or_tex_id, void* arg2, 
 
   if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
-    D_801C3E6C[0].unk_00 = arg2;
-    D_801C3E6C[0].unk_04 = arg3;
-    D_801C3E6C[0].unk_08 = arg4;
-    D_801C3E6C[0].unk_0C = arg5;
-    D_801C3E6C[0].unk_10 = arg6;
-    D_801C3E6C[0].unk_14 = arg7;
-    D_801C3E6C[0].unk_18 = arg8;
-    D_801C3E6C[0].unk_1C = arg9;
-    D_801C3E6C[0].unk_20 = arg10;
+    D_801C3E6C[0].buffer_0 = arg2;
+    D_801C3E6C[0].buffer_1 = arg3;
+    D_801C3E6C[0].buffer_2 = arg4;
+    D_801C3E6C[0].buffer_3 = arg5;
+    D_801C3E6C[0].buffer_4 = arg6;
+    D_801C3E6C[0].buffer_5 = arg7;
+    D_801C3E6C[0].buffer_6 = arg8;
+    D_801C3E6C[0].buffer_7 = arg9;
+    D_801C3E6C[0].buffer_8 = arg10;
     D_801C3E6C[0].font_or_tex_id = font_or_tex_id;
-    D_801C3E6C[0].unk_32 = arg11;
-    D_801C3E6C[0].unk_34 = arg12;
+    D_801C3E6C[0].attribute = arg11;
+    D_801C3E6C[0].priority = arg12;
     D_801C3E6C[0].scale_x = scale_x;
     D_801C3E6C[0].scale_y = scale_y;
     D_801C3E6C[0].scale_z = scale_z;
@@ -208,18 +177,18 @@ s32 MessageSetBoxTextLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void* 
 
   if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
-    D_801C3E6C[1].unk_00 = arg2;
-    D_801C3E6C[1].unk_04 = arg3;
-    D_801C3E6C[1].unk_08 = arg4;
-    D_801C3E6C[1].unk_0C = arg5;
-    D_801C3E6C[1].unk_10 = arg6;
-    D_801C3E6C[1].unk_14 = arg7;
-    D_801C3E6C[1].unk_18 = arg8;
-    D_801C3E6C[1].unk_1C = arg9;
-    D_801C3E6C[1].unk_20 = arg10;
+    D_801C3E6C[1].buffer_0 = arg2;
+    D_801C3E6C[1].buffer_1 = arg3;
+    D_801C3E6C[1].buffer_2 = arg4;
+    D_801C3E6C[1].buffer_3 = arg5;
+    D_801C3E6C[1].buffer_4 = arg6;
+    D_801C3E6C[1].buffer_5 = arg7;
+    D_801C3E6C[1].buffer_6 = arg8;
+    D_801C3E6C[1].buffer_7 = arg9;
+    D_801C3E6C[1].buffer_8 = arg10;
     D_801C3E6C[1].font_or_tex_id = font_or_tex_id;
-    D_801C3E6C[1].unk_32 = arg11;
-    D_801C3E6C[1].unk_34 = arg12;
+    D_801C3E6C[1].attribute = arg11;
+    D_801C3E6C[1].priority = arg12;
     D_801C3E6C[1].scale_x = scale_x;
     D_801C3E6C[1].scale_y = scale_y;
     D_801C3E6C[1].scale_z = scale_z;
@@ -239,18 +208,18 @@ s32 MessageSetBoxPromptLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void
 
   if (!(box_index & 0xFFFF) && (D_801C3F32 & 1)) {
     ret = 1;
-    D_801C3E6C[2].unk_00 = arg2;
-    D_801C3E6C[2].unk_04 = arg3;
-    D_801C3E6C[2].unk_08 = arg4;
-    D_801C3E6C[2].unk_0C = arg5;
-    D_801C3E6C[2].unk_10 = arg6;
-    D_801C3E6C[2].unk_14 = arg7;
-    D_801C3E6C[2].unk_18 = arg8;
-    D_801C3E6C[2].unk_1C = arg9;
-    D_801C3E6C[2].unk_20 = arg10;
+    D_801C3E6C[2].buffer_0 = arg2;
+    D_801C3E6C[2].buffer_1 = arg3;
+    D_801C3E6C[2].buffer_2 = arg4;
+    D_801C3E6C[2].buffer_3 = arg5;
+    D_801C3E6C[2].buffer_4 = arg6;
+    D_801C3E6C[2].buffer_5 = arg7;
+    D_801C3E6C[2].buffer_6 = arg8;
+    D_801C3E6C[2].buffer_7 = arg9;
+    D_801C3E6C[2].buffer_8 = arg10;
     D_801C3E6C[2].font_or_tex_id = font_or_tex_id;
-    D_801C3E6C[2].unk_32 = arg11;
-    D_801C3E6C[2].unk_34 = arg12;
+    D_801C3E6C[2].attribute = arg11;
+    D_801C3E6C[2].priority = arg12;
     D_801C3E6C[2].scale_x = scale_x;
     D_801C3E6C[2].scale_y = scale_y;
     D_801C3E6C[2].scale_z = scale_z;

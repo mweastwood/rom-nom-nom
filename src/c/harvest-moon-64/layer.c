@@ -5,7 +5,7 @@
 void LayerInit(void) {
   u16 i = 0;
   do {
-    D_80189A50[i].unk_38 = 0;
+    D_80189A50[i].base_index = 0;
     D_80189A50[i].flags = 0;
     i++;
   } while (i < 16);
@@ -21,22 +21,22 @@ s32 LayerSet(u16 index, s16 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u32 ar
   if (index < 16) {
     if (!(D_80189A50[index].flags & 1)) {
       success = 1;
-      D_80189A50[index].unk_0 = arg2;
-      D_80189A50[index].unk_4 = arg3;
-      D_80189A50[index].unk_8 = arg4;
-      D_80189A50[index].unk_C = arg5;
-      D_80189A50[index].unk_10 = arg6;
-      D_80189A50[index].unk_14 = arg7;
-      D_80189A50[index].unk_18 = arg8;
-      D_80189A50[index].unk_1C = arg9;
-      D_80189A50[index].unk_20 = arg10;
-      D_80189A50[index].unk_24 = arg11;
-      D_80189A50[index].unk_26 = arg12;
-      D_80189A50[index].unk_28 = arg13;
-      D_80189A50[index].unk_2C = arg14;
-      D_80189A50[index].unk_30 = arg15;
-      D_80189A50[index].unk_27 = arg16;
-      D_80189A50[index].unk_38 = arg1;
+      D_80189A50[index].param_0 = arg2;
+      D_80189A50[index].param_1 = arg3;
+      D_80189A50[index].param_2 = arg4;
+      D_80189A50[index].param_3 = arg5;
+      D_80189A50[index].param_4 = arg6;
+      D_80189A50[index].param_5 = arg7;
+      D_80189A50[index].param_6 = arg8;
+      D_80189A50[index].param_7 = arg9;
+      D_80189A50[index].param_8 = arg10;
+      D_80189A50[index].frame_index = arg11;
+      D_80189A50[index].alpha = arg12;
+      D_80189A50[index].scale_x = arg13;
+      D_80189A50[index].scale_y = arg14;
+      D_80189A50[index].scale_z = arg15;
+      D_80189A50[index].blend_mode = arg16;
+      D_80189A50[index].base_index = arg1;
       D_80189A50[index].flags = 1;
     }
   }
@@ -57,16 +57,16 @@ s32 LayerActivate(u16 index, u32 arg1, s8 arg2, u16 arg3) {
 
   if (index < 16) {
     if (D_80189A50[index].flags & 1) {
-      D_80189A50[index].unk_3A = arg2;
-      count = D_80189A50[index].unk_3A;
-      D_80189A50[index].unk_34 = arg1;
+      D_80189A50[index].offset_index = arg2;
+      count = D_80189A50[index].offset_index;
+      D_80189A50[index].callback = arg1;
       D_80189A50[index].flags |= 2;
       do {
-        func_8002B138(D_80189A50[index].unk_38 + count, D_80189A50[index].unk_0,
-                      D_80189A50[index].unk_4, D_80189A50[index].unk_8, D_80189A50[index].unk_C, 0,
-                      0, D_80189A50[index].unk_10, 0, D_80189A50[index].unk_14,
-                      D_80189A50[index].unk_18, D_80189A50[index].unk_1C, D_80189A50[index].unk_20,
-                      0, 0);
+        func_8002B138(D_80189A50[index].base_index + count, D_80189A50[index].param_0,
+                      D_80189A50[index].param_1, D_80189A50[index].param_2,
+                      D_80189A50[index].param_3, 0, 0, D_80189A50[index].param_4, 0,
+                      D_80189A50[index].param_5, D_80189A50[index].param_6,
+                      D_80189A50[index].param_7, D_80189A50[index].param_8, 0, 0);
       } while (count--);
       func_800461D8(index, 0xFF, 0xFF, 0xFF, 0xFF);
 

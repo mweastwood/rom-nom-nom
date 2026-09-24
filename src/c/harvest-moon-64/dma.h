@@ -8,7 +8,7 @@ typedef struct {
   u32 vram_addr;
   u32 size;
   u16 status;
-  u16 pad;
+  u16 reserved;
 } DmaRequest;
 
 extern DmaRequest D_80158268[40];

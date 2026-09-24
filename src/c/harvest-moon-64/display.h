@@ -4,11 +4,11 @@
 #include "types.h"
 
 typedef struct {
-  u32 unk_00[9];
-  u8 pad_24[0x168 - 0x24];
+  u32 transform[9];
+  u8 matrix_buffer[0x168 - 0x24];
   u32 dl;
   u16 flags;
-  u16 pad_16e;
+  u16 reserved;
 } RenderEntry;
 
 extern u8 D_80189135[9];
