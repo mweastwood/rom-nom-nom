@@ -27,7 +27,7 @@ else:
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.install_toolchain import GCC_272_DIR, get_gcc_272
+from tools.install_toolchain import GCC_272_DIR, get_gcc_272, get_kmc_as
 
 
 def compute_sha1(file_path: Path) -> str:
@@ -82,15 +82,18 @@ def compile_with_gcc_272(
     src_path: Path,
     target_obj: Path,
     asm_dir: Path,
-    as_bin: str,
     opt_flags: list,
     extra_includes: list,
 ):
     gcc_bin = get_gcc_272(require_installed=True)
+    kmc_as = get_kmc_as(require_installed=True)
     temp_s = target_obj.with_suffix(".s272")
 
     gcc_flags = [f for f in opt_flags if not f.startswith("-Wa,")]
-    as_extra_flags = [f[4:] for f in opt_flags if f.startswith("-Wa,")]
+    as_extra_flags = []
+    for f in opt_flags:
+        if f.startswith("-Wa,"):
+            as_extra_flags.extend(f[4:].split(","))
 
     cmd = [
         str(gcc_bin),
@@ -109,15 +112,22 @@ def compile_with_gcc_272(
     cmd.extend([str(src_path), "-o", str(temp_s)])
     subprocess.check_call(cmd, cwd=REPO_ROOT)
 
+    mips_isa = "-mips2" if "-mips2" in gcc_flags else "-mips3"
+    mcpu = next((f for f in gcc_flags if f.startswith("-mcpu=")), "-mcpu=vr4300")
+    if "-O0" in gcc_flags and not any(f.startswith("-O") or f == "-g" for f in as_extra_flags):
+        as_flags_norm = ["-O0"]
+    else:
+        as_flags_norm = list(as_extra_flags)
     macro_inc = asm_dir / "macro.inc"
     as_cmd = [
-        as_bin,
-        "-march=vr4300",
-        "-mabi=32",
+        str(kmc_as),
+        mcpu,
+        mips_isa,
         "-EB",
         "-G",
         "0",
-        *as_extra_flags,
+        "-N",
+        *as_flags_norm,
         f"-I{asm_dir}",
         f"-I{asm_dir.parent}",
         f"-I{asm_dir.parent.parent}",
@@ -217,7 +227,7 @@ def build_rom(
             if toolchain == "original":
                 c_flags_cfg = config_data.get("c_flags", {})
                 file_opt = c_flags_cfg.get(src_file.stem, c_flags_cfg.get("default", ["-O2", "-mips2", "-Wa,-O1"]))
-                compile_with_gcc_272(src_file, target_obj, asm_dir, as_bin, file_opt, extra_includes)
+                compile_with_gcc_272(src_file, target_obj, asm_dir, file_opt, extra_includes)
             else:
                 compiler = gpp_bin if cc_candidates else gcc_bin
                 cmd = [
@@ -343,15 +353,15 @@ def main():
 
     success = build_rom(
         game_name=args.game,
-        config_path=args.config,
-        symbols_path=args.symbols,
-        asm_dir=args.asm_dir,
-        build_dir=args.build_dir,
-        assets_dir=args.assets_dir,
-        out_elf=args.out_elf,
-        out_rom=args.out_rom,
+        config_path=args.config.resolve(),
+        symbols_path=args.symbols.resolve(),
+        asm_dir=args.asm_dir.resolve(),
+        build_dir=args.build_dir.resolve(),
+        assets_dir=args.assets_dir.resolve(),
+        out_elf=args.out_elf.resolve(),
+        out_rom=args.out_rom.resolve(),
         toolchain=args.toolchain,
-        verify_rom=args.verify_rom,
+        verify_rom=args.verify_rom.resolve() if args.verify_rom else None,
         is_test=args.test,
     )
     sys.exit(0 if success else 1)

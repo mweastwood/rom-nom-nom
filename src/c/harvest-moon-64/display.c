@@ -36,17 +36,14 @@ void RenderResetCount(void) {
 
 void RenderNoOp(void) {}
 
-void RenderAddEntry(u32 dl, u16 flags) {
-#ifdef __clang__
-  register u32 index = g_render_entry_count;
-#else
-  register u32 index asm("$2") = g_render_entry_count;
-#endif
+u32 RenderAddEntry(u32 dl, u16 flags) {
+  u32 index = g_render_entry_count;
   u16 next = index + 1;
   index &= 0xFFFF;
   g_render_entries[index].dl = dl;
   g_render_entries[index].flags = flags | 1;
   g_render_entry_count = next;
+  return index;
 }
 
 s32 RenderSetTranslation(s32 index, f32 x, f32 y, f32 z) {

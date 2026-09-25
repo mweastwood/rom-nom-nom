@@ -85,11 +85,7 @@ void AudioUpdate(void) {
         func_800F5318(g_audio_voices[j].handle, 0);
         g_audio_voices[j].flags &= ~4;
       }
-      {
-        f32 freq = (f32)g_audio_voices[j].pitch;
-        __asm__("nop" : : "r"(freq));
-        func_800F5664(g_audio_voices[j].handle, freq);
-      }
+      func_800F5664(g_audio_voices[j].handle, (f32)g_audio_voices[j].pitch);
       func_800F558C(g_audio_voices[j].handle, g_audio_voices[j].pan);
       func_800F54C0(g_audio_voices[j].handle, g_audio_voices[j].volume);
       g_audio_voices[j].is_active = func_800F5404(g_audio_voices[j].handle);

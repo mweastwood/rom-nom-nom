@@ -36,21 +36,19 @@ options:
   hardware_regs: True
   # gfx_ucode: # one of [f3d, f3db, f3dex, f3dexb, f3dex2]
 
-  generated_macro_inc_content: |
-    .include "include/gas_compat.inc"
-
 # Compiler options for C decompilation
 c_flags:
-  default: ["-O2", "-mips2", "-Wa,-O1"]
+  default: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]
   boot: ["-O0"]
-  audio: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
-  main: ["-O2", "-mips2", "-Wa,-O0"]
-  math: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
-  display: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1", "-Wa,--defsym=__R4000_FPU__=1"]
+  audio: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]
+  dma: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]
+  main: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]
+  math: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]
+  display: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]
   libultra_sinf: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
   libultra_gu_lookat: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
-  libultra_gu_mtx: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O1", "-Wa,--defsym=__C_COMPILED__=1"]
-  libultra_gu_ortho: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2", "-Wa,--defsym=__GU_ORTHO__=1"]
+  libultra_gu_mtx: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O1,-V"]
+  libultra_gu_ortho: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
   libultra_gu_scale: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
   libultra_gu_translate: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
 

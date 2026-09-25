@@ -234,7 +234,10 @@ def load_c_flags(game: str, stem: str) -> tuple[list[str], list[str]]:
         except Exception:
             pass
     gcc_flags = [f for f in opt_flags if not f.startswith("-Wa,")]
-    as_flags = [f[4:] for f in opt_flags if f.startswith("-Wa,")]
+    as_flags = []
+    for f in opt_flags:
+        if f.startswith("-Wa,"):
+            as_flags.extend(f[4:].split(","))
     if not as_flags:
         as_flags = ["-O1"]
     return gcc_flags, as_flags
@@ -247,7 +250,9 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
         print(f"Error: GCC 2.7.2 not found at {gcc_bin}", file=sys.stderr)
         return []
 
-    as_bin = find_tool("mips-linux-gnu-as")
+    kmc_as = REPO_ROOT / "toolchain" / "binutils-2.6" / "as"
+    if not kmc_as.exists():
+        kmc_as = gcc_bin.parent / "as"
     objdump_bin = find_tool("mips-linux-gnu-objdump")
 
     asm_dir = REPO_ROOT / "bazel-bin" / "asm" / game
@@ -283,25 +288,25 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             print(f"Compilation error:\n{res.stderr}", file=sys.stderr)
             return []
 
-        macro_inc = asm_dir / "macro.inc"
+        mips_isa = "-mips2" if "-mips2" in gcc_flags else "-mips3"
+        mcpu = next((f for f in gcc_flags if f.startswith("-mcpu=")), "-mcpu=vr4300")
+        if "-O0" in gcc_flags and not any(f.startswith("-O") or f == "-g" for f in as_flags):
+            as_flags_norm = ["-O0"]
+        else:
+            as_flags_norm = list(as_flags)
         as_cmd = [
-            as_bin,
-            "-march=vr4300",
-            "-mabi=32",
+            str(kmc_as),
+            mcpu,
+            mips_isa,
             "-EB",
             "-G",
             "0",
-            "-no-pad-sections",
-            *as_flags,
-            f"-I{REPO_ROOT}",
-            f"-I{REPO_ROOT / 'bazel-bin'}",
-            f"-I{asm_dir}",
-            f"-I{asm_dir.parent}",
-            f"-I{asm_dir.parent.parent}",
+            "-N",
+            *as_flags_norm,
+            str(temp_s),
+            "-o",
+            str(temp_o),
         ]
-        if macro_inc.exists():
-            as_cmd.append(str(macro_inc))
-        as_cmd.extend([str(temp_s), "-o", str(temp_o)])
         res = subprocess.run(as_cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if res.returncode != 0:
             print(f"Assembler error:\n{res.stderr}", file=sys.stderr)

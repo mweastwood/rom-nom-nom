@@ -13,5 +13,3 @@ void guTranslate(Mtx* m, f32 x, f32 y, f32 z) {
   guTranslateF(mf, x, y, z);
   guMtxF2L(mf, m);
 }
-
-__asm__(".align 4");

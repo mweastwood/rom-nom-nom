@@ -46,7 +46,7 @@ extern f32 g_camera_angles_prev[3];
 void RenderInit(void);
 void RenderResetCount(void);
 void RenderNoOp(void);
-void RenderAddEntry(u32 dl, u16 flags);
+u32 RenderAddEntry(u32 dl, u16 flags);
 s32 RenderSetTranslation(s32 index, f32 x, f32 y, f32 z);
 s32 RenderSetRotation(s32 index, f32 x, f32 y, f32 z);
 s32 RenderSetScale(s32 index, f32 x, f32 y, f32 z);

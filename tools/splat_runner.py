@@ -75,6 +75,13 @@ def main():
 
     split.main([tmp_config], modes=["all"], verbose=False, use_cache=False)
 
+    # Post-process generated macro.inc to strip directives unsupported by authentic 1996 GAS
+    macro_inc = args.out_asm / "macro.inc"
+    if macro_inc.exists():
+        lines = macro_inc.read_text(encoding="utf-8").splitlines(keepends=True)
+        filtered_lines = [l for l in lines if not l.strip().startswith(".internal")]
+        macro_inc.write_text("".join(filtered_lines), encoding="utf-8")
+
 
 if __name__ == "__main__":
     main()

@@ -299,11 +299,7 @@ void MainShutdown(void) {
   thread = &g_system_thread_2;
   func_800FFB50(thread);
   func_800FFB50((void*)((u32)thread - 0x1B0));
-  {
-    f32 scale = 1.0f;
-    __asm__("nop" : : "f"(scale));
-    func_80100340(scale);
-  }
+  func_80100340(1.0f);
   do {
   } while (func_800FFF30(0) != 0);
   while (1) {

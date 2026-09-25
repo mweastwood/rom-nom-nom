@@ -14,5 +14,3 @@ void guScale(Mtx* m, f32 x, f32 y, f32 z) {
   guScaleF(mf, x, y, z);
   guMtxF2L(mf, m);
 }
-
-__asm__(".align 4");
