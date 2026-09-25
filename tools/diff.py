@@ -397,6 +397,12 @@ def normalize_instruction(instr: str) -> str:
     instr = re.sub(r"\s*,\s*", ",", instr)
 
     # Branch target label normalization:
+    # 0. Objdump picking up _MACRO_INC_GUARD symbol instead of function label:
+    instr = re.sub(
+        r"([,\s])([0-9a-fA-F]+)\s*<_MACRO_INC_GUARD[^>]*>",
+        lambda m: f"{m.group(1)}0x{int(m.group(2), 16):x}",
+        instr,
+    )
     # 1. With offset: e.g. "beqz v0,4c0 <MessageClipSpan+0x18>" -> "beqz v0,0x18"
     #                      "bc1f a94 <AudioVoiceSetPitch+0x94>" -> "bc1f 0x94"
     instr = re.sub(

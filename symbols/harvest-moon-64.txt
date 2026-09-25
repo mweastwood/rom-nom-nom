@@ -92,6 +92,18 @@ Abs16 = 0x80026850; // type:func
 RandomRange = 0x80026874; // type:func
 SinDegrees = 0x800278F0; // type:func
 CosDegrees = 0x80027920; // type:func
+PlaneCalculateZ = 0x80027DC0; // type:func
+func_80027950 = 0x80027950; // type:func
+func_80027B74 = 0x80027B74; // type:func
+CameraSetEye = 0x80028D94; // type:func
+CameraSetAt = 0x80028DBC; // type:func
+CameraSetUp = 0x80028DD4; // type:func
+GraphicSetMode1 = 0x80028E14; // type:func
+GraphicSetMode2 = 0x80028E60; // type:func
+CameraSetRoll = 0x80028EA8; // type:func
+CameraSetAngles = 0x80028EB8; // type:func
+CameraAddAngles = 0x80028EF8; // type:func
+func_80028F44 = 0x80028F44; // type:func
 
 // Message Functions
 MessageInit = 0x80042F60; // type:func
@@ -157,6 +169,10 @@ g_main_thread = 0x80124370;
 g_idle_thread_stack = 0x80126520;
 g_main_thread_stack = 0x801C6220;
 g_idle_callback = 0x801FD628;
+
+// Graphic Global Symbols
+g_degrees_to_radians = 0x8011EC78;
+g_degrees_to_radians_cos = 0x8011EC80;
 
 // Display Global Symbols
 g_camera_angles_prev = 0x8013D5D8;
