@@ -100,7 +100,7 @@ segments:
       - [0x506C0, asm, farm]
       - [0x61370, asm, festival]
       - [0x77390, asm, asset]
-      - [0x87EB0, asm, sound]
+      - [0x87EB0, c, sound]
       - [0x88170, asm, schedule]
       - [0x8E0E0, asm, npc]
       - [0xB3020, c, time]

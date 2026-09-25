@@ -104,7 +104,7 @@ void AudioUpdate(void) {
 extern void func_800F2500(s32, s32);
 extern void func_800F5130(s32, s32);
 
-void AudioSetMasterVolume(s32 arg0, s32 arg1) {
+void AudioSetMasterVolume(s32 arg0, s32 arg1, s32 arg2) {
   func_800F2500(arg0, arg1 - arg0);
 }
 

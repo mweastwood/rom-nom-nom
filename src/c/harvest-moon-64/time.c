@@ -1,4 +1,5 @@
 #include "game_time.h"
+#include "sound.h"
 
 extern void func_8003FBD8(s32, u8, s32);
 extern void func_8005C07C(s32, s32);
@@ -12,9 +13,6 @@ extern void func_800661FC(s32, s32);
 extern void func_8006EA44(u8, u8, u8);
 extern s32 func_8006EC40(u8);
 extern void func_800A7AE8(u8);
-extern void func_800ACB5C(u16);
-extern s32 func_800ACBB8(u16);
-extern void func_800ACBEC(u16, s32);
 
 void TimeSleep(void);
 s32 TimeCheckFestival(void);
@@ -43,13 +41,14 @@ void TimeUpdate(void) {
   }
   if ((u32)(g_hour_of_day - 0x12) < 6U) {
     if (func_800650E0(0xF) == 0) {
-      func_800ACB5C(g_scene_id);
+      SoundFadeBgm(g_scene_id);
       flag = 0xF;
       goto call_flag;
     }
-    if ((func_800650E0(0x10) == 0) && (g_scene_id != 0xFF) && (func_800ACBB8(g_scene_id) & 0xFF)) {
+    if ((func_800650E0(0x10) == 0) && (g_scene_id != 0xFF) &&
+        (SoundIsBgmStopped(g_scene_id) & 0xFF)) {
       func_8006EA44(g_weather, g_season, g_hour_of_day);
-      func_800ACBEC(g_scene_id, g_time_ticks);
+      SoundSetBgmPan(g_scene_id, g_time_ticks);
       flag = 0x10;
     call_flag:
       func_80065074(flag);
@@ -57,7 +56,7 @@ void TimeUpdate(void) {
   }
   if ((g_hour_of_day < 6U) && (g_indoor_flag != 2) && (g_weather != 9) &&
       (func_800650E0(0x11) == 0)) {
-    func_800ACB5C(g_scene_id);
+    SoundFadeBgm(g_scene_id);
     func_80065074(0x11);
   }
   func_800A7AE8(g_weather);

@@ -115,6 +115,18 @@ TimeSleep = 0x800D81A8; // type:func
 TimeCheckFestival = 0x800D820C; // type:func
 TimeUpdateSeason = 0x800D835C; // type:func
 TimeSetSeasonName = 0x800D83F8; // type:func
+
+// Sound Functions
+SoundSetMasterVolume = 0x800ACAB0; // type:func
+SoundPlayBgm = 0x800ACB04; // type:func
+SoundFadeBgm = 0x800ACB5C; // type:func
+SoundStopBgm = 0x800ACB8C; // type:func
+SoundIsBgmStopped = 0x800ACBB8; // type:func
+SoundSetBgmPan = 0x800ACBEC; // type:func
+SoundFadeOutBgm = 0x800ACC1C; // type:func
+SoundPlayEffect = 0x800ACC50; // type:func
+SoundAreVoicesInactive = 0x800ACD18; // type:func
+
 // Audio Global Symbols
 kAudioMinPitch = 0x8011EE00;
 kAudioMaxPitch = 0x8011EE08;
@@ -134,6 +146,13 @@ g_camera_angles = 0x8017044C;
 g_display_matrices = 0x80189135;
 g_render_entry_count = 0x8018A05A;
 g_render_entries = 0x8018A850;
+
+// Sound Global Symbols
+g_sound_volume_settings = 0x801162F0;
+g_sound_bgm_sequences = 0x801162FC;
+g_sound_sfx_sequences = 0x801164FC;
+g_sound_sfx_channels = 0x801168FC;
+g_sound_sfx_params = 0x80116A7C;
 
 // Dma Global Symbols
 g_dma_requests = 0x80158268;
