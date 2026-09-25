@@ -102,6 +102,9 @@ s32 MessageSetBoxPromptLayer(s32 box_index, u16 font_or_tex_id, void* arg2, void
                              void* arg10, u16 arg11, u8 arg12, f32 scale_x, f32 scale_y,
                              f32 scale_z);
 s32 MessageClipSpan(s32 pos, s32 size, s32 limit);
+void MessageSetEventFlag(u16 flag_index);
+void MessageClearEventFlag(u16 flag_index);
+u32 MessageGetEventFlag(u16 flag_index);
 void TextBoxUpdate(void);
 
 #endif

@@ -229,9 +229,20 @@ INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043C6C);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043C98);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043CF8);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043D8C);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043E28);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043E5C);
-INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043E94);
+void MessageSetEventFlag(u16 flag_index) {
+  u32 index = flag_index;
+  g_message_event_flags[index >> 5] |= 1 << (index & 0x1F);
+}
+
+void MessageClearEventFlag(u16 flag_index) {
+  u32 index = flag_index;
+  g_message_event_flags[index >> 5] &= ~(1 << (index & 0x1F));
+}
+
+u32 MessageGetEventFlag(u16 flag_index) {
+  u32 index = flag_index;
+  return (g_message_event_flags[index >> 5] & (1 << (index & 0x1F))) != 0;
+}
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80043EC8);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_80044684);
 INCLUDE_ASM("asm/harvest-moon-64/nonmatchings/message", func_800449C4);

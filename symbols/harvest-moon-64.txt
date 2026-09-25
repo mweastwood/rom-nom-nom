@@ -104,6 +104,10 @@ MessageSetBoxBackgroundLayer = 0x8004318C; // type:func
 MessageSetBoxTextLayer = 0x80043260; // type:func
 MessageSetBoxPromptLayer = 0x80043334; // type:func
 MessageClipSpan = 0x80043408; // type:func
+MessageSetEventFlag = 0x80043E28; // type:func
+MessageClearEventFlag = 0x80043E5C; // type:func
+MessageGetEventFlag = 0x80043E94; // type:func
+func_80043EC8 = 0x80043EC8; // type:func
 TextBoxUpdate = 0x80045CB0; // type:func
 
 // Time Functions

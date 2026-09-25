@@ -303,10 +303,16 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             "0",
             "-N",
             *as_flags_norm,
-            str(temp_s),
-            "-o",
-            str(temp_o),
+            f"-I{REPO_ROOT}",
+            f"-I{REPO_ROOT / 'bazel-bin'}",
+            f"-I{asm_dir}",
+            f"-I{asm_dir.parent}",
+            f"-I{asm_dir.parent.parent}",
         ]
+        macro_inc = asm_dir / "macro.inc"
+        if macro_inc.exists():
+            as_cmd.append(str(macro_inc))
+        as_cmd.extend([str(temp_s), "-o", str(temp_o)])
         res = subprocess.run(as_cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if res.returncode != 0:
             print(f"Assembler error:\n{res.stderr}", file=sys.stderr)
