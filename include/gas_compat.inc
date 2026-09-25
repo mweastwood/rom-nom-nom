@@ -250,4 +250,86 @@ define_div
     define_c_lt_d
 .endif
 
+.ifdef __R4000_FPU__
+    .macro define_li_s
+        .macro li.s reg, val:vararg
+            .purgem li.s
+            li.s \reg, \val
+            nop
+            define_li_s
+        .endm
+    .endm
+    define_li_s
+
+    .macro define_mfc1
+        .macro mfc1 args:vararg
+            .purgem mfc1
+            mfc1 \args
+            nop
+            define_mfc1
+        .endm
+    .endm
+    define_mfc1
+
+    .set _c_lt_s_count, 0
+    .macro define_c_lt_s
+        .macro c.lt.s args:vararg
+            .purgem c.lt.s
+            c.lt.s \args
+            .if _c_lt_s_count == 0
+                nop
+                nop
+            .else
+                nop
+            .endif
+            .set _c_lt_s_count, _c_lt_s_count + 1
+            define_c_lt_s
+        .endm
+    .endm
+    define_c_lt_s
+
+    .macro define_c_le_s
+        .macro c.le.s args:vararg
+            .purgem c.le.s
+            c.le.s \args
+            nop
+            define_c_le_s
+        .endm
+    .endm
+    define_c_le_s
+
+    /*
+     * ==============================================================================
+     * 5. MIPS R4000 Floating-Point Multiplier Pipeline Hazard: `mul.s`
+     * ==============================================================================
+     * PURPOSE:
+     *   On the MIPS R4000 architecture, the single-precision floating-point
+     *   multiplier unit requires idle cycles between back-to-back operations or
+     *   after loading operands to avoid structural and data hazards.
+     *
+     * HISTORICAL DIFFERENCE:
+     *   - 1996 SDK GAS: The 1996 SGI/Cygnus assembler automatically inserted a NOP
+     *     before subsequent `mul.s` instructions when in `.set reorder` mode.
+     *   - Modern GAS: Compiles targeting VR4300 where hardware interlocks handle
+     *     multiplier latency dynamically, omitting software NOPs.
+     *
+     * GUARD:
+     *   Guarded by `__R4000_FPU__` to ensure disassembled assembly files
+     *   (which already include explicit NOPs) are not duplicated.
+     */
+    .set _mul_s_count, 0
+    .macro define_mul_s
+        .macro mul.s args:vararg
+            .purgem mul.s
+            .if _mul_s_count > 0
+                nop
+            .endif
+            mul.s \args
+            .set _mul_s_count, _mul_s_count + 1
+            define_mul_s
+        .endm
+    .endm
+    define_mul_s
+.endif
+
 .endif /* _GAS_COMPAT_INC_GUARD */

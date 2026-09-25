@@ -5,6 +5,9 @@ idle = 0x80025CB4; // type:func
 mainproc = 0x80025D90; // type:func
 
 // Libultra OS routines
+guRotate = 0x800FEEB8; // type:func
+guScale = 0x800FF0B0; // type:func
+guTranslate = 0x800FF324; // type:func
 os_create_thread = 0x800FF630; // type:func
 os_set_thread_priority = 0x800FF960; // type:func
 os_start_thread = 0x800FFA30; // type:func
@@ -47,6 +50,7 @@ RenderSetTranslation = 0x800292EC; // type:func
 RenderSetRotation = 0x80029330; // type:func
 RenderSetScale = 0x80029374; // type:func
 RenderNoOp2 = 0x800293B8; // type:func
+RenderDrawEntries = 0x800293C0; // type:func
 
 // Dma Functions
 DmaInit = 0x80029000; // type:func
@@ -86,6 +90,8 @@ InterpolateSetStep = 0x8002683C; // type:func
 InterpolateGetStep = 0x80026844; // type:func
 Abs16 = 0x80026850; // type:func
 RandomRange = 0x80026874; // type:func
+SinDegrees = 0x800278F0; // type:func
+CosDegrees = 0x80027920; // type:func
 
 // Message Functions
 MessageInit = 0x80042F60; // type:func
@@ -123,6 +129,8 @@ g_main_thread_stack = 0x801C6220;
 g_idle_callback = 0x801FD628;
 
 // Display Global Symbols
+g_camera_angles_prev = 0x8013D5D8;
+g_camera_angles = 0x8017044C;
 g_display_matrices = 0x80189135;
 g_render_entry_count = 0x8018A05A;
 g_render_entries = 0x8018A850;

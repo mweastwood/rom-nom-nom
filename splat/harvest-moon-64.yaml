@@ -46,6 +46,7 @@ c_flags:
   audio: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
   main: ["-O2", "-mips2", "-Wa,-O0"]
   math: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
+  display: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1", "-Wa,--defsym=__R4000_FPU__=1"]
 
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:

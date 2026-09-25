@@ -38,22 +38,8 @@ def find_tool(name: str) -> str:
 
 
 def load_symbol_table(game: str) -> dict[str, int]:
-    """Load symbol addresses from built ELF or symbol file."""
-    elf_path = REPO_ROOT / "bazel-bin" / f"{game}.elf"
+    """Load symbol addresses from symbol file, supplemented by built ELF."""
     sym_map = {}
-
-    if elf_path.exists():
-        objdump = find_tool("mips-linux-gnu-objdump")
-        res = subprocess.run([objdump, "-t", str(elf_path)], capture_output=True, text=True)
-        if res.returncode == 0:
-            for line in res.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 6 and len(parts[0]) == 8:
-                    try:
-                        sym_map[parts[-1]] = int(parts[0], 16)
-                    except ValueError:
-                        pass
-            return sym_map
 
     symbols_file = REPO_ROOT / "symbols" / f"{game}.txt"
     if symbols_file.exists():
@@ -67,6 +53,21 @@ def load_symbol_table(game: str) -> dict[str, int]:
                     sym_map[sym] = int(val, 16 if "0x" in val else 10)
                 except ValueError:
                     pass
+
+    elf_path = REPO_ROOT / "bazel-bin" / f"{game}.elf"
+    if elf_path.exists():
+        objdump = find_tool("mips-linux-gnu-objdump")
+        res = subprocess.run([objdump, "-t", str(elf_path)], capture_output=True, text=True)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 6 and len(parts[0]) == 8:
+                    try:
+                        sym_name = parts[-1]
+                        if sym_name not in sym_map:
+                            sym_map[sym_name] = int(parts[0], 16)
+                    except ValueError:
+                        pass
 
     return sym_map
 
@@ -92,6 +93,45 @@ def get_symbol_info_from_elf(elf_path: Path, func_name: str):
             vram = int(m.group(1), 16)
             size = int(m.group(2), 16)
             return vram, size
+    return None
+
+
+def get_target_size_from_symbols_and_config(game: str, vram: int) -> int | None:
+    yaml_path = REPO_ROOT / "splat" / f"{game}.yaml"
+    subseg_vrams = []
+    if yaml_path.exists():
+        try:
+            import yaml
+            cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            for seg in cfg.get("segments", []):
+                if isinstance(seg, dict) and "subsegments" in seg:
+                    vram_base = seg.get("vram", 0x80025C50)
+                    rom_start = seg.get("start", 0x1050)
+                    for s in seg["subsegments"]:
+                        if isinstance(s, list) and len(s) >= 2:
+                            rom_off = s[0]
+                            subseg_vrams.append(vram_base + (rom_off - rom_start))
+        except Exception:
+            pass
+
+    sym_file = REPO_ROOT / "symbols" / f"{game}.txt"
+    sym_vrams = []
+    if sym_file.exists():
+        for line in sym_file.read_text(encoding="utf-8").splitlines():
+            line = line.split("//")[0].strip()
+            if "=" in line:
+                sym, val = line.split("=", 1)
+                val = val.strip().rstrip(";")
+                try:
+                    sym_vrams.append(int(val, 16 if "0x" in val else 10))
+                except ValueError:
+                    pass
+
+    all_points = sorted(set(subseg_vrams + sym_vrams))
+    if vram in all_points:
+        idx = all_points.index(vram)
+        if idx + 1 < len(all_points):
+            return all_points[idx + 1] - vram
     return None
 
 
@@ -142,10 +182,10 @@ def find_function_in_asm(game: str, func_name: str):
     for d in asm_dirs:
         if not d.exists():
             continue
-        for sf in sorted(d.glob("*.s")):
+        for sf in sorted(d.rglob("*.s")):
             content = sf.read_text(encoding="utf-8")
             m = re.search(
-                r"glabel\s+" + re.escape(func_name) + r"\n(.*?)\nendlabel", content, re.DOTALL
+                r"glabel\s+" + re.escape(func_name) + r"\n(.*?)(?:\nendlabel|\Z)", content, re.DOTALL
             )
             if m:
                 return sf, m.group(1)
@@ -303,7 +343,10 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
                 rtype, rsym = m_rel.group(1), m_rel.group(2)
                 if rsym in sym_map:
                     sym_val = sym_map[rsym]
-                    if rtype == "HI16":
+                    if rtype == "26":
+                        instr = re.sub(r"\b0\s*<[^>]+>", f"0x{sym_val & 0x0FFFFFFF:x}", instr)
+                        instr = re.sub(r"\b0x0\b", f"0x{sym_val & 0x0FFFFFFF:x}", instr)
+                    elif rtype == "HI16":
                         hi_val = (sym_val + 0x8000) >> 16
                         instr = re.sub(r"0x0", f"0x{hi_val:x}", instr)
                     elif rtype == "LO16":
@@ -319,6 +362,14 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
                             instr = re.sub(
                                 r"([-\d]+)\(" + reg + r"\)", f"{actual_disp}({reg})", instr
                             )
+                        else:
+                            m_imm = re.search(r",\s*([-\d]+)$", instr)
+                            if m_imm:
+                                addend = int(m_imm.group(1))
+                                actual_val = lo_val + addend
+                                instr = re.sub(r",\s*([-\d]+)$", f",{actual_val}", instr)
+                            else:
+                                instr = re.sub(r",\s*0x0$", f",0x{lo_val:x}", instr)
             resolved_instructions.append(instr)
 
         return resolved_instructions
@@ -356,12 +407,15 @@ def run_diff(func_name: str, game: str = "harvest-moon-64", use_color: bool = Tr
 
     # 1. Determine target instructions
     target_instructions = []
-    symbol_info = get_symbol_info_from_elf(elf_path, func_name)
-
-    if symbol_info:
-        vram, size = symbol_info
+    if func_name in sym_map:
+        vram = sym_map[func_name]
+        size = get_target_size_from_symbols_and_config(game, vram)
+        if not size:
+            info = get_symbol_info_from_elf(elf_path, func_name)
+            if info:
+                _, size = info
         rom_offset = get_vram_and_rom_offset(game, vram)
-        if rom_offset is not None and size > 0:
+        if rom_offset is not None and size and size > 0:
             target_instructions = disassemble_target_from_rom(rom_path, rom_offset, size)
 
     if not target_instructions:

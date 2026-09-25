@@ -18,7 +18,7 @@ CheckOptions:
   - key: readability-identifier-naming.TypedefCase
     value: CamelCase
   - key: readability-identifier-naming.TypedefIgnoredRegexp
-    value: '^(u8|s8|u16|s16|u32|s32|u64|s64|f32|f64|size_t|int[0-9]+_t|uint[0-9]+_t|OS[A-Za-z0-9_]+)$'
+    value: '^(u8|s8|u16|s16|u32|s32|u64|s64|f32|f64|size_t|int[0-9]+_t|uint[0-9]+_t|OS[A-Za-z0-9_]+|Mtx_t)$'
   - key: readability-identifier-naming.TypeAliasCase
     value: CamelCase
   - key: readability-identifier-naming.EnumCase
@@ -60,7 +60,7 @@ CheckOptions:
   - key: readability-identifier-naming.FunctionCase
     value: CamelCase
   - key: readability-identifier-naming.FunctionIgnoredRegexp
-    value: '^(func_[0-9A-Fa-f]+|main|idle|mainproc|os[A-Za-z0-9_]*|os_[a-z0-9_]+|leo[A-Za-z0-9_]*|TEST|TEST_F)$'
+    value: '^(func_[0-9A-Fa-f]+|main|idle|mainproc|os[A-Za-z0-9_]*|os_[a-z0-9_]+|gu[A-Za-z0-9_]*|leo[A-Za-z0-9_]*|TEST|TEST_F)$'
   - key: readability-identifier-naming.MethodCase
     value: CamelCase
 

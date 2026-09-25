@@ -4,26 +4,60 @@
 #include "types.h"
 
 typedef struct {
-  u32 transform[9];
-  u8 matrix_buffer[0x168 - 0x24];
+  f32 x;
+  f32 y;
+  f32 z;
+} Vec3f;
+
+typedef struct {
+  Vec3f translation;
+  Vec3f scale;
+  Vec3f rotation;
+  u32 pad;
+  Mtx translation_matrix;
+  Mtx scale_matrix;
+  Mtx rotation_matrix_x;
+  Mtx rotation_matrix_y;
+  Mtx rotation_matrix_z;
   u32 dl;
   u16 flags;
   u16 reserved;
 } RenderEntry;
 
+typedef struct {
+  Mtx matrices[2];
+  Mtx translation_matrix;
+  Mtx scale_matrix;
+  Mtx rotation_matrix_x;
+  Mtx rotation_matrix_y;
+  Mtx rotation_matrix_z;
+  u8 pad_1c0[0x200 - 0x1C0];
+  f32 translation[3];
+  f32 scale[3];
+  f32 rotation[3];
+} CameraContext;
+
 extern u8 g_display_matrices[9];
-
 extern RenderEntry g_render_entries[336];
-
 extern u16 g_render_entry_count;
+extern f32 g_camera_angles[3];
+extern f32 g_camera_angles_prev[3];
 
 void RenderInit(void);
 void RenderResetCount(void);
 void RenderNoOp(void);
 void RenderAddEntry(u32 dl, u16 flags);
-s32 RenderSetTranslation(s32 index, u32 x, u32 y, u32 z);
-s32 RenderSetRotation(s32 index, u32 x, u32 y, u32 z);
-s32 RenderSetScale(s32 index, u32 x, u32 y, u32 z);
+s32 RenderSetTranslation(s32 index, f32 x, f32 y, f32 z);
+s32 RenderSetRotation(s32 index, f32 x, f32 y, f32 z);
+s32 RenderSetScale(s32 index, f32 x, f32 y, f32 z);
 void RenderNoOp2(void);
+Gfx* RenderDrawEntries(Gfx* dl, CameraContext* camera);
+
+void guTranslate(Mtx* m, f32 x, f32 y, f32 z);
+void guScale(Mtx* m, f32 x, f32 y, f32 z);
+void guRotate(Mtx* m, f32 x, f32 y, f32 z);
+
+f32 SinDegrees(f32 angle);
+f32 CosDegrees(f32 angle);
 
 #endif

@@ -40,4 +40,18 @@ typedef struct {
   s32 valid_count;
 } OSMesgQueue;
 
+typedef long int Mtx_t[4][4];
+typedef union {
+  Mtx_t m;
+  long long int force_structure_alignment;
+} Mtx;
+
+typedef union {
+  struct {
+    u32 w0;
+    u32 w1;
+  } words;
+  s64 force_structure_alignment;
+} Gfx;
+
 #endif

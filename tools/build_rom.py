@@ -301,14 +301,18 @@ def build_rom(
     sha1_matches = (built_sha1 == expected_sha1)
     byte_matches = True
 
-    if verify_rom and verify_rom.exists():
-        orig_bytes = verify_rom.read_bytes()
+    target_rom_candidate = verify_rom or (REPO_ROOT / config_data.get("options", {}).get("target_path", ""))
+    if target_rom_candidate and Path(target_rom_candidate).exists():
+        orig_bytes = Path(target_rom_candidate).read_bytes()
         built_bytes = out_rom.read_bytes()
         if orig_bytes != built_bytes:
             byte_matches = False
             diff_count = sum(1 for a, b in zip(orig_bytes, built_bytes) if a != b)
             diff_count += abs(len(orig_bytes) - len(built_bytes))
             print(f"[ERROR] Byte mismatch with target ROM ({diff_count} differing bytes)!")
+            diffs = [(i, orig_bytes[i], built_bytes[i]) for i in range(min(len(orig_bytes), len(built_bytes))) if orig_bytes[i] != built_bytes[i]]
+            for i, o, b in diffs[:20]:
+                print(f"  ROM diff at 0x{i:06X}: target={o:02X} built={b:02X}")
         else:
             print("[SUCCESS] Byte-for-byte exact match against target ROM verified!")
 
