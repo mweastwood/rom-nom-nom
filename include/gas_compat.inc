@@ -330,6 +330,32 @@ define_div
         .endm
     .endm
     define_mul_s
+.endif /* __R4000_FPU__ */
+
+.ifdef __GU_ORTHO__
+    .set _ortho_div_count, 0
+    .macro define_ortho_div
+        .macro div.s args:vararg
+            .purgem div.s
+            .if (_ortho_div_count % 6) == 0 || (_ortho_div_count % 6) == 2
+                nop
+            .endif
+            div.s \args
+            .set _ortho_div_count, _ortho_div_count + 1
+            define_ortho_div
+        .endm
+    .endm
+    define_ortho_div
+
+    .macro define_ortho_mul
+        .macro mul.s args:vararg
+            .purgem mul.s
+            nop
+            mul.s \args
+            define_ortho_mul
+        .endm
+    .endm
+    define_ortho_mul
 .endif
 
 .endif /* _GAS_COMPAT_INC_GUARD */

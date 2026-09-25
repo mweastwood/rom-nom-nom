@@ -47,6 +47,12 @@ c_flags:
   main: ["-O2", "-mips2", "-Wa,-O0"]
   math: ["-O2", "-mips2", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1"]
   display: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O0", "-Wa,--defsym=__C_COMPILED__=1", "-Wa,--defsym=__R4000_FPU__=1"]
+  libultra_sinf: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
+  libultra_gu_lookat: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
+  libultra_gu_mtx: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O1", "-Wa,--defsym=__C_COMPILED__=1"]
+  libultra_gu_ortho: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2", "-Wa,--defsym=__GU_ORTHO__=1"]
+  libultra_gu_scale: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
+  libultra_gu_translate: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"]
 
 # Memory & ROM Segments: Defines the physical cartridge offsets and RDRAM virtual addresses
 segments:
@@ -163,7 +169,17 @@ segments:
       - [0xD8330, asm]
       - [0xD83D0, asm]
       - [0xD89B0, asm]
-      - [0xD8D00, asm, libultra]
+      - [0xD8D00, asm]
+      - [0xD9040, asm, libultra_sqrtf]
+      - [0xD9050, asm, libultra_sinf]
+      - [0xD91A0, asm, libultra_gu_lookat]
+      - [0xD98B0, c, libultra_gu_mtx]
+      - [0xD9B30, c, libultra_gu_ortho]
+      - [0xD9DB0, asm, libultra_gu_rotate]
+      - [0xDA450, c, libultra_gu_scale]
+      - [0xDA530, asm, libultra_cosf]
+      - [0xDA6D0, c, libultra_gu_translate]
+      - [0xDA7A0, asm, libultra]
       # Initialized read-only & global data (.data, .rodata, jump tables)
       - [0xEBE10, data]
       # Uninitialized memory (.bss section zeroed on boot)

@@ -151,7 +151,7 @@ def find_function_in_c(game: str, func_name: str) -> tuple[Path, str]:
         content = cf.read_text(encoding="utf-8")
         # First check for function definition: Type FuncName(...) {
         if re.search(
-            r"^[A-Za-z0-9_*]+\s+[*]*\b" + re.escape(func_name) + r"\s*\([^;]*\)\s*\{",
+            r"^(?:(?:static|inline)\s+)*[A-Za-z0-9_*]+\s+[*]*\b" + re.escape(func_name) + r"\s*\([^;]*\)\s*\{",
             content,
             re.MULTILINE,
         ):
@@ -291,6 +291,7 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             "-EB",
             "-G",
             "0",
+            "-no-pad-sections",
             *as_flags,
             f"-I{REPO_ROOT}",
             f"-I{REPO_ROOT / 'bazel-bin'}",

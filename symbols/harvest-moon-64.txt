@@ -127,6 +127,20 @@ SoundFadeOutBgm = 0x800ACC1C; // type:func
 SoundPlayEffect = 0x800ACC50; // type:func
 SoundAreVoicesInactive = 0x800ACD18; // type:func
 
+// Libultra Functions
+sqrtf = 0x800FDC40; // type:func
+__sinf = 0x800FDC50; // type:func
+guLookAtF = 0x800FDDA0; // type:func
+guLookAt = 0x800FE120; // type:func
+guMtxF2L = 0x800FE4B0; // type:func
+guMtxL2F = 0x800FE548; // type:func
+guMtxIdentF = 0x800FE5F0; // type:func
+guMtxIdent = 0x800FE640; // type:func
+guOrthoF = 0x800FE730; // type:func
+guOrtho = 0x800FE860; // type:func
+guScaleF = 0x800FF050; // type:func
+guTranslateF = 0x800FF2D0; // type:func
+
 // Audio Global Symbols
 kAudioMinPitch = 0x8011EE00;
 kAudioMaxPitch = 0x8011EE08;
