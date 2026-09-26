@@ -90,11 +90,32 @@ InterpolateSetStep = 0x8002683C; // type:func
 InterpolateGetStep = 0x80026844; // type:func
 Abs16 = 0x80026850; // type:func
 RandomRange = 0x80026874; // type:func
+GraphicInit = 0x800268F0; // type:func
+func_80026A98 = 0x80026A98; // type:func
+func_80026AE4 = 0x80026AE4; // type:func
+func_80026BE0 = 0x80026BE0; // type:func
+func_80026CEC = 0x80026CEC; // type:func
+GraphicSetSpriteDescriptor = 0x80026E78; // type:func
+GraphicSetTextureFormat = 0x80026F30; // type:func
+GraphicLoadTexture = 0x80026F88; // type:func
+GraphicSetSpriteVertices = 0x800276AC; // type:func
 SinDegrees = 0x800278F0; // type:func
 CosDegrees = 0x80027920; // type:func
+GraphicRotateEuler = 0x80027950; // type:func
+GraphicRotateVector = 0x80027B74; // type:func
+PlaneCalculateNormal = 0x80027BFC; // type:func
 PlaneCalculateZ = 0x80027DC0; // type:func
-func_80027950 = 0x80027950; // type:func
-func_80027B74 = 0x80027B74; // type:func
+PlaneCheckNormals = 0x80027E10; // type:func
+PlaneEvaluate = 0x800284E8; // type:func
+GraphicRotateDirectionVector = 0x80028520; // type:func
+GraphicGetDirectionAngle = 0x80028820; // type:func
+GraphicResolveOffset1 = 0x80028888; // type:func
+GraphicResolveOffset2 = 0x800288A0; // type:func
+GraphicResolveIndexedOffset = 0x800288B8; // type:func
+GraphicDrawModelBuffers = 0x800288D8; // type:func
+GraphicClearDisplay = 0x80028920; // type:func
+GraphicSetupCamera = 0x80028A64; // type:func
+CameraSetup = 0x80028C00; // type:func
 CameraSetEye = 0x80028D94; // type:func
 CameraSetAt = 0x80028DBC; // type:func
 CameraSetUp = 0x80028DD4; // type:func
@@ -103,7 +124,19 @@ GraphicSetMode2 = 0x80028E60; // type:func
 CameraSetRoll = 0x80028EA8; // type:func
 CameraSetAngles = 0x80028EB8; // type:func
 CameraAddAngles = 0x80028EF8; // type:func
-func_80028F44 = 0x80028F44; // type:func
+GraphicInitBuffers = 0x80028F44; // type:func
+func_800FB910 = 0x800FB910; // type:func
+func_800FBB6C = 0x800FBB6C; // type:func
+func_800FBD24 = 0x800FBD24; // type:func
+func_800FBED0 = 0x800FBED0; // type:func
+func_800FBF10 = 0x800FBF10; // type:func
+func_800FBF30 = 0x800FBF30; // type:func
+func_800FBFD0 = 0x800FBFD0; // type:func
+g_graphic_frame_count = 0x80112910;
+g_framebuffers = 0x80112918;
+g_init_display_list = 0x80112928;
+g_graphic_mode_flags = 0x801806C4;
+g_graphic_context = 0x801C3F74;
 
 // Message Functions
 MessageInit = 0x80042F60; // type:func
@@ -144,7 +177,7 @@ SoundPlayEffect = 0x800ACC50; // type:func
 SoundAreVoicesInactive = 0x800ACD18; // type:func
 
 // Libultra Functions
-Sqrtf = 0x800FDC40; // type:func
+sqrtf = 0x800FDC40; // type:func
 Sinf = 0x800FDC50; // type:func
 Cosf = 0x800FF130; // type:func
 GuLookAtF = 0x800FDDA0; // type:func
@@ -155,8 +188,11 @@ GuMtxIdentF = 0x800FE5F0; // type:func
 GuMtxIdent = 0x800FE640; // type:func
 GuOrthoF = 0x800FE730; // type:func
 GuOrtho = 0x800FE860; // type:func
+GuPerspectiveF = 0x800FE9B0; // type:func
+GuPerspective = 0x800FEB60; // type:func
 GuScaleF = 0x800FF050; // type:func
 GuTranslateF = 0x800FF2D0; // type:func
+OsVirtualToPhysical = 0x800FFC50; // type:func
 
 // Audio Global Symbols
 kAudioMinPitch = 0x8011EE00;
@@ -174,6 +210,15 @@ g_idle_callback = 0x801FD628;
 // Graphic Global Symbols
 g_degrees_to_radians = 0x8011EC78;
 g_degrees_to_radians_cos = 0x8011EC80;
+g_degrees_to_radians_euler = 0x8011EC88;
+g_direction_angles = 0x8011EC90;
+g_degrees_to_radians_direction = 0x8011ECB0;
+g_model_display_list_1 = 0x00112A38; // absolute:True
+g_model_display_list_2 = 0x00112A10; // absolute:True
+g_depth_buffer = 0x80205750;
+g_lookat = 0x80126540;
+g_camera_config = 0x801F6F38;
+g_viewports = 0x80237660;
 
 // Display Global Symbols
 g_camera_angles_prev = 0x8013D5D8;

@@ -5,6 +5,7 @@
 #include "display.h"
 #include "dma.h"
 #include "game_time.h"
+#include "graphic_1.h"
 #include "include_asm.h"
 #include "layer.h"
 #include "message.h"
@@ -15,7 +16,6 @@ void func_801002F0(void*);
 void func_80105B00(s32);
 void func_8004DF10(void);
 void func_8004CDA0(void);
-void func_800268F0(void);
 void func_80029B30(void);
 void func_8002AFE0(void);
 void func_800337D0(void);
@@ -24,11 +24,8 @@ void func_80046860(void);
 void func_8004DEB0(void);
 void func_8002DC70(void);
 void func_8003B870(void);
-void func_800FBED0(void*);
 void func_800FBE90(void*);
 void func_800FBE50(void*);
-void func_800FBF10(void);
-void func_800FBF30(void);
 void func_800FFB50(void*);
 void func_80100340(f32);
 void func_8004DEC8(void);
@@ -70,7 +67,7 @@ void mainproc(void* arg) {
 void MainInit(void) {
   MainReset();
   func_8004CDA0();
-  func_800268F0();
+  GraphicInit();
   DmaInit();
   RenderInit();
   func_80029B30();

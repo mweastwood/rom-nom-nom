@@ -4,12 +4,6 @@
 #include "types.h"
 
 typedef struct {
-  f32 x;
-  f32 y;
-  f32 z;
-} Vec3f;
-
-typedef struct {
   Vec3f translation;
   Vec3f scale;
   Vec3f rotation;

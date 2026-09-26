@@ -387,7 +387,7 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
         return resolved_instructions
 
 
-def normalize_instruction(instr: str) -> str:
+def normalize_instruction(instr: str, vram: int = 0, size: int = 0) -> str:
     """Normalize whitespace, aliases, and branch target formatting for comparison."""
     instr = re.sub(r"\s+", " ", instr.strip())
     # Move aliases
@@ -414,6 +414,21 @@ def normalize_instruction(instr: str) -> str:
     instr = re.sub(r"([,\s])[0-9a-fA-F]+\s*<[A-Za-z0-9_]+>", r"\g<1>0x0", instr)
     # 3. Plain hex address: e.g. "beqz v0,0x18"
     instr = re.sub(r",\s*0x([0-9a-fA-F]+)", lambda m: f",0x{int(m.group(1), 16):x}", instr)
+
+    # 4. Internal jump normalization:
+    # In MIPS, intra-function jumps ("j 0x28cc4" in a function at 0x80028c00) reference absolute VRAM
+    # addresses in ROM disassembly. In contrast, unlinked C compiler object disassembly references
+    # function-relative offsets ("j 0xc4"). Normalize targets within [vram, vram + size) to relative
+    # offsets so identical control flow jumps match without false-positive diffs.
+    if vram and size:
+        vram_lo = vram & 0x0FFFFFFF
+        def norm_jump(m):
+            addr = int(m.group(1), 16)
+            if vram_lo <= addr < vram_lo + size:
+                return f"j 0x{addr - vram_lo:x}"
+            return m.group(0)
+        instr = re.sub(r"\bj\s+0x([0-9a-fA-F]+)", norm_jump, instr)
+
     return instr
 
 
@@ -425,9 +440,11 @@ def run_diff(func_name: str, game: str = "harvest-moon-64", use_color: bool = Tr
 
     # 1. Determine target instructions
     target_instructions = []
+    vram = 0
+    size = 0
     if func_name in sym_map:
         vram = sym_map[func_name]
-        size = get_target_size_from_symbols_and_config(game, vram)
+        size = get_target_size_from_symbols_and_config(game, vram) or 0
         if not size:
             info = get_symbol_info_from_elf(elf_path, func_name)
             if info:
@@ -480,8 +497,8 @@ def run_diff(func_name: str, game: str = "harvest-moon-64", use_color: bool = Tr
         target_raw = target_instructions[i] if i < len(target_instructions) else ""
         current_raw = current_instructions[i] if i < len(current_instructions) else ""
 
-        target_norm = normalize_instruction(target_raw)
-        current_norm = normalize_instruction(current_raw)
+        target_norm = normalize_instruction(target_raw, vram, size)
+        current_norm = normalize_instruction(current_raw, vram, size)
 
         target_col = (offset_str + target_norm).ljust(col_width)
         current_col = (offset_str + current_norm).ljust(col_width)

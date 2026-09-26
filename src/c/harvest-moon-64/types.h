@@ -54,4 +54,40 @@ typedef union {
   s64 force_structure_alignment;
 } Gfx;
 
+typedef struct {
+  u8 pad[16];
+} Light;
+
+typedef struct {
+  s16 ob[3];
+  u16 flag;
+  s16 tc[2];
+  u8 cn[4];
+} VtxT;
+
+typedef union {
+  VtxT v;
+  s64 force_structure_alignment;
+} Vtx;
+
+typedef union {
+  struct {
+    Light l[2];
+  } l;
+  s64 force_structure_alignment[4];
+} LookAt;
+
+typedef struct {
+  f32 x;
+  f32 y;
+  f32 z;
+} Vec3f;
+
+typedef struct {
+  f32 x;
+  f32 y;
+  f32 z;
+  f32 w;
+} Vec4f;
+
 #endif

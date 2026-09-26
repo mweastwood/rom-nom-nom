@@ -222,7 +222,30 @@ def build_rom(
         s_candidates = list(asm_dir.glob(f"**/{stem}.s"))
         bin_candidates = list(assets_dir.glob(f"**/{stem}.bin"))
 
-        if c_candidates or cc_candidates:
+        # Respect splat's subsegment types based on the linker script path in obj_match.
+        # This prevents partially decompiled C files from preempting assembly subsegments before
+        # splat's YAML config is explicitly updated from `asm` to `c`.
+        use_c = False
+        use_s = False
+        use_bin = False
+
+        if "/src/" in obj_match:
+            use_c = bool(c_candidates or cc_candidates)
+        elif "/asm/" in obj_match:
+            use_s = bool(s_candidates)
+        elif "/assets/" in obj_match:
+            use_bin = bool(bin_candidates)
+
+        # Fallback to default priority order if obj_match does not specify a distinct directory
+        if not (use_c or use_s or use_bin):
+            if c_candidates or cc_candidates:
+                use_c = True
+            elif s_candidates:
+                use_s = True
+            elif bin_candidates:
+                use_bin = True
+
+        if use_c:
             src_file = c_candidates[0] if c_candidates else cc_candidates[0]
             if toolchain == "original":
                 c_flags_cfg = config_data.get("c_flags", {})
