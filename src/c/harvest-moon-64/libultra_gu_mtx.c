@@ -2,7 +2,7 @@
 
 #include "include_asm.h"
 
-inline void guMtxF2L(MtxF mf, Mtx* m) {
+inline void GuMtxF2L(MtxF mf, Mtx* m) {
   int i, j;
   s32 e1, e2;
   s32* ai = (s32*)&m->m[0][0];
@@ -18,7 +18,7 @@ inline void guMtxF2L(MtxF mf, Mtx* m) {
   }
 }
 
-void guMtxL2F(MtxF mf, Mtx* m) {
+void GuMtxL2F(MtxF mf, Mtx* m) {
   int i, j;
   int q[2];
   f32 f1, f2;
@@ -39,7 +39,7 @@ void guMtxL2F(MtxF mf, Mtx* m) {
   }
 }
 
-inline void guMtxIdentF(MtxF mf) {
+inline void GuMtxIdentF(MtxF mf) {
   int i, j;
 
   for (i = 0; i < 4; i++) {
@@ -53,8 +53,8 @@ inline void guMtxIdentF(MtxF mf) {
   }
 }
 
-void guMtxIdent(Mtx* m) {
+void GuMtxIdent(Mtx* m) {
   MtxF mf;
-  guMtxIdentF(mf);
-  guMtxF2L(mf, m);
+  GuMtxIdentF(mf);
+  GuMtxF2L(mf, m);
 }

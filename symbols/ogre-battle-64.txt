@@ -1,11 +1,11 @@
 // Visit https://github.com/ethteck/splat/wiki/Adding-Symbols for documentation about this file
-entrypoint = 0x80070C00; // type:func
+Entrypoint = 0x80070C00; // type:func
 main = 0x8007F880; // type:func
 
 // 64DD (Project Leo) IPL boot vectors
-leo_boot_reset = 0x84001008; // type:func absolute:True
-leo_boot_read = 0x8400103C; // type:func absolute:True
-leo_boot_entry = 0x84001064; // type:func absolute:True
-leo_boot_resume = 0x840010BC; // type:func absolute:True
-leo_boot_command = 0x84001120; // type:func absolute:True
-leo_boot_status = 0x8400114C; // type:func absolute:True
+LeoBootReset = 0x84001008; // type:func absolute:True
+LeoBootRead = 0x8400103C; // type:func absolute:True
+LeoBootEntry = 0x84001064; // type:func absolute:True
+LeoBootResume = 0x840010BC; // type:func absolute:True
+LeoBootCommand = 0x84001120; // type:func absolute:True
+LeoBootStatus = 0x8400114C; // type:func absolute:True

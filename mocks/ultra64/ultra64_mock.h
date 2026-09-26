@@ -54,11 +54,11 @@ extern u8 g_main_thread_stack[0x1000];
 extern void (*g_idle_callback)(void);
 
 // N64 OS declarations
-void os_initialize(void);
-void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
-                      OSPri pri);
-void os_start_thread(OSThread* thread);
-void os_set_thread_priority(OSThread* thread, OSPri pri);
+void OsInitialize(void);
+void OsCreateThread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
+                    OSPri pri);
+void OsStartThread(OSThread* thread);
+void OsSetThreadPriority(OSThread* thread, OSPri pri);
 
 // Engine stubs
 void func_800FD5B0(void);

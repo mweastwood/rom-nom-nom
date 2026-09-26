@@ -60,7 +60,7 @@ CheckOptions:
   - key: readability-identifier-naming.FunctionCase
     value: CamelCase
   - key: readability-identifier-naming.FunctionIgnoredRegexp
-    value: '^(func_[0-9A-Fa-f]+|main|idle|mainproc|os[A-Za-z0-9_]*|os_[a-z0-9_]+|gu[A-Za-z0-9_]*|leo[A-Za-z0-9_]*|__sinf|__cosf|sinf|cosf|sqrtf|TEST|TEST_F)$'
+    value: '^(func_[0-9A-Fa-f]+|main|idle|mainproc|TEST|TEST_F)$'
   - key: readability-identifier-naming.MethodCase
     value: CamelCase
 

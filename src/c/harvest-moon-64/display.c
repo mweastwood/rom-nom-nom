@@ -124,12 +124,12 @@ Gfx* RenderDrawEntries(Gfx* dl, CameraContext* camera) {
   GFX_CMD(dl++, 0xDB04001C, 0xFFFA);
   GFX_CMD(dl++, 0xD7000002, 0x80008000);
 
-  guTranslate(&camera->translation_matrix, camera->translation[0], camera->translation[1],
+  GuTranslate(&camera->translation_matrix, camera->translation[0], camera->translation[1],
               camera->translation[2]);
-  guScale(&camera->scale_matrix, camera->scale[0], camera->scale[1], camera->scale[2]);
-  guRotate(&camera->rotation_matrix_x, camera->rotation[0], 0.0f, 0.0f);
-  guRotate(&camera->rotation_matrix_y, 0.0f, camera->rotation[1], 0.0f);
-  guRotate(&camera->rotation_matrix_z, 0.0f, 0.0f, camera->rotation[2]);
+  GuScale(&camera->scale_matrix, camera->scale[0], camera->scale[1], camera->scale[2]);
+  GuRotate(&camera->rotation_matrix_x, camera->rotation[0], 0.0f, 0.0f);
+  GuRotate(&camera->rotation_matrix_y, 0.0f, camera->rotation[1], 0.0f);
+  GuRotate(&camera->rotation_matrix_z, 0.0f, 0.0f, camera->rotation[2]);
 
   gSPMatrix(dl++, &camera->translation_matrix, 5);
   gSPMatrix(dl++, &camera->scale_matrix, 5);
@@ -202,18 +202,18 @@ Gfx* RenderDrawEntries(Gfx* dl, CameraContext* camera) {
         f32 z = pos.z + 24.0f;
         f32 x = pos.x;
         f32 y = pos.y;
-        guTranslate(&g_render_entries[i].translation_matrix, x, y, z);
+        GuTranslate(&g_render_entries[i].translation_matrix, x, y, z);
       } else {
-        guTranslate(&g_render_entries[i].translation_matrix, pos.x, pos.y, pos.z);
+        GuTranslate(&g_render_entries[i].translation_matrix, pos.x, pos.y, pos.z);
       }
       gSPMatrix(dl++, &g_render_entries[i].translation_matrix, 3);
 
       if (g_render_entries[i].flags & 0x20) {
-        guRotate(&g_render_entries[i].rotation_matrix_x, g_render_entries[i].rotation.x, 0.0f,
+        GuRotate(&g_render_entries[i].rotation_matrix_x, g_render_entries[i].rotation.x, 0.0f,
                  0.0f);
-        guRotate(&g_render_entries[i].rotation_matrix_y, 0.0f, g_render_entries[i].rotation.y,
+        GuRotate(&g_render_entries[i].rotation_matrix_y, 0.0f, g_render_entries[i].rotation.y,
                  0.0f);
-        guRotate(&g_render_entries[i].rotation_matrix_z, 0.0f, 0.0f,
+        GuRotate(&g_render_entries[i].rotation_matrix_z, 0.0f, 0.0f,
                  g_render_entries[i].rotation.z);
         gSPMatrix(dl++, &g_render_entries[i].rotation_matrix_x, 1);
         gSPMatrix(dl++, &g_render_entries[i].rotation_matrix_y, 1);
@@ -221,7 +221,7 @@ Gfx* RenderDrawEntries(Gfx* dl, CameraContext* camera) {
       }
 
       if (g_render_entries[i].flags & 0x10) {
-        guScale(&g_render_entries[i].scale_matrix, g_render_entries[i].scale.x,
+        GuScale(&g_render_entries[i].scale_matrix, g_render_entries[i].scale.x,
                 g_render_entries[i].scale.y, g_render_entries[i].scale.z);
         gSPMatrix(dl++, &g_render_entries[i].scale_matrix, 1);
       }

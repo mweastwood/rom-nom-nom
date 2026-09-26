@@ -53,9 +53,9 @@ s32 RenderSetScale(s32 index, f32 x, f32 y, f32 z);
 void RenderNoOp2(void);
 Gfx* RenderDrawEntries(Gfx* dl, CameraContext* camera);
 
-void guTranslate(Mtx* m, f32 x, f32 y, f32 z);
-void guScale(Mtx* m, f32 x, f32 y, f32 z);
-void guRotate(Mtx* m, f32 x, f32 y, f32 z);
+void GuTranslate(Mtx* m, f32 x, f32 y, f32 z);
+void GuScale(Mtx* m, f32 x, f32 y, f32 z);
+void GuRotate(Mtx* m, f32 x, f32 y, f32 z);
 
 f32 SinDegrees(f32 angle);
 f32 CosDegrees(f32 angle);

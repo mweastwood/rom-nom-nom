@@ -20,12 +20,12 @@ void MockUltra64Reset(void) {
   g_idle_callback = NULL;
 }
 
-void os_initialize(void) {
+void OsInitialize(void) {
   g_mock_state.os_initialize_calls++;
 }
 
-void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
-                      OSPri pri) {
+void OsCreateThread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp,
+                    OSPri pri) {
   if (g_mock_state.os_create_thread_calls < 16) {
     MockThreadRecord* rec = &g_mock_state.created_threads[g_mock_state.os_create_thread_calls];
     rec->thread = thread;
@@ -38,14 +38,14 @@ void os_create_thread(OSThread* thread, OSId id, void (*entry)(void*), void* arg
   g_mock_state.os_create_thread_calls++;
 }
 
-void os_start_thread(OSThread* thread) {
+void OsStartThread(OSThread* thread) {
   if (g_mock_state.os_start_thread_calls < 16) {
     g_mock_state.started_threads[g_mock_state.os_start_thread_calls] = thread;
   }
   g_mock_state.os_start_thread_calls++;
 }
 
-void os_set_thread_priority(OSThread* thread, OSPri pri) {
+void OsSetThreadPriority(OSThread* thread, OSPri pri) {
   if (g_mock_state.os_set_thread_priority_calls < 16) {
     g_mock_state.priority_changes[g_mock_state.os_set_thread_priority_calls].thread = thread;
     g_mock_state.priority_changes[g_mock_state.os_set_thread_priority_calls].pri = pri;

@@ -5,9 +5,9 @@
 
 typedef f32 MtxF[4][4];
 
-void guMtxF2L(MtxF mf, Mtx* m);
-void guMtxL2F(MtxF mf, Mtx* m);
-void guMtxIdentF(MtxF mf);
-void guMtxIdent(Mtx* m);
+void GuMtxF2L(MtxF mf, Mtx* m);
+void GuMtxL2F(MtxF mf, Mtx* m);
+void GuMtxIdentF(MtxF mf);
+void GuMtxIdent(Mtx* m);
 
 #endif

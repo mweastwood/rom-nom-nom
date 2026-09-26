@@ -1,25 +1,25 @@
 // Visit https://github.com/ethteck/splat/wiki/Adding-Symbols for documentation about this file
-entrypoint = 0x80025C00; // type:func
+Entrypoint = 0x80025C00; // type:func
 main = 0x80025C50; // type:func
 idle = 0x80025CB4; // type:func
 mainproc = 0x80025D90; // type:func
 
 // Libultra OS routines
-guRotate = 0x800FEEB8; // type:func
-guScale = 0x800FF0B0; // type:func
-guTranslate = 0x800FF324; // type:func
-os_create_thread = 0x800FF630; // type:func
-os_set_thread_priority = 0x800FF960; // type:func
-os_start_thread = 0x800FFA30; // type:func
-os_initialize = 0x80106D70; // type:func
+GuRotate = 0x800FEEB8; // type:func
+GuScale = 0x800FF0B0; // type:func
+GuTranslate = 0x800FF324; // type:func
+OsCreateThread = 0x800FF630; // type:func
+OsSetThreadPriority = 0x800FF960; // type:func
+OsStartThread = 0x800FFA30; // type:func
+OsInitialize = 0x80106D70; // type:func
 
 // 64DD (Project Leo) IPL boot vectors
-leo_boot_reset = 0x84001008; // type:func absolute:True
-leo_boot_read = 0x8400103C; // type:func absolute:True
-leo_boot_entry = 0x84001064; // type:func absolute:True
-leo_boot_resume = 0x840010BC; // type:func absolute:True
-leo_boot_command = 0x84001120; // type:func absolute:True
-leo_boot_status = 0x8400114C; // type:func absolute:True
+LeoBootReset = 0x84001008; // type:func absolute:True
+LeoBootRead = 0x8400103C; // type:func absolute:True
+LeoBootEntry = 0x84001064; // type:func absolute:True
+LeoBootResume = 0x840010BC; // type:func absolute:True
+LeoBootCommand = 0x84001120; // type:func absolute:True
+LeoBootStatus = 0x8400114C; // type:func absolute:True
 
 // --- Decompiled Function Entrypoints ---
 
@@ -144,18 +144,19 @@ SoundPlayEffect = 0x800ACC50; // type:func
 SoundAreVoicesInactive = 0x800ACD18; // type:func
 
 // Libultra Functions
-sqrtf = 0x800FDC40; // type:func
-__sinf = 0x800FDC50; // type:func
-guLookAtF = 0x800FDDA0; // type:func
-guLookAt = 0x800FE120; // type:func
-guMtxF2L = 0x800FE4B0; // type:func
-guMtxL2F = 0x800FE548; // type:func
-guMtxIdentF = 0x800FE5F0; // type:func
-guMtxIdent = 0x800FE640; // type:func
-guOrthoF = 0x800FE730; // type:func
-guOrtho = 0x800FE860; // type:func
-guScaleF = 0x800FF050; // type:func
-guTranslateF = 0x800FF2D0; // type:func
+Sqrtf = 0x800FDC40; // type:func
+Sinf = 0x800FDC50; // type:func
+Cosf = 0x800FF130; // type:func
+GuLookAtF = 0x800FDDA0; // type:func
+GuLookAt = 0x800FE120; // type:func
+GuMtxF2L = 0x800FE4B0; // type:func
+GuMtxL2F = 0x800FE548; // type:func
+GuMtxIdentF = 0x800FE5F0; // type:func
+GuMtxIdent = 0x800FE640; // type:func
+GuOrthoF = 0x800FE730; // type:func
+GuOrtho = 0x800FE860; // type:func
+GuScaleF = 0x800FF050; // type:func
+GuTranslateF = 0x800FF2D0; // type:func
 
 // Audio Global Symbols
 kAudioMinPitch = 0x8011EE00;

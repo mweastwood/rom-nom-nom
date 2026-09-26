@@ -1,10 +1,10 @@
 #include "libultra_gu_ortho.h"
 
-inline void guOrthoF(MtxF mf, f32 l, f32 r, f32 b, f32 t, f32 n, f32 f, f32 scale) {
+inline void GuOrthoF(MtxF mf, f32 l, f32 r, f32 b, f32 t, f32 n, f32 f, f32 scale) {
   int i, j;
   f32 delx, dely, delz;
 
-  guMtxIdentF(mf);
+  GuMtxIdentF(mf);
 
   delx = r - l;
   dely = t - b;
@@ -25,9 +25,9 @@ inline void guOrthoF(MtxF mf, f32 l, f32 r, f32 b, f32 t, f32 n, f32 f, f32 scal
   }
 }
 
-void guOrtho(Mtx* m, f32 l, f32 r, f32 b, f32 t, f32 n, f32 f, f32 scale) {
+void GuOrtho(Mtx* m, f32 l, f32 r, f32 b, f32 t, f32 n, f32 f, f32 scale) {
   MtxF mf;
 
-  guOrthoF(mf, l, r, b, t, n, f, scale);
-  guMtxF2L(mf, m);
+  GuOrthoF(mf, l, r, b, t, n, f, scale);
+  GuMtxF2L(mf, m);
 }
