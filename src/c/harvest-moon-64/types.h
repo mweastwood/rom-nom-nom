@@ -17,6 +17,12 @@ typedef double f64;
 #define NULL 0
 #endif
 
+#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
+#define NOP() __asm__ volatile("nop")
+#else
+#define NOP() ((void)0)
+#endif
+
 typedef s32 OSId;
 typedef s32 OSPri;
 

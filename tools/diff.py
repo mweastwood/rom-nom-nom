@@ -309,7 +309,11 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             f"-I{asm_dir.parent}",
             f"-I{asm_dir.parent.parent}",
         ]
-        macro_inc = asm_dir / "macro.inc"
+        macro_inc = REPO_ROOT / "splat" / f"{game}_macro.inc"
+        if not macro_inc.exists():
+            macro_inc = asm_dir / "c_macro.inc"
+        if not macro_inc.exists():
+            macro_inc = asm_dir / "macro.inc"
         if macro_inc.exists():
             as_cmd.append(str(macro_inc))
         as_cmd.extend([str(temp_s), "-o", str(temp_o)])

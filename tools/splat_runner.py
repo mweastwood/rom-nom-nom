@@ -82,6 +82,12 @@ def main():
         filtered_lines = [l for l in lines if not l.strip().startswith(".internal")]
         macro_inc.write_text("".join(filtered_lines), encoding="utf-8")
 
+    # Generate c_macro.inc for C compilation units if game-specific macro file exists
+    game_macro = repo_root / "splat" / f"{basename}_macro.inc"
+    if game_macro.exists():
+        c_macro_inc = args.out_asm / "c_macro.inc"
+        c_macro_inc.write_text(game_macro.read_text(encoding="utf-8"), encoding="utf-8")
+
 
 if __name__ == "__main__":
     main()

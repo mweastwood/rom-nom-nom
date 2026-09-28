@@ -106,9 +106,20 @@ bazel run //:m2c -- func_800266C0
    ```
    *** [MATCH 100%] N/N instructions match bit-exact! ***
    ```
-5. **Header File & Global Symbol Hygiene**:
+5. **Hardware Hazard Handling & Assembler Macros (`splat/<game>_macro.inc`)**:
+   - Upstream `mips-binutils-2.6 v0.3` faithfully assembles MIPS I/II/III instructions but occasionally omits hardware hazard NOPs that the original 1999 SGI/KMC toolchain generated (such as COP1 condition code hazards after `c.lt.d` or coprocessor load/arithmetic pipeline delays before `mul.s`).
+   - Hardware hazard delays for compiled C units are handled via clean assembler macros defined in `splat/<game>_macro.inc` (passed transparently to the assembler via `c_macro.inc` by `tools/build_rom.py` and `tools/diff.py`). This avoids inline assembly barriers (`__asm__`) that would otherwise disrupt GCC 2.7.2's branch delay-slot optimizer (`reorg.c`).
+   - For cases where manual inline NOP placement is explicitly needed in C code, use the standardized `NOP()` macro defined in `types.h`:
+     ```c
+     #include "types.h"
+     ...
+     NOP();
+     ```
+   - `NOP()` expands to `__asm__ volatile("nop")` targeting MIPS, and safely resolves to a no-op `((void)0)` when compiled under modern host C++20 test targets.
+6. **Header File & Global Symbol Hygiene**:
    - Place function prototypes, struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files.
    - Define global variable symbols with human-readable semantic names in `symbols/<game>.txt` (e.g. `g_audio_voices = 0x801FB690;`). This prompts splat to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
+   - Standardize `c_flags` in `splat/<game>.yaml`: modules use `default: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]`. Custom per-module entries should only be specified when genuinely diverging from the default (such as `boot: ["-O0"]` or Libultra `-Wa,-O2` / `-V`). Do not repeat redundant entries that match the default.
    - Verify header and symbol completeness using `bazel run //:progress -- -m <module>`, `bazel run //:progress -- -s`, or `bazel run //:progress -- -g`.
 
 ### Step 4: Update Splat Segment Split (When File is Complete)
