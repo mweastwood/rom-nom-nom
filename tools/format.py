@@ -13,7 +13,8 @@ else:
     REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler"]
-EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
+EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".proto"}
+
 
 
 def find_files():

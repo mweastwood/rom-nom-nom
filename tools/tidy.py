@@ -34,11 +34,12 @@ def find_files():
 def get_compile_args(file_path: Path):
     includes = [
         f"-I{REPO_ROOT}",
+        f"-I{REPO_ROOT / 'bazel-bin'}",
         f"-I{REPO_ROOT / 'src' / 'c' / 'harvest-moon-64'}",
         f"-I{REPO_ROOT / 'src' / 'cc' / 'harvest-moon-64'}",
         f"-I{REPO_ROOT / 'mocks' / 'ultra64'}",
     ]
-    # Check if googletest and abseil headers are available
+    # Check if googletest, abseil, and protobuf headers are available
     external_candidates = [
         REPO_ROOT / "bazel-rom-nom-nom" / "external" / "googletest+" / "googletest" / "include",
         REPO_ROOT / "bazel-rom-nom-nom" / "external" / "abseil-cpp+",
@@ -50,10 +51,19 @@ def get_compile_args(file_path: Path):
             external_candidates.append(p)
         for p in (output_base / "external").glob("*abseil-cpp*"):
             external_candidates.append(p)
+        for p in (output_base / "external").glob("*protobuf*/src"):
+            external_candidates.append(p)
+
+    bin_symlink = REPO_ROOT / "bazel-bin"
+    if bin_symlink.is_symlink():
+        bin_dir = bin_symlink.resolve()
+        for p in (bin_dir / "external").glob("*protobuf*/**/_virtual_includes/*"):
+            external_candidates.append(p)
 
     for ext_dir in external_candidates:
         if ext_dir.exists():
             includes.append(f"-I{ext_dir}")
+
 
     is_cpp = (
         file_path.suffix in {".cc", ".cpp"}

@@ -1,0 +1,53 @@
+edition = "2024";
+
+package rom_nom_nom;
+
+enum SegmentType {
+  SEGMENT_TYPE_UNSPECIFIED = 0;
+  SEGMENT_HEADER = 1;
+  SEGMENT_BIN = 2;
+  SEGMENT_CODE = 3;
+  SEGMENT_DATA = 4;
+  SEGMENT_RODATA = 5;
+  SEGMENT_BSS = 6;
+}
+
+enum SubsegmentType {
+  SUBSEGMENT_TYPE_UNSPECIFIED = 0;
+  SUBSEGMENT_ASM = 1;
+  SUBSEGMENT_C = 2;
+  SUBSEGMENT_HASM = 3;
+  SUBSEGMENT_DATA = 4;
+  SUBSEGMENT_RODATA = 5;
+  SUBSEGMENT_BIN = 6;
+}
+
+message Subsegment {
+  uint32 rom_start = 1;
+  SubsegmentType type = 2;
+  string name = 3;
+  uint32 vram = 4;
+}
+
+message Segment {
+  string name = 1;
+  SegmentType type = 2;
+  uint32 rom_start = 3;
+  uint32 rom_end = 4;
+  uint32 vram = 5;
+  uint32 bss_size = 6;
+  repeated Subsegment subsegments = 7;
+}
+
+message CompilerFlags {
+  repeated string flags = 1;
+}
+
+message SplitConfig {
+  string game_name = 1;
+  string sha1 = 2;
+  string basename = 3;
+  repeated string symbol_files = 4;
+  repeated Segment segments = 5;
+  map<string, CompilerFlags> c_flags = 6;
+}

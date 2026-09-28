@@ -9,3 +9,9 @@ IndentWidth: 2
 AllowShortFunctionsOnASingleLine: Inline
 SortIncludes: CaseSensitive
 IncludeBlocks: Regroup
+---
+Language: Proto
+BasedOnStyle: Google
+ColumnLimit: 100
+IndentWidth: 2
+
