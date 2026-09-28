@@ -3,13 +3,15 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 
 #include "gtest/gtest.h"
 
 namespace rom_nom_nom {
 namespace {
 
-constexpr const char* kValidConfigText = R"pb(
+constexpr std::string_view kValidConfigText = R"pb(
+
   game_name: "Harvest Moon 64 (USA)"
   sha1: "90631460f1876a14849df0541d534012b410a34c"
   basename: "harvest-moon-64"
@@ -84,28 +86,28 @@ TEST(ConfigTest, ParseValidTextproto) {
 }
 
 TEST(ConfigTest, RejectInvalidSyntax) {
-  constexpr const char* kBadSyntax = "invalid_field_123: [";
+  constexpr std::string_view kBadSyntax = "invalid_field_123: [";
   auto config_or = ParseSplitConfig(kBadSyntax);
   EXPECT_FALSE(config_or.ok());
   EXPECT_EQ(config_or.status().code(), absl::StatusCode::kInvalidArgument);
 }
 
 TEST(ConfigTest, RejectMissingRequiredFields) {
-  constexpr const char* kMissingName = R"pb(
+  constexpr std::string_view kMissingName = R"pb(
     sha1: "90631460f1876a14849df0541d534012b410a34c"
     basename: "harvest-moon-64"
     segments { name: "header" type: SEGMENT_HEADER rom_start: 0x0 }
   )pb";
   EXPECT_FALSE(ParseSplitConfig(kMissingName).ok());
 
-  constexpr const char* kMissingSha1 = R"pb(
+  constexpr std::string_view kMissingSha1 = R"pb(
     game_name: "Harvest Moon 64 (USA)"
     basename: "harvest-moon-64"
     segments { name: "header" type: SEGMENT_HEADER rom_start: 0x0 }
   )pb";
   EXPECT_FALSE(ParseSplitConfig(kMissingSha1).ok());
 
-  constexpr const char* kMissingSegments = R"pb(
+  constexpr std::string_view kMissingSegments = R"pb(
     game_name: "Harvest Moon 64 (USA)"
     sha1: "90631460f1876a14849df0541d534012b410a34c"
     basename: "harvest-moon-64"
@@ -114,7 +116,7 @@ TEST(ConfigTest, RejectMissingRequiredFields) {
 }
 
 TEST(ConfigTest, RejectNonMonotonicSegments) {
-  constexpr const char* kOutOfOrder = R"pb(
+  constexpr std::string_view kOutOfOrder = R"pb(
     game_name: "Test"
     sha1: "1234567890123456789012345678901234567890"
     basename: "test"
