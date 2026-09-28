@@ -65,11 +65,16 @@ def get_compile_args(file_path: Path):
     )
 
     if is_cpp:
-        args = ["-x", "c++", "-std=c++17"] if file_path.suffix == ".h" else ["-std=c++17"]
+        args = (
+            ["-x", "c++", "-std=c++17", "-fno-exceptions"]
+            if file_path.suffix == ".h"
+            else ["-std=c++17", "-fno-exceptions"]
+        )
     else:
         args = ["-x", "c", "-ffreestanding"] if file_path.suffix == ".h" else ["-ffreestanding"]
 
     return args + includes
+
 
 
 def check_naming_integrity(files):
