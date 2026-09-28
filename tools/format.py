@@ -12,7 +12,7 @@ if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
 else:
     REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SEARCH_DIRS = ["src", "mocks", "tests"]
+SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler"]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
 
 

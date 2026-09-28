@@ -13,7 +13,7 @@ if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
 else:
     REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SEARCH_DIRS = ["src", "mocks", "tests"]
+SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler"]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
 
 
@@ -38,29 +38,34 @@ def get_compile_args(file_path: Path):
         f"-I{REPO_ROOT / 'src' / 'cc' / 'harvest-moon-64'}",
         f"-I{REPO_ROOT / 'mocks' / 'ultra64'}",
     ]
-    # Check if googletest headers are available
-    gtest_candidates = [
+    # Check if googletest and abseil headers are available
+    external_candidates = [
         REPO_ROOT / "bazel-rom-nom-nom" / "external" / "googletest+" / "googletest" / "include",
+        REPO_ROOT / "bazel-rom-nom-nom" / "external" / "abseil-cpp+",
     ]
     symlink = REPO_ROOT / "bazel-rom-nom-nom"
     if symlink.is_symlink():
         output_base = symlink.resolve().parent.parent
         for p in (output_base / "external").glob("*googletest*/googletest/include"):
-            gtest_candidates.append(p)
+            external_candidates.append(p)
+        for p in (output_base / "external").glob("*abseil-cpp*"):
+            external_candidates.append(p)
 
-    for gtest_dir in gtest_candidates:
-        if gtest_dir.exists():
-            includes.append(f"-I{gtest_dir}")
-            break
+    for ext_dir in external_candidates:
+        if ext_dir.exists():
+            includes.append(f"-I{ext_dir}")
 
     is_cpp = (
         file_path.suffix in {".cc", ".cpp"}
         or "src/cc" in str(file_path)
         or "tests" in str(file_path)
+        or "core" in str(file_path)
+        or "splitter" in str(file_path)
+        or "decompiler" in str(file_path)
     )
 
     if is_cpp:
-        args = ["-x", "c++", "-std=c++20"] if file_path.suffix == ".h" else ["-std=c++20"]
+        args = ["-x", "c++", "-std=c++17"] if file_path.suffix == ".h" else ["-std=c++17"]
     else:
         args = ["-x", "c", "-ffreestanding"] if file_path.suffix == ".h" else ["-ffreestanding"]
 
