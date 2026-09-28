@@ -25,3 +25,24 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "sha1",
+    srcs = ["sha1.cc"],
+    hdrs = ["sha1.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "sha1_test",
+    srcs = ["sha1_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":sha1",
+        "@googletest//:gtest_main",
+    ],
+)
