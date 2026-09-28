@@ -46,3 +46,32 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "rom",
+    srcs = ["rom.cc"],
+    hdrs = ["rom.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":sha1",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "rom_test",
+    srcs = ["rom_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":rom",
+        ":sha1",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+
