@@ -136,5 +136,36 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "relocations",
+    srcs = ["relocations.cc"],
+    hdrs = ["relocations.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":symbol_registry",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "relocations_test",
+    srcs = ["relocations_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":relocations",
+        ":symbol_registry",
+        "//core:mips",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
