@@ -1,0 +1,26 @@
+edition = "2024";
+
+package rom_nom_nom;
+
+enum SymbolType {
+  SYMBOL_TYPE_UNSPECIFIED = 0;
+  SYMBOL_FUNC = 1;
+  SYMBOL_DATA = 2;
+  SYMBOL_RODATA = 3;
+  SYMBOL_BSS = 4;
+  SYMBOL_LABEL = 5;
+}
+
+message SymbolRegistryEntry {
+  string name = 1;
+  uint32 address = 2;
+  SymbolType type = 3;
+  uint32 size = 4;
+  bool is_absolute = 5;
+  uint32 rom_offset = 6;
+  string description = 7;
+}
+
+message SymbolRegistry {
+  repeated SymbolRegistryEntry entries = 1;
+}
