@@ -166,6 +166,32 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "jump_tables",
+    srcs = ["jump_tables.cc"],
+    hdrs = ["jump_tables.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "jump_tables_test",
+    srcs = ["jump_tables_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":jump_tables",
+        ":symbol_registry",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
 
