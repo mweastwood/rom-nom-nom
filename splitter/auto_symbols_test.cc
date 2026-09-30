@@ -154,5 +154,29 @@ TEST(AutoSymbolsTest, ExportToRegistry) {
   EXPECT_EQ(proto.entries(1).type(), SYMBOL_DATA);
 }
 
+TEST(AutoSymbolsTest, PreservesFuncTypeWhenTargetHasDataRelocations) {
+  AutoSymbolFinder finder;
+
+  std::vector<Instruction> instructions;
+  // jal 0x800E9C20 -> 0x0C03A708 at PC 0x80025C00
+  instructions.push_back(*DecodeInstruction(0x0C03A708, 0x80025C00));
+  // lui $t0, 0x800F (%hi of 0x800E9C20)
+  instructions.push_back(*DecodeInstruction(0x3C08800F, 0x80025C04));
+  // addiu $t0, $t0, -25568 (0x9C20, %lo of 0x800E9C20)
+  instructions.push_back(*DecodeInstruction(0x25089C20, 0x80025C08));
+
+  ASSERT_TRUE(finder.ScanInstructions(instructions).ok());
+
+  auto funcs = finder.DiscoveredFuncSymbols();
+  ASSERT_EQ(funcs.size(), 1u);
+  EXPECT_EQ(funcs[0].address, 0x800E9C20u);
+  EXPECT_EQ(funcs[0].name, "func_800E9C20");
+  EXPECT_EQ(funcs[0].type, SYMBOL_FUNC);
+
+  // Should NOT be in data symbols
+  auto data_syms = finder.DiscoveredDataSymbols();
+  EXPECT_TRUE(data_syms.empty());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

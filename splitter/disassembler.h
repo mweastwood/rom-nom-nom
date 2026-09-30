@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "splitter/relocations.h"
@@ -47,6 +48,15 @@ class Disassembler {
   // Optionally attaches a pre-computed relocation tracker.
   void SetRelocationTracker(const RelocationTracker* tracker) { reloc_tracker_ = tracker; }
 
+  // Registers an address as a known function entrypoint.
+  void RegisterFunctionEntrypoint(uint32_t vram_address) {
+    known_entrypoints_.insert(vram_address);
+  }
+
+  // Pre-scans a code buffer for jal instructions to discover function entrypoints,
+  // and branches/jumps to discover segment-wide labels.
+  void PreScanCode(absl::Span<const uint8_t> code, uint32_t vram_start);
+
   // Disassembles a single 32-bit instruction word at given PC.
   std::string DisassembleInstruction(uint32_t raw_word, uint32_t pc) const;
 
@@ -66,6 +76,8 @@ class Disassembler {
   const SymbolIndex* symbols_ = nullptr;
   DisassemblerOptions options_;
   const RelocationTracker* reloc_tracker_ = nullptr;
+  absl::flat_hash_set<uint32_t> known_entrypoints_;
+  absl::flat_hash_set<uint32_t> segment_labels_;
 };
 
 }  // namespace rom_nom_nom

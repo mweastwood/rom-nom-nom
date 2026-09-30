@@ -109,6 +109,33 @@ std::string Disassembler::DisassembleInstruction(uint32_t raw_word, uint32_t pc)
   return inst.Disassemble();
 }
 
+void Disassembler::PreScanCode(absl::Span<const uint8_t> code, uint32_t vram_start) {
+  for (size_t offset = 0; offset + 4 <= code.size(); offset += 4) {
+    uint32_t pc = vram_start + static_cast<uint32_t>(offset);
+    uint32_t raw_word = ReadBe32(code.data() + offset);
+    auto inst_or = DecodeInstruction(raw_word, pc);
+    if (!inst_or.ok()) {
+      continue;
+    }
+    const Instruction& inst = *inst_or;
+    if (inst.opcode == Opcode::kJal) {
+      uint32_t target = inst.JumpTarget();
+      if ((target >= 0x80000000 && target < 0x80800000) ||
+          (target >= 0xA0000000 && target < 0xA0800000)) {
+        known_entrypoints_.insert(target);
+      }
+    } else if (inst.IsBranch()) {
+      uint32_t target = inst.BranchTarget();
+      segment_labels_.insert(target);
+    } else if (inst.opcode == Opcode::kJ) {
+      uint32_t target = inst.JumpTarget();
+      if (target >= vram_start && target < vram_start + code.size()) {
+        segment_labels_.insert(target);
+      }
+    }
+  }
+}
+
 absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
     absl::Span<const uint8_t> code, uint32_t vram_start) const {
   if (code.size() < 4) {
@@ -117,13 +144,21 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
 
   // Pass 1: Determine function boundary
   size_t func_end_offset = code.size();
+  uint32_t max_forward_target = 0;
+
   for (size_t offset = 0; offset + 4 <= code.size(); offset += 4) {
     uint32_t pc = vram_start + static_cast<uint32_t>(offset);
 
     // If next function entry is registered, end current function here
-    if (offset > 0 && symbols_ && symbols_->HasAddress(pc)) {
-      const auto* entry = symbols_->FindByAddress(pc);
-      if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+    if (offset > 0) {
+      bool is_entrypoint = known_entrypoints_.contains(pc);
+      if (!is_entrypoint && symbols_ && symbols_->HasAddress(pc)) {
+        const auto* entry = symbols_->FindByAddress(pc);
+        if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+          is_entrypoint = true;
+        }
+      }
+      if (is_entrypoint) {
         func_end_offset = offset;
         break;
       }
@@ -136,24 +171,39 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
     }
     const Instruction& inst = *inst_or;
 
-    if (inst.IsReturn()) {
-      // jr $ra return: include delay slot instruction
-      func_end_offset = std::min<size_t>(offset + 8, code.size());
-
-      // Include trailing alignment NOPs up to next symbol or non-zero instruction
-      size_t next_offset = func_end_offset;
-      while (next_offset + 4 <= code.size()) {
-        uint32_t next_pc = vram_start + static_cast<uint32_t>(next_offset);
-        if (symbols_ && symbols_->HasAddress(next_pc)) {
-          break;
-        }
-        if (ReadBe32(code.data() + next_offset) != 0) {
-          break;
-        }
-        func_end_offset = next_offset + 4;
-        next_offset += 4;
+    // Track forward branch targets to avoid cutting functions on early returns
+    if (inst.IsBranch()) {
+      uint32_t target = inst.BranchTarget();
+      if (target > pc) {
+        max_forward_target = std::max(max_forward_target, target);
       }
-      break;
+    } else if (inst.opcode == Opcode::kJ) {
+      uint32_t target = inst.JumpTarget();
+      if (target > pc && target < vram_start + code.size()) {
+        max_forward_target = std::max(max_forward_target, target);
+      }
+    }
+
+    if (inst.IsReturn()) {
+      // jr $ra return: include delay slot instruction if no forward branch jumps past it
+      if (max_forward_target <= pc + 4) {
+        func_end_offset = std::min<size_t>(offset + 8, code.size());
+
+        // Include trailing alignment NOPs up to next symbol or non-zero instruction
+        size_t next_offset = func_end_offset;
+        while (next_offset + 4 <= code.size()) {
+          uint32_t next_pc = vram_start + static_cast<uint32_t>(next_offset);
+          if (known_entrypoints_.contains(next_pc) || (symbols_ && symbols_->HasAddress(next_pc))) {
+            break;
+          }
+          if (ReadBe32(code.data() + next_offset) != 0) {
+            break;
+          }
+          func_end_offset = next_offset + 4;
+          next_offset += 4;
+        }
+        break;
+      }
     }
   }
 
@@ -217,7 +267,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
     d_inst.raw_word = raw_word;
     d_inst.line_comment = absl::StrFormat("/* %08X %08X */", pc, raw_word);
 
-    if (local_labels.contains(pc)) {
+    if (local_labels.contains(pc) || segment_labels_.contains(pc)) {
       absl::StrAppend(&asm_text, absl::StrFormat(".L%08X:\n", pc));
     }
 
@@ -241,7 +291,18 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
       formatted = absl::StrFormat("jal    %s", target_name);
     } else if (inst.opcode == Opcode::kJ) {
       uint32_t target = inst.JumpTarget();
-      if (local_labels.contains(target)) {
+      bool target_is_func = known_entrypoints_.contains(target);
+      if (!target_is_func && symbols_ && symbols_->HasAddress(target)) {
+        const auto* entry = symbols_->FindByAddress(target);
+        if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+          target_is_func = true;
+        }
+      }
+      if (target_is_func) {
+        std::string target_name = symbols_ ? symbols_->LookupOrSynthesizeName(target, SYMBOL_FUNC)
+                                           : absl::StrFormat("func_%08X", target);
+        formatted = absl::StrFormat("j      %s", target_name);
+      } else if (local_labels.contains(target) || segment_labels_.contains(target)) {
         formatted = absl::StrFormat("j      .L%08X", target);
       } else {
         std::string target_name = symbols_ ? symbols_->LookupOrSynthesizeName(target, SYMBOL_FUNC)
@@ -250,10 +311,20 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
       }
     } else if (inst.IsBranch()) {
       uint32_t target = inst.BranchTarget();
-      std::string label = local_labels.contains(target)
-                              ? absl::StrFormat(".L%08X", target)
-                              : (symbols_ ? symbols_->LookupOrSynthesizeName(target, SYMBOL_LABEL)
-                                          : absl::StrFormat(".L%08X", target));
+      bool target_is_func = known_entrypoints_.contains(target);
+      if (!target_is_func && symbols_ && symbols_->HasAddress(target)) {
+        const auto* entry = symbols_->FindByAddress(target);
+        if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+          target_is_func = true;
+        }
+      }
+      std::string label;
+      if (target_is_func) {
+        label = symbols_ ? symbols_->LookupOrSynthesizeName(target, SYMBOL_FUNC)
+                         : absl::StrFormat("func_%08X", target);
+      } else {
+        label = absl::StrFormat(".L%08X", target);
+      }
       formatted = FormatBranch(inst, label);
     } else if (active_tracker != nullptr && active_tracker->FindRelocation(pc) != nullptr) {
       formatted = active_tracker->FormatInstruction(inst);
@@ -298,6 +369,7 @@ absl::StatusOr<std::vector<DisassembledFunction>> Disassembler::DisassembleAllFu
 
   Disassembler func_disasm = *this;
   func_disasm.SetRelocationTracker(active_tracker);
+  func_disasm.PreScanCode(code, vram_start);
 
   std::vector<DisassembledFunction> functions;
   size_t offset = 0;

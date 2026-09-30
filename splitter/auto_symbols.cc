@@ -98,9 +98,11 @@ absl::Status AutoSymbolFinder::ScanInstructions(absl::Span<const Instruction> in
     uint32_t target = reloc.target_vram;
     if (!IsDefinedAddress(target) && IsAllowedAddress(target)) {
       auto& entry = discovered_[target];
-      entry.address = target;
-      entry.name = absl::StrFormat("D_%08X", target);
-      entry.type = SYMBOL_DATA;
+      if (entry.type != SYMBOL_FUNC) {
+        entry.address = target;
+        entry.name = absl::StrFormat("D_%08X", target);
+        entry.type = SYMBOL_DATA;
+      }
       entry.reference_count++;
     }
   }

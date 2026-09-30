@@ -306,5 +306,87 @@ TEST(DisassemblerTest, UsesExternalRelocationTracker) {
             "addiu $a0, $a0, %lo(g_custom_table)");
 }
 
+TEST(DisassemblerTest, DisassembleFunctionWithMultipleReturns) {
+  // Construct a function with an early return skipped by a forward branch:
+  // 80700000: bne   $a0, $0, .L80700010 (+3)
+  // 80700004:  nop
+  // 80700008: jr    $ra                    (early return)
+  // 8070000C:  addiu $v0, $0, 1
+  // 80700010: addiu $v0, $0, 2             (.L80700010)
+  // 80700014: jr    $ra                    (final return)
+  // 80700018:  nop
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x14800003);  // bne $a0, $0, +3 (target: 0x80700010)
+  AppendWord(code, 0x00000000);  // nop
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x24020001);  // addiu $v0, $0, 1
+  AppendWord(code, 0x24020002);  // addiu $v0, $0, 2
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  Disassembler disasm(nullptr, options);
+
+  auto func_or = disasm.DisassembleFunction(code, 0x80700000);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+
+  const auto& func = *func_or;
+  EXPECT_EQ(func.vram_start, 0x80700000u);
+  EXPECT_EQ(func.vram_end, 0x8070001Cu);
+  EXPECT_EQ(func.Size(), 0x1Cu);
+  EXPECT_EQ(func.instructions.size(), 7u);
+
+  // Verify that .L80700010 label was emitted
+  EXPECT_NE(func.emitted_assembly.find(".L80700010:\n"), std::string::npos);
+  EXPECT_EQ(func.emitted_assembly,
+            "  bnez   $a0, .L80700010\n"
+            "   nop\n"
+            "  jr    $ra\n"
+            "   addiu $v0, $zero, 1\n"
+            ".L80700010:\n"
+            "  addiu $v0, $zero, 2\n"
+            "  jr    $ra\n"
+            "   nop\n");
+}
+
+TEST(DisassemblerTest, PreScanCodeDiscoversJalEntrypoints) {
+  // Construct two functions in a single buffer:
+  // Func 1 (0x80700000):
+  // 80700000: jal   0x80700010 (target: Func 2)
+  // 80700004:  nop
+  // 80700008: jr    $ra
+  // 8070000C:  nop
+  // Func 2 (0x80700010):
+  // 80700010: jr    $ra
+  // 80700014:  nop
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x0C000000 | (0x00700010 >> 2));  // jal 0x80700010
+  AppendWord(code, 0x00000000);                      // nop
+  AppendWord(code, 0x03E00008);                      // jr $ra
+  AppendWord(code, 0x00000000);                      // nop
+  AppendWord(code, 0x03E00008);                      // jr $ra
+  AppendWord(code, 0x00000000);                      // nop
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  Disassembler disasm(nullptr, options);
+
+  auto funcs_or = disasm.DisassembleAllFunctions(code, 0x80700000);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+
+  const auto& funcs = *funcs_or;
+  ASSERT_EQ(funcs.size(), 2u);
+  EXPECT_EQ(funcs[0].name, "func_80700000");
+  EXPECT_EQ(funcs[0].vram_start, 0x80700000u);
+  EXPECT_EQ(funcs[0].vram_end, 0x80700010u);
+
+  EXPECT_EQ(funcs[1].name, "func_80700010");
+  EXPECT_EQ(funcs[1].vram_start, 0x80700010u);
+  EXPECT_EQ(funcs[1].vram_end, 0x80700018u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
