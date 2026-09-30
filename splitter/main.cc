@@ -25,6 +25,8 @@ ABSL_FLAG(std::string, undefined_funcs_path, "",
           "Override output path for undefined_funcs_auto.txt");
 ABSL_FLAG(bool, verify_sha1, true, "Verify ROM SHA-1 matches split configuration");
 ABSL_FLAG(bool, emit_line_comments, true, "Emit instruction VRAM and hex comments in assembly");
+ABSL_FLAG(bool, emit_relocations, false,
+          "Emit %hi() and %lo() relocation macros in disassembled assembly");
 ABSL_FLAG(bool, verbose, false, "Print verbose progress messages");
 
 int main(int argc, char* argv[]) {
@@ -53,6 +55,7 @@ int main(int argc, char* argv[]) {
   options.undefined_funcs_path = absl::GetFlag(FLAGS_undefined_funcs_path);
   options.verify_sha1 = absl::GetFlag(FLAGS_verify_sha1);
   options.emit_line_comments = absl::GetFlag(FLAGS_emit_line_comments);
+  options.emit_relocations = absl::GetFlag(FLAGS_emit_relocations);
   options.verbose = absl::GetFlag(FLAGS_verbose);
 
   auto result_or = rom_nom_nom::RunSplitter(options);

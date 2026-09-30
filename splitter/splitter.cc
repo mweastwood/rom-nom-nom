@@ -165,6 +165,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     DisassemblerOptions disasm_options;
     disasm_options.emit_line_comments = options.emit_line_comments;
     disasm_options.emit_function_framing = true;
+    disasm_options.emit_relocations = options.emit_relocations;
     Disassembler disassembler(symbol_index.Empty() ? nullptr : &symbol_index, disasm_options);
 
     AutoSymbolFinder auto_symbols(symbol_index.Empty() ? nullptr : &symbol_index);

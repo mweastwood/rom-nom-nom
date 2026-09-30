@@ -25,6 +25,7 @@ struct SplitterOptions {
   bool disassemble_code = true;
   bool verify_sha1 = true;
   bool emit_line_comments = true;
+  bool emit_relocations = false;
   bool verbose = false;
 
   bool generate_undefined_symbols = true;

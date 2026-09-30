@@ -9,7 +9,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "core/mips.h"
+#include "splitter/relocations.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
@@ -37,11 +37,15 @@ struct DisassembledFunction {
 struct DisassemblerOptions {
   bool emit_line_comments = true;     // Emits /* VRAM RAW_HEX */ comments
   bool emit_function_framing = true;  // Emits .globl, .ent, .end, .set noat/noreorder
+  bool emit_relocations = false;      // Emits %hi(...) and %lo(...) via RelocationTracker
 };
 
 class Disassembler {
  public:
   explicit Disassembler(const SymbolIndex* symbols = nullptr, DisassemblerOptions options = {});
+
+  // Optionally attaches a pre-computed relocation tracker.
+  void SetRelocationTracker(const RelocationTracker* tracker) { reloc_tracker_ = tracker; }
 
   // Disassembles a single 32-bit instruction word at given PC.
   std::string DisassembleInstruction(uint32_t raw_word, uint32_t pc) const;
@@ -61,6 +65,7 @@ class Disassembler {
  private:
   const SymbolIndex* symbols_ = nullptr;
   DisassemblerOptions options_;
+  const RelocationTracker* reloc_tracker_ = nullptr;
 };
 
 }  // namespace rom_nom_nom

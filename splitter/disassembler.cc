@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -15,6 +16,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
+#include "splitter/relocations.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
@@ -101,6 +103,9 @@ std::string Disassembler::DisassembleInstruction(uint32_t raw_word, uint32_t pc)
                                 : absl::StrFormat("func_%08X", target);
     return absl::StrFormat("jal    %s", name);
   }
+  if (reloc_tracker_ != nullptr && reloc_tracker_->FindRelocation(pc) != nullptr) {
+    return reloc_tracker_->FormatInstruction(inst);
+  }
   return inst.Disassemble();
 }
 
@@ -153,6 +158,15 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
   }
 
   uint32_t vram_end = vram_start + static_cast<uint32_t>(func_end_offset);
+
+  // Relocation analysis (if enabled and no external tracker was provided)
+  const RelocationTracker* active_tracker = reloc_tracker_;
+  std::unique_ptr<RelocationTracker> local_tracker;
+  if (active_tracker == nullptr && options_.emit_relocations) {
+    local_tracker = std::make_unique<RelocationTracker>(symbols_);
+    (void)local_tracker->AnalyzeCode(code.subspan(0, func_end_offset), vram_start);
+    active_tracker = local_tracker.get();
+  }
 
   // Pass 2: Collect internal branch targets within function
   absl::flat_hash_set<uint32_t> local_labels;
@@ -241,6 +255,8 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
                               : (symbols_ ? symbols_->LookupOrSynthesizeName(target, SYMBOL_LABEL)
                                           : absl::StrFormat(".L%08X", target));
       formatted = FormatBranch(inst, label);
+    } else if (active_tracker != nullptr && active_tracker->FindRelocation(pc) != nullptr) {
+      formatted = active_tracker->FormatInstruction(inst);
     } else {
       formatted = inst.Disassemble();
     }
@@ -269,12 +285,26 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
 
 absl::StatusOr<std::vector<DisassembledFunction>> Disassembler::DisassembleAllFunctions(
     absl::Span<const uint8_t> code, uint32_t vram_start) const {
+  std::unique_ptr<RelocationTracker> buffer_tracker;
+  const RelocationTracker* active_tracker = reloc_tracker_;
+  if (active_tracker == nullptr && options_.emit_relocations) {
+    buffer_tracker = std::make_unique<RelocationTracker>(symbols_);
+    auto status = buffer_tracker->AnalyzeCode(code, vram_start);
+    if (!status.ok()) {
+      return status;
+    }
+    active_tracker = buffer_tracker.get();
+  }
+
+  Disassembler func_disasm = *this;
+  func_disasm.SetRelocationTracker(active_tracker);
+
   std::vector<DisassembledFunction> functions;
   size_t offset = 0;
 
   while (offset + 4 <= code.size()) {
     uint32_t current_vram = vram_start + static_cast<uint32_t>(offset);
-    auto func_or = DisassembleFunction(code.subspan(offset), current_vram);
+    auto func_or = func_disasm.DisassembleFunction(code.subspan(offset), current_vram);
     if (!func_or.ok()) {
       return func_or.status();
     }

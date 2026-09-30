@@ -180,5 +180,131 @@ TEST(DisassemblerTest, RejectEmptyBuffer) {
   EXPECT_FALSE(disasm.DisassembleFunction(empty, 0x80700000).ok());
 }
 
+TEST(DisassemblerTest, DefaultDoesNotEmitRelocations) {
+  // 80700000: lui   $a0, 0x8020
+  // 80700004: lw    $v0, 0x1234($a0)
+  // 80700008: jr    $ra
+  // 8070000C:  nop
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x3C048020);  // lui $a0, 0x8020
+  AppendWord(code, 0x8C821234);  // lw $v0, 0x1234($a0)
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  options.emit_relocations = false;
+  Disassembler disasm(nullptr, options);
+
+  auto func_or = disasm.DisassembleFunction(code, 0x80700000);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+
+  EXPECT_EQ(func_or->emitted_assembly,
+            "  lui   $a0, 0x8020\n"
+            "  lw    $v0, 4660($a0)\n"
+            "  jr    $ra\n"
+            "   nop\n");
+}
+
+TEST(DisassemblerTest, EmitsSynthesizedRelocationsWhenEnabled) {
+  // 80700000: lui   $a0, 0x8020
+  // 80700004: lw    $v0, 0x1234($a0)
+  // 80700008: jr    $ra
+  // 8070000C:  nop
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x3C048020);  // lui $a0, 0x8020
+  AppendWord(code, 0x8C821234);  // lw $v0, 0x1234($a0)
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  options.emit_relocations = true;
+  Disassembler disasm(nullptr, options);
+
+  auto func_or = disasm.DisassembleFunction(code, 0x80700000);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+
+  EXPECT_EQ(func_or->emitted_assembly,
+            "  lui   $a0, %hi(D_80201234)\n"
+            "  lw    $v0, %lo(D_80201234)($a0)\n"
+            "  jr    $ra\n"
+            "   nop\n");
+}
+
+TEST(DisassemblerTest, EmitsNamedRelocationsWithSymbolRegistry) {
+  constexpr std::string_view kSymbols = R"pb(
+    entries { name: "g_target_data" address: 0x80201234 type: SYMBOL_DATA }
+  )pb";
+  auto symbols_or = SymbolIndex::ParseFromTextproto(kSymbols);
+  ASSERT_TRUE(symbols_or.ok());
+
+  // 80700000: lui   $a0, 0x8020
+  // 80700004: sw    $v0, 0x1234($a0)
+  // 80700008: jr    $ra
+  // 8070000C:  nop
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x3C048020);  // lui $a0, 0x8020
+  AppendWord(code, 0xAC821234);  // sw $v0, 0x1234($a0)
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  options.emit_relocations = true;
+  Disassembler disasm(&*symbols_or, options);
+
+  auto func_or = disasm.DisassembleFunction(code, 0x80700000);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+
+  EXPECT_EQ(func_or->emitted_assembly,
+            "  lui   $a0, %hi(g_target_data)\n"
+            "  sw    $v0, %lo(g_target_data)($a0)\n"
+            "  jr    $ra\n"
+            "   nop\n");
+}
+
+TEST(DisassemblerTest, UsesExternalRelocationTracker) {
+  constexpr std::string_view kSymbols = R"pb(
+    entries { name: "g_custom_table" address: 0x80205000 type: SYMBOL_DATA }
+  )pb";
+  auto symbols_or = SymbolIndex::ParseFromTextproto(kSymbols);
+  ASSERT_TRUE(symbols_or.ok());
+
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x3C048020);  // lui $a0, 0x8020
+  AppendWord(code, 0x24845000);  // addiu $a0, $a0, 0x5000
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+
+  RelocationTracker tracker(&*symbols_or);
+  ASSERT_TRUE(tracker.AnalyzeCode(code, 0x80700000).ok());
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  options.emit_relocations = false;  // Relies on external tracker
+  Disassembler disasm(&*symbols_or, options);
+  disasm.SetRelocationTracker(&tracker);
+
+  auto func_or = disasm.DisassembleFunction(code, 0x80700000);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+
+  EXPECT_EQ(func_or->emitted_assembly,
+            "  lui   $a0, %hi(g_custom_table)\n"
+            "  addiu $a0, $a0, %lo(g_custom_table)\n"
+            "  jr    $ra\n"
+            "   nop\n");
+
+  // Single instruction disassembly also honors the tracker
+  EXPECT_EQ(disasm.DisassembleInstruction(0x3C048020, 0x80700000),
+            "lui   $a0, %hi(g_custom_table)");
+  EXPECT_EQ(disasm.DisassembleInstruction(0x24845000, 0x80700004),
+            "addiu $a0, $a0, %lo(g_custom_table)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
