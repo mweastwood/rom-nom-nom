@@ -146,5 +146,45 @@ TEST(ConfigTest, LoadFromFile) {
   EXPECT_EQ(bad_file_or.status().code(), absl::StatusCode::kNotFound);
 }
 
+TEST(ConfigTest, AllowBssSubsegmentWithoutRomStart) {
+  constexpr std::string_view kBssSubsegmentConfig = R"pb(
+    game_name: "Test Game"
+    sha1: "dummy_sha1"
+    basename: "test_game"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x1000
+      rom_end: 0x5000
+      vram: 0x80001000
+      subsegments { rom_start: 0x1000 type: SUBSEGMENT_ASM name: "code1" }
+      subsegments { rom_start: 0x3000 type: SUBSEGMENT_DATA name: "data1" }
+      subsegments { type: SUBSEGMENT_BSS name: "bss1" vram: 0x80005000 bss_size: 0x1000 }
+    }
+  )pb";
+  auto config_or = ParseSplitConfig(kBssSubsegmentConfig);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+  const auto& main_seg = config_or->segments(0);
+  ASSERT_EQ(main_seg.subsegments_size(), 3);
+  EXPECT_EQ(main_seg.subsegments(2).type(), SUBSEGMENT_BSS);
+  EXPECT_EQ(main_seg.subsegments(2).vram(), 0x80005000u);
+  EXPECT_EQ(main_seg.subsegments(2).bss_size(), 0x1000u);
+}
+
+TEST(ConfigTest, AllowDedicatedBssSegmentWithoutRomStart) {
+  constexpr std::string_view kBssSegmentConfig = R"pb(
+    game_name: "Test Game"
+    sha1: "dummy_sha1"
+    basename: "test_game"
+    segments { name: "code" type: SEGMENT_CODE rom_start: 0x1000 rom_end: 0x5000 vram: 0x80001000 }
+    segments { name: "bss" type: SEGMENT_BSS vram: 0x80005000 bss_size: 0x2000 }
+  )pb";
+  auto config_or = ParseSplitConfig(kBssSegmentConfig);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+  ASSERT_EQ(config_or->segments_size(), 2);
+  EXPECT_EQ(config_or->segments(1).type(), SEGMENT_BSS);
+  EXPECT_EQ(config_or->segments(1).vram(), 0x80005000u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

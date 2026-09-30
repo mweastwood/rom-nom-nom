@@ -95,3 +95,24 @@ float FloatMath(float speed, float angle, float dt) {
   }
   return vel * dt + 0.5f;
 }
+
+double DoubleMath(double speed, double angle, double dt) {
+  double vel = speed * angle;
+  if (vel > 1000.0) {
+    vel = 1000.0;
+  } else if (vel < -1000.0) {
+    vel = -1000.0;
+  }
+  return vel * dt + 2.5;
+}
+
+int BranchLikelyLoop(const int* arr, int count) {
+  int total = 0;
+  int i;
+  for (i = 0; i < count; i++) {
+    if (arr[i] > 0) {
+      total += arr[i];
+    }
+  }
+  return total;
+}

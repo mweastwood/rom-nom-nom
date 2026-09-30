@@ -117,6 +117,8 @@ absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
           rodata_objs.push_back(obj_path);
         } else if (sub.type() == SUBSEGMENT_BIN) {
           data_objs.push_back(obj_path);
+        } else if (sub.type() == SUBSEGMENT_BSS) {
+          bss_objs.push_back(obj_path);
         }
       }
 

@@ -20,6 +20,7 @@ enum SubsegmentType {
   SUBSEGMENT_DATA = 4;
   SUBSEGMENT_RODATA = 5;
   SUBSEGMENT_BIN = 6;
+  SUBSEGMENT_BSS = 7;
 }
 
 message Subsegment {
@@ -27,6 +28,7 @@ message Subsegment {
   SubsegmentType type = 2;
   string name = 3;
   uint32 vram = 4;
+  uint32 bss_size = 5;
 }
 
 message Segment {

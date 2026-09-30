@@ -29,6 +29,7 @@ absl::Status ValidateSplitConfig(const SplitConfig& config) {
   }
 
   uint32_t prev_rom_start = 0;
+  bool has_prev_seg = false;
   for (int i = 0; i < config.segments_size(); ++i) {
     const Segment& seg = config.segments(i);
     if (seg.name().empty()) {
@@ -39,28 +40,39 @@ absl::Status ValidateSplitConfig(const SplitConfig& config) {
       return absl::InvalidArgumentError(
           absl::StrFormat("Segment '%s' has unspecified type", seg.name()));
     }
-    if (i > 0 && seg.rom_start() <= prev_rom_start) {
+    if (seg.type() == SEGMENT_BSS) {
+      // BSS segment has no ROM footprint; rom_start is not part of the physical cartridge layout.
+      continue;
+    }
+    if (has_prev_seg && seg.rom_start() <= prev_rom_start) {
       return absl::InvalidArgumentError(
           absl::StrFormat("Segment '%s' rom_start (0x%X) must be strictly greater than "
                           "previous segment start (0x%X)",
                           seg.name(), seg.rom_start(), prev_rom_start));
     }
     prev_rom_start = seg.rom_start();
+    has_prev_seg = true;
 
     uint32_t prev_sub_start = 0;
+    bool has_prev_sub = false;
     for (int j = 0; j < seg.subsegments_size(); ++j) {
       const Subsegment& sub = seg.subsegments(j);
       if (sub.type() == SUBSEGMENT_TYPE_UNSPECIFIED) {
         return absl::InvalidArgumentError(absl::StrFormat(
             "Subsegment '%s' in segment '%s' has unspecified type", sub.name(), seg.name()));
       }
-      if (j > 0 && sub.rom_start() <= prev_sub_start) {
+      if (sub.type() == SUBSEGMENT_BSS) {
+        // BSS subsegments exist only in RAM and have no ROM cartridge footprint.
+        continue;
+      }
+      if (has_prev_sub && sub.rom_start() <= prev_sub_start) {
         return absl::InvalidArgumentError(
             absl::StrFormat("Subsegment '%s' rom_start (0x%X) in segment '%s' must be strictly "
                             "greater than previous subsegment start (0x%X)",
                             sub.name(), sub.rom_start(), seg.name(), prev_sub_start));
       }
       prev_sub_start = sub.rom_start();
+      has_prev_sub = true;
     }
   }
 
