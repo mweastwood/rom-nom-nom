@@ -56,7 +56,7 @@ std::string LinkerScriptGenerator::ResolveObjectPath(std::string_view game_name,
 
 absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
     const SplitConfig& config) const {
-  std::string game_name(config.game_name().empty() ? config.basename() : config.game_name());
+  std::string game_name(config.basename().empty() ? config.game_name() : config.basename());
   std::string text;
   absl::StrAppend(&text, "SECTIONS\n{\n    HIDDEN(__romPos = 0);\n");
 

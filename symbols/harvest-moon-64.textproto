@@ -1,0 +1,1388 @@
+entries {
+  name: "g_model_display_list_2"
+  address: 0x00112A10
+  type: SYMBOL_DATA
+  is_absolute: true
+}
+entries {
+  name: "g_model_display_list_1"
+  address: 0x00112A38
+  type: SYMBOL_DATA
+  is_absolute: true
+}
+entries {
+  name: "g_tv_type"
+  address: 0x80000300
+  type: SYMBOL_DATA
+}
+entries {
+  name: "Entrypoint"
+  address: 0x80025C00
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "main"
+  address: 0x80025C50
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "idle"
+  address: 0x80025CB4
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "mainproc"
+  address: 0x80025D90
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MainInit"
+  address: 0x80025E24
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MainReset"
+  address: 0x80025F04
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MainLoop"
+  address: 0x80025FF0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RegisterGameLoopCallback"
+  address: 0x80026190
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SetCurrentGameLoopCallback"
+  address: 0x800261CC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "EnableSystemFlag4B38"
+  address: 0x8002620C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "DisableSystemFlag4B38"
+  address: 0x80026220
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SetLoopCounter"
+  address: 0x80026230
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "NoOpCallback"
+  address: 0x80026240
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "WaitVsyncFrames"
+  address: 0x80026248
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "WaitForSystemReady"
+  address: 0x80026284
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "UpdateFrameCounterAndTicks"
+  address: 0x800262CC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "UpdateGraphicTiming"
+  address: 0x800263B0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "UpdateFrameTiming"
+  address: 0x800264CC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MainCallback"
+  address: 0x800265CC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MainStopThread"
+  address: 0x80026604
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MainShutdown"
+  address: 0x80026624
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "InterpolateInit"
+  address: 0x800266C0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "InterpolateUpdate"
+  address: 0x800266F8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "InterpolateStepInit"
+  address: 0x800267A4
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "InterpolateStep"
+  address: 0x800267B4
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "InterpolateSetStep"
+  address: 0x8002683C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "InterpolateGetStep"
+  address: 0x80026844
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "Abs16"
+  address: 0x80026850
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RandomRange"
+  address: 0x80026874
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicInit"
+  address: 0x800268F0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80026A98"
+  address: 0x80026A98
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80026AE4"
+  address: 0x80026AE4
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80026BE0"
+  address: 0x80026BE0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80026CEC"
+  address: 0x80026CEC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicSetSpriteDescriptor"
+  address: 0x80026E78
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicSetTextureFormat"
+  address: 0x80026F30
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicLoadTexture"
+  address: 0x80026F88
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicSetSpriteVertices"
+  address: 0x800276AC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SinDegrees"
+  address: 0x800278F0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CosDegrees"
+  address: 0x80027920
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicRotateEuler"
+  address: 0x80027950
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicRotateVector"
+  address: 0x80027B74
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "PlaneCalculateNormal"
+  address: 0x80027BFC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "PlaneCalculateZ"
+  address: 0x80027DC0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "PlaneCheckNormals"
+  address: 0x80027E10
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "PlaneEvaluate"
+  address: 0x800284E8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicRotateDirectionVector"
+  address: 0x80028520
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicGetDirectionAngle"
+  address: 0x80028820
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicResolveOffset1"
+  address: 0x80028888
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicResolveOffset2"
+  address: 0x800288A0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicResolveIndexedOffset"
+  address: 0x800288B8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicDrawModelBuffers"
+  address: 0x800288D8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicClearDisplay"
+  address: 0x80028920
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicSetupCamera"
+  address: 0x80028A64
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraSetup"
+  address: 0x80028C00
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraSetEye"
+  address: 0x80028D94
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraSetAt"
+  address: 0x80028DBC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraSetUp"
+  address: 0x80028DD4
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicSetMode1"
+  address: 0x80028E14
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicSetMode2"
+  address: 0x80028E60
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraSetRoll"
+  address: 0x80028EA8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraSetAngles"
+  address: 0x80028EB8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CameraAddAngles"
+  address: 0x80028EF8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GraphicInitBuffers"
+  address: 0x80028F44
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "DmaInit"
+  address: 0x80029000
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "DmaQueueTransfer"
+  address: 0x8002903C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "DmaProcessQueue"
+  address: 0x800290B8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderInit"
+  address: 0x80029170
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderResetCount"
+  address: 0x80029284
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderNoOp"
+  address: 0x80029294
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderAddEntry"
+  address: 0x8002929C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderSetTranslation"
+  address: 0x800292EC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderSetRotation"
+  address: 0x80029330
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderSetScale"
+  address: 0x80029374
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderNoOp2"
+  address: 0x800293B8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "RenderDrawEntries"
+  address: 0x800293C0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioInit"
+  address: 0x8003CDC0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioUpdate"
+  address: 0x8003CF38
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioSetMasterVolume"
+  address: 0x8003D250
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioChannelInit"
+  address: 0x8003D270
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioChannelSetSpeed"
+  address: 0x8003D350
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioChannelStop"
+  address: 0x8003D3C0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioChannelSetPan"
+  address: 0x8003D444
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioChannelSetVolume"
+  address: 0x8003D4E4
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioChannelSetPitch"
+  address: 0x8003D570
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioCommandSend"
+  address: 0x8003D5FC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioVoiceAllocate"
+  address: 0x8003D620
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioVoiceStop"
+  address: 0x8003D6A8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioVoiceSetVolume"
+  address: 0x8003D718
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioVoiceSetPitch"
+  address: 0x8003D7C0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioVoiceSetPan"
+  address: 0x8003D8A0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AudioCommandReset"
+  address: 0x8003D948
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageInit"
+  address: 0x80042F60
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageOpenTextBox"
+  address: 0x80042FEC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageRegisterBank"
+  address: 0x80043050
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageRegisterVariable"
+  address: 0x800430DC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageSetEventFlags"
+  address: 0x80043138
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageSetTextColor"
+  address: 0x80043148
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageSetBoxBackgroundLayer"
+  address: 0x8004318C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageSetBoxTextLayer"
+  address: 0x80043260
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageSetBoxPromptLayer"
+  address: 0x80043334
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageClipSpan"
+  address: 0x80043408
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageSetEventFlag"
+  address: 0x80043E28
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageClearEventFlag"
+  address: 0x80043E5C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "MessageGetEventFlag"
+  address: 0x80043E94
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80043EC8"
+  address: 0x80043EC8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TextBoxUpdate"
+  address: 0x80045CB0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "LayerInit"
+  address: 0x80045DE0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "LayerSet"
+  address: 0x80045E20
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "LayerActivate"
+  address: 0x80045F5C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundSetMasterVolume"
+  address: 0x800ACAB0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundPlayBgm"
+  address: 0x800ACB04
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundFadeBgm"
+  address: 0x800ACB5C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundStopBgm"
+  address: 0x800ACB8C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundIsBgmStopped"
+  address: 0x800ACBB8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundSetBgmPan"
+  address: 0x800ACBEC
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundFadeOutBgm"
+  address: 0x800ACC1C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundPlayEffect"
+  address: 0x800ACC50
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "SoundAreVoicesInactive"
+  address: 0x800ACD18
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeUpdate"
+  address: 0x800D7C20
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeAdvance"
+  address: 0x800D7E28
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeYearAdvance"
+  address: 0x800D8004
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeResetMonthlyFlags"
+  address: 0x800D8180
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeSleep"
+  address: 0x800D81A8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeCheckFestival"
+  address: 0x800D820C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeUpdateSeason"
+  address: 0x800D835C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "TimeSetSeasonName"
+  address: 0x800D83F8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FB910"
+  address: 0x800FB910
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FBB6C"
+  address: 0x800FBB6C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FBD24"
+  address: 0x800FBD24
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FBED0"
+  address: 0x800FBED0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FBF10"
+  address: 0x800FBF10
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FBF30"
+  address: 0x800FBF30
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_800FBFD0"
+  address: 0x800FBFD0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "sqrtf"
+  address: 0x800FDC40
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "Sinf"
+  address: 0x800FDC50
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuLookAtF"
+  address: 0x800FDDA0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuLookAt"
+  address: 0x800FE120
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuMtxF2L"
+  address: 0x800FE4B0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuMtxL2F"
+  address: 0x800FE548
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuMtxIdentF"
+  address: 0x800FE5F0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuMtxIdent"
+  address: 0x800FE640
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuOrthoF"
+  address: 0x800FE730
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuOrtho"
+  address: 0x800FE860
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuPerspectiveF"
+  address: 0x800FE9B0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuPerspective"
+  address: 0x800FEB60
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuRotate"
+  address: 0x800FEEB8
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuScaleF"
+  address: 0x800FF050
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuScale"
+  address: 0x800FF0B0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "Cosf"
+  address: 0x800FF130
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuTranslateF"
+  address: 0x800FF2D0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "GuTranslate"
+  address: 0x800FF324
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "OsCreateThread"
+  address: 0x800FF630
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "OsSetThreadPriority"
+  address: 0x800FF960
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "OsStartThread"
+  address: 0x800FFA30
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "OsVirtualToPhysical"
+  address: 0x800FFC50
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "OsInitialize"
+  address: 0x80106D70
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "g_graphic_frame_count"
+  address: 0x80112910
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_framebuffers"
+  address: 0x80112918
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_init_display_list"
+  address: 0x80112928
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_sound_volume_settings"
+  address: 0x801162F0
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_sound_bgm_sequences"
+  address: 0x801162FC
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_sound_sfx_sequences"
+  address: 0x801164FC
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_sound_sfx_channels"
+  address: 0x801168FC
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_sound_sfx_params"
+  address: 0x80116A7C
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_vi_ntsc_mode"
+  address: 0x8011D0F0
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_vi_mpal_mode"
+  address: 0x8011D9B0
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_degrees_to_radians"
+  address: 0x8011EC78
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_degrees_to_radians_cos"
+  address: 0x8011EC80
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_degrees_to_radians_euler"
+  address: 0x8011EC88
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_direction_angles"
+  address: 0x8011EC90
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_degrees_to_radians_direction"
+  address: 0x8011ECB0
+  type: SYMBOL_DATA
+}
+entries {
+  name: "kAudioMinPitch"
+  address: 0x8011EE00
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "kAudioMaxPitch"
+  address: 0x8011EE08
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "g_idle_thread"
+  address: 0x801241C0
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_main_thread"
+  address: 0x80124370
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_idle_thread_stack"
+  address: 0x80126520
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_lookat"
+  address: 0x80126540
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_event_flags"
+  address: 0x8013CE00
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_variables"
+  address: 0x8013CE08
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_camera_angles_prev"
+  address: 0x8013D5D8
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_ticks"
+  address: 0x8013D5E4
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_last_frame_count"
+  address: 0x8013DC30
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_day_of_month"
+  address: 0x80158260
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_dma_requests"
+  address: 0x80158268
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_main_loop_flags"
+  address: 0x801594E4
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_scene_transition_flag"
+  address: 0x8016FB04
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_stop_flag"
+  address: 0x8017027F
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_season_char_0"
+  address: 0x80170445
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_season_char_1"
+  address: 0x80170446
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_season_char_2"
+  address: 0x80170447
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_season_char_3"
+  address: 0x80170448
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_season_char_4"
+  address: 0x80170449
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_season_char_5"
+  address: 0x8017044A
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_camera_angles"
+  address: 0x8017044C
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_weather"
+  address: 0x80170458
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_graphic_mode_flags"
+  address: 0x801806C4
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_frame_rate_divisor"
+  address: 0x80182BA0
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season"
+  address: 0x80182DB1
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_configs"
+  address: 0x80188C00
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_game_loop_callbacks"
+  address: 0x80188F70
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_display_matrices"
+  address: 0x80189135
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_speed"
+  address: 0x801891D4
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_layer_entries"
+  address: 0x80189A50
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_render_entry_count"
+  address: 0x8018A05A
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_render_entries"
+  address: 0x8018A850
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_debug_timer_0"
+  address: 0x801C3B68
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_debug_timer_1"
+  address: 0x801C3B6C
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_debug_timer_2"
+  address: 0x801C3B70
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_debug_timer_3"
+  address: 0x801C3B74
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_fade_counter"
+  address: 0x801C3BEC
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_main_callback_arg"
+  address: 0x801C3E14
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_text_box_layers"
+  address: 0x801C3E6C
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_text_boxes"
+  address: 0x801C3F00
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_active_box_index"
+  address: 0x801C3F18
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_text_offset"
+  address: 0x801C3F1C
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_char_delay"
+  address: 0x801C3F20
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_window_x"
+  address: 0x801C3F28
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_window_y"
+  address: 0x801C3F2A
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_state_flags"
+  address: 0x801C3F32
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_dialogue_state"
+  address: 0x801C3F34
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_dialogue_flag"
+  address: 0x801C3F44
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_anim_frame_counter"
+  address: 0x801C3F71
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_graphic_context"
+  address: 0x801C3F74
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_pause_flag"
+  address: 0x801C3F7E
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_last_scene_frame_count"
+  address: 0x801C4215
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_main_thread_stack"
+  address: 0x801C6220
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_fade_direction"
+  address: 0x801D6230
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_counter"
+  address: 0x801F6F30
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_camera_config"
+  address: 0x801F6F38
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_total_days"
+  address: 0x801FAD90
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_dma_pending_count"
+  address: 0x801FADB2
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_hour_of_day"
+  address: 0x801FB5CA
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_audio_channels"
+  address: 0x801FB5D8
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_audio_voices"
+  address: 0x801FB690
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_vblank_counter"
+  address: 0x801FD610
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_tick_counter"
+  address: 0x801FD620
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_scene_id"
+  address: 0x801FD622
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_idle_callback"
+  address: 0x801FD628
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_system_flag_4b38"
+  address: 0x80204B38
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season_name_char_0"
+  address: 0x80204FB1
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season_name_char_1"
+  address: 0x80204FB2
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season_name_char_2"
+  address: 0x80204FB3
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season_name_char_3"
+  address: 0x80204FB4
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season_name_char_4"
+  address: 0x80204FB5
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_season_name_char_5"
+  address: 0x80204FB6
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_transition_flag"
+  address: 0x80204FF8
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_vsync_flag"
+  address: 0x80205208
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_system_pause_flag"
+  address: 0x8020520A
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_debug_flags"
+  address: 0x80205630
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_tick_counter_60hz"
+  address: 0x80205634
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_current_game_loop_index"
+  address: 0x8020564A
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_frame_skip_counter"
+  address: 0x8020564C
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_depth_buffer"
+  address: 0x80205750
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_message_banks"
+  address: 0x80205760
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_freeze_flag"
+  address: 0x80215DF2
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_audio_enable_flag"
+  address: 0x802226E2
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_audio_tick_delta"
+  address: 0x802226E8
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_frame_drop_flag"
+  address: 0x80222730
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_system_thread_1"
+  address: 0x80222E48
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_system_thread_2"
+  address: 0x80222FF8
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_indoor_flag"
+  address: 0x802373A9
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_system_sub_state"
+  address: 0x802373F1
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_event_trigger_flag"
+  address: 0x80237408
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_time_event_flag"
+  address: 0x80237409
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_viewports"
+  address: 0x80237660
+  type: SYMBOL_DATA
+}
+entries {
+  name: "g_screen_fade_alpha"
+  address: 0x80237A04
+  type: SYMBOL_DATA
+}
+entries {
+  name: "LeoBootReset"
+  address: 0x84001008
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootRead"
+  address: 0x8400103C
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootEntry"
+  address: 0x84001064
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootResume"
+  address: 0x840010BC
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootCommand"
+  address: 0x84001120
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootStatus"
+  address: 0x8400114C
+  type: SYMBOL_FUNC
+  is_absolute: true
+}

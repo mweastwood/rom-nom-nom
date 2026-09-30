@@ -1,0 +1,46 @@
+entries {
+  name: "Entrypoint"
+  address: 0x80070C00
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "main"
+  address: 0x8007F880
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "LeoBootReset"
+  address: 0x84001008
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootRead"
+  address: 0x8400103C
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootEntry"
+  address: 0x84001064
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootResume"
+  address: 0x840010BC
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootCommand"
+  address: 0x84001120
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+entries {
+  name: "LeoBootStatus"
+  address: 0x8400114C
+  type: SYMBOL_FUNC
+  is_absolute: true
+}

@@ -2,20 +2,10 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "harvest-moon-64",
-    srcs = ["harvest-moon-64.txt"],
-)
-
-filegroup(
-    name = "harvest-moon-64-textproto",
     srcs = ["harvest-moon-64.textproto"],
 )
 
 filegroup(
     name = "ogre-battle-64",
-    srcs = ["ogre-battle-64.txt"],
-)
-
-filegroup(
-    name = "ogre-battle-64-textproto",
     srcs = ["ogre-battle-64.textproto"],
 )

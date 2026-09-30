@@ -1,0 +1,218 @@
+game_name: "Harvest Moon 64 (USA)"
+sha1: "90631460f1876a14849df0541d534012b410a34c"
+basename: "harvest-moon-64"
+symbol_files: "symbols/harvest-moon-64.textproto"
+c_flags {
+  key: "boot"
+  value {
+    flags: "-O0"
+  }
+}
+c_flags {
+  key: "default"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+  }
+}
+c_flags {
+  key: "graphic_plane"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g,-V"
+  }
+}
+c_flags {
+  key: "libultra_gu_lookat"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+c_flags {
+  key: "libultra_gu_mtx"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O1,-V"
+  }
+}
+c_flags {
+  key: "libultra_gu_ortho"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+c_flags {
+  key: "libultra_gu_scale"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+c_flags {
+  key: "libultra_gu_translate"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+c_flags {
+  key: "libultra_sinf"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+segments {
+  name: "header"
+  type: SEGMENT_HEADER
+  rom_start: 0x0
+  rom_end: 0x40
+}
+segments {
+  name: "ipl3"
+  type: SEGMENT_BIN
+  rom_start: 0x40
+  rom_end: 0x1000
+}
+segments {
+  name: "entry"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x1050
+  vram: 0x80025C00
+  subsegments { rom_start: 0x1000 type: SUBSEGMENT_HASM name: "1000" }
+}
+segments {
+  name: "main"
+  type: SEGMENT_CODE
+  rom_start: 0x1050
+  rom_end: 0xFF5C0
+  vram: 0x80025C50
+  bss_size: 0x113870
+  subsegments { rom_start: 0x1050 type: SUBSEGMENT_C name: "boot" }
+  subsegments { rom_start: 0x1190 type: SUBSEGMENT_C name: "main" }
+  subsegments { rom_start: 0x1AC0 type: SUBSEGMENT_C name: "math" }
+  subsegments { rom_start: 0x1CF0 type: SUBSEGMENT_ASM name: "graphic_1" }
+  subsegments { rom_start: 0x2CF0 type: SUBSEGMENT_C name: "graphic_trig" }
+  subsegments { rom_start: 0x2D50 type: SUBSEGMENT_ASM name: "graphic_2" }
+  subsegments { rom_start: 0x31C0 type: SUBSEGMENT_C name: "graphic_plane" }
+  subsegments { rom_start: 0x3210 type: SUBSEGMENT_ASM name: "graphic_3" }
+  subsegments { rom_start: 0x4400 type: SUBSEGMENT_C name: "dma" }
+  subsegments { rom_start: 0x4570 type: SUBSEGMENT_C name: "display" }
+  subsegments { rom_start: 0x4F30 type: SUBSEGMENT_ASM name: "sprite" }
+  subsegments { rom_start: 0x63E0 type: SUBSEGMENT_ASM name: "actor" }
+  subsegments { rom_start: 0x9070 type: SUBSEGMENT_ASM name: "player" }
+  subsegments { rom_start: 0xEBD0 type: SUBSEGMENT_ASM name: "map" }
+  subsegments { rom_start: 0x16C70 type: SUBSEGMENT_ASM name: "camera" }
+  subsegments { rom_start: 0x181C0 type: SUBSEGMENT_C name: "audio" }
+  subsegments { rom_start: 0x18D70 type: SUBSEGMENT_C name: "message" }
+  subsegments { rom_start: 0x211E0 type: SUBSEGMENT_C name: "layer" }
+  subsegments { rom_start: 0x28FA0 type: SUBSEGMENT_ASM name: "controller" }
+  subsegments { rom_start: 0x29560 type: SUBSEGMENT_ASM name: "title" }
+  subsegments { rom_start: 0x31220 type: SUBSEGMENT_ASM name: "event" }
+  subsegments { rom_start: 0x40BD0 type: SUBSEGMENT_ASM name: "item" }
+  subsegments { rom_start: 0x49C20 type: SUBSEGMENT_ASM name: "scene" }
+  subsegments { rom_start: 0x506C0 type: SUBSEGMENT_ASM name: "farm" }
+  subsegments { rom_start: 0x61370 type: SUBSEGMENT_ASM name: "festival" }
+  subsegments { rom_start: 0x77390 type: SUBSEGMENT_ASM name: "asset" }
+  subsegments { rom_start: 0x87EB0 type: SUBSEGMENT_C name: "sound" }
+  subsegments { rom_start: 0x88170 type: SUBSEGMENT_ASM name: "schedule" }
+  subsegments { rom_start: 0x8E0E0 type: SUBSEGMENT_ASM name: "npc" }
+  subsegments { rom_start: 0xB3020 type: SUBSEGMENT_C name: "time" }
+  subsegments { rom_start: 0xB3940 type: SUBSEGMENT_ASM name: "B3940" }
+  subsegments { rom_start: 0xB4A00 type: SUBSEGMENT_ASM name: "B4A00" }
+  subsegments { rom_start: 0xB7760 type: SUBSEGMENT_ASM name: "B7760" }
+  subsegments { rom_start: 0xB7B50 type: SUBSEGMENT_ASM name: "B7B50" }
+  subsegments { rom_start: 0xB97C0 type: SUBSEGMENT_ASM name: "B97C0" }
+  subsegments { rom_start: 0xCC770 type: SUBSEGMENT_ASM name: "CC770" }
+  subsegments { rom_start: 0xCD4D0 type: SUBSEGMENT_ASM name: "CD4D0" }
+  subsegments { rom_start: 0xCD870 type: SUBSEGMENT_ASM name: "CD870" }
+  subsegments { rom_start: 0xCD9A0 type: SUBSEGMENT_ASM name: "CD9A0" }
+  subsegments { rom_start: 0xCDA60 type: SUBSEGMENT_ASM name: "CDA60" }
+  subsegments { rom_start: 0xCDAE0 type: SUBSEGMENT_ASM name: "CDAE0" }
+  subsegments { rom_start: 0xCDB80 type: SUBSEGMENT_ASM name: "CDB80" }
+  subsegments { rom_start: 0xCDBC0 type: SUBSEGMENT_ASM name: "CDBC0" }
+  subsegments { rom_start: 0xCE620 type: SUBSEGMENT_ASM name: "CE620" }
+  subsegments { rom_start: 0xD3600 type: SUBSEGMENT_ASM name: "D3600" }
+  subsegments { rom_start: 0xD3680 type: SUBSEGMENT_ASM name: "D3680" }
+  subsegments { rom_start: 0xD36D0 type: SUBSEGMENT_ASM name: "D36D0" }
+  subsegments { rom_start: 0xD38B0 type: SUBSEGMENT_ASM name: "D38B0" }
+  subsegments { rom_start: 0xD3960 type: SUBSEGMENT_ASM name: "D3960" }
+  subsegments { rom_start: 0xD39F0 type: SUBSEGMENT_ASM name: "D39F0" }
+  subsegments { rom_start: 0xD3A80 type: SUBSEGMENT_ASM name: "D3A80" }
+  subsegments { rom_start: 0xD3B30 type: SUBSEGMENT_ASM name: "D3B30" }
+  subsegments { rom_start: 0xD3BC0 type: SUBSEGMENT_ASM name: "D3BC0" }
+  subsegments { rom_start: 0xD3C40 type: SUBSEGMENT_ASM name: "D3C40" }
+  subsegments { rom_start: 0xD41A0 type: SUBSEGMENT_ASM name: "D41A0" }
+  subsegments { rom_start: 0xD5130 type: SUBSEGMENT_ASM name: "D5130" }
+  subsegments { rom_start: 0xD5850 type: SUBSEGMENT_ASM name: "D5850" }
+  subsegments { rom_start: 0xD5A30 type: SUBSEGMENT_ASM name: "D5A30" }
+  subsegments { rom_start: 0xD6420 type: SUBSEGMENT_ASM name: "D6420" }
+  subsegments { rom_start: 0xD6470 type: SUBSEGMENT_ASM name: "D6470" }
+  subsegments { rom_start: 0xD6540 type: SUBSEGMENT_ASM name: "D6540" }
+  subsegments { rom_start: 0xD6D10 type: SUBSEGMENT_ASM name: "D6D10" }
+  subsegments { rom_start: 0xD7250 type: SUBSEGMENT_ASM name: "D7250" }
+  subsegments { rom_start: 0xD7290 type: SUBSEGMENT_ASM name: "D7290" }
+  subsegments { rom_start: 0xD72D0 type: SUBSEGMENT_ASM name: "D72D0" }
+  subsegments { rom_start: 0xD7310 type: SUBSEGMENT_ASM name: "D7310" }
+  subsegments { rom_start: 0xD7330 type: SUBSEGMENT_ASM name: "D7330" }
+  subsegments { rom_start: 0xD7350 type: SUBSEGMENT_ASM name: "D7350" }
+  subsegments { rom_start: 0xD73D0 type: SUBSEGMENT_ASM name: "D73D0" }
+  subsegments { rom_start: 0xD7400 type: SUBSEGMENT_ASM name: "D7400" }
+  subsegments { rom_start: 0xD7430 type: SUBSEGMENT_ASM name: "D7430" }
+  subsegments { rom_start: 0xD7800 type: SUBSEGMENT_ASM name: "D7800" }
+  subsegments { rom_start: 0xD7840 type: SUBSEGMENT_ASM name: "D7840" }
+  subsegments { rom_start: 0xD78A0 type: SUBSEGMENT_ASM name: "D78A0" }
+  subsegments { rom_start: 0xD78D0 type: SUBSEGMENT_ASM name: "D78D0" }
+  subsegments { rom_start: 0xD7910 type: SUBSEGMENT_ASM name: "D7910" }
+  subsegments { rom_start: 0xD79A0 type: SUBSEGMENT_ASM name: "D79A0" }
+  subsegments { rom_start: 0xD7A50 type: SUBSEGMENT_ASM name: "D7A50" }
+  subsegments { rom_start: 0xD7AC0 type: SUBSEGMENT_ASM name: "D7AC0" }
+  subsegments { rom_start: 0xD7DC0 type: SUBSEGMENT_ASM name: "D7DC0" }
+  subsegments { rom_start: 0xD7E50 type: SUBSEGMENT_ASM name: "D7E50" }
+  subsegments { rom_start: 0xD7ED0 type: SUBSEGMENT_ASM name: "D7ED0" }
+  subsegments { rom_start: 0xD8040 type: SUBSEGMENT_ASM name: "D8040" }
+  subsegments { rom_start: 0xD8100 type: SUBSEGMENT_ASM name: "D8100" }
+  subsegments { rom_start: 0xD81A0 type: SUBSEGMENT_ASM name: "D81A0" }
+  subsegments { rom_start: 0xD82A0 type: SUBSEGMENT_ASM name: "D82A0" }
+  subsegments { rom_start: 0xD8330 type: SUBSEGMENT_ASM name: "D8330" }
+  subsegments { rom_start: 0xD83D0 type: SUBSEGMENT_ASM name: "D83D0" }
+  subsegments { rom_start: 0xD89B0 type: SUBSEGMENT_ASM name: "D89B0" }
+  subsegments { rom_start: 0xD8D00 type: SUBSEGMENT_ASM name: "D8D00" }
+  subsegments { rom_start: 0xD9040 type: SUBSEGMENT_ASM name: "libultra_sqrtf" }
+  subsegments { rom_start: 0xD9050 type: SUBSEGMENT_ASM name: "libultra_sinf" }
+  subsegments { rom_start: 0xD91A0 type: SUBSEGMENT_ASM name: "libultra_gu_lookat" }
+  subsegments { rom_start: 0xD98B0 type: SUBSEGMENT_C name: "libultra_gu_mtx" }
+  subsegments { rom_start: 0xD9B30 type: SUBSEGMENT_C name: "libultra_gu_ortho" }
+  subsegments { rom_start: 0xD9DB0 type: SUBSEGMENT_ASM name: "libultra_gu_rotate" }
+  subsegments { rom_start: 0xDA450 type: SUBSEGMENT_C name: "libultra_gu_scale" }
+  subsegments { rom_start: 0xDA530 type: SUBSEGMENT_ASM name: "libultra_cosf" }
+  subsegments { rom_start: 0xDA6D0 type: SUBSEGMENT_C name: "libultra_gu_translate" }
+  subsegments { rom_start: 0xDA7A0 type: SUBSEGMENT_ASM name: "libultra" }
+  subsegments { rom_start: 0xEBE10 type: SUBSEGMENT_DATA name: "EBE10" }
+  subsegments { type: SUBSEGMENT_BSS name: "FF5C0" vram: 0x801241C0 }
+}
+segments {
+  name: "FF5C0"
+  type: SEGMENT_BIN
+  rom_start: 0xFF5C0
+  rom_end: 0x1000000
+}

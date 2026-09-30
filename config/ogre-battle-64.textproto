@@ -1,0 +1,41 @@
+game_name: "Ogre Battle 64 (USA)"
+sha1: "d26b14bee422a09581ce438d45ba9fec9783fbb8"
+basename: "ogre-battle-64"
+symbol_files: "symbols/ogre-battle-64.textproto"
+segments {
+  name: "header"
+  type: SEGMENT_HEADER
+  rom_start: 0x0
+  rom_end: 0x40
+}
+segments {
+  name: "ipl3"
+  type: SEGMENT_BIN
+  rom_start: 0x40
+  rom_end: 0x1000
+}
+segments {
+  name: "entry"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x1060
+  vram: 0x80070C00
+  subsegments { rom_start: 0x1000 type: SUBSEGMENT_HASM name: "1000" }
+}
+segments {
+  name: "main"
+  type: SEGMENT_CODE
+  rom_start: 0x1060
+  rom_end: 0x3F1B0
+  vram: 0x80070C60
+  bss_size: 0x3AE70
+  subsegments { rom_start: 0x1060 type: SUBSEGMENT_ASM name: "1060" }
+  subsegments { rom_start: 0x2E570 type: SUBSEGMENT_DATA name: "2E570" }
+  subsegments { type: SUBSEGMENT_BSS name: "3F1B0" vram: 0x800AEDB0 }
+}
+segments {
+  name: "3F1B0"
+  type: SEGMENT_BIN
+  rom_start: 0x3F1B0
+  rom_end: 0x2800000
+}
