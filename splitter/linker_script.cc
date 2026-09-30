@@ -1,5 +1,6 @@
 #include "splitter/linker_script.h"
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -13,6 +14,22 @@
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
+namespace {
+
+std::string SanitizeIdentifier(std::string_view name) {
+  std::string result(name);
+  for (char& c : result) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+      c = '_';
+    }
+  }
+  if (!result.empty() && std::isdigit(static_cast<unsigned char>(result[0]))) {
+    result.insert(result.begin(), '_');
+  }
+  return result;
+}
+
+}  // namespace
 
 LinkerScriptGenerator::LinkerScriptGenerator(LinkerScriptOptions options)
     : options_(std::move(options)) {}
@@ -42,6 +59,12 @@ std::string LinkerScriptGenerator::ResolveObjectPath(std::string_view game_name,
         return absl::StrFormat("%s/asm/%s/%s.o", prefix, game_name, sub_name);
       case SUBSEGMENT_BIN:
         return absl::StrFormat("%s/assets/%s/%s.o", prefix, game_name, sub_name);
+      case SUBSEGMENT_BSS:
+        if (sub_name.find('/') != std::string_view::npos ||
+            sub_name.find(".bss") != std::string_view::npos) {
+          return absl::StrFormat("%s/asm/%s/%s.o", prefix, game_name, sub_name);
+        }
+        return absl::StrFormat("%s/asm/%s/data/%s.bss.o", prefix, game_name, sub_name);
       default:
         return absl::StrFormat("%s/asm/%s/%s.o", prefix, game_name, sub_name);
     }
@@ -67,7 +90,7 @@ absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
       continue;
     }
 
-    std::string_view name = segment.name();
+    std::string name = SanitizeIdentifier(segment.name());
     absl::StrAppend(&text, absl::StrFormat("    %s_ROM_START = __romPos;\n", name));
     absl::StrAppend(&text, absl::StrFormat("    %s_VRAM = ADDR(.%s);\n", name, name));
 

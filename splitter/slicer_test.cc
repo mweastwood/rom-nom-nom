@@ -209,5 +209,38 @@ TEST(SlicerTest, OutOfBoundsSegmentError) {
   EXPECT_EQ(plan_or.status().code(), absl::StatusCode::kOutOfRange);
 }
 
+TEST(SlicerTest, SubsegmentFollowedByBssResolvesToEndOfSegment) {
+  auto rom_or = Rom::FromBuffer(CreateTestRom(256));
+  ASSERT_TRUE(rom_or.ok());
+
+  constexpr std::string_view kBssFollowConfig = R"pb(
+    game_name: "Test Game"
+    sha1: "0000000000000000000000000000000000000000"
+    basename: "test-game"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x40
+      rom_end: 0x100
+      subsegments { rom_start: 0x40 type: SUBSEGMENT_ASM name: "code" }
+      subsegments { rom_start: 0x80 type: SUBSEGMENT_DATA name: "data_block" }
+      subsegments { type: SUBSEGMENT_BSS name: "bss_block" vram: 0x80100000 }
+    }
+  )pb";
+  auto config_or = ParseSplitConfig(kBssFollowConfig);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+
+  SlicerOptions options;
+  options.verify_sha1 = false;
+  Slicer slicer(options);
+  auto plan_or = slicer.PlanSlices(*rom_or, *config_or);
+  ASSERT_TRUE(plan_or.ok()) << plan_or.status();
+
+  ASSERT_EQ(plan_or->size(), 1u);
+  EXPECT_EQ((*plan_or)[0].name, "data_block");
+  EXPECT_EQ((*plan_or)[0].rom_start, 0x80u);
+  EXPECT_EQ((*plan_or)[0].rom_end, 0x100u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

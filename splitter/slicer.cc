@@ -45,10 +45,13 @@ absl::StatusOr<std::vector<CarvedSlice>> Slicer::PlanSlices(const Rom& rom,
     size_t seg_start = seg.rom_start();
     size_t seg_end = seg.rom_end();
     if (seg_end == 0) {
-      if (i + 1 < config.segments_size() && config.segments(i + 1).rom_start() > seg_start) {
-        seg_end = std::min<size_t>(config.segments(i + 1).rom_start(), rom.Size());
-      } else {
-        seg_end = rom.Size();
+      seg_end = rom.Size();
+      for (int k = i + 1; k < config.segments_size(); ++k) {
+        if (config.segments(k).type() != SEGMENT_BSS &&
+            config.segments(k).rom_start() > seg_start) {
+          seg_end = std::min<size_t>(config.segments(k).rom_start(), rom.Size());
+          break;
+        }
       }
     }
 
@@ -66,8 +69,11 @@ absl::StatusOr<std::vector<CarvedSlice>> Slicer::PlanSlices(const Rom& rom,
             sub.type() == SUBSEGMENT_BIN) {
           size_t sub_start = sub.rom_start();
           size_t sub_end = seg_end;
-          if (j + 1 < seg.subsegments_size()) {
-            sub_end = seg.subsegments(j + 1).rom_start();
+          for (int k = j + 1; k < seg.subsegments_size(); ++k) {
+            if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
+              sub_end = seg.subsegments(k).rom_start();
+              break;
+            }
           }
 
           if (sub_start > sub_end || sub_end > seg_end) {

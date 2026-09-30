@@ -174,5 +174,41 @@ TEST(LinkerScriptTest, GenerateMainScriptMatchesExpectedOutput) {
 )");
 }
 
+TEST(LinkerScriptTest, NumericSegmentNameSanitizedAndBssSubsegmentHandled) {
+  constexpr std::string_view kNumericConfigText = R"pb(
+    game_name: "test-game"
+    sha1: "0000000000000000000000000000000000000000"
+    basename: "test-game"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x1000
+      rom_end: 0x2000
+      vram: 0x80000000
+      subsegments { name: "code" type: SUBSEGMENT_ASM rom_start: 0x1000 }
+      subsegments { name: "FF5C0" type: SUBSEGMENT_BSS vram: 0x80010000 }
+    }
+    segments { name: "3F1B0" type: SEGMENT_BIN rom_start: 0x2000 rom_end: 0x3000 }
+  )pb";
+  auto config_or = ParseSplitConfig(kNumericConfigText);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+
+  LinkerScriptOptions options;
+  options.base_build_dir = "build";
+  LinkerScriptGenerator generator(options);
+
+  auto script_or = generator.GenerateMainScript(*config_or);
+  ASSERT_TRUE(script_or.ok()) << script_or.status();
+
+  // BSS subsegment inside main should resolve to data/FF5C0.bss.o
+  EXPECT_TRUE(
+      absl::StrContains(*script_or, "build/test-game/asm/test-game/data/FF5C0.bss.o(.bss);"));
+
+  // Numeric segment 3F1B0 should have section ._3F1B0 and symbol _3F1B0_ROM_START
+  EXPECT_TRUE(absl::StrContains(*script_or, "_3F1B0_ROM_START = __romPos;"));
+  EXPECT_TRUE(absl::StrContains(*script_or, "._3F1B0"));
+  EXPECT_TRUE(absl::StrContains(*script_or, "build/test-game/assets/test-game/3F1B0.o(.data);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
