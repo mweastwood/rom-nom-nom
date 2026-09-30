@@ -27,6 +27,10 @@ struct SplitterOptions {
   bool emit_line_comments = true;
   bool verbose = false;
 
+  bool generate_undefined_symbols = true;
+  std::filesystem::path undefined_syms_path;
+  std::filesystem::path undefined_funcs_path;
+
   // In-memory overrides for self-contained unit testing
   std::string config_text_override;
   std::string symbols_text_override;
@@ -40,6 +44,8 @@ struct SplitterResult {
   size_t functions_disassembled = 0;
   size_t asm_files_written = 0;
   bool ld_script_written = false;
+  size_t undefined_data_symbols_found = 0;
+  size_t undefined_func_symbols_found = 0;
 };
 
 // Executes the complete ROM splitting pipeline:

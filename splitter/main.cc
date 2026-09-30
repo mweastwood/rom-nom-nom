@@ -18,6 +18,11 @@ ABSL_FLAG(std::string, symbols_ld_path, "", "Override output path for symbols li
 ABSL_FLAG(bool, write_ld_script, true, "Generate and write GNU ld linker scripts");
 ABSL_FLAG(bool, slice_data, true, "Carve non-code binary assets (.bin, header, raw data)");
 ABSL_FLAG(bool, disassemble_code, true, "Disassemble code sections into .s assembly files");
+ABSL_FLAG(bool, generate_undefined_symbols, true,
+          "Discover and emit undefined symbols and functions for linker");
+ABSL_FLAG(std::string, undefined_syms_path, "", "Override output path for undefined_syms_auto.txt");
+ABSL_FLAG(std::string, undefined_funcs_path, "",
+          "Override output path for undefined_funcs_auto.txt");
 ABSL_FLAG(bool, verify_sha1, true, "Verify ROM SHA-1 matches split configuration");
 ABSL_FLAG(bool, emit_line_comments, true, "Emit instruction VRAM and hex comments in assembly");
 ABSL_FLAG(bool, verbose, false, "Print verbose progress messages");
@@ -43,6 +48,9 @@ int main(int argc, char* argv[]) {
   options.write_ld_script = absl::GetFlag(FLAGS_write_ld_script);
   options.slice_data = absl::GetFlag(FLAGS_slice_data);
   options.disassemble_code = absl::GetFlag(FLAGS_disassemble_code);
+  options.generate_undefined_symbols = absl::GetFlag(FLAGS_generate_undefined_symbols);
+  options.undefined_syms_path = absl::GetFlag(FLAGS_undefined_syms_path);
+  options.undefined_funcs_path = absl::GetFlag(FLAGS_undefined_funcs_path);
   options.verify_sha1 = absl::GetFlag(FLAGS_verify_sha1);
   options.emit_line_comments = absl::GetFlag(FLAGS_emit_line_comments);
   options.verbose = absl::GetFlag(FLAGS_verbose);
@@ -60,9 +68,12 @@ int main(int argc, char* argv[]) {
       "  Files written: %d\n"
       "  Functions disassembled: %d\n"
       "  Assembly files written: %d\n"
-      "  Linker script generated: %s\n",
+      "  Linker script generated: %s\n"
+      "  Undefined data symbols: %d\n"
+      "  Undefined func symbols: %d\n",
       result.bytes_carved, result.files_written, result.functions_disassembled,
-      result.asm_files_written, result.ld_script_written ? "yes" : "no");
+      result.asm_files_written, result.ld_script_written ? "yes" : "no",
+      result.undefined_data_symbols_found, result.undefined_func_symbols_found);
 
   return EXIT_SUCCESS;
 }

@@ -142,6 +142,13 @@ TEST(SplitterTest, SuccessfulPipelineExecution) {
   EXPECT_NE(s_content.find("jr    $ra"), std::string::npos);
   EXPECT_NE(s_content.find("nop"), std::string::npos);
 
+  // Check generated undefined symbol files
+  std::filesystem::path undef_syms = options.out_dir / "test_game" / "undefined_syms_auto.txt";
+  EXPECT_TRUE(std::filesystem::exists(undef_syms));
+
+  std::filesystem::path undef_funcs = options.out_dir / "test_game" / "undefined_funcs_auto.txt";
+  EXPECT_TRUE(std::filesystem::exists(undef_funcs));
+
   std::filesystem::remove_all(temp_dir);
 }
 

@@ -237,11 +237,42 @@ cc_test(
 )
 
 cc_library(
+    name = "auto_symbols",
+    srcs = ["auto_symbols.cc"],
+    hdrs = ["auto_symbols.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":relocations",
+        ":symbol_registry",
+        ":symbol_registry_cc_proto",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "auto_symbols_test",
+    srcs = ["auto_symbols_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":auto_symbols",
+        ":symbol_registry",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "splitter_lib",
     srcs = ["splitter.cc"],
     hdrs = ["splitter.h"],
     copts = ["-std=c++20"],
     deps = [
+        ":auto_symbols",
         ":config",
         ":config_cc_proto",
         ":disassembler",

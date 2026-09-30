@@ -14,6 +14,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/rom.h"
+#include "splitter/auto_symbols.h"
 #include "splitter/config.h"
 #include "splitter/config.pb.h"
 #include "splitter/disassembler.h"
@@ -159,12 +160,29 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     hw_file << ls_gen.GenerateHardwareRegsScript();
   }
 
-  // 6. Disassemble Code Subsegments into Assembly (.s)
+  // 6. Disassemble Code Subsegments into Assembly (.s) & Discover Auto Symbols
   if (options.disassemble_code) {
     DisassemblerOptions disasm_options;
     disasm_options.emit_line_comments = options.emit_line_comments;
     disasm_options.emit_function_framing = true;
     Disassembler disassembler(symbol_index.Empty() ? nullptr : &symbol_index, disasm_options);
+
+    AutoSymbolFinder auto_symbols(symbol_index.Empty() ? nullptr : &symbol_index);
+
+    // Register defined segments and subsegments
+    for (int i = 0; i < config.segments_size(); ++i) {
+      const Segment& seg = config.segments(i);
+      if (seg.vram() != 0 && seg.rom_end() > seg.rom_start()) {
+        auto_symbols.RegisterDefinedAddressRange(seg.vram(),
+                                                 seg.vram() + (seg.rom_end() - seg.rom_start()));
+      }
+      for (int j = 0; j < seg.subsegments_size(); ++j) {
+        const Subsegment& sub = seg.subsegments(j);
+        if (sub.vram() != 0) {
+          auto_symbols.RegisterDefinedSymbol(sub.name(), sub.vram());
+        }
+      }
+    }
 
     std::filesystem::path asm_dir = options.asm_out_dir;
     if (asm_dir.empty()) {
@@ -214,6 +232,14 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           return code_span_or.status();
         }
 
+        // Scan code for undefined function calls and relocations
+        if (options.generate_undefined_symbols) {
+          auto scan_status = auto_symbols.ScanCode(*code_span_or, sub_vram);
+          if (!scan_status.ok()) {
+            return scan_status;
+          }
+        }
+
         auto funcs_or = disassembler.DisassembleAllFunctions(*code_span_or, sub_vram);
         if (!funcs_or.ok()) {
           return funcs_or.status();
@@ -237,6 +263,31 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
         result.functions_disassembled += funcs_or->size();
         result.asm_files_written++;
       }
+    }
+
+    // Write undefined symbol scripts
+    if (options.generate_undefined_symbols) {
+      std::filesystem::path game_build_dir = options.out_dir / config.basename();
+      std::filesystem::create_directories(game_build_dir);
+
+      std::filesystem::path undef_syms_path = options.undefined_syms_path;
+      if (undef_syms_path.empty()) {
+        undef_syms_path = game_build_dir / "undefined_syms_auto.txt";
+      }
+      std::filesystem::create_directories(undef_syms_path.parent_path());
+      std::ofstream syms_out(undef_syms_path, std::ios::out | std::ios::trunc);
+      syms_out << auto_symbols.GenerateUndefinedSymsScript();
+
+      std::filesystem::path undef_funcs_path = options.undefined_funcs_path;
+      if (undef_funcs_path.empty()) {
+        undef_funcs_path = game_build_dir / "undefined_funcs_auto.txt";
+      }
+      std::filesystem::create_directories(undef_funcs_path.parent_path());
+      std::ofstream funcs_out(undef_funcs_path, std::ios::out | std::ios::trunc);
+      funcs_out << auto_symbols.GenerateUndefinedFuncsScript();
+
+      result.undefined_data_symbols_found = auto_symbols.DiscoveredDataSymbols().size();
+      result.undefined_func_symbols_found = auto_symbols.DiscoveredFuncSymbols().size();
     }
   }
 
