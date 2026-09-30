@@ -65,14 +65,18 @@ def get_compile_args(file_path: Path):
             includes.append(f"-I{ext_dir}")
 
 
-    is_cpp = (
-        file_path.suffix in {".cc", ".cpp"}
-        or "src/cc" in str(file_path)
-        or "tests" in str(file_path)
-        or "core" in str(file_path)
-        or "splitter" in str(file_path)
-        or "decompiler" in str(file_path)
-    )
+    if file_path.suffix == ".c":
+        is_cpp = False
+    elif file_path.suffix in {".cc", ".cpp"}:
+        is_cpp = True
+    else:
+        is_cpp = (
+            "src/cc" in str(file_path)
+            or "tests" in str(file_path)
+            or "core" in str(file_path)
+            or "splitter" in str(file_path)
+            or "decompiler" in str(file_path)
+        )
 
     if is_cpp:
         args = (
