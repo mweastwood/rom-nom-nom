@@ -116,8 +116,12 @@ TEST(SplitterTest, SuccessfulPipelineExecution) {
   EXPECT_GT(result.bytes_carved, 0u);
   EXPECT_EQ(result.files_written, 1u);  // header.bin
   EXPECT_TRUE(result.ld_script_written);
-  EXPECT_EQ(result.asm_files_written, 1u);
+  EXPECT_EQ(result.asm_files_written, 2u);  // header.s + entrypoint.s
   EXPECT_EQ(result.functions_disassembled, 1u);
+
+  // Check generated header assembly and macros
+  EXPECT_TRUE(std::filesystem::exists(options.asm_out_dir / "header.s"));
+  EXPECT_TRUE(std::filesystem::exists(options.asm_out_dir / "macro.inc"));
 
   // Check generated header slice
   std::filesystem::path header_bin = options.out_dir / "test_game" / "header.bin";
@@ -169,6 +173,76 @@ TEST(SplitterTest, Sha1MismatchFails) {
   auto result_or = RunSplitter(options);
   EXPECT_FALSE(result_or.ok());
   EXPECT_TRUE(absl::IsInvalidArgument(result_or.status()));
+}
+
+TEST(SplitterTest, EmitsCSubsegmentNonmatchingsAndDataBss) {
+  std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / "splitter_test_c_sub";
+  std::filesystem::remove_all(temp_dir);
+
+  auto rom_bytes = CreateMinimalN64Rom();
+  auto rom_or = Rom::FromBuffer(rom_bytes);
+  ASSERT_TRUE(rom_or.ok());
+  std::string sha1 = rom_or->Sha1();
+
+  std::string config_text = absl::StrFormat(
+      R"pb(
+        game_name: "Test Game"
+        sha1: "%s"
+        basename: "test_game"
+
+        segments { name: "header" type: SEGMENT_HEADER rom_start: 0x0 rom_end: 0x40 }
+
+        segments {
+          name: "code"
+          type: SEGMENT_CODE
+          rom_start: 0x40
+          rom_end: 0x80
+          vram: 0x80700000
+
+          subsegments { rom_start: 0x40 type: SUBSEGMENT_C name: "my_module" vram: 0x80700000 }
+          subsegments { rom_start: 0x50 type: SUBSEGMENT_DATA name: "my_data" vram: 0x80700010 }
+          subsegments { rom_start: 0x60 type: SUBSEGMENT_BSS name: "my_bss" vram: 0x80700020 }
+        }
+      )pb",
+      sha1);
+
+  SplitterOptions options;
+  options.config_text_override = config_text;
+  options.rom_buffer_override = std::move(rom_bytes);
+  options.out_dir = temp_dir / "build";
+  options.asm_out_dir = temp_dir / "asm" / "test_game";
+  options.verify_sha1 = false;
+  options.slice_data = true;
+  options.write_ld_script = true;
+  options.disassemble_code = true;
+
+  auto result_or = RunSplitter(options);
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  // Verify nonmatchings function was carved for SUBSEGMENT_C
+  std::filesystem::path nonmatching_func =
+      options.asm_out_dir / "nonmatchings" / "my_module" / "func_80700000.s";
+  EXPECT_TRUE(std::filesystem::exists(nonmatching_func));
+
+  // Verify data file was generated
+  std::filesystem::path data_file = options.asm_out_dir / "data" / "my_data.data.s";
+  EXPECT_TRUE(std::filesystem::exists(data_file));
+  std::ifstream data_in(data_file);
+  std::string data_content((std::istreambuf_iterator<char>(data_in)),
+                           std::istreambuf_iterator<char>());
+  EXPECT_NE(data_content.find("dlabel D_80700010"), std::string::npos);
+  EXPECT_NE(data_content.find(".word"), std::string::npos);
+
+  // Verify bss file was generated
+  std::filesystem::path bss_file = options.asm_out_dir / "data" / "my_bss.bss.s";
+  EXPECT_TRUE(std::filesystem::exists(bss_file));
+  std::ifstream bss_in(bss_file);
+  std::string bss_content((std::istreambuf_iterator<char>(bss_in)),
+                          std::istreambuf_iterator<char>());
+  EXPECT_NE(bss_content.find("dlabel D_80700020"), std::string::npos);
+  EXPECT_NE(bss_content.find(".space"), std::string::npos);
+
+  std::filesystem::remove_all(temp_dir);
 }
 
 }  // namespace

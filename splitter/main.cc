@@ -13,6 +13,10 @@ ABSL_FLAG(std::string, rom, "", "Path to input ROM binary (.z64)");
 ABSL_FLAG(std::string, symbols, "", "Path to symbols file");
 ABSL_FLAG(std::string, out_dir, "build", "Output directory for carved assets and linker scripts");
 ABSL_FLAG(std::string, asm_out_dir, "", "Output directory for disassembled assembly");
+ABSL_FLAG(std::string, assets_out_dir, "", "Output directory for carved binary assets");
+ABSL_FLAG(std::string, out_build, "", "Alias for --out_dir");
+ABSL_FLAG(std::string, out_asm, "", "Alias for --asm_out_dir");
+ABSL_FLAG(std::string, out_assets, "", "Alias for --assets_out_dir");
 ABSL_FLAG(std::string, ld_script_path, "", "Override output path for primary linker script");
 ABSL_FLAG(std::string, symbols_ld_path, "", "Override output path for symbols linker script");
 ABSL_FLAG(bool, write_ld_script, true, "Generate and write GNU ld linker scripts");
@@ -39,12 +43,26 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
+  std::string out_dir = absl::GetFlag(FLAGS_out_dir);
+  if (!absl::GetFlag(FLAGS_out_build).empty()) {
+    out_dir = absl::GetFlag(FLAGS_out_build);
+  }
+  std::string asm_out = absl::GetFlag(FLAGS_asm_out_dir);
+  if (!absl::GetFlag(FLAGS_out_asm).empty()) {
+    asm_out = absl::GetFlag(FLAGS_out_asm);
+  }
+  std::string assets_out = absl::GetFlag(FLAGS_assets_out_dir);
+  if (!absl::GetFlag(FLAGS_out_assets).empty()) {
+    assets_out = absl::GetFlag(FLAGS_out_assets);
+  }
+
   rom_nom_nom::SplitterOptions options;
   options.config_path = config_path;
   options.rom_path = absl::GetFlag(FLAGS_rom);
   options.symbols_path = absl::GetFlag(FLAGS_symbols);
-  options.out_dir = absl::GetFlag(FLAGS_out_dir);
-  options.asm_out_dir = absl::GetFlag(FLAGS_asm_out_dir);
+  options.out_dir = out_dir;
+  options.asm_out_dir = asm_out;
+  options.assets_out_dir = assets_out;
   options.ld_script_path = absl::GetFlag(FLAGS_ld_script_path);
   options.symbols_ld_path = absl::GetFlag(FLAGS_symbols_ld_path);
   options.write_ld_script = absl::GetFlag(FLAGS_write_ld_script);

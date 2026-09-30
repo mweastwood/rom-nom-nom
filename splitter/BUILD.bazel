@@ -268,11 +268,40 @@ cc_test(
 )
 
 cc_library(
+    name = "assembly_generator",
+    srcs = ["assembly_generator.cc"],
+    hdrs = ["assembly_generator.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":disassembler",
+        ":symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "assembly_generator_test",
+    srcs = ["assembly_generator_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":assembly_generator",
+        ":disassembler",
+        ":symbol_registry",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "splitter_lib",
     srcs = ["splitter.cc"],
     hdrs = ["splitter.h"],
     copts = ["-std=c++20"],
     deps = [
+        ":assembly_generator",
         ":auto_symbols",
         ":config",
         ":config_cc_proto",

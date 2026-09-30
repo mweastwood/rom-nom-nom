@@ -18,6 +18,7 @@ struct SplitterOptions {
   std::filesystem::path symbols_path;
   std::filesystem::path out_dir = "build";
   std::filesystem::path asm_out_dir;
+  std::filesystem::path assets_out_dir;
   std::filesystem::path ld_script_path;
   std::filesystem::path symbols_ld_path;
   bool write_ld_script = true;

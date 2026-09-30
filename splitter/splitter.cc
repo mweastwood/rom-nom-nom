@@ -14,6 +14,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/rom.h"
+#include "splitter/assembly_generator.h"
 #include "splitter/auto_symbols.h"
 #include "splitter/config.h"
 #include "splitter/config.pb.h"
@@ -105,7 +106,11 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
   // 4. Carve non-code binary assets (.bin, header, raw data)
   if (options.slice_data) {
     SlicerOptions slicer_options;
-    slicer_options.output_dir = options.out_dir;
+    if (!options.assets_out_dir.empty()) {
+      slicer_options.output_dir = options.assets_out_dir.parent_path();
+    } else {
+      slicer_options.output_dir = options.out_dir;
+    }
     slicer_options.verify_sha1 = options.verify_sha1;
     Slicer slicer(slicer_options);
     auto slice_report_or = slicer.SliceAll(rom, config);
@@ -122,7 +127,9 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     ls_options.base_build_dir = options.out_dir.string();
     LinkerScriptGenerator ls_gen(ls_options);
 
-    std::filesystem::path game_build_dir = options.out_dir / config.basename();
+    std::filesystem::path game_build_dir = (options.out_dir.filename() == config.basename())
+                                               ? options.out_dir
+                                               : (options.out_dir / config.basename());
     std::filesystem::create_directories(game_build_dir);
 
     // Primary linker script
@@ -189,6 +196,66 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     if (asm_dir.empty()) {
       asm_dir = std::filesystem::path("asm") / config.basename();
     }
+    std::filesystem::create_directories(asm_dir);
+
+    AssemblyGeneratorOptions asm_opts;
+    asm_opts.asm_dir = asm_dir;
+    asm_opts.symbols = symbol_index.Empty() ? nullptr : &symbol_index;
+    AssemblyGenerator asm_gen(asm_opts);
+
+    // Emit standard macro.inc and copy c_macro.inc if present
+    std::filesystem::path splat_macro =
+        std::filesystem::path("splat") / absl::StrCat(config.basename(), "_macro.inc");
+    auto macro_status = asm_gen.EmitMacroIncludes(splat_macro);
+    if (!macro_status.ok()) {
+      return macro_status;
+    }
+
+    // Emit header.s for SEGMENT_HEADER
+    for (int i = 0; i < config.segments_size(); ++i) {
+      const Segment& seg = config.segments(i);
+      if (seg.type() == SEGMENT_HEADER) {
+        size_t seg_start = seg.rom_start();
+        size_t seg_end = seg.rom_end();
+        if (seg_end > seg_start && seg_end <= rom.Size()) {
+          auto span_or = rom.SliceRange(seg_start, seg_end);
+          if (span_or.ok()) {
+            auto h_status = asm_gen.WriteHeaderAssembly(*span_or, asm_dir / "header.s");
+            if (!h_status.ok()) {
+              return h_status;
+            }
+            result.asm_files_written++;
+          }
+        }
+      }
+    }
+
+    // Pre-scan all code segments across the ROM for function entrypoints and labels
+    for (int i = 0; i < config.segments_size(); ++i) {
+      const Segment& seg = config.segments(i);
+      if (seg.type() != SEGMENT_CODE) {
+        continue;
+      }
+      size_t seg_start = seg.rom_start();
+      size_t seg_end = seg.rom_end();
+      if (seg_end == 0) {
+        seg_end = rom.Size();
+        for (int k = i + 1; k < config.segments_size(); ++k) {
+          if (config.segments(k).type() != SEGMENT_BSS &&
+              config.segments(k).rom_start() > seg_start) {
+            seg_end = std::min<size_t>(config.segments(k).rom_start(), rom.Size());
+            break;
+          }
+        }
+      }
+      if (seg_start >= seg_end || seg_end > rom.Size() || seg.vram() == 0) {
+        continue;
+      }
+      auto span_or = rom.SliceRange(seg_start, seg_end);
+      if (span_or.ok()) {
+        disassembler.PreScanCode(*span_or, seg.vram());
+      }
+    }
 
     for (int i = 0; i < config.segments_size(); ++i) {
       const Segment& seg = config.segments(i);
@@ -211,10 +278,6 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
 
       for (int j = 0; j < seg.subsegments_size(); ++j) {
         const Subsegment& sub = seg.subsegments(j);
-        if (sub.type() != SUBSEGMENT_ASM && sub.type() != SUBSEGMENT_HASM) {
-          // Skip C files or data files (data is handled by slicer)
-          continue;
-        }
 
         size_t sub_start = sub.rom_start();
         size_t sub_end = seg_end;
@@ -225,13 +288,86 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           }
         }
 
-        if (sub_start >= sub_end || sub_end > rom.Size()) {
-          continue;
-        }
-
         uint32_t sub_vram = sub.vram();
         if (sub_vram == 0 && seg.vram() != 0) {
           sub_vram = seg.vram() + static_cast<uint32_t>(sub_start - seg_start);
+        }
+
+        if (sub.type() == SUBSEGMENT_DATA) {
+          if (sub_start >= sub_end || sub_end > rom.Size()) {
+            continue;
+          }
+          auto span_or = rom.SliceRange(sub_start, sub_end);
+          if (!span_or.ok()) {
+            return span_or.status();
+          }
+          std::filesystem::path out_data_path = asm_gen.ResolveDataPath(sub.name());
+          auto d_status = asm_gen.WriteDataAssembly(*span_or, sub_vram, out_data_path);
+          if (!d_status.ok()) {
+            return d_status;
+          }
+          result.asm_files_written++;
+          continue;
+        }
+
+        if (sub.type() == SUBSEGMENT_BSS) {
+          size_t bss_size = seg.bss_size();
+          for (const auto& other_seg : config.segments()) {
+            if (other_seg.name() == sub.name() && other_seg.bss_size() > 0) {
+              bss_size = other_seg.bss_size();
+              break;
+            }
+          }
+          if (bss_size == 0) {
+            bss_size = 0x10;
+          }
+
+          std::filesystem::path out_bss_path = asm_gen.ResolveBssPath(sub.name());
+          auto b_status = asm_gen.WriteBssAssembly(bss_size, sub_vram, out_bss_path);
+          if (!b_status.ok()) {
+            return b_status;
+          }
+          result.asm_files_written++;
+          continue;
+        }
+
+        if (sub.type() == SUBSEGMENT_C) {
+          if (sub_start >= sub_end || sub_end > rom.Size()) {
+            continue;
+          }
+          auto code_span_or = rom.SliceRange(sub_start, sub_end);
+          if (!code_span_or.ok()) {
+            return code_span_or.status();
+          }
+
+          if (options.generate_undefined_symbols) {
+            auto scan_status = auto_symbols.ScanCode(*code_span_or, sub_vram);
+            if (!scan_status.ok()) {
+              return scan_status;
+            }
+          }
+
+          auto funcs_or = disassembler.DisassembleAllFunctions(*code_span_or, sub_vram);
+          if (!funcs_or.ok()) {
+            return funcs_or.status();
+          }
+
+          auto written_count_or = asm_gen.WriteNonmatchingFunctions(sub.name(), *funcs_or);
+          if (!written_count_or.ok()) {
+            return written_count_or.status();
+          }
+          result.asm_files_written += *written_count_or;
+          result.functions_disassembled += funcs_or->size();
+          continue;
+        }
+
+        if (sub.type() != SUBSEGMENT_ASM && sub.type() != SUBSEGMENT_HASM) {
+          // Skip other non-asm files
+          continue;
+        }
+
+        if (sub_start >= sub_end || sub_end > rom.Size()) {
+          continue;
         }
 
         auto code_span_or = rom.SliceRange(sub_start, sub_end);
@@ -252,21 +388,12 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           return funcs_or.status();
         }
 
-        std::string emitted_s;
-        emitted_s += absl::StrFormat(
-            ".include \"macro.inc\"\n\n# Subsegment: %s [0x%X - 0x%X] VRAM: 0x%08X\n.section "
-            ".text\n\n",
-            sub.name(), sub_start, sub_end, sub_vram);
-        for (const auto& func : *funcs_or) {
-          emitted_s += func.emitted_assembly;
-          emitted_s += "\n\n";
-        }
-
         std::filesystem::path out_s_path = asm_dir / absl::StrCat(sub.name(), ".s");
-        std::filesystem::create_directories(out_s_path.parent_path());
-        std::ofstream s_file(out_s_path, std::ios::out | std::ios::trunc);
-        s_file << emitted_s;
-
+        auto s_status = asm_gen.WriteStandaloneAssembly(sub.name(), sub_start, sub_end, sub_vram,
+                                                        *funcs_or, out_s_path);
+        if (!s_status.ok()) {
+          return s_status;
+        }
         result.functions_disassembled += funcs_or->size();
         result.asm_files_written++;
       }
@@ -274,7 +401,9 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
 
     // Write undefined symbol scripts
     if (options.generate_undefined_symbols) {
-      std::filesystem::path game_build_dir = options.out_dir / config.basename();
+      std::filesystem::path game_build_dir = (options.out_dir.filename() == config.basename())
+                                                 ? options.out_dir
+                                                 : (options.out_dir / config.basename());
       std::filesystem::create_directories(game_build_dir);
 
       std::filesystem::path undef_syms_path = options.undefined_syms_path;
