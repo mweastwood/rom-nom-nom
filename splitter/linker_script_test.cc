@@ -210,5 +210,36 @@ TEST(LinkerScriptTest, NumericSegmentNameSanitizedAndBssSubsegmentHandled) {
   EXPECT_TRUE(absl::StrContains(*script_or, "build/test-game/assets/test-game/3F1B0.o(.data);"));
 }
 
+TEST(LinkerScriptTest, ResolveObjectPathPrefixHandling) {
+  Segment seg;
+  seg.set_name("main");
+  seg.set_type(SEGMENT_CODE);
+
+  Subsegment sub;
+  sub.set_name("boot");
+  sub.set_type(SUBSEGMENT_C);
+
+  // 1. Default base_build_dir ("build") appends game_name: "build/test-game/src/c/test-game/boot.o"
+  LinkerScriptOptions opt_default;
+  opt_default.base_build_dir = "build";
+  LinkerScriptGenerator gen_default(opt_default);
+  EXPECT_EQ(gen_default.ResolveObjectPath("test-game", seg, &sub),
+            "build/test-game/src/c/test-game/boot.o");
+
+  // 2. base_build_dir already ending in game_name does not duplicate it:
+  LinkerScriptOptions opt_game_dir;
+  opt_game_dir.base_build_dir = "build/test-game";
+  LinkerScriptGenerator gen_game_dir(opt_game_dir);
+  EXPECT_EQ(gen_game_dir.ResolveObjectPath("test-game", seg, &sub),
+            "build/test-game/src/c/test-game/boot.o");
+
+  // 3. Empty base_build_dir uses game_name directly:
+  LinkerScriptOptions opt_empty;
+  opt_empty.base_build_dir = "";
+  LinkerScriptGenerator gen_empty(opt_empty);
+  EXPECT_EQ(gen_empty.ResolveObjectPath("test-game", seg, &sub),
+            "test-game/src/c/test-game/boot.o");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

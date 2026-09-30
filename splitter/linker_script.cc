@@ -37,9 +37,14 @@ LinkerScriptGenerator::LinkerScriptGenerator(LinkerScriptOptions options)
 std::string LinkerScriptGenerator::ResolveObjectPath(std::string_view game_name,
                                                      const Segment& segment,
                                                      const Subsegment* subsegment) const {
-  std::string prefix = options_.base_build_dir.empty()
-                           ? std::string(game_name)
-                           : absl::StrCat(options_.base_build_dir, "/", game_name);
+  std::string prefix;
+  if (options_.base_build_dir.empty()) {
+    prefix = std::string(game_name);
+  } else if (std::filesystem::path(options_.base_build_dir).filename() == game_name) {
+    prefix = options_.base_build_dir;
+  } else {
+    prefix = absl::StrCat(options_.base_build_dir, "/", game_name);
+  }
 
   if (subsegment != nullptr) {
     std::string_view sub_name = subsegment->name();
