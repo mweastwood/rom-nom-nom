@@ -156,13 +156,35 @@ def build_rom(
     verify_rom: Path = None,
     is_test: bool = False,
 ) -> bool:
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_data = yaml.safe_load(f)
+    config_data = {}
+    if config_path.suffix == ".textproto":
+        content = config_path.read_text(encoding="utf-8")
+        sha1_m = re.search(r'sha1:\s*"([a-fA-F0-9]+)"', content)
+        if sha1_m:
+            config_data["sha1"] = sha1_m.group(1).lower()
+        name_m = re.search(r'game_name:\s*"([^"]+)"', content)
+        if name_m:
+            config_data["name"] = name_m.group(1)
+        base_m = re.search(r'basename:\s*"([^"]+)"', content)
+        if base_m:
+            config_data["basename"] = base_m.group(1)
+
+        c_flags_dict = {}
+        for block in re.finditer(r'c_flags\s*\{\s*key:\s*"([^"]+)"\s*value\s*\{([^}]+)\}\s*\}', content):
+            key = block.group(1)
+            flags = re.findall(r'flags:\s*"([^"]+)"', block.group(2))
+            c_flags_dict[key] = flags
+        config_data["c_flags"] = c_flags_dict
+    else:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = yaml.safe_load(f)
 
     expected_sha1 = config_data.get("sha1", "").lower()
     ld_script = build_dir / f"{game_name}.ld"
     if not ld_script.exists():
         candidates = list(build_dir.glob("*.ld"))
+        if not candidates:
+            candidates = list(build_dir.glob("**/*.ld"))
         if candidates:
             ld_script = candidates[0]
         else:
@@ -174,9 +196,14 @@ def build_rom(
         shutil.rmtree(obj_dir)
     obj_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Generate symbols.ld in obj_dir
+    # 1. Obtain symbols.ld in obj_dir
     symbols_ld = obj_dir / "symbols.ld"
-    generate_symbols_ld(symbols_path, config_data, symbols_ld)
+    if (build_dir / "symbols.ld").exists():
+        shutil.copy2(build_dir / "symbols.ld", symbols_ld)
+    elif list(build_dir.glob("**/symbols.ld")):
+        shutil.copy2(list(build_dir.glob("**/symbols.ld"))[0], symbols_ld)
+    else:
+        generate_symbols_ld(symbols_path, config_data, symbols_ld)
 
     # 2. Parse needed objects and rewrite LD script
     ld_content = ld_script.read_text(encoding="utf-8")
@@ -310,11 +337,21 @@ def build_rom(
     out_elf.parent.mkdir(parents=True, exist_ok=True)
     ld_cmd = [ld_bin, "-T", str(symbols_ld)]
 
+    hw_regs = build_dir / "hardware_regs.ld"
+    if not hw_regs.exists() and list(build_dir.glob("**/hardware_regs.ld")):
+        hw_regs = list(build_dir.glob("**/hardware_regs.ld"))[0]
+    if hw_regs.exists():
+        ld_cmd += ["-T", str(hw_regs)]
+
     undef_syms = build_dir / "undefined_syms_auto.txt"
+    if not undef_syms.exists() and list(build_dir.glob("**/undefined_syms_auto.txt")):
+        undef_syms = list(build_dir.glob("**/undefined_syms_auto.txt"))[0]
     if undef_syms.exists():
         ld_cmd += ["-T", str(undef_syms)]
 
     undef_funcs = build_dir / "undefined_funcs_auto.txt"
+    if not undef_funcs.exists() and list(build_dir.glob("**/undefined_funcs_auto.txt")):
+        undef_funcs = list(build_dir.glob("**/undefined_funcs_auto.txt"))[0]
     if undef_funcs.exists():
         ld_cmd += ["-T", str(undef_funcs)]
 
@@ -338,8 +375,11 @@ def build_rom(
     sha1_matches = (built_sha1 == expected_sha1)
     byte_matches = True
 
-    target_rom_candidate = verify_rom or (REPO_ROOT / config_data.get("options", {}).get("target_path", ""))
-    if target_rom_candidate and Path(target_rom_candidate).exists():
+    target_path = config_data.get("options", {}).get("target_path", "")
+    target_rom_candidate = verify_rom or (REPO_ROOT / target_path if target_path else None)
+    if not (target_rom_candidate and Path(target_rom_candidate).is_file()):
+        target_rom_candidate = REPO_ROOT / "roms" / f"{game_name}.z64"
+    if target_rom_candidate and Path(target_rom_candidate).is_file():
         orig_bytes = Path(target_rom_candidate).read_bytes()
         built_bytes = out_rom.read_bytes()
         if orig_bytes != built_bytes:

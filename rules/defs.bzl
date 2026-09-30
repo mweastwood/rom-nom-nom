@@ -16,16 +16,16 @@ def _splat_split_impl(ctx):
     args.add("--config", ctx.file.config)
     args.add("--rom", ctx.file.rom)
     args.add("--symbols", ctx.file.symbols)
-    args.add("--out-asm", asm_dir.path)
-    args.add("--out-build", build_dir.path)
-    args.add("--out-assets", assets_dir.path)
+    args.add("--out_dir", build_dir.path)
+    args.add("--asm_out_dir", asm_dir.path)
+    args.add("--assets_out_dir", assets_dir.path)
 
     ctx.actions.run(
         inputs = [ctx.file.config, ctx.file.rom, ctx.file.symbols] + ctx.files.srcs,
         outputs = [asm_dir, build_dir, assets_dir],
-        executable = ctx.executable._splat_runner,
+        executable = ctx.executable._splitter,
         arguments = [args],
-        mnemonic = "SplatSplit",
+        mnemonic = "Splitter",
         execution_requirements = {"no-sandbox": "1"},
     )
 
@@ -42,12 +42,12 @@ splat_split = rule(
     implementation = _splat_split_impl,
     attrs = {
         "game": attr.string(mandatory = True),
-        "config": attr.label(mandatory = True, allow_single_file = [".yaml"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".txt"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".yaml", ".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "srcs": attr.label_list(allow_files = True, default = []),
-        "_splat_runner": attr.label(
-            default = "//tools:splat_runner",
+        "_splitter": attr.label(
+            default = "//splitter:splitter",
             executable = True,
             cfg = "exec",
         ),
@@ -99,8 +99,8 @@ n64_rom = rule(
     implementation = _n64_rom_impl,
     attrs = {
         "game": attr.string(mandatory = True),
-        "config": attr.label(mandatory = True, allow_single_file = [".yaml"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".txt"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".yaml", ".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
         "split": attr.label(mandatory = True, providers = [OutputGroupInfo]),
         "srcs": attr.label_list(allow_files = True, default = []),
         "toolchain": attr.string(default = "original"),
@@ -190,7 +190,7 @@ n64_rom_bitexact_test = rule(
     attrs = {
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
-        "config": attr.label(mandatory = True, allow_single_file = [".yaml"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".yaml", ".textproto"]),
     },
 )
 
