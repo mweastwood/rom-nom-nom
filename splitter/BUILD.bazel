@@ -310,6 +310,8 @@ cc_binary(
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/flags:usage",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
+
