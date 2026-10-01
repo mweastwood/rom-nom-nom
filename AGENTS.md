@@ -108,7 +108,7 @@ bazel run //:m2c -- func_800266C0
    ```
 5. **Hardware Hazard Handling & Assembler Macros (`macros/<game>_macro.inc`)**:
    - Upstream `mips-binutils-2.6 v0.3` faithfully assembles MIPS I/II/III instructions but occasionally omits hardware hazard NOPs that the original 1999 SGI/KMC toolchain generated (such as COP1 condition code hazards after `c.lt.d` or coprocessor load/arithmetic pipeline delays before `mul.s`).
-   - Hardware hazard delays for compiled C units are handled via clean assembler macros defined in `macros/<game>_macro.inc` (passed transparently to the assembler via `c_macro.inc` by `tools/build_rom.py` and `tools/diff.py`). This avoids inline assembly barriers (`__asm__`) that would otherwise disrupt GCC 2.7.2's branch delay-slot optimizer (`reorg.c`).
+   - Hardware hazard delays for compiled C units are handled via clean assembler macros defined in `macros/<game>_macro.inc` (passed transparently to the assembler via `c_macro.inc` by `builder` and `tools/diff.py`). This avoids inline assembly barriers (`__asm__`) that would otherwise disrupt GCC 2.7.2's branch delay-slot optimizer (`reorg.c`).
    - For cases where manual inline NOP placement is explicitly needed in C code, use the standardized `NOP()` macro defined in `types.h`:
      ```c
      #include "types.h"

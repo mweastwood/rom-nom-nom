@@ -20,14 +20,27 @@
 namespace rom_nom_nom {
 
 std::filesystem::path FindExecutableInPath(std::string_view name) {
+  std::vector<std::string_view> search_dirs;
   const char* path_env = std::getenv("PATH");
-  if (path_env == nullptr) {
-    return {};
-  }
-  for (std::string_view dir : absl::StrSplit(path_env, ':')) {
-    if (dir.empty()) {
-      continue;
+  if (path_env != nullptr && *path_env != '\0') {
+    for (std::string_view dir : absl::StrSplit(path_env, ':')) {
+      if (!dir.empty()) {
+        search_dirs.push_back(dir);
+      }
     }
+  }
+
+  static constexpr std::string_view kFallbackDirs[] = {
+      "/usr/bin",
+      "/bin",
+      "/usr/local/bin",
+      "/opt/local/bin",
+  };
+  for (std::string_view fallback : kFallbackDirs) {
+    search_dirs.push_back(fallback);
+  }
+
+  for (std::string_view dir : search_dirs) {
     std::filesystem::path candidate = std::filesystem::path(dir) / name;
     if (std::filesystem::exists(candidate) && access(candidate.c_str(), X_OK) == 0) {
       return candidate;

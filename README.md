@@ -31,10 +31,11 @@ rom-nom-nom/
 │   ├── c/harvest-moon-64/
 │   ├── cc/harvest-moon-64/
 │   └── ogre-battle-64/
+├── core/                    # Shared subprocess, toolchain, and MIPS compiler utilities (tracked)
 ├── splitter/                # Fast hermetic N64 binary splitter & disassembler (tracked)
+├── builder/                 # Native C++20 N64 ROM build orchestrator & linker adapter (tracked)
 └── tools/                   # Helper scripts and reproducible tools (tracked)
     ├── BUILD.bazel
-    ├── build_rom.py         # Bazel ROM build & bit-exact verification action
     ├── install_toolchain.py # GCC 2.7.2 installer
     └── format.py            # Codebase formatter
 ```

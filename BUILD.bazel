@@ -56,6 +56,12 @@ alias(
     actual = "//tools:m2c",
 )
 
+# Native C++ ROM builder tool
+alias(
+    name = "builder",
+    actual = "//builder:builder",
+)
+
 
 
 

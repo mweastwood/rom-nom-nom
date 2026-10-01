@@ -141,8 +141,20 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
       toolchain_.RepoRoot() / "src" / "c" / options_.game_name,
       toolchain_.RepoRoot() / "src" / "cc" / options_.game_name,
       toolchain_.RepoRoot(),
-      options_.asm_dir,
   };
+
+  if (!options_.asm_dir.empty()) {
+    extra_includes.push_back(options_.asm_dir);
+    if (options_.asm_dir.has_parent_path()) {
+      extra_includes.push_back(options_.asm_dir.parent_path());
+      if (options_.asm_dir.parent_path().has_parent_path()) {
+        extra_includes.push_back(options_.asm_dir.parent_path().parent_path());
+      }
+    }
+  }
+  if (!options_.build_dir.empty()) {
+    extra_includes.push_back(options_.build_dir);
+  }
 
   std::filesystem::path macro_inc = FindMacroInc(toolchain_.RepoRoot(), options_.game_name);
 

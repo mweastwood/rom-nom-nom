@@ -83,6 +83,7 @@ def _n64_rom_impl(ctx):
         arguments = [args],
         mnemonic = "N64Rom",
         execution_requirements = {"no-sandbox": "1"},
+        use_default_shell_env = True,
     )
 
     return [
@@ -106,7 +107,7 @@ n64_rom = rule(
         "srcs": attr.label_list(allow_files = True, default = []),
         "toolchain": attr.string(default = "original"),
         "_build_rom": attr.label(
-            default = "//tools:build_rom",
+            default = "//builder:builder",
             executable = True,
             cfg = "exec",
         ),
