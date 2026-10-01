@@ -50,3 +50,39 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "rom_builder",
+    srcs = ["rom_builder.cc"],
+    hdrs = ["rom_builder.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":linker_script_adapter",
+        ":source_resolver",
+        "//core:compiler",
+        "//core:sha1",
+        "//core:toolchain",
+        "//splitter:config",
+        "//splitter:config_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "rom_builder_test",
+    srcs = ["rom_builder_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":rom_builder",
+        "//core:compiler",
+        "//core:process",
+        "//core:sha1",
+        "//core:toolchain",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
