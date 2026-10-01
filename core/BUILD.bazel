@@ -75,3 +75,30 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "process",
+    srcs = ["process.cc"],
+    hdrs = ["process.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "process_test",
+    srcs = ["process_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":process",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest_main",
+    ],
+)
+
