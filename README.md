@@ -16,11 +16,13 @@ rom-nom-nom/
 │   ├── BUILD.bazel
 │   ├── harvest-moon-64.z64
 │   └── ogre-battle-64.z64
-├── config/                  # Split configurations and macros (tracked)
+├── config/                  # Split configurations (tracked)
 │   ├── BUILD.bazel
 │   ├── harvest-moon-64.textproto
-│   ├── harvest-moon-64_macro.inc
 │   └── ogre-battle-64.textproto
+├── macros/                  # Hardware hazard and assembler compatibility macros (tracked)
+│   ├── BUILD.bazel
+│   └── harvest-moon-64_macro.inc
 ├── symbols/                 # Symbol and reloc address maps (tracked)
 │   ├── BUILD.bazel
 │   ├── harvest-moon-64.textproto

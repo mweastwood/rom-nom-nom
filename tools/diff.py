@@ -306,7 +306,9 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             f"-I{asm_dir.parent}",
             f"-I{asm_dir.parent.parent}",
         ]
-        macro_inc = REPO_ROOT / "config" / f"{game}_macro.inc"
+        macro_inc = REPO_ROOT / "macros" / f"{game}_macro.inc"
+        if not macro_inc.exists():
+            macro_inc = REPO_ROOT / "config" / f"{game}_macro.inc"
         if not macro_inc.exists():
             macro_inc = asm_dir / "c_macro.inc"
         if not macro_inc.exists():

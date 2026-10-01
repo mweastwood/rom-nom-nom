@@ -205,7 +205,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
 
     // Emit standard macro.inc and copy c_macro.inc if present
     std::filesystem::path game_macro =
-        std::filesystem::path("config") / absl::StrCat(config.basename(), "_macro.inc");
+        std::filesystem::path("macros") / absl::StrCat(config.basename(), "_macro.inc");
     auto macro_status = asm_gen.EmitMacroIncludes(game_macro);
     if (!macro_status.ok()) {
       return macro_status;

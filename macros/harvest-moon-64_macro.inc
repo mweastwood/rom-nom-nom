@@ -2,7 +2,7 @@
 
 /*
  * ==============================================================================
- * splat/harvest-moon-64_macro.inc
+ * macros/harvest-moon-64_macro.inc
  * Hardware Hazard & Assembler Compatibility Macros for Harvest Moon 64
  * ==============================================================================
  *

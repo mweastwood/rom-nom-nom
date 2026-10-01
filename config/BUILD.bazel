@@ -6,11 +6,6 @@ filegroup(
 )
 
 filegroup(
-    name = "harvest-moon-64-macro",
-    srcs = ["harvest-moon-64_macro.inc"],
-)
-
-filegroup(
     name = "ogre-battle-64",
     srcs = ["ogre-battle-64.textproto"],
 )

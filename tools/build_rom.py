@@ -120,6 +120,8 @@ def compile_with_gcc_272(
         as_flags_norm = list(as_extra_flags)
     macro_inc = asm_dir / "c_macro.inc"
     if not macro_inc.exists():
+        macro_inc = REPO_ROOT / "macros" / f"{asm_dir.name}_macro.inc"
+    if not macro_inc.exists():
         macro_inc = REPO_ROOT / "config" / f"{asm_dir.name}_macro.inc"
     if not macro_inc.exists():
         macro_inc = asm_dir / "macro.inc"
