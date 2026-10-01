@@ -136,6 +136,27 @@ absl::StatusOr<Toolchain> Toolchain::Discover(ToolchainOptions options) {
   return toolchain;
 }
 
+Toolchain Toolchain::CreateForTesting(ToolchainOptions options, std::filesystem::path gcc_272_path,
+                                      std::filesystem::path kmc_as_path,
+                                      std::filesystem::path gnu_as_path,
+                                      std::filesystem::path gnu_ld_path,
+                                      std::filesystem::path gnu_objcopy_path,
+                                      std::filesystem::path gnu_gcc_path,
+                                      std::filesystem::path gnu_gxx_path) {
+  Toolchain toolchain(std::move(options));
+  toolchain.gcc_272_path_ = std::move(gcc_272_path);
+  if (!toolchain.gcc_272_path_.empty()) {
+    toolchain.gcc_272_dir_ = toolchain.gcc_272_path_.parent_path();
+  }
+  toolchain.kmc_as_path_ = std::move(kmc_as_path);
+  toolchain.gnu_as_path_ = std::move(gnu_as_path);
+  toolchain.gnu_ld_path_ = std::move(gnu_ld_path);
+  toolchain.gnu_objcopy_path_ = std::move(gnu_objcopy_path);
+  toolchain.gnu_gcc_path_ = std::move(gnu_gcc_path);
+  toolchain.gnu_gxx_path_ = std::move(gnu_gxx_path);
+  return toolchain;
+}
+
 std::vector<std::string> Toolchain::BuildGcc272CompileArgs(
     const std::vector<std::string>& opt_flags,
     const std::vector<std::filesystem::path>& include_dirs, const std::filesystem::path& src_file,

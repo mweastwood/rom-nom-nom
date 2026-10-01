@@ -38,6 +38,16 @@ class Toolchain {
   // Discovers and validates all required toolchain binaries based on options.
   static absl::StatusOr<Toolchain> Discover(ToolchainOptions options);
 
+  // Creates a Toolchain with preconfigured binary paths (e.g. for testing).
+  static Toolchain CreateForTesting(
+      ToolchainOptions options, std::filesystem::path gcc_272_path = "/usr/bin/gcc-2.7.2",
+      std::filesystem::path kmc_as_path = "/usr/bin/kmc-as",
+      std::filesystem::path gnu_as_path = "/usr/bin/mips-linux-gnu-as",
+      std::filesystem::path gnu_ld_path = "/usr/bin/mips-linux-gnu-ld",
+      std::filesystem::path gnu_objcopy_path = "/usr/bin/mips-linux-gnu-objcopy",
+      std::filesystem::path gnu_gcc_path = "/usr/bin/mips-linux-gnu-gcc",
+      std::filesystem::path gnu_gxx_path = "/usr/bin/mips-linux-gnu-g++");
+
   ToolchainMode Mode() const { return options_.mode; }
   const std::filesystem::path& RepoRoot() const { return options_.repo_root; }
 
