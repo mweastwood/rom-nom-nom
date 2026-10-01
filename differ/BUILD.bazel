@@ -50,3 +50,33 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "target_extractor",
+    srcs = ["target_extractor.cc"],
+    hdrs = ["target_extractor.h"],
+    deps = [
+        "//core:mips",
+        "//splitter:config",
+        "//splitter:disassembler",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "target_extractor_test",
+    srcs = ["target_extractor_test.cc"],
+    deps = [
+        ":target_extractor",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
