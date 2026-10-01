@@ -26,3 +26,27 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "linker_script_adapter",
+    srcs = ["linker_script_adapter.cc"],
+    hdrs = ["linker_script_adapter.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "linker_script_adapter_test",
+    srcs = ["linker_script_adapter_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":linker_script_adapter",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest_main",
+    ],
+)
