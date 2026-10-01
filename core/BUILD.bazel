@@ -102,3 +102,30 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "toolchain",
+    srcs = ["toolchain.cc"],
+    hdrs = ["toolchain.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "toolchain_test",
+    srcs = ["toolchain_test.cc"],
+    copts = ["-std=c++20"],
+    data = [
+        "//toolchain:all_files",
+    ],
+    deps = [
+        ":toolchain",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+

@@ -42,12 +42,15 @@ def get_compile_args(file_path: Path):
     # Check if googletest, abseil, and protobuf headers are available
     external_candidates = [
         REPO_ROOT / "bazel-rom-nom-nom" / "external" / "googletest+" / "googletest" / "include",
+        REPO_ROOT / "bazel-rom-nom-nom" / "external" / "googletest+" / "googlemock" / "include",
         REPO_ROOT / "bazel-rom-nom-nom" / "external" / "abseil-cpp+",
     ]
     symlink = REPO_ROOT / "bazel-rom-nom-nom"
     if symlink.is_symlink():
         output_base = symlink.resolve().parent.parent
         for p in (output_base / "external").glob("*googletest*/googletest/include"):
+            external_candidates.append(p)
+        for p in (output_base / "external").glob("*googletest*/googlemock/include"):
             external_candidates.append(p)
         for p in (output_base / "external").glob("*abseil-cpp*"):
             external_candidates.append(p)
