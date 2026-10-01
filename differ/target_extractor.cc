@@ -16,21 +16,13 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/strip.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 #include "core/mips.h"
 #include "splitter/config.h"
 #include "splitter/disassembler.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
-
-namespace {
-
-inline uint32_t ReadBe32(const uint8_t* p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
-}
-
-}  // namespace
 
 TargetExtractor::TargetExtractor(TargetExtractorOptions options, const SplitConfig* config,
                                  const SymbolIndex* symbols)

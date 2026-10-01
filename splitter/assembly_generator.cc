@@ -15,14 +15,10 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 
 namespace rom_nom_nom {
 namespace {
-
-inline uint32_t ReadBe32(const uint8_t* p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
-}
 
 constexpr std::string_view kStandardMacroInc = R"(# Defines the expected assembly macros
 .ifndef _MACRO_INC_GUARD
@@ -184,7 +180,7 @@ absl::Status AssemblyGenerator::WriteHeaderAssembly(absl::Span<const uint8_t> he
                                                     const std::filesystem::path& out_path) {
   std::string header_asm = ".section .data\n\n";
   for (size_t offset = 0; offset + 4 <= header_bytes.size(); offset += 4) {
-    uint32_t w = ReadBe32(header_bytes.data() + offset);
+    uint32_t w = ReadBigEndian32(header_bytes.data() + offset);
     absl::StrAppend(&header_asm, absl::StrFormat(".word 0x%08X\n", w));
   }
 
@@ -230,7 +226,7 @@ absl::Status AssemblyGenerator::WriteDataAssembly(absl::Span<const uint8_t> data
   data_asm += absl::StrFormat("dlabel %s\n", label_name);
 
   for (size_t offset = 0; offset + 4 <= data_bytes.size(); offset += 4) {
-    uint32_t w = ReadBe32(data_bytes.data() + offset);
+    uint32_t w = ReadBigEndian32(data_bytes.data() + offset);
     absl::StrAppend(&data_asm, absl::StrFormat("    .word 0x%08X\n", w));
   }
   for (size_t offset = (data_bytes.size() / 4) * 4; offset < data_bytes.size(); ++offset) {

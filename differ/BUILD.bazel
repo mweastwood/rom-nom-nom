@@ -7,6 +7,7 @@ cc_library(
     srcs = ["elf_reader.cc"],
     hdrs = ["elf_reader.h"],
     deps = [
+        "//core:endian",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -20,6 +21,7 @@ cc_test(
     srcs = ["elf_reader_test.cc"],
     deps = [
         ":elf_reader",
+        "//core:endian",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -55,6 +57,7 @@ cc_library(
     srcs = ["target_extractor.cc"],
     hdrs = ["target_extractor.h"],
     deps = [
+        "//core:endian",
         "//core:mips",
         "//splitter:config",
         "//splitter:disassembler",
@@ -72,6 +75,7 @@ cc_test(
     srcs = ["target_extractor_test.cc"],
     deps = [
         ":target_extractor",
+        "//core:endian",
         "//splitter:config",
         "//splitter:symbol_registry",
         "@googletest//:gtest",

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "core/endian.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "splitter/config.h"
@@ -20,13 +21,6 @@ using ::testing::Field;
 using ::testing::IsEmpty;
 using ::testing::Not;
 using ::testing::SizeIs;
-
-void AppendBe32(std::vector<uint8_t>& buf, uint32_t val) {
-  buf.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
-  buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-  buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-  buf.push_back(static_cast<uint8_t>(val & 0xFF));
-}
 
 class TargetExtractorTest : public ::testing::Test {
  protected:
@@ -120,9 +114,9 @@ TEST_F(TargetExtractorTest, ExtractsTargetFromRomBuffer) {
   // 3. nop (0x00000000)
   std::vector<uint8_t> rom(0x5000, 0);
   std::vector<uint8_t> code;
-  AppendBe32(code, 0x27BDFFE0);
-  AppendBe32(code, 0x03E00008);
-  AppendBe32(code, 0x00000000);
+  AppendBigEndian32(code, 0x27BDFFE0);
+  AppendBigEndian32(code, 0x03E00008);
+  AppendBigEndian32(code, 0x00000000);
   std::copy(code.begin(), code.end(), rom.begin() + 0x2000);
 
   auto target_or = extractor.ExtractFromRom(rom, "TargetFunc");

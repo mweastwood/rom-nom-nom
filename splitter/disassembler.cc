@@ -15,6 +15,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 #include "core/mips.h"
 #include "splitter/relocations.h"
 #include "splitter/symbol_registry.h"
@@ -22,11 +23,6 @@
 namespace rom_nom_nom {
 
 namespace {
-
-inline uint32_t ReadBe32(const uint8_t* p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
-}
 
 std::string FormatBranch(const Instruction& inst, const std::string& target_label) {
   Register rs_reg = inst.rs.value_or(Register::kZero);
@@ -112,7 +108,7 @@ std::string Disassembler::DisassembleInstruction(uint32_t raw_word, uint32_t pc)
 void Disassembler::PreScanCode(absl::Span<const uint8_t> code, uint32_t vram_start) {
   for (size_t offset = 0; offset + 4 <= code.size(); offset += 4) {
     uint32_t pc = vram_start + static_cast<uint32_t>(offset);
-    uint32_t raw_word = ReadBe32(code.data() + offset);
+    uint32_t raw_word = ReadBigEndian32(code.data() + offset);
     auto inst_or = DecodeInstruction(raw_word, pc);
     if (!inst_or.ok()) {
       continue;
@@ -164,7 +160,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
       }
     }
 
-    uint32_t raw_word = ReadBe32(code.data() + offset);
+    uint32_t raw_word = ReadBigEndian32(code.data() + offset);
     auto inst_or = DecodeInstruction(raw_word, pc);
     if (!inst_or.ok()) {
       continue;
@@ -196,7 +192,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
           if (known_entrypoints_.contains(next_pc) || (symbols_ && symbols_->HasAddress(next_pc))) {
             break;
           }
-          if (ReadBe32(code.data() + next_offset) != 0) {
+          if (ReadBigEndian32(code.data() + next_offset) != 0) {
             break;
           }
           func_end_offset = next_offset + 4;
@@ -222,7 +218,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
   absl::flat_hash_set<uint32_t> local_labels;
   for (size_t offset = 0; offset + 4 <= func_end_offset; offset += 4) {
     uint32_t pc = vram_start + static_cast<uint32_t>(offset);
-    uint32_t raw_word = ReadBe32(code.data() + offset);
+    uint32_t raw_word = ReadBigEndian32(code.data() + offset);
     auto inst_or = DecodeInstruction(raw_word, pc);
     if (!inst_or.ok()) {
       continue;
@@ -259,7 +255,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
   bool prev_has_delay_slot = false;
   for (size_t offset = 0; offset + 4 <= func_end_offset; offset += 4) {
     uint32_t pc = vram_start + static_cast<uint32_t>(offset);
-    uint32_t raw_word = ReadBe32(code.data() + offset);
+    uint32_t raw_word = ReadBigEndian32(code.data() + offset);
     auto inst_or = DecodeInstruction(raw_word, pc);
 
     DisassembledInstruction d_inst;

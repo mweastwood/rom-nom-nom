@@ -11,17 +11,10 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
-namespace {
-
-uint32_t ReadBe32(const uint8_t* p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
-}
-
-}  // namespace
 
 JumpTableResolver::JumpTableResolver(const SymbolIndex* symbols, JumpTableOptions options)
     : symbols_(symbols), options_(options) {}
@@ -36,7 +29,7 @@ std::optional<JumpTable> JumpTableResolver::DetectTableAt(absl::Span<const uint8
 
   std::vector<uint32_t> targets;
   for (size_t cur = offset_in_rodata; cur + 4 <= rodata.size(); cur += 4) {
-    uint32_t target = ReadBe32(rodata.data() + cur);
+    uint32_t target = ReadBigEndian32(rodata.data() + cur);
     if (target >= func.vram_start && target < func.vram_end && (target % 4 == 0)) {
       targets.push_back(target);
     } else {

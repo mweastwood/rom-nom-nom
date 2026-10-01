@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "core/endian.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
@@ -17,18 +18,6 @@ using ::testing::ElementsAre;
 using ::testing::Field;
 using ::testing::IsEmpty;
 using ::testing::SizeIs;
-
-void AppendBe16(std::vector<uint8_t>& buf, uint16_t val) {
-  buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-  buf.push_back(static_cast<uint8_t>(val & 0xFF));
-}
-
-void AppendBe32(std::vector<uint8_t>& buf, uint32_t val) {
-  buf.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
-  buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-  buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-  buf.push_back(static_cast<uint8_t>(val & 0xFF));
-}
 
 std::vector<uint8_t> BuildSyntheticMipsElf() {
   std::vector<uint8_t> elf;
@@ -44,28 +33,28 @@ std::vector<uint8_t> BuildSyntheticMipsElf() {
   elf.push_back(0);  // ABI
   for (int i = 0; i < 8; ++i) elf.push_back(0);
 
-  AppendBe16(elf, ET_REL);   // e_type
-  AppendBe16(elf, EM_MIPS);  // e_machine
-  AppendBe32(elf, 1);        // e_version
-  AppendBe32(elf, 0);        // e_entry
-  AppendBe32(elf, 0);        // e_phoff
+  AppendBigEndian16(elf, ET_REL);   // e_type
+  AppendBigEndian16(elf, EM_MIPS);  // e_machine
+  AppendBigEndian32(elf, 1);        // e_version
+  AppendBigEndian32(elf, 0);        // e_entry
+  AppendBigEndian32(elf, 0);        // e_phoff
   // e_shoff will be patched later
   size_t shoff_pos = elf.size();
-  AppendBe32(elf, 0);   // placeholder for e_shoff
-  AppendBe32(elf, 0);   // e_flags
-  AppendBe16(elf, 52);  // e_ehsize
-  AppendBe16(elf, 0);   // e_phentsize
-  AppendBe16(elf, 0);   // e_phnum
-  AppendBe16(elf, 40);  // e_shentsize
-  AppendBe16(elf, 6);   // e_shnum (NULL, .text, .shstrtab, .symtab, .strtab, .rel.text)
-  AppendBe16(elf, 2);   // e_shstrndx (index 2 is .shstrtab)
+  AppendBigEndian32(elf, 0);   // placeholder for e_shoff
+  AppendBigEndian32(elf, 0);   // e_flags
+  AppendBigEndian16(elf, 52);  // e_ehsize
+  AppendBigEndian16(elf, 0);   // e_phentsize
+  AppendBigEndian16(elf, 0);   // e_phnum
+  AppendBigEndian16(elf, 40);  // e_shentsize
+  AppendBigEndian16(elf, 6);   // e_shnum (NULL, .text, .shstrtab, .symtab, .strtab, .rel.text)
+  AppendBigEndian16(elf, 2);   // e_shstrndx (index 2 is .shstrtab)
 
   // 2. .text section content (offset 0x40 = 64)
   while (elf.size() < 64) elf.push_back(0);
   uint32_t text_offset = static_cast<uint32_t>(elf.size());
   // Function "TestFunc": 2 instructions (addiu $a0, $a0, 1; jr $ra)
-  AppendBe32(elf, 0x24840001);  // addiu $a0, $a0, 1
-  AppendBe32(elf, 0x03E00008);  // jr $ra
+  AppendBigEndian32(elf, 0x24840001);  // addiu $a0, $a0, 1
+  AppendBigEndian32(elf, 0x03E00008);  // jr $ra
   uint32_t text_size = 8;
 
   // 3. .shstrtab section content
@@ -101,27 +90,27 @@ std::vector<uint8_t> BuildSyntheticMipsElf() {
   // Symbol 0: NULL symbol
   for (int i = 0; i < 16; ++i) elf.push_back(0);
   // Symbol 1: TestFunc (STT_FUNC, STB_GLOBAL, section 1 (.text), value 0, size 8)
-  AppendBe32(elf, static_cast<uint32_t>(str_func_name));
-  AppendBe32(elf, 0);  // st_value
-  AppendBe32(elf, 8);  // st_size
+  AppendBigEndian32(elf, static_cast<uint32_t>(str_func_name));
+  AppendBigEndian32(elf, 0);  // st_value
+  AppendBigEndian32(elf, 8);  // st_size
   elf.push_back((STB_GLOBAL << 4) | (STT_FUNC & 0xF));
   elf.push_back(0);
-  AppendBe16(elf, 1);  // st_shndx = 1 (.text)
+  AppendBigEndian16(elf, 1);  // st_shndx = 1 (.text)
 
   // Symbol 2: g_target_symbol (STT_NOTYPE, STB_GLOBAL, SHN_UNDEF)
-  AppendBe32(elf, static_cast<uint32_t>(str_target_sym));
-  AppendBe32(elf, 0);  // st_value
-  AppendBe32(elf, 0);  // st_size
+  AppendBigEndian32(elf, static_cast<uint32_t>(str_target_sym));
+  AppendBigEndian32(elf, 0);  // st_value
+  AppendBigEndian32(elf, 0);  // st_size
   elf.push_back((STB_GLOBAL << 4) | (STT_NOTYPE & 0xF));
   elf.push_back(0);
-  AppendBe16(elf, SHN_UNDEF);  // undefined
+  AppendBigEndian16(elf, SHN_UNDEF);  // undefined
   uint32_t symtab_size = 3 * 16;
 
   // 6. .rel.text section content (each relocation is 8 bytes)
   uint32_t rel_offset = static_cast<uint32_t>(elf.size());
   // Relocation 0: offset 0x0, type R_MIPS_HI16 (5), sym 2 (g_target_symbol)
-  AppendBe32(elf, 0x0);  // r_offset
-  AppendBe32(elf, (2 << 8) | 5);
+  AppendBigEndian32(elf, 0x0);  // r_offset
+  AppendBigEndian32(elf, (2 << 8) | 5);
   uint32_t rel_size = 8;
 
   // 7. Section Header Table (6 sections * 40 bytes)
@@ -134,16 +123,16 @@ std::vector<uint8_t> BuildSyntheticMipsElf() {
 
   auto append_shdr = [&](uint32_t name, uint32_t type, uint32_t flags, uint32_t offset,
                          uint32_t size, uint32_t link, uint32_t info, uint32_t entsize) {
-    AppendBe32(elf, name);
-    AppendBe32(elf, type);
-    AppendBe32(elf, flags);
-    AppendBe32(elf, 0);  // sh_addr
-    AppendBe32(elf, offset);
-    AppendBe32(elf, size);
-    AppendBe32(elf, link);
-    AppendBe32(elf, info);
-    AppendBe32(elf, 4);  // sh_addralign
-    AppendBe32(elf, entsize);
+    AppendBigEndian32(elf, name);
+    AppendBigEndian32(elf, type);
+    AppendBigEndian32(elf, flags);
+    AppendBigEndian32(elf, 0);  // sh_addr
+    AppendBigEndian32(elf, offset);
+    AppendBigEndian32(elf, size);
+    AppendBigEndian32(elf, link);
+    AppendBigEndian32(elf, info);
+    AppendBigEndian32(elf, 4);  // sh_addralign
+    AppendBigEndian32(elf, entsize);
   };
 
   // Section 0: NULL

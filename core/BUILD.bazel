@@ -3,11 +3,33 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "endian",
+    hdrs = ["endian.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "endian_test",
+    srcs = ["endian_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":endian",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "mips",
     srcs = ["mips.cc"],
     hdrs = ["mips.h"],
     copts = ["-std=c++20"],
     deps = [
+        ":endian",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -53,6 +75,7 @@ cc_library(
     hdrs = ["rom.h"],
     copts = ["-std=c++20"],
     deps = [
+        ":endian",
         ":sha1",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

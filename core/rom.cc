@@ -17,27 +17,18 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
-#include "absl/types/span.h"
+#include "core/endian.h"
 #include "core/sha1.h"
 
 namespace rom_nom_nom {
 
 namespace {
 
-inline uint32_t ReadBe32(const uint8_t* p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
-}
-
-inline uint16_t ReadBe16(const uint8_t* p) {
-  return (static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]);
-}
-
 RomEndianness DetectEndianness(absl::Span<const uint8_t> data) {
   if (data.size() < 4) {
     return RomEndianness::kUnknown;
   }
-  const uint32_t magic = ReadBe32(data.data());
+  const uint32_t magic = ReadBigEndian32(data.data());
   switch (magic) {
     case 0x80371240:
       return RomEndianness::kBigEndian;
@@ -67,12 +58,12 @@ absl::StatusOr<RomHeader> ParseHeader(absl::Span<const uint8_t> data) {
   }
 
   const uint8_t* p = data.data();
-  header.initial_pi_reg = ReadBe32(p + 0x00);
-  header.clock_rate = ReadBe32(p + 0x04);
-  header.entry_point_pc = ReadBe32(p + 0x08);
-  header.release_offset = ReadBe32(p + 0x0C);
-  header.crc1 = ReadBe32(p + 0x10);
-  header.crc2 = ReadBe32(p + 0x14);
+  header.initial_pi_reg = ReadBigEndian32(p + 0x00);
+  header.clock_rate = ReadBigEndian32(p + 0x04);
+  header.entry_point_pc = ReadBigEndian32(p + 0x08);
+  header.release_offset = ReadBigEndian32(p + 0x0C);
+  header.crc1 = ReadBigEndian32(p + 0x10);
+  header.crc2 = ReadBigEndian32(p + 0x14);
 
   std::string raw_title(reinterpret_cast<const char*>(p + 0x20), 20);
   while (!raw_title.empty() &&
@@ -237,7 +228,7 @@ absl::StatusOr<uint32_t> Rom::ReadWord(size_t offset) const {
     return absl::OutOfRangeError(
         absl::StrFormat("ReadWord at offset 0x%X exceeds ROM bounds (size: 0x%X)", offset, size_));
   }
-  return ReadBe32(data_ + offset);
+  return ReadBigEndian32(data_ + offset);
 }
 
 absl::StatusOr<uint16_t> Rom::ReadHalf(size_t offset) const {
@@ -245,7 +236,7 @@ absl::StatusOr<uint16_t> Rom::ReadHalf(size_t offset) const {
     return absl::OutOfRangeError(
         absl::StrFormat("ReadHalf at offset 0x%X exceeds ROM bounds (size: 0x%X)", offset, size_));
   }
-  return ReadBe16(data_ + offset);
+  return ReadBigEndian16(data_ + offset);
 }
 
 absl::StatusOr<uint8_t> Rom::ReadByte(size_t offset) const {

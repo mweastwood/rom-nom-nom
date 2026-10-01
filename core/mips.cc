@@ -10,6 +10,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 
 namespace rom_nom_nom {
 
@@ -968,9 +969,7 @@ absl::StatusOr<Instruction> DecodeInstruction(absl::Span<const uint8_t> bytes, u
         "Buffer size must be at least 4 bytes to decode a MIPS instruction");
   }
 
-  const uint32_t word = (static_cast<uint32_t>(bytes[0]) << 24) |
-                        (static_cast<uint32_t>(bytes[1]) << 16) |
-                        (static_cast<uint32_t>(bytes[2]) << 8) | static_cast<uint32_t>(bytes[3]);
+  const uint32_t word = ReadBigEndian32(bytes);
 
   return DecodeInstruction(word, vram);
 }

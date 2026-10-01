@@ -16,19 +16,11 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 
 namespace rom_nom_nom {
 
 namespace {
-
-inline uint16_t ReadBe16(const uint8_t* p) {
-  return (static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]);
-}
-
-inline uint32_t ReadBe32(const uint8_t* p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
-}
 
 std::string_view ExtractString(absl::Span<const uint8_t> strtab, uint32_t offset) {
   if (offset >= strtab.size()) {
@@ -81,12 +73,12 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
     return absl::InvalidArgumentError("ElfReader: Only ELFDATA2MSB (big-endian) is supported.");
   }
 
-  uint16_t e_type = ReadBe16(&bytes[16]);
-  uint16_t e_machine = ReadBe16(&bytes[18]);
-  uint32_t e_shoff = ReadBe32(&bytes[32]);
-  uint16_t e_shentsize = ReadBe16(&bytes[46]);
-  uint16_t e_shnum = ReadBe16(&bytes[48]);
-  uint16_t e_shstrndx = ReadBe16(&bytes[50]);
+  uint16_t e_type = ReadBigEndian16(&bytes[16]);
+  uint16_t e_machine = ReadBigEndian16(&bytes[18]);
+  uint32_t e_shoff = ReadBigEndian32(&bytes[32]);
+  uint16_t e_shentsize = ReadBigEndian16(&bytes[46]);
+  uint16_t e_shnum = ReadBigEndian16(&bytes[48]);
+  uint16_t e_shstrndx = ReadBigEndian16(&bytes[50]);
 
   if (e_type != ET_REL) {
     return absl::InvalidArgumentError(
@@ -124,13 +116,13 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
   for (uint16_t i = 0; i < e_shnum; ++i) {
     const uint8_t* sh_ptr = &bytes[e_shoff + i * e_shentsize];
     RawShdr raw;
-    raw.sh_name = ReadBe32(&sh_ptr[0]);
-    raw.sh_type = ReadBe32(&sh_ptr[4]);
-    raw.sh_flags = ReadBe32(&sh_ptr[8]);
-    raw.sh_offset = ReadBe32(&sh_ptr[16]);
-    raw.sh_size = ReadBe32(&sh_ptr[20]);
-    raw.sh_link = ReadBe32(&sh_ptr[24]);
-    raw.sh_info = ReadBe32(&sh_ptr[28]);
+    raw.sh_name = ReadBigEndian32(&sh_ptr[0]);
+    raw.sh_type = ReadBigEndian32(&sh_ptr[4]);
+    raw.sh_flags = ReadBigEndian32(&sh_ptr[8]);
+    raw.sh_offset = ReadBigEndian32(&sh_ptr[16]);
+    raw.sh_size = ReadBigEndian32(&sh_ptr[20]);
+    raw.sh_link = ReadBigEndian32(&sh_ptr[24]);
+    raw.sh_info = ReadBigEndian32(&sh_ptr[28]);
     raw_shdrs[i] = raw;
 
     ElfSection sec;
@@ -178,11 +170,11 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
 
     for (size_t i = 0; i < num_symbols; ++i) {
       const uint8_t* sym_ptr = &sym_bytes[i * sizeof(Elf32_Sym)];
-      uint32_t st_name = ReadBe32(&sym_ptr[0]);
-      uint32_t st_value = ReadBe32(&sym_ptr[4]);
-      uint32_t st_size = ReadBe32(&sym_ptr[8]);
+      uint32_t st_name = ReadBigEndian32(&sym_ptr[0]);
+      uint32_t st_value = ReadBigEndian32(&sym_ptr[4]);
+      uint32_t st_size = ReadBigEndian32(&sym_ptr[8]);
       uint8_t st_info = sym_ptr[12];
-      uint16_t st_shndx = ReadBe16(&sym_ptr[14]);
+      uint16_t st_shndx = ReadBigEndian16(&sym_ptr[14]);
 
       ElfSymbol sym;
       sym.value = st_value;
@@ -212,8 +204,8 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
 
         for (size_t j = 0; j < num_relocs; ++j) {
           const uint8_t* rel_ptr = &rel_bytes[j * sizeof(Elf32_Rel)];
-          uint32_t r_offset = ReadBe32(&rel_ptr[0]);
-          uint32_t r_info = ReadBe32(&rel_ptr[4]);
+          uint32_t r_offset = ReadBigEndian32(&rel_ptr[0]);
+          uint32_t r_info = ReadBigEndian32(&rel_ptr[4]);
           uint32_t sym_idx = ELF32_R_SYM(r_info);
           uint32_t r_type = ELF32_R_TYPE(r_info);
 
@@ -305,7 +297,7 @@ std::vector<ElfFunction> ElfReader::ExtractFunctions() const {
     size_t num_words = fn_size / 4;
     fn.raw_words.reserve(num_words);
     for (size_t w = 0; w < num_words; ++w) {
-      fn.raw_words.push_back(ReadBe32(&text_data[fn_offset + w * 4]));
+      fn.raw_words.push_back(ReadBigEndian32(&text_data[fn_offset + w * 4]));
     }
 
     // Collect relocations within this function range
