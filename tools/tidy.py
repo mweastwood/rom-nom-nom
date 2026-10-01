@@ -13,7 +13,7 @@ if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
 else:
     REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler", "builder"]
+SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler", "builder", "differ"]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
 
 
@@ -80,6 +80,7 @@ def get_compile_args(file_path: Path):
             or "splitter" in str(file_path)
             or "decompiler" in str(file_path)
             or "builder" in str(file_path)
+            or "differ" in str(file_path)
         )
 
     if is_cpp:
@@ -170,7 +171,13 @@ def main():
         return 1
     clang_tidy = tidy_bin.stdout.strip()
 
-    target_files = [f.resolve() for f in args.files] if args.files else find_files()
+    if args.files:
+        target_files = [
+            (REPO_ROOT / f).resolve() if not f.is_absolute() else f.resolve()
+            for f in args.files
+        ]
+    else:
+        target_files = find_files()
     if not target_files:
         print("No C/C++ files to check.")
         return 0
@@ -195,10 +202,15 @@ def main():
         cmd.append("--")
         cmd.extend(extra_args)
 
+        try:
+            rel_display = f.relative_to(REPO_ROOT)
+        except ValueError:
+            rel_display = f.name
+
         res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if res.returncode != 0 or "error:" in res.stderr or "error:" in res.stdout:
             has_errors = True
-            print(f"\n[FAIL] {f.relative_to(REPO_ROOT)}:")
+            print(f"\n[FAIL] {rel_display}:")
             if res.stdout.strip():
                 print(res.stdout.strip())
             if res.stderr.strip():
@@ -206,7 +218,7 @@ def main():
         elif res.stdout.strip():
             if args.check:
                 has_errors = True
-                print(f"\n[WARN] {f.relative_to(REPO_ROOT)}:")
+                print(f"\n[WARN] {rel_display}:")
                 print(res.stdout.strip())
 
     if has_errors:

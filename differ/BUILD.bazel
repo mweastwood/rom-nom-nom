@@ -1,0 +1,26 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "elf_reader",
+    srcs = ["elf_reader.cc"],
+    hdrs = ["elf_reader.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "elf_reader_test",
+    srcs = ["elf_reader_test.cc"],
+    deps = [
+        ":elf_reader",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
