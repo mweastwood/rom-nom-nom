@@ -1,6 +1,5 @@
 pyyaml>=6.0.2
 pylibyaml>=0.1.0
-splat64>=0.50.0
 spimdisasm>=1.42.0
 rabbitizer>=1.16.2
 colorama>=0.4.6

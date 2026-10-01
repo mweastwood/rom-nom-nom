@@ -9,28 +9,29 @@ rom-nom-nom/
 ├── .gitignore               # Strict ignore rules for ROMs, ASM, and build dumps
 ├── MODULE.bazel             # Bazel module configuration
 ├── BUILD.bazel              # Top-level Bazel build targets
-├── requirements.txt         # Python tools (splat, spimdisasm, m2c, etc.)
+├── requirements.txt         # Python tools (spimdisasm, m2c, etc.)
 ├── rules/                   # Starlark rules for hermetic N64 ROM builds (tracked)
-│   └── defs.bzl             # splat_split, n64_rom, and n64_rom_bitexact_test
+│   └── defs.bzl             # splitter_split, n64_rom, and n64_rom_bitexact_test
 ├── roms/                    # Local baseroms (binaries untracked, BUILD tracked)
 │   ├── BUILD.bazel
 │   ├── harvest-moon-64.z64
 │   └── ogre-battle-64.z64
-├── splat/                   # Splat YAML split configurations (tracked)
+├── config/                  # Split configurations and macros (tracked)
 │   ├── BUILD.bazel
-│   ├── harvest-moon-64.yaml
-│   └── ogre-battle-64.yaml
+│   ├── harvest-moon-64.textproto
+│   ├── harvest-moon-64_macro.inc
+│   └── ogre-battle-64.textproto
 ├── symbols/                 # Symbol and reloc address maps (tracked)
 │   ├── BUILD.bazel
-│   ├── harvest-moon-64.txt
-│   └── ogre-battle-64.txt
+│   ├── harvest-moon-64.textproto
+│   └── ogre-battle-64.textproto
 ├── src/                     # C/C++ source and header files (tracked)
 │   ├── c/harvest-moon-64/
 │   ├── cc/harvest-moon-64/
 │   └── ogre-battle-64/
+├── splitter/                # Fast hermetic N64 binary splitter & disassembler (tracked)
 └── tools/                   # Helper scripts and reproducible tools (tracked)
     ├── BUILD.bazel
-    ├── splat_runner.py      # Bazel splat splitting action
     ├── build_rom.py         # Bazel ROM build & bit-exact verification action
     ├── install_toolchain.py # GCC 2.7.2 installer
     └── format.py            # Codebase formatter
@@ -51,7 +52,7 @@ rom-nom-nom/
 
 ### 2. Building ROMs with Bazel
 
-All assembly files and linker scripts are treated as **generated artifacts** by Bazel. Splat is executed hermetically as a Bazel action whenever YAML split configs or symbols change.
+All assembly files and linker scripts are treated as **generated artifacts** by Bazel. The in-house `//splitter` tool is executed hermetically as a Bazel action whenever split configs (`.textproto`) or symbols change.
 
 ```bash
 # Build matching ROM for Harvest Moon 64

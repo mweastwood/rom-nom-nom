@@ -41,7 +41,6 @@ __pycache__/
 .venv/
 env/
 venv/
-.splat_cache/
 .cache/
 
 # Editor, OS & temporary files

@@ -3,27 +3,6 @@ load("@rules_python//python:defs.bzl", "py_binary")
 package(default_visibility = ["//visibility:public"])
 
 py_binary(
-    name = "splat_runner",
-    srcs = ["splat_runner.py"],
-    deps = [
-        "@pip//colorama",
-        "@pip//crunch64",
-        "@pip//intervaltree",
-        "@pip//n64img",
-        "@pip//pygfxd",
-        "@pip//pylibyaml",
-        "@pip//pypng",
-        "@pip//pyyaml",
-        "@pip//rabbitizer",
-        "@pip//sortedcontainers",
-        "@pip//spimdisasm",
-        "@pip//splat64",
-        "@pip//tqdm",
-    ],
-    main = "splat_runner.py",
-)
-
-py_binary(
     name = "build_rom",
     srcs = [
         "build_rom.py",

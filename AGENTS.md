@@ -17,7 +17,7 @@ This document establishes the architecture rules, coding standards, and step-by-
    - **Variables & Members**: `lower_snake_case` (e.g. `box_index`, `bank_id`, `scale_x`).
    - **Constants & Enums**: `kCamelCase` with `k` prefix (e.g. `kIdle`, `kMainProc`).
    - Exceptions are restricted to N64 hardware/OS entrypoints (`main`, `idle`, `mainproc`, `os*`), undecompiled assembly labels (`func_*`), and test macros (`TEST`, `TEST_F`).
-   - **Symbol Registration**: When a function or global variable is decompiled or identified, it must be registered with its clean semantic name in `symbols/<game>.txt` (e.g. `AudioUpdate = 0x8003CF38; // type:func` or `g_audio_status = 0x801FB690;`). Function aliases (`__attribute__((alias(...)))`) are strictly prohibited; splat automatically propagates registered symbol names across all linker scripts and assembly, preventing code from bypassing readable names.
+   - **Symbol Registration**: When a function or global variable is decompiled or identified, it must be registered with its clean semantic name in `symbols/<game>.txt` or `symbols/<game>.textproto` (e.g. `AudioUpdate = 0x8003CF38; // type:func` or `g_audio_status = 0x801FB690;`). Function aliases (`__attribute__((alias(...)))`) are strictly prohibited; splitter automatically propagates registered symbol names across all linker scripts and assembly, preventing code from bypassing readable names.
 4. **Git Protocol**: **NEVER** commit or push changes without explicit user request.
 5. **Clean Room Decompilation & External Reference Policy**:
    - **STRICT PROHIBITION**: Contributors and AI agents are **strictly forbidden** from viewing, fetching, querying, referencing, citing, or deriving code, structures, symbol names, segment names, or documentation from unlicensed third-party decompilation projects, specifically including `harvestwhisperer/hm64-decomp` and any associated forks or mirrors.
@@ -47,7 +47,7 @@ This document establishes the architecture rules, coding standards, and step-by-
 ### Progress & Dependency Tracking Engine (`progress.py`)
 
 The progress tool provides clean-room, ROM-driven dependency analysis and project roadmaps:
-- **Clean-Room Compilation Unit Detection**: Identifies module boundaries dynamically from `splat/<game>.yaml`, symbol tables, and `.rodata` assertion strings embedded in the retail ROM binary.
+- **Clean-Room Compilation Unit Detection**: Identifies module boundaries dynamically from `config/<game>.textproto`, symbol tables, and `.rodata` assertion strings embedded in the retail ROM binary.
 - **Partial Module & `INCLUDE_ASM` Accounting**: Recursively scans nonmatching assembly files (`nonmatchings/<module>/*.s`). Functions under `INCLUDE_ASM` are accurately tracked as undecompiled assembly, ensuring exact byte counts and module percentages without over-counting.
 - **Call Graph & Readiness Engine**: Analyzes MIPS `jal` branches across all functions to determine decompile order:
   - `READY`: Leaf functions whose dependencies are either already decompiled or are Libultra OS/hardware routines. Sorted ascending by size for fast, targeted progress.
@@ -93,7 +93,7 @@ bazel run //:m2c -- func_800266C0
    ```txt
    MyFunction = 0x800266C0; // type:func
    ```
-   This registers the symbol with `splat`, renaming it across all disassembled assembly files, nonmatchings, and linker scripts. Any callers attempting to use the deprecated `func_800266C0` name will fail at link time.
+   This registers the symbol with `splitter`, renaming it across all disassembled assembly files, nonmatchings, and linker scripts. Any callers attempting to use the deprecated `func_800266C0` name will fail at link time.
 2. Place or append the C code into the appropriate module file under `src/c/<game>/`. Define the function directly under its Google `CamelCase` name without aliases or wrappers:
    ```c
    s32 MyFunction(s32 arg0) { ... }
@@ -106,9 +106,9 @@ bazel run //:m2c -- func_800266C0
    ```
    *** [MATCH 100%] N/N instructions match bit-exact! ***
    ```
-5. **Hardware Hazard Handling & Assembler Macros (`splat/<game>_macro.inc`)**:
+5. **Hardware Hazard Handling & Assembler Macros (`config/<game>_macro.inc`)**:
    - Upstream `mips-binutils-2.6 v0.3` faithfully assembles MIPS I/II/III instructions but occasionally omits hardware hazard NOPs that the original 1999 SGI/KMC toolchain generated (such as COP1 condition code hazards after `c.lt.d` or coprocessor load/arithmetic pipeline delays before `mul.s`).
-   - Hardware hazard delays for compiled C units are handled via clean assembler macros defined in `splat/<game>_macro.inc` (passed transparently to the assembler via `c_macro.inc` by `tools/build_rom.py` and `tools/diff.py`). This avoids inline assembly barriers (`__asm__`) that would otherwise disrupt GCC 2.7.2's branch delay-slot optimizer (`reorg.c`).
+   - Hardware hazard delays for compiled C units are handled via clean assembler macros defined in `config/<game>_macro.inc` (passed transparently to the assembler via `c_macro.inc` by `tools/build_rom.py` and `tools/diff.py`). This avoids inline assembly barriers (`__asm__`) that would otherwise disrupt GCC 2.7.2's branch delay-slot optimizer (`reorg.c`).
    - For cases where manual inline NOP placement is explicitly needed in C code, use the standardized `NOP()` macro defined in `types.h`:
      ```c
      #include "types.h"
@@ -118,16 +118,16 @@ bazel run //:m2c -- func_800266C0
    - `NOP()` expands to `__asm__ volatile("nop")` targeting MIPS, and safely resolves to a no-op `((void)0)` when compiled under modern host C++20 test targets.
 6. **Header File & Global Symbol Hygiene**:
    - Place function prototypes, struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files.
-   - Define global variable symbols with human-readable semantic names in `symbols/<game>.txt` (e.g. `g_audio_voices = 0x801FB690;`). This prompts splat to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
-   - Standardize `c_flags` in `splat/<game>.yaml`: modules use `default: ["-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"]`. Custom per-module entries should only be specified when genuinely diverging from the default (such as `boot: ["-O0"]` or Libultra `-Wa,-O2` / `-V`). Do not repeat redundant entries that match the default.
+   - Define global variable symbols with human-readable semantic names in `symbols/<game>.txt` or `symbols/<game>.textproto` (e.g. `g_audio_voices = 0x801FB690;`). This prompts splitter to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
+   - Standardize `c_flags` in `config/<game>.textproto`: modules use `default` flags (`-O2 -mips2 -mcpu=r4000 -Wa,-g`). Custom per-module entries should only be specified when genuinely diverging from the default (such as `boot: ["-O0"]` or Libultra `-Wa,-O2` / `-V`). Do not repeat redundant entries that match the default.
    - Verify header and symbol completeness using `bazel run //:progress -- -m <module>`, `bazel run //:progress -- -s`, or `bazel run //:progress -- -g`.
 
-### Step 4: Update Splat Segment Split (When File is Complete)
+### Step 4: Update Splitter Segment Split (When File is Complete)
 When all functions in an assembly split range are decompiled into a C file:
-1. Open `splat/<game>.yaml`.
-2. Replace the `asm` subsegment with your new `c` entry:
-   ```yaml
-   - [0x1AC0, c, my_module]
+1. Open `config/<game>.textproto`.
+2. Replace the `SUBSEGMENT_ASM` subsegment with your new `SUBSEGMENT_C` entry:
+   ```protobuf
+   subsegments { rom_start: 0x1AC0 type: SUBSEGMENT_C name: "my_module" }
    ```
 3. Rebuild the ROM:
    ```bash

@@ -28,7 +28,7 @@ class AssemblyGenerator {
   explicit AssemblyGenerator(AssemblyGeneratorOptions options);
 
   // Writes standard N64 macro.inc and copies game c_macro.inc if available.
-  absl::Status EmitMacroIncludes(const std::filesystem::path& splat_macro_src = {});
+  absl::Status EmitMacroIncludes(const std::filesystem::path& macro_src = {});
 
   // Formats and writes header.s for SEGMENT_HEADER from the 64-byte ROM header slice.
   absl::Status WriteHeaderAssembly(absl::Span<const uint8_t> header_bytes,

@@ -97,35 +97,32 @@ def get_symbol_info_from_elf(elf_path: Path, func_name: str):
 
 
 def get_target_size_from_symbols_and_config(game: str, vram: int) -> int | None:
-    yaml_path = REPO_ROOT / "splat" / f"{game}.yaml"
+    cfg_path = REPO_ROOT / "config" / f"{game}.textproto"
     subseg_vrams = []
-    if yaml_path.exists():
-        try:
-            import yaml
-            cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-            for seg in cfg.get("segments", []):
-                if isinstance(seg, dict) and "subsegments" in seg:
-                    vram_base = seg.get("vram", 0x80025C50)
-                    rom_start = seg.get("start", 0x1050)
-                    for s in seg["subsegments"]:
-                        if isinstance(s, list) and len(s) >= 2:
-                            rom_off = s[0]
-                            subseg_vrams.append(vram_base + (rom_off - rom_start))
-        except Exception:
-            pass
+    if cfg_path.exists():
+        content = cfg_path.read_text(encoding="utf-8")
+        for m in re.finditer(r"vram:\s*(0x[0-9A-Fa-f]+|\d+)", content):
+            v_val = m.group(1)
+            subseg_vrams.append(int(v_val, 16 if v_val.startswith("0x") else 10))
 
-    sym_file = REPO_ROOT / "symbols" / f"{game}.txt"
     sym_vrams = []
-    if sym_file.exists():
-        for line in sym_file.read_text(encoding="utf-8").splitlines():
-            line = line.split("//")[0].strip()
-            if "=" in line:
-                sym, val = line.split("=", 1)
-                val = val.strip().rstrip(";")
-                try:
-                    sym_vrams.append(int(val, 16 if "0x" in val else 10))
-                except ValueError:
-                    pass
+    sym_proto = REPO_ROOT / "symbols" / f"{game}.textproto"
+    if sym_proto.exists():
+        for m in re.finditer(r"address:\s*(0x[0-9A-Fa-f]+|\d+)", sym_proto.read_text(encoding="utf-8")):
+            v_val = m.group(1)
+            sym_vrams.append(int(v_val, 16 if v_val.startswith("0x") else 10))
+    else:
+        sym_file = REPO_ROOT / "symbols" / f"{game}.txt"
+        if sym_file.exists():
+            for line in sym_file.read_text(encoding="utf-8").splitlines():
+                line = line.split("//")[0].strip()
+                if "=" in line:
+                    sym, val = line.split("=", 1)
+                    val = val.strip().rstrip(";")
+                    try:
+                        sym_vrams.append(int(val, 16 if "0x" in val else 10))
+                    except ValueError:
+                        pass
 
     all_points = sorted(set(subseg_vrams + sym_vrams))
     if vram in all_points:
@@ -222,17 +219,17 @@ def disassemble_target_from_rom(rom_path: Path, rom_offset: int, size: int):
 
 
 def load_c_flags(game: str, stem: str) -> tuple[list[str], list[str]]:
-    """Load compiler and assembler flags for a specific C file from splat config."""
-    yaml_path = REPO_ROOT / "splat" / f"{game}.yaml"
+    """Load compiler and assembler flags for a specific C file from split config."""
+    cfg_path = REPO_ROOT / "config" / f"{game}.textproto"
     opt_flags = ["-O2", "-mips2", "-Wa,-O1"]
-    if yaml_path.exists():
-        try:
-            import yaml
-            cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-            c_flags = cfg.get("c_flags", {})
-            opt_flags = c_flags.get(stem, c_flags.get("default", opt_flags))
-        except Exception:
-            pass
+    if cfg_path.exists():
+        content = cfg_path.read_text(encoding="utf-8")
+        c_flags_dict = {}
+        for block in re.finditer(r'c_flags\s*\{\s*key:\s*"([^"]+)"\s*value\s*\{([^}]+)\}\s*\}', content):
+            key = block.group(1)
+            flags = re.findall(r'flags:\s*"([^"]+)"', block.group(2))
+            c_flags_dict[key] = flags
+        opt_flags = c_flags_dict.get(stem, c_flags_dict.get("default", opt_flags))
     gcc_flags = [f for f in opt_flags if not f.startswith("-Wa,")]
     as_flags = []
     for f in opt_flags:
@@ -309,7 +306,7 @@ def compile_and_disassemble_c(c_file: Path, func_name: str, game: str, sym_map: 
             f"-I{asm_dir.parent}",
             f"-I{asm_dir.parent.parent}",
         ]
-        macro_inc = REPO_ROOT / "splat" / f"{game}_macro.inc"
+        macro_inc = REPO_ROOT / "config" / f"{game}_macro.inc"
         if not macro_inc.exists():
             macro_inc = asm_dir / "c_macro.inc"
         if not macro_inc.exists():

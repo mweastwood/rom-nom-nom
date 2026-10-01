@@ -120,7 +120,7 @@ def compile_with_gcc_272(
         as_flags_norm = list(as_extra_flags)
     macro_inc = asm_dir / "c_macro.inc"
     if not macro_inc.exists():
-        macro_inc = REPO_ROOT / "splat" / f"{asm_dir.name}_macro.inc"
+        macro_inc = REPO_ROOT / "config" / f"{asm_dir.name}_macro.inc"
     if not macro_inc.exists():
         macro_inc = asm_dir / "macro.inc"
     as_cmd = [
@@ -253,9 +253,9 @@ def build_rom(
         s_candidates = list(asm_dir.glob(f"**/{stem}.s"))
         bin_candidates = list(assets_dir.glob(f"**/{stem}.bin"))
 
-        # Respect splat's subsegment types based on the linker script path in obj_match.
+        # Respect splitter's subsegment types based on the linker script path in obj_match.
         # This prevents partially decompiled C files from preempting assembly subsegments before
-        # splat's YAML config is explicitly updated from `asm` to `c`.
+        # the config is explicitly updated from `asm` to `c`.
         use_c = False
         use_s = False
         use_bin = False
@@ -406,7 +406,7 @@ def build_rom(
 def main():
     parser = argparse.ArgumentParser(description="Build N64 ROM from generated assembly and C sources.")
     parser.add_argument("--game", required=True, help="Game name, e.g. harvest-moon-64")
-    parser.add_argument("--config", required=True, type=Path, help="Path to splat YAML config")
+    parser.add_argument("--config", required=True, type=Path, help="Path to SplitConfig (.textproto) config")
     parser.add_argument("--symbols", required=True, type=Path, help="Path to symbols file")
     parser.add_argument("--asm-dir", required=True, type=Path, help="Generated assembly directory")
     parser.add_argument("--build-dir", required=True, type=Path, help="Generated build directory (with LD script)")

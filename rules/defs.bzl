@@ -1,12 +1,12 @@
 """
 Bazel rules for N64 decompilation:
-  - splat_split: Generates assembly, linker script, and binary assets
+  - splitter_split: Generates assembly, linker script, and binary assets via //splitter:splitter
   - n64_rom: Builds .z64 ROM and .elf binary from C sources + generated asm
   - n64_rom_bitexact_test: Verifies bit-for-byte exact match against original ROM
   - n64_game: Macro that defines <game>_rom and <game>_rom_bitexact_test
 """
 
-def _splat_split_impl(ctx):
+def _splitter_split_impl(ctx):
     game = ctx.attr.game
     asm_dir = ctx.actions.declare_directory("asm/" + game)
     build_dir = ctx.actions.declare_directory("build/" + game)
@@ -38,11 +38,11 @@ def _splat_split_impl(ctx):
         ),
     ]
 
-splat_split = rule(
-    implementation = _splat_split_impl,
+splitter_split = rule(
+    implementation = _splitter_split_impl,
     attrs = {
         "game": attr.string(mandatory = True),
-        "config": attr.label(mandatory = True, allow_single_file = [".yaml", ".textproto"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "srcs": attr.label_list(allow_files = True, default = []),
@@ -53,6 +53,7 @@ splat_split = rule(
         ),
     },
 )
+
 
 def _n64_rom_impl(ctx):
     game = ctx.attr.game
@@ -99,7 +100,7 @@ n64_rom = rule(
     implementation = _n64_rom_impl,
     attrs = {
         "game": attr.string(mandatory = True),
-        "config": attr.label(mandatory = True, allow_single_file = [".yaml", ".textproto"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
         "split": attr.label(mandatory = True, providers = [OutputGroupInfo]),
         "srcs": attr.label_list(allow_files = True, default = []),
@@ -111,6 +112,7 @@ n64_rom = rule(
         ),
     },
 )
+
 
 def _n64_rom_bitexact_test_impl(ctx):
     rom = ctx.file.rom
@@ -190,7 +192,7 @@ n64_rom_bitexact_test = rule(
     attrs = {
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
-        "config": attr.label(mandatory = True, allow_single_file = [".yaml", ".textproto"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
     },
 )
 
@@ -200,7 +202,7 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
     rom_name = name + "_rom"
     test_name = name + "_rom_bitexact_test"
 
-    splat_split(
+    splitter_split(
         name = split_name,
         game = game,
         config = config,

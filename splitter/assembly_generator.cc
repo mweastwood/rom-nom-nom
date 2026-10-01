@@ -150,7 +150,7 @@ constexpr std::string_view kStandardMacroInc = R"(# Defines the expected assembl
 AssemblyGenerator::AssemblyGenerator(AssemblyGeneratorOptions options)
     : options_(std::move(options)) {}
 
-absl::Status AssemblyGenerator::EmitMacroIncludes(const std::filesystem::path& splat_macro_src) {
+absl::Status AssemblyGenerator::EmitMacroIncludes(const std::filesystem::path& macro_src) {
   std::filesystem::create_directories(options_.asm_dir);
 
   // Emit standard macro.inc if not present
@@ -165,10 +165,10 @@ absl::Status AssemblyGenerator::EmitMacroIncludes(const std::filesystem::path& s
   }
 
   // Copy game-specific c_macro.inc if provided
-  if (!splat_macro_src.empty() && std::filesystem::exists(splat_macro_src)) {
+  if (!macro_src.empty() && std::filesystem::exists(macro_src)) {
     std::filesystem::path c_macro_dest = options_.asm_dir / "c_macro.inc";
     std::error_code ec;
-    std::filesystem::copy_file(splat_macro_src, c_macro_dest,
+    std::filesystem::copy_file(macro_src, c_macro_dest,
                                std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) {
       return absl::InternalError(

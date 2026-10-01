@@ -1,5 +1,5 @@
 // File-scope assembly directive activating multiplier hazard interlocks in
-// splat/harvest-moon-64_macro.inc for RenderDrawEntries without disrupting
+// config/harvest-moon-64_macro.inc for RenderDrawEntries without disrupting
 // function-level basic-block delay-slot optimization in GCC 2.7.2.
 #if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
 __asm__(".set __DISPLAY_MODULE__, 1");

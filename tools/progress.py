@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import re
 import sys
-import yaml
 
 if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
     REPO_ROOT = Path(os.environ["BUILD_WORKSPACE_DIRECTORY"])
@@ -36,79 +35,131 @@ def parse_assert_strings(game: str) -> dict[str, str]:
 
 
 def load_game_config(game: str):
-    """Load splat config, symbol table, and identify code subsegments."""
-    config_file = REPO_ROOT / "splat" / f"{game}.yaml"
+    """Load splitter config (.textproto), symbol table, and identify code subsegments."""
+    config_file = REPO_ROOT / "config" / f"{game}.textproto"
     if not config_file.exists():
-        print(f"Error: Splat config not found: {config_file}", file=sys.stderr)
+        print(f"Error: Config not found: {config_file}", file=sys.stderr)
         return None, None, None
 
-    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    options = data.get("options", {})
+    content = config_file.read_text(encoding="utf-8")
 
     # 1. Parse symbol addresses dynamically from symbol file(s)
     symbols = {}
-    sym_paths = options.get("symbol_addrs_path", [f"symbols/{game}.txt"])
-    if isinstance(sym_paths, str):
-        sym_paths = [sym_paths]
+    sym_paths = re.findall(r'symbol_files:\s*"([^"]+)"', content)
+    if not sym_paths:
+        sym_paths = [f"symbols/{game}.textproto", f"symbols/{game}.txt"]
     for sp in sym_paths:
         p = REPO_ROOT / sp
-        if p.exists():
+        if not p.exists():
+            continue
+        if sp.endswith(".textproto"):
+            p_content = p.read_text(encoding="utf-8", errors="ignore")
+            for entry_block in re.finditer(r"entries\s*\{([^}]+)\}", p_content):
+                block = entry_block.group(1)
+                name_m = re.search(r'name:\s*"([^"]+)"', block)
+                addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
+                if name_m and addr_m:
+                    symbols[name_m.group(1)] = int(addr_m.group(1), 0)
+        else:
             for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
                 m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*(0x[0-9A-Fa-f]+)\s*;", line)
                 if m:
                     symbols[m.group(1)] = int(m.group(2), 16)
 
-    # 2. Extract code subsegments across all code segments
+    # 2. Parse segments and subsegments from textproto
+    segments = []
+    idx = 0
+    while True:
+        m = re.search(r"\bsegments\s*\{", content[idx:])
+        if not m:
+            break
+        start = idx + m.end()
+        depth = 1
+        i = start
+        while i < len(content) and depth > 0:
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+            i += 1
+        seg_body = content[start:i - 1]
+        idx = i
+
+        subsegs_raw = []
+        for ssm in re.finditer(r"subsegments\s*\{([^}]+)\}", seg_body):
+            sub_body = ssm.group(1)
+            sub = {}
+            for sm in re.finditer(r"([a-zA-Z0-9_]+)\s*:\s*(\"[^\"]*\"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z0-9_]+)", sub_body):
+                k, v = sm.group(1), sm.group(2)
+                if v.startswith('"'):
+                    sub[k] = v[1:-1]
+                elif v.startswith("0x") or v.isdigit():
+                    sub[k] = int(v, 0)
+                else:
+                    sub[k] = v
+            subsegs_raw.append(sub)
+
+        seg_top = re.sub(r"subsegments\s*\{[^}]*\}", "", seg_body)
+        seg = {}
+        for sm in re.finditer(r"([a-zA-Z0-9_]+)\s*:\s*(\"[^\"]*\"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z0-9_]+)", seg_top):
+            k, v = sm.group(1), sm.group(2)
+            if v.startswith('"'):
+                seg[k] = v[1:-1]
+            elif v.startswith("0x") or v.isdigit():
+                seg[k] = int(v, 0)
+            else:
+                seg[k] = v
+        seg["subsegments"] = subsegs_raw
+        segments.append(seg)
+
+    SUBSEG_TYPE_MAP = {
+        "SUBSEGMENT_C": "c",
+        "SUBSEGMENT_ASM": "asm",
+        "SUBSEGMENT_HASM": "hasm",
+        "SUBSEGMENT_DATA": "data",
+        "SUBSEGMENT_RODATA": "rodata",
+        "SUBSEGMENT_BSS": "bss",
+    }
+
     subsegs = []
     c_bytes = 0
     asm_bytes = 0
 
-    for seg in data.get("segments", []):
-        if not (isinstance(seg, dict) and "subsegments" in seg):
+    for seg in segments:
+        if seg.get("type") != "SEGMENT_CODE":
             continue
 
-        raw_subsegs = seg["subsegments"]
-        seg_start = seg.get("start", 0)
+        raw_subsegs = seg.get("subsegments", [])
+        seg_start = seg.get("rom_start", 0)
         seg_vram = seg.get("vram", 0)
         vram_base = seg_vram - seg_start
 
         # Identify where code ends (.text) before data/rodata/bss
         text_end = None
         for s in raw_subsegs:
-            if isinstance(s, list) and len(s) >= 2 and s[1] in ("data", "rodata", "bss"):
-                text_end = s[0]
-                break
-            elif isinstance(s, dict) and s.get("type") in ("data", "rodata", "bss"):
-                text_end = s.get("start")
+            stype = SUBSEG_TYPE_MAP.get(s.get("type", ""), s.get("type", ""))
+            if stype in ("data", "rodata", "bss"):
+                text_end = s.get("rom_start", seg.get("rom_end", 0))
                 break
 
         if text_end is None:
-            if raw_subsegs and isinstance(raw_subsegs[-1], list):
-                text_end = raw_subsegs[-1][0]
-            elif raw_subsegs and isinstance(raw_subsegs[-1], dict):
-                text_end = raw_subsegs[-1].get("start", 0)
-            else:
-                text_end = 0
+            text_end = seg.get("rom_end", 0)
 
         for i, s in enumerate(raw_subsegs):
-            if not (isinstance(s, list) and len(s) >= 2):
-                continue
-            start, stype = s[0], s[1]
+            stype = SUBSEG_TYPE_MAP.get(s.get("type", ""), s.get("type", ""))
+            start = s.get("rom_start", 0)
             if start >= text_end or stype not in ("c", "asm", "hasm"):
                 continue
 
             next_start = text_end
             for j in range(i + 1, len(raw_subsegs)):
                 ns = raw_subsegs[j]
-                if isinstance(ns, list) and len(ns) >= 1:
-                    next_start = ns[0]
-                    break
-                elif isinstance(ns, dict) and "start" in ns:
-                    next_start = ns["start"]
+                if "rom_start" in ns:
+                    next_start = ns["rom_start"]
                     break
 
             size = next_start - start
-            name = s[2] if len(s) >= 3 else f"{start:X}"
+            name = s.get("name", f"{start:X}")
             vram = vram_base + start
             end_vram = vram_base + next_start
 
@@ -132,7 +183,7 @@ def load_game_config(game: str):
             elif stype in ("asm", "hasm"):
                 asm_bytes += size
 
-    # 3. Dynamic module detection from assert strings, splat names, and adjacent C modules
+    # 3. Dynamic module detection from assert strings and adjacent C modules
     assert_map = parse_assert_strings(game)
     asm_dirs = [REPO_ROOT / "bazel-bin" / "asm" / game, REPO_ROOT / "asm" / game]
     asm_dir = next((d for d in asm_dirs if d.exists()), None)
@@ -146,25 +197,28 @@ def load_game_config(game: str):
             s["module"] = name
         else:
             s_file = (asm_dir / f"{name}.s") if asm_dir else None
-            content = s_file.read_text(encoding="utf-8", errors="ignore") if (s_file and s_file.exists()) else ""
+            content_s = s_file.read_text(encoding="utf-8", errors="ignore") if (s_file and s_file.exists()) else ""
             found_mod = None
             for sym, m_name in assert_map.items():
-                if sym in content:
+                if sym in content_s:
                     found_mod = m_name
                     break
 
             if found_mod:
                 s["module"] = found_mod
-            elif len(subsegs) > 1 and i == len(subsegs) - 1 and len(re.findall(r"\bjal\s+os", content)) > 5:
+            elif len(subsegs) > 1 and i == len(subsegs) - 1 and len(re.findall(r"\bjal\s+os", content_s)) > 5:
                 # Trailing Libultra OS SDK section
                 s["module"] = "libultra"
             else:
                 s["module"] = name
 
+    game_name_m = re.search(r'game_name:\s*"([^"]+)"', content)
+    game_display_name = game_name_m.group(1) if game_name_m else game
+
     game_info = {
         "game": game,
-        "name": data.get("name", game),
-        "options": options,
+        "name": game_display_name,
+        "options": {},
         "c_bytes": c_bytes,
         "asm_bytes": asm_bytes,
         "total_text": c_bytes + asm_bytes,
@@ -173,16 +227,24 @@ def load_game_config(game: str):
 
 
 def load_symbols_file(game: str) -> dict[str, int]:
-    """Load manually defined symbols and their VRAM addresses from symbols/<game>.txt."""
-    sym_path = REPO_ROOT / "symbols" / f"{game}.txt"
-    if not sym_path.exists():
-        return {}
+    """Load manually defined symbols and their VRAM addresses from symbols/<game>.textproto or symbols/<game>.txt."""
+    tp_path = REPO_ROOT / "symbols" / f"{game}.textproto"
+    txt_path = REPO_ROOT / "symbols" / f"{game}.txt"
     defs = {}
-    for line in sym_path.read_text(encoding="utf-8").splitlines():
-        line = re.sub(r"//.*", "", line).strip()
-        m = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)\s*;", line)
-        if m:
-            defs[m.group(1)] = int(m.group(2), 16)
+    if tp_path.exists():
+        content = tp_path.read_text(encoding="utf-8", errors="ignore")
+        for entry_block in re.finditer(r"entries\s*\{([^}]+)\}", content):
+            block = entry_block.group(1)
+            name_m = re.search(r'name:\s*"([^"]+)"', block)
+            addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
+            if name_m and addr_m:
+                defs[name_m.group(1)] = int(addr_m.group(1), 0)
+    elif txt_path.exists():
+        for line in txt_path.read_text(encoding="utf-8").splitlines():
+            line = re.sub(r"//.*", "", line).strip()
+            m = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)\s*;", line)
+            if m:
+                defs[m.group(1)] = int(m.group(2), 16)
     return defs
 
 
@@ -912,7 +974,7 @@ def print_module_detail(
     print(f"Existing Files: {', '.join(mod['files']) if mod['files'] else 'None'}")
     print()
 
-    print("Subsegments in Splat:")
+    print("Subsegments in Config:")
     for s in mod["subsegments"]:
         stype = "[MATCH]" if s["type"] == "c" else "[ASM]"
         print(f"  {stype:7s} {s['name']:32s} [0x{s['start']:05X} - 0x{s['end']:05X}] {s['size']:6,d} B")
