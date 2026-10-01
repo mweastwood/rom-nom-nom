@@ -185,5 +185,37 @@ TEST(MipsTest, DecodeFromByteSpan) {
   EXPECT_FALSE(err.ok());
 }
 
+TEST(MipsTest, FormatBranchPseudoInstructions) {
+  // beq $zero, $zero, target -> b target
+  uint32_t b_word = (0x04 << 26) | (0 << 21) | (0 << 16) | 5;
+  auto b_inst = DecodeInstruction(b_word, 0x80025C00);
+  ASSERT_TRUE(b_inst.ok());
+  EXPECT_EQ(FormatBranch(*b_inst, ".L1"), "b      .L1");
+
+  // beq $v0, $zero, target -> beqz $v0, target
+  uint32_t beqz_word = (0x04 << 26) | (2 << 21) | (0 << 16) | 5;
+  auto beqz_inst = DecodeInstruction(beqz_word, 0x80025C00);
+  ASSERT_TRUE(beqz_inst.ok());
+  EXPECT_EQ(FormatBranch(*beqz_inst, ".L1"), "beqz   $v0, .L1");
+
+  // bne $v0, $zero, target -> bnez $v0, target
+  uint32_t bnez_word = (0x05 << 26) | (2 << 21) | (0 << 16) | 5;
+  auto bnez_inst = DecodeInstruction(bnez_word, 0x80025C00);
+  ASSERT_TRUE(bnez_inst.ok());
+  EXPECT_EQ(FormatBranch(*bnez_inst, ".L1"), "bnez   $v0, .L1");
+
+  // beq $v0, $v1, target -> beq $v0, $v1, target
+  uint32_t beq_word = (0x04 << 26) | (2 << 21) | (3 << 16) | 5;
+  auto beq_inst = DecodeInstruction(beq_word, 0x80025C00);
+  ASSERT_TRUE(beq_inst.ok());
+  EXPECT_EQ(FormatBranch(*beq_inst, ".L1"), "beq    $v0, $v1, .L1");
+
+  // Fallback for non-branch instruction
+  uint32_t nop_word = 0x00000000;
+  auto nop_inst = DecodeInstruction(nop_word, 0x80025C00);
+  ASSERT_TRUE(nop_inst.ok());
+  EXPECT_EQ(FormatBranch(*nop_inst, ".L1"), "nop");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

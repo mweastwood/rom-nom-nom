@@ -974,4 +974,66 @@ absl::StatusOr<Instruction> DecodeInstruction(absl::Span<const uint8_t> bytes, u
   return DecodeInstruction(word, vram);
 }
 
+std::string FormatBranch(const Instruction& inst, std::string_view target_label) {
+  Register rs_reg = inst.rs.value_or(Register::kZero);
+  Register rt_reg = inst.rt.value_or(Register::kZero);
+  std::string_view rs = RegisterName(rs_reg);
+  std::string_view rt = RegisterName(rt_reg);
+
+  switch (inst.opcode) {
+    case Opcode::kBeq:
+      if (rs_reg == Register::kZero && rt_reg == Register::kZero) {
+        return absl::StrFormat("b      %s", target_label);
+      }
+      if (rt_reg == Register::kZero) {
+        return absl::StrFormat("beqz   %s, %s", rs, target_label);
+      }
+      return absl::StrFormat("beq    %s, %s, %s", rs, rt, target_label);
+
+    case Opcode::kBne:
+      if (rt_reg == Register::kZero) {
+        return absl::StrFormat("bnez   %s, %s", rs, target_label);
+      }
+      return absl::StrFormat("bne    %s, %s, %s", rs, rt, target_label);
+
+    case Opcode::kBlez:
+      return absl::StrFormat("blez   %s, %s", rs, target_label);
+    case Opcode::kBgtz:
+      return absl::StrFormat("bgtz   %s, %s", rs, target_label);
+    case Opcode::kBltz:
+      return absl::StrFormat("bltz   %s, %s", rs, target_label);
+    case Opcode::kBgez:
+      return absl::StrFormat("bgez   %s, %s", rs, target_label);
+    case Opcode::kBltzal:
+      return absl::StrFormat("bltzal %s, %s", rs, target_label);
+    case Opcode::kBgezal:
+      return absl::StrFormat("bgezal %s, %s", rs, target_label);
+
+    case Opcode::kBeql:
+      return absl::StrFormat("beql   %s, %s, %s", rs, rt, target_label);
+    case Opcode::kBnel:
+      return absl::StrFormat("bnel   %s, %s, %s", rs, rt, target_label);
+    case Opcode::kBlezl:
+      return absl::StrFormat("blezl  %s, %s", rs, target_label);
+    case Opcode::kBgtzl:
+      return absl::StrFormat("bgtzl  %s, %s", rs, target_label);
+    case Opcode::kBltzl:
+      return absl::StrFormat("bltzl  %s, %s", rs, target_label);
+    case Opcode::kBgezl:
+      return absl::StrFormat("bgezl  %s, %s", rs, target_label);
+
+    case Opcode::kBc1f:
+      return absl::StrFormat("bc1f   %s", target_label);
+    case Opcode::kBc1t:
+      return absl::StrFormat("bc1t   %s", target_label);
+    case Opcode::kBc1fl:
+      return absl::StrFormat("bc1fl  %s", target_label);
+    case Opcode::kBc1tl:
+      return absl::StrFormat("bc1tl  %s", target_label);
+
+    default:
+      return inst.Disassemble();
+  }
+}
+
 }  // namespace rom_nom_nom

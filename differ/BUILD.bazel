@@ -83,4 +83,24 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "normalizer",
+    srcs = ["normalizer.cc"],
+    hdrs = ["normalizer.h"],
+    deps = [
+        "//core:mips",
+    ],
+)
+
+cc_test(
+    name = "normalizer_test",
+    srcs = ["normalizer_test.cc"],
+    deps = [
+        ":normalizer",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 

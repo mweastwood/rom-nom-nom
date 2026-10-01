@@ -284,6 +284,11 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram = 0);
 // Convenience overload: Decodes from a 4-byte buffer (reads big-endian).
 absl::StatusOr<Instruction> DecodeInstruction(absl::Span<const uint8_t> bytes, uint32_t vram = 0);
 
+// Formats a branch instruction targeting the specified label using standard
+// MIPS pseudo-instructions (e.g. "b", "beqz", "bnez", "blez", etc.).
+// If inst is not a branch, falls back to inst.Disassemble().
+std::string FormatBranch(const Instruction& inst, std::string_view target_label);
+
 }  // namespace rom_nom_nom
 
 #endif  // CORE_MIPS_H_
