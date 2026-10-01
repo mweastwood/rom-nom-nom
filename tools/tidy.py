@@ -13,7 +13,7 @@ if "BUILD_WORKSPACE_DIRECTORY" in os.environ:
 else:
     REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler"]
+SEARCH_DIRS = ["src", "mocks", "tests", "core", "splitter", "decompiler", "builder"]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
 
 
@@ -79,6 +79,7 @@ def get_compile_args(file_path: Path):
             or "core" in str(file_path)
             or "splitter" in str(file_path)
             or "decompiler" in str(file_path)
+            or "builder" in str(file_path)
         )
 
     if is_cpp:

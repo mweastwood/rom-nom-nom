@@ -1,0 +1,28 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "source_resolver",
+    srcs = ["source_resolver.cc"],
+    hdrs = ["source_resolver.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "source_resolver_test",
+    srcs = ["source_resolver_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":source_resolver",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest_main",
+    ],
+)
