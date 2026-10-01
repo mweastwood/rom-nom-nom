@@ -24,3 +24,29 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "relocation_applier",
+    srcs = ["relocation_applier.cc"],
+    hdrs = ["relocation_applier.h"],
+    deps = [
+        ":elf_reader",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "relocation_applier_test",
+    srcs = ["relocation_applier_test.cc"],
+    deps = [
+        ":relocation_applier",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
