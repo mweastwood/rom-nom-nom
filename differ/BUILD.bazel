@@ -103,4 +103,27 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "sequence_aligner",
+    srcs = ["sequence_aligner.cc"],
+    hdrs = ["sequence_aligner.h"],
+    deps = [
+        ":normalizer",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "sequence_aligner_test",
+    srcs = ["sequence_aligner_test.cc"],
+    deps = [
+        ":normalizer",
+        ":sequence_aligner",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
