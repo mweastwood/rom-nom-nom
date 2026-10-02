@@ -31,15 +31,6 @@ py_binary(
 )
 
 py_binary(
-    name = "diff",
-    srcs = ["diff.py"],
-    deps = [
-        "@pip//pyyaml",
-    ],
-    main = "diff.py",
-)
-
-py_binary(
     name = "m2c",
     srcs = ["m2c.py"],
     main = "m2c.py",
