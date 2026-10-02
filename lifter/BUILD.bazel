@@ -269,6 +269,38 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "lifter_pipeline",
+    srcs = ["lifter_pipeline.cc"],
+    hdrs = ["lifter_pipeline.h"],
+    deps = [
+        ":ast_converter",
+        ":c_emitter",
+        ":control_flow_graph",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":function_loader",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "lifter_pipeline_test",
+    srcs = ["lifter_pipeline_test.cc"],
+    deps = [
+        ":function_loader",
+        ":lifter_pipeline",
+        "//core:c_ast",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
 
