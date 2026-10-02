@@ -240,5 +240,35 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "function_loader",
+    srcs = ["function_loader.cc"],
+    hdrs = ["function_loader.h"],
+    deps = [
+        "//core:mips",
+        "//differ:target_extractor",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "function_loader_test",
+    srcs = ["function_loader_test.cc"],
+    deps = [
+        ":function_loader",
+        "//core:mips",
+        "//differ:target_extractor",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
