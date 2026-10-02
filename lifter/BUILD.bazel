@@ -181,3 +181,39 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "ast_converter",
+    srcs = ["ast_converter.cc"],
+    hdrs = ["ast_converter.h"],
+    deps = [
+        ":control_flow_graph",
+        ":control_flow_structurer",
+        ":expression_builder",
+        "//core:c_ast",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "ast_converter_test",
+    srcs = ["ast_converter_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_graph",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":expression_builder",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+

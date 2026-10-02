@@ -104,8 +104,10 @@ class ExpressionBuilder {
   static std::vector<LiftedStatement> LiftInstructions(absl::Span<const Instruction> instructions,
                                                        const SymbolIndex* symbol_index = nullptr);
 
- private:
+  // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);
+
+ private:
   static std::unique_ptr<LiftedExpression> LiftRegisterOrConstant(Register reg,
                                                                   const RegisterTracker& tracker);
 };
