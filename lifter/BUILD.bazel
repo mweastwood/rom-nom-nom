@@ -52,3 +52,29 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "loop_analyzer",
+    srcs = ["loop_analyzer.cc"],
+    hdrs = ["loop_analyzer.h"],
+    deps = [
+        ":control_flow_graph",
+        ":dominator_tree",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_test(
+    name = "loop_analyzer_test",
+    srcs = ["loop_analyzer_test.cc"],
+    deps = [
+        ":control_flow_graph",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
