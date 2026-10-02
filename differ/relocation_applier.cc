@@ -11,6 +11,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/strings/numbers.h"
 #include "absl/types/span.h"
 #include "differ/elf_reader.h"
 #include "splitter/symbol_registry.h"
@@ -29,6 +30,15 @@ RelocationApplyResult RelocationApplier::Apply(
     if (it != symbol_map.end()) {
       return it->second;
     }
+    // Fallback: If symbol name ends with 8-character hex address (e.g. func_XXXXXXXX, D_XXXXXXXX)
+    size_t last_underscore = name.rfind('_');
+    if (last_underscore != std::string_view::npos && last_underscore + 1 < name.size() &&
+        name.size() - (last_underscore + 1) == 8) {
+      uint32_t addr = 0;
+      if (absl::SimpleHexAtoi(name.substr(last_underscore + 1), &addr)) {
+        return addr;
+      }
+    }
     return std::nullopt;
   };
   return ApplyRelocations(function.raw_words, function.relocations, lookup);
@@ -40,6 +50,15 @@ RelocationApplyResult RelocationApplier::Apply(const ElfFunction& function,
     const auto* entry = symbol_index.FindByName(name);
     if (entry != nullptr) {
       return entry->address();
+    }
+    // Fallback: If symbol name ends with 8-character hex address (e.g. func_XXXXXXXX, D_XXXXXXXX)
+    size_t last_underscore = name.rfind('_');
+    if (last_underscore != std::string_view::npos && last_underscore + 1 < name.size() &&
+        name.size() - (last_underscore + 1) == 8) {
+      uint32_t addr = 0;
+      if (absl::SimpleHexAtoi(name.substr(last_underscore + 1), &addr)) {
+        return addr;
+      }
     }
     return std::nullopt;
   };

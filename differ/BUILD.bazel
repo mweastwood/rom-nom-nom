@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -37,6 +37,7 @@ cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
     ],
 )
@@ -152,6 +153,51 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "differ_pipeline",
+    srcs = ["differ_pipeline.cc"],
+    hdrs = ["differ_pipeline.h"],
+    deps = [
+        ":diff_formatter",
+        ":elf_reader",
+        ":normalizer",
+        ":relocation_applier",
+        ":sequence_aligner",
+        ":target_extractor",
+        "//core:compiler",
+        "//core:mips",
+        "//core:toolchain",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "differ_pipeline_test",
+    srcs = ["differ_pipeline_test.cc"],
+    deps = [
+        ":differ_pipeline",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "differ",
+    srcs = ["main.cc"],
+    deps = [
+        ":differ_pipeline",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/flags:usage",
+    ],
+)
+
 
 
 

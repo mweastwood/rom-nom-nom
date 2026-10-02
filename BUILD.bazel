@@ -47,7 +47,7 @@ alias(
 # Convenient alias to interactively diff a function
 alias(
     name = "diff",
-    actual = "//tools:diff",
+    actual = "//differ:differ",
 )
 
 # Convenient alias to decompile a function with on-the-fly context

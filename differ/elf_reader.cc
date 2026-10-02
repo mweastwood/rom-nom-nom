@@ -73,12 +73,12 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
     return absl::InvalidArgumentError("ElfReader: Only ELFDATA2MSB (big-endian) is supported.");
   }
 
-  uint16_t e_type = ReadBigEndian16(&bytes[16]);
-  uint16_t e_machine = ReadBigEndian16(&bytes[18]);
-  uint32_t e_shoff = ReadBigEndian32(&bytes[32]);
-  uint16_t e_shentsize = ReadBigEndian16(&bytes[46]);
-  uint16_t e_shnum = ReadBigEndian16(&bytes[48]);
-  uint16_t e_shstrndx = ReadBigEndian16(&bytes[50]);
+  uint16_t e_type = ReadBigEndian16(bytes.data() + 16);
+  uint16_t e_machine = ReadBigEndian16(bytes.data() + 18);
+  uint32_t e_shoff = ReadBigEndian32(bytes.data() + 32);
+  uint16_t e_shentsize = ReadBigEndian16(bytes.data() + 46);
+  uint16_t e_shnum = ReadBigEndian16(bytes.data() + 48);
+  uint16_t e_shstrndx = ReadBigEndian16(bytes.data() + 50);
 
   if (e_type != ET_REL) {
     return absl::InvalidArgumentError(
@@ -114,15 +114,15 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
   std::vector<RawShdr> raw_shdrs(e_shnum);
 
   for (uint16_t i = 0; i < e_shnum; ++i) {
-    const uint8_t* sh_ptr = &bytes[e_shoff + i * e_shentsize];
+    const uint8_t* sh_ptr = bytes.data() + e_shoff + i * e_shentsize;
     RawShdr raw;
-    raw.sh_name = ReadBigEndian32(&sh_ptr[0]);
-    raw.sh_type = ReadBigEndian32(&sh_ptr[4]);
-    raw.sh_flags = ReadBigEndian32(&sh_ptr[8]);
-    raw.sh_offset = ReadBigEndian32(&sh_ptr[16]);
-    raw.sh_size = ReadBigEndian32(&sh_ptr[20]);
-    raw.sh_link = ReadBigEndian32(&sh_ptr[24]);
-    raw.sh_info = ReadBigEndian32(&sh_ptr[28]);
+    raw.sh_name = ReadBigEndian32(sh_ptr + 0);
+    raw.sh_type = ReadBigEndian32(sh_ptr + 4);
+    raw.sh_flags = ReadBigEndian32(sh_ptr + 8);
+    raw.sh_offset = ReadBigEndian32(sh_ptr + 16);
+    raw.sh_size = ReadBigEndian32(sh_ptr + 20);
+    raw.sh_link = ReadBigEndian32(sh_ptr + 24);
+    raw.sh_info = ReadBigEndian32(sh_ptr + 28);
     raw_shdrs[i] = raw;
 
     ElfSection sec;
@@ -132,7 +132,7 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
     sec.size = raw.sh_size;
     if (raw.sh_type != SHT_NOBITS && raw.sh_size > 0) {
       if (raw.sh_offset + raw.sh_size <= bytes.size()) {
-        sec.data.assign(&bytes[raw.sh_offset], &bytes[raw.sh_offset + raw.sh_size]);
+        sec.data.assign(bytes.data() + raw.sh_offset, bytes.data() + raw.sh_offset + raw.sh_size);
       }
     }
     reader.sections_.push_back(std::move(sec));
@@ -169,12 +169,12 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
     reader.symbols_.reserve(num_symbols);
 
     for (size_t i = 0; i < num_symbols; ++i) {
-      const uint8_t* sym_ptr = &sym_bytes[i * sizeof(Elf32_Sym)];
-      uint32_t st_name = ReadBigEndian32(&sym_ptr[0]);
-      uint32_t st_value = ReadBigEndian32(&sym_ptr[4]);
-      uint32_t st_size = ReadBigEndian32(&sym_ptr[8]);
+      const uint8_t* sym_ptr = sym_bytes.data() + i * sizeof(Elf32_Sym);
+      uint32_t st_name = ReadBigEndian32(sym_ptr + 0);
+      uint32_t st_value = ReadBigEndian32(sym_ptr + 4);
+      uint32_t st_size = ReadBigEndian32(sym_ptr + 8);
       uint8_t st_info = sym_ptr[12];
-      uint16_t st_shndx = ReadBigEndian16(&sym_ptr[14]);
+      uint16_t st_shndx = ReadBigEndian16(sym_ptr + 14);
 
       ElfSymbol sym;
       sym.value = st_value;
@@ -203,9 +203,9 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
         reader.text_relocations_.reserve(num_relocs);
 
         for (size_t j = 0; j < num_relocs; ++j) {
-          const uint8_t* rel_ptr = &rel_bytes[j * sizeof(Elf32_Rel)];
-          uint32_t r_offset = ReadBigEndian32(&rel_ptr[0]);
-          uint32_t r_info = ReadBigEndian32(&rel_ptr[4]);
+          const uint8_t* rel_ptr = rel_bytes.data() + j * sizeof(Elf32_Rel);
+          uint32_t r_offset = ReadBigEndian32(rel_ptr + 0);
+          uint32_t r_info = ReadBigEndian32(rel_ptr + 4);
           uint32_t sym_idx = ELF32_R_SYM(r_info);
           uint32_t r_type = ELF32_R_TYPE(r_info);
 
@@ -282,6 +282,17 @@ std::vector<ElfFunction> ElfReader::ExtractFunctions() const {
       } else {
         fn_size = text_sec.size - fn_offset;
       }
+    } else {
+      // If symbol has an explicit size, absorb any trailing alignment NOPs up to the next
+      // symbol or end of .text section to mirror ROM symbol boundaries.
+      uint32_t next_limit = (i + 1 < candidates.size()) ? candidates[i + 1].offset : text_sec.size;
+      while (fn_offset + fn_size + 4 <= next_limit && fn_offset + fn_size + 4 <= text_data.size()) {
+        if (ReadBigEndian32(text_data.data() + fn_offset + fn_size) == 0) {
+          fn_size += 4;
+        } else {
+          break;
+        }
+      }
     }
 
     if (fn_offset + fn_size > text_data.size()) {
@@ -297,7 +308,7 @@ std::vector<ElfFunction> ElfReader::ExtractFunctions() const {
     size_t num_words = fn_size / 4;
     fn.raw_words.reserve(num_words);
     for (size_t w = 0; w < num_words; ++w) {
-      fn.raw_words.push_back(ReadBigEndian32(&text_data[fn_offset + w * 4]));
+      fn.raw_words.push_back(ReadBigEndian32(text_data.data() + fn_offset + w * 4));
     }
 
     // Collect relocations within this function range
