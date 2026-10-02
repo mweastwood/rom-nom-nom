@@ -181,3 +181,26 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "c_ast",
+    srcs = ["c_ast.cc"],
+    hdrs = ["c_ast.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "c_ast_test",
+    srcs = ["c_ast_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":c_ast",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+

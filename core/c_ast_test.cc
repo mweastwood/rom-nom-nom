@@ -1,0 +1,195 @@
+#include "core/c_ast.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+
+namespace rom_nom_nom {
+namespace {
+
+using ::testing::HasSubstr;
+using ::testing::NotNull;
+
+TEST(CAstTest, CTypeBasic) {
+  CType void_type = CType::Void();
+  EXPECT_EQ(void_type.ToString(), "void");
+
+  CType s32_type = CType::S32();
+  EXPECT_EQ(s32_type.ToString(), "s32");
+
+  CType s32_ptr = s32_type.MakePointer();
+  EXPECT_EQ(s32_ptr.ToString(), "s32*");
+
+  CType s32_ptr_ptr = s32_ptr.MakePointer();
+  EXPECT_EQ(s32_ptr_ptr.ToString(), "s32**");
+
+  CType custom = CType::Named("Gfx");
+  EXPECT_EQ(custom.ToString(), "Gfx");
+  EXPECT_EQ(custom.MakePointer().ToString(), "Gfx*");
+}
+
+TEST(CAstTest, IntegerLiteralExpressions) {
+  auto lit1 = CExpression::Integer(42);
+  EXPECT_EQ(lit1->Kind(), CExpressionKind::kIntegerLiteral);
+  EXPECT_EQ(lit1->ToString(), "42");
+
+  auto lit_hex = CExpression::Integer(0x801F0000, /*is_hex=*/true);
+  EXPECT_EQ(lit_hex->ToString(), "0x801F0000");
+
+  auto lit_unsigned = CExpression::Integer(100, /*is_hex=*/false, /*is_unsigned=*/true);
+  EXPECT_EQ(lit_unsigned->ToString(), "100U");
+
+  auto clone = lit_hex->Clone();
+  ASSERT_THAT(clone, NotNull());
+  EXPECT_EQ(clone->ToString(), "0x801F0000");
+}
+
+TEST(CAstTest, FloatLiteralExpressions) {
+  auto f1 = CExpression::Float(3.14, /*is_float=*/true);
+  EXPECT_EQ(f1->Kind(), CExpressionKind::kFloatLiteral);
+  EXPECT_EQ(f1->ToString(), "3.14f");
+
+  auto f_int = CExpression::Float(5.0, /*is_float=*/true);
+  EXPECT_EQ(f_int->ToString(), "5.0f");
+
+  auto d1 = CExpression::Float(2.5, /*is_float=*/false);
+  EXPECT_EQ(d1->ToString(), "2.5");
+}
+
+TEST(CAstTest, IdentifierAndStringExpressions) {
+  auto id = CExpression::Identifier("g_counter");
+  EXPECT_EQ(id->Kind(), CExpressionKind::kIdentifier);
+  EXPECT_EQ(id->ToString(), "g_counter");
+
+  auto str = CExpression::String("Hello, World!");
+  EXPECT_EQ(str->Kind(), CExpressionKind::kStringLiteral);
+  EXPECT_EQ(str->ToString(), "\"Hello, World!\"");
+}
+
+TEST(CAstTest, UnaryAndBinaryExpressions) {
+  auto var_x = CExpression::Identifier("x");
+  auto neg_x = CExpression::Unary("-", std::move(var_x));
+  EXPECT_EQ(neg_x->Kind(), CExpressionKind::kUnaryExpression);
+  EXPECT_EQ(neg_x->ToString(), "-x");
+
+  auto add = CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b"));
+  EXPECT_EQ(add->Kind(), CExpressionKind::kBinaryExpression);
+  EXPECT_EQ(add->ToString(), "(a + b)");
+
+  auto deref = CExpression::Unary("*", CExpression::Identifier("ptr"));
+  EXPECT_EQ(deref->ToString(), "*ptr");
+
+  auto address_of = CExpression::Unary("&", CExpression::Identifier("val"));
+  EXPECT_EQ(address_of->ToString(), "&val");
+}
+
+TEST(CAstTest, AssignmentAndCallExpressions) {
+  auto assign =
+      CExpression::Assignment("=", CExpression::Identifier("result"), CExpression::Integer(10));
+  EXPECT_EQ(assign->Kind(), CExpressionKind::kAssignmentExpression);
+  EXPECT_EQ(assign->ToString(), "result = 10");
+
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("a0"));
+  args.push_back(CExpression::Integer(4));
+  auto call = CExpression::Call(CExpression::Identifier("osWritebackDCache"), std::move(args));
+  EXPECT_EQ(call->Kind(), CExpressionKind::kCallExpression);
+  EXPECT_EQ(call->ToString(), "osWritebackDCache(a0, 4)");
+}
+
+TEST(CAstTest, CastMemberAndArrayIndexExpressions) {
+  auto cast = CExpression::Cast(CType::U32(), CExpression::Identifier("reg"));
+  EXPECT_EQ(cast->Kind(), CExpressionKind::kCastExpression);
+  EXPECT_EQ(cast->ToString(), "(u32)reg");
+
+  auto member_dot = CExpression::MemberAccess(CExpression::Identifier("obj"), "field");
+  EXPECT_EQ(member_dot->ToString(), "obj.field");
+
+  auto member_arrow = CExpression::MemberAccess(CExpression::Identifier("ptr"), "field",
+                                                /*is_arrow=*/true);
+  EXPECT_EQ(member_arrow->ToString(), "ptr->field");
+
+  auto arr_idx = CExpression::ArrayIndex(CExpression::Identifier("table"), CExpression::Integer(3));
+  EXPECT_EQ(arr_idx->ToString(), "table[3]");
+
+  auto ternary = CExpression::Ternary(CExpression::Identifier("cond"), CExpression::Integer(1),
+                                      CExpression::Integer(0));
+  EXPECT_EQ(ternary->ToString(), "(cond ? 1 : 0)");
+}
+
+TEST(CAstTest, VariableDeclarationAndExpressionStatements) {
+  auto var_decl = CStatement::VariableDeclaration(CType::S32(), "counter", CExpression::Integer(0));
+  EXPECT_EQ(var_decl->Kind(), CStatementKind::kVariableDeclarationStatement);
+  EXPECT_EQ(var_decl->ToString(0), "s32 counter = 0;\n");
+
+  auto expr_stmt = CStatement::Expression(
+      CExpression::Assignment("+=", CExpression::Identifier("counter"), CExpression::Integer(1)));
+  EXPECT_EQ(expr_stmt->Kind(), CStatementKind::kExpressionStatement);
+  EXPECT_EQ(expr_stmt->ToString(1), "    counter += 1;\n");
+}
+
+TEST(CAstTest, ControlFlowStatements) {
+  // if (x < 10) { x = 10; } else { x = 0; }
+  auto cond = CExpression::Binary("<", CExpression::Identifier("x"), CExpression::Integer(10));
+  auto then_body = std::make_unique<CompoundStatement>();
+  then_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(10))));
+  auto else_body = std::make_unique<CompoundStatement>();
+  else_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(0))));
+
+  auto if_stmt = CStatement::If(std::move(cond), std::move(then_body), std::move(else_body));
+  EXPECT_EQ(if_stmt->Kind(), CStatementKind::kIfStatement);
+  std::string if_str = if_stmt->ToString(0);
+  EXPECT_THAT(if_str, HasSubstr("if ((x < 10)) {"));
+  EXPECT_THAT(if_str, HasSubstr("else {"));
+
+  // while (i < 5) { i = i + 1; }
+  auto while_body = std::make_unique<CompoundStatement>();
+  while_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("i"),
+      CExpression::Binary("+", CExpression::Identifier("i"), CExpression::Integer(1)))));
+  auto while_stmt = CStatement::While(
+      CExpression::Binary("<", CExpression::Identifier("i"), CExpression::Integer(5)),
+      std::move(while_body));
+  EXPECT_EQ(while_stmt->Kind(), CStatementKind::kWhileStatement);
+  EXPECT_THAT(while_stmt->ToString(0), HasSubstr("while ((i < 5)) {"));
+
+  // return x;
+  auto ret = CStatement::Return(CExpression::Identifier("x"));
+  EXPECT_EQ(ret->Kind(), CStatementKind::kReturnStatement);
+  EXPECT_EQ(ret->ToString(0), "return x;\n");
+
+  // break; continue;
+  EXPECT_EQ(CStatement::Break()->ToString(0), "break;\n");
+  EXPECT_EQ(CStatement::Continue()->ToString(0), "continue;\n");
+}
+
+TEST(CAstTest, FunctionDeclarationToString) {
+  std::vector<CParameter> params;
+  params.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+  params.push_back(CParameter{.type = CType::S32(), .name = "arg1"});
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(
+      CType::S32(), "result",
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Identifier("arg1"))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("result")));
+
+  FunctionDeclaration func(CType::S32(), "AddNumbers", std::move(params), std::move(body));
+
+  EXPECT_EQ(func.Name(), "AddNumbers");
+  EXPECT_EQ(func.ReturnType().ToString(), "s32");
+  EXPECT_EQ(func.Parameters().size(), 2u);
+
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("s32 AddNumbers(s32 arg0, s32 arg1) {"));
+  EXPECT_THAT(code, HasSubstr("s32 result = (arg0 + arg1);"));
+  EXPECT_THAT(code, HasSubstr("return result;"));
+}
+
+}  // namespace
+}  // namespace rom_nom_nom
