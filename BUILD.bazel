@@ -50,10 +50,15 @@ alias(
     actual = "//differ:differ",
 )
 
-# Convenient alias to decompile a function with on-the-fly context
+# Native C++ MIPS-to-C lifter (clean-room replacement for m2c)
 alias(
     name = "m2c",
-    actual = "//tools:m2c",
+    actual = "//lifter:lifter",
+)
+
+alias(
+    name = "lifter",
+    actual = "//lifter:lifter",
 )
 
 # Native C++ ROM builder tool
