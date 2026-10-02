@@ -153,6 +153,35 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "expression_builder",
+    srcs = ["expression_builder.cc"],
+    hdrs = ["expression_builder.h"],
+    deps = [
+        ":control_flow_graph",
+        ":register_tracker",
+        ":symbol_folder",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "expression_builder_test",
+    srcs = ["expression_builder_test.cc"],
+    deps = [
+        ":expression_builder",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
 
