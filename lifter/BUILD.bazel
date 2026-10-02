@@ -216,4 +216,29 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "c_emitter",
+    srcs = ["c_emitter.cc"],
+    hdrs = ["c_emitter.h"],
+    deps = [
+        "//core:c_ast",
+        "//core:process",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "c_emitter_test",
+    srcs = ["c_emitter_test.cc"],
+    deps = [
+        ":c_emitter",
+        "//core:c_ast",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
