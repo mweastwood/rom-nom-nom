@@ -974,6 +974,20 @@ absl::StatusOr<Instruction> DecodeInstruction(absl::Span<const uint8_t> bytes, u
   return DecodeInstruction(word, vram);
 }
 
+absl::StatusOr<std::vector<Instruction>> DecodeSequence(absl::Span<const uint32_t> words,
+                                                        uint32_t base_vram) {
+  std::vector<Instruction> instructions;
+  instructions.reserve(words.size());
+  for (size_t i = 0; i < words.size(); ++i) {
+    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
+    if (!inst_or.ok()) {
+      return inst_or.status();
+    }
+    instructions.push_back(std::move(*inst_or));
+  }
+  return instructions;
+}
+
 std::string FormatBranch(const Instruction& inst, std::string_view target_label) {
   Register rs_reg = inst.rs.value_or(Register::kZero);
   Register rt_reg = inst.rt.value_or(Register::kZero);

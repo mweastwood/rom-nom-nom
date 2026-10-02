@@ -16,19 +16,6 @@ using ::testing::Eq;
 using ::testing::IsEmpty;
 using ::testing::Optional;
 
-std::vector<Instruction> DecodeSequence(const std::vector<uint32_t>& words,
-                                        uint32_t base_vram = 0x80000000) {
-  std::vector<Instruction> instructions;
-  for (size_t i = 0; i < words.size(); ++i) {
-    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
-    EXPECT_TRUE(inst_or.ok());
-    if (inst_or.ok()) {
-      instructions.push_back(*inst_or);
-    }
-  }
-  return instructions;
-}
-
 TEST(DominatorTreeTest, EmptyGraph) {
   ControlFlowGraph cfg;
   DominatorTree dt = DominatorTree::Compute(cfg);
@@ -58,7 +45,7 @@ TEST(DominatorTreeTest, LinearSequence) {
       0x00000000,  // 0x14: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -137,7 +124,7 @@ TEST(DominatorTreeTest, IfThenElseDiamond) {
       0x00000000,  // 0x1C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -198,7 +185,7 @@ TEST(DominatorTreeTest, NaturalLoop) {
       0x00000000,  // 0x1C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -239,7 +226,7 @@ TEST(DominatorTreeTest, MultipleExits) {
       0x00000000,  // 0x14: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;

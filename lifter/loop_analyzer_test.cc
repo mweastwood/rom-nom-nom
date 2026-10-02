@@ -18,19 +18,6 @@ using ::testing::NotNull;
 using ::testing::SizeIs;
 using ::testing::UnorderedElementsAre;
 
-std::vector<Instruction> DecodeSequence(const std::vector<uint32_t>& words,
-                                        uint32_t base_vram = 0x80000000) {
-  std::vector<Instruction> instructions;
-  for (size_t i = 0; i < words.size(); ++i) {
-    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
-    EXPECT_TRUE(inst_or.ok());
-    if (inst_or.ok()) {
-      instructions.push_back(*inst_or);
-    }
-  }
-  return instructions;
-}
-
 TEST(LoopAnalyzerTest, AcyclicGraphHasNoLoops) {
   // Linear sequence: Block 0 -> Block 1
   std::vector<uint32_t> words = {
@@ -40,7 +27,7 @@ TEST(LoopAnalyzerTest, AcyclicGraphHasNoLoops) {
       0x00000000,  // 0x0C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -82,7 +69,7 @@ TEST(LoopAnalyzerTest, SimpleWhileLoop) {
       0x00000000,  // 0x1C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -141,7 +128,7 @@ TEST(LoopAnalyzerTest, SingleBlockDoWhileLoop) {
       0x00000000,  // 0x1C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -183,7 +170,7 @@ TEST(LoopAnalyzerTest, MultiBlockDoWhileLoop) {
       0x00000000,  // 0x1C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -210,7 +197,7 @@ TEST(LoopAnalyzerTest, InfiniteLoop) {
       0x00000000,  // 0x04: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -262,7 +249,7 @@ TEST(LoopAnalyzerTest, NestedLoops) {
       0x00000000,  // 0x2C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;

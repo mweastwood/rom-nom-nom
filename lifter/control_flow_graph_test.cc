@@ -17,20 +17,6 @@ using ::testing::Ne;
 using ::testing::NotNull;
 using ::testing::SizeIs;
 
-// Helper to decode a sequence of raw 32-bit words starting at base_vram.
-std::vector<Instruction> DecodeSequence(const std::vector<uint32_t>& words,
-                                        uint32_t base_vram = 0x80000000) {
-  std::vector<Instruction> instructions;
-  for (size_t i = 0; i < words.size(); ++i) {
-    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
-    EXPECT_TRUE(inst_or.ok());
-    if (inst_or.ok()) {
-      instructions.push_back(*inst_or);
-    }
-  }
-  return instructions;
-}
-
 TEST(ControlFlowGraphTest, LinearFunctionEndingInReturn) {
   // Simple 4-instruction leaf function:
   // 0x00: addiu $sp, $sp, -16
@@ -44,7 +30,7 @@ TEST(ControlFlowGraphTest, LinearFunctionEndingInReturn) {
       0x27BD0010,  // addiu $sp, $sp, 16
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -76,7 +62,7 @@ TEST(ControlFlowGraphTest, ConditionalBranchCreatesTwoSuccessors) {
       0x00000000,  // nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -123,7 +109,7 @@ TEST(ControlFlowGraphTest, LoopWithBackEdge) {
       0x00000000,  // 0x14: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -162,7 +148,7 @@ TEST(ControlFlowGraphTest, ReversePostOrderTraversal) {
       0x00000000,  // 0x18: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
@@ -207,7 +193,7 @@ TEST(ControlFlowGraphTest, BuildsCfgForIdleLoopPattern) {
       0x00000000,  // 0x2C: nop
   };
 
-  auto insts = DecodeSequence(words, 0x80025CB4);
+  auto insts = *DecodeSequence(words, 0x80025CB4);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status().message();
 
@@ -245,7 +231,7 @@ TEST(ControlFlowGraphTest, ToDotProducesNonEmptyOutput) {
       0x03E00008,  // jr $ra
       0x00000000,  // nop
   };
-  auto insts = DecodeSequence(words, 0x80000000);
+  auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   std::string dot = cfg_or->ToDot();

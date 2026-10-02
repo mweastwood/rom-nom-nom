@@ -15,19 +15,6 @@ using ::testing::Eq;
 using ::testing::IsEmpty;
 using ::testing::Optional;
 
-std::vector<Instruction> DecodeSequence(const std::vector<uint32_t>& words,
-                                        uint32_t base_vram = 0x80000000) {
-  std::vector<Instruction> instructions;
-  for (size_t i = 0; i < words.size(); ++i) {
-    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
-    EXPECT_TRUE(inst_or.ok());
-    if (inst_or.ok()) {
-      instructions.push_back(*inst_or);
-    }
-  }
-  return instructions;
-}
-
 TEST(RegisterTrackerTest, InstructionUseDefSets) {
   // 1. addu $t0, $a0, $a1
   auto inst1_or = DecodeInstruction(0x00854021);
@@ -76,7 +63,7 @@ TEST(RegisterTrackerTest, ConstantTrackingAndPropagation) {
       0x24241234,  // 0x10: addiu $a0, $at, 0x1234
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   RegisterTracker tracker;
   tracker.Analyze(insts);
 
@@ -110,7 +97,7 @@ TEST(RegisterTrackerTest, StackFrameDiscovery) {
       0x00000000,  // 0x10: nop
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   RegisterTracker tracker;
   tracker.Analyze(insts);
 
@@ -131,7 +118,7 @@ TEST(RegisterTrackerTest, DefUseChains) {
       0x00851021,  // 2: addu  $v0, $a0, $a1   (uses $a0 and $a1, defines $v0)
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   RegisterTracker tracker;
   tracker.Analyze(insts);
 

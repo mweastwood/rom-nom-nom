@@ -217,5 +217,25 @@ TEST(MipsTest, FormatBranchPseudoInstructions) {
   EXPECT_EQ(FormatBranch(*nop_inst, ".L1"), "nop");
 }
 
+TEST(MipsTest, DecodeSequence) {
+  std::vector<uint32_t> words = {
+      0x00854021,  // addu $t0, $a0, $a1
+      0x00000000,  // nop
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop (delay slot)
+  };
+  auto seq_or = DecodeSequence(words, 0x80025C00);
+  ASSERT_TRUE(seq_or.ok());
+  EXPECT_EQ(seq_or->size(), 4);
+  EXPECT_EQ((*seq_or)[0].vram, 0x80025C00);
+  EXPECT_EQ((*seq_or)[0].opcode, Opcode::kAddu);
+  EXPECT_EQ((*seq_or)[1].vram, 0x80025C04);
+  EXPECT_TRUE((*seq_or)[1].IsNop());
+  EXPECT_EQ((*seq_or)[2].vram, 0x80025C08);
+  EXPECT_TRUE((*seq_or)[2].IsReturn());
+  EXPECT_EQ((*seq_or)[3].vram, 0x80025C0C);
+  EXPECT_TRUE((*seq_or)[3].IsNop());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

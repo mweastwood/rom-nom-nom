@@ -15,19 +15,6 @@ using ::testing::Eq;
 using ::testing::NotNull;
 using ::testing::SizeIs;
 
-std::vector<Instruction> DecodeSequence(const std::vector<uint32_t>& words,
-                                        uint32_t base_vram = 0x80000000) {
-  std::vector<Instruction> instructions;
-  for (size_t i = 0; i < words.size(); ++i) {
-    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
-    EXPECT_TRUE(inst_or.ok());
-    if (inst_or.ok()) {
-      instructions.push_back(*inst_or);
-    }
-  }
-  return instructions;
-}
-
 TEST(SymbolFolderTest, AddressLoadPair) {
   // lui $at, 0x801F
   // addiu $a0, $at, 0x2340
@@ -36,7 +23,7 @@ TEST(SymbolFolderTest, AddressLoadPair) {
       0x24242340,  // 1: addiu $a0, $at, 0x2340
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   SymbolFolder folder;
   folder.Fold(insts);
 
@@ -62,7 +49,7 @@ TEST(SymbolFolderTest, ConstantLiteralPair) {
       0x35085678,  // 1: ori $t0, $t0, 0x5678
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   SymbolFolder folder;
   folder.Fold(insts);
 
@@ -85,7 +72,7 @@ TEST(SymbolFolderTest, GlobalLoadAndStoreWithSignedOffset) {
       0xAD041000,  // 3: sw  $a0, 0x1000($t0)
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   SymbolFolder folder;
   folder.Fold(insts);
 
@@ -117,7 +104,7 @@ TEST(SymbolFolderTest, SymbolNameResolutionWithIndex) {
       0x24242340,  // 1: addiu $a0, $at, 0x2340
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   SymbolFolder folder;
   folder.Fold(insts, &(*index_or));
 

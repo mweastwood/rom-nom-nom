@@ -15,19 +15,6 @@ namespace {
 using ::testing::HasSubstr;
 using ::testing::SizeIs;
 
-std::vector<Instruction> DecodeSequence(const std::vector<uint32_t>& words,
-                                        uint32_t base_vram = 0x80000000) {
-  std::vector<Instruction> instructions;
-  for (size_t i = 0; i < words.size(); ++i) {
-    auto inst_or = DecodeInstruction(words[i], base_vram + static_cast<uint32_t>(i * 4));
-    EXPECT_TRUE(inst_or.ok());
-    if (inst_or.ok()) {
-      instructions.push_back(*inst_or);
-    }
-  }
-  return instructions;
-}
-
 TEST(ExpressionBuilderTest, ArithmeticOperations) {
   std::vector<uint32_t> words = {
       0x00851021,  // 0: addu $v0, $a0, $a1
@@ -35,7 +22,7 @@ TEST(ExpressionBuilderTest, ArithmeticOperations) {
       0x00042080,  // 8: sll  $a0, $a0, 2
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(insts);
 
   ASSERT_THAT(statements, SizeIs(3));
@@ -57,7 +44,7 @@ TEST(ExpressionBuilderTest, FoldedSymbolAccess) {
       0x8C222340,  // 4: lw  $v0, 0x2340($at)
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
 
   // lui is folded, so only the loaded symbol statement is emitted
@@ -73,7 +60,7 @@ TEST(ExpressionBuilderTest, StackVariableAccess) {
       0x03E00008,  // C: jr    $ra
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(insts);
 
   ASSERT_THAT(statements, SizeIs(3));
@@ -97,7 +84,7 @@ TEST(ExpressionBuilderTest, FunctionCallAndReturn) {
       0x03E00008,  // C: jr    $ra
   };
 
-  auto insts = DecodeSequence(words);
+  auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
 
   ASSERT_THAT(statements, SizeIs(3));

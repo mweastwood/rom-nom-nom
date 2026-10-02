@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -283,6 +284,10 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram = 0);
 
 // Convenience overload: Decodes from a 4-byte buffer (reads big-endian).
 absl::StatusOr<Instruction> DecodeInstruction(absl::Span<const uint8_t> bytes, uint32_t vram = 0);
+
+// Decodes a sequence of 32-bit big-endian instruction words starting at base_vram.
+absl::StatusOr<std::vector<Instruction>> DecodeSequence(absl::Span<const uint32_t> words,
+                                                        uint32_t base_vram = 0x80000000);
 
 // Formats a branch instruction targeting the specified label using standard
 // MIPS pseudo-instructions (e.g. "b", "beqz", "bnez", "blez", etc.).
