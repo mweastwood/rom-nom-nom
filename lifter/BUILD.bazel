@@ -77,4 +77,31 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "control_flow_structurer",
+    srcs = ["control_flow_structurer.cc"],
+    hdrs = ["control_flow_structurer.h"],
+    deps = [
+        ":control_flow_graph",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_test(
+    name = "control_flow_structurer_test",
+    srcs = ["control_flow_structurer_test.cc"],
+    deps = [
+        ":control_flow_graph",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
