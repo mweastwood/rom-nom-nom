@@ -128,6 +128,32 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "symbol_folder",
+    srcs = ["symbol_folder.cc"],
+    hdrs = ["symbol_folder.h"],
+    deps = [
+        ":register_tracker",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "symbol_folder_test",
+    srcs = ["symbol_folder_test.cc"],
+    deps = [
+        ":symbol_folder",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
 
