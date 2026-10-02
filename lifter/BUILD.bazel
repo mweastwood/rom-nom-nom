@@ -103,5 +103,31 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "register_tracker",
+    srcs = ["register_tracker.cc"],
+    hdrs = ["register_tracker.h"],
+    deps = [
+        ":control_flow_graph",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "register_tracker_test",
+    srcs = ["register_tracker_test.cc"],
+    deps = [
+        ":control_flow_graph",
+        ":register_tracker",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 
 
