@@ -125,5 +125,33 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "diff_formatter",
+    srcs = ["diff_formatter.cc"],
+    hdrs = ["diff_formatter.h"],
+    deps = [
+        ":normalizer",
+        ":sequence_aligner",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "diff_formatter_test",
+    srcs = ["diff_formatter_test.cc"],
+    deps = [
+        ":diff_formatter",
+        ":normalizer",
+        ":sequence_aligner",
+        "//core:mips",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 
 
