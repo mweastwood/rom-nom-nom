@@ -243,5 +243,36 @@ TEST(DominatorTreeTest, MultipleExits) {
   EXPECT_EQ(post_dt.ImmediateDominator(2), std::nullopt);
 }
 
+TEST(DominatorTreeTest, UnreachableBlocksFilteredInPostDominators) {
+  // Block 0:
+  // 0x00: j 0x80000010 (to Block 2)
+  // 0x04: nop
+  // Block 1 (Dead code / unreachable from entry):
+  // 0x08: nop
+  // 0x0C: j 0x80000010 (to Block 2)
+  // Block 2:
+  // 0x10: jr $ra
+  // 0x14: nop
+  std::vector<uint32_t> words = {
+      0x08000004,  // 0x00: j 0x80000010
+      0x00000000,  // 0x04: nop
+      0x00000000,  // 0x08: nop
+      0x08000004,  // 0x0C: j 0x80000010
+      0x03E00008,  // 0x10: jr $ra
+      0x00000000,  // 0x14: nop
+  };
+
+  auto instructions = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+  const auto& cfg = *cfg_or;
+
+  DominatorTree post_dominator_tree = DominatorTree::ComputePostDominators(cfg);
+  EXPECT_TRUE(post_dominator_tree.IsReachable(0));
+  EXPECT_FALSE(post_dominator_tree.IsReachable(1));
+  EXPECT_TRUE(post_dominator_tree.IsReachable(2));
+  EXPECT_THAT(post_dominator_tree.ImmediateDominator(0), Optional(2u));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
