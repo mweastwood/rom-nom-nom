@@ -196,19 +196,21 @@ std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
 }
 
 std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(const BasicBlock& block,
-                                                          const SymbolIndex* symbol_index) {
-  return LiftInstructions(block.instructions, symbol_index);
+                                                          const SymbolIndex* symbol_index,
+                                                          const SplitConfig* split_config) {
+  return LiftInstructions(block.instructions, symbol_index, split_config);
 }
 
 std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
-    absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index) {
+    absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
+    const SplitConfig* split_config) {
   std::vector<LiftedStatement> statements;
   if (instructions.empty()) {
     return statements;
   }
 
   SymbolFolder folder;
-  folder.Fold(instructions, symbol_index);
+  folder.Fold(instructions, symbol_index, split_config);
 
   RegisterTracker tracker;
   bool pending_return = false;

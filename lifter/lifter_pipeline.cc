@@ -87,6 +87,7 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   // 5. Convert Structured Regions and Lifted Instructions to C AST
   AstConverterOptions converter_opts;
   converter_opts.function_name = loaded_func.name;
+  converter_opts.split_config = loaded_func.split_config;
 
   FunctionDeclaration ast =
       AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);

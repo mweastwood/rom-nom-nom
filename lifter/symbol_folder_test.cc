@@ -6,6 +6,7 @@
 #include "core/mips.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "splitter/config.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
@@ -110,6 +111,88 @@ TEST(SymbolFolderTest, SymbolNameResolutionWithIndex) {
 
   ASSERT_THAT(folder.AllFolded(), SizeIs(1));
   EXPECT_EQ(folder.AllFolded()[0].symbol_name, "g_audio_status");
+}
+
+TEST(SymbolFolderTest, GlobalLoadAndStoreSynthesizeDataSymbolsWhenUnregistered) {
+  // 0: lui $at, 0x801F
+  // 1: lw  $v0, 0x2340($at)  -> 0x801F2340
+  // 2: lui $t0, 0x8005
+  // 3: sw  $a0, 0x1000($t0)  -> 0x80051000
+  std::vector<uint32_t> words = {
+      0x3C01801F,  // 0: lui $at, 0x801F
+      0x8C222340,  // 1: lw  $v0, 0x2340($at)
+      0x3C088005,  // 2: lui $t0, 0x8005
+      0xAD041000,  // 3: sw  $a0, 0x1000($t0)
+  };
+
+  auto instructions = *DecodeSequence(words);
+  SymbolIndex empty_symbol_index;
+  SymbolFolder folder;
+  folder.Fold(instructions, &empty_symbol_index);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+  EXPECT_EQ(folder.AllFolded()[0].symbol_name, "D_801F2340");
+  EXPECT_EQ(folder.AllFolded()[1].symbol_name, "D_80051000");
+}
+
+TEST(SymbolFolderTest, AddressLoadDefaultsToDataWhenSplitConfigNotProvided) {
+  // 0: lui $at, 0x8008
+  // 1: addiu $a0, $at, 0x1000  -> 0x80081000
+  // 2: lui $at, 0x8015
+  // 3: addiu $a1, $at, 0x2000  -> 0x80152000
+  std::vector<uint32_t> words = {
+      0x3C018008,  // 0: lui $at, 0x8008
+      0x24241000,  // 1: addiu $a0, $at, 0x1000
+      0x3C018015,  // 2: lui $at, 0x8015
+      0x24252000,  // 3: addiu $a1, $at, 0x2000
+  };
+
+  auto instructions = *DecodeSequence(words);
+  SymbolIndex empty_symbol_index;
+  SymbolFolder folder;
+  folder.Fold(instructions, &empty_symbol_index);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+  EXPECT_EQ(folder.AllFolded()[0].symbol_name, "D_80081000");
+  EXPECT_EQ(folder.AllFolded()[1].symbol_name, "D_80152000");
+}
+
+TEST(SymbolFolderTest, AddressLoadClassifiesCodeAndDataViaSplitConfig) {
+  constexpr std::string_view kConfigText = R"pb(
+    game_name: "Test Game"
+    sha1: "dummy_sha1"
+    basename: "test_game"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x1000
+      rom_end: 0x5000
+      vram: 0x80001000
+      subsegments { rom_start: 0x1000 type: SUBSEGMENT_ASM name: "code_subseg" }
+      subsegments { rom_start: 0x3000 type: SUBSEGMENT_DATA name: "data_subseg" }
+    }
+  )pb";
+  auto config_or = ParseSplitConfig(kConfigText);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+  const SplitConfig& config = *config_or;
+
+  // Address in code subsegment: 0x80001500 (code -> func_80001500)
+  // Address in data subsegment: 0x80003500 (data -> D_80003500)
+  std::vector<uint32_t> words = {
+      0x3C018000,  // 0: lui $at, 0x8000
+      0x24241500,  // 1: addiu $a0, $at, 0x1500  -> 0x80001500
+      0x3C018000,  // 2: lui $at, 0x8000
+      0x24253500,  // 3: addiu $a1, $at, 0x3500  -> 0x80003500
+  };
+
+  auto instructions = *DecodeSequence(words);
+  SymbolIndex empty_symbol_index;
+  SymbolFolder folder;
+  folder.Fold(instructions, &empty_symbol_index, &config);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+  EXPECT_EQ(folder.AllFolded()[0].symbol_name, "func_80001500");
+  EXPECT_EQ(folder.AllFolded()[1].symbol_name, "D_80003500");
 }
 
 }  // namespace

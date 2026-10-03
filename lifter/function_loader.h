@@ -30,6 +30,7 @@ struct LoadedFunction {
   uint32_t vram = 0;
   std::vector<Instruction> instructions;
   const SymbolIndex* symbol_index = nullptr;
+  const SplitConfig* split_config = nullptr;
 };
 
 // Loads target functions from ROM binaries, disassembly, or in-memory sequences.
@@ -46,7 +47,8 @@ class FunctionLoader {
   static absl::StatusOr<LoadedFunction> FromWords(std::string name,
                                                   absl::Span<const uint32_t> words,
                                                   uint32_t base_vram = 0x80000000,
-                                                  const SymbolIndex* symbol_index = nullptr);
+                                                  const SymbolIndex* symbol_index = nullptr,
+                                                  const SplitConfig* split_config = nullptr);
 
   const TargetExtractor* Extractor() const { return extractor_.get(); }
 

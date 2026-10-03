@@ -322,8 +322,9 @@ namespace {
 
 class ConverterContext {
  public:
-  ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index)
-      : cfg_(cfg), symbol_index_(symbol_index) {}
+  ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
+                   const SplitConfig* split_config)
+      : cfg_(cfg), symbol_index_(symbol_index), split_config_(split_config) {}
 
   void ConvertRegion(const StructuredRegion& region, CompoundStatement* target_block) {
     switch (region.type) {
@@ -433,7 +434,7 @@ class ConverterContext {
       return;
     }
 
-    auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_);
+    auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_);
     for (const auto& lifted_stmt : lifted_stmts) {
       auto c_stmt = AstConverter::ConvertStatement(lifted_stmt);
       if (c_stmt != nullptr) {
@@ -444,6 +445,7 @@ class ConverterContext {
 
   const ControlFlowGraph& cfg_;
   const SymbolIndex* symbol_index_;
+  const SplitConfig* split_config_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
 };
 
@@ -455,7 +457,7 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
                                           const AstConverterOptions& options) {
   auto body = std::make_unique<CompoundStatement>();
 
-  ConverterContext ctx(cfg, symbol_index);
+  ConverterContext ctx(cfg, symbol_index, options.split_config);
   ctx.ConvertRegion(root_region, body.get());
 
   // Determine parameters

@@ -105,4 +105,81 @@ absl::StatusOr<SplitConfig> LoadSplitConfig(const std::filesystem::path& path) {
   return ParseSplitConfig(buffer.str());
 }
 
+SectionVramClassification ClassifyVramAddress(const SplitConfig& config, uint32_t vram_address) {
+  for (const auto& segment : config.segments()) {
+    if (segment.vram() == 0) {
+      continue;
+    }
+
+    uint32_t segment_vram_start = segment.vram();
+    uint32_t segment_rom_size =
+        (segment.rom_end() > segment.rom_start()) ? (segment.rom_end() - segment.rom_start()) : 0;
+    uint32_t segment_vram_end = segment_vram_start + segment_rom_size + segment.bss_size();
+    for (const auto& subsegment : segment.subsegments()) {
+      if (subsegment.vram() != 0 && subsegment.bss_size() > 0) {
+        segment_vram_end = std::max(segment_vram_end, subsegment.vram() + subsegment.bss_size());
+      } else if (subsegment.bss_size() > 0) {
+        segment_vram_end = std::max(segment_vram_end,
+                                    segment_vram_start + segment_rom_size + subsegment.bss_size());
+      }
+    }
+
+    if (vram_address < segment_vram_start || vram_address >= segment_vram_end) {
+      continue;
+    }
+
+    // Check if the address falls into a specific subsegment
+    if (segment.subsegments_size() > 0) {
+      for (int i = 0; i < segment.subsegments_size(); ++i) {
+        const auto& subsegment = segment.subsegments(i);
+        uint32_t subsegment_vram_start =
+            subsegment.vram() != 0
+                ? subsegment.vram()
+                : (segment_vram_start + (subsegment.rom_start() - segment.rom_start()));
+
+        uint32_t subsegment_vram_end = segment_vram_end;
+        if (subsegment.bss_size() > 0) {
+          subsegment_vram_end = subsegment_vram_start + subsegment.bss_size();
+        } else if (i + 1 < segment.subsegments_size()) {
+          const auto& next_subsegment = segment.subsegments(i + 1);
+          subsegment_vram_end =
+              next_subsegment.vram() != 0
+                  ? next_subsegment.vram()
+                  : (segment_vram_start + (next_subsegment.rom_start() - segment.rom_start()));
+        }
+
+        if (vram_address >= subsegment_vram_start && vram_address < subsegment_vram_end) {
+          switch (subsegment.type()) {
+            case SUBSEGMENT_DATA:
+            case SUBSEGMENT_RODATA:
+            case SUBSEGMENT_BSS:
+            case SUBSEGMENT_BIN:
+              return SectionVramClassification::kData;
+            case SUBSEGMENT_C:
+            case SUBSEGMENT_ASM:
+            case SUBSEGMENT_HASM:
+              return SectionVramClassification::kCode;
+            default:
+              break;
+          }
+        }
+      }
+    }
+
+    // Fall back to segment-level classification
+    switch (segment.type()) {
+      case SEGMENT_CODE:
+        return SectionVramClassification::kCode;
+      case SEGMENT_DATA:
+      case SEGMENT_RODATA:
+      case SEGMENT_BSS:
+        return SectionVramClassification::kData;
+      default:
+        break;
+    }
+  }
+
+  return SectionVramClassification::kUnknown;
+}
+
 }  // namespace rom_nom_nom

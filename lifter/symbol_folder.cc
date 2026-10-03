@@ -8,12 +8,13 @@
 #include "absl/types/span.h"
 #include "core/mips.h"
 #include "lifter/register_tracker.h"
+#include "splitter/config.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
-void SymbolFolder::Fold(absl::Span<const Instruction> instructions,
-                        const SymbolIndex* symbol_index) {
+void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
+                        const SplitConfig* split_config) {
   folded_.clear();
   hi_to_folded_idx_.clear();
   lo_to_folded_idx_.clear();
@@ -34,15 +35,26 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions,
           uint32_t hi_val = val.symbol_hi;
 
           if (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) {
-            uint32_t addr = hi_val + static_cast<int32_t>(inst.immediate);
+            uint32_t target_address = hi_val + static_cast<int32_t>(inst.immediate);
             FoldedSymbolAccess access;
             access.type = FoldedPatternType::kAddressLoad;
-            access.address = addr;
+            access.address = target_address;
             access.dest_reg = inst.rt.value_or(Register::kZero);
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
             if (symbol_index != nullptr) {
-              access.symbol_name = symbol_index->LookupOrSynthesizeName(addr);
+              const auto* registered_entry = symbol_index->FindByAddress(target_address);
+              if (registered_entry != nullptr) {
+                access.symbol_name = std::string(registered_entry->name());
+              } else if (split_config != nullptr &&
+                         ClassifyVramAddress(*split_config, target_address) ==
+                             SectionVramClassification::kCode) {
+                access.symbol_name =
+                    symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_FUNC);
+              } else {
+                access.symbol_name =
+                    symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+              }
             }
             folded_.push_back(std::move(access));
           } else if (inst.opcode == Opcode::kOri) {
@@ -55,27 +67,29 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions,
             access.lo_inst_index = i;
             folded_.push_back(std::move(access));
           } else if (inst.IsLoad()) {
-            uint32_t addr = hi_val + static_cast<int32_t>(inst.immediate);
+            uint32_t target_address = hi_val + static_cast<int32_t>(inst.immediate);
             FoldedSymbolAccess access;
             access.type = FoldedPatternType::kGlobalLoad;
-            access.address = addr;
+            access.address = target_address;
             access.dest_reg = inst.rt.value_or(Register::kZero);
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
             if (symbol_index != nullptr) {
-              access.symbol_name = symbol_index->LookupOrSynthesizeName(addr);
+              access.symbol_name =
+                  symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
             }
             folded_.push_back(std::move(access));
           } else if (inst.IsStore()) {
-            uint32_t addr = hi_val + static_cast<int32_t>(inst.immediate);
+            uint32_t target_address = hi_val + static_cast<int32_t>(inst.immediate);
             FoldedSymbolAccess access;
             access.type = FoldedPatternType::kGlobalStore;
-            access.address = addr;
+            access.address = target_address;
             access.src_reg = inst.rt.value_or(Register::kZero);
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
             if (symbol_index != nullptr) {
-              access.symbol_name = symbol_index->LookupOrSynthesizeName(addr);
+              access.symbol_name =
+                  symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
             }
             folded_.push_back(std::move(access));
           }

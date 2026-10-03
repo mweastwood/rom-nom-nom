@@ -186,5 +186,42 @@ TEST(ConfigTest, AllowDedicatedBssSegmentWithoutRomStart) {
   EXPECT_EQ(config_or->segments(1).vram(), 0x80005000u);
 }
 
+TEST(ConfigTest, ClassifyVramAddressMatchesSegmentAndSubsegmentTypes) {
+  constexpr std::string_view kClassificationConfig = R"pb(
+    game_name: "Test Game"
+    sha1: "dummy_sha1"
+    basename: "test_game"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x1000
+      rom_end: 0x5000
+      vram: 0x80001000
+      subsegments { rom_start: 0x1000 type: SUBSEGMENT_ASM name: "code_subseg" }
+      subsegments { rom_start: 0x3000 type: SUBSEGMENT_DATA name: "data_subseg" }
+      subsegments { type: SUBSEGMENT_BSS name: "bss_subseg" vram: 0x80005000 bss_size: 0x1000 }
+    }
+  )pb";
+  auto config_or = ParseSplitConfig(kClassificationConfig);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+  const SplitConfig& config = *config_or;
+
+  // Code subsegment: 0x80001000 to 0x80002FFF
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80001000), SectionVramClassification::kCode);
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80002FFC), SectionVramClassification::kCode);
+
+  // Data subsegment: 0x80003000 to 0x80004FFF
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80003000), SectionVramClassification::kData);
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80004FFC), SectionVramClassification::kData);
+
+  // BSS subsegment: 0x80005000 to 0x80005FFF
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80005000), SectionVramClassification::kData);
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80005FFC), SectionVramClassification::kData);
+
+  // Out of bounds / unmapped addresses
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80000FFF), SectionVramClassification::kUnknown);
+  EXPECT_EQ(ClassifyVramAddress(config, 0x80006000), SectionVramClassification::kUnknown);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

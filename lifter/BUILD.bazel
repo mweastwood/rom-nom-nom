@@ -135,6 +135,7 @@ cc_library(
     deps = [
         ":register_tracker",
         "//core:mips",
+        "//splitter:config",
         "//splitter:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/types:span",
@@ -147,6 +148,7 @@ cc_test(
     deps = [
         ":symbol_folder",
         "//core:mips",
+        "//splitter:config",
         "//splitter:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

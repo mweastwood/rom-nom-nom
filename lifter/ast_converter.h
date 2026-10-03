@@ -15,12 +15,15 @@
 
 namespace rom_nom_nom {
 
+class SplitConfig;
+
 // Configuration options for AST conversion.
 struct AstConverterOptions {
   std::string function_name = "func";
   std::optional<CType> return_type;
   std::vector<CParameter> parameters;
   bool is_static = false;
+  const SplitConfig* split_config = nullptr;
 };
 
 // Converts structured control flow regions and lifted basic blocks into a C FunctionDeclaration
