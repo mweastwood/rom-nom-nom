@@ -23,6 +23,9 @@ absl::StatusOr<std::unique_ptr<FunctionLoader>> FunctionLoader::Create(
   TargetExtractorOptions extractor_opts;
   extractor_opts.repo_root = options.repo_root;
   extractor_opts.game_name = options.game_name;
+  extractor_opts.config_path = options.config_path;
+  extractor_opts.symbols_path = options.symbols_path;
+  extractor_opts.rom_path = options.rom_path;
 
   auto extractor_or = TargetExtractor::Create(extractor_opts);
   if (!extractor_or.ok()) {

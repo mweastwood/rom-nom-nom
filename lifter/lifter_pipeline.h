@@ -18,7 +18,10 @@ namespace rom_nom_nom {
 struct LifterPipelineOptions {
   std::filesystem::path repo_root = ".";
   std::string game_name = "harvest-moon-64";
-  std::vector<std::string> includes = {"common.h"};
+  std::filesystem::path config_path;
+  std::filesystem::path symbols_path;
+  std::filesystem::path rom_path;
+  std::vector<std::string> includes = {"types.h"};
   bool format_with_clang = true;
 };
 
@@ -41,6 +44,15 @@ class LifterPipeline {
 
   // Decompiles a function given by name or VRAM address (e.g. "InterpolateInit", "0x800266C0").
   absl::StatusOr<LifterResult> Decompile(std::string_view func_name_or_addr) const;
+
+  // Decompiles multiple functions in order into a single formatted translation unit.
+  absl::StatusOr<std::string> DecompileFunctions(const std::vector<std::string>& func_names) const;
+
+  // Resolves all function names registered within a module / subsegment.
+  absl::StatusOr<std::vector<std::string>> GetFunctionsInModule(std::string_view module_name) const;
+
+  // Decompiles an entire module into a single formatted translation unit.
+  absl::StatusOr<std::string> DecompileModule(std::string_view module_name) const;
 
   // Decompiles an already loaded or synthesized function directly.
   absl::StatusOr<LifterResult> DecompileFunction(const LoadedFunction& loaded_func) const;

@@ -98,5 +98,12 @@ TEST(LifterPipelineTest, EmptyInstructionsFails) {
   EXPECT_FALSE(result_or.ok());
 }
 
+TEST(LifterPipelineTest, DecompileFunctionsEmptyListFails) {
+  LifterPipeline pipeline({});
+  auto result_or = pipeline.DecompileFunctions({});
+  EXPECT_FALSE(result_or.ok());
+  EXPECT_EQ(result_or.status().code(), absl::StatusCode::kInvalidArgument);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

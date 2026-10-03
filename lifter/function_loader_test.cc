@@ -105,5 +105,72 @@ entries {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(FunctionLoaderTest, LoadFunctionViaExplicitPaths) {
+  auto test_dir = std::filesystem::temp_directory_path() / "func_loader_paths_test";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir);
+
+  std::filesystem::path cfg_path = test_dir / "custom_config.textproto";
+  std::ofstream cfg_file(cfg_path);
+  cfg_file << R"(
+game_name: "custom-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "custom-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+}
+)";
+  cfg_file.close();
+
+  std::filesystem::path sym_path = test_dir / "custom_symbols.textproto";
+  std::ofstream sym_file(sym_path);
+  sym_file << R"(
+entries {
+  name: "CustomFunc"
+  address: 0x80020000
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CustomNext"
+  address: 0x80020008
+  type: SYMBOL_FUNC
+}
+)";
+  sym_file.close();
+
+  std::vector<uint8_t> rom(0x2000, 0);
+  rom[0x1000] = 0x03;
+  rom[0x1001] = 0xE0;
+  rom[0x1002] = 0x00;
+  rom[0x1003] = 0x08;
+  std::filesystem::path rom_path = test_dir / "custom_rom.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  FunctionLoaderOptions loader_opts;
+  loader_opts.repo_root = test_dir;
+  loader_opts.game_name = "custom-game";
+  loader_opts.config_path = cfg_path;
+  loader_opts.symbols_path = sym_path;
+  loader_opts.rom_path = rom_path;
+
+  auto loader_or = FunctionLoader::Create(loader_opts);
+  ASSERT_TRUE(loader_or.ok()) << loader_or.status();
+
+  auto loaded_or = (*loader_or)->LoadFunction("CustomFunc");
+  ASSERT_TRUE(loaded_or.ok()) << loaded_or.status();
+
+  EXPECT_EQ(loaded_or->name, "CustomFunc");
+  EXPECT_EQ(loaded_or->vram, 0x80020000);
+  EXPECT_THAT(loaded_or->instructions, SizeIs(2));
+
+  std::filesystem::remove_all(test_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

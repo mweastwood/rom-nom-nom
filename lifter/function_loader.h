@@ -18,6 +18,9 @@ namespace rom_nom_nom {
 struct FunctionLoaderOptions {
   std::filesystem::path repo_root = ".";
   std::string game_name = "harvest-moon-64";
+  std::filesystem::path config_path;
+  std::filesystem::path symbols_path;
+  std::filesystem::path rom_path;
 };
 
 // Represents a loaded function ready for decompilation lifting.

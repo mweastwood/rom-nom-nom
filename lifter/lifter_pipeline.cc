@@ -7,6 +7,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "core/c_ast.h"
 #include "lifter/ast_converter.h"
 #include "lifter/c_emitter.h"
@@ -27,6 +28,9 @@ absl::StatusOr<std::unique_ptr<LifterPipeline>> LifterPipeline::Create(
   FunctionLoaderOptions loader_opts;
   loader_opts.repo_root = options.repo_root;
   loader_opts.game_name = options.game_name;
+  loader_opts.config_path = options.config_path;
+  loader_opts.symbols_path = options.symbols_path;
+  loader_opts.rom_path = options.rom_path;
 
   auto loader_or = FunctionLoader::Create(loader_opts);
   if (!loader_or.ok()) {
@@ -97,6 +101,96 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   result.c_code = std::move(c_code);
 
   return result;
+}
+
+absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
+    const std::vector<std::string>& func_names) const {
+  if (func_names.empty()) {
+    return absl::InvalidArgumentError("LifterPipeline: No function names provided.");
+  }
+
+  CTranslationUnit tu;
+  tu.includes = options_.includes;
+
+  for (const auto& func_name : func_names) {
+    auto res_or = Decompile(func_name);
+    if (!res_or.ok()) {
+      return res_or.status();
+    }
+    tu.functions.push_back(std::move(*res_or->ast));
+  }
+
+  CEmitterOptions emitter_opts;
+  emitter_opts.includes = options_.includes;
+  emitter_opts.format_with_clang = options_.format_with_clang;
+
+  return CEmitter::EmitTranslationUnit(tu, emitter_opts);
+}
+
+absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
+    std::string_view module_name) const {
+  if (loader_ == nullptr || loader_->Extractor() == nullptr) {
+    return absl::FailedPreconditionError("LifterPipeline: Loader or extractor uninitialized.");
+  }
+  const auto* config = loader_->Extractor()->Config();
+  const auto* symbols = loader_->Extractor()->Symbols();
+  if (config == nullptr || symbols == nullptr) {
+    return absl::FailedPreconditionError("LifterPipeline: Config or symbols uninitialized.");
+  }
+
+  // Find subsegment matching module_name
+  const Subsegment* matched_subseg = nullptr;
+  const Segment* matched_seg = nullptr;
+  uint32_t next_rom_start = 0;
+
+  for (const auto& seg : config->segments()) {
+    for (int i = 0; i < seg.subsegments_size(); ++i) {
+      const auto& subseg = seg.subsegments(i);
+      if (subseg.name() == module_name) {
+        matched_subseg = &subseg;
+        matched_seg = &seg;
+        if (i + 1 < seg.subsegments_size()) {
+          next_rom_start = seg.subsegments(i + 1).rom_start();
+        } else {
+          next_rom_start = seg.rom_end();
+        }
+        break;
+      }
+    }
+    if (matched_subseg != nullptr) break;
+  }
+
+  if (matched_subseg == nullptr) {
+    return absl::NotFoundError(
+        absl::StrFormat("Module '%s' not found in split configuration.", module_name));
+  }
+
+  uint32_t seg_offset = matched_subseg->rom_start() - matched_seg->rom_start();
+  uint32_t start_vram = matched_seg->vram() + seg_offset;
+  uint32_t end_vram = start_vram + (next_rom_start - matched_subseg->rom_start());
+
+  std::vector<std::string> func_names;
+  for (const auto* entry : symbols->SortedEntries()) {
+    if (entry->type() == SYMBOL_FUNC && entry->address() >= start_vram &&
+        entry->address() < end_vram) {
+      func_names.push_back(std::string(entry->name()));
+    }
+  }
+
+  if (func_names.empty()) {
+    // If no individual functions are declared in symbols, fallback to synthesized name
+    func_names.push_back(symbols->LookupOrSynthesizeName(start_vram, SYMBOL_FUNC));
+  }
+
+  return func_names;
+}
+
+absl::StatusOr<std::string> LifterPipeline::DecompileModule(std::string_view module_name) const {
+  auto funcs_or = GetFunctionsInModule(module_name);
+  if (!funcs_or.ok()) {
+    return funcs_or.status();
+  }
+  return DecompileFunctions(*funcs_or);
 }
 
 }  // namespace rom_nom_nom
