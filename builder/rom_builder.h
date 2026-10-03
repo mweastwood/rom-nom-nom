@@ -19,6 +19,7 @@ struct RomBuilderOptions {
   std::string game_name;
   std::filesystem::path config_path;
   std::filesystem::path symbols_path;
+  std::filesystem::path src_dir;
   std::filesystem::path asm_dir;
   std::filesystem::path build_dir;
   std::filesystem::path assets_dir;
@@ -27,6 +28,7 @@ struct RomBuilderOptions {
   ToolchainMode toolchain_mode = ToolchainMode::kOriginal;
   std::filesystem::path verify_rom;  // Optional retail ROM to verify bit-exact against
   bool is_test = false;              // Fails with error status if bit-exact match fails
+  bool prefer_c = false;
 };
 
 // Summary metrics and verification output of a completed ROM build.

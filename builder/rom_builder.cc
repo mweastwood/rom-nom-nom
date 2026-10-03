@@ -130,10 +130,14 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   // 5. Resolve and compile all objects
+  std::filesystem::path src_dir =
+      options_.src_dir.empty() ? (toolchain_.RepoRoot() / "src") : options_.src_dir;
+
   SourceResolver resolver({
-      .src_dir = toolchain_.RepoRoot() / "src",
+      .src_dir = src_dir,
       .asm_dir = options_.asm_dir,
       .assets_dir = options_.assets_dir,
+      .prefer_c = options_.prefer_c,
   });
 
   std::vector<std::filesystem::path> extra_includes = {
@@ -142,6 +146,9 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
       toolchain_.RepoRoot() / "src" / "cc" / options_.game_name,
       toolchain_.RepoRoot(),
   };
+  if (!options_.src_dir.empty()) {
+    extra_includes.push_back(options_.src_dir);
+  }
 
   if (!options_.asm_dir.empty()) {
     extra_includes.push_back(options_.asm_dir);
@@ -163,7 +170,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     if (!resolved_or.ok()) {
       return resolved_or.status();
     }
-    std::filesystem::path target_obj = obj_dir / absl::StrCat(resolved_or->object_stem, ".o");
+    std::filesystem::path target_obj = obj_dir / std::filesystem::path(obj_ref).filename();
 
     switch (resolved_or->type) {
       case SourceType::kC: {

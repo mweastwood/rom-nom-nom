@@ -19,6 +19,8 @@ ABSL_FLAG(std::string, out_elf, "", "Output ELF file path");
 ABSL_FLAG(std::string, out_rom, "", "Output ROM (.z64) file path");
 ABSL_FLAG(std::string, toolchain, "original", "Toolchain to use (original or modern)");
 ABSL_FLAG(std::string, verify_rom, "", "Original ROM to verify match against");
+ABSL_FLAG(std::string, src_dir, "", "Source directory containing C/C++ files");
+ABSL_FLAG(bool, prefer_c, false, "Prefer C source over assembly when both are available");
 ABSL_FLAG(bool, test, false, "Fail with non-zero exit code if not byte-exact match");
 
 int main(int argc, char* argv[]) {
@@ -99,6 +101,8 @@ int main(int argc, char* argv[]) {
   options.out_elf = out_elf;
   options.out_rom = out_rom;
   options.toolchain_mode = mode;
+  options.src_dir = absl::GetFlag(FLAGS_src_dir);
+  options.prefer_c = absl::GetFlag(FLAGS_prefer_c);
   options.verify_rom = absl::GetFlag(FLAGS_verify_rom);
   options.is_test = absl::GetFlag(FLAGS_test);
 
