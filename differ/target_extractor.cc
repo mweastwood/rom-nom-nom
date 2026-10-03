@@ -34,7 +34,9 @@ absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
   std::unique_ptr<SymbolIndex> owned_syms;
 
   std::filesystem::path cfg_path =
-      options.repo_root / "config" / absl::StrCat(options.game_name, ".textproto");
+      !options.config_path.empty()
+          ? options.config_path
+          : (options.repo_root / "config" / absl::StrCat(options.game_name, ".textproto"));
   if (std::filesystem::exists(cfg_path)) {
     auto cfg_or = LoadSplitConfig(cfg_path);
     if (cfg_or.ok()) {
@@ -43,7 +45,9 @@ absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
   }
 
   std::filesystem::path sym_proto_path =
-      options.repo_root / "symbols" / absl::StrCat(options.game_name, ".textproto");
+      !options.symbols_path.empty()
+          ? options.symbols_path
+          : (options.repo_root / "symbols" / absl::StrCat(options.game_name, ".textproto"));
   if (std::filesystem::exists(sym_proto_path)) {
     auto syms_or = SymbolIndex::LoadFromTextproto(sym_proto_path);
     if (syms_or.ok()) {
@@ -264,7 +268,9 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
 absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
     std::string_view func_name_or_addr) const {
   std::filesystem::path rom_path =
-      options_.repo_root / "roms" / absl::StrCat(options_.game_name, ".z64");
+      !options_.rom_path.empty()
+          ? options_.rom_path
+          : (options_.repo_root / "roms" / absl::StrCat(options_.game_name, ".z64"));
   if (std::filesystem::exists(rom_path)) {
     std::ifstream file(rom_path, std::ios::binary | std::ios::ate);
     if (file.is_open()) {

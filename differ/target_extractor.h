@@ -30,6 +30,9 @@ struct TargetFunction {
 struct TargetExtractorOptions {
   std::filesystem::path repo_root;
   std::string game_name;
+  std::filesystem::path config_path;
+  std::filesystem::path symbols_path;
+  std::filesystem::path rom_path;
 };
 
 // Extracts target function machine code and instructions from original retail ROM or assembly.

@@ -16,6 +16,10 @@ namespace rom_nom_nom {
 struct DifferPipelineOptions {
   std::string game_name = "harvest-moon-64";
   std::filesystem::path repo_root;
+  std::filesystem::path source_file;
+  std::filesystem::path config_path;
+  std::filesystem::path symbols_path;
+  std::filesystem::path rom_path;
   DiffFormatterOptions format_options;
 };
 
@@ -42,10 +46,6 @@ class DifferPipeline {
 
   // Executes the complete diff pipeline for the requested function.
   absl::StatusOr<DifferResult> Diff(std::string_view func_name) const;
-
-  // Searches src/c/<game> for a .c source file defining func_name or canonical_name.
-  std::optional<std::filesystem::path> FindSourceFile(std::string_view func_name,
-                                                      std::string_view canonical_name) const;
 
   const DifferPipelineOptions& Options() const { return options_; }
 

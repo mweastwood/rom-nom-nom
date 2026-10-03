@@ -69,38 +69,14 @@ DifferPipeline::DifferPipeline(DifferPipelineOptions options) : options_(std::mo
   }
 }
 
-std::optional<std::filesystem::path> DifferPipeline::FindSourceFile(
-    std::string_view func_name, std::string_view canonical_name) const {
-  std::filesystem::path src_dir = repo_root_ / "src" / "c" / options_.game_name;
-  std::error_code ec;
-  if (!std::filesystem::exists(src_dir, ec)) {
-    return std::nullopt;
-  }
-
-  // Regex pattern matching a C function definition:
-  // e.g. "void MyFunction(...) {" or "s32 InterpolateInit(...) {"
-  std::string pattern =
-      absl::StrFormat(R"(\b(?:%s|%s)\s*\([^;]*\)\s*\{)", func_name, canonical_name);
-  std::regex func_re(pattern);
-
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(src_dir, ec)) {
-    if (entry.is_regular_file() && entry.path().extension() == ".c") {
-      std::ifstream ifs(entry.path());
-      std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-      if (std::regex_search(content, func_re)) {
-        return entry.path();
-      }
-    }
-  }
-
-  return std::nullopt;
-}
-
 absl::StatusOr<DifferResult> DifferPipeline::Diff(std::string_view func_name) const {
   // 1. Initialize TargetExtractor with game configuration and symbol index.
   auto extractor_or = TargetExtractor::Create({
       .repo_root = repo_root_,
       .game_name = options_.game_name,
+      .config_path = options_.config_path,
+      .symbols_path = options_.symbols_path,
+      .rom_path = options_.rom_path,
   });
   if (!extractor_or.ok()) {
     return extractor_or.status();
@@ -115,8 +91,16 @@ absl::StatusOr<DifferResult> DifferPipeline::Diff(std::string_view func_name) co
   const TargetFunction& target_func = *target_or;
   std::string canonical_name = target_func.name;
 
-  // 3. Locate the corresponding C source file under src/c/<game>.
-  auto c_file = FindSourceFile(func_name, canonical_name);
+  // 3. Locate the C source file if an explicit path was supplied.
+  std::optional<std::filesystem::path> c_file;
+  if (!options_.source_file.empty()) {
+    std::error_code ec;
+    if (!std::filesystem::exists(options_.source_file, ec)) {
+      return absl::NotFoundError(absl::StrFormat("Specified source file does not exist: %s",
+                                                 options_.source_file.string()));
+    }
+    c_file = options_.source_file;
+  }
 
   std::vector<Instruction> compiled_instructions;
   uint32_t compiled_vram = 0;

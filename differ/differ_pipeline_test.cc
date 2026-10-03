@@ -69,18 +69,26 @@ void idle(void) {
   std::filesystem::path test_dir_;
 };
 
-TEST_F(DifferPipelineTest, FindsSourceFileForKnownFunction) {
+TEST_F(DifferPipelineTest, RejectsNonExistentSourceFile) {
   DifferPipeline pipeline({
       .game_name = "test-game",
       .repo_root = test_dir_,
+      .source_file = test_dir_ / "nonexistent.c",
   });
 
-  auto file = pipeline.FindSourceFile("idle", "idle");
-  ASSERT_TRUE(file.has_value());
-  EXPECT_EQ(file->filename().string(), "boot.c");
+  auto result_or = pipeline.Diff("idle");
+  EXPECT_FALSE(result_or.ok());
+  EXPECT_EQ(result_or.status().code(), absl::StatusCode::kNotFound);
+}
 
-  auto not_found = pipeline.FindSourceFile("NonExistent_Func", "NonExistent_Func");
-  EXPECT_FALSE(not_found.has_value());
+TEST_F(DifferPipelineTest, UsesExplicitSourceFile) {
+  DifferPipeline pipeline({
+      .game_name = "test-game",
+      .repo_root = test_dir_,
+      .source_file = test_dir_ / "src" / "c" / "test-game" / "boot.c",
+  });
+
+  EXPECT_EQ(pipeline.Options().source_file, test_dir_ / "src" / "c" / "test-game" / "boot.c");
 }
 
 TEST_F(DifferPipelineTest, HandlesFunctionNotYetInC) {

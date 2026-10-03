@@ -16,6 +16,10 @@
 #include "differ/differ_pipeline.h"
 
 ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
+ABSL_FLAG(std::string, source, "", "Explicit path to C source file containing function.");
+ABSL_FLAG(std::string, config, "", "Explicit path to split config textproto.");
+ABSL_FLAG(std::string, symbols, "", "Explicit path to symbol table textproto or txt.");
+ABSL_FLAG(std::string, rom, "", "Explicit path to target ROM binary.");
 ABSL_FLAG(bool, watch, false, "Watch source file and automatically re-diff on save.");
 ABSL_FLAG(bool, color, true, "Enable ANSI color syntax highlighting.");
 ABSL_FLAG(int, column_width, 48, "Character width for each side-by-side assembly column.");
@@ -33,24 +37,46 @@ void SignalHandler(int signum) {
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       "Assembly difference tool for N64 decompilation.\n"
-      "Usage: differ <function_name> [--game=<game>] [--watch] [--no-color]");
+      "Usage: differ <function_name> [--source=<path>] [--game=<game>] [--watch] [--no-color]");
 
   std::vector<char*> remaining_args = absl::ParseCommandLine(argc, argv);
   if (remaining_args.size() < 2) {
-    std::cerr << "Error: Target function name required.\n"
-              << "Example: bazel run //:diff -- MessageInit\n"
-              << "         bazel run //:diff -- InterpolateInit --watch\n";
+    std::cerr
+        << "Error: Target function name required.\n"
+        << "Example: bazel run //:diff -- --source=src/c/harvest-moon-64/math.c Abs16\n"
+        << "         bazel run //:diff -- --source=src/c/harvest-moon-64/math.c Abs16 --watch\n";
     return 1;
   }
 
   std::string func_name = remaining_args[1];
   std::string game_name = absl::GetFlag(FLAGS_game);
+  std::string source_path = absl::GetFlag(FLAGS_source);
+  std::string config_path = absl::GetFlag(FLAGS_config);
+  std::string symbols_path = absl::GetFlag(FLAGS_symbols);
+  std::string rom_path = absl::GetFlag(FLAGS_rom);
   bool watch = absl::GetFlag(FLAGS_watch);
   bool color = absl::GetFlag(FLAGS_color) && isatty(STDOUT_FILENO);
   int col_width = absl::GetFlag(FLAGS_column_width);
 
+  if (watch && source_path.empty()) {
+    std::cerr << "Error: --watch requires an explicit --source=<path> to monitor.\n";
+    return 1;
+  }
+
   rom_nom_nom::DifferPipelineOptions pipeline_opts;
   pipeline_opts.game_name = game_name;
+  if (!source_path.empty()) {
+    pipeline_opts.source_file = source_path;
+  }
+  if (!config_path.empty()) {
+    pipeline_opts.config_path = config_path;
+  }
+  if (!symbols_path.empty()) {
+    pipeline_opts.symbols_path = symbols_path;
+  }
+  if (!rom_path.empty()) {
+    pipeline_opts.rom_path = rom_path;
+  }
   pipeline_opts.format_options.use_color = color;
   pipeline_opts.format_options.column_width = static_cast<size_t>(col_width);
 
