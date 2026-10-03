@@ -11,7 +11,7 @@ namespace rom_nom_nom {
 
 // Configuration options for C code emission and formatting.
 struct CEmitterOptions {
-  std::vector<std::string> includes = {"common.h"};
+  std::vector<std::string> includes = {"types.h"};
   bool format_with_clang = true;
   std::string clang_format_style = "file";
 };

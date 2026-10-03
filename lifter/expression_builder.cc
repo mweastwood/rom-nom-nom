@@ -95,7 +95,14 @@ std::string LiftedExpression::ToString() const {
       return "";
     case ExpressionKind::kMemoryLoad:
       if (!args.empty()) {
-        return "*" + args[0]->ToString();
+        std::string addr = args[0]->ToString();
+        if (args[0]->kind == ExpressionKind::kBinaryOp) {
+          addr = "(" + addr + ")";
+        }
+        if (!name.empty()) {
+          return "*(" + name + "*)" + addr;
+        }
+        return "*" + addr;
       }
       return "*ptr";
     case ExpressionKind::kFunctionCall: {
@@ -115,9 +122,21 @@ std::string LiftedStatement::ToString() const {
   switch (kind) {
     case StatementKind::kAssignment:
       return destination_variable + " = " + (expression ? expression->ToString() : "0") + ";\n";
-    case StatementKind::kStore:
-      return (destination_address ? "*" + destination_address->ToString() : "dest") + " = " +
-             (expression ? expression->ToString() : "0") + ";\n";
+    case StatementKind::kStore: {
+      std::string dest = "dest";
+      if (destination_address) {
+        dest = destination_address->ToString();
+        if (destination_address->kind == ExpressionKind::kBinaryOp) {
+          dest = "(" + dest + ")";
+        }
+        if (!store_type.empty()) {
+          dest = "*(" + store_type + "*)" + dest;
+        } else {
+          dest = "*" + dest;
+        }
+      }
+      return dest + " = " + (expression ? expression->ToString() : "0") + ";\n";
+    }
     case StatementKind::kCall:
       return (expression ? expression->ToString() : "call()") + ";\n";
     case StatementKind::kReturn:
@@ -192,6 +211,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   folder.Fold(instructions, symbol_index);
 
   RegisterTracker tracker;
+  bool pending_return = false;
 
   for (size_t i = 0; i < instructions.size(); ++i) {
     const auto& inst = instructions[i];
@@ -395,6 +415,17 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       case Opcode::kLhu:
       case Opcode::kLbu:
         if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+          const char* load_type = "s32";
+          if (inst.opcode == Opcode::kLh) {
+            load_type = "s16";
+          } else if (inst.opcode == Opcode::kLhu) {
+            load_type = "u16";
+          } else if (inst.opcode == Opcode::kLb) {
+            load_type = "s8";
+          } else if (inst.opcode == Opcode::kLbu) {
+            load_type = "u8";
+          }
+
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
@@ -403,11 +434,11 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                 LiftedExpression::Variable(absl::StrFormat("var_sp_%d", inst.immediate));
           } else if (inst.immediate == 0) {
             statement.expression =
-                LiftedExpression::Load("s32", LiftRegisterOrConstant(*inst.rs, tracker));
+                LiftedExpression::Load(load_type, LiftRegisterOrConstant(*inst.rs, tracker));
           } else {
             statement.expression = LiftedExpression::Load(
-                "s32", LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
-                                                LiftedExpression::Integer(inst.immediate)));
+                load_type, LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
+                                                    LiftedExpression::Integer(inst.immediate)));
           }
           statements.push_back(std::move(statement));
         }
@@ -421,6 +452,13 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             // Function prologue saving $ra, omit from C body
             break;
           }
+          const char* store_type = "s32";
+          if (inst.opcode == Opcode::kSh) {
+            store_type = "s16";
+          } else if (inst.opcode == Opcode::kSb) {
+            store_type = "s8";
+          }
+
           LiftedStatement statement;
           if (*inst.rs == Register::kSp) {
             statement.kind = StatementKind::kAssignment;
@@ -428,6 +466,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
           } else {
             statement.kind = StatementKind::kStore;
+            statement.store_type = store_type;
             if (inst.immediate == 0) {
               statement.destination_address = LiftRegisterOrConstant(*inst.rs, tracker);
             } else {
@@ -467,13 +506,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kJr:
         if (inst.rs == Register::kRa) {
-          LiftedStatement ret;
-          ret.kind = StatementKind::kReturn;
-          auto v0_def = tracker.GetReachingDefinition(Register::kV0);
-          if (v0_def.has_value()) {
-            ret.expression = LiftedExpression::Variable("v0");
-          }
-          statements.push_back(std::move(ret));
+          pending_return = true;
         }
         break;
 
@@ -482,6 +515,16 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     }
 
     tracker.Analyze(instructions.subspan(i, 1));
+  }
+
+  if (pending_return) {
+    LiftedStatement ret;
+    ret.kind = StatementKind::kReturn;
+    auto v0_def = tracker.GetReachingDefinition(Register::kV0);
+    if (v0_def.has_value()) {
+      ret.expression = LiftedExpression::Variable("v0");
+    }
+    statements.push_back(std::move(ret));
   }
 
   return statements;

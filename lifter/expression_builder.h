@@ -78,8 +78,10 @@ struct LiftedStatement {
   // For kAssignment: destination variable name
   std::string destination_variable;
 
-  // For kStore: destination memory address expression
+  // For kStore: destination memory address expression and store width/type (e.g. "s32", "s16",
+  // "s8")
   std::unique_ptr<LiftedExpression> destination_address;
+  std::string store_type = "s32";
 
   // Expression value:
   // - kAssignment: rhs

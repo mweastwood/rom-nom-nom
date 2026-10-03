@@ -93,5 +93,44 @@ TEST(ExpressionBuilderTest, FunctionCallAndReturn) {
   EXPECT_EQ(statements[2].ToString(), "return;\n");
 }
 
+TEST(ExpressionBuilderTest, SizedLoadsAndStores) {
+  std::vector<uint32_t> words = {
+      0x84820004,  // lh  $v0, 4($a0)
+      0x94830008,  // lhu $v1, 8($a0)
+      0x80880001,  // lb  $t0, 1($a0)
+      0x90890002,  // lbu $t1, 2($a0)
+      0xA4850004,  // sh  $a1, 4($a0)
+      0xA0860001,  // sb  $a2, 1($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(6));
+  EXPECT_EQ(statements[0].ToString(), "v0 = *(s16*)(arg0 + 4);\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = *(u16*)(arg0 + 8);\n");
+  EXPECT_EQ(statements[2].ToString(), "temp_t0 = *(s8*)(arg0 + 1);\n");
+  EXPECT_EQ(statements[3].ToString(), "temp_t1 = *(u8*)(arg0 + 2);\n");
+  EXPECT_EQ(statements[4].store_type, "s16");
+  EXPECT_EQ(statements[5].store_type, "s8");
+}
+
+TEST(ExpressionBuilderTest, DelaySlotExecutionBeforeReturn) {
+  // jr $ra followed by delay-slot: sh $a1, 4($a0)
+  std::vector<uint32_t> words = {
+      0x03E00008,  // 0: jr $ra
+      0xA4850004,  // 4: sh $a1, 4($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(2));
+  // The delay-slot store must be emitted BEFORE the return statement
+  EXPECT_EQ(statements[0].kind, StatementKind::kStore);
+  EXPECT_EQ(statements[0].store_type, "s16");
+  EXPECT_EQ(statements[1].kind, StatementKind::kReturn);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

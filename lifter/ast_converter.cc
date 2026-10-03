@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "core/c_ast.h"
 #include "core/mips.h"
@@ -26,37 +27,118 @@ std::unique_ptr<CExpression> RegExpr(Register reg) {
   return CExpression::Identifier(ExpressionBuilder::RegisterVarName(reg));
 }
 
-// Recursively collects all assigned variable names in a CStatement.
-void CollectAssignedVariables(const CStatement& stmt, std::vector<std::string>* assigned_vars,
-                              absl::flat_hash_set<std::string>* seen) {
-  if (stmt.Kind() == CStatementKind::kExpressionStatement) {
-    const auto& expr_stmt = static_cast<const ExpressionStatement&>(stmt);
-    if (expr_stmt.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-      const auto& assign = static_cast<const AssignmentExpression&>(expr_stmt.Expression());
-      if (assign.Lhs().Kind() == CExpressionKind::kIdentifier) {
-        const auto& id = static_cast<const IdentifierExpression&>(assign.Lhs());
-        if (seen->insert(id.Name()).second) {
-          assigned_vars->push_back(id.Name());
-        }
+// Recursively collects all variable identifiers referenced in a CExpression.
+void CollectVariablesInExpression(const CExpression& expr, std::vector<std::string>* vars,
+                                  absl::flat_hash_set<std::string>* seen) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier: {
+      const auto& id = static_cast<const IdentifierExpression&>(expr);
+      const std::string& name = id.Name();
+      if (!name.empty() && seen->insert(name).second) {
+        vars->push_back(name);
       }
+      break;
     }
-  } else if (stmt.Kind() == CStatementKind::kCompoundStatement) {
-    const auto& comp = static_cast<const CompoundStatement&>(stmt);
-    for (const auto& child : comp.Statements()) {
-      CollectAssignedVariables(*child, assigned_vars, seen);
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      CollectVariablesInExpression(un.Operand(), vars, seen);
+      break;
     }
-  } else if (stmt.Kind() == CStatementKind::kIfStatement) {
-    const auto& if_stmt = static_cast<const IfStatement&>(stmt);
-    CollectAssignedVariables(if_stmt.ThenBranch(), assigned_vars, seen);
-    if (if_stmt.ElseBranch() != nullptr) {
-      CollectAssignedVariables(*if_stmt.ElseBranch(), assigned_vars, seen);
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      CollectVariablesInExpression(bin.Lhs(), vars, seen);
+      CollectVariablesInExpression(bin.Rhs(), vars, seen);
+      break;
     }
-  } else if (stmt.Kind() == CStatementKind::kWhileStatement) {
-    const auto& while_stmt = static_cast<const WhileStatement&>(stmt);
-    CollectAssignedVariables(while_stmt.Body(), assigned_vars, seen);
-  } else if (stmt.Kind() == CStatementKind::kDoWhileStatement) {
-    const auto& dowhile_stmt = static_cast<const DoWhileStatement&>(stmt);
-    CollectAssignedVariables(dowhile_stmt.Body(), assigned_vars, seen);
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      CollectVariablesInExpression(assign.Lhs(), vars, seen);
+      CollectVariablesInExpression(assign.Rhs(), vars, seen);
+      break;
+    }
+    case CExpressionKind::kCastExpression: {
+      const auto& cast = static_cast<const CastExpression&>(expr);
+      CollectVariablesInExpression(cast.Operand(), vars, seen);
+      break;
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      for (const auto& arg : call.Arguments()) {
+        CollectVariablesInExpression(*arg, vars, seen);
+      }
+      break;
+    }
+    case CExpressionKind::kMemberAccessExpression: {
+      const auto& member = static_cast<const MemberAccessExpression&>(expr);
+      CollectVariablesInExpression(member.Object(), vars, seen);
+      break;
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      CollectVariablesInExpression(arr.Array(), vars, seen);
+      CollectVariablesInExpression(arr.Index(), vars, seen);
+      break;
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      CollectVariablesInExpression(tern.Condition(), vars, seen);
+      CollectVariablesInExpression(tern.TrueExpression(), vars, seen);
+      CollectVariablesInExpression(tern.FalseExpression(), vars, seen);
+      break;
+    }
+    case CExpressionKind::kIntegerLiteral:
+    case CExpressionKind::kFloatLiteral:
+    case CExpressionKind::kStringLiteral:
+      break;
+  }
+}
+
+// Recursively collects all variable names referenced in a CStatement.
+void CollectUsedVariables(const CStatement& stmt, std::vector<std::string>* vars,
+                          absl::flat_hash_set<std::string>* seen) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kExpressionStatement: {
+      const auto& expr_stmt = static_cast<const ExpressionStatement&>(stmt);
+      CollectVariablesInExpression(expr_stmt.Expression(), vars, seen);
+      break;
+    }
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      for (const auto& child : comp.Statements()) {
+        CollectUsedVariables(*child, vars, seen);
+      }
+      break;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+      CollectVariablesInExpression(if_stmt.Condition(), vars, seen);
+      CollectUsedVariables(if_stmt.ThenBranch(), vars, seen);
+      if (if_stmt.ElseBranch() != nullptr) {
+        CollectUsedVariables(*if_stmt.ElseBranch(), vars, seen);
+      }
+      break;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& while_stmt = static_cast<const WhileStatement&>(stmt);
+      CollectVariablesInExpression(while_stmt.Condition(), vars, seen);
+      CollectUsedVariables(while_stmt.Body(), vars, seen);
+      break;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dowhile_stmt = static_cast<const DoWhileStatement&>(stmt);
+      CollectUsedVariables(dowhile_stmt.Body(), vars, seen);
+      CollectVariablesInExpression(dowhile_stmt.Condition(), vars, seen);
+      break;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& ret = static_cast<const ReturnStatement&>(stmt);
+      if (ret.ReturnValue() != nullptr) {
+        CollectVariablesInExpression(*ret.ReturnValue(), vars, seen);
+      }
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -136,7 +218,9 @@ std::unique_ptr<CStatement> AstConverter::ConvertStatement(const LiftedStatement
     case StatementKind::kStore: {
       auto target = stmt.destination_address ? ConvertExpression(*stmt.destination_address)
                                              : CExpression::Identifier("addr");
-      auto deref = CExpression::Unary("*", std::move(target));
+      std::string type_name = stmt.store_type.empty() ? "s32" : stmt.store_type;
+      auto cast = CExpression::Cast(CType::Named(type_name).MakePointer(), std::move(target));
+      auto deref = CExpression::Unary("*", std::move(cast));
       auto val = stmt.expression ? ConvertExpression(*stmt.expression) : CExpression::Integer(0);
       return CStatement::Expression(CExpression::Assignment("=", std::move(deref), std::move(val)));
     }
@@ -401,22 +485,68 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
     return_type = CType::S32();
   }
 
-  // Collect assigned variables and declare them at the top of the function
-  std::vector<std::string> assigned_vars;
+  // Collect all variables referenced in the function body
+  std::vector<std::string> raw_vars;
   absl::flat_hash_set<std::string> seen;
   for (const auto& param : parameters) {
     seen.insert(param.name);
   }
-  CollectAssignedVariables(*body, &assigned_vars, &seen);
+  CollectUsedVariables(*body, &raw_vars, &seen);
 
-  if (!assigned_vars.empty()) {
+  auto is_valid_c_id = [](std::string_view name) -> bool {
+    if (name.empty()) return false;
+    if (!std::isalpha(name[0]) && name[0] != '_') return false;
+    for (char c : name) {
+      if (!std::isalnum(c) && c != '_') return false;
+    }
+    return true;
+  };
+
+  std::vector<std::string> local_vars_to_declare;
+  for (const auto& var_name : raw_vars) {
+    if (!is_valid_c_id(var_name)) continue;
+    // Do not declare parameters
+    bool is_param = false;
+    for (const auto& param : parameters) {
+      if (param.name == var_name) {
+        is_param = true;
+        break;
+      }
+    }
+    if (is_param) {
+      continue;
+    }
+
+    // Do not declare globals (prefixed with g_)
+    if (absl::StartsWith(var_name, "g_")) {
+      continue;
+    }
+    // Do not declare symbols present in symbol registry
+    if (symbol_index != nullptr && symbol_index->FindByName(var_name) != nullptr) {
+      continue;
+    }
+    // Do not declare standard C keywords, literals, or types
+    if (var_name == "NULL" || var_name == "TRUE" || var_name == "FALSE" || var_name == "s32" ||
+        var_name == "u32" || var_name == "s16" || var_name == "u16" || var_name == "s8" ||
+        var_name == "u8") {
+      continue;
+    }
+    // Do not declare function names (func_*, Os*, Gu*, Leo*, main*, idle*)
+    if (absl::StartsWith(var_name, "func_") || absl::StartsWith(var_name, "Os") ||
+        absl::StartsWith(var_name, "Gu") || absl::StartsWith(var_name, "Leo")) {
+      continue;
+    }
+
+    local_vars_to_declare.push_back(var_name);
+  }
+
+  if (!local_vars_to_declare.empty()) {
     auto new_body = std::make_unique<CompoundStatement>();
-    for (const auto& var_name : assigned_vars) {
+    for (const auto& var_name : local_vars_to_declare) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::S32(), var_name));
     }
     // Move existing statements
     std::vector<std::unique_ptr<CStatement>> existing_stmts;
-    // Swap statements into new_body
     for (const auto& stmt : body->Statements()) {
       new_body->AddStatement(stmt->Clone());
     }

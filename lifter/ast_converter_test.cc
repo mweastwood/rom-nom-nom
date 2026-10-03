@@ -13,11 +13,13 @@
 #include "lifter/dominator_tree.h"
 #include "lifter/expression_builder.h"
 #include "lifter/loop_analyzer.h"
+#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
 
 using ::testing::HasSubstr;
+using ::testing::Not;
 using ::testing::NotNull;
 
 TEST(AstConverterTest, ExpressionConversion) {
@@ -69,6 +71,19 @@ TEST(AstConverterTest, StatementConversion) {
   ASSERT_THAT(c_ret, NotNull());
   EXPECT_EQ(c_ret->Kind(), CStatementKind::kReturnStatement);
   EXPECT_EQ(c_ret->ToString(0), "return v0;\n");
+
+  // Store statement with typed pointer cast: *(s16*)(arg0 + 4) = arg1
+  LiftedStatement store_stmt;
+  store_stmt.kind = StatementKind::kStore;
+  store_stmt.store_type = "s16";
+  store_stmt.destination_address = LiftedExpression::Binary("+", LiftedExpression::Variable("arg0"),
+                                                            LiftedExpression::Integer(4));
+  store_stmt.expression = LiftedExpression::Variable("arg1");
+
+  auto c_store = AstConverter::ConvertStatement(store_stmt);
+  ASSERT_THAT(c_store, NotNull());
+  EXPECT_EQ(c_store->Kind(), CStatementKind::kExpressionStatement);
+  EXPECT_THAT(c_store->ToString(0), HasSubstr("*(s16*)(arg0 + 4) = arg1;\n"));
 }
 
 TEST(AstConverterTest, LinearFunctionConversion) {
@@ -191,6 +206,57 @@ TEST(AstConverterTest, LoopFunctionConversion) {
   std::string code = func.ToString();
   EXPECT_THAT(code, HasSubstr("CountDown(s32 arg0) {"));
   EXPECT_THAT(code, HasSubstr("while ("));
+}
+
+TEST(AstConverterTest, LocalVariableDeclarationFiltering) {
+  // Verify that local variables are declared at the function header while
+  // parameters, globals (g_*), and registered symbols are excluded.
+  std::string textproto = R"pb(
+    entries { name: "g_audio_status" address: 0x801F2340 type: SYMBOL_DATA size: 64 }
+    entries { name: "AudioUpdate" address: 0x80001000 type: SYMBOL_FUNC size: 128 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // Function:
+  // 0x00: lui   $at, 0x801F
+  // 0x04: lw    $v0, 0x2340($at)  -> v0 = g_audio_status
+  // 0x08: jal   0x80001000        -> AudioUpdate(v0)
+  // 0x0C: nop
+  // 0x10: jr    $ra
+  // 0x14: nop
+  std::vector<uint32_t> words = {
+      0x3C01801F,  // 0x00: lui $at, 0x801F
+      0x8C222340,  // 0x04: lw  $v0, 0x2340($at)
+      0x0C000400,  // 0x08: jal 0x80001000
+      0x00000000,  // 0x0C: nop
+      0x03E00008,  // 0x10: jr  $ra
+      0x00000000,  // 0x14: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "ProcessAudio";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  // Local variable v0 must be declared at the top of the function
+  EXPECT_THAT(code, HasSubstr("s32 v0;"));
+  // Parameter arg0, global g_audio_status, and symbol AudioUpdate must NOT be declared
+  EXPECT_THAT(code, Not(HasSubstr("s32 arg0;")));
+  EXPECT_THAT(code, Not(HasSubstr("s32 g_audio_status;")));
+  EXPECT_THAT(code, Not(HasSubstr("s32 AudioUpdate;")));
 }
 
 }  // namespace
