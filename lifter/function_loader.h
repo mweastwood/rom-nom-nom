@@ -21,6 +21,7 @@ struct FunctionLoaderOptions {
   std::filesystem::path config_path;
   std::filesystem::path symbols_path;
   std::filesystem::path rom_path;
+  std::filesystem::path asm_dir;
 };
 
 // Represents a loaded function ready for decompilation lifting.

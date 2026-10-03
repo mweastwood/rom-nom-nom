@@ -155,6 +155,37 @@ endlabel TargetFunc
   EXPECT_EQ(target.name, "TargetFunc");
   EXPECT_EQ(target.vram, 0x80021000u);
   EXPECT_EQ(target.size, 12u);
+  EXPECT_THAT(target.formatted_instructions,
+              ElementsAre("addiu      $sp, $sp, -32", "jr         $ra", "nop"));
+}
+
+TEST_F(TargetExtractorTest, ExtractsTargetFromCustomAsmDirWithGnuLabels) {
+  std::filesystem::path custom_asm_dir = test_dir_ / "custom_asm";
+  std::filesystem::create_directories(custom_asm_dir);
+
+  std::ofstream asm_file(custom_asm_dir / "gnu_target.s");
+  asm_file << R"(
+.globl TargetFunc
+.ent TargetFunc
+TargetFunc:
+/* 80021000 27BDFFE0 */  addiu      $sp, $sp, -32
+/* 80021004 03E00008 */  jr         $ra
+/* 80021008 00000000 */   nop
+.end TargetFunc
+)";
+  asm_file.close();
+
+  TargetExtractor extractor(
+      {.repo_root = test_dir_, .game_name = "test-game", .asm_dir = custom_asm_dir}, &config_,
+      &symbols_);
+
+  auto target_or = extractor.ExtractFromAsm("TargetFunc");
+  ASSERT_TRUE(target_or.ok()) << target_or.status();
+
+  const auto& target = *target_or;
+  EXPECT_EQ(target.name, "TargetFunc");
+  EXPECT_EQ(target.vram, 0x80021000u);
+  EXPECT_EQ(target.size, 12u);
   EXPECT_THAT(target.raw_words, ElementsAre(0x27BDFFE0u, 0x03E00008u, 0x00000000u));
   EXPECT_THAT(target.formatted_instructions,
               ElementsAre("addiu      $sp, $sp, -32", "jr         $ra", "nop"));

@@ -33,6 +33,7 @@ struct TargetExtractorOptions {
   std::filesystem::path config_path;
   std::filesystem::path symbols_path;
   std::filesystem::path rom_path;
+  std::filesystem::path asm_dir;
 };
 
 // Extracts target function machine code and instructions from original retail ROM or assembly.

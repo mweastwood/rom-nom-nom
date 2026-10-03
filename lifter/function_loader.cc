@@ -26,6 +26,7 @@ absl::StatusOr<std::unique_ptr<FunctionLoader>> FunctionLoader::Create(
   extractor_opts.config_path = options.config_path;
   extractor_opts.symbols_path = options.symbols_path;
   extractor_opts.rom_path = options.rom_path;
+  extractor_opts.asm_dir = options.asm_dir;
 
   auto extractor_or = TargetExtractor::Create(extractor_opts);
   if (!extractor_or.ok()) {

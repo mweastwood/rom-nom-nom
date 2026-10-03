@@ -177,14 +177,29 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromRom(
 }
 
 absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view func_name) const {
-  std::vector<std::filesystem::path> search_dirs = {
-      options_.repo_root / "bazel-bin" / "asm" / options_.game_name,
-      options_.repo_root / "asm" / options_.game_name,
+  std::vector<std::filesystem::path> search_dirs;
+  if (!options_.asm_dir.empty()) {
+    search_dirs.push_back(options_.asm_dir);
+  }
+  search_dirs.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name);
+  search_dirs.push_back(options_.repo_root / "asm" / options_.game_name);
+
+  auto find_label = [&](const std::string& content) -> size_t {
+    std::string glabel = absl::StrCat("glabel ", func_name);
+    size_t pos = content.find(glabel);
+    if (pos != std::string::npos) return pos;
+
+    std::string ent = absl::StrCat(".ent ", func_name);
+    pos = content.find(ent);
+    if (pos != std::string::npos) return pos;
+
+    std::string colon = absl::StrCat(func_name, ":");
+    return content.find(colon);
   };
 
-  std::string target_label = absl::StrCat("glabel ", func_name);
   std::filesystem::path found_file;
   std::string file_content;
+  size_t start_pos = std::string::npos;
 
   for (const auto& dir : search_dirs) {
     if (!std::filesystem::exists(dir)) continue;
@@ -193,9 +208,11 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
         std::ifstream ifs(entry.path());
         std::string content((std::istreambuf_iterator<char>(ifs)),
                             std::istreambuf_iterator<char>());
-        if (content.find(target_label) != std::string::npos) {
+        size_t pos = find_label(content);
+        if (pos != std::string::npos) {
           found_file = entry.path();
           file_content = std::move(content);
+          start_pos = pos;
           break;
         }
       }
@@ -203,13 +220,12 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
     if (!found_file.empty()) break;
   }
 
-  if (found_file.empty()) {
+  if (found_file.empty() || start_pos == std::string::npos) {
     return absl::NotFoundError(
         absl::StrFormat("TargetExtractor: Function '%s' not found in ASM files.", func_name));
   }
 
-  // Parse lines between glabel <func_name> and endlabel
-  size_t start_pos = file_content.find(target_label);
+  // Parse lines between function label and endlabel/.end
   size_t line_start = file_content.find('\n', start_pos);
   if (line_start == std::string::npos) {
     line_start = start_pos;
@@ -218,6 +234,9 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
   }
 
   size_t end_pos = file_content.find("endlabel", line_start);
+  if (end_pos == std::string::npos) {
+    end_pos = file_content.find(".end ", line_start);
+  }
   if (end_pos == std::string::npos) {
     end_pos = file_content.size();
   }
