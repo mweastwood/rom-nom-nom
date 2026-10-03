@@ -1,5 +1,6 @@
 #include "lifter/lifter_pipeline.h"
 
+#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -104,13 +105,13 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
 }
 
 absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
-    const std::vector<std::string>& func_names) const {
+    const std::vector<std::string>& func_names, const std::vector<std::string>& includes) const {
   if (func_names.empty()) {
     return absl::InvalidArgumentError("LifterPipeline: No function names provided.");
   }
 
   CTranslationUnit tu;
-  tu.includes = options_.includes;
+  tu.includes = !includes.empty() ? includes : options_.includes;
 
   for (const auto& func_name : func_names) {
     auto res_or = Decompile(func_name);
@@ -121,7 +122,7 @@ absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
   }
 
   CEmitterOptions emitter_opts;
-  emitter_opts.includes = options_.includes;
+  emitter_opts.includes = tu.includes;
   emitter_opts.format_with_clang = options_.format_with_clang;
 
   return CEmitter::EmitTranslationUnit(tu, emitter_opts);
@@ -185,12 +186,86 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
   return func_names;
 }
 
-absl::StatusOr<std::string> LifterPipeline::DecompileModule(std::string_view module_name) const {
+absl::StatusOr<std::string> LifterPipeline::DecompileModule(
+    std::string_view module_name, const std::vector<std::string>& includes) const {
   auto funcs_or = GetFunctionsInModule(module_name);
   if (!funcs_or.ok()) {
     return funcs_or.status();
   }
-  return DecompileFunctions(*funcs_or);
+  return DecompileFunctions(*funcs_or, includes);
+}
+
+absl::StatusOr<std::vector<std::string>> LifterPipeline::GetAllModules() const {
+  if (loader_ == nullptr || loader_->Extractor() == nullptr) {
+    return absl::FailedPreconditionError("LifterPipeline: Loader or extractor uninitialized.");
+  }
+  const auto* config = loader_->Extractor()->Config();
+  if (config == nullptr) {
+    return absl::FailedPreconditionError("LifterPipeline: Config uninitialized.");
+  }
+
+  std::vector<std::string> modules;
+  for (const auto& seg : config->segments()) {
+    if (seg.type() != SEGMENT_CODE) {
+      continue;
+    }
+    for (const auto& subseg : seg.subsegments()) {
+      if (subseg.type() == SUBSEGMENT_C || subseg.type() == SUBSEGMENT_ASM) {
+        modules.push_back(std::string(subseg.name()));
+      }
+    }
+  }
+  return modules;
+}
+
+absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllModules(
+    const std::filesystem::path& output_dir) const {
+  auto modules_or = GetAllModules();
+  if (!modules_or.ok()) {
+    return modules_or.status();
+  }
+
+  std::error_code ec;
+  std::filesystem::create_directories(output_dir, ec);
+
+  std::vector<std::filesystem::path> emitted_files;
+  for (const auto& mod : *modules_or) {
+    auto funcs_or = GetFunctionsInModule(mod);
+    if (!funcs_or.ok() || funcs_or->empty()) {
+      continue;
+    }
+
+    std::vector<std::string> includes = options_.includes;
+    std::filesystem::path module_header =
+        options_.repo_root / "src" / "c" / options_.game_name / absl::StrCat(mod, ".h");
+    std::error_code ec_hdr;
+    if (std::filesystem::exists(module_header, ec_hdr)) {
+      includes.push_back(absl::StrCat(mod, ".h"));
+    }
+
+    std::filesystem::path out_file = output_dir / absl::StrCat(mod, ".c");
+    auto c_code_or = DecompileFunctions(*funcs_or, includes);
+    if (!c_code_or.ok()) {
+      std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", mod,
+                                         c_code_or.status().message());
+      std::ofstream ofs(out_file);
+      if (ofs.is_open()) {
+        ofs << stub;
+        emitted_files.push_back(out_file);
+      }
+      continue;
+    }
+
+    std::ofstream ofs(out_file);
+    if (!ofs.is_open()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to open %s for writing.", out_file.string()));
+    }
+    ofs << *c_code_or;
+    emitted_files.push_back(out_file);
+  }
+
+  return emitted_files;
 }
 
 }  // namespace rom_nom_nom

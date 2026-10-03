@@ -46,13 +46,23 @@ class LifterPipeline {
   absl::StatusOr<LifterResult> Decompile(std::string_view func_name_or_addr) const;
 
   // Decompiles multiple functions in order into a single formatted translation unit.
-  absl::StatusOr<std::string> DecompileFunctions(const std::vector<std::string>& func_names) const;
+  absl::StatusOr<std::string> DecompileFunctions(
+      const std::vector<std::string>& func_names,
+      const std::vector<std::string>& includes = {}) const;
 
   // Resolves all function names registered within a module / subsegment.
   absl::StatusOr<std::vector<std::string>> GetFunctionsInModule(std::string_view module_name) const;
 
   // Decompiles an entire module into a single formatted translation unit.
-  absl::StatusOr<std::string> DecompileModule(std::string_view module_name) const;
+  absl::StatusOr<std::string> DecompileModule(std::string_view module_name,
+                                              const std::vector<std::string>& includes = {}) const;
+
+  // Discovers all code modules registered in the split configuration.
+  absl::StatusOr<std::vector<std::string>> GetAllModules() const;
+
+  // Decompiles all modules in the game and writes each to <output_dir>/<module_name>.c.
+  absl::StatusOr<std::vector<std::filesystem::path>> DecompileAllModules(
+      const std::filesystem::path& output_dir) const;
 
   // Decompiles an already loaded or synthesized function directly.
   absl::StatusOr<LifterResult> DecompileFunction(const LoadedFunction& loaded_func) const;

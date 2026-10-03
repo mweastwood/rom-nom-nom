@@ -14,6 +14,8 @@
 ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
 ABSL_FLAG(bool, format, true, "Format generated C code using clang-format.");
 ABSL_FLAG(std::string, output, "", "Optional output file path (defaults to stdout).");
+ABSL_FLAG(std::string, output_dir, "", "Output directory for lifting all game modules.");
+ABSL_FLAG(bool, all, false, "Decompile all modules in the game.");
 ABSL_FLAG(std::string, config, "", "Optional path to split config textproto.");
 ABSL_FLAG(std::string, symbols, "", "Optional path to symbols textproto.");
 ABSL_FLAG(std::string, rom, "", "Optional path to ROM binary.");
@@ -93,10 +95,29 @@ int main(int argc, char* argv[]) {
     target_functions.insert(target_functions.end(), mod_funcs_or->begin(), mod_funcs_or->end());
   }
 
+  std::string output_dir = absl::GetFlag(FLAGS_output_dir);
+  bool decompile_all = absl::GetFlag(FLAGS_all) ||
+                       (!output_dir.empty() && target_functions.empty() && module_name.empty());
+
+  if (decompile_all) {
+    if (output_dir.empty()) {
+      output_dir = "lifted/" + game_name;
+    }
+    auto files_or = (*pipeline_or)->DecompileAllModules(output_dir);
+    if (!files_or.ok()) {
+      std::cerr << "Failed to decompile game modules: " << files_or.status().message() << "\n";
+      return 1;
+    }
+    std::cerr << "Successfully lifted " << files_or->size() << " module(s) to " << output_dir
+              << "\n";
+    return 0;
+  }
+
   if (target_functions.empty()) {
-    std::cerr << "Error: Target function name or --module required.\n"
+    std::cerr << "Error: Target function name, --module, or --output_dir required.\n"
               << "Example: bazel run //lifter:lifter -- InterpolateInit\n"
-              << "         bazel run //lifter:lifter -- --module=boot\n";
+              << "         bazel run //lifter:lifter -- --module=boot\n"
+              << "         bazel run //lifter:lifter -- --output_dir=lifted/harvest-moon-64\n";
     return 1;
   }
 
