@@ -4,6 +4,7 @@ Bazel rules for N64 decompilation:
   - n64_rom: Builds .z64 ROM and .elf binary from C sources + generated asm
   - n64_rom_bitexact_test: Verifies bit-for-byte exact match against original ROM
   - n64_game: Macro that defines <game>_rom and <game>_rom_bitexact_test
+  - lifter_lift: Lifts functions/modules into clean C implementation files via //lifter:lifter
 """
 
 def _splitter_split_impl(ctx):
@@ -227,3 +228,52 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         target_rom = rom,
         config = config,
     )
+
+    lifter_lift_game(
+        name = name + "_lifted",
+        game = game,
+        config = config,
+        symbols = symbols,
+        rom = rom,
+    )
+
+def _lifter_lift_game_impl(ctx):
+    out_dir = ctx.actions.declare_directory("lifted/" + ctx.attr.game)
+
+    args = ctx.actions.args()
+    args.add("--game=" + ctx.attr.game)
+    args.add("--config=" + ctx.file.config.path)
+    args.add("--symbols=" + ctx.file.symbols.path)
+    args.add("--rom=" + ctx.file.rom.path)
+    args.add("--output_dir=" + out_dir.path)
+    if not ctx.attr.format:
+        args.add("--noformat")
+
+    ctx.actions.run(
+        inputs = [ctx.file.config, ctx.file.symbols, ctx.file.rom],
+        outputs = [out_dir],
+        executable = ctx.executable._lifter,
+        arguments = [args],
+        mnemonic = "LifterGame",
+        execution_requirements = {"no-sandbox": "1"},
+    )
+
+    return [
+        DefaultInfo(files = depset([out_dir])),
+    ]
+
+lifter_lift_game = rule(
+    implementation = _lifter_lift_game_impl,
+    attrs = {
+        "game": attr.string(mandatory = True),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
+        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "format": attr.bool(default = True),
+        "_lifter": attr.label(
+            default = "//lifter:lifter",
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)

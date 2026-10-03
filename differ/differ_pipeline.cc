@@ -94,12 +94,16 @@ absl::StatusOr<DifferResult> DifferPipeline::Diff(std::string_view func_name) co
   // 3. Locate the C source file if an explicit path was supplied.
   std::optional<std::filesystem::path> c_file;
   if (!options_.source_file.empty()) {
+    std::filesystem::path resolved_source = options_.source_file;
+    if (resolved_source.is_relative()) {
+      resolved_source = repo_root_ / resolved_source;
+    }
     std::error_code ec;
-    if (!std::filesystem::exists(options_.source_file, ec)) {
+    if (!std::filesystem::exists(resolved_source, ec)) {
       return absl::NotFoundError(absl::StrFormat("Specified source file does not exist: %s",
                                                  options_.source_file.string()));
     }
-    c_file = options_.source_file;
+    c_file = resolved_source;
   }
 
   std::vector<Instruction> compiled_instructions;
