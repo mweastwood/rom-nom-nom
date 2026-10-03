@@ -121,6 +121,9 @@ std::string LiftedExpression::ToString() const {
 std::string LiftedStatement::ToString() const {
   switch (kind) {
     case StatementKind::kAssignment:
+      if (destination_variable.empty() || destination_variable == "0") {
+        return (expression ? expression->ToString() : "") + ";\n";
+      }
       return destination_variable + " = " + (expression ? expression->ToString() : "0") + ";\n";
     case StatementKind::kStore: {
       std::string dest = "dest";
@@ -315,8 +318,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           if (inst.rs == Register::kZero) {
             statement.expression = LiftedExpression::Integer(inst.immediate);
           } else if (inst.rs == Register::kSp) {
-            statement.expression =
-                LiftedExpression::Variable(absl::StrFormat("&var_sp_%d", inst.immediate));
+            statement.expression = LiftedExpression::Unary(
+                "&", LiftedExpression::Variable(absl::StrFormat("var_sp_%d", inst.immediate)));
           } else if (inst.immediate == 0 && inst.rs.has_value()) {
             statement.expression = LiftRegisterOrConstant(*inst.rs, tracker);
           } else if (inst.immediate < 0 && inst.rs.has_value()) {

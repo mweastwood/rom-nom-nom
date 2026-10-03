@@ -132,5 +132,38 @@ TEST(ExpressionBuilderTest, DelaySlotExecutionBeforeReturn) {
   EXPECT_EQ(statements[1].kind, StatementKind::kReturn);
 }
 
+TEST(ExpressionBuilderTest, StackVariableAddressingUnaryExpression) {
+  // addiu $a0, $sp, 16 -> arg0 = &var_sp_16
+  std::vector<uint32_t> words = {
+      0x27A40010,  // addiu $a0, $sp, 16
+  };
+
+  auto instructions = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(instructions);
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].destination_variable, "arg0");
+  ASSERT_THAT(statements[0].expression, testing::NotNull());
+  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kUnaryOp);
+  EXPECT_EQ(statements[0].expression->op, "&");
+  ASSERT_THAT(statements[0].expression->args, SizeIs(1));
+  ASSERT_THAT(statements[0].expression->args[0], testing::NotNull());
+  EXPECT_EQ(statements[0].expression->args[0]->kind, ExpressionKind::kVariable);
+  EXPECT_EQ(statements[0].expression->args[0]->name, "var_sp_16");
+  EXPECT_EQ(statements[0].ToString(), "arg0 = &var_sp_16;\n");
+}
+
+TEST(ExpressionBuilderTest, AssignmentWithEmptyOrZeroDestinationEmitsBareExpression) {
+  LiftedStatement statement;
+  statement.kind = StatementKind::kAssignment;
+  statement.destination_variable = "0";
+  statement.expression = LiftedExpression::Call("DoWork", {});
+
+  EXPECT_EQ(statement.ToString(), "DoWork();\n");
+
+  statement.destination_variable = "";
+  EXPECT_EQ(statement.ToString(), "DoWork();\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

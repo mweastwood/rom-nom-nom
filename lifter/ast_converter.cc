@@ -210,6 +210,12 @@ std::unique_ptr<CExpression> AstConverter::ConvertExpression(const LiftedExpress
 std::unique_ptr<CStatement> AstConverter::ConvertStatement(const LiftedStatement& stmt) {
   switch (stmt.kind) {
     case StatementKind::kAssignment: {
+      if (stmt.destination_variable.empty() || stmt.destination_variable == "0") {
+        if (stmt.expression) {
+          return CStatement::Expression(ConvertExpression(*stmt.expression));
+        }
+        return nullptr;
+      }
       auto lhs = CExpression::Identifier(stmt.destination_variable);
       auto rhs = stmt.expression ? ConvertExpression(*stmt.expression) : CExpression::Integer(0);
       return CStatement::Expression(CExpression::Assignment("=", std::move(lhs), std::move(rhs)));
