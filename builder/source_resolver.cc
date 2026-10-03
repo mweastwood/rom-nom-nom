@@ -80,6 +80,9 @@ void SourceResolver::IndexFiles() {
     for (const auto& entry : std::filesystem::recursive_directory_iterator(options_.asm_dir, ec)) {
       if (entry.is_regular_file()) {
         const auto& path = entry.path();
+        if (absl::StrContains(path.string(), "nonmatchings")) {
+          continue;
+        }
         if (path.extension() == ".s") {
           asm_sources_[path.stem().string()].push_back(path);
         }
@@ -157,7 +160,11 @@ absl::StatusOr<ResolvedSource> SourceResolver::Resolve(std::string_view obj_ref)
     use_c = has_c;
     use_cpp = !use_c && has_cpp;
   } else if (hint_asm) {
-    use_asm = has_asm;
+    if (options_.prefer_c && has_c) {
+      use_c = true;
+    } else {
+      use_asm = has_asm;
+    }
   } else if (hint_assets) {
     use_bin = has_bin;
   }

@@ -200,5 +200,32 @@ TEST_F(SourceResolverTest, ValidatesInvalidInputs) {
   EXPECT_EQ(resolver.Resolve("/").status().code(), absl::StatusCode::kInvalidArgument);
 }
 
+TEST_F(SourceResolverTest, IgnoresNonmatchingsDirectoryInAsmDir) {
+  CreateFile(asm_dir_ / "nonmatchings" / "boot" / "main.s");
+  std::filesystem::path c_main = CreateFile(src_dir_ / "c" / "game" / "main.c");
+
+  SourceResolver resolver({.src_dir = src_dir_, .asm_dir = asm_dir_, .assets_dir = assets_dir_});
+
+  auto resolved_or = resolver.Resolve("build/game/src/main.o");
+  ASSERT_TRUE(resolved_or.ok()) << resolved_or.status();
+  EXPECT_THAT(*resolved_or, MatchResolved(c_main, SourceType::kC, "main"));
+}
+
+TEST_F(SourceResolverTest, PreferCOverridesAssemblyHintWhenCCandidateExists) {
+  std::filesystem::path asm_entry = CreateFile(asm_dir_ / "entry.s");
+  std::filesystem::path c_entry = CreateFile(src_dir_ / "entry.c");
+
+  SourceResolver resolver({
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .assets_dir = assets_dir_,
+      .prefer_c = true,
+  });
+
+  auto resolved_or = resolver.Resolve("build/game/asm/entry.o");
+  ASSERT_TRUE(resolved_or.ok()) << resolved_or.status();
+  EXPECT_THAT(*resolved_or, MatchResolved(c_entry, SourceType::kC, "entry"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -34,6 +34,7 @@ struct SourceResolverOptions {
   std::filesystem::path src_dir;
   std::filesystem::path asm_dir;
   std::filesystem::path assets_dir;
+  bool prefer_c = false;
 };
 
 // Maps object file references from linker scripts to concrete source files on disk.
