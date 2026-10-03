@@ -130,8 +130,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   // 5. Resolve and compile all objects
-  std::filesystem::path src_dir =
-      options_.src_dir.empty() ? (toolchain_.RepoRoot() / "src") : options_.src_dir;
+  std::filesystem::path src_dir = options_.src_dir;
 
   SourceResolver resolver({
       .src_dir = src_dir,

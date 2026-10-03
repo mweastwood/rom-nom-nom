@@ -58,8 +58,9 @@ splitter_split = rule(
 
 def _n64_rom_impl(ctx):
     game = ctx.attr.game
-    out_rom = ctx.actions.declare_file(game + ".z64")
-    out_elf = ctx.actions.declare_file(game + ".elf")
+    out_name = ctx.attr.out_name if ctx.attr.out_name else game
+    out_rom = ctx.actions.declare_file(out_name + ".z64")
+    out_elf = ctx.actions.declare_file(out_name + ".elf")
 
     split_target = ctx.attr.split
     asm_dir = split_target[OutputGroupInfo].asm.to_list()[0]
@@ -77,8 +78,16 @@ def _n64_rom_impl(ctx):
     args.add("--out-rom", out_rom.path)
     args.add("--toolchain", ctx.attr.toolchain)
 
+    inputs = [ctx.file.config, ctx.file.symbols, asm_dir, build_dir, assets_dir] + ctx.files.srcs
+    if ctx.attr.src_dir:
+        src_dir_file = ctx.file.src_dir
+        args.add("--src-dir", src_dir_file.path)
+        inputs.append(src_dir_file)
+    if ctx.attr.prefer_c:
+        args.add("--prefer-c")
+
     ctx.actions.run(
-        inputs = [ctx.file.config, ctx.file.symbols, asm_dir, build_dir, assets_dir] + ctx.files.srcs,
+        inputs = inputs,
         outputs = [out_rom, out_elf],
         executable = ctx.executable._build_rom,
         arguments = [args],
@@ -106,6 +115,9 @@ n64_rom = rule(
         "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
         "split": attr.label(mandatory = True, providers = [OutputGroupInfo]),
         "srcs": attr.label_list(allow_files = True, default = []),
+        "src_dir": attr.label(allow_single_file = True),
+        "out_name": attr.string(default = ""),
+        "prefer_c": attr.bool(default = False),
         "toolchain": attr.string(default = "original"),
         "_build_rom": attr.label(
             default = "//builder:builder",
@@ -201,8 +213,8 @@ n64_rom_bitexact_test = rule(
 def n64_game(name, game, config, symbols, rom, srcs = []):
     """Macro to instantiate an N64 game with pure Bazel generated assembly pipeline."""
     split_name = name + "_split"
-    rom_name = name + "_rom"
-    test_name = name + "_rom_bitexact_test"
+    assembly_rom_name = name + "_assembly_rom"
+    assembly_test_name = name + "_assembly_rom_bitexact_test"
 
     splitter_split(
         name = split_name,
@@ -213,28 +225,53 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         srcs = srcs,
     )
 
+    # Stage 2: Pure assembly ROM (built strictly from disassembled assembly, no C files)
     n64_rom(
-        name = rom_name,
+        name = assembly_rom_name,
         game = game,
         config = config,
         symbols = symbols,
         split = ":" + split_name,
-        srcs = srcs,
+        out_name = game,
     )
 
     n64_rom_bitexact_test(
-        name = test_name,
-        rom = ":" + rom_name,
+        name = assembly_test_name,
+        rom = ":" + assembly_rom_name,
         target_rom = rom,
         config = config,
     )
 
+    # Backward-compatibility aliases
+    native.alias(
+        name = name + "_rom",
+        actual = ":" + assembly_rom_name,
+    )
+    native.test_suite(
+        name = name + "_rom_bitexact_test",
+        tests = [":" + assembly_test_name],
+    )
+
+    # Stage 3: Whole-game lifted C pipeline and lifted C ROM
     lifter_lift_game(
         name = name + "_lifted",
         game = game,
         config = config,
         symbols = symbols,
         rom = rom,
+        split = ":" + split_name,
+    )
+
+    n64_rom(
+        name = name + "_lifted_rom",
+        game = game,
+        config = config,
+        symbols = symbols,
+        split = ":" + split_name,
+        src_dir = ":" + name + "_lifted",
+        out_name = game + "_lifted",
+        prefer_c = True,
+        tags = ["manual"],
     )
 
 def _lifter_lift_game_impl(ctx):
@@ -249,8 +286,14 @@ def _lifter_lift_game_impl(ctx):
     if not ctx.attr.format:
         args.add("--noformat")
 
+    inputs = [ctx.file.config, ctx.file.symbols, ctx.file.rom]
+    if ctx.attr.split:
+        asm_dir = ctx.attr.split[OutputGroupInfo].asm.to_list()[0]
+        inputs.append(asm_dir)
+        args.add("--asm_dir=" + asm_dir.path)
+
     ctx.actions.run(
-        inputs = [ctx.file.config, ctx.file.symbols, ctx.file.rom],
+        inputs = inputs,
         outputs = [out_dir],
         executable = ctx.executable._lifter,
         arguments = [args],
@@ -269,6 +312,7 @@ lifter_lift_game = rule(
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "split": attr.label(mandatory = False, providers = [OutputGroupInfo]),
         "format": attr.bool(default = True),
         "_lifter": attr.label(
             default = "//lifter:lifter",

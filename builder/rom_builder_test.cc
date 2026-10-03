@@ -134,6 +134,7 @@ segments {
   RomBuilderOptions opts{
       .game_name = "test_game",
       .config_path = config_path,
+      .src_dir = src_dir_,
       .asm_dir = asm_dir_,
       .build_dir = build_dir_,
       .assets_dir = assets_dir_,
@@ -154,6 +155,76 @@ segments {
                                 Field(&RomBuildResult::byte_matches, Eq(true)),
                                 Field(&RomBuildResult::built_sha1, Eq(expected_sha1)),
                                 Field(&RomBuildResult::total_objects, Eq(2u))));
+}
+
+TEST_F(RomBuilderTest, BuildSuccessPureAssemblyWhenSrcDirEmpty) {
+  // Even if a C file exists in src, empty src_dir means builder resolves from asm
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "syntax error in C file");
+  CreateFile(asm_dir_ / "boot.s", ".text\nnop");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+  CreateFile(build_dir_ / "symbols.ld", "g_sym = 0x80000000;\n");
+
+  std::filesystem::path out_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path out_rom = test_dir_ / "out" / "test_game.z64";
+
+  std::string expected_rom_content = "ROM_BINARY_DATA";
+  Sha1 sha;
+  sha.Update(expected_rom_content);
+  std::string expected_sha1 = sha.FinalizeHex();
+
+  std::filesystem::path retail_rom = CreateFile(test_dir_ / "retail.z64", expected_rom_content);
+
+  std::filesystem::path config_path =
+      CreateFile(test_dir_ / "config.textproto", absl::StrCat(R"(
+game_name: "test_game"
+sha1: ")",
+                                                              expected_sha1, R"("
+basename: "test_game"
+segments {
+  name: "boot"
+  type: SEGMENT_CODE
+  rom_start: 0
+  rom_end: 0x1000
+}
+)"));
+
+  auto mock_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.args.size() >= 4 && opts.args[1] == "binary" && opts.args[3] == out_rom.string()) {
+      std::ofstream(out_rom, std::ios::binary) << expected_rom_content;
+    }
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+
+  RomBuilderOptions opts{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      // src_dir is left empty!
+      .out_elf = out_elf,
+      .out_rom = out_rom,
+      .toolchain_mode = ToolchainMode::kOriginal,
+      .verify_rom = retail_rom,
+      .is_test = true,
+  };
+
+  RomBuilder builder(toolchain_, opts, compiler);
+
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+  EXPECT_TRUE(result_or->success);
+  EXPECT_EQ(result_or->total_objects, 1u);
 }
 
 TEST_F(RomBuilderTest, BuildFailsWhenCompilationFails) {
@@ -179,6 +250,7 @@ SECTIONS
 
   RomBuilderOptions opts{
       .game_name = "test_game",
+      .src_dir = src_dir_,
       .asm_dir = asm_dir_,
       .build_dir = build_dir_,
       .assets_dir = assets_dir_,
@@ -230,6 +302,7 @@ segments {
   RomBuilderOptions opts{
       .game_name = "test_game",
       .config_path = config_path,
+      .src_dir = src_dir_,
       .asm_dir = asm_dir_,
       .build_dir = build_dir_,
       .assets_dir = assets_dir_,

@@ -358,6 +358,14 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           }
           result.asm_files_written += *written_count_or;
           result.functions_disassembled += funcs_or->size();
+
+          std::filesystem::path out_s_path = asm_dir / absl::StrCat(sub.name(), ".s");
+          auto s_status = asm_gen.WriteStandaloneAssembly(sub.name(), sub_start, sub_end, sub_vram,
+                                                          *funcs_or, out_s_path);
+          if (!s_status.ok()) {
+            return s_status;
+          }
+          result.asm_files_written++;
           continue;
         }
 
