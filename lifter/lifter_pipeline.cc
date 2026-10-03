@@ -6,9 +6,12 @@
 #include <string_view>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/strip.h"
 #include "core/c_ast.h"
 #include "lifter/ast_converter.h"
 #include "lifter/c_emitter.h"
@@ -32,6 +35,7 @@ absl::StatusOr<std::unique_ptr<LifterPipeline>> LifterPipeline::Create(
   loader_opts.config_path = options.config_path;
   loader_opts.symbols_path = options.symbols_path;
   loader_opts.rom_path = options.rom_path;
+  loader_opts.asm_dir = options.asm_dir;
 
   auto loader_or = FunctionLoader::Create(loader_opts);
   if (!loader_or.ok()) {
@@ -139,7 +143,62 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
     return absl::FailedPreconditionError("LifterPipeline: Config or symbols uninitialized.");
   }
 
-  // Find subsegment matching module_name
+  std::vector<std::string> func_names;
+  absl::flat_hash_set<std::string> seen;
+
+  std::vector<std::filesystem::path> search_paths;
+  if (!options_.asm_dir.empty()) {
+    search_paths.push_back(options_.asm_dir / absl::StrCat(module_name, ".s"));
+  }
+  search_paths.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
+                         absl::StrCat(module_name, ".s"));
+  search_paths.push_back(options_.repo_root / "asm" / options_.game_name /
+                         absl::StrCat(module_name, ".s"));
+
+  for (const auto& p : search_paths) {
+    if (std::filesystem::exists(p)) {
+      std::ifstream ifs(p);
+      std::string line;
+      while (std::getline(ifs, line)) {
+        if (absl::StartsWith(line, ".ent ")) {
+          std::string name = std::string(absl::StripAsciiWhitespace(line.substr(5)));
+          if (!name.empty() && seen.insert(name).second) {
+            func_names.push_back(name);
+          }
+        }
+      }
+      if (!func_names.empty()) {
+        break;
+      }
+    }
+  }
+
+  std::vector<std::filesystem::path> nonmatching_dirs;
+  if (!options_.asm_dir.empty()) {
+    nonmatching_dirs.push_back(options_.asm_dir / "nonmatchings" / module_name);
+  }
+  nonmatching_dirs.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
+                             "nonmatchings" / module_name);
+  nonmatching_dirs.push_back(options_.repo_root / "asm" / options_.game_name / "nonmatchings" /
+                             module_name);
+  for (const auto& dir : nonmatching_dirs) {
+    if (std::filesystem::exists(dir)) {
+      for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".s") {
+          std::string stem = entry.path().stem().string();
+          if (!stem.empty() && seen.insert(stem).second) {
+            func_names.push_back(stem);
+          }
+        }
+      }
+    }
+  }
+
+  if (!func_names.empty()) {
+    return func_names;
+  }
+
+  // Fallback: Find subsegment matching module_name in config
   const Subsegment* matched_subseg = nullptr;
   const Segment* matched_seg = nullptr;
   uint32_t next_rom_start = 0;
@@ -170,7 +229,6 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
   uint32_t start_vram = matched_seg->vram() + seg_offset;
   uint32_t end_vram = start_vram + (next_rom_start - matched_subseg->rom_start());
 
-  std::vector<std::string> func_names;
   for (const auto* entry : symbols->SortedEntries()) {
     if (entry->type() == SYMBOL_FUNC && entry->address() >= start_vram &&
         entry->address() < end_vram) {
@@ -228,6 +286,19 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
   std::error_code ec;
   std::filesystem::create_directories(output_dir, ec);
 
+  std::filesystem::path game_src_dir = options_.repo_root / "src" / "c" / options_.game_name;
+  if (std::filesystem::exists(game_src_dir, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(game_src_dir, ec)) {
+      if (entry.is_regular_file() && entry.path().extension() == ".h") {
+        std::filesystem::copy_file(entry.path(), output_dir / entry.path().filename(),
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+      }
+    }
+  }
+
+  std::vector<std::string> default_headers = options_.includes;
+  default_headers.push_back("types.h");
+
   std::vector<std::filesystem::path> emitted_files;
   for (const auto& mod : *modules_or) {
     auto funcs_or = GetFunctionsInModule(mod);
@@ -235,15 +306,13 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
       continue;
     }
 
-    std::vector<std::string> includes = options_.includes;
-    std::filesystem::path module_header =
-        options_.repo_root / "src" / "c" / options_.game_name / absl::StrCat(mod, ".h");
-    std::error_code ec_hdr;
-    if (std::filesystem::exists(module_header, ec_hdr)) {
+    std::vector<std::string> includes = default_headers;
+    if (std::filesystem::exists(game_src_dir / absl::StrCat(mod, ".h"), ec)) {
       includes.push_back(absl::StrCat(mod, ".h"));
     }
 
     std::filesystem::path out_file = output_dir / absl::StrCat(mod, ".c");
+
     auto c_code_or = DecompileFunctions(*funcs_or, includes);
     if (!c_code_or.ok()) {
       std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", mod,

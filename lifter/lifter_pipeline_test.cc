@@ -204,5 +204,98 @@ entries {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(LifterPipelineTest, DecompileAllModulesCopiesHeadersAndLiftsSources) {
+  auto test_dir = std::filesystem::temp_directory_path() / "lifter_headers_lift_test";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir / "src" / "c" / "test-game");
+  std::filesystem::create_directories(test_dir / "roms");
+
+  // Create handwritten header and source
+  std::ofstream hdr(test_dir / "src" / "c" / "test-game" / "mod_alpha.h");
+  hdr << "// Handwritten header\n";
+  hdr.close();
+
+  std::ofstream src(test_dir / "src" / "c" / "test-game" / "mod_alpha.c");
+  src << "// Handwritten source\n";
+  src.close();
+
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+  subsegments {
+    name: "mod_alpha"
+    type: SUBSEGMENT_C
+    rom_start: 0x1000
+    vram: 0x80020000
+  }
+}
+)";
+  auto cfg_or = ParseSplitConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries {
+  name: "AlphaFunc"
+  address: 0x80020000
+  type: SYMBOL_FUNC
+}
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  std::vector<uint8_t> rom(0x2000, 0);
+  // jr $ra (0x03E00008)
+  rom[0x1000] = 0x03;
+  rom[0x1001] = 0xE0;
+  rom[0x1002] = 0x00;
+  rom[0x1003] = 0x08;
+
+  std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractorOptions extractor_opts;
+  extractor_opts.repo_root = test_dir;
+  extractor_opts.game_name = "test-game";
+
+  auto extractor = std::make_unique<TargetExtractor>(extractor_opts, &(*cfg_or), &(*sym_idx_or));
+  auto loader = std::make_unique<FunctionLoader>(std::move(extractor));
+
+  LifterPipelineOptions options;
+  options.repo_root = test_dir;
+  options.game_name = "test-game";
+  options.format_with_clang = false;
+
+  LifterPipeline pipeline(options, std::move(loader));
+
+  std::filesystem::path out_dir = test_dir / "lifted";
+  auto files_or = pipeline.DecompileAllModules(out_dir);
+  ASSERT_TRUE(files_or.ok()) << files_or.status();
+  EXPECT_THAT(*files_or, ::testing::SizeIs(1));
+
+  EXPECT_TRUE(std::filesystem::exists(out_dir / "mod_alpha.h"));
+  EXPECT_TRUE(std::filesystem::exists(out_dir / "mod_alpha.c"));
+
+  std::ifstream hdr_ifs(out_dir / "mod_alpha.h");
+  std::string hdr_content((std::istreambuf_iterator<char>(hdr_ifs)),
+                          std::istreambuf_iterator<char>());
+  EXPECT_THAT(hdr_content, HasSubstr("// Handwritten header"));
+
+  std::ifstream ifs(out_dir / "mod_alpha.c");
+  std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  EXPECT_THAT(content, HasSubstr("AlphaFunc"));
+  EXPECT_THAT(content, Not(HasSubstr("// Handwritten source")));
+
+  std::filesystem::remove_all(test_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

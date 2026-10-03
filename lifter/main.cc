@@ -22,6 +22,7 @@ ABSL_FLAG(std::string, rom, "", "Optional path to ROM binary.");
 ABSL_FLAG(std::vector<std::string>, function, {}, "Target function name(s) to lift.");
 ABSL_FLAG(std::string, functions, "", "Comma-separated list of functions to lift.");
 ABSL_FLAG(std::string, module, "", "Target module/subsegment to lift all functions from.");
+ABSL_FLAG(std::string, asm_dir, "", "Optional path to assembly directory.");
 ABSL_FLAG(std::vector<std::string>, include, {}, "Additional header #includes (e.g. types.h).");
 
 int main(int argc, char* argv[]) {
@@ -57,6 +58,10 @@ int main(int argc, char* argv[]) {
   }
   if (!rom_path.empty()) {
     pipeline_opts.rom_path = rom_path;
+  }
+  std::string asm_dir = absl::GetFlag(FLAGS_asm_dir);
+  if (!asm_dir.empty()) {
+    pipeline_opts.asm_dir = asm_dir;
   }
   pipeline_opts.format_with_clang = format;
 

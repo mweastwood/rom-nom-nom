@@ -21,6 +21,7 @@ struct LifterPipelineOptions {
   std::filesystem::path config_path;
   std::filesystem::path symbols_path;
   std::filesystem::path rom_path;
+  std::filesystem::path asm_dir;
   std::vector<std::string> includes = {"types.h"};
   bool format_with_clang = true;
 };
