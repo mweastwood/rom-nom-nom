@@ -114,26 +114,27 @@ def check_naming_integrity(files):
     1. Prohibits __attribute__((alias(...))) across the codebase.
     2. Prohibits function definitions starting with func_800... in C/C++ sources.
     3. Prohibits any reference to default labels (D_XXXXXXXX or func_XXXXXXXX)
-       when a human-readable symbol has been registered in symbols/*.txt.
+       when a human-readable symbol has been registered in symbols/*.textproto.
     """
     errors = []
 
     symbols_dir = REPO_ROOT / "symbols"
     named_syms = {}
     if symbols_dir.exists():
-        for sym_file in symbols_dir.glob("*.txt"):
-            with open(sym_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    m = re.match(r"^([A-Za-z0-9_]+)\s*=\s*(0x[0-9A-Fa-f]+);", line)
-                    if m:
-                        name, addr_str = m.group(1), m.group(2)
-                        addr = int(addr_str, 16)
-                        d_sym = f"D_{addr:08X}"
-                        func_sym = f"func_{addr:08X}"
-                        if name != d_sym and not name.startswith("D_") and name != func_sym and not name.startswith("func_"):
-                            named_syms[d_sym] = (name, sym_file.name)
-                            named_syms[func_sym] = (name, sym_file.name)
+        for sym_file in symbols_dir.glob("*.textproto"):
+            content = sym_file.read_text(encoding="utf-8", errors="ignore")
+            for entry_block in re.finditer(r"entries\s*\{([^}]+)\}", content):
+                block = entry_block.group(1)
+                name_m = re.search(r'name:\s*"([^"]+)"', block)
+                addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
+                if name_m and addr_m:
+                    name = name_m.group(1)
+                    addr = int(addr_m.group(1), 0)
+                    d_sym = f"D_{addr:08X}"
+                    func_sym = f"func_{addr:08X}"
+                    if name != d_sym and not name.startswith("D_") and name != func_sym and not name.startswith("func_"):
+                        named_syms[d_sym] = (name, sym_file.name)
+                        named_syms[func_sym] = (name, sym_file.name)
 
     alias_pattern = re.compile(r"__attribute__\s*\(\s*\(\s*alias\s*\(")
     func_def_pattern = re.compile(r"^[a-zA-Z0-9_* ]+\s+(func_[0-9A-Fa-f]+)\s*\([^;]*\)\s*\{", re.MULTILINE)
@@ -153,13 +154,13 @@ def check_naming_integrity(files):
 
         # 1. Alias check
         if alias_pattern.search(content):
-            errors.append(f"{rel_path}: uses __attribute__((alias(...))), which is prohibited. Define functions directly under their readable name and register them in symbols/<game>.txt.")
+            errors.append(f"{rel_path}: uses __attribute__((alias(...))), which is prohibited. Define functions directly under their readable name and register them in symbols/<game>.textproto.")
 
         # 2. Decompiled function definition check
         if f.suffix in {".c", ".cc", ".cpp"} and "mocks" not in f.parts:
             for match in func_def_pattern.finditer(content):
                 sym = match.group(1)
-                errors.append(f"{rel_path}: defines function with default label '{sym}'. Decompiled functions must use Google Style CamelCase and be mapped in symbols/<game>.txt.")
+                errors.append(f"{rel_path}: defines function with default label '{sym}'. Decompiled functions must use Google Style CamelCase and be mapped in symbols/<game>.textproto.")
 
         # 3. Reference to renamed symbols check
         for default_sym, (clean_name, sym_file) in named_syms.items():

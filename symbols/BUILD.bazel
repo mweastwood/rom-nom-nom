@@ -11,11 +11,6 @@ filegroup(
 )
 
 filegroup(
-    name = "harvest-moon-64-txt",
-    srcs = ["harvest-moon-64.txt"],
-)
-
-filegroup(
     name = "ogre-battle-64",
     srcs = ["ogre-battle-64.textproto"],
 )
@@ -23,9 +18,4 @@ filegroup(
 filegroup(
     name = "ogre-battle-64-textproto",
     srcs = ["ogre-battle-64.textproto"],
-)
-
-filegroup(
-    name = "ogre-battle-64-txt",
-    srcs = ["ogre-battle-64.txt"],
 )

@@ -17,7 +17,7 @@ This document establishes the architecture rules, coding standards, and step-by-
    - **Variables & Members**: `lower_snake_case` (e.g. `box_index`, `bank_id`, `scale_x`).
    - **Constants & Enums**: `kCamelCase` with `k` prefix (e.g. `kIdle`, `kMainProc`).
    - Exceptions are restricted to N64 hardware/OS entrypoints (`main`, `idle`, `mainproc`, `os*`), undecompiled assembly labels (`func_*`), and test macros (`TEST`, `TEST_F`).
-   - **Symbol Registration**: When a function or global variable is decompiled or identified, it must be registered with its clean semantic name in `symbols/<game>.txt` or `symbols/<game>.textproto` (e.g. `AudioUpdate = 0x8003CF38; // type:func` or `g_audio_status = 0x801FB690;`). Function aliases (`__attribute__((alias(...)))`) are strictly prohibited; splitter automatically propagates registered symbol names across all linker scripts and assembly, preventing code from bypassing readable names.
+   - **Symbol Registration**: When a function or global variable is decompiled or identified, it must be registered with its clean semantic name in `symbols/<game>.textproto` (e.g. `entries { name: "AudioUpdate" address: 0x8003CF38 type: SYMBOL_FUNC }` or `entries { name: "g_audio_status" address: 0x801FB690 type: SYMBOL_DATA }`). Function aliases (`__attribute__((alias(...)))`) are strictly prohibited; splitter automatically propagates registered symbol names across all linker scripts and assembly, preventing code from bypassing readable names.
 4. **Git Protocol**: **NEVER** commit or push changes without explicit user request.
 5. **Clean Room Decompilation & External Reference Policy**:
    - **STRICT PROHIBITION**: Contributors and AI agents are **strictly forbidden** from viewing, fetching, querying, referencing, citing, or deriving code, structures, symbol names, segment names, or documentation from unlicensed third-party decompilation projects, specifically including `harvestwhisperer/hm64-decomp` and any associated forks or mirrors.
@@ -53,7 +53,7 @@ The progress tool provides clean-room, ROM-driven dependency analysis and projec
   - `READY`: Leaf functions whose dependencies are either already decompiled or are Libultra OS/hardware routines. Sorted ascending by size for fast, targeted progress.
   - `BLOCKED`: Functions waiting on other undecompiled functions, explicitly reporting `module:function` blockers.
 - **Data Structures (Structs) & Header Hygiene Auditing**: Scans module headers (`src/c/<game>/*.h`) and C sources (`src/c/<game>/*.c`) for `typedef struct` definitions. Measures reverse-engineering fidelity (named fields vs `unk_`/`pad` placeholders) and flags structs defined inside `.c` files that should be promoted to module headers.
-- **Global Variables & Data Symbol Accounting**: Catalogs all `.data`, `.rodata`, and `.bss` symbols from the ROM disassembly. Tracks symbols defined with semantic names in `symbols/<game>.txt` vs auto-generated `D_XXXXXXXX` labels, detects typed `extern` globals across headers and sources, tracks candidates for header migration, and cross-references global symbol accesses per module to identify untyped global dependencies.
+- **Global Variables & Data Symbol Accounting**: Catalogs all `.data`, `.rodata`, and `.bss` symbols from the ROM disassembly. Tracks symbols defined with semantic names in `symbols/<game>.textproto` vs auto-generated `D_XXXXXXXX` labels, detects typed `extern` globals across headers and sources, tracks candidates for header migration, and cross-references global symbol accesses per module to identify untyped global dependencies.
 - **Automated Workflow Prioritization**: In-progress compilation units (modules with partial C implementations) are prioritized first, followed by modules with ready candidates.
 
 ---
@@ -89,9 +89,13 @@ bazel run //:m2c -- func_800266C0
 `m2c` automatically compiles the latest context from `common.h` and project headers in memory, maps struct fields, and auto-formats the C draft with `clang-format`.
 
 ### Step 3: Implement C Code & Iterate with diff
-1. Register the target function with its clean Google `CamelCase` name in `symbols/<game>.txt`:
-   ```txt
-   MyFunction = 0x800266C0; // type:func
+1. Register the target function with its clean Google `CamelCase` name in `symbols/<game>.textproto`:
+   ```protobuf
+   entries {
+     name: "MyFunction"
+     address: 0x800266C0
+     type: SYMBOL_FUNC
+   }
    ```
    This registers the symbol with `splitter`, renaming it across all disassembled assembly files, nonmatchings, and linker scripts. Any callers attempting to use the deprecated `func_800266C0` name will fail at link time.
 2. Place or append the C code into the appropriate module file under `src/c/<game>/`. Define the function directly under its Google `CamelCase` name without aliases or wrappers:
@@ -118,7 +122,7 @@ bazel run //:m2c -- func_800266C0
    - `NOP()` expands to `__asm__ volatile("nop")` targeting MIPS, and safely resolves to a no-op `((void)0)` when compiled under modern host C++20 test targets.
 6. **Header File & Global Symbol Hygiene**:
    - Place function prototypes, struct definitions, shared types, and global variable `extern` declarations into the corresponding module header (`src/c/<game>/<module>.h`), NOT inside `.c` source files.
-   - Define global variable symbols with human-readable semantic names in `symbols/<game>.txt` or `symbols/<game>.textproto` (e.g. `g_audio_voices = 0x801FB690;`). This prompts splitter to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
+   - Define global variable symbols with human-readable semantic names in `symbols/<game>.textproto` (e.g. `entries { name: "g_audio_voices" address: 0x801FB690 type: SYMBOL_DATA }`). This prompts splitter to name the symbol across all disassembled assembly files, nonmatchings, and linker scripts, allowing C headers to declare `extern Type g_symbol;` cleanly without `D_XXXXXXXX` labels or `#define` macros.
    - Standardize `c_flags` in `config/<game>.textproto`: modules use `default` flags (`-O2 -mips2 -mcpu=r4000 -Wa,-g`). Custom per-module entries should only be specified when genuinely diverging from the default (such as `boot: ["-O0"]` or Libultra `-Wa,-O2` / `-V`). Do not repeat redundant entries that match the default.
    - Verify header and symbol completeness using `bazel run //:progress -- -m <module>`, `bazel run //:progress -- -s`, or `bazel run //:progress -- -g`.
 

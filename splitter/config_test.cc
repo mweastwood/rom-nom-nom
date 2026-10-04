@@ -15,7 +15,7 @@ constexpr std::string_view kValidConfigText = R"pb(
   game_name: "Harvest Moon 64 (USA)"
   sha1: "90631460f1876a14849df0541d534012b410a34c"
   basename: "harvest-moon-64"
-  symbol_files: "symbols/harvest-moon-64.txt"
+  symbol_files: "symbols/harvest-moon-64.textproto"
 
   segments { name: "header" type: SEGMENT_HEADER rom_start: 0x0 rom_end: 0x40 }
 
@@ -53,7 +53,7 @@ TEST(ConfigTest, ParseValidTextproto) {
   EXPECT_EQ(config.sha1(), "90631460f1876a14849df0541d534012b410a34c");
   EXPECT_EQ(config.basename(), "harvest-moon-64");
   ASSERT_EQ(config.symbol_files_size(), 1);
-  EXPECT_EQ(config.symbol_files(0), "symbols/harvest-moon-64.txt");
+  EXPECT_EQ(config.symbol_files(0), "symbols/harvest-moon-64.textproto");
 
   ASSERT_EQ(config.segments_size(), 3);
   EXPECT_EQ(config.segments(0).name(), "header");

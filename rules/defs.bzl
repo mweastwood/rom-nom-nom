@@ -44,7 +44,7 @@ splitter_split = rule(
     attrs = {
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "srcs": attr.label_list(allow_files = True, default = []),
         "_splitter": attr.label(
@@ -112,7 +112,7 @@ n64_rom = rule(
     attrs = {
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "split": attr.label(mandatory = True, providers = [OutputGroupInfo]),
         "srcs": attr.label_list(allow_files = True, default = []),
         "src_dir": attr.label(allow_single_file = True),
@@ -361,7 +361,7 @@ n64_lifted_c_equivalence_test = rule(
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "_fuzzer": attr.label(
             default = Label("//fuzzer:fuzzer"),
             executable = True,
@@ -516,7 +516,7 @@ lifter_lift_game = rule(
     attrs = {
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "split": attr.label(mandatory = False, providers = [OutputGroupInfo]),
         "format": attr.bool(default = True),
