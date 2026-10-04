@@ -434,6 +434,42 @@ class ConverterContext {
       case RegionType::kGoto:
         target_block->AddStatement(CStatement::Goto(absl::StrFormat("block_%d", region.block_id)));
         break;
+
+      case RegionType::kSwitch: {
+        const auto* jt = region.jump_table;
+        std::unique_ptr<CExpression> cond_expr;
+        if (jt != nullptr && jt->index_register != Register::kZero) {
+          cond_expr = RegExpr(jt->index_register);
+        } else {
+          cond_expr = CExpression::Identifier("cond");
+        }
+
+        std::vector<SwitchCase> c_cases;
+        c_cases.reserve(region.cases.size());
+
+        for (const auto& sc : region.cases) {
+          SwitchCase c_case;
+          c_case.case_values = sc.case_values;
+          c_case.is_default = sc.is_default;
+          c_case.body = std::make_unique<CompoundStatement>();
+
+          if (sc.body) {
+            ConvertRegion(*sc.body, c_case.body.get());
+          }
+
+          if (c_case.body->IsEmpty() || !HasReturnValue(*c_case.body)) {
+            const auto& stmts = c_case.body->Statements();
+            if (stmts.empty() || stmts.back()->Kind() != CStatementKind::kBreakStatement) {
+              c_case.body->AddStatement(CStatement::Break());
+            }
+          }
+
+          c_cases.push_back(std::move(c_case));
+        }
+
+        target_block->AddStatement(CStatement::Switch(std::move(cond_expr), std::move(c_cases)));
+        break;
+      }
     }
   }
 
@@ -445,6 +481,11 @@ class ConverterContext {
     for (const auto& child : region.children) {
       if (child) {
         CollectGotoTargets(*child);
+      }
+    }
+    for (const auto& sc : region.cases) {
+      if (sc.body) {
+        CollectGotoTargets(*sc.body);
       }
     }
   }

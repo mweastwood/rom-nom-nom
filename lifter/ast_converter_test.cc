@@ -317,5 +317,116 @@ TEST(AstConverterTest, GotoBlockLabelConsistency) {
   EXPECT_THAT(code, HasSubstr("block_99:"));
 }
 
+TEST(AstConverterTest, ConvertSwitchStatement) {
+  std::vector<Instruction> instructions;
+  Instruction nop;
+  nop.opcode = Opcode::kSll;
+  nop.rd = Register::kZero;
+  nop.rt = Register::kZero;
+  nop.vram = 0x80000000;
+  instructions.push_back(nop);
+
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  JumpTable jt;
+  jt.index_register = Register::kV1;
+
+  auto switch_reg = std::make_unique<StructuredRegion>();
+  switch_reg->type = RegionType::kSwitch;
+  switch_reg->jump_table = &jt;
+
+  StructuredCase case0;
+  case0.case_values = {0, 1};
+  switch_reg->cases.push_back(std::move(case0));
+
+  StructuredCase default_case;
+  default_case.is_default = true;
+  switch_reg->cases.push_back(std::move(default_case));
+
+  AstConverterOptions options;
+  options.function_name = "TestSwitch";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("switch (v1) {"));
+  EXPECT_THAT(code, HasSubstr("case 0:"));
+  EXPECT_THAT(code, HasSubstr("case 1:"));
+  EXPECT_THAT(code, HasSubstr("default:"));
+  EXPECT_THAT(code, HasSubstr("break;"));
+}
+
+TEST(AstConverterTest, ConvertSwitchStatementWithReturnDoesNotAddRedundantBreak) {
+  // Construct a block with a return statement (jr $ra)
+  std::vector<uint32_t> words = {
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  JumpTable jt;
+  jt.index_register = Register::kA0;
+
+  auto switch_reg = std::make_unique<StructuredRegion>();
+  switch_reg->type = RegionType::kSwitch;
+  switch_reg->jump_table = &jt;
+
+  StructuredCase case0;
+  case0.case_values = {0};
+  auto case_body = std::make_unique<StructuredRegion>();
+  case_body->type = RegionType::kBlock;
+  case_body->block_id = 0;
+  case0.body = std::move(case_body);
+  switch_reg->cases.push_back(std::move(case0));
+
+  AstConverterOptions options;
+  options.function_name = "TestSwitchReturn";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("switch (arg0) {"));
+  EXPECT_THAT(code, HasSubstr("case 0:"));
+  EXPECT_THAT(code, HasSubstr("return;"));
+  // Must NOT contain "break;" right after "return;"
+  EXPECT_THAT(code, Not(HasSubstr("return;\n  break;")));
+}
+
+TEST(AstConverterTest, ConvertSwitchStatementFallbackCondition) {
+  std::vector<Instruction> instructions;
+  Instruction nop;
+  nop.opcode = Opcode::kSll;
+  nop.rd = Register::kZero;
+  nop.rt = Register::kZero;
+  nop.vram = 0x80000000;
+  instructions.push_back(nop);
+
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  auto switch_reg = std::make_unique<StructuredRegion>();
+  switch_reg->type = RegionType::kSwitch;
+  switch_reg->jump_table = nullptr;  // No jump table pointer
+
+  StructuredCase default_case;
+  default_case.is_default = true;
+  switch_reg->cases.push_back(std::move(default_case));
+
+  AstConverterOptions options;
+  options.function_name = "TestSwitchFallback";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("switch (cond) {"));
+  EXPECT_THAT(code, HasSubstr("default:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
