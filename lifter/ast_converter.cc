@@ -137,6 +137,16 @@ void CollectUsedVariables(const CStatement& stmt, std::vector<std::string>* vars
       }
       break;
     }
+    case CStatementKind::kSwitchStatement: {
+      const auto& switch_stmt = static_cast<const SwitchStatement&>(stmt);
+      CollectVariablesInExpression(switch_stmt.Condition(), vars, seen);
+      for (const auto& sc : switch_stmt.Cases()) {
+        if (sc.body != nullptr) {
+          CollectUsedVariables(*sc.body, vars, seen);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -157,6 +167,11 @@ bool HasReturnValue(const CStatement& stmt) {
     const auto& if_stmt = static_cast<const IfStatement&>(stmt);
     if (HasReturnValue(if_stmt.ThenBranch())) return true;
     if (if_stmt.ElseBranch() != nullptr && HasReturnValue(*if_stmt.ElseBranch())) return true;
+  } else if (stmt.Kind() == CStatementKind::kSwitchStatement) {
+    const auto& switch_stmt = static_cast<const SwitchStatement&>(stmt);
+    for (const auto& sc : switch_stmt.Cases()) {
+      if (sc.body != nullptr && HasReturnValue(*sc.body)) return true;
+    }
   }
   return false;
 }

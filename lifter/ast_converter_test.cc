@@ -428,5 +428,44 @@ TEST(AstConverterTest, ConvertSwitchStatementFallbackCondition) {
   EXPECT_THAT(code, HasSubstr("default:"));
 }
 
+TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
+  // Construct block 0 with: addiu $v0, $zero, 42; jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x2402002A,  // addiu $v0, $zero, 42
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  JumpTable jt;
+  jt.index_register = Register::kA0;
+
+  auto switch_reg = std::make_unique<StructuredRegion>();
+  switch_reg->type = RegionType::kSwitch;
+  switch_reg->jump_table = &jt;
+
+  StructuredCase case0;
+  case0.case_values = {0};
+  auto case_body = std::make_unique<StructuredRegion>();
+  case_body->type = RegionType::kBlock;
+  case_body->block_id = 0;
+  case0.body = std::move(case_body);
+  switch_reg->cases.push_back(std::move(case0));
+
+  AstConverterOptions options;
+  options.function_name = "TestSwitchVars";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  std::string code = func.ToString();
+
+  // v0 must be declared at the top of the function
+  EXPECT_THAT(code, HasSubstr("s32 v0;"));
+  // Return type should be inferred as s32 because HasReturnValue detected return v0
+  EXPECT_EQ(func.ReturnType().ToString(), "s32");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
