@@ -48,3 +48,26 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "equivalence_runner",
+    srcs = ["equivalence_runner.cc"],
+    hdrs = ["equivalence_runner.h"],
+    deps = [
+        ":differential_fuzzer",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "equivalence_runner_test",
+    srcs = ["equivalence_runner_test.cc"],
+    deps = [
+        ":equivalence_runner",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
