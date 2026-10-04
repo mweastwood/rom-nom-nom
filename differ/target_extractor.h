@@ -61,6 +61,9 @@ class TargetExtractor {
   // Extracts the target function from generated assembly files (bazel-bin/asm or asm).
   absl::StatusOr<TargetFunction> ExtractFromAsm(std::string_view func_name) const;
 
+  // Reads a 32-bit big-endian word from ROM at the specified VRAM address.
+  std::optional<uint32_t> ReadRomWord(uint32_t vram) const;
+
   const SplitConfig* Config() const { return config_; }
   const SymbolIndex* Symbols() const { return symbols_; }
 
@@ -70,6 +73,7 @@ class TargetExtractor {
   const SymbolIndex* symbols_ = nullptr;
   std::unique_ptr<SplitConfig> owned_config_;
   std::unique_ptr<SymbolIndex> owned_symbols_;
+  mutable std::vector<uint8_t> cached_rom_bytes_;
 };
 
 }  // namespace rom_nom_nom

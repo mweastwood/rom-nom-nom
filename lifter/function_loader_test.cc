@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "core/endian.h"
 #include "core/mips.h"
 #include "differ/target_extractor.h"
 #include "gmock/gmock.h"
@@ -76,11 +77,8 @@ entries {
 
   // Create dummy ROM binary
   std::vector<uint8_t> rom(0x2000, 0);
-  // Place "jr $ra" at rom_start 0x1000: 0x03E00008
-  rom[0x1000] = 0x03;
-  rom[0x1001] = 0xE0;
-  rom[0x1002] = 0x00;
-  rom[0x1003] = 0x08;
+  // Place "jr $ra" (0x03E00008) at rom_start 0x1000
+  WriteBigEndian32(rom.data() + 0x1000, 0x03E00008u);
   // nop: 0x00000000
   std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
   std::ofstream rom_file(rom_path, std::ios::binary);
@@ -101,8 +99,27 @@ entries {
   EXPECT_EQ(loaded_or->vram, 0x80020000);
   EXPECT_THAT(loaded_or->instructions, SizeIs(2));
   EXPECT_TRUE(loaded_or->instructions[0].IsReturn());
+  ASSERT_TRUE(loaded_or->memory_reader != nullptr);
+  EXPECT_EQ(loaded_or->memory_reader(0x80020000), 0x03E00008u);
 
   std::filesystem::remove_all(test_dir);
+}
+
+TEST(FunctionLoaderTest, FromWordsPreservesMemoryReader) {
+  std::vector<uint32_t> words = {
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto mock_reader = [](uint32_t vram) -> std::optional<uint32_t> {
+    if (vram == 0x80021000) return 0x12345678u;
+    return std::nullopt;
+  };
+  auto loaded_or =
+      FunctionLoader::FromWords("TestMem", words, 0x80020000, nullptr, nullptr, mock_reader);
+  ASSERT_TRUE(loaded_or.ok()) << loaded_or.status();
+  ASSERT_TRUE(loaded_or->memory_reader != nullptr);
+  EXPECT_EQ(loaded_or->memory_reader(0x80021000), 0x12345678u);
+  EXPECT_EQ(loaded_or->memory_reader(0x80022000), std::nullopt);
 }
 
 TEST(FunctionLoaderTest, LoadFunctionViaExplicitPaths) {
@@ -143,10 +160,7 @@ entries {
   sym_file.close();
 
   std::vector<uint8_t> rom(0x2000, 0);
-  rom[0x1000] = 0x03;
-  rom[0x1001] = 0xE0;
-  rom[0x1002] = 0x00;
-  rom[0x1003] = 0x08;
+  WriteBigEndian32(rom.data() + 0x1000, 0x03E00008u);
   std::filesystem::path rom_path = test_dir / "custom_rom.z64";
   std::ofstream rom_file(rom_path, std::ios::binary);
   rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());

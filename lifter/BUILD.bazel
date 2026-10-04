@@ -270,6 +270,7 @@ cc_library(
     srcs = ["function_loader.cc"],
     hdrs = ["function_loader.h"],
     deps = [
+        ":jump_table",
         "//core:mips",
         "//differ:target_extractor",
         "//splitter:config",
@@ -285,6 +286,7 @@ cc_test(
     srcs = ["function_loader_test.cc"],
     deps = [
         ":function_loader",
+        "//core:endian",
         "//core:mips",
         "//differ:target_extractor",
         "//splitter:config",

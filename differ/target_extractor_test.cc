@@ -191,5 +191,38 @@ TargetFunc:
               ElementsAre("addiu      $sp, $sp, -32", "jr         $ra", "nop"));
 }
 
+TEST_F(TargetExtractorTest, ReadRomWordReadsFromRomFile) {
+  // Write a dummy ROM file with a known word at offset 0x2000 (vram 0x80021000)
+  std::vector<uint8_t> rom(0x5000, 0);
+  WriteBigEndian32(rom.data() + 0x2000, 0x80025D20u);
+
+  std::filesystem::path rom_path = test_dir_ / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractor extractor({.repo_root = test_dir_, .game_name = "test-game"}, &config_,
+                            &symbols_);
+
+  // Valid VRAM address mapped to 0x2000
+  auto word = extractor.ReadRomWord(0x80021000);
+  ASSERT_TRUE(word.has_value());
+  EXPECT_EQ(*word, 0x80025D20u);
+
+  // Unmapped VRAM address
+  EXPECT_EQ(extractor.ReadRomWord(0x80010000), std::nullopt);
+
+  // Address near end of file that cannot fit a 4-byte word (0x5000 is file size, offset 0x4FFE)
+  // vram = 0x80020000 + (0x4FFE - 0x1000) = 0x80023FFE
+  EXPECT_EQ(extractor.ReadRomWord(0x80023FFE), std::nullopt);
+}
+
+TEST_F(TargetExtractorTest, ReadRomWordReturnsNulloptWhenRomMissing) {
+  // test_dir_ / "roms" / "test-game.z64" is not created
+  TargetExtractor extractor({.repo_root = test_dir_, .game_name = "test-game"}, &config_,
+                            &symbols_);
+  EXPECT_EQ(extractor.ReadRomWord(0x80021000), std::nullopt);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

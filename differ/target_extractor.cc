@@ -308,4 +308,37 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
   return ExtractFromAsm(func_name_or_addr);
 }
 
+std::optional<uint32_t> TargetExtractor::ReadRomWord(uint32_t vram) const {
+  if (cached_rom_bytes_.empty()) {
+    std::filesystem::path rom_path =
+        !options_.rom_path.empty()
+            ? options_.rom_path
+            : (options_.repo_root / "roms" / absl::StrCat(options_.game_name, ".z64"));
+    if (std::filesystem::exists(rom_path)) {
+      std::ifstream file(rom_path, std::ios::binary | std::ios::ate);
+      if (file.is_open()) {
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        cached_rom_bytes_.resize(size);
+        file.read(reinterpret_cast<char*>(cached_rom_bytes_.data()), size);
+      }
+    }
+  }
+
+  if (cached_rom_bytes_.empty()) {
+    return std::nullopt;
+  }
+
+  auto offset_or = VramToRomOffset(vram);
+  if (!offset_or.ok()) {
+    return std::nullopt;
+  }
+  uint32_t offset = *offset_or;
+  if (offset + 4 > cached_rom_bytes_.size()) {
+    return std::nullopt;
+  }
+
+  return ReadBigEndian32(cached_rom_bytes_, offset);
+}
+
 }  // namespace rom_nom_nom

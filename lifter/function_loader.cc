@@ -52,14 +52,18 @@ absl::StatusOr<LoadedFunction> FunctionLoader::LoadFunction(
   loaded.instructions = std::move(target_or->instructions);
   loaded.symbol_index = extractor_->Symbols();
   loaded.split_config = extractor_->Config();
+  loaded.memory_reader = [this](uint32_t vram) {
+    if (extractor_ != nullptr) {
+      return extractor_->ReadRomWord(vram);
+    }
+    return std::optional<uint32_t>(std::nullopt);
+  };
   return loaded;
 }
 
-absl::StatusOr<LoadedFunction> FunctionLoader::FromWords(std::string name,
-                                                         absl::Span<const uint32_t> words,
-                                                         uint32_t base_vram,
-                                                         const SymbolIndex* symbol_index,
-                                                         const SplitConfig* split_config) {
+absl::StatusOr<LoadedFunction> FunctionLoader::FromWords(
+    std::string name, absl::Span<const uint32_t> words, uint32_t base_vram,
+    const SymbolIndex* symbol_index, const SplitConfig* split_config, MemoryReader memory_reader) {
   auto insts_or = DecodeSequence(words, base_vram);
   if (!insts_or.ok()) {
     return insts_or.status();
@@ -71,6 +75,7 @@ absl::StatusOr<LoadedFunction> FunctionLoader::FromWords(std::string name,
   loaded.instructions = std::move(*insts_or);
   loaded.symbol_index = symbol_index;
   loaded.split_config = split_config;
+  loaded.memory_reader = std::move(memory_reader);
   return loaded;
 }
 
