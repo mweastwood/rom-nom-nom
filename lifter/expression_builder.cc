@@ -377,7 +377,6 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kAnd:
-      case Opcode::kAndi:
         if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
             inst.rt.has_value()) {
           LiftedStatement statement;
@@ -386,6 +385,18 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.expression =
               LiftedExpression::Binary("&", LiftRegisterOrConstant(*inst.rs, tracker),
                                        LiftRegisterOrConstant(*inst.rt, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kAndi:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          statement.expression =
+              LiftedExpression::Binary("&", LiftRegisterOrConstant(*inst.rs, tracker),
+                                       LiftedExpression::Integer(inst.immediate));
           statements.push_back(std::move(statement));
         }
         break;

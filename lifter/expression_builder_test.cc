@@ -268,5 +268,19 @@ TEST(ExpressionBuilderTest, JalParameterArityUsesKnownCount) {
   EXPECT_EQ(statements[3].ToString(), "BinaryFunc(1, 2);\n");
 }
 
+TEST(ExpressionBuilderTest, LogicalAndiOperation) {
+  std::vector<uint32_t> words = {
+      0x00851024,  // 0: and  $v0, $a0, $a1
+      0x3083000F,  // 4: andi $v1, $a0, 15
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 & arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = arg0 & 15;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
