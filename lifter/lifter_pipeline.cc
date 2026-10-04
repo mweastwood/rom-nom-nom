@@ -2,6 +2,8 @@
 
 #include <fstream>
 #include <memory>
+#include <regex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -323,34 +325,74 @@ typedef unsigned int u32;
 
   std::vector<std::string> default_headers = {"types.h"};
 
+  // Track all defined functions across modules so we do not generate linker script
+  // fallback definitions for functions that have implementations.
+  absl::flat_hash_set<std::string> defined_function_names;
+  for (const auto& module_name : *modules_or) {
+    auto functions_or = GetFunctionsInModule(module_name);
+    if (functions_or.ok()) {
+      for (const auto& function_name : *functions_or) {
+        defined_function_names.insert(function_name);
+      }
+    }
+  }
+
+  static const std::regex auto_symbol_regex(R"(\b((?:func_|D_)([0-9a-fA-F]{8}))\b)");
+  std::set<std::string> seen_symbols;
+  std::vector<std::pair<std::string, std::string>> undefined_auto_symbols;
+
   std::vector<std::filesystem::path> emitted_files;
-  for (const auto& mod : *modules_or) {
-    auto funcs_or = GetFunctionsInModule(mod);
-    if (!funcs_or.ok() || funcs_or->empty()) {
+  for (const auto& module_name : *modules_or) {
+    auto functions_or = GetFunctionsInModule(module_name);
+    if (!functions_or.ok() || functions_or->empty()) {
       continue;
     }
 
-    std::filesystem::path out_file = output_dir / absl::StrCat(mod, ".c");
+    std::filesystem::path output_file = output_dir / absl::StrCat(module_name, ".c");
 
-    auto c_code_or = DecompileFunctions(*funcs_or, default_headers);
+    auto c_code_or = DecompileFunctions(*functions_or, default_headers);
     if (!c_code_or.ok()) {
-      std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", mod,
+      std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", module_name,
                                          c_code_or.status().message());
-      std::ofstream ofs(out_file);
-      if (ofs.is_open()) {
-        ofs << stub;
-        emitted_files.push_back(out_file);
+      std::ofstream output_stream(output_file);
+      if (output_stream.is_open()) {
+        output_stream << stub;
+        emitted_files.push_back(output_file);
       }
       continue;
     }
 
-    std::ofstream ofs(out_file);
-    if (!ofs.is_open()) {
+    std::ofstream output_stream(output_file);
+    if (!output_stream.is_open()) {
       return absl::InternalError(
-          absl::StrFormat("Failed to open %s for writing.", out_file.string()));
+          absl::StrFormat("Failed to open %s for writing.", output_file.string()));
     }
-    ofs << *c_code_or;
-    emitted_files.push_back(out_file);
+    output_stream << *c_code_or;
+    emitted_files.push_back(output_file);
+
+    // Collect undefined auto-symbols (D_XXXXXXXX or undeclared func_XXXXXXXX)
+    for (auto regex_iterator =
+             std::sregex_iterator(c_code_or->begin(), c_code_or->end(), auto_symbol_regex);
+         regex_iterator != std::sregex_iterator(); ++regex_iterator) {
+      std::string symbol_name = regex_iterator->str(1);
+      std::string address_hex = regex_iterator->str(2);
+      if (defined_function_names.contains(symbol_name)) {
+        continue;
+      }
+      if (seen_symbols.insert(symbol_name).second) {
+        undefined_auto_symbols.emplace_back(std::move(symbol_name), std::move(address_hex));
+      }
+    }
+  }
+
+  // Generate self-contained linker script for undefined auto-symbols
+  std::filesystem::path lifted_symbols_file_path = output_dir / "lifted_symbols.ld";
+  std::ofstream symbols_output_stream(lifted_symbols_file_path);
+  if (symbols_output_stream.is_open()) {
+    symbols_output_stream << "/* Auto-generated symbol definitions for lifted C */\n";
+    for (const auto& [symbol_name, address_hex] : undefined_auto_symbols) {
+      symbols_output_stream << absl::StrFormat("%s = 0x%s;\n", symbol_name, address_hex);
+    }
   }
 
   return emitted_files;

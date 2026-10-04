@@ -239,6 +239,12 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   if (!aux.undefined_funcs_auto.empty()) {
     script_paths.push_back(aux.undefined_funcs_auto);
   }
+  if (!options_.src_dir.empty()) {
+    std::filesystem::path lifted_symbols_ld_script_path = options_.src_dir / "lifted_symbols.ld";
+    if (std::filesystem::exists(lifted_symbols_ld_script_path, ec)) {
+      script_paths.push_back(lifted_symbols_ld_script_path);
+    }
+  }
 
   auto link_status = compiler_.Link({
       .script_paths = script_paths,

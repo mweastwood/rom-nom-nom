@@ -251,11 +251,16 @@ entries {
   ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
 
   std::vector<uint8_t> rom(0x2000, 0);
+  // jal 0x80054321 (0x0C0150C8)
+  rom[0x1000] = 0x0C;
+  rom[0x1001] = 0x01;
+  rom[0x1002] = 0x50;
+  rom[0x1003] = 0xC8;
   // jr $ra (0x03E00008)
-  rom[0x1000] = 0x03;
-  rom[0x1001] = 0xE0;
-  rom[0x1002] = 0x00;
-  rom[0x1003] = 0x08;
+  rom[0x1004] = 0x03;
+  rom[0x1005] = 0xE0;
+  rom[0x1006] = 0x00;
+  rom[0x1007] = 0x08;
 
   std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
   std::ofstream rom_file(rom_path, std::ios::binary);
@@ -290,6 +295,13 @@ entries {
   std::string types_file_content((std::istreambuf_iterator<char>(types_input_stream)),
                                  std::istreambuf_iterator<char>());
   EXPECT_THAT(types_file_content, HasSubstr("typedef signed int s32;"));
+
+  // Verify lifted_symbols.ld was generated and contains unresolved func_80054320
+  EXPECT_TRUE(std::filesystem::exists(out_dir / "lifted_symbols.ld"));
+  std::ifstream symbols_input_stream(out_dir / "lifted_symbols.ld");
+  std::string symbols_content((std::istreambuf_iterator<char>(symbols_input_stream)),
+                              std::istreambuf_iterator<char>());
+  EXPECT_THAT(symbols_content, HasSubstr("func_80054320 = 0x80054320;"));
 
   EXPECT_TRUE(std::filesystem::exists(out_dir / "mod_alpha.c"));
 

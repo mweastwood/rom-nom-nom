@@ -403,5 +403,76 @@ SECTIONS
   EXPECT_EQ(file_content.substr(16), std::string(48, '\0'));
 }
 
+TEST_F(RomBuilderTest, BuildIncludesLiftedSymbolsScriptFromSrcDir) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot() {}");
+  CreateFile(asm_dir_ / "entry.s", ".text\nnop");
+
+  std::filesystem::path lifted_symbols_script =
+      CreateFile(src_dir_ / "lifted_symbols.ld", "lifted_sym = 0x80010000;\n");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    segments {
+      name: "boot"
+      rom_start: 0x0
+      rom_end: 16
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path output_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path output_rom = test_dir_ / "out" / "test_game.z64";
+
+  bool link_command_included_lifted_symbols = false;
+  auto mock_process_runner =
+      [&](const ProcessOptions& process_options) -> absl::StatusOr<ProcessResult> {
+    for (const auto& argument : process_options.args) {
+      if (argument == lifted_symbols_script.string()) {
+        link_command_included_lifted_symbols = true;
+      }
+    }
+    if (process_options.args.size() >= 4 && process_options.args[1] == "binary" &&
+        process_options.args[3] == output_rom.string()) {
+      std::filesystem::create_directories(output_rom.parent_path());
+      std::ofstream rom_output(output_rom, std::ios::binary);
+      std::string initial_content(16, '\xBB');
+      rom_output.write(initial_content.data(), initial_content.size());
+    }
+    ProcessResult process_result;
+    process_result.exit_code = 0;
+    return process_result;
+  };
+
+  Compiler compiler(toolchain_, mock_process_runner);
+
+  RomBuilderOptions builder_options{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = output_elf,
+      .out_rom = output_rom,
+      .is_test = false,
+      .prefer_c = false,
+  };
+
+  RomBuilder rom_builder(toolchain_, builder_options, compiler);
+  auto build_result_or = rom_builder.Build();
+  ASSERT_TRUE(build_result_or.ok()) << build_result_or.status();
+  EXPECT_TRUE(link_command_included_lifted_symbols);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
