@@ -965,5 +965,75 @@ TEST(MipsEmulatorTest, NullPointerDereferenceFaults) {
   EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
 }
 
+TEST(MipsEmulatorTest, Ldc1AndSdc1EvenRegisterPairing) {
+  MipsEmulator emu;
+  // Initialize double 3.141592653589793 into $f20 / $f21
+  double pi = 3.141592653589793;
+  emu.SetFpDouble(FpRegister::kF20, pi);
+  EXPECT_DOUBLE_EQ(emu.GetFpDouble(FpRegister::kF20), pi);
+
+  // Address 0x80100000 is 8-byte aligned
+  // 00: sdc1  $f20, 0($a0)   (save $f20/$f21 to 0x80100000)
+  // 04: ldc1  $f22, 0($a0)   (load into $f22/$f23 from 0x80100000)
+  // 08: jr    $ra
+  // 0C: nop
+  std::vector<uint32_t> code = {
+      0xF4940000,  // sdc1 $f20, 0($a0)
+      0xD4960000,  // ldc1 $f22, 0($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetRegister(Register::kA0, 0x80100000);
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_DOUBLE_EQ(emu.GetFpDouble(FpRegister::kF22), pi);
+  EXPECT_EQ(emu.GetFpDoubleBits(FpRegister::kF22), emu.GetFpDoubleBits(FpRegister::kF20));
+  // Verify 8-byte write logged
+  ASSERT_EQ(res.write_log.size(), 1u);
+  EXPECT_EQ(res.write_log[0].size, 8);
+  EXPECT_EQ(res.write_log[0].address, 0x80100000u);
+}
+
+TEST(MipsEmulatorTest, Ldc1AndSdc1MisalignedFaults) {
+  MipsEmulator emu;
+  // Address 0x80100004 is 4-byte aligned, but NOT 8-byte aligned for ldc1
+  // 00: ldc1  $f2, 4($a0)
+  // 04: jr    $ra
+  // 08: nop
+  std::vector<uint32_t> code = {
+      0xD4820004,  // ldc1 $f2, 4($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetRegister(Register::kA0, 0x80100000);
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
+}
+
+TEST(MipsEmulatorTest, Ldc1OddRegisterFails) {
+  MipsEmulator emu;
+  // ldc1 with odd register $f1 is architecturally invalid under Status.FR=0
+  // 00: ldc1  $f1, 0($a0)
+  // 04: jr    $ra
+  // 08: nop
+  std::vector<uint32_t> code = {
+      0xD4810000,  // ldc1 $f1, 0($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetRegister(Register::kA0, 0x80100000);
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

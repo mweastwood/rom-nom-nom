@@ -54,6 +54,32 @@ float MipsEmulator::GetFpRegister(FpRegister reg) const {
   return val;
 }
 
+void MipsEmulator::SetFpDoubleBits(FpRegister reg, uint64_t bits) {
+  int idx = static_cast<int>(reg);
+  if ((idx & 1) != 0 || idx < 0 || idx >= 32) return;
+  fpr_bits_[idx] = static_cast<uint32_t>(bits >> 32);             // MSW
+  fpr_bits_[idx + 1] = static_cast<uint32_t>(bits & 0xFFFFFFFF);  // LSW
+}
+
+uint64_t MipsEmulator::GetFpDoubleBits(FpRegister reg) const {
+  int idx = static_cast<int>(reg);
+  if ((idx & 1) != 0 || idx < 0 || idx >= 32) return 0;
+  return (static_cast<uint64_t>(fpr_bits_[idx]) << 32) | static_cast<uint64_t>(fpr_bits_[idx + 1]);
+}
+
+void MipsEmulator::SetFpDouble(FpRegister reg, double val) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &val, sizeof(double));
+  SetFpDoubleBits(reg, bits);
+}
+
+double MipsEmulator::GetFpDouble(FpRegister reg) const {
+  uint64_t bits = GetFpDoubleBits(reg);
+  double val = 0.0;
+  std::memcpy(&val, &bits, sizeof(double));
+  return val;
+}
+
 std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
   uint32_t phys = 0;
   if (vram >= 0x80000000 && vram < 0xA0000000) {
@@ -144,6 +170,22 @@ bool MipsEmulator::Read32(uint32_t vram, uint32_t* val) const {
   return true;
 }
 
+bool MipsEmulator::Read64(uint32_t vram, uint64_t* val) const {
+  if ((vram & 7) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
+  uint32_t hi = (static_cast<uint32_t>(memory_[*phys]) << 24) |
+                (static_cast<uint32_t>(memory_[*phys + 1]) << 16) |
+                (static_cast<uint32_t>(memory_[*phys + 2]) << 8) |
+                static_cast<uint32_t>(memory_[*phys + 3]);
+  uint32_t lo = (static_cast<uint32_t>(memory_[*phys + 4]) << 24) |
+                (static_cast<uint32_t>(memory_[*phys + 5]) << 16) |
+                (static_cast<uint32_t>(memory_[*phys + 6]) << 8) |
+                static_cast<uint32_t>(memory_[*phys + 7]);
+  *val = (static_cast<uint64_t>(hi) << 32) | lo;
+  return true;
+}
+
 bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys >= memory_size_) return false;
@@ -171,6 +213,24 @@ bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
   memory_[*phys + 2] = static_cast<uint8_t>(val >> 8);
   memory_[*phys + 3] = static_cast<uint8_t>(val);
   write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 4});
+  return true;
+}
+
+bool MipsEmulator::Write64(uint32_t vram, uint64_t val) {
+  if ((vram & 7) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
+  uint32_t hi = static_cast<uint32_t>(val >> 32);
+  uint32_t lo = static_cast<uint32_t>(val & 0xFFFFFFFF);
+  memory_[*phys] = static_cast<uint8_t>(hi >> 24);
+  memory_[*phys + 1] = static_cast<uint8_t>(hi >> 16);
+  memory_[*phys + 2] = static_cast<uint8_t>(hi >> 8);
+  memory_[*phys + 3] = static_cast<uint8_t>(hi);
+  memory_[*phys + 4] = static_cast<uint8_t>(lo >> 24);
+  memory_[*phys + 5] = static_cast<uint8_t>(lo >> 16);
+  memory_[*phys + 6] = static_cast<uint8_t>(lo >> 8);
+  memory_[*phys + 7] = static_cast<uint8_t>(lo);
+  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 8});
   return true;
 }
 
@@ -581,6 +641,29 @@ ExecutionStatus MipsEmulator::Step() {
       if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
       uint32_t word = inst.ft.has_value() ? GetFpBits(*inst.ft) : 0;
       if (!Write32(addr, word)) return ExecutionStatus::kMemoryFault;
+      break;
+    }
+    case Opcode::kLdc1: {
+      uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
+      if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
+      uint64_t val = 0;
+      if (!Read64(addr, &val)) return ExecutionStatus::kMemoryFault;
+      if (inst.ft.has_value()) {
+        int idx = static_cast<int>(*inst.ft);
+        if ((idx & 1) != 0) return ExecutionStatus::kInvalidOpcode;
+        SetFpDoubleBits(*inst.ft, val);
+      }
+      break;
+    }
+    case Opcode::kSdc1: {
+      uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
+      if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
+      if (inst.ft.has_value()) {
+        int idx = static_cast<int>(*inst.ft);
+        if ((idx & 1) != 0) return ExecutionStatus::kInvalidOpcode;
+        uint64_t val = GetFpDoubleBits(*inst.ft);
+        if (!Write64(addr, val)) return ExecutionStatus::kMemoryFault;
+      }
       break;
     }
 

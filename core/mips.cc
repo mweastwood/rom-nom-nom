@@ -936,6 +936,9 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
       inst.ft = ToFpRegister(rt_val);
       break;
     case 0x34:
+      inst.opcode = Opcode::kLld;
+      break;
+    case 0x35:
       inst.opcode = Opcode::kLdc1;
       inst.ft = ToFpRegister(rt_val);
       break;

@@ -16,7 +16,7 @@ namespace rom_nom_nom::fuzzer {
 
 struct MemoryWrite {
   uint32_t address = 0;
-  uint32_t value = 0;
+  uint64_t value = 0;
   uint8_t size = 0;  // 1 (byte), 2 (half), 4 (word), 8 (doubleword)
 
   bool operator==(const MemoryWrite& other) const {
@@ -98,11 +98,17 @@ class MipsEmulator {
   void SetLo(uint32_t lo) { lo_ = lo; }
   uint32_t GetLo() const { return lo_; }
 
-  // Floating point register access
+  // Floating point register access (single-precision 32-bit)
   void SetFpBits(FpRegister reg, uint32_t bits);
   uint32_t GetFpBits(FpRegister reg) const;
   void SetFpRegister(FpRegister reg, float val);
   float GetFpRegister(FpRegister reg) const;
+
+  // Floating point register access (double-precision 64-bit with even/odd pairing, Status.FR = 0)
+  void SetFpDoubleBits(FpRegister reg, uint64_t bits);
+  uint64_t GetFpDoubleBits(FpRegister reg) const;
+  void SetFpDouble(FpRegister reg, double val);
+  double GetFpDouble(FpRegister reg) const;
 
   void SetFpuCondition(bool cond) { fpu_cond_ = cond; }
   bool GetFpuCondition() const { return fpu_cond_; }
@@ -111,10 +117,12 @@ class MipsEmulator {
   bool Read8(uint32_t vram, uint8_t* val) const;
   bool Read16(uint32_t vram, uint16_t* val) const;
   bool Read32(uint32_t vram, uint32_t* val) const;
+  bool Read64(uint32_t vram, uint64_t* val) const;
 
   bool Write8(uint32_t vram, uint8_t val);
   bool Write16(uint32_t vram, uint16_t val);
   bool Write32(uint32_t vram, uint32_t val);
+  bool Write64(uint32_t vram, uint64_t val);
 
   // Snapshots callee-saved registers.
   CalleeSavedRegisters GetCalleeSavedRegisters() const;
