@@ -282,5 +282,23 @@ TEST(ExpressionBuilderTest, LogicalAndiOperation) {
   EXPECT_EQ(statements[1].ToString(), "v1 = arg0 & 15;\n");
 }
 
+TEST(ExpressionBuilderTest, ComparisonOperations) {
+  std::vector<uint32_t> words = {
+      0x0085102A,  // 0: slt   $v0, $a0, $a1
+      0x28830005,  // 4: slti  $v1, $a0, 5
+      0x0085102B,  // 8: sltu  $v0, $a0, $a1
+      0x2C83000A,  // C: sltiu $v1, $a0, 10
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(4));
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 < arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = arg0 < 5;\n");
+  EXPECT_EQ(statements[2].ToString(), "v0 = arg0 < arg1;\n");
+  EXPECT_EQ(statements[3].ToString(), "v1 = arg0 < 10;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
