@@ -168,6 +168,49 @@ TEST(CAstTest, ControlFlowStatements) {
   EXPECT_EQ(CStatement::Continue()->ToString(0), "continue;\n");
 }
 
+TEST(CAstTest, SwitchAndCaseStatements) {
+  auto case_zero = CStatement::Case(0);
+  EXPECT_EQ(case_zero->Kind(), CStatementKind::kCaseStatement);
+  EXPECT_EQ(case_zero->ToString(1), "    case 0:\n");
+
+  auto case_def = CStatement::Default();
+  EXPECT_EQ(case_def->Kind(), CStatementKind::kCaseStatement);
+  EXPECT_EQ(case_def->ToString(1), "    default:\n");
+
+  std::vector<SwitchCase> cases;
+
+  SwitchCase case_0_1;
+  case_0_1.case_values = {0, 1};
+  case_0_1.body = std::make_unique<CompoundStatement>();
+  case_0_1.body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("y"), CExpression::Integer(10))));
+  case_0_1.body->AddStatement(CStatement::Break());
+  cases.push_back(std::move(case_0_1));
+
+  SwitchCase default_case;
+  default_case.is_default = true;
+  default_case.body = std::make_unique<CompoundStatement>();
+  default_case.body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("y"), CExpression::Integer(0))));
+  default_case.body->AddStatement(CStatement::Break());
+  cases.push_back(std::move(default_case));
+
+  auto switch_stmt = CStatement::Switch(CExpression::Identifier("x"), std::move(cases));
+  EXPECT_EQ(switch_stmt->Kind(), CStatementKind::kSwitchStatement);
+  std::string switch_str = switch_stmt->ToString(0);
+  EXPECT_THAT(switch_str, HasSubstr("switch (x) {"));
+  EXPECT_THAT(switch_str, HasSubstr("case 0:\n"));
+  EXPECT_THAT(switch_str, HasSubstr("case 1:\n"));
+  EXPECT_THAT(switch_str, HasSubstr("y = 10;\n"));
+  EXPECT_THAT(switch_str, HasSubstr("default:\n"));
+  EXPECT_THAT(switch_str, HasSubstr("y = 0;\n"));
+
+  auto cloned = switch_stmt->Clone();
+  ASSERT_THAT(cloned, NotNull());
+  EXPECT_EQ(cloned->Kind(), CStatementKind::kSwitchStatement);
+  EXPECT_EQ(cloned->ToString(0), switch_str);
+}
+
 TEST(CAstTest, FunctionDeclarationToString) {
   std::vector<CParameter> params;
   params.push_back(CParameter{.type = CType::S32(), .name = "arg0"});

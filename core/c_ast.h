@@ -324,6 +324,17 @@ enum class CStatementKind {
   kContinueStatement,
   kGotoStatement,
   kLabelStatement,
+  kSwitchStatement,
+  kCaseStatement,
+};
+
+// Represents a case clause inside a switch statement.
+struct SwitchCase {
+  std::vector<int64_t> case_values;  // Empty if is_default == true
+  bool is_default = false;
+  std::unique_ptr<class CompoundStatement> body;
+
+  SwitchCase Clone() const;
 };
 
 // Abstract base class for all C statements.
@@ -356,6 +367,10 @@ class CStatement {
   static std::unique_ptr<CStatement> Continue();
   static std::unique_ptr<CStatement> Goto(std::string label);
   static std::unique_ptr<CStatement> Label(std::string label);
+  static std::unique_ptr<CStatement> Switch(std::unique_ptr<CExpression> condition,
+                                            std::vector<SwitchCase> cases);
+  static std::unique_ptr<CStatement> Case(int64_t value);
+  static std::unique_ptr<CStatement> Default();
 };
 
 // Compound statement / block: { stmt1; stmt2; ... }
@@ -575,6 +590,45 @@ class LabelStatement : public CStatement {
 
  private:
   std::string label_;
+};
+
+// Case statement: case val: or default:
+class CaseStatement : public CStatement {
+ public:
+  explicit CaseStatement(int64_t value, bool is_default = false)
+      : value_(value), is_default_(is_default) {}
+
+  CStatementKind Kind() const override { return CStatementKind::kCaseStatement; }
+  using CStatement::ToString;
+  std::string ToString(int indent_level) const override;
+  std::unique_ptr<CStatement> Clone() const override;
+
+  int64_t Value() const { return value_; }
+  bool IsDefault() const { return is_default_; }
+
+ private:
+  int64_t value_ = 0;
+  bool is_default_ = false;
+};
+
+// Switch statement: switch (cond) { case 0: ... break; default: ... }
+class SwitchStatement : public CStatement {
+ public:
+  SwitchStatement(std::unique_ptr<CExpression> condition, std::vector<SwitchCase> cases)
+      : condition_(std::move(condition)), cases_(std::move(cases)) {}
+
+  CStatementKind Kind() const override { return CStatementKind::kSwitchStatement; }
+  using CStatement::ToString;
+  std::string ToString(int indent_level) const override;
+  std::unique_ptr<CStatement> Clone() const override;
+
+  const CExpression& Condition() const { return *condition_; }
+  const std::vector<SwitchCase>& Cases() const { return cases_; }
+  std::vector<SwitchCase>& MutableCases() { return cases_; }
+
+ private:
+  std::unique_ptr<CExpression> condition_;
+  std::vector<SwitchCase> cases_;
 };
 
 // Represents a function parameter.

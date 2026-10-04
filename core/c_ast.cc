@@ -343,6 +343,19 @@ std::unique_ptr<CStatement> CStatement::Label(std::string label) {
   return std::make_unique<LabelStatement>(std::move(label));
 }
 
+std::unique_ptr<CStatement> CStatement::Switch(std::unique_ptr<CExpression> condition,
+                                               std::vector<SwitchCase> cases) {
+  return std::make_unique<SwitchStatement>(std::move(condition), std::move(cases));
+}
+
+std::unique_ptr<CStatement> CStatement::Case(int64_t value) {
+  return std::make_unique<CaseStatement>(value);
+}
+
+std::unique_ptr<CStatement> CStatement::Default() {
+  return std::make_unique<CaseStatement>(0, /*is_default=*/true);
+}
+
 // --- CompoundStatement ---
 
 void CompoundStatement::AddStatement(std::unique_ptr<CStatement> statement) {
@@ -554,6 +567,62 @@ std::string LabelStatement::ToString(int /*indent_level*/) const {
 
 std::unique_ptr<CStatement> LabelStatement::Clone() const {
   return std::make_unique<LabelStatement>(label_);
+}
+
+// --- SwitchCase ---
+
+SwitchCase SwitchCase::Clone() const {
+  SwitchCase copy;
+  copy.case_values = case_values;
+  copy.is_default = is_default;
+  if (body != nullptr) {
+    copy.body = std::unique_ptr<CompoundStatement>(
+        static_cast<CompoundStatement*>(body->Clone().release()));
+  }
+  return copy;
+}
+
+// --- CaseStatement ---
+
+std::string CaseStatement::ToString(int indent_level) const {
+  if (is_default_) {
+    return Indent(indent_level) + "default:\n";
+  }
+  return Indent(indent_level) + "case " + std::to_string(value_) + ":\n";
+}
+
+std::unique_ptr<CStatement> CaseStatement::Clone() const {
+  return std::make_unique<CaseStatement>(value_, is_default_);
+}
+
+// --- SwitchStatement ---
+
+std::string SwitchStatement::ToString(int indent_level) const {
+  std::string result = Indent(indent_level) + "switch (" + condition_->ToString() + ") {\n";
+  for (const auto& switch_case : cases_) {
+    for (int64_t val : switch_case.case_values) {
+      result += Indent(indent_level + 1) + "case " + std::to_string(val) + ":\n";
+    }
+    if (switch_case.is_default) {
+      result += Indent(indent_level + 1) + "default:\n";
+    }
+    if (switch_case.body != nullptr && !switch_case.body->IsEmpty()) {
+      for (const auto& stmt : switch_case.body->Statements()) {
+        result += stmt->ToString(indent_level + 2);
+      }
+    }
+  }
+  result += Indent(indent_level) + "}\n";
+  return result;
+}
+
+std::unique_ptr<CStatement> SwitchStatement::Clone() const {
+  std::vector<SwitchCase> cloned_cases;
+  cloned_cases.reserve(cases_.size());
+  for (const auto& c : cases_) {
+    cloned_cases.push_back(c.Clone());
+  }
+  return std::make_unique<SwitchStatement>(condition_->Clone(), std::move(cloned_cases));
 }
 
 // --- CParameter ---
