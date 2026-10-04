@@ -329,12 +329,17 @@ namespace {
 class ConverterContext {
  public:
   ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
-                   const SplitConfig* split_config,
+                   const StructuredRegion& root_region, const SplitConfig* split_config,
                    const absl::flat_hash_map<std::string, int>* function_parameter_counts)
       : cfg_(cfg),
         symbol_index_(symbol_index),
         split_config_(split_config),
-        function_parameter_counts_(function_parameter_counts) {}
+        function_parameter_counts_(function_parameter_counts) {
+    CollectGotoTargets(root_region);
+  }
+
+  const absl::flat_hash_set<uint32_t>& GotoTargets() const { return goto_targets_; }
+  const absl::flat_hash_set<uint32_t>& EmittedLabels() const { return emitted_labels_; }
 
   void ConvertRegion(const StructuredRegion& region, CompoundStatement* target_block) {
     switch (region.type) {
@@ -433,11 +438,27 @@ class ConverterContext {
   }
 
  private:
+  void CollectGotoTargets(const StructuredRegion& region) {
+    if (region.type == RegionType::kGoto) {
+      goto_targets_.insert(region.block_id);
+    }
+    for (const auto& child : region.children) {
+      if (child) {
+        CollectGotoTargets(*child);
+      }
+    }
+  }
+
   void EmitBlockStatements(uint32_t block_id, CompoundStatement* target_block) {
     if (emitted_blocks_.contains(block_id)) {
       return;
     }
     emitted_blocks_.insert(block_id);
+
+    if (goto_targets_.contains(block_id)) {
+      target_block->AddStatement(CStatement::Label(absl::StrFormat("block_%d", block_id)));
+      emitted_labels_.insert(block_id);
+    }
 
     const auto* block = cfg_.GetBlock(block_id);
     if (block == nullptr) {
@@ -458,6 +479,8 @@ class ConverterContext {
   const SymbolIndex* symbol_index_;
   const SplitConfig* split_config_;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts_;
+  absl::flat_hash_set<uint32_t> goto_targets_;
+  absl::flat_hash_set<uint32_t> emitted_labels_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
 };
 
@@ -469,8 +492,16 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
                                           const AstConverterOptions& options) {
   auto body = std::make_unique<CompoundStatement>();
 
-  ConverterContext ctx(cfg, symbol_index, options.split_config, options.function_parameter_counts);
+  ConverterContext ctx(cfg, symbol_index, root_region, options.split_config,
+                       options.function_parameter_counts);
   ctx.ConvertRegion(root_region, body.get());
+
+  for (uint32_t target_block_id : ctx.GotoTargets()) {
+    if (!ctx.EmittedLabels().contains(target_block_id)) {
+      body->AddStatement(CStatement::Label(absl::StrFormat("block_%d", target_block_id)));
+      body->AddStatement(CStatement::Expression(CExpression::Integer(0)));
+    }
+  }
 
   // Determine parameters
   std::vector<CParameter> parameters = options.parameters;
@@ -482,6 +513,16 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
         parameter_count = it->second;
       }
     }
+    if (parameter_count < 0) {
+      std::vector<Instruction> all_instructions;
+      for (const auto& block : cfg.Blocks()) {
+        all_instructions.insert(all_instructions.end(), block.instructions.begin(),
+                                block.instructions.end());
+      }
+      if (!all_instructions.empty()) {
+        parameter_count = ExpressionBuilder::DetermineParameterCount(all_instructions);
+      }
+    }
     if (parameter_count >= 0) {
       for (int param_index = 0; param_index < parameter_count; ++param_index) {
         parameters.push_back(
@@ -489,17 +530,16 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
       }
     } else {
       std::string body_text = body->ToString(0);
-      if (body_text.find("arg0") != std::string::npos) {
-        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+      int max_argument_index = -1;
+      for (int arg_index = 3; arg_index >= 0; --arg_index) {
+        if (body_text.find(absl::StrFormat("arg%d", arg_index)) != std::string::npos) {
+          max_argument_index = arg_index;
+          break;
+        }
       }
-      if (body_text.find("arg1") != std::string::npos) {
-        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg1"});
-      }
-      if (body_text.find("arg2") != std::string::npos) {
-        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg2"});
-      }
-      if (body_text.find("arg3") != std::string::npos) {
-        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg3"});
+      for (int arg_index = 0; arg_index <= max_argument_index; ++arg_index) {
+        parameters.push_back(
+            CParameter{.type = CType::S32(), .name = absl::StrFormat("arg%d", arg_index)});
       }
     }
   }

@@ -259,5 +259,63 @@ TEST(AstConverterTest, LocalVariableDeclarationFiltering) {
   EXPECT_THAT(code, Not(HasSubstr("s32 AudioUpdate;")));
 }
 
+TEST(AstConverterTest, GotoBlockLabelConsistency) {
+  // block 0: vram 0x80000000: beq $a0, $zero, 0x80000014
+  // delay slot: nop
+  // block 1: vram 0x80000008: addiu $v0, $zero, 1; jr $ra; nop
+  // block 2: vram 0x80000014: addiu $v0, $zero, 2; jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x10800004,  // 00: beq   $a0, $zero, +4 -> 0x80000014
+      0x00000000,  // 04: nop
+      0x24020001,  // 08: addiu $v0, $zero, 1
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+      0x24020002,  // 14: addiu $v0, $zero, 2
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  // Construct a region with gotos to test consistency
+  auto root = std::make_unique<StructuredRegion>();
+  root->type = RegionType::kSequence;
+
+  auto block0 = std::make_unique<StructuredRegion>();
+  block0->type = RegionType::kBlock;
+  block0->block_id = 0;
+  root->children.push_back(std::move(block0));
+
+  auto goto2 = std::make_unique<StructuredRegion>();
+  goto2->type = RegionType::kGoto;
+  goto2->block_id = 2;
+  root->children.push_back(std::move(goto2));
+
+  auto block2 = std::make_unique<StructuredRegion>();
+  block2->type = RegionType::kBlock;
+  block2->block_id = 2;
+  root->children.push_back(std::move(block2));
+
+  // Goto targeting non-emitted block 99
+  auto goto99 = std::make_unique<StructuredRegion>();
+  goto99->type = RegionType::kGoto;
+  goto99->block_id = 99;
+  root->children.push_back(std::move(goto99));
+
+  AstConverterOptions options;
+  options.function_name = "TestGotoConsistency";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("goto block_2;"));
+  EXPECT_THAT(code, HasSubstr("block_2:"));
+  EXPECT_THAT(code, HasSubstr("goto block_99;"));
+  EXPECT_THAT(code, HasSubstr("block_99:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
