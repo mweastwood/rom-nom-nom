@@ -184,6 +184,17 @@ std::string ExpressionBuilder::RegisterVarName(Register reg) {
   }
 }
 
+namespace {
+
+std::string StackVarName(int32_t offset) {
+  if (offset < 0) {
+    return absl::StrFormat("var_sp_neg_%d", -offset);
+  }
+  return absl::StrFormat("var_sp_%d", offset);
+}
+
+}  // namespace
+
 std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
     Register reg, const RegisterTracker& tracker) {
   if (reg == Register::kZero) {
@@ -349,7 +360,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             statement.expression = LiftedExpression::Integer(inst.immediate);
           } else if (inst.rs == Register::kSp) {
             statement.expression = LiftedExpression::Unary(
-                "&", LiftedExpression::Variable(absl::StrFormat("var_sp_%d", inst.immediate)));
+                "&", LiftedExpression::Variable(StackVarName(inst.immediate)));
           } else if (inst.immediate == 0 && inst.rs.has_value()) {
             statement.expression = LiftRegisterOrConstant(*inst.rs, tracker);
           } else if (inst.immediate < 0 && inst.rs.has_value()) {
@@ -465,8 +476,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
           if (*inst.rs == Register::kSp) {
-            statement.expression =
-                LiftedExpression::Variable(absl::StrFormat("var_sp_%d", inst.immediate));
+            statement.expression = LiftedExpression::Variable(StackVarName(inst.immediate));
           } else if (inst.immediate == 0) {
             statement.expression =
                 LiftedExpression::Load(load_type, LiftRegisterOrConstant(*inst.rs, tracker));
@@ -497,7 +507,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           LiftedStatement statement;
           if (*inst.rs == Register::kSp) {
             statement.kind = StatementKind::kAssignment;
-            statement.destination_variable = absl::StrFormat("var_sp_%d", inst.immediate);
+            statement.destination_variable = StackVarName(inst.immediate);
             statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
           } else {
             statement.kind = StatementKind::kStore;

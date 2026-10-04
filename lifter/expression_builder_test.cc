@@ -69,6 +69,22 @@ TEST(ExpressionBuilderTest, StackVariableAccess) {
   EXPECT_EQ(statements[2].ToString(), "return v0;\n");
 }
 
+TEST(ExpressionBuilderTest, StackVariableAccessNegativeOffset) {
+  std::vector<uint32_t> instruction_words = {
+      0xAFA4FFF0,  // 0: sw    $a0, -16($sp)
+      0x8FA2FFF0,  // 4: lw    $v0, -16($sp)
+      0x27A4FFF0,  // 8: addiu $a0, $sp, -16
+  };
+
+  auto instructions = *DecodeSequence(instruction_words);
+  auto statements = ExpressionBuilder::LiftInstructions(instructions);
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].ToString(), "var_sp_neg_16 = arg0;\n");
+  EXPECT_EQ(statements[1].ToString(), "v0 = var_sp_neg_16;\n");
+  EXPECT_EQ(statements[2].ToString(), "arg0 = &var_sp_neg_16;\n");
+}
+
 TEST(ExpressionBuilderTest, FunctionCallAndReturn) {
   std::string textproto = R"pb(
     entries { name: "AudioUpdate" address: 0x80001000 type: SYMBOL_FUNC size: 128 }
