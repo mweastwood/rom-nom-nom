@@ -94,6 +94,81 @@ TEST(LifterPipelineTest, EndToEndBranchFunction) {
   EXPECT_THAT(result_or->c_code, HasSubstr("return v0;"));
 }
 
+TEST(LifterPipelineTest, EndToEndSwitchFunction) {
+  std::vector<uint32_t> words = {
+      0x2C820002,  // 00: sltiu $v0, $a0, 2
+      0x1040000A,  // 04: beqz  $v0, 0x30 (.L_default / join)
+      0x00041080,  // 08: sll   $v0, $a0, 2
+      0x3C018002,  // 0C: lui   $at, 0x8002
+      0x00220821,  // 10: addu  $at, $at, $v0
+      0x8C221000,  // 14: lw    $v0, 0x1000($at)
+      0x00400008,  // 18: jr    $v0
+      0x00000000,  // 1C: nop
+      0x24020064,  // 20: addiu $v0, $zero, 100 (.L_case0)
+      0x0800974C,  // 24: j     0x80025D30 (join)
+      0x00000000,  // 28: nop
+      0x240200C8,  // 2C: addiu $v0, $zero, 200 (.L_case1)
+      0x03E00008,  // 30: jr    $ra (join)
+      0x00000000,  // 34: nop
+  };
+
+  uint32_t table_addr = 0x80021000;
+  absl::flat_hash_map<uint32_t, uint32_t> memory = {
+      {table_addr, 0x80025D20},
+      {table_addr + 4, 0x80025D2C},
+  };
+  auto memory_reader = [memory](uint32_t vram) -> std::optional<uint32_t> {
+    auto it = memory.find(vram);
+    if (it != memory.end()) return it->second;
+    return std::nullopt;
+  };
+
+  auto loaded_or = FunctionLoader::FromWords("GetSwitchValue", words, 0x80025D00, nullptr, nullptr,
+                                             memory_reader);
+  ASSERT_TRUE(loaded_or.ok()) << loaded_or.status();
+
+  LifterPipelineOptions options;
+  options.format_with_clang = false;
+
+  LifterPipeline pipeline(options);
+  auto result_or = pipeline.DecompileFunction(*loaded_or);
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  EXPECT_EQ(result_or->function_name, "GetSwitchValue");
+  EXPECT_THAT(result_or->c_code, HasSubstr("switch ("));
+  EXPECT_THAT(result_or->c_code, HasSubstr("case 0:"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("case 1:"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("break;"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("return;"));
+}
+
+TEST(LifterPipelineTest, EndToEndSwitchFunctionWithoutMemoryReaderGracefullySkips) {
+  std::vector<uint32_t> words = {
+      0x2C820002,  // 00: sltiu $v0, $a0, 2
+      0x1040000A,  // 04: beqz  $v0, 0x30
+      0x00041080,  // 08: sll   $v0, $a0, 2
+      0x3C018002,  // 0C: lui   $at, 0x8002
+      0x00220821,  // 10: addu  $at, $at, $v0
+      0x8C221000,  // 14: lw    $v0, 0x1000($at)
+      0x00400008,  // 18: jr    $v0
+      0x00000000,  // 1C: nop
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+
+  // No memory_reader provided
+  auto loaded_or = FunctionLoader::FromWords("GetSwitchNoMem", words, 0x80025D00);
+  ASSERT_TRUE(loaded_or.ok()) << loaded_or.status();
+
+  LifterPipelineOptions options;
+  options.format_with_clang = false;
+
+  LifterPipeline pipeline(options);
+  auto result_or = pipeline.DecompileFunction(*loaded_or);
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+  EXPECT_EQ(result_or->function_name, "GetSwitchNoMem");
+}
+
 TEST(LifterPipelineTest, EmptyInstructionsFails) {
   LoadedFunction empty_func;
   empty_func.name = "Empty";

@@ -21,6 +21,7 @@
 #include "lifter/control_flow_structurer.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/function_loader.h"
+#include "lifter/jump_table.h"
 #include "lifter/loop_analyzer.h"
 
 namespace rom_nom_nom {
@@ -67,8 +68,13 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
     return absl::InvalidArgumentError("LifterPipeline: No instructions to decompile.");
   }
 
-  // 1. Build Control Flow Graph
-  auto cfg_or = ControlFlowGraph::Build(loaded_func.instructions);
+  // 1. Detect Jump Tables and Build Control Flow Graph
+  std::vector<JumpTable> jump_tables;
+  if (loaded_func.memory_reader) {
+    jump_tables =
+        JumpTableDetector::DetectJumpTables(loaded_func.instructions, loaded_func.memory_reader);
+  }
+  auto cfg_or = ControlFlowGraph::Build(loaded_func.instructions, jump_tables);
   if (!cfg_or.ok()) {
     return cfg_or.status();
   }

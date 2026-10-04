@@ -307,6 +307,7 @@ cc_library(
         ":control_flow_structurer",
         ":dominator_tree",
         ":function_loader",
+        ":jump_table",
         ":loop_analyzer",
         "//core:c_ast",
         "@abseil-cpp//absl/status",
