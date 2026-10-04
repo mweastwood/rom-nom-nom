@@ -191,5 +191,31 @@ TEST(CAstTest, FunctionDeclarationToString) {
   EXPECT_THAT(code, HasSubstr("return result;"));
 }
 
+TEST(CAstTest, FunctionDeclarationPrototype) {
+  std::vector<CParameter> parameters;
+  parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+  parameters.push_back(CParameter{.type = CType::S32(), .name = "arg1"});
+
+  FunctionDeclaration function_with_parameters(CType::S32(), "AddNumbers", std::move(parameters),
+                                               std::make_unique<CompoundStatement>());
+  EXPECT_EQ(function_with_parameters.Prototype(), "s32 AddNumbers(s32 arg0, s32 arg1);\n");
+
+  FunctionDeclaration function_without_parameters(CType::Void(), "ClearCache", /*parameters=*/{},
+                                                  std::make_unique<CompoundStatement>());
+  EXPECT_EQ(function_without_parameters.Prototype(), "void ClearCache(void);\n");
+
+  std::vector<CParameter> static_parameters;
+  static_parameters.push_back(CParameter{.type = CType::S32(), .name = "size"});
+  FunctionDeclaration static_function_with_parameters(
+      CType::U8().MakePointer(), "AllocateBlock", std::move(static_parameters),
+      std::make_unique<CompoundStatement>(), /*is_static=*/true);
+  EXPECT_EQ(static_function_with_parameters.Prototype(), "static u8* AllocateBlock(s32 size);\n");
+
+  FunctionDeclaration static_function_without_parameters(
+      CType::Void(), "ResetState", /*parameters=*/{}, std::make_unique<CompoundStatement>(),
+      /*is_static=*/true);
+  EXPECT_EQ(static_function_without_parameters.Prototype(), "static void ResetState(void);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

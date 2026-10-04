@@ -564,16 +564,30 @@ std::string CParameter::ToString() const {
 
 // --- FunctionDeclaration ---
 
-std::string FunctionDeclaration::ToString() const {
-  std::vector<std::string> param_strs;
-  param_strs.reserve(parameters_.size());
-  for (const auto& param : parameters_) {
-    param_strs.push_back(param.ToString());
+std::string FunctionDeclaration::Prototype() const {
+  std::vector<std::string> parameter_strings;
+  parameter_strings.reserve(parameters_.size());
+  for (const auto& parameter : parameters_) {
+    parameter_strings.push_back(parameter.ToString());
   }
   std::string prefix = is_static_ ? "static " : "";
-  std::string params_joined = param_strs.empty() ? "void" : absl::StrJoin(param_strs, ", ");
+  std::string parameters_joined =
+      parameter_strings.empty() ? "void" : absl::StrJoin(parameter_strings, ", ");
+  return absl::StrFormat("%s%s %s(%s);\n", prefix, return_type_.ToString(), name_,
+                         parameters_joined);
+}
+
+std::string FunctionDeclaration::ToString() const {
+  std::vector<std::string> parameter_strings;
+  parameter_strings.reserve(parameters_.size());
+  for (const auto& parameter : parameters_) {
+    parameter_strings.push_back(parameter.ToString());
+  }
+  std::string prefix = is_static_ ? "static " : "";
+  std::string parameters_joined =
+      parameter_strings.empty() ? "void" : absl::StrJoin(parameter_strings, ", ");
   std::string header =
-      absl::StrFormat("%s%s %s(%s) ", prefix, return_type_.ToString(), name_, params_joined);
+      absl::StrFormat("%s%s %s(%s) ", prefix, return_type_.ToString(), name_, parameters_joined);
   return header + body_->ToString(0);
 }
 

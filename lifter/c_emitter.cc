@@ -4,6 +4,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,29 +18,85 @@
 namespace rom_nom_nom {
 
 std::string CTranslationUnit::ToString() const {
-  std::string out;
-  for (const auto& inc : includes) {
-    if (!inc.empty()) {
-      if (inc.front() == '<') {
-        out += absl::StrFormat("#include %s\n", inc);
+  std::string output;
+  for (const auto& include_path : includes) {
+    if (!include_path.empty()) {
+      if (include_path.front() == '<') {
+        output += absl::StrFormat("#include %s\n", include_path);
       } else {
-        out += absl::StrFormat("#include \"%s\"\n", inc);
+        output += absl::StrFormat("#include \"%s\"\n", include_path);
       }
     }
   }
   if (!includes.empty()) {
-    out += "\n";
+    output += "\n";
   }
-  for (size_t i = 0; i < functions.size(); ++i) {
-    if (i > 0) {
-      out += "\n";
-    }
-    out += functions[i].ToString();
-    if (out.back() != '\n') {
-      out += "\n";
+
+  std::set<std::string> defined_function_names;
+  std::string combined_function_code;
+  for (const auto& function : functions) {
+    defined_function_names.insert(function.Name());
+    combined_function_code += function.ToString();
+    if (combined_function_code.back() != '\n') {
+      combined_function_code += "\n";
     }
   }
-  return out;
+
+  static const std::regex assembly_function_regex(R"(\b(func_[0-9a-fA-F]+)\b)");
+  static const std::regex function_call_regex(R"(\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\()");
+  std::set<std::string> external_function_names;
+  for (auto regex_iterator = std::sregex_iterator(
+           combined_function_code.begin(), combined_function_code.end(), assembly_function_regex);
+       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
+    std::string symbol_name = regex_iterator->str(1);
+    if (!defined_function_names.count(symbol_name)) {
+      external_function_names.insert(symbol_name);
+    }
+  }
+  for (auto regex_iterator = std::sregex_iterator(
+           combined_function_code.begin(), combined_function_code.end(), function_call_regex);
+       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
+    std::string symbol_name = regex_iterator->str(1);
+    if (symbol_name == "if" || symbol_name == "while" || symbol_name == "for" ||
+        symbol_name == "switch" || symbol_name == "return" || symbol_name == "sizeof") {
+      continue;
+    }
+    if (!defined_function_names.count(symbol_name)) {
+      external_function_names.insert(symbol_name);
+    }
+  }
+
+  if (!external_function_names.empty()) {
+    for (const auto& external_function : external_function_names) {
+      output += absl::StrFormat("extern void %s();\n", external_function);
+    }
+    output += "\n";
+  }
+
+  static const std::regex data_symbol_regex(R"(\b((?:D_[0-9a-fA-F]+)|(?:g_[a-zA-Z0-9_]+))\b)");
+  std::set<std::string> external_data_symbols;
+  for (auto regex_iterator = std::sregex_iterator(combined_function_code.begin(),
+                                                  combined_function_code.end(), data_symbol_regex);
+       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
+    external_data_symbols.insert(regex_iterator->str(1));
+  }
+
+  if (!external_data_symbols.empty()) {
+    for (const auto& data_symbol : external_data_symbols) {
+      output += absl::StrFormat("extern s32 %s;\n", data_symbol);
+    }
+    output += "\n";
+  }
+
+  for (const auto& function : functions) {
+    output += function.Prototype();
+  }
+  if (!functions.empty()) {
+    output += "\n";
+  }
+
+  output += combined_function_code;
+  return output;
 }
 
 std::string CEmitter::EmitFunction(const FunctionDeclaration& func,

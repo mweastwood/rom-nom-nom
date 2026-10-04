@@ -603,6 +603,7 @@ class FunctionDeclaration {
   CompoundStatement* MutableBody() { return body_.get(); }
   bool IsStatic() const { return is_static_; }
 
+  std::string Prototype() const;
   std::string ToString() const;
 
  private:
