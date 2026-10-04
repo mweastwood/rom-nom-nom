@@ -24,6 +24,16 @@ enum class RegionType {
   kBreak,       // break out of loop
   kContinue,    // continue to next loop iteration
   kGoto,        // fallback unstructured jump
+  kSwitch,      // multi-way switch statement
+};
+
+struct StructuredRegion;
+
+// Represents a case branch in a structured switch statement.
+struct StructuredCase {
+  std::vector<int64_t> case_values;
+  bool is_default = false;
+  std::unique_ptr<StructuredRegion> body;
 };
 
 // Represents a node in the structured control flow AST tree.
@@ -40,6 +50,11 @@ struct StructuredRegion {
   // Loop details when type == kLoop
   LoopType loop_type = LoopType::kWhile;
   uint32_t loop_header = 0;
+
+  // Switch details when type == RegionType::kSwitch
+  uint32_t switch_block_id = 0;
+  const JumpTable* jump_table = nullptr;
+  std::vector<StructuredCase> cases;
 
   // Sub-regions:
   // - kSequence: list of sequential regions

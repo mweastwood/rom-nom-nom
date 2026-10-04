@@ -73,6 +73,14 @@ std::unique_ptr<StructuredRegion> CreateLoop(LoopType type, uint32_t header) {
   return r;
 }
 
+std::unique_ptr<StructuredRegion> CreateSwitch(uint32_t block_id, const JumpTable* jt) {
+  auto r = std::make_unique<StructuredRegion>();
+  r->type = RegionType::kSwitch;
+  r->switch_block_id = block_id;
+  r->jump_table = jt;
+  return r;
+}
+
 }  // namespace
 
 std::string StructuredRegion::ToString(int indent) const {
@@ -138,6 +146,23 @@ std::string StructuredRegion::ToString(int indent) const {
         }
         out += ind + "}\n";
       }
+      return out;
+    }
+    case RegionType::kSwitch: {
+      std::string out = ind + "switch (block_" + std::to_string(switch_block_id) + ") {\n";
+      for (const auto& sc : cases) {
+        for (int64_t val : sc.case_values) {
+          out += ind + "  case " + std::to_string(val) + ":\n";
+        }
+        if (sc.is_default) {
+          out += ind + "  default:\n";
+        }
+        if (sc.body) {
+          out += sc.body->ToString(indent + 2);
+        }
+        out += ind + "    break;\n";
+      }
+      out += ind + "}\n";
       return out;
     }
   }
@@ -270,6 +295,102 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
   const auto* block = cfg_->GetBlock(entry);
   if (block == nullptr) {
     return nullptr;
+  }
+
+  // Case: Multi-way branch (Switch statement)
+  const JumpTable* switch_jt = nullptr;
+  uint32_t switch_dispatch_block_id = entry;
+  bool has_bounds_block = false;
+
+  if (block->jump_table != nullptr) {
+    switch_jt = block->jump_table;
+    switch_dispatch_block_id = entry;
+  } else if (block->successors.size() == 2) {
+    uint32_t succ_fallthrough = 0;
+    for (const auto& edge : block->outgoing_edges) {
+      if (edge.type == EdgeType::kFallthrough) {
+        succ_fallthrough = edge.to_block_id;
+        break;
+      }
+    }
+    const auto* fallthrough_blk = cfg_->GetBlock(succ_fallthrough);
+    if (fallthrough_blk != nullptr && fallthrough_blk->jump_table != nullptr) {
+      switch_jt = fallthrough_blk->jump_table;
+      switch_dispatch_block_id = succ_fallthrough;
+      has_bounds_block = true;
+    }
+  }
+
+  if (switch_jt != nullptr) {
+    std::optional<uint32_t> join;
+    if (post_dom_tree_ != nullptr) {
+      join = post_dom_tree_->ImmediateDominator(entry);
+      if (join.has_value() && (*join == entry || *join == switch_dispatch_block_id)) {
+        join = post_dom_tree_->ImmediateDominator(*join);
+      }
+    }
+    if (follow.has_value() && (!join.has_value() || *join == *follow)) {
+      join = follow;
+    }
+
+    if (has_bounds_block) {
+      visited_.insert(switch_dispatch_block_id);
+    }
+
+    auto switch_region = CreateSwitch(switch_dispatch_block_id, switch_jt);
+
+    // Group jump table entries by target block ID
+    std::vector<uint32_t> unique_target_blocks;
+    absl::flat_hash_map<uint32_t, std::vector<int64_t>> target_to_cases;
+
+    for (const auto& entry_item : switch_jt->entries) {
+      const auto* target_blk = cfg_->FindBlockByVram(entry_item.target_vram);
+      if (target_blk != nullptr) {
+        uint32_t blk_id = target_blk->id;
+        if (!target_to_cases.contains(blk_id)) {
+          unique_target_blocks.push_back(blk_id);
+        }
+        target_to_cases[blk_id].push_back(entry_item.case_value);
+      }
+    }
+
+    // Default target
+    const auto* def_blk = cfg_->FindBlockByVram(switch_jt->default_target_vram);
+    uint32_t def_blk_id = (def_blk != nullptr) ? def_blk->id : 0;
+    bool has_explicit_default = false;
+    if (def_blk != nullptr && (!join.has_value() || def_blk_id != *join)) {
+      has_explicit_default = true;
+      if (!target_to_cases.contains(def_blk_id)) {
+        unique_target_blocks.push_back(def_blk_id);
+      }
+    }
+
+    for (uint32_t target_blk_id : unique_target_blocks) {
+      StructuredCase sc;
+      auto it_cases = target_to_cases.find(target_blk_id);
+      if (it_cases != target_to_cases.end()) {
+        sc.case_values = it_cases->second;
+      }
+      if (has_explicit_default && target_blk_id == def_blk_id) {
+        sc.is_default = true;
+      }
+      if (!join.has_value() || target_blk_id != *join) {
+        sc.body = StructureRegion(target_blk_id, join, current_loop);
+      }
+      switch_region->cases.push_back(std::move(sc));
+    }
+
+    if (join.has_value() && join != follow) {
+      auto after_switch = StructureRegion(*join, follow, current_loop);
+      if (after_switch != nullptr) {
+        auto seq = CreateSequence();
+        seq->children.push_back(std::move(switch_region));
+        FlattenSequence(seq.get(), std::move(after_switch));
+        return seq;
+      }
+    }
+
+    return switch_region;
   }
 
   // Case 1: Return or trap (0 successors)
