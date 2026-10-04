@@ -26,3 +26,25 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "differential_fuzzer",
+    srcs = ["differential_fuzzer.cc"],
+    hdrs = ["differential_fuzzer.h"],
+    deps = [
+        ":mips_emulator",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "differential_fuzzer_test",
+    srcs = ["differential_fuzzer_test.cc"],
+    deps = [
+        ":differential_fuzzer",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
