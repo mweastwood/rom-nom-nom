@@ -187,16 +187,43 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "rom_differ",
+    srcs = ["rom_differ.cc"],
+    hdrs = ["rom_differ.h"],
+    deps = [
+        "//core:sha1",
+        "//splitter:config",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "rom_differ_test",
+    srcs = ["rom_differ_test.cc"],
+    deps = [
+        ":rom_differ",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "differ",
     srcs = ["main.cc"],
     deps = [
         ":differ_pipeline",
+        ":rom_differ",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/flags:usage",
     ],
 )
+
 
 
 

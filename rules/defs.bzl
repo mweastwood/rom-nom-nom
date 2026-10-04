@@ -214,6 +214,7 @@ def _n64_lifted_c_rom_test_impl(ctx):
     rom = ctx.file.rom
     target_rom = ctx.file.target_rom
     config = ctx.file.config
+    differ = ctx.executable._differ
 
     script = ctx.actions.declare_file(ctx.label.name + ".sh")
 
@@ -222,83 +223,35 @@ set -euo pipefail
 
 TARGET_ROM="{target_rom}"
 BUILT_ROM="{built_rom}"
+CONFIG_FILE="{config}"
+DIFFER_BIN="{differ}"
 
-if [[ -f "$TARGET_ROM" ]]; then
-    ACTUAL_TARGET="$TARGET_ROM"
-elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$TARGET_ROM" ]]; then
-    ACTUAL_TARGET="${{RUNFILES_DIR:-.default_runfiles}}/$TARGET_ROM"
-else
-    ACTUAL_TARGET=$(find . -name "$(basename "$TARGET_ROM")" | head -n 1)
-fi
+resolve_path() {{
+    local path="$1"
+    if [[ -f "$path" ]]; then
+        echo "$path"
+    elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$path" ]]; then
+        echo "${{RUNFILES_DIR:-.default_runfiles}}/$path"
+    else
+        find . -name "$(basename "$path")" | head -n 1
+    fi
+}}
 
-if [[ -f "$BUILT_ROM" ]]; then
-    ACTUAL_BUILT="$BUILT_ROM"
-elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$BUILT_ROM" ]]; then
-    ACTUAL_BUILT="${{RUNFILES_DIR:-.default_runfiles}}/$BUILT_ROM"
-else
-    ACTUAL_BUILT=$(find . -name "$(basename "$BUILT_ROM")" | head -n 1)
-fi
+ACTUAL_TARGET=$(resolve_path "$TARGET_ROM")
+ACTUAL_BUILT=$(resolve_path "$BUILT_ROM")
+ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
+ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
 
-python3 -c "
-import hashlib, sys
-from pathlib import Path
-
-target_path = Path('$ACTUAL_TARGET')
-built_path = Path('$ACTUAL_BUILT')
-
-if not built_path.exists():
-    print(f'[FAIL] Built lifted C ROM does not exist at {{built_path}}!')
-    sys.exit(1)
-
-original_bytes = target_path.read_bytes()
-built_bytes = built_path.read_bytes()
-
-target_sha1 = hashlib.sha1(original_bytes).hexdigest()
-built_sha1 = hashlib.sha1(built_bytes).hexdigest()
-
-target_size = len(original_bytes)
-built_size = len(built_bytes)
-
-print('=' * 80)
-print('[LIFTED C ROM STRUCTURAL VALIDATION]')
-print(f'Target ROM SHA-1: {{target_sha1}}')
-print(f'Built  ROM SHA-1: {{built_sha1}}')
-print(f'Expected Size:    {{target_size}} bytes')
-print(f'Built Size:       {{built_size}} bytes')
-
-if built_size != target_size:
-    print(f'[FAIL] Size mismatch: built ROM has {{built_size}} bytes, expected {{target_size}} bytes!')
-    sys.exit(1)
-
-# Validate N64 Header (magic words, entrypoint)
-if original_bytes[:4] != built_bytes[:4]:
-    print(f'[FAIL] N64 header magic mismatch: {{built_bytes[:4].hex()}} vs {{original_bytes[:4].hex()}}!')
-    sys.exit(1)
-
-if original_bytes[8:12] != built_bytes[8:12]:
-    print(f'[FAIL] N64 entrypoint address mismatch: {{built_bytes[8:12].hex()}} vs {{original_bytes[8:12].hex()}}!')
-    sys.exit(1)
-
-print('[SUCCESS] N64 ROM structural integrity verified!')
-print('-' * 80)
-print('[DIFF METRIC RELATIVE TO RETAIL ROM]')
-
-matching_bytes = sum(1 for a, b in zip(original_bytes, built_bytes) if a == b)
-byte_percentage = (matching_bytes / target_size) * 100.0
-differing_bytes = target_size - matching_bytes
-
-total_words = target_size // 4
-matching_words = sum(1 for i in range(0, target_size, 4) if original_bytes[i:i+4] == built_bytes[i:i+4])
-word_percentage = (matching_words / total_words) * 100.0
-
-print(f'Byte Match: {{matching_bytes:,}} / {{target_size:,}} bytes ({{byte_percentage:.2f}}%)')
-print(f'Word Match: {{matching_words:,}} / {{total_words:,}} words ({{word_percentage:.2f}}%)')
-print(f'Differing Bytes: {{differing_bytes:,}} bytes')
-print('=' * 80)
-"
+"$ACTUAL_DIFFER" \
+    --rom="$ACTUAL_TARGET" \
+    --built_rom="$ACTUAL_BUILT" \
+    --config="$ACTUAL_CONFIG" \
+    --nocolor
 """.format(
         target_rom = target_rom.short_path,
         built_rom = rom.short_path,
+        config = config.short_path,
+        differ = differ.short_path,
     )
 
     ctx.actions.write(
@@ -310,7 +263,9 @@ print('=' * 80)
     return [
         DefaultInfo(
             executable = script,
-            runfiles = ctx.runfiles(files = [rom, target_rom, config]),
+            runfiles = ctx.runfiles(files = [rom, target_rom, config, differ]).merge(
+                ctx.attr._differ[DefaultInfo].default_runfiles,
+            ),
         ),
     ]
 
@@ -321,6 +276,11 @@ n64_lifted_c_rom_test = rule(
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+        "_differ": attr.label(
+            default = Label("//differ:differ"),
+            executable = True,
+            cfg = "exec",
+        ),
     },
 )
 
