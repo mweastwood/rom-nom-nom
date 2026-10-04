@@ -210,6 +210,120 @@ n64_rom_bitexact_test = rule(
     },
 )
 
+def _n64_lifted_c_rom_test_impl(ctx):
+    rom = ctx.file.rom
+    target_rom = ctx.file.target_rom
+    config = ctx.file.config
+
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+
+    script_content = """#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_ROM="{target_rom}"
+BUILT_ROM="{built_rom}"
+
+if [[ -f "$TARGET_ROM" ]]; then
+    ACTUAL_TARGET="$TARGET_ROM"
+elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$TARGET_ROM" ]]; then
+    ACTUAL_TARGET="${{RUNFILES_DIR:-.default_runfiles}}/$TARGET_ROM"
+else
+    ACTUAL_TARGET=$(find . -name "$(basename "$TARGET_ROM")" | head -n 1)
+fi
+
+if [[ -f "$BUILT_ROM" ]]; then
+    ACTUAL_BUILT="$BUILT_ROM"
+elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$BUILT_ROM" ]]; then
+    ACTUAL_BUILT="${{RUNFILES_DIR:-.default_runfiles}}/$BUILT_ROM"
+else
+    ACTUAL_BUILT=$(find . -name "$(basename "$BUILT_ROM")" | head -n 1)
+fi
+
+python3 -c "
+import hashlib, sys
+from pathlib import Path
+
+target_path = Path('$ACTUAL_TARGET')
+built_path = Path('$ACTUAL_BUILT')
+
+if not built_path.exists():
+    print(f'[FAIL] Built lifted C ROM does not exist at {{built_path}}!')
+    sys.exit(1)
+
+original_bytes = target_path.read_bytes()
+built_bytes = built_path.read_bytes()
+
+target_sha1 = hashlib.sha1(original_bytes).hexdigest()
+built_sha1 = hashlib.sha1(built_bytes).hexdigest()
+
+target_size = len(original_bytes)
+built_size = len(built_bytes)
+
+print('=' * 80)
+print('[LIFTED C ROM STRUCTURAL VALIDATION]')
+print(f'Target ROM SHA-1: {{target_sha1}}')
+print(f'Built  ROM SHA-1: {{built_sha1}}')
+print(f'Expected Size:    {{target_size}} bytes')
+print(f'Built Size:       {{built_size}} bytes')
+
+if built_size != target_size:
+    print(f'[FAIL] Size mismatch: built ROM has {{built_size}} bytes, expected {{target_size}} bytes!')
+    sys.exit(1)
+
+# Validate N64 Header (magic words, entrypoint)
+if original_bytes[:4] != built_bytes[:4]:
+    print(f'[FAIL] N64 header magic mismatch: {{built_bytes[:4].hex()}} vs {{original_bytes[:4].hex()}}!')
+    sys.exit(1)
+
+if original_bytes[8:12] != built_bytes[8:12]:
+    print(f'[FAIL] N64 entrypoint address mismatch: {{built_bytes[8:12].hex()}} vs {{original_bytes[8:12].hex()}}!')
+    sys.exit(1)
+
+print('[SUCCESS] N64 ROM structural integrity verified!')
+print('-' * 80)
+print('[DIFF METRIC RELATIVE TO RETAIL ROM]')
+
+matching_bytes = sum(1 for a, b in zip(original_bytes, built_bytes) if a == b)
+byte_percentage = (matching_bytes / target_size) * 100.0
+differing_bytes = target_size - matching_bytes
+
+total_words = target_size // 4
+matching_words = sum(1 for i in range(0, target_size, 4) if original_bytes[i:i+4] == built_bytes[i:i+4])
+word_percentage = (matching_words / total_words) * 100.0
+
+print(f'Byte Match: {{matching_bytes:,}} / {{target_size:,}} bytes ({{byte_percentage:.2f}}%)')
+print(f'Word Match: {{matching_words:,}} / {{total_words:,}} words ({{word_percentage:.2f}}%)')
+print(f'Differing Bytes: {{differing_bytes:,}} bytes')
+print('=' * 80)
+"
+""".format(
+        target_rom = target_rom.short_path,
+        built_rom = rom.short_path,
+    )
+
+    ctx.actions.write(
+        output = script,
+        content = script_content,
+        is_executable = True,
+    )
+
+    return [
+        DefaultInfo(
+            executable = script,
+            runfiles = ctx.runfiles(files = [rom, target_rom, config]),
+        ),
+    ]
+
+n64_lifted_c_rom_test = rule(
+    implementation = _n64_lifted_c_rom_test_impl,
+    test = True,
+    attrs = {
+        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+    },
+)
+
 def n64_game(name, game, config, symbols, rom, srcs = []):
     """Macro to instantiate an N64 game with pure Bazel generated assembly pipeline."""
     split_name = name + "_split"
@@ -252,9 +366,13 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         tests = [":" + assembly_test_name],
     )
 
-    # Stage 3: Whole-game lifted C pipeline and lifted C ROM
+    # Stage 3: Whole-game lifted C pipeline, lifted C ROM, and validation test
+    lifted_c_name = name + "_lifted_c"
+    lifted_c_rom_name = name + "_lifted_c_rom"
+    lifted_c_test_name = name + "_lifted_c_rom_test"
+
     lifter_lift_game(
-        name = name + "_lifted",
+        name = lifted_c_name,
         game = game,
         config = config,
         symbols = symbols,
@@ -262,16 +380,34 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         split = ":" + split_name,
     )
 
+    # Backward-compatible alias for lifted directory
+    native.alias(
+        name = name + "_lifted",
+        actual = ":" + lifted_c_name,
+    )
+
     n64_rom(
-        name = name + "_lifted_rom",
+        name = lifted_c_rom_name,
         game = game,
         config = config,
         symbols = symbols,
         split = ":" + split_name,
-        src_dir = ":" + name + "_lifted",
-        out_name = game + "_lifted",
+        src_dir = ":" + lifted_c_name,
+        out_name = game + "_lifted_c",
         prefer_c = True,
-        tags = ["manual"],
+    )
+
+    # Backward-compatible alias for lifted ROM
+    native.alias(
+        name = name + "_lifted_rom",
+        actual = ":" + lifted_c_rom_name,
+    )
+
+    n64_lifted_c_rom_test(
+        name = lifted_c_test_name,
+        rom = ":" + lifted_c_rom_name,
+        target_rom = rom,
+        config = config,
     )
 
 def _lifter_lift_game_impl(ctx):
