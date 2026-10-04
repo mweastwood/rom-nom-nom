@@ -8,6 +8,12 @@
 
 namespace rom_nom_nom::fuzzer {
 
+namespace {
+bool IsEvenFpRegister(FpRegister reg) {
+  return (static_cast<int>(reg) & 1) == 0;
+}
+}  // namespace
+
 MipsEmulator::MipsEmulator(size_t memory_size_bytes, uint32_t base_vram)
     : memory_size_(memory_size_bytes), base_vram_(base_vram), memory_(memory_size_bytes, 0) {
   Reset();
@@ -649,8 +655,7 @@ ExecutionStatus MipsEmulator::Step() {
       uint64_t val = 0;
       if (!Read64(addr, &val)) return ExecutionStatus::kMemoryFault;
       if (inst.ft.has_value()) {
-        int idx = static_cast<int>(*inst.ft);
-        if ((idx & 1) != 0) return ExecutionStatus::kInvalidOpcode;
+        if (!IsEvenFpRegister(*inst.ft)) return ExecutionStatus::kInvalidOpcode;
         SetFpDoubleBits(*inst.ft, val);
       }
       break;
@@ -659,8 +664,7 @@ ExecutionStatus MipsEmulator::Step() {
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
       if (inst.ft.has_value()) {
-        int idx = static_cast<int>(*inst.ft);
-        if ((idx & 1) != 0) return ExecutionStatus::kInvalidOpcode;
+        if (!IsEvenFpRegister(*inst.ft)) return ExecutionStatus::kInvalidOpcode;
         uint64_t val = GetFpDoubleBits(*inst.ft);
         if (!Write64(addr, val)) return ExecutionStatus::kMemoryFault;
       }
@@ -739,7 +743,142 @@ ExecutionStatus MipsEmulator::Step() {
     case Opcode::kTruncWS: {
       if (inst.fd && inst.fs) {
         float f = GetFpRegister(*inst.fs);
-        int32_t val = static_cast<int32_t>(f);
+        int32_t val = 0;
+        if (std::isnan(f)) {
+          val = 0x7FFFFFFF;
+        } else if (f >= 2147483647.0f) {
+          val = 0x7FFFFFFF;
+        } else if (f <= -2147483648.0f) {
+          val = static_cast<int32_t>(0x80000000u);
+        } else {
+          val = static_cast<int32_t>(std::trunc(f));
+        }
+        SetFpBits(*inst.fd, static_cast<uint32_t>(val));
+      }
+      break;
+    }
+
+    // Double-Precision Floating-Point Arithmetic
+    case Opcode::kAddD: {
+      if (inst.fd && inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs) ||
+            !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDouble(*inst.fd, GetFpDouble(*inst.fs) + GetFpDouble(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kSubD: {
+      if (inst.fd && inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs) ||
+            !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDouble(*inst.fd, GetFpDouble(*inst.fs) - GetFpDouble(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kMulD: {
+      if (inst.fd && inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs) ||
+            !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDouble(*inst.fd, GetFpDouble(*inst.fs) * GetFpDouble(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kDivD: {
+      if (inst.fd && inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs) ||
+            !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDouble(*inst.fd, GetFpDouble(*inst.fs) / GetFpDouble(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kSqrtD: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDouble(*inst.fd, std::sqrt(GetFpDouble(*inst.fs)));
+      }
+      break;
+    }
+    case Opcode::kAbsD: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDoubleBits(*inst.fd, GetFpDoubleBits(*inst.fs) & ~(1ULL << 63));
+      }
+      break;
+    }
+    case Opcode::kMovD: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDoubleBits(*inst.fd, GetFpDoubleBits(*inst.fs));
+      }
+      break;
+    }
+    case Opcode::kNegD: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fd) || !IsEvenFpRegister(*inst.fs)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDoubleBits(*inst.fd, GetFpDoubleBits(*inst.fs) ^ (1ULL << 63));
+      }
+      break;
+    }
+    case Opcode::kCvtSD: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fs)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpRegister(*inst.fd, static_cast<float>(GetFpDouble(*inst.fs)));
+      }
+      break;
+    }
+    case Opcode::kCvtDS: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fd)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        SetFpDouble(*inst.fd, static_cast<double>(GetFpRegister(*inst.fs)));
+      }
+      break;
+    }
+    case Opcode::kCvtDW: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fd)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        int32_t val = static_cast<int32_t>(GetFpBits(*inst.fs));
+        SetFpDouble(*inst.fd, static_cast<double>(val));
+      }
+      break;
+    }
+    case Opcode::kTruncWD: {
+      if (inst.fd && inst.fs) {
+        if (!IsEvenFpRegister(*inst.fs)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        double d = GetFpDouble(*inst.fs);
+        int32_t val = 0;
+        if (std::isnan(d)) {
+          val = 0x7FFFFFFF;
+        } else if (d >= 2147483647.0) {
+          val = 0x7FFFFFFF;
+        } else if (d <= -2147483648.0) {
+          val = static_cast<int32_t>(0x80000000u);
+        } else {
+          val = static_cast<int32_t>(std::trunc(d));
+        }
         SetFpBits(*inst.fd, static_cast<uint32_t>(val));
       }
       break;
@@ -761,6 +900,33 @@ ExecutionStatus MipsEmulator::Step() {
     case Opcode::kCLeS: {
       if (inst.fs && inst.ft) {
         fpu_cond_ = (GetFpRegister(*inst.fs) <= GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kCEqD: {
+      if (inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fs) || !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        fpu_cond_ = (GetFpDouble(*inst.fs) == GetFpDouble(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kCLtD: {
+      if (inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fs) || !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        fpu_cond_ = (GetFpDouble(*inst.fs) < GetFpDouble(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kCLeD: {
+      if (inst.fs && inst.ft) {
+        if (!IsEvenFpRegister(*inst.fs) || !IsEvenFpRegister(*inst.ft)) {
+          return ExecutionStatus::kInvalidOpcode;
+        }
+        fpu_cond_ = (GetFpDouble(*inst.fs) <= GetFpDouble(*inst.ft));
       }
       break;
     }
@@ -835,6 +1001,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.v1 = gpr_[3];
       result.f0 = GetFpRegister(FpRegister::kF0);
       result.f0_bits = GetFpBits(FpRegister::kF0);
+      result.f0_double = GetFpDouble(FpRegister::kF0);
+      result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
       result.write_log = write_log_;
       return result;
     }
@@ -844,6 +1012,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.v1 = gpr_[3];
       result.f0 = GetFpRegister(FpRegister::kF0);
       result.f0_bits = GetFpBits(FpRegister::kF0);
+      result.f0_double = GetFpDouble(FpRegister::kF0);
+      result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
       result.write_log = write_log_;
       result.error_message = absl::StrFormat("Execution halted with status %d at PC 0x%08X",
                                              static_cast<int>(status), pc_);
@@ -856,6 +1026,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
   result.v1 = gpr_[3];
   result.f0 = GetFpRegister(FpRegister::kF0);
   result.f0_bits = GetFpBits(FpRegister::kF0);
+  result.f0_double = GetFpDouble(FpRegister::kF0);
+  result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
   result.write_log = write_log_;
   result.error_message = absl::StrFormat("Exceeded maximum step limit of %llu", max_steps);
   return result;

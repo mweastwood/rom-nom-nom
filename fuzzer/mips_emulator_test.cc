@@ -1035,5 +1035,225 @@ TEST(MipsEmulatorTest, Ldc1OddRegisterFails) {
   EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
 }
 
+TEST(MipsEmulatorTest, DoublePrecisionArithmetic) {
+  MipsEmulator emu;
+  emu.SetFpDouble(FpRegister::kF2, 10.5);
+  emu.SetFpDouble(FpRegister::kF4, 2.5);
+
+  // 00: add.d  $f0, $f2, $f4
+  // 04: jr     $ra
+  // 08: nop
+  std::vector<uint32_t> code_add = {
+      0x46241000,  // add.d $f0, $f2, $f4
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_add));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_DOUBLE_EQ(res.f0_double, 13.0);
+  EXPECT_DOUBLE_EQ(emu.GetFpDouble(FpRegister::kF0), 13.0);
+
+  // sub.d
+  std::vector<uint32_t> code_sub = {0x46241001, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_sub));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 8.0);
+
+  // mul.d
+  std::vector<uint32_t> code_mul = {0x46241002, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_mul));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 26.25);
+
+  // div.d
+  std::vector<uint32_t> code_div = {0x46241003, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_div));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 4.2);
+
+  // sqrt.d
+  emu.SetFpDouble(FpRegister::kF2, 64.0);
+  std::vector<uint32_t> code_sqrt = {0x46201004, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_sqrt));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 8.0);
+
+  // abs.d
+  emu.SetFpDouble(FpRegister::kF2, -42.75);
+  std::vector<uint32_t> code_abs = {0x46201005, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_abs));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 42.75);
+
+  // mov.d
+  emu.SetFpDouble(FpRegister::kF2, 123.456);
+  std::vector<uint32_t> code_mov = {0x46201006, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_mov));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 123.456);
+
+  // neg.d
+  std::vector<uint32_t> code_neg = {0x46201007, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_neg));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, -123.456);
+}
+
+TEST(MipsEmulatorTest, DoublePrecisionConversions) {
+  MipsEmulator emu;
+
+  // cvt.s.d $f0, $f2 (double to single)
+  emu.SetFpDouble(FpRegister::kF2, 3.141592653589793);
+  std::vector<uint32_t> code_cvt_sd = {
+      0x46201020,  // cvt.s.d $f0, $f2
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_cvt_sd));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_FLOAT_EQ(res.f0, 3.1415927f);
+
+  // cvt.d.s $f0, $f2 (single to double)
+  emu.SetFpRegister(FpRegister::kF2, 2.5f);
+  std::vector<uint32_t> code_cvt_ds = {
+      0x46001021,  // cvt.d.s $f0, $f2
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_cvt_ds));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, 2.5);
+
+  // cvt.d.w $f0, $f2 (32-bit int in $f2 to double)
+  emu.SetFpBits(FpRegister::kF2, static_cast<uint32_t>(-500));
+  std::vector<uint32_t> code_cvt_dw = {
+      0x46801021,  // cvt.d.w $f0, $f2
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_cvt_dw));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_DOUBLE_EQ(res.f0_double, -500.0);
+
+  // trunc.w.d $f0, $f2 (double to 32-bit int)
+  emu.SetFpDouble(FpRegister::kF2, 123.85);
+  std::vector<uint32_t> code_trunc = {
+      0x4620100D,  // trunc.w.d $f0, $f2
+      0x03E00008,  // jr        $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_trunc));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF0), 123u);
+
+  // trunc.w.d with negative value
+  emu.SetFpDouble(FpRegister::kF2, -456.9);
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(static_cast<int32_t>(emu.GetFpBits(FpRegister::kF0)), -456);
+
+  // trunc.w.d with NaN clamps to 0x7FFFFFFF
+  emu.SetFpDouble(FpRegister::kF2, std::numeric_limits<double>::quiet_NaN());
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF0), 0x7FFFFFFFu);
+
+  // trunc.w.d with overflow clamps
+  emu.SetFpDouble(FpRegister::kF2, 1e20);
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF0), 0x7FFFFFFFu);
+
+  emu.SetFpDouble(FpRegister::kF2, -1e20);
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF0), 0x80000000u);
+}
+
+TEST(MipsEmulatorTest, DoublePrecisionComparisonsAndBranches) {
+  MipsEmulator emu;
+  emu.SetFpDouble(FpRegister::kF2, 10.0);
+  emu.SetFpDouble(FpRegister::kF4, 20.0);
+
+  // 00: c.lt.d $f2, $f4   (10.0 < 20.0 -> true)
+  // 04: bc1t   target (+2 instructions -> 0x10)
+  // 08: addiu  $v0, $zero, 1   (delay slot executed: v0 = 1)
+  // 0C: addiu  $v0, $zero, 2   (skipped)
+  // 10: jr     $ra
+  // 14: nop
+  std::vector<uint32_t> code = {
+      0x4624103C,  // c.lt.d $f2, $f4
+      0x45010002,  // bc1t   +2
+      0x24020001,  // addiu  $v0, $zero, 1
+      0x24020002,  // addiu  $v0, $zero, 2
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_TRUE(emu.GetFpuCondition());
+  EXPECT_EQ(res.v0, 1u);
+
+  // Test c.eq.d (10.0 == 20.0 -> false)
+  std::vector<uint32_t> code_eq = {
+      0x46241032,  // c.eq.d $f2, $f4
+      0x45000002,  // bc1f   +2 (taken because false)
+      0x24020005,  // addiu  $v0, $zero, 5 (delay slot)
+      0x24020006,  // addiu  $v0, $zero, 6 (skipped)
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_eq));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_FALSE(emu.GetFpuCondition());
+  EXPECT_EQ(res.v0, 5u);
+
+  // Test c.le.d (10.0 <= 20.0 -> true)
+  std::vector<uint32_t> code_le = {
+      0x4624103E,  // c.le.d $f2, $f4
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_le));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_TRUE(emu.GetFpuCondition());
+}
+
+TEST(MipsEmulatorTest, DoublePrecisionOddRegistersRaiseInvalidOpcode) {
+  MipsEmulator emu;
+
+  // add.d with odd fd ($f1): 0x46240840
+  // add.d $f1, $f2, $f4 -> fd=1 (odd)
+  std::vector<uint32_t> code_odd_fd = {
+      0x46241040,  // add.d $f1, $f2, $f4
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_odd_fd));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
+
+  // cvt.s.d with odd fs ($f1):
+  // cvt.s.d $f0, $f1 -> fs=1 (odd)
+  std::vector<uint32_t> code_odd_fs = {
+      0x46200820,  // cvt.s.d $f0, $f1
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_odd_fs));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
+
+  // c.eq.d with odd ft ($f3):
+  std::vector<uint32_t> code_odd_ft = {
+      0x46231032,  // c.eq.d $f2, $f3
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code_odd_ft));
+  res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

@@ -42,6 +42,8 @@ struct ExecutionResult {
   uint32_t v1 = 0;
   float f0 = 0.0f;
   uint32_t f0_bits = 0;
+  double f0_double = 0.0;
+  uint64_t f0_double_bits = 0;
   std::vector<MemoryWrite> write_log;
   std::string error_message;
 };
