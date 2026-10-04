@@ -115,7 +115,7 @@ segments {
   name: "boot"
   type: SEGMENT_CODE
   rom_start: 0
-  rom_end: 0x1000
+  rom_end: 15
 }
 )"));
 
@@ -190,7 +190,7 @@ segments {
   name: "boot"
   type: SEGMENT_CODE
   rom_start: 0
-  rom_end: 0x1000
+  rom_end: 15
 }
 )"));
 
@@ -328,6 +328,79 @@ TEST_F(RomBuilderTest, ValidatesEmptyRequiredOptions) {
 
   RomBuilder b3(toolchain_, {.game_name = "game", .out_elf = "a.elf", .out_rom = ""}, compiler);
   EXPECT_EQ(b3.Build().status().code(), absl::StatusCode::kInvalidArgument);
+}
+
+TEST_F(RomBuilderTest, BuildPadsRomToCartridgeMediaSize) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot() {}");
+  CreateFile(asm_dir_ / "entry.s", ".text\nnop");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    segments {
+      name: "boot"
+      rom_start: 0x0
+      rom_end: 64
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path output_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path output_rom = test_dir_ / "out" / "test_game.z64";
+
+  auto mock_process_runner =
+      [&](const ProcessOptions& process_options) -> absl::StatusOr<ProcessResult> {
+    if (process_options.args.size() >= 4 && process_options.args[1] == "binary" &&
+        process_options.args[3] == output_rom.string()) {
+      std::filesystem::create_directories(output_rom.parent_path());
+      std::ofstream rom_output(output_rom, std::ios::binary);
+      std::string initial_content(16, '\xAA');
+      rom_output.write(initial_content.data(), initial_content.size());
+    }
+    ProcessResult process_result;
+    process_result.exit_code = 0;
+    return process_result;
+  };
+
+  Compiler compiler(toolchain_, mock_process_runner);
+
+  RomBuilderOptions builder_options{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = output_elf,
+      .out_rom = output_rom,
+      .is_test = false,
+      .prefer_c = false,
+  };
+
+  RomBuilder rom_builder(toolchain_, builder_options, compiler);
+  auto build_result_or = rom_builder.Build();
+  ASSERT_TRUE(build_result_or.ok()) << build_result_or.status();
+
+  // Verify ROM was unconditionally padded from 16 bytes to the expected 64 bytes
+  std::error_code error_code;
+  EXPECT_EQ(std::filesystem::file_size(output_rom, error_code), uint64_t{64});
+
+  // Verify the initial 16 bytes are intact and trailing 48 bytes are zero padding
+  std::ifstream rom_input(output_rom, std::ios::binary);
+  std::string file_content((std::istreambuf_iterator<char>(rom_input)),
+                           std::istreambuf_iterator<char>());
+  ASSERT_EQ(file_content.size(), 64ULL);
+  EXPECT_EQ(file_content.substr(0, 16), std::string(16, '\xAA'));
+  EXPECT_EQ(file_content.substr(16), std::string(48, '\0'));
 }
 
 }  // namespace

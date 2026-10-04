@@ -258,6 +258,20 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     return extract_status;
   }
 
+  // Pad ROM to expected cartridge size based on configuration segments
+  uint64_t expected_rom_size = 0;
+  for (const auto& segment : config.segments()) {
+    expected_rom_size = std::max<uint64_t>(expected_rom_size, segment.rom_end());
+  }
+  uint64_t current_rom_size = std::filesystem::file_size(options_.out_rom, ec);
+  if (expected_rom_size > current_rom_size) {
+    std::ofstream rom_append_stream(options_.out_rom, std::ios::binary | std::ios::app);
+    if (rom_append_stream.is_open()) {
+      std::vector<char> padding_buffer(expected_rom_size - current_rom_size, 0);
+      rom_append_stream.write(padding_buffer.data(), padding_buffer.size());
+    }
+  }
+
   // 8. Verification
   RomBuildResult result;
   result.total_objects = obj_refs.size();
