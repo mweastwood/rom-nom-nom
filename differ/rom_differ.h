@@ -14,8 +14,8 @@ namespace rom_nom_nom {
 
 // Options configuring the ROM difference analysis.
 struct RomDiffOptions {
-  std::filesystem::path target_rom_path;
-  std::filesystem::path built_rom_path;
+  std::filesystem::path base_rom_path;
+  std::filesystem::path candidate_rom_path;
   std::filesystem::path config_path;
   bool use_color = true;
 };

@@ -79,8 +79,8 @@ TEST_F(RomDifferEndToEndTest, StructuralValidationFailsOnSizeMismatch) {
   }
 
   RomDiffer differ(RomDiffOptions{
-      .target_rom_path = target_path,
-      .built_rom_path = built_path,
+      .base_rom_path = target_path,
+      .candidate_rom_path = built_path,
   });
 
   auto result_or = differ.Diff();
@@ -113,8 +113,8 @@ TEST_F(RomDifferEndToEndTest, StructuralValidationFailsOnMagicMismatch) {
   }
 
   RomDiffer differ(RomDiffOptions{
-      .target_rom_path = target_path,
-      .built_rom_path = built_path,
+      .base_rom_path = target_path,
+      .candidate_rom_path = built_path,
   });
 
   auto result_or = differ.Diff();
@@ -152,8 +152,8 @@ TEST_F(RomDifferEndToEndTest, MatchesIdenticalRoms) {
   }
 
   RomDiffer differ(RomDiffOptions{
-      .target_rom_path = target_path,
-      .built_rom_path = built_path,
+      .base_rom_path = target_path,
+      .candidate_rom_path = built_path,
       .use_color = false,
   });
 

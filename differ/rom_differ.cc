@@ -133,13 +133,13 @@ size_t RomDiffer::ComputeWordLcs(absl::Span<const uint32_t> target_words,
 }
 
 absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
-  auto target_bytes_or = ReadBinaryFile(options_.target_rom_path);
+  auto target_bytes_or = ReadBinaryFile(options_.base_rom_path);
   if (!target_bytes_or.ok()) {
     return target_bytes_or.status();
   }
   const std::vector<uint8_t>& target_bytes = *target_bytes_or;
 
-  auto built_bytes_or = ReadBinaryFile(options_.built_rom_path);
+  auto built_bytes_or = ReadBinaryFile(options_.candidate_rom_path);
   if (!built_bytes_or.ok()) {
     return built_bytes_or.status();
   }

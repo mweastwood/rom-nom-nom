@@ -22,9 +22,9 @@ ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
 ABSL_FLAG(std::string, source, "", "Explicit path to C source file containing function.");
 ABSL_FLAG(std::string, config, "", "Explicit path to split config textproto.");
 ABSL_FLAG(std::string, symbols, "", "Explicit path to symbol table textproto or txt.");
-ABSL_FLAG(std::string, rom, "", "Explicit path to target retail ROM binary.");
-ABSL_FLAG(std::string, built_rom, "",
-          "Explicit path to built comparison ROM binary (enables ROM diff mode).");
+ABSL_FLAG(std::string, base_rom, "", "Explicit path to base retail ROM binary.");
+ABSL_FLAG(std::string, candidate_rom, "",
+          "Explicit path to candidate comparison ROM binary (enables ROM diff mode).");
 ABSL_FLAG(bool, watch, false, "Watch source file and automatically re-diff on save.");
 ABSL_FLAG(bool, color, true, "Enable ANSI color syntax highlighting.");
 ABSL_FLAG(int, column_width, 48, "Character width for each side-by-side assembly column.");
@@ -45,10 +45,10 @@ int main(int argc, char* argv[]) {
       "Usage:\n"
       "  Function Diff (unlinked code vs ROM):\n"
       "    differ <function_name> [--source=<path>] [--game=<game>] [--watch] [--no-color]\n"
-      "  ROM Diff (target ROM vs built ROM):\n"
-      "    differ --built_rom=<path> [--rom=<path>] [--config=<path>] [--game=<game>] "
+      "  ROM Diff (base ROM vs candidate ROM):\n"
+      "    differ --candidate_rom=<path> [--base_rom=<path>] [--config=<path>] [--game=<game>] "
       "[--no-color]\n"
-      "    differ <target_rom.z64> <built_rom.z64> [--config=<path>] [--no-color]");
+      "    differ <base_rom.z64> <candidate_rom.z64> [--config=<path>] [--no-color]");
 
   std::vector<char*> remaining_args = absl::ParseCommandLine(argc, argv);
 
@@ -56,34 +56,34 @@ int main(int argc, char* argv[]) {
   std::string source_path = absl::GetFlag(FLAGS_source);
   std::string config_path = absl::GetFlag(FLAGS_config);
   std::string symbols_path = absl::GetFlag(FLAGS_symbols);
-  std::string target_rom_path = absl::GetFlag(FLAGS_rom);
-  std::string built_rom_path = absl::GetFlag(FLAGS_built_rom);
+  std::string base_rom_path = absl::GetFlag(FLAGS_base_rom);
+  std::string candidate_rom_path = absl::GetFlag(FLAGS_candidate_rom);
   bool watch = absl::GetFlag(FLAGS_watch);
   bool color = absl::GetFlag(FLAGS_color) && isatty(STDOUT_FILENO);
   int col_width = absl::GetFlag(FLAGS_column_width);
 
   // Check if ROM diff mode is triggered via positional arguments (e.g. differ a.z64 b.z64)
-  bool is_rom_mode = !built_rom_path.empty();
+  bool is_rom_mode = !candidate_rom_path.empty();
   if (!is_rom_mode && remaining_args.size() >= 3) {
     std::string_view first_arg = remaining_args[1];
     std::string_view second_arg = remaining_args[2];
     if (absl::EndsWith(first_arg, ".z64") && absl::EndsWith(second_arg, ".z64")) {
       is_rom_mode = true;
-      if (target_rom_path.empty()) {
-        target_rom_path = std::string(first_arg);
+      if (base_rom_path.empty()) {
+        base_rom_path = std::string(first_arg);
       }
-      built_rom_path = std::string(second_arg);
+      candidate_rom_path = std::string(second_arg);
     }
   }
 
   // --- ROM DIFF MODE ---
   if (is_rom_mode) {
     std::error_code error_code;
-    if (target_rom_path.empty()) {
+    if (base_rom_path.empty()) {
       std::filesystem::path default_rom =
           std::filesystem::path("roms") / absl::StrCat(game_name, ".z64");
       if (std::filesystem::exists(default_rom, error_code)) {
-        target_rom_path = default_rom.string();
+        base_rom_path = default_rom.string();
       }
     }
     if (config_path.empty()) {
@@ -94,15 +94,15 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    if (target_rom_path.empty()) {
-      std::cerr << "Error: Target ROM binary required for ROM diff mode.\n"
-                << "Pass --rom=<path> or ensure roms/" << game_name << ".z64 exists.\n";
+    if (base_rom_path.empty()) {
+      std::cerr << "Error: Base ROM binary required for ROM diff mode.\n"
+                << "Pass --base_rom=<path> or ensure roms/" << game_name << ".z64 exists.\n";
       return 1;
     }
 
     rom_nom_nom::RomDiffer rom_differ(rom_nom_nom::RomDiffOptions{
-        .target_rom_path = target_rom_path,
-        .built_rom_path = built_rom_path,
+        .base_rom_path = base_rom_path,
+        .candidate_rom_path = candidate_rom_path,
         .config_path = config_path,
         .use_color = color,
     });
@@ -145,8 +145,8 @@ int main(int argc, char* argv[]) {
   if (!symbols_path.empty()) {
     pipeline_opts.symbols_path = symbols_path;
   }
-  if (!target_rom_path.empty()) {
-    pipeline_opts.rom_path = target_rom_path;
+  if (!base_rom_path.empty()) {
+    pipeline_opts.rom_path = base_rom_path;
   }
   pipeline_opts.format_options.use_color = color;
   pipeline_opts.format_options.column_width = static_cast<size_t>(col_width);

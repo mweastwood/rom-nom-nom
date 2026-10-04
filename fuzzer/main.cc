@@ -26,8 +26,8 @@
 ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
 ABSL_FLAG(std::string, config, "", "Path to split config textproto.");
 ABSL_FLAG(std::string, symbols, "", "Path to symbol table txt or textproto.");
-ABSL_FLAG(std::string, rom, "", "Path to target retail ROM binary.");
-ABSL_FLAG(std::string, built_rom, "", "Path to built comparison ROM binary.");
+ABSL_FLAG(std::string, base_rom, "", "Path to base retail ROM binary.");
+ABSL_FLAG(std::string, candidate_rom, "", "Path to candidate comparison ROM binary.");
 ABSL_FLAG(std::string, source, "", "Path to C source file containing target function.");
 ABSL_FLAG(std::string, function, "", "Target function name or VRAM address to fuzz.");
 ABSL_FLAG(std::string, module, "", "Target module subsegment to evaluate.");
@@ -81,16 +81,16 @@ int main(int argc, char* argv[]) {
       "  Single function fuzzing against compiled C:\n"
       "    fuzzer <function_name> [--source=<path>] [--game=<game>]\n"
       "  Module / Whole-ROM equivalence evaluation:\n"
-      "    fuzzer --built_rom=<path> [--rom=<path>] [--module=<module>] [--game=<game>]\n"
-      "    fuzzer <target_rom.z64> <built_rom.z64>");
+      "    fuzzer --candidate_rom=<path> [--base_rom=<path>] [--module=<module>] [--game=<game>]\n"
+      "    fuzzer <base_rom.z64> <candidate_rom.z64>");
 
   std::vector<char*> remaining_args = absl::ParseCommandLine(argc, argv);
 
   std::string game_name = absl::GetFlag(FLAGS_game);
   std::string config_path = absl::GetFlag(FLAGS_config);
   std::string symbols_path = absl::GetFlag(FLAGS_symbols);
-  std::string target_rom_path = absl::GetFlag(FLAGS_rom);
-  std::string built_rom_path = absl::GetFlag(FLAGS_built_rom);
+  std::string base_rom_path = absl::GetFlag(FLAGS_base_rom);
+  std::string candidate_rom_path = absl::GetFlag(FLAGS_candidate_rom);
   std::string source_path = absl::GetFlag(FLAGS_source);
   std::string func_flag = absl::GetFlag(FLAGS_function);
   std::string module_flag = absl::GetFlag(FLAGS_module);
@@ -108,8 +108,8 @@ int main(int argc, char* argv[]) {
     std::string_view arg1 = remaining_args[1];
     std::string_view arg2 = remaining_args[2];
     if (absl::EndsWith(arg1, ".z64") && absl::EndsWith(arg2, ".z64")) {
-      target_rom_path = std::string(arg1);
-      built_rom_path = std::string(arg2);
+      base_rom_path = std::string(arg1);
+      candidate_rom_path = std::string(arg2);
     }
   } else if (remaining_args.size() >= 2 && func_flag.empty()) {
     std::string_view arg1 = remaining_args[1];
@@ -120,10 +120,10 @@ int main(int argc, char* argv[]) {
 
   // Resolve default paths
   std::error_code ec;
-  if (target_rom_path.empty()) {
+  if (base_rom_path.empty()) {
     std::filesystem::path default_rom = repo_root / "roms" / absl::StrCat(game_name, ".z64");
     if (std::filesystem::exists(default_rom, ec)) {
-      target_rom_path = default_rom.string();
+      base_rom_path = default_rom.string();
     }
   }
   if (config_path.empty()) {
@@ -141,11 +141,11 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (!target_rom_path.empty() && std::filesystem::path(target_rom_path).is_relative()) {
-    target_rom_path = (repo_root / target_rom_path).string();
+  if (!base_rom_path.empty() && std::filesystem::path(base_rom_path).is_relative()) {
+    base_rom_path = (repo_root / base_rom_path).string();
   }
-  if (!built_rom_path.empty() && std::filesystem::path(built_rom_path).is_relative()) {
-    built_rom_path = (repo_root / built_rom_path).string();
+  if (!candidate_rom_path.empty() && std::filesystem::path(candidate_rom_path).is_relative()) {
+    candidate_rom_path = (repo_root / candidate_rom_path).string();
   }
   if (!config_path.empty() && std::filesystem::path(config_path).is_relative()) {
     config_path = (repo_root / config_path).string();
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
       .game_name = game_name,
       .config_path = config_path,
       .symbols_path = symbols_path,
-      .rom_path = target_rom_path,
+      .rom_path = base_rom_path,
   });
   if (!extractor_or.ok()) {
     std::cerr << "Error initializing TargetExtractor: " << extractor_or.status().message() << "\n";
@@ -207,7 +207,7 @@ int main(int argc, char* argv[]) {
       pipe_opts.source_file = source_path;
       pipe_opts.config_path = config_path;
       pipe_opts.symbols_path = symbols_path;
-      pipe_opts.rom_path = target_rom_path;
+      pipe_opts.rom_path = base_rom_path;
       rom_nom_nom::DifferPipeline pipeline(pipe_opts);
 
       auto diff_res_or = pipeline.Diff(func_flag);
@@ -221,22 +221,22 @@ int main(int argc, char* argv[]) {
           target.candidate_words.push_back(row.compiled->original.raw_word);
         }
       }
-    } else if (!built_rom_path.empty()) {
-      std::vector<uint8_t> built_bytes = ReadBinaryFile(built_rom_path);
-      if (built_bytes.empty()) {
-        std::cerr << "Error reading built ROM file: " << built_rom_path << "\n";
+    } else if (!candidate_rom_path.empty()) {
+      std::vector<uint8_t> candidate_bytes = ReadBinaryFile(candidate_rom_path);
+      if (candidate_bytes.empty()) {
+        std::cerr << "Error reading candidate ROM file: " << candidate_rom_path << "\n";
         return 1;
       }
-      auto cand_or = extractor->ExtractFromRom(built_bytes, func_flag);
+      auto cand_or = extractor->ExtractFromRom(candidate_bytes, func_flag);
       if (!cand_or.ok()) {
-        std::cerr << "Error extracting candidate function from built ROM: "
+        std::cerr << "Error extracting candidate function from candidate ROM: "
                   << cand_or.status().message() << "\n";
         return 1;
       }
       target.candidate_words = cand_or->raw_words;
     } else {
       std::cerr << "Error: Fuzzing function '" << func_flag
-                << "' requires either --source=<path.c> or --built_rom=<path.z64>\n";
+                << "' requires either --source=<path.c> or --candidate_rom=<path.z64>\n";
       return 1;
     }
 
@@ -271,24 +271,24 @@ int main(int argc, char* argv[]) {
   }
 
   // Mode 2: Whole-ROM or Module Batch Equivalence Evaluation
-  if (built_rom_path.empty()) {
+  if (candidate_rom_path.empty()) {
     std::filesystem::path default_built = repo_root / "bazel-bin" / absl::StrCat(game_name, ".z64");
     if (std::filesystem::exists(default_built, ec)) {
-      built_rom_path = default_built.string();
+      candidate_rom_path = default_built.string();
     } else {
-      std::cerr << "Error: Evaluation mode requires --built_rom=<path.z64>\n";
+      std::cerr << "Error: Evaluation mode requires --candidate_rom=<path.z64>\n";
       return 1;
     }
   }
 
-  std::vector<uint8_t> target_bytes = ReadBinaryFile(target_rom_path);
+  std::vector<uint8_t> target_bytes = ReadBinaryFile(base_rom_path);
   if (target_bytes.empty()) {
-    std::cerr << "Error reading target retail ROM: " << target_rom_path << "\n";
+    std::cerr << "Error reading base retail ROM: " << base_rom_path << "\n";
     return 1;
   }
-  std::vector<uint8_t> built_bytes = ReadBinaryFile(built_rom_path);
+  std::vector<uint8_t> built_bytes = ReadBinaryFile(candidate_rom_path);
   if (built_bytes.empty()) {
-    std::cerr << "Error reading built candidate ROM: " << built_rom_path << "\n";
+    std::cerr << "Error reading built candidate ROM: " << candidate_rom_path << "\n";
     return 1;
   }
 

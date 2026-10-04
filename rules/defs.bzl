@@ -211,8 +211,8 @@ n64_rom_bitexact_test = rule(
 )
 
 def _n64_lifted_c_rom_diff_test_impl(ctx):
-    rom = ctx.file.rom
-    target_rom = ctx.file.target_rom
+    candidate_rom = ctx.file.candidate_rom
+    base_rom = ctx.file.base_rom
     config = ctx.file.config
     differ = ctx.executable._differ
 
@@ -221,8 +221,8 @@ def _n64_lifted_c_rom_diff_test_impl(ctx):
     script_content = """#!/usr/bin/env bash
 set -euo pipefail
 
-TARGET_ROM="{target_rom}"
-BUILT_ROM="{built_rom}"
+BASE_ROM="{base_rom}"
+CANDIDATE_ROM="{candidate_rom}"
 CONFIG_FILE="{config}"
 DIFFER_BIN="{differ}"
 
@@ -237,19 +237,19 @@ resolve_path() {{
     fi
 }}
 
-ACTUAL_TARGET=$(resolve_path "$TARGET_ROM")
-ACTUAL_BUILT=$(resolve_path "$BUILT_ROM")
+ACTUAL_BASE=$(resolve_path "$BASE_ROM")
+ACTUAL_CANDIDATE=$(resolve_path "$CANDIDATE_ROM")
 ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
 ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
 
 "$ACTUAL_DIFFER" \
-    --rom="$ACTUAL_TARGET" \
-    --built_rom="$ACTUAL_BUILT" \
+    --base_rom="$ACTUAL_BASE" \
+    --candidate_rom="$ACTUAL_CANDIDATE" \
     --config="$ACTUAL_CONFIG" \
     --nocolor
 """.format(
-        target_rom = target_rom.short_path,
-        built_rom = rom.short_path,
+        base_rom = base_rom.short_path,
+        candidate_rom = candidate_rom.short_path,
         config = config.short_path,
         differ = differ.short_path,
     )
@@ -263,7 +263,7 @@ ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
     return [
         DefaultInfo(
             executable = script,
-            runfiles = ctx.runfiles(files = [rom, target_rom, config, differ]).merge(
+            runfiles = ctx.runfiles(files = [candidate_rom, base_rom, config, differ]).merge(
                 ctx.attr._differ[DefaultInfo].default_runfiles,
             ),
         ),
@@ -273,8 +273,8 @@ n64_lifted_c_rom_diff_test = rule(
     implementation = _n64_lifted_c_rom_diff_test_impl,
     test = True,
     attrs = {
-        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
-        "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "candidate_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "base_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "_differ": attr.label(
             default = Label("//differ:differ"),
@@ -287,22 +287,24 @@ n64_lifted_c_rom_diff_test = rule(
 n64_lifted_c_rom_test = n64_lifted_c_rom_diff_test
 
 def _n64_lifted_c_equivalence_test_impl(ctx):
-    rom = ctx.file.rom
-    target_rom = ctx.file.target_rom
+    candidate_rom = ctx.file.candidate_rom
+    base_rom = ctx.file.base_rom
     config = ctx.file.config
     symbols = ctx.file.symbols
     fuzzer = ctx.executable._fuzzer
+    game = ctx.attr.game
 
     script = ctx.actions.declare_file(ctx.label.name + ".sh")
 
     script_content = """#!/usr/bin/env bash
 set -euo pipefail
 
-TARGET_ROM="{target_rom}"
-BUILT_ROM="{built_rom}"
+BASE_ROM="{base_rom}"
+CANDIDATE_ROM="{candidate_rom}"
 CONFIG_FILE="{config}"
 SYMBOLS_FILE="{symbols}"
 FUZZER_BIN="{fuzzer}"
+GAME="{game}"
 
 resolve_path() {{
     local path="$1"
@@ -319,21 +321,23 @@ resolve_path() {{
     fi
 }}
 
-ACTUAL_TARGET=$(resolve_path "$TARGET_ROM")
-ACTUAL_BUILT=$(resolve_path "$BUILT_ROM")
+ACTUAL_BASE=$(resolve_path "$BASE_ROM")
+ACTUAL_CANDIDATE=$(resolve_path "$CANDIDATE_ROM")
 ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
 ACTUAL_SYMBOLS=$(resolve_path "$SYMBOLS_FILE")
 ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
 
 "$ACTUAL_FUZZER" \
-    --rom="$ACTUAL_TARGET" \
-    --built_rom="$ACTUAL_BUILT" \
+    --game="$GAME" \
+    --base_rom="$ACTUAL_BASE" \
+    --candidate_rom="$ACTUAL_CANDIDATE" \
     --config="$ACTUAL_CONFIG" \
     --symbols="$ACTUAL_SYMBOLS" \
     --nocolor
 """.format(
-        target_rom = target_rom.short_path,
-        built_rom = rom.short_path,
+        game = game,
+        base_rom = base_rom.short_path,
+        candidate_rom = candidate_rom.short_path,
         config = config.short_path,
         symbols = symbols.short_path,
         fuzzer = fuzzer.short_path,
@@ -348,7 +352,7 @@ ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
     return [
         DefaultInfo(
             executable = script,
-            runfiles = ctx.runfiles(files = [rom, target_rom, config, symbols, fuzzer]).merge(
+            runfiles = ctx.runfiles(files = [candidate_rom, base_rom, config, symbols, fuzzer]).merge(
                 ctx.attr._fuzzer[DefaultInfo].default_runfiles,
             ),
         ),
@@ -358,8 +362,9 @@ n64_lifted_c_equivalence_test = rule(
     implementation = _n64_lifted_c_equivalence_test_impl,
     test = True,
     attrs = {
-        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
-        "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "game": attr.string(default = "harvest-moon-64"),
+        "candidate_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "base_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "_fuzzer": attr.label(
@@ -416,8 +421,9 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
     equivalence_test_name = name + "_equivalence_test"
     n64_lifted_c_equivalence_test(
         name = equivalence_test_name,
-        rom = ":" + assembly_rom_name,
-        target_rom = rom,
+        game = game,
+        candidate_rom = ":" + assembly_rom_name,
+        base_rom = rom,
         config = config,
         symbols = symbols,
     )
@@ -461,8 +467,8 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
 
     n64_lifted_c_rom_diff_test(
         name = lifted_c_diff_test_name,
-        rom = ":" + lifted_c_rom_name,
-        target_rom = rom,
+        candidate_rom = ":" + lifted_c_rom_name,
+        base_rom = rom,
         config = config,
     )
 
@@ -474,8 +480,9 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
 
     n64_lifted_c_equivalence_test(
         name = name + "_lifted_c_equivalence_test",
-        rom = ":" + lifted_c_rom_name,
-        target_rom = rom,
+        game = game,
+        candidate_rom = ":" + lifted_c_rom_name,
+        base_rom = rom,
         config = config,
         symbols = symbols,
     )
