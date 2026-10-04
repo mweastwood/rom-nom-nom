@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
@@ -198,32 +199,61 @@ std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
   return LiftedExpression::Variable(RegisterVarName(reg));
 }
 
-std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(const BasicBlock& block,
-                                                          const SymbolIndex* symbol_index,
-                                                          const SplitConfig* split_config) {
-  return LiftInstructions(block.instructions, symbol_index, split_config);
+std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
+    const BasicBlock& block, const SymbolIndex* symbol_index, const SplitConfig* split_config,
+    const absl::flat_hash_map<std::string, int>* function_parameter_counts) {
+  return LiftInstructions(block.instructions, symbol_index, split_config,
+                          function_parameter_counts);
 }
 
 std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
-    const SplitConfig* split_config) {
+    const SplitConfig* split_config,
+    const absl::flat_hash_map<std::string, int>* function_parameter_counts) {
   std::vector<LiftedStatement> statements;
   if (instructions.empty()) {
     return statements;
   }
 
+  std::vector<Instruction> reordered_storage;
+  absl::Span<const Instruction> instructions_to_process = instructions;
+  bool has_jal_instruction = false;
+  for (const auto& instruction : instructions) {
+    if (instruction.opcode == Opcode::kJal) {
+      has_jal_instruction = true;
+      break;
+    }
+  }
+  if (has_jal_instruction) {
+    reordered_storage.reserve(instructions.size());
+    for (size_t instruction_index = 0; instruction_index < instructions.size();
+         ++instruction_index) {
+      if (instructions[instruction_index].opcode == Opcode::kJal &&
+          instruction_index + 1 < instructions.size()) {
+        // In MIPS, the delay slot instruction executes before the function call branch takes
+        // effect.
+        reordered_storage.push_back(instructions[instruction_index + 1]);
+        reordered_storage.push_back(instructions[instruction_index]);
+        ++instruction_index;
+      } else {
+        reordered_storage.push_back(instructions[instruction_index]);
+      }
+    }
+    instructions_to_process = reordered_storage;
+  }
+
   SymbolFolder folder;
-  folder.Fold(instructions, symbol_index, split_config);
+  folder.Fold(instructions_to_process, symbol_index, split_config);
 
   RegisterTracker tracker;
   bool pending_return = false;
 
-  for (size_t i = 0; i < instructions.size(); ++i) {
-    const auto& inst = instructions[i];
+  for (size_t i = 0; i < instructions_to_process.size(); ++i) {
+    const auto& inst = instructions_to_process[i];
 
     // If this instruction is the high half of a folded pair, skip emitting it
     if (folder.IsFoldedHi(i)) {
-      tracker.Analyze(instructions.subspan(i, 1));
+      tracker.Analyze(instructions_to_process.subspan(i, 1));
       continue;
     }
 
@@ -257,13 +287,13 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         statement.expression = LiftedExpression::Variable(RegisterVarName(lo->src_reg));
         statements.push_back(std::move(statement));
       }
-      tracker.Analyze(instructions.subspan(i, 1));
+      tracker.Analyze(instructions_to_process.subspan(i, 1));
       continue;
     }
 
     // Skip NOPs
     if (inst.IsNop()) {
-      tracker.Analyze(instructions.subspan(i, 1));
+      tracker.Analyze(instructions_to_process.subspan(i, 1));
       continue;
     }
 
@@ -486,25 +516,50 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kJal: {
-        uint32_t target = inst.JumpTarget();
-        std::string func_name = (symbol_index != nullptr)
-                                    ? symbol_index->LookupOrSynthesizeName(target, SYMBOL_FUNC)
-                                    : absl::StrFormat("func_%08X", target);
+        uint32_t target_vram = inst.JumpTarget();
+        std::string function_name =
+            (symbol_index != nullptr)
+                ? symbol_index->LookupOrSynthesizeName(target_vram, SYMBOL_FUNC)
+                : absl::StrFormat("func_%08X", target_vram);
 
-        std::vector<std::unique_ptr<LiftedExpression>> call_args;
-        // Collect active arguments (checking $a0-$a3)
-        Register arg_regs[] = {Register::kA0, Register::kA1, Register::kA2, Register::kA3};
-        for (Register arg_reg : arg_regs) {
-          if (tracker.GetReachingDefinition(arg_reg).has_value()) {
-            call_args.push_back(LiftRegisterOrConstant(arg_reg, tracker));
-          } else {
+        Register argument_registers[] = {Register::kA0, Register::kA1, Register::kA2,
+                                         Register::kA3};
+        int highest_defined_argument_index = -1;
+        for (int arg_index = 3; arg_index >= 0; --arg_index) {
+          if (tracker.GetReachingDefinition(argument_registers[arg_index]).has_value()) {
+            highest_defined_argument_index = arg_index;
             break;
+          }
+        }
+
+        int argument_count = 0;
+        if (function_parameter_counts != nullptr) {
+          auto it = function_parameter_counts->find(function_name);
+          if (it != function_parameter_counts->end()) {
+            argument_count = it->second;
+          } else {
+            argument_count = highest_defined_argument_index + 1;
+          }
+        } else {
+          argument_count = highest_defined_argument_index + 1;
+        }
+
+        std::vector<std::unique_ptr<LiftedExpression>> call_arguments;
+        call_arguments.reserve(argument_count);
+        for (int arg_index = 0; arg_index < argument_count; ++arg_index) {
+          if (arg_index < 4 &&
+              tracker.GetReachingDefinition(argument_registers[arg_index]).has_value()) {
+            call_arguments.push_back(
+                LiftRegisterOrConstant(argument_registers[arg_index], tracker));
+          } else {
+            call_arguments.push_back(
+                LiftedExpression::Variable(absl::StrFormat("arg%d", arg_index)));
           }
         }
 
         LiftedStatement statement;
         statement.kind = StatementKind::kCall;
-        statement.expression = LiftedExpression::Call(func_name, std::move(call_args));
+        statement.expression = LiftedExpression::Call(function_name, std::move(call_arguments));
         statements.push_back(std::move(statement));
         break;
       }
@@ -519,7 +574,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
     }
 
-    tracker.Analyze(instructions.subspan(i, 1));
+    tracker.Analyze(instructions_to_process.subspan(i, 1));
   }
 
   if (pending_return) {
@@ -533,6 +588,44 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   }
 
   return statements;
+}
+
+int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> instructions) {
+  absl::flat_hash_set<Register> defined_registers;
+  absl::flat_hash_set<Register> used_before_definition;
+
+  for (const auto& instruction : instructions) {
+    RegisterUseDef use_def = GetInstructionUseDef(instruction);
+    for (Register used_register : use_def.gpr_uses) {
+      if (!defined_registers.contains(used_register)) {
+        used_before_definition.insert(used_register);
+      }
+    }
+    for (Register defined_register : use_def.gpr_defs) {
+      defined_registers.insert(defined_register);
+    }
+    if (instruction.opcode == Opcode::kJal) {
+      // Subroutine calls may clobber argument registers; from caller perspective they are redefined
+      defined_registers.insert(Register::kA0);
+      defined_registers.insert(Register::kA1);
+      defined_registers.insert(Register::kA2);
+      defined_registers.insert(Register::kA3);
+    }
+  }
+
+  if (used_before_definition.contains(Register::kA3)) {
+    return 4;
+  }
+  if (used_before_definition.contains(Register::kA2)) {
+    return 3;
+  }
+  if (used_before_definition.contains(Register::kA1)) {
+    return 2;
+  }
+  if (used_before_definition.contains(Register::kA0)) {
+    return 1;
+  }
+  return 0;
 }
 
 }  // namespace rom_nom_nom

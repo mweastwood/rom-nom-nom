@@ -329,8 +329,12 @@ namespace {
 class ConverterContext {
  public:
   ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
-                   const SplitConfig* split_config)
-      : cfg_(cfg), symbol_index_(symbol_index), split_config_(split_config) {}
+                   const SplitConfig* split_config,
+                   const absl::flat_hash_map<std::string, int>* function_parameter_counts)
+      : cfg_(cfg),
+        symbol_index_(symbol_index),
+        split_config_(split_config),
+        function_parameter_counts_(function_parameter_counts) {}
 
   void ConvertRegion(const StructuredRegion& region, CompoundStatement* target_block) {
     switch (region.type) {
@@ -440,7 +444,8 @@ class ConverterContext {
       return;
     }
 
-    auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_);
+    auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
+                                                     function_parameter_counts_);
     for (const auto& lifted_stmt : lifted_stmts) {
       auto c_stmt = AstConverter::ConvertStatement(lifted_stmt);
       if (c_stmt != nullptr) {
@@ -452,6 +457,7 @@ class ConverterContext {
   const ControlFlowGraph& cfg_;
   const SymbolIndex* symbol_index_;
   const SplitConfig* split_config_;
+  const absl::flat_hash_map<std::string, int>* function_parameter_counts_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
 };
 
@@ -463,25 +469,38 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
                                           const AstConverterOptions& options) {
   auto body = std::make_unique<CompoundStatement>();
 
-  ConverterContext ctx(cfg, symbol_index, options.split_config);
+  ConverterContext ctx(cfg, symbol_index, options.split_config, options.function_parameter_counts);
   ctx.ConvertRegion(root_region, body.get());
 
   // Determine parameters
   std::vector<CParameter> parameters = options.parameters;
   if (parameters.empty()) {
-    // Check if arg0, arg1, arg2, arg3 are referenced in the function body
-    std::string body_text = body->ToString(0);
-    if (body_text.find("arg0") != std::string::npos) {
-      parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+    int parameter_count = -1;
+    if (options.function_parameter_counts != nullptr) {
+      auto it = options.function_parameter_counts->find(options.function_name);
+      if (it != options.function_parameter_counts->end()) {
+        parameter_count = it->second;
+      }
     }
-    if (body_text.find("arg1") != std::string::npos) {
-      parameters.push_back(CParameter{.type = CType::S32(), .name = "arg1"});
-    }
-    if (body_text.find("arg2") != std::string::npos) {
-      parameters.push_back(CParameter{.type = CType::S32(), .name = "arg2"});
-    }
-    if (body_text.find("arg3") != std::string::npos) {
-      parameters.push_back(CParameter{.type = CType::S32(), .name = "arg3"});
+    if (parameter_count >= 0) {
+      for (int param_index = 0; param_index < parameter_count; ++param_index) {
+        parameters.push_back(
+            CParameter{.type = CType::S32(), .name = absl::StrFormat("arg%d", param_index)});
+      }
+    } else {
+      std::string body_text = body->ToString(0);
+      if (body_text.find("arg0") != std::string::npos) {
+        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+      }
+      if (body_text.find("arg1") != std::string::npos) {
+        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg1"});
+      }
+      if (body_text.find("arg2") != std::string::npos) {
+        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg2"});
+      }
+      if (body_text.find("arg3") != std::string::npos) {
+        parameters.push_back(CParameter{.type = CType::S32(), .name = "arg3"});
+      }
     }
   }
 

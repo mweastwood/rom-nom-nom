@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "core/c_ast.h"
 #include "lifter/function_loader.h"
@@ -66,7 +67,9 @@ class LifterPipeline {
       const std::filesystem::path& output_dir) const;
 
   // Decompiles an already loaded or synthesized function directly.
-  absl::StatusOr<LifterResult> DecompileFunction(const LoadedFunction& loaded_func) const;
+  absl::StatusOr<LifterResult> DecompileFunction(
+      const LoadedFunction& loaded_func,
+      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr) const;
 
   const LifterPipelineOptions& Options() const { return options_; }
   const FunctionLoader* Loader() const { return loader_.get(); }

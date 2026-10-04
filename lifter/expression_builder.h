@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
 #include "lifter/control_flow_graph.h"
@@ -99,14 +100,20 @@ class ExpressionBuilder {
   ExpressionBuilder() = default;
 
   // Lifts a basic block into a sequence of high-level statements.
-  static std::vector<LiftedStatement> LiftBlock(const BasicBlock& block,
-                                                const SymbolIndex* symbol_index = nullptr,
-                                                const SplitConfig* split_config = nullptr);
+  static std::vector<LiftedStatement> LiftBlock(
+      const BasicBlock& block, const SymbolIndex* symbol_index = nullptr,
+      const SplitConfig* split_config = nullptr,
+      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr);
 
   // Lifts a raw sequence of instructions into high-level statements.
-  static std::vector<LiftedStatement> LiftInstructions(absl::Span<const Instruction> instructions,
-                                                       const SymbolIndex* symbol_index = nullptr,
-                                                       const SplitConfig* split_config = nullptr);
+  static std::vector<LiftedStatement> LiftInstructions(
+      absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index = nullptr,
+      const SplitConfig* split_config = nullptr,
+      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr);
+
+  // Analyzes register usage across instructions to determine the number of parameters ($a0-$a3)
+  // expected by a function (via use-before-definition).
+  static int DetermineParameterCount(absl::Span<const Instruction> instructions);
 
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);

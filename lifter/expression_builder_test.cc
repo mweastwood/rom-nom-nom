@@ -165,5 +165,92 @@ TEST(ExpressionBuilderTest, AssignmentWithEmptyOrZeroDestinationEmitsBareExpress
   EXPECT_EQ(statement.ToString(), "DoWork();\n");
 }
 
+TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesUsedArguments) {
+  // 1 arg: addu $v0, $a0, $zero
+  std::vector<uint32_t> one_arg_words = {
+      0x00801021,  // addu $v0, $a0, $zero
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto one_arg_insts = *DecodeSequence(one_arg_words);
+  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(one_arg_insts), 1);
+
+  // 3 args: addu $v0, $a0, $a1; addu $v0, $v0, $a2
+  std::vector<uint32_t> three_args_words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x00461021,  // addu $v0, $v0, $a2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto three_args_insts = *DecodeSequence(three_args_words);
+  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(three_args_insts), 3);
+
+  // 0 args: addiu $v0, $zero, 1
+  std::vector<uint32_t> zero_args_words = {
+      0x24020001,  // addiu $v0, $zero, 1
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto zero_args_insts = *DecodeSequence(zero_args_words);
+  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(zero_args_insts), 0);
+}
+
+TEST(ExpressionBuilderTest, JalDelaySlotReorderingPassesArgumentToCall) {
+  // Call target: 0x80001000
+  // 0: jal   0x80001000
+  // 4: addiu $a0, $zero, 42  (delay-slot executes BEFORE call!)
+  // 8: jr    $ra
+  // C: nop
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 0: jal   0x80001000
+      0x2404002A,  // 4: addiu $a0, $zero, 42
+      0x03E00008,  // 8: jr    $ra
+      0x00000000,  // C: nop
+  };
+
+  std::string textproto = R"pb(
+    entries { name: "TargetFunc" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  auto instructions = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(instructions, &(*index_or));
+
+  // The delay-slot assignment arg0 = 42 must execute before TargetFunc, so the call passes 42
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].ToString(), "arg0 = 42;\n");
+  EXPECT_EQ(statements[1].ToString(), "TargetFunc(42);\n");
+  EXPECT_EQ(statements[2].ToString(), "return;\n");
+}
+
+TEST(ExpressionBuilderTest, JalParameterArityUsesKnownCount) {
+  // Setup a call with reaching definitions for $a0, $a1, $a2
+  std::vector<uint32_t> words = {
+      0x24040001,  // 0: addiu $a0, $zero, 1
+      0x24050002,  // 4: addiu $a1, $zero, 2
+      0x24060003,  // 8: addiu $a2, $zero, 3
+      0x0C000400,  // C: jal   0x80001000
+      0x00000000,  // 10: nop
+  };
+
+  std::string textproto = R"pb(
+    entries { name: "BinaryFunc" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // Tell expression builder that BinaryFunc takes only 2 parameters
+  absl::flat_hash_map<std::string, int> parameter_counts;
+  parameter_counts["BinaryFunc"] = 2;
+
+  auto instructions = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(
+      instructions, &(*index_or), /*split_config=*/nullptr, &parameter_counts);
+
+  ASSERT_THAT(statements, SizeIs(4));
+  EXPECT_EQ(statements[3].ToString(), "BinaryFunc(1, 2);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

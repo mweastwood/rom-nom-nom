@@ -59,7 +59,8 @@ absl::StatusOr<LifterResult> LifterPipeline::Decompile(std::string_view func_nam
 }
 
 absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
-    const LoadedFunction& loaded_func) const {
+    const LoadedFunction& loaded_func,
+    const absl::flat_hash_map<std::string, int>* function_parameter_counts) const {
   if (loaded_func.instructions.empty()) {
     return absl::InvalidArgumentError("LifterPipeline: No instructions to decompile.");
   }
@@ -88,6 +89,7 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   AstConverterOptions converter_opts;
   converter_opts.function_name = loaded_func.name;
   converter_opts.split_config = loaded_func.split_config;
+  converter_opts.function_parameter_counts = function_parameter_counts;
 
   FunctionDeclaration ast =
       AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);
@@ -118,8 +120,22 @@ absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
   CTranslationUnit tu;
   tu.includes = !includes.empty() ? includes : options_.includes;
 
+  std::vector<LoadedFunction> loaded_functions;
+  loaded_functions.reserve(func_names.size());
+  absl::flat_hash_map<std::string, int> parameter_counts;
+
   for (const auto& func_name : func_names) {
-    auto res_or = Decompile(func_name);
+    auto loaded_or = loader_->LoadFunction(func_name);
+    if (!loaded_or.ok()) {
+      return loaded_or.status();
+    }
+    parameter_counts[loaded_or->name] =
+        ExpressionBuilder::DetermineParameterCount(loaded_or->instructions);
+    loaded_functions.push_back(std::move(*loaded_or));
+  }
+
+  for (const auto& loaded_func : loaded_functions) {
+    auto res_or = DecompileFunction(loaded_func, &parameter_counts);
     if (!res_or.ok()) {
       return res_or.status();
     }

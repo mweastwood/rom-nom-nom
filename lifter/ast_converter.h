@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "core/c_ast.h"
 #include "core/mips.h"
 #include "lifter/control_flow_graph.h"
@@ -24,6 +25,7 @@ struct AstConverterOptions {
   std::vector<CParameter> parameters;
   bool is_static = false;
   const SplitConfig* split_config = nullptr;
+  const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr;
 };
 
 // Converts structured control flow regions and lifted basic blocks into a C FunctionDeclaration
