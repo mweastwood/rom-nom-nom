@@ -210,7 +210,7 @@ n64_rom_bitexact_test = rule(
     },
 )
 
-def _n64_lifted_c_rom_test_impl(ctx):
+def _n64_lifted_c_rom_diff_test_impl(ctx):
     rom = ctx.file.rom
     target_rom = ctx.file.target_rom
     config = ctx.file.config
@@ -269,8 +269,8 @@ ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
         ),
     ]
 
-n64_lifted_c_rom_test = rule(
-    implementation = _n64_lifted_c_rom_test_impl,
+n64_lifted_c_rom_diff_test = rule(
+    implementation = _n64_lifted_c_rom_diff_test_impl,
     test = True,
     attrs = {
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
@@ -283,6 +283,8 @@ n64_lifted_c_rom_test = rule(
         ),
     },
 )
+
+n64_lifted_c_rom_test = n64_lifted_c_rom_diff_test
 
 def _n64_lifted_c_equivalence_test_impl(ctx):
     rom = ctx.file.rom
@@ -423,7 +425,7 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
     # Stage 3: Whole-game lifted C pipeline, lifted C ROM, and validation test
     lifted_c_name = name + "_lifted_c"
     lifted_c_rom_name = name + "_lifted_c_rom"
-    lifted_c_test_name = name + "_lifted_c_rom_test"
+    lifted_c_diff_test_name = name + "_lifted_c_rom_diff_test"
 
     lifter_lift_game(
         name = lifted_c_name,
@@ -457,11 +459,17 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         actual = ":" + lifted_c_rom_name,
     )
 
-    n64_lifted_c_rom_test(
-        name = lifted_c_test_name,
+    n64_lifted_c_rom_diff_test(
+        name = lifted_c_diff_test_name,
         rom = ":" + lifted_c_rom_name,
         target_rom = rom,
         config = config,
+    )
+
+    # Backward-compatible alias for lifted diff test
+    native.test_suite(
+        name = name + "_lifted_c_rom_test",
+        tests = [":" + lifted_c_diff_test_name],
     )
 
     n64_lifted_c_equivalence_test(
