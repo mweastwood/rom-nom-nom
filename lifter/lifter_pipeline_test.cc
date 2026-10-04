@@ -281,18 +281,24 @@ entries {
   ASSERT_TRUE(files_or.ok()) << files_or.status();
   EXPECT_THAT(*files_or, ::testing::SizeIs(1));
 
-  EXPECT_TRUE(std::filesystem::exists(out_dir / "mod_alpha.h"));
+  // Handwritten headers should NOT be copied into lifted output
+  EXPECT_FALSE(std::filesystem::exists(out_dir / "mod_alpha.h"));
+
+  // Purely generated standard types.h should be generated
+  EXPECT_TRUE(std::filesystem::exists(out_dir / "types.h"));
+  std::ifstream types_input_stream(out_dir / "types.h");
+  std::string types_file_content((std::istreambuf_iterator<char>(types_input_stream)),
+                                 std::istreambuf_iterator<char>());
+  EXPECT_THAT(types_file_content, HasSubstr("typedef signed int s32;"));
+
   EXPECT_TRUE(std::filesystem::exists(out_dir / "mod_alpha.c"));
 
-  std::ifstream hdr_ifs(out_dir / "mod_alpha.h");
-  std::string hdr_content((std::istreambuf_iterator<char>(hdr_ifs)),
-                          std::istreambuf_iterator<char>());
-  EXPECT_THAT(hdr_content, HasSubstr("// Handwritten header"));
-
-  std::ifstream ifs(out_dir / "mod_alpha.c");
-  std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-  EXPECT_THAT(content, HasSubstr("AlphaFunc"));
-  EXPECT_THAT(content, Not(HasSubstr("// Handwritten source")));
+  std::ifstream module_source_stream(out_dir / "mod_alpha.c");
+  std::string module_source_content((std::istreambuf_iterator<char>(module_source_stream)),
+                                    std::istreambuf_iterator<char>());
+  EXPECT_THAT(module_source_content, HasSubstr("AlphaFunc"));
+  EXPECT_THAT(module_source_content, Not(HasSubstr("// Handwritten source")));
+  EXPECT_THAT(module_source_content, Not(HasSubstr("mod_alpha.h")));
 
   std::filesystem::remove_all(test_dir);
 }

@@ -303,18 +303,25 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
   std::error_code ec;
   std::filesystem::create_directories(output_dir, ec);
 
-  std::filesystem::path game_src_dir = options_.repo_root / "src" / "c" / options_.game_name;
-  if (std::filesystem::exists(game_src_dir, ec)) {
-    for (const auto& entry : std::filesystem::directory_iterator(game_src_dir, ec)) {
-      if (entry.is_regular_file() && entry.path().extension() == ".h") {
-        std::filesystem::copy_file(entry.path(), output_dir / entry.path().filename(),
-                                   std::filesystem::copy_options::overwrite_existing, ec);
-      }
-    }
+  // Generate self-contained standard types header
+  std::filesystem::path types_file_path = output_dir / "types.h";
+  std::ofstream types_output_stream(types_file_path);
+  if (types_output_stream.is_open()) {
+    types_output_stream << R"(#ifndef TYPES_H
+#define TYPES_H
+
+typedef signed char s8;
+typedef unsigned char u8;
+typedef signed short s16;
+typedef unsigned short u16;
+typedef signed int s32;
+typedef unsigned int u32;
+
+#endif  // TYPES_H
+)";
   }
 
-  std::vector<std::string> default_headers = options_.includes;
-  default_headers.push_back("types.h");
+  std::vector<std::string> default_headers = {"types.h"};
 
   std::vector<std::filesystem::path> emitted_files;
   for (const auto& mod : *modules_or) {
@@ -323,14 +330,9 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
       continue;
     }
 
-    std::vector<std::string> includes = default_headers;
-    if (std::filesystem::exists(game_src_dir / absl::StrCat(mod, ".h"), ec)) {
-      includes.push_back(absl::StrCat(mod, ".h"));
-    }
-
     std::filesystem::path out_file = output_dir / absl::StrCat(mod, ".c");
 
-    auto c_code_or = DecompileFunctions(*funcs_or, includes);
+    auto c_code_or = DecompileFunctions(*funcs_or, default_headers);
     if (!c_code_or.ok()) {
       std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", mod,
                                          c_code_or.status().message());
