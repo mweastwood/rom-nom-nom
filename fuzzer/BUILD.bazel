@@ -7,6 +7,7 @@ cc_library(
     srcs = ["mips_emulator.cc"],
     hdrs = ["mips_emulator.h"],
     deps = [
+        "//core:endian",
         "//core:mips",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

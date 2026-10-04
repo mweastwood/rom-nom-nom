@@ -10,6 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 #include "core/mips.h"
 
 namespace rom_nom_nom::fuzzer {
@@ -170,6 +171,95 @@ class MipsEmulator {
 
   std::vector<MemoryWrite> write_log_;
 };
+
+inline std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
+  if ((vram >> 30) == 2) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    if (phys < memory_size_) {
+      return static_cast<size_t>(phys);
+    }
+  }
+  return std::nullopt;
+}
+
+inline void MipsEmulator::SetGpr(int index, uint32_t value) {
+  if (index > 0 && index < 32) {
+    gpr_[index] = value;
+  }
+}
+
+inline uint32_t MipsEmulator::GetGpr(int index) const {
+  if (index >= 0 && index < 32) {
+    return gpr_[index];
+  }
+  return 0;
+}
+
+inline bool MipsEmulator::Read8(uint32_t vram, uint8_t* val) const {
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value()) return false;
+  *val = memory_[*phys];
+  return true;
+}
+
+inline bool MipsEmulator::Read16(uint32_t vram, uint16_t* val) const {
+  if ((vram & 1) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
+  *val = ReadBigEndian16(&memory_[*phys]);
+  return true;
+}
+
+inline bool MipsEmulator::Read32(uint32_t vram, uint32_t* val) const {
+  if ((vram & 3) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
+  *val = ReadBigEndian32(&memory_[*phys]);
+  return true;
+}
+
+inline bool MipsEmulator::Read64(uint32_t vram, uint64_t* val) const {
+  if ((vram & 7) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
+  *val = ReadBigEndian64(&memory_[*phys]);
+  return true;
+}
+
+inline bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value()) return false;
+  memory_[*phys] = val;
+  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 1});
+  return true;
+}
+
+inline bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
+  if ((vram & 1) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
+  WriteBigEndian16(&memory_[*phys], val);
+  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 2});
+  return true;
+}
+
+inline bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
+  if ((vram & 3) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
+  WriteBigEndian32(&memory_[*phys], val);
+  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 4});
+  return true;
+}
+
+inline bool MipsEmulator::Write64(uint32_t vram, uint64_t val) {
+  if ((vram & 7) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
+  WriteBigEndian64(&memory_[*phys], val);
+  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 8});
+  return true;
+}
 
 }  // namespace rom_nom_nom::fuzzer
 
