@@ -1,0 +1,656 @@
+#include "fuzzer/mips_emulator.h"
+
+#include <vector>
+
+#include "gtest/gtest.h"
+
+namespace rom_nom_nom::fuzzer {
+namespace {
+
+TEST(MipsEmulatorTest, ArithmeticAndLogicalInstructions) {
+  MipsEmulator emu;
+  // 00: addiu $a0, $zero, 42
+  // 04: addiu $a1, $zero, 10
+  // 08: addu  $v0, $a0, $a1   -> 52
+  // 0C: subu  $v1, $a0, $a1   -> 32
+  // 10: andi  $t0, $v0, 0x0F   -> 52 & 15 = 4
+  // 14: ori   $t1, $v0, 0xF0   -> 52 | 240 = 244
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> code = {
+      0x2404002A,  // addiu $a0, $zero, 42
+      0x2405000A,  // addiu $a1, $zero, 10
+      0x00851021,  // addu  $v0, $a0, $a1
+      0x00851823,  // subu  $v1, $a0, $a1
+      0x3048000F,  // andi  $t0, $v0, 0xF
+      0x344900F0,  // ori   $t1, $v0, 0xF0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 52u);
+  EXPECT_EQ(res.v1, 32u);
+  EXPECT_EQ(emu.GetRegister(Register::kT0), 4u);
+  EXPECT_EQ(emu.GetRegister(Register::kT1), 244u);
+}
+
+TEST(MipsEmulatorTest, ShiftAndComparisons) {
+  MipsEmulator emu;
+  // 00: addiu $a0, $zero, -16   (0xFFFFFFF0)
+  // 04: sra   $t0, $a0, 2       (0xFFFFFFFC = -4)
+  // 08: srl   $t1, $a0, 28      (0x0000000F = 15)
+  // 0C: sll   $t2, $t1, 4       (0x000000F0 = 240)
+  // 10: slti  $v0, $a0, 0       (true = 1)
+  // 14: sltiu $v1, $a0, 0       (false = 0, unsigned compares 0xFFFFFFF0 < 0)
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> code = {
+      0x2404FFF0,  // addiu $a0, $zero, -16
+      0x00044083,  // sra   $t0, $a0, 2
+      0x00044F02,  // srl   $t1, $a0, 28
+      0x00095100,  // sll   $t2, $t1, 4
+      0x28820000,  // slti  $v0, $a0, 0
+      0x2C830000,  // sltiu $v1, $a0, 0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(emu.GetRegister(Register::kT0), 0xFFFFFFFCu);
+  EXPECT_EQ(emu.GetRegister(Register::kT1), 15u);
+  EXPECT_EQ(emu.GetRegister(Register::kT2), 240u);
+  EXPECT_EQ(res.v0, 1u);
+  EXPECT_EQ(res.v1, 0u);
+}
+
+TEST(MipsEmulatorTest, MemoryStoreAndLoadWithWriteLog) {
+  MipsEmulator emu;
+  uint32_t target_ram = 0x80100000;
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 0x1234
+  // 08: sw    $t0, 0($a0)
+  // 0C: addiu $t1, $zero, 0x56
+  // 10: sb    $t1, 4($a0)
+  // 14: lw    $v0, 0($a0)
+  // 18: lbu   $v1, 4($a0)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x24081234,  // addiu $t0, $zero, 0x1234
+      0xAC880000,  // sw    $t0, 0($a0)
+      0x24090056,  // addiu $t1, $zero, 0x56
+      0xA0890004,  // sb    $t1, 4($a0)
+      0x8C820000,  // lw    $v0, 0($a0)
+      0x90830004,  // lbu   $v1, 4($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0x1234u);
+  EXPECT_EQ(res.v1, 0x56u);
+
+  // Verify write log recorded both store operations
+  ASSERT_EQ(res.write_log.size(), 2u);
+  EXPECT_EQ(res.write_log[0].address, target_ram);
+  EXPECT_EQ(res.write_log[0].value, 0x1234u);
+  EXPECT_EQ(res.write_log[0].size, 4u);
+
+  EXPECT_EQ(res.write_log[1].address, target_ram + 4);
+  EXPECT_EQ(res.write_log[1].value, 0x56u);
+  EXPECT_EQ(res.write_log[1].size, 1u);
+}
+
+TEST(MipsEmulatorTest, BranchDelaySlotExecution) {
+  MipsEmulator emu;
+  // 00: addiu $v0, $zero, 1
+  // 04: beq   $zero, $zero, 0x0C (branches to 0x14)
+  // 08: addiu $v0, $v0, 10       (executed in delay slot! -> v0 becomes 11)
+  // 0C: addiu $v0, $v0, 100      (skipped!)
+  // 10: nop
+  // 14: jr    $ra
+  // 18: addiu $v0, $v0, 5        (delay slot of jr $ra! -> v0 becomes 16)
+  std::vector<uint32_t> code = {
+      0x24020001,  // addiu $v0, $zero, 1
+      0x10000003,  // beq   $zero, $zero, +3 (to 0x14)
+      0x2442000A,  // addiu $v0, $v0, 10
+      0x24420064,  // addiu $v0, $v0, 100
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra
+      0x24420005,  // addiu $v0, $v0, 5
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 16u);  // 1 + 10 + 5
+}
+
+TEST(MipsEmulatorTest, Abs16ExecutionWithPositiveAndNegativeValues) {
+  MipsEmulator emu;
+  // Retail Abs16:
+  // 00: sll   $v0, $a0, 16
+  // 04: sra   $v0, $v0, 16
+  // 08: bgez  $v0, 0x0C (.L_end)
+  // 0C: nop
+  // 10: subu  $v0, $zero, $a0
+  // 14: sll   $v0, $v0, 16
+  // 18: sra   $v0, $v0, 16
+  // .L_end:
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> code = {
+      0x00041400,  // sll   $v0, $a0, 16
+      0x00021403,  // sra   $v0, $v0, 16
+      0x04410004,  // bgez  $v0, .L_end (+4)
+      0x00000000,  // nop
+      0x00041023,  // subu  $v0, $zero, $a0
+      0x00021400,  // sll   $v0, $v0, 16
+      0x00021403,  // sra   $v0, $v0, 16
+      0x03E00008,  // jr    $ra (.L_end)
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80026850, code));
+
+  // Test with positive value: +50 -> 50
+  emu.SetRegister(Register::kA0, 50);
+  ExecutionResult pos_res = emu.RunFunction(0x80026850);
+  EXPECT_EQ(pos_res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(pos_res.v0, 50u);
+
+  // Test with negative value: -123 -> 123
+  emu.SetRegister(Register::kA0, static_cast<uint32_t>(-123));
+  ExecutionResult neg_res = emu.RunFunction(0x80026850);
+  EXPECT_EQ(neg_res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(neg_res.v0, 123u);
+}
+
+TEST(MipsEmulatorTest, InfiniteLoopProtection) {
+  MipsEmulator emu;
+  // 00: beq $zero, $zero, 0 (infinite branch to itself)
+  // 04: nop
+  std::vector<uint32_t> code = {
+      0x1000FFFF,  // beq $zero, $zero, -1 (points to itself at 00)
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, /*max_steps=*/500);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kMaxStepsReached);
+  EXPECT_EQ(res.total_steps, 500u);
+}
+
+TEST(MipsEmulatorTest, MultiplyAndDivide) {
+  MipsEmulator emu;
+  // 00: addiu $a0, $zero, 7
+  // 04: addiu $a1, $zero, 3
+  // 08: mult  $a0, $a1      (prod = 21)
+  // 0C: mflo  $v0           (v0 = 21)
+  // 10: div   $a0, $a1      (lo = 2, hi = 1)
+  // 14: mflo  $t0           (t0 = 2)
+  // 18: mfhi  $t1           (t1 = 1)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> code = {
+      0x24040007,  // addiu $a0, $zero, 7
+      0x24050003,  // addiu $a1, $zero, 3
+      0x00850018,  // mult  $a0, $a1
+      0x00001012,  // mflo  $v0
+      0x0085001A,  // div   $a0, $a1
+      0x00004012,  // mflo  $t0
+      0x00004810,  // mfhi  $t1
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 21u);
+  EXPECT_EQ(emu.GetRegister(Register::kT0), 2u);
+  EXPECT_EQ(emu.GetRegister(Register::kT1), 1u);
+}
+
+TEST(MipsEmulatorTest, CalleeSavedRegistersSnapshot) {
+  MipsEmulator emu;
+  emu.SetRegister(Register::kS0, 0x1111);
+  emu.SetRegister(Register::kS7, 0x7777);
+  emu.SetRegister(Register::kSp, 0x80700000);
+
+  CalleeSavedRegisters snapshot = emu.GetCalleeSavedRegisters();
+  EXPECT_EQ(snapshot.s0, 0x1111u);
+  EXPECT_EQ(snapshot.s7, 0x7777u);
+  EXPECT_EQ(snapshot.sp, 0x80700000u);
+
+  CalleeSavedRegisters other = snapshot;
+  EXPECT_EQ(snapshot, other);
+
+  other.s0 = 0x2222;
+  EXPECT_FALSE(snapshot == other);
+}
+
+TEST(MipsEmulatorTest, MemoryFaultHandling) {
+  MipsEmulator emu;
+  // Load from invalid address 0x10000000 (outside 8MB RDRAM)
+  // 00: lui $at, 0x1000
+  // 04: lw  $v0, 0($at)
+  // 08: jr  $ra
+  // 0C: nop
+  std::vector<uint32_t> code = {
+      0x3C011000,  // lui $at, 0x1000
+      0x8C220000,  // lw  $v0, 0($at)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
+}
+
+TEST(MipsEmulatorTest, ZeroRegisterImmutability) {
+  MipsEmulator emu;
+  // Attempting to write to $zero using multiple instructions
+  // 00: addiu $zero, $zero, 99
+  // 04: ori   $zero, $zero, 0xFF
+  // 08: sll   $zero, $zero, 5
+  // 0C: jr    $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x24000063,  // addiu $zero, $zero, 99
+      0x340000FF,  // ori   $zero, $zero, 0xFF
+      0x00000140,  // sll   $zero, $zero, 5
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(emu.GetRegister(Register::kZero), 0u);
+}
+
+TEST(MipsEmulatorTest, BranchLikelyTakenExecutesDelaySlot) {
+  MipsEmulator emu;
+  // 00: addiu $v0, $zero, 10
+  // 04: addiu $t0, $zero, 1
+  // 08: bnel  $t0, $zero, +2 (taken to 0x14)
+  // 0C: addiu $v0, $v0, 5    (executed in delay slot! -> v0 becomes 15)
+  // 10: addiu $v0, $v0, 100  (skipped)
+  // 14: jr    $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x2402000A,  // addiu $v0, $zero, 10
+      0x24080001,  // addiu $t0, $zero, 1
+      0x55000002,  // bnel  $t0, $zero, +2 (to 0x14)
+      0x24420005,  // addiu $v0, $v0, 5
+      0x24420064,  // addiu $v0, $v0, 100
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 15u);
+}
+
+TEST(MipsEmulatorTest, BranchLikelyNotTakenAnnulsDelaySlot) {
+  MipsEmulator emu;
+  // 00: addiu $v0, $zero, 10
+  // 04: bnel  $zero, $zero, +2 (not taken!)
+  // 08: addiu $v0, $v0, 5      (ANNULLED! Not executed!)
+  // 0C: addiu $v0, $v0, 2      (falls through to here -> v0 becomes 12)
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> code = {
+      0x2402000A,  // addiu $v0, $zero, 10
+      0x54000002,  // bnel  $zero, $zero, +2 (not taken)
+      0x24420005,  // addiu $v0, $v0, 5 (annulled)
+      0x24420002,  // addiu $v0, $v0, 2
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 12u);  // 10 + 2 (5 was annulled!)
+}
+
+TEST(MipsEmulatorTest, VariableShiftsAndNor) {
+  MipsEmulator emu;
+  // 00: addiu $a0, $zero, 1
+  // 04: addiu $a1, $zero, 4
+  // 08: sllv  $t0, $a0, $a1   (1 << 4 = 16)
+  // 0C: srlv  $t1, $t0, $a1   (16 >> 4 = 1)
+  // 10: nor   $v0, $a0, $zero (~1 = 0xFFFFFFFE)
+  // 14: jr    $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x24040001,  // addiu $a0, $zero, 1
+      0x24050004,  // addiu $a1, $zero, 4
+      0x00A44004,  // sllv  $t0, $a0, $a1
+      0x00A84846,  // srlv  $t1, $t0, $a1
+      0x00801027,  // nor   $v0, $a0, $zero
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(emu.GetRegister(Register::kT0), 16u);
+  EXPECT_EQ(emu.GetRegister(Register::kT1), 1u);
+  EXPECT_EQ(res.v0, 0xFFFFFFFEu);
+}
+
+TEST(MipsEmulatorTest, DivisionByZeroSafe) {
+  MipsEmulator emu;
+  // 00: addiu $a0, $zero, 10
+  // 04: div   $a0, $zero  (division by zero should not crash process)
+  // 08: divu  $a0, $zero
+  // 0C: jr    $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x2404000A,  // addiu $a0, $zero, 10
+      0x0080001A,  // div   $a0, $zero
+      0x0080001B,  // divu  $a0, $zero
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+}
+
+TEST(MipsEmulatorTest, JalrIndirectCallAndLink) {
+  MipsEmulator emu;
+  // 00: lui   $t0, 0x8000
+  // 04: ori   $t0, $t0, 0x1014 (target: 0x80001014)
+  // 08: jalr  $ra, $t0         (jumps to 0x1014, links return address 0x1010 into $ra)
+  // 0C: addiu $a0, $zero, 25   (executed in delay slot!)
+  // 10: jr    $t9              (callee returns here)
+  // 14: addu  $v0, $a0, $a0    (callee function: 25 + 25 = 50)
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> code = {
+      0x3C088000,  // lui   $t0, 0x8000
+      0x35081014,  // ori   $t0, $t0, 0x1014
+      0x0100F809,  // jalr  $ra, $t0
+      0x24040019,  // addiu $a0, $zero, 25
+      0x03E00008,  // jr    $ra
+      0x00841021,  // addu  $v0, $a0, $a0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 50u);
+}
+
+TEST(MipsEmulatorTest, CalleeSavedPreservationAndStackFrame) {
+  MipsEmulator emu;
+  // Simulate full C prologue / epilogue saving and restoring $s0-$s1:
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $s0, 24($sp)
+  // 08: sw    $s1, 20($sp)
+  // 0C: addiu $s0, $zero, 0xAAAA (scratch work)
+  // 10: addiu $s1, $zero, 0xBBBB
+  // 14: addu  $v0, $s0, $s1
+  // 18: lw    $s1, 20($sp)
+  // 1C: lw    $s0, 24($sp)
+  // 20: jr    $ra
+  // 24: addiu $sp, $sp, 32
+  std::vector<uint32_t> code = {
+      0x27BDFFE0,  // addiu $sp, $sp, -32
+      0xAFB00018,  // sw    $s0, 24($sp)
+      0xAFB10014,  // sw    $s1, 20($sp)
+      0x2410AAAA,  // addiu $s0, $zero, 0xAAAA
+      0x2411BBBB,  // addiu $s1, $zero, 0xBBBB
+      0x02111021,  // addu  $v0, $s0, $s1
+      0x8FB10014,  // lw    $s1, 20($sp)
+      0x8FB00018,  // lw    $s0, 24($sp)
+      0x03E00008,  // jr    $ra
+      0x27BD0020,  // addiu $sp, $sp, 32
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+
+  // Initialize caller state
+  emu.SetRegister(Register::kSp, 0x80700000);
+  emu.SetRegister(Register::kS0, 0x12345678);
+  emu.SetRegister(Register::kS1, 0x9ABCDEF0);
+  CalleeSavedRegisters pre_call = emu.GetCalleeSavedRegisters();
+
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, static_cast<uint32_t>(0xFFFF6665));  // 0xFFFF... + 0xFFFF...
+
+  CalleeSavedRegisters post_call = emu.GetCalleeSavedRegisters();
+  EXPECT_EQ(pre_call, post_call);
+  EXPECT_EQ(emu.GetRegister(Register::kS0), 0x12345678u);
+  EXPECT_EQ(emu.GetRegister(Register::kS1), 0x9ABCDEF0u);
+  EXPECT_EQ(emu.GetRegister(Register::kSp), 0x80700000u);
+}
+
+TEST(MipsEmulatorTest, UnalignedLwlAndLwr) {
+  MipsEmulator emu;
+  uint32_t ram = 0x80100000;
+  // Write two words to RAM:
+  // [0x80100000] = 0x11223344
+  // [0x80100004] = 0x55667788
+  ASSERT_TRUE(emu.Write32(ram, 0x11223344));
+  ASSERT_TRUE(emu.Write32(ram + 4, 0x55667788));
+
+  // 00: lui $a0, 0x8010
+  // 04: lwl $v0, 1($a0)  (loads 22, 33, 44 into top 24 bits)
+  // 08: lwr $v0, 4($a0)  (loads 55 into bottom 8 bits)
+  // 0C: jr  $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui $a0, 0x8010
+      0x88820001,  // lwl $v0, 1($a0)
+      0x98820004,  // lwr $v0, 4($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0x22334455u);
+}
+
+TEST(MipsEmulatorTest, UnalignedSwlAndSwr) {
+  MipsEmulator emu;
+  uint32_t ram = 0x80100000;
+  ASSERT_TRUE(emu.Write32(ram, 0x11223344));
+  ASSERT_TRUE(emu.Write32(ram + 4, 0x55667788));
+  emu.ClearWriteLog();
+
+  // 00: lui $a0, 0x8010
+  // 04: lui $t0, 0xAABB
+  // 08: ori $t0, $t0, 0xCCDD  ($t0 = 0xAABBCCDD)
+  // 0C: swl $t0, 1($a0)       (stores AA, BB, CC into bytes 1, 2, 3)
+  // 10: swr $t0, 4($a0)       (stores DD into byte 4)
+  // 14: jr  $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui $a0, 0x8010
+      0x3C08AABB,  // lui $t0, 0xAABB
+      0x3508CCDD,  // ori $t0, $t0, 0xCCDD
+      0xA8880001,  // swl $t0, 1($a0)
+      0xB8880004,  // swr $t0, 4($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+
+  uint32_t word0 = 0;
+  uint32_t word1 = 0;
+  ASSERT_TRUE(emu.Read32(ram, &word0));
+  ASSERT_TRUE(emu.Read32(ram + 4, &word1));
+  EXPECT_EQ(word0, 0x11AABBCCu);
+  EXPECT_EQ(word1, 0xDD667788u);
+}
+
+TEST(MipsEmulatorTest, SignedIntegerOverflowAddAndSubTraps) {
+  MipsEmulator emu;
+  // 00: lui  $a0, 0x7FFF
+  // 04: ori  $a0, $a0, 0xFFFF (0x7FFFFFFF = INT32_MAX)
+  // 08: addi $t0, $a0, 1      (overflows! traps!)
+  // 0C: jr   $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x3C047FFF,  // lui  $a0, 0x7FFF
+      0x3484FFFF,  // ori  $a0, $a0, 0xFFFF
+      0x20880001,  // addi $t0, $a0, 1
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kIntegerOverflow);
+}
+
+TEST(MipsEmulatorTest, UnsignedWraparoundNeverTraps) {
+  MipsEmulator emu;
+  // 00: addiu $a0, $zero, -1  (0xFFFFFFFF)
+  // 04: addiu $v0, $a0, 1     (0xFFFFFFFF + 1 = 0x00000000, wraps with NO trap!)
+  // 08: subu  $v1, $v0, 1     (0x00000000 - 1 = 0xFFFFFFFF, wraps with NO trap!)
+  // 0C: jr    $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x2404FFFF,  // addiu $a0, $zero, -1
+      0x24820001,  // addiu $v0, $a0, 1
+      0x2443FFFF,  // addiu $v1, $v0, -1
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0u);
+  EXPECT_EQ(res.v1, 0xFFFFFFFFu);
+}
+
+TEST(MipsEmulatorTest, DivisionSignedOverflowMinIntNoCrash) {
+  MipsEmulator emu;
+  // INT32_MIN / -1 must not crash host with SIGFPE
+  // 00: lui  $a0, 0x8000      (0x80000000 = INT32_MIN)
+  // 04: addiu $a1, $zero, -1  (0xFFFFFFFF = -1)
+  // 08: div  $a0, $a1         (0x80000000 / -1)
+  // 0C: mflo $v0              (v0 = 0x80000000)
+  // 10: mfhi $v1              (v1 = 0)
+  // 14: jr   $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x3C048000,  // lui  $a0, 0x8000
+      0x2405FFFF,  // addiu $a1, $zero, -1
+      0x0085001A,  // div  $a0, $a1
+      0x00001012,  // mflo $v0
+      0x00001810,  // mfhi $v1
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0x80000000u);
+  EXPECT_EQ(res.v1, 0u);
+}
+
+TEST(MipsEmulatorTest, MisalignedWordLoadFaults) {
+  MipsEmulator emu;
+  // Standard lw at misaligned address 0x80100001 must fault
+  // 00: lui $a0, 0x8010
+  // 04: lw  $v0, 1($a0)
+  // 08: jr  $ra
+  // 0C: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui $a0, 0x8010
+      0x8C820001,  // lw  $v0, 1($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
+}
+
+TEST(MipsEmulatorTest, SignVsZeroExtensionLoads) {
+  MipsEmulator emu;
+  uint32_t ram = 0x80100000;
+  // Write 0x80 to byte 0 and 0x8000 to halfword 2:
+  // [0x80100000] = 0x80008000
+  ASSERT_TRUE(emu.Write32(ram, 0x80008000));
+
+  // 00: lui $a0, 0x8010
+  // 04: lb  $t0, 0($a0)  (0x80 -> sign-extended to 0xFFFFFF80)
+  // 08: lbu $t1, 0($a0)  (0x80 -> zero-extended to 0x00000080)
+  // 0C: lh  $t2, 2($a0)  (0x8000 -> sign-extended to 0xFFFF8000)
+  // 10: lhu $t3, 2($a0)  (0x8000 -> zero-extended to 0x00008000)
+  // 14: jr  $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui $a0, 0x8010
+      0x80880000,  // lb  $t0, 0($a0)
+      0x90890000,  // lbu $t1, 0($a0)
+      0x848A0002,  // lh  $t2, 2($a0)
+      0x948B0002,  // lhu $t3, 2($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(emu.GetRegister(Register::kT0), 0xFFFFFF80u);
+  EXPECT_EQ(emu.GetRegister(Register::kT1), 0x00000080u);
+  EXPECT_EQ(emu.GetRegister(Register::kT2), 0xFFFF8000u);
+  EXPECT_EQ(emu.GetRegister(Register::kT3), 0x00008000u);
+}
+
+}  // namespace
+}  // namespace rom_nom_nom::fuzzer
