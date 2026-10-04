@@ -3,6 +3,28 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "jump_table",
+    srcs = ["jump_table.cc"],
+    hdrs = ["jump_table.h"],
+    deps = [
+        "//core:mips",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "jump_table_test",
+    srcs = ["jump_table_test.cc"],
+    deps = [
+        ":jump_table",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "control_flow_graph",
     srcs = ["control_flow_graph.cc"],
     hdrs = ["control_flow_graph.h"],
