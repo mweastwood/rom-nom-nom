@@ -284,6 +284,90 @@ n64_lifted_c_rom_test = rule(
     },
 )
 
+def _n64_lifted_c_equivalence_test_impl(ctx):
+    rom = ctx.file.rom
+    target_rom = ctx.file.target_rom
+    config = ctx.file.config
+    symbols = ctx.file.symbols
+    fuzzer = ctx.executable._fuzzer
+
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+
+    script_content = """#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_ROM="{target_rom}"
+BUILT_ROM="{built_rom}"
+CONFIG_FILE="{config}"
+SYMBOLS_FILE="{symbols}"
+FUZZER_BIN="{fuzzer}"
+
+resolve_path() {{
+    local path="$1"
+    if [[ -f "$path" ]]; then
+        echo "$path"
+    elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$path" ]]; then
+        echo "${{RUNFILES_DIR:-.default_runfiles}}/$path"
+    elif [[ -n "${{TEST_SRCDIR:-}}" && -f "$TEST_SRCDIR/$path" ]]; then
+        echo "$TEST_SRCDIR/$path"
+    elif [[ -n "${{TEST_SRCDIR:-}}" && -f "$TEST_SRCDIR/_main/$path" ]]; then
+        echo "$TEST_SRCDIR/_main/$path"
+    else
+        find . -name "$(basename "$path")" | head -n 1
+    fi
+}}
+
+ACTUAL_TARGET=$(resolve_path "$TARGET_ROM")
+ACTUAL_BUILT=$(resolve_path "$BUILT_ROM")
+ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
+ACTUAL_SYMBOLS=$(resolve_path "$SYMBOLS_FILE")
+ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
+
+"$ACTUAL_FUZZER" \
+    --rom="$ACTUAL_TARGET" \
+    --built_rom="$ACTUAL_BUILT" \
+    --config="$ACTUAL_CONFIG" \
+    --symbols="$ACTUAL_SYMBOLS" \
+    --nocolor
+""".format(
+        target_rom = target_rom.short_path,
+        built_rom = rom.short_path,
+        config = config.short_path,
+        symbols = symbols.short_path,
+        fuzzer = fuzzer.short_path,
+    )
+
+    ctx.actions.write(
+        output = script,
+        content = script_content,
+        is_executable = True,
+    )
+
+    return [
+        DefaultInfo(
+            executable = script,
+            runfiles = ctx.runfiles(files = [rom, target_rom, config, symbols, fuzzer]).merge(
+                ctx.attr._fuzzer[DefaultInfo].default_runfiles,
+            ),
+        ),
+    ]
+
+n64_lifted_c_equivalence_test = rule(
+    implementation = _n64_lifted_c_equivalence_test_impl,
+    test = True,
+    attrs = {
+        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "target_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+        "symbols": attr.label(mandatory = True, allow_single_file = [".txt", ".textproto"]),
+        "_fuzzer": attr.label(
+            default = Label("//fuzzer:fuzzer"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
 def n64_game(name, game, config, symbols, rom, srcs = []):
     """Macro to instantiate an N64 game with pure Bazel generated assembly pipeline."""
     split_name = name + "_split"
@@ -324,6 +408,16 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
     native.test_suite(
         name = name + "_rom_bitexact_test",
         tests = [":" + assembly_test_name],
+    )
+
+    # Equivalence verification test via differential fuzzer
+    equivalence_test_name = name + "_equivalence_test"
+    n64_lifted_c_equivalence_test(
+        name = equivalence_test_name,
+        rom = ":" + assembly_rom_name,
+        target_rom = rom,
+        config = config,
+        symbols = symbols,
     )
 
     # Stage 3: Whole-game lifted C pipeline, lifted C ROM, and validation test
@@ -368,6 +462,14 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         rom = ":" + lifted_c_rom_name,
         target_rom = rom,
         config = config,
+    )
+
+    n64_lifted_c_equivalence_test(
+        name = name + "_lifted_c_equivalence_test",
+        rom = ":" + lifted_c_rom_name,
+        target_rom = rom,
+        config = config,
+        symbols = symbols,
     )
 
 def _lifter_lift_game_impl(ctx):
