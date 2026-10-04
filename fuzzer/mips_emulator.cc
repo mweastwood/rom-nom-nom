@@ -20,7 +20,6 @@ void MipsEmulator::Reset() {
   hi_ = 0;
   lo_ = 0;
   pc_ = base_vram_;
-  next_pc_ = base_vram_ + 4;
   in_delay_slot_ = false;
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;
@@ -61,8 +60,6 @@ std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
     phys = vram - 0x80000000;
   } else if (vram >= 0xA0000000 && vram < 0xC0000000) {
     phys = vram - 0xA0000000;
-  } else if (vram < memory_size_) {
-    phys = vram;
   } else {
     return std::nullopt;
   }
@@ -128,6 +125,7 @@ bool MipsEmulator::Read8(uint32_t vram, uint8_t* val) const {
 }
 
 bool MipsEmulator::Read16(uint32_t vram, uint16_t* val) const {
+  if ((vram & 1) != 0) return false;
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
   *val = static_cast<uint16_t>((static_cast<uint16_t>(memory_[*phys]) << 8) |
@@ -136,6 +134,7 @@ bool MipsEmulator::Read16(uint32_t vram, uint16_t* val) const {
 }
 
 bool MipsEmulator::Read32(uint32_t vram, uint32_t* val) const {
+  if ((vram & 3) != 0) return false;
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
   *val = (static_cast<uint32_t>(memory_[*phys]) << 24) |
@@ -154,6 +153,7 @@ bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
 }
 
 bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
+  if ((vram & 1) != 0) return false;
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
   memory_[*phys] = static_cast<uint8_t>(val >> 8);
@@ -163,6 +163,7 @@ bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
 }
 
 bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
+  if ((vram & 3) != 0) return false;
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
   memory_[*phys] = static_cast<uint8_t>(val >> 24);
@@ -191,6 +192,9 @@ CalleeSavedRegisters MipsEmulator::GetCalleeSavedRegisters() const {
 
 ExecutionStatus MipsEmulator::Step() {
   uint32_t current_pc = pc_;
+  if ((current_pc & 3) != 0) {
+    return ExecutionStatus::kMemoryFault;
+  }
   uint32_t raw_word = 0;
   if (!Read32(current_pc, &raw_word)) {
     return ExecutionStatus::kMemoryFault;
@@ -477,6 +481,23 @@ ExecutionStatus MipsEmulator::Step() {
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     }
+    case Opcode::kBltzal:
+    case Opcode::kBgezal: {
+      if (rs == 31) {
+        return ExecutionStatus::kInvalidOpcode;  // MIPS III undefined restriction
+      }
+      bool take_branch = (inst.opcode == Opcode::kBltzal) ? (static_cast<int32_t>(gpr_[rs]) < 0)
+                                                          : (static_cast<int32_t>(gpr_[rs]) >= 0);
+      SetGpr(31, current_pc + 8);
+      in_delay_slot_ = true;
+      if (take_branch) {
+        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+      } else {
+        delayed_branch_target_ = current_pc + 8;
+      }
+      pc_ = advanced_pc;
+      return ExecutionStatus::kRunning;
+    }
     case Opcode::kBeql:
     case Opcode::kBnel:
     case Opcode::kBlezl:
@@ -518,19 +539,18 @@ ExecutionStatus MipsEmulator::Step() {
     }
     case Opcode::kJalr: {
       int link_reg = (rd != 0) ? rd : 31;
+      if (rs == link_reg) {
+        return ExecutionStatus::kInvalidOpcode;  // MIPS III undefined restriction
+      }
       SetGpr(link_reg, current_pc + 8);
       in_delay_slot_ = true;
-      if (rs == 31 || gpr_[rs] == kReturnAddressSentinel) {
-        delay_slot_is_return_ = true;
-      } else {
-        delayed_branch_target_ = gpr_[rs];
-      }
+      delayed_branch_target_ = gpr_[rs];
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     }
     case Opcode::kJr: {
       in_delay_slot_ = true;
-      if (rs == 31 || gpr_[rs] == kReturnAddressSentinel) {
+      if (gpr_[rs] == kReturnAddressSentinel) {
         delay_slot_is_return_ = true;
       } else {
         delayed_branch_target_ = gpr_[rs];
@@ -714,7 +734,6 @@ ExecutionStatus MipsEmulator::Step() {
 ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_steps) {
   ExecutionResult result;
   pc_ = start_vram;
-  next_pc_ = start_vram + 4;
   in_delay_slot_ = false;
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;

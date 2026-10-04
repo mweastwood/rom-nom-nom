@@ -388,25 +388,31 @@ TEST(MipsEmulatorTest, DivisionByZeroSafe) {
 
 TEST(MipsEmulatorTest, JalrIndirectCallAndLink) {
   MipsEmulator emu;
+  // Non-leaf function saving $ra, calling subroutine via jalr, and returning:
   // 00: lui   $t0, 0x8000
-  // 04: ori   $t0, $t0, 0x1014 (target: 0x80001014)
-  // 08: jalr  $ra, $t0         (jumps to 0x1014, links return address 0x1010 into $ra)
-  // 0C: addiu $a0, $zero, 25   (executed in delay slot!)
-  // 10: jr    $t9              (callee returns here)
-  // 14: addu  $v0, $a0, $a0    (callee function: 25 + 25 = 50)
-  // 18: jr    $ra
-  // 1C: nop
+  // 04: ori   $t0, $t0, 0x101C (subroutine at 0x8000101C)
+  // 08: sw    $ra, 0($sp)      (save top-level return sentinel)
+  // 0C: jalr  $ra, $t0         (call subroutine, link return address 0x1014 into $ra)
+  // 10: addiu $a0, $zero, 25   (delay slot: arg = 25)
+  // 14: lw    $ra, 0($sp)      (restore top-level return sentinel)
+  // 18: jr    $ra              (return to top-level caller)
+  // 1C: addu  $v0, $a0, $a0    (subroutine: v0 = 25 + 25 = 50)
+  // 20: jr    $ra              (subroutine returns to caller at 0x1014)
+  // 24: nop
   std::vector<uint32_t> code = {
       0x3C088000,  // lui   $t0, 0x8000
-      0x35081014,  // ori   $t0, $t0, 0x1014
+      0x3508101C,  // ori   $t0, $t0, 0x101C
+      0xAFBF0000,  // sw    $ra, 0($sp)
       0x0100F809,  // jalr  $ra, $t0
       0x24040019,  // addiu $a0, $zero, 25
+      0x8FBF0000,  // lw    $ra, 0($sp)
       0x03E00008,  // jr    $ra
       0x00841021,  // addu  $v0, $a0, $a0
       0x03E00008,  // jr    $ra
       0x00000000,  // nop
   };
 
+  emu.SetRegister(Register::kSp, 0x80101000);  // Initialize stack pointer
   ASSERT_TRUE(emu.LoadWords(0x80001000, code));
   ExecutionResult res = emu.RunFunction(0x80001000);
 
@@ -876,6 +882,87 @@ TEST(MipsEmulatorTest, RunFunctionReturnsF0Float) {
   EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
   EXPECT_FLOAT_EQ(res.f0, 123.456f);
   EXPECT_EQ(res.f0_bits, 0x42F6E979u);
+}
+
+TEST(MipsEmulatorTest, BltzalAndBgezalBranchAndLink) {
+  MipsEmulator emu;
+  // Test 1: bltzal taken (a0 = -5)
+  // 00: bltzal  $a0, +2          (taken to 0x1010, links ra = 0x1008)
+  // 04: addiu   $v0, $zero, 1    (delay slot: v0 = 1)
+  // 08: addiu   $v0, $v0, 100    (skipped)
+  // 0C: addiu   $v0, $v0, 100    (skipped)
+  // 10: jr      $ra              (callee returns to 0x1008)
+  // 14: nop
+  std::vector<uint32_t> code = {
+      0x04900002,  // bltzal $a0, +2 (target: 0x80001010)
+      0x24020001,  // addiu  $v0, $zero, 1
+      0x24420064,  // addiu  $v0, $v0, 100
+      0x24420064,  // addiu  $v0, $v0, 100
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetPc(0x80001000);
+  emu.SetRegister(Register::kA0, static_cast<uint32_t>(-5));
+  // Call Step:
+  // Step 1: executes bltzal, sets $ra = 0x80001008
+  EXPECT_EQ(emu.Step(), ExecutionStatus::kRunning);
+  EXPECT_EQ(emu.GetRegister(Register::kRa), 0x80001008u);
+
+  // Test 2: bltzal NOT taken (a0 = 5) still unconditionally updates $ra = PC + 8
+  MipsEmulator emu2;
+  ASSERT_TRUE(emu2.LoadWords(0x80001000, code));
+  emu2.SetPc(0x80001000);
+  emu2.SetRegister(Register::kA0, 5);
+  EXPECT_EQ(emu2.Step(), ExecutionStatus::kRunning);
+  EXPECT_EQ(emu2.GetRegister(Register::kRa), 0x80001008u);  // Unconditionally linked!
+
+  // Test 3: bltzal with rs == 31 is architecturally illegal
+  MipsEmulator emu3;
+  std::vector<uint32_t> illegal_code = {0x07F00002};  // bltzal $ra, +2
+  ASSERT_TRUE(emu3.LoadWords(0x80001000, illegal_code));
+  emu3.SetPc(0x80001000);
+  EXPECT_EQ(emu3.Step(), ExecutionStatus::kInvalidOpcode);
+}
+
+TEST(MipsEmulatorTest, UnalignedPcInstructionFetchFaults) {
+  MipsEmulator emu;
+  // Jump to misaligned address 0x80001005:
+  // 00: lui   $t0, 0x8000
+  // 04: ori   $t0, $t0, 0x1005 (unaligned target)
+  // 08: jr    $t0
+  // 0C: addiu $v0, $zero, 42   (delay slot executes normally)
+  std::vector<uint32_t> code = {
+      0x3C088000,  // lui   $t0, 0x8000
+      0x35081005,  // ori   $t0, $t0, 0x1005
+      0x01000008,  // jr    $t0
+      0x2402002A,  // addiu $v0, $zero, 42 (delay slot)
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  // Hardware executes delay slot ($v0 becomes 42) then raises AdEL on fetch
+  EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
+  EXPECT_EQ(emu.GetRegister(Register::kV0), 42u);
+}
+
+TEST(MipsEmulatorTest, NullPointerDereferenceFaults) {
+  MipsEmulator emu;
+  // 00: lw    $v0, 0($zero) (NULL pointer dereference)
+  // 04: jr    $ra
+  // 08: nop
+  std::vector<uint32_t> code = {
+      0x8C020000,  // lw $v0, 0($zero)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
 }
 
 }  // namespace

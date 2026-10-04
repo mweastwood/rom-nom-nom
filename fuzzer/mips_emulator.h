@@ -89,10 +89,7 @@ class MipsEmulator {
   void SetGpr(int index, uint32_t value);
   uint32_t GetGpr(int index) const;
 
-  void SetPc(uint32_t pc) {
-    pc_ = pc;
-    next_pc_ = pc + 4;
-  }
+  void SetPc(uint32_t pc) { pc_ = pc; }
   uint32_t GetPc() const { return pc_; }
 
   void SetHi(uint32_t hi) { hi_ = hi; }
@@ -147,7 +144,6 @@ class MipsEmulator {
   uint32_t hi_ = 0;
   uint32_t lo_ = 0;
   uint32_t pc_ = 0;
-  uint32_t next_pc_ = 4;
 
   bool in_delay_slot_ = false;
   std::optional<uint32_t> delayed_branch_target_;
