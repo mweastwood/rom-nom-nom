@@ -10,6 +10,7 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
+#include "lifter/jump_table.h"
 
 namespace rom_nom_nom {
 
@@ -40,12 +41,15 @@ struct BasicBlock {
   std::vector<uint32_t> successors;
   std::vector<CfgEdge> outgoing_edges;
 
+  const JumpTable* jump_table = nullptr;
+
   // Convenience queries
   bool IsEmpty() const { return instructions.empty(); }
   size_t Size() const { return instructions.size(); }
   const Instruction* Terminator() const;
   bool HasBranch() const;
   bool HasReturn() const;
+  bool HasSwitch() const { return jump_table != nullptr; }
 };
 
 // Represents the Control Flow Graph of a decompiled function.
@@ -53,13 +57,15 @@ class ControlFlowGraph {
  public:
   ControlFlowGraph() = default;
 
-  // Constructs a CFG from a sequence of decoded instructions.
-  static absl::StatusOr<ControlFlowGraph> Build(absl::Span<const Instruction> instructions);
+  // Constructs a CFG from a sequence of decoded instructions and optional jump tables.
+  static absl::StatusOr<ControlFlowGraph> Build(absl::Span<const Instruction> instructions,
+                                                absl::Span<const JumpTable> jump_tables = {});
 
   // Accessors
   uint32_t EntryBlockId() const { return entry_block_id_; }
   const std::vector<BasicBlock>& Blocks() const { return blocks_; }
   const std::vector<CfgEdge>& Edges() const { return edges_; }
+  const std::vector<JumpTable>& JumpTables() const { return jump_tables_; }
 
   const BasicBlock* GetBlock(uint32_t id) const;
   const BasicBlock* FindBlockByVram(uint32_t vram) const;
@@ -78,6 +84,7 @@ class ControlFlowGraph {
   uint32_t entry_block_id_ = 0;
   std::vector<BasicBlock> blocks_;
   std::vector<CfgEdge> edges_;
+  std::vector<JumpTable> jump_tables_;
   absl::flat_hash_map<uint32_t, size_t> vram_to_block_index_;
 };
 

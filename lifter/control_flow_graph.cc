@@ -44,13 +44,14 @@ bool BasicBlock::HasReturn() const {
   return term != nullptr && term->IsReturn();
 }
 
-absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(
-    absl::Span<const Instruction> instructions) {
+absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instruction> instructions,
+                                                         absl::Span<const JumpTable> jump_tables) {
   if (instructions.empty()) {
     return absl::InvalidArgumentError("ControlFlowGraph: cannot build from empty instructions.");
   }
 
   ControlFlowGraph cfg;
+  cfg.jump_tables_.assign(jump_tables.begin(), jump_tables.end());
 
   // 1. Index instructions by VRAM address.
   absl::flat_hash_map<uint32_t, size_t> vram_to_idx;
@@ -62,6 +63,22 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(
   // 2. Identify basic block leaders.
   std::vector<bool> is_leader(instructions.size(), false);
   is_leader[0] = true;
+
+  // Jump table targets and default targets are leaders
+  absl::flat_hash_map<uint32_t, const JumpTable*> switch_vram_to_table;
+  for (const auto& table : cfg.jump_tables_) {
+    switch_vram_to_table[table.switch_vram] = &table;
+    for (const auto& entry : table.entries) {
+      auto it = vram_to_idx.find(entry.target_vram);
+      if (it != vram_to_idx.end()) {
+        is_leader[it->second] = true;
+      }
+    }
+    auto it_def = vram_to_idx.find(table.default_target_vram);
+    if (it_def != vram_to_idx.end()) {
+      is_leader[it_def->second] = true;
+    }
+  }
 
   for (size_t i = 0; i < instructions.size(); ++i) {
     const auto& inst = instructions[i];
@@ -109,6 +126,14 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(
     block.end_vram = instructions[end_idx - 1].vram;
     block.instructions.assign(instructions.begin() + start_idx, instructions.begin() + end_idx);
 
+    for (const auto& inst : block.instructions) {
+      auto it_table = switch_vram_to_table.find(inst.vram);
+      if (it_table != switch_vram_to_table.end()) {
+        block.jump_table = it_table->second;
+        break;
+      }
+    }
+
     cfg.vram_to_block_index_[block.start_vram] = b;
     cfg.blocks_.push_back(std::move(block));
   }
@@ -134,6 +159,20 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(
 
     if (term->IsReturn()) {
       // Function exit block: no outgoing edges.
+      continue;
+    }
+
+    if (block.jump_table != nullptr) {
+      absl::flat_hash_set<uint32_t> added_targets;
+      for (const auto& entry : block.jump_table->entries) {
+        if (!added_targets.contains(entry.target_vram)) {
+          added_targets.insert(entry.target_vram);
+          auto it = cfg.vram_to_block_index_.find(entry.target_vram);
+          if (it != cfg.vram_to_block_index_.end()) {
+            add_edge(block.id, static_cast<uint32_t>(it->second), EdgeType::kJump);
+          }
+        }
+      }
       continue;
     }
 

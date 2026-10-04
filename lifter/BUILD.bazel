@@ -29,6 +29,7 @@ cc_library(
     srcs = ["control_flow_graph.cc"],
     hdrs = ["control_flow_graph.h"],
     deps = [
+        ":jump_table",
         "//core:mips",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",

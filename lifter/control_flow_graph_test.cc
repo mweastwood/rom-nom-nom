@@ -239,5 +239,117 @@ TEST(ControlFlowGraphTest, ToDotProducesNonEmptyOutput) {
   EXPECT_NE(dot.find("digraph CFG"), std::string::npos);
 }
 
+TEST(ControlFlowGraphTest, BuildWithJumpTable) {
+  std::vector<Instruction> instructions;
+
+  // 0x80000000: sltiu $v0, $v1, 2
+  Instruction sltiu;
+  sltiu.opcode = Opcode::kSltiu;
+  sltiu.rt = Register::kV0;
+  sltiu.rs = Register::kV1;
+  sltiu.immediate = 2;
+  sltiu.vram = 0x80000000;
+  instructions.push_back(sltiu);
+
+  // 0x80000004: beqz $v0, 0x80000024 (default)
+  Instruction beqz;
+  beqz.opcode = Opcode::kBeq;
+  beqz.rs = Register::kV0;
+  beqz.rt = Register::kZero;
+  beqz.immediate = 7;  // 0x80000008 + (7 << 2) = 0x80000024
+  beqz.vram = 0x80000004;
+  instructions.push_back(beqz);
+
+  // 0x80000008: sll $v0, $v1, 2
+  Instruction sll;
+  sll.opcode = Opcode::kSll;
+  sll.rd = Register::kV0;
+  sll.rt = Register::kV1;
+  sll.shift_amount = 2;
+  sll.vram = 0x80000008;
+  instructions.push_back(sll);
+
+  // 0x8000000C: jr $v0
+  Instruction jr;
+  jr.opcode = Opcode::kJr;
+  jr.rs = Register::kV0;
+  jr.vram = 0x8000000C;
+  instructions.push_back(jr);
+
+  // 0x80000010: nop
+  Instruction nop;
+  nop.opcode = Opcode::kSll;
+  nop.rd = Register::kZero;
+  nop.rt = Register::kZero;
+  nop.vram = 0x80000010;
+  instructions.push_back(nop);
+
+  // 0x80000014: jr $ra (Case 0)
+  Instruction ret0;
+  ret0.opcode = Opcode::kJr;
+  ret0.rs = Register::kRa;
+  ret0.vram = 0x80000014;
+  instructions.push_back(ret0);
+
+  // 0x80000018: nop
+  Instruction nop0 = nop;
+  nop0.vram = 0x80000018;
+  instructions.push_back(nop0);
+
+  // 0x8000001C: jr $ra (Case 1)
+  Instruction ret1 = ret0;
+  ret1.vram = 0x8000001C;
+  instructions.push_back(ret1);
+
+  // 0x80000020: nop
+  Instruction nop1 = nop;
+  nop1.vram = 0x80000020;
+  instructions.push_back(nop1);
+
+  // 0x80000024: jr $ra (Default)
+  Instruction ret_def = ret0;
+  ret_def.vram = 0x80000024;
+  instructions.push_back(ret_def);
+
+  // 0x80000028: nop
+  Instruction nop_def = nop;
+  nop_def.vram = 0x80000028;
+  instructions.push_back(nop_def);
+
+  JumpTable table;
+  table.switch_vram = 0x8000000C;
+  table.default_target_vram = 0x80000024;
+  table.entries = {
+      JumpTableEntry{.case_index = 0, .case_value = 0, .target_vram = 0x80000014},
+      JumpTableEntry{.case_index = 1, .case_value = 1, .target_vram = 0x8000001C},
+  };
+
+  auto cfg_or = ControlFlowGraph::Build(instructions, {table});
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  EXPECT_EQ(cfg.JumpTables().size(), 1u);
+
+  // Find switch block
+  const auto* switch_block = cfg.FindBlockByVram(0x8000000C);
+  ASSERT_THAT(switch_block, NotNull());
+  EXPECT_TRUE(switch_block->HasSwitch());
+  ASSERT_THAT(switch_block->jump_table, NotNull());
+  EXPECT_EQ(switch_block->jump_table->switch_vram, 0x8000000C);
+
+  // Switch block successors should be the case blocks (0x80000014 and 0x8000001C)
+  const auto* case0 = cfg.FindBlockByVram(0x80000014);
+  const auto* case1 = cfg.FindBlockByVram(0x8000001C);
+  const auto* def_block = cfg.FindBlockByVram(0x80000024);
+
+  ASSERT_THAT(case0, NotNull());
+  ASSERT_THAT(case1, NotNull());
+  ASSERT_THAT(def_block, NotNull());
+
+  EXPECT_THAT(switch_block->successors, ElementsAre(case0->id, case1->id));
+  EXPECT_THAT(case0->predecessors, ElementsAre(switch_block->id));
+  EXPECT_THAT(case1->predecessors, ElementsAre(switch_block->id));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
