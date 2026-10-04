@@ -878,12 +878,12 @@ entries {
 entries {
   name: "kAudioMinPitch"
   address: 0x8011EE00
-  type: SYMBOL_FUNC
+  type: SYMBOL_DATA
 }
 entries {
   name: "kAudioMaxPitch"
   address: 0x8011EE08
-  type: SYMBOL_FUNC
+  type: SYMBOL_DATA
 }
 entries {
   name: "g_idle_thread"
