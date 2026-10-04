@@ -300,5 +300,17 @@ TEST(ExpressionBuilderTest, ComparisonOperations) {
   EXPECT_EQ(statements[3].ToString(), "v1 = arg0 < 10;\n");
 }
 
+TEST(ExpressionBuilderTest, StandaloneLuiOperation) {
+  std::vector<uint32_t> words = {
+      0x3C02801F,  // 0: lui $v0, 0x801F
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].ToString(), "v0 = 0x801F0000;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

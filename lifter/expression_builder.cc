@@ -376,6 +376,17 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kLui:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          uint32_t val = static_cast<uint32_t>(static_cast<uint16_t>(inst.immediate)) << 16;
+          statement.expression = LiftedExpression::Integer(val, /*hex=*/true);
+          statements.push_back(std::move(statement));
+        }
+        break;
+
       case Opcode::kAnd:
         if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
             inst.rt.has_value()) {
