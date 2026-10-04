@@ -50,14 +50,15 @@ alias(
     actual = "//differ:differ",
 )
 
-# Native C++ MIPS-to-C lifter (clean-room replacement for m2c)
+# Native C++ MIPS-to-C lifter
 alias(
-    name = "m2c",
+    name = "lifter",
     actual = "//lifter:lifter",
 )
 
+# Backward-compatibility alias
 alias(
-    name = "lifter",
+    name = "m2c",
     actual = "//lifter:lifter",
 )
 

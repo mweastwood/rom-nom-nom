@@ -9,7 +9,7 @@ rom-nom-nom/
 ├── .gitignore               # Strict ignore rules for ROMs, ASM, and build dumps
 ├── MODULE.bazel             # Bazel module configuration
 ├── BUILD.bazel              # Top-level Bazel build targets
-├── requirements.txt         # Python tools (spimdisasm, m2c, etc.)
+├── requirements.txt         # Python tools (spimdisasm, etc.)
 ├── rules/                   # Starlark rules for hermetic N64 ROM builds (tracked)
 │   └── defs.bzl             # splitter_split, n64_rom, and n64_rom_bitexact_test
 ├── roms/                    # Local baseroms (binaries untracked, BUILD tracked)

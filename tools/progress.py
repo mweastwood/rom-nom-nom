@@ -1053,7 +1053,7 @@ def print_module_detail(
     print(f"  2. Add C implementation:     src/c/{game}/{mod['name']}.c")
     print(f"  3. Include module header:    #include \"{mod['name']}.h\"")
     print("  4. Check bit-exact diff:     bazel run //:diff -- <func_name>")
-    print("  5. Generate C draft context: bazel run //:m2c -- <func_name>")
+    print("  5. Generate initial C draft: bazel run //:lifter -- <func_name>")
     print()
 
 
@@ -1216,7 +1216,7 @@ def main():
         print("\nWorkflow Tips:")
         print("  - To decompile next, add matching C functions into src/c/<game>/<module>.c.")
         print("  - Check bit-exact diff:      bazel run //:diff -- <func_name>")
-        print("  - Generate initial C draft:  bazel run //:m2c -- <func_name>")
+        print("  - Generate initial C draft:  bazel run //:lifter -- <func_name>")
         print("  - View module details:       bazel run //:progress -- -m <module>")
         print()
 
