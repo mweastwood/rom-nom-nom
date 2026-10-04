@@ -87,6 +87,14 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
 
   body->AddStatement(CStatement::Return(CExpression::Integer(0)));
 
+  // Test address-taken external function and address-taken stack variable
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("function_pointer"),
+      CExpression::Unary("&", CExpression::Identifier("AddressTakenFunction")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("stack_pointer_reference"),
+                              CExpression::Unary("&", CExpression::Identifier("var_sp_16")))));
+
   std::vector<CParameter> parameters;
   parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
   translation_unit.functions.push_back(
@@ -98,8 +106,13 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
 
   // Check external function declarations
+  EXPECT_THAT(emitted_code, HasSubstr("extern void AddressTakenFunction();\n"));
   EXPECT_THAT(emitted_code, HasSubstr("extern void ExternalHelper();\n"));
   EXPECT_THAT(emitted_code, HasSubstr("extern void func_80012345();\n"));
+
+  // Stack variables should not be emitted as extern
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void var_sp_16();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 var_sp_16;")));
 
   // Check external data declarations
   EXPECT_THAT(emitted_code, HasSubstr("extern s32 D_80100000;\n"));

@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/c_ast.h"
@@ -66,6 +67,25 @@ std::string CTranslationUnit::ToString() const {
     }
   }
 
+  std::set<std::string> external_data_symbols;
+  static const std::regex address_of_symbol_regex(R"(&([a-zA-Z_][a-zA-Z0-9_]*))");
+  for (auto regex_iterator = std::sregex_iterator(
+           combined_function_code.begin(), combined_function_code.end(), address_of_symbol_regex);
+       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
+    std::string symbol_name = regex_iterator->str(1);
+    if (absl::StartsWith(symbol_name, "var_sp_")) {
+      continue;
+    }
+    if (defined_function_names.count(symbol_name)) {
+      continue;
+    }
+    if (absl::StartsWith(symbol_name, "g_") || absl::StartsWith(symbol_name, "D_")) {
+      external_data_symbols.insert(symbol_name);
+    } else {
+      external_function_names.insert(symbol_name);
+    }
+  }
+
   if (!external_function_names.empty()) {
     for (const auto& external_function : external_function_names) {
       output += absl::StrFormat("extern void %s();\n", external_function);
@@ -74,7 +94,6 @@ std::string CTranslationUnit::ToString() const {
   }
 
   static const std::regex data_symbol_regex(R"(\b((?:D_[0-9a-fA-F]+)|(?:g_[a-zA-Z0-9_]+))\b)");
-  std::set<std::string> external_data_symbols;
   for (auto regex_iterator = std::sregex_iterator(combined_function_code.begin(),
                                                   combined_function_code.end(), data_symbol_regex);
        regex_iterator != std::sregex_iterator(); ++regex_iterator) {
