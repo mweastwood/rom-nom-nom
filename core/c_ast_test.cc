@@ -260,5 +260,96 @@ TEST(CAstTest, FunctionDeclarationPrototype) {
   EXPECT_EQ(static_function_without_parameters.Prototype(), "static void ResetState(void);\n");
 }
 
+TEST(CAstTest, CollectReferencedSymbolsLocalOnly) {
+  std::vector<CParameter> parameters;
+  parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+  parameters.push_back(CParameter{.type = CType::S32(), .name = "arg1"});
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(
+      CType::S32(), "result",
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Identifier("arg1"))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("result")));
+
+  FunctionDeclaration func(CType::S32(), "AddNumbers", std::move(parameters), std::move(body));
+
+  ReferencedSymbols symbols = CollectReferencedSymbols(func);
+
+  EXPECT_EQ(symbols.local_variables, (std::set<std::string>{"arg0", "arg1", "result"}));
+  EXPECT_TRUE(symbols.external_functions.empty());
+  EXPECT_TRUE(symbols.external_data.empty());
+}
+
+TEST(CAstTest, CollectReferencedSymbolsExternalCallsAndData) {
+  std::vector<CParameter> parameters;
+  parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "local_var"));
+
+  // Call external function: AlphaHelper(arg0, g_audio_status)
+  std::vector<std::unique_ptr<CExpression>> alpha_args;
+  alpha_args.push_back(CExpression::Identifier("arg0"));
+  alpha_args.push_back(CExpression::Identifier("g_audio_status"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("AlphaHelper"), std::move(alpha_args))));
+
+  // Assignment: local_var = kAudioMinPitch
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("local_var"), CExpression::Identifier("kAudioMinPitch"))));
+
+  // Assignment: D_80100000 = sizeof(u32)
+  std::vector<std::unique_ptr<CExpression>> sizeof_args;
+  sizeof_args.push_back(CExpression::Identifier("u32"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("D_80100000"),
+      CExpression::Call(CExpression::Identifier("sizeof"), std::move(sizeof_args)))));
+
+  // Member access: player->flags (member 'flags' should not be recorded as external symbol)
+  body->AddStatement(CStatement::Expression(
+      CExpression::MemberAccess(CExpression::Identifier("player"), "flags", /*is_arrow=*/true)));
+
+  FunctionDeclaration func(CType::Void(), "ProcessAudio", std::move(parameters), std::move(body));
+
+  ReferencedSymbols symbols = CollectReferencedSymbols(func);
+
+  EXPECT_EQ(symbols.local_variables, (std::set<std::string>{"arg0", "local_var"}));
+  EXPECT_EQ(symbols.external_functions, (std::set<std::string>{"AlphaHelper"}));
+  EXPECT_EQ(symbols.external_data,
+            (std::set<std::string>{"D_80100000", "g_audio_status", "kAudioMinPitch", "player"}));
+  EXPECT_EQ(symbols.external_data.count("flags"), 0);
+  EXPECT_EQ(symbols.external_functions.count("sizeof"), 0);
+}
+
+TEST(CAstTest, CollectReferencedSymbolsNestedStructures) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "i"));
+
+  // If statement with external condition and branch
+  auto then_branch = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("ExternalAction"), std::move(call_args))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("<", CExpression::Identifier("i"), CExpression::Identifier("g_limit")),
+      std::move(then_branch)));
+
+  // While loop
+  auto while_body = std::make_unique<CompoundStatement>();
+  while_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "+=", CExpression::Identifier("i"), CExpression::Identifier("kStepSize"))));
+  body->AddStatement(CStatement::While(
+      CExpression::Binary("!=", CExpression::Identifier("g_status"), CExpression::Integer(0)),
+      std::move(while_body)));
+
+  FunctionDeclaration func(CType::Void(), "LoopHandler", /*parameters=*/{}, std::move(body));
+
+  ReferencedSymbols symbols = CollectReferencedSymbols(func);
+
+  EXPECT_EQ(symbols.local_variables, (std::set<std::string>{"i"}));
+  EXPECT_EQ(symbols.external_functions, (std::set<std::string>{"ExternalAction"}));
+  EXPECT_EQ(symbols.external_data, (std::set<std::string>{"g_limit", "g_status", "kStepSize"}));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

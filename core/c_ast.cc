@@ -3,9 +3,11 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 
@@ -658,6 +660,252 @@ std::string FunctionDeclaration::ToString() const {
   std::string header =
       absl::StrFormat("%s%s %s(%s) ", prefix, return_type_.ToString(), name_, parameters_joined);
   return header + body_->ToString(0);
+}
+
+namespace {
+
+bool IsKeywordOrBuiltin(std::string_view name) {
+  static const absl::flat_hash_set<std::string_view> k_builtins = {
+      "sizeof", "NULL", "TRUE",   "FALSE",  "true",  "false",    "void", "s8",   "u8",
+      "s16",    "u16",  "s32",    "u32",    "s64",   "u64",      "f32",  "f64",  "if",
+      "while",  "for",  "switch", "return", "break", "continue", "goto", "case", "default"};
+  return k_builtins.contains(name);
+}
+
+void CollectLocalVariablesFromStatement(const CStatement& stmt, std::set<std::string>& local_vars) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr) {
+          CollectLocalVariablesFromStatement(*s, local_vars);
+        }
+      }
+      break;
+    }
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& var_decl = static_cast<const VariableDeclarationStatement&>(stmt);
+      local_vars.insert(var_decl.Name());
+      break;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+      CollectLocalVariablesFromStatement(if_stmt.ThenBranch(), local_vars);
+      if (if_stmt.ElseBranch() != nullptr) {
+        CollectLocalVariablesFromStatement(*if_stmt.ElseBranch(), local_vars);
+      }
+      break;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& while_stmt = static_cast<const WhileStatement&>(stmt);
+      CollectLocalVariablesFromStatement(while_stmt.Body(), local_vars);
+      break;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& do_while = static_cast<const DoWhileStatement&>(stmt);
+      CollectLocalVariablesFromStatement(do_while.Body(), local_vars);
+      break;
+    }
+    case CStatementKind::kForStatement: {
+      const auto& for_stmt = static_cast<const ForStatement&>(stmt);
+      if (for_stmt.Init() != nullptr) {
+        CollectLocalVariablesFromStatement(*for_stmt.Init(), local_vars);
+      }
+      CollectLocalVariablesFromStatement(for_stmt.Body(), local_vars);
+      break;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& switch_stmt = static_cast<const SwitchStatement&>(stmt);
+      for (const auto& c : switch_stmt.Cases()) {
+        if (c.body != nullptr) {
+          CollectLocalVariablesFromStatement(*c.body, local_vars);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier: {
+      const auto& id = static_cast<const IdentifierExpression&>(expr);
+      const std::string& name = id.Name();
+      if (!IsKeywordOrBuiltin(name) && symbols.local_variables.count(name) == 0 &&
+          symbols.external_functions.count(name) == 0) {
+        symbols.external_data.insert(name);
+      }
+      break;
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
+        const auto& id = static_cast<const IdentifierExpression&>(call.Callee());
+        const std::string& callee_name = id.Name();
+        if (!IsKeywordOrBuiltin(callee_name) && symbols.local_variables.count(callee_name) == 0) {
+          symbols.external_functions.insert(callee_name);
+          symbols.external_data.erase(callee_name);
+        }
+      } else {
+        VisitExpression(call.Callee(), symbols);
+      }
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr) {
+          VisitExpression(*arg, symbols);
+        }
+      }
+      break;
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& unary = static_cast<const UnaryExpression&>(expr);
+      VisitExpression(unary.Operand(), symbols);
+      break;
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& binary = static_cast<const BinaryExpression&>(expr);
+      VisitExpression(binary.Lhs(), symbols);
+      VisitExpression(binary.Rhs(), symbols);
+      break;
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      VisitExpression(assign.Lhs(), symbols);
+      VisitExpression(assign.Rhs(), symbols);
+      break;
+    }
+    case CExpressionKind::kCastExpression: {
+      const auto& cast = static_cast<const CastExpression&>(expr);
+      VisitExpression(cast.Operand(), symbols);
+      break;
+    }
+    case CExpressionKind::kMemberAccessExpression: {
+      const auto& member = static_cast<const MemberAccessExpression&>(expr);
+      VisitExpression(member.Object(), symbols);
+      break;
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      VisitExpression(arr.Array(), symbols);
+      VisitExpression(arr.Index(), symbols);
+      break;
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& ternary = static_cast<const TernaryExpression&>(expr);
+      VisitExpression(ternary.Condition(), symbols);
+      VisitExpression(ternary.TrueExpression(), symbols);
+      VisitExpression(ternary.FalseExpression(), symbols);
+      break;
+    }
+    case CExpressionKind::kIntegerLiteral:
+    case CExpressionKind::kFloatLiteral:
+    case CExpressionKind::kStringLiteral:
+      break;
+  }
+}
+
+void VisitStatement(const CStatement& stmt, ReferencedSymbols& symbols) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr) {
+          VisitStatement(*s, symbols);
+        }
+      }
+      break;
+    }
+    case CStatementKind::kExpressionStatement: {
+      const auto& expr_stmt = static_cast<const ExpressionStatement&>(stmt);
+      VisitExpression(expr_stmt.Expression(), symbols);
+      break;
+    }
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& var_decl = static_cast<const VariableDeclarationStatement&>(stmt);
+      if (var_decl.Initializer() != nullptr) {
+        VisitExpression(*var_decl.Initializer(), symbols);
+      }
+      break;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& ret = static_cast<const ReturnStatement&>(stmt);
+      if (ret.ReturnValue() != nullptr) {
+        VisitExpression(*ret.ReturnValue(), symbols);
+      }
+      break;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+      VisitExpression(if_stmt.Condition(), symbols);
+      VisitStatement(if_stmt.ThenBranch(), symbols);
+      if (if_stmt.ElseBranch() != nullptr) {
+        VisitStatement(*if_stmt.ElseBranch(), symbols);
+      }
+      break;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& while_stmt = static_cast<const WhileStatement&>(stmt);
+      VisitExpression(while_stmt.Condition(), symbols);
+      VisitStatement(while_stmt.Body(), symbols);
+      break;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& do_while = static_cast<const DoWhileStatement&>(stmt);
+      VisitStatement(do_while.Body(), symbols);
+      VisitExpression(do_while.Condition(), symbols);
+      break;
+    }
+    case CStatementKind::kForStatement: {
+      const auto& for_stmt = static_cast<const ForStatement&>(stmt);
+      if (for_stmt.Init() != nullptr) {
+        VisitStatement(*for_stmt.Init(), symbols);
+      }
+      if (for_stmt.Condition() != nullptr) {
+        VisitExpression(*for_stmt.Condition(), symbols);
+      }
+      if (for_stmt.Step() != nullptr) {
+        VisitExpression(*for_stmt.Step(), symbols);
+      }
+      VisitStatement(for_stmt.Body(), symbols);
+      break;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& switch_stmt = static_cast<const SwitchStatement&>(stmt);
+      VisitExpression(switch_stmt.Condition(), symbols);
+      for (const auto& c : switch_stmt.Cases()) {
+        if (c.body != nullptr) {
+          VisitStatement(*c.body, symbols);
+        }
+      }
+      break;
+    }
+    case CStatementKind::kBreakStatement:
+    case CStatementKind::kContinueStatement:
+    case CStatementKind::kGotoStatement:
+    case CStatementKind::kLabelStatement:
+    case CStatementKind::kCaseStatement:
+      break;
+  }
+}
+
+}  // namespace
+
+ReferencedSymbols CollectReferencedSymbols(const FunctionDeclaration& function) {
+  ReferencedSymbols symbols;
+
+  // 1. Collect function parameters
+  for (const auto& param : function.Parameters()) {
+    symbols.local_variables.insert(param.name);
+  }
+
+  // 2. Collect declared local variables
+  CollectLocalVariablesFromStatement(function.Body(), symbols.local_variables);
+
+  // 3. Traverse body expressions and statements to collect referenced external symbols
+  VisitStatement(function.Body(), symbols);
+
+  return symbols;
 }
 
 }  // namespace rom_nom_nom

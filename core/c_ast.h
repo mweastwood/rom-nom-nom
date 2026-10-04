@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -667,6 +668,17 @@ class FunctionDeclaration {
   std::unique_ptr<CompoundStatement> body_;
   bool is_static_;
 };
+
+// Holds symbols referenced across an AST function scope.
+struct ReferencedSymbols {
+  std::set<std::string> local_variables;     // Parameters and declared local variables
+  std::set<std::string> external_functions;  // Non-local callee names
+  std::set<std::string> external_data;       // Non-local identifiers that are not callees
+};
+
+// Traverses a FunctionDeclaration AST to semantically identify local variables and external symbol
+// references.
+ReferencedSymbols CollectReferencedSymbols(const FunctionDeclaration& function);
 
 }  // namespace rom_nom_nom
 
