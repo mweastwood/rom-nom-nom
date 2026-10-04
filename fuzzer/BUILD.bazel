@@ -70,12 +70,42 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "rom_function_scanner",
+    srcs = ["rom_function_scanner.cc"],
+    hdrs = ["rom_function_scanner.h"],
+    deps = [
+        "//core:endian",
+        "//splitter:config",
+        "//splitter:disassembler",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "rom_function_scanner_test",
+    srcs = ["rom_function_scanner_test.cc"],
+    deps = [
+        ":rom_function_scanner",
+        "//core:endian",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "fuzzer",
     srcs = ["main.cc"],
     deps = [
         ":differential_fuzzer",
         ":equivalence_runner",
+        ":rom_function_scanner",
         "//differ:differ_pipeline",
         "//differ:target_extractor",
         "//splitter:config",
