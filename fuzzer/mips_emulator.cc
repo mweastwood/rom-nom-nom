@@ -128,6 +128,40 @@ bool MipsEmulator::LoadWords(uint32_t vram, absl::Span<const uint32_t> words) {
   return true;
 }
 
+void MipsEmulator::ClearMemory(uint32_t vram, size_t size) {
+  auto phys_opt = VramToPhysical(vram);
+  if (!phys_opt.has_value() || *phys_opt + size > memory_size_) {
+    return;
+  }
+  std::memset(&memory_[*phys_opt], 0, size);
+}
+
+void MipsEmulator::RollbackWrites(absl::Span<const uint32_t> code, uint32_t code_vram) {
+  uint32_t code_end = code_vram + static_cast<uint32_t>(code.size() * sizeof(uint32_t));
+  for (const auto& w : write_log_) {
+    auto phys_opt = VramToPhysical(w.address);
+    if (!phys_opt.has_value() || *phys_opt + w.size > memory_size_) {
+      continue;
+    }
+    if (!code.empty() && w.address >= code_vram && w.address < code_end) {
+      for (size_t b = 0; b < w.size; ++b) {
+        uint32_t addr = w.address + static_cast<uint32_t>(b);
+        if (addr >= code_vram && addr < code_end) {
+          size_t word_idx = (addr - code_vram) / 4;
+          size_t byte_in_word = 3 - (addr % 4);
+          uint8_t orig_byte = static_cast<uint8_t>((code[word_idx] >> (byte_in_word * 8)) & 0xFF);
+          memory_[*phys_opt + b] = orig_byte;
+        } else {
+          memory_[*phys_opt + b] = 0;
+        }
+      }
+    } else {
+      std::memset(&memory_[*phys_opt], 0, w.size);
+    }
+  }
+  write_log_.clear();
+}
+
 void MipsEmulator::SetRegister(Register reg, uint32_t value) {
   SetGpr(static_cast<int>(reg), value);
 }

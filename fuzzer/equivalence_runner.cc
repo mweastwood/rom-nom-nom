@@ -36,7 +36,6 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   }
 
   // Differential Fuzzing Battery
-  DifferentialFuzzer fuzzer(options_.fuzzer_options);
 
   std::vector<FuzzTestCase> test_cases = DifferentialFuzzer::GenerateBoundaryCases();
   if (options_.random_vectors_per_function > 0) {
@@ -53,8 +52,8 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
 
   res.fuzz_vectors_evaluated = test_cases.size();
 
-  auto comparisons = fuzzer.RunBattery(target.target_words, target.vram, target.candidate_words,
-                                       target.vram, test_cases);
+  auto comparisons = fuzzer_.RunBattery(target.target_words, target.vram, target.candidate_words,
+                                        target.vram, test_cases);
 
   for (size_t i = 0; i < comparisons.size(); ++i) {
     const auto& comp = comparisons[i];

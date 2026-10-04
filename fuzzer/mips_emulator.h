@@ -85,6 +85,15 @@ class MipsEmulator {
   bool LoadMemory(uint32_t vram, const void* data, size_t size);
   bool LoadWords(uint32_t vram, absl::Span<const uint32_t> words);
 
+  // Clears (zeros out) a range of memory in the sandboxed RAM.
+  void ClearMemory(uint32_t vram, size_t size);
+
+  // Reverts all writes recorded in write_log_.
+  // If an address falls within [code_vram, code_vram + code.size() * 4), it is restored
+  // to the original instruction word from code; otherwise, it is zeroed out.
+  // Clears write_log_ upon completion.
+  void RollbackWrites(absl::Span<const uint32_t> code = {}, uint32_t code_vram = 0);
+
   // Register access
   void SetRegister(Register reg, uint32_t value);
   uint32_t GetRegister(Register reg) const;

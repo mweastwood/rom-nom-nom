@@ -67,7 +67,8 @@ struct EquivalenceRunnerOptions {
 class EquivalenceRunner {
  public:
   EquivalenceRunner() = default;
-  explicit EquivalenceRunner(EquivalenceRunnerOptions options) : options_(options) {}
+  explicit EquivalenceRunner(EquivalenceRunnerOptions options)
+      : options_(options), fuzzer_(options.fuzzer_options) {}
 
   // Evaluates equivalence for a single function target.
   FunctionEquivalenceResult EvaluateFunction(const FunctionEquivalenceTarget& target);
@@ -81,6 +82,7 @@ class EquivalenceRunner {
 
  private:
   EquivalenceRunnerOptions options_;
+  DifferentialFuzzer fuzzer_;
 };
 
 }  // namespace rom_nom_nom::fuzzer

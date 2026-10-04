@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "fuzzer/mips_emulator.h"
 
 namespace rom_nom_nom::fuzzer {
@@ -87,8 +88,13 @@ class DifferentialFuzzer {
 
  private:
   void SetupEmulator(MipsEmulator* emu, const FuzzTestCase& test_case) const;
+  void EvaluateComparison(DifferentialComparison* comp, absl::Span<const uint32_t> target_code,
+                          uint32_t target_vram, absl::Span<const uint32_t> candidate_code,
+                          uint32_t candidate_vram, const FuzzTestCase& test_case);
 
   Options options_;
+  MipsEmulator target_emu_;
+  MipsEmulator candidate_emu_;
 };
 
 }  // namespace rom_nom_nom::fuzzer
