@@ -7,6 +7,7 @@
 #include "core/c_ast.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -65,7 +66,20 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   CTranslationUnit translation_unit;
   translation_unit.includes = {"types.h"};
 
+  SymbolIndex symbol_index = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "AddressTakenFunction" address: 0x80010000 type: SYMBOL_FUNC }
+    entries { name: "g_audio_state" address: 0x80020000 type: SYMBOL_DATA }
+  )")
+                                 .value();
+  translation_unit.symbol_index = &symbol_index;
+
   auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32().MakePointer(), "function_pointer"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32().MakePointer(), "stack_pointer_reference"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "var_sp_16"));
+
   // Call ExternalHelper(), func_80012345(), and LocalFunction(arg0)
   std::vector<std::unique_ptr<CExpression>> helper_args;
   body->AddStatement(CStatement::Expression(
@@ -110,9 +124,13 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   EXPECT_THAT(emitted_code, HasSubstr("extern void ExternalHelper();\n"));
   EXPECT_THAT(emitted_code, HasSubstr("extern void func_80012345();\n"));
 
-  // Stack variables should not be emitted as extern
+  // Stack and local variables should not be emitted as extern
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void var_sp_16();")));
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 var_sp_16;")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void function_pointer();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 function_pointer;")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void stack_pointer_reference();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 stack_pointer_reference;")));
 
   // Check external data declarations
   EXPECT_THAT(emitted_code, HasSubstr("extern s32 D_80100000;\n"));
@@ -127,6 +145,51 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   // Keywords should not have extern declarations
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void if();")));
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void return();")));
+}
+
+TEST(CEmitterTest, EmitTranslationUnitWithSemanticSymbolClassification) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  SymbolIndex symbol_index = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "kAudioMinPitch" address: 0x80040000 type: SYMBOL_DATA }
+    entries { name: "kAudioMaxPitch" address: 0x80040008 type: SYMBOL_DATA }
+    entries { name: "AudioProcess" address: 0x80050000 type: SYMBOL_FUNC }
+  )")
+                                 .value();
+  translation_unit.symbol_index = &symbol_index;
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32().MakePointer(), "pitch_ptr"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::Void().MakePointer(), "proc_ptr"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "max_pitch"));
+
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("pitch_ptr"),
+                              CExpression::Unary("&", CExpression::Identifier("kAudioMinPitch")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("proc_ptr"),
+                              CExpression::Unary("&", CExpression::Identifier("AudioProcess")))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("max_pitch"), CExpression::Identifier("kAudioMaxPitch"))));
+  body->AddStatement(CStatement::Return());
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "TestAudio", /*parameters=*/{}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  // Address-taken function is correctly recognized as SYMBOL_FUNC
+  EXPECT_THAT(emitted_code, HasSubstr("extern void AudioProcess();\n"));
+  // Constants and data symbols (even when address is taken) are correctly recognized as SYMBOL_DATA
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 kAudioMaxPitch;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 kAudioMinPitch;\n"));
+  // Constants must NOT be declared as functions
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void kAudioMinPitch();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void kAudioMaxPitch();")));
 }
 
 TEST(CEmitterTest, EmitTranslationUnitDeduplicationAndOrdering) {

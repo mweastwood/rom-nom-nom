@@ -248,6 +248,7 @@ cc_library(
     deps = [
         "//core:c_ast",
         "//core:process",
+        "//splitter:symbol_registry",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
@@ -260,6 +261,7 @@ cc_test(
     deps = [
         ":c_emitter",
         "//core:c_ast",
+        "//splitter:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],

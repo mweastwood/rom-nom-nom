@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/c_ast.h"
+#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -20,6 +21,7 @@ struct CEmitterOptions {
 struct CTranslationUnit {
   std::vector<std::string> includes;
   std::vector<FunctionDeclaration> functions;
+  const SymbolIndex* symbol_index = nullptr;
 
   std::string ToString() const;
 };

@@ -4,17 +4,16 @@
 
 #include <filesystem>
 #include <fstream>
-#include <regex>
 #include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/c_ast.h"
 #include "core/process.h"
+#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -43,47 +42,43 @@ std::string CTranslationUnit::ToString() const {
     }
   }
 
-  static const std::regex assembly_function_regex(R"(\b(func_[0-9a-fA-F]+)\b)");
-  static const std::regex function_call_regex(R"(\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\()");
   std::set<std::string> external_function_names;
-  for (auto regex_iterator = std::sregex_iterator(
-           combined_function_code.begin(), combined_function_code.end(), assembly_function_regex);
-       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
-    std::string symbol_name = regex_iterator->str(1);
-    if (!defined_function_names.count(symbol_name)) {
-      external_function_names.insert(symbol_name);
+  std::set<std::string> external_data_symbols;
+
+  for (const auto& function : functions) {
+    ReferencedSymbols symbols = CollectReferencedSymbols(function);
+
+    for (const auto& func_name : symbols.external_functions) {
+      if (defined_function_names.count(func_name) > 0) {
+        continue;
+      }
+      if (symbol_index != nullptr) {
+        const auto* entry = symbol_index->FindByName(func_name);
+        if (entry != nullptr && entry->type() == SYMBOL_DATA) {
+          external_data_symbols.insert(func_name);
+          continue;
+        }
+      }
+      external_function_names.insert(func_name);
     }
-  }
-  for (auto regex_iterator = std::sregex_iterator(
-           combined_function_code.begin(), combined_function_code.end(), function_call_regex);
-       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
-    std::string symbol_name = regex_iterator->str(1);
-    if (symbol_name == "if" || symbol_name == "while" || symbol_name == "for" ||
-        symbol_name == "switch" || symbol_name == "return" || symbol_name == "sizeof") {
-      continue;
-    }
-    if (!defined_function_names.count(symbol_name)) {
-      external_function_names.insert(symbol_name);
+
+    for (const auto& data_name : symbols.external_data) {
+      if (defined_function_names.count(data_name) > 0) {
+        continue;
+      }
+      if (symbol_index != nullptr) {
+        const auto* entry = symbol_index->FindByName(data_name);
+        if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+          external_function_names.insert(data_name);
+          continue;
+        }
+      }
+      external_data_symbols.insert(data_name);
     }
   }
 
-  std::set<std::string> external_data_symbols;
-  static const std::regex address_of_symbol_regex(R"(&([a-zA-Z_][a-zA-Z0-9_]*))");
-  for (auto regex_iterator = std::sregex_iterator(
-           combined_function_code.begin(), combined_function_code.end(), address_of_symbol_regex);
-       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
-    std::string symbol_name = regex_iterator->str(1);
-    if (absl::StartsWith(symbol_name, "var_sp_")) {
-      continue;
-    }
-    if (defined_function_names.count(symbol_name)) {
-      continue;
-    }
-    if (absl::StartsWith(symbol_name, "g_") || absl::StartsWith(symbol_name, "D_")) {
-      external_data_symbols.insert(symbol_name);
-    } else {
-      external_function_names.insert(symbol_name);
-    }
+  for (const auto& func_name : external_function_names) {
+    external_data_symbols.erase(func_name);
   }
 
   if (!external_function_names.empty()) {
@@ -91,13 +86,6 @@ std::string CTranslationUnit::ToString() const {
       output += absl::StrFormat("extern void %s();\n", external_function);
     }
     output += "\n";
-  }
-
-  static const std::regex data_symbol_regex(R"(\b((?:D_[0-9a-fA-F]+)|(?:g_[a-zA-Z0-9_]+))\b)");
-  for (auto regex_iterator = std::sregex_iterator(combined_function_code.begin(),
-                                                  combined_function_code.end(), data_symbol_regex);
-       regex_iterator != std::sregex_iterator(); ++regex_iterator) {
-    external_data_symbols.insert(regex_iterator->str(1));
   }
 
   if (!external_data_symbols.empty()) {
