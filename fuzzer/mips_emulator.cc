@@ -1,5 +1,6 @@
 #include "fuzzer/mips_emulator.h"
 
+#include <cmath>
 #include <cstring>
 #include <optional>
 
@@ -14,6 +15,8 @@ MipsEmulator::MipsEmulator(size_t memory_size_bytes, uint32_t base_vram)
 
 void MipsEmulator::Reset() {
   std::memset(gpr_, 0, sizeof(gpr_));
+  std::memset(fpr_bits_, 0, sizeof(fpr_bits_));
+  fpu_cond_ = false;
   hi_ = 0;
   lo_ = 0;
   pc_ = base_vram_;
@@ -22,6 +25,34 @@ void MipsEmulator::Reset() {
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;
   write_log_.clear();
+}
+
+void MipsEmulator::SetFpBits(FpRegister reg, uint32_t bits) {
+  int idx = static_cast<int>(reg);
+  if (idx >= 0 && idx < 32) {
+    fpr_bits_[idx] = bits;
+  }
+}
+
+uint32_t MipsEmulator::GetFpBits(FpRegister reg) const {
+  int idx = static_cast<int>(reg);
+  if (idx >= 0 && idx < 32) {
+    return fpr_bits_[idx];
+  }
+  return 0;
+}
+
+void MipsEmulator::SetFpRegister(FpRegister reg, float val) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &val, sizeof(float));
+  SetFpBits(reg, bits);
+}
+
+float MipsEmulator::GetFpRegister(FpRegister reg) const {
+  uint32_t bits = GetFpBits(reg);
+  float val = 0.0f;
+  std::memcpy(&val, &bits, sizeof(float));
+  return val;
 }
 
 std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
@@ -174,6 +205,10 @@ ExecutionStatus MipsEmulator::Step() {
   bool executing_delay_slot = in_delay_slot_;
   bool delayed_is_return = delay_slot_is_return_;
   std::optional<uint32_t> next_branch_target = delayed_branch_target_;
+
+  if (executing_delay_slot && (inst.IsBranch() || inst.IsJump())) {
+    return ExecutionStatus::kInvalidOpcode;
+  }
 
   // Advance default next PC
   uint32_t advanced_pc = current_pc + 4;
@@ -503,6 +538,155 @@ ExecutionStatus MipsEmulator::Step() {
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     }
+    case Opcode::kSync:
+      break;
+    case Opcode::kBreak:
+      return ExecutionStatus::kBreakTrap;
+    case Opcode::kSyscall:
+      return ExecutionStatus::kSyscallTrap;
+
+    // Floating-Point (COP1) Loads & Stores
+    case Opcode::kLwc1: {
+      uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
+      if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
+      uint32_t word = 0;
+      if (!Read32(addr, &word)) return ExecutionStatus::kMemoryFault;
+      if (inst.ft.has_value()) {
+        SetFpBits(*inst.ft, word);
+      }
+      break;
+    }
+    case Opcode::kSwc1: {
+      uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
+      if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
+      uint32_t word = inst.ft.has_value() ? GetFpBits(*inst.ft) : 0;
+      if (!Write32(addr, word)) return ExecutionStatus::kMemoryFault;
+      break;
+    }
+
+    // Floating-Point (COP1) Moves
+    case Opcode::kMfc1: {
+      uint32_t word = inst.fs.has_value() ? GetFpBits(*inst.fs) : 0;
+      SetGpr(rt, word);
+      break;
+    }
+    case Opcode::kMtc1: {
+      if (inst.fs.has_value()) {
+        SetFpBits(*inst.fs, gpr_[rt]);
+      }
+      break;
+    }
+
+    // Single-Precision Floating-Point Arithmetic
+    case Opcode::kAddS: {
+      if (inst.fd && inst.fs && inst.ft) {
+        SetFpRegister(*inst.fd, GetFpRegister(*inst.fs) + GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kSubS: {
+      if (inst.fd && inst.fs && inst.ft) {
+        SetFpRegister(*inst.fd, GetFpRegister(*inst.fs) - GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kMulS: {
+      if (inst.fd && inst.fs && inst.ft) {
+        SetFpRegister(*inst.fd, GetFpRegister(*inst.fs) * GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kDivS: {
+      if (inst.fd && inst.fs && inst.ft) {
+        SetFpRegister(*inst.fd, GetFpRegister(*inst.fs) / GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kSqrtS: {
+      if (inst.fd && inst.fs) {
+        SetFpRegister(*inst.fd, std::sqrt(GetFpRegister(*inst.fs)));
+      }
+      break;
+    }
+    case Opcode::kAbsS: {
+      if (inst.fd && inst.fs) {
+        SetFpRegister(*inst.fd, std::fabs(GetFpRegister(*inst.fs)));
+      }
+      break;
+    }
+    case Opcode::kMovS: {
+      if (inst.fd && inst.fs) {
+        SetFpBits(*inst.fd, GetFpBits(*inst.fs));
+      }
+      break;
+    }
+    case Opcode::kNegS: {
+      if (inst.fd && inst.fs) {
+        SetFpBits(*inst.fd, GetFpBits(*inst.fs) ^ 0x80000000u);
+      }
+      break;
+    }
+    case Opcode::kCvtSW: {
+      if (inst.fd && inst.fs) {
+        int32_t val = static_cast<int32_t>(GetFpBits(*inst.fs));
+        SetFpRegister(*inst.fd, static_cast<float>(val));
+      }
+      break;
+    }
+    case Opcode::kTruncWS: {
+      if (inst.fd && inst.fs) {
+        float f = GetFpRegister(*inst.fs);
+        int32_t val = static_cast<int32_t>(f);
+        SetFpBits(*inst.fd, static_cast<uint32_t>(val));
+      }
+      break;
+    }
+
+    // Floating-Point Comparisons
+    case Opcode::kCEqS: {
+      if (inst.fs && inst.ft) {
+        fpu_cond_ = (GetFpRegister(*inst.fs) == GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kCLtS: {
+      if (inst.fs && inst.ft) {
+        fpu_cond_ = (GetFpRegister(*inst.fs) < GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+    case Opcode::kCLeS: {
+      if (inst.fs && inst.ft) {
+        fpu_cond_ = (GetFpRegister(*inst.fs) <= GetFpRegister(*inst.ft));
+      }
+      break;
+    }
+
+    // Floating-Point Conditional Branches
+    case Opcode::kBc1t:
+    case Opcode::kBc1f: {
+      bool take_branch = (inst.opcode == Opcode::kBc1t) ? fpu_cond_ : !fpu_cond_;
+      in_delay_slot_ = true;
+      if (take_branch) {
+        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+      } else {
+        delayed_branch_target_ = current_pc + 8;
+      }
+      pc_ = advanced_pc;
+      return ExecutionStatus::kRunning;
+    }
+    case Opcode::kBc1tl:
+    case Opcode::kBc1fl: {
+      bool take_branch = (inst.opcode == Opcode::kBc1tl) ? fpu_cond_ : !fpu_cond_;
+      if (take_branch) {
+        in_delay_slot_ = true;
+        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+        pc_ = advanced_pc;
+      } else {
+        pc_ = current_pc + 8;
+      }
+      return ExecutionStatus::kRunning;
+    }
     default:
       return ExecutionStatus::kInvalidOpcode;
   }
@@ -547,6 +731,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.status = ExecutionStatus::kHaltedReturn;
       result.v0 = gpr_[2];
       result.v1 = gpr_[3];
+      result.f0 = GetFpRegister(FpRegister::kF0);
+      result.f0_bits = GetFpBits(FpRegister::kF0);
       result.write_log = write_log_;
       return result;
     }
@@ -554,6 +740,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.status = status;
       result.v0 = gpr_[2];
       result.v1 = gpr_[3];
+      result.f0 = GetFpRegister(FpRegister::kF0);
+      result.f0_bits = GetFpBits(FpRegister::kF0);
       result.write_log = write_log_;
       result.error_message = absl::StrFormat("Execution halted with status %d at PC 0x%08X",
                                              static_cast<int>(status), pc_);
@@ -564,6 +752,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
   result.status = ExecutionStatus::kMaxStepsReached;
   result.v0 = gpr_[2];
   result.v1 = gpr_[3];
+  result.f0 = GetFpRegister(FpRegister::kF0);
+  result.f0_bits = GetFpBits(FpRegister::kF0);
   result.write_log = write_log_;
   result.error_message = absl::StrFormat("Exceeded maximum step limit of %llu", max_steps);
   return result;

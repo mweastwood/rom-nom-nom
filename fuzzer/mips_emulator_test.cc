@@ -652,5 +652,231 @@ TEST(MipsEmulatorTest, SignVsZeroExtensionLoads) {
   EXPECT_EQ(emu.GetRegister(Register::kT3), 0x00008000u);
 }
 
+TEST(MipsEmulatorTest, BreakAndSyscallTraps) {
+  MipsEmulator emu;
+  // 00: break
+  std::vector<uint32_t> break_code = {0x0000000D};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, break_code));
+  EXPECT_EQ(emu.RunFunction(0x80001000).status, ExecutionStatus::kBreakTrap);
+
+  // 00: syscall
+  std::vector<uint32_t> syscall_code = {0x0000000C};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, syscall_code));
+  EXPECT_EQ(emu.RunFunction(0x80001000).status, ExecutionStatus::kSyscallTrap);
+
+  // sync instruction should execute as a no-op
+  // 00: sync
+  // 04: jr   $ra
+  // 08: nop
+  std::vector<uint32_t> sync_code = {0x0000000F, 0x03E00008, 0x00000000};
+  ASSERT_TRUE(emu.LoadWords(0x80001000, sync_code));
+  EXPECT_EQ(emu.RunFunction(0x80001000).status, ExecutionStatus::kHaltedReturn);
+}
+
+TEST(MipsEmulatorTest, BranchInBranchDelaySlotIllegal) {
+  MipsEmulator emu;
+  // Branch placed directly inside delay slot of another branch:
+  // 00: beq  $zero, $zero, +2
+  // 04: beq  $zero, $zero, +2  (ILLEGAL: branch in delay slot)
+  // 08: nop
+  // 0C: jr   $ra
+  // 10: nop
+  std::vector<uint32_t> illegal_code = {
+      0x10000002,  // beq $zero, $zero, +2
+      0x10000002,  // beq $zero, $zero, +2 (in delay slot)
+      0x00000000,  // nop
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, illegal_code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
+}
+
+TEST(MipsEmulatorTest, FpuDataMovementAndArithmetic) {
+  MipsEmulator emu;
+  // $a0 = 4.0f (0x40800000)
+  // $a1 = 2.0f (0x40000000)
+  // 00: mtc1    $a0, $f0
+  // 04: mtc1    $a1, $f1
+  // 08: add.s   $f2, $f0, $f1   (4.0 + 2.0 = 6.0)
+  // 0C: sub.s   $f3, $f0, $f1   (4.0 - 2.0 = 2.0)
+  // 10: mul.s   $f4, $f0, $f1   (4.0 * 2.0 = 8.0)
+  // 14: div.s   $f5, $f0, $f1   (4.0 / 2.0 = 2.0)
+  // 18: sqrt.s  $f6, $f0        (sqrt(4.0) = 2.0)
+  // 1C: neg.s   $f7, $f0        (-4.0)
+  // 20: abs.s   $f8, $f7        (abs(-4.0) = 4.0)
+  // 24: mov.s   $f9, $f0        (4.0)
+  // 28: mfc1    $v0, $f2        (move 6.0f bits to $v0)
+  // 2C: jr      $ra
+  // 30: nop
+  std::vector<uint32_t> code = {
+      0x44840000,  // mtc1   $a0, $f0
+      0x44850800,  // mtc1   $a1, $f1
+      0x46010080,  // add.s  $f2, $f0, $f1
+      0x460100C1,  // sub.s  $f3, $f0, $f1
+      0x46010102,  // mul.s  $f4, $f0, $f1
+      0x46010143,  // div.s  $f5, $f0, $f1
+      0x46000184,  // sqrt.s $f6, $f0
+      0x460001C7,  // neg.s  $f7, $f0
+      0x46003A05,  // abs.s  $f8, $f7
+      0x46000246,  // mov.s  $f9, $f0
+      0x44021000,  // mfc1   $v0, $f2
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetRegister(Register::kA0, 0x40800000);  // 4.0f
+  emu.SetRegister(Register::kA1, 0x40000000);  // 2.0f
+
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF2), 6.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF3), 2.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF4), 8.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF5), 2.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF6), 2.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF7), -4.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF8), 4.0f);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF9), 4.0f);
+  EXPECT_EQ(res.v0, 0x40C00000u);  // 6.0f IEEE 754 bits
+}
+
+TEST(MipsEmulatorTest, FpuConversions) {
+  MipsEmulator emu;
+  // 00: mtc1       $a0, $f0    ($a0 = 42 integer)
+  // 04: cvt.s.w    $f1, $f0    (convert 42 -> 42.0f)
+  // 08: mtc1       $a1, $f2    ($a1 = 42.9f bits: 0x422B999A)
+  // 0C: trunc.w.s  $f3, $f2    (truncate 42.9f -> 42 integer)
+  // 10: mfc1       $v0, $f3    (move integer 42 to $v0)
+  // 14: jr         $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x44840000,  // mtc1       $a0, $f0
+      0x46800060,  // cvt.s.w    $f1, $f0
+      0x44851000,  // mtc1       $a1, $f2
+      0x460010CD,  // trunc.w.s  $f3, $f2
+      0x44021800,  // mfc1       $v0, $f3
+      0x03E00008,  // jr         $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetRegister(Register::kA0, 42);          // integer 42
+  emu.SetRegister(Register::kA1, 0x422B999A);  // 42.9f
+
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF1), 42.0f);
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF3), 42u);
+  EXPECT_EQ(res.v0, 42u);
+}
+
+TEST(MipsEmulatorTest, FpuComparisonsAndBranches) {
+  MipsEmulator emu;
+  // 00: mtc1    $a0, $f0     ($f0 = 2.0f)
+  // 04: mtc1    $a1, $f1     ($f1 = 4.0f)
+  // 08: c.lt.s  $f0, $f1     (2.0 < 4.0 -> true)
+  // 0C: bc1t    .Ltaken      (branch taken)
+  // 10: addiu   $v0, $zero, 1 (delay slot: v0 = 1)
+  // 14: addiu   $v0, $v0, 100 (skipped)
+  // .Ltaken (18):
+  // 18: c.eq.s  $f0, $f1     (2.0 == 4.0 -> false)
+  // 1C: bc1f    .Ldone       (branch taken because condition is false)
+  // 20: addiu   $v0, $v0, 2  (delay slot: v0 += 2 -> v0 = 3)
+  // 24: addiu   $v0, $v0, 200 (skipped)
+  // .Ldone (28):
+  // 28: jr      $ra
+  // 2C: nop
+  std::vector<uint32_t> code = {
+      0x44840000,  // mtc1   $a0, $f0
+      0x44850800,  // mtc1   $a1, $f1
+      0x4601003C,  // c.lt.s $f0, $f1
+      0x45010002,  // bc1t   +2 (target: 0x80001018)
+      0x24020001,  // addiu  $v0, $zero, 1
+      0x24420064,  // addiu  $v0, $v0, 100 (skipped)
+      0x46010032,  // c.eq.s $f0, $f1
+      0x45000002,  // bc1f   +2 (target: 0x80001028)
+      0x24420002,  // addiu  $v0, $v0, 2
+      0x244200C8,  // addiu  $v0, $v0, 200 (skipped)
+      0x03E00008,  // jr     $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  emu.SetRegister(Register::kA0, 0x40000000);  // 2.0f
+  emu.SetRegister(Register::kA1, 0x40800000);  // 4.0f
+
+  ExecutionResult res = emu.RunFunction(0x80001000);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 3u);  // 1 + 2
+}
+
+TEST(MipsEmulatorTest, FpuLoadsAndStores) {
+  MipsEmulator emu;
+  uint32_t ram = 0x80100000;
+  // Write 3.14159f (0x40490FD0) into RAM
+  ASSERT_TRUE(emu.Write32(ram, 0x40490FD0));
+
+  // 00: lui     $a0, 0x8010
+  // 04: lwc1    $f0, 0($a0)
+  // 08: swc1    $f0, 4($a0)
+  // 0C: jr      $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0xC4800000,  // lwc1  $f0, 0($a0)
+      0xE4800004,  // swc1  $f0, 4($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_FLOAT_EQ(emu.GetFpRegister(FpRegister::kF0), 3.14159f);
+
+  uint32_t copied = 0;
+  ASSERT_TRUE(emu.Read32(ram + 4, &copied));
+  EXPECT_EQ(copied, 0x40490FD0u);
+
+  // Misaligned lwc1 must fault
+  std::vector<uint32_t> misaligned_code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0xC4800001,  // lwc1  $f0, 1($a0) (unaligned!)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80002000, misaligned_code));
+  EXPECT_EQ(emu.RunFunction(0x80002000).status, ExecutionStatus::kMemoryFault);
+}
+
+TEST(MipsEmulatorTest, RunFunctionReturnsF0Float) {
+  MipsEmulator emu;
+  // Function returning 123.456f in $f0
+  // 00: lui   $a0, 0x42F6
+  // 04: ori   $a0, $a0, 0xE979  (0x42F6E979 = 123.456f)
+  // 08: mtc1  $a0, $f0
+  // 0C: jr    $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x3C0442F6,  // lui   $a0, 0x42F6
+      0x3484E979,  // ori   $a0, $a0, 0xE979
+      0x44840000,  // mtc1  $a0, $f0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_FLOAT_EQ(res.f0, 123.456f);
+  EXPECT_EQ(res.f0_bits, 0x42F6E979u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

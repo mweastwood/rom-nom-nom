@@ -30,6 +30,8 @@ enum class ExecutionStatus {
   kMaxStepsReached,  // Step limit reached (infinite loop guard)
   kMemoryFault,      // Attempted to read/write unmapped or unaligned address
   kIntegerOverflow,  // Signed integer overflow trap on add/addi/sub
+  kBreakTrap,        // Executed break instruction
+  kSyscallTrap,      // Executed syscall instruction
   kInvalidOpcode,    // Encountered unsupported or illegal instruction
 };
 
@@ -38,6 +40,8 @@ struct ExecutionResult {
   uint64_t total_steps = 0;
   uint32_t v0 = 0;
   uint32_t v1 = 0;
+  float f0 = 0.0f;
+  uint32_t f0_bits = 0;
   std::vector<MemoryWrite> write_log;
   std::string error_message;
 };
@@ -97,6 +101,15 @@ class MipsEmulator {
   void SetLo(uint32_t lo) { lo_ = lo; }
   uint32_t GetLo() const { return lo_; }
 
+  // Floating point register access
+  void SetFpBits(FpRegister reg, uint32_t bits);
+  uint32_t GetFpBits(FpRegister reg) const;
+  void SetFpRegister(FpRegister reg, float val);
+  float GetFpRegister(FpRegister reg) const;
+
+  void SetFpuCondition(bool cond) { fpu_cond_ = cond; }
+  bool GetFpuCondition() const { return fpu_cond_; }
+
   // Memory access
   bool Read8(uint32_t vram, uint8_t* val) const;
   bool Read16(uint32_t vram, uint16_t* val) const;
@@ -128,6 +141,9 @@ class MipsEmulator {
   std::vector<uint8_t> memory_;
 
   uint32_t gpr_[32] = {0};
+  uint32_t fpr_bits_[32] = {0};
+  bool fpu_cond_ = false;
+
   uint32_t hi_ = 0;
   uint32_t lo_ = 0;
   uint32_t pc_ = 0;
