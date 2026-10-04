@@ -20,6 +20,7 @@
 #include "differ/target_extractor.h"
 #include "fuzzer/differential_fuzzer.h"
 #include "fuzzer/equivalence_runner.h"
+#include "fuzzer/rom_function_scanner.h"
 #include "splitter/config.h"
 #include "splitter/symbol_registry.h"
 
@@ -141,18 +142,19 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (!base_rom_path.empty() && std::filesystem::path(base_rom_path).is_relative()) {
-    base_rom_path = (repo_root / base_rom_path).string();
-  }
-  if (!candidate_rom_path.empty() && std::filesystem::path(candidate_rom_path).is_relative()) {
-    candidate_rom_path = (repo_root / candidate_rom_path).string();
-  }
-  if (!config_path.empty() && std::filesystem::path(config_path).is_relative()) {
-    config_path = (repo_root / config_path).string();
-  }
-  if (!symbols_path.empty() && std::filesystem::path(symbols_path).is_relative()) {
-    symbols_path = (repo_root / symbols_path).string();
-  }
+  auto resolve_relative = [&](const std::string& p) -> std::string {
+    if (p.empty()) return "";
+    std::filesystem::path fp(p);
+    if (fp.is_absolute()) return p;
+    if (std::filesystem::exists(fp, ec)) return fp.string();
+    if (std::filesystem::exists(repo_root / fp, ec)) return (repo_root / fp).string();
+    return p;
+  };
+
+  base_rom_path = resolve_relative(base_rom_path);
+  candidate_rom_path = resolve_relative(candidate_rom_path);
+  config_path = resolve_relative(config_path);
+  symbols_path = resolve_relative(symbols_path);
 
   if (!symbols_path.empty()) {
     std::filesystem::path sym_path(symbols_path);
@@ -292,22 +294,109 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  auto base_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::Scan(
+      target_bytes, extractor->Config(), extractor->Symbols());
+  if (!base_funcs_or.ok()) {
+    std::cerr << "Error scanning base ROM functions: " << base_funcs_or.status().message() << "\n";
+    return 1;
+  }
+  const auto& base_funcs = *base_funcs_or;
+
+  auto cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::Scan(
+      built_bytes, extractor->Config(), extractor->Symbols());
+  if (!cand_funcs_or.ok()) {
+    std::cerr << "Error scanning candidate ROM functions: " << cand_funcs_or.status().message()
+              << "\n";
+    return 1;
+  }
+  const auto& cand_funcs = *cand_funcs_or;
+
+  std::optional<uint32_t> mod_rom_start;
+  std::optional<uint32_t> mod_rom_end;
+  if (!module_flag.empty() && extractor->Config() != nullptr) {
+    for (const auto& seg : extractor->Config()->segments()) {
+      if (seg.name() == module_flag) {
+        mod_rom_start = seg.rom_start();
+        mod_rom_end = seg.rom_end();
+        break;
+      }
+      for (int s = 0; s < seg.subsegments_size(); ++s) {
+        const auto& sub = seg.subsegments(s);
+        if (sub.name() == module_flag) {
+          mod_rom_start = sub.rom_start();
+          if (s + 1 < seg.subsegments_size()) {
+            mod_rom_end = seg.subsegments(s + 1).rom_start();
+          } else {
+            mod_rom_end = seg.rom_end();
+          }
+          break;
+        }
+      }
+      if (mod_rom_start.has_value()) break;
+    }
+  }
+
+  std::unordered_map<uint64_t, const rom_nom_nom::fuzzer::ScannedFunction*> cand_by_vram_and_offset;
+  std::unordered_map<uint32_t, const rom_nom_nom::fuzzer::ScannedFunction*> cand_by_vram;
+  std::unordered_map<std::string, const rom_nom_nom::fuzzer::ScannedFunction*> cand_by_name;
+  for (const auto& cand_fn : cand_funcs) {
+    uint64_t vo_key = (static_cast<uint64_t>(cand_fn.vram) << 32) | cand_fn.rom_offset;
+    cand_by_vram_and_offset[vo_key] = &cand_fn;
+    cand_by_vram[cand_fn.vram] = &cand_fn;
+    if (!cand_fn.name.empty()) {
+      cand_by_name[cand_fn.name] = &cand_fn;
+    }
+  }
+
   std::vector<rom_nom_nom::fuzzer::FunctionEquivalenceTarget> targets;
-  if (extractor->Symbols() != nullptr) {
-    for (const auto* entry : extractor->Symbols()->SortedEntries()) {
-      if (entry->type() == rom_nom_nom::SymbolType::SYMBOL_FUNC) {
-        auto t_or = extractor->ExtractFromRom(target_bytes, entry->name());
-        auto c_or = extractor->ExtractFromRom(built_bytes, entry->name());
-        if (t_or.ok() && c_or.ok() && !t_or->raw_words.empty() && !c_or->raw_words.empty()) {
-          rom_nom_nom::fuzzer::FunctionEquivalenceTarget t;
-          t.name = entry->name();
-          t.vram = entry->address();
-          t.target_words = t_or->raw_words;
-          t.candidate_words = c_or->raw_words;
-          targets.push_back(std::move(t));
+  targets.reserve(base_funcs.size());
+  for (size_t i = 0; i < base_funcs.size(); ++i) {
+    const auto& base_fn = base_funcs[i];
+    if (mod_rom_start.has_value() && mod_rom_end.has_value()) {
+      if (base_fn.rom_offset < *mod_rom_start || base_fn.rom_offset >= *mod_rom_end) {
+        continue;
+      }
+    }
+
+    rom_nom_nom::fuzzer::FunctionEquivalenceTarget target;
+    target.name = base_fn.name;
+    target.vram = base_fn.vram;
+    target.target_words = base_fn.raw_words;
+
+    const rom_nom_nom::fuzzer::ScannedFunction* cand_match = nullptr;
+    uint64_t vo_key = (static_cast<uint64_t>(base_fn.vram) << 32) | base_fn.rom_offset;
+    auto it_vo = cand_by_vram_and_offset.find(vo_key);
+    if (it_vo != cand_by_vram_and_offset.end()) {
+      cand_match = it_vo->second;
+    } else {
+      auto it_v = cand_by_vram.find(base_fn.vram);
+      if (it_v != cand_by_vram.end()) {
+        cand_match = it_v->second;
+      } else if (!base_fn.name.empty()) {
+        auto it_n = cand_by_name.find(base_fn.name);
+        if (it_n != cand_by_name.end()) {
+          cand_match = it_n->second;
         }
       }
     }
+
+    if (cand_match != nullptr) {
+      target.candidate_words = cand_match->raw_words;
+    } else if (i < cand_funcs.size() && cand_funcs[i].rom_offset == base_fn.rom_offset) {
+      target.candidate_words = cand_funcs[i].raw_words;
+    } else if (base_fn.rom_offset + base_fn.size <= built_bytes.size()) {
+      target.candidate_words.reserve(base_fn.size / 4);
+      for (size_t off = base_fn.rom_offset; off + 4 <= base_fn.rom_offset + base_fn.size;
+           off += 4) {
+        uint32_t w = (static_cast<uint32_t>(built_bytes[off]) << 24) |
+                     (static_cast<uint32_t>(built_bytes[off + 1]) << 16) |
+                     (static_cast<uint32_t>(built_bytes[off + 2]) << 8) |
+                     static_cast<uint32_t>(built_bytes[off + 3]);
+        target.candidate_words.push_back(w);
+      }
+    }
+
+    targets.push_back(std::move(target));
   }
 
   std::string eval_name = module_flag.empty() ? game_name : module_flag;
