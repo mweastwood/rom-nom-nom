@@ -390,5 +390,90 @@ entries {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(LifterPipelineTest, BuildTranslationUnitPopulatesSymbolIndexAndFunctions) {
+  std::filesystem::path test_dir = std::filesystem::temp_directory_path() / "lifter_tu_test";
+  std::filesystem::create_directories(test_dir / "roms");
+
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+  subsegments {
+    name: "mod_alpha"
+    type: SUBSEGMENT_C
+    rom_start: 0x1000
+    vram: 0x80020000
+  }
+}
+)";
+  auto cfg_or = ParseSplitConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries {
+  name: "AlphaFunc"
+  address: 0x80020000
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "BetaFunc"
+  address: 0x80020010
+  type: SYMBOL_FUNC
+}
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  std::vector<uint8_t> rom(0x2000, 0);
+  // AlphaFunc at 0x1000: jr $ra; nop
+  rom[0x1000] = 0x03;
+  rom[0x1001] = 0xE0;
+  rom[0x1002] = 0x00;
+  rom[0x1003] = 0x08;
+  // BetaFunc at 0x1010: jr $ra; nop
+  rom[0x1010] = 0x03;
+  rom[0x1011] = 0xE0;
+  rom[0x1012] = 0x00;
+  rom[0x1013] = 0x08;
+
+  std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractorOptions extractor_opts;
+  extractor_opts.repo_root = test_dir;
+  extractor_opts.game_name = "test-game";
+
+  auto extractor = std::make_unique<TargetExtractor>(extractor_opts, &(*cfg_or), &(*sym_idx_or));
+  auto loader = std::make_unique<FunctionLoader>(std::move(extractor));
+
+  LifterPipelineOptions options;
+  options.repo_root = test_dir;
+  options.game_name = "test-game";
+  options.includes = {"custom.h"};
+
+  LifterPipeline pipeline(options, std::move(loader));
+
+  auto tu_or = pipeline.BuildTranslationUnit({"AlphaFunc", "BetaFunc"}, {"custom.h"});
+  ASSERT_TRUE(tu_or.ok()) << tu_or.status();
+
+  EXPECT_EQ(tu_or->includes, std::vector<std::string>{"custom.h"});
+  ASSERT_NE(tu_or->symbol_index, nullptr);
+  EXPECT_TRUE(tu_or->symbol_index->HasName("AlphaFunc"));
+  EXPECT_TRUE(tu_or->symbol_index->HasName("BetaFunc"));
+  ASSERT_THAT(tu_or->functions, ::testing::SizeIs(2));
+  EXPECT_EQ(tu_or->functions[0].Name(), "AlphaFunc");
+  EXPECT_EQ(tu_or->functions[1].Name(), "BetaFunc");
+
+  std::filesystem::remove_all(test_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

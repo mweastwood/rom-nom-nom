@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "core/c_ast.h"
+#include "lifter/c_emitter.h"
 #include "lifter/function_loader.h"
 
 namespace rom_nom_nom {
@@ -46,6 +47,11 @@ class LifterPipeline {
 
   // Decompiles a function given by name or VRAM address (e.g. "InterpolateInit", "0x800266C0").
   absl::StatusOr<LifterResult> Decompile(std::string_view func_name_or_addr) const;
+
+  // Builds a CTranslationUnit AST for multiple functions.
+  absl::StatusOr<CTranslationUnit> BuildTranslationUnit(
+      const std::vector<std::string>& func_names,
+      const std::vector<std::string>& includes = {}) const;
 
   // Decompiles multiple functions in order into a single formatted translation unit.
   absl::StatusOr<std::string> DecompileFunctions(

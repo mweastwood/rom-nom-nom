@@ -312,5 +312,59 @@ TEST(ExpressionBuilderTest, StandaloneLuiOperation) {
   EXPECT_EQ(statements[0].ToString(), "v0 = 0x801F0000;\n");
 }
 
+TEST(ExpressionBuilderTest, FoldedSymbolAddressLoad) {
+  std::string textproto = R"pb(
+    entries { name: "g_audio_status" address: 0x801F2340 type: SYMBOL_DATA size: 64 }
+  )pb";
+
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x3C01801F,  // 0: lui   $at, 0x801F
+      0x24242340,  // 4: addiu $a0, $at, 0x2340
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].ToString(), "arg0 = &g_audio_status;\n");
+  EXPECT_EQ(statements[0].kind, StatementKind::kAssignment);
+  EXPECT_EQ(statements[0].destination_variable, "arg0");
+  ASSERT_NE(statements[0].expression, nullptr);
+  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kUnaryOp);
+  EXPECT_EQ(statements[0].expression->op, "&");
+  ASSERT_THAT(statements[0].expression->args, SizeIs(1));
+  ASSERT_NE(statements[0].expression->args[0], nullptr);
+  EXPECT_EQ(statements[0].expression->args[0]->kind, ExpressionKind::kGlobalRef);
+  EXPECT_EQ(statements[0].expression->args[0]->name, "g_audio_status");
+}
+
+TEST(ExpressionBuilderTest, FoldedSymbolStoreZero) {
+  std::string textproto = R"pb(
+    entries { name: "g_audio_status" address: 0x801F2340 type: SYMBOL_DATA size: 64 }
+  )pb";
+
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x3C01801F,  // 0: lui $at, 0x801F
+      0xAC202340,  // 4: sw  $zero, 0x2340($at)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].ToString(), "g_audio_status = 0;\n");
+  EXPECT_EQ(statements[0].kind, StatementKind::kAssignment);
+  EXPECT_EQ(statements[0].destination_variable, "g_audio_status");
+  ASSERT_NE(statements[0].expression, nullptr);
+  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kIntegerLiteral);
+  EXPECT_EQ(statements[0].expression->int_val, 0u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

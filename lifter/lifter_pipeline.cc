@@ -2,7 +2,6 @@
 
 #include <fstream>
 #include <memory>
-#include <regex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -12,6 +11,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/strip.h"
 #include "core/c_ast.h"
@@ -119,7 +119,7 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   return result;
 }
 
-absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
+absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
     const std::vector<std::string>& func_names, const std::vector<std::string>& includes) const {
   if (func_names.empty()) {
     return absl::InvalidArgumentError("LifterPipeline: No function names provided.");
@@ -127,6 +127,9 @@ absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
 
   CTranslationUnit tu;
   tu.includes = !includes.empty() ? includes : options_.includes;
+  if (loader_ != nullptr && loader_->Extractor() != nullptr) {
+    tu.symbol_index = loader_->Extractor()->Symbols();
+  }
 
   std::vector<LoadedFunction> loaded_functions;
   loaded_functions.reserve(func_names.size());
@@ -150,11 +153,21 @@ absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
     tu.functions.push_back(std::move(*res_or->ast));
   }
 
+  return tu;
+}
+
+absl::StatusOr<std::string> LifterPipeline::DecompileFunctions(
+    const std::vector<std::string>& func_names, const std::vector<std::string>& includes) const {
+  auto tu_or = BuildTranslationUnit(func_names, includes);
+  if (!tu_or.ok()) {
+    return tu_or.status();
+  }
+
   CEmitterOptions emitter_opts;
-  emitter_opts.includes = tu.includes;
+  emitter_opts.includes = tu_or->includes;
   emitter_opts.format_with_clang = options_.format_with_clang;
 
-  return CEmitter::EmitTranslationUnit(tu, emitter_opts);
+  return CEmitter::EmitTranslationUnit(*tu_or, emitter_opts);
 }
 
 absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
@@ -343,9 +356,33 @@ typedef unsigned int u32;
     }
   }
 
-  static const std::regex auto_symbol_regex(R"(\b((?:func_|D_)([0-9a-fA-F]{8}))\b)");
+  const auto* symbols = (loader_ != nullptr && loader_->Extractor() != nullptr)
+                            ? loader_->Extractor()->Symbols()
+                            : nullptr;
+
   std::set<std::string> seen_symbols;
   std::vector<std::pair<std::string, std::string>> undefined_auto_symbols;
+
+  auto collect_auto_symbol = [&](const std::string& symbol_name) {
+    if (defined_function_names.contains(symbol_name)) {
+      return;
+    }
+    if (symbols != nullptr && symbols->FindByName(symbol_name) != nullptr) {
+      return;
+    }
+    uint32_t address = 0;
+    if (symbol_name.size() == 13 && absl::StartsWith(symbol_name, "func_") &&
+        absl::SimpleHexAtoi(symbol_name.substr(5), &address)) {
+      if (seen_symbols.insert(symbol_name).second) {
+        undefined_auto_symbols.emplace_back(symbol_name, symbol_name.substr(5));
+      }
+    } else if (symbol_name.size() == 10 && absl::StartsWith(symbol_name, "D_") &&
+               absl::SimpleHexAtoi(symbol_name.substr(2), &address)) {
+      if (seen_symbols.insert(symbol_name).second) {
+        undefined_auto_symbols.emplace_back(symbol_name, symbol_name.substr(2));
+      }
+    }
+  };
 
   std::vector<std::filesystem::path> emitted_files;
   for (const auto& module_name : *modules_or) {
@@ -356,10 +393,10 @@ typedef unsigned int u32;
 
     std::filesystem::path output_file = output_dir / absl::StrCat(module_name, ".c");
 
-    auto c_code_or = DecompileFunctions(*functions_or, default_headers);
-    if (!c_code_or.ok()) {
+    auto tu_or = BuildTranslationUnit(*functions_or, default_headers);
+    if (!tu_or.ok()) {
       std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", module_name,
-                                         c_code_or.status().message());
+                                         tu_or.status().message());
       std::ofstream output_stream(output_file);
       if (output_stream.is_open()) {
         output_stream << stub;
@@ -368,25 +405,28 @@ typedef unsigned int u32;
       continue;
     }
 
+    CEmitterOptions emitter_opts;
+    emitter_opts.includes = tu_or->includes;
+    emitter_opts.format_with_clang = options_.format_with_clang;
+
+    std::string c_code = CEmitter::EmitTranslationUnit(*tu_or, emitter_opts);
+
     std::ofstream output_stream(output_file);
     if (!output_stream.is_open()) {
       return absl::InternalError(
           absl::StrFormat("Failed to open %s for writing.", output_file.string()));
     }
-    output_stream << *c_code_or;
+    output_stream << c_code;
     emitted_files.push_back(output_file);
 
-    // Collect undefined auto-symbols (D_XXXXXXXX or undeclared func_XXXXXXXX)
-    for (auto regex_iterator =
-             std::sregex_iterator(c_code_or->begin(), c_code_or->end(), auto_symbol_regex);
-         regex_iterator != std::sregex_iterator(); ++regex_iterator) {
-      std::string symbol_name = regex_iterator->str(1);
-      std::string address_hex = regex_iterator->str(2);
-      if (defined_function_names.contains(symbol_name)) {
-        continue;
+    // Collect undefined auto-symbols (D_XXXXXXXX or undeclared func_XXXXXXXX) directly via AST
+    for (const auto& func : tu_or->functions) {
+      ReferencedSymbols refs = CollectReferencedSymbols(func);
+      for (const auto& func_name : refs.external_functions) {
+        collect_auto_symbol(func_name);
       }
-      if (seen_symbols.insert(symbol_name).second) {
-        undefined_auto_symbols.emplace_back(std::move(symbol_name), std::move(address_hex));
+      for (const auto& data_name : refs.external_data) {
+        collect_auto_symbol(data_name);
       }
     }
   }

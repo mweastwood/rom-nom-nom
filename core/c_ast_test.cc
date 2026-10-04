@@ -317,8 +317,8 @@ TEST(CAstTest, CollectReferencedSymbolsExternalCallsAndData) {
   EXPECT_EQ(symbols.external_functions, (std::set<std::string>{"AlphaHelper"}));
   EXPECT_EQ(symbols.external_data,
             (std::set<std::string>{"D_80100000", "g_audio_status", "kAudioMinPitch", "player"}));
-  EXPECT_EQ(symbols.external_data.count("flags"), 0);
-  EXPECT_EQ(symbols.external_functions.count("sizeof"), 0);
+  EXPECT_EQ(symbols.external_data.count("flags"), 0u);
+  EXPECT_EQ(symbols.external_functions.count("sizeof"), 0u);
 }
 
 TEST(CAstTest, CollectReferencedSymbolsNestedStructures) {
@@ -349,6 +349,32 @@ TEST(CAstTest, CollectReferencedSymbolsNestedStructures) {
   EXPECT_EQ(symbols.local_variables, (std::set<std::string>{"i"}));
   EXPECT_EQ(symbols.external_functions, (std::set<std::string>{"ExternalAction"}));
   EXPECT_EQ(symbols.external_data, (std::set<std::string>{"g_limit", "g_status", "kStepSize"}));
+}
+
+TEST(CAstTest, CollectReferencedSymbolsFiltersNonIdentifiers) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // Expressions containing invalid identifiers (e.g. starting with digits or containing symbols)
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("123bad"), CExpression::Identifier("&D_80100000"))));
+
+  // Call with non-identifier callee
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("0invalid_call"), std::move(call_args))));
+
+  // Valid identifier to verify collection still works
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("valid_data"), CExpression::Integer(42))));
+
+  FunctionDeclaration func(CType::Void(), "InvalidIdentTest", /*parameters=*/{}, std::move(body));
+
+  ReferencedSymbols symbols = CollectReferencedSymbols(func);
+
+  EXPECT_TRUE(symbols.external_functions.empty());
+  EXPECT_EQ(symbols.external_data, (std::set<std::string>{"valid_data"}));
+  EXPECT_EQ(symbols.external_data.count("123bad"), 0u);
+  EXPECT_EQ(symbols.external_data.count("&D_80100000"), 0u);
 }
 
 }  // namespace

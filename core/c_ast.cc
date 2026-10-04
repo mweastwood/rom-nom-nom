@@ -664,6 +664,15 @@ std::string FunctionDeclaration::ToString() const {
 
 namespace {
 
+bool IsValidCIdentifier(std::string_view name) {
+  if (name.empty()) return false;
+  if (!isalpha(name.front()) && name.front() != '_') return false;
+  for (char c : name) {
+    if (!isalnum(c) && c != '_') return false;
+  }
+  return true;
+}
+
 bool IsKeywordOrBuiltin(std::string_view name) {
   static const absl::flat_hash_set<std::string_view> k_builtins = {
       "sizeof", "NULL", "TRUE",   "FALSE",  "true",  "false",    "void", "s8",   "u8",
@@ -733,8 +742,8 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols) {
     case CExpressionKind::kIdentifier: {
       const auto& id = static_cast<const IdentifierExpression&>(expr);
       const std::string& name = id.Name();
-      if (!IsKeywordOrBuiltin(name) && symbols.local_variables.count(name) == 0 &&
-          symbols.external_functions.count(name) == 0) {
+      if (IsValidCIdentifier(name) && !IsKeywordOrBuiltin(name) &&
+          symbols.local_variables.count(name) == 0 && symbols.external_functions.count(name) == 0) {
         symbols.external_data.insert(name);
       }
       break;
@@ -744,7 +753,8 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols) {
       if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
         const auto& id = static_cast<const IdentifierExpression&>(call.Callee());
         const std::string& callee_name = id.Name();
-        if (!IsKeywordOrBuiltin(callee_name) && symbols.local_variables.count(callee_name) == 0) {
+        if (IsValidCIdentifier(callee_name) && !IsKeywordOrBuiltin(callee_name) &&
+            symbols.local_variables.count(callee_name) == 0) {
           symbols.external_functions.insert(callee_name);
           symbols.external_data.erase(callee_name);
         }

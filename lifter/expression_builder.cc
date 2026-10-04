@@ -274,9 +274,10 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       if (lo->type == FoldedPatternType::kAddressLoad) {
         statement.kind = StatementKind::kAssignment;
         statement.destination_variable = RegisterVarName(lo->dest_reg);
-        statement.expression = lo->symbol_name.empty()
-                                   ? LiftedExpression::Integer(lo->address, true)
-                                   : LiftedExpression::GlobalRef("&" + lo->symbol_name);
+        statement.expression =
+            lo->symbol_name.empty()
+                ? LiftedExpression::Integer(lo->address, true)
+                : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
         statements.push_back(std::move(statement));
       } else if (lo->type == FoldedPatternType::kConstantLiteral) {
         statement.kind = StatementKind::kAssignment;
@@ -295,7 +296,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         statement.kind = StatementKind::kAssignment;
         statement.destination_variable =
             lo->symbol_name.empty() ? absl::StrFormat("*(0x%X)", lo->address) : lo->symbol_name;
-        statement.expression = LiftedExpression::Variable(RegisterVarName(lo->src_reg));
+        statement.expression = LiftRegisterOrConstant(lo->src_reg, tracker);
         statements.push_back(std::move(statement));
       }
       tracker.Analyze(instructions_to_process.subspan(i, 1));
