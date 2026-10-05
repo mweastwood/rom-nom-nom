@@ -560,5 +560,44 @@ TEST(ExpressionBuilderTest, IndirectCallJalr) {
   EXPECT_EQ(statements[0].ToString(), "((void (*)())temp_t9)();\n");
 }
 
+TEST(ExpressionBuilderTest, SizedGlobalLoadAndStore) {
+  std::string textproto = R"pb(
+    entries { name: "g_flag" address: 0x80204B38 type: SYMBOL_DATA size: 1 }
+    entries { name: "g_count" address: 0x80182BA0 type: SYMBOL_DATA size: 2 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // lui $at, 0x8020
+  // sb  $zero, 0x4B38($at)
+  // lui $t0, 0x8018
+  // sh  $a0, 0x2BA0($t0)
+  // lui $t1, 0x8020
+  // lbu $v0, 0x4B38($t1)
+  std::vector<uint32_t> words = {
+      0x3C018020,  // 0: lui $at, 0x8020
+      0xA0204B38,  // 1: sb  $zero, 0x4B38($at)
+      0x3C088018,  // 2: lui $t0, 0x8018
+      0xA5042BA0,  // 3: sh  $a0, 0x2BA0($t0)
+      0x3C098020,  // 4: lui $t1, 0x8020
+      0x91224B38,  // 5: lbu $v0, 0x4B38($t1)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].kind, StatementKind::kStore);
+  EXPECT_EQ(statements[0].store_type, "u8");
+  EXPECT_EQ(statements[0].ToString(), "*(u8*)&g_flag = 0;\n");
+
+  EXPECT_EQ(statements[1].kind, StatementKind::kStore);
+  EXPECT_EQ(statements[1].store_type, "u16");
+  EXPECT_EQ(statements[1].ToString(), "*(u16*)&g_count = arg0;\n");
+
+  EXPECT_EQ(statements[2].kind, StatementKind::kAssignment);
+  EXPECT_EQ(statements[2].ToString(), "v0 = *(u8*)&g_flag;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

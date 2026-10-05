@@ -195,5 +195,42 @@ TEST(SymbolFolderTest, AddressLoadClassifiesCodeAndDataViaSplitConfig) {
   EXPECT_EQ(folder.AllFolded()[1].symbol_name, "D_80003500");
 }
 
+TEST(SymbolFolderTest, SizedGlobalAccess) {
+  // lui $at, 0x8020
+  // sb  $v0, 0x4B38($at)
+  // lui $t0, 0x8018
+  // sh  $a0, 0x2BA0($t0)
+  // lui $t1, 0x8025
+  // lbu $v1, 0x0100($t1)
+  std::vector<uint32_t> words = {
+      0x3C018020,  // 0: lui $at, 0x8020
+      0xA0224B38,  // 1: sb  $v0, 0x4B38($at)
+      0x3C088018,  // 2: lui $t0, 0x8018
+      0xA5042BA0,  // 3: sh  $a0, 0x2BA0($t0)
+      0x3C098025,  // 4: lui $t1, 0x8025
+      0x91230100,  // 5: lbu $v1, 0x0100($t1)
+  };
+
+  auto instructions = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(instructions);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(3));
+  EXPECT_EQ(folder.AllFolded()[0].type, FoldedPatternType::kGlobalStore);
+  EXPECT_EQ(folder.AllFolded()[0].access_type, "u8");
+  EXPECT_EQ(folder.AllFolded()[0].hi_inst_index, 0u);
+  EXPECT_EQ(folder.AllFolded()[0].lo_inst_index, 1u);
+
+  EXPECT_EQ(folder.AllFolded()[1].type, FoldedPatternType::kGlobalStore);
+  EXPECT_EQ(folder.AllFolded()[1].access_type, "u16");
+  EXPECT_EQ(folder.AllFolded()[1].hi_inst_index, 2u);
+  EXPECT_EQ(folder.AllFolded()[1].lo_inst_index, 3u);
+
+  EXPECT_EQ(folder.AllFolded()[2].type, FoldedPatternType::kGlobalLoad);
+  EXPECT_EQ(folder.AllFolded()[2].access_type, "u8");
+  EXPECT_EQ(folder.AllFolded()[2].hi_inst_index, 4u);
+  EXPECT_EQ(folder.AllFolded()[2].lo_inst_index, 5u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

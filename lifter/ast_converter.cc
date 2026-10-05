@@ -526,8 +526,14 @@ class ConverterContext {
     auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
                                                      function_parameter_counts_);
     for (auto& lifted_stmt : lifted_stmts) {
-      if (returns_v0_ && lifted_stmt.kind == StatementKind::kReturn && !lifted_stmt.expression) {
-        lifted_stmt.expression = LiftedExpression::Variable("v0");
+      if (lifted_stmt.kind == StatementKind::kReturn) {
+        if (returns_v0_) {
+          if (!lifted_stmt.expression) {
+            lifted_stmt.expression = LiftedExpression::Variable("v0");
+          }
+        } else {
+          lifted_stmt.expression = nullptr;
+        }
       }
       auto c_stmt = AstConverter::ConvertStatement(lifted_stmt);
       if (c_stmt != nullptr) {

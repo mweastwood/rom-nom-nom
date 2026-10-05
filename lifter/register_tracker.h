@@ -86,7 +86,7 @@ class RegisterTracker {
   RegisterTracker();
 
   // Analyzes a sequence of instructions within a basic block or function.
-  void Analyze(absl::Span<const Instruction> instructions);
+  void Analyze(absl::Span<const Instruction> instructions, size_t start_instruction_index = 0);
 
   // Queries register state at a given instruction index.
   TrackedValue GetRegisterValue(Register reg) const;

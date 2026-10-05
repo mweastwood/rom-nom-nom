@@ -74,6 +74,33 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
             access.dest_reg = inst.rt.value_or(Register::kZero);
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
+            switch (inst.opcode) {
+              case Opcode::kLb:
+                access.access_type = "s8";
+                break;
+              case Opcode::kLbu:
+                access.access_type = "u8";
+                break;
+              case Opcode::kLh:
+                access.access_type = "s16";
+                break;
+              case Opcode::kLhu:
+                access.access_type = "u16";
+                break;
+              case Opcode::kLwc1:
+                access.access_type = "f32";
+                break;
+              case Opcode::kLdc1:
+                access.access_type = "f64";
+                break;
+              case Opcode::kLd:
+                access.access_type = "s64";
+                break;
+              case Opcode::kLw:
+              default:
+                access.access_type = "s32";
+                break;
+            }
             if (symbol_index != nullptr) {
               access.symbol_name =
                   symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
@@ -87,6 +114,27 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
             access.src_reg = inst.rt.value_or(Register::kZero);
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
+            switch (inst.opcode) {
+              case Opcode::kSb:
+                access.access_type = "u8";
+                break;
+              case Opcode::kSh:
+                access.access_type = "u16";
+                break;
+              case Opcode::kSwc1:
+                access.access_type = "f32";
+                break;
+              case Opcode::kSdc1:
+                access.access_type = "f64";
+                break;
+              case Opcode::kSd:
+                access.access_type = "s64";
+                break;
+              case Opcode::kSw:
+              default:
+                access.access_type = "s32";
+                break;
+            }
             if (symbol_index != nullptr) {
               access.symbol_name =
                   symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
@@ -97,7 +145,7 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
       }
     }
 
-    tracker.Analyze(instructions.subspan(i, 1));
+    tracker.Analyze(instructions.subspan(i, 1), i);
   }
 
   for (size_t f = 0; f < folded_.size(); ++f) {

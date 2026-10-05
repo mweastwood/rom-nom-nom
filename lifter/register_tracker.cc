@@ -226,8 +226,10 @@ void RegisterTracker::Reset() {
   frame_info_ = StackFrameInfo();
 }
 
-void RegisterTracker::Analyze(absl::Span<const Instruction> instructions) {
+void RegisterTracker::Analyze(absl::Span<const Instruction> instructions,
+                              size_t start_instruction_index) {
   for (size_t i = 0; i < instructions.size(); ++i) {
+    size_t inst_idx = start_instruction_index + i;
     const auto& inst = instructions[i];
     RegisterUseDef ud = GetInstructionUseDef(inst);
 
@@ -235,7 +237,7 @@ void RegisterTracker::Analyze(absl::Span<const Instruction> instructions) {
     for (Register r : ud.gpr_uses) {
       size_t idx = RegIdx(r);
       if (reaching_defs_[idx].has_value()) {
-        def_to_uses_[reaching_defs_[idx]->instruction_index].push_back(i);
+        def_to_uses_[reaching_defs_[idx]->instruction_index].push_back(inst_idx);
       }
     }
 
@@ -393,7 +395,7 @@ void RegisterTracker::Analyze(absl::Span<const Instruction> instructions) {
     // 3. Update reaching definitions
     for (Register r : ud.gpr_defs) {
       size_t idx = RegIdx(r);
-      reaching_defs_[idx] = Definition{inst.vram, i, r, &inst};
+      reaching_defs_[idx] = Definition{inst.vram, inst_idx, r, &inst};
     }
   }
 }

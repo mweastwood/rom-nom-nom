@@ -29,6 +29,7 @@ struct FoldedSymbolAccess {
   FoldedPatternType type = FoldedPatternType::kNone;
   uint32_t address = 0;
   std::string symbol_name;
+  std::string access_type = "s32";
 
   Register dest_reg = Register::kZero;
   Register src_reg = Register::kZero;  // For stores
