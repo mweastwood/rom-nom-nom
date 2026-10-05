@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -164,6 +165,156 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
   }
 
   return result;
+}
+
+absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::ScanFromElfAndRom(
+    absl::Span<const uint8_t> rom_bytes, absl::Span<const uint8_t> elf_bytes,
+    const SplitConfig* config) {
+  if (elf_bytes.size() < 52) {
+    return absl::InvalidArgumentError("RomFunctionScanner: ELF binary too small");
+  }
+  if (elf_bytes[0] != 0x7F || elf_bytes[1] != 'E' || elf_bytes[2] != 'L' || elf_bytes[3] != 'F') {
+    return absl::InvalidArgumentError("RomFunctionScanner: Not an ELF binary");
+  }
+
+  uint32_t e_phoff = ReadBigEndian32(elf_bytes.data() + 28);
+  uint16_t e_phentsize = ReadBigEndian16(elf_bytes.data() + 42);
+  uint16_t e_phnum = ReadBigEndian16(elf_bytes.data() + 44);
+
+  struct LoadSegment {
+    uint32_t vaddr;
+    uint32_t paddr;
+    uint32_t filesz;
+    uint32_t memsz;
+  };
+  std::vector<LoadSegment> load_segments;
+
+  if (e_phoff > 0 && e_phentsize >= 32 &&
+      e_phoff + static_cast<size_t>(e_phnum) * e_phentsize <= elf_bytes.size()) {
+    for (uint16_t i = 0; i < e_phnum; ++i) {
+      size_t ph_offset = e_phoff + i * e_phentsize;
+      uint32_t p_type = ReadBigEndian32(elf_bytes.data() + ph_offset);
+      if (p_type == 1 /* PT_LOAD */) {
+        uint32_t p_vaddr = ReadBigEndian32(elf_bytes.data() + ph_offset + 8);
+        uint32_t p_paddr = ReadBigEndian32(elf_bytes.data() + ph_offset + 12);
+        uint32_t p_filesz = ReadBigEndian32(elf_bytes.data() + ph_offset + 16);
+        uint32_t p_memsz = ReadBigEndian32(elf_bytes.data() + ph_offset + 20);
+        load_segments.push_back({p_vaddr, p_paddr, p_filesz, p_memsz});
+      }
+    }
+  }
+
+  uint32_t e_shoff = ReadBigEndian32(elf_bytes.data() + 32);
+  uint16_t e_shentsize = ReadBigEndian16(elf_bytes.data() + 46);
+  uint16_t e_shnum = ReadBigEndian16(elf_bytes.data() + 48);
+
+  if (e_shoff == 0 || e_shentsize < 40 ||
+      e_shoff + static_cast<size_t>(e_shnum) * e_shentsize > elf_bytes.size()) {
+    return absl::InvalidArgumentError("RomFunctionScanner: Invalid ELF section headers");
+  }
+
+  size_t symtab_offset = 0;
+  size_t symtab_size = 0;
+  size_t symtab_entsize = 16;
+  size_t strtab_offset = 0;
+  size_t strtab_size = 0;
+
+  for (uint16_t i = 0; i < e_shnum; ++i) {
+    size_t sh_off = e_shoff + i * e_shentsize;
+    uint32_t sh_type = ReadBigEndian32(elf_bytes.data() + sh_off + 4);
+    if (sh_type == 2 /* SHT_SYMTAB */) {
+      symtab_offset = ReadBigEndian32(elf_bytes.data() + sh_off + 16);
+      symtab_size = ReadBigEndian32(elf_bytes.data() + sh_off + 20);
+      symtab_entsize = ReadBigEndian32(elf_bytes.data() + sh_off + 36);
+      if (symtab_entsize == 0) symtab_entsize = 16;
+      uint32_t sh_link = ReadBigEndian32(elf_bytes.data() + sh_off + 24);
+      if (sh_link < e_shnum) {
+        size_t str_hdr = e_shoff + sh_link * e_shentsize;
+        strtab_offset = ReadBigEndian32(elf_bytes.data() + str_hdr + 16);
+        strtab_size = ReadBigEndian32(elf_bytes.data() + str_hdr + 20);
+      }
+      break;
+    }
+  }
+
+  if (symtab_offset == 0 || strtab_offset == 0 || symtab_offset + symtab_size > elf_bytes.size() ||
+      strtab_offset + strtab_size > elf_bytes.size()) {
+    return absl::InvalidArgumentError(
+        "RomFunctionScanner: Symbol table or string table not found in ELF");
+  }
+
+  auto vram_to_rom = [&](uint32_t vram) -> std::optional<uint32_t> {
+    for (const auto& seg : load_segments) {
+      if (vram >= seg.vaddr && vram < seg.vaddr + seg.memsz) {
+        return seg.paddr + (vram - seg.vaddr);
+      }
+    }
+    if (config != nullptr) {
+      for (const auto& seg : config->segments()) {
+        if (seg.type() != SEGMENT_CODE || seg.vram() == 0) continue;
+        size_t seg_start = seg.rom_start();
+        size_t seg_end = seg.rom_end() != 0 ? seg.rom_end() : rom_bytes.size();
+        uint32_t seg_size = static_cast<uint32_t>(seg_end - seg_start);
+        if (vram >= seg.vram() && vram < seg.vram() + seg_size) {
+          return static_cast<uint32_t>(seg_start + (vram - seg.vram()));
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
+  std::vector<ScannedFunction> functions;
+  for (size_t off = 0; off + symtab_entsize <= symtab_size; off += symtab_entsize) {
+    size_t entry = symtab_offset + off;
+    uint32_t st_name = ReadBigEndian32(elf_bytes.data() + entry);
+    uint32_t st_value = ReadBigEndian32(elf_bytes.data() + entry + 4);
+    uint32_t st_size = ReadBigEndian32(elf_bytes.data() + entry + 8);
+    uint8_t st_info = elf_bytes[entry + 12];
+    uint8_t st_type = st_info & 0x0F;
+
+    if (st_type != 2 /* STT_FUNC */) {
+      continue;
+    }
+    if (st_name >= strtab_size) {
+      continue;
+    }
+    const char* name_ptr =
+        reinterpret_cast<const char*>(elf_bytes.data() + strtab_offset + st_name);
+    std::string name(name_ptr);
+    if (name.empty()) {
+      continue;
+    }
+
+    auto rom_off_opt = vram_to_rom(st_value);
+    if (!rom_off_opt.has_value()) {
+      continue;
+    }
+    uint32_t rom_off = *rom_off_opt;
+    if (rom_off + st_size > rom_bytes.size()) {
+      continue;
+    }
+
+    ScannedFunction sf;
+    sf.name = std::move(name);
+    sf.vram = st_value;
+    sf.rom_offset = rom_off;
+    sf.size = st_size;
+    sf.raw_words.reserve(st_size / 4);
+    for (uint32_t w = 0; w < st_size; w += 4) {
+      if (rom_off + w + 4 <= rom_bytes.size()) {
+        sf.raw_words.push_back(ReadBigEndian32(rom_bytes.data() + rom_off + w));
+      }
+    }
+    functions.push_back(std::move(sf));
+  }
+
+  std::sort(functions.begin(), functions.end(),
+            [](const ScannedFunction& a, const ScannedFunction& b) {
+              if (a.vram != b.vram) return a.vram < b.vram;
+              return a.rom_offset < b.rom_offset;
+            });
+
+  return functions;
 }
 
 }  // namespace rom_nom_nom::fuzzer

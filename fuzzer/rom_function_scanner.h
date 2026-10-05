@@ -32,6 +32,15 @@ class RomFunctionScanner {
   static absl::StatusOr<std::vector<ScannedFunction>> Scan(absl::Span<const uint8_t> rom_bytes,
                                                            const SplitConfig* config = nullptr,
                                                            const SymbolIndex* symbols = nullptr);
+
+  // Scans an executable candidate ELF and extracts all functions directly from
+  // its symbol table (.symtab) and maps their VRAM addresses to ROM offsets
+  // via ELF program headers (PT_LOAD segments).
+  // If config is provided and program headers do not resolve an address,
+  // falls back to SEGMENT_CODE definitions in config.
+  static absl::StatusOr<std::vector<ScannedFunction>> ScanFromElfAndRom(
+      absl::Span<const uint8_t> rom_bytes, absl::Span<const uint8_t> elf_bytes,
+      const SplitConfig* config = nullptr);
 };
 
 }  // namespace rom_nom_nom::fuzzer

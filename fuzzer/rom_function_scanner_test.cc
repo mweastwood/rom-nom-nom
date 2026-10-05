@@ -302,5 +302,154 @@ TEST(RomFunctionScannerTest, ScansFunctionsAcrossSubsegments) {
   EXPECT_EQ(funcs[1].rom_offset, 0x1100u);
 }
 
+TEST(RomFunctionScannerTest, ScansFunctionsFromElfAndRom) {
+  std::vector<uint8_t> rom(0x3000, 0);
+  // Place two instruction words at ROM 0x1050
+  rom[0x1050] = 0x03;
+  rom[0x1051] = 0xE0;
+  rom[0x1052] = 0x00;
+  rom[0x1053] = 0x08;  // jr $ra
+  rom[0x1054] = 0x00;
+  rom[0x1055] = 0x00;
+  rom[0x1056] = 0x00;
+  rom[0x1057] = 0x00;  // nop
+
+  // Construct a minimal ELF binary
+  std::vector<uint8_t> elf(52 + 32 + 3 * 40, 0);
+
+  // ELF Header (52 bytes)
+  elf[0] = 0x7F;
+  elf[1] = 'E';
+  elf[2] = 'L';
+  elf[3] = 'F';
+  elf[4] = 1;  // ELFCLASS32
+  elf[5] = 2;  // ELFDATA2MSB (Big Endian)
+  elf[6] = 1;  // EV_CURRENT
+  elf[28] = 0;
+  elf[29] = 0;
+  elf[30] = 0;
+  elf[31] = 52;  // e_phoff = 52
+  elf[32] = 0;
+  elf[33] = 0;
+  elf[34] = 0;
+  elf[35] = 84;  // e_shoff = 84 (52 + 32)
+  elf[42] = 0;
+  elf[43] = 32;  // e_phentsize = 32
+  elf[44] = 0;
+  elf[45] = 1;  // e_phnum = 1
+  elf[46] = 0;
+  elf[47] = 40;  // e_shentsize = 40
+  elf[48] = 0;
+  elf[49] = 3;  // e_shnum = 3
+  elf[50] = 0;
+  elf[51] = 0;  // e_shstrndx = 0
+
+  // Program Header 0 (32 bytes at offset 52)
+  // p_type = PT_LOAD (1)
+  elf[52] = 0;
+  elf[53] = 0;
+  elf[54] = 0;
+  elf[55] = 1;
+  // p_vaddr = 0x80025C50
+  elf[60] = 0x80;
+  elf[61] = 0x02;
+  elf[62] = 0x5C;
+  elf[63] = 0x50;
+  // p_paddr = 0x1050
+  elf[64] = 0x00;
+  elf[65] = 0x00;
+  elf[66] = 0x10;
+  elf[67] = 0x50;
+  // p_filesz = 0x100
+  elf[68] = 0x00;
+  elf[69] = 0x00;
+  elf[70] = 0x01;
+  elf[71] = 0x00;
+  // p_memsz = 0x100
+  elf[72] = 0x00;
+  elf[73] = 0x00;
+  elf[74] = 0x01;
+  elf[75] = 0x00;
+
+  // Strtab data at offset = 204
+  size_t strtab_offset = elf.size();
+  std::vector<char> strtab_data = {'\0', 'T', 'e', 's', 't', 'F', 'u', 'n', 'c', '\0'};
+  elf.insert(elf.end(), strtab_data.begin(), strtab_data.end());
+
+  // Symtab data (2 entries: null symbol + TestFunc symbol)
+  size_t symtab_offset = elf.size();
+  // Null symbol (16 bytes)
+  elf.insert(elf.end(), 16, 0);
+  // TestFunc symbol (16 bytes)
+  // st_name = 1
+  AppendWord(elf, 1);
+  // st_value = 0x80025C50
+  AppendWord(elf, 0x80025C50);
+  // st_size = 8
+  AppendWord(elf, 8);
+  // st_info = STT_FUNC (2), st_other = 0, st_shndx = 1
+  elf.push_back(2);
+  elf.push_back(0);
+  elf.push_back(0);
+  elf.push_back(1);
+
+  // Section Header 2: .strtab (offset 84 + 80 = 164)
+  // sh_type = SHT_STRTAB (3)
+  elf[168] = 0;
+  elf[169] = 0;
+  elf[170] = 0;
+  elf[171] = 3;
+  // sh_offset
+  elf[180] = static_cast<uint8_t>((strtab_offset >> 24) & 0xFF);
+  elf[181] = static_cast<uint8_t>((strtab_offset >> 16) & 0xFF);
+  elf[182] = static_cast<uint8_t>((strtab_offset >> 8) & 0xFF);
+  elf[183] = static_cast<uint8_t>(strtab_offset & 0xFF);
+  // sh_size
+  elf[184] = static_cast<uint8_t>((strtab_data.size() >> 24) & 0xFF);
+  elf[185] = static_cast<uint8_t>((strtab_data.size() >> 16) & 0xFF);
+  elf[186] = static_cast<uint8_t>((strtab_data.size() >> 8) & 0xFF);
+  elf[187] = static_cast<uint8_t>(strtab_data.size() & 0xFF);
+
+  // Section Header 1: .symtab (offset 84 + 40 = 124)
+  // sh_type = SHT_SYMTAB (2)
+  elf[128] = 0;
+  elf[129] = 0;
+  elf[130] = 0;
+  elf[131] = 2;
+  // sh_offset
+  elf[140] = static_cast<uint8_t>((symtab_offset >> 24) & 0xFF);
+  elf[141] = static_cast<uint8_t>((symtab_offset >> 16) & 0xFF);
+  elf[142] = static_cast<uint8_t>((symtab_offset >> 8) & 0xFF);
+  elf[143] = static_cast<uint8_t>(symtab_offset & 0xFF);
+  // sh_size = 32
+  elf[144] = 0;
+  elf[145] = 0;
+  elf[146] = 0;
+  elf[147] = 32;
+  // sh_link = 2 (points to Section 2 .strtab)
+  elf[148] = 0;
+  elf[149] = 0;
+  elf[150] = 0;
+  elf[151] = 2;
+  // sh_entsize = 16
+  elf[160] = 0;
+  elf[161] = 0;
+  elf[162] = 0;
+  elf[163] = 16;
+
+  auto funcs_or = RomFunctionScanner::ScanFromElfAndRom(rom, elf);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+  const auto& funcs = *funcs_or;
+
+  ASSERT_EQ(funcs.size(), 1u);
+  EXPECT_EQ(funcs[0].name, "TestFunc");
+  EXPECT_EQ(funcs[0].vram, 0x80025C50u);
+  EXPECT_EQ(funcs[0].rom_offset, 0x1050u);
+  EXPECT_EQ(funcs[0].size, 8u);
+  ASSERT_EQ(funcs[0].raw_words.size(), 2u);
+  EXPECT_EQ(funcs[0].raw_words[0], 0x03E00008u);
+  EXPECT_EQ(funcs[0].raw_words[1], 0x00000000u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer
