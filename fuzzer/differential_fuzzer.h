@@ -64,6 +64,7 @@ class DifferentialFuzzer {
     bool check_f0_double = false;
     bool intercept_external_calls = true;
     bool check_external_calls = false;
+    bool filter_local_stack_writes = true;
   };
 
   DifferentialFuzzer() = default;

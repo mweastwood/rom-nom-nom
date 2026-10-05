@@ -332,5 +332,74 @@ TEST(DifferentialFuzzerTest, DetectsExternalCallMismatchWhenCheckEnabled) {
   EXPECT_NE(comp.failure_reason.find("Call log mismatch"), std::string::npos);
 }
 
+TEST(DifferentialFuzzerTest, LocalStackWritesFilteredUponReturn) {
+  // Target: allocates 24 bytes stack, stores $ra at 16($sp), restores and returns
+  std::vector<uint32_t> target = {
+      0x27BDFFE8,  // addiu $sp, $sp, -24
+      0xAFBF0010,  // sw    $ra, 16($sp)
+      0x8FBF0010,  // lw    $ra, 16($sp)
+      0x27BD0018,  // addiu $sp, $sp, 24
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: allocates 32 bytes stack, stores $ra at 24($sp) and $s0 at 20($sp)
+  std::vector<uint32_t> candidate = {
+      0x27BDFFE0,  // addiu $sp, $sp, -32
+      0xAFBF0018,  // sw    $ra, 24($sp)
+      0xAFB00014,  // sw    $s0, 20($sp)
+      0x8FB00014,  // lw    $s0, 20($sp)
+      0x8FBF0018,  // lw    $ra, 24($sp)
+      0x27BD0020,  // addiu $sp, $sp, 32
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+
+  // With filter_local_stack_writes = true (default), stack frame differences are ignored
+  DifferentialFuzzer fuzzer_filtered;
+  DifferentialComparison comp_filtered =
+      fuzzer_filtered.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp_filtered.result, EquivalenceResult::kEquivalent) << comp_filtered.failure_reason;
+
+  // With filter_local_stack_writes = false, the raw store log differences are caught
+  DifferentialFuzzer::Options unfiltered_opts;
+  unfiltered_opts.filter_local_stack_writes = false;
+  DifferentialFuzzer fuzzer_unfiltered(unfiltered_opts);
+  DifferentialComparison comp_unfiltered =
+      fuzzer_unfiltered.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp_unfiltered.result, EquivalenceResult::kMemoryWriteMismatch);
+}
+
+TEST(DifferentialFuzzerTest, ReorderedPersistentStoresMatchInvariantly) {
+  DifferentialFuzzer fuzzer;
+
+  // Target: writes $a0 to 0x80100000, then $a1 to 0x80100004
+  std::vector<uint32_t> target = {
+      0x3C088010,  // lui  $t0, 0x8010
+      0xAC840000,  // sw   $a0, 0($t0)
+      0xAC850004,  // sw   $a1, 4($t0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: writes $a1 to 0x80100004, then $a0 to 0x80100000 (instruction scheduler reordered)
+  std::vector<uint32_t> candidate = {
+      0x3C088010,  // lui  $t0, 0x8010
+      0xAC850004,  // sw   $a1, 4($t0)
+      0xAC840000,  // sw   $a0, 0($t0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x11111111;
+  tc.a1 = 0x22222222;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

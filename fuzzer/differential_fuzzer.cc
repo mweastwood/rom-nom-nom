@@ -107,24 +107,55 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
         "Return value f0_double mismatch: target=%f (0x%016llX) vs candidate=%f (0x%016llX)",
         comp->target_result.f0_double, comp->target_result.f0_double_bits,
         comp->candidate_result.f0_double, comp->candidate_result.f0_double_bits);
-  } else if (options_.check_memory_writes &&
-             comp->target_result.write_log.size() != comp->candidate_result.write_log.size()) {
-    comp->result = EquivalenceResult::kMemoryWriteMismatch;
-    comp->failure_reason = absl::StrFormat(
-        "Write log size mismatch: target logged %zu writes vs candidate logged %zu writes",
-        comp->target_result.write_log.size(), comp->candidate_result.write_log.size());
   } else if (options_.check_memory_writes) {
-    comp->result = EquivalenceResult::kEquivalent;
-    for (size_t i = 0; i < comp->target_result.write_log.size(); ++i) {
-      const auto& tw = comp->target_result.write_log[i];
-      const auto& cw = comp->candidate_result.write_log[i];
-      if (!(tw == cw)) {
-        comp->result = EquivalenceResult::kMemoryWriteMismatch;
-        comp->failure_reason = absl::StrFormat(
-            "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
-            "candidate(addr=0x%08X, val=0x%llX, size=%d)",
-            i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size);
-        break;
+    std::vector<MemoryWrite> target_writes;
+    std::vector<MemoryWrite> candidate_writes;
+    if (options_.filter_local_stack_writes) {
+      for (const auto& w : comp->target_result.write_log) {
+        if (!(w.address < options_.initial_sp && w.address >= options_.initial_sp - 0x4000)) {
+          target_writes.push_back(w);
+        }
+      }
+      for (const auto& w : comp->candidate_result.write_log) {
+        if (!(w.address < options_.initial_sp && w.address >= options_.initial_sp - 0x4000)) {
+          candidate_writes.push_back(w);
+        }
+      }
+    } else {
+      target_writes = comp->target_result.write_log;
+      candidate_writes = comp->candidate_result.write_log;
+    }
+
+    if (target_writes.size() != candidate_writes.size()) {
+      comp->result = EquivalenceResult::kMemoryWriteMismatch;
+      comp->failure_reason = absl::StrFormat(
+          "Write log size mismatch: target logged %zu writes vs candidate logged %zu writes",
+          target_writes.size(), candidate_writes.size());
+    } else {
+      std::sort(target_writes.begin(), target_writes.end(),
+                [](const MemoryWrite& a, const MemoryWrite& b) {
+                  if (a.address != b.address) return a.address < b.address;
+                  if (a.size != b.size) return a.size < b.size;
+                  return a.value < b.value;
+                });
+      std::sort(candidate_writes.begin(), candidate_writes.end(),
+                [](const MemoryWrite& a, const MemoryWrite& b) {
+                  if (a.address != b.address) return a.address < b.address;
+                  if (a.size != b.size) return a.size < b.size;
+                  return a.value < b.value;
+                });
+      comp->result = EquivalenceResult::kEquivalent;
+      for (size_t i = 0; i < target_writes.size(); ++i) {
+        const auto& tw = target_writes[i];
+        const auto& cw = candidate_writes[i];
+        if (!(tw == cw)) {
+          comp->result = EquivalenceResult::kMemoryWriteMismatch;
+          comp->failure_reason = absl::StrFormat(
+              "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
+              "candidate(addr=0x%08X, val=0x%llX, size=%d)",
+              i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size);
+          break;
+        }
       }
     }
   } else {
