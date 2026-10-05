@@ -85,8 +85,11 @@ class RegisterTracker {
  public:
   RegisterTracker();
 
+  // Steps a single instruction sequentially, updating register values and def-use chains.
+  void Step(const Instruction& inst);
+
   // Analyzes a sequence of instructions within a basic block or function.
-  void Analyze(absl::Span<const Instruction> instructions, size_t start_instruction_index = 0);
+  void Analyze(absl::Span<const Instruction> instructions);
 
   // Queries register state at a given instruction index.
   TrackedValue GetRegisterValue(Register reg) const;
@@ -114,6 +117,7 @@ class RegisterTracker {
   absl::flat_hash_map<size_t, std::vector<size_t>> def_to_uses_;
 
   StackFrameInfo frame_info_;
+  size_t current_instruction_index_ = 0;
 
   static const std::vector<size_t>& EmptyVector();
 };

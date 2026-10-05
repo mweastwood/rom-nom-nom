@@ -224,179 +224,182 @@ void RegisterTracker::Reset() {
   reaching_defs_.assign(kNumGprs, std::nullopt);
   def_to_uses_.clear();
   frame_info_ = StackFrameInfo();
+  current_instruction_index_ = 0;
 }
 
-void RegisterTracker::Analyze(absl::Span<const Instruction> instructions,
-                              size_t start_instruction_index) {
-  for (size_t i = 0; i < instructions.size(); ++i) {
-    size_t inst_idx = start_instruction_index + i;
-    const auto& inst = instructions[i];
-    RegisterUseDef ud = GetInstructionUseDef(inst);
+void RegisterTracker::Step(const Instruction& inst) {
+  size_t inst_idx = current_instruction_index_++;
+  RegisterUseDef ud = GetInstructionUseDef(inst);
 
-    // 1. Record uses for all read registers
-    for (Register r : ud.gpr_uses) {
-      size_t idx = RegIdx(r);
-      if (reaching_defs_[idx].has_value()) {
-        def_to_uses_[reaching_defs_[idx]->instruction_index].push_back(inst_idx);
+  // 1. Record uses for all read registers
+  for (Register r : ud.gpr_uses) {
+    size_t idx = RegIdx(r);
+    if (reaching_defs_[idx].has_value()) {
+      def_to_uses_[reaching_defs_[idx]->instruction_index].push_back(inst_idx);
+    }
+  }
+
+  // 2. Track values produced by instruction
+  switch (inst.opcode) {
+    case Opcode::kLui:
+      if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+        uint32_t hi = static_cast<uint32_t>(static_cast<uint16_t>(inst.immediate)) << 16;
+        gpr_values_[RegIdx(*inst.rt)] = TrackedValue::SymbolHi(hi);
       }
-    }
+      break;
 
-    // 2. Track values produced by instruction
-    switch (inst.opcode) {
-      case Opcode::kLui:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
-          uint32_t hi = static_cast<uint32_t>(static_cast<uint16_t>(inst.immediate)) << 16;
-          gpr_values_[RegIdx(*inst.rt)] = TrackedValue::SymbolHi(hi);
-        }
-        break;
-
-      case Opcode::kAddi:
-      case Opcode::kAddiu:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
-          size_t dest = RegIdx(*inst.rt);
-          if (inst.rs == Register::kZero) {
-            gpr_values_[dest] = TrackedValue::Constant(static_cast<uint32_t>(inst.immediate));
-          } else if (inst.rs.has_value()) {
-            size_t src = RegIdx(*inst.rs);
-            const auto& src_val = gpr_values_[src];
-            if (src_val.kind == ValueKind::kConstant) {
-              gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value + inst.immediate);
-            } else if (src_val.kind == ValueKind::kStackOffset) {
-              int32_t new_offset = src_val.stack_offset + inst.immediate;
-              gpr_values_[dest] = TrackedValue::StackOffset(new_offset);
-              if (*inst.rt == Register::kSp && new_offset < 0) {
-                frame_info_.frame_size =
-                    std::max(frame_info_.frame_size, static_cast<uint32_t>(-new_offset));
-              }
-            } else if (src_val.kind == ValueKind::kSymbolHi) {
-              gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi + inst.immediate);
-            } else {
-              gpr_values_[dest] = TrackedValue();
+    case Opcode::kAddi:
+    case Opcode::kAddiu:
+      if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+        size_t dest = RegIdx(*inst.rt);
+        if (inst.rs == Register::kZero) {
+          gpr_values_[dest] = TrackedValue::Constant(static_cast<uint32_t>(inst.immediate));
+        } else if (inst.rs.has_value()) {
+          size_t src = RegIdx(*inst.rs);
+          const auto& src_val = gpr_values_[src];
+          if (src_val.kind == ValueKind::kConstant) {
+            gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value + inst.immediate);
+          } else if (src_val.kind == ValueKind::kStackOffset) {
+            int32_t new_offset = src_val.stack_offset + inst.immediate;
+            gpr_values_[dest] = TrackedValue::StackOffset(new_offset);
+            if (*inst.rt == Register::kSp && new_offset < 0) {
+              frame_info_.frame_size =
+                  std::max(frame_info_.frame_size, static_cast<uint32_t>(-new_offset));
             }
+          } else if (src_val.kind == ValueKind::kSymbolHi) {
+            gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi + inst.immediate);
+          } else {
+            gpr_values_[dest] = TrackedValue();
           }
         }
-        break;
+      }
+      break;
 
-      case Opcode::kAndi:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
-          size_t dest = RegIdx(*inst.rt);
-          uint32_t imm_u16 = inst.UnsignedImmediate();
-          if (inst.rs == Register::kZero) {
-            gpr_values_[dest] = TrackedValue::Constant(0);
-          } else if (inst.rs.has_value()) {
-            size_t src = RegIdx(*inst.rs);
-            const auto& src_val = gpr_values_[src];
-            if (src_val.kind == ValueKind::kConstant) {
-              gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value & imm_u16);
-            } else {
-              gpr_values_[dest] = TrackedValue();
-            }
+    case Opcode::kAndi:
+      if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+        size_t dest = RegIdx(*inst.rt);
+        uint32_t imm_u16 = inst.UnsignedImmediate();
+        if (inst.rs == Register::kZero) {
+          gpr_values_[dest] = TrackedValue::Constant(0);
+        } else if (inst.rs.has_value()) {
+          size_t src = RegIdx(*inst.rs);
+          const auto& src_val = gpr_values_[src];
+          if (src_val.kind == ValueKind::kConstant) {
+            gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value & imm_u16);
+          } else {
+            gpr_values_[dest] = TrackedValue();
           }
         }
-        break;
+      }
+      break;
 
-      case Opcode::kOri:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
-          size_t dest = RegIdx(*inst.rt);
-          uint32_t imm_u16 = inst.UnsignedImmediate();
-          if (inst.rs == Register::kZero) {
-            gpr_values_[dest] = TrackedValue::Constant(imm_u16);
-          } else if (inst.rs.has_value()) {
-            size_t src = RegIdx(*inst.rs);
-            const auto& src_val = gpr_values_[src];
-            if (src_val.kind == ValueKind::kConstant) {
-              gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value | imm_u16);
-            } else if (src_val.kind == ValueKind::kSymbolHi) {
-              gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi | imm_u16);
-            } else {
-              gpr_values_[dest] = TrackedValue();
-            }
+    case Opcode::kOri:
+      if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+        size_t dest = RegIdx(*inst.rt);
+        uint32_t imm_u16 = inst.UnsignedImmediate();
+        if (inst.rs == Register::kZero) {
+          gpr_values_[dest] = TrackedValue::Constant(imm_u16);
+        } else if (inst.rs.has_value()) {
+          size_t src = RegIdx(*inst.rs);
+          const auto& src_val = gpr_values_[src];
+          if (src_val.kind == ValueKind::kConstant) {
+            gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value | imm_u16);
+          } else if (src_val.kind == ValueKind::kSymbolHi) {
+            gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi | imm_u16);
+          } else {
+            gpr_values_[dest] = TrackedValue();
           }
         }
-        break;
+      }
+      break;
 
-      case Opcode::kXori:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
-          size_t dest = RegIdx(*inst.rt);
-          uint32_t imm_u16 = inst.UnsignedImmediate();
-          if (inst.rs == Register::kZero) {
-            gpr_values_[dest] = TrackedValue::Constant(imm_u16);
-          } else if (inst.rs.has_value()) {
-            size_t src = RegIdx(*inst.rs);
-            const auto& src_val = gpr_values_[src];
-            if (src_val.kind == ValueKind::kConstant) {
-              gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value ^ imm_u16);
-            } else {
-              gpr_values_[dest] = TrackedValue();
-            }
+    case Opcode::kXori:
+      if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+        size_t dest = RegIdx(*inst.rt);
+        uint32_t imm_u16 = inst.UnsignedImmediate();
+        if (inst.rs == Register::kZero) {
+          gpr_values_[dest] = TrackedValue::Constant(imm_u16);
+        } else if (inst.rs.has_value()) {
+          size_t src = RegIdx(*inst.rs);
+          const auto& src_val = gpr_values_[src];
+          if (src_val.kind == ValueKind::kConstant) {
+            gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value ^ imm_u16);
+          } else {
+            gpr_values_[dest] = TrackedValue();
           }
         }
-        break;
+      }
+      break;
 
-      case Opcode::kAddu:
-      case Opcode::kAdd:
-        if (inst.rd.has_value() && *inst.rd != Register::kZero) {
-          size_t dest = RegIdx(*inst.rd);
-          if (inst.rs == Register::kZero && inst.rt.has_value()) {
-            gpr_values_[dest] = gpr_values_[RegIdx(*inst.rt)];
-          } else if (inst.rt == Register::kZero && inst.rs.has_value()) {
-            gpr_values_[dest] = gpr_values_[RegIdx(*inst.rs)];
-          } else if (inst.rs.has_value() && inst.rt.has_value()) {
-            const auto& v1 = gpr_values_[RegIdx(*inst.rs)];
-            const auto& v2 = gpr_values_[RegIdx(*inst.rt)];
-            if (v1.kind == ValueKind::kConstant && v2.kind == ValueKind::kConstant) {
-              gpr_values_[dest] = TrackedValue::Constant(v1.constant_value + v2.constant_value);
-            } else {
-              gpr_values_[dest] = TrackedValue();
-            }
+    case Opcode::kAddu:
+    case Opcode::kAdd:
+      if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+        size_t dest = RegIdx(*inst.rd);
+        if (inst.rs == Register::kZero && inst.rt.has_value()) {
+          gpr_values_[dest] = gpr_values_[RegIdx(*inst.rt)];
+        } else if (inst.rt == Register::kZero && inst.rs.has_value()) {
+          gpr_values_[dest] = gpr_values_[RegIdx(*inst.rs)];
+        } else if (inst.rs.has_value() && inst.rt.has_value()) {
+          const auto& v1 = gpr_values_[RegIdx(*inst.rs)];
+          const auto& v2 = gpr_values_[RegIdx(*inst.rt)];
+          if (v1.kind == ValueKind::kConstant && v2.kind == ValueKind::kConstant) {
+            gpr_values_[dest] = TrackedValue::Constant(v1.constant_value + v2.constant_value);
+          } else {
+            gpr_values_[dest] = TrackedValue();
           }
         }
-        break;
+      }
+      break;
 
-      case Opcode::kSw:
-        if (inst.rs == Register::kSp) {
-          int32_t offset = inst.immediate;
-          if (inst.rt == Register::kRa) {
-            frame_info_.saved_ra_offset = offset;
-          } else if (inst.rt.has_value()) {
-            frame_info_.saved_gpr_offsets[*inst.rt] = offset;
-          }
+    case Opcode::kSw:
+      if (inst.rs == Register::kSp) {
+        int32_t offset = inst.immediate;
+        if (inst.rt == Register::kRa) {
+          frame_info_.saved_ra_offset = offset;
+        } else if (inst.rt.has_value()) {
+          frame_info_.saved_gpr_offsets[*inst.rt] = offset;
         }
-        break;
+      }
+      break;
 
-      case Opcode::kJal:
-      case Opcode::kJalr:
-        frame_info_.is_leaf = false;
-        // Function call clobbers caller-saved registers
-        gpr_values_[RegIdx(Register::kV0)] = TrackedValue();
-        gpr_values_[RegIdx(Register::kV1)] = TrackedValue();
-        gpr_values_[RegIdx(Register::kA0)] = TrackedValue();
-        gpr_values_[RegIdx(Register::kA1)] = TrackedValue();
-        gpr_values_[RegIdx(Register::kA2)] = TrackedValue();
-        gpr_values_[RegIdx(Register::kA3)] = TrackedValue();
-        for (size_t t = RegIdx(Register::kT0); t <= RegIdx(Register::kT7); ++t) {
-          gpr_values_[t] = TrackedValue();
-        }
-        gpr_values_[RegIdx(Register::kT8)] = TrackedValue();
-        gpr_values_[RegIdx(Register::kT9)] = TrackedValue();
-        break;
+    case Opcode::kJal:
+    case Opcode::kJalr:
+      frame_info_.is_leaf = false;
+      // Function call clobbers caller-saved registers
+      gpr_values_[RegIdx(Register::kV0)] = TrackedValue();
+      gpr_values_[RegIdx(Register::kV1)] = TrackedValue();
+      gpr_values_[RegIdx(Register::kA0)] = TrackedValue();
+      gpr_values_[RegIdx(Register::kA1)] = TrackedValue();
+      gpr_values_[RegIdx(Register::kA2)] = TrackedValue();
+      gpr_values_[RegIdx(Register::kA3)] = TrackedValue();
+      for (size_t t = RegIdx(Register::kT0); t <= RegIdx(Register::kT7); ++t) {
+        gpr_values_[t] = TrackedValue();
+      }
+      gpr_values_[RegIdx(Register::kT8)] = TrackedValue();
+      gpr_values_[RegIdx(Register::kT9)] = TrackedValue();
+      break;
 
-      default:
-        // Any other instruction defining a GPR resets its value to unknown
-        for (Register r : ud.gpr_defs) {
-          gpr_values_[RegIdx(r)] = TrackedValue();
-        }
-        break;
-    }
+    default:
+      // Any other instruction defining a GPR resets its value to unknown
+      for (Register r : ud.gpr_defs) {
+        gpr_values_[RegIdx(r)] = TrackedValue();
+      }
+      break;
+  }
 
-    // $zero is always 0
-    gpr_values_[RegIdx(Register::kZero)] = TrackedValue::Constant(0);
+  // $zero is always 0
+  gpr_values_[RegIdx(Register::kZero)] = TrackedValue::Constant(0);
 
-    // 3. Update reaching definitions
-    for (Register r : ud.gpr_defs) {
-      size_t idx = RegIdx(r);
-      reaching_defs_[idx] = Definition{inst.vram, inst_idx, r, &inst};
-    }
+  // 3. Update reaching definitions
+  for (Register r : ud.gpr_defs) {
+    size_t idx = RegIdx(r);
+    reaching_defs_[idx] = Definition{inst.vram, inst_idx, r, &inst};
+  }
+}
+
+void RegisterTracker::Analyze(absl::Span<const Instruction> instructions) {
+  for (const auto& inst : instructions) {
+    Step(inst);
   }
 }
 

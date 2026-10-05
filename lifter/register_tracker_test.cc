@@ -165,5 +165,33 @@ TEST(RegisterTrackerTest, DefUseChains) {
   EXPECT_EQ(def_v0->instruction_index, 2u);
 }
 
+TEST(RegisterTrackerTest, StepExecution) {
+  std::vector<uint32_t> words = {
+      0x24020001,  // 0: addiu $v0, $zero, 1
+      0x3C018020,  // 1: lui   $at, 0x8020
+      0xA0224B38,  // 2: sb    $v0, 19256($at)
+  };
+
+  auto insts = *DecodeSequence(words);
+  RegisterTracker tracker;
+
+  tracker.Step(insts[0]);
+  auto def_v0 = tracker.GetReachingDefinition(Register::kV0);
+  ASSERT_TRUE(def_v0.has_value());
+  EXPECT_EQ(def_v0->instruction_index, 0u);
+  EXPECT_TRUE(tracker.IsConstant(Register::kV0));
+  EXPECT_THAT(tracker.GetConstant(Register::kV0), Optional(1u));
+
+  tracker.Step(insts[1]);
+  auto def_at = tracker.GetReachingDefinition(Register::kAt);
+  ASSERT_TRUE(def_at.has_value());
+  EXPECT_EQ(def_at->instruction_index, 1u);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kAt).kind, ValueKind::kSymbolHi);
+
+  tracker.Step(insts[2]);
+  EXPECT_THAT(tracker.GetUses(0), ElementsAre(2u));
+  EXPECT_THAT(tracker.GetUses(1), ElementsAre(2u));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

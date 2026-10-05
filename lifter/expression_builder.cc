@@ -304,14 +304,16 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                                      LiftRegisterOrConstant(div_pattern->den_reg, tracker));
         statements.push_back(std::move(statement));
       }
-      tracker.Analyze(instructions_to_process.subspan(i, div_pattern->end_index - i + 1), i);
+      for (size_t k = i; k <= div_pattern->end_index; ++k) {
+        tracker.Step(instructions_to_process[k]);
+      }
       i = div_pattern->end_index;
       continue;
     }
 
     // If this instruction is the high half of a folded pair, skip emitting it
     if (folder.IsFoldedHi(i)) {
-      tracker.Analyze(instructions_to_process.subspan(i, 1), i);
+      tracker.Step(inst);
       continue;
     }
 
@@ -362,13 +364,13 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         statements.push_back(std::move(statement));
       }
-      tracker.Analyze(instructions_to_process.subspan(i, 1), i);
+      tracker.Step(inst);
       continue;
     }
 
     // Skip NOPs
     if (inst.IsNop()) {
-      tracker.Analyze(instructions_to_process.subspan(i, 1), i);
+      tracker.Step(inst);
       continue;
     }
 
@@ -880,7 +882,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
     }
 
-    tracker.Analyze(instructions_to_process.subspan(i, 1), i);
+    tracker.Step(inst);
   }
 
   if (pending_return) {

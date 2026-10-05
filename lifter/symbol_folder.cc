@@ -145,7 +145,7 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
       }
     }
 
-    tracker.Analyze(instructions.subspan(i, 1), i);
+    tracker.Step(inst);
   }
 
   for (size_t f = 0; f < folded_.size(); ++f) {
