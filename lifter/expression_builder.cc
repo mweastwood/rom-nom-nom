@@ -11,6 +11,7 @@
 #include "absl/types/span.h"
 #include "core/mips.h"
 #include "lifter/control_flow_graph.h"
+#include "lifter/division_pattern.h"
 #include "lifter/register_tracker.h"
 #include "lifter/symbol_folder.h"
 #include "splitter/symbol_registry.h"
@@ -261,6 +262,32 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
   for (size_t i = 0; i < instructions_to_process.size(); ++i) {
     const auto& inst = instructions_to_process[i];
+
+    // Check for MIPS GCC integer division/modulo trap expansion
+    auto div_pattern = MatchDivisionPattern(instructions_to_process, i);
+    if (div_pattern.has_value()) {
+      if (div_pattern->div_dest_reg.has_value()) {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = RegisterVarName(*div_pattern->div_dest_reg);
+        statement.expression =
+            LiftedExpression::Binary("/", LiftRegisterOrConstant(div_pattern->num_reg, tracker),
+                                     LiftRegisterOrConstant(div_pattern->den_reg, tracker));
+        statements.push_back(std::move(statement));
+      }
+      if (div_pattern->mod_dest_reg.has_value()) {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = RegisterVarName(*div_pattern->mod_dest_reg);
+        statement.expression =
+            LiftedExpression::Binary("%", LiftRegisterOrConstant(div_pattern->num_reg, tracker),
+                                     LiftRegisterOrConstant(div_pattern->den_reg, tracker));
+        statements.push_back(std::move(statement));
+      }
+      tracker.Analyze(instructions_to_process.subspan(i, div_pattern->end_index - i + 1));
+      i = div_pattern->end_index;
+      continue;
+    }
 
     // If this instruction is the high half of a folded pair, skip emitting it
     if (folder.IsFoldedHi(i)) {

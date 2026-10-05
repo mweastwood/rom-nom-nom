@@ -12,6 +12,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/mips.h"
+#include "lifter/division_pattern.h"
 
 namespace rom_nom_nom {
 
@@ -80,28 +81,47 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
     }
   }
 
+  // Pre-detect division/modulo trap expansions so their internal branches and break traps
+  // do not split the control flow graph.
+  absl::flat_hash_set<size_t> division_trap_internal_indices;
+  absl::flat_hash_set<size_t> division_trap_branch_indices;
   for (size_t i = 0; i < instructions.size(); ++i) {
+    auto div_pat = MatchDivisionPattern(instructions, i);
+    if (div_pat.has_value()) {
+      for (size_t idx = div_pat->start_index + 1; idx <= div_pat->end_index; ++idx) {
+        division_trap_internal_indices.insert(idx);
+        if (instructions[idx].IsBranch() || instructions[idx].IsJump()) {
+          division_trap_branch_indices.insert(idx);
+        }
+      }
+    }
+  }
+
+  for (size_t i = 0; i < instructions.size(); ++i) {
+    if (division_trap_branch_indices.contains(i)) {
+      continue;
+    }
     const auto& inst = instructions[i];
     if (inst.IsBranch()) {
       uint32_t target = inst.BranchTarget();
       auto it = vram_to_idx.find(target);
-      if (it != vram_to_idx.end()) {
+      if (it != vram_to_idx.end() && !division_trap_internal_indices.contains(it->second)) {
         is_leader[it->second] = true;
       }
       size_t next_idx = inst.HasDelaySlot() ? (i + 2) : (i + 1);
-      if (next_idx < instructions.size()) {
+      if (next_idx < instructions.size() && !division_trap_internal_indices.contains(next_idx)) {
         is_leader[next_idx] = true;
       }
     } else if (inst.IsJump()) {
       if (inst.opcode == Opcode::kJ) {
         uint32_t target = inst.JumpTarget();
         auto it = vram_to_idx.find(target);
-        if (it != vram_to_idx.end()) {
+        if (it != vram_to_idx.end() && !division_trap_internal_indices.contains(it->second)) {
           is_leader[it->second] = true;
         }
       }
       size_t next_idx = inst.HasDelaySlot() ? (i + 2) : (i + 1);
-      if (next_idx < instructions.size()) {
+      if (next_idx < instructions.size() && !division_trap_internal_indices.contains(next_idx)) {
         is_leader[next_idx] = true;
       }
     }

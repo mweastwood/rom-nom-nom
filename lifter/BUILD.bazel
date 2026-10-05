@@ -25,10 +25,32 @@ cc_test(
 )
 
 cc_library(
+    name = "division_pattern",
+    srcs = ["division_pattern.cc"],
+    hdrs = ["division_pattern.h"],
+    deps = [
+        "//core:mips",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "division_pattern_test",
+    srcs = ["division_pattern_test.cc"],
+    deps = [
+        ":division_pattern",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "control_flow_graph",
     srcs = ["control_flow_graph.cc"],
     hdrs = ["control_flow_graph.h"],
     deps = [
+        ":division_pattern",
         ":jump_table",
         "//core:mips",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -184,6 +206,7 @@ cc_library(
     hdrs = ["expression_builder.h"],
     deps = [
         ":control_flow_graph",
+        ":division_pattern",
         ":register_tracker",
         ":symbol_folder",
         "//core:mips",
