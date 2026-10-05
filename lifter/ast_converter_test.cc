@@ -467,5 +467,46 @@ TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
   EXPECT_EQ(func.ReturnType().ToString(), "s32");
 }
 
+TEST(AstConverterTest, ConvertMultiBlockFunctionWithInterBlockReturnLiveness) {
+  // Multi-block function where $v0 is computed across conditional branches,
+  // and the exit block contains only jr $ra; nop.
+  // The lifter must infer return type s32, declare s32 v0, and emit return v0.
+  std::vector<uint32_t> words = {
+      0x00041400,  // 00: sll   $v0, $a0, 16
+      0x00021403,  // 04: sra   $v0, $v0, 16
+      0x04410004,  // 08: bgez  $v0, +4 -> 0x1C (.L_exit)
+      0x00000000,  // 0C: nop
+      0x00041023,  // 10: subu  $v0, $zero, $a0
+      0x00021400,  // 14: sll   $v0, $v0, 16
+      0x00021403,  // 18: sra   $v0, $v0, 16
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "Abs16";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  EXPECT_EQ(func.Name(), "Abs16");
+  EXPECT_EQ(func.ReturnType().ToString(), "s32");
+
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("s32 Abs16(s32 arg0) {"));
+  EXPECT_THAT(code, HasSubstr("s32 v0;"));
+  EXPECT_THAT(code, HasSubstr("return v0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

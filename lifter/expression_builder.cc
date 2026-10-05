@@ -688,4 +688,159 @@ int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> ins
   return 0;
 }
 
+bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
+  if (cfg.Blocks().empty()) {
+    return false;
+  }
+
+  // Build a lookup map from block ID to block index
+  absl::flat_hash_map<uint32_t, size_t> id_to_index;
+  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+    id_to_index[cfg.Blocks()[i].id] = i;
+  }
+
+  // Pre-calculate per-block properties for $v0
+  struct BlockV0Props {
+    bool has_return = false;
+    bool defines_v0 = false;
+    bool v0_used_after_last_def = false;
+    bool uses_v0_before_def = false;
+  };
+
+  std::vector<BlockV0Props> block_props(cfg.Blocks().size());
+
+  for (size_t b_idx = 0; b_idx < cfg.Blocks().size(); ++b_idx) {
+    const auto& block = cfg.Blocks()[b_idx];
+    auto& props = block_props[b_idx];
+    props.has_return = block.HasReturn();
+
+    int last_def_idx = -1;
+    for (size_t i = 0; i < block.instructions.size(); ++i) {
+      RegisterUseDef ud = GetInstructionUseDef(block.instructions[i]);
+      bool uses_v0 = false;
+      for (Register r : ud.gpr_uses) {
+        if (r == Register::kV0) {
+          uses_v0 = true;
+          break;
+        }
+      }
+      if (uses_v0) {
+        if (last_def_idx == -1) {
+          props.uses_v0_before_def = true;
+        } else {
+          props.v0_used_after_last_def = true;
+        }
+      }
+
+      bool defs_v0 = false;
+      for (Register r : ud.gpr_defs) {
+        if (r == Register::kV0) {
+          defs_v0 = true;
+          break;
+        }
+      }
+      if (defs_v0) {
+        props.defines_v0 = true;
+        last_def_idx = static_cast<int>(i);
+        props.v0_used_after_last_def = false;
+      }
+    }
+
+    // Direct check: if an exit block directly defines $v0 and does not use it after,
+    // it returns $v0.
+    if (props.has_return && props.defines_v0 && !props.v0_used_after_last_def) {
+      return true;
+    }
+  }
+
+  // Helper lambda: inspect a sequence of instructions to check if it produces an unconsumed def of
+  // $v0
+  auto produces_unconsumed_v0 = [](absl::Span<const Instruction> instructions) -> bool {
+    int last_def = -1;
+    bool used_after_last_def = false;
+    for (size_t i = 0; i < instructions.size(); ++i) {
+      RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
+      for (Register r : ud.gpr_uses) {
+        if (r == Register::kV0) {
+          if (last_def != -1) {
+            used_after_last_def = true;
+          }
+          break;
+        }
+      }
+      for (Register r : ud.gpr_defs) {
+        if (r == Register::kV0) {
+          last_def = static_cast<int>(i);
+          used_after_last_def = false;
+          break;
+        }
+      }
+    }
+    return last_def != -1 && !used_after_last_def;
+  };
+
+  // Check each outgoing edge across all blocks
+  for (size_t b_idx = 0; b_idx < cfg.Blocks().size(); ++b_idx) {
+    const auto& block = cfg.Blocks()[b_idx];
+    const auto* term = block.Terminator();
+
+    for (const auto& edge : block.outgoing_edges) {
+      absl::Span<const Instruction> executed_instructions = block.instructions;
+      // If this is a fallthrough edge from a branch likely, the delay slot instruction
+      // was nullified and did not execute on fallthrough.
+      if (edge.type == EdgeType::kFallthrough && term != nullptr && term->IsBranchLikely() &&
+          executed_instructions.size() > 1) {
+        executed_instructions = executed_instructions.subspan(0, executed_instructions.size() - 1);
+      }
+
+      if (!produces_unconsumed_v0(executed_instructions)) {
+        continue;
+      }
+
+      // This edge carries an unconsumed definition of $v0 into edge.to_block_id.
+      // Search forward to see if it reaches any exit block without being consumed or redefined.
+      auto target_it = id_to_index.find(edge.to_block_id);
+      if (target_it == id_to_index.end()) {
+        continue;
+      }
+
+      std::vector<size_t> worklist = {target_it->second};
+      absl::flat_hash_set<size_t> visited = {target_it->second};
+
+      while (!worklist.empty()) {
+        size_t curr_idx = worklist.back();
+        worklist.pop_back();
+
+        const auto& curr_props = block_props[curr_idx];
+        // If this block consumes $v0 before defining it, the reaching definition is consumed.
+        if (curr_props.uses_v0_before_def) {
+          continue;
+        }
+
+        // If this block is an exit block and does not redefine $v0,
+        // the unconsumed definition reaches the return!
+        if (curr_props.has_return && !curr_props.defines_v0) {
+          return true;
+        }
+
+        // If this block defines $v0, it redefines $v0 (kills the incoming def).
+        if (curr_props.defines_v0) {
+          continue;
+        }
+
+        // Otherwise propagate through successors.
+        const auto& curr_block = cfg.Blocks()[curr_idx];
+        for (uint32_t succ_id : curr_block.successors) {
+          auto it = id_to_index.find(succ_id);
+          if (it != id_to_index.end() && visited.insert(it->second).second) {
+            worklist.push_back(it->second);
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 }  // namespace rom_nom_nom

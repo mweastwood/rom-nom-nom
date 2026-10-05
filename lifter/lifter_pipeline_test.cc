@@ -139,7 +139,7 @@ TEST(LifterPipelineTest, EndToEndSwitchFunction) {
   EXPECT_THAT(result_or->c_code, HasSubstr("case 0:"));
   EXPECT_THAT(result_or->c_code, HasSubstr("case 1:"));
   EXPECT_THAT(result_or->c_code, HasSubstr("break;"));
-  EXPECT_THAT(result_or->c_code, HasSubstr("return;"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("return v0;"));
 }
 
 TEST(LifterPipelineTest, EndToEndSwitchFunctionWithoutMemoryReaderGracefullySkips) {

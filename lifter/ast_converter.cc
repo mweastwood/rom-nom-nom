@@ -345,11 +345,13 @@ class ConverterContext {
  public:
   ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
                    const StructuredRegion& root_region, const SplitConfig* split_config,
-                   const absl::flat_hash_map<std::string, int>* function_parameter_counts)
+                   const absl::flat_hash_map<std::string, int>* function_parameter_counts,
+                   bool returns_v0)
       : cfg_(cfg),
         symbol_index_(symbol_index),
         split_config_(split_config),
-        function_parameter_counts_(function_parameter_counts) {
+        function_parameter_counts_(function_parameter_counts),
+        returns_v0_(returns_v0) {
     CollectGotoTargets(root_region);
   }
 
@@ -523,7 +525,10 @@ class ConverterContext {
 
     auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
                                                      function_parameter_counts_);
-    for (const auto& lifted_stmt : lifted_stmts) {
+    for (auto& lifted_stmt : lifted_stmts) {
+      if (returns_v0_ && lifted_stmt.kind == StatementKind::kReturn && !lifted_stmt.expression) {
+        lifted_stmt.expression = LiftedExpression::Variable("v0");
+      }
       auto c_stmt = AstConverter::ConvertStatement(lifted_stmt);
       if (c_stmt != nullptr) {
         target_block->AddStatement(std::move(c_stmt));
@@ -535,6 +540,7 @@ class ConverterContext {
   const SymbolIndex* symbol_index_;
   const SplitConfig* split_config_;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts_;
+  bool returns_v0_ = false;
   absl::flat_hash_set<uint32_t> goto_targets_;
   absl::flat_hash_set<uint32_t> emitted_labels_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
@@ -548,8 +554,15 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
                                           const AstConverterOptions& options) {
   auto body = std::make_unique<CompoundStatement>();
 
+  bool returns_v0 = false;
+  if (options.return_type.has_value()) {
+    returns_v0 = (options.return_type->ToString() != "void");
+  } else {
+    returns_v0 = ExpressionBuilder::DetermineReturnsV0(cfg);
+  }
+
   ConverterContext ctx(cfg, symbol_index, root_region, options.split_config,
-                       options.function_parameter_counts);
+                       options.function_parameter_counts, returns_v0);
   ctx.ConvertRegion(root_region, body.get());
 
   for (uint32_t target_block_id : ctx.GotoTargets()) {
@@ -604,7 +617,7 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
   CType return_type = CType::Void();
   if (options.return_type.has_value()) {
     return_type = *options.return_type;
-  } else if (HasReturnValue(*body)) {
+  } else if (returns_v0 || HasReturnValue(*body)) {
     return_type = CType::S32();
   }
 

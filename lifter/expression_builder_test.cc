@@ -384,5 +384,69 @@ TEST(ExpressionBuilderTest, FoldedSymbolStoreZero) {
   EXPECT_EQ(statements[0].expression->int_val, 0u);
 }
 
+TEST(ExpressionBuilderTest, DetermineReturnsV0MultiBlock) {
+  // Abs16-like pattern:
+  // Block 0:
+  //   sll   $v0, $a0, 16
+  //   sra   $v0, $v0, 16
+  //   bgez  $v0, .L_exit (+4 instructions)
+  //   nop
+  // Block 1:
+  //   subu  $v0, $zero, $a0
+  //   sll   $v0, $v0, 16
+  //   sra   $v0, $v0, 16
+  // Block 2 (.L_exit):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x00041400,  // sll   $v0, $a0, 16
+      0x00021403,  // sra   $v0, $v0, 16
+      0x04410004,  // bgez  $v0, +4 -> .L_exit
+      0x00000000,  // nop
+      0x00041023,  // subu  $v0, $zero, $a0
+      0x00021400,  // sll   $v0, $v0, 16
+      0x00021403,  // sra   $v0, $v0, 16
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0LoopVoidFunction) {
+  // DmaInit-like pattern:
+  // Block 0:
+  //   addu  $v1, $zero, $zero
+  //   andi  $v0, $v1, 0xFFFF
+  // Block 1 (loop body):
+  //   sll   $v0, $v0, 4
+  //   addiu $v1, $v1, 1
+  //   sltiu $v0, $v0, 40
+  //   bnel  $v0, $zero, Block 1
+  //   andi  $v0, $v1, 0xFFFF
+  // Block 2 (exit):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x00001821,  // 00: addu  $v1, $zero, $zero
+      0x3062FFFF,  // 04: andi  $v0, $v1, 0xFFFF
+      0x00021100,  // 08: sll   $v0, $v0, 4
+      0x24630001,  // 0C: addiu $v1, $v1, 1
+      0x2C420028,  // 10: sltiu $v0, $v0, 40
+      0x5440FFFD,  // 14: bnel  $v0, $zero, -3 (0x80020008)
+      0x3062FFFF,  // 18: andi  $v0, $v1, 0xFFFF
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

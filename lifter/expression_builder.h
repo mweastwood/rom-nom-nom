@@ -115,6 +115,10 @@ class ExpressionBuilder {
   // expected by a function (via use-before-definition).
   static int DetermineParameterCount(absl::Span<const Instruction> instructions);
 
+  // Analyzes the CFG to determine if the function returns a value in $v0.
+  // Returns true if there is an unconsumed definition of $v0 that reaches a return instruction.
+  static bool DetermineReturnsV0(const ControlFlowGraph& cfg);
+
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);
 
