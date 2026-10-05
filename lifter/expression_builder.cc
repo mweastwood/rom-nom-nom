@@ -88,8 +88,13 @@ std::string LiftedExpression::ToString() const {
     case ExpressionKind::kVariable:
     case ExpressionKind::kGlobalRef:
       return name;
-    case ExpressionKind::kUnaryOp:
-      return op + (args.empty() ? "" : args[0]->ToString());
+    case ExpressionKind::kUnaryOp: {
+      std::string operand = args.empty() ? "" : args[0]->ToString();
+      if (!args.empty() && args[0]->kind == ExpressionKind::kBinaryOp) {
+        operand = "(" + operand + ")";
+      }
+      return op + operand;
+    }
     case ExpressionKind::kBinaryOp:
       if (args.size() >= 2) {
         return args[0]->ToString() + " " + op + " " + args[1]->ToString();
@@ -475,6 +480,27 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             statement.expression =
                 LiftedExpression::Binary("^", LiftRegisterOrConstant(*inst.rs, tracker),
                                          LiftRegisterOrConstant(*inst.rt, tracker));
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kNor:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
+            inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          if (*inst.rs == Register::kZero) {
+            statement.expression =
+                LiftedExpression::Unary("~", LiftRegisterOrConstant(*inst.rt, tracker));
+          } else if (*inst.rt == Register::kZero) {
+            statement.expression =
+                LiftedExpression::Unary("~", LiftRegisterOrConstant(*inst.rs, tracker));
+          } else {
+            statement.expression = LiftedExpression::Unary(
+                "~", LiftedExpression::Binary("|", LiftRegisterOrConstant(*inst.rs, tracker),
+                                              LiftRegisterOrConstant(*inst.rt, tracker)));
           }
           statements.push_back(std::move(statement));
         }

@@ -448,5 +448,41 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0LoopVoidFunction) {
   EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
 }
 
+TEST(ExpressionBuilderTest, NorBitwiseNot) {
+  // nor $v0, $zero, $a0 (bitwise NOT / unary ~)
+  std::vector<uint32_t> words = {
+      0x00041027,  // nor $v0, $zero, $a0
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].kind, StatementKind::kAssignment);
+  EXPECT_EQ(statements[0].destination_variable, "v0");
+  ASSERT_NE(statements[0].expression, nullptr);
+  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kUnaryOp);
+  EXPECT_EQ(statements[0].expression->op, "~");
+  EXPECT_EQ(statements[0].expression->ToString(), "~arg0");
+}
+
+TEST(ExpressionBuilderTest, NorGeneral) {
+  // nor $v0, $a0, $a1 (bitwise NOR: ~(arg0 | arg1))
+  std::vector<uint32_t> words = {
+      0x00851027,  // nor $v0, $a0, $a1
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].kind, StatementKind::kAssignment);
+  EXPECT_EQ(statements[0].destination_variable, "v0");
+  ASSERT_NE(statements[0].expression, nullptr);
+  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kUnaryOp);
+  EXPECT_EQ(statements[0].expression->op, "~");
+  EXPECT_EQ(statements[0].expression->ToString(), "~(arg0 | arg1)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
