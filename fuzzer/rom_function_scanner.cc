@@ -45,10 +45,32 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
           }
         }
       }
-      if (seg_start >= seg_end || seg_end > rom_bytes.size() || seg.vram() == 0) {
-        continue;
+      if (seg.subsegments_size() > 0) {
+        for (int j = 0; j < seg.subsegments_size(); ++j) {
+          const auto& sub = seg.subsegments(j);
+          if (sub.type() != SUBSEGMENT_C && sub.type() != SUBSEGMENT_ASM &&
+              sub.type() != SUBSEGMENT_HASM) {
+            continue;
+          }
+          size_t sub_start = sub.rom_start();
+          size_t sub_end = seg_end;
+          for (int k = j + 1; k < seg.subsegments_size(); ++k) {
+            if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
+              sub_end = seg.subsegments(k).rom_start();
+              break;
+            }
+          }
+          uint32_t sub_vram = sub.vram();
+          if (sub_vram == 0 && seg.vram() != 0) {
+            sub_vram = seg.vram() + static_cast<uint32_t>(sub_start - seg_start);
+          }
+          if (sub_start < sub_end && sub_end <= rom_bytes.size()) {
+            regions.push_back({sub_start, sub_end, sub_vram});
+          }
+        }
+      } else {
+        regions.push_back({seg_start, seg_end, seg.vram()});
       }
-      regions.push_back({seg_start, seg_end, seg.vram()});
     }
   }
 
@@ -66,6 +88,20 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
   disasm_opts.emit_function_framing = false;
   disasm_opts.emit_relocations = false;
   Disassembler disasm(symbols, disasm_opts);
+
+  if (config != nullptr) {
+    for (int i = 0; i < config->segments_size(); ++i) {
+      const auto& seg = config->segments(i);
+      if (seg.type() != SEGMENT_CODE || seg.vram() == 0) {
+        continue;
+      }
+      size_t seg_start = seg.rom_start();
+      size_t seg_end = seg.rom_end() != 0 ? seg.rom_end() : rom_bytes.size();
+      if (seg_start < seg_end && seg_end <= rom_bytes.size()) {
+        disasm.PreScanCode(rom_bytes.subspan(seg_start, seg_end - seg_start), seg.vram());
+      }
+    }
+  }
 
   std::vector<ScannedFunction> result;
 

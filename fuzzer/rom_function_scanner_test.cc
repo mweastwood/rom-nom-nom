@@ -237,5 +237,70 @@ TEST(RomFunctionScannerTest, SkipsNonCodeSegments) {
   EXPECT_EQ(funcs[0].rom_offset, 0x1800u);
 }
 
+TEST(RomFunctionScannerTest, ScansFunctionsAcrossSubsegments) {
+  std::vector<uint8_t> rom(0x3000, 0);
+
+  SplitConfig config;
+  auto* seg = config.add_segments();
+  seg->set_name("main");
+  seg->set_type(SEGMENT_CODE);
+  seg->set_rom_start(0x1000);
+  seg->set_rom_end(0x2000);
+  seg->set_vram(0x80025C00);
+
+  // Subsegment 1: SUBSEGMENT_C from 0x1000 to 0x1100
+  auto* sub1 = seg->add_subsegments();
+  sub1->set_name("sub1");
+  sub1->set_type(SUBSEGMENT_C);
+  sub1->set_rom_start(0x1000);
+  sub1->set_vram(0x80025C00);
+
+  // Subsegment 2: SUBSEGMENT_ASM from 0x1100 to 0x1200
+  auto* sub2 = seg->add_subsegments();
+  sub2->set_name("sub2");
+  sub2->set_type(SUBSEGMENT_ASM);
+  sub2->set_rom_start(0x1100);
+  sub2->set_vram(0x80025D00);
+
+  // Subsegment 3: SUBSEGMENT_BSS from 0x1200
+  auto* sub3 = seg->add_subsegments();
+  sub3->set_name("sub3_bss");
+  sub3->set_type(SUBSEGMENT_BSS);
+  sub3->set_rom_start(0x1200);
+
+  // Subsegment 1 contains Function 1 at 0x1000 (VRAM 0x80025C00):
+  // jal 0x80025D00 (Function 2 in subsegment 2)
+  // nop
+  // jr $ra
+  // nop
+  std::vector<uint8_t> f1;
+  // jal target: (0x80025D00 & 0x0FFFFFFF) >> 2 = 0x0009740
+  AppendWord(f1, 0x0C000000 | 0x0009740);
+  AppendWord(f1, 0x00000000);  // nop
+  AppendWord(f1, 0x03E00008);  // jr $ra
+  AppendWord(f1, 0x00000000);  // nop
+  std::copy(f1.begin(), f1.end(), rom.begin() + 0x1000);
+
+  // Subsegment 2 contains Function 2 at 0x1100 (VRAM 0x80025D00):
+  // addiu $v0, $zero, 10
+  // jr $ra
+  // nop
+  std::vector<uint8_t> f2;
+  AppendWord(f2, 0x2402000A);  // addiu $v0, $zero, 10
+  AppendWord(f2, 0x03E00008);  // jr $ra
+  AppendWord(f2, 0x00000000);  // nop
+  std::copy(f2.begin(), f2.end(), rom.begin() + 0x1100);
+
+  auto funcs_or = RomFunctionScanner::Scan(rom, &config);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+  const auto& funcs = *funcs_or;
+
+  ASSERT_EQ(funcs.size(), 2u);
+  EXPECT_EQ(funcs[0].vram, 0x80025C00u);
+  EXPECT_EQ(funcs[0].rom_offset, 0x1000u);
+  EXPECT_EQ(funcs[1].vram, 0x80025D00u);
+  EXPECT_EQ(funcs[1].rom_offset, 0x1100u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer
