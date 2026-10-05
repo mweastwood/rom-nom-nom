@@ -319,6 +319,14 @@ int main(int argc, char* argv[]) {
   }
   const auto& cand_funcs = *cand_funcs_or;
 
+  if (base_funcs.size() != cand_funcs.size()) {
+    std::cerr << absl::StrFormat(
+        "Error: Discovered function count mismatch: base ROM has %zu functions, but candidate ROM "
+        "has %zu functions.\n",
+        base_funcs.size(), cand_funcs.size());
+    return 1;
+  }
+
   std::optional<uint32_t> mod_rom_start;
   std::optional<uint32_t> mod_rom_end;
   if (!module_flag.empty() && extractor->Config() != nullptr) {
@@ -344,22 +352,11 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  std::unordered_map<uint64_t, const rom_nom_nom::fuzzer::ScannedFunction*> cand_by_vram_and_offset;
-  std::unordered_map<uint32_t, const rom_nom_nom::fuzzer::ScannedFunction*> cand_by_vram;
-  std::unordered_map<std::string, const rom_nom_nom::fuzzer::ScannedFunction*> cand_by_name;
-  for (const auto& cand_fn : cand_funcs) {
-    uint64_t vo_key = (static_cast<uint64_t>(cand_fn.vram) << 32) | cand_fn.rom_offset;
-    cand_by_vram_and_offset[vo_key] = &cand_fn;
-    cand_by_vram[cand_fn.vram] = &cand_fn;
-    if (!cand_fn.name.empty()) {
-      cand_by_name[cand_fn.name] = &cand_fn;
-    }
-  }
-
   std::vector<rom_nom_nom::fuzzer::FunctionEquivalenceTarget> targets;
   targets.reserve(base_funcs.size());
   for (size_t i = 0; i < base_funcs.size(); ++i) {
     const auto& base_fn = base_funcs[i];
+    const auto& cand_fn = cand_funcs[i];
     if (mod_rom_start.has_value() && mod_rom_end.has_value()) {
       if (base_fn.rom_offset < *mod_rom_start || base_fn.rom_offset >= *mod_rom_end) {
         continue;
@@ -370,39 +367,7 @@ int main(int argc, char* argv[]) {
     target.name = base_fn.name;
     target.vram = base_fn.vram;
     target.target_words = base_fn.raw_words;
-
-    const rom_nom_nom::fuzzer::ScannedFunction* cand_match = nullptr;
-    uint64_t vo_key = (static_cast<uint64_t>(base_fn.vram) << 32) | base_fn.rom_offset;
-    auto it_vo = cand_by_vram_and_offset.find(vo_key);
-    if (it_vo != cand_by_vram_and_offset.end()) {
-      cand_match = it_vo->second;
-    } else {
-      auto it_v = cand_by_vram.find(base_fn.vram);
-      if (it_v != cand_by_vram.end()) {
-        cand_match = it_v->second;
-      } else if (!base_fn.name.empty()) {
-        auto it_n = cand_by_name.find(base_fn.name);
-        if (it_n != cand_by_name.end()) {
-          cand_match = it_n->second;
-        }
-      }
-    }
-
-    if (cand_match != nullptr) {
-      target.candidate_words = cand_match->raw_words;
-    } else if (i < cand_funcs.size() && cand_funcs[i].rom_offset == base_fn.rom_offset) {
-      target.candidate_words = cand_funcs[i].raw_words;
-    } else if (base_fn.rom_offset + base_fn.size <= built_bytes.size()) {
-      target.candidate_words.reserve(base_fn.size / 4);
-      for (size_t off = base_fn.rom_offset; off + 4 <= base_fn.rom_offset + base_fn.size;
-           off += 4) {
-        uint32_t w = (static_cast<uint32_t>(built_bytes[off]) << 24) |
-                     (static_cast<uint32_t>(built_bytes[off + 1]) << 16) |
-                     (static_cast<uint32_t>(built_bytes[off + 2]) << 8) |
-                     static_cast<uint32_t>(built_bytes[off + 3]);
-        target.candidate_words.push_back(w);
-      }
-    }
+    target.candidate_words = cand_fn.raw_words;
 
     targets.push_back(std::move(target));
   }
