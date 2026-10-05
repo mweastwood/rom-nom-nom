@@ -327,12 +327,21 @@ ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
 ACTUAL_SYMBOLS=$(resolve_path "$SYMBOLS_FILE")
 ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
 
+CANDIDATE_ELF="${{CANDIDATE_ROM%.z64}}.elf"
+ACTUAL_CANDIDATE_ELF=$(resolve_path "$CANDIDATE_ELF" || true)
+
+EXTRA_FLAGS=""
+if [[ -n "$ACTUAL_CANDIDATE_ELF" && -f "$ACTUAL_CANDIDATE_ELF" ]]; then
+    EXTRA_FLAGS="--candidate_elf=$ACTUAL_CANDIDATE_ELF"
+fi
+
 "$ACTUAL_FUZZER" \
     --game="$GAME" \
     --base_rom="$ACTUAL_BASE" \
     --candidate_rom="$ACTUAL_CANDIDATE" \
     --config="$ACTUAL_CONFIG" \
     --symbols="$ACTUAL_SYMBOLS" \
+    $EXTRA_FLAGS \
     --nocolor
 """.format(
         game = game,
@@ -349,12 +358,16 @@ ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
         is_executable = True,
     )
 
+    runfiles = ctx.runfiles(files = [candidate_rom, base_rom, config, symbols, fuzzer]).merge(
+        ctx.attr._fuzzer[DefaultInfo].default_runfiles,
+    )
+    if DefaultInfo in ctx.attr.candidate_rom:
+        runfiles = runfiles.merge(ctx.attr.candidate_rom[DefaultInfo].default_runfiles)
+
     return [
         DefaultInfo(
             executable = script,
-            runfiles = ctx.runfiles(files = [candidate_rom, base_rom, config, symbols, fuzzer]).merge(
-                ctx.attr._fuzzer[DefaultInfo].default_runfiles,
-            ),
+            runfiles = runfiles,
         ),
     ]
 

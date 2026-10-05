@@ -111,6 +111,7 @@ cc_binary(
         "//differ:target_extractor",
         "//splitter:config",
         "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/flags:usage",

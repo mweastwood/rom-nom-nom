@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
@@ -29,6 +30,7 @@ ABSL_FLAG(std::string, config, "", "Path to split config textproto.");
 ABSL_FLAG(std::string, symbols, "", "Path to symbol table txt or textproto.");
 ABSL_FLAG(std::string, base_rom, "", "Path to base retail ROM binary.");
 ABSL_FLAG(std::string, candidate_rom, "", "Path to candidate comparison ROM binary.");
+ABSL_FLAG(std::string, candidate_elf, "", "Path to candidate comparison ELF binary.");
 ABSL_FLAG(std::string, source, "", "Path to C source file containing target function.");
 ABSL_FLAG(std::string, function, "", "Target function name or VRAM address to fuzz.");
 ABSL_FLAG(std::string, module, "", "Target module subsegment to evaluate.");
@@ -310,20 +312,65 @@ int main(int argc, char* argv[]) {
   }
   const auto& base_funcs = *base_funcs_or;
 
-  auto cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::Scan(
-      built_bytes, extractor->Config(), extractor->Symbols());
-  if (!cand_funcs_or.ok()) {
-    std::cerr << "Error scanning candidate ROM functions: " << cand_funcs_or.status().message()
-              << "\n";
-    return 1;
+  std::string candidate_elf_path = absl::GetFlag(FLAGS_candidate_elf);
+  candidate_elf_path = resolve_relative(candidate_elf_path);
+  if (candidate_elf_path.empty() && !candidate_rom_path.empty()) {
+    std::filesystem::path cand_rom_p(candidate_rom_path);
+    if (cand_rom_p.extension() == ".z64") {
+      std::filesystem::path potential_elf = cand_rom_p;
+      potential_elf.replace_extension(".elf");
+      if (std::filesystem::exists(potential_elf, ec)) {
+        candidate_elf_path = potential_elf.string();
+      }
+    }
   }
-  const auto& cand_funcs = *cand_funcs_or;
+
+  std::vector<rom_nom_nom::fuzzer::ScannedFunction> cand_funcs;
+  if (!candidate_elf_path.empty()) {
+    std::vector<uint8_t> elf_bytes = ReadBinaryFile(candidate_elf_path);
+    if (!elf_bytes.empty()) {
+      auto elf_cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::ScanFromElfAndRom(
+          built_bytes, elf_bytes, extractor->Config());
+      if (elf_cand_funcs_or.ok()) {
+        absl::flat_hash_map<std::string, const rom_nom_nom::fuzzer::ScannedFunction*> cand_map;
+        for (const auto& fn : *elf_cand_funcs_or) {
+          cand_map[fn.name] = &fn;
+        }
+        cand_funcs.reserve(base_funcs.size());
+        for (const auto& base_fn : base_funcs) {
+          auto it = cand_map.find(base_fn.name);
+          if (it != cand_map.end()) {
+            cand_funcs.push_back(*it->second);
+          }
+        }
+      }
+    }
+  }
+
+  if (cand_funcs.empty()) {
+    auto cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::Scan(
+        built_bytes, extractor->Config(), extractor->Symbols());
+    if (!cand_funcs_or.ok()) {
+      std::cerr << "Error scanning candidate ROM functions: " << cand_funcs_or.status().message()
+                << "\n";
+      return 1;
+    }
+    cand_funcs = std::move(*cand_funcs_or);
+  }
 
   if (base_funcs.size() != cand_funcs.size()) {
     std::cerr << absl::StrFormat(
         "Error: Discovered function count mismatch: base ROM has %zu functions, but candidate ROM "
         "has %zu functions.\n",
         base_funcs.size(), cand_funcs.size());
+    std::cerr << "First 10 functions comparison:\n";
+    for (size_t i = 0; i < std::min<size_t>(10, std::min(base_funcs.size(), cand_funcs.size()));
+         ++i) {
+      std::cerr << absl::StrFormat(
+          "  [%zu] BASE: %-20s (vram=0x%08X, size=%4zu) | CAND: %-20s (vram=0x%08X, size=%4zu)\n",
+          i, base_funcs[i].name, base_funcs[i].vram, base_funcs[i].size, cand_funcs[i].name,
+          cand_funcs[i].vram, cand_funcs[i].size);
+    }
     return 1;
   }
 
@@ -366,6 +413,7 @@ int main(int argc, char* argv[]) {
     rom_nom_nom::fuzzer::FunctionEquivalenceTarget target;
     target.name = base_fn.name;
     target.vram = base_fn.vram;
+    target.candidate_vram = cand_fn.vram;
     target.target_words = base_fn.raw_words;
     target.candidate_words = cand_fn.raw_words;
 
