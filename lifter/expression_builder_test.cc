@@ -763,5 +763,43 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonWithInterveningFpuInstruction) {
   EXPECT_TRUE(folded->can_suppress_statement);
 }
 
+TEST(ExpressionBuilderTest, LiftsStackPointerArithmeticAsCast) {
+  // addu $v0, $v1, $sp
+  // addu $a3, $sp, $zero
+  std::vector<uint32_t> words = {
+      0x007D1021,  // 0: addu $v0, $v1, $sp
+      0x03A03821,  // 4: addu $a3, $sp, $zero
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 2u);
+  EXPECT_EQ(statements[0].ToString(), "v0 = v1 + (s32)sp;\n");
+  EXPECT_EQ(statements[1].ToString(), "arg3 = (s32)sp;\n");
+}
+
+TEST(ExpressionBuilderTest, SuppressesSpDestinationInAdduSubuAndLoads) {
+  // Epilogue stack pointer adjustments or OS context switches restoring $sp
+  // should not emit assignments to 'sp'.
+  std::vector<uint32_t> words = {
+      0x03C0E821,  // 0: addu $sp, $fp, $zero
+      0x03A2E823,  // 4: subu $sp, $sp, $v0
+      0x8D3D0004,  // 8: lw   $sp, 4($t1)
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  EXPECT_TRUE(statements.empty());
+}
+
+TEST(ExpressionBuilderTest, LiftsStackPointerBitwiseOperations) {
+  // or $v0, $sp, $a0
+  std::vector<uint32_t> words = {
+      0x03A41025,  // 0: or $v0, $sp, $a0
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 1u);
+  EXPECT_EQ(statements[0].ToString(), "v0 = (s32)sp | arg0;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

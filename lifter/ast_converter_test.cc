@@ -693,5 +693,73 @@ TEST(AstConverterTest, MultiBlockDoWhileLoopConversion) {
   EXPECT_THAT(code, Not(HasSubstr("continue;")));
 }
 
+TEST(AstConverterTest, DeclaresStackBufferWithDetectedFrameSize) {
+  // Function prologue allocates 128 bytes on stack, indexes into stack buffer:
+  // 0: addiu $sp, $sp, -128
+  // 4: addu  $v0, $v1, $sp
+  // 8: jr    $ra
+  // C: addiu $sp, $sp, 128
+  std::vector<uint32_t> words = {
+      0x27BDFF80,  // addiu $sp, $sp, -128
+      0x007D1021,  // addu  $v0, $v1, $sp
+      0x03E00008,  // jr    $ra
+      0x27BD0080,  // addiu $sp, $sp, 128
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "StackFunc";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("u8 sp[128];"));
+  EXPECT_THAT(code, HasSubstr("v0 = (v1 + (s32)sp);"));
+  EXPECT_THAT(code, Not(HasSubstr("s32 sp;")));
+}
+
+TEST(AstConverterTest, DeclaresStackBufferDefaultSizeWhenNoPrologueAdjustment) {
+  // Function indexes into stack buffer without an explicit addiu $sp, $sp, -frame_size.
+  // Should default safely to 64 bytes: u8 sp[64];
+  std::vector<uint32_t> words = {
+      0x007D1021,  // addu  $v0, $v1, $sp
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "StackFuncDefault";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("u8 sp[64];"));
+  EXPECT_THAT(code, HasSubstr("v0 = (v1 + (s32)sp);"));
+  EXPECT_THAT(code, Not(HasSubstr("s32 sp;")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

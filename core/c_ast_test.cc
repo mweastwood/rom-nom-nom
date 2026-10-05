@@ -131,6 +131,19 @@ TEST(CAstTest, VariableDeclarationAndExpressionStatements) {
   EXPECT_EQ(expr_stmt->ToString(1), "    counter += 1;\n");
 }
 
+TEST(CAstTest, VariableDeclarationArray) {
+  auto arr_decl = CStatement::VariableDeclaration(CType::U8(), "buffer", nullptr, 128);
+  EXPECT_EQ(arr_decl->Kind(), CStatementKind::kVariableDeclarationStatement);
+  EXPECT_EQ(arr_decl->ToString(0), "u8 buffer[128];\n");
+
+  const auto* var_stmt = static_cast<const VariableDeclarationStatement*>(arr_decl.get());
+  ASSERT_TRUE(var_stmt->ArraySize().has_value());
+  EXPECT_EQ(*var_stmt->ArraySize(), 128u);
+
+  auto cloned = arr_decl->Clone();
+  EXPECT_EQ(cloned->ToString(0), "u8 buffer[128];\n");
+}
+
 TEST(CAstTest, ControlFlowStatements) {
   // if (x < 10) { x = 10; } else { x = 0; }
   auto cond = CExpression::Binary("<", CExpression::Identifier("x"), CExpression::Integer(10));

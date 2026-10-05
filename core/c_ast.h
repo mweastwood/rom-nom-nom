@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -351,7 +352,8 @@ class CStatement {
   // Static helper factories
   static std::unique_ptr<CStatement> Expression(std::unique_ptr<CExpression> expression);
   static std::unique_ptr<CStatement> VariableDeclaration(
-      CType type, std::string name, std::unique_ptr<CExpression> initializer = nullptr);
+      CType type, std::string name, std::unique_ptr<CExpression> initializer = nullptr,
+      std::optional<size_t> array_size = std::nullopt);
   static std::unique_ptr<CStatement> If(std::unique_ptr<CExpression> condition,
                                         std::unique_ptr<CStatement> then_branch,
                                         std::unique_ptr<CStatement> else_branch = nullptr);
@@ -415,8 +417,12 @@ class ExpressionStatement : public CStatement {
 class VariableDeclarationStatement : public CStatement {
  public:
   VariableDeclarationStatement(CType type, std::string name,
-                               std::unique_ptr<CExpression> initializer = nullptr)
-      : type_(std::move(type)), name_(std::move(name)), initializer_(std::move(initializer)) {}
+                               std::unique_ptr<CExpression> initializer = nullptr,
+                               std::optional<size_t> array_size = std::nullopt)
+      : type_(std::move(type)),
+        name_(std::move(name)),
+        initializer_(std::move(initializer)),
+        array_size_(array_size) {}
 
   CStatementKind Kind() const override { return CStatementKind::kVariableDeclarationStatement; }
   using CStatement::ToString;
@@ -426,11 +432,13 @@ class VariableDeclarationStatement : public CStatement {
   const CType& Type() const { return type_; }
   const std::string& Name() const { return name_; }
   const CExpression* Initializer() const { return initializer_.get(); }
+  std::optional<size_t> ArraySize() const { return array_size_; }
 
  private:
   CType type_;
   std::string name_;
   std::unique_ptr<CExpression> initializer_;
+  std::optional<size_t> array_size_;
 };
 
 // If statement: if (cond) { then } else { else }

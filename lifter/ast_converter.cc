@@ -831,9 +831,29 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
   }
 
   if (!local_vars_to_declare.empty()) {
+    uint32_t detected_frame_size = 0;
+    for (const auto& block : cfg.Blocks()) {
+      for (const auto& inst : block.instructions) {
+        if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) &&
+            inst.rt.has_value() && *inst.rt == Register::kSp && inst.rs == Register::kSp &&
+            inst.immediate < 0) {
+          detected_frame_size =
+              std::max(detected_frame_size, static_cast<uint32_t>(-inst.immediate));
+        }
+      }
+    }
+    if (detected_frame_size == 0) {
+      detected_frame_size = 64;
+    }
+
     auto new_body = std::make_unique<CompoundStatement>();
     for (const auto& var_name : local_vars_to_declare) {
-      new_body->AddStatement(CStatement::VariableDeclaration(CType::S32(), var_name));
+      if (var_name == "sp") {
+        new_body->AddStatement(
+            CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, detected_frame_size));
+      } else {
+        new_body->AddStatement(CStatement::VariableDeclaration(CType::S32(), var_name));
+      }
     }
     // Move existing statements
     std::vector<std::unique_ptr<CStatement>> existing_stmts;

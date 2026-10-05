@@ -295,9 +295,10 @@ std::unique_ptr<CStatement> CStatement::Expression(std::unique_ptr<CExpression> 
 }
 
 std::unique_ptr<CStatement> CStatement::VariableDeclaration(
-    CType type, std::string name, std::unique_ptr<CExpression> initializer) {
+    CType type, std::string name, std::unique_ptr<CExpression> initializer,
+    std::optional<size_t> array_size) {
   return std::make_unique<VariableDeclarationStatement>(std::move(type), std::move(name),
-                                                        std::move(initializer));
+                                                        std::move(initializer), array_size);
 }
 
 std::unique_ptr<CStatement> CStatement::If(std::unique_ptr<CExpression> condition,
@@ -396,6 +397,9 @@ std::unique_ptr<CStatement> ExpressionStatement::Clone() const {
 
 std::string VariableDeclarationStatement::ToString(int indent_level) const {
   std::string result = Indent(indent_level) + type_.ToString() + " " + name_;
+  if (array_size_.has_value()) {
+    absl::StrAppend(&result, "[", *array_size_, "]");
+  }
   if (initializer_ != nullptr) {
     result += " = " + initializer_->ToString();
   }
@@ -405,7 +409,7 @@ std::string VariableDeclarationStatement::ToString(int indent_level) const {
 
 std::unique_ptr<CStatement> VariableDeclarationStatement::Clone() const {
   return std::make_unique<VariableDeclarationStatement>(
-      type_, name_, initializer_ ? initializer_->Clone() : nullptr);
+      type_, name_, initializer_ ? initializer_->Clone() : nullptr, array_size_);
 }
 
 // --- IfStatement ---

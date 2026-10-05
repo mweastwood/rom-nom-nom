@@ -206,6 +206,9 @@ std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
   if (reg == Register::kZero) {
     return LiftedExpression::Integer(0);
   }
+  if (reg == Register::kSp) {
+    return LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp"));
+  }
   if (tracker.IsConstant(reg)) {
     auto c = tracker.GetConstant(reg);
     if (c.has_value()) {
@@ -387,7 +390,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     switch (inst.opcode) {
       case Opcode::kAddu:
       case Opcode::kAdd:
-        if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && *inst.rd != Register::kSp) {
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rd);
@@ -406,7 +409,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kSubu:
       case Opcode::kSub:
-        if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && *inst.rd != Register::kSp) {
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rd);
@@ -688,7 +691,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       case Opcode::kLb:
       case Opcode::kLhu:
       case Opcode::kLbu:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
+            inst.rs.has_value()) {
           const char* load_type = "s32";
           if (inst.opcode == Opcode::kLh) {
             load_type = "s16";
@@ -718,7 +722,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kLwl:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
+            inst.rs.has_value()) {
           pending_lwl = std::make_unique<PendingUnalignedAccess>();
           pending_lwl->rt = *inst.rt;
           pending_lwl->rs = *inst.rs;
@@ -727,7 +732,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kLwr:
-        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
+            inst.rs.has_value()) {
           int16_t offset = inst.immediate;
           Register base_reg = *inst.rs;
           if (pending_lwl != nullptr && pending_lwl->rt == *inst.rt &&
