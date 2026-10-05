@@ -282,6 +282,24 @@ TEST(ExpressionBuilderTest, LogicalAndiOperation) {
   EXPECT_EQ(statements[1].ToString(), "v1 = arg0 & 15;\n");
 }
 
+TEST(ExpressionBuilderTest, LogicalImmediateZeroExtension) {
+  // Test that logical immediate instructions (andi, ori, xori) with bit 15 set
+  // (e.g. 0xFFFF) are zero-extended to 65535, NOT sign-extended to 4294967295 (-1).
+  std::vector<uint32_t> words = {
+      0x3082FFFF,  // 0: andi $v0, $a0, 0xFFFF
+      0x3403FFFF,  // 4: ori  $v1, $zero, 0xFFFF
+      0x38848000,  // 8: xori $a0, $a0, 0x8000
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 & 65535;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = 0 | 65535;\n");
+  EXPECT_EQ(statements[2].ToString(), "arg0 = arg0 ^ 32768;\n");
+}
+
 TEST(ExpressionBuilderTest, ComparisonOperations) {
   std::vector<uint32_t> words = {
       0x0085102A,  // 0: slt   $v0, $a0, $a1

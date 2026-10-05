@@ -408,7 +408,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.destination_variable = RegisterVarName(*inst.rt);
           statement.expression =
               LiftedExpression::Binary("&", LiftRegisterOrConstant(*inst.rs, tracker),
-                                       LiftedExpression::Integer(inst.immediate));
+                                       LiftedExpression::Integer(inst.UnsignedImmediate()));
           statements.push_back(std::move(statement));
         }
         break;
@@ -422,7 +422,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           if (inst.opcode == Opcode::kOri) {
             statement.expression =
                 LiftedExpression::Binary("|", LiftRegisterOrConstant(*inst.rs, tracker),
-                                         LiftedExpression::Integer(inst.immediate));
+                                         LiftedExpression::Integer(inst.UnsignedImmediate()));
           } else if (inst.rd.has_value() && *inst.rd != Register::kZero) {
             statement.destination_variable = RegisterVarName(*inst.rd);
             statement.expression =
@@ -442,7 +442,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           if (inst.opcode == Opcode::kXori) {
             statement.expression =
                 LiftedExpression::Binary("^", LiftRegisterOrConstant(*inst.rs, tracker),
-                                         LiftedExpression::Integer(inst.immediate));
+                                         LiftedExpression::Integer(inst.UnsignedImmediate()));
           } else if (inst.rd.has_value() && *inst.rd != Register::kZero) {
             statement.destination_variable = RegisterVarName(*inst.rd);
             statement.expression =

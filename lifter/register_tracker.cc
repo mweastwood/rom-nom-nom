@@ -275,10 +275,28 @@ void RegisterTracker::Analyze(absl::Span<const Instruction> instructions) {
         }
         break;
 
+      case Opcode::kAndi:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+          size_t dest = RegIdx(*inst.rt);
+          uint32_t imm_u16 = inst.UnsignedImmediate();
+          if (inst.rs == Register::kZero) {
+            gpr_values_[dest] = TrackedValue::Constant(0);
+          } else if (inst.rs.has_value()) {
+            size_t src = RegIdx(*inst.rs);
+            const auto& src_val = gpr_values_[src];
+            if (src_val.kind == ValueKind::kConstant) {
+              gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value & imm_u16);
+            } else {
+              gpr_values_[dest] = TrackedValue();
+            }
+          }
+        }
+        break;
+
       case Opcode::kOri:
         if (inst.rt.has_value() && *inst.rt != Register::kZero) {
           size_t dest = RegIdx(*inst.rt);
-          uint32_t imm_u16 = static_cast<uint16_t>(inst.immediate);
+          uint32_t imm_u16 = inst.UnsignedImmediate();
           if (inst.rs == Register::kZero) {
             gpr_values_[dest] = TrackedValue::Constant(imm_u16);
           } else if (inst.rs.has_value()) {
@@ -288,6 +306,24 @@ void RegisterTracker::Analyze(absl::Span<const Instruction> instructions) {
               gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value | imm_u16);
             } else if (src_val.kind == ValueKind::kSymbolHi) {
               gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi | imm_u16);
+            } else {
+              gpr_values_[dest] = TrackedValue();
+            }
+          }
+        }
+        break;
+
+      case Opcode::kXori:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero) {
+          size_t dest = RegIdx(*inst.rt);
+          uint32_t imm_u16 = inst.UnsignedImmediate();
+          if (inst.rs == Register::kZero) {
+            gpr_values_[dest] = TrackedValue::Constant(imm_u16);
+          } else if (inst.rs.has_value()) {
+            size_t src = RegIdx(*inst.rs);
+            const auto& src_val = gpr_values_[src];
+            if (src_val.kind == ValueKind::kConstant) {
+              gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value ^ imm_u16);
             } else {
               gpr_values_[dest] = TrackedValue();
             }

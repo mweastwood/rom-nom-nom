@@ -72,6 +72,16 @@ TEST(MipsTest, DecodeITypeImmediateAndStack) {
   EXPECT_EQ(res->Disassemble(), "addiu $sp, $sp, -32");
 }
 
+TEST(MipsTest, DecodeLogicalImmediateUnsigned) {
+  // andi $a0, $a0, 0xFFFF (op=0x0C, rs=4, rt=4, imm=0xFFFF -> 0x3084FFFF)
+  auto res = DecodeInstruction(0x3084FFFF, 0x80025C00);
+  ASSERT_TRUE(res.ok());
+  EXPECT_EQ(res->opcode, Opcode::kAndi);
+  EXPECT_EQ(res->UnsignedImmediate(), 0xFFFFu);
+  EXPECT_EQ(res->immediate, -1);
+  EXPECT_EQ(res->Disassemble(), "andi  $a0, $a0, 0xFFFF");
+}
+
 TEST(MipsTest, DecodeLui) {
   // lui $t0, 0x8004 -> op=0x0F, rs=0, rt=8 ($t0), imm=0x8004 -> 0x3C088004
   auto res = DecodeInstruction(0x3C088004, 0x80025C00);

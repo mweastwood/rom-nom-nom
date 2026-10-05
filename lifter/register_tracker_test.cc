@@ -88,6 +88,30 @@ TEST(RegisterTrackerTest, ConstantTrackingAndPropagation) {
   EXPECT_THAT(tracker.GetConstant(Register::kA0), Optional(0x80051234u));
 }
 
+TEST(RegisterTrackerTest, LogicalImmediateTracking) {
+  std::vector<uint32_t> words = {
+      0x3408FFFF,  // 0x00: ori  $t0, $zero, 0xFFFF
+      0x3109F000,  // 0x04: andi $t1, $t0, 0xF000
+      0x390AF0F0,  // 0x08: xori $t2, $t0, 0xF0F0
+  };
+
+  auto insts = *DecodeSequence(words);
+  RegisterTracker tracker;
+  tracker.Analyze(insts);
+
+  // $t0 = 0 | 0xFFFF = 0x0000FFFF (zero-extended)
+  EXPECT_TRUE(tracker.IsConstant(Register::kT0));
+  EXPECT_THAT(tracker.GetConstant(Register::kT0), Optional(0x0000FFFFu));
+
+  // $t1 = 0x0000FFFF & 0xF000 = 0x0000F000
+  EXPECT_TRUE(tracker.IsConstant(Register::kT1));
+  EXPECT_THAT(tracker.GetConstant(Register::kT1), Optional(0x0000F000u));
+
+  // $t2 = 0x0000FFFF ^ 0xF0F0 = 0x00000F0F
+  EXPECT_TRUE(tracker.IsConstant(Register::kT2));
+  EXPECT_THAT(tracker.GetConstant(Register::kT2), Optional(0x00000F0Fu));
+}
+
 TEST(RegisterTrackerTest, StackFrameDiscovery) {
   std::vector<uint32_t> words = {
       0x27BDFFE0,  // 0x00: addiu $sp, $sp, -32

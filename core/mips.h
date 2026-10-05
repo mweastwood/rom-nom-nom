@@ -256,6 +256,9 @@ struct Instruction {
   uint8_t shift_amount = 0;  // 5-bit sa field for shifts
   uint32_t target = 0;       // 26-bit target for J/JAL
 
+  // Returns the zero-extended 16-bit immediate for logical instructions (andi, ori, xori).
+  uint16_t UnsignedImmediate() const { return static_cast<uint16_t>(immediate); }
+
   // --- Classification Queries ---
   bool IsBranch() const;        // beq, bne, blez, etc.
   bool IsBranchLikely() const;  // beql, bnel, etc.
