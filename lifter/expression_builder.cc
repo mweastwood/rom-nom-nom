@@ -1162,9 +1162,15 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
   // 3. Scan backward from branch_idx - 1 for reaching definition of cond_reg
   int def_idx = -1;
   for (int i = branch_idx - 1; i >= 0; --i) {
-    const auto& inst = instructions[i];
-    if ((inst.rd.has_value() && *inst.rd == *cond_reg) ||
-        (inst.rt.has_value() && *inst.rt == *cond_reg)) {
+    RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
+    bool defs_cond = false;
+    for (Register r : ud.gpr_defs) {
+      if (r == *cond_reg) {
+        defs_cond = true;
+        break;
+      }
+    }
+    if (defs_cond) {
       def_idx = i;
       break;
     }
@@ -1201,25 +1207,24 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
   }
 
   // 4. Hazard check: no instruction between def_idx and branch_idx clobbers inputs of def_inst,
-  // or uses cond_reg
+  // or uses or clobbers cond_reg
+  RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
   for (int i = def_idx + 1; i < branch_idx; ++i) {
-    const auto& mid = instructions[i];
-    if (def_inst.rs.has_value() && *def_inst.rs != Register::kZero) {
-      if ((mid.rd.has_value() && *mid.rd == *def_inst.rs) ||
-          (mid.rt.has_value() && *mid.rt == *def_inst.rs)) {
+    RegisterUseDef mid_ud = GetInstructionUseDef(instructions[i]);
+    for (Register input_reg : def_ud.gpr_uses) {
+      for (Register mid_def : mid_ud.gpr_defs) {
+        if (mid_def == input_reg) {
+          return std::nullopt;
+        }
+      }
+    }
+    for (Register mid_use : mid_ud.gpr_uses) {
+      if (mid_use == *cond_reg) {
         return std::nullopt;
       }
     }
-    if (def_inst.rt.has_value() && *def_inst.rt != Register::kZero) {
-      if ((mid.rd.has_value() && *mid.rd == *def_inst.rt) ||
-          (mid.rt.has_value() && *mid.rt == *def_inst.rt)) {
-        return std::nullopt;
-      }
-    }
-    // Check if mid uses cond_reg
-    RegisterUseDef ud = GetInstructionUseDef(mid);
-    for (Register r : ud.gpr_uses) {
-      if (r == *cond_reg) {
+    for (Register mid_def : mid_ud.gpr_defs) {
+      if (mid_def == *cond_reg) {
         return std::nullopt;
       }
     }
@@ -1229,21 +1234,38 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
   bool can_suppress = false;
   if (*cond_reg == Register::kAt) {
     can_suppress = true;
-  } else if (branch_idx + 1 < static_cast<int>(instructions.size())) {
-    const auto& delay = instructions[branch_idx + 1];
-    // If the delay slot defines cond_reg without reading it, the comparison value in cond_reg
-    // is immediately dead after the branch
-    bool delay_uses_cond = false;
-    RegisterUseDef delay_ud = GetInstructionUseDef(delay);
-    for (Register r : delay_ud.gpr_uses) {
+  } else {
+    // If cond_reg is an input to def_inst, emitting def_inst as an assignment clobbers
+    // its own input, corrupting the folded branch expression. It must be suppressed.
+    bool cond_is_input = false;
+    for (Register r : def_ud.gpr_uses) {
       if (r == *cond_reg) {
-        delay_uses_cond = true;
+        cond_is_input = true;
         break;
       }
     }
-    if (!delay_uses_cond && ((delay.rd.has_value() && *delay.rd == *cond_reg) ||
-                             (delay.rt.has_value() && *delay.rt == *cond_reg))) {
+    if (cond_is_input) {
       can_suppress = true;
+    } else if (branch_idx + 1 < static_cast<int>(instructions.size())) {
+      const auto& delay = instructions[branch_idx + 1];
+      RegisterUseDef delay_ud = GetInstructionUseDef(delay);
+      bool delay_uses_cond = false;
+      for (Register r : delay_ud.gpr_uses) {
+        if (r == *cond_reg) {
+          delay_uses_cond = true;
+          break;
+        }
+      }
+      bool delay_defs_cond = false;
+      for (Register r : delay_ud.gpr_defs) {
+        if (r == *cond_reg) {
+          delay_defs_cond = true;
+          break;
+        }
+      }
+      if (!delay_uses_cond && delay_defs_cond) {
+        can_suppress = true;
+      }
     }
   }
 

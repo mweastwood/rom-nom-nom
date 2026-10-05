@@ -744,5 +744,24 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonXoriAndAndi) {
   EXPECT_TRUE(and_folded->can_suppress_statement);
 }
 
+TEST(ExpressionBuilderTest, FindFoldedComparisonWithInterveningFpuInstruction) {
+  // sltiu $v0, $v0, 176
+  // swc1  $f2, 0($a0)   (ft = $f2, whose index 2 must NOT alias with GPR $v0)
+  // bnez  $v0, +2
+  // andi  $v0, $a0, 0xFFFF (delay slot defines GPR $v0, making comparison dead)
+  std::vector<uint32_t> words = {
+      0x2C4200B0,  // 0: sltiu $v0, $v0, 176
+      0xE4820000,  // 4: swc1  $f2, 0($a0)
+      0x14400002,  // 8: bne   $v0, $zero, +2
+      0x3082FFFF,  // C: andi  $v0, $a0, 0xFFFF
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  ASSERT_TRUE(folded.has_value());
+  EXPECT_EQ(folded->instruction_index, 0u);
+  EXPECT_TRUE(folded->can_suppress_statement);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
