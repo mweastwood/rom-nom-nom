@@ -265,6 +265,21 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   RegisterTracker tracker;
   bool pending_return = false;
 
+  struct PendingMult {
+    bool is_unsigned = false;
+    Register rs = Register::kZero;
+    Register rt = Register::kZero;
+  };
+  std::unique_ptr<PendingMult> pending_mult;
+
+  struct PendingUnalignedAccess {
+    Register rt = Register::kZero;
+    Register rs = Register::kZero;
+    int16_t offset = 0;
+  };
+  std::unique_ptr<PendingUnalignedAccess> pending_lwl;
+  std::unique_ptr<PendingUnalignedAccess> pending_swl;
+
   for (size_t i = 0; i < instructions_to_process.size(); ++i) {
     const auto& inst = instructions_to_process[i];
 
@@ -585,6 +600,61 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kMult:
+      case Opcode::kMultu:
+        if (inst.rs.has_value() && inst.rt.has_value()) {
+          pending_mult = std::make_unique<PendingMult>();
+          pending_mult->is_unsigned = (inst.opcode == Opcode::kMultu);
+          pending_mult->rs = *inst.rs;
+          pending_mult->rt = *inst.rt;
+        }
+        break;
+
+      case Opcode::kMflo:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          if (pending_mult != nullptr) {
+            statement.expression =
+                LiftedExpression::Binary("*", LiftRegisterOrConstant(pending_mult->rs, tracker),
+                                         LiftRegisterOrConstant(pending_mult->rt, tracker));
+            pending_mult = nullptr;
+          } else {
+            statement.expression = LiftedExpression::Variable("lo");
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kMfhi:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          if (pending_mult != nullptr) {
+            std::string cast_type = pending_mult->is_unsigned ? "u64" : "s64";
+            auto lhs = LiftRegisterOrConstant(pending_mult->rs, tracker);
+            auto rhs = LiftRegisterOrConstant(pending_mult->rt, tracker);
+            statement.expression = LiftedExpression::Binary(
+                ">>",
+                LiftedExpression::Binary(
+                    "*", LiftedExpression::Unary("(" + cast_type + ")", std::move(lhs)),
+                    LiftedExpression::Unary("(" + cast_type + ")", std::move(rhs))),
+                LiftedExpression::Integer(32));
+            pending_mult = nullptr;
+          } else {
+            statement.expression = LiftedExpression::Variable("hi");
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kMtlo:
+      case Opcode::kMthi:
+        pending_mult = nullptr;
+        break;
+
       case Opcode::kLw:
       case Opcode::kLh:
       case Opcode::kLb:
@@ -614,6 +684,41 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             statement.expression = LiftedExpression::Load(
                 load_type, LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
                                                     LiftedExpression::Integer(inst.immediate)));
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kLwl:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+          pending_lwl = std::make_unique<PendingUnalignedAccess>();
+          pending_lwl->rt = *inst.rt;
+          pending_lwl->rs = *inst.rs;
+          pending_lwl->offset = inst.immediate;
+        }
+        break;
+
+      case Opcode::kLwr:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+          int16_t offset = inst.immediate;
+          Register base_reg = *inst.rs;
+          if (pending_lwl != nullptr && pending_lwl->rt == *inst.rt &&
+              pending_lwl->rs == *inst.rs) {
+            offset = pending_lwl->offset;
+            pending_lwl = nullptr;
+          }
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          if (base_reg == Register::kSp) {
+            statement.expression = LiftedExpression::Variable(StackVarName(offset));
+          } else if (offset == 0) {
+            statement.expression =
+                LiftedExpression::Load("s32", LiftRegisterOrConstant(base_reg, tracker));
+          } else {
+            statement.expression = LiftedExpression::Load(
+                "s32", LiftedExpression::Binary("+", LiftRegisterOrConstant(base_reg, tracker),
+                                                LiftedExpression::Integer(offset)));
           }
           statements.push_back(std::move(statement));
         }
@@ -655,12 +760,57 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
-      case Opcode::kJal: {
-        uint32_t target_vram = inst.JumpTarget();
-        std::string function_name =
-            (symbol_index != nullptr)
-                ? symbol_index->LookupOrSynthesizeName(target_vram, SYMBOL_FUNC)
-                : absl::StrFormat("func_%08X", target_vram);
+      case Opcode::kSwl:
+        if (inst.rt.has_value() && inst.rs.has_value()) {
+          pending_swl = std::make_unique<PendingUnalignedAccess>();
+          pending_swl->rt = *inst.rt;
+          pending_swl->rs = *inst.rs;
+          pending_swl->offset = inst.immediate;
+        }
+        break;
+
+      case Opcode::kSwr:
+        if (inst.rt.has_value() && inst.rs.has_value()) {
+          int16_t offset = inst.immediate;
+          Register base_reg = *inst.rs;
+          if (pending_swl != nullptr && pending_swl->rt == *inst.rt &&
+              pending_swl->rs == *inst.rs) {
+            offset = pending_swl->offset;
+            pending_swl = nullptr;
+          }
+          LiftedStatement statement;
+          if (base_reg == Register::kSp) {
+            statement.kind = StatementKind::kAssignment;
+            statement.destination_variable = StackVarName(offset);
+            statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
+          } else {
+            statement.kind = StatementKind::kStore;
+            statement.store_type = "s32";
+            if (offset == 0) {
+              statement.destination_address = LiftRegisterOrConstant(base_reg, tracker);
+            } else {
+              statement.destination_address =
+                  LiftedExpression::Binary("+", LiftRegisterOrConstant(base_reg, tracker),
+                                           LiftedExpression::Integer(offset));
+            }
+            statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kJal:
+      case Opcode::kJalr: {
+        std::string function_name;
+        if (inst.opcode == Opcode::kJalr) {
+          function_name =
+              absl::StrFormat("((void (*)())%s)", RegisterVarName(inst.rs.value_or(Register::kT9)));
+        } else {
+          uint32_t target_vram = inst.JumpTarget();
+          function_name = (symbol_index != nullptr)
+                              ? symbol_index->LookupOrSynthesizeName(target_vram, SYMBOL_FUNC)
+                              : absl::StrFormat("func_%08X", target_vram);
+        }
 
         Register argument_registers[] = {Register::kA0, Register::kA1, Register::kA2,
                                          Register::kA3};
@@ -744,7 +894,7 @@ int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> ins
     for (Register defined_register : use_def.gpr_defs) {
       defined_registers.insert(defined_register);
     }
-    if (instruction.opcode == Opcode::kJal) {
+    if (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr) {
       // Subroutine calls may clobber argument registers; from caller perspective they are redefined
       defined_registers.insert(Register::kA0);
       defined_registers.insert(Register::kA1);

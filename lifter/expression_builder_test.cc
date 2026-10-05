@@ -503,5 +503,62 @@ TEST(ExpressionBuilderTest, VariableShiftOperations) {
   EXPECT_EQ(statements[2].ToString(), "temp_t0 = arg0 >> arg1;\n");
 }
 
+TEST(ExpressionBuilderTest, MultMfloAndMfhi) {
+  // mult $a0, $a1
+  // mflo $v0
+  // mfhi $v1
+  std::vector<uint32_t> words = {
+      0x00850018,  // mult $a0, $a1
+      0x00001012,  // mflo $v0
+      0x00850018,  // mult $a0, $a1
+      0x00001810,  // mfhi $v1
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 * arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = (s64)arg0 * (s64)arg1 >> 32;\n");
+}
+
+TEST(ExpressionBuilderTest, UnalignedLoadStore) {
+  // lwl $v0, 0($a0)
+  // lwr $v0, 3($a0)
+  // swl $a1, 0($a0)
+  // swr $a1, 3($a0)
+  std::vector<uint32_t> words = {
+      0x88820000,  // lwl $v0, 0($a0)
+      0x98820003,  // lwr $v0, 3($a0)
+      0xA8850000,  // swl $a1, 0($a0)
+      0xB8850003,  // swr $a1, 3($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "v0 = *(s32*)arg0;\n");
+  EXPECT_EQ(statements[1].ToString(), "*(s32*)arg0 = arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, IndirectCallJalr) {
+  // jalr $t9
+  // nop
+  std::vector<uint32_t> words = {
+      0x0320F809,  // jalr $t9
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].kind, StatementKind::kCall);
+  ASSERT_NE(statements[0].expression, nullptr);
+  EXPECT_EQ(statements[0].expression->name, "((void (*)())temp_t9)");
+  EXPECT_EQ(statements[0].ToString(), "((void (*)())temp_t9)();\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
