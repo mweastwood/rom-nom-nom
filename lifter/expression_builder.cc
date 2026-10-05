@@ -531,6 +531,33 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kSllv:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value() &&
+            inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression =
+              LiftedExpression::Binary("<<", LiftRegisterOrConstant(*inst.rt, tracker),
+                                       LiftRegisterOrConstant(*inst.rs, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kSrlv:
+      case Opcode::kSrav:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value() &&
+            inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression =
+              LiftedExpression::Binary(">>", LiftRegisterOrConstant(*inst.rt, tracker),
+                                       LiftRegisterOrConstant(*inst.rs, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
       case Opcode::kSlt:
       case Opcode::kSltu:
         if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&

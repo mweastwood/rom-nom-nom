@@ -484,5 +484,24 @@ TEST(ExpressionBuilderTest, NorGeneral) {
   EXPECT_EQ(statements[0].expression->ToString(), "~(arg0 | arg1)");
 }
 
+TEST(ExpressionBuilderTest, VariableShiftOperations) {
+  // sllv $v0, $a0, $a1
+  // srlv $v1, $a0, $a1
+  // srav $t0, $a0, $a1
+  std::vector<uint32_t> words = {
+      0x00A41004,  // sllv $v0, $a0, $a1
+      0x00A41806,  // srlv $v1, $a0, $a1
+      0x00A44007,  // srav $t0, $a0, $a1
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 << arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = arg0 >> arg1;\n");
+  EXPECT_EQ(statements[2].ToString(), "temp_t0 = arg0 >> arg1;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
