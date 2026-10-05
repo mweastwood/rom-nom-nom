@@ -62,6 +62,7 @@ struct EquivalenceRunnerOptions {
   uint32_t seed = 42;
   DifferentialFuzzer::Options fuzzer_options;
   bool stop_on_first_divergence = false;
+  size_t num_threads = 0;  // 0 = auto-detect hardware concurrency
 };
 
 class EquivalenceRunner {

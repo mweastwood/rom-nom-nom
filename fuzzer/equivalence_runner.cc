@@ -1,9 +1,12 @@
 #include "fuzzer/equivalence_runner.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -76,10 +79,57 @@ ModuleEquivalenceSummary EquivalenceRunner::EvaluateModule(
   ModuleEquivalenceSummary summary;
   summary.module_name = std::string(module_name);
   summary.total_functions = targets.size();
-  summary.function_results.reserve(targets.size());
+  summary.function_results.resize(targets.size());
 
-  for (const auto& target : targets) {
-    FunctionEquivalenceResult res = EvaluateFunction(target);
+  size_t thread_count = options_.num_threads;
+  if (thread_count == 0) {
+    unsigned int hw = std::thread::hardware_concurrency();
+    thread_count = hw > 0 ? hw : 1;
+  }
+
+  // If single-threaded or small batch, execute sequentially
+  if (thread_count <= 1 || targets.size() <= 1) {
+    for (size_t i = 0; i < targets.size(); ++i) {
+      summary.function_results[i] = EvaluateFunction(targets[i]);
+      if (options_.stop_on_first_divergence &&
+          summary.function_results[i].status == FunctionEquivalenceStatus::kDivergent) {
+        summary.function_results.resize(i + 1);
+        summary.total_functions = i + 1;
+        break;
+      }
+    }
+  } else {
+    // Multi-threaded work-stealing pool across targets
+    std::atomic<size_t> next_target_idx{0};
+    size_t actual_threads = std::min(thread_count, targets.size());
+    std::vector<std::thread> workers;
+    workers.reserve(actual_threads);
+
+    EquivalenceRunnerOptions worker_options = options_;
+    worker_options.num_threads = 1;  // Prevent worker recursion
+
+    for (size_t t = 0; t < actual_threads; ++t) {
+      workers.emplace_back([&, worker_options]() {
+        EquivalenceRunner worker_runner(worker_options);
+        while (true) {
+          size_t idx = next_target_idx.fetch_add(1, std::memory_order_relaxed);
+          if (idx >= targets.size()) {
+            break;
+          }
+          summary.function_results[idx] = worker_runner.EvaluateFunction(targets[idx]);
+        }
+      });
+    }
+
+    for (auto& w : workers) {
+      if (w.joinable()) {
+        w.join();
+      }
+    }
+  }
+
+  // Aggregate stats deterministically in target order
+  for (const auto& res : summary.function_results) {
     switch (res.status) {
       case FunctionEquivalenceStatus::kExactBinaryMatch:
         summary.exact_binary_matches++;
@@ -93,12 +143,6 @@ ModuleEquivalenceSummary EquivalenceRunner::EvaluateModule(
       case FunctionEquivalenceStatus::kCompilationOrExtractError:
         summary.error_functions++;
         break;
-    }
-
-    summary.function_results.push_back(res);
-
-    if (options_.stop_on_first_divergence && res.status == FunctionEquivalenceStatus::kDivergent) {
-      break;
     }
   }
 

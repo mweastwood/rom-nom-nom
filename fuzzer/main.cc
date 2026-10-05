@@ -39,6 +39,9 @@ ABSL_FLAG(uint32_t, seed, 42, "PRNG seed for deterministic test vector generatio
 ABSL_FLAG(std::string, report, "", "Optional file path to output detailed markdown/text report.");
 ABSL_FLAG(bool, color, true, "Enable ANSI color output.");
 ABSL_FLAG(bool, verbose, false, "Print detailed information for all functions.");
+ABSL_FLAG(int, jobs, 0,
+          "Number of concurrent worker threads (0 = auto-detect hardware concurrency).");
+ABSL_FLAG(int, j, 0, "Alias for --jobs.");
 
 namespace {
 
@@ -101,6 +104,10 @@ int main(int argc, char* argv[]) {
   std::string report_path = absl::GetFlag(FLAGS_report);
   bool color = absl::GetFlag(FLAGS_color) && isatty(STDOUT_FILENO);
   bool verbose = absl::GetFlag(FLAGS_verbose);
+  int jobs = absl::GetFlag(FLAGS_jobs);
+  if (jobs <= 0) {
+    jobs = absl::GetFlag(FLAGS_j);
+  }
 
   std::filesystem::path repo_root = FindRepoRoot();
 
@@ -172,6 +179,7 @@ int main(int argc, char* argv[]) {
   runner_opts.random_vectors_per_function = num_vectors;
   runner_opts.pointer_vectors_per_function = num_pointer_vectors;
   runner_opts.seed = seed;
+  runner_opts.num_threads = jobs > 0 ? static_cast<size_t>(jobs) : 0;
   rom_nom_nom::fuzzer::EquivalenceRunner runner(runner_opts);
 
   // Initialize TargetExtractor
