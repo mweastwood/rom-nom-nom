@@ -36,6 +36,19 @@ enum class ExecutionStatus {
   kInvalidOpcode,    // Encountered unsupported or illegal instruction
 };
 
+struct ExternalCall {
+  uint32_t target_address = 0;
+  uint32_t a0 = 0;
+  uint32_t a1 = 0;
+  uint32_t a2 = 0;
+  uint32_t a3 = 0;
+
+  bool operator==(const ExternalCall& other) const {
+    return target_address == other.target_address && a0 == other.a0 && a1 == other.a1 &&
+           a2 == other.a2 && a3 == other.a3;
+  }
+};
+
 struct ExecutionResult {
   ExecutionStatus status = ExecutionStatus::kRunning;
   uint64_t total_steps = 0;
@@ -46,6 +59,7 @@ struct ExecutionResult {
   double f0_double = 0.0;
   uint64_t f0_double_bits = 0;
   std::vector<MemoryWrite> write_log;
+  std::vector<ExternalCall> call_log;
   std::string error_message;
 };
 
@@ -149,6 +163,21 @@ class MipsEmulator {
   const std::vector<MemoryWrite>& GetWriteLog() const { return write_log_; }
   void ClearWriteLog() { write_log_.clear(); }
 
+  // External call log inspection
+  const std::vector<ExternalCall>& GetCallLog() const { return call_log_; }
+  void ClearCallLog() { call_log_.clear(); }
+
+  // Code execution bounds for call interception.
+  void SetCodeBounds(uint32_t start_vram, uint32_t end_vram) {
+    code_bounds_ = std::make_pair(start_vram, end_vram);
+  }
+  void ClearCodeBounds() { code_bounds_.reset(); }
+  bool HasCodeBounds() const { return code_bounds_.has_value(); }
+  std::optional<std::pair<uint32_t, uint32_t>> GetCodeBounds() const { return code_bounds_; }
+
+  void SetInterceptExternalCalls(bool enable) { intercept_external_calls_ = enable; }
+  bool GetInterceptExternalCalls() const { return intercept_external_calls_; }
+
   // Memory address translation to physical RDRAM index.
   std::optional<size_t> VramToPhysical(uint32_t vram) const;
 
@@ -168,8 +197,14 @@ class MipsEmulator {
   bool in_delay_slot_ = false;
   std::optional<uint32_t> delayed_branch_target_;
   bool delay_slot_is_return_ = false;
+  bool delay_slot_is_call_ = false;
+  int call_link_reg_ = 31;
+
+  bool intercept_external_calls_ = false;
+  std::optional<std::pair<uint32_t, uint32_t>> code_bounds_;
 
   std::vector<MemoryWrite> write_log_;
+  std::vector<ExternalCall> call_log_;
 };
 
 inline std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {

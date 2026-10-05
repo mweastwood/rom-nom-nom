@@ -245,5 +245,92 @@ TEST(DifferentialFuzzerTest, PointerPayloadBufferFuzzing) {
   }
 }
 
+TEST(DifferentialFuzzerTest, ExternalCallInterceptionBothMatch) {
+  DifferentialFuzzer fuzzer;
+
+  // Target:
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 16($sp)
+  // 08: addiu $a0, $zero, 42
+  // 0C: jal   0x80050000 (external call, returns v0=0)
+  // 10: addiu $a1, $zero, 10
+  // 14: addu  $v0, $v0, $a1
+  // 18: lw    $ra, 16($sp)
+  // 1C: addiu $sp, $sp, 24
+  // 20: jr    $ra
+  // 24: nop
+  std::vector<uint32_t> target = {
+      0x27BDFFE8,  // addiu $sp, $sp, -24
+      0xAFBF0010,  // sw    $ra, 16($sp)
+      0x2404002A,  // addiu $a0, $zero, 42
+      0x0C014000,  // jal   0x80050000
+      0x2405000A,  // addiu $a1, $zero, 10
+      0x00451021,  // addu  $v0, $v0, $a1
+      0x8FBF0010,  // lw    $ra, 16($sp)
+      0x27BD0018,  // addiu $sp, $sp, 24
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: identical call to 0x80050000, slight instruction order variation
+  std::vector<uint32_t> candidate = {
+      0x27BDFFE8,  // addiu $sp, $sp, -24
+      0xAFBF0010,  // sw    $ra, 16($sp)
+      0x2405000A,  // addiu $a1, $zero, 10
+      0x0C014000,  // jal   0x80050000
+      0x2404002A,  // addiu $a0, $zero, 42 (delay slot)
+      0x00451021,  // addu  $v0, $v0, $a1
+      0x8FBF0010,  // lw    $ra, 16($sp)
+      0x27BD0018,  // addiu $sp, $sp, 24
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.v0, 10u);
+  EXPECT_EQ(comp.candidate_result.v0, 10u);
+  ASSERT_EQ(comp.target_result.call_log.size(), 1u);
+  ASSERT_EQ(comp.candidate_result.call_log.size(), 1u);
+}
+
+TEST(DifferentialFuzzerTest, DetectsExternalCallMismatchWhenCheckEnabled) {
+  DifferentialFuzzer::Options opts;
+  opts.check_external_calls = true;
+  DifferentialFuzzer fuzzer(opts);
+
+  // Target calls 0x80050000
+  std::vector<uint32_t> target = {
+      0x27BDFFE8,  // addiu $sp, $sp, -24
+      0xAFBF0010,  // sw    $ra, 16($sp)
+      0x0C014000,  // jal   0x80050000
+      0x00000000,  // nop
+      0x8FBF0010,  // lw    $ra, 16($sp)
+      0x27BD0018,  // addiu $sp, $sp, 24
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate calls 0x80060000 (different target address!)
+  std::vector<uint32_t> candidate = {
+      0x27BDFFE8,  // addiu $sp, $sp, -24
+      0xAFBF0010,  // sw    $ra, 16($sp)
+      0x0C018000,  // jal   0x80060000 (0x00060000 >> 2 = 0x00018000)
+      0x00000000,  // nop
+      0x8FBF0010,  // lw    $ra, 16($sp)
+      0x27BD0018,  // addiu $sp, $sp, 24
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+
+  EXPECT_EQ(comp.result, EquivalenceResult::kCallMismatch);
+  EXPECT_NE(comp.failure_reason.find("Call log mismatch"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

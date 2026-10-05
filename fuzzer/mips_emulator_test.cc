@@ -1255,5 +1255,91 @@ TEST(MipsEmulatorTest, DoublePrecisionOddRegistersRaiseInvalidOpcode) {
   EXPECT_EQ(res.status, ExecutionStatus::kInvalidOpcode);
 }
 
+TEST(MipsEmulatorTest, JalExternalCallInterception) {
+  MipsEmulator emu;
+  emu.SetRegister(Register::kSp, 0x801F0000);
+  emu.SetInterceptExternalCalls(true);
+  emu.SetCodeBounds(0x80001000, 0x80001028);
+
+  std::vector<uint32_t> code = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x2404002A,  // 08: addiu $a0, $zero, 42
+      0x0C014000,  // 0C: jal   0x80050000 (external call)
+      0x24050063,  // 10: addiu $a1, $zero, 99 (delay slot)
+      0x00451021,  // 14: addu  $v0, $v0, $a1 (v0 was 0, so v0 becomes 99)
+      0x8FBF0010,  // 18: lw    $ra, 16($sp)
+      0x27BD0018,  // 1C: addiu $sp, $sp, 24
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 99u);
+  ASSERT_EQ(res.call_log.size(), 1u);
+  EXPECT_EQ(res.call_log[0].target_address, 0x80050000u);
+  EXPECT_EQ(res.call_log[0].a0, 42u);
+  EXPECT_EQ(res.call_log[0].a1, 99u);
+}
+
+TEST(MipsEmulatorTest, JalrExternalCallInterception) {
+  MipsEmulator emu;
+  emu.SetRegister(Register::kSp, 0x801F0000);
+  emu.SetInterceptExternalCalls(true);
+  emu.SetCodeBounds(0x80001000, 0x80001028);
+
+  std::vector<uint32_t> code = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x3C088006,  // 08: lui   $t0, 0x8006
+      0x2404007B,  // 0C: addiu $a0, $zero, 123
+      0x0100F809,  // 10: jalr  $t0 (external call to 0x80060000)
+      0x240501C8,  // 14: addiu $a1, $zero, 456 (delay slot)
+      0x8FBF0010,  // 18: lw    $ra, 16($sp)
+      0x27BD0018,  // 1C: addiu $sp, $sp, 24
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  ASSERT_EQ(res.call_log.size(), 1u);
+  EXPECT_EQ(res.call_log[0].target_address, 0x80060000u);
+  EXPECT_EQ(res.call_log[0].a0, 123u);
+  EXPECT_EQ(res.call_log[0].a1, 456u);
+}
+
+TEST(MipsEmulatorTest, JalInternalCallNotIntercepted) {
+  MipsEmulator emu;
+  emu.SetRegister(Register::kSp, 0x801F0000);
+  emu.SetInterceptExternalCalls(true);
+  emu.SetCodeBounds(0x80001000, 0x80001028);
+
+  std::vector<uint32_t> code = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x0C000407,  // 08: jal   0x8000101C (internal call to local helper)
+      0x2404000A,  // 0C: addiu $a0, $zero, 10
+      0x8FBF0010,  // 10: lw    $ra, 16($sp)
+      0x27BD0018,  // 14: addiu $sp, $sp, 24
+      0x03E00008,  // 18: jr    $ra
+      0x24820005,  // 1C: addiu $v0, $a0, 5 (helper: returns a0 + 5)
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 15u);
+  EXPECT_TRUE(res.call_log.empty());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

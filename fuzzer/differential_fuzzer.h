@@ -39,6 +39,7 @@ enum class EquivalenceResult {
   kReturnValueMismatch,
   kMemoryWriteMismatch,
   kCalleeSavedMismatch,
+  kCallMismatch,
   kExecutionError,
 };
 
@@ -61,6 +62,8 @@ class DifferentialFuzzer {
     bool check_v1 = false;
     bool check_f0 = false;
     bool check_f0_double = false;
+    bool intercept_external_calls = true;
+    bool check_external_calls = false;
   };
 
   DifferentialFuzzer() = default;

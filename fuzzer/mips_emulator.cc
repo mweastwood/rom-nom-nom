@@ -29,7 +29,10 @@ void MipsEmulator::Reset() {
   in_delay_slot_ = false;
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;
+  delay_slot_is_call_ = false;
+  call_link_reg_ = 31;
   write_log_.clear();
+  call_log_.clear();
 }
 
 void MipsEmulator::SetFpBits(FpRegister reg, uint32_t bits) {
@@ -183,6 +186,8 @@ ExecutionStatus MipsEmulator::Step() {
 
   bool executing_delay_slot = in_delay_slot_;
   bool delayed_is_return = delay_slot_is_return_;
+  bool delayed_is_call = delay_slot_is_call_;
+  int delayed_call_link = call_link_reg_;
   std::optional<uint32_t> next_branch_target = delayed_branch_target_;
 
   // Advance default next PC
@@ -222,6 +227,7 @@ ExecutionStatus MipsEmulator::Step() {
         case 0x08:  // JR
           if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
           in_delay_slot_ = true;
+          delay_slot_is_call_ = false;
           if (gpr_[rs] == kReturnAddressSentinel) {
             delay_slot_is_return_ = true;
           } else {
@@ -237,6 +243,8 @@ ExecutionStatus MipsEmulator::Step() {
           }
           SetGpr(link_reg, current_pc + 8);
           in_delay_slot_ = true;
+          delay_slot_is_call_ = true;
+          call_link_reg_ = link_reg;
           delayed_branch_target_ = gpr_[rs];
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
@@ -383,10 +391,13 @@ ExecutionStatus MipsEmulator::Step() {
           if (rs == 31) return ExecutionStatus::kInvalidOpcode;
           SetGpr(31, current_pc + 8);
           in_delay_slot_ = true;
+          call_link_reg_ = 31;
           if (static_cast<int32_t>(gpr_[rs]) < 0) {
             delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+            delay_slot_is_call_ = true;
           } else {
             delayed_branch_target_ = current_pc + 8;
+            delay_slot_is_call_ = false;
           }
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
@@ -394,10 +405,13 @@ ExecutionStatus MipsEmulator::Step() {
           if (rs == 31) return ExecutionStatus::kInvalidOpcode;
           SetGpr(31, current_pc + 8);
           in_delay_slot_ = true;
+          call_link_reg_ = 31;
           if (static_cast<int32_t>(gpr_[rs]) >= 0) {
             delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+            delay_slot_is_call_ = true;
           } else {
             delayed_branch_target_ = current_pc + 8;
+            delay_slot_is_call_ = false;
           }
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
@@ -408,6 +422,7 @@ ExecutionStatus MipsEmulator::Step() {
     case 0x02:  // J
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
       in_delay_slot_ = true;
+      delay_slot_is_call_ = false;
       delayed_branch_target_ = (current_pc & 0xF0000000) | (target << 2);
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
@@ -415,6 +430,8 @@ ExecutionStatus MipsEmulator::Step() {
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
       SetGpr(31, current_pc + 8);
       in_delay_slot_ = true;
+      delay_slot_is_call_ = true;
+      call_link_reg_ = 31;
       delayed_branch_target_ = (current_pc & 0xF0000000) | (target << 2);
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
@@ -886,11 +903,29 @@ ExecutionStatus MipsEmulator::Step() {
   if (executing_delay_slot) {
     in_delay_slot_ = false;
     delayed_branch_target_.reset();
+    delay_slot_is_call_ = false;
     if (delayed_is_return) {
       delay_slot_is_return_ = false;
       return ExecutionStatus::kHaltedReturn;
     }
-    if (next_branch_target.has_value()) {
+    if (intercept_external_calls_ && delayed_is_call && next_branch_target.has_value() &&
+        code_bounds_.has_value() &&
+        (*next_branch_target < code_bounds_->first ||
+         *next_branch_target >= code_bounds_->second) &&
+        VramToPhysical(*next_branch_target).has_value() && ((*next_branch_target & 3) == 0)) {
+      call_log_.push_back(ExternalCall{
+          .target_address = *next_branch_target,
+          .a0 = gpr_[4],
+          .a1 = gpr_[5],
+          .a2 = gpr_[6],
+          .a3 = gpr_[7],
+      });
+      pc_ = gpr_[delayed_call_link];
+      gpr_[2] = 0;  // $v0 = 0
+      gpr_[3] = 0;  // $v1 = 0
+      SetFpRegister(FpRegister::kF0, 0.0f);
+      SetFpDouble(FpRegister::kF0, 0.0);
+    } else if (next_branch_target.has_value()) {
       pc_ = *next_branch_target;
     } else {
       pc_ = advanced_pc;
@@ -908,6 +943,9 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
   in_delay_slot_ = false;
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;
+  delay_slot_is_call_ = false;
+  call_link_reg_ = 31;
+  call_log_.clear();
 
   // Set return address sentinel if unset
   if (gpr_[31] == 0) {
@@ -926,6 +964,7 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.f0_double = GetFpDouble(FpRegister::kF0);
       result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
       result.write_log = write_log_;
+      result.call_log = call_log_;
       return result;
     }
     if (status != ExecutionStatus::kRunning) {
@@ -937,6 +976,7 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.f0_double = GetFpDouble(FpRegister::kF0);
       result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
       result.write_log = write_log_;
+      result.call_log = call_log_;
       result.error_message = absl::StrFormat("Execution halted with status %d at PC 0x%08X",
                                              static_cast<int>(status), pc_);
       return result;
@@ -951,6 +991,7 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
   result.f0_double = GetFpDouble(FpRegister::kF0);
   result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
   result.write_log = write_log_;
+  result.call_log = call_log_;
   result.error_message = absl::StrFormat("Exceeded maximum step limit of %llu", max_steps);
   return result;
 }

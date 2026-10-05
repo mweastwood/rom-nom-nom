@@ -131,6 +131,30 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
     comp->result = EquivalenceResult::kEquivalent;
   }
 
+  if (comp->result == EquivalenceResult::kEquivalent && options_.check_external_calls) {
+    if (comp->target_result.call_log.size() != comp->candidate_result.call_log.size()) {
+      comp->result = EquivalenceResult::kCallMismatch;
+      comp->failure_reason = absl::StrFormat(
+          "Call log size mismatch: target logged %zu calls vs candidate logged %zu calls",
+          comp->target_result.call_log.size(), comp->candidate_result.call_log.size());
+    } else {
+      for (size_t i = 0; i < comp->target_result.call_log.size(); ++i) {
+        const auto& tc = comp->target_result.call_log[i];
+        const auto& cc = comp->candidate_result.call_log[i];
+        if (!(tc == cc)) {
+          comp->result = EquivalenceResult::kCallMismatch;
+          comp->failure_reason = absl::StrFormat(
+              "Call log mismatch at call #%zu: target(addr=0x%08X, a0=0x%X, a1=0x%X, a2=0x%X, "
+              "a3=0x%X) vs "
+              "candidate(addr=0x%08X, a0=0x%X, a1=0x%X, a2=0x%X, a3=0x%X)",
+              i, tc.target_address, tc.a0, tc.a1, tc.a2, tc.a3, cc.target_address, cc.a0, cc.a1,
+              cc.a2, cc.a3);
+          break;
+        }
+      }
+    }
+  }
+
   // Roll back memory writes recorded during execution
   target_emu_.RollbackWrites(target_code, target_vram);
   candidate_emu_.RollbackWrites(candidate_code, candidate_vram);
@@ -169,8 +193,20 @@ DifferentialComparison DifferentialFuzzer::Compare(const std::vector<uint32_t>& 
     return comp;
   }
 
+  if (options_.intercept_external_calls) {
+    target_emu_.SetInterceptExternalCalls(true);
+    target_emu_.SetCodeBounds(
+        target_vram, target_vram + static_cast<uint32_t>(target_code.size() * sizeof(uint32_t)));
+    candidate_emu_.SetInterceptExternalCalls(true);
+    candidate_emu_.SetCodeBounds(
+        candidate_vram,
+        candidate_vram + static_cast<uint32_t>(candidate_code.size() * sizeof(uint32_t)));
+  }
+
   EvaluateComparison(&comp, target_code, target_vram, candidate_code, candidate_vram, test_case);
 
+  target_emu_.ClearCodeBounds();
+  candidate_emu_.ClearCodeBounds();
   target_emu_.ClearMemory(target_vram, target_code.size() * sizeof(uint32_t));
   candidate_emu_.ClearMemory(candidate_vram, candidate_code.size() * sizeof(uint32_t));
 
@@ -204,6 +240,16 @@ std::vector<DifferentialComparison> DifferentialFuzzer::RunBattery(
     return results;
   }
 
+  if (options_.intercept_external_calls) {
+    target_emu_.SetInterceptExternalCalls(true);
+    target_emu_.SetCodeBounds(
+        target_vram, target_vram + static_cast<uint32_t>(target_code.size() * sizeof(uint32_t)));
+    candidate_emu_.SetInterceptExternalCalls(true);
+    candidate_emu_.SetCodeBounds(
+        candidate_vram,
+        candidate_vram + static_cast<uint32_t>(candidate_code.size() * sizeof(uint32_t)));
+  }
+
   for (const auto& tc : test_cases) {
     DifferentialComparison comp;
     comp.test_case = tc;
@@ -214,6 +260,8 @@ std::vector<DifferentialComparison> DifferentialFuzzer::RunBattery(
     }
   }
 
+  target_emu_.ClearCodeBounds();
+  candidate_emu_.ClearCodeBounds();
   target_emu_.ClearMemory(target_vram, target_code.size() * sizeof(uint32_t));
   candidate_emu_.ClearMemory(candidate_vram, candidate_code.size() * sizeof(uint32_t));
 
