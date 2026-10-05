@@ -126,5 +126,33 @@ TEST(EquivalenceRunnerTest, WholeModuleBatchEvaluation) {
   EXPECT_NE(report.find("FuncFuzzProven"), std::string::npos);
 }
 
+TEST(EquivalenceRunnerTest, CandidateVramRelocationSupport) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "RelocatedBranch";
+  target.vram = 0x80001000;
+  target.candidate_vram = 0x80005000;
+
+  target.target_words = {
+      0x10800002,  // beqz $a0, +2
+      0x24020001,  // addiu $v0, $zero, 1
+      0x24020002,  // addiu $v0, $zero, 2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  target.candidate_words = {
+      0x10800002,  // beqz $a0, +2
+      0x34020001,  // ori $v0, $zero, 1
+      0x34020002,  // ori $v0, $zero, 2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kFuzzProvenEquivalent);
+  EXPECT_FALSE(res.counterexample.has_value());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

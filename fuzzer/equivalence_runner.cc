@@ -55,8 +55,9 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
 
   res.fuzz_vectors_evaluated = test_cases.size();
 
+  uint32_t cand_vram = target.candidate_vram != 0 ? target.candidate_vram : target.vram;
   auto comparisons = fuzzer_.RunBattery(target.target_words, target.vram, target.candidate_words,
-                                        target.vram, test_cases);
+                                        cand_vram, test_cases);
 
   for (size_t i = 0; i < comparisons.size(); ++i) {
     const auto& comp = comparisons[i];

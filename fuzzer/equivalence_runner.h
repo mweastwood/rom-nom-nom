@@ -16,6 +16,7 @@ namespace rom_nom_nom::fuzzer {
 struct FunctionEquivalenceTarget {
   std::string name;
   uint32_t vram = 0;
+  uint32_t candidate_vram = 0;
   std::vector<uint32_t> target_words;
   std::vector<uint32_t> candidate_words;
 };
