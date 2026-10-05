@@ -132,7 +132,8 @@ std::string StructuredRegion::ToString(int indent) const {
         if (!children.empty() && children[0]) {
           out += children[0]->ToString(indent + 1);
         }
-        out += ind + "} while (block_" + std::to_string(loop_header) + ");\n";
+        uint32_t cond_id = condition_block_id != 0 ? condition_block_id : loop_header;
+        out += ind + "} while (block_" + std::to_string(cond_id) + ");\n";
       } else if (loop_type == LoopType::kInfinite) {
         out = ind + "while (1) {\n";
         if (!children.empty() && children[0]) {
@@ -202,7 +203,6 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::Structure(
 std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
     const Loop* loop, std::optional<uint32_t> follow, const Loop* parent_loop) {
   auto loop_region = CreateLoop(loop->type, loop->header);
-  visited_.insert(loop->header);
 
   std::optional<uint32_t> loop_follow;
   if (loop->exit_blocks.size() == 1) {
@@ -212,6 +212,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
   }
 
   if (loop->type == LoopType::kWhile) {
+    loop_region->condition_block_id = loop->header;
     const auto* header_block = cfg_->GetBlock(loop->header);
     if (header_block != nullptr && header_block->successors.size() == 2) {
       uint32_t body_start = 0;
@@ -223,6 +224,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
       }
 
       if (body_start != 0) {
+        visited_.insert(loop->header);
         auto body = StructureRegion(body_start, loop->header, loop);
         if (body) {
           loop_region->children.push_back(std::move(body));
@@ -230,8 +232,24 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
       }
     }
   } else if (loop->type == LoopType::kDoWhile) {
+    uint32_t latch_id = 0;
+    for (const auto& edge : loop->exit_edges) {
+      if (loop->IsLatch(edge.from_block_id)) {
+        latch_id = edge.from_block_id;
+        break;
+      }
+    }
+    if (latch_id == 0 && !loop->latches.empty()) {
+      latch_id = loop->latches[0];
+    }
+    if (latch_id == 0) {
+      latch_id = loop->header;
+    }
+    loop_region->condition_block_id = latch_id;
+
     if (loop->blocks.size() == 1) {
       loop_region->children.push_back(CreateBlock(loop->header));
+      visited_.insert(loop->header);
     } else {
       auto body = StructureRegion(loop->header, loop_follow, loop);
       if (body) {
@@ -244,6 +262,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
     if (header_block != nullptr && header_block->successors.size() == 1 &&
         header_block->successors[0] == loop->header) {
       loop_region->children.push_back(CreateBlock(loop->header));
+      visited_.insert(loop->header);
     } else {
       auto body = StructureRegion(loop->header, loop_follow, loop);
       if (body) {
@@ -273,11 +292,15 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
 
   // Handle loop back-edges and exits
   if (current_loop != nullptr) {
-    if (entry == current_loop->header) {
+    if (visited_.contains(entry) && entry == current_loop->header) {
       return CreateContinue(entry);
     }
     if (current_loop->IsExitBlock(entry)) {
       return CreateBreak(entry);
+    }
+    if (current_loop->type == LoopType::kDoWhile && current_loop->IsLatch(entry)) {
+      visited_.insert(entry);
+      return CreateBlock(entry);
     }
   }
 

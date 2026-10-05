@@ -640,5 +640,58 @@ TEST(AstConverterTest, BranchLikelyDelaySlotNullification) {
   EXPECT_THAT(code, HasSubstr("arg1 = 256;"));
 }
 
+TEST(AstConverterTest, MultiBlockDoWhileLoopConversion) {
+  // Multi-block do-while loop:
+  // 0x00: j 0x80020008
+  // 0x04: nop
+  // Header:
+  // 0x08: addiu $v0, $v0, 1
+  // 0x0C: j 0x80020014
+  // 0x10: nop
+  // Latch:
+  // 0x14: addiu $a0, $a0, -1
+  // 0x18: bne $a0, $zero, -4 (0x80020008)
+  // 0x1C: nop
+  // Exit:
+  // 0x20: jr $ra
+  // 0x24: nop
+  std::vector<uint32_t> words = {
+      0x08008002,  // 0x00: j 0x80020008
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x08008005,  // 0x0C: j 0x80020014
+      0x00000000,  // 0x10: nop
+      0x2484FFFF,  // 0x14: addiu $a0, $a0, -1
+      0x1480FFFB,  // 0x18: bne $a0, $zero, -5 (to 0x08)
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20: jr $ra
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "CountDown";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("do {"));
+  EXPECT_THAT(code, HasSubstr("v0 = (v0 + 1);"));
+  EXPECT_THAT(code, HasSubstr("arg0 = (arg0 - 1);"));
+  EXPECT_THAT(code, HasSubstr("while ((arg0 != 0));"));
+  EXPECT_THAT(code, Not(HasSubstr("continue;")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

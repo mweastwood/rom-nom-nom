@@ -550,9 +550,11 @@ class ConverterContext {
           if (!region.children.empty() && region.children[0]) {
             ConvertRegion(*region.children[0], loop_body.get());
           }
-          const auto* header_block = cfg_.GetBlock(region.loop_header);
-          auto cond = header_block != nullptr
-                          ? AstConverter::ExtractBranchCondition(*header_block, false)
+          uint32_t cond_block_id =
+              region.condition_block_id != 0 ? region.condition_block_id : region.loop_header;
+          const auto* cond_block = cfg_.GetBlock(cond_block_id);
+          auto cond = cond_block != nullptr
+                          ? AstConverter::ExtractBranchCondition(*cond_block, false)
                           : CExpression::Integer(1);
           target_block->AddStatement(CStatement::DoWhile(std::move(loop_body), std::move(cond)));
         } else if (region.loop_type == LoopType::kInfinite) {

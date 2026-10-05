@@ -216,6 +216,55 @@ TEST(ControlFlowStructurerTest, DoWhileLoop) {
   EXPECT_THAT(s, HasSubstr("block_2"));
 }
 
+TEST(ControlFlowStructurerTest, MultiBlockDoWhileLoop) {
+  // Multi-block do-while loop:
+  // Block 0 (Entry):
+  // 0x00: beq $zero, $zero, +1 (to Header at 0x08)
+  // 0x04: nop
+  // Block 1 (Header):
+  // 0x08: addiu $v0, $v0, 1
+  // 0x0C: nop (fallthrough to Latch at 0x10)
+  // Block 2 (Latch):
+  // 0x10: addiu $a0, $a0, -1
+  // 0x14: bne $a0, $zero, -4 (target Header at 0x08)
+  // 0x18: nop (delay slot, fallthrough to Exit at 0x1C)
+  // Block 3 (Exit):
+  // 0x1C: jr $ra
+  // 0x20: nop
+  std::vector<uint32_t> words = {
+      0x08000002,  // 0x00: j 0x80000008 (target Header at 0x08)
+      0x00000000,  // 0x04: nop
+      0x08000004,  // 0x08: j 0x80000010 (target Latch at 0x10)
+      0x00000000,  // 0x0C: nop
+      0x2484FFFF,  // 0x10: addiu $a0, $a0, -1 (Latch)
+      0x1480FFFC,  // 0x14: bne $a0, $zero, -4 (target Header at 0x08)
+      0x00000000,  // 0x18: nop (delay slot, fallthrough to Exit at 0x1C)
+      0x03E00008,  // 0x1C: jr $ra
+      0x00000000,  // 0x20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("block_0"));
+  EXPECT_THAT(s, HasSubstr("do {"));
+  EXPECT_THAT(s, HasSubstr("block_1"));
+  EXPECT_THAT(s, HasSubstr("block_2"));
+  EXPECT_THAT(s, HasSubstr("} while (block_2);"));
+  EXPECT_THAT(s, HasSubstr("block_3"));
+  EXPECT_THAT(s, Not(HasSubstr("continue")));
+}
+
 TEST(ControlFlowStructurerTest, StructureSwitchStatement) {
   std::vector<Instruction> instructions;
 
