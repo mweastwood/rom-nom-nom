@@ -14,6 +14,7 @@
 #include "lifter/control_flow_graph.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/expression_builder.h"
+#include "lifter/register_tracker.h"
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
@@ -482,7 +483,8 @@ class ConverterContext {
                         : CExpression::Integer(1);
 
         auto then_body = std::make_unique<CompoundStatement>();
-        if (has_branch_likely && !region.invert_condition) {
+        auto else_body = std::make_unique<CompoundStatement>();
+        if (has_branch_likely) {
           const auto& delay_inst = cond_block->instructions.back();
           auto delay_stmts =
               ExpressionBuilder::LiftInstructions(absl::MakeSpan(&delay_inst, 1), symbol_index_,
@@ -490,7 +492,11 @@ class ConverterContext {
           for (auto& s : delay_stmts) {
             auto cs = AstConverter::ConvertStatement(s);
             if (cs != nullptr) {
-              then_body->AddStatement(std::move(cs));
+              if (region.invert_condition) {
+                else_body->AddStatement(std::move(cs));
+              } else {
+                then_body->AddStatement(std::move(cs));
+              }
             }
           }
         }
@@ -498,7 +504,13 @@ class ConverterContext {
         if (!region.children.empty() && region.children[0]) {
           ConvertRegion(*region.children[0], then_body.get());
         }
-        target_block->AddStatement(CStatement::If(std::move(cond), std::move(then_body)));
+
+        if (!else_body->Statements().empty()) {
+          target_block->AddStatement(
+              CStatement::If(std::move(cond), std::move(then_body), std::move(else_body)));
+        } else {
+          target_block->AddStatement(CStatement::If(std::move(cond), std::move(then_body)));
+        }
         break;
       }
 
@@ -519,6 +531,7 @@ class ConverterContext {
                         : CExpression::Integer(1);
 
         auto then_body = std::make_unique<CompoundStatement>();
+        auto else_body = std::make_unique<CompoundStatement>();
         if (has_branch_likely) {
           const auto& delay_inst = cond_block->instructions.back();
           auto delay_stmts =
@@ -527,12 +540,15 @@ class ConverterContext {
           for (auto& s : delay_stmts) {
             auto cs = AstConverter::ConvertStatement(s);
             if (cs != nullptr) {
-              then_body->AddStatement(std::move(cs));
+              if (region.invert_condition) {
+                else_body->AddStatement(std::move(cs));
+              } else {
+                then_body->AddStatement(std::move(cs));
+              }
             }
           }
         }
 
-        auto else_body = std::make_unique<CompoundStatement>();
         if (region.children.size() > 0 && region.children[0]) {
           ConvertRegion(*region.children[0], then_body.get());
         }
@@ -546,17 +562,37 @@ class ConverterContext {
 
       case RegionType::kLoop: {
         if (region.loop_type == LoopType::kDoWhile) {
+          uint32_t cond_block_id =
+              region.condition_block_id != 0 ? region.condition_block_id : region.loop_header;
+          bool decouple_delay =
+              ShouldDecoupleLoopConditionDelaySlot(cond_block_id, region.loop_header);
+          if (decouple_delay) {
+            omit_last_instruction_blocks_.insert(cond_block_id);
+          }
+
           auto loop_body = std::make_unique<CompoundStatement>();
           if (!region.children.empty() && region.children[0]) {
             ConvertRegion(*region.children[0], loop_body.get());
           }
-          uint32_t cond_block_id =
-              region.condition_block_id != 0 ? region.condition_block_id : region.loop_header;
+
           const auto* cond_block = cfg_.GetBlock(cond_block_id);
           auto cond = cond_block != nullptr
                           ? AstConverter::ExtractBranchCondition(*cond_block, false)
                           : CExpression::Integer(1);
           target_block->AddStatement(CStatement::DoWhile(std::move(loop_body), std::move(cond)));
+
+          if (decouple_delay && cond_block != nullptr && cond_block->instructions.size() >= 2) {
+            const auto& delay_inst = cond_block->instructions.back();
+            auto delay_stmts =
+                ExpressionBuilder::LiftInstructions(absl::MakeSpan(&delay_inst, 1), symbol_index_,
+                                                    split_config_, function_parameter_counts_);
+            for (auto& s : delay_stmts) {
+              auto cs = AstConverter::ConvertStatement(s);
+              if (cs != nullptr) {
+                target_block->AddStatement(std::move(cs));
+              }
+            }
+          }
         } else if (region.loop_type == LoopType::kInfinite) {
           auto loop_body = std::make_unique<CompoundStatement>();
           if (!region.children.empty() && region.children[0]) {
@@ -646,6 +682,101 @@ class ConverterContext {
     }
   }
 
+  bool ShouldDecoupleLoopConditionDelaySlot(uint32_t cond_block_id,
+                                            uint32_t header_block_id) const {
+    const auto* cond_block = cfg_.GetBlock(cond_block_id);
+    if (cond_block == nullptr || cond_block->instructions.size() < 2) {
+      return false;
+    }
+    const auto* term = cond_block->Terminator();
+    if (term == nullptr || !term->IsBranch() || term->IsBranchLikely()) {
+      return false;
+    }
+    const auto& delay_inst = cond_block->instructions.back();
+    if (delay_inst.IsNop()) {
+      return false;
+    }
+
+    RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+    if (delay_ud.gpr_defs.empty()) {
+      return false;
+    }
+
+    // Check 1: Does delay_inst define a register used by the branch condition or its folded
+    // comparison?
+    absl::flat_hash_set<Register> cond_regs;
+    if (term->rs.has_value() && *term->rs != Register::kZero) {
+      cond_regs.insert(*term->rs);
+    }
+    if (term->rt.has_value() && *term->rt != Register::kZero) {
+      cond_regs.insert(*term->rt);
+    }
+    auto folded_comp = ExpressionBuilder::FindFoldedComparison(cond_block->instructions);
+    if (folded_comp.has_value() &&
+        folded_comp->instruction_index < cond_block->instructions.size()) {
+      const auto& def_inst = cond_block->instructions[folded_comp->instruction_index];
+      RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
+      for (Register r : def_ud.gpr_uses) {
+        if (r != Register::kZero) {
+          cond_regs.insert(r);
+        }
+      }
+      for (Register r : def_ud.gpr_defs) {
+        if (r != Register::kZero) {
+          cond_regs.insert(r);
+        }
+      }
+    }
+    for (Register r : delay_ud.gpr_defs) {
+      if (cond_regs.contains(r)) {
+        return true;
+      }
+    }
+
+    // Check 2: Are all registers defined by delay_inst killed at header_block before being used?
+    const auto* header_block = cfg_.GetBlock(header_block_id);
+    if (header_block != nullptr) {
+      bool all_killed = true;
+      for (Register def_reg : delay_ud.gpr_defs) {
+        if (def_reg == Register::kZero) continue;
+        bool killed = false;
+        for (const auto& inst : header_block->instructions) {
+          RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+          bool used = false;
+          for (Register u : inst_ud.gpr_uses) {
+            if (u == def_reg) {
+              used = true;
+              break;
+            }
+          }
+          if (used) {
+            break;
+          }
+          bool defined = false;
+          for (Register d : inst_ud.gpr_defs) {
+            if (d == def_reg) {
+              defined = true;
+              break;
+            }
+          }
+          if (defined) {
+            killed = true;
+            break;
+          }
+        }
+        if (!killed) {
+          all_killed = false;
+          break;
+        }
+      }
+      if (all_killed) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   void EmitBlockStatements(uint32_t block_id, CompoundStatement* target_block,
                            bool omit_last_instruction = false) {
     if (emitted_blocks_.contains(block_id)) {
@@ -663,8 +794,9 @@ class ConverterContext {
       return;
     }
 
+    bool should_omit = omit_last_instruction || omit_last_instruction_blocks_.contains(block_id);
     std::vector<LiftedStatement> lifted_stmts;
-    if (omit_last_instruction && block->instructions.size() > 1) {
+    if (should_omit && block->instructions.size() > 1) {
       absl::Span<const Instruction> inst_span(block->instructions.data(),
                                               block->instructions.size() - 1);
       lifted_stmts = ExpressionBuilder::LiftInstructions(inst_span, symbol_index_, split_config_,
@@ -698,6 +830,7 @@ class ConverterContext {
   absl::flat_hash_set<uint32_t> goto_targets_;
   absl::flat_hash_set<uint32_t> emitted_labels_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
+  absl::flat_hash_set<uint32_t> omit_last_instruction_blocks_;
 };
 
 }  // namespace

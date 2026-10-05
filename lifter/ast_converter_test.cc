@@ -761,5 +761,90 @@ TEST(AstConverterTest, DeclaresStackBufferDefaultSizeWhenNoPrologueAdjustment) {
   EXPECT_THAT(code, Not(HasSubstr("s32 sp;")));
 }
 
+TEST(AstConverterTest, DoWhileLoopDelaySlotDecoupling) {
+  // Pattern matching WaitVsyncFrames inner busy-wait loop:
+  // 00: lui   $v0, 0x8020
+  // 04: lbu   $v0, 21000($v0)
+  // 08: beqz  $v0, 0x00 (.L_loop)
+  // 0C: addu  $v0, $v1, $zero  (delay slot defines $v0, but $v0 is killed at 0x00)
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> words = {
+      0x3C028020,  // 00: lui   $v0, 0x8020
+      0x90425208,  // 04: lbu   $v0, 21000($v0)
+      0x1040FFFD,  // 08: beqz  $v0, -3 words -> 0x00
+      0x00601021,  // 0C: addu  $v0, $v1, $zero  (delay slot)
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "WaitVsyncBusyWait";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // The loop body should contain the load, but NOT the delay slot assignment v0 = v1.
+  EXPECT_THAT(code, HasSubstr("do {"));
+  EXPECT_THAT(code, HasSubstr("while ((v0 == 0));"));
+  // v0 = v1 must be emitted AFTER the do-while loop!
+  EXPECT_THAT(code, HasSubstr("} while ((v0 == 0));\n    v0 = v1;"));
+}
+
+TEST(AstConverterTest, BranchLikelyInvertedIfElseDelaySlotPreserved) {
+  // Pattern matching AudioVoiceSetVolume:
+  // 00: andi  $v0, $a0, 1
+  // 04: beql  $v0, $zero, 0x10 (.L_join)  (skips to join on zero, incrementing $a2 in delay slot)
+  // 08: addiu $a2, $a2, 1                (delay slot)
+  // 0C: sw    $a1, 0($a0)                (then body)
+  // 10: addu  $v0, $a2, $zero            (.L_join)
+  // 14: jr    $ra
+  // 18: nop
+  std::vector<uint32_t> words = {
+      0x30820001,  // 00: andi  $v0, $a0, 1
+      0x50400002,  // 04: beql  $v0, $zero, +2 -> 0x10
+      0x24C60001,  // 08: addiu $a2, $a2, 1  (delay slot)
+      0xAC850000,  // 0C: sw    $a1, 0($a0)
+      0x00C01021,  // 10: addu  $v0, $a2, $zero
+      0x03E00008,  // 14: jr    $ra
+      0x00000000,  // 18: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "BranchLikelyInverted";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // Condition is inverted to ((arg0 & 1) != 0)
+  EXPECT_THAT(code, HasSubstr("if (((arg0 & 1) != 0)) {"));
+  // Inside the else block, arg2 should be incremented (the taken branch-likely delay slot)
+  EXPECT_THAT(code, HasSubstr("} else {\n        arg2 = (arg2 + 1);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
