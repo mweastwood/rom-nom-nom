@@ -376,7 +376,7 @@ entries {
   std::ifstream symbols_input_stream(out_dir / "lifted_symbols.ld");
   std::string symbols_content((std::istreambuf_iterator<char>(symbols_input_stream)),
                               std::istreambuf_iterator<char>());
-  EXPECT_THAT(symbols_content, HasSubstr("func_80054320 = 0x80054320;"));
+  EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(func_80054320 = 0x80054320);"));
 
   EXPECT_TRUE(std::filesystem::exists(out_dir / "mod_alpha.c"));
 

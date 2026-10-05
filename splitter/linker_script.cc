@@ -231,7 +231,8 @@ std::string LinkerScriptGenerator::GenerateSymbolsScript(const SymbolIndex& symb
   std::string text;
   absl::StrAppend(&text, "/* Auto-generated global symbol definitions */\n");
   for (const auto* entry : symbols.SortedEntries()) {
-    absl::StrAppend(&text, absl::StrFormat("%s = 0x%08X;\n", entry->name(), entry->address()));
+    absl::StrAppend(&text,
+                    absl::StrFormat("PROVIDE(%s = 0x%08X);\n", entry->name(), entry->address()));
   }
   return text;
 }

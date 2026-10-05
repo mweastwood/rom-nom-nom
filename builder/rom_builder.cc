@@ -106,7 +106,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
       }
       std::smatch match;
       if (std::regex_search(line, match, sym_re)) {
-        s_out << match[1].str() << " = " << match[2].str() << ";\n";
+        s_out << "PROVIDE(" << match[1].str() << " = " << match[2].str() << ");\n";
       }
     }
   }

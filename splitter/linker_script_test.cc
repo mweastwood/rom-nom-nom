@@ -48,8 +48,8 @@ TEST(LinkerScriptTest, GenerateSymbolsScript) {
   std::string script = generator.GenerateSymbolsScript(*symbols_or);
 
   EXPECT_EQ(script, R"(/* Auto-generated global symbol definitions */
-g_boot_flag = 0x80025C00;
-MainProc = 0x80026000;
+PROVIDE(g_boot_flag = 0x80025C00);
+PROVIDE(MainProc = 0x80026000);
 )");
 }
 

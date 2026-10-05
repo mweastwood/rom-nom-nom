@@ -442,7 +442,7 @@ typedef double f64;
   if (symbols_output_stream.is_open()) {
     symbols_output_stream << "/* Auto-generated symbol definitions for lifted C */\n";
     for (const auto& [symbol_name, address_hex] : undefined_auto_symbols) {
-      symbols_output_stream << absl::StrFormat("%s = 0x%s;\n", symbol_name, address_hex);
+      symbols_output_stream << absl::StrFormat("PROVIDE(%s = 0x%s);\n", symbol_name, address_hex);
     }
   }
 
