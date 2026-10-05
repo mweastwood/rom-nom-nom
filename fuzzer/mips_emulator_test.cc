@@ -1341,5 +1341,59 @@ TEST(MipsEmulatorTest, JalInternalCallNotIntercepted) {
   EXPECT_TRUE(res.call_log.empty());
 }
 
+TEST(MipsEmulatorTest, MmioRegisterReadAndWriteMocking) {
+  MipsEmulator emu;
+
+  // SP_STATUS (0xA4040010): reading returns 1 (halted)
+  uint32_t sp_status = 0;
+  ASSERT_TRUE(emu.Read32(0xA4040010, &sp_status));
+  EXPECT_EQ(sp_status, 1u);
+
+  // MI_VERSION (0xA4300004): reading returns 0x02020102
+  uint32_t mi_version = 0;
+  ASSERT_TRUE(emu.Read32(0xA4300004, &mi_version));
+  EXPECT_EQ(mi_version, 0x02020102u);
+
+  // VI_CURRENT (0xA4400010): scanline advances on each read
+  uint32_t vi_line0 = 0;
+  uint32_t vi_line1 = 0;
+  ASSERT_TRUE(emu.Read32(0xA4400010, &vi_line0));
+  ASSERT_TRUE(emu.Read32(0xA4400010, &vi_line1));
+  EXPECT_NE(vi_line0, vi_line1);
+
+  // Writing to MMIO register does not fault and reads back
+  ASSERT_TRUE(emu.Write32(0xA4600000, 0x12345678));
+  uint32_t pi_dram = 0;
+  ASSERT_TRUE(emu.Read32(0xA4600000, &pi_dram));
+  EXPECT_EQ(pi_dram, 0x12345678u);
+}
+
+TEST(MipsEmulatorTest, MmioPollingLoopTerminatesOnStatus) {
+  // Loop: polls SP_STATUS (0xA4040010) waiting for halt bit (bit 0)
+  // 00: lui  $t0, 0xA404
+  // 04: lw   $v0, 16($t0)      ; read SP_STATUS (0xA4040010)
+  // 08: andi $v0, $v0, 1       ; check halt bit
+  // 0C: beqz $v0, -3 (0x80001004) ; wait while not halted
+  // 10: nop
+  // 14: jr   $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x3C08A404,  // lui  $t0, 0xA404
+      0x8D020010,  // lw   $v0, 16($t0)
+      0x30420001,  // andi $v0, $v0, 1
+      0x1040FFFD,  // beqz $v0, -3 (0x80001004)
+      0x00000000,  // nop
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  MipsEmulator emu;
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 1u);
+  EXPECT_LT(res.total_steps, 10u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

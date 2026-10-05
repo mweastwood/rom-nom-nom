@@ -401,5 +401,29 @@ TEST(DifferentialFuzzerTest, ReorderedPersistentStoresMatchInvariantly) {
   EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
 }
 
+TEST(DifferentialFuzzerTest, MmioAndSpinloopFunctionsMatchEquivalently) {
+  DifferentialFuzzer fuzzer;
+
+  // Function: reads SP_STATUS (0xA4040010), returns 1 in $v0
+  // 00: lui  $t0, 0xA404
+  // 04: lw   $v0, 16($t0)
+  // 08: andi $v0, $v0, 1
+  // 0C: jr   $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x3C08A404,  // lui  $t0, 0xA404
+      0x8D020010,  // lw   $v0, 16($t0)
+      0x30420001,  // andi $v0, $v0, 1
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  DifferentialComparison comp = fuzzer.Compare(code, 0x80001000, code, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.v0, 1u);
+  EXPECT_EQ(comp.candidate_result.v0, 1u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

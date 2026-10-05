@@ -65,6 +65,7 @@ class DifferentialFuzzer {
     bool intercept_external_calls = true;
     bool check_external_calls = false;
     bool filter_local_stack_writes = true;
+    bool mock_mmio = true;
   };
 
   DifferentialFuzzer() = default;

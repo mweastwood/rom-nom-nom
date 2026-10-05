@@ -47,6 +47,8 @@ void DifferentialFuzzer::SetupEmulator(MipsEmulator* emu, const FuzzTestCase& te
       emu->LoadMemory(payload.address, payload.data.data(), payload.data.size());
     }
   }
+
+  emu->SetMockMmio(options_.mock_mmio);
 }
 
 void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,

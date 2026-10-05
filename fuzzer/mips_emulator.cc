@@ -9,6 +9,16 @@
 namespace rom_nom_nom::fuzzer {
 
 namespace {
+constexpr uint32_t kSpStatusReg = 0x04040010;
+constexpr uint32_t kSpDmaBusyReg = 0x04040018;
+constexpr uint32_t kDpcStatusReg = 0x0410000C;
+constexpr uint32_t kMiVersionReg = 0x04300004;
+constexpr uint32_t kViStatusReg = 0x04400000;
+constexpr uint32_t kViCurrentReg = 0x04400010;
+constexpr uint32_t kAiStatusReg = 0x0450000C;
+constexpr uint32_t kPiStatusReg = 0x04600010;
+constexpr uint32_t kSiStatusReg = 0x04800018;
+
 bool IsEvenFpRegister(FpRegister reg) {
   return (static_cast<int>(reg) & 1) == 0;
 }
@@ -33,6 +43,8 @@ void MipsEmulator::Reset() {
   call_link_reg_ = 31;
   write_log_.clear();
   call_log_.clear();
+  mmio_regs_.clear();
+  vi_scanline_counter_ = 0;
 }
 
 void MipsEmulator::SetFpBits(FpRegister reg, uint32_t bits) {
@@ -147,6 +159,8 @@ void MipsEmulator::RollbackWrites(absl::Span<const uint32_t> code, uint32_t code
     }
   }
   write_log_.clear();
+  mmio_regs_.clear();
+  vi_scanline_counter_ = 0;
 }
 
 void MipsEmulator::SetRegister(Register reg, uint32_t value) {
@@ -171,6 +185,43 @@ CalleeSavedRegisters MipsEmulator::GetCalleeSavedRegisters() const {
       .sp = gpr_[29],
       .fp = gpr_[30],
   };
+}
+
+uint32_t MipsEmulator::ReadMmio32(uint32_t phys_addr) const {
+  switch (phys_addr) {
+    case kSpStatusReg:
+      return 0x0001;  // SP_STATUS_HALT
+    case kSpDmaBusyReg:
+      return 0x0000;
+    case kDpcStatusReg:
+      return 0x0080;  // DPC_STATUS_CBUF_READY
+    case kMiVersionReg:
+      return 0x02020102;
+    case kViStatusReg:
+      return 0x00000002;
+    case kViCurrentReg: {
+      uint32_t line = (vi_scanline_counter_ * 2) % 525;
+      vi_scanline_counter_++;
+      return line;
+    }
+    case kAiStatusReg:
+      return 0x0000;
+    case kPiStatusReg:
+      return 0x0000;
+    case kSiStatusReg:
+      return 0x0000;
+    default: {
+      auto it = mmio_regs_.find(phys_addr);
+      if (it != mmio_regs_.end()) {
+        return it->second;
+      }
+      return 0;
+    }
+  }
+}
+
+void MipsEmulator::WriteMmio32(uint32_t phys_addr, uint32_t val) {
+  mmio_regs_[phys_addr] = val;
 }
 
 ExecutionStatus MipsEmulator::Step() {

@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -178,10 +179,18 @@ class MipsEmulator {
   void SetInterceptExternalCalls(bool enable) { intercept_external_calls_ = enable; }
   bool GetInterceptExternalCalls() const { return intercept_external_calls_; }
 
+  // MMIO hardware register mocking.
+  static bool IsMmioAddress(uint32_t vram);
+  void SetMockMmio(bool enable) { mock_mmio_ = enable; }
+  bool GetMockMmio() const { return mock_mmio_; }
+
   // Memory address translation to physical RDRAM index.
   std::optional<size_t> VramToPhysical(uint32_t vram) const;
 
  private:
+  uint32_t ReadMmio32(uint32_t phys_addr) const;
+  void WriteMmio32(uint32_t phys_addr, uint32_t val);
+
   size_t memory_size_;
   uint32_t base_vram_;
   std::vector<uint8_t> memory_;
@@ -203,6 +212,10 @@ class MipsEmulator {
   bool intercept_external_calls_ = false;
   std::optional<std::pair<uint32_t, uint32_t>> code_bounds_;
 
+  bool mock_mmio_ = true;
+  mutable absl::flat_hash_map<uint32_t, uint32_t> mmio_regs_;
+  mutable uint32_t vi_scanline_counter_ = 0;
+
   std::vector<MemoryWrite> write_log_;
   std::vector<ExternalCall> call_log_;
 };
@@ -215,6 +228,11 @@ inline std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
     }
   }
   return std::nullopt;
+}
+
+inline bool MipsEmulator::IsMmioAddress(uint32_t vram) {
+  uint32_t phys = vram & 0x1FFFFFFF;
+  return (phys >= 0x04000000 && phys < 0x04900000) || (phys >= 0x1FC00000 && phys < 0x1FC00800);
 }
 
 inline void MipsEmulator::SetGpr(int index, uint32_t value) {
@@ -231,6 +249,13 @@ inline uint32_t MipsEmulator::GetGpr(int index) const {
 }
 
 inline bool MipsEmulator::Read8(uint32_t vram, uint8_t* val) const {
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    uint32_t word = ReadMmio32(phys & ~3);
+    size_t byte_in_word = 3 - (phys % 4);
+    *val = static_cast<uint8_t>((word >> (byte_in_word * 8)) & 0xFF);
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value()) return false;
   *val = memory_[*phys];
@@ -239,6 +264,13 @@ inline bool MipsEmulator::Read8(uint32_t vram, uint8_t* val) const {
 
 inline bool MipsEmulator::Read16(uint32_t vram, uint16_t* val) const {
   if ((vram & 1) != 0) return false;
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    uint32_t word = ReadMmio32(phys & ~3);
+    size_t half_in_word = (phys % 4 == 0) ? 1 : 0;
+    *val = static_cast<uint16_t>((word >> (half_in_word * 16)) & 0xFFFF);
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
   *val = ReadBigEndian16(&memory_[*phys]);
@@ -247,6 +279,11 @@ inline bool MipsEmulator::Read16(uint32_t vram, uint16_t* val) const {
 
 inline bool MipsEmulator::Read32(uint32_t vram, uint32_t* val) const {
   if ((vram & 3) != 0) return false;
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    *val = ReadMmio32(phys);
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
   *val = ReadBigEndian32(&memory_[*phys]);
@@ -255,6 +292,13 @@ inline bool MipsEmulator::Read32(uint32_t vram, uint32_t* val) const {
 
 inline bool MipsEmulator::Read64(uint32_t vram, uint64_t* val) const {
   if ((vram & 7) != 0) return false;
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    uint32_t hi = ReadMmio32(phys);
+    uint32_t lo = ReadMmio32(phys + 4);
+    *val = (static_cast<uint64_t>(hi) << 32) | lo;
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
   *val = ReadBigEndian64(&memory_[*phys]);
@@ -262,6 +306,15 @@ inline bool MipsEmulator::Read64(uint32_t vram, uint64_t* val) const {
 }
 
 inline bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    uint32_t word = ReadMmio32(phys & ~3);
+    size_t byte_in_word = 3 - (phys % 4);
+    uint32_t mask = 0xFFu << (byte_in_word * 8);
+    word = (word & ~mask) | (static_cast<uint32_t>(val) << (byte_in_word * 8));
+    WriteMmio32(phys & ~3, word);
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value()) return false;
   memory_[*phys] = val;
@@ -271,6 +324,15 @@ inline bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
 
 inline bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
   if ((vram & 1) != 0) return false;
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    uint32_t word = ReadMmio32(phys & ~3);
+    size_t half_in_word = (phys % 4 == 0) ? 1 : 0;
+    uint32_t mask = 0xFFFFu << (half_in_word * 16);
+    word = (word & ~mask) | (static_cast<uint32_t>(val) << (half_in_word * 16));
+    WriteMmio32(phys & ~3, word);
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
   WriteBigEndian16(&memory_[*phys], val);
@@ -280,6 +342,11 @@ inline bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
 
 inline bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
   if ((vram & 3) != 0) return false;
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    WriteMmio32(phys, val);
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
   WriteBigEndian32(&memory_[*phys], val);
@@ -289,6 +356,12 @@ inline bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
 
 inline bool MipsEmulator::Write64(uint32_t vram, uint64_t val) {
   if ((vram & 7) != 0) return false;
+  if (mock_mmio_ && IsMmioAddress(vram)) {
+    uint32_t phys = vram & 0x1FFFFFFF;
+    WriteMmio32(phys, static_cast<uint32_t>(val >> 32));
+    WriteMmio32(phys + 4, static_cast<uint32_t>(val & 0xFFFFFFFF));
+    return true;
+  }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
   WriteBigEndian64(&memory_[*phys], val);
