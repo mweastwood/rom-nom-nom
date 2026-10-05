@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -121,6 +122,17 @@ class ExpressionBuilder {
 
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);
+
+  // Information about a comparison instruction folded into a subsequent conditional branch.
+  struct FoldedComparison {
+    size_t instruction_index = 0;
+    bool can_suppress_statement = false;
+  };
+
+  // Finds a comparison instruction in `instructions` that is folded into a subsequent conditional
+  // branch. Returns std::nullopt if no instruction is folded.
+  static std::optional<FoldedComparison> FindFoldedComparison(
+      absl::Span<const Instruction> instructions);
 
  private:
   static std::unique_ptr<LiftedExpression> LiftRegisterOrConstant(Register reg,

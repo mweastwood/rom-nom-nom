@@ -280,8 +280,18 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   std::unique_ptr<PendingUnalignedAccess> pending_lwl;
   std::unique_ptr<PendingUnalignedAccess> pending_swl;
 
+  auto folded_comp = FindFoldedComparison(instructions_to_process);
+
   for (size_t i = 0; i < instructions_to_process.size(); ++i) {
     const auto& inst = instructions_to_process[i];
+
+    // Skip emitting assignment for folded comparison instructions that are directly
+    // integrated into subsequent branch conditions.
+    if (folded_comp.has_value() && folded_comp->can_suppress_statement &&
+        i == folded_comp->instruction_index) {
+      tracker.Step(inst);
+      continue;
+    }
 
     // Check for MIPS GCC integer division/modulo trap expansion
     auto div_pattern = MatchDivisionPattern(instructions_to_process, i);
@@ -1089,6 +1099,155 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
   }
 
   return false;
+}
+
+std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFoldedComparison(
+    absl::Span<const Instruction> instructions) {
+  if (instructions.size() < 2) {
+    return std::nullopt;
+  }
+
+  // 1. Find the terminating branch instruction (skipping trailing delay slot if present)
+  int branch_idx = -1;
+  for (int i = static_cast<int>(instructions.size()) - 1; i >= 0; --i) {
+    if (instructions[i].IsBranch()) {
+      branch_idx = i;
+      break;
+    }
+  }
+
+  if (branch_idx < 0) {
+    return std::nullopt;
+  }
+
+  const auto& branch = instructions[branch_idx];
+  Register rs = branch.rs.value_or(Register::kZero);
+  Register rt = branch.rt.value_or(Register::kZero);
+
+  // 2. Identify condition register tested against zero
+  std::optional<Register> cond_reg;
+  switch (branch.opcode) {
+    case Opcode::kBne:
+    case Opcode::kBnel:
+    case Opcode::kBeq:
+    case Opcode::kBeql:
+      if (rt == Register::kZero && rs != Register::kZero) {
+        cond_reg = rs;
+      } else if (rs == Register::kZero && rt != Register::kZero) {
+        cond_reg = rt;
+      }
+      break;
+
+    case Opcode::kBgtz:
+    case Opcode::kBgtzl:
+    case Opcode::kBgez:
+    case Opcode::kBgezl:
+    case Opcode::kBltz:
+    case Opcode::kBltzl:
+    case Opcode::kBlez:
+    case Opcode::kBlezl:
+      if (rs != Register::kZero) {
+        cond_reg = rs;
+      }
+      break;
+
+    default:
+      break;
+  }
+
+  if (!cond_reg.has_value()) {
+    return std::nullopt;
+  }
+
+  // 3. Scan backward from branch_idx - 1 for reaching definition of cond_reg
+  int def_idx = -1;
+  for (int i = branch_idx - 1; i >= 0; --i) {
+    const auto& inst = instructions[i];
+    if ((inst.rd.has_value() && *inst.rd == *cond_reg) ||
+        (inst.rt.has_value() && *inst.rt == *cond_reg)) {
+      def_idx = i;
+      break;
+    }
+  }
+
+  if (def_idx < 0) {
+    return std::nullopt;
+  }
+
+  const auto& def_inst = instructions[def_idx];
+
+  // Verify that def_inst is a comparison/test opcode that defines cond_reg
+  switch (def_inst.opcode) {
+    case Opcode::kSlt:
+    case Opcode::kSltu:
+    case Opcode::kXor:
+    case Opcode::kAnd:
+      if (!def_inst.rd.has_value() || *def_inst.rd != *cond_reg) {
+        return std::nullopt;
+      }
+      break;
+
+    case Opcode::kSlti:
+    case Opcode::kSltiu:
+    case Opcode::kXori:
+    case Opcode::kAndi:
+      if (!def_inst.rt.has_value() || *def_inst.rt != *cond_reg) {
+        return std::nullopt;
+      }
+      break;
+
+    default:
+      return std::nullopt;
+  }
+
+  // 4. Hazard check: no instruction between def_idx and branch_idx clobbers inputs of def_inst,
+  // or uses cond_reg
+  for (int i = def_idx + 1; i < branch_idx; ++i) {
+    const auto& mid = instructions[i];
+    if (def_inst.rs.has_value() && *def_inst.rs != Register::kZero) {
+      if ((mid.rd.has_value() && *mid.rd == *def_inst.rs) ||
+          (mid.rt.has_value() && *mid.rt == *def_inst.rs)) {
+        return std::nullopt;
+      }
+    }
+    if (def_inst.rt.has_value() && *def_inst.rt != Register::kZero) {
+      if ((mid.rd.has_value() && *mid.rd == *def_inst.rt) ||
+          (mid.rt.has_value() && *mid.rt == *def_inst.rt)) {
+        return std::nullopt;
+      }
+    }
+    // Check if mid uses cond_reg
+    RegisterUseDef ud = GetInstructionUseDef(mid);
+    for (Register r : ud.gpr_uses) {
+      if (r == *cond_reg) {
+        return std::nullopt;
+      }
+    }
+  }
+
+  // 5. Determine whether emitting def_inst as a statement can be safely suppressed
+  bool can_suppress = false;
+  if (*cond_reg == Register::kAt) {
+    can_suppress = true;
+  } else if (branch_idx + 1 < static_cast<int>(instructions.size())) {
+    const auto& delay = instructions[branch_idx + 1];
+    // If the delay slot defines cond_reg without reading it, the comparison value in cond_reg
+    // is immediately dead after the branch
+    bool delay_uses_cond = false;
+    RegisterUseDef delay_ud = GetInstructionUseDef(delay);
+    for (Register r : delay_ud.gpr_uses) {
+      if (r == *cond_reg) {
+        delay_uses_cond = true;
+        break;
+      }
+    }
+    if (!delay_uses_cond && ((delay.rd.has_value() && *delay.rd == *cond_reg) ||
+                             (delay.rt.has_value() && *delay.rt == *cond_reg))) {
+      can_suppress = true;
+    }
+  }
+
+  return FoldedComparison{static_cast<size_t>(def_idx), can_suppress};
 }
 
 }  // namespace rom_nom_nom

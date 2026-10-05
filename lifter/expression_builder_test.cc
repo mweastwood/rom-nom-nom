@@ -599,5 +599,150 @@ TEST(ExpressionBuilderTest, SizedGlobalLoadAndStore) {
   EXPECT_EQ(statements[2].ToString(), "v0 = *(u8*)&g_flag;\n");
 }
 
+TEST(ExpressionBuilderTest, FindFoldedComparisonSltAtSuppressed) {
+  // slt $at, $a0, $a1
+  // beq $at, $zero, +2
+  // nop
+  std::vector<uint32_t> words = {
+      0x0085082A,  // 0: slt $at, $a0, $a1
+      0x10200002,  // 4: beq $at, $zero, +2
+      0x00000000,  // 8: nop
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  ASSERT_TRUE(folded.has_value());
+  EXPECT_EQ(folded->instruction_index, 0u);
+  EXPECT_TRUE(folded->can_suppress_statement);
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  // temp_at = arg0 < arg1 statement should be suppressed
+  EXPECT_THAT(statements, SizeIs(0));
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonV0PreservedWhenNotOverwritten) {
+  // sltiu $v0, $a0, 42
+  // bne   $v0, $zero, +2
+  // nop
+  std::vector<uint32_t> words = {
+      0x2C82002A,  // 0: sltiu $v0, $a0, 42
+      0x14400002,  // 4: bne   $v0, $zero, +2
+      0x00000000,  // 8: nop
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  ASSERT_TRUE(folded.has_value());
+  EXPECT_EQ(folded->instruction_index, 0u);
+  // $v0 is not $at and not overwritten in delay slot, so statement is preserved
+  EXPECT_FALSE(folded->can_suppress_statement);
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].destination_variable, "v0");
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 < 42;\n");
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonV0SuppressedWhenOverwrittenInDelaySlot) {
+  // Pattern matching MainReset:
+  // sltiu $v0, $v0, 57
+  // bnel  $v0, $zero, -4
+  // andi  $v0, $v1, 0xFF   (delay slot overwrites $v0)
+  std::vector<uint32_t> words = {
+      0x2C420039,  // 0: sltiu $v0, $v0, 57
+      0x5440FFFC,  // 4: bnel  $v0, $zero, -4
+      0x306200FF,  // 8: andi  $v0, $v1, 0xFF
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  ASSERT_TRUE(folded.has_value());
+  EXPECT_EQ(folded->instruction_index, 0u);
+  // Overwritten in delay slot before any exit, so statement can be safely suppressed
+  EXPECT_TRUE(folded->can_suppress_statement);
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  // The sltiu statement is suppressed; only the delay slot andi statement is emitted
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].ToString(), "v0 = v1 & 255;\n");
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonHazardRejectsFolding) {
+  // slt   $at, $a0, $a1
+  // addiu $a0, $zero, 5   (hazard: overwrites input $a0!)
+  // bne   $at, $zero, +2
+  // nop
+  std::vector<uint32_t> words = {
+      0x0085082A,  // 0: slt   $at, $a0, $a1
+      0x24040005,  // 4: addiu $a0, $zero, 5
+      0x14200002,  // 8: bne   $at, $zero, +2
+      0x00000000,  // C: nop
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  // Hazard on $a0 prevents folding
+  EXPECT_FALSE(folded.has_value());
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].destination_variable, "temp_at");
+  EXPECT_EQ(statements[1].destination_variable, "arg0");
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonIntermediateUseRejectsFolding) {
+  // slt   $at, $a0, $a1
+  // addu  $v0, $at, $zero  (intermediate use of $at!)
+  // bne   $at, $zero, +2
+  // nop
+  std::vector<uint32_t> words = {
+      0x0085082A,  // 0: slt  $at, $a0, $a1
+      0x00201021,  // 4: addu $v0, $at, $zero
+      0x14200002,  // 8: bne  $at, $zero, +2
+      0x00000000,  // C: nop
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  // Intermediate use of $at prevents folding
+  EXPECT_FALSE(folded.has_value());
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].destination_variable, "temp_at");
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonXoriAndAndi) {
+  // xori $at, $a0, 5
+  // bne  $at, $zero, +2
+  // nop
+  std::vector<uint32_t> xor_words = {
+      0x38810005,  // 0: xori $at, $a0, 5
+      0x14200002,  // 4: bne  $at, $zero, +2
+      0x00000000,  // 8: nop
+  };
+
+  auto xor_insts = *DecodeSequence(xor_words);
+  auto xor_folded = ExpressionBuilder::FindFoldedComparison(xor_insts);
+  ASSERT_TRUE(xor_folded.has_value());
+  EXPECT_EQ(xor_folded->instruction_index, 0u);
+  EXPECT_TRUE(xor_folded->can_suppress_statement);
+
+  // andi $at, $a0, 0x8
+  // beq  $at, $zero, +2
+  // nop
+  std::vector<uint32_t> and_words = {
+      0x30810008,  // 0: andi $at, $a0, 8
+      0x10200002,  // 4: beq  $at, $zero, +2
+      0x00000000,  // 8: nop
+  };
+
+  auto and_insts = *DecodeSequence(and_words);
+  auto and_folded = ExpressionBuilder::FindFoldedComparison(and_insts);
+  ASSERT_TRUE(and_folded.has_value());
+  EXPECT_EQ(and_folded->instruction_index, 0u);
+  EXPECT_TRUE(and_folded->can_suppress_statement);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

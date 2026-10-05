@@ -278,6 +278,99 @@ std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlo
     return CExpression::Integer(invert_condition ? 0 : 1);
   }
 
+  // Check if this block's branch folds a reaching comparison instruction
+  auto folded_comp = ExpressionBuilder::FindFoldedComparison(block.instructions);
+  if (folded_comp.has_value()) {
+    const auto& def_inst = block.instructions[folded_comp->instruction_index];
+
+    bool branch_taken_on_nonzero = false;
+    switch (branch_inst->opcode) {
+      case Opcode::kBne:
+      case Opcode::kBnel:
+      case Opcode::kBgtz:
+      case Opcode::kBgtzl:
+        branch_taken_on_nonzero = true;
+        break;
+      case Opcode::kBeq:
+      case Opcode::kBeql:
+      case Opcode::kBlez:
+      case Opcode::kBlezl:
+        branch_taken_on_nonzero = false;
+        break;
+      default:
+        break;
+    }
+
+    bool want_true = branch_taken_on_nonzero ^ invert_condition;
+
+    switch (def_inst.opcode) {
+      case Opcode::kSlt: {
+        std::string op = want_true ? "<" : ">=";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        Register def_rt = def_inst.rt.value_or(Register::kZero);
+        return CExpression::Binary(op, RegExpr(def_rs), RegExpr(def_rt));
+      }
+
+      case Opcode::kSlti: {
+        std::string op = want_true ? "<" : ">=";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        return CExpression::Binary(op, RegExpr(def_rs), CExpression::Integer(def_inst.immediate));
+      }
+
+      case Opcode::kSltu: {
+        std::string op = want_true ? "<" : ">=";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        Register def_rt = def_inst.rt.value_or(Register::kZero);
+        return CExpression::Binary(op, CExpression::Cast(CType::U32(), RegExpr(def_rs)),
+                                   CExpression::Cast(CType::U32(), RegExpr(def_rt)));
+      }
+
+      case Opcode::kSltiu: {
+        std::string op = want_true ? "<" : ">=";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        uint32_t uimm = static_cast<uint32_t>(def_inst.immediate);
+        return CExpression::Binary(
+            op, CExpression::Cast(CType::U32(), RegExpr(def_rs)),
+            CExpression::Integer(uimm, /*is_hex=*/uimm > 0xFFFF, /*is_unsigned=*/true));
+      }
+
+      case Opcode::kXor: {
+        std::string op = want_true ? "!=" : "==";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        Register def_rt = def_inst.rt.value_or(Register::kZero);
+        return CExpression::Binary(op, RegExpr(def_rs), RegExpr(def_rt));
+      }
+
+      case Opcode::kXori: {
+        std::string op = want_true ? "!=" : "==";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        uint32_t uimm = def_inst.UnsignedImmediate();
+        return CExpression::Binary(op, RegExpr(def_rs),
+                                   CExpression::Integer(uimm, /*is_hex=*/uimm > 0xFFFF));
+      }
+
+      case Opcode::kAndi: {
+        std::string op = want_true ? "!=" : "==";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        uint32_t uimm = def_inst.UnsignedImmediate();
+        auto bit_and = CExpression::Binary("&", RegExpr(def_rs),
+                                           CExpression::Integer(uimm, /*is_hex=*/uimm > 0xFFFF));
+        return CExpression::Binary(op, std::move(bit_and), CExpression::Integer(0));
+      }
+
+      case Opcode::kAnd: {
+        std::string op = want_true ? "!=" : "==";
+        Register def_rs = def_inst.rs.value_or(Register::kZero);
+        Register def_rt = def_inst.rt.value_or(Register::kZero);
+        auto bit_and = CExpression::Binary("&", RegExpr(def_rs), RegExpr(def_rt));
+        return CExpression::Binary(op, std::move(bit_and), CExpression::Integer(0));
+      }
+
+      default:
+        break;
+    }
+  }
+
   Register rs = branch_inst->rs.value_or(Register::kZero);
   Register rt = branch_inst->rt.value_or(Register::kZero);
 
@@ -373,13 +466,35 @@ class ConverterContext {
         break;
 
       case RegionType::kIfThen: {
-        EmitBlockStatements(region.condition_block_id, target_block);
         const auto* cond_block = cfg_.GetBlock(region.condition_block_id);
+        bool has_branch_likely = false;
+        if (cond_block != nullptr) {
+          const auto* term = cond_block->Terminator();
+          if (term != nullptr && term->IsBranchLikely() && cond_block->instructions.size() >= 2) {
+            has_branch_likely = true;
+          }
+        }
+
+        EmitBlockStatements(region.condition_block_id, target_block,
+                            /*omit_last_instruction=*/has_branch_likely);
         auto cond = cond_block != nullptr
                         ? AstConverter::ExtractBranchCondition(*cond_block, region.invert_condition)
                         : CExpression::Integer(1);
 
         auto then_body = std::make_unique<CompoundStatement>();
+        if (has_branch_likely && !region.invert_condition) {
+          const auto& delay_inst = cond_block->instructions.back();
+          auto delay_stmts =
+              ExpressionBuilder::LiftInstructions(absl::MakeSpan(&delay_inst, 1), symbol_index_,
+                                                  split_config_, function_parameter_counts_);
+          for (auto& s : delay_stmts) {
+            auto cs = AstConverter::ConvertStatement(s);
+            if (cs != nullptr) {
+              then_body->AddStatement(std::move(cs));
+            }
+          }
+        }
+
         if (!region.children.empty() && region.children[0]) {
           ConvertRegion(*region.children[0], then_body.get());
         }
@@ -388,13 +503,35 @@ class ConverterContext {
       }
 
       case RegionType::kIfThenElse: {
-        EmitBlockStatements(region.condition_block_id, target_block);
         const auto* cond_block = cfg_.GetBlock(region.condition_block_id);
+        bool has_branch_likely = false;
+        if (cond_block != nullptr) {
+          const auto* term = cond_block->Terminator();
+          if (term != nullptr && term->IsBranchLikely() && cond_block->instructions.size() >= 2) {
+            has_branch_likely = true;
+          }
+        }
+
+        EmitBlockStatements(region.condition_block_id, target_block,
+                            /*omit_last_instruction=*/has_branch_likely);
         auto cond = cond_block != nullptr
                         ? AstConverter::ExtractBranchCondition(*cond_block, region.invert_condition)
                         : CExpression::Integer(1);
 
         auto then_body = std::make_unique<CompoundStatement>();
+        if (has_branch_likely) {
+          const auto& delay_inst = cond_block->instructions.back();
+          auto delay_stmts =
+              ExpressionBuilder::LiftInstructions(absl::MakeSpan(&delay_inst, 1), symbol_index_,
+                                                  split_config_, function_parameter_counts_);
+          for (auto& s : delay_stmts) {
+            auto cs = AstConverter::ConvertStatement(s);
+            if (cs != nullptr) {
+              then_body->AddStatement(std::move(cs));
+            }
+          }
+        }
+
         auto else_body = std::make_unique<CompoundStatement>();
         if (region.children.size() > 0 && region.children[0]) {
           ConvertRegion(*region.children[0], then_body.get());
@@ -507,7 +644,8 @@ class ConverterContext {
     }
   }
 
-  void EmitBlockStatements(uint32_t block_id, CompoundStatement* target_block) {
+  void EmitBlockStatements(uint32_t block_id, CompoundStatement* target_block,
+                           bool omit_last_instruction = false) {
     if (emitted_blocks_.contains(block_id)) {
       return;
     }
@@ -523,8 +661,16 @@ class ConverterContext {
       return;
     }
 
-    auto lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
-                                                     function_parameter_counts_);
+    std::vector<LiftedStatement> lifted_stmts;
+    if (omit_last_instruction && block->instructions.size() > 1) {
+      absl::Span<const Instruction> inst_span(block->instructions.data(),
+                                              block->instructions.size() - 1);
+      lifted_stmts = ExpressionBuilder::LiftInstructions(inst_span, symbol_index_, split_config_,
+                                                         function_parameter_counts_);
+    } else {
+      lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
+                                                  function_parameter_counts_);
+    }
     for (auto& lifted_stmt : lifted_stmts) {
       if (lifted_stmt.kind == StatementKind::kReturn) {
         if (returns_v0_) {

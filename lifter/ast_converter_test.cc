@@ -508,5 +508,137 @@ TEST(AstConverterTest, ConvertMultiBlockFunctionWithInterBlockReturnLiveness) {
   EXPECT_THAT(code, HasSubstr("return v0;"));
 }
 
+TEST(AstConverterTest, BranchConditionFoldingSltAndDeadAtElimination) {
+  // slt   $at, $a0, $a1
+  // beq   $at, $zero, +2 (0x10)
+  // nop
+  // addiu $v0, $zero, 1
+  // jr    $ra
+  // nop
+  // addiu $v0, $zero, 2
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x0085082A,  // 00: slt   $at, $a0, $a1
+      0x10200002,  // 04: beq   $at, $zero, +2 -> 0x10
+      0x00000000,  // 08: nop
+      0x24020001,  // 0C: addiu $v0, $zero, 1
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+      0x24020002,  // 18: addiu $v0, $zero, 2
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "MinBranch";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // The condition should be folded to (arg0 < arg1)
+  EXPECT_THAT(code, HasSubstr("(arg0 < arg1)"));
+  // temp_at must not be assigned or declared
+  EXPECT_THAT(code, Not(HasSubstr("temp_at = ")));
+  EXPECT_THAT(code, Not(HasSubstr("s32 temp_at;")));
+}
+
+TEST(AstConverterTest, BranchConditionFoldingSltiu) {
+  // sltiu $v0, $a0, 10
+  // bne   $v0, $zero, +2 (0x10)
+  // nop
+  // addiu $v0, $zero, 1
+  // jr    $ra
+  // nop
+  // addiu $v0, $zero, 2
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x2C82000A,  // 00: sltiu $v0, $a0, 10
+      0x14400002,  // 04: bne   $v0, $zero, +2 -> 0x10
+      0x00000000,  // 08: nop
+      0x24020001,  // 0C: addiu $v0, $zero, 1
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+      0x24020002,  // 18: addiu $v0, $zero, 2
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "CheckBound";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // The condition should be folded to ((u32)arg0 >= 10U) due to fallthrough structuring
+  EXPECT_THAT(code, HasSubstr("(u32)arg0 >= 10U"));
+}
+
+TEST(AstConverterTest, BranchLikelyDelaySlotNullification) {
+  // Pattern matching AudioChannelSetPan:
+  // 00: slti  $v0, $a1, 257
+  // 04: beql  $v0, $zero, 0x0C
+  // 08: addiu $a1, $zero, 256
+  // 0C: addu  $v0, $a1, $zero
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> words = {
+      0x28A20101,  // 00: slti  $v0, $a1, 257
+      0x50400001,  // 04: beql  $v0, $zero, +1 -> 0x0C
+      0x24050100,  // 08: addiu $a1, $zero, 256  (delay slot)
+      0x00A01021,  // 0C: addu  $v0, $a1, $zero
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "ClampPan";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // Condition should be folded to (arg1 >= 257)
+  EXPECT_THAT(code, HasSubstr("(arg1 >= 257)"));
+  // Inside the if body, arg1 should be set to 256
+  EXPECT_THAT(code, HasSubstr("arg1 = 256;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
