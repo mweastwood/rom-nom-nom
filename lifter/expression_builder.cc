@@ -619,7 +619,6 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kSlt:
-      case Opcode::kSltu:
         if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
             inst.rt.has_value()) {
           LiftedStatement statement;
@@ -632,8 +631,20 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kSltu:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
+            inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression = LiftedExpression::Binary(
+              "<", LiftedExpression::Unary("(u32)", LiftRegisterOrConstant(*inst.rs, tracker)),
+              LiftedExpression::Unary("(u32)", LiftRegisterOrConstant(*inst.rt, tracker)));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
       case Opcode::kSlti:
-      case Opcode::kSltiu:
         if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
@@ -641,6 +652,19 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.expression =
               LiftedExpression::Binary("<", LiftRegisterOrConstant(*inst.rs, tracker),
                                        LiftedExpression::Integer(inst.immediate));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kSltiu:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          uint32_t uimm = static_cast<uint32_t>(inst.immediate);
+          statement.expression = LiftedExpression::Binary(
+              "<", LiftedExpression::Unary("(u32)", LiftRegisterOrConstant(*inst.rs, tracker)),
+              LiftedExpression::Integer(uimm, /*hex=*/uimm > 0xFFFF));
           statements.push_back(std::move(statement));
         }
         break;

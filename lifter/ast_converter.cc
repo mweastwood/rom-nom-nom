@@ -190,6 +190,12 @@ std::unique_ptr<CExpression> AstConverter::ConvertExpression(const LiftedExpress
 
     case ExpressionKind::kUnaryOp:
       if (!expr.args.empty() && expr.args[0]) {
+        if (expr.op == "(u32)") {
+          return CExpression::Cast(CType::U32(), ConvertExpression(*expr.args[0]));
+        }
+        if (expr.op == "(s32)") {
+          return CExpression::Cast(CType::S32(), ConvertExpression(*expr.args[0]));
+        }
         return CExpression::Unary(expr.op, ConvertExpression(*expr.args[0]));
       }
       return CExpression::Identifier(expr.name);

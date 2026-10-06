@@ -889,5 +889,36 @@ TEST(AstConverterTest, DeclaresFpRegistersWithProperFloatTypesAndFoldsCop1Branch
   EXPECT_THAT(code, HasSubstr("f0 < f2"));
 }
 
+TEST(AstConverterTest, SltiuAssignmentProducesUnsignedCast) {
+  // 00: sltiu $v0, $a0, 1
+  // 04: jr    $ra
+  // 08: nop
+  std::vector<uint32_t> words = {
+      0x2C820001,  // sltiu $v0, $a0, 1
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestSltiuAssign";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("(u32)arg0 < 1"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

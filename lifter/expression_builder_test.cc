@@ -314,8 +314,8 @@ TEST(ExpressionBuilderTest, ComparisonOperations) {
   ASSERT_THAT(statements, SizeIs(4));
   EXPECT_EQ(statements[0].ToString(), "v0 = arg0 < arg1;\n");
   EXPECT_EQ(statements[1].ToString(), "v1 = arg0 < 5;\n");
-  EXPECT_EQ(statements[2].ToString(), "v0 = arg0 < arg1;\n");
-  EXPECT_EQ(statements[3].ToString(), "v1 = arg0 < 10;\n");
+  EXPECT_EQ(statements[2].ToString(), "v0 = (u32)arg0 < (u32)arg1;\n");
+  EXPECT_EQ(statements[3].ToString(), "v1 = (u32)arg0 < 10;\n");
 }
 
 TEST(ExpressionBuilderTest, StandaloneLuiOperation) {
@@ -640,7 +640,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonV0PreservedWhenNotOverwritten) {
   auto statements = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_THAT(statements, SizeIs(1));
   EXPECT_EQ(statements[0].destination_variable, "v0");
-  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 < 42;\n");
+  EXPECT_EQ(statements[0].ToString(), "v0 = (u32)arg0 < 42;\n");
 }
 
 TEST(ExpressionBuilderTest, FindFoldedComparisonV0SuppressedWhenOverwrittenInDelaySlot) {
