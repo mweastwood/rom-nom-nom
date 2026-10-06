@@ -369,5 +369,82 @@ TEST(ControlFlowStructurerTest, StructureSwitchStatement) {
   EXPECT_THAT(s, HasSubstr("case 1:"));
 }
 
+TEST(ControlFlowStructurerTest, StructureSwitchPreservesBoundsBlock) {
+  std::vector<Instruction> instructions;
+
+  Instruction nop;
+  nop.opcode = Opcode::kSll;
+  nop.rd = Register::kZero;
+  nop.rt = Register::kZero;
+
+  // Block 0: Bounds check (0x80000000)
+  Instruction beqz;
+  beqz.opcode = Opcode::kBeq;
+  beqz.rs = Register::kV0;
+  beqz.rt = Register::kZero;
+  beqz.immediate = 0x80000030 - (0x80000000 + 4);
+  beqz.vram = 0x80000000;
+  instructions.push_back(beqz);
+
+  Instruction nop_delay = nop;
+  nop_delay.vram = 0x80000004;
+  instructions.push_back(nop_delay);
+
+  // Block 1: Jump table indirect jump (0x80000008)
+  Instruction jr;
+  jr.opcode = Opcode::kJr;
+  jr.rs = Register::kAt;
+  jr.vram = 0x80000008;
+  instructions.push_back(jr);
+
+  Instruction nop_jr = nop;
+  nop_jr.vram = 0x8000000C;
+  instructions.push_back(nop_jr);
+
+  // Case 0 (0x80000010): jr $ra
+  Instruction ret;
+  ret.opcode = Opcode::kJr;
+  ret.rs = Register::kRa;
+  ret.vram = 0x80000010;
+  instructions.push_back(ret);
+  Instruction nop_ret0 = nop;
+  nop_ret0.vram = 0x80000014;
+  instructions.push_back(nop_ret0);
+
+  // Default (0x80000030): jr $ra
+  Instruction ret_def;
+  ret_def.opcode = Opcode::kJr;
+  ret_def.rs = Register::kRa;
+  ret_def.vram = 0x80000030;
+  instructions.push_back(ret_def);
+  Instruction nop_ret_def = nop;
+  nop_ret_def.vram = 0x80000034;
+  instructions.push_back(nop_ret_def);
+
+  JumpTable table;
+  table.switch_vram = 0x80000008;
+  table.bounds_branch_vram = 0x80000000;
+  table.default_target_vram = 0x80000030;
+  table.entries = {
+      JumpTableEntry{.case_index = 0, .case_value = 0, .target_vram = 0x80000010},
+  };
+
+  auto cfg_or = ControlFlowGraph::Build(instructions, {table});
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  EXPECT_EQ(region->type, RegionType::kSequence);
+  ASSERT_GE(region->children.size(), 2u);
+  EXPECT_EQ(region->children[0]->type, RegionType::kBlock);
+  EXPECT_EQ(region->children[0]->block_id, 0u);
+  EXPECT_EQ(region->children[1]->type, RegionType::kSwitch);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

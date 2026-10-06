@@ -403,17 +403,27 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       switch_region->cases.push_back(std::move(sc));
     }
 
+    std::unique_ptr<StructuredRegion> final_region;
+    if (has_bounds_block) {
+      auto seq = CreateSequence();
+      seq->children.push_back(CreateBlock(entry));
+      seq->children.push_back(std::move(switch_region));
+      final_region = std::move(seq);
+    } else {
+      final_region = std::move(switch_region);
+    }
+
     if (join.has_value() && join != follow) {
       auto after_switch = StructureRegion(*join, follow, current_loop);
       if (after_switch != nullptr) {
         auto seq = CreateSequence();
-        seq->children.push_back(std::move(switch_region));
+        FlattenSequence(seq.get(), std::move(final_region));
         FlattenSequence(seq.get(), std::move(after_switch));
         return seq;
       }
     }
 
-    return switch_region;
+    return final_region;
   }
 
   // Case 1: Return or trap (0 successors)
