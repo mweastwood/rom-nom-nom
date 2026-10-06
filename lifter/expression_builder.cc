@@ -362,7 +362,11 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         statements.push_back(std::move(statement));
       } else if (lo->type == FoldedPatternType::kGlobalLoad) {
         statement.kind = StatementKind::kAssignment;
-        statement.destination_variable = RegisterVarName(lo->dest_reg);
+        if (lo->dest_fp_reg.has_value()) {
+          statement.destination_variable = FpRegisterVarName(*lo->dest_fp_reg);
+        } else {
+          statement.destination_variable = RegisterVarName(lo->dest_reg);
+        }
         if (lo->symbol_name.empty()) {
           statement.expression =
               LiftedExpression::Load(lo->access_type, LiftedExpression::Integer(lo->address, true));
@@ -375,6 +379,13 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         statements.push_back(std::move(statement));
       } else if (lo->type == FoldedPatternType::kGlobalStore) {
+        std::unique_ptr<LiftedExpression> src_expr;
+        if (lo->src_fp_reg.has_value()) {
+          src_expr = LiftFpRegister(*lo->src_fp_reg);
+        } else {
+          src_expr = LiftRegisterOrConstant(lo->src_reg, tracker);
+        }
+
         if (lo->access_type != "s32") {
           statement.kind = StatementKind::kStore;
           statement.store_type = lo->access_type;
@@ -382,12 +393,12 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               lo->symbol_name.empty()
                   ? LiftedExpression::Integer(lo->address, true)
                   : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
-          statement.expression = LiftRegisterOrConstant(lo->src_reg, tracker);
+          statement.expression = std::move(src_expr);
         } else {
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable =
               lo->symbol_name.empty() ? absl::StrFormat("*(0x%X)", lo->address) : lo->symbol_name;
-          statement.expression = LiftRegisterOrConstant(lo->src_reg, tracker);
+          statement.expression = std::move(src_expr);
         }
         statements.push_back(std::move(statement));
       }

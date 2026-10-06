@@ -1074,8 +1074,9 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
       continue;
     }
 
-    // Do not declare globals (prefixed with g_)
-    if (absl::StartsWith(var_name, "g_")) {
+    // Do not declare globals (prefixed with g_, D_, RO_, B_)
+    if (absl::StartsWith(var_name, "g_") || absl::StartsWith(var_name, "D_") ||
+        absl::StartsWith(var_name, "RO_") || absl::StartsWith(var_name, "B_")) {
       continue;
     }
     // Do not declare symbols present in symbol registry

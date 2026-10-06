@@ -981,5 +981,24 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonDoesNotFoldSelfMutatingInstructi
   EXPECT_FALSE(folded.has_value());
 }
 
+TEST(ExpressionBuilderTest, LiftsFoldedFloatingPointGlobalLoadAndStore) {
+  // lui  $at, 0x8017
+  // lwc1 $f2, 1104($at)  # target: 0x80170450
+  // lui  $at, 0x8017
+  // swc1 $f2, 1104($at)  # target: 0x80170450
+  std::vector<uint32_t> words = {
+      0x3C018017,  // 0: lui  $at, 0x8017
+      0xC4220450,  // 1: lwc1 $f2, 1104($at)
+      0x3C018017,  // 2: lui  $at, 0x8017
+      0xE4220450,  // 3: swc1 $f2, 1104($at)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = *(f32*)0x80170450;\n");
+  EXPECT_EQ(stmts[1].ToString(), "*(f32*)0x80170450 = f2;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -952,6 +952,7 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     case 0x31:
       inst.opcode = Opcode::kLwc1;
       inst.ft = ToFpRegister(rt_val);
+      inst.rt.reset();
       break;
     case 0x34:
       inst.opcode = Opcode::kLld;
@@ -959,6 +960,7 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     case 0x35:
       inst.opcode = Opcode::kLdc1;
       inst.ft = ToFpRegister(rt_val);
+      inst.rt.reset();
       break;
     case 0x37:
       inst.opcode = Opcode::kLd;
@@ -967,10 +969,12 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     case 0x39:
       inst.opcode = Opcode::kSwc1;
       inst.ft = ToFpRegister(rt_val);
+      inst.rt.reset();
       break;
     case 0x3D:
       inst.opcode = Opcode::kSdc1;
       inst.ft = ToFpRegister(rt_val);
+      inst.rt.reset();
       break;
     case 0x3F:
       inst.opcode = Opcode::kSd;

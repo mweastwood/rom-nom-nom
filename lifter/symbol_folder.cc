@@ -71,7 +71,11 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
             FoldedSymbolAccess access;
             access.type = FoldedPatternType::kGlobalLoad;
             access.address = target_address;
-            access.dest_reg = inst.rt.value_or(Register::kZero);
+            if (inst.opcode == Opcode::kLwc1 || inst.opcode == Opcode::kLdc1) {
+              access.dest_fp_reg = inst.ft;
+            } else {
+              access.dest_reg = inst.rt.value_or(Register::kZero);
+            }
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
             switch (inst.opcode) {
@@ -111,7 +115,11 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
             FoldedSymbolAccess access;
             access.type = FoldedPatternType::kGlobalStore;
             access.address = target_address;
-            access.src_reg = inst.rt.value_or(Register::kZero);
+            if (inst.opcode == Opcode::kSwc1 || inst.opcode == Opcode::kSdc1) {
+              access.src_fp_reg = inst.ft;
+            } else {
+              access.src_reg = inst.rt.value_or(Register::kZero);
+            }
             access.hi_inst_index = hi_idx;
             access.lo_inst_index = i;
             switch (inst.opcode) {

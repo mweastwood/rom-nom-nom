@@ -920,5 +920,38 @@ TEST(AstConverterTest, SltiuAssignmentProducesUnsignedCast) {
   EXPECT_THAT(code, HasSubstr("(u32)arg0 < 1"));
 }
 
+TEST(AstConverterTest, DoesNotDeclareSynthesizedDataGlobalsAsLocalVariables) {
+  std::vector<uint32_t> words = {
+      0x3C018017,  // 0: lui  $at, 0x8017
+      0xC4220450,  // 4: lwc1 $f2, 1104($at)
+      0x03E00008,  // 8: jr   $ra
+      0x00000000,  // C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestGlobalDataNotLocal";
+
+  auto index_or = SymbolIndex::ParseFromTextproto("");
+  ASSERT_TRUE(index_or.ok());
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("s32 D_80170450;")));
+  EXPECT_THAT(code, HasSubstr("&D_80170450"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

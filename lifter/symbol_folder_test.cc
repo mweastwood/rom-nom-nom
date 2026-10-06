@@ -232,5 +232,34 @@ TEST(SymbolFolderTest, SizedGlobalAccess) {
   EXPECT_EQ(folder.AllFolded()[2].lo_inst_index, 5u);
 }
 
+TEST(SymbolFolderTest, FoldsFloatingPointGlobalLoadAndStore) {
+  std::vector<uint32_t> words = {
+      0x3C018017,  // 0: lui  $at, 0x8017
+      0xC4220450,  // 1: lwc1 $f2, 1104($at)
+      0x3C018017,  // 2: lui  $at, 0x8017
+      0xE4220450,  // 3: swc1 $f2, 1104($at)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+
+  // Global load
+  const auto& load_folded = folder.AllFolded()[0];
+  EXPECT_EQ(load_folded.type, FoldedPatternType::kGlobalLoad);
+  EXPECT_EQ(load_folded.address, 0x80170450u);
+  EXPECT_EQ(load_folded.access_type, "f32");
+  EXPECT_THAT(load_folded.dest_fp_reg, ::testing::Optional(FpRegister::kF2));
+
+  // Global store
+  const auto& store_folded = folder.AllFolded()[1];
+  EXPECT_EQ(store_folded.type, FoldedPatternType::kGlobalStore);
+  EXPECT_EQ(store_folded.address, 0x80170450u);
+  EXPECT_EQ(store_folded.access_type, "f32");
+  EXPECT_THAT(store_folded.src_fp_reg, ::testing::Optional(FpRegister::kF2));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
