@@ -1757,43 +1757,50 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
     }
   }
 
-  // 5. Determine whether emitting def_inst as a statement can be safely suppressed
-  bool can_suppress = false;
-  if (*cond_reg == Register::kAt) {
-    can_suppress = true;
-  } else {
-    // If cond_reg is an input to def_inst, emitting def_inst as an assignment clobbers
-    // its own input, corrupting the folded branch expression. It must be suppressed.
-    bool cond_is_input = false;
-    for (Register r : def_ud.gpr_uses) {
+  // 5. Check if cond_reg is an input to def_inst (in-place modification / self-clobbering)
+  bool cond_is_input = false;
+  for (Register r : def_ud.gpr_uses) {
+    if (r == *cond_reg) {
+      cond_is_input = true;
+      break;
+    }
+  }
+
+  bool delay_clobbers_cond = false;
+  if (branch_idx + 1 < static_cast<int>(instructions.size())) {
+    const auto& delay = instructions[branch_idx + 1];
+    RegisterUseDef delay_ud = GetInstructionUseDef(delay);
+    bool delay_uses_cond = false;
+    for (Register r : delay_ud.gpr_uses) {
       if (r == *cond_reg) {
-        cond_is_input = true;
+        delay_uses_cond = true;
         break;
       }
     }
-    if (cond_is_input) {
-      can_suppress = true;
-    } else if (branch_idx + 1 < static_cast<int>(instructions.size())) {
-      const auto& delay = instructions[branch_idx + 1];
-      RegisterUseDef delay_ud = GetInstructionUseDef(delay);
-      bool delay_uses_cond = false;
-      for (Register r : delay_ud.gpr_uses) {
-        if (r == *cond_reg) {
-          delay_uses_cond = true;
-          break;
-        }
-      }
-      bool delay_defs_cond = false;
-      for (Register r : delay_ud.gpr_defs) {
-        if (r == *cond_reg) {
-          delay_defs_cond = true;
-          break;
-        }
-      }
-      if (!delay_uses_cond && delay_defs_cond) {
-        can_suppress = true;
+    bool delay_defs_cond = false;
+    for (Register r : delay_ud.gpr_defs) {
+      if (r == *cond_reg) {
+        delay_defs_cond = true;
+        break;
       }
     }
+    if (!delay_uses_cond && delay_defs_cond) {
+      delay_clobbers_cond = true;
+    }
+  }
+
+  // If def_inst mutates cond_reg in place (cond_is_input) and cond_reg is not $at,
+  // we can only fold and suppress def_inst if the delay slot immediately clobbers cond_reg.
+  // Otherwise, def_inst is an in-place variable mutation that must be preserved as a
+  // statement and cannot be folded into the branch condition.
+  if (cond_is_input && *cond_reg != Register::kAt && !delay_clobbers_cond) {
+    return std::nullopt;
+  }
+
+  // Determine whether emitting def_inst as a statement can be safely suppressed
+  bool can_suppress = false;
+  if (*cond_reg == Register::kAt || delay_clobbers_cond) {
+    can_suppress = true;
   }
 
   return FoldedComparison{static_cast<size_t>(def_idx), can_suppress};

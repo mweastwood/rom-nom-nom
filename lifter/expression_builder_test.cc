@@ -964,5 +964,22 @@ TEST(ExpressionBuilderTest, DetermineFpParameterCountAndPassesFpArgsToCalls) {
   EXPECT_EQ(caller_stmts[0].ToString(), "func_80080000(f12, f14);\n");
 }
 
+TEST(ExpressionBuilderTest, FindFoldedComparisonDoesNotFoldSelfMutatingInstructionWithoutClobber) {
+  // Pattern matching func_8002CDB4:
+  // andi  $a0, $a0, 0xFFFF
+  // beqz  $a0, +6
+  // addu  $v1, $zero, $zero
+  // Because $a0 is mutated in place and the delay slot does not redefine $a0,
+  // the andi instruction must not be folded/suppressed.
+  std::vector<uint32_t> words = {
+      0x3084FFFF,  // 0: andi $a0, $a0, 0xFFFF
+      0x10800006,  // 4: beqz $a0, +6
+      0x00001821,  // 8: addu $v1, $zero, $zero
+  };
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  EXPECT_FALSE(folded.has_value());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
