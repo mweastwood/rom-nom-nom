@@ -1299,7 +1299,23 @@ int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> ins
   absl::flat_hash_set<Register> defined_registers;
   absl::flat_hash_set<Register> used_before_definition;
 
-  for (const auto& instruction : instructions) {
+  for (size_t i = 0; i < instructions.size(); ++i) {
+    const auto& instruction = instructions[i];
+    bool is_call = (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr);
+
+    if (is_call && i + 1 < instructions.size()) {
+      const auto& delay_inst = instructions[i + 1];
+      RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+      for (Register used_register : delay_ud.gpr_uses) {
+        if (!defined_registers.contains(used_register)) {
+          used_before_definition.insert(used_register);
+        }
+      }
+      for (Register defined_register : delay_ud.gpr_defs) {
+        defined_registers.insert(defined_register);
+      }
+    }
+
     RegisterUseDef use_def = GetInstructionUseDef(instruction);
     for (Register used_register : use_def.gpr_uses) {
       if (!defined_registers.contains(used_register)) {
@@ -1309,12 +1325,15 @@ int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> ins
     for (Register defined_register : use_def.gpr_defs) {
       defined_registers.insert(defined_register);
     }
-    if (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr) {
+    if (is_call) {
       // Subroutine calls may clobber argument registers; from caller perspective they are redefined
       defined_registers.insert(Register::kA0);
       defined_registers.insert(Register::kA1);
       defined_registers.insert(Register::kA2);
       defined_registers.insert(Register::kA3);
+      if (i + 1 < instructions.size()) {
+        ++i;  // Delay slot was already processed
+      }
     }
   }
 
@@ -1337,7 +1356,23 @@ int ExpressionBuilder::DetermineFpParameterCount(absl::Span<const Instruction> i
   absl::flat_hash_set<FpRegister> defined_fprs;
   absl::flat_hash_set<FpRegister> used_fprs_before_def;
 
-  for (const auto& instruction : instructions) {
+  for (size_t i = 0; i < instructions.size(); ++i) {
+    const auto& instruction = instructions[i];
+    bool is_call = (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr);
+
+    if (is_call && i + 1 < instructions.size()) {
+      const auto& delay_inst = instructions[i + 1];
+      RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+      for (FpRegister used_reg : delay_ud.fpr_uses) {
+        if (!defined_fprs.contains(used_reg)) {
+          used_fprs_before_def.insert(used_reg);
+        }
+      }
+      for (FpRegister def_reg : delay_ud.fpr_defs) {
+        defined_fprs.insert(def_reg);
+      }
+    }
+
     RegisterUseDef use_def = GetInstructionUseDef(instruction);
     for (FpRegister used_reg : use_def.fpr_uses) {
       if (!defined_fprs.contains(used_reg)) {
@@ -1347,9 +1382,12 @@ int ExpressionBuilder::DetermineFpParameterCount(absl::Span<const Instruction> i
     for (FpRegister def_reg : use_def.fpr_defs) {
       defined_fprs.insert(def_reg);
     }
-    if (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr) {
+    if (is_call) {
       defined_fprs.insert(FpRegister::kF12);
       defined_fprs.insert(FpRegister::kF14);
+      if (i + 1 < instructions.size()) {
+        ++i;  // Delay slot was already processed
+      }
     }
   }
 

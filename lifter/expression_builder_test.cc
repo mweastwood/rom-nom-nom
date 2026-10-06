@@ -211,6 +211,24 @@ TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesUsedArguments) {
   EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(zero_args_insts), 0);
 }
 
+TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesArgumentsUsedInCallDelaySlot) {
+  // Pattern matching RandomRange:
+  // 0: addu $s1, $a0, $zero
+  // 4: jal  0x80001000
+  // 8: addu $s0, $a1, $zero  (delay slot uses $a1 before call clobbers arguments)
+  // C: jr   $ra
+  // 10: nop
+  std::vector<uint32_t> words = {
+      0x00808821,  // 0: addu $s1, $a0, $zero
+      0x0C000400,  // 4: jal  0x80001000
+      0x00A08021,  // 8: addu $s0, $a1, $zero
+      0x03E00008,  // C: jr   $ra
+      0x00000000,  // 10: nop
+  };
+  auto insts = *DecodeSequence(words);
+  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(insts), 2);
+}
+
 TEST(ExpressionBuilderTest, JalDelaySlotReorderingPassesArgumentToCall) {
   // Call target: 0x80001000
   // 0: jal   0x80001000
