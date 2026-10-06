@@ -466,6 +466,28 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0LoopVoidFunction) {
   EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
 }
 
+TEST(ExpressionBuilderTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) {
+  // Pattern matching GraphicInit:
+  // Loop defines $v0, then on loop exit an external call occurs, then the function returns without
+  // redefining $v0. The call clobbers $v0, so the function should be detected as returning void
+  // (not returning $v0).
+  std::vector<uint32_t> words = {
+      0x308200FF,  // 00: andi  $v0, $a0, 0xFF
+      0x2C420002,  // 04: sltiu $v0, $v0, 2
+      0x1440FFFD,  // 08: bnez  $v0, -3 -> 0x80020000
+      0x308200FF,  // 0C: andi  $v0, $a0, 0xFF
+      0x0C000400,  // 10: jal   0x80001000
+      0x00000000,  // 14: nop
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
 TEST(ExpressionBuilderTest, NorBitwiseNot) {
   // nor $v0, $zero, $a0 (bitwise NOT / unary ~)
   std::vector<uint32_t> words = {

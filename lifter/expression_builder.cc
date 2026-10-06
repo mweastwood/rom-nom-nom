@@ -1414,6 +1414,7 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
   // Pre-calculate per-block properties for $v0
   struct BlockV0Props {
     bool has_return = false;
+    bool has_call = false;
     bool defines_v0 = false;
     bool v0_used_after_last_def = false;
     bool uses_v0_before_def = false;
@@ -1428,6 +1429,16 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
 
     int last_def_idx = -1;
     for (size_t i = 0; i < block.instructions.size(); ++i) {
+      if (block.instructions[i].opcode == Opcode::kJal ||
+          block.instructions[i].opcode == Opcode::kJalr) {
+        props.has_call = true;
+        // Subroutine call clobbers any prior $v0 definition in this block
+        last_def_idx = -1;
+        props.defines_v0 = false;
+        props.v0_used_after_last_def = false;
+        continue;
+      }
+
       RegisterUseDef ud = GetInstructionUseDef(block.instructions[i]);
       bool uses_v0 = false;
       for (Register r : ud.gpr_uses) {
@@ -1471,6 +1482,11 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
     int last_def = -1;
     bool used_after_last_def = false;
     for (size_t i = 0; i < instructions.size(); ++i) {
+      if (instructions[i].opcode == Opcode::kJal || instructions[i].opcode == Opcode::kJalr) {
+        last_def = -1;
+        used_after_last_def = false;
+        continue;
+      }
       RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
       for (Register r : ud.gpr_uses) {
         if (r == Register::kV0) {
@@ -1530,13 +1546,13 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
         }
 
         // If this block is an exit block and does not redefine $v0,
-        // the unconsumed definition reaches the return!
-        if (curr_props.has_return && !curr_props.defines_v0) {
+        // the unconsumed definition reaches the return only if no call intervened!
+        if (curr_props.has_return && !curr_props.defines_v0 && !curr_props.has_call) {
           return true;
         }
 
-        // If this block defines $v0, it redefines $v0 (kills the incoming def).
-        if (curr_props.defines_v0) {
+        // If this block defines $v0 or contains a call, it kills the incoming def.
+        if (curr_props.defines_v0 || curr_props.has_call) {
           continue;
         }
 
