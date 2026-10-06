@@ -388,6 +388,12 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("mfc1  %s, %s", reg_str(rt), fp_reg_str(fs));
     case Opcode::kMtc1:
       return absl::StrFormat("mtc1  %s, %s", reg_str(rt), fp_reg_str(fs));
+    case Opcode::kCfc1:
+      return absl::StrFormat("cfc1  %s, $%d", reg_str(rt),
+                             static_cast<int>(fs.value_or(FpRegister::kF0)));
+    case Opcode::kCtc1:
+      return absl::StrFormat("ctc1  %s, $%d", reg_str(rt),
+                             static_cast<int>(fs.value_or(FpRegister::kF0)));
     case Opcode::kDmfc1:
       return absl::StrFormat("dmfc1 %s, %s", reg_str(rt), fp_reg_str(fs));
     case Opcode::kDmtc1:
@@ -679,6 +685,12 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
       inst.fs = ToFpRegister(rd_val);
       return inst;
     }
+    if (rs_val == 0x02) {
+      inst.opcode = Opcode::kCfc1;
+      inst.rt = ToRegister(rt_val);
+      inst.fs = ToFpRegister(rd_val);
+      return inst;
+    }
     if (rs_val == 0x04) {
       inst.opcode = Opcode::kMtc1;
       inst.rt = ToRegister(rt_val);
@@ -687,6 +699,12 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     }
     if (rs_val == 0x05) {
       inst.opcode = Opcode::kDmtc1;
+      inst.rt = ToRegister(rt_val);
+      inst.fs = ToFpRegister(rd_val);
+      return inst;
+    }
+    if (rs_val == 0x06) {
+      inst.opcode = Opcode::kCtc1;
       inst.rt = ToRegister(rt_val);
       inst.fs = ToFpRegister(rd_val);
       return inst;

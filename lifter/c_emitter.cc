@@ -83,6 +83,17 @@ std::string CTranslationUnit::ToString() const {
 
   if (!external_function_names.empty()) {
     for (const auto& external_function : external_function_names) {
+      if (external_function == "sqrtf" || external_function == "fabsf" ||
+          external_function == "sqrt" || external_function == "fabs") {
+        if (symbol_index != nullptr && symbol_index->FindByName(external_function) != nullptr) {
+          if (external_function == "sqrtf" || external_function == "fabsf") {
+            output += absl::StrFormat("extern f32 %s(f32);\n", external_function);
+          } else {
+            output += absl::StrFormat("extern f64 %s(f64);\n", external_function);
+          }
+        }
+        continue;
+      }
       output += absl::StrFormat("extern void %s();\n", external_function);
     }
     output += "\n";

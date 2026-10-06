@@ -104,24 +104,36 @@ class ExpressionBuilder {
   static std::vector<LiftedStatement> LiftBlock(
       const BasicBlock& block, const SymbolIndex* symbol_index = nullptr,
       const SplitConfig* split_config = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr);
+      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
+      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr);
 
   // Lifts a raw sequence of instructions into high-level statements.
   static std::vector<LiftedStatement> LiftInstructions(
       absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index = nullptr,
       const SplitConfig* split_config = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr);
+      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
+      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr);
 
   // Analyzes register usage across instructions to determine the number of parameters ($a0-$a3)
   // expected by a function (via use-before-definition).
   static int DetermineParameterCount(absl::Span<const Instruction> instructions);
 
+  // Analyzes register usage across instructions to determine the number of float parameters ($f12,
+  // $f14) expected by a function (via use-before-definition).
+  static int DetermineFpParameterCount(absl::Span<const Instruction> instructions);
+
   // Analyzes the CFG to determine if the function returns a value in $v0.
   // Returns true if there is an unconsumed definition of $v0 that reaches a return instruction.
   static bool DetermineReturnsV0(const ControlFlowGraph& cfg);
 
+  // Analyzes the CFG to determine if the function returns a float value in $f0.
+  static bool DetermineReturnsF0(const ControlFlowGraph& cfg);
+
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);
+
+  // Maps a COP1 floating point register to its clean variable name (e.g. "f0", "f12").
+  static std::string FpRegisterVarName(FpRegister reg);
 
   // Information about a comparison instruction folded into a subsequent conditional branch.
   struct FoldedComparison {

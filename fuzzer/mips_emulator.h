@@ -140,6 +140,12 @@ class MipsEmulator {
   void SetFpuCondition(bool cond) { fpu_cond_ = cond; }
   bool GetFpuCondition() const { return fpu_cond_; }
 
+  uint32_t GetFcr31() const { return (fcr31_ & ~(1u << 23)) | (fpu_cond_ ? (1u << 23) : 0); }
+  void SetFcr31(uint32_t val) {
+    fcr31_ = val;
+    fpu_cond_ = (val & (1u << 23)) != 0;
+  }
+
   // Memory access
   bool Read8(uint32_t vram, uint8_t* val) const;
   bool Read16(uint32_t vram, uint16_t* val) const;
@@ -197,6 +203,7 @@ class MipsEmulator {
 
   uint32_t gpr_[32] = {0};
   uint32_t fpr_bits_[32] = {0};
+  uint32_t fcr31_ = 0;
   bool fpu_cond_ = false;
 
   uint32_t hi_ = 0;

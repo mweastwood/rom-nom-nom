@@ -26,6 +26,7 @@ struct AstConverterOptions {
   bool is_static = false;
   const SplitConfig* split_config = nullptr;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr;
+  const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr;
 };
 
 // Converts structured control flow regions and lifted basic blocks into a C FunctionDeclaration

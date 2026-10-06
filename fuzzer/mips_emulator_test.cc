@@ -1395,5 +1395,33 @@ TEST(MipsEmulatorTest, MmioPollingLoopTerminatesOnStatus) {
   EXPECT_LT(res.total_steps, 10u);
 }
 
+TEST(MipsEmulatorTest, FloatingPointControlRegistersCfc1Ctc1) {
+  // Test CFC1 / CTC1 with FCR31 and FCR0:
+  // 00: cfc1  $v0, $0      (read FCR0 -> 0x00000B00)
+  // 04: addiu $t0, $zero, 1
+  // 08: sll   $t0, $t0, 23 (bit 23 = FPU condition)
+  // 0C: ctc1  $t0, $31     (write FCR31 with condition bit set)
+  // 10: cfc1  $v1, $31     (read FCR31)
+  // 14: jr    $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x44420000,  // cfc1  $v0, $0
+      0x24080001,  // addiu $t0, $zero, 1
+      0x000845C0,  // sll   $t0, $t0, 23
+      0x44C8F800,  // ctc1  $t0, $31
+      0x4443F800,  // cfc1  $v1, $31
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  MipsEmulator emu;
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0x00000B00u);
+  EXPECT_EQ(res.v1, (1u << 23));
+  EXPECT_TRUE(emu.GetFpuCondition());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

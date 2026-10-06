@@ -846,5 +846,48 @@ TEST(AstConverterTest, BranchLikelyInvertedIfElseDelaySlotPreserved) {
   EXPECT_THAT(code, HasSubstr("} else {\n        arg2 = (arg2 + 1);"));
 }
 
+TEST(AstConverterTest, DeclaresFpRegistersWithProperFloatTypesAndFoldsCop1Branch) {
+  std::vector<uint32_t> words = {
+      0x46041000,  // 00: add.s $f0, $f2, $f4
+      0x4602003C,  // 04: c.lt.s $f0, $f2
+      0x45010004,  // 08: bc1t  +4 (to 1C)
+      0x00000000,  // 0C: nop
+      0x46307300,  // 10: add.d $f12, $f14, $f16
+      0x03E00008,  // 14: jr    $ra
+      0x00000000,  // 18: nop
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "FloatTest";
+
+  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // Single precision variables are f32
+  EXPECT_THAT(code, HasSubstr("f32 f0;"));
+  EXPECT_THAT(code, HasSubstr("f32 f2;"));
+  EXPECT_THAT(code, HasSubstr("f32 f4;"));
+  // Double precision variables are f64
+  EXPECT_THAT(code, HasSubstr("f64 f12;"));
+  EXPECT_THAT(code, HasSubstr("f64 f14;"));
+  EXPECT_THAT(code, HasSubstr("f64 f16;"));
+  // Branch comparison is folded directly
+  EXPECT_THAT(code, HasSubstr("f0 < f2"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

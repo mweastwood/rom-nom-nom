@@ -205,6 +205,58 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
       if (inst.fs) ud.fpr_defs.push_back(*inst.fs);
       break;
 
+    case Opcode::kCfc1:
+      add_gpr_def(inst.rt);
+      break;
+
+    case Opcode::kCtc1:
+      add_gpr_use(inst.rt);
+      break;
+
+    // FPU 3-register arithmetic
+    case Opcode::kAddS:
+    case Opcode::kSubS:
+    case Opcode::kMulS:
+    case Opcode::kDivS:
+    case Opcode::kAddD:
+    case Opcode::kSubD:
+    case Opcode::kMulD:
+    case Opcode::kDivD:
+      if (inst.fs) ud.fpr_uses.push_back(*inst.fs);
+      if (inst.ft) ud.fpr_uses.push_back(*inst.ft);
+      if (inst.fd) ud.fpr_defs.push_back(*inst.fd);
+      break;
+
+    // FPU 2-register unary and conversion ops
+    case Opcode::kSqrtS:
+    case Opcode::kAbsS:
+    case Opcode::kMovS:
+    case Opcode::kNegS:
+    case Opcode::kSqrtD:
+    case Opcode::kAbsD:
+    case Opcode::kMovD:
+    case Opcode::kNegD:
+    case Opcode::kCvtSD:
+    case Opcode::kCvtDS:
+    case Opcode::kCvtSW:
+    case Opcode::kCvtDW:
+    case Opcode::kTruncWS:
+    case Opcode::kTruncWD:
+      if (inst.fs) ud.fpr_uses.push_back(*inst.fs);
+      if (inst.fd) ud.fpr_defs.push_back(*inst.fd);
+      break;
+
+    // FPU Comparisons
+    case Opcode::kCEqS:
+    case Opcode::kCLtS:
+    case Opcode::kCLeS:
+    case Opcode::kCEqD:
+    case Opcode::kCLtD:
+    case Opcode::kCLeD:
+      if (inst.fs) ud.fpr_uses.push_back(*inst.fs);
+      if (inst.ft) ud.fpr_uses.push_back(*inst.ft);
+      break;
+
     default:
       break;
   }

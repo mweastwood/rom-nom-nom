@@ -63,7 +63,8 @@ absl::StatusOr<LifterResult> LifterPipeline::Decompile(std::string_view func_nam
 
 absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
     const LoadedFunction& loaded_func,
-    const absl::flat_hash_map<std::string, int>* function_parameter_counts) const {
+    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
+    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts) const {
   if (loaded_func.instructions.empty()) {
     return absl::InvalidArgumentError("LifterPipeline: No instructions to decompile.");
   }
@@ -98,6 +99,7 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   converter_opts.function_name = loaded_func.name;
   converter_opts.split_config = loaded_func.split_config;
   converter_opts.function_parameter_counts = function_parameter_counts;
+  converter_opts.function_fp_parameter_counts = function_fp_parameter_counts;
 
   FunctionDeclaration ast =
       AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);
@@ -134,6 +136,7 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
   std::vector<LoadedFunction> loaded_functions;
   loaded_functions.reserve(func_names.size());
   absl::flat_hash_map<std::string, int> parameter_counts;
+  absl::flat_hash_map<std::string, int> fp_parameter_counts;
 
   for (const auto& func_name : func_names) {
     auto loaded_or = loader_->LoadFunction(func_name);
@@ -142,11 +145,13 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
     }
     parameter_counts[loaded_or->name] =
         ExpressionBuilder::DetermineParameterCount(loaded_or->instructions);
+    fp_parameter_counts[loaded_or->name] =
+        ExpressionBuilder::DetermineFpParameterCount(loaded_or->instructions);
     loaded_functions.push_back(std::move(*loaded_or));
   }
 
   for (const auto& loaded_func : loaded_functions) {
-    auto res_or = DecompileFunction(loaded_func, &parameter_counts);
+    auto res_or = DecompileFunction(loaded_func, &parameter_counts, &fp_parameter_counts);
     if (!res_or.ok()) {
       return res_or.status();
     }
@@ -324,6 +329,28 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
   std::error_code ec;
   std::filesystem::create_directories(output_dir, ec);
 
+  // Track all defined functions across modules so we do not generate linker script
+  // fallback definitions for functions that have implementations.
+  absl::flat_hash_set<std::string> defined_function_names;
+  for (const auto& module_name : *modules_or) {
+    auto functions_or = GetFunctionsInModule(module_name);
+    if (functions_or.ok()) {
+      for (const auto& function_name : *functions_or) {
+        defined_function_names.insert(function_name);
+      }
+    }
+  }
+
+  const auto* symbols = (loader_ != nullptr && loader_->Extractor() != nullptr)
+                            ? loader_->Extractor()->Symbols()
+                            : nullptr;
+
+  auto has_symbol_or_func = [&](const std::string& name) {
+    if (defined_function_names.contains(name)) return true;
+    if (symbols != nullptr && symbols->FindByName(name) != nullptr) return true;
+    return false;
+  };
+
   // Generate self-contained standard types header
   std::filesystem::path types_file_path = output_dir / "types.h";
   std::ofstream types_output_stream(types_file_path);
@@ -343,27 +370,51 @@ typedef unsigned long long u64;
 typedef float f32;
 typedef double f64;
 
-#endif  // TYPES_H
 )";
+    if (!has_symbol_or_func("sqrtf")) {
+      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
+static inline f32 sqrtf(f32 x) {
+  f32 res;
+  __asm__("sqrt.s %0, %1" : "=f"(res) : "f"(x));
+  return res;
+}
+#endif
+)";
+    }
+    if (!has_symbol_or_func("sqrt")) {
+      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
+static inline f64 sqrt(f64 x) {
+  f64 res;
+  __asm__("sqrt.d %0, %1" : "=f"(res) : "f"(x));
+  return res;
+}
+#endif
+)";
+    }
+    if (!has_symbol_or_func("fabsf")) {
+      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
+static inline f32 fabsf(f32 x) {
+  f32 res;
+  __asm__("abs.s %0, %1" : "=f"(res) : "f"(x));
+  return res;
+}
+#endif
+)";
+    }
+    if (!has_symbol_or_func("fabs")) {
+      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
+static inline f64 fabs(f64 x) {
+  f64 res;
+  __asm__("abs.d %0, %1" : "=f"(res) : "f"(x));
+  return res;
+}
+#endif
+)";
+    }
+    types_output_stream << "\n#endif  // TYPES_H\n";
   }
 
   std::vector<std::string> default_headers = {"types.h"};
-
-  // Track all defined functions across modules so we do not generate linker script
-  // fallback definitions for functions that have implementations.
-  absl::flat_hash_set<std::string> defined_function_names;
-  for (const auto& module_name : *modules_or) {
-    auto functions_or = GetFunctionsInModule(module_name);
-    if (functions_or.ok()) {
-      for (const auto& function_name : *functions_or) {
-        defined_function_names.insert(function_name);
-      }
-    }
-  }
-
-  const auto* symbols = (loader_ != nullptr && loader_->Extractor() != nullptr)
-                            ? loader_->Extractor()->Symbols()
-                            : nullptr;
 
   std::set<std::string> seen_symbols;
   std::vector<std::pair<std::string, std::string>> undefined_auto_symbols;

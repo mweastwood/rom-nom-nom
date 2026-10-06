@@ -75,7 +75,8 @@ class LifterPipeline {
   // Decompiles an already loaded or synthesized function directly.
   absl::StatusOr<LifterResult> DecompileFunction(
       const LoadedFunction& loaded_func,
-      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr) const;
+      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
+      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr) const;
 
   const LifterPipelineOptions& Options() const { return options_; }
   const FunctionLoader* Loader() const { return loader_.get(); }

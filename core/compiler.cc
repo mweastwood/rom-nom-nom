@@ -8,6 +8,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 
 namespace rom_nom_nom {
 
@@ -81,8 +82,19 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
                           gcc_result->stdout_output, gcc_result->stderr_output));
     }
 
-    auto as_args = toolchain_.BuildKmcAsArgs(options.opt_flags, options.include_dirs,
-                                             options.macro_inc, temp_s272, options.out_obj);
+    std::vector<std::filesystem::path> as_include_dirs;
+    for (const auto& inc : options.include_dirs) {
+      std::error_code ec;
+      if (std::filesystem::exists(inc / "macro.inc", ec)) {
+        as_include_dirs.push_back(inc);
+      }
+    }
+    if (as_include_dirs.empty()) {
+      as_include_dirs = options.include_dirs;
+    }
+
+    auto as_args = toolchain_.BuildKmcAsArgs(options.opt_flags, as_include_dirs, options.macro_inc,
+                                             temp_s272, options.out_obj);
 
     ProcessOptions as_opts{
         .program = toolchain_.KmcAs().string(),
@@ -99,10 +111,10 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
       return as_result.status();
     }
     if (!as_result->Ok()) {
-      return absl::InternalError(
-          absl::StrFormat("CompileC: KMC AS assembly failed for '%s' (exit code %d):\n%s\n%s",
-                          options.src_file.string(), as_result->exit_code, as_result->stdout_output,
-                          as_result->stderr_output));
+      return absl::InternalError(absl::StrFormat(
+          "CompileC: KMC AS assembly failed for '%s' (exit code %d):\n%s\n%s\nCommand: %s %s",
+          options.src_file.string(), as_result->exit_code, as_result->stdout_output,
+          as_result->stderr_output, as_opts.program, absl::StrJoin(as_opts.args, " ")));
     }
     return absl::OkStatus();
   }

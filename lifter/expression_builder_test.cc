@@ -801,5 +801,128 @@ TEST(ExpressionBuilderTest, LiftsStackPointerBitwiseOperations) {
   EXPECT_EQ(statements[0].ToString(), "v0 = (s32)sp | arg0;\n");
 }
 
+TEST(ExpressionBuilderTest, LiftsCop1ArithmeticAndUnary) {
+  std::vector<uint32_t> words = {
+      0x46041000,  // 0: add.s $f0, $f2, $f4
+      0x46080182,  // 4: mul.s $f6, $f0, $f8
+      0x46023281,  // 8: sub.s $f10, $f6, $f2
+      0x46045303,  // C: div.s $f12, $f10, $f4
+      0x46006387,  // 10: neg.s $f14, $f12
+      0x46007404,  // 14: sqrt.s $f16, $f14
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 6u);
+  EXPECT_EQ(statements[0].ToString(), "f0 = f2 + f4;\n");
+  EXPECT_EQ(statements[1].ToString(), "f6 = f0 * f8;\n");
+  EXPECT_EQ(statements[2].ToString(), "f10 = f6 - f2;\n");
+  EXPECT_EQ(statements[3].ToString(), "f12 = f10 / f4;\n");
+  EXPECT_EQ(statements[4].ToString(), "f14 = -f12;\n");
+  EXPECT_EQ(statements[5].ToString(), "f16 = sqrtf(f14);\n");
+}
+
+TEST(ExpressionBuilderTest, LiftsCop1MemoryLoadsAndStores) {
+  std::vector<uint32_t> words = {
+      0xC4800000,  // 0: lwc1 $f0, 0($a0)
+      0xE4A00004,  // 4: swc1 $f0, 4($a1)
+      0xC7A20010,  // 8: lwc1 $f2, 16($sp)
+      0xE7A20014,  // C: swc1 $f2, 20($sp)
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 4u);
+  EXPECT_EQ(statements[0].ToString(), "f0 = *(f32*)arg0;\n");
+  EXPECT_EQ(statements[1].ToString(), "*(f32*)(arg1 + 4) = f0;\n");
+  EXPECT_EQ(statements[2].ToString(), "f2 = *(f32*)&var_sp_16;\n");
+  EXPECT_EQ(statements[3].ToString(), "*(f32*)&var_sp_20 = f2;\n");
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonCop1Branch) {
+  std::vector<uint32_t> words = {
+      0x4602003C,  // 0: c.lt.s $f0, $f2
+      0x00000000,  // 4: nop
+      0x45010002,  // 8: bc1t +2
+      0x00000000,  // C: nop
+  };
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  ASSERT_TRUE(folded.has_value());
+  EXPECT_EQ(folded->instruction_index, 0u);
+  EXPECT_TRUE(folded->can_suppress_statement);
+}
+
+TEST(ExpressionBuilderTest, LiftsCop1CpuMovesAndControlRegisters) {
+  std::vector<uint32_t> words = {
+      0x44020000,  // 0: mfc1 $v0, $f0
+      0x44801000,  // 4: mtc1 $zero, $f2
+      0x44842000,  // 8: mtc1 $a0, $f4
+      0x4443F800,  // C: cfc1 $v1, $31
+      0x44C5F800,  // 10: ctc1 $a1, $31
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 5u);
+  EXPECT_EQ(statements[0].ToString(), "v0 = *(s32*)&f0;\n");
+  EXPECT_EQ(statements[1].ToString(), "f2 = 0.0f;\n");
+  EXPECT_EQ(statements[2].ToString(), "f4 = *(f32*)&arg0;\n");
+  EXPECT_EQ(statements[3].ToString(), "v1 = fcr31;\n");
+  EXPECT_EQ(statements[4].ToString(), "fcr31 = arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, LiftsCop1ConversionsAndDoubleOps) {
+  std::vector<uint32_t> words = {
+      0x46801020,  // 0: cvt.s.w $f0, $f2
+      0x4600010D,  // 4: trunc.w.s $f4, $f0
+      0x46307300,  // 8: add.d $f12, $f14, $f16
+      0xD7B40028,  // C: ldc1 $f20, 40($sp)
+      0xF7B40030,  // 10: sdc1 $f20, 48($sp)
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 5u);
+  EXPECT_EQ(statements[0].ToString(), "f0 = (f32)f2;\n");
+  EXPECT_EQ(statements[1].ToString(), "f4 = (s32)f0;\n");
+  EXPECT_EQ(statements[2].ToString(), "f12 = f14 + f16;\n");
+  EXPECT_EQ(statements[3].ToString(), "f20 = *(f64*)&var_sp_40;\n");
+  EXPECT_EQ(statements[4].ToString(), "*(f64*)&var_sp_48 = f20;\n");
+}
+
+TEST(ExpressionBuilderTest, DetermineFpParameterCountAndPassesFpArgsToCalls) {
+  // Function that takes f12 and f14 (uses both before definition)
+  std::vector<uint32_t> callee_words = {
+      0x462E6032,  // c.eq.d $f12, $f14
+      0x45010002,  // bc1t +2
+      0x00000000,  // nop
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto callee_insts = *DecodeSequence(callee_words);
+  EXPECT_EQ(ExpressionBuilder::DetermineFpParameterCount(callee_insts), 2);
+
+  // Function that defines f12 before use (takes 0 FP parameters)
+  std::vector<uint32_t> non_callee_words = {
+      0x44806000,  // mtc1 $zero, $f12
+      0x46006005,  // abs.s $f0, $f12
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto non_callee_insts = *DecodeSequence(non_callee_words);
+  EXPECT_EQ(ExpressionBuilder::DetermineFpParameterCount(non_callee_insts), 0);
+
+  // Caller that calls func_fp_2 via jal
+  std::vector<uint32_t> caller_words = {
+      0x0C020000,  // jal func_80080000
+      0x00000000,  // nop
+  };
+  auto caller_insts = *DecodeSequence(caller_words, 0x80010000);
+  absl::flat_hash_map<std::string, int> gpr_counts = {{"func_80080000", 0}};
+  absl::flat_hash_map<std::string, int> fp_counts = {{"func_80080000", 2}};
+
+  auto caller_stmts =
+      ExpressionBuilder::LiftInstructions(caller_insts, nullptr, nullptr, &gpr_counts, &fp_counts);
+  ASSERT_GE(caller_stmts.size(), 1u);
+  EXPECT_EQ(caller_stmts[0].ToString(), "func_80080000(f12, f14);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

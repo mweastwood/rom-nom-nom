@@ -193,6 +193,8 @@ enum class Opcode : uint16_t {
   kSdc1,
   kMfc1,
   kMtc1,
+  kCfc1,
+  kCtc1,
   kDmfc1,
   kDmtc1,
   kAddS,

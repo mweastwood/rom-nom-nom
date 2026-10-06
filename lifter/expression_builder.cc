@@ -190,7 +190,19 @@ std::string ExpressionBuilder::RegisterVarName(Register reg) {
   }
 }
 
+std::string ExpressionBuilder::FpRegisterVarName(FpRegister reg) {
+  std::string_view name = FpRegisterName(reg);
+  if (!name.empty() && name[0] == '$') {
+    return std::string(name.substr(1));
+  }
+  return std::string(name);
+}
+
 namespace {
+
+std::unique_ptr<LiftedExpression> LiftFpRegister(FpRegister reg) {
+  return LiftedExpression::Variable(ExpressionBuilder::FpRegisterVarName(reg));
+}
 
 std::string StackVarName(int32_t offset) {
   if (offset < 0) {
@@ -221,15 +233,17 @@ std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
 
 std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
     const BasicBlock& block, const SymbolIndex* symbol_index, const SplitConfig* split_config,
-    const absl::flat_hash_map<std::string, int>* function_parameter_counts) {
-  return LiftInstructions(block.instructions, symbol_index, split_config,
-                          function_parameter_counts);
+    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
+    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts) {
+  return LiftInstructions(block.instructions, symbol_index, split_config, function_parameter_counts,
+                          function_fp_parameter_counts);
 }
 
 std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
     const SplitConfig* split_config,
-    const absl::flat_hash_map<std::string, int>* function_parameter_counts) {
+    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
+    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts) {
   std::vector<LiftedStatement> statements;
   if (instructions.empty()) {
     return statements;
@@ -881,8 +895,55 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           }
         }
 
+        if (call_arguments.empty()) {
+          bool known_fp_count = false;
+          int fp_arg_count = 0;
+          if (function_fp_parameter_counts != nullptr) {
+            auto it = function_fp_parameter_counts->find(function_name);
+            if (it != function_fp_parameter_counts->end()) {
+              known_fp_count = true;
+              fp_arg_count = it->second;
+            }
+          }
+          if (known_fp_count) {
+            if (fp_arg_count >= 1) {
+              call_arguments.push_back(LiftedExpression::Variable("f12"));
+            }
+            if (fp_arg_count >= 2) {
+              call_arguments.push_back(LiftedExpression::Variable("f14"));
+            }
+          } else {
+            bool defines_f12 = false;
+            bool defines_f14 = false;
+            for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+              RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[j]);
+              for (FpRegister r : ud.fpr_defs) {
+                if (r == FpRegister::kF12) defines_f12 = true;
+                if (r == FpRegister::kF14) defines_f14 = true;
+              }
+              if (instructions_to_process[j].opcode == Opcode::kJal ||
+                  instructions_to_process[j].opcode == Opcode::kJalr) {
+                break;
+              }
+            }
+            if (defines_f12 || function_name == "sqrtf" || function_name == "fabsf" ||
+                function_name == "sqrt" || function_name == "fabs") {
+              call_arguments.push_back(LiftedExpression::Variable("f12"));
+              if (defines_f14) {
+                call_arguments.push_back(LiftedExpression::Variable("f14"));
+              }
+            }
+          }
+        }
+
         LiftedStatement statement;
-        statement.kind = StatementKind::kCall;
+        if (function_name == "sqrtf" || function_name == "fabsf" || function_name == "sqrt" ||
+            function_name == "fabs") {
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = "f0";
+        } else {
+          statement.kind = StatementKind::kCall;
+        }
         statement.expression = LiftedExpression::Call(function_name, std::move(call_arguments));
         statements.push_back(std::move(statement));
         break;
@@ -891,6 +952,287 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       case Opcode::kJr:
         if (inst.rs == Register::kRa) {
           pending_return = true;
+        }
+        break;
+
+      case Opcode::kLwc1:
+        if (inst.ft.has_value() && inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.ft);
+          if (*inst.rs == Register::kSp) {
+            statement.expression = LiftedExpression::Load(
+                "f32", LiftedExpression::Unary(
+                           "&", LiftedExpression::Variable(StackVarName(inst.immediate))));
+          } else if (inst.immediate == 0) {
+            statement.expression =
+                LiftedExpression::Load("f32", LiftRegisterOrConstant(*inst.rs, tracker));
+          } else {
+            statement.expression = LiftedExpression::Load(
+                "f32", LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
+                                                LiftedExpression::Integer(inst.immediate)));
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kSwc1:
+        if (inst.ft.has_value() && inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kStore;
+          statement.store_type = "f32";
+          if (*inst.rs == Register::kSp) {
+            statement.destination_address = LiftedExpression::Unary(
+                "&", LiftedExpression::Variable(StackVarName(inst.immediate)));
+          } else if (inst.immediate == 0) {
+            statement.destination_address = LiftRegisterOrConstant(*inst.rs, tracker);
+          } else {
+            statement.destination_address =
+                LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
+                                         LiftedExpression::Integer(inst.immediate));
+          }
+          statement.expression = LiftFpRegister(*inst.ft);
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kLdc1:
+        if (inst.ft.has_value() && inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.ft);
+          if (*inst.rs == Register::kSp) {
+            statement.expression = LiftedExpression::Load(
+                "f64", LiftedExpression::Unary(
+                           "&", LiftedExpression::Variable(StackVarName(inst.immediate))));
+          } else if (inst.immediate == 0) {
+            statement.expression =
+                LiftedExpression::Load("f64", LiftRegisterOrConstant(*inst.rs, tracker));
+          } else {
+            statement.expression = LiftedExpression::Load(
+                "f64", LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
+                                                LiftedExpression::Integer(inst.immediate)));
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kSdc1:
+        if (inst.ft.has_value() && inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kStore;
+          statement.store_type = "f64";
+          if (*inst.rs == Register::kSp) {
+            statement.destination_address = LiftedExpression::Unary(
+                "&", LiftedExpression::Variable(StackVarName(inst.immediate)));
+          } else if (inst.immediate == 0) {
+            statement.destination_address = LiftRegisterOrConstant(*inst.rs, tracker);
+          } else {
+            statement.destination_address =
+                LiftedExpression::Binary("+", LiftRegisterOrConstant(*inst.rs, tracker),
+                                         LiftedExpression::Integer(inst.immediate));
+          }
+          statement.expression = LiftFpRegister(*inst.ft);
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kMfc1:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          statement.expression = LiftedExpression::Unary("*(s32*)&", LiftFpRegister(*inst.fs));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDmfc1:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          statement.expression = LiftedExpression::Unary("*(s64*)&", LiftFpRegister(*inst.fs));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kMtc1:
+        if (inst.fs.has_value() && inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fs);
+          if (*inst.rt == Register::kZero) {
+            statement.expression = LiftedExpression::Variable("0.0f");
+          } else {
+            statement.expression = LiftedExpression::Unary(
+                "*(f32*)&", LiftedExpression::Variable(RegisterVarName(*inst.rt)));
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDmtc1:
+        if (inst.fs.has_value() && inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fs);
+          if (*inst.rt == Register::kZero) {
+            statement.expression = LiftedExpression::Variable("0.0");
+          } else {
+            statement.expression = LiftedExpression::Unary(
+                "*(f64*)&", LiftedExpression::Variable(RegisterVarName(*inst.rt)));
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCfc1:
+        if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rt);
+          int ctrl = static_cast<int>(*inst.fs);
+          if (ctrl == 31) {
+            statement.expression = LiftedExpression::Variable("fcr31");
+          } else {
+            statement.expression = LiftedExpression::Integer(0x00000B00, true);
+          }
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCtc1:
+        if (inst.fs.has_value() && inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = "fcr31";
+          statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kAddS:
+      case Opcode::kSubS:
+      case Opcode::kMulS:
+      case Opcode::kDivS:
+      case Opcode::kAddD:
+      case Opcode::kSubD:
+      case Opcode::kMulD:
+      case Opcode::kDivD:
+        if (inst.fd.has_value() && inst.fs.has_value() && inst.ft.has_value()) {
+          const char* op = "+";
+          if (inst.opcode == Opcode::kSubS || inst.opcode == Opcode::kSubD) op = "-";
+          if (inst.opcode == Opcode::kMulS || inst.opcode == Opcode::kMulD) op = "*";
+          if (inst.opcode == Opcode::kDivS || inst.opcode == Opcode::kDivD) op = "/";
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          statement.expression =
+              LiftedExpression::Binary(op, LiftFpRegister(*inst.fs), LiftFpRegister(*inst.ft));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kSqrtS:
+      case Opcode::kSqrtD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          std::string fn = (inst.opcode == Opcode::kSqrtS) ? "sqrtf" : "sqrt";
+          std::vector<std::unique_ptr<LiftedExpression>> args;
+          args.push_back(LiftFpRegister(*inst.fs));
+          statement.expression = LiftedExpression::Call(fn, std::move(args));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kAbsS:
+      case Opcode::kAbsD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          std::string fn = (inst.opcode == Opcode::kAbsS) ? "fabsf" : "fabs";
+          std::vector<std::unique_ptr<LiftedExpression>> args;
+          args.push_back(LiftFpRegister(*inst.fs));
+          statement.expression = LiftedExpression::Call(fn, std::move(args));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kMovS:
+      case Opcode::kMovD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          statement.expression = LiftFpRegister(*inst.fs);
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kNegS:
+      case Opcode::kNegD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          statement.expression = LiftedExpression::Unary("-", LiftFpRegister(*inst.fs));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCvtSD:
+      case Opcode::kCvtSW:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          statement.expression = LiftedExpression::Unary("(f32)", LiftFpRegister(*inst.fs));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCvtDS:
+      case Opcode::kCvtDW:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          statement.expression = LiftedExpression::Unary("(f64)", LiftFpRegister(*inst.fs));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kTruncWS:
+      case Opcode::kTruncWD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd);
+          statement.expression = LiftedExpression::Unary("(s32)", LiftFpRegister(*inst.fs));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCEqS:
+      case Opcode::kCEqD:
+      case Opcode::kCLtS:
+      case Opcode::kCLtD:
+      case Opcode::kCLeS:
+      case Opcode::kCLeD:
+        if (inst.fs.has_value() && inst.ft.has_value()) {
+          const char* op = "==";
+          if (inst.opcode == Opcode::kCLtS || inst.opcode == Opcode::kCLtD) op = "<";
+          if (inst.opcode == Opcode::kCLeS || inst.opcode == Opcode::kCLeD) op = "<=";
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = "fcond";
+          statement.expression =
+              LiftedExpression::Binary(op, LiftFpRegister(*inst.fs), LiftFpRegister(*inst.ft));
+          statements.push_back(std::move(statement));
         }
         break;
 
@@ -907,6 +1249,21 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     auto v0_def = tracker.GetReachingDefinition(Register::kV0);
     if (v0_def.has_value()) {
       ret.expression = LiftedExpression::Variable("v0");
+    } else {
+      bool defines_f0 = false;
+      for (int i = static_cast<int>(instructions.size()) - 1; i >= 0; --i) {
+        RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
+        for (FpRegister r : ud.fpr_defs) {
+          if (r == FpRegister::kF0) {
+            defines_f0 = true;
+            break;
+          }
+        }
+        if (defines_f0) break;
+      }
+      if (defines_f0) {
+        ret.expression = LiftedExpression::Variable("f0");
+      }
     }
     statements.push_back(std::move(ret));
   }
@@ -947,6 +1304,35 @@ int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> ins
     return 2;
   }
   if (used_before_definition.contains(Register::kA0)) {
+    return 1;
+  }
+  return 0;
+}
+
+int ExpressionBuilder::DetermineFpParameterCount(absl::Span<const Instruction> instructions) {
+  absl::flat_hash_set<FpRegister> defined_fprs;
+  absl::flat_hash_set<FpRegister> used_fprs_before_def;
+
+  for (const auto& instruction : instructions) {
+    RegisterUseDef use_def = GetInstructionUseDef(instruction);
+    for (FpRegister used_reg : use_def.fpr_uses) {
+      if (!defined_fprs.contains(used_reg)) {
+        used_fprs_before_def.insert(used_reg);
+      }
+    }
+    for (FpRegister def_reg : use_def.fpr_defs) {
+      defined_fprs.insert(def_reg);
+    }
+    if (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr) {
+      defined_fprs.insert(FpRegister::kF12);
+      defined_fprs.insert(FpRegister::kF14);
+    }
+  }
+
+  if (used_fprs_before_def.contains(FpRegister::kF12)) {
+    if (used_fprs_before_def.contains(FpRegister::kF14)) {
+      return 2;
+    }
     return 1;
   }
   return 0;
@@ -1107,6 +1493,22 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
   return false;
 }
 
+bool ExpressionBuilder::DetermineReturnsF0(const ControlFlowGraph& cfg) {
+  for (const auto& block : cfg.Blocks()) {
+    if (block.HasReturn()) {
+      for (const auto& inst : block.instructions) {
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (FpRegister r : ud.fpr_defs) {
+          if (r == FpRegister::kF0) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFoldedComparison(
     absl::Span<const Instruction> instructions) {
   if (instructions.size() < 2) {
@@ -1127,6 +1529,47 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
   }
 
   const auto& branch = instructions[branch_idx];
+  if (branch.opcode == Opcode::kBc1t || branch.opcode == Opcode::kBc1tl ||
+      branch.opcode == Opcode::kBc1f || branch.opcode == Opcode::kBc1fl) {
+    int def_idx = -1;
+    for (int i = branch_idx - 1; i >= 0; --i) {
+      const auto& op = instructions[i].opcode;
+      if (op == Opcode::kCEqS || op == Opcode::kCEqD || op == Opcode::kCLtS ||
+          op == Opcode::kCLtD || op == Opcode::kCLeS || op == Opcode::kCLeD) {
+        def_idx = i;
+        break;
+      }
+      if (op == Opcode::kCtc1) {
+        break;
+      }
+    }
+    if (def_idx >= 0) {
+      const auto& def_inst = instructions[def_idx];
+      RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
+      bool hazard = false;
+      for (int i = def_idx + 1; i < branch_idx; ++i) {
+        RegisterUseDef mid_ud = GetInstructionUseDef(instructions[i]);
+        for (FpRegister input_reg : def_ud.fpr_uses) {
+          for (FpRegister mid_def : mid_ud.fpr_defs) {
+            if (mid_def == input_reg) {
+              hazard = true;
+              break;
+            }
+          }
+          if (hazard) break;
+        }
+        if (hazard) break;
+      }
+      if (!hazard) {
+        FoldedComparison folded;
+        folded.instruction_index = static_cast<size_t>(def_idx);
+        folded.can_suppress_statement = true;
+        return folded;
+      }
+    }
+    return std::nullopt;
+  }
+
   Register rs = branch.rs.value_or(Register::kZero);
   Register rt = branch.rt.value_or(Register::kZero);
 

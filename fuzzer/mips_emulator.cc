@@ -33,6 +33,7 @@ void MipsEmulator::Reset() {
   std::memset(gpr_, 0, sizeof(gpr_));
   std::memset(fpr_bits_, 0, sizeof(fpr_bits_));
   fpu_cond_ = false;
+  fcr31_ = 0;
   hi_ = 0;
   lo_ = 0;
   pc_ = base_vram_;
@@ -566,8 +567,27 @@ ExecutionStatus MipsEmulator::Step() {
         SetGpr(rt, GetFpBits(fs));
         break;
       }
+      if (rs == 0x02) {  // CFC1
+        uint32_t ctrl_reg = static_cast<uint32_t>(fs);
+        uint32_t val = 0;
+        if (ctrl_reg == 31) {
+          val = (fcr31_ & ~(1u << 23)) | (fpu_cond_ ? (1u << 23) : 0);
+        } else if (ctrl_reg == 0) {
+          val = 0x00000B00;  // VR4300 revision
+        }
+        SetGpr(rt, val);
+        break;
+      }
       if (rs == 0x04) {  // MTC1
         SetFpBits(fs, gpr_[rt]);
+        break;
+      }
+      if (rs == 0x06) {  // CTC1
+        uint32_t ctrl_reg = static_cast<uint32_t>(fs);
+        if (ctrl_reg == 31) {
+          fcr31_ = gpr_[rt];
+          fpu_cond_ = (gpr_[rt] & (1u << 23)) != 0;
+        }
         break;
       }
       if (rs == 0x08) {  // BC1

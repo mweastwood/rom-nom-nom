@@ -298,6 +298,14 @@ std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlo
       case Opcode::kBlezl:
         branch_taken_on_nonzero = false;
         break;
+      case Opcode::kBc1t:
+      case Opcode::kBc1tl:
+        branch_taken_on_nonzero = true;
+        break;
+      case Opcode::kBc1f:
+      case Opcode::kBc1fl:
+        branch_taken_on_nonzero = false;
+        break;
       default:
         break;
     }
@@ -365,6 +373,36 @@ std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlo
         Register def_rt = def_inst.rt.value_or(Register::kZero);
         auto bit_and = CExpression::Binary("&", RegExpr(def_rs), RegExpr(def_rt));
         return CExpression::Binary(op, std::move(bit_and), CExpression::Integer(0));
+      }
+
+      case Opcode::kCEqS:
+      case Opcode::kCEqD: {
+        std::string op = want_true ? "==" : "!=";
+        return CExpression::Binary(op,
+                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
+                                       def_inst.fs.value_or(FpRegister::kF0))),
+                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
+                                       def_inst.ft.value_or(FpRegister::kF0))));
+      }
+
+      case Opcode::kCLtS:
+      case Opcode::kCLtD: {
+        std::string op = want_true ? "<" : ">=";
+        return CExpression::Binary(op,
+                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
+                                       def_inst.fs.value_or(FpRegister::kF0))),
+                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
+                                       def_inst.ft.value_or(FpRegister::kF0))));
+      }
+
+      case Opcode::kCLeS:
+      case Opcode::kCLeD: {
+        std::string op = want_true ? "<=" : ">";
+        return CExpression::Binary(op,
+                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
+                                       def_inst.fs.value_or(FpRegister::kF0))),
+                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
+                                       def_inst.ft.value_or(FpRegister::kF0))));
       }
 
       default:
@@ -440,12 +478,15 @@ class ConverterContext {
   ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
                    const StructuredRegion& root_region, const SplitConfig* split_config,
                    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
-                   bool returns_v0)
+                   const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
+                   bool returns_v0, bool returns_f0)
       : cfg_(cfg),
         symbol_index_(symbol_index),
         split_config_(split_config),
         function_parameter_counts_(function_parameter_counts),
-        returns_v0_(returns_v0) {
+        function_fp_parameter_counts_(function_fp_parameter_counts),
+        returns_v0_(returns_v0),
+        returns_f0_(returns_f0) {
     CollectGotoTargets(root_region);
   }
 
@@ -800,16 +841,22 @@ class ConverterContext {
       absl::Span<const Instruction> inst_span(block->instructions.data(),
                                               block->instructions.size() - 1);
       lifted_stmts = ExpressionBuilder::LiftInstructions(inst_span, symbol_index_, split_config_,
-                                                         function_parameter_counts_);
+                                                         function_parameter_counts_,
+                                                         function_fp_parameter_counts_);
     } else {
-      lifted_stmts = ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
-                                                  function_parameter_counts_);
+      lifted_stmts =
+          ExpressionBuilder::LiftBlock(*block, symbol_index_, split_config_,
+                                       function_parameter_counts_, function_fp_parameter_counts_);
     }
     for (auto& lifted_stmt : lifted_stmts) {
       if (lifted_stmt.kind == StatementKind::kReturn) {
         if (returns_v0_) {
           if (!lifted_stmt.expression) {
             lifted_stmt.expression = LiftedExpression::Variable("v0");
+          }
+        } else if (returns_f0_) {
+          if (!lifted_stmt.expression) {
+            lifted_stmt.expression = LiftedExpression::Variable("f0");
           }
         } else {
           lifted_stmt.expression = nullptr;
@@ -826,7 +873,9 @@ class ConverterContext {
   const SymbolIndex* symbol_index_;
   const SplitConfig* split_config_;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts_;
+  const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts_;
   bool returns_v0_ = false;
+  bool returns_f0_ = false;
   absl::flat_hash_set<uint32_t> goto_targets_;
   absl::flat_hash_set<uint32_t> emitted_labels_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
@@ -842,14 +891,21 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
   auto body = std::make_unique<CompoundStatement>();
 
   bool returns_v0 = false;
+  bool returns_f0 = false;
   if (options.return_type.has_value()) {
-    returns_v0 = (options.return_type->ToString() != "void");
+    std::string rt = options.return_type->ToString();
+    returns_v0 = (rt != "void" && rt != "f32" && rt != "f64");
+    returns_f0 = (rt == "f32" || rt == "f64");
   } else {
     returns_v0 = ExpressionBuilder::DetermineReturnsV0(cfg);
+    if (!returns_v0) {
+      returns_f0 = ExpressionBuilder::DetermineReturnsF0(cfg);
+    }
   }
 
   ConverterContext ctx(cfg, symbol_index, root_region, options.split_config,
-                       options.function_parameter_counts, returns_v0);
+                       options.function_parameter_counts, options.function_fp_parameter_counts,
+                       returns_v0, returns_f0);
   ctx.ConvertRegion(root_region, body.get());
 
   for (uint32_t target_block_id : ctx.GotoTargets()) {
@@ -869,20 +925,58 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
         parameter_count = it->second;
       }
     }
+    std::vector<Instruction> all_instructions;
+    for (const auto& block : cfg.Blocks()) {
+      all_instructions.insert(all_instructions.end(), block.instructions.begin(),
+                              block.instructions.end());
+    }
     if (parameter_count < 0) {
-      std::vector<Instruction> all_instructions;
-      for (const auto& block : cfg.Blocks()) {
-        all_instructions.insert(all_instructions.end(), block.instructions.begin(),
-                                block.instructions.end());
-      }
       if (!all_instructions.empty()) {
         parameter_count = ExpressionBuilder::DetermineParameterCount(all_instructions);
       }
     }
-    if (parameter_count >= 0) {
+    absl::flat_hash_set<std::string> double_vars;
+    for (const auto& block : cfg.Blocks()) {
+      for (const auto& inst : block.instructions) {
+        if (inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
+            inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
+            inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
+            inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
+            inst.opcode == Opcode::kCvtSD || inst.opcode == Opcode::kTruncWD ||
+            inst.opcode == Opcode::kCEqD || inst.opcode == Opcode::kCLtD ||
+            inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kLdc1 ||
+            inst.opcode == Opcode::kSdc1 || inst.opcode == Opcode::kDmfc1 ||
+            inst.opcode == Opcode::kDmtc1) {
+          if (inst.fd) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fd));
+          if (inst.fs) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fs));
+          if (inst.ft) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.ft));
+        }
+      }
+    }
+
+    if (parameter_count > 0) {
       for (int param_index = 0; param_index < parameter_count; ++param_index) {
         parameters.push_back(
             CParameter{.type = CType::S32(), .name = absl::StrFormat("arg%d", param_index)});
+      }
+    } else if (parameter_count == 0 && !all_instructions.empty()) {
+      int fp_param_count = 0;
+      if (options.function_fp_parameter_counts != nullptr) {
+        auto it = options.function_fp_parameter_counts->find(options.function_name);
+        if (it != options.function_fp_parameter_counts->end()) {
+          fp_param_count = it->second;
+        }
+      }
+      if (fp_param_count == 0) {
+        fp_param_count = ExpressionBuilder::DetermineFpParameterCount(all_instructions);
+      }
+      if (fp_param_count >= 1) {
+        CType t = double_vars.contains("f12") ? CType::F64() : CType::F32();
+        parameters.push_back(CParameter{.type = t, .name = "f12"});
+        if (fp_param_count >= 2) {
+          CType t2 = double_vars.contains("f14") ? CType::F64() : CType::F32();
+          parameters.push_back(CParameter{.type = t2, .name = "f14"});
+        }
       }
     } else {
       std::string body_text = body->ToString(0);
@@ -904,8 +998,42 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
   CType return_type = CType::Void();
   if (options.return_type.has_value()) {
     return_type = *options.return_type;
-  } else if (returns_v0 || HasReturnValue(*body)) {
+  } else if (returns_v0) {
     return_type = CType::S32();
+  } else if (HasReturnValue(*body)) {
+    bool returns_f0 = false;
+    for (const auto& stmt : body->Statements()) {
+      if (stmt->Kind() == CStatementKind::kReturnStatement) {
+        const auto& r = static_cast<const ReturnStatement&>(*stmt);
+        if (r.ReturnValue() != nullptr && r.ReturnValue()->ToString() == "f0") {
+          returns_f0 = true;
+          break;
+        }
+      }
+    }
+    if (returns_f0) {
+      absl::flat_hash_set<std::string> double_vars;
+      for (const auto& block : cfg.Blocks()) {
+        for (const auto& inst : block.instructions) {
+          if (inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
+              inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
+              inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
+              inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
+              inst.opcode == Opcode::kCvtSD || inst.opcode == Opcode::kTruncWD ||
+              inst.opcode == Opcode::kCEqD || inst.opcode == Opcode::kCLtD ||
+              inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kLdc1 ||
+              inst.opcode == Opcode::kSdc1 || inst.opcode == Opcode::kDmfc1 ||
+              inst.opcode == Opcode::kDmtc1) {
+            if (inst.fd) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fd));
+            if (inst.fs) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fs));
+            if (inst.ft) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.ft));
+          }
+        }
+      }
+      return_type = double_vars.contains("f0") ? CType::F64() : CType::F32();
+    } else {
+      return_type = CType::S32();
+    }
   }
 
   // Collect all variables referenced in the function body
@@ -951,7 +1079,8 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
     // Do not declare standard C keywords, literals, or types
     if (var_name == "NULL" || var_name == "TRUE" || var_name == "FALSE" || var_name == "s32" ||
         var_name == "u32" || var_name == "s16" || var_name == "u16" || var_name == "s8" ||
-        var_name == "u8") {
+        var_name == "u8" || var_name == "f32" || var_name == "f64" || var_name == "s64" ||
+        var_name == "u64") {
       continue;
     }
     // Do not declare function names (func_*, Os*, Gu*, Leo*, main*, idle*)
@@ -979,11 +1108,46 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
       detected_frame_size = 64;
     }
 
+    absl::flat_hash_set<std::string> double_vars;
+    for (const auto& block : cfg.Blocks()) {
+      for (const auto& inst : block.instructions) {
+        if (inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
+            inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
+            inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
+            inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
+            inst.opcode == Opcode::kCvtSD || inst.opcode == Opcode::kTruncWD ||
+            inst.opcode == Opcode::kCEqD || inst.opcode == Opcode::kCLtD ||
+            inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kLdc1 ||
+            inst.opcode == Opcode::kSdc1 || inst.opcode == Opcode::kDmfc1 ||
+            inst.opcode == Opcode::kDmtc1) {
+          if (inst.fd) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fd));
+          if (inst.fs) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fs));
+          if (inst.ft) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.ft));
+        }
+      }
+    }
+
+    auto is_fp_reg = [](std::string_view name) -> bool {
+      if (name.size() >= 2 && name[0] == 'f' && std::isdigit(name[1])) {
+        for (size_t i = 1; i < name.size(); ++i) {
+          if (!std::isdigit(name[i])) return false;
+        }
+        return true;
+      }
+      return false;
+    };
+
     auto new_body = std::make_unique<CompoundStatement>();
     for (const auto& var_name : local_vars_to_declare) {
       if (var_name == "sp") {
         new_body->AddStatement(
             CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, detected_frame_size));
+      } else if (is_fp_reg(var_name)) {
+        if (double_vars.contains(var_name)) {
+          new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name));
+        } else {
+          new_body->AddStatement(CStatement::VariableDeclaration(CType::F32(), var_name));
+        }
       } else {
         new_body->AddStatement(CStatement::VariableDeclaration(CType::S32(), var_name));
       }
