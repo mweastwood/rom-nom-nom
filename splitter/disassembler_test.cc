@@ -433,5 +433,112 @@ TEST(DisassemblerTest, ForwardBranchToReturnDelaySlotDoesNotPrematurelyEndFuncti
   EXPECT_NE(func.emitted_assembly.find(".L8070000C:"), std::string::npos);
 }
 
+TEST(DisassemblerTest, IdentifiesTrailingPaddingAndOmitsFunctionFraming) {
+  // Construct code slice:
+  // Function: jr $ra; nop (8 bytes)
+  // Followed by trailing padding: andi $v0, $t9, 0xFFFF (4 bytes)
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+  AppendWord(code, 0x3322FFFF);  // andi $v0, $t9, 0xFFFF (trailing padding word)
+
+  Disassembler disasm;
+  auto funcs_or = disasm.DisassembleAllFunctions(code, 0x80110A00);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+
+  const auto& funcs = *funcs_or;
+  ASSERT_EQ(funcs.size(), 2u);
+
+  // First block is a legitimate function
+  EXPECT_TRUE(funcs[0].is_function);
+  EXPECT_EQ(funcs[0].vram_start, 0x80110A00u);
+  EXPECT_EQ(funcs[0].Size(), 8u);
+  EXPECT_NE(funcs[0].emitted_assembly.find(".ent func_80110A00"), std::string::npos);
+  EXPECT_NE(funcs[0].emitted_assembly.find(".end func_80110A00"), std::string::npos);
+
+  // Second block is trailing padding (< 8 bytes, no return, no callers)
+  EXPECT_FALSE(funcs[1].is_function);
+  EXPECT_EQ(funcs[1].vram_start, 0x80110A08u);
+  EXPECT_EQ(funcs[1].Size(), 4u);
+  EXPECT_EQ(funcs[1].emitted_assembly.find(".ent"), std::string::npos);
+  EXPECT_EQ(funcs[1].emitted_assembly.find(".end"), std::string::npos);
+  EXPECT_NE(funcs[1].emitted_assembly.find("andi  $v0, $t9, 0xFFFF"), std::string::npos);
+}
+
+TEST(DisassemblerTest, SmallBlockWithExplicitSymbolPreservesFunctionFraming) {
+  // 4-byte block with explicit symbol registered as SYMBOL_FUNC
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x24020001);  // addiu $v0, $zero, 1
+
+  SymbolRegistry registry;
+  auto* entry = registry.add_entries();
+  entry->set_name("SpecialSmallFunc");
+  entry->set_address(0x80700000);
+  entry->set_type(SYMBOL_FUNC);
+
+  auto symbols_or = SymbolIndex::FromProto(std::move(registry));
+  ASSERT_TRUE(symbols_or.ok());
+
+  Disassembler disasm(&*symbols_or);
+  auto funcs_or = disasm.DisassembleAllFunctions(code, 0x80700000);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+
+  const auto& funcs = *funcs_or;
+  ASSERT_EQ(funcs.size(), 1u);
+  EXPECT_TRUE(funcs[0].is_function);
+  EXPECT_EQ(funcs[0].name, "SpecialSmallFunc");
+  EXPECT_NE(funcs[0].emitted_assembly.find(".ent SpecialSmallFunc"), std::string::npos);
+  EXPECT_NE(funcs[0].emitted_assembly.find(".end SpecialSmallFunc"), std::string::npos);
+}
+
+TEST(DisassemblerTest, SmallBlockWithKnownEntrypointPreservesFunctionFraming) {
+  // 4-byte block registered in known_entrypoints_
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x24020001);  // addiu $v0, $zero, 1
+
+  Disassembler disasm;
+  disasm.RegisterFunctionEntrypoint(0x80700000);
+
+  auto funcs_or = disasm.DisassembleAllFunctions(code, 0x80700000);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+
+  const auto& funcs = *funcs_or;
+  ASSERT_EQ(funcs.size(), 1u);
+  EXPECT_TRUE(funcs[0].is_function);
+  EXPECT_NE(funcs[0].emitted_assembly.find(".ent func_80700000"), std::string::npos);
+  EXPECT_NE(funcs[0].emitted_assembly.find(".end func_80700000"), std::string::npos);
+}
+
+TEST(DisassemblerTest, TrailingPaddingAfterAlignmentNops) {
+  // Function: jr $ra; nop (8 bytes)
+  // Followed by 2 alignment NOPs (8 bytes of zeros) -> total function size 16 bytes
+  // Followed by 1 trailing padding word: 0x3322FFFF (4 bytes)
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop (delay slot)
+  AppendWord(code, 0x00000000);  // alignment nop
+  AppendWord(code, 0x00000000);  // alignment nop
+  AppendWord(code, 0x3322FFFF);  // trailing padding
+
+  Disassembler disasm;
+  auto funcs_or = disasm.DisassembleAllFunctions(code, 0x80700000);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+
+  const auto& funcs = *funcs_or;
+  ASSERT_EQ(funcs.size(), 2u);
+
+  // Function absorbs alignment NOPs
+  EXPECT_TRUE(funcs[0].is_function);
+  EXPECT_EQ(funcs[0].vram_start, 0x80700000u);
+  EXPECT_EQ(funcs[0].Size(), 16u);
+
+  // Trailing word is padding without function framing
+  EXPECT_FALSE(funcs[1].is_function);
+  EXPECT_EQ(funcs[1].vram_start, 0x80700010u);
+  EXPECT_EQ(funcs[1].Size(), 4u);
+  EXPECT_EQ(funcs[1].emitted_assembly.find(".ent"), std::string::npos);
+  EXPECT_EQ(funcs[1].emitted_assembly.find(".end"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -154,25 +154,34 @@ TEST(AssemblyGeneratorTest, WriteNonmatchingFunctionsAndStandaloneAssembly) {
   func.vram_end = 0x80700008;
   func.emitted_assembly = "glabel MyTestFunc\n  jr    $ra\n   nop\nendlabel MyTestFunc";
 
-  std::vector<DisassembledFunction> funcs = {func};
+  DisassembledFunction func_pad;
+  func_pad.name = "func_80700008";
+  func_pad.vram_start = 0x80700008;
+  func_pad.vram_end = 0x8070000C;
+  func_pad.emitted_assembly = "/* 80700008 3322FFFF */  andi  $v0, $t9, 0xFFFF";
+  func_pad.is_function = false;
 
-  // 1. Nonmatching functions
+  std::vector<DisassembledFunction> funcs = {func, func_pad};
+
+  // 1. Nonmatching functions: should only write func, skipping func_pad
   auto count_or = generator.WriteNonmatchingFunctions("my_module", funcs);
   ASSERT_TRUE(count_or.ok());
   EXPECT_EQ(*count_or, 1u);
 
   std::filesystem::path func_file = temp_dir / "nonmatchings" / "my_module" / "MyTestFunc.s";
   ASSERT_TRUE(std::filesystem::exists(func_file));
+  std::filesystem::path pad_file = temp_dir / "nonmatchings" / "my_module" / "func_80700008.s";
+  EXPECT_FALSE(std::filesystem::exists(pad_file));
 
   std::ifstream f_in(func_file);
   std::string f_content((std::istreambuf_iterator<char>(f_in)), std::istreambuf_iterator<char>());
   EXPECT_NE(f_content.find("glabel MyTestFunc"), std::string::npos);
 
-  // 2. Standalone assembly
+  // 2. Standalone assembly: should contain both func and trailing padding bytes
   std::filesystem::path standalone_file = temp_dir / "standalone.s";
   ASSERT_TRUE(
       generator
-          .WriteStandaloneAssembly("standalone", 0x1000, 0x1008, 0x80700000, funcs, standalone_file)
+          .WriteStandaloneAssembly("standalone", 0x1000, 0x100C, 0x80700000, funcs, standalone_file)
           .ok());
   ASSERT_TRUE(std::filesystem::exists(standalone_file));
 
@@ -182,6 +191,7 @@ TEST(AssemblyGeneratorTest, WriteNonmatchingFunctionsAndStandaloneAssembly) {
   EXPECT_NE(s_content.find(".set noat"), std::string::npos);
   EXPECT_NE(s_content.find(".set noreorder"), std::string::npos);
   EXPECT_NE(s_content.find("glabel MyTestFunc"), std::string::npos);
+  EXPECT_NE(s_content.find("andi  $v0, $t9, 0xFFFF"), std::string::npos);
 
   std::filesystem::remove_all(temp_dir);
 }

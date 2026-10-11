@@ -275,6 +275,9 @@ absl::StatusOr<size_t> AssemblyGenerator::WriteNonmatchingFunctions(
 
   size_t count = 0;
   for (const auto& func : functions) {
+    if (!func.is_function) {
+      continue;
+    }
     std::filesystem::path func_s_path = nonmatchings_dir / absl::StrCat(func.name, ".s");
     std::ofstream f(func_s_path, std::ios::out | std::ios::trunc);
     if (!f.is_open()) {

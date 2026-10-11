@@ -115,7 +115,7 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
     }
 
     for (const auto& dfn : *funcs_or) {
-      if (dfn.instructions.empty()) {
+      if (!dfn.is_function || dfn.instructions.empty()) {
         continue;
       }
       ScannedFunction sf;

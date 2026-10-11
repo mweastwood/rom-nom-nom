@@ -451,5 +451,42 @@ TEST(RomFunctionScannerTest, ScansFunctionsFromElfAndRom) {
   EXPECT_EQ(funcs[0].raw_words[1], 0x00000000u);
 }
 
+TEST(RomFunctionScannerTest, SkipsTrailingPaddingBlocks) {
+  std::vector<uint8_t> rom(0x3000, 0);
+
+  SplitConfig config;
+  auto* seg = config.add_segments();
+  seg->set_name("code");
+  seg->set_type(SEGMENT_CODE);
+  seg->set_rom_start(0x1000);
+  seg->set_rom_end(0x100C);
+  seg->set_vram(0x80001000);
+
+  // 0x1000: jr $ra
+  // 0x1004: nop
+  // 0x1008: andi $v0, $t9, 0xFFFF (trailing padding)
+  rom[0x1000] = 0x03;
+  rom[0x1001] = 0xE0;
+  rom[0x1002] = 0x00;
+  rom[0x1003] = 0x08;  // jr $ra
+  rom[0x1004] = 0x00;
+  rom[0x1005] = 0x00;
+  rom[0x1006] = 0x00;
+  rom[0x1007] = 0x00;  // nop
+  rom[0x1008] = 0x33;
+  rom[0x1009] = 0x22;
+  rom[0x100A] = 0xFF;
+  rom[0x100B] = 0xFF;  // andi $v0, $t9, 0xFFFF
+
+  auto funcs_or = RomFunctionScanner::Scan(rom, &config);
+  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
+  const auto& funcs = *funcs_or;
+
+  // Only the legitimate function should be returned; the trailing padding must be skipped
+  ASSERT_EQ(funcs.size(), 1u);
+  EXPECT_EQ(funcs[0].vram, 0x80001000u);
+  EXPECT_EQ(funcs[0].size, 8u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

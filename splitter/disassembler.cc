@@ -79,6 +79,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
   // Pass 1: Determine function boundary
   size_t func_end_offset = code.size();
   uint32_t max_forward_target = 0;
+  bool has_return = false;
 
   for (size_t offset = 0; offset + 4 <= code.size(); offset += 4) {
     uint32_t pc = vram_start + static_cast<uint32_t>(offset);
@@ -119,6 +120,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
     }
 
     if (inst.IsReturn()) {
+      has_return = true;
       // jr $ra return: include delay slot instruction if no forward branch jumps to delay slot or
       // past it
       if (max_forward_target <= pc) {
@@ -184,11 +186,23 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
   func.vram_start = vram_start;
   func.vram_end = vram_end;
 
+  bool is_entrypoint = known_entrypoints_.contains(vram_start);
+  if (!is_entrypoint && symbols_ && symbols_->HasAddress(vram_start)) {
+    const auto* entry = symbols_->FindByAddress(vram_start);
+    if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+      is_entrypoint = true;
+    }
+  }
+
+  func.is_function = is_entrypoint || (func_end_offset >= 8) || has_return;
+
   std::string asm_text;
   if (options_.emit_function_framing) {
     absl::StrAppend(&asm_text, ".set noat\n.set noreorder\n\n");
-    absl::StrAppend(&asm_text,
-                    absl::StrFormat(".globl %s\n.ent %s\n%s:\n", func.name, func.name, func.name));
+    if (func.is_function) {
+      absl::StrAppend(
+          &asm_text, absl::StrFormat(".globl %s\n.ent %s\n%s:\n", func.name, func.name, func.name));
+    }
   }
 
   bool prev_has_delay_slot = false;
@@ -281,7 +295,7 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
     prev_has_delay_slot = inst.HasDelaySlot();
   }
 
-  if (options_.emit_function_framing) {
+  if (options_.emit_function_framing && func.is_function) {
     absl::StrAppend(&asm_text, absl::StrFormat(".end %s\n", func.name));
   }
 

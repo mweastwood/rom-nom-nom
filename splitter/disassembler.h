@@ -32,6 +32,7 @@ struct DisassembledFunction {
   size_t Size() const { return vram_end - vram_start; }
   std::vector<DisassembledInstruction> instructions;
   std::string emitted_assembly;  // Complete formatted .s text with directives
+  bool is_function = true;
 };
 
 // Formatting options for assembly output.
