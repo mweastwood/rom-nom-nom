@@ -691,7 +691,7 @@ entries {
   type: SYMBOL_FUNC
 }
 entries {
-  name: "Sinf"
+  name: "Cosf"
   address: 0x800FDC50
   type: SYMBOL_FUNC
 }
@@ -761,7 +761,7 @@ entries {
   type: SYMBOL_FUNC
 }
 entries {
-  name: "Cosf"
+  name: "Sinf"
   address: 0x800FF130
   type: SYMBOL_FUNC
 }
@@ -1019,6 +1019,7 @@ entries {
   name: "g_game_loop_callbacks"
   address: 0x80188F70
   type: SYMBOL_DATA
+  size: 228
 }
 entries {
   name: "g_display_matrices"
@@ -1159,11 +1160,13 @@ entries {
   name: "g_time_counter"
   address: 0x801F6F30
   type: SYMBOL_DATA
+  size: 1
 }
 entries {
   name: "g_camera_config"
   address: 0x801F6F38
   type: SYMBOL_DATA
+  size: 144
 }
 entries {
   name: "g_total_days"
@@ -1385,4 +1388,58 @@ entries {
   address: 0x8400114C
   type: SYMBOL_FUNC
   is_absolute: true
+}
+entries {
+  name: "D_8011E280"
+  address: 0x8011E280
+  size: 48
+  type: SYMBOL_DATA
+}
+entries {
+  name: "D_8011E2B0"
+  address: 0x8011E2B0
+  size: 52
+  type: SYMBOL_DATA
+}
+entries {
+  name: "D_8011E2E4"
+  address: 0x8011E2E4
+  size: 4
+  type: SYMBOL_DATA
+}
+entries {
+  name: "D_8011CCE0"
+  address: 0x8011CCE0
+  size: 24
+  type: SYMBOL_DATA
+}
+entries {
+  name: "func_80110488"
+  address: 0x80110488
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80110584"
+  address: 0x80110584
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80110650"
+  address: 0x80110650
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_80110700"
+  address: 0x80110700
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_801107C0"
+  address: 0x801107C0
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "func_801107E0"
+  address: 0x801107E0
+  type: SYMBOL_FUNC
 }

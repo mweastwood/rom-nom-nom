@@ -19,9 +19,39 @@ typedef double f64;
 
 #if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
 #define NOP() __asm__ volatile("nop")
+static inline f32 N64Sqrtf(f32 x) {
+  f32 res;
+  __asm__("sqrt.s %0, %1" : "=f"(res) : "f"(x));
+  return res;
+}
+static inline f64 N64Sqrt(f64 x) {
+  f64 res;
+  __asm__("sqrt.d %0, %1" : "=f"(res) : "f"(x));
+  return res;
+}
 #else
 #define NOP() ((void)0)
+#ifdef __cplusplus
+#include <cmath>
+static inline f32 N64Sqrtf(f32 x) {
+  return std::sqrt(x);
+}
+static inline f64 N64Sqrt(f64 x) {
+  return std::sqrt(x);
+}
+#else
+#include <math.h>
+static inline f32 N64Sqrtf(f32 x) {
+  return sqrtf(x);
+}
+static inline f64 N64Sqrt(f64 x) {
+  return sqrt(x);
+}
 #endif
+#endif
+
+#define __n64_sqrtf N64Sqrtf
+#define __n64_sqrt N64Sqrt
 
 typedef s32 OSId;
 typedef s32 OSPri;
