@@ -10,13 +10,18 @@
 namespace rom_nom_nom {
 namespace {
 
-constexpr size_t kMaxSearchWindow = 35;
+constexpr size_t kMaxSearchWindow = 100;
 constexpr uint32_t kMaxCases = 512;
+
+struct ResolvedBaseAddress {
+  uint32_t address = 0;
+  std::vector<uint32_t> instruction_vrams;
+};
 
 // Resolves a base address loaded into a register by searching backwards for
 // `lui` or `lui` + `addiu`.
-std::optional<uint32_t> ResolveBaseAddress(absl::Span<const Instruction> instructions,
-                                           size_t start_index, Register reg) {
+std::optional<ResolvedBaseAddress> ResolveBaseAddress(absl::Span<const Instruction> instructions,
+                                                      size_t start_index, Register reg) {
   for (size_t i = start_index; i > 0; --i) {
     const auto& inst = instructions[i - 1];
 
@@ -31,7 +36,10 @@ std::optional<uint32_t> ResolveBaseAddress(absl::Span<const Instruction> instruc
           const auto& prev = instructions[j - 1];
           if (prev.opcode == Opcode::kLui && prev.rt.has_value() && *prev.rt == reg) {
             uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(prev.immediate));
-            return (hi_imm << 16) + lo_imm;
+            return ResolvedBaseAddress{
+                .address = (hi_imm << 16) + lo_imm,
+                .instruction_vrams = {prev.vram, inst.vram},
+            };
           }
         }
       } else {
@@ -40,7 +48,10 @@ std::optional<uint32_t> ResolveBaseAddress(absl::Span<const Instruction> instruc
           const auto& prev = instructions[j - 1];
           if (prev.opcode == Opcode::kLui && prev.rt.has_value() && *prev.rt == base_reg) {
             uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(prev.immediate));
-            return (hi_imm << 16) + lo_imm;
+            return ResolvedBaseAddress{
+                .address = (hi_imm << 16) + lo_imm,
+                .instruction_vrams = {prev.vram, inst.vram},
+            };
           }
         }
       }
@@ -50,7 +61,10 @@ std::optional<uint32_t> ResolveBaseAddress(absl::Span<const Instruction> instruc
     // Check for direct lui reg, hi
     if (inst.opcode == Opcode::kLui && inst.rt.has_value() && *inst.rt == reg) {
       uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(inst.immediate));
-      return (hi_imm << 16);
+      return ResolvedBaseAddress{
+          .address = (hi_imm << 16),
+          .instruction_vrams = {inst.vram},
+      };
     }
   }
   return std::nullopt;
@@ -117,25 +131,25 @@ std::optional<JumpTable> JumpTableDetector::DetectAt(absl::Span<const Instructio
   }
 
   // 3. Identify which operand is the shifted offset: `sll offset_reg, index_reg, 2`
-  size_t sll_index = addu_index;
   Register table_base_reg = Register::kZero;
   Register index_reg = Register::kZero;
   bool found_sll = false;
+  size_t sll_index = 0;
 
   for (size_t i = addu_index + 1; i > min_idx; --i) {
     // Note: sll can be in the delay slot of a branch preceding addu, or right before addu.
     const auto& inst = instructions[i - 1];
     if (inst.opcode == Opcode::kSll && inst.shift_amount == 2 && inst.rd.has_value()) {
       if (*inst.rd == op1) {
-        sll_index = i - 1;
         table_base_reg = op2;
         index_reg = inst.rt.value_or(Register::kZero);
+        sll_index = i - 1;
         found_sll = true;
         break;
       } else if (*inst.rd == op2) {
-        sll_index = i - 1;
         table_base_reg = op1;
         index_reg = inst.rt.value_or(Register::kZero);
+        sll_index = i - 1;
         found_sll = true;
         break;
       }
@@ -152,12 +166,11 @@ std::optional<JumpTable> JumpTableDetector::DetectAt(absl::Span<const Instructio
     return std::nullopt;
   }
 
-  uint32_t table_vram = *base_vram_opt + load_offset;
+  uint32_t table_vram = base_vram_opt->address + load_offset;
 
   // 5. Scan backward for bounds check branch: `beqz cmp_reg, default_target`
   // and bounds comparison: `sltiu cmp_reg, index_reg, num_cases`
-  size_t branch_search_start =
-      (sll_index + 2 < instructions.size()) ? (sll_index + 2) : instructions.size();
+  size_t branch_search_start = jr_index;
   size_t bounds_branch_index = 0;
   uint32_t bounds_branch_vram = 0;
   uint32_t default_target_vram = 0;
@@ -166,7 +179,7 @@ std::optional<JumpTable> JumpTableDetector::DetectAt(absl::Span<const Instructio
 
   for (size_t i = branch_search_start; i > min_idx; --i) {
     const auto& inst = instructions[i - 1];
-    if (inst.opcode == Opcode::kBeq) {
+    if (inst.opcode == Opcode::kBeq || inst.opcode == Opcode::kBeql) {
       Register r1 = inst.rs.value_or(Register::kZero);
       Register r2 = inst.rt.value_or(Register::kZero);
       if (r2 == Register::kZero && r1 != Register::kZero) {
@@ -217,13 +230,21 @@ std::optional<JumpTable> JumpTableDetector::DetectAt(absl::Span<const Instructio
   int64_t lower_bound = 0;
   Register final_index_reg = index_reg;
   size_t norm_search_min = (sltiu_index > 10) ? (sltiu_index - 10) : 0;
+  std::vector<uint32_t> setup_vrams;
+  setup_vrams.push_back(instructions[addu_index].vram);
+  if (found_sll) {
+    setup_vrams.push_back(instructions[sll_index].vram);
+  }
+  for (uint32_t v : base_vram_opt->instruction_vrams) {
+    setup_vrams.push_back(v);
+  }
 
   for (size_t i = sltiu_index; i > norm_search_min; --i) {
     const auto& inst = instructions[i - 1];
     if (inst.opcode == Opcode::kAddiu && inst.rt.has_value() && *inst.rt == index_reg) {
-      if (inst.immediate < 0) {
+      if (inst.immediate < 0 && inst.rs.has_value() && *inst.rs != *inst.rt) {
         lower_bound = -static_cast<int64_t>(inst.immediate);
-        final_index_reg = inst.rs.value_or(Register::kZero);
+        final_index_reg = *inst.rs;
       }
       break;
     }
@@ -258,6 +279,7 @@ std::optional<JumpTable> JumpTableDetector::DetectAt(absl::Span<const Instructio
   table.index_register = final_index_reg;
   table.default_target_vram = default_target_vram;
   table.entries = std::move(entries);
+  table.setup_instruction_vrams = std::move(setup_vrams);
 
   return table;
 }

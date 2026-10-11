@@ -28,6 +28,7 @@ struct JumpTable {
   Register index_register = Register::kZero;  // Register holding the switch variable
   uint32_t default_target_vram = 0;           // Branch target when index >= num_cases
   std::vector<JumpTableEntry> entries;
+  std::vector<uint32_t> setup_instruction_vrams;
 };
 
 // Reader callback to fetch 32-bit big-endian words from memory (e.g. .rodata / ROM).

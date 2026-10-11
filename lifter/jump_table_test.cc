@@ -327,6 +327,88 @@ TEST(JumpTableTest, HoistedBaseRegisterJumpTable) {
   EXPECT_EQ(tables[0].entries[1].target_vram, 0x800404F0);
 }
 
+TEST(JumpTableTest, InPlaceNormalizationLeavesZeroLowerBound) {
+  // Pattern where index register was decremented in place (e.g. addiu $a1, $a1, -1):
+  // lower_bound should be 0 because C variable already holds decremented value.
+  std::vector<Instruction> instructions;
+
+  Instruction addiu;
+  addiu.opcode = Opcode::kAddiu;
+  addiu.rt = Register::kA1;
+  addiu.rs = Register::kA1;
+  addiu.immediate = -1;
+  addiu.vram = 0x800ADCEC;
+  instructions.push_back(addiu);
+
+  Instruction sltiu;
+  sltiu.opcode = Opcode::kSltiu;
+  sltiu.rt = Register::kV0;
+  sltiu.rs = Register::kA1;
+  sltiu.immediate = 2;
+  sltiu.vram = 0x800ADCF0;
+  instructions.push_back(sltiu);
+
+  Instruction beqz;
+  beqz.opcode = Opcode::kBeq;
+  beqz.rs = Register::kV0;
+  beqz.rt = Register::kZero;
+  beqz.immediate = 100;
+  beqz.vram = 0x800ADCF8;
+  instructions.push_back(beqz);
+
+  Instruction sll;
+  sll.opcode = Opcode::kSll;
+  sll.rd = Register::kV0;
+  sll.rt = Register::kA1;
+  sll.shift_amount = 2;
+  sll.vram = 0x800ADD00;
+  instructions.push_back(sll);
+
+  Instruction lui;
+  lui.opcode = Opcode::kLui;
+  lui.rt = Register::kAt;
+  lui.immediate = static_cast<int16_t>(0x8012);
+  lui.vram = 0x800ADD04;
+  instructions.push_back(lui);
+
+  Instruction addu;
+  addu.opcode = Opcode::kAddu;
+  addu.rd = Register::kAt;
+  addu.rs = Register::kAt;
+  addu.rt = Register::kV0;
+  addu.vram = 0x800ADD08;
+  instructions.push_back(addu);
+
+  Instruction lw;
+  lw.opcode = Opcode::kLw;
+  lw.rt = Register::kV0;
+  lw.rs = Register::kAt;
+  lw.immediate = 5616;
+  lw.vram = 0x800ADD0C;
+  instructions.push_back(lw);
+
+  Instruction jr;
+  jr.opcode = Opcode::kJr;
+  jr.rs = Register::kV0;
+  jr.vram = 0x800ADD10;
+  instructions.push_back(jr);
+
+  uint32_t table_addr = 0x80120000 + 5616;
+  absl::flat_hash_map<uint32_t, uint32_t> memory = {
+      {table_addr, 0x800ADD18},
+      {table_addr + 4, 0x800ADD50},
+  };
+
+  auto reader = MakeMemoryReader(memory);
+  auto result = JumpTableDetector::DetectAt(instructions, 7, reader);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->lower_bound, 0);
+  EXPECT_EQ(result->index_register, Register::kA1);
+  EXPECT_EQ(result->entries[0].case_value, 0);
+  EXPECT_EQ(result->entries[1].case_value, 1);
+}
+
 TEST(JumpTableTest, IgnoresFunctionReturn) {
   // jr $ra must never be treated as a jump table.
   Instruction jr_ra;
@@ -339,6 +421,164 @@ TEST(JumpTableTest, IgnoresFunctionReturn) {
   auto result = JumpTableDetector::DetectAt(instructions, 0, reader);
 
   EXPECT_FALSE(result.has_value());
+}
+
+TEST(JumpTableTest, BranchLikelyBoundsCheckJumpTable) {
+  // Verify jump table detection with beql (branch-likely) instruction
+  std::vector<Instruction> instructions;
+
+  Instruction sltiu;
+  sltiu.opcode = Opcode::kSltiu;
+  sltiu.rt = Register::kV0;
+  sltiu.rs = Register::kA0;
+  sltiu.immediate = 2;
+  sltiu.vram = 0x80020000;
+  instructions.push_back(sltiu);
+
+  Instruction beql;
+  beql.opcode = Opcode::kBeql;
+  beql.rs = Register::kV0;
+  beql.rt = Register::kZero;
+  beql.immediate = 20;  // target = 0x80020004 + 4 + (20 << 2) = 0x8002005C
+  beql.vram = 0x80020004;
+  instructions.push_back(beql);
+
+  Instruction sll;
+  sll.opcode = Opcode::kSll;
+  sll.rd = Register::kV0;
+  sll.rt = Register::kA0;
+  sll.shift_amount = 2;
+  sll.vram = 0x80020008;
+  instructions.push_back(sll);
+
+  Instruction lui;
+  lui.opcode = Opcode::kLui;
+  lui.rt = Register::kAt;
+  lui.immediate = static_cast<int16_t>(0x8010);
+  lui.vram = 0x8002000C;
+  instructions.push_back(lui);
+
+  Instruction addu;
+  addu.opcode = Opcode::kAddu;
+  addu.rd = Register::kAt;
+  addu.rs = Register::kAt;
+  addu.rt = Register::kV0;
+  addu.vram = 0x80020010;
+  instructions.push_back(addu);
+
+  Instruction lw;
+  lw.opcode = Opcode::kLw;
+  lw.rt = Register::kV0;
+  lw.rs = Register::kAt;
+  lw.immediate = 0x1000;
+  lw.vram = 0x80020014;
+  instructions.push_back(lw);
+
+  Instruction jr;
+  jr.opcode = Opcode::kJr;
+  jr.rs = Register::kV0;
+  jr.vram = 0x80020018;
+  instructions.push_back(jr);
+
+  uint32_t table_addr = 0x80100000 + 0x1000;
+  absl::flat_hash_map<uint32_t, uint32_t> memory = {
+      {table_addr, 0x80020020},
+      {table_addr + 4, 0x80020030},
+  };
+
+  auto reader = MakeMemoryReader(memory);
+  auto result = JumpTableDetector::DetectAt(instructions, 6, reader);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->default_target_vram, 0x80020058);
+  EXPECT_EQ(result->num_cases, 2u);
+  EXPECT_EQ(result->index_register, Register::kA0);
+  ASSERT_EQ(result->entries.size(), 2u);
+  EXPECT_EQ(result->entries[0].target_vram, 0x80020020);
+  EXPECT_EQ(result->entries[1].target_vram, 0x80020030);
+
+  // Verify setup instructions were captured (addu, sll, lui)
+  EXPECT_THAT(result->setup_instruction_vrams,
+              ::testing::UnorderedElementsAre(0x80020010, 0x80020008, 0x8002000C));
+}
+
+TEST(JumpTableTest, SetupInstructionTrackingWithAddiuBase) {
+  // Verify setup_instruction_vrams captures lui + addiu base resolution
+  std::vector<Instruction> instructions;
+
+  Instruction lui;
+  lui.opcode = Opcode::kLui;
+  lui.rt = Register::kAt;
+  lui.immediate = static_cast<int16_t>(0x8010);
+  lui.vram = 0x80030000;
+  instructions.push_back(lui);
+
+  Instruction addiu;
+  addiu.opcode = Opcode::kAddiu;
+  addiu.rt = Register::kAt;
+  addiu.rs = Register::kAt;
+  addiu.immediate = static_cast<int16_t>(0x2000);
+  addiu.vram = 0x80030004;
+  instructions.push_back(addiu);
+
+  Instruction sltiu;
+  sltiu.opcode = Opcode::kSltiu;
+  sltiu.rt = Register::kV0;
+  sltiu.rs = Register::kA0;
+  sltiu.immediate = 2;
+  sltiu.vram = 0x80030008;
+  instructions.push_back(sltiu);
+
+  Instruction beqz;
+  beqz.opcode = Opcode::kBeq;
+  beqz.rs = Register::kV0;
+  beqz.rt = Register::kZero;
+  beqz.immediate = 10;
+  beqz.vram = 0x8003000C;
+  instructions.push_back(beqz);
+
+  Instruction sll;
+  sll.opcode = Opcode::kSll;
+  sll.rd = Register::kV0;
+  sll.rt = Register::kA0;
+  sll.shift_amount = 2;
+  sll.vram = 0x80030010;
+  instructions.push_back(sll);
+
+  Instruction addu;
+  addu.opcode = Opcode::kAddu;
+  addu.rd = Register::kAt;
+  addu.rs = Register::kAt;
+  addu.rt = Register::kV0;
+  addu.vram = 0x80030014;
+  instructions.push_back(addu);
+
+  Instruction lw;
+  lw.opcode = Opcode::kLw;
+  lw.rt = Register::kV0;
+  lw.rs = Register::kAt;
+  lw.immediate = 0;
+  lw.vram = 0x80030018;
+  instructions.push_back(lw);
+
+  Instruction jr;
+  jr.opcode = Opcode::kJr;
+  jr.rs = Register::kV0;
+  jr.vram = 0x8003001C;
+  instructions.push_back(jr);
+
+  uint32_t table_addr = 0x80100000 + 0x2000;
+  absl::flat_hash_map<uint32_t, uint32_t> memory = {
+      {table_addr, 0x80030020},
+      {table_addr + 4, 0x80030030},
+  };
+
+  auto reader = MakeMemoryReader(memory);
+  auto result = JumpTableDetector::DetectAt(instructions, 7, reader);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_THAT(result->setup_instruction_vrams,
+              ::testing::UnorderedElementsAre(0x80030014, 0x80030010, 0x80030000, 0x80030004));
 }
 
 }  // namespace
