@@ -236,7 +236,7 @@ TEST(MipsTest, DecodeSequence) {
   };
   auto seq_or = DecodeSequence(words, 0x80025C00);
   ASSERT_TRUE(seq_or.ok());
-  EXPECT_EQ(seq_or->size(), 4);
+  EXPECT_EQ(seq_or->size(), 4u);
   EXPECT_EQ((*seq_or)[0].vram, 0x80025C00);
   EXPECT_EQ((*seq_or)[0].opcode, Opcode::kAddu);
   EXPECT_EQ((*seq_or)[1].vram, 0x80025C04);
@@ -245,6 +245,80 @@ TEST(MipsTest, DecodeSequence) {
   EXPECT_TRUE((*seq_or)[2].IsReturn());
   EXPECT_EQ((*seq_or)[3].vram, 0x80025C0C);
   EXPECT_TRUE((*seq_or)[3].IsNop());
+}
+
+TEST(MipsTest, IsUnconditionalBranch) {
+  // beq $zero, $zero, offset
+  uint32_t b_word = (0x04 << 26) | (0 << 21) | (0 << 16) | 5;
+  auto b_inst = DecodeInstruction(b_word, 0x80025C00);
+  ASSERT_TRUE(b_inst.ok());
+  EXPECT_TRUE(b_inst->IsUnconditionalBranch());
+
+  // beq $t0, $t0, offset
+  uint32_t beq_same_word = (0x04 << 26) | (8 << 21) | (8 << 16) | 5;
+  auto beq_same_inst = DecodeInstruction(beq_same_word, 0x80025C00);
+  ASSERT_TRUE(beq_same_inst.ok());
+  EXPECT_TRUE(beq_same_inst->IsUnconditionalBranch());
+
+  // bgez $zero, offset
+  uint32_t bgez_zero_word = (0x01 << 26) | (0 << 21) | (1 << 16) | 5;
+  auto bgez_zero_inst = DecodeInstruction(bgez_zero_word, 0x80025C00);
+  ASSERT_TRUE(bgez_zero_inst.ok());
+  EXPECT_TRUE(bgez_zero_inst->IsUnconditionalBranch());
+
+  // Conditional branch: beq $t0, $t1, offset
+  uint32_t beq_diff_word = (0x04 << 26) | (8 << 21) | (9 << 16) | 5;
+  auto beq_diff_inst = DecodeInstruction(beq_diff_word, 0x80025C00);
+  ASSERT_TRUE(beq_diff_inst.ok());
+  EXPECT_FALSE(beq_diff_inst->IsUnconditionalBranch());
+}
+
+TEST(MipsTest, DecodeCop0Instructions) {
+  // mfc0 $a0, $12 (status) -> major=0x10, rs=0x00, rt=4, rd=12
+  uint32_t mfc0_word = (0x10 << 26) | (0x00 << 21) | (4 << 16) | (12 << 11);
+  auto mfc0_inst = DecodeInstruction(mfc0_word, 0x80025C00);
+  ASSERT_TRUE(mfc0_inst.ok());
+  EXPECT_EQ(mfc0_inst->opcode, Opcode::kMfc0);
+  EXPECT_EQ(*mfc0_inst->rt, Register::kA0);
+  EXPECT_EQ(mfc0_inst->Disassemble(), "mfc0  $a0, $12");
+
+  // mtc0 $a0, $12 (status) -> major=0x10, rs=0x04, rt=4, rd=12
+  uint32_t mtc0_word = (0x10 << 26) | (0x04 << 21) | (4 << 16) | (12 << 11);
+  auto mtc0_inst = DecodeInstruction(mtc0_word, 0x80025C00);
+  ASSERT_TRUE(mtc0_inst.ok());
+  EXPECT_EQ(mtc0_inst->opcode, Opcode::kMtc0);
+  EXPECT_EQ(*mtc0_inst->rt, Register::kA0);
+  EXPECT_EQ(mtc0_inst->Disassemble(), "mtc0  $a0, $12");
+}
+
+TEST(MipsTest, DecodeCop1RoundingInstructions) {
+  // round.w.s $f0, $f12 -> major=0x11, fmt=0x10(S), fs=12, fd=0, funct=0x0C
+  uint32_t round_word = (0x11 << 26) | (0x10 << 21) | (0 << 16) | (12 << 11) | (0 << 6) | 0x0C;
+  auto round_inst = DecodeInstruction(round_word, 0x80025C00);
+  ASSERT_TRUE(round_inst.ok());
+  EXPECT_EQ(round_inst->opcode, Opcode::kRoundWS);
+  EXPECT_EQ(round_inst->Disassemble(), "round.w.s $f0, $f12");
+
+  // trunc.w.s $f0, $f12 -> funct=0x0D
+  uint32_t trunc_word = (0x11 << 26) | (0x10 << 21) | (0 << 16) | (12 << 11) | (0 << 6) | 0x0D;
+  auto trunc_inst = DecodeInstruction(trunc_word, 0x80025C00);
+  ASSERT_TRUE(trunc_inst.ok());
+  EXPECT_EQ(trunc_inst->opcode, Opcode::kTruncWS);
+  EXPECT_EQ(trunc_inst->Disassemble(), "trunc.w.s $f0, $f12");
+
+  // ceil.w.s $f0, $f12 -> funct=0x0E
+  uint32_t ceil_word = (0x11 << 26) | (0x10 << 21) | (0 << 16) | (12 << 11) | (0 << 6) | 0x0E;
+  auto ceil_inst = DecodeInstruction(ceil_word, 0x80025C00);
+  ASSERT_TRUE(ceil_inst.ok());
+  EXPECT_EQ(ceil_inst->opcode, Opcode::kCeilWS);
+  EXPECT_EQ(ceil_inst->Disassemble(), "ceil.w.s $f0, $f12");
+
+  // floor.w.s $f0, $f12 -> funct=0x0F
+  uint32_t floor_word = (0x11 << 26) | (0x10 << 21) | (0 << 16) | (12 << 11) | (0 << 6) | 0x0F;
+  auto floor_inst = DecodeInstruction(floor_word, 0x80025C00);
+  ASSERT_TRUE(floor_inst.ok());
+  EXPECT_EQ(floor_inst->opcode, Opcode::kFloorWS);
+  EXPECT_EQ(floor_inst->Disassemble(), "floor.w.s $f0, $f12");
 }
 
 }  // namespace

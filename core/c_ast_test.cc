@@ -390,5 +390,99 @@ TEST(CAstTest, CollectReferencedSymbolsFiltersNonIdentifiers) {
   EXPECT_EQ(symbols.external_data.count("&D_80100000"), 0u);
 }
 
+TEST(CAstTest, LargeIntegerLiteralFormattedAsHex) {
+  // Values >= 0x80000000 should automatically format as hex even when is_hex is false.
+  auto lit_rom_addr = CExpression::Integer(0x800266C0, /*is_hex=*/false);
+  EXPECT_EQ(lit_rom_addr->ToString(), "0x800266C0");
+
+  auto lit_neg_as_u32 = CExpression::Integer(0xFFFFFFFF, /*is_hex=*/false, /*is_unsigned=*/true);
+  EXPECT_EQ(lit_neg_as_u32->ToString(), "0xFFFFFFFFU");
+
+  // Standard values < 0x80000000 format as decimal unless is_hex is true.
+  auto lit_dec = CExpression::Integer(12345, /*is_hex=*/false);
+  EXPECT_EQ(lit_dec->ToString(), "12345");
+
+  auto lit_hex_explicit = CExpression::Integer(0x100, /*is_hex=*/true);
+  EXPECT_EQ(lit_hex_explicit->ToString(), "0x100");
+}
+
+TEST(CAstTest, CompoundStatementPrunesDeadCodeAfterReturn) {
+  CompoundStatement compound;
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(1))));
+  compound.AddStatement(CStatement::Return(CExpression::Identifier("x")));
+
+  // Unreachable statements following return should be pruned.
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(2))));
+  compound.AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  std::string code = compound.ToString(0);
+  EXPECT_THAT(code, HasSubstr("x = 1;"));
+  EXPECT_THAT(code, HasSubstr("return x;"));
+  EXPECT_THAT(code, Not(HasSubstr("x = 2;")));
+  EXPECT_THAT(code, Not(HasSubstr("return 0;")));
+}
+
+TEST(CAstTest, CompoundStatementPreservesLabelsAfterReturn) {
+  CompoundStatement compound;
+  compound.AddStatement(CStatement::Return(CExpression::Identifier("x")));
+
+  // A label creates a new entry point, so it and subsequent statements must be kept.
+  compound.AddStatement(CStatement::Label(".L_resume"));
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(42))));
+
+  std::string code = compound.ToString(0);
+  EXPECT_THAT(code, HasSubstr("return x;"));
+  EXPECT_THAT(code, HasSubstr(".L_resume:"));
+  EXPECT_THAT(code, HasSubstr("x = 42;"));
+}
+
+TEST(CAstTest, CompoundStatementPrunesDeadCodeAfterBreakAndPreservesCase) {
+  CompoundStatement compound;
+  compound.AddStatement(CStatement::Break());
+
+  // Dead statement after break is pruned.
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("y"), CExpression::Integer(10))));
+
+  // Case label is preserved along with statements following it.
+  compound.AddStatement(CStatement::Case(1));
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("y"), CExpression::Integer(20))));
+
+  std::string code = compound.ToString(0);
+  EXPECT_THAT(code, HasSubstr("break;"));
+  EXPECT_THAT(code, Not(HasSubstr("y = 10;")));
+  EXPECT_THAT(code, HasSubstr("case 1:"));
+  EXPECT_THAT(code, HasSubstr("y = 20;"));
+}
+
+TEST(CAstTest, CompoundStatementPrunesDeadCodeAfterContinueAndGoto) {
+  CompoundStatement compound;
+  compound.AddStatement(CStatement::Continue());
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("a"), CExpression::Integer(1))));
+
+  compound.AddStatement(CStatement::Label(".L_loop_end"));
+  compound.AddStatement(CStatement::Goto(".L_top"));
+  compound.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("b"), CExpression::Integer(2))));
+
+  std::string code = compound.ToString(0);
+  EXPECT_THAT(code, HasSubstr("continue;"));
+  EXPECT_THAT(code, Not(HasSubstr("a = 1;")));
+  EXPECT_THAT(code, HasSubstr(".L_loop_end:"));
+  EXPECT_THAT(code, HasSubstr("goto .L_top;"));
+  EXPECT_THAT(code, Not(HasSubstr("b = 2;")));
+}
+
+TEST(CAstTest, CompoundStatementIgnoresNullStatement) {
+  CompoundStatement compound;
+  compound.AddStatement(nullptr);
+  EXPECT_EQ(compound.ToString(0), "{\n}\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

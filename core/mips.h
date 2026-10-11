@@ -219,6 +219,12 @@ enum class Opcode : uint16_t {
   kCvtDW,
   kTruncWS,
   kTruncWD,
+  kRoundWS,
+  kRoundWD,
+  kCeilWS,
+  kCeilWD,
+  kFloorWS,
+  kFloorWD,
   kCEqS,
   kCLtS,
   kCLeS,
@@ -234,6 +240,8 @@ enum class Opcode : uint16_t {
   kSyscall,
   kBreak,
   kSync,
+  kMfc0,
+  kMtc0,
 };
 
 // Represents a fully decoded 32-bit MIPS instruction.
@@ -262,12 +270,13 @@ struct Instruction {
   uint16_t UnsignedImmediate() const { return static_cast<uint16_t>(immediate); }
 
   // --- Classification Queries ---
-  bool IsBranch() const;        // beq, bne, blez, etc.
-  bool IsBranchLikely() const;  // beql, bnel, etc.
-  bool IsJump() const;          // j, jal, jr, jalr
-  bool IsCall() const;          // jal, jalr, bltzal, bgezal (calls function)
-  bool IsReturn() const;        // jr $ra
-  bool HasDelaySlot() const;    // All standard branches and jumps
+  bool IsBranch() const;               // beq, bne, blez, etc.
+  bool IsBranchLikely() const;         // beql, bnel, etc.
+  bool IsUnconditionalBranch() const;  // b, beq $r, $r, bgez $zero, etc.
+  bool IsJump() const;                 // j, jal, jr, jalr
+  bool IsCall() const;                 // jal, jalr, bltzal, bgezal (calls function)
+  bool IsReturn() const;               // jr $ra
+  bool HasDelaySlot() const;           // All standard branches and jumps
 
   bool IsLoad() const;   // lw, lh, lb, lwc1, etc.
   bool IsStore() const;  // sw, sh, sb, swc1, etc.

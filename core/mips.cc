@@ -96,6 +96,19 @@ bool Instruction::IsBranchLikely() const {
   }
 }
 
+bool Instruction::IsUnconditionalBranch() const {
+  if (opcode == Opcode::kBeq || opcode == Opcode::kBeql) {
+    return rs.has_value() && rt.has_value() && *rs == *rt;
+  }
+  if (opcode == Opcode::kBgez || opcode == Opcode::kBgezl) {
+    return rs.has_value() && *rs == Register::kZero;
+  }
+  if (opcode == Opcode::kBlez || opcode == Opcode::kBlezl) {
+    return rs.has_value() && *rs == Register::kZero;
+  }
+  return false;
+}
+
 bool Instruction::IsJump() const {
   switch (opcode) {
     case Opcode::kJ:
@@ -444,6 +457,18 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("trunc.w.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
     case Opcode::kTruncWD:
       return absl::StrFormat("trunc.w.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kRoundWS:
+      return absl::StrFormat("round.w.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kRoundWD:
+      return absl::StrFormat("round.w.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCeilWS:
+      return absl::StrFormat("ceil.w.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCeilWD:
+      return absl::StrFormat("ceil.w.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kFloorWS:
+      return absl::StrFormat("floor.w.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kFloorWD:
+      return absl::StrFormat("floor.w.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
 
     // FPU Comparisons
     case Opcode::kCEqS:
@@ -484,6 +509,12 @@ std::string Instruction::Disassemble() const {
     }
     case Opcode::kSync:
       return "sync";
+    case Opcode::kMfc0:
+      return absl::StrFormat("mfc0  %s, $%d", reg_str(rt),
+                             rd.has_value() ? static_cast<int>(*rd) : 0);
+    case Opcode::kMtc0:
+      return absl::StrFormat("mtc0  %s, $%d", reg_str(rt),
+                             rd.has_value() ? static_cast<int>(*rd) : 0);
 
     default:
       return absl::StrFormat(".word 0x%08X", raw_word);
@@ -666,6 +697,22 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     return inst;
   }
 
+  // Major Opcode 0x10: COP0
+  if (major_op == 0x10) {
+    if (rs_val == 0x00) {
+      inst.opcode = Opcode::kMfc0;
+      inst.rt = ToRegister(rt_val);
+      inst.rd = ToRegister(rd_val);
+      return inst;
+    }
+    if (rs_val == 0x04) {
+      inst.opcode = Opcode::kMtc0;
+      inst.rt = ToRegister(rt_val);
+      inst.rd = ToRegister(rd_val);
+      return inst;
+    }
+  }
+
   // Major Opcode 0x11: COP1 (Floating Point)
   if (major_op == 0x11) {
     inst.ft = ToFpRegister(rt_val);
@@ -759,8 +806,17 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
         case 0x07:
           inst.opcode = Opcode::kNegS;
           break;
+        case 0x0C:
+          inst.opcode = Opcode::kRoundWS;
+          break;
         case 0x0D:
           inst.opcode = Opcode::kTruncWS;
+          break;
+        case 0x0E:
+          inst.opcode = Opcode::kCeilWS;
+          break;
+        case 0x0F:
+          inst.opcode = Opcode::kFloorWS;
           break;
         case 0x21:
           inst.opcode = Opcode::kCvtDS;
@@ -808,8 +864,17 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
         case 0x07:
           inst.opcode = Opcode::kNegD;
           break;
+        case 0x0C:
+          inst.opcode = Opcode::kRoundWD;
+          break;
         case 0x0D:
           inst.opcode = Opcode::kTruncWD;
+          break;
+        case 0x0E:
+          inst.opcode = Opcode::kCeilWD;
+          break;
+        case 0x0F:
+          inst.opcode = Opcode::kFloorWD;
           break;
         case 0x20:
           inst.opcode = Opcode::kCvtSD;

@@ -146,7 +146,7 @@ std::unique_ptr<CExpression> CExpression::Ternary(std::unique_ptr<CExpression> c
 
 std::string IntegerLiteralExpression::ToString() const {
   std::string suffix = is_unsigned_ ? "U" : "";
-  if (is_hex_) {
+  if (is_hex_ || static_cast<uint64_t>(value_) >= 0x80000000ULL) {
     return absl::StrFormat("0x%X%s", static_cast<uint64_t>(value_), suffix);
   }
   return absl::StrFormat("%d%s", value_, suffix);
@@ -362,6 +362,27 @@ std::unique_ptr<CStatement> CStatement::Default() {
 // --- CompoundStatement ---
 
 void CompoundStatement::AddStatement(std::unique_ptr<CStatement> statement) {
+  if (statement == nullptr) return;
+  // Prune unreachable dead statements within this compound block.  If the
+  // preceding statement unconditionally transfers control (return, break,
+  // continue, goto), any subsequent statement in the same lexical block is
+  // dead and can never execute, unless it is a jump target (a label or case
+  // label).  Eliminating dead code prevents compiler unreachable-code
+  // warnings, avoids polluting decompiled C output, and prevents the compiler
+  // from generating spurious instructions or altered basic block layouts that
+  // break binary equivalence.
+  if (!statements_.empty()) {
+    CStatementKind last_kind = statements_.back()->Kind();
+    if (last_kind == CStatementKind::kReturnStatement ||
+        last_kind == CStatementKind::kBreakStatement ||
+        last_kind == CStatementKind::kContinueStatement ||
+        last_kind == CStatementKind::kGotoStatement) {
+      if (statement->Kind() != CStatementKind::kLabelStatement &&
+          statement->Kind() != CStatementKind::kCaseStatement) {
+        return;
+      }
+    }
+  }
   statements_.push_back(std::move(statement));
 }
 
