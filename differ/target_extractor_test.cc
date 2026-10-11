@@ -224,5 +224,59 @@ TEST_F(TargetExtractorTest, ReadRomWordReturnsNulloptWhenRomMissing) {
   EXPECT_EQ(extractor.ReadRomWord(0x80021000), std::nullopt);
 }
 
+TEST_F(TargetExtractorTest, EnsureRomLoadedAndPrescannedDiscoversJalEntrypoints) {
+  // Construct a ROM image containing two functions in the "code" segment (rom_start=0x1000,
+  // vram=0x80020000) TargetFunc at offset 0x2000 (vram 0x80021000):
+  //   80021000: jal 0x80021010 (target: Func2) -> target26 = 0x80021010 >> 2 = 0x02008404
+  //   80021004: nop
+  //   80021008: jr $ra
+  //   8002100C: nop
+  // Func2 at offset 0x2010 (vram 0x80021010):
+  //   80021010: addiu $v0, $zero, 42
+  //   80021014: jr $ra
+  //   80021018: nop
+  std::vector<uint8_t> rom(0x5000, 0);
+  uint32_t jal_word = 0x0C000000 | ((0x80021010u >> 2) & 0x03FFFFFF);
+  WriteBigEndian32(rom.data() + 0x2000, jal_word);
+  WriteBigEndian32(rom.data() + 0x2004, 0x00000000);  // nop
+  WriteBigEndian32(rom.data() + 0x2008, 0x03E00008);  // jr $ra
+  WriteBigEndian32(rom.data() + 0x200C, 0x00000000);  // nop
+  WriteBigEndian32(rom.data() + 0x2010, 0x2402002A);  // addiu $v0, $zero, 42
+  WriteBigEndian32(rom.data() + 0x2014, 0x03E00008);  // jr $ra
+  WriteBigEndian32(rom.data() + 0x2018, 0x00000000);  // nop
+  // Non-zero instruction at offset 0x201C (vram 0x8002101C) to bound trailing alignment NOPs
+  WriteBigEndian32(rom.data() + 0x201C, 0x24020001);  // addiu $v0, $zero, 1
+
+  std::filesystem::path rom_path = test_dir_ / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractor extractor({.repo_root = test_dir_, .game_name = "test-game"}, &config_,
+                            &symbols_);
+
+  // Extract TargetFunc; pre-scanning will run and discover 0x80021010 as a known entrypoint
+  auto target_or = extractor.ExtractTarget("TargetFunc");
+  ASSERT_TRUE(target_or.ok()) << target_or.status();
+
+  const auto& target = *target_or;
+  EXPECT_EQ(target.name, "TargetFunc");
+  EXPECT_EQ(target.vram, 0x80021000u);
+  EXPECT_EQ(target.size, 16u);
+  EXPECT_THAT(target.raw_words, ElementsAre(jal_word, 0x00000000u, 0x03E00008u, 0x00000000u));
+
+  // Extract Func2 by VRAM address (which was discovered via jal pre-scan)
+  auto func2_or = extractor.ExtractTarget("0x80021010");
+  ASSERT_TRUE(func2_or.ok()) << func2_or.status();
+  EXPECT_EQ(func2_or->vram, 0x80021010u);
+  EXPECT_EQ(func2_or->size, 12u);
+  EXPECT_THAT(func2_or->raw_words, ElementsAre(0x2402002A, 0x03E00008, 0x00000000));
+
+  // Verify cached ROM bytes are reused for subsequent read
+  auto word = extractor.ReadRomWord(0x80021010);
+  ASSERT_TRUE(word.has_value());
+  EXPECT_EQ(*word, 0x2402002Au);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

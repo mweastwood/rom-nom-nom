@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
@@ -68,12 +69,15 @@ class TargetExtractor {
   const SymbolIndex* Symbols() const { return symbols_; }
 
  private:
+  void EnsureRomLoadedAndPrescanned() const;
+
   TargetExtractorOptions options_;
   const SplitConfig* config_ = nullptr;
   const SymbolIndex* symbols_ = nullptr;
   std::unique_ptr<SplitConfig> owned_config_;
   std::unique_ptr<SymbolIndex> owned_symbols_;
   mutable std::vector<uint8_t> cached_rom_bytes_;
+  mutable absl::flat_hash_set<uint32_t> known_entrypoints_;
 };
 
 }  // namespace rom_nom_nom

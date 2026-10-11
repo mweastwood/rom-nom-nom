@@ -151,6 +151,9 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromRom(
   disasm_opts.emit_function_framing = false;
   disasm_opts.emit_relocations = false;
   Disassembler disasm(symbols_, disasm_opts);
+  if (!known_entrypoints_.empty()) {
+    disasm.SetKnownEntrypoints(known_entrypoints_);
+  }
 
   auto fn_or = disasm.DisassembleFunction(code_slice, vram);
   if (!fn_or.ok()) {
@@ -284,8 +287,10 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
   return target;
 }
 
-absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
-    std::string_view func_name_or_addr) const {
+void TargetExtractor::EnsureRomLoadedAndPrescanned() const {
+  if (!cached_rom_bytes_.empty()) {
+    return;
+  }
   std::filesystem::path rom_path =
       !options_.rom_path.empty()
           ? options_.rom_path
@@ -295,13 +300,38 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
     if (file.is_open()) {
       std::streamsize size = file.tellg();
       file.seekg(0, std::ios::beg);
-      std::vector<uint8_t> buffer(size);
-      if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        auto target_or = ExtractFromRom(buffer, func_name_or_addr);
-        if (target_or.ok()) {
-          return target_or;
+      cached_rom_bytes_.resize(size);
+      file.read(reinterpret_cast<char*>(cached_rom_bytes_.data()), size);
+    }
+  }
+
+  if (cached_rom_bytes_.empty()) {
+    return;
+  }
+
+  if (config_ != nullptr) {
+    for (const auto& seg : config_->segments()) {
+      if (seg.type() == SEGMENT_CODE && seg.vram() != 0 && seg.rom_end() > seg.rom_start() &&
+          seg.rom_end() <= cached_rom_bytes_.size()) {
+        absl::Span<const uint8_t> code_span(cached_rom_bytes_.data() + seg.rom_start(),
+                                            seg.rom_end() - seg.rom_start());
+        Disassembler disasm(symbols_);
+        disasm.PreScanCode(code_span, seg.vram());
+        for (uint32_t ep : disasm.KnownEntrypoints()) {
+          known_entrypoints_.insert(ep);
         }
       }
+    }
+  }
+}
+
+absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
+    std::string_view func_name_or_addr) const {
+  EnsureRomLoadedAndPrescanned();
+  if (!cached_rom_bytes_.empty()) {
+    auto target_or = ExtractFromRom(cached_rom_bytes_, func_name_or_addr);
+    if (target_or.ok()) {
+      return target_or;
     }
   }
 
@@ -309,22 +339,7 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
 }
 
 std::optional<uint32_t> TargetExtractor::ReadRomWord(uint32_t vram) const {
-  if (cached_rom_bytes_.empty()) {
-    std::filesystem::path rom_path =
-        !options_.rom_path.empty()
-            ? options_.rom_path
-            : (options_.repo_root / "roms" / absl::StrCat(options_.game_name, ".z64"));
-    if (std::filesystem::exists(rom_path)) {
-      std::ifstream file(rom_path, std::ios::binary | std::ios::ate);
-      if (file.is_open()) {
-        std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
-        cached_rom_bytes_.resize(size);
-        file.read(reinterpret_cast<char*>(cached_rom_bytes_.data()), size);
-      }
-    }
-  }
-
+  EnsureRomLoadedAndPrescanned();
   if (cached_rom_bytes_.empty()) {
     return std::nullopt;
   }
