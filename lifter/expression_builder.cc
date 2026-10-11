@@ -231,6 +231,68 @@ std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
   return LiftedExpression::Variable(RegisterVarName(reg));
 }
 
+void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Instruction& inst,
+                                         RegisterTracker& tracker,
+                                         std::vector<LiftedStatement>& statements) {
+  LiftedStatement statement;
+  if (lo.type == FoldedPatternType::kAddressLoad) {
+    statement.kind = StatementKind::kAssignment;
+    statement.destination_variable = ExpressionBuilder::RegisterVarName(lo.dest_reg);
+    statement.expression =
+        lo.symbol_name.empty()
+            ? LiftedExpression::Integer(lo.address, true)
+            : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name));
+    statements.push_back(std::move(statement));
+  } else if (lo.type == FoldedPatternType::kConstantLiteral) {
+    statement.kind = StatementKind::kAssignment;
+    statement.destination_variable = ExpressionBuilder::RegisterVarName(lo.dest_reg);
+    statement.expression = LiftedExpression::Integer(lo.address, true);
+    statements.push_back(std::move(statement));
+  } else if (lo.type == FoldedPatternType::kGlobalLoad) {
+    statement.kind = StatementKind::kAssignment;
+    if (lo.dest_fp_reg.has_value()) {
+      statement.destination_variable = ExpressionBuilder::FpRegisterVarName(*lo.dest_fp_reg);
+    } else {
+      statement.destination_variable = ExpressionBuilder::RegisterVarName(lo.dest_reg);
+    }
+    if (lo.symbol_name.empty()) {
+      statement.expression =
+          LiftedExpression::Load(lo.access_type, LiftedExpression::Integer(lo.address, true));
+    } else if (lo.access_type != "s32") {
+      statement.expression = LiftedExpression::Load(
+          lo.access_type,
+          LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name)));
+    } else {
+      statement.expression = LiftedExpression::GlobalRef(lo.symbol_name);
+    }
+    statements.push_back(std::move(statement));
+  } else if (lo.type == FoldedPatternType::kGlobalStore) {
+    std::unique_ptr<LiftedExpression> src_expr;
+    if (lo.src_fp_reg.has_value()) {
+      src_expr = LiftFpRegister(*lo.src_fp_reg);
+    } else {
+      src_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.src_reg, tracker);
+    }
+
+    if (lo.access_type != "s32") {
+      statement.kind = StatementKind::kStore;
+      statement.store_type = lo.access_type;
+      statement.destination_address =
+          lo.symbol_name.empty()
+              ? LiftedExpression::Integer(lo.address, true)
+              : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name));
+      statement.expression = std::move(src_expr);
+    } else {
+      statement.kind = StatementKind::kAssignment;
+      statement.destination_variable =
+          lo.symbol_name.empty() ? absl::StrFormat("*(0x%X)", lo.address) : lo.symbol_name;
+      statement.expression = std::move(src_expr);
+    }
+    statements.push_back(std::move(statement));
+  }
+  tracker.Step(inst);
+}
+
 std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
     const BasicBlock& block, const SymbolIndex* symbol_index, const SplitConfig* split_config,
     const absl::flat_hash_map<std::string, int>* function_parameter_counts,
@@ -346,63 +408,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
     // If this instruction is the low half of a folded pair, emit high-level folded access
     if (const auto* lo = folder.GetFoldedLo(i)) {
-      LiftedStatement statement;
-      if (lo->type == FoldedPatternType::kAddressLoad) {
-        statement.kind = StatementKind::kAssignment;
-        statement.destination_variable = RegisterVarName(lo->dest_reg);
-        statement.expression =
-            lo->symbol_name.empty()
-                ? LiftedExpression::Integer(lo->address, true)
-                : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
-        statements.push_back(std::move(statement));
-      } else if (lo->type == FoldedPatternType::kConstantLiteral) {
-        statement.kind = StatementKind::kAssignment;
-        statement.destination_variable = RegisterVarName(lo->dest_reg);
-        statement.expression = LiftedExpression::Integer(lo->address, true);
-        statements.push_back(std::move(statement));
-      } else if (lo->type == FoldedPatternType::kGlobalLoad) {
-        statement.kind = StatementKind::kAssignment;
-        if (lo->dest_fp_reg.has_value()) {
-          statement.destination_variable = FpRegisterVarName(*lo->dest_fp_reg);
-        } else {
-          statement.destination_variable = RegisterVarName(lo->dest_reg);
-        }
-        if (lo->symbol_name.empty()) {
-          statement.expression =
-              LiftedExpression::Load(lo->access_type, LiftedExpression::Integer(lo->address, true));
-        } else if (lo->access_type != "s32") {
-          statement.expression = LiftedExpression::Load(
-              lo->access_type,
-              LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name)));
-        } else {
-          statement.expression = LiftedExpression::GlobalRef(lo->symbol_name);
-        }
-        statements.push_back(std::move(statement));
-      } else if (lo->type == FoldedPatternType::kGlobalStore) {
-        std::unique_ptr<LiftedExpression> src_expr;
-        if (lo->src_fp_reg.has_value()) {
-          src_expr = LiftFpRegister(*lo->src_fp_reg);
-        } else {
-          src_expr = LiftRegisterOrConstant(lo->src_reg, tracker);
-        }
-
-        if (lo->access_type != "s32") {
-          statement.kind = StatementKind::kStore;
-          statement.store_type = lo->access_type;
-          statement.destination_address =
-              lo->symbol_name.empty()
-                  ? LiftedExpression::Integer(lo->address, true)
-                  : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
-          statement.expression = std::move(src_expr);
-        } else {
-          statement.kind = StatementKind::kAssignment;
-          statement.destination_variable =
-              lo->symbol_name.empty() ? absl::StrFormat("*(0x%X)", lo->address) : lo->symbol_name;
-          statement.expression = std::move(src_expr);
-        }
-        statements.push_back(std::move(statement));
-      }
-      tracker.Step(inst);
+      LiftFoldedAccess(*lo, inst, tracker, statements);
       continue;
     }
 

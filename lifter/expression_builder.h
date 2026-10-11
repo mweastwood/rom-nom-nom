@@ -146,6 +146,10 @@ class ExpressionBuilder {
   static std::optional<FoldedComparison> FindFoldedComparison(
       absl::Span<const Instruction> instructions);
 
+  // Lifts a folded symbol access into one or more high-level statements.
+  static void LiftFoldedAccess(const FoldedSymbolAccess& lo, const Instruction& inst,
+                               RegisterTracker& tracker, std::vector<LiftedStatement>& statements);
+
  private:
   static std::unique_ptr<LiftedExpression> LiftRegisterOrConstant(Register reg,
                                                                   const RegisterTracker& tracker);
