@@ -367,6 +367,7 @@ TEST(ControlFlowStructurerTest, StructureSwitchStatement) {
   EXPECT_THAT(s, HasSubstr("switch"));
   EXPECT_THAT(s, HasSubstr("case 0:"));
   EXPECT_THAT(s, HasSubstr("case 1:"));
+  EXPECT_THAT(s, HasSubstr("default:\n    break;"));
 }
 
 TEST(ControlFlowStructurerTest, StructureSwitchPreservesBoundsBlock) {
@@ -444,6 +445,233 @@ TEST(ControlFlowStructurerTest, StructureSwitchPreservesBoundsBlock) {
   EXPECT_EQ(region->children[0]->type, RegionType::kBlock);
   EXPECT_EQ(region->children[0]->block_id, 0u);
   EXPECT_EQ(region->children[1]->type, RegionType::kSwitch);
+}
+
+TEST(ControlFlowStructurerTest, DoWhileLoopEarlyBreak) {
+  // Multi-block do-while loop with an early break before latch:
+  // Block 0 (Entry):
+  //   0x00: beq $zero, $zero, +1 (to Header at 0x08)
+  //   0x04: nop
+  // Block 1 (Header with early break check):
+  //   0x08: addiu $v0, $v0, 1
+  //   0x0C: nop
+  //   0x10: beq $a0, $zero, +3 (to Exit at 0x20)
+  //   0x14: nop (delay slot, fallthrough to Latch at 0x18)
+  // Block 2 (Latch):
+  //   0x18: bne $v0, $zero, -5 (to Header at 0x08)
+  //   0x1C: nop (fallthrough to Exit at 0x20)
+  // Block 3 (Exit):
+  //   0x20: jr $ra
+  //   0x24: nop
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08)
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x00000000,  // 0x0C: nop
+      0x10800003,  // 0x10: beq $a0, $zero, +3 (0x20)
+      0x00000000,  // 0x14: nop
+      0x1440FFFB,  // 0x18: bne $v0, $zero, -5 (0x08)
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20: jr $ra
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("block_0"));
+  EXPECT_THAT(s, HasSubstr("do {"));
+  EXPECT_THAT(s, HasSubstr("if (block_1) {\n    break\n  }"));
+  EXPECT_THAT(s, HasSubstr("} while (block_2);"));
+  EXPECT_THAT(s, HasSubstr("block_3"));
+}
+
+TEST(ControlFlowStructurerTest, DoWhileLoopEarlyBreakInverted) {
+  // Multi-block do-while loop with an early break where fallthrough exits:
+  // Block 0 (Header):
+  //   0x00: beq $zero, $zero, +1 (to Header at 0x08)
+  //   0x04: nop
+  // Block 1 (Early break check):
+  //   0x08: addiu $v0, $v0, 1
+  //   0x0C: bne $a0, $zero, +4 (to Latch at 0x20)
+  //   0x10: nop (fallthrough to Exit jump at 0x14)
+  // Block 2 (Exit jump / body):
+  //   0x14: j 0x80000028 (Exit at 0x28)
+  //   0x18: nop
+  // Block 3 (Latch):
+  //   0x20: bne $v0, $zero, -7 (to Header at 0x08)
+  //   0x24: nop (fallthrough to Exit at 0x28)
+  // Block 4 (Exit):
+  //   0x28: jr $ra
+  //   0x2C: nop
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08)
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x14800004,  // 0x0C: bne $a0, $zero, +4 (0x20)
+      0x00000000,  // 0x10: nop
+      0x0800000A,  // 0x14: j 0x80000028
+      0x00000000,  // 0x18: nop
+      0x00000000,  // 0x1C: nop
+      0x1440FFF9,  // 0x20: bne $v0, $zero, -7 (0x08)
+      0x00000000,  // 0x24: nop
+      0x03E00008,  // 0x28: jr $ra
+      0x00000000,  // 0x2C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("block_0"));
+  EXPECT_THAT(s, HasSubstr("do {"));
+  EXPECT_THAT(s, HasSubstr("if (!block_1) {\n    block_2\n    break\n  }"));
+  EXPECT_THAT(s, HasSubstr("} while (block_4);"));
+  EXPECT_THAT(s, HasSubstr("block_5"));
+}
+
+TEST(ControlFlowStructurerTest, WhileLoopConditionPolarity) {
+  // Case A: Branch in header targets Exit -> invert_condition is true
+  std::vector<uint32_t> words_exit_on_branch = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08)
+      0x00000000,  // 0x04: nop
+      0x14800003,  // 0x08: bne $a0, $zero, +3 (Exit at 0x18)
+      0x00000000,  // 0x0C: nop
+      0x08000002,  // 0x10: j 0x80000008 (Latch to Header at 0x08)
+      0x00000000,  // 0x14: nop
+      0x03E00008,  // 0x18: jr $ra
+      0x00000000,  // 0x1C: nop
+  };
+
+  auto insts_a = *DecodeSequence(words_exit_on_branch, 0x80000000);
+  auto cfg_a = *ControlFlowGraph::Build(insts_a);
+  DominatorTree dt_a = DominatorTree::Compute(cfg_a);
+  DominatorTree post_dt_a = DominatorTree::ComputePostDominators(cfg_a);
+  LoopInfo loops_a = LoopInfo::Analyze(cfg_a, dt_a);
+  auto region_a = ControlFlowStructurer::Structure(cfg_a, dt_a, post_dt_a, loops_a);
+  ASSERT_THAT(region_a, NotNull());
+  ASSERT_EQ(region_a->type, RegionType::kSequence);
+  ASSERT_GE(region_a->children.size(), 2u);
+  EXPECT_EQ(region_a->children[1]->type, RegionType::kLoop);
+  EXPECT_TRUE(region_a->children[1]->invert_condition);
+
+  // Case B: Branch in header targets Body -> invert_condition is false
+  // 0x08: bne $a0, $zero, +3 -> targets Body at 0x18
+  // 0x10: jr $ra -> Exit on fallthrough
+  // 0x18: j 0x80000008 -> Latch back to Header
+  std::vector<uint32_t> words_body_on_branch = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08)
+      0x00000000,  // 0x04: nop
+      0x14800003,  // 0x08: bne $a0, $zero, +3 (0x18)
+      0x00000000,  // 0x0C: nop
+      0x03E00008,  // 0x10: jr $ra (Exit)
+      0x00000000,  // 0x14: nop
+      0x08000002,  // 0x18: j 0x80000008 (Latch to Header at 0x08)
+      0x00000000,  // 0x1C: nop
+  };
+
+  auto insts_b = *DecodeSequence(words_body_on_branch, 0x80000000);
+  auto cfg_b = *ControlFlowGraph::Build(insts_b);
+  DominatorTree dt_b = DominatorTree::Compute(cfg_b);
+  DominatorTree post_dt_b = DominatorTree::ComputePostDominators(cfg_b);
+  LoopInfo loops_b = LoopInfo::Analyze(cfg_b, dt_b);
+  auto region_b = ControlFlowStructurer::Structure(cfg_b, dt_b, post_dt_b, loops_b);
+  ASSERT_THAT(region_b, NotNull());
+  ASSERT_EQ(region_b->type, RegionType::kSequence);
+  ASSERT_GE(region_b->children.size(), 2u);
+  EXPECT_EQ(region_b->children[1]->type, RegionType::kLoop);
+  EXPECT_FALSE(region_b->children[1]->invert_condition);
+}
+
+TEST(ControlFlowStructurerTest, DoWhileLoopMultipleExitsFollow) {
+  // Loop with multiple exits:
+  // Exit 1 (0x28) is reachable via early break from Block 1.
+  // Exit 2 (0x20) is reachable via fallthrough from latch Block 2.
+  // The follow block should be selected as Exit 2 (the latch exit).
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08)
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x10800006,  // 0x0C: beq $a0, $zero, +6 (Exit 1 at 0x28)
+      0x00000000,  // 0x10: nop
+      0x1440FFFC,  // 0x14: bne $v0, $zero, -4 (0x08)
+      0x00000000,  // 0x18: nop (fallthrough to Exit 2 at 0x20)
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20: jr $ra (Exit 2)
+      0x00000000,  // 0x24: nop
+      0x03E00008,  // 0x28: jr $ra (Exit 1)
+      0x00000000,  // 0x2C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("do {"));
+  EXPECT_THAT(s, HasSubstr("} while (block_2);"));
+  // Exit 2 (block_3) follows immediately after the loop
+  EXPECT_THAT(s, HasSubstr("} while (block_2);\nblock_3\n"));
+}
+
+TEST(ControlFlowStructurerTest, IntraLoopConditionalJoinFallback) {
+  // Loop containing an if-then branch whose post-dominator is outside the loop.
+  // The structurer should fall back to joining at the latch.
+  // Block 0: Header (0x00) -> falls through to Block 1 (0x08)
+  // Block 1: Body (0x08) -> beq $a0, $zero to Latch (0x18); fallthrough to Block 2 (0x10)
+  // Block 2: Work (0x10) -> jumps to Latch (0x18)
+  // Block 3: Latch (0x18) -> bne $v0, $zero to Header (0x00); fallthrough to Exit (0x24)
+  // Block 4: Exit (0x24) -> jr $ra
+  std::vector<uint32_t> words = {
+      0x08000002,  // 0x00: j 0x80000008 (Header to Body)
+      0x00000000,  // 0x04: nop
+      0x10800003,  // 0x08: beq $a0, $zero, +3 (to Latch at 0x18)
+      0x00000000,  // 0x0C: nop
+      0x08000006,  // 0x10: j 0x80000018 (to Latch at 0x18)
+      0x00000000,  // 0x14: nop
+      0x1440FFFA,  // 0x18: bne $v0, $zero, -6 (Latch to Header at 0x00)
+      0x00000000,  // 0x1C: nop (fallthrough to Exit at 0x24)
+      0x00000000,  // 0x20: nop
+      0x03E00008,  // 0x24: jr $ra (Exit)
+      0x00000000,  // 0x28: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("if (!block_2) {\n    block_3\n  }"));
+  EXPECT_THAT(s, HasSubstr("block_5"));
 }
 
 }  // namespace

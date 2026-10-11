@@ -207,8 +207,29 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
   std::optional<uint32_t> loop_follow;
   if (loop->exit_blocks.size() == 1) {
     loop_follow = loop->exit_blocks[0];
-  } else if (!loop->exit_blocks.empty()) {
-    loop_follow = post_dom_tree_->ImmediateDominator(loop->header);
+  } else {
+    if (loop->type == LoopType::kDoWhile) {
+      for (const auto& edge : loop->exit_edges) {
+        if (loop->IsLatch(edge.from_block_id)) {
+          loop_follow = edge.to_block_id;
+          break;
+        }
+      }
+    } else if (loop->type == LoopType::kWhile) {
+      for (const auto& edge : loop->exit_edges) {
+        if (edge.from_block_id == loop->header) {
+          loop_follow = edge.to_block_id;
+          break;
+        }
+      }
+    }
+    if (!loop_follow.has_value() && !loop->exit_blocks.empty() && post_dom_tree_ != nullptr) {
+      std::optional<uint32_t> cand = post_dom_tree_->ImmediateDominator(loop->header);
+      while (cand.has_value() && loop->Contains(*cand)) {
+        cand = post_dom_tree_->ImmediateDominator(*cand);
+      }
+      loop_follow = cand;
+    }
   }
 
   if (loop->type == LoopType::kWhile) {
@@ -222,6 +243,15 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
           break;
         }
       }
+
+      bool branch_targets_body = false;
+      for (const auto& edge : header_block->outgoing_edges) {
+        if (edge.type == EdgeType::kBranch && loop->Contains(edge.to_block_id)) {
+          branch_targets_body = true;
+          break;
+        }
+      }
+      loop_region->invert_condition = !branch_targets_body;
 
       if (body_start != 0) {
         visited_.insert(loop->header);
@@ -246,6 +276,18 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
       latch_id = loop->header;
     }
     loop_region->condition_block_id = latch_id;
+
+    bool branch_targets_body = false;
+    const auto* latch_block = cfg_->GetBlock(latch_id);
+    if (latch_block != nullptr) {
+      for (const auto& edge : latch_block->outgoing_edges) {
+        if (edge.type == EdgeType::kBranch && loop->Contains(edge.to_block_id)) {
+          branch_targets_body = true;
+          break;
+        }
+      }
+    }
+    loop_region->invert_condition = !branch_targets_body;
 
     if (loop->blocks.size() == 1) {
       loop_region->children.push_back(CreateBlock(loop->header));
@@ -296,6 +338,16 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       return CreateContinue(entry);
     }
     if (current_loop->IsExitBlock(entry)) {
+      if (follow.has_value() && entry == *follow) {
+        return CreateBreak(entry);
+      }
+      auto exit_body = StructureRegion(entry, follow, current_loop->parent);
+      if (exit_body) {
+        auto seq = CreateSequence();
+        seq->children.push_back(std::move(exit_body));
+        seq->children.push_back(CreateBreak(entry));
+        return seq;
+      }
       return CreateBreak(entry);
     }
     if (current_loop->type == LoopType::kDoWhile && current_loop->IsLatch(entry)) {
@@ -381,7 +433,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     const auto* def_blk = cfg_->FindBlockByVram(switch_jt->default_target_vram);
     uint32_t def_blk_id = (def_blk != nullptr) ? def_blk->id : 0;
     bool has_explicit_default = false;
-    if (def_blk != nullptr && (!join.has_value() || def_blk_id != *join)) {
+    if (def_blk != nullptr) {
       has_explicit_default = true;
       if (!target_to_cases.contains(def_blk_id)) {
         unique_target_blocks.push_back(def_blk_id);
@@ -479,8 +531,67 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       succ_fallthrough = block->successors[1];
     }
 
+    // Case 3-break: If inside a loop and one successor is a loop exit before the latch
+    if (current_loop != nullptr && !current_loop->IsLatch(entry)) {
+      if (current_loop->IsExitBlock(succ_taken) && !current_loop->IsExitBlock(succ_fallthrough)) {
+        auto if_break = CreateIfThen(entry, /*invert=*/false);
+        if (follow.has_value() && succ_taken == *follow) {
+          if_break->children.push_back(CreateBreak(succ_taken));
+        } else {
+          auto exit_body = StructureRegion(succ_taken, follow, current_loop->parent);
+          if (exit_body) {
+            auto seq = CreateSequence();
+            seq->children.push_back(std::move(exit_body));
+            seq->children.push_back(CreateBreak(succ_taken));
+            if_break->children.push_back(std::move(seq));
+          } else {
+            if_break->children.push_back(CreateBreak(succ_taken));
+          }
+        }
+        auto next = StructureRegion(succ_fallthrough, follow, current_loop);
+        if (next) {
+          auto seq = CreateSequence();
+          seq->children.push_back(std::move(if_break));
+          FlattenSequence(seq.get(), std::move(next));
+          return seq;
+        }
+        return if_break;
+      }
+      if (current_loop->IsExitBlock(succ_fallthrough) && !current_loop->IsExitBlock(succ_taken)) {
+        auto if_break = CreateIfThen(entry, /*invert=*/true);
+        if (follow.has_value() && succ_fallthrough == *follow) {
+          if_break->children.push_back(CreateBreak(succ_fallthrough));
+        } else {
+          auto exit_body = StructureRegion(succ_fallthrough, follow, current_loop->parent);
+          if (exit_body) {
+            auto seq = CreateSequence();
+            seq->children.push_back(std::move(exit_body));
+            seq->children.push_back(CreateBreak(succ_fallthrough));
+            if_break->children.push_back(std::move(seq));
+          } else {
+            if_break->children.push_back(CreateBreak(succ_fallthrough));
+          }
+        }
+        auto next = StructureRegion(succ_taken, follow, current_loop);
+        if (next) {
+          auto seq = CreateSequence();
+          seq->children.push_back(std::move(if_break));
+          FlattenSequence(seq.get(), std::move(next));
+          return seq;
+        }
+        return if_break;
+      }
+    }
+
     // Determine join point using post-dominators
     std::optional<uint32_t> join = post_dom_tree_->ImmediateDominator(entry);
+    if (current_loop != nullptr && current_loop->Contains(entry)) {
+      if (!join.has_value() || !current_loop->Contains(*join)) {
+        if (!current_loop->latches.empty() && current_loop->latches[0] != entry) {
+          join = current_loop->latches[0];
+        }
+      }
+    }
     if (follow.has_value() && (!join.has_value() || *join == *follow)) {
       join = follow;
     }
