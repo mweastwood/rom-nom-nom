@@ -1816,7 +1816,21 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
     }
   }
 
-  // 5. Check if cond_reg is an input to def_inst (in-place modification / self-clobbering)
+  // 5. Reject folding if a non-likely branch delay slot defines any input of def_inst (other than
+  // cond_reg)
+  if (!branch.IsBranchLikely() && branch_idx + 1 < static_cast<int>(instructions.size())) {
+    RegisterUseDef delay_ud = GetInstructionUseDef(instructions[branch_idx + 1]);
+    for (Register input_reg : def_ud.gpr_uses) {
+      if (input_reg == *cond_reg) continue;
+      for (Register delay_def : delay_ud.gpr_defs) {
+        if (delay_def == input_reg) {
+          return std::nullopt;
+        }
+      }
+    }
+  }
+
+  // 6. Check if cond_reg is an input to def_inst (in-place modification / self-clobbering)
   bool cond_is_input = false;
   for (Register r : def_ud.gpr_uses) {
     if (r == *cond_reg) {

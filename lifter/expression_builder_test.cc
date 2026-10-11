@@ -1124,6 +1124,38 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonDoesNotFoldSelfMutatingInstructi
   EXPECT_FALSE(folded.has_value());
 }
 
+TEST(ExpressionBuilderTest, FindFoldedComparisonDoesNotFoldWhenDelaySlotClobbersInput) {
+  // Pattern matching GraphicSetSpriteDescriptor:
+  // andi  $v1, $v0, 0xF
+  // beqz  $v1, +5
+  // addiu $v0, $zero, 1
+  // Because $v0 is an input to andi and the delay slot redefines $v0,
+  // the andi instruction must not be folded/suppressed.
+  std::vector<uint32_t> words = {
+      0x3043000F,  // 0: andi  $v1, $v0, 0xF
+      0x10600005,  // 4: beqz  $v1, +5
+      0x24020001,  // 8: addiu $v0, $zero, 1
+  };
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  EXPECT_FALSE(folded.has_value());
+}
+
+TEST(ExpressionBuilderTest, FindFoldedComparisonFoldsWhenDelaySlotDoesNotClobberInput) {
+  // Same pattern but delay slot does not redefine $v0 or $v1:
+  // andi  $v1, $v0, 0xF
+  // beqz  $v1, +5
+  // addiu $a0, $zero, 1
+  std::vector<uint32_t> words = {
+      0x3043000F,  // 0: andi  $v1, $v0, 0xF
+      0x10600005,  // 4: beqz  $v1, +5
+      0x24040001,  // 8: addiu $a0, $zero, 1
+  };
+  auto insts = *DecodeSequence(words);
+  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  EXPECT_TRUE(folded.has_value());
+}
+
 TEST(ExpressionBuilderTest, LiftsFoldedFloatingPointGlobalLoadAndStore) {
   // lui  $at, 0x8017
   // lwc1 $f2, 1104($at)  # target: 0x80170450
