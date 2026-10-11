@@ -289,5 +289,183 @@ TEST(LoopAnalyzerTest, NestedLoops) {
   EXPECT_EQ(loops.GetLoopFor(4), outer);
 }
 
+TEST(LoopAnalyzerTest, TrampolineJumpLatchFolding) {
+  // Loop with a synthesized unconditional jump trampoline to the header:
+  // Block 0 (Entry):
+  // 0x00: beq $zero, $zero, +1 (0x08 -> Header)
+  // 0x04: nop
+  // Block 1 (Header):
+  // 0x08: addiu $v0, $v0, 1
+  // 0x0C: beq $zero, $zero, +1 (0x14 -> Body)
+  // 0x10: nop
+  // Block 2 (Body / Branching Pred):
+  // 0x14: bne $v0, $a0, +3 (0x24 -> Trampoline)
+  // 0x18: nop (fallthrough to Exit at 0x1C)
+  // Block 3 (Exit):
+  // 0x1C: jr $ra
+  // 0x20: nop
+  // Block 4 (Trampoline Latch):
+  // 0x24: j 0x80000008 (target Header at 0x08)
+  // 0x28: nop
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08)
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x10000001,  // 0x0C: beq $zero, $zero, +1 (0x14)
+      0x00000000,  // 0x10: nop
+      0x14440003,  // 0x14: bne $v0, $a0, +3 (0x24)
+      0x00000000,  // 0x18: nop
+      0x03E00008,  // 0x1C: jr $ra
+      0x00000000,  // 0x20: nop
+      0x08000002,  // 0x24: j 0x80000008 (index 2)
+      0x00000000,  // 0x28: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  ASSERT_THAT(loops.AllLoops(), SizeIs(1));
+  const Loop* loop = loops.AllLoops()[0].get();
+  EXPECT_EQ(loop->header, 1u);
+  // Trampoline block 4 was folded, latch replaced with predecessor block 2
+  EXPECT_THAT(loop->latches, ElementsAre(2u));
+  // Both body block 2 and trampoline block 4 are in loop blocks
+  EXPECT_TRUE(loop->Contains(1u));
+  EXPECT_TRUE(loop->Contains(2u));
+  EXPECT_TRUE(loop->Contains(4u));
+  // Loop type is kDoWhile because latch block 2 exits to block 3
+  EXPECT_EQ(loop->type, LoopType::kDoWhile);
+}
+
+TEST(LoopAnalyzerTest, TrampolineNotFoldedWhenInstructionsExceedThreshold) {
+  // Latch has > 2 instructions before/including j, so it is not a pure trampoline.
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08 -> Header)
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x10000001,  // 0x0C: beq $zero, $zero, +1 (0x14 -> Body)
+      0x00000000,  // 0x10: nop
+      0x14440003,  // 0x14: bne $v0, $a0, +3 (0x24 -> Latch)
+      0x00000000,  // 0x18: nop (fallthrough to Exit at 0x1C)
+      0x03E00008,  // 0x1C: jr $ra
+      0x00000000,  // 0x20: nop
+      0x24630001,  // 0x24: addiu $v1, $v1, 1
+      0x24630002,  // 0x28: addiu $v1, $v1, 2
+      0x08000002,  // 0x2C: j 0x80000008 (target Header at 0x08)
+      0x00000000,  // 0x30: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  ASSERT_THAT(loops.AllLoops(), SizeIs(1));
+  const Loop* loop = loops.AllLoops()[0].get();
+  EXPECT_EQ(loop->header, 1u);
+  // Latch has 4 instructions (> 2 threshold), so block 4 remains the latch (not folded)
+  EXPECT_THAT(loop->latches, ElementsAre(4u));
+}
+
+TEST(LoopAnalyzerTest, TrampolineNotFoldedWhenMultiplePredecessors) {
+  // Latch has 2 predecessors (shared merge point), so it is not a dedicated trampoline.
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08 -> Header)
+      0x00000000,  // 0x04: nop
+      0x14800005,  // 0x08: bne $a0, $zero, +5 (0x20 -> Trampoline)
+      0x00000000,  // 0x0C: nop (fallthrough to Body at 0x10)
+      0x14A00003,  // 0x10: bne $a1, $zero, +3 (0x20 -> Trampoline)
+      0x00000000,  // 0x14: nop (fallthrough to Exit at 0x18)
+      0x03E00008,  // 0x18: jr $ra
+      0x00000000,  // 0x1C: nop
+      0x08000002,  // 0x20: j 0x80000008 (target Header at 0x08)
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  ASSERT_THAT(loops.AllLoops(), SizeIs(1));
+  const Loop* loop = loops.AllLoops()[0].get();
+  EXPECT_EQ(loop->header, 1u);
+  // Trampoline has multiple predecessors, so it is not folded
+  EXPECT_THAT(loop->latches, ElementsAre(4u));
+}
+
+TEST(LoopAnalyzerTest, LoopClassificationPrioritizesLatchExitOverHeaderExit) {
+  // Loop where both header and latch have exit edges.
+  // Latch exit takes priority, classifying it as kDoWhile.
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08 -> Header)
+      0x00000000,  // 0x04: nop
+      0x14800005,  // 0x08: bne $a0, $zero, +5 (0x20 -> Exit 1)
+      0x00000000,  // 0x0C: nop (fallthrough to Latch at 0x10)
+      0x14A0FFFD,  // 0x10: bne $a1, $zero, -3 (0x08 -> Header)
+      0x00000000,  // 0x14: nop (fallthrough to Exit 2 at 0x18)
+      0x03E00008,  // 0x18: jr $ra (Exit 2)
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20: jr $ra (Exit 1)
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  ASSERT_THAT(loops.AllLoops(), SizeIs(1));
+  const Loop* loop = loops.AllLoops()[0].get();
+  EXPECT_EQ(loop->type, LoopType::kDoWhile);
+}
+
+TEST(LoopAnalyzerTest, LoopClassificationFallsBackToInfiniteWhenInteriorBlockExits) {
+  // Loop where neither header nor latch exits, but an interior body block exits (break).
+  std::vector<uint32_t> words = {
+      0x10000001,  // 0x00: beq $zero, $zero, +1 (0x08 -> Header)
+      0x00000000,  // 0x04: nop
+      0x24420001,  // 0x08: addiu $v0, $v0, 1
+      0x10000001,  // 0x0C: beq $zero, $zero, +1 (0x14 -> Interior)
+      0x00000000,  // 0x10: nop
+      0x14440004,  // 0x14: bne $v0, $a0, +4 (0x28 -> Exit)
+      0x00000000,  // 0x18: nop (fallthrough to Latch at 0x1C)
+      0x24630001,  // 0x1C: addiu $v1, $v1, 1 (Latch)
+      0x24630002,  // 0x20: addiu $v1, $v1, 2
+      0x08000002,  // 0x24: j 0x80000008 (target Header at 0x08)
+      0x00000000,  // 0x28: nop
+      0x03E00008,  // 0x2C: jr $ra (Exit)
+      0x00000000,  // 0x30: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  ASSERT_THAT(loops.AllLoops(), SizeIs(1));
+  const Loop* loop = loops.AllLoops()[0].get();
+  EXPECT_EQ(loop->header, 1u);
+  // Neither header (block 1) nor latch (block 3) exits; only interior block 2 exits
+  EXPECT_EQ(loop->type, LoopType::kInfinite);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -12,6 +12,44 @@
 
 namespace rom_nom_nom {
 
+namespace {
+
+// Returns the branching predecessor block ID if `latch_id` is an unconditional
+// jump trampoline back to `header_id`.
+std::optional<uint32_t> DetectTrampolineBranchPredecessor(const ControlFlowGraph& cfg,
+                                                          uint32_t latch_id, uint32_t header_id) {
+  const auto* lb = cfg.GetBlock(latch_id);
+  if (lb == nullptr || lb->instructions.size() > 2) {
+    return std::nullopt;
+  }
+
+  const auto* term = lb->Terminator();
+  const auto* hb = cfg.GetBlock(header_id);
+  if (term == nullptr || term->opcode != Opcode::kJ || hb == nullptr) {
+    return std::nullopt;
+  }
+
+  bool targets_header = (term->JumpTarget() == hb->start_vram) ||
+                        (!lb->successors.empty() && lb->successors[0] == header_id);
+  if (!targets_header || lb->predecessors.size() != 1) {
+    return std::nullopt;
+  }
+
+  uint32_t pred_id = lb->predecessors[0];
+  if (pred_id == header_id) {
+    return std::nullopt;
+  }
+
+  const auto* pb = cfg.GetBlock(pred_id);
+  if (pb == nullptr || pb->Terminator() == nullptr || !pb->Terminator()->IsBranch()) {
+    return std::nullopt;
+  }
+
+  return pred_id;
+}
+
+}  // namespace
+
 bool Loop::IsLatch(uint32_t block_id) const {
   return std::find(latches.begin(), latches.end(), block_id) != latches.end();
 }
@@ -49,11 +87,22 @@ LoopInfo LoopInfo::Analyze(const ControlFlowGraph& cfg, const DominatorTree& dom
 
   // 2. Build natural loop for each header.
   for (auto& [header, latches] : header_to_latches) {
+    std::vector<uint32_t> trampolines;
+    for (uint32_t& latch : latches) {
+      if (auto pred = DetectTrampolineBranchPredecessor(cfg, latch, header)) {
+        trampolines.push_back(latch);
+        latch = *pred;
+      }
+    }
     std::sort(latches.begin(), latches.end());
+    latches.erase(std::unique(latches.begin(), latches.end()), latches.end());
     auto loop = std::make_unique<Loop>();
     loop->header = header;
     loop->latches = latches;
     loop->blocks.insert(header);
+    for (uint32_t t : trampolines) {
+      loop->blocks.insert(t);
+    }
 
     // Backward reachability from all latches to header
     std::vector<uint32_t> worklist;
@@ -108,29 +157,19 @@ LoopInfo LoopInfo::Analyze(const ControlFlowGraph& cfg, const DominatorTree& dom
       // the branch at the latch, which is characteristic of do-while.
       loop->type = LoopType::kDoWhile;
     } else {
-      bool header_exits = false;
-      for (const auto& edge : loop->exit_edges) {
-        if (edge.from_block_id == loop->header) {
-          header_exits = true;
-          break;
-        }
-      }
+      bool latch_exits =
+          std::any_of(loop->exit_edges.begin(), loop->exit_edges.end(),
+                      [&](const auto& edge) { return loop->IsLatch(edge.from_block_id); });
+      bool header_exits =
+          std::any_of(loop->exit_edges.begin(), loop->exit_edges.end(),
+                      [&](const auto& edge) { return edge.from_block_id == loop->header; });
 
-      if (header_exits) {
+      if (latch_exits) {
+        loop->type = LoopType::kDoWhile;
+      } else if (header_exits) {
         loop->type = LoopType::kWhile;
       } else {
-        bool latch_exits = false;
-        for (const auto& edge : loop->exit_edges) {
-          if (loop->IsLatch(edge.from_block_id)) {
-            latch_exits = true;
-            break;
-          }
-        }
-        if (latch_exits) {
-          loop->type = LoopType::kDoWhile;
-        } else {
-          loop->type = LoopType::kWhile;
-        }
+        loop->type = LoopType::kInfinite;
       }
     }
 
