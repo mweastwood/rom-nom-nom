@@ -4,11 +4,14 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/c_ast.h"
@@ -16,6 +19,14 @@
 #include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
+
+namespace {
+
+bool IsCompilerIntrinsic(std::string_view name) {
+  return absl::StartsWith(name, "__n64_") || absl::StartsWith(name, "__builtin_");
+}
+
+}  // namespace
 
 std::string CTranslationUnit::ToString() const {
   std::string output;
@@ -44,12 +55,22 @@ std::string CTranslationUnit::ToString() const {
 
   std::set<std::string> external_function_names;
   std::set<std::string> external_data_symbols;
+  std::map<std::string, CType> inferred_return_types;
 
   for (const auto& function : functions) {
     ReferencedSymbols symbols = CollectReferencedSymbols(function);
+    for (const auto& [name, ret_type] : symbols.inferred_function_return_types) {
+      inferred_return_types[name] = ret_type;
+    }
 
     for (const auto& func_name : symbols.external_functions) {
       if (defined_function_names.count(func_name) > 0) {
+        continue;
+      }
+      if (IsCompilerIntrinsic(func_name)) {
+        continue;
+      }
+      if (header_provided_functions.count(func_name) > 0) {
         continue;
       }
       if (symbol_index != nullptr) {
@@ -64,6 +85,12 @@ std::string CTranslationUnit::ToString() const {
 
     for (const auto& data_name : symbols.external_data) {
       if (defined_function_names.count(data_name) > 0) {
+        continue;
+      }
+      if (IsCompilerIntrinsic(data_name)) {
+        continue;
+      }
+      if (header_provided_functions.count(data_name) > 0) {
         continue;
       }
       if (symbol_index != nullptr) {
@@ -83,18 +110,12 @@ std::string CTranslationUnit::ToString() const {
 
   if (!external_function_names.empty()) {
     for (const auto& external_function : external_function_names) {
-      if (external_function == "sqrtf" || external_function == "fabsf" ||
-          external_function == "sqrt" || external_function == "fabs") {
-        if (symbol_index != nullptr && symbol_index->FindByName(external_function) != nullptr) {
-          if (external_function == "sqrtf" || external_function == "fabsf") {
-            output += absl::StrFormat("extern f32 %s(f32);\n", external_function);
-          } else {
-            output += absl::StrFormat("extern f64 %s(f64);\n", external_function);
-          }
-        }
-        continue;
+      CType return_type = CType::S32();
+      auto it = inferred_return_types.find(external_function);
+      if (it != inferred_return_types.end()) {
+        return_type = it->second;
       }
-      output += absl::StrFormat("extern void %s();\n", external_function);
+      output += absl::StrFormat("extern %s %s();\n", return_type.ToString(), external_function);
     }
     output += "\n";
   }

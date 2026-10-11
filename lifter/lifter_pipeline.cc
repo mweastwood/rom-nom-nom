@@ -133,6 +133,23 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
     tu.symbol_index = loader_->Extractor()->Symbols();
   }
 
+  // Populate header-provided standard math inline functions if types.h is included
+  // and the functions are not defined as concrete symbols in the ROM symbol index.
+  bool includes_types_h = false;
+  for (const auto& inc : tu.includes) {
+    if (absl::StrContains(inc, "types.h")) {
+      includes_types_h = true;
+      break;
+    }
+  }
+  if (includes_types_h) {
+    for (const char* math_func : {"sqrtf", "sqrt", "fabsf", "fabs"}) {
+      if (tu.symbol_index == nullptr || tu.symbol_index->FindByName(math_func) == nullptr) {
+        tu.header_provided_functions.insert(math_func);
+      }
+    }
+  }
+
   std::vector<LoadedFunction> loaded_functions;
   loaded_functions.reserve(func_names.size());
   absl::flat_hash_map<std::string, int> parameter_counts;
@@ -351,6 +368,8 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
     return false;
   };
 
+  std::set<std::string> header_provided_functions;
+
   // Generate self-contained standard types header
   std::filesystem::path types_file_path = output_dir / "types.h";
   std::ofstream types_output_stream(types_file_path);
@@ -372,6 +391,7 @@ typedef double f64;
 
 )";
     if (!has_symbol_or_func("sqrtf")) {
+      header_provided_functions.insert("sqrtf");
       types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
 static inline f32 sqrtf(f32 x) {
   f32 res;
@@ -382,6 +402,7 @@ static inline f32 sqrtf(f32 x) {
 )";
     }
     if (!has_symbol_or_func("sqrt")) {
+      header_provided_functions.insert("sqrt");
       types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
 static inline f64 sqrt(f64 x) {
   f64 res;
@@ -392,6 +413,7 @@ static inline f64 sqrt(f64 x) {
 )";
     }
     if (!has_symbol_or_func("fabsf")) {
+      header_provided_functions.insert("fabsf");
       types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
 static inline f32 fabsf(f32 x) {
   f32 res;
@@ -402,6 +424,7 @@ static inline f32 fabsf(f32 x) {
 )";
     }
     if (!has_symbol_or_func("fabs")) {
+      header_provided_functions.insert("fabs");
       types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
 static inline f64 fabs(f64 x) {
   f64 res;
@@ -460,6 +483,9 @@ static inline f64 fabs(f64 x) {
       }
       continue;
     }
+
+    tu_or->header_provided_functions.insert(header_provided_functions.begin(),
+                                            header_provided_functions.end());
 
     CEmitterOptions emitter_opts;
     emitter_opts.includes = tu_or->includes;

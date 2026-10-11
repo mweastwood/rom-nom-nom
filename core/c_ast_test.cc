@@ -484,5 +484,49 @@ TEST(CAstTest, CompoundStatementIgnoresNullStatement) {
   EXPECT_EQ(compound.ToString(0), "{\n}\n");
 }
 
+TEST(CAstTest, CollectReferencedSymbolsInfersFunctionReturnTypes) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::F32(), "my_float"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::F64(), "my_double"));
+
+  // my_float = GetFloat();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("my_float"),
+                              CExpression::Call(CExpression::Identifier("GetFloat"), {}))));
+
+  // my_double = GetDouble();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("my_double"),
+                              CExpression::Call(CExpression::Identifier("GetDouble"), {}))));
+
+  // f0 = GetF0();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f0"),
+                              CExpression::Call(CExpression::Identifier("GetF0"), {}))));
+
+  // f0_d = GetF0D();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f0_d"),
+                              CExpression::Call(CExpression::Identifier("GetF0D"), {}))));
+
+  // Initializer with call: s32 count = GetCount();
+  body->AddStatement(CStatement::VariableDeclaration(
+      CType::S32(), "count", CExpression::Call(CExpression::Identifier("GetCount"), {})));
+
+  // NormalAction();
+  body->AddStatement(
+      CStatement::Expression(CExpression::Call(CExpression::Identifier("NormalAction"), {})));
+
+  FunctionDeclaration func(CType::Void(), "TestInference", {}, std::move(body));
+  ReferencedSymbols symbols = CollectReferencedSymbols(func);
+
+  EXPECT_EQ(symbols.inferred_function_return_types.at("GetFloat").ToString(), "f32");
+  EXPECT_EQ(symbols.inferred_function_return_types.at("GetDouble").ToString(), "f64");
+  EXPECT_EQ(symbols.inferred_function_return_types.at("GetF0").ToString(), "f32");
+  EXPECT_EQ(symbols.inferred_function_return_types.at("GetF0D").ToString(), "f64");
+  EXPECT_EQ(symbols.inferred_function_return_types.at("GetCount").ToString(), "s32");
+  EXPECT_EQ(symbols.inferred_function_return_types.count("NormalAction"), 0u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

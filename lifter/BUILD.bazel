@@ -272,6 +272,7 @@ cc_library(
         "//core:c_ast",
         "//core:process",
         "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",

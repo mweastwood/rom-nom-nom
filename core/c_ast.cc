@@ -1,6 +1,8 @@
 #include "core/c_ast.h"
 
+#include <cctype>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -8,6 +10,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 
@@ -706,7 +709,8 @@ bool IsKeywordOrBuiltin(std::string_view name) {
   return k_builtins.contains(name);
 }
 
-void CollectLocalVariablesFromStatement(const CStatement& stmt, std::set<std::string>& local_vars) {
+void CollectLocalVariablesFromStatement(const CStatement& stmt,
+                                        std::map<std::string, CType>& local_vars) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement: {
       const auto& comp = static_cast<const CompoundStatement&>(stmt);
@@ -719,7 +723,7 @@ void CollectLocalVariablesFromStatement(const CStatement& stmt, std::set<std::st
     }
     case CStatementKind::kVariableDeclarationStatement: {
       const auto& var_decl = static_cast<const VariableDeclarationStatement&>(stmt);
-      local_vars.insert(var_decl.Name());
+      local_vars[var_decl.Name()] = var_decl.Type();
       break;
     }
     case CStatementKind::kIfStatement: {
@@ -762,7 +766,13 @@ void CollectLocalVariablesFromStatement(const CStatement& stmt, std::set<std::st
   }
 }
 
-void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols) {
+void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
+                     const std::map<std::string, CType>& local_vars);
+void VisitStatement(const CStatement& stmt, ReferencedSymbols& symbols,
+                    const std::map<std::string, CType>& local_vars);
+
+void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
+                     const std::map<std::string, CType>& local_vars) {
   switch (expr.Kind()) {
     case CExpressionKind::kIdentifier: {
       const auto& id = static_cast<const IdentifierExpression&>(expr);
@@ -784,53 +794,78 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols) {
           symbols.external_data.erase(callee_name);
         }
       } else {
-        VisitExpression(call.Callee(), symbols);
+        VisitExpression(call.Callee(), symbols, local_vars);
       }
       for (const auto& arg : call.Arguments()) {
         if (arg != nullptr) {
-          VisitExpression(*arg, symbols);
+          VisitExpression(*arg, symbols, local_vars);
         }
       }
       break;
     }
     case CExpressionKind::kUnaryExpression: {
       const auto& unary = static_cast<const UnaryExpression&>(expr);
-      VisitExpression(unary.Operand(), symbols);
+      VisitExpression(unary.Operand(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kBinaryExpression: {
       const auto& binary = static_cast<const BinaryExpression&>(expr);
-      VisitExpression(binary.Lhs(), symbols);
-      VisitExpression(binary.Rhs(), symbols);
+      VisitExpression(binary.Lhs(), symbols, local_vars);
+      VisitExpression(binary.Rhs(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& assign = static_cast<const AssignmentExpression&>(expr);
-      VisitExpression(assign.Lhs(), symbols);
-      VisitExpression(assign.Rhs(), symbols);
+      const CExpression* rhs = &assign.Rhs();
+      if (rhs->Kind() == CExpressionKind::kCastExpression) {
+        rhs = &static_cast<const CastExpression*>(rhs)->Operand();
+      }
+      if (rhs->Kind() == CExpressionKind::kCallExpression) {
+        const auto& call = static_cast<const CallExpression&>(*rhs);
+        if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
+          const auto& callee_id = static_cast<const IdentifierExpression&>(call.Callee());
+          if (assign.Lhs().Kind() == CExpressionKind::kIdentifier) {
+            const auto& lhs_id = static_cast<const IdentifierExpression&>(assign.Lhs());
+            auto it = local_vars.find(lhs_id.Name());
+            if (it != local_vars.end()) {
+              symbols.inferred_function_return_types[callee_id.Name()] = it->second;
+            } else if (lhs_id.Name() == "f0_d" || absl::EndsWith(lhs_id.Name(), "_d")) {
+              symbols.inferred_function_return_types[callee_id.Name()] = CType::F64();
+            } else if (lhs_id.Name() == "f0" ||
+                       (lhs_id.Name().size() >= 2 && lhs_id.Name()[0] == 'f' &&
+                        std::isdigit(static_cast<unsigned char>(lhs_id.Name()[1])))) {
+              symbols.inferred_function_return_types[callee_id.Name()] = CType::F32();
+            } else if (lhs_id.Name() == "v0") {
+              symbols.inferred_function_return_types[callee_id.Name()] = CType::S32();
+            }
+          }
+        }
+      }
+      VisitExpression(assign.Lhs(), symbols, local_vars);
+      VisitExpression(assign.Rhs(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kCastExpression: {
       const auto& cast = static_cast<const CastExpression&>(expr);
-      VisitExpression(cast.Operand(), symbols);
+      VisitExpression(cast.Operand(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kMemberAccessExpression: {
       const auto& member = static_cast<const MemberAccessExpression&>(expr);
-      VisitExpression(member.Object(), symbols);
+      VisitExpression(member.Object(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kArrayIndexExpression: {
       const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
-      VisitExpression(arr.Array(), symbols);
-      VisitExpression(arr.Index(), symbols);
+      VisitExpression(arr.Array(), symbols, local_vars);
+      VisitExpression(arr.Index(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kTernaryExpression: {
       const auto& ternary = static_cast<const TernaryExpression&>(expr);
-      VisitExpression(ternary.Condition(), symbols);
-      VisitExpression(ternary.TrueExpression(), symbols);
-      VisitExpression(ternary.FalseExpression(), symbols);
+      VisitExpression(ternary.Condition(), symbols, local_vars);
+      VisitExpression(ternary.TrueExpression(), symbols, local_vars);
+      VisitExpression(ternary.FalseExpression(), symbols, local_vars);
       break;
     }
     case CExpressionKind::kIntegerLiteral:
@@ -840,77 +875,89 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols) {
   }
 }
 
-void VisitStatement(const CStatement& stmt, ReferencedSymbols& symbols) {
+void VisitStatement(const CStatement& stmt, ReferencedSymbols& symbols,
+                    const std::map<std::string, CType>& local_vars) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement: {
       const auto& comp = static_cast<const CompoundStatement&>(stmt);
       for (const auto& s : comp.Statements()) {
         if (s != nullptr) {
-          VisitStatement(*s, symbols);
+          VisitStatement(*s, symbols, local_vars);
         }
       }
       break;
     }
     case CStatementKind::kExpressionStatement: {
       const auto& expr_stmt = static_cast<const ExpressionStatement&>(stmt);
-      VisitExpression(expr_stmt.Expression(), symbols);
+      VisitExpression(expr_stmt.Expression(), symbols, local_vars);
       break;
     }
     case CStatementKind::kVariableDeclarationStatement: {
       const auto& var_decl = static_cast<const VariableDeclarationStatement&>(stmt);
       if (var_decl.Initializer() != nullptr) {
-        VisitExpression(*var_decl.Initializer(), symbols);
+        const CExpression* init = var_decl.Initializer();
+        if (init->Kind() == CExpressionKind::kCastExpression) {
+          init = &static_cast<const CastExpression*>(init)->Operand();
+        }
+        if (init->Kind() == CExpressionKind::kCallExpression) {
+          const auto& call = static_cast<const CallExpression&>(*init);
+          if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
+            const auto& callee_id = static_cast<const IdentifierExpression&>(call.Callee());
+            symbols.inferred_function_return_types[callee_id.Name()] = var_decl.Type();
+          }
+        }
+        VisitExpression(*var_decl.Initializer(), symbols, local_vars);
       }
       break;
     }
     case CStatementKind::kReturnStatement: {
       const auto& ret = static_cast<const ReturnStatement&>(stmt);
       if (ret.ReturnValue() != nullptr) {
-        VisitExpression(*ret.ReturnValue(), symbols);
+        VisitExpression(*ret.ReturnValue(), symbols, local_vars);
       }
       break;
     }
     case CStatementKind::kIfStatement: {
       const auto& if_stmt = static_cast<const IfStatement&>(stmt);
-      VisitExpression(if_stmt.Condition(), symbols);
-      VisitStatement(if_stmt.ThenBranch(), symbols);
+      VisitExpression(if_stmt.Condition(), symbols, local_vars);
+      VisitStatement(if_stmt.ThenBranch(), symbols, local_vars);
       if (if_stmt.ElseBranch() != nullptr) {
-        VisitStatement(*if_stmt.ElseBranch(), symbols);
+        VisitStatement(*if_stmt.ElseBranch(), symbols, local_vars);
       }
       break;
     }
     case CStatementKind::kWhileStatement: {
       const auto& while_stmt = static_cast<const WhileStatement&>(stmt);
-      VisitExpression(while_stmt.Condition(), symbols);
-      VisitStatement(while_stmt.Body(), symbols);
+      VisitExpression(while_stmt.Condition(), symbols, local_vars);
+      VisitStatement(while_stmt.Body(), symbols, local_vars);
       break;
     }
     case CStatementKind::kDoWhileStatement: {
       const auto& do_while = static_cast<const DoWhileStatement&>(stmt);
-      VisitStatement(do_while.Body(), symbols);
-      VisitExpression(do_while.Condition(), symbols);
+      VisitStatement(do_while.Body(), symbols, local_vars);
+      VisitExpression(do_while.Condition(), symbols, local_vars);
       break;
     }
     case CStatementKind::kForStatement: {
       const auto& for_stmt = static_cast<const ForStatement&>(stmt);
       if (for_stmt.Init() != nullptr) {
-        VisitStatement(*for_stmt.Init(), symbols);
+        VisitStatement(*for_stmt.Init(), symbols, local_vars);
       }
       if (for_stmt.Condition() != nullptr) {
-        VisitExpression(*for_stmt.Condition(), symbols);
+        VisitExpression(*for_stmt.Condition(), symbols, local_vars);
       }
       if (for_stmt.Step() != nullptr) {
-        VisitExpression(*for_stmt.Step(), symbols);
+        VisitExpression(*for_stmt.Step(), symbols, local_vars);
       }
-      VisitStatement(for_stmt.Body(), symbols);
+      VisitStatement(for_stmt.Body(), symbols, local_vars);
       break;
     }
     case CStatementKind::kSwitchStatement: {
       const auto& switch_stmt = static_cast<const SwitchStatement&>(stmt);
-      VisitExpression(switch_stmt.Condition(), symbols);
+      VisitExpression(switch_stmt.Condition(), symbols, local_vars);
       for (const auto& c : switch_stmt.Cases()) {
         if (c.body != nullptr) {
-          VisitStatement(*c.body, symbols);
+          VisitStatement(*c.body, symbols, local_vars);
         }
       }
       break;
@@ -928,17 +975,23 @@ void VisitStatement(const CStatement& stmt, ReferencedSymbols& symbols) {
 
 ReferencedSymbols CollectReferencedSymbols(const FunctionDeclaration& function) {
   ReferencedSymbols symbols;
+  std::map<std::string, CType> local_var_types;
 
   // 1. Collect function parameters
   for (const auto& param : function.Parameters()) {
     symbols.local_variables.insert(param.name);
+    local_var_types[param.name] = param.type;
   }
 
   // 2. Collect declared local variables
-  CollectLocalVariablesFromStatement(function.Body(), symbols.local_variables);
+  CollectLocalVariablesFromStatement(function.Body(), local_var_types);
+  for (const auto& [name, type] : local_var_types) {
+    symbols.local_variables.insert(name);
+  }
 
-  // 3. Traverse body expressions and statements to collect referenced external symbols
-  VisitStatement(function.Body(), symbols);
+  // 3. Traverse body expressions and statements to collect referenced external symbols and infer
+  // types
+  VisitStatement(function.Body(), symbols, local_var_types);
 
   return symbols;
 }

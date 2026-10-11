@@ -1,6 +1,7 @@
 #ifndef LIFTER_C_EMITTER_H_
 #define LIFTER_C_EMITTER_H_
 
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,7 @@ struct CTranslationUnit {
   std::vector<std::string> includes;
   std::vector<FunctionDeclaration> functions;
   const SymbolIndex* symbol_index = nullptr;
+  std::set<std::string> header_provided_functions;
 
   std::string ToString() const;
 };

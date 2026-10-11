@@ -271,7 +271,7 @@ TEST(AstConverterTest, GotoBlockLabelConsistency) {
       0x03E00008,  // 0C: jr    $ra
       0x00000000,  // 10: nop
       0x24020002,  // 14: addiu $v0, $zero, 2
-      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 18: nop
       0x00000000,  // 1C: nop
   };
 

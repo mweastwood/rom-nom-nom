@@ -93,14 +93,6 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   body->AddStatement(CStatement::Expression(CExpression::Assignment(
       "=", CExpression::Identifier("g_audio_state"), CExpression::Identifier("D_80100000"))));
 
-  // Control flow keywords should not be identified as external functions
-  auto cond = CExpression::Binary(">", CExpression::Identifier("arg0"), CExpression::Integer(0));
-  auto if_body = std::make_unique<CompoundStatement>();
-  if_body->AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
-  body->AddStatement(CStatement::If(std::move(cond), std::move(if_body)));
-
-  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
-
   // Test address-taken external function and address-taken stack variable
   body->AddStatement(CStatement::Expression(CExpression::Assignment(
       "=", CExpression::Identifier("function_pointer"),
@@ -108,6 +100,14 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   body->AddStatement(CStatement::Expression(
       CExpression::Assignment("=", CExpression::Identifier("stack_pointer_reference"),
                               CExpression::Unary("&", CExpression::Identifier("var_sp_16")))));
+
+  // Control flow keywords should not be identified as external functions
+  auto cond = CExpression::Binary(">", CExpression::Identifier("arg0"), CExpression::Integer(0));
+  auto if_body = std::make_unique<CompoundStatement>();
+  if_body->AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
+  body->AddStatement(CStatement::If(std::move(cond), std::move(if_body)));
+
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
 
   std::vector<CParameter> parameters;
   parameters.push_back(CParameter{.type = CType::S32(), .name = "arg0"});
@@ -120,16 +120,16 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
 
   // Check external function declarations
-  EXPECT_THAT(emitted_code, HasSubstr("extern void AddressTakenFunction();\n"));
-  EXPECT_THAT(emitted_code, HasSubstr("extern void ExternalHelper();\n"));
-  EXPECT_THAT(emitted_code, HasSubstr("extern void func_80012345();\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 AddressTakenFunction();\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 ExternalHelper();\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 func_80012345();\n"));
 
   // Stack and local variables should not be emitted as extern
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void var_sp_16();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 var_sp_16();")));
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 var_sp_16;")));
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void function_pointer();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 function_pointer();")));
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 function_pointer;")));
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void stack_pointer_reference();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 stack_pointer_reference();")));
   EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 stack_pointer_reference;")));
 
   // Check external data declarations
@@ -140,11 +140,11 @@ TEST(CEmitterTest, EmitTranslationUnitWithExternalDeclarationsAndPrototypes) {
   EXPECT_THAT(emitted_code, HasSubstr("s32 LocalFunction(s32 arg0);\n"));
 
   // Defined function should not have an extern declaration
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void LocalFunction();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 LocalFunction();")));
 
   // Keywords should not have extern declarations
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void if();")));
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void return();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 if();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 return();")));
 }
 
 TEST(CEmitterTest, EmitTranslationUnitWithSemanticSymbolClassification) {
@@ -183,13 +183,13 @@ TEST(CEmitterTest, EmitTranslationUnitWithSemanticSymbolClassification) {
   std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
 
   // Address-taken function is correctly recognized as SYMBOL_FUNC
-  EXPECT_THAT(emitted_code, HasSubstr("extern void AudioProcess();\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 AudioProcess();\n"));
   // Constants and data symbols (even when address is taken) are correctly recognized as SYMBOL_DATA
   EXPECT_THAT(emitted_code, HasSubstr("extern s32 kAudioMaxPitch;\n"));
   EXPECT_THAT(emitted_code, HasSubstr("extern s32 kAudioMinPitch;\n"));
   // Constants must NOT be declared as functions
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void kAudioMinPitch();")));
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void kAudioMaxPitch();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 kAudioMinPitch();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 kAudioMaxPitch();")));
 }
 
 TEST(CEmitterTest, EmitTranslationUnitDeduplicationAndOrdering) {
@@ -255,8 +255,8 @@ TEST(CEmitterTest, EmitTranslationUnitDeduplicationAndOrdering) {
 
   // External functions are emitted in alphabetical order and deduplicated
   std::string expected_extern_funcs =
-      "extern void AlphaHelper();\n"
-      "extern void BetaHelper();\n\n";
+      "extern s32 AlphaHelper();\n"
+      "extern s32 BetaHelper();\n\n";
   EXPECT_THAT(emitted_code, HasSubstr(expected_extern_funcs));
 
   // External data symbols are emitted in alphabetical order and deduplicated
@@ -272,16 +272,16 @@ TEST(CEmitterTest, EmitTranslationUnitDeduplicationAndOrdering) {
   EXPECT_THAT(emitted_code, HasSubstr(expected_prototypes));
 
   // Verify that neither LocalFirst nor LocalSecond is declared extern
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void LocalFirst();")));
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void LocalSecond();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 LocalFirst();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 LocalSecond();")));
 
   // Verify keywords are not declared extern
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void while();")));
-  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void sizeof();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 while();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 sizeof();")));
 
   // Verify layout order: extern funcs before extern data, extern data before prototypes,
   // prototypes before function implementations
-  size_t extern_func_pos = emitted_code.find("extern void AlphaHelper();");
+  size_t extern_func_pos = emitted_code.find("extern s32 AlphaHelper();");
   size_t extern_data_pos = emitted_code.find("extern s32 D_80100000;");
   size_t prototype_pos = emitted_code.find("void LocalFirst(void);");
   size_t body_pos = emitted_code.find("void LocalFirst(void) {");
@@ -297,6 +297,101 @@ TEST(CEmitterTest, FormatCodeWithClangFormatOrFallback) {
 
   EXPECT_THAT(formatted, HasSubstr("MessyFunc"));
   EXPECT_THAT(formatted, HasSubstr("return"));
+}
+
+TEST(CEmitterTest, EmitTranslationUnitSkipsN64Intrinsics) {
+  CTranslationUnit translation_unit;
+  auto body = std::make_unique<CompoundStatement>();
+
+  std::vector<std::unique_ptr<CExpression>> args;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("__n64_hazard_barrier"), std::move(args))));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::S32(), "IntrinsicUser", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 __n64_hazard_barrier();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern void __n64_hazard_barrier();")));
+}
+
+TEST(CEmitterTest, EmitTranslationUnitDetectsFloatReturnTypes) {
+  CTranslationUnit translation_unit;
+  auto body = std::make_unique<CompoundStatement>();
+
+  // f0 = GetFloat();
+  std::vector<std::unique_ptr<CExpression>> float_args;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f0"),
+      CExpression::Call(CExpression::Identifier("GetFloat"), std::move(float_args)))));
+
+  // f0_d = GetDouble();
+  std::vector<std::unique_ptr<CExpression>> double_args;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f0_d"),
+      CExpression::Call(CExpression::Identifier("GetDouble"), std::move(double_args)))));
+
+  // NormalIntFunc();
+  std::vector<std::unique_ptr<CExpression>> int_args;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("NormalIntFunc"), std::move(int_args))));
+
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::S32(), "CallerFunc", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  EXPECT_THAT(emitted_code, HasSubstr("extern f32 GetFloat();\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern f64 GetDouble();\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 NormalIntFunc();\n"));
+}
+
+TEST(CEmitterTest, EmitTranslationUnitSkipsHeaderProvidedFunctions) {
+  CTranslationUnit translation_unit;
+  translation_unit.header_provided_functions = {"sqrtf", "fabsf"};
+
+  auto body = std::make_unique<CompoundStatement>();
+
+  std::vector<std::unique_ptr<CExpression>> args1;
+  args1.push_back(CExpression::Identifier("f0"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("sqrtf"), std::move(args1))));
+
+  std::vector<std::unique_ptr<CExpression>> args2;
+  args2.push_back(CExpression::Identifier("f0"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("fabsf"), std::move(args2))));
+
+  std::vector<std::unique_ptr<CExpression>> args3;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("NormalExternalFunc"), std::move(args3))));
+
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::S32(), "MathUser", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  // Functions in header_provided_functions must NOT be emitted as extern declarations
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 sqrtf();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern f32 sqrtf(")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern s32 fabsf();")));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("extern f32 fabsf(")));
+
+  // External functions not in header_provided_functions must be declared extern
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 NormalExternalFunc();\n"));
 }
 
 }  // namespace

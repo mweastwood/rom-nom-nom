@@ -2,6 +2,7 @@
 #define CORE_C_AST_H_
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -682,6 +683,7 @@ struct ReferencedSymbols {
   std::set<std::string> local_variables;     // Parameters and declared local variables
   std::set<std::string> external_functions;  // Non-local callee names
   std::set<std::string> external_data;       // Non-local identifiers that are not callees
+  std::map<std::string, CType> inferred_function_return_types;  // Inferred callee return types
 };
 
 // Traverses a FunctionDeclaration AST to semantically identify local variables and external symbol
