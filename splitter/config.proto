@@ -39,6 +39,7 @@ message Segment {
   uint32 vram = 5;
   uint32 bss_size = 6;
   repeated Subsegment subsegments = 7;
+  repeated string section_order = 8;
 }
 
 message CompilerFlags {
@@ -52,4 +53,5 @@ message SplitConfig {
   repeated string symbol_files = 4;
   repeated Segment segments = 5;
   map<string, CompilerFlags> c_flags = 6;
+  repeated string section_order = 7;
 }

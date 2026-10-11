@@ -97,16 +97,16 @@ TEST(LinkerScriptTest, GenerateMainScriptMatchesExpectedOutput) {
         . = ALIGN(., 16);
         entry_TEXT_END = .;
         entry_TEXT_SIZE = ABSOLUTE(entry_TEXT_END - entry_TEXT_START);
-        entry_DATA_START = .;
-        build/test-game/asm/test-game/entry_asm.o(.data);
-        . = ALIGN(., 16);
-        entry_DATA_END = .;
-        entry_DATA_SIZE = ABSOLUTE(entry_DATA_END - entry_DATA_START);
         entry_RODATA_START = .;
         build/test-game/asm/test-game/entry_asm.o(.rodata);
         . = ALIGN(., 16);
         entry_RODATA_END = .;
         entry_RODATA_SIZE = ABSOLUTE(entry_RODATA_END - entry_RODATA_START);
+        entry_DATA_START = .;
+        build/test-game/asm/test-game/entry_asm.o(.data);
+        . = ALIGN(., 16);
+        entry_DATA_END = .;
+        entry_DATA_SIZE = ABSOLUTE(entry_DATA_END - entry_DATA_START);
     }
     entry_bss_VRAM = ADDR(.entry_bss);
     .entry_bss (NOLOAD) : SUBALIGN(16)
@@ -135,6 +135,12 @@ TEST(LinkerScriptTest, GenerateMainScriptMatchesExpectedOutput) {
         . = ALIGN(., 16);
         main_TEXT_END = .;
         main_TEXT_SIZE = ABSOLUTE(main_TEXT_END - main_TEXT_START);
+        main_RODATA_START = .;
+        build/test-game/src/c/test-game/boot.o(.rodata);
+        build/test-game/asm/test-game/13F0.o(.rodata);
+        . = ALIGN(., 16);
+        main_RODATA_END = .;
+        main_RODATA_SIZE = ABSOLUTE(main_RODATA_END - main_RODATA_START);
         main_DATA_START = .;
         build/test-game/src/c/test-game/boot.o(.data);
         build/test-game/asm/test-game/13F0.o(.data);
@@ -142,12 +148,6 @@ TEST(LinkerScriptTest, GenerateMainScriptMatchesExpectedOutput) {
         . = ALIGN(., 16);
         main_DATA_END = .;
         main_DATA_SIZE = ABSOLUTE(main_DATA_END - main_DATA_START);
-        main_RODATA_START = .;
-        build/test-game/src/c/test-game/boot.o(.rodata);
-        build/test-game/asm/test-game/13F0.o(.rodata);
-        . = ALIGN(., 16);
-        main_RODATA_END = .;
-        main_RODATA_SIZE = ABSOLUTE(main_RODATA_END - main_RODATA_START);
     }
     main_bss_VRAM = ADDR(.main_bss);
     .main_bss (NOLOAD) : SUBALIGN(16)
@@ -239,6 +239,41 @@ TEST(LinkerScriptTest, ResolveObjectPathPrefixHandling) {
   LinkerScriptGenerator gen_empty(opt_empty);
   EXPECT_EQ(gen_empty.ResolveObjectPath("test-game", seg, &sub),
             "test-game/src/c/test-game/boot.o");
+}
+
+TEST(LinkerScriptTest, CustomSectionOrderRespected) {
+  constexpr std::string_view kCustomOrderConfigText = R"pb(
+    game_name: "test-game"
+    sha1: "0000000000000000000000000000000000000000"
+    basename: "test-game"
+    section_order: ".text"
+    section_order: ".data"
+    section_order: ".rodata"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x1000
+      rom_end: 0x2000
+      vram: 0x80000000
+      subsegments { name: "boot" type: SUBSEGMENT_C rom_start: 0x1000 }
+    }
+  )pb";
+  auto config_or = ParseSplitConfig(kCustomOrderConfigText);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+
+  LinkerScriptOptions options;
+  options.base_build_dir = "build";
+  LinkerScriptGenerator generator(options);
+
+  auto script_or = generator.GenerateMainScript(*config_or);
+  ASSERT_TRUE(script_or.ok()) << script_or.status();
+
+  // In custom order (.text, .data, .rodata), main_DATA_START must appear before main_RODATA_START
+  size_t data_pos = script_or->find("main_DATA_START");
+  size_t rodata_pos = script_or->find("main_RODATA_START");
+  ASSERT_NE(data_pos, std::string::npos);
+  ASSERT_NE(rodata_pos, std::string::npos);
+  EXPECT_LT(data_pos, rodata_pos);
 }
 
 }  // namespace

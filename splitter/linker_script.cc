@@ -154,44 +154,79 @@ absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
                                              name, vram_expr, name, options_.subalign));
       absl::StrAppend(&text, absl::StrFormat("        FILL(0x%08X);\n", options_.fill_value));
 
-      if (!text_objs.empty()) {
-        absl::StrAppend(&text, absl::StrFormat("        %s_TEXT_START = .;\n", name));
-        for (const auto& obj : text_objs) {
-          absl::StrAppend(&text, absl::StrFormat("        %s(.text);\n", obj));
+      auto emit_text = [&]() {
+        if (!text_objs.empty()) {
+          absl::StrAppend(&text, absl::StrFormat("        %s_TEXT_START = .;\n", name));
+          for (const auto& obj : text_objs) {
+            absl::StrAppend(&text, absl::StrFormat("        %s(.text);\n", obj));
+          }
+          absl::StrAppend(&text, absl::StrFormat("        . = ALIGN(., %d);\n", options_.subalign));
+          absl::StrAppend(&text, absl::StrFormat("        %s_TEXT_END = .;\n", name));
+          absl::StrAppend(
+              &text,
+              absl::StrFormat("        %s_TEXT_SIZE = ABSOLUTE(%s_TEXT_END - %s_TEXT_START);\n",
+                              name, name, name));
         }
-        absl::StrAppend(&text, absl::StrFormat("        . = ALIGN(., %d);\n", options_.subalign));
-        absl::StrAppend(&text, absl::StrFormat("        %s_TEXT_END = .;\n", name));
-        absl::StrAppend(
-            &text,
-            absl::StrFormat("        %s_TEXT_SIZE = ABSOLUTE(%s_TEXT_END - %s_TEXT_START);\n", name,
-                            name, name));
+      };
+
+      auto emit_rodata = [&]() {
+        if (!rodata_objs.empty()) {
+          absl::StrAppend(&text, absl::StrFormat("        %s_RODATA_START = .;\n", name));
+          for (const auto& obj : rodata_objs) {
+            absl::StrAppend(&text, absl::StrFormat("        %s(.rodata);\n", obj));
+          }
+          absl::StrAppend(&text, absl::StrFormat("        . = ALIGN(., %d);\n", options_.subalign));
+          absl::StrAppend(&text, absl::StrFormat("        %s_RODATA_END = .;\n", name));
+          absl::StrAppend(
+              &text, absl::StrFormat(
+                         "        %s_RODATA_SIZE = ABSOLUTE(%s_RODATA_END - %s_RODATA_START);\n",
+                         name, name, name));
+        }
+      };
+
+      auto emit_data = [&]() {
+        if (!data_objs.empty()) {
+          absl::StrAppend(&text, absl::StrFormat("        %s_DATA_START = .;\n", name));
+          for (const auto& obj : data_objs) {
+            absl::StrAppend(&text, absl::StrFormat("        %s(.data);\n", obj));
+          }
+          absl::StrAppend(&text, absl::StrFormat("        . = ALIGN(., %d);\n", options_.subalign));
+          absl::StrAppend(&text, absl::StrFormat("        %s_DATA_END = .;\n", name));
+          absl::StrAppend(
+              &text,
+              absl::StrFormat("        %s_DATA_SIZE = ABSOLUTE(%s_DATA_END - %s_DATA_START);\n",
+                              name, name, name));
+        }
+      };
+
+      std::vector<std::string> order;
+      if (segment.section_order_size() > 0) {
+        order.assign(segment.section_order().begin(), segment.section_order().end());
+      } else if (config.section_order_size() > 0) {
+        order.assign(config.section_order().begin(), config.section_order().end());
+      } else {
+        order = {".text", ".rodata", ".data"};
       }
 
-      if (!data_objs.empty()) {
-        absl::StrAppend(&text, absl::StrFormat("        %s_DATA_START = .;\n", name));
-        for (const auto& obj : data_objs) {
-          absl::StrAppend(&text, absl::StrFormat("        %s(.data);\n", obj));
-        }
-        absl::StrAppend(&text, absl::StrFormat("        . = ALIGN(., %d);\n", options_.subalign));
-        absl::StrAppend(&text, absl::StrFormat("        %s_DATA_END = .;\n", name));
-        absl::StrAppend(
-            &text,
-            absl::StrFormat("        %s_DATA_SIZE = ABSOLUTE(%s_DATA_END - %s_DATA_START);\n", name,
-                            name, name));
-      }
+      bool text_emitted = false;
+      bool rodata_emitted = false;
+      bool data_emitted = false;
 
-      if (!rodata_objs.empty()) {
-        absl::StrAppend(&text, absl::StrFormat("        %s_RODATA_START = .;\n", name));
-        for (const auto& obj : rodata_objs) {
-          absl::StrAppend(&text, absl::StrFormat("        %s(.rodata);\n", obj));
+      for (const auto& sec : order) {
+        if (sec == ".text" && !text_emitted) {
+          emit_text();
+          text_emitted = true;
+        } else if (sec == ".rodata" && !rodata_emitted) {
+          emit_rodata();
+          rodata_emitted = true;
+        } else if (sec == ".data" && !data_emitted) {
+          emit_data();
+          data_emitted = true;
         }
-        absl::StrAppend(&text, absl::StrFormat("        . = ALIGN(., %d);\n", options_.subalign));
-        absl::StrAppend(&text, absl::StrFormat("        %s_RODATA_END = .;\n", name));
-        absl::StrAppend(
-            &text,
-            absl::StrFormat("        %s_RODATA_SIZE = ABSOLUTE(%s_RODATA_END - %s_RODATA_START);\n",
-                            name, name, name));
       }
+      if (!text_emitted) emit_text();
+      if (!rodata_emitted) emit_rodata();
+      if (!data_emitted) emit_data();
       absl::StrAppend(&text, "    }\n");
 
       if (!bss_objs.empty()) {
