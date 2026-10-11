@@ -882,9 +882,9 @@ TEST(AstConverterTest, DeclaresFpRegistersWithProperFloatTypesAndFoldsCop1Branch
   EXPECT_THAT(code, HasSubstr("f32 f2;"));
   EXPECT_THAT(code, HasSubstr("f32 f4;"));
   // Double precision variables are f64
-  EXPECT_THAT(code, HasSubstr("f64 f12;"));
-  EXPECT_THAT(code, HasSubstr("f64 f14;"));
-  EXPECT_THAT(code, HasSubstr("f64 f16;"));
+  EXPECT_THAT(code, HasSubstr("f64 f12_d;"));
+  EXPECT_THAT(code, HasSubstr("f64 f14_d;"));
+  EXPECT_THAT(code, HasSubstr("f64 f16_d;"));
   // Branch comparison is folded directly
   EXPECT_THAT(code, HasSubstr("f0 < f2"));
 }

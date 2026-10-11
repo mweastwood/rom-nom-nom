@@ -105,7 +105,9 @@ absl::StatusOr<LifterResult> LifterPipeline::Decompile(std::string_view func_nam
 absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
     const LoadedFunction& loaded_func,
     const absl::flat_hash_map<std::string, int>* function_parameter_counts,
-    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts) const {
+    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
+    const absl::flat_hash_set<std::string>* functions_returning_v0,
+    const absl::flat_hash_set<std::string>* functions_returning_f0) const {
   if (loaded_func.instructions.empty()) {
     return absl::InvalidArgumentError("LifterPipeline: No instructions to decompile.");
   }
@@ -141,6 +143,8 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   converter_opts.split_config = loaded_func.split_config;
   converter_opts.function_parameter_counts = function_parameter_counts;
   converter_opts.function_fp_parameter_counts = function_fp_parameter_counts;
+  converter_opts.functions_returning_v0 = functions_returning_v0;
+  converter_opts.functions_returning_f0 = functions_returning_f0;
 
   FunctionDeclaration ast =
       AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);
@@ -195,6 +199,8 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
   loaded_functions.reserve(func_names.size());
   absl::flat_hash_map<std::string, int> parameter_counts;
   absl::flat_hash_map<std::string, int> fp_parameter_counts;
+  absl::flat_hash_set<std::string> callers_use_v0;
+  absl::flat_hash_set<std::string> callers_use_f0;
 
   for (const auto& func_name : func_names) {
     auto loaded_or = loader_->LoadFunction(func_name);
@@ -205,6 +211,14 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
         ExpressionBuilder::DetermineParameterCount(loaded_or->instructions);
     fp_parameter_counts[loaded_or->name] =
         ExpressionBuilder::DetermineFpParameterCount(loaded_or->instructions);
+    auto cfg_or = ControlFlowGraph::Build(loaded_or->instructions);
+    if (cfg_or.ok()) {
+      if (ExpressionBuilder::DetermineReturnsF0(*cfg_or)) {
+        callers_use_f0.insert(loaded_or->name);
+      } else if (ExpressionBuilder::DetermineReturnsV0(*cfg_or, tu.symbol_index, &callers_use_v0)) {
+        callers_use_v0.insert(loaded_or->name);
+      }
+    }
 
     const auto& insts = loaded_or->instructions;
     for (size_t i = 0; i < insts.size(); ++i) {
@@ -226,6 +240,84 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
                 ExpressionBuilder::DetermineParameterCount(callee_loaded->instructions);
             fp_parameter_counts[callee_name] =
                 ExpressionBuilder::DetermineFpParameterCount(callee_loaded->instructions);
+            auto callee_cfg = ControlFlowGraph::Build(callee_loaded->instructions);
+            if (callee_cfg.ok()) {
+              if (ExpressionBuilder::DetermineReturnsF0(*callee_cfg)) {
+                callers_use_f0.insert(callee_name);
+              } else if (ExpressionBuilder::DetermineReturnsV0(*callee_cfg, tu.symbol_index,
+                                                               &callers_use_v0)) {
+                callers_use_v0.insert(callee_name);
+              }
+            }
+          }
+        }
+
+        bool v0_active = true;
+        bool f0_active = true;
+        for (size_t next_i = i + 1; next_i < insts.size(); ++next_i) {
+          const auto& next_inst = insts[next_i];
+          RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
+          if (v0_active) {
+            for (Register r : next_ud.gpr_uses) {
+              if (r == Register::kV0) {
+                callers_use_v0.insert(callee_name);
+                v0_active = false;
+                break;
+              }
+            }
+            for (Register r : next_ud.gpr_defs) {
+              if (r == Register::kV0) {
+                v0_active = false;
+                break;
+              }
+            }
+          }
+          if (f0_active) {
+            for (FpRegister r : next_ud.fpr_uses) {
+              if (r == FpRegister::kF0) {
+                if (!callers_use_v0.contains(callee_name)) {
+                  callers_use_f0.insert(callee_name);
+                }
+                f0_active = false;
+                break;
+              }
+            }
+            for (FpRegister r : next_ud.fpr_defs) {
+              if (r == FpRegister::kF0) {
+                f0_active = false;
+                break;
+              }
+            }
+          }
+          if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr) {
+            // Also inspect the delay slot of this subsequent call before terminating scan
+            if (next_i + 1 < insts.size()) {
+              RegisterUseDef ds_ud = GetInstructionUseDef(insts[next_i + 1]);
+              if (v0_active) {
+                for (Register r : ds_ud.gpr_uses) {
+                  if (r == Register::kV0) {
+                    callers_use_v0.insert(callee_name);
+                    v0_active = false;
+                    break;
+                  }
+                }
+              }
+              if (f0_active) {
+                for (FpRegister r : ds_ud.fpr_uses) {
+                  if (r == FpRegister::kF0) {
+                    if (!callers_use_v0.contains(callee_name)) {
+                      callers_use_f0.insert(callee_name);
+                    }
+                    f0_active = false;
+                    break;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          if (!v0_active && !f0_active) {
+            break;
           }
         }
       }
@@ -235,7 +327,8 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
   }
 
   for (const auto& loaded_func : loaded_functions) {
-    auto res_or = DecompileFunction(loaded_func, &parameter_counts, &fp_parameter_counts);
+    auto res_or = DecompileFunction(loaded_func, &parameter_counts, &fp_parameter_counts,
+                                    &callers_use_v0, &callers_use_f0);
     if (!res_or.ok()) {
       return res_or.status();
     }

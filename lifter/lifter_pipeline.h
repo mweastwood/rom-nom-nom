@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "core/c_ast.h"
 #include "lifter/c_emitter.h"
@@ -76,7 +77,9 @@ class LifterPipeline {
   absl::StatusOr<LifterResult> DecompileFunction(
       const LoadedFunction& loaded_func,
       const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr) const;
+      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr,
+      const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr,
+      const absl::flat_hash_set<std::string>* functions_returning_f0 = nullptr) const;
 
   const LifterPipelineOptions& Options() const { return options_; }
   const FunctionLoader* Loader() const { return loader_.get(); }

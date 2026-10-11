@@ -225,7 +225,7 @@ TEST(ExpressionBuilderTest, StackVariableAccessNegativeOffset) {
   ASSERT_THAT(statements, SizeIs(3));
   EXPECT_EQ(statements[0].ToString(), "var_sp_neg_16 = arg0;\n");
   EXPECT_EQ(statements[1].ToString(), "v0 = var_sp_neg_16;\n");
-  EXPECT_EQ(statements[2].ToString(), "arg0 = &var_sp_neg_16;\n");
+  EXPECT_EQ(statements[2].ToString(), "arg0 = (s32)sp - 16;\n");
 }
 
 TEST(ExpressionBuilderTest, FunctionCallAndReturn) {
@@ -291,8 +291,8 @@ TEST(ExpressionBuilderTest, DelaySlotExecutionBeforeReturn) {
   EXPECT_EQ(statements[1].kind, StatementKind::kReturn);
 }
 
-TEST(ExpressionBuilderTest, StackVariableAddressingUnaryExpression) {
-  // addiu $a0, $sp, 16 -> arg0 = &var_sp_16
+TEST(ExpressionBuilderTest, StackVariableAddressingExpression) {
+  // addiu $a0, $sp, 16 -> arg0 = ((s32)sp + 16)
   std::vector<uint32_t> words = {
       0x27A40010,  // addiu $a0, $sp, 16
   };
@@ -303,13 +303,10 @@ TEST(ExpressionBuilderTest, StackVariableAddressingUnaryExpression) {
   ASSERT_THAT(statements, SizeIs(1));
   EXPECT_EQ(statements[0].destination_variable, "arg0");
   ASSERT_THAT(statements[0].expression, testing::NotNull());
-  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kUnaryOp);
-  EXPECT_EQ(statements[0].expression->op, "&");
-  ASSERT_THAT(statements[0].expression->args, SizeIs(1));
-  ASSERT_THAT(statements[0].expression->args[0], testing::NotNull());
-  EXPECT_EQ(statements[0].expression->args[0]->kind, ExpressionKind::kVariable);
-  EXPECT_EQ(statements[0].expression->args[0]->name, "var_sp_16");
-  EXPECT_EQ(statements[0].ToString(), "arg0 = &var_sp_16;\n");
+  EXPECT_EQ(statements[0].expression->kind, ExpressionKind::kBinaryOp);
+  EXPECT_EQ(statements[0].expression->op, "+");
+  ASSERT_THAT(statements[0].expression->args, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "arg0 = (s32)sp + 16;\n");
 }
 
 TEST(ExpressionBuilderTest, AssignmentWithEmptyOrZeroDestinationEmitsBareExpression) {
@@ -1665,7 +1662,7 @@ TEST(ExpressionBuilderTest, LiftsCop1ArithmeticAndUnary) {
   EXPECT_EQ(statements[2].ToString(), "f10 = f6 - f2;\n");
   EXPECT_EQ(statements[3].ToString(), "f12 = f10 / f4;\n");
   EXPECT_EQ(statements[4].ToString(), "f14 = -f12;\n");
-  EXPECT_EQ(statements[5].ToString(), "f16 = sqrtf(f14);\n");
+  EXPECT_EQ(statements[5].ToString(), "f16 = __n64_sqrtf(f14);\n");
 }
 
 TEST(ExpressionBuilderTest, LiftsCop1MemoryLoadsAndStores) {
@@ -1680,7 +1677,7 @@ TEST(ExpressionBuilderTest, LiftsCop1MemoryLoadsAndStores) {
   ASSERT_EQ(statements.size(), 4u);
   EXPECT_EQ(statements[0].ToString(), "f0 = *(f32*)arg0;\n");
   EXPECT_EQ(statements[1].ToString(), "*(f32*)(arg1 + 4) = f0;\n");
-  EXPECT_EQ(statements[2].ToString(), "f2 = *(f32*)&var_sp_16;\n");
+  EXPECT_EQ(statements[2].ToString(), "f2 = *(f32*)&arg4;\n");
   EXPECT_EQ(statements[3].ToString(), "*(f32*)&var_sp_20 = f2;\n");
 }
 
@@ -1727,11 +1724,11 @@ TEST(ExpressionBuilderTest, LiftsCop1ConversionsAndDoubleOps) {
   auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_EQ(statements.size(), 5u);
-  EXPECT_EQ(statements[0].ToString(), "f0 = (f32)f2;\n");
-  EXPECT_EQ(statements[1].ToString(), "f4 = (s32)f0;\n");
-  EXPECT_EQ(statements[2].ToString(), "f12 = f14 + f16;\n");
-  EXPECT_EQ(statements[3].ToString(), "f20 = *(f64*)&var_sp_40;\n");
-  EXPECT_EQ(statements[4].ToString(), "*(f64*)&var_sp_48 = f20;\n");
+  EXPECT_EQ(statements[0].ToString(), "f0 = (f32)*(s32*)&f2;\n");
+  EXPECT_EQ(statements[1].ToString(), "*(s32*)&f4 = (s32)f0;\n");
+  EXPECT_EQ(statements[2].ToString(), "f12_d = f14_d + f16_d;\n");
+  EXPECT_EQ(statements[3].ToString(), "f20_d = *(f64*)&arg10;\n");
+  EXPECT_EQ(statements[4].ToString(), "*(f64*)&var_sp_48 = f20_d;\n");
 }
 
 TEST(ExpressionBuilderTest, DetermineFpParameterCountAndPassesFpArgsToCalls) {
@@ -1839,6 +1836,27 @@ TEST(ExpressionBuilderTest, LiftsFoldedFloatingPointGlobalLoadAndStore) {
   EXPECT_EQ(stmts[1].ToString(), "*(f32*)0x80170450 = f2;\n");
 }
 
+TEST(ExpressionBuilderTest, AssignsV0ReturnWhenUsedAfterSubroutineCall) {
+  // jal  func_80110410
+  // andi $s0, $s0, 0xFFFF (delay slot)
+  // addu $v1, $s1, $zero
+  // andi $v0, $v0, 0xFFFF (uses $v0 from call)
+  std::vector<uint32_t> words = {
+      0x0C044104,  // 0: jal  func_80110410
+      0x3210FFFF,  // 4: andi $s0, $s0, 0xFFFF
+      0x02201821,  // 8: addu $v1, $s1, $zero
+      0x3042FFFF,  // C: andi $v0, $v0, 0xFFFF
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_GE(stmts.size(), 4u);
+  EXPECT_EQ(stmts[0].destination_variable, "temp_s0");
+  EXPECT_EQ(stmts[1].destination_variable, "v0");
+  EXPECT_EQ(stmts[1].kind, StatementKind::kAssignment);
+  EXPECT_EQ(stmts[1].ToString(), "v0 = func_80110410();\n");
+}
+
 TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesMtc1CvtAndTruncMfc1) {
   // 1. mtc1 $v0, $f2; nop; cvt.s.w $f2, $f2 -> f2 = (f32)v0;
   // 2. trunc.w.s $f0, $f0; nop; mfc1 $v0, $f0 -> v0 = (s32)f0;
@@ -1875,8 +1893,8 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternHandlesZeroAndDouble) 
   auto stmts = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_EQ(stmts.size(), 3u);
   EXPECT_EQ(stmts[0].ToString(), "f4 = 0.0f;\n");
-  EXPECT_EQ(stmts[1].ToString(), "f2 = (f64)arg0;\n");
-  EXPECT_EQ(stmts[2].ToString(), "v1 = (s32)f12;\n");
+  EXPECT_EQ(stmts[1].ToString(), "f2_d = (f64)arg0;\n");
+  EXPECT_EQ(stmts[2].ToString(), "v1 = (s32)f12_d;\n");
 }
 
 TEST(ExpressionBuilderTest, FloatingPointConversionPatternHandlesMultipleHazardNops) {
@@ -1908,8 +1926,8 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternRejectsMismatchedRegis
   auto stmts = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_EQ(stmts.size(), 4u);
   EXPECT_EQ(stmts[0].ToString(), "f2 = *(f32*)&v0;\n");
-  EXPECT_EQ(stmts[1].ToString(), "f4 = (f32)f0;\n");
-  EXPECT_EQ(stmts[2].ToString(), "f2 = (s32)f0;\n");
+  EXPECT_EQ(stmts[1].ToString(), "f4 = (f32)*(s32*)&f0;\n");
+  EXPECT_EQ(stmts[2].ToString(), "*(s32*)&f2 = (s32)f0;\n");
   EXPECT_EQ(stmts[3].ToString(), "v0 = *(s32*)&f4;\n");
 }
 
@@ -1928,7 +1946,7 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternRejectsNonConversionSu
   ASSERT_EQ(stmts.size(), 3u);
   EXPECT_EQ(stmts[0].ToString(), "f2 = *(f32*)&v0;\n");
   EXPECT_EQ(stmts[1].ToString(), "f0 = f2 + f4;\n");
-  EXPECT_EQ(stmts[2].ToString(), "f0 = (s32)f0;\n");
+  EXPECT_EQ(stmts[2].ToString(), "*(s32*)&f0 = (s32)f0;\n");
 }
 
 TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesRoundingToMathFunctions) {
@@ -1958,10 +1976,10 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesRoundingToMathF
 }
 
 TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesDoubleRounding) {
-  // ceil.w.d  $f2, $f12; cvt.d.w $f2, $f2 -> f2 = ceil(f12);
-  // floor.w.d $f4, $f12; cvt.d.w $f4, $f4 -> f4 = floor(f12);
-  // round.w.d $f6, $f12; cvt.d.w $f6, $f6 -> f6 = round(f12);
-  // trunc.w.d $f8, $f12; cvt.d.w $f8, $f8 -> f8 = trunc(f12);
+  // ceil.w.d  $f2, $f12; cvt.d.w $f2, $f2 -> f2_d = ceil(f12_d);
+  // floor.w.d $f4, $f12; cvt.d.w $f4, $f4 -> f4_d = floor(f12_d);
+  // round.w.d $f6, $f12; cvt.d.w $f6, $f6 -> f6_d = round(f12_d);
+  // trunc.w.d $f8, $f12; cvt.d.w $f8, $f8 -> f8_d = trunc(f12_d);
   std::vector<uint32_t> words = {
       0x4620608E,  // 0:  ceil.w.d  $f2, $f12
       0x468010A1,  // 4:  cvt.d.w   $f2, $f2
@@ -1976,10 +1994,10 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesDoubleRounding)
   auto insts = *DecodeSequence(words);
   auto stmts = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_EQ(stmts.size(), 4u);
-  EXPECT_EQ(stmts[0].ToString(), "f2 = ceil(f12);\n");
-  EXPECT_EQ(stmts[1].ToString(), "f4 = floor(f12);\n");
-  EXPECT_EQ(stmts[2].ToString(), "f6 = round(f12);\n");
-  EXPECT_EQ(stmts[3].ToString(), "f8 = trunc(f12);\n");
+  EXPECT_EQ(stmts[0].ToString(), "f2_d = ceil(f12_d);\n");
+  EXPECT_EQ(stmts[1].ToString(), "f4_d = floor(f12_d);\n");
+  EXPECT_EQ(stmts[2].ToString(), "f6_d = round(f12_d);\n");
+  EXPECT_EQ(stmts[3].ToString(), "f8_d = trunc(f12_d);\n");
 }
 
 TEST(ExpressionBuilderTest, FloatingPointRoundingInReturnDelaySlot) {
@@ -2007,9 +2025,9 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesFloatToIntRound
   // ceil.w.s  $f2, $f0;  mfc1 $v0, $f2 -> v0 = (s32)ceilf(f0);
   // floor.w.s $f4, $f0;  mfc1 $v1, $f4 -> v1 = (s32)floorf(f0);
   // Double precision:
-  // ceil.w.d  $f2, $f12; mfc1 $a0, $f2 -> arg0 = (s32)ceil(f12);
-  // floor.w.d $f4, $f12; mfc1 $a1, $f4 -> arg1 = (s32)floor(f12);
-  // round.w.d $f6, $f12; mfc1 $a2, $f6 -> arg2 = (s32)round(f12);
+  // ceil.w.d  $f2, $f12; mfc1 $a0, $f2 -> arg0 = (s32)ceil(f12_d);
+  // floor.w.d $f4, $f12; mfc1 $a1, $f4 -> arg1 = (s32)floor(f12_d);
+  // round.w.d $f6, $f12; mfc1 $a2, $f6 -> arg2 = (s32)round(f12_d);
   std::vector<uint32_t> words = {
       0x4600008E,  // 0:  ceil.w.s  $f2, $f0
       0x44021000,  // 4:  mfc1      $v0, $f2
@@ -2028,30 +2046,9 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesFloatToIntRound
   ASSERT_EQ(stmts.size(), 5u);
   EXPECT_EQ(stmts[0].ToString(), "v0 = (s32)ceilf(f0);\n");
   EXPECT_EQ(stmts[1].ToString(), "v1 = (s32)floorf(f0);\n");
-  EXPECT_EQ(stmts[2].ToString(), "arg0 = (s32)ceil(f12);\n");
-  EXPECT_EQ(stmts[3].ToString(), "arg1 = (s32)floor(f12);\n");
-  EXPECT_EQ(stmts[4].ToString(), "arg2 = (s32)round(f12);\n");
-}
-
-TEST(ExpressionBuilderTest, AssignsV0ReturnWhenUsedAfterSubroutineCall) {
-  // jal  func_80110410
-  // andi $s0, $s0, 0xFFFF (delay slot)
-  // addu $v1, $s1, $zero
-  // andi $v0, $v0, 0xFFFF (uses $v0 from call)
-  std::vector<uint32_t> words = {
-      0x0C044104,  // 0: jal  func_80110410
-      0x3210FFFF,  // 4: andi $s0, $s0, 0xFFFF
-      0x02201821,  // 8: addu $v1, $s1, $zero
-      0x3042FFFF,  // C: andi $v0, $v0, 0xFFFF
-  };
-
-  auto insts = *DecodeSequence(words);
-  auto stmts = ExpressionBuilder::LiftInstructions(insts);
-  ASSERT_GE(stmts.size(), 4u);
-  EXPECT_EQ(stmts[0].destination_variable, "temp_s0");
-  EXPECT_EQ(stmts[1].destination_variable, "v0");
-  EXPECT_EQ(stmts[1].kind, StatementKind::kAssignment);
-  EXPECT_EQ(stmts[1].ToString(), "v0 = func_80110410();\n");
+  EXPECT_EQ(stmts[2].ToString(), "arg0 = (s32)ceil(f12_d);\n");
+  EXPECT_EQ(stmts[3].ToString(), "arg1 = (s32)floor(f12_d);\n");
+  EXPECT_EQ(stmts[4].ToString(), "arg2 = (s32)round(f12_d);\n");
 }
 
 TEST(ExpressionBuilderTest, AssignsF0ReturnWhenUsedAfterSubroutineCall) {
