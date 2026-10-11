@@ -73,11 +73,20 @@ define_c
  *   inject NOPs into other C files performing floating-point math (such as
  *   message.c and libultra_gu_mtx.c).
  *
- *   display.c declares `__asm__(".set __DISPLAY_MODULE__, 1");` at file scope
+ *   display.c declares `__asm__(".set __DISPLAY_MODULE__, 1\ndefine_mul");` at file scope
  *   (outside any function body). When `mul.s` is assembled in display.c,
  *   `__DISPLAY_MODULE__` is defined and inserts the exact 4 hardware delay slots
  *   (at multiplication occurrences #3, #5, #7, and #8). In all other C units,
  *   `__DISPLAY_MODULE__` is undefined, allowing `mul.s` to pass through untouched.
+ *
+ * TODO(cleanup): The instruction-counter pattern below (_mul_count - 2, 4, 6, 7)
+ * is brittle and specific to RenderDrawEntries in display.c.
+ * Clean cleanup options for the future:
+ *   1. Explicit NOP() in C: Place standardized NOP() macros (from types.h) directly
+ *      in RenderDrawEntries where the delay slots occur, and eliminate define_mul entirely.
+ *   2. C Expression Tuning: Restructure the vertex transform expression tree and local
+ *      variables in RenderDrawEntries so GCC 2.7.2 naturally schedules the pipeline
+ *      without requiring artificial NOP delays.
  */
 .set _mul_count, 0
 .macro define_mul
@@ -102,4 +111,4 @@ define_c
         define_mul
     .endm
 .endm
-define_mul
+

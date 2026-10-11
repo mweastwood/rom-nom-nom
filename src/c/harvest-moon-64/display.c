@@ -1,8 +1,12 @@
 // File-scope assembly directive activating multiplier hazard interlocks in
 // macros/harvest-moon-64_macro.inc for RenderDrawEntries without disrupting
 // function-level basic-block delay-slot optimization in GCC 2.7.2.
+//
+// TODO(cleanup): Remove this file-scope __asm__ activation and the define_mul
+// macro by either placing explicit NOP() calls (from types.h) inside RenderDrawEntries
+// where needed, or refactoring the vertex projection expressions to schedule naturally.
 #if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
-__asm__(".set __DISPLAY_MODULE__, 1");
+__asm__(".set __DISPLAY_MODULE__, 1\ndefine_mul");
 #endif
 
 #include "display.h"
