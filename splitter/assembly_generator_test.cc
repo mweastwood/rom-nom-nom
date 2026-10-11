@@ -105,6 +105,41 @@ TEST(AssemblyGeneratorTest, WriteDataAndBssAssembly) {
   std::filesystem::remove_all(temp_dir);
 }
 
+TEST(AssemblyGeneratorTest, WriteDataAssemblyResolvesSymbolPointers) {
+  std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / "asm_gen_data_sym_test";
+  std::filesystem::remove_all(temp_dir);
+
+  constexpr std::string_view kSymbolsProtoText = R"pb(
+    entries { name: "g_target_data" address: 0x80702000 type: SYMBOL_DATA }
+    entries { name: "k_absolute_const" address: 0x80703000 type: SYMBOL_DATA is_absolute: true }
+  )pb";
+  auto symbols_or = SymbolIndex::ParseFromTextproto(kSymbolsProtoText);
+  ASSERT_TRUE(symbols_or.ok());
+
+  AssemblyGeneratorOptions options;
+  options.asm_dir = temp_dir;
+  options.symbols = &(*symbols_or);
+  AssemblyGenerator generator(options);
+
+  // 8 bytes: 2 words
+  // First word is 0x80702000 (resolves to g_target_data)
+  // Second word is 0x80703000 (absolute symbol, remains hex 0x80703000)
+  std::vector<uint8_t> data_bytes = {
+      0x80, 0x70, 0x20, 0x00, 0x80, 0x70, 0x30, 0x00,
+  };
+  std::filesystem::path data_path = generator.ResolveDataPath("symbols_sample");
+  ASSERT_TRUE(generator.WriteDataAssembly(data_bytes, 0x80701000, data_path).ok());
+  ASSERT_TRUE(std::filesystem::exists(data_path));
+
+  std::ifstream data_in(data_path);
+  std::string data_content((std::istreambuf_iterator<char>(data_in)),
+                           std::istreambuf_iterator<char>());
+  EXPECT_NE(data_content.find(".word g_target_data"), std::string::npos);
+  EXPECT_NE(data_content.find(".word 0x80703000"), std::string::npos);
+
+  std::filesystem::remove_all(temp_dir);
+}
+
 TEST(AssemblyGeneratorTest, WriteNonmatchingFunctionsAndStandaloneAssembly) {
   std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / "asm_gen_funcs_test";
   std::filesystem::remove_all(temp_dir);

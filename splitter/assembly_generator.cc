@@ -227,7 +227,12 @@ absl::Status AssemblyGenerator::WriteDataAssembly(absl::Span<const uint8_t> data
 
   for (size_t offset = 0; offset + 4 <= data_bytes.size(); offset += 4) {
     uint32_t w = ReadBigEndian32(data_bytes.data() + offset);
-    absl::StrAppend(&data_asm, absl::StrFormat("    .word 0x%08X\n", w));
+    const auto* sym = options_.symbols ? options_.symbols->FindByAddress(w) : nullptr;
+    if (sym != nullptr && !sym->is_absolute()) {
+      absl::StrAppend(&data_asm, absl::StrFormat("    .word %s\n", sym->name()));
+    } else {
+      absl::StrAppend(&data_asm, absl::StrFormat("    .word 0x%08X\n", w));
+    }
   }
   for (size_t offset = (data_bytes.size() / 4) * 4; offset < data_bytes.size(); ++offset) {
     absl::StrAppend(&data_asm, absl::StrFormat("    .byte 0x%02X\n", data_bytes[offset]));
