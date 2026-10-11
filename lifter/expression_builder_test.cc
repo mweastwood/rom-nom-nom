@@ -667,6 +667,25 @@ TEST(ExpressionBuilderTest, NorGeneral) {
   EXPECT_EQ(statements[0].expression->ToString(), "~(arg0 | arg1)");
 }
 
+TEST(ExpressionBuilderTest, ImmediateShiftOperations) {
+  // sll $v0, $a0, 4
+  // srl $v1, $a0, 4
+  // sra $t0, $a0, 4
+  std::vector<uint32_t> words = {
+      0x00041100,  // sll $v0, $a0, 4
+      0x00041902,  // srl $v1, $a0, 4
+      0x00044103,  // sra $t0, $a0, 4
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 << 4;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = (u32)arg0 >> 4;\n");
+  EXPECT_EQ(statements[2].ToString(), "temp_t0 = arg0 >> 4;\n");
+}
+
 TEST(ExpressionBuilderTest, VariableShiftOperations) {
   // sllv $v0, $a0, $a1
   // srlv $v1, $a0, $a1
@@ -682,7 +701,7 @@ TEST(ExpressionBuilderTest, VariableShiftOperations) {
 
   ASSERT_THAT(statements, SizeIs(3));
   EXPECT_EQ(statements[0].ToString(), "v0 = arg0 << arg1;\n");
-  EXPECT_EQ(statements[1].ToString(), "v1 = arg0 >> arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = (u32)arg0 >> arg1;\n");
   EXPECT_EQ(statements[2].ToString(), "temp_t0 = arg0 >> arg1;\n");
 }
 
