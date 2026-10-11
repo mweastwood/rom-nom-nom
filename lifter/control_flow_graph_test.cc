@@ -351,5 +351,341 @@ TEST(ControlFlowGraphTest, BuildWithJumpTable) {
   EXPECT_THAT(case1->predecessors, ElementsAre(switch_block->id));
 }
 
+TEST(ControlFlowGraphTest, ConstantIndirectJumpCreatesEdge) {
+  // 0x80000000: lui   $t0, 0x8000
+  // 0x80000004: addiu $t0, $t0, 0x0010
+  // 0x80000008: jr    $t0
+  // 0x8000000C: nop
+  // 0x80000010: jr    $ra
+  // 0x80000014: nop
+  std::vector<uint32_t> words = {
+      0x3C088000,  // lui   $t0, 0x8000
+      0x25080010,  // addiu $t0, $t0, 0x0010
+      0x01000008,  // jr    $t0
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* block0 = cfg.FindBlockByVram(0x80000000);
+  const auto* block1 = cfg.FindBlockByVram(0x80000010);
+  ASSERT_THAT(block0, NotNull());
+  ASSERT_THAT(block1, NotNull());
+
+  EXPECT_THAT(block0->successors, ElementsAre(block1->id));
+  EXPECT_THAT(block1->predecessors, ElementsAre(block0->id));
+}
+
+TEST(ControlFlowGraphTest, ExternalJumpCreatesTargetBlock) {
+  // 0x80000000: j   0x80010000
+  // 0x80000004: nop
+  std::vector<uint32_t> words = {
+      0x08004000,  // j 0x80010000
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* entry = cfg.FindBlockByVram(0x80000000);
+  const auto* ext_block = cfg.FindBlockByVram(0x80010000);
+  ASSERT_THAT(entry, NotNull());
+  ASSERT_THAT(ext_block, NotNull());
+
+  EXPECT_THAT(entry->successors, ElementsAre(ext_block->id));
+  EXPECT_THAT(ext_block->predecessors, ElementsAre(entry->id));
+}
+
+TEST(ControlFlowGraphTest, UnreachableBlockPrunedFromPredecessors) {
+  // 0x80000000: jr $ra
+  // 0x80000004: nop
+  // 0x80000008: j  0x80000000 (unreachable block jumping to entry)
+  // 0x8000000C: nop
+  std::vector<uint32_t> words = {
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+      0x08000000,  // j  0x80000000
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* entry = cfg.FindBlockByVram(0x80000000);
+  ASSERT_THAT(entry, NotNull());
+  // The unreachable block at 0x80000008 should have its edge pruned and must not
+  // contaminate entry's predecessors.
+  EXPECT_THAT(entry->predecessors, IsEmpty());
+}
+
+TEST(ControlFlowGraphTest, ConstantIndirectJumpLuiOnly) {
+  // 0x80000000: lui $t0, 0x8001
+  // 0x80000004: jr  $t0
+  // 0x80000008: nop
+  // ... target at 0x80010000
+  // 0x80010000: jr  $ra
+  // 0x80010004: nop
+  std::vector<Instruction> insts;
+  Instruction lui_inst;
+  lui_inst.vram = 0x80000000;
+  lui_inst.opcode = Opcode::kLui;
+  lui_inst.rt = Register::kT0;
+  lui_inst.immediate = 0x8001;
+  insts.push_back(lui_inst);
+
+  Instruction jr_inst;
+  jr_inst.vram = 0x80000004;
+  jr_inst.opcode = Opcode::kJr;
+  jr_inst.rs = Register::kT0;
+  insts.push_back(jr_inst);
+
+  Instruction nop0;
+  nop0.vram = 0x80000008;
+  nop0.opcode = Opcode::kSll;
+  nop0.rd = Register::kZero;
+  nop0.rt = Register::kZero;
+  insts.push_back(nop0);
+
+  Instruction ret_inst;
+  ret_inst.vram = 0x80010000;
+  ret_inst.opcode = Opcode::kJr;
+  ret_inst.rs = Register::kRa;
+  insts.push_back(ret_inst);
+
+  Instruction nop1 = nop0;
+  nop1.vram = 0x80010004;
+  insts.push_back(nop1);
+
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* block0 = cfg.FindBlockByVram(0x80000000);
+  const auto* block1 = cfg.FindBlockByVram(0x80010000);
+  ASSERT_THAT(block0, NotNull());
+  ASSERT_THAT(block1, NotNull());
+
+  EXPECT_THAT(block0->successors, ElementsAre(block1->id));
+  EXPECT_THAT(block1->predecessors, ElementsAre(block0->id));
+}
+
+TEST(ControlFlowGraphTest, ConstantIndirectJumpNegativeImmediate) {
+  // 0x80000000: lui   $t0, 0x8002
+  // 0x80000004: addiu $t0, $t0, -32768 (0x8000 -> sign-extended -> target 0x80018000)
+  // 0x80000008: jr    $t0
+  // 0x8000000C: nop
+  // 0x80018000: jr    $ra
+  // 0x80018004: nop
+  std::vector<Instruction> insts;
+  Instruction lui_inst;
+  lui_inst.vram = 0x80000000;
+  lui_inst.opcode = Opcode::kLui;
+  lui_inst.rt = Register::kT0;
+  lui_inst.immediate = 0x8002;
+  insts.push_back(lui_inst);
+
+  Instruction addiu_inst;
+  addiu_inst.vram = 0x80000004;
+  addiu_inst.opcode = Opcode::kAddiu;
+  addiu_inst.rt = Register::kT0;
+  addiu_inst.rs = Register::kT0;
+  addiu_inst.immediate = static_cast<uint16_t>(-32768);
+  insts.push_back(addiu_inst);
+
+  Instruction jr_inst;
+  jr_inst.vram = 0x80000008;
+  jr_inst.opcode = Opcode::kJr;
+  jr_inst.rs = Register::kT0;
+  insts.push_back(jr_inst);
+
+  Instruction nop0;
+  nop0.vram = 0x8000000C;
+  nop0.opcode = Opcode::kSll;
+  nop0.rd = Register::kZero;
+  nop0.rt = Register::kZero;
+  insts.push_back(nop0);
+
+  Instruction ret_inst;
+  ret_inst.vram = 0x80018000;
+  ret_inst.opcode = Opcode::kJr;
+  ret_inst.rs = Register::kRa;
+  insts.push_back(ret_inst);
+
+  Instruction nop1 = nop0;
+  nop1.vram = 0x80018004;
+  insts.push_back(nop1);
+
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* block0 = cfg.FindBlockByVram(0x80000000);
+  const auto* target_block = cfg.FindBlockByVram(0x80018000);
+  ASSERT_THAT(block0, NotNull());
+  ASSERT_THAT(target_block, NotNull());
+
+  EXPECT_THAT(block0->successors, ElementsAre(target_block->id));
+  EXPECT_THAT(target_block->predecessors, ElementsAre(block0->id));
+}
+
+TEST(ControlFlowGraphTest, ConstantIndirectJumpNonConstantIgnored) {
+  // 0x80000000: lw  $t0, 0($a0)  (dynamic pointer load)
+  // 0x80000004: jr  $t0
+  // 0x80000008: nop
+  std::vector<uint32_t> words = {
+      0x8C880000,  // lw $t0, 0($a0)
+      0x01000008,  // jr $t0
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* block0 = cfg.FindBlockByVram(0x80000000);
+  ASSERT_THAT(block0, NotNull());
+  EXPECT_THAT(block0->successors, IsEmpty());
+}
+
+TEST(ControlFlowGraphTest, ExternalBranchConditionalAndUnconditional) {
+  // Conditional branch to external target (0x80000020):
+  // 0x80000000: bne $a0, $zero, +7 (-> 0x80000020)
+  // 0x80000004: nop
+  // 0x80000008: jr  $ra
+  // 0x8000000C: nop
+  std::vector<uint32_t> cond_words = {
+      0x14800007,  // bne $a0, $zero, 0x80000020
+      0x00000000,  // nop
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  auto cond_insts = *DecodeSequence(cond_words, 0x80000000);
+  auto cond_cfg = *ControlFlowGraph::Build(cond_insts);
+
+  const auto* cond_entry = cond_cfg.FindBlockByVram(0x80000000);
+  const auto* cond_fallthrough = cond_cfg.FindBlockByVram(0x80000008);
+  const auto* cond_ext = cond_cfg.FindBlockByVram(0x80000020);
+  ASSERT_THAT(cond_entry, NotNull());
+  ASSERT_THAT(cond_fallthrough, NotNull());
+  ASSERT_THAT(cond_ext, NotNull());
+
+  EXPECT_THAT(cond_entry->successors, ElementsAre(cond_ext->id, cond_fallthrough->id));
+
+  // Unconditional branch to external target:
+  // 0x80000000: beq $zero, $zero, +7 (-> 0x80000020)
+  // 0x80000004: nop
+  // 0x80000008: jr  $ra
+  // 0x8000000C: nop
+  std::vector<uint32_t> uncond_words = {
+      0x10000007,  // beq $zero, $zero, 0x80000020
+      0x00000000,  // nop
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  auto uncond_insts = *DecodeSequence(uncond_words, 0x80000000);
+  auto uncond_cfg = *ControlFlowGraph::Build(uncond_insts);
+
+  const auto* uncond_entry = uncond_cfg.FindBlockByVram(0x80000000);
+  const auto* uncond_ext = uncond_cfg.FindBlockByVram(0x80000020);
+  ASSERT_THAT(uncond_entry, NotNull());
+  ASSERT_THAT(uncond_ext, NotNull());
+
+  // Unconditional branch should NOT have a fallthrough edge.
+  EXPECT_THAT(uncond_entry->successors, ElementsAre(uncond_ext->id));
+}
+
+TEST(ControlFlowGraphTest, ExternalTargetBlockDeduplication) {
+  // Multiple jumps to the same external target 0x80010000:
+  // 0x80000000: j 0x80010000
+  // 0x80000004: nop
+  // 0x80000008: j 0x80010000
+  // 0x8000000C: nop
+  std::vector<uint32_t> words = {
+      0x08004000,  // j 0x80010000
+      0x00000000,  // nop
+      0x08004000,  // j 0x80010000
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  // Verify only one external target block was created for 0x80010000.
+  const auto* ext_block = cfg.FindBlockByVram(0x80010000);
+  ASSERT_THAT(ext_block, NotNull());
+
+  const auto* block0 = cfg.FindBlockByVram(0x80000000);
+  ASSERT_THAT(block0, NotNull());
+  EXPECT_THAT(block0->successors, ElementsAre(ext_block->id));
+}
+
+TEST(ControlFlowGraphTest, UnreachableSubgraphWithCyclePruning) {
+  // 0x80000000: bne $a0, $zero, +4 (-> 0x80000014: target)
+  // 0x80000004: nop
+  // 0x80000008: jr  $ra
+  // 0x8000000C: nop
+  //
+  // Unreachable block A:
+  // 0x80000010: j 0x80000018 (-> Unreachable block B)
+  //
+  // Reachable target:
+  // 0x80000014: jr  $ra
+  //
+  // Unreachable block B:
+  // 0x80000018: bne $v0, $zero, -3 (-> Unreachable block A 0x80000010)
+  // 0x8000001C: nop
+  // 0x80000020: j   0x80000014 (-> Reachable target)
+  // 0x80000024: nop
+  std::vector<uint32_t> words = {
+      0x14800004,  // 00: bne $a0, $zero, +4 (0x80000014)
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr  $ra
+      0x00000000,  // 0C: nop
+      0x08000006,  // 10: j   0x80000018 (B)
+      0x03E00008,  // 14: jr  $ra (Target)
+      0x1440FFFD,  // 18: bne $v0, $zero, -3 (0x80000010: A)
+      0x00000000,  // 1C: nop
+      0x08000005,  // 20: j   0x80000014 (Target)
+      0x00000000,  // 24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  const auto* entry = cfg.FindBlockByVram(0x80000000);
+  const auto* target = cfg.FindBlockByVram(0x80000014);
+  const auto* unreach_a = cfg.FindBlockByVram(0x80000010);
+  const auto* unreach_b = cfg.FindBlockByVram(0x80000018);
+
+  ASSERT_THAT(entry, NotNull());
+  ASSERT_THAT(target, NotNull());
+  ASSERT_THAT(unreach_a, NotNull());
+  ASSERT_THAT(unreach_b, NotNull());
+
+  // Target's predecessors should ONLY contain the reachable entry block,
+  // NOT the unreachable block B.
+  EXPECT_THAT(target->predecessors, ElementsAre(entry->id));
+
+  // Unreachable blocks A and B should have all outgoing edges cleared.
+  EXPECT_THAT(unreach_a->successors, IsEmpty());
+  EXPECT_THAT(unreach_b->successors, IsEmpty());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

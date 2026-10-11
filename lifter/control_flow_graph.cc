@@ -119,6 +119,39 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
         if (it != vram_to_idx.end() && !division_trap_internal_indices.contains(it->second)) {
           is_leader[it->second] = true;
         }
+      } else if (inst.opcode == Opcode::kJr && inst.rs.has_value() && *inst.rs != Register::kRa) {
+        Register jump_reg = *inst.rs;
+        for (size_t prev_i = i; prev_i > 0; --prev_i) {
+          const auto& prev = instructions[prev_i - 1];
+          if ((prev.opcode == Opcode::kAddiu || prev.opcode == Opcode::kAddi) &&
+              prev.rt.has_value() && *prev.rt == jump_reg) {
+            Register base_reg = prev.rs.value_or(Register::kZero);
+            int32_t lo_imm = static_cast<int32_t>(prev.immediate);
+            for (size_t hi_i = prev_i - 1; hi_i > 0; --hi_i) {
+              const auto& hi_inst = instructions[hi_i - 1];
+              if (hi_inst.opcode == Opcode::kLui && hi_inst.rt.has_value() &&
+                  *hi_inst.rt == base_reg) {
+                uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(hi_inst.immediate));
+                uint32_t const_target = (hi_imm << 16) + lo_imm;
+                auto it = vram_to_idx.find(const_target);
+                if (it != vram_to_idx.end() &&
+                    !division_trap_internal_indices.contains(it->second)) {
+                  is_leader[it->second] = true;
+                }
+                break;
+              }
+            }
+            break;
+          } else if (prev.opcode == Opcode::kLui && prev.rt.has_value() && *prev.rt == jump_reg) {
+            uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(prev.immediate));
+            uint32_t const_target = hi_imm << 16;
+            auto it = vram_to_idx.find(const_target);
+            if (it != vram_to_idx.end() && !division_trap_internal_indices.contains(it->second)) {
+              is_leader[it->second] = true;
+            }
+            break;
+          }
+        }
       }
       size_t next_idx = inst.HasDelaySlot() ? (i + 2) : (i + 1);
       if (next_idx < instructions.size() && !division_trap_internal_indices.contains(next_idx)) {
@@ -196,28 +229,120 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
       continue;
     }
 
-    if (term->opcode == Opcode::kJ) {
-      uint32_t target_vram = term->JumpTarget();
+    auto get_or_create_target_block = [&](uint32_t target_vram) -> uint32_t {
       auto it = cfg.vram_to_block_index_.find(target_vram);
       if (it != cfg.vram_to_block_index_.end()) {
-        add_edge(block.id, static_cast<uint32_t>(it->second), EdgeType::kJump);
+        return static_cast<uint32_t>(it->second);
       }
+      uint32_t ext_id = static_cast<uint32_t>(cfg.blocks_.size());
+      BasicBlock ext_block;
+      ext_block.id = ext_id;
+      ext_block.start_vram = target_vram;
+      ext_block.end_vram = target_vram + 12;
+      Instruction nop1;
+      nop1.vram = target_vram;
+      nop1.opcode = Opcode::kOr;
+      nop1.rd = Register::kZero;
+      nop1.rs = Register::kA0;
+      nop1.rt = Register::kA1;
+      nop1.raw_word = 0x00850025;
+      ext_block.instructions.push_back(nop1);
+      Instruction nop2;
+      nop2.vram = target_vram + 4;
+      nop2.opcode = Opcode::kOr;
+      nop2.rd = Register::kZero;
+      nop2.rs = Register::kA2;
+      nop2.rt = Register::kA3;
+      nop2.raw_word = 0x00C70025;
+      ext_block.instructions.push_back(nop2);
+      Instruction jal_inst;
+      jal_inst.vram = target_vram + 8;
+      jal_inst.opcode = Opcode::kJal;
+      jal_inst.target = (target_vram & 0x0FFFFFFF) >> 2;
+      jal_inst.raw_word = (3 << 26) | jal_inst.target;
+      ext_block.instructions.push_back(jal_inst);
+      Instruction nop_delay1;
+      nop_delay1.vram = target_vram + 12;
+      nop_delay1.opcode = Opcode::kSll;
+      nop_delay1.rd = Register::kZero;
+      nop_delay1.rt = Register::kZero;
+      nop_delay1.raw_word = 0;
+      ext_block.instructions.push_back(nop_delay1);
+      Instruction jr_inst;
+      jr_inst.vram = target_vram + 16;
+      jr_inst.opcode = Opcode::kJr;
+      jr_inst.rs = Register::kRa;
+      jr_inst.raw_word = 0x03E00008;
+      ext_block.instructions.push_back(jr_inst);
+      Instruction nop_delay2;
+      nop_delay2.vram = target_vram + 20;
+      nop_delay2.opcode = Opcode::kSll;
+      nop_delay2.rd = Register::kZero;
+      nop_delay2.rt = Register::kZero;
+      nop_delay2.raw_word = 0;
+      ext_block.instructions.push_back(nop_delay2);
+      cfg.vram_to_block_index_[target_vram] = ext_id;
+      cfg.blocks_.push_back(std::move(ext_block));
+      return ext_id;
+    };
+
+    if (term->opcode == Opcode::kJ) {
+      uint32_t target_vram = term->JumpTarget();
+      uint32_t target_id = get_or_create_target_block(target_vram);
+      add_edge(static_cast<uint32_t>(b), target_id, EdgeType::kJump);
       continue;
     }
 
     if (term->IsBranch()) {
       // Taken branch edge
       uint32_t target_vram = term->BranchTarget();
-      auto it_target = cfg.vram_to_block_index_.find(target_vram);
-      if (it_target != cfg.vram_to_block_index_.end()) {
-        add_edge(block.id, static_cast<uint32_t>(it_target->second), EdgeType::kBranch);
-      }
+      uint32_t target_id = get_or_create_target_block(target_vram);
+      add_edge(static_cast<uint32_t>(b), target_id, EdgeType::kBranch);
 
-      // Fallthrough edge (instruction after branch + delay slot)
-      uint32_t fallthrough_vram = term->vram + (term->HasDelaySlot() ? 8 : 4);
-      auto it_fallthrough = cfg.vram_to_block_index_.find(fallthrough_vram);
-      if (it_fallthrough != cfg.vram_to_block_index_.end()) {
-        add_edge(block.id, static_cast<uint32_t>(it_fallthrough->second), EdgeType::kFallthrough);
+      if (!term->IsUnconditionalBranch()) {
+        // Fallthrough edge (instruction after branch + delay slot)
+        uint32_t fallthrough_vram = term->vram + (term->HasDelaySlot() ? 8 : 4);
+        auto it_fallthrough = cfg.vram_to_block_index_.find(fallthrough_vram);
+        if (it_fallthrough != cfg.vram_to_block_index_.end()) {
+          add_edge(static_cast<uint32_t>(b), static_cast<uint32_t>(it_fallthrough->second),
+                   EdgeType::kFallthrough);
+        }
+      }
+      continue;
+    }
+
+    if (term->opcode == Opcode::kJr) {
+      if (term->rs.has_value() && *term->rs != Register::kRa) {
+        Register jump_reg = *term->rs;
+        std::optional<uint32_t> const_target;
+        for (auto it_inst = block.instructions.rbegin(); it_inst != block.instructions.rend();
+             ++it_inst) {
+          if ((it_inst->opcode == Opcode::kAddiu || it_inst->opcode == Opcode::kAddi) &&
+              it_inst->rt.has_value() && *it_inst->rt == jump_reg) {
+            Register base_reg = it_inst->rs.value_or(Register::kZero);
+            int32_t lo_imm = static_cast<int32_t>(it_inst->immediate);
+            for (auto hi_it = it_inst + 1; hi_it != block.instructions.rend(); ++hi_it) {
+              if (hi_it->opcode == Opcode::kLui && hi_it->rt.has_value() &&
+                  *hi_it->rt == base_reg) {
+                uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(hi_it->immediate));
+                const_target = (hi_imm << 16) + lo_imm;
+                break;
+              }
+            }
+            break;
+          } else if (it_inst->opcode == Opcode::kLui && it_inst->rt.has_value() &&
+                     *it_inst->rt == jump_reg) {
+            uint32_t hi_imm = static_cast<uint32_t>(static_cast<uint16_t>(it_inst->immediate));
+            const_target = hi_imm << 16;
+            break;
+          }
+        }
+        if (const_target.has_value()) {
+          auto it = cfg.vram_to_block_index_.find(*const_target);
+          if (it != cfg.vram_to_block_index_.end()) {
+            add_edge(block.id, static_cast<uint32_t>(it->second), EdgeType::kJump);
+          }
+        }
       }
       continue;
     }
@@ -226,6 +351,45 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
     if (b + 1 < cfg.blocks_.size()) {
       add_edge(block.id, static_cast<uint32_t>(b + 1), EdgeType::kFallthrough);
     }
+  }
+
+  // Prune edges originating from blocks unreachable from entry so they do not
+  // contaminate predecessors of reachable blocks during dataflow analysis.
+  if (!cfg.blocks_.empty()) {
+    absl::flat_hash_set<uint32_t> reachable;
+    std::vector<uint32_t> queue;
+    queue.push_back(cfg.entry_block_id_);
+    reachable.insert(cfg.entry_block_id_);
+    while (!queue.empty()) {
+      uint32_t curr = queue.back();
+      queue.pop_back();
+      if (curr < cfg.blocks_.size()) {
+        for (uint32_t succ : cfg.blocks_[curr].successors) {
+          if (reachable.insert(succ).second) {
+            queue.push_back(succ);
+          }
+        }
+      }
+    }
+
+    for (size_t b = 0; b < cfg.blocks_.size(); ++b) {
+      if (!reachable.contains(b)) {
+        for (uint32_t succ : cfg.blocks_[b].successors) {
+          if (succ < cfg.blocks_.size()) {
+            auto& preds = cfg.blocks_[succ].predecessors;
+            preds.erase(std::remove(preds.begin(), preds.end(), static_cast<uint32_t>(b)),
+                        preds.end());
+          }
+        }
+        cfg.blocks_[b].successors.clear();
+        cfg.blocks_[b].outgoing_edges.clear();
+      }
+    }
+    cfg.edges_.erase(std::remove_if(cfg.edges_.begin(), cfg.edges_.end(),
+                                    [&](const CfgEdge& edge) {
+                                      return !reachable.contains(edge.from_block_id);
+                                    }),
+                     cfg.edges_.end());
   }
 
   return cfg;
