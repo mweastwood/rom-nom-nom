@@ -18,10 +18,12 @@ namespace rom_nom_nom {
 // Type of folded multi-instruction pattern.
 enum class FoldedPatternType {
   kNone,
-  kAddressLoad,      // lui + addiu: &symbol or pointer
-  kConstantLiteral,  // lui + ori: 32-bit integer constant
-  kGlobalLoad,       // lui + lw/lh/lb/lbu/lhu/lwc1: symbol value
-  kGlobalStore,      // lui + sw/sh/sb/swc1: symbol = value
+  kAddressLoad,         // lui + addiu: &symbol or pointer
+  kConstantLiteral,     // lui + ori: 32-bit integer constant
+  kGlobalLoad,          // lui + lw/lh/lb/lbu/lhu/lwc1: symbol value
+  kGlobalStore,         // lui + sw/sh/sb/swc1: symbol = value
+  kGlobalIndexedLoad,   // lui + addu + lw/lh/lb/lbu/lhu/lwc1: *(type*)((u8*)&symbol + index)
+  kGlobalIndexedStore,  // lui + addu + sw/sh/sb/swc1: *(type*)((u8*)&symbol + index) = value
 };
 
 // Represents a matched and folded symbol / constant access.
@@ -36,7 +38,10 @@ struct FoldedSymbolAccess {
   std::optional<FpRegister> dest_fp_reg;
   std::optional<FpRegister> src_fp_reg;
 
+  Register index_reg = Register::kZero;
+
   size_t hi_inst_index = 0;
+  std::optional<size_t> mid_inst_index;
   size_t lo_inst_index = 0;
 };
 
@@ -59,12 +64,16 @@ class SymbolFolder {
   // Returns true if the instruction at index is the 'lui' half of a folded pair.
   bool IsFoldedHi(size_t instruction_index) const;
 
+  // Returns true if the instruction at index is the 'addu' mid half of a folded indexed access.
+  bool IsFoldedMid(size_t instruction_index) const;
+
   // Returns the folded access if the instruction at index is the 'lo' half of a folded pair.
   const FoldedSymbolAccess* GetFoldedLo(size_t instruction_index) const;
 
  private:
   std::vector<FoldedSymbolAccess> folded_;
   absl::flat_hash_map<size_t, size_t> hi_to_folded_idx_;
+  absl::flat_hash_map<size_t, size_t> mid_to_folded_idx_;
   absl::flat_hash_map<size_t, size_t> lo_to_folded_idx_;
 };
 

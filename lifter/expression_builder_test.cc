@@ -151,6 +151,50 @@ TEST(ExpressionBuilderTest, FoldedGlobalLoadTypedAndFp) {
   EXPECT_EQ(untyped_statements[3].ToString(), "*(f32*)0x80204000 = f12;\n");
 }
 
+TEST(ExpressionBuilderTest, FoldedGlobalIndexedLoadAndStore) {
+  std::string textproto = R"pb(
+    entries { name: "g_arr" address: 0x80188BFC type: SYMBOL_DATA size: 1024 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      // Indexed load: v0 = *(s32*)((u8*)&g_arr + v1)
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00230821,  // 1: addu  $at, $at, $v1
+      0x8C228BFC,  // 2: lw    $v0, -29700($at)
+      // Indexed store: *(u8*)((u8*)&g_arr + a0) = 0
+      0x3C088019,  // 3: lui   $t0, 0x8019
+      0x00884021,  // 4: addu  $t0, $a0, $t0
+      0xA1008BFC,  // 5: sb    $zero, -29700($t0)
+      // FP Indexed load: f0 = *(f32*)((u8*)&g_arr + v1)
+      0x3C018019,  // 6: lui   $at, 0x8019
+      0x00230821,  // 7: addu  $at, $at, $v1
+      0xC4208BFC,  // 8: lwc1  $f0, -29700($at)
+      // FP Indexed store: *(f32*)((u8*)&g_arr + a0) = f12
+      0x3C088019,  // 9: lui   $t0, 0x8019
+      0x00884021,  // A: addu  $t0, $a0, $t0
+      0xE50C8BFC,  // B: swc1  $f12, -29700($t0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+
+  ASSERT_THAT(statements, SizeIs(4));
+  EXPECT_EQ(statements[0].ToString(), "v0 = *(s32*)((u8*)&g_arr + v1);\n");
+  EXPECT_EQ(statements[1].ToString(), "*(u8*)((u8*)&g_arr + arg0) = 0;\n");
+  EXPECT_EQ(statements[2].ToString(), "f0 = *(f32*)((u8*)&g_arr + v1);\n");
+  EXPECT_EQ(statements[3].ToString(), "*(f32*)((u8*)&g_arr + arg0) = f12;\n");
+
+  // Without symbol index:
+  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts, nullptr);
+  ASSERT_THAT(untyped_statements, SizeIs(4));
+  EXPECT_EQ(untyped_statements[0].ToString(), "v0 = *(s32*)((u8*)0x80188BFC + v1);\n");
+  EXPECT_EQ(untyped_statements[1].ToString(), "*(u8*)((u8*)0x80188BFC + arg0) = 0;\n");
+  EXPECT_EQ(untyped_statements[2].ToString(), "f0 = *(f32*)((u8*)0x80188BFC + v1);\n");
+  EXPECT_EQ(untyped_statements[3].ToString(), "*(f32*)((u8*)0x80188BFC + arg0) = f12;\n");
+}
+
 TEST(ExpressionBuilderTest, StackVariableAccess) {
   std::vector<uint32_t> words = {
       0x27BDFFE0,  // 0: addiu $sp, $sp, -32 (prologue)

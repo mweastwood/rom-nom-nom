@@ -261,5 +261,134 @@ TEST(SymbolFolderTest, FoldsFloatingPointGlobalLoadAndStore) {
   EXPECT_THAT(store_folded.src_fp_reg, ::testing::Optional(FpRegister::kF2));
 }
 
+TEST(SymbolFolderTest, FoldsGlobalIndexedLoadAndStore) {
+  // lui   $at, 0x8019
+  // addu  $at, $at, $v1
+  // lw    $v0, -0x7404($at)  (-29700) -> 0x80188BFC
+  // lui   $t0, 0x8019
+  // addu  $t0, $a0, $t0
+  // sb    $zero, -0x7400($t0) (-29696) -> 0x80188C00
+  std::vector<uint32_t> words = {
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00230821,  // 1: addu  $at, $at, $v1
+      0x8C228BFC,  // 2: lw    $v0, -29700($at)
+      0x3C088019,  // 3: lui   $t0, 0x8019
+      0x00884021,  // 4: addu  $t0, $a0, $t0
+      0xA1008C00,  // 5: sb    $zero, -29696($t0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+
+  // Indexed load
+  const auto& load_folded = folder.AllFolded()[0];
+  EXPECT_EQ(load_folded.type, FoldedPatternType::kGlobalIndexedLoad);
+  EXPECT_EQ(load_folded.address, 0x80188BFCu);
+  EXPECT_EQ(load_folded.index_reg, Register::kV1);
+  EXPECT_EQ(load_folded.dest_reg, Register::kV0);
+  EXPECT_EQ(load_folded.access_type, "s32");
+  EXPECT_EQ(load_folded.hi_inst_index, 0u);
+  EXPECT_THAT(load_folded.mid_inst_index, ::testing::Optional(1u));
+  EXPECT_EQ(load_folded.lo_inst_index, 2u);
+
+  EXPECT_TRUE(folder.IsFoldedHi(0));
+  EXPECT_TRUE(folder.IsFoldedMid(1));
+  EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
+
+  // Indexed store
+  const auto& store_folded = folder.AllFolded()[1];
+  EXPECT_EQ(store_folded.type, FoldedPatternType::kGlobalIndexedStore);
+  EXPECT_EQ(store_folded.address, 0x80188C00u);
+  EXPECT_EQ(store_folded.index_reg, Register::kA0);
+  EXPECT_EQ(store_folded.src_reg, Register::kZero);
+  EXPECT_EQ(store_folded.access_type, "u8");
+  EXPECT_EQ(store_folded.hi_inst_index, 3u);
+  EXPECT_THAT(store_folded.mid_inst_index, ::testing::Optional(4u));
+  EXPECT_EQ(store_folded.lo_inst_index, 5u);
+
+  EXPECT_TRUE(folder.IsFoldedHi(3));
+  EXPECT_TRUE(folder.IsFoldedMid(4));
+  EXPECT_THAT(folder.GetFoldedLo(5), NotNull());
+}
+
+TEST(SymbolFolderTest, FoldsFloatingPointGlobalIndexedLoadAndStore) {
+  // lui   $at, 0x8019
+  // addu  $at, $at, $v1
+  // lwc1  $f0, -29700($at)
+  // lui   $t0, 0x8019
+  // addu  $t0, $a0, $t0
+  // swc1  $f12, -29700($t0)
+  std::vector<uint32_t> words = {
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00230821,  // 1: addu  $at, $at, $v1
+      0xC4208BFC,  // 2: lwc1  $f0, -29700($at)
+      0x3C088019,  // 3: lui   $t0, 0x8019
+      0x00884021,  // 4: addu  $t0, $a0, $t0
+      0xE50C8BFC,  // 5: swc1  $f12, -29700($t0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+
+  const auto& load_folded = folder.AllFolded()[0];
+  EXPECT_EQ(load_folded.type, FoldedPatternType::kGlobalIndexedLoad);
+  EXPECT_EQ(load_folded.access_type, "f32");
+  EXPECT_THAT(load_folded.dest_fp_reg, ::testing::Optional(FpRegister::kF0));
+
+  const auto& store_folded = folder.AllFolded()[1];
+  EXPECT_EQ(store_folded.type, FoldedPatternType::kGlobalIndexedStore);
+  EXPECT_EQ(store_folded.access_type, "f32");
+  EXPECT_THAT(store_folded.src_fp_reg, ::testing::Optional(FpRegister::kF12));
+}
+
+TEST(SymbolFolderTest, IndexClobberedRejectsFolding) {
+  // lui   $at, 0x8019
+  // addu  $at, $at, $v1
+  // addiu $v1, $zero, 0   # clobbers index register $v1 before load
+  // lw    $v0, -29700($at)
+  std::vector<uint32_t> words = {
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00230821,  // 1: addu  $at, $at, $v1
+      0x24030000,  // 2: addiu $v1, $zero, 0
+      0x8C228BFC,  // 3: lw    $v0, -29700($at)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  EXPECT_THAT(folder.AllFolded(), SizeIs(0));
+}
+
+TEST(SymbolFolderTest, MultipleUsesPreservesHi) {
+  // lui   $at, 0x8019
+  // addu  $t1, $at, $v1      # uses $at in indexed calculation
+  // lw    $v0, -29700($t1)
+  // addu  $v1, $at, $a0      # another unfolded use of $at
+  std::vector<uint32_t> words = {
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00234821,  // 1: addu  $t1, $at, $v1
+      0x8D228BFC,  // 2: lw    $v0, -29700($t1)
+      0x00241821,  // 3: addu  $v1, $at, $a0
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  // The indexed access is folded, but the lui itself must not be suppressed
+  // because instruction 3 also needs $at.
+  EXPECT_FALSE(folder.IsFoldedHi(0));
+  EXPECT_TRUE(folder.IsFoldedMid(1));
+  EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

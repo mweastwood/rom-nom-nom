@@ -289,6 +289,48 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
       statement.expression = std::move(src_expr);
     }
     statements.push_back(std::move(statement));
+  } else if (lo.type == FoldedPatternType::kGlobalIndexedLoad) {
+    if (lo.dest_fp_reg.has_value()) {
+      statement.destination_variable = ExpressionBuilder::FpRegisterVarName(*lo.dest_fp_reg);
+    } else {
+      statement.destination_variable = ExpressionBuilder::RegisterVarName(lo.dest_reg);
+    }
+    std::unique_ptr<LiftedExpression> base_addr_expr;
+    if (lo.symbol_name.empty()) {
+      base_addr_expr = LiftedExpression::Integer(lo.address, true);
+    } else {
+      base_addr_expr = LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name));
+    }
+    auto cast_u8_ptr = LiftedExpression::Unary("(u8*)", std::move(base_addr_expr));
+    auto index_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.index_reg, tracker);
+    auto indexed_addr =
+        LiftedExpression::Binary("+", std::move(cast_u8_ptr), std::move(index_expr));
+    statement.kind = StatementKind::kAssignment;
+    statement.expression = LiftedExpression::Load(lo.access_type, std::move(indexed_addr));
+    statements.push_back(std::move(statement));
+  } else if (lo.type == FoldedPatternType::kGlobalIndexedStore) {
+    std::unique_ptr<LiftedExpression> src_expr;
+    if (lo.src_fp_reg.has_value()) {
+      src_expr = LiftFpRegister(*lo.src_fp_reg);
+    } else {
+      src_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.src_reg, tracker);
+    }
+    std::unique_ptr<LiftedExpression> base_addr_expr;
+    if (lo.symbol_name.empty()) {
+      base_addr_expr = LiftedExpression::Integer(lo.address, true);
+    } else {
+      base_addr_expr = LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name));
+    }
+    auto cast_u8_ptr = LiftedExpression::Unary("(u8*)", std::move(base_addr_expr));
+    auto index_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.index_reg, tracker);
+    auto indexed_addr =
+        LiftedExpression::Binary("+", std::move(cast_u8_ptr), std::move(index_expr));
+
+    statement.kind = StatementKind::kStore;
+    statement.store_type = lo.access_type;
+    statement.destination_address = std::move(indexed_addr);
+    statement.expression = std::move(src_expr);
+    statements.push_back(std::move(statement));
   }
   tracker.Step(inst);
 }
@@ -400,8 +442,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       continue;
     }
 
-    // If this instruction is the high half of a folded pair, skip emitting it
-    if (folder.IsFoldedHi(i)) {
+    // If this instruction is the high or mid half of a folded pair, skip emitting it
+    if (folder.IsFoldedHi(i) || folder.IsFoldedMid(i)) {
       tracker.Step(inst);
       continue;
     }
