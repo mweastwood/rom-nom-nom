@@ -293,6 +293,14 @@ def _n64_lifted_c_equivalence_test_impl(ctx):
     symbols = ctx.file.symbols
     fuzzer = ctx.executable._fuzzer
     game = ctx.attr.game
+    runfiles_files = [candidate_rom, base_rom, config, symbols, fuzzer]
+    candidate_elf_str = ""
+    if OutputGroupInfo in ctx.attr.candidate_rom and hasattr(ctx.attr.candidate_rom[OutputGroupInfo], "elf"):
+        elf_list = ctx.attr.candidate_rom[OutputGroupInfo].elf.to_list()
+        if elf_list:
+            candidate_elf_file = elf_list[0]
+            runfiles_files.append(candidate_elf_file)
+            candidate_elf_str = candidate_elf_file.short_path
 
     script = ctx.actions.declare_file(ctx.label.name + ".sh")
 
@@ -301,6 +309,7 @@ set -euo pipefail
 
 BASE_ROM="{base_rom}"
 CANDIDATE_ROM="{candidate_rom}"
+CANDIDATE_ELF="{candidate_elf}"
 CONFIG_FILE="{config}"
 SYMBOLS_FILE="{symbols}"
 FUZZER_BIN="{fuzzer}"
@@ -327,8 +336,13 @@ ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
 ACTUAL_SYMBOLS=$(resolve_path "$SYMBOLS_FILE")
 ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
 
-CANDIDATE_ELF="${{CANDIDATE_ROM%.z64}}.elf"
-ACTUAL_CANDIDATE_ELF=$(resolve_path "$CANDIDATE_ELF" || true)
+ACTUAL_CANDIDATE_ELF=""
+if [[ -n "$CANDIDATE_ELF" ]]; then
+    ACTUAL_CANDIDATE_ELF=$(resolve_path "$CANDIDATE_ELF" || true)
+fi
+if [[ -z "$ACTUAL_CANDIDATE_ELF" ]]; then
+    ACTUAL_CANDIDATE_ELF=$(resolve_path "${{CANDIDATE_ROM%.z64}}.elf" || true)
+fi
 
 EXTRA_FLAGS=""
 if [[ -n "$ACTUAL_CANDIDATE_ELF" && -f "$ACTUAL_CANDIDATE_ELF" ]]; then
@@ -347,6 +361,7 @@ fi
         game = game,
         base_rom = base_rom.short_path,
         candidate_rom = candidate_rom.short_path,
+        candidate_elf = candidate_elf_str,
         config = config.short_path,
         symbols = symbols.short_path,
         fuzzer = fuzzer.short_path,
@@ -358,7 +373,7 @@ fi
         is_executable = True,
     )
 
-    runfiles = ctx.runfiles(files = [candidate_rom, base_rom, config, symbols, fuzzer]).merge(
+    runfiles = ctx.runfiles(files = runfiles_files).merge(
         ctx.attr._fuzzer[DefaultInfo].default_runfiles,
     )
     if DefaultInfo in ctx.attr.candidate_rom:
