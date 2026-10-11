@@ -242,6 +242,12 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kCvtDW:
     case Opcode::kTruncWS:
     case Opcode::kTruncWD:
+    case Opcode::kRoundWS:
+    case Opcode::kRoundWD:
+    case Opcode::kCeilWS:
+    case Opcode::kCeilWD:
+    case Opcode::kFloorWS:
+    case Opcode::kFloorWD:
       if (inst.fs) ud.fpr_uses.push_back(*inst.fs);
       if (inst.fd) ud.fpr_defs.push_back(*inst.fd);
       break;
@@ -255,6 +261,14 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kCLeD:
       if (inst.fs) ud.fpr_uses.push_back(*inst.fs);
       if (inst.ft) ud.fpr_uses.push_back(*inst.ft);
+      break;
+
+    case Opcode::kMfc0:
+      add_gpr_def(inst.rt);
+      break;
+
+    case Opcode::kMtc0:
+      add_gpr_use(inst.rt);
       break;
 
     default:
@@ -296,7 +310,7 @@ void RegisterTracker::Step(const Instruction& inst) {
     case Opcode::kLui:
       if (inst.rt.has_value() && *inst.rt != Register::kZero) {
         uint32_t hi = static_cast<uint32_t>(static_cast<uint16_t>(inst.immediate)) << 16;
-        gpr_values_[RegIdx(*inst.rt)] = TrackedValue::SymbolHi(hi);
+        gpr_values_[RegIdx(*inst.rt)] = TrackedValue::SymbolHi(hi, inst_idx);
       }
       break;
 
@@ -319,7 +333,10 @@ void RegisterTracker::Step(const Instruction& inst) {
                   std::max(frame_info_.frame_size, static_cast<uint32_t>(-new_offset));
             }
           } else if (src_val.kind == ValueKind::kSymbolHi) {
-            gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi + inst.immediate);
+            TrackedValue tv;
+            tv.kind = ValueKind::kSymbolAddress;
+            tv.constant_value = src_val.symbol_hi + inst.immediate;
+            gpr_values_[dest] = tv;
           } else {
             gpr_values_[dest] = TrackedValue();
           }
@@ -357,7 +374,10 @@ void RegisterTracker::Step(const Instruction& inst) {
           if (src_val.kind == ValueKind::kConstant) {
             gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value | imm_u16);
           } else if (src_val.kind == ValueKind::kSymbolHi) {
-            gpr_values_[dest] = TrackedValue::Constant(src_val.symbol_hi | imm_u16);
+            TrackedValue tv;
+            tv.kind = ValueKind::kSymbolAddress;
+            tv.constant_value = src_val.symbol_hi | imm_u16;
+            gpr_values_[dest] = tv;
           } else {
             gpr_values_[dest] = TrackedValue();
           }
@@ -396,6 +416,16 @@ void RegisterTracker::Step(const Instruction& inst) {
           const auto& v2 = gpr_values_[RegIdx(*inst.rt)];
           if (v1.kind == ValueKind::kConstant && v2.kind == ValueKind::kConstant) {
             gpr_values_[dest] = TrackedValue::Constant(v1.constant_value + v2.constant_value);
+          } else if (v1.kind == ValueKind::kSymbolHi && v2.kind != ValueKind::kSymbolHi &&
+                     v2.kind != ValueKind::kConstant && *inst.rt != Register::kZero &&
+                     *inst.rt != Register::kSp && *inst.rt != Register::kFp) {
+            gpr_values_[dest] =
+                TrackedValue::SymbolHiIndex(v1.symbol_hi, *inst.rt, v1.hi_inst_index, inst_idx);
+          } else if (v2.kind == ValueKind::kSymbolHi && v1.kind != ValueKind::kSymbolHi &&
+                     v1.kind != ValueKind::kConstant && *inst.rs != Register::kZero &&
+                     *inst.rs != Register::kSp && *inst.rs != Register::kFp) {
+            gpr_values_[dest] =
+                TrackedValue::SymbolHiIndex(v2.symbol_hi, *inst.rs, v2.hi_inst_index, inst_idx);
           } else {
             gpr_values_[dest] = TrackedValue();
           }
@@ -460,12 +490,13 @@ TrackedValue RegisterTracker::GetRegisterValue(Register reg) const {
 }
 
 bool RegisterTracker::IsConstant(Register reg) const {
-  return gpr_values_[RegIdx(reg)].kind == ValueKind::kConstant;
+  const auto& val = gpr_values_[RegIdx(reg)];
+  return val.kind == ValueKind::kConstant || val.kind == ValueKind::kSymbolAddress;
 }
 
 std::optional<uint32_t> RegisterTracker::GetConstant(Register reg) const {
   const auto& val = gpr_values_[RegIdx(reg)];
-  if (val.kind == ValueKind::kConstant) {
+  if (val.kind == ValueKind::kConstant || val.kind == ValueKind::kSymbolAddress) {
     return val.constant_value;
   }
   return std::nullopt;
@@ -481,6 +512,14 @@ const std::vector<size_t>& RegisterTracker::GetUses(size_t def_instruction_index
     return it->second;
   }
   return EmptyVector();
+}
+
+void RegisterTracker::Invalidate(Register reg) {
+  size_t idx = RegIdx(reg);
+  if (idx < gpr_values_.size()) {
+    gpr_values_[idx] = TrackedValue();
+    reaching_defs_[idx] = std::nullopt;
+  }
 }
 
 }  // namespace rom_nom_nom

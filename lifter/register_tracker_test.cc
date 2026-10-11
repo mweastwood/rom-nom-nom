@@ -193,5 +193,62 @@ TEST(RegisterTrackerTest, StepExecution) {
   EXPECT_THAT(tracker.GetUses(1), ElementsAre(2u));
 }
 
+TEST(RegisterTrackerTest, SymbolHiIndexTracking) {
+  std::vector<uint32_t> words = {
+      0x3C088019,  // 0: lui  $t0, 0x8019
+      0x01044821,  // 1: addu $t1, $t0, $a0
+  };
+
+  auto insts = *DecodeSequence(words);
+  RegisterTracker tracker;
+  tracker.Analyze(insts);
+
+  const auto& val_t1 = tracker.GetRegisterValue(Register::kT1);
+  EXPECT_EQ(val_t1.kind, ValueKind::kSymbolHiIndex);
+  EXPECT_EQ(val_t1.symbol_hi, 0x80190000u);
+  EXPECT_EQ(val_t1.index_reg, Register::kA0);
+  EXPECT_EQ(val_t1.hi_inst_index, 0u);
+  EXPECT_EQ(val_t1.mid_inst_index, 1u);
+}
+
+TEST(RegisterTrackerTest, InvalidateRegister) {
+  std::vector<uint32_t> words = {
+      0x2402002A,  // 0: addiu $v0, $zero, 42
+  };
+
+  auto insts = *DecodeSequence(words);
+  RegisterTracker tracker;
+  tracker.Analyze(insts);
+
+  EXPECT_TRUE(tracker.IsConstant(Register::kV0));
+  EXPECT_THAT(tracker.GetConstant(Register::kV0), Optional(42u));
+
+  tracker.Invalidate(Register::kV0);
+  EXPECT_FALSE(tracker.IsConstant(Register::kV0));
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kV0).kind, ValueKind::kUnknown);
+  EXPECT_FALSE(tracker.GetReachingDefinition(Register::kV0).has_value());
+}
+
+TEST(RegisterTrackerTest, Cop0AndCop1InstructionUseDef) {
+  // mfc0 $v0, $12 (Status) - 0x40026000
+  auto mfc0_inst = DecodeInstruction(0x40026000);
+  ASSERT_TRUE(mfc0_inst.ok());
+  auto ud_mfc0 = GetInstructionUseDef(*mfc0_inst);
+  EXPECT_THAT(ud_mfc0.gpr_defs, ElementsAre(Register::kV0));
+
+  // mtc0 $v0, $12 - 0x40826000
+  auto mtc0_inst = DecodeInstruction(0x40826000);
+  ASSERT_TRUE(mtc0_inst.ok());
+  auto ud_mtc0 = GetInstructionUseDef(*mtc0_inst);
+  EXPECT_THAT(ud_mtc0.gpr_uses, ElementsAre(Register::kV0));
+
+  // round.w.s $f0, $f12 - 0x4600600C
+  auto round_inst = DecodeInstruction(0x4600600C);
+  ASSERT_TRUE(round_inst.ok());
+  auto ud_round = GetInstructionUseDef(*round_inst);
+  EXPECT_THAT(ud_round.fpr_uses, ElementsAre(FpRegister::kF12));
+  EXPECT_THAT(ud_round.fpr_defs, ElementsAre(FpRegister::kF0));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

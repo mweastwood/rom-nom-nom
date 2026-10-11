@@ -14,10 +14,12 @@ namespace rom_nom_nom {
 
 // Classification of a tracked register's value.
 enum class ValueKind {
-  kUnknown,      // Value is indeterminate or external
-  kConstant,     // Known 32-bit integer constant
-  kStackOffset,  // Value is an offset relative to initial stack pointer ($sp)
-  kSymbolHi,     // Result of lui for a high 16-bit address
+  kUnknown,        // Value is indeterminate or external
+  kConstant,       // Known 32-bit integer constant
+  kStackOffset,    // Value is an offset relative to initial stack pointer ($sp)
+  kSymbolHi,       // Result of lui for a high 16-bit address
+  kSymbolAddress,  // Address computed from lui + addiu/ori (address, not integer constant)
+  kSymbolHiIndex,  // lui + addu with an index register: (hi_val, index_reg)
 };
 
 // Represents a tracked register value.
@@ -26,6 +28,9 @@ struct TrackedValue {
   uint32_t constant_value = 0;
   int32_t stack_offset = 0;
   uint32_t symbol_hi = 0;
+  Register index_reg = Register::kZero;
+  size_t hi_inst_index = 0;
+  size_t mid_inst_index = 0;
 
   static TrackedValue Constant(uint32_t val) {
     TrackedValue v;
@@ -41,12 +46,45 @@ struct TrackedValue {
     return v;
   }
 
-  static TrackedValue SymbolHi(uint32_t hi_val) {
+  static TrackedValue SymbolHi(uint32_t hi_val, size_t inst_idx = 0) {
     TrackedValue v;
     v.kind = ValueKind::kSymbolHi;
     v.symbol_hi = hi_val;
+    v.hi_inst_index = inst_idx;
     return v;
   }
+
+  static TrackedValue SymbolHiIndex(uint32_t hi_val, Register index, size_t hi_idx = 0,
+                                    size_t mid_idx = 0) {
+    TrackedValue v;
+    v.kind = ValueKind::kSymbolHiIndex;
+    v.symbol_hi = hi_val;
+    v.index_reg = index;
+    v.hi_inst_index = hi_idx;
+    v.mid_inst_index = mid_idx;
+    return v;
+  }
+
+  bool operator==(const TrackedValue& o) const {
+    if (kind != o.kind) return false;
+    switch (kind) {
+      case ValueKind::kUnknown:
+        return true;
+      case ValueKind::kConstant:
+        return constant_value == o.constant_value;
+      case ValueKind::kStackOffset:
+        return stack_offset == o.stack_offset;
+      case ValueKind::kSymbolHi:
+        return symbol_hi == o.symbol_hi;
+      case ValueKind::kSymbolAddress:
+        return constant_value == o.constant_value;
+      case ValueKind::kSymbolHiIndex:
+        return symbol_hi == o.symbol_hi && index_reg == o.index_reg;
+    }
+    return false;
+  }
+
+  bool operator!=(const TrackedValue& o) const { return !(*this == o); }
 };
 
 // Specifies which registers are read (used) and written (defined) by an instruction.
@@ -105,6 +143,9 @@ class RegisterTracker {
 
   // Resets all tracked registers to initial state.
   void Reset();
+
+  // Clears tracked value and reaching definition for a specific register.
+  void Invalidate(Register reg);
 
  private:
   // Register state table (32 GPRs)
