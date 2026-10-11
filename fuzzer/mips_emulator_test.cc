@@ -1423,5 +1423,433 @@ TEST(MipsEmulatorTest, FloatingPointControlRegistersCfc1Ctc1) {
   EXPECT_TRUE(emu.GetFpuCondition());
 }
 
+TEST(MipsEmulatorTest, ReadHookInterceptsUninitializedMemory) {
+  MipsEmulator emu;
+  // 00: lui  $a0, 0x8010
+  // 04: lw   $v0, 0($a0)
+  // 08: jr   $ra
+  // 0C: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui  $a0, 0x8010
+      0x8C820000,  // lw   $v0, 0($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+  emu.SetReadHook([](uint32_t vram, size_t size, bool is_fp) -> std::optional<uint64_t> {
+    if (vram == 0x80100000 && size == 4) {
+      return 0x12345678u;
+    }
+    return std::nullopt;
+  });
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0x12345678u);
+}
+
+TEST(MipsEmulatorTest, ReadHookDoesNotOverrideWrittenMemory) {
+  MipsEmulator emu;
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 42
+  // 08: sw    $t0, 0($a0)
+  // 0C: lw    $v0, 0($a0)
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x2408002A,  // addiu $t0, $zero, 42
+      0xAC880000,  // sw    $t0, 0($a0)
+      0x8C820000,  // lw    $v0, 0($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  emu.SetReadHook([](uint32_t vram, size_t size, bool is_fp) -> std::optional<uint64_t> {
+    if (vram == 0x80100000) {
+      return 0xDEADBEEFu;
+    }
+    return std::nullopt;
+  });
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 42u);
+}
+
+TEST(MipsEmulatorTest, CacheInstructionIsNoOp) {
+  MipsEmulator emu;
+  // 00: cache 0x14, 0($zero)
+  // 04: addiu $v0, $zero, 1
+  // 08: jr    $ra
+  // 0C: nop
+  std::vector<uint32_t> code = {
+      0xBC140000,  // cache 0x14, 0($zero)
+      0x24020001,  // addiu $v0, $zero, 1
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 1u);
+}
+
+TEST(MipsEmulatorTest, LoadDoubleAndStoreDouble) {
+  MipsEmulator emu;
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 0x1234
+  // 08: sll   $t0, $t0, 16
+  // 0C: ori   $t0, $t0, 0x5678
+  // 10: sd    $t0, 0($a0)
+  // 14: ld    $v0, 0($a0)
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x24081234,  // addiu $t0, $zero, 0x1234
+      0x00084400,  // sll   $t0, $t0, 16
+      0x35085678,  // ori   $t0, $t0, 0x5678
+      0xFC880000,  // sd    $t0, 0($a0)
+      0xDC820000,  // ld    $v0, 0($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 0x12345678u);
+}
+
+TEST(MipsEmulatorTest, StackRelativeWriteTrackingAndRollback) {
+  MipsEmulator emu;
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 111
+  // 08: sw    $t0, 0($sp)       (base_reg = $sp, is_stack_relative = true)
+  // 0C: addiu $t1, $zero, 222
+  // 10: sw    $t1, 0($a0)       (base_reg = $a0, is_stack_relative = false)
+  // 14: jr    $ra
+  // 18: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x2408006F,  // addiu $t0, $zero, 111
+      0xAFA80000,  // sw    $t0, 0($sp)
+      0x240900DE,  // addiu $t1, $zero, 222
+      0xAC890000,  // sw    $t1, 0($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  emu.SetRegister(Register::kSp, 0x80010000);
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+
+  const auto& writes = emu.GetWriteLog();
+  ASSERT_GE(writes.size(), 2u);
+  EXPECT_TRUE(writes[0].is_stack_relative);
+  EXPECT_EQ(writes[0].base_reg, 29);
+  EXPECT_FALSE(writes[1].is_stack_relative);
+  EXPECT_EQ(writes[1].base_reg, 4);
+
+  // Test rollback restores previous memory
+  uint32_t val = 0;
+  ASSERT_TRUE(emu.Read32(0x80100000, &val));
+  EXPECT_EQ(val, 222u);
+
+  emu.RollbackWrites(code, 0x80001000);
+  ASSERT_TRUE(emu.Read32(0x80100000, &val));
+  EXPECT_EQ(val, 0u);
+}
+
+TEST(MipsEmulatorTest, ReadHookAllSizesAndFloatingPointDistinction) {
+  MipsEmulator emu;
+  // 00: lui   $a0, 0x8010
+  // 04: lbu   $t0, 0($a0)      (1-byte read, is_fp = false)
+  // 08: lhu   $t1, 4($a0)      (2-byte read, is_fp = false)
+  // 0C: lw    $t2, 8($a0)      (4-byte read, is_fp = false)
+  // 10: ld    $t3, 16($a0)     (8-byte read, is_fp = false)
+  // 14: lwc1  $f0, 24($a0)     (4-byte read, is_fp = true)
+  // 18: ldc1  $f2, 32($a0)     (8-byte read, is_fp = true)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x90880000,  // lbu   $t0, 0($a0)
+      0x94890004,  // lhu   $t1, 4($a0)
+      0x8C8A0008,  // lw    $t2, 8($a0)
+      0xDC8B0010,  // ld    $t3, 16($a0)
+      0xC4800018,  // lwc1  $f0, 24($a0)
+      0xD4820020,  // ldc1  $f2, 32($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  struct HookInvocation {
+    uint32_t vram;
+    size_t size;
+    bool is_fp;
+  };
+  std::vector<HookInvocation> invocations;
+
+  emu.SetReadHook([&](uint32_t vram, size_t size, bool is_fp) -> std::optional<uint64_t> {
+    invocations.push_back({vram, size, is_fp});
+    if (size == 1) return 0xABu;
+    if (size == 2) return 0xCDEFu;
+    if (size == 4) return 0x11223344u;
+    if (size == 8) return 0x0123456789ABCDEFULL;
+    return std::nullopt;
+  });
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+
+  ASSERT_EQ(invocations.size(), 6u);
+  EXPECT_EQ(invocations[0].size, 1u);
+  EXPECT_FALSE(invocations[0].is_fp);
+  EXPECT_EQ(invocations[1].size, 2u);
+  EXPECT_FALSE(invocations[1].is_fp);
+  EXPECT_EQ(invocations[2].size, 4u);
+  EXPECT_FALSE(invocations[2].is_fp);
+  EXPECT_EQ(invocations[3].size, 8u);
+  EXPECT_FALSE(invocations[3].is_fp);
+  EXPECT_EQ(invocations[4].size, 4u);
+  EXPECT_TRUE(invocations[4].is_fp);
+  EXPECT_EQ(invocations[5].size, 8u);
+  EXPECT_TRUE(invocations[5].is_fp);
+
+  EXPECT_EQ(emu.GetRegister(Register::kT0), 0xABu);
+  EXPECT_EQ(emu.GetRegister(Register::kT1), 0xCDEFu);
+  EXPECT_EQ(emu.GetRegister(Register::kT2), 0x11223344u);
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF0), 0x11223344u);
+}
+
+TEST(MipsEmulatorTest, ReadHookWasWrittenGranularByteTracking) {
+  MipsEmulator emu;
+  // Store a single byte at 0x80100002 (offset 2 within the 4-byte word at 0x80100000)
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 0x77
+  // 08: sb    $t0, 2($a0)
+  // 0C: lw    $v0, 0($a0)
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x24080077,  // addiu $t0, $zero, 0x77
+      0xA0880002,  // sb    $t0, 2($a0)
+      0x8C820000,  // lw    $v0, 0($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  bool hook_called = false;
+  emu.SetReadHook([&](uint32_t vram, size_t size, bool is_fp) -> std::optional<uint64_t> {
+    if (vram == 0x80100000) {
+      hook_called = true;
+      return 0xDEADBEEFu;
+    }
+    return std::nullopt;
+  });
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  // The hook should NOT have been called because byte 2 was written
+  EXPECT_FALSE(hook_called);
+  // In big-endian, byte offset 2 in a 32-bit word is (val >> 8) & 0xFF
+  EXPECT_EQ(res.v0 & 0x0000FF00u, 0x00007700u);
+}
+
+TEST(MipsEmulatorTest, FloatingPointDoubleRegisterPairingAndLdc1Sdc1) {
+  MipsEmulator emu;
+  // 00: lui   $a0, 0x8010
+  // 04: ldc1  $f2, 0($a0)
+  // 08: sdc1  $f2, 8($a0)
+  // 0C: jr    $ra
+  // 10: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0xD4820000,  // ldc1  $f2, 0($a0)
+      0xF4820008,  // sdc1  $f2, 8($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Pre-load double at 0x80100000
+  double pi = 3.141592653589793;
+  uint64_t pi_bits = 0;
+  std::memcpy(&pi_bits, &pi, sizeof(double));
+  ASSERT_TRUE(emu.Write64(0x80100000, pi_bits));
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+
+  // Verify GetFpDouble
+  EXPECT_DOUBLE_EQ(emu.GetFpDouble(FpRegister::kF2), pi);
+
+  // Verify odd register ($f3) holds MSW and even register ($f2) holds LSW
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF3), static_cast<uint32_t>(pi_bits >> 32));
+  EXPECT_EQ(emu.GetFpBits(FpRegister::kF2), static_cast<uint32_t>(pi_bits & 0xFFFFFFFF));
+
+  // Verify write to 0x80100008
+  uint64_t stored_bits = 0;
+  ASSERT_TRUE(emu.Read64(0x80100008, &stored_bits));
+  EXPECT_EQ(stored_bits, pi_bits);
+}
+
+TEST(MipsEmulatorTest, RollbackMultipleWritesToSameAddressReverseOrder) {
+  MipsEmulator emu;
+  // Initialize address 0x80100000 with 0xAAAA5555
+  ASSERT_TRUE(emu.Write32(0x80100000, 0xAAAA5555));
+  emu.ClearWriteLog();
+
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 1
+  // 08: sw    $t0, 0($a0)
+  // 0C: addiu $t0, $zero, 2
+  // 10: sw    $t0, 0($a0)
+  // 14: addiu $t0, $zero, 3
+  // 18: sw    $t0, 0($a0)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x24080001,  // addiu $t0, $zero, 1
+      0xAC880000,  // sw    $t0, 0($a0)
+      0x24080002,  // addiu $t0, $zero, 2
+      0xAC880000,  // sw    $t0, 0($a0)
+      0x24080003,  // addiu $t0, $zero, 3
+      0xAC880000,  // sw    $t0, 0($a0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+
+  uint32_t val = 0;
+  ASSERT_TRUE(emu.Read32(0x80100000, &val));
+  EXPECT_EQ(val, 3u);
+
+  // Rollback writes
+  emu.RollbackWrites(code, 0x80001000);
+  ASSERT_TRUE(emu.Read32(0x80100000, &val));
+  EXPECT_EQ(val, 0xAAAA5555u);
+}
+
+TEST(MipsEmulatorTest, StackRelativeBaseRegDetectionSpAndFp) {
+  MipsEmulator emu;
+  // 00: lui   $a0, 0x8010
+  // 04: addiu $t0, $zero, 1
+  // 08: sb    $t0, 0($sp)       (base_reg = 29, stack_relative = true)
+  // 0C: sh    $t0, 4($fp)       (base_reg = 30, stack_relative = true)
+  // 10: sw    $t0, 8($s0)       (base_reg = 16, stack_relative = false)
+  // 14: sw    $t0, 12($gp)      (base_reg = 28, stack_relative = false)
+  // 18: swc1  $f0, 16($sp)      (base_reg = 29, stack_relative = true)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui   $a0, 0x8010
+      0x24080001,  // addiu $t0, $zero, 1
+      0xA3A80000,  // sb    $t0, 0($sp)   (op 0x28, rs=29, rt=8)
+      0xA7C80004,  // sh    $t0, 4($fp)   (op 0x29, rs=30, rt=8)
+      0xAE080008,  // sw    $t0, 8($s0)   (op 0x2B, rs=16, rt=8)
+      0xAF88000C,  // sw    $t0, 12($gp)  (op 0x2B, rs=28, rt=8)
+      0xE7A00010,  // swc1  $f0, 16($sp)  (op 0x39, rs=29, ft=0)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  emu.SetRegister(Register::kSp, 0x80010000);
+  emu.SetRegister(Register::kFp, 0x80010100);
+  emu.SetRegister(Register::kS0, 0x80010200);
+  emu.SetRegister(Register::kGp, 0x80010300);
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+
+  const auto& writes = emu.GetWriteLog();
+  ASSERT_EQ(writes.size(), 5u);
+
+  // 0: sb via $sp (29)
+  EXPECT_EQ(writes[0].base_reg, 29);
+  EXPECT_TRUE(writes[0].is_stack_relative);
+
+  // 1: sh via $fp (30)
+  EXPECT_EQ(writes[1].base_reg, 30);
+  EXPECT_TRUE(writes[1].is_stack_relative);
+
+  // 2: sw via $s0 (16)
+  EXPECT_EQ(writes[2].base_reg, 16);
+  EXPECT_FALSE(writes[2].is_stack_relative);
+
+  // 3: sw via $gp (28)
+  EXPECT_EQ(writes[3].base_reg, 28);
+  EXPECT_FALSE(writes[3].is_stack_relative);
+
+  // 4: swc1 via $sp (29)
+  EXPECT_EQ(writes[4].base_reg, 29);
+  EXPECT_TRUE(writes[4].is_stack_relative);
+}
+
+TEST(MipsEmulatorTest, DiagnosticsReportingOnMemoryFaults) {
+  MipsEmulator emu;
+  // 00: lui  $a0, 0x8010
+  // 04: lw   $v0, 1($a0)      (Unaligned 4-byte read at 0x80100001)
+  // 08: jr   $ra
+  // 0C: nop
+  std::vector<uint32_t> code = {
+      0x3C048010,  // lui  $a0, 0x8010
+      0x8C820001,  // lw   $v0, 1($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kMemoryFault);
+  EXPECT_NE(res.error_message.find("LW unaligned addr=0x80100001"), std::string::npos);
+}
+
+TEST(MipsEmulatorTest, ExternalCallInterceptionWithArgumentsAndSentinel) {
+  MipsEmulator emu;
+  // Code bounds: 0x80001000 .. 0x80001040
+  // 00: addiu $a0, $zero, 10
+  // 04: addiu $a1, $zero, 20
+  // 08: addiu $a2, $zero, 30
+  // 0C: jal   0x80005000       (outside code bounds)
+  // 10: addiu $a3, $zero, 40   (delay slot sets $a3)
+  // 14: addu  $v0, $v0, $a0    (resumes here after call, $v0 is 0 from call return)
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> code = {
+      0x2404000A,  // addiu $a0, $zero, 10
+      0x24050014,  // addiu $a1, $zero, 20
+      0x2406001E,  // addiu $a2, $zero, 30
+      0x0C001400,  // jal   0x80005000 (target: 0x80005000)
+      0x24070028,  // addiu $a3, $zero, 40
+      0x00441021,  // addu  $v0, $v0, $a0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  emu.SetInterceptExternalCalls(true);
+  emu.SetCodeBounds(0x80001000, 0x80001040);
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000, 100);
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  EXPECT_EQ(res.v0, 10u);
+
+  const auto& calls = emu.GetCallLog();
+  ASSERT_EQ(calls.size(), 1u);
+  EXPECT_EQ(calls[0].target_address, 0x80005000u);
+  EXPECT_EQ(calls[0].a0, 10u);
+  EXPECT_EQ(calls[0].a1, 20u);
+  EXPECT_EQ(calls[0].a2, 30u);
+  EXPECT_EQ(calls[0].a3, 40u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

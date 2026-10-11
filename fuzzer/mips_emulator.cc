@@ -46,6 +46,7 @@ void MipsEmulator::Reset() {
   call_log_.clear();
   mmio_regs_.clear();
   vi_scanline_counter_ = 0;
+  written_phys_addrs_.clear();
 }
 
 void MipsEmulator::SetFpBits(FpRegister reg, uint32_t bits) {
@@ -79,14 +80,14 @@ float MipsEmulator::GetFpRegister(FpRegister reg) const {
 void MipsEmulator::SetFpDoubleBits(FpRegister reg, uint64_t bits) {
   int idx = static_cast<int>(reg);
   if ((idx & 1) != 0 || idx < 0 || idx >= 32) return;
-  fpr_bits_[idx] = static_cast<uint32_t>(bits >> 32);             // MSW
-  fpr_bits_[idx + 1] = static_cast<uint32_t>(bits & 0xFFFFFFFF);  // LSW
+  fpr_bits_[idx + 1] = static_cast<uint32_t>(bits >> 32);     // Odd register is MSW
+  fpr_bits_[idx] = static_cast<uint32_t>(bits & 0xFFFFFFFF);  // Even register is LSW
 }
 
 uint64_t MipsEmulator::GetFpDoubleBits(FpRegister reg) const {
   int idx = static_cast<int>(reg);
   if ((idx & 1) != 0 || idx < 0 || idx >= 32) return 0;
-  return (static_cast<uint64_t>(fpr_bits_[idx]) << 32) | static_cast<uint64_t>(fpr_bits_[idx + 1]);
+  return (static_cast<uint64_t>(fpr_bits_[idx + 1]) << 32) | static_cast<uint64_t>(fpr_bits_[idx]);
 }
 
 void MipsEmulator::SetFpDouble(FpRegister reg, double val) {
@@ -137,26 +138,24 @@ void MipsEmulator::ClearMemory(uint32_t vram, size_t size) {
 }
 
 void MipsEmulator::RollbackWrites(absl::Span<const uint32_t> code, uint32_t code_vram) {
-  uint32_t code_end = code_vram + static_cast<uint32_t>(code.size() * sizeof(uint32_t));
-  for (const auto& w : write_log_) {
-    auto phys_opt = VramToPhysical(w.address);
-    if (!phys_opt.has_value() || *phys_opt + w.size > memory_size_) {
+  for (auto it = write_log_.rbegin(); it != write_log_.rend(); ++it) {
+    auto phys_opt = VramToPhysical(it->address);
+    if (!phys_opt.has_value() || *phys_opt + it->size > memory_size_) {
       continue;
     }
-    if (!code.empty() && w.address >= code_vram && w.address < code_end) {
-      for (size_t b = 0; b < w.size; ++b) {
-        uint32_t addr = w.address + static_cast<uint32_t>(b);
-        if (addr >= code_vram && addr < code_end) {
-          size_t word_idx = (addr - code_vram) / 4;
-          size_t byte_in_word = 3 - (addr % 4);
-          uint8_t orig_byte = static_cast<uint8_t>((code[word_idx] >> (byte_in_word * 8)) & 0xFF);
-          memory_[*phys_opt + b] = orig_byte;
-        } else {
-          memory_[*phys_opt + b] = 0;
-        }
-      }
-    } else {
-      std::memset(&memory_[*phys_opt], 0, w.size);
+    switch (it->size) {
+      case 1:
+        memory_[*phys_opt] = static_cast<uint8_t>(it->previous_value);
+        break;
+      case 2:
+        WriteBigEndian16(&memory_[*phys_opt], static_cast<uint16_t>(it->previous_value));
+        break;
+      case 4:
+        WriteBigEndian32(&memory_[*phys_opt], static_cast<uint32_t>(it->previous_value));
+        break;
+      case 8:
+        WriteBigEndian64(&memory_[*phys_opt], it->previous_value);
+        break;
     }
   }
   write_log_.clear();
@@ -225,6 +224,7 @@ void MipsEmulator::WriteMmio32(uint32_t phys_addr, uint32_t val) {
   mmio_regs_[phys_addr] = val;
 }
 
+// NOLINTNEXTLINE(google-readability-function-size,readability-function-size)
 ExecutionStatus MipsEmulator::Step() {
   uint32_t current_pc = pc_;
   if ((current_pc & 3) != 0 || (current_pc >> 30) != 2) {
@@ -235,7 +235,6 @@ ExecutionStatus MipsEmulator::Step() {
     return ExecutionStatus::kMemoryFault;
   }
   uint32_t raw_word = ReadBigEndian32(&memory_[phys_pc]);
-
   bool executing_delay_slot = in_delay_slot_;
   bool delayed_is_return = delay_slot_is_return_;
   bool delayed_is_call = delay_slot_is_call_;
@@ -254,6 +253,42 @@ ExecutionStatus MipsEmulator::Step() {
   uint32_t imm_u = raw_word & 0xFFFF;
   int32_t imm_s = static_cast<int32_t>(static_cast<int16_t>(raw_word & 0xFFFF));
   uint32_t target = raw_word & 0x03FFFFFF;
+
+  auto invalid_opcode = [&](std::string_view reason = "") {
+    last_invalid_info_ = absl::StrFormat(
+        "raw_word=0x%08X (op=0x%02X, rs=%d, rt=%d, rd=%d, funct=0x%02X, delay_slot=%d) %s",
+        raw_word, major_op, rs, rt, rd, funct, executing_delay_slot, reason);
+    return ExecutionStatus::kInvalidOpcode;
+  };
+
+  auto setup_branch = [&](bool taken, uint32_t branch_target) {
+    in_delay_slot_ = true;
+    delayed_branch_target_ = taken ? branch_target : (current_pc + 8);
+    if (taken && intercept_external_calls_ && code_bounds_.has_value() &&
+        (branch_target < code_bounds_->first || branch_target >= code_bounds_->second)) {
+      delay_slot_is_call_ = true;
+      call_link_reg_ = 31;
+    } else {
+      delay_slot_is_call_ = false;
+    }
+  };
+
+  auto setup_branch_likely = [&](bool taken, uint32_t branch_target) {
+    if (taken) {
+      in_delay_slot_ = true;
+      delayed_branch_target_ = branch_target;
+      if (intercept_external_calls_ && code_bounds_.has_value() &&
+          (branch_target < code_bounds_->first || branch_target >= code_bounds_->second)) {
+        delay_slot_is_call_ = true;
+        call_link_reg_ = 31;
+      } else {
+        delay_slot_is_call_ = false;
+      }
+      pc_ = advanced_pc;
+    } else {
+      pc_ = current_pc + 8;
+    }
+  };
 
   switch (major_op) {
     case 0x00: {  // SPECIAL
@@ -276,17 +311,27 @@ ExecutionStatus MipsEmulator::Step() {
         case 0x07:  // SRAV
           SetGpr(rd, static_cast<uint32_t>(static_cast<int32_t>(gpr_[rt]) >> (gpr_[rs] & 0x1F)));
           break;
-        case 0x08:  // JR
+        case 0x08: {  // JR
           if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
           in_delay_slot_ = true;
-          delay_slot_is_call_ = false;
-          if (gpr_[rs] == kReturnAddressSentinel) {
+          if (rs == 31 || gpr_[rs] == kReturnAddressSentinel) {
             delay_slot_is_return_ = true;
+            delay_slot_is_call_ = false;
           } else {
-            delayed_branch_target_ = gpr_[rs];
+            delay_slot_is_return_ = false;
+            uint32_t jr_target = gpr_[rs];
+            if (intercept_external_calls_ && code_bounds_.has_value() &&
+                (jr_target < code_bounds_->first || jr_target >= code_bounds_->second)) {
+              delay_slot_is_call_ = true;
+              call_link_reg_ = 31;
+            } else {
+              delay_slot_is_call_ = false;
+            }
+            delayed_branch_target_ = jr_target;
           }
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
+        }
         case 0x09: {  // JALR
           if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
           int link_reg = (rd != 0) ? rd : 31;
@@ -404,40 +449,22 @@ ExecutionStatus MipsEmulator::Step() {
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
       switch (rt) {
         case 0x00:  // BLTZ
-          in_delay_slot_ = true;
-          if (static_cast<int32_t>(gpr_[rs]) < 0) {
-            delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-          } else {
-            delayed_branch_target_ = current_pc + 8;
-          }
+          setup_branch(static_cast<int32_t>(gpr_[rs]) < 0,
+                       current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
         case 0x01:  // BGEZ
-          in_delay_slot_ = true;
-          if (static_cast<int32_t>(gpr_[rs]) >= 0) {
-            delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-          } else {
-            delayed_branch_target_ = current_pc + 8;
-          }
+          setup_branch(static_cast<int32_t>(gpr_[rs]) >= 0,
+                       current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
         case 0x02:  // BLTZL
-          if (static_cast<int32_t>(gpr_[rs]) < 0) {
-            in_delay_slot_ = true;
-            delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-            pc_ = advanced_pc;
-          } else {
-            pc_ = current_pc + 8;
-          }
+          setup_branch_likely(static_cast<int32_t>(gpr_[rs]) < 0,
+                              current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
           return ExecutionStatus::kRunning;
         case 0x03:  // BGEZL
-          if (static_cast<int32_t>(gpr_[rs]) >= 0) {
-            in_delay_slot_ = true;
-            delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-            pc_ = advanced_pc;
-          } else {
-            pc_ = current_pc + 8;
-          }
+          setup_branch_likely(static_cast<int32_t>(gpr_[rs]) >= 0,
+                              current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
           return ExecutionStatus::kRunning;
         case 0x10:  // BLTZAL
           if (rs == 31) return ExecutionStatus::kInvalidOpcode;
@@ -471,13 +498,21 @@ ExecutionStatus MipsEmulator::Step() {
           return ExecutionStatus::kInvalidOpcode;
       }
     }
-    case 0x02:  // J
+    case 0x02: {  // J
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
       in_delay_slot_ = true;
-      delay_slot_is_call_ = false;
-      delayed_branch_target_ = (current_pc & 0xF0000000) | (target << 2);
+      uint32_t j_target = (current_pc & 0xF0000000) | (target << 2);
+      if (intercept_external_calls_ && code_bounds_.has_value() &&
+          (j_target < code_bounds_->first || j_target >= code_bounds_->second)) {
+        delay_slot_is_call_ = true;
+        call_link_reg_ = 31;
+      } else {
+        delay_slot_is_call_ = false;
+      }
+      delayed_branch_target_ = j_target;
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
+    }
     case 0x03:  // JAL
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
       SetGpr(31, current_pc + 8);
@@ -489,42 +524,24 @@ ExecutionStatus MipsEmulator::Step() {
       return ExecutionStatus::kRunning;
     case 0x04:  // BEQ
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      in_delay_slot_ = true;
-      if (gpr_[rs] == gpr_[rt]) {
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-      } else {
-        delayed_branch_target_ = current_pc + 8;
-      }
+      setup_branch(gpr_[rs] == gpr_[rt], current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     case 0x05:  // BNE
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      in_delay_slot_ = true;
-      if (gpr_[rs] != gpr_[rt]) {
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-      } else {
-        delayed_branch_target_ = current_pc + 8;
-      }
+      setup_branch(gpr_[rs] != gpr_[rt], current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     case 0x06:  // BLEZ
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      in_delay_slot_ = true;
-      if (static_cast<int32_t>(gpr_[rs]) <= 0) {
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-      } else {
-        delayed_branch_target_ = current_pc + 8;
-      }
+      setup_branch(static_cast<int32_t>(gpr_[rs]) <= 0,
+                   current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     case 0x07:  // BGTZ
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      in_delay_slot_ = true;
-      if (static_cast<int32_t>(gpr_[rs]) > 0) {
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-      } else {
-        delayed_branch_target_ = current_pc + 8;
-      }
+      setup_branch(static_cast<int32_t>(gpr_[rs]) > 0,
+                   current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
     case 0x08: {  // ADDI
@@ -558,6 +575,26 @@ ExecutionStatus MipsEmulator::Step() {
     case 0x0F:  // LUI
       SetGpr(rt, imm_u << 16);
       break;
+    case 0x10: {  // COP0
+      if ((raw_word & 0x02000000) != 0) {
+        // COP0 CO functions (TLB instructions, ERET, etc.)
+        if (funct == 0x18) {  // ERET
+          if (delayed_branch_target_.has_value()) {
+            pc_ = *delayed_branch_target_;
+          }
+          return ExecutionStatus::kHaltedReturn;
+        }
+        break;
+      }
+      if (rs == 0x00) {  // MFC0
+        SetGpr(rt, 0);
+        break;
+      }
+      if (rs == 0x04) {  // MTC0
+        break;
+      }
+      return invalid_opcode("unhandled COP0");
+    }
     case 0x11: {  // COP1
       FpRegister fs = static_cast<FpRegister>(rd);
       FpRegister ft = static_cast<FpRegister>(rt);
@@ -596,25 +633,14 @@ ExecutionStatus MipsEmulator::Step() {
           case 0x00:    // BC1F
           case 0x01: {  // BC1T
             bool take = (rt == 0x01) ? fpu_cond_ : !fpu_cond_;
-            in_delay_slot_ = true;
-            if (take) {
-              delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-            } else {
-              delayed_branch_target_ = current_pc + 8;
-            }
+            setup_branch(take, current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
             pc_ = advanced_pc;
             return ExecutionStatus::kRunning;
           }
           case 0x02:    // BC1FL
           case 0x03: {  // BC1TL
             bool take = (rt == 0x03) ? fpu_cond_ : !fpu_cond_;
-            if (take) {
-              in_delay_slot_ = true;
-              delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-              pc_ = advanced_pc;
-            } else {
-              pc_ = current_pc + 8;
-            }
+            setup_branch_likely(take, current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
             return ExecutionStatus::kRunning;
           }
           default:
@@ -647,6 +673,21 @@ ExecutionStatus MipsEmulator::Step() {
           case 0x07:
             SetFpBits(fd, GetFpBits(fs) ^ 0x80000000);
             break;
+          case 0x0C: {  // ROUND.W.S
+            float f = GetFpRegister(fs);
+            int32_t val = 0;
+            if (std::isnan(f)) {
+              val = 0x7FFFFFFF;
+            } else if (f >= 2147483647.0f) {
+              val = 0x7FFFFFFF;
+            } else if (f <= -2147483648.0f) {
+              val = static_cast<int32_t>(0x80000000u);
+            } else {
+              val = static_cast<int32_t>(std::round(f));
+            }
+            SetFpBits(fd, static_cast<uint32_t>(val));
+            break;
+          }
           case 0x0D: {  // TRUNC.W.S
             float f = GetFpRegister(fs);
             int32_t val = 0;
@@ -658,6 +699,36 @@ ExecutionStatus MipsEmulator::Step() {
               val = static_cast<int32_t>(0x80000000u);
             } else {
               val = static_cast<int32_t>(std::trunc(f));
+            }
+            SetFpBits(fd, static_cast<uint32_t>(val));
+            break;
+          }
+          case 0x0E: {  // CEIL.W.S
+            float f = GetFpRegister(fs);
+            int32_t val = 0;
+            if (std::isnan(f)) {
+              val = 0x7FFFFFFF;
+            } else if (f >= 2147483647.0f) {
+              val = 0x7FFFFFFF;
+            } else if (f <= -2147483648.0f) {
+              val = static_cast<int32_t>(0x80000000u);
+            } else {
+              val = static_cast<int32_t>(std::ceil(f));
+            }
+            SetFpBits(fd, static_cast<uint32_t>(val));
+            break;
+          }
+          case 0x0F: {  // FLOOR.W.S
+            float f = GetFpRegister(fs);
+            int32_t val = 0;
+            if (std::isnan(f)) {
+              val = 0x7FFFFFFF;
+            } else if (f >= 2147483647.0f) {
+              val = 0x7FFFFFFF;
+            } else if (f <= -2147483648.0f) {
+              val = static_cast<int32_t>(0x80000000u);
+            } else {
+              val = static_cast<int32_t>(std::floor(f));
             }
             SetFpBits(fd, static_cast<uint32_t>(val));
             break;
@@ -730,6 +801,24 @@ ExecutionStatus MipsEmulator::Step() {
             }
             SetFpDoubleBits(fd, GetFpDoubleBits(fs) ^ (1ULL << 63));
             break;
+          case 0x0C: {  // ROUND.W.D
+            if (!IsEvenFpRegister(fs)) {
+              return ExecutionStatus::kInvalidOpcode;
+            }
+            double d = GetFpDouble(fs);
+            int32_t val = 0;
+            if (std::isnan(d)) {
+              val = 0x7FFFFFFF;
+            } else if (d >= 2147483647.0) {
+              val = 0x7FFFFFFF;
+            } else if (d <= -2147483648.0) {
+              val = static_cast<int32_t>(0x80000000u);
+            } else {
+              val = static_cast<int32_t>(std::round(d));
+            }
+            SetFpBits(fd, static_cast<uint32_t>(val));
+            break;
+          }
           case 0x0D: {  // TRUNC.W.D
             if (!IsEvenFpRegister(fs)) {
               return ExecutionStatus::kInvalidOpcode;
@@ -744,6 +833,42 @@ ExecutionStatus MipsEmulator::Step() {
               val = static_cast<int32_t>(0x80000000u);
             } else {
               val = static_cast<int32_t>(std::trunc(d));
+            }
+            SetFpBits(fd, static_cast<uint32_t>(val));
+            break;
+          }
+          case 0x0E: {  // CEIL.W.D
+            if (!IsEvenFpRegister(fs)) {
+              return ExecutionStatus::kInvalidOpcode;
+            }
+            double d = GetFpDouble(fs);
+            int32_t val = 0;
+            if (std::isnan(d)) {
+              val = 0x7FFFFFFF;
+            } else if (d >= 2147483647.0) {
+              val = 0x7FFFFFFF;
+            } else if (d <= -2147483648.0) {
+              val = static_cast<int32_t>(0x80000000u);
+            } else {
+              val = static_cast<int32_t>(std::ceil(d));
+            }
+            SetFpBits(fd, static_cast<uint32_t>(val));
+            break;
+          }
+          case 0x0F: {  // FLOOR.W.D
+            if (!IsEvenFpRegister(fs)) {
+              return ExecutionStatus::kInvalidOpcode;
+            }
+            double d = GetFpDouble(fs);
+            int32_t val = 0;
+            if (std::isnan(d)) {
+              val = 0x7FFFFFFF;
+            } else if (d >= 2147483647.0) {
+              val = 0x7FFFFFFF;
+            } else if (d <= -2147483648.0) {
+              val = static_cast<int32_t>(0x80000000u);
+            } else {
+              val = static_cast<int32_t>(std::floor(d));
             }
             SetFpBits(fd, static_cast<uint32_t>(val));
             break;
@@ -797,56 +922,41 @@ ExecutionStatus MipsEmulator::Step() {
     }
     case 0x14:  // BEQL
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      if (gpr_[rs] == gpr_[rt]) {
-        in_delay_slot_ = true;
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-        pc_ = advanced_pc;
-      } else {
-        pc_ = current_pc + 8;
-      }
+      setup_branch_likely(gpr_[rs] == gpr_[rt],
+                          current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       return ExecutionStatus::kRunning;
     case 0x15:  // BNEL
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      if (gpr_[rs] != gpr_[rt]) {
-        in_delay_slot_ = true;
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-        pc_ = advanced_pc;
-      } else {
-        pc_ = current_pc + 8;
-      }
+      setup_branch_likely(gpr_[rs] != gpr_[rt],
+                          current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       return ExecutionStatus::kRunning;
     case 0x16:  // BLEZL
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      if (static_cast<int32_t>(gpr_[rs]) <= 0) {
-        in_delay_slot_ = true;
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-        pc_ = advanced_pc;
-      } else {
-        pc_ = current_pc + 8;
-      }
+      setup_branch_likely(static_cast<int32_t>(gpr_[rs]) <= 0,
+                          current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       return ExecutionStatus::kRunning;
     case 0x17:  // BGTZL
       if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
-      if (static_cast<int32_t>(gpr_[rs]) > 0) {
-        in_delay_slot_ = true;
-        delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
-        pc_ = advanced_pc;
-      } else {
-        pc_ = current_pc + 8;
-      }
+      setup_branch_likely(static_cast<int32_t>(gpr_[rs]) > 0,
+                          current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       return ExecutionStatus::kRunning;
     case 0x20: {  // LB
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       uint8_t val = 0;
-      if (!Read8(addr, &val)) return ExecutionStatus::kMemoryFault;
+      if (!Read8(addr, &val)) {
+        last_invalid_info_ = absl::StrFormat("LB faulting addr=0x%08X", addr);
+        return ExecutionStatus::kMemoryFault;
+      }
       SetGpr(rt, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(val))));
       break;
     }
     case 0x21: {  // LH
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
-      if ((addr & 1) != 0) return ExecutionStatus::kMemoryFault;
       uint16_t val = 0;
-      if (!Read16(addr, &val)) return ExecutionStatus::kMemoryFault;
+      if ((addr & 1) != 0 || !Read16(addr, &val)) {
+        last_invalid_info_ = absl::StrFormat("LH faulting addr=0x%08X", addr);
+        return ExecutionStatus::kMemoryFault;
+      }
       SetGpr(rt, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(val))));
       break;
     }
@@ -855,23 +965,35 @@ ExecutionStatus MipsEmulator::Step() {
       uint32_t shift_byte = addr & 3;
       uint32_t word_addr = addr & ~3;
       uint32_t word = 0;
-      if (!Read32(word_addr, &word)) return ExecutionStatus::kMemoryFault;
+      if (!Read32(word_addr, &word)) {
+        last_invalid_info_ = absl::StrFormat("LWL faulting addr=0x%08X", word_addr);
+        return ExecutionStatus::kMemoryFault;
+      }
       uint32_t mask = 0xFFFFFFFFu << (shift_byte * 8);
       SetGpr(rt, (gpr_[rt] & ~mask) | (word << (shift_byte * 8)));
       break;
     }
     case 0x23: {  // LW
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
-      if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
+      if ((addr & 3) != 0) {
+        last_invalid_info_ = absl::StrFormat("LW unaligned addr=0x%08X", addr);
+        return ExecutionStatus::kMemoryFault;
+      }
       uint32_t val = 0;
-      if (!Read32(addr, &val)) return ExecutionStatus::kMemoryFault;
+      if (!Read32(addr, &val)) {
+        last_invalid_info_ = absl::StrFormat("LW faulting addr=0x%08X", addr);
+        return ExecutionStatus::kMemoryFault;
+      }
       SetGpr(rt, val);
       break;
     }
     case 0x24: {  // LBU
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       uint8_t val = 0;
-      if (!Read8(addr, &val)) return ExecutionStatus::kMemoryFault;
+      if (!Read8(addr, &val)) {
+        last_invalid_info_ = absl::StrFormat("LBU faulting addr=0x%08X", addr);
+        return ExecutionStatus::kMemoryFault;
+      }
       SetGpr(rt, val);
       break;
     }
@@ -895,13 +1017,13 @@ ExecutionStatus MipsEmulator::Step() {
     }
     case 0x28: {  // SB
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
-      if (!Write8(addr, static_cast<uint8_t>(gpr_[rt]))) return ExecutionStatus::kMemoryFault;
+      if (!Write8(addr, static_cast<uint8_t>(gpr_[rt]), rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
     case 0x29: {  // SH
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 1) != 0) return ExecutionStatus::kMemoryFault;
-      if (!Write16(addr, static_cast<uint16_t>(gpr_[rt]))) return ExecutionStatus::kMemoryFault;
+      if (!Write16(addr, static_cast<uint16_t>(gpr_[rt]), rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
     case 0x2A: {  // SWL
@@ -912,13 +1034,13 @@ ExecutionStatus MipsEmulator::Step() {
       if (!Read32(word_addr, &word)) return ExecutionStatus::kMemoryFault;
       uint32_t mask = 0xFFFFFFFFu >> (shift_byte * 8);
       uint32_t new_word = (word & ~mask) | (gpr_[rt] >> (shift_byte * 8));
-      if (!Write32(word_addr, new_word)) return ExecutionStatus::kMemoryFault;
+      if (!Write32(word_addr, new_word, rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
     case 0x2B: {  // SW
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
-      if (!Write32(addr, gpr_[rt])) return ExecutionStatus::kMemoryFault;
+      if (!Write32(addr, gpr_[rt], rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
     case 0x2E: {  // SWR
@@ -929,15 +1051,17 @@ ExecutionStatus MipsEmulator::Step() {
       if (!Read32(word_addr, &word)) return ExecutionStatus::kMemoryFault;
       uint32_t mask = 0xFFFFFFFFu << ((3 - shift_byte) * 8);
       uint32_t new_word = (word & ~mask) | (gpr_[rt] << ((3 - shift_byte) * 8));
-      if (!Write32(word_addr, new_word)) return ExecutionStatus::kMemoryFault;
+      if (!Write32(word_addr, new_word, rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
+    case 0x2F:  // CACHE
+      break;
     case 0x31: {  // LWC1
       FpRegister ft = static_cast<FpRegister>(rt);
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
       uint32_t word = 0;
-      if (!Read32(addr, &word)) return ExecutionStatus::kMemoryFault;
+      if (!Read32(addr, &word, /*is_fp=*/true)) return ExecutionStatus::kMemoryFault;
       SetFpBits(ft, word);
       break;
     }
@@ -947,15 +1071,23 @@ ExecutionStatus MipsEmulator::Step() {
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
       uint64_t val = 0;
-      if (!Read64(addr, &val)) return ExecutionStatus::kMemoryFault;
+      if (!Read64(addr, &val, /*is_fp=*/true)) return ExecutionStatus::kMemoryFault;
       SetFpDoubleBits(ft, val);
+      break;
+    }
+    case 0x37: {  // LD
+      uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
+      if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
+      uint64_t val = 0;
+      if (!Read64(addr, &val)) return ExecutionStatus::kMemoryFault;
+      SetGpr(rt, static_cast<uint32_t>(val));
       break;
     }
     case 0x39: {  // SWC1
       FpRegister ft = static_cast<FpRegister>(rt);
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 3) != 0) return ExecutionStatus::kMemoryFault;
-      if (!Write32(addr, GetFpBits(ft))) return ExecutionStatus::kMemoryFault;
+      if (!Write32(addr, GetFpBits(ft), rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
     case 0x3D: {  // SDC1
@@ -963,11 +1095,18 @@ ExecutionStatus MipsEmulator::Step() {
       if (!IsEvenFpRegister(ft)) return ExecutionStatus::kInvalidOpcode;
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
-      if (!Write64(addr, GetFpDoubleBits(ft))) return ExecutionStatus::kMemoryFault;
+      if (!Write64(addr, GetFpDoubleBits(ft), rs)) return ExecutionStatus::kMemoryFault;
+      break;
+    }
+    case 0x3F: {  // SD
+      uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
+      if ((addr & 7) != 0) return ExecutionStatus::kMemoryFault;
+      uint64_t val = static_cast<uint64_t>(gpr_[rt]);
+      if (!Write64(addr, val, rs)) return ExecutionStatus::kMemoryFault;
       break;
     }
     default:
-      return ExecutionStatus::kInvalidOpcode;
+      return invalid_opcode("unhandled major_op");
   }
 
   // Handle PC advancement and delay slot completion
@@ -991,11 +1130,14 @@ ExecutionStatus MipsEmulator::Step() {
           .a2 = gpr_[6],
           .a3 = gpr_[7],
       });
-      pc_ = gpr_[delayed_call_link];
       gpr_[2] = 0;  // $v0 = 0
       gpr_[3] = 0;  // $v1 = 0
       SetFpRegister(FpRegister::kF0, 0.0f);
       SetFpDouble(FpRegister::kF0, 0.0);
+      if (gpr_[delayed_call_link] == kReturnAddressSentinel) {
+        return ExecutionStatus::kHaltedReturn;
+      }
+      pc_ = gpr_[delayed_call_link];
     } else if (next_branch_target.has_value()) {
       pc_ = *next_branch_target;
     } else {
@@ -1017,6 +1159,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
   delay_slot_is_call_ = false;
   call_link_reg_ = 31;
   call_log_.clear();
+  last_invalid_info_.clear();
+  written_phys_addrs_.clear();
 
   // Set return address sentinel if unset
   if (gpr_[31] == 0) {
@@ -1048,8 +1192,8 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
       result.f0_double_bits = GetFpDoubleBits(FpRegister::kF0);
       result.write_log = write_log_;
       result.call_log = call_log_;
-      result.error_message = absl::StrFormat("Execution halted with status %d at PC 0x%08X",
-                                             static_cast<int>(status), pc_);
+      result.error_message = absl::StrFormat("Execution halted with status %d at PC 0x%08X [%s]",
+                                             static_cast<int>(status), pc_, last_invalid_info_);
       return result;
     }
   }

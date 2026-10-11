@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -20,6 +21,9 @@ struct MemoryWrite {
   uint32_t address = 0;
   uint64_t value = 0;
   uint8_t size = 0;  // 1 (byte), 2 (half), 4 (word), 8 (doubleword)
+  uint64_t previous_value = 0;
+  uint8_t base_reg = 0;
+  bool is_stack_relative = false;
 
   bool operator==(const MemoryWrite& other) const {
     return address == other.address && value == other.value && size == other.size;
@@ -88,7 +92,8 @@ struct CalleeSavedRegisters {
 class MipsEmulator {
  public:
   static constexpr uint32_t kDefaultRamBase = 0x80000000;
-  static constexpr size_t kDefaultRamSize = 8 * 1024 * 1024;  // 8MB N64 RDRAM
+  static constexpr size_t kDefaultRamSize =
+      16 * 1024 * 1024;  // 16MB RDRAM (allows candidate BSS shift headroom)
   static constexpr uint32_t kReturnAddressSentinel = 0xFFFFFFFC;
 
   explicit MipsEmulator(size_t memory_size_bytes = kDefaultRamSize,
@@ -147,15 +152,15 @@ class MipsEmulator {
   }
 
   // Memory access
-  bool Read8(uint32_t vram, uint8_t* val) const;
-  bool Read16(uint32_t vram, uint16_t* val) const;
-  bool Read32(uint32_t vram, uint32_t* val) const;
-  bool Read64(uint32_t vram, uint64_t* val) const;
+  bool Read8(uint32_t vram, uint8_t* val, bool is_fp = false) const;
+  bool Read16(uint32_t vram, uint16_t* val, bool is_fp = false) const;
+  bool Read32(uint32_t vram, uint32_t* val, bool is_fp = false) const;
+  bool Read64(uint32_t vram, uint64_t* val, bool is_fp = false) const;
 
-  bool Write8(uint32_t vram, uint8_t val);
-  bool Write16(uint32_t vram, uint16_t val);
-  bool Write32(uint32_t vram, uint32_t val);
-  bool Write64(uint32_t vram, uint64_t val);
+  bool Write8(uint32_t vram, uint8_t val, int base_reg = -1);
+  bool Write16(uint32_t vram, uint16_t val, int base_reg = -1);
+  bool Write32(uint32_t vram, uint32_t val, int base_reg = -1);
+  bool Write64(uint32_t vram, uint64_t val, int base_reg = -1);
 
   // Snapshots callee-saved registers.
   CalleeSavedRegisters GetCalleeSavedRegisters() const;
@@ -190,6 +195,11 @@ class MipsEmulator {
   void SetMockMmio(bool enable) { mock_mmio_ = enable; }
   bool GetMockMmio() const { return mock_mmio_; }
 
+  // Memory read interception hook.
+  using ReadHook = std::function<std::optional<uint64_t>(uint32_t vram, size_t size, bool is_fp)>;
+  void SetReadHook(ReadHook hook) { read_hook_ = std::move(hook); }
+  void ClearReadHook() { read_hook_ = nullptr; }
+
   // Memory address translation to physical RDRAM index.
   std::optional<size_t> VramToPhysical(uint32_t vram) const;
 
@@ -222,9 +232,12 @@ class MipsEmulator {
   bool mock_mmio_ = true;
   mutable absl::flat_hash_map<uint32_t, uint32_t> mmio_regs_;
   mutable uint32_t vi_scanline_counter_ = 0;
+  ReadHook read_hook_;
 
   std::vector<MemoryWrite> write_log_;
   std::vector<ExternalCall> call_log_;
+  std::string last_invalid_info_;
+  absl::flat_hash_set<uint32_t> written_phys_addrs_;
 };
 
 inline std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
@@ -255,64 +268,110 @@ inline uint32_t MipsEmulator::GetGpr(int index) const {
   return 0;
 }
 
-inline bool MipsEmulator::Read8(uint32_t vram, uint8_t* val) const {
+inline bool MipsEmulator::Read8(uint32_t vram, uint8_t* val, bool is_fp) const {
+  auto phys = VramToPhysical(vram);
+  if (read_hook_ &&
+      (!phys.has_value() || !written_phys_addrs_.contains(static_cast<uint32_t>(*phys)))) {
+    auto res = read_hook_(vram, 1, is_fp);
+    if (res.has_value()) {
+      *val = static_cast<uint8_t>(*res);
+      return true;
+    }
+  }
   if (mock_mmio_ && IsMmioAddress(vram)) {
-    uint32_t phys = vram & 0x1FFFFFFF;
-    uint32_t word = ReadMmio32(phys & ~3);
-    size_t byte_in_word = 3 - (phys % 4);
+    uint32_t p = vram & 0x1FFFFFFF;
+    uint32_t word = ReadMmio32(p & ~3);
+    size_t byte_in_word = 3 - (p % 4);
     *val = static_cast<uint8_t>((word >> (byte_in_word * 8)) & 0xFF);
     return true;
   }
-  auto phys = VramToPhysical(vram);
   if (!phys.has_value()) return false;
   *val = memory_[*phys];
   return true;
 }
 
-inline bool MipsEmulator::Read16(uint32_t vram, uint16_t* val) const {
+inline bool MipsEmulator::Read16(uint32_t vram, uint16_t* val, bool is_fp) const {
   if ((vram & 1) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  bool was_written =
+      phys.has_value() && (written_phys_addrs_.contains(static_cast<uint32_t>(*phys)) ||
+                           written_phys_addrs_.contains(static_cast<uint32_t>(*phys + 1)));
+  if (read_hook_ && !was_written) {
+    auto res = read_hook_(vram, 2, is_fp);
+    if (res.has_value()) {
+      *val = static_cast<uint16_t>(*res);
+      return true;
+    }
+  }
   if (mock_mmio_ && IsMmioAddress(vram)) {
-    uint32_t phys = vram & 0x1FFFFFFF;
-    uint32_t word = ReadMmio32(phys & ~3);
-    size_t half_in_word = (phys % 4 == 0) ? 1 : 0;
+    uint32_t p = vram & 0x1FFFFFFF;
+    uint32_t word = ReadMmio32(p & ~3);
+    size_t half_in_word = (p % 4 == 0) ? 1 : 0;
     *val = static_cast<uint16_t>((word >> (half_in_word * 16)) & 0xFFFF);
     return true;
   }
-  auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
   *val = ReadBigEndian16(&memory_[*phys]);
   return true;
 }
 
-inline bool MipsEmulator::Read32(uint32_t vram, uint32_t* val) const {
+inline bool MipsEmulator::Read32(uint32_t vram, uint32_t* val, bool is_fp) const {
   if ((vram & 3) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  bool was_written =
+      phys.has_value() && (written_phys_addrs_.contains(static_cast<uint32_t>(*phys)) ||
+                           written_phys_addrs_.contains(static_cast<uint32_t>(*phys + 1)) ||
+                           written_phys_addrs_.contains(static_cast<uint32_t>(*phys + 2)) ||
+                           written_phys_addrs_.contains(static_cast<uint32_t>(*phys + 3)));
+  if (read_hook_ && !was_written) {
+    auto res = read_hook_(vram, 4, is_fp);
+    if (res.has_value()) {
+      *val = static_cast<uint32_t>(*res);
+      return true;
+    }
+  }
   if (mock_mmio_ && IsMmioAddress(vram)) {
-    uint32_t phys = vram & 0x1FFFFFFF;
-    *val = ReadMmio32(phys);
+    uint32_t p = vram & 0x1FFFFFFF;
+    *val = ReadMmio32(p);
     return true;
   }
-  auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
   *val = ReadBigEndian32(&memory_[*phys]);
   return true;
 }
 
-inline bool MipsEmulator::Read64(uint32_t vram, uint64_t* val) const {
+inline bool MipsEmulator::Read64(uint32_t vram, uint64_t* val, bool is_fp) const {
   if ((vram & 7) != 0) return false;
+  auto phys = VramToPhysical(vram);
+  bool was_written = false;
+  if (phys.has_value()) {
+    for (uint32_t i = 0; i < 8; ++i) {
+      if (written_phys_addrs_.contains(static_cast<uint32_t>(*phys + i))) {
+        was_written = true;
+        break;
+      }
+    }
+  }
+  if (read_hook_ && !was_written) {
+    auto res = read_hook_(vram, 8, is_fp);
+    if (res.has_value()) {
+      *val = *res;
+      return true;
+    }
+  }
   if (mock_mmio_ && IsMmioAddress(vram)) {
-    uint32_t phys = vram & 0x1FFFFFFF;
-    uint32_t hi = ReadMmio32(phys);
-    uint32_t lo = ReadMmio32(phys + 4);
+    uint32_t p = vram & 0x1FFFFFFF;
+    uint32_t hi = ReadMmio32(p);
+    uint32_t lo = ReadMmio32(p + 4);
     *val = (static_cast<uint64_t>(hi) << 32) | lo;
     return true;
   }
-  auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
   *val = ReadBigEndian64(&memory_[*phys]);
   return true;
 }
 
-inline bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
+inline bool MipsEmulator::Write8(uint32_t vram, uint8_t val, int base_reg) {
   if (mock_mmio_ && IsMmioAddress(vram)) {
     uint32_t phys = vram & 0x1FFFFFFF;
     uint32_t word = ReadMmio32(phys & ~3);
@@ -324,12 +383,19 @@ inline bool MipsEmulator::Write8(uint32_t vram, uint8_t val) {
   }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value()) return false;
+  written_phys_addrs_.insert(static_cast<uint32_t>(*phys));
+  uint8_t prev = memory_[*phys];
   memory_[*phys] = val;
-  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 1});
+  write_log_.push_back(MemoryWrite{.address = vram,
+                                   .value = val,
+                                   .size = 1,
+                                   .previous_value = prev,
+                                   .base_reg = static_cast<uint8_t>(base_reg >= 0 ? base_reg : 0),
+                                   .is_stack_relative = (base_reg == 29 || base_reg == 30)});
   return true;
 }
 
-inline bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
+inline bool MipsEmulator::Write16(uint32_t vram, uint16_t val, int base_reg) {
   if ((vram & 1) != 0) return false;
   if (mock_mmio_ && IsMmioAddress(vram)) {
     uint32_t phys = vram & 0x1FFFFFFF;
@@ -342,12 +408,20 @@ inline bool MipsEmulator::Write16(uint32_t vram, uint16_t val) {
   }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 1 >= memory_size_) return false;
+  written_phys_addrs_.insert(static_cast<uint32_t>(*phys));
+  written_phys_addrs_.insert(static_cast<uint32_t>(*phys + 1));
+  uint16_t prev = ReadBigEndian16(&memory_[*phys]);
   WriteBigEndian16(&memory_[*phys], val);
-  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 2});
+  write_log_.push_back(MemoryWrite{.address = vram,
+                                   .value = val,
+                                   .size = 2,
+                                   .previous_value = prev,
+                                   .base_reg = static_cast<uint8_t>(base_reg >= 0 ? base_reg : 0),
+                                   .is_stack_relative = (base_reg == 29 || base_reg == 30)});
   return true;
 }
 
-inline bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
+inline bool MipsEmulator::Write32(uint32_t vram, uint32_t val, int base_reg) {
   if ((vram & 3) != 0) return false;
   if (mock_mmio_ && IsMmioAddress(vram)) {
     uint32_t phys = vram & 0x1FFFFFFF;
@@ -356,12 +430,21 @@ inline bool MipsEmulator::Write32(uint32_t vram, uint32_t val) {
   }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 3 >= memory_size_) return false;
+  for (uint32_t i = 0; i < 4; ++i) {
+    written_phys_addrs_.insert(static_cast<uint32_t>(*phys + i));
+  }
+  uint32_t prev = ReadBigEndian32(&memory_[*phys]);
   WriteBigEndian32(&memory_[*phys], val);
-  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 4});
+  write_log_.push_back(MemoryWrite{.address = vram,
+                                   .value = val,
+                                   .size = 4,
+                                   .previous_value = prev,
+                                   .base_reg = static_cast<uint8_t>(base_reg >= 0 ? base_reg : 0),
+                                   .is_stack_relative = (base_reg == 29 || base_reg == 30)});
   return true;
 }
 
-inline bool MipsEmulator::Write64(uint32_t vram, uint64_t val) {
+inline bool MipsEmulator::Write64(uint32_t vram, uint64_t val, int base_reg) {
   if ((vram & 7) != 0) return false;
   if (mock_mmio_ && IsMmioAddress(vram)) {
     uint32_t phys = vram & 0x1FFFFFFF;
@@ -371,8 +454,17 @@ inline bool MipsEmulator::Write64(uint32_t vram, uint64_t val) {
   }
   auto phys = VramToPhysical(vram);
   if (!phys.has_value() || *phys + 7 >= memory_size_) return false;
+  for (uint32_t i = 0; i < 8; ++i) {
+    written_phys_addrs_.insert(static_cast<uint32_t>(*phys + i));
+  }
+  uint64_t prev = ReadBigEndian64(&memory_[*phys]);
   WriteBigEndian64(&memory_[*phys], val);
-  write_log_.push_back(MemoryWrite{.address = vram, .value = val, .size = 8});
+  write_log_.push_back(MemoryWrite{.address = vram,
+                                   .value = val,
+                                   .size = 8,
+                                   .previous_value = prev,
+                                   .base_reg = static_cast<uint8_t>(base_reg >= 0 ? base_reg : 0),
+                                   .is_stack_relative = (base_reg == 29 || base_reg == 30)});
   return true;
 }
 
