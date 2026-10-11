@@ -13,6 +13,8 @@
 #include "core/toolchain.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "splitter/config.pb.h"
+#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -472,6 +474,209 @@ SECTIONS
   auto build_result_or = rom_builder.Build();
   ASSERT_TRUE(build_result_or.ok()) << build_result_or.status();
   EXPECT_TRUE(link_command_included_lifted_symbols);
+}
+
+TEST_F(RomBuilderTest, UsesOutElfStemForIsolatedObjectDirectoryAndLinkerScript) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot() {}");
+  CreateFile(asm_dir_ / "entry.s", ".text\nnop");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    segments {
+      name: "boot"
+      rom_start: 0x0
+      rom_end: 16
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path custom_elf = test_dir_ / "out" / "test_game_lifted_c.elf";
+  std::filesystem::path custom_rom = test_dir_ / "out" / "test_game_lifted_c.z64";
+
+  auto mock_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.args.size() >= 4 && opts.args[1] == "binary" && opts.args[3] == custom_rom.string()) {
+      std::filesystem::create_directories(custom_rom.parent_path());
+      std::ofstream(custom_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+
+  RomBuilderOptions opts{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = custom_elf,
+      .out_rom = custom_rom,
+  };
+
+  RomBuilder builder(toolchain_, opts, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  std::filesystem::path expected_obj_dir = test_dir_ / "out" / "_test_game_lifted_c_objs";
+  EXPECT_TRUE(std::filesystem::exists(expected_obj_dir));
+  EXPECT_TRUE(std::filesystem::exists(expected_obj_dir / "test_game_lifted_c.ld"));
+}
+
+TEST_F(RomBuilderTest, SkipsUndefinedAutoScriptsWhenLiftedSymbolsPresent) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot() {}");
+  CreateFile(asm_dir_ / "entry.s", ".text\nnop");
+
+  std::filesystem::path lifted_symbols =
+      CreateFile(src_dir_ / "lifted_symbols.ld", "lifted_sym = 0x80010000;\n");
+  std::filesystem::path undef_syms =
+      CreateFile(build_dir_ / "undefined_syms_auto.test_game.ld", "undef_sym = 0x80020000;\n");
+  std::filesystem::path undef_funcs =
+      CreateFile(build_dir_ / "undefined_funcs_auto.test_game.ld", "undef_func = 0x80030000;\n");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    segments {
+      name: "boot"
+      rom_start: 0x0
+      rom_end: 16
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path out_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path out_rom = test_dir_ / "out" / "test_game.z64";
+
+  std::vector<std::string> link_args;
+  auto mock_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    for (size_t i = 0; i + 1 < opts.args.size(); ++i) {
+      if (opts.args[i] == "-o" && opts.args[i + 1] == out_elf.string()) {
+        link_args = opts.args;
+        break;
+      }
+    }
+    if (opts.args.size() >= 4 && opts.args[1] == "binary" && opts.args[3] == out_rom.string()) {
+      std::filesystem::create_directories(out_rom.parent_path());
+      std::ofstream(out_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+
+  RomBuilderOptions opts{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = out_elf,
+      .out_rom = out_rom,
+  };
+
+  RomBuilder builder(toolchain_, opts, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  EXPECT_THAT(link_args, ::testing::Contains(lifted_symbols.string()));
+  EXPECT_THAT(link_args, ::testing::Not(::testing::Contains(undef_syms.string())));
+  EXPECT_THAT(link_args, ::testing::Not(::testing::Contains(undef_funcs.string())));
+}
+
+TEST_F(RomBuilderTest, GeneratesSymbolsFromTextprotoWhenSymbolsLdAbsent) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot() {}");
+  CreateFile(asm_dir_ / "entry.s", ".text\nnop");
+
+  std::filesystem::path symbols_proto = CreateFile(test_dir_ / "symbols.textproto", R"pb(
+    entries { name: "D_80002000" address: 0x80002000 type: SYMBOL_DATA }
+    entries { name: "g_inner_data" address: 0x80002010 type: SYMBOL_DATA }
+  )pb");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    segments {
+      name: "code"
+      rom_start: 0x0
+      rom_end: 0x4000
+      vram: 0x80000000
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path out_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path out_rom = test_dir_ / "out" / "test_game.z64";
+
+  auto mock_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.args.size() >= 4 && opts.args[1] == "binary" && opts.args[3] == out_rom.string()) {
+      std::filesystem::create_directories(out_rom.parent_path());
+      std::ofstream(out_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+
+  RomBuilderOptions opts{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .symbols_path = symbols_proto,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = out_elf,
+      .out_rom = out_rom,
+  };
+
+  RomBuilder builder(toolchain_, opts, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  std::filesystem::path generated_symbols = test_dir_ / "out" / "_test_game_objs" / "symbols.ld";
+  ASSERT_TRUE(std::filesystem::exists(generated_symbols));
+
+  std::ifstream ifs(generated_symbols);
+  std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+  EXPECT_THAT(content, HasSubstr("PROVIDE(D_80002000 = 0x80002000);"));
+  EXPECT_THAT(content, HasSubstr("PROVIDE(g_inner_data = 0x80002010);"));
 }
 
 }  // namespace

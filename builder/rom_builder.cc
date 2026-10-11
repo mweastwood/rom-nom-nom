@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <regex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -20,6 +19,8 @@
 #include "core/sha1.h"
 #include "splitter/config.h"
 #include "splitter/config.pb.h"
+#include "splitter/linker_script.h"
+#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -82,33 +83,33 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   // 2. Prepare isolated object directory
+  std::string obj_prefix = options_.out_elf.stem().string();
+  if (obj_prefix.empty()) {
+    obj_prefix = options_.game_name;
+  }
   std::filesystem::path obj_dir =
-      options_.out_elf.parent_path() / absl::StrCat("_", options_.game_name, "_objs");
+      options_.out_elf.parent_path() / absl::StrCat("_", obj_prefix, "_objs");
   std::filesystem::remove_all(obj_dir, ec);
   std::filesystem::create_directories(obj_dir, ec);
 
   // 3. Set up symbols.ld
+  std::unique_ptr<SymbolIndex> symbol_index;
+  if (!options_.symbols_path.empty() && std::filesystem::exists(options_.symbols_path, ec)) {
+    auto index_or = SymbolIndex::LoadFromTextproto(options_.symbols_path);
+    if (index_or.ok()) {
+      symbol_index = std::make_unique<SymbolIndex>(std::move(*index_or));
+    }
+  }
+
   std::filesystem::path target_symbols_ld = obj_dir / "symbols.ld";
   auto aux = LinkerScriptAdapter::DiscoverAuxiliaryScripts(options_.build_dir);
   if (!aux.symbols_ld.empty()) {
     std::filesystem::copy_file(aux.symbols_ld, target_symbols_ld,
                                std::filesystem::copy_options::overwrite_existing, ec);
-  } else if (!options_.symbols_path.empty() && std::filesystem::exists(options_.symbols_path, ec)) {
-    std::ifstream s_in(options_.symbols_path);
+  } else if (symbol_index != nullptr) {
+    LinkerScriptGenerator generator;
     std::ofstream s_out(target_symbols_ld);
-    s_out << "/* Generated symbols */\n";
-    std::string line;
-    static const std::regex sym_re(R"(^([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)\s*;)");
-    while (std::getline(s_in, line)) {
-      size_t comment_pos = line.find("//");
-      if (comment_pos != std::string::npos) {
-        line = line.substr(0, comment_pos);
-      }
-      std::smatch match;
-      if (std::regex_search(line, match, sym_re)) {
-        s_out << "PROVIDE(" << match[1].str() << " = " << match[2].str() << ");\n";
-      }
-    }
+    s_out << generator.GenerateSymbolsScript(*symbol_index);
   }
 
   // 4. Adapt and rewrite main linker script
@@ -123,7 +124,8 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
 
   const auto& obj_refs = adapter_or->ObjectReferences();
   std::string rewritten_ld = adapter_or->RewriteObjectPaths(obj_dir);
-  std::filesystem::path rewritten_ld_path = obj_dir / absl::StrCat(options_.game_name, ".ld");
+
+  std::filesystem::path rewritten_ld_path = obj_dir / absl::StrCat(obj_prefix, ".ld");
   {
     std::ofstream ofs(rewritten_ld_path);
     ofs << rewritten_ld;
@@ -233,16 +235,20 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   if (!aux.hardware_regs_ld.empty()) {
     script_paths.push_back(aux.hardware_regs_ld);
   }
-  if (!aux.undefined_syms_auto.empty()) {
-    script_paths.push_back(aux.undefined_syms_auto);
-  }
-  if (!aux.undefined_funcs_auto.empty()) {
-    script_paths.push_back(aux.undefined_funcs_auto);
-  }
+  bool has_lifted_symbols = false;
   if (!options_.src_dir.empty()) {
     std::filesystem::path lifted_symbols_ld_script_path = options_.src_dir / "lifted_symbols.ld";
     if (std::filesystem::exists(lifted_symbols_ld_script_path, ec)) {
       script_paths.push_back(lifted_symbols_ld_script_path);
+      has_lifted_symbols = true;
+    }
+  }
+  if (!has_lifted_symbols) {
+    if (!aux.undefined_syms_auto.empty()) {
+      script_paths.push_back(aux.undefined_syms_auto);
+    }
+    if (!aux.undefined_funcs_auto.empty()) {
+      script_paths.push_back(aux.undefined_funcs_auto);
     }
   }
 
