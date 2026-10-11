@@ -211,6 +211,67 @@ std::string StackVarName(int32_t offset) {
   return absl::StrFormat("var_sp_%d", offset);
 }
 
+struct FloatingPointConversionPattern {
+  size_t end_index = 0;
+  bool is_int_to_float = false;
+  Register src_gpr = Register::kZero;
+  FpRegister dest_floating_point_reg = FpRegister::kF0;
+  bool is_double = false;
+  FpRegister src_floating_point_reg = FpRegister::kF0;
+  Register dest_gpr = Register::kZero;
+};
+
+std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPattern(
+    absl::Span<const Instruction> instructions, size_t i) {
+  const auto& inst = instructions[i];
+
+  // 1. Integer to Float: mtc1 $rt, $fs [-> nop]* -> cvt.s.w/cvt.d.w $fd, $fs
+  if (inst.opcode == Opcode::kMtc1 && inst.fs.has_value() && inst.rt.has_value()) {
+    size_t j = i + 1;
+    while (j < instructions.size() && instructions[j].IsNop()) {
+      ++j;
+    }
+    if (j < instructions.size()) {
+      const auto& next_inst = instructions[j];
+      if ((next_inst.opcode == Opcode::kCvtSW || next_inst.opcode == Opcode::kCvtDW) &&
+          next_inst.fs.has_value() && *next_inst.fs == *inst.fs && next_inst.fd.has_value()) {
+        FloatingPointConversionPattern pattern;
+        pattern.end_index = j;
+        pattern.is_int_to_float = true;
+        pattern.src_gpr = *inst.rt;
+        pattern.dest_floating_point_reg = *next_inst.fd;
+        pattern.is_double = (next_inst.opcode == Opcode::kCvtDW);
+        return pattern;
+      }
+    }
+  }
+
+  // 2. Float to Integer: trunc.w.s/trunc.w.d $fd, $fs [-> nop]* -> mfc1 $rt, $fd
+  if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD) && inst.fd.has_value() &&
+      inst.fs.has_value()) {
+    size_t j = i + 1;
+    while (j < instructions.size() && instructions[j].IsNop()) {
+      ++j;
+    }
+    if (j < instructions.size()) {
+      const auto& next_inst = instructions[j];
+      if (next_inst.opcode == Opcode::kMfc1 && next_inst.fs.has_value() &&
+          *next_inst.fs == *inst.fd && next_inst.rt.has_value() &&
+          *next_inst.rt != Register::kZero) {
+        FloatingPointConversionPattern pattern;
+        pattern.end_index = j;
+        pattern.is_int_to_float = false;
+        pattern.src_floating_point_reg = *inst.fs;
+        pattern.dest_gpr = *next_inst.rt;
+        pattern.is_double = (inst.opcode == Opcode::kTruncWD);
+        return pattern;
+      }
+    }
+  }
+
+  return std::nullopt;
+}
+
 }  // namespace
 
 std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
@@ -439,6 +500,36 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         tracker.Step(instructions_to_process[k]);
       }
       i = div_pattern->end_index;
+      continue;
+    }
+
+    // Check for MIPS GCC floating-point / integer conversion patterns
+    auto conversion = MatchFloatingPointConversionPattern(instructions_to_process, i);
+    if (conversion.has_value()) {
+      if (conversion->is_int_to_float) {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = FpRegisterVarName(conversion->dest_floating_point_reg);
+        if (conversion->src_gpr == Register::kZero) {
+          statement.expression = LiftedExpression::Variable(conversion->is_double ? "0.0" : "0.0f");
+        } else {
+          statement.expression =
+              LiftedExpression::Unary(conversion->is_double ? "(f64)" : "(f32)",
+                                      LiftRegisterOrConstant(conversion->src_gpr, tracker));
+        }
+        statements.push_back(std::move(statement));
+      } else {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = RegisterVarName(conversion->dest_gpr);
+        statement.expression =
+            LiftedExpression::Unary("(s32)", LiftFpRegister(conversion->src_floating_point_reg));
+        statements.push_back(std::move(statement));
+      }
+      for (size_t k = i; k <= conversion->end_index; ++k) {
+        tracker.Step(instructions_to_process[k]);
+      }
+      i = conversion->end_index;
       continue;
     }
 

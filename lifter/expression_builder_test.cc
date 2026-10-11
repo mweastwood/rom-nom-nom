@@ -1194,5 +1194,97 @@ TEST(ExpressionBuilderTest, LiftsFoldedFloatingPointGlobalLoadAndStore) {
   EXPECT_EQ(stmts[1].ToString(), "*(f32*)0x80170450 = f2;\n");
 }
 
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesMtc1CvtAndTruncMfc1) {
+  // 1. mtc1 $v0, $f2; nop; cvt.s.w $f2, $f2 -> f2 = (f32)v0;
+  // 2. trunc.w.s $f0, $f0; nop; mfc1 $v0, $f0 -> v0 = (s32)f0;
+  std::vector<uint32_t> words = {
+      0x44821000,  // 0: mtc1 $v0, $f2
+      0x00000000,  // 4: nop
+      0x468010A0,  // 8: cvt.s.w $f2, $f2
+      0x4600000D,  // C: trunc.w.s $f0, $f0
+      0x00000000,  // 10: nop
+      0x44020000,  // 14: mfc1 $v0, $f0
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = (f32)v0;\n");
+  EXPECT_EQ(stmts[1].ToString(), "v0 = (s32)f0;\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternHandlesZeroAndDouble) {
+  // 1. mtc1 $zero, $f4; cvt.s.w $f4, $f4 -> f4 = 0.0f;
+  // 2. mtc1 $a0, $f2; cvt.d.w $f2, $f2 -> f2 = (f64)arg0;
+  // 3. trunc.w.d $f2, $f12; mfc1 $v1, $f2 -> v1 = (s32)f12;
+  std::vector<uint32_t> words = {
+      0x44802000,  // 0: mtc1 $zero, $f4
+      0x46802120,  // 4: cvt.s.w $f4, $f4
+      0x44841000,  // 8: mtc1 $a0, $f2
+      0x468010A1,  // C: cvt.d.w $f2, $f2
+      0x4620608D,  // 10: trunc.w.d $f2, $f12
+      0x44031000,  // 14: mfc1 $v1, $f2
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 3u);
+  EXPECT_EQ(stmts[0].ToString(), "f4 = 0.0f;\n");
+  EXPECT_EQ(stmts[1].ToString(), "f2 = (f64)arg0;\n");
+  EXPECT_EQ(stmts[2].ToString(), "v1 = (s32)f12;\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternHandlesMultipleHazardNops) {
+  // mtc1 $a1, $f6; nop; nop; cvt.s.w $f6, $f6 -> f6 = (f32)arg1;
+  std::vector<uint32_t> words = {
+      0x44853000,  // 0: mtc1 $a1, $f6
+      0x00000000,  // 4: nop
+      0x00000000,  // 8: nop
+      0x468031A0,  // C: cvt.s.w $f6, $f6
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 1u);
+  EXPECT_EQ(stmts[0].ToString(), "f6 = (f32)arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternRejectsMismatchedRegisters) {
+  // 1. mtc1 $v0, $f2; cvt.s.w $f4, $f0 ($fs mismatch: 2 vs 0) -> no pattern match
+  // 2. trunc.w.s $f2, $f0; mfc1 $v0, $f4 ($fs mismatch: 2 vs 4) -> no pattern match
+  std::vector<uint32_t> words = {
+      0x44821000,  // 0: mtc1 $v0, $f2
+      0x46800120,  // 4: cvt.s.w $f4, $f0
+      0x4600008D,  // 8: trunc.w.s $f2, $f0
+      0x44022000,  // C: mfc1 $v0, $f4
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 4u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = *(f32*)&v0;\n");
+  EXPECT_EQ(stmts[1].ToString(), "f4 = (f32)f0;\n");
+  EXPECT_EQ(stmts[2].ToString(), "f2 = (s32)f0;\n");
+  EXPECT_EQ(stmts[3].ToString(), "v0 = *(s32*)&f4;\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternRejectsNonConversionSuccessors) {
+  // 1. mtc1 $v0, $f2; add.s $f0, $f2, $f4 (not cvt) -> no pattern match
+  // 2. trunc.w.s $f0, $f0; mfc1 $zero, $f0 (dest $zero) -> no pattern match
+  std::vector<uint32_t> words = {
+      0x44821000,  // 0: mtc1 $v0, $f2
+      0x46041000,  // 4: add.s $f0, $f2, $f4
+      0x4600000D,  // 8: trunc.w.s $f0, $f0
+      0x44000000,  // C: mfc1 $zero, $f0
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 3u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = *(f32*)&v0;\n");
+  EXPECT_EQ(stmts[1].ToString(), "f0 = f2 + f4;\n");
+  EXPECT_EQ(stmts[2].ToString(), "f0 = (s32)f0;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
