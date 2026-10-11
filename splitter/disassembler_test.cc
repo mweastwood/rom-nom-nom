@@ -388,5 +388,50 @@ TEST(DisassemblerTest, PreScanCodeDiscoversJalEntrypoints) {
   EXPECT_EQ(funcs[1].vram_end, 0x80700018u);
 }
 
+TEST(DisassemblerTest, KnownEntrypointsAccessors) {
+  Disassembler disasm;
+  EXPECT_TRUE(disasm.KnownEntrypoints().empty());
+
+  disasm.RegisterFunctionEntrypoint(0x80025C00);
+  EXPECT_EQ(disasm.KnownEntrypoints().size(), 1u);
+  EXPECT_TRUE(disasm.KnownEntrypoints().contains(0x80025C00));
+
+  absl::flat_hash_set<uint32_t> custom_entrypoints = {0x80026000, 0x80027000};
+  disasm.SetKnownEntrypoints(custom_entrypoints);
+  EXPECT_EQ(disasm.KnownEntrypoints().size(), 2u);
+  EXPECT_TRUE(disasm.KnownEntrypoints().contains(0x80026000));
+  EXPECT_TRUE(disasm.KnownEntrypoints().contains(0x80027000));
+  EXPECT_FALSE(disasm.KnownEntrypoints().contains(0x80025C00));
+}
+
+TEST(DisassemblerTest, ForwardBranchToReturnDelaySlotDoesNotPrematurelyEndFunction) {
+  // 80700000: bnez  $a0, .L8070000C (target: 80700004 + 2*4 = 8070000C)
+  // 80700004:  nop
+  // 80700008: jr    $ra
+  // 8070000C:  addiu $v0, $zero, 2  <- branch target (.L8070000C, delay slot of jr $ra)
+  // 80700010: jr    $ra
+  // 80700014:  nop
+  std::vector<uint8_t> code;
+  AppendWord(code, 0x14800002);  // bne $a0, $0, +2 -> 8070000C
+  AppendWord(code, 0x00000000);  // nop
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x24020002);  // addiu $v0, $zero, 2 (target of bne, delay slot of return)
+  AppendWord(code, 0x03E00008);  // jr $ra
+  AppendWord(code, 0x00000000);  // nop
+
+  DisassemblerOptions options;
+  options.emit_line_comments = false;
+  options.emit_function_framing = false;
+  Disassembler disasm(nullptr, options);
+
+  auto func_or = disasm.DisassembleFunction(code, 0x80700000);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+
+  const auto& func = *func_or;
+  EXPECT_EQ(func.vram_start, 0x80700000u);
+  EXPECT_GE(func.vram_end, 0x80700014u);
+  EXPECT_NE(func.emitted_assembly.find(".L8070000C:"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -119,8 +119,9 @@ absl::StatusOr<DisassembledFunction> Disassembler::DisassembleFunction(
     }
 
     if (inst.IsReturn()) {
-      // jr $ra return: include delay slot instruction if no forward branch jumps past it
-      if (max_forward_target <= pc + 4) {
+      // jr $ra return: include delay slot instruction if no forward branch jumps to delay slot or
+      // past it
+      if (max_forward_target <= pc) {
         func_end_offset = std::min<size_t>(offset + 8, code.size());
 
         // Include trailing alignment NOPs up to next symbol or non-zero instruction

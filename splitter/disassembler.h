@@ -53,6 +53,14 @@ class Disassembler {
     known_entrypoints_.insert(vram_address);
   }
 
+  // Returns all known function entrypoints.
+  const absl::flat_hash_set<uint32_t>& KnownEntrypoints() const { return known_entrypoints_; }
+
+  // Sets known function entrypoints.
+  void SetKnownEntrypoints(absl::flat_hash_set<uint32_t> entrypoints) {
+    known_entrypoints_ = std::move(entrypoints);
+  }
+
   // Pre-scans a code buffer for jal instructions to discover function entrypoints,
   // and branches/jumps to discover segment-wide labels.
   void PreScanCode(absl::Span<const uint8_t> code, uint32_t vram_start);
