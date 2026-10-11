@@ -159,7 +159,7 @@ std::vector<DiscoveredSymbol> AutoSymbolFinder::DiscoveredFuncSymbols() const {
 std::string AutoSymbolFinder::GenerateUndefinedSymsScript() const {
   std::string output = "/* Auto-generated undefined data symbols */\n";
   for (const auto& sym : DiscoveredDataSymbols()) {
-    absl::StrAppend(&output, absl::StrFormat("%s = 0x%08X;\n", sym.name, sym.address));
+    absl::StrAppend(&output, absl::StrFormat("PROVIDE(%s = 0x%08X);\n", sym.name, sym.address));
   }
   return output;
 }
@@ -167,7 +167,7 @@ std::string AutoSymbolFinder::GenerateUndefinedSymsScript() const {
 std::string AutoSymbolFinder::GenerateUndefinedFuncsScript() const {
   std::string output = "/* Auto-generated undefined function symbols */\n";
   for (const auto& sym : DiscoveredFuncSymbols()) {
-    absl::StrAppend(&output, absl::StrFormat("%s = 0x%08X;\n", sym.name, sym.address));
+    absl::StrAppend(&output, absl::StrFormat("PROVIDE(%s = 0x%08X);\n", sym.name, sym.address));
   }
   return output;
 }

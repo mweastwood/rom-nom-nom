@@ -28,7 +28,7 @@ class LinkerScriptGenerator {
   // Generates the primary GNU ld script (SECTIONS, memory tracking, .text/.data/.rodata/.bss).
   absl::StatusOr<std::string> GenerateMainScript(const SplitConfig& config) const;
 
-  // Generates a symbols.ld script from a SymbolIndex (symbol = 0xXXXXXXXX;).
+  // Generates a symbols.ld script from a SymbolIndex (PROVIDE(symbol = 0xXXXXXXXX);).
   std::string GenerateSymbolsScript(const SymbolIndex& symbols) const;
 
   // Generates standard N64 hardware and OS memory-mapped register definitions.

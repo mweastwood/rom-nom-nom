@@ -35,7 +35,7 @@ TEST(AutoSymbolsTest, DiscoversUndefinedFunctionCall) {
   EXPECT_EQ(funcs[0].reference_count, 1u);
 
   std::string script = finder.GenerateUndefinedFuncsScript();
-  EXPECT_NE(script.find("func_80099990 = 0x80099990;"), std::string::npos);
+  EXPECT_NE(script.find("PROVIDE(func_80099990 = 0x80099990);"), std::string::npos);
 }
 
 TEST(AutoSymbolsTest, DiscoversUndefinedDataRelocation) {
@@ -63,7 +63,7 @@ TEST(AutoSymbolsTest, DiscoversUndefinedDataRelocation) {
   EXPECT_EQ(data_syms[0].reference_count, 2u);
 
   std::string script = finder.GenerateUndefinedSymsScript();
-  EXPECT_NE(script.find("D_801F7004 = 0x801F7004;"), std::string::npos);
+  EXPECT_NE(script.find("PROVIDE(D_801F7004 = 0x801F7004);"), std::string::npos);
 }
 
 TEST(AutoSymbolsTest, ExcludesKnownSymbols) {
