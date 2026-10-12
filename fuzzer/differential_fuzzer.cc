@@ -35,12 +35,22 @@ void DifferentialFuzzer::SetupEmulator(MipsEmulator* emu, const FuzzTestCase& te
   emu->SetRegister(Register::kA3, test_case.a3);
 
   // Floating point argument registers
-  if (test_case.f12_double != 0.0 || test_case.f14_double != 0.0) {
-    emu->SetFpDouble(FpRegister::kF12, test_case.f12_double);
-    emu->SetFpDouble(FpRegister::kF14, test_case.f14_double);
+  if (options_.check_f0_double) {
+    if (test_case.f12_double != 0.0 || test_case.f14_double != 0.0) {
+      emu->SetFpDouble(FpRegister::kF12, test_case.f12_double);
+      emu->SetFpDouble(FpRegister::kF14, test_case.f14_double);
+    } else {
+      emu->SetFpDouble(FpRegister::kF12, static_cast<double>(test_case.f12));
+      emu->SetFpDouble(FpRegister::kF14, static_cast<double>(test_case.f14));
+    }
   } else {
-    emu->SetFpRegister(FpRegister::kF12, test_case.f12);
-    emu->SetFpRegister(FpRegister::kF14, test_case.f14);
+    if (test_case.f12_double != 0.0 || test_case.f14_double != 0.0) {
+      emu->SetFpDouble(FpRegister::kF12, test_case.f12_double);
+      emu->SetFpDouble(FpRegister::kF14, test_case.f14_double);
+    } else {
+      emu->SetFpRegister(FpRegister::kF12, test_case.f12);
+      emu->SetFpRegister(FpRegister::kF14, test_case.f14);
+    }
   }
 
   // Stack arguments (sp + 16, sp + 20, ...)
@@ -109,19 +119,37 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
         absl::StrFormat("Return value v1 mismatch: target=0x%08X (%d) vs candidate=0x%08X (%d)",
                         comp->target_result.v1, static_cast<int32_t>(comp->target_result.v1),
                         comp->candidate_result.v1, static_cast<int32_t>(comp->candidate_result.v1));
-  } else if (options_.check_f0 && comp->target_result.f0_bits != comp->candidate_result.f0_bits) {
-    comp->result = EquivalenceResult::kReturnValueMismatch;
-    comp->failure_reason =
-        absl::StrFormat("Return value f0 mismatch: target=%f (0x%08X) vs candidate=%f (0x%08X)",
-                        comp->target_result.f0, comp->target_result.f0_bits,
-                        comp->candidate_result.f0, comp->candidate_result.f0_bits);
-  } else if (options_.check_f0_double &&
-             comp->target_result.f0_double_bits != comp->candidate_result.f0_double_bits) {
-    comp->result = EquivalenceResult::kReturnValueMismatch;
-    comp->failure_reason = absl::StrFormat(
-        "Return value f0_double mismatch: target=%f (0x%016llX) vs candidate=%f (0x%016llX)",
-        comp->target_result.f0_double, comp->target_result.f0_double_bits,
-        comp->candidate_result.f0_double, comp->candidate_result.f0_double_bits);
+  } else if (options_.check_f0) {
+    auto fp_equal = [](float a, float b, uint32_t a_bits, uint32_t b_bits) {
+      if (a_bits == b_bits) return true;
+      if (a == b) return true;
+      if (std::isnan(a) && std::isnan(b)) return true;
+      return false;
+    };
+    if (!fp_equal(comp->target_result.f0, comp->candidate_result.f0, comp->target_result.f0_bits,
+                  comp->candidate_result.f0_bits)) {
+      comp->result = EquivalenceResult::kReturnValueMismatch;
+      comp->failure_reason =
+          absl::StrFormat("Return value f0 mismatch: target=%f (0x%08X) vs candidate=%f (0x%08X)",
+                          comp->target_result.f0, comp->target_result.f0_bits,
+                          comp->candidate_result.f0, comp->candidate_result.f0_bits);
+    }
+  } else if (options_.check_f0_double) {
+    auto fp_double_equal = [](double a, double b, uint64_t a_bits, uint64_t b_bits) {
+      if (a_bits == b_bits) return true;
+      if (a == b) return true;
+      if (std::isnan(a) && std::isnan(b)) return true;
+      return false;
+    };
+    if (!fp_double_equal(comp->target_result.f0_double, comp->candidate_result.f0_double,
+                         comp->target_result.f0_double_bits,
+                         comp->candidate_result.f0_double_bits)) {
+      comp->result = EquivalenceResult::kReturnValueMismatch;
+      comp->failure_reason = absl::StrFormat(
+          "Return value f0_double mismatch: target=%f (0x%016llX) vs candidate=%f (0x%016llX)",
+          comp->target_result.f0_double, comp->target_result.f0_double_bits,
+          comp->candidate_result.f0_double, comp->candidate_result.f0_double_bits);
+    }
   } else if (options_.check_memory_writes) {
     std::vector<MemoryWrite> target_writes = comp->target_result.write_log;
     std::vector<MemoryWrite> candidate_writes = comp->candidate_result.write_log;

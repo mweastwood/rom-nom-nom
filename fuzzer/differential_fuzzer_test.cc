@@ -218,6 +218,90 @@ TEST(DifferentialFuzzerTest, DoublePrecisionFloatComparison) {
   EXPECT_DOUBLE_EQ(comp.target_result.f0_double, 25.0);
 }
 
+TEST(DifferentialFuzzerTest, SinglePrecisionFloatNanMatchesAsEquivalent) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = false;
+  opts.check_f0 = true;
+  DifferentialFuzzer fuzzer(opts);
+
+  // Target: mtc1 $a0, $f0; jr $ra; nop
+  std::vector<uint32_t> target = {
+      0x44840000,  // mtc1 $a0, $f0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: mtc1 $a1, $f0; jr $ra; nop
+  std::vector<uint32_t> candidate = {
+      0x44850000,  // mtc1 $a1, $f0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x7FC00000;  // Standard quiet NaN
+  tc.a1 = 0x7F800001;  // Differing NaN bit pattern
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+
+  // Verify non-NaN still reports mismatch
+  tc.a1 = 0x3F800000;  // 1.0f
+  DifferentialComparison mismatch_comp =
+      fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(mismatch_comp.result, EquivalenceResult::kReturnValueMismatch);
+}
+
+TEST(DifferentialFuzzerTest, DoublePrecisionFloatNanMatchesAsEquivalent) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = false;
+  opts.check_f0_double = true;
+  DifferentialFuzzer fuzzer(opts);
+
+  // Target: div.d $f0, $f12, $f14; jr $ra; nop
+  std::vector<uint32_t> target = {
+      0x462E6003,  // div.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: div.d $f0, $f14, $f12; jr $ra; nop
+  std::vector<uint32_t> candidate = {
+      0x462C7003,  // div.d $f0, $f14, $f12
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.f12_double = 0.0;
+  tc.f14_double = 0.0;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, DoublePrecisionArgumentCasting) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = false;
+  opts.check_f0_double = true;
+  DifferentialFuzzer fuzzer(opts);
+
+  // Function: mul.d $f0, $f12, $f12; jr $ra; nop
+  std::vector<uint32_t> code = {
+      0x462C6002,  // mul.d $f0, $f12, $f12
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.f12 = 3.0f;
+  tc.f12_double = 0.0;  // Single-precision provided, should be cast to double
+
+  DifferentialComparison comp = fuzzer.Compare(code, 0x80001000, code, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_DOUBLE_EQ(comp.target_result.f0_double, 9.0);
+}
+
 TEST(DifferentialFuzzerTest, PointerPayloadBufferFuzzing) {
   DifferentialFuzzer fuzzer;
 
