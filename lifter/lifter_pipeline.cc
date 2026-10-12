@@ -36,6 +36,8 @@ struct MathIntrinsic {
 };
 
 constexpr MathIntrinsic kMathIntrinsics[] = {
+    {"__n64_sqrtf", "f32", "sqrt.s %0, %1"},
+    {"__n64_sqrt", "f64", "sqrt.d %0, %1"},
     {"sqrtf", "f32", "sqrt.s %0, %1"},
     {"sqrt", "f64", "sqrt.d %0, %1"},
     {"fabsf", "f32", "abs.s %0, %1"},
@@ -600,8 +602,12 @@ typedef double f64;
     types_output_stream << R"(#else
 #ifdef __cplusplus
 #include <cmath>
+static inline f32 __n64_sqrtf(f32 x) { return std::sqrt(x); }
+static inline f64 __n64_sqrt(f64 x) { return std::sqrt(x); }
 #else
 #include <math.h>
+static inline f32 __n64_sqrtf(f32 x) { return sqrtf(x); }
+static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
 #endif
 #endif
 )";
