@@ -19,6 +19,7 @@
 #include "absl/strings/str_format.h"
 #include "differ/differ_pipeline.h"
 #include "differ/target_extractor.h"
+#include "fuzzer/candidate_symbol_map.h"
 #include "fuzzer/differential_fuzzer.h"
 #include "fuzzer/equivalence_runner.h"
 #include "fuzzer/rom_function_scanner.h"
@@ -77,6 +78,11 @@ std::vector<uint8_t> ReadBinaryFile(const std::filesystem::path& path) {
   }
   return {};
 }
+
+using rom_nom_nom::fuzzer::BuildCandidateSymbolMap;
+using rom_nom_nom::fuzzer::CandidateSymbolMap;
+using rom_nom_nom::fuzzer::ExtractCandidateDataPayloads;
+using rom_nom_nom::fuzzer::ExtractTargetDataPayloads;
 
 }  // namespace
 
@@ -176,14 +182,6 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  // Set up equivalence runner options
-  rom_nom_nom::fuzzer::EquivalenceRunnerOptions runner_opts;
-  runner_opts.random_vectors_per_function = num_vectors;
-  runner_opts.pointer_vectors_per_function = num_pointer_vectors;
-  runner_opts.seed = seed;
-  runner_opts.num_threads = jobs > 0 ? static_cast<size_t>(jobs) : 0;
-  rom_nom_nom::fuzzer::EquivalenceRunner runner(runner_opts);
-
   // Initialize TargetExtractor
   auto extractor_or = rom_nom_nom::TargetExtractor::Create({
       .repo_root = repo_root,
@@ -198,6 +196,130 @@ int main(int argc, char* argv[]) {
   }
   auto extractor = std::move(*extractor_or);
 
+  std::string candidate_elf_path = absl::GetFlag(FLAGS_candidate_elf);
+  candidate_elf_path = resolve_relative(candidate_elf_path);
+  if (candidate_elf_path.empty() && !candidate_rom_path.empty()) {
+    std::filesystem::path cand_rom_p(candidate_rom_path);
+    if (cand_rom_p.extension() == ".z64") {
+      std::filesystem::path potential_elf = cand_rom_p;
+      potential_elf.replace_extension(".elf");
+      if (std::filesystem::exists(potential_elf, ec)) {
+        candidate_elf_path = potential_elf.string();
+      }
+    }
+  }
+
+  std::vector<uint8_t> elf_bytes;
+  if (!candidate_elf_path.empty()) {
+    elf_bytes = ReadBinaryFile(candidate_elf_path);
+  }
+
+  // Set up equivalence runner options
+  rom_nom_nom::fuzzer::EquivalenceRunnerOptions runner_opts;
+  runner_opts.random_vectors_per_function = num_vectors;
+  runner_opts.pointer_vectors_per_function = num_pointer_vectors;
+  runner_opts.seed = seed;
+  runner_opts.num_threads = jobs > 0 ? static_cast<size_t>(jobs) : 0;
+
+  if (!elf_bytes.empty()) {
+    auto symbol_map = BuildCandidateSymbolMap(elf_bytes, extractor->Symbols());
+    if (!symbol_map.entries.empty()) {
+      auto map_ptr = std::make_shared<CandidateSymbolMap>(std::move(symbol_map));
+      runner_opts.fuzzer_options.candidate_to_target_address = [map = map_ptr](uint32_t addr) {
+        return map->Translate(addr);
+      };
+
+      std::vector<uint8_t> base_rom_for_payloads;
+      if (!base_rom_path.empty()) {
+        base_rom_for_payloads = ReadBinaryFile(base_rom_path);
+      }
+      auto target_payloads = ExtractTargetDataPayloads(base_rom_for_payloads, extractor->Config());
+      auto target_payloads_ptr = std::make_shared<std::vector<rom_nom_nom::fuzzer::MemoryPayload>>(
+          std::move(target_payloads));
+
+      uint32_t target_bss_start = 0;
+      uint32_t target_bss_end = 0;
+      if (extractor->Config() != nullptr) {
+        for (const auto& seg : extractor->Config()->segments()) {
+          for (int s = 0; s < seg.subsegments_size(); ++s) {
+            const auto& sub = seg.subsegments(s);
+            if (sub.type() == rom_nom_nom::SUBSEGMENT_BSS && sub.vram() != 0) {
+              if (target_bss_start == 0 || sub.vram() < target_bss_start) {
+                target_bss_start = sub.vram();
+              }
+              uint32_t bss_end = sub.vram() + (seg.bss_size() != 0 ? seg.bss_size() : 0x100000);
+              if (bss_end > target_bss_end) {
+                target_bss_end = bss_end;
+              }
+            }
+          }
+        }
+      }
+
+      auto read_payload = [payloads = target_payloads_ptr](uint32_t addr,
+                                                           size_t size) -> std::optional<uint64_t> {
+        for (const auto& p : *payloads) {
+          if (addr >= p.address && addr + size <= p.address + p.data.size()) {
+            size_t offset = addr - p.address;
+            if (size == 1) return p.data[offset];
+            if (size == 2) return rom_nom_nom::ReadBigEndian16(p.data.data() + offset);
+            if (size == 4) return rom_nom_nom::ReadBigEndian32(p.data.data() + offset);
+            if (size == 8) return rom_nom_nom::ReadBigEndian64(p.data.data() + offset);
+          }
+        }
+        return std::nullopt;
+      };
+
+      runner_opts.fuzzer_options.target_read_hook =
+          [read_payload, target_bss_start, target_bss_end](uint32_t target_vram, size_t size,
+                                                           bool is_fp) -> std::optional<uint64_t> {
+        if (target_bss_start != 0 && target_vram >= target_bss_start &&
+            target_vram < target_bss_end) {
+          return 0;
+        }
+        return read_payload(target_vram, size);
+      };
+
+      runner_opts.fuzzer_options.candidate_read_hook =
+          [map = map_ptr, read_payload, target_bss_start, target_bss_end,
+           has_candidate_payloads = !candidate_rom_path.empty()](
+              uint32_t cand_vram, size_t size, bool is_fp) -> std::optional<uint64_t> {
+        // 1. If the address is within candidate's own rodata section, candidate emulator
+        // already holds the compiled rodata (e.g. jump tables) directly.
+        if (map != nullptr && map->IsCandidateRodata(cand_vram, is_fp)) {
+          return std::nullopt;
+        }
+
+        // 2. Candidate address that translates to target rodata / data
+        uint32_t target_vram = (map != nullptr) ? map->Translate(cand_vram) : cand_vram;
+        if (target_bss_start != 0 && target_vram >= target_bss_start &&
+            target_vram < target_bss_end) {
+          return 0;
+        }
+
+        // If candidate data payloads were loaded from candidate ROM, candidate emulator
+        // already holds candidate's own data directly.
+        if (has_candidate_payloads && map != nullptr && map->IsCandidateData(cand_vram)) {
+          return std::nullopt;
+        }
+        if (target_vram != cand_vram) {
+          auto res = read_payload(target_vram, size);
+          if (res.has_value()) return *res;
+        }
+
+        // 3. Direct target address dereference (via embedded retail pointer in data table)
+        auto target_res = read_payload(cand_vram, size);
+        if (target_res.has_value()) {
+          return *target_res;
+        }
+
+        return std::nullopt;
+      };
+    }
+  }
+
+  rom_nom_nom::fuzzer::EquivalenceRunner runner(runner_opts);
+
   // Mode 1: Single function fuzzing via C source file or ROM
   if (!func_flag.empty()) {
     rom_nom_nom::fuzzer::FunctionEquivalenceTarget target;
@@ -211,6 +333,8 @@ int main(int argc, char* argv[]) {
     }
     target.vram = target_func_or->vram;
     target.target_words = target_func_or->raw_words;
+    std::vector<uint8_t> base_rom_bytes = ReadBinaryFile(base_rom_path);
+    target.target_initial_memory = ExtractTargetDataPayloads(base_rom_bytes, extractor->Config());
 
     // If source file given, compile via DifferPipeline
     if (!source_path.empty()) {
@@ -239,13 +363,30 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error reading candidate ROM file: " << candidate_rom_path << "\n";
         return 1;
       }
-      auto cand_or = extractor->ExtractFromRom(candidate_bytes, func_flag);
-      if (!cand_or.ok()) {
-        std::cerr << "Error extracting candidate function from candidate ROM: "
-                  << cand_or.status().message() << "\n";
-        return 1;
+      if (!candidate_elf_path.empty() && !elf_bytes.empty()) {
+        auto elf_cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::ScanFromElfAndRom(
+            candidate_bytes, elf_bytes, extractor->Config());
+        if (elf_cand_funcs_or.ok()) {
+          for (const auto& fn : *elf_cand_funcs_or) {
+            if (fn.name == func_flag) {
+              target.candidate_vram = fn.vram;
+              target.candidate_words = fn.raw_words;
+              break;
+            }
+          }
+        }
+        target.candidate_initial_memory =
+            ExtractCandidateDataPayloads(candidate_bytes, elf_bytes, extractor->Config());
       }
-      target.candidate_words = cand_or->raw_words;
+      if (target.candidate_words.empty()) {
+        auto cand_or = extractor->ExtractFromRom(candidate_bytes, func_flag);
+        if (!cand_or.ok()) {
+          std::cerr << "Error extracting candidate function from candidate ROM: "
+                    << cand_or.status().message() << "\n";
+          return 1;
+        }
+        target.candidate_words = cand_or->raw_words;
+      }
     } else {
       std::cerr << "Error: Fuzzing function '" << func_flag
                 << "' requires either --source=<path.c> or --candidate_rom=<path.z64>\n";
@@ -312,36 +453,20 @@ int main(int argc, char* argv[]) {
   }
   const auto& base_funcs = *base_funcs_or;
 
-  std::string candidate_elf_path = absl::GetFlag(FLAGS_candidate_elf);
-  candidate_elf_path = resolve_relative(candidate_elf_path);
-  if (candidate_elf_path.empty() && !candidate_rom_path.empty()) {
-    std::filesystem::path cand_rom_p(candidate_rom_path);
-    if (cand_rom_p.extension() == ".z64") {
-      std::filesystem::path potential_elf = cand_rom_p;
-      potential_elf.replace_extension(".elf");
-      if (std::filesystem::exists(potential_elf, ec)) {
-        candidate_elf_path = potential_elf.string();
-      }
-    }
-  }
-
   std::vector<rom_nom_nom::fuzzer::ScannedFunction> cand_funcs;
-  if (!candidate_elf_path.empty()) {
-    std::vector<uint8_t> elf_bytes = ReadBinaryFile(candidate_elf_path);
-    if (!elf_bytes.empty()) {
-      auto elf_cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::ScanFromElfAndRom(
-          built_bytes, elf_bytes, extractor->Config());
-      if (elf_cand_funcs_or.ok()) {
-        absl::flat_hash_map<std::string, const rom_nom_nom::fuzzer::ScannedFunction*> cand_map;
-        for (const auto& fn : *elf_cand_funcs_or) {
-          cand_map[fn.name] = &fn;
-        }
-        cand_funcs.reserve(base_funcs.size());
-        for (const auto& base_fn : base_funcs) {
-          auto it = cand_map.find(base_fn.name);
-          if (it != cand_map.end()) {
-            cand_funcs.push_back(*it->second);
-          }
+  if (!elf_bytes.empty()) {
+    auto elf_cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::ScanFromElfAndRom(
+        built_bytes, elf_bytes, extractor->Config());
+    if (elf_cand_funcs_or.ok()) {
+      absl::flat_hash_map<std::string, const rom_nom_nom::fuzzer::ScannedFunction*> cand_map;
+      for (const auto& fn : *elf_cand_funcs_or) {
+        cand_map[fn.name] = &fn;
+      }
+      cand_funcs.reserve(base_funcs.size());
+      for (const auto& base_fn : base_funcs) {
+        auto it = cand_map.find(base_fn.name);
+        if (it != cand_map.end()) {
+          cand_funcs.push_back(*it->second);
         }
       }
     }
@@ -399,6 +524,10 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  auto target_payloads = ExtractTargetDataPayloads(target_bytes, extractor->Config());
+  auto candidate_payloads =
+      ExtractCandidateDataPayloads(built_bytes, elf_bytes, extractor->Config());
+
   std::vector<rom_nom_nom::fuzzer::FunctionEquivalenceTarget> targets;
   targets.reserve(base_funcs.size());
   for (size_t i = 0; i < base_funcs.size(); ++i) {
@@ -416,6 +545,8 @@ int main(int argc, char* argv[]) {
     target.candidate_vram = cand_fn.vram;
     target.target_words = base_fn.raw_words;
     target.candidate_words = cand_fn.raw_words;
+    target.target_initial_memory = target_payloads;
+    target.candidate_initial_memory = candidate_payloads;
 
     targets.push_back(std::move(target));
   }

@@ -107,10 +107,41 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "candidate_symbol_map",
+    srcs = ["candidate_symbol_map.cc"],
+    hdrs = ["candidate_symbol_map.h"],
+    deps = [
+        ":differential_fuzzer",
+        "//core:endian",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "candidate_symbol_map_test",
+    srcs = ["candidate_symbol_map_test.cc"],
+    deps = [
+        ":candidate_symbol_map",
+        "//core:endian",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "fuzzer",
     srcs = ["main.cc"],
     deps = [
+        ":candidate_symbol_map",
         ":differential_fuzzer",
         ":equivalence_runner",
         ":rom_function_scanner",
