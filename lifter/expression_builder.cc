@@ -1990,98 +1990,93 @@ int ExpressionBuilder::DetermineFpParameterCount(absl::Span<const Instruction> i
   return 0;
 }
 
-bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
+bool ExpressionBuilder::DetermineReturnsV0(
+    const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
+    const absl::flat_hash_set<std::string>* functions_returning_v0) {
   if (cfg.Blocks().empty()) {
     return false;
   }
 
-  // Build a lookup map from block ID to block index
   absl::flat_hash_map<uint32_t, size_t> id_to_index;
   for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
     id_to_index[cfg.Blocks()[i].id] = i;
   }
 
-  // Pre-calculate per-block properties for $v0
-  struct BlockV0Props {
-    bool has_return = false;
-    bool has_call = false;
-    bool defines_v0 = false;
-    bool v0_used_after_last_def = false;
-    bool uses_v0_before_def = false;
-  };
-
-  std::vector<BlockV0Props> block_props(cfg.Blocks().size());
-
-  for (size_t b_idx = 0; b_idx < cfg.Blocks().size(); ++b_idx) {
-    const auto& block = cfg.Blocks()[b_idx];
-    auto& props = block_props[b_idx];
-    props.has_return = block.HasReturn();
-
-    int last_def_idx = -1;
-    for (size_t i = 0; i < block.instructions.size(); ++i) {
-      if (block.instructions[i].opcode == Opcode::kJal ||
-          block.instructions[i].opcode == Opcode::kJalr) {
-        props.has_call = true;
-        // Subroutine call clobbers any prior $v0 definition in this block
-        last_def_idx = -1;
-        props.defines_v0 = false;
-        props.v0_used_after_last_def = false;
-        continue;
+  std::vector<bool> reachable(cfg.Blocks().size(), false);
+  std::vector<size_t> reach_worklist = {0};
+  reachable[0] = true;
+  while (!reach_worklist.empty()) {
+    size_t curr = reach_worklist.back();
+    reach_worklist.pop_back();
+    for (uint32_t succ_id : cfg.Blocks()[curr].successors) {
+      auto it = id_to_index.find(succ_id);
+      if (it != id_to_index.end() && !reachable[it->second]) {
+        reachable[it->second] = true;
+        reach_worklist.push_back(it->second);
       }
-
-      RegisterUseDef ud = GetInstructionUseDef(block.instructions[i]);
-      bool uses_v0 = false;
-      for (Register r : ud.gpr_uses) {
-        if (r == Register::kV0) {
-          uses_v0 = true;
-          break;
-        }
-      }
-      if (uses_v0) {
-        if (last_def_idx == -1) {
-          props.uses_v0_before_def = true;
-        } else {
-          props.v0_used_after_last_def = true;
-        }
-      }
-
-      bool defs_v0 = false;
-      for (Register r : ud.gpr_defs) {
-        if (r == Register::kV0) {
-          defs_v0 = true;
-          break;
-        }
-      }
-      if (defs_v0) {
-        props.defines_v0 = true;
-        last_def_idx = static_cast<int>(i);
-        props.v0_used_after_last_def = false;
-      }
-    }
-
-    // Direct check: if an exit block directly defines $v0 and does not use it after,
-    // it returns $v0.
-    if (props.has_return && props.defines_v0 && !props.v0_used_after_last_def) {
-      return true;
     }
   }
 
-  // Helper lambda: inspect a sequence of instructions to check if it produces an unconsumed def of
-  // $v0
-  auto produces_unconsumed_v0 = [](absl::Span<const Instruction> instructions) -> bool {
+  bool has_reachable_return = false;
+  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+    if (reachable[i] && cfg.Blocks()[i].HasReturn()) {
+      has_reachable_return = true;
+      break;
+    }
+  }
+  if (!has_reachable_return) {
+    return false;
+  }
+
+  auto eval_seq = [&](absl::Span<const Instruction> instructions) -> int {
     int last_def = -1;
-    bool used_after_last_def = false;
+    int last_call = -1;
+    bool used_before_def = false;
+    bool non_branch_used_after_last_def = false;
+    bool branch_used_after_last_def = false;
     for (size_t i = 0; i < instructions.size(); ++i) {
       if (instructions[i].opcode == Opcode::kJal || instructions[i].opcode == Opcode::kJalr) {
+        bool callee_returns_v0 = false;
+        if (instructions[i].opcode == Opcode::kJal) {
+          uint32_t target_vram = instructions[i].JumpTarget();
+          std::string callee_name;
+          if (symbol_index != nullptr) {
+            const auto* sym = symbol_index->FindByAddress(target_vram);
+            if (sym != nullptr) {
+              callee_name = sym->name();
+            }
+          }
+          if (callee_name.empty()) {
+            callee_name = absl::StrFormat("func_%08X", target_vram);
+          }
+          if (functions_returning_v0 != nullptr && functions_returning_v0->contains(callee_name)) {
+            callee_returns_v0 = true;
+          }
+        }
+        if (callee_returns_v0) {
+          last_def = static_cast<int>(i);
+          last_call = -1;
+          non_branch_used_after_last_def = false;
+          branch_used_after_last_def = false;
+          continue;
+        }
+        last_call = static_cast<int>(i);
         last_def = -1;
-        used_after_last_def = false;
+        non_branch_used_after_last_def = false;
+        branch_used_after_last_def = false;
         continue;
       }
       RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
       for (Register r : ud.gpr_uses) {
         if (r == Register::kV0) {
           if (last_def != -1) {
-            used_after_last_def = true;
+            if (instructions[i].IsBranch()) {
+              branch_used_after_last_def = true;
+            } else {
+              non_branch_used_after_last_def = true;
+            }
+          } else {
+            used_before_def = true;
           }
           break;
         }
@@ -2089,76 +2084,191 @@ bool ExpressionBuilder::DetermineReturnsV0(const ControlFlowGraph& cfg) {
       for (Register r : ud.gpr_defs) {
         if (r == Register::kV0) {
           last_def = static_cast<int>(i);
-          used_after_last_def = false;
+          non_branch_used_after_last_def = false;
+          branch_used_after_last_def = false;
           break;
         }
       }
     }
-    return last_def != -1 && !used_after_last_def;
-  };
-
-  // Check each outgoing edge across all blocks
-  for (size_t b_idx = 0; b_idx < cfg.Blocks().size(); ++b_idx) {
-    const auto& block = cfg.Blocks()[b_idx];
-    const auto* term = block.Terminator();
-
-    for (const auto& edge : block.outgoing_edges) {
-      absl::Span<const Instruction> executed_instructions = block.instructions;
-      // If this is a fallthrough edge from a branch likely, the delay slot instruction
-      // was nullified and did not execute on fallthrough.
-      if (edge.type == EdgeType::kFallthrough && term != nullptr && term->IsBranchLikely() &&
-          executed_instructions.size() > 1) {
-        executed_instructions = executed_instructions.subspan(0, executed_instructions.size() - 1);
+    if (last_def != -1) {
+      if (non_branch_used_after_last_def) {
+        return -1;
       }
-
-      if (!produces_unconsumed_v0(executed_instructions)) {
-        continue;
-      }
-
-      // This edge carries an unconsumed definition of $v0 into edge.to_block_id.
-      // Search forward to see if it reaches any exit block without being consumed or redefined.
-      auto target_it = id_to_index.find(edge.to_block_id);
-      if (target_it == id_to_index.end()) {
-        continue;
-      }
-
-      std::vector<size_t> worklist = {target_it->second};
-      absl::flat_hash_set<size_t> visited = {target_it->second};
-
-      while (!worklist.empty()) {
-        size_t curr_idx = worklist.back();
-        worklist.pop_back();
-
-        const auto& curr_props = block_props[curr_idx];
-        // If this block consumes $v0 before defining it, the reaching definition is consumed.
-        if (curr_props.uses_v0_before_def) {
-          continue;
+      Opcode op = instructions[last_def].opcode;
+      bool is_comparison = (op == Opcode::kSlt || op == Opcode::kSlti || op == Opcode::kSltu ||
+                            op == Opcode::kSltiu);
+      if (branch_used_after_last_def) {
+        if (is_comparison) {
+          return -1;
         }
-
-        // If this block is an exit block and does not redefine $v0,
-        // the unconsumed definition reaches the return only if no call intervened!
-        if (curr_props.has_return && !curr_props.defines_v0 && !curr_props.has_call) {
-          return true;
-        }
-
-        // If this block defines $v0 or contains a call, it kills the incoming def.
-        if (curr_props.defines_v0 || curr_props.has_call) {
-          continue;
-        }
-
-        // Otherwise propagate through successors.
-        const auto& curr_block = cfg.Blocks()[curr_idx];
-        for (uint32_t succ_id : curr_block.successors) {
-          auto it = id_to_index.find(succ_id);
-          if (it != id_to_index.end() && visited.insert(it->second).second) {
-            worklist.push_back(it->second);
+        for (const auto& inst : instructions) {
+          if (inst.IsBranch() && inst.BranchTarget() <= inst.vram) {
+            return -1;
           }
         }
+      }
+      if (instructions.size() > 1 && instructions[instructions.size() - 2].IsBranch() &&
+          is_comparison) {
+        return -1;
+      }
+      return 1;
+    }
+    if (last_call != -1 || used_before_def) {
+      return -1;
+    }
+    return 0;
+  };
+
+  std::vector<std::vector<size_t>> predecessors(cfg.Blocks().size());
+  for (size_t u = 0; u < cfg.Blocks().size(); ++u) {
+    if (!reachable[u]) continue;
+    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
+      auto it = id_to_index.find(succ_id);
+      if (it != id_to_index.end()) {
+        predecessors[it->second].push_back(u);
       }
     }
   }
 
-  return false;
+  std::vector<bool> in_avail(cfg.Blocks().size(), false);
+  std::vector<bool> out_avail(cfg.Blocks().size(), false);
+  in_avail[0] = false;
+  int entry_effect = eval_seq(cfg.Blocks()[0].instructions);
+  out_avail[0] = (entry_effect == 1);
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+      if (!reachable[b]) continue;
+
+      bool new_in = false;
+      if (b == 0) {
+        new_in = false;
+      } else if (!predecessors[b].empty()) {
+        for (size_t p : predecessors[b]) {
+          const auto& p_block = cfg.Blocks()[p];
+          const auto* term = p_block.Terminator();
+          absl::Span<const Instruction> executed = p_block.instructions;
+          bool is_likely_fallthrough = false;
+          if (term != nullptr && term->IsBranchLikely()) {
+            for (const auto& edge : p_block.outgoing_edges) {
+              if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kFallthrough) {
+                is_likely_fallthrough = true;
+                break;
+              }
+            }
+          }
+          if (is_likely_fallthrough && executed.size() > 1) {
+            executed = executed.subspan(0, executed.size() - 1);
+          }
+
+          bool is_taken_branch = false;
+          if (term != nullptr && term->IsBranch()) {
+            for (const auto& edge : p_block.outgoing_edges) {
+              if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kBranch) {
+                is_taken_branch = true;
+                break;
+              }
+            }
+          }
+          if (is_taken_branch && executed.size() > 1) {
+            RegisterUseDef delay_ud = GetInstructionUseDef(executed.back());
+            bool delay_defs_v0 = false;
+            for (Register d : delay_ud.gpr_defs) {
+              if (d == Register::kV0) delay_defs_v0 = true;
+            }
+            if (delay_defs_v0) {
+              for (const auto& edge : p_block.outgoing_edges) {
+                if (edge.type == EdgeType::kFallthrough) {
+                  auto ft_it = id_to_index.find(edge.to_block_id);
+                  if (ft_it != id_to_index.end()) {
+                    const auto& ft_block = cfg.Blocks()[ft_it->second];
+                    bool ft_uses_v0 = false;
+                    for (const auto& ft_inst : ft_block.instructions) {
+                      RegisterUseDef ft_ud = GetInstructionUseDef(ft_inst);
+                      for (Register u : ft_ud.gpr_uses) {
+                        if (u == Register::kV0) {
+                          ft_uses_v0 = true;
+                          break;
+                        }
+                      }
+                      if (ft_uses_v0) break;
+                      for (Register d : ft_ud.gpr_defs) {
+                        if (d == Register::kV0) break;
+                      }
+                    }
+                    if (ft_uses_v0) {
+                      executed = executed.subspan(0, executed.size() - 1);
+                    }
+                  }
+                  break;
+                }
+              }
+            }
+          }
+
+          int effect = eval_seq(executed);
+          bool edge_avail = false;
+          if (effect == 1) {
+            edge_avail = true;
+          } else if (effect == -1) {
+            edge_avail = false;
+          } else {
+            edge_avail = in_avail[p];
+          }
+
+          if (edge_avail) {
+            new_in = true;
+            break;
+          }
+        }
+      }
+
+      if (new_in != in_avail[b]) {
+        in_avail[b] = new_in;
+        changed = true;
+      }
+
+      int blk_effect = eval_seq(cfg.Blocks()[b].instructions);
+      bool new_out = false;
+      if (blk_effect == 1) {
+        new_out = true;
+      } else if (blk_effect == -1) {
+        new_out = false;
+      } else {
+        new_out = in_avail[b];
+      }
+
+      if (new_out != out_avail[b]) {
+        out_avail[b] = new_out;
+        changed = true;
+      }
+    }
+  }
+
+  bool any_return_avail = false;
+  for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+    if (!reachable[b]) continue;
+    const auto& block = cfg.Blocks()[b];
+    if (!block.HasReturn()) continue;
+
+    int effect = eval_seq(block.instructions);
+    bool return_avail = false;
+    if (effect == 1) {
+      return_avail = true;
+    } else if (effect == -1) {
+      return_avail = false;
+    } else {
+      return_avail = in_avail[b];
+    }
+
+    if (return_avail) {
+      any_return_avail = true;
+    }
+  }
+
+  return any_return_avail;
 }
 
 bool ExpressionBuilder::DetermineReturnsF0(const ControlFlowGraph& cfg) {

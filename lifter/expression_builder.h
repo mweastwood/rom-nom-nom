@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
 #include "lifter/control_flow_graph.h"
@@ -136,7 +137,9 @@ class ExpressionBuilder {
 
   // Analyzes the CFG to determine if the function returns a value in $v0.
   // Returns true if there is an unconsumed definition of $v0 that reaches a return instruction.
-  static bool DetermineReturnsV0(const ControlFlowGraph& cfg);
+  static bool DetermineReturnsV0(
+      const ControlFlowGraph& cfg, const SymbolIndex* symbol_index = nullptr,
+      const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr);
 
   // Analyzes the CFG to determine if the function returns a float value in $f0.
   static bool DetermineReturnsF0(const ControlFlowGraph& cfg);

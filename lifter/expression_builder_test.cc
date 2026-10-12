@@ -632,6 +632,26 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0LoopVoidFunction) {
   EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
 }
 
+TEST(ExpressionBuilderTest, DetermineReturnsV0LoopWithBeqlCondition) {
+  // MessageInit-like pattern:
+  // Loop defines $v0 via andi, then loops back with beql $v0, $zero.
+  // On loop exit, falls through to jr $ra. $v0 is only the loop condition.
+  std::vector<uint32_t> words = {
+      0x00002021,  // 00: addu  $a0, $zero, $zero
+      0x3082FFFF,  // 04: andi  $v0, $a0, 0xFFFF
+      0x24840001,  // 08: addiu $a0, $a0, 1
+      0x5040FFFE,  // 0C: beql  $v0, $zero, 0x80020004
+      0x24840001,  // 10: addiu $a0, $a0, 1
+      0x03E00008,  // 14: jr    $ra
+      0x00000000,  // 18: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
 TEST(ExpressionBuilderTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) {
   // Pattern matching GraphicInit:
   // Loop defines $v0, then on loop exit an external call occurs, then the function returns without
@@ -652,6 +672,181 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) 
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
   EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0PartiallyDefinedVoidFunction) {
+  // Pattern matching func_800D0318:
+  // Block 0:
+  //   beqz $a0, .L_exit
+  //   nop
+  // Block 1:
+  //   addiu $v0, $zero, 3
+  //   beq $a0, $v0, .L_exit
+  //   slti $v0, $a0, 4
+  // Block 2 (.L_exit):
+  //   jr $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x10800004,  // 00: beqz $a0, +4 -> 0x80020014 (.L_exit)
+      0x00000000,  // 04: nop
+      0x24020003,  // 08: addiu $v0, $zero, 3
+      0x10820002,  // 0C: beq $a0, $v0, +2 -> 0x80020014 (.L_exit)
+      0x28820004,  // 10: slti $v0, $a0, 4
+      0x03E00008,  // 14: jr $ra
+      0x00000000,  // 18: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0WithCalleeReturningV0) {
+  // Function calls a callee that returns v0 right before return, so v0 is preserved and returned.
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 00: jal 0x80001000
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr $ra
+      0x00000000,  // 0C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  // Without known callee returning v0, call clobbers v0, so returns false.
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+
+  // With known callee returning v0, returns true.
+  absl::flat_hash_set<std::string> returning_v0 = {"func_80001000"};
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or, nullptr, &returning_v0));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0EmptyCfg) {
+  ControlFlowGraph cfg;
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(cfg));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0InfiniteLoopNoReturn) {
+  // Idle loop pattern: loop contains definitions but never returns
+  std::vector<uint32_t> words = {
+      0x24020001,  // 00: addiu $v0, $zero, 1
+      0x1000FFFD,  // 04: b     -3 -> 0x80020000
+      0x00000000,  // 08: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0UnreachableReturnIgnored) {
+  // Reachable exit returns void, while an unreachable block defines $v0 before returning
+  std::vector<uint32_t> words = {
+      0x03E00008,  // 00: jr    $ra
+      0x00000000,  // 04: nop
+      0x24020001,  // 08: addiu $v0, $zero, 1
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedThenConsumedBeforeReturn) {
+  // $v0 is used as a temporary scratch register and read before return:
+  std::vector<uint32_t> words = {
+      0x24020005,  // 00: addiu $v0, $zero, 5
+      0x00402021,  // 04: addu  $a0, $v0, $zero
+      0xAFAC0000,  // 08: sw    $a0, 0($sp)
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedInReturnDelaySlot) {
+  // Single block function where $v0 is defined in the return delay slot:
+  std::vector<uint32_t> words = {
+      0x03E00008,  // 00: jr    $ra
+      0x2402002A,  // 04: addiu $v0, $zero, 42
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedInBranchDelaySlotToReturn) {
+  // Block 0 branches to return block, defining $v0 in its branch delay slot:
+  std::vector<uint32_t> words = {
+      0x10000002,  // 00: b     +2 -> 0x8002000C
+      0x24020063,  // 04: addiu $v0, $zero, 99
+      0x00000000,  // 08: nop (padding)
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0LoopAccumulatorReturned) {
+  // Loop accumulator pattern: $v0 is updated in loop and returned at exit
+  std::vector<uint32_t> words = {
+      0x00001021,  // 00: addu  $v0, $zero, $zero
+      0x2408000A,  // 04: addiu $t0, $zero, 10
+      0x00481021,  // 08: addu  $v0, $v0, $t0
+      0x2108FFFF,  // 0C: addiu $t0, $t0, -1
+      0x1D00FFFD,  // 10: bgtz  $t0, -3 -> 0x80020008
+      0x00000000,  // 14: nop
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsV0WithSymbolIndexLookup) {
+  // Function calls 0x80045678, mapped to "ReadHardwareStatus" in SymbolIndex
+  std::string textproto = R"pb(
+    entries { name: "ReadHardwareStatus" address: 0x80045678 type: SYMBOL_FUNC }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x0C01159E,  // 00: jal 0x80045678
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr  $ra
+      0x00000000,  // 0C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  // Unknown callee -> returns false
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or, &(*index_or), nullptr));
+
+  // Callee known to return v0 -> returns true
+  absl::flat_hash_set<std::string> returning_v0 = {"ReadHardwareStatus"};
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or, &(*index_or), &returning_v0));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsTrueForDoubleOps) {
