@@ -740,41 +740,51 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kOr:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
+            inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression =
+              LiftedExpression::Binary("|", LiftRegisterOrConstant(*inst.rs, tracker),
+                                       LiftRegisterOrConstant(*inst.rt, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
       case Opcode::kOri:
         if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
-          if (inst.opcode == Opcode::kOri) {
-            statement.expression =
-                LiftedExpression::Binary("|", LiftRegisterOrConstant(*inst.rs, tracker),
-                                         LiftedExpression::Integer(inst.UnsignedImmediate()));
-          } else if (inst.rd.has_value() && *inst.rd != Register::kZero) {
-            statement.destination_variable = RegisterVarName(*inst.rd);
-            statement.expression =
-                LiftedExpression::Binary("|", LiftRegisterOrConstant(*inst.rs, tracker),
-                                         LiftRegisterOrConstant(*inst.rt, tracker));
-          }
+          statement.expression =
+              LiftedExpression::Binary("|", LiftRegisterOrConstant(*inst.rs, tracker),
+                                       LiftedExpression::Integer(inst.UnsignedImmediate()));
           statements.push_back(std::move(statement));
         }
         break;
 
       case Opcode::kXor:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rs.has_value() &&
+            inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression =
+              LiftedExpression::Binary("^", LiftRegisterOrConstant(*inst.rs, tracker),
+                                       LiftRegisterOrConstant(*inst.rt, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
       case Opcode::kXori:
         if (inst.rt.has_value() && *inst.rt != Register::kZero && inst.rs.has_value()) {
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
-          if (inst.opcode == Opcode::kXori) {
-            statement.expression =
-                LiftedExpression::Binary("^", LiftRegisterOrConstant(*inst.rs, tracker),
-                                         LiftedExpression::Integer(inst.UnsignedImmediate()));
-          } else if (inst.rd.has_value() && *inst.rd != Register::kZero) {
-            statement.destination_variable = RegisterVarName(*inst.rd);
-            statement.expression =
-                LiftedExpression::Binary("^", LiftRegisterOrConstant(*inst.rs, tracker),
-                                         LiftRegisterOrConstant(*inst.rt, tracker));
-          }
+          statement.expression =
+              LiftedExpression::Binary("^", LiftRegisterOrConstant(*inst.rs, tracker),
+                                       LiftedExpression::Integer(inst.UnsignedImmediate()));
           statements.push_back(std::move(statement));
         }
         break;

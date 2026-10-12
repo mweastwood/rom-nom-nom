@@ -824,6 +824,62 @@ TEST(ExpressionBuilderTest, NorGeneral) {
   EXPECT_EQ(statements[0].expression->ToString(), "~(arg0 | arg1)");
 }
 
+TEST(ExpressionBuilderTest, OrAndOriOperations) {
+  // or  $v0, $a0, $a1
+  // or  $v1, $a0, $zero
+  // ori $t0, $a0, 0x1234
+  // or  $zero, $a0, $a1 (should produce no statement)
+  // ori $zero, $a0, 0x1234 (should produce no statement)
+  std::vector<uint32_t> words = {
+      0x00851025,  // or  $v0, $a0, $a1
+      0x00801825,  // or  $v1, $a0, $zero
+      0x34881234,  // ori $t0, $a0, 0x1234
+      0x00850025,  // or  $zero, $a0, $a1
+      0x34801234,  // ori $zero, $a0, 0x1234
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].destination_variable, "v0");
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 | arg1;\n");
+
+  EXPECT_EQ(statements[1].destination_variable, "v1");
+  EXPECT_EQ(statements[1].ToString(), "v1 = arg0 | 0;\n");
+
+  EXPECT_EQ(statements[2].destination_variable, "temp_t0");
+  EXPECT_EQ(statements[2].ToString(), "temp_t0 = arg0 | 4660;\n");
+}
+
+TEST(ExpressionBuilderTest, XorAndXoriOperations) {
+  // xor  $v0, $a0, $a1
+  // xor  $v1, $a0, $zero
+  // xori $t0, $a0, 0x5678
+  // xor  $zero, $a0, $a1 (should produce no statement)
+  // xori $zero, $a0, 0x5678 (should produce no statement)
+  std::vector<uint32_t> words = {
+      0x00851026,  // xor  $v0, $a0, $a1
+      0x00801826,  // xor  $v1, $a0, $zero
+      0x38885678,  // xori $t0, $a0, 0x5678
+      0x00850026,  // xor  $zero, $a0, $a1
+      0x38805678,  // xori $zero, $a0, 0x5678
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(3));
+  EXPECT_EQ(statements[0].destination_variable, "v0");
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg0 ^ arg1;\n");
+
+  EXPECT_EQ(statements[1].destination_variable, "v1");
+  EXPECT_EQ(statements[1].ToString(), "v1 = arg0 ^ 0;\n");
+
+  EXPECT_EQ(statements[2].destination_variable, "temp_t0");
+  EXPECT_EQ(statements[2].ToString(), "temp_t0 = arg0 ^ 22136;\n");
+}
+
 TEST(ExpressionBuilderTest, ImmediateShiftOperations) {
   // sll $v0, $a0, 4
   // srl $v1, $a0, 4
