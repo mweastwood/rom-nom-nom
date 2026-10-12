@@ -931,7 +931,118 @@ TEST(DifferentialFuzzerTest, DetectsCalleeSavedZeroClearingCorruption) {
   FuzzTestCase tc;
   auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
   EXPECT_EQ(comp.result, EquivalenceResult::kCalleeSavedMismatch);
-  EXPECT_NE(comp.failure_reason.find("corrupted callee-saved registers"), std::string::npos);
+  EXPECT_NE(comp.failure_reason.find("corrupted callee-saved registers:"), std::string::npos);
+  EXPECT_NE(comp.failure_reason.find("s0: init=0xcafe0010 curr=0x0"), std::string::npos)
+      << comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, ReportsDetailedCalleeSavedRegistersOnCorruption) {
+  // Target: jr $ra; nop (preserves callee-saved registers)
+  std::vector<uint32_t> target = {
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: modifies $s1 and $sp
+  // addiu $s1, $zero, 0x1234
+  // addiu $sp, $sp, -32
+  // jr $ra; nop
+  std::vector<uint32_t> candidate = {
+      0x24111234,  // addiu $s1, $zero, 0x1234
+      0x27BDFFE0,  // addiu $sp, $sp, -32
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kCalleeSavedMismatch);
+  EXPECT_NE(comp.failure_reason.find("s1: init=0xcafe0011 curr=0x1234"), std::string::npos)
+      << comp.failure_reason;
+  EXPECT_NE(comp.failure_reason.find("sp: init=0x807fe000 curr=0x807fdfe0"), std::string::npos)
+      << comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, RetriesWithHigherStepLimitWhenCandidateExceedsLimit) {
+  // Target: li $v0, 0; jr $ra; nop (3 steps)
+  std::vector<uint32_t> target = {
+      0x24020000,  // li   $v0, 0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: li $t0, 15; loop: addiu $t0, $t0, -1; bnez $t0, loop; nop; li $v0, 0; jr $ra; nop
+  // Loop takes 15 iterations * 2 instructions = 30 steps + entry/exit = ~35 steps.
+  std::vector<uint32_t> candidate = {
+      0x2408000F,  // li    $t0, 15
+      0x2508FFFF,  // loop: addiu $t0, $t0, -1
+      0x1500FFFE,  //       bne   $t0, $zero, loop
+      0x00000000,  //       nop
+      0x24020000,  //       li    $v0, 0
+      0x03E00008,  //       jr    $ra
+      0x00000000,  //       nop
+  };
+
+  DifferentialFuzzer::Options options;
+  options.max_steps_per_run =
+      20;  // candidate fails in 20 steps, but succeeds in 20 * 5 = 100 steps
+  DifferentialFuzzer fuzzer(options);
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.candidate_result.status, ExecutionStatus::kHaltedReturn);
+}
+
+TEST(DifferentialFuzzerTest, RetriesWithHigherStepLimitWhenTargetExceedsLimit) {
+  // Target: loop taking ~35 steps
+  std::vector<uint32_t> target = {
+      0x2408000F,  // li    $t0, 15
+      0x2508FFFF,  // loop: addiu $t0, $t0, -1
+      0x1500FFFE,  //       bne   $t0, $zero, loop
+      0x00000000,  //       nop
+      0x24020000,  //       li    $v0, 0
+      0x03E00008,  //       jr    $ra
+      0x00000000,  //       nop
+  };
+
+  // Candidate: li $v0, 0; jr $ra; nop (3 steps)
+  std::vector<uint32_t> candidate = {
+      0x24020000,  // li   $v0, 0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer::Options options;
+  options.max_steps_per_run = 20;
+  DifferentialFuzzer fuzzer(options);
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.status, ExecutionStatus::kHaltedReturn);
+}
+
+TEST(DifferentialFuzzerTest, ExecutionStatusMismatchIncludesStepsAndV0) {
+  // Target: li $v0, 42; jr $ra; nop
+  std::vector<uint32_t> target = {
+      0x2402002A,  // li   $v0, 42
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: teq $zero, $zero (traps / kIntegerOverflow or exception)
+  std::vector<uint32_t> candidate = {
+      0x00000034,  // teq  $zero, $zero
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kStatusMismatch);
+  EXPECT_NE(comp.failure_reason.find("steps="), std::string::npos) << comp.failure_reason;
+  EXPECT_NE(comp.failure_reason.find("v0=0x2a"), std::string::npos) << comp.failure_reason;
 }
 
 }  // namespace

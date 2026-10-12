@@ -104,6 +104,17 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
   comp->target_result = target_emu_.RunFunction(target_vram, options_.max_steps_per_run);
   comp->candidate_result = candidate_emu_.RunFunction(candidate_vram, options_.max_steps_per_run);
 
+  if (comp->target_result.status == ExecutionStatus::kMaxStepsReached &&
+      comp->candidate_result.status != ExecutionStatus::kMaxStepsReached) {
+    SetupEmulator(&target_emu_, test_case);
+    comp->target_result = target_emu_.RunFunction(target_vram, options_.max_steps_per_run * 5);
+  } else if (comp->candidate_result.status == ExecutionStatus::kMaxStepsReached &&
+             comp->target_result.status != ExecutionStatus::kMaxStepsReached) {
+    SetupEmulator(&candidate_emu_, test_case);
+    comp->candidate_result =
+        candidate_emu_.RunFunction(candidate_vram, options_.max_steps_per_run * 5);
+  }
+
   // 1. Check ExecutionStatus
   bool both_faulted = (comp->target_result.status == ExecutionStatus::kMemoryFault ||
                        comp->target_result.status == ExecutionStatus::kIntegerOverflow) &&
@@ -113,20 +124,71 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
   if (comp->target_result.status != comp->candidate_result.status && !both_faulted) {
     comp->result = EquivalenceResult::kStatusMismatch;
     comp->failure_reason = absl::StrFormat(
-        "ExecutionStatus mismatch: target=%d (%s) vs candidate=%d (%s)",
+        "ExecutionStatus mismatch: target=%d (%s, steps=%llu, v0=0x%x) vs candidate=%d (%s, "
+        "steps=%llu)",
         static_cast<int>(comp->target_result.status), comp->target_result.error_message,
-        static_cast<int>(comp->candidate_result.status), comp->candidate_result.error_message);
+        comp->target_result.total_steps, comp->target_result.v0,
+        static_cast<int>(comp->candidate_result.status), comp->candidate_result.error_message,
+        comp->candidate_result.total_steps);
   } else if (comp->target_result.status != ExecutionStatus::kHaltedReturn || both_faulted) {
     // If both trapped or halted with a non-return status, consider equivalent in error.
     comp->result = EquivalenceResult::kEquivalent;
   } else if (options_.check_callee_saved &&
+             (target_emu_.GetCalleeSavedRegisters() == target_initial_saved) &&
+             !(candidate_emu_.GetCalleeSavedRegisters() == candidate_initial_saved)) {
+    comp->result = EquivalenceResult::kCalleeSavedMismatch;
+    auto c_saved = candidate_emu_.GetCalleeSavedRegisters();
+    std::string diff_regs;
+    if (c_saved.s0 != candidate_initial_saved.s0) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s0: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s0, c_saved.s0));
+    }
+    if (c_saved.s1 != candidate_initial_saved.s1) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s1: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s1, c_saved.s1));
+    }
+    if (c_saved.s2 != candidate_initial_saved.s2) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s2: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s2, c_saved.s2));
+    }
+    if (c_saved.s3 != candidate_initial_saved.s3) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s3: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s3, c_saved.s3));
+    }
+    if (c_saved.s4 != candidate_initial_saved.s4) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s4: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s4, c_saved.s4));
+    }
+    if (c_saved.s5 != candidate_initial_saved.s5) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s5: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s5, c_saved.s5));
+    }
+    if (c_saved.s6 != candidate_initial_saved.s6) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s6: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s6, c_saved.s6));
+    }
+    if (c_saved.s7 != candidate_initial_saved.s7) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" s7: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.s7, c_saved.s7));
+    }
+    if (c_saved.gp != candidate_initial_saved.gp) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" gp: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.gp, c_saved.gp));
+    }
+    if (c_saved.sp != candidate_initial_saved.sp) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" sp: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.sp, c_saved.sp));
+    }
+    if (c_saved.fp != candidate_initial_saved.fp) {
+      absl::StrAppend(&diff_regs, absl::StrFormat(" fp: init=0x%x curr=0x%x",
+                                                  candidate_initial_saved.fp, c_saved.fp));
+    }
+    comp->failure_reason =
+        absl::StrCat("Candidate code corrupted callee-saved registers:", diff_regs);
+  } else if (options_.check_callee_saved &&
              !(target_emu_.GetCalleeSavedRegisters() == target_initial_saved)) {
     comp->result = EquivalenceResult::kCalleeSavedMismatch;
     comp->failure_reason = "Target code corrupted callee-saved registers";
-  } else if (options_.check_callee_saved &&
-             !(candidate_emu_.GetCalleeSavedRegisters() == candidate_initial_saved)) {
-    comp->result = EquivalenceResult::kCalleeSavedMismatch;
-    comp->failure_reason = "Candidate code corrupted callee-saved registers";
   } else if (options_.check_v0 && comp->target_result.v0 != comp->candidate_result.v0) {
     comp->result = EquivalenceResult::kReturnValueMismatch;
     comp->failure_reason =
