@@ -30,6 +30,7 @@ struct FuzzTestCase {
   double f12_double = 0.0;
   double f14_double = 0.0;
 
+  std::vector<uint32_t> stack_args;
   std::vector<MemoryPayload> initial_memory;
 };
 

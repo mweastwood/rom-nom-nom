@@ -536,5 +536,101 @@ TEST(DifferentialFuzzerTest, DetectsMemoryStoreByteMismatchWithDifferentWriteCou
   EXPECT_NE(comp.failure_reason.find("Write log size mismatch"), std::string::npos);
 }
 
+TEST(DifferentialFuzzerTest, PassesStackArguments) {
+  DifferentialFuzzer fuzzer;
+
+  // Target: loads args 4 and 5 from stack (sp + 16, sp + 20) and adds all 6 args
+  // 00: lw   $t0, 16($sp)
+  // 04: lw   $t1, 20($sp)
+  // 08: addu $v0, $a0, $a1
+  // 0C: addu $v0, $v0, $a2
+  // 10: addu $v0, $v0, $a3
+  // 14: addu $v0, $v0, $t0
+  // 18: addu $v0, $v0, $t1
+  // 1C: jr   $ra
+  // 20: nop
+  std::vector<uint32_t> target = {
+      0x8FA80010,  // lw   $t0, 16($sp)
+      0x8FA90014,  // lw   $t1, 20($sp)
+      0x00851021,  // addu $v0, $a0, $a1
+      0x00461021,  // addu $v0, $v0, $a2
+      0x00471021,  // addu $v0, $v0, $a3
+      0x00481021,  // addu $v0, $v0, $t0
+      0x00491021,  // addu $v0, $v0, $t1
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: computes the same sum with swapped temporary registers
+  std::vector<uint32_t> candidate = {
+      0x8FA90010,  // lw   $t1, 16($sp)
+      0x8FA80014,  // lw   $t0, 20($sp)
+      0x00851021,  // addu $v0, $a0, $a1
+      0x00461021,  // addu $v0, $v0, $a2
+      0x00471021,  // addu $v0, $v0, $a3
+      0x00491021,  // addu $v0, $v0, $t1
+      0x00481021,  // addu $v0, $v0, $t0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 10;
+  tc.a1 = 20;
+  tc.a2 = 30;
+  tc.a3 = 40;
+  tc.stack_args = {50, 60};
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.v0, 210u);
+  EXPECT_EQ(comp.candidate_result.v0, 210u);
+}
+
+TEST(DifferentialFuzzerTest, DetectsStackArgumentMismatch) {
+  DifferentialFuzzer fuzzer;
+
+  // Target: loads arg 4 from 16($sp)
+  std::vector<uint32_t> target = {
+      0x8FA80010,  // lw   $t0, 16($sp)
+      0x00841021,  // addu $v0, $a0, $a0
+      0x00481021,  // addu $v0, $v0, $t0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: incorrectly loads arg 5 from 20($sp)
+  std::vector<uint32_t> candidate = {
+      0x8FA80014,  // lw   $t0, 20($sp)
+      0x00841021,  // addu $v0, $a0, $a0
+      0x00481021,  // addu $v0, $v0, $t0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 5;
+  tc.stack_args = {100, 200};
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kReturnValueMismatch);
+  EXPECT_NE(comp.failure_reason.find("Return value v0 mismatch"), std::string::npos);
+}
+
+TEST(DifferentialFuzzerTest, RandomCasesIncludeStackArgs) {
+  auto cases = DifferentialFuzzer::GenerateRandomCases(10, /*seed=*/42);
+  ASSERT_EQ(cases.size(), 10u);
+  bool any_non_zero = false;
+  for (const auto& tc : cases) {
+    EXPECT_EQ(tc.stack_args.size(), 12u);
+    for (uint32_t val : tc.stack_args) {
+      if (val != 0) {
+        any_non_zero = true;
+      }
+    }
+  }
+  EXPECT_TRUE(any_non_zero);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

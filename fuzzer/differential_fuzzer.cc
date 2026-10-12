@@ -43,6 +43,17 @@ void DifferentialFuzzer::SetupEmulator(MipsEmulator* emu, const FuzzTestCase& te
     emu->SetFpRegister(FpRegister::kF14, test_case.f14);
   }
 
+  // Stack arguments (sp + 16, sp + 20, ...)
+  uint8_t stack_buf[16 * 4] = {0};
+  for (size_t i = 0; i < 16; ++i) {
+    uint32_t val = (i < test_case.stack_args.size()) ? test_case.stack_args[i] : 0;
+    stack_buf[i * 4] = static_cast<uint8_t>(val >> 24);
+    stack_buf[i * 4 + 1] = static_cast<uint8_t>(val >> 16);
+    stack_buf[i * 4 + 2] = static_cast<uint8_t>(val >> 8);
+    stack_buf[i * 4 + 3] = static_cast<uint8_t>(val);
+  }
+  emu->LoadMemory(options_.initial_sp + 16, stack_buf, sizeof(stack_buf));
+
   // Pre-load memory payloads
   for (const auto& payload : test_case.initial_memory) {
     if (!payload.data.empty()) {
@@ -281,6 +292,8 @@ DifferentialComparison DifferentialFuzzer::Compare(const std::vector<uint32_t>& 
   candidate_emu_.ClearCodeBounds();
   target_emu_.ClearMemory(target_vram, target_code.size() * sizeof(uint32_t));
   candidate_emu_.ClearMemory(candidate_vram, candidate_code.size() * sizeof(uint32_t));
+  target_emu_.ClearMemory(options_.initial_sp + 16, 16 * sizeof(uint32_t));
+  candidate_emu_.ClearMemory(options_.initial_sp + 16, 16 * sizeof(uint32_t));
 
   return comp;
 }
@@ -336,6 +349,8 @@ std::vector<DifferentialComparison> DifferentialFuzzer::RunBattery(
   candidate_emu_.ClearCodeBounds();
   target_emu_.ClearMemory(target_vram, target_code.size() * sizeof(uint32_t));
   candidate_emu_.ClearMemory(candidate_vram, candidate_code.size() * sizeof(uint32_t));
+  target_emu_.ClearMemory(options_.initial_sp + 16, 16 * sizeof(uint32_t));
+  candidate_emu_.ClearMemory(options_.initial_sp + 16, 16 * sizeof(uint32_t));
 
   return results;
 }
@@ -414,6 +429,9 @@ std::vector<FuzzTestCase> DifferentialFuzzer::GenerateRandomCases(size_t count, 
     tc.f14 = dist_float(rng);
     tc.f12_double = dist_double(rng);
     tc.f14_double = dist_double(rng);
+    for (size_t s = 0; s < 12; ++s) {
+      tc.stack_args.push_back(dist_u32(rng));
+    }
     cases.push_back(tc);
   }
 
