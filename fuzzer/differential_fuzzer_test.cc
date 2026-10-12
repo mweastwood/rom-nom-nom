@@ -897,5 +897,42 @@ TEST(DifferentialFuzzerTest, BothFaultedReportsEquivalentInError) {
   EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
 }
 
+TEST(DifferentialFuzzerTest, TemporaryRegistersResetToZeroBetweenVectors) {
+  // Target: addu $v0, $t0, $zero; jr $ra; nop (returns initial $t0)
+  std::vector<uint32_t> target = {
+      0x01001021,  // addu $v0, $t0, $zero
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, target, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.v0, 0u);
+  EXPECT_EQ(comp.candidate_result.v0, 0u);
+}
+
+TEST(DifferentialFuzzerTest, DetectsCalleeSavedZeroClearingCorruption) {
+  // Target: jr $ra; nop (preserves callee-saved registers)
+  std::vector<uint32_t> target = {
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: zeroes $s0 (move $s0, $zero) and returns
+  std::vector<uint32_t> candidate = {
+      0x00008021,  // move $s0, $zero (addu $s0, $zero, $zero)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kCalleeSavedMismatch);
+  EXPECT_NE(comp.failure_reason.find("corrupted callee-saved registers"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

@@ -28,6 +28,21 @@ void DifferentialFuzzer::SetupEmulator(MipsEmulator* emu, const FuzzTestCase& te
   emu->SetRegister(Register::kGp, 0xCAFE001C);
   emu->SetRegister(Register::kFp, 0xCAFE001E);
 
+  // Reset caller-saved temporary registers to 0 for cross-vector determinism
+  emu->SetRegister(Register::kAt, 0);
+  emu->SetRegister(Register::kV0, 0);
+  emu->SetRegister(Register::kV1, 0);
+  emu->SetRegister(Register::kT0, 0);
+  emu->SetRegister(Register::kT1, 0);
+  emu->SetRegister(Register::kT2, 0);
+  emu->SetRegister(Register::kT3, 0);
+  emu->SetRegister(Register::kT4, 0);
+  emu->SetRegister(Register::kT5, 0);
+  emu->SetRegister(Register::kT6, 0);
+  emu->SetRegister(Register::kT7, 0);
+  emu->SetRegister(Register::kT8, 0);
+  emu->SetRegister(Register::kT9, 0);
+
   // Argument registers (a0 - a3)
   emu->SetRegister(Register::kA0, test_case.a0);
   emu->SetRegister(Register::kA1, test_case.a1);
