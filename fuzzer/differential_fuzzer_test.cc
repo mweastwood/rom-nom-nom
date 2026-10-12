@@ -632,5 +632,99 @@ TEST(DifferentialFuzzerTest, RandomCasesIncludeStackArgs) {
   EXPECT_TRUE(any_non_zero);
 }
 
+TEST(DifferentialFuzzerTest, HighMemoryIsolationDefaults) {
+  DifferentialFuzzer::Options opts;
+  EXPECT_EQ(opts.initial_sp, 0x807FE000u);
+
+  auto pointer_cases = DifferentialFuzzer::GeneratePointerCases(5);
+  ASSERT_EQ(pointer_cases.size(), 5u);
+  for (const auto& tc : pointer_cases) {
+    EXPECT_GE(tc.a0, 0x80500000u);
+    EXPECT_LT(tc.a0, 0x80500000u + 256);
+  }
+}
+
+TEST(DifferentialFuzzerTest, RandomCasesAlternateSingleAndDoubleFp) {
+  auto cases = DifferentialFuzzer::GenerateRandomCases(10, /*seed=*/123);
+  ASSERT_EQ(cases.size(), 10u);
+  for (size_t i = 0; i < cases.size(); ++i) {
+    if (i % 2 == 0) {
+      EXPECT_DOUBLE_EQ(cases[i].f12_double, 0.0);
+      EXPECT_DOUBLE_EQ(cases[i].f14_double, 0.0);
+    } else {
+      EXPECT_NE(cases[i].f12_double, 0.0);
+      EXPECT_NE(cases[i].f14_double, 0.0);
+    }
+  }
+}
+
+TEST(DifferentialFuzzerTest, LocalStackWritesFilteredCorrectly) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = false;
+  opts.check_memory_writes = true;
+  opts.filter_local_stack_writes = true;
+  DifferentialFuzzer fuzzer(opts);
+
+  // Target writes to stack (filtered) and global memory at 0x80200000
+  // sw $a0, -16($sp)
+  // sw $a1, 0($a2)
+  // jr $ra; nop
+  std::vector<uint32_t> target = {
+      0xAFA4FFF0,  // sw $a0, -16($sp)
+      0xAC850000,  // sw $a1, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate writes different value to stack (should be filtered), but same to global memory
+  // sw $zero, -16($sp)
+  // sw $a1, 0($a2)
+  // jr $ra; nop
+  std::vector<uint32_t> candidate = {
+      0xAFA0FFF0,  // sw $zero, -16($sp)
+      0xAC850000,  // sw $a1, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80200000;
+  tc.a1 = 0x12345678;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, WriteMismatchReportsSurroundingSampleContext) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = false;
+  opts.check_memory_writes = true;
+  DifferentialFuzzer fuzzer(opts);
+
+  // Target writes 0x11111111 to 0x80200000
+  std::vector<uint32_t> target = {
+      0xAC850000,  // sw $a1, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate writes 0x22222222 to 0x80200000
+  std::vector<uint32_t> candidate = {
+      0xAC860000,  // sw $a2, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80200000;
+  tc.a1 = 0x11111111;
+  tc.a2 = 0x22222222;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kMemoryWriteMismatch);
+  EXPECT_NE(comp.failure_reason.find("Write log mismatch at store #0:"), std::string::npos);
+  EXPECT_NE(comp.failure_reason.find("#0: target(0x80200000"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

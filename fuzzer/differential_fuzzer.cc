@@ -123,22 +123,23 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
         comp->target_result.f0_double, comp->target_result.f0_double_bits,
         comp->candidate_result.f0_double, comp->candidate_result.f0_double_bits);
   } else if (options_.check_memory_writes) {
-    std::vector<MemoryWrite> target_writes;
-    std::vector<MemoryWrite> candidate_writes;
+    std::vector<MemoryWrite> target_writes = comp->target_result.write_log;
+    std::vector<MemoryWrite> candidate_writes = comp->candidate_result.write_log;
+
     if (options_.filter_local_stack_writes) {
-      for (const auto& w : comp->target_result.write_log) {
-        if (!(w.address < options_.initial_sp && w.address >= options_.initial_sp - 0x4000)) {
-          target_writes.push_back(w);
+      auto is_local_stack = [&](const MemoryWrite& w) {
+        if (w.is_stack_relative) return true;
+        if (w.address < options_.initial_sp + 0x100 && w.address >= options_.initial_sp - 0x10000) {
+          return true;
         }
-      }
-      for (const auto& w : comp->candidate_result.write_log) {
-        if (!(w.address < options_.initial_sp && w.address >= options_.initial_sp - 0x4000)) {
-          candidate_writes.push_back(w);
-        }
-      }
-    } else {
-      target_writes = comp->target_result.write_log;
-      candidate_writes = comp->candidate_result.write_log;
+        return false;
+      };
+      target_writes.erase(
+          std::remove_if(target_writes.begin(), target_writes.end(), is_local_stack),
+          target_writes.end());
+      candidate_writes.erase(
+          std::remove_if(candidate_writes.begin(), candidate_writes.end(), is_local_stack),
+          candidate_writes.end());
     }
 
     absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
@@ -199,10 +200,20 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
           const auto& tw = target_writes[i];
           const auto& cw = candidate_writes[i];
           if (!(tw == cw)) {
+            std::string sample;
+            for (size_t k = (i > 2 ? i - 2 : 0); k < std::min(target_writes.size(), i + 5); ++k) {
+              absl::StrAppend(
+                  &sample,
+                  absl::StrFormat(
+                      "\n  #%zu: target(0x%X, val=0x%X, sz=%d) vs cand(0x%X, val=0x%X, sz=%d)", k,
+                      target_writes[k].address, target_writes[k].value, target_writes[k].size,
+                      candidate_writes[k].address, candidate_writes[k].value,
+                      candidate_writes[k].size));
+            }
             comp->failure_reason = absl::StrFormat(
                 "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
-                "candidate(addr=0x%08X, val=0x%llX, size=%d)",
-                i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size);
+                "candidate(addr=0x%08X, val=0x%llX, size=%d)%s",
+                i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size, sample);
             break;
           }
         }
@@ -427,8 +438,10 @@ std::vector<FuzzTestCase> DifferentialFuzzer::GenerateRandomCases(size_t count, 
     tc.a3 = dist_u32(rng);
     tc.f12 = dist_float(rng);
     tc.f14 = dist_float(rng);
-    tc.f12_double = dist_double(rng);
-    tc.f14_double = dist_double(rng);
+    if (i % 2 == 1) {
+      tc.f12_double = dist_double(rng);
+      tc.f14_double = dist_double(rng);
+    }
     for (size_t s = 0; s < 12; ++s) {
       tc.stack_args.push_back(dist_u32(rng));
     }

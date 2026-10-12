@@ -51,7 +51,7 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   }
   if (options_.pointer_vectors_per_function > 0) {
     auto pointer_cases = DifferentialFuzzer::GeneratePointerCases(
-        options_.pointer_vectors_per_function, /*buffer_vram=*/0x80100000,
+        options_.pointer_vectors_per_function, /*buffer_vram=*/0x80500000,
         /*buffer_size=*/256, options_.seed);
     test_cases.insert(test_cases.end(), pointer_cases.begin(), pointer_cases.end());
   }

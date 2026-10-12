@@ -56,7 +56,7 @@ class DifferentialFuzzer {
  public:
   struct Options {
     uint64_t max_steps_per_run = 50000;
-    uint32_t initial_sp = 0x801F0000;
+    uint32_t initial_sp = 0x807FE000;
     bool check_callee_saved = true;
     bool check_memory_writes = true;
     bool check_v0 = true;
@@ -88,7 +88,7 @@ class DifferentialFuzzer {
   static std::vector<FuzzTestCase> GenerateBoundaryCases();
   static std::vector<FuzzTestCase> GenerateRandomCases(size_t count, uint32_t seed = 42);
   static std::vector<FuzzTestCase> GeneratePointerCases(size_t count,
-                                                        uint32_t buffer_vram = 0x80100000,
+                                                        uint32_t buffer_vram = 0x80500000,
                                                         size_t buffer_size = 256,
                                                         uint32_t seed = 42);
 
