@@ -1770,5 +1770,95 @@ TEST(ExpressionBuilderTest, MatchesSignedAndUnsignedDivisionAndModuloPatterns) {
   EXPECT_EQ(unsigned_stmts[1].ToString(), "v1 = (u32)arg0 % (u32)arg1;\n");
 }
 
+TEST(ExpressionBuilderTest, LiftedExpressionCloneCreatesIndependentDeepCopy) {
+  auto orig = LiftedExpression::Binary(
+      "+", LiftedExpression::Variable("arg0"),
+      LiftedExpression::Unary("(u32)", LiftedExpression::Integer(42, /*hex=*/true)));
+  auto clone = orig->Clone();
+  ASSERT_NE(clone, nullptr);
+  EXPECT_EQ(clone->ToString(), orig->ToString());
+
+  // Mutating clone does not mutate original
+  clone->args[0]->name = "modified";
+  EXPECT_EQ(orig->args[0]->name, "arg0");
+  EXPECT_EQ(clone->args[0]->name, "modified");
+}
+
+TEST(ExpressionBuilderTest, SignedAndUnsignedMultWithBothMfloAndMfhi) {
+  // 1. Signed multiplication:
+  // mult $a0, $a1
+  // mflo $v0
+  // mfhi $v1
+  std::vector<uint32_t> signed_words = {
+      0x00850018,  // 0: mult $a0, $a1
+      0x00001012,  // 4: mflo $v0
+      0x00001810,  // 8: mfhi $v1
+  };
+  auto signed_insts = *DecodeSequence(signed_words);
+  auto signed_stmts = ExpressionBuilder::LiftInstructions(signed_insts);
+  ASSERT_EQ(signed_stmts.size(), 2u);
+  EXPECT_EQ(signed_stmts[0].destination_variable, "v0");
+  EXPECT_EQ(signed_stmts[0].ToString(), "v0 = arg0 * arg1;\n");
+  EXPECT_EQ(signed_stmts[1].destination_variable, "v1");
+  EXPECT_EQ(signed_stmts[1].ToString(), "v1 = (s64)arg0 * (s64)arg1 >> 32;\n");
+
+  // 2. Unsigned multiplication with (u64)(u32) casting:
+  // multu $a0, $a1
+  // mflo  $v0
+  // mfhi  $v1
+  std::vector<uint32_t> unsigned_words = {
+      0x00850019,  // 0: multu $a0, $a1
+      0x00001012,  // 4: mflo  $v0
+      0x00001810,  // 8: mfhi  $v1
+  };
+  auto unsigned_insts = *DecodeSequence(unsigned_words);
+  auto unsigned_stmts = ExpressionBuilder::LiftInstructions(unsigned_insts);
+  ASSERT_EQ(unsigned_stmts.size(), 2u);
+  EXPECT_EQ(unsigned_stmts[0].destination_variable, "v0");
+  EXPECT_EQ(unsigned_stmts[0].ToString(), "v0 = arg0 * arg1;\n");
+  EXPECT_EQ(unsigned_stmts[1].destination_variable, "v1");
+  EXPECT_EQ(unsigned_stmts[1].ToString(), "v1 = (u64)(u32)arg0 * (u64)(u32)arg1 >> 32;\n");
+}
+
+TEST(ExpressionBuilderTest, MultWhereMfloClobbersSourceOperandBeforeMfhi) {
+  // multu $a0, $a1
+  // mflo  $a0  <- clobbers $a0 before mfhi reads it!
+  // mfhi  $v0
+  std::vector<uint32_t> words = {
+      0x00850019,  // 0: multu $a0, $a1
+      0x00002012,  // 4: mflo  $a0
+      0x00001010,  // 8: mfhi  $v0
+  };
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].destination_variable, "v0");
+  EXPECT_EQ(stmts[0].ToString(), "v0 = (u64)(u32)arg0 * (u64)(u32)arg1 >> 32;\n");
+  EXPECT_EQ(stmts[1].destination_variable, "arg0");
+  EXPECT_EQ(stmts[1].ToString(), "arg0 = arg0 * arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, MultWhereIntermediateInstructionClobbersSourceOperand) {
+  // mult $a0, $a1
+  // addu $a0, $zero, $zero  <- clobbers $a0 before mflo/mfhi!
+  // mflo $v0
+  // mfhi $v1
+  std::vector<uint32_t> words = {
+      0x00850018,  // 0: mult $a0, $a1
+      0x00002021,  // 4: addu $a0, $zero, $zero
+      0x00001012,  // 8: mflo $v0
+      0x00001810,  // C: mfhi $v1
+  };
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 3u);
+  EXPECT_EQ(stmts[0].destination_variable, "v0");
+  EXPECT_EQ(stmts[0].ToString(), "v0 = arg0 * arg1;\n");
+  EXPECT_EQ(stmts[1].destination_variable, "v1");
+  EXPECT_EQ(stmts[1].ToString(), "v1 = (s64)arg0 * (s64)arg1 >> 32;\n");
+  EXPECT_EQ(stmts[2].destination_variable, "arg0");
+  EXPECT_EQ(stmts[2].ToString(), "arg0 = 0;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

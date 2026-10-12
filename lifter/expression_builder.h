@@ -50,6 +50,7 @@ struct LiftedExpression {
   std::vector<std::unique_ptr<LiftedExpression>> args;
 
   std::string ToString() const;
+  std::unique_ptr<LiftedExpression> Clone() const;
 
   static std::unique_ptr<LiftedExpression> Integer(uint32_t val, bool hex = false);
   static std::unique_ptr<LiftedExpression> Variable(std::string name);

@@ -125,6 +125,20 @@ std::string LiftedExpression::ToString() const {
   return "";
 }
 
+std::unique_ptr<LiftedExpression> LiftedExpression::Clone() const {
+  auto clone = std::make_unique<LiftedExpression>();
+  clone->kind = kind;
+  clone->int_val = int_val;
+  clone->is_hex = is_hex;
+  clone->name = name;
+  clone->op = op;
+  clone->args.reserve(args.size());
+  for (const auto& arg : args) {
+    clone->args.push_back(arg ? arg->Clone() : nullptr);
+  }
+  return clone;
+}
+
 std::string LiftedStatement::ToString() const {
   switch (kind) {
     case StatementKind::kAssignment:
@@ -518,6 +532,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
   auto folded_comp = FindFoldedComparison(instructions_to_process);
 
+  absl::flat_hash_set<size_t> skipped_instruction_indices;
+  size_t loop_end = instructions_to_process.size();
+
   for (size_t i = 0; i < instructions_to_process.size(); ++i) {
     const auto& inst = instructions_to_process[i];
 
@@ -605,6 +622,11 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         tracker.Step(instructions_to_process[k]);
       }
       i = conversion->end_index;
+      continue;
+    }
+
+    if (skipped_instruction_indices.contains(i)) {
+      tracker.Step(inst);
       continue;
     }
 
@@ -951,11 +973,193 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           pending_mult->is_unsigned = (inst.opcode == Opcode::kMultu);
           pending_mult->rs = *inst.rs;
           pending_mult->rt = *inst.rt;
+
+          // Look ahead to find mflo and/or mfhi before next mult/div/mthi/mtlo
+          std::optional<size_t> mflo_idx;
+          std::optional<size_t> mfhi_idx;
+          for (size_t next_i = i + 1; next_i < loop_end; ++next_i) {
+            const auto& next_inst = instructions_to_process[next_i];
+            if (next_inst.opcode == Opcode::kMflo && !mflo_idx.has_value()) {
+              mflo_idx = next_i;
+            } else if (next_inst.opcode == Opcode::kMfhi && !mfhi_idx.has_value()) {
+              mfhi_idx = next_i;
+            }
+            if (mflo_idx.has_value() && mfhi_idx.has_value()) break;
+            if (next_inst.opcode == Opcode::kMult || next_inst.opcode == Opcode::kMultu ||
+                next_inst.opcode == Opcode::kDiv || next_inst.opcode == Opcode::kDivu ||
+                next_inst.opcode == Opcode::kMthi || next_inst.opcode == Opcode::kMtlo) {
+              break;
+            }
+          }
+
+          // Check if rs or rt is clobbered by instructions before mflo or mfhi
+          size_t max_read_idx = 0;
+          if (mflo_idx.has_value()) max_read_idx = std::max(max_read_idx, *mflo_idx);
+          if (mfhi_idx.has_value()) max_read_idx = std::max(max_read_idx, *mfhi_idx);
+
+          bool operands_clobbered = false;
+          if (max_read_idx > i + 1) {
+            for (size_t check_i = i + 1; check_i < max_read_idx; ++check_i) {
+              RegisterUseDef def_ud = GetInstructionUseDef(instructions_to_process[check_i]);
+              for (Register r : def_ud.gpr_defs) {
+                if (r == *inst.rs || r == *inst.rt) {
+                  operands_clobbered = true;
+                  break;
+                }
+              }
+              if (operands_clobbered) break;
+            }
+          }
+
+          if (operands_clobbered) {
+            auto lhs = LiftRegisterOrConstant(*inst.rs, tracker);
+            auto rhs = LiftRegisterOrConstant(*inst.rt, tracker);
+            std::string cast_type = pending_mult->is_unsigned ? "u64)(u32" : "s64";
+
+            auto emit_mflo = [&]() {
+              if (mflo_idx.has_value()) {
+                const auto& mflo_inst = instructions_to_process[*mflo_idx];
+                if (mflo_inst.rd.has_value() && *mflo_inst.rd != Register::kZero) {
+                  bool rd_conflict = false;
+                  for (size_t check_i = i + 1; check_i < *mflo_idx; ++check_i) {
+                    RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[check_i]);
+                    for (Register r : ud.gpr_uses) {
+                      if (r == *mflo_inst.rd) {
+                        rd_conflict = true;
+                        break;
+                      }
+                    }
+                    for (Register r : ud.gpr_defs) {
+                      if (r == *mflo_inst.rd) {
+                        rd_conflict = true;
+                        break;
+                      }
+                    }
+                    if (rd_conflict) break;
+                  }
+                  LiftedStatement lo_stmt;
+                  lo_stmt.kind = StatementKind::kAssignment;
+                  if (!rd_conflict) {
+                    lo_stmt.destination_variable = RegisterVarName(*mflo_inst.rd);
+                    lo_stmt.expression = LiftedExpression::Binary("*", lhs->Clone(), rhs->Clone());
+                    statements.push_back(std::move(lo_stmt));
+                    skipped_instruction_indices.insert(*mflo_idx);
+                  } else {
+                    lo_stmt.destination_variable = "lo";
+                    lo_stmt.expression = LiftedExpression::Binary("*", lhs->Clone(), rhs->Clone());
+                    statements.push_back(std::move(lo_stmt));
+                  }
+                }
+              }
+            };
+
+            auto emit_mfhi = [&]() {
+              if (mfhi_idx.has_value()) {
+                const auto& mfhi_inst = instructions_to_process[*mfhi_idx];
+                if (mfhi_inst.rd.has_value() && *mfhi_inst.rd != Register::kZero) {
+                  bool rd_conflict = false;
+                  for (size_t check_i = i + 1; check_i < *mfhi_idx; ++check_i) {
+                    RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[check_i]);
+                    for (Register r : ud.gpr_uses) {
+                      if (r == *mfhi_inst.rd) {
+                        rd_conflict = true;
+                        break;
+                      }
+                    }
+                    for (Register r : ud.gpr_defs) {
+                      if (r == *mfhi_inst.rd) {
+                        rd_conflict = true;
+                        break;
+                      }
+                    }
+                    if (rd_conflict) break;
+                  }
+                  LiftedStatement hi_stmt;
+                  hi_stmt.kind = StatementKind::kAssignment;
+                  if (!rd_conflict) {
+                    hi_stmt.destination_variable = RegisterVarName(*mfhi_inst.rd);
+                    hi_stmt.expression = LiftedExpression::Binary(
+                        ">>",
+                        LiftedExpression::Binary(
+                            "*", LiftedExpression::Unary("(" + cast_type + ")", lhs->Clone()),
+                            LiftedExpression::Unary("(" + cast_type + ")", rhs->Clone())),
+                        LiftedExpression::Integer(32));
+                    statements.push_back(std::move(hi_stmt));
+                    skipped_instruction_indices.insert(*mfhi_idx);
+                  } else {
+                    hi_stmt.destination_variable = "hi";
+                    hi_stmt.expression = LiftedExpression::Binary(
+                        ">>",
+                        LiftedExpression::Binary(
+                            "*", LiftedExpression::Unary("(" + cast_type + ")", lhs->Clone()),
+                            LiftedExpression::Unary("(" + cast_type + ")", rhs->Clone())),
+                        LiftedExpression::Integer(32));
+                    statements.push_back(std::move(hi_stmt));
+                  }
+                }
+              }
+            };
+
+            bool emit_mfhi_first = false;
+            if (mflo_idx.has_value() && mfhi_idx.has_value()) {
+              const auto& mflo_inst = instructions_to_process[*mflo_idx];
+              if (mflo_inst.rd.has_value() &&
+                  (*mflo_inst.rd == *inst.rs || *mflo_inst.rd == *inst.rt)) {
+                emit_mfhi_first = true;
+              }
+            }
+
+            if (emit_mfhi_first) {
+              emit_mfhi();
+              emit_mflo();
+            } else {
+              emit_mflo();
+              emit_mfhi();
+            }
+
+            pending_mult = nullptr;
+          }
         }
         break;
 
       case Opcode::kMflo:
         if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+          if (pending_mult != nullptr) {
+            bool mfhi_follows = false;
+            size_t mfhi_idx = 0;
+            for (size_t next_i = i + 1; next_i < loop_end; ++next_i) {
+              const auto& next_inst = instructions_to_process[next_i];
+              if (next_inst.opcode == Opcode::kMfhi) {
+                mfhi_follows = true;
+                mfhi_idx = next_i;
+                break;
+              }
+              if (next_inst.opcode == Opcode::kMult || next_inst.opcode == Opcode::kMultu ||
+                  next_inst.opcode == Opcode::kDiv || next_inst.opcode == Opcode::kDivu ||
+                  next_inst.opcode == Opcode::kMthi || next_inst.opcode == Opcode::kMtlo) {
+                break;
+              }
+            }
+            if (mfhi_follows && (inst.rd == pending_mult->rs || inst.rd == pending_mult->rt)) {
+              const auto& mfhi_inst = instructions_to_process[mfhi_idx];
+              if (mfhi_inst.rd.has_value() && *mfhi_inst.rd != Register::kZero) {
+                LiftedStatement hi_stmt;
+                hi_stmt.kind = StatementKind::kAssignment;
+                hi_stmt.destination_variable = RegisterVarName(*mfhi_inst.rd);
+                std::string cast_type = pending_mult->is_unsigned ? "u64)(u32" : "s64";
+                auto lhs = LiftRegisterOrConstant(pending_mult->rs, tracker);
+                auto rhs = LiftRegisterOrConstant(pending_mult->rt, tracker);
+                hi_stmt.expression = LiftedExpression::Binary(
+                    ">>",
+                    LiftedExpression::Binary(
+                        "*", LiftedExpression::Unary("(" + cast_type + ")", std::move(lhs)),
+                        LiftedExpression::Unary("(" + cast_type + ")", std::move(rhs))),
+                    LiftedExpression::Integer(32));
+                statements.push_back(std::move(hi_stmt));
+              }
+              skipped_instruction_indices.insert(mfhi_idx);
+            }
+          }
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rd);
@@ -963,7 +1167,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             statement.expression =
                 LiftedExpression::Binary("*", LiftRegisterOrConstant(pending_mult->rs, tracker),
                                          LiftRegisterOrConstant(pending_mult->rt, tracker));
-            pending_mult = nullptr;
+            if (inst.rd == pending_mult->rs || inst.rd == pending_mult->rt) {
+              pending_mult = nullptr;
+            }
           } else {
             statement.expression = LiftedExpression::Variable("lo");
           }
@@ -973,11 +1179,41 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kMfhi:
         if (inst.rd.has_value() && *inst.rd != Register::kZero) {
+          if (pending_mult != nullptr) {
+            bool mflo_follows = false;
+            size_t mflo_idx = 0;
+            for (size_t next_i = i + 1; next_i < loop_end; ++next_i) {
+              const auto& next_inst = instructions_to_process[next_i];
+              if (next_inst.opcode == Opcode::kMflo) {
+                mflo_follows = true;
+                mflo_idx = next_i;
+                break;
+              }
+              if (next_inst.opcode == Opcode::kMult || next_inst.opcode == Opcode::kMultu ||
+                  next_inst.opcode == Opcode::kDiv || next_inst.opcode == Opcode::kDivu ||
+                  next_inst.opcode == Opcode::kMthi || next_inst.opcode == Opcode::kMtlo) {
+                break;
+              }
+            }
+            if (mflo_follows && (inst.rd == pending_mult->rs || inst.rd == pending_mult->rt)) {
+              const auto& mflo_inst = instructions_to_process[mflo_idx];
+              if (mflo_inst.rd.has_value() && *mflo_inst.rd != Register::kZero) {
+                LiftedStatement lo_stmt;
+                lo_stmt.kind = StatementKind::kAssignment;
+                lo_stmt.destination_variable = RegisterVarName(*mflo_inst.rd);
+                lo_stmt.expression =
+                    LiftedExpression::Binary("*", LiftRegisterOrConstant(pending_mult->rs, tracker),
+                                             LiftRegisterOrConstant(pending_mult->rt, tracker));
+                statements.push_back(std::move(lo_stmt));
+              }
+              skipped_instruction_indices.insert(mflo_idx);
+            }
+          }
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rd);
           if (pending_mult != nullptr) {
-            std::string cast_type = pending_mult->is_unsigned ? "u64" : "s64";
+            std::string cast_type = pending_mult->is_unsigned ? "u64)(u32" : "s64";
             auto lhs = LiftRegisterOrConstant(pending_mult->rs, tracker);
             auto rhs = LiftRegisterOrConstant(pending_mult->rt, tracker);
             statement.expression = LiftedExpression::Binary(
@@ -986,7 +1222,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                     "*", LiftedExpression::Unary("(" + cast_type + ")", std::move(lhs)),
                     LiftedExpression::Unary("(" + cast_type + ")", std::move(rhs))),
                 LiftedExpression::Integer(32));
-            pending_mult = nullptr;
+            if (inst.rd == pending_mult->rs || inst.rd == pending_mult->rt) {
+              pending_mult = nullptr;
+            }
           } else {
             statement.expression = LiftedExpression::Variable("hi");
           }
