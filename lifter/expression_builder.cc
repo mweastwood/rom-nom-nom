@@ -2272,19 +2272,225 @@ bool ExpressionBuilder::DetermineReturnsV0(
 }
 
 bool ExpressionBuilder::DetermineReturnsF0(const ControlFlowGraph& cfg) {
-  for (const auto& block : cfg.Blocks()) {
-    if (block.HasReturn()) {
-      for (const auto& inst : block.instructions) {
-        RegisterUseDef ud = GetInstructionUseDef(inst);
-        for (FpRegister r : ud.fpr_defs) {
-          if (r == FpRegister::kF0) {
-            return true;
-          }
-        }
+  if (cfg.Blocks().empty()) {
+    return false;
+  }
+
+  absl::flat_hash_map<uint32_t, size_t> id_to_index;
+  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+    id_to_index[cfg.Blocks()[i].id] = i;
+  }
+
+  std::vector<bool> reachable(cfg.Blocks().size(), false);
+  std::vector<size_t> reach_worklist = {0};
+  reachable[0] = true;
+  while (!reach_worklist.empty()) {
+    size_t curr = reach_worklist.back();
+    reach_worklist.pop_back();
+    for (uint32_t succ_id : cfg.Blocks()[curr].successors) {
+      auto it = id_to_index.find(succ_id);
+      if (it != id_to_index.end() && !reachable[it->second]) {
+        reachable[it->second] = true;
+        reach_worklist.push_back(it->second);
       }
     }
   }
-  return false;
+
+  bool has_reachable_return = false;
+  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+    if (reachable[i] && cfg.Blocks()[i].HasReturn()) {
+      has_reachable_return = true;
+      break;
+    }
+  }
+  if (!has_reachable_return) {
+    return false;
+  }
+
+  auto eval_seq = [](absl::Span<const Instruction> instructions) -> int {
+    int last_def = -1;
+    int last_call = -1;
+    bool used_after_last_def = false;
+    for (size_t i = 0; i < instructions.size(); ++i) {
+      if (instructions[i].opcode == Opcode::kJal || instructions[i].opcode == Opcode::kJalr) {
+        last_call = static_cast<int>(i);
+        last_def = -1;
+        used_after_last_def = false;
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
+      for (FpRegister r : ud.fpr_uses) {
+        if (r == FpRegister::kF0) {
+          if (last_def != -1) {
+            used_after_last_def = true;
+          }
+          break;
+        }
+      }
+      for (FpRegister r : ud.fpr_defs) {
+        if (r == FpRegister::kF0) {
+          last_def = static_cast<int>(i);
+          used_after_last_def = false;
+          break;
+        }
+      }
+    }
+    if (last_def != -1) {
+      if (used_after_last_def) {
+        return -1;
+      }
+      return 1;
+    }
+    if (last_call != -1) {
+      return -1;
+    }
+    return 0;
+  };
+
+  std::vector<std::vector<size_t>> predecessors(cfg.Blocks().size());
+  for (size_t u = 0; u < cfg.Blocks().size(); ++u) {
+    if (!reachable[u]) continue;
+    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
+      auto it = id_to_index.find(succ_id);
+      if (it != id_to_index.end()) {
+        predecessors[it->second].push_back(u);
+      }
+    }
+  }
+
+  std::vector<bool> in_avail(cfg.Blocks().size(), true);
+  std::vector<bool> out_avail(cfg.Blocks().size(), true);
+  in_avail[0] = false;
+  int entry_effect = eval_seq(cfg.Blocks()[0].instructions);
+  out_avail[0] = (entry_effect == 1);
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+      if (!reachable[b]) continue;
+
+      bool new_in = false;
+      if (b == 0) {
+        new_in = false;
+      } else if (!predecessors[b].empty()) {
+        new_in = true;
+        for (size_t p : predecessors[b]) {
+          const auto& p_block = cfg.Blocks()[p];
+          const auto* term = p_block.Terminator();
+          absl::Span<const Instruction> executed = p_block.instructions;
+          bool is_likely_fallthrough = false;
+          if (term != nullptr && term->IsBranchLikely()) {
+            for (const auto& edge : p_block.outgoing_edges) {
+              if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kFallthrough) {
+                is_likely_fallthrough = true;
+                break;
+              }
+            }
+          }
+          if (is_likely_fallthrough && executed.size() > 1) {
+            executed = executed.subspan(0, executed.size() - 1);
+          }
+
+          int effect = eval_seq(executed);
+          bool edge_avail = false;
+          if (effect == 1) {
+            edge_avail = true;
+          } else if (effect == -1) {
+            edge_avail = false;
+          } else {
+            edge_avail = in_avail[p];
+          }
+
+          if (!edge_avail) {
+            new_in = false;
+            break;
+          }
+        }
+      }
+
+      if (new_in != in_avail[b]) {
+        in_avail[b] = new_in;
+        changed = true;
+      }
+
+      int blk_effect = eval_seq(cfg.Blocks()[b].instructions);
+      bool new_out = false;
+      if (blk_effect == 1) {
+        new_out = true;
+      } else if (blk_effect == -1) {
+        new_out = false;
+      } else {
+        new_out = in_avail[b];
+      }
+
+      if (new_out != out_avail[b]) {
+        out_avail[b] = new_out;
+        changed = true;
+      }
+    }
+  }
+
+  for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+    if (!reachable[b]) continue;
+    const auto& block = cfg.Blocks()[b];
+    if (!block.HasReturn()) continue;
+
+    int effect = eval_seq(block.instructions);
+    bool return_avail = false;
+    if (effect == 1) {
+      return_avail = true;
+    } else if (effect == -1) {
+      return_avail = false;
+    } else {
+      return_avail = in_avail[b];
+    }
+
+    if (!return_avail) {
+      return false;
+    }
+
+    int last_def_v0 = -1;
+    bool v0_used_after = false;
+    int last_def_f0 = -1;
+    bool f0_used_after = false;
+    for (size_t i = 0; i < block.instructions.size(); ++i) {
+      if (block.instructions[i].opcode == Opcode::kJal ||
+          block.instructions[i].opcode == Opcode::kJalr) {
+        last_def_v0 = -1;
+        v0_used_after = false;
+        last_def_f0 = -1;
+        f0_used_after = false;
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(block.instructions[i]);
+      for (Register r : ud.gpr_uses) {
+        if (r == Register::kV0 && last_def_v0 != -1) v0_used_after = true;
+      }
+      for (Register r : ud.gpr_defs) {
+        if (r == Register::kV0) {
+          last_def_v0 = static_cast<int>(i);
+          v0_used_after = false;
+        }
+      }
+      for (FpRegister r : ud.fpr_uses) {
+        if (r == FpRegister::kF0 && last_def_f0 != -1) f0_used_after = true;
+      }
+      for (FpRegister r : ud.fpr_defs) {
+        if (r == FpRegister::kF0) {
+          last_def_f0 = static_cast<int>(i);
+          f0_used_after = false;
+        }
+      }
+    }
+    bool has_live_v0 = (last_def_v0 != -1 && !v0_used_after);
+    bool has_live_f0 = (last_def_f0 != -1 && !f0_used_after);
+    if (has_live_v0 && (!has_live_f0 || last_def_v0 > last_def_f0)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 bool ExpressionBuilder::DetermineReturnsF0Double(const ControlFlowGraph& cfg) {

@@ -903,9 +903,9 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
     returns_v0 = (rt != "void" && rt != "f32" && rt != "f64");
     returns_f0 = (rt == "f32" || rt == "f64");
   } else {
-    returns_v0 = ExpressionBuilder::DetermineReturnsV0(cfg);
-    if (!returns_v0) {
-      returns_f0 = ExpressionBuilder::DetermineReturnsF0(cfg);
+    returns_f0 = ExpressionBuilder::DetermineReturnsF0(cfg);
+    if (!returns_f0) {
+      returns_v0 = ExpressionBuilder::DetermineReturnsV0(cfg);
     }
   }
 
@@ -1004,6 +1004,9 @@ FunctionDeclaration AstConverter::Convert(const ControlFlowGraph& cfg,
   CType return_type = CType::Void();
   if (options.return_type.has_value()) {
     return_type = *options.return_type;
+  } else if (returns_f0) {
+    bool is_double = ExpressionBuilder::DetermineReturnsF0Double(cfg);
+    return_type = is_double ? CType::F64() : CType::F32();
   } else if (returns_v0) {
     return_type = CType::S32();
   } else if (HasReturnValue(*body)) {
