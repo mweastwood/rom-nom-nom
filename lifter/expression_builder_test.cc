@@ -401,6 +401,29 @@ TEST(ExpressionBuilderTest, JalDelaySlotReorderingPassesArgumentToCall) {
   EXPECT_EQ(statements[2].ToString(), "return;\n");
 }
 
+TEST(ExpressionBuilderTest, JalrDelaySlotReorderingPassesArgumentToCall) {
+  // Indirect call via $t9 with delay slot setting $a0:
+  // 0: jalr  $t9
+  // 4: addiu $a0, $zero, 99
+  // 8: jr    $ra
+  // C: nop
+  std::vector<uint32_t> words = {
+      0x0320F809,  // 0: jalr  $ra, $t9
+      0x24040063,  // 4: addiu $a0, $zero, 99
+      0x03E00008,  // 8: jr    $ra
+      0x00000000,  // C: nop
+  };
+
+  auto instructions = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(instructions);
+
+  // The delay-slot assignment arg0 = 99 must execute before the indirect call
+  ASSERT_GE(statements.size(), 3u);
+  EXPECT_EQ(statements[0].ToString(), "arg0 = 99;\n");
+  EXPECT_EQ(statements[1].ToString(), "((void (*)())temp_t9)(99);\n");
+  EXPECT_EQ(statements.back().kind, StatementKind::kReturn);
+}
+
 TEST(ExpressionBuilderTest, JalParameterArityUsesKnownCount) {
   // Setup a call with reaching definitions for $a0, $a1, $a2
   std::vector<uint32_t> words = {
@@ -1284,6 +1307,108 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternRejectsNonConversionSu
   EXPECT_EQ(stmts[0].ToString(), "f2 = *(f32*)&v0;\n");
   EXPECT_EQ(stmts[1].ToString(), "f0 = f2 + f4;\n");
   EXPECT_EQ(stmts[2].ToString(), "f0 = (s32)f0;\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesRoundingToMathFunctions) {
+  // ceil.w.s  $f2, $f0; nop; cvt.s.w $f2, $f2 -> f2 = ceilf(f0);
+  // floor.w.s $f4, $f0; cvt.s.w $f4, $f4      -> f4 = floorf(f0);
+  // round.w.s $f6, $f0; cvt.s.w $f6, $f6      -> f6 = roundf(f0);
+  // trunc.w.s $f8, $f0; cvt.s.w $f8, $f8      -> f8 = truncf(f0);
+  std::vector<uint32_t> words = {
+      0x4600008E,  // 0:  ceil.w.s  $f2, $f0
+      0x00000000,  // 4:  nop
+      0x468010A0,  // 8:  cvt.s.w   $f2, $f2
+      0x4600010F,  // C:  floor.w.s $f4, $f0
+      0x46802120,  // 10: cvt.s.w   $f4, $f4
+      0x4600018C,  // 14: round.w.s $f6, $f0
+      0x468031A0,  // 18: cvt.s.w   $f6, $f6
+      0x4600020D,  // 1C: trunc.w.s $f8, $f0
+      0x46804220,  // 20: cvt.s.w   $f8, $f8
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 4u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = ceilf(f0);\n");
+  EXPECT_EQ(stmts[1].ToString(), "f4 = floorf(f0);\n");
+  EXPECT_EQ(stmts[2].ToString(), "f6 = roundf(f0);\n");
+  EXPECT_EQ(stmts[3].ToString(), "f8 = truncf(f0);\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesDoubleRounding) {
+  // ceil.w.d  $f2, $f12; cvt.d.w $f2, $f2 -> f2 = ceil(f12);
+  // floor.w.d $f4, $f12; cvt.d.w $f4, $f4 -> f4 = floor(f12);
+  // round.w.d $f6, $f12; cvt.d.w $f6, $f6 -> f6 = round(f12);
+  // trunc.w.d $f8, $f12; cvt.d.w $f8, $f8 -> f8 = trunc(f12);
+  std::vector<uint32_t> words = {
+      0x4620608E,  // 0:  ceil.w.d  $f2, $f12
+      0x468010A1,  // 4:  cvt.d.w   $f2, $f2
+      0x4620610F,  // 8:  floor.w.d $f4, $f12
+      0x46802121,  // C:  cvt.d.w   $f4, $f4
+      0x4620618C,  // 10: round.w.d $f6, $f12
+      0x468031A1,  // 14: cvt.d.w   $f6, $f6
+      0x4620620D,  // 18: trunc.w.d $f8, $f12
+      0x46804221,  // 1C: cvt.d.w   $f8, $f8
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 4u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = ceil(f12);\n");
+  EXPECT_EQ(stmts[1].ToString(), "f4 = floor(f12);\n");
+  EXPECT_EQ(stmts[2].ToString(), "f6 = round(f12);\n");
+  EXPECT_EQ(stmts[3].ToString(), "f8 = trunc(f12);\n");
+}
+
+TEST(ExpressionBuilderTest, FloatingPointRoundingInReturnDelaySlot) {
+  // Pattern matching func_8009D3D0:
+  // ceil.w.s $f14, $f12
+  // jr       $ra
+  // cvt.s.w  $f0, $f14
+  // nop
+  std::vector<uint32_t> words = {
+      0x4600638E,  // 0: ceil.w.s $f14, $f12
+      0x03E00008,  // 4: jr       $ra
+      0x46807020,  // 8: cvt.s.w  $f0, $f14
+      0x00000000,  // C: nop
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_GE(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].ToString(), "f0 = ceilf(f12);\n");
+  EXPECT_EQ(stmts.back().kind, StatementKind::kReturn);
+}
+
+TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesFloatToIntRounding) {
+  // Single precision:
+  // ceil.w.s  $f2, $f0;  mfc1 $v0, $f2 -> v0 = (s32)ceilf(f0);
+  // floor.w.s $f4, $f0;  mfc1 $v1, $f4 -> v1 = (s32)floorf(f0);
+  // Double precision:
+  // ceil.w.d  $f2, $f12; mfc1 $a0, $f2 -> arg0 = (s32)ceil(f12);
+  // floor.w.d $f4, $f12; mfc1 $a1, $f4 -> arg1 = (s32)floor(f12);
+  // round.w.d $f6, $f12; mfc1 $a2, $f6 -> arg2 = (s32)round(f12);
+  std::vector<uint32_t> words = {
+      0x4600008E,  // 0:  ceil.w.s  $f2, $f0
+      0x44021000,  // 4:  mfc1      $v0, $f2
+      0x4600010F,  // 8:  floor.w.s $f4, $f0
+      0x44032000,  // C:  mfc1      $v1, $f4
+      0x4620608E,  // 10: ceil.w.d  $f2, $f12
+      0x44041000,  // 14: mfc1      $a0, $f2
+      0x4620610F,  // 18: floor.w.d $f4, $f12
+      0x44052000,  // 1C: mfc1      $a1, $f4
+      0x4620618C,  // 20: round.w.d $f6, $f12
+      0x44063000,  // 24: mfc1      $a2, $f6
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 5u);
+  EXPECT_EQ(stmts[0].ToString(), "v0 = (s32)ceilf(f0);\n");
+  EXPECT_EQ(stmts[1].ToString(), "v1 = (s32)floorf(f0);\n");
+  EXPECT_EQ(stmts[2].ToString(), "arg0 = (s32)ceil(f12);\n");
+  EXPECT_EQ(stmts[3].ToString(), "arg1 = (s32)floor(f12);\n");
+  EXPECT_EQ(stmts[4].ToString(), "arg2 = (s32)round(f12);\n");
 }
 
 }  // namespace

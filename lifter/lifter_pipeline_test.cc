@@ -370,6 +370,19 @@ entries {
   std::string types_file_content((std::istreambuf_iterator<char>(types_input_stream)),
                                  std::istreambuf_iterator<char>());
   EXPECT_THAT(types_file_content, HasSubstr("typedef signed int s32;"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f32 ceilf(f32 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f64 ceil(f64 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f32 floorf(f32 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f64 floor(f64 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f32 roundf(f32 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f64 round(f64 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f32 truncf(f32 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f64 trunc(f64 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f32 sqrtf(f32 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f64 sqrt(f64 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f32 fabsf(f32 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("static inline f64 fabs(f64 x)"));
+  EXPECT_THAT(types_file_content, HasSubstr("#include <math.h>"));
 
   // Verify lifted_symbols.ld was generated and contains unresolved func_80054320
   EXPECT_TRUE(std::filesystem::exists(out_dir / "lifted_symbols.ld"));
@@ -471,6 +484,86 @@ entries {
   ASSERT_THAT(tu_or->functions, ::testing::SizeIs(2));
   EXPECT_EQ(tu_or->functions[0].Name(), "AlphaFunc");
   EXPECT_EQ(tu_or->functions[1].Name(), "BetaFunc");
+
+  std::filesystem::remove_all(test_dir);
+}
+
+TEST(LifterPipelineTest, BuildTranslationUnitWithTypesHeaderPopulatesHeaderProvidedFunctions) {
+  std::filesystem::path test_dir =
+      std::filesystem::temp_directory_path() / "lifter_tu_math_header_test";
+  std::filesystem::create_directories(test_dir / "roms");
+
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+  subsegments {
+    name: "mod_alpha"
+    type: SUBSEGMENT_C
+    rom_start: 0x1000
+    vram: 0x80020000
+  }
+}
+)";
+  auto cfg_or = ParseSplitConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries {
+  name: "AlphaFunc"
+  address: 0x80020000
+  type: SYMBOL_FUNC
+}
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  std::vector<uint8_t> rom(0x2000, 0);
+  rom[0x1000] = 0x03;
+  rom[0x1001] = 0xE0;
+  rom[0x1002] = 0x00;
+  rom[0x1003] = 0x08;
+
+  std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractorOptions extractor_opts;
+  extractor_opts.repo_root = test_dir;
+  extractor_opts.game_name = "test-game";
+
+  auto extractor = std::make_unique<TargetExtractor>(extractor_opts, &(*cfg_or), &(*sym_idx_or));
+  auto loader = std::make_unique<FunctionLoader>(std::move(extractor));
+
+  LifterPipelineOptions options;
+  options.repo_root = test_dir;
+  options.game_name = "test-game";
+  options.includes = {"types.h"};
+
+  LifterPipeline pipeline(options, std::move(loader));
+
+  auto tu_or = pipeline.BuildTranslationUnit({"AlphaFunc"}, {"types.h"});
+  ASSERT_TRUE(tu_or.ok()) << tu_or.status();
+
+  EXPECT_NE(tu_or->header_provided_functions.count("ceilf"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("floorf"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("roundf"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("truncf"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("ceil"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("floor"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("round"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("trunc"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("sqrtf"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("sqrt"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("fabsf"), 0u);
+  EXPECT_NE(tu_or->header_provided_functions.count("fabs"), 0u);
 
   std::filesystem::remove_all(test_dir);
 }

@@ -219,6 +219,8 @@ struct FloatingPointConversionPattern {
   bool is_double = false;
   FpRegister src_floating_point_reg = FpRegister::kF0;
   Register dest_gpr = Register::kZero;
+  bool is_rounding = false;
+  std::string round_func;
 };
 
 std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPattern(
@@ -246,9 +248,12 @@ std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPatter
     }
   }
 
-  // 2. Float to Integer: trunc.w.s/trunc.w.d $fd, $fs [-> nop]* -> mfc1 $rt, $fd
-  if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD) && inst.fd.has_value() &&
-      inst.fs.has_value()) {
+  // 2. Float to Integer: (trunc/ceil/floor/round).w.(s/d) $fd, $fs [-> nop]* -> mfc1 $rt, $fd
+  if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD ||
+       inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
+       inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
+       inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) &&
+      inst.fd.has_value() && inst.fs.has_value()) {
     size_t j = i + 1;
     while (j < instructions.size() && instructions[j].IsNop()) {
       ++j;
@@ -263,7 +268,55 @@ std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPatter
         pattern.is_int_to_float = false;
         pattern.src_floating_point_reg = *inst.fs;
         pattern.dest_gpr = *next_inst.rt;
-        pattern.is_double = (inst.opcode == Opcode::kTruncWD);
+        pattern.is_double = (inst.opcode == Opcode::kTruncWD || inst.opcode == Opcode::kCeilWD ||
+                             inst.opcode == Opcode::kFloorWD || inst.opcode == Opcode::kRoundWD);
+        if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
+          pattern.round_func = pattern.is_double ? "ceil" : "ceilf";
+        } else if (inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD) {
+          pattern.round_func = pattern.is_double ? "floor" : "floorf";
+        } else if (inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) {
+          pattern.round_func = pattern.is_double ? "round" : "roundf";
+        }
+        return pattern;
+      }
+    }
+  }
+
+  // 3. Float rounding: (ceil/floor/round/trunc).w.(s/d) $fd, $fs [-> nop]* -> cvt.(s/d).w $dest,
+  // $fd
+  if ((inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
+       inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
+       inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD ||
+       inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD) &&
+      inst.fd.has_value() && inst.fs.has_value()) {
+    size_t j = i + 1;
+    while (j < instructions.size() && instructions[j].IsNop()) {
+      ++j;
+    }
+    if (j < instructions.size()) {
+      const auto& next_inst = instructions[j];
+      if ((next_inst.opcode == Opcode::kCvtSW || next_inst.opcode == Opcode::kCvtDW) &&
+          next_inst.fs.has_value() && *next_inst.fs == *inst.fd && next_inst.fd.has_value()) {
+        bool is_double = (inst.opcode == Opcode::kCeilWD || inst.opcode == Opcode::kFloorWD ||
+                          inst.opcode == Opcode::kRoundWD || inst.opcode == Opcode::kTruncWD ||
+                          next_inst.opcode == Opcode::kCvtDW);
+        std::string func_name;
+        if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
+          func_name = is_double ? "ceil" : "ceilf";
+        } else if (inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD) {
+          func_name = is_double ? "floor" : "floorf";
+        } else if (inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) {
+          func_name = is_double ? "round" : "roundf";
+        } else {
+          func_name = is_double ? "trunc" : "truncf";
+        }
+        FloatingPointConversionPattern pattern;
+        pattern.end_index = j;
+        pattern.is_rounding = true;
+        pattern.round_func = func_name;
+        pattern.dest_floating_point_reg = *next_inst.fd;
+        pattern.src_floating_point_reg = *inst.fs;
+        pattern.is_double = is_double;
         return pattern;
       }
     }
@@ -404,6 +457,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
                           function_fp_parameter_counts);
 }
 
+// NOLINTNEXTLINE(google-readability-function-size)
 std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
     const SplitConfig* split_config,
@@ -416,21 +470,21 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
   std::vector<Instruction> reordered_storage;
   absl::Span<const Instruction> instructions_to_process = instructions;
-  bool has_jal_instruction = false;
+  bool has_delayed_branch = false;
   for (const auto& instruction : instructions) {
-    if (instruction.opcode == Opcode::kJal) {
-      has_jal_instruction = true;
+    if (instruction.IsCall() || instruction.IsReturn()) {
+      has_delayed_branch = true;
       break;
     }
   }
-  if (has_jal_instruction) {
+  if (has_delayed_branch) {
     reordered_storage.reserve(instructions.size());
     for (size_t instruction_index = 0; instruction_index < instructions.size();
          ++instruction_index) {
-      if (instructions[instruction_index].opcode == Opcode::kJal &&
+      if ((instructions[instruction_index].IsCall() ||
+           instructions[instruction_index].IsReturn()) &&
           instruction_index + 1 < instructions.size()) {
-        // In MIPS, the delay slot instruction executes before the function call branch takes
-        // effect.
+        // In MIPS, delay slot instructions execute before the call or return takes effect.
         reordered_storage.push_back(instructions[instruction_index + 1]);
         reordered_storage.push_back(instructions[instruction_index]);
         ++instruction_index;
@@ -506,7 +560,15 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     // Check for MIPS GCC floating-point / integer conversion patterns
     auto conversion = MatchFloatingPointConversionPattern(instructions_to_process, i);
     if (conversion.has_value()) {
-      if (conversion->is_int_to_float) {
+      if (conversion->is_rounding) {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = FpRegisterVarName(conversion->dest_floating_point_reg);
+        std::vector<std::unique_ptr<LiftedExpression>> args;
+        args.push_back(LiftFpRegister(conversion->src_floating_point_reg));
+        statement.expression = LiftedExpression::Call(conversion->round_func, std::move(args));
+        statements.push_back(std::move(statement));
+      } else if (conversion->is_int_to_float) {
         LiftedStatement statement;
         statement.kind = StatementKind::kAssignment;
         statement.destination_variable = FpRegisterVarName(conversion->dest_floating_point_reg);
@@ -522,8 +584,13 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         LiftedStatement statement;
         statement.kind = StatementKind::kAssignment;
         statement.destination_variable = RegisterVarName(conversion->dest_gpr);
-        statement.expression =
-            LiftedExpression::Unary("(s32)", LiftFpRegister(conversion->src_floating_point_reg));
+        auto src_expr = LiftFpRegister(conversion->src_floating_point_reg);
+        if (!conversion->round_func.empty()) {
+          std::vector<std::unique_ptr<LiftedExpression>> args;
+          args.push_back(std::move(src_expr));
+          src_expr = LiftedExpression::Call(conversion->round_func, std::move(args));
+        }
+        statement.expression = LiftedExpression::Unary("(s32)", std::move(src_expr));
         statements.push_back(std::move(statement));
       }
       for (size_t k = i; k <= conversion->end_index; ++k) {

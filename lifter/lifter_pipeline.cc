@@ -26,6 +26,31 @@
 
 namespace rom_nom_nom {
 
+namespace {
+
+struct MathIntrinsic {
+  std::string_view name;
+  std::string_view type;  // "f32" or "f64"
+  std::string_view asm_inst;
+};
+
+constexpr MathIntrinsic kMathIntrinsics[] = {
+    {"sqrtf", "f32", "sqrt.s %0, %1"},
+    {"sqrt", "f64", "sqrt.d %0, %1"},
+    {"fabsf", "f32", "abs.s %0, %1"},
+    {"fabs", "f64", "abs.d %0, %1"},
+    {"ceilf", "f32", "ceil.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"floorf", "f32", "floor.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"roundf", "f32", "round.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"truncf", "f32", "trunc.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"ceil", "f64", "ceil.w.d %0, %1\n\tcvt.d.w %0, %0"},
+    {"floor", "f64", "floor.w.d %0, %1\n\tcvt.d.w %0, %0"},
+    {"round", "f64", "round.w.d %0, %1\n\tcvt.d.w %0, %0"},
+    {"trunc", "f64", "trunc.w.d %0, %1\n\tcvt.d.w %0, %0"},
+};
+
+}  // namespace
+
 LifterPipeline::LifterPipeline(LifterPipelineOptions options,
                                std::unique_ptr<FunctionLoader> loader)
     : options_(std::move(options)), loader_(std::move(loader)) {}
@@ -143,9 +168,9 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
     }
   }
   if (includes_types_h) {
-    for (const char* math_func : {"sqrtf", "sqrt", "fabsf", "fabs"}) {
-      if (tu.symbol_index == nullptr || tu.symbol_index->FindByName(math_func) == nullptr) {
-        tu.header_provided_functions.insert(math_func);
+    for (const auto& intrin : kMathIntrinsics) {
+      if (tu.symbol_index == nullptr || tu.symbol_index->FindByName(intrin.name) == nullptr) {
+        tu.header_provided_functions.insert(std::string(intrin.name));
       }
     }
   }
@@ -362,7 +387,7 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
                             ? loader_->Extractor()->Symbols()
                             : nullptr;
 
-  auto has_symbol_or_func = [&](const std::string& name) {
+  auto has_symbol_or_func = [&](std::string_view name) {
     if (defined_function_names.contains(name)) return true;
     if (symbols != nullptr && symbols->FindByName(name) != nullptr) return true;
     return false;
@@ -390,50 +415,27 @@ typedef float f32;
 typedef double f64;
 
 )";
-    if (!has_symbol_or_func("sqrtf")) {
-      header_provided_functions.insert("sqrtf");
-      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
-static inline f32 sqrtf(f32 x) {
-  f32 res;
-  __asm__("sqrt.s %0, %1" : "=f"(res) : "f"(x));
-  return res;
-}
+    types_output_stream << "#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))\n";
+    for (const auto& intrin : kMathIntrinsics) {
+      if (!has_symbol_or_func(intrin.name)) {
+        header_provided_functions.insert(std::string(intrin.name));
+        types_output_stream << absl::StrFormat(
+            "static inline %s %s(%s x) {\n"
+            "  %s res;\n"
+            "  __asm__(\"%s\" : \"=f\"(res) : \"f\"(x));\n"
+            "  return res;\n"
+            "}\n",
+            intrin.type, intrin.name, intrin.type, intrin.type, intrin.asm_inst);
+      }
+    }
+    types_output_stream << R"(#else
+#ifdef __cplusplus
+#include <cmath>
+#else
+#include <math.h>
+#endif
 #endif
 )";
-    }
-    if (!has_symbol_or_func("sqrt")) {
-      header_provided_functions.insert("sqrt");
-      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
-static inline f64 sqrt(f64 x) {
-  f64 res;
-  __asm__("sqrt.d %0, %1" : "=f"(res) : "f"(x));
-  return res;
-}
-#endif
-)";
-    }
-    if (!has_symbol_or_func("fabsf")) {
-      header_provided_functions.insert("fabsf");
-      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
-static inline f32 fabsf(f32 x) {
-  f32 res;
-  __asm__("abs.s %0, %1" : "=f"(res) : "f"(x));
-  return res;
-}
-#endif
-)";
-    }
-    if (!has_symbol_or_func("fabs")) {
-      header_provided_functions.insert("fabs");
-      types_output_stream << R"(#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
-static inline f64 fabs(f64 x) {
-  f64 res;
-  __asm__("abs.d %0, %1" : "=f"(res) : "f"(x));
-  return res;
-}
-#endif
-)";
-    }
     types_output_stream << "\n#endif  // TYPES_H\n";
   }
 
