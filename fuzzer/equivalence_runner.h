@@ -19,6 +19,8 @@ struct FunctionEquivalenceTarget {
   uint32_t candidate_vram = 0;
   std::vector<uint32_t> target_words;
   std::vector<uint32_t> candidate_words;
+  std::vector<MemoryPayload> target_initial_memory;
+  std::vector<MemoryPayload> candidate_initial_memory;
 };
 
 enum class FunctionEquivalenceStatus {

@@ -60,6 +60,12 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
 
   uint32_t cand_vram = target.candidate_vram != 0 ? target.candidate_vram : target.vram;
   DifferentialFuzzer::Options func_options = options_.fuzzer_options;
+  if (!target.target_initial_memory.empty()) {
+    func_options.target_initial_memory = target.target_initial_memory;
+  }
+  if (!target.candidate_initial_memory.empty()) {
+    func_options.candidate_initial_memory = target.candidate_initial_memory;
+  }
   auto target_insts = DecodeSequence(target.target_words, target.vram);
   if (target_insts.ok()) {
     auto target_cfg = ControlFlowGraph::Build(*target_insts);

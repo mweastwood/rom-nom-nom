@@ -251,5 +251,56 @@ TEST(EquivalenceRunnerTest, CounterexampleDetailsIncludeArguments) {
   EXPECT_NE(res.details.find("(args: a0=0x"), std::string::npos);
 }
 
+TEST(EquivalenceRunnerTest, InitialMemoryPayloadsForwardedAndProvenEquivalent) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "LoadInitialMemory";
+  target.vram = 0x80001000;
+
+  // Target: loads word at 0x80200000 into v0
+  // lui $at, 0x8020; lw $v0, 0($at); jr $ra; nop
+  target.target_words = {0x3C018020, 0x8C220000, 0x03E00008, 0x00000000};
+  // Candidate: loads word at 0x80200000 into v0 via different register t0
+  // lui $t0, 0x8020; lw $v0, 0($t0); jr $ra; nop
+  target.candidate_words = {0x3C088020, 0x8D020000, 0x03E00008, 0x00000000};
+
+  MemoryPayload payload;
+  payload.address = 0x80200000;
+  payload.data = {0x11, 0x22, 0x33, 0x44};
+  target.target_initial_memory.push_back(payload);
+  target.candidate_initial_memory.push_back(payload);
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kFuzzProvenEquivalent);
+  EXPECT_FALSE(res.counterexample.has_value());
+}
+
+TEST(EquivalenceRunnerTest, InitialMemoryPayloadsForwardedDetectsDivergence) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "LoadInitialMemoryDivergent";
+  target.vram = 0x80001000;
+
+  // Both functions load word at 0x80200000 into v0
+  target.target_words = {0x3C018020, 0x8C220000, 0x03E00008, 0x00000000};
+  target.candidate_words = {0x3C088020, 0x8D020000, 0x03E00008, 0x00000000};
+
+  MemoryPayload target_payload;
+  target_payload.address = 0x80200000;
+  target_payload.data = {0x11, 0x22, 0x33, 0x44};
+  target.target_initial_memory.push_back(target_payload);
+
+  MemoryPayload candidate_payload;
+  candidate_payload.address = 0x80200000;
+  candidate_payload.data = {0x99, 0x88, 0x77, 0x66};
+  target.candidate_initial_memory.push_back(candidate_payload);
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kDivergent);
+  ASSERT_TRUE(res.counterexample.has_value());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer
