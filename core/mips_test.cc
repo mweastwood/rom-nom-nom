@@ -321,5 +321,33 @@ TEST(MipsTest, DecodeCop1RoundingInstructions) {
   EXPECT_EQ(floor_inst->Disassemble(), "floor.w.s $f0, $f12");
 }
 
+TEST(MipsTest, MemorySegmentPredicates) {
+  // KUSEG (user space): 0x00000000 - 0x7FFFFFFF
+  EXPECT_FALSE(IsDirectMappedAddress(0x00000000));
+  EXPECT_FALSE(IsDirectMappedAddress(0x7FFFFFFF));
+  EXPECT_FALSE(IsKseg0Address(0x7FFFFFFF));
+  EXPECT_FALSE(IsKseg1Address(0x7FFFFFFF));
+
+  // KSEG0 (cached kernel space, RAM/ROM): 0x80000000 - 0x9FFFFFFF
+  EXPECT_TRUE(IsDirectMappedAddress(kKseg0Base));
+  EXPECT_TRUE(IsDirectMappedAddress(0x800266C0));
+  EXPECT_TRUE(IsDirectMappedAddress(kKseg0End));
+  EXPECT_TRUE(IsKseg0Address(kKseg0Base));
+  EXPECT_TRUE(IsKseg0Address(kKseg0End));
+  EXPECT_FALSE(IsKseg1Address(kKseg0Base));
+
+  // KSEG1 (uncached kernel space, MMIO/ROM): 0xA0000000 - 0xBFFFFFFF
+  EXPECT_TRUE(IsDirectMappedAddress(kKseg1Base));
+  EXPECT_TRUE(IsDirectMappedAddress(0xA4000000));
+  EXPECT_TRUE(IsDirectMappedAddress(kKseg1End));
+  EXPECT_TRUE(IsKseg1Address(kKseg1Base));
+  EXPECT_TRUE(IsKseg1Address(kKseg1End));
+  EXPECT_FALSE(IsKseg0Address(kKseg1Base));
+
+  // KSSEG / KSEG3 (supervisor / kernel mapped): 0xC0000000 - 0xFFFFFFFF
+  EXPECT_FALSE(IsDirectMappedAddress(kKssegBase));
+  EXPECT_FALSE(IsDirectMappedAddress(kKseg3End));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

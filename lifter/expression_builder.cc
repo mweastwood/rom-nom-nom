@@ -81,7 +81,7 @@ std::unique_ptr<LiftedExpression> LiftedExpression::Call(
 std::string LiftedExpression::ToString() const {
   switch (kind) {
     case ExpressionKind::kIntegerLiteral:
-      if (is_hex && int_val > 9) {
+      if (RequiresHex(int_val, is_hex)) {
         return absl::StrFormat("0x%X", int_val);
       }
       return std::to_string(int_val);
@@ -351,7 +351,7 @@ std::unique_ptr<LiftedExpression> ExpressionBuilder::LiftRegisterOrConstant(
   }
   if (tracker.IsConstant(reg)) {
     auto c = tracker.GetConstant(reg);
-    if (c.has_value()) {
+    if (c.has_value() && !IsDirectMappedAddress(*c)) {
       bool hex = (*c > 0xFFFF);
       return LiftedExpression::Integer(*c, hex);
     }

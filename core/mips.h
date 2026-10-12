@@ -51,6 +51,36 @@ enum class Register : uint8_t {
 // Returns standard ABI register name (e.g. "$a0", "$sp", "$zero").
 std::string_view RegisterName(Register reg);
 
+// --- MIPS 32-Bit Memory Architecture ---
+
+// Base and boundary definitions for MIPS 32-bit virtual memory segments.
+constexpr uint32_t kKusegBase = 0x00000000;
+constexpr uint32_t kKusegEnd = 0x7FFFFFFF;
+constexpr uint32_t kKseg0Base = 0x80000000;
+constexpr uint32_t kKseg0End = 0x9FFFFFFF;
+constexpr uint32_t kKseg1Base = 0xA0000000;
+constexpr uint32_t kKseg1End = 0xBFFFFFFF;
+constexpr uint32_t kKssegBase = 0xC0000000;
+constexpr uint32_t kKssegEnd = 0xDFFFFFFF;
+constexpr uint32_t kKseg3Base = 0xE0000000;
+constexpr uint32_t kKseg3End = 0xFFFFFFFF;
+
+// Returns true if the address falls within direct-mapped physical address space
+// (KSEG0 / KSEG1), which covers all physical RDRAM, ROM, and memory-mapped I/O on N64.
+constexpr bool IsDirectMappedAddress(uint32_t address) {
+  return address >= kKseg0Base && address <= kKseg1End;
+}
+
+// Returns true if the address is in KSEG0 (cached, direct-mapped RAM/ROM).
+constexpr bool IsKseg0Address(uint32_t address) {
+  return address >= kKseg0Base && address <= kKseg0End;
+}
+
+// Returns true if the address is in KSEG1 (uncached, direct-mapped MMIO/ROM).
+constexpr bool IsKseg1Address(uint32_t address) {
+  return address >= kKseg1Base && address <= kKseg1End;
+}
+
 // MIPS Floating Point Registers (FPRs) for COP1.
 enum class FpRegister : uint8_t {
   kF0,

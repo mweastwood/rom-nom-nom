@@ -52,6 +52,17 @@ struct LiftedExpression {
   std::string ToString() const;
   std::unique_ptr<LiftedExpression> Clone() const;
 
+  // Returns true if the integer literal should be formatted in hexadecimal.
+  // Values with bit 31 set represent either 32-bit bitmasks, addresses, or sign-extended
+  // negative numbers that must be formatted in hex to prevent unsigned decimal overflow in C89.
+  // Explicitly requested hex values format as hex when multi-digit (> 9).
+  static bool RequiresHex(uint32_t val, bool explicit_hex = false) {
+    if ((val & 0x80000000u) != 0) {
+      return true;
+    }
+    return explicit_hex && val > 9;
+  }
+
   static std::unique_ptr<LiftedExpression> Integer(uint32_t val, bool hex = false);
   static std::unique_ptr<LiftedExpression> Variable(std::string name);
   static std::unique_ptr<LiftedExpression> GlobalRef(std::string name);

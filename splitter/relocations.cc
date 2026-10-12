@@ -93,7 +93,7 @@ bool RelocationTracker::IsValidTarget(uint32_t addr) const {
     return false;
   }
   // Standard N64 KSEG0 and KSEG1 pointer ranges
-  return (addr >= 0x80000000 && addr <= 0xBFFFFFFF);
+  return IsDirectMappedAddress(addr);
 }
 
 void RelocationTracker::ResolveSymbol(uint32_t target_vram, std::string& out_name,

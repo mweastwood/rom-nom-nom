@@ -1860,5 +1860,59 @@ TEST(ExpressionBuilderTest, MultWhereIntermediateInstructionClobbersSourceOperan
   EXPECT_EQ(stmts[2].ToString(), "arg0 = 0;\n");
 }
 
+TEST(ExpressionBuilderTest, LiftedExpressionFormatsLargeIntegersAsHex) {
+  // Values with bit 31 set should automatically format as hex even when is_hex is false.
+  EXPECT_TRUE(LiftedExpression::RequiresHex(0x80000000, /*explicit_hex=*/false));
+  EXPECT_TRUE(LiftedExpression::RequiresHex(0x800266C0, /*explicit_hex=*/false));
+  EXPECT_TRUE(LiftedExpression::RequiresHex(0xFFFFFFFF, /*explicit_hex=*/false));
+
+  EXPECT_EQ(LiftedExpression::Integer(0x80000000, /*hex=*/false)->ToString(), "0x80000000");
+  EXPECT_EQ(LiftedExpression::Integer(0x800266C0, /*hex=*/false)->ToString(), "0x800266C0");
+  EXPECT_EQ(LiftedExpression::Integer(0xFFFFFFFF, /*hex=*/false)->ToString(), "0xFFFFFFFF");
+
+  // Standard values without bit 31 set format as decimal unless explicit_hex is true.
+  EXPECT_FALSE(LiftedExpression::RequiresHex(0, /*explicit_hex=*/false));
+  EXPECT_FALSE(LiftedExpression::RequiresHex(42, /*explicit_hex=*/false));
+  EXPECT_FALSE(LiftedExpression::RequiresHex(0x7FFFFFFF, /*explicit_hex=*/false));
+
+  EXPECT_EQ(LiftedExpression::Integer(0, /*hex=*/false)->ToString(), "0");
+  EXPECT_EQ(LiftedExpression::Integer(42, /*hex=*/false)->ToString(), "42");
+  EXPECT_EQ(LiftedExpression::Integer(0x7FFFFFFF, /*hex=*/false)->ToString(), "2147483647");
+
+  // Explicit hex flag formatting: multi-digit (> 9) uses hex, single digit (0-9) stays decimal.
+  EXPECT_TRUE(LiftedExpression::RequiresHex(0x2A, /*explicit_hex=*/true));
+  EXPECT_FALSE(LiftedExpression::RequiresHex(5, /*explicit_hex=*/true));
+
+  EXPECT_EQ(LiftedExpression::Integer(0x2A, /*hex=*/true)->ToString(), "0x2A");
+  EXPECT_EQ(LiftedExpression::Integer(5, /*hex=*/true)->ToString(), "5");
+}
+
+TEST(ExpressionBuilderTest, LiftRegisterOrConstantExcludesKsegPointerAddresses) {
+  // 1. Loading a KSEG0 pointer address into $t0 (0x80051234) should NOT be constant-folded
+  // into a raw integer literal in subsequent expressions.
+  std::vector<uint32_t> kseg0_words = {
+      0x3C088005,  // lui   $t0, 0x8005
+      0x25081234,  // addiu $t0, $t0, 0x1234
+      0x01001021,  // addu  $v0, $t0, $zero  (reads $t0)
+  };
+  auto kseg0_insts = *DecodeSequence(kseg0_words);
+  auto kseg0_stmts = ExpressionBuilder::LiftInstructions(kseg0_insts);
+  ASSERT_EQ(kseg0_stmts.size(), 2u);
+  EXPECT_EQ(kseg0_stmts[0].ToString(), "temp_t0 = 0x80051234;\n");
+  // $t0 in the second statement should remain variable temp_t0, not 0x80051234
+  EXPECT_EQ(kseg0_stmts[1].ToString(), "v0 = temp_t0;\n");
+
+  // 2. In contrast, standard non-pointer constants (e.g. 0x1234) are constant-folded.
+  std::vector<uint32_t> const_words = {
+      0x24081234,  // li   $t0, 0x1234
+      0x01001021,  // addu $v0, $t0, $zero
+  };
+  auto const_insts = *DecodeSequence(const_words);
+  auto const_stmts = ExpressionBuilder::LiftInstructions(const_insts);
+  ASSERT_EQ(const_stmts.size(), 2u);
+  EXPECT_EQ(const_stmts[0].ToString(), "temp_t0 = 4660;\n");
+  EXPECT_EQ(const_stmts[1].ToString(), "v0 = 4660;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
