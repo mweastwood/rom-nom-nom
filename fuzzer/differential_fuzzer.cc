@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 
 namespace rom_nom_nom::fuzzer {
@@ -128,12 +130,23 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
       candidate_writes = comp->candidate_result.write_log;
     }
 
-    if (target_writes.size() != candidate_writes.size()) {
-      comp->result = EquivalenceResult::kMemoryWriteMismatch;
-      comp->failure_reason = absl::StrFormat(
-          "Write log size mismatch: target logged %zu writes vs candidate logged %zu writes",
-          target_writes.size(), candidate_writes.size());
-    } else {
+    absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
+    for (const auto& tw : target_writes) {
+      for (uint8_t b = 0; b < tw.size; ++b) {
+        uint8_t byte_val = static_cast<uint8_t>((tw.value >> ((tw.size - 1 - b) * 8)) & 0xFF);
+        target_bytes[tw.address + b] = byte_val;
+      }
+    }
+    absl::flat_hash_map<uint32_t, uint8_t> candidate_bytes;
+    for (const auto& cw : candidate_writes) {
+      for (uint8_t b = 0; b < cw.size; ++b) {
+        uint8_t byte_val = static_cast<uint8_t>((cw.value >> ((cw.size - 1 - b) * 8)) & 0xFF);
+        candidate_bytes[cw.address + b] = byte_val;
+      }
+    }
+
+    bool writes_match = (target_bytes == candidate_bytes);
+    if (!writes_match && target_writes.size() == candidate_writes.size()) {
       std::sort(target_writes.begin(), target_writes.end(),
                 [](const MemoryWrite& a, const MemoryWrite& b) {
                   if (a.address != b.address) return a.address < b.address;
@@ -146,19 +159,45 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
                   if (a.size != b.size) return a.size < b.size;
                   return a.value < b.value;
                 });
-      comp->result = EquivalenceResult::kEquivalent;
+      writes_match = true;
       for (size_t i = 0; i < target_writes.size(); ++i) {
-        const auto& tw = target_writes[i];
-        const auto& cw = candidate_writes[i];
-        if (!(tw == cw)) {
-          comp->result = EquivalenceResult::kMemoryWriteMismatch;
-          comp->failure_reason = absl::StrFormat(
-              "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
-              "candidate(addr=0x%08X, val=0x%llX, size=%d)",
-              i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size);
+        if (!(target_writes[i] == candidate_writes[i])) {
+          writes_match = false;
           break;
         }
       }
+    }
+
+    if (!writes_match) {
+      comp->result = EquivalenceResult::kMemoryWriteMismatch;
+      if (target_writes.size() != candidate_writes.size()) {
+        std::string tw_str;
+        for (const auto& w : target_writes) {
+          absl::StrAppend(&tw_str, absl::StrFormat(" [0x%X:0x%X]", w.address, w.value));
+        }
+        std::string cw_str;
+        for (const auto& w : candidate_writes) {
+          absl::StrAppend(&cw_str, absl::StrFormat(" [0x%X:0x%X]", w.address, w.value));
+        }
+        comp->failure_reason = absl::StrFormat(
+            "Write log size mismatch: target logged %zu writes (%s) vs candidate logged %zu writes "
+            "(%s)",
+            target_writes.size(), tw_str, candidate_writes.size(), cw_str);
+      } else {
+        for (size_t i = 0; i < target_writes.size(); ++i) {
+          const auto& tw = target_writes[i];
+          const auto& cw = candidate_writes[i];
+          if (!(tw == cw)) {
+            comp->failure_reason = absl::StrFormat(
+                "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
+                "candidate(addr=0x%08X, val=0x%llX, size=%d)",
+                i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size);
+            break;
+          }
+        }
+      }
+    } else {
+      comp->result = EquivalenceResult::kEquivalent;
     }
   } else {
     comp->result = EquivalenceResult::kEquivalent;

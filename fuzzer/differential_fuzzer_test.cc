@@ -425,5 +425,116 @@ TEST(DifferentialFuzzerTest, MmioAndSpinloopFunctionsMatchEquivalently) {
   EXPECT_EQ(comp.candidate_result.v0, 1u);
 }
 
+TEST(DifferentialFuzzerTest, EquivalentWithSplitMemoryStores) {
+  DifferentialFuzzer fuzzer;
+
+  // Target: stores word $a1 (0x12345678) at 0($a0)
+  // 00: sw   $a1, 0($a0)
+  // 04: jr   $ra
+  // 08: nop
+  std::vector<uint32_t> target = {
+      0xAC850000,  // sw $a1, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: splits word store into 4 byte stores (sb)
+  // 00: srl  $t0, $a1, 24
+  // 04: sb   $t0, 0($a0)
+  // 08: srl  $t0, $a1, 16
+  // 0C: sb   $t0, 1($a0)
+  // 10: srl  $t0, $a1, 8
+  // 14: sb   $t0, 2($a0)
+  // 18: sb   $a1, 3($a0)
+  // 1C: jr   $ra
+  // 20: nop
+  std::vector<uint32_t> candidate = {
+      0x00054602,  // srl $t0, $a1, 24
+      0xA0880000,  // sb  $t0, 0($a0)
+      0x00054402,  // srl $t0, $a1, 16
+      0xA0880001,  // sb  $t0, 1($a0)
+      0x00054202,  // srl $t0, $a1, 8
+      0xA0880002,  // sb  $t0, 2($a0)
+      0xA0850003,  // sb  $a1, 3($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80100000;
+  tc.a1 = 0x12345678;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, EquivalentWithMergedHalfwordStores) {
+  DifferentialFuzzer fuzzer;
+
+  // Target: 2 halfword stores at 0($a0) and 2($a0)
+  // 00: srl  $t0, $a1, 16
+  // 04: sh   $t0, 0($a0)
+  // 08: sh   $a1, 2($a0)
+  // 0C: jr   $ra
+  // 10: nop
+  std::vector<uint32_t> target = {
+      0x00054402,  // srl $t0, $a1, 16
+      0xA4880000,  // sh  $t0, 0($a0)
+      0xA4850002,  // sh  $a1, 2($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: 1 single word store at 0($a0)
+  // 00: sw   $a1, 0($a0)
+  // 04: jr   $ra
+  // 08: nop
+  std::vector<uint32_t> candidate = {
+      0xAC850000,  // sw  $a1, 0($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80100000;
+  tc.a1 = 0xDEADBEEF;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, DetectsMemoryStoreByteMismatchWithDifferentWriteCounts) {
+  DifferentialFuzzer fuzzer;
+
+  // Target: stores word 0x12345678 at 0($a0)
+  std::vector<uint32_t> target = {
+      0xAC850000,  // sw $a1, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: stores byte 0x99 instead of 0x78 at 3($a0)
+  std::vector<uint32_t> candidate = {
+      0x00054602,  // srl $t0, $a1, 24
+      0xA0880000,  // sb  $t0, 0($a0)
+      0x00054402,  // srl $t0, $a1, 16
+      0xA0880001,  // sb  $t0, 1($a0)
+      0x00054202,  // srl $t0, $a1, 8
+      0xA0880002,  // sb  $t0, 2($a0)
+      0x24080099,  // addiu $t0, $zero, 0x99 (mismatched byte!)
+      0xA0880003,  // sb  $t0, 3($a0)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80100000;
+  tc.a1 = 0x12345678;
+
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kMemoryWriteMismatch);
+  EXPECT_NE(comp.failure_reason.find("Write log size mismatch"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer
