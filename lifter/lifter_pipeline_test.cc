@@ -917,5 +917,140 @@ entries {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(LifterPipelineTest, BuildTranslationUnitPopulatesCalleeParameterCountsFromLoader) {
+  std::filesystem::path test_dir =
+      std::filesystem::temp_directory_path() / "lifter_tu_callee_params_test";
+  std::filesystem::create_directories(test_dir / "roms");
+
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+  subsegments {
+    name: "mod_alpha"
+    type: SUBSEGMENT_C
+    rom_start: 0x1000
+    vram: 0x80020000
+  }
+}
+)";
+  auto cfg_or = ParseSplitConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries {
+  name: "CallerFunc"
+  address: 0x80020000
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "CalleeFunc"
+  address: 0x80020020
+  type: SYMBOL_FUNC
+}
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  std::vector<uint8_t> rom(0x2000, 0);
+  // CallerFunc at 0x1000 (0x80020000):
+  // addiu $a0, $zero, 1
+  rom[0x1000] = 0x24;
+  rom[0x1001] = 0x04;
+  rom[0x1002] = 0x00;
+  rom[0x1003] = 0x01;
+  // addiu $a1, $zero, 2
+  rom[0x1004] = 0x24;
+  rom[0x1005] = 0x05;
+  rom[0x1006] = 0x00;
+  rom[0x1007] = 0x02;
+  // addiu $a2, $zero, 3
+  rom[0x1008] = 0x24;
+  rom[0x1009] = 0x06;
+  rom[0x1008 + 2] = 0x00;
+  rom[0x1008 + 3] = 0x03;
+  // jal CalleeFunc (target 0x80020020: (0x80020020 & 0x0FFFFFFF) >> 2 = 0x8008, opcode 3 ->
+  // 0x0C008008)
+  rom[0x100C] = 0x0C;
+  rom[0x100D] = 0x00;
+  rom[0x100E] = 0x80;
+  rom[0x100F] = 0x08;
+  // nop
+  rom[0x1010] = 0x00;
+  rom[0x1011] = 0x00;
+  rom[0x1012] = 0x00;
+  rom[0x1013] = 0x00;
+  // jr $ra
+  rom[0x1014] = 0x03;
+  rom[0x1015] = 0xE0;
+  rom[0x1016] = 0x00;
+  rom[0x1017] = 0x08;
+  // nop
+  rom[0x1018] = 0x00;
+  rom[0x1019] = 0x00;
+  rom[0x101A] = 0x00;
+  rom[0x101B] = 0x00;
+
+  // CalleeFunc at 0x1020 (0x80020020):
+  // addu $v0, $a0, $a1 (uses only $a0 and $a1)
+  rom[0x1020] = 0x00;
+  rom[0x1021] = 0x85;
+  rom[0x1022] = 0x10;
+  rom[0x1023] = 0x21;
+  // jr $ra
+  rom[0x1024] = 0x03;
+  rom[0x1025] = 0xE0;
+  rom[0x1026] = 0x00;
+  rom[0x1027] = 0x08;
+  // nop
+  rom[0x1028] = 0x00;
+  rom[0x1029] = 0x00;
+  rom[0x102A] = 0x00;
+  rom[0x102B] = 0x00;
+
+  std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractorOptions extractor_opts;
+  extractor_opts.repo_root = test_dir;
+  extractor_opts.game_name = "test-game";
+
+  auto extractor = std::make_unique<TargetExtractor>(extractor_opts, &(*cfg_or), &(*sym_idx_or));
+  auto loader = std::make_unique<FunctionLoader>(std::move(extractor));
+
+  LifterPipelineOptions options;
+  options.repo_root = test_dir;
+  options.game_name = "test-game";
+  options.format_with_clang = false;
+
+  LifterPipeline pipeline(options, std::move(loader));
+
+  // BuildTranslationUnit with ONLY CallerFunc should discover CalleeFunc and its 2 params
+  auto tu_or = pipeline.BuildTranslationUnit({"CallerFunc"});
+  ASSERT_TRUE(tu_or.ok()) << tu_or.status();
+  ASSERT_THAT(tu_or->functions, ::testing::SizeIs(1));
+
+  CEmitterOptions emitter_opts;
+  emitter_opts.format_with_clang = false;
+  std::string c_code = CEmitter::EmitFunction(tu_or->functions[0], emitter_opts);
+  EXPECT_THAT(c_code, HasSubstr("CalleeFunc(1, 2);"));
+  EXPECT_THAT(c_code, ::testing::Not(HasSubstr("CalleeFunc(1, 2, 3);")));
+
+  // Decompile should also route through BuildTranslationUnit and yield the exact same result
+  auto decompile_or = pipeline.Decompile("CallerFunc");
+  ASSERT_TRUE(decompile_or.ok()) << decompile_or.status();
+  EXPECT_THAT(decompile_or->c_code, HasSubstr("CalleeFunc(1, 2);"));
+
+  std::filesystem::remove_all(test_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -84,6 +84,21 @@ absl::StatusOr<LifterResult> LifterPipeline::Decompile(std::string_view func_nam
     return loaded_or.status();
   }
 
+  auto tu_or = BuildTranslationUnit({std::string(loaded_or->name)});
+  if (tu_or.ok() && !tu_or->functions.empty()) {
+    CEmitterOptions emitter_opts;
+    emitter_opts.includes = tu_or->includes;
+    emitter_opts.format_with_clang = options_.format_with_clang;
+    std::string c_code = CEmitter::EmitFunction(tu_or->functions[0], emitter_opts);
+    LifterResult result;
+    result.function_name = loaded_or->name;
+    result.vram = loaded_or->vram;
+    result.instruction_count = loaded_or->instructions.size();
+    result.ast = std::make_unique<FunctionDeclaration>(std::move(tu_or->functions[0]));
+    result.c_code = std::move(c_code);
+    return result;
+  }
+
   return DecompileFunction(*loaded_or);
 }
 
@@ -190,6 +205,32 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
         ExpressionBuilder::DetermineParameterCount(loaded_or->instructions);
     fp_parameter_counts[loaded_or->name] =
         ExpressionBuilder::DetermineFpParameterCount(loaded_or->instructions);
+
+    const auto& insts = loaded_or->instructions;
+    for (size_t i = 0; i < insts.size(); ++i) {
+      uint32_t target_vram = 0;
+      if (insts[i].opcode == Opcode::kJal) {
+        target_vram = insts[i].JumpTarget();
+      }
+
+      if (target_vram != 0) {
+        std::string callee_name =
+            (tu.symbol_index != nullptr)
+                ? tu.symbol_index->LookupOrSynthesizeName(target_vram, SYMBOL_FUNC)
+                : absl::StrFormat("func_%08X", target_vram);
+
+        if (!parameter_counts.contains(callee_name) && loader_ != nullptr) {
+          auto callee_loaded = loader_->LoadFunction(callee_name);
+          if (callee_loaded.ok()) {
+            parameter_counts[callee_name] =
+                ExpressionBuilder::DetermineParameterCount(callee_loaded->instructions);
+            fp_parameter_counts[callee_name] =
+                ExpressionBuilder::DetermineFpParameterCount(callee_loaded->instructions);
+          }
+        }
+      }
+    }
+
     loaded_functions.push_back(std::move(*loaded_or));
   }
 
