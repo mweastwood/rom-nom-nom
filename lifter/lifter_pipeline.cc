@@ -283,6 +283,40 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
     return func_names;
   }
 
+  // 2. Check standalone module assembly file (e.g. <asm_dir>/<module_name>.s)
+  std::vector<std::filesystem::path> asm_files;
+  if (!options_.asm_dir.empty()) {
+    asm_files.push_back(options_.asm_dir / absl::StrCat(module_name, ".s"));
+  }
+  asm_files.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
+                      absl::StrCat(module_name, ".s"));
+  asm_files.push_back(options_.repo_root / "asm" / options_.game_name /
+                      absl::StrCat(module_name, ".s"));
+  for (const auto& file : asm_files) {
+    if (std::filesystem::exists(file)) {
+      std::ifstream in(file);
+      std::string line;
+      while (std::getline(in, line)) {
+        std::string_view sv = line;
+        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) {
+          sv.remove_prefix(1);
+        }
+        std::string func_name;
+        if (absl::ConsumePrefix(&sv, ".ent ")) {
+          func_name = std::string(absl::StripTrailingAsciiWhitespace(sv));
+        } else if (absl::ConsumePrefix(&sv, "glabel ")) {
+          func_name = std::string(absl::StripTrailingAsciiWhitespace(sv));
+        }
+        if (!func_name.empty() && seen.insert(func_name).second) {
+          func_names.push_back(func_name);
+        }
+      }
+      if (!func_names.empty()) {
+        return func_names;
+      }
+    }
+  }
+
   // Fallback: Find subsegment matching module_name in config
   const Subsegment* matched_subseg = nullptr;
   const Segment* matched_seg = nullptr;
