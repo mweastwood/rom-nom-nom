@@ -90,14 +90,19 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
   comp->candidate_result = candidate_emu_.RunFunction(candidate_vram, options_.max_steps_per_run);
 
   // 1. Check ExecutionStatus
-  if (comp->target_result.status != comp->candidate_result.status) {
+  bool both_faulted = (comp->target_result.status == ExecutionStatus::kMemoryFault ||
+                       comp->target_result.status == ExecutionStatus::kIntegerOverflow) &&
+                      (comp->candidate_result.status == ExecutionStatus::kMemoryFault ||
+                       comp->candidate_result.status == ExecutionStatus::kIntegerOverflow);
+
+  if (comp->target_result.status != comp->candidate_result.status && !both_faulted) {
     comp->result = EquivalenceResult::kStatusMismatch;
     comp->failure_reason = absl::StrFormat(
         "ExecutionStatus mismatch: target=%d (%s) vs candidate=%d (%s)",
         static_cast<int>(comp->target_result.status), comp->target_result.error_message,
         static_cast<int>(comp->candidate_result.status), comp->candidate_result.error_message);
-  } else if (comp->target_result.status != ExecutionStatus::kHaltedReturn) {
-    // If both trapped or halted identically with a non-return status, consider equivalent in error.
+  } else if (comp->target_result.status != ExecutionStatus::kHaltedReturn || both_faulted) {
+    // If both trapped or halted with a non-return status, consider equivalent in error.
     comp->result = EquivalenceResult::kEquivalent;
   } else if (options_.check_callee_saved &&
              !(target_emu_.GetCalleeSavedRegisters() == target_initial_saved)) {

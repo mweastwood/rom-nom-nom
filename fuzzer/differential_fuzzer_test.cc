@@ -876,5 +876,26 @@ TEST(DifferentialFuzzerTest, TargetAndCandidateReadHooks) {
   EXPECT_EQ(comp.candidate_result.v0, 0xCAFEBABEu);
 }
 
+TEST(DifferentialFuzzerTest, BothFaultedReportsEquivalentInError) {
+  // Target: loads from invalid address 0x0
+  std::vector<uint32_t> target = {
+      0x8C020000,  // lw $v0, 0($zero)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: loads from invalid address 0x4
+  std::vector<uint32_t> candidate = {
+      0x8C020004,  // lw $v0, 4($zero)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  DifferentialComparison comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer
