@@ -2,6 +2,8 @@
 #define ROM_NOM_NOM_FUZZER_DIFFERENTIAL_FUZZER_H_
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,6 +69,10 @@ class DifferentialFuzzer {
     bool check_external_calls = false;
     bool filter_local_stack_writes = true;
     bool mock_mmio = true;
+    std::function<std::optional<uint64_t>(uint32_t, size_t, bool)> target_read_hook;
+    std::function<std::optional<uint64_t>(uint32_t, size_t, bool)> candidate_read_hook;
+    std::vector<MemoryPayload> target_initial_memory;
+    std::vector<MemoryPayload> candidate_initial_memory;
   };
 
   DifferentialFuzzer() = default;

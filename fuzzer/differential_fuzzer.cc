@@ -325,7 +325,35 @@ DifferentialComparison DifferentialFuzzer::Compare(const std::vector<uint32_t>& 
         candidate_vram + static_cast<uint32_t>(candidate_code.size() * sizeof(uint32_t)));
   }
 
+  for (const auto& payload : options_.target_initial_memory) {
+    if (!payload.data.empty()) {
+      target_emu_.LoadMemory(payload.address, payload.data.data(), payload.data.size());
+    }
+  }
+  for (const auto& payload : options_.candidate_initial_memory) {
+    if (!payload.data.empty()) {
+      candidate_emu_.LoadMemory(payload.address, payload.data.data(), payload.data.size());
+    }
+  }
+
+  if (options_.target_read_hook) {
+    target_emu_.SetReadHook(options_.target_read_hook);
+  }
+  if (options_.candidate_read_hook) {
+    candidate_emu_.SetReadHook(options_.candidate_read_hook);
+  }
+
   EvaluateComparison(&comp, target_code, target_vram, candidate_code, candidate_vram, test_case);
+
+  target_emu_.ClearReadHook();
+  candidate_emu_.ClearReadHook();
+
+  for (const auto& payload : options_.target_initial_memory) {
+    target_emu_.ClearMemory(payload.address, payload.data.size());
+  }
+  for (const auto& payload : options_.candidate_initial_memory) {
+    candidate_emu_.ClearMemory(payload.address, payload.data.size());
+  }
 
   target_emu_.ClearCodeBounds();
   candidate_emu_.ClearCodeBounds();
@@ -374,6 +402,24 @@ std::vector<DifferentialComparison> DifferentialFuzzer::RunBattery(
         candidate_vram + static_cast<uint32_t>(candidate_code.size() * sizeof(uint32_t)));
   }
 
+  for (const auto& payload : options_.target_initial_memory) {
+    if (!payload.data.empty()) {
+      target_emu_.LoadMemory(payload.address, payload.data.data(), payload.data.size());
+    }
+  }
+  for (const auto& payload : options_.candidate_initial_memory) {
+    if (!payload.data.empty()) {
+      candidate_emu_.LoadMemory(payload.address, payload.data.data(), payload.data.size());
+    }
+  }
+
+  if (options_.target_read_hook) {
+    target_emu_.SetReadHook(options_.target_read_hook);
+  }
+  if (options_.candidate_read_hook) {
+    candidate_emu_.SetReadHook(options_.candidate_read_hook);
+  }
+
   for (const auto& tc : test_cases) {
     DifferentialComparison comp;
     comp.test_case = tc;
@@ -382,6 +428,16 @@ std::vector<DifferentialComparison> DifferentialFuzzer::RunBattery(
     if (comp.result != EquivalenceResult::kEquivalent) {
       break;
     }
+  }
+
+  target_emu_.ClearReadHook();
+  candidate_emu_.ClearReadHook();
+
+  for (const auto& payload : options_.target_initial_memory) {
+    target_emu_.ClearMemory(payload.address, payload.data.size());
+  }
+  for (const auto& payload : options_.candidate_initial_memory) {
+    candidate_emu_.ClearMemory(payload.address, payload.data.size());
   }
 
   target_emu_.ClearCodeBounds();

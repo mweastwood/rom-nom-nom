@@ -810,5 +810,71 @@ TEST(DifferentialFuzzerTest, WriteMismatchReportsSurroundingSampleContext) {
   EXPECT_NE(comp.failure_reason.find("#0: target(0x80200000"), std::string::npos);
 }
 
+TEST(DifferentialFuzzerTest, InitialMemoryPayloadsLoadedAndRestored) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = true;
+  opts.check_memory_writes = false;
+
+  MemoryPayload target_payload;
+  target_payload.address = 0x80200000;
+  target_payload.data = {0x12, 0x34, 0x56, 0x78};
+  opts.target_initial_memory.push_back(target_payload);
+
+  MemoryPayload candidate_payload;
+  candidate_payload.address = 0x80200000;
+  candidate_payload.data = {0x12, 0x34, 0x56, 0x78};
+  opts.candidate_initial_memory.push_back(candidate_payload);
+
+  DifferentialFuzzer fuzzer(opts);
+
+  // lw $v0, 0($a0); jr $ra; nop
+  std::vector<uint32_t> code = {
+      0x8C820000,  // lw $v0, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80200000;
+
+  DifferentialComparison comp = fuzzer.Compare(code, 0x80001000, code, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.v0, 0x12345678u);
+  EXPECT_EQ(comp.candidate_result.v0, 0x12345678u);
+}
+
+TEST(DifferentialFuzzerTest, TargetAndCandidateReadHooks) {
+  DifferentialFuzzer::Options opts;
+  opts.check_v0 = true;
+  opts.check_memory_writes = false;
+  opts.target_read_hook = [](uint32_t addr, size_t size,
+                             bool /*is_fp*/) -> std::optional<uint64_t> {
+    if (addr == 0x80300000 && size == 4) return 0xCAFEBABEu;
+    return std::nullopt;
+  };
+  opts.candidate_read_hook = [](uint32_t addr, size_t size,
+                                bool /*is_fp*/) -> std::optional<uint64_t> {
+    if (addr == 0x80300000 && size == 4) return 0xCAFEBABEu;
+    return std::nullopt;
+  };
+
+  DifferentialFuzzer fuzzer(opts);
+
+  // lw $v0, 0($a0); jr $ra; nop
+  std::vector<uint32_t> code = {
+      0x8C820000,  // lw $v0, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80300000;
+
+  DifferentialComparison comp = fuzzer.Compare(code, 0x80001000, code, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+  EXPECT_EQ(comp.target_result.v0, 0xCAFEBABEu);
+  EXPECT_EQ(comp.candidate_result.v0, 0xCAFEBABEu);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer
