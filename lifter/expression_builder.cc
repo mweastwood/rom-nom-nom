@@ -536,18 +536,26 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         LiftedStatement statement;
         statement.kind = StatementKind::kAssignment;
         statement.destination_variable = RegisterVarName(*div_pattern->div_dest_reg);
-        statement.expression =
-            LiftedExpression::Binary("/", LiftRegisterOrConstant(div_pattern->num_reg, tracker),
-                                     LiftRegisterOrConstant(div_pattern->den_reg, tracker));
+        auto num = LiftRegisterOrConstant(div_pattern->num_reg, tracker);
+        auto den = LiftRegisterOrConstant(div_pattern->den_reg, tracker);
+        if (div_pattern->is_unsigned) {
+          num = LiftedExpression::Unary("(u32)", std::move(num));
+          den = LiftedExpression::Unary("(u32)", std::move(den));
+        }
+        statement.expression = LiftedExpression::Binary("/", std::move(num), std::move(den));
         statements.push_back(std::move(statement));
       }
       if (div_pattern->mod_dest_reg.has_value()) {
         LiftedStatement statement;
         statement.kind = StatementKind::kAssignment;
         statement.destination_variable = RegisterVarName(*div_pattern->mod_dest_reg);
-        statement.expression =
-            LiftedExpression::Binary("%", LiftRegisterOrConstant(div_pattern->num_reg, tracker),
-                                     LiftRegisterOrConstant(div_pattern->den_reg, tracker));
+        auto num = LiftRegisterOrConstant(div_pattern->num_reg, tracker);
+        auto den = LiftRegisterOrConstant(div_pattern->den_reg, tracker);
+        if (div_pattern->is_unsigned) {
+          num = LiftedExpression::Unary("(u32)", std::move(num));
+          den = LiftedExpression::Unary("(u32)", std::move(den));
+        }
+        statement.expression = LiftedExpression::Binary("%", std::move(num), std::move(den));
         statements.push_back(std::move(statement));
       }
       for (size_t k = i; k <= div_pattern->end_index; ++k) {

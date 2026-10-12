@@ -1708,5 +1708,67 @@ TEST(ExpressionBuilderTest, AssignsIndirectCallReturnWhenUsed) {
   EXPECT_EQ(stmts[0].ToString(), "v0 = ((s32 (*)())temp_t9)();\n");
 }
 
+TEST(ExpressionBuilderTest, MatchesSignedAndUnsignedDivisionAndModuloPatterns) {
+  // 1. Signed division and modulo:
+  // div   $zero, $a0, $a1
+  // bnez  $a1, +2
+  // nop
+  // break 7
+  // addiu $at, $zero, -1
+  // bne   $a1, $at, +4
+  // lui   $at, 0x8000
+  // bne   $a0, $at, +2
+  // nop
+  // break 6
+  // mflo  $v0
+  // mfhi  $v1
+  std::vector<uint32_t> signed_words = {
+      0x0085001A,  // 0:  div   $zero, $a0, $a1
+      0x14A00002,  // 4:  bnez  $a1, +2
+      0x00000000,  // 8:  nop
+      0x0007000D,  // C:  break 7
+      0x2401FFFF,  // 10: addiu $at, $zero, -1
+      0x14A10004,  // 14: bne   $a1, $at, +4
+      0x3C018000,  // 18: lui   $at, 0x8000
+      0x14810002,  // 1C: bne   $a0, $at, +2
+      0x00000000,  // 20: nop
+      0x0006000D,  // 24: break 6
+      0x00001012,  // 28: mflo  $v0
+      0x00001810,  // 2C: mfhi  $v1
+  };
+
+  auto signed_insts = *DecodeSequence(signed_words);
+  auto signed_stmts = ExpressionBuilder::LiftInstructions(signed_insts);
+  ASSERT_EQ(signed_stmts.size(), 2u);
+  EXPECT_EQ(signed_stmts[0].destination_variable, "v0");
+  EXPECT_EQ(signed_stmts[0].ToString(), "v0 = arg0 / arg1;\n");
+  EXPECT_EQ(signed_stmts[1].destination_variable, "v1");
+  EXPECT_EQ(signed_stmts[1].ToString(), "v1 = arg0 % arg1;\n");
+
+  // 2. Unsigned division and modulo:
+  // divu  $zero, $a0, $a1
+  // bnez  $a1, +2
+  // nop
+  // break 7
+  // mflo  $v0
+  // mfhi  $v1
+  std::vector<uint32_t> unsigned_words = {
+      0x0085001B,  // 0: divu  $zero, $a0, $a1
+      0x14A00002,  // 4: bnez  $a1, +2
+      0x00000000,  // 8: nop
+      0x0007000D,  // C: break 7
+      0x00001012,  // 10: mflo  $v0
+      0x00001810,  // 14: mfhi  $v1
+  };
+
+  auto unsigned_insts = *DecodeSequence(unsigned_words);
+  auto unsigned_stmts = ExpressionBuilder::LiftInstructions(unsigned_insts);
+  ASSERT_EQ(unsigned_stmts.size(), 2u);
+  EXPECT_EQ(unsigned_stmts[0].destination_variable, "v0");
+  EXPECT_EQ(unsigned_stmts[0].ToString(), "v0 = (u32)arg0 / (u32)arg1;\n");
+  EXPECT_EQ(unsigned_stmts[1].destination_variable, "v1");
+  EXPECT_EQ(unsigned_stmts[1].ToString(), "v1 = (u32)arg0 % (u32)arg1;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
