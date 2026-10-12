@@ -59,6 +59,8 @@ class DifferentialFuzzer {
   struct Options {
     uint64_t max_steps_per_run = 50000;
     uint32_t initial_sp = 0x807FE000;
+    uint32_t pointer_buffer_vram = 0x80500000;
+    uint32_t pointer_buffer_size = 0x100000;
     bool check_callee_saved = true;
     bool check_memory_writes = true;
     bool check_v0 = true;
@@ -69,6 +71,7 @@ class DifferentialFuzzer {
     bool check_external_calls = false;
     bool filter_local_stack_writes = true;
     bool mock_mmio = true;
+    std::function<uint32_t(uint32_t)> candidate_to_target_address;
     std::function<std::optional<uint64_t>(uint32_t, size_t, bool)> target_read_hook;
     std::function<std::optional<uint64_t>(uint32_t, size_t, bool)> candidate_read_hook;
     std::vector<MemoryPayload> target_initial_memory;

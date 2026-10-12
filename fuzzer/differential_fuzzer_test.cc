@@ -1045,5 +1045,128 @@ TEST(DifferentialFuzzerTest, ExecutionStatusMismatchIncludesStepsAndV0) {
   EXPECT_NE(comp.failure_reason.find("v0=0x2a"), std::string::npos) << comp.failure_reason;
 }
 
+TEST(DifferentialFuzzerTest, MapsCandidateReturnValueToTargetAddress) {
+  // Target returns 0x80100000
+  std::vector<uint32_t> target = {
+      0x3C028010,  // lui  $v0, 0x8010
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate returns 0x80200000
+  std::vector<uint32_t> candidate = {
+      0x3C028020,  // lui  $v0, 0x8020
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer default_fuzzer;
+  FuzzTestCase tc;
+  auto unmapped_comp = default_fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(unmapped_comp.result, EquivalenceResult::kReturnValueMismatch);
+
+  DifferentialFuzzer::Options options;
+  options.candidate_to_target_address = [](uint32_t addr) -> uint32_t {
+    if (addr == 0x80200000) return 0x80100000;
+    return addr;
+  };
+  DifferentialFuzzer mapped_fuzzer(options);
+  auto mapped_comp = mapped_fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(mapped_comp.result, EquivalenceResult::kEquivalent) << mapped_comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, MapsCandidateWriteAddressToTargetAddress) {
+  // Target: writes 1 to 0x80100000
+  std::vector<uint32_t> target = {
+      0x3C088010,  // lui  $t0, 0x8010
+      0x24090001,  // li   $t1, 1
+      0xAD090000,  // sw   $t1, 0($t0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: writes 1 to 0x80200000
+  std::vector<uint32_t> candidate = {
+      0x3C088020,  // lui  $t0, 0x8020
+      0x24090001,  // li   $t1, 1
+      0xAD090000,  // sw   $t1, 0($t0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer default_fuzzer;
+  FuzzTestCase tc;
+  auto unmapped_comp = default_fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(unmapped_comp.result, EquivalenceResult::kMemoryWriteMismatch);
+
+  DifferentialFuzzer::Options options;
+  options.candidate_to_target_address = [](uint32_t addr) -> uint32_t {
+    if (addr == 0x80200000) return 0x80100000;
+    return addr;
+  };
+  DifferentialFuzzer mapped_fuzzer(options);
+  auto mapped_comp = mapped_fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(mapped_comp.result, EquivalenceResult::kEquivalent) << mapped_comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, MapsCandidateStoredPointerValueToTargetAddress) {
+  // Target: stores pointer 0x80150000 at address 0x80100000
+  std::vector<uint32_t> target = {
+      0x3C088010,  // lui  $t0, 0x8010
+      0x3C098015,  // lui  $t1, 0x8015
+      0xAD090000,  // sw   $t1, 0($t0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: stores pointer 0x80250000 at address 0x80200000
+  std::vector<uint32_t> candidate = {
+      0x3C088020,  // lui  $t0, 0x8020
+      0x3C098025,  // lui  $t1, 0x8025
+      0xAD090000,  // sw   $t1, 0($t0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer default_fuzzer;
+  FuzzTestCase tc;
+  auto unmapped_comp = default_fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(unmapped_comp.result, EquivalenceResult::kMemoryWriteMismatch);
+
+  DifferentialFuzzer::Options options;
+  options.candidate_to_target_address = [](uint32_t addr) -> uint32_t {
+    if (addr == 0x80200000) return 0x80100000;
+    if (addr == 0x80250000) return 0x80150000;
+    return addr;
+  };
+  DifferentialFuzzer mapped_fuzzer(options);
+  auto mapped_comp = mapped_fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(mapped_comp.result, EquivalenceResult::kEquivalent) << mapped_comp.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, PreservesPointerBufferWritesForPointerTestCases) {
+  // Both target and candidate store to $a0
+  std::vector<uint32_t> code = {
+      0xAC800000,  // sw   $zero, 0($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer::Options options;
+  options.pointer_buffer_vram = 0x80500000;
+  options.pointer_buffer_size = 0x100000;
+  options.candidate_to_target_address = [](uint32_t addr) -> uint32_t {
+    // Erroneously remap pointer buffer addresses if called
+    if (addr == 0x80500000) return 0x80600000;
+    return addr;
+  };
+  DifferentialFuzzer fuzzer(options);
+
+  FuzzTestCase tc;
+  tc.a0 = 0x80500000;  // Inside pointer buffer
+  auto comp = fuzzer.Compare(code, 0x80001000, code, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 
@@ -115,6 +116,14 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
         candidate_emu_.RunFunction(candidate_vram, options_.max_steps_per_run * 5);
   }
 
+  uint32_t cand_v0 = comp->candidate_result.v0;
+  if (cand_v0 != comp->target_result.v0 && options_.candidate_to_target_address) {
+    uint32_t mapped_v0 = options_.candidate_to_target_address(cand_v0);
+    if (mapped_v0 == comp->target_result.v0) {
+      cand_v0 = mapped_v0;
+    }
+  }
+
   // 1. Check ExecutionStatus
   bool both_faulted = (comp->target_result.status == ExecutionStatus::kMemoryFault ||
                        comp->target_result.status == ExecutionStatus::kIntegerOverflow) &&
@@ -189,12 +198,12 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
              !(target_emu_.GetCalleeSavedRegisters() == target_initial_saved)) {
     comp->result = EquivalenceResult::kCalleeSavedMismatch;
     comp->failure_reason = "Target code corrupted callee-saved registers";
-  } else if (options_.check_v0 && comp->target_result.v0 != comp->candidate_result.v0) {
+  } else if (options_.check_v0 && comp->target_result.v0 != cand_v0) {
     comp->result = EquivalenceResult::kReturnValueMismatch;
     comp->failure_reason =
         absl::StrFormat("Return value v0 mismatch: target=0x%08X (%d) vs candidate=0x%08X (%d)",
                         comp->target_result.v0, static_cast<int32_t>(comp->target_result.v0),
-                        comp->candidate_result.v0, static_cast<int32_t>(comp->candidate_result.v0));
+                        cand_v0, static_cast<int32_t>(cand_v0));
   } else if (options_.check_v1 && comp->target_result.v1 != comp->candidate_result.v1) {
     comp->result = EquivalenceResult::kReturnValueMismatch;
     comp->failure_reason =
@@ -250,6 +259,34 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
       candidate_writes.erase(
           std::remove_if(candidate_writes.begin(), candidate_writes.end(), is_local_stack),
           candidate_writes.end());
+    }
+
+    if (options_.candidate_to_target_address) {
+      absl::flat_hash_set<std::tuple<uint32_t, uint64_t, uint8_t>> exact_target_stores;
+      absl::flat_hash_set<uint32_t> target_addresses;
+      for (const auto& tw : target_writes) {
+        exact_target_stores.insert({tw.address, tw.value, tw.size});
+        target_addresses.insert(tw.address);
+      }
+      uint32_t buf_start = options_.pointer_buffer_vram;
+      uint32_t buf_end = options_.pointer_buffer_vram + options_.pointer_buffer_size;
+      bool is_pointer_case = (test_case.a0 >= buf_start && test_case.a0 < buf_end) ||
+                             (test_case.a1 >= buf_start && test_case.a1 < buf_end);
+      for (auto& cw : candidate_writes) {
+        if (!is_pointer_case || !(cw.address >= buf_start && cw.address < buf_end)) {
+          uint32_t mapped_addr = options_.candidate_to_target_address(cw.address);
+          if (target_addresses.contains(mapped_addr) || !target_addresses.contains(cw.address)) {
+            cw.address = mapped_addr;
+          }
+        }
+        if (cw.size == 4 && !exact_target_stores.contains({cw.address, cw.value, cw.size})) {
+          uint32_t mapped_val =
+              options_.candidate_to_target_address(static_cast<uint32_t>(cw.value));
+          if (exact_target_stores.contains({cw.address, mapped_val, cw.size})) {
+            cw.value = mapped_val;
+          }
+        }
+      }
     }
 
     absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
