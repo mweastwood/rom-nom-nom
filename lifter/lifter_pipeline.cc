@@ -1,6 +1,7 @@
 #include "lifter/lifter_pipeline.h"
 
 #include <fstream>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -554,8 +555,116 @@ typedef double f64;
   std::ofstream symbols_output_stream(lifted_symbols_file_path);
   if (symbols_output_stream.is_open()) {
     symbols_output_stream << "/* Auto-generated symbol definitions for lifted C */\n";
+
+    std::map<uint32_t, std::string> all_known_functions;
+    if (symbols != nullptr) {
+      for (const auto* entry : symbols->SortedEntries()) {
+        if (entry->type() == SYMBOL_FUNC) {
+          all_known_functions[entry->address()] = entry->name();
+        }
+      }
+    }
+    for (const auto& func_name : defined_function_names) {
+      uint32_t addr = 0;
+      if (func_name.size() == 13 && absl::StartsWith(func_name, "func_") &&
+          absl::SimpleHexAtoi(func_name.substr(5), &addr)) {
+        all_known_functions[addr] = func_name;
+      }
+    }
+
+    struct DataSubsegmentRange {
+      uint32_t vram_start = 0;
+      uint32_t vram_end = 0;
+      std::string label_name;
+    };
+    std::vector<DataSubsegmentRange> data_subsegments;
+    if (loader_ != nullptr && loader_->Extractor() != nullptr) {
+      const auto* cfg = loader_->Extractor()->Config();
+      if (cfg != nullptr) {
+        for (const auto& seg : cfg->segments()) {
+          if (seg.type() != SEGMENT_CODE) continue;
+          size_t seg_start = seg.rom_start();
+          size_t seg_end = seg.rom_end();
+          uint32_t seg_vram = seg.vram();
+          for (int j = 0; j < seg.subsegments_size(); ++j) {
+            const auto& sub = seg.subsegments(j);
+            if (sub.type() == SUBSEGMENT_DATA) {
+              size_t sub_start = sub.rom_start();
+              size_t sub_end = seg_end;
+              for (int k = j + 1; k < seg.subsegments_size(); ++k) {
+                if (seg.subsegments(k).type() != SUBSEGMENT_BSS &&
+                    seg.subsegments(k).rom_start() > 0) {
+                  sub_end = seg.subsegments(k).rom_start();
+                  break;
+                }
+              }
+              uint32_t sub_vram = sub.vram();
+              if (sub_vram == 0 && seg_vram != 0) {
+                sub_vram = seg_vram + static_cast<uint32_t>(sub_start - seg_start);
+              }
+              uint32_t sub_size = static_cast<uint32_t>(sub_end - sub_start);
+              std::string label_name;
+              if (symbols != nullptr) {
+                const auto* sym = symbols->FindByAddress(sub_vram);
+                if (sym != nullptr) {
+                  label_name = sym->name();
+                }
+              }
+              if (label_name.empty()) {
+                label_name = absl::StrFormat("D_%08X", sub_vram);
+              }
+              data_subsegments.push_back({sub_vram, sub_vram + sub_size, label_name});
+            }
+          }
+        }
+      }
+    }
+
     for (const auto& [symbol_name, address_hex] : undefined_auto_symbols) {
-      symbols_output_stream << absl::StrFormat("PROVIDE(%s = 0x%s);\n", symbol_name, address_hex);
+      bool resolved = false;
+      uint32_t addr = 0;
+      if (absl::SimpleHexAtoi(address_hex, &addr)) {
+        if (absl::StartsWith(symbol_name, "func_") && loader_ != nullptr) {
+          // If this is an unexported internal code label or sub-entrypoint inside a known function,
+          // resolve it relative to the preceding registered or defined function symbol.
+          auto it = all_known_functions.upper_bound(addr);
+          if (it != all_known_functions.begin()) {
+            const auto& prev = *std::prev(it);
+            auto prev_loaded = loader_->LoadFunction(prev.second);
+            if (prev_loaded.ok()) {
+              uint32_t prev_end =
+                  prev.first + static_cast<uint32_t>(prev_loaded->instructions.size() * 4);
+              if (addr > prev.first && addr < prev_end) {
+                uint32_t offset = addr - prev.first;
+                symbols_output_stream << absl::StrFormat("PROVIDE(%s = %s + 0x%X);\n", symbol_name,
+                                                         prev.second, offset);
+                resolved = true;
+              }
+            }
+          }
+        } else if (absl::StartsWith(symbol_name, "D_")) {
+          for (const auto& ds : data_subsegments) {
+            if (addr >= ds.vram_start && addr < ds.vram_end) {
+              uint32_t offset = addr - ds.vram_start;
+              if (offset == 0 && symbol_name == ds.label_name) {
+                resolved = true;
+              } else if (offset == 0) {
+                symbols_output_stream
+                    << absl::StrFormat("PROVIDE(%s = %s);\n", symbol_name, ds.label_name);
+                resolved = true;
+              } else {
+                symbols_output_stream << absl::StrFormat("PROVIDE(%s = %s + 0x%X);\n", symbol_name,
+                                                         ds.label_name, offset);
+                resolved = true;
+              }
+              break;
+            }
+          }
+        }
+      }
+      if (!resolved) {
+        symbols_output_stream << absl::StrFormat("PROVIDE(%s = 0x%s);\n", symbol_name, address_hex);
+      }
     }
   }
 

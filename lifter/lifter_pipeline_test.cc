@@ -403,6 +403,154 @@ entries {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(LifterPipelineTest,
+     DecompileAllModulesResolvesAutoSymbolsRelativeToFunctionsAndDataSubsegments) {
+  auto test_dir = std::filesystem::temp_directory_path() / "lifter_relative_symbols_test";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir / "roms");
+
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x3000
+  vram: 0x80020000
+  subsegments {
+    name: "mod_alpha"
+    type: SUBSEGMENT_C
+    rom_start: 0x1000
+    vram: 0x80020000
+  }
+  subsegments {
+    name: "mod_beta"
+    type: SUBSEGMENT_C
+    rom_start: 0x1040
+    vram: 0x80020040
+  }
+  subsegments {
+    name: "mod_data"
+    type: SUBSEGMENT_DATA
+    rom_start: 0x2000
+    vram: 0x80021000
+  }
+}
+)";
+  auto cfg_or = ParseSplitConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries {
+  name: "AlphaFunc"
+  address: 0x80020000
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "AlphaData"
+  address: 0x80021000
+  type: SYMBOL_DATA
+}
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  std::filesystem::create_directories(test_dir / "asm");
+  std::filesystem::path beta_asm = test_dir / "asm" / "mod_beta.s";
+  {
+    std::ofstream out(beta_asm);
+    out << ".text\n"
+        << ".ent BetaFunc\n"
+        << "glabel BetaFunc\n"
+        << "/* 80020040 0C008006 */  jal func_80020018\n"
+        << "/* 80020044 00000000 */  nop\n"
+        << "/* 80020048 03E00008 */  jr $ra\n"
+        << "/* 8002004C 00000000 */  nop\n"
+        << ".end BetaFunc\n";
+  }
+
+  std::vector<uint8_t> rom(0x3000, 0);
+
+  // AlphaFunc at 0x1000 (vram 0x80020000):
+  // 0x00: jal 0x80054320 (unresolved external func_80054320)
+  rom[0x1000] = 0x0C;
+  rom[0x1001] = 0x01;
+  rom[0x1002] = 0x50;
+  rom[0x1003] = 0xC8;
+  // 0x04: nop
+  // 0x08: lui $at, 0x8002
+  rom[0x1008] = 0x3C;
+  rom[0x1009] = 0x01;
+  rom[0x100A] = 0x80;
+  rom[0x100B] = 0x02;
+  // 0x0C: lw $v0, 0x1004($at) (references D_80021004)
+  rom[0x100C] = 0x8C;
+  rom[0x100D] = 0x22;
+  rom[0x100E] = 0x10;
+  rom[0x100F] = 0x04;
+  // 0x10: bnez $v0, 0x80020018 (offset 1 inst)
+  rom[0x1010] = 0x14;
+  rom[0x1011] = 0x40;
+  rom[0x1012] = 0x00;
+  rom[0x1013] = 0x01;
+  // 0x14: nop
+  // 0x18: addiu $v0, $v0, 1 (sub-label func_80020018 inside AlphaFunc)
+  rom[0x1018] = 0x24;
+  rom[0x1019] = 0x42;
+  rom[0x101A] = 0x00;
+  rom[0x101B] = 0x01;
+  // 0x1C: jr $ra
+  rom[0x101C] = 0x03;
+  rom[0x101D] = 0xE0;
+  rom[0x101E] = 0x00;
+  rom[0x101F] = 0x08;
+  // 0x20: nop
+
+  std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractorOptions extractor_opts;
+  extractor_opts.repo_root = test_dir;
+  extractor_opts.game_name = "test-game";
+  extractor_opts.asm_dir = test_dir / "asm";
+
+  auto extractor = std::make_unique<TargetExtractor>(extractor_opts, &(*cfg_or), &(*sym_idx_or));
+  auto loader = std::make_unique<FunctionLoader>(std::move(extractor));
+
+  LifterPipelineOptions options;
+  options.repo_root = test_dir;
+  options.game_name = "test-game";
+  options.asm_dir = test_dir / "asm";
+  options.format_with_clang = false;
+
+  LifterPipeline pipeline(options, std::move(loader));
+
+  std::filesystem::path out_dir = test_dir / "lifted";
+  auto files_or = pipeline.DecompileAllModules(out_dir);
+  ASSERT_TRUE(files_or.ok()) << files_or.status();
+
+  EXPECT_TRUE(std::filesystem::exists(out_dir / "lifted_symbols.ld"));
+  std::ifstream symbols_input_stream(out_dir / "lifted_symbols.ld");
+  std::string symbols_content((std::istreambuf_iterator<char>(symbols_input_stream)),
+                              std::istreambuf_iterator<char>());
+
+  // func_80020018 is inside AlphaFunc (0x80020000..0x80020024), so it resolves relative to
+  // AlphaFunc
+  EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(func_80020018 = AlphaFunc + 0x18);"));
+
+  // D_80021004 is inside mod_data (AlphaData at 0x80021000), so it resolves relative to AlphaData
+  EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(D_80021004 = AlphaData + 0x4);"));
+
+  // func_80054320 is outside any known function, so it resolves to its absolute address
+  EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(func_80054320 = 0x80054320);"));
+
+  std::filesystem::remove_all(test_dir);
+}
+
 TEST(LifterPipelineTest, BuildTranslationUnitPopulatesSymbolIndexAndFunctions) {
   std::filesystem::path test_dir = std::filesystem::temp_directory_path() / "lifter_tu_test";
   std::filesystem::create_directories(test_dir / "roms");
