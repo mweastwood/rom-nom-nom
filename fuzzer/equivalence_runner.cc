@@ -12,7 +12,10 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/mips.h"
 #include "fuzzer/differential_fuzzer.h"
+#include "lifter/control_flow_graph.h"
+#include "lifter/expression_builder.h"
 
 namespace rom_nom_nom::fuzzer {
 
@@ -56,15 +59,49 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   res.fuzz_vectors_evaluated = test_cases.size();
 
   uint32_t cand_vram = target.candidate_vram != 0 ? target.candidate_vram : target.vram;
-  auto comparisons = fuzzer_.RunBattery(target.target_words, target.vram, target.candidate_words,
-                                        cand_vram, test_cases);
+  DifferentialFuzzer::Options func_options = options_.fuzzer_options;
+  auto target_insts = DecodeSequence(target.target_words, target.vram);
+  if (target_insts.ok()) {
+    auto target_cfg = ControlFlowGraph::Build(*target_insts);
+    if (target_cfg.ok()) {
+      bool target_returns_f0 = ExpressionBuilder::DetermineReturnsF0(*target_cfg);
+      bool target_returns_v0 = ExpressionBuilder::DetermineReturnsV0(*target_cfg);
+
+      if (target_returns_f0) {
+        bool is_double = ExpressionBuilder::DetermineReturnsF0Double(*target_cfg);
+        if (is_double) {
+          func_options.check_f0_double = true;
+          func_options.check_f0 = false;
+        } else {
+          func_options.check_f0 = true;
+          func_options.check_f0_double = false;
+        }
+        func_options.check_v0 = false;
+      } else if (target_returns_v0) {
+        func_options.check_v0 = true;
+        func_options.check_f0 = false;
+        func_options.check_f0_double = false;
+      } else {
+        func_options.check_v0 = false;
+        func_options.check_f0 = false;
+        func_options.check_f0_double = false;
+      }
+    }
+  }
+
+  DifferentialFuzzer fuzzer(func_options);
+  auto comparisons = fuzzer.RunBattery(target.target_words, target.vram, target.candidate_words,
+                                       cand_vram, test_cases);
 
   for (size_t i = 0; i < comparisons.size(); ++i) {
     const auto& comp = comparisons[i];
     if (comp.result != EquivalenceResult::kEquivalent) {
       res.status = FunctionEquivalenceStatus::kDivergent;
       res.counterexample = comp;
-      res.details = absl::StrFormat("Divergence on vector #%zu: %s", i, comp.failure_reason);
+      res.details = absl::StrFormat(
+          "Divergence on vector #%zu: %s (args: a0=0x%08X, a1=0x%08X, a2=0x%08X, a3=0x%08X)", i,
+          comp.failure_reason, comp.test_case.a0, comp.test_case.a1, comp.test_case.a2,
+          comp.test_case.a3);
       return res;
     }
   }

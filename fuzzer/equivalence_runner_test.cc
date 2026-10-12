@@ -154,5 +154,102 @@ TEST(EquivalenceRunnerTest, CandidateVramRelocationSupport) {
   EXPECT_FALSE(res.counterexample.has_value());
 }
 
+TEST(EquivalenceRunnerTest, VoidFunctionDoesNotCheckV0) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "VoidFunc";
+  target.vram = 0x80001000;
+  // Target: sw $a0, 0($a1); jr $ra; nop
+  target.target_words = {0xACA40000, 0x03E00008, 0x00000000};
+  // Candidate: sw $a0, 0($a1); addiu $v0, $zero, 42; jr $ra; nop
+  target.candidate_words = {0xACA40000, 0x2402002A, 0x03E00008, 0x00000000};
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kFuzzProvenEquivalent);
+  EXPECT_FALSE(res.counterexample.has_value());
+}
+
+TEST(EquivalenceRunnerTest, FloatFunctionChecksF0AndIgnoresV0) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "FloatAdd";
+  target.vram = 0x80001000;
+  // Target: add.s $f0, $f12, $f14; jr $ra; nop
+  target.target_words = {0x460E6000, 0x03E00008, 0x00000000};
+  // Candidate: add.s $f0, $f14, $f12; addiu $v0, $zero, 99; jr $ra; nop
+  target.candidate_words = {0x460C7000, 0x24020063, 0x03E00008, 0x00000000};
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kFuzzProvenEquivalent);
+  EXPECT_FALSE(res.counterexample.has_value());
+}
+
+TEST(EquivalenceRunnerTest, FloatFunctionDetectsF0Divergence) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "FloatDivergent";
+  target.vram = 0x80001000;
+  // Target: add.s $f0, $f12, $f14; jr $ra; nop
+  target.target_words = {0x460E6000, 0x03E00008, 0x00000000};
+  // Candidate: sub.s $f0, $f12, $f14; jr $ra; nop
+  target.candidate_words = {0x460E6001, 0x03E00008, 0x00000000};
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kDivergent);
+  ASSERT_TRUE(res.counterexample.has_value());
+}
+
+TEST(EquivalenceRunnerTest, DoubleFunctionChecksF0Double) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "DoubleAdd";
+  target.vram = 0x80001000;
+  // Target: add.d $f0, $f12, $f14; jr $ra; nop
+  target.target_words = {0x462E6000, 0x03E00008, 0x00000000};
+  // Candidate: add.d $f0, $f14, $f12; addiu $v0, $zero, 123; jr $ra; nop
+  target.candidate_words = {0x462C7000, 0x2402007B, 0x03E00008, 0x00000000};
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kFuzzProvenEquivalent);
+  EXPECT_FALSE(res.counterexample.has_value());
+}
+
+TEST(EquivalenceRunnerTest, DoubleFunctionDetectsF0DoubleDivergence) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "DoubleDivergent";
+  target.vram = 0x80001000;
+  // Target: add.d $f0, $f12, $f14; jr $ra; nop
+  target.target_words = {0x462E6000, 0x03E00008, 0x00000000};
+  // Candidate: sub.d $f0, $f12, $f14; jr $ra; nop
+  target.candidate_words = {0x462E6001, 0x03E00008, 0x00000000};
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kDivergent);
+  ASSERT_TRUE(res.counterexample.has_value());
+}
+
+TEST(EquivalenceRunnerTest, CounterexampleDetailsIncludeArguments) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "DivergentWithArgs";
+  target.vram = 0x80001000;
+  // Target: addu $v0, $a0, $a1; jr $ra; nop
+  target.target_words = {0x00851021, 0x03E00008, 0x00000000};
+  // Candidate: subu $v0, $a0, $a1; jr $ra; nop
+  target.candidate_words = {0x00851023, 0x03E00008, 0x00000000};
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kDivergent);
+  ASSERT_TRUE(res.counterexample.has_value());
+  EXPECT_NE(res.details.find("(args: a0=0x"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

@@ -58,6 +58,9 @@ cc_library(
     hdrs = ["equivalence_runner.h"],
     deps = [
         ":differential_fuzzer",
+        "//core:mips",
+        "//lifter:control_flow_graph",
+        "//lifter:expression_builder",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
