@@ -1921,6 +1921,53 @@ bool ExpressionBuilder::DetermineReturnsF0(const ControlFlowGraph& cfg) {
   return false;
 }
 
+bool ExpressionBuilder::DetermineReturnsF0Double(const ControlFlowGraph& cfg) {
+  for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+    const auto& block = cfg.Blocks()[b];
+    if (!block.HasReturn()) continue;
+
+    std::vector<size_t> queue = {b};
+    absl::flat_hash_set<size_t> visited = {b};
+
+    while (!queue.empty()) {
+      size_t curr = queue.back();
+      queue.pop_back();
+      const auto& curr_block = cfg.Blocks()[curr];
+
+      bool defined_in_block = false;
+      for (int i = static_cast<int>(curr_block.instructions.size()) - 1; i >= 0; --i) {
+        RegisterUseDef ud = GetInstructionUseDef(curr_block.instructions[i]);
+        for (FpRegister r : ud.fpr_defs) {
+          if (r == FpRegister::kF0) {
+            defined_in_block = true;
+            Opcode op = curr_block.instructions[i].opcode;
+            if (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
+                op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
+                op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtDS ||
+                op == Opcode::kCvtDW || op == Opcode::kLdc1 || op == Opcode::kDmfc1) {
+              return true;
+            }
+            break;
+          }
+        }
+        if (defined_in_block) break;
+      }
+
+      if (!defined_in_block) {
+        uint32_t curr_id = curr_block.id;
+        for (size_t p = 0; p < cfg.Blocks().size(); ++p) {
+          for (uint32_t succ : cfg.Blocks()[p].successors) {
+            if (succ == curr_id && visited.insert(p).second) {
+              queue.push_back(p);
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFoldedComparison(
     absl::Span<const Instruction> instructions) {
   if (instructions.size() < 2) {

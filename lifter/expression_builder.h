@@ -128,6 +128,7 @@ class ExpressionBuilder {
 
   // Analyzes the CFG to determine if the function returns a float value in $f0.
   static bool DetermineReturnsF0(const ControlFlowGraph& cfg);
+  static bool DetermineReturnsF0Double(const ControlFlowGraph& cfg);
 
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);

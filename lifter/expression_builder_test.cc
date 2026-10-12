@@ -654,6 +654,140 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) 
   EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
 }
 
+TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsTrueForDoubleOps) {
+  // add.d $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x462E6000,  // add.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsFalseForSinglePrecision) {
+  // add.s $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleAcrossBlocks) {
+  // Block 0:
+  //   cvt.d.w $f0, $f2
+  //   b       .L_exit
+  //   nop
+  // Block 1 (.L_exit):
+  //   jr      $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x46801021,  // cvt.d.w $f0, $f2
+      0x10000002,  // b       +2 -> 0x80020010
+      0x00000000,  // nop
+      0x00000000,  // nop (padding)
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(
+      ExpressionBuilder::DetermineReturnsF0(*cfg_or));  // HasReturn block itself didn't define $f0
+  EXPECT_TRUE(
+      ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));  // Reachable definition in predecessor
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsFalseForVoidOrInteger) {
+  // addu $v0, $a0, $a1
+  // jr   $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+}
+
+TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
+  // Test ldc1 $f0, 0($a0)
+  std::vector<uint32_t> ldc1_words = {
+      0xD4800000,  // ldc1 $f0, 0($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(ldc1_words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+
+  // Test sub.d $f0, $f12, $f14
+  std::vector<uint32_t> subd_words = {
+      0x462E6001,  // sub.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(subd_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+
+  // Test mul.d $f0, $f12, $f14
+  std::vector<uint32_t> muld_words = {
+      0x462E6002,  // mul.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(muld_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+
+  // Test div.d $f0, $f12, $f14
+  std::vector<uint32_t> divd_words = {
+      0x462E6003,  // div.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(divd_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+
+  // Test cvt.d.s $f0, $f2
+  std::vector<uint32_t> cvtds_words = {
+      0x46001021,  // cvt.d.s $f0, $f2
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(cvtds_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+}
+
 TEST(ExpressionBuilderTest, NorBitwiseNot) {
   // nor $v0, $zero, $a0 (bitwise NOT / unary ~)
   std::vector<uint32_t> words = {
