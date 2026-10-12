@@ -1113,10 +1113,56 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kJal:
       case Opcode::kJalr: {
+        bool v0_used_after_call = false;
+        bool f0_used_after_call = false;
+        for (size_t next_i = i + 1; next_i < instructions_to_process.size(); ++next_i) {
+          const auto& next_inst = instructions_to_process[next_i];
+          if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr) {
+            break;
+          }
+          RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
+          bool stop_v0 = false;
+          for (Register r : next_ud.gpr_uses) {
+            if (r == Register::kV0) {
+              v0_used_after_call = true;
+              stop_v0 = true;
+              break;
+            }
+          }
+          if (!stop_v0) {
+            for (Register r : next_ud.gpr_defs) {
+              if (r == Register::kV0) {
+                stop_v0 = true;
+                break;
+              }
+            }
+          }
+          bool stop_f0 = false;
+          for (FpRegister r : next_ud.fpr_uses) {
+            if (r == FpRegister::kF0) {
+              f0_used_after_call = true;
+              stop_f0 = true;
+              break;
+            }
+          }
+          if (!stop_f0) {
+            for (FpRegister r : next_ud.fpr_defs) {
+              if (r == FpRegister::kF0) {
+                stop_f0 = true;
+                break;
+              }
+            }
+          }
+          if (stop_v0 && stop_f0) {
+            break;
+          }
+        }
+
         std::string function_name;
         if (inst.opcode == Opcode::kJalr) {
-          function_name =
-              absl::StrFormat("((void (*)())%s)", RegisterVarName(inst.rs.value_or(Register::kT9)));
+          const char* ret_type = f0_used_after_call ? "f32" : (v0_used_after_call ? "s32" : "void");
+          function_name = absl::StrFormat("((%s (*)())%s)", ret_type,
+                                          RegisterVarName(inst.rs.value_or(Register::kT9)));
         } else {
           uint32_t target_vram = inst.JumpTarget();
           function_name = (symbol_index != nullptr)
@@ -1202,9 +1248,12 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
         LiftedStatement statement;
         if (function_name == "sqrtf" || function_name == "fabsf" || function_name == "sqrt" ||
-            function_name == "fabs") {
+            function_name == "fabs" || f0_used_after_call) {
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = "f0";
+        } else if (v0_used_after_call) {
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = "v0";
         } else {
           statement.kind = StatementKind::kCall;
         }

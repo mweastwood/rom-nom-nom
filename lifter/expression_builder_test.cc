@@ -1411,5 +1411,62 @@ TEST(ExpressionBuilderTest, FloatingPointConversionPatternMatchesFloatToIntRound
   EXPECT_EQ(stmts[4].ToString(), "arg2 = (s32)round(f12);\n");
 }
 
+TEST(ExpressionBuilderTest, AssignsV0ReturnWhenUsedAfterSubroutineCall) {
+  // jal  func_80110410
+  // andi $s0, $s0, 0xFFFF (delay slot)
+  // addu $v1, $s1, $zero
+  // andi $v0, $v0, 0xFFFF (uses $v0 from call)
+  std::vector<uint32_t> words = {
+      0x0C044104,  // 0: jal  func_80110410
+      0x3210FFFF,  // 4: andi $s0, $s0, 0xFFFF
+      0x02201821,  // 8: addu $v1, $s1, $zero
+      0x3042FFFF,  // C: andi $v0, $v0, 0xFFFF
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_GE(stmts.size(), 4u);
+  EXPECT_EQ(stmts[0].destination_variable, "temp_s0");
+  EXPECT_EQ(stmts[1].destination_variable, "v0");
+  EXPECT_EQ(stmts[1].kind, StatementKind::kAssignment);
+  EXPECT_EQ(stmts[1].ToString(), "v0 = func_80110410();\n");
+}
+
+TEST(ExpressionBuilderTest, AssignsF0ReturnWhenUsedAfterSubroutineCall) {
+  // jal   sinf
+  // nop (delay slot)
+  // add.s $f2, $f0, $f4 (uses $f0 from call)
+  std::vector<uint32_t> words = {
+      0x0C000000,  // 0: jal  func_00000000
+      0x00000000,  // 4: nop
+      0x46040080,  // 8: add.s $f2, $f0, $f4
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_GE(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].destination_variable, "f0");
+  EXPECT_EQ(stmts[0].kind, StatementKind::kAssignment);
+  EXPECT_EQ(stmts[0].ToString(), "f0 = func_80000000();\n");
+}
+
+TEST(ExpressionBuilderTest, AssignsIndirectCallReturnWhenUsed) {
+  // jalr $t9
+  // nop
+  // addu $a0, $v0, $zero (uses $v0)
+  std::vector<uint32_t> words = {
+      0x0320F809,  // 0: jalr $t9
+      0x00000000,  // 4: nop
+      0x00402021,  // 8: addu $a0, $v0, $zero
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_GE(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].destination_variable, "v0");
+  EXPECT_EQ(stmts[0].kind, StatementKind::kAssignment);
+  EXPECT_EQ(stmts[0].ToString(), "v0 = ((s32 (*)())temp_t9)();\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
