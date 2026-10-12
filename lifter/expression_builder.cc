@@ -618,6 +618,23 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       continue;
     }
 
+    if (inst.opcode != Opcode::kSwr && pending_swl != nullptr) {
+      LiftedStatement statement;
+      statement.kind = StatementKind::kStore;
+      statement.store_type = "u8";
+      Register base_reg = pending_swl->rs;
+      if (pending_swl->offset == 0) {
+        statement.destination_address = LiftRegisterOrConstant(base_reg, tracker);
+      } else {
+        statement.destination_address =
+            LiftedExpression::Binary("+", LiftRegisterOrConstant(base_reg, tracker),
+                                     LiftedExpression::Integer(pending_swl->offset));
+      }
+      statement.expression = LiftRegisterOrConstant(pending_swl->rt, tracker);
+      statements.push_back(std::move(statement));
+      pending_swl = nullptr;
+    }
+
     switch (inst.opcode) {
       case Opcode::kAddu:
       case Opcode::kAdd:
@@ -1090,24 +1107,35 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             offset = pending_swl->offset;
             pending_swl = nullptr;
           }
-          LiftedStatement statement;
           if (base_reg == Register::kSp) {
+            LiftedStatement statement;
             statement.kind = StatementKind::kAssignment;
             statement.destination_variable = StackVarName(offset);
             statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
+            statements.push_back(std::move(statement));
           } else {
-            statement.kind = StatementKind::kStore;
-            statement.store_type = "s32";
-            if (offset == 0) {
-              statement.destination_address = LiftRegisterOrConstant(base_reg, tracker);
-            } else {
-              statement.destination_address =
-                  LiftedExpression::Binary("+", LiftRegisterOrConstant(base_reg, tracker),
-                                           LiftedExpression::Integer(offset));
+            for (int b = 0; b < 4; ++b) {
+              LiftedStatement statement;
+              statement.kind = StatementKind::kStore;
+              statement.store_type = "u8";
+              int32_t byte_offset = static_cast<int32_t>(offset) + b;
+              if (byte_offset == 0) {
+                statement.destination_address = LiftRegisterOrConstant(base_reg, tracker);
+              } else {
+                statement.destination_address =
+                    LiftedExpression::Binary("+", LiftRegisterOrConstant(base_reg, tracker),
+                                             LiftedExpression::Integer(byte_offset));
+              }
+              if (b == 3) {
+                statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
+              } else {
+                statement.expression =
+                    LiftedExpression::Binary(">>", LiftRegisterOrConstant(*inst.rt, tracker),
+                                             LiftedExpression::Integer((3 - b) * 8));
+              }
+              statements.push_back(std::move(statement));
             }
-            statement.expression = LiftRegisterOrConstant(*inst.rt, tracker);
           }
-          statements.push_back(std::move(statement));
         }
         break;
 
@@ -1554,6 +1582,23 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     }
 
     tracker.Step(inst);
+  }
+
+  if (pending_swl != nullptr) {
+    LiftedStatement statement;
+    statement.kind = StatementKind::kStore;
+    statement.store_type = "u8";
+    Register base_reg = pending_swl->rs;
+    if (pending_swl->offset == 0) {
+      statement.destination_address = LiftRegisterOrConstant(base_reg, tracker);
+    } else {
+      statement.destination_address =
+          LiftedExpression::Binary("+", LiftRegisterOrConstant(base_reg, tracker),
+                                   LiftedExpression::Integer(pending_swl->offset));
+    }
+    statement.expression = LiftRegisterOrConstant(pending_swl->rt, tracker);
+    statements.push_back(std::move(statement));
+    pending_swl = nullptr;
   }
 
   if (pending_return) {

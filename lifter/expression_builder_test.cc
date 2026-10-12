@@ -762,9 +762,59 @@ TEST(ExpressionBuilderTest, UnalignedLoadStore) {
   auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(insts);
 
-  ASSERT_THAT(statements, SizeIs(2));
+  ASSERT_THAT(statements, SizeIs(5));
   EXPECT_EQ(statements[0].ToString(), "v0 = *(s32*)arg0;\n");
-  EXPECT_EQ(statements[1].ToString(), "*(s32*)arg0 = arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "*(u8*)arg0 = arg1 >> 24;\n");
+  EXPECT_EQ(statements[2].ToString(), "*(u8*)(arg0 + 1) = arg1 >> 16;\n");
+  EXPECT_EQ(statements[3].ToString(), "*(u8*)(arg0 + 2) = arg1 >> 8;\n");
+  EXPECT_EQ(statements[4].ToString(), "*(u8*)(arg0 + 3) = arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, UnalignedStoreWithOffset) {
+  // swl $a1, 4($a0)
+  // swr $a1, 7($a0)
+  std::vector<uint32_t> words = {
+      0xA8850004,  // swl $a1, 4($a0)
+      0xB8850007,  // swr $a1, 7($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(4));
+  EXPECT_EQ(statements[0].ToString(), "*(u8*)(arg0 + 4) = arg1 >> 24;\n");
+  EXPECT_EQ(statements[1].ToString(), "*(u8*)(arg0 + 5) = arg1 >> 16;\n");
+  EXPECT_EQ(statements[2].ToString(), "*(u8*)(arg0 + 6) = arg1 >> 8;\n");
+  EXPECT_EQ(statements[3].ToString(), "*(u8*)(arg0 + 7) = arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, StandaloneUnalignedStoreFlushedBeforeOtherInstruction) {
+  // swl $a1, 0($a0)
+  // addu $v0, $zero, $zero
+  std::vector<uint32_t> words = {
+      0xA8850000,  // swl $a1, 0($a0)
+      0x00001021,  // addu $v0, $zero, $zero
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "*(u8*)arg0 = arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "v0 = 0;\n");
+}
+
+TEST(ExpressionBuilderTest, StandaloneUnalignedStoreFlushedAtFunctionEnd) {
+  // swl $a1, 4($a0)
+  std::vector<uint32_t> words = {
+      0xA8850004,  // swl $a1, 4($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].ToString(), "*(u8*)(arg0 + 4) = arg1;\n");
 }
 
 TEST(ExpressionBuilderTest, IndirectCallJalr) {
