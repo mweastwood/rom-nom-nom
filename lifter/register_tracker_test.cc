@@ -248,6 +248,38 @@ TEST(RegisterTrackerTest, Cop0AndCop1InstructionUseDef) {
   auto ud_round = GetInstructionUseDef(*round_inst);
   EXPECT_THAT(ud_round.fpr_uses, ElementsAre(FpRegister::kF12));
   EXPECT_THAT(ud_round.fpr_defs, ElementsAre(FpRegister::kF0));
+
+  // cvt.w.s $f0, $f12 - 0x46006024
+  auto cvtws_inst = DecodeInstruction(0x46006024);
+  ASSERT_TRUE(cvtws_inst.ok());
+  auto ud_cvtws = GetInstructionUseDef(*cvtws_inst);
+  EXPECT_THAT(ud_cvtws.fpr_uses, ElementsAre(FpRegister::kF12));
+  EXPECT_THAT(ud_cvtws.fpr_defs, ElementsAre(FpRegister::kF0));
+
+  // c.eq.s $f0, $f2 - 0x46001032
+  auto ceqs_inst = DecodeInstruction(0x46001032);
+  ASSERT_TRUE(ceqs_inst.ok());
+  auto ud_ceqs = GetInstructionUseDef(*ceqs_inst);
+  EXPECT_THAT(ud_ceqs.fpr_uses, ::testing::UnorderedElementsAre(FpRegister::kF0, FpRegister::kF2));
+
+  // daddiu $t0, $a0, 16 - 0x64880010
+  auto daddiu_inst = DecodeInstruction(0x64880010);
+  ASSERT_TRUE(daddiu_inst.ok());
+  auto ud_daddiu = GetInstructionUseDef(*daddiu_inst);
+  EXPECT_THAT(ud_daddiu.gpr_uses, ElementsAre(Register::kA0));
+  EXPECT_THAT(ud_daddiu.gpr_defs, ElementsAre(Register::kT0));
+
+  // sd $s0, 16($sp) - 0xFFB00010
+  auto sd_inst = DecodeInstruction(0xFFB00010);
+  ASSERT_TRUE(sd_inst.ok());
+  auto ud_sd = GetInstructionUseDef(*sd_inst);
+  EXPECT_THAT(ud_sd.gpr_uses, ElementsAre(Register::kSp, Register::kS0));
+
+  // bgezall $zero, target
+  auto bgezall_inst = DecodeInstruction(0x04130004);
+  ASSERT_TRUE(bgezall_inst.ok());
+  auto ud_bgezall = GetInstructionUseDef(*bgezall_inst);
+  EXPECT_THAT(ud_bgezall.gpr_defs, ElementsAre(Register::kRa));
 }
 
 }  // namespace

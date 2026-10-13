@@ -1818,18 +1818,22 @@ TEST(MipsEmulatorTest, ExternalCallInterceptionWithArgumentsAndSentinel) {
   // 00: addiu $a0, $zero, 10
   // 04: addiu $a1, $zero, 20
   // 08: addiu $a2, $zero, 30
-  // 0C: jal   0x80005000       (outside code bounds)
-  // 10: addiu $a3, $zero, 40   (delay slot sets $a3)
-  // 14: addu  $v0, $v0, $a0    (resumes here after call, $v0 is 0 from call return)
-  // 18: jr    $ra
-  // 1C: nop
+  // 0C: addu  $s0, $ra, $zero   (save initial $ra sentinel)
+  // 10: jal   0x80005000       (outside code bounds)
+  // 14: addiu $a3, $zero, 40   (delay slot sets $a3)
+  // 18: addu  $v0, $v0, $a0    (resumes here after call, $v0 is 0 from call return)
+  // 1C: addu  $ra, $s0, $zero   (restore initial $ra sentinel)
+  // 20: jr    $ra
+  // 24: nop
   std::vector<uint32_t> code = {
       0x2404000A,  // addiu $a0, $zero, 10
       0x24050014,  // addiu $a1, $zero, 20
       0x2406001E,  // addiu $a2, $zero, 30
+      0x03E08021,  // addu  $s0, $ra, $zero
       0x0C001400,  // jal   0x80005000 (target: 0x80005000)
       0x24070028,  // addiu $a3, $zero, 40
       0x00441021,  // addu  $v0, $v0, $a0
+      0x0200F821,  // addu  $ra, $s0, $zero
       0x03E00008,  // jr    $ra
       0x00000000,  // nop
   };

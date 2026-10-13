@@ -46,6 +46,10 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kAddu:
     case Opcode::kSub:
     case Opcode::kSubu:
+    case Opcode::kDadd:
+    case Opcode::kDaddu:
+    case Opcode::kDsub:
+    case Opcode::kDsubu:
     case Opcode::kAnd:
     case Opcode::kOr:
     case Opcode::kXor:
@@ -61,6 +65,12 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kSll:
     case Opcode::kSrl:
     case Opcode::kSra:
+    case Opcode::kDsll:
+    case Opcode::kDsrl:
+    case Opcode::kDsra:
+    case Opcode::kDsll32:
+    case Opcode::kDsrl32:
+    case Opcode::kDsra32:
       add_gpr_use(inst.rt);
       add_gpr_def(inst.rd);
       break;
@@ -69,6 +79,9 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kSllv:
     case Opcode::kSrlv:
     case Opcode::kSrav:
+    case Opcode::kDsllv:
+    case Opcode::kDsrlv:
+    case Opcode::kDsrav:
       add_gpr_use(inst.rs);
       add_gpr_use(inst.rt);
       add_gpr_def(inst.rd);
@@ -77,6 +90,8 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     // Immediate Arithmetic & Logic
     case Opcode::kAddi:
     case Opcode::kAddiu:
+    case Opcode::kDaddi:
+    case Opcode::kDaddiu:
     case Opcode::kAndi:
     case Opcode::kOri:
     case Opcode::kXori:
@@ -98,7 +113,11 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kLbu:
     case Opcode::kLwl:
     case Opcode::kLwr:
+    case Opcode::kLwu:
     case Opcode::kLd:
+    case Opcode::kLld:
+    case Opcode::kLdl:
+    case Opcode::kLdr:
       add_gpr_use(inst.rs);
       add_gpr_def(inst.rt);
       break;
@@ -110,8 +129,16 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kSwl:
     case Opcode::kSwr:
     case Opcode::kSd:
+    case Opcode::kSdl:
+    case Opcode::kSdr:
       add_gpr_use(inst.rs);
       add_gpr_use(inst.rt);
+      break;
+
+    case Opcode::kScd:
+      add_gpr_use(inst.rs);
+      add_gpr_use(inst.rt);
+      add_gpr_def(inst.rt);
       break;
 
     // Multiply / Divide
@@ -119,6 +146,10 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kMultu:
     case Opcode::kDiv:
     case Opcode::kDivu:
+    case Opcode::kDmult:
+    case Opcode::kDmultu:
+    case Opcode::kDdiv:
+    case Opcode::kDdivu:
       add_gpr_use(inst.rs);
       add_gpr_use(inst.rt);
       ud.defs_hi = true;
@@ -164,6 +195,8 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
 
     case Opcode::kBltzal:
     case Opcode::kBgezal:
+    case Opcode::kBltzall:
+    case Opcode::kBgezall:
       add_gpr_use(inst.rs);
       add_gpr_def(Register::kRa);
       break;
@@ -240,6 +273,12 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
     case Opcode::kCvtDS:
     case Opcode::kCvtSW:
     case Opcode::kCvtDW:
+    case Opcode::kCvtWS:
+    case Opcode::kCvtWD:
+    case Opcode::kCvtLS:
+    case Opcode::kCvtLD:
+    case Opcode::kCvtSL:
+    case Opcode::kCvtDL:
     case Opcode::kTruncWS:
     case Opcode::kTruncWD:
     case Opcode::kRoundWS:
@@ -253,12 +292,38 @@ RegisterUseDef GetInstructionUseDef(const Instruction& inst) {
       break;
 
     // FPU Comparisons
+    case Opcode::kCFS:
+    case Opcode::kCUnS:
     case Opcode::kCEqS:
+    case Opcode::kCUeqS:
+    case Opcode::kCOltS:
+    case Opcode::kCUltS:
+    case Opcode::kCOleS:
+    case Opcode::kCUleS:
+    case Opcode::kCSfS:
+    case Opcode::kCNgleS:
+    case Opcode::kCSeqS:
+    case Opcode::kCNglS:
     case Opcode::kCLtS:
+    case Opcode::kCNgeS:
     case Opcode::kCLeS:
+    case Opcode::kCNgtS:
+    case Opcode::kCFD:
+    case Opcode::kCUnD:
     case Opcode::kCEqD:
+    case Opcode::kCUeqD:
+    case Opcode::kCOltD:
+    case Opcode::kCUltD:
+    case Opcode::kCOleD:
+    case Opcode::kCUleD:
+    case Opcode::kCSfD:
+    case Opcode::kCNgleD:
+    case Opcode::kCSeqD:
+    case Opcode::kCNglD:
     case Opcode::kCLtD:
+    case Opcode::kCNgeD:
     case Opcode::kCLeD:
+    case Opcode::kCNgtD:
       if (inst.fs) ud.fpr_uses.push_back(*inst.fs);
       if (inst.ft) ud.fpr_uses.push_back(*inst.ft);
       break;
@@ -316,6 +381,8 @@ void RegisterTracker::Step(const Instruction& inst) {
 
     case Opcode::kAddi:
     case Opcode::kAddiu:
+    case Opcode::kDaddi:
+    case Opcode::kDaddiu:
       if (inst.rt.has_value() && *inst.rt != Register::kZero) {
         size_t dest = RegIdx(*inst.rt);
         if (inst.rs == Register::kZero) {
@@ -405,6 +472,8 @@ void RegisterTracker::Step(const Instruction& inst) {
 
     case Opcode::kAddu:
     case Opcode::kAdd:
+    case Opcode::kDaddu:
+    case Opcode::kDadd:
       if (inst.rd.has_value() && *inst.rd != Register::kZero) {
         size_t dest = RegIdx(*inst.rd);
         if (inst.rs == Register::kZero && inst.rt.has_value()) {
@@ -434,6 +503,7 @@ void RegisterTracker::Step(const Instruction& inst) {
       break;
 
     case Opcode::kSw:
+    case Opcode::kSd:
       if (inst.rs == Register::kSp) {
         int32_t offset = inst.immediate;
         if (inst.rt == Register::kRa) {
@@ -446,6 +516,10 @@ void RegisterTracker::Step(const Instruction& inst) {
 
     case Opcode::kJal:
     case Opcode::kJalr:
+    case Opcode::kBltzal:
+    case Opcode::kBgezal:
+    case Opcode::kBltzall:
+    case Opcode::kBgezall:
       frame_info_.is_leaf = false;
       // Function call clobbers caller-saved registers
       gpr_values_[RegIdx(Register::kV0)] = TrackedValue();

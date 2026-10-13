@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/statusor.h"
 #include "core/c_ast.h"
 #include "core/mips.h"
 #include "lifter/control_flow_graph.h"
@@ -36,10 +37,10 @@ struct AstConverterOptions {
 class AstConverter {
  public:
   // Converts a structured CFG into a complete C FunctionDeclaration AST.
-  static FunctionDeclaration Convert(const ControlFlowGraph& cfg,
-                                     const StructuredRegion& root_region,
-                                     const SymbolIndex* symbol_index = nullptr,
-                                     const AstConverterOptions& options = {});
+  static absl::StatusOr<FunctionDeclaration> Convert(const ControlFlowGraph& cfg,
+                                                     const StructuredRegion& root_region,
+                                                     const SymbolIndex* symbol_index = nullptr,
+                                                     const AstConverterOptions& options = {});
 
   // Converts a single LiftedExpression to a CExpression.
   static std::unique_ptr<CExpression> ConvertExpression(

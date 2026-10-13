@@ -112,7 +112,7 @@ TEST(AstConverterTest, LinearFunctionConversion) {
   AstConverterOptions options;
   options.function_name = "AddTwo";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   EXPECT_EQ(func.Name(), "AddTwo");
   EXPECT_EQ(func.ReturnType().ToString(), "s32");
   EXPECT_EQ(func.Parameters().size(), 2u);
@@ -159,7 +159,7 @@ TEST(AstConverterTest, IfElseFunctionConversion) {
   AstConverterOptions options;
   options.function_name = "CheckPositive";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   EXPECT_EQ(func.Name(), "CheckPositive");
   EXPECT_EQ(func.ReturnType().ToString(), "s32");
 
@@ -200,7 +200,7 @@ TEST(AstConverterTest, LoopFunctionConversion) {
   AstConverterOptions options;
   options.function_name = "CountDown";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   EXPECT_EQ(func.Name(), "CountDown");
 
   std::string code = func.ToString();
@@ -248,7 +248,7 @@ TEST(AstConverterTest, LocalVariableDeclarationFiltering) {
   AstConverterOptions options;
   options.function_name = "ProcessAudio";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
   std::string code = func.ToString();
 
   // Local variable v0 must be declared at the top of the function
@@ -308,7 +308,7 @@ TEST(AstConverterTest, GotoBlockLabelConsistency) {
   AstConverterOptions options;
   options.function_name = "TestGotoConsistency";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("goto block_2;"));
@@ -348,7 +348,7 @@ TEST(AstConverterTest, ConvertSwitchStatement) {
   AstConverterOptions options;
   options.function_name = "TestSwitch";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("switch (v1) {"));
@@ -387,7 +387,7 @@ TEST(AstConverterTest, ConvertSwitchStatementWithReturnDoesNotAddRedundantBreak)
   AstConverterOptions options;
   options.function_name = "TestSwitchReturn";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("switch (arg0) {"));
@@ -421,7 +421,7 @@ TEST(AstConverterTest, ConvertSwitchStatementFallbackCondition) {
   AstConverterOptions options;
   options.function_name = "TestSwitchFallback";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("switch (cond) {"));
@@ -458,7 +458,7 @@ TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
   AstConverterOptions options;
   options.function_name = "TestSwitchVars";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
   std::string code = func.ToString();
 
   // v0 must be declared at the top of the function
@@ -498,7 +498,7 @@ TEST(AstConverterTest, ConvertMultiBlockFunctionWithInterBlockReturnLiveness) {
   AstConverterOptions options;
   options.function_name = "Abs16";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   EXPECT_EQ(func.Name(), "Abs16");
   EXPECT_EQ(func.ReturnType().ToString(), "s32");
 
@@ -545,7 +545,7 @@ TEST(AstConverterTest, BranchConditionFoldingSltAndDeadAtElimination) {
   AstConverterOptions options;
   options.function_name = "MinBranch";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   // The condition should be folded to (arg0 < arg1)
@@ -592,7 +592,7 @@ TEST(AstConverterTest, BranchConditionFoldingSltiu) {
   AstConverterOptions options;
   options.function_name = "CheckBound";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   // The condition should be folded to ((u32)arg0 >= 10U) due to fallthrough structuring
@@ -631,7 +631,7 @@ TEST(AstConverterTest, BranchLikelyDelaySlotNullification) {
   AstConverterOptions options;
   options.function_name = "ClampPan";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   // Condition should be folded to (arg1 >= 257)
@@ -683,7 +683,7 @@ TEST(AstConverterTest, MultiBlockDoWhileLoopConversion) {
   AstConverterOptions options;
   options.function_name = "CountDown";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("do {"));
@@ -721,7 +721,7 @@ TEST(AstConverterTest, DeclaresStackBufferWithDetectedFrameSize) {
   AstConverterOptions options;
   options.function_name = "StackFunc";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("u8 sp[128];"));
@@ -729,9 +729,9 @@ TEST(AstConverterTest, DeclaresStackBufferWithDetectedFrameSize) {
   EXPECT_THAT(code, Not(HasSubstr("s32 sp;")));
 }
 
-TEST(AstConverterTest, DeclaresStackBufferDefaultSizeWhenNoPrologueAdjustment) {
+TEST(AstConverterTest, FailsWhenStackBufferAccessedWithoutPrologueAdjustment) {
   // Function indexes into stack buffer without an explicit addiu $sp, $sp, -frame_size.
-  // Should default safely to 64 bytes: u8 sp[64];
+  // Must fail instead of guessing or defaulting to 64 bytes.
   std::vector<uint32_t> words = {
       0x007D1021,  // addu  $v0, $v1, $sp
       0x03E00008,  // jr    $ra
@@ -753,12 +753,50 @@ TEST(AstConverterTest, DeclaresStackBufferDefaultSizeWhenNoPrologueAdjustment) {
   AstConverterOptions options;
   options.function_name = "StackFuncDefault";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
-  std::string code = func.ToString();
+  auto func_or = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  EXPECT_FALSE(func_or.ok());
+}
 
-  EXPECT_THAT(code, HasSubstr("u8 sp[64];"));
-  EXPECT_THAT(code, HasSubstr("v0 = (v1 + (s32)sp);"));
-  EXPECT_THAT(code, Not(HasSubstr("s32 sp;")));
+TEST(AstConverterTest, RobustPrologueAnalysisWithSdAndMultiBlock) {
+  // Function allocates frame in block 0, falls through to block 1,
+  // saves callee-saved registers using sd (64-bit).
+  // 0: daddiu $sp, $sp, -32
+  // 4: b      8
+  // 8: sd     $ra, 24($sp)
+  // C: sd     $s0, 16($sp)
+  // 10: jr    $ra
+  // 14: daddiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x67BDFFE0,  // 0: daddiu $sp, $sp, -32
+      0x10000001,  // 4: b      12 (pc+4+4 = 0xC)
+      0x00000000,  // 8: nop
+      0xFFBF0018,  // C: sd     $ra, 24($sp)
+      0xFFB00010,  // 10: sd    $s0, 16($sp)
+      0x03E00008,  // 14: jr    $ra
+      0x67BD0020,  // 18: daddiu $sp, $sp, 32
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "MultiBlockPrologue";
+
+  auto func_or = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  ASSERT_TRUE(func_or.ok());
+  std::string code = func_or->ToString();
+
+  // $ra and $s0 saves should be identified as prologue and omitted from the C body
+  EXPECT_THAT(code, Not(HasSubstr("*(s64*)")));
 }
 
 TEST(AstConverterTest, DoWhileLoopDelaySlotDecoupling) {
@@ -793,7 +831,7 @@ TEST(AstConverterTest, DoWhileLoopDelaySlotDecoupling) {
   AstConverterOptions options;
   options.function_name = "WaitVsyncBusyWait";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   // The loop body should contain the load, but NOT the delay slot assignment v0 = v1.
@@ -837,7 +875,7 @@ TEST(AstConverterTest, BranchLikelyInvertedIfElseDelaySlotPreserved) {
   AstConverterOptions options;
   options.function_name = "BranchLikelyInverted";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   // Condition is inverted to ((arg0 & 1) != 0)
@@ -874,7 +912,7 @@ TEST(AstConverterTest, DeclaresFpRegistersWithProperFloatTypesAndFoldsCop1Branch
   AstConverterOptions options;
   options.function_name = "FloatTest";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   // Single precision variables are f32
@@ -914,7 +952,7 @@ TEST(AstConverterTest, SltiuAssignmentProducesUnsignedCast) {
   AstConverterOptions options;
   options.function_name = "TestSltiuAssign";
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("(u32)arg0 < 1"));
@@ -946,11 +984,56 @@ TEST(AstConverterTest, DoesNotDeclareSynthesizedDataGlobalsAsLocalVariables) {
   auto index_or = SymbolIndex::ParseFromTextproto("");
   ASSERT_TRUE(index_or.ok());
 
-  FunctionDeclaration func = AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, Not(HasSubstr("s32 D_80170450;")));
   EXPECT_THAT(code, HasSubstr("&D_80170450"));
+}
+
+TEST(AstConverterTest, CalleeSavedInCallDelaySlotDetected) {
+  // Pattern where $s1 is saved in the delay slot of jal:
+  // 00: addiu $sp, $sp, -48
+  // 04: sw    $ra, 40($sp)
+  // 08: jal   func_80030000
+  // 0C: sw    $s1, 36($sp)      (delay slot saves callee-saved $s1)
+  // 10: lw    $ra, 40($sp)
+  // 14: lw    $s1, 36($sp)
+  // 18: jr    $ra
+  // 1C: addiu $sp, $sp, 48
+  std::vector<uint32_t> words = {
+      0x27BDFFD0,  // 00: addiu $sp, $sp, -48
+      0xAFBF0028,  // 04: sw    $ra, 40($sp)
+      0x0C00C000,  // 08: jal   0x80030000
+      0xAFB10024,  // 0C: sw    $s1, 36($sp)
+      0x8FBF0028,  // 10: lw    $ra, 40($sp)
+      0x8FB10024,  // 14: lw    $s1, 36($sp)
+      0x03E00008,  // 18: jr    $ra
+      0x27BD0030,  // 1C: addiu $sp, $sp, 48
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "DelaySlotSave";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // $s1 should be recognized as a callee-saved register save/restore,
+  // not emitted as a local stack variable or assignment in the body.
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_36")));
+  EXPECT_THAT(code, Not(HasSubstr("s1 = ")));
 }
 
 }  // namespace

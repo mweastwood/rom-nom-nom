@@ -85,6 +85,7 @@ enum class StatementKind {
   kStore,
   kCall,
   kReturn,
+  kUnhandled,
 };
 
 // Represents a statement lifted from instructions.
@@ -180,6 +181,12 @@ class ExpressionBuilder {
   // Analyzes the CFG to determine if the function returns a float value in $f0.
   static bool DetermineReturnsF0(const ControlFlowGraph& cfg);
   static bool DetermineReturnsF0Double(const ControlFlowGraph& cfg);
+
+  // Detects callee-saved registers ($s0-$s7, $fp) that are used before definition in the
+  // function body (excluding standard prologue spills like `sw $sX, offset($sp)`).
+  // These represent uninitialized local variables in the original compiled binary.
+  static absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(
+      const ControlFlowGraph& cfg);
 
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);

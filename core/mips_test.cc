@@ -319,6 +319,83 @@ TEST(MipsTest, DecodeCop1RoundingInstructions) {
   ASSERT_TRUE(floor_inst.ok());
   EXPECT_EQ(floor_inst->opcode, Opcode::kFloorWS);
   EXPECT_EQ(floor_inst->Disassemble(), "floor.w.s $f0, $f12");
+
+  // cvt.w.s $f0, $f12 -> funct=0x24
+  uint32_t cvtws_word = (0x11 << 26) | (0x10 << 21) | (0 << 16) | (12 << 11) | (0 << 6) | 0x24;
+  auto cvtws_inst = DecodeInstruction(cvtws_word, 0x80025C00);
+  ASSERT_TRUE(cvtws_inst.ok());
+  EXPECT_EQ(cvtws_inst->opcode, Opcode::kCvtWS);
+  EXPECT_EQ(cvtws_inst->Disassemble(), "cvt.w.s $f0, $f12");
+
+  // cvt.s.l $f0, $f12 -> rs=0x15, funct=0x20
+  uint32_t cvtsl_word = (0x11 << 26) | (0x15 << 21) | (0 << 16) | (12 << 11) | (0 << 6) | 0x20;
+  auto cvtsl_inst = DecodeInstruction(cvtsl_word, 0x80025C00);
+  ASSERT_TRUE(cvtsl_inst.ok());
+  EXPECT_EQ(cvtsl_inst->opcode, Opcode::kCvtSL);
+  EXPECT_EQ(cvtsl_inst->Disassemble(), "cvt.s.l $f0, $f12");
+
+  // c.eq.s $f0, $f2 -> rs=0x10, fs=0, ft=2, funct=0x32
+  uint32_t ceqs_word = (0x11 << 26) | (0x10 << 21) | (2 << 16) | (0 << 11) | 0x32;
+  auto ceqs_inst = DecodeInstruction(ceqs_word, 0x80025C00);
+  ASSERT_TRUE(ceqs_inst.ok());
+  EXPECT_EQ(ceqs_inst->opcode, Opcode::kCEqS);
+  EXPECT_EQ(ceqs_inst->Disassemble(), "c.eq.s $f0, $f2");
+
+  // c.olt.d $f0, $f2 -> rs=0x11, fs=0, ft=2, funct=0x34
+  uint32_t coltd_word = (0x11 << 26) | (0x11 << 21) | (2 << 16) | (0 << 11) | 0x34;
+  auto coltd_inst = DecodeInstruction(coltd_word, 0x80025C00);
+  ASSERT_TRUE(coltd_inst.ok());
+  EXPECT_EQ(coltd_inst->opcode, Opcode::kCOltD);
+  EXPECT_EQ(coltd_inst->Disassemble(), "c.olt.d $f0, $f2");
+}
+
+TEST(MipsTest, Decode64BitInstructions) {
+  // daddiu $t0, $a0, 64 -> op=0x19, rs=4 ($a0), rt=8 ($t0), imm=64
+  uint32_t daddiu_word = (0x19 << 26) | (4 << 21) | (8 << 16) | 64;
+  auto daddiu_inst = DecodeInstruction(daddiu_word, 0x80025C00);
+  ASSERT_TRUE(daddiu_inst.ok());
+  EXPECT_EQ(daddiu_inst->opcode, Opcode::kDaddiu);
+  EXPECT_EQ(daddiu_inst->Disassemble(), "daddiu $t0, $a0, 64");
+
+  // dsllv $t0, $t1, $a0 -> op=0x00, rs=4 ($a0), rt=9 ($t1), rd=8 ($t0), funct=0x14
+  uint32_t dsllv_word = (0x00 << 26) | (4 << 21) | (9 << 16) | (8 << 11) | 0x14;
+  auto dsllv_inst = DecodeInstruction(dsllv_word, 0x80025C00);
+  ASSERT_TRUE(dsllv_inst.ok());
+  EXPECT_EQ(dsllv_inst->opcode, Opcode::kDsllv);
+  EXPECT_EQ(dsllv_inst->Disassemble(), "dsllv $t0, $t1, $a0");
+
+  // dmult $a0, $a1 -> op=0x00, rs=4, rt=5, funct=0x1C
+  uint32_t dmult_word = (0x00 << 26) | (4 << 21) | (5 << 16) | 0x1C;
+  auto dmult_inst = DecodeInstruction(dmult_word, 0x80025C00);
+  ASSERT_TRUE(dmult_inst.ok());
+  EXPECT_EQ(dmult_inst->opcode, Opcode::kDmult);
+  EXPECT_EQ(dmult_inst->Disassemble(), "dmult $a0, $a1");
+
+  // lwu $v0, 16($sp) -> op=0x27, rs=29, rt=2, imm=16
+  uint32_t lwu_word = (0x27 << 26) | (29 << 21) | (2 << 16) | 16;
+  auto lwu_inst = DecodeInstruction(lwu_word, 0x80025C00);
+  ASSERT_TRUE(lwu_inst.ok());
+  EXPECT_EQ(lwu_inst->opcode, Opcode::kLwu);
+  EXPECT_TRUE(lwu_inst->IsLoad());
+  EXPECT_EQ(lwu_inst->Disassemble(), "lwu   $v0, 16($sp)");
+
+  // scd $t0, 0($a0) -> op=0x3C, rs=4, rt=8, imm=0
+  uint32_t scd_word = (0x3C << 26) | (4 << 21) | (8 << 16) | 0;
+  auto scd_inst = DecodeInstruction(scd_word, 0x80025C00);
+  ASSERT_TRUE(scd_inst.ok());
+  EXPECT_EQ(scd_inst->opcode, Opcode::kScd);
+  EXPECT_TRUE(scd_inst->IsStore());
+  EXPECT_EQ(scd_inst->Disassemble(), "scd   $t0, 0($a0)");
+
+  // bgezall $zero, target -> op=0x01, rs=0, rt=0x13, offset=4
+  uint32_t bgezall_word = (0x01 << 26) | (0 << 21) | (0x13 << 16) | 4;
+  auto bgezall_inst = DecodeInstruction(bgezall_word, 0x80025C00);
+  ASSERT_TRUE(bgezall_inst.ok());
+  EXPECT_EQ(bgezall_inst->opcode, Opcode::kBgezall);
+  EXPECT_TRUE(bgezall_inst->IsCall());
+  EXPECT_TRUE(bgezall_inst->IsBranch());
+  EXPECT_TRUE(bgezall_inst->IsBranchLikely());
+  EXPECT_TRUE(bgezall_inst->IsUnconditionalBranch());
 }
 
 TEST(MipsTest, MemorySegmentPredicates) {

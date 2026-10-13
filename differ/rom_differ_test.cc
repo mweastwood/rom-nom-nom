@@ -165,5 +165,122 @@ TEST_F(RomDifferEndToEndTest, MatchesIdenticalRoms) {
   EXPECT_DOUBLE_EQ(result_or->overall_match_percentage, 100.0);
 }
 
+TEST_F(RomDifferEndToEndTest, StructuralValidationSucceedsWithShiftedAssetSegments) {
+  std::filesystem::path target_path = test_dir_ / "target.z64";
+  std::filesystem::path built_path = test_dir_ / "built.z64";
+  std::filesystem::path config_path = test_dir_ / "config.textproto";
+
+  const std::string config_content = R"(
+game_name: "test"
+sha1: "0000000000000000000000000000000000000000"
+basename: "test"
+segments {
+  name: "main"
+  rom_start: 0x1050
+  rom_end: 0x1200
+  type: SEGMENT_CODE
+  subsegments {
+    name: "main"
+    rom_start: 0x1050
+    type: SUBSEGMENT_C
+  }
+}
+segments {
+  name: "assets"
+  rom_start: 0x1200
+  rom_end: 0x1400
+  type: SEGMENT_DATA
+}
+)";
+  {
+    std::ofstream config_file(config_path);
+    config_file << config_content;
+  }
+
+  std::vector<uint8_t> target_bytes(0x1400, 0);
+  target_bytes[0] = 0x80;
+  target_bytes[1] = 0x37;
+  target_bytes[2] = 0x12;
+  target_bytes[3] = 0x40;
+  target_bytes[8] = 0x80;
+  target_bytes[9] = 0x02;
+  target_bytes[10] = 0x5C;
+  target_bytes[11] = 0x00;
+
+  for (size_t i = 0x1050; i < 0x1200; ++i) {
+    target_bytes[i] = static_cast<uint8_t>(i & 0xFF);
+  }
+  for (size_t i = 0x1200; i < 0x1400; ++i) {
+    target_bytes[i] = static_cast<uint8_t>(0x5A);
+  }
+
+  // Built ROM has 0x20 additional bytes in the code segment (+0x20 shift)
+  std::vector<uint8_t> built_bytes(0x1420, 0);
+  built_bytes[0] = 0x80;
+  built_bytes[1] = 0x37;
+  built_bytes[2] = 0x12;
+  built_bytes[3] = 0x40;
+  built_bytes[8] = 0x80;
+  built_bytes[9] = 0x02;
+  built_bytes[10] = 0x5C;
+  built_bytes[11] = 0x00;
+
+  for (size_t i = 0x1050; i < 0x1220; ++i) {
+    built_bytes[i] = static_cast<uint8_t>(i & 0xFF);
+  }
+  // Shifted assets start at 0x1220
+  for (size_t i = 0x1220; i < 0x1420; ++i) {
+    built_bytes[i] = static_cast<uint8_t>(0x5A);
+  }
+
+  {
+    std::ofstream target_file(target_path, std::ios::binary);
+    target_file.write(reinterpret_cast<const char*>(target_bytes.data()), target_bytes.size());
+  }
+  {
+    std::ofstream built_file(built_path, std::ios::binary);
+    built_file.write(reinterpret_cast<const char*>(built_bytes.data()), built_bytes.size());
+  }
+
+  // 1. With allow_code_shift = true (default)
+  {
+    RomDiffer differ(RomDiffOptions{
+        .base_rom_path = target_path,
+        .candidate_rom_path = built_path,
+        .config_path = config_path,
+        .use_color = false,
+        .allow_code_shift = true,
+    });
+
+    auto result_or = differ.Diff();
+    ASSERT_TRUE(result_or.ok());
+    EXPECT_TRUE(result_or->success);
+    EXPECT_TRUE(result_or->structural.is_valid);
+    EXPECT_TRUE(result_or->structural.code_shift_matches);
+    EXPECT_FALSE(result_or->structural.size_matches);
+    ASSERT_EQ(result_or->asset_segments.size(), 1u);
+    EXPECT_EQ(result_or->asset_segments[0].shift_offset, 0x20);
+    EXPECT_DOUBLE_EQ(result_or->asset_segments[0].MatchPercentage(), 100.0);
+  }
+
+  // 2. With allow_code_shift = false
+  {
+    RomDiffer differ(RomDiffOptions{
+        .base_rom_path = target_path,
+        .candidate_rom_path = built_path,
+        .config_path = config_path,
+        .use_color = false,
+        .allow_code_shift = false,
+    });
+
+    auto result_or = differ.Diff();
+    ASSERT_TRUE(result_or.ok());
+    EXPECT_FALSE(result_or->success);
+    EXPECT_FALSE(result_or->structural.is_valid);
+    EXPECT_FALSE(result_or->structural.code_shift_matches);
+    EXPECT_FALSE(result_or->structural.size_matches);
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

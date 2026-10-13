@@ -314,7 +314,7 @@ ExecutionStatus MipsEmulator::Step() {
         case 0x08: {  // JR
           if (executing_delay_slot) return ExecutionStatus::kInvalidOpcode;
           in_delay_slot_ = true;
-          if (rs == 31 || gpr_[rs] == kReturnAddressSentinel) {
+          if (gpr_[rs] == kReturnAddressSentinel) {
             delay_slot_is_return_ = true;
             delay_slot_is_call_ = false;
           } else {

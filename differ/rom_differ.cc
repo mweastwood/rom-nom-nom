@@ -166,20 +166,6 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
          target_bytes[10] == built_bytes[10] && target_bytes[11] == built_bytes[11]);
   }
 
-  result.structural.is_valid =
-      (result.structural.size_matches && result.structural.header_magic_matches &&
-       result.structural.entrypoint_matches);
-
-  if (!result.structural.size_matches) {
-    result.structural.failure_reason =
-        absl::StrFormat("Size mismatch: target has %d bytes, built has %d bytes",
-                        result.structural.target_size, result.structural.built_size);
-  } else if (!result.structural.header_magic_matches) {
-    result.structural.failure_reason = "N64 header magic mismatch";
-  } else if (!result.structural.entrypoint_matches) {
-    result.structural.failure_reason = "N64 entrypoint address mismatch";
-  }
-
   // 2. Header and IPL3 Verification (0x0 - 0x1050)
   const size_t header_end_offset = std::min<size_t>(0x1050, target_bytes.size());
   result.header_total_bytes = header_end_offset;
@@ -280,10 +266,12 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
 
   // 6. Asset Segments Shift-Aligned Matching
   size_t total_asset_matches = 0;
+  size_t total_asset_bytes = 0;
   for (const auto& asset_range : asset_segment_ranges) {
     uint64_t retail_segment_start = asset_range.rom_start;
     uint64_t retail_segment_end = asset_range.rom_end;
     uint64_t segment_length = retail_segment_end - retail_segment_start;
+    total_asset_bytes += segment_length;
 
     int64_t shift_offset = 0;
     if (first_asset_built_offset < built_bytes.size() && !asset_segment_ranges.empty()) {
@@ -314,6 +302,34 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
     asset_diff.matching_bytes = matching_bytes;
     total_asset_matches += matching_bytes;
     result.asset_segments.push_back(asset_diff);
+  }
+
+  int64_t total_shift_offset = 0;
+  if (first_asset_built_offset < built_bytes.size() && !asset_segment_ranges.empty()) {
+    total_shift_offset = static_cast<int64_t>(first_asset_built_offset) -
+                         static_cast<int64_t>(asset_segment_ranges.front().rom_start);
+  }
+
+  if (!result.structural.size_matches && options_.allow_code_shift &&
+      !asset_segment_ranges.empty() && total_asset_bytes > 0 &&
+      total_asset_matches == total_asset_bytes &&
+      static_cast<int64_t>(built_bytes.size()) ==
+          static_cast<int64_t>(target_bytes.size()) + total_shift_offset) {
+    result.structural.code_shift_matches = true;
+  }
+
+  result.structural.is_valid =
+      ((result.structural.size_matches || result.structural.code_shift_matches) &&
+       result.structural.header_magic_matches && result.structural.entrypoint_matches);
+
+  if (!result.structural.header_magic_matches) {
+    result.structural.failure_reason = "N64 header magic mismatch";
+  } else if (!result.structural.entrypoint_matches) {
+    result.structural.failure_reason = "N64 entrypoint address mismatch";
+  } else if (!result.structural.size_matches && !result.structural.code_shift_matches) {
+    result.structural.failure_reason =
+        absl::StrFormat("Size mismatch: target has %d bytes, built has %d bytes",
+                        result.structural.target_size, result.structural.built_size);
   }
 
   // 7. Aggregate Total Logical Matches
@@ -356,6 +372,16 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
     return "0";
   };
 
+  std::string size_status;
+  if (result.structural.size_matches) {
+    size_status = "Exact match";
+  } else if (result.structural.code_shift_matches) {
+    size_status =
+        absl::StrFormat("Shift match: %s bytes", format_signed_commas(total_shift_offset));
+  } else {
+    size_status = "MISMATCH";
+  }
+
   std::string report;
   absl::StrAppend(
       &report,
@@ -364,8 +390,7 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
   absl::StrAppendFormat(&report, "Target ROM SHA-1: %s\n", result.structural.target_sha1);
   absl::StrAppendFormat(&report, "Built  ROM SHA-1: %s\n", result.structural.built_sha1);
   absl::StrAppendFormat(&report, "Cartridge Size:   %s bytes (%s)\n",
-                        format_commas(result.structural.built_size),
-                        result.structural.size_matches ? "Exact match" : "MISMATCH");
+                        format_commas(result.structural.built_size), size_status);
   absl::StrAppendFormat(
       &report, "N64 Header & IPL3: %s / %s bytes (%.2f%% bit-exact)\n",
       format_commas(result.header_matching_bytes), format_commas(result.header_total_bytes),
@@ -374,7 +399,14 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
           : 0.0);
 
   if (result.structural.is_valid) {
-    absl::StrAppend(&report, green, "[SUCCESS] ROM structural integrity verified!", reset, "\n");
+    if (result.structural.code_shift_matches) {
+      absl::StrAppend(&report, green,
+                      "[SUCCESS] ROM structural integrity verified (code segment shifted with "
+                      "bit-exact assets)!",
+                      reset, "\n");
+    } else {
+      absl::StrAppend(&report, green, "[SUCCESS] ROM structural integrity verified!", reset, "\n");
+    }
   } else {
     absl::StrAppendFormat(&report, "%s[FAIL] Structural validation failed: %s%s\n", red,
                           result.structural.failure_reason, reset);

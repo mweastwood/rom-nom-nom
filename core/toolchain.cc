@@ -344,6 +344,9 @@ std::vector<std::string> Toolchain::BuildLdArgs(
   args.push_back("-T");
   args.push_back(main_ld_script.string());
   args.push_back("--no-check-sections");
+  // Preserve relocations in the linked ELF. They are emitted into non-allocated .rel.* sections,
+  // so the ROM image extracted with `objcopy -O binary` is unaffected.
+  args.push_back("--emit-relocs");
   args.push_back("-o");
   args.push_back(out_elf.string());
   return args;

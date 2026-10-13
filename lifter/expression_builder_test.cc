@@ -2293,5 +2293,63 @@ TEST(ExpressionBuilderTest, LiftRegisterOrConstantExcludesKsegPointerAddresses) 
   EXPECT_EQ(const_stmts[1].ToString(), "v0 = 4660;\n");
 }
 
+TEST(ExpressionBuilderTest, LoudUnhandledInstructionMarker) {
+  // Test that an unsupported instruction emits an unhandled marker statement
+  Instruction unhandled_inst;
+  unhandled_inst.opcode = Opcode::kUnknown;
+  unhandled_inst.raw_word = 0x01234567;
+  unhandled_inst.vram = 0x80020000;
+
+  auto statements = ExpressionBuilder::LiftInstructions(absl::MakeSpan(&unhandled_inst, 1));
+  ASSERT_EQ(statements.size(), 1u);
+  EXPECT_EQ(statements[0].kind, StatementKind::kUnhandled);
+  EXPECT_THAT(statements[0].ToString(), HasSubstr("__UNHANDLED_INSTRUCTION_0x01234567__"));
+}
+
+TEST(ExpressionBuilderTest, LiftBranchAndLink) {
+  // bal target (0x04110002 -> bgezal $zero, +2 instructions)
+  std::vector<uint32_t> words = {
+      0x04110002,  // 0: bal +2 (target = 0x8002000C)
+      0x00000000,  // 4: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_FALSE(statements.empty());
+  EXPECT_EQ(statements[0].kind, StatementKind::kCall);
+  EXPECT_THAT(statements[0].ToString(), HasSubstr("func_8002000C"));
+}
+
+TEST(ExpressionBuilderTest, Lift64BitAluAndShifts) {
+  std::vector<uint32_t> words = {
+      0x67BDFFE0,  // 0: daddiu $sp, $sp, -32
+      0x00A4102D,  // 4: daddu  $v0, $a1, $a0
+      0x00041138,  // 8: dsll   $v0, $a0, 4
+      0x0004113F,  // C: dsra32 $v0, $a0, 4
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_GE(statements.size(), 3u);
+  EXPECT_EQ(statements[0].ToString(), "v0 = arg1 + arg0;\n");
+  EXPECT_EQ(statements[1].ToString(), "v0 = arg0 << 4;\n");
+  EXPECT_EQ(statements[2].ToString(), "v0 = (s64)arg0 >> 36;\n");
+}
+
+TEST(ExpressionBuilderTest, LiftCop1CvtAndCompare) {
+  std::vector<uint32_t> words = {
+      0x46001024,  // 0: cvt.w.s $f0, $f2
+      0x4604103C,  // 4: c.lt.s  $f2, $f4
+      0x46241032,  // 8: c.eq.d  $f2, $f4
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(statements.size(), 3u);
+  EXPECT_EQ(statements[0].ToString(), "*(s32*)&f0 = (s32)f2;\n");
+  EXPECT_EQ(statements[1].ToString(), "fcond = f2 < f4;\n");
+  EXPECT_EQ(statements[2].ToString(), "fcond = f2_d == f4_d;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

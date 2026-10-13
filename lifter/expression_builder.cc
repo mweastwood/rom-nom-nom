@@ -172,6 +172,8 @@ std::string LiftedStatement::ToString() const {
         return "return " + expression->ToString() + ";\n";
       }
       return "return;\n";
+    case StatementKind::kUnhandled:
+      return (expression ? expression->ToString() : "/* UNHANDLED */") + ";\n";
   }
   return "";
 }
@@ -636,7 +638,7 @@ void ExpressionBuilder::LiftCallInstruction(
           "((void (*)())%s)", ExpressionBuilder::RegisterVarName(inst.rs.value_or(Register::kT9)));
     }
   } else {
-    uint32_t target_vram = inst.JumpTarget();
+    uint32_t target_vram = (inst.opcode == Opcode::kJal) ? inst.JumpTarget() : inst.BranchTarget();
     function_name = (symbol_index != nullptr)
                         ? symbol_index->LookupOrSynthesizeName(target_vram, SYMBOL_FUNC)
                         : absl::StrFormat("func_%08X", target_vram);
@@ -781,11 +783,16 @@ void ExpressionBuilder::LiftCallInstruction(
           break;
         }
       }
-      if (defines_f12 || function_name == "__n64_sqrtf" || function_name == "__n64_sqrt" ||
-          function_name == "sqrtf" || function_name == "fabsf" || function_name == "sqrt" ||
-          function_name == "fabs") {
+      int fp_param_count = 0;
+      if (function_fp_parameter_counts != nullptr) {
+        auto it = function_fp_parameter_counts->find(function_name);
+        if (it != function_fp_parameter_counts->end()) {
+          fp_param_count = it->second;
+        }
+      }
+      if (defines_f12 || fp_param_count >= 1) {
         call_arguments.push_back(LiftedExpression::Variable("f12"));
-        if (defines_f14) {
+        if (defines_f14 || fp_param_count >= 2) {
           call_arguments.push_back(LiftedExpression::Variable("f14"));
         }
       }
@@ -794,14 +801,8 @@ void ExpressionBuilder::LiftCallInstruction(
 
   bool returns_f0 = false;
   bool returns_v0 = false;
-  if (function_name == "sqrt" || function_name == "fabs") {
-    returns_f0 = true;
-    f0_is_double = true;
-  } else if (function_name == "__n64_sqrtf" || function_name == "__n64_sqrt" ||
-             function_name == "sqrtf" || function_name == "fabsf") {
-    returns_f0 = true;
-  } else if (inst.opcode == Opcode::kJal && functions_returning_v0 != nullptr &&
-             functions_returning_f0 != nullptr) {
+  if (inst.opcode == Opcode::kJal && functions_returning_v0 != nullptr &&
+      functions_returning_f0 != nullptr) {
     if (functions_returning_f0->contains(function_name)) {
       returns_f0 = true;
     } else if (functions_returning_v0->contains(function_name)) {
@@ -1044,6 +1045,26 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   };
   std::unique_ptr<PendingUnalignedAccess> pending_lwl;
   std::unique_ptr<PendingUnalignedAccess> pending_swl;
+
+  auto flush_pending_lwl = [&]() {
+    if (pending_lwl == nullptr) return;
+    LiftedStatement statement;
+    statement.kind = StatementKind::kAssignment;
+    statement.destination_variable = RegisterVarName(pending_lwl->rt);
+    if (pending_lwl->rs == Register::kSp) {
+      if (sp_address_taken) {
+        statement.expression = LiftedExpression::Load("s32", make_sp_addr(pending_lwl->offset));
+      } else {
+        statement.expression = LiftedExpression::Variable(StackVarName(pending_lwl->offset));
+      }
+    } else {
+      statement.expression =
+          LiftedExpression::Load("s32", make_reg_offset_expr(pending_lwl->rs, pending_lwl->offset));
+    }
+    statements.push_back(std::move(statement));
+    pending_lwl = nullptr;
+  };
+
   absl::flat_hash_set<int32_t> local_stack_stores;
   if (function_stack_stores != nullptr) {
     local_stack_stores = *function_stack_stores;
@@ -1073,6 +1094,22 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
   for (size_t i = 0; i < loop_end; ++i) {
     const auto& inst = instructions_to_process[i];
+
+    if (pending_lwl != nullptr && inst.opcode != Opcode::kLwr) {
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      bool touches_rt = false;
+      for (Register r : ud.gpr_uses) {
+        if (r == pending_lwl->rt) touches_rt = true;
+      }
+      for (Register r : ud.gpr_defs) {
+        if (r == pending_lwl->rt) touches_rt = true;
+      }
+      if (touches_rt || inst.opcode == Opcode::kLwl || inst.IsBranch() ||
+          inst.opcode == Opcode::kJ || inst.opcode == Opcode::kJr || inst.opcode == Opcode::kJal ||
+          inst.opcode == Opcode::kJalr) {
+        flush_pending_lwl();
+      }
+    }
 
     if (inst.opcode != Opcode::kMtc1) {
       RegisterUseDef ud = GetInstructionUseDef(inst);
@@ -1216,6 +1253,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     switch (inst.opcode) {
       case Opcode::kAddu:
       case Opcode::kAdd:
+      case Opcode::kDaddu:
+      case Opcode::kDadd:
         if (has_frame_pointer && inst.rd == Register::kFp &&
             ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
              (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
@@ -1245,6 +1284,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kSubu:
       case Opcode::kSub:
+      case Opcode::kDsubu:
+      case Opcode::kDsub:
         if (inst.rd.has_value() && *inst.rd != Register::kZero && *inst.rd != Register::kSp &&
             (!has_frame_pointer || *inst.rd != Register::kFp)) {
           LiftedStatement statement;
@@ -1262,6 +1303,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kAddiu:
       case Opcode::kAddi:
+      case Opcode::kDaddiu:
+      case Opcode::kDaddi:
         if (has_frame_pointer && inst.rt == Register::kFp && inst.rs == Register::kSp &&
             inst.immediate == 0) {
           break;
@@ -1470,6 +1513,86 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.expression =
               LiftedExpression::Binary(">>", LiftRegisterOrConstant(*inst.rt, tracker),
                                        LiftRegisterOrConstant(*inst.rs, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDsll:
+      case Opcode::kDsll32:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          uint8_t sa = inst.shift_amount + (inst.opcode == Opcode::kDsll32 ? 32 : 0);
+          statement.expression = LiftedExpression::Binary(
+              "<<", LiftRegisterOrConstant(*inst.rt, tracker), LiftedExpression::Integer(sa));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDsrl:
+      case Opcode::kDsrl32:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          uint8_t sa = inst.shift_amount + (inst.opcode == Opcode::kDsrl32 ? 32 : 0);
+          statement.expression = LiftedExpression::Binary(
+              ">>", LiftedExpression::Unary("(u64)", LiftRegisterOrConstant(*inst.rt, tracker)),
+              LiftedExpression::Integer(sa));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDsra:
+      case Opcode::kDsra32:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          uint8_t sa = inst.shift_amount + (inst.opcode == Opcode::kDsra32 ? 32 : 0);
+          statement.expression = LiftedExpression::Binary(
+              ">>", LiftedExpression::Unary("(s64)", LiftRegisterOrConstant(*inst.rt, tracker)),
+              LiftedExpression::Integer(sa));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDsllv:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value() &&
+            inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression =
+              LiftedExpression::Binary("<<", LiftRegisterOrConstant(*inst.rt, tracker),
+                                       LiftRegisterOrConstant(*inst.rs, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDsrlv:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value() &&
+            inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression = LiftedExpression::Binary(
+              ">>", LiftedExpression::Unary("(u64)", LiftRegisterOrConstant(*inst.rt, tracker)),
+              LiftRegisterOrConstant(*inst.rs, tracker));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kDsrav:
+        if (inst.rd.has_value() && *inst.rd != Register::kZero && inst.rt.has_value() &&
+            inst.rs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = RegisterVarName(*inst.rd);
+          statement.expression = LiftedExpression::Binary(
+              ">>", LiftedExpression::Unary("(s64)", LiftRegisterOrConstant(*inst.rt, tracker)),
+              LiftRegisterOrConstant(*inst.rs, tracker));
           statements.push_back(std::move(statement));
         }
         break;
@@ -1797,7 +1920,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kLd:
+      case Opcode::kLld:
       case Opcode::kLw:
+      case Opcode::kLwu:
       case Opcode::kLh:
       case Opcode::kLb:
       case Opcode::kLhu:
@@ -1805,8 +1930,10 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
             (!has_frame_pointer || *inst.rt != Register::kFp) && inst.rs.has_value()) {
           const char* load_type = "s32";
-          if (inst.opcode == Opcode::kLd) {
+          if (inst.opcode == Opcode::kLd || inst.opcode == Opcode::kLld) {
             load_type = "s64";
+          } else if (inst.opcode == Opcode::kLwu) {
+            load_type = "u32";
           } else if (inst.opcode == Opcode::kLh) {
             load_type = "s16";
           } else if (inst.opcode == Opcode::kLhu) {
@@ -1944,6 +2071,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       case Opcode::kLwl:
         if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
             (!has_frame_pointer || *inst.rt != Register::kFp) && inst.rs.has_value()) {
+          flush_pending_lwl();
           pending_lwl = std::make_unique<PendingUnalignedAccess>();
           pending_lwl->rt = *inst.rt;
           pending_lwl->rs =
@@ -1958,10 +2086,13 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           int16_t offset = inst.immediate;
           Register base_reg =
               (has_frame_pointer && *inst.rs == Register::kFp) ? Register::kSp : *inst.rs;
-          if (pending_lwl != nullptr && pending_lwl->rt == *inst.rt &&
-              pending_lwl->rs == base_reg) {
-            offset = pending_lwl->offset;
-            pending_lwl = nullptr;
+          if (pending_lwl != nullptr) {
+            if (pending_lwl->rt == *inst.rt && pending_lwl->rs == base_reg) {
+              offset = pending_lwl->offset;
+              pending_lwl = nullptr;
+            } else {
+              flush_pending_lwl();
+            }
           }
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
@@ -1981,6 +2112,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kSd:
+      case Opcode::kScd:
       case Opcode::kSw:
       case Opcode::kSh:
       case Opcode::kSb:
@@ -2001,7 +2133,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             }
           }
           const char* store_type = "s32";
-          if (inst.opcode == Opcode::kSd) {
+          if (inst.opcode == Opcode::kSd || inst.opcode == Opcode::kScd) {
             store_type = "s64";
           } else if (inst.opcode == Opcode::kSh) {
             store_type = "s16";
@@ -2121,6 +2253,10 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kJal:
       case Opcode::kJalr:
+      case Opcode::kBltzal:
+      case Opcode::kBgezal:
+      case Opcode::kBltzall:
+      case Opcode::kBgezall:
         LiftCallInstruction(inst, i, instructions_to_process, symbol_index,
                             function_parameter_counts, function_fp_parameter_counts,
                             functions_returning_v0, functions_returning_f0, tracker, statements,
@@ -2575,6 +2711,58 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kCvtWS:
+      case Opcode::kCvtWD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kStore;
+          statement.store_type = "s32";
+          statement.destination_address = LiftedExpression::Unary(
+              "&", LiftedExpression::Variable(FpRegisterVarName(*inst.fd, /*is_double=*/false)));
+          bool src_is_double = (inst.opcode == Opcode::kCvtWD);
+          statement.expression =
+              LiftedExpression::Unary("(s32)", LiftFpRegister(*inst.fs, src_is_double));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCvtLS:
+      case Opcode::kCvtLD:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kStore;
+          statement.store_type = "s64";
+          statement.destination_address = LiftedExpression::Unary(
+              "&", LiftedExpression::Variable(FpRegisterVarName(*inst.fd, /*is_double=*/true)));
+          bool src_is_double = (inst.opcode == Opcode::kCvtLD);
+          statement.expression =
+              LiftedExpression::Unary("(s64)", LiftFpRegister(*inst.fs, src_is_double));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCvtSL:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd, /*is_double=*/false);
+          statement.expression = LiftedExpression::Unary(
+              "(f32)*(s64*)&", LiftFpRegister(*inst.fs, /*is_double=*/true));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
+      case Opcode::kCvtDL:
+        if (inst.fd.has_value() && inst.fs.has_value()) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = FpRegisterVarName(*inst.fd, /*is_double=*/true);
+          statement.expression = LiftedExpression::Unary(
+              "(f64)*(s64*)&", LiftFpRegister(*inst.fs, /*is_double=*/true));
+          statements.push_back(std::move(statement));
+        }
+        break;
+
       case Opcode::kTruncWS:
       case Opcode::kTruncWD:
         if (inst.fd.has_value() && inst.fs.has_value()) {
@@ -2662,13 +2850,35 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kCFS:
+      case Opcode::kCSfS:
+      case Opcode::kCFD:
+      case Opcode::kCSfD: {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = "fcond";
+        statement.expression = LiftedExpression::Integer(0);
+        statements.push_back(std::move(statement));
+        break;
+      }
+
       case Opcode::kCEqS:
+      case Opcode::kCSeqS:
       case Opcode::kCLtS:
+      case Opcode::kCOltS:
+      case Opcode::kCNgeS:
       case Opcode::kCLeS:
+      case Opcode::kCOleS:
+      case Opcode::kCNgtS:
         if (inst.fs.has_value() && inst.ft.has_value()) {
           const char* op = "==";
-          if (inst.opcode == Opcode::kCLtS) op = "<";
-          if (inst.opcode == Opcode::kCLeS) op = "<=";
+          if (inst.opcode == Opcode::kCLtS || inst.opcode == Opcode::kCOltS ||
+              inst.opcode == Opcode::kCNgeS) {
+            op = "<";
+          } else if (inst.opcode == Opcode::kCLeS || inst.opcode == Opcode::kCOleS ||
+                     inst.opcode == Opcode::kCNgtS) {
+            op = "<=";
+          }
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = "fcond";
@@ -2680,12 +2890,22 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       case Opcode::kCEqD:
+      case Opcode::kCSeqD:
       case Opcode::kCLtD:
+      case Opcode::kCOltD:
+      case Opcode::kCNgeD:
       case Opcode::kCLeD:
+      case Opcode::kCOleD:
+      case Opcode::kCNgtD:
         if (inst.fs.has_value() && inst.ft.has_value()) {
           const char* op = "==";
-          if (inst.opcode == Opcode::kCLtD) op = "<";
-          if (inst.opcode == Opcode::kCLeD) op = "<=";
+          if (inst.opcode == Opcode::kCLtD || inst.opcode == Opcode::kCOltD ||
+              inst.opcode == Opcode::kCNgeD) {
+            op = "<";
+          } else if (inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kCOleD ||
+                     inst.opcode == Opcode::kCNgtD) {
+            op = "<=";
+          }
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = "fcond";
@@ -2697,11 +2917,21 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         break;
 
       default:
+        if (inst.opcode != Opcode::kJ && !inst.IsBranch() && inst.opcode != Opcode::kBreak &&
+            inst.opcode != Opcode::kSync) {
+          LiftedStatement statement;
+          statement.kind = StatementKind::kUnhandled;
+          statement.expression = LiftedExpression::Variable(
+              absl::StrFormat("__UNHANDLED_INSTRUCTION_0x%08X__", inst.raw_word));
+          statements.push_back(std::move(statement));
+        }
         break;
     }
 
     tracker.Step(inst);
   }
+
+  flush_pending_lwl();
 
   if (pending_swl != nullptr) {
     LiftedStatement statement;
@@ -3144,6 +3374,8 @@ bool ExpressionBuilder::DetermineReturnsV0(
     return false;
   }
 
+  auto uninit_callee_saved = DetectUninitializedCalleeSavedRegisters(cfg);
+
   auto eval_seq = [&](absl::Span<const Instruction> instructions) -> int {
     int last_def = -1;
     int last_call = -1;
@@ -3210,18 +3442,17 @@ bool ExpressionBuilder::DetermineReturnsV0(
       if (non_branch_used_after_last_def) {
         return -1;
       }
+      RegisterUseDef def_ud = GetInstructionUseDef(instructions[last_def]);
+      for (Register u : def_ud.gpr_uses) {
+        if (uninit_callee_saved.contains(u)) {
+          return -1;
+        }
+      }
       Opcode op = instructions[last_def].opcode;
       bool is_comparison = (op == Opcode::kSlt || op == Opcode::kSlti || op == Opcode::kSltu ||
                             op == Opcode::kSltiu);
       if (branch_used_after_last_def) {
-        if (is_comparison) {
-          return -1;
-        }
-        for (const auto& inst : instructions) {
-          if (inst.IsBranch() && inst.BranchTarget() <= inst.vram) {
-            return -1;
-          }
-        }
+        return -1;
       }
       if (instructions.size() > 1 && instructions[instructions.size() - 2].IsBranch() &&
           is_comparison) {
@@ -3654,6 +3885,87 @@ bool ExpressionBuilder::DetermineReturnsF0Double(const ControlFlowGraph& cfg) {
     }
   }
   return false;
+}
+
+absl::flat_hash_set<Register> ExpressionBuilder::DetectUninitializedCalleeSavedRegisters(
+    const ControlFlowGraph& cfg) {
+  absl::flat_hash_set<Register> uninit;
+  if (cfg.Blocks().empty()) return uninit;
+
+  auto is_callee_saved = [](Register r) {
+    int idx = static_cast<int>(r);
+    return (idx >= 16 && idx <= 23) || idx == 30;
+  };
+
+  uint32_t init_def_mask = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 28) |
+                           (1u << 29) | (1u << 31);
+
+  absl::flat_hash_map<uint32_t, size_t> id_to_index;
+  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+    id_to_index[cfg.Blocks()[i].id] = i;
+  }
+
+  std::vector<std::vector<size_t>> predecessors(cfg.Blocks().size());
+  for (size_t u = 0; u < cfg.Blocks().size(); ++u) {
+    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
+      auto it = id_to_index.find(succ_id);
+      if (it != id_to_index.end()) {
+        predecessors[it->second].push_back(u);
+      }
+    }
+  }
+
+  std::vector<uint32_t> in_defs(cfg.Blocks().size(), 0);
+  std::vector<uint32_t> out_defs(cfg.Blocks().size(), 0);
+  in_defs[0] = init_def_mask;
+
+  auto is_stack_spill = [](const Instruction& inst, Register r) {
+    if (inst.opcode != Opcode::kSw && inst.opcode != Opcode::kSd) return false;
+    return (inst.rs == Register::kSp || inst.rs == Register::kFp) && inst.rt == r;
+  };
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+      uint32_t curr_in = 0;
+      if (b == 0) {
+        curr_in = init_def_mask;
+      } else if (!predecessors[b].empty()) {
+        curr_in = 0xFFFFFFFF;
+        for (size_t p : predecessors[b]) {
+          curr_in &= out_defs[p];
+        }
+      }
+      if (curr_in != in_defs[b]) {
+        in_defs[b] = curr_in;
+        changed = true;
+      }
+
+      uint32_t defs = in_defs[b];
+      for (const auto& inst : cfg.Blocks()[b].instructions) {
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register u : ud.gpr_uses) {
+          int u_idx = static_cast<int>(u);
+          if (is_callee_saved(u) && !is_stack_spill(inst, u)) {
+            if ((defs & (1u << u_idx)) == 0) {
+              uninit.insert(u);
+            }
+          }
+        }
+        for (Register d : ud.gpr_defs) {
+          defs |= (1u << static_cast<int>(d));
+        }
+      }
+
+      if (defs != out_defs[b]) {
+        out_defs[b] = defs;
+        changed = true;
+      }
+    }
+  }
+
+  return uninit;
 }
 
 absl::flat_hash_map<uint32_t, CallReturnInfo> ExpressionBuilder::ComputeCallReturnInfo(

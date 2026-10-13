@@ -70,6 +70,8 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   if (target_insts.ok()) {
     auto target_cfg = ControlFlowGraph::Build(*target_insts);
     if (target_cfg.ok()) {
+      func_options.uninitialized_callee_saved_registers =
+          ExpressionBuilder::DetectUninitializedCalleeSavedRegisters(*target_cfg);
       bool target_returns_f0 = ExpressionBuilder::DetermineReturnsF0(*target_cfg);
       bool target_returns_v0 = ExpressionBuilder::DetermineReturnsV0(*target_cfg);
 

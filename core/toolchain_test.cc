@@ -169,8 +169,8 @@ TEST(ToolchainTest, BuildsLdArgsCorrectly) {
   ASSERT_TRUE(toolchain_or.ok()) << toolchain_or.status();
 
   auto args = toolchain_or->BuildLdArgs({}, "build/game.ld", "build/game.elf");
-  EXPECT_THAT(args,
-              ElementsAre("-T", "build/game.ld", "--no-check-sections", "-o", "build/game.elf"));
+  EXPECT_THAT(args, ElementsAre("-T", "build/game.ld", "--no-check-sections", "--emit-relocs", "-o",
+                                "build/game.elf"));
 }
 
 }  // namespace

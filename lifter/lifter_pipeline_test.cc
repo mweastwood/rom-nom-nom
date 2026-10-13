@@ -437,6 +437,12 @@ segments {
     rom_start: 0x2000
     vram: 0x80021000
   }
+  subsegments {
+    name: "mod_bss"
+    type: SUBSEGMENT_BSS
+    vram: 0x80030000
+  }
+  bss_size: 0x100
 }
 )";
   auto cfg_or = ParseSplitConfig(proto_cfg);
@@ -451,6 +457,26 @@ entries {
 entries {
   name: "AlphaData"
   address: 0x80021000
+  type: SYMBOL_DATA
+}
+entries {
+  name: "AlphaTable"
+  address: 0x80021010
+  type: SYMBOL_DATA
+}
+entries {
+  name: "BssBase"
+  address: 0x80030000
+  type: SYMBOL_DATA
+}
+entries {
+  name: "BssCounter"
+  address: 0x80030020
+  type: SYMBOL_DATA
+}
+entries {
+  name: "FrameBuffer"
+  address: 0x80400000
   type: SYMBOL_DATA
 }
 )";
@@ -542,8 +568,25 @@ entries {
   // AlphaFunc
   EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(func_80020018 = AlphaFunc + 0x18);"));
 
-  // D_80021004 is inside mod_data (AlphaData at 0x80021000), so it resolves relative to AlphaData
-  EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(D_80021004 = AlphaData + 0x4);"));
+  // D_80021004 is inside mod_data (AlphaData at 0x80021000), so it is anchored to AlphaData.
+  // Data-relative symbols are plain assignments so they override absolute PROVIDEs.
+  EXPECT_THAT(symbols_content, HasSubstr("D_80021004 = AlphaData + 0x4;"));
+  EXPECT_THAT(symbols_content, Not(HasSubstr("PROVIDE(D_80021004")));
+
+  // Named data symbols inside a data blob are re-anchored even though symbols.ld PROVIDEs them
+  // at their original absolute address.
+  EXPECT_THAT(symbols_content, HasSubstr("AlphaTable = AlphaData + 0x10;"));
+
+  // Named symbols inside BSS are anchored to the BSS subsegment's base label.
+  EXPECT_THAT(symbols_content, HasSubstr("BssCounter = BssBase + 0x20;"));
+
+  // Base labels are defined by their own data/BSS objects and must not be reassigned.
+  EXPECT_THAT(symbols_content, Not(HasSubstr("AlphaData = ")));
+  EXPECT_THAT(symbols_content, Not(HasSubstr("BssBase = ")));
+
+  // Symbols outside every data/BSS blob (e.g. fixed hardware/framebuffer addresses) stay absolute
+  // and are left to symbols.ld.
+  EXPECT_THAT(symbols_content, Not(HasSubstr("FrameBuffer")));
 
   // func_80054320 is outside any known function, so it resolves to its absolute address
   EXPECT_THAT(symbols_content, HasSubstr("PROVIDE(func_80054320 = 0x80054320);"));

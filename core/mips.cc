@@ -70,6 +70,8 @@ bool Instruction::IsBranch() const {
     case Opcode::kBgtzl:
     case Opcode::kBltzl:
     case Opcode::kBgezl:
+    case Opcode::kBltzall:
+    case Opcode::kBgezall:
     case Opcode::kBc1t:
     case Opcode::kBc1f:
     case Opcode::kBc1tl:
@@ -88,6 +90,8 @@ bool Instruction::IsBranchLikely() const {
     case Opcode::kBgtzl:
     case Opcode::kBltzl:
     case Opcode::kBgezl:
+    case Opcode::kBltzall:
+    case Opcode::kBgezall:
     case Opcode::kBc1tl:
     case Opcode::kBc1fl:
       return true;
@@ -100,7 +104,8 @@ bool Instruction::IsUnconditionalBranch() const {
   if (opcode == Opcode::kBeq || opcode == Opcode::kBeql) {
     return rs.has_value() && rt.has_value() && *rs == *rt;
   }
-  if (opcode == Opcode::kBgez || opcode == Opcode::kBgezl) {
+  if (opcode == Opcode::kBgez || opcode == Opcode::kBgezl || opcode == Opcode::kBgezal ||
+      opcode == Opcode::kBgezall) {
     return rs.has_value() && *rs == Register::kZero;
   }
   if (opcode == Opcode::kBlez || opcode == Opcode::kBlezl) {
@@ -127,6 +132,8 @@ bool Instruction::IsCall() const {
     case Opcode::kJalr:
     case Opcode::kBltzal:
     case Opcode::kBgezal:
+    case Opcode::kBltzall:
+    case Opcode::kBgezall:
       return true;
     default:
       return false;
@@ -150,8 +157,11 @@ bool Instruction::IsLoad() const {
     case Opcode::kLw:
     case Opcode::kLwl:
     case Opcode::kLwr:
+    case Opcode::kLwu:
     case Opcode::kLld:
     case Opcode::kLd:
+    case Opcode::kLdl:
+    case Opcode::kLdr:
     case Opcode::kLwc1:
     case Opcode::kLdc1:
       return true;
@@ -169,6 +179,8 @@ bool Instruction::IsStore() const {
     case Opcode::kSwr:
     case Opcode::kScd:
     case Opcode::kSd:
+    case Opcode::kSdl:
+    case Opcode::kSdr:
     case Opcode::kSwc1:
     case Opcode::kSdc1:
       return true;
@@ -261,6 +273,12 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("srlv  %s, %s, %s", reg_str(rd), reg_str(rt), reg_str(rs));
     case Opcode::kSrav:
       return absl::StrFormat("srav  %s, %s, %s", reg_str(rd), reg_str(rt), reg_str(rs));
+    case Opcode::kDsllv:
+      return absl::StrFormat("dsllv %s, %s, %s", reg_str(rd), reg_str(rt), reg_str(rs));
+    case Opcode::kDsrlv:
+      return absl::StrFormat("dsrlv %s, %s, %s", reg_str(rd), reg_str(rt), reg_str(rs));
+    case Opcode::kDsrav:
+      return absl::StrFormat("dsrav %s, %s, %s", reg_str(rd), reg_str(rt), reg_str(rs));
 
     // Multiplies / Divides: op rs, rt
     case Opcode::kMult:
@@ -271,6 +289,14 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("div   $zero, %s, %s", reg_str(rs), reg_str(rt));
     case Opcode::kDivu:
       return absl::StrFormat("divu  $zero, %s, %s", reg_str(rs), reg_str(rt));
+    case Opcode::kDmult:
+      return absl::StrFormat("dmult %s, %s", reg_str(rs), reg_str(rt));
+    case Opcode::kDmultu:
+      return absl::StrFormat("dmultu %s, %s", reg_str(rs), reg_str(rt));
+    case Opcode::kDdiv:
+      return absl::StrFormat("ddiv  $zero, %s, %s", reg_str(rs), reg_str(rt));
+    case Opcode::kDdivu:
+      return absl::StrFormat("ddivu $zero, %s, %s", reg_str(rs), reg_str(rt));
 
     // HI/LO moves
     case Opcode::kMfhi:
@@ -328,12 +354,20 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("bltzal %s, .L%08X", reg_str(rs), BranchTarget());
     case Opcode::kBgezal:
       return absl::StrFormat("bgezal %s, .L%08X", reg_str(rs), BranchTarget());
+    case Opcode::kBltzall:
+      return absl::StrFormat("bltzall %s, .L%08X", reg_str(rs), BranchTarget());
+    case Opcode::kBgezall:
+      return absl::StrFormat("bgezall %s, .L%08X", reg_str(rs), BranchTarget());
 
     // I-Type Arithmetic: op rt, rs, imm
     case Opcode::kAddi:
       return absl::StrFormat("addi  %s, %s, %d", reg_str(rt), reg_str(rs), immediate);
     case Opcode::kAddiu:
       return absl::StrFormat("addiu %s, %s, %d", reg_str(rt), reg_str(rs), immediate);
+    case Opcode::kDaddi:
+      return absl::StrFormat("daddi %s, %s, %d", reg_str(rt), reg_str(rs), immediate);
+    case Opcode::kDaddiu:
+      return absl::StrFormat("daddiu %s, %s, %d", reg_str(rt), reg_str(rs), immediate);
     case Opcode::kSlti:
       return absl::StrFormat("slti  %s, %s, %d", reg_str(rt), reg_str(rs), immediate);
     case Opcode::kSltiu:
@@ -365,10 +399,16 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("lwl   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
     case Opcode::kLwr:
       return absl::StrFormat("lwr   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
+    case Opcode::kLwu:
+      return absl::StrFormat("lwu   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
     case Opcode::kLd:
       return absl::StrFormat("ld    %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
     case Opcode::kLld:
       return absl::StrFormat("lld   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
+    case Opcode::kLdl:
+      return absl::StrFormat("ldl   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
+    case Opcode::kLdr:
+      return absl::StrFormat("ldr   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
 
     // Memory Stores: op rt, offset(rs)
     case Opcode::kSb:
@@ -383,6 +423,10 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("swr   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
     case Opcode::kSd:
       return absl::StrFormat("sd    %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
+    case Opcode::kSdl:
+      return absl::StrFormat("sdl   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
+    case Opcode::kSdr:
+      return absl::StrFormat("sdr   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
     case Opcode::kScd:
       return absl::StrFormat("scd   %s, %d(%s)", reg_str(rt), immediate, reg_str(rs));
 
@@ -453,6 +497,18 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("cvt.s.w %s, %s", fp_reg_str(fd), fp_reg_str(fs));
     case Opcode::kCvtDW:
       return absl::StrFormat("cvt.d.w %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCvtWS:
+      return absl::StrFormat("cvt.w.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCvtWD:
+      return absl::StrFormat("cvt.w.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCvtLS:
+      return absl::StrFormat("cvt.l.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCvtLD:
+      return absl::StrFormat("cvt.l.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCvtSL:
+      return absl::StrFormat("cvt.s.l %s, %s", fp_reg_str(fd), fp_reg_str(fs));
+    case Opcode::kCvtDL:
+      return absl::StrFormat("cvt.d.l %s, %s", fp_reg_str(fd), fp_reg_str(fs));
     case Opcode::kTruncWS:
       return absl::StrFormat("trunc.w.s %s, %s", fp_reg_str(fd), fp_reg_str(fs));
     case Opcode::kTruncWD:
@@ -471,18 +527,70 @@ std::string Instruction::Disassemble() const {
       return absl::StrFormat("floor.w.d %s, %s", fp_reg_str(fd), fp_reg_str(fs));
 
     // FPU Comparisons
+    case Opcode::kCFS:
+      return absl::StrFormat("c.f.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUnS:
+      return absl::StrFormat("c.un.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
     case Opcode::kCEqS:
       return absl::StrFormat("c.eq.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUeqS:
+      return absl::StrFormat("c.ueq.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCOltS:
+      return absl::StrFormat("c.olt.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUltS:
+      return absl::StrFormat("c.ult.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCOleS:
+      return absl::StrFormat("c.ole.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUleS:
+      return absl::StrFormat("c.ule.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCSfS:
+      return absl::StrFormat("c.sf.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNgleS:
+      return absl::StrFormat("c.ngle.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCSeqS:
+      return absl::StrFormat("c.seq.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNglS:
+      return absl::StrFormat("c.ngl.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
     case Opcode::kCLtS:
       return absl::StrFormat("c.lt.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNgeS:
+      return absl::StrFormat("c.nge.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
     case Opcode::kCLeS:
       return absl::StrFormat("c.le.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNgtS:
+      return absl::StrFormat("c.ngt.s %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCFD:
+      return absl::StrFormat("c.f.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUnD:
+      return absl::StrFormat("c.un.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
     case Opcode::kCEqD:
       return absl::StrFormat("c.eq.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUeqD:
+      return absl::StrFormat("c.ueq.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCOltD:
+      return absl::StrFormat("c.olt.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUltD:
+      return absl::StrFormat("c.ult.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCOleD:
+      return absl::StrFormat("c.ole.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCUleD:
+      return absl::StrFormat("c.ule.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCSfD:
+      return absl::StrFormat("c.sf.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNgleD:
+      return absl::StrFormat("c.ngle.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCSeqD:
+      return absl::StrFormat("c.seq.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNglD:
+      return absl::StrFormat("c.ngl.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
     case Opcode::kCLtD:
       return absl::StrFormat("c.lt.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNgeD:
+      return absl::StrFormat("c.nge.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
     case Opcode::kCLeD:
       return absl::StrFormat("c.le.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
+    case Opcode::kCNgtD:
+      return absl::StrFormat("c.ngt.d %s, %s", fp_reg_str(fs), fp_reg_str(ft));
 
     // FPU Branches
     case Opcode::kBc1t:
@@ -589,6 +697,15 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
       case 0x13:
         inst.opcode = Opcode::kMtlo;
         break;
+      case 0x14:
+        inst.opcode = Opcode::kDsllv;
+        break;
+      case 0x16:
+        inst.opcode = Opcode::kDsrlv;
+        break;
+      case 0x17:
+        inst.opcode = Opcode::kDsrav;
+        break;
       case 0x18:
         inst.opcode = Opcode::kMult;
         break;
@@ -600,6 +717,18 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
         break;
       case 0x1B:
         inst.opcode = Opcode::kDivu;
+        break;
+      case 0x1C:
+        inst.opcode = Opcode::kDmult;
+        break;
+      case 0x1D:
+        inst.opcode = Opcode::kDmultu;
+        break;
+      case 0x1E:
+        inst.opcode = Opcode::kDdiv;
+        break;
+      case 0x1F:
+        inst.opcode = Opcode::kDdivu;
         break;
       case 0x20:
         inst.opcode = Opcode::kAdd;
@@ -689,6 +818,12 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
         break;
       case 0x11:
         inst.opcode = Opcode::kBgezal;
+        break;
+      case 0x12:
+        inst.opcode = Opcode::kBltzall;
+        break;
+      case 0x13:
+        inst.opcode = Opcode::kBgezall;
         break;
       default:
         inst.opcode = Opcode::kUnknown;
@@ -821,14 +956,59 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
         case 0x21:
           inst.opcode = Opcode::kCvtDS;
           break;
+        case 0x24:
+          inst.opcode = Opcode::kCvtWS;
+          break;
+        case 0x25:
+          inst.opcode = Opcode::kCvtLS;
+          break;
+        case 0x30:
+          inst.opcode = Opcode::kCFS;
+          break;
+        case 0x31:
+          inst.opcode = Opcode::kCUnS;
+          break;
         case 0x32:
           inst.opcode = Opcode::kCEqS;
+          break;
+        case 0x33:
+          inst.opcode = Opcode::kCUeqS;
+          break;
+        case 0x34:
+          inst.opcode = Opcode::kCOltS;
+          break;
+        case 0x35:
+          inst.opcode = Opcode::kCUltS;
+          break;
+        case 0x36:
+          inst.opcode = Opcode::kCOleS;
+          break;
+        case 0x37:
+          inst.opcode = Opcode::kCUleS;
+          break;
+        case 0x38:
+          inst.opcode = Opcode::kCSfS;
+          break;
+        case 0x39:
+          inst.opcode = Opcode::kCNgleS;
+          break;
+        case 0x3A:
+          inst.opcode = Opcode::kCSeqS;
+          break;
+        case 0x3B:
+          inst.opcode = Opcode::kCNglS;
           break;
         case 0x3C:
           inst.opcode = Opcode::kCLtS;
           break;
+        case 0x3D:
+          inst.opcode = Opcode::kCNgeS;
+          break;
         case 0x3E:
           inst.opcode = Opcode::kCLeS;
+          break;
+        case 0x3F:
+          inst.opcode = Opcode::kCNgtS;
           break;
         default:
           inst.opcode = Opcode::kUnknown;
@@ -879,14 +1059,59 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
         case 0x20:
           inst.opcode = Opcode::kCvtSD;
           break;
+        case 0x24:
+          inst.opcode = Opcode::kCvtWD;
+          break;
+        case 0x25:
+          inst.opcode = Opcode::kCvtLD;
+          break;
+        case 0x30:
+          inst.opcode = Opcode::kCFD;
+          break;
+        case 0x31:
+          inst.opcode = Opcode::kCUnD;
+          break;
         case 0x32:
           inst.opcode = Opcode::kCEqD;
+          break;
+        case 0x33:
+          inst.opcode = Opcode::kCUeqD;
+          break;
+        case 0x34:
+          inst.opcode = Opcode::kCOltD;
+          break;
+        case 0x35:
+          inst.opcode = Opcode::kCUltD;
+          break;
+        case 0x36:
+          inst.opcode = Opcode::kCOleD;
+          break;
+        case 0x37:
+          inst.opcode = Opcode::kCUleD;
+          break;
+        case 0x38:
+          inst.opcode = Opcode::kCSfD;
+          break;
+        case 0x39:
+          inst.opcode = Opcode::kCNgleD;
+          break;
+        case 0x3A:
+          inst.opcode = Opcode::kCSeqD;
+          break;
+        case 0x3B:
+          inst.opcode = Opcode::kCNglD;
           break;
         case 0x3C:
           inst.opcode = Opcode::kCLtD;
           break;
+        case 0x3D:
+          inst.opcode = Opcode::kCNgeD;
+          break;
         case 0x3E:
           inst.opcode = Opcode::kCLeD;
+          break;
+        case 0x3F:
+          inst.opcode = Opcode::kCNgtD;
           break;
         default:
           inst.opcode = Opcode::kUnknown;
@@ -903,6 +1128,22 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
           break;
         case 0x21:
           inst.opcode = Opcode::kCvtDW;
+          break;
+        default:
+          inst.opcode = Opcode::kUnknown;
+          break;
+      }
+      return inst;
+    }
+
+    // Longword to Float Ops: rs == 0x15
+    if (rs_val == 0x15) {
+      switch (funct) {
+        case 0x20:
+          inst.opcode = Opcode::kCvtSL;
+          break;
+        case 0x21:
+          inst.opcode = Opcode::kCvtDL;
           break;
         default:
           inst.opcode = Opcode::kUnknown;
@@ -975,6 +1216,18 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     case 0x17:
       inst.opcode = Opcode::kBgtzl;
       break;
+    case 0x18:
+      inst.opcode = Opcode::kDaddi;
+      break;
+    case 0x19:
+      inst.opcode = Opcode::kDaddiu;
+      break;
+    case 0x1A:
+      inst.opcode = Opcode::kLdl;
+      break;
+    case 0x1B:
+      inst.opcode = Opcode::kLdr;
+      break;
 
     case 0x20:
       inst.opcode = Opcode::kLb;
@@ -997,6 +1250,9 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
     case 0x26:
       inst.opcode = Opcode::kLwr;
       break;
+    case 0x27:
+      inst.opcode = Opcode::kLwu;
+      break;
 
     case 0x28:
       inst.opcode = Opcode::kSb;
@@ -1009,6 +1265,12 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
       break;
     case 0x2B:
       inst.opcode = Opcode::kSw;
+      break;
+    case 0x2C:
+      inst.opcode = Opcode::kSdl;
+      break;
+    case 0x2D:
+      inst.opcode = Opcode::kSdr;
       break;
     case 0x2E:
       inst.opcode = Opcode::kSwr;
@@ -1035,6 +1297,9 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
       inst.opcode = Opcode::kSwc1;
       inst.ft = ToFpRegister(rt_val);
       inst.rt.reset();
+      break;
+    case 0x3C:
+      inst.opcode = Opcode::kScd;
       break;
     case 0x3D:
       inst.opcode = Opcode::kSdc1;

@@ -137,6 +137,38 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "relocation_rebaser",
+    srcs = ["relocation_rebaser.cc"],
+    hdrs = ["relocation_rebaser.h"],
+    deps = [
+        ":differential_fuzzer",
+        "//core:endian",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "relocation_rebaser_test",
+    srcs = ["relocation_rebaser_test.cc"],
+    deps = [
+        ":relocation_rebaser",
+        "//core:endian",
+        "//splitter:config",
+        "//splitter:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "fuzzer",
     srcs = ["main.cc"],
@@ -144,6 +176,7 @@ cc_binary(
         ":candidate_symbol_map",
         ":differential_fuzzer",
         ":equivalence_runner",
+        ":relocation_rebaser",
         ":rom_function_scanner",
         "//differ:differ_pipeline",
         "//differ:target_extractor",

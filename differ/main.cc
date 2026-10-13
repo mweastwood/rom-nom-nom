@@ -28,6 +28,8 @@ ABSL_FLAG(std::string, candidate_rom, "",
 ABSL_FLAG(bool, watch, false, "Watch source file and automatically re-diff on save.");
 ABSL_FLAG(bool, color, true, "Enable ANSI color syntax highlighting.");
 ABSL_FLAG(int, column_width, 48, "Character width for each side-by-side assembly column.");
+ABSL_FLAG(bool, allow_code_shift, true,
+          "Allow code segment expansion/shift when asset segments match bit-exact.");
 
 namespace {
 
@@ -105,6 +107,7 @@ int main(int argc, char* argv[]) {
         .candidate_rom_path = candidate_rom_path,
         .config_path = config_path,
         .use_color = color,
+        .allow_code_shift = absl::GetFlag(FLAGS_allow_code_shift),
     });
 
     auto result_or = rom_differ.Diff();

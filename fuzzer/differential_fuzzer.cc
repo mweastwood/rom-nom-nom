@@ -13,21 +13,84 @@
 #include "absl/strings/str_format.h"
 
 namespace rom_nom_nom::fuzzer {
+namespace {
+
+bool CheckCalleeSavedRegisters(const CalleeSavedRegisters& target_init,
+                               const CalleeSavedRegisters& target_final,
+                               const CalleeSavedRegisters& cand_init,
+                               const CalleeSavedRegisters& cand_final,
+                               std::string* failure_reason) {
+  struct RegRef {
+    const char* name;
+    uint32_t CalleeSavedRegisters::*member;
+  };
+  static constexpr RegRef kRegs[] = {
+      {"s0", &CalleeSavedRegisters::s0}, {"s1", &CalleeSavedRegisters::s1},
+      {"s2", &CalleeSavedRegisters::s2}, {"s3", &CalleeSavedRegisters::s3},
+      {"s4", &CalleeSavedRegisters::s4}, {"s5", &CalleeSavedRegisters::s5},
+      {"s6", &CalleeSavedRegisters::s6}, {"s7", &CalleeSavedRegisters::s7},
+      {"gp", &CalleeSavedRegisters::gp}, {"sp", &CalleeSavedRegisters::sp},
+      {"fp", &CalleeSavedRegisters::fp},
+  };
+
+  std::string diffs;
+  for (const auto& reg : kRegs) {
+    uint32_t t_init = target_init.*(reg.member);
+    uint32_t t_final = target_final.*(reg.member);
+    uint32_t c_init = cand_init.*(reg.member);
+    uint32_t c_final = cand_final.*(reg.member);
+
+    // If target preserved this register, candidate must also preserve it.
+    if (t_init == t_final) {
+      if (c_init != c_final) {
+        absl::StrAppend(&diffs,
+                        absl::StrFormat(" %s: init=0x%x curr=0x%x", reg.name, c_init, c_final));
+      }
+    } else {
+      // Target did not preserve this register (e.g. hand-written asm trashing a callee-saved reg).
+      // Candidate is valid if it preserved it (standard ABI compliance) or matched target's final
+      // value.
+      if (c_init != c_final && c_final != t_final) {
+        absl::StrAppend(
+            &diffs, absl::StrFormat(" %s: target=0x%x cand=0x%x (neither preserved nor matched)",
+                                    reg.name, t_final, c_final));
+      }
+    }
+  }
+
+  if (!diffs.empty()) {
+    *failure_reason = absl::StrCat("Candidate code corrupted callee-saved registers:", diffs);
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
 
 void DifferentialFuzzer::SetupEmulator(MipsEmulator* emu, const FuzzTestCase& test_case) const {
   emu->SetRegister(Register::kSp, options_.initial_sp);
 
-  // Callee-saved register canary values (O32 ABI: s0-s7, gp, fp)
-  emu->SetRegister(Register::kS0, 0xCAFE0010);
-  emu->SetRegister(Register::kS1, 0xCAFE0011);
-  emu->SetRegister(Register::kS2, 0xCAFE0012);
-  emu->SetRegister(Register::kS3, 0xCAFE0013);
-  emu->SetRegister(Register::kS4, 0xCAFE0014);
-  emu->SetRegister(Register::kS5, 0xCAFE0015);
-  emu->SetRegister(Register::kS6, 0xCAFE0016);
-  emu->SetRegister(Register::kS7, 0xCAFE0017);
-  emu->SetRegister(Register::kGp, 0xCAFE001C);
-  emu->SetRegister(Register::kFp, 0xCAFE001E);
+  // Callee-saved register canary values (O32 ABI: s0-s7, gp, fp).
+  // If a register is used before definition in target, it represents an uninitialized
+  // variable, so initialize with 0 to match C semantics.
+  auto set_callee_saved = [&](Register reg, uint32_t canary) {
+    if (options_.uninitialized_callee_saved_registers.contains(reg)) {
+      emu->SetRegister(reg, 0);
+    } else {
+      emu->SetRegister(reg, canary);
+    }
+  };
+
+  set_callee_saved(Register::kS0, 0xCAFE0010);
+  set_callee_saved(Register::kS1, 0xCAFE0011);
+  set_callee_saved(Register::kS2, 0xCAFE0012);
+  set_callee_saved(Register::kS3, 0xCAFE0013);
+  set_callee_saved(Register::kS4, 0xCAFE0014);
+  set_callee_saved(Register::kS5, 0xCAFE0015);
+  set_callee_saved(Register::kS6, 0xCAFE0016);
+  set_callee_saved(Register::kS7, 0xCAFE0017);
+  set_callee_saved(Register::kGp, 0xCAFE001C);
+  set_callee_saved(Register::kFp, 0xCAFE001E);
 
   // Reset caller-saved temporary registers to 0 for cross-vector determinism
   emu->SetRegister(Register::kAt, 0);
@@ -143,61 +206,11 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
     // If both trapped or halted with a non-return status, consider equivalent in error.
     comp->result = EquivalenceResult::kEquivalent;
   } else if (options_.check_callee_saved &&
-             (target_emu_.GetCalleeSavedRegisters() == target_initial_saved) &&
-             !(candidate_emu_.GetCalleeSavedRegisters() == candidate_initial_saved)) {
+             !CheckCalleeSavedRegisters(target_initial_saved, target_emu_.GetCalleeSavedRegisters(),
+                                        candidate_initial_saved,
+                                        candidate_emu_.GetCalleeSavedRegisters(),
+                                        &comp->failure_reason)) {
     comp->result = EquivalenceResult::kCalleeSavedMismatch;
-    auto c_saved = candidate_emu_.GetCalleeSavedRegisters();
-    std::string diff_regs;
-    if (c_saved.s0 != candidate_initial_saved.s0) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s0: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s0, c_saved.s0));
-    }
-    if (c_saved.s1 != candidate_initial_saved.s1) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s1: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s1, c_saved.s1));
-    }
-    if (c_saved.s2 != candidate_initial_saved.s2) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s2: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s2, c_saved.s2));
-    }
-    if (c_saved.s3 != candidate_initial_saved.s3) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s3: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s3, c_saved.s3));
-    }
-    if (c_saved.s4 != candidate_initial_saved.s4) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s4: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s4, c_saved.s4));
-    }
-    if (c_saved.s5 != candidate_initial_saved.s5) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s5: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s5, c_saved.s5));
-    }
-    if (c_saved.s6 != candidate_initial_saved.s6) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s6: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s6, c_saved.s6));
-    }
-    if (c_saved.s7 != candidate_initial_saved.s7) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" s7: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.s7, c_saved.s7));
-    }
-    if (c_saved.gp != candidate_initial_saved.gp) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" gp: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.gp, c_saved.gp));
-    }
-    if (c_saved.sp != candidate_initial_saved.sp) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" sp: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.sp, c_saved.sp));
-    }
-    if (c_saved.fp != candidate_initial_saved.fp) {
-      absl::StrAppend(&diff_regs, absl::StrFormat(" fp: init=0x%x curr=0x%x",
-                                                  candidate_initial_saved.fp, c_saved.fp));
-    }
-    comp->failure_reason =
-        absl::StrCat("Candidate code corrupted callee-saved registers:", diff_regs);
-  } else if (options_.check_callee_saved &&
-             !(target_emu_.GetCalleeSavedRegisters() == target_initial_saved)) {
-    comp->result = EquivalenceResult::kCalleeSavedMismatch;
-    comp->failure_reason = "Target code corrupted callee-saved registers";
   } else if (options_.check_v0 && comp->target_result.v0 != cand_v0) {
     comp->result = EquivalenceResult::kReturnValueMismatch;
     comp->failure_reason =
@@ -571,37 +584,98 @@ std::vector<DifferentialComparison> DifferentialFuzzer::RunBattery(
 
 std::vector<FuzzTestCase> DifferentialFuzzer::GenerateBoundaryCases() {
   std::vector<uint32_t> int_boundaries = {
-      0,           1,       static_cast<uint32_t>(-1), 2, static_cast<uint32_t>(-2), 0x7FFF, 0x8000,
-      0xFFFF,      0x10000,
+      0,
+      1,
+      static_cast<uint32_t>(-1),
+      2,
+      static_cast<uint32_t>(-2),
+      0x7FFF,
+      0x8000,
+      0xFFFF,
+      0x10000,
+      0x55555555u,
+      0xAAAAAAAAu,
+      0x000000FFu,
+      0x0000FF00u,
+      0x00FF0000u,
+      0xFF000000u,
       0x7FFFFFFFu,  // INT32_MAX
       0x80000000u,  // INT32_MIN
       0xFFFFFFFFu,
   };
 
   std::vector<float> float_boundaries = {
-      0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -0.5f, 2.0f, -2.0f, 100.0f, -100.0f,
+      0.0f,
+      -0.0f,
+      1.0f,
+      -1.0f,
+      0.5f,
+      -0.5f,
+      2.0f,
+      -2.0f,
+      100.0f,
+      -100.0f,
+      std::numeric_limits<float>::min(),
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::denorm_min(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
   };
 
   std::vector<double> double_boundaries = {
-      0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 100.0, -100.0, 3.141592653589793,
+      0.0,
+      -0.0,
+      1.0,
+      -1.0,
+      0.5,
+      -0.5,
+      2.0,
+      -2.0,
+      100.0,
+      -100.0,
+      3.141592653589793,
+      std::numeric_limits<double>::min(),
+      std::numeric_limits<double>::max(),
+      std::numeric_limits<double>::denorm_min(),
+      std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
   };
 
   std::vector<FuzzTestCase> cases;
-  cases.reserve(int_boundaries.size() * 2 + float_boundaries.size());
+  cases.reserve(int_boundaries.size() * 5 + float_boundaries.size() + double_boundaries.size());
 
-  // Pure integer boundary combinations on a0/a1
+  // Integer boundary combinations across a0, a1, a2, a3, and stack args
   for (uint32_t v : int_boundaries) {
     FuzzTestCase tc;
     tc.a0 = v;
     tc.a1 = 0;
+    tc.a2 = 0;
+    tc.a3 = 0;
     cases.push_back(tc);
 
     tc.a0 = 0;
     tc.a1 = v;
+    tc.a2 = 0;
+    tc.a3 = 0;
+    cases.push_back(tc);
+
+    tc.a0 = 0;
+    tc.a1 = 0;
+    tc.a2 = v;
+    tc.a3 = 0;
+    cases.push_back(tc);
+
+    tc.a0 = 0;
+    tc.a1 = 0;
+    tc.a2 = 0;
+    tc.a3 = v;
     cases.push_back(tc);
 
     tc.a0 = v;
     tc.a1 = v;
+    tc.a2 = v;
+    tc.a3 = v;
+    tc.stack_args = {v, v, v, v};
     cases.push_back(tc);
   }
 
@@ -658,17 +732,78 @@ std::vector<FuzzTestCase> DifferentialFuzzer::GeneratePointerCases(size_t count,
                                                                    uint32_t buffer_vram,
                                                                    size_t buffer_size,
                                                                    uint32_t seed) {
+  std::vector<FuzzTestCase> cases;
+  if (count == 0) {
+    return cases;
+  }
+  cases.reserve(count);
+
   std::mt19937 rng(seed);
   std::uniform_int_distribution<uint32_t> dist_byte(0, 255);
   std::uniform_int_distribution<uint32_t> dist_len(1, static_cast<uint32_t>(buffer_size));
 
-  std::vector<FuzzTestCase> cases;
-  cases.reserve(count);
+  // Deterministic structured pointer cases
+  // 1. All-zero memory (e.g. empty string or clear buffer)
+  if (cases.size() < count) {
+    FuzzTestCase tc;
+    tc.a0 = buffer_vram;
+    tc.a1 = static_cast<uint32_t>(buffer_size);
+    MemoryPayload payload;
+    payload.address = buffer_vram;
+    payload.data.assign(buffer_size, 0);
+    tc.initial_memory.push_back(std::move(payload));
+    cases.push_back(tc);
+  }
 
-  for (size_t i = 0; i < count; ++i) {
+  // 2. All-0xFF memory
+  if (cases.size() < count) {
+    FuzzTestCase tc;
+    tc.a0 = buffer_vram;
+    tc.a1 = static_cast<uint32_t>(buffer_size);
+    MemoryPayload payload;
+    payload.address = buffer_vram;
+    payload.data.assign(buffer_size, 0xFF);
+    tc.initial_memory.push_back(std::move(payload));
+    cases.push_back(tc);
+  }
+
+  // 3. Null-terminated ASCII string pattern
+  if (cases.size() < count) {
+    FuzzTestCase tc;
+    tc.a0 = buffer_vram;
+    tc.a1 = 32;
+    MemoryPayload payload;
+    payload.address = buffer_vram;
+    payload.data.assign(buffer_size, 0);
+    const char sample_string[] = "The quick brown fox jumps over the lazy dog";
+    for (size_t i = 0; i < sizeof(sample_string) && i < buffer_size; ++i) {
+      payload.data[i] = static_cast<uint8_t>(sample_string[i]);
+    }
+    tc.initial_memory.push_back(std::move(payload));
+    cases.push_back(tc);
+  }
+
+  // 4. Two pointers: a0 pointing to buffer, a1 pointing to halfway offset
+  if (cases.size() < count && buffer_size >= 64) {
+    FuzzTestCase tc;
+    tc.a0 = buffer_vram;
+    tc.a1 = buffer_vram + static_cast<uint32_t>(buffer_size / 2);
+    tc.a2 = static_cast<uint32_t>(buffer_size / 4);
+    MemoryPayload payload;
+    payload.address = buffer_vram;
+    payload.data.resize(buffer_size);
+    for (size_t b = 0; b < buffer_size; ++b) {
+      payload.data[b] = static_cast<uint8_t>(dist_byte(rng));
+    }
+    tc.initial_memory.push_back(std::move(payload));
+    cases.push_back(tc);
+  }
+
+  while (cases.size() < count) {
     FuzzTestCase tc;
     tc.a0 = buffer_vram;
     tc.a1 = dist_len(rng);
+    tc.a2 = dist_byte(rng);
 
     MemoryPayload payload;
     payload.address = buffer_vram;

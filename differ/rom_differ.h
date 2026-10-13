@@ -18,6 +18,7 @@ struct RomDiffOptions {
   std::filesystem::path candidate_rom_path;
   std::filesystem::path config_path;
   bool use_color = true;
+  bool allow_code_shift = true;
 };
 
 // Structural integrity and cartridge header validation results.
@@ -28,6 +29,7 @@ struct StructuralValidationResult {
   uint64_t target_size = 0;
   uint64_t built_size = 0;
   bool size_matches = false;
+  bool code_shift_matches = false;
   bool header_magic_matches = false;
   bool entrypoint_matches = false;
   std::string failure_reason;

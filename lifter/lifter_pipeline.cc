@@ -3,6 +3,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -148,8 +149,11 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   converter_opts.functions_returning_v0 = functions_returning_v0;
   converter_opts.functions_returning_f0 = functions_returning_f0;
 
-  FunctionDeclaration ast =
-      AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);
+  auto ast_or = AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);
+  if (!ast_or.ok()) {
+    return ast_or.status();
+  }
+  FunctionDeclaration ast = std::move(*ast_or);
 
   // 6. Format and Emit C Code
   CEmitterOptions emitter_opts;
@@ -227,6 +231,9 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
       uint32_t target_vram = 0;
       if (insts[i].opcode == Opcode::kJal) {
         target_vram = insts[i].JumpTarget();
+      } else if (insts[i].opcode == Opcode::kBltzal || insts[i].opcode == Opcode::kBgezal ||
+                 insts[i].opcode == Opcode::kBltzall || insts[i].opcode == Opcode::kBgezall) {
+        target_vram = insts[i].BranchTarget();
       }
 
       if (target_vram != 0) {
@@ -651,6 +658,9 @@ static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
 
     auto tu_or = BuildTranslationUnit(*functions_or, default_headers);
     if (!tu_or.ok()) {
+      for (const auto& func_name : *functions_or) {
+        defined_function_names.erase(func_name);
+      }
       std::string stub = absl::StrFormat("// Module '%s' lifting deferred: %s\n", module_name,
                                          tu_or.status().message());
       std::ofstream output_stream(output_file);
@@ -712,12 +722,25 @@ static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
       }
     }
 
+    // Data and BSS subsegments are each emitted as one contiguous blob with a single base label.
+    // When lifted C code is larger or smaller than the original, these blobs move, so every
+    // symbol inside them must be defined relative to the blob's base label rather than at its
+    // original absolute address.
     struct DataSubsegmentRange {
       uint32_t vram_start = 0;
       uint32_t vram_end = 0;
       std::string label_name;
     };
     std::vector<DataSubsegmentRange> data_subsegments;
+    auto label_for_vram = [&](uint32_t vram) {
+      if (symbols != nullptr) {
+        const auto* sym = symbols->FindByAddress(vram);
+        if (sym != nullptr) {
+          return std::string(sym->name());
+        }
+      }
+      return absl::StrFormat("D_%08X", vram);
+    };
     if (loader_ != nullptr && loader_->Extractor() != nullptr) {
       const auto* cfg = loader_->Extractor()->Config();
       if (cfg != nullptr) {
@@ -743,22 +766,28 @@ static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
                 sub_vram = seg_vram + static_cast<uint32_t>(sub_start - seg_start);
               }
               uint32_t sub_size = static_cast<uint32_t>(sub_end - sub_start);
-              std::string label_name;
-              if (symbols != nullptr) {
-                const auto* sym = symbols->FindByAddress(sub_vram);
-                if (sym != nullptr) {
-                  label_name = sym->name();
-                }
-              }
-              if (label_name.empty()) {
-                label_name = absl::StrFormat("D_%08X", sub_vram);
-              }
-              data_subsegments.push_back({sub_vram, sub_vram + sub_size, label_name});
+              data_subsegments.push_back({sub_vram, sub_vram + sub_size, label_for_vram(sub_vram)});
+            } else if (sub.type() == SUBSEGMENT_BSS && sub.vram() != 0 && seg.bss_size() != 0) {
+              data_subsegments.push_back(
+                  {sub.vram(), sub.vram() + seg.bss_size(), label_for_vram(sub.vram())});
             }
           }
         }
       }
     }
+
+    // Returns "<label> + 0xOFF" (or "<label>") for an address inside a relocatable data/BSS
+    // range, or nullopt if the address is not inside any such range.
+    auto relative_data_expr = [&](uint32_t addr) -> std::optional<std::pair<std::string, bool>> {
+      for (const auto& ds : data_subsegments) {
+        if (addr >= ds.vram_start && addr < ds.vram_end) {
+          uint32_t offset = addr - ds.vram_start;
+          if (offset == 0) return std::make_pair(ds.label_name, true);
+          return std::make_pair(absl::StrFormat("%s + 0x%X", ds.label_name, offset), false);
+        }
+      }
+      return std::nullopt;
+    };
 
     for (const auto& [symbol_name, address_hex] : undefined_auto_symbols) {
       bool resolved = false;
@@ -774,7 +803,8 @@ static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
             if (prev_loaded.ok()) {
               uint32_t prev_end =
                   prev.first + static_cast<uint32_t>(prev_loaded->instructions.size() * 4);
-              if (addr > prev.first && addr < prev_end) {
+              if (addr > prev.first && addr < prev_end &&
+                  defined_function_names.contains(prev.second)) {
                 uint32_t offset = addr - prev.first;
                 symbols_output_stream << absl::StrFormat("PROVIDE(%s = %s + 0x%X);\n", symbol_name,
                                                          prev.second, offset);
@@ -783,27 +813,31 @@ static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
             }
           }
         } else if (absl::StartsWith(symbol_name, "D_")) {
-          for (const auto& ds : data_subsegments) {
-            if (addr >= ds.vram_start && addr < ds.vram_end) {
-              uint32_t offset = addr - ds.vram_start;
-              if (offset == 0 && symbol_name == ds.label_name) {
-                resolved = true;
-              } else if (offset == 0) {
-                symbols_output_stream
-                    << absl::StrFormat("PROVIDE(%s = %s);\n", symbol_name, ds.label_name);
-                resolved = true;
-              } else {
-                symbols_output_stream << absl::StrFormat("PROVIDE(%s = %s + 0x%X);\n", symbol_name,
-                                                         ds.label_name, offset);
-                resolved = true;
-              }
-              break;
+          if (auto rel = relative_data_expr(addr); rel.has_value()) {
+            // A symbol that *is* the base label is already defined by the data/BSS object.
+            if (!(rel->second && rel->first == symbol_name)) {
+              symbols_output_stream << absl::StrFormat("%s = %s;\n", symbol_name, rel->first);
             }
+            resolved = true;
           }
         }
       }
       if (!resolved) {
         symbols_output_stream << absl::StrFormat("PROVIDE(%s = 0x%s);\n", symbol_name, address_hex);
+      }
+    }
+
+    // Registered (named) data symbols are PROVIDEd at their original absolute address by the
+    // splitter's symbols.ld, which is only correct when nothing before them changes size. Re-anchor
+    // every named data symbol that lives inside a data/BSS blob to that blob's base label. A plain
+    // assignment is used because, in GNU ld, it overrides a PROVIDE regardless of script order.
+    if (symbols != nullptr) {
+      for (const auto* entry : symbols->SortedEntries()) {
+        if (entry->type() != SYMBOL_DATA) continue;
+        auto rel = relative_data_expr(entry->address());
+        if (!rel.has_value()) continue;
+        if (rel->second && rel->first == entry->name()) continue;  // This is the base label.
+        symbols_output_stream << absl::StrFormat("%s = %s;\n", entry->name(), rel->first);
       }
     }
   }

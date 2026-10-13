@@ -77,6 +77,7 @@ class DifferentialFuzzer {
     std::function<std::optional<uint64_t>(uint32_t, size_t, bool)> candidate_read_hook;
     std::vector<MemoryPayload> target_initial_memory;
     std::vector<MemoryPayload> candidate_initial_memory;
+    absl::flat_hash_set<Register> uninitialized_callee_saved_registers;
   };
 
   DifferentialFuzzer() = default;
