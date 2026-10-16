@@ -17,6 +17,7 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
                         const GameConfig* game_config) {
   folded_.clear();
   hi_to_folded_idx_.clear();
+  mid_to_folded_idx_.clear();
   lo_to_folded_idx_.clear();
 
   RegisterTracker tracker;
@@ -247,15 +248,25 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
   }
 
   for (size_t f = 0; f < folded_.size(); ++f) {
-    bool all_uses_folded = true;
+    bool all_hi_uses_folded = true;
     for (size_t use_idx : tracker.GetUses(folded_[f].hi_inst_index)) {
       if (!folded_uses.contains(use_idx)) {
-        all_uses_folded = false;
+        all_hi_uses_folded = false;
         break;
       }
     }
-    if (all_uses_folded && (folded_[f].type == FoldedPatternType::kGlobalStore ||
-                            folded_[f].type == FoldedPatternType::kGlobalIndexedStore)) {
+    bool all_mid_uses_folded = true;
+    if (folded_[f].mid_inst_index.has_value()) {
+      for (size_t use_idx : tracker.GetUses(*folded_[f].mid_inst_index)) {
+        if (!folded_uses.contains(use_idx)) {
+          all_mid_uses_folded = false;
+          all_hi_uses_folded = false;
+          break;
+        }
+      }
+    }
+    if (all_hi_uses_folded && (folded_[f].type == FoldedPatternType::kGlobalStore ||
+                               folded_[f].type == FoldedPatternType::kGlobalIndexedStore)) {
       Register hi_reg = instructions[folded_[f].hi_inst_index].rt.value_or(Register::kZero);
       if (hi_reg != Register::kAt && hi_reg != Register::kZero) {
         for (size_t k = folded_[f].lo_inst_index + 1; k < instructions.size(); ++k) {
@@ -263,19 +274,19 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
             RegisterUseDef ud = GetInstructionUseDef(instructions[k]);
             for (Register r : ud.gpr_defs) {
               if (r == hi_reg) {
-                all_uses_folded = false;
+                all_hi_uses_folded = false;
                 break;
               }
             }
           }
-          if (!all_uses_folded) break;
+          if (!all_hi_uses_folded) break;
         }
       }
     }
-    if (all_uses_folded) {
+    if (all_hi_uses_folded) {
       hi_to_folded_idx_[folded_[f].hi_inst_index] = f;
     }
-    if (folded_[f].mid_inst_index.has_value()) {
+    if (folded_[f].mid_inst_index.has_value() && all_mid_uses_folded) {
       mid_to_folded_idx_[*folded_[f].mid_inst_index] = f;
     }
     lo_to_folded_idx_[folded_[f].lo_inst_index] = f;

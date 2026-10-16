@@ -251,6 +251,9 @@ inline std::optional<size_t> MipsEmulator::VramToPhysical(uint32_t vram) const {
 }
 
 inline bool MipsEmulator::IsMmioAddress(uint32_t vram) {
+  if ((vram >> 30) != 2) {
+    return false;
+  }
   uint32_t phys = vram & 0x1FFFFFFF;
   return (phys >= 0x04000000 && phys < 0x04900000) || (phys >= 0x1FC00000 && phys < 0x1FC00800);
 }

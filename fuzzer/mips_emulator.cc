@@ -22,6 +22,16 @@ constexpr uint32_t kSiStatusReg = 0x04800018;
 bool IsEvenFpRegister(FpRegister reg) {
   return (static_cast<int>(reg) & 1) == 0;
 }
+
+int32_t ClampDoubleToWord(double val) {
+  if (std::isnan(val) || val >= 2147483648.0) {
+    return 0x7FFFFFFF;
+  }
+  if (val < -2147483648.0) {
+    return static_cast<int32_t>(0x80000000u);
+  }
+  return static_cast<int32_t>(val);
+}
 }  // namespace
 
 MipsEmulator::MipsEmulator(size_t memory_size_bytes, uint32_t base_vram)
@@ -138,10 +148,15 @@ void MipsEmulator::ClearMemory(uint32_t vram, size_t size) {
 }
 
 void MipsEmulator::RollbackWrites(absl::Span<const uint32_t> code, uint32_t code_vram) {
+  bool code_touched = false;
+  uint32_t code_end = code_vram + static_cast<uint32_t>(code.size() * sizeof(uint32_t));
   for (auto it = write_log_.rbegin(); it != write_log_.rend(); ++it) {
     auto phys_opt = VramToPhysical(it->address);
     if (!phys_opt.has_value() || *phys_opt + it->size > memory_size_) {
       continue;
+    }
+    if (!code.empty() && it->address + it->size > code_vram && it->address < code_end) {
+      code_touched = true;
     }
     switch (it->size) {
       case 1:
@@ -158,7 +173,11 @@ void MipsEmulator::RollbackWrites(absl::Span<const uint32_t> code, uint32_t code
         break;
     }
   }
+  if (code_touched) {
+    LoadWords(code_vram, code);
+  }
   write_log_.clear();
+  written_phys_addrs_.clear();
   mmio_regs_.clear();
   vi_scanline_counter_ = 0;
 }
@@ -364,20 +383,33 @@ ExecutionStatus MipsEmulator::Step() {
         case 0x13:  // MTLO
           lo_ = gpr_[rs];
           break;
-        case 0x18: {  // MULT
+        case 0x14:  // DSLLV
+          SetGpr(rd, static_cast<uint32_t>(static_cast<uint64_t>(gpr_[rt]) << (gpr_[rs] & 0x3F)));
+          break;
+        case 0x16:  // DSRLV
+          SetGpr(rd, static_cast<uint32_t>(static_cast<uint64_t>(gpr_[rt]) >> (gpr_[rs] & 0x3F)));
+          break;
+        case 0x17:  // DSRAV
+          SetGpr(rd, static_cast<uint32_t>(static_cast<int64_t>(static_cast<int32_t>(gpr_[rt])) >>
+                                           (gpr_[rs] & 0x3F)));
+          break;
+        case 0x18:    // MULT
+        case 0x1C: {  // DMULT
           int64_t prod = static_cast<int64_t>(static_cast<int32_t>(gpr_[rs])) *
                          static_cast<int64_t>(static_cast<int32_t>(gpr_[rt]));
           hi_ = static_cast<uint32_t>(prod >> 32);
           lo_ = static_cast<uint32_t>(prod & 0xFFFFFFFF);
           break;
         }
-        case 0x19: {  // MULTU
+        case 0x19:    // MULTU
+        case 0x1D: {  // DMULTU
           uint64_t prod = static_cast<uint64_t>(gpr_[rs]) * static_cast<uint64_t>(gpr_[rt]);
           hi_ = static_cast<uint32_t>(prod >> 32);
           lo_ = static_cast<uint32_t>(prod & 0xFFFFFFFF);
           break;
         }
         case 0x1A:  // DIV
+        case 0x1E:  // DDIV
           if (gpr_[rt] != 0) {
             int32_t num = static_cast<int32_t>(gpr_[rs]);
             int32_t den = static_cast<int32_t>(gpr_[rt]);
@@ -391,12 +423,14 @@ ExecutionStatus MipsEmulator::Step() {
           }
           break;
         case 0x1B:  // DIVU
+        case 0x1F:  // DDIVU
           if (gpr_[rt] != 0) {
             lo_ = gpr_[rs] / gpr_[rt];
             hi_ = gpr_[rs] % gpr_[rt];
           }
           break;
-        case 0x20: {  // ADD
+        case 0x20:    // ADD
+        case 0x2C: {  // DADD
           int32_t a = static_cast<int32_t>(gpr_[rs]);
           int32_t b = static_cast<int32_t>(gpr_[rt]);
           int32_t res = static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b));
@@ -407,9 +441,11 @@ ExecutionStatus MipsEmulator::Step() {
           break;
         }
         case 0x21:  // ADDU
+        case 0x2D:  // DADDU
           SetGpr(rd, gpr_[rs] + gpr_[rt]);
           break;
-        case 0x22: {  // SUB
+        case 0x22:    // SUB
+        case 0x2E: {  // DSUB
           int32_t a = static_cast<int32_t>(gpr_[rs]);
           int32_t b = static_cast<int32_t>(gpr_[rt]);
           int32_t res = static_cast<int32_t>(static_cast<uint32_t>(a) - static_cast<uint32_t>(b));
@@ -420,6 +456,7 @@ ExecutionStatus MipsEmulator::Step() {
           break;
         }
         case 0x23:  // SUBU
+        case 0x2F:  // DSUBU
           SetGpr(rd, gpr_[rs] - gpr_[rt]);
           break;
         case 0x24:  // AND
@@ -439,6 +476,25 @@ ExecutionStatus MipsEmulator::Step() {
           break;
         case 0x2B:  // SLTU
           SetGpr(rd, (gpr_[rs] < gpr_[rt]) ? 1 : 0);
+          break;
+        case 0x38:  // DSLL
+          SetGpr(rd, gpr_[rt] << sa);
+          break;
+        case 0x3A:  // DSRL
+          SetGpr(rd, gpr_[rt] >> sa);
+          break;
+        case 0x3B:  // DSRA
+          SetGpr(rd, static_cast<uint32_t>(static_cast<int32_t>(gpr_[rt]) >> sa));
+          break;
+        case 0x3C:  // DSLL32
+          SetGpr(rd, static_cast<uint32_t>(static_cast<uint64_t>(gpr_[rt]) << (sa + 32)));
+          break;
+        case 0x3E:  // DSRL32
+          SetGpr(rd, static_cast<uint32_t>(static_cast<uint64_t>(gpr_[rt]) >> (sa + 32)));
+          break;
+        case 0x3F:  // DSRA32
+          SetGpr(rd, static_cast<uint32_t>(static_cast<int64_t>(static_cast<int32_t>(gpr_[rt])) >>
+                                           (sa + 32)));
           break;
         default:
           return ExecutionStatus::kInvalidOpcode;
@@ -494,6 +550,36 @@ ExecutionStatus MipsEmulator::Step() {
           }
           pc_ = advanced_pc;
           return ExecutionStatus::kRunning;
+        case 0x12:  // BLTZALL
+          if (rs == 31) return ExecutionStatus::kInvalidOpcode;
+          SetGpr(31, current_pc + 8);
+          call_link_reg_ = 31;
+          if (static_cast<int32_t>(gpr_[rs]) < 0) {
+            in_delay_slot_ = true;
+            delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+            delay_slot_is_call_ = true;
+            pc_ = advanced_pc;
+          } else {
+            in_delay_slot_ = false;
+            delay_slot_is_call_ = false;
+            pc_ = current_pc + 8;
+          }
+          return ExecutionStatus::kRunning;
+        case 0x13:  // BGEZALL
+          if (rs == 31) return ExecutionStatus::kInvalidOpcode;
+          SetGpr(31, current_pc + 8);
+          call_link_reg_ = 31;
+          if (static_cast<int32_t>(gpr_[rs]) >= 0) {
+            in_delay_slot_ = true;
+            delayed_branch_target_ = current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2);
+            delay_slot_is_call_ = true;
+            pc_ = advanced_pc;
+          } else {
+            in_delay_slot_ = false;
+            delay_slot_is_call_ = false;
+            pc_ = current_pc + 8;
+          }
+          return ExecutionStatus::kRunning;
         default:
           return ExecutionStatus::kInvalidOpcode;
       }
@@ -544,7 +630,8 @@ ExecutionStatus MipsEmulator::Step() {
                    current_pc + 4 + (static_cast<uint32_t>(imm_s) << 2));
       pc_ = advanced_pc;
       return ExecutionStatus::kRunning;
-    case 0x08: {  // ADDI
+    case 0x08:    // ADDI
+    case 0x18: {  // DADDI
       int32_t a = static_cast<int32_t>(gpr_[rs]);
       int32_t b = imm_s;
       int32_t res = static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b));
@@ -555,6 +642,7 @@ ExecutionStatus MipsEmulator::Step() {
       break;
     }
     case 0x09:  // ADDIU
+    case 0x19:  // DADDIU
       SetGpr(rt, gpr_[rs] + static_cast<uint32_t>(imm_s));
       break;
     case 0x0A:  // SLTI
@@ -604,6 +692,11 @@ ExecutionStatus MipsEmulator::Step() {
         SetGpr(rt, GetFpBits(fs));
         break;
       }
+      if (rs == 0x01) {  // DMFC1
+        if (!IsEvenFpRegister(fs)) return ExecutionStatus::kInvalidOpcode;
+        SetGpr(rt, GetFpBits(fs));
+        break;
+      }
       if (rs == 0x02) {  // CFC1
         uint32_t ctrl_reg = static_cast<uint32_t>(fs);
         uint32_t val = 0;
@@ -617,6 +710,11 @@ ExecutionStatus MipsEmulator::Step() {
       }
       if (rs == 0x04) {  // MTC1
         SetFpBits(fs, gpr_[rt]);
+        break;
+      }
+      if (rs == 0x05) {  // DMTC1
+        if (!IsEvenFpRegister(fs)) return ExecutionStatus::kInvalidOpcode;
+        SetFpDoubleBits(fs, static_cast<uint64_t>(gpr_[rt]));
         break;
       }
       if (rs == 0x06) {  // CTC1
@@ -648,6 +746,16 @@ ExecutionStatus MipsEmulator::Step() {
         }
       }
       if (rs == 0x10) {  // Single-precision float
+        if (funct >= 0x30 && funct <= 0x3F) {
+          float a = GetFpRegister(fs);
+          float b = GetFpRegister(ft);
+          bool unordered = std::isnan(a) || std::isnan(b);
+          bool equal = !unordered && (a == b);
+          bool less = !unordered && (a < b);
+          fpu_cond_ = (((funct & 1) != 0) && unordered) || (((funct & 2) != 0) && equal) ||
+                      (((funct & 4) != 0) && less);
+          break;
+        }
         switch (funct) {
           case 0x00:
             SetFpRegister(fd, GetFpRegister(fs) + GetFpRegister(ft));
@@ -674,84 +782,67 @@ ExecutionStatus MipsEmulator::Step() {
             SetFpBits(fd, GetFpBits(fs) ^ 0x80000000);
             break;
           case 0x0C: {  // ROUND.W.S
-            float f = GetFpRegister(fs);
-            int32_t val = 0;
-            if (std::isnan(f)) {
-              val = 0x7FFFFFFF;
-            } else if (f >= 2147483647.0f) {
-              val = 0x7FFFFFFF;
-            } else if (f <= -2147483648.0f) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::round(f));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::nearbyint(static_cast<double>(GetFpRegister(fs)));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x0D: {  // TRUNC.W.S
-            float f = GetFpRegister(fs);
-            int32_t val = 0;
-            if (std::isnan(f)) {
-              val = 0x7FFFFFFF;
-            } else if (f >= 2147483647.0f) {
-              val = 0x7FFFFFFF;
-            } else if (f <= -2147483648.0f) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::trunc(f));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::trunc(static_cast<double>(GetFpRegister(fs)));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x0E: {  // CEIL.W.S
-            float f = GetFpRegister(fs);
-            int32_t val = 0;
-            if (std::isnan(f)) {
-              val = 0x7FFFFFFF;
-            } else if (f >= 2147483647.0f) {
-              val = 0x7FFFFFFF;
-            } else if (f <= -2147483648.0f) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::ceil(f));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::ceil(static_cast<double>(GetFpRegister(fs)));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x0F: {  // FLOOR.W.S
-            float f = GetFpRegister(fs);
-            int32_t val = 0;
-            if (std::isnan(f)) {
-              val = 0x7FFFFFFF;
-            } else if (f >= 2147483647.0f) {
-              val = 0x7FFFFFFF;
-            } else if (f <= -2147483648.0f) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::floor(f));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::floor(static_cast<double>(GetFpRegister(fs)));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x21:  // CVT.D.S
             if (!IsEvenFpRegister(fd)) return ExecutionStatus::kInvalidOpcode;
             SetFpDouble(fd, static_cast<double>(GetFpRegister(fs)));
             break;
-          case 0x32:  // C.EQ.S
-            fpu_cond_ = (GetFpRegister(fs) == GetFpRegister(ft));
+          case 0x24: {  // CVT.W.S
+            double d = static_cast<double>(GetFpRegister(fs));
+            switch (fcr31_ & 3) {
+              case 0:
+                d = std::nearbyint(d);
+                break;
+              case 1:
+                d = std::trunc(d);
+                break;
+              case 2:
+                d = std::ceil(d);
+                break;
+              case 3:
+                d = std::floor(d);
+                break;
+            }
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
-          case 0x3C:  // C.LT.S
-            fpu_cond_ = (GetFpRegister(fs) < GetFpRegister(ft));
-            break;
-          case 0x3E:  // C.LE.S
-            fpu_cond_ = (GetFpRegister(fs) <= GetFpRegister(ft));
-            break;
+          }
           default:
             return ExecutionStatus::kInvalidOpcode;
         }
         break;
       }
       if (rs == 0x11) {  // Double-precision float
+        if (funct >= 0x30 && funct <= 0x3F) {
+          if (!IsEvenFpRegister(fs) || !IsEvenFpRegister(ft)) {
+            return ExecutionStatus::kInvalidOpcode;
+          }
+          double a = GetFpDouble(fs);
+          double b = GetFpDouble(ft);
+          bool unordered = std::isnan(a) || std::isnan(b);
+          bool equal = !unordered && (a == b);
+          bool less = !unordered && (a < b);
+          fpu_cond_ = (((funct & 1) != 0) && unordered) || (((funct & 2) != 0) && equal) ||
+                      (((funct & 4) != 0) && less);
+          break;
+        }
         switch (funct) {
           case 0x00:  // ADD.D
             if (!IsEvenFpRegister(fd) || !IsEvenFpRegister(fs) || !IsEvenFpRegister(ft)) {
@@ -802,75 +893,35 @@ ExecutionStatus MipsEmulator::Step() {
             SetFpDoubleBits(fd, GetFpDoubleBits(fs) ^ (1ULL << 63));
             break;
           case 0x0C: {  // ROUND.W.D
-            if (!IsEvenFpRegister(fs)) {
+            if (!IsEvenFpRegister(fd) || !IsEvenFpRegister(fs)) {
               return ExecutionStatus::kInvalidOpcode;
             }
-            double d = GetFpDouble(fs);
-            int32_t val = 0;
-            if (std::isnan(d)) {
-              val = 0x7FFFFFFF;
-            } else if (d >= 2147483647.0) {
-              val = 0x7FFFFFFF;
-            } else if (d <= -2147483648.0) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::round(d));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::nearbyint(GetFpDouble(fs));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x0D: {  // TRUNC.W.D
-            if (!IsEvenFpRegister(fs)) {
+            if (!IsEvenFpRegister(fd) || !IsEvenFpRegister(fs)) {
               return ExecutionStatus::kInvalidOpcode;
             }
-            double d = GetFpDouble(fs);
-            int32_t val = 0;
-            if (std::isnan(d)) {
-              val = 0x7FFFFFFF;
-            } else if (d >= 2147483647.0) {
-              val = 0x7FFFFFFF;
-            } else if (d <= -2147483648.0) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::trunc(d));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::trunc(GetFpDouble(fs));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x0E: {  // CEIL.W.D
-            if (!IsEvenFpRegister(fs)) {
+            if (!IsEvenFpRegister(fd) || !IsEvenFpRegister(fs)) {
               return ExecutionStatus::kInvalidOpcode;
             }
-            double d = GetFpDouble(fs);
-            int32_t val = 0;
-            if (std::isnan(d)) {
-              val = 0x7FFFFFFF;
-            } else if (d >= 2147483647.0) {
-              val = 0x7FFFFFFF;
-            } else if (d <= -2147483648.0) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::ceil(d));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::ceil(GetFpDouble(fs));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x0F: {  // FLOOR.W.D
-            if (!IsEvenFpRegister(fs)) {
+            if (!IsEvenFpRegister(fd) || !IsEvenFpRegister(fs)) {
               return ExecutionStatus::kInvalidOpcode;
             }
-            double d = GetFpDouble(fs);
-            int32_t val = 0;
-            if (std::isnan(d)) {
-              val = 0x7FFFFFFF;
-            } else if (d >= 2147483647.0) {
-              val = 0x7FFFFFFF;
-            } else if (d <= -2147483648.0) {
-              val = static_cast<int32_t>(0x80000000u);
-            } else {
-              val = static_cast<int32_t>(std::floor(d));
-            }
-            SetFpBits(fd, static_cast<uint32_t>(val));
+            double d = std::floor(GetFpDouble(fs));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
           }
           case 0x20:  // CVT.S.D
@@ -879,24 +930,28 @@ ExecutionStatus MipsEmulator::Step() {
             }
             SetFpRegister(fd, static_cast<float>(GetFpDouble(fs)));
             break;
-          case 0x32:  // C.EQ.D
-            if (!IsEvenFpRegister(fs) || !IsEvenFpRegister(ft)) {
+          case 0x24: {  // CVT.W.D
+            if (!IsEvenFpRegister(fd) || !IsEvenFpRegister(fs)) {
               return ExecutionStatus::kInvalidOpcode;
             }
-            fpu_cond_ = (GetFpDouble(fs) == GetFpDouble(ft));
-            break;
-          case 0x3C:  // C.LT.D
-            if (!IsEvenFpRegister(fs) || !IsEvenFpRegister(ft)) {
-              return ExecutionStatus::kInvalidOpcode;
+            double d = GetFpDouble(fs);
+            switch (fcr31_ & 3) {
+              case 0:
+                d = std::nearbyint(d);
+                break;
+              case 1:
+                d = std::trunc(d);
+                break;
+              case 2:
+                d = std::ceil(d);
+                break;
+              case 3:
+                d = std::floor(d);
+                break;
             }
-            fpu_cond_ = (GetFpDouble(fs) < GetFpDouble(ft));
+            SetFpBits(fd, static_cast<uint32_t>(ClampDoubleToWord(d)));
             break;
-          case 0x3E:  // C.LE.D
-            if (!IsEvenFpRegister(fs) || !IsEvenFpRegister(ft)) {
-              return ExecutionStatus::kInvalidOpcode;
-            }
-            fpu_cond_ = (GetFpDouble(fs) <= GetFpDouble(ft));
-            break;
+          }
           default:
             return ExecutionStatus::kInvalidOpcode;
         }
@@ -973,7 +1028,8 @@ ExecutionStatus MipsEmulator::Step() {
       SetGpr(rt, (gpr_[rt] & ~mask) | (word << (shift_byte * 8)));
       break;
     }
-    case 0x23: {  // LW
+    case 0x23:    // LW
+    case 0x27: {  // LWU
       uint32_t addr = gpr_[rs] + static_cast<uint32_t>(imm_s);
       if ((addr & 3) != 0) {
         last_invalid_info_ = absl::StrFormat("LW unaligned addr=0x%08X", addr);

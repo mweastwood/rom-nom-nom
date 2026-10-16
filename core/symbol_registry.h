@@ -59,7 +59,7 @@ class SymbolIndex {
                                      SymbolType fallback_type = SYMBOL_FUNC) const;
 
   // Returns all registered symbol entries sorted ascending by address.
-  std::vector<const SymbolRegistryEntry*> SortedEntries() const;
+  const std::vector<const SymbolRegistryEntry*>& SortedEntries() const { return sorted_entries_; }
 
   // Formats all registered symbols as GNU ld PROVIDE statements (`PROVIDE(name = 0xXXXXXXXX);`).
   std::string GenerateSymbolsScript() const;
@@ -74,6 +74,7 @@ class SymbolIndex {
   SymbolRegistry registry_;
   absl::flat_hash_map<uint32_t, const SymbolRegistryEntry*> by_address_;
   absl::flat_hash_map<std::string_view, const SymbolRegistryEntry*> by_name_;
+  std::vector<const SymbolRegistryEntry*> sorted_entries_;
 };
 
 using SymbolRegistryIndex = SymbolIndex;

@@ -356,9 +356,10 @@ struct Instruction {
   bool IsReturn() const;               // jr $ra
   bool HasDelaySlot() const;           // All standard branches and jumps
 
-  bool IsLoad() const;   // lw, lh, lb, lwc1, etc.
-  bool IsStore() const;  // sw, sh, sb, swc1, etc.
-  bool IsNop() const;    // sll $zero, $zero, 0
+  bool IsLoad() const;             // lw, lh, lb, lwc1, etc.
+  bool IsStore() const;            // sw, sh, sb, swc1, etc.
+  bool IsNop() const;              // sll $zero, $zero, 0
+  bool IsDoublePrecision() const;  // ldc1, sdc1, add.d, cvt.s.d, etc.
 
   // --- Target Address Calculators ---
   // Computes PC-relative target: vram + 4 + (immediate << 2)

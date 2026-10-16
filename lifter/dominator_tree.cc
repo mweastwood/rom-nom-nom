@@ -22,17 +22,12 @@ const std::vector<uint32_t>& DominatorTree::EmptyVector() {
   return *empty_vector;
 }
 
-DominatorTree DominatorTree::Compute(const ControlFlowGraph& cfg) {
+DominatorTree DominatorTree::ComputeOnGraph(
+    uint32_t root_id, bool is_post_dom, const std::vector<uint32_t>& rpo,
+    const absl::flat_hash_map<uint32_t, std::vector<uint32_t>>& predecessors) {
   DominatorTree dt;
-  if (cfg.Blocks().empty()) {
-    return dt;
-  }
-
-  dt.root_id_ = cfg.EntryBlockId();
-  dt.is_post_dom_ = false;
-
-  // 1. Get Reverse Post-Order (RPO) from entry.
-  std::vector<uint32_t> rpo = cfg.ReversePostOrder();
+  dt.root_id_ = root_id;
+  dt.is_post_dom_ = is_post_dom;
   if (rpo.empty()) {
     return dt;
   }
@@ -52,12 +47,16 @@ DominatorTree DominatorTree::Compute(const ControlFlowGraph& cfg) {
     while (finger1 != finger2) {
       while (rpo_index[finger1] > rpo_index[finger2]) {
         auto it = idom.find(finger1);
-        if (it == idom.end() || it->second == finger1) break;
+        if (it == idom.end() || it->second == finger1) {
+          return root_id;
+        }
         finger1 = it->second;
       }
       while (rpo_index[finger2] > rpo_index[finger1]) {
         auto it = idom.find(finger2);
-        if (it == idom.end() || it->second == finger2) break;
+        if (it == idom.end() || it->second == finger2) {
+          return root_id;
+        }
         finger2 = it->second;
       }
     }
@@ -65,46 +64,47 @@ DominatorTree DominatorTree::Compute(const ControlFlowGraph& cfg) {
   };
 
   absl::flat_hash_map<uint32_t, uint32_t> idom;
-  idom[dt.root_id_] = dt.root_id_;
+  idom[root_id] = root_id;
 
   bool changed = true;
   while (changed) {
     changed = false;
     // Iterate over RPO, skipping the root (index 0)
     for (size_t i = 1; i < rpo.size(); ++i) {
-      uint32_t b = rpo[i];
-      const auto* block = cfg.GetBlock(b);
-      if (block == nullptr) continue;
+      uint32_t block_id = rpo[i];
+      auto it_preds = predecessors.find(block_id);
+      if (it_preds == predecessors.end()) continue;
+      const auto& preds = it_preds->second;
 
       // Find first processed predecessor
       uint32_t new_idom = UINT32_MAX;
-      for (uint32_t p : block->predecessors) {
-        if (idom.contains(p)) {
-          new_idom = p;
+      for (uint32_t pred_id : preds) {
+        if (idom.contains(pred_id)) {
+          new_idom = pred_id;
           break;
         }
       }
       if (new_idom == UINT32_MAX) continue;
 
-      for (uint32_t p : block->predecessors) {
-        if (p != new_idom && idom.contains(p)) {
-          new_idom = intersect(p, new_idom, idom);
+      for (uint32_t pred_id : preds) {
+        if (pred_id != new_idom && idom.contains(pred_id)) {
+          new_idom = intersect(pred_id, new_idom, idom);
         }
       }
 
-      auto it = idom.find(b);
+      auto it = idom.find(block_id);
       if (it == idom.end() || it->second != new_idom) {
-        idom[b] = new_idom;
+        idom[block_id] = new_idom;
         changed = true;
       }
     }
   }
 
-  // Populate final idom_ (omitting self-root) and children_
-  for (const auto& [b, parent] : idom) {
-    if (b != dt.root_id_) {
-      dt.idom_[b] = parent;
-      dt.children_[parent].push_back(b);
+  // Populate final idom_ (omitting self-root and virtual exit) and children_
+  for (const auto& [block_id, parent_id] : idom) {
+    if (block_id != root_id && block_id != kVirtualExitId && parent_id != kVirtualExitId) {
+      dt.idom_[block_id] = parent_id;
+      dt.children_[parent_id].push_back(block_id);
     }
   }
 
@@ -115,23 +115,23 @@ DominatorTree DominatorTree::Compute(const ControlFlowGraph& cfg) {
 
   // Compute Dominance Frontiers using CHK algorithm
   absl::flat_hash_map<uint32_t, absl::flat_hash_set<uint32_t>> df_sets;
-  for (const auto& block : cfg.Blocks()) {
-    if (!dt.IsReachable(block.id)) continue;
-    if (block.predecessors.size() >= 2) {
-      uint32_t idom_b = UINT32_MAX;
-      auto it_b = dt.idom_.find(block.id);
-      if (it_b != dt.idom_.end()) {
-        idom_b = it_b->second;
-      }
-      for (uint32_t p : block.predecessors) {
-        if (!dt.IsReachable(p)) continue;
-        uint32_t runner = p;
-        while (runner != idom_b) {
-          df_sets[runner].insert(block.id);
-          auto it_r = dt.idom_.find(runner);
-          if (it_r == dt.idom_.end()) break;
-          runner = it_r->second;
-        }
+  for (uint32_t block_id : rpo) {
+    if (block_id == kVirtualExitId || !dt.IsReachable(block_id)) continue;
+    auto it_preds = predecessors.find(block_id);
+    if (it_preds == predecessors.end() || it_preds->second.size() < 2) continue;
+    uint32_t idom_block = UINT32_MAX;
+    auto it_b = dt.idom_.find(block_id);
+    if (it_b != dt.idom_.end()) {
+      idom_block = it_b->second;
+    }
+    for (uint32_t pred_id : it_preds->second) {
+      if (pred_id == kVirtualExitId || !dt.IsReachable(pred_id)) continue;
+      uint32_t runner = pred_id;
+      while (runner != idom_block && runner != kVirtualExitId) {
+        df_sets[runner].insert(block_id);
+        auto it_r = dt.idom_.find(runner);
+        if (it_r == dt.idom_.end()) break;
+        runner = it_r->second;
       }
     }
   }
@@ -145,13 +145,25 @@ DominatorTree DominatorTree::Compute(const ControlFlowGraph& cfg) {
   return dt;
 }
 
-DominatorTree DominatorTree::ComputePostDominators(const ControlFlowGraph& cfg) {
-  DominatorTree dt;
+DominatorTree DominatorTree::Compute(const ControlFlowGraph& cfg) {
   if (cfg.Blocks().empty()) {
-    return dt;
+    return DominatorTree();
   }
 
-  dt.is_post_dom_ = true;
+  std::vector<uint32_t> rpo = cfg.ReversePostOrder();
+  absl::flat_hash_map<uint32_t, std::vector<uint32_t>> predecessors;
+  predecessors.reserve(cfg.Blocks().size());
+  for (const auto& block : cfg.Blocks()) {
+    predecessors[block.id] = block.predecessors;
+  }
+
+  return ComputeOnGraph(cfg.EntryBlockId(), /*is_post_dom=*/false, rpo, predecessors);
+}
+
+DominatorTree DominatorTree::ComputePostDominators(const ControlFlowGraph& cfg) {
+  if (cfg.Blocks().empty()) {
+    return DominatorTree();
+  }
 
   // Build reverse CFG: forward predecessors become successors, forward successors become
   // predecessors.
@@ -194,13 +206,12 @@ DominatorTree DominatorTree::ComputePostDominators(const ControlFlowGraph& cfg) 
   } else {
     // Multiple exits: connect via a virtual exit node.
     root_block_id = kVirtualExitId;
-    reverse_cfg_successors[root_block_id] = {};
-    reverse_cfg_predecessors[root_block_id] = exit_block_ids;
+    reverse_cfg_successors[root_block_id] = exit_block_ids;
+    reverse_cfg_predecessors[root_block_id] = {};
     for (uint32_t exit_id : exit_block_ids) {
-      reverse_cfg_successors[exit_id].push_back(root_block_id);
+      reverse_cfg_predecessors[exit_id].push_back(root_block_id);
     }
   }
-  dt.root_id_ = root_block_id;
 
   // Compute Reverse Post-Order on the reversed graph.
   std::vector<uint32_t> reverse_rpo;
@@ -221,105 +232,7 @@ DominatorTree DominatorTree::ComputePostDominators(const ControlFlowGraph& cfg) 
   dfs(dfs, root_block_id);
   std::reverse(reverse_rpo.begin(), reverse_rpo.end());
 
-  absl::flat_hash_map<uint32_t, size_t> rpo_index;
-  for (size_t i = 0; i < reverse_rpo.size(); ++i) {
-    rpo_index[reverse_rpo[i]] = i;
-    dt.reachable_.insert(reverse_rpo[i]);
-  }
-
-  auto intersect = [&](uint32_t b1, uint32_t b2,
-                       const absl::flat_hash_map<uint32_t, uint32_t>& idom) -> uint32_t {
-    uint32_t finger1 = b1;
-    uint32_t finger2 = b2;
-    while (finger1 != finger2) {
-      while (rpo_index[finger1] > rpo_index[finger2]) {
-        auto it = idom.find(finger1);
-        if (it == idom.end() || it->second == finger1) break;
-        finger1 = it->second;
-      }
-      while (rpo_index[finger2] > rpo_index[finger1]) {
-        auto it = idom.find(finger2);
-        if (it == idom.end() || it->second == finger2) break;
-        finger2 = it->second;
-      }
-    }
-    return finger1;
-  };
-
-  absl::flat_hash_map<uint32_t, uint32_t> idom;
-  idom[root_block_id] = root_block_id;
-
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (size_t i = 1; i < reverse_rpo.size(); ++i) {
-      uint32_t block_id = reverse_rpo[i];
-      const auto& preds = reverse_cfg_predecessors[block_id];
-
-      uint32_t new_idom = UINT32_MAX;
-      for (uint32_t pred_id : preds) {
-        if (idom.contains(pred_id)) {
-          new_idom = pred_id;
-          break;
-        }
-      }
-      if (new_idom == UINT32_MAX) continue;
-
-      for (uint32_t pred_id : preds) {
-        if (pred_id != new_idom && idom.contains(pred_id)) {
-          new_idom = intersect(pred_id, new_idom, idom);
-        }
-      }
-
-      auto it = idom.find(block_id);
-      if (it == idom.end() || it->second != new_idom) {
-        idom[block_id] = new_idom;
-        changed = true;
-      }
-    }
-  }
-
-  for (const auto& [block_id, parent_id] : idom) {
-    if (block_id != root_block_id && block_id != kVirtualExitId && parent_id != kVirtualExitId) {
-      dt.idom_[block_id] = parent_id;
-      dt.children_[parent_id].push_back(block_id);
-    }
-  }
-
-  for (auto& [_, child_list] : dt.children_) {
-    std::sort(child_list.begin(), child_list.end());
-  }
-
-  // Post-dominance frontiers (Control dependence)
-  absl::flat_hash_map<uint32_t, absl::flat_hash_set<uint32_t>> df_sets;
-  for (const auto& [block_id, preds] : reverse_cfg_predecessors) {
-    if (block_id == kVirtualExitId || !dt.IsReachable(block_id)) continue;
-    if (preds.size() >= 2) {
-      uint32_t idom_block = UINT32_MAX;
-      auto it_b = dt.idom_.find(block_id);
-      if (it_b != dt.idom_.end()) {
-        idom_block = it_b->second;
-      }
-      for (uint32_t pred_id : preds) {
-        if (pred_id == kVirtualExitId || !dt.IsReachable(pred_id)) continue;
-        uint32_t runner = pred_id;
-        while (runner != idom_block && runner != kVirtualExitId) {
-          df_sets[runner].insert(block_id);
-          auto it_r = dt.idom_.find(runner);
-          if (it_r == dt.idom_.end()) break;
-          runner = it_r->second;
-        }
-      }
-    }
-  }
-
-  for (auto& [node, set] : df_sets) {
-    auto& list = dt.df_[node];
-    list.assign(set.begin(), set.end());
-    std::sort(list.begin(), list.end());
-  }
-
-  return dt;
+  return ComputeOnGraph(root_block_id, /*is_post_dom=*/true, reverse_rpo, reverse_cfg_predecessors);
 }
 
 std::optional<uint32_t> DominatorTree::ImmediateDominator(uint32_t block_id) const {

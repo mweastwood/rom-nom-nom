@@ -66,6 +66,8 @@ alias(
     actual = "//builder:builder",
 )
 
-
-
-
+# Native C++ differential fuzzer tool
+alias(
+    name = "fuzzer",
+    actual = "//fuzzer:fuzzer",
+)

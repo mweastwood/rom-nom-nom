@@ -64,6 +64,10 @@ class DominatorTree {
   // Set of blocks reachable in this analysis
   absl::flat_hash_set<uint32_t> reachable_;
 
+  static DominatorTree ComputeOnGraph(
+      uint32_t root_id, bool is_post_dom, const std::vector<uint32_t>& rpo,
+      const absl::flat_hash_map<uint32_t, std::vector<uint32_t>>& predecessors);
+
   static const std::vector<uint32_t>& EmptyVector();
 };
 

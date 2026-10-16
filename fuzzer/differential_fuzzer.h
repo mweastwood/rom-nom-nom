@@ -81,7 +81,10 @@ class DifferentialFuzzer {
   };
 
   DifferentialFuzzer() = default;
-  explicit DifferentialFuzzer(Options options) : options_(options) {}
+  explicit DifferentialFuzzer(Options options) : options_(std::move(options)) {}
+
+  void SetOptions(Options options) { options_ = std::move(options); }
+  const Options& GetOptions() const { return options_; }
 
   // Executes and differentially compares target and candidate code on a single test case.
   DifferentialComparison Compare(const std::vector<uint32_t>& target_code, uint32_t target_vram,

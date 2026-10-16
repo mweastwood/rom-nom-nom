@@ -274,5 +274,110 @@ TEST(DominatorTreeTest, UnreachableBlocksFilteredInPostDominators) {
   EXPECT_THAT(post_dominator_tree.ImmediateDominator(0), Optional(2u));
 }
 
+TEST(DominatorTreeTest, UnreachableCycleFilteredInDominatorsAndPostDominators) {
+  // Block 0 (0x00):
+  //   0x00: j 0x80000018 (to Block 3)
+  //   0x04: nop
+  // Block 1 (0x08 - unreachable cycle part A):
+  //   0x08: bne $a0, $zero, +3 (to Block 3 at 0x18)
+  //   0x0C: nop
+  // Block 2 (0x10 - unreachable cycle part B):
+  //   0x10: j 0x80000008 (back to Block 1 at 0x08)
+  //   0x14: nop
+  // Block 3 (0x18 - reachable exit):
+  //   0x18: jr $ra
+  //   0x1C: nop
+  std::vector<uint32_t> words = {
+      0x08000006,  // 0x00: j 0x80000018
+      0x00000000,  // 0x04: nop
+      0x14800003,  // 0x08: bne $a0, $zero, +3 -> 0x18
+      0x00000000,  // 0x0C: nop
+      0x08000002,  // 0x10: j 0x80000008
+      0x00000000,  // 0x14: nop
+      0x03E00008,  // 0x18: jr $ra
+      0x00000000,  // 0x1C: nop
+  };
+
+  auto instructions = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+  const auto& cfg = *cfg_or;
+  ASSERT_EQ(cfg.Blocks().size(), 4u);
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  EXPECT_TRUE(dt.IsReachable(0));
+  EXPECT_FALSE(dt.IsReachable(1));
+  EXPECT_FALSE(dt.IsReachable(2));
+  EXPECT_TRUE(dt.IsReachable(3));
+  EXPECT_THAT(dt.ImmediateDominator(3), Optional(0u));
+  EXPECT_EQ(dt.ImmediateDominator(1), std::nullopt);
+  EXPECT_EQ(dt.ImmediateDominator(2), std::nullopt);
+  EXPECT_FALSE(dt.Dominates(1, 2));
+  EXPECT_FALSE(dt.Dominates(1, 1));
+
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  EXPECT_TRUE(post_dt.IsReachable(0));
+  EXPECT_FALSE(post_dt.IsReachable(1));
+  EXPECT_FALSE(post_dt.IsReachable(2));
+  EXPECT_TRUE(post_dt.IsReachable(3));
+  EXPECT_THAT(post_dt.ImmediateDominator(0), Optional(3u));
+  EXPECT_EQ(post_dt.ImmediateDominator(1), std::nullopt);
+  EXPECT_EQ(post_dt.ImmediateDominator(2), std::nullopt);
+}
+
+TEST(DominatorTreeTest, MultiExitWithCyclicDiamondAndLoop) {
+  // Multi-exit CFG with a loop and diamond merge to exercise intersect() across
+  // multiple RPO levels and virtual exit post-dominators:
+  // Block 0 (0x00): bne $a0, $zero, +5 (to Block 2 at 0x18); nop
+  // Block 1 (0x08): bne $a1, $zero, +5 (to Block 3 at 0x20); nop
+  // Block 4 (0x10 - Exit 1): jr $ra; nop
+  // Block 2 (0x18): bne $a2, $zero, +3 (to Block 5 at 0x28); nop
+  // Block 3 (0x20 - Loop/Merge): bne $a3, $zero, -3 (back to Block 2 at 0x18); nop
+  // Block 5 (0x28 - Exit 2): jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x14800005,  // 0x00: bne $a0, $zero, +5 -> 0x18 (Block 2)
+      0x00000000,  // 0x04: nop
+      0x14A00005,  // 0x08: bne $a1, $zero, +5 -> 0x20 (Block 3)
+      0x00000000,  // 0x0C: nop
+      0x03E00008,  // 0x10: jr $ra (Block 2 in address order = Exit 1)
+      0x00000000,  // 0x14: nop
+      0x14C00003,  // 0x18: bne $a2, $zero, +3 -> 0x28
+      0x00000000,  // 0x1C: nop
+      0x14E0FFFD,  // 0x20: bne $a3, $zero, -3 -> 0x18
+      0x00000000,  // 0x24: nop
+      0x03E00008,  // 0x28: jr $ra (Exit 2)
+      0x00000000,  // 0x2C: nop
+  };
+
+  auto instructions = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+  const auto& cfg = *cfg_or;
+  ASSERT_EQ(cfg.Blocks().size(), 6u);
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  for (uint32_t id = 0; id < 6; ++id) {
+    EXPECT_TRUE(dt.IsReachable(id));
+    EXPECT_TRUE(dt.Dominates(0, id));
+  }
+  // Block 3 (0x18) is reached from Block 0 and from Block 4 (0x20, which is reached from Block 1).
+  // Therefore Block 0 is the immediate dominator of both Block 3 and Block 4.
+  EXPECT_THAT(dt.ImmediateDominator(3), Optional(0u));
+  EXPECT_THAT(dt.ImmediateDominator(4), Optional(0u));
+  EXPECT_THAT(dt.ImmediateDominator(5), Optional(0u));
+
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  for (uint32_t id = 0; id < 6; ++id) {
+    EXPECT_TRUE(post_dt.IsReachable(id));
+  }
+  // Block 5 (0x28, Exit 2) post-dominates Block 3 (0x18) and Block 4 (0x20) because the only exit
+  // from the 3<->4 cycle is through Block 5.
+  EXPECT_TRUE(post_dt.Dominates(5, 3));
+  EXPECT_TRUE(post_dt.Dominates(5, 4));
+  // Neither Exit 1 (Block 2 at 0x10) nor Exit 2 (Block 5 at 0x28) post-dominates Entry (Block 0).
+  EXPECT_FALSE(post_dt.Dominates(2, 0));
+  EXPECT_FALSE(post_dt.Dominates(5, 0));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -1036,5 +1036,149 @@ TEST(AstConverterTest, CalleeSavedInCallDelaySlotDetected) {
   EXPECT_THAT(code, Not(HasSubstr("s1 = ")));
 }
 
+TEST(AstConverterTest, FoldsNewFpuComparisonOpcodesInBranchConditions) {
+  // 1. Test ExtractBranchCondition directly on blocks with c.ueq.s, c.ult.s, c.ule.d, c.ngle.s,
+  // c.ngl.d, c.un.s followed by bc1t / bc1f.
+  auto make_fpu_branch_block = [](uint32_t cmp_word, uint32_t branch_word) {
+    std::vector<uint32_t> words = {cmp_word, branch_word, 0x00000000};
+    BasicBlock block;
+    block.id = 0;
+    block.instructions = *DecodeSequence(words, 0x80020000);
+    return block;
+  };
+
+  // c.ueq.s $f2, $f4 (0x46041033) + bc1t (0x45010002)
+  {
+    auto block = make_fpu_branch_block(0x46041033, 0x45010002);
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+              "(f2 == f4)");
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/true)->ToString(),
+              "(f2 != f4)");
+  }
+
+  // c.ult.s $f2, $f4 (0x46041035) + bc1f (0x45000002)
+  {
+    auto block = make_fpu_branch_block(0x46041035, 0x45000002);
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+              "!(f2 < f4)");
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/true)->ToString(),
+              "(f2 < f4)");
+  }
+
+  // c.ule.d $f12, $f14 (0x462E6037) + bc1t (0x45010002)
+  {
+    auto block = make_fpu_branch_block(0x462E6037, 0x45010002);
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+              "(f12_d <= f14_d)");
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/true)->ToString(),
+              "!(f12_d <= f14_d)");
+  }
+
+  // c.ngle.s $f2, $f4 (0x46041039) + bc1t (0x45010002)
+  {
+    auto block = make_fpu_branch_block(0x46041039, 0x45010002);
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+              "(f2 <= f4)");
+  }
+
+  // c.ngl.d $f12, $f14 (0x462E603B) + bc1f (0x45000002)
+  {
+    auto block = make_fpu_branch_block(0x462E603B, 0x45000002);
+    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+              "(f12_d != f14_d)");
+  }
+
+  // 2. Test full AstConverter::Convert with c.ule.d + bc1f and c.ueq.s + bc1t
+  std::vector<uint32_t> words = {
+      0x462E6037,  // 00: c.ule.d $f12, $f14
+      0x45000003,  // 04: bc1f    +3 -> 0x14
+      0x00000000,  // 08: nop
+      0x24020001,  // 0C: addiu   $v0, $zero, 1
+      0x03E00008,  // 10: jr      $ra
+      0x00000000,  // 14: nop
+      0x46041033,  // 18: c.ueq.s $f2, $f4
+      0x45010003,  // 1C: bc1t    +3 -> 0x2C
+      0x00000000,  // 20: nop
+      0x24020002,  // 24: addiu   $v0, $zero, 2
+      0x03E00008,  // 28: jr      $ra
+      0x00000000,  // 2C: nop
+      0x24020003,  // 30: addiu   $v0, $zero, 3
+      0x03E00008,  // 34: jr      $ra
+      0x00000000,  // 38: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "FpuBranchFold";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("(f12_d <= f14_d)"));
+  EXPECT_THAT(code, HasSubstr("(f2 == f4)"));
+  EXPECT_THAT(code, Not(HasSubstr("fcond")));
+}
+
+TEST(AstConverterTest, ComputeBlockEntryStatesStepsDelaySlotBeforeCallInstruction) {
+  // Block 0:
+  //   00: addiu $v0, $zero, 42
+  //   04: jal   0x80030000
+  //   08: addu  $s0, $v0, $zero   (delay slot copies $v0 (=42) into callee-saved $s0 BEFORE jal
+  //                                clobbers $v0; then jal preserves $s0)
+  //   0C: bnez  $a0, 0x18         (forces Block 1 at 0x18 to be a separate basic block)
+  //   10: nop
+  // Block 1 (0x14):
+  //   14: nop
+  // Block 2 (0x18):
+  //   18: addu  $v0, $s0, $zero   (uses $s0 in successor block; should fold to 42!)
+  //   1C: jr    $ra
+  //   20: nop
+  std::vector<uint32_t> words = {
+      0x2402002A,  // 00: addiu $v0, $zero, 42
+      0x0C00C000,  // 04: jal   0x80030000
+      0x00408021,  // 08: addu  $s0, $v0, $zero  (delay slot of jal)
+      0x14800002,  // 0C: bnez  $a0, +2 -> 0x18
+      0x00000000,  // 10: nop
+      0x00000000,  // 14: nop
+      0x02001021,  // 18: addu  $v0, $s0, $zero
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "DelaySlotCopyAcrossCall";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // Because the delay slot stepped before the jal in ComputeBlockEntryStates,
+  // $s0 holds constant 42 upon entering Block 2, so `addu $v0, $s0, $zero` lifts to `v0 = 42;`.
+  EXPECT_THAT(code, HasSubstr("temp_s0 = 42;"));
+  EXPECT_THAT(code, Not(HasSubstr("v0 = temp_s0;")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

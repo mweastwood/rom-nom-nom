@@ -52,8 +52,25 @@ absl::StatusOr<SymbolRegistry> ParseSymbolRegistry(std::string_view textproto_co
   if (!parser.ParseFromString(std::string(textproto_content), &registry)) {
     GameConfig game_config;
     if (parser.ParseFromString(std::string(textproto_content), &game_config)) {
+      absl::flat_hash_set<uint32_t> seen_addresses;
+      absl::flat_hash_set<std::string> seen_names;
       for (const auto& sym : game_config.symbols()) {
+        seen_addresses.insert(sym.address());
+        seen_names.insert(std::string(sym.name()));
         *registry.add_entries() = sym;
+      }
+      for (const auto& sym_file : game_config.symbol_files()) {
+        if (std::filesystem::exists(sym_file)) {
+          auto file_reg_or = LoadSymbolRegistry(sym_file);
+          if (file_reg_or.ok()) {
+            for (const auto& sym : file_reg_or->entries()) {
+              if (seen_addresses.insert(sym.address()).second &&
+                  seen_names.insert(std::string(sym.name())).second) {
+                *registry.add_entries() = sym;
+              }
+            }
+          }
+        }
       }
       auto status = ValidateSymbolRegistry(registry);
       if (!status.ok()) {
@@ -103,13 +120,20 @@ SymbolIndex& SymbolIndex::operator=(SymbolIndex&& other) noexcept {
 void SymbolIndex::RebuildIndex() {
   by_address_.clear();
   by_name_.clear();
+  sorted_entries_.clear();
   by_address_.reserve(registry_.entries_size());
   by_name_.reserve(registry_.entries_size());
+  sorted_entries_.reserve(registry_.entries_size());
 
   for (const auto& entry : registry_.entries()) {
     by_address_[entry.address()] = &entry;
     by_name_[entry.name()] = &entry;
+    sorted_entries_.push_back(&entry);
   }
+  std::sort(sorted_entries_.begin(), sorted_entries_.end(),
+            [](const SymbolRegistryEntry* a, const SymbolRegistryEntry* b) {
+              return a->address() < b->address();
+            });
 }
 
 absl::StatusOr<SymbolIndex> SymbolIndex::FromProto(SymbolRegistry registry) {
@@ -123,8 +147,25 @@ absl::StatusOr<SymbolIndex> SymbolIndex::FromProto(SymbolRegistry registry) {
 absl::StatusOr<SymbolIndex> SymbolIndex::FromGameConfig(const GameConfig& config) {
   SymbolRegistry registry;
   registry.mutable_entries()->Reserve(config.symbols_size());
+  absl::flat_hash_set<uint32_t> seen_addresses;
+  absl::flat_hash_set<std::string> seen_names;
   for (const auto& sym : config.symbols()) {
+    seen_addresses.insert(sym.address());
+    seen_names.insert(std::string(sym.name()));
     *registry.add_entries() = sym;
+  }
+  for (const auto& sym_file : config.symbol_files()) {
+    if (std::filesystem::exists(sym_file)) {
+      auto file_reg_or = LoadSymbolRegistry(sym_file);
+      if (file_reg_or.ok()) {
+        for (const auto& sym : file_reg_or->entries()) {
+          if (seen_addresses.insert(sym.address()).second &&
+              seen_names.insert(std::string(sym.name())).second) {
+            *registry.add_entries() = sym;
+          }
+        }
+      }
+    }
   }
   return FromProto(std::move(registry));
 }
@@ -177,19 +218,6 @@ std::string SymbolIndex::LookupOrSynthesizeName(uint32_t address, SymbolType fal
     default:
       return absl::StrFormat("D_%08X", address);
   }
-}
-
-std::vector<const SymbolRegistryEntry*> SymbolIndex::SortedEntries() const {
-  std::vector<const SymbolRegistryEntry*> entries;
-  entries.reserve(by_address_.size());
-  for (const auto& [_, entry] : by_address_) {
-    entries.push_back(entry);
-  }
-  std::sort(entries.begin(), entries.end(),
-            [](const SymbolRegistryEntry* a, const SymbolRegistryEntry* b) {
-              return a->address() < b->address();
-            });
-  return entries;
 }
 
 std::string SymbolIndex::GenerateSymbolsScript() const {

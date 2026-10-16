@@ -16,6 +16,7 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/strip.h"
+#include "absl/types/span.h"
 #include "core/c_ast.h"
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
@@ -57,7 +58,13 @@ constexpr MathIntrinsic kMathIntrinsics[] = {
 
 LifterPipeline::LifterPipeline(LifterPipelineOptions options,
                                std::unique_ptr<FunctionLoader> loader)
-    : options_(std::move(options)), loader_(std::move(loader)) {}
+    : options_(std::move(options)), loader_(std::move(loader)) {
+  if (loader_ != nullptr && loader_->Extractor() != nullptr &&
+      loader_->Extractor()->Config() != nullptr &&
+      !loader_->Extractor()->Config()->game_name().empty()) {
+    options_.game_name = loader_->Extractor()->Config()->game_name();
+  }
+}
 
 absl::StatusOr<std::unique_ptr<LifterPipeline>> LifterPipeline::Create(
     LifterPipelineOptions options) {
@@ -87,7 +94,7 @@ absl::StatusOr<LifterResult> LifterPipeline::Decompile(std::string_view func_nam
     return loaded_or.status();
   }
 
-  auto tu_or = BuildTranslationUnit({std::string(loaded_or->name)});
+  auto tu_or = BuildTranslationUnitForLoadedFunctions(absl::MakeConstSpan(&(*loaded_or), 1));
   if (tu_or.ok() && !tu_or->functions.empty()) {
     CEmitterOptions emitter_opts;
     emitter_opts.includes = tu_or->includes;
@@ -177,6 +184,29 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
   if (func_names.empty()) {
     return absl::InvalidArgumentError("LifterPipeline: No function names provided.");
   }
+  if (loader_ == nullptr) {
+    return absl::FailedPreconditionError("LifterPipeline: No FunctionLoader initialized.");
+  }
+
+  std::vector<LoadedFunction> loaded_functions;
+  loaded_functions.reserve(func_names.size());
+  for (const auto& func_name : func_names) {
+    auto loaded_or = loader_->LoadFunction(func_name);
+    if (!loaded_or.ok()) {
+      return loaded_or.status();
+    }
+    loaded_functions.push_back(std::move(*loaded_or));
+  }
+
+  return BuildTranslationUnitForLoadedFunctions(loaded_functions, includes);
+}
+
+absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFunctions(
+    absl::Span<const LoadedFunction> loaded_functions,
+    const std::vector<std::string>& includes) const {
+  if (loaded_functions.empty()) {
+    return absl::InvalidArgumentError("LifterPipeline: No functions provided.");
+  }
 
   CTranslationUnit tu;
   tu.includes = !includes.empty() ? includes : options_.includes;
@@ -201,32 +231,28 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
     }
   }
 
-  std::vector<LoadedFunction> loaded_functions;
-  loaded_functions.reserve(func_names.size());
   absl::flat_hash_map<std::string, int> parameter_counts;
   absl::flat_hash_map<std::string, int> fp_parameter_counts;
   absl::flat_hash_set<std::string> callers_use_v0;
   absl::flat_hash_set<std::string> callers_use_f0;
 
-  for (const auto& func_name : func_names) {
-    auto loaded_or = loader_->LoadFunction(func_name);
-    if (!loaded_or.ok()) {
-      return loaded_or.status();
-    }
-    parameter_counts[loaded_or->name] =
-        ExpressionBuilder::DetermineParameterCount(loaded_or->instructions);
-    fp_parameter_counts[loaded_or->name] =
-        ExpressionBuilder::DetermineFpParameterCount(loaded_or->instructions);
-    auto cfg_or = ControlFlowGraph::Build(loaded_or->instructions);
+  for (const auto& loaded_func : loaded_functions) {
+    parameter_counts[loaded_func.name] =
+        ExpressionBuilder::DetermineParameterCount(loaded_func.instructions);
+    fp_parameter_counts[loaded_func.name] =
+        ExpressionBuilder::DetermineFpParameterCount(loaded_func.instructions);
+    auto cfg_or = ControlFlowGraph::Build(loaded_func.instructions);
     if (cfg_or.ok()) {
       if (ExpressionBuilder::DetermineReturnsF0(*cfg_or)) {
-        callers_use_f0.insert(loaded_or->name);
+        callers_use_f0.insert(loaded_func.name);
       } else if (ExpressionBuilder::DetermineReturnsV0(*cfg_or, tu.symbol_index, &callers_use_v0)) {
-        callers_use_v0.insert(loaded_or->name);
+        callers_use_v0.insert(loaded_func.name);
       }
     }
+  }
 
-    const auto& insts = loaded_or->instructions;
+  for (const auto& loaded_func : loaded_functions) {
+    const auto& insts = loaded_func.instructions;
     for (size_t i = 0; i < insts.size(); ++i) {
       uint32_t target_vram = 0;
       if (insts[i].opcode == Opcode::kJal) {
@@ -331,8 +357,6 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnit(
         }
       }
     }
-
-    loaded_functions.push_back(std::move(*loaded_or));
   }
 
   for (const auto& loaded_func : loaded_functions) {
@@ -375,33 +399,7 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
   std::vector<std::string> func_names;
   absl::flat_hash_set<std::string> seen;
 
-  std::vector<std::filesystem::path> search_paths;
-  if (!options_.asm_dir.empty()) {
-    search_paths.push_back(options_.asm_dir / absl::StrCat(module_name, ".s"));
-  }
-  search_paths.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
-                         absl::StrCat(module_name, ".s"));
-  search_paths.push_back(options_.repo_root / "asm" / options_.game_name /
-                         absl::StrCat(module_name, ".s"));
-
-  for (const auto& p : search_paths) {
-    if (std::filesystem::exists(p)) {
-      std::ifstream ifs(p);
-      std::string line;
-      while (std::getline(ifs, line)) {
-        if (absl::StartsWith(line, ".ent ")) {
-          std::string name = std::string(absl::StripAsciiWhitespace(line.substr(5)));
-          if (!name.empty() && seen.insert(name).second) {
-            func_names.push_back(name);
-          }
-        }
-      }
-      if (!func_names.empty()) {
-        break;
-      }
-    }
-  }
-
+  // 1. Check nonmatchings directory (e.g. <asm_dir>/nonmatchings/<module_name>/*.s)
   std::vector<std::filesystem::path> nonmatching_dirs;
   if (!options_.asm_dir.empty()) {
     nonmatching_dirs.push_back(options_.asm_dir / "nonmatchings" / module_name);

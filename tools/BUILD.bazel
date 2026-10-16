@@ -24,9 +24,6 @@ py_binary(
 py_binary(
     name = "progress",
     srcs = ["progress.py"],
-    deps = [
-        "@pip//pyyaml",
-    ],
     main = "progress.py",
 )
 

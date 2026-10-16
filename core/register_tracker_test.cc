@@ -282,5 +282,37 @@ TEST(RegisterTrackerTest, Cop0AndCop1InstructionUseDef) {
   EXPECT_THAT(ud_bgezall.gpr_defs, ElementsAre(Register::kRa));
 }
 
+TEST(RegisterTrackerTest, DetermineReturnsV0FallthroughRedefinesV0AfterNonV0Instruction) {
+  // Block 0 (0x80000000):
+  //   0x00: beq   $a0, $zero, +6 (-> 0x8000001C: Block 2 return)
+  //   0x04: addiu $v0, $zero, 1  (delay slot defines $v0 for taken branch)
+  // Block 1 (0x80000008, fallthrough from Block 0):
+  //   0x08: addiu $t0, $zero, 10 (does not touch $v0)
+  //   0x0C: addiu $v0, $zero, 2  (redefines $v0 -> ft_redefined_v0 = true, breaks outer loop)
+  //   0x10: sw    $v0, 0($a1)    (uses redefined $v0; must not be mistaken for use of delay slot)
+  //   0x14: jr    $ra
+  //   0x18: nop
+  // Block 2 (0x8000001C, target of branch from Block 0):
+  //   0x1C: jr    $ra
+  //   0x20: nop
+  std::vector<uint32_t> words = {
+      0x10800006,  // 0x00: beq   $a0, $zero, +6 (0x8000001C)
+      0x24020001,  // 0x04: addiu $v0, $zero, 1
+      0x2408000A,  // 0x08: addiu $t0, $zero, 10
+      0x24020002,  // 0x0C: addiu $v0, $zero, 2
+      0xAC620000,  // 0x10: sw    $v0, 0($v1)
+      0x03E00008,  // 0x14: jr    $ra
+      0x00000000,  // 0x18: nop
+      0x03E00008,  // 0x1C: jr    $ra
+      0x00000000,  // 0x20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  EXPECT_TRUE(DetermineReturnsV0(*cfg_or));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

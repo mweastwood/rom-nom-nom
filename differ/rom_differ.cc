@@ -201,13 +201,14 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
             break;
           }
         }
-        if (!found_code_segment &&
-            (has_code_subsegments || segment.name() == "main" || segment.name() == "code")) {
+        if (!found_code_segment && (segment.type() == SEGMENT_CODE || has_code_subsegments ||
+                                    segment.name() == "main" || segment.name() == "code")) {
           found_code_segment = true;
           code_segment_name = segment.name();
           retail_code_start = segment.rom_start();
           retail_code_end = segment.rom_end();
-        } else if (found_code_segment) {
+        } else if (found_code_segment && segment.type() != SEGMENT_CODE &&
+                   segment.type() != SEGMENT_BSS) {
           asset_segment_ranges.push_back(AssetSegmentRange{.name = std::string(segment.name()),
                                                            .rom_start = segment.rom_start(),
                                                            .rom_end = segment.rom_end()});
@@ -222,18 +223,21 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
 
   if (!asset_segment_ranges.empty()) {
     const uint64_t first_retail_asset_start = asset_segment_ranges.front().rom_start;
-    // Extract a 32-byte non-zero signature from the start of the first asset segment
-    size_t signature_length = std::min<size_t>(32, target_bytes.size() - first_retail_asset_start);
-    std::string_view asset_signature(
-        reinterpret_cast<const char*>(target_bytes.data() + first_retail_asset_start),
-        signature_length);
+    if (first_retail_asset_start < target_bytes.size()) {
+      // Extract a 32-byte non-zero signature from the start of the first asset segment
+      size_t signature_length =
+          std::min<size_t>(32, target_bytes.size() - first_retail_asset_start);
+      std::string_view asset_signature(
+          reinterpret_cast<const char*>(target_bytes.data() + first_retail_asset_start),
+          signature_length);
 
-    std::string_view built_rom_view(reinterpret_cast<const char*>(built_bytes.data()),
-                                    built_bytes.size());
-    size_t found_position = built_rom_view.find(asset_signature, retail_code_start);
-    if (found_position != std::string_view::npos) {
-      first_asset_built_offset = found_position;
-      built_code_end = found_position;
+      std::string_view built_rom_view(reinterpret_cast<const char*>(built_bytes.data()),
+                                      built_bytes.size());
+      size_t found_position = built_rom_view.find(asset_signature, retail_code_start);
+      if (found_position != std::string_view::npos) {
+        first_asset_built_offset = found_position;
+        built_code_end = found_position;
+      }
     }
   }
 

@@ -2351,5 +2351,165 @@ TEST(ExpressionBuilderTest, LiftCop1CvtAndCompare) {
   EXPECT_EQ(statements[2].ToString(), "fcond = f2_d == f4_d;\n");
 }
 
+TEST(ExpressionBuilderTest, FoldedGlobalIndexedLoadAndStoreDoublePrecision) {
+  std::string textproto = R"pb(
+    entries { name: "g_double_arr" address: 0x80188BFC type: SYMBOL_DATA size: 1024 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      // Double indexed load: f0_d = *(f64*)((u8*)&g_double_arr + v1)
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00230821,  // 1: addu  $at, $at, $v1
+      0xD4208BFC,  // 2: ldc1  $f0, -29700($at)
+      // Double indexed store: *(f64*)((u8*)&g_double_arr + arg0) = f12_d
+      0x3C088019,  // 3: lui   $t0, 0x8019
+      0x00884021,  // 4: addu  $t0, $a0, $t0
+      0xF50C8BFC,  // 5: sdc1  $f12, -29700($t0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "f0_d = *(f64*)((u8*)&g_double_arr + v1);\n");
+  EXPECT_EQ(statements[1].ToString(), "*(f64*)((u8*)&g_double_arr + arg0) = f12_d;\n");
+}
+
+TEST(ExpressionBuilderTest, FprConstBitsInvalidatedForCallerSavedButPreservedForCalleeSaved) {
+  // Load constant 0 into caller-saved $f4 and callee-saved $f20 via mtc1 $zero.
+  // Execute jal.
+  // After jal, load constant 0x3FF00000 (upper half of 1.0) into $f5 and $f21.
+  // $f4 was invalidated by jal, so $f5 must NOT combine into f4_d = 1.0.
+  // $f20 was preserved across jal, so $f21 MUST combine with $f20 into f20_d = 1.0.
+  std::vector<uint32_t> words = {
+      0x44802000,  // 0: mtc1 $zero, $f4
+      0x4480A000,  // 1: mtc1 $zero, $f20
+      0x0C000400,  // 2: jal  0x80001000
+      0x00000000,  // 3: nop
+      0x3C083FF0,  // 4: lui  $t0, 0x3FF0
+      0x44882800,  // 5: mtc1 $t0, $f5
+      0x4488A800,  // 6: mtc1 $t0, $f21
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  std::string combined;
+  for (const auto& s : statements) {
+    combined += s.ToString();
+  }
+
+  EXPECT_THAT(combined, ::testing::Not(HasSubstr("f4_d = 1.0;")));
+  EXPECT_THAT(combined, HasSubstr("f20_d = 1.0;"));
+}
+
+TEST(ExpressionBuilderTest, Ldc1AndSdc1SuppressSavedFprStackSpillsAndRestores) {
+  std::vector<uint32_t> words = {
+      0xF7B40018,  // 0: sdc1 $f20, 24($sp)  (matches saved_fpr_offsets -> suppressed)
+      0xF7B60020,  // 1: sdc1 $f22, 32($sp)  (offset mismatch -> emitted)
+      0xD7B40018,  // 2: ldc1 $f20, 24($sp)  (matches saved_fpr_offsets -> suppressed)
+      0xD7B60020,  // 3: ldc1 $f22, 32($sp)  (offset mismatch -> emitted)
+  };
+
+  absl::flat_hash_map<FpRegister, int32_t> saved_fpr_offsets = {
+      {FpRegister::kF20, 24},
+      {FpRegister::kF22, 40},
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(
+      insts, /*symbol_index=*/nullptr, /*game_config=*/nullptr,
+      /*function_parameter_counts=*/nullptr, /*function_fp_parameter_counts=*/nullptr,
+      /*omit_last_instruction=*/false, /*frame_size=*/64,
+      /*functions_returning_v0=*/nullptr, /*functions_returning_f0=*/nullptr,
+      /*has_frame_pointer=*/false, /*has_calls=*/false, /*sp_address_taken=*/false,
+      /*saved_reg_offsets=*/nullptr, &saved_fpr_offsets);
+
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "*(f64*)&var_sp_32 = f22_d;\n");
+  EXPECT_EQ(statements[1].ToString(), "f22_d = *(f64*)&var_sp_32;\n");
+}
+
+TEST(ExpressionBuilderTest, LiftsNewFpuComparisonOpcodesSingleAndDouble) {
+  std::vector<uint32_t> words = {
+      // Single-precision comparisons ($f2, $f4)
+      0x46041031,  // c.un.s   $f2, $f4 -> ==
+      0x46041033,  // c.ueq.s  $f2, $f4 -> ==
+      0x4604103B,  // c.ngl.s  $f2, $f4 -> ==
+      0x46041035,  // c.ult.s  $f2, $f4 -> <
+      0x46041037,  // c.ule.s  $f2, $f4 -> <=
+      0x46041039,  // c.ngle.s $f2, $f4 -> <=
+      // Double-precision comparisons ($f2, $f4)
+      0x46241031,  // c.un.d   $f2, $f4 -> ==
+      0x46241033,  // c.ueq.d  $f2, $f4 -> ==
+      0x4624103B,  // c.ngl.d  $f2, $f4 -> ==
+      0x46241035,  // c.ult.d  $f2, $f4 -> <
+      0x46241037,  // c.ule.d  $f2, $f4 -> <=
+      0x46241039,  // c.ngle.d $f2, $f4 -> <=
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(12));
+  EXPECT_EQ(statements[0].ToString(), "fcond = f2 == f4;\n");
+  EXPECT_EQ(statements[1].ToString(), "fcond = f2 == f4;\n");
+  EXPECT_EQ(statements[2].ToString(), "fcond = f2 == f4;\n");
+  EXPECT_EQ(statements[3].ToString(), "fcond = f2 < f4;\n");
+  EXPECT_EQ(statements[4].ToString(), "fcond = f2 <= f4;\n");
+  EXPECT_EQ(statements[5].ToString(), "fcond = f2 <= f4;\n");
+
+  EXPECT_EQ(statements[6].ToString(), "fcond = f2_d == f4_d;\n");
+  EXPECT_EQ(statements[7].ToString(), "fcond = f2_d == f4_d;\n");
+  EXPECT_EQ(statements[8].ToString(), "fcond = f2_d == f4_d;\n");
+  EXPECT_EQ(statements[9].ToString(), "fcond = f2_d < f4_d;\n");
+  EXPECT_EQ(statements[10].ToString(), "fcond = f2_d <= f4_d;\n");
+  EXPECT_EQ(statements[11].ToString(), "fcond = f2_d <= f4_d;\n");
+}
+
+TEST(ExpressionBuilderTest, LiftsStandaloneDivDdivAndDmultInstructions) {
+  std::vector<uint32_t> words = {
+      0x0085001A,  // 0: div    $zero, $a0, $a1
+      0x0085001B,  // 1: divu   $zero, $a0, $a1
+      0x0085001E,  // 2: ddiv   $zero, $a0, $a1
+      0x0085001F,  // 3: ddivu  $zero, $a0, $a1
+      0x0085001C,  // 4: dmult  $a0, $a1
+      0x00001012,  // 5: mflo   $v0
+      0x00001810,  // 6: mfhi   $v1
+      0x0085001D,  // 7: dmultu $a0, $a1
+      0x00001012,  // 8: mflo   $v0
+      0x00001810,  // 9: mfhi   $v1
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  for (const auto& stmt : statements) {
+    EXPECT_NE(stmt.kind, StatementKind::kUnhandled);
+  }
+
+  ASSERT_THAT(statements, SizeIs(12));
+  // div
+  EXPECT_EQ(statements[0].ToString(), "lo = arg0 / arg1;\n");
+  EXPECT_EQ(statements[1].ToString(), "hi = arg0 % arg1;\n");
+  // divu
+  EXPECT_EQ(statements[2].ToString(), "lo = (u32)arg0 / (u32)arg1;\n");
+  EXPECT_EQ(statements[3].ToString(), "hi = (u32)arg0 % (u32)arg1;\n");
+  // ddiv
+  EXPECT_EQ(statements[4].ToString(), "lo = arg0 / arg1;\n");
+  EXPECT_EQ(statements[5].ToString(), "hi = arg0 % arg1;\n");
+  // ddivu
+  EXPECT_EQ(statements[6].ToString(), "lo = (u32)arg0 / (u32)arg1;\n");
+  EXPECT_EQ(statements[7].ToString(), "hi = (u32)arg0 % (u32)arg1;\n");
+  // dmult + mflo/mfhi
+  EXPECT_EQ(statements[8].ToString(), "v0 = arg0 * arg1;\n");
+  EXPECT_EQ(statements[9].ToString(), "v1 = (s64)arg0 * (s64)arg1 >> 32;\n");
+  // dmultu + mflo/mfhi
+  EXPECT_EQ(statements[10].ToString(), "v0 = arg0 * arg1;\n");
+  EXPECT_EQ(statements[11].ToString(), "v1 = (u64)(u32)arg0 * (u64)(u32)arg1 >> 32;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

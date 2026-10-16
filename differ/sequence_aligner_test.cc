@@ -204,5 +204,45 @@ TEST(SequenceAlignerTest, PairsSimilarOpcodesOnSameRow) {
   EXPECT_THAT(result.stats.MatchPercentage(), DoubleEq(0.0));
 }
 
+TEST(SequenceAlignerTest, BitExactInstructionsDistinguishedFromNormalizedMatches) {
+  FunctionDiffContext ctx;
+  ctx.target_vram = 0x80025C00;
+  ctx.target_size = 0xC;
+  ctx.compiled_vram = 0x0;
+  ctx.compiled_size = 0xC;
+
+  Normalizer normalizer(ctx);
+  SequenceAligner aligner(&normalizer);
+
+  // 0x00: addiu $v0, $zero, 1 (0x24020001) - kBitExact
+  // 0x04: intra-function jump back to function start:
+  //       target at 0x80025C00 -> j 0x80025C00 (0x08009700)
+  //       compiled at 0x00000000 -> j 0x00000000 (0x08000000) - kNormalizedExact
+  // 0x08: nop (0x00000000) - kBitExact
+  std::vector<NormalizedInstruction> target = {
+      MakeNorm(0x24020001, 0x80025C00, normalizer, /*is_target=*/true),
+      MakeNorm(0x08009700, 0x80025C04, normalizer, /*is_target=*/true),
+      MakeNorm(0x00000000, 0x80025C08, normalizer, /*is_target=*/true),
+  };
+  std::vector<NormalizedInstruction> compiled = {
+      MakeNorm(0x24020001, 0x0, normalizer, /*is_target=*/false),
+      MakeNorm(0x08000000, 0x4, normalizer, /*is_target=*/false),
+      MakeNorm(0x00000000, 0x8, normalizer, /*is_target=*/false),
+  };
+
+  auto result = aligner.Align(target, compiled);
+
+  ASSERT_THAT(result.rows, SizeIs(3));
+  EXPECT_EQ(result.rows[0].kind, DiffRowKind::kMatch);
+  EXPECT_EQ(result.rows[0].quality, MatchQuality::kBitExact);
+  EXPECT_EQ(result.rows[1].kind, DiffRowKind::kMatch);
+  EXPECT_EQ(result.rows[1].quality, MatchQuality::kNormalizedExact);
+  EXPECT_EQ(result.rows[2].kind, DiffRowKind::kMatch);
+  EXPECT_EQ(result.rows[2].quality, MatchQuality::kBitExact);
+
+  EXPECT_EQ(result.stats.matching_instructions, 3u);
+  EXPECT_EQ(result.stats.bit_exact_instructions, 2u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

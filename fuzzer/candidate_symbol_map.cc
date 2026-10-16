@@ -150,6 +150,7 @@ std::vector<MemoryPayload> ExtractCandidateDataPayloads(absl::Span<const uint8_t
   struct SegmentMapping {
     uint32_t vaddr;
     uint32_t paddr;
+    uint32_t filesz;
     uint32_t memsz;
   };
   std::vector<SegmentMapping> load_segments;
@@ -161,8 +162,9 @@ std::vector<MemoryPayload> ExtractCandidateDataPayloads(absl::Span<const uint8_t
       if (p_type == 1 /* PT_LOAD */) {
         uint32_t p_vaddr = ReadBigEndian32(candidate_elf.data() + ph_offset + 8);
         uint32_t p_paddr = ReadBigEndian32(candidate_elf.data() + ph_offset + 12);
+        uint32_t p_filesz = ReadBigEndian32(candidate_elf.data() + ph_offset + 16);
         uint32_t p_memsz = ReadBigEndian32(candidate_elf.data() + ph_offset + 20);
-        load_segments.push_back({p_vaddr, p_paddr, p_memsz});
+        load_segments.push_back({p_vaddr, p_paddr, p_filesz, p_memsz});
       }
     }
   }
@@ -199,7 +201,11 @@ std::vector<MemoryPayload> ExtractCandidateDataPayloads(absl::Span<const uint8_t
     }
   }
 
-  if (symtab_offset == 0 || strtab_offset == 0) return payloads;
+  if (symtab_offset == 0 || strtab_offset == 0 ||
+      symtab_offset + symtab_size > candidate_elf.size() ||
+      strtab_offset + strtab_size > candidate_elf.size()) {
+    return payloads;
+  }
 
   absl::flat_hash_map<std::string, uint32_t> symbols;
   for (size_t off = 0; off + symtab_entsize <= symtab_size; off += symtab_entsize) {
@@ -209,13 +215,15 @@ std::vector<MemoryPayload> ExtractCandidateDataPayloads(absl::Span<const uint8_t
     if (st_name < strtab_size) {
       const char* sym_name =
           reinterpret_cast<const char*>(candidate_elf.data() + strtab_offset + st_name);
-      symbols[sym_name] = st_value;
+      size_t max_len = strtab_size - st_name;
+      size_t len = strnlen(sym_name, max_len);
+      symbols[std::string(sym_name, len)] = st_value;
     }
   }
 
   auto vram_to_rom = [&](uint32_t vram) -> std::optional<uint32_t> {
     for (const auto& seg : load_segments) {
-      if (vram >= seg.vaddr && vram <= seg.vaddr + seg.memsz) {
+      if (vram >= seg.vaddr && vram <= seg.vaddr + seg.filesz) {
         return seg.paddr + (vram - seg.vaddr);
       }
     }
@@ -266,6 +274,9 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
   size_t shoff = ReadBigEndian32(candidate_elf.data() + 32);
   size_t shentsize = ReadBigEndian16(candidate_elf.data() + 46);
   size_t shnum = ReadBigEndian16(candidate_elf.data() + 48);
+  if (shoff == 0 || shentsize < 40 || shoff + shnum * shentsize > candidate_elf.size()) {
+    return map;
+  }
 
   size_t symtab_offset = 0;
   size_t symtab_size = 0;
@@ -279,6 +290,8 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
     if (sh_type == 2) {  // SHT_SYMTAB
       symtab_offset = ReadBigEndian32(candidate_elf.data() + hdr + 16);
       symtab_size = ReadBigEndian32(candidate_elf.data() + hdr + 20);
+      symtab_entsize = ReadBigEndian32(candidate_elf.data() + hdr + 36);
+      if (symtab_entsize == 0) symtab_entsize = 16;
       uint32_t sh_link = ReadBigEndian32(candidate_elf.data() + hdr + 24);
       if (sh_link < shnum) {
         size_t str_hdr = shoff + sh_link * shentsize;
@@ -289,7 +302,11 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
     }
   }
 
-  if (symtab_offset == 0 || strtab_offset == 0) return map;
+  if (symtab_offset == 0 || strtab_offset == 0 ||
+      symtab_offset + symtab_size > candidate_elf.size() ||
+      strtab_offset + strtab_size > candidate_elf.size()) {
+    return map;
+  }
 
   struct ElfSection {
     std::string name;
@@ -307,6 +324,10 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
       size_t shstr_hdr = shoff + e_shstrndx * shentsize;
       shstr_offset = ReadBigEndian32(candidate_elf.data() + shstr_hdr + 16);
       shstr_size = ReadBigEndian32(candidate_elf.data() + shstr_hdr + 20);
+      if (shstr_offset + shstr_size > candidate_elf.size()) {
+        shstr_offset = 0;
+        shstr_size = 0;
+      }
     }
     for (size_t i = 0; i < shnum; ++i) {
       size_t hdr = shoff + i * shentsize;
@@ -318,7 +339,10 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
       if (sh_addr == 0 || sh_size == 0 || !(sh_flags & 2 /* SHF_ALLOC */)) continue;
       std::string sname;
       if (shstr_offset != 0 && sh_name < shstr_size) {
-        sname = reinterpret_cast<const char*>(candidate_elf.data() + shstr_offset + sh_name);
+        const char* sname_ptr =
+            reinterpret_cast<const char*>(candidate_elf.data() + shstr_offset + sh_name);
+        size_t max_len = shstr_size - sh_name;
+        sname.assign(sname_ptr, strnlen(sname_ptr, max_len));
       }
       alloc_sections.push_back({sname, sh_addr, sh_size, sh_flags, sh_type});
     }
@@ -336,7 +360,8 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
 
     const char* sym_name =
         reinterpret_cast<const char*>(candidate_elf.data() + strtab_offset + st_name);
-    std::string_view name(sym_name);
+    size_t max_len = strtab_size - st_name;
+    std::string_view name(sym_name, strnlen(sym_name, max_len));
 
     bool is_data = false;
     std::optional<uint32_t> target_addr;
@@ -407,7 +432,9 @@ CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_e
     int64_t chosen_shift = 0;
     size_t max_count = 0;
     for (const auto& [shift, count] : shift_counts) {
-      if (count > max_count) {
+      if (count > max_count || (count == max_count && (std::abs(shift) < std::abs(chosen_shift) ||
+                                                       (std::abs(shift) == std::abs(chosen_shift) &&
+                                                        shift < chosen_shift)))) {
         max_count = count;
         chosen_shift = shift;
       }

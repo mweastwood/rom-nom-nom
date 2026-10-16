@@ -1170,7 +1170,7 @@ TEST(DifferentialFuzzerTest, PreservesPointerBufferWritesForPointerTestCases) {
 
 TEST(DifferentialFuzzerTest, InvalidOpcodeAlwaysFailsWithStatusMismatch) {
   std::vector<uint32_t> invalid_code = {
-      0x0000003F,  // Invalid SPECIAL funct 0x3F -> kInvalidOpcode
+      0x00000039,  // Invalid SPECIAL funct 0x39 -> kInvalidOpcode
       0x03E00008,  // jr $ra
       0x00000000,  // nop
   };
@@ -1179,6 +1179,168 @@ TEST(DifferentialFuzzerTest, InvalidOpcodeAlwaysFailsWithStatusMismatch) {
   FuzzTestCase tc;
   auto comp = fuzzer.Compare(invalid_code, 0x80001000, invalid_code, 0x80001000, tc);
   EXPECT_EQ(comp.result, EquivalenceResult::kStatusMismatch);
+}
+
+TEST(DifferentialFuzzerTest, RetryOnMaxStepsReachedRollsBackMemoryWritesBeforeRetry) {
+  // Loop of 60,000 iterations (~240,005 steps): exceeds initial 50,000-step limit,
+  // succeeds on the 250,000-step retry.
+  // Reads initial counter from 0($a0) and increments *(a0) by 1 per iteration.
+  // If memory writes from the initial 50,000-step run were not rolled back before retry,
+  // 0($a0) would start the retry with ~12,499 instead of 0 and end up > 60,000.
+  // 00: ori   $t0, $zero, 60000 (0x3408EA60)
+  // 04: lw    $t1, 0($a0)       (0x8C890000)
+  // loop (08):
+  // 08: addiu $t0, $t0, -1      (0x2508FFFF)
+  // 0C: addiu $t1, $t1, 1       (0x25290001)
+  // 10: bne   $t0, $zero, -3    (0x1500FFFD -> 0x08)
+  // 14: sw    $t1, 0($a0)       (0xAC890000, delay slot)
+  // 18: addu  $v0, $t1, $zero   (0x01201021)
+  // 1C: jr    $ra               (0x03E00008)
+  // 20: nop                     (0x00000000)
+  std::vector<uint32_t> loop_code = {
+      0x3408EA60,  // ori   $t0, $zero, 60000
+      0x8C890000,  // lw    $t1, 0($a0)
+      0x2508FFFF,  // addiu $t0, $t0, -1
+      0x25290001,  // addiu $t1, $t1, 1
+      0x1500FFFD,  // bne   $t0, $zero, -3
+      0xAC890000,  // sw    $t1, 0($a0)
+      0x01201021,  // addu  $v0, $t1, $zero
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Fast equivalent code: adds 60,000 directly to *(a0) in 7 steps
+  std::vector<uint32_t> fast_code = {
+      0x3408EA60,  // ori  $t0, $zero, 60000
+      0x8C890000,  // lw   $t1, 0($a0)
+      0x01284821,  // addu $t1, $t1, $t0
+      0xAC890000,  // sw   $t1, 0($a0)
+      0x01201021,  // addu $v0, $t1, $zero
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  tc.a0 = 0x80100000;
+
+  // Case 1: Target hits 50,000-step limit and retries with 250,000 steps
+  DifferentialComparison comp_target_retry =
+      fuzzer.Compare(loop_code, 0x80001000, fast_code, 0x80001000, tc);
+  EXPECT_EQ(comp_target_retry.result, EquivalenceResult::kEquivalent)
+      << comp_target_retry.failure_reason;
+  EXPECT_EQ(comp_target_retry.target_result.v0, 60000u);
+  EXPECT_EQ(comp_target_retry.candidate_result.v0, 60000u);
+  ASSERT_EQ(comp_target_retry.target_result.write_log.size(), 60000u);
+  EXPECT_EQ(comp_target_retry.target_result.write_log.back().value, 60000u);
+
+  // Case 2: Candidate hits 50,000-step limit and retries with 250,000 steps
+  DifferentialComparison comp_cand_retry =
+      fuzzer.Compare(fast_code, 0x80001000, loop_code, 0x80001000, tc);
+  EXPECT_EQ(comp_cand_retry.result, EquivalenceResult::kEquivalent)
+      << comp_cand_retry.failure_reason;
+  EXPECT_EQ(comp_cand_retry.target_result.v0, 60000u);
+  EXPECT_EQ(comp_cand_retry.candidate_result.v0, 60000u);
+  ASSERT_EQ(comp_cand_retry.candidate_result.write_log.size(), 60000u);
+  EXPECT_EQ(comp_cand_retry.candidate_result.write_log.back().value, 60000u);
+}
+
+TEST(DifferentialFuzzerTest, PreservesPointerBufferWritesWhenPointerInA1A2OrA3) {
+  DifferentialFuzzer::Options options;
+  options.pointer_buffer_vram = 0x80500000;
+  options.pointer_buffer_size = 0x100000;
+  // Map 0x80500000 -> 0x80200000 (which is also in target_addresses) so that if is_pointer_case
+  // fails to detect a pointer in $a1, $a2, or $a3, the candidate write to 0x80500000 would be
+  // erroneously remapped to 0x80200000 and fail comparison.
+  options.candidate_to_target_address = [](uint32_t addr) -> uint32_t {
+    if (addr >= 0x80500000 && addr < 0x80600000) return 0x80200000;
+    return addr;
+  };
+  DifferentialFuzzer fuzzer(options);
+
+  // Pointer in $a1 ($a0 is a non-pointer integer 42)
+  // Both write $a0 to 0x80200000 and to 0($a1)
+  std::vector<uint32_t> code_a1 = {
+      0x3C088020,  // lui $t0, 0x8020
+      0xAD040000,  // sw  $a0, 0($t0)
+      0xACA40000,  // sw  $a0, 0($a1)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+  FuzzTestCase tc_a1;
+  tc_a1.a0 = 42;
+  tc_a1.a1 = 0x80500010;
+  auto comp_a1 = fuzzer.Compare(code_a1, 0x80001000, code_a1, 0x80001000, tc_a1);
+  EXPECT_EQ(comp_a1.result, EquivalenceResult::kEquivalent) << comp_a1.failure_reason;
+
+  // Pointer in $a2 ($a0 = 42, $a1 = 0)
+  std::vector<uint32_t> code_a2 = {
+      0x3C088020,  // lui $t0, 0x8020
+      0xAD040000,  // sw  $a0, 0($t0)
+      0xACC40000,  // sw  $a0, 0($a2)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+  FuzzTestCase tc_a2;
+  tc_a2.a0 = 42;
+  tc_a2.a2 = 0x80500020;
+  auto comp_a2 = fuzzer.Compare(code_a2, 0x80001000, code_a2, 0x80001000, tc_a2);
+  EXPECT_EQ(comp_a2.result, EquivalenceResult::kEquivalent) << comp_a2.failure_reason;
+
+  // Pointer in $a3 ($a0 = 42, $a1 = 0, $a2 = 0)
+  std::vector<uint32_t> code_a3 = {
+      0x3C088020,  // lui $t0, 0x8020
+      0xAD040000,  // sw  $a0, 0($t0)
+      0xACE40000,  // sw  $a0, 0($a3)
+      0x03E00008,  // jr  $ra
+      0x00000000,  // nop
+  };
+  FuzzTestCase tc_a3;
+  tc_a3.a0 = 42;
+  tc_a3.a3 = 0x80500030;
+  auto comp_a3 = fuzzer.Compare(code_a3, 0x80001000, code_a3, 0x80001000, tc_a3);
+  EXPECT_EQ(comp_a3.result, EquivalenceResult::kEquivalent) << comp_a3.failure_reason;
+}
+
+TEST(DifferentialFuzzerTest, SetOptionsAndGetOptionsRoundTripAndTakeEffect) {
+  DifferentialFuzzer fuzzer;
+  EXPECT_EQ(fuzzer.GetOptions().max_steps_per_run, 50000u);
+  EXPECT_TRUE(fuzzer.GetOptions().check_v0);
+  EXPECT_FALSE(fuzzer.GetOptions().check_v1);
+
+  DifferentialFuzzer::Options new_opts;
+  new_opts.max_steps_per_run = 12345;
+  new_opts.initial_sp = 0x80700000;
+  new_opts.pointer_buffer_vram = 0x80400000;
+  new_opts.pointer_buffer_size = 0x80000;
+  new_opts.check_v0 = false;
+  new_opts.check_v1 = true;
+  fuzzer.SetOptions(new_opts);
+
+  EXPECT_EQ(fuzzer.GetOptions().max_steps_per_run, 12345u);
+  EXPECT_EQ(fuzzer.GetOptions().initial_sp, 0x80700000u);
+  EXPECT_EQ(fuzzer.GetOptions().pointer_buffer_vram, 0x80400000u);
+  EXPECT_EQ(fuzzer.GetOptions().pointer_buffer_size, 0x80000u);
+  EXPECT_FALSE(fuzzer.GetOptions().check_v0);
+  EXPECT_TRUE(fuzzer.GetOptions().check_v1);
+
+  // Verify updated options take effect: different $v0 is ignored, different $v1 is caught
+  std::vector<uint32_t> target = {
+      0x24020001,  // addiu $v0, $zero, 1
+      0x2403000A,  // addiu $v1, $zero, 10
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  std::vector<uint32_t> candidate = {
+      0x24020002,  // addiu $v0, $zero, 2 (differs, but check_v0=false)
+      0x24030014,  // addiu $v1, $zero, 20 (differs, check_v1=true)
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(target, 0x80001000, candidate, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kReturnValueMismatch);
+  EXPECT_NE(comp.failure_reason.find("v1 mismatch"), std::string::npos);
 }
 
 }  // namespace

@@ -282,5 +282,161 @@ segments {
   }
 }
 
+TEST_F(RomDifferEndToEndTest, TargetRomSmallerThanFirstAssetStartDoesNotUnderflow) {
+  std::filesystem::path target_path = test_dir_ / "target_short.z64";
+  std::filesystem::path built_path = test_dir_ / "built_short.z64";
+  std::filesystem::path config_path = test_dir_ / "config_short.textproto";
+
+  const std::string config_content = R"(
+game_name: "test"
+sha1: "0000000000000000000000000000000000000000"
+basename: "test"
+segments {
+  name: "main"
+  rom_start: 0x1050
+  rom_end: 0x1200
+  type: SEGMENT_CODE
+}
+segments {
+  name: "assets"
+  rom_start: 0x2000
+  rom_end: 0x2400
+  type: SEGMENT_DATA
+}
+)";
+  {
+    std::ofstream config_file(config_path);
+    config_file << config_content;
+  }
+
+  // Target ROM size (0x1500) is smaller than first_retail_asset_start (0x2000)
+  std::vector<uint8_t> target_bytes(0x1500, 0);
+  target_bytes[0] = 0x80;
+  target_bytes[1] = 0x37;
+  target_bytes[2] = 0x12;
+  target_bytes[3] = 0x40;
+  target_bytes[8] = 0x80;
+  target_bytes[9] = 0x02;
+  target_bytes[10] = 0x5C;
+  target_bytes[11] = 0x00;
+
+  {
+    std::ofstream target_file(target_path, std::ios::binary);
+    target_file.write(reinterpret_cast<const char*>(target_bytes.data()), target_bytes.size());
+  }
+  {
+    std::ofstream built_file(built_path, std::ios::binary);
+    built_file.write(reinterpret_cast<const char*>(target_bytes.data()), target_bytes.size());
+  }
+
+  RomDiffer differ(RomDiffOptions{
+      .base_rom_path = target_path,
+      .candidate_rom_path = built_path,
+      .config_path = config_path,
+      .use_color = false,
+  });
+
+  auto result_or = differ.Diff();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+  EXPECT_TRUE(result_or->success);
+  ASSERT_EQ(result_or->asset_segments.size(), 1u);
+  EXPECT_EQ(result_or->asset_segments[0].matching_bytes, 0u);
+}
+
+TEST_F(RomDifferEndToEndTest, BssSegmentPrecedingAssetSegmentIsIgnored) {
+  std::filesystem::path target_path = test_dir_ / "target_bss.z64";
+  std::filesystem::path built_path = test_dir_ / "built_bss.z64";
+  std::filesystem::path config_path = test_dir_ / "config_bss.textproto";
+
+  const std::string config_content = R"(
+game_name: "test"
+sha1: "0000000000000000000000000000000000000000"
+basename: "test"
+segments {
+  name: "main"
+  rom_start: 0x1050
+  rom_end: 0x1200
+  type: SEGMENT_CODE
+}
+segments {
+  name: "main_bss"
+  rom_start: 0x1200
+  rom_end: 0x1200
+  type: SEGMENT_BSS
+  bss_size: 0x8000
+}
+segments {
+  name: "assets"
+  rom_start: 0x1200
+  rom_end: 0x1400
+  type: SEGMENT_DATA
+}
+)";
+  {
+    std::ofstream config_file(config_path);
+    config_file << config_content;
+  }
+
+  std::vector<uint8_t> target_bytes(0x1400, 0);
+  target_bytes[0] = 0x80;
+  target_bytes[1] = 0x37;
+  target_bytes[2] = 0x12;
+  target_bytes[3] = 0x40;
+  target_bytes[8] = 0x80;
+  target_bytes[9] = 0x02;
+  target_bytes[10] = 0x5C;
+  target_bytes[11] = 0x00;
+
+  for (size_t i = 0x1050; i < 0x1200; ++i) {
+    target_bytes[i] = static_cast<uint8_t>(i & 0xFF);
+  }
+  for (size_t i = 0x1200; i < 0x1400; ++i) {
+    target_bytes[i] = static_cast<uint8_t>(0xA5);
+  }
+
+  std::vector<uint8_t> built_bytes(0x1420, 0);
+  built_bytes[0] = 0x80;
+  built_bytes[1] = 0x37;
+  built_bytes[2] = 0x12;
+  built_bytes[3] = 0x40;
+  built_bytes[8] = 0x80;
+  built_bytes[9] = 0x02;
+  built_bytes[10] = 0x5C;
+  built_bytes[11] = 0x00;
+
+  for (size_t i = 0x1050; i < 0x1220; ++i) {
+    built_bytes[i] = static_cast<uint8_t>(i & 0xFF);
+  }
+  for (size_t i = 0x1220; i < 0x1420; ++i) {
+    built_bytes[i] = static_cast<uint8_t>(0xA5);
+  }
+
+  {
+    std::ofstream target_file(target_path, std::ios::binary);
+    target_file.write(reinterpret_cast<const char*>(target_bytes.data()), target_bytes.size());
+  }
+  {
+    std::ofstream built_file(built_path, std::ios::binary);
+    built_file.write(reinterpret_cast<const char*>(built_bytes.data()), built_bytes.size());
+  }
+
+  RomDiffer differ(RomDiffOptions{
+      .base_rom_path = target_path,
+      .candidate_rom_path = built_path,
+      .config_path = config_path,
+      .use_color = false,
+      .allow_code_shift = true,
+  });
+
+  auto result_or = differ.Diff();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+  EXPECT_TRUE(result_or->success);
+  EXPECT_TRUE(result_or->structural.code_shift_matches);
+  ASSERT_EQ(result_or->asset_segments.size(), 1u);
+  EXPECT_EQ(result_or->asset_segments[0].segment_name, "assets");
+  EXPECT_EQ(result_or->asset_segments[0].shift_offset, 0x20);
+  EXPECT_DOUBLE_EQ(result_or->asset_segments[0].MatchPercentage(), 100.0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

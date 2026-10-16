@@ -134,6 +134,9 @@ AlignmentResult SequenceAligner::Align(absl::Span<const NormalizedInstruction> t
     switch (row.kind) {
       case DiffRowKind::kMatch:
         ++stats.matching_instructions;
+        if (row.quality == MatchQuality::kBitExact) {
+          ++stats.bit_exact_instructions;
+        }
         break;
       case DiffRowKind::kDifference:
         ++stats.differing_instructions;

@@ -113,7 +113,10 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
   if (options.slice_data) {
     SlicerOptions slicer_options;
     if (!options.assets_out_dir.empty()) {
-      slicer_options.output_dir = options.assets_out_dir.parent_path();
+      slicer_options.output_dir = (options.assets_out_dir.filename() == config.basename() &&
+                                   options.assets_out_dir.has_parent_path())
+                                      ? options.assets_out_dir.parent_path()
+                                      : options.assets_out_dir;
     } else {
       slicer_options.output_dir = options.out_dir;
     }
@@ -211,7 +214,9 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
 
     // Emit standard macro.inc and copy c_macro.inc if present
     std::filesystem::path game_macro =
-        std::filesystem::path("macros") / absl::StrCat(config.basename(), "_macro.inc");
+        !config.macro_inc().empty()
+            ? std::filesystem::path(config.macro_inc())
+            : (std::filesystem::path("macros") / absl::StrCat(config.basename(), "_macro.inc"));
     auto macro_status = asm_gen.EmitMacroIncludes(game_macro);
     if (!macro_status.ok()) {
       return macro_status;
@@ -317,11 +322,13 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
         }
 
         if (sub.type() == SUBSEGMENT_BSS) {
-          size_t bss_size = seg.bss_size();
-          for (const auto& other_seg : config.segments()) {
-            if (other_seg.name() == sub.name() && other_seg.bss_size() > 0) {
-              bss_size = other_seg.bss_size();
-              break;
+          size_t bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
+          if (sub.bss_size() == 0) {
+            for (const auto& other_seg : config.segments()) {
+              if (other_seg.name() == sub.name() && other_seg.bss_size() > 0) {
+                bss_size = other_seg.bss_size();
+                break;
+              }
             }
           }
           if (bss_size == 0) {

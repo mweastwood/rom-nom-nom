@@ -20,7 +20,7 @@
 namespace rom_nom_nom::fuzzer {
 
 FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
-    const FunctionEquivalenceTarget& target) {
+    const FunctionEquivalenceTarget& target, DifferentialFuzzer* fuzzer) {
   FunctionEquivalenceResult res;
   res.name = target.name;
   res.vram = target.vram;
@@ -51,7 +51,7 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   }
   if (options_.pointer_vectors_per_function > 0) {
     auto pointer_cases = DifferentialFuzzer::GeneratePointerCases(
-        options_.pointer_vectors_per_function, /*buffer_vram=*/0x80500000,
+        options_.pointer_vectors_per_function, options_.fuzzer_options.pointer_buffer_vram,
         /*buffer_size=*/256, options_.seed);
     test_cases.insert(test_cases.end(), pointer_cases.begin(), pointer_cases.end());
   }
@@ -97,9 +97,10 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
     }
   }
 
-  DifferentialFuzzer fuzzer(func_options);
-  auto comparisons = fuzzer.RunBattery(target.target_words, target.vram, target.candidate_words,
-                                       cand_vram, test_cases);
+  DifferentialFuzzer* active_fuzzer = (fuzzer != nullptr) ? fuzzer : &fuzzer_;
+  active_fuzzer->SetOptions(std::move(func_options));
+  auto comparisons = active_fuzzer->RunBattery(target.target_words, target.vram,
+                                               target.candidate_words, cand_vram, test_cases);
 
   for (size_t i = 0; i < comparisons.size(); ++i) {
     const auto& comp = comparisons[i];
@@ -147,6 +148,8 @@ ModuleEquivalenceSummary EquivalenceRunner::EvaluateModule(
   } else {
     // Multi-threaded work-stealing pool across targets
     std::atomic<size_t> next_target_idx{0};
+    std::atomic<size_t> first_divergent_idx{targets.size()};
+    std::vector<uint8_t> evaluated(targets.size(), 0);
     size_t actual_threads = std::min(thread_count, targets.size());
     std::vector<std::thread> workers;
     workers.reserve(actual_threads);
@@ -162,7 +165,20 @@ ModuleEquivalenceSummary EquivalenceRunner::EvaluateModule(
           if (idx >= targets.size()) {
             break;
           }
+          if (options_.stop_on_first_divergence &&
+              idx >= first_divergent_idx.load(std::memory_order_relaxed)) {
+            break;
+          }
           summary.function_results[idx] = worker_runner.EvaluateFunction(targets[idx]);
+          evaluated[idx] = 1;
+          if (options_.stop_on_first_divergence &&
+              summary.function_results[idx].status == FunctionEquivalenceStatus::kDivergent) {
+            size_t prev = first_divergent_idx.load(std::memory_order_relaxed);
+            while (idx < prev && !first_divergent_idx.compare_exchange_weak(
+                                     prev, idx, std::memory_order_relaxed)) {
+            }
+            break;
+          }
         }
       });
     }
@@ -171,6 +187,20 @@ ModuleEquivalenceSummary EquivalenceRunner::EvaluateModule(
       if (w.joinable()) {
         w.join();
       }
+    }
+
+    if (options_.stop_on_first_divergence &&
+        first_divergent_idx.load(std::memory_order_relaxed) < targets.size()) {
+      size_t limit = first_divergent_idx.load(std::memory_order_relaxed);
+      std::vector<FunctionEquivalenceResult> filtered;
+      filtered.reserve(limit + 1);
+      for (size_t i = 0; i <= limit; ++i) {
+        if (evaluated[i]) {
+          filtered.push_back(std::move(summary.function_results[i]));
+        }
+      }
+      summary.function_results = std::move(filtered);
+      summary.total_functions = summary.function_results.size();
     }
   }
 

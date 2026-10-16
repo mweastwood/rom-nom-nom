@@ -242,5 +242,29 @@ TEST(SlicerTest, SubsegmentFollowedByBssResolvesToEndOfSegment) {
   EXPECT_EQ((*plan_or)[0].rom_end, 0x100u);
 }
 
+TEST(SlicerTest, OutputDirEndingWithGameBasenameDoesNotNestDuplicateDir) {
+  auto rom_or = Rom::FromBuffer(CreateTestRom(256));
+  ASSERT_TRUE(rom_or.ok());
+
+  auto config_or = ParseGameConfig(kTestConfigText);
+  ASSERT_TRUE(config_or.ok());
+
+  const std::filesystem::path temp_dir =
+      std::filesystem::temp_directory_path() / "slicer_test_basename_dir" / "test-game";
+  std::filesystem::remove_all(temp_dir.parent_path());
+
+  SlicerOptions options;
+  options.output_dir = temp_dir;
+  options.verify_sha1 = false;
+  Slicer slicer(options);
+
+  auto slices_or = slicer.PlanSlices(*rom_or, *config_or);
+  ASSERT_TRUE(slices_or.ok()) << slices_or.status();
+  ASSERT_FALSE(slices_or->empty());
+  EXPECT_EQ((*slices_or)[0].output_path, temp_dir / "header.bin");
+
+  std::filesystem::remove_all(temp_dir.parent_path());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

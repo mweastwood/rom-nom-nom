@@ -21,7 +21,7 @@ def _splitter_split_impl(ctx):
     args.add("--assets_out_dir", assets_dir.path)
 
     ctx.actions.run(
-        inputs = [ctx.file.config, ctx.file.rom] + ctx.files.srcs,
+        inputs = [ctx.file.config, ctx.file.rom],
         outputs = [asm_dir, build_dir, assets_dir],
         executable = ctx.executable._splitter,
         arguments = [args],
@@ -44,7 +44,6 @@ splitter_split = rule(
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
-        "srcs": attr.label_list(allow_files = True, default = []),
         "_splitter": attr.label(
             default = "//splitter:splitter",
             executable = True,
@@ -404,7 +403,6 @@ def n64_game(name, game, config, rom, srcs = []):
         game = game,
         config = config,
         rom = rom,
-        srcs = srcs,
     )
 
     # Stage 2: Pure assembly ROM (built strictly from disassembled assembly, no C files)

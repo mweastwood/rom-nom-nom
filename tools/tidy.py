@@ -19,7 +19,6 @@ SEARCH_DIRS = [
     "tests",
     "core",
     "splitter",
-    "decompiler",
     "builder",
     "differ",
     "lifter",
@@ -89,7 +88,6 @@ def get_compile_args(file_path: Path):
             or "tests" in str(file_path)
             or "core" in str(file_path)
             or "splitter" in str(file_path)
-            or "decompiler" in str(file_path)
             or "builder" in str(file_path)
             or "differ" in str(file_path)
             or "lifter" in str(file_path)
@@ -119,9 +117,13 @@ def check_naming_integrity(files):
     errors = []
 
     config_dir = REPO_ROOT / "config"
-    named_syms = {}
+    named_syms_by_game = {}
+    regex_by_game = {}
+    all_named_syms = {}
     if config_dir.exists():
-        for cfg_file in config_dir.glob("*.textproto"):
+        for cfg_file in sorted(config_dir.glob("*.textproto")):
+            game = cfg_file.stem
+            game_syms = {}
             content = cfg_file.read_text(encoding="utf-8", errors="ignore")
             for entry_block in re.finditer(r"symbols\s*\{([^}]+)\}", content):
                 block = entry_block.group(1)
@@ -133,8 +135,21 @@ def check_naming_integrity(files):
                     d_sym = f"D_{addr:08X}"
                     func_sym = f"func_{addr:08X}"
                     if name != d_sym and not name.startswith("D_") and name != func_sym and not name.startswith("func_"):
-                        named_syms[d_sym] = (name, cfg_file.name)
-                        named_syms[func_sym] = (name, cfg_file.name)
+                        game_syms[d_sym] = (name, cfg_file.name)
+                        game_syms[func_sym] = (name, cfg_file.name)
+                        all_named_syms[d_sym] = (name, cfg_file.name)
+                        all_named_syms[func_sym] = (name, cfg_file.name)
+            named_syms_by_game[game] = game_syms
+            if game_syms:
+                regex_by_game[game] = re.compile(
+                    r"\b(" + "|".join(re.escape(k) for k in game_syms) + r")\b"
+                )
+
+    all_regex = (
+        re.compile(r"\b(" + "|".join(re.escape(k) for k in all_named_syms) + r")\b")
+        if all_named_syms
+        else None
+    )
 
     alias_pattern = re.compile(r"__attribute__\s*\(\s*\(\s*alias\s*\(")
     func_def_pattern = re.compile(r"^[a-zA-Z0-9_* ]+\s+(func_[0-9A-Fa-f]+)\s*\([^;]*\)\s*\{", re.MULTILINE)
@@ -162,12 +177,26 @@ def check_naming_integrity(files):
                 sym = match.group(1)
                 errors.append(f"{rel_path}: defines function with default label '{sym}'. Decompiled functions must use Google Style CamelCase and be mapped in config/<game>.textproto.")
 
-        # 3. Reference to renamed symbols check
-        for default_sym, (clean_name, cfg_file) in named_syms.items():
-            if default_sym in content:
-                for line_idx, line in enumerate(content.splitlines(), start=1):
-                    if default_sym in line:
-                        errors.append(f"{rel_path}:{line_idx}: references deprecated label '{default_sym}'. Use readable name '{clean_name}' (defined in config/{cfg_file}).")
+        # 3. Reference to renamed symbols check (scoped to the file's game if under src/)
+        file_game = None
+        for game in named_syms_by_game:
+            if game in rel_path.parts:
+                file_game = game
+                break
+
+        if file_game is not None:
+            active_syms = named_syms_by_game.get(file_game, {})
+            active_regex = regex_by_game.get(file_game)
+        else:
+            active_syms = all_named_syms
+            active_regex = all_regex
+
+        if active_regex and active_regex.search(content):
+            for line_idx, line in enumerate(content.splitlines(), start=1):
+                for m in active_regex.finditer(line):
+                    default_sym = m.group(1)
+                    clean_name, cfg_file = active_syms[default_sym]
+                    errors.append(f"{rel_path}:{line_idx}: references deprecated label '{default_sym}'. Use readable name '{clean_name}' (defined in config/{cfg_file}).")
 
     return errors
 

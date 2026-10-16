@@ -302,5 +302,66 @@ TEST(EquivalenceRunnerTest, InitialMemoryPayloadsForwardedDetectsDivergence) {
   ASSERT_TRUE(res.counterexample.has_value());
 }
 
+TEST(EquivalenceRunnerTest, EvaluateFunctionUsesExternalDifferentialFuzzer) {
+  EquivalenceRunner runner;
+  DifferentialFuzzer external_fuzzer;
+
+  FunctionEquivalenceTarget target;
+  target.name = "ExternalFuzzerFloatFunc";
+  target.vram = 0x80001000;
+  // Target: add.s $f0, $f12, $f14; jr $ra; nop
+  target.target_words = {0x460E6000, 0x03E00008, 0x00000000};
+  // Candidate: add.s $f0, $f14, $f12; jr $ra; nop
+  target.candidate_words = {0x460C7000, 0x03E00008, 0x00000000};
+
+  MemoryPayload payload;
+  payload.address = 0x80200000;
+  payload.data = {1, 2, 3, 4};
+  target.target_initial_memory.push_back(payload);
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target, &external_fuzzer);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kFuzzProvenEquivalent);
+  // Verify EvaluateFunction configured and used external_fuzzer
+  EXPECT_TRUE(external_fuzzer.GetOptions().check_f0);
+  EXPECT_FALSE(external_fuzzer.GetOptions().check_v0);
+  ASSERT_EQ(external_fuzzer.GetOptions().target_initial_memory.size(), 1u);
+  EXPECT_EQ(external_fuzzer.GetOptions().target_initial_memory[0].address, 0x80200000u);
+}
+
+TEST(EquivalenceRunnerTest, StopOnFirstDivergenceMultiThreaded) {
+  EquivalenceRunnerOptions opts;
+  opts.num_threads = 2;
+  opts.stop_on_first_divergence = true;
+  opts.random_vectors_per_function = 200;
+  EquivalenceRunner runner(opts);
+
+  std::vector<FunctionEquivalenceTarget> targets;
+  // Target 0: Divergent immediately
+  FunctionEquivalenceTarget div_target;
+  div_target.name = "FuncDivergent0";
+  div_target.vram = 0x80001000;
+  div_target.target_words = {0x00851021, 0x03E00008, 0x00000000};     // addu $v0, $a0, $a1
+  div_target.candidate_words = {0x00851023, 0x03E00008, 0x00000000};  // subu $v0, $a0, $a1
+  targets.push_back(div_target);
+
+  // Targets 1..19: Non-matching instruction sequences that require full fuzzing batteries
+  for (int i = 1; i < 20; ++i) {
+    FunctionEquivalenceTarget eq_target;
+    eq_target.name = "FuncEquivalent_" + std::to_string(i);
+    eq_target.vram = 0x80001000 + static_cast<uint32_t>(i * 0x20);
+    eq_target.target_words = {0x00851021, 0x03E00008, 0x00000000};
+    eq_target.candidate_words = {0x00A41021, 0x03E00008, 0x00000000};
+    targets.push_back(eq_target);
+  }
+
+  ModuleEquivalenceSummary summary = runner.EvaluateModule("mt_stop_early", targets);
+  // Because target 0 diverges, the results must be truncated at index 0 (size 1)
+  EXPECT_EQ(summary.total_functions, 1u);
+  ASSERT_EQ(summary.function_results.size(), 1u);
+  EXPECT_EQ(summary.function_results[0].name, "FuncDivergent0");
+  EXPECT_EQ(summary.function_results[0].status, FunctionEquivalenceStatus::kDivergent);
+  EXPECT_EQ(summary.divergent_functions, 1u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

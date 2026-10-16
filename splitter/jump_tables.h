@@ -14,7 +14,7 @@
 namespace rom_nom_nom {
 
 // Represents a switch statement jump table located in .rodata.
-struct JumpTable {
+struct RodataJumpTable {
   uint32_t vram_start = 0;              // VRAM address of the table start
   std::string name;                     // e.g. "jtbl_80025D80"
   std::vector<uint32_t> entry_targets;  // Target VRAM address for each case
@@ -44,20 +44,21 @@ class JumpTableResolver {
 
   // Detects a jump table starting at a specific offset within rodata.
   // Entries must fall strictly within [func.vram_start, func.vram_end).
-  std::optional<JumpTable> DetectTableAt(absl::Span<const uint8_t> rodata, size_t offset_in_rodata,
-                                         uint32_t rodata_vram_start,
-                                         const FunctionRange& func) const;
+  std::optional<RodataJumpTable> DetectTableAt(absl::Span<const uint8_t> rodata,
+                                               size_t offset_in_rodata, uint32_t rodata_vram_start,
+                                               const FunctionRange& func) const;
 
   // Scans rodata for all jump tables associated with a collection of functions.
-  std::vector<JumpTable> ScanRodata(absl::Span<const uint8_t> rodata, uint32_t rodata_vram_start,
-                                    absl::Span<const FunctionRange> functions) const;
+  std::vector<RodataJumpTable> ScanRodata(absl::Span<const uint8_t> rodata,
+                                          uint32_t rodata_vram_start,
+                                          absl::Span<const FunctionRange> functions) const;
 
-  // Formats a single JumpTable as GNU assembly text (.word .LXXXXXXXX).
-  std::string FormatJumpTableAsm(const JumpTable& jtbl) const;
+  // Formats a single RodataJumpTable as GNU assembly text (.word .LXXXXXXXX).
+  std::string FormatJumpTableAsm(const RodataJumpTable& jtbl) const;
 
   // Extracts all unique local target labels (.LXXXXXXXX) from a set of jump tables
   // that belong to a specific function range.
-  std::vector<uint32_t> ExtractLocalLabels(absl::Span<const JumpTable> tables,
+  std::vector<uint32_t> ExtractLocalLabels(absl::Span<const RodataJumpTable> tables,
                                            const FunctionRange& func) const;
 
  private:

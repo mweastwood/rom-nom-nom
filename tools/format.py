@@ -18,7 +18,6 @@ SEARCH_DIRS = [
     "tests",
     "core",
     "splitter",
-    "decompiler",
     "builder",
     "differ",
     "lifter",

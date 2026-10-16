@@ -348,46 +348,6 @@ std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPatter
     }
   }
 
-  // 3. Float rounding: (ceil/floor/round/trunc).w.(s/d) $fd, $fs [-> nop]* -> cvt.(s/d).w $dest,
-  // $fd
-  if ((inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
-       inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
-       inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD ||
-       inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD) &&
-      inst.fd.has_value() && inst.fs.has_value()) {
-    size_t j = i + 1;
-    while (j < instructions.size() && instructions[j].IsNop()) {
-      ++j;
-    }
-    if (j < instructions.size()) {
-      const auto& next_inst = instructions[j];
-      if ((next_inst.opcode == Opcode::kCvtSW || next_inst.opcode == Opcode::kCvtDW) &&
-          next_inst.fs.has_value() && *next_inst.fs == *inst.fd && next_inst.fd.has_value()) {
-        bool is_double = (inst.opcode == Opcode::kCeilWD || inst.opcode == Opcode::kFloorWD ||
-                          inst.opcode == Opcode::kRoundWD || inst.opcode == Opcode::kTruncWD ||
-                          next_inst.opcode == Opcode::kCvtDW);
-        std::string func_name;
-        if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
-          func_name = is_double ? "ceil" : "ceilf";
-        } else if (inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD) {
-          func_name = is_double ? "floor" : "floorf";
-        } else if (inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) {
-          func_name = is_double ? "round" : "roundf";
-        } else {
-          func_name = is_double ? "trunc" : "truncf";
-        }
-        FloatingPointConversionPattern pattern;
-        pattern.end_index = j;
-        pattern.is_rounding = true;
-        pattern.round_func = func_name;
-        pattern.dest_floating_point_reg = *next_inst.fd;
-        pattern.src_floating_point_reg = *inst.fs;
-        pattern.is_double = is_double;
-        return pattern;
-      }
-    }
-  }
-
   return std::nullopt;
 }
 
@@ -493,7 +453,7 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
   } else if (lo.type == FoldedPatternType::kGlobalIndexedStore) {
     std::unique_ptr<LiftedExpression> src_expr;
     if (lo.src_fp_reg.has_value()) {
-      src_expr = LiftFpRegister(*lo.src_fp_reg);
+      src_expr = LiftFpRegister(*lo.src_fp_reg, lo.access_type == "f64");
     } else {
       src_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.src_reg, tracker);
     }
@@ -1120,6 +1080,11 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           fpr_const_bits[idx + 1] = std::nullopt;
         }
       }
+      if (inst.IsCall()) {
+        for (int k = 0; k < 20; ++k) {
+          fpr_const_bits[k] = std::nullopt;
+        }
+      }
     }
 
     // Skip emitting assignment for folded comparison instructions that are directly
@@ -1650,9 +1615,12 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kMult:
       case Opcode::kMultu:
+      case Opcode::kDmult:
+      case Opcode::kDmultu:
         if (inst.rs.has_value() && inst.rt.has_value()) {
           pending_mult = std::make_unique<PendingMult>();
-          pending_mult->is_unsigned = (inst.opcode == Opcode::kMultu);
+          pending_mult->is_unsigned =
+              (inst.opcode == Opcode::kMultu || inst.opcode == Opcode::kDmultu);
           pending_mult->rs = *inst.rs;
           pending_mult->rt = *inst.rt;
 
@@ -1668,7 +1636,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             }
             if (mflo_idx.has_value() && mfhi_idx.has_value()) break;
             if (next_inst.opcode == Opcode::kMult || next_inst.opcode == Opcode::kMultu ||
+                next_inst.opcode == Opcode::kDmult || next_inst.opcode == Opcode::kDmultu ||
                 next_inst.opcode == Opcode::kDiv || next_inst.opcode == Opcode::kDivu ||
+                next_inst.opcode == Opcode::kDdiv || next_inst.opcode == Opcode::kDdivu ||
                 next_inst.opcode == Opcode::kMthi || next_inst.opcode == Opcode::kMtlo) {
               break;
             }
@@ -1804,6 +1774,42 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         }
         break;
 
+      case Opcode::kDiv:
+      case Opcode::kDivu:
+      case Opcode::kDdiv:
+      case Opcode::kDdivu:
+        pending_mult = nullptr;
+        if (inst.rs.has_value() && inst.rt.has_value()) {
+          bool is_unsigned = (inst.opcode == Opcode::kDivu || inst.opcode == Opcode::kDdivu);
+          {
+            LiftedStatement lo_stmt;
+            lo_stmt.kind = StatementKind::kAssignment;
+            lo_stmt.destination_variable = "lo";
+            auto num = LiftRegisterOrConstant(*inst.rs, tracker);
+            auto den = LiftRegisterOrConstant(*inst.rt, tracker);
+            if (is_unsigned) {
+              num = LiftedExpression::Unary("(u32)", std::move(num));
+              den = LiftedExpression::Unary("(u32)", std::move(den));
+            }
+            lo_stmt.expression = LiftedExpression::Binary("/", std::move(num), std::move(den));
+            statements.push_back(std::move(lo_stmt));
+          }
+          {
+            LiftedStatement hi_stmt;
+            hi_stmt.kind = StatementKind::kAssignment;
+            hi_stmt.destination_variable = "hi";
+            auto num = LiftRegisterOrConstant(*inst.rs, tracker);
+            auto den = LiftRegisterOrConstant(*inst.rt, tracker);
+            if (is_unsigned) {
+              num = LiftedExpression::Unary("(u32)", std::move(num));
+              den = LiftedExpression::Unary("(u32)", std::move(den));
+            }
+            hi_stmt.expression = LiftedExpression::Binary("%", std::move(num), std::move(den));
+            statements.push_back(std::move(hi_stmt));
+          }
+        }
+        break;
+
       case Opcode::kMflo:
         if (inst.rd.has_value() && *inst.rd != Register::kZero) {
           if (pending_mult != nullptr) {
@@ -1817,7 +1823,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                 break;
               }
               if (next_inst.opcode == Opcode::kMult || next_inst.opcode == Opcode::kMultu ||
+                  next_inst.opcode == Opcode::kDmult || next_inst.opcode == Opcode::kDmultu ||
                   next_inst.opcode == Opcode::kDiv || next_inst.opcode == Opcode::kDivu ||
+                  next_inst.opcode == Opcode::kDdiv || next_inst.opcode == Opcode::kDdivu ||
                   next_inst.opcode == Opcode::kMthi || next_inst.opcode == Opcode::kMtlo) {
                 break;
               }
@@ -1872,7 +1880,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                 break;
               }
               if (next_inst.opcode == Opcode::kMult || next_inst.opcode == Opcode::kMultu ||
+                  next_inst.opcode == Opcode::kDmult || next_inst.opcode == Opcode::kDmultu ||
                   next_inst.opcode == Opcode::kDiv || next_inst.opcode == Opcode::kDivu ||
+                  next_inst.opcode == Opcode::kDdiv || next_inst.opcode == Opcode::kDdivu ||
                   next_inst.opcode == Opcode::kMthi || next_inst.opcode == Opcode::kMtlo) {
                 break;
               }
@@ -2343,19 +2353,17 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               (*inst.rs == Register::kSp) || (has_frame_pointer && *inst.rs == Register::kFp);
           if (is_stack_base) {
             int32_t offset = inst.immediate;
+            if (saved_fpr_offsets != nullptr && saved_fpr_offsets->contains(*inst.ft) &&
+                saved_fpr_offsets->at(*inst.ft) == offset) {
+              // Function epilogue restoring callee-saved float register, omit from C body
+              break;
+            }
             uint32_t base_offset = frame_size + 16;
             if (offset >= static_cast<int32_t>(base_offset)) {
               int arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
               statement.expression = LiftedExpression::Unary(
                   "*(f64*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
             } else {
-              int reg_num = static_cast<int>(*inst.ft);
-              if (frame_size > 0 && offset < static_cast<int32_t>(frame_size) &&
-                  reg_num >= static_cast<int>(FpRegister::kF20) &&
-                  reg_num <= static_cast<int>(FpRegister::kF31)) {
-                // Function epilogue restoring callee-saved float register, omit from C body
-                break;
-              }
               if (sp_address_taken) {
                 statement.expression = LiftedExpression::Load("f64", make_sp_addr(offset));
               } else {
@@ -2380,10 +2388,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           bool is_stack_base =
               (*inst.rs == Register::kSp) || (has_frame_pointer && *inst.rs == Register::kFp);
           if (is_stack_base) {
-            int reg_num = static_cast<int>(*inst.ft);
-            if (frame_size > 0 && inst.immediate < static_cast<int32_t>(frame_size) &&
-                reg_num >= static_cast<int>(FpRegister::kF20) &&
-                reg_num <= static_cast<int>(FpRegister::kF31)) {
+            int32_t offset = inst.immediate;
+            if (saved_fpr_offsets != nullptr && saved_fpr_offsets->contains(*inst.ft) &&
+                saved_fpr_offsets->at(*inst.ft) == offset) {
               // Function prologue saving callee-saved float register, omit from C body
               break;
             }
@@ -2864,19 +2871,26 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kCEqS:
       case Opcode::kCSeqS:
+      case Opcode::kCUeqS:
+      case Opcode::kCNglS:
+      case Opcode::kCUnS:
       case Opcode::kCLtS:
       case Opcode::kCOltS:
+      case Opcode::kCUltS:
       case Opcode::kCNgeS:
       case Opcode::kCLeS:
       case Opcode::kCOleS:
+      case Opcode::kCUleS:
       case Opcode::kCNgtS:
+      case Opcode::kCNgleS:
         if (inst.fs.has_value() && inst.ft.has_value()) {
           const char* op = "==";
           if (inst.opcode == Opcode::kCLtS || inst.opcode == Opcode::kCOltS ||
-              inst.opcode == Opcode::kCNgeS) {
+              inst.opcode == Opcode::kCUltS || inst.opcode == Opcode::kCNgeS) {
             op = "<";
           } else if (inst.opcode == Opcode::kCLeS || inst.opcode == Opcode::kCOleS ||
-                     inst.opcode == Opcode::kCNgtS) {
+                     inst.opcode == Opcode::kCUleS || inst.opcode == Opcode::kCNgtS ||
+                     inst.opcode == Opcode::kCNgleS) {
             op = "<=";
           }
           LiftedStatement statement;
@@ -2891,19 +2905,26 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kCEqD:
       case Opcode::kCSeqD:
+      case Opcode::kCUeqD:
+      case Opcode::kCNglD:
+      case Opcode::kCUnD:
       case Opcode::kCLtD:
       case Opcode::kCOltD:
+      case Opcode::kCUltD:
       case Opcode::kCNgeD:
       case Opcode::kCLeD:
       case Opcode::kCOleD:
+      case Opcode::kCUleD:
       case Opcode::kCNgtD:
+      case Opcode::kCNgleD:
         if (inst.fs.has_value() && inst.ft.has_value()) {
           const char* op = "==";
           if (inst.opcode == Opcode::kCLtD || inst.opcode == Opcode::kCOltD ||
-              inst.opcode == Opcode::kCNgeD) {
+              inst.opcode == Opcode::kCUltD || inst.opcode == Opcode::kCNgeD) {
             op = "<";
           } else if (inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kCOleD ||
-                     inst.opcode == Opcode::kCNgtD) {
+                     inst.opcode == Opcode::kCUleD || inst.opcode == Opcode::kCNgtD ||
+                     inst.opcode == Opcode::kCNgleD) {
             op = "<=";
           }
           LiftedStatement statement;
@@ -3702,8 +3723,16 @@ std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFolded
     int def_idx = -1;
     for (int i = branch_idx - 1; i >= 0; --i) {
       const auto& op = instructions[i].opcode;
-      if (op == Opcode::kCEqS || op == Opcode::kCEqD || op == Opcode::kCLtS ||
-          op == Opcode::kCLtD || op == Opcode::kCLeS || op == Opcode::kCLeD) {
+      if (op == Opcode::kCEqS || op == Opcode::kCEqD || op == Opcode::kCSeqS ||
+          op == Opcode::kCSeqD || op == Opcode::kCUeqS || op == Opcode::kCUeqD ||
+          op == Opcode::kCNglS || op == Opcode::kCNglD || op == Opcode::kCUnS ||
+          op == Opcode::kCUnD || op == Opcode::kCLtS || op == Opcode::kCLtD ||
+          op == Opcode::kCOltS || op == Opcode::kCOltD || op == Opcode::kCUltS ||
+          op == Opcode::kCUltD || op == Opcode::kCNgeS || op == Opcode::kCNgeD ||
+          op == Opcode::kCLeS || op == Opcode::kCLeD || op == Opcode::kCOleS ||
+          op == Opcode::kCOleD || op == Opcode::kCUleS || op == Opcode::kCUleD ||
+          op == Opcode::kCNgtS || op == Opcode::kCNgtD || op == Opcode::kCNgleS ||
+          op == Opcode::kCNgleD) {
         def_idx = i;
         break;
       }

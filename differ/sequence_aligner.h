@@ -38,6 +38,7 @@ struct AlignedDiffRow {
 // Summary statistics and match fidelity metrics across aligned instruction sequences.
 struct AlignmentStats {
   size_t total_rows = 0;
+  size_t bit_exact_instructions = 0;      // kBitExact only
   size_t matching_instructions = 0;       // kBitExact or kNormalizedExact
   size_t differing_instructions = 0;      // kSimilarOpcode or kDifferent
   size_t target_only_instructions = 0;    // Missing in compiled

@@ -108,7 +108,7 @@ TEST(JumpTablesTest, ScanRodataMultipleTables) {
 }
 
 TEST(JumpTablesTest, FormatJumpTableAsm) {
-  JumpTable table;
+  RodataJumpTable table;
   table.vram_start = 0x80710000;
   table.name = "jtbl_80710000";
   table.entry_targets = {0x80700020, 0x80700040, 0x80700060};
@@ -129,10 +129,10 @@ TEST(JumpTablesTest, ExtractLocalLabels) {
   func.vram_start = 0x80700000;
   func.vram_end = 0x80700100;
 
-  JumpTable table1;
+  RodataJumpTable table1;
   table1.entry_targets = {0x80700040, 0x80700020, 0x80700040};  // Duplicate 0x80700040
 
-  JumpTable table2;
+  RodataJumpTable table2;
   table2.entry_targets = {0x80700080, 0x80720000};  // 0x80720000 is outside func
 
   JumpTableResolver resolver;

@@ -687,5 +687,54 @@ TEST(ControlFlowGraphTest, UnreachableSubgraphWithCyclePruning) {
   EXPECT_THAT(unreach_b->successors, IsEmpty());
 }
 
+TEST(ControlFlowGraphTest, MultipleExternalBranchesTriggerReallocationAndSetSyntheticEndVram) {
+  // Construct 10 conditional branch blocks, each branching to a distinct out-of-bounds
+  // external target and falling through to the next block, forcing cfg.blocks_ to
+  // reallocate multiple times during edge construction.
+  std::vector<uint32_t> words;
+  constexpr size_t kNumBranches = 10;
+  for (size_t i = 0; i < kNumBranches; ++i) {
+    // bne $a0, $zero, +64 (branches to PC + 4 + 256, well past the end of this function)
+    words.push_back(0x14800040);
+    words.push_back(0x00000000);  // nop (delay slot)
+  }
+  words.push_back(0x03E00008);  // jr $ra
+  words.push_back(0x00000000);  // nop
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status().message();
+  const auto& cfg = *cfg_or;
+
+  // 11 initial blocks (10 branch blocks + 1 return block) + 10 synthetic external blocks.
+  ASSERT_THAT(cfg.Blocks(), SizeIs(2 * kNumBranches + 1));
+
+  for (size_t i = 0; i < kNumBranches; ++i) {
+    uint32_t block_vram = 0x80000000 + static_cast<uint32_t>(i * 8);
+    uint32_t fallthrough_vram = block_vram + 8;
+    uint32_t ext_target_vram = block_vram + 4 + (0x40 << 2);
+
+    const auto* branch_block = cfg.FindBlockByVram(block_vram);
+    const auto* ft_block = cfg.FindBlockByVram(fallthrough_vram);
+    const auto* ext_block = cfg.FindBlockByVram(ext_target_vram);
+    ASSERT_THAT(branch_block, NotNull());
+    ASSERT_THAT(ft_block, NotNull());
+    ASSERT_THAT(ext_block, NotNull());
+
+    EXPECT_EQ(ext_block->start_vram, ext_target_vram);
+    EXPECT_EQ(ext_block->end_vram, ext_target_vram + 24);
+    EXPECT_EQ(ext_block->Size(), 6u);
+    EXPECT_TRUE(ext_block->HasReturn());
+
+    EXPECT_THAT(branch_block->successors, ElementsAre(ext_block->id, ft_block->id));
+    ASSERT_THAT(branch_block->outgoing_edges, SizeIs(2));
+    EXPECT_EQ(branch_block->outgoing_edges[0].type, EdgeType::kBranch);
+    EXPECT_EQ(branch_block->outgoing_edges[0].to_block_id, ext_block->id);
+    EXPECT_EQ(branch_block->outgoing_edges[1].type, EdgeType::kFallthrough);
+    EXPECT_EQ(branch_block->outgoing_edges[1].to_block_id, ft_block->id);
+    EXPECT_THAT(ext_block->predecessors, ElementsAre(branch_block->id));
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "core/c_ast.h"
 #include "lifter/c_emitter.h"
 #include "lifter/function_loader.h"
@@ -85,6 +86,10 @@ class LifterPipeline {
   const FunctionLoader* Loader() const { return loader_.get(); }
 
  private:
+  absl::StatusOr<CTranslationUnit> BuildTranslationUnitForLoadedFunctions(
+      absl::Span<const LoadedFunction> loaded_functions,
+      const std::vector<std::string>& includes = {}) const;
+
   LifterPipelineOptions options_;
   std::unique_ptr<FunctionLoader> loader_;
 };

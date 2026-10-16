@@ -496,8 +496,18 @@ std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlo
       }
 
       case Opcode::kCEqS:
-      case Opcode::kCEqD: {
-        bool is_double = (def_inst.opcode == Opcode::kCEqD);
+      case Opcode::kCEqD:
+      case Opcode::kCSeqS:
+      case Opcode::kCSeqD:
+      case Opcode::kCUeqS:
+      case Opcode::kCUeqD:
+      case Opcode::kCNglS:
+      case Opcode::kCNglD:
+      case Opcode::kCUnS:
+      case Opcode::kCUnD: {
+        bool is_double = (def_inst.opcode == Opcode::kCEqD || def_inst.opcode == Opcode::kCSeqD ||
+                          def_inst.opcode == Opcode::kCUeqD || def_inst.opcode == Opcode::kCNglD ||
+                          def_inst.opcode == Opcode::kCUnD);
         std::string op = want_true ? "==" : "!=";
         return CExpression::Binary(op,
                                    CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
@@ -507,8 +517,15 @@ std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlo
       }
 
       case Opcode::kCLtS:
-      case Opcode::kCLtD: {
-        bool is_double = (def_inst.opcode == Opcode::kCLtD);
+      case Opcode::kCLtD:
+      case Opcode::kCOltS:
+      case Opcode::kCOltD:
+      case Opcode::kCUltS:
+      case Opcode::kCUltD:
+      case Opcode::kCNgeS:
+      case Opcode::kCNgeD: {
+        bool is_double = (def_inst.opcode == Opcode::kCLtD || def_inst.opcode == Opcode::kCOltD ||
+                          def_inst.opcode == Opcode::kCUltD || def_inst.opcode == Opcode::kCNgeD);
         auto expr =
             CExpression::Binary("<",
                                 CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
@@ -522,8 +539,18 @@ std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlo
       }
 
       case Opcode::kCLeS:
-      case Opcode::kCLeD: {
-        bool is_double = (def_inst.opcode == Opcode::kCLeD);
+      case Opcode::kCLeD:
+      case Opcode::kCOleS:
+      case Opcode::kCOleD:
+      case Opcode::kCUleS:
+      case Opcode::kCUleD:
+      case Opcode::kCNgtS:
+      case Opcode::kCNgtD:
+      case Opcode::kCNgleS:
+      case Opcode::kCNgleD: {
+        bool is_double = (def_inst.opcode == Opcode::kCLeD || def_inst.opcode == Opcode::kCOleD ||
+                          def_inst.opcode == Opcode::kCUleD || def_inst.opcode == Opcode::kCNgtD ||
+                          def_inst.opcode == Opcode::kCNgleD);
         auto expr =
             CExpression::Binary("<=",
                                 CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
@@ -786,6 +813,7 @@ class ConverterContext {
     PrologueAnalysis prologue = AnalyzePrologue(cfg_, has_frame_pointer_);
     saved_reg_offsets_ = std::move(prologue.saved_gprs);
     saved_fpr_offsets_ = std::move(prologue.saved_fprs);
+    min_saved_reg_offset_ = prologue.min_saved_reg_offset;
 
     CollectGotoTargets(root_region);
     for (const auto& jt : cfg_.JumpTables()) {
@@ -809,6 +837,11 @@ class ConverterContext {
   const absl::flat_hash_set<uint32_t>& GotoTargets() const { return goto_targets_; }
   const absl::flat_hash_set<uint32_t>& EmittedLabels() const { return emitted_labels_; }
   bool SpAddressTaken() const { return sp_address_taken_; }
+  uint32_t FrameSize() const { return frame_size_; }
+  bool HasFramePointer() const { return has_frame_pointer_; }
+  bool HasCalls() const { return has_calls_; }
+  uint32_t MinSavedRegOffset() const { return min_saved_reg_offset_; }
+  const absl::flat_hash_set<std::string>& DoubleVars() const { return double_vars_; }
 
   std::vector<LiftedStatement> LiftInstructionsHelper(
       absl::Span<const Instruction> instructions) const {
@@ -1389,31 +1422,6 @@ class ConverterContext {
       return false;
     }
 
-    // Check 1: Does delay_inst define a register used by the branch condition or its folded
-    // comparison?
-    absl::flat_hash_set<Register> cond_regs;
-    if (term->rs.has_value() && *term->rs != Register::kZero) {
-      cond_regs.insert(*term->rs);
-    }
-    if (term->rt.has_value() && *term->rt != Register::kZero) {
-      cond_regs.insert(*term->rt);
-    }
-    auto folded_comp = ExpressionBuilder::FindFoldedComparison(cond_block->instructions);
-    if (folded_comp.has_value() &&
-        folded_comp->instruction_index < cond_block->instructions.size()) {
-      const auto& def_inst = cond_block->instructions[folded_comp->instruction_index];
-      RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
-      for (Register r : def_ud.gpr_uses) {
-        if (r != Register::kZero) {
-          cond_regs.insert(r);
-        }
-      }
-      for (Register r : def_ud.gpr_defs) {
-        if (r != Register::kZero) {
-          cond_regs.insert(r);
-        }
-      }
-    }
     // Check: Are all registers defined by delay_inst killed at header_block before being used?
     const auto* header_block = cfg_.GetBlock(header_block_id);
     if (header_block != nullptr) {
@@ -1598,36 +1606,55 @@ class ConverterContext {
         const auto* term = block->Terminator();
         bool is_likely = (term != nullptr && term->IsBranchLikely());
 
-        for (size_t idx = 0; idx < block->instructions.size(); ++idx) {
-          const auto& inst = block->instructions[idx];
-          if (is_likely && idx + 1 == block->instructions.size()) {
-            exit_fallthrough_state = exit_state;
-          }
-          if (inst.opcode != Opcode::kMtc1) {
+        auto step_inst = [](BlockState& state, const Instruction& inst) {
+          if (inst.IsCall()) {
+            for (int f = 0; f < 20; ++f) {
+              state.fpr_const_bits[f] = std::nullopt;
+            }
+          } else if (inst.opcode != Opcode::kMtc1) {
             RegisterUseDef ud = GetInstructionUseDef(inst);
             for (FpRegister d : ud.fpr_defs) {
               int f_idx = static_cast<int>(d);
-              exit_state.fpr_const_bits[f_idx] = std::nullopt;
+              state.fpr_const_bits[f_idx] = std::nullopt;
               if ((f_idx % 2) == 0 && f_idx + 1 < 32) {
-                exit_state.fpr_const_bits[f_idx + 1] = std::nullopt;
+                state.fpr_const_bits[f_idx + 1] = std::nullopt;
               }
             }
           } else if (inst.fs.has_value() && inst.rt.has_value()) {
             int fs_idx = static_cast<int>(*inst.fs);
             if (*inst.rt == Register::kZero) {
-              exit_state.fpr_const_bits[fs_idx] = 0;
+              state.fpr_const_bits[fs_idx] = 0;
             } else {
-              TrackedValue tv = exit_state.tracker.GetRegisterValue(*inst.rt);
+              TrackedValue tv = state.tracker.GetRegisterValue(*inst.rt);
               if (tv.kind == ValueKind::kConstant) {
-                exit_state.fpr_const_bits[fs_idx] = tv.constant_value;
+                state.fpr_const_bits[fs_idx] = tv.constant_value;
               } else if (tv.kind == ValueKind::kSymbolHi) {
-                exit_state.fpr_const_bits[fs_idx] = tv.symbol_hi;
+                state.fpr_const_bits[fs_idx] = tv.symbol_hi;
               } else {
-                exit_state.fpr_const_bits[fs_idx] = std::nullopt;
+                state.fpr_const_bits[fs_idx] = std::nullopt;
               }
             }
           }
-          exit_state.tracker.Step(inst);
+          state.tracker.Step(inst);
+        };
+
+        for (size_t idx = 0; idx < block->instructions.size(); ++idx) {
+          const auto& inst = block->instructions[idx];
+          if ((inst.IsCall() || inst.IsBranch() || inst.IsJump()) &&
+              idx + 1 < block->instructions.size()) {
+            if (is_likely && idx + 2 == block->instructions.size()) {
+              exit_fallthrough_state = exit_state;
+              step_inst(*exit_fallthrough_state, inst);
+            }
+            step_inst(exit_state, block->instructions[idx + 1]);
+            step_inst(exit_state, inst);
+            ++idx;
+            continue;
+          }
+          if (is_likely && idx + 1 == block->instructions.size()) {
+            exit_fallthrough_state = exit_state;
+          }
+          step_inst(exit_state, inst);
         }
 
         if (exit_fallthrough_state.has_value()) {
@@ -1669,6 +1696,7 @@ class ConverterContext {
   bool has_frame_pointer_ = false;
   bool has_calls_ = false;
   bool sp_address_taken_ = false;
+  uint32_t min_saved_reg_offset_ = 0xFFFFFFFF;
   absl::flat_hash_map<Register, int32_t> saved_reg_offsets_;
   absl::flat_hash_map<FpRegister, int32_t> saved_fpr_offsets_;
   absl::flat_hash_set<int32_t> stack_stores_;
@@ -1744,7 +1772,6 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
         parameter_count = ExpressionBuilder::DetermineParameterCount(all_instructions);
       }
     }
-    absl::flat_hash_set<std::string> double_vars = IdentifyDoubleVariables(cfg);
 
     int fp_param_count = 0;
     if (options.function_fp_parameter_counts != nullptr) {
@@ -1886,38 +1913,10 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
   }
 
   if (!local_vars_to_declare.empty()) {
-    uint32_t detected_frame_size = 0;
-    bool has_calls = false;
-    bool has_frame_pointer = false;
-    for (const auto& block : cfg.Blocks()) {
-      for (const auto& inst : block.instructions) {
-        if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-             inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-            inst.rt.has_value() && *inst.rt == Register::kSp && inst.rs == Register::kSp &&
-            inst.immediate < 0) {
-          detected_frame_size =
-              std::max(detected_frame_size, static_cast<uint32_t>(-inst.immediate));
-        }
-        if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
-             inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd) &&
-            inst.rd.has_value() && *inst.rd == Register::kFp &&
-            ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
-             (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
-          has_frame_pointer = true;
-        }
-        if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-             inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-            inst.rt.has_value() && *inst.rt == Register::kFp && inst.rs == Register::kSp &&
-            inst.immediate == 0) {
-          has_frame_pointer = true;
-        }
-        if (inst.IsCall()) {
-          has_calls = true;
-        }
-      }
-    }
-    PrologueAnalysis prologue = AnalyzePrologue(cfg, has_frame_pointer);
-    uint32_t min_saved_reg_offset = prologue.min_saved_reg_offset;
+    uint32_t detected_frame_size = ctx.FrameSize();
+    bool has_calls = ctx.HasCalls();
+    bool has_frame_pointer = ctx.HasFramePointer();
+    uint32_t min_saved_reg_offset = ctx.MinSavedRegOffset();
 
     uint32_t sp_base_offset = (has_calls && detected_frame_size > 16) ? 16 : 0;
     uint32_t max_sp_access = 0;
@@ -1979,7 +1978,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
       }
     }
 
-    absl::flat_hash_set<std::string> double_vars = IdentifyDoubleVariables(cfg);
+    const absl::flat_hash_set<std::string>& double_vars = ctx.DoubleVars();
 
     auto is_fp_reg = [](std::string_view name) -> bool {
       if (name.size() >= 2 && name[0] == 'f' && std::isdigit(name[1])) {

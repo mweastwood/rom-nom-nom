@@ -170,10 +170,18 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
 
   if (comp->target_result.status == ExecutionStatus::kMaxStepsReached &&
       comp->candidate_result.status != ExecutionStatus::kMaxStepsReached) {
+    target_emu_.RollbackWrites(target_code, target_vram);
+    for (const auto& payload : test_case.initial_memory) {
+      target_emu_.ClearMemory(payload.address, payload.data.size());
+    }
     SetupEmulator(&target_emu_, test_case);
     comp->target_result = target_emu_.RunFunction(target_vram, options_.max_steps_per_run * 5);
   } else if (comp->candidate_result.status == ExecutionStatus::kMaxStepsReached &&
              comp->target_result.status != ExecutionStatus::kMaxStepsReached) {
+    candidate_emu_.RollbackWrites(candidate_code, candidate_vram);
+    for (const auto& payload : test_case.initial_memory) {
+      candidate_emu_.ClearMemory(payload.address, payload.data.size());
+    }
     SetupEmulator(&candidate_emu_, test_case);
     comp->candidate_result =
         candidate_emu_.RunFunction(candidate_vram, options_.max_steps_per_run * 5);
@@ -276,7 +284,8 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
           candidate_writes.end());
     }
 
-    if (options_.candidate_to_target_address) {
+    if (options_.candidate_to_target_address &&
+        !(target_writes.empty() && candidate_writes.empty())) {
       absl::flat_hash_set<std::tuple<uint32_t, uint64_t, uint8_t>> exact_target_stores;
       absl::flat_hash_set<uint32_t> target_addresses;
       for (const auto& tw : target_writes) {
@@ -286,7 +295,9 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
       uint32_t buf_start = options_.pointer_buffer_vram;
       uint32_t buf_end = options_.pointer_buffer_vram + options_.pointer_buffer_size;
       bool is_pointer_case = (test_case.a0 >= buf_start && test_case.a0 < buf_end) ||
-                             (test_case.a1 >= buf_start && test_case.a1 < buf_end);
+                             (test_case.a1 >= buf_start && test_case.a1 < buf_end) ||
+                             (test_case.a2 >= buf_start && test_case.a2 < buf_end) ||
+                             (test_case.a3 >= buf_start && test_case.a3 < buf_end);
       for (auto& cw : candidate_writes) {
         if (!is_pointer_case || !(cw.address >= buf_start && cw.address < buf_end)) {
           uint32_t mapped_addr = options_.candidate_to_target_address(cw.address);
@@ -304,40 +315,43 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
       }
     }
 
-    absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
-    for (const auto& tw : target_writes) {
-      for (uint8_t b = 0; b < tw.size; ++b) {
-        uint8_t byte_val = static_cast<uint8_t>((tw.value >> ((tw.size - 1 - b) * 8)) & 0xFF);
-        target_bytes[tw.address + b] = byte_val;
+    bool writes_match = (target_writes == candidate_writes);
+    if (!writes_match) {
+      absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
+      for (const auto& tw : target_writes) {
+        for (uint8_t b = 0; b < tw.size; ++b) {
+          uint8_t byte_val = static_cast<uint8_t>((tw.value >> ((tw.size - 1 - b) * 8)) & 0xFF);
+          target_bytes[tw.address + b] = byte_val;
+        }
       }
-    }
-    absl::flat_hash_map<uint32_t, uint8_t> candidate_bytes;
-    for (const auto& cw : candidate_writes) {
-      for (uint8_t b = 0; b < cw.size; ++b) {
-        uint8_t byte_val = static_cast<uint8_t>((cw.value >> ((cw.size - 1 - b) * 8)) & 0xFF);
-        candidate_bytes[cw.address + b] = byte_val;
+      absl::flat_hash_map<uint32_t, uint8_t> candidate_bytes;
+      for (const auto& cw : candidate_writes) {
+        for (uint8_t b = 0; b < cw.size; ++b) {
+          uint8_t byte_val = static_cast<uint8_t>((cw.value >> ((cw.size - 1 - b) * 8)) & 0xFF);
+          candidate_bytes[cw.address + b] = byte_val;
+        }
       }
-    }
 
-    bool writes_match = (target_bytes == candidate_bytes);
-    if (!writes_match && target_writes.size() == candidate_writes.size()) {
-      std::sort(target_writes.begin(), target_writes.end(),
-                [](const MemoryWrite& a, const MemoryWrite& b) {
-                  if (a.address != b.address) return a.address < b.address;
-                  if (a.size != b.size) return a.size < b.size;
-                  return a.value < b.value;
-                });
-      std::sort(candidate_writes.begin(), candidate_writes.end(),
-                [](const MemoryWrite& a, const MemoryWrite& b) {
-                  if (a.address != b.address) return a.address < b.address;
-                  if (a.size != b.size) return a.size < b.size;
-                  return a.value < b.value;
-                });
-      writes_match = true;
-      for (size_t i = 0; i < target_writes.size(); ++i) {
-        if (!(target_writes[i] == candidate_writes[i])) {
-          writes_match = false;
-          break;
+      writes_match = (target_bytes == candidate_bytes);
+      if (!writes_match && target_writes.size() == candidate_writes.size()) {
+        std::sort(target_writes.begin(), target_writes.end(),
+                  [](const MemoryWrite& a, const MemoryWrite& b) {
+                    if (a.address != b.address) return a.address < b.address;
+                    if (a.size != b.size) return a.size < b.size;
+                    return a.value < b.value;
+                  });
+        std::sort(candidate_writes.begin(), candidate_writes.end(),
+                  [](const MemoryWrite& a, const MemoryWrite& b) {
+                    if (a.address != b.address) return a.address < b.address;
+                    if (a.size != b.size) return a.size < b.size;
+                    return a.value < b.value;
+                  });
+        writes_match = true;
+        for (size_t i = 0; i < target_writes.size(); ++i) {
+          if (!(target_writes[i] == candidate_writes[i])) {
+            writes_match = false;
+            break;
+          }
         }
       }
     }

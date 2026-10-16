@@ -194,6 +194,52 @@ bool Instruction::IsNop() const {
                            rt.has_value() && *rt == Register::kZero && shift_amount == 0);
 }
 
+bool Instruction::IsDoublePrecision() const {
+  switch (opcode) {
+    case Opcode::kLdc1:
+    case Opcode::kSdc1:
+    case Opcode::kDmfc1:
+    case Opcode::kDmtc1:
+    case Opcode::kAddD:
+    case Opcode::kSubD:
+    case Opcode::kMulD:
+    case Opcode::kDivD:
+    case Opcode::kSqrtD:
+    case Opcode::kAbsD:
+    case Opcode::kMovD:
+    case Opcode::kNegD:
+    case Opcode::kCvtSD:
+    case Opcode::kCvtDS:
+    case Opcode::kCvtDW:
+    case Opcode::kCvtWD:
+    case Opcode::kCvtLD:
+    case Opcode::kCvtDL:
+    case Opcode::kTruncWD:
+    case Opcode::kRoundWD:
+    case Opcode::kCeilWD:
+    case Opcode::kFloorWD:
+    case Opcode::kCFD:
+    case Opcode::kCUnD:
+    case Opcode::kCEqD:
+    case Opcode::kCUeqD:
+    case Opcode::kCOltD:
+    case Opcode::kCUltD:
+    case Opcode::kCOleD:
+    case Opcode::kCUleD:
+    case Opcode::kCSfD:
+    case Opcode::kCNgleD:
+    case Opcode::kCSeqD:
+    case Opcode::kCNglD:
+    case Opcode::kCLtD:
+    case Opcode::kCNgeD:
+    case Opcode::kCLeD:
+    case Opcode::kCNgtD:
+      return true;
+    default:
+      return false;
+  }
+}
+
 uint32_t Instruction::BranchTarget() const {
   return vram + 4 + (static_cast<int32_t>(immediate) << 2);
 }
@@ -1390,6 +1436,10 @@ std::string FormatBranch(const Instruction& inst, std::string_view target_label)
       return absl::StrFormat("bltzl  %s, %s", rs, target_label);
     case Opcode::kBgezl:
       return absl::StrFormat("bgezl  %s, %s", rs, target_label);
+    case Opcode::kBltzall:
+      return absl::StrFormat("bltzall %s, %s", rs, target_label);
+    case Opcode::kBgezall:
+      return absl::StrFormat("bgezall %s, %s", rs, target_label);
 
     case Opcode::kBc1f:
       return absl::StrFormat("bc1f   %s", target_label);

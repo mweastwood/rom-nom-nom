@@ -75,7 +75,8 @@ class EquivalenceRunner {
       : options_(options), fuzzer_(options.fuzzer_options) {}
 
   // Evaluates equivalence for a single function target.
-  FunctionEquivalenceResult EvaluateFunction(const FunctionEquivalenceTarget& target);
+  FunctionEquivalenceResult EvaluateFunction(const FunctionEquivalenceTarget& target,
+                                             DifferentialFuzzer* fuzzer = nullptr);
 
   // Evaluates equivalence for a collection of function targets in a module.
   ModuleEquivalenceSummary EvaluateModule(std::string_view module_name,

@@ -802,9 +802,14 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
                         }
                       }
                       if (ft_uses_v0) break;
+                      bool ft_redefined_v0 = false;
                       for (Register d : ft_ud.gpr_defs) {
-                        if (d == Register::kV0) break;
+                        if (d == Register::kV0) {
+                          ft_redefined_v0 = true;
+                          break;
+                        }
                       }
+                      if (ft_redefined_v0) break;
                     }
                     if (ft_uses_v0) {
                       executed = executed.subspan(0, executed.size() - 1);

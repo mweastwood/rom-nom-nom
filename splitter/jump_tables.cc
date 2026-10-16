@@ -19,10 +19,10 @@ namespace rom_nom_nom {
 JumpTableResolver::JumpTableResolver(const SymbolIndex* symbols, JumpTableOptions options)
     : symbols_(symbols), options_(options) {}
 
-std::optional<JumpTable> JumpTableResolver::DetectTableAt(absl::Span<const uint8_t> rodata,
-                                                          size_t offset_in_rodata,
-                                                          uint32_t rodata_vram_start,
-                                                          const FunctionRange& func) const {
+std::optional<RodataJumpTable> JumpTableResolver::DetectTableAt(absl::Span<const uint8_t> rodata,
+                                                                size_t offset_in_rodata,
+                                                                uint32_t rodata_vram_start,
+                                                                const FunctionRange& func) const {
   if (offset_in_rodata % 4 != 0 || offset_in_rodata + 4 > rodata.size()) {
     return std::nullopt;
   }
@@ -41,7 +41,7 @@ std::optional<JumpTable> JumpTableResolver::DetectTableAt(absl::Span<const uint8
     return std::nullopt;
   }
 
-  JumpTable table;
+  RodataJumpTable table;
   table.vram_start = rodata_vram_start + static_cast<uint32_t>(offset_in_rodata);
   if (symbols_ != nullptr) {
     const auto* entry = symbols_->FindByAddress(table.vram_start);
@@ -57,15 +57,15 @@ std::optional<JumpTable> JumpTableResolver::DetectTableAt(absl::Span<const uint8
   return table;
 }
 
-std::vector<JumpTable> JumpTableResolver::ScanRodata(
+std::vector<RodataJumpTable> JumpTableResolver::ScanRodata(
     absl::Span<const uint8_t> rodata, uint32_t rodata_vram_start,
     absl::Span<const FunctionRange> functions) const {
-  std::vector<JumpTable> tables;
+  std::vector<RodataJumpTable> tables;
   size_t offset = 0;
   size_t min_bytes = options_.min_entries * 4;
 
   while (offset + min_bytes <= rodata.size()) {
-    std::optional<JumpTable> found_table;
+    std::optional<RodataJumpTable> found_table;
     for (const auto& func : functions) {
       auto table = DetectTableAt(rodata, offset, rodata_vram_start, func);
       if (table.has_value()) {
@@ -85,7 +85,7 @@ std::vector<JumpTable> JumpTableResolver::ScanRodata(
   return tables;
 }
 
-std::string JumpTableResolver::FormatJumpTableAsm(const JumpTable& jtbl) const {
+std::string JumpTableResolver::FormatJumpTableAsm(const RodataJumpTable& jtbl) const {
   std::string asm_text;
   if (options_.emit_section) {
     absl::StrAppend(&asm_text, ".section .rodata\n\n");
@@ -104,8 +104,8 @@ std::string JumpTableResolver::FormatJumpTableAsm(const JumpTable& jtbl) const {
   return asm_text;
 }
 
-std::vector<uint32_t> JumpTableResolver::ExtractLocalLabels(absl::Span<const JumpTable> tables,
-                                                            const FunctionRange& func) const {
+std::vector<uint32_t> JumpTableResolver::ExtractLocalLabels(
+    absl::Span<const RodataJumpTable> tables, const FunctionRange& func) const {
   std::vector<uint32_t> labels;
   absl::flat_hash_set<uint32_t> seen;
 

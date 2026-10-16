@@ -266,8 +266,11 @@ std::vector<DataBlob> CollectDataBlobs(const GameConfig* config, const SymbolInd
           sub_vram = seg.vram() + (sub_start - seg.rom_start());
         }
         blobs.push_back({sub_vram, sub_end - sub_start, label_for_vram(sub_vram), false});
-      } else if (sub.type() == SUBSEGMENT_BSS && sub.vram() != 0 && seg.bss_size() != 0) {
-        blobs.push_back({sub.vram(), seg.bss_size(), label_for_vram(sub.vram()), true});
+      } else if (sub.type() == SUBSEGMENT_BSS && sub.vram() != 0) {
+        uint32_t bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
+        if (bss_size != 0) {
+          blobs.push_back({sub.vram(), bss_size, label_for_vram(sub.vram()), true});
+        }
       }
     }
   }

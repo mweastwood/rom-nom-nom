@@ -205,9 +205,9 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
     cfg.blocks_[to].predecessors.push_back(from);
   };
 
-  for (size_t b = 0; b < cfg.blocks_.size(); ++b) {
-    auto& block = cfg.blocks_[b];
-    const auto* term = block.Terminator();
+  const size_t initial_block_count = cfg.blocks_.size();
+  for (size_t b = 0; b < initial_block_count; ++b) {
+    const auto* term = cfg.blocks_[b].Terminator();
     if (term == nullptr) continue;
 
     if (term->IsReturn()) {
@@ -215,14 +215,14 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
       continue;
     }
 
-    if (block.jump_table != nullptr) {
+    if (cfg.blocks_[b].jump_table != nullptr) {
       absl::flat_hash_set<uint32_t> added_targets;
-      for (const auto& entry : block.jump_table->entries) {
+      for (const auto& entry : cfg.blocks_[b].jump_table->entries) {
         if (!added_targets.contains(entry.target_vram)) {
           added_targets.insert(entry.target_vram);
           auto it = cfg.vram_to_block_index_.find(entry.target_vram);
           if (it != cfg.vram_to_block_index_.end()) {
-            add_edge(block.id, static_cast<uint32_t>(it->second), EdgeType::kJump);
+            add_edge(cfg.blocks_[b].id, static_cast<uint32_t>(it->second), EdgeType::kJump);
           }
         }
       }
@@ -238,7 +238,7 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
       BasicBlock ext_block;
       ext_block.id = ext_id;
       ext_block.start_vram = target_vram;
-      ext_block.end_vram = target_vram + 12;
+      ext_block.end_vram = target_vram + 24;
       Instruction nop1;
       nop1.vram = target_vram;
       nop1.opcode = Opcode::kOr;
@@ -296,12 +296,13 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
     if (term->IsBranch()) {
       // Taken branch edge
       uint32_t target_vram = term->BranchTarget();
+      bool is_unconditional = term->IsUnconditionalBranch();
+      uint32_t fallthrough_vram = term->vram + (term->HasDelaySlot() ? 8 : 4);
       uint32_t target_id = get_or_create_target_block(target_vram);
       add_edge(static_cast<uint32_t>(b), target_id, EdgeType::kBranch);
 
-      if (!term->IsUnconditionalBranch()) {
+      if (!is_unconditional) {
         // Fallthrough edge (instruction after branch + delay slot)
-        uint32_t fallthrough_vram = term->vram + (term->HasDelaySlot() ? 8 : 4);
         auto it_fallthrough = cfg.vram_to_block_index_.find(fallthrough_vram);
         if (it_fallthrough != cfg.vram_to_block_index_.end()) {
           add_edge(static_cast<uint32_t>(b), static_cast<uint32_t>(it_fallthrough->second),
@@ -315,6 +316,7 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
       if (term->rs.has_value() && *term->rs != Register::kRa) {
         Register jump_reg = *term->rs;
         std::optional<uint32_t> const_target;
+        const auto& block = cfg.blocks_[b];
         for (auto it_inst = block.instructions.rbegin(); it_inst != block.instructions.rend();
              ++it_inst) {
           if ((it_inst->opcode == Opcode::kAddiu || it_inst->opcode == Opcode::kAddi) &&
@@ -340,7 +342,7 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
         if (const_target.has_value()) {
           auto it = cfg.vram_to_block_index_.find(*const_target);
           if (it != cfg.vram_to_block_index_.end()) {
-            add_edge(block.id, static_cast<uint32_t>(it->second), EdgeType::kJump);
+            add_edge(cfg.blocks_[b].id, static_cast<uint32_t>(it->second), EdgeType::kJump);
           }
         }
       }
@@ -348,8 +350,8 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
     }
 
     // Normal fallthrough block
-    if (b + 1 < cfg.blocks_.size()) {
-      add_edge(block.id, static_cast<uint32_t>(b + 1), EdgeType::kFallthrough);
+    if (b + 1 < initial_block_count) {
+      add_edge(cfg.blocks_[b].id, static_cast<uint32_t>(b + 1), EdgeType::kFallthrough);
     }
   }
 

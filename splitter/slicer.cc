@@ -30,8 +30,11 @@ absl::StatusOr<std::vector<CarvedSlice>> Slicer::PlanSlices(const Rom& rom,
   }
 
   std::vector<CarvedSlice> slices;
-  const std::filesystem::path game_out_dir =
-      options_.output_dir / (config.basename().empty() ? "game" : config.basename());
+  const std::string game_basename =
+      config.basename().empty() ? "game" : std::string(config.basename());
+  const std::filesystem::path game_out_dir = (options_.output_dir.filename() == game_basename)
+                                                 ? options_.output_dir
+                                                 : (options_.output_dir / game_basename);
 
   for (int i = 0; i < config.segments_size(); ++i) {
     const Segment& seg = config.segments(i);

@@ -245,7 +245,7 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::ScanFromElfAndR
 
   auto vram_to_rom = [&](uint32_t vram) -> std::optional<uint32_t> {
     for (const auto& seg : load_segments) {
-      if (vram >= seg.vaddr && vram < seg.vaddr + seg.memsz) {
+      if (vram >= seg.vaddr && vram < seg.vaddr + seg.filesz) {
         return seg.paddr + (vram - seg.vaddr);
       }
     }
@@ -280,7 +280,8 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::ScanFromElfAndR
     }
     const char* name_ptr =
         reinterpret_cast<const char*>(elf_bytes.data() + strtab_offset + st_name);
-    std::string name(name_ptr);
+    size_t max_len = strtab_size - st_name;
+    std::string name(name_ptr, strnlen(name_ptr, max_len));
     if (name.empty()) {
       continue;
     }

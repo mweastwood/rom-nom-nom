@@ -48,6 +48,10 @@ ABSL_FLAG(int, j, 0, "Alias for --jobs.");
 namespace {
 
 std::filesystem::path FindRepoRoot() {
+  const char* build_workspace_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
+  if (build_workspace_dir != nullptr && build_workspace_dir[0] != '\0') {
+    return std::filesystem::path(build_workspace_dir);
+  }
   const char* build_working_dir = std::getenv("BUILD_WORKING_DIRECTORY");
   if (build_working_dir != nullptr && build_working_dir[0] != '\0') {
     return std::filesystem::path(build_working_dir);
@@ -211,7 +215,7 @@ int main(int argc, char* argv[]) {
     const auto& fopts = runner_opts.fuzzer_options;
     RebaseOptions rebase_opts;
     rebase_opts.reserved_ranges = {
-        {fopts.pointer_buffer_vram, fopts.pointer_buffer_vram + 0x10000},
+        {fopts.pointer_buffer_vram, fopts.pointer_buffer_vram + fopts.pointer_buffer_size},
         {fopts.initial_sp - 0x10000, fopts.initial_sp + 0x1000},
     };
     // Keep relocated compiler rodata far away from game data: fuzz vectors routinely index
@@ -274,7 +278,8 @@ int main(int argc, char* argv[]) {
               if (target_bss_start == 0 || sub.vram() < target_bss_start) {
                 target_bss_start = sub.vram();
               }
-              uint32_t bss_end = sub.vram() + (seg.bss_size() != 0 ? seg.bss_size() : 0x100000);
+              uint32_t sub_bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
+              uint32_t bss_end = sub.vram() + (sub_bss_size != 0 ? sub_bss_size : 0x100000);
               if (bss_end > target_bss_end) {
                 target_bss_end = bss_end;
               }

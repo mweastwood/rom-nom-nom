@@ -26,6 +26,8 @@ bool WritesToGprRt(Opcode opcode) {
   switch (opcode) {
     case Opcode::kAddi:
     case Opcode::kAddiu:
+    case Opcode::kDaddi:
+    case Opcode::kDaddiu:
     case Opcode::kSlti:
     case Opcode::kSltiu:
     case Opcode::kAndi:
@@ -36,12 +38,18 @@ bool WritesToGprRt(Opcode opcode) {
     case Opcode::kLh:
     case Opcode::kLhu:
     case Opcode::kLw:
+    case Opcode::kLwu:
     case Opcode::kLwl:
     case Opcode::kLwr:
     case Opcode::kLd:
+    case Opcode::kLdl:
+    case Opcode::kLdr:
     case Opcode::kLld:
+    case Opcode::kScd:
+    case Opcode::kMfc0:
     case Opcode::kMfc1:
     case Opcode::kDmfc1:
+    case Opcode::kCfc1:
       return true;
     default:
       return false;
@@ -53,15 +61,20 @@ bool IsLuiConsumer(Opcode opcode) {
   switch (opcode) {
     case Opcode::kAddiu:
     case Opcode::kAddi:
+    case Opcode::kDaddiu:
+    case Opcode::kDaddi:
     case Opcode::kOri:
     case Opcode::kLb:
     case Opcode::kLbu:
     case Opcode::kLh:
     case Opcode::kLhu:
     case Opcode::kLw:
+    case Opcode::kLwu:
     case Opcode::kLwl:
     case Opcode::kLwr:
     case Opcode::kLd:
+    case Opcode::kLdl:
+    case Opcode::kLdr:
     case Opcode::kLld:
     case Opcode::kSb:
     case Opcode::kSh:
@@ -69,6 +82,8 @@ bool IsLuiConsumer(Opcode opcode) {
     case Opcode::kSwl:
     case Opcode::kSwr:
     case Opcode::kSd:
+    case Opcode::kSdl:
+    case Opcode::kSdr:
     case Opcode::kScd:
     case Opcode::kLwc1:
     case Opcode::kLdc1:
@@ -133,7 +148,7 @@ std::string RelocationTracker::FormatSymbolExpression(std::string_view symbol_na
   if (addend > 0) {
     return absl::StrFormat("%s + 0x%X", symbol_name, addend);
   }
-  return absl::StrFormat("%s - 0x%X", symbol_name, -addend);
+  return absl::StrFormat("%s - 0x%X", symbol_name, -static_cast<int64_t>(addend));
 }
 
 void RelocationTracker::Clear() {
@@ -276,6 +291,18 @@ std::string RelocationTracker::FormatInstruction(const Instruction& inst) const 
                                  RegisterName(*inst.rs), sym_expr);
         }
         break;
+      case Opcode::kDaddiu:
+        if (inst.rt.has_value() && inst.rs.has_value()) {
+          return absl::StrFormat("daddiu %s, %s, %%lo(%s)", RegisterName(*inst.rt),
+                                 RegisterName(*inst.rs), sym_expr);
+        }
+        break;
+      case Opcode::kDaddi:
+        if (inst.rt.has_value() && inst.rs.has_value()) {
+          return absl::StrFormat("daddi %s, %s, %%lo(%s)", RegisterName(*inst.rt),
+                                 RegisterName(*inst.rs), sym_expr);
+        }
+        break;
       case Opcode::kOri:
         if (inst.rt.has_value() && inst.rs.has_value()) {
           return absl::StrFormat("ori   %s, %s, %%lo(%s)", RegisterName(*inst.rt),
@@ -285,11 +312,14 @@ std::string RelocationTracker::FormatInstruction(const Instruction& inst) const 
 
       // Integer Loads
       case Opcode::kLw:
+      case Opcode::kLwu:
       case Opcode::kLh:
       case Opcode::kLhu:
       case Opcode::kLb:
       case Opcode::kLbu:
       case Opcode::kLd:
+      case Opcode::kLdl:
+      case Opcode::kLdr:
       case Opcode::kLld:
       case Opcode::kLwl:
       case Opcode::kLwr: {
@@ -297,6 +327,9 @@ std::string RelocationTracker::FormatInstruction(const Instruction& inst) const 
         switch (inst.opcode) {
           case Opcode::kLw:
             op_name = "lw";
+            break;
+          case Opcode::kLwu:
+            op_name = "lwu";
             break;
           case Opcode::kLh:
             op_name = "lh";
@@ -312,6 +345,12 @@ std::string RelocationTracker::FormatInstruction(const Instruction& inst) const 
             break;
           case Opcode::kLd:
             op_name = "ld";
+            break;
+          case Opcode::kLdl:
+            op_name = "ldl";
+            break;
+          case Opcode::kLdr:
+            op_name = "ldr";
             break;
           case Opcode::kLld:
             op_name = "lld";
@@ -337,6 +376,8 @@ std::string RelocationTracker::FormatInstruction(const Instruction& inst) const 
       case Opcode::kSh:
       case Opcode::kSb:
       case Opcode::kSd:
+      case Opcode::kSdl:
+      case Opcode::kSdr:
       case Opcode::kScd:
       case Opcode::kSwl:
       case Opcode::kSwr: {
@@ -353,6 +394,12 @@ std::string RelocationTracker::FormatInstruction(const Instruction& inst) const 
             break;
           case Opcode::kSd:
             op_name = "sd";
+            break;
+          case Opcode::kSdl:
+            op_name = "sdl";
+            break;
+          case Opcode::kSdr:
+            op_name = "sdr";
             break;
           case Opcode::kScd:
             op_name = "scd";

@@ -390,5 +390,60 @@ TEST(SymbolFolderTest, MultipleUsesPreservesHi) {
   EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
 }
 
+TEST(SymbolFolderTest, FoldClearsMidToFoldedIdxBetweenRuns) {
+  // First run: indexed global load that populates mid_to_folded_idx_ at index 1.
+  std::vector<uint32_t> indexed_words = {
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00230821,  // 1: addu  $at, $at, $v1
+      0x8C228BFC,  // 2: lw    $v0, -29700($at)
+  };
+  auto indexed_insts = *DecodeSequence(indexed_words);
+
+  SymbolFolder folder;
+  folder.Fold(indexed_insts);
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  EXPECT_TRUE(folder.IsFoldedHi(0));
+  EXPECT_TRUE(folder.IsFoldedMid(1));
+  EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
+
+  // Second run on the same SymbolFolder instance: non-indexed sequence.
+  std::vector<uint32_t> non_indexed_words = {
+      0x3C01801F,  // 0: lui   $at, 0x801F
+      0x24242340,  // 1: addiu $a0, $at, 0x2340
+  };
+  auto non_indexed_insts = *DecodeSequence(non_indexed_words);
+
+  folder.Fold(non_indexed_insts);
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  EXPECT_TRUE(folder.IsFoldedHi(0));
+  EXPECT_FALSE(folder.IsFoldedMid(1));
+  EXPECT_THAT(folder.GetFoldedLo(1), NotNull());
+}
+
+TEST(SymbolFolderTest, MultipleUsesOnMidPreservesBothHiAndMid) {
+  // lui   $at, 0x8019
+  // addu  $t1, $at, $v1      # mid_inst_index = 1
+  // lw    $v0, -29700($t1)   # lo_inst_index = 2
+  // addu  $a0, $t1, $a1      # additional unfolded use of $t1 (mid register)
+  std::vector<uint32_t> words = {
+      0x3C018019,  // 0: lui   $at, 0x8019
+      0x00234821,  // 1: addu  $t1, $at, $v1
+      0x8D228BFC,  // 2: lw    $v0, -29700($t1)
+      0x01252021,  // 3: addu  $a0, $t1, $a1
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  EXPECT_EQ(folder.AllFolded()[0].type, FoldedPatternType::kGlobalIndexedLoad);
+  // Because the mid instruction's destination ($t1) has an unfolded use at index 3,
+  // neither the mid addu nor the hi lui may be suppressed.
+  EXPECT_FALSE(folder.IsFoldedMid(1));
+  EXPECT_FALSE(folder.IsFoldedHi(0));
+  EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

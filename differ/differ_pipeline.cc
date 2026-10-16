@@ -31,13 +31,6 @@ namespace rom_nom_nom {
 
 namespace {
 
-// Default compiler flags if unspecified in GameConfig.
-const std::vector<std::string>& DefaultCompilerFlags() {
-  static const auto* k_flags =
-      new std::vector<std::string>({"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"});
-  return *k_flags;
-}
-
 std::filesystem::path FindRepoRoot() {
   const char* ws_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
   if (ws_dir != nullptr && *ws_dir != '\0') {
@@ -112,115 +105,16 @@ absl::StatusOr<DifferResult> DifferPipeline::Diff(std::string_view func_name) co
 
   // 4. If C source exists, compile it with GCC 2.7.2, read object, and apply relocations.
   if (c_file.has_value()) {
-    auto tc_or = Toolchain::Discover({
-        .repo_root = repo_root_,
-        .mode = ToolchainMode::kOriginal,
-    });
-    if (!tc_or.ok()) {
-      return tc_or.status();
+    auto cand_or = extractor->CompileCandidateFunction(*c_file, canonical_name, target_func.vram);
+    if (absl::IsNotFound(cand_or.status()) && canonical_name != func_name) {
+      cand_or = extractor->CompileCandidateFunction(*c_file, func_name, target_func.vram);
     }
-    Compiler compiler(*tc_or);
-
-    // Determine module compiler flags from GameConfig.
-    std::vector<std::string> flags = DefaultCompilerFlags();
-    if (extractor->Config() != nullptr) {
-      const auto& c_flags_map = extractor->Config()->c_flags();
-      auto it = c_flags_map.find(c_file->stem().string());
-      if (it != c_flags_map.end()) {
-        flags.assign(it->second.flags().begin(), it->second.flags().end());
-      } else {
-        auto def_it = c_flags_map.find("default");
-        if (def_it != c_flags_map.end()) {
-          flags.assign(def_it->second.flags().begin(), def_it->second.flags().end());
-        }
-      }
+    if (!cand_or.ok()) {
+      return cand_or.status();
     }
-
-    std::filesystem::path asm_dir = repo_root_ / "bazel-bin" / "asm" / options_.game_name;
-    std::error_code ec;
-    if (!std::filesystem::exists(asm_dir, ec)) {
-      asm_dir = repo_root_ / "asm" / options_.game_name;
-    }
-
-    std::vector<std::filesystem::path> includes = {
-        repo_root_,
-        repo_root_ / "src" / options_.game_name,
-        repo_root_ / "src" / "c" / options_.game_name,
-        repo_root_ / "src" / "cc" / options_.game_name,
-        asm_dir,
-        repo_root_ / "bazel-bin",
-    };
-    if (asm_dir.has_parent_path()) {
-      includes.push_back(asm_dir.parent_path());
-    }
-
-    std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
-    std::filesystem::path temp_obj =
-        temp_dir / absl::StrCat("diff_", c_file->stem().string(), "_", func_name, ".o");
-
-    auto compile_status = compiler.CompileC({
-        .src_file = *c_file,
-        .out_obj = temp_obj,
-        .opt_flags = flags,
-        .include_dirs = includes,
-        .macro_inc = FindMacroInc(repo_root_, options_.game_name),
-    });
-    if (!compile_status.ok()) {
-      return absl::InternalError(absl::StrCat(
-          "Compilation failed for ", c_file->filename().string(), ":\n", compile_status.message()));
-    }
-
-    auto reader_or = ElfReader::LoadFromFile(temp_obj);
-    std::filesystem::remove(temp_obj, ec);
-    if (!reader_or.ok()) {
-      return reader_or.status();
-    }
-
-    auto func_or = reader_or->ExtractFunction(canonical_name);
-    if (!func_or.ok()) {
-      func_or = reader_or->ExtractFunction(func_name);
-    }
-    if (!func_or.ok()) {
-      return absl::NotFoundError(
-          absl::StrFormat("Function '%s' not found in compiled object file %s: %s", canonical_name,
-                          c_file->filename().string(), func_or.status().message()));
-    }
-    const ElfFunction& matched_elf_func = *func_or;
-
-    compiled_vram = matched_elf_func.section_offset;
-    compiled_size = matched_elf_func.size;
-
-    // Apply relocations to compiled object code using symbol registry and section base.
-    uint32_t text_base_vram = target_func.vram - matched_elf_func.section_offset;
-    auto symbol_lookup = [&](std::string_view name) -> std::optional<uint32_t> {
-      if (name == ".text") {
-        return text_base_vram;
-      }
-      if (extractor->Symbols() != nullptr) {
-        const auto* entry = extractor->Symbols()->FindByName(name);
-        if (entry != nullptr) {
-          return entry->address();
-        }
-      }
-      size_t last_underscore = name.rfind('_');
-      if (last_underscore != std::string_view::npos && last_underscore + 1 < name.size() &&
-          name.size() - (last_underscore + 1) == 8) {
-        uint32_t addr = 0;
-        if (absl::SimpleHexAtoi(name.substr(last_underscore + 1), &addr)) {
-          return addr;
-        }
-      }
-      return std::nullopt;
-    };
-    RelocationApplyResult applied = RelocationApplier::Apply(matched_elf_func, symbol_lookup);
-
-    for (size_t i = 0; i < applied.patched_words.size(); ++i) {
-      auto inst_or =
-          DecodeInstruction(applied.patched_words[i], matched_elf_func.section_offset + i * 4);
-      if (inst_or.ok()) {
-        compiled_instructions.push_back(*inst_or);
-      }
-    }
+    compiled_vram = target_func.vram;
+    compiled_size = cand_or->size;
+    compiled_instructions = std::move(cand_or->instructions);
   }
 
   // 5. Normalization: map branch/jump targets to function-relative offsets.

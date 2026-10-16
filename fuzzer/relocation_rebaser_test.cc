@@ -376,5 +376,43 @@ TEST(RelocationRebaserTest, ReportsDataSymbolsThatMovedInsideTheirBlob) {
   EXPECT_EQ(rebase->layout_mismatches, 1u);
 }
 
+TEST(RelocationRebaserTest, CollectDataBlobsRespectsSubsegmentBssSize) {
+  constexpr char kSubBssConfig[] = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "main"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80001000
+  subsegments { name: "code" type: SUBSEGMENT_ASM rom_start: 0x1000 }
+  subsegments { name: "bss1" type: SUBSEGMENT_BSS vram: 0x80003000 bss_size: 0x80 }
+  subsegments { name: "bss2" type: SUBSEGMENT_BSS vram: 0x80003080 bss_size: 0x120 }
+  bss_size: 0x200
+}
+)";
+  auto cfg = ParseGameConfig(kSubBssConfig);
+  ASSERT_TRUE(cfg.ok()) << cfg.status();
+  auto syms = SymbolIndex::ParseFromTextproto(R"(
+entries { name: "g_bss1" address: 0x80003000 type: SYMBOL_DATA }
+entries { name: "g_bss2" address: 0x80003080 type: SYMBOL_DATA }
+)");
+  ASSERT_TRUE(syms.ok()) << syms.status();
+
+  auto blobs = CollectDataBlobs(&*cfg, &*syms);
+  ASSERT_EQ(blobs.size(), 2u);
+  EXPECT_EQ(blobs[0].label, "g_bss1");
+  EXPECT_EQ(blobs[0].target_start, 0x80003000u);
+  EXPECT_EQ(blobs[0].size, 0x80u);
+  EXPECT_TRUE(blobs[0].is_bss);
+
+  EXPECT_EQ(blobs[1].label, "g_bss2");
+  EXPECT_EQ(blobs[1].target_start, 0x80003080u);
+  EXPECT_EQ(blobs[1].size, 0x120u);
+  EXPECT_TRUE(blobs[1].is_bss);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

@@ -191,7 +191,11 @@ def load_game_config(game: str):
     assert_map = parse_assert_strings(game)
     asm_dirs = [REPO_ROOT / "bazel-bin" / "asm" / game, REPO_ROOT / "asm" / game]
     asm_dir = next((d for d in asm_dirs if d.exists()), None)
-    src_dirs = [REPO_ROOT / "src" / "c" / game, REPO_ROOT / "src" / game]
+    src_dirs = [
+        REPO_ROOT / "src" / "c" / game,
+        REPO_ROOT / "src" / "cc" / game,
+        REPO_ROOT / "src" / game,
+    ]
     c_dir = next((d for d in src_dirs if d.exists()), None)
 
     for i, s in enumerate(subsegs):
@@ -290,9 +294,16 @@ def parse_c_declarations(
     game: str, modules: dict | None = None, defined_symbols: dict[str, int] | None = None
 ) -> tuple[list[dict], dict[str, dict]]:
     """Parse struct definitions and global variable extern declarations from headers and C sources."""
-    src_dirs = [REPO_ROOT / "src" / "c" / game, REPO_ROOT / "src" / game]
-    s_dir = next((d for d in src_dirs if d.exists()), None)
-    if not s_dir:
+    src_dirs = [
+        d
+        for d in (
+            REPO_ROOT / "src" / "c" / game,
+            REPO_ROOT / "src" / "cc" / game,
+            REPO_ROOT / "src" / game,
+        )
+        if d.exists()
+    ]
+    if not src_dirs:
         return [], {}
 
     structs = []
@@ -309,7 +320,12 @@ def parse_c_declarations(
             return m.group(1)
         return stem
 
-    for p in sorted(s_dir.glob("*.[ch]")):
+    source_files = []
+    for s_dir in src_dirs:
+        for ext in ("*.c", "*.cc", "*.cpp", "*.h"):
+            source_files.extend(sorted(s_dir.glob(ext)))
+
+    for p in source_files:
         content = p.read_text(encoding="utf-8", errors="ignore")
         content = re.sub(r"/\*.*?\*/", "", content, flags=re.S)
         content = re.sub(r"//.*$", "", content, flags=re.M)
@@ -420,7 +436,7 @@ def parse_c_declarations(
         r"#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)",
         re.M,
     )
-    for p in sorted(s_dir.glob("*.[ch]")):
+    for p in source_files:
         content = p.read_text(encoding="utf-8", errors="ignore")
         for m in alias_pat.finditer(content):
             alias_name = m.group(1).strip()
@@ -442,9 +458,14 @@ def get_module_data_refs(
     p2 = REPO_ROOT / "bazel-bin" / "asm" / game / "nonmatchings" / mod_name
     if p2.exists():
         paths.extend(p2.glob("*.s"))
-    p3 = REPO_ROOT / "src" / "c" / game / f"{mod_name}.c"
-    if p3.exists():
-        paths.append(p3)
+    for p_cand in (
+        REPO_ROOT / "src" / "c" / game / f"{mod_name}.c",
+        REPO_ROOT / "src" / "cc" / game / f"{mod_name}.cc",
+        REPO_ROOT / "src" / game / f"{mod_name}.c",
+        REPO_ROOT / "src" / game / f"{mod_name}.cc",
+    ):
+        if p_cand.exists():
+            paths.append(p_cand)
 
     refs = set()
     for p in paths:
@@ -499,12 +520,22 @@ def parse_codebase_and_functions(game: str, subsegs: list, symbols: dict):
     c_funcs = {}
     decompiled_func_names = set()
 
-    # 1. Parse C source files
-    src_dirs = [REPO_ROOT / "src" / "c" / game, REPO_ROOT / "src" / game]
-    c_dir = next((d for d in src_dirs if d.exists()), None)
+    # 1. Parse C/C++ source files
+    src_dirs = [
+        d
+        for d in (
+            REPO_ROOT / "src" / "c" / game,
+            REPO_ROOT / "src" / "cc" / game,
+            REPO_ROOT / "src" / game,
+        )
+        if d.exists()
+    ]
 
-    if c_dir:
-        for c_file in sorted(c_dir.glob("*.c")):
+    for c_dir in src_dirs:
+        c_files = []
+        for ext in ("*.c", "*.cc", "*.cpp"):
+            c_files.extend(sorted(c_dir.glob(ext)))
+        for c_file in c_files:
             content = c_file.read_text(encoding="utf-8", errors="ignore")
             mod_stem = c_file.stem
             m_seg = re.match(r"^([a-zA-Z0-9_]+)_segment_", mod_stem)
@@ -614,10 +645,12 @@ def parse_codebase_and_functions(game: str, subsegs: list, symbols: dict):
 
                 m_off = re.search(r"/\*\s*([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)", line_s)
                 if m_off and cur_func:
-                    rom_val = int(m_off.group(1), 16)
+                    vram_val = int(m_off.group(1), 16)
+                    sub = find_subseg_by_vram(vram_val)
+                    rom_val = (vram_val - sub["vram_base"]) if sub else vram_val
                     if start_rom is None:
                         start_rom = rom_val
-                        vram = int(m_off.group(2), 16)
+                        vram = vram_val
                     last_rom = rom_val
 
                     m_jal = re.search(r"\bjal\s+([A-Za-z0-9_]+)", line_s)
@@ -716,11 +749,21 @@ def group_by_logical_module(subsegs: list, all_funcs: dict, game: str):
         mod["rom_end"] = max(mod["rom_end"], s["end"])
         mod["subsegments"].append(s)
 
-    # Map existing C files to modules
-    src_dirs = [REPO_ROOT / "src" / "c" / game, REPO_ROOT / "src" / game]
-    c_dir = next((d for d in src_dirs if d.exists()), None)
-    if c_dir:
-        for c_file in sorted(c_dir.glob("*.c")):
+    # Map existing C/C++ files to modules
+    src_dirs = [
+        d
+        for d in (
+            REPO_ROOT / "src" / "c" / game,
+            REPO_ROOT / "src" / "cc" / game,
+            REPO_ROOT / "src" / game,
+        )
+        if d.exists()
+    ]
+    for c_dir in src_dirs:
+        c_files = []
+        for ext in ("*.c", "*.cc", "*.cpp"):
+            c_files.extend(sorted(c_dir.glob(ext)))
+        for c_file in c_files:
             stem = c_file.stem
             m_seg = re.match(r"^([a-zA-Z0-9_]+)_segment_", stem)
             target_mod = m_seg.group(1) if m_seg else stem

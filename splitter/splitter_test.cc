@@ -245,5 +245,92 @@ TEST(SplitterTest, EmitsCSubsegmentNonmatchingsAndDataBss) {
   std::filesystem::remove_all(temp_dir);
 }
 
+TEST(SplitterTest, CustomAssetsOutDirMacroIncAndSubsegmentBssSize) {
+  std::filesystem::path temp_dir =
+      std::filesystem::temp_directory_path() / "splitter_test_custom_opts";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+
+  std::filesystem::path custom_macro_path = temp_dir / "custom_game_macro.inc";
+  {
+    std::ofstream macro_out(custom_macro_path);
+    macro_out << "# Custom game macro include\n.macro custom_op\n    nop\n.endm\n";
+  }
+
+  auto rom_bytes = CreateMinimalN64Rom();
+  auto rom_or = Rom::FromBuffer(rom_bytes);
+  ASSERT_TRUE(rom_or.ok());
+  std::string sha1 = rom_or->Sha1();
+
+  std::string config_text = absl::StrFormat(
+      R"pb(
+        game_name: "Test Game"
+        sha1: "%s"
+        basename: "test_game"
+        macro_inc: "%s"
+
+        segments { name: "header" type: SEGMENT_HEADER rom_start: 0x0 rom_end: 0x40 }
+
+        segments {
+          name: "code"
+          type: SEGMENT_CODE
+          rom_start: 0x40
+          rom_end: 0x80
+          vram: 0x80025C00
+          bss_size: 0x40
+
+          subsegments { rom_start: 0x40 type: SUBSEGMENT_ASM name: "entrypoint" vram: 0x80025C00 }
+          subsegments {
+            rom_start: 0x80
+            type: SUBSEGMENT_BSS
+            name: "custom_bss"
+            vram: 0x80025C40
+            bss_size: 0x180
+          }
+        }
+      )pb",
+      sha1, custom_macro_path.string());
+
+  SplitterOptions options;
+  options.config_text_override = config_text;
+  options.rom_buffer_override = std::move(rom_bytes);
+  options.out_dir = temp_dir / "build";
+  options.assets_out_dir = temp_dir / "custom_assets" / "test_game";
+  options.asm_out_dir = temp_dir / "asm" / "test_game";
+  options.verify_sha1 = false;
+  options.slice_data = true;
+  options.write_ld_script = true;
+  options.disassemble_code = true;
+
+  auto result_or = RunSplitter(options);
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  // 1. Verify carved binary asset was written to custom assets_out_dir (and not out_dir)
+  EXPECT_TRUE(std::filesystem::exists(temp_dir / "custom_assets" / "test_game" / "header.bin"));
+  EXPECT_FALSE(std::filesystem::exists(options.out_dir / "test_game" / "header.bin"));
+
+  // 2. Verify custom macro_inc was copied to c_macro.inc in asm_out_dir
+  std::filesystem::path c_macro_inc = options.asm_out_dir / "c_macro.inc";
+  EXPECT_TRUE(std::filesystem::exists(c_macro_inc));
+  {
+    std::ifstream c_macro_in(c_macro_inc);
+    std::string c_macro_content((std::istreambuf_iterator<char>(c_macro_in)),
+                                std::istreambuf_iterator<char>());
+    EXPECT_NE(c_macro_content.find(".macro custom_op"), std::string::npos);
+  }
+
+  // 3. Verify subsegment bss_size (0x180) overrode segment bss_size (0x40)
+  std::filesystem::path bss_file = options.asm_out_dir / "data" / "custom_bss.bss.s";
+  EXPECT_TRUE(std::filesystem::exists(bss_file));
+  {
+    std::ifstream bss_in(bss_file);
+    std::string bss_content((std::istreambuf_iterator<char>(bss_in)),
+                            std::istreambuf_iterator<char>());
+    EXPECT_NE(bss_content.find(".space 0x180"), std::string::npos);
+  }
+
+  std::filesystem::remove_all(temp_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

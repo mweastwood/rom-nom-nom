@@ -426,5 +426,49 @@ TEST(MipsTest, MemorySegmentPredicates) {
   EXPECT_FALSE(IsDirectMappedAddress(kKseg3End));
 }
 
+TEST(MipsTest, FormatBranchBltzallAndBgezall) {
+  // bltzall $a0, target -> op=0x01, rs=4 ($a0), rt=0x12, offset=4
+  uint32_t bltzall_word = (0x01 << 26) | (4 << 21) | (0x12 << 16) | 4;
+  auto bltzall_inst = DecodeInstruction(bltzall_word, 0x80025C00);
+  ASSERT_TRUE(bltzall_inst.ok());
+  EXPECT_EQ(bltzall_inst->opcode, Opcode::kBltzall);
+  EXPECT_EQ(FormatBranch(*bltzall_inst, ".L_target"), "bltzall $a0, .L_target");
+
+  // bgezall $a1, target -> op=0x01, rs=5 ($a1), rt=0x13, offset=4
+  uint32_t bgezall_word = (0x01 << 26) | (5 << 21) | (0x13 << 16) | 4;
+  auto bgezall_inst = DecodeInstruction(bgezall_word, 0x80025C00);
+  ASSERT_TRUE(bgezall_inst.ok());
+  EXPECT_EQ(bgezall_inst->opcode, Opcode::kBgezall);
+  EXPECT_EQ(FormatBranch(*bgezall_inst, ".L_target"), "bgezall $a1, .L_target");
+}
+
+TEST(MipsTest, IsDoublePrecisionPredicate) {
+  const std::vector<Opcode> double_precision_opcodes = {
+      Opcode::kAddD,   Opcode::kSubD,    Opcode::kMulD,  Opcode::kDivD,    Opcode::kSqrtD,
+      Opcode::kAbsD,   Opcode::kMovD,    Opcode::kNegD,  Opcode::kRoundWD, Opcode::kTruncWD,
+      Opcode::kCeilWD, Opcode::kFloorWD, Opcode::kCvtSD, Opcode::kCvtWD,   Opcode::kCvtDS,
+      Opcode::kCvtDW,  Opcode::kCvtLD,   Opcode::kCvtDL, Opcode::kCEqD,    Opcode::kCLtD,
+      Opcode::kCLeD,   Opcode::kLdc1,    Opcode::kSdc1,  Opcode::kDmfc1,   Opcode::kDmtc1,
+  };
+  for (Opcode op : double_precision_opcodes) {
+    Instruction inst;
+    inst.opcode = op;
+    EXPECT_TRUE(inst.IsDoublePrecision()) << "Expected true for opcode " << static_cast<int>(op);
+  }
+
+  const std::vector<Opcode> non_double_precision_opcodes = {
+      Opcode::kAddS,   Opcode::kSubS,    Opcode::kMulS,  Opcode::kDivS,    Opcode::kSqrtS,
+      Opcode::kAbsS,   Opcode::kMovS,    Opcode::kNegS,  Opcode::kRoundWS, Opcode::kTruncWS,
+      Opcode::kCeilWS, Opcode::kFloorWS, Opcode::kCvtSW, Opcode::kCvtWS,   Opcode::kCEqS,
+      Opcode::kCLtS,   Opcode::kCLeS,    Opcode::kLwc1,  Opcode::kSwc1,    Opcode::kMfc1,
+      Opcode::kMtc1,   Opcode::kAddu,    Opcode::kLw,    Opcode::kSw,      Opcode::kJal,
+  };
+  for (Opcode op : non_double_precision_opcodes) {
+    Instruction inst;
+    inst.opcode = op;
+    EXPECT_FALSE(inst.IsDoublePrecision()) << "Expected false for opcode " << static_cast<int>(op);
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

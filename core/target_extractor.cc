@@ -93,7 +93,20 @@ absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
     if (syms_or.ok()) {
       owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
     }
-  } else {
+  } else if (owned_cfg != nullptr && owned_cfg->symbol_files_size() > 0) {
+    for (const auto& sym_file : owned_cfg->symbol_files()) {
+      std::filesystem::path p(sym_file);
+      std::filesystem::path resolved = p.is_relative() ? (options.repo_root / p) : p;
+      if (std::filesystem::exists(resolved)) {
+        auto syms_or = SymbolIndex::LoadFromTextproto(resolved);
+        if (syms_or.ok()) {
+          owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
+          break;
+        }
+      }
+    }
+  }
+  if (owned_syms == nullptr) {
     std::filesystem::path sym_proto_path =
         options.repo_root / "symbols" / absl::StrCat(options.game_name, ".textproto");
     if (std::filesystem::exists(sym_proto_path)) {
@@ -465,7 +478,8 @@ absl::StatusOr<CompiledCandidateFunction> TargetExtractor::CompileCandidateFunct
   out.patched_words = std::move(applied.patched_words);
   out.instructions.reserve(out.patched_words.size());
   for (size_t i = 0; i < out.patched_words.size(); ++i) {
-    auto inst_or = DecodeInstruction(out.patched_words[i], matched_elf_func.section_offset + i * 4);
+    auto inst_or =
+        DecodeInstruction(out.patched_words[i], target_vram + static_cast<uint32_t>(i * 4));
     if (inst_or.ok()) {
       out.instructions.push_back(*inst_or);
     }

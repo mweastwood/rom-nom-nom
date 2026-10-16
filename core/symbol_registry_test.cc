@@ -156,5 +156,56 @@ TEST(SymbolRegistryTest, MoveSemantics) {
   EXPECT_EQ(index2.FindByAddress(0x80025C00)->name(), "Entrypoint");
 }
 
+TEST(SymbolRegistryTest, FromGameConfigLoadsExternalSymbolFilesAndSortsEntries) {
+  const std::filesystem::path ext_sym_path =
+      std::filesystem::temp_directory_path() / "test_external_game_symbols.textproto";
+  {
+    std::ofstream out(ext_sym_path);
+    out << R"pb(
+      entries { name: "ExtLateFunc" address: 0x80050000 type: SYMBOL_FUNC }
+      entries { name: "ExtEarlyFunc" address: 0x80010000 type: SYMBOL_FUNC }
+      entries { name: "InlineOverrideDupAddr" address: 0x80030000 type: SYMBOL_FUNC }
+    )pb";
+  }
+
+  GameConfig config;
+  auto* inline_sym1 = config.add_symbols();
+  inline_sym1->set_name("InlineMidFunc");
+  inline_sym1->set_address(0x80030000);
+  inline_sym1->set_type(SYMBOL_FUNC);
+
+  auto* inline_sym2 = config.add_symbols();
+  inline_sym2->set_name("InlineData");
+  inline_sym2->set_address(0x80020000);
+  inline_sym2->set_type(SYMBOL_DATA);
+
+  config.add_symbol_files(ext_sym_path.string());
+
+  auto index_or = SymbolIndex::FromGameConfig(config);
+  ASSERT_TRUE(index_or.ok()) << index_or.status();
+
+  const SymbolIndex& index = *index_or;
+  EXPECT_EQ(index.Size(), 4u);
+  EXPECT_TRUE(index.HasName("ExtEarlyFunc"));
+  EXPECT_TRUE(index.HasName("InlineData"));
+  EXPECT_TRUE(index.HasName("InlineMidFunc"));
+  EXPECT_TRUE(index.HasName("ExtLateFunc"));
+  // Duplicate address from external file should be ignored in favor of inline symbol.
+  EXPECT_FALSE(index.HasName("InlineOverrideDupAddr"));
+
+  const auto& sorted = index.SortedEntries();
+  ASSERT_EQ(sorted.size(), 4u);
+  EXPECT_EQ(sorted[0]->address(), 0x80010000u);
+  EXPECT_EQ(sorted[0]->name(), "ExtEarlyFunc");
+  EXPECT_EQ(sorted[1]->address(), 0x80020000u);
+  EXPECT_EQ(sorted[1]->name(), "InlineData");
+  EXPECT_EQ(sorted[2]->address(), 0x80030000u);
+  EXPECT_EQ(sorted[2]->name(), "InlineMidFunc");
+  EXPECT_EQ(sorted[3]->address(), 0x80050000u);
+  EXPECT_EQ(sorted[3]->name(), "ExtLateFunc");
+
+  std::filesystem::remove(ext_sym_path);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

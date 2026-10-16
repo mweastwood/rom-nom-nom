@@ -154,5 +154,80 @@ TEST(RelocationsTest, ClobberedRegisterNotPaired) {
   EXPECT_EQ(tracker.Size(), 0u);
 }
 
+TEST(RelocationsTest, SixtyFourBitLuiConsumersAndFormatting) {
+  auto symbols_or = SymbolIndex::ParseFromTextproto(kSymbolsProtoText);
+  ASSERT_TRUE(symbols_or.ok());
+
+  struct ConsumerCase {
+    Opcode opcode;
+    std::string expected_formatted;
+  };
+  const std::vector<ConsumerCase> cases = {
+      {Opcode::kLwu, "lwu   $v0, %lo(g_my_symbol)($a0)"},
+      {Opcode::kLdl, "ldl   $v0, %lo(g_my_symbol)($a0)"},
+      {Opcode::kLdr, "ldr   $v0, %lo(g_my_symbol)($a0)"},
+      {Opcode::kSdl, "sdl   $v0, %lo(g_my_symbol)($a0)"},
+      {Opcode::kSdr, "sdr   $v0, %lo(g_my_symbol)($a0)"},
+      {Opcode::kDaddi, "daddi $v0, $a0, %lo(g_my_symbol)"},
+      {Opcode::kDaddiu, "daddiu $v0, $a0, %lo(g_my_symbol)"},
+  };
+
+  for (const auto& tc : cases) {
+    Instruction lui_inst;
+    lui_inst.vram = 0x80700000;
+    lui_inst.opcode = Opcode::kLui;
+    lui_inst.rt = Register::kA0;
+    lui_inst.immediate = 0x8070;
+
+    Instruction lo_inst;
+    lo_inst.vram = 0x80700004;
+    lo_inst.opcode = tc.opcode;
+    lo_inst.rs = Register::kA0;
+    lo_inst.rt = Register::kV0;
+    lo_inst.immediate = 0x1000;
+
+    std::vector<Instruction> insts = {lui_inst, lo_inst};
+    RelocationTracker tracker(&*symbols_or);
+    ASSERT_TRUE(tracker.Analyze(insts).ok());
+    ASSERT_EQ(tracker.Size(), 2u);
+
+    const auto* lo_reloc = tracker.FindRelocation(0x80700004);
+    ASSERT_NE(lo_reloc, nullptr);
+    EXPECT_EQ(lo_reloc->type, RelocType::kLo16);
+    EXPECT_EQ(lo_reloc->target_vram, 0x80701000u);
+    EXPECT_EQ(lo_reloc->symbol_name, "g_my_symbol");
+    EXPECT_EQ(tracker.FormatInstruction(lo_inst), tc.expected_formatted);
+  }
+}
+
+TEST(RelocationsTest, ClobberRtWithCfc1Mfc0AndScd) {
+  for (Opcode clobber_op : {Opcode::kCfc1, Opcode::kMfc0, Opcode::kScd}) {
+    Instruction lui_inst;
+    lui_inst.vram = 0x80700000;
+    lui_inst.opcode = Opcode::kLui;
+    lui_inst.rt = Register::kT0;
+    lui_inst.immediate = 0x8070;
+
+    Instruction clobber_inst;
+    clobber_inst.vram = 0x80700004;
+    clobber_inst.opcode = clobber_op;
+    clobber_inst.rt = Register::kT0;
+    clobber_inst.rs = Register::kA0;
+
+    Instruction consumer_inst;
+    consumer_inst.vram = 0x80700008;
+    consumer_inst.opcode = Opcode::kAddiu;
+    consumer_inst.rt = Register::kT1;
+    consumer_inst.rs = Register::kT0;
+    consumer_inst.immediate = 0x1000;
+
+    std::vector<Instruction> insts = {lui_inst, clobber_inst, consumer_inst};
+    RelocationTracker tracker;
+    ASSERT_TRUE(tracker.Analyze(insts).ok());
+    EXPECT_EQ(tracker.Size(), 0u) << "Expected rt clobber for opcode "
+                                  << static_cast<int>(clobber_op);
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
