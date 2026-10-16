@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
-#include "lifter/control_flow_graph.h"
+#include "core/control_flow_graph.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/loop_analyzer.h"
 

@@ -7,7 +7,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "lifter/control_flow_graph.h"
+#include "core/control_flow_graph.h"
 #include "lifter/dominator_tree.h"
 
 namespace rom_nom_nom {

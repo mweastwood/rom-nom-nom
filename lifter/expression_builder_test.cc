@@ -5,9 +5,9 @@
 #include <vector>
 
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -442,8 +442,8 @@ TEST(ExpressionBuilderTest, JalParameterArityUsesKnownCount) {
   parameter_counts["BinaryFunc"] = 2;
 
   auto instructions = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(
-      instructions, &(*index_or), /*split_config=*/nullptr, &parameter_counts);
+  auto statements = ExpressionBuilder::LiftInstructions(instructions, &(*index_or),
+                                                        /*game_config=*/nullptr, &parameter_counts);
 
   ASSERT_THAT(statements, SizeIs(4));
   EXPECT_EQ(statements[3].ToString(), "BinaryFunc(1, 2);\n");
@@ -1662,7 +1662,7 @@ TEST(ExpressionBuilderTest, LiftsCop1ArithmeticAndUnary) {
   EXPECT_EQ(statements[2].ToString(), "f10 = f6 - f2;\n");
   EXPECT_EQ(statements[3].ToString(), "f12 = f10 / f4;\n");
   EXPECT_EQ(statements[4].ToString(), "f14 = -f12;\n");
-  EXPECT_EQ(statements[5].ToString(), "f16 = __n64_sqrtf(f14);\n");
+  EXPECT_EQ(statements[5].ToString(), "f16 = N64Sqrtf(f14);\n");
 }
 
 TEST(ExpressionBuilderTest, LiftsCop1MemoryLoadsAndStores) {
@@ -2303,7 +2303,7 @@ TEST(ExpressionBuilderTest, LoudUnhandledInstructionMarker) {
   auto statements = ExpressionBuilder::LiftInstructions(absl::MakeSpan(&unhandled_inst, 1));
   ASSERT_EQ(statements.size(), 1u);
   EXPECT_EQ(statements[0].kind, StatementKind::kUnhandled);
-  EXPECT_THAT(statements[0].ToString(), HasSubstr("__UNHANDLED_INSTRUCTION_0x01234567__"));
+  EXPECT_EQ(statements[0].ToString(), "/* UNHANDLED_INSTRUCTION: 0x01234567 */\n");
 }
 
 TEST(ExpressionBuilderTest, LiftBranchAndLink) {

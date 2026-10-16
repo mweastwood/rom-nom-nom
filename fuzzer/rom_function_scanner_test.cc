@@ -4,11 +4,10 @@
 #include <vector>
 
 #include "core/endian.h"
+#include "core/game_config.h"
+#include "core/game_config.pb.h"
+#include "core/symbol_registry.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/config.pb.h"
-#include "splitter/symbol_registry.h"
-#include "splitter/symbol_registry.pb.h"
 
 namespace rom_nom_nom::fuzzer {
 namespace {
@@ -82,10 +81,10 @@ TEST(RomFunctionScannerTest, ScansFunctionsFromRawRomWithoutConfig) {
   EXPECT_EQ(funcs[1].raw_words.size(), 4u);
 }
 
-TEST(RomFunctionScannerTest, ScansFunctionsWithSplitConfig) {
+TEST(RomFunctionScannerTest, ScansFunctionsWithGameConfig) {
   std::vector<uint8_t> rom(0x3000, 0);
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg = config.add_segments();
   seg->set_name("code");
   seg->set_type(SEGMENT_CODE);
@@ -115,7 +114,7 @@ TEST(RomFunctionScannerTest, ScansFunctionsWithSplitConfig) {
 TEST(RomFunctionScannerTest, DiscoversFunctionsViaJalTarget) {
   std::vector<uint8_t> rom(0x3000, 0);
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg = config.add_segments();
   seg->set_name("code");
   seg->set_type(SEGMENT_CODE);
@@ -161,7 +160,7 @@ TEST(RomFunctionScannerTest, DiscoversFunctionsViaJalTarget) {
 TEST(RomFunctionScannerTest, AppliesSemanticSymbolNames) {
   std::vector<uint8_t> rom(0x3000, 0);
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg = config.add_segments();
   seg->set_name("code");
   seg->set_type(SEGMENT_CODE);
@@ -199,7 +198,7 @@ TEST(RomFunctionScannerTest, AppliesSemanticSymbolNames) {
 TEST(RomFunctionScannerTest, SkipsNonCodeSegments) {
   std::vector<uint8_t> rom(0x3000, 0);
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg_data = config.add_segments();
   seg_data->set_name("data");
   seg_data->set_type(SEGMENT_DATA);
@@ -240,7 +239,7 @@ TEST(RomFunctionScannerTest, SkipsNonCodeSegments) {
 TEST(RomFunctionScannerTest, ScansFunctionsAcrossSubsegments) {
   std::vector<uint8_t> rom(0x3000, 0);
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg = config.add_segments();
   seg->set_name("main");
   seg->set_type(SEGMENT_CODE);
@@ -454,7 +453,7 @@ TEST(RomFunctionScannerTest, ScansFunctionsFromElfAndRom) {
 TEST(RomFunctionScannerTest, SkipsTrailingPaddingBlocks) {
   std::vector<uint8_t> rom(0x3000, 0);
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg = config.add_segments();
   seg->set_name("code");
   seg->set_type(SEGMENT_CODE);

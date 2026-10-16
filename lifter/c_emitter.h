@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "core/c_ast.h"
-#include "splitter/symbol_registry.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 

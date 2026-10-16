@@ -43,18 +43,22 @@ def load_game_config(game: str):
 
     content = config_file.read_text(encoding="utf-8")
 
-    # 1. Parse symbol addresses dynamically from symbol file(s)
+    # 1. Parse symbol addresses dynamically from config file
     symbols = {}
+    for entry_block in re.finditer(r"symbols\s*\{([^}]+)\}", content):
+        block = entry_block.group(1)
+        name_m = re.search(r'name:\s*"([^"]+)"', block)
+        addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
+        if name_m and addr_m:
+            symbols[name_m.group(1)] = int(addr_m.group(1), 0)
     sym_paths = re.findall(r'symbol_files:\s*"([^"]+)"', content)
-    if not sym_paths:
-        sym_paths = [f"symbols/{game}.textproto"]
     for sp in sym_paths:
         p = REPO_ROOT / sp
         if not p.exists():
             continue
         if sp.endswith(".textproto"):
             p_content = p.read_text(encoding="utf-8", errors="ignore")
-            for entry_block in re.finditer(r"entries\s*\{([^}]+)\}", p_content):
+            for entry_block in re.finditer(r"(?:entries|symbols)\s*\{([^}]+)\}", p_content):
                 block = entry_block.group(1)
                 name_m = re.search(r'name:\s*"([^"]+)"', block)
                 addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
@@ -227,12 +231,12 @@ def load_game_config(game: str):
 
 
 def load_symbols_file(game: str) -> dict[str, int]:
-    """Load manually defined symbols and their VRAM addresses from symbols/<game>.textproto."""
-    tp_path = REPO_ROOT / "symbols" / f"{game}.textproto"
+    """Load manually defined symbols and their VRAM addresses from config/<game>.textproto."""
+    tp_path = REPO_ROOT / "config" / f"{game}.textproto"
     defs = {}
     if tp_path.exists():
         content = tp_path.read_text(encoding="utf-8", errors="ignore")
-        for entry_block in re.finditer(r"entries\s*\{([^}]+)\}", content):
+        for entry_block in re.finditer(r"symbols\s*\{([^}]+)\}", content):
             block = entry_block.group(1)
             name_m = re.search(r'name:\s*"([^"]+)"', block)
             addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
@@ -870,7 +874,7 @@ def print_data_and_structs_summary(
         src_pct = (src_globals / total_data_syms * 100.0)
         und_pct = (unnamed_cnt / total_data_syms * 100.0)
         print(f"Total Global Symbols:       {total_data_syms:6,d} symbols (.data: {total_data_cnt:,}, .bss: {total_bss_cnt:,})")
-        print(f"Named in symbols/{game}.textproto:{named_syms_cnt:6,d} symbols ({named_pct:5.1f}%)")
+        print(f"Named in config/{game}.textproto:{named_syms_cnt:6,d} symbols ({named_pct:5.1f}%)")
         print(f"Declared in C Headers:      {hdr_globals:6,d} symbols ({hdr_pct:5.1f}%)")
         migration_note = "  [Candidates for header migration]" if src_globals > 0 else ""
         print(f"Declared in C Sources:      {src_globals:6,d} symbols ({src_pct:5.1f}%){migration_note}")
@@ -923,7 +927,7 @@ def print_globals_catalog(
     for g in sorted(globals_map.values(), key=lambda x: (0 if x["is_header"] else 1, x["name"])):
         vram_str = f"0x{g['vram']:08X}" if g.get("vram") else "-"
         if defined_symbols and g["name"] in defined_symbols:
-            status = f"symbols/{game}.textproto"
+            status = f"config/{game}.textproto"
         elif g["is_header"]:
             status = "header"
         else:
@@ -934,7 +938,7 @@ def print_globals_catalog(
     src_cnt = sum(1 for g in globals_map.values() if not g["is_header"])
     named_in_file = sum(1 for g in globals_map.values() if defined_symbols and g["name"] in defined_symbols)
     print(
-        f"\nTotal declared globals: {len(globals_map)} ({named_in_file} defined in symbols/{game}.textproto, {hdr_cnt} in headers, {src_cnt} in C sources)"
+        f"\nTotal declared globals: {len(globals_map)} ({named_in_file} defined in config/{game}.textproto, {hdr_cnt} in headers, {src_cnt} in C sources)"
     )
     if data_symbols:
         unnamed = sum(1 for s in data_symbols.values() if not s.get("is_named"))

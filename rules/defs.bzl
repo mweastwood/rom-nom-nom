@@ -16,13 +16,12 @@ def _splitter_split_impl(ctx):
     args = ctx.actions.args()
     args.add("--config", ctx.file.config)
     args.add("--rom", ctx.file.rom)
-    args.add("--symbols", ctx.file.symbols)
     args.add("--out_dir", build_dir.path)
     args.add("--asm_out_dir", asm_dir.path)
     args.add("--assets_out_dir", assets_dir.path)
 
     ctx.actions.run(
-        inputs = [ctx.file.config, ctx.file.rom, ctx.file.symbols] + ctx.files.srcs,
+        inputs = [ctx.file.config, ctx.file.rom] + ctx.files.srcs,
         outputs = [asm_dir, build_dir, assets_dir],
         executable = ctx.executable._splitter,
         arguments = [args],
@@ -44,7 +43,6 @@ splitter_split = rule(
     attrs = {
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "srcs": attr.label_list(allow_files = True, default = []),
         "_splitter": attr.label(
@@ -70,7 +68,6 @@ def _n64_rom_impl(ctx):
     args = ctx.actions.args()
     args.add("--game", game)
     args.add("--config", ctx.file.config)
-    args.add("--symbols", ctx.file.symbols)
     args.add("--asm-dir", asm_dir.path)
     args.add("--build-dir", build_dir.path)
     args.add("--assets-dir", assets_dir.path)
@@ -78,7 +75,7 @@ def _n64_rom_impl(ctx):
     args.add("--out-rom", out_rom.path)
     args.add("--toolchain", ctx.attr.toolchain)
 
-    inputs = [ctx.file.config, ctx.file.symbols, asm_dir, build_dir, assets_dir] + ctx.files.srcs
+    inputs = [ctx.file.config, asm_dir, build_dir, assets_dir] + ctx.files.srcs
     if ctx.attr.src_dir:
         src_dir_file = ctx.file.src_dir
         args.add("--src-dir", src_dir_file.path)
@@ -112,7 +109,6 @@ n64_rom = rule(
     attrs = {
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "split": attr.label(mandatory = True, providers = [OutputGroupInfo]),
         "srcs": attr.label_list(allow_files = True, default = []),
         "src_dir": attr.label(allow_single_file = True),
@@ -290,10 +286,9 @@ def _n64_lifted_c_equivalence_test_impl(ctx):
     candidate_rom = ctx.file.candidate_rom
     base_rom = ctx.file.base_rom
     config = ctx.file.config
-    symbols = ctx.file.symbols
     fuzzer = ctx.executable._fuzzer
     game = ctx.attr.game
-    runfiles_files = [candidate_rom, base_rom, config, symbols, fuzzer]
+    runfiles_files = [candidate_rom, base_rom, config, fuzzer]
     candidate_elf_str = ""
     if OutputGroupInfo in ctx.attr.candidate_rom and hasattr(ctx.attr.candidate_rom[OutputGroupInfo], "elf"):
         elf_list = ctx.attr.candidate_rom[OutputGroupInfo].elf.to_list()
@@ -311,7 +306,6 @@ BASE_ROM="{base_rom}"
 CANDIDATE_ROM="{candidate_rom}"
 CANDIDATE_ELF="{candidate_elf}"
 CONFIG_FILE="{config}"
-SYMBOLS_FILE="{symbols}"
 FUZZER_BIN="{fuzzer}"
 GAME="{game}"
 
@@ -333,7 +327,6 @@ resolve_path() {{
 ACTUAL_BASE=$(resolve_path "$BASE_ROM")
 ACTUAL_CANDIDATE=$(resolve_path "$CANDIDATE_ROM")
 ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
-ACTUAL_SYMBOLS=$(resolve_path "$SYMBOLS_FILE")
 ACTUAL_FUZZER=$(resolve_path "$FUZZER_BIN")
 
 ACTUAL_CANDIDATE_ELF=""
@@ -354,7 +347,6 @@ fi
     --base_rom="$ACTUAL_BASE" \
     --candidate_rom="$ACTUAL_CANDIDATE" \
     --config="$ACTUAL_CONFIG" \
-    --symbols="$ACTUAL_SYMBOLS" \
     $EXTRA_FLAGS \
     --nocolor
 """.format(
@@ -363,7 +355,6 @@ fi
         candidate_rom = candidate_rom.short_path,
         candidate_elf = candidate_elf_str,
         config = config.short_path,
-        symbols = symbols.short_path,
         fuzzer = fuzzer.short_path,
     )
 
@@ -394,7 +385,6 @@ n64_lifted_c_equivalence_test = rule(
         "candidate_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "base_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "_fuzzer": attr.label(
             default = Label("//fuzzer:fuzzer"),
             executable = True,
@@ -403,7 +393,7 @@ n64_lifted_c_equivalence_test = rule(
     },
 )
 
-def n64_game(name, game, config, symbols, rom, srcs = []):
+def n64_game(name, game, config, rom, srcs = []):
     """Macro to instantiate an N64 game with pure Bazel generated assembly pipeline."""
     split_name = name + "_split"
     assembly_rom_name = name + "_assembly_rom"
@@ -413,7 +403,6 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         name = split_name,
         game = game,
         config = config,
-        symbols = symbols,
         rom = rom,
         srcs = srcs,
     )
@@ -423,7 +412,6 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         name = assembly_rom_name,
         game = game,
         config = config,
-        symbols = symbols,
         split = ":" + split_name,
         out_name = game,
     )
@@ -453,7 +441,6 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         candidate_rom = ":" + assembly_rom_name,
         base_rom = rom,
         config = config,
-        symbols = symbols,
     )
 
     # Stage 3: Whole-game lifted C pipeline, lifted C ROM, and validation test
@@ -465,7 +452,6 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         name = lifted_c_name,
         game = game,
         config = config,
-        symbols = symbols,
         rom = rom,
         split = ":" + split_name,
     )
@@ -480,7 +466,6 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         name = lifted_c_rom_name,
         game = game,
         config = config,
-        symbols = symbols,
         split = ":" + split_name,
         src_dir = ":" + lifted_c_name,
         out_name = game + "_lifted_c",
@@ -512,7 +497,6 @@ def n64_game(name, game, config, symbols, rom, srcs = []):
         candidate_rom = ":" + lifted_c_rom_name,
         base_rom = rom,
         config = config,
-        symbols = symbols,
     )
 
 def _lifter_lift_game_impl(ctx):
@@ -521,13 +505,12 @@ def _lifter_lift_game_impl(ctx):
     args = ctx.actions.args()
     args.add("--game=" + ctx.attr.game)
     args.add("--config=" + ctx.file.config.path)
-    args.add("--symbols=" + ctx.file.symbols.path)
     args.add("--rom=" + ctx.file.rom.path)
     args.add("--output_dir=" + out_dir.path)
     if not ctx.attr.format:
         args.add("--noformat")
 
-    inputs = [ctx.file.config, ctx.file.symbols, ctx.file.rom]
+    inputs = [ctx.file.config, ctx.file.rom]
     if ctx.attr.split:
         asm_dir = ctx.attr.split[OutputGroupInfo].asm.to_list()[0]
         inputs.append(asm_dir)
@@ -551,7 +534,6 @@ lifter_lift_game = rule(
     attrs = {
         "game": attr.string(mandatory = True),
         "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
-        "symbols": attr.label(mandatory = True, allow_single_file = [".textproto"]),
         "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "split": attr.label(mandatory = False, providers = [OutputGroupInfo]),
         "format": attr.bool(default = True),

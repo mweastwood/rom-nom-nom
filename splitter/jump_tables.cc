@@ -12,7 +12,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/endian.h"
-#include "splitter/symbol_registry.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 

@@ -6,11 +6,11 @@
 #include <vector>
 
 #include "absl/strings/str_format.h"
+#include "core/disassembler.h"
+#include "core/relocations.h"
+#include "core/symbol_registry.h"
 #include "gtest/gtest.h"
-#include "splitter/disassembler.h"
 #include "splitter/jump_tables.h"
-#include "splitter/relocations.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {

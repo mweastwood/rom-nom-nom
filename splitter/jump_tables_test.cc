@@ -5,8 +5,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/symbol_registry.h"
 #include "gtest/gtest.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {

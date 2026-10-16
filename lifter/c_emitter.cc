@@ -16,7 +16,7 @@
 #include "absl/time/time.h"
 #include "core/c_ast.h"
 #include "core/process.h"
-#include "splitter/symbol_registry.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 

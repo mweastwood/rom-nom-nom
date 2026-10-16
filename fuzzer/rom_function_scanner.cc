@@ -9,13 +9,13 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "core/disassembler.h"
 #include "core/endian.h"
-#include "splitter/disassembler.h"
 
 namespace rom_nom_nom::fuzzer {
 
 absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
-    absl::Span<const uint8_t> rom_bytes, const SplitConfig* config, const SymbolIndex* symbols) {
+    absl::Span<const uint8_t> rom_bytes, const GameConfig* config, const SymbolIndex* symbols) {
   if (rom_bytes.size() < 0x1050) {
     return absl::InvalidArgumentError(
         absl::StrFormat("RomFunctionScanner: ROM too small (%zu bytes)", rom_bytes.size()));
@@ -169,7 +169,7 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
 
 absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::ScanFromElfAndRom(
     absl::Span<const uint8_t> rom_bytes, absl::Span<const uint8_t> elf_bytes,
-    const SplitConfig* config) {
+    const GameConfig* config) {
   if (elf_bytes.size() < 52) {
     return absl::InvalidArgumentError("RomFunctionScanner: ELF binary too small");
   }

@@ -7,8 +7,8 @@
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom::fuzzer {
 
@@ -30,7 +30,7 @@ class RomFunctionScanner {
   // If config is null, uses N64 header at 0x08 for entrypoint and starts code at 0x1000/0x1050.
   // If symbols is provided, uses semantic names; otherwise synthesizes func_%08X.
   static absl::StatusOr<std::vector<ScannedFunction>> Scan(absl::Span<const uint8_t> rom_bytes,
-                                                           const SplitConfig* config = nullptr,
+                                                           const GameConfig* config = nullptr,
                                                            const SymbolIndex* symbols = nullptr);
 
   // Scans an executable candidate ELF and extracts all functions directly from
@@ -40,7 +40,7 @@ class RomFunctionScanner {
   // falls back to SEGMENT_CODE definitions in config.
   static absl::StatusOr<std::vector<ScannedFunction>> ScanFromElfAndRom(
       absl::Span<const uint8_t> rom_bytes, absl::Span<const uint8_t> elf_bytes,
-      const SplitConfig* config = nullptr);
+      const GameConfig* config = nullptr);
 };
 
 }  // namespace rom_nom_nom::fuzzer

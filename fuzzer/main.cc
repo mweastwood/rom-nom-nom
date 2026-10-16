@@ -17,19 +17,17 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "differ/differ_pipeline.h"
-#include "differ/target_extractor.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
+#include "core/target_extractor.h"
 #include "fuzzer/candidate_symbol_map.h"
 #include "fuzzer/differential_fuzzer.h"
 #include "fuzzer/equivalence_runner.h"
 #include "fuzzer/relocation_rebaser.h"
 #include "fuzzer/rom_function_scanner.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
-ABSL_FLAG(std::string, config, "", "Path to split config textproto.");
-ABSL_FLAG(std::string, symbols, "", "Path to symbol table txt or textproto.");
+ABSL_FLAG(std::string, config, "", "Path to game config textproto.");
 ABSL_FLAG(std::string, base_rom, "", "Path to base retail ROM binary.");
 ABSL_FLAG(std::string, candidate_rom, "", "Path to candidate comparison ROM binary.");
 ABSL_FLAG(std::string, candidate_elf, "", "Path to candidate comparison ELF binary.");
@@ -105,7 +103,6 @@ int main(int argc, char* argv[]) {
 
   std::string game_name = absl::GetFlag(FLAGS_game);
   std::string config_path = absl::GetFlag(FLAGS_config);
-  std::string symbols_path = absl::GetFlag(FLAGS_symbols);
   std::string base_rom_path = absl::GetFlag(FLAGS_base_rom);
   std::string candidate_rom_path = absl::GetFlag(FLAGS_candidate_rom);
   std::string source_path = absl::GetFlag(FLAGS_source);
@@ -154,13 +151,6 @@ int main(int argc, char* argv[]) {
       config_path = default_config.string();
     }
   }
-  if (symbols_path.empty()) {
-    std::filesystem::path default_syms =
-        repo_root / "symbols" / absl::StrCat(game_name, ".textproto");
-    if (std::filesystem::exists(default_syms, ec)) {
-      symbols_path = default_syms.string();
-    }
-  }
 
   auto resolve_relative = [&](const std::string& p) -> std::string {
     if (p.empty()) return "";
@@ -174,25 +164,12 @@ int main(int argc, char* argv[]) {
   base_rom_path = resolve_relative(base_rom_path);
   candidate_rom_path = resolve_relative(candidate_rom_path);
   config_path = resolve_relative(config_path);
-  symbols_path = resolve_relative(symbols_path);
-
-  if (!symbols_path.empty()) {
-    std::filesystem::path sym_path(symbols_path);
-    if (sym_path.extension() == ".txt") {
-      std::filesystem::path candidate = sym_path;
-      candidate.replace_extension(".textproto");
-      if (std::filesystem::exists(candidate, ec)) {
-        symbols_path = candidate.string();
-      }
-    }
-  }
 
   // Initialize TargetExtractor
   auto extractor_or = rom_nom_nom::TargetExtractor::Create({
       .repo_root = repo_root,
       .game_name = game_name,
       .config_path = config_path,
-      .symbols_path = symbols_path,
       .rom_path = base_rom_path,
   });
   if (!extractor_or.ok()) {
@@ -245,18 +222,24 @@ int main(int argc, char* argv[]) {
     auto rebase_or =
         BuildCandidateRebase(elf_bytes, CollectDataBlobs(extractor->Config(), extractor->Symbols()),
                              extractor->Config(), extractor->Symbols(), rebase_opts);
-    if (rebase_or.ok()) {
-      rebase = std::make_shared<const CandidateRebase>(std::move(*rebase_or));
-      std::cerr << absl::StrFormat(
-          "Relocation rebasing: %zu relocations patched, %zu private payload(s), %zu unsupported "
-          "relocation(s), %zu layout mismatch(es)\n",
-          rebase->relocations_patched, rebase->private_payloads.size(),
-          rebase->unsupported_relocations, rebase->layout_mismatches);
-      for (const auto& w : rebase->warnings) {
-        std::cerr << "  warning: " << w << "\n";
-      }
-    } else {
-      std::cerr << "Relocation rebasing disabled: " << rebase_or.status().message() << "\n";
+    if (!rebase_or.ok()) {
+      std::cerr << "Error building candidate relocation rebase: " << rebase_or.status().message()
+                << "\n";
+      return 1;
+    }
+    rebase = std::make_shared<const CandidateRebase>(std::move(*rebase_or));
+    std::cerr << absl::StrFormat(
+        "Relocation rebasing: %zu relocations patched, %zu private payload(s), %zu unsupported "
+        "relocation(s), %zu layout mismatch(es)\n",
+        rebase->relocations_patched, rebase->private_payloads.size(),
+        rebase->unsupported_relocations, rebase->layout_mismatches);
+    for (const auto& w : rebase->warnings) {
+      std::cerr << "  warning: " << w << "\n";
+    }
+    if (rebase->layout_mismatches > 0) {
+      std::cerr << "Error: Candidate relocation rebase detected " << rebase->layout_mismatches
+                << " layout mismatch(es).\n";
+      return 1;
     }
   }
 
@@ -404,27 +387,14 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> base_rom_bytes = ReadBinaryFile(base_rom_path);
     target.target_initial_memory = ExtractTargetDataPayloads(base_rom_bytes, extractor->Config());
 
-    // If source file given, compile via DifferPipeline
+    // If source file given, compile via TargetExtractor
     if (!source_path.empty()) {
-      rom_nom_nom::DifferPipelineOptions pipe_opts;
-      pipe_opts.game_name = game_name;
-      pipe_opts.source_file = source_path;
-      pipe_opts.config_path = config_path;
-      pipe_opts.symbols_path = symbols_path;
-      pipe_opts.rom_path = base_rom_path;
-      rom_nom_nom::DifferPipeline pipeline(pipe_opts);
-
-      auto diff_res_or = pipeline.Diff(func_flag);
-      if (!diff_res_or.ok()) {
-        std::cerr << "Error compiling/diffing candidate source: " << diff_res_or.status().message()
-                  << "\n";
+      auto compiled_or = extractor->CompileCandidateFunction(source_path, func_flag, target.vram);
+      if (!compiled_or.ok()) {
+        std::cerr << "Error compiling candidate source: " << compiled_or.status().message() << "\n";
         return 1;
       }
-      for (const auto& row : diff_res_or->alignment.rows) {
-        if (row.compiled.has_value()) {
-          target.candidate_words.push_back(row.compiled->original.raw_word);
-        }
-      }
+      target.candidate_words = std::move(compiled_or->patched_words);
     } else if (!candidate_rom_path.empty()) {
       std::vector<uint8_t> candidate_bytes = ReadBinaryFile(candidate_rom_path);
       if (candidate_bytes.empty()) {

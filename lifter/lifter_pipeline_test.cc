@@ -8,13 +8,13 @@
 #include <vector>
 
 #include "core/c_ast.h"
+#include "core/game_config.h"
 #include "core/mips.h"
-#include "differ/target_extractor.h"
+#include "core/symbol_registry.h"
+#include "core/target_extractor.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "lifter/function_loader.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -216,7 +216,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -312,7 +312,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -445,7 +445,7 @@ segments {
   bss_size: 0x100
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -616,7 +616,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -702,7 +702,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -803,7 +803,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -874,7 +874,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -929,7 +929,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(
@@ -983,7 +983,7 @@ segments {
   }
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(

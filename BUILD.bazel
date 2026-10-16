@@ -6,7 +6,6 @@ n64_game(
     name = "harvest_moon_64",
     game = "harvest-moon-64",
     config = "//config:harvest-moon-64",
-    symbols = "//symbols:harvest-moon-64",
     rom = "//roms:harvest-moon-64.z64",
     srcs = [
         "//macros:harvest-moon-64-macro",
@@ -19,7 +18,6 @@ n64_game(
     name = "ogre_battle_64",
     game = "ogre-battle-64",
     config = "//config:ogre-battle-64",
-    symbols = "//symbols:ogre-battle-64",
     rom = "//roms:ogre-battle-64.z64",
     srcs = [
         "//src/ogre-battle-64:srcs",

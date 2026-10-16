@@ -18,9 +18,9 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/game_config.h"
+#include "core/game_config.pb.h"
 #include "core/sha1.h"
-#include "splitter/config.h"
-#include "splitter/config.pb.h"
 
 namespace rom_nom_nom {
 
@@ -190,7 +190,7 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
 
   std::error_code error_code;
   if (!options_.config_path.empty() && std::filesystem::exists(options_.config_path, error_code)) {
-    auto config_or = LoadSplitConfig(options_.config_path);
+    auto config_or = LoadGameConfig(options_.config_path);
     if (config_or.ok()) {
       bool found_code_segment = false;
       for (const auto& segment : config_or->segments()) {

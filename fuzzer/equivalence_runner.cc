@@ -12,10 +12,10 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/control_flow_graph.h"
 #include "core/mips.h"
+#include "core/register_tracker.h"
 #include "fuzzer/differential_fuzzer.h"
-#include "lifter/control_flow_graph.h"
-#include "lifter/expression_builder.h"
 
 namespace rom_nom_nom::fuzzer {
 
@@ -71,12 +71,12 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
     auto target_cfg = ControlFlowGraph::Build(*target_insts);
     if (target_cfg.ok()) {
       func_options.uninitialized_callee_saved_registers =
-          ExpressionBuilder::DetectUninitializedCalleeSavedRegisters(*target_cfg);
-      bool target_returns_f0 = ExpressionBuilder::DetermineReturnsF0(*target_cfg);
-      bool target_returns_v0 = ExpressionBuilder::DetermineReturnsV0(*target_cfg);
+          DetectUninitializedCalleeSavedRegisters(*target_cfg);
+      bool target_returns_f0 = DetermineReturnsF0(*target_cfg);
+      bool target_returns_v0 = DetermineReturnsV0(*target_cfg);
 
       if (target_returns_f0) {
-        bool is_double = ExpressionBuilder::DetermineReturnsF0Double(*target_cfg);
+        bool is_double = DetermineReturnsF0Double(*target_cfg);
         if (is_double) {
           func_options.check_f0_double = true;
           func_options.check_f0 = false;

@@ -10,12 +10,12 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "core/c_ast.h"
+#include "core/control_flow_graph.h"
 #include "core/mips.h"
-#include "lifter/control_flow_graph.h"
+#include "core/register_tracker.h"
+#include "core/symbol_registry.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/expression_builder.h"
-#include "lifter/register_tracker.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -376,9 +376,9 @@ std::unique_ptr<CStatement> AstConverter::ConvertStatement(const LiftedStatement
 
     case StatementKind::kUnhandled: {
       if (stmt.expression) {
-        return CStatement::Expression(ConvertExpression(*stmt.expression, current_function_name));
+        return CStatement::Comment(stmt.expression->ToString());
       }
-      return CStatement::Expression(CExpression::Identifier("__UNHANDLED_INSTRUCTION__"));
+      return CStatement::Comment("UNHANDLED_INSTRUCTION");
     }
   }
   return nullptr;
@@ -685,7 +685,7 @@ PrologueAnalysis AnalyzePrologue(const ControlFlowGraph& cfg, bool has_frame_poi
 class ConverterContext {
  public:
   ConverterContext(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
-                   const StructuredRegion& root_region, const SplitConfig* split_config,
+                   const StructuredRegion& root_region, const GameConfig* game_config,
                    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
                    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
                    bool returns_v0, bool returns_f0,
@@ -694,7 +694,7 @@ class ConverterContext {
                    std::string function_name = "")
       : cfg_(cfg),
         symbol_index_(symbol_index),
-        split_config_(split_config),
+        game_config_(game_config),
         function_parameter_counts_(function_parameter_counts),
         function_fp_parameter_counts_(function_fp_parameter_counts),
         returns_v0_(returns_v0),
@@ -813,7 +813,7 @@ class ConverterContext {
   std::vector<LiftedStatement> LiftInstructionsHelper(
       absl::Span<const Instruction> instructions) const {
     return ExpressionBuilder::LiftInstructions(
-        instructions, symbol_index_, split_config_, function_parameter_counts_,
+        instructions, symbol_index_, game_config_, function_parameter_counts_,
         function_fp_parameter_counts_, /*omit_last_instruction=*/false, frame_size_,
         functions_returning_v0_, functions_returning_f0_, has_frame_pointer_, has_calls_,
         sp_address_taken_, &saved_reg_offsets_, &saved_fpr_offsets_, nullptr, nullptr,
@@ -1497,7 +1497,7 @@ class ConverterContext {
     }
 
     auto lifted_stmts = ExpressionBuilder::LiftBlock(
-        filtered_block, symbol_index_, split_config_, function_parameter_counts_,
+        filtered_block, symbol_index_, game_config_, function_parameter_counts_,
         function_fp_parameter_counts_, should_omit, frame_size_, functions_returning_v0_,
         functions_returning_f0_, has_frame_pointer_, has_calls_, sp_address_taken_,
         &saved_reg_offsets_, &saved_fpr_offsets_, initial_fpr, initial_tracker, &call_return_info_,
@@ -1656,7 +1656,7 @@ class ConverterContext {
 
   const ControlFlowGraph& cfg_;
   const SymbolIndex* symbol_index_;
-  const SplitConfig* split_config_;
+  const GameConfig* game_config_;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts_;
   const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts_;
   bool returns_v0_ = false;
@@ -1711,7 +1711,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
     }
   }
 
-  ConverterContext ctx(cfg, symbol_index, root_region, options.split_config,
+  ConverterContext ctx(cfg, symbol_index, root_region, options.game_config,
                        options.function_parameter_counts, options.function_fp_parameter_counts,
                        returns_v0, returns_f0, options.functions_returning_v0,
                        options.functions_returning_f0, options.function_name);

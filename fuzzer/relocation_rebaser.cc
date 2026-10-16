@@ -18,8 +18,8 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/endian.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom::fuzzer {
 namespace {
@@ -237,7 +237,7 @@ std::optional<uint32_t> TargetAddressForName(std::string_view name,
 
 }  // namespace
 
-std::vector<DataBlob> CollectDataBlobs(const SplitConfig* config, const SymbolIndex* symbols) {
+std::vector<DataBlob> CollectDataBlobs(const GameConfig* config, const SymbolIndex* symbols) {
   std::vector<DataBlob> blobs;
   if (config == nullptr) return blobs;
   auto label_for_vram = [&](uint32_t vram) {
@@ -335,7 +335,7 @@ uint32_t CandidateRebase::MapAddress(uint32_t cand_addr) const {
 
 absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> candidate_elf,
                                                      absl::Span<const DataBlob> blobs,
-                                                     const SplitConfig* config,
+                                                     const GameConfig* config,
                                                      const SymbolIndex* symbols,
                                                      const RebaseOptions& options) {
   auto elf_or = LinkedElf::Parse(candidate_elf);

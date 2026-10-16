@@ -9,9 +9,9 @@
 #include <vector>
 
 #include "absl/types/span.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 #include "fuzzer/differential_fuzzer.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom::fuzzer {
 
@@ -43,12 +43,12 @@ struct CandidateSymbolMap {
 
 // Extracts initial memory payloads for DATA and RODATA subsegments from the base retail ROM.
 std::vector<MemoryPayload> ExtractTargetDataPayloads(absl::Span<const uint8_t> base_rom,
-                                                     const SplitConfig* config);
+                                                     const GameConfig* config);
 
 // Extracts initial memory payloads for candidate DATA and RODATA from candidate ELF and ROM.
 std::vector<MemoryPayload> ExtractCandidateDataPayloads(absl::Span<const uint8_t> candidate_rom,
                                                         absl::Span<const uint8_t> candidate_elf,
-                                                        const SplitConfig* config);
+                                                        const GameConfig* config);
 
 // Constructs a CandidateSymbolMap by analyzing symbol table and section headers of candidate ELF.
 CandidateSymbolMap BuildCandidateSymbolMap(absl::Span<const uint8_t> candidate_elf,

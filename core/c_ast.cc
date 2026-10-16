@@ -362,6 +362,10 @@ std::unique_ptr<CStatement> CStatement::Default() {
   return std::make_unique<CaseStatement>(0, /*is_default=*/true);
 }
 
+std::unique_ptr<CStatement> CStatement::Comment(std::string text) {
+  return std::make_unique<CommentStatement>(std::move(text));
+}
+
 // --- CompoundStatement ---
 
 void CompoundStatement::AddStatement(std::unique_ptr<CStatement> statement) {
@@ -653,6 +657,16 @@ std::unique_ptr<CStatement> SwitchStatement::Clone() const {
     cloned_cases.push_back(c.Clone());
   }
   return std::make_unique<SwitchStatement>(condition_->Clone(), std::move(cloned_cases));
+}
+
+// --- CommentStatement ---
+
+std::string CommentStatement::ToString(int indent_level) const {
+  return Indent(indent_level) + "/* " + text_ + " */\n";
+}
+
+std::unique_ptr<CStatement> CommentStatement::Clone() const {
+  return std::make_unique<CommentStatement>(text_);
 }
 
 // --- CParameter ---
@@ -967,6 +981,7 @@ void VisitStatement(const CStatement& stmt, ReferencedSymbols& symbols,
     case CStatementKind::kGotoStatement:
     case CStatementKind::kLabelStatement:
     case CStatementKind::kCaseStatement:
+    case CStatementKind::kCommentStatement:
       break;
   }
 }

@@ -11,10 +11,10 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/game_config.pb.h"
 #include "core/mips.h"
-#include "splitter/relocations.h"
-#include "splitter/symbol_registry.h"
-#include "splitter/symbol_registry.pb.h"
+#include "core/relocations.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 

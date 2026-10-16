@@ -16,8 +16,7 @@ ABSL_FLAG(bool, format, true, "Format generated C code using clang-format.");
 ABSL_FLAG(std::string, output, "", "Optional output file path (defaults to stdout).");
 ABSL_FLAG(std::string, output_dir, "", "Output directory for lifting all game modules.");
 ABSL_FLAG(bool, all, false, "Decompile all modules in the game.");
-ABSL_FLAG(std::string, config, "", "Optional path to split config textproto.");
-ABSL_FLAG(std::string, symbols, "", "Optional path to symbols textproto.");
+ABSL_FLAG(std::string, config, "", "Optional path to game config textproto.");
 ABSL_FLAG(std::string, rom, "", "Optional path to ROM binary.");
 ABSL_FLAG(std::vector<std::string>, function, {}, "Target function name(s) to lift.");
 ABSL_FLAG(std::string, functions, "", "Comma-separated list of functions to lift.");
@@ -29,7 +28,7 @@ int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       "Native clean-room MIPS-to-C lifter for N64 decompilation.\n"
       "Usage: lifter [<function_name> ...] [--function=<func>] [--module=<module>] "
-      "[--game=<game>] [--config=<file>] [--symbols=<file>] [--rom=<file>] "
+      "[--game=<game>] [--config=<file>] [--rom=<file>] "
       "[--noformat] [--output=<file>]");
 
   std::vector<char*> remaining_args = absl::ParseCommandLine(argc, argv);
@@ -38,7 +37,6 @@ int main(int argc, char* argv[]) {
   bool format = absl::GetFlag(FLAGS_format);
   std::string output_path = absl::GetFlag(FLAGS_output);
   std::string config_path = absl::GetFlag(FLAGS_config);
-  std::string symbols_path = absl::GetFlag(FLAGS_symbols);
   std::string rom_path = absl::GetFlag(FLAGS_rom);
   std::string module_name = absl::GetFlag(FLAGS_module);
   std::vector<std::string> flag_funcs = absl::GetFlag(FLAGS_function);
@@ -52,9 +50,6 @@ int main(int argc, char* argv[]) {
   pipeline_opts.game_name = game_name;
   if (!config_path.empty()) {
     pipeline_opts.config_path = config_path;
-  }
-  if (!symbols_path.empty()) {
-    pipeline_opts.symbols_path = symbols_path;
   }
   if (!rom_path.empty()) {
     pipeline_opts.rom_path = rom_path;

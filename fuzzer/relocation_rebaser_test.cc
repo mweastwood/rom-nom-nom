@@ -6,9 +6,9 @@
 #include <vector>
 
 #include "core/endian.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom::fuzzer {
 namespace {
@@ -164,7 +164,7 @@ entries { name: "g_bss_value" address: 0x80003010 type: SYMBOL_DATA }
 )";
 
 TEST(RelocationRebaserTest, CollectDataBlobsFindsDataAndBssSubsegments) {
-  auto cfg = ParseSplitConfig(kConfig);
+  auto cfg = ParseGameConfig(kConfig);
   ASSERT_TRUE(cfg.ok()) << cfg.status();
   auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
   ASSERT_TRUE(syms.ok()) << syms.status();
@@ -182,7 +182,7 @@ TEST(RelocationRebaserTest, CollectDataBlobsFindsDataAndBssSubsegments) {
 }
 
 TEST(RelocationRebaserTest, RebasesBlobReferencesAndRelocatesCollidingPrivateRodata) {
-  auto cfg = ParseSplitConfig(kConfig);
+  auto cfg = ParseGameConfig(kConfig);
   ASSERT_TRUE(cfg.ok()) << cfg.status();
   auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
   ASSERT_TRUE(syms.ok()) << syms.status();
@@ -274,7 +274,7 @@ segments {
   subsegments { name: "data" type: SUBSEGMENT_DATA rom_start: 0x8010 }
 }
 )";
-  auto cfg = ParseSplitConfig(kCarryConfig);
+  auto cfg = ParseGameConfig(kCarryConfig);
   ASSERT_TRUE(cfg.ok()) << cfg.status();
   auto syms = SymbolIndex::ParseFromTextproto(
       R"(entries { name: "g_far" address: 0x80008010 type: SYMBOL_DATA })");
@@ -300,7 +300,7 @@ segments {
 }
 
 TEST(RelocationRebaserTest, MovesFunctionsWhoseCodeOverlapsRebasedData) {
-  auto cfg = ParseSplitConfig(kConfig);
+  auto cfg = ParseGameConfig(kConfig);
   ASSERT_TRUE(cfg.ok()) << cfg.status();
   auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
   ASSERT_TRUE(syms.ok()) << syms.status();
@@ -346,7 +346,7 @@ TEST(RelocationRebaserTest, MovesFunctionsWhoseCodeOverlapsRebasedData) {
 }
 
 TEST(RelocationRebaserTest, FailsWithoutRelocations) {
-  auto cfg = ParseSplitConfig(kConfig);
+  auto cfg = ParseGameConfig(kConfig);
   ASSERT_TRUE(cfg.ok()) << cfg.status();
   auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
   ASSERT_TRUE(syms.ok()) << syms.status();
@@ -361,7 +361,7 @@ TEST(RelocationRebaserTest, FailsWithoutRelocations) {
 }
 
 TEST(RelocationRebaserTest, ReportsDataSymbolsThatMovedInsideTheirBlob) {
-  auto cfg = ParseSplitConfig(kConfig);
+  auto cfg = ParseGameConfig(kConfig);
   ASSERT_TRUE(cfg.ok()) << cfg.status();
   auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
   ASSERT_TRUE(syms.ok()) << syms.status();

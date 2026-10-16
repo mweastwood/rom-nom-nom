@@ -4,9 +4,9 @@
 #include <string_view>
 
 #include "absl/strings/match.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -63,7 +63,7 @@ TEST(LinkerScriptTest, GenerateHardwareRegsScript) {
 }
 
 TEST(LinkerScriptTest, GenerateMainScriptMatchesExpectedOutput) {
-  auto config_or = ParseSplitConfig(kConfigProtoText);
+  auto config_or = ParseGameConfig(kConfigProtoText);
   ASSERT_TRUE(config_or.ok());
 
   LinkerScriptGenerator generator;
@@ -190,7 +190,7 @@ TEST(LinkerScriptTest, NumericSegmentNameSanitizedAndBssSubsegmentHandled) {
     }
     segments { name: "3F1B0" type: SEGMENT_BIN rom_start: 0x2000 rom_end: 0x3000 }
   )pb";
-  auto config_or = ParseSplitConfig(kNumericConfigText);
+  auto config_or = ParseGameConfig(kNumericConfigText);
   ASSERT_TRUE(config_or.ok()) << config_or.status();
 
   LinkerScriptOptions options;
@@ -258,7 +258,7 @@ TEST(LinkerScriptTest, CustomSectionOrderRespected) {
       subsegments { name: "boot" type: SUBSEGMENT_C rom_start: 0x1000 }
     }
   )pb";
-  auto config_or = ParseSplitConfig(kCustomOrderConfigText);
+  auto config_or = ParseGameConfig(kCustomOrderConfigText);
   ASSERT_TRUE(config_or.ok()) << config_or.status();
 
   LinkerScriptOptions options;

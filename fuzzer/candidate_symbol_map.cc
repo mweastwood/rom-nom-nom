@@ -16,8 +16,8 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/endian.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom::fuzzer {
 
@@ -96,7 +96,7 @@ uint32_t CandidateSymbolMap::Translate(uint32_t cand_addr) const {
 }
 
 std::vector<MemoryPayload> ExtractTargetDataPayloads(absl::Span<const uint8_t> base_rom,
-                                                     const SplitConfig* config) {
+                                                     const GameConfig* config) {
   std::vector<MemoryPayload> payloads;
   if (config == nullptr || base_rom.empty()) return payloads;
 
@@ -130,7 +130,7 @@ std::vector<MemoryPayload> ExtractTargetDataPayloads(absl::Span<const uint8_t> b
 
 std::vector<MemoryPayload> ExtractCandidateDataPayloads(absl::Span<const uint8_t> candidate_rom,
                                                         absl::Span<const uint8_t> candidate_elf,
-                                                        const SplitConfig* config) {
+                                                        const GameConfig* config) {
   std::vector<MemoryPayload> payloads;
   if (candidate_rom.empty() || candidate_elf.size() < 52) return payloads;
 

@@ -10,8 +10,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "splitter/disassembler.h"
-#include "splitter/symbol_registry.h"
+#include "core/disassembler.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 

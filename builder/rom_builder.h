@@ -56,7 +56,7 @@ class RomBuilder {
   const Compiler& GetCompiler() const { return compiler_; }
 
   // Executes the complete build pipeline:
-  // 1. Loads SplitConfig (.textproto) for c_flags and expected SHA-1.
+  // 1. Loads GameConfig (.textproto) for c_flags and expected SHA-1.
   // 2. Prepares isolated object working directory (_<game>_objs).
   // 3. Obtains symbols.ld and discovers auxiliary linker scripts.
   // 4. Adapts and rewrites main linker script to point to isolated objects.

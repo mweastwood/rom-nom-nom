@@ -1,6 +1,71 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_proto//proto:defs.bzl", "proto_library")
 
 package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "game_config_proto",
+    srcs = ["game_config.proto"],
+)
+
+cc_proto_library(
+    name = "game_config_cc_proto",
+    deps = [":game_config_proto"],
+)
+
+cc_library(
+    name = "game_config",
+    srcs = ["game_config.cc"],
+    hdrs = ["game_config.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":game_config_cc_proto",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@protobuf",
+    ],
+)
+
+cc_test(
+    name = "game_config_test",
+    srcs = ["game_config_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":game_config",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "symbol_registry",
+    srcs = ["symbol_registry.cc"],
+    hdrs = ["symbol_registry.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":game_config_cc_proto",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@protobuf",
+    ],
+)
+
+cc_test(
+    name = "symbol_registry_test",
+    srcs = ["symbol_registry_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":symbol_registry",
+        "@googletest//:gtest_main",
+    ],
+)
 
 cc_library(
     name = "endian",
@@ -204,4 +269,264 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "relocations",
+    srcs = ["relocations.cc"],
+    hdrs = ["relocations.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":mips",
+        ":symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
 
+cc_test(
+    name = "relocations_test",
+    srcs = ["relocations_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":mips",
+        ":relocations",
+        ":symbol_registry",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "disassembler",
+    srcs = ["disassembler.cc"],
+    hdrs = ["disassembler.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":endian",
+        ":mips",
+        ":relocations",
+        ":symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "disassembler_test",
+    srcs = ["disassembler_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":disassembler",
+        ":symbol_registry",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "elf_reader",
+    srcs = ["elf_reader.cc"],
+    hdrs = ["elf_reader.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":endian",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "elf_reader_test",
+    srcs = ["elf_reader_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":elf_reader",
+        ":endian",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "relocation_applier",
+    srcs = ["relocation_applier.cc"],
+    hdrs = ["relocation_applier.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":elf_reader",
+        ":symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "relocation_applier_test",
+    srcs = ["relocation_applier_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":relocation_applier",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "target_extractor",
+    srcs = ["target_extractor.cc"],
+    hdrs = ["target_extractor.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":compiler",
+        ":disassembler",
+        ":elf_reader",
+        ":endian",
+        ":game_config",
+        ":mips",
+        ":relocation_applier",
+        ":symbol_registry",
+        ":toolchain",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "target_extractor_test",
+    srcs = ["target_extractor_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":endian",
+        ":game_config",
+        ":symbol_registry",
+        ":target_extractor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "jump_table",
+    srcs = ["jump_table.cc"],
+    hdrs = ["jump_table.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":mips",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "jump_table_test",
+    srcs = ["jump_table_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":jump_table",
+        ":mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "division_pattern",
+    srcs = ["division_pattern.cc"],
+    hdrs = ["division_pattern.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":mips",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "division_pattern_test",
+    srcs = ["division_pattern_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":division_pattern",
+        ":mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "control_flow_graph",
+    srcs = ["control_flow_graph.cc"],
+    hdrs = ["control_flow_graph.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":division_pattern",
+        ":jump_table",
+        ":mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "control_flow_graph_test",
+    srcs = ["control_flow_graph_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":control_flow_graph",
+        ":mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "register_tracker",
+    srcs = ["register_tracker.cc"],
+    hdrs = ["register_tracker.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":control_flow_graph",
+        ":mips",
+        ":symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "register_tracker_test",
+    srcs = ["register_tracker_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":control_flow_graph",
+        ":mips",
+        ":register_tracker",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

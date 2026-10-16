@@ -20,8 +20,7 @@
 
 ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
 ABSL_FLAG(std::string, source, "", "Explicit path to C source file containing function.");
-ABSL_FLAG(std::string, config, "", "Explicit path to split config textproto.");
-ABSL_FLAG(std::string, symbols, "", "Explicit path to symbol table textproto or txt.");
+ABSL_FLAG(std::string, config, "", "Explicit path to game config textproto.");
 ABSL_FLAG(std::string, base_rom, "", "Explicit path to base retail ROM binary.");
 ABSL_FLAG(std::string, candidate_rom, "",
           "Explicit path to candidate comparison ROM binary (enables ROM diff mode).");
@@ -57,7 +56,6 @@ int main(int argc, char* argv[]) {
   std::string game_name = absl::GetFlag(FLAGS_game);
   std::string source_path = absl::GetFlag(FLAGS_source);
   std::string config_path = absl::GetFlag(FLAGS_config);
-  std::string symbols_path = absl::GetFlag(FLAGS_symbols);
   std::string base_rom_path = absl::GetFlag(FLAGS_base_rom);
   std::string candidate_rom_path = absl::GetFlag(FLAGS_candidate_rom);
   bool watch = absl::GetFlag(FLAGS_watch);
@@ -144,9 +142,6 @@ int main(int argc, char* argv[]) {
   }
   if (!config_path.empty()) {
     pipeline_opts.config_path = config_path;
-  }
-  if (!symbols_path.empty()) {
-    pipeline_opts.symbols_path = symbols_path;
   }
   if (!base_rom_path.empty()) {
     pipeline_opts.rom_path = base_rom_path;

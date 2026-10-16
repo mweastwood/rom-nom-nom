@@ -17,13 +17,13 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/strip.h"
 #include "core/c_ast.h"
+#include "core/control_flow_graph.h"
+#include "core/jump_table.h"
 #include "lifter/ast_converter.h"
 #include "lifter/c_emitter.h"
-#include "lifter/control_flow_graph.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/function_loader.h"
-#include "lifter/jump_table.h"
 #include "lifter/loop_analyzer.h"
 
 namespace rom_nom_nom {
@@ -37,8 +37,8 @@ struct MathIntrinsic {
 };
 
 constexpr MathIntrinsic kMathIntrinsics[] = {
-    {"__n64_sqrtf", "f32", "sqrt.s %0, %1"},
-    {"__n64_sqrt", "f64", "sqrt.d %0, %1"},
+    {"N64Sqrtf", "f32", "sqrt.s %0, %1"},
+    {"N64Sqrt", "f64", "sqrt.d %0, %1"},
     {"sqrtf", "f32", "sqrt.s %0, %1"},
     {"sqrt", "f64", "sqrt.d %0, %1"},
     {"fabsf", "f32", "abs.s %0, %1"},
@@ -143,7 +143,7 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   // 5. Convert Structured Regions and Lifted Instructions to C AST
   AstConverterOptions converter_opts;
   converter_opts.function_name = loaded_func.name;
-  converter_opts.split_config = loaded_func.split_config;
+  converter_opts.game_config = loaded_func.game_config;
   converter_opts.function_parameter_counts = function_parameter_counts;
   converter_opts.function_fp_parameter_counts = function_fp_parameter_counts;
   converter_opts.functions_returning_v0 = functions_returning_v0;
@@ -609,12 +609,12 @@ typedef double f64;
     types_output_stream << R"(#else
 #ifdef __cplusplus
 #include <cmath>
-static inline f32 __n64_sqrtf(f32 x) { return std::sqrt(x); }
-static inline f64 __n64_sqrt(f64 x) { return std::sqrt(x); }
+static inline f32 N64Sqrtf(f32 x) { return std::sqrt(x); }
+static inline f64 N64Sqrt(f64 x) { return std::sqrt(x); }
 #else
 #include <math.h>
-static inline f32 __n64_sqrtf(f32 x) { return sqrtf(x); }
-static inline f64 __n64_sqrt(f64 x) { return sqrt(x); }
+static inline f32 N64Sqrtf(f32 x) { return sqrtf(x); }
+static inline f64 N64Sqrt(f64 x) { return sqrt(x); }
 #endif
 #endif
 )";

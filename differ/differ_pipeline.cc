@@ -16,22 +16,22 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/compiler.h"
+#include "core/elf_reader.h"
+#include "core/game_config.h"
 #include "core/mips.h"
+#include "core/relocation_applier.h"
+#include "core/symbol_registry.h"
+#include "core/target_extractor.h"
 #include "core/toolchain.h"
 #include "differ/diff_formatter.h"
-#include "differ/elf_reader.h"
 #include "differ/normalizer.h"
-#include "differ/relocation_applier.h"
 #include "differ/sequence_aligner.h"
-#include "differ/target_extractor.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
 namespace {
 
-// Default compiler flags if unspecified in SplitConfig.
+// Default compiler flags if unspecified in GameConfig.
 const std::vector<std::string>& DefaultCompilerFlags() {
   static const auto* k_flags =
       new std::vector<std::string>({"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"});
@@ -121,7 +121,7 @@ absl::StatusOr<DifferResult> DifferPipeline::Diff(std::string_view func_name) co
     }
     Compiler compiler(*tc_or);
 
-    // Determine module compiler flags from SplitConfig.
+    // Determine module compiler flags from GameConfig.
     std::vector<std::string> flags = DefaultCompilerFlags();
     if (extractor->Config() != nullptr) {
       const auto& c_flags_map = extractor->Config()->c_flags();

@@ -16,11 +16,10 @@
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "core/game_config.h"
+#include "core/game_config.pb.h"
 #include "core/sha1.h"
-#include "splitter/config.h"
-#include "splitter/config.pb.h"
-#include "splitter/linker_script.h"
-#include "splitter/symbol_registry.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -65,10 +64,10 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     std::filesystem::create_directories(options_.out_rom.parent_path(), ec);
   }
 
-  // 1. Load SplitConfig if provided
-  SplitConfig config;
+  // 1. Load GameConfig if provided
+  GameConfig config;
   if (!options_.config_path.empty() && std::filesystem::exists(options_.config_path, ec)) {
-    auto config_or = LoadSplitConfig(options_.config_path);
+    auto config_or = LoadGameConfig(options_.config_path);
     if (!config_or.ok()) {
       return config_or.status();
     }
@@ -76,7 +75,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   std::string expected_sha1 = std::string(config.sha1());
-  std::vector<std::string> default_c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  std::vector<std::string> default_c_flags;
   auto default_it = config.c_flags().find("default");
   if (default_it != config.c_flags().end()) {
     default_c_flags.assign(default_it->second.flags().begin(), default_it->second.flags().end());
@@ -99,6 +98,11 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     if (index_or.ok()) {
       symbol_index = std::make_unique<SymbolIndex>(std::move(*index_or));
     }
+  } else if (config.symbols_size() > 0) {
+    auto index_or = SymbolIndex::FromGameConfig(config);
+    if (index_or.ok()) {
+      symbol_index = std::make_unique<SymbolIndex>(std::move(*index_or));
+    }
   }
 
   std::filesystem::path target_symbols_ld = obj_dir / "symbols.ld";
@@ -107,9 +111,8 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     std::filesystem::copy_file(aux.symbols_ld, target_symbols_ld,
                                std::filesystem::copy_options::overwrite_existing, ec);
   } else if (symbol_index != nullptr) {
-    LinkerScriptGenerator generator;
     std::ofstream s_out(target_symbols_ld);
-    s_out << generator.GenerateSymbolsScript(*symbol_index);
+    s_out << symbol_index->GenerateSymbolsScript();
   }
 
   // 4. Adapt and rewrite main linker script
@@ -141,12 +144,11 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
       .prefer_c = options_.prefer_c,
   });
 
-  std::vector<std::filesystem::path> extra_includes = {
-      toolchain_.RepoRoot() / "src" / options_.game_name,
-      toolchain_.RepoRoot() / "src" / "c" / options_.game_name,
-      toolchain_.RepoRoot() / "src" / "cc" / options_.game_name,
-      toolchain_.RepoRoot(),
-  };
+  std::vector<std::filesystem::path> extra_includes;
+  for (const auto& inc_dir : config.include_dirs()) {
+    std::filesystem::path p(inc_dir);
+    extra_includes.push_back(p.is_relative() ? (toolchain_.RepoRoot() / p) : p);
+  }
   if (!options_.src_dir.empty()) {
     extra_includes.push_back(options_.src_dir);
   }
@@ -164,7 +166,11 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     extra_includes.push_back(options_.build_dir);
   }
 
-  std::filesystem::path macro_inc = FindMacroInc(toolchain_.RepoRoot(), options_.game_name);
+  std::filesystem::path macro_inc;
+  if (!config.macro_inc().empty()) {
+    std::filesystem::path p(config.macro_inc());
+    macro_inc = p.is_relative() ? (toolchain_.RepoRoot() / p) : p;
+  }
 
   for (const auto& obj_ref : obj_refs) {
     auto resolved_or = resolver.Resolve(obj_ref);

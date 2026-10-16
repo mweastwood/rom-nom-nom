@@ -10,8 +10,7 @@
 #include "core/toolchain.h"
 
 ABSL_FLAG(std::string, game, "", "Game name, e.g. harvest-moon-64");
-ABSL_FLAG(std::string, config, "", "Path to split config (.textproto)");
-ABSL_FLAG(std::string, symbols, "", "Path to symbols file");
+ABSL_FLAG(std::string, config, "", "Path to game config (.textproto)");
 ABSL_FLAG(std::string, asm_dir, "", "Generated assembly directory");
 ABSL_FLAG(std::string, build_dir, "", "Generated build directory (with LD script)");
 ABSL_FLAG(std::string, assets_dir, "", "Generated assets directory");
@@ -25,7 +24,7 @@ ABSL_FLAG(bool, test, false, "Fail with non-zero exit code if not byte-exact mat
 
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
-      "Usage: builder --game=<name> --config=<config> --symbols=<symbols> "
+      "Usage: builder --game=<name> --config=<config> "
       "--asm-dir=<dir> --build-dir=<dir> --assets-dir=<dir> --out-elf=<elf> --out-rom=<rom> "
       "[options]");
 
@@ -94,7 +93,6 @@ int main(int argc, char* argv[]) {
   rom_nom_nom::RomBuilderOptions options;
   options.game_name = game;
   options.config_path = config_path;
-  options.symbols_path = absl::GetFlag(FLAGS_symbols);
   options.asm_dir = absl::GetFlag(FLAGS_asm_dir);
   options.build_dir = absl::GetFlag(FLAGS_build_dir);
   options.assets_dir = absl::GetFlag(FLAGS_assets_dir);

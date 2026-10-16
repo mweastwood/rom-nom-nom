@@ -8,9 +8,8 @@
 #include "absl/strings/str_format.h"
 #include "splitter/splitter.h"
 
-ABSL_FLAG(std::string, config, "", "Path to split config (.textproto)");
+ABSL_FLAG(std::string, config, "", "Path to game config (.textproto)");
 ABSL_FLAG(std::string, rom, "", "Path to input ROM binary (.z64)");
-ABSL_FLAG(std::string, symbols, "", "Path to symbols file");
 ABSL_FLAG(std::string, out_dir, "build", "Output directory for carved assets and linker scripts");
 ABSL_FLAG(std::string, asm_out_dir, "", "Output directory for disassembled assembly");
 ABSL_FLAG(std::string, assets_out_dir, "", "Output directory for carved binary assets");
@@ -59,7 +58,6 @@ int main(int argc, char* argv[]) {
   rom_nom_nom::SplitterOptions options;
   options.config_path = config_path;
   options.rom_path = absl::GetFlag(FLAGS_rom);
-  options.symbols_path = absl::GetFlag(FLAGS_symbols);
   options.out_dir = out_dir;
   options.asm_out_dir = asm_out;
   options.assets_out_dir = assets_out;

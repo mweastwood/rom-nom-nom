@@ -11,11 +11,11 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/types/span.h"
+#include "core/control_flow_graph.h"
 #include "core/mips.h"
-#include "lifter/control_flow_graph.h"
-#include "lifter/register_tracker.h"
+#include "core/register_tracker.h"
+#include "core/symbol_registry.h"
 #include "lifter/symbol_folder.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -128,7 +128,7 @@ class ExpressionBuilder {
   // Lifts a basic block into a sequence of high-level statements.
   static std::vector<LiftedStatement> LiftBlock(
       const BasicBlock& block, const SymbolIndex* symbol_index = nullptr,
-      const SplitConfig* split_config = nullptr,
+      const GameConfig* game_config = nullptr,
       const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
       const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr,
       bool omit_last_instruction = false, uint32_t frame_size = 0,
@@ -145,7 +145,7 @@ class ExpressionBuilder {
   // Lifts a raw sequence of instructions into high-level statements.
   static std::vector<LiftedStatement> LiftInstructions(
       absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index = nullptr,
-      const SplitConfig* split_config = nullptr,
+      const GameConfig* game_config = nullptr,
       const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
       const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr,
       bool omit_last_instruction = false, uint32_t frame_size = 0,

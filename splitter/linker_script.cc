@@ -10,8 +10,8 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "splitter/config.pb.h"
-#include "splitter/symbol_registry.h"
+#include "core/game_config.pb.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -83,7 +83,7 @@ std::string LinkerScriptGenerator::ResolveObjectPath(std::string_view game_name,
 }
 
 absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
-    const SplitConfig& config) const {
+    const GameConfig& config) const {
   std::string game_name(config.basename().empty() ? config.game_name() : config.basename());
   std::string text;
   absl::StrAppend(&text, "SECTIONS\n{\n    HIDDEN(__romPos = 0);\n");

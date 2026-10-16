@@ -5,15 +5,15 @@
 #include <vector>
 
 #include "core/c_ast.h"
+#include "core/control_flow_graph.h"
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "lifter/control_flow_graph.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/expression_builder.h"
 #include "lifter/loop_analyzer.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {

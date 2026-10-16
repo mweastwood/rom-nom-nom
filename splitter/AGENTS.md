@@ -2,7 +2,7 @@
 
 The clean-room ROM extraction and disassembly engine. Slices the retail ROM
 binary into reproducible assembly files, data blobs, and linker scripts driven
-purely by `config/<game>.textproto` and `symbols/<game>.textproto`.
+purely by `config/<game>.textproto`.
 
 ## Invariants
 

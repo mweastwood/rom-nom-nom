@@ -8,10 +8,10 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
+#include "core/game_config.h"
 #include "core/mips.h"
-#include "lifter/register_tracker.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
+#include "core/register_tracker.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -53,10 +53,10 @@ class SymbolFolder {
 
   // Folds symbol accesses across a sequence of instructions.
   // If symbol_index is provided, addresses are mapped to semantic symbol names.
-  // If split_config is provided, unregistered address loads are classified as code (func_*) or
+  // If game_config is provided, unregistered address loads are classified as code (func_*) or
   // data (D_*).
   void Fold(absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index = nullptr,
-            const SplitConfig* split_config = nullptr);
+            const GameConfig* game_config = nullptr);
 
   // Returns all folded patterns found.
   const std::vector<FoldedSymbolAccess>& AllFolded() const { return folded_; }

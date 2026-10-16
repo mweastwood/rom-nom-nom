@@ -8,10 +8,10 @@
 #include <vector>
 
 #include "absl/types/span.h"
+#include "core/game_config.h"
+#include "core/game_config.pb.h"
 #include "core/rom.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/config.pb.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -70,7 +70,7 @@ TEST(SlicerTest, PlanSlicesWithImplicitEndsAndSubsegments) {
   auto rom_or = Rom::FromBuffer(CreateTestRom(256));
   ASSERT_TRUE(rom_or.ok());
 
-  auto config_or = ParseSplitConfig(kTestConfigText);
+  auto config_or = ParseGameConfig(kTestConfigText);
   ASSERT_TRUE(config_or.ok()) << config_or.status();
 
   SlicerOptions options;
@@ -128,7 +128,7 @@ TEST(SlicerTest, SliceAllWritesFilesToDisk) {
   auto rom_or = Rom::FromBuffer(CreateTestRom(256));
   ASSERT_TRUE(rom_or.ok());
 
-  auto config_or = ParseSplitConfig(kTestConfigText);
+  auto config_or = ParseGameConfig(kTestConfigText);
   ASSERT_TRUE(config_or.ok());
 
   const std::filesystem::path temp_dir =
@@ -172,7 +172,7 @@ TEST(SlicerTest, VerifySha1Check) {
     basename: "test-game"
     segments { name: "header" type: SEGMENT_HEADER rom_start: 0x0 rom_end: 0x40 }
   )pb";
-  auto config_or = ParseSplitConfig(kConfigWithSha1);
+  auto config_or = ParseGameConfig(kConfigWithSha1);
   ASSERT_TRUE(config_or.ok());
 
   // With verification enabled -> fails
@@ -198,7 +198,7 @@ TEST(SlicerTest, OutOfBoundsSegmentError) {
     basename: "test-game"
     segments { name: "big" type: SEGMENT_BIN rom_start: 0x0 rom_end: 0x200 }
   )pb";
-  auto config_or = ParseSplitConfig(kOutOfBoundsConfig);
+  auto config_or = ParseGameConfig(kOutOfBoundsConfig);
   ASSERT_TRUE(config_or.ok()) << config_or.status();
 
   SlicerOptions options;
@@ -227,7 +227,7 @@ TEST(SlicerTest, SubsegmentFollowedByBssResolvesToEndOfSegment) {
       subsegments { type: SUBSEGMENT_BSS name: "bss_block" vram: 0x80100000 }
     }
   )pb";
-  auto config_or = ParseSplitConfig(kBssFollowConfig);
+  auto config_or = ParseGameConfig(kBssFollowConfig);
   ASSERT_TRUE(config_or.ok()) << config_or.status();
 
   SlicerOptions options;

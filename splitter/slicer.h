@@ -10,8 +10,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/game_config.pb.h"
 #include "core/rom.h"
-#include "splitter/config.pb.h"
 
 namespace rom_nom_nom {
 
@@ -45,7 +45,7 @@ class Slicer {
   // Computes slice ranges for non-code segments, resolving implicit boundaries.
   // (If segment.rom_end is 0, it extends to the next segment's rom_start or ROM end).
   absl::StatusOr<std::vector<CarvedSlice>> PlanSlices(const Rom& rom,
-                                                      const SplitConfig& config) const;
+                                                      const GameConfig& config) const;
 
   // Extracts zero-copy ROM data for a specific slice range.
   absl::StatusOr<absl::Span<const uint8_t>> SliceData(const Rom& rom,
@@ -53,7 +53,7 @@ class Slicer {
 
   // Executes the complete slicing plan: verifies ROM checksum, computes slice bounds,
   // and writes all non-code binary assets (.bin, header, raw data) to output_dir.
-  absl::StatusOr<SlicingReport> SliceAll(const Rom& rom, const SplitConfig& config) const;
+  absl::StatusOr<SlicingReport> SliceAll(const Rom& rom, const GameConfig& config) const;
 
   // Carves a single slice directly to disk.
   absl::Status SliceToDisk(const Rom& rom, const CarvedSlice& slice) const;

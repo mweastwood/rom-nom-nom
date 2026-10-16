@@ -8,13 +8,13 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/compiler.h"
+#include "core/game_config.pb.h"
 #include "core/process.h"
 #include "core/sha1.h"
+#include "core/symbol_registry.h"
 #include "core/toolchain.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "splitter/config.pb.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {

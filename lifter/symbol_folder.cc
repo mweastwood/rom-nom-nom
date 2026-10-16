@@ -6,15 +6,15 @@
 #include <vector>
 
 #include "absl/types/span.h"
+#include "core/game_config.h"
 #include "core/mips.h"
-#include "lifter/register_tracker.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
+#include "core/register_tracker.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 
 void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
-                        const SplitConfig* split_config) {
+                        const GameConfig* game_config) {
   folded_.clear();
   hi_to_folded_idx_.clear();
   lo_to_folded_idx_.clear();
@@ -46,8 +46,8 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
               const auto* registered_entry = symbol_index->FindByAddress(target_address);
               if (registered_entry != nullptr) {
                 access.symbol_name = std::string(registered_entry->name());
-              } else if (split_config != nullptr &&
-                         ClassifyVramAddress(*split_config, target_address) ==
+              } else if (game_config != nullptr &&
+                         ClassifyVramAddress(*game_config, target_address) ==
                              SectionVramClassification::kCode) {
                 access.symbol_name =
                     symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_FUNC);

@@ -1,85 +1,13 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
-package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "jump_table",
-    srcs = ["jump_table.cc"],
-    hdrs = ["jump_table.h"],
-    deps = [
-        "//core:mips",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "jump_table_test",
-    srcs = ["jump_table_test.cc"],
-    deps = [
-        ":jump_table",
-        "//core:mips",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "division_pattern",
-    srcs = ["division_pattern.cc"],
-    hdrs = ["division_pattern.h"],
-    deps = [
-        "//core:mips",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "division_pattern_test",
-    srcs = ["division_pattern_test.cc"],
-    deps = [
-        ":division_pattern",
-        "//core:mips",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "control_flow_graph",
-    srcs = ["control_flow_graph.cc"],
-    hdrs = ["control_flow_graph.h"],
-    deps = [
-        ":division_pattern",
-        ":jump_table",
-        "//core:mips",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "control_flow_graph_test",
-    srcs = ["control_flow_graph_test.cc"],
-    deps = [
-        ":control_flow_graph",
-        "//core:mips",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
+package(default_visibility = ["//visibility:private"])
 
 cc_library(
     name = "dominator_tree",
     srcs = ["dominator_tree.cc"],
     hdrs = ["dominator_tree.h"],
     deps = [
-        ":control_flow_graph",
+        "//core:control_flow_graph",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
@@ -89,8 +17,8 @@ cc_test(
     name = "dominator_tree_test",
     srcs = ["dominator_tree_test.cc"],
     deps = [
-        ":control_flow_graph",
         ":dominator_tree",
+        "//core:control_flow_graph",
         "//core:mips",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
@@ -102,8 +30,8 @@ cc_library(
     srcs = ["loop_analyzer.cc"],
     hdrs = ["loop_analyzer.h"],
     deps = [
-        ":control_flow_graph",
         ":dominator_tree",
+        "//core:control_flow_graph",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
@@ -113,9 +41,9 @@ cc_test(
     name = "loop_analyzer_test",
     srcs = ["loop_analyzer_test.cc"],
     deps = [
-        ":control_flow_graph",
         ":dominator_tree",
         ":loop_analyzer",
+        "//core:control_flow_graph",
         "//core:mips",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
@@ -127,9 +55,9 @@ cc_library(
     srcs = ["control_flow_structurer.cc"],
     hdrs = ["control_flow_structurer.h"],
     deps = [
-        ":control_flow_graph",
         ":dominator_tree",
         ":loop_analyzer",
+        "//core:control_flow_graph",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
@@ -138,35 +66,10 @@ cc_test(
     name = "control_flow_structurer_test",
     srcs = ["control_flow_structurer_test.cc"],
     deps = [
-        ":control_flow_graph",
         ":control_flow_structurer",
         ":dominator_tree",
         ":loop_analyzer",
-        "//core:mips",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "register_tracker",
-    srcs = ["register_tracker.cc"],
-    hdrs = ["register_tracker.h"],
-    deps = [
-        ":control_flow_graph",
-        "//core:mips",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "register_tracker_test",
-    srcs = ["register_tracker_test.cc"],
-    deps = [
-        ":control_flow_graph",
-        ":register_tracker",
+        "//core:control_flow_graph",
         "//core:mips",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
@@ -178,10 +81,10 @@ cc_library(
     srcs = ["symbol_folder.cc"],
     hdrs = ["symbol_folder.h"],
     deps = [
-        ":register_tracker",
+        "//core:game_config",
         "//core:mips",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:register_tracker",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/types:span",
     ],
@@ -192,9 +95,9 @@ cc_test(
     srcs = ["symbol_folder_test.cc"],
     deps = [
         ":symbol_folder",
+        "//core:game_config",
         "//core:mips",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -205,12 +108,12 @@ cc_library(
     srcs = ["expression_builder.cc"],
     hdrs = ["expression_builder.h"],
     deps = [
-        ":control_flow_graph",
-        ":division_pattern",
-        ":register_tracker",
         ":symbol_folder",
+        "//core:control_flow_graph",
+        "//core:division_pattern",
         "//core:mips",
-        "//splitter:symbol_registry",
+        "//core:register_tracker",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -223,7 +126,7 @@ cc_test(
     deps = [
         ":expression_builder",
         "//core:mips",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -234,12 +137,12 @@ cc_library(
     srcs = ["ast_converter.cc"],
     hdrs = ["ast_converter.h"],
     deps = [
-        ":control_flow_graph",
         ":control_flow_structurer",
         ":expression_builder",
         "//core:c_ast",
+        "//core:control_flow_graph",
         "//core:mips",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
@@ -252,12 +155,12 @@ cc_test(
     srcs = ["ast_converter_test.cc"],
     deps = [
         ":ast_converter",
-        ":control_flow_graph",
         ":control_flow_structurer",
         ":dominator_tree",
         ":expression_builder",
         ":loop_analyzer",
         "//core:c_ast",
+        "//core:control_flow_graph",
         "//core:mips",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
@@ -271,7 +174,7 @@ cc_library(
     deps = [
         "//core:c_ast",
         "//core:process",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
@@ -285,7 +188,7 @@ cc_test(
     deps = [
         ":c_emitter",
         "//core:c_ast",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -296,11 +199,11 @@ cc_library(
     srcs = ["function_loader.cc"],
     hdrs = ["function_loader.h"],
     deps = [
-        ":jump_table",
+        "//core:game_config",
+        "//core:jump_table",
         "//core:mips",
-        "//differ:target_extractor",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
+        "//core:target_extractor",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
@@ -313,10 +216,10 @@ cc_test(
     deps = [
         ":function_loader",
         "//core:endian",
+        "//core:game_config",
         "//core:mips",
-        "//differ:target_extractor",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
+        "//core:target_extractor",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -329,13 +232,13 @@ cc_library(
     deps = [
         ":ast_converter",
         ":c_emitter",
-        ":control_flow_graph",
         ":control_flow_structurer",
         ":dominator_tree",
         ":function_loader",
-        ":jump_table",
         ":loop_analyzer",
         "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:jump_table",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
     ],
@@ -348,10 +251,10 @@ cc_test(
         ":function_loader",
         ":lifter_pipeline",
         "//core:c_ast",
+        "//core:game_config",
         "//core:mips",
-        "//differ:target_extractor",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
+        "//core:target_extractor",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -360,6 +263,7 @@ cc_test(
 cc_binary(
     name = "lifter",
     srcs = ["main.cc"],
+    visibility = ["//visibility:public"],
     deps = [
         ":lifter_pipeline",
         "@abseil-cpp//absl/flags:flag",
@@ -367,9 +271,3 @@ cc_binary(
         "@abseil-cpp//absl/flags:usage",
     ],
 )
-
-
-
-
-
-

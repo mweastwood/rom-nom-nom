@@ -8,12 +8,12 @@
 #include <vector>
 
 #include "core/endian.h"
+#include "core/game_config.h"
 #include "core/mips.h"
-#include "differ/target_extractor.h"
+#include "core/symbol_registry.h"
+#include "core/target_extractor.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -57,7 +57,7 @@ segments {
   vram: 0x80020000
 }
 )";
-  auto cfg_or = ParseSplitConfig(proto_cfg);
+  auto cfg_or = ParseGameConfig(proto_cfg);
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::string proto_syms = R"(

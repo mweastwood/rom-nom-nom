@@ -11,10 +11,10 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
+#include "core/game_config.pb.h"
 #include "core/mips.h"
-#include "splitter/relocations.h"
-#include "splitter/symbol_registry.h"
-#include "splitter/symbol_registry.pb.h"
+#include "core/relocations.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 

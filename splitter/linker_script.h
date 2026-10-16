@@ -7,8 +7,8 @@
 #include <string_view>
 
 #include "absl/status/statusor.h"
-#include "splitter/config.pb.h"
-#include "splitter/symbol_registry.h"
+#include "core/game_config.pb.h"
+#include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -26,7 +26,7 @@ class LinkerScriptGenerator {
   explicit LinkerScriptGenerator(LinkerScriptOptions options = {});
 
   // Generates the primary GNU ld script (SECTIONS, memory tracking, .text/.data/.rodata/.bss).
-  absl::StatusOr<std::string> GenerateMainScript(const SplitConfig& config) const;
+  absl::StatusOr<std::string> GenerateMainScript(const GameConfig& config) const;
 
   // Generates a symbols.ld script from a SymbolIndex (PROVIDE(symbol = 0xXXXXXXXX);).
   std::string GenerateSymbolsScript(const SymbolIndex& symbols) const;

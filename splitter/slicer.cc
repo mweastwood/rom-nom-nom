@@ -14,13 +14,13 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/game_config.pb.h"
 #include "core/rom.h"
-#include "splitter/config.pb.h"
 
 namespace rom_nom_nom {
 
 absl::StatusOr<std::vector<CarvedSlice>> Slicer::PlanSlices(const Rom& rom,
-                                                            const SplitConfig& config) const {
+                                                            const GameConfig& config) const {
   if (options_.verify_sha1 && !config.sha1().empty()) {
     std::string actual_sha1 = rom.Sha1();
     if (actual_sha1 != config.sha1()) {
@@ -150,7 +150,7 @@ absl::Status Slicer::SliceToDisk(const Rom& rom, const CarvedSlice& slice) const
   return absl::OkStatus();
 }
 
-absl::StatusOr<SlicingReport> Slicer::SliceAll(const Rom& rom, const SplitConfig& config) const {
+absl::StatusOr<SlicingReport> Slicer::SliceAll(const Rom& rom, const GameConfig& config) const {
   auto slices_or = PlanSlices(rom, config);
   if (!slices_or.ok()) {
     return slices_or.status();

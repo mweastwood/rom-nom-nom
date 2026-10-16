@@ -1,7 +1,17 @@
 game_name: "Ogre Battle 64 (USA)"
 sha1: "d26b14bee422a09581ce438d45ba9fec9783fbb8"
 basename: "ogre-battle-64"
-symbol_files: "symbols/ogre-battle-64.textproto"
+include_dirs: "src/ogre-battle-64"
+include_dirs: "."
+c_flags {
+  key: "default"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+  }
+}
 segments {
   name: "header"
   type: SEGMENT_HEADER
@@ -38,4 +48,50 @@ segments {
   type: SEGMENT_BIN
   rom_start: 0x3F1B0
   rom_end: 0x2800000
+}
+symbols {
+  name: "Entrypoint"
+  address: 0x80070C00
+  type: SYMBOL_FUNC
+}
+symbols {
+  name: "main"
+  address: 0x8007F880
+  type: SYMBOL_FUNC
+}
+symbols {
+  name: "LeoBootReset"
+  address: 0x84001008
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+symbols {
+  name: "LeoBootRead"
+  address: 0x8400103C
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+symbols {
+  name: "LeoBootEntry"
+  address: 0x84001064
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+symbols {
+  name: "LeoBootResume"
+  address: 0x840010BC
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+symbols {
+  name: "LeoBootCommand"
+  address: 0x84001120
+  type: SYMBOL_FUNC
+  is_absolute: true
+}
+symbols {
+  name: "LeoBootStatus"
+  address: 0x8400114C
+  type: SYMBOL_FUNC
+  is_absolute: true
 }

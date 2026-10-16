@@ -114,16 +114,16 @@ def check_naming_integrity(files):
     1. Prohibits __attribute__((alias(...))) across the codebase.
     2. Prohibits function definitions starting with func_800... in C/C++ sources.
     3. Prohibits any reference to default labels (D_XXXXXXXX or func_XXXXXXXX)
-       when a human-readable symbol has been registered in symbols/*.textproto.
+       when a human-readable symbol has been registered in config/*.textproto.
     """
     errors = []
 
-    symbols_dir = REPO_ROOT / "symbols"
+    config_dir = REPO_ROOT / "config"
     named_syms = {}
-    if symbols_dir.exists():
-        for sym_file in symbols_dir.glob("*.textproto"):
-            content = sym_file.read_text(encoding="utf-8", errors="ignore")
-            for entry_block in re.finditer(r"entries\s*\{([^}]+)\}", content):
+    if config_dir.exists():
+        for cfg_file in config_dir.glob("*.textproto"):
+            content = cfg_file.read_text(encoding="utf-8", errors="ignore")
+            for entry_block in re.finditer(r"symbols\s*\{([^}]+)\}", content):
                 block = entry_block.group(1)
                 name_m = re.search(r'name:\s*"([^"]+)"', block)
                 addr_m = re.search(r'address:\s*(0x[0-9a-fA-F]+|\d+)', block)
@@ -133,8 +133,8 @@ def check_naming_integrity(files):
                     d_sym = f"D_{addr:08X}"
                     func_sym = f"func_{addr:08X}"
                     if name != d_sym and not name.startswith("D_") and name != func_sym and not name.startswith("func_"):
-                        named_syms[d_sym] = (name, sym_file.name)
-                        named_syms[func_sym] = (name, sym_file.name)
+                        named_syms[d_sym] = (name, cfg_file.name)
+                        named_syms[func_sym] = (name, cfg_file.name)
 
     alias_pattern = re.compile(r"__attribute__\s*\(\s*\(\s*alias\s*\(")
     func_def_pattern = re.compile(r"^[a-zA-Z0-9_* ]+\s+(func_[0-9A-Fa-f]+)\s*\([^;]*\)\s*\{", re.MULTILINE)
@@ -154,20 +154,20 @@ def check_naming_integrity(files):
 
         # 1. Alias check
         if alias_pattern.search(content):
-            errors.append(f"{rel_path}: uses __attribute__((alias(...))), which is prohibited. Define functions directly under their readable name and register them in symbols/<game>.textproto.")
+            errors.append(f"{rel_path}: uses __attribute__((alias(...))), which is prohibited. Define functions directly under their readable name and register them in config/<game>.textproto.")
 
         # 2. Decompiled function definition check
         if f.suffix in {".c", ".cc", ".cpp"} and "mocks" not in f.parts:
             for match in func_def_pattern.finditer(content):
                 sym = match.group(1)
-                errors.append(f"{rel_path}: defines function with default label '{sym}'. Decompiled functions must use Google Style CamelCase and be mapped in symbols/<game>.textproto.")
+                errors.append(f"{rel_path}: defines function with default label '{sym}'. Decompiled functions must use Google Style CamelCase and be mapped in config/<game>.textproto.")
 
         # 3. Reference to renamed symbols check
-        for default_sym, (clean_name, sym_file) in named_syms.items():
+        for default_sym, (clean_name, cfg_file) in named_syms.items():
             if default_sym in content:
                 for line_idx, line in enumerate(content.splitlines(), start=1):
                     if default_sym in line:
-                        errors.append(f"{rel_path}:{line_idx}: references deprecated label '{default_sym}'. Use readable name '{clean_name}' (defined in symbols/{sym_file}).")
+                        errors.append(f"{rel_path}:{line_idx}: references deprecated label '{default_sym}'. Use readable name '{clean_name}' (defined in config/{cfg_file}).")
 
     return errors
 

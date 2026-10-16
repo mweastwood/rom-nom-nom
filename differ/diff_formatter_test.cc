@@ -7,9 +7,9 @@
 #include <string>
 
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "differ/normalizer.h"
 #include "differ/sequence_aligner.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {

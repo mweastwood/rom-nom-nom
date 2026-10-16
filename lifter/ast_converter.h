@@ -9,15 +9,15 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "core/c_ast.h"
+#include "core/control_flow_graph.h"
 #include "core/mips.h"
-#include "lifter/control_flow_graph.h"
+#include "core/symbol_registry.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/expression_builder.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
-class SplitConfig;
+class GameConfig;
 
 // Configuration options for AST conversion.
 struct AstConverterOptions {
@@ -25,7 +25,7 @@ struct AstConverterOptions {
   std::optional<CType> return_type;
   std::vector<CParameter> parameters;
   bool is_static = false;
-  const SplitConfig* split_config = nullptr;
+  const GameConfig* game_config = nullptr;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr;
   const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr;
   const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr;

@@ -1,88 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
-package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "elf_reader",
-    srcs = ["elf_reader.cc"],
-    hdrs = ["elf_reader.h"],
-    deps = [
-        "//core:endian",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "elf_reader_test",
-    srcs = ["elf_reader_test.cc"],
-    deps = [
-        ":elf_reader",
-        "//core:endian",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "relocation_applier",
-    srcs = ["relocation_applier.cc"],
-    hdrs = ["relocation_applier.h"],
-    deps = [
-        ":elf_reader",
-        "//splitter:symbol_registry",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "relocation_applier_test",
-    srcs = ["relocation_applier_test.cc"],
-    deps = [
-        ":relocation_applier",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "target_extractor",
-    srcs = ["target_extractor.cc"],
-    hdrs = ["target_extractor.h"],
-    deps = [
-        "//core:endian",
-        "//core:mips",
-        "//splitter:config",
-        "//splitter:disassembler",
-        "//splitter:symbol_registry",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "target_extractor_test",
-    srcs = ["target_extractor_test.cc"],
-    deps = [
-        ":target_extractor",
-        "//core:endian",
-        "//splitter:config",
-        "//splitter:symbol_registry",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
+package(default_visibility = ["//visibility:private"])
 
 cc_library(
     name = "normalizer",
@@ -134,7 +52,7 @@ cc_library(
         ":normalizer",
         ":sequence_aligner",
         "//core:mips",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
     ],
@@ -148,7 +66,7 @@ cc_test(
         ":normalizer",
         ":sequence_aligner",
         "//core:mips",
-        "//splitter:symbol_registry",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -160,16 +78,16 @@ cc_library(
     hdrs = ["differ_pipeline.h"],
     deps = [
         ":diff_formatter",
-        ":elf_reader",
         ":normalizer",
-        ":relocation_applier",
         ":sequence_aligner",
-        ":target_extractor",
         "//core:compiler",
+        "//core:elf_reader",
+        "//core:game_config",
         "//core:mips",
+        "//core:relocation_applier",
+        "//core:symbol_registry",
+        "//core:target_extractor",
         "//core:toolchain",
-        "//splitter:config",
-        "//splitter:symbol_registry",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -192,8 +110,8 @@ cc_library(
     srcs = ["rom_differ.cc"],
     hdrs = ["rom_differ.h"],
     deps = [
+        "//core:game_config",
         "//core:sha1",
-        "//splitter:config",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -215,6 +133,7 @@ cc_test(
 cc_binary(
     name = "differ",
     srcs = ["main.cc"],
+    visibility = ["//visibility:public"],
     deps = [
         ":differ_pipeline",
         ":rom_differ",
@@ -223,8 +142,3 @@ cc_binary(
         "@abseil-cpp//absl/flags:usage",
     ],
 )
-
-
-
-
-

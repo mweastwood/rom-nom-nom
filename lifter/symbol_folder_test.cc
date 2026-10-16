@@ -3,11 +3,11 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/game_config.h"
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -135,7 +135,7 @@ TEST(SymbolFolderTest, GlobalLoadAndStoreSynthesizeDataSymbolsWhenUnregistered) 
   EXPECT_EQ(folder.AllFolded()[1].symbol_name, "D_80051000");
 }
 
-TEST(SymbolFolderTest, AddressLoadDefaultsToDataWhenSplitConfigNotProvided) {
+TEST(SymbolFolderTest, AddressLoadDefaultsToDataWhenGameConfigNotProvided) {
   // 0: lui $at, 0x8008
   // 1: addiu $a0, $at, 0x1000  -> 0x80081000
   // 2: lui $at, 0x8015
@@ -157,7 +157,7 @@ TEST(SymbolFolderTest, AddressLoadDefaultsToDataWhenSplitConfigNotProvided) {
   EXPECT_EQ(folder.AllFolded()[1].symbol_name, "D_80152000");
 }
 
-TEST(SymbolFolderTest, AddressLoadClassifiesCodeAndDataViaSplitConfig) {
+TEST(SymbolFolderTest, AddressLoadClassifiesCodeAndDataViaGameConfig) {
   constexpr std::string_view kConfigText = R"pb(
     game_name: "Test Game"
     sha1: "dummy_sha1"
@@ -172,9 +172,9 @@ TEST(SymbolFolderTest, AddressLoadClassifiesCodeAndDataViaSplitConfig) {
       subsegments { rom_start: 0x3000 type: SUBSEGMENT_DATA name: "data_subseg" }
     }
   )pb";
-  auto config_or = ParseSplitConfig(kConfigText);
+  auto config_or = ParseGameConfig(kConfigText);
   ASSERT_TRUE(config_or.ok()) << config_or.status();
-  const SplitConfig& config = *config_or;
+  const GameConfig& config = *config_or;
 
   // Address in code subsegment: 0x80001500 (code -> func_80001500)
   // Address in data subsegment: 0x80003500 (data -> D_80003500)

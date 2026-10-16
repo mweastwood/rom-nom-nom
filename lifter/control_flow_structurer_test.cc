@@ -4,10 +4,10 @@
 #include <string>
 #include <vector>
 
+#include "core/control_flow_graph.h"
 #include "core/mips.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "lifter/control_flow_graph.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/loop_analyzer.h"
 

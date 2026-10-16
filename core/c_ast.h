@@ -329,6 +329,7 @@ enum class CStatementKind {
   kLabelStatement,
   kSwitchStatement,
   kCaseStatement,
+  kCommentStatement,
 };
 
 // Represents a case clause inside a switch statement.
@@ -375,6 +376,7 @@ class CStatement {
                                             std::vector<SwitchCase> cases);
   static std::unique_ptr<CStatement> Case(int64_t value);
   static std::unique_ptr<CStatement> Default();
+  static std::unique_ptr<CStatement> Comment(std::string text);
 };
 
 // Compound statement / block: { stmt1; stmt2; ... }
@@ -639,6 +641,22 @@ class SwitchStatement : public CStatement {
  private:
   std::unique_ptr<CExpression> condition_;
   std::vector<SwitchCase> cases_;
+};
+
+// Comment statement: /* text */
+class CommentStatement : public CStatement {
+ public:
+  explicit CommentStatement(std::string text) : text_(std::move(text)) {}
+
+  CStatementKind Kind() const override { return CStatementKind::kCommentStatement; }
+  using CStatement::ToString;
+  std::string ToString(int indent_level) const override;
+  std::unique_ptr<CStatement> Clone() const override;
+
+  const std::string& Text() const { return text_; }
+
+ private:
+  std::string text_;
 };
 
 // Represents a function parameter.

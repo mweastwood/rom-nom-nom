@@ -10,9 +10,9 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/game_config.h"
+#include "core/symbol_registry.h"
 #include "fuzzer/differential_fuzzer.h"
-#include "splitter/config.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom::fuzzer {
 
@@ -29,7 +29,7 @@ struct DataBlob {
 // Collects every data/rodata/BSS blob of the code segments in `config`. Blob base labels are
 // resolved exactly like the lifter's linker-script generator: the registered symbol at the
 // blob's target address, or `D_XXXXXXXX` when none is registered.
-std::vector<DataBlob> CollectDataBlobs(const SplitConfig* config, const SymbolIndex* symbols);
+std::vector<DataBlob> CollectDataBlobs(const GameConfig* config, const SymbolIndex* symbols);
 
 struct RebaseOptions {
   // Address ranges [first, second) that relocated candidate-private data must never overlap
@@ -104,7 +104,7 @@ struct CandidateRebase {
 // (`ld --emit-relocs`). Fails if the ELF carries no relocations or no blob label is found.
 absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> candidate_elf,
                                                      absl::Span<const DataBlob> blobs,
-                                                     const SplitConfig* config,
+                                                     const GameConfig* config,
                                                      const SymbolIndex* symbols,
                                                      const RebaseOptions& options);
 

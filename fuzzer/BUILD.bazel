@@ -1,6 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//visibility:private"])
 
 cc_library(
     name = "mips_emulator",
@@ -59,9 +59,9 @@ cc_library(
     hdrs = ["equivalence_runner.h"],
     deps = [
         ":differential_fuzzer",
+        "//core:control_flow_graph",
         "//core:mips",
-        "//lifter:control_flow_graph",
-        "//lifter:expression_builder",
+        "//core:register_tracker",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -83,10 +83,10 @@ cc_library(
     srcs = ["rom_function_scanner.cc"],
     hdrs = ["rom_function_scanner.h"],
     deps = [
+        "//core:disassembler",
         "//core:endian",
-        "//splitter:config",
-        "//splitter:disassembler",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
@@ -100,8 +100,8 @@ cc_test(
     deps = [
         ":rom_function_scanner",
         "//core:endian",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -114,8 +114,8 @@ cc_library(
     deps = [
         ":differential_fuzzer",
         "//core:endian",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
@@ -130,8 +130,8 @@ cc_test(
     deps = [
         ":candidate_symbol_map",
         "//core:endian",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -144,8 +144,8 @@ cc_library(
     deps = [
         ":differential_fuzzer",
         "//core:endian",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",
@@ -162,8 +162,8 @@ cc_test(
     deps = [
         ":relocation_rebaser",
         "//core:endian",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -172,16 +172,16 @@ cc_test(
 cc_binary(
     name = "fuzzer",
     srcs = ["main.cc"],
+    visibility = ["//visibility:public"],
     deps = [
         ":candidate_symbol_map",
         ":differential_fuzzer",
         ":equivalence_runner",
         ":relocation_rebaser",
         ":rom_function_scanner",
-        "//differ:differ_pipeline",
-        "//differ:target_extractor",
-        "//splitter:config",
-        "//splitter:symbol_registry",
+        "//core:game_config",
+        "//core:symbol_registry",
+        "//core:target_extractor",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
@@ -190,6 +190,3 @@ cc_binary(
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
-
-
-

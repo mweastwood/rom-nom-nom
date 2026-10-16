@@ -10,8 +10,8 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
-#include "differ/target_extractor.h"
-#include "splitter/symbol_registry.h"
+#include "core/symbol_registry.h"
+#include "core/target_extractor.h"
 
 namespace rom_nom_nom {
 
@@ -51,7 +51,7 @@ absl::StatusOr<LoadedFunction> FunctionLoader::LoadFunction(
   loaded.vram = target_or->vram;
   loaded.instructions = std::move(target_or->instructions);
   loaded.symbol_index = extractor_->Symbols();
-  loaded.split_config = extractor_->Config();
+  loaded.game_config = extractor_->Config();
   loaded.memory_reader = [this](uint32_t vram) {
     if (extractor_ != nullptr) {
       return extractor_->ReadRomWord(vram);
@@ -63,7 +63,7 @@ absl::StatusOr<LoadedFunction> FunctionLoader::LoadFunction(
 
 absl::StatusOr<LoadedFunction> FunctionLoader::FromWords(
     std::string name, absl::Span<const uint32_t> words, uint32_t base_vram,
-    const SymbolIndex* symbol_index, const SplitConfig* split_config, MemoryReader memory_reader) {
+    const SymbolIndex* symbol_index, const GameConfig* game_config, MemoryReader memory_reader) {
   auto insts_or = DecodeSequence(words, base_vram);
   if (!insts_or.ok()) {
     return insts_or.status();
@@ -74,7 +74,7 @@ absl::StatusOr<LoadedFunction> FunctionLoader::FromWords(
   loaded.vram = base_vram;
   loaded.instructions = std::move(*insts_or);
   loaded.symbol_index = symbol_index;
-  loaded.split_config = split_config;
+  loaded.game_config = game_config;
   loaded.memory_reader = std::move(memory_reader);
   return loaded;
 }

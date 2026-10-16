@@ -1168,5 +1168,18 @@ TEST(DifferentialFuzzerTest, PreservesPointerBufferWritesForPointerTestCases) {
   EXPECT_EQ(comp.result, EquivalenceResult::kEquivalent) << comp.failure_reason;
 }
 
+TEST(DifferentialFuzzerTest, InvalidOpcodeAlwaysFailsWithStatusMismatch) {
+  std::vector<uint32_t> invalid_code = {
+      0x0000003F,  // Invalid SPECIAL funct 0x3F -> kInvalidOpcode
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  DifferentialFuzzer fuzzer;
+  FuzzTestCase tc;
+  auto comp = fuzzer.Compare(invalid_code, 0x80001000, invalid_code, 0x80001000, tc);
+  EXPECT_EQ(comp.result, EquivalenceResult::kStatusMismatch);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

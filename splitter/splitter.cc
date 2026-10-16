@@ -13,15 +13,15 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "core/disassembler.h"
+#include "core/game_config.h"
+#include "core/game_config.pb.h"
 #include "core/rom.h"
+#include "core/symbol_registry.h"
 #include "splitter/assembly_generator.h"
 #include "splitter/auto_symbols.h"
-#include "splitter/config.h"
-#include "splitter/config.pb.h"
-#include "splitter/disassembler.h"
 #include "splitter/linker_script.h"
 #include "splitter/slicer.h"
-#include "splitter/symbol_registry.h"
 
 namespace rom_nom_nom {
 
@@ -29,9 +29,9 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
   SplitterResult result;
 
   // 1. Load split configuration
-  SplitConfig config;
+  GameConfig config;
   if (!options.config_text_override.empty()) {
-    auto config_or = ParseSplitConfig(options.config_text_override);
+    auto config_or = ParseGameConfig(options.config_text_override);
     if (!config_or.ok()) {
       return config_or.status();
     }
@@ -41,7 +41,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
       return absl::InvalidArgumentError(
           "Splitter: config_path must not be empty (--config is required)");
     }
-    auto config_or = LoadSplitConfig(options.config_path);
+    auto config_or = LoadGameConfig(options.config_path);
     if (!config_or.ok()) {
       return config_or.status();
     }
@@ -87,6 +87,12 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     symbol_index = std::move(*index_or);
   } else if (!options.symbols_path.empty()) {
     auto index_or = SymbolIndex::LoadFromTextproto(options.symbols_path);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    symbol_index = std::move(*index_or);
+  } else if (config.symbols_size() > 0) {
+    auto index_or = SymbolIndex::FromGameConfig(config);
     if (!index_or.ok()) {
       return index_or.status();
     }

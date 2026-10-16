@@ -5,11 +5,10 @@
 #include <vector>
 
 #include "core/endian.h"
+#include "core/game_config.h"
+#include "core/game_config.pb.h"
+#include "core/symbol_registry.h"
 #include "gtest/gtest.h"
-#include "splitter/config.h"
-#include "splitter/config.pb.h"
-#include "splitter/symbol_registry.h"
-#include "splitter/symbol_registry.pb.h"
 
 namespace rom_nom_nom::fuzzer {
 namespace {
@@ -91,7 +90,7 @@ TEST(CandidateSymbolMapTest, ExtractsTargetDataPayloadsFromConfig) {
     base_rom[i] = static_cast<uint8_t>((i + 5) & 0xFF);
   }
 
-  SplitConfig config;
+  GameConfig config;
   auto* seg = config.add_segments();
   seg->set_name("code");
   seg->set_type(SEGMENT_CODE);

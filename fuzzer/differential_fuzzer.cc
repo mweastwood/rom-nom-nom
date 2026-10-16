@@ -193,7 +193,9 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
                       (comp->candidate_result.status == ExecutionStatus::kMemoryFault ||
                        comp->candidate_result.status == ExecutionStatus::kIntegerOverflow);
 
-  if (comp->target_result.status != comp->candidate_result.status && !both_faulted) {
+  if (comp->target_result.status == ExecutionStatus::kInvalidOpcode ||
+      comp->candidate_result.status == ExecutionStatus::kInvalidOpcode ||
+      (comp->target_result.status != comp->candidate_result.status && !both_faulted)) {
     comp->result = EquivalenceResult::kStatusMismatch;
     comp->failure_reason = absl::StrFormat(
         "ExecutionStatus mismatch: target=%d (%s, steps=%llu, v0=0x%x) vs candidate=%d (%s, "

@@ -9,10 +9,10 @@
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/jump_table.h"
 #include "core/mips.h"
-#include "differ/target_extractor.h"
-#include "lifter/jump_table.h"
-#include "splitter/symbol_registry.h"
+#include "core/symbol_registry.h"
+#include "core/target_extractor.h"
 
 namespace rom_nom_nom {
 
@@ -31,7 +31,7 @@ struct LoadedFunction {
   uint32_t vram = 0;
   std::vector<Instruction> instructions;
   const SymbolIndex* symbol_index = nullptr;
-  const SplitConfig* split_config = nullptr;
+  const GameConfig* game_config = nullptr;
   MemoryReader memory_reader;
 };
 
@@ -50,7 +50,7 @@ class FunctionLoader {
                                                   absl::Span<const uint32_t> words,
                                                   uint32_t base_vram = 0x80000000,
                                                   const SymbolIndex* symbol_index = nullptr,
-                                                  const SplitConfig* split_config = nullptr,
+                                                  const GameConfig* game_config = nullptr,
                                                   MemoryReader memory_reader = nullptr);
 
   const TargetExtractor* Extractor() const { return extractor_.get(); }
