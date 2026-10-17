@@ -59,6 +59,20 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     }
     config = std::move(*config_or);
   }
+  if (!config.tuning_cache_file().empty()) {
+    std::filesystem::path cache_file(config.tuning_cache_file());
+    if (cache_file.is_relative()) {
+      cache_file = toolchain_.RepoRoot() / cache_file;
+    }
+    if (std::filesystem::exists(cache_file, ec)) {
+      auto cache_or = LoadTuningCache(cache_file);
+      if (cache_or.ok()) {
+        for (const auto& [module_name, flags] : cache_or->module_c_flags()) {
+          (*config.mutable_c_flags())[module_name] = flags;
+        }
+      }
+    }
+  }
   if (!options_.src_dir.empty()) {
     std::filesystem::path tuned_flags_path = options_.src_dir / "tuned_c_flags.textproto";
     if (std::filesystem::exists(tuned_flags_path, ec)) {

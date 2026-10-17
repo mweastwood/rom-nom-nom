@@ -282,15 +282,16 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
 }
 
 absl::StatusOr<CompiledCandidateFunction> TargetExtractor::CompileCandidateFunction(
-    const std::filesystem::path& source_file, std::string_view func_name,
-    uint32_t target_vram) const {
+    const std::filesystem::path& source_file, std::string_view function_name, uint32_t target_vram,
+    std::optional<uint32_t> target_rodata_vram) const {
   CandidateCompiler compiler({
       .repo_root = options_.repo_root,
       .game_name = options_.game_name,
       .config = config_,
       .symbols = symbols_,
   });
-  return compiler.CompileFunction(source_file, func_name, target_vram);
+  return compiler.CompileFunction(source_file, function_name, target_vram, {}, {},
+                                  target_rodata_vram);
 }
 
 absl::Span<const uint8_t> TargetExtractor::RomData() const {

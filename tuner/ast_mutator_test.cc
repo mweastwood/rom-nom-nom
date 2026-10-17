@@ -375,5 +375,315 @@ TEST(AstMutatorTest, SwapAdjacentStatementsAndGlobalPromotionsAndDescribeStep) {
   EXPECT_EQ(AstMutator::DescribeStep(smart_arr_step), "GlobalArrayAccess(site=0, param=2)");
 }
 
+TEST(AstMutatorTest, CoalesceParameterCopyPreservesPreCopyUsesAndPrunesDeadInitializer) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", CExpression::Integer(0)));
+  // Pre-copy use of temp_s0 as a temporary before `temp_s0 = arg1;`
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U8().MakePointer(), CExpression::Identifier("arg1"))))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_val"), CExpression::Identifier("temp_s0"))));
+  // Now copy parameter `arg1` into `temp_s0` and increment it
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg1"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_s0")));
+
+  FunctionDeclaration function(CType::S32(), "PreCopyTest",
+                               {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}}, std::move(body));
+
+  AstMutationStep coalesce_step;
+  coalesce_step.set_kind(AST_MUTATION_COALESCE_PARAM_COPY);
+  coalesce_step.set_param(1);
+  FunctionDeclaration coalesced = AstMutator::ApplyMutation(function, coalesce_step);
+  std::string code = coalesced.ToString();
+  // Pre-copy assignment to temp_s0 must NOT be overwritten with `arg1 = *(u8*)arg1;`
+  EXPECT_TRUE(absl::StrContains(code, "temp_s0 = *(u8*)arg1;")) << code;
+  EXPECT_TRUE(absl::StrContains(code, "arg1 = (arg1 + 1);")) << code;
+  EXPECT_TRUE(absl::StrContains(code, "return arg1;")) << code;
+
+  // Bulk inline (param = 1) should inline the pre-copy temp_s0 and strip `s32 temp_s0 = 0;`
+  AstMutationStep inline_step;
+  inline_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  inline_step.set_param(1);
+  std::string inlined = AstMutator::ApplyMutation(coalesced, inline_step).ToString();
+  EXPECT_TRUE(absl::StrContains(inlined, "g_val = *(u8*)arg1;")) << inlined;
+  EXPECT_FALSE(absl::StrContains(inlined, "temp_s0")) << inlined;
+}
+
+TEST(AstMutatorTest, ReadModifyWriteCompoundAssignmentAndScaledGlobalArrayIndexing) {
+  // v0 = ((((u32)arg0 >> 5) << 2) + &D_8016FAFC);
+  // *(s32 *)v0 = (*(s32 *)v0 | (1 << (arg0 & 31)));
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  auto index_expression =
+      CExpression::Binary(">>", CExpression::Cast(CType::U32(), CExpression::Identifier("arg0")),
+                          CExpression::Integer(5));
+  auto scaled_address = CExpression::Binary(
+      "+", CExpression::Binary("<<", std::move(index_expression), CExpression::Integer(2)),
+      CExpression::Unary("&", CExpression::Identifier("D_8016FAFC")));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), std::move(scaled_address))));
+  auto dereference_v0 = CExpression::Unary(
+      "*", CExpression::Cast(CType::S32().MakePointer(), CExpression::Identifier("v0")));
+  auto dereference_v0_lhs = dereference_v0->Clone();
+  auto mask_expression = CExpression::Binary(
+      "<<", CExpression::Integer(1),
+      CExpression::Binary("&", CExpression::Identifier("arg0"), CExpression::Integer(31)));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", std::move(dereference_v0_lhs),
+      CExpression::Binary("|", std::move(dereference_v0), std::move(mask_expression)))));
+
+  FunctionDeclaration function(CType::Void(), "SetBit", {{CType::S32(), "arg0"}}, std::move(body));
+
+  auto presets = AstMutator::GenerateCanonicalPresets(function);
+  ASSERT_GE(presets.size(), 3u);
+  FunctionDeclaration mutated = AstMutator::ApplyMutations(function, presets[2]);
+  std::string code = mutated.ToString();
+  EXPECT_TRUE(absl::StrContains(code, "D_8016FAFC[((u32)arg0 >> 5)] |= (1 << (arg0 & 31));"))
+      << code;
+  EXPECT_FALSE(absl::StrContains(code, "v0")) << code;
+}
+
+TEST(AstMutatorTest, ShiftAddMultiplyAndLoopPreheaderBackedgeNormalization) {
+  // temp_s0 = 0;
+  // arg0 = (0 & 255);
+  // do {
+  //   v0 = (arg0 << 1);
+  //   v0 = (v0 + arg0);
+  //   v0 = (v0 << 2);
+  //   v0 = (v0 - arg0);
+  //   v1 = (v0 << 2);
+  //   temp_s0 = (temp_s0 + 1);
+  //   if ((v1 != 0)) {
+  //     Foo(arg0);
+  //   }
+  //   v0 = (temp_s0 & 255);
+  //   v0 = ((u32)v0 < 10);
+  //   arg0 = (temp_s0 & 255);
+  // } while ((v0 != 0));
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "arg0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v1", CExpression::Integer(0)));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"), CExpression::Integer(0))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("&", CExpression::Integer(0), CExpression::Integer(255)))));
+
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("<<", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("v0"), CExpression::Identifier("arg0")))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("<<", CExpression::Identifier("v0"), CExpression::Integer(2)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("-", CExpression::Identifier("v0"), CExpression::Identifier("arg0")))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("<<", CExpression::Identifier("v0"), CExpression::Integer(2)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+
+  auto then_body = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> call_arguments;
+  call_arguments.push_back(CExpression::Identifier("arg0"));
+  then_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("Foo"), std::move(call_arguments))));
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Integer(0)),
+      std::move(then_body)));
+
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("&", CExpression::Identifier("temp_s0"), CExpression::Integer(255)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("<", CExpression::Cast(CType::U32(), CExpression::Identifier("v0")),
+                          CExpression::Integer(10)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("&", CExpression::Identifier("temp_s0"), CExpression::Integer(255)))));
+
+  body->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+
+  FunctionDeclaration function(CType::Void(), "LoopMultiplyTest", {}, std::move(body));
+
+  AstMutationStep inline_step;
+  inline_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  inline_step.set_param(1);
+  std::string output = AstMutator::ApplyMutation(function, inline_step).ToString();
+  EXPECT_FALSE(absl::StrContains(output, "arg0 = (0 & 255);")) << output;
+  EXPECT_TRUE(absl::StrContains(output, "arg0 * 44")) << output;
+  EXPECT_LT(output.find("Foo(arg0);"), output.find("temp_s0 = (temp_s0 + 1);")) << output;
+}
+
+TEST(AstMutatorTest, InlinesTemporaryInsideIfBranchWhenOverwrittenAfterOuterIfStatement) {
+  // if (arg0 != 0) {
+  //   v0 = arg0 + 5;
+  //   g_result = v0;
+  // }
+  // if (arg1 != 0) {
+  //   v0 = 10;
+  // } else {
+  //   v0 = 20;
+  // }
+  // return v0;
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0", CExpression::Integer(0)));
+
+  auto first_then = std::make_unique<CompoundStatement>();
+  first_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(5)))));
+  first_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_result"), CExpression::Identifier("v0"))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(first_then)));
+
+  auto second_then = std::make_unique<CompoundStatement>();
+  second_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(10))));
+  auto second_else = std::make_unique<CompoundStatement>();
+  second_else->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(20))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg1"), CExpression::Integer(0)),
+      std::move(second_then), std::move(second_else)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  FunctionDeclaration function(CType::S32(), "NestedIfOverwriteTest",
+                               {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}}, std::move(body));
+
+  AstMutationStep inline_step;
+  inline_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  inline_step.set_param(1);
+  std::string output = AstMutator::ApplyMutation(function, inline_step).ToString();
+  EXPECT_TRUE(absl::StrContains(output, "g_result = (arg0 + 5);")) << output;
+  // The `= 0` initializer on `s32 v0` is also stripped since `v0` is overwritten in both branches
+  // of the second `if` before `return v0;`
+  EXPECT_TRUE(absl::StrContains(output, "s32 v0;")) << output;
+  EXPECT_FALSE(absl::StrContains(output, "s32 v0 = 0;")) << output;
+}
+
+TEST(AstMutatorTest, InfiniteWhileLoopPreheaderAndBackedgeRollIntoDoWhileLoop) {
+  // v1 = *(u8 *)arg0;
+  // while (1) {
+  //   g_last = v1;
+  //   arg0 = (arg0 + 1);
+  //   if ((v0 == 0)) {
+  //     break;
+  //   }
+  //   v1 = *(u8 *)arg0;
+  // }
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v1"));
+  auto load_byte = [&]() {
+    return CExpression::Unary(
+        "*", CExpression::Cast(CType::U8().MakePointer(), CExpression::Identifier("arg0")));
+  };
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v1"), load_byte())));
+
+  auto while_body = std::make_unique<CompoundStatement>();
+  while_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_last"), CExpression::Identifier("v1"))));
+  while_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  auto break_then = std::make_unique<CompoundStatement>();
+  break_then->AddStatement(CStatement::Break());
+  while_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("v0"), CExpression::Integer(0)),
+      std::move(break_then)));
+  while_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v1"), load_byte())));
+
+  body->AddStatement(CStatement::While(CExpression::Integer(1), std::move(while_body)));
+
+  FunctionDeclaration function(CType::Void(), "StringScanTest", {{CType::S32(), "arg0"}},
+                               std::move(body));
+
+  AstMutationStep inline_step;
+  inline_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  inline_step.set_param(1);
+  std::string output = AstMutator::ApplyMutation(function, inline_step).ToString();
+  EXPECT_TRUE(absl::StrContains(output, "do {")) << output;
+  EXPECT_TRUE(absl::StrContains(output, "} while ((v0 != 0));")) << output;
+  EXPECT_FALSE(absl::StrContains(output, "while (1)")) << output;
+}
+
+TEST(AstMutatorTest, BranchDelaySlotSinksIntoAndAcrossIfStatement) {
+  // Case A (sink into if):
+  //   v0 = (arg0 + 4);
+  //   if ((arg1 != 0)) {
+  //     g_sink = v0;
+  //   }
+  // Case B (sink across if when !prefer_hoist):
+  //   temp_s0 = (temp_s0 + 1);
+  //   if ((arg1 == 0)) {
+  //     g_other = 1;
+  //   }
+  //   return temp_s0;
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+
+  // Case A
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(4)))));
+  auto then_a = std::make_unique<CompoundStatement>();
+  then_a->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_sink"), CExpression::Identifier("v0"))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg1"), CExpression::Integer(0)),
+      std::move(then_a)));
+
+  // Case B
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+  auto then_b = std::make_unique<CompoundStatement>();
+  then_b->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("g_other"), CExpression::Integer(1))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg1"), CExpression::Integer(0)),
+      std::move(then_b)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_s0")));
+
+  FunctionDeclaration function(CType::S32(), "DelaySlotSinkTest",
+                               {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}}, std::move(body));
+
+  AstMutationStep inline_step;
+  inline_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  inline_step.set_param(1);
+  std::string output = AstMutator::ApplyMutation(function, inline_step).ToString();
+  // Case A: v0 is sunk into `then_a` and inlined into `g_sink = (arg0 + 4);`
+  EXPECT_TRUE(absl::StrContains(output, "g_sink = (arg0 + 4);")) << output;
+  EXPECT_FALSE(absl::StrContains(output, "v0")) << output;
+  // Case B: `temp_s0 = (temp_s0 + 1);` is sunk after `if ((arg1 == 0))` and inlined into `return`
+  EXPECT_LT(output.find("g_other = 1;"), output.find("return")) << output;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

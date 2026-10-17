@@ -15,20 +15,20 @@ namespace rom_nom_nom {
 // polarity variations.
 class AstMutator {
  public:
-  // Enumerates all valid single-step AST mutations applicable to `func`.
-  static std::vector<AstMutationStep> DiscoverMutations(const FunctionDeclaration& func,
+  // Enumerates all valid single-step AST mutations applicable to `function`.
+  static std::vector<AstMutationStep> DiscoverMutations(const FunctionDeclaration& function,
                                                         size_t max_mutations = 64);
 
   // Returns multi-step canonicalization preset sequences to evaluate as candidate starting points.
   static std::vector<std::vector<AstMutationStep>> GenerateCanonicalPresets(
-      const FunctionDeclaration& func);
+      const FunctionDeclaration& function);
 
-  // Applies a single `AstMutationStep` to a clone of `func` and returns the mutated AST.
-  static FunctionDeclaration ApplyMutation(const FunctionDeclaration& func,
+  // Applies a single `AstMutationStep` to a clone of `function` and returns the mutated AST.
+  static FunctionDeclaration ApplyMutation(const FunctionDeclaration& function,
                                            const AstMutationStep& step);
 
-  // Applies a sequence of `AstMutationStep`s in order to a clone of `func`.
-  static FunctionDeclaration ApplyMutations(const FunctionDeclaration& func,
+  // Applies a sequence of `AstMutationStep`s in order to a clone of `function`.
+  static FunctionDeclaration ApplyMutations(const FunctionDeclaration& function,
                                             absl::Span<const AstMutationStep> steps);
 
   // Returns a human-readable description of a mutation step.

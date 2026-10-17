@@ -189,30 +189,44 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   result.winning_c_flags = base_flags;
 
   // 1. Check O(1) TuningCacheStore
+  std::vector<AstMutationStep> previous_cached_mutations;
+  std::vector<std::string> previous_cached_flags;
   {
     std::lock_guard<std::mutex> lock(cache_mutex_);
+    if (!module_name.empty()) {
+      auto module_flags = cache_store_.GetModuleCFlags(module_name);
+      if (!module_flags.empty()) {
+        base_flags = std::move(module_flags);
+        result.winning_c_flags = base_flags;
+      }
+    }
     if (const auto* cached = cache_store_.Lookup(target.name, input_sha1); cached != nullptr) {
-      result.from_cache = true;
-      if (!cached->c_flags().empty()) {
-        result.winning_c_flags.assign(cached->c_flags().begin(), cached->c_flags().end());
+      if (!options_.only_non_bit_exact || cached->is_bit_exact()) {
+        result.from_cache = true;
+        if (!cached->c_flags().empty()) {
+          result.winning_c_flags.assign(cached->c_flags().begin(), cached->c_flags().end());
+        }
+        result.applied_mutations.assign(cached->ast_mutations().begin(),
+                                        cached->ast_mutations().end());
+        FunctionDeclaration mutated =
+            AstMutator::ApplyMutations(baseline_ast, result.applied_mutations);
+        result.best_score.raw_bit_exact = cached->is_bit_exact();
+        result.best_score.normalized_exact = cached->is_bit_exact();
+        result.best_score.bit_exact_instructions = cached->bit_exact_instructions();
+        result.best_score.matching_instructions = cached->matching_instructions();
+        result.best_score.target_instruction_count = cached->target_instructions();
+        result.baseline_score = result.best_score;
+        result.improved_over_baseline = !result.applied_mutations.empty();
+        if (emit_formatted_c) {
+          result.tuned_c_code = EmitSingleFunctionWithExterns(mutated, parent_tu, symbols,
+                                                              options_.format_with_clang);
+        }
+        result.tuned_ast = std::make_unique<FunctionDeclaration>(std::move(mutated));
+        return result;
       }
-      result.applied_mutations.assign(cached->ast_mutations().begin(),
-                                      cached->ast_mutations().end());
-      FunctionDeclaration mutated =
-          AstMutator::ApplyMutations(baseline_ast, result.applied_mutations);
-      result.best_score.raw_bit_exact = cached->is_bit_exact();
-      result.best_score.normalized_exact = cached->is_bit_exact();
-      result.best_score.bit_exact_instructions = cached->bit_exact_instructions();
-      result.best_score.matching_instructions = cached->matching_instructions();
-      result.best_score.target_instruction_count = cached->target_instructions();
-      result.baseline_score = result.best_score;
-      result.improved_over_baseline = !result.applied_mutations.empty();
-      if (emit_formatted_c) {
-        result.tuned_c_code =
-            EmitSingleFunctionWithExterns(mutated, parent_tu, symbols, options_.format_with_clang);
-      }
-      result.tuned_ast = std::make_unique<FunctionDeclaration>(std::move(mutated));
-      return result;
+      previous_cached_mutations.assign(cached->ast_mutations().begin(),
+                                       cached->ast_mutations().end());
+      previous_cached_flags.assign(cached->c_flags().begin(), cached->c_flags().end());
     }
   }
 
@@ -226,20 +240,21 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     return result;
   }
 
-  // Prepare temporary include dir containing types.h so standalone function compiles cleanly
-  static std::atomic<uint64_t> inc_counter{0};
-  uint64_t inc_id = inc_counter.fetch_add(1, std::memory_order_relaxed);
-  std::filesystem::path temp_inc_dir =
-      std::filesystem::temp_directory_path() / absl::StrCat("tuner_inc_", target.name, "_", inc_id);
-  std::error_code ec;
-  std::filesystem::create_directories(temp_inc_dir, ec);
+  // Prepare temporary include directory containing types.h so standalone function compiles cleanly
+  static std::atomic<uint64_t> include_counter{0};
+  uint64_t include_id = include_counter.fetch_add(1, std::memory_order_relaxed);
+  std::filesystem::path temporary_include_dir =
+      std::filesystem::temp_directory_path() /
+      absl::StrCat("tuner_inc_", target.name, "_", include_id);
+  std::error_code error_code;
+  std::filesystem::create_directories(temporary_include_dir, error_code);
   {
-    std::ofstream types_out(temp_inc_dir / "types.h");
+    std::ofstream types_out(temporary_include_dir / "types.h");
     types_out << WriteTypesHeaderContent();
   }
-  std::vector<std::filesystem::path> extra_inc = {temp_inc_dir};
+  std::vector<std::filesystem::path> extra_include_dirs = {temporary_include_dir};
   if (!options_.lifted_dir.empty()) {
-    extra_inc.push_back(options_.lifted_dir);
+    extra_include_dirs.push_back(options_.lifted_dir);
   }
 
   CandidateScorer scorer(extractor, symbols);
@@ -247,14 +262,15 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
       EmitSingleFunctionWithExterns(baseline_ast, parent_tu, symbols, /*format_with_clang=*/false);
 
   absl::flat_hash_set<std::string> evaluated_candidates;
-  auto make_eval_key = [](const std::vector<std::string>& flags, std::string_view code) {
+  auto make_evaluation_key = [](const std::vector<std::string>& flags, std::string_view code) {
     return absl::StrCat(absl::StrJoin(flags, " "), "\n", code);
   };
-  evaluated_candidates.insert(make_eval_key(base_flags, baseline_compilable_c));
+  evaluated_candidates.insert(make_evaluation_key(base_flags, baseline_compilable_c));
 
-  auto base_score_or = scorer.CompileAndScore(target, baseline_compilable_c, base_flags, extra_inc);
+  auto base_score_or =
+      scorer.CompileAndScore(target, baseline_compilable_c, base_flags, extra_include_dirs);
   if (!base_score_or.ok()) {
-    std::filesystem::remove_all(temp_inc_dir, ec);
+    std::filesystem::remove_all(temporary_include_dir, error_code);
     result.tuned_ast = std::make_unique<FunctionDeclaration>(baseline_ast.Clone());
     if (emit_formatted_c) {
       result.tuned_c_code = EmitSingleFunctionWithExterns(*result.tuned_ast, parent_tu, symbols,
@@ -271,44 +287,54 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   if (options_.explore_flags) {
     flag_profiles = FlagExplorer::GenerateCandidateFlags(base_flags, options_.flag_options);
   }
-
-  // Phase 1a: Canonical AST Preset Sweep on base_flags first (resolves most bit-exact functions in
-  // 1-5 compilations without needing a full flag sweep).
-  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
-    auto presets = AstMutator::GenerateCanonicalPresets(baseline_ast);
-    for (const auto& preset_steps : presets) {
-      FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
-      std::string preset_c = EmitSingleFunctionWithExterns(preset_ast, parent_tu, symbols,
-                                                           /*format_with_clang=*/false);
-      if (!evaluated_candidates.insert(make_eval_key(base_flags, preset_c)).second) {
-        continue;
-      }
-      auto cand_score_or = scorer.CompileAndScore(target, preset_c, base_flags, extra_inc);
-      if (!cand_score_or.ok()) continue;
-      if (cand_score_or->IsBetterThan(result.best_score)) {
-        result.best_score = *cand_score_or;
-        best_ast = std::move(preset_ast);
-        result.applied_mutations = preset_steps;
-        result.improved_over_baseline = true;
-        if (result.best_score.raw_bit_exact) break;
-      }
-    }
+  if (!previous_cached_flags.empty() && std::find(flag_profiles.begin(), flag_profiles.end(),
+                                                  previous_cached_flags) == flag_profiles.end()) {
+    flag_profiles.push_back(previous_cached_flags);
   }
 
-  // Phase 1b: Compiler Flag Sweep on best AST so far
+  // Phase 1a: Compiler Flag Sweep on Baseline AST first (immediately resolves functions that only
+  // need `-Wa,-O2` and ensures Phase 1b/Phase 2 run with the best flag profile).
   if (!result.best_score.raw_bit_exact && options_.explore_flags) {
-    std::string best_c_so_far =
-        EmitSingleFunctionWithExterns(best_ast, parent_tu, symbols, /*format_with_clang=*/false);
     for (size_t i = 1; i < flag_profiles.size(); ++i) {
-      if (evaluated_candidates.insert(make_eval_key(flag_profiles[i], best_c_so_far)).second) {
-        auto cand_score_or =
-            scorer.CompileAndScore(target, best_c_so_far, flag_profiles[i], extra_inc);
-        if (cand_score_or.ok() && cand_score_or->IsBetterThan(result.best_score)) {
-          result.best_score = *cand_score_or;
+      if (evaluated_candidates.insert(make_evaluation_key(flag_profiles[i], baseline_compilable_c))
+              .second) {
+        auto candidate_score_or = scorer.CompileAndScore(target, baseline_compilable_c,
+                                                         flag_profiles[i], extra_include_dirs);
+        if (candidate_score_or.ok() && candidate_score_or->IsBetterThan(result.best_score)) {
+          result.best_score = *candidate_score_or;
           result.winning_c_flags = flag_profiles[i];
           result.improved_over_baseline = true;
           if (result.best_score.raw_bit_exact) break;
         }
+      }
+    }
+  }
+
+  // Phase 1b: Canonical AST Preset Sweep on winning_c_flags
+  bool improved_in_phase1b = false;
+  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
+    auto presets = AstMutator::GenerateCanonicalPresets(baseline_ast);
+    if (!previous_cached_mutations.empty()) {
+      presets.insert(presets.begin(), previous_cached_mutations);
+    }
+    for (const auto& preset_steps : presets) {
+      FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
+      std::string preset_c = EmitSingleFunctionWithExterns(preset_ast, parent_tu, symbols,
+                                                           /*format_with_clang=*/false);
+      if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, preset_c))
+               .second) {
+        continue;
+      }
+      auto candidate_score_or =
+          scorer.CompileAndScore(target, preset_c, result.winning_c_flags, extra_include_dirs);
+      if (!candidate_score_or.ok()) continue;
+      if (candidate_score_or->IsBetterThan(result.best_score)) {
+        result.best_score = *candidate_score_or;
+        best_ast = std::move(preset_ast);
+        result.applied_mutations = preset_steps;
+        result.improved_over_baseline = true;
+        improved_in_phase1b = true;
+        if (result.best_score.raw_bit_exact) break;
       }
     }
   }
@@ -325,14 +351,15 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
         FunctionDeclaration mutated = AstMutator::ApplyMutation(best_ast, step);
         std::string mutated_c =
             EmitSingleFunctionWithExterns(mutated, parent_tu, symbols, /*format_with_clang=*/false);
-        if (!evaluated_candidates.insert(make_eval_key(result.winning_c_flags, mutated_c)).second) {
+        if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, mutated_c))
+                 .second) {
           continue;
         }
-        auto cand_score_or =
-            scorer.CompileAndScore(target, mutated_c, result.winning_c_flags, extra_inc);
-        if (!cand_score_or.ok()) continue;
-        if (cand_score_or->IsBetterThan(result.best_score)) {
-          result.best_score = *cand_score_or;
+        auto candidate_score_or =
+            scorer.CompileAndScore(target, mutated_c, result.winning_c_flags, extra_include_dirs);
+        if (!candidate_score_or.ok()) continue;
+        if (candidate_score_or->IsBetterThan(result.best_score)) {
+          result.best_score = *candidate_score_or;
           best_ast = std::move(mutated);
           result.applied_mutations.push_back(step);
           result.improved_over_baseline = true;
@@ -345,19 +372,21 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     }
   }
 
-  // Phase 3: Post-AST Compiler Flag Re-Sweep if Phase 2 mutated the AST
-  if (!result.best_score.raw_bit_exact && options_.explore_flags && improved_in_phase2) {
+  // Phase 3: Post-AST Compiler Flag Re-Sweep if Phase 1b or Phase 2 mutated the AST
+  if (!result.best_score.raw_bit_exact && options_.explore_flags &&
+      (improved_in_phase1b || improved_in_phase2)) {
     std::string best_ast_c =
         EmitSingleFunctionWithExterns(best_ast, parent_tu, symbols, /*format_with_clang=*/false);
     for (const auto& flags : flag_profiles) {
       if (flags == result.winning_c_flags) continue;
-      if (!evaluated_candidates.insert(make_eval_key(flags, best_ast_c)).second) {
+      if (!evaluated_candidates.insert(make_evaluation_key(flags, best_ast_c)).second) {
         continue;
       }
-      auto cand_score_or = scorer.CompileAndScore(target, best_ast_c, flags, extra_inc);
-      if (!cand_score_or.ok()) continue;
-      if (cand_score_or->IsBetterThan(result.best_score)) {
-        result.best_score = *cand_score_or;
+      auto candidate_score_or =
+          scorer.CompileAndScore(target, best_ast_c, flags, extra_include_dirs);
+      if (!candidate_score_or.ok()) continue;
+      if (candidate_score_or->IsBetterThan(result.best_score)) {
+        result.best_score = *candidate_score_or;
         result.winning_c_flags = flags;
         result.improved_over_baseline = true;
         if (result.best_score.raw_bit_exact) break;
@@ -365,7 +394,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     }
   }
 
-  std::filesystem::remove_all(temp_inc_dir, ec);
+  std::filesystem::remove_all(temporary_include_dir, error_code);
 
   // Verify behavioral equivalence once on the final winning candidate (if not raw bit-exact)
   if (result.improved_over_baseline && !result.best_score.raw_bit_exact &&
@@ -384,8 +413,8 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   entry.set_function_name(target.name);
   entry.set_module_name(std::string(module_name));
   entry.set_input_sha1(input_sha1);
-  for (const auto& f : result.winning_c_flags) {
-    entry.add_c_flags(f);
+  for (const auto& flag : result.winning_c_flags) {
+    entry.add_c_flags(flag);
   }
   for (const auto& step : result.applied_mutations) {
     *entry.add_ast_mutations() = step;
@@ -413,145 +442,176 @@ absl::StatusOr<ModuleTuneResult> TunerPipeline::TuneModule(std::string_view modu
     return absl::FailedPreconditionError("TunerPipeline: LifterPipeline is not initialized.");
   }
 
-  auto func_names_or = lifter_->GetFunctionsInModule(module_name);
-  if (!func_names_or.ok()) {
-    return func_names_or.status();
+  auto function_names_or = lifter_->GetFunctionsInModule(module_name);
+  if (!function_names_or.ok()) {
+    return function_names_or.status();
   }
 
-  auto tu_or = lifter_->BuildTranslationUnit(*func_names_or);
-  if (!tu_or.ok()) {
-    return tu_or.status();
+  auto translation_unit_or = lifter_->BuildTranslationUnit(*function_names_or);
+  if (!translation_unit_or.ok()) {
+    return translation_unit_or.status();
   }
 
   const auto* extractor = lifter_->Loader()->Extractor();
   const auto* config = extractor->Config();
   const auto* symbols = extractor->Symbols();
 
-  for (std::string_view intrin_name : {"N64Sqrtf", "N64Sqrt"}) {
-    if (symbols == nullptr || symbols->FindByName(intrin_name) == nullptr) {
-      tu_or->header_provided_functions.insert(std::string(intrin_name));
+  for (std::string_view intrinsic_name : {"N64Sqrtf", "N64Sqrt"}) {
+    if (symbols == nullptr || symbols->FindByName(intrinsic_name) == nullptr) {
+      translation_unit_or->header_provided_functions.insert(std::string(intrinsic_name));
     }
   }
 
-  ModuleTuneResult mod_result;
-  mod_result.module_name = std::string(module_name);
-  mod_result.total_functions = tu_or->functions.size();
-  mod_result.module_c_flags = cache_store_.GetModuleCFlags(module_name);
-  if (mod_result.module_c_flags.empty() && config != nullptr) {
-    mod_result.module_c_flags = ResolveCFlags(*config, module_name);
+  std::vector<std::string> default_config_flags;
+  if (config != nullptr) {
+    default_config_flags = ResolveCFlags(*config, module_name);
+  }
+  if (default_config_flags.empty()) {
+    default_config_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
   }
 
-  const size_t num_funcs = tu_or->functions.size();
-  std::vector<std::optional<TargetFunction>> targets(num_funcs);
-  size_t active_funcs = 0;
-  for (size_t i = 0; i < num_funcs; ++i) {
-    const auto& fn_decl = tu_or->functions[i];
-    if (!options_.search_on_miss && !cache_store_.ContainsFunction(fn_decl.Name())) {
+  ModuleTuneResult module_result;
+  module_result.module_name = std::string(module_name);
+  module_result.total_functions = translation_unit_or->functions.size();
+  module_result.module_c_flags = cache_store_.GetModuleCFlags(module_name);
+  if (module_result.module_c_flags.empty()) {
+    module_result.module_c_flags = default_config_flags;
+  }
+
+  const size_t total_functions = translation_unit_or->functions.size();
+  std::vector<std::optional<TargetFunction>> targets(total_functions);
+  size_t active_functions = 0;
+  for (size_t i = 0; i < total_functions; ++i) {
+    const auto& function_declaration = translation_unit_or->functions[i];
+    if (!options_.search_on_miss && !cache_store_.ContainsFunction(function_declaration.Name())) {
       continue;
     }
-    auto target_or = extractor->ExtractTarget(fn_decl.Name());
+    auto target_or = extractor->ExtractTarget(function_declaration.Name());
     if (target_or.ok()) {
       targets[i] = std::move(*target_or);
-      active_funcs++;
+      active_functions++;
     }
   }
 
-  std::vector<std::optional<FunctionTuneResult>> slot_results(num_funcs);
-  const size_t hw_threads =
+  std::vector<std::optional<FunctionTuneResult>> slot_results(total_functions);
+  const size_t hardware_threads =
       options_.num_threads > 0
           ? options_.num_threads
           : std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
-  const size_t worker_count = std::min(hw_threads, std::max<size_t>(1, active_funcs));
+  const size_t worker_count = std::min(hardware_threads, std::max<size_t>(1, active_functions));
 
   std::atomic<size_t> next_index{0};
   std::atomic<size_t> completed_live{0};
 
-  auto worker_fn = [&]() {
+  auto worker_function = [&]() {
     while (true) {
-      size_t idx = next_index.fetch_add(1, std::memory_order_relaxed);
-      if (idx >= num_funcs) break;
-      if (!targets[idx].has_value()) continue;
+      size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
+      if (index >= total_functions) break;
+      if (!targets[index].has_value()) continue;
 
-      auto fn_res_or = TuneLoadedFunctionAst(*targets[idx], tu_or->functions[idx], &(*tu_or),
-                                             module_name, /*emit_formatted_c=*/false);
-      if (!fn_res_or.ok()) continue;
+      auto function_result_or =
+          TuneLoadedFunctionAst(*targets[index], translation_unit_or->functions[index],
+                                &(*translation_unit_or), module_name, /*emit_formatted_c=*/false);
+      if (!function_result_or.ok()) continue;
 
-      bool was_live = !fn_res_or->from_cache;
-      slot_results[idx] = std::move(*fn_res_or);
+      bool was_live = !function_result_or->from_cache;
+      slot_results[index] = std::move(*function_result_or);
       if (was_live && options_.search_on_miss && !options_.cache_out_path.empty()) {
         size_t done = completed_live.fetch_add(1, std::memory_order_relaxed) + 1;
         if (done % 25 == 0) {
           std::lock_guard<std::mutex> lock(cache_mutex_);
           (void)cache_store_.SaveToFile(options_.cache_out_path, options_.game_name);
           std::cerr << absl::StreamFormat("  [%s] Checkpointed %zu/%zu functions...\n", module_name,
-                                          done, active_funcs);
+                                          done, active_functions);
         }
       }
     }
   };
 
   if (worker_count <= 1) {
-    worker_fn();
+    worker_function();
   } else {
     std::vector<std::thread> workers;
     workers.reserve(worker_count);
     for (size_t t = 0; t < worker_count; ++t) {
-      workers.emplace_back(worker_fn);
+      workers.emplace_back(worker_function);
     }
-    for (auto& w : workers) {
-      w.join();
+    for (auto& worker : workers) {
+      worker.join();
     }
   }
 
+  absl::flat_hash_map<std::string, size_t> bit_exact_flag_votes;
   absl::flat_hash_map<std::string, size_t> flag_votes;
-  for (size_t i = 0; i < num_funcs; ++i) {
+  for (size_t i = 0; i < total_functions; ++i) {
     if (!slot_results[i].has_value()) continue;
-    auto& fn_res = *slot_results[i];
-    if (fn_res.from_cache) {
-      mod_result.cache_hits++;
+    auto& function_result = *slot_results[i];
+    if (function_result.from_cache) {
+      module_result.cache_hits++;
     }
-    if (fn_res.improved_over_baseline) {
-      mod_result.improved_functions++;
+    if (function_result.improved_over_baseline) {
+      module_result.improved_functions++;
     }
-    if (fn_res.best_score.raw_bit_exact || fn_res.best_score.normalized_exact) {
-      mod_result.bit_exact_functions++;
+    const bool is_bit_exact =
+        function_result.best_score.raw_bit_exact || function_result.best_score.normalized_exact;
+    if (is_bit_exact) {
+      module_result.bit_exact_functions++;
     }
-    if (!fn_res.winning_c_flags.empty()) {
-      flag_votes[absl::StrJoin(fn_res.winning_c_flags, "\t")]++;
+    if (!function_result.winning_c_flags.empty()) {
+      std::string key = absl::StrJoin(function_result.winning_c_flags, "\t");
+      flag_votes[key]++;
+      if (is_bit_exact) {
+        bit_exact_flag_votes[key]++;
+      }
     }
-    if (fn_res.tuned_ast != nullptr) {
-      tu_or->functions[i] = std::move(*fn_res.tuned_ast);
+    if (function_result.tuned_ast != nullptr) {
+      translation_unit_or->functions[i] = std::move(*function_result.tuned_ast);
     }
-    mod_result.function_results.push_back(std::move(fn_res));
+    module_result.function_results.push_back(std::move(function_result));
   }
 
-  // Pick majority-voted winning c_flags for the module if not explicitly locked in cache
-  if (cache_store_.GetModuleCFlags(module_name).empty() && !flag_votes.empty()) {
+  // Pick winning c_flags for the module: prefer the plurality winner among bit-exact functions,
+  // falling back to overall majority vote when no functions are bit-exact yet.
+  if (!bit_exact_flag_votes.empty()) {
     size_t best_votes = 0;
-    for (const auto& fn_res : mod_result.function_results) {
-      if (fn_res.winning_c_flags.empty()) continue;
-      std::string key = absl::StrJoin(fn_res.winning_c_flags, "\t");
+    for (const auto& function_result : module_result.function_results) {
+      if (function_result.winning_c_flags.empty()) continue;
+      std::string key = absl::StrJoin(function_result.winning_c_flags, "\t");
+      auto it = bit_exact_flag_votes.find(key);
+      if (it != bit_exact_flag_votes.end() && it->second > best_votes) {
+        best_votes = it->second;
+        module_result.module_c_flags = function_result.winning_c_flags;
+      }
+    }
+    if (!module_result.module_c_flags.empty()) {
+      cache_store_.SetModuleCFlags(module_name, module_result.module_c_flags);
+    }
+  } else if (!flag_votes.empty()) {
+    size_t best_votes = 0;
+    for (const auto& function_result : module_result.function_results) {
+      if (function_result.winning_c_flags.empty()) continue;
+      std::string key = absl::StrJoin(function_result.winning_c_flags, "\t");
       size_t count = flag_votes[key];
       if (count > best_votes) {
         best_votes = count;
-        mod_result.module_c_flags = fn_res.winning_c_flags;
+        module_result.module_c_flags = function_result.winning_c_flags;
       }
     }
-    if (!mod_result.module_c_flags.empty()) {
-      cache_store_.SetModuleCFlags(module_name, mod_result.module_c_flags);
+    if (!module_result.module_c_flags.empty()) {
+      cache_store_.SetModuleCFlags(module_name, module_result.module_c_flags);
     }
   }
 
-  CEmitterOptions emitter_opts;
-  emitter_opts.includes = tu_or->includes;
-  emitter_opts.format_with_clang = options_.format_with_clang;
-  mod_result.tuned_c_code = CEmitter::EmitTranslationUnit(*tu_or, emitter_opts);
+  CEmitterOptions emitter_options;
+  emitter_options.includes = translation_unit_or->includes;
+  emitter_options.format_with_clang = options_.format_with_clang;
+  module_result.tuned_c_code = CEmitter::EmitTranslationUnit(*translation_unit_or, emitter_options);
 
   if (!options_.cache_out_path.empty()) {
     std::lock_guard<std::mutex> lock(cache_mutex_);
     (void)cache_store_.SaveToFile(options_.cache_out_path, options_.game_name);
   }
-  return mod_result;
+  return module_result;
 }
 
 absl::StatusOr<std::vector<std::filesystem::path>> TunerPipeline::TuneAllModules(

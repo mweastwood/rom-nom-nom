@@ -679,5 +679,102 @@ SECTIONS
   EXPECT_THAT(content, HasSubstr("PROVIDE(g_inner_data = 0x80002010);"));
 }
 
+TEST_F(RomBuilderTest, LoadsModuleCFlagsFromTuningCacheFileAndTunedCFlagsTextproto) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot(void) {}");
+  CreateFile(src_dir_ / "c" / "test_game" / "audio.c", "void audio(void) {}");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); build/src/audio.o(.text*); }
+}
+)");
+
+  // Relative tuning_cache_file sets module_c_flags for both "boot" and "audio"
+  CreateFile(test_dir_ / "config" / "test_game.tuning.textproto", R"pb(
+    game_name: "test_game"
+    module_c_flags {
+      key: "boot"
+      value { flags: "-O2" flags: "-Wa,-O2" }
+    }
+    module_c_flags {
+      key: "audio"
+      value { flags: "-O1" flags: "-Wa,-g" }
+    }
+  )pb");
+
+  // Optional src_dir/tuned_c_flags.textproto overrides "audio"
+  CreateFile(src_dir_ / "tuned_c_flags.textproto", R"pb(
+    game_name: "test_game"
+    module_c_flags {
+      key: "audio"
+      value { flags: "-O3" flags: "-Wa,-O2" }
+    }
+  )pb");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    tuning_cache_file: "config/test_game.tuning.textproto"
+    c_flags {
+      key: "default"
+      value { flags: "-O0" }
+    }
+    segments {
+      name: "code"
+      rom_start: 0x0
+      rom_end: 0x10
+      vram: 0x80000000
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+      subsegments { name: "audio" rom_start: 0x8 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path output_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path output_rom = test_dir_ / "out" / "test_game.z64";
+
+  std::vector<std::string> boot_compiler_arguments;
+  std::vector<std::string> audio_compiler_arguments;
+  auto mock_runner = [&](const ProcessOptions& process_options) -> absl::StatusOr<ProcessResult> {
+    for (const auto& argument : process_options.args) {
+      if (argument == (src_dir_ / "c" / "test_game" / "boot.c").string()) {
+        boot_compiler_arguments = process_options.args;
+      }
+      if (argument == (src_dir_ / "c" / "test_game" / "audio.c").string()) {
+        audio_compiler_arguments = process_options.args;
+      }
+    }
+    if (process_options.args.size() >= 4 && process_options.args[1] == "binary" &&
+        process_options.args[3] == output_rom.string()) {
+      std::filesystem::create_directories(output_rom.parent_path());
+      std::ofstream(output_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+    ProcessResult process_result;
+    process_result.exit_code = 0;
+    return process_result;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+  RomBuilderOptions builder_options{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = output_elf,
+      .out_rom = output_rom,
+  };
+
+  RomBuilder builder(toolchain_, builder_options, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  EXPECT_THAT(boot_compiler_arguments, ::testing::Contains("-O2"));
+  EXPECT_THAT(audio_compiler_arguments, ::testing::Contains("-O3"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

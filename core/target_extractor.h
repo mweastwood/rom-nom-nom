@@ -68,8 +68,8 @@ class TargetExtractor {
   // Compiles a single C source file with the retail toolchain, extracts the named function,
   // and applies relocations against the symbol table.
   absl::StatusOr<CompiledCandidateFunction> CompileCandidateFunction(
-      const std::filesystem::path& source_file, std::string_view func_name,
-      uint32_t target_vram) const;
+      const std::filesystem::path& source_file, std::string_view function_name,
+      uint32_t target_vram, std::optional<uint32_t> target_rodata_vram = std::nullopt) const;
 
   // Reads a 32-bit big-endian word from ROM at the specified VRAM address.
   std::optional<uint32_t> ReadRomWord(uint32_t vram) const;

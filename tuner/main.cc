@@ -26,6 +26,8 @@ ABSL_FLAG(std::string, output, "", "Optional output C file path.");
 ABSL_FLAG(std::string, output_dir, "", "Output directory for tuning all game modules.");
 ABSL_FLAG(bool, search_on_miss, true,
           "Run live compiler flag and AST mutation search on cache misses.");
+ABSL_FLAG(bool, only_non_bit_exact, false,
+          "Skip live search for cached bit-exact functions and only search non-bit-exact ones.");
 ABSL_FLAG(bool, explore_flags, true, "Explore compiler/assembler flag profiles.");
 ABSL_FLAG(bool, explore_ast, true, "Explore semantics-preserving AST mutations.");
 ABSL_FLAG(bool, verify_fuzzer, true,
@@ -64,6 +66,7 @@ int main(int argc, char* argv[]) {
   opts.cache_path = absl::GetFlag(FLAGS_cache);
   opts.cache_out_path = absl::GetFlag(FLAGS_cache_out);
   opts.search_on_miss = absl::GetFlag(FLAGS_search_on_miss);
+  opts.only_non_bit_exact = absl::GetFlag(FLAGS_only_non_bit_exact);
   opts.explore_flags = absl::GetFlag(FLAGS_explore_flags);
   opts.explore_ast_mutations = absl::GetFlag(FLAGS_explore_ast);
   opts.verify_with_fuzzer = absl::GetFlag(FLAGS_verify_fuzzer);

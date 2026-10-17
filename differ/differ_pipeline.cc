@@ -80,16 +80,19 @@ absl::StatusOr<DifferResult> DifferPipeline::Diff(std::string_view func_name) co
 
   // 4. If C source exists, compile it with GCC 2.7.2, read object, and apply relocations.
   if (c_file.has_value()) {
-    auto cand_or = extractor->CompileCandidateFunction(*c_file, canonical_name, target_func.vram);
-    if (absl::IsNotFound(cand_or.status()) && canonical_name != func_name) {
-      cand_or = extractor->CompileCandidateFunction(*c_file, func_name, target_func.vram);
+    auto rodata_vram = InferTargetRodataVram(target_func.instructions);
+    auto candidate_or =
+        extractor->CompileCandidateFunction(*c_file, canonical_name, target_func.vram, rodata_vram);
+    if (absl::IsNotFound(candidate_or.status()) && canonical_name != func_name) {
+      candidate_or =
+          extractor->CompileCandidateFunction(*c_file, func_name, target_func.vram, rodata_vram);
     }
-    if (!cand_or.ok()) {
-      return cand_or.status();
+    if (!candidate_or.ok()) {
+      return candidate_or.status();
     }
     compiled_vram = target_func.vram;
-    compiled_size = cand_or->size;
-    compiled_instructions = std::move(cand_or->instructions);
+    compiled_size = candidate_or->size;
+    compiled_instructions = std::move(candidate_or->instructions);
   }
 
   // 5. Normalization: map branch/jump targets to function-relative offsets.

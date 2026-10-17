@@ -47,25 +47,28 @@ CandidateScorer::CandidateScorer(const TargetExtractor* extractor, const SymbolI
 
 namespace {
 
-size_t CountTrailingSectionPaddingNops(uint32_t start_vram, absl::Span<const Instruction> insts) {
-  if (insts.size() < 3 || ((start_vram + static_cast<uint32_t>(insts.size() * 4)) % 16) != 0) {
+size_t CountTrailingSectionPaddingNops(uint32_t start_vram,
+                                       absl::Span<const Instruction> instructions) {
+  if (instructions.size() < 3 ||
+      ((start_vram + static_cast<uint32_t>(instructions.size() * 4)) % 16) != 0) {
     return 0;
   }
-  for (size_t k = 1; k <= 3 && insts.size() >= k + 2; ++k) {
-    if (!insts[insts.size() - k].IsNop()) {
+  for (size_t k = 1; k <= 3 && instructions.size() >= k + 2; ++k) {
+    if (!instructions[instructions.size() - k].IsNop()) {
       break;
     }
-    const auto& term = insts[insts.size() - k - 2];
+    const auto& terminator = instructions[instructions.size() - k - 2];
     bool is_unconditional_exit =
-        term.IsReturn() || term.opcode == Opcode::kJ ||
-        (term.opcode == Opcode::kBeq && term.rs == Register::kZero && term.rt == Register::kZero);
+        terminator.IsReturn() || terminator.opcode == Opcode::kJ ||
+        (terminator.opcode == Opcode::kBeq && terminator.rs == Register::kZero &&
+         terminator.rt == Register::kZero);
     if (!is_unconditional_exit) {
       continue;
     }
-    uint32_t pad_start_vram = insts[insts.size() - k].vram;
+    uint32_t padding_start_vram = instructions[instructions.size() - k].vram;
     bool branch_targets_padding = false;
-    for (size_t i = 0; i <= insts.size() - k - 2; ++i) {
-      if (insts[i].IsBranch() && insts[i].BranchTarget() >= pad_start_vram) {
+    for (size_t i = 0; i <= instructions.size() - k - 2; ++i) {
+      if (instructions[i].IsBranch() && instructions[i].BranchTarget() >= padding_start_vram) {
         branch_targets_padding = true;
         break;
       }
@@ -82,17 +85,17 @@ size_t CountTrailingSectionPaddingNops(uint32_t start_vram, absl::Span<const Ins
 CandidateScore CandidateScorer::ScoreInstructions(
     const TargetFunction& target, absl::Span<const Instruction> compiled_instructions,
     absl::Span<const uint32_t> patched_words) const {
-  absl::Span<const Instruction> target_insts = target.instructions;
+  absl::Span<const Instruction> target_instructions = target.instructions;
   absl::Span<const uint32_t> target_words = target.raw_words;
 
-  const size_t target_pad = CountTrailingSectionPaddingNops(target.vram, target_insts);
-  const size_t compiled_pad =
+  const size_t target_padding = CountTrailingSectionPaddingNops(target.vram, target_instructions);
+  const size_t compiled_padding =
       CountTrailingSectionPaddingNops(/*start_vram=*/0, compiled_instructions);
 
-  std::vector<Instruction> adjusted_compiled_insts;
+  std::vector<Instruction> adjusted_compiled_instructions;
   std::vector<uint32_t> adjusted_patched_words;
-  if (compiled_pad > target_pad) {
-    const size_t excess = compiled_pad - target_pad;
+  if (compiled_padding > target_padding) {
+    const size_t excess = compiled_padding - target_padding;
     if (compiled_instructions.size() > excess) {
       compiled_instructions =
           compiled_instructions.subspan(0, compiled_instructions.size() - excess);
@@ -100,47 +103,48 @@ CandidateScore CandidateScorer::ScoreInstructions(
         patched_words = patched_words.subspan(0, compiled_instructions.size());
       }
     }
-  } else if (compiled_pad < target_pad && !compiled_instructions.empty()) {
-    const size_t deficit = target_pad - compiled_pad;
-    adjusted_compiled_insts.assign(compiled_instructions.begin(), compiled_instructions.end());
+  } else if (compiled_padding < target_padding && !compiled_instructions.empty()) {
+    const size_t deficit = target_padding - compiled_padding;
+    adjusted_compiled_instructions.assign(compiled_instructions.begin(),
+                                          compiled_instructions.end());
     adjusted_patched_words.assign(patched_words.begin(), patched_words.end());
     for (size_t i = 0; i < deficit; ++i) {
-      Instruction nop_inst = target_insts.back();
-      nop_inst.vram = adjusted_compiled_insts.back().vram + 4;
-      adjusted_compiled_insts.push_back(nop_inst);
+      Instruction nop_instruction = target_instructions.back();
+      nop_instruction.vram = adjusted_compiled_instructions.back().vram + 4;
+      adjusted_compiled_instructions.push_back(nop_instruction);
       if (!adjusted_patched_words.empty()) {
         adjusted_patched_words.push_back(0x00000000);
       }
     }
-    compiled_instructions = adjusted_compiled_insts;
+    compiled_instructions = adjusted_compiled_instructions;
     if (!adjusted_patched_words.empty()) {
       patched_words = adjusted_patched_words;
     }
   }
 
-  FunctionDiffContext diff_ctx;
-  diff_ctx.target_vram = target.vram;
-  diff_ctx.target_size =
-      target.size > 0 ? target.size : static_cast<uint32_t>(target_insts.size() * 4);
-  diff_ctx.compiled_vram = target.vram;
-  diff_ctx.compiled_size = static_cast<uint32_t>(compiled_instructions.size() * 4);
+  FunctionDiffContext diff_context;
+  diff_context.target_vram = target.vram;
+  diff_context.target_size =
+      target.size > 0 ? target.size : static_cast<uint32_t>(target_instructions.size() * 4);
+  diff_context.compiled_vram = target.vram;
+  diff_context.compiled_size = static_cast<uint32_t>(compiled_instructions.size() * 4);
 
-  Normalizer normalizer(diff_ctx);
+  Normalizer normalizer(diff_context);
 
-  std::vector<NormalizedInstruction> norm_target;
-  norm_target.reserve(target_insts.size());
-  for (const auto& inst : target_insts) {
-    norm_target.push_back(normalizer.NormalizeTarget(inst));
+  std::vector<NormalizedInstruction> normalized_target;
+  normalized_target.reserve(target_instructions.size());
+  for (const auto& instruction : target_instructions) {
+    normalized_target.push_back(normalizer.NormalizeTarget(instruction));
   }
 
-  std::vector<NormalizedInstruction> norm_compiled;
-  norm_compiled.reserve(compiled_instructions.size());
-  for (const auto& inst : compiled_instructions) {
-    norm_compiled.push_back(normalizer.NormalizeCompiled(inst));
+  std::vector<NormalizedInstruction> normalized_compiled;
+  normalized_compiled.reserve(compiled_instructions.size());
+  for (const auto& instruction : compiled_instructions) {
+    normalized_compiled.push_back(normalizer.NormalizeCompiled(instruction));
   }
 
   SequenceAligner aligner(&normalizer);
-  AlignmentResult alignment = aligner.Align(norm_target, norm_compiled);
+  AlignmentResult alignment = aligner.Align(normalized_target, normalized_compiled);
 
   CandidateScore score;
   score.bit_exact_instructions = alignment.stats.bit_exact_instructions;
@@ -175,21 +179,21 @@ absl::StatusOr<CandidateScore> CandidateScorer::CompileAndScore(
     return absl::FailedPreconditionError("CandidateScorer: TargetExtractor is required.");
   }
 
-  static std::atomic<uint64_t> temp_counter{0};
-  uint64_t id = temp_counter.fetch_add(1, std::memory_order_relaxed);
-  std::filesystem::path temp_dir =
-      std::filesystem::temp_directory_path() / absl::StrCat("tuner_cand_", id);
-  std::error_code ec;
-  std::filesystem::create_directories(temp_dir, ec);
-  std::filesystem::path src_file = temp_dir / absl::StrCat(target.name, ".c");
+  static std::atomic<uint64_t> temporary_counter{0};
+  uint64_t identifier = temporary_counter.fetch_add(1, std::memory_order_relaxed);
+  std::filesystem::path temporary_directory =
+      std::filesystem::temp_directory_path() / absl::StrCat("tuner_candidate_", identifier);
+  std::error_code error_code;
+  std::filesystem::create_directories(temporary_directory, error_code);
+  std::filesystem::path source_file = temporary_directory / absl::StrCat(target.name, ".c");
 
   {
-    std::ofstream out(src_file);
-    if (!out.is_open()) {
-      std::filesystem::remove_all(temp_dir, ec);
+    std::ofstream output_stream(source_file);
+    if (!output_stream.is_open()) {
+      std::filesystem::remove_all(temporary_directory, error_code);
       return absl::InternalError("CandidateScorer: Failed to write temporary C file.");
     }
-    out << c_code;
+    output_stream << c_code;
   }
 
   CandidateCompiler compiler({
@@ -199,8 +203,9 @@ absl::StatusOr<CandidateScore> CandidateScorer::CompileAndScore(
       .symbols = symbols_,
   });
   auto compiled_or =
-      compiler.CompileFunction(src_file, target.name, target.vram, c_flags, extra_include_dirs);
-  std::filesystem::remove_all(temp_dir, ec);
+      compiler.CompileFunction(source_file, target.name, target.vram, c_flags, extra_include_dirs,
+                               InferTargetRodataVram(target.instructions));
+  std::filesystem::remove_all(temporary_directory, error_code);
   if (!compiled_or.ok()) {
     return compiled_or.status();
   }
@@ -217,15 +222,16 @@ bool CandidateScorer::VerifyEquivalence(const TargetFunction& target,
   if (candidate_words == absl::MakeConstSpan(target.raw_words)) {
     return true;
   }
-  fuzzer::DifferentialFuzzer diff_fuzzer;
+  fuzzer::DifferentialFuzzer differential_fuzzer;
   auto cases = fuzzer::DifferentialFuzzer::GenerateBoundaryCases();
   auto random_cases = fuzzer::DifferentialFuzzer::GenerateRandomCases(num_vectors, /*seed=*/42);
   cases.insert(cases.end(), random_cases.begin(), random_cases.end());
 
-  std::vector<uint32_t> cand_vec(candidate_words.begin(), candidate_words.end());
-  for (const auto& tc : cases) {
-    auto comp = diff_fuzzer.Compare(target.raw_words, target.vram, cand_vec, target.vram, tc);
-    if (comp.result != fuzzer::EquivalenceResult::kEquivalent) {
+  std::vector<uint32_t> candidate_vector(candidate_words.begin(), candidate_words.end());
+  for (const auto& test_case : cases) {
+    auto comparison = differential_fuzzer.Compare(target.raw_words, target.vram, candidate_vector,
+                                                  target.vram, test_case);
+    if (comparison.result != fuzzer::EquivalenceResult::kEquivalent) {
       return false;
     }
   }

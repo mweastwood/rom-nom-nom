@@ -34,6 +34,9 @@ struct TunerPipelineOptions {
 
   // Whether to run live compiler/AST search when a function is not in the tuning cache.
   bool search_on_miss = true;
+  // When true, use cached entries for already bit-exact functions and re-run live search on
+  // non-bit-exact functions.
+  bool only_non_bit_exact = false;
   bool explore_flags = true;
   bool explore_ast_mutations = true;
   bool verify_with_fuzzer = true;
