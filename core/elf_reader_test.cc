@@ -166,11 +166,11 @@ TEST(ElfReaderTest, RejectsInvalidMagicOrTooSmall) {
   EXPECT_FALSE(reader_or.ok());
 }
 
-TEST(ElfReaderTest, RejectsNonMipsOrNonRelocatable) {
+TEST(ElfReaderTest, RejectsNonMipsOrUnsupportedType) {
   auto elf = BuildSyntheticMipsElf();
-  // Patch e_type to ET_EXEC (2)
+  // Patch e_type to ET_DYN (3)
   elf[16] = 0;
-  elf[17] = ET_EXEC;
+  elf[17] = ET_DYN;
   EXPECT_FALSE(ElfReader::LoadFromBytes(elf).ok());
 
   elf = BuildSyntheticMipsElf();
@@ -178,6 +178,66 @@ TEST(ElfReaderTest, RejectsNonMipsOrNonRelocatable) {
   elf[18] = 0;
   elf[19] = EM_386;
   EXPECT_FALSE(ElfReader::LoadFromBytes(elf).ok());
+}
+
+TEST(ElfReaderTest, ParsesExecutableProgramHeadersAndVramToFileOffset) {
+  std::vector<uint8_t> elf;
+
+  // 1. ELF Header (52 bytes)
+  elf.push_back(0x7F);
+  elf.push_back('E');
+  elf.push_back('L');
+  elf.push_back('F');
+  elf.push_back(ELFCLASS32);
+  elf.push_back(ELFDATA2MSB);
+  elf.push_back(EV_CURRENT);
+  elf.push_back(0);
+  for (int i = 0; i < 8; ++i) elf.push_back(0);
+
+  AppendBigEndian16(elf, ET_EXEC);     // e_type = 2
+  AppendBigEndian16(elf, EM_MIPS);     // e_machine
+  AppendBigEndian32(elf, 1);           // e_version
+  AppendBigEndian32(elf, 0x80025C00);  // e_entry
+  AppendBigEndian32(elf, 52);          // e_phoff (immediately after header)
+  AppendBigEndian32(elf, 0);           // e_shoff
+  AppendBigEndian32(elf, 0);           // e_flags
+  AppendBigEndian16(elf, 52);          // e_ehsize
+  AppendBigEndian16(elf, 32);          // e_phentsize
+  AppendBigEndian16(elf, 1);           // e_phnum
+  AppendBigEndian16(elf, 0);           // e_shentsize
+  AppendBigEndian16(elf, 0);           // e_shnum
+  AppendBigEndian16(elf, 0);           // e_shstrndx
+
+  // 2. Program Header 0: PT_LOAD (32 bytes)
+  AppendBigEndian32(elf, PT_LOAD);      // p_type
+  AppendBigEndian32(elf, 0x100);        // p_offset
+  AppendBigEndian32(elf, 0x80025C00);   // p_vaddr
+  AppendBigEndian32(elf, 0x80025C00);   // p_paddr
+  AppendBigEndian32(elf, 0x40);         // p_filesz
+  AppendBigEndian32(elf, 0x100);        // p_memsz (includes 0xC0 bytes of BSS)
+  AppendBigEndian32(elf, PF_R | PF_X);  // p_flags
+  AppendBigEndian32(elf, 0x10);         // p_align
+
+  while (elf.size() < 0x140) elf.push_back(0);
+
+  auto obj_or = ElfReader::LoadFromBuffer(elf);
+  ASSERT_TRUE(obj_or.ok()) << obj_or.status();
+  const ElfObject& obj = *obj_or;
+
+  EXPECT_EQ(obj.type, ET_EXEC);
+  EXPECT_EQ(obj.entry, 0x80025C00u);
+  ASSERT_EQ(obj.program_headers.size(), 1u);
+  EXPECT_EQ(obj.program_headers[0].type, static_cast<uint32_t>(PT_LOAD));
+  EXPECT_EQ(obj.program_headers[0].offset, 0x100u);
+  EXPECT_EQ(obj.program_headers[0].vaddr, 0x80025C00u);
+  EXPECT_EQ(obj.program_headers[0].filesz, 0x40u);
+  EXPECT_EQ(obj.program_headers[0].memsz, 0x100u);
+
+  EXPECT_EQ(obj.VramToFileOffset(0x80025C00), 0x100u);
+  EXPECT_EQ(obj.VramToFileOffset(0x80025C20), 0x120u);
+  // BSS region [0x80025C40, 0x80025D00) is not backed by file bytes
+  EXPECT_EQ(obj.VramToFileOffset(0x80025C40), std::nullopt);
+  EXPECT_EQ(obj.VramToFileOffset(0x80000000), std::nullopt);
 }
 
 TEST(ElfReaderTest, ParsesSectionsAndSymbolsCorrectly) {
@@ -191,12 +251,14 @@ TEST(ElfReaderTest, ParsesSectionsAndSymbolsCorrectly) {
   const ElfSection* text_sec = reader.FindSection(".text");
   ASSERT_NE(text_sec, nullptr);
   EXPECT_EQ(text_sec->size, 8u);
+  EXPECT_EQ(text_sec->file_offset, text_sec->offset);
   EXPECT_THAT(text_sec->data, ElementsAre(0x24, 0x84, 0x00, 0x01, 0x03, 0xE0, 0x00, 0x08));
 
   const ElfSymbol* func_sym = reader.FindSymbol("TestFunc");
   ASSERT_NE(func_sym, nullptr);
   EXPECT_EQ(func_sym->value, 0u);
   EXPECT_EQ(func_sym->size, 8u);
+  EXPECT_EQ(func_sym->bind, static_cast<uint8_t>(STB_GLOBAL));
   EXPECT_EQ(func_sym->type, static_cast<uint8_t>(STT_FUNC));
   EXPECT_TRUE(func_sym->is_defined);
 

@@ -353,6 +353,7 @@ void RegisterTracker::Reset() {
   gpr_values_.assign(kNumGprs, TrackedValue());
   gpr_values_[RegIdx(Register::kZero)] = TrackedValue::Constant(0);
   gpr_values_[RegIdx(Register::kSp)] = TrackedValue::StackOffset(0);
+  fpr_const_bits_.fill(std::nullopt);
 
   reaching_defs_.assign(kNumGprs, std::nullopt);
   def_to_uses_.clear();
@@ -372,7 +373,33 @@ void RegisterTracker::Step(const Instruction& inst) {
     }
   }
 
-  // 2. Track values produced by instruction
+  // 2. Track FPR constant bits (before GPR updates in case mtc1 reads a GPR)
+  if (inst.IsCall()) {
+    ClearCallerSavedFprs();
+  } else if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() && inst.fs.has_value()) {
+    if (*inst.rt == Register::kZero) {
+      SetFprConstantBits(*inst.fs, 0);
+    } else {
+      const TrackedValue& tv = gpr_values_[RegIdx(*inst.rt)];
+      if (tv.kind == ValueKind::kConstant) {
+        SetFprConstantBits(*inst.fs, tv.constant_value);
+      } else if (tv.kind == ValueKind::kSymbolHi) {
+        SetFprConstantBits(*inst.fs, tv.symbol_hi);
+      } else {
+        ClearFprConstantBits(*inst.fs);
+      }
+    }
+  } else {
+    for (FpRegister f : ud.fpr_defs) {
+      size_t d = static_cast<size_t>(f);
+      ClearFprConstantBits(d);
+      if (d % 2 == 0 && d + 1 < fpr_const_bits_.size()) {
+        ClearFprConstantBits(d + 1);
+      }
+    }
+  }
+
+  // 3. Track GPR values produced by instruction
   switch (inst.opcode) {
     case Opcode::kLui:
       if (inst.rt.has_value() && *inst.rt != Register::kZero) {
@@ -402,10 +429,7 @@ void RegisterTracker::Step(const Instruction& inst) {
                   std::max(frame_info_.frame_size, static_cast<uint32_t>(-new_offset));
             }
           } else if (src_val.kind == ValueKind::kSymbolHi) {
-            TrackedValue tv;
-            tv.kind = ValueKind::kSymbolAddress;
-            tv.constant_value = src_val.symbol_hi + inst.immediate;
-            gpr_values_[dest] = tv;
+            gpr_values_[dest] = TrackedValue::SymbolAddress(src_val.symbol_hi + inst.immediate);
           } else {
             gpr_values_[dest] = TrackedValue();
           }
@@ -443,10 +467,7 @@ void RegisterTracker::Step(const Instruction& inst) {
           if (src_val.kind == ValueKind::kConstant) {
             gpr_values_[dest] = TrackedValue::Constant(src_val.constant_value | imm_u16);
           } else if (src_val.kind == ValueKind::kSymbolHi) {
-            TrackedValue tv;
-            tv.kind = ValueKind::kSymbolAddress;
-            tv.constant_value = src_val.symbol_hi | imm_u16;
-            gpr_values_[dest] = tv;
+            gpr_values_[dest] = TrackedValue::SymbolAddress(src_val.symbol_hi | imm_u16);
           } else {
             gpr_values_[dest] = TrackedValue();
           }
@@ -548,10 +569,10 @@ void RegisterTracker::Step(const Instruction& inst) {
   // $zero is always 0
   gpr_values_[RegIdx(Register::kZero)] = TrackedValue::Constant(0);
 
-  // 3. Update reaching definitions
+  // 4. Update reaching definitions
   for (Register r : ud.gpr_defs) {
     size_t idx = RegIdx(r);
-    reaching_defs_[idx] = Definition{inst.vram, inst_idx, r, &inst};
+    reaching_defs_[idx] = Definition{inst.vram, inst_idx, r, inst};
   }
 }
 
@@ -565,6 +586,12 @@ TrackedValue RegisterTracker::GetRegisterValue(Register reg) const {
   return gpr_values_[RegIdx(reg)];
 }
 
+void RegisterTracker::SetRegisterValue(Register reg, const TrackedValue& value) {
+  if (reg != Register::kZero) {
+    gpr_values_[RegIdx(reg)] = value;
+  }
+}
+
 bool RegisterTracker::IsConstant(Register reg) const {
   const auto& val = gpr_values_[RegIdx(reg)];
   return val.kind == ValueKind::kConstant || val.kind == ValueKind::kSymbolAddress;
@@ -576,6 +603,75 @@ std::optional<uint32_t> RegisterTracker::GetConstant(Register reg) const {
     return val.constant_value;
   }
   return std::nullopt;
+}
+
+void RegisterTracker::SetFprConstantBits(FpRegister reg, uint32_t bits) {
+  SetFprConstantBits(static_cast<size_t>(reg), bits);
+}
+
+void RegisterTracker::SetFprConstantBits(size_t reg_idx, uint32_t bits) {
+  if (reg_idx < fpr_const_bits_.size()) {
+    fpr_const_bits_[reg_idx] = bits;
+  }
+}
+
+std::optional<uint32_t> RegisterTracker::GetFprConstantBits(FpRegister reg) const {
+  return GetFprConstantBits(static_cast<size_t>(reg));
+}
+
+std::optional<uint32_t> RegisterTracker::GetFprConstantBits(size_t reg_idx) const {
+  if (reg_idx < fpr_const_bits_.size()) {
+    return fpr_const_bits_[reg_idx];
+  }
+  return std::nullopt;
+}
+
+void RegisterTracker::ClearFprConstantBits(FpRegister reg) {
+  ClearFprConstantBits(static_cast<size_t>(reg));
+}
+
+void RegisterTracker::ClearFprConstantBits(size_t reg_idx) {
+  if (reg_idx < fpr_const_bits_.size()) {
+    fpr_const_bits_[reg_idx] = std::nullopt;
+  }
+}
+
+void RegisterTracker::ClearCallerSavedFprs() {
+  for (size_t f = 0; f <= 19 && f < fpr_const_bits_.size(); ++f) {
+    fpr_const_bits_[f] = std::nullopt;
+  }
+}
+
+bool RegisterTracker::Merge(const RegisterTracker& other) {
+  bool changed = false;
+  for (size_t r = 0; r < kNumGprs; ++r) {
+    if (r == RegIdx(Register::kZero)) {
+      continue;
+    }
+    if (gpr_values_[r] != other.gpr_values_[r]) {
+      if (gpr_values_[r].kind != ValueKind::kUnknown) {
+        gpr_values_[r] = TrackedValue();
+        changed = true;
+      }
+    }
+    bool same_def =
+        reaching_defs_[r].has_value() && other.reaching_defs_[r].has_value() &&
+        reaching_defs_[r]->instruction_index == other.reaching_defs_[r]->instruction_index &&
+        reaching_defs_[r]->vram == other.reaching_defs_[r]->vram;
+    if (!same_def && reaching_defs_[r].has_value()) {
+      reaching_defs_[r] = std::nullopt;
+      changed = true;
+    }
+  }
+  for (size_t f = 0; f < fpr_const_bits_.size(); ++f) {
+    if (fpr_const_bits_[f] != other.fpr_const_bits_[f]) {
+      if (fpr_const_bits_[f].has_value()) {
+        fpr_const_bits_[f] = std::nullopt;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 std::optional<Definition> RegisterTracker::GetReachingDefinition(Register reg) const {

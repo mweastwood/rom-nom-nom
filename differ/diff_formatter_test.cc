@@ -223,5 +223,32 @@ TEST(DiffFormatterTest, FormatsJalWithSymbolIndex) {
   EXPECT_THAT(formatted, HasSubstr("jal    AudioUpdate"));
 }
 
+TEST(DiffFormatterTest, FormatsRomDiffReport) {
+  RomDiffResult result;
+  result.structural.is_valid = true;
+  result.structural.target_sha1 = "aaa";
+  result.structural.built_sha1 = "aaa";
+  result.structural.target_size = 4096;
+  result.structural.built_size = 4096;
+  result.structural.size_matches = true;
+  result.header_matching_bytes = 64;
+  result.header_total_bytes = 64;
+  result.code_segments.push_back(CodeSegmentDiffResult{
+      .segment_name = "main",
+      .retail_words_count = 100,
+      .built_words_count = 100,
+      .matched_words_count = 100,
+  });
+  result.total_logical_matching_bytes = 4096;
+  result.total_rom_bytes = 4096;
+  result.overall_match_percentage = 100.0;
+
+  DiffFormatter formatter(DiffFormatterOptions{.use_color = false});
+  std::string report = formatter.FormatRomDiff(result);
+  EXPECT_THAT(report, HasSubstr("[LIFTED C ROM STRUCTURAL VALIDATION]"));
+  EXPECT_THAT(report, HasSubstr("Code Segment (.main)"));
+  EXPECT_THAT(report, HasSubstr("100.00%"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

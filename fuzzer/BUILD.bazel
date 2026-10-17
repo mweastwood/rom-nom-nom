@@ -169,19 +169,54 @@ cc_test(
     ],
 )
 
-cc_binary(
-    name = "fuzzer",
-    srcs = ["main.cc"],
-    visibility = ["//visibility:public"],
+cc_library(
+    name = "candidate_environment",
+    srcs = ["candidate_environment.cc"],
+    hdrs = ["candidate_environment.h"],
     deps = [
         ":candidate_symbol_map",
         ":differential_fuzzer",
         ":equivalence_runner",
         ":relocation_rebaser",
+        "//core:endian",
+        "//core:game_config",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "candidate_environment_test",
+    srcs = ["candidate_environment_test.cc"],
+    deps = [
+        ":candidate_environment",
+        ":differential_fuzzer",
+        ":equivalence_runner",
+        "//core:endian",
+        "//core:game_config",
+        "//core:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "fuzzer",
+    srcs = ["main.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":candidate_environment",
+        ":differential_fuzzer",
+        ":equivalence_runner",
         ":rom_function_scanner",
         "//core:game_config",
         "//core:symbol_registry",
         "//core:target_extractor",
+        "//core:toolchain",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
@@ -190,3 +225,4 @@ cc_binary(
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
+

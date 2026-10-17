@@ -207,4 +207,135 @@ std::string DiffFormatter::FormatDiff(std::string_view func_name, const Alignmen
   return out;
 }
 
+std::string DiffFormatter::FormatRomDiff(const RomDiffResult& result) const {
+  return FormatRomDiff(result, options_.use_color);
+}
+
+std::string DiffFormatter::FormatRomDiff(const RomDiffResult& result, bool use_color) {
+  std::string_view bold = use_color ? kColorBold : "";
+  std::string_view green = use_color ? kColorGreen : "";
+  std::string_view red = use_color ? kColorRed : "";
+  std::string_view reset = use_color ? kColorReset : "";
+
+  auto format_commas = [](uint64_t value) -> std::string {
+    std::string text = std::to_string(value);
+    int insert_position = static_cast<int>(text.length()) - 3;
+    while (insert_position > 0) {
+      text.insert(insert_position, ",");
+      insert_position -= 3;
+    }
+    return text;
+  };
+
+  auto format_signed_commas = [&](int64_t value) -> std::string {
+    if (value < 0) {
+      return absl::StrCat("-", format_commas(static_cast<uint64_t>(-value)));
+    }
+    if (value > 0) {
+      return absl::StrCat("+", format_commas(static_cast<uint64_t>(value)));
+    }
+    return "0";
+  };
+
+  int64_t total_shift_offset = 0;
+  if (!result.asset_segments.empty()) {
+    total_shift_offset = result.asset_segments.front().shift_offset;
+  }
+
+  std::string size_status;
+  if (result.structural.size_matches) {
+    size_status = "Exact match";
+  } else if (result.structural.code_shift_matches) {
+    size_status =
+        absl::StrFormat("Shift match: %s bytes", format_signed_commas(total_shift_offset));
+  } else {
+    size_status = "MISMATCH";
+  }
+
+  std::string report;
+  absl::StrAppend(
+      &report,
+      "================================================================================\n");
+  absl::StrAppend(&report, bold, "[LIFTED C ROM STRUCTURAL VALIDATION]", reset, "\n");
+  absl::StrAppendFormat(&report, "Target ROM SHA-1: %s\n", result.structural.target_sha1);
+  absl::StrAppendFormat(&report, "Built  ROM SHA-1: %s\n", result.structural.built_sha1);
+  absl::StrAppendFormat(&report, "Cartridge Size:   %s bytes (%s)\n",
+                        format_commas(result.structural.built_size), size_status);
+  absl::StrAppendFormat(
+      &report, "N64 Header & IPL3: %s / %s bytes (%.2f%% bit-exact)\n",
+      format_commas(result.header_matching_bytes), format_commas(result.header_total_bytes),
+      (result.header_total_bytes > 0)
+          ? (static_cast<double>(result.header_matching_bytes) / result.header_total_bytes * 100.0)
+          : 0.0);
+
+  if (result.structural.is_valid) {
+    if (result.structural.code_shift_matches) {
+      absl::StrAppend(&report, green,
+                      "[SUCCESS] ROM structural integrity verified (code segment shifted with "
+                      "bit-exact assets)!",
+                      reset, "\n");
+    } else {
+      absl::StrAppend(&report, green, "[SUCCESS] ROM structural integrity verified!", reset, "\n");
+    }
+  } else {
+    absl::StrAppendFormat(&report, "%s[FAIL] Structural validation failed: %s%s\n", red,
+                          result.structural.failure_reason, reset);
+  }
+
+  absl::StrAppend(
+      &report,
+      "--------------------------------------------------------------------------------\n");
+  absl::StrAppend(&report, bold, "[SEGMENT-AWARE INSERTION/DELETION RESILIENT DIFF]", reset, "\n");
+
+  for (size_t i = 0; i < result.code_segments.size(); ++i) {
+    const auto& code_diff = result.code_segments[i];
+    absl::StrAppendFormat(&report, "%d. Code Segment (.%s):\n", i + 1, code_diff.segment_name);
+    absl::StrAppendFormat(&report, "   - Retail Words:     %s words (%s bytes)\n",
+                          format_commas(code_diff.retail_words_count),
+                          format_commas(code_diff.retail_words_count * 4));
+    int64_t code_size_delta = static_cast<int64_t>(code_diff.built_words_count * 4) -
+                              static_cast<int64_t>(code_diff.retail_words_count * 4);
+    absl::StrAppendFormat(&report, "   - Built Words:      %s words (%s bytes) [%s bytes]\n",
+                          format_commas(code_diff.built_words_count),
+                          format_commas(code_diff.built_words_count * 4),
+                          format_signed_commas(code_size_delta));
+    absl::StrAppendFormat(&report, "   - Myers Match (LCS): %s words (%s bytes)\n",
+                          format_commas(code_diff.matched_words_count),
+                          format_commas(code_diff.matched_words_count * 4));
+    absl::StrAppendFormat(&report, "   - Match vs Retail:   %.2f%%\n",
+                          code_diff.MatchPercentageRetail());
+    absl::StrAppendFormat(&report, "   - Match vs Built:    %.2f%%\n",
+                          code_diff.MatchPercentageBuilt());
+    absl::StrAppendFormat(&report, "   - Word Insertions:  %s words | Word Deletions: %s words\n",
+                          format_commas(code_diff.built_only_words_count),
+                          format_commas(code_diff.target_only_words_count));
+  }
+
+  size_t base_idx = result.code_segments.size() + 1;
+  for (size_t index = 0; index < result.asset_segments.size(); ++index) {
+    const auto& asset = result.asset_segments[index];
+    absl::StrAppendFormat(&report, "\n%d. Asset Segment (.%s):\n", base_idx + index,
+                          asset.segment_name);
+    absl::StrAppendFormat(&report, "   - Shift Offset:     %s bytes (0x%06X vs retail 0x%06X)\n",
+                          format_signed_commas(asset.shift_offset), asset.built_rom_start,
+                          asset.retail_rom_start);
+    absl::StrAppendFormat(&report, "   - Byte Match:       %s / %s bytes (%.2f%% bit-exact)\n",
+                          format_commas(asset.matching_bytes), format_commas(asset.total_bytes),
+                          asset.MatchPercentage());
+  }
+
+  absl::StrAppend(
+      &report,
+      "--------------------------------------------------------------------------------\n");
+  absl::StrAppendFormat(&report, "%sOverall Logical ROM Content Match: %s / %s bytes (%.2f%%)%s\n",
+                        bold, format_commas(result.total_logical_matching_bytes),
+                        format_commas(result.total_rom_bytes), result.overall_match_percentage,
+                        reset);
+  absl::StrAppend(
+      &report,
+      "================================================================================\n");
+
+  return report;
+}
+
 }  // namespace rom_nom_nom

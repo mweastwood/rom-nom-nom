@@ -1,6 +1,8 @@
 #ifndef CORE_REGISTER_TRACKER_H_
 #define CORE_REGISTER_TRACKER_H_
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -53,6 +55,13 @@ struct TrackedValue {
     v.kind = ValueKind::kSymbolHi;
     v.symbol_hi = hi_val;
     v.hi_inst_index = inst_idx;
+    return v;
+  }
+
+  static TrackedValue SymbolAddress(uint32_t addr) {
+    TrackedValue v;
+    v.kind = ValueKind::kSymbolAddress;
+    v.constant_value = addr;
     return v;
   }
 
@@ -117,7 +126,7 @@ struct Definition {
   uint32_t vram = 0;
   size_t instruction_index = 0;
   Register reg = Register::kZero;
-  const Instruction* inst = nullptr;
+  std::optional<Instruction> inst;
 };
 
 // Information discovered about a function's stack frame.
@@ -141,8 +150,23 @@ class RegisterTracker {
 
   // Queries register state at a given instruction index.
   TrackedValue GetRegisterValue(Register reg) const;
+  void SetRegisterValue(Register reg, const TrackedValue& value);
   bool IsConstant(Register reg) const;
   std::optional<uint32_t> GetConstant(Register reg) const;
+
+  // FPR constant bits tracking (for mtc1 / floating-point literal synthesis).
+  void SetFprConstantBits(FpRegister reg, uint32_t bits);
+  void SetFprConstantBits(size_t reg_idx, uint32_t bits);
+  std::optional<uint32_t> GetFprConstantBits(FpRegister reg) const;
+  std::optional<uint32_t> GetFprConstantBits(size_t reg_idx) const;
+  void ClearFprConstantBits(FpRegister reg);
+  void ClearFprConstantBits(size_t reg_idx);
+  void ClearCallerSavedFprs();
+  const std::array<std::optional<uint32_t>, 32>& FprConstantBits() const { return fpr_const_bits_; }
+
+  // Merges another RegisterTracker state into this one (intersection of known values).
+  // Returns true if this tracker's state changed.
+  bool Merge(const RegisterTracker& other);
 
   // Def-use queries
   std::optional<Definition> GetReachingDefinition(Register reg) const;
@@ -160,6 +184,9 @@ class RegisterTracker {
  private:
   // Register state table (32 GPRs)
   std::vector<TrackedValue> gpr_values_;
+
+  // FPR constant bits table (32 FPRs)
+  std::array<std::optional<uint32_t>, 32> fpr_const_bits_{};
 
   // Current reaching definition for each GPR
   std::vector<std::optional<Definition>> reaching_defs_;

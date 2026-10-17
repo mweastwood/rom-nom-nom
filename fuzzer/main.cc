@@ -20,10 +20,10 @@
 #include "core/game_config.h"
 #include "core/symbol_registry.h"
 #include "core/target_extractor.h"
-#include "fuzzer/candidate_symbol_map.h"
+#include "core/toolchain.h"
+#include "fuzzer/candidate_environment.h"
 #include "fuzzer/differential_fuzzer.h"
 #include "fuzzer/equivalence_runner.h"
-#include "fuzzer/relocation_rebaser.h"
 #include "fuzzer/rom_function_scanner.h"
 
 ABSL_FLAG(std::string, game, "harvest-moon-64", "Target game identifier.");
@@ -47,29 +47,6 @@ ABSL_FLAG(int, j, 0, "Alias for --jobs.");
 
 namespace {
 
-std::filesystem::path FindRepoRoot() {
-  const char* build_workspace_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
-  if (build_workspace_dir != nullptr && build_workspace_dir[0] != '\0') {
-    return std::filesystem::path(build_workspace_dir);
-  }
-  const char* build_working_dir = std::getenv("BUILD_WORKING_DIRECTORY");
-  if (build_working_dir != nullptr && build_working_dir[0] != '\0') {
-    return std::filesystem::path(build_working_dir);
-  }
-  std::filesystem::path cur = std::filesystem::current_path();
-  std::error_code ec;
-  while (!cur.empty()) {
-    if (std::filesystem::exists(cur / "MODULE.bazel", ec) ||
-        std::filesystem::exists(cur / "WORKSPACE", ec)) {
-      return cur;
-    }
-    auto parent = cur.parent_path();
-    if (parent == cur) break;
-    cur = parent;
-  }
-  return std::filesystem::current_path();
-}
-
 std::vector<uint8_t> ReadBinaryFile(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) return {};
@@ -82,14 +59,7 @@ std::vector<uint8_t> ReadBinaryFile(const std::filesystem::path& path) {
   return {};
 }
 
-using rom_nom_nom::fuzzer::BuildCandidateRebase;
-using rom_nom_nom::fuzzer::BuildCandidateSymbolMap;
-using rom_nom_nom::fuzzer::CandidateRebase;
-using rom_nom_nom::fuzzer::CandidateSymbolMap;
-using rom_nom_nom::fuzzer::CollectDataBlobs;
-using rom_nom_nom::fuzzer::ExtractCandidateDataPayloads;
-using rom_nom_nom::fuzzer::ExtractTargetDataPayloads;
-using rom_nom_nom::fuzzer::RebaseOptions;
+using rom_nom_nom::fuzzer::CandidateEnvironment;
 
 }  // namespace
 
@@ -123,7 +93,7 @@ int main(int argc, char* argv[]) {
     jobs = absl::GetFlag(FLAGS_j);
   }
 
-  std::filesystem::path repo_root = FindRepoRoot();
+  std::filesystem::path repo_root = rom_nom_nom::FindRepoRoot();
 
   // Positional arguments handling
   if (remaining_args.size() >= 3) {
@@ -153,6 +123,12 @@ int main(int argc, char* argv[]) {
         repo_root / "config" / absl::StrCat(game_name, ".textproto");
     if (std::filesystem::exists(default_config, ec)) {
       config_path = default_config.string();
+    }
+  }
+  if (func_flag.empty() && candidate_rom_path.empty()) {
+    std::filesystem::path default_built = repo_root / "bazel-bin" / absl::StrCat(game_name, ".z64");
+    if (std::filesystem::exists(default_built, ec)) {
+      candidate_rom_path = default_built.string();
     }
   }
 
@@ -195,6 +171,14 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  std::vector<uint8_t> base_rom_bytes;
+  if (!base_rom_path.empty()) {
+    base_rom_bytes = ReadBinaryFile(base_rom_path);
+  }
+  std::vector<uint8_t> candidate_rom_bytes;
+  if (!candidate_rom_path.empty()) {
+    candidate_rom_bytes = ReadBinaryFile(candidate_rom_path);
+  }
   std::vector<uint8_t> elf_bytes;
   if (!candidate_elf_path.empty()) {
     elf_bytes = ReadBinaryFile(candidate_elf_path);
@@ -207,172 +191,26 @@ int main(int argc, char* argv[]) {
   runner_opts.seed = seed;
   runner_opts.num_threads = jobs > 0 ? static_cast<size_t>(jobs) : 0;
 
-  // Prefer exact relocation-based rebasing: rewrite every candidate reference into a data/BSS
-  // blob so it points at the blob's target address. Both emulators then share one data layout
-  // and memory effects compare byte-for-byte without heuristic address translation.
-  std::shared_ptr<const CandidateRebase> rebase;
-  if (!elf_bytes.empty()) {
-    const auto& fopts = runner_opts.fuzzer_options;
-    RebaseOptions rebase_opts;
-    rebase_opts.reserved_ranges = {
-        {fopts.pointer_buffer_vram, fopts.pointer_buffer_vram + fopts.pointer_buffer_size},
-        {fopts.initial_sp - 0x10000, fopts.initial_sp + 0x1000},
-    };
-    // Keep relocated compiler rodata far away from game data: fuzz vectors routinely index
-    // arrays out of bounds, and the target reads zeros wherever the candidate keeps extra data.
-    rebase_opts.scratch_base = fopts.pointer_buffer_vram + 0x100000;
-    // Functions whose candidate code overlaps the target's data addresses run from here.
-    rebase_opts.code_scratch_base = fopts.pointer_buffer_vram + 0x200000;
-    auto rebase_or =
-        BuildCandidateRebase(elf_bytes, CollectDataBlobs(extractor->Config(), extractor->Symbols()),
-                             extractor->Config(), extractor->Symbols(), rebase_opts);
-    if (!rebase_or.ok()) {
-      std::cerr << "Error building candidate relocation rebase: " << rebase_or.status().message()
-                << "\n";
-      return 1;
-    }
-    rebase = std::make_shared<const CandidateRebase>(std::move(*rebase_or));
+  auto env_or = CandidateEnvironment::Build(
+      base_rom_bytes, candidate_rom_bytes, elf_bytes, extractor->Config(), extractor->Symbols(),
+      runner_opts.fuzzer_options, !candidate_rom_path.empty());
+  if (!env_or.ok()) {
+    std::cerr << "Error building candidate environment: " << env_or.status().message() << "\n";
+    return 1;
+  }
+  CandidateEnvironment env = std::move(*env_or);
+  if (env.Rebase().has_value()) {
+    const auto& rebase = *env.Rebase();
     std::cerr << absl::StrFormat(
         "Relocation rebasing: %zu relocations patched, %zu private payload(s), %zu unsupported "
         "relocation(s), %zu layout mismatch(es)\n",
-        rebase->relocations_patched, rebase->private_payloads.size(),
-        rebase->unsupported_relocations, rebase->layout_mismatches);
-    for (const auto& w : rebase->warnings) {
+        rebase.relocations_patched, rebase.private_payloads.size(), rebase.unsupported_relocations,
+        rebase.layout_mismatches);
+    for (const auto& w : rebase.warnings) {
       std::cerr << "  warning: " << w << "\n";
     }
-    if (rebase->layout_mismatches > 0) {
-      std::cerr << "Error: Candidate relocation rebase detected " << rebase->layout_mismatches
-                << " layout mismatch(es).\n";
-      return 1;
-    }
   }
-
-  std::vector<rom_nom_nom::fuzzer::MemoryPayload> rebased_candidate_payloads;
-  bool rebase_hooks_installed = false;
-  if (!elf_bytes.empty()) {
-    auto symbol_map = BuildCandidateSymbolMap(elf_bytes, extractor->Symbols());
-    if (!symbol_map.entries.empty()) {
-      auto map_ptr = std::make_shared<CandidateSymbolMap>(std::move(symbol_map));
-
-      std::vector<uint8_t> base_rom_for_payloads;
-      if (!base_rom_path.empty()) {
-        base_rom_for_payloads = ReadBinaryFile(base_rom_path);
-      }
-      auto target_payloads = ExtractTargetDataPayloads(base_rom_for_payloads, extractor->Config());
-      if (rebase != nullptr) {
-        rebased_candidate_payloads = target_payloads;
-        rebased_candidate_payloads.insert(rebased_candidate_payloads.end(),
-                                          rebase->private_payloads.begin(),
-                                          rebase->private_payloads.end());
-      }
-      auto target_payloads_ptr = std::make_shared<std::vector<rom_nom_nom::fuzzer::MemoryPayload>>(
-          std::move(target_payloads));
-
-      uint32_t target_bss_start = 0;
-      uint32_t target_bss_end = 0;
-      if (extractor->Config() != nullptr) {
-        for (const auto& seg : extractor->Config()->segments()) {
-          for (int s = 0; s < seg.subsegments_size(); ++s) {
-            const auto& sub = seg.subsegments(s);
-            if (sub.type() == rom_nom_nom::SUBSEGMENT_BSS && sub.vram() != 0) {
-              if (target_bss_start == 0 || sub.vram() < target_bss_start) {
-                target_bss_start = sub.vram();
-              }
-              uint32_t sub_bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
-              uint32_t bss_end = sub.vram() + (sub_bss_size != 0 ? sub_bss_size : 0x100000);
-              if (bss_end > target_bss_end) {
-                target_bss_end = bss_end;
-              }
-            }
-          }
-        }
-      }
-
-      auto read_payload = [payloads = target_payloads_ptr](uint32_t addr,
-                                                           size_t size) -> std::optional<uint64_t> {
-        for (const auto& p : *payloads) {
-          if (addr >= p.address && addr + size <= p.address + p.data.size()) {
-            size_t offset = addr - p.address;
-            if (size == 1) return p.data[offset];
-            if (size == 2) return rom_nom_nom::ReadBigEndian16(p.data.data() + offset);
-            if (size == 4) return rom_nom_nom::ReadBigEndian32(p.data.data() + offset);
-            if (size == 8) return rom_nom_nom::ReadBigEndian64(p.data.data() + offset);
-          }
-        }
-        return std::nullopt;
-      };
-
-      auto shared_read_hook = [read_payload, target_bss_start, target_bss_end](
-                                  uint32_t vram, size_t size,
-                                  bool /*is_fp*/) -> std::optional<uint64_t> {
-        if (target_bss_start != 0 && vram >= target_bss_start && vram < target_bss_end) {
-          return 0;
-        }
-        return read_payload(vram, size);
-      };
-      runner_opts.fuzzer_options.target_read_hook = shared_read_hook;
-
-      if (rebase != nullptr) {
-        // Data addresses are already identical; only code addresses (e.g. returned or stored
-        // function pointers) still differ between the two builds.
-        auto function_map = std::make_shared<absl::flat_hash_map<uint32_t, uint32_t>>();
-        for (const auto& e : map_ptr->entries) {
-          if (!e.is_data && e.cand_addr != e.target_addr) {
-            function_map->emplace(e.cand_addr, e.target_addr);
-          }
-        }
-        runner_opts.fuzzer_options.candidate_to_target_address = [function_map](uint32_t addr) {
-          auto it = function_map->find(addr);
-          return it != function_map->end() ? it->second : addr;
-        };
-        runner_opts.fuzzer_options.candidate_read_hook = shared_read_hook;
-        rebase_hooks_installed = true;
-      } else {
-        runner_opts.fuzzer_options.candidate_to_target_address = [map = map_ptr](uint32_t addr) {
-          return map->Translate(addr);
-        };
-        runner_opts.fuzzer_options.candidate_read_hook =
-            [map = map_ptr, read_payload, target_bss_start, target_bss_end,
-             has_candidate_payloads = !candidate_rom_path.empty()](
-                uint32_t cand_vram, size_t size, bool is_fp) -> std::optional<uint64_t> {
-          // 1. If the address is within candidate's own rodata section, candidate emulator
-          // already holds the compiled rodata (e.g. jump tables) directly.
-          if (map != nullptr && map->IsCandidateRodata(cand_vram, is_fp)) {
-            return std::nullopt;
-          }
-
-          // 2. Candidate address that translates to target rodata / data
-          uint32_t target_vram = (map != nullptr) ? map->Translate(cand_vram) : cand_vram;
-          if (target_bss_start != 0 && target_vram >= target_bss_start &&
-              target_vram < target_bss_end) {
-            return 0;
-          }
-
-          // If candidate data payloads were loaded from candidate ROM, candidate emulator
-          // already holds candidate's own data directly.
-          if (has_candidate_payloads && map != nullptr && map->IsCandidateData(cand_vram)) {
-            return std::nullopt;
-          }
-          if (target_vram != cand_vram) {
-            auto res = read_payload(target_vram, size);
-            if (res.has_value()) return *res;
-          }
-
-          // 3. Direct target address dereference (via embedded retail pointer in data table)
-          auto target_res = read_payload(cand_vram, size);
-          if (target_res.has_value()) {
-            return *target_res;
-          }
-
-          return std::nullopt;
-        };
-      }
-    }
-  }
-  if (!rebase_hooks_installed) {
-    // Without a symbol map the rebased hooks are not installed; keep words and memory unrebased.
-    rebase.reset();
-  }
+  env.ConfigureFuzzerOptions(&runner_opts.fuzzer_options);
 
   rom_nom_nom::fuzzer::EquivalenceRunner runner(runner_opts);
 
@@ -389,8 +227,7 @@ int main(int argc, char* argv[]) {
     }
     target.vram = target_func_or->vram;
     target.target_words = target_func_or->raw_words;
-    std::vector<uint8_t> base_rom_bytes = ReadBinaryFile(base_rom_path);
-    target.target_initial_memory = ExtractTargetDataPayloads(base_rom_bytes, extractor->Config());
+    target.target_initial_memory = env.TargetPayloads();
 
     // If source file given, compile via TargetExtractor
     if (!source_path.empty()) {
@@ -401,14 +238,13 @@ int main(int argc, char* argv[]) {
       }
       target.candidate_words = std::move(compiled_or->patched_words);
     } else if (!candidate_rom_path.empty()) {
-      std::vector<uint8_t> candidate_bytes = ReadBinaryFile(candidate_rom_path);
-      if (candidate_bytes.empty()) {
+      if (candidate_rom_bytes.empty()) {
         std::cerr << "Error reading candidate ROM file: " << candidate_rom_path << "\n";
         return 1;
       }
       if (!candidate_elf_path.empty() && !elf_bytes.empty()) {
         auto elf_cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::ScanFromElfAndRom(
-            candidate_bytes, elf_bytes, extractor->Config());
+            candidate_rom_bytes, elf_bytes, extractor->Config());
         if (elf_cand_funcs_or.ok()) {
           for (const auto& fn : *elf_cand_funcs_or) {
             if (fn.name == func_flag) {
@@ -418,20 +254,10 @@ int main(int argc, char* argv[]) {
             }
           }
         }
-        target.candidate_initial_memory =
-            rebase != nullptr
-                ? rebased_candidate_payloads
-                : ExtractCandidateDataPayloads(candidate_bytes, elf_bytes, extractor->Config());
-        if (rebase != nullptr && !target.candidate_words.empty()) {
-          auto placed = rebase->PlaceFunction(target.candidate_vram, target.candidate_words);
-          target.candidate_vram = placed.vram;
-          target.candidate_words = std::move(placed.words);
-          target.candidate_initial_memory.insert(target.candidate_initial_memory.end(),
-                                                 placed.overlays.begin(), placed.overlays.end());
-        }
+        env.PlaceCandidateFunction(&target);
       }
       if (target.candidate_words.empty()) {
-        auto cand_or = extractor->ExtractFromRom(candidate_bytes, func_flag);
+        auto cand_or = extractor->ExtractFromRom(candidate_rom_bytes, func_flag);
         if (!cand_or.ok()) {
           std::cerr << "Error extracting candidate function from candidate ROM: "
                     << cand_or.status().message() << "\n";
@@ -477,28 +303,21 @@ int main(int argc, char* argv[]) {
 
   // Mode 2: Whole-ROM or Module Batch Equivalence Evaluation
   if (candidate_rom_path.empty()) {
-    std::filesystem::path default_built = repo_root / "bazel-bin" / absl::StrCat(game_name, ".z64");
-    if (std::filesystem::exists(default_built, ec)) {
-      candidate_rom_path = default_built.string();
-    } else {
-      std::cerr << "Error: Evaluation mode requires --candidate_rom=<path.z64>\n";
-      return 1;
-    }
+    std::cerr << "Error: Evaluation mode requires --candidate_rom=<path.z64>\n";
+    return 1;
   }
 
-  std::vector<uint8_t> target_bytes = ReadBinaryFile(base_rom_path);
-  if (target_bytes.empty()) {
+  if (base_rom_bytes.empty()) {
     std::cerr << "Error reading base retail ROM: " << base_rom_path << "\n";
     return 1;
   }
-  std::vector<uint8_t> built_bytes = ReadBinaryFile(candidate_rom_path);
-  if (built_bytes.empty()) {
+  if (candidate_rom_bytes.empty()) {
     std::cerr << "Error reading built candidate ROM: " << candidate_rom_path << "\n";
     return 1;
   }
 
   auto base_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::Scan(
-      target_bytes, extractor->Config(), extractor->Symbols());
+      base_rom_bytes, extractor->Config(), extractor->Symbols());
   if (!base_funcs_or.ok()) {
     std::cerr << "Error scanning base ROM functions: " << base_funcs_or.status().message() << "\n";
     return 1;
@@ -508,7 +327,7 @@ int main(int argc, char* argv[]) {
   std::vector<rom_nom_nom::fuzzer::ScannedFunction> cand_funcs;
   if (!elf_bytes.empty()) {
     auto elf_cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::ScanFromElfAndRom(
-        built_bytes, elf_bytes, extractor->Config());
+        candidate_rom_bytes, elf_bytes, extractor->Config());
     if (elf_cand_funcs_or.ok()) {
       absl::flat_hash_map<std::string, const rom_nom_nom::fuzzer::ScannedFunction*> cand_map;
       for (const auto& fn : *elf_cand_funcs_or) {
@@ -526,7 +345,7 @@ int main(int argc, char* argv[]) {
 
   if (cand_funcs.empty()) {
     auto cand_funcs_or = rom_nom_nom::fuzzer::RomFunctionScanner::Scan(
-        built_bytes, extractor->Config(), extractor->Symbols());
+        candidate_rom_bytes, extractor->Config(), extractor->Symbols());
     if (!cand_funcs_or.ok()) {
       std::cerr << "Error scanning candidate ROM functions: " << cand_funcs_or.status().message()
                 << "\n";
@@ -554,32 +373,23 @@ int main(int argc, char* argv[]) {
   std::optional<uint32_t> mod_rom_start;
   std::optional<uint32_t> mod_rom_end;
   if (!module_flag.empty() && extractor->Config() != nullptr) {
-    for (const auto& seg : extractor->Config()->segments()) {
-      if (seg.name() == module_flag) {
-        mod_rom_start = seg.rom_start();
-        mod_rom_end = seg.rom_end();
+    for (const auto& seg :
+         rom_nom_nom::ResolveSegments(*extractor->Config(), base_rom_bytes.size())) {
+      if (seg.name == module_flag) {
+        mod_rom_start = seg.rom_start;
+        mod_rom_end = seg.rom_end;
         break;
       }
-      for (int s = 0; s < seg.subsegments_size(); ++s) {
-        const auto& sub = seg.subsegments(s);
-        if (sub.name() == module_flag) {
-          mod_rom_start = sub.rom_start();
-          if (s + 1 < seg.subsegments_size()) {
-            mod_rom_end = seg.subsegments(s + 1).rom_start();
-          } else {
-            mod_rom_end = seg.rom_end();
-          }
+      for (const auto& sub : seg.subsegments) {
+        if (sub.name == module_flag) {
+          mod_rom_start = sub.rom_start;
+          mod_rom_end = sub.rom_end;
           break;
         }
       }
       if (mod_rom_start.has_value()) break;
     }
   }
-
-  auto target_payloads = ExtractTargetDataPayloads(target_bytes, extractor->Config());
-  auto candidate_payloads =
-      rebase != nullptr ? rebased_candidate_payloads
-                        : ExtractCandidateDataPayloads(built_bytes, elf_bytes, extractor->Config());
 
   std::vector<rom_nom_nom::fuzzer::FunctionEquivalenceTarget> targets;
   targets.reserve(base_funcs.size());
@@ -598,15 +408,7 @@ int main(int argc, char* argv[]) {
     target.candidate_vram = cand_fn.vram;
     target.target_words = base_fn.raw_words;
     target.candidate_words = cand_fn.raw_words;
-    target.target_initial_memory = target_payloads;
-    target.candidate_initial_memory = candidate_payloads;
-    if (rebase != nullptr) {
-      auto placed = rebase->PlaceFunction(cand_fn.vram, cand_fn.raw_words);
-      target.candidate_vram = placed.vram;
-      target.candidate_words = std::move(placed.words);
-      target.candidate_initial_memory.insert(target.candidate_initial_memory.end(),
-                                             placed.overlays.begin(), placed.overlays.end());
-    }
+    env.PlaceCandidateFunction(&target);
 
     targets.push_back(std::move(target));
   }

@@ -12,8 +12,10 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/candidate_compiler.h"
 #include "core/game_config.h"
 #include "core/mips.h"
+#include "core/rom.h"
 #include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
@@ -27,14 +29,6 @@ struct TargetFunction {
   std::vector<uint32_t> raw_words;
   std::vector<Instruction> instructions;
   std::vector<std::string> formatted_instructions;
-};
-
-// Represents a candidate C function compiled and relocated against the game's symbol table.
-struct CompiledCandidateFunction {
-  uint32_t section_offset = 0;
-  uint32_t size = 0;
-  std::vector<uint32_t> patched_words;
-  std::vector<Instruction> instructions;
 };
 
 struct TargetExtractorOptions {
@@ -85,12 +79,14 @@ class TargetExtractor {
 
  private:
   void EnsureRomLoadedAndPrescanned() const;
+  absl::Span<const uint8_t> RomData() const;
 
   TargetExtractorOptions options_;
   const GameConfig* config_ = nullptr;
   const SymbolIndex* symbols_ = nullptr;
   std::unique_ptr<GameConfig> owned_config_;
   std::unique_ptr<SymbolIndex> owned_symbols_;
+  mutable std::optional<Rom> cached_rom_;
   mutable std::vector<uint8_t> cached_rom_bytes_;
   mutable absl::flat_hash_set<uint32_t> known_entrypoints_;
 };

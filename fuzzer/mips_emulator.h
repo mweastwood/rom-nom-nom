@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -204,6 +206,24 @@ class MipsEmulator {
   std::optional<size_t> VramToPhysical(uint32_t vram) const;
 
  private:
+  ExecutionStatus StepSpecial(uint32_t raw_word, uint32_t current_pc, bool executing_delay_slot);
+  ExecutionStatus StepRegimm(uint32_t raw_word, uint32_t current_pc, bool executing_delay_slot,
+                             uint32_t* next_pc);
+  ExecutionStatus StepCop0(uint32_t raw_word, bool executing_delay_slot);
+  ExecutionStatus StepCop1(uint32_t raw_word, uint32_t current_pc, bool executing_delay_slot,
+                           uint32_t* next_pc);
+  ExecutionStatus StepCop1Single(uint32_t raw_word, FpRegister fs, FpRegister ft, FpRegister fd);
+  ExecutionStatus StepCop1Double(uint32_t raw_word, FpRegister fs, FpRegister ft, FpRegister fd);
+  ExecutionStatus StepLoadStore(uint32_t raw_word);
+
+  void SetupBranch(bool taken, uint32_t branch_target, uint32_t current_pc);
+  void SetupBranchLikely(bool taken, uint32_t branch_target, uint32_t current_pc,
+                         uint32_t* next_pc);
+  bool IsExternalCallTarget(uint32_t target_vram) const;
+  std::optional<ExecutionStatus> HandleCallTarget(uint32_t target_vram, int link_reg);
+  ExecutionStatus RecordInvalidOpcode(uint32_t raw_word, bool executing_delay_slot,
+                                      std::string_view reason = "");
+
   uint32_t ReadMmio32(uint32_t phys_addr) const;
   void WriteMmio32(uint32_t phys_addr, uint32_t val);
 

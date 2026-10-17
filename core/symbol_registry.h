@@ -79,6 +79,29 @@ class SymbolIndex {
 
 using SymbolRegistryIndex = SymbolIndex;
 
+// Resolves a symbol name or address representation to a 32-bit VRAM address.
+// Checks registered symbols in `symbols` (if non-null), `0x...` hex literals,
+// `.LXXXXXXXX` local labels, `func_XXXXXXXX` / `D_XXXXXXXX` / `*_XXXXXXXX`
+// synthesized labels, and 8-digit hex strings.
+std::optional<uint32_t> ResolveSymbolOrSynthesizedAddress(std::string_view name_or_addr,
+                                                          const SymbolIndex* symbols = nullptr);
+
+// Options for unified SymbolIndex loading across overrides, explicit paths, and GameConfig.
+struct SymbolLoadOptions {
+  std::string symbols_text_override;
+  std::filesystem::path symbols_path;
+  const GameConfig* config = nullptr;
+  std::filesystem::path repo_root;
+  std::string game_name;
+};
+
+// Loads a SymbolIndex according to priority:
+// 1. symbols_text_override
+// 2. symbols_path
+// 3. config inline symbols + symbol_files
+// 4. fallback configs/<game>.symbols.textproto or symbols/<game>.textproto discovery
+absl::StatusOr<SymbolIndex> LoadSymbolIndex(const SymbolLoadOptions& options);
+
 }  // namespace rom_nom_nom
 
 #endif  // CORE_SYMBOL_REGISTRY_H_

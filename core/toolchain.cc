@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,39 @@
 #include "absl/strings/strip.h"
 
 namespace rom_nom_nom {
+
+std::filesystem::path FindRepoRoot(const std::filesystem::path& start_dir) {
+  auto find_marker_upward = [](const std::filesystem::path& initial) -> std::filesystem::path {
+    std::filesystem::path cur = initial;
+    while (!cur.empty()) {
+      std::error_code ec;
+      if (std::filesystem::exists(cur / "MODULE.bazel", ec) ||
+          std::filesystem::exists(cur / "WORKSPACE", ec)) {
+        return cur;
+      }
+      auto parent = cur.parent_path();
+      if (parent == cur) {
+        break;
+      }
+      cur = parent;
+    }
+    return {};
+  };
+
+  if (!start_dir.empty()) {
+    std::filesystem::path found = find_marker_upward(start_dir);
+    return found.empty() ? start_dir : found;
+  }
+
+  const char* ws_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
+  if (ws_dir != nullptr && *ws_dir != '\0') {
+    return ws_dir;
+  }
+
+  std::filesystem::path cwd = std::filesystem::current_path();
+  std::filesystem::path found = find_marker_upward(cwd);
+  return found.empty() ? cwd : found;
+}
 
 std::filesystem::path FindExecutableInPath(std::string_view name) {
   std::vector<std::string_view> search_dirs;
@@ -73,14 +107,7 @@ std::filesystem::path ResolveTool(const std::filesystem::path& explicit_path,
 }  // namespace
 
 absl::StatusOr<Toolchain> Toolchain::Discover(ToolchainOptions options) {
-  if (options.repo_root.empty()) {
-    const char* ws_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
-    if (ws_dir != nullptr && *ws_dir != '\0') {
-      options.repo_root = ws_dir;
-    } else {
-      options.repo_root = std::filesystem::current_path();
-    }
-  }
+  options.repo_root = FindRepoRoot(options.repo_root);
 
   Toolchain toolchain(options);
 

@@ -14,6 +14,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/game_config.h"
 #include "core/game_config.pb.h"
 #include "core/rom.h"
 
@@ -36,59 +37,38 @@ absl::StatusOr<std::vector<CarvedSlice>> Slicer::PlanSlices(const Rom& rom,
                                                  ? options_.output_dir
                                                  : (options_.output_dir / game_basename);
 
-  for (int i = 0; i < config.segments_size(); ++i) {
-    const Segment& seg = config.segments(i);
-
+  for (const auto& seg : ResolveSegments(config, rom.Size())) {
     // BSS occupies 0 bytes in ROM
-    if (seg.type() == SEGMENT_BSS) {
+    if (seg.type == SEGMENT_BSS) {
       continue;
     }
 
-    // Compute segment ROM end boundary (resolving implicit ends)
-    size_t seg_start = seg.rom_start();
-    size_t seg_end = seg.rom_end();
-    if (seg_end == 0) {
-      seg_end = rom.Size();
-      for (int k = i + 1; k < config.segments_size(); ++k) {
-        if (config.segments(k).type() != SEGMENT_BSS &&
-            config.segments(k).rom_start() > seg_start) {
-          seg_end = std::min<size_t>(config.segments(k).rom_start(), rom.Size());
-          break;
-        }
-      }
-    }
+    size_t seg_start = seg.rom_start;
+    size_t seg_end = seg.rom_end;
 
     if (seg_start > seg_end || seg_end > rom.Size()) {
       return absl::OutOfRangeError(
           absl::StrFormat("Segment '%s' range [0x%X, 0x%X) exceeds ROM bounds (size: 0x%X)",
-                          seg.name(), seg_start, seg_end, rom.Size()));
+                          seg.name, seg_start, seg_end, rom.Size()));
     }
 
-    if (seg.type() == SEGMENT_CODE) {
+    if (seg.type == SEGMENT_CODE) {
       // Code segments may contain embedded data/rodata/bin subsegments
-      for (int j = 0; j < seg.subsegments_size(); ++j) {
-        const Subsegment& sub = seg.subsegments(j);
-        if (sub.type() == SUBSEGMENT_DATA || sub.type() == SUBSEGMENT_RODATA ||
-            sub.type() == SUBSEGMENT_BIN) {
-          size_t sub_start = sub.rom_start();
-          size_t sub_end = seg_end;
-          for (int k = j + 1; k < seg.subsegments_size(); ++k) {
-            if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
-              sub_end = seg.subsegments(k).rom_start();
-              break;
-            }
-          }
+      for (const auto& sub : seg.subsegments) {
+        if (sub.type == SUBSEGMENT_DATA || sub.type == SUBSEGMENT_RODATA ||
+            sub.type == SUBSEGMENT_BIN) {
+          size_t sub_start = sub.rom_start;
+          size_t sub_end = sub.rom_end;
 
           if (sub_start > sub_end || sub_end > seg_end) {
             return absl::OutOfRangeError(absl::StrFormat(
                 "Subsegment '%s' range [0x%X, 0x%X) exceeds parent segment bounds [0x%X, 0x%X)",
-                sub.name(), sub_start, sub_end, seg_start, seg_end));
+                sub.name, sub_start, sub_end, seg_start, seg_end));
           }
 
           if (sub_start < sub_end) {
-            std::string sub_name = sub.name().empty()
-                                       ? absl::StrFormat("%s_0x%X", seg.name(), sub_start)
-                                       : std::string(sub.name());
+            std::string sub_name =
+                sub.name.empty() ? absl::StrFormat("%s_0x%X", seg.name, sub_start) : sub.name;
             CarvedSlice slice;
             slice.name = sub_name;
             slice.rom_start = sub_start;
@@ -104,10 +84,10 @@ absl::StatusOr<std::vector<CarvedSlice>> Slicer::PlanSlices(const Rom& rom,
     // Non-code segment (HEADER, BIN, DATA, RODATA)
     if (seg_start < seg_end) {
       CarvedSlice slice;
-      slice.name = std::string(seg.name());
+      slice.name = seg.name;
       slice.rom_start = seg_start;
       slice.rom_end = seg_end;
-      slice.output_path = game_out_dir / absl::StrCat(seg.name(), ".bin");
+      slice.output_path = game_out_dir / absl::StrCat(seg.name, ".bin");
       slices.push_back(std::move(slice));
     }
   }

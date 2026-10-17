@@ -75,41 +75,77 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
 
   uint16_t e_type = ReadBigEndian16(bytes.data() + 16);
   uint16_t e_machine = ReadBigEndian16(bytes.data() + 18);
+  uint32_t e_entry = ReadBigEndian32(bytes.data() + 24);
+  uint32_t e_phoff = ReadBigEndian32(bytes.data() + 28);
   uint32_t e_shoff = ReadBigEndian32(bytes.data() + 32);
+  uint16_t e_phentsize = ReadBigEndian16(bytes.data() + 42);
+  uint16_t e_phnum = ReadBigEndian16(bytes.data() + 44);
   uint16_t e_shentsize = ReadBigEndian16(bytes.data() + 46);
   uint16_t e_shnum = ReadBigEndian16(bytes.data() + 48);
   uint16_t e_shstrndx = ReadBigEndian16(bytes.data() + 50);
 
-  if (e_type != ET_REL) {
+  if (e_type != ET_REL && e_type != ET_EXEC) {
     return absl::InvalidArgumentError(
-        absl::StrFormat("ElfReader: Expected ET_REL (1), got %d", e_type));
+        absl::StrFormat("ElfReader: Expected ET_REL (1) or ET_EXEC (2), got %d", e_type));
   }
   if (e_machine != EM_MIPS) {
     return absl::InvalidArgumentError(
         absl::StrFormat("ElfReader: Expected EM_MIPS (8), got %d", e_machine));
   }
-  if (e_shentsize < sizeof(Elf32_Shdr)) {
+  if (e_shnum > 0 && e_shentsize < sizeof(Elf32_Shdr)) {
     return absl::InvalidArgumentError(
         absl::StrFormat("ElfReader: Invalid section header size %d", e_shentsize));
   }
 
   uint64_t sh_table_end =
       static_cast<uint64_t>(e_shoff) + static_cast<uint64_t>(e_shnum) * e_shentsize;
-  if (sh_table_end > bytes.size()) {
+  if (e_shnum > 0 && sh_table_end > bytes.size()) {
     return absl::InvalidArgumentError("ElfReader: Section header table out of bounds.");
   }
 
   ElfReader reader;
-  reader.sections_.reserve(e_shnum);
+  reader.type = e_type;
+  reader.entry = e_entry;
+
+  if (e_phnum > 0) {
+    if (e_phentsize < sizeof(Elf32_Phdr)) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("ElfReader: Invalid program header size %d", e_phentsize));
+    }
+    uint64_t ph_table_end =
+        static_cast<uint64_t>(e_phoff) + static_cast<uint64_t>(e_phnum) * e_phentsize;
+    if (ph_table_end > bytes.size()) {
+      return absl::InvalidArgumentError("ElfReader: Program header table out of bounds.");
+    }
+    reader.program_headers.reserve(e_phnum);
+    for (uint16_t i = 0; i < e_phnum; ++i) {
+      const uint8_t* ph_ptr = bytes.data() + e_phoff + i * e_phentsize;
+      ElfProgramHeader ph;
+      ph.type = ReadBigEndian32(ph_ptr + 0);
+      ph.offset = ReadBigEndian32(ph_ptr + 4);
+      ph.vaddr = ReadBigEndian32(ph_ptr + 8);
+      ph.paddr = ReadBigEndian32(ph_ptr + 12);
+      ph.filesz = ReadBigEndian32(ph_ptr + 16);
+      ph.memsz = ReadBigEndian32(ph_ptr + 20);
+      ph.flags = ReadBigEndian32(ph_ptr + 24);
+      ph.align = ReadBigEndian32(ph_ptr + 28);
+      reader.program_headers.push_back(ph);
+    }
+  }
+
+  reader.sections.reserve(e_shnum);
 
   struct RawShdr {
     uint32_t sh_name;
     uint32_t sh_type;
     uint32_t sh_flags;
+    uint32_t sh_addr;
     uint32_t sh_offset;
     uint32_t sh_size;
     uint32_t sh_link;
     uint32_t sh_info;
+    uint32_t sh_addralign;
+    uint32_t sh_entsize;
   };
   std::vector<RawShdr> raw_shdrs(e_shnum);
 
@@ -119,32 +155,42 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
     raw.sh_name = ReadBigEndian32(sh_ptr + 0);
     raw.sh_type = ReadBigEndian32(sh_ptr + 4);
     raw.sh_flags = ReadBigEndian32(sh_ptr + 8);
+    raw.sh_addr = ReadBigEndian32(sh_ptr + 12);
     raw.sh_offset = ReadBigEndian32(sh_ptr + 16);
     raw.sh_size = ReadBigEndian32(sh_ptr + 20);
     raw.sh_link = ReadBigEndian32(sh_ptr + 24);
     raw.sh_info = ReadBigEndian32(sh_ptr + 28);
+    raw.sh_addralign = ReadBigEndian32(sh_ptr + 32);
+    raw.sh_entsize = ReadBigEndian32(sh_ptr + 36);
     raw_shdrs[i] = raw;
 
     ElfSection sec;
     sec.type = raw.sh_type;
     sec.flags = raw.sh_flags;
+    sec.addr = raw.sh_addr;
+    sec.vaddr = raw.sh_addr;
     sec.offset = raw.sh_offset;
+    sec.file_offset = raw.sh_offset;
     sec.size = raw.sh_size;
+    sec.link = raw.sh_link;
+    sec.info = raw.sh_info;
+    sec.addralign = raw.sh_addralign;
+    sec.entsize = raw.sh_entsize;
     if (raw.sh_type != SHT_NOBITS && raw.sh_size > 0) {
       if (raw.sh_offset + raw.sh_size <= bytes.size()) {
         sec.data.assign(bytes.data() + raw.sh_offset, bytes.data() + raw.sh_offset + raw.sh_size);
       }
     }
-    reader.sections_.push_back(std::move(sec));
+    reader.sections.push_back(std::move(sec));
   }
 
   // Populate section names from .shstrtab
   if (e_shstrndx < e_shnum) {
-    absl::Span<const uint8_t> shstrtab = reader.sections_[e_shstrndx].data;
+    absl::Span<const uint8_t> shstrtab = reader.sections[e_shstrndx].data;
     for (uint16_t i = 0; i < e_shnum; ++i) {
-      reader.sections_[i].name = std::string(ExtractString(shstrtab, raw_shdrs[i].sh_name));
-      if (reader.sections_[i].name == ".text") {
-        reader.text_section_index_ = i;
+      reader.sections[i].name = std::string(ExtractString(shstrtab, raw_shdrs[i].sh_name));
+      if (reader.sections[i].name == ".text") {
+        reader.text_section_index = i;
       }
     }
   }
@@ -162,11 +208,11 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
     const RawShdr& sym_shdr = raw_shdrs[symtab_idx];
     uint32_t strtab_idx = sym_shdr.sh_link;
     absl::Span<const uint8_t> strtab =
-        (strtab_idx < e_shnum) ? reader.sections_[strtab_idx].data : absl::Span<const uint8_t>();
-    absl::Span<const uint8_t> sym_bytes = reader.sections_[symtab_idx].data;
+        (strtab_idx < e_shnum) ? reader.sections[strtab_idx].data : absl::Span<const uint8_t>();
+    absl::Span<const uint8_t> sym_bytes = reader.sections[symtab_idx].data;
 
     size_t num_symbols = sym_bytes.size() / sizeof(Elf32_Sym);
-    reader.symbols_.reserve(num_symbols);
+    reader.symbols.reserve(num_symbols);
 
     for (size_t i = 0; i < num_symbols; ++i) {
       const uint8_t* sym_ptr = sym_bytes.data() + i * sizeof(Elf32_Sym);
@@ -187,20 +233,20 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
       if (st_name != 0) {
         sym.name = std::string(ExtractString(strtab, st_name));
       } else if (sym.type == STT_SECTION && st_shndx < e_shnum) {
-        sym.name = reader.sections_[st_shndx].name;
+        sym.name = reader.sections[st_shndx].name;
       }
-      reader.symbols_.push_back(std::move(sym));
+      reader.symbols.push_back(std::move(sym));
     }
   }
 
   // Locate relocation section for .text
-  if (reader.text_section_index_ >= 0) {
+  if (reader.text_section_index >= 0) {
     for (uint16_t i = 0; i < e_shnum; ++i) {
       if (raw_shdrs[i].sh_type == SHT_REL &&
-          raw_shdrs[i].sh_info == static_cast<uint32_t>(reader.text_section_index_)) {
-        absl::Span<const uint8_t> rel_bytes = reader.sections_[i].data;
+          raw_shdrs[i].sh_info == static_cast<uint32_t>(reader.text_section_index)) {
+        absl::Span<const uint8_t> rel_bytes = reader.sections[i].data;
         size_t num_relocs = rel_bytes.size() / sizeof(Elf32_Rel);
-        reader.text_relocations_.reserve(num_relocs);
+        reader.text_relocations.reserve(num_relocs);
 
         for (size_t j = 0; j < num_relocs; ++j) {
           const uint8_t* rel_ptr = rel_bytes.data() + j * sizeof(Elf32_Rel);
@@ -211,12 +257,13 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
 
           ElfRelocation reloc;
           reloc.section_offset = r_offset;
+          reloc.offset = r_offset;
           reloc.type = r_type;
           reloc.sym_index = sym_idx;
-          if (sym_idx < reader.symbols_.size()) {
-            reloc.symbol_name = reader.symbols_[sym_idx].name;
+          if (sym_idx < reader.symbols.size()) {
+            reloc.symbol_name = reader.symbols[sym_idx].name;
           }
-          reader.text_relocations_.push_back(std::move(reloc));
+          reader.text_relocations.push_back(std::move(reloc));
         }
       }
     }
@@ -225,8 +272,17 @@ absl::StatusOr<ElfReader> ElfReader::LoadFromBytes(absl::Span<const uint8_t> byt
   return reader;
 }
 
+std::optional<uint32_t> ElfReader::VramToFileOffset(uint32_t vram) const {
+  for (const auto& ph : program_headers) {
+    if (ph.type == PT_LOAD && vram >= ph.vaddr && vram < ph.vaddr + ph.filesz) {
+      return ph.offset + (vram - ph.vaddr);
+    }
+  }
+  return std::nullopt;
+}
+
 const ElfSection* ElfReader::FindSection(std::string_view name) const {
-  for (const auto& sec : sections_) {
+  for (const auto& sec : sections) {
     if (sec.name == name) {
       return &sec;
     }
@@ -235,7 +291,7 @@ const ElfSection* ElfReader::FindSection(std::string_view name) const {
 }
 
 const ElfSymbol* ElfReader::FindSymbol(std::string_view name) const {
-  for (const auto& sym : symbols_) {
+  for (const auto& sym : symbols) {
     if (sym.name == name) {
       return &sym;
     }
@@ -245,11 +301,11 @@ const ElfSymbol* ElfReader::FindSymbol(std::string_view name) const {
 
 std::vector<ElfFunction> ElfReader::ExtractFunctions() const {
   std::vector<ElfFunction> functions;
-  if (text_section_index_ < 0 || static_cast<size_t>(text_section_index_) >= sections_.size()) {
+  if (text_section_index < 0 || static_cast<size_t>(text_section_index) >= sections.size()) {
     return functions;
   }
 
-  const ElfSection& text_sec = sections_[text_section_index_];
+  const ElfSection& text_sec = sections[text_section_index];
   const auto& text_data = text_sec.data;
 
   // Gather all function candidates in .text
@@ -260,10 +316,13 @@ std::vector<ElfFunction> ElfReader::ExtractFunctions() const {
   };
   std::vector<Candidate> candidates;
 
-  for (const auto& sym : symbols_) {
-    if (sym.is_defined && sym.shndx == text_section_index_ &&
+  for (const auto& sym : symbols) {
+    if (sym.is_defined && sym.shndx == text_section_index &&
         (sym.type == STT_FUNC || (sym.type == STT_NOTYPE && !sym.name.empty()))) {
-      candidates.push_back({&sym, sym.value, sym.size});
+      uint32_t sym_offset = (type == ET_EXEC && text_sec.addr != 0 && sym.value >= text_sec.addr)
+                                ? (sym.value - text_sec.addr)
+                                : sym.value;
+      candidates.push_back({&sym, sym_offset, sym.size});
     }
   }
 
@@ -312,7 +371,7 @@ std::vector<ElfFunction> ElfReader::ExtractFunctions() const {
     }
 
     // Collect relocations within this function range
-    for (const auto& rel : text_relocations_) {
+    for (const auto& rel : text_relocations) {
       if (rel.section_offset >= fn_offset && rel.section_offset < fn_offset + fn_size) {
         ElfRelocation fn_rel = rel;
         fn_rel.function_offset = rel.section_offset - fn_offset;

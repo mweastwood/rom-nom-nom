@@ -263,13 +263,7 @@ absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
 }
 
 std::string LinkerScriptGenerator::GenerateSymbolsScript(const SymbolIndex& symbols) const {
-  std::string text;
-  absl::StrAppend(&text, "/* Auto-generated global symbol definitions */\n");
-  for (const auto* entry : symbols.SortedEntries()) {
-    absl::StrAppend(&text,
-                    absl::StrFormat("PROVIDE(%s = 0x%08X);\n", entry->name(), entry->address()));
-  }
-  return text;
+  return symbols.GenerateSymbolsScript();
 }
 
 std::string LinkerScriptGenerator::GenerateHardwareRegsScript() const {

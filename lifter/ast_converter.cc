@@ -14,104 +14,21 @@
 #include "core/mips.h"
 #include "core/register_tracker.h"
 #include "core/symbol_registry.h"
+#include "lifter/abi_analyzer.h"
+#include "lifter/branch_condition_builder.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/expression_builder.h"
+#include "lifter/stack_frame_analyzer.h"
 
 namespace rom_nom_nom {
 
 absl::flat_hash_set<std::string> AstConverter::IdentifyDoubleVariables(
     const ControlFlowGraph& cfg) {
-  absl::flat_hash_set<std::string> double_vars;
-  for (const auto& block : cfg.Blocks()) {
-    for (const auto& inst : block.instructions) {
-      switch (inst.opcode) {
-        case Opcode::kAddD:
-        case Opcode::kSubD:
-        case Opcode::kMulD:
-        case Opcode::kDivD:
-        case Opcode::kSqrtD:
-        case Opcode::kAbsD:
-        case Opcode::kMovD:
-        case Opcode::kNegD:
-        case Opcode::kCEqD:
-        case Opcode::kCLtD:
-        case Opcode::kCLeD:
-          if (inst.fd) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fd, true));
-          if (inst.fs) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fs, true));
-          if (inst.ft) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.ft, true));
-          break;
-        case Opcode::kLdc1:
-        case Opcode::kSdc1:
-          if (inst.ft) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.ft, true));
-          if (inst.rs.has_value() && (*inst.rs == Register::kSp || *inst.rs == Register::kFp)) {
-            if (inst.immediate < 0) {
-              double_vars.insert(absl::StrFormat("var_sp_neg_%d", -inst.immediate));
-            } else {
-              double_vars.insert(absl::StrFormat("var_sp_%d", inst.immediate));
-            }
-          }
-          break;
-        case Opcode::kDmfc1:
-        case Opcode::kDmtc1:
-          if (inst.fs) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fs, true));
-          break;
-        case Opcode::kCvtDS:
-        case Opcode::kCvtDW:
-          if (inst.fd) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fd, true));
-          break;
-        case Opcode::kCvtSD:
-        case Opcode::kTruncWD:
-          if (inst.fs) double_vars.insert(ExpressionBuilder::FpRegisterVarName(*inst.fs, true));
-          break;
-        default:
-          break;
-      }
-    }
-  }
-  return double_vars;
+  return AbiAnalyzer::IdentifyDoubleVariables(cfg);
 }
 
 bool AstConverter::IsFpParameterDouble(const ControlFlowGraph& cfg, FpRegister reg) {
-  if (cfg.Blocks().empty()) return false;
-  std::vector<size_t> queue = {0};
-  absl::flat_hash_set<size_t> visited = {0};
-
-  while (!queue.empty()) {
-    size_t curr = queue.front();
-    queue.erase(queue.begin());
-    const auto& block = cfg.Blocks()[curr];
-    for (const auto& inst : block.instructions) {
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (FpRegister u : ud.fpr_uses) {
-        if (u == reg) {
-          Opcode op = inst.opcode;
-          return (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
-                  op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
-                  op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtSD ||
-                  op == Opcode::kTruncWD || op == Opcode::kRoundWD || op == Opcode::kCeilWD ||
-                  op == Opcode::kFloorWD || op == Opcode::kCEqD || op == Opcode::kCLtD ||
-                  op == Opcode::kCLeD || op == Opcode::kSdc1);
-        }
-      }
-      for (FpRegister d : ud.fpr_defs) {
-        if (d == reg) {
-          goto next_block;
-        }
-      }
-    }
-    for (uint32_t succ_id : block.successors) {
-      auto it = std::find_if(cfg.Blocks().begin(), cfg.Blocks().end(),
-                             [succ_id](const BasicBlock& b) { return b.id == succ_id; });
-      if (it != cfg.Blocks().end()) {
-        size_t succ_idx = std::distance(cfg.Blocks().begin(), it);
-        if (visited.insert(succ_idx).second) {
-          queue.push_back(succ_idx);
-        }
-      }
-    }
-  next_block:;
-  }
-  return false;
+  return AbiAnalyzer::IsFpParameterDouble(cfg, reg);
 }
 
 namespace {
@@ -386,328 +303,10 @@ std::unique_ptr<CStatement> AstConverter::ConvertStatement(const LiftedStatement
 
 std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlock& block,
                                                                   bool invert_condition) {
-  // Find the branch instruction (skipping trailing delay slot if present)
-  const Instruction* branch_inst = nullptr;
-  for (auto it = block.instructions.rbegin(); it != block.instructions.rend(); ++it) {
-    if (it->IsBranch()) {
-      branch_inst = &(*it);
-      break;
-    }
-  }
-
-  if (branch_inst == nullptr) {
-    return CExpression::Integer(invert_condition ? 0 : 1);
-  }
-
-  // Check if this block's branch folds a reaching comparison instruction
-  auto folded_comp = ExpressionBuilder::FindFoldedComparison(block.instructions);
-  if (folded_comp.has_value()) {
-    const auto& def_inst = block.instructions[folded_comp->instruction_index];
-
-    bool branch_taken_on_nonzero = false;
-    switch (branch_inst->opcode) {
-      case Opcode::kBne:
-      case Opcode::kBnel:
-      case Opcode::kBgtz:
-      case Opcode::kBgtzl:
-        branch_taken_on_nonzero = true;
-        break;
-      case Opcode::kBeq:
-      case Opcode::kBeql:
-      case Opcode::kBlez:
-      case Opcode::kBlezl:
-        branch_taken_on_nonzero = false;
-        break;
-      case Opcode::kBc1t:
-      case Opcode::kBc1tl:
-        branch_taken_on_nonzero = true;
-        break;
-      case Opcode::kBc1f:
-      case Opcode::kBc1fl:
-        branch_taken_on_nonzero = false;
-        break;
-      default:
-        break;
-    }
-
-    bool want_true = branch_taken_on_nonzero ^ invert_condition;
-
-    switch (def_inst.opcode) {
-      case Opcode::kSlt: {
-        std::string op = want_true ? "<" : ">=";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        Register def_rt = def_inst.rt.value_or(Register::kZero);
-        return CExpression::Binary(op, RegExpr(def_rs), RegExpr(def_rt));
-      }
-
-      case Opcode::kSlti: {
-        std::string op = want_true ? "<" : ">=";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        return CExpression::Binary(op, RegExpr(def_rs), CExpression::Integer(def_inst.immediate));
-      }
-
-      case Opcode::kSltu: {
-        std::string op = want_true ? "<" : ">=";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        Register def_rt = def_inst.rt.value_or(Register::kZero);
-        return CExpression::Binary(op, CExpression::Cast(CType::U32(), RegExpr(def_rs)),
-                                   CExpression::Cast(CType::U32(), RegExpr(def_rt)));
-      }
-
-      case Opcode::kSltiu: {
-        std::string op = want_true ? "<" : ">=";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        uint32_t uimm = static_cast<uint32_t>(def_inst.immediate);
-        return CExpression::Binary(
-            op, CExpression::Cast(CType::U32(), RegExpr(def_rs)),
-            CExpression::Integer(uimm, /*is_hex=*/uimm > 0xFFFF, /*is_unsigned=*/true));
-      }
-
-      case Opcode::kXor: {
-        std::string op = want_true ? "!=" : "==";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        Register def_rt = def_inst.rt.value_or(Register::kZero);
-        return CExpression::Binary(op, RegExpr(def_rs), RegExpr(def_rt));
-      }
-
-      case Opcode::kXori: {
-        std::string op = want_true ? "!=" : "==";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        uint32_t uimm = def_inst.UnsignedImmediate();
-        return CExpression::Binary(op, RegExpr(def_rs),
-                                   CExpression::Integer(uimm, /*is_hex=*/uimm > 0xFFFF));
-      }
-
-      case Opcode::kAndi: {
-        std::string op = want_true ? "!=" : "==";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        uint32_t uimm = def_inst.UnsignedImmediate();
-        auto bit_and = CExpression::Binary("&", RegExpr(def_rs),
-                                           CExpression::Integer(uimm, /*is_hex=*/uimm > 0xFFFF));
-        return CExpression::Binary(op, std::move(bit_and), CExpression::Integer(0));
-      }
-
-      case Opcode::kAnd: {
-        std::string op = want_true ? "!=" : "==";
-        Register def_rs = def_inst.rs.value_or(Register::kZero);
-        Register def_rt = def_inst.rt.value_or(Register::kZero);
-        auto bit_and = CExpression::Binary("&", RegExpr(def_rs), RegExpr(def_rt));
-        return CExpression::Binary(op, std::move(bit_and), CExpression::Integer(0));
-      }
-
-      case Opcode::kCEqS:
-      case Opcode::kCEqD:
-      case Opcode::kCSeqS:
-      case Opcode::kCSeqD:
-      case Opcode::kCUeqS:
-      case Opcode::kCUeqD:
-      case Opcode::kCNglS:
-      case Opcode::kCNglD:
-      case Opcode::kCUnS:
-      case Opcode::kCUnD: {
-        bool is_double = (def_inst.opcode == Opcode::kCEqD || def_inst.opcode == Opcode::kCSeqD ||
-                          def_inst.opcode == Opcode::kCUeqD || def_inst.opcode == Opcode::kCNglD ||
-                          def_inst.opcode == Opcode::kCUnD);
-        std::string op = want_true ? "==" : "!=";
-        return CExpression::Binary(op,
-                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
-                                       def_inst.fs.value_or(FpRegister::kF0), is_double)),
-                                   CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
-                                       def_inst.ft.value_or(FpRegister::kF0), is_double)));
-      }
-
-      case Opcode::kCLtS:
-      case Opcode::kCLtD:
-      case Opcode::kCOltS:
-      case Opcode::kCOltD:
-      case Opcode::kCUltS:
-      case Opcode::kCUltD:
-      case Opcode::kCNgeS:
-      case Opcode::kCNgeD: {
-        bool is_double = (def_inst.opcode == Opcode::kCLtD || def_inst.opcode == Opcode::kCOltD ||
-                          def_inst.opcode == Opcode::kCUltD || def_inst.opcode == Opcode::kCNgeD);
-        auto expr =
-            CExpression::Binary("<",
-                                CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
-                                    def_inst.fs.value_or(FpRegister::kF0), is_double)),
-                                CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
-                                    def_inst.ft.value_or(FpRegister::kF0), is_double)));
-        if (!want_true) {
-          return CExpression::Unary("!", std::move(expr));
-        }
-        return expr;
-      }
-
-      case Opcode::kCLeS:
-      case Opcode::kCLeD:
-      case Opcode::kCOleS:
-      case Opcode::kCOleD:
-      case Opcode::kCUleS:
-      case Opcode::kCUleD:
-      case Opcode::kCNgtS:
-      case Opcode::kCNgtD:
-      case Opcode::kCNgleS:
-      case Opcode::kCNgleD: {
-        bool is_double = (def_inst.opcode == Opcode::kCLeD || def_inst.opcode == Opcode::kCOleD ||
-                          def_inst.opcode == Opcode::kCUleD || def_inst.opcode == Opcode::kCNgtD ||
-                          def_inst.opcode == Opcode::kCNgleD);
-        auto expr =
-            CExpression::Binary("<=",
-                                CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
-                                    def_inst.fs.value_or(FpRegister::kF0), is_double)),
-                                CExpression::Identifier(ExpressionBuilder::FpRegisterVarName(
-                                    def_inst.ft.value_or(FpRegister::kF0), is_double)));
-        if (!want_true) {
-          return CExpression::Unary("!", std::move(expr));
-        }
-        return expr;
-      }
-
-      default:
-        break;
-    }
-  }
-
-  Register rs = branch_inst->rs.value_or(Register::kZero);
-  Register rt = branch_inst->rt.value_or(Register::kZero);
-
-  switch (branch_inst->opcode) {
-    case Opcode::kBeq:
-    case Opcode::kBeql: {
-      std::string op = invert_condition ? "!=" : "==";
-      return CExpression::Binary(op, RegExpr(rs), RegExpr(rt));
-    }
-
-    case Opcode::kBne:
-    case Opcode::kBnel: {
-      std::string op = invert_condition ? "==" : "!=";
-      return CExpression::Binary(op, RegExpr(rs), RegExpr(rt));
-    }
-
-    case Opcode::kBgtz:
-    case Opcode::kBgtzl: {
-      std::string op = invert_condition ? "<=" : ">";
-      return CExpression::Binary(op, RegExpr(rs), CExpression::Integer(0));
-    }
-
-    case Opcode::kBgez:
-    case Opcode::kBgezl: {
-      std::string op = invert_condition ? "<" : ">=";
-      return CExpression::Binary(op, RegExpr(rs), CExpression::Integer(0));
-    }
-
-    case Opcode::kBltz:
-    case Opcode::kBltzl: {
-      std::string op = invert_condition ? ">=" : "<";
-      return CExpression::Binary(op, RegExpr(rs), CExpression::Integer(0));
-    }
-
-    case Opcode::kBlez:
-    case Opcode::kBlezl: {
-      std::string op = invert_condition ? ">" : "<=";
-      return CExpression::Binary(op, RegExpr(rs), CExpression::Integer(0));
-    }
-
-    case Opcode::kBc1t:
-    case Opcode::kBc1tl:
-      if (invert_condition) {
-        return CExpression::Unary("!", CExpression::Identifier("fcond"));
-      }
-      return CExpression::Identifier("fcond");
-
-    case Opcode::kBc1f:
-    case Opcode::kBc1fl:
-      if (invert_condition) {
-        return CExpression::Identifier("fcond");
-      }
-      return CExpression::Unary("!", CExpression::Identifier("fcond"));
-
-    default:
-      break;
-  }
-
-  return CExpression::Integer(invert_condition ? 0 : 1);
+  return BranchConditionBuilder::ExtractBranchCondition(block, invert_condition);
 }
 
 namespace {
-
-struct PrologueAnalysis {
-  absl::flat_hash_map<Register, int32_t> saved_gprs;
-  absl::flat_hash_map<FpRegister, int32_t> saved_fprs;
-  uint32_t min_saved_reg_offset = 0xFFFFFFFF;
-};
-
-PrologueAnalysis AnalyzePrologue(const ControlFlowGraph& cfg, bool has_frame_pointer) {
-  PrologueAnalysis result;
-  if (cfg.Blocks().empty()) return result;
-
-  absl::flat_hash_set<Register> defined_gprs;
-  absl::flat_hash_set<FpRegister> defined_fprs;
-
-  auto check_saved_inst = [&](const Instruction& inst) {
-    if ((inst.opcode == Opcode::kSw || inst.opcode == Opcode::kSd) &&
-        (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
-        inst.rt.has_value() && inst.immediate > 0) {
-      Register r = *inst.rt;
-      if (((r >= Register::kS0 && r <= Register::kS7) || r == Register::kFp ||
-           r == Register::kRa) &&
-          !defined_gprs.contains(r)) {
-        result.saved_gprs.try_emplace(r, inst.immediate);
-        result.min_saved_reg_offset =
-            std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
-      }
-    }
-
-    if ((inst.opcode == Opcode::kSwc1 || inst.opcode == Opcode::kSdc1) &&
-        (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
-        inst.ft.has_value() && inst.immediate > 0) {
-      FpRegister fr = *inst.ft;
-      if (fr >= FpRegister::kF20 && fr <= FpRegister::kF31 && !defined_fprs.contains(fr)) {
-        result.saved_fprs.try_emplace(fr, inst.immediate);
-        result.min_saved_reg_offset =
-            std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
-      }
-    }
-  };
-
-  for (uint32_t block_id : cfg.ReversePostOrder()) {
-    const auto* block = cfg.GetBlock(block_id);
-    if (block == nullptr) continue;
-
-    bool stop_traversal = false;
-    for (size_t i = 0; i < block->instructions.size(); ++i) {
-      const auto& inst = block->instructions[i];
-      if (inst.IsCall()) {
-        if (i + 1 < block->instructions.size()) {
-          check_saved_inst(block->instructions[i + 1]);
-        }
-        stop_traversal = true;
-        break;
-      }
-
-      if (inst.opcode == Opcode::kJr && inst.rs == Register::kRa) {
-        stop_traversal = true;
-        break;
-      }
-
-      check_saved_inst(inst);
-
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (Register d : ud.gpr_defs) {
-        if (d != Register::kZero) defined_gprs.insert(d);
-      }
-      for (FpRegister fd : ud.fpr_defs) {
-        defined_fprs.insert(fd);
-      }
-    }
-
-    if (stop_traversal) {
-      break;
-    }
-  }
-
-  return result;
-}
 
 class ConverterContext {
  public:
@@ -729,92 +328,8 @@ class ConverterContext {
         functions_returning_v0_(functions_returning_v0),
         functions_returning_f0_(functions_returning_f0),
         function_name_(std::move(function_name)),
-        double_vars_(AstConverter::IdentifyDoubleVariables(cfg_)) {
-    absl::flat_hash_map<int32_t, int> stack_access_sizes;
-    for (const auto& block : cfg_.Blocks()) {
-      for (const auto& inst : block.instructions) {
-        if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-             inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-            inst.rt.has_value() && *inst.rt == Register::kSp && inst.rs == Register::kSp &&
-            inst.immediate < 0) {
-          frame_size_ = std::max(frame_size_, static_cast<uint32_t>(-inst.immediate));
-        }
-        if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
-             inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd) &&
-            inst.rd.has_value() && *inst.rd == Register::kFp &&
-            ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
-             (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
-          has_frame_pointer_ = true;
-        }
-        if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-             inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-            inst.rt.has_value() && *inst.rt == Register::kFp && inst.rs == Register::kSp &&
-            inst.immediate == 0) {
-          has_frame_pointer_ = true;
-        }
-        if (inst.IsCall()) {
-          has_calls_ = true;
-        }
-        if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-             inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-            (inst.rs == Register::kSp || (has_frame_pointer_ && inst.rs == Register::kFp)) &&
-            inst.rt.has_value() && *inst.rt != Register::kSp && *inst.rt != Register::kFp &&
-            inst.immediate >= 0) {
-          sp_address_taken_ = true;
-        }
-        if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
-             inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd ||
-             inst.opcode == Opcode::kOr) &&
-            (inst.rs == Register::kSp || inst.rt == Register::kSp ||
-             (has_frame_pointer_ && (inst.rs == Register::kFp || inst.rt == Register::kFp))) &&
-            inst.rd.has_value() && *inst.rd != Register::kSp &&
-            (!has_frame_pointer_ || *inst.rd != Register::kFp)) {
-          sp_address_taken_ = true;
-        }
-        if ((inst.opcode == Opcode::kLwl || inst.opcode == Opcode::kLwr ||
-             inst.opcode == Opcode::kSwl || inst.opcode == Opcode::kSwr ||
-             inst.opcode == Opcode::kLdl || inst.opcode == Opcode::kLdr ||
-             inst.opcode == Opcode::kSdl || inst.opcode == Opcode::kSdr) &&
-            (inst.rs == Register::kSp || (has_frame_pointer_ && inst.rs == Register::kFp))) {
-          sp_address_taken_ = true;
-        }
-        if (inst.rs == Register::kSp || (has_frame_pointer_ && inst.rs == Register::kFp)) {
-          int32_t offset = inst.immediate;
-          uint32_t base_offset = frame_size_ + 16;
-          if (offset >= static_cast<int32_t>(base_offset)) {
-            continue;
-          }
-          if (inst.IsStore()) {
-            stack_stores_.insert(inst.immediate);
-          }
-          int size = 0;
-          if (inst.opcode == Opcode::kLdc1 || inst.opcode == Opcode::kSdc1 ||
-              inst.opcode == Opcode::kLd || inst.opcode == Opcode::kSd) {
-            size = 8;
-          } else if (inst.opcode == Opcode::kLw || inst.opcode == Opcode::kSw ||
-                     inst.opcode == Opcode::kLwc1 || inst.opcode == Opcode::kSwc1) {
-            size = 4;
-          } else if (inst.opcode == Opcode::kLh || inst.opcode == Opcode::kLhu ||
-                     inst.opcode == Opcode::kSh) {
-            size = 2;
-          } else if (inst.opcode == Opcode::kLb || inst.opcode == Opcode::kLbu ||
-                     inst.opcode == Opcode::kSb) {
-            size = 1;
-          }
-          if (size > 0) {
-            auto [it, inserted] = stack_access_sizes.try_emplace(inst.immediate, size);
-            if (!inserted && it->second != size) {
-              sp_address_taken_ = true;
-            }
-          }
-        }
-      }
-    }
-    PrologueAnalysis prologue = AnalyzePrologue(cfg_, has_frame_pointer_);
-    saved_reg_offsets_ = std::move(prologue.saved_gprs);
-    saved_fpr_offsets_ = std::move(prologue.saved_fprs);
-    min_saved_reg_offset_ = prologue.min_saved_reg_offset;
-
+        double_vars_(AstConverter::IdentifyDoubleVariables(cfg_)),
+        frame_analysis_(StackFrameAnalyzer::Analyze(cfg_)) {
     CollectGotoTargets(root_region);
     for (const auto& jt : cfg_.JumpTables()) {
       for (uint32_t vram : jt.setup_instruction_vrams) {
@@ -836,21 +351,41 @@ class ConverterContext {
 
   const absl::flat_hash_set<uint32_t>& GotoTargets() const { return goto_targets_; }
   const absl::flat_hash_set<uint32_t>& EmittedLabels() const { return emitted_labels_; }
-  bool SpAddressTaken() const { return sp_address_taken_; }
-  uint32_t FrameSize() const { return frame_size_; }
-  bool HasFramePointer() const { return has_frame_pointer_; }
-  bool HasCalls() const { return has_calls_; }
-  uint32_t MinSavedRegOffset() const { return min_saved_reg_offset_; }
+  bool SpAddressTaken() const { return frame_analysis_.sp_address_taken; }
+  uint32_t FrameSize() const { return frame_analysis_.frame_size; }
+  bool HasFramePointer() const { return frame_analysis_.has_frame_pointer; }
+  bool HasCalls() const { return frame_analysis_.has_calls; }
+  uint32_t MinSavedRegOffset() const { return frame_analysis_.prologue.min_saved_reg_offset; }
+  uint32_t SpBufferSize() const { return frame_analysis_.sp_buffer_size; }
   const absl::flat_hash_set<std::string>& DoubleVars() const { return double_vars_; }
+
+  FunctionLiftContext BuildLiftContext(
+      const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits = nullptr,
+      const RegisterTracker* initial_tracker = nullptr) const {
+    FunctionLiftContext ctx;
+    ctx.symbol_index = symbol_index_;
+    ctx.game_config = game_config_;
+    ctx.function_parameter_counts = function_parameter_counts_;
+    ctx.function_fp_parameter_counts = function_fp_parameter_counts_;
+    ctx.frame_size = frame_analysis_.frame_size;
+    ctx.functions_returning_v0 = functions_returning_v0_;
+    ctx.functions_returning_f0 = functions_returning_f0_;
+    ctx.has_frame_pointer = frame_analysis_.has_frame_pointer;
+    ctx.has_calls = frame_analysis_.has_calls;
+    ctx.sp_address_taken = frame_analysis_.sp_address_taken;
+    ctx.saved_reg_offsets = &frame_analysis_.prologue.saved_reg_offsets;
+    ctx.saved_fpr_offsets = &frame_analysis_.prologue.saved_fpr_offsets;
+    ctx.initial_fpr_const_bits = initial_fpr_const_bits;
+    ctx.initial_tracker = initial_tracker;
+    ctx.call_return_info = &call_return_info_;
+    ctx.function_stack_stores = &frame_analysis_.stack_store_offsets;
+    return ctx;
+  }
 
   std::vector<LiftedStatement> LiftInstructionsHelper(
       absl::Span<const Instruction> instructions) const {
-    return ExpressionBuilder::LiftInstructions(
-        instructions, symbol_index_, game_config_, function_parameter_counts_,
-        function_fp_parameter_counts_, /*omit_last_instruction=*/false, frame_size_,
-        functions_returning_v0_, functions_returning_f0_, has_frame_pointer_, has_calls_,
-        sp_address_taken_, &saved_reg_offsets_, &saved_fpr_offsets_, nullptr, nullptr,
-        &call_return_info_, &stack_stores_);
+    return ExpressionBuilder::LiftInstructions(instructions, BuildLiftContext(),
+                                               /*omit_last_instruction=*/false);
   }
 
   void ConvertRegion(const StructuredRegion& region, CompoundStatement* target_block) {
@@ -1349,121 +884,13 @@ class ConverterContext {
   }
 
   bool ShouldDecoupleBranchConditionDelaySlot(uint32_t cond_block_id) const {
-    const auto* cond_block = cfg_.GetBlock(cond_block_id);
-    if (cond_block == nullptr || cond_block->instructions.size() < 2) {
-      return false;
-    }
-    const auto* term = cond_block->Terminator();
-    if (term == nullptr || !term->IsBranch() || term->IsBranchLikely()) {
-      return false;
-    }
-    const auto& delay_inst = cond_block->instructions.back();
-    if (delay_inst.IsNop()) {
-      return false;
-    }
-
-    RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-    if (delay_ud.gpr_defs.empty() && delay_ud.fpr_defs.empty()) {
-      return false;
-    }
-
-    absl::flat_hash_set<Register> cond_gprs;
-    absl::flat_hash_set<FpRegister> cond_fprs;
-    if (term->rs.has_value() && *term->rs != Register::kZero) {
-      cond_gprs.insert(*term->rs);
-    }
-    if (term->rt.has_value() && *term->rt != Register::kZero) {
-      cond_gprs.insert(*term->rt);
-    }
-    auto folded_comp = ExpressionBuilder::FindFoldedComparison(cond_block->instructions);
-    if (folded_comp.has_value() &&
-        folded_comp->instruction_index < cond_block->instructions.size()) {
-      const auto& def_inst = cond_block->instructions[folded_comp->instruction_index];
-      RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
-      for (Register r : def_ud.gpr_uses) {
-        if (r != Register::kZero) {
-          cond_gprs.insert(r);
-        }
-      }
-      for (FpRegister f : def_ud.fpr_uses) {
-        cond_fprs.insert(f);
-      }
-    }
-    for (Register r : delay_ud.gpr_defs) {
-      if (cond_gprs.contains(r)) {
-        return true;
-      }
-    }
-    for (FpRegister f : delay_ud.fpr_defs) {
-      if (cond_fprs.contains(f)) {
-        return true;
-      }
-    }
-    return false;
+    return BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(cfg_, cond_block_id);
   }
 
   bool ShouldDecoupleLoopConditionDelaySlot(uint32_t cond_block_id,
                                             uint32_t header_block_id) const {
-    const auto* cond_block = cfg_.GetBlock(cond_block_id);
-    if (cond_block == nullptr || cond_block->instructions.size() < 2) {
-      return false;
-    }
-    const auto* term = cond_block->Terminator();
-    if (term == nullptr || !term->IsBranch() || term->IsBranchLikely()) {
-      return false;
-    }
-    const auto& delay_inst = cond_block->instructions.back();
-    if (delay_inst.IsNop()) {
-      return false;
-    }
-
-    RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-    if (delay_ud.gpr_defs.empty()) {
-      return false;
-    }
-
-    // Check: Are all registers defined by delay_inst killed at header_block before being used?
-    const auto* header_block = cfg_.GetBlock(header_block_id);
-    if (header_block != nullptr) {
-      bool all_killed = true;
-      for (Register def_reg : delay_ud.gpr_defs) {
-        if (def_reg == Register::kZero) continue;
-        bool killed = false;
-        for (const auto& inst : header_block->instructions) {
-          RegisterUseDef inst_ud = GetInstructionUseDef(inst);
-          bool used = false;
-          for (Register u : inst_ud.gpr_uses) {
-            if (u == def_reg) {
-              used = true;
-              break;
-            }
-          }
-          if (used) {
-            break;
-          }
-          bool defined = false;
-          for (Register d : inst_ud.gpr_defs) {
-            if (d == def_reg) {
-              defined = true;
-              break;
-            }
-          }
-          if (defined) {
-            killed = true;
-            break;
-          }
-        }
-        if (!killed) {
-          all_killed = false;
-          break;
-        }
-      }
-      if (all_killed) {
-        return true;
-      }
-    }
-
-    return false;
+    return BranchConditionBuilder::ShouldDecoupleLoopConditionDelaySlot(cfg_, cond_block_id,
+                                                                        header_block_id);
   }
 
   void EmitBlockStatements(uint32_t block_id, CompoundStatement* target_block,
@@ -1505,11 +932,7 @@ class ConverterContext {
     }
 
     auto lifted_stmts = ExpressionBuilder::LiftBlock(
-        filtered_block, symbol_index_, game_config_, function_parameter_counts_,
-        function_fp_parameter_counts_, should_omit, frame_size_, functions_returning_v0_,
-        functions_returning_f0_, has_frame_pointer_, has_calls_, sp_address_taken_,
-        &saved_reg_offsets_, &saved_fpr_offsets_, initial_fpr, initial_tracker, &call_return_info_,
-        &stack_stores_);
+        filtered_block, BuildLiftContext(initial_fpr, initial_tracker), should_omit);
     for (auto& lifted_stmt : lifted_stmts) {
       if (lifted_stmt.kind == StatementKind::kReturn) {
         if (returns_v0_) {
@@ -1692,14 +1115,7 @@ class ConverterContext {
   const absl::flat_hash_set<std::string>* functions_returning_f0_ = nullptr;
   std::string function_name_;
   absl::flat_hash_set<std::string> double_vars_;
-  uint32_t frame_size_ = 0;
-  bool has_frame_pointer_ = false;
-  bool has_calls_ = false;
-  bool sp_address_taken_ = false;
-  uint32_t min_saved_reg_offset_ = 0xFFFFFFFF;
-  absl::flat_hash_map<Register, int32_t> saved_reg_offsets_;
-  absl::flat_hash_map<FpRegister, int32_t> saved_fpr_offsets_;
-  absl::flat_hash_set<int32_t> stack_stores_;
+  StackFrameAnalysis frame_analysis_;
   absl::flat_hash_set<uint32_t> goto_targets_;
   absl::flat_hash_set<uint32_t> emitted_labels_;
   absl::flat_hash_set<uint32_t> emitted_blocks_;
@@ -1913,70 +1329,13 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
   }
 
   if (!local_vars_to_declare.empty()) {
-    uint32_t detected_frame_size = ctx.FrameSize();
-    bool has_calls = ctx.HasCalls();
-    bool has_frame_pointer = ctx.HasFramePointer();
-    uint32_t min_saved_reg_offset = ctx.MinSavedRegOffset();
-
-    uint32_t sp_base_offset = (has_calls && detected_frame_size > 16) ? 16 : 0;
-    uint32_t max_sp_access = 0;
-    for (const auto& block : cfg.Blocks()) {
-      for (const auto& inst : block.instructions) {
-        if (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) {
-          if (inst.rt.has_value() &&
-              (*inst.rt == Register::kRa || (has_frame_pointer && *inst.rt == Register::kFp) ||
-               (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7))) {
-            continue;
-          }
-          int32_t offset = inst.immediate;
-          uint32_t base_offset = detected_frame_size + 16;
-          if (offset >= static_cast<int32_t>(base_offset)) {
-            // Incoming caller stack argument, not a local frame access.
-            continue;
-          }
-          if ((inst.IsLoad() || inst.IsStore()) && inst.immediate > 0) {
-            int32_t adj =
-                static_cast<int32_t>(inst.immediate) - static_cast<int32_t>(sp_base_offset);
-            if (adj > 0) {
-              uint32_t access_size =
-                  (inst.opcode == Opcode::kSdc1 || inst.opcode == Opcode::kLdc1 ||
-                   inst.opcode == Opcode::kSd || inst.opcode == Opcode::kLd)
-                      ? 8
-                      : 4;
-              max_sp_access = std::max(max_sp_access, static_cast<uint32_t>(adj + access_size));
-            }
-          } else if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-                      inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-                     inst.rt.has_value() && *inst.rt != Register::kSp &&
-                     (!has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate > 0) {
-            int32_t adj =
-                static_cast<int32_t>(inst.immediate) - static_cast<int32_t>(sp_base_offset);
-            if (adj > 0) {
-              max_sp_access = std::max(max_sp_access, static_cast<uint32_t>(adj + 4));
-            }
-          }
-        }
-      }
+    if (ctx.SpAddressTaken() && ctx.FrameSize() == 0) {
+      return absl::InternalError(
+          absl::StrFormat("Frame analysis failed for function '%s': sp address taken as buffer, "
+                          "but no stack allocation detected.",
+                          options.function_name));
     }
-
-    uint32_t sp_buffer_size = 0;
-    if (ctx.SpAddressTaken()) {
-      if (detected_frame_size == 0) {
-        return absl::InternalError(
-            absl::StrFormat("Frame analysis failed for function '%s': sp address taken as buffer, "
-                            "but no stack allocation detected.",
-                            options.function_name));
-      }
-      if (min_saved_reg_offset == 0xFFFFFFFF) {
-        min_saved_reg_offset = detected_frame_size;
-      }
-      sp_buffer_size = (min_saved_reg_offset > sp_base_offset)
-                           ? (min_saved_reg_offset - sp_base_offset)
-                           : detected_frame_size;
-      if (max_sp_access > sp_buffer_size) {
-        sp_buffer_size = (max_sp_access + 15) & ~15;
-      }
-    }
+    uint32_t sp_buffer_size = ctx.SpBufferSize();
 
     const absl::flat_hash_set<std::string>& double_vars = ctx.DoubleVars();
 

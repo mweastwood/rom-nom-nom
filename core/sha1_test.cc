@@ -1,5 +1,7 @@
 #include "core/sha1.h"
 
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -60,6 +62,21 @@ TEST(Sha1Test, RawDigest) {
   EXPECT_EQ(digest[0], 0xa9);
   EXPECT_EQ(digest[1], 0x99);
   EXPECT_EQ(digest[19], 0x9d);
+}
+
+TEST(Sha1Test, ComputeFileSha1) {
+  const std::filesystem::path temp_file =
+      std::filesystem::temp_directory_path() / "test_compute_file_sha1.bin";
+  {
+    std::ofstream ofs(temp_file, std::ios::binary);
+    ofs << "abc";
+  }
+  auto hex_or = ComputeFileSha1(temp_file);
+  ASSERT_TRUE(hex_or.ok()) << hex_or.status();
+  EXPECT_EQ(*hex_or, "a9993e364706816aba3e25717850c26c9cd0d89d");
+  std::filesystem::remove(temp_file);
+
+  EXPECT_FALSE(ComputeFileSha1("non_existent_sha1_file.bin").ok());
 }
 
 }  // namespace

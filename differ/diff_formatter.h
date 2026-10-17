@@ -2,14 +2,93 @@
 #define DIFFER_DIFF_FORMATTER_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/symbol_registry.h"
 #include "differ/normalizer.h"
 #include "differ/sequence_aligner.h"
 
 namespace rom_nom_nom {
+
+// Structural integrity and cartridge header validation results.
+struct StructuralValidationResult {
+  bool is_valid = false;
+  std::string target_sha1;
+  std::string built_sha1;
+  uint64_t target_size = 0;
+  uint64_t built_size = 0;
+  bool size_matches = false;
+  bool code_shift_matches = false;
+  bool header_magic_matches = false;
+  bool entrypoint_matches = false;
+  std::string failure_reason;
+};
+
+// Word-level LCS comparison results for an executable code segment.
+struct CodeSegmentDiffResult {
+  std::string segment_name;
+  uint64_t retail_rom_start = 0;
+  uint64_t retail_rom_end = 0;
+  uint64_t built_rom_start = 0;
+  uint64_t built_rom_end = 0;
+
+  size_t retail_words_count = 0;
+  size_t built_words_count = 0;
+  size_t matched_words_count = 0;
+  size_t target_only_words_count = 0;
+  size_t built_only_words_count = 0;
+
+  double MatchPercentageRetail() const {
+    if (retail_words_count == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(matched_words_count) / static_cast<double>(retail_words_count)) *
+           100.0;
+  }
+
+  double MatchPercentageBuilt() const {
+    if (built_words_count == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(matched_words_count) / static_cast<double>(built_words_count)) *
+           100.0;
+  }
+};
+
+// Block-level comparison results for an asset/data segment.
+struct AssetSegmentDiffResult {
+  std::string segment_name;
+  uint64_t retail_rom_start = 0;
+  uint64_t retail_rom_end = 0;
+  uint64_t built_rom_start = 0;
+  int64_t shift_offset = 0;
+  size_t total_bytes = 0;
+  size_t matching_bytes = 0;
+
+  double MatchPercentage() const {
+    if (total_bytes == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(matching_bytes) / static_cast<double>(total_bytes)) * 100.0;
+  }
+};
+
+// Complete result of ROM difference analysis.
+struct RomDiffResult {
+  StructuralValidationResult structural;
+  size_t header_matching_bytes = 0;
+  size_t header_total_bytes = 0;
+  std::vector<CodeSegmentDiffResult> code_segments;
+  std::vector<AssetSegmentDiffResult> asset_segments;
+  size_t total_logical_matching_bytes = 0;
+  size_t total_rom_bytes = 0;
+  double overall_match_percentage = 0.0;
+  std::string formatted_report;
+  bool success = false;
+};
 
 // Visual rendering and layout options for side-by-side assembly diffs.
 struct DiffFormatterOptions {
@@ -39,6 +118,10 @@ class DiffFormatter {
   // Formats the complete diff report: header, all aligned rows, and summary.
   std::string FormatDiff(std::string_view func_name, const AlignmentResult& result,
                          std::string_view source_path = "") const;
+
+  // Formats a full-ROM structural validation and segment-aware diff report.
+  std::string FormatRomDiff(const RomDiffResult& result) const;
+  static std::string FormatRomDiff(const RomDiffResult& result, bool use_color);
 
   // Formats a single instruction side into a column string (unpadded).
   std::string FormatInstructionSide(const NormalizedInstruction& norm) const;

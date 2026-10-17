@@ -207,5 +207,58 @@ TEST(SymbolRegistryTest, FromGameConfigLoadsExternalSymbolFilesAndSortsEntries) 
   std::filesystem::remove(ext_sym_path);
 }
 
+TEST(SymbolRegistryTest, ResolveSymbolOrSynthesizedAddressResolvesAllForms) {
+  auto index_or = SymbolIndex::ParseFromTextproto(kValidSymbolsText);
+  ASSERT_TRUE(index_or.ok());
+  const SymbolIndex& index = *index_or;
+
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("AudioUpdate", &index), 0x8003CF38u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("0x80025C00", &index), 0x80025C00u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("0X80025C00", nullptr), 0x80025C00u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("func_80041234", nullptr), 0x80041234u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("D_801FB600", nullptr), 0x801FB600u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress(".L80025C20", nullptr), 0x80025C20u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("jtbl_8009ABC0", nullptr), 0x8009ABC0u);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("80025C00", nullptr), 0x80025C00u);
+
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("UnknownSymbol", &index), std::nullopt);
+  EXPECT_EQ(ResolveSymbolOrSynthesizedAddress("", &index), std::nullopt);
+}
+
+TEST(SymbolRegistryTest, LoadSymbolIndexPriorityAndFallbackDiscovery) {
+  const std::filesystem::path temp_root =
+      std::filesystem::temp_directory_path() / "test_symbol_load_root";
+  std::filesystem::remove_all(temp_root);
+  std::filesystem::create_directories(temp_root / "configs");
+
+  const std::filesystem::path fallback_path = temp_root / "configs" / "my-game.symbols.textproto";
+  {
+    std::ofstream out(fallback_path);
+    out << R"pb(
+      entries { name: "FallbackSym" address: 0x80090000 type: SYMBOL_FUNC }
+    )pb";
+  }
+
+  // 1. Text override takes highest priority
+  auto override_or = LoadSymbolIndex({
+      .symbols_text_override = std::string(kValidSymbolsText),
+      .repo_root = temp_root,
+      .game_name = "my-game",
+  });
+  ASSERT_TRUE(override_or.ok()) << override_or.status();
+  EXPECT_TRUE(override_or->HasName("Entrypoint"));
+  EXPECT_FALSE(override_or->HasName("FallbackSym"));
+
+  // 2. Fallback discovery in configs/<game>.symbols.textproto
+  auto fallback_or = LoadSymbolIndex({
+      .repo_root = temp_root,
+      .game_name = "my-game",
+  });
+  ASSERT_TRUE(fallback_or.ok()) << fallback_or.status();
+  EXPECT_TRUE(fallback_or->HasName("FallbackSym"));
+
+  std::filesystem::remove_all(temp_root);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

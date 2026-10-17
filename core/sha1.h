@@ -4,9 +4,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 
 namespace rom_nom_nom {
@@ -43,6 +45,9 @@ class Sha1 {
 // Computes 40-character lowercase hex string for the given byte span.
 std::string ComputeSha1Hex(absl::Span<const uint8_t> data);
 std::string ComputeSha1Hex(std::string_view data);
+
+// Computes 40-character lowercase hex string for a file on disk.
+absl::StatusOr<std::string> ComputeFileSha1(const std::filesystem::path& path);
 
 // Computes 20-byte raw digest for the given byte span.
 Sha1Digest ComputeSha1Digest(absl::Span<const uint8_t> data);

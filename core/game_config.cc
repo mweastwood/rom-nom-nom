@@ -1,12 +1,16 @@
 #include "core/game_config.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -129,69 +133,177 @@ absl::StatusOr<GameConfig> LoadGameConfig(const std::filesystem::path& path) {
   return ParseGameConfig(buffer.str());
 }
 
-SectionVramClassification ClassifyVramAddress(const GameConfig& config, uint32_t vram_address) {
-  for (const auto& segment : config.segments()) {
-    if (segment.vram() == 0) {
-      continue;
+std::vector<ResolvedSegment> ResolveSegments(const GameConfig& config,
+                                             std::optional<size_t> total_rom_size) {
+  std::vector<ResolvedSegment> resolved;
+  resolved.reserve(config.segments_size());
+
+  for (int i = 0; i < config.segments_size(); ++i) {
+    const Segment& seg = config.segments(i);
+    ResolvedSegment rseg;
+    rseg.proto = &seg;
+    rseg.name = seg.name();
+    rseg.type = seg.type();
+    rseg.rom_start = seg.rom_start();
+    rseg.rom_end = seg.rom_end();
+
+    if (seg.type() != SEGMENT_BSS && rseg.rom_end == 0) {
+      uint32_t inferred_end =
+          total_rom_size.has_value() ? static_cast<uint32_t>(*total_rom_size) : 0;
+      for (int k = i + 1; k < config.segments_size(); ++k) {
+        if (config.segments(k).type() != SEGMENT_BSS &&
+            config.segments(k).rom_start() > rseg.rom_start) {
+          inferred_end = config.segments(k).rom_start();
+          if (total_rom_size.has_value()) {
+            inferred_end = std::min(inferred_end, static_cast<uint32_t>(*total_rom_size));
+          }
+          break;
+        }
+      }
+      rseg.rom_end = inferred_end;
     }
 
-    uint32_t segment_vram_start = segment.vram();
-    uint32_t segment_rom_size =
-        (segment.rom_end() > segment.rom_start()) ? (segment.rom_end() - segment.rom_start()) : 0;
-    uint32_t segment_vram_end = segment_vram_start + segment_rom_size + segment.bss_size();
-    for (const auto& subsegment : segment.subsegments()) {
-      if (subsegment.vram() != 0 && subsegment.bss_size() > 0) {
-        segment_vram_end = std::max(segment_vram_end, subsegment.vram() + subsegment.bss_size());
-      } else if (subsegment.bss_size() > 0) {
-        segment_vram_end = std::max(segment_vram_end,
-                                    segment_vram_start + segment_rom_size + subsegment.bss_size());
+    rseg.vram_start = seg.vram();
+    rseg.bss_size = seg.bss_size();
+    rseg.vram_end = (rseg.vram_start != 0) ? (rseg.vram_start + rseg.RomSize() + rseg.bss_size) : 0;
+
+    rseg.subsegments.reserve(seg.subsegments_size());
+    for (int j = 0; j < seg.subsegments_size(); ++j) {
+      const Subsegment& sub = seg.subsegments(j);
+      ResolvedSubsegment rsub;
+      rsub.proto = &sub;
+      rsub.name = sub.name();
+      rsub.type = sub.type();
+      rsub.rom_start = sub.rom_start();
+
+      if (sub.type() == SUBSEGMENT_BSS) {
+        rsub.rom_end = sub.rom_start();
+        uint32_t bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
+        if (sub.bss_size() == 0) {
+          for (const auto& other_seg : config.segments()) {
+            if (other_seg.name() == sub.name() && other_seg.bss_size() > 0) {
+              bss_size = other_seg.bss_size();
+              break;
+            }
+          }
+        }
+        rsub.bss_size = bss_size;
+        if (sub.vram() != 0) {
+          rsub.vram_start = sub.vram();
+        } else if (rseg.vram_start != 0) {
+          rsub.vram_start = (sub.rom_start() > rseg.rom_start)
+                                ? (rseg.vram_start + (sub.rom_start() - rseg.rom_start))
+                                : (rseg.vram_start + rseg.RomSize());
+        }
+        rsub.vram_end = rsub.vram_start + rsub.bss_size;
+        if (rseg.bss_size == 0 && rsub.bss_size > 0) {
+          rseg.bss_size = rsub.bss_size;
+        }
+      } else {
+        uint32_t sub_end = rseg.rom_end;
+        for (int k = j + 1; k < seg.subsegments_size(); ++k) {
+          if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
+            sub_end = seg.subsegments(k).rom_start();
+            break;
+          }
+        }
+        rsub.rom_end = sub_end;
+        rsub.bss_size = sub.bss_size();
+        if (sub.vram() != 0) {
+          rsub.vram_start = sub.vram();
+        } else if (rseg.vram_start != 0) {
+          rsub.vram_start = rseg.vram_start + (rsub.rom_start - rseg.rom_start);
+        }
+        if (rsub.bss_size > 0) {
+          rsub.vram_end = rsub.vram_start + rsub.bss_size;
+        } else if (rsub.RomSize() > 0) {
+          rsub.vram_end = rsub.vram_start + rsub.RomSize();
+        } else if (j + 1 < seg.subsegments_size()) {
+          const auto& next_sub = seg.subsegments(j + 1);
+          rsub.vram_end = next_sub.vram() != 0
+                              ? next_sub.vram()
+                              : (rseg.vram_start != 0
+                                     ? rseg.vram_start + (next_sub.rom_start() - rseg.rom_start)
+                                     : 0);
+        } else {
+          rsub.vram_end = rseg.vram_end;
+        }
+      }
+
+      if (rseg.vram_start != 0) {
+        rseg.vram_end = std::max(rseg.vram_end, rsub.vram_end);
+      }
+      rseg.subsegments.push_back(std::move(rsub));
+    }
+
+    resolved.push_back(std::move(rseg));
+  }
+
+  return resolved;
+}
+
+std::optional<uint32_t> VramToRomOffset(const GameConfig& config, uint32_t vram,
+                                        std::optional<size_t> total_rom_size) {
+  std::vector<ResolvedSegment> segments = ResolveSegments(config, total_rom_size);
+  for (const auto& seg : segments) {
+    if (seg.type == SEGMENT_BSS || seg.vram_start == 0) {
+      continue;
+    }
+    for (const auto& sub : seg.subsegments) {
+      if (sub.type == SUBSEGMENT_BSS || sub.vram_start == 0 || sub.RomSize() == 0) {
+        continue;
+      }
+      if (vram >= sub.vram_start && vram < sub.vram_start + sub.RomSize()) {
+        return sub.rom_start + (vram - sub.vram_start);
       }
     }
+    if (seg.RomSize() > 0 && vram >= seg.vram_start && vram < seg.vram_start + seg.RomSize()) {
+      return seg.rom_start + (vram - seg.vram_start);
+    }
+  }
+  return std::nullopt;
+}
 
-    if (vram_address < segment_vram_start || vram_address >= segment_vram_end) {
+std::vector<std::string> ResolveCFlags(const GameConfig& config, std::string_view object_stem) {
+  auto it = config.c_flags().find(object_stem);
+  if (it == config.c_flags().end()) {
+    it = config.c_flags().find("default");
+  }
+  if (it == config.c_flags().end()) {
+    return {};
+  }
+  return std::vector<std::string>(it->second.flags().begin(), it->second.flags().end());
+}
+
+SectionVramClassification ClassifyVramAddress(const GameConfig& config, uint32_t vram_address) {
+  for (const auto& segment : ResolveSegments(config)) {
+    if (segment.vram_start == 0) {
+      continue;
+    }
+    if (vram_address < segment.vram_start || vram_address >= segment.vram_end) {
       continue;
     }
 
-    // Check if the address falls into a specific subsegment
-    if (segment.subsegments_size() > 0) {
-      for (int i = 0; i < segment.subsegments_size(); ++i) {
-        const auto& subsegment = segment.subsegments(i);
-        uint32_t subsegment_vram_start =
-            subsegment.vram() != 0
-                ? subsegment.vram()
-                : (segment_vram_start + (subsegment.rom_start() - segment.rom_start()));
-
-        uint32_t subsegment_vram_end = segment_vram_end;
-        if (subsegment.bss_size() > 0) {
-          subsegment_vram_end = subsegment_vram_start + subsegment.bss_size();
-        } else if (i + 1 < segment.subsegments_size()) {
-          const auto& next_subsegment = segment.subsegments(i + 1);
-          subsegment_vram_end =
-              next_subsegment.vram() != 0
-                  ? next_subsegment.vram()
-                  : (segment_vram_start + (next_subsegment.rom_start() - segment.rom_start()));
-        }
-
-        if (vram_address >= subsegment_vram_start && vram_address < subsegment_vram_end) {
-          switch (subsegment.type()) {
-            case SUBSEGMENT_DATA:
-            case SUBSEGMENT_RODATA:
-            case SUBSEGMENT_BSS:
-            case SUBSEGMENT_BIN:
-              return SectionVramClassification::kData;
-            case SUBSEGMENT_C:
-            case SUBSEGMENT_ASM:
-            case SUBSEGMENT_HASM:
-              return SectionVramClassification::kCode;
-            default:
-              break;
-          }
+    for (const auto& subsegment : segment.subsegments) {
+      if (vram_address >= subsegment.vram_start && vram_address < subsegment.vram_end) {
+        switch (subsegment.type) {
+          case SUBSEGMENT_DATA:
+          case SUBSEGMENT_RODATA:
+          case SUBSEGMENT_BSS:
+          case SUBSEGMENT_BIN:
+            return SectionVramClassification::kData;
+          case SUBSEGMENT_C:
+          case SUBSEGMENT_ASM:
+          case SUBSEGMENT_HASM:
+            return SectionVramClassification::kCode;
+          default:
+            break;
         }
       }
     }
 
     // Fall back to segment-level classification
-    switch (segment.type()) {
+    switch (segment.type) {
       case SEGMENT_CODE:
         return SectionVramClassification::kCode;
       case SEGMENT_DATA:

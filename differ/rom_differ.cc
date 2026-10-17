@@ -1,12 +1,11 @@
 #include "differ/rom_differ.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -15,49 +14,57 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/endian.h"
 #include "core/game_config.h"
 #include "core/game_config.pb.h"
+#include "core/rom.h"
 #include "core/sha1.h"
+#include "differ/diff_formatter.h"
 
 namespace rom_nom_nom {
 
 namespace {
 
-constexpr const char* kAnsiReset = "\033[0m";
-constexpr const char* kAnsiBold = "\033[1m";
-constexpr const char* kAnsiGreen = "\033[32m";
-constexpr const char* kAnsiRed = "\033[31m";
-constexpr const char* kAnsiYellow = "\033[33m";
-constexpr const char* kAnsiCyan = "\033[36m";
+struct LoadedRom {
+  std::optional<Rom> rom;
+  std::vector<uint8_t> fallback_bytes;
 
-absl::StatusOr<std::vector<uint8_t>> ReadBinaryFile(const std::filesystem::path& file_path) {
+  absl::Span<const uint8_t> Data() const {
+    return rom.has_value() ? rom->Data() : absl::MakeConstSpan(fallback_bytes);
+  }
+
+  std::string Sha1() const {
+    return rom.has_value() ? rom->Sha1() : ComputeSha1Hex(fallback_bytes);
+  }
+};
+
+absl::StatusOr<LoadedRom> LoadRomOrFallback(const std::filesystem::path& file_path) {
+  auto rom_or = Rom::OpenFile(file_path);
+  if (rom_or.ok()) {
+    LoadedRom loaded;
+    loaded.rom = std::move(*rom_or);
+    return loaded;
+  }
+  if (!absl::IsInvalidArgument(rom_or.status())) {
+    return rom_or.status();
+  }
   std::ifstream file_stream(file_path, std::ios::binary);
   if (!file_stream.is_open()) {
     return absl::NotFoundError(absl::StrFormat("Could not open file '%s'", file_path.string()));
   }
-  return std::vector<uint8_t>((std::istreambuf_iterator<char>(file_stream)),
-                              std::istreambuf_iterator<char>());
-}
-
-std::string ComputeBytesSha1(absl::Span<const uint8_t> bytes) {
-  Sha1 sha1_calculator;
-  sha1_calculator.Update(
-      std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
-  return sha1_calculator.FinalizeHex();
+  LoadedRom loaded;
+  loaded.fallback_bytes = std::vector<uint8_t>((std::istreambuf_iterator<char>(file_stream)),
+                                               std::istreambuf_iterator<char>());
+  return loaded;
 }
 
 std::vector<uint32_t> ExtractBigEndianWords(absl::Span<const uint8_t> bytes) {
   std::vector<uint32_t> words;
   words.reserve(bytes.size() / 4);
   for (size_t offset = 0; offset + 4 <= bytes.size(); offset += 4) {
-    uint32_t word = (static_cast<uint32_t>(bytes[offset]) << 24) |
-                    (static_cast<uint32_t>(bytes[offset + 1]) << 16) |
-                    (static_cast<uint32_t>(bytes[offset + 2]) << 8) |
-                    static_cast<uint32_t>(bytes[offset + 3]);
-    words.push_back(word);
+    words.push_back(ReadBigEndian32(bytes.data() + offset));
   }
   return words;
 }
@@ -133,17 +140,17 @@ size_t RomDiffer::ComputeWordLcs(absl::Span<const uint32_t> target_words,
 }
 
 absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
-  auto target_bytes_or = ReadBinaryFile(options_.base_rom_path);
-  if (!target_bytes_or.ok()) {
-    return target_bytes_or.status();
+  auto target_loaded_or = LoadRomOrFallback(options_.base_rom_path);
+  if (!target_loaded_or.ok()) {
+    return target_loaded_or.status();
   }
-  const std::vector<uint8_t>& target_bytes = *target_bytes_or;
+  absl::Span<const uint8_t> target_bytes = target_loaded_or->Data();
 
-  auto built_bytes_or = ReadBinaryFile(options_.candidate_rom_path);
-  if (!built_bytes_or.ok()) {
-    return built_bytes_or.status();
+  auto built_loaded_or = LoadRomOrFallback(options_.candidate_rom_path);
+  if (!built_loaded_or.ok()) {
+    return built_loaded_or.status();
   }
-  const std::vector<uint8_t>& built_bytes = *built_bytes_or;
+  absl::Span<const uint8_t> built_bytes = built_loaded_or->Data();
 
   RomDiffResult result;
   result.total_rom_bytes = target_bytes.size();
@@ -151,19 +158,17 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
   // 1. Structural Validation
   result.structural.target_size = target_bytes.size();
   result.structural.built_size = built_bytes.size();
-  result.structural.target_sha1 = ComputeBytesSha1(target_bytes);
-  result.structural.built_sha1 = ComputeBytesSha1(built_bytes);
+  result.structural.target_sha1 = target_loaded_or->Sha1();
+  result.structural.built_sha1 = built_loaded_or->Sha1();
   result.structural.size_matches = (result.structural.target_size == result.structural.built_size);
 
   if (target_bytes.size() >= 4 && built_bytes.size() >= 4) {
     result.structural.header_magic_matches =
-        (target_bytes[0] == built_bytes[0] && target_bytes[1] == built_bytes[1] &&
-         target_bytes[2] == built_bytes[2] && target_bytes[3] == built_bytes[3]);
+        (ReadBigEndian32(target_bytes.data()) == ReadBigEndian32(built_bytes.data()));
   }
   if (target_bytes.size() >= 12 && built_bytes.size() >= 12) {
     result.structural.entrypoint_matches =
-        (target_bytes[8] == built_bytes[8] && target_bytes[9] == built_bytes[9] &&
-         target_bytes[10] == built_bytes[10] && target_bytes[11] == built_bytes[11]);
+        (ReadBigEndian32(target_bytes.data() + 8) == ReadBigEndian32(built_bytes.data() + 8));
   }
 
   // 2. Header and IPL3 Verification (0x0 - 0x1050)
@@ -192,26 +197,27 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
   if (!options_.config_path.empty() && std::filesystem::exists(options_.config_path, error_code)) {
     auto config_or = LoadGameConfig(options_.config_path);
     if (config_or.ok()) {
+      auto resolved_segments = ResolveSegments(*config_or);
       bool found_code_segment = false;
-      for (const auto& segment : config_or->segments()) {
+      for (const auto& segment : resolved_segments) {
         bool has_code_subsegments = false;
-        for (const auto& subsegment : segment.subsegments()) {
-          if (subsegment.type() == SUBSEGMENT_C || subsegment.type() == SUBSEGMENT_ASM) {
+        for (const auto& subsegment : segment.subsegments) {
+          if (subsegment.type == SUBSEGMENT_C || subsegment.type == SUBSEGMENT_ASM) {
             has_code_subsegments = true;
             break;
           }
         }
-        if (!found_code_segment && (segment.type() == SEGMENT_CODE || has_code_subsegments ||
-                                    segment.name() == "main" || segment.name() == "code")) {
+        if (!found_code_segment && (segment.type == SEGMENT_CODE || has_code_subsegments ||
+                                    segment.name == "main" || segment.name == "code")) {
           found_code_segment = true;
-          code_segment_name = segment.name();
-          retail_code_start = segment.rom_start();
-          retail_code_end = segment.rom_end();
-        } else if (found_code_segment && segment.type() != SEGMENT_CODE &&
-                   segment.type() != SEGMENT_BSS) {
-          asset_segment_ranges.push_back(AssetSegmentRange{.name = std::string(segment.name()),
-                                                           .rom_start = segment.rom_start(),
-                                                           .rom_end = segment.rom_end()});
+          code_segment_name = segment.name;
+          retail_code_start = segment.rom_start;
+          retail_code_end = segment.rom_end > 0 ? segment.rom_end : target_bytes.size();
+        } else if (found_code_segment && segment.type != SEGMENT_CODE &&
+                   segment.type != SEGMENT_BSS) {
+          uint64_t seg_end = segment.rom_end > 0 ? segment.rom_end : target_bytes.size();
+          asset_segment_ranges.push_back(AssetSegmentRange{
+              .name = segment.name, .rom_start = segment.rom_start, .rom_end = seg_end});
         }
       }
     }
@@ -348,123 +354,8 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
   result.success = result.structural.is_valid;
 
   // 8. Generate Formatted Output Report
-  const bool color = options_.use_color;
-  std::string bold = color ? kAnsiBold : "";
-  std::string green = color ? kAnsiGreen : "";
-  std::string red = color ? kAnsiRed : "";
-  std::string yellow = color ? kAnsiYellow : "";
-  std::string cyan = color ? kAnsiCyan : "";
-  std::string reset = color ? kAnsiReset : "";
-
-  auto format_commas = [](uint64_t value) -> std::string {
-    std::string text = std::to_string(value);
-    int insert_position = static_cast<int>(text.length()) - 3;
-    while (insert_position > 0) {
-      text.insert(insert_position, ",");
-      insert_position -= 3;
-    }
-    return text;
-  };
-
-  auto format_signed_commas = [&](int64_t value) -> std::string {
-    if (value < 0) {
-      return absl::StrCat("-", format_commas(static_cast<uint64_t>(-value)));
-    }
-    if (value > 0) {
-      return absl::StrCat("+", format_commas(static_cast<uint64_t>(value)));
-    }
-    return "0";
-  };
-
-  std::string size_status;
-  if (result.structural.size_matches) {
-    size_status = "Exact match";
-  } else if (result.structural.code_shift_matches) {
-    size_status =
-        absl::StrFormat("Shift match: %s bytes", format_signed_commas(total_shift_offset));
-  } else {
-    size_status = "MISMATCH";
-  }
-
-  std::string report;
-  absl::StrAppend(
-      &report,
-      "================================================================================\n");
-  absl::StrAppend(&report, bold, "[LIFTED C ROM STRUCTURAL VALIDATION]", reset, "\n");
-  absl::StrAppendFormat(&report, "Target ROM SHA-1: %s\n", result.structural.target_sha1);
-  absl::StrAppendFormat(&report, "Built  ROM SHA-1: %s\n", result.structural.built_sha1);
-  absl::StrAppendFormat(&report, "Cartridge Size:   %s bytes (%s)\n",
-                        format_commas(result.structural.built_size), size_status);
-  absl::StrAppendFormat(
-      &report, "N64 Header & IPL3: %s / %s bytes (%.2f%% bit-exact)\n",
-      format_commas(result.header_matching_bytes), format_commas(result.header_total_bytes),
-      (result.header_total_bytes > 0)
-          ? (static_cast<double>(result.header_matching_bytes) / result.header_total_bytes * 100.0)
-          : 0.0);
-
-  if (result.structural.is_valid) {
-    if (result.structural.code_shift_matches) {
-      absl::StrAppend(&report, green,
-                      "[SUCCESS] ROM structural integrity verified (code segment shifted with "
-                      "bit-exact assets)!",
-                      reset, "\n");
-    } else {
-      absl::StrAppend(&report, green, "[SUCCESS] ROM structural integrity verified!", reset, "\n");
-    }
-  } else {
-    absl::StrAppendFormat(&report, "%s[FAIL] Structural validation failed: %s%s\n", red,
-                          result.structural.failure_reason, reset);
-  }
-
-  absl::StrAppend(
-      &report,
-      "--------------------------------------------------------------------------------\n");
-  absl::StrAppend(&report, bold, "[SEGMENT-AWARE INSERTION/DELETION RESILIENT DIFF]", reset, "\n");
-
-  absl::StrAppendFormat(&report, "1. Code Segment (.%s):\n", code_diff.segment_name);
-  absl::StrAppendFormat(&report, "   - Retail Words:     %s words (%s bytes)\n",
-                        format_commas(code_diff.retail_words_count),
-                        format_commas(code_diff.retail_words_count * 4));
-  int64_t code_size_delta = static_cast<int64_t>(code_diff.built_words_count * 4) -
-                            static_cast<int64_t>(code_diff.retail_words_count * 4);
-  absl::StrAppendFormat(&report, "   - Built Words:      %s words (%s bytes) [%s bytes]\n",
-                        format_commas(code_diff.built_words_count),
-                        format_commas(code_diff.built_words_count * 4),
-                        format_signed_commas(code_size_delta));
-  absl::StrAppendFormat(&report, "   - Myers Match (LCS): %s words (%s bytes)\n",
-                        format_commas(code_diff.matched_words_count),
-                        format_commas(code_diff.matched_words_count * 4));
-  absl::StrAppendFormat(&report, "   - Match vs Retail:   %.2f%%\n",
-                        code_diff.MatchPercentageRetail());
-  absl::StrAppendFormat(&report, "   - Match vs Built:    %.2f%%\n",
-                        code_diff.MatchPercentageBuilt());
-  absl::StrAppendFormat(&report, "   - Word Insertions:  %s words | Word Deletions: %s words\n",
-                        format_commas(code_diff.built_only_words_count),
-                        format_commas(code_diff.target_only_words_count));
-
-  for (size_t index = 0; index < result.asset_segments.size(); ++index) {
-    const auto& asset = result.asset_segments[index];
-    absl::StrAppendFormat(&report, "\n%d. Asset Segment (.%s):\n", index + 2, asset.segment_name);
-    absl::StrAppendFormat(&report, "   - Shift Offset:     %s bytes (0x%06X vs retail 0x%06X)\n",
-                          format_signed_commas(asset.shift_offset), asset.built_rom_start,
-                          asset.retail_rom_start);
-    absl::StrAppendFormat(&report, "   - Byte Match:       %s / %s bytes (%.2f%% bit-exact)\n",
-                          format_commas(asset.matching_bytes), format_commas(asset.total_bytes),
-                          asset.MatchPercentage());
-  }
-
-  absl::StrAppend(
-      &report,
-      "--------------------------------------------------------------------------------\n");
-  absl::StrAppendFormat(&report, "%sOverall Logical ROM Content Match: %s / %s bytes (%.2f%%)%s\n",
-                        bold, format_commas(result.total_logical_matching_bytes),
-                        format_commas(result.total_rom_bytes), result.overall_match_percentage,
-                        reset);
-  absl::StrAppend(
-      &report,
-      "================================================================================\n");
-
-  result.formatted_report = report;
+  DiffFormatter formatter(DiffFormatterOptions{.use_color = options_.use_color});
+  result.formatted_report = formatter.FormatRomDiff(result);
   return result;
 }
 

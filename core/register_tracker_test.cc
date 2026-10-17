@@ -314,5 +314,37 @@ TEST(RegisterTrackerTest, DetermineReturnsV0FallthroughRedefinesV0AfterNonV0Inst
   EXPECT_TRUE(DetermineReturnsV0(*cfg_or));
 }
 
+TEST(RegisterTrackerTest, FprConstantBitsAndMergeAndOwnedDefinitionInst) {
+  RegisterTracker tracker;
+
+  // Step with temporary Instruction objects to ensure Definition::inst owns the copy
+  tracker.Step(*DecodeInstruction(0x3C013F80));  // lui $at, 0x3F80 (1.0f high bits)
+  tracker.Step(*DecodeInstruction(0x44816000));  // mtc1 $at, $f12
+  tracker.Step(*DecodeInstruction(0x4480A000));  // mtc1 $zero, $f20
+
+  auto def_at = tracker.GetReachingDefinition(Register::kAt);
+  ASSERT_TRUE(def_at.has_value());
+  ASSERT_TRUE(def_at->inst.has_value());
+  EXPECT_EQ(def_at->inst->opcode, Opcode::kLui);
+
+  EXPECT_EQ(tracker.GetFprConstantBits(FpRegister::kF12), 0x3F800000u);
+  EXPECT_EQ(tracker.GetFprConstantBits(FpRegister::kF20), 0u);
+
+  // Merge with an identical tracker keeps values
+  RegisterTracker other = tracker;
+  EXPECT_FALSE(tracker.Merge(other));
+  EXPECT_EQ(tracker.GetFprConstantBits(FpRegister::kF12), 0x3F800000u);
+
+  // Call clears caller-saved FPRs ($f0..$f19) but preserves callee-saved ($f20)
+  other.Step(*DecodeInstruction(0x0C000400));  // jal 0x80001000
+  EXPECT_EQ(other.GetFprConstantBits(FpRegister::kF12), std::nullopt);
+  EXPECT_EQ(other.GetFprConstantBits(FpRegister::kF20), 0u);
+
+  // Merging `other` into `tracker` clears diverging $f12 but keeps $f20
+  EXPECT_TRUE(tracker.Merge(other));
+  EXPECT_EQ(tracker.GetFprConstantBits(FpRegister::kF12), std::nullopt);
+  EXPECT_EQ(tracker.GetFprConstantBits(FpRegister::kF20), 0u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

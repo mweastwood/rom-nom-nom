@@ -100,26 +100,14 @@ std::vector<MemoryPayload> ExtractTargetDataPayloads(absl::Span<const uint8_t> b
   std::vector<MemoryPayload> payloads;
   if (config == nullptr || base_rom.empty()) return payloads;
 
-  for (const auto& seg : config->segments()) {
-    if (seg.type() != SEGMENT_CODE) continue;
-    for (int s = 0; s < seg.subsegments_size(); ++s) {
-      const auto& sub = seg.subsegments(s);
-      if (sub.type() == SUBSEGMENT_DATA || sub.type() == SUBSEGMENT_RODATA) {
-        uint32_t start_rom = sub.rom_start();
-        uint32_t end_rom = 0;
-        if (s + 1 < seg.subsegments_size() && seg.subsegments(s + 1).rom_start() > start_rom) {
-          end_rom = seg.subsegments(s + 1).rom_start();
-        } else {
-          end_rom = seg.rom_end();
-        }
-        if (start_rom < end_rom && end_rom <= base_rom.size()) {
-          uint32_t sub_vram = sub.vram();
-          if (sub_vram == 0) {
-            sub_vram = seg.vram() + (start_rom - seg.rom_start());
-          }
+  for (const auto& seg : ResolveSegments(*config, base_rom.size())) {
+    if (seg.type != SEGMENT_CODE) continue;
+    for (const auto& sub : seg.subsegments) {
+      if (sub.type == SUBSEGMENT_DATA || sub.type == SUBSEGMENT_RODATA) {
+        if (sub.rom_start < sub.rom_end && sub.rom_end <= base_rom.size()) {
           MemoryPayload payload;
-          payload.address = sub_vram;
-          payload.data.assign(base_rom.begin() + start_rom, base_rom.begin() + end_rom);
+          payload.address = sub.vram_start;
+          payload.data.assign(base_rom.begin() + sub.rom_start, base_rom.begin() + sub.rom_end);
           payloads.push_back(std::move(payload));
         }
       }

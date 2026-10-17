@@ -23,20 +23,6 @@
 
 namespace rom_nom_nom {
 
-absl::StatusOr<std::string> ComputeFileSha1(const std::filesystem::path& path) {
-  std::ifstream ifs(path, std::ios::binary);
-  if (!ifs) {
-    return absl::NotFoundError(
-        absl::StrFormat("Could not open file '%s' for SHA-1 calculation.", path.string()));
-  }
-  Sha1 sha1;
-  std::array<char, 65536> buffer;
-  while (ifs.read(buffer.data(), buffer.size()) || ifs.gcount() > 0) {
-    sha1.Update(std::string_view(buffer.data(), ifs.gcount()));
-  }
-  return sha1.FinalizeHex();
-}
-
 RomBuilder::RomBuilder(Toolchain toolchain, RomBuilderOptions options)
     : toolchain_(std::move(toolchain)), options_(std::move(options)), compiler_(toolchain_) {}
 
@@ -75,11 +61,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   std::string expected_sha1 = std::string(config.sha1());
-  std::vector<std::string> default_c_flags;
-  auto default_it = config.c_flags().find("default");
-  if (default_it != config.c_flags().end()) {
-    default_c_flags.assign(default_it->second.flags().begin(), default_it->second.flags().end());
-  }
 
   // 2. Prepare isolated object directory
   std::string obj_prefix = options_.out_elf.stem().string();
@@ -93,16 +74,17 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
 
   // 3. Set up symbols.ld
   std::unique_ptr<SymbolIndex> symbol_index;
+  SymbolLoadOptions sym_load_opts{
+      .config = &config,
+      .repo_root = toolchain_.RepoRoot(),
+      .game_name = options_.game_name,
+  };
   if (!options_.symbols_path.empty() && std::filesystem::exists(options_.symbols_path, ec)) {
-    auto index_or = SymbolIndex::LoadFromTextproto(options_.symbols_path);
-    if (index_or.ok()) {
-      symbol_index = std::make_unique<SymbolIndex>(std::move(*index_or));
-    }
-  } else if (config.symbols_size() > 0) {
-    auto index_or = SymbolIndex::FromGameConfig(config);
-    if (index_or.ok()) {
-      symbol_index = std::make_unique<SymbolIndex>(std::move(*index_or));
-    }
+    sym_load_opts.symbols_path = options_.symbols_path;
+  }
+  auto loaded_index_or = LoadSymbolIndex(sym_load_opts);
+  if (loaded_index_or.ok() && !loaded_index_or->Empty()) {
+    symbol_index = std::make_unique<SymbolIndex>(std::move(*loaded_index_or));
   }
 
   std::filesystem::path target_symbols_ld = obj_dir / "symbols.ld";
@@ -181,11 +163,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
 
     switch (resolved_or->type) {
       case SourceType::kC: {
-        std::vector<std::string> flags = default_c_flags;
-        auto flag_it = config.c_flags().find(resolved_or->object_stem);
-        if (flag_it != config.c_flags().end()) {
-          flags.assign(flag_it->second.flags().begin(), flag_it->second.flags().end());
-        }
+        std::vector<std::string> flags = ResolveCFlags(config, resolved_or->object_stem);
         auto status = compiler_.CompileC({
             .src_file = resolved_or->source_path,
             .out_obj = target_obj,

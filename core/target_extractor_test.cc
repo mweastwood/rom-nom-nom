@@ -325,6 +325,7 @@ TargetFunc:
 TEST_F(TargetExtractorTest, ReadRomWordReadsFromRomFile) {
   // Write a dummy ROM file with a known word at offset 0x2000 (vram 0x80021000)
   std::vector<uint8_t> rom(0x5000, 0);
+  WriteBigEndian32(rom.data(), 0x80371240u);
   WriteBigEndian32(rom.data() + 0x2000, 0x80025D20u);
 
   std::filesystem::path rom_path = test_dir_ / "roms" / "test-game.z64";
@@ -367,6 +368,7 @@ TEST_F(TargetExtractorTest, EnsureRomLoadedAndPrescannedDiscoversJalEntrypoints)
   //   80021014: jr $ra
   //   80021018: nop
   std::vector<uint8_t> rom(0x5000, 0);
+  WriteBigEndian32(rom.data(), 0x80371240u);
   uint32_t jal_word = 0x0C000000 | ((0x80021010u >> 2) & 0x03FFFFFF);
   WriteBigEndian32(rom.data() + 0x2000, jal_word);
   WriteBigEndian32(rom.data() + 0x2004, 0x00000000);  // nop

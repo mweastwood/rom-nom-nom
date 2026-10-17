@@ -173,5 +173,20 @@ TEST(ToolchainTest, BuildsLdArgsCorrectly) {
                                 "build/game.elf"));
 }
 
+TEST(ToolchainTest, FindRepoRootWalksUpwardForModuleBazel) {
+  std::filesystem::path temp_root = std::filesystem::temp_directory_path() / "test_find_repo_root";
+  std::filesystem::remove_all(temp_root);
+  std::filesystem::path nested = temp_root / "a" / "b" / "c";
+  std::filesystem::create_directories(nested);
+  {
+    std::filesystem::path marker = temp_root / "MODULE.bazel";
+    FILE* f = std::fopen(marker.c_str(), "w");
+    if (f != nullptr) std::fclose(f);
+  }
+
+  EXPECT_EQ(FindRepoRoot(nested), temp_root);
+  std::filesystem::remove_all(temp_root);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

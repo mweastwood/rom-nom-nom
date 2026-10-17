@@ -4,9 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 
@@ -176,6 +180,20 @@ std::string ComputeSha1Hex(std::string_view data) {
   Sha1 hasher;
   hasher.Update(data);
   return hasher.FinalizeHex();
+}
+
+absl::StatusOr<std::string> ComputeFileSha1(const std::filesystem::path& path) {
+  std::ifstream ifs(path, std::ios::binary);
+  if (!ifs) {
+    return absl::NotFoundError(
+        absl::StrFormat("Could not open file '%s' for SHA-1 calculation.", path.string()));
+  }
+  Sha1 sha1;
+  std::array<char, 65536> buffer;
+  while (ifs.read(buffer.data(), buffer.size()) || ifs.gcount() > 0) {
+    sha1.Update(std::string_view(buffer.data(), ifs.gcount()));
+  }
+  return sha1.FinalizeHex();
 }
 
 Sha1Digest ComputeSha1Digest(absl::Span<const uint8_t> data) {

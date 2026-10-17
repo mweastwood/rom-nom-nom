@@ -228,5 +228,80 @@ TEST(GameConfigTest, ClassifyVramAddressMatchesSegmentAndSubsegmentTypes) {
   EXPECT_EQ(ClassifyVramAddress(config, 0x80006000), SectionVramClassification::kUnknown);
 }
 
+TEST(GameConfigTest, ResolveSegmentsResolvesImplicitEndsVramAndBssSize) {
+  constexpr std::string_view kConfigText = R"pb(
+    game_name: "Test Game"
+    sha1: "dummy_sha1"
+    basename: "test_game"
+    segments {
+      name: "main"
+      type: SEGMENT_CODE
+      rom_start: 0x1000
+      vram: 0x80001000
+      subsegments { rom_start: 0x1000 type: SUBSEGMENT_C name: "code_a" }
+      subsegments { rom_start: 0x2000 type: SUBSEGMENT_DATA name: "data_a" }
+      subsegments { type: SUBSEGMENT_BSS name: "main_bss" }
+    }
+    segments { name: "assets" type: SEGMENT_BIN rom_start: 0x4000 }
+    segments { name: "main_bss" type: SEGMENT_BSS vram: 0x80004000 bss_size: 0x1800 }
+  )pb";
+  auto config_or = ParseGameConfig(kConfigText);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+
+  std::vector<ResolvedSegment> segments = ResolveSegments(*config_or, 0x8000);
+  ASSERT_EQ(segments.size(), 3u);
+
+  const ResolvedSegment& main_seg = segments[0];
+  EXPECT_EQ(main_seg.name, "main");
+  EXPECT_EQ(main_seg.rom_start, 0x1000u);
+  EXPECT_EQ(main_seg.rom_end, 0x4000u);
+  EXPECT_EQ(main_seg.RomSize(), 0x3000u);
+  EXPECT_EQ(main_seg.vram_start, 0x80001000u);
+  EXPECT_EQ(main_seg.bss_size, 0x1800u);
+  EXPECT_EQ(main_seg.vram_end, 0x80005800u);
+
+  ASSERT_EQ(main_seg.subsegments.size(), 3u);
+  EXPECT_EQ(main_seg.subsegments[0].name, "code_a");
+  EXPECT_EQ(main_seg.subsegments[0].rom_start, 0x1000u);
+  EXPECT_EQ(main_seg.subsegments[0].rom_end, 0x2000u);
+  EXPECT_EQ(main_seg.subsegments[0].vram_start, 0x80001000u);
+  EXPECT_EQ(main_seg.subsegments[0].vram_end, 0x80002000u);
+
+  EXPECT_EQ(main_seg.subsegments[1].name, "data_a");
+  EXPECT_EQ(main_seg.subsegments[1].rom_start, 0x2000u);
+  EXPECT_EQ(main_seg.subsegments[1].rom_end, 0x4000u);
+  EXPECT_EQ(main_seg.subsegments[1].vram_start, 0x80002000u);
+  EXPECT_EQ(main_seg.subsegments[1].vram_end, 0x80004000u);
+
+  EXPECT_EQ(main_seg.subsegments[2].name, "main_bss");
+  EXPECT_EQ(main_seg.subsegments[2].vram_start, 0x80004000u);
+  EXPECT_EQ(main_seg.subsegments[2].bss_size, 0x1800u);
+  EXPECT_EQ(main_seg.subsegments[2].vram_end, 0x80005800u);
+
+  const ResolvedSegment& assets_seg = segments[1];
+  EXPECT_EQ(assets_seg.rom_start, 0x4000u);
+  EXPECT_EQ(assets_seg.rom_end, 0x8000u);
+}
+
+TEST(GameConfigTest, VramToRomOffsetAndResolveCFlags) {
+  auto config_or = ParseGameConfig(kValidConfigText);
+  ASSERT_TRUE(config_or.ok()) << config_or.status();
+  const GameConfig& config = *config_or;
+
+  EXPECT_EQ(VramToRomOffset(config, 0x80025C50), 0x1050u);
+  EXPECT_EQ(VramToRomOffset(config, 0x80025D90), 0x1190u);
+  EXPECT_EQ(VramToRomOffset(config, 0x80000000), std::nullopt);
+  // BSS range should not map to ROM offset
+  EXPECT_EQ(VramToRomOffset(config, 0x80124C00), std::nullopt);
+
+  std::vector<std::string> boot_flags = ResolveCFlags(config, "boot");
+  ASSERT_EQ(boot_flags.size(), 1u);
+  EXPECT_EQ(boot_flags[0], "-O0");
+
+  std::vector<std::string> default_flags = ResolveCFlags(config, "main");
+  ASSERT_EQ(default_flags.size(), 4u);
+  EXPECT_EQ(default_flags[0], "-O2");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

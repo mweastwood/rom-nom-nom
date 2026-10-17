@@ -4,20 +4,44 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/game_config.pb.h"
 #include "google/protobuf/text_format.h"
 
 namespace rom_nom_nom {
+namespace {
+
+bool IsHexDigits(std::string_view s, size_t expected_len = 0) {
+  if (expected_len > 0 && s.size() != expected_len) {
+    return false;
+  }
+  if (s.empty() || s.size() > 8) {
+    return false;
+  }
+  for (char c : s) {
+    if (!absl::ascii_isxdigit(static_cast<unsigned char>(c))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
 
 absl::Status ValidateSymbolRegistry(const SymbolRegistry& registry) {
   absl::flat_hash_set<uint32_t> seen_addresses;
@@ -222,10 +246,138 @@ std::string SymbolIndex::LookupOrSynthesizeName(uint32_t address, SymbolType fal
 
 std::string SymbolIndex::GenerateSymbolsScript() const {
   std::string out;
+  absl::StrAppend(&out, "/* Auto-generated global symbol definitions */\n");
   for (const auto* entry : SortedEntries()) {
     absl::StrAppendFormat(&out, "PROVIDE(%s = 0x%08X);\n", entry->name(), entry->address());
   }
   return out;
+}
+
+std::optional<uint32_t> ResolveSymbolOrSynthesizedAddress(std::string_view name_or_addr,
+                                                          const SymbolIndex* symbols) {
+  if (name_or_addr.empty()) {
+    return std::nullopt;
+  }
+
+  if (symbols != nullptr) {
+    const SymbolRegistryEntry* entry = symbols->FindByName(name_or_addr);
+    if (entry != nullptr) {
+      return entry->address();
+    }
+  }
+
+  if (absl::StartsWith(name_or_addr, "0x") || absl::StartsWith(name_or_addr, "0X")) {
+    std::string_view hex = name_or_addr.substr(2);
+    uint32_t addr = 0;
+    if (IsHexDigits(hex) && absl::SimpleHexAtoi(hex, &addr)) {
+      return addr;
+    }
+  }
+
+  if (absl::StartsWith(name_or_addr, ".L") && name_or_addr.size() == 10) {
+    std::string_view hex = name_or_addr.substr(2);
+    uint32_t addr = 0;
+    if (IsHexDigits(hex, 8) && absl::SimpleHexAtoi(hex, &addr)) {
+      return addr;
+    }
+  }
+
+  size_t last_underscore = name_or_addr.rfind('_');
+  if (last_underscore != std::string_view::npos && last_underscore + 1 < name_or_addr.size() &&
+      name_or_addr.size() - (last_underscore + 1) == 8) {
+    std::string_view hex = name_or_addr.substr(last_underscore + 1);
+    uint32_t addr = 0;
+    if (IsHexDigits(hex, 8) && absl::SimpleHexAtoi(hex, &addr)) {
+      return addr;
+    }
+  }
+
+  if (IsHexDigits(name_or_addr, 8)) {
+    bool has_digit = false;
+    for (char c : name_or_addr) {
+      if (absl::ascii_isdigit(static_cast<unsigned char>(c))) {
+        has_digit = true;
+        break;
+      }
+    }
+    uint32_t addr = 0;
+    if (has_digit && absl::SimpleHexAtoi(name_or_addr, &addr)) {
+      return addr;
+    }
+  }
+
+  return std::nullopt;
+}
+
+absl::StatusOr<SymbolIndex> LoadSymbolIndex(const SymbolLoadOptions& options) {
+  if (!options.symbols_text_override.empty()) {
+    return SymbolIndex::ParseFromTextproto(options.symbols_text_override);
+  }
+
+  if (!options.symbols_path.empty()) {
+    return SymbolIndex::LoadFromTextproto(options.symbols_path);
+  }
+
+  if (options.config != nullptr &&
+      (options.config->symbols_size() > 0 || options.config->symbol_files_size() > 0)) {
+    SymbolRegistry registry;
+    registry.mutable_entries()->Reserve(options.config->symbols_size());
+    absl::flat_hash_set<uint32_t> seen_addresses;
+    absl::flat_hash_set<std::string> seen_names;
+    for (const auto& sym : options.config->symbols()) {
+      seen_addresses.insert(sym.address());
+      seen_names.insert(std::string(sym.name()));
+      *registry.add_entries() = sym;
+    }
+    for (const auto& sym_file : options.config->symbol_files()) {
+      std::filesystem::path p(sym_file);
+      std::error_code ec;
+      if (!std::filesystem::exists(p, ec) && p.is_relative() && !options.repo_root.empty()) {
+        p = options.repo_root / p;
+      }
+      if (std::filesystem::exists(p, ec)) {
+        auto file_reg_or = LoadSymbolRegistry(p);
+        if (file_reg_or.ok()) {
+          for (const auto& sym : file_reg_or->entries()) {
+            if (seen_addresses.insert(sym.address()).second &&
+                seen_names.insert(std::string(sym.name())).second) {
+              *registry.add_entries() = sym;
+            }
+          }
+        }
+      }
+    }
+    if (registry.entries_size() > 0) {
+      return SymbolIndex::FromProto(std::move(registry));
+    }
+  }
+
+  std::string game_name = options.game_name;
+  if (game_name.empty() && options.config != nullptr) {
+    game_name = options.config->basename().empty() ? std::string(options.config->game_name())
+                                                   : std::string(options.config->basename());
+  }
+
+  if (!game_name.empty()) {
+    const std::vector<std::filesystem::path> rel_candidates = {
+        std::filesystem::path("configs") / absl::StrCat(game_name, ".symbols.textproto"),
+        std::filesystem::path("config") / absl::StrCat(game_name, ".symbols.textproto"),
+        std::filesystem::path("symbols") / absl::StrCat(game_name, ".textproto"),
+        std::filesystem::path("configs") / absl::StrCat(game_name, "_symbols.textproto"),
+    };
+    for (const auto& rel : rel_candidates) {
+      std::filesystem::path cand = options.repo_root.empty() ? rel : (options.repo_root / rel);
+      std::error_code ec;
+      if (std::filesystem::exists(cand, ec)) {
+        auto idx_or = SymbolIndex::LoadFromTextproto(cand);
+        if (idx_or.ok()) {
+          return idx_or;
+        }
+      }
+    }
+  }
+
+  return SymbolIndex{};
 }
 
 }  // namespace rom_nom_nom

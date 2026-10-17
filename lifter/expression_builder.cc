@@ -18,6 +18,7 @@
 #include "core/mips.h"
 #include "core/register_tracker.h"
 #include "core/symbol_registry.h"
+#include "lifter/instruction_patterns.h"
 #include "lifter/symbol_folder.h"
 
 namespace rom_nom_nom {
@@ -179,49 +180,11 @@ std::string LiftedStatement::ToString() const {
 }
 
 std::string ExpressionBuilder::RegisterVarName(Register reg) {
-  switch (reg) {
-    case Register::kZero:
-      return "0";
-    case Register::kV0:
-      return "v0";
-    case Register::kV1:
-      return "v1";
-    case Register::kA0:
-      return "arg0";
-    case Register::kA1:
-      return "arg1";
-    case Register::kA2:
-      return "arg2";
-    case Register::kA3:
-      return "arg3";
-    case Register::kSp:
-      return "sp";
-    case Register::kFp:
-      return "fp";
-    case Register::kRa:
-      return "ra";
-    default: {
-      std::string_view name = RegisterName(reg);
-      if (!name.empty() && name[0] == '$') {
-        return std::string("temp_") + std::string(name.substr(1));
-      }
-      return std::string(name);
-    }
-  }
+  return AbiAnalyzer::RegisterVarName(reg);
 }
 
 std::string ExpressionBuilder::FpRegisterVarName(FpRegister reg, bool is_double) {
-  std::string_view name = FpRegisterName(reg);
-  std::string base;
-  if (!name.empty() && name[0] == '$') {
-    base = std::string(name.substr(1));
-  } else {
-    base = std::string(name);
-  }
-  if (is_double) {
-    return absl::StrCat(base, "_d");
-  }
-  return base;
+  return AbiAnalyzer::FpRegisterVarName(reg, is_double);
 }
 
 namespace {
@@ -235,120 +198,6 @@ std::string StackVarName(int32_t offset) {
     return absl::StrFormat("var_sp_neg_%d", -offset);
   }
   return absl::StrFormat("var_sp_%d", offset);
-}
-
-struct FloatingPointConversionPattern {
-  size_t end_index = 0;
-  bool is_int_to_float = false;
-  Register src_gpr = Register::kZero;
-  FpRegister dest_floating_point_reg = FpRegister::kF0;
-  bool is_double = false;
-  FpRegister src_floating_point_reg = FpRegister::kF0;
-  Register dest_gpr = Register::kZero;
-  bool is_rounding = false;
-  std::string round_func;
-};
-
-std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPattern(
-    absl::Span<const Instruction> instructions, size_t i) {
-  const auto& inst = instructions[i];
-
-  // 1. Integer to Float: mtc1 $rt, $fs [-> nop]* -> cvt.s.w/cvt.d.w $fd, $fs
-  if (inst.opcode == Opcode::kMtc1 && inst.fs.has_value() && inst.rt.has_value()) {
-    size_t j = i + 1;
-    while (j < instructions.size() && instructions[j].IsNop()) {
-      ++j;
-    }
-    if (j < instructions.size()) {
-      const auto& next_inst = instructions[j];
-      if ((next_inst.opcode == Opcode::kCvtSW || next_inst.opcode == Opcode::kCvtDW) &&
-          next_inst.fs.has_value() && *next_inst.fs == *inst.fs && next_inst.fd.has_value()) {
-        FloatingPointConversionPattern pattern;
-        pattern.end_index = j;
-        pattern.is_int_to_float = true;
-        pattern.src_gpr = *inst.rt;
-        pattern.dest_floating_point_reg = *next_inst.fd;
-        pattern.is_double = (next_inst.opcode == Opcode::kCvtDW);
-        return pattern;
-      }
-    }
-  }
-
-  // 2. Float to Integer: (trunc/ceil/floor/round).w.(s/d) $fd, $fs [-> nop]* -> mfc1 $rt, $fd
-  if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD ||
-       inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
-       inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
-       inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) &&
-      inst.fd.has_value() && inst.fs.has_value()) {
-    size_t j = i + 1;
-    while (j < instructions.size() && instructions[j].IsNop()) {
-      ++j;
-    }
-    if (j < instructions.size()) {
-      const auto& next_inst = instructions[j];
-      if (next_inst.opcode == Opcode::kMfc1 && next_inst.fs.has_value() &&
-          *next_inst.fs == *inst.fd && next_inst.rt.has_value() &&
-          *next_inst.rt != Register::kZero) {
-        FloatingPointConversionPattern pattern;
-        pattern.end_index = j;
-        pattern.is_int_to_float = false;
-        pattern.src_floating_point_reg = *inst.fs;
-        pattern.dest_gpr = *next_inst.rt;
-        pattern.is_double = (inst.opcode == Opcode::kTruncWD || inst.opcode == Opcode::kCeilWD ||
-                             inst.opcode == Opcode::kFloorWD || inst.opcode == Opcode::kRoundWD);
-        if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
-          pattern.round_func = pattern.is_double ? "ceil" : "ceilf";
-        } else if (inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD) {
-          pattern.round_func = pattern.is_double ? "floor" : "floorf";
-        } else if (inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) {
-          pattern.round_func = pattern.is_double ? "round" : "roundf";
-        }
-        return pattern;
-      }
-    }
-  }
-
-  // 3. Float rounding: (ceil/floor/round/trunc).w.(s/d) $fd, $fs [-> nop]* -> cvt.(s/d).w $dest,
-  // $fd
-  if ((inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
-       inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
-       inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD ||
-       inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD) &&
-      inst.fd.has_value() && inst.fs.has_value()) {
-    size_t j = i + 1;
-    while (j < instructions.size() && instructions[j].IsNop()) {
-      ++j;
-    }
-    if (j < instructions.size()) {
-      const auto& next_inst = instructions[j];
-      if ((next_inst.opcode == Opcode::kCvtSW || next_inst.opcode == Opcode::kCvtDW) &&
-          next_inst.fs.has_value() && *next_inst.fs == *inst.fd && next_inst.fd.has_value()) {
-        bool is_double = (inst.opcode == Opcode::kCeilWD || inst.opcode == Opcode::kFloorWD ||
-                          inst.opcode == Opcode::kRoundWD || inst.opcode == Opcode::kTruncWD ||
-                          next_inst.opcode == Opcode::kCvtDW);
-        std::string func_name;
-        if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
-          func_name = is_double ? "ceil" : "ceilf";
-        } else if (inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD) {
-          func_name = is_double ? "floor" : "floorf";
-        } else if (inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) {
-          func_name = is_double ? "round" : "roundf";
-        } else {
-          func_name = is_double ? "trunc" : "truncf";
-        }
-        FloatingPointConversionPattern pattern;
-        pattern.end_index = j;
-        pattern.is_rounding = true;
-        pattern.round_func = func_name;
-        pattern.dest_floating_point_reg = *next_inst.fd;
-        pattern.src_floating_point_reg = *inst.fs;
-        pattern.is_double = is_double;
-        return pattern;
-      }
-    }
-  }
-
-  return std::nullopt;
 }
 
 }  // namespace
@@ -824,6 +673,12 @@ void ExpressionBuilder::LiftCallInstruction(
   statements.push_back(std::move(statement));
 }
 
+std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(const BasicBlock& block,
+                                                          const FunctionLiftContext& ctx,
+                                                          bool omit_last_instruction) {
+  return LiftInstructions(block.instructions, ctx, omit_last_instruction);
+}
+
 std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
     const BasicBlock& block, const SymbolIndex* symbol_index, const GameConfig* game_config,
     const absl::flat_hash_map<std::string, int>* function_parameter_counts,
@@ -838,15 +693,26 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
     const RegisterTracker* initial_tracker,
     const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info,
     const absl::flat_hash_set<int32_t>* function_stack_stores) {
-  return LiftInstructions(block.instructions, symbol_index, game_config, function_parameter_counts,
-                          function_fp_parameter_counts, omit_last_instruction, frame_size,
-                          functions_returning_v0, functions_returning_f0, has_frame_pointer,
-                          has_calls, sp_address_taken, saved_reg_offsets, saved_fpr_offsets,
-                          initial_fpr_const_bits, initial_tracker, call_return_info,
-                          function_stack_stores);
+  FunctionLiftContext ctx;
+  ctx.symbol_index = symbol_index;
+  ctx.game_config = game_config;
+  ctx.function_parameter_counts = function_parameter_counts;
+  ctx.function_fp_parameter_counts = function_fp_parameter_counts;
+  ctx.frame_size = frame_size;
+  ctx.functions_returning_v0 = functions_returning_v0;
+  ctx.functions_returning_f0 = functions_returning_f0;
+  ctx.has_frame_pointer = has_frame_pointer;
+  ctx.has_calls = has_calls;
+  ctx.sp_address_taken = sp_address_taken;
+  ctx.saved_reg_offsets = saved_reg_offsets;
+  ctx.saved_fpr_offsets = saved_fpr_offsets;
+  ctx.initial_fpr_const_bits = initial_fpr_const_bits;
+  ctx.initial_tracker = initial_tracker;
+  ctx.call_return_info = call_return_info;
+  ctx.function_stack_stores = function_stack_stores;
+  return LiftBlock(block, ctx, omit_last_instruction);
 }
 
-// NOLINTNEXTLINE(google-readability-function-size)
 std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
     const GameConfig* game_config,
@@ -862,6 +728,50 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     const RegisterTracker* initial_tracker,
     const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info,
     const absl::flat_hash_set<int32_t>* function_stack_stores) {
+  FunctionLiftContext ctx;
+  ctx.symbol_index = symbol_index;
+  ctx.game_config = game_config;
+  ctx.function_parameter_counts = function_parameter_counts;
+  ctx.function_fp_parameter_counts = function_fp_parameter_counts;
+  ctx.frame_size = frame_size;
+  ctx.functions_returning_v0 = functions_returning_v0;
+  ctx.functions_returning_f0 = functions_returning_f0;
+  ctx.has_frame_pointer = has_frame_pointer;
+  ctx.has_calls = has_calls;
+  ctx.sp_address_taken = sp_address_taken;
+  ctx.saved_reg_offsets = saved_reg_offsets;
+  ctx.saved_fpr_offsets = saved_fpr_offsets;
+  ctx.initial_fpr_const_bits = initial_fpr_const_bits;
+  ctx.initial_tracker = initial_tracker;
+  ctx.call_return_info = call_return_info;
+  ctx.function_stack_stores = function_stack_stores;
+  return LiftInstructions(instructions, ctx, omit_last_instruction);
+}
+
+// NOLINTNEXTLINE(google-readability-function-size)
+std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
+    absl::Span<const Instruction> instructions, const FunctionLiftContext& ctx,
+    bool omit_last_instruction) {
+  const SymbolIndex* symbol_index = ctx.symbol_index;
+  const GameConfig* game_config = ctx.game_config;
+  const absl::flat_hash_map<std::string, int>* function_parameter_counts =
+      ctx.function_parameter_counts;
+  const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts =
+      ctx.function_fp_parameter_counts;
+  uint32_t frame_size = ctx.frame_size;
+  const absl::flat_hash_set<std::string>* functions_returning_v0 = ctx.functions_returning_v0;
+  const absl::flat_hash_set<std::string>* functions_returning_f0 = ctx.functions_returning_f0;
+  bool has_frame_pointer = ctx.has_frame_pointer;
+  bool has_calls = ctx.has_calls;
+  bool sp_address_taken = ctx.sp_address_taken;
+  const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = ctx.saved_reg_offsets;
+  const absl::flat_hash_map<FpRegister, int32_t>* saved_fpr_offsets = ctx.saved_fpr_offsets;
+  const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits =
+      ctx.initial_fpr_const_bits;
+  const RegisterTracker* initial_tracker = ctx.initial_tracker;
+  const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = ctx.call_return_info;
+  const absl::flat_hash_set<int32_t>* function_stack_stores = ctx.function_stack_stores;
+
   std::vector<LiftedStatement> statements;
   if (instructions.empty()) {
     return statements;
@@ -3039,904 +2949,41 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   return statements;
 }
 
-namespace {
-
-bool IsRegisterLiveIn(const ControlFlowGraph& cfg, Register reg) {
-  if (cfg.Blocks().empty()) return false;
-
-  absl::flat_hash_map<uint32_t, size_t> id_to_index;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    id_to_index[cfg.Blocks()[i].id] = i;
-  }
-
-  std::vector<bool> uses_before_def(cfg.Blocks().size(), false);
-  std::vector<bool> defines(cfg.Blocks().size(), false);
-
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    const auto& block = cfg.Blocks()[i];
-    for (size_t j = 0; j < block.instructions.size(); ++j) {
-      const auto& inst = block.instructions[j];
-      bool is_call = (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr);
-
-      if (is_call && j + 1 < block.instructions.size()) {
-        RegisterUseDef delay_ud = GetInstructionUseDef(block.instructions[j + 1]);
-        for (Register u : delay_ud.gpr_uses) {
-          if (u == reg && !defines[i]) {
-            uses_before_def[i] = true;
-          }
-        }
-        for (Register d : delay_ud.gpr_defs) {
-          if (d == reg) {
-            defines[i] = true;
-          }
-        }
-      }
-
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (Register u : ud.gpr_uses) {
-        if (u == reg && !defines[i]) {
-          uses_before_def[i] = true;
-        }
-      }
-      for (Register d : ud.gpr_defs) {
-        if (d == reg) {
-          defines[i] = true;
-        }
-      }
-      if (is_call) {
-        defines[i] = true;
-        if (j + 1 < block.instructions.size()) {
-          ++j;
-        }
-      }
-    }
-  }
-
-  std::vector<size_t> queue = {0};
-  absl::flat_hash_set<size_t> visited = {0};
-
-  while (!queue.empty()) {
-    size_t curr = queue.back();
-    queue.pop_back();
-
-    if (uses_before_def[curr]) {
-      return true;
-    }
-    if (defines[curr]) {
-      continue;
-    }
-
-    const auto& block = cfg.Blocks()[curr];
-    for (uint32_t succ_id : block.successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end() && visited.insert(it->second).second) {
-        queue.push_back(it->second);
-      }
-    }
-  }
-
-  return false;
-}
-
-bool IsFpRegisterLiveIn(const ControlFlowGraph& cfg, FpRegister reg) {
-  if (cfg.Blocks().empty()) return false;
-
-  absl::flat_hash_map<uint32_t, size_t> id_to_index;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    id_to_index[cfg.Blocks()[i].id] = i;
-  }
-
-  std::vector<bool> uses_before_def(cfg.Blocks().size(), false);
-  std::vector<bool> defines(cfg.Blocks().size(), false);
-
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    const auto& block = cfg.Blocks()[i];
-    for (size_t j = 0; j < block.instructions.size(); ++j) {
-      const auto& inst = block.instructions[j];
-      bool is_call = (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr);
-
-      if (is_call && j + 1 < block.instructions.size()) {
-        RegisterUseDef delay_ud = GetInstructionUseDef(block.instructions[j + 1]);
-        for (FpRegister u : delay_ud.fpr_uses) {
-          if (u == reg && !defines[i]) {
-            uses_before_def[i] = true;
-          }
-        }
-        for (FpRegister d : delay_ud.fpr_defs) {
-          if (d == reg) {
-            defines[i] = true;
-          }
-        }
-      }
-
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (FpRegister u : ud.fpr_uses) {
-        if (u == reg && !defines[i]) {
-          uses_before_def[i] = true;
-        }
-      }
-      for (FpRegister d : ud.fpr_defs) {
-        if (d == reg) {
-          defines[i] = true;
-        }
-      }
-      if (is_call) {
-        defines[i] = true;
-        if (j + 1 < block.instructions.size()) {
-          ++j;
-        }
-      }
-    }
-  }
-
-  std::vector<size_t> queue = {0};
-  absl::flat_hash_set<size_t> visited = {0};
-
-  while (!queue.empty()) {
-    size_t curr = queue.back();
-    queue.pop_back();
-
-    if (uses_before_def[curr]) {
-      return true;
-    }
-    if (defines[curr]) {
-      continue;
-    }
-
-    const auto& block = cfg.Blocks()[curr];
-    for (uint32_t succ_id : block.successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end() && visited.insert(it->second).second) {
-        queue.push_back(it->second);
-      }
-    }
-  }
-
-  return false;
-}
-
-}  // namespace
-
 int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> instructions) {
-  absl::flat_hash_set<Register> defined_registers;
-  absl::flat_hash_set<Register> used_before_definition;
-
-  int frame_size = 0;
-  for (const auto& inst : instructions) {
-    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) && inst.rt.has_value() &&
-        *inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
-      frame_size = std::max(frame_size, static_cast<int>(-inst.immediate));
-    }
-  }
-
-  int max_stack_arg = -1;
-  absl::flat_hash_set<int32_t> stored_stack_offsets;
-
-  for (size_t i = 0; i < instructions.size(); ++i) {
-    const auto& instruction = instructions[i];
-    bool is_call = (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr);
-
-    if (instruction.rs == Register::kSp || instruction.rs == Register::kFp) {
-      if (instruction.opcode == Opcode::kSw || instruction.opcode == Opcode::kSh ||
-          instruction.opcode == Opcode::kSb || instruction.opcode == Opcode::kSwc1 ||
-          instruction.opcode == Opcode::kSdc1) {
-        stored_stack_offsets.insert(instruction.immediate);
-      } else if (instruction.opcode == Opcode::kLw || instruction.opcode == Opcode::kLh ||
-                 instruction.opcode == Opcode::kLhu || instruction.opcode == Opcode::kLb ||
-                 instruction.opcode == Opcode::kLbu || instruction.opcode == Opcode::kLwc1 ||
-                 instruction.opcode == Opcode::kLdc1) {
-        int32_t offset = instruction.immediate;
-        int arg_idx = -1;
-        if (offset >= static_cast<int32_t>(frame_size + 16)) {
-          arg_idx = 4 + (offset - static_cast<int32_t>(frame_size + 16)) / 4;
-        }
-        if (arg_idx >= 0 && !stored_stack_offsets.contains(offset)) {
-          if (arg_idx < 4) {
-            Register arg_reg = static_cast<Register>(static_cast<int>(Register::kA0) + arg_idx);
-            used_before_definition.insert(arg_reg);
-          } else {
-            max_stack_arg = std::max(max_stack_arg, arg_idx);
-          }
-        }
-      }
-    }
-
-    if (is_call && i + 1 < instructions.size()) {
-      const auto& delay_inst = instructions[i + 1];
-      RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-      for (Register used_register : delay_ud.gpr_uses) {
-        if (!defined_registers.contains(used_register)) {
-          used_before_definition.insert(used_register);
-        }
-      }
-      for (Register defined_register : delay_ud.gpr_defs) {
-        defined_registers.insert(defined_register);
-      }
-    }
-
-    RegisterUseDef use_def = GetInstructionUseDef(instruction);
-    for (Register used_register : use_def.gpr_uses) {
-      if (!defined_registers.contains(used_register)) {
-        used_before_definition.insert(used_register);
-      }
-    }
-    for (Register defined_register : use_def.gpr_defs) {
-      defined_registers.insert(defined_register);
-    }
-    if (is_call) {
-      // Subroutine calls may clobber argument registers; from caller perspective they are redefined
-      defined_registers.insert(Register::kA0);
-      defined_registers.insert(Register::kA1);
-      defined_registers.insert(Register::kA2);
-      defined_registers.insert(Register::kA3);
-      if (i + 1 < instructions.size()) {
-        ++i;  // Delay slot was already processed
-      }
-    }
-  }
-
-  int count = 0;
-  auto cfg = ControlFlowGraph::Build(instructions);
-  auto check_reg = [&](Register reg) {
-    if (cfg.ok() && IsRegisterLiveIn(*cfg, reg)) return true;
-    return used_before_definition.contains(reg);
-  };
-
-  if (check_reg(Register::kA3)) {
-    count = 4;
-  } else if (check_reg(Register::kA2)) {
-    count = 3;
-  } else if (check_reg(Register::kA1)) {
-    count = 2;
-  } else if (check_reg(Register::kA0)) {
-    count = 1;
-  }
-
-  if (max_stack_arg >= 4) {
-    count = std::max(count, max_stack_arg + 1);
-  }
-  return count;
+  return AbiAnalyzer::DetermineParameterCount(instructions);
 }
 
 int ExpressionBuilder::DetermineFpParameterCount(absl::Span<const Instruction> instructions) {
-  auto cfg = ControlFlowGraph::Build(instructions);
-  if (cfg.ok()) {
-    if (IsFpRegisterLiveIn(*cfg, FpRegister::kF12)) {
-      if (IsFpRegisterLiveIn(*cfg, FpRegister::kF14)) {
-        return 2;
-      }
-      return 1;
-    }
-    return 0;
-  }
-
-  absl::flat_hash_set<FpRegister> defined_fprs;
-  absl::flat_hash_set<FpRegister> used_fprs_before_def;
-
-  for (size_t i = 0; i < instructions.size(); ++i) {
-    const auto& instruction = instructions[i];
-    bool is_call = (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr);
-
-    if (is_call && i + 1 < instructions.size()) {
-      const auto& delay_inst = instructions[i + 1];
-      RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-      for (FpRegister used_reg : delay_ud.fpr_uses) {
-        if (!defined_fprs.contains(used_reg)) {
-          used_fprs_before_def.insert(used_reg);
-        }
-      }
-      for (FpRegister def_reg : delay_ud.fpr_defs) {
-        defined_fprs.insert(def_reg);
-      }
-    }
-
-    RegisterUseDef use_def = GetInstructionUseDef(instruction);
-    for (FpRegister used_reg : use_def.fpr_uses) {
-      if (!defined_fprs.contains(used_reg)) {
-        used_fprs_before_def.insert(used_reg);
-      }
-    }
-    for (FpRegister def_reg : use_def.fpr_defs) {
-      defined_fprs.insert(def_reg);
-    }
-    if (is_call) {
-      defined_fprs.insert(FpRegister::kF12);
-      defined_fprs.insert(FpRegister::kF14);
-      if (i + 1 < instructions.size()) {
-        ++i;  // Delay slot was already processed
-      }
-    }
-  }
-
-  if (used_fprs_before_def.contains(FpRegister::kF12)) {
-    if (used_fprs_before_def.contains(FpRegister::kF14)) {
-      return 2;
-    }
-    return 1;
-  }
-  return 0;
+  return AbiAnalyzer::DetermineFpParameterCount(instructions);
 }
 
 bool ExpressionBuilder::DetermineReturnsV0(
     const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
     const absl::flat_hash_set<std::string>* functions_returning_v0) {
-  return ::rom_nom_nom::DetermineReturnsV0(cfg, symbol_index, functions_returning_v0);
+  return AbiAnalyzer::DetermineReturnsV0(cfg, symbol_index, functions_returning_v0);
 }
 
 bool ExpressionBuilder::DetermineReturnsF0(const ControlFlowGraph& cfg) {
-  return ::rom_nom_nom::DetermineReturnsF0(cfg);
+  return AbiAnalyzer::DetermineReturnsF0(cfg);
 }
 
 bool ExpressionBuilder::DetermineReturnsF0Double(const ControlFlowGraph& cfg) {
-  return ::rom_nom_nom::DetermineReturnsF0Double(cfg);
+  return AbiAnalyzer::DetermineReturnsF0Double(cfg);
 }
 
 absl::flat_hash_set<Register> ExpressionBuilder::DetectUninitializedCalleeSavedRegisters(
     const ControlFlowGraph& cfg) {
-  return ::rom_nom_nom::DetectUninitializedCalleeSavedRegisters(cfg);
+  return AbiAnalyzer::DetectUninitializedCalleeSavedRegisters(cfg);
 }
 
 absl::flat_hash_map<uint32_t, CallReturnInfo> ExpressionBuilder::ComputeCallReturnInfo(
     const ControlFlowGraph& cfg, bool function_returns_v0, bool function_returns_f0) {
-  absl::flat_hash_map<uint32_t, CallReturnInfo> result;
-
-  auto is_double_op = [](Opcode op) {
-    return (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
-            op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
-            op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtSD ||
-            op == Opcode::kTruncWD || op == Opcode::kRoundWD || op == Opcode::kCeilWD ||
-            op == Opcode::kFloorWD || op == Opcode::kCEqD || op == Opcode::kCLtD ||
-            op == Opcode::kCLeD || op == Opcode::kSdc1 || op == Opcode::kDmfc1);
-  };
-
-  for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
-    const auto& block = cfg.Blocks()[b];
-    for (size_t i = 0; i < block.instructions.size(); ++i) {
-      const auto& call_inst = block.instructions[i];
-      if (call_inst.opcode != Opcode::kJal && call_inst.opcode != Opcode::kJalr) {
-        continue;
-      }
-
-      CallReturnInfo info;
-
-      auto check_fp_arg_double = [&](FpRegister reg) -> bool {
-        // Check delay slot instruction of this call if within current block
-        if (i + 1 < block.instructions.size()) {
-          const auto& inst = block.instructions[i + 1];
-          if (inst.opcode == Opcode::kLdc1 && inst.ft == reg) return true;
-          if (inst.opcode == Opcode::kDmtc1 && inst.fs == reg) return true;
-          if ((inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
-               inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
-               inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
-               inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
-               inst.opcode == Opcode::kCvtDW || inst.opcode == Opcode::kCvtDS) &&
-              inst.fd == reg) {
-            return true;
-          }
-          RegisterUseDef ud = GetInstructionUseDef(inst);
-          for (FpRegister d : ud.fpr_defs) {
-            if (d == reg) return false;
-          }
-        }
-        // Check instructions in the current block before the call
-        for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
-          const auto& inst = block.instructions[j];
-          if (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr) {
-            break;
-          }
-          if (inst.opcode == Opcode::kLdc1 && inst.ft == reg) return true;
-          if (inst.opcode == Opcode::kDmtc1 && inst.fs == reg) return true;
-          if ((inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
-               inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
-               inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
-               inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
-               inst.opcode == Opcode::kCvtDW || inst.opcode == Opcode::kCvtDS) &&
-              inst.fd == reg) {
-            return true;
-          }
-          RegisterUseDef ud = GetInstructionUseDef(inst);
-          for (FpRegister d : ud.fpr_defs) {
-            if (d == reg) return false;
-          }
-        }
-        // If not found in current block, search predecessor blocks in CFG
-        absl::flat_hash_set<uint32_t> visited;
-        visited.insert(block.id);
-        std::vector<uint32_t> pred_queue = block.predecessors;
-        while (!pred_queue.empty()) {
-          uint32_t pid = pred_queue.back();
-          pred_queue.pop_back();
-          if (visited.contains(pid)) continue;
-          visited.insert(pid);
-          const auto* pblock = cfg.GetBlock(pid);
-          if (pblock == nullptr) continue;
-          bool def_found = false;
-          for (int j = static_cast<int>(pblock->instructions.size()) - 1; j >= 0; --j) {
-            const auto& inst = pblock->instructions[j];
-            if (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr) {
-              break;
-            }
-            if (inst.opcode == Opcode::kLdc1 && inst.ft == reg) return true;
-            if (inst.opcode == Opcode::kDmtc1 && inst.fs == reg) return true;
-            if ((inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
-                 inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
-                 inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
-                 inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
-                 inst.opcode == Opcode::kCvtDW || inst.opcode == Opcode::kCvtDS) &&
-                inst.fd == reg) {
-              return true;
-            }
-            RegisterUseDef ud = GetInstructionUseDef(inst);
-            for (FpRegister d : ud.fpr_defs) {
-              if (d == reg) {
-                def_found = true;
-                break;
-              }
-            }
-            if (def_found) break;
-          }
-          if (!def_found) {
-            for (uint32_t next_pid : pblock->predecessors) {
-              pred_queue.push_back(next_pid);
-            }
-          }
-        }
-        return false;
-      };
-
-      info.arg_f12_double = check_fp_arg_double(FpRegister::kF12);
-      info.arg_f14_double = check_fp_arg_double(FpRegister::kF14);
-
-      struct WorkItem {
-        uint32_t block_id;
-        size_t start_idx;
-        bool v0_live;
-        bool v1_live;
-        bool f0_live;
-        int depth;
-      };
-
-      std::vector<WorkItem> queue;
-      if (i + 2 < block.instructions.size()) {
-        queue.push_back({block.id, i + 2, true, true, true, 32});
-      } else {
-        for (uint32_t succ_id : block.successors) {
-          queue.push_back({succ_id, 0, true, true, true, 32});
-        }
-        if (block.successors.empty()) {
-          const auto* next_block = cfg.FindBlockByVram(call_inst.vram + 8);
-          if (next_block != nullptr) {
-            queue.push_back({next_block->id, 0, true, true, true, 32});
-          }
-        }
-      }
-
-      absl::flat_hash_set<uint32_t> visited_blocks;
-
-      while (!queue.empty()) {
-        auto item = queue.back();
-        queue.pop_back();
-
-        if (!item.v0_live && !item.v1_live && !item.f0_live) {
-          continue;
-        }
-
-        const auto* curr_block = cfg.GetBlock(item.block_id);
-        if (curr_block == nullptr) continue;
-
-        if (item.start_idx == 0) {
-          if (!visited_blocks.insert(item.block_id).second) {
-            continue;
-          }
-        }
-
-        bool stop_path = false;
-        for (size_t k = item.start_idx; k < curr_block->instructions.size(); ++k) {
-          if (item.depth <= 0) {
-            stop_path = true;
-            break;
-          }
-          --item.depth;
-
-          const auto& inst = curr_block->instructions[k];
-
-          if (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr) {
-            RegisterUseDef call_ud = GetInstructionUseDef(inst);
-            if (item.v0_live) {
-              for (Register u : call_ud.gpr_uses) {
-                if (u == Register::kV0) {
-                  info.returns_v0 = true;
-                  item.v0_live = false;
-                  break;
-                }
-              }
-            }
-            if (item.v1_live) {
-              for (Register u : call_ud.gpr_uses) {
-                if (u == Register::kV1) {
-                  info.returns_s64 = true;
-                  item.v1_live = false;
-                  break;
-                }
-              }
-            }
-            if (item.f0_live) {
-              for (FpRegister u : call_ud.fpr_uses) {
-                if (u == FpRegister::kF0) {
-                  info.returns_f0 = true;
-                  if (is_double_op(inst.opcode)) info.returns_f0_double = true;
-                  item.f0_live = false;
-                  break;
-                }
-              }
-            }
-            if (k + 1 < curr_block->instructions.size()) {
-              const auto& delay_inst = curr_block->instructions[k + 1];
-              RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-              if (item.v0_live) {
-                for (Register u : delay_ud.gpr_uses) {
-                  if (u == Register::kV0) {
-                    info.returns_v0 = true;
-                    item.v0_live = false;
-                    break;
-                  }
-                }
-              }
-              if (item.v1_live) {
-                for (Register u : delay_ud.gpr_uses) {
-                  if (u == Register::kV1) {
-                    info.returns_s64 = true;
-                    item.v1_live = false;
-                    break;
-                  }
-                }
-              }
-              if (item.f0_live) {
-                for (FpRegister u : delay_ud.fpr_uses) {
-                  if (u == FpRegister::kF0) {
-                    info.returns_f0 = true;
-                    if (is_double_op(delay_inst.opcode)) info.returns_f0_double = true;
-                    item.f0_live = false;
-                    break;
-                  }
-                }
-              }
-            }
-            stop_path = true;
-            break;
-          }
-
-          RegisterUseDef ud = GetInstructionUseDef(inst);
-
-          // Check uses first
-          if (item.v0_live) {
-            for (Register u : ud.gpr_uses) {
-              if (u == Register::kV0) {
-                info.returns_v0 = true;
-                item.v0_live = false;
-                break;
-              }
-            }
-          }
-          if (item.v1_live) {
-            for (Register u : ud.gpr_uses) {
-              if (u == Register::kV1) {
-                info.returns_s64 = true;
-                item.v1_live = false;
-                break;
-              }
-            }
-          }
-          if (item.f0_live) {
-            for (FpRegister u : ud.fpr_uses) {
-              if (u == FpRegister::kF0) {
-                info.returns_f0 = true;
-                if (is_double_op(inst.opcode)) {
-                  info.returns_f0_double = true;
-                }
-                item.f0_live = false;
-                break;
-              }
-            }
-          }
-
-          // Check defs
-          if (item.v0_live) {
-            for (Register d : ud.gpr_defs) {
-              if (d == Register::kV0) {
-                item.v0_live = false;
-                break;
-              }
-            }
-          }
-          if (item.v1_live) {
-            for (Register d : ud.gpr_defs) {
-              if (d == Register::kV1) {
-                item.v1_live = false;
-                break;
-              }
-            }
-          }
-          if (item.f0_live) {
-            for (FpRegister d : ud.fpr_defs) {
-              if (d == FpRegister::kF0) {
-                item.f0_live = false;
-                break;
-              }
-            }
-          }
-
-          if (inst.IsReturn()) {
-            stop_path = true;
-            break;
-          }
-
-          if (!item.v0_live && !item.v1_live && !item.f0_live) {
-            stop_path = true;
-            break;
-          }
-        }
-
-        if (!stop_path && (item.v0_live || item.v1_live || item.f0_live)) {
-          for (uint32_t succ_id : curr_block->successors) {
-            queue.push_back({succ_id, 0, item.v0_live, item.v1_live, item.f0_live, item.depth});
-          }
-        }
-      }
-
-      if (info.returns_s64) {
-        info.returns_v0 = true;
-      }
-      if (info.returns_f0_double) {
-        info.returns_f0 = true;
-      }
-
-      result[call_inst.vram] = info;
-    }
-  }
-
-  return result;
+  return AbiAnalyzer::ComputeCallReturnInfo(cfg, function_returns_v0, function_returns_f0);
 }
 
 std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFoldedComparison(
     absl::Span<const Instruction> instructions) {
-  if (instructions.size() < 2) {
-    return std::nullopt;
-  }
-
-  // 1. Find the terminating branch instruction (skipping trailing delay slot if present)
-  int branch_idx = -1;
-  for (int i = static_cast<int>(instructions.size()) - 1; i >= 0; --i) {
-    if (instructions[i].IsBranch()) {
-      branch_idx = i;
-      break;
-    }
-  }
-
-  if (branch_idx < 0) {
-    return std::nullopt;
-  }
-
-  const auto& branch = instructions[branch_idx];
-  if (branch.opcode == Opcode::kBc1t || branch.opcode == Opcode::kBc1tl ||
-      branch.opcode == Opcode::kBc1f || branch.opcode == Opcode::kBc1fl) {
-    int def_idx = -1;
-    for (int i = branch_idx - 1; i >= 0; --i) {
-      const auto& op = instructions[i].opcode;
-      if (op == Opcode::kCEqS || op == Opcode::kCEqD || op == Opcode::kCSeqS ||
-          op == Opcode::kCSeqD || op == Opcode::kCUeqS || op == Opcode::kCUeqD ||
-          op == Opcode::kCNglS || op == Opcode::kCNglD || op == Opcode::kCUnS ||
-          op == Opcode::kCUnD || op == Opcode::kCLtS || op == Opcode::kCLtD ||
-          op == Opcode::kCOltS || op == Opcode::kCOltD || op == Opcode::kCUltS ||
-          op == Opcode::kCUltD || op == Opcode::kCNgeS || op == Opcode::kCNgeD ||
-          op == Opcode::kCLeS || op == Opcode::kCLeD || op == Opcode::kCOleS ||
-          op == Opcode::kCOleD || op == Opcode::kCUleS || op == Opcode::kCUleD ||
-          op == Opcode::kCNgtS || op == Opcode::kCNgtD || op == Opcode::kCNgleS ||
-          op == Opcode::kCNgleD) {
-        def_idx = i;
-        break;
-      }
-      if (op == Opcode::kCtc1) {
-        break;
-      }
-    }
-    if (def_idx >= 0) {
-      const auto& def_inst = instructions[def_idx];
-      RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
-      bool hazard = false;
-      for (int i = def_idx + 1; i < branch_idx; ++i) {
-        RegisterUseDef mid_ud = GetInstructionUseDef(instructions[i]);
-        for (FpRegister input_reg : def_ud.fpr_uses) {
-          for (FpRegister mid_def : mid_ud.fpr_defs) {
-            if (mid_def == input_reg) {
-              hazard = true;
-              break;
-            }
-          }
-          if (hazard) break;
-        }
-        if (hazard) break;
-      }
-      if (!hazard) {
-        FoldedComparison folded;
-        folded.instruction_index = static_cast<size_t>(def_idx);
-        folded.can_suppress_statement = true;
-        return folded;
-      }
-    }
-    return std::nullopt;
-  }
-
-  Register rs = branch.rs.value_or(Register::kZero);
-  Register rt = branch.rt.value_or(Register::kZero);
-
-  // 2. Identify condition register tested against zero
-  std::optional<Register> cond_reg;
-  switch (branch.opcode) {
-    case Opcode::kBne:
-    case Opcode::kBnel:
-    case Opcode::kBeq:
-    case Opcode::kBeql:
-      if (rt == Register::kZero && rs != Register::kZero) {
-        cond_reg = rs;
-      } else if (rs == Register::kZero && rt != Register::kZero) {
-        cond_reg = rt;
-      }
-      break;
-
-    case Opcode::kBgtz:
-    case Opcode::kBgtzl:
-    case Opcode::kBgez:
-    case Opcode::kBgezl:
-    case Opcode::kBltz:
-    case Opcode::kBltzl:
-    case Opcode::kBlez:
-    case Opcode::kBlezl:
-      if (rs != Register::kZero) {
-        cond_reg = rs;
-      }
-      break;
-
-    default:
-      break;
-  }
-
-  if (!cond_reg.has_value()) {
-    return std::nullopt;
-  }
-
-  // 3. Scan backward from branch_idx - 1 for reaching definition of cond_reg
-  int def_idx = -1;
-  for (int i = branch_idx - 1; i >= 0; --i) {
-    RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
-    bool defs_cond = false;
-    for (Register r : ud.gpr_defs) {
-      if (r == *cond_reg) {
-        defs_cond = true;
-        break;
-      }
-    }
-    if (defs_cond) {
-      def_idx = i;
-      break;
-    }
-  }
-
-  if (def_idx < 0) {
-    return std::nullopt;
-  }
-
-  const auto& def_inst = instructions[def_idx];
-
-  // Verify that def_inst is a comparison/test opcode that defines cond_reg
-  switch (def_inst.opcode) {
-    case Opcode::kSlt:
-    case Opcode::kSltu:
-    case Opcode::kXor:
-    case Opcode::kAnd:
-      if (!def_inst.rd.has_value() || *def_inst.rd != *cond_reg) {
-        return std::nullopt;
-      }
-      break;
-
-    case Opcode::kSlti:
-    case Opcode::kSltiu:
-    case Opcode::kXori:
-    case Opcode::kAndi:
-      if (!def_inst.rt.has_value() || *def_inst.rt != *cond_reg) {
-        return std::nullopt;
-      }
-      break;
-
-    default:
-      return std::nullopt;
-  }
-
-  // 4. Hazard check: no instruction between def_idx and branch_idx clobbers inputs of def_inst,
-  // or uses or clobbers cond_reg
-  RegisterUseDef def_ud = GetInstructionUseDef(def_inst);
-  for (int i = def_idx + 1; i < branch_idx; ++i) {
-    RegisterUseDef mid_ud = GetInstructionUseDef(instructions[i]);
-    for (Register input_reg : def_ud.gpr_uses) {
-      for (Register mid_def : mid_ud.gpr_defs) {
-        if (mid_def == input_reg) {
-          return std::nullopt;
-        }
-      }
-    }
-    for (Register mid_use : mid_ud.gpr_uses) {
-      if (mid_use == *cond_reg) {
-        return std::nullopt;
-      }
-    }
-    for (Register mid_def : mid_ud.gpr_defs) {
-      if (mid_def == *cond_reg) {
-        return std::nullopt;
-      }
-    }
-  }
-
-  // 5. Reject folding if a non-likely branch delay slot defines any input of def_inst (other than
-  // cond_reg)
-  if (!branch.IsBranchLikely() && branch_idx + 1 < static_cast<int>(instructions.size())) {
-    RegisterUseDef delay_ud = GetInstructionUseDef(instructions[branch_idx + 1]);
-    for (Register input_reg : def_ud.gpr_uses) {
-      if (input_reg == *cond_reg) continue;
-      for (Register delay_def : delay_ud.gpr_defs) {
-        if (delay_def == input_reg) {
-          return std::nullopt;
-        }
-      }
-    }
-  }
-
-  // 6. Check if cond_reg is an input to def_inst (in-place modification / self-clobbering)
-  bool cond_is_input = false;
-  for (Register r : def_ud.gpr_uses) {
-    if (r == *cond_reg) {
-      cond_is_input = true;
-      break;
-    }
-  }
-
-  bool delay_clobbers_cond = false;
-  if (branch_idx + 1 < static_cast<int>(instructions.size())) {
-    const auto& delay = instructions[branch_idx + 1];
-    RegisterUseDef delay_ud = GetInstructionUseDef(delay);
-    bool delay_uses_cond = false;
-    for (Register r : delay_ud.gpr_uses) {
-      if (r == *cond_reg) {
-        delay_uses_cond = true;
-        break;
-      }
-    }
-    bool delay_defs_cond = false;
-    for (Register r : delay_ud.gpr_defs) {
-      if (r == *cond_reg) {
-        delay_defs_cond = true;
-        break;
-      }
-    }
-    if (!delay_uses_cond && delay_defs_cond) {
-      delay_clobbers_cond = true;
-    }
-  }
-
-  // If def_inst mutates cond_reg in place (cond_is_input) and cond_reg is not $at,
-  // we can only fold and suppress def_inst if the delay slot immediately clobbers cond_reg.
-  // Otherwise, def_inst is an in-place variable mutation that must be preserved as a
-  // statement and cannot be folded into the branch condition.
-  if (cond_is_input && *cond_reg != Register::kAt && !delay_clobbers_cond) {
-    return std::nullopt;
-  }
-
-  // Determine whether emitting def_inst as a statement can be safely suppressed
-  bool can_suppress = false;
-  if (*cond_reg == Register::kAt || delay_clobbers_cond) {
-    can_suppress = true;
-  }
-
-  return FoldedComparison{static_cast<size_t>(def_idx), can_suppress};
+  return BranchConditionBuilder::FindFoldedComparison(instructions);
 }
 
 }  // namespace rom_nom_nom

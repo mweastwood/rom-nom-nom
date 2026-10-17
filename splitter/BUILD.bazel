@@ -8,6 +8,7 @@ cc_library(
     hdrs = ["slicer.h"],
     copts = ["-std=c++20"],
     deps = [
+        "//core:game_config",
         "//core:game_config_cc_proto",
         "//core:rom",
         "@abseil-cpp//absl/status",

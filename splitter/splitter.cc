@@ -78,36 +78,16 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
   }
 
   // 3. Load Symbol Index
-  SymbolIndex symbol_index;
-  if (!options.symbols_text_override.empty()) {
-    auto index_or = SymbolIndex::ParseFromTextproto(options.symbols_text_override);
-    if (!index_or.ok()) {
-      return index_or.status();
-    }
-    symbol_index = std::move(*index_or);
-  } else if (!options.symbols_path.empty()) {
-    auto index_or = SymbolIndex::LoadFromTextproto(options.symbols_path);
-    if (!index_or.ok()) {
-      return index_or.status();
-    }
-    symbol_index = std::move(*index_or);
-  } else if (config.symbols_size() > 0) {
-    auto index_or = SymbolIndex::FromGameConfig(config);
-    if (!index_or.ok()) {
-      return index_or.status();
-    }
-    symbol_index = std::move(*index_or);
-  } else {
-    for (const auto& sym_file : config.symbol_files()) {
-      if (std::filesystem::exists(sym_file)) {
-        auto index_or = SymbolIndex::LoadFromTextproto(sym_file);
-        if (index_or.ok()) {
-          symbol_index = std::move(*index_or);
-          break;
-        }
-      }
-    }
+  auto index_or = LoadSymbolIndex({
+      .symbols_text_override = options.symbols_text_override,
+      .symbols_path = options.symbols_path,
+      .config = &config,
+      .game_name = std::string(config.basename()),
+  });
+  if (!index_or.ok()) {
+    return index_or.status();
   }
+  SymbolIndex symbol_index = std::move(*index_or);
 
   // 4. Carve non-code binary assets (.bin, header, raw data)
   if (options.slice_data) {
@@ -186,17 +166,16 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
 
     AutoSymbolFinder auto_symbols(symbol_index.Empty() ? nullptr : &symbol_index);
 
+    const std::vector<ResolvedSegment> resolved_segments = ResolveSegments(config, rom.Size());
+
     // Register defined segments and subsegments
-    for (int i = 0; i < config.segments_size(); ++i) {
-      const Segment& seg = config.segments(i);
-      if (seg.vram() != 0 && seg.rom_end() > seg.rom_start()) {
-        auto_symbols.RegisterDefinedAddressRange(seg.vram(),
-                                                 seg.vram() + (seg.rom_end() - seg.rom_start()));
+    for (const auto& seg : resolved_segments) {
+      if (seg.vram_start != 0 && seg.RomSize() > 0) {
+        auto_symbols.RegisterDefinedAddressRange(seg.vram_start, seg.vram_start + seg.RomSize());
       }
-      for (int j = 0; j < seg.subsegments_size(); ++j) {
-        const Subsegment& sub = seg.subsegments(j);
-        if (sub.vram() != 0) {
-          auto_symbols.RegisterDefinedSymbol(sub.name(), sub.vram());
+      for (const auto& sub : seg.subsegments) {
+        if (sub.proto != nullptr && sub.proto->vram() != 0) {
+          auto_symbols.RegisterDefinedSymbol(sub.name, sub.vram_start);
         }
       }
     }
@@ -223,11 +202,10 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     }
 
     // Emit header.s for SEGMENT_HEADER
-    for (int i = 0; i < config.segments_size(); ++i) {
-      const Segment& seg = config.segments(i);
-      if (seg.type() == SEGMENT_HEADER) {
-        size_t seg_start = seg.rom_start();
-        size_t seg_end = seg.rom_end();
+    for (const auto& seg : resolved_segments) {
+      if (seg.type == SEGMENT_HEADER) {
+        size_t seg_start = seg.rom_start;
+        size_t seg_end = seg.rom_end;
         if (seg_end > seg_start && seg_end <= rom.Size()) {
           auto span_or = rom.SliceRange(seg_start, seg_end);
           if (span_or.ok()) {
@@ -242,69 +220,32 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
     }
 
     // Pre-scan all code segments across the ROM for function entrypoints and labels
-    for (int i = 0; i < config.segments_size(); ++i) {
-      const Segment& seg = config.segments(i);
-      if (seg.type() != SEGMENT_CODE) {
+    for (const auto& seg : resolved_segments) {
+      if (seg.type != SEGMENT_CODE) {
         continue;
       }
-      size_t seg_start = seg.rom_start();
-      size_t seg_end = seg.rom_end();
-      if (seg_end == 0) {
-        seg_end = rom.Size();
-        for (int k = i + 1; k < config.segments_size(); ++k) {
-          if (config.segments(k).type() != SEGMENT_BSS &&
-              config.segments(k).rom_start() > seg_start) {
-            seg_end = std::min<size_t>(config.segments(k).rom_start(), rom.Size());
-            break;
-          }
-        }
-      }
-      if (seg_start >= seg_end || seg_end > rom.Size() || seg.vram() == 0) {
+      size_t seg_start = seg.rom_start;
+      size_t seg_end = seg.rom_end;
+      if (seg_start >= seg_end || seg_end > rom.Size() || seg.vram_start == 0) {
         continue;
       }
       auto span_or = rom.SliceRange(seg_start, seg_end);
       if (span_or.ok()) {
-        disassembler.PreScanCode(*span_or, seg.vram());
+        disassembler.PreScanCode(*span_or, seg.vram_start);
       }
     }
 
-    for (int i = 0; i < config.segments_size(); ++i) {
-      const Segment& seg = config.segments(i);
-      if (seg.type() != SEGMENT_CODE) {
+    for (const auto& seg : resolved_segments) {
+      if (seg.type != SEGMENT_CODE) {
         continue;
       }
 
-      size_t seg_start = seg.rom_start();
-      size_t seg_end = seg.rom_end();
-      if (seg_end == 0) {
-        seg_end = rom.Size();
-        for (int k = i + 1; k < config.segments_size(); ++k) {
-          if (config.segments(k).type() != SEGMENT_BSS &&
-              config.segments(k).rom_start() > seg_start) {
-            seg_end = std::min<size_t>(config.segments(k).rom_start(), rom.Size());
-            break;
-          }
-        }
-      }
+      for (const auto& sub : seg.subsegments) {
+        size_t sub_start = sub.rom_start;
+        size_t sub_end = sub.rom_end;
+        uint32_t sub_vram = sub.vram_start;
 
-      for (int j = 0; j < seg.subsegments_size(); ++j) {
-        const Subsegment& sub = seg.subsegments(j);
-
-        size_t sub_start = sub.rom_start();
-        size_t sub_end = seg_end;
-        for (int k = j + 1; k < seg.subsegments_size(); ++k) {
-          if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
-            sub_end = seg.subsegments(k).rom_start();
-            break;
-          }
-        }
-
-        uint32_t sub_vram = sub.vram();
-        if (sub_vram == 0 && seg.vram() != 0) {
-          sub_vram = seg.vram() + static_cast<uint32_t>(sub_start - seg_start);
-        }
-
-        if (sub.type() == SUBSEGMENT_DATA) {
+        if (sub.type == SUBSEGMENT_DATA) {
           if (sub_start >= sub_end || sub_end > rom.Size()) {
             continue;
           }
@@ -312,7 +253,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           if (!span_or.ok()) {
             return span_or.status();
           }
-          std::filesystem::path out_data_path = asm_gen.ResolveDataPath(sub.name());
+          std::filesystem::path out_data_path = asm_gen.ResolveDataPath(sub.name);
           auto d_status = asm_gen.WriteDataAssembly(*span_or, sub_vram, out_data_path);
           if (!d_status.ok()) {
             return d_status;
@@ -321,21 +262,9 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           continue;
         }
 
-        if (sub.type() == SUBSEGMENT_BSS) {
-          size_t bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
-          if (sub.bss_size() == 0) {
-            for (const auto& other_seg : config.segments()) {
-              if (other_seg.name() == sub.name() && other_seg.bss_size() > 0) {
-                bss_size = other_seg.bss_size();
-                break;
-              }
-            }
-          }
-          if (bss_size == 0) {
-            bss_size = 0x10;
-          }
-
-          std::filesystem::path out_bss_path = asm_gen.ResolveBssPath(sub.name());
+        if (sub.type == SUBSEGMENT_BSS) {
+          size_t bss_size = sub.bss_size > 0 ? sub.bss_size : 0x10;
+          std::filesystem::path out_bss_path = asm_gen.ResolveBssPath(sub.name);
           auto b_status = asm_gen.WriteBssAssembly(bss_size, sub_vram, out_bss_path);
           if (!b_status.ok()) {
             return b_status;
@@ -344,7 +273,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           continue;
         }
 
-        if (sub.type() == SUBSEGMENT_C) {
+        if (sub.type == SUBSEGMENT_C) {
           if (sub_start >= sub_end || sub_end > rom.Size()) {
             continue;
           }
@@ -365,15 +294,15 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
             return funcs_or.status();
           }
 
-          auto written_count_or = asm_gen.WriteNonmatchingFunctions(sub.name(), *funcs_or);
+          auto written_count_or = asm_gen.WriteNonmatchingFunctions(sub.name, *funcs_or);
           if (!written_count_or.ok()) {
             return written_count_or.status();
           }
           result.asm_files_written += *written_count_or;
           result.functions_disassembled += funcs_or->size();
 
-          std::filesystem::path out_s_path = asm_dir / absl::StrCat(sub.name(), ".s");
-          auto s_status = asm_gen.WriteStandaloneAssembly(sub.name(), sub_start, sub_end, sub_vram,
+          std::filesystem::path out_s_path = asm_dir / absl::StrCat(sub.name, ".s");
+          auto s_status = asm_gen.WriteStandaloneAssembly(sub.name, sub_start, sub_end, sub_vram,
                                                           *funcs_or, out_s_path);
           if (!s_status.ok()) {
             return s_status;
@@ -382,7 +311,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           continue;
         }
 
-        if (sub.type() != SUBSEGMENT_ASM && sub.type() != SUBSEGMENT_HASM) {
+        if (sub.type != SUBSEGMENT_ASM && sub.type != SUBSEGMENT_HASM) {
           // Skip other non-asm files
           continue;
         }
@@ -409,8 +338,8 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           return funcs_or.status();
         }
 
-        std::filesystem::path out_s_path = asm_dir / absl::StrCat(sub.name(), ".s");
-        auto s_status = asm_gen.WriteStandaloneAssembly(sub.name(), sub_start, sub_end, sub_vram,
+        std::filesystem::path out_s_path = asm_dir / absl::StrCat(sub.name, ".s");
+        auto s_status = asm_gen.WriteStandaloneAssembly(sub.name, sub_start, sub_end, sub_vram,
                                                         *funcs_or, out_s_path);
         if (!s_status.ok()) {
           return s_status;

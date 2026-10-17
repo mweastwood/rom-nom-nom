@@ -29,31 +29,6 @@
 
 namespace rom_nom_nom {
 
-namespace {
-
-std::filesystem::path FindRepoRoot() {
-  const char* ws_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
-  if (ws_dir != nullptr && *ws_dir != '\0') {
-    return ws_dir;
-  }
-  std::filesystem::path cur = std::filesystem::current_path();
-  while (!cur.empty()) {
-    std::error_code ec;
-    if (std::filesystem::exists(cur / "MODULE.bazel", ec) ||
-        std::filesystem::exists(cur / "WORKSPACE", ec)) {
-      return cur;
-    }
-    auto parent = cur.parent_path();
-    if (parent == cur) {
-      break;
-    }
-    cur = parent;
-  }
-  return std::filesystem::current_path();
-}
-
-}  // namespace
-
 DifferPipeline::DifferPipeline(DifferPipelineOptions options) : options_(std::move(options)) {
   if (!options_.repo_root.empty()) {
     repo_root_ = options_.repo_root;

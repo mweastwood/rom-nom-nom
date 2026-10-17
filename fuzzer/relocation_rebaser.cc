@@ -216,23 +216,11 @@ std::vector<Range> SubtractRanges(const std::vector<Range>& ranges,
 
 std::optional<uint32_t> TargetAddressForName(std::string_view name,
                                              const SymbolIndex* symbol_index) {
-  if (absl::StartsWith(name, "D_") && name.size() == 10) {
-    uint32_t parsed = 0;
-    if (absl::SimpleHexAtoi(name.substr(2), &parsed)) {
-      return parsed;
-    }
-  } else if (absl::StartsWith(name, "func_") && name.size() == 13) {
-    uint32_t parsed = 0;
-    if (absl::SimpleHexAtoi(name.substr(5), &parsed)) {
-      return parsed;
-    }
-  } else if (symbol_index != nullptr) {
-    const auto* sym_entry = symbol_index->FindByName(name);
-    if (sym_entry != nullptr) {
-      return sym_entry->address();
-    }
+  if (absl::StartsWith(name, "0x") || absl::StartsWith(name, "0X") ||
+      absl::StartsWith(name, ".L")) {
+    return std::nullopt;
   }
-  return std::nullopt;
+  return ResolveSymbolOrSynthesizedAddress(name, symbol_index);
 }
 
 }  // namespace
@@ -247,30 +235,14 @@ std::vector<DataBlob> CollectDataBlobs(const GameConfig* config, const SymbolInd
     }
     return absl::StrFormat("D_%08X", vram);
   };
-  for (const auto& seg : config->segments()) {
-    if (seg.type() != SEGMENT_CODE) continue;
-    for (int j = 0; j < seg.subsegments_size(); ++j) {
-      const auto& sub = seg.subsegments(j);
-      if (sub.type() == SUBSEGMENT_DATA || sub.type() == SUBSEGMENT_RODATA) {
-        uint32_t sub_start = sub.rom_start();
-        uint32_t sub_end = seg.rom_end();
-        for (int k = j + 1; k < seg.subsegments_size(); ++k) {
-          if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
-            sub_end = seg.subsegments(k).rom_start();
-            break;
-          }
-        }
-        if (sub_end <= sub_start) continue;
-        uint32_t sub_vram = sub.vram();
-        if (sub_vram == 0 && seg.vram() != 0) {
-          sub_vram = seg.vram() + (sub_start - seg.rom_start());
-        }
-        blobs.push_back({sub_vram, sub_end - sub_start, label_for_vram(sub_vram), false});
-      } else if (sub.type() == SUBSEGMENT_BSS && sub.vram() != 0) {
-        uint32_t bss_size = sub.bss_size() > 0 ? sub.bss_size() : seg.bss_size();
-        if (bss_size != 0) {
-          blobs.push_back({sub.vram(), bss_size, label_for_vram(sub.vram()), true});
-        }
+  for (const auto& seg : ResolveSegments(*config)) {
+    if (seg.type != SEGMENT_CODE) continue;
+    for (const auto& sub : seg.subsegments) {
+      if (sub.type == SUBSEGMENT_DATA || sub.type == SUBSEGMENT_RODATA) {
+        if (sub.rom_end <= sub.rom_start) continue;
+        blobs.push_back({sub.vram_start, sub.RomSize(), label_for_vram(sub.vram_start), false});
+      } else if (sub.type == SUBSEGMENT_BSS && sub.vram_start != 0 && sub.bss_size != 0) {
+        blobs.push_back({sub.vram_start, sub.bss_size, label_for_vram(sub.vram_start), true});
       }
     }
   }

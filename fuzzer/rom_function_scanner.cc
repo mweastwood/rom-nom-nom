@@ -29,48 +29,22 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
   std::vector<CodeRegion> regions;
 
   if (config != nullptr) {
-    for (int i = 0; i < config->segments_size(); ++i) {
-      const auto& seg = config->segments(i);
-      if (seg.type() != SEGMENT_CODE) {
+    for (const auto& seg : ResolveSegments(*config, rom_bytes.size())) {
+      if (seg.type != SEGMENT_CODE) {
         continue;
       }
-      size_t seg_start = seg.rom_start();
-      size_t seg_end = seg.rom_end();
-      if (seg_end == 0) {
-        seg_end = rom_bytes.size();
-        for (int k = i + 1; k < config->segments_size(); ++k) {
-          if (config->segments(k).type() != SEGMENT_BSS &&
-              config->segments(k).rom_start() > seg_start) {
-            seg_end = std::min<size_t>(config->segments(k).rom_start(), rom_bytes.size());
-            break;
-          }
-        }
-      }
-      if (seg.subsegments_size() > 0) {
-        for (int j = 0; j < seg.subsegments_size(); ++j) {
-          const auto& sub = seg.subsegments(j);
-          if (sub.type() != SUBSEGMENT_C && sub.type() != SUBSEGMENT_ASM &&
-              sub.type() != SUBSEGMENT_HASM) {
+      if (!seg.subsegments.empty()) {
+        for (const auto& sub : seg.subsegments) {
+          if (sub.type != SUBSEGMENT_C && sub.type != SUBSEGMENT_ASM &&
+              sub.type != SUBSEGMENT_HASM) {
             continue;
           }
-          size_t sub_start = sub.rom_start();
-          size_t sub_end = seg_end;
-          for (int k = j + 1; k < seg.subsegments_size(); ++k) {
-            if (seg.subsegments(k).type() != SUBSEGMENT_BSS && seg.subsegments(k).rom_start() > 0) {
-              sub_end = seg.subsegments(k).rom_start();
-              break;
-            }
-          }
-          uint32_t sub_vram = sub.vram();
-          if (sub_vram == 0 && seg.vram() != 0) {
-            sub_vram = seg.vram() + static_cast<uint32_t>(sub_start - seg_start);
-          }
-          if (sub_start < sub_end && sub_end <= rom_bytes.size()) {
-            regions.push_back({sub_start, sub_end, sub_vram});
+          if (sub.rom_start < sub.rom_end && sub.rom_end <= rom_bytes.size()) {
+            regions.push_back({sub.rom_start, sub.rom_end, sub.vram_start});
           }
         }
-      } else {
-        regions.push_back({seg_start, seg_end, seg.vram()});
+      } else if (seg.rom_start < seg.rom_end && seg.rom_end <= rom_bytes.size()) {
+        regions.push_back({seg.rom_start, seg.rom_end, seg.vram_start});
       }
     }
   }
@@ -91,15 +65,13 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
   Disassembler disasm(symbols, disasm_opts);
 
   if (config != nullptr) {
-    for (int i = 0; i < config->segments_size(); ++i) {
-      const auto& seg = config->segments(i);
-      if (seg.type() != SEGMENT_CODE || seg.vram() == 0) {
+    for (const auto& seg : ResolveSegments(*config, rom_bytes.size())) {
+      if (seg.type != SEGMENT_CODE || seg.vram_start == 0) {
         continue;
       }
-      size_t seg_start = seg.rom_start();
-      size_t seg_end = seg.rom_end() != 0 ? seg.rom_end() : rom_bytes.size();
-      if (seg_start < seg_end && seg_end <= rom_bytes.size()) {
-        disasm.PreScanCode(rom_bytes.subspan(seg_start, seg_end - seg_start), seg.vram());
+      if (seg.rom_start < seg.rom_end && seg.rom_end <= rom_bytes.size()) {
+        disasm.PreScanCode(rom_bytes.subspan(seg.rom_start, seg.rom_end - seg.rom_start),
+                           seg.vram_start);
       }
     }
   }

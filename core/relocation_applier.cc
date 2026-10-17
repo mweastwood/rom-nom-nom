@@ -30,16 +30,7 @@ RelocationApplyResult RelocationApplier::Apply(
     if (it != symbol_map.end()) {
       return it->second;
     }
-    // Fallback: If symbol name ends with 8-character hex address (e.g. func_XXXXXXXX, D_XXXXXXXX)
-    size_t last_underscore = name.rfind('_');
-    if (last_underscore != std::string_view::npos && last_underscore + 1 < name.size() &&
-        name.size() - (last_underscore + 1) == 8) {
-      uint32_t addr = 0;
-      if (absl::SimpleHexAtoi(name.substr(last_underscore + 1), &addr)) {
-        return addr;
-      }
-    }
-    return std::nullopt;
+    return ResolveSymbolOrSynthesizedAddress(name, nullptr);
   };
   return ApplyRelocations(function.raw_words, function.relocations, lookup);
 }
@@ -47,20 +38,7 @@ RelocationApplyResult RelocationApplier::Apply(
 RelocationApplyResult RelocationApplier::Apply(const ElfFunction& function,
                                                const SymbolIndex& symbol_index) {
   auto lookup = [&](std::string_view name) -> std::optional<uint32_t> {
-    const auto* entry = symbol_index.FindByName(name);
-    if (entry != nullptr) {
-      return entry->address();
-    }
-    // Fallback: If symbol name ends with 8-character hex address (e.g. func_XXXXXXXX, D_XXXXXXXX)
-    size_t last_underscore = name.rfind('_');
-    if (last_underscore != std::string_view::npos && last_underscore + 1 < name.size() &&
-        name.size() - (last_underscore + 1) == 8) {
-      uint32_t addr = 0;
-      if (absl::SimpleHexAtoi(name.substr(last_underscore + 1), &addr)) {
-        return addr;
-      }
-    }
-    return std::nullopt;
+    return ResolveSymbolOrSynthesizedAddress(name, &symbol_index);
   };
   return ApplyRelocations(function.raw_words, function.relocations, lookup);
 }

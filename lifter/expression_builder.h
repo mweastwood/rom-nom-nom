@@ -15,6 +15,8 @@
 #include "core/mips.h"
 #include "core/register_tracker.h"
 #include "core/symbol_registry.h"
+#include "lifter/abi_analyzer.h"
+#include "lifter/branch_condition_builder.h"
 #include "lifter/symbol_folder.h"
 
 namespace rom_nom_nom {
@@ -110,20 +112,37 @@ struct LiftedStatement {
   std::string ToString() const;
 };
 
-// Information about return types of calls within a function.
-struct CallReturnInfo {
-  bool returns_s64 = false;
-  bool returns_f0 = false;
-  bool returns_f0_double = false;
-  bool returns_v0 = false;
-  bool arg_f12_double = false;
-  bool arg_f14_double = false;
+// Per-function and per-module context for lifting basic blocks and instruction sequences.
+struct FunctionLiftContext {
+  const SymbolIndex* symbol_index = nullptr;
+  const GameConfig* game_config = nullptr;
+  const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr;
+  const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr;
+  uint32_t frame_size = 0;
+  const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr;
+  const absl::flat_hash_set<std::string>* functions_returning_f0 = nullptr;
+  bool has_frame_pointer = false;
+  bool has_calls = false;
+  bool sp_address_taken = false;
+  const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr;
+  const absl::flat_hash_map<FpRegister, int32_t>* saved_fpr_offsets = nullptr;
+  const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits = nullptr;
+  const RegisterTracker* initial_tracker = nullptr;
+  const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr;
+  const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr;
 };
 
 // Lifts instructions within basic blocks into structured statements and expressions.
 class ExpressionBuilder {
  public:
+  using FoldedComparison = ::rom_nom_nom::FoldedComparison;
+
   ExpressionBuilder() = default;
+
+  // Lifts a basic block into a sequence of high-level statements using a FunctionLiftContext.
+  static std::vector<LiftedStatement> LiftBlock(const BasicBlock& block,
+                                                const FunctionLiftContext& ctx,
+                                                bool omit_last_instruction = false);
 
   // Lifts a basic block into a sequence of high-level statements.
   static std::vector<LiftedStatement> LiftBlock(
@@ -141,6 +160,11 @@ class ExpressionBuilder {
       const RegisterTracker* initial_tracker = nullptr,
       const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr,
       const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr);
+
+  // Lifts a raw sequence of instructions into high-level statements using a FunctionLiftContext.
+  static std::vector<LiftedStatement> LiftInstructions(absl::Span<const Instruction> instructions,
+                                                       const FunctionLiftContext& ctx,
+                                                       bool omit_last_instruction = false);
 
   // Lifts a raw sequence of instructions into high-level statements.
   static std::vector<LiftedStatement> LiftInstructions(
@@ -194,12 +218,6 @@ class ExpressionBuilder {
   // Maps a COP1 floating point register to its clean variable name (e.g. "f0", "f12", or "f0_d" if
   // double).
   static std::string FpRegisterVarName(FpRegister reg, bool is_double = false);
-
-  // Information about a comparison instruction folded into a subsequent conditional branch.
-  struct FoldedComparison {
-    size_t instruction_index = 0;
-    bool can_suppress_statement = false;
-  };
 
   // Finds a comparison instruction in `instructions` that is folded into a subsequent conditional
   // branch. Returns std::nullopt if no instruction is folded.

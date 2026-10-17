@@ -113,6 +113,11 @@ class Toolchain {
 // Searches the filesystem PATH environment variable for an executable by name.
 std::filesystem::path FindExecutableInPath(std::string_view name);
 
+// Resolves the repository root directory by checking `start_dir` (and its ancestors
+// for MODULE.bazel or WORKSPACE), BUILD_WORKSPACE_DIRECTORY, or walking upward from
+// the current working directory.
+std::filesystem::path FindRepoRoot(const std::filesystem::path& start_dir = {});
+
 }  // namespace rom_nom_nom
 
 #endif  // ROM_NOM_NOM_CORE_TOOLCHAIN_H_

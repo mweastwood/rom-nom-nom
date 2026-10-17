@@ -104,16 +104,125 @@ cc_test(
 )
 
 cc_library(
+    name = "instruction_patterns",
+    srcs = ["instruction_patterns.cc"],
+    hdrs = ["instruction_patterns.h"],
+    deps = [
+        "//core:mips",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "instruction_patterns_test",
+    srcs = ["instruction_patterns_test.cc"],
+    deps = [
+        ":instruction_patterns",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "stack_frame_analyzer",
+    srcs = ["stack_frame_analyzer.cc"],
+    hdrs = ["stack_frame_analyzer.h"],
+    deps = [
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:register_tracker",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "stack_frame_analyzer_test",
+    srcs = ["stack_frame_analyzer_test.cc"],
+    deps = [
+        ":stack_frame_analyzer",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "abi_analyzer",
+    srcs = ["abi_analyzer.cc"],
+    hdrs = ["abi_analyzer.h"],
+    deps = [
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:register_tracker",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "abi_analyzer_test",
+    srcs = ["abi_analyzer_test.cc"],
+    deps = [
+        ":abi_analyzer",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "branch_condition_builder",
+    srcs = ["branch_condition_builder.cc"],
+    hdrs = ["branch_condition_builder.h"],
+    deps = [
+        ":abi_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:register_tracker",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "branch_condition_builder_test",
+    srcs = ["branch_condition_builder_test.cc"],
+    deps = [
+        ":branch_condition_builder",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "expression_builder",
     srcs = ["expression_builder.cc"],
     hdrs = ["expression_builder.h"],
     deps = [
+        ":abi_analyzer",
+        ":branch_condition_builder",
+        ":instruction_patterns",
         ":symbol_folder",
         "//core:control_flow_graph",
         "//core:division_pattern",
+        "//core:game_config",
         "//core:mips",
         "//core:register_tracker",
         "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -137,14 +246,21 @@ cc_library(
     srcs = ["ast_converter.cc"],
     hdrs = ["ast_converter.h"],
     deps = [
+        ":abi_analyzer",
+        ":branch_condition_builder",
         ":control_flow_structurer",
         ":expression_builder",
+        ":stack_frame_analyzer",
         "//core:c_ast",
         "//core:control_flow_graph",
+        "//core:game_config",
         "//core:mips",
+        "//core:register_tracker",
         "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
     ],

@@ -1,7 +1,6 @@
 #include "core/target_extractor.h"
 
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -18,57 +17,27 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "absl/strings/strip.h"
 #include "absl/types/span.h"
-#include "core/compiler.h"
+#include "core/candidate_compiler.h"
 #include "core/disassembler.h"
-#include "core/elf_reader.h"
 #include "core/endian.h"
 #include "core/game_config.h"
 #include "core/mips.h"
-#include "core/relocation_applier.h"
+#include "core/rom.h"
 #include "core/symbol_registry.h"
 #include "core/toolchain.h"
 
 namespace rom_nom_nom {
 
-namespace {
-
-std::filesystem::path ResolveRepoRoot(const std::filesystem::path& configured_root) {
-  if (!configured_root.empty()) {
-    return configured_root;
-  }
-  const char* ws_dir = std::getenv("BUILD_WORKSPACE_DIRECTORY");
-  if (ws_dir != nullptr && *ws_dir != '\0') {
-    return ws_dir;
-  }
-  std::filesystem::path cur = std::filesystem::current_path();
-  while (!cur.empty()) {
-    std::error_code ec;
-    if (std::filesystem::exists(cur / "MODULE.bazel", ec) ||
-        std::filesystem::exists(cur / "WORKSPACE", ec)) {
-      return cur;
-    }
-    auto parent = cur.parent_path();
-    if (parent == cur) {
-      break;
-    }
-    cur = parent;
-  }
-  return std::filesystem::current_path();
-}
-
-}  // namespace
-
 TargetExtractor::TargetExtractor(TargetExtractorOptions options, const GameConfig* config,
                                  const SymbolIndex* symbols)
     : options_(std::move(options)), config_(config), symbols_(symbols) {
-  options_.repo_root = ResolveRepoRoot(options_.repo_root);
+  options_.repo_root = FindRepoRoot(options_.repo_root);
 }
 
 absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
     TargetExtractorOptions options) {
-  options.repo_root = ResolveRepoRoot(options.repo_root);
+  options.repo_root = FindRepoRoot(options.repo_root);
   std::unique_ptr<GameConfig> owned_cfg;
   std::unique_ptr<SymbolIndex> owned_syms;
 
@@ -76,6 +45,13 @@ absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
       !options.config_path.empty()
           ? options.config_path
           : (options.repo_root / "config" / absl::StrCat(options.game_name, ".textproto"));
+  if (!std::filesystem::exists(cfg_path)) {
+    std::filesystem::path alt_cfg =
+        options.repo_root / "configs" / absl::StrCat(options.game_name, ".textproto");
+    if (std::filesystem::exists(alt_cfg)) {
+      cfg_path = alt_cfg;
+    }
+  }
   if (std::filesystem::exists(cfg_path)) {
     auto cfg_or = LoadGameConfig(cfg_path);
     if (cfg_or.ok()) {
@@ -83,38 +59,17 @@ absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
     }
   }
 
+  SymbolLoadOptions sym_opts{
+      .config = owned_cfg.get(),
+      .repo_root = options.repo_root,
+      .game_name = options.game_name,
+  };
   if (!options.symbols_path.empty() && std::filesystem::exists(options.symbols_path)) {
-    auto syms_or = SymbolIndex::LoadFromTextproto(options.symbols_path);
-    if (syms_or.ok()) {
-      owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
-    }
-  } else if (owned_cfg != nullptr && owned_cfg->symbols_size() > 0) {
-    auto syms_or = SymbolIndex::FromGameConfig(*owned_cfg);
-    if (syms_or.ok()) {
-      owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
-    }
-  } else if (owned_cfg != nullptr && owned_cfg->symbol_files_size() > 0) {
-    for (const auto& sym_file : owned_cfg->symbol_files()) {
-      std::filesystem::path p(sym_file);
-      std::filesystem::path resolved = p.is_relative() ? (options.repo_root / p) : p;
-      if (std::filesystem::exists(resolved)) {
-        auto syms_or = SymbolIndex::LoadFromTextproto(resolved);
-        if (syms_or.ok()) {
-          owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
-          break;
-        }
-      }
-    }
+    sym_opts.symbols_path = options.symbols_path;
   }
-  if (owned_syms == nullptr) {
-    std::filesystem::path sym_proto_path =
-        options.repo_root / "symbols" / absl::StrCat(options.game_name, ".textproto");
-    if (std::filesystem::exists(sym_proto_path)) {
-      auto syms_or = SymbolIndex::LoadFromTextproto(sym_proto_path);
-      if (syms_or.ok()) {
-        owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
-      }
-    }
+  auto syms_or = LoadSymbolIndex(sym_opts);
+  if (syms_or.ok() && !syms_or->Empty()) {
+    owned_syms = std::make_unique<SymbolIndex>(std::move(*syms_or));
   }
 
   auto extractor = std::make_unique<TargetExtractor>(options, owned_cfg.get(), owned_syms.get());
@@ -124,31 +79,9 @@ absl::StatusOr<std::unique_ptr<TargetExtractor>> TargetExtractor::Create(
 }
 
 absl::StatusOr<uint32_t> TargetExtractor::ResolveVram(std::string_view func_name_or_addr) const {
-  if (symbols_ != nullptr) {
-    const auto* entry = symbols_->FindByName(func_name_or_addr);
-    if (entry != nullptr) {
-      return entry->address();
-    }
-  }
-
-  std::string_view addr_sv = func_name_or_addr;
-  if (absl::ConsumePrefix(&addr_sv, "func_")) {
-    uint32_t addr = 0;
-    if (absl::SimpleHexAtoi(addr_sv, &addr)) {
-      return addr;
-    }
-  }
-
-  if (absl::ConsumePrefix(&addr_sv, "0x") || absl::ConsumePrefix(&addr_sv, "0X")) {
-    uint32_t addr = 0;
-    if (absl::SimpleHexAtoi(addr_sv, &addr)) {
-      return addr;
-    }
-  }
-
-  uint32_t direct_addr = 0;
-  if (func_name_or_addr.size() == 8 && absl::SimpleHexAtoi(func_name_or_addr, &direct_addr)) {
-    return direct_addr;
+  auto resolved = ResolveSymbolOrSynthesizedAddress(func_name_or_addr, symbols_);
+  if (resolved.has_value()) {
+    return *resolved;
   }
 
   return absl::NotFoundError(absl::StrFormat(
@@ -157,11 +90,9 @@ absl::StatusOr<uint32_t> TargetExtractor::ResolveVram(std::string_view func_name
 
 absl::StatusOr<uint32_t> TargetExtractor::VramToRomOffset(uint32_t vram) const {
   if (config_ != nullptr) {
-    for (const auto& seg : config_->segments()) {
-      uint32_t seg_len = seg.rom_end() - seg.rom_start();
-      if (vram >= seg.vram() && vram < seg.vram() + seg_len) {
-        return seg.rom_start() + (vram - seg.vram());
-      }
+    auto offset = rom_nom_nom::VramToRomOffset(*config_, vram);
+    if (offset.has_value()) {
+      return *offset;
     }
   }
 
@@ -198,9 +129,10 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromRom(
 
   size_t slice_size = rom_bytes.size() - rom_offset;
   if (config_ != nullptr) {
-    for (const auto& seg : config_->segments()) {
-      if (rom_offset >= seg.rom_start() && rom_offset < seg.rom_end()) {
-        slice_size = seg.rom_end() - rom_offset;
+    for (const auto& seg : ResolveSegments(*config_, rom_bytes.size())) {
+      if (rom_offset >= seg.rom_start && rom_offset < seg.rom_end &&
+          seg.rom_end <= rom_bytes.size()) {
+        slice_size = seg.rom_end - rom_offset;
         break;
       }
     }
@@ -352,143 +284,24 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractFromAsm(std::string_view 
 absl::StatusOr<CompiledCandidateFunction> TargetExtractor::CompileCandidateFunction(
     const std::filesystem::path& source_file, std::string_view func_name,
     uint32_t target_vram) const {
-  std::filesystem::path resolved_source = source_file;
-  if (resolved_source.is_relative()) {
-    resolved_source = options_.repo_root / resolved_source;
-  }
-  std::error_code ec;
-  if (!std::filesystem::exists(resolved_source, ec)) {
-    return absl::NotFoundError(
-        absl::StrFormat("Specified source file does not exist: %s", source_file.string()));
-  }
-
-  auto tc_or = Toolchain::Discover({
+  CandidateCompiler compiler({
       .repo_root = options_.repo_root,
-      .mode = ToolchainMode::kOriginal,
+      .game_name = options_.game_name,
+      .config = config_,
+      .symbols = symbols_,
   });
-  if (!tc_or.ok()) {
-    return tc_or.status();
-  }
-  Compiler compiler(*tc_or);
+  return compiler.CompileFunction(source_file, func_name, target_vram);
+}
 
-  std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
-  if (config_ != nullptr) {
-    const auto& c_flags_map = config_->c_flags();
-    auto it = c_flags_map.find(resolved_source.stem().string());
-    if (it != c_flags_map.end()) {
-      flags.assign(it->second.flags().begin(), it->second.flags().end());
-    } else {
-      auto def_it = c_flags_map.find("default");
-      if (def_it != c_flags_map.end()) {
-        flags.assign(def_it->second.flags().begin(), def_it->second.flags().end());
-      }
-    }
+absl::Span<const uint8_t> TargetExtractor::RomData() const {
+  if (cached_rom_.has_value()) {
+    return cached_rom_->Data();
   }
-
-  std::filesystem::path asm_dir = options_.repo_root / "bazel-bin" / "asm" / options_.game_name;
-  if (!std::filesystem::exists(asm_dir, ec)) {
-    asm_dir = options_.repo_root / "asm" / options_.game_name;
-  }
-
-  std::vector<std::filesystem::path> includes;
-  if (config_ != nullptr && config_->include_dirs_size() > 0) {
-    for (const auto& dir : config_->include_dirs()) {
-      std::filesystem::path p(dir);
-      includes.push_back(p.is_relative() ? (options_.repo_root / p) : p);
-    }
-  } else {
-    includes = {
-        options_.repo_root,
-        options_.repo_root / "src" / options_.game_name,
-        options_.repo_root / "src" / "c" / options_.game_name,
-        options_.repo_root / "src" / "cc" / options_.game_name,
-    };
-  }
-  includes.push_back(asm_dir);
-  includes.push_back(options_.repo_root / "bazel-bin");
-  if (asm_dir.has_parent_path()) {
-    includes.push_back(asm_dir.parent_path());
-  }
-
-  std::filesystem::path macro_inc;
-  if (config_ != nullptr && !config_->macro_inc().empty()) {
-    std::filesystem::path p(config_->macro_inc());
-    macro_inc = p.is_relative() ? (options_.repo_root / p) : p;
-  } else {
-    macro_inc = FindMacroInc(options_.repo_root, options_.game_name);
-  }
-
-  std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
-  std::filesystem::path temp_obj =
-      temp_dir / absl::StrCat("diff_", resolved_source.stem().string(), "_", func_name, ".o");
-
-  auto compile_status = compiler.CompileC({
-      .src_file = resolved_source,
-      .out_obj = temp_obj,
-      .opt_flags = flags,
-      .include_dirs = includes,
-      .macro_inc = macro_inc,
-  });
-  if (!compile_status.ok()) {
-    return absl::InternalError(absl::StrCat("Compilation failed for ",
-                                            resolved_source.filename().string(), ":\n",
-                                            compile_status.message()));
-  }
-
-  auto reader_or = ElfReader::LoadFromFile(temp_obj);
-  std::filesystem::remove(temp_obj, ec);
-  if (!reader_or.ok()) {
-    return reader_or.status();
-  }
-
-  auto func_or = reader_or->ExtractFunction(func_name);
-  if (!func_or.ok()) {
-    return absl::NotFoundError(
-        absl::StrFormat("Function '%s' not found in compiled object file %s: %s", func_name,
-                        resolved_source.filename().string(), func_or.status().message()));
-  }
-  const ElfFunction& matched_elf_func = *func_or;
-
-  CompiledCandidateFunction out;
-  out.section_offset = matched_elf_func.section_offset;
-  out.size = matched_elf_func.size;
-
-  uint32_t text_base_vram = target_vram - matched_elf_func.section_offset;
-  auto symbol_lookup = [&](std::string_view name) -> std::optional<uint32_t> {
-    if (name == ".text") {
-      return text_base_vram;
-    }
-    if (symbols_ != nullptr) {
-      const auto* entry = symbols_->FindByName(name);
-      if (entry != nullptr) {
-        return entry->address();
-      }
-    }
-    size_t last_underscore = name.rfind('_');
-    if (last_underscore != std::string_view::npos && last_underscore + 1 < name.size() &&
-        name.size() - (last_underscore + 1) == 8) {
-      uint32_t addr = 0;
-      if (absl::SimpleHexAtoi(name.substr(last_underscore + 1), &addr)) {
-        return addr;
-      }
-    }
-    return std::nullopt;
-  };
-  RelocationApplyResult applied = RelocationApplier::Apply(matched_elf_func, symbol_lookup);
-  out.patched_words = std::move(applied.patched_words);
-  out.instructions.reserve(out.patched_words.size());
-  for (size_t i = 0; i < out.patched_words.size(); ++i) {
-    auto inst_or =
-        DecodeInstruction(out.patched_words[i], target_vram + static_cast<uint32_t>(i * 4));
-    if (inst_or.ok()) {
-      out.instructions.push_back(*inst_or);
-    }
-  }
-  return out;
+  return absl::MakeConstSpan(cached_rom_bytes_);
 }
 
 void TargetExtractor::EnsureRomLoadedAndPrescanned() const {
-  if (!cached_rom_bytes_.empty()) {
+  if (cached_rom_.has_value() || !cached_rom_bytes_.empty()) {
     return;
   }
   std::filesystem::path rom_path =
@@ -496,27 +309,34 @@ void TargetExtractor::EnsureRomLoadedAndPrescanned() const {
           ? options_.rom_path
           : (options_.repo_root / "roms" / absl::StrCat(options_.game_name, ".z64"));
   if (std::filesystem::exists(rom_path)) {
-    std::ifstream file(rom_path, std::ios::binary | std::ios::ate);
-    if (file.is_open()) {
-      std::streamsize size = file.tellg();
-      file.seekg(0, std::ios::beg);
-      cached_rom_bytes_.resize(size);
-      file.read(reinterpret_cast<char*>(cached_rom_bytes_.data()), size);
+    auto rom_or = Rom::OpenFile(rom_path);
+    if (rom_or.ok()) {
+      cached_rom_ = std::move(*rom_or);
+    } else {
+      std::ifstream ifs(rom_path, std::ios::binary | std::ios::ate);
+      if (ifs.is_open()) {
+        std::streamsize size = ifs.tellg();
+        if (size > 0) {
+          ifs.seekg(0, std::ios::beg);
+          cached_rom_bytes_.resize(static_cast<size_t>(size));
+          ifs.read(reinterpret_cast<char*>(cached_rom_bytes_.data()), size);
+        }
+      }
     }
   }
 
-  if (cached_rom_bytes_.empty()) {
+  absl::Span<const uint8_t> rom_data = RomData();
+  if (rom_data.empty()) {
     return;
   }
 
   if (config_ != nullptr) {
-    for (const auto& seg : config_->segments()) {
-      if (seg.type() == SEGMENT_CODE && seg.vram() != 0 && seg.rom_end() > seg.rom_start() &&
-          seg.rom_end() <= cached_rom_bytes_.size()) {
-        absl::Span<const uint8_t> code_span(cached_rom_bytes_.data() + seg.rom_start(),
-                                            seg.rom_end() - seg.rom_start());
+    for (const auto& seg : ResolveSegments(*config_, rom_data.size())) {
+      if (seg.type == SEGMENT_CODE && seg.vram_start != 0 && seg.RomSize() > 0 &&
+          seg.rom_end <= rom_data.size()) {
+        absl::Span<const uint8_t> code_span = rom_data.subspan(seg.rom_start, seg.RomSize());
         Disassembler disasm(symbols_);
-        disasm.PreScanCode(code_span, seg.vram());
+        disasm.PreScanCode(code_span, seg.vram_start);
         for (uint32_t ep : disasm.KnownEntrypoints()) {
           known_entrypoints_.insert(ep);
         }
@@ -528,8 +348,9 @@ void TargetExtractor::EnsureRomLoadedAndPrescanned() const {
 absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
     std::string_view func_name_or_addr) const {
   EnsureRomLoadedAndPrescanned();
-  if (!cached_rom_bytes_.empty()) {
-    auto target_or = ExtractFromRom(cached_rom_bytes_, func_name_or_addr);
+  absl::Span<const uint8_t> rom_data = RomData();
+  if (!rom_data.empty()) {
+    auto target_or = ExtractFromRom(rom_data, func_name_or_addr);
     if (target_or.ok()) {
       return target_or;
     }
@@ -540,7 +361,8 @@ absl::StatusOr<TargetFunction> TargetExtractor::ExtractTarget(
 
 std::optional<uint32_t> TargetExtractor::ReadRomWord(uint32_t vram) const {
   EnsureRomLoadedAndPrescanned();
-  if (cached_rom_bytes_.empty()) {
+  absl::Span<const uint8_t> rom_data = RomData();
+  if (rom_data.empty()) {
     return std::nullopt;
   }
 
@@ -549,11 +371,10 @@ std::optional<uint32_t> TargetExtractor::ReadRomWord(uint32_t vram) const {
     return std::nullopt;
   }
   uint32_t offset = *offset_or;
-  if (offset + 4 > cached_rom_bytes_.size()) {
+  if (offset + 4 > rom_data.size()) {
     return std::nullopt;
   }
-
-  return ReadBigEndian32(cached_rom_bytes_, offset);
+  return ReadBigEndian32(rom_data.data() + offset);
 }
 
 }  // namespace rom_nom_nom

@@ -119,6 +119,9 @@ cc_library(
     hdrs = ["sha1.h"],
     copts = ["-std=c++20"],
     deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
     ],
@@ -387,11 +390,33 @@ cc_test(
 )
 
 cc_library(
+    name = "candidate_compiler",
+    srcs = ["candidate_compiler.cc"],
+    hdrs = ["candidate_compiler.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":compiler",
+        ":elf_reader",
+        ":game_config",
+        ":mips",
+        ":relocation_applier",
+        ":symbol_registry",
+        ":toolchain",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
     name = "target_extractor",
     srcs = ["target_extractor.cc"],
     hdrs = ["target_extractor.h"],
     copts = ["-std=c++20"],
     deps = [
+        ":candidate_compiler",
         ":compiler",
         ":disassembler",
         ":elf_reader",
@@ -399,6 +424,7 @@ cc_library(
         ":game_config",
         ":mips",
         ":relocation_applier",
+        ":rom",
         ":symbol_registry",
         ":toolchain",
         "@abseil-cpp//absl/container:flat_hash_set",
