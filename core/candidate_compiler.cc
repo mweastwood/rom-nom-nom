@@ -93,7 +93,9 @@ absl::StatusOr<CompiledCandidateFunction> CandidateCompiler::CompileFunction(
     macro_inc = FindMacroInc(options_.repo_root, options_.game_name);
   }
 
-  std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
+  std::filesystem::path temp_dir = resolved_source.has_parent_path()
+                                       ? resolved_source.parent_path()
+                                       : std::filesystem::temp_directory_path();
   std::filesystem::path temp_obj =
       temp_dir / absl::StrCat("diff_", resolved_source.stem().string(), "_", func_name, ".o");
 

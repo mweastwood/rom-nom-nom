@@ -15,6 +15,7 @@
 #include "core/symbol_registry.h"
 #include "core/target_extractor.h"
 #include "differ/sequence_aligner.h"
+#include "fuzzer/differential_fuzzer.h"
 
 namespace rom_nom_nom {
 

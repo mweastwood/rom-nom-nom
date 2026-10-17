@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,6 +42,7 @@ struct TunerPipelineOptions {
   FlagExplorerOptions flag_options;
   size_t max_ast_candidates_per_round = 64;
   size_t max_rounds = 4;
+  size_t num_threads = 0;
 };
 
 struct FunctionTuneResult {
@@ -100,11 +102,13 @@ class TunerPipeline {
   absl::StatusOr<FunctionTuneResult> TuneLoadedFunctionAst(const TargetFunction& target,
                                                            const FunctionDeclaration& baseline_ast,
                                                            const CTranslationUnit* parent_tu,
-                                                           std::string_view module_name);
+                                                           std::string_view module_name,
+                                                           bool emit_formatted_c = true);
 
   TunerPipelineOptions options_;
   std::unique_ptr<LifterPipeline> lifter_;
   TuningCacheStore cache_store_;
+  mutable std::mutex cache_mutex_;
 };
 
 }  // namespace rom_nom_nom

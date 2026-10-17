@@ -26,14 +26,33 @@ bool IsCompilerIntrinsic(std::string_view name) {
   return absl::StartsWith(name, "__n64_") || absl::StartsWith(name, "__builtin_");
 }
 
-std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(const CExpression& expr,
-                                                         const std::set<std::string>& array_symbols,
-                                                         const std::set<std::string>& local_vars) {
+std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
+    const CExpression& expr, const std::set<std::string>& array_symbols,
+    const std::set<std::string>& local_vars, const std::map<std::string, CType>& module_data_types,
+    const std::set<std::string>& external_function_names) {
   switch (expr.Kind()) {
     case CExpressionKind::kIdentifier: {
       const auto& id = static_cast<const IdentifierExpression&>(expr);
-      if (local_vars.count(id.Name()) == 0 && array_symbols.count(id.Name()) > 0) {
-        return CExpression::ArrayIndex(expr.Clone(), CExpression::Integer(0));
+      if (local_vars.count(id.Name()) == 0) {
+        if (id.SymbolType().has_value() && !id.IsArraySymbol()) {
+          bool is_func = external_function_names.count(id.Name()) > 0;
+          auto type_it = module_data_types.find(id.Name());
+          bool type_conflict =
+              is_func || (type_it != module_data_types.end() &&
+                          type_it->second.ToString() != id.SymbolType()->ToString());
+          if (type_conflict) {
+            std::unique_ptr<CExpression> addr =
+                (!is_func && array_symbols.count(id.Name()) > 0)
+                    ? CExpression::Identifier(id.Name())
+                    : CExpression::Unary("&", CExpression::Identifier(id.Name()));
+            return CExpression::Unary(
+                "*", CExpression::Cast(id.SymbolType()->MakePointer(), std::move(addr)));
+          }
+        }
+        if (array_symbols.count(id.Name()) > 0) {
+          return CExpression::ArrayIndex(CExpression::Identifier(id.Name()),
+                                         CExpression::Integer(0));
+        }
       }
       return expr.Clone();
     }
@@ -42,129 +61,182 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(const CExpression& expr
       if (u.IsPrefix() && u.Op() == "&" && u.Operand().Kind() == CExpressionKind::kIdentifier) {
         return expr.Clone();
       }
-      return CExpression::Unary(u.Op(),
-                                NormalizeArraySymbolsInExpr(u.Operand(), array_symbols, local_vars),
-                                u.IsPrefix());
+      return CExpression::Unary(
+          u.Op(),
+          NormalizeArraySymbolsInExpr(u.Operand(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          u.IsPrefix());
     }
     case CExpressionKind::kArrayIndexExpression: {
       const auto& a = static_cast<const ArrayIndexExpression&>(expr);
-      std::unique_ptr<CExpression> new_arr =
-          a.Array().Kind() == CExpressionKind::kIdentifier
-              ? a.Array().Clone()
-              : NormalizeArraySymbolsInExpr(a.Array(), array_symbols, local_vars);
+      std::unique_ptr<CExpression> new_idx = NormalizeArraySymbolsInExpr(
+          a.Index(), array_symbols, local_vars, module_data_types, external_function_names);
+      if (a.Array().Kind() == CExpressionKind::kIdentifier) {
+        const auto& arr_id = static_cast<const IdentifierExpression&>(a.Array());
+        if (local_vars.count(arr_id.Name()) == 0 && arr_id.SymbolType().has_value()) {
+          bool is_func = external_function_names.count(arr_id.Name()) > 0;
+          auto type_it = module_data_types.find(arr_id.Name());
+          bool type_conflict =
+              is_func || (type_it != module_data_types.end() &&
+                          type_it->second.ToString() != arr_id.SymbolType()->ToString());
+          if (type_conflict) {
+            std::unique_ptr<CExpression> addr =
+                (!is_func && array_symbols.count(arr_id.Name()) > 0)
+                    ? CExpression::Identifier(arr_id.Name())
+                    : CExpression::Unary("&", CExpression::Identifier(arr_id.Name()));
+            return CExpression::ArrayIndex(
+                CExpression::Cast(arr_id.SymbolType()->MakePointer(), std::move(addr)),
+                std::move(new_idx));
+          }
+        }
+        return CExpression::ArrayIndex(a.Array().Clone(), std::move(new_idx));
+      }
       return CExpression::ArrayIndex(
-          std::move(new_arr), NormalizeArraySymbolsInExpr(a.Index(), array_symbols, local_vars));
+          NormalizeArraySymbolsInExpr(a.Array(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          std::move(new_idx));
     }
     case CExpressionKind::kBinaryExpression: {
       const auto& b = static_cast<const BinaryExpression&>(expr);
-      return CExpression::Binary(b.Op(),
-                                 NormalizeArraySymbolsInExpr(b.Lhs(), array_symbols, local_vars),
-                                 NormalizeArraySymbolsInExpr(b.Rhs(), array_symbols, local_vars));
+      return CExpression::Binary(
+          b.Op(),
+          NormalizeArraySymbolsInExpr(b.Lhs(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          NormalizeArraySymbolsInExpr(b.Rhs(), array_symbols, local_vars, module_data_types,
+                                      external_function_names));
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& a = static_cast<const AssignmentExpression&>(expr);
       return CExpression::Assignment(
-          a.Op(), NormalizeArraySymbolsInExpr(a.Lhs(), array_symbols, local_vars),
-          NormalizeArraySymbolsInExpr(a.Rhs(), array_symbols, local_vars));
+          a.Op(),
+          NormalizeArraySymbolsInExpr(a.Lhs(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          NormalizeArraySymbolsInExpr(a.Rhs(), array_symbols, local_vars, module_data_types,
+                                      external_function_names));
     }
     case CExpressionKind::kCallExpression: {
       const auto& c = static_cast<const CallExpression&>(expr);
       std::vector<std::unique_ptr<CExpression>> args;
       args.reserve(c.Arguments().size());
       for (const auto& arg : c.Arguments()) {
-        args.push_back(NormalizeArraySymbolsInExpr(*arg, array_symbols, local_vars));
+        args.push_back(NormalizeArraySymbolsInExpr(*arg, array_symbols, local_vars,
+                                                   module_data_types, external_function_names));
       }
       std::unique_ptr<CExpression> new_callee =
           c.Callee().Kind() == CExpressionKind::kIdentifier
               ? c.Callee().Clone()
-              : NormalizeArraySymbolsInExpr(c.Callee(), array_symbols, local_vars);
+              : NormalizeArraySymbolsInExpr(c.Callee(), array_symbols, local_vars,
+                                            module_data_types, external_function_names);
       return CExpression::Call(std::move(new_callee), std::move(args));
     }
     case CExpressionKind::kCastExpression: {
       const auto& c = static_cast<const CastExpression&>(expr);
-      return CExpression::Cast(c.TargetType(),
-                               NormalizeArraySymbolsInExpr(c.Operand(), array_symbols, local_vars));
+      return CExpression::Cast(
+          c.TargetType(), NormalizeArraySymbolsInExpr(c.Operand(), array_symbols, local_vars,
+                                                      module_data_types, external_function_names));
     }
     case CExpressionKind::kMemberAccessExpression: {
       const auto& m = static_cast<const MemberAccessExpression&>(expr);
       return CExpression::MemberAccess(
-          NormalizeArraySymbolsInExpr(m.Object(), array_symbols, local_vars), m.MemberName(),
-          m.IsArrow());
+          NormalizeArraySymbolsInExpr(m.Object(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          m.MemberName(), m.IsArrow());
     }
     case CExpressionKind::kTernaryExpression: {
       const auto& t = static_cast<const TernaryExpression&>(expr);
       return CExpression::Ternary(
-          NormalizeArraySymbolsInExpr(t.Condition(), array_symbols, local_vars),
-          NormalizeArraySymbolsInExpr(t.TrueExpression(), array_symbols, local_vars),
-          NormalizeArraySymbolsInExpr(t.FalseExpression(), array_symbols, local_vars));
+          NormalizeArraySymbolsInExpr(t.Condition(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          NormalizeArraySymbolsInExpr(t.TrueExpression(), array_symbols, local_vars,
+                                      module_data_types, external_function_names),
+          NormalizeArraySymbolsInExpr(t.FalseExpression(), array_symbols, local_vars,
+                                      module_data_types, external_function_names));
     }
     default:
       return expr.Clone();
   }
 }
 
-std::unique_ptr<CStatement> NormalizeArraySymbolsInStmt(const CStatement& stmt,
-                                                        const std::set<std::string>& array_symbols,
-                                                        const std::set<std::string>& local_vars) {
+std::unique_ptr<CStatement> NormalizeArraySymbolsInStmt(
+    const CStatement& stmt, const std::set<std::string>& array_symbols,
+    const std::set<std::string>& local_vars, const std::map<std::string, CType>& module_data_types,
+    const std::set<std::string>& external_function_names) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement: {
       const auto& comp = static_cast<const CompoundStatement&>(stmt);
       std::vector<std::unique_ptr<CStatement>> stmts;
       stmts.reserve(comp.Statements().size());
       for (const auto& s : comp.Statements()) {
-        stmts.push_back(NormalizeArraySymbolsInStmt(*s, array_symbols, local_vars));
+        stmts.push_back(NormalizeArraySymbolsInStmt(*s, array_symbols, local_vars,
+                                                    module_data_types, external_function_names));
       }
       return std::make_unique<CompoundStatement>(std::move(stmts));
     }
     case CStatementKind::kExpressionStatement:
       return CStatement::Expression(NormalizeArraySymbolsInExpr(
-          static_cast<const ExpressionStatement&>(stmt).Expression(), array_symbols, local_vars));
+          static_cast<const ExpressionStatement&>(stmt).Expression(), array_symbols, local_vars,
+          module_data_types, external_function_names));
     case CStatementKind::kVariableDeclarationStatement: {
       const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
       std::unique_ptr<CExpression> init =
           vd.Initializer() != nullptr
-              ? NormalizeArraySymbolsInExpr(*vd.Initializer(), array_symbols, local_vars)
+              ? NormalizeArraySymbolsInExpr(*vd.Initializer(), array_symbols, local_vars,
+                                            module_data_types, external_function_names)
               : nullptr;
       return CStatement::VariableDeclaration(vd.Type(), vd.Name(), std::move(init), vd.ArraySize());
     }
     case CStatementKind::kIfStatement: {
       const auto& ifs = static_cast<const IfStatement&>(stmt);
       return CStatement::If(
-          NormalizeArraySymbolsInExpr(ifs.Condition(), array_symbols, local_vars),
-          NormalizeArraySymbolsInStmt(ifs.ThenBranch(), array_symbols, local_vars),
+          NormalizeArraySymbolsInExpr(ifs.Condition(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          NormalizeArraySymbolsInStmt(ifs.ThenBranch(), array_symbols, local_vars,
+                                      module_data_types, external_function_names),
           ifs.ElseBranch() != nullptr
-              ? NormalizeArraySymbolsInStmt(*ifs.ElseBranch(), array_symbols, local_vars)
+              ? NormalizeArraySymbolsInStmt(*ifs.ElseBranch(), array_symbols, local_vars,
+                                            module_data_types, external_function_names)
               : nullptr);
     }
     case CStatementKind::kWhileStatement: {
       const auto& ws = static_cast<const WhileStatement&>(stmt);
       return CStatement::While(
-          NormalizeArraySymbolsInExpr(ws.Condition(), array_symbols, local_vars),
-          NormalizeArraySymbolsInStmt(ws.Body(), array_symbols, local_vars));
+          NormalizeArraySymbolsInExpr(ws.Condition(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          NormalizeArraySymbolsInStmt(ws.Body(), array_symbols, local_vars, module_data_types,
+                                      external_function_names));
     }
     case CStatementKind::kDoWhileStatement: {
       const auto& dws = static_cast<const DoWhileStatement&>(stmt);
       return CStatement::DoWhile(
-          NormalizeArraySymbolsInStmt(dws.Body(), array_symbols, local_vars),
-          NormalizeArraySymbolsInExpr(dws.Condition(), array_symbols, local_vars));
+          NormalizeArraySymbolsInStmt(dws.Body(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          NormalizeArraySymbolsInExpr(dws.Condition(), array_symbols, local_vars, module_data_types,
+                                      external_function_names));
     }
     case CStatementKind::kForStatement: {
       const auto& fs = static_cast<const ForStatement&>(stmt);
       return CStatement::For(
-          fs.Init() != nullptr ? NormalizeArraySymbolsInStmt(*fs.Init(), array_symbols, local_vars)
-                               : nullptr,
-          fs.Condition() != nullptr
-              ? NormalizeArraySymbolsInExpr(*fs.Condition(), array_symbols, local_vars)
+          fs.Init() != nullptr
+              ? NormalizeArraySymbolsInStmt(*fs.Init(), array_symbols, local_vars,
+                                            module_data_types, external_function_names)
               : nullptr,
-          fs.Step() != nullptr ? NormalizeArraySymbolsInExpr(*fs.Step(), array_symbols, local_vars)
-                               : nullptr,
-          NormalizeArraySymbolsInStmt(fs.Body(), array_symbols, local_vars));
+          fs.Condition() != nullptr
+              ? NormalizeArraySymbolsInExpr(*fs.Condition(), array_symbols, local_vars,
+                                            module_data_types, external_function_names)
+              : nullptr,
+          fs.Step() != nullptr
+              ? NormalizeArraySymbolsInExpr(*fs.Step(), array_symbols, local_vars,
+                                            module_data_types, external_function_names)
+              : nullptr,
+          NormalizeArraySymbolsInStmt(fs.Body(), array_symbols, local_vars, module_data_types,
+                                      external_function_names));
     }
     case CStatementKind::kReturnStatement: {
       const auto& rs = static_cast<const ReturnStatement&>(stmt);
       if (rs.ReturnValue() == nullptr) return CStatement::Return();
-      return CStatement::Return(
-          NormalizeArraySymbolsInExpr(*rs.ReturnValue(), array_symbols, local_vars));
+      return CStatement::Return(NormalizeArraySymbolsInExpr(*rs.ReturnValue(), array_symbols,
+                                                            local_vars, module_data_types,
+                                                            external_function_names));
     }
     case CStatementKind::kSwitchStatement: {
       const auto& ss = static_cast<const SwitchStatement&>(stmt);
@@ -176,12 +248,16 @@ std::unique_ptr<CStatement> NormalizeArraySymbolsInStmt(const CStatement& stmt,
         sc.is_default = c.is_default;
         if (c.body != nullptr) {
           sc.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
-              NormalizeArraySymbolsInStmt(*c.body, array_symbols, local_vars).release()));
+              NormalizeArraySymbolsInStmt(*c.body, array_symbols, local_vars, module_data_types,
+                                          external_function_names)
+                  .release()));
         }
         cases.push_back(std::move(sc));
       }
       return CStatement::Switch(
-          NormalizeArraySymbolsInExpr(ss.Condition(), array_symbols, local_vars), std::move(cases));
+          NormalizeArraySymbolsInExpr(ss.Condition(), array_symbols, local_vars, module_data_types,
+                                      external_function_names),
+          std::move(cases));
     }
     default:
       return stmt.Clone();
@@ -310,12 +386,16 @@ std::string CTranslationUnit::ToString() const {
     output += "\n";
   }
 
+  std::set<std::string> all_function_names = external_function_names;
+  all_function_names.insert(defined_function_names.begin(), defined_function_names.end());
+
   std::string combined_function_code;
   for (size_t i = 0; i < functions.size(); ++i) {
-    if (!array_data_symbols.empty()) {
+    if (functions.size() > 1 || !array_data_symbols.empty()) {
       auto norm_body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
           NormalizeArraySymbolsInStmt(functions[i].Body(), array_data_symbols,
-                                      per_func_symbols[i].local_variables)
+                                      per_func_symbols[i].local_variables, inferred_data_types,
+                                      all_function_names)
               .release()));
       FunctionDeclaration norm_fn(functions[i].ReturnType(), functions[i].Name(),
                                   functions[i].Parameters(), std::move(norm_body),

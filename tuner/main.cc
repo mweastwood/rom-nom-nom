@@ -33,6 +33,9 @@ ABSL_FLAG(bool, verify_fuzzer, true,
 ABSL_FLAG(bool, format, true, "Format generated C code using clang-format.");
 ABSL_FLAG(size_t, max_rounds, 4, "Maximum greedy AST mutation rounds per function.");
 ABSL_FLAG(size_t, max_candidates, 64, "Maximum AST mutation candidates per round.");
+ABSL_FLAG(size_t, max_flag_profiles, 24, "Maximum compiler flag profiles to explore per function.");
+ABSL_FLAG(size_t, threads, 0, "Number of worker threads (0 = hardware_concurrency).");
+ABSL_FLAG(bool, all_modules, false, "Tune all modules in the game.");
 
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
@@ -42,6 +45,8 @@ int main(int argc, char* argv[]) {
       "    tuner <function_name> [--game=<game>] [--cache_out=<path>]\n"
       "  Module tuning:\n"
       "    tuner --module=<module> [--game=<game>] [--cache_out=<path>]\n"
+      "  All modules tuning:\n"
+      "    tuner --all_modules [--game=<game>] [--cache_out=<path>]\n"
       "  Whole-game directory tuning:\n"
       "    tuner --lifted_dir=<dir> --output_dir=<dir> [--cache=<file>] [--nosearch_on_miss]");
 
@@ -65,6 +70,8 @@ int main(int argc, char* argv[]) {
   opts.format_with_clang = absl::GetFlag(FLAGS_format);
   opts.max_rounds = absl::GetFlag(FLAGS_max_rounds);
   opts.max_ast_candidates_per_round = absl::GetFlag(FLAGS_max_candidates);
+  opts.flag_options.max_profiles = absl::GetFlag(FLAGS_max_flag_profiles);
+  opts.num_threads = absl::GetFlag(FLAGS_threads);
 
   std::string func_name = absl::GetFlag(FLAGS_function);
   if (func_name.empty() && remaining_args.size() >= 2) {
@@ -73,6 +80,7 @@ int main(int argc, char* argv[]) {
   std::string module_name = absl::GetFlag(FLAGS_module);
   std::string output_path = absl::GetFlag(FLAGS_output);
   std::string output_dir = absl::GetFlag(FLAGS_output_dir);
+  bool all_modules = absl::GetFlag(FLAGS_all_modules);
 
   auto tuner_or = rom_nom_nom::TunerPipeline::Create(opts);
   if (!tuner_or.ok()) {
@@ -81,13 +89,17 @@ int main(int argc, char* argv[]) {
   }
   auto& tuner = *tuner_or;
 
-  if (!output_dir.empty()) {
-    auto files_or = tuner->TuneAllModules(output_dir);
+  if (!output_dir.empty() || all_modules) {
+    std::filesystem::path target_out_dir =
+        !output_dir.empty()
+            ? std::filesystem::path(output_dir)
+            : (std::filesystem::temp_directory_path() / absl::StrCat("tuned_all_", opts.game_name));
+    auto files_or = tuner->TuneAllModules(target_out_dir);
     if (!files_or.ok()) {
       std::cerr << "Failed to tune game modules: " << files_or.status().message() << "\n";
       return 1;
     }
-    std::cerr << "Successfully tuned " << files_or->size() << " artifact(s) to " << output_dir
+    std::cerr << "Successfully tuned " << files_or->size() << " artifact(s) to " << target_out_dir
               << "\n";
     return 0;
   }

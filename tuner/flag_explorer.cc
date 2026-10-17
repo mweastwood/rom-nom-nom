@@ -89,7 +89,9 @@ std::vector<std::vector<std::string>> FlagExplorer::GenerateCandidateFlags(
 
   if (options.explore_assembler_flags) {
     static constexpr std::string_view kAssemblerVariants[] = {
-        "-Wa,-g", "-Wa,-g,-V", "-Wa,-O2", "-Wa,-O1,-V", "-Wa,-O1", "-Wa,-O2,-V",
+        "-Wa,-g",
+        "-Wa,-O2",
+        "-Wa,-O1",
     };
     for (std::string_view wa : kAssemblerVariants) {
       add_candidate(ReplaceAssemblerFlag(seed, wa));
@@ -103,16 +105,15 @@ std::vector<std::vector<std::string>> FlagExplorer::GenerateCandidateFlags(
       add_candidate(with_opt);
       if (options.explore_assembler_flags) {
         add_candidate(ReplaceAssemblerFlag(with_opt, "-Wa,-O2"));
-        add_candidate(ReplaceAssemblerFlag(with_opt, "-Wa,-g,-V"));
       }
     }
   }
 
   if (options.explore_codegen_flags) {
     static constexpr std::string_view kCodegenFlags[] = {
-        "-fomit-frame-pointer", "-fno-strength-reduce", "-fforce-mem",
-        "-fforce-addr",         "-fno-schedule-insns",  "-fno-delayed-branch",
-        "-fcaller-saves",       "-fcse-follow-jumps",   "-fexpensive-optimizations",
+        "-fno-schedule-insns",  "-fno-delayed-branch", "-fomit-frame-pointer",
+        "-fno-strength-reduce", "-fforce-mem",         "-fforce-addr",
+        "-fcaller-saves",       "-fcse-follow-jumps",  "-fexpensive-optimizations",
     };
     for (std::string_view cg : kCodegenFlags) {
       std::vector<std::string> with_cg = seed;

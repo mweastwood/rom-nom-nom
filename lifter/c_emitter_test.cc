@@ -420,5 +420,53 @@ TEST(CEmitterTest, EmitTranslationUnitEmitsTypedAndArrayExternDataDeclarations) 
   EXPECT_THAT(emitted_code, HasSubstr("extern s32 g_word_table[];\n"));
 }
 
+TEST(CEmitterTest, EmitTranslationUnitResolvesConflictingGlobalSymbolTypesAcrossFunctions) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  // Function 1 uses g_shared_scalar as s16 and g_shared_array as s16[]
+  auto body1 = std::make_unique<CompoundStatement>();
+  body1->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", std::make_unique<IdentifierExpression>("g_shared_scalar", CType::S16()),
+      CExpression::Integer(10))));
+  body1->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::ArrayIndex(std::make_unique<IdentifierExpression>("g_shared_array", CType::S16(),
+                                                                     /*is_array_symbol=*/true),
+                              CExpression::Integer(1)),
+      CExpression::Integer(20))));
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "FuncOne", {}, std::move(body1)));
+
+  // Function 2 uses g_shared_scalar as conflicting u8 and g_shared_array as conflicting s32[]
+  auto body2 = std::make_unique<CompoundStatement>();
+  body2->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", std::make_unique<IdentifierExpression>("g_shared_scalar", CType::U8()),
+      CExpression::Integer(30))));
+  body2->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::ArrayIndex(std::make_unique<IdentifierExpression>("g_shared_array", CType::S32(),
+                                                                     /*is_array_symbol=*/true),
+                              CExpression::Integer(2)),
+      CExpression::Integer(40))));
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "FuncTwo", {}, std::move(body2)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  // The winning extern declarations use the resolved translation-unit-wide types
+  EXPECT_THAT(emitted_code, HasSubstr("extern u8 g_shared_scalar;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 g_shared_array[];\n"));
+
+  // Conflicting accesses in FuncOne are safely wrapped with pointer casts while FuncTwo accesses
+  // directly
+  EXPECT_THAT(emitted_code, HasSubstr("*(s16*)&g_shared_scalar = 10;"));
+  EXPECT_THAT(emitted_code, HasSubstr("((s16*)g_shared_array)[1] = 20;"));
+  EXPECT_THAT(emitted_code, HasSubstr("g_shared_scalar = 30;"));
+  EXPECT_THAT(emitted_code, HasSubstr("g_shared_array[2] = 40;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -214,6 +214,9 @@ bool CandidateScorer::VerifyEquivalence(const TargetFunction& target,
   if (target.raw_words.empty() || candidate_words.empty()) {
     return false;
   }
+  if (candidate_words == absl::MakeConstSpan(target.raw_words)) {
+    return true;
+  }
   fuzzer::DifferentialFuzzer diff_fuzzer;
   auto cases = fuzzer::DifferentialFuzzer::GenerateBoundaryCases();
   auto random_cases = fuzzer::DifferentialFuzzer::GenerateRandomCases(num_vectors, /*seed=*/42);
