@@ -50,5 +50,39 @@ TEST(CandidateScorerTest, ScoreInstructionsRecognizesBitExactAndPartialMatches) 
   EXPECT_TRUE(scorer.VerifyEquivalence(target, commuted_words));
 }
 
+TEST(CandidateScorerTest, ScoreInstructionsStripsTrailingSectionPaddingNops) {
+  std::vector<uint32_t> target_words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop (delay slot)
+  };
+  TargetFunction target;
+  target.name = "UnalignedTarget";
+  target.vram = 0x80025C08;  // Not 16-byte aligned in retail ROM
+  target.raw_words = target_words;
+  auto target_insts_or = DecodeSequence(target_words, target.vram);
+  ASSERT_TRUE(target_insts_or.ok());
+  target.instructions = *std::move(target_insts_or);
+
+  // Standalone compiled .text section is padded to 16-byte boundary (4 words = 16 bytes)
+  std::vector<uint32_t> compiled_words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop (delay slot)
+      0x00000000,  // nop (16-byte section alignment padding)
+  };
+  auto compiled_insts_or = DecodeSequence(compiled_words, target.vram);
+  ASSERT_TRUE(compiled_insts_or.ok());
+  std::vector<Instruction> compiled_insts = *std::move(compiled_insts_or);
+
+  CandidateScorer scorer;
+  CandidateScore score = scorer.ScoreInstructions(target, compiled_insts, compiled_words);
+  EXPECT_TRUE(score.raw_bit_exact);
+  EXPECT_TRUE(score.normalized_exact);
+  EXPECT_EQ(score.bit_exact_instructions, 3u);
+  EXPECT_EQ(score.compiled_instruction_count, 3u);
+  EXPECT_EQ(score.target_instruction_count, 3u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

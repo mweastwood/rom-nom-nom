@@ -1180,5 +1180,45 @@ TEST(AstConverterTest, ComputeBlockEntryStatesStepsDelaySlotBeforeCallInstructio
   EXPECT_THAT(code, Not(HasSubstr("v0 = temp_s0;")));
 }
 
+TEST(AstConverterTest, ComputeBlockEntryStatesInvalidatesCallerSavedArgumentsAcrossCallsIntoLoop) {
+  // Entry block sets $a0=1, $a1=2 and calls jal 0x80030000, then enters an infinite loop
+  // that loads a function pointer into $s0 and executes `jalr $s0; nop` without setting $a0/$a1.
+  // The indirect call inside the loop must NOT inherit stale $a0/$a1 from the pre-loop call.
+  std::vector<uint32_t> words = {
+      0x24040001,  // 00: addiu $a0, $zero, 1
+      0x24050002,  // 04: addiu $a1, $zero, 2
+      0x0C00C000,  // 08: jal   0x80030000
+      0x00000000,  // 0C: nop
+      // .L_loop (0x80020010):
+      0x3C108020,  // 10: lui   $s0, 0x8020
+      0x8E100000,  // 14: lw    $s0, 0x0000($s0)
+      0x0200F809,  // 18: jalr  $ra, $s0
+      0x00000000,  // 1C: nop
+      0x08008004,  // 20: j     0x80020010 (.L_loop)
+      0x00000000,  // 24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "IdleLoopIndirectCall";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("((void (*)())temp_s0)();"));
+  EXPECT_THAT(code, Not(HasSubstr("((void (*)())temp_s0)(1")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

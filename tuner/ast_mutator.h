@@ -19,6 +19,10 @@ class AstMutator {
   static std::vector<AstMutationStep> DiscoverMutations(const FunctionDeclaration& func,
                                                         size_t max_mutations = 64);
 
+  // Returns multi-step canonicalization preset sequences to evaluate as candidate starting points.
+  static std::vector<std::vector<AstMutationStep>> GenerateCanonicalPresets(
+      const FunctionDeclaration& func);
+
   // Applies a single `AstMutationStep` to a clone of `func` and returns the mutated AST.
   static FunctionDeclaration ApplyMutation(const FunctionDeclaration& func,
                                            const AstMutationStep& step);

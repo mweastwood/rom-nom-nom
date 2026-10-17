@@ -98,5 +98,70 @@ TEST(TunerPipelineTest, AppliesCachedAstMutationInO1WithoutSpawningCompiler) {
   std::filesystem::remove_all(temp_dir);
 }
 
+TEST(TunerPipelineTest, ExplicitCachePathDoesNotFallBackToDefaultGameConfigCache) {
+  std::filesystem::path temp_dir =
+      std::filesystem::temp_directory_path() / "tuner_pipeline_explicit_cache_test";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir / "config");
+  std::filesystem::create_directories(temp_dir / "asm" / "test-game");
+
+  std::filesystem::path config_path = temp_dir / "config" / "test-game.textproto";
+  {
+    std::ofstream out(config_path);
+    out << R"pb(
+      game_name: "test-game"
+      sha1: "0123456789abcdef0123456789abcdef01234567"
+      basename: "test-game"
+      segments {
+        name: "main"
+        type: SEGMENT_CODE
+        rom_start: 0x1000
+        rom_end: 0x1010
+        vram: 0x80025C00
+        subsegments { name: "code" type: SUBSEGMENT_C rom_start: 0x1000 vram: 0x80025C00 }
+      }
+      symbols { name: "AddArgs" address: 0x80025C00 type: SYMBOL_FUNC size: 8 }
+    )pb";
+  }
+
+  // Write a default `config/test-game.tuning.textproto` containing an entry
+  {
+    std::ofstream out(temp_dir / "config" / "test-game.tuning.textproto");
+    out << R"pb(
+      game_name: "test-game"
+      entries {
+        function_name: "AddArgs"
+        module_name: "code"
+        input_sha1: "dummy"
+        is_bit_exact: true
+      }
+    )pb";
+  }
+
+  std::filesystem::path rom_path = temp_dir / "test-game.z64";
+  {
+    std::vector<uint8_t> rom(0x1010, 0);
+    WriteBigEndian32(rom.data(), 0x80371240);
+    WriteBigEndian32(rom.data() + 0x1000, 0x00851021);
+    WriteBigEndian32(rom.data() + 0x1004, 0x03E00008);
+    std::ofstream out(rom_path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  }
+
+  TunerPipelineOptions opts;
+  opts.repo_root = temp_dir;
+  opts.game_name = "test-game";
+  opts.config_path = config_path;
+  opts.rom_path = rom_path;
+  opts.cache_path = temp_dir / "fresh_nonexistent_cache.textproto";
+  opts.search_on_miss = false;
+
+  auto tuner_or = TunerPipeline::Create(opts);
+  ASSERT_TRUE(tuner_or.ok()) << tuner_or.status();
+  EXPECT_EQ((*tuner_or)->CacheStore().Size(), 0u);
+
+  std::filesystem::remove_all(temp_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

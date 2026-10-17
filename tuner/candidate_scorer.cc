@@ -45,39 +45,91 @@ CandidateScorer::CandidateScorer(const TargetExtractor* extractor, const SymbolI
       symbols_(symbols != nullptr ? symbols
                                   : (extractor != nullptr ? extractor->Symbols() : nullptr)) {}
 
-CandidateScore CandidateScorer::ScoreInstructions(
-    const TargetFunction& target, absl::Span<const Instruction> compiled_instructions,
-    absl::Span<const uint32_t> patched_words) const {
-  const size_t target_len = target.instructions.size();
-  if (target_len >= 2 && compiled_instructions.size() > target_len &&
-      compiled_instructions.size() - target_len <= 3 && (compiled_instructions.size() % 4) == 0) {
-    bool all_trailing_nops = true;
-    for (size_t i = target_len; i < compiled_instructions.size(); ++i) {
-      if (!compiled_instructions[i].IsNop()) {
-        all_trailing_nops = false;
+namespace {
+
+size_t CountTrailingSectionPaddingNops(uint32_t start_vram, absl::Span<const Instruction> insts) {
+  if (insts.size() < 3 || ((start_vram + static_cast<uint32_t>(insts.size() * 4)) % 16) != 0) {
+    return 0;
+  }
+  for (size_t k = 1; k <= 3 && insts.size() >= k + 2; ++k) {
+    if (!insts[insts.size() - k].IsNop()) {
+      break;
+    }
+    const auto& term = insts[insts.size() - k - 2];
+    bool is_unconditional_exit =
+        term.IsReturn() || term.opcode == Opcode::kJ ||
+        (term.opcode == Opcode::kBeq && term.rs == Register::kZero && term.rt == Register::kZero);
+    if (!is_unconditional_exit) {
+      continue;
+    }
+    uint32_t pad_start_vram = insts[insts.size() - k].vram;
+    bool branch_targets_padding = false;
+    for (size_t i = 0; i <= insts.size() - k - 2; ++i) {
+      if (insts[i].IsBranch() && insts[i].BranchTarget() >= pad_start_vram) {
+        branch_targets_padding = true;
         break;
       }
     }
-    if (all_trailing_nops) {
-      compiled_instructions = compiled_instructions.subspan(0, target_len);
-      if (patched_words.size() >= target_len) {
-        patched_words = patched_words.subspan(0, target_len);
+    if (!branch_targets_padding) {
+      return k;
+    }
+  }
+  return 0;
+}
+
+}  // namespace
+
+CandidateScore CandidateScorer::ScoreInstructions(
+    const TargetFunction& target, absl::Span<const Instruction> compiled_instructions,
+    absl::Span<const uint32_t> patched_words) const {
+  absl::Span<const Instruction> target_insts = target.instructions;
+  absl::Span<const uint32_t> target_words = target.raw_words;
+
+  const size_t target_pad = CountTrailingSectionPaddingNops(target.vram, target_insts);
+  const size_t compiled_pad =
+      CountTrailingSectionPaddingNops(/*start_vram=*/0, compiled_instructions);
+
+  std::vector<Instruction> adjusted_compiled_insts;
+  std::vector<uint32_t> adjusted_patched_words;
+  if (compiled_pad > target_pad) {
+    const size_t excess = compiled_pad - target_pad;
+    if (compiled_instructions.size() > excess) {
+      compiled_instructions =
+          compiled_instructions.subspan(0, compiled_instructions.size() - excess);
+      if (patched_words.size() >= compiled_instructions.size()) {
+        patched_words = patched_words.subspan(0, compiled_instructions.size());
       }
+    }
+  } else if (compiled_pad < target_pad && !compiled_instructions.empty()) {
+    const size_t deficit = target_pad - compiled_pad;
+    adjusted_compiled_insts.assign(compiled_instructions.begin(), compiled_instructions.end());
+    adjusted_patched_words.assign(patched_words.begin(), patched_words.end());
+    for (size_t i = 0; i < deficit; ++i) {
+      Instruction nop_inst = target_insts.back();
+      nop_inst.vram = adjusted_compiled_insts.back().vram + 4;
+      adjusted_compiled_insts.push_back(nop_inst);
+      if (!adjusted_patched_words.empty()) {
+        adjusted_patched_words.push_back(0x00000000);
+      }
+    }
+    compiled_instructions = adjusted_compiled_insts;
+    if (!adjusted_patched_words.empty()) {
+      patched_words = adjusted_patched_words;
     }
   }
 
   FunctionDiffContext diff_ctx;
   diff_ctx.target_vram = target.vram;
   diff_ctx.target_size =
-      target.size > 0 ? target.size : static_cast<uint32_t>(target.instructions.size() * 4);
+      target.size > 0 ? target.size : static_cast<uint32_t>(target_insts.size() * 4);
   diff_ctx.compiled_vram = target.vram;
   diff_ctx.compiled_size = static_cast<uint32_t>(compiled_instructions.size() * 4);
 
   Normalizer normalizer(diff_ctx);
 
   std::vector<NormalizedInstruction> norm_target;
-  norm_target.reserve(target.instructions.size());
-  for (const auto& inst : target.instructions) {
+  norm_target.reserve(target_insts.size());
+  for (const auto& inst : target_insts) {
     norm_target.push_back(normalizer.NormalizeTarget(inst));
   }
 
@@ -99,10 +151,10 @@ CandidateScore CandidateScorer::ScoreInstructions(
   score.normalized_exact = alignment.stats.IsBitExactMatch();
   score.patched_words.assign(patched_words.begin(), patched_words.end());
 
-  if (!target.raw_words.empty() && patched_words.size() == target.raw_words.size()) {
+  if (!target_words.empty() && patched_words.size() == target_words.size()) {
     bool all_equal = true;
-    for (size_t i = 0; i < target.raw_words.size(); ++i) {
-      if (patched_words[i] != target.raw_words[i]) {
+    for (size_t i = 0; i < target_words.size(); ++i) {
+      if (patched_words[i] != target_words[i]) {
         all_equal = false;
         break;
       }

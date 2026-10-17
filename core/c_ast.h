@@ -64,7 +64,9 @@ class CExpression {
                                               bool is_unsigned = false);
   static std::unique_ptr<CExpression> Float(double value, bool is_float = true);
   static std::unique_ptr<CExpression> String(std::string value);
-  static std::unique_ptr<CExpression> Identifier(std::string name);
+  static std::unique_ptr<CExpression> Identifier(std::string name,
+                                                 std::optional<CType> symbol_type = std::nullopt,
+                                                 bool is_array_symbol = false);
   static std::unique_ptr<CExpression> Unary(std::string op, std::unique_ptr<CExpression> operand,
                                             bool is_prefix = true);
   static std::unique_ptr<CExpression> Binary(std::string op, std::unique_ptr<CExpression> lhs,
@@ -139,16 +141,24 @@ class StringLiteralExpression : public CExpression {
 // Identifier expression (e.g. variable name, global name).
 class IdentifierExpression : public CExpression {
  public:
-  explicit IdentifierExpression(std::string name) : name_(std::move(name)) {}
+  explicit IdentifierExpression(std::string name, std::optional<CType> symbol_type = std::nullopt,
+                                bool is_array_symbol = false)
+      : name_(std::move(name)),
+        symbol_type_(std::move(symbol_type)),
+        is_array_symbol_(is_array_symbol) {}
 
   CExpressionKind Kind() const override { return CExpressionKind::kIdentifier; }
   std::string ToString() const override;
   std::unique_ptr<CExpression> Clone() const override;
 
   const std::string& Name() const { return name_; }
+  const std::optional<CType>& SymbolType() const { return symbol_type_; }
+  bool IsArraySymbol() const { return is_array_symbol_; }
 
  private:
   std::string name_;
+  std::optional<CType> symbol_type_;
+  bool is_array_symbol_;
 };
 
 // Unary operator expression (e.g. -x, ~x, !x, *ptr, &x).
@@ -703,6 +713,8 @@ struct ReferencedSymbols {
   std::set<std::string> external_functions;  // Non-local callee names
   std::set<std::string> external_data;       // Non-local identifiers that are not callees
   std::map<std::string, CType> inferred_function_return_types;  // Inferred callee return types
+  std::map<std::string, CType> inferred_data_types;             // Inferred external data types
+  std::set<std::string> array_data_symbols;                     // External data used as arrays
 };
 
 // Traverses a FunctionDeclaration AST to semantically identify local variables and external symbol

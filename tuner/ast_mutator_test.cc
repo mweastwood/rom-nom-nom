@@ -96,5 +96,284 @@ TEST(AstMutatorTest, TogglesCompoundAssignmentAndInlinesSingleUseTemp) {
   EXPECT_TRUE(absl::StrContains(code, "return (a0 + 4);")) << code;
 }
 
+TEST(AstMutatorTest, LivenessAwareInlineAcrossOverwrittenTempAndHoist) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+  // v0 = a0 + 1;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("a0"), CExpression::Integer(1)))));
+  // v0 = v0 * 2; (single use of previous v0, and overwrites v0)
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("*", CExpression::Identifier("v0"), CExpression::Integer(2)))));
+  // temp_s0 = v0; (consumes first v0 chain)
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("v0"))));
+  // v0 = a1; (overwrites v0 again later in block)
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Identifier("a1"))));
+  body->AddStatement(CStatement::Return(
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Identifier("v0"))));
+
+  FunctionDeclaration func(CType::S32(), "ChainInline",
+                           {{CType::S32(), "a0"}, {CType::S32(), "a1"}}, std::move(body));
+
+  AstMutationStep step;
+  step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  step.set_site_index(0);
+  step.set_param(1);  // inline all
+
+  FunctionDeclaration mutated = AstMutator::ApplyMutation(func, step);
+  std::string code = mutated.ToString();
+  EXPECT_FALSE(absl::StrContains(code, "v0 =")) << code;
+  EXPECT_FALSE(absl::StrContains(code, "temp_s0 =")) << code;
+  EXPECT_TRUE(absl::StrContains(code, "return (((a0 + 1) * 2) + a1);")) << code;
+}
+
+TEST(AstMutatorTest, DirectTypedGlobalAndArrayPromotions) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32().MakePointer(), "temp_s1"));
+  // temp_s1 = &D_800B0000;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Unary("&", CExpression::Identifier("D_800B0000")))));
+  // *(s32 *)(temp_s1 + 8) = *(s16 *)&D_800A0000;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S32().MakePointer(),
+                                 CExpression::Binary("+", CExpression::Identifier("temp_s1"),
+                                                     CExpression::Integer(8)))),
+      CExpression::Unary("*", CExpression::Cast(CType::S16().MakePointer(),
+                                                CExpression::Unary("&", CExpression::Identifier(
+                                                                            "D_800A0000")))))));
+
+  FunctionDeclaration func(CType::Void(), "Globals", {}, std::move(body));
+
+  AstMutationStep direct_step;
+  direct_step.set_kind(AST_MUTATION_DIRECT_TYPED_GLOBAL);
+  direct_step.set_site_index(0);
+  FunctionDeclaration after_direct = AstMutator::ApplyMutation(func, direct_step);
+  EXPECT_TRUE(absl::StrContains(after_direct.ToString(), "= D_800A0000;"))
+      << after_direct.ToString();
+
+  AstMutationStep array_step;
+  array_step.set_kind(AST_MUTATION_GLOBAL_ARRAY_ACCESS);
+  array_step.set_site_index(0);
+  FunctionDeclaration after_array = AstMutator::ApplyMutation(after_direct, array_step);
+  EXPECT_TRUE(absl::StrContains(after_array.ToString(), "D_800B0000[2] = D_800A0000;"))
+      << after_array.ToString();
+
+  ReferencedSymbols refs = CollectReferencedSymbols(after_array);
+  ASSERT_TRUE(refs.inferred_data_types.count("D_800A0000") > 0);
+  EXPECT_EQ(refs.inferred_data_types.at("D_800A0000").ToString(), "s16");
+  ASSERT_TRUE(refs.inferred_data_types.count("D_800B0000") > 0);
+  EXPECT_EQ(refs.inferred_data_types.at("D_800B0000").ToString(), "s32");
+  EXPECT_TRUE(refs.array_data_symbols.count("D_800B0000") > 0);
+}
+
+TEST(AstMutatorTest, PointerOffsetToArrayIndexAndCoalesceParamCopyAndDeadCallReturn) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  // temp_s0 = arg0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+  // v0 = Helper(temp_s0); (dead return value)
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("temp_s0"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Call(CExpression::Identifier("Helper"), std::move(args)))));
+  // *(s32 *)(temp_s0 + 8) = 1;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S32().MakePointer(),
+                                 CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                     CExpression::Integer(8)))),
+      CExpression::Integer(1))));
+
+  FunctionDeclaration func(CType::Void(), "Mutations", {{CType::S32(), "arg0"}}, std::move(body));
+
+  AstMutationStep coalesce_step;
+  coalesce_step.set_kind(AST_MUTATION_COALESCE_PARAM_COPY);
+  coalesce_step.set_site_index(0);
+  FunctionDeclaration m1 = AstMutator::ApplyMutation(func, coalesce_step);
+  EXPECT_FALSE(absl::StrContains(m1.ToString(), "temp_s0")) << m1.ToString();
+
+  AstMutationStep dead_call_step;
+  dead_call_step.set_kind(AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN);
+  dead_call_step.set_site_index(0);
+  dead_call_step.set_param(1);
+  FunctionDeclaration m2 = AstMutator::ApplyMutation(m1, dead_call_step);
+  EXPECT_FALSE(absl::StrContains(m2.ToString(), "v0 = Helper")) << m2.ToString();
+  EXPECT_TRUE(absl::StrContains(m2.ToString(), "Helper(arg0);")) << m2.ToString();
+
+  AstMutationStep ptr_idx_step;
+  ptr_idx_step.set_kind(AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX);
+  ptr_idx_step.set_site_index(0);
+  FunctionDeclaration m3 = AstMutator::ApplyMutation(m2, ptr_idx_step);
+  EXPECT_TRUE(absl::StrContains(m3.ToString(), "((s32*)arg0)[2] = 1;")) << m3.ToString();
+}
+
+TEST(AstMutatorTest, InlineInsideInfiniteLoopAndFuncPtrCastCallee) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", CExpression::Integer(0)));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  // v0 = 10; (overwritten at top of while(1) loop)
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(10))));
+
+  auto if_body = std::make_unique<CompoundStatement>();
+  if_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("g_idle_callback"))));
+  if_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("((void (*)())temp_s0)"), {})));
+
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("g_idle_callback"))));
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0)),
+      std::move(if_body)));
+
+  body->AddStatement(CStatement::While(CExpression::Integer(1), std::move(loop_body)));
+
+  FunctionDeclaration func(CType::Void(), "idle", {}, std::move(body));
+  auto presets = AstMutator::GenerateCanonicalPresets(func);
+  ASSERT_FALSE(presets.empty());
+  FunctionDeclaration tuned = AstMutator::ApplyMutations(func, presets[0]);
+  std::string code = tuned.ToString();
+  EXPECT_FALSE(absl::StrContains(code, "v0")) << code;
+  EXPECT_FALSE(absl::StrContains(code, "temp_s0")) << code;
+  EXPECT_TRUE(absl::StrContains(code, "if ((g_idle_callback != 0))")) << code;
+  EXPECT_TRUE(absl::StrContains(code, "((void (*)())g_idle_callback)();")) << code;
+}
+
+TEST(AstMutatorTest, MultiStatementInlineTempSinkAndHoistAndHazardRejection) {
+  // temp_t6 = arg0 + 1;
+  // g_other = 99;        (independent intervening statement)
+  // g_dest = temp_t6;
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t6"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t6"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("g_other"), CExpression::Integer(99))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_dest"), CExpression::Identifier("temp_t6"))));
+
+  FunctionDeclaration func(CType::Void(), "CrossInline", {{CType::S32(), "arg0"}}, std::move(body));
+
+  // param = 0: sink definition down to use site (`g_other = 99;` precedes `g_dest = (arg0 + 1);`)
+  AstMutationStep sink_step;
+  sink_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  sink_step.set_site_index(0);
+  sink_step.set_param(0);
+  std::string sunk = AstMutator::ApplyMutation(func, sink_step).ToString();
+  size_t sunk_other_pos = sunk.find("g_other = 99;");
+  size_t sunk_dest_pos = sunk.find("g_dest = (arg0 + 1);");
+  ASSERT_NE(sunk_other_pos, std::string::npos) << sunk;
+  ASSERT_NE(sunk_dest_pos, std::string::npos) << sunk;
+  EXPECT_LT(sunk_other_pos, sunk_dest_pos) << sunk;
+
+  // param = 2: hoist use statement up to definition site (`g_dest = (arg0 + 1);` precedes `g_other
+  // = 99;`)
+  AstMutationStep hoist_step;
+  hoist_step.set_kind(AST_MUTATION_INLINE_SINGLE_USE_TEMP);
+  hoist_step.set_site_index(0);
+  hoist_step.set_param(2);
+  std::string hoisted = AstMutator::ApplyMutation(func, hoist_step).ToString();
+  size_t hoisted_other_pos = hoisted.find("g_other = 99;");
+  size_t hoisted_dest_pos = hoisted.find("g_dest = (arg0 + 1);");
+  ASSERT_NE(hoisted_other_pos, std::string::npos) << hoisted;
+  ASSERT_NE(hoisted_dest_pos, std::string::npos) << hoisted;
+  EXPECT_LT(hoisted_dest_pos, hoisted_other_pos) << hoisted;
+
+  // If the intervening statement modifies `arg0` AND reads `g_dest`, neither sink nor hoist is
+  // valid.
+  auto hazard_body = std::make_unique<CompoundStatement>();
+  hazard_body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t6"));
+  hazard_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t6"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  hazard_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"), CExpression::Identifier("g_dest"))));
+  hazard_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_dest"), CExpression::Identifier("temp_t6"))));
+  FunctionDeclaration hazard_func(CType::Void(), "HazardInline", {{CType::S32(), "arg0"}},
+                                  std::move(hazard_body));
+  std::string hazard_out = AstMutator::ApplyMutation(hazard_func, sink_step).ToString();
+  EXPECT_TRUE(absl::StrContains(hazard_out, "temp_t6 = (arg0 + 1);")) << hazard_out;
+}
+
+TEST(AstMutatorTest, SwapAdjacentStatementsAndGlobalPromotionsAndDescribeStep) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32().MakePointer(), "temp_s1"));
+  // Statement 0: D_80010000 = 0; (zero-only assigned global)
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("D_80010000"), CExpression::Integer(0))));
+  // Statement 1: temp_s1 = &D_80020000;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Unary("&", CExpression::Identifier("D_80020000")))));
+  // Statement 2: *(s32 *)(temp_s1 + 8) = 7;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S32().MakePointer(),
+                                 CExpression::Binary("+", CExpression::Identifier("temp_s1"),
+                                                     CExpression::Integer(8)))),
+      CExpression::Integer(7))));
+  // Conflicting widths on D_80030000 (`s16` and `s8`) should NOT be promoted by DirectTypedGlobal
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S16().MakePointer(),
+                                 CExpression::Unary("&", CExpression::Identifier("D_80030000")))),
+      CExpression::Integer(1))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S8().MakePointer(),
+                                 CExpression::Unary("&", CExpression::Identifier("D_80030000")))),
+      CExpression::Integer(2))));
+
+  FunctionDeclaration func(CType::Void(), "SwapAndGlobalTest", {}, std::move(body));
+
+  // Swap statement 0 and statement 1 (independent)
+  AstMutationStep swap_step;
+  swap_step.set_kind(AST_MUTATION_SWAP_ADJACENT_STATEMENTS);
+  swap_step.set_site_index(0);
+  std::string swapped = AstMutator::ApplyMutation(func, swap_step).ToString();
+  EXPECT_LT(swapped.find("temp_s1 = &D_80020000;"), swapped.find("D_80010000 = 0;")) << swapped;
+
+  // Conflicting widths on D_80030000 are rejected by AST_MUTATION_DIRECT_TYPED_GLOBAL
+  AstMutationStep direct_step;
+  direct_step.set_kind(AST_MUTATION_DIRECT_TYPED_GLOBAL);
+  direct_step.set_param(1);
+  std::string direct_out = AstMutator::ApplyMutation(func, direct_step).ToString();
+  EXPECT_TRUE(absl::StrContains(direct_out, "*(s16*)&D_80030000 = 1;")) << direct_out;
+
+  // Smart global array access (param = 2) skips zero-only D_80010000 and folds temp_s1 into
+  // D_80020000[2]
+  AstMutationStep smart_arr_step;
+  smart_arr_step.set_kind(AST_MUTATION_GLOBAL_ARRAY_ACCESS);
+  smart_arr_step.set_param(2);
+  std::string smart_arr_out = AstMutator::ApplyMutation(func, smart_arr_step).ToString();
+  EXPECT_TRUE(absl::StrContains(smart_arr_out, "D_80010000 = 0;")) << smart_arr_out;
+  EXPECT_TRUE(absl::StrContains(smart_arr_out, "D_80020000[2] = 7;")) << smart_arr_out;
+  EXPECT_FALSE(absl::StrContains(smart_arr_out, "temp_s1")) << smart_arr_out;
+
+  EXPECT_EQ(AstMutator::DescribeStep(swap_step), "SwapAdjacentStatements(site=0)");
+  EXPECT_EQ(AstMutator::DescribeStep(direct_step), "DirectTypedGlobal(site=0, param=1)");
+  EXPECT_EQ(AstMutator::DescribeStep(smart_arr_step), "GlobalArrayAccess(site=0, param=2)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

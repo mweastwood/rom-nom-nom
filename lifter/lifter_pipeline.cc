@@ -59,10 +59,14 @@ constexpr MathIntrinsic kMathIntrinsics[] = {
 LifterPipeline::LifterPipeline(LifterPipelineOptions options,
                                std::unique_ptr<FunctionLoader> loader)
     : options_(std::move(options)), loader_(std::move(loader)) {
-  if (loader_ != nullptr && loader_->Extractor() != nullptr &&
-      loader_->Extractor()->Config() != nullptr &&
-      !loader_->Extractor()->Config()->game_name().empty()) {
-    options_.game_name = loader_->Extractor()->Config()->game_name();
+  if (options_.game_name.empty() && loader_ != nullptr && loader_->Extractor() != nullptr &&
+      loader_->Extractor()->Config() != nullptr) {
+    const auto* cfg = loader_->Extractor()->Config();
+    if (!cfg->basename().empty()) {
+      options_.game_name = cfg->basename();
+    } else if (!cfg->game_name().empty()) {
+      options_.game_name = cfg->game_name();
+    }
   }
 }
 
@@ -399,15 +403,45 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
   std::vector<std::string> func_names;
   absl::flat_hash_set<std::string> seen;
 
+  // Find subsegment matching module_name (or filename stem) in config
+  const Subsegment* matched_subseg = nullptr;
+  const Segment* matched_seg = nullptr;
+  uint32_t next_rom_start = 0;
+
+  for (const auto& seg : config->segments()) {
+    for (int i = 0; i < seg.subsegments_size(); ++i) {
+      const auto& subseg = seg.subsegments(i);
+      if (subseg.name() == module_name ||
+          std::filesystem::path(subseg.name()).filename().string() == module_name) {
+        matched_subseg = &subseg;
+        matched_seg = &seg;
+        if (i + 1 < seg.subsegments_size()) {
+          next_rom_start = seg.subsegments(i + 1).rom_start();
+        } else {
+          next_rom_start = seg.rom_end();
+        }
+        break;
+      }
+    }
+    if (matched_subseg != nullptr) break;
+  }
+
+  std::vector<std::string> candidate_rel_names = {std::string(module_name)};
+  if (matched_subseg != nullptr && matched_subseg->name() != module_name) {
+    candidate_rel_names.push_back(std::string(matched_subseg->name()));
+  }
+
   // 1. Check nonmatchings directory (e.g. <asm_dir>/nonmatchings/<module_name>/*.s)
   std::vector<std::filesystem::path> nonmatching_dirs;
-  if (!options_.asm_dir.empty()) {
-    nonmatching_dirs.push_back(options_.asm_dir / "nonmatchings" / module_name);
+  for (const auto& rel_name : candidate_rel_names) {
+    if (!options_.asm_dir.empty()) {
+      nonmatching_dirs.push_back(options_.asm_dir / "nonmatchings" / rel_name);
+    }
+    nonmatching_dirs.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
+                               "nonmatchings" / rel_name);
+    nonmatching_dirs.push_back(options_.repo_root / "asm" / options_.game_name / "nonmatchings" /
+                               rel_name);
   }
-  nonmatching_dirs.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
-                             "nonmatchings" / module_name);
-  nonmatching_dirs.push_back(options_.repo_root / "asm" / options_.game_name / "nonmatchings" /
-                             module_name);
   for (const auto& dir : nonmatching_dirs) {
     if (std::filesystem::exists(dir)) {
       for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -427,13 +461,15 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
 
   // 2. Check standalone module assembly file (e.g. <asm_dir>/<module_name>.s)
   std::vector<std::filesystem::path> asm_files;
-  if (!options_.asm_dir.empty()) {
-    asm_files.push_back(options_.asm_dir / absl::StrCat(module_name, ".s"));
+  for (const auto& rel_name : candidate_rel_names) {
+    if (!options_.asm_dir.empty()) {
+      asm_files.push_back(options_.asm_dir / absl::StrCat(rel_name, ".s"));
+    }
+    asm_files.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
+                        absl::StrCat(rel_name, ".s"));
+    asm_files.push_back(options_.repo_root / "asm" / options_.game_name /
+                        absl::StrCat(rel_name, ".s"));
   }
-  asm_files.push_back(options_.repo_root / "bazel-bin" / "asm" / options_.game_name /
-                      absl::StrCat(module_name, ".s"));
-  asm_files.push_back(options_.repo_root / "asm" / options_.game_name /
-                      absl::StrCat(module_name, ".s"));
   for (const auto& file : asm_files) {
     if (std::filesystem::exists(file)) {
       std::ifstream in(file);
@@ -457,28 +493,6 @@ absl::StatusOr<std::vector<std::string>> LifterPipeline::GetFunctionsInModule(
         return func_names;
       }
     }
-  }
-
-  // Fallback: Find subsegment matching module_name in config
-  const Subsegment* matched_subseg = nullptr;
-  const Segment* matched_seg = nullptr;
-  uint32_t next_rom_start = 0;
-
-  for (const auto& seg : config->segments()) {
-    for (int i = 0; i < seg.subsegments_size(); ++i) {
-      const auto& subseg = seg.subsegments(i);
-      if (subseg.name() == module_name) {
-        matched_subseg = &subseg;
-        matched_seg = &seg;
-        if (i + 1 < seg.subsegments_size()) {
-          next_rom_start = seg.subsegments(i + 1).rom_start();
-        } else {
-          next_rom_start = seg.rom_end();
-        }
-        break;
-      }
-    }
-    if (matched_subseg != nullptr) break;
   }
 
   if (matched_subseg == nullptr) {

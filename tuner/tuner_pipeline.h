@@ -39,8 +39,8 @@ struct TunerPipelineOptions {
   bool format_with_clang = true;
 
   FlagExplorerOptions flag_options;
-  size_t max_ast_candidates_per_round = 32;
-  size_t max_rounds = 2;
+  size_t max_ast_candidates_per_round = 64;
+  size_t max_rounds = 4;
 };
 
 struct FunctionTuneResult {

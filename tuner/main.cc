@@ -31,8 +31,8 @@ ABSL_FLAG(bool, explore_ast, true, "Explore semantics-preserving AST mutations."
 ABSL_FLAG(bool, verify_fuzzer, true,
           "Verify candidate behavioral equivalence via differential fuzzer.");
 ABSL_FLAG(bool, format, true, "Format generated C code using clang-format.");
-ABSL_FLAG(size_t, max_rounds, 2, "Maximum greedy AST mutation rounds per function.");
-ABSL_FLAG(size_t, max_candidates, 32, "Maximum AST mutation candidates per round.");
+ABSL_FLAG(size_t, max_rounds, 4, "Maximum greedy AST mutation rounds per function.");
+ABSL_FLAG(size_t, max_candidates, 64, "Maximum AST mutation candidates per round.");
 
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(

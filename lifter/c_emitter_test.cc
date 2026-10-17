@@ -394,5 +394,31 @@ TEST(CEmitterTest, EmitTranslationUnitSkipsHeaderProvidedFunctions) {
   EXPECT_THAT(emitted_code, HasSubstr("extern s32 NormalExternalFunc();\n"));
 }
 
+TEST(CEmitterTest, EmitTranslationUnitEmitsTypedAndArrayExternDataDeclarations) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  auto body = std::make_unique<CompoundStatement>();
+  auto short_sym = std::make_unique<IdentifierExpression>("g_halfword", CType::S16());
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", std::move(short_sym), CExpression::Integer(12))));
+
+  auto arr_sym = std::make_unique<IdentifierExpression>("g_word_table", CType::S32(),
+                                                        /*is_array_symbol=*/true);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::ArrayIndex(std::move(arr_sym), CExpression::Integer(3)),
+      CExpression::Integer(99))));
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "WriteGlobals", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  EXPECT_THAT(emitted_code, HasSubstr("extern s16 g_halfword;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 g_word_table[];\n"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

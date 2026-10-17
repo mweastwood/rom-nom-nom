@@ -32,3 +32,9 @@ verification platform for Nintendo 64 software.
    - Structural integrity must be preserved: valid N64 header magic,
      entrypoint, and bit-exact downstream asset segments when code expansion
      shifts occur.
+
+4. **Thorough Unit Testing**:
+   - All changes should be accompanied with unit tests to verify that
+     improvements do not regress.
+   - Tautological unit tests are unnecessary (e.g., testing the contents of a
+     map or anything that is blindingly obvious from the code).

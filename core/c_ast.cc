@@ -96,8 +96,11 @@ std::unique_ptr<CExpression> CExpression::String(std::string value) {
   return std::make_unique<StringLiteralExpression>(std::move(value));
 }
 
-std::unique_ptr<CExpression> CExpression::Identifier(std::string name) {
-  return std::make_unique<IdentifierExpression>(std::move(name));
+std::unique_ptr<CExpression> CExpression::Identifier(std::string name,
+                                                     std::optional<CType> symbol_type,
+                                                     bool is_array_symbol) {
+  return std::make_unique<IdentifierExpression>(std::move(name), std::move(symbol_type),
+                                                is_array_symbol);
 }
 
 std::unique_ptr<CExpression> CExpression::Unary(std::string op,
@@ -193,7 +196,7 @@ std::string IdentifierExpression::ToString() const {
 }
 
 std::unique_ptr<CExpression> IdentifierExpression::Clone() const {
-  return std::make_unique<IdentifierExpression>(name_);
+  return std::make_unique<IdentifierExpression>(name_, symbol_type_, is_array_symbol_);
 }
 
 // --- UnaryExpression ---
@@ -272,6 +275,11 @@ std::unique_ptr<CExpression> MemberAccessExpression::Clone() const {
 // --- ArrayIndexExpression ---
 
 std::string ArrayIndexExpression::ToString() const {
+  if (array_->Kind() == CExpressionKind::kCastExpression ||
+      array_->Kind() == CExpressionKind::kUnaryExpression ||
+      array_->Kind() == CExpressionKind::kAssignmentExpression) {
+    return absl::StrFormat("(%s)[%s]", array_->ToString(), index_->ToString());
+  }
   return absl::StrFormat("%s[%s]", array_->ToString(), index_->ToString());
 }
 
@@ -803,6 +811,12 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
       if (IsValidCIdentifier(name) && !IsKeywordOrBuiltin(name) &&
           symbols.local_variables.count(name) == 0 && symbols.external_functions.count(name) == 0) {
         symbols.external_data.insert(name);
+        if (id.SymbolType().has_value()) {
+          symbols.inferred_data_types[name] = *id.SymbolType();
+        }
+        if (id.IsArraySymbol()) {
+          symbols.array_data_symbols.insert(name);
+        }
       }
       break;
     }
@@ -815,6 +829,17 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
             symbols.local_variables.count(callee_name) == 0) {
           symbols.external_functions.insert(callee_name);
           symbols.external_data.erase(callee_name);
+        } else if (absl::StartsWith(callee_name, "((") && absl::EndsWith(callee_name, ")")) {
+          size_t cast_end = callee_name.find("(*)())");
+          if (cast_end != std::string::npos) {
+            std::string inner_name =
+                callee_name.substr(cast_end + 6, callee_name.size() - (cast_end + 6) - 1);
+            if (IsValidCIdentifier(inner_name) && !IsKeywordOrBuiltin(inner_name) &&
+                symbols.local_variables.count(inner_name) == 0 &&
+                symbols.external_functions.count(inner_name) == 0) {
+              symbols.external_data.insert(inner_name);
+            }
+          }
         }
       } else {
         VisitExpression(call.Callee(), symbols, local_vars);
@@ -880,6 +905,15 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
     }
     case CExpressionKind::kArrayIndexExpression: {
       const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      if (arr.Array().Kind() == CExpressionKind::kIdentifier) {
+        const auto& id = static_cast<const IdentifierExpression&>(arr.Array());
+        const std::string& name = id.Name();
+        if (IsValidCIdentifier(name) && !IsKeywordOrBuiltin(name) &&
+            symbols.local_variables.count(name) == 0 &&
+            symbols.external_functions.count(name) == 0) {
+          symbols.array_data_symbols.insert(name);
+        }
+      }
       VisitExpression(arr.Array(), symbols, local_vars);
       VisitExpression(arr.Index(), symbols, local_vars);
       break;

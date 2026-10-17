@@ -109,10 +109,12 @@ absl::StatusOr<std::unique_ptr<TunerPipeline>> TunerPipeline::Create(TunerPipeli
 
   TuningCacheStore cache_store;
   std::error_code ec;
-  if (!options.cache_path.empty() && std::filesystem::exists(options.cache_path, ec)) {
-    auto loaded_or = TuningCacheStore::LoadFromFile(options.cache_path);
-    if (loaded_or.ok()) {
-      cache_store = std::move(*loaded_or);
+  if (!options.cache_path.empty()) {
+    if (std::filesystem::exists(options.cache_path, ec)) {
+      auto loaded_or = TuningCacheStore::LoadFromFile(options.cache_path);
+      if (loaded_or.ok()) {
+        cache_store = std::move(*loaded_or);
+      }
     }
   } else if (lifter->Loader() != nullptr && lifter->Loader()->Extractor() != nullptr &&
              lifter->Loader()->Extractor()->Config() != nullptr) {
@@ -242,9 +244,13 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   result.best_score = *base_score_or;
   FunctionDeclaration best_ast = baseline_ast.Clone();
 
-  // Phase 1: Compiler Flag Sweep
+  std::vector<std::vector<std::string>> flag_profiles = {base_flags};
+  if (options_.explore_flags) {
+    flag_profiles = FlagExplorer::GenerateCandidateFlags(base_flags, options_.flag_options);
+  }
+
+  // Phase 1: Compiler Flag Sweep on baseline AST
   if (!result.best_score.raw_bit_exact && options_.explore_flags) {
-    auto flag_profiles = FlagExplorer::GenerateCandidateFlags(base_flags, options_.flag_options);
     for (size_t i = 1; i < flag_profiles.size(); ++i) {
       auto cand_score_or =
           scorer.CompileAndScore(target, baseline_compilable_c, flag_profiles[i], extra_inc);
@@ -258,6 +264,45 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
           if (result.best_score.raw_bit_exact) break;
         }
       }
+    }
+  }
+
+  // Phase 1b: Canonical AST Preset Sweep across core flag profiles
+  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
+    std::vector<std::vector<std::string>> core_flag_profiles;
+    auto add_unique_flags = [&](const std::vector<std::string>& flags) {
+      for (const auto& existing : core_flag_profiles) {
+        if (existing == flags) return;
+      }
+      core_flag_profiles.push_back(flags);
+    };
+    add_unique_flags(result.winning_c_flags);
+    add_unique_flags(base_flags);
+    for (size_t i = 0; i < flag_profiles.size() && core_flag_profiles.size() < 6; ++i) {
+      add_unique_flags(flag_profiles[i]);
+    }
+
+    auto presets = AstMutator::GenerateCanonicalPresets(baseline_ast);
+    for (const auto& preset_steps : presets) {
+      FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
+      std::string preset_c = EmitSingleFunctionWithExterns(preset_ast, parent_tu, symbols,
+                                                           /*format_with_clang=*/false);
+      for (const auto& flags : core_flag_profiles) {
+        auto cand_score_or = scorer.CompileAndScore(target, preset_c, flags, extra_inc);
+        if (!cand_score_or.ok()) continue;
+        if (cand_score_or->IsBetterThan(result.best_score)) {
+          if (!options_.verify_with_fuzzer ||
+              scorer.VerifyEquivalence(target, cand_score_or->patched_words)) {
+            result.best_score = *cand_score_or;
+            best_ast = preset_ast.Clone();
+            result.applied_mutations = preset_steps;
+            result.winning_c_flags = flags;
+            result.improved_over_baseline = true;
+            if (result.best_score.raw_bit_exact) break;
+          }
+        }
+      }
+      if (result.best_score.raw_bit_exact) break;
     }
   }
 
@@ -288,6 +333,27 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
         }
       }
       if (!improved_in_round) break;
+    }
+  }
+
+  // Phase 3: Post-AST Compiler Flag Re-Sweep if AST mutations were applied
+  if (!result.best_score.raw_bit_exact && options_.explore_flags &&
+      !result.applied_mutations.empty()) {
+    std::string best_ast_c =
+        EmitSingleFunctionWithExterns(best_ast, parent_tu, symbols, /*format_with_clang=*/false);
+    for (const auto& flags : flag_profiles) {
+      if (flags == result.winning_c_flags) continue;
+      auto cand_score_or = scorer.CompileAndScore(target, best_ast_c, flags, extra_inc);
+      if (!cand_score_or.ok()) continue;
+      if (cand_score_or->IsBetterThan(result.best_score)) {
+        if (!options_.verify_with_fuzzer ||
+            scorer.VerifyEquivalence(target, cand_score_or->patched_words)) {
+          result.best_score = *cand_score_or;
+          result.winning_c_flags = flags;
+          result.improved_over_baseline = true;
+          if (result.best_score.raw_bit_exact) break;
+        }
+      }
     }
   }
 

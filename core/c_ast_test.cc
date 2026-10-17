@@ -528,5 +528,50 @@ TEST(CAstTest, CollectReferencedSymbolsInfersFunctionReturnTypes) {
   EXPECT_EQ(symbols.inferred_function_return_types.count("NormalAction"), 0u);
 }
 
+TEST(CAstTest, ArrayIndexParenthesizesCastAndUnaryBases) {
+  auto cast_base = CExpression::ArrayIndex(
+      CExpression::Cast(CType::S32().MakePointer(), CExpression::Identifier("arg0")),
+      CExpression::Integer(2));
+  EXPECT_EQ(cast_base->ToString(), "((s32*)arg0)[2]");
+
+  auto unary_base = CExpression::ArrayIndex(
+      CExpression::Unary("*", CExpression::Identifier("ptr_table")), CExpression::Integer(1));
+  EXPECT_EQ(unary_base->ToString(), "(*ptr_table)[1]");
+}
+
+TEST(CAstTest, IdentifierSymbolMetadataAndFuncPtrCastCollection) {
+  auto typed_id = std::make_unique<IdentifierExpression>("g_short_val", CType::S16());
+  EXPECT_TRUE(typed_id->SymbolType().has_value());
+  EXPECT_EQ(typed_id->SymbolType()->ToString(), "s16");
+  EXPECT_FALSE(typed_id->IsArraySymbol());
+
+  auto arr_id = std::make_unique<IdentifierExpression>("g_arr_val", CType::S32(),
+                                                       /*is_array_symbol=*/true);
+  auto cloned_arr = arr_id->Clone();
+  const auto& cloned_id = static_cast<const IdentifierExpression&>(*cloned_arr);
+  ASSERT_TRUE(cloned_id.SymbolType().has_value());
+  EXPECT_EQ(cloned_id.SymbolType()->ToString(), "s32");
+  EXPECT_TRUE(cloned_id.IsArraySymbol());
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", std::move(typed_id), CExpression::Integer(5))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::ArrayIndex(std::move(cloned_arr), CExpression::Integer(0)),
+      CExpression::Integer(9))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("((void (*)())g_callback_ptr)"), {})));
+
+  FunctionDeclaration func(CType::Void(), "UseTypedGlobals", {}, std::move(body));
+  ReferencedSymbols refs = CollectReferencedSymbols(func);
+
+  EXPECT_TRUE(refs.external_data.count("g_short_val") > 0);
+  EXPECT_TRUE(refs.external_data.count("g_arr_val") > 0);
+  EXPECT_TRUE(refs.external_data.count("g_callback_ptr") > 0);
+  ASSERT_TRUE(refs.inferred_data_types.count("g_short_val") > 0);
+  EXPECT_EQ(refs.inferred_data_types.at("g_short_val").ToString(), "s16");
+  EXPECT_TRUE(refs.array_data_symbols.count("g_arr_val") > 0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

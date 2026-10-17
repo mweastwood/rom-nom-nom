@@ -1011,13 +1011,7 @@ class ConverterContext {
                     entry_state.fpr_const_bits[k] = std::nullopt;
                   }
                 }
-                for (int r = 0; r < 32; ++r) {
-                  Register reg = static_cast<Register>(r);
-                  if (entry_state.tracker.GetRegisterValue(reg) !=
-                      pred_state->tracker.GetRegisterValue(reg)) {
-                    entry_state.tracker.Invalidate(reg);
-                  }
-                }
+                entry_state.tracker.Merge(pred_state->tracker);
               }
             }
           }
@@ -1059,6 +1053,20 @@ class ConverterContext {
             }
           }
           state.tracker.Step(inst);
+          if (inst.IsCall()) {
+            state.tracker.Invalidate(Register::kV0);
+            state.tracker.Invalidate(Register::kV1);
+            state.tracker.Invalidate(Register::kA0);
+            state.tracker.Invalidate(Register::kA1);
+            state.tracker.Invalidate(Register::kA2);
+            state.tracker.Invalidate(Register::kA3);
+            for (int t = static_cast<int>(Register::kT0); t <= static_cast<int>(Register::kT7);
+                 ++t) {
+              state.tracker.Invalidate(static_cast<Register>(t));
+            }
+            state.tracker.Invalidate(Register::kT8);
+            state.tracker.Invalidate(Register::kT9);
+          }
         };
 
         for (size_t idx = 0; idx < block->instructions.size(); ++idx) {
