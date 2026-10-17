@@ -335,6 +335,10 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
     result.structural.code_shift_matches = true;
   }
 
+  result.structural.exact_sha1_match =
+      (result.structural.target_sha1 == result.structural.built_sha1 &&
+       target_bytes == built_bytes);
+
   result.structural.is_valid =
       ((result.structural.size_matches || result.structural.code_shift_matches) &&
        result.structural.header_magic_matches && result.structural.entrypoint_matches);
@@ -358,7 +362,8 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
                                        static_cast<double>(result.total_rom_bytes)) *
                                       100.0;
   }
-  result.success = result.structural.is_valid;
+  result.success =
+      options_.require_bit_exact ? result.structural.exact_sha1_match : result.structural.is_valid;
 
   // 8. Generate Formatted Output Report
   DiffFormatter formatter(DiffFormatterOptions{.use_color = options_.use_color});

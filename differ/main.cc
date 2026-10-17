@@ -29,6 +29,8 @@ ABSL_FLAG(bool, color, true, "Enable ANSI color syntax highlighting.");
 ABSL_FLAG(int, column_width, 48, "Character width for each side-by-side assembly column.");
 ABSL_FLAG(bool, allow_code_shift, true,
           "Allow code segment expansion/shift when asset segments match bit-exact.");
+ABSL_FLAG(bool, require_bit_exact, false,
+          "Require 100% byte-for-byte bit-exact ROM match to succeed.");
 
 namespace {
 
@@ -106,6 +108,7 @@ int main(int argc, char* argv[]) {
         .config_path = config_path,
         .use_color = color,
         .allow_code_shift = absl::GetFlag(FLAGS_allow_code_shift),
+        .require_bit_exact = absl::GetFlag(FLAGS_require_bit_exact),
     });
 
     auto result_or = rom_differ.Diff();

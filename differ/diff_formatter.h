@@ -16,6 +16,7 @@ namespace rom_nom_nom {
 // Structural integrity and cartridge header validation results.
 struct StructuralValidationResult {
   bool is_valid = false;
+  bool exact_sha1_match = false;
   std::string target_sha1;
   std::string built_sha1;
   uint64_t target_size = 0;

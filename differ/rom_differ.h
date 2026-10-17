@@ -20,6 +20,7 @@ struct RomDiffOptions {
   std::filesystem::path config_path;
   bool use_color = true;
   bool allow_code_shift = true;
+  bool require_bit_exact = false;
 };
 
 // RomDiffer coordinates structural verification, segment-aware partitioning,

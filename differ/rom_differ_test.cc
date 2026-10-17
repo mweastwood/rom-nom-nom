@@ -280,6 +280,24 @@ segments {
     EXPECT_FALSE(result_or->structural.code_shift_matches);
     EXPECT_FALSE(result_or->structural.size_matches);
   }
+
+  // 3. With require_bit_exact = true (structurally valid, but fails bit-exactness)
+  {
+    RomDiffer differ(RomDiffOptions{
+        .base_rom_path = target_path,
+        .candidate_rom_path = built_path,
+        .config_path = config_path,
+        .use_color = false,
+        .allow_code_shift = true,
+        .require_bit_exact = true,
+    });
+
+    auto result_or = differ.Diff();
+    ASSERT_TRUE(result_or.ok());
+    EXPECT_FALSE(result_or->success);
+    EXPECT_TRUE(result_or->structural.is_valid);
+    EXPECT_FALSE(result_or->structural.exact_sha1_match);
+  }
 }
 
 TEST_F(RomDifferEndToEndTest, TargetRomSmallerThanFirstAssetStartDoesNotUnderflow) {

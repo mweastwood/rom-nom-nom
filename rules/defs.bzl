@@ -205,11 +205,12 @@ n64_rom_bitexact_test = rule(
     },
 )
 
-def _n64_lifted_c_rom_diff_test_impl(ctx):
+def _n64_rom_diff_test_impl(ctx):
     candidate_rom = ctx.file.candidate_rom
     base_rom = ctx.file.base_rom
     config = ctx.file.config
     differ = ctx.executable._differ
+    require_bit_exact_flag = "--require_bit_exact" if ctx.attr.require_bit_exact else "--norequire_bit_exact"
 
     script = ctx.actions.declare_file(ctx.label.name + ".sh")
 
@@ -237,16 +238,18 @@ ACTUAL_CANDIDATE=$(resolve_path "$CANDIDATE_ROM")
 ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
 ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
 
-"$ACTUAL_DIFFER" \
-    --base_rom="$ACTUAL_BASE" \
-    --candidate_rom="$ACTUAL_CANDIDATE" \
-    --config="$ACTUAL_CONFIG" \
+"$ACTUAL_DIFFER" \\
+    --base_rom="$ACTUAL_BASE" \\
+    --candidate_rom="$ACTUAL_CANDIDATE" \\
+    --config="$ACTUAL_CONFIG" \\
+    {require_bit_exact_flag} \\
     --nocolor
 """.format(
         base_rom = base_rom.short_path,
         candidate_rom = candidate_rom.short_path,
         config = config.short_path,
         differ = differ.short_path,
+        require_bit_exact_flag = require_bit_exact_flag,
     )
 
     ctx.actions.write(
@@ -264,13 +267,14 @@ ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
         ),
     ]
 
-n64_lifted_c_rom_diff_test = rule(
-    implementation = _n64_lifted_c_rom_diff_test_impl,
+n64_rom_diff_test = rule(
+    implementation = _n64_rom_diff_test_impl,
     test = True,
     attrs = {
         "candidate_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
         "base_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
-        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".z64", ".textproto"]),
+        "require_bit_exact": attr.bool(default = True),
         "_differ": attr.label(
             default = Label("//differ:differ"),
             executable = True,
@@ -279,7 +283,24 @@ n64_lifted_c_rom_diff_test = rule(
     },
 )
 
-n64_lifted_c_rom_test = n64_lifted_c_rom_diff_test
+n64_rom_structural_validity_test = rule(
+    implementation = _n64_rom_diff_test_impl,
+    test = True,
+    attrs = {
+        "candidate_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "base_rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".z64", ".textproto"]),
+        "require_bit_exact": attr.bool(default = False),
+        "_differ": attr.label(
+            default = Label("//differ:differ"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+n64_lifted_c_rom_diff_test = n64_rom_structural_validity_test
+n64_lifted_c_rom_test = n64_rom_structural_validity_test
 
 def _n64_lifted_c_equivalence_test_impl(ctx):
     candidate_rom = ctx.file.candidate_rom
@@ -441,10 +462,10 @@ def n64_game(name, game, config, rom, srcs = []):
         config = config,
     )
 
-    # Stage 3: Whole-game lifted C pipeline, lifted C ROM, and validation test
+    # Stage 3: Whole-game lifted C pipeline, lifted C ROM, and structural validity test
     lifted_c_name = name + "_lifted_c"
     lifted_c_rom_name = name + "_lifted_c_rom"
-    lifted_c_diff_test_name = name + "_lifted_c_rom_diff_test"
+    lifted_c_structural_test_name = name + "_lifted_c_rom_structural_validity_test"
 
     lifter_lift_game(
         name = lifted_c_name,
@@ -476,17 +497,17 @@ def n64_game(name, game, config, rom, srcs = []):
         actual = ":" + lifted_c_rom_name,
     )
 
-    n64_lifted_c_rom_diff_test(
-        name = lifted_c_diff_test_name,
+    n64_rom_structural_validity_test(
+        name = lifted_c_structural_test_name,
         candidate_rom = ":" + lifted_c_rom_name,
         base_rom = rom,
         config = config,
     )
 
-    # Backward-compatible alias for lifted diff test
+    # Backward-compatible alias for lifted structural validity test
     native.test_suite(
         name = name + "_lifted_c_rom_test",
-        tests = [":" + lifted_c_diff_test_name],
+        tests = [":" + lifted_c_structural_test_name],
     )
 
     n64_lifted_c_equivalence_test(
@@ -501,6 +522,7 @@ def n64_game(name, game, config, rom, srcs = []):
     tuned_c_name = name + "_tuned_c"
     tuned_c_rom_name = name + "_tuned_c_rom"
     tuned_c_diff_test_name = name + "_tuned_c_rom_diff_test"
+    tuned_c_structural_test_name = name + "_tuned_c_rom_structural_validity_test"
     tuning_cache_label = "//config:" + game + "-tuning"
 
     tuner_tune_game(
@@ -523,8 +545,15 @@ def n64_game(name, game, config, rom, srcs = []):
         prefer_c = True,
     )
 
-    n64_lifted_c_rom_diff_test(
+    n64_rom_diff_test(
         name = tuned_c_diff_test_name,
+        candidate_rom = ":" + tuned_c_rom_name,
+        base_rom = rom,
+        config = config,
+    )
+
+    n64_rom_structural_validity_test(
+        name = tuned_c_structural_test_name,
         candidate_rom = ":" + tuned_c_rom_name,
         base_rom = rom,
         config = config,

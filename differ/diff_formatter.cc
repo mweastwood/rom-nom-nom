@@ -331,6 +331,15 @@ std::string DiffFormatter::FormatRomDiff(const RomDiffResult& result, bool use_c
                         bold, format_commas(result.total_logical_matching_bytes),
                         format_commas(result.total_rom_bytes), result.overall_match_percentage,
                         reset);
+  if (result.structural.exact_sha1_match) {
+    absl::StrAppend(&report, green, "[SUCCESS] 100% byte-for-byte bit-exact ROM match verified!",
+                    reset, "\n");
+  } else if (!result.success && result.structural.is_valid) {
+    absl::StrAppendFormat(
+        &report,
+        "%s[FAIL] Bit-exact match required, but ROM differs from target (%.2f%% match)!%s\n", red,
+        result.overall_match_percentage, reset);
+  }
   absl::StrAppend(
       &report,
       "================================================================================\n");
