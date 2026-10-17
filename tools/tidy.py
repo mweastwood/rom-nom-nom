@@ -23,6 +23,7 @@ SEARCH_DIRS = [
     "differ",
     "lifter",
     "fuzzer",
+    "tuner",
 ]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
 
@@ -92,6 +93,7 @@ def get_compile_args(file_path: Path):
             or "differ" in str(file_path)
             or "lifter" in str(file_path)
             or "fuzzer" in str(file_path)
+            or "tuner" in str(file_path)
         )
 
     if is_cpp:

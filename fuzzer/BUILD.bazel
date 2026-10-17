@@ -34,6 +34,7 @@ cc_library(
     name = "differential_fuzzer",
     srcs = ["differential_fuzzer.cc"],
     hdrs = ["differential_fuzzer.h"],
+    visibility = ["//tuner:__pkg__"],
     deps = [
         ":mips_emulator",
         "@abseil-cpp//absl/container:flat_hash_map",

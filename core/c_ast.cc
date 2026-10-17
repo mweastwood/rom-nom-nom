@@ -704,6 +704,15 @@ std::string FunctionDeclaration::ToString() const {
   return header + body_->ToString(0);
 }
 
+FunctionDeclaration FunctionDeclaration::Clone() const {
+  std::unique_ptr<CompoundStatement> cloned_body;
+  if (body_ != nullptr) {
+    cloned_body = std::unique_ptr<CompoundStatement>(
+        static_cast<CompoundStatement*>(body_->Clone().release()));
+  }
+  return FunctionDeclaration(return_type_, name_, parameters_, std::move(cloned_body), is_static_);
+}
+
 namespace {
 
 bool IsValidCIdentifier(std::string_view name) {

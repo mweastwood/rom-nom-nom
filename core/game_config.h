@@ -79,6 +79,15 @@ SectionVramClassification ClassifyVramAddress(const GameConfig& config, uint32_t
 // Loads, parses, and validates a GameConfig from a .textproto file on disk.
 absl::StatusOr<GameConfig> LoadGameConfig(const std::filesystem::path& path);
 
+// Parses a TuningCache from a textproto-formatted string.
+absl::StatusOr<TuningCache> ParseTuningCache(std::string_view textproto_content);
+
+// Loads a TuningCache from a .textproto file on disk.
+absl::StatusOr<TuningCache> LoadTuningCache(const std::filesystem::path& path);
+
+// Serializes and writes a TuningCache to a .textproto file on disk.
+absl::Status SaveTuningCache(const TuningCache& cache, const std::filesystem::path& path);
+
 }  // namespace rom_nom_nom
 
 #endif  // CORE_GAME_CONFIG_H_

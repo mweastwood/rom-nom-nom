@@ -497,6 +497,47 @@ def n64_game(name, game, config, rom, srcs = []):
         config = config,
     )
 
+    # Stage 4: Whole-game tuned C pipeline, tuned C ROM, diff test, and equivalence test
+    tuned_c_name = name + "_tuned_c"
+    tuned_c_rom_name = name + "_tuned_c_rom"
+    tuned_c_diff_test_name = name + "_tuned_c_rom_diff_test"
+    tuning_cache_label = "//config:" + game + "-tuning"
+
+    tuner_tune_game(
+        name = tuned_c_name,
+        game = game,
+        config = config,
+        rom = rom,
+        split = ":" + split_name,
+        lifted = ":" + lifted_c_name,
+        cache = tuning_cache_label,
+    )
+
+    n64_rom(
+        name = tuned_c_rom_name,
+        game = game,
+        config = config,
+        split = ":" + split_name,
+        src_dir = ":" + tuned_c_name,
+        out_name = game + "_tuned_c",
+        prefer_c = True,
+    )
+
+    n64_lifted_c_rom_diff_test(
+        name = tuned_c_diff_test_name,
+        candidate_rom = ":" + tuned_c_rom_name,
+        base_rom = rom,
+        config = config,
+    )
+
+    n64_lifted_c_equivalence_test(
+        name = name + "_tuned_c_equivalence_test",
+        game = game,
+        candidate_rom = ":" + tuned_c_rom_name,
+        base_rom = rom,
+        config = config,
+    )
+
 def _lifter_lift_game_impl(ctx):
     out_dir = ctx.actions.declare_directory("lifted/" + ctx.attr.game)
 
@@ -537,6 +578,65 @@ lifter_lift_game = rule(
         "format": attr.bool(default = True),
         "_lifter": attr.label(
             default = "//lifter:lifter",
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+def _tuner_tune_game_impl(ctx):
+    out_dir = ctx.actions.declare_directory("tuned/" + ctx.attr.game)
+    lifted_dir = ctx.file.lifted
+
+    args = ctx.actions.args()
+    args.add("--game=" + ctx.attr.game)
+    args.add("--config=" + ctx.file.config.path)
+    args.add("--rom=" + ctx.file.rom.path)
+    args.add("--lifted_dir=" + lifted_dir.path)
+    args.add("--output_dir=" + out_dir.path)
+    if ctx.attr.search_on_miss:
+        args.add("--search_on_miss")
+    else:
+        args.add("--nosearch_on_miss")
+    if not ctx.attr.format:
+        args.add("--noformat")
+
+    inputs = [ctx.file.config, ctx.file.rom, lifted_dir]
+    if ctx.attr.split:
+        asm_dir = ctx.attr.split[OutputGroupInfo].asm.to_list()[0]
+        inputs.append(asm_dir)
+        args.add("--asm_dir=" + asm_dir.path)
+    if ctx.attr.cache:
+        inputs.append(ctx.file.cache)
+        args.add("--cache=" + ctx.file.cache.path)
+
+    ctx.actions.run(
+        inputs = inputs,
+        outputs = [out_dir],
+        executable = ctx.executable._tuner,
+        arguments = [args],
+        mnemonic = "TunerGame",
+        execution_requirements = {"no-sandbox": "1"},
+        use_default_shell_env = True,
+    )
+
+    return [
+        DefaultInfo(files = depset([out_dir])),
+    ]
+
+tuner_tune_game = rule(
+    implementation = _tuner_tune_game_impl,
+    attrs = {
+        "game": attr.string(mandatory = True),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "split": attr.label(mandatory = False, providers = [OutputGroupInfo]),
+        "lifted": attr.label(mandatory = True, allow_single_file = True),
+        "cache": attr.label(mandatory = False, allow_single_file = [".textproto"]),
+        "search_on_miss": attr.bool(default = False),
+        "format": attr.bool(default = True),
+        "_tuner": attr.label(
+            default = "//tuner:tuner",
             executable = True,
             cfg = "exec",
         ),

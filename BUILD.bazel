@@ -71,3 +71,9 @@ alias(
     name = "fuzzer",
     actual = "//fuzzer:fuzzer",
 )
+
+# Native C++ compiler/AST bit-exactness tuner tool
+alias(
+    name = "tuner",
+    actual = "//tuner:tuner",
+)

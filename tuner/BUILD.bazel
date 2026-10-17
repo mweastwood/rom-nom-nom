@@ -1,0 +1,157 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:private"])
+
+cc_library(
+    name = "flag_explorer",
+    srcs = ["flag_explorer.cc"],
+    hdrs = ["flag_explorer.h"],
+    deps = [
+        "//core:game_config",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "flag_explorer_test",
+    srcs = ["flag_explorer_test.cc"],
+    deps = [
+        ":flag_explorer",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "ast_mutator",
+    srcs = ["ast_mutator.cc"],
+    hdrs = ["ast_mutator.h"],
+    deps = [
+        "//core:c_ast",
+        "//core:game_config_cc_proto",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "ast_mutator_test",
+    srcs = ["ast_mutator_test.cc"],
+    deps = [
+        ":ast_mutator",
+        "//core:c_ast",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "tuning_cache_store",
+    srcs = ["tuning_cache_store.cc"],
+    hdrs = ["tuning_cache_store.h"],
+    deps = [
+        "//core:endian",
+        "//core:game_config",
+        "//core:sha1",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "tuning_cache_store_test",
+    srcs = ["tuning_cache_store_test.cc"],
+    deps = [
+        ":tuning_cache_store",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "candidate_scorer",
+    srcs = ["candidate_scorer.cc"],
+    hdrs = ["candidate_scorer.h"],
+    deps = [
+        "//core:candidate_compiler",
+        "//core:mips",
+        "//core:symbol_registry",
+        "//core:target_extractor",
+        "//differ:normalizer",
+        "//differ:sequence_aligner",
+        "//fuzzer:differential_fuzzer",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "candidate_scorer_test",
+    srcs = ["candidate_scorer_test.cc"],
+    deps = [
+        ":candidate_scorer",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "tuner_pipeline",
+    srcs = ["tuner_pipeline.cc"],
+    hdrs = ["tuner_pipeline.h"],
+    deps = [
+        ":ast_mutator",
+        ":candidate_scorer",
+        ":flag_explorer",
+        ":tuning_cache_store",
+        "//core:c_ast",
+        "//core:game_config",
+        "//core:game_config_cc_proto",
+        "//core:target_extractor",
+        "//lifter:c_emitter",
+        "//lifter:lifter_pipeline",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "tuner_pipeline_test",
+    srcs = ["tuner_pipeline_test.cc"],
+    deps = [
+        ":tuner_pipeline",
+        "//core:endian",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "tuner",
+    srcs = ["main.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_mutator",
+        ":tuner_pipeline",
+        "//core:toolchain",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/flags:usage",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)

@@ -1,0 +1,539 @@
+game_name: "harvest-moon-64"
+entries {
+  function_name: "func_800F2470"
+  module_name: "CD870"
+  input_sha1: "f8e01f1d2831b83faaa77875ca82b143a5809927"
+  c_flags: "-O1"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 27
+  matching_instructions: 27
+  target_instructions: 36
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F2500"
+  module_name: "CD870"
+  input_sha1: "4a0d6c7b4296152bad9e1b16ad7a8754993b9966"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 31
+  matching_instructions: 31
+  target_instructions: 40
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F25A0"
+  module_name: "CD9A0"
+  input_sha1: "4215f379e0d2deb38d103df75b3319e1b92d4a98"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 48
+  matching_instructions: 48
+  target_instructions: 48
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F2660"
+  module_name: "CDA60"
+  input_sha1: "2745c942a963ea705557db85afc6bbaf11c718ca"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 11
+  matching_instructions: 11
+  target_instructions: 11
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F268C"
+  module_name: "CDA60"
+  input_sha1: "4367a4a55f09ba1b53dbed5b2a79e10feffa9918"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 8
+  matching_instructions: 8
+  target_instructions: 21
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F26E0"
+  module_name: "CDAE0"
+  input_sha1: "9ddee40f0df4e3d4e5b2e7e415253b5430f77a99"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 9
+  matching_instructions: 9
+  target_instructions: 9
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F2704"
+  module_name: "CDAE0"
+  input_sha1: "2836308b9520383b13348d9575c7cf08666c05f5"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 15
+  matching_instructions: 15
+  target_instructions: 15
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F2740"
+  module_name: "CDAE0"
+  input_sha1: "50489f09b054a3ed6e6d317ba5183b3f5d77d296"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 7
+  matching_instructions: 7
+  target_instructions: 7
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F275C"
+  module_name: "CDAE0"
+  input_sha1: "5d0c2ecc8abddb0040c95c96dfba9f3adef85dab"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 8
+  matching_instructions: 8
+  target_instructions: 9
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F2780"
+  module_name: "CDB80"
+  input_sha1: "e90920810c550407a462cf752ec24839e19b2860"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 16
+  matching_instructions: 16
+  target_instructions: 16
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F8200"
+  module_name: "D3600"
+  input_sha1: "bce49c3a5027f7aa79b8b3c6af0e02e017a0430a"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 17
+  matching_instructions: 17
+  target_instructions: 17
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F8244"
+  module_name: "D3600"
+  input_sha1: "1914df0625fabf4d7ae66f8247f557ab3f8c44ef"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 15
+  matching_instructions: 15
+  target_instructions: 15
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F8280"
+  module_name: "D3680"
+  input_sha1: "15242ed3bd6b290f29d636318d1e73500cf8b9cc"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 13
+  matching_instructions: 13
+  target_instructions: 20
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F82D0"
+  module_name: "D36D0"
+  input_sha1: "ffe7b6f9a5e992ee865ff6beb7432f477c128629"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 59
+  matching_instructions: 59
+  target_instructions: 70
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F83E8"
+  module_name: "D36D0"
+  input_sha1: "7b33783fc71cd5592318ca8a569821be268ed4b5"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 17
+  matching_instructions: 17
+  target_instructions: 50
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F84B0"
+  module_name: "D38B0"
+  input_sha1: "2843d049479931434bfe531b650c432188748d2e"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 4
+  matching_instructions: 4
+  target_instructions: 4
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_800F84C0"
+  module_name: "D38B0"
+  input_sha1: "4d1555b4f9757f991f1999f2313dc546b1580d2f"
+  c_flags: "-O1"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 20
+  matching_instructions: 20
+  target_instructions: 40
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800F8560"
+  module_name: "D3960"
+  input_sha1: "0a7501a75451b29b3369d1140c8e3816141fb027"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 22
+  matching_instructions: 22
+  target_instructions: 36
+  is_bit_exact: false
+}
+entries {
+  function_name: "idle"
+  module_name: "boot"
+  input_sha1: "b374efd7e09a0e1ae640af67bef0d1563ac54ac5"
+  c_flags: "-O0"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 26
+  matching_instructions: 26
+  target_instructions: 55
+  is_bit_exact: false
+}
+entries {
+  function_name: "main"
+  module_name: "boot"
+  input_sha1: "d97c2b4c16a715aa599c98d2735d6a82386409c0"
+  c_flags: "-O2"
+  bit_exact_instructions: 14
+  matching_instructions: 14
+  target_instructions: 25
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004DBA0"
+  module_name: "controller"
+  input_sha1: "44175179a80214dd0f54f904bc3fc233623d214b"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 39
+  matching_instructions: 39
+  target_instructions: 42
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004DC48"
+  module_name: "controller"
+  input_sha1: "9cec3eab6cf7a96e2742d439bc4ddfda1b7f43c7"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 45
+  matching_instructions: 45
+  target_instructions: 77
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004DD7C"
+  module_name: "controller"
+  input_sha1: "135fc3b1959ca95eff513fe784513fdcecd5dda2"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 45
+  matching_instructions: 45
+  target_instructions: 77
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004DEB0"
+  module_name: "controller"
+  input_sha1: "74c2b1d6f3ff7d0e9bd16fab05077bbf24e0e0e5"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 6
+  matching_instructions: 6
+  target_instructions: 6
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_8004DEC8"
+  module_name: "controller"
+  input_sha1: "010c097aa153e175af05153dc8acba1fcfc06fbd"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 7
+  matching_instructions: 7
+  target_instructions: 7
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_8004DEE4"
+  module_name: "controller"
+  input_sha1: "46ed9c9e3827002db266737cbb3e1295eff55c7c"
+  c_flags: "-O0"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 6
+  matching_instructions: 6
+  target_instructions: 7
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004DF00"
+  module_name: "controller"
+  input_sha1: "ad300f0c9903ba118ff973481d68055a5e9045b5"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 2
+  matching_instructions: 2
+  target_instructions: 2
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_8004DF08"
+  module_name: "controller"
+  input_sha1: "9a913cbade71811a1c62615b3472d9b416ed37cf"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 2
+  matching_instructions: 2
+  target_instructions: 2
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_8004DF10"
+  module_name: "controller"
+  input_sha1: "7b592854fc674498ceccbdd7102682ce6825b1af"
+  c_flags: "-O0"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 27
+  matching_instructions: 27
+  target_instructions: 39
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004DFAC"
+  module_name: "controller"
+  input_sha1: "e7b3dc4c3dd709e440422ffb482acb632c367d41"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 19
+  matching_instructions: 19
+  target_instructions: 19
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_8004DFF8"
+  module_name: "controller"
+  input_sha1: "780b7966262fbc98df073fd7ac3346fcfd104bdd"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 79
+  matching_instructions: 79
+  target_instructions: 87
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8004E154"
+  module_name: "controller"
+  input_sha1: "803f5a47bb9fc87572b0e633130256fc0b26b142"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 3
+  matching_instructions: 3
+  target_instructions: 3
+  is_bit_exact: true
+}
+module_c_flags {
+  key: "CD870"
+  value {
+    flags: "-O1"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "CD9A0"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "CDA60"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "CDAE0"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "CDB80"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "D3600"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "D3680"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-O2"
+  }
+}
+module_c_flags {
+  key: "D36D0"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+    flags: "-fno-schedule-insns"
+  }
+}
+module_c_flags {
+  key: "D38B0"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+  }
+}
+module_c_flags {
+  key: "D3960"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+    flags: "-fno-schedule-insns"
+  }
+}
+module_c_flags {
+  key: "boot"
+  value {
+    flags: "-O2"
+  }
+}
+module_c_flags {
+  key: "controller"
+  value {
+    flags: "-O2"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+  }
+}

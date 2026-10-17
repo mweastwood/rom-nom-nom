@@ -6,6 +6,7 @@ cc_library(
     name = "normalizer",
     srcs = ["normalizer.cc"],
     hdrs = ["normalizer.h"],
+    visibility = ["//tuner:__pkg__"],
     deps = [
         "//core:mips",
     ],
@@ -26,6 +27,7 @@ cc_library(
     name = "sequence_aligner",
     srcs = ["sequence_aligner.cc"],
     hdrs = ["sequence_aligner.h"],
+    visibility = ["//tuner:__pkg__"],
     deps = [
         ":normalizer",
         "@abseil-cpp//absl/types:span",

@@ -6,7 +6,16 @@ filegroup(
 )
 
 filegroup(
+    name = "harvest-moon-64-tuning",
+    srcs = ["harvest-moon-64.tuning.textproto"],
+)
+
+filegroup(
     name = "ogre-battle-64",
     srcs = ["ogre-battle-64.textproto"],
 )
 
+filegroup(
+    name = "ogre-battle-64-tuning",
+    srcs = ["ogre-battle-64.tuning.textproto"],
+)

@@ -74,6 +74,7 @@ class TargetExtractor {
   // Reads a 32-bit big-endian word from ROM at the specified VRAM address.
   std::optional<uint32_t> ReadRomWord(uint32_t vram) const;
 
+  const TargetExtractorOptions& Options() const { return options_; }
   const GameConfig* Config() const { return config_; }
   const SymbolIndex* Symbols() const { return symbols_; }
 

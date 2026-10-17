@@ -1,0 +1,72 @@
+game_name: "ogre-battle-64"
+entries {
+  function_name: "func_80070C60"
+  module_name: ""
+  input_sha1: "a86804c20f7f70dbd1ae01cdf54956a78224e386"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  c_flags: "-fforce-addr"
+  bit_exact_instructions: 28
+  matching_instructions: 28
+  target_instructions: 48
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80070D20"
+  module_name: ""
+  input_sha1: "eaabe67536e2c74e3e22b19e119edf3ec359a3dd"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 72
+  matching_instructions: 72
+  target_instructions: 125
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80070F14"
+  module_name: ""
+  input_sha1: "4734a93d68ddeede1b2ec3d9a2dbb40bc7061c7e"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 7
+  matching_instructions: 7
+  target_instructions: 7
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_80070F30"
+  module_name: ""
+  input_sha1: "438ad2081784a21556bded2cab56d9fc402c4799"
+  c_flags: "-O1"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 18
+  matching_instructions: 18
+  target_instructions: 107
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_800710DC"
+  module_name: ""
+  input_sha1: "7124921bc494dc7ed319d02a3747a6227458e4d4"
+  c_flags: "-O1"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 18
+  matching_instructions: 18
+  target_instructions: 107
+  is_bit_exact: false
+}

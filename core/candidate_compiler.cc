@@ -29,8 +29,9 @@ CandidateCompiler::CandidateCompiler(CandidateCompileOptions options)
 }
 
 absl::StatusOr<CompiledCandidateFunction> CandidateCompiler::CompileFunction(
-    const std::filesystem::path& source_file, std::string_view func_name,
-    uint32_t target_vram) const {
+    const std::filesystem::path& source_file, std::string_view func_name, uint32_t target_vram,
+    const std::vector<std::string>& c_flags_override,
+    const std::vector<std::filesystem::path>& extra_include_dirs) const {
   std::filesystem::path resolved_source = source_file;
   if (resolved_source.is_relative()) {
     resolved_source = options_.repo_root / resolved_source;
@@ -50,8 +51,8 @@ absl::StatusOr<CompiledCandidateFunction> CandidateCompiler::CompileFunction(
   }
   Compiler compiler(*tc_or);
 
-  std::vector<std::string> flags;
-  if (options_.config != nullptr) {
+  std::vector<std::string> flags = c_flags_override;
+  if (flags.empty() && options_.config != nullptr) {
     flags = ResolveCFlags(*options_.config, resolved_source.stem().string());
   }
   if (flags.empty()) {
@@ -64,18 +65,19 @@ absl::StatusOr<CompiledCandidateFunction> CandidateCompiler::CompileFunction(
   }
 
   std::vector<std::filesystem::path> includes;
+  for (const auto& inc : extra_include_dirs) {
+    includes.push_back(inc.is_relative() ? (options_.repo_root / inc) : inc);
+  }
   if (options_.config != nullptr && options_.config->include_dirs_size() > 0) {
     for (const auto& dir : options_.config->include_dirs()) {
       std::filesystem::path p(dir);
       includes.push_back(p.is_relative() ? (options_.repo_root / p) : p);
     }
   } else {
-    includes = {
-        options_.repo_root,
-        options_.repo_root / "src" / options_.game_name,
-        options_.repo_root / "src" / "c" / options_.game_name,
-        options_.repo_root / "src" / "cc" / options_.game_name,
-    };
+    includes.push_back(options_.repo_root);
+    includes.push_back(options_.repo_root / "src" / options_.game_name);
+    includes.push_back(options_.repo_root / "src" / "c" / options_.game_name);
+    includes.push_back(options_.repo_root / "src" / "cc" / options_.game_name);
   }
   includes.push_back(asm_dir);
   includes.push_back(options_.repo_root / "bazel-bin");

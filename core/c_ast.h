@@ -687,6 +687,7 @@ class FunctionDeclaration {
 
   std::string Prototype() const;
   std::string ToString() const;
+  FunctionDeclaration Clone() const;
 
  private:
   CType return_type_;

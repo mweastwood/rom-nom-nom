@@ -287,6 +287,7 @@ cc_library(
     name = "c_emitter",
     srcs = ["c_emitter.cc"],
     hdrs = ["c_emitter.h"],
+    visibility = ["//tuner:__pkg__"],
     deps = [
         "//core:c_ast",
         "//core:process",
@@ -345,6 +346,7 @@ cc_library(
     name = "lifter_pipeline",
     srcs = ["lifter_pipeline.cc"],
     hdrs = ["lifter_pipeline.h"],
+    visibility = ["//tuner:__pkg__"],
     deps = [
         ":ast_converter",
         ":c_emitter",

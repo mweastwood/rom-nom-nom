@@ -36,13 +36,16 @@ class CandidateCompiler {
   explicit CandidateCompiler(CandidateCompileOptions options);
 
   absl::StatusOr<CompiledCandidateFunction> CompileFunction(
-      const std::filesystem::path& source_file, std::string_view func_name,
-      uint32_t target_vram) const;
+      const std::filesystem::path& source_file, std::string_view func_name, uint32_t target_vram,
+      const std::vector<std::string>& c_flags_override = {},
+      const std::vector<std::filesystem::path>& extra_include_dirs = {}) const;
 
   absl::StatusOr<CompiledCandidateFunction> CompileCandidateFunction(
-      const std::filesystem::path& source_file, std::string_view func_name,
-      uint32_t target_vram) const {
-    return CompileFunction(source_file, func_name, target_vram);
+      const std::filesystem::path& source_file, std::string_view func_name, uint32_t target_vram,
+      const std::vector<std::string>& c_flags_override = {},
+      const std::vector<std::filesystem::path>& extra_include_dirs = {}) const {
+    return CompileFunction(source_file, func_name, target_vram, c_flags_override,
+                           extra_include_dirs);
   }
 
  private:

@@ -22,6 +22,7 @@ SEARCH_DIRS = [
     "differ",
     "lifter",
     "fuzzer",
+    "tuner",
 ]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".proto"}
 

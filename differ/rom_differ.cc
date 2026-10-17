@@ -213,6 +213,13 @@ absl::StatusOr<RomDiffResult> RomDiffer::Diff() const {
           code_segment_name = segment.name;
           retail_code_start = segment.rom_start;
           retail_code_end = segment.rom_end > 0 ? segment.rom_end : target_bytes.size();
+        } else if (found_code_segment && (segment.type == SEGMENT_CODE || has_code_subsegments) &&
+                   asset_segment_ranges.empty()) {
+          uint64_t seg_end = segment.rom_end > 0 ? segment.rom_end : target_bytes.size();
+          if (seg_end - segment.rom_start > retail_code_end - retail_code_start) {
+            code_segment_name = segment.name;
+          }
+          retail_code_end = std::max(retail_code_end, seg_end);
         } else if (found_code_segment && segment.type != SEGMENT_CODE &&
                    segment.type != SEGMENT_BSS) {
           uint64_t seg_end = segment.rom_end > 0 ? segment.rom_end : target_bytes.size();

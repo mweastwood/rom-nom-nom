@@ -318,4 +318,42 @@ SectionVramClassification ClassifyVramAddress(const GameConfig& config, uint32_t
   return SectionVramClassification::kUnknown;
 }
 
+absl::StatusOr<TuningCache> ParseTuningCache(std::string_view textproto_content) {
+  TuningCache cache;
+  google::protobuf::TextFormat::Parser parser;
+  if (!parser.ParseFromString(textproto_content, &cache)) {
+    return absl::InvalidArgumentError("Failed to parse TuningCache textproto.");
+  }
+  return cache;
+}
+
+absl::StatusOr<TuningCache> LoadTuningCache(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return absl::NotFoundError(
+        absl::StrFormat("Failed to open TuningCache file: %s", path.string()));
+  }
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  return ParseTuningCache(buffer.str());
+}
+
+absl::Status SaveTuningCache(const TuningCache& cache, const std::filesystem::path& path) {
+  if (path.has_parent_path()) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+  }
+  std::string text;
+  if (!google::protobuf::TextFormat::PrintToString(cache, &text)) {
+    return absl::InternalError("Failed to serialize TuningCache to textproto.");
+  }
+  std::ofstream file(path);
+  if (!file.is_open()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to open TuningCache file for writing: %s", path.string()));
+  }
+  file << text;
+  return absl::OkStatus();
+}
+
 }  // namespace rom_nom_nom

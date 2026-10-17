@@ -69,6 +69,41 @@ message SymbolRegistry {
   repeated SymbolRegistryEntry entries = 1;
 }
 
+enum AstMutationKind {
+  AST_MUTATION_UNSPECIFIED = 0;
+  AST_MUTATION_COMMUTE_BINARY_OP = 1;
+  AST_MUTATION_INVERT_IF_ELSE = 2;
+  AST_MUTATION_REORDER_LOCAL_DECLS = 3;
+  AST_MUTATION_TOGGLE_COMPOUND_ASSIGNMENT = 4;
+  AST_MUTATION_WHILE_TO_FOR_LOOP = 5;
+  AST_MUTATION_TOGGLE_UNSIGNED_CAST = 6;
+  AST_MUTATION_INLINE_SINGLE_USE_TEMP = 7;
+}
+
+message AstMutationStep {
+  AstMutationKind kind = 1;
+  uint32 site_index = 2;
+  uint32 param = 3;
+}
+
+message FunctionTuningEntry {
+  string function_name = 1;
+  string module_name = 2;
+  string input_sha1 = 3;
+  repeated string c_flags = 4;
+  repeated AstMutationStep ast_mutations = 5;
+  uint32 bit_exact_instructions = 6;
+  uint32 matching_instructions = 7;
+  uint32 target_instructions = 8;
+  bool is_bit_exact = 9;
+}
+
+message TuningCache {
+  string game_name = 1;
+  repeated FunctionTuningEntry entries = 2;
+  map<string, CompilerFlags> module_c_flags = 3;
+}
+
 message GameConfig {
   string game_name = 1;
   string sha1 = 2;
@@ -80,4 +115,6 @@ message GameConfig {
   repeated string include_dirs = 8;
   string macro_inc = 9;
   repeated SymbolRegistryEntry symbols = 10;
+  repeated FunctionTuningEntry tuning_entries = 11;
+  string tuning_cache_file = 12;
 }
