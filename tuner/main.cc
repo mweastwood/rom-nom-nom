@@ -10,6 +10,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "core/toolchain.h"
+#include "google/protobuf/text_format.h"
 #include "tuner/ast_mutator.h"
 #include "tuner/tuner_pipeline.h"
 
@@ -128,6 +129,13 @@ int main(int argc, char* argv[]) {
     for (const auto& step : res.applied_mutations) {
       std::cerr << "  Applied AST Mutation: " << rom_nom_nom::AstMutator::DescribeStep(step)
                 << "\n";
+    }
+    if (const auto* entry = tuner->CacheStore().Lookup(res.function_name, res.input_sha1);
+        entry != nullptr) {
+      std::string entry_text;
+      if (google::protobuf::TextFormat::PrintToString(*entry, &entry_text)) {
+        std::cerr << "--- BEGIN TUNING ENTRY ---\n" << entry_text << "--- END TUNING ENTRY ---\n";
+      }
     }
     if (!output_path.empty()) {
       std::ofstream out(output_path);

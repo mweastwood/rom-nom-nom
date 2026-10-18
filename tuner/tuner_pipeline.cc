@@ -372,6 +372,83 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     }
   }
 
+  // Phase 2b: Near-Miss Polish Pass
+  // When a function is not yet bit-exact after the main mutation rounds, if the best candidate is
+  // a near-miss (target_insns - matching_insns <= 6 or instruction_match_ratio >= 0.85), run an
+  // extra Polish Pass (up to 2 extra micro-rounds) that tests ALL swap adjacent statements sites
+  // and near-miss mutations without truncating at max_candidates=24, co-evaluating across flag
+  // profiles.
+  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
+    size_t target_insns = result.best_score.target_instruction_count;
+    size_t matching_insns = result.best_score.matching_instructions;
+    double match_ratio =
+        target_insns > 0 ? static_cast<double>(matching_insns) / target_insns : 0.0;
+    bool is_near_miss = (target_insns >= matching_insns && (target_insns - matching_insns <= 6)) ||
+                        (match_ratio >= 0.85);
+    if (is_near_miss) {
+      constexpr size_t kMaxPolishRounds = 2;
+      for (size_t polish_round = 0;
+           polish_round < kMaxPolishRounds && !result.best_score.raw_bit_exact; ++polish_round) {
+        auto all_steps = AstMutator::DiscoverMutations(best_ast, /*max_mutations=*/512);
+        std::vector<AstMutationStep> polish_steps;
+        for (const auto& step : all_steps) {
+          if (step.kind() == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
+              step.kind() == AST_MUTATION_PROPAGATE_REGISTER_COPY ||
+              step.kind() == AST_MUTATION_HOIST_WHILE_GUARD ||
+              step.kind() == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR ||
+              step.kind() == AST_MUTATION_INVERT_IF_ELSE ||
+              step.kind() == AST_MUTATION_COMMUTE_BINARY_OP) {
+            polish_steps.push_back(step);
+          }
+        }
+        for (const auto& step : all_steps) {
+          if (step.kind() != AST_MUTATION_SWAP_ADJACENT_STATEMENTS &&
+              step.kind() != AST_MUTATION_PROPAGATE_REGISTER_COPY &&
+              step.kind() != AST_MUTATION_HOIST_WHILE_GUARD &&
+              step.kind() != AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR &&
+              step.kind() != AST_MUTATION_INVERT_IF_ELSE &&
+              step.kind() != AST_MUTATION_COMMUTE_BINARY_OP) {
+            polish_steps.push_back(step);
+          }
+        }
+
+        bool improved_in_polish = false;
+        for (const auto& step : polish_steps) {
+          FunctionDeclaration mutated = AstMutator::ApplyMutation(best_ast, step);
+          std::string mutated_c = EmitSingleFunctionWithExterns(mutated, parent_tu, symbols,
+                                                                /*format_with_clang=*/false);
+          std::vector<std::vector<std::string>> candidate_flags_to_try = {result.winning_c_flags};
+          for (const auto& flags : flag_profiles) {
+            if (flags != result.winning_c_flags) {
+              candidate_flags_to_try.push_back(flags);
+            }
+          }
+
+          for (const auto& flags : candidate_flags_to_try) {
+            if (!evaluated_candidates.insert(make_evaluation_key(flags, mutated_c)).second) {
+              continue;
+            }
+            auto candidate_score_or =
+                scorer.CompileAndScore(target, mutated_c, flags, extra_include_dirs);
+            if (!candidate_score_or.ok()) continue;
+            if (candidate_score_or->IsBetterThan(result.best_score)) {
+              result.best_score = *candidate_score_or;
+              result.winning_c_flags = flags;
+              best_ast = std::move(mutated);
+              result.applied_mutations.push_back(step);
+              result.improved_over_baseline = true;
+              improved_in_polish = true;
+              improved_in_phase2 = true;
+              if (result.best_score.raw_bit_exact) break;
+            }
+          }
+          if (result.best_score.raw_bit_exact) break;
+        }
+        if (!improved_in_polish) break;
+      }
+    }
+  }
+
   // Phase 3: Post-AST Compiler Flag Re-Sweep if Phase 1b or Phase 2 mutated the AST
   if (!result.best_score.raw_bit_exact && options_.explore_flags &&
       (improved_in_phase1b || improved_in_phase2)) {

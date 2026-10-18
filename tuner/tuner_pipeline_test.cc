@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "absl/strings/match.h"
+#include "core/c_ast.h"
 #include "core/endian.h"
 #include "gtest/gtest.h"
+#include "tuner/ast_mutator.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -500,6 +502,51 @@ TEST(TunerPipelineTest, TuneAllModulesOverwritesReadOnlyLiftedFilesWithMutatedAs
   std::filesystem::permissions(baseline_c, std::filesystem::perms::all, ec);
   std::filesystem::permissions(tuned_c, std::filesystem::perms::all, ec);
   std::filesystem::remove_all(temp_dir, ec);
+}
+
+TEST(TunerPipelineTest, NearMissPolishPassPrioritizesNearMissMutations) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "a"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "b"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("a"),
+      CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b")))));
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("b"),
+      CExpression::Binary("+", CExpression::Identifier("b"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::While(
+      CExpression::Binary("<", CExpression::Identifier("b"), CExpression::Integer(10)),
+      std::move(loop_body)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("a")));
+
+  FunctionDeclaration func(CType::S32(), "NearMissFunc", {}, std::move(body));
+
+  auto all_steps = AstMutator::DiscoverMutations(func, 512);
+  EXPECT_GT(all_steps.size(), 0u);
+
+  // Partition steps as in Phase 2b Near-Miss Polish Pass
+  std::vector<AstMutationStep> polish_steps;
+  for (const auto& step : all_steps) {
+    if (step.kind() == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
+        step.kind() == AST_MUTATION_PROPAGATE_REGISTER_COPY ||
+        step.kind() == AST_MUTATION_HOIST_WHILE_GUARD ||
+        step.kind() == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR ||
+        step.kind() == AST_MUTATION_INVERT_IF_ELSE ||
+        step.kind() == AST_MUTATION_COMMUTE_BINARY_OP) {
+      polish_steps.push_back(step);
+    }
+  }
+
+  EXPECT_FALSE(polish_steps.empty());
+  for (const auto& step : polish_steps) {
+    EXPECT_TRUE(step.kind() == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
+                step.kind() == AST_MUTATION_PROPAGATE_REGISTER_COPY ||
+                step.kind() == AST_MUTATION_HOIST_WHILE_GUARD ||
+                step.kind() == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR ||
+                step.kind() == AST_MUTATION_INVERT_IF_ELSE ||
+                step.kind() == AST_MUTATION_COMMUTE_BINARY_OP);
+  }
 }
 
 }  // namespace

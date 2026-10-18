@@ -1314,5 +1314,203 @@ TEST(AstMutatorTest, VolatileGlobalAccessOgreBattleFunc800737A0) {
   EXPECT_TRUE(absl::StrContains(output, "D_800E9BA0 = v1;"));
 }
 
+TEST(AstMutatorTest, PropagatesRegisterCopyAndPrunesDeadInit) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v1", CExpression::Integer(0)));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v1"), CExpression::Identifier("v0"))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v1")));
+
+  FunctionDeclaration func(CType::S32(), "CopyFunc", {}, std::move(body));
+
+  auto mutations = AstMutator::DiscoverMutations(func, 64);
+  EXPECT_FALSE(mutations.empty());
+
+  // Apply discovered mutations (both dead init pruning and register copy propagation)
+  FunctionDeclaration mutated = AstMutator::ApplyMutations(func, mutations);
+  std::string output = mutated.ToString();
+  EXPECT_FALSE(absl::StrContains(output, "v1")) << output;
+  EXPECT_TRUE(absl::StrContains(output, "return v0;")) << output;
+}
+
+TEST(AstMutatorTest, SinksSelfMaskAndFoldsCast) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "arg0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "x"));
+  // arg0 = (arg0 & 65535);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("&", CExpression::Identifier("arg0"), CExpression::Integer(65535)))));
+  // x = 1;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(1))));
+  // if (arg0 < 16) { return x; }
+  auto if_body = std::make_unique<CompoundStatement>();
+  if_body->AddStatement(CStatement::Return(CExpression::Identifier("x")));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("<", CExpression::Identifier("arg0"), CExpression::Integer(16)),
+      std::move(if_body)));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FunctionDeclaration func(CType::S32(), "MaskFunc", {{CType::S32(), "arg0"}}, std::move(body));
+
+  AstMutationStep sink_step;
+  sink_step.set_kind(AST_MUTATION_PROPAGATE_REGISTER_COPY);
+  sink_step.set_site_index(0);
+  sink_step.set_param(0);  // sink statement
+
+  FunctionDeclaration mutated_sink = AstMutator::ApplyMutation(func, sink_step);
+  std::string output_sink = mutated_sink.ToString();
+  size_t pos_x = output_sink.find("x = 1;");
+  size_t pos_mask = output_sink.find("arg0 = (arg0 & 65535);");
+  ASSERT_NE(pos_x, std::string::npos);
+  ASSERT_NE(pos_mask, std::string::npos);
+  EXPECT_LT(pos_x, pos_mask);
+
+  AstMutationStep fold_step;
+  fold_step.set_kind(AST_MUTATION_PROPAGATE_REGISTER_COPY);
+  fold_step.set_site_index(0);
+  fold_step.set_param(1);  // fold cast into condition
+
+  FunctionDeclaration mutated_fold = AstMutator::ApplyMutation(func, fold_step);
+  std::string output_fold = mutated_fold.ToString();
+  EXPECT_TRUE(absl::StrContains(output_fold, "if (((u16)arg0 < 16))")) << output_fold;
+}
+
+TEST(AstMutatorTest, HoistsWhileGuardAndInvertsLoop) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("i"),
+      CExpression::Binary("+", CExpression::Identifier("i"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::While(
+      CExpression::Binary("<", CExpression::Identifier("i"), CExpression::Integer(10)),
+      std::move(loop_body)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("i")));
+
+  FunctionDeclaration func(CType::S32(), "WhileFunc", {{CType::S32(), "i"}}, std::move(body));
+
+  auto mutations = AstMutator::DiscoverMutations(func, 64);
+  bool found_hoist = false;
+  for (const auto& step : mutations) {
+    if (step.kind() == AST_MUTATION_HOIST_WHILE_GUARD) {
+      found_hoist = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_hoist);
+
+  // param 0: guarded do-while
+  AstMutationStep guard_step;
+  guard_step.set_kind(AST_MUTATION_HOIST_WHILE_GUARD);
+  guard_step.set_site_index(0);
+  guard_step.set_param(0);
+
+  FunctionDeclaration guarded = AstMutator::ApplyMutation(func, guard_step);
+  std::string output_guarded = guarded.ToString();
+  EXPECT_TRUE(absl::StrContains(output_guarded, "if ((i < 10)) {")) << output_guarded;
+  EXPECT_TRUE(absl::StrContains(output_guarded, "do {")) << output_guarded;
+
+  // and reverse: guarded do-while -> while
+  auto reverse_mutations = AstMutator::DiscoverMutations(guarded, 64);
+  bool found_reverse = false;
+  AstMutationStep reverse_step;
+  for (const auto& step : reverse_mutations) {
+    if (step.kind() == AST_MUTATION_HOIST_WHILE_GUARD) {
+      found_reverse = true;
+      reverse_step = step;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_reverse);
+  FunctionDeclaration restored = AstMutator::ApplyMutation(guarded, reverse_step);
+  std::string output_restored = restored.ToString();
+  EXPECT_TRUE(absl::StrContains(output_restored, "while ((i < 10)) {")) << output_restored;
+}
+
+TEST(AstMutatorTest, HoistsWhileBreakIfToGoardedDoWhile) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto loop_body = std::make_unique<CompoundStatement>();
+  auto break_body = std::make_unique<CompoundStatement>();
+  break_body->AddStatement(CStatement::Break());
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("i"), CExpression::Integer(10)),
+      std::move(break_body)));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("i"),
+      CExpression::Binary("+", CExpression::Identifier("i"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::While(CExpression::Integer(1), std::move(loop_body)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("i")));
+
+  FunctionDeclaration func(CType::S32(), "BreakFunc", {{CType::S32(), "i"}}, std::move(body));
+
+  AstMutationStep hoist_step;
+  hoist_step.set_kind(AST_MUTATION_HOIST_WHILE_GUARD);
+  hoist_step.set_site_index(0);
+  hoist_step.set_param(0);  // while (!cond) { body; }
+
+  FunctionDeclaration mutated = AstMutator::ApplyMutation(func, hoist_step);
+  std::string output = mutated.ToString();
+  EXPECT_TRUE(absl::StrContains(output, "while ((i != 10)) {")) << output;
+  EXPECT_FALSE(absl::StrContains(output, "break;")) << output;
+}
+
+TEST(AstMutatorTest, ReloadOrEarlyReturnVarMemoryStoreAndZeroSubstitution) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v1", CExpression::Integer(0)));
+  // *(s8 *)(arg0 + 213) = v0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType::Named("s8").MakePointer(),
+                                           CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                               CExpression::Integer(213)))),
+      CExpression::Identifier("v0"))));
+  // v0 = *(u8 *)(arg0 + 213);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Unary("*",
+                         CExpression::Cast(CType::Named("u8").MakePointer(),
+                                           CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                               CExpression::Integer(213)))))));
+  // return 0;
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FunctionDeclaration func(CType::S32(), "ReloadFunc", {{CType::S32(), "arg0"}}, std::move(body));
+
+  auto mutations = AstMutator::DiscoverMutations(func, 64);
+  bool found_reload = false;
+  for (const auto& step : mutations) {
+    if (step.kind() == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR) {
+      found_reload = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_reload);
+
+  // Apply volatile store & reload mutation (site 0)
+  AstMutationStep reload_step;
+  reload_step.set_kind(AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR);
+  reload_step.set_site_index(0);
+  reload_step.set_param(0);
+
+  FunctionDeclaration mutated = AstMutator::ApplyMutation(func, reload_step);
+  std::string output = mutated.ToString();
+  EXPECT_TRUE(absl::StrContains(output, "volatile s8*")) << output;
+  EXPECT_TRUE(absl::StrContains(output, "volatile u8*")) << output;
+
+  // Apply zero-return variable substitution (site 1)
+  AstMutationStep ret_step;
+  ret_step.set_kind(AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR);
+  ret_step.set_site_index(1);
+  ret_step.set_param(0);
+
+  FunctionDeclaration ret_mutated = AstMutator::ApplyMutation(func, ret_step);
+  std::string ret_output = ret_mutated.ToString();
+  EXPECT_TRUE(absl::StrContains(ret_output, "return v1;")) << ret_output;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
