@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/compiler.h"
 #include "core/game_config.pb.h"
@@ -774,6 +775,175 @@ SECTIONS
 
   EXPECT_THAT(boot_compiler_arguments, ::testing::Contains("-O2"));
   EXPECT_THAT(audio_compiler_arguments, ::testing::Contains("-O3"));
+}
+
+TEST_F(RomBuilderTest, BuildCompilesCModuleWithPerFunctionFlagsUsingAssemblySplicing) {
+  CreateFile(src_dir_ / "c" / "test_game" / "math.c", R"(
+int Add(int a, int b) { return a + b; }
+int Sub(int a, int b) { return a - b; }
+)");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .math : { build/src/math.o(.text*); }
+}
+)");
+  CreateFile(build_dir_ / "symbols.ld", "");
+
+  CreateFile(src_dir_ / "tuned_c_flags.textproto", R"pb(
+    game_name: "test_game"
+    module_c_flags {
+      key: "math"
+      value { flags: "-O2" flags: "-mips2" flags: "-mcpu=r4000" flags: "-Wa,-O2" }
+    }
+    entries {
+      function_name: "Sub"
+      module_name: "math"
+      c_flags: "-O1"
+      c_flags: "-mips2"
+      c_flags: "-mcpu=r4000"
+      c_flags: "-Wa,-g"
+    }
+  )pb");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    c_flags {
+      key: "default"
+      value { flags: "-O2" flags: "-mips2" flags: "-mcpu=r4000" flags: "-Wa,-O2" }
+    }
+    segments {
+      name: "code"
+      rom_start: 0x0
+      rom_end: 0x10
+      vram: 0x80000000
+      type: SEGMENT_CODE
+      subsegments { name: "math" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path output_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path output_rom = test_dir_ / "out" / "test_game.z64";
+
+  std::vector<std::vector<std::string>> gcc_invocations;
+  std::string captured_spliced_assembly;
+
+  auto mock_runner = [&](const ProcessOptions& process_options) -> absl::StatusOr<ProcessResult> {
+    if (process_options.program == toolchain_.Gcc272().string()) {
+      gcc_invocations.push_back(process_options.args);
+      for (size_t i = 0; i + 1 < process_options.args.size(); ++i) {
+        if (process_options.args[i] == "-o") {
+          std::filesystem::path out_s(process_options.args[i + 1]);
+          bool is_o1 = false;
+          for (const auto& arg : process_options.args) {
+            if (arg == "-O1") is_o1 = true;
+          }
+          std::ofstream ofs(out_s);
+          if (is_o1) {
+            ofs << R"(	.text
+	.align	2
+	.globl	Add
+	.type	 Add,@function
+	.ent	Add
+Add:
+.L1:
+	addu_o1	$2,$4,$5
+	j	$31
+	.end	Add
+.Lfe1:
+	.size	 Add,.Lfe1-Add
+	.align	2
+	.globl	Sub
+	.type	 Sub,@function
+	.ent	Sub
+Sub:
+.L1:
+	subu_o1	$2,$4,$5
+	j	$31
+	.end	Sub
+.Lfe2:
+	.size	 Sub,.Lfe2-Sub
+)";
+          } else {
+            ofs << R"(	.text
+	.align	2
+	.globl	Add
+	.type	 Add,@function
+	.ent	Add
+Add:
+.L1:
+	addu_o2	$2,$4,$5
+	j	$31
+	.end	Add
+.Lfe1:
+	.size	 Add,.Lfe1-Add
+	.align	2
+	.globl	Sub
+	.type	 Sub,@function
+	.ent	Sub
+Sub:
+.L1:
+	subu_o2	$2,$4,$5
+	j	$31
+	.end	Sub
+.Lfe2:
+	.size	 Sub,.Lfe2-Sub
+)";
+          }
+        }
+      }
+    } else if (process_options.program == toolchain_.KmcAs().string()) {
+      for (const auto& arg : process_options.args) {
+        if (absl::EndsWith(arg, ".spliced.s272")) {
+          std::ifstream ifs(arg);
+          captured_spliced_assembly.assign((std::istreambuf_iterator<char>(ifs)),
+                                           std::istreambuf_iterator<char>());
+        }
+      }
+    }
+
+    if (process_options.args.size() >= 4 && process_options.args[1] == "binary" &&
+        process_options.args[3] == output_rom.string()) {
+      std::filesystem::create_directories(output_rom.parent_path());
+      std::ofstream(output_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+  RomBuilderOptions builder_options{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = output_elf,
+      .out_rom = output_rom,
+  };
+
+  RomBuilder builder(toolchain_, builder_options, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  ASSERT_EQ(gcc_invocations.size(), 2u);
+  EXPECT_THAT(gcc_invocations[0], ::testing::Contains("-O2"));
+  EXPECT_THAT(gcc_invocations[1], ::testing::Contains("-O1"));
+
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr("addu_o2"));
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr("subu_o1"));
+  EXPECT_THAT(captured_spliced_assembly, ::testing::Not(::testing::HasSubstr("subu_o2")));
+
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".L_sp_Sub_1"));
+
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".set\tnomove"));
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".set\tmove"));
 }
 
 }  // namespace

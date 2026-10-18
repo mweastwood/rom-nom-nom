@@ -631,6 +631,8 @@ absl::StatusOr<std::vector<std::filesystem::path>> TunerPipeline::TuneAllModules
       std::filesystem::path dst = output_dir / entry.path().filename();
       std::filesystem::copy_file(entry.path(), dst,
                                  std::filesystem::copy_options::overwrite_existing, ec);
+      std::filesystem::permissions(dst, std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::add, ec);
       emitted_files.push_back(dst);
     }
     copied_from_lifted_dir = true;
@@ -677,9 +679,23 @@ absl::StatusOr<std::vector<std::filesystem::path>> TunerPipeline::TuneAllModules
               tuned_mod_or->improved_functions);
         }
         std::filesystem::path out_c = output_dir / absl::StrCat(module_name, ".c");
+        std::error_code perm_ec;
+        if (std::filesystem::exists(out_c, perm_ec)) {
+          std::filesystem::permissions(out_c, std::filesystem::perms::owner_write,
+                                       std::filesystem::perm_options::add, perm_ec);
+        }
         std::ofstream ofs(out_c);
-        if (ofs.is_open()) {
-          ofs << tuned_mod_or->tuned_c_code;
+        if (!ofs.is_open()) {
+          return absl::PermissionDeniedError(
+              absl::StrFormat("Failed to open '%s' for writing tuned C code.", out_c.string()));
+        }
+        ofs << tuned_mod_or->tuned_c_code;
+        if (!ofs.good()) {
+          return absl::InternalError(
+              absl::StrFormat("Failed to write tuned C code to '%s'.", out_c.string()));
+        }
+        if (std::find(emitted_files.begin(), emitted_files.end(), out_c) == emitted_files.end()) {
+          emitted_files.push_back(out_c);
         }
       }
     }

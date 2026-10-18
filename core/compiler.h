@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/process.h"
@@ -23,6 +24,17 @@ struct CCompileOptions {
   std::filesystem::path src_file;
   std::filesystem::path out_obj;
   std::vector<std::string> opt_flags;
+  std::vector<std::filesystem::path> include_dirs;
+  std::filesystem::path macro_inc;
+  absl::Duration timeout = absl::ZeroDuration();
+};
+
+// Options for compiling a C source file where individual functions use distinct compiler flags.
+struct PerFunctionCCompileOptions {
+  std::filesystem::path src_file;
+  std::filesystem::path out_obj;
+  std::vector<std::string> default_flags;
+  absl::flat_hash_map<std::string, std::vector<std::string>> function_flags;
   std::vector<std::filesystem::path> include_dirs;
   std::filesystem::path macro_inc;
   absl::Duration timeout = absl::ZeroDuration();
@@ -80,6 +92,12 @@ class Compiler {
   // file, then executes KMC AS to assemble it to .o, and removes the temporary .s272 file.
   // In modern toolchain mode: executes modern GNU MIPS GCC directly to .o.
   absl::Status CompileC(const CCompileOptions& options) const;
+
+  // Compiles a C source file where individual functions use distinct compiler flags by
+  // compiling the translation unit under each unique flag set, extracting the resulting
+  // assembly for each function, renaming local labels to prevent collisions, splicing
+  // them together into a unified .s272 file, and assembling the spliced output with KMC AS.
+  absl::Status CompileCWithPerFunctionFlags(const PerFunctionCCompileOptions& options) const;
 
   // Compiles a C++ source file to an object file (.cc/.cpp -> .o).
   // Requires modern toolchain mode.

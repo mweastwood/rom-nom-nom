@@ -1,7 +1,9 @@
 #include "core/candidate_compiler.h"
 
 #include <elf.h>
+#include <unistd.h>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -135,12 +137,16 @@ absl::StatusOr<CompiledCandidateFunction> CandidateCompiler::CompileFunction(
     macro_inc = FindMacroInc(options_.repo_root, options_.game_name);
   }
 
-  std::filesystem::path temporary_dir = resolved_source.has_parent_path()
-                                            ? resolved_source.parent_path()
-                                            : std::filesystem::temp_directory_path();
+  std::error_code temp_ec;
+  std::filesystem::path temporary_dir = std::filesystem::temp_directory_path(temp_ec);
+  if (temp_ec || temporary_dir.empty()) {
+    temporary_dir = "/tmp";
+  }
+  static std::atomic<uint64_t> temp_counter{0};
+  uint64_t unique_id = temp_counter.fetch_add(1, std::memory_order_relaxed);
   std::filesystem::path temporary_object =
-      temporary_dir /
-      absl::StrCat("diff_", resolved_source.stem().string(), "_", function_name, ".o");
+      temporary_dir / absl::StrCat("diff_", resolved_source.stem().string(), "_", function_name,
+                                   "_", static_cast<uint64_t>(getpid()), "_", unique_id, ".o");
 
   auto compile_status = compiler.CompileC({
       .src_file = resolved_source,

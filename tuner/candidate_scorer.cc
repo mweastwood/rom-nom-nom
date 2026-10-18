@@ -224,6 +224,9 @@ bool CandidateScorer::VerifyEquivalence(const TargetFunction& target,
   }
   fuzzer::DifferentialFuzzer differential_fuzzer;
   auto cases = fuzzer::DifferentialFuzzer::GenerateBoundaryCases();
+  auto pointer_cases = fuzzer::DifferentialFuzzer::GeneratePointerCases(
+      num_vectors, /*buffer_vram=*/0x80500000, /*buffer_size=*/256, /*seed=*/42);
+  cases.insert(cases.end(), pointer_cases.begin(), pointer_cases.end());
   auto random_cases = fuzzer::DifferentialFuzzer::GenerateRandomCases(num_vectors, /*seed=*/42);
   cases.insert(cases.end(), random_cases.begin(), random_cases.end());
 

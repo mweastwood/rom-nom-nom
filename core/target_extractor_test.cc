@@ -702,5 +702,80 @@ TEST_F(TargetExtractorTest,
   EXPECT_EQ(compiled_or->patched_words[1], 0x8C2222B0u);
 }
 
+TEST_F(TargetExtractorTest,
+       CompileCandidateFunctionCompilesInTempDirectoryEvenIfSourceDirReadOnly) {
+  std::filesystem::create_directories(test_dir_ / "bin");
+  std::filesystem::create_directories(test_dir_ / "toolchain" / "gcc-2.7.2");
+  std::filesystem::create_directories(test_dir_ / "toolchain" / "binutils-2.6");
+
+  std::filesystem::path prebuilt_elf_path = test_dir_ / "prebuilt_candidate.o";
+  {
+    auto elf_bytes = BuildCandidateMipsElfWithJumps();
+    std::ofstream elf_out(prebuilt_elf_path, std::ios::binary);
+    elf_out.write(reinterpret_cast<const char*>(elf_bytes.data()), elf_bytes.size());
+  }
+
+  auto write_executable = [](const std::filesystem::path& path, const std::string& script) {
+    std::ofstream out(path);
+    out << script;
+    out.close();
+    std::filesystem::permissions(
+        path,
+        std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
+            std::filesystem::perms::group_exec | std::filesystem::perms::others_read |
+            std::filesystem::perms::others_exec,
+        std::filesystem::perm_options::replace);
+  };
+
+  const std::string noop_script = "#!/bin/sh\nexit 0\n";
+  write_executable(test_dir_ / "bin" / "mips-linux-gnu-as", noop_script);
+  write_executable(test_dir_ / "bin" / "mips-linux-gnu-ld", noop_script);
+  write_executable(test_dir_ / "bin" / "mips-linux-gnu-objcopy", noop_script);
+  write_executable(test_dir_ / "toolchain" / "gcc-2.7.2" / "gcc", noop_script);
+
+  std::string kmc_as_script =
+      "#!/bin/sh\n"
+      "while [ $# -gt 0 ]; do\n"
+      "  if [ \"$1\" = \"-o\" ]; then\n"
+      "    cp \"" +
+      prebuilt_elf_path.string() +
+      "\" \"$2\"\n"
+      "    exit 0\n"
+      "  fi\n"
+      "  shift\n"
+      "done\n"
+      "exit 1\n";
+  write_executable(test_dir_ / "toolchain" / "binutils-2.6" / "as", kmc_as_script);
+
+  std::filesystem::path readonly_src_dir = test_dir_ / "readonly_src";
+  std::filesystem::create_directories(readonly_src_dir);
+  std::filesystem::path source_file = readonly_src_dir / "candidate_readonly.c";
+  {
+    std::ofstream source_output(source_file);
+    source_output << "void TargetFunc(void) {}\n";
+  }
+
+  // Make source directory read-only (0555)
+  std::filesystem::permissions(
+      readonly_src_dir,
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec |
+          std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
+          std::filesystem::perms::others_read | std::filesystem::perms::others_exec,
+      std::filesystem::perm_options::replace);
+
+  TargetExtractor extractor({.repo_root = test_dir_, .game_name = "test-game"}, &config_,
+                            &symbols_);
+  auto compiled_or = extractor.CompileCandidateFunction(source_file, "TargetFunc", 0x80021000);
+  EXPECT_TRUE(compiled_or.ok()) << compiled_or.status();
+
+  // Verify that no intermediate or object files were written into the source directory
+  EXPECT_FALSE(std::filesystem::exists(readonly_src_dir / "candidate_readonly.o"));
+  EXPECT_FALSE(std::filesystem::exists(readonly_src_dir / "diff_candidate_readonly_TargetFunc.o"));
+
+  // Restore permissions for cleanup
+  std::error_code ec;
+  std::filesystem::permissions(readonly_src_dir, std::filesystem::perms::all, ec);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

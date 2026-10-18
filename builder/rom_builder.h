@@ -66,6 +66,9 @@ class RomBuilder {
   // 8. Performs SHA-1 and bit-exact retail ROM verification.
   absl::StatusOr<RomBuildResult> Build() const;
 
+  // Compiles a C module with per-function compiler flags via assembly splicing.
+  absl::Status CompileCWithPerFunctionFlags(const PerFunctionCCompileOptions& options) const;
+
  private:
   Toolchain toolchain_;
   RomBuilderOptions options_;

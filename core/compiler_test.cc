@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -422,12 +423,171 @@ TEST_F(CompilerTest, ExtractRomExecutesObjcopy) {
                                           }));
 }
 
+TEST_F(CompilerTest, CompileCWithPerFunctionFlagsSplicesAssemblyWithLabelNamespacingAndNomove) {
+  std::vector<ProcessOptions> executed_processes;
+  std::string captured_spliced_assembly;
+
+  auto mock_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    executed_processes.push_back(opts);
+    if (opts.program == "/tools/gcc") {
+      for (size_t i = 0; i + 1 < opts.args.size(); ++i) {
+        if (opts.args[i] == "-o") {
+          std::filesystem::path out_path(opts.args[i + 1]);
+          bool is_o1 = false;
+          for (const auto& arg : opts.args) {
+            if (arg == "-O1") is_o1 = true;
+          }
+          std::ofstream ofs(out_path);
+          if (is_o1) {
+            ofs << "\t.text\n"
+                << "\t.align\t2\n"
+                << "\t.globl\tFuncA\n"
+                << "\t.type\tFuncA,@function\n"
+                << "\t.ent\tFuncA\n"
+                << "FuncA:\n"
+                << ".L1:\n"
+                << "\taddu_o1\t$2,$4,$5\n"
+                << "\tj\t$31\n"
+                << "\t.end\tFuncA\n"
+                << ".Lfe1:\n"
+                << "\t.size\tFuncA,.Lfe1-FuncA\n"
+                << "\t.align\t2\n"
+                << "\t.globl\tFuncB\n"
+                << "\t.type\tFuncB,@function\n"
+                << "\t.ent\tFuncB\n"
+                << "FuncB:\n"
+                << ".L1:\n"
+                << "\tsubu_o1\t$2,$4,$5\n"
+                << "\tj\t$31\n"
+                << "\t.end\tFuncB\n"
+                << ".Lfe2:\n"
+                << "\t.size\tFuncB,.Lfe2-FuncB\n";
+          } else {
+            ofs << "\t.text\n"
+                << "\t.align\t2\n"
+                << "\t.globl\tFuncA\n"
+                << "\t.type\tFuncA,@function\n"
+                << "\t.ent\tFuncA\n"
+                << "FuncA:\n"
+                << ".L1:\n"
+                << "\taddu_o2\t$2,$4,$5\n"
+                << "\tj\t$31\n"
+                << "\t.end\tFuncA\n"
+                << ".Lfe1:\n"
+                << "\t.size\tFuncA,.Lfe1-FuncA\n"
+                << "\t.align\t2\n"
+                << "\t.globl\tFuncB\n"
+                << "\t.type\tFuncB,@function\n"
+                << "\t.ent\tFuncB\n"
+                << "FuncB:\n"
+                << ".L1:\n"
+                << "\tsubu_o2\t$2,$4,$5\n"
+                << "\tj\t$31\n"
+                << "\t.end\tFuncB\n"
+                << ".Lfe2:\n"
+                << "\t.size\tFuncB,.Lfe2-FuncB\n";
+          }
+        }
+      }
+    } else if (opts.program == "/tools/kmc-as") {
+      for (const auto& arg : opts.args) {
+        if (absl::EndsWith(arg, ".spliced.s272")) {
+          std::ifstream ifs(arg);
+          captured_spliced_assembly.assign((std::istreambuf_iterator<char>(ifs)),
+                                           std::istreambuf_iterator<char>());
+        }
+      }
+    }
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(original_toolchain_, mock_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "sample.c";
+  std::filesystem::path out_obj = test_dir_ / "obj" / "sample.o";
+  std::filesystem::path macro_inc = test_dir_ / "macros" / "game_macro.inc";
+
+  PerFunctionCCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .default_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      .function_flags = {{"FuncB", {"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"}}},
+      .include_dirs = {test_dir_ / "include"},
+      .macro_inc = macro_inc,
+  };
+
+  EXPECT_TRUE(compiler.CompileCWithPerFunctionFlags(opts).ok());
+
+  ASSERT_THAT(executed_processes, SizeIs(3));
+  EXPECT_EQ(executed_processes[0].program, "/tools/gcc");
+  EXPECT_THAT(executed_processes[0].args, Contains("-O2"));
+  EXPECT_EQ(executed_processes[1].program, "/tools/gcc");
+  EXPECT_THAT(executed_processes[1].args, Contains("-O1"));
+  EXPECT_EQ(executed_processes[2].program, "/tools/kmc-as");
+
+  // Verify assembly block splicing: FuncA uses -O2 body, FuncB uses -O1 body
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr("addu_o2"));
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr("subu_o1"));
+  EXPECT_THAT(captured_spliced_assembly, ::testing::Not(::testing::HasSubstr("subu_o2")));
+
+  // Verify local label namespacing (.L1 in FuncB renamed to .L_sp_FuncB_1)
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".L_sp_FuncB_1"));
+
+  // Verify .set nomove / .set move injection for -Wa,-g function under -Wa,-O2 overall
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".set\tnomove"));
+  EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".set\tmove"));
+
+  // Verify temporary files are deleted
+  EXPECT_FALSE(std::filesystem::exists(test_dir_ / "obj" / "sample.0.s272"));
+  EXPECT_FALSE(std::filesystem::exists(test_dir_ / "obj" / "sample.1.s272"));
+  EXPECT_FALSE(std::filesystem::exists(test_dir_ / "obj" / "sample.spliced.s272"));
+}
+
+TEST_F(CompilerTest, CompileCWithPerFunctionFlagsFallsBackToCompileCWhenNoDistinctFlags) {
+  std::vector<ProcessOptions> executed_processes;
+  auto mock_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    executed_processes.push_back(opts);
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(original_toolchain_, mock_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "sample.c";
+  std::filesystem::path out_obj = test_dir_ / "obj" / "sample.o";
+  std::filesystem::path macro_inc = test_dir_ / "macros" / "game_macro.inc";
+
+  PerFunctionCCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .default_flags = {"-O2", "-mips2", "-Wa,-O2"},
+      .function_flags = {{"FuncA", {"-O2", "-mips2", "-Wa,-O2"}}},  // Identical to default
+      .include_dirs = {test_dir_ / "include"},
+      .macro_inc = macro_inc,
+  };
+
+  EXPECT_TRUE(compiler.CompileCWithPerFunctionFlags(opts).ok());
+
+  // Exactly 2 processes: 1 GCC and 1 KMC AS (via standard CompileC fallback)
+  ASSERT_THAT(executed_processes, SizeIs(2));
+  EXPECT_EQ(executed_processes[0].program, "/tools/gcc");
+  EXPECT_EQ(executed_processes[1].program, "/tools/kmc-as");
+}
+
 TEST_F(CompilerTest, ValidatesInputPaths) {
   Compiler compiler(original_toolchain_);
 
   EXPECT_EQ(compiler.CompileC({.src_file = "", .out_obj = "a.o"}).code(),
             absl::StatusCode::kInvalidArgument);
   EXPECT_EQ(compiler.CompileC({.src_file = "a.c", .out_obj = ""}).code(),
+            absl::StatusCode::kInvalidArgument);
+
+  EXPECT_EQ(compiler.CompileCWithPerFunctionFlags({.src_file = "", .out_obj = "a.o"}).code(),
+            absl::StatusCode::kInvalidArgument);
+  EXPECT_EQ(compiler.CompileCWithPerFunctionFlags({.src_file = "a.c", .out_obj = ""}).code(),
             absl::StatusCode::kInvalidArgument);
 
   EXPECT_EQ(compiler.Assemble({.src_file = "", .out_obj = "a.o"}).code(),

@@ -393,5 +393,114 @@ TEST(TunerPipelineTest, OnlyNonBitExactModeSkipsBitExactCacheEntriesAndReevaluat
   std::filesystem::remove_all(temp_dir);
 }
 
+TEST(TunerPipelineTest, TuneAllModulesOverwritesReadOnlyLiftedFilesWithMutatedAst) {
+  std::filesystem::path temp_dir =
+      std::filesystem::temp_directory_path() / "tuner_pipeline_readonly_test";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir / "asm" / "test-game");
+
+  std::filesystem::path config_path = temp_dir / "test-game.textproto";
+  {
+    std::ofstream out(config_path);
+    out << R"pb(
+      game_name: "test-game"
+      sha1: "0123456789abcdef0123456789abcdef01234567"
+      basename: "test-game"
+      c_flags {
+        key: "default"
+        value { flags: "-O2" }
+      }
+      segments {
+        name: "main"
+        type: SEGMENT_CODE
+        rom_start: 0x1000
+        rom_end: 0x1010
+        vram: 0x80025C00
+        subsegments { name: "code" type: SUBSEGMENT_C rom_start: 0x1000 vram: 0x80025C00 }
+      }
+      symbols { name: "AddArgs" address: 0x80025C00 type: SYMBOL_FUNC size: 8 }
+    )pb";
+  }
+
+  // Create minimal ROM: `addu $v0, $a0, $a1; jr $ra; nop`
+  std::filesystem::path rom_path = temp_dir / "test-game.z64";
+  {
+    std::vector<uint8_t> rom(0x1010, 0);
+    WriteBigEndian32(rom.data(), 0x80371240);
+    WriteBigEndian32(rom.data() + 0x1000, 0x00851021);  // addu $v0, $a0, $a1
+    WriteBigEndian32(rom.data() + 0x1004, 0x03E00008);  // jr $ra
+    WriteBigEndian32(rom.data() + 0x1008, 0x00000000);  // nop
+    std::ofstream out(rom_path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  }
+
+  // Create lifted_dir containing a read-only baseline C file (perms: 0555 / read-only)
+  std::filesystem::path lifted_dir = temp_dir / "lifted";
+  std::filesystem::create_directories(lifted_dir);
+  std::filesystem::path baseline_c = lifted_dir / "code.c";
+  {
+    std::ofstream out(baseline_c);
+    out << "// baseline\ns32 AddArgs(s32 arg0, s32 arg1) {\n    return arg0 + arg1;\n}\n";
+  }
+  std::filesystem::permissions(baseline_c, std::filesystem::perms::owner_read |
+                                               std::filesystem::perms::group_read |
+                                               std::filesystem::perms::others_read);
+
+  TunerPipelineOptions opts;
+  opts.repo_root = temp_dir;
+  opts.game_name = "test-game";
+  opts.config_path = config_path;
+  opts.rom_path = rom_path;
+  opts.lifted_dir = lifted_dir;
+  opts.search_on_miss = false;
+  opts.format_with_clang = false;
+
+  auto tuner_or = TunerPipeline::Create(opts);
+  ASSERT_TRUE(tuner_or.ok()) << tuner_or.status();
+  auto& tuner = *tuner_or;
+
+  auto base_res_or = tuner->TuneFunction("AddArgs", "code");
+  ASSERT_TRUE(base_res_or.ok()) << base_res_or.status();
+
+  // Populate cache with commute mutation
+  FunctionTuningEntry entry;
+  entry.set_function_name("AddArgs");
+  entry.set_module_name("code");
+  entry.set_input_sha1(base_res_or->input_sha1);
+  entry.add_c_flags("-O2");
+  entry.set_is_bit_exact(true);
+  auto* step = entry.add_ast_mutations();
+  step->set_kind(AST_MUTATION_COMMUTE_BINARY_OP);
+  step->set_site_index(0);
+  tuner->MutableCacheStore().Upsert(entry);
+
+  // Execute TuneAllModules into output_dir
+  std::filesystem::path output_dir = temp_dir / "output";
+  auto emitted_or = tuner->TuneAllModules(output_dir);
+  ASSERT_TRUE(emitted_or.ok()) << emitted_or.status();
+
+  std::filesystem::path tuned_c = output_dir / "code.c";
+  ASSERT_TRUE(std::filesystem::exists(tuned_c));
+
+  std::ifstream in(tuned_c);
+  ASSERT_TRUE(in.is_open());
+  std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+  // Verify that TuneAllModules wrote the mutated tuned AST (arg1 + arg0), NOT the unmutated
+  // baseline
+  EXPECT_TRUE(absl::StrContains(content, "arg1 + arg0")) << content;
+  EXPECT_FALSE(absl::StrContains(content, "// baseline")) << content;
+
+  // Verify that the emitted file is writable
+  auto perms = std::filesystem::status(tuned_c).permissions();
+  EXPECT_NE(perms & std::filesystem::perms::owner_write, std::filesystem::perms::none);
+
+  // Clean up
+  std::error_code ec;
+  std::filesystem::permissions(baseline_c, std::filesystem::perms::all, ec);
+  std::filesystem::permissions(tuned_c, std::filesystem::perms::all, ec);
+  std::filesystem::remove_all(temp_dir, ec);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

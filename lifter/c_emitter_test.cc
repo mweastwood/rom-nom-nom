@@ -468,5 +468,60 @@ TEST(CEmitterTest, EmitTranslationUnitResolvesConflictingGlobalSymbolTypesAcross
   EXPECT_THAT(emitted_code, HasSubstr("g_shared_array[2] = 40;"));
 }
 
+TEST(CEmitterTest, EmitTranslationUnitEmitsVolatileGlobalDeclarations) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  auto body = std::make_unique<CompoundStatement>();
+  auto volatile_global =
+      std::make_unique<IdentifierExpression>("D_800737A0", CType::Named("volatile s32"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", std::move(volatile_global), CExpression::Integer(42))));
+  body->AddStatement(CStatement::Return());
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "WriteVolatileGlobal", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  EXPECT_THAT(emitted_code, HasSubstr("extern volatile s32 D_800737A0;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("D_800737A0 = 42;"));
+}
+
+TEST(CEmitterTest, EmitTranslationUnitResolvesUntypedGlobalSymbolAccessWithDefaultS32Cast) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  // FuncOne accesses g_byte_flag as u8
+  auto body1 = std::make_unique<CompoundStatement>();
+  body1->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", std::make_unique<IdentifierExpression>("g_byte_flag", CType::U8()),
+      CExpression::Integer(1))));
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "FuncOne", {}, std::move(body1)));
+
+  // FuncTwo accesses g_byte_flag without SymbolType (untyped, default access is s32)
+  auto body2 = std::make_unique<CompoundStatement>();
+  body2->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", std::make_unique<IdentifierExpression>("g_byte_flag"), CExpression::Integer(2))));
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "FuncTwo", {}, std::move(body2)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  // The extern declaration resolves to u8
+  EXPECT_THAT(emitted_code, HasSubstr("extern u8 g_byte_flag;\n"));
+
+  // FuncOne writes directly
+  EXPECT_THAT(emitted_code, HasSubstr("g_byte_flag = 1;"));
+
+  // FuncTwo wraps untyped access with *(s32*)&g_byte_flag
+  EXPECT_THAT(emitted_code, HasSubstr("*(s32*)&g_byte_flag = 2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

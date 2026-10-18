@@ -33,6 +33,10 @@ class AstMutator {
 
   // Returns a human-readable description of a mutation step.
   static std::string DescribeStep(const AstMutationStep& step);
+
+  // Prunes unused local declarations and dead variable assignments.
+  static std::unique_ptr<CompoundStatement> PruneUnusedLocalDeclarations(
+      const CompoundStatement& body, bool preserve_trailing_return = true);
 };
 
 }  // namespace rom_nom_nom

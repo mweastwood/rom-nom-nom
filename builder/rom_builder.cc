@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
@@ -59,28 +60,56 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     }
     config = std::move(*config_or);
   }
+  absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, std::vector<std::string>>>
+      function_flags_by_module;
+
+  auto index_tuning_cache = [&](const TuningCache& cache) {
+    for (const auto& [module_name, flags] : cache.module_c_flags()) {
+      (*config.mutable_c_flags())[module_name] = flags;
+    }
+    for (const auto& entry : cache.entries()) {
+      if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
+        std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
+        function_flags_by_module[std::string(entry.module_name())]
+                                [std::string(entry.function_name())] = std::move(flags);
+      }
+    }
+  };
+
+  for (const auto& entry : config.tuning_entries()) {
+    if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
+      std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
+      function_flags_by_module[std::string(entry.module_name())]
+                              [std::string(entry.function_name())] = std::move(flags);
+    }
+  }
+
+  std::filesystem::path cache_file;
   if (!config.tuning_cache_file().empty()) {
-    std::filesystem::path cache_file(config.tuning_cache_file());
+    cache_file = config.tuning_cache_file();
     if (cache_file.is_relative()) {
       cache_file = toolchain_.RepoRoot() / cache_file;
     }
-    if (std::filesystem::exists(cache_file, ec)) {
-      auto cache_or = LoadTuningCache(cache_file);
-      if (cache_or.ok()) {
-        for (const auto& [module_name, flags] : cache_or->module_c_flags()) {
-          (*config.mutable_c_flags())[module_name] = flags;
-        }
-      }
+  } else if (!config.basename().empty()) {
+    std::filesystem::path default_cache =
+        toolchain_.RepoRoot() / "config" / absl::StrCat(config.basename(), ".tuning.textproto");
+    if (std::filesystem::exists(default_cache, ec)) {
+      cache_file = default_cache;
     }
   }
+  if (!cache_file.empty() && std::filesystem::exists(cache_file, ec)) {
+    auto cache_or = LoadTuningCache(cache_file);
+    if (cache_or.ok()) {
+      index_tuning_cache(*cache_or);
+    }
+  }
+
   if (!options_.src_dir.empty()) {
     std::filesystem::path tuned_flags_path = options_.src_dir / "tuned_c_flags.textproto";
     if (std::filesystem::exists(tuned_flags_path, ec)) {
       auto cache_or = LoadTuningCache(tuned_flags_path);
       if (cache_or.ok()) {
-        for (const auto& [module_name, flags] : cache_or->module_c_flags()) {
-          (*config.mutable_c_flags())[module_name] = flags;
-        }
+        index_tuning_cache(*cache_or);
       }
     }
   }
@@ -189,13 +218,39 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     switch (resolved_or->type) {
       case SourceType::kC: {
         std::vector<std::string> flags = ResolveCFlags(config, resolved_or->object_stem);
-        auto status = compiler_.CompileC({
-            .src_file = resolved_or->source_path,
-            .out_obj = target_obj,
-            .opt_flags = std::move(flags),
-            .include_dirs = extra_includes,
-            .macro_inc = macro_inc,
-        });
+        const auto* mod_fn_flags = function_flags_by_module.contains(resolved_or->object_stem)
+                                       ? &function_flags_by_module.at(resolved_or->object_stem)
+                                       : nullptr;
+
+        bool has_distinct_flags = false;
+        if (mod_fn_flags != nullptr && toolchain_.Mode() == ToolchainMode::kOriginal) {
+          for (const auto& [fn_name, fn_flags] : *mod_fn_flags) {
+            if (fn_flags != flags) {
+              has_distinct_flags = true;
+              break;
+            }
+          }
+        }
+
+        absl::Status status;
+        if (has_distinct_flags) {
+          status = compiler_.CompileCWithPerFunctionFlags({
+              .src_file = resolved_or->source_path,
+              .out_obj = target_obj,
+              .default_flags = flags,
+              .function_flags = *mod_fn_flags,
+              .include_dirs = extra_includes,
+              .macro_inc = macro_inc,
+          });
+        } else {
+          status = compiler_.CompileC({
+              .src_file = resolved_or->source_path,
+              .out_obj = target_obj,
+              .opt_flags = std::move(flags),
+              .include_dirs = extra_includes,
+              .macro_inc = macro_inc,
+          });
+        }
         if (!status.ok()) {
           return status;
         }
@@ -358,6 +413,11 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   return result;
+}
+
+absl::Status RomBuilder::CompileCWithPerFunctionFlags(
+    const PerFunctionCCompileOptions& options) const {
+  return compiler_.CompileCWithPerFunctionFlags(options);
 }
 
 }  // namespace rom_nom_nom

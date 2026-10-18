@@ -34,19 +34,19 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
     case CExpressionKind::kIdentifier: {
       const auto& id = static_cast<const IdentifierExpression&>(expr);
       if (local_vars.count(id.Name()) == 0) {
-        if (id.SymbolType().has_value() && !id.IsArraySymbol()) {
+        if (!id.IsArraySymbol()) {
           bool is_func = external_function_names.count(id.Name()) > 0;
           auto type_it = module_data_types.find(id.Name());
-          bool type_conflict =
-              is_func || (type_it != module_data_types.end() &&
-                          type_it->second.ToString() != id.SymbolType()->ToString());
-          if (type_conflict) {
-            std::unique_ptr<CExpression> addr =
-                (!is_func && array_symbols.count(id.Name()) > 0)
-                    ? CExpression::Identifier(id.Name())
-                    : CExpression::Unary("&", CExpression::Identifier(id.Name()));
-            return CExpression::Unary(
-                "*", CExpression::Cast(id.SymbolType()->MakePointer(), std::move(addr)));
+          if (type_it != module_data_types.end() || is_func) {
+            CType accessed_type = id.SymbolType().value_or(CType::S32());
+            if (is_func || type_it->second.ToString() != accessed_type.ToString()) {
+              std::unique_ptr<CExpression> addr =
+                  (!is_func && array_symbols.count(id.Name()) > 0)
+                      ? CExpression::Identifier(id.Name())
+                      : CExpression::Unary("&", CExpression::Identifier(id.Name()));
+              return CExpression::Unary(
+                  "*", CExpression::Cast(accessed_type.MakePointer(), std::move(addr)));
+            }
           }
         }
         if (array_symbols.count(id.Name()) > 0) {

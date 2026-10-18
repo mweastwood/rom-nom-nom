@@ -84,5 +84,38 @@ TEST(CandidateScorerTest, ScoreInstructionsStripsTrailingSectionPaddingNops) {
   EXPECT_EQ(score.target_instruction_count, 3u);
 }
 
+TEST(CandidateScorerTest, VerifyEquivalenceVerifiesPointerDereferencingFunctions) {
+  // Target: lw $v0, 0($a0); jr $ra; nop
+  std::vector<uint32_t> target_words = {
+      0x8C820000,  // lw $v0, 0($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  TargetFunction target;
+  target.name = "LoadWord";
+  target.vram = 0x80025C00;
+  target.raw_words = target_words;
+  auto target_insts_or = DecodeSequence(target_words, target.vram);
+  ASSERT_TRUE(target_insts_or.ok());
+  target.instructions = *std::move(target_insts_or);
+
+  CandidateScorer scorer;
+
+  // 1. Functionally equivalent candidate: loads word in the delay slot of jr $ra
+  std::vector<uint32_t> equivalent_words = {
+      0x03E00008,  // jr $ra
+      0x8C820000,  // lw $v0, 0($a0) (delay slot)
+  };
+  EXPECT_TRUE(scorer.VerifyEquivalence(target, equivalent_words));
+
+  // 2. Non-equivalent candidate: loads from offset +4 instead of 0
+  std::vector<uint32_t> differing_offset_words = {
+      0x8C820004,  // lw $v0, 4($a0)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  EXPECT_FALSE(scorer.VerifyEquivalence(target, differing_offset_words));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
