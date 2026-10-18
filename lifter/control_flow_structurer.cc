@@ -58,10 +58,12 @@ std::unique_ptr<StructuredRegion> CreateIfThen(uint32_t condition_block_id, bool
   return r;
 }
 
-std::unique_ptr<StructuredRegion> CreateIfThenElse(uint32_t condition_block_id) {
+std::unique_ptr<StructuredRegion> CreateIfThenElse(uint32_t condition_block_id,
+                                                   bool invert = false) {
   auto r = std::make_unique<StructuredRegion>();
   r->type = RegionType::kIfThenElse;
   r->condition_block_id = condition_block_id;
+  r->invert_condition = invert;
   return r;
 }
 
@@ -79,6 +81,22 @@ std::unique_ptr<StructuredRegion> CreateSwitch(uint32_t block_id, const JumpTabl
   r->switch_block_id = block_id;
   r->jump_table = jt;
   return r;
+}
+
+bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
+  const auto* b = cfg.GetBlock(block_id);
+  if (b == nullptr || b->instructions.empty() || b->instructions.size() > 3) return false;
+  for (const auto& inst : b->instructions) {
+    if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) return false;
+    if (inst.IsBranch() || inst.IsNop()) continue;
+    if (inst.rd.has_value() && *inst.rd != Register::kZero && *inst.rd != Register::kAt) {
+      return false;
+    }
+    if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kAt) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -104,8 +122,18 @@ std::string StructuredRegion::ToString(int indent) const {
       return out;
     }
     case RegionType::kIfThen: {
-      std::string out = ind + "if (" + (invert_condition ? "!" : "") + "block_" +
-                        std::to_string(condition_block_id) + ") {\n";
+      std::string cond_str =
+          std::string(invert_condition ? "!" : "") + "block_" + std::to_string(condition_block_id);
+      if (!condition_op.empty()) {
+        for (size_t i = 0; i < additional_condition_blocks.size(); ++i) {
+          cond_str += " " + condition_op + " ";
+          if (i < additional_invert_conditions.size() && additional_invert_conditions[i]) {
+            cond_str += "!";
+          }
+          cond_str += "block_" + std::to_string(additional_condition_blocks[i]);
+        }
+      }
+      std::string out = ind + "if (" + cond_str + ") {\n";
       if (!children.empty() && children[0]) {
         out += children[0]->ToString(indent + 1);
       }
@@ -113,8 +141,18 @@ std::string StructuredRegion::ToString(int indent) const {
       return out;
     }
     case RegionType::kIfThenElse: {
-      std::string out = ind + "if (" + (invert_condition ? "!" : "") + "block_" +
-                        std::to_string(condition_block_id) + ") {\n";
+      std::string cond_str =
+          std::string(invert_condition ? "!" : "") + "block_" + std::to_string(condition_block_id);
+      if (!condition_op.empty()) {
+        for (size_t i = 0; i < additional_condition_blocks.size(); ++i) {
+          cond_str += " " + condition_op + " ";
+          if (i < additional_invert_conditions.size() && additional_invert_conditions[i]) {
+            cond_str += "!";
+          }
+          cond_str += "block_" + std::to_string(additional_condition_blocks[i]);
+        }
+      }
+      std::string out = ind + "if (" + cond_str + ") {\n";
       if (!children.empty() && children[0]) {
         out += children[0]->ToString(indent + 1);
       }
@@ -594,6 +632,232 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     }
     if (follow.has_value() && (!join.has_value() || *join == *follow)) {
       join = follow;
+    }
+
+    // Short-Circuit OR (||): entry branches to succ_taken; succ_fallthrough also reaches succ_taken
+    if (!visited_.contains(succ_fallthrough)) {
+      const auto* b_fallthrough = cfg_->GetBlock(succ_fallthrough);
+      if (b_fallthrough != nullptr && b_fallthrough->successors.size() == 2 &&
+          b_fallthrough->predecessors.size() == 1 && b_fallthrough->predecessors[0] == entry &&
+          IsPureConditionBlock(*cfg_, succ_fallthrough)) {
+        uint32_t b_taken = 0;
+        uint32_t b_ft = 0;
+        for (const auto& edge : b_fallthrough->outgoing_edges) {
+          if (edge.type == EdgeType::kBranch) {
+            b_taken = edge.to_block_id;
+          } else {
+            b_ft = edge.to_block_id;
+          }
+        }
+        if (b_taken == 0 && b_ft == 0) {
+          b_taken = b_fallthrough->successors[0];
+          b_ft = b_fallthrough->successors[1];
+        }
+        if (b_taken == succ_taken || b_ft == succ_taken) {
+          std::vector<uint32_t> or_chain;
+          std::vector<bool> or_inverts;
+          uint32_t curr_id = succ_fallthrough;
+          uint32_t curr_taken = b_taken;
+          uint32_t curr_ft = b_ft;
+          std::optional<uint32_t> final_after;
+
+          while (true) {
+            bool matches_taken = (curr_taken == succ_taken);
+            bool matches_ft = (curr_ft == succ_taken);
+            if (!matches_taken && !matches_ft) break;
+
+            uint32_t other = matches_taken ? curr_ft : curr_taken;
+            bool invert = matches_ft;
+            or_chain.push_back(curr_id);
+            or_inverts.push_back(invert);
+
+            const auto* next_b = cfg_->GetBlock(other);
+            if (next_b != nullptr && next_b->successors.size() == 2 &&
+                next_b->predecessors.size() == 1 && !visited_.contains(other) &&
+                IsPureConditionBlock(*cfg_, other) &&
+                (next_b->successors[0] == succ_taken || next_b->successors[1] == succ_taken)) {
+              curr_id = other;
+              curr_taken = 0;
+              curr_ft = 0;
+              for (const auto& edge : next_b->outgoing_edges) {
+                if (edge.type == EdgeType::kBranch) {
+                  curr_taken = edge.to_block_id;
+                } else {
+                  curr_ft = edge.to_block_id;
+                }
+              }
+              if (curr_taken == 0 && curr_ft == 0) {
+                curr_taken = next_b->successors[0];
+                curr_ft = next_b->successors[1];
+              }
+            } else {
+              final_after = other;
+              break;
+            }
+          }
+
+          if (!or_chain.empty()) {
+            for (uint32_t b_id : or_chain) {
+              visited_.insert(b_id);
+            }
+            if (join.has_value() && final_after.has_value() && *final_after == *join) {
+              auto if_then = CreateIfThen(entry, /*invert=*/false);
+              if_then->condition_op = "||";
+              if_then->additional_condition_blocks = or_chain;
+              if_then->additional_invert_conditions = or_inverts;
+              auto then_body = StructureRegion(succ_taken, join, current_loop);
+              if (then_body) {
+                if_then->children.push_back(std::move(then_body));
+              }
+              if (join.has_value() && join != follow) {
+                auto after_region = StructureRegion(*join, follow, current_loop);
+                if (after_region) {
+                  auto seq = CreateSequence();
+                  seq->children.push_back(std::move(if_then));
+                  FlattenSequence(seq.get(), std::move(after_region));
+                  return seq;
+                }
+              }
+              return if_then;
+            } else {
+              auto if_else = CreateIfThenElse(entry, /*invert=*/false);
+              if_else->condition_op = "||";
+              if_else->additional_condition_blocks = or_chain;
+              if_else->additional_invert_conditions = or_inverts;
+              auto then_body = StructureRegion(succ_taken, join, current_loop);
+              auto else_body = final_after.has_value()
+                                   ? StructureRegion(*final_after, join, current_loop)
+                                   : nullptr;
+              if_else->children.push_back(then_body ? std::move(then_body) : CreateSequence());
+              if_else->children.push_back(else_body ? std::move(else_body) : CreateSequence());
+
+              if (join.has_value() && join != follow) {
+                auto after_region = StructureRegion(*join, follow, current_loop);
+                if (after_region) {
+                  auto seq = CreateSequence();
+                  seq->children.push_back(std::move(if_else));
+                  FlattenSequence(seq.get(), std::move(after_region));
+                  return seq;
+                }
+              }
+              return if_else;
+            }
+          }
+        }
+      }
+    }
+
+    // Check for short-circuit AND (&&): entry branches to after on false; succ_fallthrough also
+    // branches to after on false
+    uint32_t and_after = succ_taken;
+    if (!visited_.contains(succ_fallthrough)) {
+      const auto* b_fallthrough = cfg_->GetBlock(succ_fallthrough);
+      if (b_fallthrough != nullptr && b_fallthrough->successors.size() == 2 &&
+          b_fallthrough->predecessors.size() == 1 && b_fallthrough->predecessors[0] == entry &&
+          IsPureConditionBlock(*cfg_, succ_fallthrough)) {
+        uint32_t b_taken = 0;
+        uint32_t b_ft = 0;
+        for (const auto& edge : b_fallthrough->outgoing_edges) {
+          if (edge.type == EdgeType::kBranch) {
+            b_taken = edge.to_block_id;
+          } else {
+            b_ft = edge.to_block_id;
+          }
+        }
+        if (b_taken == 0 && b_ft == 0) {
+          b_taken = b_fallthrough->successors[0];
+          b_ft = b_fallthrough->successors[1];
+        }
+        if (b_taken == and_after || b_ft == and_after) {
+          std::vector<uint32_t> and_chain;
+          std::vector<bool> and_inverts;
+          uint32_t curr_id = succ_fallthrough;
+          uint32_t curr_taken = b_taken;
+          uint32_t curr_ft = b_ft;
+          std::optional<uint32_t> final_then;
+
+          while (true) {
+            bool matches_taken = (curr_taken == and_after);
+            bool matches_ft = (curr_ft == and_after);
+            if (!matches_taken && !matches_ft) break;
+
+            uint32_t other = matches_taken ? curr_ft : curr_taken;
+            bool invert = matches_taken;
+            and_chain.push_back(curr_id);
+            and_inverts.push_back(invert);
+
+            const auto* next_b = cfg_->GetBlock(other);
+            if (next_b != nullptr && next_b->successors.size() == 2 &&
+                next_b->predecessors.size() == 1 && !visited_.contains(other) &&
+                IsPureConditionBlock(*cfg_, other) &&
+                (next_b->successors[0] == and_after || next_b->successors[1] == and_after)) {
+              curr_id = other;
+              curr_taken = 0;
+              curr_ft = 0;
+              for (const auto& edge : next_b->outgoing_edges) {
+                if (edge.type == EdgeType::kBranch) {
+                  curr_taken = edge.to_block_id;
+                } else {
+                  curr_ft = edge.to_block_id;
+                }
+              }
+              if (curr_taken == 0 && curr_ft == 0) {
+                curr_taken = next_b->successors[0];
+                curr_ft = next_b->successors[1];
+              }
+            } else {
+              final_then = other;
+              break;
+            }
+          }
+
+          if (!and_chain.empty() && final_then.has_value()) {
+            for (uint32_t b_id : and_chain) {
+              visited_.insert(b_id);
+            }
+            if (join.has_value() && and_after == *join) {
+              auto if_then = CreateIfThen(entry, /*invert=*/true);
+              if_then->condition_op = "&&";
+              if_then->additional_condition_blocks = and_chain;
+              if_then->additional_invert_conditions = and_inverts;
+              auto then_body = StructureRegion(*final_then, join, current_loop);
+              if (then_body) {
+                if_then->children.push_back(std::move(then_body));
+              }
+              if (join.has_value() && join != follow) {
+                auto after_region = StructureRegion(*join, follow, current_loop);
+                if (after_region) {
+                  auto seq = CreateSequence();
+                  seq->children.push_back(std::move(if_then));
+                  FlattenSequence(seq.get(), std::move(after_region));
+                  return seq;
+                }
+              }
+              return if_then;
+            } else {
+              auto if_else = CreateIfThenElse(entry, /*invert=*/true);
+              if_else->condition_op = "&&";
+              if_else->additional_condition_blocks = and_chain;
+              if_else->additional_invert_conditions = and_inverts;
+              auto then_body = StructureRegion(*final_then, join, current_loop);
+              auto else_body = StructureRegion(and_after, join, current_loop);
+              if_else->children.push_back(then_body ? std::move(then_body) : CreateSequence());
+              if_else->children.push_back(else_body ? std::move(else_body) : CreateSequence());
+
+              if (join.has_value() && join != follow) {
+                auto after_region = StructureRegion(*join, follow, current_loop);
+                if (after_region) {
+                  auto seq = CreateSequence();
+                  seq->children.push_back(std::move(if_else));
+                  FlattenSequence(seq.get(), std::move(after_region));
+                  return seq;
+                }
+              }
+              return if_else;
+            }
+          }
+        }
+      }
     }
 
     // Subcase 3a: If-Then (one successor directly is join)

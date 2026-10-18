@@ -162,7 +162,13 @@ class RegisterTracker {
   void ClearFprConstantBits(FpRegister reg);
   void ClearFprConstantBits(size_t reg_idx);
   void ClearCallerSavedFprs();
+  void ClearCallerSavedGprs();
   const std::array<std::optional<uint32_t>, 32>& FprConstantBits() const { return fpr_const_bits_; }
+
+  // Prepares the tracker for analyzing a new block, resetting local instruction
+  // indices, def-use chains, and reaching definitions while preserving tracked
+  // register values and constants.
+  void PrepareForBlock();
 
   // Merges another RegisterTracker state into this one (intersection of known values).
   // Returns true if this tracker's state changed.

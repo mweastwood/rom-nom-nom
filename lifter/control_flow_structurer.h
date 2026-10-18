@@ -47,6 +47,11 @@ struct StructuredRegion {
   uint32_t condition_block_id = 0;
   bool invert_condition = false;
 
+  // Short-circuit condition details (&& / ||)
+  std::string condition_op;
+  std::vector<uint32_t> additional_condition_blocks;
+  std::vector<bool> additional_invert_conditions;
+
   // Loop details when type == kLoop
   LoopType loop_type = LoopType::kWhile;
   uint32_t loop_header = 0;

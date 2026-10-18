@@ -373,9 +373,10 @@ void RegisterTracker::Step(const Instruction& inst) {
     }
   }
 
-  // 2. Track FPR constant bits (before GPR updates in case mtc1 reads a GPR)
+  // 2. Track FPR constant bits and caller-saved registers on calls
   if (inst.IsCall()) {
     ClearCallerSavedFprs();
+    ClearCallerSavedGprs();
   } else if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() && inst.fs.has_value()) {
     if (*inst.rt == Register::kZero) {
       SetFprConstantBits(*inst.fs, 0);
@@ -544,18 +545,7 @@ void RegisterTracker::Step(const Instruction& inst) {
     case Opcode::kBltzall:
     case Opcode::kBgezall:
       frame_info_.is_leaf = false;
-      // Function call clobbers caller-saved registers
-      gpr_values_[RegIdx(Register::kV0)] = TrackedValue();
-      gpr_values_[RegIdx(Register::kV1)] = TrackedValue();
-      gpr_values_[RegIdx(Register::kA0)] = TrackedValue();
-      gpr_values_[RegIdx(Register::kA1)] = TrackedValue();
-      gpr_values_[RegIdx(Register::kA2)] = TrackedValue();
-      gpr_values_[RegIdx(Register::kA3)] = TrackedValue();
-      for (size_t t = RegIdx(Register::kT0); t <= RegIdx(Register::kT7); ++t) {
-        gpr_values_[t] = TrackedValue();
-      }
-      gpr_values_[RegIdx(Register::kT8)] = TrackedValue();
-      gpr_values_[RegIdx(Register::kT9)] = TrackedValue();
+      ClearCallerSavedGprs();
       break;
 
     default:
@@ -640,6 +630,30 @@ void RegisterTracker::ClearCallerSavedFprs() {
   for (size_t f = 0; f <= 19 && f < fpr_const_bits_.size(); ++f) {
     fpr_const_bits_[f] = std::nullopt;
   }
+}
+
+void RegisterTracker::ClearCallerSavedGprs() {
+  Invalidate(Register::kAt);
+  Invalidate(Register::kV0);
+  Invalidate(Register::kV1);
+  Invalidate(Register::kA0);
+  Invalidate(Register::kA1);
+  Invalidate(Register::kA2);
+  Invalidate(Register::kA3);
+  for (size_t t = RegIdx(Register::kT0); t <= RegIdx(Register::kT7); ++t) {
+    gpr_values_[t] = TrackedValue();
+    reaching_defs_[t] = std::nullopt;
+  }
+  Invalidate(Register::kT8);
+  Invalidate(Register::kT9);
+  Invalidate(Register::kK0);
+  Invalidate(Register::kK1);
+}
+
+void RegisterTracker::PrepareForBlock() {
+  current_instruction_index_ = 0;
+  def_to_uses_.clear();
+  reaching_defs_.assign(kNumGprs, std::nullopt);
 }
 
 bool RegisterTracker::Merge(const RegisterTracker& other) {

@@ -1997,5 +1997,472 @@ void StoreDouble(f64 val, f64* ptr) {
 )");
 }
 
+TEST_F(RoundTripTest, ArithmeticAddThree) {
+  AssertRoundTripBitExact("AddThree", R"(
+s32 AddThree(s32 a, s32 b, s32 c) {
+    return a + b + c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticSubThree) {
+  AssertRoundTripBitExact("SubThree", R"(
+s32 SubThree(s32 a, s32 b, s32 c) {
+    return a - b - c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticAverageTwo) {
+  AssertRoundTripBitExact("AverageTwo", R"(
+s32 AverageTwo(s32 a, s32 b) {
+    return (a + b) >> 1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticAverageUnsigned) {
+  AssertRoundTripBitExact("AverageUnsigned", R"(
+u32 AverageUnsigned(u32 a, u32 b) {
+    return (a + b) >> 1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticMulAdd) {
+  AssertRoundTripBitExact("MulAdd", R"(
+s32 MulAdd(s32 a, s32 b, s32 c) {
+    return a * b + c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticMulSub) {
+  AssertRoundTripBitExact("MulSub", R"(
+s32 MulSub(s32 a, s32 b, s32 c) {
+    return a * b - c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticMaskAndShift) {
+  AssertRoundTripBitExact("MaskAndShift", R"(
+u32 MaskAndShift(u32 a) {
+    return (a & 0xFF00) >> 8;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticShiftAndMask) {
+  AssertRoundTripBitExact("ShiftAndMask", R"(
+u32 ShiftAndMask(u32 a) {
+    return (a >> 4) & 0x0F;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticNand) {
+  AssertRoundTripBitExact("Nand", R"(
+u32 Nand(u32 a, u32 b) {
+    return ~(a & b);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticUnpackHighS16) {
+  AssertRoundTripBitExact("UnpackHighS16", R"(
+s32 UnpackHighS16(u32 packed) {
+    return (s32)(packed >> 16);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticUnpackLowS16) {
+  AssertRoundTripBitExact("UnpackLowS16", R"(
+s32 UnpackLowS16(u32 packed) {
+    return (s16)(packed & 0xFFFF);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticRotateLeftOne) {
+  AssertRoundTripBitExact("RotateLeftOne", R"(
+u32 RotateLeftOne(u32 a) {
+    return (a << 1) | (a >> 31);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticIsOdd) {
+  AssertRoundTripBitExact("IsOdd", R"(
+s32 IsOdd(s32 a) {
+    return a & 1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticClearLowestBit) {
+  AssertRoundTripBitExact("ClearLowestBit", R"(
+u32 ClearLowestBit(u32 a) {
+    return a & (a - 1);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayAccessIndexedOffset) {
+  AssertRoundTripBitExact("IndexedOffset", R"(
+s32 IndexedOffset(s32* arr, s32 i) {
+    return arr[i + 2];
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayWriteIndexedOffset) {
+  AssertRoundTripBitExact("WriteIndexedOffset", R"(
+void WriteIndexedOffset(s32* arr, s32 i, s32 v) {
+    arr[i + 2] = v;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayReadS8Indexed) {
+  AssertRoundTripBitExact("ReadS8Indexed", R"(
+s32 ReadS8Indexed(s8* arr, s32 i) {
+    return arr[i];
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayReadS16Indexed) {
+  AssertRoundTripBitExact("ReadS16Indexed", R"(
+s32 ReadS16Indexed(s16* arr, s32 i) {
+    return arr[i];
+}
+)");
+}
+
+TEST_F(RoundTripTest, StructPoint3DNormSq) {
+  std::string point_def = R"(
+typedef struct {
+    s32 x;
+    s32 y;
+    s32 z;
+} Point3D;
+)";
+  RoundTripOptions opts;
+  opts.extra_types_header = point_def;
+
+  AssertRoundTripBitExact("Point3DNormSq", R"(
+s32 Point3DNormSq(Point3D* p) {
+    return p->x * p->x + p->y * p->y + p->z * p->z;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, StructPoint3DGetZ) {
+  std::string point_def = R"(
+typedef struct {
+    s32 x;
+    s32 y;
+    s32 z;
+} Point3D;
+)";
+  RoundTripOptions opts;
+  opts.extra_types_header = point_def;
+
+  AssertRoundTripBitExact("Point3DGetZ", R"(
+s32 Point3DGetZ(Point3D* p) {
+    return p->z;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, StructPoint3DSet) {
+  std::string point_def = R"(
+typedef struct {
+    s32 x;
+    s32 y;
+    s32 z;
+} Point3D;
+)";
+  RoundTripOptions opts;
+  opts.extra_types_header = point_def;
+
+  AssertRoundTripBitExact("Point3DSet", R"(
+void Point3DSet(Point3D* p, s32 x, s32 y, s32 z) {
+    p->x = x;
+    p->y = y;
+    p->z = z;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, BranchIfElseAssignDiff) {
+  AssertRoundTripBitExact("IfElseAssignDiff", R"(
+s32 IfElseAssignDiff(s32 a, s32 b) {
+    s32 res;
+    if (a < b) {
+        res = b - a;
+    } else {
+        res = a - b;
+    }
+    return res;
+}
+)");
+}
+
+TEST_F(RoundTripTest, BranchMaxThree) {
+  AssertRoundTripBitExact("MaxThree", R"(
+s32 MaxThree(s32 a, s32 b, s32 c) {
+    s32 m = a;
+    if (b > m) {
+        m = b;
+    }
+    if (c > m) {
+        m = c;
+    }
+    return m;
+}
+)");
+}
+
+TEST_F(RoundTripTest, BranchMinThree) {
+  AssertRoundTripBitExact("MinThree", R"(
+s32 MinThree(s32 a, s32 b, s32 c) {
+    s32 m = a;
+    if (b < m) {
+        m = b;
+    }
+    if (c < m) {
+        m = c;
+    }
+    return m;
+}
+)");
+}
+
+TEST_F(RoundTripTest, BranchThreeWayBranch) {
+  AssertRoundTripBitExact("ThreeWayBranch", R"(
+s32 ThreeWayBranch(s32 a) {
+    if (a > 0) {
+        return 1;
+    }
+    if (a < 0) {
+        return -1;
+    }
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, BranchTestBitZero) {
+  AssertRoundTripBitExact("TestBitZero", R"(
+s32 TestBitZero(u32 val) {
+    if (val & 1) {
+        return 10;
+    }
+    return 20;
+}
+)");
+}
+
+TEST_F(RoundTripTest, BranchSelectPositive) {
+  AssertRoundTripBitExact("SelectPositive", R"(
+s32 SelectPositive(s32 a, s32 fallback) {
+    if (a <= 0) {
+        return fallback;
+    }
+    return a;
+}
+)");
+}
+
+TEST_F(RoundTripTest, BranchSelectZero) {
+  AssertRoundTripBitExact("SelectZero", R"(
+s32 SelectZero(s32 a, s32 fallback) {
+    if (a == 0) {
+        return fallback;
+    }
+    return a;
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopSumArrayS16) {
+  AssertRoundTripBitExact("SumArrayS16", R"(
+s32 SumArrayS16(s16* arr, s32 n) {
+    s32 sum = 0;
+    s32 i;
+    for (i = 0; i < n; i++) {
+        sum += arr[i];
+    }
+    return sum;
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopZeroArray) {
+  AssertRoundTripBitExact("ZeroArray", R"(
+void ZeroArray(s32* arr, s32 n) {
+    s32 i;
+    for (i = 0; i < n; i++) {
+        arr[i] = 0;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopDoWhileDecrement) {
+  AssertRoundTripBitExact("DoWhileDecrement", R"(
+s32 DoWhileDecrement(s32 val) {
+    s32 count = 0;
+    do {
+        count++;
+        val -= 2;
+    } while (val > 0);
+    return count;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArithmeticBitClear) {
+  AssertRoundTripBitExact("BitClear", R"(
+u32 BitClear(u32 val, u32 mask) {
+    return val & ~mask;
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallTwoArgsAdd) {
+  AssertRoundTripBitExact("CallTwoArgsAdd", R"(
+extern s32 CalleeTwo(s32 a, s32 b);
+
+s32 CallTwoArgsAdd(s32 a, s32 b) {
+    return CalleeTwo(a + 1, b + 2);
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallWithGlobal) {
+  AssertRoundTripBitExact("CallWithGlobal", R"(
+extern s32 gGlobalS32;
+extern s32 CalleeOne(s32 a);
+
+s32 CallWithGlobal(void) {
+    return CalleeOne(gGlobalS32);
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallSetGlobal) {
+  AssertRoundTripBitExact("CallSetGlobal", R"(
+extern s32 gGlobalS32;
+extern s32 CalleeOne(s32 a);
+
+void CallSetGlobal(s32 a) {
+    gGlobalS32 = CalleeOne(a);
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallAddConstant) {
+  AssertRoundTripBitExact("CallAddConstant", R"(
+extern s32 CalleeOne(s32 a);
+
+s32 CallAddConstant(s32 a) {
+    return CalleeOne(a) + 10;
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalConditionalIncrement) {
+  AssertRoundTripBitExact("GlobalConditionalIncrement", R"(
+extern s32 gGlobalS32;
+
+void GlobalConditionalIncrement(s32 cond) {
+    if (cond) {
+        gGlobalS32++;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayRead) {
+  AssertRoundTripBitExact("GlobalArrayRead", R"(
+extern s32 gGlobalArray[4];
+
+s32 GlobalArrayRead(s32 idx) {
+    return gGlobalArray[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayWrite) {
+  AssertRoundTripBitExact("GlobalArrayWrite", R"(
+extern s32 gGlobalArray[4];
+
+void GlobalArrayWrite(s32 idx, s32 val) {
+    gGlobalArray[idx] = val;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatScale) {
+  AssertRoundTripBitExact("FloatScale", R"(
+f32 FloatScale(f32 a, f32 scale) {
+    return a * scale;
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoubleScale) {
+  AssertRoundTripBitExact("DoubleScale", R"(
+f64 DoubleScale(f64 a, f64 scale) {
+    return a * scale;
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoubleMulAdd) {
+  AssertRoundTripBitExact("DoubleMulAdd", R"(
+f64 DoubleMulAdd(f64 a, f64 b, f64 c) {
+    return a * b + c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoubleMulSub) {
+  AssertRoundTripBitExact("DoubleMulSub", R"(
+f64 DoubleMulSub(f64 a, f64 b, f64 c) {
+    return a * b - c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatAbs) {
+  AssertRoundTripBitExact("FloatAbs", R"(
+f32 FloatAbs(f32 a) {
+    if (a < 0.0f) {
+        return -a;
+    }
+    return a;
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerChainedSelfAssign) {
+  AssertRoundTripBitExact("ChainedSelfAssign", R"(
+void ChainedSelfAssign(s32 a, s32 b, s32 c) {
+    s32 v0;
+    v0 = (a | b);
+    v0 = (v0 | 0xA0000000);
+    *(s32*)v0 = c;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -374,5 +374,80 @@ TEST(RegisterTrackerTest, FprConstantBitsAndMergeAndOwnedDefinitionInst) {
   EXPECT_EQ(tracker.GetFprConstantBits(FpRegister::kF20), 0u);
 }
 
+TEST(RegisterTrackerTest, CallerSavedGprsClearedAcrossCallWhileCalleeSavedPreserved) {
+  RegisterTracker tracker;
+
+  // Set up values in caller-saved registers:
+  // $at = SymbolHi(0x80200000)
+  tracker.Step(*DecodeInstruction(0x3C018020));  // lui $at, 0x8020
+  // $v0 = Constant(10)
+  tracker.Step(*DecodeInstruction(0x2402000A));  // addiu $v0, $zero, 10
+  // $v1 = Constant(20)
+  tracker.Step(*DecodeInstruction(0x24030014));  // addiu $v1, $zero, 20
+  // $a0 = Constant(30)
+  tracker.Step(*DecodeInstruction(0x2404001E));  // addiu $a0, $zero, 30
+  // $a1 = Constant(40)
+  tracker.Step(*DecodeInstruction(0x24050028));  // addiu $a1, $zero, 40
+  // $t0 = Constant(50)
+  tracker.Step(*DecodeInstruction(0x24080032));  // addiu $t0, $zero, 50
+  // $t9 = Constant(60)
+  tracker.Step(*DecodeInstruction(0x2419003C));  // addiu $t9, $zero, 60
+
+  // Set up values in callee-saved registers:
+  // $s0 = SymbolHi(0x80300000)
+  tracker.Step(*DecodeInstruction(0x3C108030));  // lui $s0, 0x8030
+  // $s1 = Constant(100)
+  tracker.Step(*DecodeInstruction(0x24110064));  // addiu $s1, $zero, 100
+  // $s7 = Constant(200)
+  tracker.Step(*DecodeInstruction(0x241700C8));  // addiu $s7, $zero, 200
+
+  // Verify state before call:
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kAt).kind, ValueKind::kSymbolHi);
+  EXPECT_EQ(tracker.GetConstant(Register::kV0), 10u);
+  EXPECT_EQ(tracker.GetConstant(Register::kV1), 20u);
+  EXPECT_EQ(tracker.GetConstant(Register::kA0), 30u);
+  EXPECT_EQ(tracker.GetConstant(Register::kA1), 40u);
+  EXPECT_EQ(tracker.GetConstant(Register::kT0), 50u);
+  EXPECT_EQ(tracker.GetConstant(Register::kT9), 60u);
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kAt).has_value());
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kA0).has_value());
+
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kS0).kind, ValueKind::kSymbolHi);
+  EXPECT_EQ(tracker.GetConstant(Register::kS1), 100u);
+  EXPECT_EQ(tracker.GetConstant(Register::kS7), 200u);
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kS0).has_value());
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kS1).has_value());
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kS7).has_value());
+
+  // Step a call instruction: jal 0x80001000
+  tracker.Step(*DecodeInstruction(0x0C000400));
+
+  // Caller-saved registers must be cleared
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kAt).kind, ValueKind::kUnknown);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kV0).kind, ValueKind::kUnknown);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kV1).kind, ValueKind::kUnknown);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kA0).kind, ValueKind::kUnknown);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kA1).kind, ValueKind::kUnknown);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kT0).kind, ValueKind::kUnknown);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kT9).kind, ValueKind::kUnknown);
+  EXPECT_FALSE(tracker.IsConstant(Register::kV0));
+  EXPECT_FALSE(tracker.IsConstant(Register::kA0));
+  EXPECT_FALSE(tracker.IsConstant(Register::kT0));
+  EXPECT_FALSE(tracker.GetReachingDefinition(Register::kAt).has_value());
+  EXPECT_FALSE(tracker.GetReachingDefinition(Register::kV0).has_value());
+  EXPECT_FALSE(tracker.GetReachingDefinition(Register::kA0).has_value());
+  EXPECT_FALSE(tracker.GetReachingDefinition(Register::kT0).has_value());
+  EXPECT_FALSE(tracker.GetReachingDefinition(Register::kT9).has_value());
+
+  // Callee-saved registers must be preserved
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kS0).kind, ValueKind::kSymbolHi);
+  EXPECT_EQ(tracker.GetRegisterValue(Register::kS0).symbol_hi, 0x80300000u);
+  EXPECT_EQ(tracker.GetConstant(Register::kS1), 100u);
+  EXPECT_EQ(tracker.GetConstant(Register::kS7), 200u);
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kS0).has_value());
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kS1).has_value());
+  EXPECT_TRUE(tracker.GetReachingDefinition(Register::kS7).has_value());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -840,7 +840,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   }
 
   SymbolFolder folder;
-  folder.Fold(instructions_to_process, symbol_index, game_config);
+  folder.Fold(instructions_to_process, symbol_index, game_config, initial_tracker);
 
   if (!sp_address_taken) {
     for (const auto& inst : instructions_to_process) {

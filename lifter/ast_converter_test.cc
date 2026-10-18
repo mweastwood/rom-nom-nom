@@ -1410,5 +1410,180 @@ TEST(AstConverterTest, PredecessorGuardPeelingStructuredForLoop) {
   EXPECT_THAT(code, Not(HasSubstr("temp_t0 = 0;\n    for")));
 }
 
+TEST(AstConverterTest, VarsNeedingInitDataflowAcrossBlocks) {
+  // Function:
+  // 00: jal 0x80001000 (defines $v0, $ra)
+  // 04: nop
+  // 08: bgez $v0, +2 -> 0x14
+  // 0C: nop
+  // 10: addu $a0, $v0, $zero
+  // 14: subu $a0, $v0, $zero
+  // 18: jr $ra
+  // 1C: nop
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 00: jal 0x80001000
+      0x00000000,  // 04: nop
+      0x04410002,  // 08: bgez $v0, +2 -> 0x14
+      0x00000000,  // 0C: nop
+      0x00402021,  // 10: addu $a0, $v0, $zero
+      0x00402023,  // 14: subu $a0, $v0, $zero
+      0x03E00008,  // 18: jr $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "DataflowReachingDefs";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // $v0 is defined by the jal in the entry block, so it reaches both blocks.
+  // Therefore, v0 does NOT need "= 0" initialization.
+  EXPECT_THAT(code, Not(HasSubstr("v0 = 0;")));
+}
+
+TEST(AstConverterTest, WhileLoopConditionInlining) {
+  // 00: lb    $t0, 0($a0)        (load char: *(s8*)arg0)
+  // 04: beq   $t0, $zero, +3 -> 0x14 (exit loop if *s == 0)
+  // 08: nop
+  // Loop body:
+  // 0C: addiu $a0, $a0, 1        (arg0++)
+  // 10: j     0x80020000         (loop back)
+  // 14: nop
+  // Exit:
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> words = {
+      0x80880000,  // 00: lb $t0, 0($a0)
+      0x11000003,  // 04: beq $t0, $zero, +3 -> 0x14
+      0x00000000,  // 08: nop
+      0x24840001,  // 0C: addiu $a0, $a0, 1
+      0x08008000,  // 10: j 0x80020000
+      0x00000000,  // 14: nop
+      0x03E00008,  // 18: jr $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "WhileLoopInlining";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // The condition load should be inlined into the while condition without falling back to while
+  // (1).
+  EXPECT_THAT(code, Not(HasSubstr("while (1)")));
+  EXPECT_THAT(code, HasSubstr("while ("));
+}
+
+TEST(AstConverterTest, ShortCircuitConditionSynthesis) {
+  // Cascading branches:
+  // 00: slti  $at, $a0, 10       (a0 < 10)
+  // 04: beq   $at, $zero, +5 -> 0x1C (false -> exit)
+  // 08: nop
+  // 0C: slti  $at, $a1, 20       (a1 < 20)
+  // 10: beq   $at, $zero, +2 -> 0x1C (false -> exit)
+  // 14: nop
+  // 18: addiu $v0, $zero, 1      (then: return 1)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> words = {
+      0x2881000A,  // 00: slti $at, $a0, 10
+      0x10200005,  // 04: beq $at, $zero, +5 -> 0x1C
+      0x00000000,  // 08: nop
+      0x28A10014,  // 0C: slti $at, $a1, 20
+      0x10200002,  // 10: beq $at, $zero, +2 -> 0x1C
+      0x00000000,  // 14: nop
+      0x24020001,  // 18: addiu $v0, $zero, 1
+      0x03E00008,  // 1C: jr $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "CascadingBranchAnd";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // Short-circuit || condition should be synthesized into if (...)
+  EXPECT_THAT(code, HasSubstr("||"));
+}
+
+TEST(AstConverterTest, ChainedSelfAssignmentPreservesLvalueAndDefinitions) {
+  // Pattern:
+  // 00: or   $v0, $a0, $a1
+  // 04: lui  $at, 0xA000
+  // 08: or   $v0, $v0, $at
+  // 0C: sw   $a2, 0($v0)
+  // 10: jr   $ra
+  // 14: nop
+  std::vector<uint32_t> words = {
+      0x00851025,  // 00: or  $v0, $a0, $a1
+      0x3C01A000,  // 04: lui $at, 0xA000
+      0x00411025,  // 08: or  $v0, $v0, $at
+      0xAC460000,  // 0C: sw  $a2, 0($v0)
+      0x03E00008,  // 10: jr  $ra
+      0x00000000,  // 14: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "ChainedSelfAssignTest";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // LHS of assignment must NEVER be replaced by an rvalue expression
+  EXPECT_THAT(code, Not(HasSubstr(") = (")));
+  EXPECT_THAT(code, HasSubstr("*(s32*)v0 = arg2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

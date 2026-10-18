@@ -445,5 +445,149 @@ TEST(SymbolFolderTest, MultipleUsesOnMidPreservesBothHiAndMid) {
   EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
 }
 
+TEST(SymbolFolderTest, CrossBlockDominatorHiFoldedWithLo) {
+  RegisterTracker initial_tracker;
+  initial_tracker.SetRegisterValue(Register::kS0, TrackedValue::SymbolHi(0x80200000));
+
+  // Instructions in dominating block's successor:
+  // 0: lw $v0, 0x1234($s0)
+  // 1: sw $a0, 0x5678($s0)
+  std::vector<uint32_t> words = {
+      0x8E021234,  // 0: lw $v0, 0x1234($s0)
+      0xAE045678,  // 1: sw $a0, 0x5678($s0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts, nullptr, nullptr, &initial_tracker);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+
+  const auto& load_folded = folder.AllFolded()[0];
+  EXPECT_EQ(load_folded.type, FoldedPatternType::kGlobalLoad);
+  EXPECT_EQ(load_folded.address, 0x80201234u);
+  EXPECT_EQ(load_folded.dest_reg, Register::kV0);
+  EXPECT_EQ(load_folded.lo_inst_index, 0u);
+  EXPECT_FALSE(load_folded.hi_is_local);
+
+  const auto& store_folded = folder.AllFolded()[1];
+  EXPECT_EQ(store_folded.type, FoldedPatternType::kGlobalStore);
+  EXPECT_EQ(store_folded.address, 0x80205678u);
+  EXPECT_EQ(store_folded.src_reg, Register::kA0);
+  EXPECT_EQ(store_folded.lo_inst_index, 1u);
+  EXPECT_FALSE(store_folded.hi_is_local);
+
+  // In this block, there is no lui, so IsFoldedHi must return false
+  EXPECT_FALSE(folder.IsFoldedHi(0));
+  EXPECT_FALSE(folder.IsFoldedHi(1));
+
+  // The low instructions in this block are both folded
+  EXPECT_THAT(folder.GetFoldedLo(0), NotNull());
+  EXPECT_THAT(folder.GetFoldedLo(1), NotNull());
+}
+
+TEST(SymbolFolderTest, MultipleLoadsSharingLuiSeparatedByNonClobberingInstructions) {
+  // 0: lui   $s0, 0x8020
+  // 1: addiu $a0, $zero, 42  # non-clobbering instruction
+  // 2: lw    $v0, 0x1000($s0)
+  // 3: addu  $a1, $a0, $v0   # non-clobbering instruction of $s0
+  // 4: lw    $v1, 0x2000($s0)
+  std::vector<uint32_t> words = {
+      0x3C108020,  // 0: lui   $s0, 0x8020
+      0x2404002A,  // 1: addiu $a0, $zero, 42
+      0x8E021000,  // 2: lw    $v0, 0x1000($s0)
+      0x00822821,  // 3: addu  $a1, $a0, $v0
+      0x8E032000,  // 4: lw    $v1, 0x2000($s0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(2));
+
+  EXPECT_EQ(folder.AllFolded()[0].type, FoldedPatternType::kGlobalLoad);
+  EXPECT_EQ(folder.AllFolded()[0].address, 0x80201000u);
+  EXPECT_EQ(folder.AllFolded()[0].dest_reg, Register::kV0);
+  EXPECT_EQ(folder.AllFolded()[0].hi_inst_index, 0u);
+  EXPECT_EQ(folder.AllFolded()[0].lo_inst_index, 2u);
+
+  EXPECT_EQ(folder.AllFolded()[1].type, FoldedPatternType::kGlobalLoad);
+  EXPECT_EQ(folder.AllFolded()[1].address, 0x80202000u);
+  EXPECT_EQ(folder.AllFolded()[1].dest_reg, Register::kV1);
+  EXPECT_EQ(folder.AllFolded()[1].hi_inst_index, 0u);
+  EXPECT_EQ(folder.AllFolded()[1].lo_inst_index, 4u);
+
+  // The shared lui instruction at index 0 should be suppressed because all uses are folded
+  EXPECT_TRUE(folder.IsFoldedHi(0));
+  EXPECT_THAT(folder.GetFoldedLo(2), NotNull());
+  EXPECT_THAT(folder.GetFoldedLo(4), NotNull());
+}
+
+TEST(SymbolFolderTest, CrossBlockHiClobberedByCallRejectsFolding) {
+  RegisterTracker initial_tracker;
+  // Caller-saved $t0 has %hi(0x8020)
+  initial_tracker.SetRegisterValue(Register::kT0, TrackedValue::SymbolHi(0x80200000));
+  // Callee-saved $s0 has %hi(0x8030)
+  initial_tracker.SetRegisterValue(Register::kS0, TrackedValue::SymbolHi(0x80300000));
+
+  // Sequence containing a call:
+  // 0: jal 0x80001000
+  // 1: nop
+  // 2: lw $v0, 0x1000($t0)  # $t0 was clobbered by the call; must NOT fold!
+  // 3: lw $v1, 0x2000($s0)  # $s0 is callee-saved; MUST fold!
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 0: jal 0x80001000
+      0x00000000,  // 1: nop
+      0x8D021000,  // 2: lw $v0, 0x1000($t0)
+      0x8E032000,  // 3: lw $v1, 0x2000($s0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts, nullptr, nullptr, &initial_tracker);
+
+  // Only the load via callee-saved $s0 should fold
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  EXPECT_EQ(folder.AllFolded()[0].type, FoldedPatternType::kGlobalLoad);
+  EXPECT_EQ(folder.AllFolded()[0].address, 0x80302000u);
+  EXPECT_EQ(folder.AllFolded()[0].dest_reg, Register::kV1);
+  EXPECT_EQ(folder.AllFolded()[0].lo_inst_index, 3u);
+  EXPECT_EQ(folder.GetFoldedLo(2), nullptr);
+  EXPECT_THAT(folder.GetFoldedLo(3), NotNull());
+}
+
+TEST(SymbolFolderTest, CrossBlockHiWithLocalIndexedAdduFoldsAndSuppressesAddu) {
+  RegisterTracker initial_tracker;
+  initial_tracker.SetRegisterValue(Register::kS0, TrackedValue::SymbolHi(0x80200000));
+
+  // 0: addu $t0, $s0, $v1   # local addu combines cross-block %hi with index
+  // 1: lw   $v0, 0x1000($t0)
+  std::vector<uint32_t> words = {
+      0x02034021,  // 0: addu $t0, $s0, $v1
+      0x8D021000,  // 1: lw   $v0, 0x1000($t0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts, nullptr, nullptr, &initial_tracker);
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  const auto& folded = folder.AllFolded()[0];
+  EXPECT_EQ(folded.type, FoldedPatternType::kGlobalIndexedLoad);
+  EXPECT_EQ(folded.address, 0x80201000u);
+  EXPECT_EQ(folded.dest_reg, Register::kV0);
+  EXPECT_EQ(folded.index_reg, Register::kV1);
+  EXPECT_FALSE(folded.hi_is_local);
+  EXPECT_TRUE(folded.mid_is_local);
+  EXPECT_THAT(folded.mid_inst_index, ::testing::Optional(0u));
+  EXPECT_EQ(folded.lo_inst_index, 1u);
+
+  // The local addu at index 0 is suppressed, while hi was not local
+  EXPECT_FALSE(folder.IsFoldedHi(0));
+  EXPECT_TRUE(folder.IsFoldedMid(0));
+  EXPECT_THAT(folder.GetFoldedLo(1), NotNull());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

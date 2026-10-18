@@ -2511,5 +2511,56 @@ TEST(ExpressionBuilderTest, LiftsStandaloneDivDdivAndDmultInstructions) {
   EXPECT_EQ(statements[11].ToString(), "v1 = (u64)(u32)arg0 * (u64)(u32)arg1 >> 32;\n");
 }
 
+TEST(ExpressionBuilderTest, CrossBlockDominatorHiSymbolFoldedInBlock) {
+  RegisterTracker initial_tracker;
+  initial_tracker.SetRegisterValue(Register::kS0, TrackedValue::SymbolHi(0x80200000));
+
+  std::string textproto = R"pb(
+    entries { name: "g_player_pos" address: 0x80201234 type: SYMBOL_DATA size: 4 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // Block in dominating block's successor:
+  // lw $v0, 0x1234($s0)
+  std::vector<uint32_t> words = {
+      0x8E021234,  // lw $v0, 0x1234($s0)
+  };
+  auto insts = *DecodeSequence(words);
+
+  FunctionLiftContext ctx;
+  ctx.symbol_index = &(*index_or);
+  ctx.initial_tracker = &initial_tracker;
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_THAT(statements, SizeIs(1));
+  EXPECT_EQ(statements[0].ToString(), "v0 = g_player_pos;\n");
+}
+
+TEST(ExpressionBuilderTest, PreCallCallerSavedGprsNotPreservedAcrossCall) {
+  // 0: addiu $t0, $zero, 42    # caller-saved $t0
+  // 1: addiu $s0, $zero, 100   # callee-saved $s0
+  // 2: jal func_80100000
+  // 3: nop                     # delay slot
+  // 4: addu $v0, $t0, $s0      # uses $t0 (clobbered by call) and $s0 (preserved)
+  std::vector<uint32_t> words = {
+      0x2408002A,  // addiu $t0, $zero, 42
+      0x24100064,  // addiu $s0, $zero, 100
+      0x0C040000,  // jal func_80100000
+      0x00000000,  // nop
+      0x01101021,  // addu $v0, $t0, $s0
+  };
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  // $s0 should be recognized as constant 100 across the call, but $t0 must NOT be constant 42
+  // across the call since the call clobbered it!
+  ASSERT_GE(statements.size(), 4u);
+  // Last statement: addu $v0, $t0, $s0
+  const auto& last_stmt = statements.back();
+  EXPECT_EQ(last_stmt.destination_variable, "v0");
+  EXPECT_EQ(last_stmt.ToString(), "v0 = temp_t0 + 100;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

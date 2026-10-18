@@ -43,6 +43,8 @@ struct FoldedSymbolAccess {
   size_t hi_inst_index = 0;
   std::optional<size_t> mid_inst_index;
   size_t lo_inst_index = 0;
+  bool hi_is_local = true;
+  bool mid_is_local = true;
 };
 
 // Analyzes instructions to fold multi-instruction lui/lo relocation pairs
@@ -55,8 +57,11 @@ class SymbolFolder {
   // If symbol_index is provided, addresses are mapped to semantic symbol names.
   // If game_config is provided, unregistered address loads are classified as code (func_*) or
   // data (D_*).
+  // If initial_tracker is provided, tracked register values (such as %hi from dominating
+  // blocks) are used to fold cross-block symbol references.
   void Fold(absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index = nullptr,
-            const GameConfig* game_config = nullptr);
+            const GameConfig* game_config = nullptr,
+            const RegisterTracker* initial_tracker = nullptr);
 
   // Returns all folded patterns found.
   const std::vector<FoldedSymbolAccess>& AllFolded() const { return folded_; }
