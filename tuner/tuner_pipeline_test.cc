@@ -9,6 +9,7 @@
 #include "absl/strings/match.h"
 #include "core/c_ast.h"
 #include "core/endian.h"
+#include "core/toolchain.h"
 #include "gtest/gtest.h"
 #include "tuner/ast_mutator.h"
 
@@ -547,6 +548,57 @@ TEST(TunerPipelineTest, NearMissPolishPassPrioritizesNearMissMutations) {
                 step.kind() == AST_MUTATION_INVERT_IF_ELSE ||
                 step.kind() == AST_MUTATION_COMMUTE_BINARY_OP);
   }
+}
+
+TEST(TunerPipelineTest, CachedByNameFallbackSeedsPreviousCachedFlagsAndMutations) {
+  TunerPipelineOptions opts;
+  opts.repo_root = FindRepoRoot();
+  opts.game_name = "harvest-moon-64";
+  opts.search_on_miss = true;
+  opts.explore_ast_mutations = true;
+  opts.format_with_clang = false;
+
+  auto tuner_or = TunerPipeline::Create(opts);
+  if (!tuner_or.ok()) {
+    // If retail ROM or config is unavailable in this test environment, skip gracefully.
+    return;
+  }
+  auto& tuner = *tuner_or;
+
+  // Insert a cached entry for LayerSet with an outdated input_sha1,
+  // custom c_flags, and the known winning AST mutations.
+  FunctionTuningEntry entry;
+  entry.set_function_name("LayerSet");
+  entry.set_module_name("layer");
+  entry.set_input_sha1("outdated_sha1_hash");
+  entry.add_c_flags("-O2");
+  entry.add_c_flags("-mips2");
+  entry.add_c_flags("-mcpu=r4000");
+  entry.add_c_flags("-Wa,-g");
+  entry.set_is_bit_exact(true);
+  auto* step1 = entry.add_ast_mutations();
+  step1->set_kind(AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN);
+  step1->set_site_index(0);
+  step1->set_param(0);
+  auto* step2 = entry.add_ast_mutations();
+  step2->set_kind(AST_MUTATION_PROPAGATE_REGISTER_COPY);
+  step2->set_site_index(0);
+  step2->set_param(1);
+  tuner->MutableCacheStore().Upsert(entry);
+
+  // When tuning LayerSet, the exact input_sha1 does NOT match, but cached_by_name matches.
+  // It seeds previous_cached_flags and previous_cached_mutations into Phase 1b presets.
+  auto res_or = tuner->TuneFunction("LayerSet", "layer");
+  if (!res_or.ok()) {
+    return;
+  }
+  const auto& res = *res_or;
+
+  EXPECT_FALSE(res.from_cache);
+  EXPECT_TRUE(res.best_score.raw_bit_exact);
+  ASSERT_EQ(res.applied_mutations.size(), 2u);
+  EXPECT_EQ(res.applied_mutations[0].kind(), AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN);
+  EXPECT_EQ(res.applied_mutations[1].kind(), AST_MUTATION_PROPAGATE_REGISTER_COPY);
 }
 
 }  // namespace

@@ -1512,5 +1512,101 @@ TEST(AstMutatorTest, ReloadOrEarlyReturnVarMemoryStoreAndZeroSubstitution) {
   EXPECT_TRUE(absl::StrContains(ret_output, "return v1;")) << ret_output;
 }
 
+TEST(AstMutatorTest, PropagateRegisterCopySoundnessGuardsRejectLoopsAndMemoryAliasing) {
+  // Case 1: func_8009A9C0 pattern:
+  // arg0 = v0;
+  // followed by a loop where arg0 and v0 are assigned!
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v1"));
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "arg0"));
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+
+    // arg0 = v0;
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg0"), CExpression::Identifier("v0"))));
+
+    // do { v0 = 1; arg0 = v0; } while (v0 != v1);
+    auto loop_body = std::make_unique<CompoundStatement>();
+    loop_body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(1))));
+    loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg0"), CExpression::Identifier("v0"))));
+    body->AddStatement(CStatement::DoWhile(
+        std::move(loop_body),
+        CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Identifier("v1"))));
+
+    FunctionDeclaration func(CType::Void(), "UnsoundLoopCopyFunc", {}, std::move(body));
+    auto mutations = AstMutator::DiscoverMutations(func, 64);
+    for (const auto& step : mutations) {
+      EXPECT_NE(step.kind(), AST_MUTATION_PROPAGATE_REGISTER_COPY)
+          << "PropagateRegisterCopy must NOT propagate into or across a loop where registers are "
+             "assigned!";
+    }
+  }
+
+  // Case 2: func_8006E840 pattern:
+  // temp_s0 = arg0;
+  // followed by if (cond) { arg0 = 0; }
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "arg0"));
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "cond"));
+
+    // temp_s0 = arg0;
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+
+    // if (cond) { arg0 = 0; }
+    auto if_body = std::make_unique<CompoundStatement>();
+    if_body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("arg0"), CExpression::Integer(0))));
+    body->AddStatement(CStatement::If(CExpression::Identifier("cond"), std::move(if_body)));
+
+    FunctionDeclaration func(CType::Void(), "UnsoundIfOverwriteFunc", {}, std::move(body));
+    auto mutations = AstMutator::DiscoverMutations(func, 64);
+    for (const auto& step : mutations) {
+      EXPECT_NE(step.kind(), AST_MUTATION_PROPAGATE_REGISTER_COPY)
+          << "PropagateRegisterCopy must NOT propagate across an if statement where the source is "
+             "overwritten!";
+    }
+  }
+
+  // Case 3: Self-mask sinking across memory write or function call:
+  // x = (x & 65535);
+  // *ptr = 1; (memory write)
+  // if (x < 16) ...
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "x"));
+    body->AddStatement(CStatement::VariableDeclaration(CType::S32().MakePointer(), "ptr"));
+
+    // x = (x & 65535);
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("x"),
+        CExpression::Binary("&", CExpression::Identifier("x"), CExpression::Integer(65535)))));
+
+    // *ptr = 1;
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Unary("*", CExpression::Identifier("ptr")), CExpression::Integer(1))));
+
+    // if (x < 16) { ... }
+    auto if_body = std::make_unique<CompoundStatement>();
+    if_body->AddStatement(CStatement::Return(CExpression::Integer(1)));
+    body->AddStatement(CStatement::If(
+        CExpression::Binary("<", CExpression::Identifier("x"), CExpression::Integer(16)),
+        std::move(if_body)));
+
+    FunctionDeclaration func(CType::Void(), "UnsoundSinkAcrossMemoryFunc", {}, std::move(body));
+    auto mutations = AstMutator::DiscoverMutations(func, 64);
+    for (const auto& step : mutations) {
+      EXPECT_NE(step.kind(), AST_MUTATION_PROPAGATE_REGISTER_COPY)
+          << "Self-mask sinking must NOT sink across an instruction that writes to memory!";
+    }
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -3125,6 +3125,179 @@ bool IsVariableArrayInStatement(const CStatement& stmt, std::string_view name) {
   return false;
 }
 
+bool IsGlobalIdentifierName(std::string_view name) {
+  return name.rfind("D_", 0) == 0 || name.rfind("g_", 0) == 0;
+}
+
+bool ExpressionContainsFunctionCall(const CExpression& expression) {
+  switch (expression.Kind()) {
+    case CExpressionKind::kCallExpression:
+      return true;
+    case CExpressionKind::kUnaryExpression:
+      return ExpressionContainsFunctionCall(
+          static_cast<const UnaryExpression&>(expression).Operand());
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expression);
+      return ExpressionContainsFunctionCall(bin.Lhs()) || ExpressionContainsFunctionCall(bin.Rhs());
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expression);
+      return ExpressionContainsFunctionCall(assign.Lhs()) ||
+             ExpressionContainsFunctionCall(assign.Rhs());
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionContainsFunctionCall(
+          static_cast<const CastExpression&>(expression).Operand());
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expression);
+      return ExpressionContainsFunctionCall(arr.Array()) ||
+             ExpressionContainsFunctionCall(arr.Index());
+    }
+    case CExpressionKind::kMemberAccessExpression:
+      return ExpressionContainsFunctionCall(
+          static_cast<const MemberAccessExpression&>(expression).Object());
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expression);
+      return ExpressionContainsFunctionCall(tern.Condition()) ||
+             ExpressionContainsFunctionCall(tern.TrueExpression()) ||
+             ExpressionContainsFunctionCall(tern.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StatementContainsFunctionCall(const CStatement& statement) {
+  switch (statement.Kind()) {
+    case CStatementKind::kExpressionStatement:
+      return ExpressionContainsFunctionCall(
+          static_cast<const ExpressionStatement&>(statement).Expression());
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& decl = static_cast<const VariableDeclarationStatement&>(statement);
+      return decl.Initializer() != nullptr && ExpressionContainsFunctionCall(*decl.Initializer());
+    }
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& child : static_cast<const CompoundStatement&>(statement).Statements()) {
+        if (StatementContainsFunctionCall(*child)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(statement);
+      if (ExpressionContainsFunctionCall(if_stmt.Condition())) return true;
+      if (StatementContainsFunctionCall(if_stmt.ThenBranch())) return true;
+      if (if_stmt.ElseBranch() != nullptr && StatementContainsFunctionCall(*if_stmt.ElseBranch())) {
+        return true;
+      }
+      return false;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(statement);
+      return ExpressionContainsFunctionCall(ws.Condition()) ||
+             StatementContainsFunctionCall(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(statement);
+      return ExpressionContainsFunctionCall(dws.Condition()) ||
+             StatementContainsFunctionCall(dws.Body());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(statement);
+      if (fs.Init() != nullptr && StatementContainsFunctionCall(*fs.Init())) return true;
+      if (fs.Condition() != nullptr && ExpressionContainsFunctionCall(*fs.Condition())) return true;
+      if (fs.Step() != nullptr && ExpressionContainsFunctionCall(*fs.Step())) return true;
+      return StatementContainsFunctionCall(fs.Body());
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& ret = static_cast<const ReturnStatement&>(statement);
+      return ret.ReturnValue() != nullptr && ExpressionContainsFunctionCall(*ret.ReturnValue());
+    }
+    default:
+      return false;
+  }
+}
+
+bool ExpressionReadsOrWritesMemoryOrGlobals(const CExpression& expression) {
+  switch (expression.Kind()) {
+    case CExpressionKind::kIdentifier: {
+      const std::string& name = static_cast<const IdentifierExpression&>(expression).Name();
+      return IsGlobalIdentifierName(name);
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& unary = static_cast<const UnaryExpression&>(expression);
+      if (unary.IsPrefix() && unary.Op() == "*") return true;
+      return ExpressionReadsOrWritesMemoryOrGlobals(unary.Operand());
+    }
+    case CExpressionKind::kArrayIndexExpression:
+      return true;
+    case CExpressionKind::kMemberAccessExpression:
+      return true;
+    case CExpressionKind::kCallExpression:
+      return true;
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expression);
+      return ExpressionReadsOrWritesMemoryOrGlobals(bin.Lhs()) ||
+             ExpressionReadsOrWritesMemoryOrGlobals(bin.Rhs());
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expression);
+      return ExpressionReadsOrWritesMemoryOrGlobals(assign.Lhs()) ||
+             ExpressionReadsOrWritesMemoryOrGlobals(assign.Rhs());
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionReadsOrWritesMemoryOrGlobals(
+          static_cast<const CastExpression&>(expression).Operand());
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expression);
+      return ExpressionReadsOrWritesMemoryOrGlobals(tern.Condition()) ||
+             ExpressionReadsOrWritesMemoryOrGlobals(tern.TrueExpression()) ||
+             ExpressionReadsOrWritesMemoryOrGlobals(tern.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StatementReadsOrWritesMemoryOrGlobals(const CStatement& statement) {
+  switch (statement.Kind()) {
+    case CStatementKind::kExpressionStatement:
+      return ExpressionReadsOrWritesMemoryOrGlobals(
+          static_cast<const ExpressionStatement&>(statement).Expression());
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& decl = static_cast<const VariableDeclarationStatement&>(statement);
+      return decl.Initializer() != nullptr &&
+             ExpressionReadsOrWritesMemoryOrGlobals(*decl.Initializer());
+    }
+    default:
+      return true;
+  }
+}
+
+bool StatementContainsLoop(const CStatement& statement) {
+  switch (statement.Kind()) {
+    case CStatementKind::kWhileStatement:
+    case CStatementKind::kDoWhileStatement:
+    case CStatementKind::kForStatement:
+      return true;
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& child : static_cast<const CompoundStatement&>(statement).Statements()) {
+        if (StatementContainsLoop(*child)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(statement);
+      if (StatementContainsLoop(if_stmt.ThenBranch())) return true;
+      if (if_stmt.ElseBranch() != nullptr && StatementContainsLoop(*if_stmt.ElseBranch())) {
+        return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 bool MatchRegisterCopy(const CStatement& statement, std::string* out_dst, std::string* out_src) {
   if (statement.Kind() == CStatementKind::kExpressionStatement) {
     const auto& expr_stmt = static_cast<const ExpressionStatement&>(statement);
@@ -3134,7 +3307,7 @@ bool MatchRegisterCopy(const CStatement& statement, std::string* out_dst, std::s
           assign.Rhs().Kind() == CExpressionKind::kIdentifier) {
         const std::string& dst = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
         const std::string& src = static_cast<const IdentifierExpression&>(assign.Rhs()).Name();
-        if (dst != src) {
+        if (dst != src && !IsGlobalIdentifierName(dst) && !IsGlobalIdentifierName(src)) {
           if (out_dst != nullptr) *out_dst = dst;
           if (out_src != nullptr) *out_src = src;
           return true;
@@ -3146,7 +3319,8 @@ bool MatchRegisterCopy(const CStatement& statement, std::string* out_dst, std::s
     if (decl.Initializer() != nullptr &&
         decl.Initializer()->Kind() == CExpressionKind::kIdentifier) {
       const std::string& src = static_cast<const IdentifierExpression&>(*decl.Initializer()).Name();
-      if (decl.Name() != src) {
+      if (decl.Name() != src && !IsGlobalIdentifierName(decl.Name()) &&
+          !IsGlobalIdentifierName(src)) {
         if (out_dst != nullptr) *out_dst = decl.Name();
         if (out_src != nullptr) *out_src = src;
         return true;
@@ -3599,14 +3773,16 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 6. Check register copy propagation (`AST_MUTATION_PROPAGATE_REGISTER_COPY`)
     std::string copy_dst, copy_src;
-    if (MatchRegisterCopy(*statements[i], &copy_dst, &copy_src)) {
+    if (MatchRegisterCopy(*statements[i], &copy_dst, &copy_src) &&
+        !IsGlobalIdentifierName(copy_dst) && !IsGlobalIdentifierName(copy_src)) {
       std::vector<size_t> read_indices;
       for (size_t j = i + 1; j < statements.size(); ++j) {
+        // Soundness guard: if statements[j] assigns either copy_src or copy_dst,
+        // or contains a loop where either is modified, stop immediately.
+        // Never add statements[j] if it assigns copy_src or copy_dst!
         if (IsIdentifierAssignedInStatement(*statements[j], copy_src) ||
-            IsIdentifierAssignedInStatement(*statements[j], copy_dst)) {
-          if (CountIdentifierOccurrencesInStatement(*statements[j], copy_src) > 0) {
-            read_indices.push_back(j);
-          }
+            IsIdentifierAssignedInStatement(*statements[j], copy_dst) ||
+            StatementContainsLoop(*statements[j])) {
           break;
         }
         if (CountIdentifierOccurrencesInStatement(*statements[j], copy_src) > 0) {
@@ -3698,7 +3874,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
     std::string mask_var;
     CType mask_cast_type;
     int64_t mask_val = 0;
-    if (MatchSelfMask(*statements[i], &mask_var, &mask_cast_type, &mask_val)) {
+    if (MatchSelfMask(*statements[i], &mask_var, &mask_cast_type, &mask_val) &&
+        !IsGlobalIdentifierName(mask_var)) {
       size_t first_read_idx = statements.size();
       bool modified_in_between = false;
       for (size_t j = i + 1; j < statements.size(); ++j) {
@@ -3706,7 +3883,10 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
           first_read_idx = j;
           break;
         }
-        if (IsIdentifierAssignedInStatement(*statements[j], mask_var)) {
+        if (IsIdentifierAssignedInStatement(*statements[j], mask_var) ||
+            StatementReadsOrWritesMemoryOrGlobals(*statements[j]) ||
+            StatementContainsFunctionCall(*statements[j]) ||
+            StatementContainsLoop(*statements[j])) {
           modified_in_between = true;
           break;
         }
@@ -3721,12 +3901,6 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
           if (CountIdentifierOccurrencesInExpression(if_stmt.Condition(), mask_var) > 0) {
             context->Record(AST_MUTATION_PROPAGATE_REGISTER_COPY, site, 1);
           }
-        }
-        context->Record(AST_MUTATION_PROPAGATE_REGISTER_COPY, site, 2);
-        if (i + 1 < statements.size() &&
-            (statements[i + 1]->Kind() == CStatementKind::kDoWhileStatement ||
-             statements[i + 1]->Kind() == CStatementKind::kWhileStatement)) {
-          context->Record(AST_MUTATION_PROPAGATE_REGISTER_COPY, site, 3);
         }
 
         uint32_t parameter = 0;
@@ -3772,41 +3946,6 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
             new_statements.push_back(TraverseStatement(*mutated_if, context));
             i = first_read_idx;
             continue;
-          } else if (parameter == 2) {
-            for (size_t middle = i + 1; middle < first_read_idx; ++middle) {
-              new_statements.push_back(TraverseStatement(*statements[middle], context));
-            }
-            auto folded_stmt = ReplaceIdentifierInStatement(
-                *statements[first_read_idx], mask_var,
-                *CExpression::Cast(mask_cast_type, CExpression::Identifier(mask_var)));
-            new_statements.push_back(TraverseStatement(*folded_stmt, context));
-            i = first_read_idx;
-            continue;
-          } else if (parameter == 3 && i + 1 < statements.size()) {
-            if (statements[i + 1]->Kind() == CStatementKind::kDoWhileStatement) {
-              const auto& loop = static_cast<const DoWhileStatement&>(*statements[i + 1]);
-              std::vector<std::unique_ptr<CStatement>> loop_stmts;
-              loop_stmts.push_back(statements[i]->Clone());
-              if (loop.Body().Kind() == CStatementKind::kCompoundStatement) {
-                const auto& orig_body_stmts =
-                    static_cast<const CompoundStatement&>(loop.Body()).Statements();
-                for (size_t b = 0; b < orig_body_stmts.size(); ++b) {
-                  if (b + 1 == orig_body_stmts.size() &&
-                      orig_body_stmts[b]->ToString() == statements[i]->ToString()) {
-                    continue;
-                  }
-                  loop_stmts.push_back(orig_body_stmts[b]->Clone());
-                }
-              } else {
-                loop_stmts.push_back(loop.Body().Clone());
-              }
-              auto mutated_loop =
-                  CStatement::DoWhile(std::make_unique<CompoundStatement>(std::move(loop_stmts)),
-                                      loop.Condition().Clone());
-              new_statements.push_back(TraverseStatement(*mutated_loop, context));
-              ++i;
-              continue;
-            }
           }
         }
       }

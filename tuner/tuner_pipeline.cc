@@ -200,21 +200,26 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
         result.winning_c_flags = base_flags;
       }
     }
-    if (const auto* cached = cache_store_.Lookup(target.name, input_sha1); cached != nullptr) {
-      if (!options_.only_non_bit_exact || cached->is_bit_exact()) {
+    const auto* cached_exact = cache_store_.Lookup(target.name, input_sha1);
+    const auto* cached_by_name =
+        cached_exact != nullptr ? cached_exact : cache_store_.Lookup(target.name, "");
+
+    if (cached_exact != nullptr) {
+      if (!options_.only_non_bit_exact || cached_exact->is_bit_exact()) {
         result.from_cache = true;
-        if (!cached->c_flags().empty()) {
-          result.winning_c_flags.assign(cached->c_flags().begin(), cached->c_flags().end());
+        if (!cached_exact->c_flags().empty()) {
+          result.winning_c_flags.assign(cached_exact->c_flags().begin(),
+                                        cached_exact->c_flags().end());
         }
-        result.applied_mutations.assign(cached->ast_mutations().begin(),
-                                        cached->ast_mutations().end());
+        result.applied_mutations.assign(cached_exact->ast_mutations().begin(),
+                                        cached_exact->ast_mutations().end());
         FunctionDeclaration mutated =
             AstMutator::ApplyMutations(baseline_ast, result.applied_mutations);
-        result.best_score.raw_bit_exact = cached->is_bit_exact();
-        result.best_score.normalized_exact = cached->is_bit_exact();
-        result.best_score.bit_exact_instructions = cached->bit_exact_instructions();
-        result.best_score.matching_instructions = cached->matching_instructions();
-        result.best_score.target_instruction_count = cached->target_instructions();
+        result.best_score.raw_bit_exact = cached_exact->is_bit_exact();
+        result.best_score.normalized_exact = cached_exact->is_bit_exact();
+        result.best_score.bit_exact_instructions = cached_exact->bit_exact_instructions();
+        result.best_score.matching_instructions = cached_exact->matching_instructions();
+        result.best_score.target_instruction_count = cached_exact->target_instructions();
         result.baseline_score = result.best_score;
         result.improved_over_baseline = !result.applied_mutations.empty();
         if (emit_formatted_c) {
@@ -224,9 +229,13 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
         result.tuned_ast = std::make_unique<FunctionDeclaration>(std::move(mutated));
         return result;
       }
-      previous_cached_mutations.assign(cached->ast_mutations().begin(),
-                                       cached->ast_mutations().end());
-      previous_cached_flags.assign(cached->c_flags().begin(), cached->c_flags().end());
+    }
+
+    if (cached_by_name != nullptr) {
+      previous_cached_mutations.assign(cached_by_name->ast_mutations().begin(),
+                                       cached_by_name->ast_mutations().end());
+      previous_cached_flags.assign(cached_by_name->c_flags().begin(),
+                                   cached_by_name->c_flags().end());
     }
   }
 
@@ -294,7 +303,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
 
   // Phase 1a: Compiler Flag Sweep on Baseline AST first (immediately resolves functions that only
   // need `-Wa,-O2` and ensures Phase 1b/Phase 2 run with the best flag profile).
-  if (!result.best_score.raw_bit_exact && options_.explore_flags) {
+  if (!result.best_score.raw_bit_exact && (options_.explore_flags || flag_profiles.size() > 1)) {
     for (size_t i = 1; i < flag_profiles.size(); ++i) {
       if (evaluated_candidates.insert(make_evaluation_key(flag_profiles[i], baseline_compilable_c))
               .second) {
