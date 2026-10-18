@@ -777,6 +777,12 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
           if (last_def != -1) {
             if (instructions[i].IsBranch()) {
               branch_used_after_last_def = true;
+            } else if (instructions[i].opcode == Opcode::kSlt ||
+                       instructions[i].opcode == Opcode::kSlti ||
+                       instructions[i].opcode == Opcode::kSltu ||
+                       instructions[i].opcode == Opcode::kSltiu) {
+              // Comparison using $v0 to evaluate a condition before a branch does not consume/kill
+              // $v0.
             } else {
               non_branch_used_after_last_def = true;
             }

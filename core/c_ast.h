@@ -2,6 +2,7 @@
 #define CORE_C_AST_H_
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -402,8 +403,10 @@ class CompoundStatement : public CStatement {
   std::unique_ptr<CStatement> Clone() const override;
 
   void AddStatement(std::unique_ptr<CStatement> statement);
+  void RemoveStatementIf(std::function<bool(const CStatement&)> predicate);
   bool IsEmpty() const { return statements_.empty(); }
   const std::vector<std::unique_ptr<CStatement>>& Statements() const { return statements_; }
+  std::vector<std::unique_ptr<CStatement>>& MutableStatements() { return statements_; }
 
  private:
   std::vector<std::unique_ptr<CStatement>> statements_;

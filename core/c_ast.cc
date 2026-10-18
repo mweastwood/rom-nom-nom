@@ -401,6 +401,13 @@ void CompoundStatement::AddStatement(std::unique_ptr<CStatement> statement) {
   statements_.push_back(std::move(statement));
 }
 
+void CompoundStatement::RemoveStatementIf(std::function<bool(const CStatement&)> predicate) {
+  statements_.erase(
+      std::remove_if(statements_.begin(), statements_.end(),
+                     [&](const std::unique_ptr<CStatement>& s) { return predicate(*s); }),
+      statements_.end());
+}
+
 std::string CompoundStatement::ToString(int indent_level) const {
   std::string result = Indent(indent_level) + "{\n";
   for (const auto& stmt : statements_) {

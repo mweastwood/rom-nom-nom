@@ -21,6 +21,7 @@ namespace {
 using ::testing::HasSubstr;
 using ::testing::Not;
 using ::testing::NotNull;
+using ::testing::UnorderedElementsAre;
 
 TEST(AstConverterTest, ExpressionConversion) {
   // Integer literal
@@ -119,9 +120,7 @@ TEST(AstConverterTest, LinearFunctionConversion) {
 
   std::string code = func.ToString();
   EXPECT_THAT(code, HasSubstr("s32 AddTwo(s32 arg0, s32 arg1) {"));
-  EXPECT_THAT(code, HasSubstr("s32 v0;"));
-  EXPECT_THAT(code, HasSubstr("v0 = (arg0 + arg1);"));
-  EXPECT_THAT(code, HasSubstr("return v0;"));
+  EXPECT_THAT(code, HasSubstr("return (arg0 + arg1);"));
 }
 
 TEST(AstConverterTest, IfElseFunctionConversion) {
@@ -166,7 +165,8 @@ TEST(AstConverterTest, IfElseFunctionConversion) {
   std::string code = func.ToString();
   EXPECT_THAT(code, HasSubstr("CheckPositive(s32 arg0) {"));
   EXPECT_THAT(code, HasSubstr("if ("));
-  EXPECT_THAT(code, HasSubstr("return v0;"));
+  EXPECT_THAT(code, HasSubstr("return 2;"));
+  EXPECT_THAT(code, HasSubstr("return 1;"));
 }
 
 TEST(AstConverterTest, LoopFunctionConversion) {
@@ -725,7 +725,7 @@ TEST(AstConverterTest, DeclaresStackBufferWithDetectedFrameSize) {
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("u8 sp[128];"));
-  EXPECT_THAT(code, HasSubstr("v0 = (v1 + (s32)sp);"));
+  EXPECT_THAT(code, HasSubstr("return (v1 + (s32)sp);"));
   EXPECT_THAT(code, Not(HasSubstr("s32 sp;")));
 }
 
@@ -837,8 +837,8 @@ TEST(AstConverterTest, DoWhileLoopDelaySlotDecoupling) {
   // The loop body should contain the load, but NOT the delay slot assignment v0 = v1.
   EXPECT_THAT(code, HasSubstr("do {"));
   EXPECT_THAT(code, HasSubstr("while ((v0 == 0));"));
-  // v0 = v1 must be emitted AFTER the do-while loop!
-  EXPECT_THAT(code, HasSubstr("} while ((v0 == 0));\n    v0 = v1;"));
+  // return v1 must be emitted AFTER the do-while loop!
+  EXPECT_THAT(code, HasSubstr("} while ((v0 == 0));\n    return v1;\n"));
 }
 
 TEST(AstConverterTest, BranchLikelyInvertedIfElseDelaySlotPreserved) {
@@ -1218,6 +1218,196 @@ TEST(AstConverterTest, ComputeBlockEntryStatesInvalidatesCallerSavedArgumentsAcr
 
   EXPECT_THAT(code, HasSubstr("((void (*)())temp_s0)();"));
   EXPECT_THAT(code, Not(HasSubstr("((void (*)())temp_s0)(1")));
+}
+
+TEST(AstConverterTest, CollectUsedVariablesProperlyCollectsVariablesInForStatement) {
+  // Construct for (i = 0; (i < limit); i++) { total = (total + item); }
+  auto for_init = CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("i"), CExpression::Integer(0)));
+  auto for_cond =
+      CExpression::Binary("<", CExpression::Identifier("i"), CExpression::Identifier("limit"));
+  auto for_step = CExpression::Unary("++", CExpression::Identifier("i"), /*is_prefix=*/false);
+  auto for_body = std::make_unique<CompoundStatement>();
+  for_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("total"),
+                              CExpression::Binary("+", CExpression::Identifier("total"),
+                                                  CExpression::Identifier("item")))));
+
+  auto for_stmt = CStatement::For(std::move(for_init), std::move(for_cond), std::move(for_step),
+                                  std::move(for_body));
+
+  std::vector<std::string> vars;
+  absl::flat_hash_set<std::string> seen;
+  AstConverter::CollectUsedVariables(*for_stmt, &vars, &seen);
+
+  EXPECT_THAT(vars, UnorderedElementsAre("i", "limit", "total", "item"));
+}
+
+TEST(AstConverterTest, SimplifyReturnStatementsTerminalAssignmentFoldsIntoDirectReturn) {
+  // v0 = (a + b); return v0; -> return (a + b);
+  CompoundStatement comp;
+  comp.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b")))));
+  comp.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  AstConverter::SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
+
+  ASSERT_EQ(comp.Statements().size(), 1u);
+  EXPECT_EQ(comp.Statements()[0]->Kind(), CStatementKind::kReturnStatement);
+  EXPECT_THAT(comp.Statements()[0]->ToString(), HasSubstr("return (a + b);"));
+}
+
+TEST(AstConverterTest, SimplifyReturnStatementsEarlyReturnRestructuring) {
+  // v0 = default_val;
+  // if ((v0 == 0)) { v0 = other_val; }
+  // return v0;
+  // ->
+  // if ((default_val == 0)) { return other_val; }
+  // return default_val;
+  CompoundStatement comp;
+  comp.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("default_val"))));
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("other_val"))));
+  comp.AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("v0"), CExpression::Integer(0)),
+      std::move(then_branch)));
+  comp.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  AstConverter::SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
+
+  ASSERT_EQ(comp.Statements().size(), 2u);
+  EXPECT_EQ(comp.Statements()[0]->Kind(), CStatementKind::kIfStatement);
+  EXPECT_THAT(comp.Statements()[0]->ToString(), HasSubstr("if ((default_val == 0))"));
+  EXPECT_THAT(comp.Statements()[0]->ToString(), HasSubstr("return other_val;"));
+  EXPECT_EQ(comp.Statements()[1]->Kind(), CStatementKind::kReturnStatement);
+  EXPECT_THAT(comp.Statements()[1]->ToString(), HasSubstr("return default_val;"));
+}
+
+TEST(AstConverterTest, SimplifyReturnStatementsBranchLikelyReturnInversion) {
+  // MaxTwo pattern:
+  // v0 = arg0;
+  // if ((arg1 >= v0)) { v0 = arg1; }
+  // return v0;
+  // ->
+  // if ((arg0 > arg1)) { return arg0; }
+  // return arg1;
+  CompoundStatement comp;
+  comp.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("arg0"))));
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("arg1"))));
+  comp.AddStatement(CStatement::If(
+      CExpression::Binary(">=", CExpression::Identifier("arg1"), CExpression::Identifier("v0")),
+      std::move(then_branch)));
+  comp.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  AstConverter::SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
+
+  ASSERT_EQ(comp.Statements().size(), 2u);
+  EXPECT_EQ(comp.Statements()[0]->Kind(), CStatementKind::kIfStatement);
+  EXPECT_THAT(comp.Statements()[0]->ToString(), HasSubstr("if ((arg0 > arg1))"));
+  EXPECT_THAT(comp.Statements()[0]->ToString(), HasSubstr("return arg0;"));
+  EXPECT_EQ(comp.Statements()[1]->Kind(), CStatementKind::kReturnStatement);
+  EXPECT_THAT(comp.Statements()[1]->ToString(), HasSubstr("return arg1;"));
+}
+
+TEST(AstConverterTest, LoopRotationPreScanPeeledLoopLatchDelay) {
+  // Entry block (0x80020000) peels loop decrement before entering loop:
+  // 00: addiu $a0, $a0, -1
+  // Loop header/latch (0x80020004):
+  // 04: addu  $v0, $v0, $a0
+  // 08: bnel  $a0, $zero, -1 word -> 0x04
+  // 0C: addiu $a0, $a0, -1  (delay slot matches predecessor peeled instruction)
+  // Exit (0x80020010):
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> words = {
+      0x2484FFFF,  // 00: addiu $a0, $a0, -1
+      0x00441021,  // 04: addu  $v0, $v0, $a0
+      0x5480FFFF,  // 08: bnel  $a0, $zero, -1 word -> 0x80020004
+      0x2484FFFF,  // 0C: addiu $a0, $a0, -1
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "PeeledLoopRotation";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // The peeled instruction before the loop should be omitted, and emitted inside the loop body!
+  EXPECT_THAT(code, Not(HasSubstr("arg0 = (arg0 - 1);\n    do {")));
+  EXPECT_THAT(code, HasSubstr("do {\n        arg0 = (arg0 - 1);"));
+}
+
+TEST(AstConverterTest, PredecessorGuardPeelingStructuredForLoop) {
+  // Predecessor (0x80020000):
+  // 00: addiu $t0, $zero, 0      (loop counter init: temp_t0 = 0)
+  // 04: slt   $at, $t0, $a0      (guard check: temp_t0 < arg0)
+  // 08: beqz  $at, +6 -> 0x24    (skip loop if false)
+  // 0C: nop
+  // Loop body (0x80020010):
+  // 10: addu  $v0, $v0, $t0      (accumulate)
+  // 14: addiu $t0, $t0, 1        (increment loop counter: temp_t0 = temp_t0 + 1)
+  // 18: slt   $at, $t0, $a0      (loop latch condition: temp_t0 < arg0)
+  // 1C: bnez  $at, -4 -> 0x10    (latch branch back to loop body)
+  // 20: nop                      (delay slot)
+  // Exit (0x80020024):
+  // 24: jr    $ra
+  // 28: nop
+  std::vector<uint32_t> words = {
+      0x24080000,  // 00: addiu $t0, $zero, 0
+      0x0104082A,  // 04: slt   $at, $t0, $a0
+      0x10200006,  // 08: beq   $at, $zero, +6 -> 0x24
+      0x00000000,  // 0C: nop
+      0x00481021,  // 10: addu  $v0, $v0, $t0
+      0x25080001,  // 14: addiu $t0, $t0, 1
+      0x0104082A,  // 18: slt   $at, $t0, $a0
+      0x1420FFFC,  // 1C: bne   $at, $zero, -4 -> 0x10
+      0x00000000,  // 20: nop
+      0x03E00008,  // 24: jr    $ra
+      0x00000000,  // 28: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "GuardedLoopConversion";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  // Should synthesize for (temp_t0 = 0; (temp_t0 < arg0); temp_t0++)
+  EXPECT_THAT(code, HasSubstr("for (temp_t0 = 0; (temp_t0 < arg0); temp_t0++)"));
+  // And temp_t0 = 0; should NOT appear duplicated outside the for loop
+  EXPECT_THAT(code, Not(HasSubstr("temp_t0 = 0;\n    for")));
 }
 
 }  // namespace

@@ -52,9 +52,7 @@ TEST(LifterPipelineTest, EndToEndLinearFunction) {
   EXPECT_THAT(result_or->c_code, HasSubstr("#include \"common.h\""));
   EXPECT_THAT(result_or->c_code, HasSubstr("#include \"types.h\""));
   EXPECT_THAT(result_or->c_code, HasSubstr("s32 AddTwo(s32 arg0, s32 arg1) {"));
-  EXPECT_THAT(result_or->c_code, HasSubstr("s32 v0;"));
-  EXPECT_THAT(result_or->c_code, HasSubstr("v0 = (arg0 + arg1);"));
-  EXPECT_THAT(result_or->c_code, HasSubstr("return v0;"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("return (arg0 + arg1);"));
 }
 
 TEST(LifterPipelineTest, EndToEndBranchFunction) {
@@ -91,7 +89,8 @@ TEST(LifterPipelineTest, EndToEndBranchFunction) {
   EXPECT_EQ(result_or->function_name, "GetBranchValue");
   EXPECT_THAT(result_or->c_code, HasSubstr("GetBranchValue(s32 arg0) {"));
   EXPECT_THAT(result_or->c_code, HasSubstr("if ("));
-  EXPECT_THAT(result_or->c_code, HasSubstr("return v0;"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("return 20;"));
+  EXPECT_THAT(result_or->c_code, HasSubstr("return 10;"));
 }
 
 TEST(LifterPipelineTest, EndToEndSwitchFunction) {

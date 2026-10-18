@@ -573,5 +573,43 @@ TEST(CAstTest, IdentifierSymbolMetadataAndFuncPtrCastCollection) {
   EXPECT_TRUE(refs.array_data_symbols.count("g_arr_val") > 0);
 }
 
+TEST(CAstTest, CompoundStatementMutableStatementsAllowsInPlaceModification) {
+  CompoundStatement comp;
+  comp.AddStatement(CStatement::VariableDeclaration(CType::S32(), "x", CExpression::Integer(10)));
+  comp.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(20))));
+
+  ASSERT_EQ(comp.Statements().size(), 2u);
+  EXPECT_THAT(comp.Statements()[1]->ToString(), HasSubstr("x = 20;"));
+
+  auto& mutable_stmts = comp.MutableStatements();
+  mutable_stmts[1] = CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(99)));
+
+  EXPECT_THAT(comp.Statements()[1]->ToString(), HasSubstr("x = 99;"));
+  EXPECT_EQ(comp.Statements().size(), 2u);
+}
+
+TEST(CAstTest, CompoundStatementRemoveStatementIfFiltersMatchingStatements) {
+  CompoundStatement comp;
+  comp.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(1))));
+  comp.AddStatement(CStatement::Comment("temporary note"));
+  comp.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("x"), CExpression::Integer(2))));
+  comp.AddStatement(CStatement::Return(CExpression::Identifier("x")));
+
+  ASSERT_EQ(comp.Statements().size(), 4u);
+
+  comp.RemoveStatementIf([](const CStatement& s) {
+    return s.Kind() == CStatementKind::kCommentStatement ||
+           s.Kind() == CStatementKind::kReturnStatement;
+  });
+
+  ASSERT_EQ(comp.Statements().size(), 2u);
+  EXPECT_THAT(comp.Statements()[0]->ToString(), HasSubstr("x = 1;"));
+  EXPECT_THAT(comp.Statements()[1]->ToString(), HasSubstr("x = 2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

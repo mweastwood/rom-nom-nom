@@ -262,7 +262,10 @@ std::optional<FoldedComparison> BranchConditionBuilder::FindFoldedComparison(
 
   // Determine whether emitting def_inst as a statement can be safely suppressed
   bool can_suppress = false;
-  if (*cond_reg == Register::kAt || delay_clobbers_cond) {
+  if (*cond_reg == Register::kAt || delay_clobbers_cond ||
+      (*cond_reg == Register::kV1 &&
+       (def_inst.opcode == Opcode::kSlt || def_inst.opcode == Opcode::kSltu ||
+        def_inst.opcode == Opcode::kSlti || def_inst.opcode == Opcode::kSltiu))) {
     can_suppress = true;
   }
 

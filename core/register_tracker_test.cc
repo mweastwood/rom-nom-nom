@@ -314,6 +314,34 @@ TEST(RegisterTrackerTest, DetermineReturnsV0FallthroughRedefinesV0AfterNonV0Inst
   EXPECT_TRUE(DetermineReturnsV0(*cfg_or));
 }
 
+TEST(RegisterTrackerTest, DetermineReturnsV0PreservedAcrossComparisonInstruction) {
+  // MaxTwo pattern:
+  // 0x00: addu $v0, $a0, $zero
+  // 0x04: slt  $v1, $a1, $v0
+  // 0x08: beql $v1, $zero, +3 (-> 0x80000018)
+  // 0x0C: addu $v0, $a1, $zero
+  // 0x10: jr   $ra
+  // 0x14: nop
+  // 0x18: jr   $ra
+  // 0x1C: nop
+  std::vector<uint32_t> words = {
+      0x00801021,  // 0x00: addu $v0, $a0, $zero
+      0x00A2182A,  // 0x04: slt  $v1, $a1, $v0
+      0x50600003,  // 0x08: beql $v1, $zero, +3 (0x80000018)
+      0x00A01021,  // 0x0C: addu $v0, $a1, $zero
+      0x03E00008,  // 0x10: jr   $ra
+      0x00000000,  // 0x14: nop
+      0x03E00008,  // 0x18: jr   $ra
+      0x00000000,  // 0x1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  EXPECT_TRUE(DetermineReturnsV0(*cfg_or));
+}
+
 TEST(RegisterTrackerTest, FprConstantBitsAndMergeAndOwnedDefinitionInst) {
   RegisterTracker tracker;
 

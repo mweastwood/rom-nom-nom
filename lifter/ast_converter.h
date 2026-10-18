@@ -59,6 +59,13 @@ class AstConverter {
 
   // Determines whether an FP parameter register (e.g. $f12 or $f14) expects double precision.
   static bool IsFpParameterDouble(const ControlFlowGraph& cfg, FpRegister reg);
+
+  // Recursively collects all variable names referenced in a CStatement.
+  static void CollectUsedVariables(const CStatement& stmt, std::vector<std::string>* vars,
+                                   absl::flat_hash_set<std::string>* seen);
+
+  // Simplifies return statements and folds terminal assignments into direct returns.
+  static void SimplifyReturnStatements(CompoundStatement* comp, bool returns_v0, bool returns_f0);
 };
 
 }  // namespace rom_nom_nom
