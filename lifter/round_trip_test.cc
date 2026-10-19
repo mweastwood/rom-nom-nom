@@ -169,6 +169,7 @@ typedef double f64;
     // 5. Handle relocations and build SymbolIndex
     std::unique_ptr<SymbolIndex> symbol_index;
     std::vector<uint32_t> words_to_lift = orig_func.raw_words;
+    MemoryReader memory_reader = nullptr;
 
     if (!orig_func.relocations.empty()) {
       SymbolRegistry reg;
@@ -182,7 +183,11 @@ typedef double f64;
 
         auto* entry = reg.add_entries();
         entry->set_name(rel.symbol_name);
-        if (rel.type == R_MIPS_26) {
+        if (rel.symbol_name == ".text") {
+          sym_to_vram[rel.symbol_name] = options.base_vram;
+          entry->set_address(options.base_vram);
+          entry->set_type(SYMBOL_FUNC);
+        } else if (rel.type == R_MIPS_26) {
           sym_to_vram[rel.symbol_name] = next_func_vram;
           entry->set_address(next_func_vram);
           entry->set_type(SYMBOL_FUNC);
@@ -201,11 +206,40 @@ typedef double f64;
 
       auto applied = RelocationApplier::Apply(orig_func, *symbol_index);
       words_to_lift = std::move(applied.patched_words);
+
+      const ElfSection* rodata_sec = orig_reader_or->FindSection(".rodata");
+      if (rodata_sec != nullptr && sym_to_vram.contains(".rodata")) {
+        uint32_t rodata_vram = sym_to_vram[".rodata"];
+        std::vector<uint8_t> rodata_bytes = rodata_sec->data;
+        uint32_t text_offset = orig_func.section_offset;
+        uint32_t text_size = orig_func.raw_words.size() * 4;
+        uint32_t base_vram = options.base_vram;
+
+        memory_reader = [rodata_vram, rodata_bytes = std::move(rodata_bytes), text_offset,
+                         text_size, base_vram](uint32_t vram) -> std::optional<uint32_t> {
+          if (vram >= rodata_vram && vram + 4 <= rodata_vram + rodata_bytes.size()) {
+            uint32_t offset = vram - rodata_vram;
+            uint32_t word = (static_cast<uint32_t>(rodata_bytes[offset]) << 24) |
+                            (static_cast<uint32_t>(rodata_bytes[offset + 1]) << 16) |
+                            (static_cast<uint32_t>(rodata_bytes[offset + 2]) << 8) |
+                            static_cast<uint32_t>(rodata_bytes[offset + 3]);
+            if (word >= 0x80000000) {
+              return word;
+            }
+            if (word >= text_offset && word < text_offset + text_size && (word & 3) == 0) {
+              return base_vram + (word - text_offset);
+            }
+            return word;
+          }
+          return std::nullopt;
+        };
+      }
     }
 
     // 6. Lift MIPS binary to C using LifterPipeline
     auto loaded_or = FunctionLoader::FromWords(std::string(func_name), words_to_lift,
-                                               options.base_vram, symbol_index.get());
+                                               options.base_vram, symbol_index.get(),
+                                               /*game_config=*/nullptr, memory_reader);
     ASSERT_TRUE(loaded_or.ok()) << loaded_or.status();
 
     LifterPipelineOptions lifter_opts;
@@ -1669,6 +1703,21 @@ s32 PassTwoConstants(void) {
 )");
 }
 
+TEST_F(RoundTripTest, StackArrayWithCalls) {
+  AssertRoundTripBitExact("StackArrayWithCalls", R"(
+extern s32 ProcessArray(s32* arr, s32 n);
+
+s32 StackArrayWithCalls(s32 a, s32 b, s32 c, s32 d) {
+    s32 buf[4];
+    buf[0] = a;
+    buf[1] = b;
+    buf[2] = c;
+    buf[3] = d;
+    return ProcessArray(buf, 4);
+}
+)");
+}
+
 // -----------------------------------------------------------------------------
 // 7. Global Variable Reads & Writes
 // -----------------------------------------------------------------------------
@@ -2460,6 +2509,751 @@ void ChainedSelfAssign(s32 a, s32 b, s32 c) {
     v0 = (a | b);
     v0 = (v0 | 0xA0000000);
     *(s32*)v0 = c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, WriteScaledFloats) {
+  AssertRoundTripBitExact("WriteScaledFloats", R"(
+void WriteScaledFloats(f32* out, f32 a, f32 b, f32 c) {
+    out[0] = a + a;
+    out[1] = b + b;
+    out[2] = c + c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ScaleAndOffsetFloat) {
+  AssertRoundTripBitExact("ScaleAndOffsetFloat", R"(
+f32 ScaleAndOffsetFloat(s32 mode, f32 x, f32 scale, f32 bias) {
+    return (x * scale) + bias;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatToUintSimple) {
+  AssertRoundTripBitExact("FloatToUintSimple", R"(
+u32 FloatToUintSimple(f32 val) {
+    return (u32)val;
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoubleToUintSimple) {
+  AssertRoundTripBitExact("DoubleToUintSimple", R"(
+u32 DoubleToUintSimple(f64 val) {
+    return (u32)val;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ConvertFloatAndDoubleToUint) {
+  AssertRoundTripBitExact("ConvertFloatAndDoubleToUint", R"(
+void ConvertFloatAndDoubleToUint(f32 a, f64 b, u32* out) {
+    out[0] = (u32)a;
+    out[1] = (u32)b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ConditionalFloatToUint) {
+  AssertRoundTripBitExact("ConditionalFloatToUint", R"(
+u32 ConditionalFloatToUint(f32 val, s32 cond) {
+    u32 res = 0;
+    if (cond) {
+        res = (u32)val;
+    }
+    return res + 1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SwitchWithSharedTail) {
+  AssertRoundTripBitExact("SwitchWithSharedTail", R"(
+s32 SwitchWithSharedTail(s32 x) {
+    s32 res;
+    switch (x) {
+        case 0:
+            return 100;
+        case 1:
+            res = x + 10;
+            break;
+        case 2:
+            res = x + 20;
+            break;
+        case 3:
+            res = x + 30;
+            break;
+        case 4:
+            res = x + 40;
+            break;
+        case 5:
+            res = x + 50;
+            break;
+        default:
+            res = -1;
+            break;
+    }
+    return res * 2;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SwitchDecisionTreeFourCases) {
+  AssertRoundTripBitExact("SwitchDecisionTreeFourCases", R"(
+s32 SwitchDecisionTreeFourCases(s32 x) {
+    switch (x) {
+        case 1:
+            return 10;
+        case 2:
+            return 20;
+        case 3:
+            return 30;
+        case 4:
+            return 40;
+        default:
+            return 0;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayScaleMul5) {
+  AssertRoundTripBitExact("ArrayScaleMul5", R"(
+void ArrayScaleMul5(s32* arr, s32 n) {
+    s32 i;
+    for (i = 0; i < n; i++) {
+        arr[i] = arr[i] * 5;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayScaleMul9) {
+  AssertRoundTripBitExact("ArrayScaleMul9", R"(
+void ArrayScaleMul9(s32* arr, s32 n) {
+    s32 i;
+    for (i = 0; i < n; i++) {
+        arr[i] = arr[i] * 9;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayTransformMul5) {
+  AssertRoundTripBitExact("ArrayTransformMul5", R"(
+void ArrayTransformMul5(s32* dst, s32* src, s32 n) {
+    s32 i;
+    for (i = 0; i < n; i++) {
+        dst[i] = src[i] * 5;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkUnrolled4) {
+  AssertRoundTripBitExact("PointerWalkUnrolled4", R"(
+void PointerWalkUnrolled4(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = *src++ * 5;
+        *dst++ = *src++ * 9;
+        *dst++ = *src++ * 20;
+        *dst++ = *src++ * 68;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkUnrolled8) {
+  AssertRoundTripBitExact("PointerWalkUnrolled8", R"(
+void PointerWalkUnrolled8(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = *src++ * 5;
+        *dst++ = *src++ * 9;
+        *dst++ = *src++ * 20;
+        *dst++ = *src++ * 68;
+        *dst++ = *src++ * 7;
+        *dst++ = *src++ * 3;
+        *dst++ = *src++ * 5;
+        *dst++ = *src++ * 9;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScaleAdd) {
+  AssertRoundTripBitExact("PointerWalkScaleAdd", R"(
+void PointerWalkScaleAdd(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 10;
+        *dst++ = (*src++ * 9) - 20;
+        *dst++ = (*src++ * 20) + 30;
+        *dst++ = (*src++ * 68) - 40;
+        *dst++ = (*src++ * 7) + 50;
+        *dst++ = (*src++ * 3) - 60;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScaleSub) {
+  AssertRoundTripBitExact("PointerWalkScaleSub", R"(
+void PointerWalkScaleSub(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 3) + 15;
+        *dst++ = (*src++ * 7) - 25;
+        *dst++ = (*src++ * 5) + 35;
+        *dst++ = (*src++ * 9) - 45;
+        *dst++ = (*src++ * 20) + 55;
+        *dst++ = (*src++ * 68) - 65;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScaleBitwise) {
+  AssertRoundTripBitExact("PointerWalkScaleBitwise", R"(
+void PointerWalkScaleBitwise(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) ^ 0xFF;
+        *dst++ = (*src++ * 9) & 0x7FFF;
+        *dst++ = (*src++ * 20) | 0x100;
+        *dst++ = (*src++ * 68) ^ 0x5555;
+        *dst++ = (*src++ * 7) & 0x3FFF;
+        *dst++ = (*src++ * 3) | 0x80;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkInPlaceScale6) {
+  AssertRoundTripBitExact("PointerWalkInPlaceScale6", R"(
+void PointerWalkInPlaceScale6(s32* p, s32 count) {
+    while (count > 0) {
+        *p = (*p * 5) + 12; p++;
+        *p = (*p * 9) - 34; p++;
+        *p = (*p * 20) + 56; p++;
+        *p = (*p * 68) - 78; p++;
+        *p = (*p * 7) + 90; p++;
+        *p = (*p * 3) - 12; p++;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ShiftAddMul5And9) {
+  AssertRoundTripBitExact("ShiftAddMul5And9", R"(
+s32 ShiftAddMul5And9(s32 x, s32 y) {
+    s32 a = x * 5;
+    s32 b = y * 9;
+    return a + b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ShiftAddMul20And68) {
+  AssertRoundTripBitExact("ShiftAddMul20And68", R"(
+s32 ShiftAddMul20And68(s32 x, s32 y) {
+    s32 a = x * 20;
+    s32 b = y * 68;
+    return a - b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ShiftAddMul7And3) {
+  AssertRoundTripBitExact("ShiftAddMul7And3", R"(
+s32 ShiftAddMul7And3(s32 x, s32 y) {
+    return (x * 7) + (y * 3);
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScale8) {
+  AssertRoundTripBitExact("PointerWalkScale8", R"(
+void PointerWalkScale8(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 10;
+        *dst++ = (*src++ * 9) - 20;
+        *dst++ = (*src++ * 20) + 30;
+        *dst++ = (*src++ * 68) - 40;
+        *dst++ = (*src++ * 7) + 50;
+        *dst++ = (*src++ * 3) - 60;
+        *dst++ = (*src++ * 5) + 70;
+        *dst++ = (*src++ * 9) - 80;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScale10) {
+  AssertRoundTripBitExact("PointerWalkScale10", R"(
+void PointerWalkScale10(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 11;
+        *dst++ = (*src++ * 9) - 22;
+        *dst++ = (*src++ * 20) + 33;
+        *dst++ = (*src++ * 68) - 44;
+        *dst++ = (*src++ * 7) + 55;
+        *dst++ = (*src++ * 3) - 66;
+        *dst++ = (*src++ * 5) + 77;
+        *dst++ = (*src++ * 9) - 88;
+        *dst++ = (*src++ * 20) + 99;
+        *dst++ = (*src++ * 68) - 100;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScale12) {
+  AssertRoundTripBitExact("PointerWalkScale12", R"(
+void PointerWalkScale12(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 1;
+        *dst++ = (*src++ * 9) - 2;
+        *dst++ = (*src++ * 20) + 3;
+        *dst++ = (*src++ * 68) - 4;
+        *dst++ = (*src++ * 7) + 5;
+        *dst++ = (*src++ * 3) - 6;
+        *dst++ = (*src++ * 5) + 7;
+        *dst++ = (*src++ * 9) - 8;
+        *dst++ = (*src++ * 20) + 9;
+        *dst++ = (*src++ * 68) - 10;
+        *dst++ = (*src++ * 7) + 11;
+        *dst++ = (*src++ * 3) - 12;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScale16) {
+  AssertRoundTripBitExact("PointerWalkScale16", R"(
+void PointerWalkScale16(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 1;
+        *dst++ = (*src++ * 9) - 2;
+        *dst++ = (*src++ * 20) + 3;
+        *dst++ = (*src++ * 68) - 4;
+        *dst++ = (*src++ * 7) + 5;
+        *dst++ = (*src++ * 3) - 6;
+        *dst++ = (*src++ * 5) + 7;
+        *dst++ = (*src++ * 9) - 8;
+        *dst++ = (*src++ * 20) + 9;
+        *dst++ = (*src++ * 68) - 10;
+        *dst++ = (*src++ * 7) + 11;
+        *dst++ = (*src++ * 3) - 12;
+        *dst++ = (*src++ * 5) + 13;
+        *dst++ = (*src++ * 9) - 14;
+        *dst++ = (*src++ * 20) + 15;
+        *dst++ = (*src++ * 68) - 16;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkInPlaceScale8) {
+  AssertRoundTripBitExact("PointerWalkInPlaceScale8", R"(
+void PointerWalkInPlaceScale8(s32* p, s32 count) {
+    while (count > 0) {
+        *p = (*p * 5) + 10; p++;
+        *p = (*p * 9) - 20; p++;
+        *p = (*p * 20) + 30; p++;
+        *p = (*p * 68) - 40; p++;
+        *p = (*p * 7) + 50; p++;
+        *p = (*p * 3) - 60; p++;
+        *p = (*p * 5) + 70; p++;
+        *p = (*p * 9) - 80; p++;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkInPlaceScale12) {
+  AssertRoundTripBitExact("PointerWalkInPlaceScale12", R"(
+void PointerWalkInPlaceScale12(s32* p, s32 count) {
+    while (count > 0) {
+        *p = (*p * 5) + 1; p++;
+        *p = (*p * 9) - 2; p++;
+        *p = (*p * 20) + 3; p++;
+        *p = (*p * 68) - 4; p++;
+        *p = (*p * 7) + 5; p++;
+        *p = (*p * 3) - 6; p++;
+        *p = (*p * 5) + 7; p++;
+        *p = (*p * 9) - 8; p++;
+        *p = (*p * 20) + 9; p++;
+        *p = (*p * 68) - 10; p++;
+        *p = (*p * 7) + 11; p++;
+        *p = (*p * 3) - 12; p++;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScale14) {
+  AssertRoundTripBitExact("PointerWalkScale14", R"(
+void PointerWalkScale14(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 1;
+        *dst++ = (*src++ * 9) - 2;
+        *dst++ = (*src++ * 20) + 3;
+        *dst++ = (*src++ * 68) - 4;
+        *dst++ = (*src++ * 7) + 5;
+        *dst++ = (*src++ * 3) - 6;
+        *dst++ = (*src++ * 5) + 7;
+        *dst++ = (*src++ * 9) - 8;
+        *dst++ = (*src++ * 20) + 9;
+        *dst++ = (*src++ * 68) - 10;
+        *dst++ = (*src++ * 7) + 11;
+        *dst++ = (*src++ * 3) - 12;
+        *dst++ = (*src++ * 5) + 13;
+        *dst++ = (*src++ * 9) - 14;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkInPlaceScale10) {
+  AssertRoundTripBitExact("PointerWalkInPlaceScale10", R"(
+void PointerWalkInPlaceScale10(s32* p, s32 count) {
+    while (count > 0) {
+        *p = (*p * 5) + 11; p++;
+        *p = (*p * 9) - 22; p++;
+        *p = (*p * 20) + 33; p++;
+        *p = (*p * 68) - 44; p++;
+        *p = (*p * 7) + 55; p++;
+        *p = (*p * 3) - 66; p++;
+        *p = (*p * 5) + 77; p++;
+        *p = (*p * 9) - 88; p++;
+        *p = (*p * 20) + 99; p++;
+        *p = (*p * 68) - 100; p++;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkS16Scale6) {
+  AssertRoundTripBitExact("PointerWalkS16Scale6", R"(
+void PointerWalkS16Scale6(s16* dst, s16* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 10;
+        *dst++ = (*src++ * 9) - 20;
+        *dst++ = (*src++ * 20) + 30;
+        *dst++ = (*src++ * 68) - 40;
+        *dst++ = (*src++ * 7) + 50;
+        *dst++ = (*src++ * 3) - 60;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkS16Scale8) {
+  AssertRoundTripBitExact("PointerWalkS16Scale8", R"(
+void PointerWalkS16Scale8(s16* dst, s16* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) + 10;
+        *dst++ = (*src++ * 9) - 20;
+        *dst++ = (*src++ * 20) + 30;
+        *dst++ = (*src++ * 68) - 40;
+        *dst++ = (*src++ * 7) + 50;
+        *dst++ = (*src++ * 3) - 60;
+        *dst++ = (*src++ * 5) + 70;
+        *dst++ = (*src++ * 9) - 80;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScaleShift6) {
+  AssertRoundTripBitExact("PointerWalkScaleShift6", R"(
+void PointerWalkScaleShift6(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) >> 2;
+        *dst++ = (*src++ * 9) >> 3;
+        *dst++ = (*src++ * 20) >> 4;
+        *dst++ = (*src++ * 68) >> 5;
+        *dst++ = (*src++ * 7) >> 2;
+        *dst++ = (*src++ * 3) >> 1;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerWalkScaleShift8) {
+  AssertRoundTripBitExact("PointerWalkScaleShift8", R"(
+void PointerWalkScaleShift8(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = (*src++ * 5) >> 2;
+        *dst++ = (*src++ * 9) >> 3;
+        *dst++ = (*src++ * 20) >> 4;
+        *dst++ = (*src++ * 68) >> 5;
+        *dst++ = (*src++ * 7) >> 2;
+        *dst++ = (*src++ * 3) >> 1;
+        *dst++ = (*src++ * 5) >> 3;
+        *dst++ = (*src++ * 9) >> 2;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, TransformArrayWithClamp) {
+  AssertRoundTripBitExact("TransformArrayWithClamp", R"(
+void TransformArrayWithClamp(s32* dst, const s32* src, s32 count, s32 scale, s32 min_val, s32 max_val) {
+    while (count > 0) {
+        s32 val = (*src++ * scale) >> 8;
+        if (val > max_val) {
+            val = max_val;
+        } else if (val < min_val) {
+            val = min_val;
+        }
+        *dst++ = val;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, Vector3ProcessVertices) {
+  AssertRoundTripBitExact("Vector3ProcessVertices", R"(
+void Vector3ProcessVertices(s32* dst, s32* src, s32 count) {
+    while (count > 0) {
+        *dst++ = ((*src++ * 5) >> 4) + 10;
+        *dst++ = ((*src++ * 9) >> 4) - 20;
+        *dst++ = ((*src++ * 17) >> 4) + 30;
+        *dst++ = ((*src++ * 33) >> 5) - 40;
+        *dst++ = ((*src++ * 65) >> 6) + 50;
+        *dst++ = ((*src++ * 129) >> 7) - 60;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, NestedLoopSum) {
+  AssertRoundTripBitExact("NestedLoopSum", R"(
+s32 NestedLoopSum(s32* matrix, s32 rows, s32 cols) {
+    s32 total = 0;
+    while (rows > 0) {
+        s32 c = cols;
+        while (c > 0) {
+            total += *matrix++;
+            c--;
+        }
+        rows--;
+    }
+    return total;
+}
+)");
+}
+
+TEST_F(RoundTripTest, NestedLoopMatrixClamp) {
+  AssertRoundTripBitExact("NestedLoopMatrixClamp", R"(
+s32 NestedLoopMatrixClamp(s32* matrix, s32 rows, s32 cols, s32 limit) {
+    s32 total = 0;
+    while (rows > 0) {
+        s32 c = cols;
+        while (c > 0) {
+            s32 v = *matrix++;
+            if (v > limit) {
+                total += limit;
+            } else {
+                total += v;
+            }
+            c--;
+        }
+        rows--;
+    }
+    return total;
+}
+)");
+}
+
+TEST_F(RoundTripTest, PipelineProcess) {
+  AssertRoundTripBitExact("PipelineProcess", R"(
+s32 PipelineProcess(s32* data, s32 count) {
+    s32 total = 0;
+    while (count > 0) {
+        s32 v = *data++;
+        if (v > 0) {
+            total += v;
+        } else {
+            total -= v;
+        }
+        count--;
+    }
+    return total;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ArrayClampValues) {
+  AssertRoundTripBitExact("ArrayClampValues", R"(
+void ArrayClampValues(s32* dst, s32* src, s32 count, s32 min_val, s32 max_val) {
+    while (count > 0) {
+        s32 v = *src++;
+        if (v < min_val) {
+            v = min_val;
+        } else if (v > max_val) {
+            v = max_val;
+        }
+        *dst++ = v;
+        count--;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, LinearSearchFirstNegative) {
+  AssertRoundTripBitExact("LinearSearchFirstNegative", R"(
+s32 LinearSearchFirstNegative(const s32* arr, s32 count) {
+    s32 idx = 0;
+    while (count > 0) {
+        if (*arr < 0) {
+            return idx;
+        }
+        arr++;
+        idx++;
+        count--;
+    }
+    return -1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, LinearSearchFirstMatchingTarget) {
+  AssertRoundTripBitExact("LinearSearchFirstMatchingTarget", R"(
+s32 LinearSearchFirstMatchingTarget(const s32* arr, s32 count, s32 target) {
+    s32 idx = 0;
+    while (count > 0) {
+        if (*arr == target) {
+            return idx;
+        }
+        arr++;
+        idx++;
+        count--;
+    }
+    return -1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ComputeChecksum32) {
+  AssertRoundTripBitExact("ComputeChecksum32", R"(
+u32 ComputeChecksum32(const u32* data, s32 count) {
+    u32 sum1 = 1;
+    u32 sum2 = 0;
+    while (count > 0) {
+        sum1 += *data++;
+        sum2 += sum1;
+        count--;
+    }
+    return sum1 ^ sum2;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SubwordSpillSlotReadback) {
+  AssertRoundTripBitExact("SubwordSpillSlotReadback", R"(
+void SubwordSpillSlotReadback(s32 flag, s32 value, u16* destination_one, u16* destination_two) {
+    if (flag & 1) {
+        *destination_one = (u16)value;
+    }
+    if (flag & 2) {
+        *destination_two = (u16)value;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopWithUnsigned8BitCounter) {
+  AssertRoundTripBitExact("LoopWithUnsigned8BitCounter", R"(
+u32 LoopWithUnsigned8BitCounter(const u32* array) {
+    u8 counter = 0;
+    u32 accumulator = 0;
+    while (counter < 8) {
+        accumulator += array[counter];
+        counter++;
+    }
+    return accumulator;
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoWhileLoopMultiStatementLatch) {
+  AssertRoundTripBitExact("DoWhileLoopMultiStatementLatch", R"(
+s32 DoWhileLoopMultiStatementLatch(const s32* source, s32* destination, s32 count) {
+    s32 total = 0;
+    do {
+        s32 value = *source++;
+        *destination++ = value;
+        total += value;
+        count--;
+    } while (count > 0);
+    return total;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatToUintPrecededByFloatComputation) {
+  AssertRoundTripBitExact("FloatToUintPrecededByFloatComputation", R"(
+u32 FloatToUintPrecededByFloatComputation(f32 first_float, f32 second_float, f32 scale_factor) {
+    f32 computed_float = (first_float + second_float) * scale_factor;
+    return (u32)computed_float;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SwitchCasesSharedIntermediateBeforeLatch) {
+  AssertRoundTripBitExact("SwitchCasesSharedIntermediateBeforeLatch", R"(
+s32 SwitchCasesSharedIntermediateBeforeLatch(const s32* array, s32 selector, s32 count) {
+    s32 total = 0;
+    do {
+        s32 value;
+        switch (selector) {
+            case 0:
+                value = *array * 2;
+                break;
+            case 1:
+                value = *array * 3;
+                break;
+            case 2:
+                value = *array * 4;
+                break;
+            case 3:
+                value = *array * 5;
+                break;
+            case 4:
+                value = *array + 1;
+                break;
+            case 5:
+                value = *array + 2;
+                break;
+            default:
+                value = 0;
+                break;
+        }
+        total += value;
+        array++;
+        count--;
+    } while (count > 0);
+    return total;
 }
 )");
 }

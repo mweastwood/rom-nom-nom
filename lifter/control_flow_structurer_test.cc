@@ -123,7 +123,7 @@ TEST(ControlFlowStructurerTest, IfThenElse) {
   ASSERT_THAT(region, NotNull());
 
   std::string s = region->ToString();
-  EXPECT_THAT(s, HasSubstr("if (block_0) {"));
+  EXPECT_THAT(s, HasSubstr("if (!block_0) {"));
   EXPECT_THAT(s, HasSubstr("} else {"));
   EXPECT_THAT(s, HasSubstr("block_3"));
 }
@@ -672,6 +672,273 @@ TEST(ControlFlowStructurerTest, IntraLoopConditionalJoinFallback) {
   std::string s = region->ToString();
   EXPECT_THAT(s, HasSubstr("if (!block_2) {\n    block_3\n  }"));
   EXPECT_THAT(s, HasSubstr("block_5"));
+}
+
+TEST(ControlFlowStructurerTest, SwitchEarlyReturnSharedTailBreak) {
+  // Jump-table switch where one case returns early and two other cases jump to a shared tail.
+  // Block 0 (0x80000000): switch dispatch: jr $t0; nop
+  // Block 1 (0x80000008): case 0 (returns early): jr $ra; nop
+  // Block 2 (0x80000010): case 1: addiu $v0, $zero, 1; j 0x80000028; nop
+  // Block 3 (0x8000001C): case 2: addiu $v0, $zero, 2; j 0x80000028; nop
+  // Block 4 (0x80000028): shared tail (default target): addiu $v0, $v0, 10; jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x01000008,  // 0x00: jr $t0
+      0x00000000,  // 0x04: nop
+      0x03E00008,  // 0x08: jr $ra (Case 0 return)
+      0x00000000,  // 0x0C: nop
+      0x24020001,  // 0x10: addiu $v0, $zero, 1
+      0x0800000A,  // 0x14: j 0x80000028
+      0x00000000,  // 0x18: nop
+      0x24020002,  // 0x1C: addiu $v0, $zero, 2
+      0x0800000A,  // 0x20: j 0x80000028
+      0x00000000,  // 0x24: nop
+      0x2442000A,  // 0x28: addiu $v0, $v0, 10
+      0x03E00008,  // 0x2C: jr $ra
+      0x00000000,  // 0x30: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  JumpTable table;
+  table.switch_vram = 0x80000000;
+  table.default_target_vram = 0x80000028;
+  table.entries = {
+      JumpTableEntry{.case_index = 0, .case_value = 0, .target_vram = 0x80000008},
+      JumpTableEntry{.case_index = 1, .case_value = 1, .target_vram = 0x80000010},
+      JumpTableEntry{.case_index = 2, .case_value = 2, .target_vram = 0x8000001C},
+  };
+
+  auto cfg_or = ControlFlowGraph::Build(insts, {table});
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  EXPECT_EQ(region->type, RegionType::kSequence);
+  ASSERT_GE(region->children.size(), 2u);
+  EXPECT_EQ(region->children[0]->type, RegionType::kSwitch);
+  // Shared tail (block 4) is structured after the switch
+  EXPECT_EQ(region->children[1]->type, RegionType::kBlock);
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("switch"));
+  EXPECT_THAT(s, HasSubstr("case 0:"));
+  EXPECT_THAT(s, HasSubstr("case 1:"));
+  EXPECT_THAT(s, HasSubstr("case 2:"));
+  EXPECT_THAT(s, HasSubstr("default:\n    break;"));
+  EXPECT_THAT(s, HasSubstr("block_4\n"));
+}
+
+TEST(ControlFlowStructurerTest, DecisionTreeSwitchTwoCases) {
+  // 2-case linear decision tree:
+  // Block 0: addiu $at, $zero, 1; beq $a0, $at, Case 1 (0x20); nop
+  // Block 1: addiu $at, $zero, 2; beq $a0, $at, Case 2 (0x2C); nop
+  // Block 2: j Join (0x38); nop (Default target)
+  // Block 3 (Case 1 at 0x20): addiu $v0, $zero, 10; j Join (0x38); nop
+  // Block 4 (Case 2 at 0x2C): addiu $v0, $zero, 20; j Join (0x38); nop
+  // Block 5 (Join at 0x38): jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x24010001,  // 0x00: addiu $at, $zero, 1
+      0x10810006,  // 0x04: beq $a0, $at, +6 (0x20)
+      0x00000000,  // 0x08: nop
+      0x24010002,  // 0x0C: addiu $at, $zero, 2
+      0x10810006,  // 0x10: beq $a0, $at, +6 (0x2C)
+      0x00000000,  // 0x14: nop
+      0x0800000E,  // 0x18: j 0x80000038
+      0x00000000,  // 0x1C: nop
+      0x2402000A,  // 0x20: addiu $v0, $zero, 10
+      0x0800000E,  // 0x24: j 0x80000038
+      0x00000000,  // 0x28: nop
+      0x24020014,  // 0x2C: addiu $v0, $zero, 20
+      0x0800000E,  // 0x30: j 0x80000038
+      0x00000000,  // 0x34: nop
+      0x03E00008,  // 0x38: jr $ra
+      0x00000000,  // 0x3C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  EXPECT_EQ(region->type, RegionType::kSequence);
+  ASSERT_GE(region->children.size(), 2u);
+  EXPECT_EQ(region->children[0]->type, RegionType::kSwitch);
+  EXPECT_EQ(region->children[0]->switch_register, Register::kA0);
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("switch ($a0)"));
+  EXPECT_THAT(s, HasSubstr("case 1:"));
+  EXPECT_THAT(s, HasSubstr("case 2:"));
+  EXPECT_THAT(s, HasSubstr("default:"));
+  EXPECT_THAT(s, HasSubstr("block_5\n"));
+}
+
+TEST(ControlFlowStructurerTest, DecisionTreeSwitchFourCases) {
+  // 4-case binary decision tree:
+  // Root: slti $at, $a0, 3; beq $at, $zero, Right branch (0x2C); nop
+  // Left: addiu $at, $zero, 1; beq $a0, $at, Case 1 (0x4C); nop
+  // Left cont: addiu $at, $zero, 2; beq $a0, $at, Case 2 (0x58); nop
+  // Left default: j Default (0x7C); nop
+  // Right: addiu $at, $zero, 3; beq $a0, $at, Case 3 (0x64); nop
+  // Right cont: addiu $at, $zero, 4; beq $a0, $at, Case 4 (0x70); nop
+  // Right default: j Default (0x7C); nop
+  // Case 1 (0x4C): addiu $v0, $zero, 10; j Join (0x88); nop
+  // Case 2 (0x58): addiu $v0, $zero, 20; j Join (0x88); nop
+  // Case 3 (0x64): addiu $v0, $zero, 30; j Join (0x88); nop
+  // Case 4 (0x70): addiu $v0, $zero, 40; j Join (0x88); nop
+  // Default (0x7C): addiu $v0, $zero, 0; j Join (0x88); nop
+  // Join (0x88): jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x28810003,  // 0x00: slti $at, $a0, 3
+      0x10200009,  // 0x04: beq $at, $zero, +9 (0x2C)
+      0x00000000,  // 0x08: nop
+      0x24010001,  // 0x0C: addiu $at, $zero, 1
+      0x1081000E,  // 0x10: beq $a0, $at, +14 (0x4C)
+      0x00000000,  // 0x14: nop
+      0x24010002,  // 0x18: addiu $at, $zero, 2
+      0x1081000E,  // 0x1C: beq $a0, $at, +14 (0x58)
+      0x00000000,  // 0x20: nop
+      0x0800001F,  // 0x24: j 0x8000007C
+      0x00000000,  // 0x28: nop
+      0x24010003,  // 0x2C: addiu $at, $zero, 3
+      0x1081000C,  // 0x30: beq $a0, $at, +12 (0x64)
+      0x00000000,  // 0x34: nop
+      0x24010004,  // 0x38: addiu $at, $zero, 4
+      0x1081000C,  // 0x3C: beq $a0, $at, +12 (0x70)
+      0x00000000,  // 0x40: nop
+      0x0800001F,  // 0x44: j 0x8000007C
+      0x00000000,  // 0x48: nop
+      0x2402000A,  // 0x4C: addiu $v0, $zero, 10
+      0x08000022,  // 0x50: j 0x80000088
+      0x00000000,  // 0x54: nop
+      0x24020014,  // 0x58: addiu $v0, $zero, 20
+      0x08000022,  // 0x5C: j 0x80000088
+      0x00000000,  // 0x60: nop
+      0x2402001E,  // 0x64: addiu $v0, $zero, 30
+      0x08000022,  // 0x68: j 0x80000088
+      0x00000000,  // 0x6C: nop
+      0x24020028,  // 0x70: addiu $v0, $zero, 40
+      0x08000022,  // 0x74: j 0x80000088
+      0x00000000,  // 0x78: nop
+      0x24020000,  // 0x7C: addiu $v0, $zero, 0
+      0x08000022,  // 0x80: j 0x80000088
+      0x00000000,  // 0x84: nop
+      0x03E00008,  // 0x88: jr $ra
+      0x00000000,  // 0x8C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  EXPECT_EQ(region->type, RegionType::kSequence);
+  ASSERT_GE(region->children.size(), 2u);
+  EXPECT_EQ(region->children[0]->type, RegionType::kSwitch);
+  EXPECT_EQ(region->children[0]->switch_register, Register::kA0);
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("switch ($a0)"));
+  EXPECT_THAT(s, HasSubstr("case 1:"));
+  EXPECT_THAT(s, HasSubstr("case 2:"));
+  EXPECT_THAT(s, HasSubstr("case 3:"));
+  EXPECT_THAT(s, HasSubstr("case 4:"));
+  EXPECT_THAT(s, HasSubstr("default:"));
+  EXPECT_THAT(s, HasSubstr("block_12\n"));
+}
+
+TEST(ControlFlowStructurerTest, FloatToUintConversionDiamond) {
+  // Single-precision 0x4F000000 float-to-uint conversion diamond.
+  std::vector<uint32_t> words = {
+      0x3C014F00,  // 0x00: lui $at, 0x4F00
+      0x44811000,  // 0x04: mtc1 $at, $f2
+      0x4602603C,  // 0x08: c.lt.s $f12, $f2
+      0x45010008,  // 0x0C: bc1t +8 (0x30)
+      0x00000000,  // 0x10: nop
+      0x46026101,  // 0x14: sub.s $f4, $f12, $f2
+      0x4600200D,  // 0x18: trunc.w.s $f0, $f4
+      0x44020000,  // 0x1C: mfc1 $v0, $f0
+      0x3C018000,  // 0x20: lui $at, 0x8000
+      0x00411025,  // 0x24: or $v0, $v0, $at
+      0x08000010,  // 0x28: j 0x80000040
+      0x00000000,  // 0x2C: nop
+      0x4600600D,  // 0x30: trunc.w.s $f0, $f12
+      0x44020000,  // 0x34: mfc1 $v0, $f0
+      0x08000010,  // 0x38: j 0x80000040
+      0x00000000,  // 0x3C: nop
+      0x03E00008,  // 0x40: jr $ra
+      0x00000000,  // 0x44: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("$v0 = (u32)(f32)$f12;"));
+}
+
+TEST(ControlFlowStructurerTest, DoubleToUintConversionDiamond) {
+  // Double-precision 0x41E00000 double-to-uint conversion diamond.
+  std::vector<uint32_t> words = {
+      0x3C0141E0,  // 0x00: lui $at, 0x41E0
+      0x44A11000,  // 0x04: dmtc1 $at, $f2
+      0x4622603C,  // 0x08: c.lt.d $f12, $f2
+      0x45010008,  // 0x0C: bc1t +8 (0x30)
+      0x00000000,  // 0x10: nop
+      0x46226101,  // 0x14: sub.d $f4, $f12, $f2
+      0x4620200D,  // 0x18: trunc.w.d $f0, $f4
+      0x44020000,  // 0x1C: mfc1 $v0, $f0
+      0x3C018000,  // 0x20: lui $at, 0x8000
+      0x00411025,  // 0x24: or $v0, $v0, $at
+      0x08000010,  // 0x28: j 0x80000040
+      0x00000000,  // 0x2C: nop
+      0x4620600D,  // 0x30: trunc.w.d $f0, $f12
+      0x44020000,  // 0x34: mfc1 $v0, $f0
+      0x08000010,  // 0x38: j 0x80000040
+      0x00000000,  // 0x3C: nop
+      0x03E00008,  // 0x40: jr $ra
+      0x00000000,  // 0x44: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("$v0 = (u32)(f64)$f12;"));
 }
 
 }  // namespace

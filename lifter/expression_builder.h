@@ -130,6 +130,9 @@ struct FunctionLiftContext {
   const RegisterTracker* initial_tracker = nullptr;
   const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr;
   const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr;
+  const absl::flat_hash_set<Register>* float_parameters_in_general_registers = nullptr;
+  uint32_t outgoing_args_size = 0;
+  int32_t sp_buffer_size = 0;
 };
 
 // Lifts instructions within basic blocks into structured statements and expressions.

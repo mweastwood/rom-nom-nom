@@ -36,7 +36,7 @@ struct FoldedSymbolAccess {
   Register dest_reg = Register::kZero;
   Register src_reg = Register::kZero;  // For stores
   std::optional<FpRegister> dest_fp_reg;
-  std::optional<FpRegister> src_fp_reg;
+  std::optional<FpRegister> source_float_register;
 
   Register index_reg = Register::kZero;
 

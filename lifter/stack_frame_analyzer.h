@@ -23,6 +23,7 @@ struct StackFrameAnalysis {
   int32_t frame_size = 0;
   int32_t max_sp_access = 0;
   int32_t sp_buffer_size = 0;
+  int32_t outgoing_args_size = 0;
   bool has_frame_pointer = false;
   bool has_calls = false;
   bool sp_address_taken = false;

@@ -2562,5 +2562,56 @@ TEST(ExpressionBuilderTest, PreCallCallerSavedGprsNotPreservedAcrossCall) {
   EXPECT_EQ(last_stmt.ToString(), "v0 = temp_t0 + 100;\n");
 }
 
+TEST(ExpressionBuilderTest, Mtc1WithFloatParametersInGeneralRegisters) {
+  // mtc1 $a1, $f2
+  std::vector<uint32_t> words = {
+      0x44851000,  // mtc1 $a1, $f2
+  };
+  auto insts = *DecodeSequence(words);
+
+  // Without float_parameters_in_general_registers: bitcast is emitted
+  {
+    FunctionLiftContext ctx;
+    auto statements = ExpressionBuilder::LiftInstructions(insts, ctx);
+    ASSERT_THAT(statements, SizeIs(1));
+    EXPECT_EQ(statements[0].destination_variable, "f2");
+    EXPECT_EQ(statements[0].ToString(), "f2 = *(f32*)&arg1;\n");
+  }
+
+  // With float_parameters_in_general_registers containing kA1: direct variable name is emitted
+  {
+    absl::flat_hash_set<Register> float_params = {Register::kA1};
+    FunctionLiftContext ctx;
+    ctx.float_parameters_in_general_registers = &float_params;
+    auto statements = ExpressionBuilder::LiftInstructions(insts, ctx);
+    ASSERT_THAT(statements, SizeIs(1));
+    EXPECT_EQ(statements[0].destination_variable, "f2");
+    EXPECT_EQ(statements[0].ToString(), "f2 = arg1;\n");
+  }
+}
+
+TEST(ExpressionBuilderTest, SpIndexingWithOutgoingArgsSize) {
+  // 0: addiu $a0, $sp, 48
+  // 1: lw    $v0, 48($sp)
+  std::vector<uint32_t> words = {
+      0x27A40030,  // addiu $a0, $sp, 48
+      0x8FA20030,  // lw    $v0, 48($sp)
+  };
+  auto insts = *DecodeSequence(words);
+
+  // When outgoing_args_size == 32 and sp_address_taken == true:
+  // effective offset is 48 - 32 = 16.
+  FunctionLiftContext ctx;
+  ctx.frame_size = 128;
+  ctx.has_calls = true;
+  ctx.sp_address_taken = true;
+  ctx.outgoing_args_size = 32;
+
+  auto statements = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_THAT(statements, SizeIs(2));
+  EXPECT_EQ(statements[0].ToString(), "arg0 = (s32)sp + 16;\n");
+  EXPECT_EQ(statements[1].ToString(), "v0 = *(s32*)((s32)sp + 16);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

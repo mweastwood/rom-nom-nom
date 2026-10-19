@@ -474,6 +474,8 @@ class IfStatement : public CStatement {
   const CExpression& Condition() const { return *condition_; }
   const CStatement& ThenBranch() const { return *then_branch_; }
   const CStatement* ElseBranch() const { return else_branch_.get(); }
+  CStatement* MutableThenBranch() { return then_branch_.get(); }
+  CStatement* MutableElseBranch() { return else_branch_.get(); }
 
  private:
   std::unique_ptr<CExpression> condition_;
@@ -494,6 +496,7 @@ class WhileStatement : public CStatement {
 
   const CExpression& Condition() const { return *condition_; }
   const CStatement& Body() const { return *body_; }
+  CStatement* MutableBody() { return body_.get(); }
 
  private:
   std::unique_ptr<CExpression> condition_;
@@ -513,6 +516,7 @@ class DoWhileStatement : public CStatement {
 
   const CStatement& Body() const { return *body_; }
   const CExpression& Condition() const { return *condition_; }
+  CStatement* MutableBody() { return body_.get(); }
 
  private:
   std::unique_ptr<CStatement> body_;
@@ -538,6 +542,7 @@ class ForStatement : public CStatement {
   const CExpression* Condition() const { return condition_.get(); }
   const CExpression* Step() const { return step_.get(); }
   const CStatement& Body() const { return *body_; }
+  CStatement* MutableBody() { return body_.get(); }
 
  private:
   std::unique_ptr<CStatement> init_;

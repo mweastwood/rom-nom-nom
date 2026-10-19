@@ -258,7 +258,7 @@ TEST(SymbolFolderTest, FoldsFloatingPointGlobalLoadAndStore) {
   EXPECT_EQ(store_folded.type, FoldedPatternType::kGlobalStore);
   EXPECT_EQ(store_folded.address, 0x80170450u);
   EXPECT_EQ(store_folded.access_type, "f32");
-  EXPECT_THAT(store_folded.src_fp_reg, ::testing::Optional(FpRegister::kF2));
+  EXPECT_THAT(store_folded.source_float_register, ::testing::Optional(FpRegister::kF2));
 }
 
 TEST(SymbolFolderTest, FoldsGlobalIndexedLoadAndStore) {
@@ -344,7 +344,7 @@ TEST(SymbolFolderTest, FoldsFloatingPointGlobalIndexedLoadAndStore) {
   const auto& store_folded = folder.AllFolded()[1];
   EXPECT_EQ(store_folded.type, FoldedPatternType::kGlobalIndexedStore);
   EXPECT_EQ(store_folded.access_type, "f32");
-  EXPECT_THAT(store_folded.src_fp_reg, ::testing::Optional(FpRegister::kF12));
+  EXPECT_THAT(store_folded.source_float_register, ::testing::Optional(FpRegister::kF12));
 }
 
 TEST(SymbolFolderTest, IndexClobberedRejectsFolding) {

@@ -63,5 +63,64 @@ TEST(AbiAnalyzerTest, FpParameterDoubleAndDoubleVars) {
   EXPECT_TRUE(double_vars.contains("f14_d"));
 }
 
+TEST(AbiAnalyzerTest, DetectFloatParametersInGeneralRegistersWithFloatOperation) {
+  // mtc1 $a1, $f2
+  // add.s $f0, $f2, $f2
+  // jr $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x44851000,  // mtc1 $a1, $f2
+      0x46021000,  // add.s $f0, $f2, $f2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_params = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_params.contains(Register::kA1));
+  EXPECT_FALSE(float_params.contains(Register::kA0));
+}
+
+TEST(AbiAnalyzerTest, DetectFloatParametersInGeneralRegistersWithConvertFromInteger) {
+  // mtc1 $a1, $f2
+  // cvt.s.w $f2, $f2
+  // add.s $f0, $f2, $f2
+  // jr $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x44851000,  // mtc1 $a1, $f2
+      0x468010A0,  // cvt.s.w $f2, $f2
+      0x46021000,  // add.s $f0, $f2, $f2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_params = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_FALSE(float_params.contains(Register::kA1));
+}
+
+TEST(AbiAnalyzerTest, DetectFloatParametersInGeneralRegistersWithIntegerUse) {
+  // addu $v0, $a0, $a1
+  // mtc1 $a1, $f2
+  // add.s $f0, $f2, $f2
+  // jr $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x44851000,  // mtc1 $a1, $f2
+      0x46021000,  // add.s $f0, $f2, $f2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_params = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_FALSE(float_params.contains(Register::kA1));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

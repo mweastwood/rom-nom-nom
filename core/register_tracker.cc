@@ -937,6 +937,60 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
             }
           }
 
+          bool is_fallthrough_branch = false;
+          if (term != nullptr && term->IsBranch() && !term->IsBranchLikely()) {
+            for (const auto& edge : p_block.outgoing_edges) {
+              if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kFallthrough) {
+                is_fallthrough_branch = true;
+                break;
+              }
+            }
+          }
+          if (is_fallthrough_branch && executed.size() > 1) {
+            RegisterUseDef delay_instruction_use_def = GetInstructionUseDef(executed.back());
+            bool delay_defines_v0 = false;
+            for (Register destination_register : delay_instruction_use_def.gpr_defs) {
+              if (destination_register == Register::kV0) {
+                delay_defines_v0 = true;
+                break;
+              }
+            }
+            if (delay_defines_v0) {
+              for (const auto& edge : p_block.outgoing_edges) {
+                if (edge.type == EdgeType::kBranch) {
+                  auto branch_target_iterator = id_to_index.find(edge.to_block_id);
+                  if (branch_target_iterator != id_to_index.end()) {
+                    const auto& branch_target_block = cfg.Blocks()[branch_target_iterator->second];
+                    bool branch_target_uses_v0 = false;
+                    for (const auto& branch_instruction : branch_target_block.instructions) {
+                      RegisterUseDef branch_instruction_use_def =
+                          GetInstructionUseDef(branch_instruction);
+                      for (Register use_register : branch_instruction_use_def.gpr_uses) {
+                        if (use_register == Register::kV0) {
+                          branch_target_uses_v0 = true;
+                          break;
+                        }
+                      }
+                      if (branch_target_uses_v0) break;
+                      bool branch_redefined_v0 = false;
+                      for (Register destination_register : branch_instruction_use_def.gpr_defs) {
+                        if (destination_register == Register::kV0) {
+                          branch_redefined_v0 = true;
+                          break;
+                        }
+                      }
+                      if (branch_redefined_v0) break;
+                    }
+                    if (branch_target_uses_v0) {
+                      executed = executed.subspan(0, executed.size() - 1);
+                    }
+                  }
+                  break;
+                }
+              }
+            }
+          }
+
           int effect = eval_seq(executed);
           bool edge_avail = false;
           if (effect == 1) {

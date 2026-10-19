@@ -258,8 +258,8 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
     statements.push_back(std::move(statement));
   } else if (lo.type == FoldedPatternType::kGlobalStore) {
     std::unique_ptr<LiftedExpression> src_expr;
-    if (lo.src_fp_reg.has_value()) {
-      src_expr = LiftFpRegister(*lo.src_fp_reg, lo.access_type == "f64");
+    if (lo.source_float_register.has_value()) {
+      src_expr = LiftFpRegister(*lo.source_float_register, lo.access_type == "f64");
     } else {
       src_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.src_reg, tracker);
     }
@@ -301,8 +301,8 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
     statements.push_back(std::move(statement));
   } else if (lo.type == FoldedPatternType::kGlobalIndexedStore) {
     std::unique_ptr<LiftedExpression> src_expr;
-    if (lo.src_fp_reg.has_value()) {
-      src_expr = LiftFpRegister(*lo.src_fp_reg, lo.access_type == "f64");
+    if (lo.source_float_register.has_value()) {
+      src_expr = LiftFpRegister(*lo.source_float_register, lo.access_type == "f64");
     } else {
       src_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.src_reg, tracker);
     }
@@ -534,19 +534,7 @@ void ExpressionBuilder::LiftCallInstruction(
           call_arguments.push_back(LiftedExpression::Variable(absl::StrFormat("arg%d", slot)));
         } else {
           int32_t stack_offset = 16 + (slot - 4) * 4;
-          if (sp_address_taken) {
-            std::unique_ptr<LiftedExpression> addr_expr;
-            if (stack_offset == 0) {
-              addr_expr = LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp"));
-            } else {
-              addr_expr = LiftedExpression::Binary(
-                  "+", LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp")),
-                  LiftedExpression::Integer(stack_offset));
-            }
-            call_arguments.push_back(LiftedExpression::Load("s32", std::move(addr_expr)));
-          } else {
-            call_arguments.push_back(LiftedExpression::Variable(StackVarName(stack_offset)));
-          }
+          call_arguments.push_back(LiftedExpression::Variable(StackVarName(stack_offset)));
         }
         slot++;
       }
@@ -562,19 +550,7 @@ void ExpressionBuilder::LiftCallInstruction(
         call_arguments.push_back(LiftedExpression::Variable(absl::StrFormat("arg%d", arg_index)));
       } else {
         int32_t stack_offset = 16 + (arg_index - 4) * 4;
-        if (sp_address_taken) {
-          std::unique_ptr<LiftedExpression> addr_expr;
-          if (stack_offset == 0) {
-            addr_expr = LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp"));
-          } else {
-            addr_expr = LiftedExpression::Binary(
-                "+", LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp")),
-                LiftedExpression::Integer(stack_offset));
-          }
-          call_arguments.push_back(LiftedExpression::Load("s32", std::move(addr_expr)));
-        } else {
-          call_arguments.push_back(LiftedExpression::Variable(StackVarName(stack_offset)));
-        }
+        call_arguments.push_back(LiftedExpression::Variable(StackVarName(stack_offset)));
       }
     }
 
@@ -771,6 +747,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   const RegisterTracker* initial_tracker = ctx.initial_tracker;
   const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = ctx.call_return_info;
   const absl::flat_hash_set<int32_t>* function_stack_stores = ctx.function_stack_stores;
+  const absl::flat_hash_set<Register>* float_parameters_in_general_registers =
+      ctx.float_parameters_in_general_registers;
 
   std::vector<LiftedStatement> statements;
   if (instructions.empty()) {
@@ -869,9 +847,10 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     }
   }
 
-  int32_t sp_base_offset = (has_calls && frame_size > 16) ? 16 : 0;
+  int32_t sp_base_offset = ctx.outgoing_args_size > 0 ? static_cast<int32_t>(ctx.outgoing_args_size)
+                                                      : ((has_calls && frame_size > 16) ? 16 : 0);
   auto make_sp_addr = [sp_base_offset](int32_t offset) -> std::unique_ptr<LiftedExpression> {
-    int32_t eff_offset = (offset >= sp_base_offset) ? (offset - sp_base_offset) : offset;
+    int32_t eff_offset = offset - sp_base_offset;
     if (eff_offset == 0) {
       return LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp"));
     } else if (eff_offset > 0) {
@@ -883,6 +862,14 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           "-", LiftedExpression::Unary("(s32)", LiftedExpression::Variable("sp")),
           LiftedExpression::Integer(-eff_offset));
     }
+  };
+
+  int32_t sp_buffer_size = ctx.sp_buffer_size;
+  auto is_sp_offset = [sp_address_taken, sp_base_offset, sp_buffer_size](int32_t offset) -> bool {
+    if (!sp_address_taken) return false;
+    if (offset < sp_base_offset) return false;
+    if (sp_buffer_size > 0 && (offset - sp_base_offset) >= sp_buffer_size) return false;
+    return true;
   };
 
   RegisterTracker tracker;
@@ -922,7 +909,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     statement.kind = StatementKind::kAssignment;
     statement.destination_variable = RegisterVarName(pending_lwl->rt);
     if (pending_lwl->rs == Register::kSp) {
-      if (sp_address_taken) {
+      if (is_sp_offset(pending_lwl->offset)) {
         statement.expression = LiftedExpression::Load("s32", make_sp_addr(pending_lwl->offset));
       } else {
         statement.expression = LiftedExpression::Variable(StackVarName(pending_lwl->offset));
@@ -1196,7 +1183,12 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             statement.expression = LiftedExpression::Integer(inst.immediate);
           } else if (sp_address_taken && (inst.rs == Register::kSp ||
                                           (has_frame_pointer && inst.rs == Register::kFp))) {
-            statement.expression = make_sp_addr(inst.immediate);
+            if (is_sp_offset(inst.immediate)) {
+              statement.expression = make_sp_addr(inst.immediate);
+            } else {
+              statement.expression = LiftedExpression::Unary(
+                  "(s32)&", LiftedExpression::Variable(StackVarName(inst.immediate)));
+            }
           } else if (inst.immediate == 0 && inst.rs.has_value()) {
             statement.expression = lift_reg(*inst.rs);
           } else if (inst.immediate < 0 && inst.rs.has_value()) {
@@ -1884,87 +1876,90 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.destination_variable = RegisterVarName(*inst.rt);
           if (is_stack_base) {
             int32_t offset = inst.immediate;
-            int arg_idx = -1;
-            if (offset >= static_cast<int32_t>(frame_size + 16)) {
-              arg_idx = 4 + (offset - static_cast<int32_t>(frame_size + 16)) / 4;
-            }
-            if (arg_idx >= 0) {
-              std::string arg_name = absl::StrFormat("arg%d", arg_idx);
-              if (inst.opcode == Opcode::kLhu) {
-                statement.expression =
-                    LiftedExpression::Unary("(u16)", LiftedExpression::Variable(arg_name));
-              } else if (inst.opcode == Opcode::kLh) {
-                statement.expression =
-                    LiftedExpression::Unary("(s16)", LiftedExpression::Variable(arg_name));
-              } else if (inst.opcode == Opcode::kLbu) {
-                statement.expression =
-                    LiftedExpression::Unary("(u8)", LiftedExpression::Variable(arg_name));
-              } else if (inst.opcode == Opcode::kLb) {
-                statement.expression =
-                    LiftedExpression::Unary("(s8)", LiftedExpression::Variable(arg_name));
-              } else {
-                statement.expression = LiftedExpression::Variable(arg_name);
-              }
-            } else if (sp_address_taken) {
+            if (is_sp_offset(offset)) {
               statement.expression = LiftedExpression::Load(load_type, make_sp_addr(offset));
             } else {
-              int32_t base_word_offset = offset & ~3;
-              int32_t byte_in_word = offset & 3;
-              bool is_subword_from_word =
-                  (byte_in_word != 0 && !local_stack_stores.contains(offset) &&
-                   local_stack_stores.contains(base_word_offset));
-              if (!is_subword_from_word) {
-                auto var_expr = LiftedExpression::Variable(StackVarName(offset));
+              uint32_t base_offset = frame_size + 16;
+              int arg_idx = -1;
+              if (offset >= static_cast<int32_t>(base_offset)) {
+                arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
+              }
+              if (arg_idx >= 0) {
+                std::string arg_name = absl::StrFormat("arg%d", arg_idx);
                 if (inst.opcode == Opcode::kLhu) {
-                  statement.expression = LiftedExpression::Unary("(u16)", std::move(var_expr));
+                  statement.expression =
+                      LiftedExpression::Unary("(u16)", LiftedExpression::Variable(arg_name));
                 } else if (inst.opcode == Opcode::kLh) {
-                  statement.expression = LiftedExpression::Unary("(s16)", std::move(var_expr));
+                  statement.expression =
+                      LiftedExpression::Unary("(s16)", LiftedExpression::Variable(arg_name));
                 } else if (inst.opcode == Opcode::kLbu) {
-                  statement.expression = LiftedExpression::Unary("(u8)", std::move(var_expr));
+                  statement.expression =
+                      LiftedExpression::Unary("(u8)", LiftedExpression::Variable(arg_name));
                 } else if (inst.opcode == Opcode::kLb) {
-                  statement.expression = LiftedExpression::Unary("(s8)", std::move(var_expr));
+                  statement.expression =
+                      LiftedExpression::Unary("(s8)", LiftedExpression::Variable(arg_name));
                 } else {
-                  statement.expression = std::move(var_expr);
+                  statement.expression = LiftedExpression::Variable(arg_name);
                 }
               } else {
-                auto base_var = LiftedExpression::Variable(StackVarName(base_word_offset));
-                if (inst.opcode == Opcode::kLhu) {
-                  if (byte_in_word == 2) {
-                    statement.expression = LiftedExpression::Unary("(u16)", std::move(base_var));
+                int32_t base_word_offset = offset & ~3;
+                int32_t byte_in_word = offset & 3;
+                bool is_subword_from_word =
+                    (byte_in_word != 0 && !local_stack_stores.contains(offset) &&
+                     local_stack_stores.contains(base_word_offset));
+                if (!is_subword_from_word) {
+                  auto var_expr = LiftedExpression::Variable(StackVarName(offset));
+                  if (inst.opcode == Opcode::kLhu) {
+                    statement.expression = LiftedExpression::Unary("(u16)", std::move(var_expr));
+                  } else if (inst.opcode == Opcode::kLh) {
+                    statement.expression = LiftedExpression::Unary("(s16)", std::move(var_expr));
+                  } else if (inst.opcode == Opcode::kLbu) {
+                    statement.expression = LiftedExpression::Unary("(u8)", std::move(var_expr));
+                  } else if (inst.opcode == Opcode::kLb) {
+                    statement.expression = LiftedExpression::Unary("(s8)", std::move(var_expr));
                   } else {
-                    statement.expression = LiftedExpression::Unary(
-                        "(u16)", LiftedExpression::Binary(
-                                     ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
-                                     LiftedExpression::Integer((2 - byte_in_word) * 8)));
-                  }
-                } else if (inst.opcode == Opcode::kLh) {
-                  if (byte_in_word == 2) {
-                    statement.expression = LiftedExpression::Unary("(s16)", std::move(base_var));
-                  } else {
-                    statement.expression =
-                        LiftedExpression::Binary(">>", std::move(base_var),
-                                                 LiftedExpression::Integer((2 - byte_in_word) * 8));
-                  }
-                } else if (inst.opcode == Opcode::kLbu) {
-                  if (byte_in_word == 3) {
-                    statement.expression = LiftedExpression::Unary("(u8)", std::move(base_var));
-                  } else {
-                    statement.expression = LiftedExpression::Unary(
-                        "(u8)", LiftedExpression::Binary(
-                                    ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
-                                    LiftedExpression::Integer((3 - byte_in_word) * 8)));
-                  }
-                } else if (inst.opcode == Opcode::kLb) {
-                  if (byte_in_word == 3) {
-                    statement.expression = LiftedExpression::Unary("(s8)", std::move(base_var));
-                  } else {
-                    statement.expression = LiftedExpression::Unary(
-                        "(s8)", LiftedExpression::Binary(
-                                    ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
-                                    LiftedExpression::Integer((3 - byte_in_word) * 8)));
+                    statement.expression = std::move(var_expr);
                   }
                 } else {
-                  statement.expression = std::move(base_var);
+                  auto base_var = LiftedExpression::Variable(StackVarName(base_word_offset));
+                  if (inst.opcode == Opcode::kLhu) {
+                    if (byte_in_word == 2) {
+                      statement.expression = LiftedExpression::Unary("(u16)", std::move(base_var));
+                    } else {
+                      statement.expression = LiftedExpression::Unary(
+                          "(u16)", LiftedExpression::Binary(
+                                       ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
+                                       LiftedExpression::Integer((2 - byte_in_word) * 8)));
+                    }
+                  } else if (inst.opcode == Opcode::kLh) {
+                    if (byte_in_word == 2) {
+                      statement.expression = LiftedExpression::Unary("(s16)", std::move(base_var));
+                    } else {
+                      statement.expression = LiftedExpression::Binary(
+                          ">>", std::move(base_var),
+                          LiftedExpression::Integer((2 - byte_in_word) * 8));
+                    }
+                  } else if (inst.opcode == Opcode::kLbu) {
+                    if (byte_in_word == 3) {
+                      statement.expression = LiftedExpression::Unary("(u8)", std::move(base_var));
+                    } else {
+                      statement.expression = LiftedExpression::Unary(
+                          "(u8)", LiftedExpression::Binary(
+                                      ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
+                                      LiftedExpression::Integer((3 - byte_in_word) * 8)));
+                    }
+                  } else if (inst.opcode == Opcode::kLb) {
+                    if (byte_in_word == 3) {
+                      statement.expression = LiftedExpression::Unary("(s8)", std::move(base_var));
+                    } else {
+                      statement.expression = LiftedExpression::Unary(
+                          "(s8)", LiftedExpression::Binary(
+                                      ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
+                                      LiftedExpression::Integer((3 - byte_in_word) * 8)));
+                    }
+                  } else {
+                    statement.expression = std::move(base_var);
+                  }
                 }
               }
             }
@@ -2018,7 +2013,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
           if (base_reg == Register::kSp) {
-            if (sp_address_taken) {
+            if (is_sp_offset(offset)) {
               statement.expression = LiftedExpression::Load("s32", make_sp_addr(offset));
             } else {
               statement.expression = LiftedExpression::Variable(StackVarName(offset));
@@ -2064,37 +2059,40 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           LiftedStatement statement;
           if (is_stack_base) {
             int32_t offset = inst.immediate;
-            int arg_idx = -1;
-            if (offset >= static_cast<int32_t>(frame_size + 16)) {
-              arg_idx = 4 + (offset - static_cast<int32_t>(frame_size + 16)) / 4;
-            }
-            if (arg_idx >= 0) {
-              std::string arg_name = absl::StrFormat("arg%d", arg_idx);
-              statement.kind = StatementKind::kAssignment;
-              statement.destination_variable = arg_name;
-              auto val_expr = lift_reg(*inst.rt);
-              if (inst.opcode == Opcode::kSh) {
-                statement.expression = LiftedExpression::Unary("(u16)", std::move(val_expr));
-              } else if (inst.opcode == Opcode::kSb) {
-                statement.expression = LiftedExpression::Unary("(u8)", std::move(val_expr));
-              } else {
-                statement.expression = std::move(val_expr);
-              }
-            } else if (sp_address_taken) {
+            if (is_sp_offset(offset)) {
               statement.kind = StatementKind::kStore;
               statement.store_type = store_type;
               statement.destination_address = make_sp_addr(offset);
               statement.expression = lift_reg(*inst.rt);
             } else {
-              statement.kind = StatementKind::kAssignment;
-              statement.destination_variable = StackVarName(offset);
-              auto val_expr = lift_reg(*inst.rt);
-              if (inst.opcode == Opcode::kSh) {
-                statement.expression = LiftedExpression::Unary("(u16)", std::move(val_expr));
-              } else if (inst.opcode == Opcode::kSb) {
-                statement.expression = LiftedExpression::Unary("(u8)", std::move(val_expr));
+              uint32_t base_offset = frame_size + 16;
+              int arg_idx = -1;
+              if (offset >= static_cast<int32_t>(base_offset)) {
+                arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
+              }
+              if (arg_idx >= 0) {
+                std::string arg_name = absl::StrFormat("arg%d", arg_idx);
+                statement.kind = StatementKind::kAssignment;
+                statement.destination_variable = arg_name;
+                auto val_expr = lift_reg(*inst.rt);
+                if (inst.opcode == Opcode::kSh) {
+                  statement.expression = LiftedExpression::Unary("(u16)", std::move(val_expr));
+                } else if (inst.opcode == Opcode::kSb) {
+                  statement.expression = LiftedExpression::Unary("(u8)", std::move(val_expr));
+                } else {
+                  statement.expression = std::move(val_expr);
+                }
               } else {
-                statement.expression = std::move(val_expr);
+                statement.kind = StatementKind::kAssignment;
+                statement.destination_variable = StackVarName(offset);
+                auto val_expr = lift_reg(*inst.rt);
+                if (inst.opcode == Opcode::kSh) {
+                  statement.expression = LiftedExpression::Unary("(u16)", std::move(val_expr));
+                } else if (inst.opcode == Opcode::kSb) {
+                  statement.expression = LiftedExpression::Unary("(u8)", std::move(val_expr));
+                } else {
+                  statement.expression = std::move(val_expr);
+                }
               }
             }
           } else {
@@ -2136,7 +2134,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           }
           if (base_reg == Register::kSp) {
             LiftedStatement statement;
-            if (sp_address_taken) {
+            if (is_sp_offset(offset)) {
               statement.kind = StatementKind::kStore;
               statement.store_type = "s32";
               statement.destination_address = make_sp_addr(offset);
@@ -2205,17 +2203,22 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               }
             }
             int32_t offset = inst.immediate;
-            uint32_t base_offset = frame_size + 16;
-            if (offset >= static_cast<int32_t>(base_offset)) {
-              int arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
-              statement.expression = LiftedExpression::Unary(
-                  "*(f32*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
-            } else if (sp_address_taken) {
+            if (is_sp_offset(offset)) {
               statement.expression = LiftedExpression::Load("f32", make_sp_addr(offset));
             } else {
-              statement.expression = LiftedExpression::Load(
-                  "f32",
-                  LiftedExpression::Unary("&", LiftedExpression::Variable(StackVarName(offset))));
+              uint32_t base_offset = frame_size + 16;
+              int arg_idx = -1;
+              if (offset >= static_cast<int32_t>(base_offset)) {
+                arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
+              }
+              if (arg_idx >= 0) {
+                statement.expression = LiftedExpression::Unary(
+                    "*(f32*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
+              } else {
+                statement.expression = LiftedExpression::Load(
+                    "f32",
+                    LiftedExpression::Unary("&", LiftedExpression::Variable(StackVarName(offset))));
+              }
             }
           } else {
             statement.expression =
@@ -2240,7 +2243,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                 break;
               }
             }
-            if (sp_address_taken) {
+            if (is_sp_offset(inst.immediate)) {
               statement.destination_address = make_sp_addr(inst.immediate);
             } else {
               statement.destination_address = LiftedExpression::Unary(
@@ -2268,14 +2271,17 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               // Function epilogue restoring callee-saved float register, omit from C body
               break;
             }
-            uint32_t base_offset = frame_size + 16;
-            if (offset >= static_cast<int32_t>(base_offset)) {
-              int arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
-              statement.expression = LiftedExpression::Unary(
-                  "*(f64*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
+            if (is_sp_offset(offset)) {
+              statement.expression = LiftedExpression::Load("f64", make_sp_addr(offset));
             } else {
-              if (sp_address_taken) {
-                statement.expression = LiftedExpression::Load("f64", make_sp_addr(offset));
+              uint32_t base_offset = frame_size + 16;
+              int arg_idx = -1;
+              if (offset >= static_cast<int32_t>(base_offset)) {
+                arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
+              }
+              if (arg_idx >= 0) {
+                statement.expression = LiftedExpression::Unary(
+                    "*(f64*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
               } else {
                 statement.expression = LiftedExpression::Load(
                     "f64",
@@ -2304,7 +2310,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               // Function prologue saving callee-saved float register, omit from C body
               break;
             }
-            if (sp_address_taken) {
+            if (is_sp_offset(inst.immediate)) {
               statement.destination_address = make_sp_addr(inst.immediate);
             } else {
               statement.destination_address = LiftedExpression::Unary(
@@ -2370,6 +2376,9 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.destination_variable = FpRegisterVarName(*inst.fs, /*is_double=*/false);
           if (*inst.rt == Register::kZero) {
             statement.expression = LiftedExpression::Variable("0.0f");
+          } else if (float_parameters_in_general_registers != nullptr &&
+                     float_parameters_in_general_registers->contains(*inst.rt)) {
+            statement.expression = LiftedExpression::Variable(RegisterVarName(*inst.rt));
           } else {
             statement.expression = LiftedExpression::Unary(
                 "*(f32*)&", LiftedExpression::Variable(RegisterVarName(*inst.rt)));

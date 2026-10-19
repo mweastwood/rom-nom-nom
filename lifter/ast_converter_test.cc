@@ -333,22 +333,22 @@ TEST(AstConverterTest, ConvertSwitchStatement) {
   JumpTable jt;
   jt.index_register = Register::kV1;
 
-  auto switch_reg = std::make_unique<StructuredRegion>();
-  switch_reg->type = RegionType::kSwitch;
-  switch_reg->jump_table = &jt;
+  auto switch_region = std::make_unique<StructuredRegion>();
+  switch_region->type = RegionType::kSwitch;
+  switch_region->jump_table = &jt;
 
   StructuredCase case0;
   case0.case_values = {0, 1};
-  switch_reg->cases.push_back(std::move(case0));
+  switch_region->cases.push_back(std::move(case0));
 
   StructuredCase default_case;
   default_case.is_default = true;
-  switch_reg->cases.push_back(std::move(default_case));
+  switch_region->cases.push_back(std::move(default_case));
 
   AstConverterOptions options;
   options.function_name = "TestSwitch";
 
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_region, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("switch (v1) {"));
@@ -372,9 +372,9 @@ TEST(AstConverterTest, ConvertSwitchStatementWithReturnDoesNotAddRedundantBreak)
   JumpTable jt;
   jt.index_register = Register::kA0;
 
-  auto switch_reg = std::make_unique<StructuredRegion>();
-  switch_reg->type = RegionType::kSwitch;
-  switch_reg->jump_table = &jt;
+  auto switch_region = std::make_unique<StructuredRegion>();
+  switch_region->type = RegionType::kSwitch;
+  switch_region->jump_table = &jt;
 
   StructuredCase case0;
   case0.case_values = {0};
@@ -382,12 +382,12 @@ TEST(AstConverterTest, ConvertSwitchStatementWithReturnDoesNotAddRedundantBreak)
   case_body->type = RegionType::kBlock;
   case_body->block_id = 0;
   case0.body = std::move(case_body);
-  switch_reg->cases.push_back(std::move(case0));
+  switch_region->cases.push_back(std::move(case0));
 
   AstConverterOptions options;
   options.function_name = "TestSwitchReturn";
 
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_region, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("switch (arg0) {"));
@@ -410,18 +410,18 @@ TEST(AstConverterTest, ConvertSwitchStatementFallbackCondition) {
   ASSERT_TRUE(cfg_or.ok());
   const auto& cfg = *cfg_or;
 
-  auto switch_reg = std::make_unique<StructuredRegion>();
-  switch_reg->type = RegionType::kSwitch;
-  switch_reg->jump_table = nullptr;  // No jump table pointer
+  auto switch_region = std::make_unique<StructuredRegion>();
+  switch_region->type = RegionType::kSwitch;
+  switch_region->jump_table = nullptr;  // No jump table pointer
 
   StructuredCase default_case;
   default_case.is_default = true;
-  switch_reg->cases.push_back(std::move(default_case));
+  switch_region->cases.push_back(std::move(default_case));
 
   AstConverterOptions options;
   options.function_name = "TestSwitchFallback";
 
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_region, nullptr, options);
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("switch (cond) {"));
@@ -429,10 +429,12 @@ TEST(AstConverterTest, ConvertSwitchStatementFallbackCondition) {
 }
 
 TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
-  // Construct block 0 with: addiu $v0, $zero, 42; jr $ra; nop
+  // Construct block 0 with: addiu $t0, $zero, 10; sw $t0, 0($a0); addiu $v0, $zero, 42; jr $ra; nop
   std::vector<uint32_t> words = {
+      0x2408000A,  // addiu $t0, $zero, 10
+      0xAC880000,  // sw    $t0, 0($a0)
       0x2402002A,  // addiu $v0, $zero, 42
-      0x03E00008,  // jr $ra
+      0x03E00008,  // jr    $ra
       0x00000000,  // nop
   };
   auto insts = *DecodeSequence(words, 0x80000000);
@@ -443,9 +445,9 @@ TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
   JumpTable jt;
   jt.index_register = Register::kA0;
 
-  auto switch_reg = std::make_unique<StructuredRegion>();
-  switch_reg->type = RegionType::kSwitch;
-  switch_reg->jump_table = &jt;
+  auto switch_region = std::make_unique<StructuredRegion>();
+  switch_region->type = RegionType::kSwitch;
+  switch_region->jump_table = &jt;
 
   StructuredCase case0;
   case0.case_values = {0};
@@ -453,17 +455,17 @@ TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
   case_body->type = RegionType::kBlock;
   case_body->block_id = 0;
   case0.body = std::move(case_body);
-  switch_reg->cases.push_back(std::move(case0));
+  switch_region->cases.push_back(std::move(case0));
 
   AstConverterOptions options;
   options.function_name = "TestSwitchVars";
 
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_reg, nullptr, options);
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *switch_region, nullptr, options);
   std::string code = func.ToString();
 
-  // v0 must be declared at the top of the function
-  EXPECT_THAT(code, HasSubstr("s32 v0;"));
-  // Return type should be inferred as s32 because HasReturnValue detected return v0
+  // temp_t0 must be declared at the top of the function
+  EXPECT_THAT(code, HasSubstr("s32 temp_t0;"));
+  // Return type should be inferred as s32 because HasReturnValue detected return 42
   EXPECT_EQ(func.ReturnType().ToString(), "s32");
 }
 
@@ -1126,7 +1128,7 @@ TEST(AstConverterTest, FoldsNewFpuComparisonOpcodesInBranchConditions) {
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("(f12_d <= f14_d)"));
-  EXPECT_THAT(code, HasSubstr("(f2 == f4)"));
+  EXPECT_THAT(code, HasSubstr("(f2 != f4)"));
   EXPECT_THAT(code, Not(HasSubstr("fcond")));
 }
 
@@ -1583,6 +1585,261 @@ TEST(AstConverterTest, ChainedSelfAssignmentPreservesLvalueAndDefinitions) {
   // LHS of assignment must NEVER be replaced by an rvalue expression
   EXPECT_THAT(code, Not(HasSubstr(") = (")));
   EXPECT_THAT(code, HasSubstr("*(s32*)v0 = arg2;"));
+}
+
+TEST(AstConverterTest, FloatParametersInGeneralRegistersTyping) {
+  // Function:
+  // 00: mtc1  $a1, $f0
+  // 04: jr    $ra
+  // 08: nop
+  std::vector<uint32_t> words = {
+      0x44850000,  // mtc1 $a1, $f0
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "PassFloatInGpr";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  EXPECT_EQ(func.ReturnType().ToString(), "f32");
+  ASSERT_GE(func.Parameters().size(), 2u);
+  EXPECT_EQ(func.Parameters()[0].type.ToString(), "s32");
+  EXPECT_EQ(func.Parameters()[1].type.ToString(), "f32");
+
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("f32 PassFloatInGpr(s32 arg0, f32 arg1)"));
+}
+
+TEST(AstConverterTest, FloatToUintConversionAst) {
+  std::vector<uint32_t> words = {
+      0x3C014F00,  // 00: lui $at, 0x4F00
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr  $ra
+      0x00000000,  // 0C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  auto root = std::make_unique<StructuredRegion>();
+  root->type = RegionType::kIfThenElse;
+  root->condition_block_id = 0;
+  root->float_to_uint_info = FloatToUintInfo{
+      .entry_block_id = 0,
+      .join_block_id = 0,
+      .source_float_register = FpRegister::kF12,
+      .destination_integer_register = Register::kV0,
+      .is_double = false,
+  };
+
+  AstConverterOptions options;
+  options.function_name = "ConvertFloat";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root, nullptr, options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("(u32)f12"));
+}
+
+TEST(AstConverterTest, ShiftAddMultiplicationSimplification) {
+  std::vector<uint32_t> words = {
+      // 00: sll  $v0, $a0, 2
+      // 04: addu $v0, $v0, $a0  -> v0 = arg0 * 5
+      // 08: sll  $v1, $v0, 2    -> v1 = arg0 * 20
+      // 0C: sll  $t0, $a0, 4
+      // 10: addu $t0, $t0, $a0
+      // 14: sll  $t0, $t0, 2    -> t0 = arg0 * 68
+      // 18: sll  $t1, $a0, 3
+      // 1C: subu $t1, $t1, $a0  -> t1 = arg0 * 7
+      // 20: jr   $ra
+      // 24: nop
+      0x00041080,  // sll  $v0, $a0, 2
+      0x00441021,  // addu $v0, $v0, $a0
+      0x00021880,  // sll  $v1, $v0, 2
+      0x00044100,  // sll  $t0, $a0, 4
+      0x01044021,  // addu $t0, $t0, $a0
+      0x00084880,  // sll  $t0, $t0, 2
+      0x000448C0,  // sll  $t1, $a0, 3
+      0x01244823,  // subu $t1, $t1, $a0
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "MulPatterns";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("(arg0 * 20)"));
+  EXPECT_THAT(code, HasSubstr("(arg0 * 68)"));
+  EXPECT_THAT(code, HasSubstr("(arg0 * 7)"));
+}
+
+TEST(AstConverterTest, FoldExpressionIntoIfCondition) {
+  std::string textproto = R"pb(
+    entries { name: "CheckItem" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // Function:
+  // 00: jal  0x80001000  (CheckItem)
+  // 04: nop
+  // 08: beq  $v0, $zero, 0x18
+  // 0C: nop
+  // 10: addiu $v0, $zero, 1
+  // 14: jr   $ra
+  // 18: addiu $v0, $zero, 0
+  // 1C: jr   $ra
+  // 20: nop
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 00: jal 0x80001000
+      0x00000000,  // 04: nop
+      0x10400003,  // 08: beq $v0, $zero, +3 (to 18)
+      0x00000000,  // 0C: nop
+      0x24020001,  // 10: addiu $v0, $zero, 1
+      0x03E00008,  // 14: jr $ra
+      0x24020000,  // 18: addiu $v0, $zero, 0
+      0x03E00008,  // 1C: jr $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_set<std::string> v0_funcs = {"CheckItem"};
+  AstConverterOptions options;
+  options.function_name = "TestIfFold";
+  options.functions_returning_v0 = &v0_funcs;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("CheckItem()"));
+}
+
+TEST(AstConverterTest, FoldExpressionIntoReturn) {
+  std::string textproto = R"pb(
+    entries { name: "GetState" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // Function:
+  // 00: jal  0x80001000  (GetState)
+  // 04: nop
+  // 08: jr   $ra
+  // 0C: nop
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 00: jal 0x80001000
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr $ra
+      0x00000000,  // 0C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_set<std::string> v0_funcs = {"GetState"};
+  AstConverterOptions options;
+  options.function_name = "TestReturnFold";
+  options.functions_returning_v0 = &v0_funcs;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("return GetState();"));
+}
+
+TEST(AstConverterTest, FoldExpressionIntoSwitchCondition) {
+  // Block 0:
+  // 00: addiu $v0, $a0, 1
+  // 04: beq   $zero, $zero, 0x10
+  // 08: nop
+  // Block 1:
+  // 0C: nop
+  // Block 2:
+  // 10: jr    $ra
+  // 14: nop
+  std::vector<uint32_t> words = {
+      0x24820001,  // 00: addiu $v0, $a0, 1
+      0x10000002,  // 04: beq $zero, $zero, +2 (to 10)
+      0x00000000,  // 08: nop
+      0x00000000,  // 0C: nop
+      0x03E00008,  // 10: jr  $ra
+      0x00000000,  // 14: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  auto seq = std::make_unique<StructuredRegion>();
+  seq->type = RegionType::kSequence;
+
+  auto b0 = std::make_unique<StructuredRegion>();
+  b0->type = RegionType::kBlock;
+  b0->block_id = 0;
+  seq->children.push_back(std::move(b0));
+
+  auto sw = std::make_unique<StructuredRegion>();
+  sw->type = RegionType::kSwitch;
+  sw->switch_register = Register::kV0;
+  StructuredCase c0;
+  c0.case_values = {0};
+  c0.body = std::make_unique<StructuredRegion>();
+  c0.body->type = RegionType::kBlock;
+  c0.body->block_id = 1;
+  sw->cases.push_back(std::move(c0));
+  seq->children.push_back(std::move(sw));
+
+  AstConverterOptions options;
+  options.function_name = "TestSwitchFold";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *seq, nullptr, options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("switch ((arg0 + 1))"));
 }
 
 }  // namespace

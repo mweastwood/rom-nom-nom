@@ -142,7 +142,7 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
           access.type = FoldedPatternType::kGlobalStore;
           access.address = target_address;
           if (inst.opcode == Opcode::kSwc1 || inst.opcode == Opcode::kSdc1) {
-            access.src_fp_reg = inst.ft;
+            access.source_float_register = inst.ft;
           } else {
             access.src_reg = inst.rt.value_or(Register::kZero);
           }
@@ -229,7 +229,7 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
           } else {
             access.type = FoldedPatternType::kGlobalIndexedStore;
             if (inst.opcode == Opcode::kSwc1 || inst.opcode == Opcode::kSdc1) {
-              access.src_fp_reg = inst.ft;
+              access.source_float_register = inst.ft;
             } else {
               access.src_reg = inst.rt.value_or(Register::kZero);
             }

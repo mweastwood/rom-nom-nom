@@ -248,15 +248,10 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
                  instruction.opcode == Opcode::kLbu || instruction.opcode == Opcode::kLwc1 ||
                  instruction.opcode == Opcode::kLdc1) {
         int32_t offset = instruction.immediate;
-        int arg_idx = -1;
-        if (offset >= static_cast<int32_t>(frame_size + 16)) {
-          arg_idx = 4 + (offset - static_cast<int32_t>(frame_size + 16)) / 4;
-        }
-        if (arg_idx >= 0 && !stored_stack_offsets.contains(offset)) {
-          if (arg_idx < 4) {
-            Register arg_reg = static_cast<Register>(static_cast<int>(Register::kA0) + arg_idx);
-            used_before_definition.insert(arg_reg);
-          } else {
+        uint32_t base_offset = frame_size + 16;
+        if (offset >= static_cast<int32_t>(base_offset)) {
+          int arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
+          if (!stored_stack_offsets.contains(offset)) {
             max_stack_arg = std::max(max_stack_arg, arg_idx);
           }
         }
@@ -396,6 +391,122 @@ bool AbiAnalyzer::DetermineReturnsF0Double(const ControlFlowGraph& cfg) {
 absl::flat_hash_set<Register> AbiAnalyzer::DetectUninitializedCalleeSavedRegisters(
     const ControlFlowGraph& cfg) {
   return ::rom_nom_nom::DetectUninitializedCalleeSavedRegisters(cfg);
+}
+
+absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegisters(
+    const ControlFlowGraph& cfg) {
+  absl::flat_hash_set<Register> result;
+  if (cfg.Blocks().empty()) {
+    return result;
+  }
+
+  std::vector<Register> candidates;
+  if (!IsFpRegisterLiveIn(cfg, FpRegister::kF12)) {
+    candidates = {Register::kA1, Register::kA2, Register::kA3};
+  } else {
+    candidates = {Register::kA2, Register::kA3};
+  }
+
+  absl::flat_hash_map<uint32_t, size_t> id_to_index;
+  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+    id_to_index[cfg.Blocks()[i].id] = i;
+  }
+
+  auto is_fpr_converted_from_int = [&](uint32_t start_block_id, size_t start_inst_idx,
+                                       FpRegister fpr) -> bool {
+    struct WorkItem {
+      uint32_t block_id;
+      size_t inst_idx;
+    };
+    std::vector<WorkItem> queue = {{start_block_id, start_inst_idx + 1}};
+    absl::flat_hash_set<uint32_t> visited_blocks;
+
+    while (!queue.empty()) {
+      WorkItem item = queue.back();
+      queue.pop_back();
+
+      auto it = id_to_index.find(item.block_id);
+      if (it == id_to_index.end()) continue;
+      const auto& block = cfg.Blocks()[it->second];
+
+      bool fpr_dead = false;
+      for (size_t i = item.inst_idx; i < block.instructions.size(); ++i) {
+        const auto& inst = block.instructions[i];
+
+        if ((inst.opcode == Opcode::kCvtSW || inst.opcode == Opcode::kCvtDW) &&
+            inst.fs.has_value() && *inst.fs == fpr) {
+          return true;
+        }
+
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (FpRegister d : ud.fpr_defs) {
+          if (d == fpr) {
+            fpr_dead = true;
+            break;
+          }
+        }
+        if (fpr_dead) break;
+
+        if (inst.IsCall() && static_cast<int>(fpr) < 20) {
+          fpr_dead = true;
+          break;
+        }
+      }
+
+      if (!fpr_dead) {
+        for (uint32_t succ_id : block.successors) {
+          if (visited_blocks.insert(succ_id).second) {
+            queue.push_back({succ_id, 0});
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  for (Register reg : candidates) {
+    if (!IsRegisterLiveIn(cfg, reg)) {
+      continue;
+    }
+
+    bool has_mtc1 = false;
+    bool has_integer_use = false;
+    bool is_converted_from_int = false;
+    bool has_def = false;
+
+    for (const auto& block : cfg.Blocks()) {
+      for (size_t j = 0; j < block.instructions.size(); ++j) {
+        const auto& inst = block.instructions[j];
+
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register u : ud.gpr_uses) {
+          if (u == reg) {
+            if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() && *inst.rt == reg &&
+                inst.fs.has_value()) {
+              has_mtc1 = true;
+              if (is_fpr_converted_from_int(block.id, j, *inst.fs)) {
+                is_converted_from_int = true;
+              }
+            } else {
+              has_integer_use = true;
+            }
+          }
+        }
+
+        for (Register d : ud.gpr_defs) {
+          if (d == reg) {
+            has_def = true;
+          }
+        }
+      }
+    }
+
+    if (has_mtc1 && !has_integer_use && !is_converted_from_int && !has_def) {
+      result.insert(reg);
+    }
+  }
+
+  return result;
 }
 
 absl::flat_hash_map<uint32_t, CallReturnInfo> AbiAnalyzer::ComputeCallReturnInfo(

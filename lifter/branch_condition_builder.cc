@@ -558,6 +558,18 @@ bool BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(const BasicB
     if (cond_gprs.contains(r)) {
       return true;
     }
+    if (r >= Register::kA0 && r <= Register::kA3) {
+      bool has_call = false;
+      for (const auto& inst : cond_block.instructions) {
+        if (inst.IsCall()) {
+          has_call = true;
+          break;
+        }
+      }
+      if (has_call) {
+        return true;
+      }
+    }
   }
   for (FpRegister f : delay_ud.fpr_defs) {
     if (cond_fprs.contains(f)) {
