@@ -180,7 +180,7 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
         auto index_def = tracker.GetReachingDefinition(val.index_reg);
         bool mid_is_local = !is_cross_block_mid[RegIdx(base_reg)];
         bool hi_is_local = !is_cross_block_hi[RegIdx(base_reg)];
-        bool index_clobbered = mid_is_local && index_def.has_value() &&
+        bool index_clobbered = mid_is_local && index_def.has_value() && index_def->is_local &&
                                index_def->instruction_index >= val.mid_inst_index;
         if (!index_clobbered && (inst.IsLoad() || inst.IsStore())) {
           FoldedSymbolAccess access;

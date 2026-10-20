@@ -3499,5 +3499,138 @@ s32 GlobalScalarHalfwordAndByteUpdatesAroundCall(u16 next_val) {
 )");
 }
 
+TEST_F(RoundTripTest, GlobalArrayReadU16) {
+  AssertRoundTripBitExact("GlobalArrayReadU16", R"(
+extern u16 g_table_u16[16];
+
+u16 GlobalArrayReadU16(s32 idx) {
+    return g_table_u16[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayWriteU16) {
+  AssertRoundTripBitExact("GlobalArrayWriteU16", R"(
+extern u16 g_table_u16[16];
+
+void GlobalArrayWriteU16(s32 idx, u16 val) {
+    g_table_u16[idx] = val;
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayReadU8) {
+  AssertRoundTripBitExact("GlobalArrayReadU8", R"(
+extern u8 g_table_u8[32];
+
+u8 GlobalArrayReadU8(s32 idx) {
+    return g_table_u8[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayWriteU8) {
+  AssertRoundTripBitExact("GlobalArrayWriteU8", R"(
+extern u8 g_table_u8[32];
+
+void GlobalArrayWriteU8(s32 idx, u8 val) {
+    g_table_u8[idx] = val;
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayReadS16) {
+  AssertRoundTripBitExact("GlobalArrayReadS16", R"(
+extern s16 g_table_s16[16];
+
+s16 GlobalArrayReadS16(s32 idx) {
+    return g_table_s16[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayReadS8) {
+  AssertRoundTripBitExact("GlobalArrayReadS8", R"(
+extern s8 g_table_s8[32];
+
+s8 GlobalArrayReadS8(s32 idx) {
+    return g_table_s8[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayReadFloat) {
+  AssertRoundTripBitExact("GlobalArrayReadFloat", R"(
+extern f32 g_table_f32[16];
+
+f32 GlobalArrayReadFloat(s32 idx) {
+    return g_table_f32[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayWriteFloat) {
+  AssertRoundTripBitExact("GlobalArrayWriteFloat", R"(
+extern f32 g_table_f32[16];
+
+void GlobalArrayWriteFloat(s32 idx, f32 val) {
+    g_table_f32[idx] = val;
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayReadModifyWriteAtIndex) {
+  AssertRoundTripBitExact("GlobalArrayReadModifyWriteAtIndex", R"(
+extern s32 g_counters[16];
+
+s32 GlobalArrayReadModifyWriteAtIndex(s32 idx, s32 delta) {
+    g_counters[idx] += delta;
+    return g_counters[idx];
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalPointerDereferenceLoadAndStore) {
+  AssertRoundTripBitExact("GlobalPointerDereferenceLoadAndStore", R"(
+extern s32* g_active_buffer;
+
+s32 GlobalPointerDereferenceLoadAndStore(s32 idx, s32 val) {
+    s32 prev = g_active_buffer[idx];
+    g_active_buffer[idx] = prev + val;
+    return prev;
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalArrayConditionalUpdateAroundCall) {
+  AssertRoundTripBitExact("GlobalArrayConditionalUpdateAroundCall", R"(
+extern s32 g_slot_status[16];
+extern void NotifySlotChanged(s32 idx, s32 status);
+
+s32 GlobalArrayConditionalUpdateAroundCall(s32 idx, s32 next_status) {
+    if (g_slot_status[idx] != next_status) {
+        g_slot_status[idx] = next_status;
+        NotifySlotChanged(idx, next_status);
+        return 1;
+    }
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalParallelArraysReadAndUpdate) {
+  AssertRoundTripBitExact("GlobalParallelArraysReadAndUpdate", R"(
+extern s32 g_slot_ids[8];
+extern s32 g_slot_states[8];
+extern s32 g_slot_timers[8];
+
+s32 GlobalParallelArraysReadAndUpdate(s32 idx, s32 new_state) {
+    g_slot_states[idx] = new_state;
+    g_slot_timers[idx] = 0;
+    return g_slot_ids[idx];
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

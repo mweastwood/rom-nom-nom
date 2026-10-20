@@ -1789,6 +1789,51 @@ class ConverterContext {
         if (block == nullptr) continue;
 
         BlockState entry_state;
+        if (block_id == cfg_.EntryBlockId() && cfg_.Blocks().size() > 1) {
+          bool entry_has_call = false;
+          for (const auto& inst : block->instructions) {
+            if (inst.IsCall()) {
+              entry_has_call = true;
+              break;
+            }
+          }
+          if (!entry_has_call) {
+            for (Register reg : {Register::kA0, Register::kA1, Register::kA2, Register::kA3}) {
+              if (!AbiAnalyzer::IsRegisterLiveIn(cfg_, reg) ||
+                  float_parameters_in_general_registers_.contains(reg)) {
+                continue;
+              }
+              bool used_directly_in_entry = false;
+              for (const auto& inst : block->instructions) {
+                bool is_callee_saved_copy =
+                    (inst.opcode == Opcode::kAddu && inst.rt == Register::kZero &&
+                     inst.rd.has_value() && *inst.rd >= Register::kS0 && *inst.rd <= Register::kS7);
+                if (is_callee_saved_copy) {
+                  continue;
+                }
+                RegisterUseDef ud = GetInstructionUseDef(inst);
+                for (Register u : ud.gpr_uses) {
+                  if (u == reg) {
+                    used_directly_in_entry = true;
+                    break;
+                  }
+                }
+                if (used_directly_in_entry) break;
+                bool overwritten = false;
+                for (Register d : ud.gpr_defs) {
+                  if (d == reg) {
+                    overwritten = true;
+                    break;
+                  }
+                }
+                if (overwritten) break;
+              }
+              if (used_directly_in_entry) {
+                entry_state.tracker.SetEntryParameter(reg);
+              }
+            }
+          }
+        }
         bool has_entry = false;
         auto it_edges = incoming_edges.find(block_id);
         if (it_edges != incoming_edges.end()) {
@@ -3590,6 +3635,234 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
               stmts.erase(stmts.begin() + i);
               changed = true;
               break;
+            }
+
+            // Dead scratch assignment overwritten later in the same CompoundStatement
+            // across an intervening function call without any intervening read (e.g., from a
+            // branch delay slot duplicated into the fallthrough path before a call and
+            // subsequent assignment to v0).
+            if (is_scratch && !is_float_bitcast_lhs && is_pure_expr(effective_rhs)) {
+              bool overwritten_before_use = false;
+              bool saw_intervening_call = false;
+              for (size_t k = i + 1; k < stmts.size(); ++k) {
+                if (stmts[k]->Kind() != CStatementKind::kExpressionStatement) break;
+                const auto& kes = static_cast<const ExpressionStatement&>(*stmts[k]);
+                if (kes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& ka = static_cast<const AssignmentExpression&>(kes.Expression());
+                  if (ka.Op() == "=" && ka.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      static_cast<const IdentifierExpression&>(ka.Lhs()).Name() == var &&
+                      count_expr_uses(ka.Rhs(), var) == 0) {
+                    overwritten_before_use = saw_intervening_call;
+                    break;
+                  }
+                }
+                if (count_uses(*stmts[k], var) > 0) break;
+                if (has_call_in_stmt(*stmts[k])) {
+                  saw_intervening_call = true;
+                }
+              }
+              if (overwritten_before_use) {
+                stmts.erase(stmts.begin() + i);
+                changed = true;
+                break;
+              }
+            }
+
+            // Fold `argX = <pure_expr>; *(T*)<addr> = argX;` when `argX` is used as a dead
+            // scratch register for a memory store right before return.
+            if (is_call_arg && !is_float_bitcast_lhs && is_pure_expr(assign.Rhs()) &&
+                i + 2 < stmts.size() &&
+                stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement &&
+                stmts[i + 2]->Kind() == CStatementKind::kReturnStatement) {
+              const auto& next_es = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
+              if (next_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                const auto& next_assign =
+                    static_cast<const AssignmentExpression&>(next_es.Expression());
+                if (next_assign.Op() == "=" &&
+                    next_assign.Lhs().Kind() != CExpressionKind::kIdentifier &&
+                    count_expr_uses(next_assign.Lhs(), var) == 0 &&
+                    next_assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                    static_cast<const IdentifierExpression&>(next_assign.Rhs()).Name() == var &&
+                    is_dead_after_stmt(i + 1, var, 1, stmts[i].get())) {
+                  stmts[i + 1] = CStatement::Expression(CExpression::Assignment(
+                      "=", next_assign.Lhs().Clone(), assign.Rhs().Clone()));
+                  stmts.erase(stmts.begin() + i);
+                  changed = true;
+                  break;
+                }
+              }
+            }
+
+            // Atomically fold `v0 = &sym; dest = ((idx << 2) + v0);` (or
+            // `v0 = &sym; dest = (idx << 2); dest = (dest + v0);`) directly into the
+            // immediately following statement when `dest` is dereferenced at least twice
+            // (`*(T*)dest` read + write) and is dead afterwards.
+            if (is_scratch && !is_float_bitcast_lhs &&
+                assign.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
+                static_cast<const UnaryExpression&>(assign.Rhs()).Op() == "&") {
+              auto extract_word_index = [](const CExpression& expr) -> const CExpression* {
+                if (expr.Kind() == CExpressionKind::kBinaryExpression) {
+                  const auto& b = static_cast<const BinaryExpression&>(expr);
+                  if (b.Op() == "<<" && b.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                      static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value() == 2 &&
+                      b.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                    return &b.Lhs();
+                  }
+                }
+                return nullptr;
+              };
+              std::string dest_var;
+              const CExpression* word_idx = nullptr;
+              size_t use_stmt_idx = 0;
+              // Pattern 1: `v0 = &sym; dest = ((idx << 2) + v0); <use_stmt>`
+              if (i + 2 < stmts.size() &&
+                  stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement) {
+                const auto& next_es = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
+                if (next_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& next_assign =
+                      static_cast<const AssignmentExpression&>(next_es.Expression());
+                  if (next_assign.Op() == "=" &&
+                      next_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      next_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                    const auto& bin = static_cast<const BinaryExpression&>(next_assign.Rhs());
+                    const CExpression* candidate_idx = extract_word_index(bin.Lhs());
+                    if (bin.Op() == "+" && candidate_idx != nullptr &&
+                        bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                        static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var &&
+                        count_expr_uses(*candidate_idx, var) == 0 &&
+                        is_dead_after_stmt(i + 1, var, 1, stmts[i].get())) {
+                      dest_var = std::string(
+                          static_cast<const IdentifierExpression&>(next_assign.Lhs()).Name());
+                      word_idx = candidate_idx;
+                      use_stmt_idx = i + 2;
+                    }
+                  }
+                }
+              }
+              // Pattern 2: `v0 = &sym; dest = (idx << 2); dest = (dest + v0); <use_stmt>`
+              if (word_idx == nullptr && i + 3 < stmts.size() &&
+                  stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement &&
+                  stmts[i + 2]->Kind() == CStatementKind::kExpressionStatement) {
+                const auto& mid_es = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
+                const auto& add_es = static_cast<const ExpressionStatement&>(*stmts[i + 2]);
+                if (mid_es.Expression().Kind() == CExpressionKind::kAssignmentExpression &&
+                    add_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& mid_assign =
+                      static_cast<const AssignmentExpression&>(mid_es.Expression());
+                  const auto& add_assign =
+                      static_cast<const AssignmentExpression&>(add_es.Expression());
+                  const CExpression* candidate_idx = extract_word_index(mid_assign.Rhs());
+                  if (mid_assign.Op() == "=" && add_assign.Op() == "=" &&
+                      candidate_idx != nullptr &&
+                      mid_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      add_assign.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                    std::string_view candidate_dest =
+                        static_cast<const IdentifierExpression&>(mid_assign.Lhs()).Name();
+                    if (candidate_dest ==
+                            static_cast<const IdentifierExpression&>(add_assign.Lhs()).Name() &&
+                        candidate_dest != var && count_expr_uses(*candidate_idx, var) == 0 &&
+                        add_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                      const auto& bin = static_cast<const BinaryExpression&>(add_assign.Rhs());
+                      if (bin.Op() == "+" && bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                          static_cast<const IdentifierExpression&>(bin.Lhs()).Name() ==
+                              candidate_dest &&
+                          bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                          static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var &&
+                          is_dead_after_stmt(i + 2, var, 1, stmts[i].get())) {
+                        dest_var = std::string(candidate_dest);
+                        word_idx = candidate_idx;
+                        use_stmt_idx = i + 3;
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (word_idx != nullptr && (is_scratch_var(dest_var) || is_call_arg_var(dest_var))) {
+                int total_dest_uses = count_uses(*stmts[use_stmt_idx], dest_var);
+                int deref_dest_uses = 0;
+                std::function<void(const CExpression&)> count_deref_uses = [&](const CExpression&
+                                                                                   e) {
+                  if (e.Kind() == CExpressionKind::kUnaryExpression) {
+                    const auto& u = static_cast<const UnaryExpression&>(e);
+                    if (u.Op() == "*" && u.Operand().Kind() == CExpressionKind::kCastExpression) {
+                      const auto& inner_cast = static_cast<const CastExpression&>(u.Operand());
+                      if (inner_cast.Operand().Kind() == CExpressionKind::kIdentifier &&
+                          static_cast<const IdentifierExpression&>(inner_cast.Operand()).Name() ==
+                              dest_var) {
+                        ++deref_dest_uses;
+                        return;
+                      }
+                    }
+                    count_deref_uses(u.Operand());
+                  } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+                    const auto& b = static_cast<const BinaryExpression&>(e);
+                    count_deref_uses(b.Lhs());
+                    count_deref_uses(b.Rhs());
+                  } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+                    const auto& a = static_cast<const AssignmentExpression&>(e);
+                    count_deref_uses(a.Lhs());
+                    count_deref_uses(a.Rhs());
+                  } else if (e.Kind() == CExpressionKind::kCastExpression) {
+                    count_deref_uses(static_cast<const CastExpression&>(e).Operand());
+                  }
+                };
+                bool safe_stmt_shape = false;
+                if (stmts[use_stmt_idx]->Kind() == CStatementKind::kExpressionStatement) {
+                  count_deref_uses(
+                      static_cast<const ExpressionStatement&>(*stmts[use_stmt_idx]).Expression());
+                  safe_stmt_shape = (total_dest_uses >= 2 && deref_dest_uses == total_dest_uses);
+                } else if (stmts[use_stmt_idx]->Kind() == CStatementKind::kIfStatement) {
+                  const auto& ifs = static_cast<const IfStatement&>(*stmts[use_stmt_idx]);
+                  count_deref_uses(ifs.Condition());
+                  if (ifs.ThenBranch().Kind() == CStatementKind::kCompoundStatement) {
+                    for (const auto& cs :
+                         static_cast<const CompoundStatement&>(ifs.ThenBranch()).Statements()) {
+                      if (cs->Kind() == CStatementKind::kExpressionStatement) {
+                        const auto& ces = static_cast<const ExpressionStatement&>(*cs);
+                        if (has_call_in_stmt(*cs)) break;
+                        count_deref_uses(ces.Expression());
+                      } else {
+                        break;
+                      }
+                    }
+                  }
+                  safe_stmt_shape = (total_dest_uses >= 2 && deref_dest_uses == total_dest_uses);
+                }
+                if (safe_stmt_shape && is_dead_after_stmt(use_stmt_idx, dest_var, total_dest_uses,
+                                                          stmts[use_stmt_idx - 1].get())) {
+                  auto sum_expr = CExpression::Binary("+", assign.Rhs().Clone(), word_idx->Clone());
+                  if (stmts[use_stmt_idx]->Kind() == CStatementKind::kExpressionStatement) {
+                    const auto& next_es =
+                        static_cast<const ExpressionStatement&>(*stmts[use_stmt_idx]);
+                    auto new_expr = SubstituteIdentifier(next_es.Expression(), dest_var, *sum_expr);
+                    stmts[use_stmt_idx] = CStatement::Expression(std::move(new_expr));
+                  } else if (stmts[use_stmt_idx]->Kind() == CStatementKind::kIfStatement) {
+                    const auto& ifs = static_cast<const IfStatement&>(*stmts[use_stmt_idx]);
+                    auto new_cond = SubstituteIdentifier(ifs.Condition(), dest_var, *sum_expr);
+                    auto new_then = ifs.ThenBranch().Clone();
+                    if (new_then->Kind() == CStatementKind::kCompoundStatement) {
+                      auto& then_stmts =
+                          static_cast<CompoundStatement*>(new_then.get())->MutableStatements();
+                      for (auto& ts : then_stmts) {
+                        if (ts->Kind() == CStatementKind::kExpressionStatement &&
+                            count_uses(*ts, dest_var) > 0) {
+                          const auto& tes = static_cast<const ExpressionStatement&>(*ts);
+                          ts = CStatement::Expression(
+                              SubstituteIdentifier(tes.Expression(), dest_var, *sum_expr));
+                        }
+                      }
+                    }
+                    std::unique_ptr<CStatement> new_else =
+                        (ifs.ElseBranch() != nullptr) ? ifs.ElseBranch()->Clone() : nullptr;
+                    stmts[use_stmt_idx] = CStatement::If(std::move(new_cond), std::move(new_then),
+                                                         std::move(new_else));
+                  }
+                  stmts.erase(stmts.begin() + i, stmts.begin() + use_stmt_idx);
+                  changed = true;
+                  break;
+                }
+              }
             }
 
             // Ensure effective_rhs itself doesn't contain var

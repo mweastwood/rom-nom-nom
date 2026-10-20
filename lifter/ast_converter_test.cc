@@ -2264,5 +2264,55 @@ TEST(AstConverterTest, AnnotatesCallerSavedRegistersWhenNotLiveAcrossCalls) {
   EXPECT_THAT(code, Not(HasSubstr("register s32 temp_t1")));
 }
 
+TEST(AstConverterTest, CrossBlockEntryParametersPassedToCallAndGlobalArrayElementFolded) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "NotifySlotChanged" address: 0x80001000 type: SYMBOL_FUNC }
+    entries { name: "g_slot_status" address: 0x80050000 type: SYMBOL_DATA }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  // Matches GlobalArrayConditionalUpdateAroundCall:
+  // Entry block computes $v1 = &g_slot_status + ($a0 << 2), branches on lw $v0, 0($v1) == $a1,
+  // and in the fallthrough block stores $a1 to 0($v1) and calls NotifySlotChanged($a0, $a1)
+  // using the entry parameters $a0 and $a1 without redefining them in the successor block.
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0x3C028005,  // 04: lui   $v0, 0x8005
+      0x24420000,  // 08: addiu $v0, $v0, 0
+      0x00041880,  // 0C: sll   $v1, $a0, 2
+      0x00621821,  // 10: addu  $v1, $v1, $v0
+      0xAFBF0010,  // 14: sw    $ra, 16($sp)
+      0x8C620000,  // 18: lw    $v0, 0($v1)
+      0x10450004,  // 1C: beq   $v0, $a1, 0x80000030
+      0x00001021,  // 20: addu  $v0, $zero, $zero
+      0x0C000400,  // 24: jal   0x80001000 (NotifySlotChanged)
+      0xAC650000,  // 28: sw    $a1, 0($v1)
+      0x24020001,  // 2C: addiu $v0, $zero, 1
+      0x8FBF0010,  // 30: lw    $ra, 16($sp)
+      0x27BD0018,  // 34: addiu $sp, $sp, 24
+      0x03E00008,  // 38: jr    $ra
+      0x00000000,  // 3C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "GlobalArrayConditionalUpdateAroundCall";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("NotifySlotChanged(arg0, arg1);"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)(&g_slot_status + arg0)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

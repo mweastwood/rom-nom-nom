@@ -456,9 +456,33 @@ void ExpressionBuilder::LiftCallInstruction(
   Register argument_registers[] = {Register::kA0, Register::kA1, Register::kA2, Register::kA3};
   int highest_defined_argument_index = -1;
   for (int arg_index = 3; arg_index >= 0; --arg_index) {
-    if (tracker.GetReachingDefinition(argument_registers[arg_index]).has_value()) {
+    auto def = tracker.GetReachingDefinition(argument_registers[arg_index]);
+    if (def.has_value() && def->is_local) {
       highest_defined_argument_index = arg_index;
       break;
+    }
+  }
+  if (highest_defined_argument_index < 0) {
+    for (int arg_index = 3; arg_index >= 0; --arg_index) {
+      Register reg = argument_registers[arg_index];
+      auto def = tracker.GetReachingDefinition(reg);
+      if (def.has_value() && !def->is_local) {
+        bool used_in_block_before_call = false;
+        for (size_t j = 0; j < i; ++j) {
+          RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[j]);
+          for (Register u : ud.gpr_uses) {
+            if (u == reg) {
+              used_in_block_before_call = true;
+              break;
+            }
+          }
+          if (used_in_block_before_call) break;
+        }
+        if (used_in_block_before_call) {
+          highest_defined_argument_index = arg_index;
+          break;
+        }
+      }
     }
   }
 

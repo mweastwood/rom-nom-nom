@@ -368,7 +368,7 @@ void RegisterTracker::Step(const Instruction& inst) {
   // 1. Record uses for all read registers
   for (Register r : ud.gpr_uses) {
     size_t idx = RegIdx(r);
-    if (reaching_defs_[idx].has_value()) {
+    if (reaching_defs_[idx].has_value() && reaching_defs_[idx]->is_local) {
       def_to_uses_[reaching_defs_[idx]->instruction_index].push_back(inst_idx);
     }
   }
@@ -653,7 +653,22 @@ void RegisterTracker::ClearCallerSavedGprs() {
 void RegisterTracker::PrepareForBlock() {
   current_instruction_index_ = 0;
   def_to_uses_.clear();
-  reaching_defs_.assign(kNumGprs, std::nullopt);
+  for (auto& def : reaching_defs_) {
+    if (def.has_value()) {
+      if (def->vram == 0) {
+        def->is_local = false;
+      } else {
+        def = std::nullopt;
+      }
+    }
+  }
+}
+
+void RegisterTracker::SetEntryParameter(Register reg) {
+  size_t idx = RegIdx(reg);
+  if (idx < reaching_defs_.size()) {
+    reaching_defs_[idx] = Definition{0, 0, reg, std::nullopt, true};
+  }
 }
 
 bool RegisterTracker::Merge(const RegisterTracker& other) {
@@ -753,6 +768,13 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
     bool used_before_def = false;
     bool non_branch_used_after_last_def = false;
     bool branch_used_after_last_def = false;
+    bool has_return_in_seq = false;
+    for (const auto& inst : instructions) {
+      if (inst.opcode == Opcode::kJr && inst.rs == Register::kRa) {
+        has_return_in_seq = true;
+        break;
+      }
+    }
     for (size_t i = 0; i < instructions.size(); ++i) {
       if (instructions[i].opcode == Opcode::kJal || instructions[i].opcode == Opcode::kJalr) {
         bool callee_returns_v0 = false;
@@ -798,7 +820,39 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
               // Comparison using $v0 to evaluate a condition before a branch does not consume/kill
               // $v0.
             } else {
-              non_branch_used_after_last_def = true;
+              bool preserved_for_return_while_computing_store = false;
+              if (has_return_in_seq && instructions[last_def].IsLoad() &&
+                  !instructions[i].IsLoad() && !instructions[i].IsStore() &&
+                  !instructions[i].IsCall() && instructions[i].opcode != Opcode::kMtc1 &&
+                  instructions[i].opcode != Opcode::kDmtc1 &&
+                  instructions[i].opcode != Opcode::kMult &&
+                  instructions[i].opcode != Opcode::kMultu &&
+                  instructions[i].opcode != Opcode::kDiv &&
+                  instructions[i].opcode != Opcode::kDivu && ud.gpr_defs.size() == 1 &&
+                  ud.gpr_defs[0] != Register::kV0) {
+                Register other_reg = ud.gpr_defs[0];
+                bool other_stored_to_same_mem = false;
+                bool v0_overwritten_later = false;
+                for (size_t j = i + 1; j < instructions.size(); ++j) {
+                  RegisterUseDef later_ud = GetInstructionUseDef(instructions[j]);
+                  for (Register d : later_ud.gpr_defs) {
+                    if (d == Register::kV0) {
+                      v0_overwritten_later = true;
+                    }
+                  }
+                  if (instructions[j].IsStore() && instructions[j].rt == other_reg &&
+                      instructions[j].rs == instructions[last_def].rs &&
+                      instructions[j].immediate == instructions[last_def].immediate) {
+                    other_stored_to_same_mem = true;
+                  }
+                }
+                if (other_stored_to_same_mem && !v0_overwritten_later) {
+                  preserved_for_return_while_computing_store = true;
+                }
+              }
+              if (!preserved_for_return_while_computing_store) {
+                non_branch_used_after_last_def = true;
+              }
             }
           } else {
             used_before_def = true;

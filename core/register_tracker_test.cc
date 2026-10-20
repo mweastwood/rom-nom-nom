@@ -481,5 +481,42 @@ TEST(RegisterTrackerTest, DetermineReturnsV0RecognizesCallInLoopTargetRedefinesV
   EXPECT_TRUE(DetermineReturnsV0(cfg));
 }
 
+TEST(RegisterTrackerTest, DetermineReturnsV0RecognizesPreservedV0UsedInStoreComputation) {
+  // Pattern from GlobalPointerDereferenceLoadAndStore:
+  //   0x80000000: lw $v0, 0($a0)
+  //   0x80000004: addu $a1, $v0, $a1
+  //   0x80000008: jr $ra
+  //   0x8000000C: sw $a1, 0($a0)
+  std::vector<uint32_t> words = {
+      0x8C820000,  // lw $v0, 0($a0)
+      0x00452821,  // addu $a1, $v0, $a1
+      0x03E00008,  // jr $ra
+      0xAC850000,  // sw $a1, 0($a0)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_TRUE(DetermineReturnsV0(cfg));
+}
+
+TEST(RegisterTrackerTest, PrepareForBlockMarksCrossBlockDefinitionsNonLocal) {
+  RegisterTracker tracker;
+  tracker.SetEntryParameter(Register::kA0);
+
+  auto entry_def = tracker.GetReachingDefinition(Register::kA0);
+  ASSERT_TRUE(entry_def.has_value());
+  EXPECT_TRUE(entry_def->is_local);
+
+  tracker.PrepareForBlock();
+  auto cross_def = tracker.GetReachingDefinition(Register::kA0);
+  ASSERT_TRUE(cross_def.has_value());
+  EXPECT_FALSE(cross_def->is_local);
+
+  // A read of $a0 in the successor block should still see the reaching definition
+  // without attributing the use to instruction index 0 of the successor block.
+  tracker.Step(*DecodeInstruction(0x00801021));  // addu $v0, $a0, $zero
+  EXPECT_TRUE(tracker.GetUses(0).empty());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

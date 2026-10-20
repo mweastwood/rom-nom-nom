@@ -127,6 +127,7 @@ struct Definition {
   size_t instruction_index = 0;
   Register reg = Register::kZero;
   std::optional<Instruction> inst;
+  bool is_local = true;
 };
 
 // Information discovered about a function's stack frame.
@@ -186,6 +187,9 @@ class RegisterTracker {
 
   // Clears tracked value and reaching definition for a specific register.
   void Invalidate(Register reg);
+
+  // Seeds a non-local reaching definition for an incoming function parameter register.
+  void SetEntryParameter(Register reg);
 
  private:
   // Register state table (32 GPRs)
