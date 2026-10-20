@@ -27,7 +27,7 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
   auto check_saved_inst = [&](const Instruction& inst) {
     if ((inst.opcode == Opcode::kSw || inst.opcode == Opcode::kSd) &&
         (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
-        inst.rt.has_value() && inst.immediate > 0) {
+        inst.rt.has_value() && inst.immediate >= 0) {
       Register r = *inst.rt;
       if (((r >= Register::kS0 && r <= Register::kS7) || r == Register::kFp ||
            r == Register::kRa) &&
@@ -40,7 +40,7 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
 
     if ((inst.opcode == Opcode::kSwc1 || inst.opcode == Opcode::kSdc1) &&
         (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
-        inst.ft.has_value() && inst.immediate > 0) {
+        inst.ft.has_value() && inst.immediate >= 0) {
       FpRegister fr = *inst.ft;
       if (fr >= FpRegister::kF20 && fr <= FpRegister::kF31 && !defined_fprs.contains(fr)) {
         result.saved_fpr_offsets.try_emplace(fr, inst.immediate);
@@ -234,9 +234,24 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           call_candidate_stores[offset] = ArgStore{offset, sz};
         };
 
+        bool saw_prior_call = false;
         for (int k = static_cast<int>(i) - 1; k >= 0; --k) {
-          if (block.instructions[k].IsCall()) break;
+          if (block.instructions[k].IsCall()) {
+            saw_prior_call = true;
+            break;
+          }
           check_candidate(block.instructions[k]);
+        }
+
+        if (!saw_prior_call) {
+          for (uint32_t pred_id : block.predecessors) {
+            const auto* pred = cfg.GetBlock(pred_id);
+            if (pred == nullptr) continue;
+            for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
+              if (pred->instructions[k].IsCall()) break;
+              check_candidate(pred->instructions[k]);
+            }
+          }
         }
 
         if (i + 1 < block.instructions.size()) {

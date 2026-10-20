@@ -3864,5 +3864,139 @@ void LinkedListInvokeCallbackPerNode(ListNode* curr, s32 ctx) {
                           opts);
 }
 
+// ============================================================================
+// Category 29: Leaf Saved Registers, Multi-Arg Stack Calls, and Mixed Float/Int
+// ============================================================================
+
+TEST_F(RoundTripTest, LeafFunctionSavingCalleeSavedAtSpZero) {
+  AssertRoundTripBitExact("LeafFunctionSavingCalleeSavedAtSpZero", R"(
+s32 LeafFunctionSavingCalleeSavedAtSpZero(s32* a, s32* b, s32* c, s32* d) {
+    s32 sum = 0;
+    s32 i = 0;
+    while (i < 16) {
+        s32 v0 = a[i];
+        s32 v1 = b[i];
+        s32 v2 = c[i];
+        s32 v3 = d[i];
+        s32 v4 = a[i + 1];
+        s32 v5 = b[i + 1];
+        s32 v6 = c[i + 1];
+        s32 v7 = d[i + 1];
+        sum += (v0 ^ v1) + (v2 ^ v3) + (v4 ^ v5) + (v6 ^ v7);
+        i++;
+    }
+    return sum;
+}
+)");
+}
+
+TEST_F(RoundTripTest, StackLocalBufferWithMixedThreeCallSizes) {
+  AssertRoundTripBitExact("StackLocalBufferWithMixedThreeCallSizes", R"(
+extern void CallSevenArgs(s32 a0, s32* out_buf, s32 a2, s32 a3, f32 a4, f32 a5, f32 a6);
+extern void CallTenArgs(s32 a0, s32 a1, s32 a2, s32 a3, f32 a4, f32 a5, f32 a6, f32 a7, f32 a8, f32 a9);
+extern void CallTwelveArgs(s32 a0, s32 a1, s32 a2, s32 a3, f32 a4, f32 a5, f32 a6, f32 a7, f32 a8, f32 a9, s32 a10, s32 a11);
+
+s32 StackLocalBufferWithMixedThreeCallSizes(s32* p, s32 mode) {
+    s32 local_buf[2];
+    CallSevenArgs(p[0], local_buf, p[1], p[2], *(f32*)&p[3], *(f32*)&p[4], *(f32*)&p[5]);
+    if (mode == 0) {
+        CallTenArgs(local_buf[0], p[6], p[7], p[8], *(f32*)&p[9], *(f32*)&p[10], *(f32*)&p[11], *(f32*)&p[12], *(f32*)&p[13], *(f32*)&p[14]);
+    } else {
+        CallTwelveArgs(local_buf[0], p[6], p[7], p[8], *(f32*)&p[9], *(f32*)&p[10], *(f32*)&p[11], *(f32*)&p[12], *(f32*)&p[13], *(f32*)&p[14], p[15], p[16]);
+    }
+    return local_buf[0];
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallWithSevenConstantAndStackArgsInsideBranch) {
+  AssertRoundTripBitExact("CallWithSevenConstantAndStackArgsInsideBranch", R"(
+extern void InitConfigSevenArgs(s32 a0, s32 a1, s32 a2, s32 a3, s32 a4, s32 a5, s32 a6);
+extern void PreStep(void);
+
+void CallWithSevenConstantAndStackArgsInsideBranch(s32 flag, s8* state) {
+    if (flag != 0) {
+        PreStep();
+        InitConfigSevenArgs(0, 8, 2, 64, 64, 256, 4096);
+        state[0] = 0;
+        state[1] = 0;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallWithSignExtendedHalfwordFifthArgInsideLoop) {
+  AssertRoundTripBitExact("CallWithSignExtendedHalfwordFifthArgInsideLoop", R"(
+extern void SubmitRectFiveArgs(s32 handle, s32 x, s32 y, s32 w, s32 h);
+
+void CallWithSignExtendedHalfwordFifthArgInsideLoop(s32 handle, s16* coords, s16* end) {
+    while (coords != end) {
+        s32 h = (s16)(coords[3] + 6);
+        SubmitRectFiveArgs(handle, (s16)(coords[0] - 6), (s16)(coords[1] - 6), (s16)(coords[2] + 6), h);
+        coords += 4;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatParamsAfterTwoPointerParamsWithCalls) {
+  AssertRoundTripBitExact("FloatParamsAfterTwoPointerParamsWithCalls", R"(
+extern void ApplyForce(s32* dst, f32 fx, f32 fy);
+
+void FloatParamsAfterTwoPointerParamsWithCalls(s32* dst, s32* src, f32 scale_x, f32 scale_y) {
+    f32 x = (f32)src[0] * scale_x;
+    f32 y = (f32)src[1] * scale_y;
+    ApplyForce(dst, x, y);
+}
+)");
+}
+
+TEST_F(RoundTripTest, UnsignedByteLoadsConvertedToFloatStackArgs) {
+  AssertRoundTripBitExact("UnsignedByteLoadsConvertedToFloatStackArgs", R"(
+extern void ComputePlane(s32* out_plane, f32 x0, f32 y0, f32 z0, f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2);
+
+void UnsignedByteLoadsConvertedToFloatStackArgs(s32* out_plane, u8* pts) {
+    ComputePlane(out_plane, (f32)pts[1], (f32)pts[2], (f32)pts[3], (f32)pts[4], (f32)pts[5], (f32)pts[6], (f32)pts[7], (f32)pts[8], (f32)pts[9]);
+}
+)");
+}
+
+TEST_F(RoundTripTest, VoidFunctionUpdatingPointerHeadWithoutReturn) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 val;
+} ListNode;
+)";
+  AssertRoundTripBitExact("VoidFunctionUpdatingPointerHeadWithoutReturn", R"(
+void VoidFunctionUpdatingPointerHeadWithoutReturn(ListNode** head) {
+    ListNode* first = *head;
+    if (first != 0) {
+        *head = first->next;
+    }
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, MultipleCallsWithFiveStackArgsInSwitchCases) {
+  AssertRoundTripBitExact("MultipleCallsWithFiveStackArgsInSwitchCases", R"(
+extern s32 SetupLayerFiveArgs(s32 id, s32 a, s32 b, s32 addr, s32 extra);
+
+s32 MultipleCallsWithFiveStackArgsInSwitchCases(s32 cmd) {
+    s32 res = 0;
+    if (cmd == 1) {
+        res = SetupLayerFiveArgs(0, 14, 14, 0x1000, 0x2000);
+    } else if (cmd == 2) {
+        res = SetupLayerFiveArgs(0, 255, 255, 255, 255);
+    } else if (cmd == 3) {
+        res = SetupLayerFiveArgs(0, 0, 0, 0, 0);
+    }
+    return res;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

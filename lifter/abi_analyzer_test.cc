@@ -211,5 +211,26 @@ TEST(AbiAnalyzerTest, DetectFloatParametersSavedToCalleeSavedFprAcrossCalls) {
   EXPECT_TRUE(float_regs.contains(Register::kA2));
 }
 
+TEST(AbiAnalyzerTest, DetectFloatParametersMovedToCallerSavedFprBeforeCall) {
+  // Incoming $a2 and $a3 are moved via mtc1 into caller-saved $f2/$f4 and stored before a call,
+  // while $a2 is later overwritten for an outgoing call argument.
+  std::vector<uint32_t> words = {
+      0x44861000,  // mtc1 $a2, $f2
+      0x44872000,  // mtc1 $a3, $f4
+      0x46041080,  // add.s $f2, $f2, $f4
+      0xE4820000,  // swc1 $f2, 0($a0)
+      0x0C000400,  // jal 0x80001000
+      0x24060001,  // addiu $a2, $zero, 1
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_regs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_regs.contains(Register::kA2));
+  EXPECT_TRUE(float_regs.contains(Register::kA3));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

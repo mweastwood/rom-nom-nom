@@ -133,6 +133,8 @@ struct FunctionLiftContext {
   const absl::flat_hash_set<Register>* float_parameters_in_general_registers = nullptr;
   uint32_t outgoing_args_size = 0;
   int32_t sp_buffer_size = 0;
+  const ControlFlowGraph* cfg = nullptr;
+  uint32_t current_block_id = 0;
 };
 
 // Lifts instructions within basic blocks into structured statements and expressions.
@@ -246,7 +248,8 @@ class ExpressionBuilder {
       std::vector<LiftedStatement>& statements, bool sp_address_taken = false,
       const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr,
       int32_t sp_base_offset = 16,
-      const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr);
+      const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr,
+      const ControlFlowGraph* cfg = nullptr, uint32_t current_block_id = 0);
 };
 
 }  // namespace rom_nom_nom

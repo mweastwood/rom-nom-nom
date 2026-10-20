@@ -686,7 +686,8 @@ bool RegisterTracker::Merge(const RegisterTracker& other) {
     bool same_def =
         reaching_defs_[r].has_value() && other.reaching_defs_[r].has_value() &&
         reaching_defs_[r]->instruction_index == other.reaching_defs_[r]->instruction_index &&
-        reaching_defs_[r]->vram == other.reaching_defs_[r]->vram;
+        reaching_defs_[r]->vram == other.reaching_defs_[r]->vram &&
+        reaching_defs_[r]->reg == other.reaching_defs_[r]->reg;
     if (!same_def && reaching_defs_[r].has_value()) {
       reaching_defs_[r] = std::nullopt;
       changed = true;

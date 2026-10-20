@@ -335,7 +335,8 @@ void ExpressionBuilder::LiftCallInstruction(
     const absl::flat_hash_set<std::string>* functions_returning_f0, RegisterTracker& tracker,
     std::vector<LiftedStatement>& statements, bool sp_address_taken,
     const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info, int32_t sp_base_offset,
-    const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets) {
+    const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets, const ControlFlowGraph* cfg,
+    uint32_t current_block_id) {
   bool v0_used_after_call = false;
   bool v1_used_after_call = false;
   bool f0_used_after_call = false;
@@ -486,7 +487,8 @@ void ExpressionBuilder::LiftCallInstruction(
       }
     }
   }
-  if (highest_defined_argument_index < 0 &&
+  bool is_entry_block = (cfg == nullptr || current_block_id == cfg->EntryBlockId());
+  if (is_entry_block && highest_defined_argument_index < 0 &&
       !tracker.GetReachingDefinition(Register::kA0).has_value()) {
     bool has_prior_call_or_a0_def = false;
     bool has_prologue_ra_save = false;
@@ -530,30 +532,120 @@ void ExpressionBuilder::LiftCallInstruction(
     }
   }
   if (argument_count < 0) {
+    bool has_prior_call_in_block = false;
+    for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+      if (instructions_to_process[j].IsCall()) {
+        has_prior_call_in_block = true;
+        break;
+      }
+    }
+
     int32_t max_stack_arg_offset = sp_address_taken ? sp_base_offset : 80;
+    auto is_stack_arg_store = [&](const Instruction& prev_inst) -> bool {
+      if (!prev_inst.IsStore() || prev_inst.rs != Register::kSp || prev_inst.immediate < 16 ||
+          prev_inst.immediate >= max_stack_arg_offset || (prev_inst.immediate % 4 != 0)) {
+        return false;
+      }
+      if (prev_inst.rt.has_value()) {
+        Register rt = *prev_inst.rt;
+        if (rt == Register::kRa || rt == Register::kFp) {
+          return false;
+        }
+        if (rt >= Register::kS0 && rt <= Register::kS7) {
+          if (saved_reg_offsets == nullptr) {
+            return false;
+          }
+          auto it = saved_reg_offsets->find(rt);
+          if (it == saved_reg_offsets->end() || it->second <= prev_inst.immediate) {
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+
+    if (!has_prior_call_in_block && cfg != nullptr) {
+      const BasicBlock* curr_block = cfg->GetBlock(current_block_id);
+      if (curr_block != nullptr && !curr_block->predecessors.empty()) {
+        for (int arg_index = 3; arg_index > highest_defined_argument_index; --arg_index) {
+          Register reg = argument_registers[arg_index];
+          bool used_in_curr_before_call = false;
+          for (size_t j = 0; j < i; ++j) {
+            RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[j]);
+            for (Register u : ud.gpr_uses) {
+              if (u == reg) {
+                used_in_curr_before_call = true;
+                break;
+              }
+            }
+            if (used_in_curr_before_call) break;
+          }
+          if (used_in_curr_before_call) continue;
+
+          bool defined_for_call_in_pred = false;
+          for (uint32_t pred_id : curr_block->predecessors) {
+            const BasicBlock* pred = cfg->GetBlock(pred_id);
+            if (pred == nullptr || pred->instructions.empty()) continue;
+            bool read_since_end = false;
+            size_t sz = pred->instructions.size();
+            if (sz >= 2 && (pred->instructions[sz - 2].IsBranch() ||
+                            pred->instructions[sz - 2].opcode == Opcode::kJ ||
+                            pred->instructions[sz - 2].opcode == Opcode::kJr)) {
+              RegisterUseDef br_ud = GetInstructionUseDef(pred->instructions[sz - 2]);
+              for (Register u : br_ud.gpr_uses) {
+                if (u == reg) read_since_end = true;
+              }
+            }
+            for (int k = static_cast<int>(sz) - 1; k >= 0; --k) {
+              const auto& pinst = pred->instructions[k];
+              if (pinst.IsCall()) break;
+              RegisterUseDef pud = GetInstructionUseDef(pinst);
+              bool defs_reg = false;
+              for (Register d : pud.gpr_defs) {
+                if (d == reg) defs_reg = true;
+              }
+              if (defs_reg) {
+                if (!read_since_end) {
+                  defined_for_call_in_pred = true;
+                }
+                break;
+              }
+              for (Register u : pud.gpr_uses) {
+                if (u == reg) read_since_end = true;
+              }
+            }
+            if (defined_for_call_in_pred) break;
+          }
+          if (defined_for_call_in_pred) {
+            highest_defined_argument_index = arg_index;
+            break;
+          }
+        }
+      }
+    }
+
     if (max_stack_arg_offset > 16) {
       absl::flat_hash_set<int32_t> stack_arg_offsets;
       for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
         const auto& prev_inst = instructions_to_process[j];
         if (prev_inst.IsCall()) break;
-        if (prev_inst.IsStore() && prev_inst.rs == Register::kSp && prev_inst.immediate >= 16 &&
-            prev_inst.immediate < max_stack_arg_offset && (prev_inst.immediate % 4 == 0)) {
-          if (prev_inst.rt.has_value()) {
-            Register rt = *prev_inst.rt;
-            if (rt == Register::kRa || rt == Register::kFp) {
-              continue;
-            }
-            if (rt >= Register::kS0 && rt <= Register::kS7) {
-              if (saved_reg_offsets == nullptr) {
-                continue;
-              }
-              auto it = saved_reg_offsets->find(rt);
-              if (it == saved_reg_offsets->end() || it->second <= prev_inst.immediate) {
-                continue;
+        if (is_stack_arg_store(prev_inst)) {
+          stack_arg_offsets.insert(prev_inst.immediate);
+        }
+      }
+      if (!has_prior_call_in_block && cfg != nullptr) {
+        const BasicBlock* curr_block = cfg->GetBlock(current_block_id);
+        if (curr_block != nullptr) {
+          for (uint32_t pred_id : curr_block->predecessors) {
+            const BasicBlock* pred = cfg->GetBlock(pred_id);
+            if (pred == nullptr) continue;
+            for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
+              if (pred->instructions[k].IsCall()) break;
+              if (is_stack_arg_store(pred->instructions[k])) {
+                stack_arg_offsets.insert(pred->instructions[k].immediate);
               }
             }
           }
-          stack_arg_offsets.insert(prev_inst.immediate);
         }
       }
       if (stack_arg_offsets.contains(16)) {
@@ -744,7 +836,9 @@ void ExpressionBuilder::LiftCallInstruction(
 std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(const BasicBlock& block,
                                                           const FunctionLiftContext& ctx,
                                                           bool omit_last_instruction) {
-  return LiftInstructions(block.instructions, ctx, omit_last_instruction);
+  FunctionLiftContext block_ctx = ctx;
+  block_ctx.current_block_id = block.id;
+  return LiftInstructions(block.instructions, block_ctx, omit_last_instruction);
 }
 
 std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
@@ -967,6 +1061,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   RegisterTracker tracker;
   if (initial_tracker != nullptr) {
     tracker = *initial_tracker;
+    tracker.PrepareForBlock();
   }
   auto lift_reg = [&](Register r) { return LiftRegisterOrConstant(r, tracker, has_frame_pointer); };
   auto make_reg_offset_expr = [&](Register r, int16_t imm) -> std::unique_ptr<LiftedExpression> {
@@ -2274,7 +2369,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         LiftCallInstruction(inst, i, instructions_to_process, symbol_index,
                             function_parameter_counts, function_fp_parameter_counts,
                             functions_returning_v0, functions_returning_f0, tracker, statements,
-                            sp_address_taken, call_return_info, sp_base_offset, saved_reg_offsets);
+                            sp_address_taken, call_return_info, sp_base_offset, saved_reg_offsets,
+                            ctx.cfg, ctx.current_block_id);
         break;
 
       case Opcode::kJr:
@@ -2285,19 +2381,96 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kLwc1:
         if (inst.ft.has_value() && inst.rs.has_value()) {
+          bool is_stack_base =
+              (*inst.rs == Register::kSp) || (has_frame_pointer && *inst.rs == Register::kFp);
+          if (is_stack_base && saved_fpr_offsets != nullptr) {
+            auto it = saved_fpr_offsets->find(*inst.ft);
+            if (it != saved_fpr_offsets->end() && it->second == inst.immediate) {
+              // Callee-saved float register epilogue restore, omit from C body
+              break;
+            }
+          }
+          int ft_idx = static_cast<int>(*inst.ft);
+          bool only_used_by_int_to_fp_cvt = false;
+          for (size_t look = i + 1; look < loop_end; ++look) {
+            const Instruction& future_inst = instructions_to_process[look];
+            if ((future_inst.opcode == Opcode::kCvtSW || future_inst.opcode == Opcode::kCvtDW) &&
+                future_inst.fs == *inst.ft) {
+              bool reused_after_cvt = false;
+              if (future_inst.fd != *inst.ft) {
+                for (size_t k = look + 1; k < loop_end; ++k) {
+                  RegisterUseDef kud = GetInstructionUseDef(instructions_to_process[k]);
+                  for (FpRegister u : kud.fpr_uses) {
+                    if (u == *inst.ft || (static_cast<int>(u) & ~1) == (ft_idx & ~1)) {
+                      reused_after_cvt = true;
+                      break;
+                    }
+                  }
+                  if (reused_after_cvt) break;
+                  bool redefined = false;
+                  for (FpRegister d : kud.fpr_defs) {
+                    if (d == *inst.ft || (static_cast<int>(d) & ~1) == (ft_idx & ~1)) {
+                      redefined = true;
+                      break;
+                    }
+                  }
+                  if (redefined || instructions_to_process[k].IsCall()) break;
+                }
+              }
+              only_used_by_int_to_fp_cvt = !reused_after_cvt;
+              break;
+            }
+            RegisterUseDef fud = GetInstructionUseDef(future_inst);
+            bool touches_ft_or_rs = false;
+            for (FpRegister u : fud.fpr_uses) {
+              if (u == *inst.ft || (static_cast<int>(u) & ~1) == (ft_idx & ~1)) {
+                touches_ft_or_rs = true;
+              }
+            }
+            for (FpRegister d : fud.fpr_defs) {
+              if (d == *inst.ft || (static_cast<int>(d) & ~1) == (ft_idx & ~1)) {
+                touches_ft_or_rs = true;
+              }
+            }
+            for (Register d : fud.gpr_defs) {
+              if (d == *inst.rs) {
+                touches_ft_or_rs = true;
+              }
+            }
+            if (touches_ft_or_rs || future_inst.IsCall() || future_inst.IsStore()) {
+              break;
+            }
+          }
+          if (only_used_by_int_to_fp_cvt) {
+            if (is_stack_base) {
+              int32_t offset = inst.immediate;
+              if (is_sp_offset(offset)) {
+                pending_int_to_fp[ft_idx] = LiftedExpression::Load("s32", make_sp_addr(offset));
+              } else {
+                uint32_t base_offset = frame_size + 16;
+                int arg_idx = -1;
+                if (offset >= static_cast<int32_t>(base_offset)) {
+                  arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
+                }
+                if (arg_idx >= 0) {
+                  pending_int_to_fp[ft_idx] =
+                      LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx));
+                } else {
+                  pending_int_to_fp[ft_idx] = LiftedExpression::Variable(StackVarName(offset));
+                }
+              }
+            } else {
+              pending_int_to_fp[ft_idx] =
+                  LiftedExpression::Load("s32", make_reg_offset_expr(*inst.rs, inst.immediate));
+            }
+            fpr_const_bits[ft_idx] = std::nullopt;
+            break;
+          }
+
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = FpRegisterVarName(*inst.ft);
-          bool is_stack_base =
-              (*inst.rs == Register::kSp) || (has_frame_pointer && *inst.rs == Register::kFp);
           if (is_stack_base) {
-            if (saved_fpr_offsets != nullptr) {
-              auto it = saved_fpr_offsets->find(*inst.ft);
-              if (it != saved_fpr_offsets->end() && it->second == inst.immediate) {
-                // Callee-saved float register epilogue restore, omit from C body
-                break;
-              }
-            }
             int32_t offset = inst.immediate;
             if (is_sp_offset(offset)) {
               statement.expression = LiftedExpression::Load("f32", make_sp_addr(offset));
@@ -3100,7 +3273,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
     {
       RegisterUseDef ud = GetInstructionUseDef(inst);
-      if (inst.opcode != Opcode::kMtc1) {
+      if (inst.opcode != Opcode::kMtc1 && inst.opcode != Opcode::kLwc1) {
         for (FpRegister d : ud.fpr_defs) {
           int idx = static_cast<int>(d);
           if (idx >= 0 && idx < 32) {

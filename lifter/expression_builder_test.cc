@@ -2637,5 +2637,18 @@ TEST(ExpressionBuilderTest, NonAdjacentCop1IntFloatConversionsScheduledAcrossIns
   EXPECT_EQ(stmts[3].ToString(), "v0 = (s32)f6;\n");
 }
 
+TEST(ExpressionBuilderTest, Lwc1FollowedByCvtSWLiftsAsDirectIntToFloatMemoryLoad) {
+  // 00: lwc1    $f0, 4($a0)
+  // 04: cvt.s.w $f2, $f0
+  std::vector<uint32_t> words = {
+      0xC4800004,  // lwc1    $f0, 4($a0)
+      0x468000A0,  // cvt.s.w $f2, $f0
+  };
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 1u);
+  EXPECT_EQ(stmts[0].ToString(), "f2 = (f32)*(s32*)(arg0 + 4);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

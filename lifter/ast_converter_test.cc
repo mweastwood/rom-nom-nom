@@ -2155,7 +2155,7 @@ TEST(AstConverterTest, DeadPreCallArgAssignmentsEliminatedAndSignExtendedCallFol
   FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
   std::string code = func.ToString();
   EXPECT_THAT(code, Not(HasSubstr("arg1 = v0;")));
-  EXPECT_THAT(code, HasSubstr("return ((QueryShortStatus(arg0, *(s32*)(arg0 + 4)) << 16) >> 16);"));
+  EXPECT_THAT(code, HasSubstr("return (s16)QueryShortStatus(arg0, *(s32*)(arg0 + 4));"));
 }
 
 TEST(AstConverterTest, FloatInGprAndStackCallArgumentsRewrittenWithCalleeSavedFprBinding) {
@@ -2312,6 +2312,72 @@ TEST(AstConverterTest, CrossBlockEntryParametersPassedToCallAndGlobalArrayElemen
   std::string code = func.ToString();
   EXPECT_THAT(code, HasSubstr("NotifySlotChanged(arg0, arg1);"));
   EXPECT_THAT(code, HasSubstr("*(s32*)(&g_slot_status + arg0)"));
+}
+
+TEST(AstConverterTest, InlinesCrossJumpedCallTailsAndSimplifiesSignExtensionShiftPairs) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "DispatchCmd" address: 0x80001000 type: SYMBOL_FUNC }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  // Outer `if (arg0 > 0)` sets `arg1 = (s16)arg1` and jumps to shared call block 0x2C;
+  // `else if (arg1 > 0)` sets `arg1 = 7` and falls through to shared call block 0x2C;
+  // `else` jumps to epilogue 0x34 (mirroring CallWithSevenConstantAndStackArgsInsideBranch):
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 16($sp)
+  // 08: blez  $a0, +4 -> 0x1C (else branch)
+  // 0C: nop
+  // 10: sll   $v0, $a1, 16
+  // 14: b     +5 -> 0x2C (shared call block)
+  // 18: sra   $a1, $v0, 16
+  // 1C: blez  $a1, +5 -> 0x34 (epilogue)
+  // 20: nop
+  // 24: addiu $a1, $zero, 7
+  // 28: nop
+  // 2C: jal   0x80001000 (DispatchCmd)
+  // 30: nop
+  // 34: lw    $ra, 16($sp)
+  // 38: jr    $ra
+  // 3C: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x18800004,  // 08: blez  $a0, +4 -> 0x1C
+      0x00000000,  // 0C: nop
+      0x00051400,  // 10: sll   $v0, $a1, 16
+      0x10000005,  // 14: b     +5 -> 0x2C
+      0x00022C03,  // 18: sra   $a1, $v0, 16
+      0x18A00005,  // 1C: blez  $a1, +5 -> 0x34
+      0x00000000,  // 20: nop
+      0x24050007,  // 24: addiu $a1, $zero, 7
+      0x00000000,  // 28: nop
+      0x0C000400,  // 2C: jal   0x80001000 (DispatchCmd)
+      0x00000000,  // 30: nop
+      0x8FBF0010,  // 34: lw    $ra, 16($sp)
+      0x03E00008,  // 38: jr    $ra
+      0x27BD0018,  // 3C: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestCrossJumpedCallAndSignExtend";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("arg1 = (s16)arg1;"));
+  EXPECT_THAT(code, HasSubstr("DispatchCmd(arg0, arg1);"));
+  EXPECT_THAT(code, HasSubstr("DispatchCmd(arg0, 7);"));
+  EXPECT_THAT(code, Not(HasSubstr("goto ")));
 }
 
 }  // namespace

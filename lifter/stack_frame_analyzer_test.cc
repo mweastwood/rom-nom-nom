@@ -167,5 +167,49 @@ TEST(StackFrameAnalyzerTest, RecognizesCalleeSavedRegisterStoresAtLowOffsetsAsOu
   EXPECT_EQ(analysis.sp_buffer_size, 64);
 }
 
+TEST(StackFrameAnalyzerTest, RecognizesLeafSavedRegisterAtSpZeroAndPredecessorOutgoingStackArgs) {
+  // 1) Leaf function saving $s0 at 0($sp) with 8-byte frame:
+  std::vector<uint32_t> leaf_words = {
+      0x27BDFFF8,  // addiu $sp, $sp, -8
+      0xAFB00000,  // sw    $s0, 0($sp)
+      0x24900001,  // addiu $s0, $a0, 1
+      0x02001021,  // addu  $v0, $s0, $zero
+      0x8FB00000,  // lw    $s0, 0($sp)
+      0x03E00008,  // jr    $ra
+      0x27BD0008,  // addiu $sp, $sp, 8
+  };
+  auto leaf_insts = *DecodeSequence(leaf_words, 0x80000000);
+  auto leaf_cfg = *ControlFlowGraph::Build(leaf_insts);
+  StackFrameAnalysis leaf_analysis = StackFrameAnalyzer::Analyze(leaf_cfg);
+  EXPECT_EQ(leaf_analysis.frame_size, 8);
+  EXPECT_FALSE(leaf_analysis.has_calls);
+  ASSERT_TRUE(leaf_analysis.prologue.saved_reg_offsets.contains(Register::kS0));
+  EXPECT_EQ(leaf_analysis.prologue.saved_reg_offsets.at(Register::kS0), 0);
+  EXPECT_EQ(leaf_analysis.prologue.min_saved_reg_offset, 0u);
+
+  // 2) Non-leaf function where predecessor branches store outgoing args at 16($sp) and 20($sp)
+  // before jumping to a shared call block, while a local buffer starts at 24($sp):
+  std::vector<uint32_t> branch_call_words = {
+      0x27BDFFC8,  // 00: addiu $sp, $sp, -56
+      0xAFBF0030,  // 04: sw    $ra, 48($sp)
+      0x10800004,  // 08: beqz  $a0, +4 -> 0x1C
+      0x27A50018,  // 0C: addiu $a1, $sp, 24
+      0xAFA60010,  // 10: sw    $a2, 16($sp)
+      0x10000002,  // 14: b     +2 -> 0x20
+      0xAFA70014,  // 18: sw    $a3, 20($sp)
+      0xAFA70010,  // 1C: sw    $a3, 16($sp)
+      0x0C000400,  // 20: jal   0x80001000
+      0xAFA60014,  // 24: sw    $a2, 20($sp)
+      0x8FBF0030,  // 28: lw    $ra, 48($sp)
+      0x03E00008,  // 2C: jr    $ra
+      0x27BD0038,  // 30: addiu $sp, $sp, 56
+  };
+  auto branch_insts = *DecodeSequence(branch_call_words, 0x80000000);
+  auto branch_cfg = *ControlFlowGraph::Build(branch_insts);
+  StackFrameAnalysis branch_analysis = StackFrameAnalyzer::Analyze(branch_cfg);
+  EXPECT_EQ(branch_analysis.outgoing_args_size, 24);
+  EXPECT_EQ(branch_analysis.sp_buffer_size, 24);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
