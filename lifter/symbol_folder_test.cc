@@ -589,5 +589,23 @@ TEST(SymbolFolderTest, CrossBlockHiWithLocalIndexedAdduFoldsAndSuppressesAddu) {
   EXPECT_THAT(folder.GetFoldedLo(1), NotNull());
 }
 
+TEST(SymbolFolderTest, SanitizesLeadingDotSectionSymbolsToSynthesizedDataName) {
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(R"pb(
+    entries { name: ".rodata" address: 0x80050000 type: SYMBOL_DATA }
+  )pb");
+  ASSERT_TRUE(sym_idx_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x3C018005,  // 0: lui  $at, 0x8005
+      0xD4260000,  // 1: ldc1 $f6, 0($at)
+  };
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts, &(*sym_idx_or));
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  EXPECT_EQ(folder.AllFolded()[0].symbol_name, "D_80050000");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -130,5 +130,42 @@ TEST(StackFrameAnalyzerTest, LargeFrameWithCalleeSavedFpAndOutgoingArgs) {
   EXPECT_EQ(analysis.sp_buffer_size, 56);
 }
 
+TEST(StackFrameAnalyzerTest, RecognizesCalleeSavedRegisterStoresAtLowOffsetsAsOutgoingCallArgs) {
+  // 136-byte frame where $s0..$s2 are saved at 96..104($sp) in prologue,
+  // loaded with incoming stack args 152..160($sp), and stored at 16..24($sp) as outgoing call args
+  // while a local buffer starts at 32($sp).
+  std::vector<uint32_t> words = {
+      0x27BDFF78,  // addiu $sp, $sp, -136
+      0xAFB00060,  // sw $s0, 96($sp)
+      0x8FB00098,  // lw $s0, 152($sp)
+      0xAFB10064,  // sw $s1, 100($sp)
+      0x8FB1009C,  // lw $s1, 156($sp)
+      0xAFB20068,  // sw $s2, 104($sp)
+      0x8FB200A0,  // lw $s2, 160($sp)
+      0xAFBF006C,  // sw $ra, 108($sp)
+      0x27A40020,  // addiu $a0, $sp, 32
+      0xAFB00010,  // sw $s0, 16($sp)
+      0xAFB10014,  // sw $s1, 20($sp)
+      0x0C000400,  // jal 0x80001000
+      0xAFB20018,  // sw $s2, 24($sp)
+      0x8FBF006C,  // lw $ra, 108($sp)
+      0x8FB20068,  // lw $s2, 104($sp)
+      0x8FB10064,  // lw $s1, 100($sp)
+      0x8FB00060,  // lw $s0, 96($sp)
+      0x27BD0088,  // addiu $sp, $sp, 136
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+  EXPECT_EQ(analysis.frame_size, 136);
+  EXPECT_TRUE(analysis.sp_address_taken);
+  EXPECT_EQ(analysis.prologue.min_saved_reg_offset, 96u);
+  EXPECT_EQ(analysis.outgoing_args_size, 32);
+  EXPECT_EQ(analysis.sp_buffer_size, 64);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

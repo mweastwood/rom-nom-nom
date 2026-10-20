@@ -370,7 +370,10 @@ typedef double f64;
         } else {
           const auto& orig_rel = orig_it->second;
           const auto& cand_rel = cand_it->second;
-          if (orig_rel.type != cand_rel.type || orig_rel.symbol_name != cand_rel.symbol_name) {
+          bool sym_matches =
+              (orig_rel.symbol_name == cand_rel.symbol_name) ||
+              (orig_rel.symbol_name == ".rodata" && absl::StartsWith(cand_rel.symbol_name, "D_"));
+          if (orig_rel.type != cand_rel.type || !sym_matches) {
             line_matches = false;
           } else {
             uint32_t mask = 0xFFFFFFFF;
@@ -3630,6 +3633,235 @@ s32 GlobalParallelArraysReadAndUpdate(s32 idx, s32 new_state) {
     return g_slot_ids[idx];
 }
 )");
+}
+
+// ============================================================================
+// Category 28: Linked-List Traversal, Pointer Loops, and Multi-Argument Calls
+// ============================================================================
+
+TEST_F(RoundTripTest, LinkedListSortedInsertVoid) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 pri;
+    struct ListNode* head_ref;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListSortedInsertVoid", R"(
+void LinkedListSortedInsertVoid(ListNode* head, ListNode* node) {
+    ListNode* prev = head;
+    ListNode* curr = head->next;
+    s32 pri = node->pri;
+    while (curr->pri >= pri) {
+        prev = curr;
+        curr = curr->next;
+    }
+    node->next = prev->next;
+    prev->next = node;
+    node->head_ref = head;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LinkedListPopFrontReturnNode) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 value;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListPopFrontReturnNode", R"(
+ListNode* LinkedListPopFrontReturnNode(ListNode** head_ptr) {
+    ListNode* node = *head_ptr;
+    *head_ptr = node->next;
+    return node;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LinkedListPushFrontVoid) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 value;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListPushFrontVoid", R"(
+void LinkedListPushFrontVoid(ListNode** head_ptr, ListNode* node) {
+    node->next = *head_ptr;
+    *head_ptr = node;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LinkedListSumValuesWhileNotNull) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 value;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListSumValuesWhileNotNull", R"(
+s32 LinkedListSumValuesWhileNotNull(ListNode* curr) {
+    s32 sum = 0;
+    while (curr != 0) {
+        sum += curr->value;
+        curr = curr->next;
+    }
+    return sum;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LinkedListFindNodeByKey) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 key;
+    s32 value;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListFindNodeByKey", R"(
+ListNode* LinkedListFindNodeByKey(ListNode* curr, s32 key) {
+    while (curr != 0) {
+        if (curr->key == key) {
+            return curr;
+        }
+        curr = curr->next;
+    }
+    return 0;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LinkedListClearFlagsVoidLoop) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 flags;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListClearFlagsVoidLoop", R"(
+void LinkedListClearFlagsVoidLoop(ListNode* curr) {
+    while (curr != 0) {
+        curr->flags = 0;
+        curr = curr->next;
+    }
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, PointerLoopUnpackAndScaleToFloatVoid) {
+  AssertRoundTripBitExact("PointerLoopUnpackAndScaleToFloatVoid", R"(
+void PointerLoopUnpackAndScaleToFloatVoid(f32* dst, s32* src) {
+    s32* end = src + 8;
+    do {
+        s32 w0 = src[0];
+        s32 w1 = src[8];
+        dst[0] = (f32)((w0 & 0xFFFF0000) | ((u32)w1 >> 16)) * 1.52587891e-05f;
+        dst[1] = (f32)((w0 << 16) | (w1 & 0xFFFF)) * 1.52587891e-05f;
+        src++;
+        dst += 2;
+    } while (src != end);
+}
+)");
+}
+
+TEST_F(RoundTripTest, StackBufferTwoCallsWithThreeFloatGprParamsAndThreeStackParams) {
+  AssertRoundTripBitExact("StackBufferTwoCallsWithThreeFloatGprParamsAndThreeStackParams", R"(
+extern void UnpackBuffer(f32* dst, s32* src);
+extern void ProcessUnpacked(f32* buf, f32 x, f32 y, f32 z, s32 a, s32 b, s32 c);
+
+void StackBufferTwoCallsWithThreeFloatGprParamsAndThreeStackParams(
+    s32* src, f32 x, f32 y, f32 z, s32 a, s32 b, s32 c) {
+    f32 buf[16];
+    UnpackBuffer(buf, src);
+    ProcessUnpacked(buf, x, y, z, a, b, c);
+}
+)");
+}
+
+TEST_F(RoundTripTest, PreserveTwoFloatGprParamsAcrossCall) {
+  AssertRoundTripBitExact("PreserveTwoFloatGprParamsAcrossCall", R"(
+extern s32 PrepareTarget(s32 id);
+extern void ApplyFloatPair(s32 handle, f32 x, f32 y, s32 extra);
+
+void PreserveTwoFloatGprParamsAcrossCall(s32 id, f32 x, f32 y, s32 extra) {
+    s32 handle = PrepareTarget(id);
+    ApplyFloatPair(handle, x, y, extra);
+}
+)");
+}
+
+TEST_F(RoundTripTest, PointerArrayCopyWithStrideVoidLoop) {
+  AssertRoundTripBitExact("PointerArrayCopyWithStrideVoidLoop", R"(
+void PointerArrayCopyWithStrideVoidLoop(s32* dst, s32* src, s32 count) {
+    if (count > 0) {
+        s32* end = src + count;
+        do {
+            *dst = *src;
+            src++;
+            dst += 2;
+        } while (src != end);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, LinkedListCountMatchingNodes) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 type;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListCountMatchingNodes", R"(
+s32 LinkedListCountMatchingNodes(ListNode* curr, s32 target_type) {
+    s32 count = 0;
+    while (curr != 0) {
+        if (curr->type == target_type) {
+            count++;
+        }
+        curr = curr->next;
+    }
+    return count;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LinkedListInvokeCallbackPerNode) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 id;
+} ListNode;
+)";
+  AssertRoundTripBitExact("LinkedListInvokeCallbackPerNode", R"(
+extern void OnVisitNode(s32 id, s32 ctx);
+
+void LinkedListInvokeCallbackPerNode(ListNode* curr, s32 ctx) {
+    while (curr != 0) {
+        OnVisitNode(curr->id, ctx);
+        curr = curr->next;
+    }
+}
+)",
+                          opts);
 }
 
 }  // namespace

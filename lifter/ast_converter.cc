@@ -2476,6 +2476,8 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
     return count;
   };
 
+  std::optional<size_t> modified_s0_arg0_stmt_idx;
+  bool other_s_reg_coalesced = false;
   for (size_t i = 0; i < comp->Statements().size(); ++i) {
     const auto& s = comp->Statements()[i];
     if (s->Kind() == CStatementKind::kExpressionStatement) {
@@ -2490,15 +2492,28 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
                            (lhs.size() == 2 && lhs[0] == 's' && std::isdigit(lhs[1])));
           bool is_f_reg = (lhs.size() >= 2 && lhs[0] == 'f' && std::isdigit(lhs[1]));
           if (param_names.contains(rhs) && (is_s_reg || is_f_reg)) {
+            std::string body_text = comp->ToString();
             if (!is_assigned(rhs) && count_assignments(lhs) == 1 &&
-                !absl::StrContains(comp->ToString(), absl::StrCat("&", lhs))) {
+                !absl::StrContains(body_text, absl::StrCat("&", lhs)) &&
+                !absl::StrContains(body_text, absl::StrCat("(*)())", lhs))) {
               coalesced_aliases[lhs] = rhs;
               stmts_to_erase.push_back(i);
+              if (is_s_reg) {
+                other_s_reg_coalesced = true;
+              }
+            } else if (i == 0 && lhs == "temp_s0" && rhs == "arg0" && !is_assigned(rhs) &&
+                       !absl::StrContains(body_text, absl::StrCat("&", lhs)) &&
+                       !absl::StrContains(body_text, absl::StrCat("(*)())", lhs))) {
+              modified_s0_arg0_stmt_idx = i;
             }
           }
         }
       }
     }
+  }
+  if (modified_s0_arg0_stmt_idx.has_value() && other_s_reg_coalesced) {
+    coalesced_aliases["temp_s0"] = "arg0";
+    stmts_to_erase.insert(stmts_to_erase.begin(), *modified_s0_arg0_stmt_idx);
   }
 
   if (coalesced_aliases.empty()) return;
@@ -4774,6 +4789,63 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
   }
 }
 
+void DetermineReturnFlags(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
+                          const AstConverterOptions& options, bool* returns_v0, bool* returns_f0) {
+  *returns_v0 = false;
+  *returns_f0 = false;
+  if (options.return_type.has_value()) {
+    std::string rt = options.return_type->ToString();
+    *returns_v0 = (rt != "void" && rt != "f32" && rt != "f64");
+    *returns_f0 = (rt == "f32" || rt == "f64");
+    return;
+  }
+  *returns_f0 = ExpressionBuilder::DetermineReturnsF0(cfg);
+  if (!*returns_f0 && options.functions_returning_f0 != nullptr &&
+      options.functions_returning_f0->contains(options.function_name)) {
+    for (const auto& block : cfg.Blocks()) {
+      for (const auto& inst : block.instructions) {
+        if (inst.IsCall()) {
+          *returns_f0 = true;
+          break;
+        }
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (FpRegister d : ud.fpr_defs) {
+          if (d == FpRegister::kF0) {
+            *returns_f0 = true;
+            break;
+          }
+        }
+        if (*returns_f0) break;
+      }
+      if (*returns_f0) break;
+    }
+  }
+  if (!*returns_f0) {
+    *returns_v0 =
+        ExpressionBuilder::DetermineReturnsV0(cfg, symbol_index, options.functions_returning_v0);
+    if (!*returns_v0 && options.functions_returning_v0 != nullptr &&
+        options.functions_returning_v0->contains(options.function_name)) {
+      for (const auto& block : cfg.Blocks()) {
+        for (const auto& inst : block.instructions) {
+          if (inst.IsCall()) {
+            *returns_v0 = true;
+            break;
+          }
+          RegisterUseDef ud = GetInstructionUseDef(inst);
+          for (Register d : ud.gpr_defs) {
+            if (d == Register::kV0) {
+              *returns_v0 = true;
+              break;
+            }
+          }
+          if (*returns_v0) break;
+        }
+        if (*returns_v0) break;
+      }
+    }
+  }
+}
+
 }  // namespace
 
 absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph& cfg,
@@ -4784,25 +4856,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
 
   bool returns_v0 = false;
   bool returns_f0 = false;
-  if (options.return_type.has_value()) {
-    std::string rt = options.return_type->ToString();
-    returns_v0 = (rt != "void" && rt != "f32" && rt != "f64");
-    returns_f0 = (rt == "f32" || rt == "f64");
-  } else {
-    returns_f0 = ExpressionBuilder::DetermineReturnsF0(cfg);
-    if (!returns_f0 && options.functions_returning_f0 != nullptr &&
-        options.functions_returning_f0->contains(options.function_name)) {
-      returns_f0 = true;
-    }
-    if (!returns_f0) {
-      returns_v0 =
-          ExpressionBuilder::DetermineReturnsV0(cfg, symbol_index, options.functions_returning_v0);
-      if (!returns_v0 && options.functions_returning_v0 != nullptr &&
-          options.functions_returning_v0->contains(options.function_name)) {
-        returns_v0 = true;
-      }
-    }
-  }
+  DetermineReturnFlags(cfg, symbol_index, options, &returns_v0, &returns_f0);
 
   ConverterContext ctx(cfg, symbol_index, root_region, options.game_config,
                        options.function_parameter_counts, options.function_fp_parameter_counts,
@@ -5170,10 +5224,13 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
     };
 
     absl::flat_hash_map<std::string, int> fp_base_counts;
+    bool has_shared_fp_base = false;
     for (const auto& vn : local_vars_to_declare) {
       if (is_fp_reg(vn)) {
         std::string base = absl::EndsWith(vn, "_d") ? vn.substr(0, vn.size() - 2) : vn;
-        fp_base_counts[base]++;
+        if (++fp_base_counts[base] > 1) {
+          has_shared_fp_base = true;
+        }
       }
     }
 
@@ -5506,7 +5563,9 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
             return absl::StrCat("$", base);
           }
           if (base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
-              base == "f16" || base == "f18") {
+              base == "f16" || base == "f18" ||
+              (base == "f0" && is_leaf_func && has_shared_fp_base &&
+               return_type.ToString() == "void")) {
             if (is_caller_saved_safe_across_calls(var_name)) {
               return absl::StrCat("$", base);
             }

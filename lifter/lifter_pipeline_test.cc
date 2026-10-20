@@ -1094,5 +1094,102 @@ entries {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(LifterPipelineTest, VoidCalleeWithCallerReadingV0InJalDelaySlotRemainsVoid) {
+  std::filesystem::path test_dir =
+      std::filesystem::temp_directory_path() / "lifter_delay_slot_v0_test";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir / "roms");
+
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+  subsegments {
+    name: "mod_alpha"
+    type: SUBSEGMENT_C
+    rom_start: 0x1000
+    vram: 0x80020000
+  }
+}
+)";
+  auto cfg_or = ParseGameConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries {
+  name: "CallerWithDelaySlotV0"
+  address: 0x80020000
+  size: 0x1C
+  type: SYMBOL_FUNC
+}
+entries {
+  name: "VoidCallee"
+  address: 0x80020020
+  size: 0x0C
+  type: SYMBOL_FUNC
+}
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  std::vector<uint8_t> rom(0x2000, 0);
+  // CallerWithDelaySlotV0 at 0x1000 (0x80020000):
+  // 0x00: addiu $v0, $a0, 4       (0x24820004)
+  // 0x04: jal   VoidCallee        (0x0C008008)
+  // 0x08: addu  $a1, $v0, $zero   (0x00402821)  <-- reads $v0 in jal delay slot!
+  // 0x0C: jr    $ra               (0x03E00008)
+  // 0x10: nop                     (0x00000000)
+  auto write_word = [&](size_t off, uint32_t w) {
+    rom[off + 0] = (w >> 24) & 0xFF;
+    rom[off + 1] = (w >> 16) & 0xFF;
+    rom[off + 2] = (w >> 8) & 0xFF;
+    rom[off + 3] = w & 0xFF;
+  };
+  write_word(0x1000, 0x24820004);
+  write_word(0x1004, 0x0C008008);
+  write_word(0x1008, 0x00402821);
+  write_word(0x100C, 0x03E00008);
+  write_word(0x1010, 0x00000000);
+
+  // VoidCallee at 0x1020 (0x80020020):
+  // 0x20: sw $a1, 0($a0)          (0xAC850000)  <-- never defines $v0!
+  // 0x24: jr $ra                  (0x03E00008)
+  // 0x28: nop                     (0x00000000)
+  write_word(0x1020, 0xAC850000);
+  write_word(0x1024, 0x03E00008);
+  write_word(0x1028, 0x00000000);
+
+  std::filesystem::path rom_path = test_dir / "roms" / "test-game.z64";
+  std::ofstream rom_file(rom_path, std::ios::binary);
+  rom_file.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  rom_file.close();
+
+  TargetExtractorOptions extractor_opts;
+  extractor_opts.repo_root = test_dir;
+  extractor_opts.game_name = "test-game";
+
+  auto extractor = std::make_unique<TargetExtractor>(extractor_opts, &(*cfg_or), &(*sym_idx_or));
+  auto loader = std::make_unique<FunctionLoader>(std::move(extractor));
+
+  LifterPipelineOptions options;
+  options.repo_root = test_dir;
+  options.game_name = "test-game";
+  options.format_with_clang = false;
+
+  LifterPipeline pipeline(options, std::move(loader));
+  auto decompile_or = pipeline.Decompile("VoidCallee");
+  ASSERT_TRUE(decompile_or.ok()) << decompile_or.status();
+  EXPECT_THAT(decompile_or->c_code, HasSubstr("void VoidCallee("));
+  EXPECT_THAT(decompile_or->c_code, ::testing::Not(HasSubstr("return v0;")));
+
+  std::filesystem::remove_all(test_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

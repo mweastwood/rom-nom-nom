@@ -822,8 +822,8 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
             } else {
               bool preserved_for_return_while_computing_store = false;
               if (has_return_in_seq && instructions[last_def].IsLoad() &&
-                  !instructions[i].IsLoad() && !instructions[i].IsStore() &&
-                  !instructions[i].IsCall() && instructions[i].opcode != Opcode::kMtc1 &&
+                  !instructions[i].IsStore() && !instructions[i].IsCall() &&
+                  instructions[i].opcode != Opcode::kMtc1 &&
                   instructions[i].opcode != Opcode::kDmtc1 &&
                   instructions[i].opcode != Opcode::kMult &&
                   instructions[i].opcode != Opcode::kMultu &&
@@ -1136,6 +1136,14 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
     int last_def = -1;
     int last_call = -1;
     bool used_after_last_def = false;
+    bool any_f0_use = false;
+    bool has_return_in_seq = false;
+    for (const auto& inst : instructions) {
+      if (inst.opcode == Opcode::kJr && inst.rs == Register::kRa) {
+        has_return_in_seq = true;
+        break;
+      }
+    }
     for (size_t i = 0; i < instructions.size(); ++i) {
       if (instructions[i].opcode == Opcode::kJal || instructions[i].opcode == Opcode::kJalr) {
         last_call = static_cast<int>(i);
@@ -1146,6 +1154,7 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
       RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
       for (FpRegister r : ud.fpr_uses) {
         if (r == FpRegister::kF0) {
+          any_f0_use = true;
           if (last_def != -1) {
             used_after_last_def = true;
           }
@@ -1159,6 +1168,11 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
           break;
         }
       }
+      if (has_return_in_seq && last_def != -1 &&
+          (instructions[i].opcode == Opcode::kSwc1 || instructions[i].opcode == Opcode::kSdc1) &&
+          instructions[i].ft.has_value() && *instructions[i].ft != FpRegister::kF0) {
+        used_after_last_def = true;
+      }
     }
     if (last_def != -1) {
       if (used_after_last_def) {
@@ -1166,7 +1180,7 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
       }
       return 1;
     }
-    if (last_call != -1) {
+    if (last_call != -1 || any_f0_use) {
       return -1;
     }
     return 0;

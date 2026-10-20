@@ -187,5 +187,29 @@ TEST(AbiAnalyzerTest, DetectFloatParametersCopiedToCalleeSavedAndFloatCarrierReg
   EXPECT_TRUE(float_regs.contains(Register::kS1));
 }
 
+TEST(AbiAnalyzerTest, DetectFloatParametersSavedToCalleeSavedFprAcrossCalls) {
+  // Incoming $a1 and $a2 are moved to $f20 and $f22 via mtc1 before the first jal,
+  // $a1 is redefined in the delay slot of the first jal for an outgoing integer arg,
+  // and $a1/$a2 are later loaded via mfc1 $a1, $f20 and mfc1 $a2, $f22 for a second jal.
+  std::vector<uint32_t> words = {
+      0x4485A000,  // mtc1 $a1, $f20
+      0x4486B000,  // mtc1 $a2, $f22
+      0x0C000400,  // jal 0x80001000
+      0x00802821,  // addu $a1, $a0, $zero
+      0x4405A000,  // mfc1 $a1, $f20
+      0x4406B000,  // mfc1 $a2, $f22
+      0x0C000410,  // jal 0x80001040
+      0x00000000,  // nop
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_regs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_regs.contains(Register::kA1));
+  EXPECT_TRUE(float_regs.contains(Register::kA2));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

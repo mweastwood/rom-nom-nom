@@ -216,9 +216,15 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           if (offset >= static_cast<int32_t>(analysis.prologue.min_saved_reg_offset)) return;
           if (inst.rt.has_value()) {
             Register r = *inst.rt;
-            if (r == Register::kRa || r == Register::kFp ||
-                (r >= Register::kS0 && r <= Register::kS7)) {
+            if (r == Register::kRa || r == Register::kFp) {
               return;
+            }
+            if (r >= Register::kS0 && r <= Register::kS7) {
+              auto it = analysis.prologue.saved_reg_offsets.find(r);
+              if (it == analysis.prologue.saved_reg_offsets.end() ||
+                  static_cast<int32_t>(it->second) <= offset) {
+                return;
+              }
             }
           }
           if (loaded_offsets.contains(offset)) return;

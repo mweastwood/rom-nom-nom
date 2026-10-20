@@ -518,5 +518,61 @@ TEST(RegisterTrackerTest, PrepareForBlockMarksCrossBlockDefinitionsNonLocal) {
   EXPECT_TRUE(tracker.GetUses(0).empty());
 }
 
+TEST(RegisterTrackerTest, DetermineReturnsV0RecognizesPreservedV0LoadedFromAndStoredBackToHead) {
+  // Pattern from LinkedListPopFrontReturnNode:
+  //   0x80000000: lw $v0, 0($a0)
+  //   0x80000004: lw $v1, 0($v0)
+  //   0x80000008: jr $ra
+  //   0x8000000C: sw $v1, 0($a0)
+  std::vector<uint32_t> words = {
+      0x8C820000,  // lw $v0, 0($a0)
+      0x8C430000,  // lw $v1, 0($v0)
+      0x03E00008,  // jr $ra
+      0xAC830000,  // sw $v1, 0($a0)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_TRUE(DetermineReturnsV0(cfg));
+}
+
+TEST(RegisterTrackerTest, DetermineReturnsF0RejectsLoopConstantF0ConsumedBeforeFloatStores) {
+  // Block 0 (entry):
+  //   0x80000000: lui  $at, 0x3780
+  //   0x80000004: mtc1 $at, $f0
+  //   0x80000008: addiu $t0, $a1, 32
+  // Block 1 (loop body, 0x8000000C):
+  //   0x8000000C: lw      $v0, 0($a1)
+  //   0x80000010: mtc1    $v0, $f2
+  //   0x80000014: cvt.s.w $f2, $f2
+  //   0x80000018: mul.s   $f2, $f2, $f0
+  //   0x8000001C: addiu   $a1, $a1, 4
+  //   0x80000020: swc1    $f2, 0($a0)
+  //   0x80000024: bne     $a1, $t0, 0x8000000C
+  //   0x80000028: addiu   $a0, $a0, 4
+  // Block 2 (epilogue, 0x8000002C):
+  //   0x8000002C: jr $ra
+  //   0x80000030: nop
+  std::vector<uint32_t> words = {
+      0x3C013780,  // lui $at, 0x3780
+      0x44810000,  // mtc1 $at, $f0
+      0x24A80020,  // addiu $t0, $a1, 32
+      0x8CA20000,  // lw $v0, 0($a1)
+      0x44821000,  // mtc1 $v0, $f2
+      0x468010A0,  // cvt.s.w $f2, $f2
+      0x46001082,  // mul.s $f2, $f2, $f0
+      0x24A50004,  // addiu $a1, $a1, 4
+      0xE4820000,  // swc1 $f2, 0($a0)
+      0x14A8FFF9,  // bne $a1, $t0, 0x8000000C
+      0x24840004,  // addiu $a0, $a0, 4
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_FALSE(DetermineReturnsF0(cfg));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

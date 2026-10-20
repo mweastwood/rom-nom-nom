@@ -334,7 +334,8 @@ void ExpressionBuilder::LiftCallInstruction(
     const absl::flat_hash_set<std::string>* functions_returning_v0,
     const absl::flat_hash_set<std::string>* functions_returning_f0, RegisterTracker& tracker,
     std::vector<LiftedStatement>& statements, bool sp_address_taken,
-    const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info) {
+    const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info, int32_t sp_base_offset,
+    const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets) {
   bool v0_used_after_call = false;
   bool v1_used_after_call = false;
   bool f0_used_after_call = false;
@@ -485,6 +486,41 @@ void ExpressionBuilder::LiftCallInstruction(
       }
     }
   }
+  if (highest_defined_argument_index < 0 &&
+      !tracker.GetReachingDefinition(Register::kA0).has_value()) {
+    bool has_prior_call_or_a0_def = false;
+    bool has_prologue_ra_save = false;
+    bool higher_arg_saved_before_call = false;
+    for (size_t j = 0; j < i; ++j) {
+      const auto& prev = instructions_to_process[j];
+      if (prev.IsCall()) {
+        has_prior_call_or_a0_def = true;
+        break;
+      }
+      if (prev.IsStore() && prev.rs == Register::kSp && prev.rt == Register::kRa) {
+        has_prologue_ra_save = true;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(prev);
+      for (Register d : ud.gpr_defs) {
+        if (d == Register::kA0) {
+          has_prior_call_or_a0_def = true;
+        }
+      }
+      for (FpRegister fd : ud.fpr_defs) {
+        if (fd == FpRegister::kF12) {
+          has_prior_call_or_a0_def = true;
+        }
+      }
+      for (Register u : ud.gpr_uses) {
+        if (u == Register::kA1 || u == Register::kA2 || u == Register::kA3) {
+          higher_arg_saved_before_call = true;
+        }
+      }
+    }
+    if (!has_prior_call_or_a0_def && has_prologue_ra_save && higher_arg_saved_before_call) {
+      highest_defined_argument_index = 0;
+    }
+  }
 
   int argument_count = -1;
   if (function_parameter_counts != nullptr) {
@@ -494,18 +530,27 @@ void ExpressionBuilder::LiftCallInstruction(
     }
   }
   if (argument_count < 0) {
-    if (!sp_address_taken) {
+    int32_t max_stack_arg_offset = sp_address_taken ? sp_base_offset : 80;
+    if (max_stack_arg_offset > 16) {
       absl::flat_hash_set<int32_t> stack_arg_offsets;
       for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
         const auto& prev_inst = instructions_to_process[j];
         if (prev_inst.IsCall()) break;
         if (prev_inst.IsStore() && prev_inst.rs == Register::kSp && prev_inst.immediate >= 16 &&
-            prev_inst.immediate < 80 && (prev_inst.immediate % 4 == 0)) {
+            prev_inst.immediate < max_stack_arg_offset && (prev_inst.immediate % 4 == 0)) {
           if (prev_inst.rt.has_value()) {
             Register rt = *prev_inst.rt;
-            if (rt == Register::kRa || rt == Register::kFp ||
-                (rt >= Register::kS0 && rt <= Register::kS7)) {
+            if (rt == Register::kRa || rt == Register::kFp) {
               continue;
+            }
+            if (rt >= Register::kS0 && rt <= Register::kS7) {
+              if (saved_reg_offsets == nullptr) {
+                continue;
+              }
+              auto it = saved_reg_offsets->find(rt);
+              if (it == saved_reg_offsets->end() || it->second <= prev_inst.immediate) {
+                continue;
+              }
             }
           }
           stack_arg_offsets.insert(prev_inst.immediate);
@@ -2229,7 +2274,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         LiftCallInstruction(inst, i, instructions_to_process, symbol_index,
                             function_parameter_counts, function_fp_parameter_counts,
                             functions_returning_v0, functions_returning_f0, tracker, statements,
-                            sp_address_taken, call_return_info);
+                            sp_address_taken, call_return_info, sp_base_offset, saved_reg_offsets);
         break;
 
       case Opcode::kJr:
@@ -2381,10 +2426,12 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           LiftedStatement statement;
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
+          bool is_arg_reg =
+              (*inst.rt == Register::kA1 || *inst.rt == Register::kA2 || *inst.rt == Register::kA3);
           if (pending_fp_to_int[fs_idx] != nullptr) {
             statement.expression = std::move(pending_fp_to_int[fs_idx]);
           } else if (float_parameters_in_general_registers != nullptr &&
-                     float_parameters_in_general_registers->contains(*inst.rt)) {
+                     float_parameters_in_general_registers->contains(*inst.rt) && !is_arg_reg) {
             statement.expression = LiftFpRegister(*inst.fs, /*is_double=*/false);
           } else {
             statement.expression =

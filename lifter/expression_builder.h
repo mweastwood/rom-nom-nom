@@ -244,7 +244,9 @@ class ExpressionBuilder {
       const absl::flat_hash_set<std::string>* functions_returning_v0,
       const absl::flat_hash_set<std::string>* functions_returning_f0, RegisterTracker& tracker,
       std::vector<LiftedStatement>& statements, bool sp_address_taken = false,
-      const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr);
+      const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr,
+      int32_t sp_base_offset = 16,
+      const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr);
 };
 
 }  // namespace rom_nom_nom

@@ -69,7 +69,8 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
           access.hi_is_local = hi_is_local;
           if (symbol_index != nullptr) {
             const auto* registered_entry = symbol_index->FindByAddress(target_address);
-            if (registered_entry != nullptr) {
+            if (registered_entry != nullptr && !registered_entry->name().empty() &&
+                registered_entry->name()[0] != '.') {
               access.symbol_name = std::string(registered_entry->name());
             } else if (game_config != nullptr &&
                        ClassifyVramAddress(*game_config, target_address) ==
@@ -134,6 +135,9 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
           }
           if (symbol_index != nullptr) {
             access.symbol_name = symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+            if (!access.symbol_name.empty() && access.symbol_name[0] == '.') {
+              access.symbol_name = absl::StrFormat("D_%08X", target_address);
+            }
           }
           folded_.push_back(std::move(access));
         } else if (inst.IsStore()) {
@@ -172,6 +176,9 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
           }
           if (symbol_index != nullptr) {
             access.symbol_name = symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+            if (!access.symbol_name.empty() && access.symbol_name[0] == '.') {
+              access.symbol_name = absl::StrFormat("D_%08X", target_address);
+            }
           }
           folded_.push_back(std::move(access));
         }
@@ -258,6 +265,9 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
 
           if (symbol_index != nullptr) {
             access.symbol_name = symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+            if (!access.symbol_name.empty() && access.symbol_name[0] == '.') {
+              access.symbol_name = absl::StrFormat("D_%08X", target_address);
+            }
           }
           folded_.push_back(std::move(access));
         }

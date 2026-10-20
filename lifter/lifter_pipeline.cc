@@ -293,7 +293,7 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFu
 
         bool v0_active = true;
         bool f0_active = true;
-        for (size_t next_i = i + 1; next_i < insts.size(); ++next_i) {
+        for (size_t next_i = i + 2; next_i < insts.size(); ++next_i) {
           const auto& next_inst = insts[next_i];
           RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
           if (v0_active) {
@@ -328,8 +328,9 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFu
               }
             }
           }
-          if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr) {
-            // Also inspect the delay slot of this subsequent call before terminating scan
+          if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr ||
+              (next_inst.opcode == Opcode::kJr && next_inst.rs == Register::kRa)) {
+            // Also inspect the delay slot of this subsequent call/return before terminating scan
             if (next_i + 1 < insts.size()) {
               RegisterUseDef ds_ud = GetInstructionUseDef(insts[next_i + 1]);
               if (v0_active) {

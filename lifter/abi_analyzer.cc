@@ -504,9 +504,12 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
     }
 
     bool has_mtc1 = false;
+    bool has_callee_saved_mtc1 = false;
     bool has_integer_use = false;
     bool is_converted_from_int = false;
     bool has_def = false;
+    bool has_non_mfc1_def = false;
+    bool all_defs_are_call_args = true;
     std::optional<Register> copied_to_callee_saved;
     int total_uses = 0;
 
@@ -518,9 +521,12 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
         for (Register u : ud.gpr_uses) {
           if (u == reg) {
             total_uses++;
-            if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() && *inst.rt == reg &&
-                inst.fs.has_value() && (static_cast<int>(*inst.fs) % 2 == 0)) {
+            if (!has_def && inst.opcode == Opcode::kMtc1 && inst.rt.has_value() &&
+                *inst.rt == reg && inst.fs.has_value() && (static_cast<int>(*inst.fs) % 2 == 0)) {
               has_mtc1 = true;
+              if (*inst.fs >= FpRegister::kF20) {
+                has_callee_saved_mtc1 = true;
+              }
               if (is_fpr_converted_from_int(block.id, j, *inst.fs)) {
                 is_converted_from_int = true;
               }
@@ -542,12 +548,34 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
         for (Register d : ud.gpr_defs) {
           if (d == reg) {
             has_def = true;
+            bool is_mfc1_float_arg =
+                (inst.opcode == Opcode::kMfc1 && inst.fs.has_value() &&
+                 (static_cast<int>(*inst.fs) % 2 == 0) && !fixed_point_fprs.contains(*inst.fs));
+            if (!is_mfc1_float_arg) {
+              has_non_mfc1_def = true;
+            }
+            bool is_call_arg_def = false;
+            if (j > 0 && block.instructions[j - 1].IsCall()) {
+              is_call_arg_def = true;
+            } else {
+              for (size_t k = j + 1; k < block.instructions.size(); ++k) {
+                if (block.instructions[k].IsCall()) {
+                  is_call_arg_def = true;
+                  break;
+                }
+              }
+            }
+            if (!is_call_arg_def) {
+              all_defs_are_call_args = false;
+            }
           }
         }
       }
     }
 
-    if (has_mtc1 && !has_integer_use && !is_converted_from_int && !has_def) {
+    if (has_mtc1 && !has_integer_use && !is_converted_from_int &&
+        (!has_def || (has_callee_saved_mtc1 && total_uses == 1 &&
+                      (!has_non_mfc1_def || all_defs_are_call_args)))) {
       result.insert(reg);
     } else if (copied_to_callee_saved.has_value() && total_uses == 1 && !has_integer_use &&
                !has_def) {
