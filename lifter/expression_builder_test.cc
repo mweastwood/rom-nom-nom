@@ -2755,5 +2755,53 @@ TEST(ExpressionBuilderTest, Mtc1FollowedByGprDecrementBeforeCvtSWLiftsAsIntToFlo
   EXPECT_EQ(stmts[2].ToString(), "f18 = (f32)temp_t2;\n");
 }
 
+TEST(ExpressionBuilderTest, PredecessorCallDelaySlotDoesNotLeakIntoSuccessorCallArguments) {
+  // Block 0:
+  //   00: beq   $a0, $zero, 0x80000018
+  //   04: nop
+  // Block 1 (fallthrough):
+  //   08: jal   0x80001000
+  //   0C: addiu $a1, $zero, 10   # delay slot of jal 0x80001000!
+  //   10: j     0x80000018
+  //   14: nop
+  // Block 2 (join at 0x80000018):
+  //   18: addiu $a0, $zero, 1
+  //   1C: jal   0x80002000       # should take only 1 arg ($a0), NOT $a1 from Block 1's jal!
+  //   20: nop
+  //   24: jr    $ra
+  //   28: nop
+  std::vector<uint32_t> words = {
+      0x10800005,  // 00: beq   $a0, $zero, 0x80000018
+      0x00000000,  // 04: nop
+      0x0C000400,  // 08: jal   0x80001000
+      0x2405000A,  // 0C: addiu $a1, $zero, 10
+      0x08000006,  // 10: j     0x80000018
+      0x00000000,  // 14: nop
+      0x24040001,  // 18: addiu $a0, $zero, 1
+      0x0C000800,  // 1C: jal   0x80002000
+      0x00000000,  // 20: nop
+      0x03E00008,  // 24: jr    $ra
+      0x00000000,  // 28: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  const BasicBlock* join_block = nullptr;
+  for (const auto& b : cfg_or->Blocks()) {
+    if (!b.instructions.empty() && b.instructions.front().vram == 0x80000018) {
+      join_block = &b;
+      break;
+    }
+  }
+  ASSERT_NE(join_block, nullptr);
+
+  FunctionLiftContext ctx;
+  ctx.cfg = &(*cfg_or);
+  auto stmts = ExpressionBuilder::LiftBlock(*join_block, ctx, /*omit_last_instruction=*/false);
+  ASSERT_GE(stmts.size(), 2u);
+  EXPECT_EQ(stmts[1].ToString(), "func_80002000(1);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

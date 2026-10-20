@@ -1951,6 +1951,18 @@ class ConverterContext {
             }
           }
         }
+        if (cfg_.Blocks().size() > 1) {
+          for (int r = 1; r < 32; ++r) {
+            Register reg = static_cast<Register>(r);
+            if (reg == Register::kAt || reg == Register::kSp) continue;
+            TrackedValue tv = entry_state.tracker.GetRegisterValue(reg);
+            if (tv.kind == ValueKind::kConstant &&
+                static_cast<int32_t>(tv.constant_value) >= -32768 &&
+                static_cast<int32_t>(tv.constant_value) <= 65535) {
+              entry_state.tracker.SetRegisterValue(reg, TrackedValue());
+            }
+          }
+        }
 
         // Simulate block instructions to compute exit state
         BlockState exit_state = entry_state;
@@ -3482,16 +3494,7 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
           VarLiveness res = analyze_var_liveness(*child, var, in_switch_case_top, goto_depth);
           if (res == VarLiveness::kReadBeforeWrite) return VarLiveness::kReadBeforeWrite;
           if (res == VarLiveness::kKilledBeforeRead) {
-            bool label_after = false;
-            if (root_has_label) {
-              for (size_t c2 = c + 1; c2 < children.size(); ++c2) {
-                if (has_label_in_stmt(*children[c2])) {
-                  label_after = true;
-                  break;
-                }
-              }
-            }
-            if (!label_after) return VarLiveness::kKilledBeforeRead;
+            return VarLiveness::kKilledBeforeRead;
           }
         }
         return VarLiveness::kTransparent;
@@ -4971,14 +4974,82 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                   }
                 }
                 const auto& if_stmt = static_cast<const IfStatement&>(*stmts[j]);
-                // If `argX = <id_or_literal>;` (from a branch delay slot) precedes an `if`
+                // If `argX = <pure_rhs>;` (from a branch delay slot) precedes an `if`
                 // whose `then` or `else` branch calls a function using `argX` once (and the
                 // other branch does not touch `argX`), and `argX` is dead after the `if`,
                 // fold `argX` into that branch's call statement.
                 if (j == i + 1 && is_call_arg && count_expr_uses(if_stmt.Condition(), var) == 0 &&
-                    (assign.Rhs().Kind() == CExpressionKind::kIdentifier ||
-                     assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral) &&
+                    is_pure_expr(assign.Rhs()) && !has_memory_deref(assign.Rhs()) &&
+                    !has_address_of(assign.Rhs()) &&
                     is_dead_after_stmt(j, var, 1, stmts[i].get())) {
+                  auto try_fold_into_branch_comp = [&](const CompoundStatement& branch_comp)
+                      -> std::unique_ptr<CompoundStatement> {
+                    if (branch_comp.Statements().size() > 1 &&
+                        assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                        absl::StartsWith(
+                            static_cast<const IdentifierExpression&>(assign.Rhs()).Name(),
+                            "temp_s")) {
+                      return nullptr;
+                    }
+                    for (size_t k = 0; k < branch_comp.Statements().size() && k < 4; ++k) {
+                      const CStatement& bs = *branch_comp.Statements()[k];
+                      int k_uses = count_uses(bs, var);
+                      if (k_uses == 1) {
+                        if (bs.Kind() != CStatementKind::kExpressionStatement ||
+                            !has_call_in_stmt(bs)) {
+                          return nullptr;
+                        }
+                        if (k > 0 && (assign.Rhs().Kind() != CExpressionKind::kIdentifier &&
+                                      assign.Rhs().Kind() != CExpressionKind::kIntegerLiteral)) {
+                          // Only fold non-trivial expressions into a multi-statement branch
+                          // if the branch has no other call after k.
+                          for (size_t after_k = k + 1; after_k < branch_comp.Statements().size();
+                               ++after_k) {
+                            if (has_call_in_stmt(*branch_comp.Statements()[after_k])) {
+                              return nullptr;
+                            }
+                          }
+                        }
+                        const auto& call_es = static_cast<const ExpressionStatement&>(bs);
+                        auto new_call_expr =
+                            SubstituteIdentifier(call_es.Expression(), var, assign.Rhs());
+                        if (count_expr_uses(*new_call_expr, var) != 0) return nullptr;
+                        auto new_comp = std::make_unique<CompoundStatement>();
+                        for (size_t m = 0; m < branch_comp.Statements().size(); ++m) {
+                          if (m == k) {
+                            new_comp->AddStatement(
+                                CStatement::Expression(std::move(new_call_expr)));
+                          } else {
+                            new_comp->AddStatement(branch_comp.Statements()[m]->Clone());
+                          }
+                        }
+                        return new_comp;
+                      }
+                      if (k_uses > 0 || has_call_in_stmt(bs) ||
+                          bs.Kind() != CStatementKind::kExpressionStatement) {
+                        return nullptr;
+                      }
+                      const auto& mid_es = static_cast<const ExpressionStatement&>(bs);
+                      if (mid_es.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+                        return nullptr;
+                      }
+                      const auto& mid_a =
+                          static_cast<const AssignmentExpression&>(mid_es.Expression());
+                      if (mid_a.Op() != "=" || !is_pure_expr(mid_a.Rhs()) ||
+                          !is_pure_expr(mid_a.Lhs())) {
+                        return nullptr;
+                      }
+                      std::string_view mid_lhs_sv = extract_assigned_lhs_var(mid_a.Lhs());
+                      if (!mid_lhs_sv.empty()) {
+                        std::string mid_lhs(mid_lhs_sv);
+                        if (mid_lhs == var || count_expr_uses(assign.Rhs(), mid_lhs) > 0) {
+                          return nullptr;
+                        }
+                      }
+                    }
+                    return nullptr;
+                  };
+
                   int then_uses = count_uses(if_stmt.ThenBranch(), var);
                   int else_uses = (if_stmt.ElseBranch() != nullptr)
                                       ? count_uses(*if_stmt.ElseBranch(), var)
@@ -4989,24 +5060,15 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                       !has_address_of_var_in_stmt(if_stmt.ThenBranch(), var)) {
                     const auto& then_comp =
                         static_cast<const CompoundStatement&>(if_stmt.ThenBranch());
-                    if (then_comp.Statements().size() == 1 &&
-                        then_comp.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
-                      const auto& then_es =
-                          static_cast<const ExpressionStatement&>(*then_comp.Statements()[0]);
-                      auto new_then_expr =
-                          SubstituteIdentifier(then_es.Expression(), var, assign.Rhs());
-                      if (count_expr_uses(*new_then_expr, var) == 0) {
-                        auto new_then = std::make_unique<CompoundStatement>();
-                        new_then->AddStatement(CStatement::Expression(std::move(new_then_expr)));
-                        std::unique_ptr<CStatement> new_else = (if_stmt.ElseBranch() != nullptr)
-                                                                   ? if_stmt.ElseBranch()->Clone()
-                                                                   : nullptr;
-                        stmts[j] = CStatement::If(if_stmt.Condition().Clone(), std::move(new_then),
-                                                  std::move(new_else));
-                        stmts.erase(stmts.begin() + i);
-                        changed = true;
-                        break;
-                      }
+                    if (auto new_then = try_fold_into_branch_comp(then_comp)) {
+                      std::unique_ptr<CStatement> new_else = (if_stmt.ElseBranch() != nullptr)
+                                                                 ? if_stmt.ElseBranch()->Clone()
+                                                                 : nullptr;
+                      stmts[j] = CStatement::If(if_stmt.Condition().Clone(), std::move(new_then),
+                                                std::move(new_else));
+                      stmts.erase(stmts.begin() + i);
+                      changed = true;
+                      break;
                     }
                   } else if (then_uses == 0 && else_uses == 1 && if_stmt.ElseBranch() != nullptr &&
                              if_stmt.ElseBranch()->Kind() == CStatementKind::kCompoundStatement &&
@@ -5014,22 +5076,12 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                              !has_address_of_var_in_stmt(*if_stmt.ElseBranch(), var)) {
                     const auto& else_comp =
                         static_cast<const CompoundStatement&>(*if_stmt.ElseBranch());
-                    if (else_comp.Statements().size() == 1 &&
-                        else_comp.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
-                      const auto& else_es =
-                          static_cast<const ExpressionStatement&>(*else_comp.Statements()[0]);
-                      auto new_else_expr =
-                          SubstituteIdentifier(else_es.Expression(), var, assign.Rhs());
-                      if (count_expr_uses(*new_else_expr, var) == 0) {
-                        auto new_else = std::make_unique<CompoundStatement>();
-                        new_else->AddStatement(CStatement::Expression(std::move(new_else_expr)));
-                        stmts[j] =
-                            CStatement::If(if_stmt.Condition().Clone(),
-                                           if_stmt.ThenBranch().Clone(), std::move(new_else));
-                        stmts.erase(stmts.begin() + i);
-                        changed = true;
-                        break;
-                      }
+                    if (auto new_else = try_fold_into_branch_comp(else_comp)) {
+                      stmts[j] = CStatement::If(if_stmt.Condition().Clone(),
+                                                if_stmt.ThenBranch().Clone(), std::move(new_else));
+                      stmts.erase(stmts.begin() + i);
+                      changed = true;
+                      break;
                     }
                   }
                 }

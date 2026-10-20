@@ -464,29 +464,6 @@ void ExpressionBuilder::LiftCallInstruction(
       break;
     }
   }
-  if (highest_defined_argument_index < 0) {
-    for (int arg_index = 3; arg_index >= 0; --arg_index) {
-      Register reg = argument_registers[arg_index];
-      auto def = tracker.GetReachingDefinition(reg);
-      if (def.has_value() && !def->is_local) {
-        bool used_in_block_before_call = false;
-        for (size_t j = 0; j < i; ++j) {
-          RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[j]);
-          for (Register u : ud.gpr_uses) {
-            if (u == reg) {
-              used_in_block_before_call = true;
-              break;
-            }
-          }
-          if (used_in_block_before_call) break;
-        }
-        if (used_in_block_before_call) {
-          highest_defined_argument_index = arg_index;
-          break;
-        }
-      }
-    }
-  }
   bool is_entry_block = (cfg == nullptr || current_block_id == cfg->EntryBlockId());
   if (is_entry_block && highest_defined_argument_index < 3) {
     bool has_prior_call = false;
@@ -625,62 +602,97 @@ void ExpressionBuilder::LiftCallInstruction(
           bool defined_for_call_in_pred = false;
           for (uint32_t pred_id : curr_block->predecessors) {
             const BasicBlock* pred = cfg->GetBlock(pred_id);
-            if (pred == nullptr || pred->instructions.empty()) continue;
-            bool read_since_end = false;
-            size_t sz = pred->instructions.size();
-            std::optional<Register> branch_cond_temp;
-            if (sz >= 2 && (pred->instructions[sz - 2].IsBranch() ||
-                            pred->instructions[sz - 2].opcode == Opcode::kJ ||
-                            pred->instructions[sz - 2].opcode == Opcode::kJr)) {
-              const auto& br_inst = pred->instructions[sz - 2];
-              RegisterUseDef br_ud = GetInstructionUseDef(br_inst);
-              for (Register u : br_ud.gpr_uses) {
-                if (u == reg && arg_index > 0) read_since_end = true;
-              }
-              if (arg_index == 0 &&
-                  (br_inst.opcode == Opcode::kBeq || br_inst.opcode == Opcode::kBne ||
-                   br_inst.opcode == Opcode::kBeql || br_inst.opcode == Opcode::kBnel)) {
-                if (br_inst.rt == Register::kZero && br_inst.rs.has_value() &&
-                    *br_inst.rs != Register::kZero) {
-                  branch_cond_temp = *br_inst.rs;
-                } else if (br_inst.rs == Register::kZero && br_inst.rt.has_value() &&
-                           *br_inst.rt != Register::kZero) {
-                  branch_cond_temp = *br_inst.rt;
+            for (int hop = 0; hop < 2 && pred != nullptr && !pred->instructions.empty(); ++hop) {
+              bool read_since_end = false;
+              bool hit_stop = false;
+              size_t sz = pred->instructions.size();
+              std::optional<Register> branch_cond_temp;
+              if (sz >= 2 && (pred->instructions[sz - 2].IsBranch() ||
+                              pred->instructions[sz - 2].opcode == Opcode::kJ ||
+                              pred->instructions[sz - 2].opcode == Opcode::kJr)) {
+                const auto& br_inst = pred->instructions[sz - 2];
+                RegisterUseDef br_ud = GetInstructionUseDef(br_inst);
+                for (Register u : br_ud.gpr_uses) {
+                  if (u == reg && arg_index > 0) read_since_end = true;
+                }
+                if (arg_index == 0 &&
+                    (br_inst.opcode == Opcode::kBeq || br_inst.opcode == Opcode::kBne ||
+                     br_inst.opcode == Opcode::kBeql || br_inst.opcode == Opcode::kBnel)) {
+                  if (br_inst.rt == Register::kZero && br_inst.rs.has_value() &&
+                      *br_inst.rs != Register::kZero) {
+                    branch_cond_temp = *br_inst.rs;
+                  } else if (br_inst.rs == Register::kZero && br_inst.rt.has_value() &&
+                             *br_inst.rt != Register::kZero) {
+                    branch_cond_temp = *br_inst.rt;
+                  }
                 }
               }
-            }
-            for (int k = static_cast<int>(sz) - 1; k >= 0; --k) {
-              const auto& pinst = pred->instructions[k];
-              if (pinst.IsCall()) break;
-              if (arg_index == 0 && static_cast<size_t>(k) + 2 == sz && pinst.IsBranch()) {
-                continue;
-              }
-              RegisterUseDef pud = GetInstructionUseDef(pinst);
-              bool defs_reg = false;
-              for (Register d : pud.gpr_defs) {
-                if (d == reg) defs_reg = true;
-              }
-              if (defs_reg) {
-                if (!read_since_end) {
-                  defined_for_call_in_pred = true;
+              for (int k = static_cast<int>(sz) - 1; k >= 0; --k) {
+                const auto& pinst = pred->instructions[k];
+                if (pinst.IsCall() || (k > 0 && pred->instructions[k - 1].IsCall())) {
+                  hit_stop = true;
+                  break;
                 }
+                if (arg_index == 0 && static_cast<size_t>(k) + 2 == sz && pinst.IsBranch()) {
+                  continue;
+                }
+                RegisterUseDef pud = GetInstructionUseDef(pinst);
+                bool defs_reg = false;
+                for (Register d : pud.gpr_defs) {
+                  if (d == reg) defs_reg = true;
+                }
+                if (defs_reg) {
+                  if (!read_since_end) {
+                    defined_for_call_in_pred = true;
+                  }
+                  hit_stop = true;
+                  break;
+                }
+                bool is_branch_slt_use =
+                    (arg_index == 0 && branch_cond_temp.has_value() &&
+                     (pinst.opcode == Opcode::kSlt || pinst.opcode == Opcode::kSltu ||
+                      pinst.opcode == Opcode::kSlti || pinst.opcode == Opcode::kSltiu) &&
+                     ((pinst.rd.has_value() && *pinst.rd == *branch_cond_temp) ||
+                      (pinst.rt.has_value() && *pinst.rt == *branch_cond_temp)));
+                if (!is_branch_slt_use) {
+                  for (Register u : pud.gpr_uses) {
+                    if (u == reg) read_since_end = true;
+                  }
+                }
+              }
+              if (defined_for_call_in_pred || hit_stop || read_since_end ||
+                  pred->predecessors.size() != 1 || pred->predecessors[0] == pred->id) {
                 break;
               }
-              bool is_branch_slt_use =
-                  (arg_index == 0 && branch_cond_temp.has_value() &&
-                   (pinst.opcode == Opcode::kSlt || pinst.opcode == Opcode::kSltu ||
-                    pinst.opcode == Opcode::kSlti || pinst.opcode == Opcode::kSltiu) &&
-                   ((pinst.rd.has_value() && *pinst.rd == *branch_cond_temp) ||
-                    (pinst.rt.has_value() && *pinst.rt == *branch_cond_temp)));
-              if (!is_branch_slt_use) {
-                for (Register u : pud.gpr_uses) {
-                  if (u == reg) read_since_end = true;
-                }
-              }
+              pred = cfg->GetBlock(pred->predecessors[0]);
             }
             if (defined_for_call_in_pred) break;
           }
           if (defined_for_call_in_pred) {
+            highest_defined_argument_index = arg_index;
+            break;
+          }
+        }
+      }
+    }
+
+    if (highest_defined_argument_index < 0) {
+      for (int arg_index = 3; arg_index >= 0; --arg_index) {
+        Register reg = argument_registers[arg_index];
+        auto def = tracker.GetReachingDefinition(reg);
+        if (def.has_value() && !def->is_local) {
+          bool used_in_block_before_call = false;
+          for (size_t j = 0; j < i; ++j) {
+            RegisterUseDef ud = GetInstructionUseDef(instructions_to_process[j]);
+            for (Register u : ud.gpr_uses) {
+              if (u == reg) {
+                used_in_block_before_call = true;
+                break;
+              }
+            }
+            if (used_in_block_before_call) break;
+          }
+          if (used_in_block_before_call) {
             highest_defined_argument_index = arg_index;
             break;
           }

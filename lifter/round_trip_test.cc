@@ -4689,5 +4689,142 @@ s32 SignedDivisionAndModuloBy240WithCall(s32 frames, s32 offset) {
 )");
 }
 
+// ============================================================================
+// Category 34: Loop-Hoisted Constants & Liveness Across Goto Labels
+// ============================================================================
+
+TEST_F(RoundTripTest, LoopHoistedByteStoresOnMatch) {
+  AssertRoundTripBitExact("LoopHoistedByteStoresOnMatch", R"(
+void LoopHoistedByteStoresOnMatch(s8* p, s32 n) {
+    s32 i = 0;
+    if (n > 0) {
+        do {
+            s8 c = *p;
+            if (c == 58) {
+                *p = 47;
+            } else if (c == 92) {
+                *p = 46;
+            }
+            p++;
+            i++;
+        } while (i < n);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopHoistedHalfwordConstantStore) {
+  AssertRoundTripBitExact("LoopHoistedHalfwordConstantStore", R"(
+void LoopHoistedHalfwordConstantStore(s16* p, s32 count) {
+    s32 i = 0;
+    if (count > 0) {
+        do {
+            s16 v = *p;
+            if (v == 100) {
+                *p = 3;
+            } else if (v == 200) {
+                *p = 7;
+            }
+            p++;
+            i++;
+        } while (i < count);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopHoistedBitwiseMaskAndCompare) {
+  AssertRoundTripBitExact("LoopHoistedBitwiseMaskAndCompare", R"(
+s32 LoopHoistedBitwiseMaskAndCompare(u16* arr, s32 n) {
+    s32 hits = 0;
+    s32 i = 0;
+    if (n > 0) {
+        do {
+            u16 v = *arr;
+            if ((v & 7) == 5) {
+                *arr = v | 8;
+                hits++;
+            }
+            arr++;
+            i++;
+        } while (i < n);
+    }
+    return hits;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ScratchFoldingBeforeGotoSharedExitLabel) {
+  AssertRoundTripBitExact("ScratchFoldingBeforeGotoSharedExitLabel", R"(
+void notify_error(s32 code);
+s32 compute_step(s32 x);
+
+s32 ScratchFoldingBeforeGotoSharedExitLabel(s32* p, s32 a, s32 b) {
+    if (a < 0) {
+        goto bail;
+    }
+    if (b < 0) {
+        p[0] = a;
+        goto bail;
+    }
+    p[1] = (a + b) << 2;
+    p[2] = compute_step(a - b);
+    return p[2];
+bail:
+    notify_error(a);
+    return -1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultipleCallsAndStoresBeforeSharedReturnLabel) {
+  AssertRoundTripBitExact("MultipleCallsAndStoresBeforeSharedReturnLabel", R"(
+s32 fetch_val(s32* dst, s32 mode);
+void commit_val(s32* dst, s32 v);
+
+s32 MultipleCallsAndStoresBeforeSharedReturnLabel(s32* dst, s32 mode) {
+    if (mode <= 0) {
+        goto done;
+    }
+    if (mode == 1) {
+        s32 x = fetch_val(dst, 1);
+        dst[0] = x + 10;
+        goto done;
+    }
+    dst[1] = fetch_val(dst, mode);
+    commit_val(dst, dst[1] * 3);
+    return 1;
+done:
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopHoistedThreeWayStateTransition) {
+  AssertRoundTripBitExact("LoopHoistedThreeWayStateTransition", R"(
+s32 LoopHoistedThreeWayStateTransition(u8* states, s32 n) {
+    s32 changed = 0;
+    s32 i = 0;
+    if (n > 0) {
+        do {
+            u8 s = *states;
+            if (s == 1) {
+                *states = 2;
+                changed++;
+            } else if (s == 2) {
+                *states = 3;
+                changed++;
+            } else if (s == 3) {
+                *states = 0;
+            }
+            states++;
+            i++;
+        } while (i < n);
+    }
+    return changed;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

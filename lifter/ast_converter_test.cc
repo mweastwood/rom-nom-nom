@@ -2877,5 +2877,97 @@ TEST(AstConverterTest, FoldsSignedDivisionWithHoistedMagicInFpAndPartiallyFolded
   EXPECT_THAT(code, Not(HasSubstr("0xB21642C9")));
 }
 
+TEST(AstConverterTest, FoldsSingleUseScratchKilledBeforeSubsequentGotoLabel) {
+  // Block 0:
+  // 00: beq   $a0, $zero, +5 (to Block 2 at 0x18)
+  // 04: nop
+  // Block 1:
+  // 08: addiu $v0, $a1, 10
+  // 0C: sw    $v0, 0($a2)
+  // 10: lw    $v0, 4($a2)
+  // 14: sw    $v0, 8($a2)
+  // Block 2 (shared label target):
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> words = {
+      0x10800005,  // 00: beq   $a0, $zero, +5 (to 0x18)
+      0x00000000,  // 04: nop
+      0x24A2000A,  // 08: addiu $v0, $a1, 10
+      0xACC20000,  // 0C: sw    $v0, 0($a2)
+      0x8CC20004,  // 10: lw    $v0, 4($a2)
+      0xACC20008,  // 14: sw    $v0, 8($a2)
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto seq = std::make_unique<StructuredRegion>();
+  seq->type = RegionType::kSequence;
+
+  auto if_reg = std::make_unique<StructuredRegion>();
+  if_reg->type = RegionType::kIfThenElse;
+  if_reg->condition_block_id = 0;
+  auto goto_b2 = std::make_unique<StructuredRegion>();
+  goto_b2->type = RegionType::kGoto;
+  goto_b2->block_id = 2;
+  if_reg->children.push_back(std::move(goto_b2));
+  seq->children.push_back(std::move(if_reg));
+
+  auto b1 = std::make_unique<StructuredRegion>();
+  b1->type = RegionType::kBlock;
+  b1->block_id = 1;
+  seq->children.push_back(std::move(b1));
+
+  auto b2 = std::make_unique<StructuredRegion>();
+  b2->type = RegionType::kBlock;
+  b2->block_id = 2;
+  seq->children.push_back(std::move(b2));
+
+  AstConverterOptions options;
+  options.function_name = "TestKilledBeforeLabel";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *seq, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("*(s32*)arg2 = (arg1 + 10);"));
+  EXPECT_THAT(code, Not(HasSubstr("v0 = (arg1 + 10);")));
+}
+
+TEST(AstConverterTest, PreservesLoopHoistedConstantRegisterInStoreInsideLoop) {
+  // Block 0 (preheader):
+  // 00: addiu $v1, $zero, 47
+  // Block 1 (do-while loop body):
+  // 04: sb    $v1, 0($a0)
+  // 08: addiu $a1, $a1, -1
+  // 0C: bne   $a1, $zero, -3 (to 0x04)
+  // 10: addiu $a0, $a0, 1
+  // Block 2 (exit):
+  // 14: jr    $ra
+  // 18: nop
+  std::vector<uint32_t> words = {
+      0x2403002F,  // 00: addiu $v1, $zero, 47
+      0xA0830000,  // 04: sb    $v1, 0($a0)
+      0x24A5FFFF,  // 08: addiu $a1, $a1, -1
+      0x14A0FFFD,  // 0C: bne   $a1, $zero, -3 (to 0x04)
+      0x24840001,  // 10: addiu $a0, $a0, 1
+      0x03E00008,  // 14: jr    $ra
+      0x00000000,  // 18: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestLoopHoistedStore";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("*(s8*)arg0 = v1;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
