@@ -628,17 +628,33 @@ void ExpressionBuilder::LiftCallInstruction(
             if (pred == nullptr || pred->instructions.empty()) continue;
             bool read_since_end = false;
             size_t sz = pred->instructions.size();
+            std::optional<Register> branch_cond_temp;
             if (sz >= 2 && (pred->instructions[sz - 2].IsBranch() ||
                             pred->instructions[sz - 2].opcode == Opcode::kJ ||
                             pred->instructions[sz - 2].opcode == Opcode::kJr)) {
-              RegisterUseDef br_ud = GetInstructionUseDef(pred->instructions[sz - 2]);
+              const auto& br_inst = pred->instructions[sz - 2];
+              RegisterUseDef br_ud = GetInstructionUseDef(br_inst);
               for (Register u : br_ud.gpr_uses) {
-                if (u == reg) read_since_end = true;
+                if (u == reg && arg_index > 0) read_since_end = true;
+              }
+              if (arg_index == 0 &&
+                  (br_inst.opcode == Opcode::kBeq || br_inst.opcode == Opcode::kBne ||
+                   br_inst.opcode == Opcode::kBeql || br_inst.opcode == Opcode::kBnel)) {
+                if (br_inst.rt == Register::kZero && br_inst.rs.has_value() &&
+                    *br_inst.rs != Register::kZero) {
+                  branch_cond_temp = *br_inst.rs;
+                } else if (br_inst.rs == Register::kZero && br_inst.rt.has_value() &&
+                           *br_inst.rt != Register::kZero) {
+                  branch_cond_temp = *br_inst.rt;
+                }
               }
             }
             for (int k = static_cast<int>(sz) - 1; k >= 0; --k) {
               const auto& pinst = pred->instructions[k];
               if (pinst.IsCall()) break;
+              if (arg_index == 0 && static_cast<size_t>(k) + 2 == sz && pinst.IsBranch()) {
+                continue;
+              }
               RegisterUseDef pud = GetInstructionUseDef(pinst);
               bool defs_reg = false;
               for (Register d : pud.gpr_defs) {
@@ -650,8 +666,16 @@ void ExpressionBuilder::LiftCallInstruction(
                 }
                 break;
               }
-              for (Register u : pud.gpr_uses) {
-                if (u == reg) read_since_end = true;
+              bool is_branch_slt_use =
+                  (arg_index == 0 && branch_cond_temp.has_value() &&
+                   (pinst.opcode == Opcode::kSlt || pinst.opcode == Opcode::kSltu ||
+                    pinst.opcode == Opcode::kSlti || pinst.opcode == Opcode::kSltiu) &&
+                   ((pinst.rd.has_value() && *pinst.rd == *branch_cond_temp) ||
+                    (pinst.rt.has_value() && *pinst.rt == *branch_cond_temp)));
+              if (!is_branch_slt_use) {
+                for (Register u : pud.gpr_uses) {
+                  if (u == reg) read_since_end = true;
+                }
               }
             }
             if (defined_for_call_in_pred) break;
@@ -1428,8 +1452,14 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           } else if (inst.rt == Register::kZero && inst.rs.has_value()) {
             statement.expression = lift_reg(*inst.rs);
           } else if (inst.rs.has_value() && inst.rt.has_value()) {
-            statement.expression =
-                LiftedExpression::Binary("+", lift_reg(*inst.rs), lift_reg(*inst.rt));
+            auto lift_non_zero_add_op = [&](Register r) {
+              if (r != Register::kZero && tracker.IsConstant(r) && tracker.GetConstant(r) == 0) {
+                return LiftedExpression::Variable(RegisterVarName(r));
+              }
+              return lift_reg(r);
+            };
+            statement.expression = LiftedExpression::Binary("+", lift_non_zero_add_op(*inst.rs),
+                                                            lift_non_zero_add_op(*inst.rt));
           }
           statements.push_back(std::move(statement));
         }

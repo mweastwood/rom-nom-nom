@@ -4583,5 +4583,111 @@ void FloatStackArgsConditionalDispatch(s32 id, f32* p, s32 flag) {
 )");
 }
 
+// ============================================================================
+// Category 33: 9 Callee-Saved Registers ($s0..$s8 / fp), Loop-Hoisted Magic
+// Division Multipliers in $s8, and Partially Folded Signed Division Idioms
+// ============================================================================
+
+TEST_F(RoundTripTest, NineCalleeSavedRegistersAcrossMultipleCalls) {
+  AssertRoundTripBitExact("NineCalleeSavedRegistersAcrossMultipleCalls", R"(
+s32 step_fn(s32 x);
+void sink_nine(s32 a, s32 b, s32 c, s32 d);
+
+s32 NineCalleeSavedRegistersAcrossMultipleCalls(s32* p, s32 a, s32 b, s32 c) {
+    s32 s0 = p[0];
+    s32 s1 = p[1];
+    s32 s2 = p[2];
+    s32 s3 = p[3];
+    s32 s4 = p[4];
+    s32 s5 = p[5];
+    s32 s6 = p[6];
+    s32 s7 = p[7];
+    s32 v0 = step_fn(s0 + a);
+    s32 v1 = step_fn(s1 + v0);
+    sink_nine(s2 + v1, s3 + b, s4 + c, s5 - a);
+    return s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + p[8];
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopWithNineLiveCalleeSavedValuesAndCall) {
+  AssertRoundTripBitExact("LoopWithNineLiveCalleeSavedValuesAndCall", R"(
+s32 eval_slot(s32 idx, s32 val, s32 scale);
+
+s32 LoopWithNineLiveCalleeSavedValuesAndCall(s32* arr, s32 count, s32 k0, s32 k1) {
+    s32 a = arr[0];
+    s32 b = arr[1];
+    s32 c = arr[2];
+    s32 d = arr[3];
+    s32 sum = 0;
+    s32 i = k0;
+    while (i < count) {
+        sum += eval_slot(i + a, i + b, i + c);
+        i++;
+    }
+    return sum + a + b + c + d + k0 + k1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignedDivisionBy184InLoopWithCalls) {
+  AssertRoundTripBitExact("SignedDivisionBy184InLoopWithCalls", R"(
+void process_pair(s32 q, s32 r);
+
+void SignedDivisionBy184InLoopWithCalls(s32* data, s32 n) {
+    s32 i = 0;
+    if (n > 0) {
+        s32* p = data;
+        do {
+            s32 v = *p;
+            p++;
+            i++;
+            process_pair(v / 184, (v + 92) / 184);
+        } while (i < n);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignedDivisionWithBranchAndCall) {
+  AssertRoundTripBitExact("SignedDivisionWithBranchAndCall", R"(
+s32 use_quotient(s32 q);
+
+s32 SignedDivisionWithBranchAndCall(s32 x, s32 y) {
+    s32 q = y / 100;
+    if (q > x) {
+        return use_quotient(q);
+    }
+    return q + y;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignedDivisionBy60And3600StoreChain) {
+  AssertRoundTripBitExact("SignedDivisionBy60And3600StoreChain", R"(
+void SignedDivisionBy60And3600StoreChain(s32 ticks, s32* out) {
+    s32 min = ticks / 3600;
+    s32 sec;
+    out[0] = min;
+    sec = ticks / 60;
+    out[1] = sec - min * 60;
+    out[2] = ticks - sec * 60;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignedDivisionAndModuloBy240WithCall) {
+  AssertRoundTripBitExact("SignedDivisionAndModuloBy240WithCall", R"(
+s32 combine_time(s32 q, s32 r);
+
+s32 SignedDivisionAndModuloBy240WithCall(s32 frames, s32 offset) {
+    s32 total = frames + offset;
+    s32 q = total / 240;
+    s32 r = total % 240;
+    return combine_time(q, r);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -2779,5 +2779,103 @@ TEST(AstConverterTest, CoalescesCallerHomedParameterSlotWhenAddressTaken) {
   EXPECT_THAT(code, Not(HasSubstr("u8 sp[")));
 }
 
+TEST(AstConverterTest, TrimsTrailingUnassignedCallArgScratchRegistersAfterDivisionFolding) {
+  std::string textproto = R"pb(
+    entries { name: "ProcessPair" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 20($sp)
+  // 08: lui   $v0, 0xB216
+  // 0C: ori   $v0, $v0, 0x42C9
+  // 10: mult  $a0, $v0
+  // 14: mfhi  $a3
+  // 18: addiu $a1, $a1, 1
+  // 1C: addu  $a0, $a3, $a0
+  // 20: sra   $a0, $a0, 7
+  // 24: sra   $v1, $a0, 31
+  // 28: jal   0x80001000
+  // 2C: subu  $a0, $a0, $v1
+  // 30: lw    $ra, 20($sp)
+  // 34: jr    $ra
+  // 38: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0x3C02B216,  // 08: lui   $v0, 0xB216
+      0x344242C9,  // 0C: ori   $v0, $v0, 0x42C9
+      0x00820018,  // 10: mult  $a0, $v0
+      0x00003810,  // 14: mfhi  $a3
+      0x24A50001,  // 18: addiu $a1, $a1, 1
+      0x00E42021,  // 1C: addu  $a0, $a3, $a0
+      0x000421C3,  // 20: sra   $a0, $a0, 7
+      0x00041FC3,  // 24: sra   $v1, $a0, 31
+      0x0C000400,  // 28: jal   0x80001000
+      0x00832023,  // 2C: subu  $a0, $a0, $v1
+      0x8FBF0014,  // 30: lw    $ra, 20($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0018,  // 38: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestTrimTrailingScratchCallArgs";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("arg0 = (arg0 / 184);"));
+  EXPECT_THAT(code, HasSubstr("ProcessPair(arg0, arg1);"));
+  EXPECT_THAT(code, Not(HasSubstr("arg2")));
+  EXPECT_THAT(code, Not(HasSubstr("arg3")));
+}
+
+TEST(AstConverterTest, FoldsSignedDivisionWithHoistedMagicInFpAndPartiallyFoldedHighMult) {
+  // 00: lui   $fp, 0xB216
+  // 04: ori   $fp, $fp, 0x42C9   # 0xB21642C9 (magic for / 184)
+  // 08: mult  $a0, $fp
+  // 0C: mfhi  $v0
+  // 10: addu  $v0, $v0, $a0
+  // 14: sra   $v0, $v0, 7
+  // 18: sra   $v1, $a0, 31
+  // 1C: subu  $v0, $v0, $v1
+  // 20: jr    $ra
+  // 24: nop
+  std::vector<uint32_t> words = {
+      0x3C1EB216,  // 00: lui   $fp, 0xB216
+      0x37DE42C9,  // 04: ori   $fp, $fp, 0x42C9
+      0x009E0018,  // 08: mult  $a0, $fp
+      0x00001010,  // 0C: mfhi  $v0
+      0x00441021,  // 10: addu  $v0, $v0, $a0
+      0x000211C3,  // 14: sra   $v0, $v0, 7
+      0x00041FC3,  // 18: sra   $v1, $a0, 31
+      0x00431023,  // 1C: subu  $v0, $v0, $v1
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "DivBy184";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("(arg0 / 184)"));
+  EXPECT_THAT(code, Not(HasSubstr("0xB21642C9")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
