@@ -4164,5 +4164,135 @@ void FourFloatStackArgumentsToMatrixHelper(s32* mtx, const f32* params, s32 flag
 )");
 }
 
+// ============================================================================
+// Category 31: Float Literals, Truncation to Memory, Float Stack Parameters,
+//              and Reused Float-in-GPR Parameter Registers
+// ============================================================================
+
+TEST_F(RoundTripTest, NonZeroLoFloatConstantScaling) {
+  AssertRoundTripBitExact("NonZeroLoFloatConstantScaling", R"(
+f32 NonZeroLoFloatConstantScaling(f32 x, f32 y) {
+    return x * 0.2f + y * 0.1f;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatTruncationStoredDirectlyToMemory) {
+  AssertRoundTripBitExact("FloatTruncationStoredDirectlyToMemory", R"(
+void FloatTruncationStoredDirectlyToMemory(s32* out, f32 a, f32 b, f32 c) {
+    out[0] = (s32)(a * b + c);
+    out[1] = (s32)(a - b);
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatStackParametersUsedInArithmeticAndStore) {
+  AssertRoundTripBitExact("FloatStackParametersUsedInArithmeticAndStore", R"(
+void FloatStackParametersUsedInArithmeticAndStore(
+    f32* out, f32 a, f32 b, f32 c, f32 d, f32 e, f32 f) {
+    out[0] = a + d;
+    out[1] = b + e;
+    out[2] = c + f;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatStackParametersPreservedAcrossHelperCall) {
+  AssertRoundTripBitExact("FloatStackParametersPreservedAcrossHelperCall", R"(
+extern void PrepareFloatOutput(f32* out);
+
+void FloatStackParametersPreservedAcrossHelperCall(
+    f32* out, f32 a, f32 b, f32 c, f32 d, f32 e) {
+    f32 sum0 = a + d;
+    f32 sum1 = b + e;
+    PrepareFloatOutput(out);
+    out[0] = sum0;
+    out[1] = sum1;
+    out[2] = c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatGprParamsWithFirstFloatRegReusedForStatusReturn) {
+  AssertRoundTripBitExact("FloatGprParamsWithFirstFloatRegReusedForStatusReturn", R"(
+extern f32 gVecActorX[64];
+extern f32 gVecActorY[64];
+extern f32 gVecActorZ[64];
+extern u16 gVecActorFlags[64];
+
+s32 FloatGprParamsWithFirstFloatRegReusedForStatusReturn(u16 index, f32 x, f32 y, f32 z) {
+    s32 result = 0;
+    if (index < 64) {
+        if (gVecActorFlags[index] & 1) {
+            gVecActorX[index] = x;
+            gVecActorY[index] = y;
+            gVecActorZ[index] = z;
+            result = 1;
+        }
+    }
+    return result;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatGprParamsIncrementalUpdateWithStatusReturn) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct VecActor {
+    u16 flags;
+    f32 x;
+    f32 y;
+    f32 z;
+} VecActor;
+)";
+  AssertRoundTripBitExact("FloatGprParamsIncrementalUpdateWithStatusReturn", R"(
+s32 FloatGprParamsIncrementalUpdateWithStatusReturn(VecActor* a, f32 dx, f32 dy, f32 dz) {
+    s32 result = 0;
+    if (a != 0) {
+        if (a->flags & 1) {
+            a->x += dx;
+            a->y += dy;
+            a->z += dz;
+            result = 1;
+        }
+    }
+    return result;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, GlobalStoreBeforeFloatArgumentForwardingCall) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+extern u8 gActiveMode;
+)";
+  AssertRoundTripBitExact("GlobalStoreBeforeFloatArgumentForwardingCall", R"(
+extern u8 DispatchUniformScale(u16 id, f32 sx, f32 sy, f32 sz);
+
+u8 GlobalStoreBeforeFloatArgumentForwardingCall(f32 scale) {
+    gActiveMode = 2;
+    return DispatchUniformScale(91, scale, scale, scale);
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, SixFloatStackParametersToMatrixInit) {
+  AssertRoundTripBitExact("SixFloatStackParametersToMatrixInit", R"(
+void SixFloatStackParametersToMatrixInit(
+    f32* m, s32 mode, f32 a, f32 b, f32 c, f32 d, f32 e, f32 f, f32 g, f32 h) {
+    m[0] = a * d + g;
+    m[1] = b * e + h;
+    m[2] = c * f;
+    if (mode != 0) {
+        m[3] = 1.0f;
+    } else {
+        m[3] = 0.0f;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

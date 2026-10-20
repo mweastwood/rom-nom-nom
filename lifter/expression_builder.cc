@@ -187,17 +187,17 @@ std::string ExpressionBuilder::FpRegisterVarName(FpRegister reg, bool is_double)
   return AbiAnalyzer::FpRegisterVarName(reg, is_double);
 }
 
-namespace {
-
-std::unique_ptr<LiftedExpression> LiftFpRegister(FpRegister reg, bool is_double = false) {
-  return LiftedExpression::Variable(ExpressionBuilder::FpRegisterVarName(reg, is_double));
-}
-
-std::string StackVarName(int32_t offset) {
+std::string ExpressionBuilder::StackVarName(int32_t offset) {
   if (offset < 0) {
     return absl::StrFormat("var_sp_neg_%d", -offset);
   }
   return absl::StrFormat("var_sp_%d", offset);
+}
+
+namespace {
+
+std::unique_ptr<LiftedExpression> LiftFpRegister(FpRegister reg, bool is_double = false) {
+  return LiftedExpression::Variable(ExpressionBuilder::FpRegisterVarName(reg, is_double));
 }
 
 }  // namespace
@@ -519,7 +519,25 @@ void ExpressionBuilder::LiftCallInstruction(
       for (Register u : ud.gpr_uses) {
         for (int k = 0; k < 4; ++k) {
           if (u == argument_registers[k]) {
-            arg_read_before_call[k] = true;
+            bool is_s_copy_before_mtc1 = false;
+            if (k == 0 &&
+                (prev.opcode == Opcode::kAddu || prev.opcode == Opcode::kOr ||
+                 prev.opcode == Opcode::kDaddu) &&
+                prev.rt == Register::kZero && prev.rd.has_value() && *prev.rd >= Register::kS0 &&
+                *prev.rd <= Register::kS7) {
+              for (size_t m_idx = j + 1; m_idx < i; ++m_idx) {
+                const auto& later = instructions_to_process[m_idx];
+                if (later.opcode == Opcode::kMtc1 && later.rt.has_value() &&
+                    (*later.rt == Register::kA1 || *later.rt == Register::kA2 ||
+                     *later.rt == Register::kA3)) {
+                  is_s_copy_before_mtc1 = true;
+                  break;
+                }
+              }
+            }
+            if (!is_s_copy_before_mtc1) {
+              arg_read_before_call[k] = true;
+            }
           }
         }
       }
@@ -957,6 +975,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   const absl::flat_hash_set<int32_t>* function_stack_stores = ctx.function_stack_stores;
   const absl::flat_hash_set<Register>* float_parameters_in_general_registers =
       ctx.float_parameters_in_general_registers;
+  const absl::flat_hash_set<int>* float_stack_param_slots = ctx.float_stack_param_slots;
+  const absl::flat_hash_set<int32_t>* float_local_stack_offsets = ctx.float_local_stack_offsets;
 
   std::vector<LiftedStatement> statements;
   if (instructions.empty()) {
@@ -1161,6 +1181,28 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   }
 
   absl::flat_hash_set<size_t> skipped_instruction_indices;
+  absl::flat_hash_set<Register> gprs_defined_in_block;
+  auto record_gpr_defs = [&](const Instruction& ins) {
+    RegisterUseDef ud = GetInstructionUseDef(ins);
+    for (Register d : ud.gpr_defs) {
+      gprs_defined_in_block.insert(d);
+    }
+  };
+  auto is_float_carrier_gpr = [&](Register r) -> bool {
+    return float_parameters_in_general_registers != nullptr &&
+           float_parameters_in_general_registers->contains(r) && r != Register::kA0 &&
+           r != Register::kA1 && r != Register::kA2 && r != Register::kA3;
+  };
+  auto is_active_float_gpr = [&](Register r) -> bool {
+    if (float_parameters_in_general_registers == nullptr ||
+        !float_parameters_in_general_registers->contains(r)) {
+      return false;
+    }
+    if (r == Register::kA0 || r == Register::kA1 || r == Register::kA2 || r == Register::kA3) {
+      return !gprs_defined_in_block.contains(r);
+    }
+    return true;
+  };
   std::optional<uint32_t> fpr_const_bits[32];
   std::unique_ptr<LiftedExpression> pending_int_to_fp[32];
   std::unique_ptr<LiftedExpression> pending_fp_to_int[32];
@@ -1211,6 +1253,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     // integrated into subsequent branch conditions.
     if (folded_comp.has_value() && folded_comp->can_suppress_statement &&
         i == folded_comp->instruction_index) {
+      record_gpr_defs(inst);
       tracker.Step(inst);
       continue;
     }
@@ -1245,6 +1288,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         statements.push_back(std::move(statement));
       }
       for (size_t k = i; k <= div_pattern->end_index; ++k) {
+        record_gpr_defs(instructions_to_process[k]);
         tracker.Step(instructions_to_process[k]);
       }
       i = div_pattern->end_index;
@@ -1290,6 +1334,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         statements.push_back(std::move(statement));
       }
       for (size_t k = i; k <= conversion->end_index; ++k) {
+        record_gpr_defs(instructions_to_process[k]);
         tracker.Step(instructions_to_process[k]);
       }
       i = conversion->end_index;
@@ -1297,18 +1342,21 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     }
 
     if (skipped_instruction_indices.contains(i)) {
+      record_gpr_defs(inst);
       tracker.Step(inst);
       continue;
     }
 
     // If this instruction is the high or mid half of a folded pair, skip emitting it
     if (folder.IsFoldedHi(i) || folder.IsFoldedMid(i)) {
+      record_gpr_defs(inst);
       tracker.Step(inst);
       continue;
     }
 
     // If this instruction is the low half of a folded pair, emit high-level folded access
     if (const auto* lo = folder.GetFoldedLo(i)) {
+      record_gpr_defs(inst);
       LiftFoldedAccess(*lo, inst, tracker, statements);
       continue;
     }
@@ -1431,7 +1479,20 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.kind = StatementKind::kAssignment;
           statement.destination_variable = RegisterVarName(*inst.rt);
           uint32_t val = static_cast<uint32_t>(static_cast<uint16_t>(inst.immediate)) << 16;
-          statement.expression = LiftedExpression::Integer(val, /*hex=*/true);
+          if (is_float_carrier_gpr(*inst.rt) && (val & 0x7F800000u) != 0 &&
+              (val & 0x7F800000u) != 0x7F800000u) {
+            float f_val = 0.0f;
+            std::memcpy(&f_val, &val, sizeof(f_val));
+            std::string f_str = absl::StrFormat("%.9g", f_val);
+            if (f_str.find('.') == std::string::npos && f_str.find('e') == std::string::npos) {
+              f_str += ".0f";
+            } else {
+              f_str += "f";
+            }
+            statement.expression = LiftedExpression::Variable(f_str);
+          } else {
+            statement.expression = LiftedExpression::Integer(val, /*hex=*/true);
+          }
           statements.push_back(std::move(statement));
         }
         break;
@@ -2279,6 +2340,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             store_type = "s16";
           } else if (inst.opcode == Opcode::kSb) {
             store_type = "s8";
+          } else if (inst.opcode == Opcode::kSw && is_float_carrier_gpr(*inst.rt)) {
+            store_type = "f32";
           }
 
           LiftedStatement statement;
@@ -2515,12 +2578,23 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
                 arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
               }
               if (arg_idx >= 0) {
-                statement.expression = LiftedExpression::Unary(
-                    "*(f32*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
+                std::string arg_name = absl::StrFormat("arg%d", arg_idx);
+                if (float_stack_param_slots != nullptr &&
+                    float_stack_param_slots->contains(arg_idx)) {
+                  statement.expression = LiftedExpression::Variable(arg_name);
+                } else {
+                  statement.expression =
+                      LiftedExpression::Unary("*(f32*)&", LiftedExpression::Variable(arg_name));
+                }
               } else {
-                statement.expression = LiftedExpression::Load(
-                    "f32",
-                    LiftedExpression::Unary("&", LiftedExpression::Variable(StackVarName(offset))));
+                if (float_local_stack_offsets != nullptr &&
+                    float_local_stack_offsets->contains(offset)) {
+                  statement.expression = LiftedExpression::Variable(StackVarName(offset));
+                } else {
+                  statement.expression = LiftedExpression::Load(
+                      "f32", LiftedExpression::Unary(
+                                 "&", LiftedExpression::Variable(StackVarName(offset))));
+                }
               }
             }
           } else {
@@ -2535,9 +2609,15 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
       case Opcode::kSwc1:
         if (inst.ft.has_value() && inst.rs.has_value()) {
+          int ft_idx = static_cast<int>(*inst.ft);
+          bool is_int_trunc_store =
+              (ft_idx >= 0 && ft_idx < 32 && pending_fp_to_int[ft_idx] != nullptr);
+          auto val_expr =
+              is_int_trunc_store ? std::move(pending_fp_to_int[ft_idx]) : LiftFpRegister(*inst.ft);
+          const char* store_type = is_int_trunc_store ? "s32" : "f32";
           LiftedStatement statement;
           statement.kind = StatementKind::kStore;
-          statement.store_type = "f32";
+          statement.store_type = store_type;
           bool is_stack_base =
               (*inst.rs == Register::kSp) || (has_frame_pointer && *inst.rs == Register::kFp);
           if (is_stack_base) {
@@ -2550,14 +2630,38 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             }
             if (is_sp_offset(inst.immediate)) {
               statement.destination_address = make_sp_addr(inst.immediate);
+              statement.expression = std::move(val_expr);
             } else {
-              statement.destination_address = LiftedExpression::Unary(
-                  "&", LiftedExpression::Variable(StackVarName(inst.immediate)));
+              uint32_t base_offset = frame_size + 16;
+              int arg_idx = -1;
+              if (inst.immediate >= static_cast<int32_t>(base_offset)) {
+                int candidate_idx = 4 + (inst.immediate - static_cast<int32_t>(base_offset)) / 4;
+                if (float_stack_param_slots != nullptr &&
+                    float_stack_param_slots->contains(candidate_idx)) {
+                  arg_idx = candidate_idx;
+                }
+              }
+              if (arg_idx >= 0) {
+                std::string arg_name = absl::StrFormat("arg%d", arg_idx);
+                statement.kind = StatementKind::kAssignment;
+                statement.destination_variable = arg_name;
+                statement.expression = std::move(val_expr);
+              } else if (is_int_trunc_store ||
+                         (float_local_stack_offsets != nullptr &&
+                          float_local_stack_offsets->contains(inst.immediate))) {
+                statement.kind = StatementKind::kAssignment;
+                statement.destination_variable = StackVarName(inst.immediate);
+                statement.expression = std::move(val_expr);
+              } else {
+                statement.destination_address = LiftedExpression::Unary(
+                    "&", LiftedExpression::Variable(StackVarName(inst.immediate)));
+                statement.expression = std::move(val_expr);
+              }
             }
           } else {
             statement.destination_address = make_reg_offset_expr(*inst.rs, inst.immediate);
+            statement.expression = std::move(val_expr);
           }
-          statement.expression = LiftFpRegister(*inst.ft);
           statements.push_back(std::move(statement));
         }
         break;
@@ -2708,7 +2812,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
             has_val_bits = true;
           } else {
             TrackedValue tv = tracker.GetRegisterValue(*inst.rt);
-            if (tv.kind == ValueKind::kConstant) {
+            if (tv.kind == ValueKind::kConstant || tv.kind == ValueKind::kSymbolAddress) {
               val_bits = tv.constant_value;
               has_val_bits = true;
             } else if (tv.kind == ValueKind::kSymbolHi) {
@@ -2728,8 +2832,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.destination_variable = FpRegisterVarName(*inst.fs, /*is_double=*/false);
           if (*inst.rt == Register::kZero) {
             statement.expression = LiftedExpression::Variable("0.0f");
-          } else if (float_parameters_in_general_registers != nullptr &&
-                     float_parameters_in_general_registers->contains(*inst.rt)) {
+          } else if (is_active_float_gpr(*inst.rt)) {
             statement.expression = LiftedExpression::Variable(RegisterVarName(*inst.rt));
           } else if (*inst.rt == Register::kAt && has_val_bits && (val_bits & 0x7F800000u) != 0 &&
                      (val_bits & 0x7F800000u) != 0x7F800000u) {
@@ -3018,12 +3121,32 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           int fd_idx = static_cast<int>(*inst.fd);
           int fs_idx = static_cast<int>(*inst.fs);
           bool src_is_double = (inst.opcode == Opcode::kCvtWD);
-          bool only_used_by_mfc1 = false;
+          bool only_used_by_mfc1_or_swc1 = false;
           for (size_t look = i + 1; look < loop_end; ++look) {
             const Instruction& future_inst = instructions_to_process[look];
-            if (future_inst.opcode == Opcode::kMfc1 && future_inst.fs == *inst.fd &&
-                future_inst.rt.has_value() && *future_inst.rt != Register::kZero) {
-              only_used_by_mfc1 = true;
+            if ((future_inst.opcode == Opcode::kMfc1 && future_inst.fs == *inst.fd &&
+                 future_inst.rt.has_value() && *future_inst.rt != Register::kZero) ||
+                (future_inst.opcode == Opcode::kSwc1 && future_inst.ft == *inst.fd)) {
+              bool reused_after_consumer = false;
+              for (size_t k = look + 1; k < loop_end; ++k) {
+                RegisterUseDef kud = GetInstructionUseDef(instructions_to_process[k]);
+                for (FpRegister u : kud.fpr_uses) {
+                  if (u == *inst.fd || (static_cast<int>(u) & ~1) == (fd_idx & ~1)) {
+                    reused_after_consumer = true;
+                    break;
+                  }
+                }
+                if (reused_after_consumer) break;
+                bool redefined = false;
+                for (FpRegister d : kud.fpr_defs) {
+                  if (d == *inst.fd || (static_cast<int>(d) & ~1) == (fd_idx & ~1)) {
+                    redefined = true;
+                    break;
+                  }
+                }
+                if (redefined || instructions_to_process[k].IsCall()) break;
+              }
+              only_used_by_mfc1_or_swc1 = !reused_after_consumer;
               break;
             }
             RegisterUseDef fud = GetInstructionUseDef(future_inst);
@@ -3043,7 +3166,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               break;
             }
           }
-          if (only_used_by_mfc1) {
+          if (only_used_by_mfc1_or_swc1) {
             pending_fp_to_int[fd_idx] =
                 LiftedExpression::Unary("(s32)", LiftFpRegister(*inst.fs, src_is_double));
             break;
@@ -3102,12 +3225,32 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           int fd_idx = static_cast<int>(*inst.fd);
           int fs_idx = static_cast<int>(*inst.fs);
           bool src_is_double = (inst.opcode == Opcode::kTruncWD);
-          bool only_used_by_mfc1 = false;
+          bool only_used_by_mfc1_or_swc1 = false;
           for (size_t look = i + 1; look < loop_end; ++look) {
             const Instruction& future_inst = instructions_to_process[look];
-            if (future_inst.opcode == Opcode::kMfc1 && future_inst.fs == *inst.fd &&
-                future_inst.rt.has_value() && *future_inst.rt != Register::kZero) {
-              only_used_by_mfc1 = true;
+            if ((future_inst.opcode == Opcode::kMfc1 && future_inst.fs == *inst.fd &&
+                 future_inst.rt.has_value() && *future_inst.rt != Register::kZero) ||
+                (future_inst.opcode == Opcode::kSwc1 && future_inst.ft == *inst.fd)) {
+              bool reused_after_consumer = false;
+              for (size_t k = look + 1; k < loop_end; ++k) {
+                RegisterUseDef kud = GetInstructionUseDef(instructions_to_process[k]);
+                for (FpRegister u : kud.fpr_uses) {
+                  if (u == *inst.fd || (static_cast<int>(u) & ~1) == (fd_idx & ~1)) {
+                    reused_after_consumer = true;
+                    break;
+                  }
+                }
+                if (reused_after_consumer) break;
+                bool redefined = false;
+                for (FpRegister d : kud.fpr_defs) {
+                  if (d == *inst.fd || (static_cast<int>(d) & ~1) == (fd_idx & ~1)) {
+                    redefined = true;
+                    break;
+                  }
+                }
+                if (redefined || instructions_to_process[k].IsCall()) break;
+              }
+              only_used_by_mfc1_or_swc1 = !reused_after_consumer;
               break;
             }
             RegisterUseDef fud = GetInstructionUseDef(future_inst);
@@ -3127,7 +3270,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               break;
             }
           }
-          if (only_used_by_mfc1) {
+          if (only_used_by_mfc1_or_swc1) {
             pending_fp_to_int[fd_idx] =
                 LiftedExpression::Unary("(s32)", LiftFpRegister(*inst.fs, src_is_double));
             break;
@@ -3328,6 +3471,7 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       }
     }
 
+    record_gpr_defs(inst);
     tracker.Step(inst);
   }
 

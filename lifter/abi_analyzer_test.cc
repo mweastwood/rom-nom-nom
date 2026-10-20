@@ -232,5 +232,74 @@ TEST(AbiAnalyzerTest, DetectFloatParametersMovedToCallerSavedFprBeforeCall) {
   EXPECT_TRUE(float_regs.contains(Register::kA3));
 }
 
+TEST(AbiAnalyzerTest, DetectFloatParametersWhenEntryParamReusedForIntegerReturn) {
+  // Pattern from func_8002BD0C:
+  //   00: sll   $v0, $a0, 16
+  //   04: srl   $a0, $v0, 16
+  //   08: mtc1  $a1, $f0       # $a1 read as float parameter
+  //   0C: sltiu $v0, $a0, 192
+  //   10: beq   $v0, $zero, 0x80000024
+  //   14: addu  $a1, $zero, $zero  # $a1 reused as integer return accumulator
+  //   18: swc1  $f0, 0($a2)
+  //   1C: addiu $a1, $zero, 1
+  //   20: jr    $ra
+  //   24: addu  $v0, $a1, $zero
+  std::vector<uint32_t> words = {
+      0x00041400,  // sll   $v0, $a0, 16
+      0x00022402,  // srl   $a0, $v0, 16
+      0x44850000,  // mtc1  $a1, $f0
+      0x2C8200C0,  // sltiu $v0, $a0, 192
+      0x10400003,  // beq   $v0, $zero, 0x80000020
+      0x00002821,  // addu  $a1, $zero, $zero
+      0xE4C00000,  // swc1  $f0, 0($a2)
+      0x24050001,  // addiu $a1, $zero, 1
+      0x03E00008,  // jr    $ra
+      0x00A01021,  // addu  $v0, $a1, $zero
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_regs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_regs.contains(Register::kA1));
+}
+
+TEST(AbiAnalyzerTest, DetectFloatStackParameterSlotsAndLocalOffsets) {
+  // Frame size = 32:
+  //   00: addiu $sp, $sp, -32
+  //   04: lwc1  $f2, 48($sp)   # caller stack slot 4 (32 + 16 = 48)
+  //   08: lw    $s0, 52($sp)   # caller stack slot 5 loaded into float carrier $s0
+  //   0C: mtc1  $s0, $f4
+  //   10: add.s $f6, $f2, $f4
+  //   14: swc1  $f6, 20($sp)   # local float stack slot at offset 20
+  //   18: swc1  $f6, 48($sp)   # caller stack slot 4 updated via swc1
+  //   1C: lwc1  $f0, 20($sp)
+  //   20: jr    $ra
+  //   24: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // addiu $sp, $sp, -32
+      0xC7A20030,  // lwc1  $f2, 48($sp)
+      0x8FB00034,  // lw    $s0, 52($sp)
+      0x44902000,  // mtc1  $s0, $f4
+      0x46041180,  // add.s $f6, $f2, $f4
+      0xE7A60014,  // swc1  $f6, 20($sp)
+      0xE7A60030,  // swc1  $f6, 48($sp)
+      0xC7A00014,  // lwc1  $f0, 20($sp)
+      0x03E00008,  // jr    $ra
+      0x27BD0020,  // addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_regs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_regs.contains(Register::kS0));
+
+  auto float_slots = AbiAnalyzer::DetectFloatStackParameterSlots(cfg);
+  EXPECT_TRUE(float_slots.contains(4));
+  EXPECT_TRUE(float_slots.contains(5));
+
+  auto float_locals = AbiAnalyzer::DetectFloatLocalStackOffsets(cfg);
+  EXPECT_TRUE(float_locals.contains(20));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

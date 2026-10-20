@@ -2704,5 +2704,34 @@ TEST(ExpressionBuilderTest, LoadsBeforeStackFrameAllocationLiftWithConstQualific
   EXPECT_EQ(stmts[2].ToString(), "arg3 = *(s32*)(arg1 + 4);\n");
 }
 
+TEST(ExpressionBuilderTest, TruncWSFollowedBySwc1LiftsAsIntegerCastStore) {
+  // 00: trunc.w.s $f2, $f12
+  // 04: swc1      $f2, 8($a0)
+  std::vector<uint32_t> words = {
+      0x4600608D,  // trunc.w.s $f2, $f12
+      0xE4820008,  // swc1      $f2, 8($a0)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 1u);
+  EXPECT_EQ(stmts[0].ToString(), "*(s32*)(arg0 + 8) = (s32)f12;\n");
+}
+
+TEST(ExpressionBuilderTest, Mtc1WithLuiOriNonZeroLoConstantLiftsAsFloatLiteral) {
+  // 0.2f = 0x3E4CCCCD:
+  //   00: lui  $at, 0x3E4C
+  //   04: ori  $at, $at, 0xCCCD
+  //   08: mtc1 $at, $f4
+  std::vector<uint32_t> words = {
+      0x3C013E4C,  // lui  $at, 0x3E4C
+      0x3421CCCD,  // ori  $at, $at, 0xCCCD
+      0x44812000,  // mtc1 $at, $f4
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 2u);
+  EXPECT_EQ(stmts.back().ToString(), "f4 = 0.200000003f;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

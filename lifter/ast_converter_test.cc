@@ -2455,5 +2455,48 @@ TEST(AstConverterTest, FoldsCallReturnAndLoadsAcrossProvablyDisjointStructStores
   EXPECT_THAT(code, HasSubstr("*(s32*)(arg0 + 4) = (*(s32*)(arg0 + 4) + *(s32*)(arg0 + 16));"));
 }
 
+TEST(AstConverterTest, SplitsReusedFloatGprParameterIntoIntegerTempAndTypesParamAsF32) {
+  // Pattern from HM64 actor.c (func_8002BD0C):
+  //   00: sll   $v0, $a0, 16
+  //   04: srl   $a0, $v0, 16
+  //   08: mtc1  $a1, $f0       # $a1 is f32 arg1
+  //   0C: sltiu $v0, $a0, 64
+  //   10: beq   $v0, $zero, 0x80000024
+  //   14: addu  $a1, $zero, $zero  # $a1 reused as integer status result
+  //   18: swc1  $f0, 0($a2)
+  //   1C: addiu $a1, $zero, 1
+  //   20: jr    $ra
+  //   24: addu  $v0, $a1, $zero
+  std::vector<uint32_t> words = {
+      0x00041400,  // 00: sll   $v0, $a0, 16
+      0x00022402,  // 04: srl   $a0, $v0, 16
+      0x44850000,  // 08: mtc1  $a1, $f0
+      0x2C820040,  // 0C: sltiu $v0, $a0, 64
+      0x10400003,  // 10: beq   $v0, $zero, 0x80000020
+      0x00002821,  // 14: addu  $a1, $zero, $zero
+      0xE4C00000,  // 18: swc1  $f0, 0($a2)
+      0x24050001,  // 1C: addiu $a1, $zero, 1
+      0x03E00008,  // 20: jr    $ra
+      0x00A01021,  // 24: addu  $v0, $a1, $zero
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestReusedFloatGprParam";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("f32 arg1"));
+  EXPECT_THAT(code, HasSubstr("s32 temp_a1;"));
+  EXPECT_THAT(code, HasSubstr("*(f32*)arg2 = arg1;"));
+  EXPECT_THAT(code, HasSubstr("return temp_a1;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

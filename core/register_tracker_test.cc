@@ -574,5 +574,17 @@ TEST(RegisterTrackerTest, DetermineReturnsF0RejectsLoopConstantF0ConsumedBeforeF
   EXPECT_FALSE(DetermineReturnsF0(cfg));
 }
 
+TEST(RegisterTrackerTest, StepMtc1PropagatesLuiOriSymbolAddressConstantToFpr) {
+  // 0.2f = 0x3E4CCCCD -> lui $at, 0x3E4C; ori $at, $at, 0xCCCD; mtc1 $at, $f4
+  RegisterTracker tracker;
+  tracker.Step(*DecodeInstruction(0x3C013E4C));  // lui  $at, 0x3E4C
+  tracker.Step(*DecodeInstruction(0x3421CCCD));  // ori  $at, $at, 0xCCCD
+  tracker.Step(*DecodeInstruction(0x44812000));  // mtc1 $at, $f4
+
+  auto f4_bits = tracker.GetFprConstantBits(FpRegister::kF4);
+  ASSERT_TRUE(f4_bits.has_value());
+  EXPECT_EQ(*f4_bits, 0x3E4CCCCD);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

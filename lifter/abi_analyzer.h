@@ -65,11 +65,19 @@ class AbiAnalyzer {
   static absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(
       const ControlFlowGraph& cfg);
 
-  // Detects incoming function parameters in GPRs ($a1-$a3) that represent float arguments
-  // (e.g. when preceding parameters are integer/pointer or $f12 is used, and the parameter
-  // is moved via mtc1 without integer use or cvt.s.w/cvt.d.w conversion).
+  // Detects incoming function parameters in GPRs ($a1-$a3) and local carrier GPRs that represent
+  // float values (e.g. when preceding parameters are integer/pointer or $f12 is used, and the
+  // parameter is moved via mtc1 without integer use or cvt.s.w/cvt.d.w conversion).
   static absl::flat_hash_set<Register> DetectFloatParametersInGeneralRegisters(
       const ControlFlowGraph& cfg);
+
+  // Detects incoming stack parameter slots (slot >= 4, corresponding to arg4+) that represent
+  // single-precision float parameters (f32).
+  static absl::flat_hash_set<int> DetectFloatStackParameterSlots(const ControlFlowGraph& cfg);
+
+  // Detects local stack frame offsets (0 <= offset < frame_size) that are used exclusively as
+  // single-precision float local variables (var_sp_<offset>).
+  static absl::flat_hash_set<int32_t> DetectFloatLocalStackOffsets(const ControlFlowGraph& cfg);
 
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);

@@ -131,6 +131,8 @@ struct FunctionLiftContext {
   const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr;
   const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr;
   const absl::flat_hash_set<Register>* float_parameters_in_general_registers = nullptr;
+  const absl::flat_hash_set<int>* float_stack_param_slots = nullptr;
+  const absl::flat_hash_set<int32_t>* float_local_stack_offsets = nullptr;
   uint32_t outgoing_args_size = 0;
   int32_t sp_buffer_size = 0;
   const ControlFlowGraph* cfg = nullptr;
@@ -223,6 +225,9 @@ class ExpressionBuilder {
   // Maps a COP1 floating point register to its clean variable name (e.g. "f0", "f12", or "f0_d" if
   // double).
   static std::string FpRegisterVarName(FpRegister reg, bool is_double = false);
+
+  // Maps a local stack frame offset to its variable name (e.g. "var_sp_20").
+  static std::string StackVarName(int32_t offset);
 
   // Finds a comparison instruction in `instructions` that is folded into a subsequent conditional
   // branch. Returns std::nullopt if no instruction is folded.

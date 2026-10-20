@@ -382,7 +382,7 @@ void RegisterTracker::Step(const Instruction& inst) {
       SetFprConstantBits(*inst.fs, 0);
     } else {
       const TrackedValue& tv = gpr_values_[RegIdx(*inst.rt)];
-      if (tv.kind == ValueKind::kConstant) {
+      if (tv.kind == ValueKind::kConstant || tv.kind == ValueKind::kSymbolAddress) {
         SetFprConstantBits(*inst.fs, tv.constant_value);
       } else if (tv.kind == ValueKind::kSymbolHi) {
         SetFprConstantBits(*inst.fs, tv.symbol_hi);
