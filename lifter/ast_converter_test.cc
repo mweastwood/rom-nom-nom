@@ -2669,5 +2669,115 @@ TEST(AstConverterTest, CollapsesUnalignedBlock8CopyFromLwlLwrSwlSwr) {
   EXPECT_THAT(code, HasSubstr("*(UnalignedBlock8*)arg0 = *(UnalignedBlock8*)arg1;"));
 }
 
+TEST(AstConverterTest, FoldsFloatBitcastOutgoingStackArgsAcrossDisjointGlobalStore) {
+  std::string textproto = R"pb(
+    entries { name: "SinkCall" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+    entries { name: "D_800E7A0E" address: 0x800E7A0E type: SYMBOL_DATA size: 2 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $ra, 28($sp)
+  // 08: lwc1  $f0, 0($a1)
+  // 0C: swc1  $f0, 16($sp)
+  // 10: lwc1  $f2, 4($a1)
+  // 14: swc1  $f2, 20($sp)
+  // 18: lui   $v0, 0x800F
+  // 1C: sh    $a0, 0x7A0E($v0)
+  // 20: addiu $a1, $zero, 1
+  // 24: addiu $a2, $zero, 2
+  // 28: jal   0x80001000
+  // 2C: addiu $a3, $zero, 3
+  // 30: lw    $ra, 28($sp)
+  // 34: jr    $ra
+  // 38: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xC4A00000,  // 08: lwc1  $f0, 0($a1)
+      0xE7A00010,  // 0C: swc1  $f0, 16($sp)
+      0xC4A20004,  // 10: lwc1  $f2, 4($a1)
+      0xE7A20014,  // 14: swc1  $f2, 20($sp)
+      0x3C02800F,  // 18: lui   $v0, 0x800F
+      0xA4447A0E,  // 1C: sh    $a0, 0x7A0E($v0)
+      0x24050001,  // 20: addiu $a1, $zero, 1
+      0x24060002,  // 24: addiu $a2, $zero, 2
+      0x0C000400,  // 28: jal   0x80001000
+      0x24070003,  // 2C: addiu $a3, $zero, 3
+      0x8FBF001C,  // 30: lw    $ra, 28($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0020,  // 38: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestFloatStackArgsAcrossGlobalStore";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("((void (*)(s32, s32, s32, s32, f32, f32))SinkCall)(arg0, 1, 2, 3, "
+                              "*(f32*)arg1, *(f32*)(arg1 + 4));"));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_16")));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_20")));
+}
+
+TEST(AstConverterTest, CoalescesCallerHomedParameterSlotWhenAddressTaken) {
+  std::string textproto = R"pb(
+    entries { name: "TakePtr" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 20($sp)
+  // 08: sw    $s0, 16($sp)
+  // 0C: sw    $a0, 24($sp)
+  // 10: addiu $a0, $sp, 24
+  // 14: jal   0x80001000
+  // 18: addu  $s0, $a1, $zero
+  // 1C: addu  $v0, $v0, $s0
+  // 20: lw    $ra, 20($sp)
+  // 24: lw    $s0, 16($sp)
+  // 28: jr    $ra
+  // 2C: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFB00010,  // 08: sw    $s0, 16($sp)
+      0xAFA40018,  // 0C: sw    $a0, 24($sp)
+      0x27A40018,  // 10: addiu $a0, $sp, 24
+      0x0C000400,  // 14: jal   0x80001000
+      0x00A08021,  // 18: addu  $s0, $a1, $zero
+      0x00501021,  // 1C: addu  $v0, $v0, $s0
+      0x8FBF0014,  // 20: lw    $ra, 20($sp)
+      0x8FB00010,  // 24: lw    $s0, 16($sp)
+      0x03E00008,  // 28: jr    $ra
+      0x27BD0018,  // 2C: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestCallerHomedAddressTaken";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("TakePtr((s32)&arg0)"));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_24")));
+  EXPECT_THAT(code, Not(HasSubstr("u8 sp[")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

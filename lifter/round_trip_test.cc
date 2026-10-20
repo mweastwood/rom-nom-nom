@@ -4498,5 +4498,90 @@ void UnalignedStructBlock16CopyLoop(UnalignedBlock16* dst, UnalignedBlock16* src
 )");
 }
 
+// ============================================================================
+// Category 34: Float Outgoing Stack Args & Caller-Homed Parameter Addresses
+// ============================================================================
+
+TEST_F(RoundTripTest, FloatStackArgsWithGlobalHalfwordStore) {
+  AssertRoundTripBitExact("FloatStackArgsWithGlobalHalfwordStore", R"(
+extern u16 D_800E7A0E;
+void sink10(s32 a0, s32 a1, s32 a2, s32 a3, f32 f4, f32 f5, f32 f6, f32 f7, s32 s8, s32 s9);
+void FloatStackArgsWithGlobalHalfwordStore(s32 id, f32* p) {
+    D_800E7A0E = (u16)id;
+    sink10(id, 0, 1, 2, p[0], p[1], p[2], p[3], 10, 20);
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatStackArgsWithInterleavedGlobalStore) {
+  AssertRoundTripBitExact("FloatStackArgsWithInterleavedGlobalStore", R"(
+extern u16 D_800E7A0E;
+void sink8(s32 a0, s32 a1, s32 a2, s32 a3, f32 f4, f32 f5, f32 f6, f32 f7);
+void sink10(s32 a0, s32 a1, s32 a2, s32 a3, f32 f4, f32 f5, f32 f6, f32 f7, s32 s8, s32 s9);
+void FloatStackArgsWithInterleavedGlobalStore(s32 id, s32 p) {
+    if (id > 0) {
+        D_800E7A0E = (u16)id;
+        sink10(id, 0, 1, 2, *(f32*)(p + 8), *(f32*)(p + 12), *(f32*)(p + 16), *(f32*)(p + 20), 10, 20);
+    } else {
+        sink8(id, 0, 1, 2, *(f32*)p, *(f32*)(p + 4), *(f32*)(p + 8), *(f32*)(p + 12));
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ManyStackArgsFifteenParamCall) {
+  AssertRoundTripBitExact("ManyStackArgsFifteenParamCall", R"(
+s32 sink15(s32 a0, s32 a1, s32 a2, s32 a3,
+           f32 f4, f32 f5, f32 f6, f32 f7, f32 f8, f32 f9, f32 f10, f32 f11,
+           s32 s12, s32 s13, s32 s14);
+s32 ManyStackArgsFifteenParamCall(s32 a0, f32* p, s32 extra) {
+    return sink15(a0, 1, 2, 3, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], extra, 10, 20);
+}
+)");
+}
+
+TEST_F(RoundTripTest, PassFirstParamAddressToCallee) {
+  AssertRoundTripBitExact("PassFirstParamAddressToCallee", R"(
+s32 ext_take_ptr(s32* p);
+s32 PassFirstParamAddressToCallee(s32 a, s32 b) {
+    return ext_take_ptr(&a) + b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, PassSecondParamAddressAndReadModified) {
+  AssertRoundTripBitExact("PassSecondParamAddressAndReadModified", R"(
+void ext_init_second(s32 a, s32* b_out);
+s32 PassSecondParamAddressAndReadModified(s32 a, s32 b) {
+    ext_init_second(a, &b);
+    return b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, PassTwoParamAddressesToCallee) {
+  AssertRoundTripBitExact("PassTwoParamAddressesToCallee", R"(
+s32 ext_swap_or_add(s32* a, s32* b);
+s32 PassTwoParamAddressesToCallee(s32 a, s32 b) {
+    ext_swap_or_add(&a, &b);
+    return a + b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatStackArgsConditionalDispatch) {
+  AssertRoundTripBitExact("FloatStackArgsConditionalDispatch", R"(
+void sink9a(s32 a0, s32 a1, s32 a2, s32 a3, f32 f4, f32 f5, f32 f6, f32 f7, s32 s8);
+void sink9b(s32 a0, s32 a1, s32 a2, s32 a3, f32 f4, f32 f5, f32 f6, f32 f7, s32 s8);
+void FloatStackArgsConditionalDispatch(s32 id, f32* p, s32 flag) {
+    if (flag != 0) {
+        sink9a(id, 1, 2, 3, p[0], p[1], p[2], p[3], flag);
+    } else {
+        sink9b(id, 4, 5, 6, p[4], p[5], p[6], p[7], 0);
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

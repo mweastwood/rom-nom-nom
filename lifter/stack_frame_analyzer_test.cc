@@ -211,5 +211,29 @@ TEST(StackFrameAnalyzerTest, RecognizesLeafSavedRegisterAtSpZeroAndPredecessorOu
   EXPECT_EQ(branch_analysis.sp_buffer_size, 24);
 }
 
+TEST(StackFrameAnalyzerTest, CallerFrameAddressTakenDoesNotSetSpAddressTaken) {
+  // Function with 24-byte frame that homes $a0 at 24($sp) and takes &24($sp):
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFB00010,  // 08: sw    $s0, 16($sp)
+      0xAFA40018,  // 0C: sw    $a0, 24($sp)
+      0x27A40018,  // 10: addiu $a0, $sp, 24
+      0x0C000400,  // 14: jal   0x80001000
+      0x00A08021,  // 18: addu  $s0, $a1, $zero
+      0x8FBF0014,  // 1C: lw    $ra, 20($sp)
+      0x8FB00010,  // 20: lw    $s0, 16($sp)
+      0x03E00008,  // 24: jr    $ra
+      0x27BD0018,  // 28: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 24);
+  EXPECT_FALSE(analysis.sp_address_taken);
+  EXPECT_EQ(analysis.sp_buffer_size, 0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

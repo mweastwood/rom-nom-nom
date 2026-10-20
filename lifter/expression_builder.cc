@@ -1048,12 +1048,32 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   SymbolFolder folder;
   folder.Fold(instructions_to_process, symbol_index, game_config, initial_tracker);
 
+  const int32_t caller_frame_start =
+      (frame_size > 0) ? static_cast<int32_t>(frame_size) : 0x7FFFFFFF;
+  auto is_caller_homed_scalar_addr = [&](int32_t imm) -> bool {
+    if (frame_size == 0 || imm < caller_frame_start || imm >= caller_frame_start + 16 ||
+        (imm % 4) != 0) {
+      return false;
+    }
+    if (function_stack_stores != nullptr) {
+      return function_stack_stores->contains(imm);
+    }
+    for (const auto& ins : instructions_to_process) {
+      if (ins.IsStore() && ins.rs.has_value() &&
+          (*ins.rs == Register::kSp || (has_frame_pointer && *ins.rs == Register::kFp)) &&
+          ins.immediate == imm) {
+        return true;
+      }
+    }
+    return false;
+  };
   if (!sp_address_taken) {
     for (const auto& inst : instructions_to_process) {
       if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) &&
           (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
           inst.rt.has_value() && *inst.rt != Register::kSp &&
-          (!has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0) {
+          (!has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0 &&
+          !is_caller_homed_scalar_addr(inst.immediate)) {
         sp_address_taken = true;
         break;
       }
@@ -1452,8 +1472,10 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
           statement.destination_variable = RegisterVarName(*inst.rt);
           if (inst.rs == Register::kZero) {
             statement.expression = LiftedExpression::Integer(inst.immediate);
-          } else if (sp_address_taken && (inst.rs == Register::kSp ||
-                                          (has_frame_pointer && inst.rs == Register::kFp))) {
+          } else if ((sp_address_taken || is_caller_homed_scalar_addr(inst.immediate)) &&
+                     (inst.rs == Register::kSp ||
+                      (has_frame_pointer && inst.rs == Register::kFp)) &&
+                     inst.immediate >= 0) {
             if (is_sp_offset(inst.immediate)) {
               statement.expression = make_sp_addr(inst.immediate);
             } else {
