@@ -665,5 +665,58 @@ TEST_F(CompilerTest, CompileCAlignsFunctionsWithWordZeroPaddingWhenTargetVramsPr
               ::testing::HasSubstr("\t.word\t0\n\t.word\t0\n\t.word\t0\n\t.word\t0\n"));
 }
 
+TEST_F(CompilerTest, CompileCAlignsPrefixFunctionsWhenModuleSizeMatchesUnpaddedSymbolEnd) {
+  auto real_tc_or = Toolchain::Discover({
+      .repo_root = std::filesystem::current_path(),
+      .mode = ToolchainMode::kOriginal,
+  });
+  if (!real_tc_or.ok()) {
+    GTEST_SKIP() << "Original toolchain not available";
+  }
+
+  std::vector<std::string> assembled_inputs;
+  auto tracking_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.program == real_tc_or->KmcAs().string()) {
+      for (const auto& arg : opts.args) {
+        if (absl::EndsWith(arg, ".s272")) {
+          std::ifstream ifs(arg);
+          assembled_inputs.emplace_back((std::istreambuf_iterator<char>(ifs)),
+                                        std::istreambuf_iterator<char>());
+        }
+      }
+    }
+    return RunProcess(opts);
+  };
+
+  Compiler compiler(*real_tc_or, tracking_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "align_prefix_sample.c";
+  std::filesystem::create_directories(src_file.parent_path());
+  {
+    std::ofstream(src_file) << "int FuncA(int a) { return a + 1; }\n"
+                            << "int FuncB(int b) { return (b << 2) + 1; }\n";
+  }
+  std::filesystem::path out_obj = test_dir_ / "obj" / "align_prefix_sample.o";
+
+  // FuncA is 8 bytes and FuncB is 12 bytes (20 bytes unpadded, rounded to 32 bytes
+  // in .text by KMC as). With module_target_size = 24, using the unpadded symbol end
+  // (20 bytes) preserves the 4 bytes of free padding slack needed to align FuncB at +12.
+  CCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .opt_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      .function_target_vrams =
+          {
+              {"FuncA", 0x80025C00},
+              {"FuncB", 0x80025C0C},
+          },
+      .module_target_size = 24,
+  };
+
+  ASSERT_TRUE(compiler.CompileC(opts).ok());
+  ASSERT_EQ(assembled_inputs.size(), 2u);
+  EXPECT_THAT(assembled_inputs[1], ::testing::HasSubstr("\t.word\t0\n"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

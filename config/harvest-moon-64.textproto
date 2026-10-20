@@ -13,6 +13,15 @@ c_flags {
   }
 }
 c_flags {
+  key: "CE620"
+  value {
+    flags: "-O0"
+    flags: "-mips2"
+    flags: "-mcpu=r4000"
+    flags: "-Wa,-g"
+  }
+}
+c_flags {
   key: "default"
   value {
     flags: "-O2"

@@ -3080,5 +3080,80 @@ TEST(AstConverterTest, SortsStackLocalDeclarationsByNumericOffset) {
   EXPECT_LT(pos_16, pos_20);
 }
 
+TEST(AstConverterTest, CoalescesCallerHomedParameterSlotWithoutAddressTaken) {
+  // Function that homes $a0 to 24($sp) (its caller home slot in a 24-byte frame)
+  // and reloads it after a call without taking its address.
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFA40018,  // 08: sw    $a0, 24($sp)
+      0x0C000400,  // 0C: jal   0x80001000
+      0x00000000,  // 10: nop
+      0x8FA30018,  // 14: lw    $v1, 24($sp)
+      0x00431021,  // 18: addu  $v0, $v0, $v1
+      0x8FBF0014,  // 1C: lw    $ra, 20($sp)
+      0x03E00008,  // 20: jr    $ra
+      0x27BD0018,  // 24: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestHomedParamCoalesce";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_24")));
+  EXPECT_THAT(code, HasSubstr("arg0"));
+}
+
+TEST(AstConverterTest, SplitsParameterRegisterReusedAsScratchAfterPrologueCopy) {
+  // Function with 2 parameters ($a0, $a1) that copies $a0 -> $s0 and $a1 -> $s1
+  // before a call, then reuses $a0 as a scratch register after the call.
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFB00010,  // 04: sw    $s0, 16($sp)
+      0x00808021,  // 08: addu  $s0, $a0, $zero
+      0xAFBF0018,  // 0C: sw    $ra, 24($sp)
+      0xAFB10014,  // 10: sw    $s1, 20($sp)
+      0x8E040000,  // 14: lw    $a0, 0($s0)
+      0x00A08821,  // 18: addu  $s1, $a1, $zero
+      0x0C000400,  // 1C: jal   0x80001000
+      0x26250001,  // 20: addiu $a1, $s1, 1
+      0x00402021,  // 24: addu  $a0, $v0, $zero
+      0x8E030008,  // 28: lw    $v1, 8($s0)
+      0x00831821,  // 2C: addu  $v1, $a0, $v1
+      0x00712026,  // 30: xor   $a0, $v1, $s1
+      0xAE030004,  // 34: sw    $v1, 4($s0)
+      0xAE04000C,  // 38: sw    $a0, 12($s0)
+      0x00801021,  // 3C: addu  $v0, $a0, $zero
+      0x8FBF0018,  // 40: lw    $ra, 24($sp)
+      0x8FB10014,  // 44: lw    $s1, 20($sp)
+      0x8FB00010,  // 48: lw    $s0, 16($sp)
+      0x03E00008,  // 4C: jr    $ra
+      0x27BD0020,  // 50: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestSplitParamScratch";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 temp_a0 asm(\"$4\");"));
+  EXPECT_THAT(code, HasSubstr("temp_s0 = arg0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

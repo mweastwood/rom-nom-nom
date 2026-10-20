@@ -173,14 +173,22 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
   if (text_sec == nullptr) {
     return absl::OkStatus();
   }
+  const ElfSymbol* last_sym = elf_or->FindSymbol(sorted_funcs.back().name);
   uint32_t unpadded_text_size = static_cast<uint32_t>(text_sec->data.size());
+  if (last_sym != nullptr && last_sym->size > 0 &&
+      sym_offsets.back() + last_sym->size <= text_sec->data.size()) {
+    unpadded_text_size = sym_offsets.back() + last_sym->size;
+  }
   uint32_t effective_used = initial_vram_offset + unpadded_text_size;
-  int64_t max_pad_bytes =
+  constexpr int64_t kMaxSoftOverflowBytes = 1024;
+  int64_t free_pad_bytes =
       (module_target_size > 0)
           ? ((module_target_size > effective_used)
                  ? static_cast<int64_t>((module_target_size - effective_used) & ~3u)
                  : 0)
           : (1LL << 30);
+  int64_t max_pad_bytes =
+      (module_target_size > 0) ? (free_pad_bytes + kMaxSoftOverflowBytes) : (1LL << 30);
 
   absl::flat_hash_map<std::string, int32_t> jal_counts;
   for (const auto& raw_line : lines) {
@@ -194,16 +202,18 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
   const size_t n = sorted_funcs.size();
   std::vector<int64_t> req_pad_before(n, -1);
   std::vector<int32_t> func_weight(n, 2);
+  std::vector<int32_t> internal_j_count(n, 0);
   for (size_t i = 0; i < n; ++i) {
-    int32_t w = 2 + jal_counts[sorted_funcs[i].name] * 2;
+    int32_t j_cnt = 0;
     for (size_t ln = sorted_funcs[i].start_line;
          ln <= sorted_funcs[i].end_line && ln < lines.size(); ++ln) {
       std::string_view sv = absl::StripAsciiWhitespace(lines[ln]);
       if (absl::StartsWith(sv, "j\t.L") || absl::StartsWith(sv, "j .L")) {
-        w += 1;
+        j_cnt += 1;
       }
     }
-    func_weight[i] = w;
+    internal_j_count[i] = j_cnt;
+    func_weight[i] = 2 + jal_counts[sorted_funcs[i].name] * 2 + j_cnt;
 
     auto vram_opt = lookup_vram(sorted_funcs[i].name);
     if (!vram_opt.has_value() || *vram_opt < module_base_vram) {
@@ -214,6 +224,11 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
     int64_t needed = target_off - unpadded_off;
     if (needed >= 0 && needed <= max_pad_bytes && (needed % 4) == 0) {
       req_pad_before[i] = needed;
+    }
+  }
+  for (size_t i = 0; i + 1 < n; ++i) {
+    if (req_pad_before[i] >= 0 && req_pad_before[i] == req_pad_before[i + 1]) {
+      func_weight[i] += internal_j_count[i];
     }
   }
 
@@ -233,8 +248,10 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
         parent[i] = static_cast<int32_t>(j);
       }
     }
-    if (dp[i] > best_score) {
-      best_score = dp[i];
+    int64_t overflow_bytes = std::max<int64_t>(0, req_pad_before[i] - free_pad_bytes);
+    int32_t net_score = dp[i] - static_cast<int32_t>(overflow_bytes);
+    if (net_score > best_score) {
+      best_score = net_score;
       best_end = static_cast<int32_t>(i);
     }
   }

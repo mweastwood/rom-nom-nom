@@ -4934,5 +4934,96 @@ s32 ModifiedFirstParamWithExtraScratchArgsForHelperCall(s32* buf, s32 count) {
 )");
 }
 
+// ============================================================================
+// Category 36: Multi-Assignment Return Scratch & High-Arity Helper Call Loops
+// ============================================================================
+
+TEST_F(RoundTripTest, ThreeStepHelperCallAccumulationIntoReturnScratch) {
+  AssertRoundTripBitExact("ThreeStepHelperCallAccumulationIntoReturnScratch", R"(
+s32 compute_step(s32 a, s32 b);
+
+s32 ThreeStepHelperCallAccumulationIntoReturnScratch(s32* p, s32 k) {
+    s32 r = compute_step(p[0], k + 1);
+    if (r < 0) {
+        return -1;
+    }
+    p[1] = r + p[2];
+    p[3] = p[1] ^ k;
+    return p[3] + p[4];
+}
+)");
+}
+
+TEST_F(RoundTripTest, FourArgHelperCallInLoopWithDualScratchUpdates) {
+  AssertRoundTripBitExact("FourArgHelperCallInLoopWithDualScratchUpdates", R"(
+s32 blend_quad(s32 a, s32 b, s32 c, s32 d);
+
+s32 FourArgHelperCallInLoopWithDualScratchUpdates(s32* arr, s32 n) {
+    s32 sum = 0;
+    while (n > 0) {
+        s32 x = arr[0] + 4;
+        s32 y = arr[1] - 4;
+        sum += blend_quad(x, y, arr[2], n);
+        arr += 3;
+        n--;
+    }
+    return sum;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ConditionalHelperCallWithPostCallArrayWriteback) {
+  AssertRoundTripBitExact("ConditionalHelperCallWithPostCallArrayWriteback", R"(
+s32 filter_entry(s32 val, s32 tag);
+
+s32 ConditionalHelperCallWithPostCallArrayWriteback(s32* slot, s32 tag) {
+    s32 v = filter_entry(slot[0], tag);
+    if (v <= 0) {
+        slot[0] = 0;
+        return 0;
+    }
+    slot[1] = v + slot[2];
+    slot[3] = slot[1] - tag;
+    return slot[3];
+}
+)");
+}
+
+TEST_F(RoundTripTest, DualHelperCallsWithIntermediateStructFieldUpdates) {
+  AssertRoundTripBitExact("DualHelperCallsWithIntermediateStructFieldUpdates", R"(
+s32 stage_one(s32 a, s32 b);
+s32 stage_two(s32 a, s32 b);
+
+s32 DualHelperCallsWithIntermediateStructFieldUpdates(s32* ctx, s32 arg) {
+    s32 a;
+    s32 b;
+    a = stage_one(ctx[0], arg + 1);
+    ctx[1] = a;
+    b = stage_two(a + ctx[2], arg);
+    ctx[3] = b;
+    return b + ctx[0];
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopWithEarlyExitHelperCallAndScratchWriteback) {
+  AssertRoundTripBitExact("LoopWithEarlyExitHelperCallAndScratchWriteback", R"(
+s32 check_slot(s32 val, s32 idx);
+
+s32 LoopWithEarlyExitHelperCallAndScratchWriteback(s32* table, s32 len) {
+    while (len > 0) {
+        s32 res = check_slot(table[0], len);
+        if (res != 0) {
+            table[0] = res + len;
+            return res;
+        }
+        table++;
+        len--;
+    }
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
