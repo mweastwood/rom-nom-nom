@@ -414,5 +414,70 @@ entries { name: "g_bss2" address: 0x80003080 type: SYMBOL_DATA }
   EXPECT_TRUE(blobs[1].is_bss);
 }
 
+TEST(RelocationRebaserTest, RebasesSectionSymbolHiLoReferencesToShiftedFunction) {
+  auto cfg = ParseGameConfig(kConfig);
+  ASSERT_TRUE(cfg.ok()) << cfg.status();
+  auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
+  ASSERT_TRUE(syms.ok()) << syms.status();
+
+  // Candidate function `func_80001800` is placed at candidate address 0x80001900.
+  // An instruction in `Func` loads from `func_80001800 + 4` using a section-symbol
+  // (.main) HI16/LO16 relocation resolved to 0x80001904.
+  std::vector<uint32_t> words(0x1060 / 4, 0);
+  words[0] = 0x3C028000;  // lui v0, 0x8000
+  words[1] = 0x8C431904;  // lw  v1, 0x1904(v0)
+  std::vector<TestSymbol> symbols = {
+      {".main", 0x80001000, 3},        {"Func", 0x80001000},
+      {"func_80001800", 0x80001900},   {"g_table", 0x80002000},
+      {"main_DATA_START", 0x80002000}, {"main_DATA_END", 0x80002040},
+  };
+  std::vector<TestReloc> relocs = {
+      {0x80001000, 1, kRMipsHi16},
+      {0x80001004, 1, kRMipsLo16},
+  };
+  auto elf = BuildElf(0x80001000, words, 0x80003000, 0x100, symbols, relocs);
+
+  auto rebase =
+      BuildCandidateRebase(elf, CollectDataBlobs(&*cfg, &*syms), &*cfg, &*syms, RebaseOptions{});
+  ASSERT_TRUE(rebase.ok()) << rebase.status();
+  auto rebased = rebase->RebaseFunctionWords(0x80001000, {words[0], words[1]});
+  EXPECT_EQ(rebased[0], 0x3C028000u);
+  EXPECT_EQ(rebased[1], 0x8C431804u);  // 0x80001904 rebased to target 0x80001800 + 4
+}
+
+TEST(RelocationRebaserTest, RelocatesPrivateRodataPlacedImmediatelyAfterBssToScratch) {
+  auto cfg = ParseGameConfig(kConfig);
+  ASSERT_TRUE(cfg.ok()) << cfg.status();
+  auto syms = SymbolIndex::ParseFromTextproto(kSymbols);
+  ASSERT_TRUE(syms.ok()) << syms.status();
+
+  std::vector<uint32_t> words(0x2080 / 4, 0);
+  words[0] = 0x3C028000;            // lui $v0, %hi(.main_rodata)
+  words[1] = 0x8C423100;            // lw  $v0, %lo(.main_rodata)($v0)
+  words[0x2040 / 4] = 0x11223344u;  // rodata word inside candidate .main_rodata
+
+  // Candidate placed private .main_rodata at 0x80003040 ( words offset 0x2040 ),
+  // outside target data/bss blobs (main_BSS_END is 0x80003200).
+  std::vector<TestSymbol> symbols = {
+      {".main", 0x80001000, 3},        {"Func", 0x80001000},
+      {"g_table", 0x80002000},         {"main_DATA_START", 0x80002000},
+      {"main_DATA_END", 0x80002040},   {"main_RODATA_START", 0x80003040},
+      {"main_RODATA_END", 0x80003060},
+  };
+  std::vector<TestReloc> relocs = {
+      {0x80001000, 1, kRMipsHi16},
+      {0x80001004, 1, kRMipsLo16},
+  };
+  auto elf = BuildElf(0x80001000, words, 0x80003100, 0x100, symbols, relocs);
+
+  RebaseOptions opts;
+  opts.scratch_base = 0x80600000;
+  auto rebase = BuildCandidateRebase(elf, CollectDataBlobs(&*cfg, &*syms), &*cfg, &*syms, opts);
+  ASSERT_TRUE(rebase.ok()) << rebase.status();
+  ASSERT_EQ(rebase->private_payloads.size(), 1u);
+  EXPECT_EQ(rebase->private_payloads[0].address, 0x80600000u);
+  EXPECT_EQ(rebase->MapAddress(0x80003040), 0x80600000u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

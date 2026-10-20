@@ -89,18 +89,20 @@ absl::StatusOr<uint32_t> TargetExtractor::ResolveVram(std::string_view func_name
 }
 
 absl::StatusOr<uint32_t> TargetExtractor::VramToRomOffset(uint32_t vram) const {
-  if (config_ != nullptr) {
+  if (config_ != nullptr && !config_->segments().empty()) {
     auto offset = rom_nom_nom::VramToRomOffset(*config_, vram);
     if (offset.has_value()) {
       return *offset;
     }
+    return absl::NotFoundError(absl::StrFormat(
+        "TargetExtractor: VRAM address 0x%08X does not map to any ROM segment.", vram));
   }
 
   // Fallback defaults if config is unavailable
-  if (options_.game_name == "harvest-moon-64" && vram >= 0x80025C50) {
+  if (options_.game_name == "harvest-moon-64" && vram >= 0x80025C50 && vram < 0x801241C0) {
     return vram - 0x80025C50 + 0x1050;
   }
-  if (options_.game_name == "ogre-battle-64" && vram >= 0x80070C60) {
+  if (options_.game_name == "ogre-battle-64" && vram >= 0x80070C60 && vram < 0x800AEDB0) {
     return vram - 0x80070C60 + 0x1060;
   }
 

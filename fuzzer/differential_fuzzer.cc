@@ -270,7 +270,7 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
 
     if (options_.filter_local_stack_writes) {
       auto is_local_stack = [&](const MemoryWrite& w) {
-        if (w.is_stack_relative) return true;
+        if (w.is_stack_relative && w.base_reg != 30) return true;
         if (w.address < options_.initial_sp + 0x100 && w.address >= options_.initial_sp - 0x10000) {
           return true;
         }

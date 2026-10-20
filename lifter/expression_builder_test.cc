@@ -2613,5 +2613,29 @@ TEST(ExpressionBuilderTest, SpIndexingWithOutgoingArgsSize) {
   EXPECT_EQ(statements[1].ToString(), "v0 = *(s32*)((s32)sp + 16);\n");
 }
 
+TEST(ExpressionBuilderTest, NonAdjacentCop1IntFloatConversionsScheduledAcrossInstructions) {
+  // 00: mtc1      $a0, $f4
+  // 04: addiu     $v1, $a1, 8       # independent instruction scheduled in COP1 delay slot
+  // 08: cvt.s.w   $f6, $f4          # consumes $f4 from mtc1
+  // 0C: trunc.w.s $f8, $f6
+  // 10: sw        $v1, 0($a2)       # independent instruction scheduled in COP1 delay slot
+  // 14: mfc1      $v0, $f8          # consumes $f8 from trunc.w.s
+  std::vector<uint32_t> words = {
+      0x44842000,  // mtc1      $a0, $f4
+      0x24A30008,  // addiu     $v1, $a1, 8
+      0x468021A0,  // cvt.s.w   $f6, $f4
+      0x4600320D,  // trunc.w.s $f8, $f6
+      0xACC30000,  // sw        $v1, 0($a2)
+      0x44024000,  // mfc1      $v0, $f8
+  };
+  auto insts = *DecodeSequence(words);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 4u);
+  EXPECT_EQ(stmts[0].ToString(), "v1 = arg1 + 8;\n");
+  EXPECT_EQ(stmts[1].ToString(), "f6 = (f32)arg0;\n");
+  EXPECT_EQ(stmts[2].ToString(), "*(s32*)arg2 = v1;\n");
+  EXPECT_EQ(stmts[3].ToString(), "v0 = (s32)f6;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

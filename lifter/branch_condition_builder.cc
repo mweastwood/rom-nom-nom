@@ -613,7 +613,52 @@ bool BranchConditionBuilder::ShouldDecoupleLoopConditionDelaySlot(const BasicBlo
     for (Register def_reg : delay_ud.gpr_defs) {
       if (def_reg == Register::kZero) continue;
       bool killed = false;
-      for (const auto& inst : header_block->instructions) {
+      for (size_t idx = 0; idx < header_block->instructions.size(); ++idx) {
+        const auto& inst = header_block->instructions[idx];
+        if (inst.IsCall()) {
+          if (idx + 1 < header_block->instructions.size()) {
+            RegisterUseDef delay_inst_ud =
+                GetInstructionUseDef(header_block->instructions[idx + 1]);
+            bool delay_used = false;
+            for (Register u : delay_inst_ud.gpr_uses) {
+              if (u == def_reg) {
+                delay_used = true;
+                break;
+              }
+            }
+            if (delay_used) break;
+            bool delay_defined = false;
+            for (Register d : delay_inst_ud.gpr_defs) {
+              if (d == def_reg) {
+                delay_defined = true;
+                break;
+              }
+            }
+            if (delay_defined) {
+              killed = true;
+              break;
+            }
+          }
+          RegisterUseDef call_ud = GetInstructionUseDef(inst);
+          bool call_used = false;
+          for (Register u : call_ud.gpr_uses) {
+            if (u == def_reg) {
+              call_used = true;
+              break;
+            }
+          }
+          if (call_used) break;
+          if (def_reg == Register::kV0 || def_reg == Register::kV1 || def_reg == Register::kAt ||
+              (def_reg >= Register::kT0 && def_reg <= Register::kT7) || def_reg == Register::kT8 ||
+              def_reg == Register::kT9) {
+            killed = true;
+            break;
+          }
+          if (idx + 1 < header_block->instructions.size()) {
+            ++idx;
+          }
+          continue;
+        }
         RegisterUseDef inst_ud = GetInstructionUseDef(inst);
         bool used = false;
         for (Register u : inst_ud.gpr_uses) {

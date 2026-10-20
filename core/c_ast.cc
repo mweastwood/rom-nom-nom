@@ -307,9 +307,10 @@ std::unique_ptr<CStatement> CStatement::Expression(std::unique_ptr<CExpression> 
 
 std::unique_ptr<CStatement> CStatement::VariableDeclaration(
     CType type, std::string name, std::unique_ptr<CExpression> initializer,
-    std::optional<size_t> array_size) {
+    std::optional<size_t> array_size, std::optional<std::string> register_annotation) {
   return std::make_unique<VariableDeclarationStatement>(std::move(type), std::move(name),
-                                                        std::move(initializer), array_size);
+                                                        std::move(initializer), array_size,
+                                                        std::move(register_annotation));
 }
 
 std::unique_ptr<CStatement> CStatement::If(std::unique_ptr<CExpression> condition,
@@ -439,9 +440,16 @@ std::unique_ptr<CStatement> ExpressionStatement::Clone() const {
 // --- VariableDeclarationStatement ---
 
 std::string VariableDeclarationStatement::ToString(int indent_level) const {
-  std::string result = Indent(indent_level) + type_.ToString() + " " + name_;
+  std::string result = Indent(indent_level);
+  if (register_annotation_.has_value() && !array_size_.has_value()) {
+    result += "register ";
+  }
+  result += type_.ToString() + " " + name_;
   if (array_size_.has_value()) {
     absl::StrAppend(&result, "[", *array_size_, "]");
+  }
+  if (register_annotation_.has_value() && !array_size_.has_value()) {
+    absl::StrAppend(&result, " asm(\"", *register_annotation_, "\")");
   }
   if (initializer_ != nullptr) {
     result += " = " + initializer_->ToString();
@@ -452,7 +460,8 @@ std::string VariableDeclarationStatement::ToString(int indent_level) const {
 
 std::unique_ptr<CStatement> VariableDeclarationStatement::Clone() const {
   return std::make_unique<VariableDeclarationStatement>(
-      type_, name_, initializer_ ? initializer_->Clone() : nullptr, array_size_);
+      type_, name_, initializer_ ? initializer_->Clone() : nullptr, array_size_,
+      register_annotation_);
 }
 
 // --- IfStatement ---
@@ -845,6 +854,17 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
                 symbols.local_variables.count(inner_name) == 0 &&
                 symbols.external_functions.count(inner_name) == 0) {
               symbols.external_data.insert(inner_name);
+            }
+          } else {
+            size_t proto_end = callee_name.find("))");
+            if (proto_end != std::string::npos) {
+              std::string inner_name =
+                  callee_name.substr(proto_end + 2, callee_name.size() - (proto_end + 2) - 1);
+              if (IsValidCIdentifier(inner_name) && !IsKeywordOrBuiltin(inner_name) &&
+                  symbols.local_variables.count(inner_name) == 0) {
+                symbols.external_functions.insert(inner_name);
+                symbols.external_data.erase(inner_name);
+              }
             }
           }
         }

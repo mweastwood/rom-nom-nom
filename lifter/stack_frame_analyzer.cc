@@ -126,8 +126,8 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
       if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
            inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
           (inst.rs == Register::kSp || (analysis.has_frame_pointer && inst.rs == Register::kFp)) &&
-          inst.rt.has_value() && *inst.rt != Register::kSp && *inst.rt != Register::kFp &&
-          inst.immediate >= 0) {
+          inst.rt.has_value() && *inst.rt != Register::kSp &&
+          (!analysis.has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0) {
         analysis.sp_address_taken = true;
         addr_taken_offsets.insert(inst.immediate);
       }
@@ -137,7 +137,8 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           (inst.rs == Register::kSp || inst.rt == Register::kSp ||
            (analysis.has_frame_pointer &&
             (inst.rs == Register::kFp || inst.rt == Register::kFp))) &&
-          inst.rd.has_value() && *inst.rd != Register::kSp && *inst.rd != Register::kFp) {
+          inst.rd.has_value() && *inst.rd != Register::kSp &&
+          (!analysis.has_frame_pointer || *inst.rd != Register::kFp)) {
         analysis.sp_address_taken = true;
       }
       if ((inst.opcode == Opcode::kLwl || inst.opcode == Opcode::kLwr ||
@@ -292,7 +293,8 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           }
         } else if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
                     inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-                   inst.rt.has_value() && *inst.rt != Register::kSp && *inst.rt != Register::kFp &&
+                   inst.rt.has_value() && *inst.rt != Register::kSp &&
+                   (!analysis.has_frame_pointer || *inst.rt != Register::kFp) &&
                    inst.immediate > 0) {
           int32_t adj = static_cast<int32_t>(inst.immediate) - sp_base_offset;
           if (adj > 0) {

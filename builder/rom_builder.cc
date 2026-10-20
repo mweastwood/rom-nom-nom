@@ -12,11 +12,15 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "core/elf_reader.h"
 #include "core/game_config.h"
 #include "core/game_config.pb.h"
 #include "core/sha1.h"
@@ -164,10 +168,116 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   const auto& obj_refs = adapter_or->ObjectReferences();
   std::string rewritten_ld = adapter_or->RewriteObjectPaths(obj_dir);
 
+  // Align each subsegment (.text and .data) in SEGMENT_CODE segments to at least its retail
+  // section-relative offset so shrinkage in an earlier module does not cascade-shift all
+  // subsequent modules and .data/.bss. Also move <seg>_RODATA after <seg>_DATA so compiler-
+  // generated .rodata sections (from jump tables and float constants in lifted C) do not push
+  // the retail .data subsegments forward from their retail VRAM addresses.
+  for (const auto& seg : config.segments()) {
+    if (seg.type() != SEGMENT_CODE || seg.vram() == 0) {
+      continue;
+    }
+    if (!seg.name().empty()) {
+      std::string rodata_start_marker = absl::StrCat("        ", seg.name(), "_RODATA_START = .;");
+      std::string data_start_marker = absl::StrCat("        ", seg.name(), "_DATA_START = .;");
+      std::string rom_pos_inc_marker = absl::StrCat("    __romPos += SIZEOF(.", seg.name(), ");");
+      size_t rodata_pos = rewritten_ld.find(rodata_start_marker);
+      size_t data_pos = rewritten_ld.find(data_start_marker);
+      if (rodata_pos != std::string::npos && data_pos != std::string::npos &&
+          rodata_pos < data_pos) {
+        std::string rodata_block = rewritten_ld.substr(rodata_pos, data_pos - rodata_pos);
+        rewritten_ld.erase(rodata_pos, data_pos - rodata_pos);
+        size_t rom_pos_inc = rewritten_ld.find(rom_pos_inc_marker);
+        if (rom_pos_inc != std::string::npos) {
+          size_t align_line_end = rewritten_ld.find('\n', rom_pos_inc);
+          if (align_line_end != std::string::npos) {
+            size_t next_line_end = rewritten_ld.find('\n', align_line_end + 1);
+            if (next_line_end != std::string::npos) {
+              align_line_end = next_line_end;
+            }
+            std::string rodata_section = absl::StrCat(
+                "    .", seg.name(), "_rodata (ADDR(.", seg.name(), "_bss) + SIZEOF(.", seg.name(),
+                "_bss)) : AT(__romPos) SUBALIGN(16)\n    {\n        FILL(0x00000000);\n",
+                rodata_block, "    }\n    __romPos += SIZEOF(.", seg.name(),
+                "_rodata);\n    __romPos = ALIGN(__romPos, 16);\n");
+            rewritten_ld.insert(align_line_end + 1, rodata_section);
+          }
+        }
+      }
+    }
+    for (const auto& sub : seg.subsegments()) {
+      if (sub.name().empty() || sub.rom_start() <= seg.rom_start()) {
+        continue;
+      }
+      uint32_t sub_offset = sub.rom_start() - seg.rom_start();
+      uint32_t sub_vram = seg.vram() + sub_offset;
+      std::string align_expr =
+          absl::StrFormat(". = (ABSOLUTE(.) < 0x%08X) ? 0x%X : .;\n        ", sub_vram, sub_offset);
+      if (sub.type() == SUBSEGMENT_DATA) {
+        std::string target = (obj_dir / absl::StrCat(sub.name(), ".data.o")).string() + "(.data);";
+        size_t pos = rewritten_ld.find(target);
+        if (pos != std::string::npos) {
+          rewritten_ld.insert(pos, align_expr);
+        }
+      } else if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) {
+        std::string obj_path = (obj_dir / absl::StrCat(sub.name(), ".o")).string();
+        std::string target_exact = obj_path + "(.text);";
+        size_t pos = rewritten_ld.find(target_exact);
+        if (pos == std::string::npos) {
+          std::string target_wild = obj_path + "(.text*);";
+          pos = rewritten_ld.find(target_wild);
+        }
+        if (pos != std::string::npos) {
+          rewritten_ld.insert(pos, align_expr);
+        }
+      }
+    }
+  }
+
   std::filesystem::path rewritten_ld_path = obj_dir / absl::StrCat(obj_prefix, ".ld");
   {
     std::ofstream ofs(rewritten_ld_path);
     ofs << rewritten_ld;
+  }
+
+  // Build map of function target VRAMs for inter-function retail alignment.
+  absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
+  if (symbol_index != nullptr) {
+    for (const SymbolRegistryEntry* entry : symbol_index->SortedEntries()) {
+      if (entry->type() == SYMBOL_FUNC && !entry->name().empty() && entry->address() != 0) {
+        function_target_vrams[std::string(entry->name())] = entry->address();
+      }
+    }
+  }
+  if (!options_.src_dir.empty()) {
+    std::filesystem::path lifted_symbols_path = options_.src_dir / "lifted_symbols.ld";
+    if (std::filesystem::exists(lifted_symbols_path, ec)) {
+      std::ifstream ls_ifs(lifted_symbols_path);
+      std::string line;
+      while (std::getline(ls_ifs, line)) {
+        size_t eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) {
+          continue;
+        }
+        std::string_view line_view = line;
+        std::string_view lhs = absl::StripAsciiWhitespace(line_view.substr(0, eq_pos));
+        if (absl::StartsWith(lhs, "PROVIDE(")) {
+          lhs.remove_prefix(8);
+          lhs = absl::StripAsciiWhitespace(lhs);
+        }
+        std::string_view rhs = absl::StripAsciiWhitespace(line_view.substr(eq_pos + 1));
+        while (!rhs.empty() && (rhs.back() == ';' || rhs.back() == ')' ||
+                                absl::ascii_isspace(static_cast<unsigned char>(rhs.back())))) {
+          rhs.remove_suffix(1);
+        }
+        if (!lhs.empty() && (absl::StartsWith(rhs, "0x") || absl::StartsWith(rhs, "0X"))) {
+          uint32_t addr = 0;
+          if (absl::SimpleHexAtoi(rhs.substr(2), &addr) && addr != 0) {
+            function_target_vrams.try_emplace(std::string(lhs), addr);
+          }
+        }
+      }
+    }
   }
 
   // 5. Resolve and compile all objects
@@ -208,7 +318,43 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     macro_inc = p.is_relative() ? (toolchain_.RepoRoot() / p) : p;
   }
 
-  for (const auto& obj_ref : obj_refs) {
+  absl::flat_hash_map<std::string, uint32_t> module_target_sizes;
+  absl::flat_hash_map<std::string, std::string> module_segment_names;
+  absl::flat_hash_map<std::string, uint32_t> module_rom_starts;
+  for (const auto& seg : config.segments()) {
+    if (seg.type() != SEGMENT_CODE) {
+      continue;
+    }
+    for (int i = 0; i < seg.subsegments_size(); ++i) {
+      const auto& sub = seg.subsegments(i);
+      uint32_t sub_end =
+          (i + 1 < seg.subsegments_size()) ? seg.subsegments(i + 1).rom_start() : seg.rom_end();
+      if (!sub.name().empty()) {
+        module_rom_starts.try_emplace(std::string(sub.name()), sub.rom_start());
+      }
+      if ((sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) && !sub.name().empty() &&
+          sub_end > sub.rom_start()) {
+        module_target_sizes[std::string(sub.name())] = sub_end - sub.rom_start();
+        module_segment_names[std::string(sub.name())] = std::string(seg.name());
+      }
+    }
+  }
+
+  std::vector<std::string> ordered_obj_refs(obj_refs.begin(), obj_refs.end());
+  std::stable_sort(
+      ordered_obj_refs.begin(), ordered_obj_refs.end(),
+      [&](const std::string& a, const std::string& b) {
+        std::string stem_a = std::filesystem::path(a).stem().string();
+        std::string stem_b = std::filesystem::path(b).stem().string();
+        auto it_a = module_rom_starts.find(stem_a);
+        auto it_b = module_rom_starts.find(stem_b);
+        uint32_t rom_a = (it_a != module_rom_starts.end()) ? it_a->second : 0xFFFFFFFFu;
+        uint32_t rom_b = (it_b != module_rom_starts.end()) ? it_b->second : 0xFFFFFFFFu;
+        return rom_a < rom_b;
+      });
+
+  absl::flat_hash_map<std::string, uint32_t> segment_overflow_bytes;
+  for (const auto& obj_ref : ordered_obj_refs) {
     auto resolved_or = resolver.Resolve(obj_ref);
     if (!resolved_or.ok()) {
       return resolved_or.status();
@@ -221,6 +367,18 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
         const auto* mod_fn_flags = function_flags_by_module.contains(resolved_or->object_stem)
                                        ? &function_flags_by_module.at(resolved_or->object_stem)
                                        : nullptr;
+        uint32_t mod_target_size = 0;
+        if (auto it_sz = module_target_sizes.find(resolved_or->object_stem);
+            it_sz != module_target_sizes.end()) {
+          mod_target_size = it_sz->second;
+        }
+        std::string seg_name;
+        uint32_t initial_overflow = 0;
+        if (auto it_seg = module_segment_names.find(resolved_or->object_stem);
+            it_seg != module_segment_names.end()) {
+          seg_name = it_seg->second;
+          initial_overflow = segment_overflow_bytes[seg_name];
+        }
 
         bool has_distinct_flags = false;
         if (mod_fn_flags != nullptr && toolchain_.Mode() == ToolchainMode::kOriginal) {
@@ -241,6 +399,9 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
               .function_flags = *mod_fn_flags,
               .include_dirs = extra_includes,
               .macro_inc = macro_inc,
+              .function_target_vrams = function_target_vrams,
+              .module_target_size = mod_target_size,
+              .initial_vram_offset = initial_overflow,
           });
         } else {
           status = compiler_.CompileC({
@@ -249,10 +410,26 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
               .opt_flags = std::move(flags),
               .include_dirs = extra_includes,
               .macro_inc = macro_inc,
+              .function_target_vrams = function_target_vrams,
+              .module_target_size = mod_target_size,
+              .initial_vram_offset = initial_overflow,
           });
         }
         if (!status.ok()) {
           return status;
+        }
+        if (!seg_name.empty() && mod_target_size > 0) {
+          auto elf_or = ElfReader::LoadFromFile(target_obj);
+          if (elf_or.ok()) {
+            const ElfSection* text_sec = elf_or->FindSection(".text");
+            if (text_sec != nullptr) {
+              uint32_t text_sz = static_cast<uint32_t>(text_sec->data.size());
+              uint32_t aligned_sz = (text_sz + 15u) & ~15u;
+              uint32_t total_end = initial_overflow + aligned_sz;
+              segment_overflow_bytes[seg_name] =
+                  (total_end > mod_target_size) ? (total_end - mod_target_size) : 0;
+            }
+          }
         }
         break;
       }

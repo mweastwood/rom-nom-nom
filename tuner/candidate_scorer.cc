@@ -25,8 +25,22 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
   if (normalized_exact != other.normalized_exact) {
     return normalized_exact;
   }
+  const int64_t net_bit_exact =
+      static_cast<int64_t>(bit_exact_instructions) * 2 - static_cast<int64_t>(SizeDelta());
+  const int64_t other_net_bit_exact = static_cast<int64_t>(other.bit_exact_instructions) * 2 -
+                                      static_cast<int64_t>(other.SizeDelta());
+  if (net_bit_exact != other_net_bit_exact) {
+    return net_bit_exact > other_net_bit_exact;
+  }
   if (bit_exact_instructions != other.bit_exact_instructions) {
     return bit_exact_instructions > other.bit_exact_instructions;
+  }
+  const int64_t net_matching =
+      static_cast<int64_t>(matching_instructions) * 2 - static_cast<int64_t>(SizeDelta());
+  const int64_t other_net_matching = static_cast<int64_t>(other.matching_instructions) * 2 -
+                                     static_cast<int64_t>(other.SizeDelta());
+  if (net_matching != other_net_matching) {
+    return net_matching > other_net_matching;
   }
   if (matching_instructions != other.matching_instructions) {
     return matching_instructions > other.matching_instructions;

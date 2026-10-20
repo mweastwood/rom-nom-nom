@@ -464,7 +464,7 @@ TEST(AstConverterTest, ConvertSwitchStatementDeclaresLocalVariables) {
   std::string code = func.ToString();
 
   // temp_t0 must be declared at the top of the function
-  EXPECT_THAT(code, HasSubstr("s32 temp_t0;"));
+  EXPECT_THAT(code, HasSubstr("register s32 temp_t0 asm(\"$8\");"));
   // Return type should be inferred as s32 because HasReturnValue detected return 42
   EXPECT_EQ(func.ReturnType().ToString(), "s32");
 }
@@ -919,12 +919,12 @@ TEST(AstConverterTest, DeclaresFpRegistersWithProperFloatTypesAndFoldsCop1Branch
 
   // Single precision variables are f32
   EXPECT_THAT(code, HasSubstr("f32 f0;"));
-  EXPECT_THAT(code, HasSubstr("f32 f2;"));
-  EXPECT_THAT(code, HasSubstr("f32 f4;"));
+  EXPECT_THAT(code, HasSubstr("register f32 f2 asm(\"$f2\");"));
+  EXPECT_THAT(code, HasSubstr("register f32 f4 asm(\"$f4\");"));
   // Double precision variables are f64
   EXPECT_THAT(code, HasSubstr("f64 f12_d;"));
   EXPECT_THAT(code, HasSubstr("f64 f14_d;"));
-  EXPECT_THAT(code, HasSubstr("f64 f16_d;"));
+  EXPECT_THAT(code, HasSubstr("register f64 f16_d asm(\"$f16\");"));
   // Branch comparison is folded directly
   EXPECT_THAT(code, HasSubstr("f0 < f2"));
 }
@@ -1582,9 +1582,10 @@ TEST(AstConverterTest, ChainedSelfAssignmentPreservesLvalueAndDefinitions) {
   FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
-  // LHS of assignment must NEVER be replaced by an rvalue expression
+  // LHS of assignment must NEVER be replaced by an rvalue expression, while pure pointer
+  // subexpressions inside a dereference *(s32*)ptr are folded cleanly.
   EXPECT_THAT(code, Not(HasSubstr(") = (")));
-  EXPECT_THAT(code, HasSubstr("*(s32*)v0 = arg2;"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)((arg0 | arg1) | 0xA0000000) = arg2;"));
 }
 
 TEST(AstConverterTest, FloatParametersInGeneralRegistersTyping) {
@@ -1840,6 +1841,427 @@ TEST(AstConverterTest, FoldExpressionIntoSwitchCondition) {
   FunctionDeclaration func = *AstConverter::Convert(cfg, *seq, nullptr, options);
   std::string code = func.ToString();
   EXPECT_THAT(code, HasSubstr("switch ((arg0 + 1))"));
+}
+
+TEST(AstConverterTest, ScopeAwareFoldingAcrossMultipleScratchUses) {
+  std::string textproto = R"pb(
+    entries { name: "StepOne" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+    entries { name: "StepTwo" address: 0x80002000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // Function calls StepOne(), branches on $v0, then calls StepTwo() and returns $v0:
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 20($sp)
+  // 08: jal   0x80001000  (StepOne)
+  // 0C: nop
+  // 10: beq   $v0, $zero, +3 (to 20)
+  // 14: nop
+  // 18: jal   0x80002000  (StepTwo)
+  // 1C: nop
+  // 20: lw    $ra, 20($sp)
+  // 24: jr    $ra
+  // 28: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0x0C000400,  // 08: jal   0x80001000
+      0x00000000,  // 0C: nop
+      0x10400003,  // 10: beq   $v0, $zero, +3 (to 20)
+      0x00000000,  // 14: nop
+      0x0C000800,  // 18: jal   0x80002000
+      0x00000000,  // 1C: nop
+      0x8FBF0014,  // 20: lw    $ra, 20($sp)
+      0x03E00008,  // 24: jr    $ra
+      0x27BD0018,  // 28: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_set<std::string> v0_funcs = {"StepOne", "StepTwo"};
+  AstConverterOptions options;
+  options.function_name = "TestScopeAwareFold";
+  options.functions_returning_v0 = &v0_funcs;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("if ((StepOne() != 0))"));
+}
+
+TEST(AstConverterTest, GeneralInPlaceScratchRedefinitionFolding) {
+  // v0 = *(u16*)arg0;
+  // v0 = ((u32)v0 >> 3);
+  // v0 = (v0 & 3);
+  // return v0;
+  std::vector<uint32_t> words = {
+      0x94820000,  // 00: lhu  $v0, 0($a0)
+      0x000210C2,  // 04: srl  $v0, $v0, 3
+      0x30420003,  // 08: andi $v0, $v0, 3
+      0x03E00008,  // 0C: jr   $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "ExtractBitfield";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("return (((u32)*(u16*)arg0 >> 3) & 3);"));
+}
+
+TEST(AstConverterTest, OutgoingStackArgumentFoldingIntoCall) {
+  std::string textproto = R"pb(
+    entries { name: "CallWithSixArgs" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $ra, 28($sp)
+  // 08: addiu $v0, $zero, 10
+  // 0C: sw    $v0, 16($sp)
+  // 10: addiu $v1, $zero, 20
+  // 14: sw    $v1, 20($sp)
+  // 18: jal   0x80001000
+  // 1C: nop
+  // 20: lw    $ra, 28($sp)
+  // 24: jr    $ra
+  // 28: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0x2402000A,  // 08: addiu $v0, $zero, 10
+      0xAF820010,  // 0C: sw    $v0, 16($sp) (wait: base $sp is 29 = 0x1D -> 0xAFA20010)
+      0x24030014,  // 10: addiu $v1, $zero, 20
+      0xAFA30014,  // 14: sw    $v1, 20($sp)
+      0x0C000400,  // 18: jal   0x80001000
+      0x00000000,  // 1C: nop
+      0x8FBF001C,  // 20: lw    $ra, 28($sp)
+      0x03E00008,  // 24: jr    $ra
+      0x27BD0020,  // 28: addiu $sp, $sp, 32
+  };
+  words[3] = 0xAFA20010;  // sw $v0, 16($sp)
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_map<std::string, int> param_counts = {{"CallWithSixArgs", 6}};
+  AstConverterOptions options;
+  options.function_name = "TestStackArgsFold";
+  options.function_parameter_counts = &param_counts;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("CallWithSixArgs(arg0, arg1, arg2, arg3, 10, 20);"));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_16")));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_20")));
+}
+
+TEST(AstConverterTest, CalleeSavedRegistersOmitBogusZeroInitAndEmitHardwareRegisterBinding) {
+  // Prologue saves $s0 and $s1 to stack BEFORE $s0 and $s1 are defined in the body:
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $ra, 24($sp)
+  // 08: sw    $s1, 20($sp)
+  // 0C: sw    $s0, 16($sp)
+  // 10: addiu $s0, $a0, 5
+  // 14: addiu $s1, $a1, 10
+  // 18: jal   0x80001000
+  // 1C: addu  $a0, $s0, $s1
+  // 20: addu  $v0, $v0, $s0
+  // 24: addu  $v0, $v0, $s1
+  // 28: lw    $ra, 24($sp)
+  // 2C: lw    $s1, 20($sp)
+  // 30: lw    $s0, 16($sp)
+  // 34: jr    $ra
+  // 38: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF0018,  // 04: sw    $ra, 24($sp)
+      0xAFB10014,  // 08: sw    $s1, 20($sp)
+      0xAFB00010,  // 0C: sw    $s0, 16($sp)
+      0x24840005,  // 10: addiu $s0, $a0, 5 (wait: $s0 is 16 -> 0x24900005)
+      0x24B1000A,  // 14: addiu $s1, $a1, 10
+      0x0C000400,  // 18: jal   0x80001000
+      0x02112021,  // 1C: addu  $a0, $s0, $s1
+      0x00501021,  // 20: addu  $v0, $v0, $s0
+      0x00511021,  // 24: addu  $v0, $v0, $s1
+      0x8FBF0018,  // 28: lw    $ra, 24($sp)
+      0x8FB10014,  // 2C: lw    $s1, 20($sp)
+      0x8FB00010,  // 30: lw    $s0, 16($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0020,  // 38: addiu $sp, $sp, 32
+  };
+  words[4] = 0x24900005;  // addiu $s0, $a0, 5
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestCalleeSavedBindings";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("register s32 temp_s0 asm(\"$16\");"));
+  EXPECT_THAT(code, HasSubstr("register s32 temp_s1 asm(\"$17\");"));
+  EXPECT_THAT(code, Not(HasSubstr("temp_s0 = 0")));
+  EXPECT_THAT(code, Not(HasSubstr("temp_s1 = 0")));
+}
+
+TEST(AstConverterTest, JumpTableBoundsCheckDoesNotClobberSwitchSelectorRegister) {
+  // Mirrors GCC 2.7.2 jump table sequence where $v0 holds the switch selector (`lbu $v0, 3($a0)`),
+  // $v1 holds the normalized index (`addiu $v1, $v0, -2`), and the bounds check `sltiu $v0, $v1, 6`
+  // temporarily writes the boolean bounds result into $v0 before `sll $v0, $v1, 2` in the delay
+  // slot of `beqz $v0, default`. The lifter must NOT emit `v0 = ((u32)v1 < 6);` before `switch`!
+  std::vector<uint32_t> words = {
+      0x90820003,  // 00: lbu   $v0, 3($a0)
+      0x2443FFFE,  // 04: addiu $v1, $v0, -2
+      0x2C620006,  // 08: sltiu $v0, $v1, 6
+      0x10400008,  // 0C: beqz  $v0, +8 -> 0x30 (default/exit)
+      0x00031080,  // 10: sll   $v0, $v1, 2
+      0x3C018005,  // 14: lui   $at, 0x8005
+      0x00220821,  // 18: addu  $at, $at, $v0
+      0x8C220000,  // 1C: lw    $v0, 0($at)
+      0x00400008,  // 20: jr    $v0
+      0x00000000,  // 24: nop
+      0x2402000A,  // 28: addiu $v0, $zero, 10 (case 2)
+      0x03E00008,  // 2C: jr    $ra
+      0x00000000,  // 30: nop                  (default/exit)
+      0x03E00008,  // 34: jr    $ra
+      0x00000000,  // 38: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto jts =
+      JumpTableDetector::DetectJumpTables(insts, [](uint32_t vram) -> std::optional<uint32_t> {
+        if (vram >= 0x80050000 && vram < 0x80050018) {
+          return 0x80000028;
+        }
+        return std::nullopt;
+      });
+  ASSERT_EQ(jts.size(), 1u);
+
+  auto cfg_or = ControlFlowGraph::Build(insts, jts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestSwitchSelectorNotClobbered";
+  options.return_type = CType::Void();
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("< 6")));
+  EXPECT_THAT(code, HasSubstr("switch (*(u8*)(arg0 + 3))"));
+}
+
+TEST(AstConverterTest, DeadPreCallArgAssignmentsEliminatedAndSignExtendedCallFolded) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"pb(
+    entries { name: "QueryShortStatus" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb");
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 16($sp)
+  // 08: lw    $v0, 4($a0)
+  // 0C: addu  $a1, $v0, $zero
+  // 10: jal   0x80001000 (QueryShortStatus)
+  // 14: nop
+  // 18: sll   $v0, $v0, 16
+  // 1C: sra   $v0, $v0, 16
+  // 20: lw    $ra, 16($sp)
+  // 24: jr    $ra
+  // 28: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x8C820004,  // 08: lw    $v0, 4($a0)
+      0x00402821,  // 0C: addu  $a1, $v0, $zero
+      0x0C000400,  // 10: jal   0x80001000
+      0x00000000,  // 14: nop
+      0x00021400,  // 18: sll   $v0, $v0, 16
+      0x00021403,  // 1C: sra   $v0, $v0, 16
+      0x8FBF0010,  // 20: lw    $ra, 16($sp)
+      0x03E00008,  // 24: jr    $ra
+      0x27BD0018,  // 28: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_map<std::string, int> param_counts = {{"QueryShortStatus", 2}};
+  absl::flat_hash_set<std::string> returning_v0 = {"QueryShortStatus"};
+  AstConverterOptions options;
+  options.function_name = "TestSignExtendedShortCall";
+  options.function_parameter_counts = &param_counts;
+  options.functions_returning_v0 = &returning_v0;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("arg1 = v0;")));
+  EXPECT_THAT(code, HasSubstr("return ((QueryShortStatus(arg0, *(s32*)(arg0 + 4)) << 16) >> 16);"));
+}
+
+TEST(AstConverterTest, FloatInGprAndStackCallArgumentsRewrittenWithCalleeSavedFprBinding) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"pb(
+    entries { name: "SpawnParticle" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb");
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $ra, 28($sp)
+  // 08: swc1  $f20, 24($sp)
+  // 0C: lwc1  $f20, 0($a0)
+  // 10: mfc1  $a1, $f20
+  // 14: mfc1  $a2, $f20
+  // 18: mfc1  $a3, $f20
+  // 1C: jal   0x80001000 (SpawnParticle)
+  // 20: swc1  $f20, 16($sp)
+  // 24: lwc1  $f20, 24($sp)
+  // 28: lw    $ra, 28($sp)
+  // 2C: jr    $ra
+  // 30: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xE7B40018,  // 08: swc1  $f20, 24($sp)
+      0xC4940000,  // 0C: lwc1  $f20, 0($a0)
+      0x4405A000,  // 10: mfc1  $a1, $f20
+      0x4406A000,  // 14: mfc1  $a2, $f20
+      0x4407A000,  // 18: mfc1  $a3, $f20
+      0x0C000400,  // 1C: jal   0x80001000
+      0xE7B40010,  // 20: swc1  $f20, 16($sp)
+      0xC7B40018,  // 24: lwc1  $f20, 24($sp)
+      0x8FBF001C,  // 28: lw    $ra, 28($sp)
+      0x03E00008,  // 2C: jr    $ra
+      0x27BD0020,  // 30: addiu $sp, $sp, 32
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_map<std::string, int> param_counts = {{"SpawnParticle", 5}};
+  AstConverterOptions options;
+  options.function_name = "TestFloatGprAndStackCall";
+  options.function_parameter_counts = &param_counts;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("register f32 f20 asm(\"$f20\");"));
+  EXPECT_THAT(code, Not(HasSubstr("*(s32*)&f20")));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_16")));
+  EXPECT_THAT(
+      code,
+      HasSubstr("((void (*)(s32, f32, f32, f32, f32))SpawnParticle)(arg0, f20, f20, f20, f20);"));
+}
+
+TEST(AstConverterTest, AnnotatesCallerSavedRegistersWhenNotLiveAcrossCalls) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "StepEntity" address: 0x80001000 type: SYMBOL_FUNC }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  // Non-leaf function where $t0 is only used after the call, while $t1 is defined before the call
+  // and read after the call (so $t0 gets asm("$8") and $t1 must not get asm("$9")).
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0x24090005,  // 08: addiu $t1, $zero, 5
+      0xAC890000,  // 0C: sw    $t1, 0($a0)
+      0x0C000400,  // 10: jal   0x80001000 (StepEntity)
+      0x00000000,  // 14: nop
+      0x8C480000,  // 18: lw    $t0, 0($v0)
+      0xAC480004,  // 1C: sw    $t0, 4($v0)
+      0x01091021,  // 20: addu  $v0, $t0, $t1
+      0x8FBF0014,  // 24: lw    $ra, 20($sp)
+      0x03E00008,  // 28: jr    $ra
+      0x27BD0018,  // 2C: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestCallerSavedLiveness";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("register s32 temp_t0 asm(\"$8\");"));
+  EXPECT_THAT(code, HasSubstr("s32 temp_t1;"));
+  EXPECT_THAT(code, Not(HasSubstr("register s32 temp_t1")));
 }
 
 }  // namespace

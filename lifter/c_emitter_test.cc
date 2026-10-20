@@ -523,5 +523,46 @@ TEST(CEmitterTest, EmitTranslationUnitResolvesUntypedGlobalSymbolAccessWithDefau
   EXPECT_THAT(emitted_code, HasSubstr("*(s32*)&g_byte_flag = 2;"));
 }
 
+TEST(CEmitterTest, EmitTranslationUnitPromotesConsistentScalarCastDerefGlobals) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  auto body = std::make_unique<CompoundStatement>();
+  // *(u16*)&D_800AF3C6 = 7;
+  auto u16_deref = CExpression::Unary(
+      "*", CExpression::Cast(CType::U16().MakePointer(),
+                             CExpression::Unary("&", CExpression::Identifier("D_800AF3C6"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", std::move(u16_deref), CExpression::Integer(7))));
+
+  // Mixed symbol: *(u8*)&D_800AF3C8 = 1; and *(u16*)&D_800AF3C8 = 2;
+  auto u8_mixed = CExpression::Unary(
+      "*", CExpression::Cast(CType::U8().MakePointer(),
+                             CExpression::Unary("&", CExpression::Identifier("D_800AF3C8"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", std::move(u8_mixed), CExpression::Integer(1))));
+  auto u16_mixed = CExpression::Unary(
+      "*", CExpression::Cast(CType::U16().MakePointer(),
+                             CExpression::Unary("&", CExpression::Identifier("D_800AF3C8"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", std::move(u16_mixed), CExpression::Integer(2))));
+
+  body->AddStatement(CStatement::Return());
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "UpdateScalarGlobals", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  EXPECT_THAT(emitted_code, HasSubstr("extern u16 D_800AF3C6;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("D_800AF3C6 = 7;"));
+  EXPECT_THAT(emitted_code, ::testing::Not(HasSubstr("*(u16*)&D_800AF3C6")));
+
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 D_800AF3C8;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("*(u8*)&D_800AF3C8 = 1;"));
+  EXPECT_THAT(emitted_code, HasSubstr("*(u16*)&D_800AF3C8 = 2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

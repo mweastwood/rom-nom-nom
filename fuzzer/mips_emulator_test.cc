@@ -1316,6 +1316,36 @@ TEST(MipsEmulatorTest, JalrExternalCallInterception) {
   EXPECT_EQ(res.call_log[0].a1, 456u);
 }
 
+TEST(MipsEmulatorTest, JalrExternalCallInterceptionWhenTargetOverlapsCodeBounds) {
+  MipsEmulator emu;
+  emu.SetRegister(Register::kSp, 0x801F0000);
+  emu.SetInterceptExternalCalls(true);
+  emu.SetCodeBounds(0x80001000, 0x80001028);
+
+  std::vector<uint32_t> code = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x3C088000,  // 08: lui   $t0, 0x8000
+      0x25081020,  // 0C: addiu $t0, $t0, 0x1020 (target function ptr overlapping bounds)
+      0x2404007B,  // 10: addiu $a0, $zero, 123
+      0x0100F809,  // 14: jalr  $t0
+      0x240501C8,  // 18: addiu $a1, $zero, 456 (delay slot)
+      0x8FBF0010,  // 1C: lw    $ra, 16($sp)
+      0x27BD0018,  // 20: addiu $sp, $sp, 24
+      0x03E00008,  // 24: jr    $ra
+      0x00000000,  // 28: nop
+  };
+
+  ASSERT_TRUE(emu.LoadWords(0x80001000, code));
+  ExecutionResult res = emu.RunFunction(0x80001000);
+
+  EXPECT_EQ(res.status, ExecutionStatus::kHaltedReturn);
+  ASSERT_EQ(res.call_log.size(), 1u);
+  EXPECT_EQ(res.call_log[0].target_address, 0x80001020u);
+  EXPECT_EQ(res.call_log[0].a0, 123u);
+  EXPECT_EQ(res.call_log[0].a1, 456u);
+}
+
 TEST(MipsEmulatorTest, JalInternalCallNotIntercepted) {
   MipsEmulator emu;
   emu.SetRegister(Register::kSp, 0x801F0000);

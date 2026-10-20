@@ -3862,8 +3862,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
           context->Record(AST_MUTATION_PROPAGATE_REGISTER_COPY, site, 0);
           uint32_t parameter = 0;
           if (context->ShouldApply(AST_MUTATION_PROPAGATE_REGISTER_COPY, site, &parameter)) {
-            new_statements.push_back(CStatement::VariableDeclaration(decl.Type(), decl.Name(),
-                                                                     nullptr, decl.ArraySize()));
+            new_statements.push_back(CStatement::VariableDeclaration(
+                decl.Type(), decl.Name(), nullptr, decl.ArraySize(), decl.RegisterAnnotation()));
             continue;
           }
         }
@@ -4115,7 +4115,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
               ? TraverseExpression(*declaration.Initializer(), context)
               : nullptr;
       return CStatement::VariableDeclaration(declaration.Type(), declaration.Name(),
-                                             std::move(initializer), declaration.ArraySize());
+                                             std::move(initializer), declaration.ArraySize(),
+                                             declaration.RegisterAnnotation());
     }
     case CStatementKind::kIfStatement: {
       const auto& if_statement = static_cast<const IfStatement&>(statement);
@@ -4455,7 +4456,7 @@ std::unique_ptr<CStatement> FoldShiftAddMultiplyInStatement(const CStatement& st
           declaration.Type(), declaration.Name(),
           declaration.Initializer() ? FoldShiftAddMultiplyInExpression(*declaration.Initializer())
                                     : nullptr,
-          declaration.ArraySize());
+          declaration.ArraySize(), declaration.RegisterAnnotation());
     }
     case CStatementKind::kIfStatement: {
       const auto& if_statement = static_cast<const IfStatement&>(statement);

@@ -249,7 +249,16 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
                  instruction.opcode == Opcode::kLdc1) {
         int32_t offset = instruction.immediate;
         uint32_t base_offset = frame_size + 16;
-        if (offset >= static_cast<int32_t>(base_offset)) {
+        bool valid_alignment = true;
+        if (instruction.opcode == Opcode::kLw || instruction.opcode == Opcode::kLwu ||
+            instruction.opcode == Opcode::kLwc1 || instruction.opcode == Opcode::kLd ||
+            instruction.opcode == Opcode::kLdc1) {
+          valid_alignment = (offset % 4 == 0);
+        } else if (instruction.opcode == Opcode::kLh || instruction.opcode == Opcode::kLhu) {
+          valid_alignment = (offset % 2 == 0);
+        }
+        if (offset >= static_cast<int32_t>(base_offset) && valid_alignment &&
+            offset < static_cast<int32_t>(base_offset + 64)) {
           int arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
           if (!stored_stack_offsets.contains(offset)) {
             max_stack_arg = std::max(max_stack_arg, arg_idx);
@@ -309,7 +318,9 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
     count = 1;
   }
 
-  if (max_stack_arg >= 4) {
+  bool has_fp_register_params = cfg.ok() && (IsFpRegisterLiveIn(*cfg, FpRegister::kF12) ||
+                                             IsFpRegisterLiveIn(*cfg, FpRegister::kF14));
+  if (max_stack_arg >= 4 && (count > 0 || has_fp_register_params)) {
     count = std::max(count, max_stack_arg + 1);
   }
   return count;
@@ -464,6 +475,29 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
     return false;
   };
 
+  absl::flat_hash_set<FpRegister> fixed_point_fprs;
+  for (const auto& block : cfg.Blocks()) {
+    for (const auto& inst : block.instructions) {
+      if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD ||
+           inst.opcode == Opcode::kCvtWS || inst.opcode == Opcode::kCvtWD ||
+           inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
+           inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
+           inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) &&
+          inst.fd.has_value()) {
+        fixed_point_fprs.insert(*inst.fd);
+      }
+    }
+  }
+
+  auto is_callee_saved_sp_access = [](const Instruction& inst, Register r) -> bool {
+    if (inst.rs != Register::kSp || !inst.rt.has_value() || *inst.rt != r) return false;
+    if (inst.opcode != Opcode::kSw && inst.opcode != Opcode::kSd && inst.opcode != Opcode::kLw &&
+        inst.opcode != Opcode::kLd) {
+      return false;
+    }
+    return r == Register::kFp || (r >= Register::kS0 && r <= Register::kS7);
+  };
+
   for (Register reg : candidates) {
     if (!IsRegisterLiveIn(cfg, reg)) {
       continue;
@@ -473,6 +507,8 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
     bool has_integer_use = false;
     bool is_converted_from_int = false;
     bool has_def = false;
+    std::optional<Register> copied_to_callee_saved;
+    int total_uses = 0;
 
     for (const auto& block : cfg.Blocks()) {
       for (size_t j = 0; j < block.instructions.size(); ++j) {
@@ -481,12 +517,22 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
         RegisterUseDef ud = GetInstructionUseDef(inst);
         for (Register u : ud.gpr_uses) {
           if (u == reg) {
+            total_uses++;
             if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() && *inst.rt == reg &&
-                inst.fs.has_value()) {
+                inst.fs.has_value() && (static_cast<int>(*inst.fs) % 2 == 0)) {
               has_mtc1 = true;
               if (is_fpr_converted_from_int(block.id, j, *inst.fs)) {
                 is_converted_from_int = true;
               }
+            } else if (block.id == cfg.EntryBlockId() &&
+                       (inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kDaddu ||
+                        inst.opcode == Opcode::kOr) &&
+                       inst.rd.has_value() &&
+                       ((inst.rs == reg && inst.rt == Register::kZero) ||
+                        (inst.rt == reg && inst.rs == Register::kZero)) &&
+                       (*inst.rd == Register::kFp ||
+                        (*inst.rd >= Register::kS0 && *inst.rd <= Register::kS7))) {
+              copied_to_callee_saved = *inst.rd;
             } else {
               has_integer_use = true;
             }
@@ -503,6 +549,88 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
 
     if (has_mtc1 && !has_integer_use && !is_converted_from_int && !has_def) {
       result.insert(reg);
+    } else if (copied_to_callee_saved.has_value() && total_uses == 1 && !has_integer_use &&
+               !has_def) {
+      Register dst_reg = *copied_to_callee_saved;
+      bool dst_has_mtc1 = false;
+      bool dst_has_int_use = false;
+      bool dst_converted = false;
+      int dst_defs = 0;
+      for (const auto& block : cfg.Blocks()) {
+        for (size_t j = 0; j < block.instructions.size(); ++j) {
+          const auto& inst = block.instructions[j];
+          if (is_callee_saved_sp_access(inst, dst_reg)) continue;
+          RegisterUseDef ud = GetInstructionUseDef(inst);
+          for (Register u : ud.gpr_uses) {
+            if (u == dst_reg) {
+              if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() && *inst.rt == dst_reg &&
+                  inst.fs.has_value() && (static_cast<int>(*inst.fs) % 2 == 0)) {
+                dst_has_mtc1 = true;
+                if (is_fpr_converted_from_int(block.id, j, *inst.fs)) {
+                  dst_converted = true;
+                }
+              } else {
+                dst_has_int_use = true;
+              }
+            }
+          }
+          for (Register d : ud.gpr_defs) {
+            if (d == dst_reg) {
+              dst_defs++;
+            }
+          }
+        }
+      }
+      if (dst_has_mtc1 && !dst_has_int_use && !dst_converted && dst_defs == 1) {
+        result.insert(reg);
+        result.insert(dst_reg);
+      }
+    }
+  }
+
+  // Also detect local GPRs (e.g. $s0-$s7) used purely as f32 carriers via mfc1/mtc1.
+  const std::vector<Register> carrier_candidates = {
+      Register::kS0, Register::kS1, Register::kS2, Register::kS3, Register::kS4, Register::kS5,
+      Register::kS6, Register::kS7, Register::kFp, Register::kV0, Register::kV1, Register::kT0,
+      Register::kT1, Register::kT2, Register::kT3, Register::kT4, Register::kT5, Register::kT6,
+      Register::kT7, Register::kT8, Register::kT9,
+  };
+  for (Register r : carrier_candidates) {
+    if (result.contains(r) || IsRegisterLiveIn(cfg, r)) continue;
+    int mfc1_defs = 0;
+    int other_defs = 0;
+    int mtc1_uses = 0;
+    int other_uses = 0;
+    for (const auto& block : cfg.Blocks()) {
+      for (size_t j = 0; j < block.instructions.size(); ++j) {
+        const auto& inst = block.instructions[j];
+        if (is_callee_saved_sp_access(inst, r)) continue;
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register d : ud.gpr_defs) {
+          if (d == r) {
+            if (inst.opcode == Opcode::kMfc1 && inst.rt == r && inst.fs.has_value() &&
+                (static_cast<int>(*inst.fs) % 2 == 0) && !fixed_point_fprs.contains(*inst.fs)) {
+              mfc1_defs++;
+            } else {
+              other_defs++;
+            }
+          }
+        }
+        for (Register u : ud.gpr_uses) {
+          if (u == r) {
+            if (inst.opcode == Opcode::kMtc1 && inst.rt == r && inst.fs.has_value() &&
+                (static_cast<int>(*inst.fs) % 2 == 0) &&
+                !is_fpr_converted_from_int(block.id, j, *inst.fs)) {
+              mtc1_uses++;
+            } else {
+              other_uses++;
+            }
+          }
+        }
+      }
+    }
+    if (mfc1_defs > 0 && other_defs == 0 && mtc1_uses > 0 && other_uses == 0) {
+      result.insert(r);
     }
   }
 
@@ -510,7 +638,7 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
 }
 
 absl::flat_hash_map<uint32_t, CallReturnInfo> AbiAnalyzer::ComputeCallReturnInfo(
-    const ControlFlowGraph& cfg, bool /*function_returns_v0*/, bool /*function_returns_f0*/) {
+    const ControlFlowGraph& cfg, bool function_returns_v0, bool function_returns_f0) {
   absl::flat_hash_map<uint32_t, CallReturnInfo> result;
 
   auto is_double_op = [](Opcode op) {
@@ -800,6 +928,47 @@ absl::flat_hash_map<uint32_t, CallReturnInfo> AbiAnalyzer::ComputeCallReturnInfo
           }
 
           if (inst.IsReturn()) {
+            if (k + 1 < curr_block->instructions.size()) {
+              const auto& delay_inst = curr_block->instructions[k + 1];
+              RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+              if (item.v0_live) {
+                for (Register u : delay_ud.gpr_uses) {
+                  if (u == Register::kV0) {
+                    info.returns_v0 = true;
+                    item.v0_live = false;
+                    break;
+                  }
+                }
+                for (Register d : delay_ud.gpr_defs) {
+                  if (d == Register::kV0) {
+                    item.v0_live = false;
+                    break;
+                  }
+                }
+              }
+              if (item.f0_live) {
+                for (FpRegister u : delay_ud.fpr_uses) {
+                  if (u == FpRegister::kF0) {
+                    info.returns_f0 = true;
+                    if (is_double_op(delay_inst.opcode)) info.returns_f0_double = true;
+                    item.f0_live = false;
+                    break;
+                  }
+                }
+                for (FpRegister d : delay_ud.fpr_defs) {
+                  if (d == FpRegister::kF0) {
+                    item.f0_live = false;
+                    break;
+                  }
+                }
+              }
+            }
+            if (item.v0_live && function_returns_v0 && !info.returns_f0) {
+              info.returns_v0 = true;
+            }
+            if (item.f0_live && function_returns_f0 && !info.returns_v0) {
+              info.returns_f0 = true;
+            }
             stop_path = true;
             break;
           }

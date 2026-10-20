@@ -104,5 +104,37 @@ TEST(BranchConditionBuilderTest,
   EXPECT_TRUE(at_folded->can_suppress_statement);
 }
 
+TEST(BranchConditionBuilderTest, DoesNotDecoupleLoopLatchDelaySlotWhenLoopBodyCallRedefinesV0) {
+  // Block 0 (entry):
+  //   0x80000000: move $s1, $zero
+  //   0x80000004: move $s0, $zero
+  // Block 1 (do-while loop body, 0x80000008):
+  //   0x80000008: jal 0x80001000
+  //   0x8000000C: move $a0, $s0
+  //   0x80000010: addu $s1, $s1, $v0
+  //   0x80000014: addiu $s0, $s0, 1
+  //   0x80000018: bne $s0, $s2, 0x80000008
+  //   0x8000001C: move $v0, $s1
+  // Block 2 (epilogue, 0x80000020):
+  //   0x80000020: jr $ra
+  //   0x80000024: nop
+  std::vector<uint32_t> words = {
+      0x00008821,  // addu $s1, $zero, $zero
+      0x00008021,  // addu $s0, $zero, $zero
+      0x0C000400,  // jal 0x80001000
+      0x02002021,  // addu $a0, $s0, $zero
+      0x02228821,  // addu $s1, $s1, $v0
+      0x26100001,  // addiu $s0, $s0, 1
+      0x1612FFFB,  // bne $s0, $s2, 0x80000008
+      0x02201021,  // addu $v0, $s1, $zero
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_FALSE(BranchConditionBuilder::ShouldDecoupleLoopConditionDelaySlot(cfg, 1, 1));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

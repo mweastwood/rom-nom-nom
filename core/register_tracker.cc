@@ -896,6 +896,33 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
               }
             }
           }
+          auto block_uses_v0_before_redef = [](const BasicBlock& blk) -> bool {
+            for (size_t idx = 0; idx < blk.instructions.size(); ++idx) {
+              const auto& inst = blk.instructions[idx];
+              if (inst.IsCall()) {
+                if (idx + 1 < blk.instructions.size()) {
+                  RegisterUseDef delay_ud = GetInstructionUseDef(blk.instructions[idx + 1]);
+                  for (Register u : delay_ud.gpr_uses) {
+                    if (u == Register::kV0) return true;
+                  }
+                }
+                RegisterUseDef call_ud = GetInstructionUseDef(inst);
+                for (Register u : call_ud.gpr_uses) {
+                  if (u == Register::kV0) return true;
+                }
+                return false;
+              }
+              RegisterUseDef ud = GetInstructionUseDef(inst);
+              for (Register u : ud.gpr_uses) {
+                if (u == Register::kV0) return true;
+              }
+              for (Register d : ud.gpr_defs) {
+                if (d == Register::kV0) return false;
+              }
+            }
+            return false;
+          };
+
           if (is_taken_branch && executed.size() > 1) {
             RegisterUseDef delay_ud = GetInstructionUseDef(executed.back());
             bool delay_defs_v0 = false;
@@ -908,26 +935,7 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
                   auto ft_it = id_to_index.find(edge.to_block_id);
                   if (ft_it != id_to_index.end()) {
                     const auto& ft_block = cfg.Blocks()[ft_it->second];
-                    bool ft_uses_v0 = false;
-                    for (const auto& ft_inst : ft_block.instructions) {
-                      RegisterUseDef ft_ud = GetInstructionUseDef(ft_inst);
-                      for (Register u : ft_ud.gpr_uses) {
-                        if (u == Register::kV0) {
-                          ft_uses_v0 = true;
-                          break;
-                        }
-                      }
-                      if (ft_uses_v0) break;
-                      bool ft_redefined_v0 = false;
-                      for (Register d : ft_ud.gpr_defs) {
-                        if (d == Register::kV0) {
-                          ft_redefined_v0 = true;
-                          break;
-                        }
-                      }
-                      if (ft_redefined_v0) break;
-                    }
-                    if (ft_uses_v0) {
+                    if (block_uses_v0_before_redef(ft_block)) {
                       executed = executed.subspan(0, executed.size() - 1);
                     }
                   }
@@ -961,27 +969,7 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
                   auto branch_target_iterator = id_to_index.find(edge.to_block_id);
                   if (branch_target_iterator != id_to_index.end()) {
                     const auto& branch_target_block = cfg.Blocks()[branch_target_iterator->second];
-                    bool branch_target_uses_v0 = false;
-                    for (const auto& branch_instruction : branch_target_block.instructions) {
-                      RegisterUseDef branch_instruction_use_def =
-                          GetInstructionUseDef(branch_instruction);
-                      for (Register use_register : branch_instruction_use_def.gpr_uses) {
-                        if (use_register == Register::kV0) {
-                          branch_target_uses_v0 = true;
-                          break;
-                        }
-                      }
-                      if (branch_target_uses_v0) break;
-                      bool branch_redefined_v0 = false;
-                      for (Register destination_register : branch_instruction_use_def.gpr_defs) {
-                        if (destination_register == Register::kV0) {
-                          branch_redefined_v0 = true;
-                          break;
-                        }
-                      }
-                      if (branch_redefined_v0) break;
-                    }
-                    if (branch_target_uses_v0) {
+                    if (block_uses_v0_before_redef(branch_target_block)) {
                       executed = executed.subspan(0, executed.size() - 1);
                     }
                   }
@@ -1351,7 +1339,7 @@ absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(const Cont
   }
 
   std::vector<uint32_t> in_defs(cfg.Blocks().size(), 0);
-  std::vector<uint32_t> out_defs(cfg.Blocks().size(), 0);
+  std::vector<uint32_t> out_defs(cfg.Blocks().size(), 0xFFFFFFFF);
   in_defs[0] = init_def_mask;
 
   auto is_stack_spill = [](const Instruction& inst, Register r) {
@@ -1380,14 +1368,6 @@ absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(const Cont
       uint32_t defs = in_defs[b];
       for (const auto& inst : cfg.Blocks()[b].instructions) {
         RegisterUseDef ud = GetInstructionUseDef(inst);
-        for (Register u : ud.gpr_uses) {
-          int u_idx = static_cast<int>(u);
-          if (is_callee_saved(u) && !is_stack_spill(inst, u)) {
-            if ((defs & (1u << u_idx)) == 0) {
-              uninit.insert(u);
-            }
-          }
-        }
         for (Register d : ud.gpr_defs) {
           defs |= (1u << static_cast<int>(d));
         }
@@ -1396,6 +1376,24 @@ absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(const Cont
       if (defs != out_defs[b]) {
         out_defs[b] = defs;
         changed = true;
+      }
+    }
+  }
+
+  for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
+    uint32_t defs = in_defs[b];
+    for (const auto& inst : cfg.Blocks()[b].instructions) {
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      for (Register u : ud.gpr_uses) {
+        int u_idx = static_cast<int>(u);
+        if (is_callee_saved(u) && !is_stack_spill(inst, u)) {
+          if ((defs & (1u << u_idx)) == 0) {
+            uninit.insert(u);
+          }
+        }
+      }
+      for (Register d : ud.gpr_defs) {
+        defs |= (1u << static_cast<int>(d));
       }
     }
   }

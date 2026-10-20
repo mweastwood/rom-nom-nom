@@ -946,5 +946,76 @@ Sub:
   EXPECT_THAT(captured_spliced_assembly, ::testing::HasSubstr(".set\tmove"));
 }
 
+TEST_F(RomBuilderTest, BuildAlignsCodeAndDataSubsegmentsToRetailVramInLinkerScript) {
+  CreateFile(src_dir_ / "c" / "test_game" / "mod_a.c", "void FuncA(void) {}");
+  CreateFile(src_dir_ / "c" / "test_game" / "mod_b.c", "void FuncB(void) {}");
+  CreateFile(assets_dir_ / "data_seg.data.bin", std::string(16, '\0'));
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .main : {
+        build/src/mod_a.o(.text);
+        build/src/mod_b.o(.text);
+        build/assets/data_seg.data.o(.data);
+    }
+}
+)");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    segments {
+      name: "main"
+      rom_start: 0x1000
+      rom_end: 0x3000
+      vram: 0x80025C00
+      type: SEGMENT_CODE
+      subsegments { name: "mod_a" rom_start: 0x1000 type: SUBSEGMENT_C }
+      subsegments { name: "mod_b" rom_start: 0x1400 type: SUBSEGMENT_C }
+      subsegments { name: "data_seg" rom_start: 0x2000 type: SUBSEGMENT_DATA }
+    }
+  )pb");
+
+  std::filesystem::path output_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path output_rom = test_dir_ / "out" / "test_game.z64";
+
+  auto mock_runner = [&](const ProcessOptions& process_options) -> absl::StatusOr<ProcessResult> {
+    if (process_options.args.size() >= 4 && process_options.args[1] == "binary" &&
+        process_options.args[3] == output_rom.string()) {
+      std::filesystem::create_directories(output_rom.parent_path());
+      std::ofstream(output_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+    ProcessResult res;
+    res.exit_code = 0;
+    return res;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+  RomBuilderOptions builder_options{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = output_elf,
+      .out_rom = output_rom,
+  };
+
+  RomBuilder builder(toolchain_, builder_options, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  std::filesystem::path rewritten_ld = test_dir_ / "out" / "_test_game_objs" / "test_game.ld";
+  ASSERT_TRUE(std::filesystem::exists(rewritten_ld));
+  std::ifstream ifs(rewritten_ld);
+  std::string ld_content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+  EXPECT_THAT(ld_content, HasSubstr(". = (ABSOLUTE(.) < 0x80026000) ? 0x400 : .;"));
+  EXPECT_THAT(ld_content, HasSubstr(". = (ABSOLUTE(.) < 0x80026C00) ? 0x1000 : .;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

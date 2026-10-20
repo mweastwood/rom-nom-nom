@@ -3258,5 +3258,246 @@ s32 SwitchCasesSharedIntermediateBeforeLatch(const s32* array, s32 selector, s32
 )");
 }
 
+TEST_F(RoundTripTest, SixParameterCalleeWithStackArgs) {
+  AssertRoundTripBitExact("SixParameterCalleeWithStackArgs", R"(
+s32 SixParameterCalleeWithStackArgs(s32 a, s32 b, s32 c, s32 d, s32 e, s32 f) {
+    return (a + b) - (c + d) + (e * f);
+}
+)");
+}
+
+TEST_F(RoundTripTest, BitfieldShiftMaskAndBranch) {
+  AssertRoundTripBitExact("BitfieldShiftMaskAndBranch", R"(
+s32 BitfieldShiftMaskAndBranch(const u16* flags_ptr, s32 fallback) {
+    u16 raw = flags_ptr[2];
+    u32 mode = (raw >> 3) & 3;
+    if (mode == 1) {
+        return (raw & 7) + 10;
+    }
+    return fallback;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiCallConditionAndReturnFolding) {
+  AssertRoundTripBitExact("MultiCallConditionAndReturnFolding", R"(
+extern s32 CheckPrimary(s32 x);
+extern s32 CheckSecondary(s32 x);
+extern s32 ComputeResult(s32 x);
+
+s32 MultiCallConditionAndReturnFolding(s32 x) {
+    if (CheckPrimary(x) != 0) {
+        if (CheckSecondary(x + 1) != 0) {
+            return ComputeResult(x);
+        }
+    }
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallerPassingSixArgumentsOnStack) {
+  AssertRoundTripBitExact("CallerPassingSixArgumentsOnStack", R"(
+extern s32 CombineSixValues(s32 a, s32 b, s32 c, s32 d, s32 e, s32 f);
+
+s32 CallerPassingSixArgumentsOnStack(s32 x, s32 y) {
+    return CombineSixValues(x, y, x + 1, y + 2, x + 3, y + 4);
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiCalleeSavedLoopAndAccumulate) {
+  AssertRoundTripBitExact("MultiCalleeSavedLoopAndAccumulate", R"(
+extern s32 TransformElement(s32 val);
+
+s32 MultiCalleeSavedLoopAndAccumulate(s32 start_val, s32 step_val, s32 limit) {
+    s32 acc = 0;
+    s32 cur = start_val;
+    do {
+        acc += TransformElement(cur);
+        cur += step_val;
+    } while (cur < limit);
+    return acc;
+}
+)");
+}
+
+TEST_F(RoundTripTest, CalleeSavedInitializedBeforeMultipleCalls) {
+  AssertRoundTripBitExact("CalleeSavedInitializedBeforeMultipleCalls", R"(
+extern s32 ComputeStep(s32 x);
+
+s32 CalleeSavedInitializedBeforeMultipleCalls(s32 a, s32 b) {
+    s32 first = a + 5;
+    s32 second = b + 10;
+    s32 r1 = ComputeStep(first + second);
+    return r1 + first + second;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SwitchOnLoadedByteWithNonZeroLowerBound) {
+  AssertRoundTripBitExact("SwitchOnLoadedByteWithNonZeroLowerBound", R"(
+s32 SwitchOnLoadedByteWithNonZeroLowerBound(const u8* state_ptr, s32 base) {
+    s32 res;
+    switch (state_ptr[3]) {
+        case 2:
+            return 100;
+        case 3:
+            res = base + 20;
+            break;
+        case 4:
+            res = base + 30;
+            break;
+        case 5:
+            res = base + 40;
+            break;
+        case 6:
+            res = base + 50;
+            break;
+        case 7:
+            res = base + 60;
+            break;
+        default:
+            res = -1;
+            break;
+    }
+    return res * 2;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiArgCallWithLoadedStructFields) {
+  AssertRoundTripBitExact("MultiArgCallWithLoadedStructFields", R"(
+typedef struct {
+    s32 id;
+    s32 x;
+    s32 y;
+    s32 flags;
+} EntityState;
+
+extern s32 UpdateEntityPosition(s32 id, s32 x, s32 y, s32 flags);
+
+s32 MultiArgCallWithLoadedStructFields(EntityState* ent) {
+    s32 res = UpdateEntityPosition(ent->id, ent->x, ent->y, ent->flags);
+    ent->flags = res;
+    return res;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignExtendedShortCallReturnInBranch) {
+  AssertRoundTripBitExact("SignExtendedShortCallReturnInBranch", R"(
+extern s16 QueryShortStatus(s32 channel);
+extern void NotifyComplete(s32 channel);
+
+s32 SignExtendedShortCallReturnInBranch(s32 channel) {
+    if (QueryShortStatus(channel) == 1) {
+        NotifyComplete(channel);
+        return 1;
+    }
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SequentialIfsReusingLoadedFieldAndCalls) {
+  AssertRoundTripBitExact("SequentialIfsReusingLoadedFieldAndCalls", R"(
+extern void TriggerEventA(s32 id, s32 param);
+extern void TriggerEventB(s32 id, s32 param);
+
+void SequentialIfsReusingLoadedFieldAndCalls(s32* state) {
+    if (state[0] == 1) {
+        TriggerEventA(state[1], 10);
+    }
+    if (state[2] == 2) {
+        TriggerEventB(state[3], 20);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, StoreThroughIndexedStructPointerArray) {
+  AssertRoundTripBitExact("StoreThroughIndexedStructPointerArray", R"(
+typedef struct {
+    s32 x;
+    s32 y;
+    s32 z;
+} ActorSlot;
+
+void StoreThroughIndexedStructPointerArray(ActorSlot** table, s32 new_x, s32 new_y, s32 new_z) {
+    table[0]->x = new_x;
+    table[1]->y = new_y;
+    table[2]->z = new_z;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatIntConvertWithInterleavedStores) {
+  AssertRoundTripBitExact("FloatIntConvertWithInterleavedStores", R"(
+s32 FloatIntConvertWithInterleavedStores(s32 count, f32 scale, s32* out_meta, f32* out_float) {
+    f32 fcount;
+    f32 scaled;
+    fcount = (f32)count;
+    *out_meta = count + 1;
+    scaled = fcount * scale;
+    *out_float = scaled;
+    return (s32)scaled;
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatParametersPreservedAcrossCall) {
+  AssertRoundTripBitExact("FloatParametersPreservedAcrossCall", R"(
+extern void NotifyMatrixUpdated(s32* out_flag);
+
+f32 FloatParametersPreservedAcrossCall(s32* out_flag, f32 a, f32 b, f32 c) {
+    f32 prod = a * b;
+    NotifyMatrixUpdated(out_flag);
+    return prod + c;
+}
+)");
+}
+
+TEST_F(RoundTripTest, CalleeSavedFloatPassedInGprAndStackAcrossCalls) {
+  AssertRoundTripBitExact("CalleeSavedFloatPassedInGprAndStackAcrossCalls", R"(
+extern void ApplyVectorTransform(s32 slot, f32 x, f32 y, f32 z, f32 w);
+
+void CalleeSavedFloatPassedInGprAndStackAcrossCalls(s32 slot, f32* vec) {
+    f32 x = vec[0];
+    f32 y = vec[1];
+    ApplyVectorTransform(slot, x, y, x, y);
+    ApplyVectorTransform(slot + 1, y, x, y, x);
+}
+)");
+}
+
+TEST_F(RoundTripTest, RepeatedSameArgPassedToMultiArgCall) {
+  AssertRoundTripBitExact("RepeatedSameArgPassedToMultiArgCall", R"(
+extern s32 DispatchQuad(s32 cmd, s32 a, s32 b, s32 c);
+
+s32 RepeatedSameArgPassedToMultiArgCall(s32 val) {
+    return DispatchQuad(101, val, val, val);
+}
+)");
+}
+
+TEST_F(RoundTripTest, GlobalScalarHalfwordAndByteUpdatesAroundCall) {
+  AssertRoundTripBitExact("GlobalScalarHalfwordAndByteUpdatesAroundCall", R"(
+extern u16 g_frame_counter;
+extern u8 g_mode_flag;
+extern void SyncSubsystem(s32 frame);
+
+s32 GlobalScalarHalfwordAndByteUpdatesAroundCall(u16 next_val) {
+    u16 cur = g_frame_counter;
+    g_frame_counter = next_val;
+    SyncSubsystem(cur);
+    if (g_mode_flag != 0) {
+        return g_frame_counter;
+    }
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

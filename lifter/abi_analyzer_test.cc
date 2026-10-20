@@ -122,5 +122,70 @@ TEST(AbiAnalyzerTest, DetectFloatParametersInGeneralRegistersWithIntegerUse) {
   EXPECT_FALSE(float_params.contains(Register::kA1));
 }
 
+TEST(AbiAnalyzerTest, DetermineParameterCountBoundsStackParametersAndRejectsBogusOffsets) {
+  // Valid 6-parameter function (reads $a0..$a3 and 16($sp), 20($sp)):
+  // addu $v0, $a0, $a1
+  // addu $v0, $v0, $a2
+  // addu $v0, $v0, $a3
+  // lw   $t0, 16($sp)
+  // lw   $t1, 20($sp)
+  // addu $v0, $v0, $t0
+  // jr   $ra
+  // addu $v0, $v0, $t1
+  std::vector<uint32_t> valid_six_param_words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x00461021,  // addu $v0, $v0, $a2
+      0x00471021,  // addu $v0, $v0, $a3
+      0x8FA80010,  // lw $t0, 16($sp)
+      0x8FA90014,  // lw $t1, 20($sp)
+      0x00481021,  // addu $v0, $v0, $t0
+      0x03E00008,  // jr $ra
+      0x00491021,  // addu $v0, $v0, $t1
+  };
+  auto valid_insts = *DecodeSequence(valid_six_param_words, 0x80000000);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(valid_insts), 6);
+
+  // Bogus large stack offset (e.g. lw $t0, 24884($sp)) or unaligned offset without register args
+  // must not inflate parameter count into thousands of parameters.
+  std::vector<uint32_t> bogus_offset_words = {
+      0x8FA86134,  // lw $t0, 24884($sp)
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto bogus_insts = *DecodeSequence(bogus_offset_words, 0x80000000);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(bogus_insts), 0);
+}
+
+TEST(AbiAnalyzerTest, DetectFloatParametersCopiedToCalleeSavedAndFloatCarrierRegisters) {
+  // Rule A: $a1 copied to $s0 in entry block, then $s0 used only by mtc1 $s0, $f12
+  // Rule B: $s1 defined only by mfc1 $s1, $f0 (where $f0 is produced by add.s) and used only by
+  //         mtc1 $s1, $f2 (used by add.s)
+  // 00: addu  $s0, $a1, $zero
+  // 04: add.s $f0, $f4, $f6
+  // 08: mfc1  $s1, $f0
+  // 0C: mtc1  $s0, $f12
+  // 10: mtc1  $s1, $f2
+  // 14: add.s $f0, $f12, $f2
+  // 18: jr    $ra
+  // 1C: nop
+  std::vector<uint32_t> words = {
+      0x00A08021,  // addu  $s0, $a1, $zero
+      0x46062000,  // add.s $f0, $f4, $f6
+      0x44028800,  // wait: mfc1 rt=$s1(17), fs=$f0(0) -> 0x44000000 | (17 << 16) = 0x44110000
+      0x44906000,  // mtc1  $s0, $f12
+      0x44911000,  // mtc1  $s1, $f2
+      0x46026000,  // add.s $f0, $f12, $f2
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  words[2] = 0x44110000;  // mfc1 $s1, $f0
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_regs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_regs.contains(Register::kA1));
+  EXPECT_TRUE(float_regs.contains(Register::kS1));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

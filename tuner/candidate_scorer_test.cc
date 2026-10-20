@@ -117,5 +117,22 @@ TEST(CandidateScorerTest, VerifyEquivalenceVerifiesPointerDereferencingFunctions
   EXPECT_FALSE(scorer.VerifyEquivalence(target, differing_offset_words));
 }
 
+TEST(CandidateScorerTest, IsBetterThanPenalizesMassiveCodeSizeBloat) {
+  CandidateScore compact_o2;
+  compact_o2.target_instruction_count = 100;
+  compact_o2.compiled_instruction_count = 100;
+  compact_o2.bit_exact_instructions = 48;
+  compact_o2.matching_instructions = 60;
+
+  CandidateScore bloated_o0;
+  bloated_o0.target_instruction_count = 100;
+  bloated_o0.compiled_instruction_count = 260;  // +160 instructions of -O0 stack spill bloat
+  bloated_o0.bit_exact_instructions = 52;       // +4 accidental matches in bloated sequence
+  bloated_o0.matching_instructions = 65;
+
+  EXPECT_TRUE(compact_o2.IsBetterThan(bloated_o0));
+  EXPECT_FALSE(bloated_o0.IsBetterThan(compact_o2));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

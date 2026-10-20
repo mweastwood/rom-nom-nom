@@ -611,5 +611,59 @@ TEST_F(CompilerTest, ValidatesInputPaths) {
             absl::StatusCode::kInvalidArgument);
 }
 
+TEST_F(CompilerTest, CompileCAlignsFunctionsWithWordZeroPaddingWhenTargetVramsProvided) {
+  auto real_tc_or = Toolchain::Discover({
+      .repo_root = std::filesystem::current_path(),
+      .mode = ToolchainMode::kOriginal,
+  });
+  if (!real_tc_or.ok()) {
+    GTEST_SKIP() << "Original toolchain not available";
+  }
+
+  std::vector<std::string> assembled_inputs;
+  auto tracking_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.program == real_tc_or->KmcAs().string()) {
+      for (const auto& arg : opts.args) {
+        if (absl::EndsWith(arg, ".s272")) {
+          std::ifstream ifs(arg);
+          assembled_inputs.emplace_back((std::istreambuf_iterator<char>(ifs)),
+                                        std::istreambuf_iterator<char>());
+        }
+      }
+    }
+    return RunProcess(opts);
+  };
+
+  Compiler compiler(*real_tc_or, tracking_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "align_sample.c";
+  std::filesystem::create_directories(src_file.parent_path());
+  {
+    std::ofstream(src_file) << "int FuncFirst(int a) { return a + 1; }\n"
+                            << "int FuncSecond(int b) { return b + 2; }\n";
+  }
+  std::filesystem::path out_obj = test_dir_ / "obj" / "align_sample.o";
+
+  // FuncFirst is 2 instructions (8 bytes: jr $ra; addiu $v0, $a0, 1).
+  // Setting FuncSecond's target VRAM to 0x80025C00 + 0x18 (24 bytes) requires
+  // (24 - 8) / 4 = 4 words of .word 0 inter-function padding.
+  CCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .opt_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      .function_target_vrams =
+          {
+              {"FuncFirst", 0x80025C00},
+              {"FuncSecond", 0x80025C18},
+          },
+  };
+
+  ASSERT_TRUE(compiler.CompileC(opts).ok());
+  ASSERT_EQ(assembled_inputs.size(), 2u);
+  EXPECT_THAT(assembled_inputs[0], ::testing::Not(::testing::HasSubstr("\t.word\t0\n")));
+  EXPECT_THAT(assembled_inputs[1],
+              ::testing::HasSubstr("\t.word\t0\n\t.word\t0\n\t.word\t0\n\t.word\t0\n"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

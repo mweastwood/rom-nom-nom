@@ -226,6 +226,7 @@ cc_library(
     hdrs = ["compiler.h"],
     copts = ["-std=c++20"],
     deps = [
+        ":elf_reader",
         ":process",
         ":toolchain",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -240,6 +241,9 @@ cc_test(
     name = "compiler_test",
     srcs = ["compiler_test.cc"],
     copts = ["-std=c++20"],
+    data = [
+        "//toolchain:all_files",
+    ],
     deps = [
         ":compiler",
         ":process",

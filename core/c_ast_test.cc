@@ -611,5 +611,14 @@ TEST(CAstTest, CompoundStatementRemoveStatementIfFiltersMatchingStatements) {
   EXPECT_THAT(comp.Statements()[1]->ToString(), HasSubstr("x = 2;"));
 }
 
+TEST(CAstTest, VariableDeclarationWithRegisterAnnotation) {
+  auto decl =
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16");
+  EXPECT_EQ(decl->ToString(1), "    register s32 temp_s0 asm(\"$16\");\n");
+
+  auto cloned = decl->Clone();
+  EXPECT_EQ(cloned->ToString(1), "    register s32 temp_s0 asm(\"$16\");\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

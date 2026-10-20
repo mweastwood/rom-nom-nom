@@ -27,6 +27,9 @@ struct CCompileOptions {
   std::vector<std::filesystem::path> include_dirs;
   std::filesystem::path macro_inc;
   absl::Duration timeout = absl::ZeroDuration();
+  absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
+  uint32_t module_target_size = 0;
+  uint32_t initial_vram_offset = 0;
 };
 
 // Options for compiling a C source file where individual functions use distinct compiler flags.
@@ -38,6 +41,9 @@ struct PerFunctionCCompileOptions {
   std::vector<std::filesystem::path> include_dirs;
   std::filesystem::path macro_inc;
   absl::Duration timeout = absl::ZeroDuration();
+  absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
+  uint32_t module_target_size = 0;
+  uint32_t initial_vram_offset = 0;
 };
 
 // Options for compiling a C++ source file.

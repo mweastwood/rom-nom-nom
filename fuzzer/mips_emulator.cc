@@ -51,6 +51,7 @@ void MipsEmulator::Reset() {
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;
   delay_slot_is_call_ = false;
+  delay_slot_is_indirect_call_ = false;
   call_link_reg_ = 31;
   write_log_.clear();
   call_log_.clear();
@@ -278,9 +279,11 @@ void MipsEmulator::SetupBranchLikely(bool taken, uint32_t branch_target, uint32_
   }
 }
 
-std::optional<ExecutionStatus> MipsEmulator::HandleCallTarget(uint32_t target_vram, int link_reg) {
-  if (IsExternalCallTarget(target_vram) && VramToPhysical(target_vram).has_value() &&
-      ((target_vram & 3) == 0)) {
+std::optional<ExecutionStatus> MipsEmulator::HandleCallTarget(uint32_t target_vram, int link_reg,
+                                                              bool is_indirect_call) {
+  bool is_external =
+      IsExternalCallTarget(target_vram) || (is_indirect_call && intercept_external_calls_);
+  if (is_external && VramToPhysical(target_vram).has_value() && ((target_vram & 3) == 0)) {
     call_log_.push_back(ExternalCall{
         .target_address = target_vram,
         .a0 = gpr_[4],
@@ -369,6 +372,7 @@ ExecutionStatus MipsEmulator::StepSpecial(uint32_t raw_word, uint32_t current_pc
       SetGpr(link_reg, current_pc + 8);
       in_delay_slot_ = true;
       delay_slot_is_call_ = true;
+      delay_slot_is_indirect_call_ = true;
       call_link_reg_ = link_reg;
       delayed_branch_target_ = gpr_[rs];
       break;
@@ -1075,6 +1079,7 @@ ExecutionStatus MipsEmulator::Step() {
   bool executing_delay_slot = in_delay_slot_;
   bool delayed_is_return = delay_slot_is_return_;
   bool delayed_is_call = delay_slot_is_call_;
+  bool delayed_is_indirect_call = delay_slot_is_indirect_call_;
   int delayed_call_link = call_link_reg_;
   std::optional<uint32_t> next_branch_target = delayed_branch_target_;
 
@@ -1224,12 +1229,14 @@ ExecutionStatus MipsEmulator::Step() {
     in_delay_slot_ = false;
     delayed_branch_target_.reset();
     delay_slot_is_call_ = false;
+    delay_slot_is_indirect_call_ = false;
     if (delayed_is_return) {
       delay_slot_is_return_ = false;
       return ExecutionStatus::kHaltedReturn;
     }
     if (delayed_is_call && next_branch_target.has_value()) {
-      auto call_status = HandleCallTarget(*next_branch_target, delayed_call_link);
+      auto call_status =
+          HandleCallTarget(*next_branch_target, delayed_call_link, delayed_is_indirect_call);
       if (call_status.has_value()) {
         return *call_status;
       }
@@ -1253,6 +1260,7 @@ ExecutionResult MipsEmulator::RunFunction(uint32_t start_vram, uint64_t max_step
   delayed_branch_target_.reset();
   delay_slot_is_return_ = false;
   delay_slot_is_call_ = false;
+  delay_slot_is_indirect_call_ = false;
   call_link_reg_ = 31;
   call_log_.clear();
   last_invalid_info_.clear();

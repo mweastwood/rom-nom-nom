@@ -366,7 +366,8 @@ class CStatement {
   static std::unique_ptr<CStatement> Expression(std::unique_ptr<CExpression> expression);
   static std::unique_ptr<CStatement> VariableDeclaration(
       CType type, std::string name, std::unique_ptr<CExpression> initializer = nullptr,
-      std::optional<size_t> array_size = std::nullopt);
+      std::optional<size_t> array_size = std::nullopt,
+      std::optional<std::string> register_annotation = std::nullopt);
   static std::unique_ptr<CStatement> If(std::unique_ptr<CExpression> condition,
                                         std::unique_ptr<CStatement> then_branch,
                                         std::unique_ptr<CStatement> else_branch = nullptr);
@@ -434,11 +435,13 @@ class VariableDeclarationStatement : public CStatement {
  public:
   VariableDeclarationStatement(CType type, std::string name,
                                std::unique_ptr<CExpression> initializer = nullptr,
-                               std::optional<size_t> array_size = std::nullopt)
+                               std::optional<size_t> array_size = std::nullopt,
+                               std::optional<std::string> register_annotation = std::nullopt)
       : type_(std::move(type)),
         name_(std::move(name)),
         initializer_(std::move(initializer)),
-        array_size_(array_size) {}
+        array_size_(array_size),
+        register_annotation_(std::move(register_annotation)) {}
 
   CStatementKind Kind() const override { return CStatementKind::kVariableDeclarationStatement; }
   using CStatement::ToString;
@@ -449,12 +452,14 @@ class VariableDeclarationStatement : public CStatement {
   const std::string& Name() const { return name_; }
   const CExpression* Initializer() const { return initializer_.get(); }
   std::optional<size_t> ArraySize() const { return array_size_; }
+  const std::optional<std::string>& RegisterAnnotation() const { return register_annotation_; }
 
  private:
   CType type_;
   std::string name_;
   std::unique_ptr<CExpression> initializer_;
   std::optional<size_t> array_size_;
+  std::optional<std::string> register_annotation_;
 };
 
 // If statement: if (cond) { then } else { else }

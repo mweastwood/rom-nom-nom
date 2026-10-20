@@ -777,5 +777,23 @@ TEST_F(TargetExtractorTest,
   std::filesystem::permissions(readonly_src_dir, std::filesystem::perms::all, ec);
 }
 
+TEST_F(TargetExtractorTest, VramToRomOffsetRejectsOutOfSegmentAddresses) {
+  TargetExtractor configured_extractor({.repo_root = test_dir_, .game_name = "ogre-battle-64"},
+                                       &config_, &symbols_);
+  EXPECT_TRUE(configured_extractor.VramToRomOffset(0x80021000).ok());
+  EXPECT_FALSE(configured_extractor.VramToRomOffset(0x800EAF1C).ok());
+  EXPECT_FALSE(configured_extractor.VramToRomOffset(0x801AB76C).ok());
+
+  TargetExtractor unconfigured_ob64_extractor(
+      {.repo_root = test_dir_, .game_name = "ogre-battle-64"}, nullptr, &symbols_);
+  EXPECT_TRUE(unconfigured_ob64_extractor.VramToRomOffset(0x80070C60).ok());
+  EXPECT_FALSE(unconfigured_ob64_extractor.VramToRomOffset(0x800EAF1C).ok());
+
+  TargetExtractor unconfigured_hm64_extractor(
+      {.repo_root = test_dir_, .game_name = "harvest-moon-64"}, nullptr, &symbols_);
+  EXPECT_TRUE(unconfigured_hm64_extractor.VramToRomOffset(0x80025C50).ok());
+  EXPECT_FALSE(unconfigured_hm64_extractor.VramToRomOffset(0x801241C0).ok());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

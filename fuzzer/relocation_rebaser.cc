@@ -433,6 +433,7 @@ absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> c
   std::vector<PlacedPrivate> privates;
   for (const Range& r : private_ranges) {
     bool collides =
+        options.scratch_base != 0 ||
         std::any_of(avoid.begin(), avoid.end(), [&](const Range& a) { return Overlaps(r, a); });
     uint32_t final_start = r.start;
     if (collides) {
@@ -486,6 +487,54 @@ absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> c
     return std::any_of(blob_cand_ranges.begin(), blob_cand_ranges.end(),
                        [&](const Range& r) { return addr >= r.start && addr < r.end; });
   };
+  auto in_content = [&](uint32_t addr) {
+    return std::any_of(content_ranges.begin(), content_ranges.end(),
+                       [&](const Range& r) { return addr >= r.start && addr < r.end; });
+  };
+  auto is_function_symbol = [&](const Symbol& sym) {
+    if ((sym.type == 2 /* STT_FUNC */) || absl::StartsWith(sym.name, "func_")) {
+      return true;
+    }
+    if (symbols != nullptr) {
+      const auto* entry = symbols->FindByName(sym.name);
+      if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+        return true;
+      }
+    }
+    return false;
+  };
+  struct ShiftedFuncRange {
+    uint32_t cand_start = 0;
+    uint32_t cand_end = 0;
+    int64_t shift = 0;
+  };
+  std::vector<ShiftedFuncRange> shifted_funcs;
+  for (const Symbol& s : elf.Symbols()) {
+    if (s.shndx == 0 || s.type == kSttSection || s.name.empty()) continue;
+    if (!is_function_symbol(s)) continue;
+    std::optional<uint32_t> target = TargetAddressForName(s.name, symbols);
+    if (!target.has_value() || *target == s.value) continue;
+    if (in_blob(s.value) || in_content(s.value)) continue;
+    uint32_t end = s.value + (s.size > 0 ? s.size : 64u);
+    shifted_funcs.push_back(
+        {s.value, end, static_cast<int64_t>(*target) - static_cast<int64_t>(s.value)});
+  }
+  std::sort(shifted_funcs.begin(), shifted_funcs.end(),
+            [](const ShiftedFuncRange& a, const ShiftedFuncRange& b) {
+              return a.cand_start < b.cand_start;
+            });
+  for (size_t i = 0; i + 1 < shifted_funcs.size(); ++i) {
+    if (shifted_funcs[i].cand_end > shifted_funcs[i + 1].cand_start) {
+      shifted_funcs[i].cand_end = shifted_funcs[i + 1].cand_start;
+    }
+  }
+  auto func_shift_for = [&](uint32_t addr) -> std::optional<int64_t> {
+    if (in_blob(addr) || in_content(addr)) return std::nullopt;
+    for (const auto& f : shifted_funcs) {
+      if (addr >= f.cand_start && addr < f.cand_end) return f.shift;
+    }
+    return std::nullopt;
+  };
   // A named symbol that stands for a known target address (registered, or an auto-generated
   // D_/func_ label) moves exactly when that target address lies inside a blob. This keeps
   // absolute symbols pinned outside every blob (e.g. memory past BSS) in place even when their
@@ -497,6 +546,9 @@ absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> c
       if (*target >= pb.blob->target_start && *target - pb.blob->target_start < pb.blob->size) {
         return static_cast<int64_t>(pb.blob->target_start) - static_cast<int64_t>(pb.cand_start);
       }
+    }
+    if (is_function_symbol(sym) && sym.value != *target) {
+      return static_cast<int64_t>(*target) - static_cast<int64_t>(sym.value);
     }
     return std::nullopt;
   };
@@ -516,6 +568,11 @@ absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> c
       bool is_section = sym.type == kSttSection;
       auto classify = [&](uint32_t resolved) {
         return is_section ? shift_for(resolved) : symbol_shift(sym);
+      };
+      auto classify_hi_lo = [&](uint32_t resolved) -> std::optional<int64_t> {
+        if (!is_section) return symbol_shift(sym);
+        if (auto s = shift_for(resolved); s.has_value()) return s;
+        return func_shift_for(resolved);
       };
       // Bytes inside blobs come from the target ROM, so relocations located there are moot.
       if (in_blob(rel.offset)) continue;
@@ -553,7 +610,7 @@ absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> c
               uint32_t hi_imm = *hi_word & 0xFFFF;
               last_hi_imm[rel.sym] = hi_imm;
               uint32_t resolved = (hi_imm << 16) + static_cast<uint32_t>(lo_imm);
-              auto shift = classify(resolved);
+              auto shift = classify_hi_lo(resolved);
               if (!shift.has_value()) continue;
               uint32_t moved = static_cast<uint32_t>(resolved + *shift);
               uint32_t new_hi = ((moved + 0x8000) >> 16) & 0xFFFF;
@@ -565,7 +622,7 @@ absl::StatusOr<CandidateRebase> BuildCandidateRebase(absl::Span<const uint8_t> c
           std::optional<int64_t> shift;
           auto hi_it = last_hi_imm.find(rel.sym);
           if (hi_it != last_hi_imm.end()) {
-            shift = classify((hi_it->second << 16) + static_cast<uint32_t>(lo_imm));
+            shift = classify_hi_lo((hi_it->second << 16) + static_cast<uint32_t>(lo_imm));
           } else if (!is_section) {
             shift = symbol_shift(sym);
           } else {

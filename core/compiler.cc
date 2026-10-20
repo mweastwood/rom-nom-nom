@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
@@ -15,8 +16,304 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "core/elf_reader.h"
 
 namespace rom_nom_nom {
+namespace {
+
+struct FunctionSpan {
+  std::string name;
+  size_t start_line = 0;
+  size_t end_line = 0;
+};
+
+absl::StatusOr<std::vector<std::string>> ReadLines(const std::filesystem::path& path) {
+  std::ifstream ifs(path);
+  if (!ifs.is_open()) {
+    return absl::NotFoundError(absl::StrFormat("Failed to open file: %s", path.string()));
+  }
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(ifs, line)) {
+    line.push_back('\n');
+    lines.push_back(std::move(line));
+  }
+  return lines;
+}
+
+absl::flat_hash_map<std::string, FunctionSpan> ParseFunctions(
+    const std::vector<std::string>& lines) {
+  absl::flat_hash_map<std::string, FunctionSpan> funcs;
+  size_t i = 0;
+  while (i < lines.size()) {
+    std::string_view l = lines[i];
+    while (!l.empty() && (l.front() == ' ' || l.front() == '\t')) {
+      l.remove_prefix(1);
+    }
+    if (absl::StartsWith(l, ".ent\t") || absl::StartsWith(l, ".ent ")) {
+      std::vector<std::string_view> parts =
+          absl::StrSplit(l, absl::ByAnyChar(" \t\r\n"), absl::SkipEmpty());
+      if (parts.size() >= 2) {
+        std::string fn_name(parts[1]);
+        size_t start_idx = i;
+        size_t end_idx = start_idx;
+        bool found_end = false;
+        for (size_t j = start_idx + 1; j < lines.size(); ++j) {
+          std::string_view jl = lines[j];
+          while (!jl.empty() && (jl.front() == ' ' || jl.front() == '\t')) {
+            jl.remove_prefix(1);
+          }
+          if (absl::StartsWith(jl, absl::StrCat(".end\t", fn_name)) ||
+              absl::StartsWith(jl, absl::StrCat(".end ", fn_name))) {
+            end_idx = j;
+            found_end = true;
+            for (size_t k = j + 1; k < lines.size() && k <= j + 5; ++k) {
+              std::string_view kl = lines[k];
+              while (!kl.empty() && (kl.front() == ' ' || kl.front() == '\t')) {
+                kl.remove_prefix(1);
+              }
+              if (absl::StartsWith(kl, ".size\t") || absl::StartsWith(kl, ".size ")) {
+                std::string_view rest = absl::StripLeadingAsciiWhitespace(kl.substr(5));
+                if (absl::StartsWith(rest, fn_name)) {
+                  end_idx = k;
+                  break;
+                }
+              }
+            }
+            break;
+          }
+        }
+        if (found_end) {
+          funcs[fn_name] = FunctionSpan{
+              .name = fn_name,
+              .start_line = start_idx,
+              .end_line = end_idx,
+          };
+          i = end_idx + 1;
+          continue;
+        }
+      }
+    }
+    ++i;
+  }
+  return funcs;
+}
+
+absl::Status AlignFunctionsInAssemblyAndReassemble(
+    const Toolchain& toolchain, const Compiler::ProcessRunner& runner,
+    const std::filesystem::path& s272_path, const std::filesystem::path& out_obj,
+    const std::vector<std::string>& as_opt_flags,
+    const std::vector<std::filesystem::path>& as_include_dirs,
+    const std::filesystem::path& macro_inc, absl::Duration timeout,
+    const absl::flat_hash_map<std::string, uint32_t>& function_target_vrams,
+    uint32_t module_target_size = 0, uint32_t initial_vram_offset = 0) {
+  std::error_code ec;
+  if (function_target_vrams.empty() || !std::filesystem::exists(out_obj, ec) ||
+      !std::filesystem::exists(s272_path, ec)) {
+    return absl::OkStatus();
+  }
+
+  auto lookup_vram = [&](std::string_view name) -> std::optional<uint32_t> {
+    auto it = function_target_vrams.find(name);
+    if (it != function_target_vrams.end()) {
+      return it->second;
+    }
+    if (name.size() == 13 && absl::StartsWith(name, "func_80")) {
+      uint32_t addr = 0;
+      if (absl::SimpleHexAtoi(name.substr(5), &addr) && addr != 0) {
+        return addr;
+      }
+    }
+    return std::nullopt;
+  };
+
+  auto elf_or = ElfReader::LoadFromFile(out_obj);
+  if (!elf_or.ok()) {
+    return absl::OkStatus();
+  }
+
+  auto lines_or = ReadLines(s272_path);
+  if (!lines_or.ok()) {
+    return absl::OkStatus();
+  }
+  const auto& lines = *lines_or;
+  auto funcs_map = ParseFunctions(lines);
+  if (funcs_map.size() < 2) {
+    return absl::OkStatus();
+  }
+
+  std::vector<FunctionSpan> sorted_funcs;
+  sorted_funcs.reserve(funcs_map.size());
+  for (const auto& [_, span] : funcs_map) {
+    sorted_funcs.push_back(span);
+  }
+  std::sort(
+      sorted_funcs.begin(), sorted_funcs.end(),
+      [](const FunctionSpan& a, const FunctionSpan& b) { return a.start_line < b.start_line; });
+
+  auto first_vram_opt = lookup_vram(sorted_funcs[0].name);
+  if (!first_vram_opt.has_value()) {
+    return absl::OkStatus();
+  }
+  uint32_t module_base_vram = *first_vram_opt;
+
+  std::vector<uint32_t> sym_offsets(sorted_funcs.size(), 0);
+  for (size_t i = 0; i < sorted_funcs.size(); ++i) {
+    const ElfSymbol* sym = elf_or->FindSymbol(sorted_funcs[i].name);
+    if (sym == nullptr || !sym->is_defined) {
+      return absl::OkStatus();
+    }
+    sym_offsets[i] = sym->value;
+    if (i > 0 && sym_offsets[i] < sym_offsets[i - 1]) {
+      return absl::OkStatus();
+    }
+  }
+
+  const ElfSection* text_sec = elf_or->FindSection(".text");
+  if (text_sec == nullptr) {
+    return absl::OkStatus();
+  }
+  uint32_t unpadded_text_size = static_cast<uint32_t>(text_sec->data.size());
+  uint32_t effective_used = initial_vram_offset + unpadded_text_size;
+  int64_t max_pad_bytes =
+      (module_target_size > 0)
+          ? ((module_target_size > effective_used)
+                 ? static_cast<int64_t>((module_target_size - effective_used) & ~3u)
+                 : 0)
+          : (1LL << 30);
+
+  absl::flat_hash_map<std::string, int32_t> jal_counts;
+  for (const auto& raw_line : lines) {
+    std::string_view sv = absl::StripAsciiWhitespace(raw_line);
+    if (absl::StartsWith(sv, "jal\t") || absl::StartsWith(sv, "jal ")) {
+      std::string_view target = absl::StripAsciiWhitespace(sv.substr(4));
+      jal_counts[std::string(target)]++;
+    }
+  }
+
+  const size_t n = sorted_funcs.size();
+  std::vector<int64_t> req_pad_before(n, -1);
+  std::vector<int32_t> func_weight(n, 2);
+  for (size_t i = 0; i < n; ++i) {
+    int32_t w = 2 + jal_counts[sorted_funcs[i].name] * 2;
+    for (size_t ln = sorted_funcs[i].start_line;
+         ln <= sorted_funcs[i].end_line && ln < lines.size(); ++ln) {
+      std::string_view sv = absl::StripAsciiWhitespace(lines[ln]);
+      if (absl::StartsWith(sv, "j\t.L") || absl::StartsWith(sv, "j .L")) {
+        w += 1;
+      }
+    }
+    func_weight[i] = w;
+
+    auto vram_opt = lookup_vram(sorted_funcs[i].name);
+    if (!vram_opt.has_value() || *vram_opt < module_base_vram) {
+      continue;
+    }
+    int64_t target_off = static_cast<int64_t>(*vram_opt - module_base_vram);
+    int64_t unpadded_off = static_cast<int64_t>(initial_vram_offset + sym_offsets[i]);
+    int64_t needed = target_off - unpadded_off;
+    if (needed >= 0 && needed <= max_pad_bytes && (needed % 4) == 0) {
+      req_pad_before[i] = needed;
+    }
+  }
+
+  std::vector<int32_t> dp(n, 0);
+  std::vector<int32_t> parent(n, -1);
+  int32_t best_score = 0;
+  int32_t best_end = -1;
+  for (size_t i = 0; i < n; ++i) {
+    if (req_pad_before[i] < 0) {
+      continue;
+    }
+    dp[i] = func_weight[i];
+    for (size_t j = 0; j < i; ++j) {
+      if (req_pad_before[j] >= 0 && req_pad_before[j] <= req_pad_before[i] &&
+          dp[j] + func_weight[i] > dp[i]) {
+        dp[i] = dp[j] + func_weight[i];
+        parent[i] = static_cast<int32_t>(j);
+      }
+    }
+    if (dp[i] > best_score) {
+      best_score = dp[i];
+      best_end = static_cast<int32_t>(i);
+    }
+  }
+
+  std::vector<uint32_t> pad_words_after(n, 0);
+  bool any_padding = false;
+  if (best_end >= 0) {
+    std::vector<size_t> chosen;
+    for (int32_t cur = best_end; cur >= 0; cur = parent[cur]) {
+      chosen.push_back(static_cast<size_t>(cur));
+    }
+    std::reverse(chosen.begin(), chosen.end());
+    int64_t prev_pad = 0;
+    for (size_t idx : chosen) {
+      int64_t delta_pad = req_pad_before[idx] - prev_pad;
+      if (delta_pad > 0 && idx > 0) {
+        pad_words_after[idx - 1] = static_cast<uint32_t>(delta_pad / 4);
+        any_padding = true;
+      }
+      prev_pad = req_pad_before[idx];
+    }
+  }
+
+  if (!any_padding) {
+    return absl::OkStatus();
+  }
+
+  std::vector<std::string> padded_lines;
+  padded_lines.reserve(lines.size() + 256);
+  size_t line_idx = 0;
+  for (size_t i = 0; i < sorted_funcs.size(); ++i) {
+    while (line_idx <= sorted_funcs[i].end_line && line_idx < lines.size()) {
+      padded_lines.push_back(lines[line_idx]);
+      ++line_idx;
+    }
+    for (uint32_t p = 0; p < pad_words_after[i]; ++p) {
+      padded_lines.push_back("\t.word\t0\n");
+    }
+  }
+  while (line_idx < lines.size()) {
+    padded_lines.push_back(lines[line_idx]);
+    ++line_idx;
+  }
+
+  {
+    std::ofstream ofs(s272_path);
+    if (!ofs.is_open()) {
+      return absl::InternalError(absl::StrFormat(
+          "AlignFunctionsInAssemblyAndReassemble: Failed to write padded assembly '%s'.",
+          s272_path.string()));
+    }
+    for (const auto& l : padded_lines) {
+      ofs << l;
+    }
+  }
+
+  auto as_args =
+      toolchain.BuildKmcAsArgs(as_opt_flags, as_include_dirs, macro_inc, s272_path, out_obj);
+  ProcessOptions as_opts{
+      .program = toolchain.KmcAs().string(),
+      .args = std::move(as_args),
+      .working_directory = toolchain.RepoRoot(),
+      .timeout = timeout,
+  };
+  auto as_result = runner(as_opts);
+  if (!as_result.ok()) {
+    return as_result.status();
+  }
+  if (!as_result->Ok()) {
+    return absl::InternalError(absl::StrFormat(
+        "AlignFunctionsInAssemblyAndReassemble: KMC AS re-assembly failed for '%s' (exit code "
+        "%d):\n%s\n%s",
+        s272_path.string(), as_result->exit_code, as_result->stdout_output,
+        as_result->stderr_output));
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace
 
 std::filesystem::path FindMacroInc(const std::filesystem::path& repo_root,
                                    std::string_view game_name) {
@@ -110,19 +407,27 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
     };
 
     auto as_result = runner_(as_opts);
-    std::error_code ec;
-    std::filesystem::remove(temp_s272, ec);
-
     if (!as_result.ok()) {
+      std::error_code ec;
+      std::filesystem::remove(temp_s272, ec);
       return as_result.status();
     }
     if (!as_result->Ok()) {
+      std::error_code ec;
+      std::filesystem::remove(temp_s272, ec);
       return absl::InternalError(absl::StrFormat(
           "CompileC: KMC AS assembly failed for '%s' (exit code %d):\n%s\n%s\nCommand: %s %s",
           options.src_file.string(), as_result->exit_code, as_result->stdout_output,
           as_result->stderr_output, as_opts.program, absl::StrJoin(as_opts.args, " ")));
     }
-    return absl::OkStatus();
+
+    auto align_status = AlignFunctionsInAssemblyAndReassemble(
+        toolchain_, runner_, temp_s272, options.out_obj, options.opt_flags, as_include_dirs,
+        options.macro_inc, options.timeout, options.function_target_vrams,
+        options.module_target_size, options.initial_vram_offset);
+    std::error_code ec;
+    std::filesystem::remove(temp_s272, ec);
+    return align_status;
   }
 
   // Modern toolchain mode
@@ -168,6 +473,9 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
         .include_dirs = options.include_dirs,
         .macro_inc = options.macro_inc,
         .timeout = options.timeout,
+        .function_target_vrams = options.function_target_vrams,
+        .module_target_size = options.module_target_size,
+        .initial_vram_offset = options.initial_vram_offset,
     });
   }
 
@@ -199,6 +507,9 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
         .include_dirs = options.include_dirs,
         .macro_inc = options.macro_inc,
         .timeout = options.timeout,
+        .function_target_vrams = options.function_target_vrams,
+        .module_target_size = options.module_target_size,
+        .initial_vram_offset = options.initial_vram_offset,
     });
   }
 
@@ -254,94 +565,16 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
     }
   }
 
-  // Helper to read all lines from a file.
-  auto read_lines =
-      [](const std::filesystem::path& path) -> absl::StatusOr<std::vector<std::string>> {
-    std::ifstream ifs(path);
-    if (!ifs.is_open()) {
-      return absl::NotFoundError(absl::StrFormat("Failed to open file: %s", path.string()));
-    }
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(ifs, line)) {
-      line.push_back('\n');
-      lines.push_back(std::move(line));
-    }
-    return lines;
-  };
-
-  struct FunctionSpan {
-    std::string name;
-    size_t start_line = 0;
-    size_t end_line = 0;
-  };
-
-  auto parse_functions =
-      [](const std::vector<std::string>& lines) -> absl::flat_hash_map<std::string, FunctionSpan> {
-    absl::flat_hash_map<std::string, FunctionSpan> funcs;
-    size_t i = 0;
-    while (i < lines.size()) {
-      std::string_view l = lines[i];
-      while (!l.empty() && (l.front() == ' ' || l.front() == '\t')) {
-        l.remove_prefix(1);
-      }
-      if (absl::StartsWith(l, ".ent\t") || absl::StartsWith(l, ".ent ")) {
-        std::vector<std::string_view> parts =
-            absl::StrSplit(l, absl::ByAnyChar(" \t\r\n"), absl::SkipEmpty());
-        if (parts.size() >= 2) {
-          std::string fn_name(parts[1]);
-          size_t start_idx = i;
-          size_t end_idx = start_idx;
-          bool found_end = false;
-          for (size_t j = start_idx + 1; j < lines.size(); ++j) {
-            std::string_view jl = lines[j];
-            while (!jl.empty() && (jl.front() == ' ' || jl.front() == '\t')) {
-              jl.remove_prefix(1);
-            }
-            if (absl::StartsWith(jl, absl::StrCat(".end\t", fn_name)) ||
-                absl::StartsWith(jl, absl::StrCat(".end ", fn_name))) {
-              end_idx = j;
-              found_end = true;
-              for (size_t k = j + 1; k < lines.size() && k <= j + 5; ++k) {
-                std::string_view kl = lines[k];
-                while (!kl.empty() && (kl.front() == ' ' || kl.front() == '\t')) {
-                  kl.remove_prefix(1);
-                }
-                if (absl::StartsWith(kl, absl::StrCat(".size\t", fn_name)) ||
-                    absl::StartsWith(kl, absl::StrCat(".size ", fn_name))) {
-                  end_idx = k;
-                  break;
-                }
-              }
-              break;
-            }
-          }
-          if (found_end) {
-            funcs[fn_name] = FunctionSpan{
-                .name = fn_name,
-                .start_line = start_idx,
-                .end_line = end_idx,
-            };
-            i = end_idx + 1;
-            continue;
-          }
-        }
-      }
-      ++i;
-    }
-    return funcs;
-  };
-
   // 3. Read assembly for each flag set.
   std::vector<std::vector<std::string>> all_lines(unique_flag_sets.size());
   std::vector<absl::flat_hash_map<std::string, FunctionSpan>> all_funcs(unique_flag_sets.size());
   for (size_t j = 0; j < unique_flag_sets.size(); ++j) {
-    auto lines_or = read_lines(temp_s272_files[j]);
+    auto lines_or = ReadLines(temp_s272_files[j]);
     if (!lines_or.ok()) {
       cleanup_temps();
       return lines_or.status();
     }
-    all_funcs[j] = parse_functions(*lines_or);
+    all_funcs[j] = ParseFunctions(*lines_or);
     all_lines[j] = std::move(*lines_or);
   }
 
@@ -560,12 +793,12 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
   };
 
   auto as_result = runner_(as_opts);
-  cleanup_temps();
-
   if (!as_result.ok()) {
+    cleanup_temps();
     return as_result.status();
   }
   if (!as_result->Ok()) {
+    cleanup_temps();
     return absl::InternalError(absl::StrFormat(
         "CompileCWithPerFunctionFlags: KMC AS assembly failed for '%s' (exit code "
         "%d):\n%s\n%s\nCommand: %s %s",
@@ -573,7 +806,12 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
         as_result->stderr_output, as_opts.program, absl::StrJoin(as_opts.args, " ")));
   }
 
-  return absl::OkStatus();
+  auto align_status = AlignFunctionsInAssemblyAndReassemble(
+      toolchain_, runner_, temp_spliced_s272, options.out_obj, as_opt_flags, as_include_dirs,
+      options.macro_inc, options.timeout, options.function_target_vrams, options.module_target_size,
+      options.initial_vram_offset);
+  cleanup_temps();
+  return align_status;
 }
 
 absl::Status Compiler::CompileCpp(const CppCompileOptions& options) const {

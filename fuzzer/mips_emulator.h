@@ -220,7 +220,8 @@ class MipsEmulator {
   void SetupBranchLikely(bool taken, uint32_t branch_target, uint32_t current_pc,
                          uint32_t* next_pc);
   bool IsExternalCallTarget(uint32_t target_vram) const;
-  std::optional<ExecutionStatus> HandleCallTarget(uint32_t target_vram, int link_reg);
+  std::optional<ExecutionStatus> HandleCallTarget(uint32_t target_vram, int link_reg,
+                                                  bool is_indirect_call = false);
   ExecutionStatus RecordInvalidOpcode(uint32_t raw_word, bool executing_delay_slot,
                                       std::string_view reason = "");
 
@@ -244,6 +245,7 @@ class MipsEmulator {
   std::optional<uint32_t> delayed_branch_target_;
   bool delay_slot_is_return_ = false;
   bool delay_slot_is_call_ = false;
+  bool delay_slot_is_indirect_call_ = false;
   int call_link_reg_ = 31;
 
   bool intercept_external_calls_ = false;
