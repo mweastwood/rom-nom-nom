@@ -2539,5 +2539,135 @@ TEST(AstConverterTest, FoldsFcondAndDoublePrecisionScratchTemporaries) {
   EXPECT_THAT(code, Not(HasSubstr("f6_d")));
 }
 
+TEST(AstConverterTest, FoldsMultiStepShiftAddSubConstantMultiplications) {
+  // 00: sll  $v0, $a0, 4       # v0 = a0 << 4
+  // 04: subu $v0, $v0, $a0     # v0 = v0 - a0  (a0 * 15)
+  // 08: sll  $v1, $a1, 1       # v1 = a1 << 1
+  // 0C: addu $v1, $v1, $a1     # v1 = v1 + a1  (a1 * 3)
+  // 10: sll  $v1, $v1, 3       # v1 = v1 << 3  (a1 * 24)
+  // 14: addu $v1, $v1, $a1     # v1 = v1 + a1  (a1 * 25)
+  // 18: sll  $v1, $v1, 2       # v1 = v1 << 2  (a1 * 100)
+  // 1C: jr   $ra
+  // 20: addu $v0, $v0, $v1
+  std::vector<uint32_t> words = {
+      0x00041100,  // 00: sll  $v0, $a0, 4
+      0x00441023,  // 04: subu $v0, $v0, $a0
+      0x00051840,  // 08: sll  $v1, $a1, 1
+      0x00651821,  // 0C: addu $v1, $v1, $a1
+      0x000318C0,  // 10: sll  $v1, $v1, 3
+      0x00651821,  // 14: addu $v1, $v1, $a1
+      0x00031880,  // 18: sll  $v1, $v1, 2
+      0x03E00008,  // 1C: jr   $ra
+      0x00431021,  // 20: addu $v0, $v0, $v1
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestShiftAddSubConstMul";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("(arg0 * 15)"));
+  EXPECT_THAT(code, HasSubstr("(arg1 * 100)"));
+}
+
+TEST(AstConverterTest, FoldsReciprocalConstantDivisionsAndUnsignedToFloatDiamond) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "D_8011DD50" address: 0x8011DD50 type: SYMBOL_DATA size: 8 }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: lui     $a1, 0x8080
+  // 04: ori     $a1, $a1, 0x8081   # a1 = 0x80808081 (magic for / 255u)
+  // 08: multu   $a0, $a1
+  // 0C: mfhi    $v0
+  // 10: srl     $v0, $v0, 7        # v0 = (u32)arg0 / 255u
+  // 14: mtc1    $v0, $f2
+  // 18: bgez    $v0, 0x8000002C
+  // 1C: cvt.d.w $f2, $f2
+  // 20: lui     $at, 0x8012
+  // 24: ldc1    $f0, -8880($at)
+  // 28: add.d   $f2, $f2, $f0
+  // 2C: cvt.s.d $f0, $f2
+  // 30: jr      $ra
+  // 34: nop
+  std::vector<uint32_t> words = {
+      0x3C058080,  // 00: lui     $a1, 0x8080
+      0x34A58081,  // 04: ori     $a1, $a1, 0x8081
+      0x00850019,  // 08: multu   $a0, $a1
+      0x00001010,  // 0C: mfhi    $v0
+      0x000211C2,  // 10: srl     $v0, $v0, 7
+      0x44821000,  // 14: mtc1    $v0, $f2
+      0x04410004,  // 18: bgez    $v0, 0x8000002C
+      0x468010A1,  // 1C: cvt.d.w $f2, $f2
+      0x3C018012,  // 20: lui     $at, 0x8012
+      0xD420DD50,  // 24: ldc1    $f0, -8880($at)
+      0x46201080,  // 28: add.d   $f2, $f2, $f0
+      0x46201020,  // 2C: cvt.s.d $f0, $f2
+      0x03E00008,  // 30: jr      $ra
+      0x00000000,  // 34: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestUnsignedDivAndFloatDiamond";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("/ 255U"));
+  EXPECT_THAT(code, HasSubstr("(f32)(u32)"));
+  EXPECT_THAT(code, Not(HasSubstr("0x80808081")));
+  EXPECT_THAT(code, Not(HasSubstr("f2_d")));
+}
+
+TEST(AstConverterTest, CollapsesUnalignedBlock8CopyFromLwlLwrSwlSwr) {
+  // 00: lwl $v0, 0($a1)
+  // 04: lwr $v0, 3($a1)
+  // 08: lwl $v1, 4($a1)
+  // 0C: lwr $v1, 7($a1)
+  // 10: swl $v0, 0($a0)
+  // 14: swr $v0, 3($a0)
+  // 18: swl $v1, 4($a0)
+  // 1C: jr  $ra
+  // 20: swr $v1, 7($a0)
+  std::vector<uint32_t> words = {
+      0x88A20000,  // 00: lwl $v0, 0($a1)
+      0x98A20003,  // 04: lwr $v0, 3($a1)
+      0x88A30004,  // 08: lwl $v1, 4($a1)
+      0x98A30007,  // 0C: lwr $v1, 7($a1)
+      0xA8820000,  // 10: swl $v0, 0($a0)
+      0xB8820003,  // 14: swr $v0, 3($a0)
+      0xA8830004,  // 18: swl $v1, 4($a0)
+      0x03E00008,  // 1C: jr  $ra
+      0xB8830007,  // 20: swr $v1, 7($a0)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestUnalignedBlock8Copy";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("*(UnalignedBlock8*)arg0 = *(UnalignedBlock8*)arg1;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

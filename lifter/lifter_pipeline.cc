@@ -605,6 +605,12 @@ typedef unsigned long long u64;
 typedef float f32;
 typedef double f64;
 
+typedef struct { u8 b[4]; } UnalignedWord;
+typedef struct { u8 b[6]; } UnalignedBlock6;
+typedef struct { u8 b[8]; } UnalignedBlock8;
+typedef struct { u8 b[12]; } UnalignedBlock12;
+typedef struct { u8 b[16]; } UnalignedBlock16;
+
 )";
     types_output_stream << "#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))\n";
     for (const auto& intrin : kMathIntrinsics) {

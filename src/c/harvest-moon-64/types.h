@@ -126,4 +126,20 @@ typedef struct {
   f32 w;
 } Vec4f;
 
+typedef struct {
+  u8 b[4];
+} UnalignedWord;
+typedef struct {
+  u8 b[6];
+} UnalignedBlock6;
+typedef struct {
+  u8 b[8];
+} UnalignedBlock8;
+typedef struct {
+  u8 b[12];
+} UnalignedBlock12;
+typedef struct {
+  u8 b[16];
+} UnalignedBlock16;
+
 #endif

@@ -91,6 +91,12 @@ typedef unsigned long long u64;
 typedef float f32;
 typedef double f64;
 
+typedef struct { u8 b[4]; } UnalignedWord;
+typedef struct { u8 b[6]; } UnalignedBlock6;
+typedef struct { u8 b[8]; } UnalignedBlock8;
+typedef struct { u8 b[12]; } UnalignedBlock12;
+typedef struct { u8 b[16]; } UnalignedBlock16;
+
 #endif // TYPES_H
 )";
     WriteTextFile(types_h, types_content);
@@ -4418,6 +4424,76 @@ void PreserveFloatGprAndStackParamsInCalleeSavedAcrossCalls(
     out[0] = r0 + a * e;
     out[1] = r1 + b * d;
     out[2] = c + e;
+}
+)");
+}
+
+// ============================================================================
+// Category 33: Multi-Step Shift-Add/Sub Multiplications, Reciprocal Constant
+//              Divisions & Modulos, Unsigned-to-Float Conversion Diamonds &
+//              Unaligned Struct Block Copies
+// ============================================================================
+
+TEST_F(RoundTripTest, MultiStepShiftAddSubConstantMultiplications) {
+  AssertRoundTripBitExact("MultiStepShiftAddSubConstantMultiplications", R"(
+void MultiStepShiftAddSubConstantMultiplications(s32* out, s32 x, s32 y, s32 z) {
+    out[0] = x * 15;
+    out[1] = y * 25;
+    out[2] = z * 27;
+    out[3] = x * 100;
+    out[4] = y * 108;
+    out[5] = z * 184;
+    out[6] = x * 255;
+    out[7] = y * 1000;
+}
+)");
+}
+
+TEST_F(RoundTripTest, UnsignedConstantDivisionsAndModulos) {
+  AssertRoundTripBitExact("UnsignedConstantDivisionsAndModulos", R"(
+void UnsignedConstantDivisionsAndModulos(u32* out, u32 a, u32 b) {
+    out[0] = a / 255u;
+    out[1] = b % 10u;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignedConstantDivisionsAndModulos) {
+  AssertRoundTripBitExact("SignedConstantDivisionsAndModulos", R"(
+void SignedConstantDivisionsAndModulos(s32* out, s32 a, s32 b) {
+    out[0] = a / 100;
+    out[1] = b % 6;
+}
+)");
+}
+
+TEST_F(RoundTripTest, UnsignedScaleDivideAndFloatAccumulate) {
+  AssertRoundTripBitExact("UnsignedScaleDivideAndFloatAccumulate", R"(
+f32 UnsignedScaleDivideAndFloatAccumulate(u8* tbl, s32 idx, f32 base) {
+    u32 d0 = (u32)(tbl[idx] * 100) / 255u;
+    return base + (f32)d0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, UnalignedStructBlock8Copy) {
+  AssertRoundTripBitExact("UnalignedStructBlock8Copy", R"(
+void UnalignedStructBlock8Copy(UnalignedBlock8* dst, UnalignedBlock8* src) {
+    *dst = *src;
+}
+)");
+}
+
+TEST_F(RoundTripTest, UnalignedStructBlock16CopyLoop) {
+  AssertRoundTripBitExact("UnalignedStructBlock16CopyLoop", R"(
+void UnalignedStructBlock16CopyLoop(UnalignedBlock16* dst, UnalignedBlock16* src, s32 count) {
+    s32 i = 0;
+    do {
+        *dst = *src;
+        src++;
+        dst++;
+        i++;
+    } while (i < count);
 }
 )");
 }
