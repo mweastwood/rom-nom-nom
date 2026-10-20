@@ -4294,5 +4294,133 @@ void SixFloatStackParametersToMatrixInit(
 )");
 }
 
+// ============================================================================
+// Category 32: Callee-Saved Float Carriers, Interleaved Int-to-Float Loops,
+//              Double-Precision Scratch Folding & Multi-Arg Float Stack Calls
+// ============================================================================
+
+TEST_F(RoundTripTest, CalleeSavedFloatCarriersAcrossTwoSqrtCalls) {
+  AssertRoundTripBitExact("CalleeSavedFloatCarriersAcrossTwoSqrtCalls", R"(
+extern f32 HelperLength(f32 sq);
+
+void CalleeSavedFloatCarriersAcrossTwoSqrtCalls(
+    f32* out, f32 x0, f32 y0, f32 z0, f32 x1, f32 y1, f32 z1) {
+    f32 dx = x1 - x0;
+    f32 dy = y1 - y0;
+    f32 dz = z1 - z0;
+    f32 inv0 = HelperLength(dx * dx + dy * dy + dz * dz);
+    f32 inv1;
+    dx *= inv0;
+    dy *= inv0;
+    dz *= inv0;
+    inv1 = HelperLength(dx * dx + dy * dy);
+    out[0] = dx * inv1;
+    out[1] = dy * inv1;
+    out[2] = dz;
+    out[3] = -(x0 * dx + y0 * dy + z0 * dz);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ContinuedFractionIntToFloatLoopSinglePrecision) {
+  AssertRoundTripBitExact("ContinuedFractionIntToFloatLoopSinglePrecision", R"(
+f32 ContinuedFractionIntToFloatLoopSinglePrecision(f32 x) {
+    f32 acc = 0.0f;
+    s32 k = 12;
+    s32 odd = 25;
+    do {
+        s32 sq = k * k;
+        k -= 4;
+        odd -= 8;
+        acc = ((f32)sq * x * x) / ((f32)odd + acc);
+    } while (k != 0);
+    return x / (1.0f + acc);
+}
+)");
+}
+
+TEST_F(RoundTripTest, ContinuedFractionIntToFloatLoopDoublePrecision) {
+  AssertRoundTripBitExact("ContinuedFractionIntToFloatLoopDoublePrecision", R"(
+f64 ContinuedFractionIntToFloatLoopDoublePrecision(f64 x) {
+    f64 acc = 0.0;
+    s32 k = 12;
+    s32 odd = 25;
+    do {
+        s32 sq = k * k;
+        k -= 4;
+        odd -= 8;
+        acc = ((f64)sq * x * x) / ((f64)odd + acc);
+    } while (k != 0);
+    return x / (1.0 + acc);
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoublePrecisionConstantOffsetAdjustmentFromFloat) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+extern f64 gHalfPiDouble;
+extern f64 gPiDouble;
+)";
+  AssertRoundTripBitExact("DoublePrecisionConstantOffsetAdjustmentFromFloat", R"(
+f32 DoublePrecisionConstantOffsetAdjustmentFromFloat(f32 val, f32 sign_ref) {
+    if (val > 1.0f) {
+        val = (f32)(gHalfPiDouble - (f64)val);
+    }
+    if (sign_ref < 0.0f) {
+        val = (f32)(gPiDouble - (f64)val);
+    }
+    return val;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, ConditionalMultiFloatStackArgHelperCalls) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct CameraRig {
+    s32 mode;
+    f32 fovy;
+    f32 aspect;
+    f32 near_p;
+    f32 far_p;
+    f32 eye_x;
+    f32 eye_y;
+    f32 eye_z;
+    f32 at_x;
+    f32 at_y;
+    f32 at_z;
+} CameraRig;
+)";
+  AssertRoundTripBitExact("ConditionalMultiFloatStackArgHelperCalls", R"(
+extern void SetupPerspective(s32* mtx, u16* norm, f32 fovy, f32 aspect, f32 near_p, f32 far_p, f32 scale);
+extern void SetupLookAt(s32* mtx, f32 ex, f32 ey, f32 ez, f32 ax, f32 ay, f32 az);
+
+void ConditionalMultiFloatStackArgHelperCalls(CameraRig* rig, s32* mtx, u16* norm) {
+    if (rig->mode == 1) {
+        SetupPerspective(mtx, norm, rig->fovy, rig->aspect, rig->near_p, rig->far_p, 1.0f);
+    }
+    SetupLookAt(mtx, rig->eye_x, rig->eye_y, rig->eye_z, rig->at_x, rig->at_y, rig->at_z);
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, PreserveFloatGprAndStackParamsInCalleeSavedAcrossCalls) {
+  AssertRoundTripBitExact("PreserveFloatGprAndStackParamsInCalleeSavedAcrossCalls", R"(
+extern f32 EvalBasis(f32 u, f32 v);
+
+void PreserveFloatGprAndStackParamsInCalleeSavedAcrossCalls(
+    f32* out, f32 a, f32 b, f32 c, f32 d, f32 e) {
+    f32 r0 = EvalBasis(a, b);
+    f32 r1 = EvalBasis(c, d);
+    out[0] = r0 + a * e;
+    out[1] = r1 + b * d;
+    out[2] = c + e;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

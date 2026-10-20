@@ -2733,5 +2733,27 @@ TEST(ExpressionBuilderTest, Mtc1WithLuiOriNonZeroLoConstantLiftsAsFloatLiteral) 
   EXPECT_EQ(stmts.back().ToString(), "f4 = 0.200000003f;\n");
 }
 
+TEST(ExpressionBuilderTest, Mtc1FollowedByGprDecrementBeforeCvtSWLiftsAsIntToFloatCast) {
+  // Pattern from libm __atan2f / __logf polynomial loops:
+  //   00: mtc1    $a2, $f8
+  //   04: addiu   $a2, $a2, -8   # modifies $a2 before cvt.s.w!
+  //   08: mtc1    $t2, $f10      # temporary int-to-fp staging using $f10
+  //   0C: cvt.s.w $f18, $f10
+  //   10: cvt.s.w $f10, $f8
+  std::vector<uint32_t> words = {
+      0x44864000,  // 00: mtc1    $a2, $f8
+      0x24C6FFF8,  // 04: addiu   $a2, $a2, -8
+      0x448A5000,  // 08: mtc1    $t2, $f10
+      0x468054A0,  // 0C: cvt.s.w $f18, $f10
+      0x468042A0,  // 10: cvt.s.w $f10, $f8
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 3u);
+  EXPECT_EQ(stmts[0].ToString(), "f10 = (f32)arg2;\n");
+  EXPECT_EQ(stmts[1].ToString(), "arg2 = arg2 - 8;\n");
+  EXPECT_EQ(stmts[2].ToString(), "f18 = (f32)temp_t2;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -301,5 +301,69 @@ TEST(AbiAnalyzerTest, DetectFloatStackParameterSlotsAndLocalOffsets) {
   EXPECT_TRUE(float_locals.contains(20));
 }
 
+TEST(AbiAnalyzerTest, DetectsCalleeSavedFloatCarriersWithPrologueStackSavesAndHomeSlotSpills) {
+  // Frame size = 48:
+  //   00: addiu $sp, $sp, -48
+  //   04: sw    $s4, 24($sp)   # prologue save of $s4 before definition!
+  //   08: sw    $s7, 28($sp)   # prologue save of $s7 before definition!
+  //   0C: sw    $fp, 32($sp)   # prologue save of $fp ($s8) before definition!
+  //   10: addu  $s4, $a2, $zero # $s4 copies incoming f32 arg2 ($a2)
+  //   14: lw    $s7, 64($sp)   # $s7 loads incoming f32 stack slot 4 (48 + 16 = 64)
+  //   18: swc1  $f12, 48($sp)  # caller argument home slot spill at frame_size + 0
+  //   1C: jal   0x80001000
+  //   20: nop
+  //   24: mfc1  $fp, $f0       # $fp receives f32 return from helper call
+  //   28: mtc1  $s4, $f2       # $s4 used as f32 after call
+  //   2C: mtc1  $s7, $f4       # $s7 used as f32 after call
+  //   30: mtc1  $fp, $f6       # $fp used as f32
+  //   34: lwc1  $f8, 48($sp)   # reload from caller argument home slot 48($sp)
+  //   38: add.s $f0, $f2, $f4
+  //   3C: add.s $f0, $f0, $f6
+  //   40: add.s $f0, $f0, $f8
+  //   44: lw    $s4, 24($sp)
+  //   48: lw    $s7, 28($sp)
+  //   4C: lw    $fp, 32($sp)
+  //   50: jr    $ra
+  //   54: addiu $sp, $sp, 48
+  std::vector<uint32_t> words = {
+      0x27BDFFD0,  // 00: addiu $sp, $sp, -48
+      0xAFB40018,  // 04: sw    $s4, 24($sp)
+      0xAFB7001C,  // 08: sw    $s7, 28($sp)
+      0xAFBE0020,  // 0C: sw    $fp, 32($sp)
+      0x00C0A021,  // 10: addu  $s4, $a2, $zero
+      0x8FB70040,  // 14: lw    $s7, 64($sp)
+      0xE7AC0030,  // 18: swc1  $f12, 48($sp)
+      0x0C000400,  // 1C: jal   0x80001000
+      0x00000000,  // 20: nop
+      0x441E0000,  // 24: mfc1  $fp, $f0
+      0x44941000,  // 28: mtc1  $s4, $f2
+      0x44972000,  // 2C: mtc1  $s7, $f4
+      0x449E3000,  // 30: mtc1  $fp, $f6
+      0xC7A80030,  // 34: lwc1  $f8, 48($sp)
+      0x46041000,  // 38: add.s $f0, $f2, $f4
+      0x46060000,  // 3C: add.s $f0, $f0, $f6
+      0x46080000,  // 40: add.s $f0, $f0, $f8
+      0x8FB40018,  // 44: lw    $s4, 24($sp)
+      0x8FB7001C,  // 48: lw    $s7, 28($sp)
+      0x8FBE0020,  // 4C: lw    $fp, 32($sp)
+      0x03E00008,  // 50: jr    $ra
+      0x27BD0030,  // 54: addiu $sp, $sp, 48
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto float_regs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  EXPECT_TRUE(float_regs.contains(Register::kS4));
+  EXPECT_TRUE(float_regs.contains(Register::kS7));
+  EXPECT_TRUE(float_regs.contains(Register::kFp));
+  EXPECT_TRUE(float_regs.contains(Register::kA2));
+
+  auto float_slots = AbiAnalyzer::DetectFloatStackParameterSlots(cfg);
+  EXPECT_TRUE(float_slots.contains(4));
+
+  auto float_locals = AbiAnalyzer::DetectFloatLocalStackOffsets(cfg);
+  EXPECT_TRUE(float_locals.contains(48));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

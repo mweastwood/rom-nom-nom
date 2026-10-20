@@ -531,8 +531,64 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
       Register::kT1, Register::kT2, Register::kT3, Register::kT4, Register::kT5, Register::kT6,
       Register::kT7, Register::kT8, Register::kT9,
   };
+  auto is_live_in_ignoring_callee_save = [&](Register r) -> bool {
+    std::vector<bool> uses_before_def(cfg.Blocks().size(), false);
+    std::vector<bool> defines(cfg.Blocks().size(), false);
+    for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
+      const auto& block = cfg.Blocks()[i];
+      for (size_t j = 0; j < block.instructions.size(); ++j) {
+        const auto& inst = block.instructions[j];
+        bool is_call = (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr);
+        if (is_call && j + 1 < block.instructions.size()) {
+          const auto& delay_inst = block.instructions[j + 1];
+          if (!is_callee_saved_sp_access(delay_inst, r)) {
+            RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+            for (Register u : delay_ud.gpr_uses) {
+              if (u == r && !defines[i]) uses_before_def[i] = true;
+            }
+            for (Register d : delay_ud.gpr_defs) {
+              if (d == r) defines[i] = true;
+            }
+          }
+        }
+        if (!is_callee_saved_sp_access(inst, r)) {
+          RegisterUseDef ud = GetInstructionUseDef(inst);
+          for (Register u : ud.gpr_uses) {
+            if (u == r && !defines[i]) uses_before_def[i] = true;
+          }
+          for (Register d : ud.gpr_defs) {
+            if (d == r) defines[i] = true;
+          }
+        }
+        if (is_call) {
+          if (r != Register::kFp && (r < Register::kS0 || r > Register::kS7)) {
+            defines[i] = true;
+          }
+          if (j + 1 < block.instructions.size()) {
+            ++j;
+          }
+        }
+      }
+    }
+    std::vector<size_t> queue = {0};
+    absl::flat_hash_set<size_t> visited = {0};
+    while (!queue.empty()) {
+      size_t curr = queue.back();
+      queue.pop_back();
+      if (uses_before_def[curr]) return true;
+      if (defines[curr]) continue;
+      for (uint32_t succ_id : cfg.Blocks()[curr].successors) {
+        auto it = id_to_index.find(succ_id);
+        if (it != id_to_index.end() && visited.insert(it->second).second) {
+          queue.push_back(it->second);
+        }
+      }
+    }
+    return false;
+  };
+
   for (Register r : carrier_candidates) {
-    if (IsRegisterLiveIn(cfg, r)) continue;
+    if (is_live_in_ignoring_callee_save(r)) continue;
     int mfc1_defs = 0;
     int stack_arg_load_defs = 0;
     int entry_arg_copy_defs = 0;
@@ -815,7 +871,7 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
     for (size_t j = 0; j < block.instructions.size(); ++j) {
       const auto& inst = block.instructions[j];
       if (inst.rs == Register::kSp && inst.immediate >= 0 &&
-          inst.immediate < static_cast<int32_t>(frame_size) && (inst.immediate % 4 == 0) &&
+          inst.immediate < static_cast<int32_t>(frame_size + 16) && (inst.immediate % 4 == 0) &&
           !saved_offsets.contains(inst.immediate)) {
         int32_t off = inst.immediate;
         if (inst.opcode == Opcode::kLwc1 && inst.ft.has_value()) {
@@ -832,8 +888,9 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
                     *inst.rt == Register::kA3) &&
                    !defined_in_block.contains(*inst.rt)) {
           stats[off].prologue_gpr_spills++;
-        } else if (inst.IsLoad() || inst.IsStore() || inst.opcode == Opcode::kAddiu ||
-                   inst.opcode == Opcode::kAddi) {
+        } else if (inst.IsLoad() || inst.IsStore() ||
+                   ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) &&
+                    inst.rt != Register::kSp)) {
           stats[off].other_accesses++;
         }
       }
@@ -945,8 +1002,10 @@ absl::flat_hash_set<int> AbiAnalyzer::DetectFloatStackParameterSlots(const Contr
         gpr_float_or_swc1_accesses[slot]++;
       } else if (inst.opcode == Opcode::kLw && inst.rt.has_value() &&
                  float_gprs.contains(*inst.rt)) {
-        bool followed_by_mtc1 = false;
-        for (size_t k = j + 1; k < block.instructions.size(); ++k) {
+        bool is_callee_saved_float_gpr =
+            (*inst.rt == Register::kFp || (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7));
+        bool followed_by_mtc1 = is_callee_saved_float_gpr;
+        for (size_t k = j + 1; !followed_by_mtc1 && k < block.instructions.size(); ++k) {
           const auto& next_inst = block.instructions[k];
           if (next_inst.opcode == Opcode::kMtc1 && next_inst.rt == inst.rt &&
               next_inst.fs.has_value() && !is_fpr_converted_from_int(block.id, k, *next_inst.fs)) {

@@ -2498,5 +2498,46 @@ TEST(AstConverterTest, SplitsReusedFloatGprParameterIntoIntegerTempAndTypesParam
   EXPECT_THAT(code, HasSubstr("return temp_a1;"));
 }
 
+TEST(AstConverterTest, FoldsFcondAndDoublePrecisionScratchTemporaries) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "D_800AED48" address: 0x800AED48 type: SYMBOL_DATA size: 8 }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: lui     $at, 0x800B
+  // 04: ldc1    $f18, -4792($at)   # f18_d = D_800AED48
+  // 08: cvt.d.s $f4, $f12          # f4_d = (f64)f12
+  // 0C: sub.d   $f6, $f18, $f4     # f6_d = f18_d - f4_d
+  // 10: cvt.s.d $f0, $f6           # f0 = (f32)f6_d
+  // 14: jr      $ra
+  // 18: nop
+  std::vector<uint32_t> words = {
+      0x3C01800B,  // 00: lui     $at, 0x800B
+      0xD432ED48,  // 04: ldc1    $f18, -4792($at)
+      0x46006121,  // 08: cvt.d.s $f4, $f12
+      0x46249181,  // 0C: sub.d   $f6, $f18, $f4
+      0x46203020,  // 10: cvt.s.d $f0, $f6
+      0x03E00008,  // 14: jr      $ra
+      0x00000000,  // 18: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestDoubleScratchFolding";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("return (f32)(*(f64*)&D_800AED48 - (f64)f12);"));
+  EXPECT_THAT(code, Not(HasSubstr("f18_d")));
+  EXPECT_THAT(code, Not(HasSubstr("f4_d")));
+  EXPECT_THAT(code, Not(HasSubstr("f6_d")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

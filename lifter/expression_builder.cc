@@ -1258,6 +1258,12 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
       continue;
     }
 
+    if (skipped_instruction_indices.contains(i)) {
+      record_gpr_defs(inst);
+      tracker.Step(inst);
+      continue;
+    }
+
     // Check for MIPS GCC integer division/modulo trap expansion
     auto div_pattern = MatchDivisionPattern(instructions_to_process, i);
     if (div_pattern.has_value()) {
@@ -1338,12 +1344,6 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         tracker.Step(instructions_to_process[k]);
       }
       i = conversion->end_index;
-      continue;
-    }
-
-    if (skipped_instruction_indices.contains(i)) {
-      record_gpr_defs(inst);
-      tracker.Step(inst);
       continue;
     }
 
@@ -2769,40 +2769,137 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
         if (inst.fs.has_value() && inst.rt.has_value()) {
           int fs_idx = static_cast<int>(*inst.fs);
           bool only_used_by_int_to_fp_cvt = false;
+          bool rt_modified_before_cvt = false;
+          size_t cvt_look_idx = 0;
           if (*inst.rt != Register::kZero) {
             for (size_t look = i + 1; look < loop_end; ++look) {
               const Instruction& future_inst = instructions_to_process[look];
               if ((future_inst.opcode == Opcode::kCvtSW || future_inst.opcode == Opcode::kCvtDW) &&
-                  future_inst.fs == *inst.fs) {
-                only_used_by_int_to_fp_cvt = true;
+                  future_inst.fs == *inst.fs && future_inst.fd.has_value()) {
+                bool reused_after_cvt = false;
+                if (future_inst.fd != *inst.fs) {
+                  for (size_t k = look + 1; k < loop_end; ++k) {
+                    RegisterUseDef kud = GetInstructionUseDef(instructions_to_process[k]);
+                    for (FpRegister u : kud.fpr_uses) {
+                      if (u == *inst.fs || (static_cast<int>(u) & ~1) == (fs_idx & ~1)) {
+                        reused_after_cvt = true;
+                        break;
+                      }
+                    }
+                    if (reused_after_cvt) break;
+                    bool redefined = false;
+                    for (FpRegister d : kud.fpr_defs) {
+                      if (d == *inst.fs || (static_cast<int>(d) & ~1) == (fs_idx & ~1)) {
+                        redefined = true;
+                        break;
+                      }
+                    }
+                    if (redefined || instructions_to_process[k].IsCall()) break;
+                  }
+                }
+                only_used_by_int_to_fp_cvt = !reused_after_cvt;
+                cvt_look_idx = look;
                 break;
               }
               RegisterUseDef fud = GetInstructionUseDef(future_inst);
-              bool touches_fs_or_rt = false;
+              bool touches_fs = false;
               for (FpRegister u : fud.fpr_uses) {
                 if (u == *inst.fs || (static_cast<int>(u) & ~1) == (fs_idx & ~1)) {
-                  touches_fs_or_rt = true;
+                  touches_fs = true;
                 }
               }
               for (FpRegister d : fud.fpr_defs) {
                 if (d == *inst.fs || (static_cast<int>(d) & ~1) == (fs_idx & ~1)) {
-                  touches_fs_or_rt = true;
+                  touches_fs = true;
                 }
               }
               for (Register d : fud.gpr_defs) {
                 if (d == *inst.rt) {
-                  touches_fs_or_rt = true;
+                  rt_modified_before_cvt = true;
                 }
               }
-              if (touches_fs_or_rt || future_inst.IsCall()) {
+              if (touches_fs || future_inst.IsCall()) {
                 break;
               }
             }
           }
-          if (only_used_by_int_to_fp_cvt) {
+          if (only_used_by_int_to_fp_cvt && !rt_modified_before_cvt) {
             pending_int_to_fp[fs_idx] = LiftRegisterOrConstant(*inst.rt, tracker);
             fpr_const_bits[fs_idx] = std::nullopt;
             break;
+          }
+          if (only_used_by_int_to_fp_cvt && rt_modified_before_cvt) {
+            const Instruction& cvt_inst = instructions_to_process[cvt_look_idx];
+            FpRegister target_fd = *cvt_inst.fd;
+            int target_fd_idx = static_cast<int>(target_fd);
+            bool fd_clobbered_between = false;
+            absl::flat_hash_set<size_t> folded_staging_indices;
+            for (size_t m = i + 1; m < cvt_look_idx; ++m) {
+              if (skipped_instruction_indices.contains(m) || folded_staging_indices.contains(m)) {
+                continue;
+              }
+              const Instruction& mid_inst = instructions_to_process[m];
+              if (mid_inst.opcode == Opcode::kMtc1 && mid_inst.fs == target_fd &&
+                  mid_inst.rt.has_value() && *mid_inst.rt != Register::kZero) {
+                bool staged_cvt_found = false;
+                for (size_t m2 = m + 1; m2 < cvt_look_idx; ++m2) {
+                  const Instruction& m2_inst = instructions_to_process[m2];
+                  if ((m2_inst.opcode == Opcode::kCvtSW || m2_inst.opcode == Opcode::kCvtDW) &&
+                      m2_inst.fs == target_fd && m2_inst.fd.has_value() &&
+                      *m2_inst.fd != target_fd) {
+                    folded_staging_indices.insert(m2);
+                    staged_cvt_found = true;
+                    break;
+                  }
+                  RegisterUseDef m2_ud = GetInstructionUseDef(m2_inst);
+                  bool touches_target_or_rt = false;
+                  for (FpRegister u : m2_ud.fpr_uses) {
+                    if (u == target_fd || (static_cast<int>(u) & ~1) == (target_fd_idx & ~1)) {
+                      touches_target_or_rt = true;
+                    }
+                  }
+                  for (FpRegister d : m2_ud.fpr_defs) {
+                    if (d == target_fd || (static_cast<int>(d) & ~1) == (target_fd_idx & ~1)) {
+                      touches_target_or_rt = true;
+                    }
+                  }
+                  for (Register d : m2_ud.gpr_defs) {
+                    if (d == *mid_inst.rt) {
+                      touches_target_or_rt = true;
+                    }
+                  }
+                  if (touches_target_or_rt || m2_inst.IsCall()) break;
+                }
+                if (staged_cvt_found) {
+                  continue;
+                }
+              }
+              RegisterUseDef mud = GetInstructionUseDef(mid_inst);
+              for (FpRegister u : mud.fpr_uses) {
+                if (u == target_fd || (static_cast<int>(u) & ~1) == (target_fd_idx & ~1)) {
+                  fd_clobbered_between = true;
+                }
+              }
+              for (FpRegister d : mud.fpr_defs) {
+                if (d == target_fd || (static_cast<int>(d) & ~1) == (target_fd_idx & ~1)) {
+                  fd_clobbered_between = true;
+                }
+              }
+              if (fd_clobbered_between) break;
+            }
+            if (!fd_clobbered_between) {
+              bool is_double_cvt = (cvt_inst.opcode == Opcode::kCvtDW);
+              LiftedStatement statement;
+              statement.kind = StatementKind::kAssignment;
+              statement.destination_variable = FpRegisterVarName(target_fd, is_double_cvt);
+              statement.expression = LiftedExpression::Unary(
+                  is_double_cvt ? "(f64)" : "(f32)", LiftRegisterOrConstant(*inst.rt, tracker));
+              statements.push_back(std::move(statement));
+              skipped_instruction_indices.insert(cvt_look_idx);
+              fpr_const_bits[fs_idx] = std::nullopt;
+              fpr_const_bits[target_fd_idx] = std::nullopt;
+              break;
+            }
           }
 
           uint32_t val_bits = 0;
