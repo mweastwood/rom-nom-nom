@@ -4826,5 +4826,113 @@ s32 LoopHoistedThreeWayStateTransition(u8* states, s32 n) {
 )");
 }
 
+// ============================================================================
+// Category 35: Caller-Saved Register Pinning Across Goto/Label Control Flow &
+//              Multi-Branch Call Dispatch
+// ============================================================================
+
+TEST_F(RoundTripTest, NonLeafEntryCallFollowedByGotoBailoutAndScratchCompute) {
+  AssertRoundTripBitExact("NonLeafEntryCallFollowedByGotoBailoutAndScratchCompute", R"(
+s32 validate_pair(s32 a, s32 b);
+
+s32 NonLeafEntryCallFollowedByGotoBailoutAndScratchCompute(s32* hdr, s32 scale) {
+    s32 status = validate_pair(hdr[0], scale);
+    if (status < 0) {
+        goto fail;
+    }
+    if (status == 0) {
+        goto fail;
+    }
+    hdr[1] = status + hdr[2];
+    hdr[3] = hdr[1] ^ hdr[4];
+    return hdr[3];
+fail:
+    hdr[0] = -1;
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiBranchCallDispatchWithSharedGotoErrorAndScratch) {
+  AssertRoundTripBitExact("MultiBranchCallDispatchWithSharedGotoErrorAndScratch", R"(
+s32 op_alpha(s32 a, s32 b);
+
+s32 MultiBranchCallDispatchWithSharedGotoErrorAndScratch(s32* state, s32 kind) {
+    s32 r = op_alpha(state[0], kind);
+    if (r < 0) {
+        goto err;
+    }
+    if (r == 0) {
+        goto err;
+    }
+    state[1] = r - state[2];
+    state[3] = state[1] + state[4];
+    return state[3];
+err:
+    state[0] = -2;
+    return -1;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiCalleeSavedWithEntryCallAndSharedGotoCleanup) {
+  AssertRoundTripBitExact("MultiCalleeSavedWithEntryCallAndSharedGotoCleanup", R"(
+s32 step_value(s32 x, s32 y, s32 z);
+
+s32 MultiCalleeSavedWithEntryCallAndSharedGotoCleanup(s32* p, s32 id, s32 mode) {
+    s32 r = step_value(p[0], id, mode);
+    if (r < 0) {
+        goto cleanup;
+    }
+    if (r == 0) {
+        goto cleanup;
+    }
+    p[1] = r + p[2];
+    p[3] = p[1] ^ p[4];
+    return p[3];
+cleanup:
+    p[0] = -1;
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, LoopWithMultipleHelperCallsAndScratchAccumulation) {
+  AssertRoundTripBitExact("LoopWithMultipleHelperCallsAndScratchAccumulation", R"(
+s32 eval_item(s32 x, s32 idx);
+
+s32 LoopWithMultipleHelperCallsAndScratchAccumulation(s32* items, s32 count) {
+    s32 total = 0;
+    while (count > 0) {
+        s32 a = items[0];
+        s32 b = items[1];
+        s32 r = eval_item(a + 2, b - 1);
+        total += (r ^ count);
+        items += 2;
+        count--;
+    }
+    return total;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ModifiedFirstParamWithExtraScratchArgsForHelperCall) {
+  AssertRoundTripBitExact("ModifiedFirstParamWithExtraScratchArgsForHelperCall", R"(
+s32 transform_pair(s32 x, s32 y, s32 z);
+
+s32 ModifiedFirstParamWithExtraScratchArgsForHelperCall(s32* buf, s32 count) {
+    s32 total = 0;
+    while (count > 0) {
+        s32 a = buf[0];
+        s32 b = buf[1];
+        total += transform_pair(a + 1, b + 2, count);
+        buf += 2;
+        count--;
+    }
+    return total;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

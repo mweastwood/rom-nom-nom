@@ -8545,6 +8545,396 @@ void TrimUnassignedTrailingCallArgRegisters(
   rewrite_comp(body);
 }
 
+bool IsInlineAsmIntrinsicCall(const CallExpression& c) {
+  if (c.Callee().Kind() != CExpressionKind::kIdentifier) return false;
+  std::string_view name = static_cast<const IdentifierExpression&>(c.Callee()).Name();
+  return name == "N64Sqrtf" || name == "N64Sqrt" || name == "sqrtf" || name == "sqrt" ||
+         name == "fabsf" || name == "fabs" || name == "ceilf" || name == "floorf" ||
+         name == "roundf" || name == "truncf" || name == "ceil" || name == "floor" ||
+         name == "round" || name == "trunc";
+}
+
+bool ExpressionUsesVariable(const CExpression& expr, std::string_view target_var) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier:
+      return static_cast<const IdentifierExpression&>(expr).Name() == target_var;
+    case CExpressionKind::kUnaryExpression:
+      return ExpressionUsesVariable(static_cast<const UnaryExpression&>(expr).Operand(),
+                                    target_var);
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      return ExpressionUsesVariable(b.Lhs(), target_var) ||
+             ExpressionUsesVariable(b.Rhs(), target_var);
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      return ExpressionUsesVariable(a.Lhs(), target_var) ||
+             ExpressionUsesVariable(a.Rhs(), target_var);
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& c = static_cast<const CallExpression&>(expr);
+      if (ExpressionUsesVariable(c.Callee(), target_var)) return true;
+      for (const auto& arg : c.Arguments()) {
+        if (arg != nullptr && ExpressionUsesVariable(*arg, target_var)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionUsesVariable(static_cast<const CastExpression&>(expr).Operand(), target_var);
+    case CExpressionKind::kMemberAccessExpression:
+      return ExpressionUsesVariable(static_cast<const MemberAccessExpression&>(expr).Object(),
+                                    target_var);
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& a = static_cast<const ArrayIndexExpression&>(expr);
+      return ExpressionUsesVariable(a.Array(), target_var) ||
+             ExpressionUsesVariable(a.Index(), target_var);
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      return ExpressionUsesVariable(t.Condition(), target_var) ||
+             ExpressionUsesVariable(t.TrueExpression(), target_var) ||
+             ExpressionUsesVariable(t.FalseExpression(), target_var);
+    }
+    default:
+      return false;
+  }
+}
+
+bool ExpressionHasCall(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kCallExpression: {
+      const auto& c = static_cast<const CallExpression&>(expr);
+      if (!IsInlineAsmIntrinsicCall(c)) return true;
+      for (const auto& arg : c.Arguments()) {
+        if (arg != nullptr && ExpressionHasCall(*arg)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kUnaryExpression:
+      return ExpressionHasCall(static_cast<const UnaryExpression&>(expr).Operand());
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      return ExpressionHasCall(b.Lhs()) || ExpressionHasCall(b.Rhs());
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      return ExpressionHasCall(a.Lhs()) || ExpressionHasCall(a.Rhs());
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionHasCall(static_cast<const CastExpression&>(expr).Operand());
+    case CExpressionKind::kMemberAccessExpression:
+      return ExpressionHasCall(static_cast<const MemberAccessExpression&>(expr).Object());
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& a = static_cast<const ArrayIndexExpression&>(expr);
+      return ExpressionHasCall(a.Array()) || ExpressionHasCall(a.Index());
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      return ExpressionHasCall(t.Condition()) || ExpressionHasCall(t.TrueExpression()) ||
+             ExpressionHasCall(t.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StatementHasCall(const CStatement& s) {
+  switch (s.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
+        if (child != nullptr && StatementHasCall(*child)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement:
+      return ExpressionHasCall(static_cast<const ExpressionStatement&>(s).Expression());
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& vd = static_cast<const VariableDeclarationStatement&>(s);
+      return vd.Initializer() != nullptr && ExpressionHasCall(*vd.Initializer());
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(s);
+      return ExpressionHasCall(ifs.Condition()) || StatementHasCall(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StatementHasCall(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(s);
+      return ExpressionHasCall(ws.Condition()) || StatementHasCall(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(s);
+      return StatementHasCall(dws.Body()) || ExpressionHasCall(dws.Condition());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(s);
+      return (fs.Init() != nullptr && StatementHasCall(*fs.Init())) ||
+             (fs.Condition() != nullptr && ExpressionHasCall(*fs.Condition())) ||
+             (fs.Step() != nullptr && ExpressionHasCall(*fs.Step())) || StatementHasCall(fs.Body());
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(s);
+      return rs.ReturnValue() != nullptr && ExpressionHasCall(*rs.ReturnValue());
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(s);
+      if (ExpressionHasCall(ss.Condition())) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StatementHasCall(*c.body)) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+const CallExpression* UnwrapDirectCall(const CExpression& expr) {
+  const CExpression* cur = &expr;
+  while (cur->Kind() == CExpressionKind::kCastExpression) {
+    cur = &static_cast<const CastExpression*>(cur)->Operand();
+  }
+  if (cur->Kind() == CExpressionKind::kCallExpression) {
+    return static_cast<const CallExpression*>(cur);
+  }
+  return nullptr;
+}
+
+bool CheckArgRegInCall(std::string_view r, const CExpression& expr) {
+  if (!ExpressionUsesVariable(expr, r)) return true;
+  const CallExpression* call = UnwrapDirectCall(expr);
+  if (call == nullptr) return false;
+  for (const auto& arg : call->Arguments()) {
+    if (arg != nullptr && ExpressionHasCall(*arg)) {
+      return false;
+    }
+  }
+  bool is_gpr_arg = (r == "arg0" || r == "arg1" || r == "arg2" || r == "arg3");
+  bool is_fpr_arg = (r == "f12" || r == "f12_d" || r == "f14" || r == "f14_d");
+  if (!is_gpr_arg && !is_fpr_arg) {
+    return !(ExpressionUsesVariable(call->Callee(), r) && r != "temp_t9");
+  }
+  if (ExpressionUsesVariable(call->Callee(), r)) return false;
+  size_t slot =
+      is_gpr_arg ? static_cast<size_t>(r[3] - '0') : ((r == "f12" || r == "f12_d") ? 0 : 1);
+  if (slot >= call->Arguments().size() || call->Arguments()[slot] == nullptr) return false;
+  if (call->Arguments()[slot]->Kind() != CExpressionKind::kIdentifier ||
+      static_cast<const IdentifierExpression&>(*call->Arguments()[slot]).Name() != r) {
+    return false;
+  }
+  for (size_t i = 0; i < call->Arguments().size(); ++i) {
+    if (i != slot && call->Arguments()[i] != nullptr &&
+        ExpressionUsesVariable(*call->Arguments()[i], r)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_func,
+                                  std::string_view r) {
+  if (is_leaf_func) return true;
+  bool clobbered = false;
+  bool break_clobbered = false;
+  bool continue_clobbered = false;
+  absl::flat_hash_map<std::string, bool> label_clobbered;
+  auto check_expr = [&](const CExpression& e) -> bool {
+    if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+      const auto& a = static_cast<const AssignmentExpression&>(e);
+      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+        std::string_view lhs_name = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
+        const CExpression& rhs = a.Rhs();
+        bool rhs_has_call = ExpressionHasCall(rhs);
+        bool rhs_uses_r = ExpressionUsesVariable(rhs, r);
+        if (rhs_uses_r && clobbered) return false;
+        if (rhs_has_call && rhs_uses_r) {
+          if (!CheckArgRegInCall(r, rhs)) return false;
+        }
+        if (lhs_name == r) {
+          if (!rhs_has_call || UnwrapDirectCall(rhs) != nullptr) {
+            clobbered = false;
+            return true;
+          }
+          return false;
+        }
+        if (rhs_has_call) {
+          clobbered = true;
+        }
+        return true;
+      }
+      if (a.Op() == "=" && !ExpressionHasCall(a.Lhs()) && !ExpressionUsesVariable(a.Lhs(), r)) {
+        const CExpression& rhs = a.Rhs();
+        bool rhs_has_call = ExpressionHasCall(rhs);
+        bool rhs_uses_r = ExpressionUsesVariable(rhs, r);
+        if (rhs_uses_r && clobbered) return false;
+        if (rhs_has_call && rhs_uses_r) {
+          if (!CheckArgRegInCall(r, rhs)) return false;
+        }
+        if (rhs_has_call) {
+          clobbered = true;
+        }
+        return true;
+      }
+    }
+    bool has_c = ExpressionHasCall(e);
+    bool uses_r = ExpressionUsesVariable(e, r);
+    if (uses_r && clobbered) return false;
+    if (has_c && uses_r) {
+      if (!CheckArgRegInCall(r, e)) return false;
+    }
+    if (has_c) {
+      clobbered = true;
+    }
+    return true;
+  };
+
+  auto check_stmt = [&](auto& self, const CStatement& s) -> bool {
+    switch (s.Kind()) {
+      case CStatementKind::kCompoundStatement:
+        for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
+          if (child != nullptr && !self(self, *child)) return false;
+        }
+        return true;
+      case CStatementKind::kExpressionStatement:
+        return check_expr(static_cast<const ExpressionStatement&>(s).Expression());
+      case CStatementKind::kVariableDeclarationStatement: {
+        const auto& vd = static_cast<const VariableDeclarationStatement&>(s);
+        if (vd.Initializer() != nullptr) {
+          return check_expr(*vd.Initializer());
+        }
+        return true;
+      }
+      case CStatementKind::kReturnStatement: {
+        const auto& rs = static_cast<const ReturnStatement&>(s);
+        if (rs.ReturnValue() != nullptr && !check_expr(*rs.ReturnValue())) {
+          return false;
+        }
+        clobbered = false;
+        return true;
+      }
+      case CStatementKind::kIfStatement: {
+        const auto& ifs = static_cast<const IfStatement&>(s);
+        if (!check_expr(ifs.Condition())) return false;
+        bool before = clobbered;
+        bool then_clobbered = before;
+        clobbered = before;
+        if (!self(self, ifs.ThenBranch())) return false;
+        then_clobbered = clobbered;
+        bool else_clobbered = before;
+        if (ifs.ElseBranch() != nullptr) {
+          clobbered = before;
+          if (!self(self, *ifs.ElseBranch())) return false;
+          else_clobbered = clobbered;
+        }
+        clobbered = then_clobbered || else_clobbered;
+        return true;
+      }
+      case CStatementKind::kWhileStatement: {
+        const auto& ws = static_cast<const WhileStatement&>(s);
+        bool saved_break = break_clobbered;
+        bool saved_continue = continue_clobbered;
+        break_clobbered = false;
+        for (int pass = 0; pass < 2; ++pass) {
+          continue_clobbered = false;
+          if (!check_expr(ws.Condition())) return false;
+          bool cond_clobbered = clobbered;
+          if (!self(self, ws.Body())) return false;
+          clobbered = clobbered || continue_clobbered || cond_clobbered;
+        }
+        clobbered = clobbered || break_clobbered;
+        break_clobbered = saved_break;
+        continue_clobbered = saved_continue;
+        return true;
+      }
+      case CStatementKind::kDoWhileStatement: {
+        const auto& dws = static_cast<const DoWhileStatement&>(s);
+        bool saved_break = break_clobbered;
+        bool saved_continue = continue_clobbered;
+        break_clobbered = false;
+        for (int pass = 0; pass < 2; ++pass) {
+          continue_clobbered = false;
+          if (!self(self, dws.Body())) return false;
+          clobbered = clobbered || continue_clobbered;
+          if (!check_expr(dws.Condition())) return false;
+        }
+        clobbered = clobbered || break_clobbered;
+        break_clobbered = saved_break;
+        continue_clobbered = saved_continue;
+        return true;
+      }
+      case CStatementKind::kForStatement: {
+        const auto& fs = static_cast<const ForStatement&>(s);
+        if (fs.Init() != nullptr && !self(self, *fs.Init())) return false;
+        bool saved_break = break_clobbered;
+        bool saved_continue = continue_clobbered;
+        break_clobbered = false;
+        for (int pass = 0; pass < 2; ++pass) {
+          continue_clobbered = false;
+          if (fs.Condition() != nullptr && !check_expr(*fs.Condition())) return false;
+          bool cond_clobbered = clobbered;
+          if (!self(self, fs.Body())) return false;
+          clobbered = clobbered || continue_clobbered;
+          if (fs.Step() != nullptr && !check_expr(*fs.Step())) return false;
+          clobbered = clobbered || cond_clobbered;
+        }
+        clobbered = clobbered || break_clobbered;
+        break_clobbered = saved_break;
+        continue_clobbered = saved_continue;
+        return true;
+      }
+      case CStatementKind::kSwitchStatement: {
+        const auto& ss = static_cast<const SwitchStatement&>(s);
+        if (!check_expr(ss.Condition())) return false;
+        bool before = clobbered;
+        bool any_clobbered = before;
+        bool saved_break = break_clobbered;
+        break_clobbered = false;
+        for (const auto& c : ss.Cases()) {
+          clobbered = before;
+          if (c.body != nullptr && !self(self, *c.body)) return false;
+          any_clobbered = any_clobbered || clobbered;
+        }
+        clobbered = any_clobbered || break_clobbered;
+        break_clobbered = saved_break;
+        return true;
+      }
+      case CStatementKind::kBreakStatement:
+        break_clobbered = break_clobbered || clobbered;
+        clobbered = false;
+        return true;
+      case CStatementKind::kContinueStatement:
+        continue_clobbered = continue_clobbered || clobbered;
+        clobbered = false;
+        return true;
+      case CStatementKind::kGotoStatement: {
+        const auto& gs = static_cast<const GotoStatement&>(s);
+        if (clobbered) {
+          label_clobbered[gs.Label()] = true;
+        }
+        clobbered = false;
+        return true;
+      }
+      case CStatementKind::kLabelStatement: {
+        const auto& ls = static_cast<const LabelStatement&>(s);
+        if (clobbered) {
+          label_clobbered[ls.Label()] = true;
+        } else {
+          clobbered = label_clobbered[ls.Label()];
+        }
+        return true;
+      }
+      default:
+        return true;
+    }
+  };
+
+  for (int pass = 0; pass < 2; ++pass) {
+    clobbered = false;
+    break_clobbered = false;
+    continue_clobbered = false;
+    if (!check_stmt(check_stmt, body)) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph& cfg,
@@ -8716,6 +9106,28 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
     }
 
     local_vars_to_declare.push_back(var_name);
+  }
+
+  {
+    std::vector<size_t> sp_var_indices;
+    std::vector<std::pair<int64_t, std::string>> sp_vars;
+    for (size_t i = 0; i < local_vars_to_declare.size(); ++i) {
+      if (absl::StartsWith(local_vars_to_declare[i], "var_sp_")) {
+        int64_t off = 0;
+        std::string_view sv = local_vars_to_declare[i];
+        if (absl::SimpleAtoi(sv.substr(7), &off)) {
+          sp_var_indices.push_back(i);
+          sp_vars.emplace_back(off, local_vars_to_declare[i]);
+        }
+      }
+    }
+    if (sp_vars.size() >= 2) {
+      std::sort(sp_vars.begin(), sp_vars.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+      for (size_t i = 0; i < sp_var_indices.size(); ++i) {
+        local_vars_to_declare[sp_var_indices[i]] = sp_vars[i].second;
+      }
+    }
   }
 
   uint32_t unreferenced_sp_gap_size = 0;
@@ -8929,329 +9341,16 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
       }
     }
 
-    auto expr_uses_var = [](const CExpression& expr, std::string_view target_var) -> bool {
-      auto impl = [&](auto& self, const CExpression& e) -> bool {
-        switch (e.Kind()) {
-          case CExpressionKind::kIdentifier:
-            return static_cast<const IdentifierExpression&>(e).Name() == target_var;
-          case CExpressionKind::kUnaryExpression:
-            return self(self, static_cast<const UnaryExpression&>(e).Operand());
-          case CExpressionKind::kBinaryExpression: {
-            const auto& b = static_cast<const BinaryExpression&>(e);
-            return self(self, b.Lhs()) || self(self, b.Rhs());
-          }
-          case CExpressionKind::kAssignmentExpression: {
-            const auto& a = static_cast<const AssignmentExpression&>(e);
-            return self(self, a.Lhs()) || self(self, a.Rhs());
-          }
-          case CExpressionKind::kCallExpression: {
-            const auto& c = static_cast<const CallExpression&>(e);
-            if (self(self, c.Callee())) return true;
-            for (const auto& arg : c.Arguments()) {
-              if (arg != nullptr && self(self, *arg)) return true;
-            }
-            return false;
-          }
-          case CExpressionKind::kCastExpression:
-            return self(self, static_cast<const CastExpression&>(e).Operand());
-          case CExpressionKind::kMemberAccessExpression:
-            return self(self, static_cast<const MemberAccessExpression&>(e).Object());
-          case CExpressionKind::kArrayIndexExpression: {
-            const auto& a = static_cast<const ArrayIndexExpression&>(e);
-            return self(self, a.Array()) || self(self, a.Index());
-          }
-          case CExpressionKind::kTernaryExpression: {
-            const auto& t = static_cast<const TernaryExpression&>(e);
-            return self(self, t.Condition()) || self(self, t.TrueExpression()) ||
-                   self(self, t.FalseExpression());
-          }
-          default:
-            return false;
-        }
-      };
-      return impl(impl, expr);
-    };
-
-    auto is_inline_asm_intrinsic_call = [](const CallExpression& c) -> bool {
-      if (c.Callee().Kind() != CExpressionKind::kIdentifier) return false;
-      std::string_view name = static_cast<const IdentifierExpression&>(c.Callee()).Name();
-      return name == "N64Sqrtf" || name == "N64Sqrt" || name == "sqrtf" || name == "sqrt" ||
-             name == "fabsf" || name == "fabs" || name == "ceilf" || name == "floorf" ||
-             name == "roundf" || name == "truncf" || name == "ceil" || name == "floor" ||
-             name == "round" || name == "trunc";
-    };
-
-    auto expr_has_call = [&](const CExpression& expr) -> bool {
-      auto impl = [&](auto& self, const CExpression& e) -> bool {
-        switch (e.Kind()) {
-          case CExpressionKind::kCallExpression: {
-            const auto& c = static_cast<const CallExpression&>(e);
-            if (!is_inline_asm_intrinsic_call(c)) return true;
-            for (const auto& arg : c.Arguments()) {
-              if (arg != nullptr && self(self, *arg)) return true;
-            }
-            return false;
-          }
-          case CExpressionKind::kUnaryExpression:
-            return self(self, static_cast<const UnaryExpression&>(e).Operand());
-          case CExpressionKind::kBinaryExpression: {
-            const auto& b = static_cast<const BinaryExpression&>(e);
-            return self(self, b.Lhs()) || self(self, b.Rhs());
-          }
-          case CExpressionKind::kAssignmentExpression: {
-            const auto& a = static_cast<const AssignmentExpression&>(e);
-            return self(self, a.Lhs()) || self(self, a.Rhs());
-          }
-          case CExpressionKind::kCastExpression:
-            return self(self, static_cast<const CastExpression&>(e).Operand());
-          case CExpressionKind::kMemberAccessExpression:
-            return self(self, static_cast<const MemberAccessExpression&>(e).Object());
-          case CExpressionKind::kArrayIndexExpression: {
-            const auto& a = static_cast<const ArrayIndexExpression&>(e);
-            return self(self, a.Array()) || self(self, a.Index());
-          }
-          case CExpressionKind::kTernaryExpression: {
-            const auto& t = static_cast<const TernaryExpression&>(e);
-            return self(self, t.Condition()) || self(self, t.TrueExpression()) ||
-                   self(self, t.FalseExpression());
-          }
-          default:
-            return false;
-        }
-      };
-      return impl(impl, expr);
-    };
-
-    auto stmt_has_call = [&](const CStatement& root_stmt) -> bool {
-      auto impl = [&](auto& self, const CStatement& s) -> bool {
-        switch (s.Kind()) {
-          case CStatementKind::kCompoundStatement:
-            for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-              if (child != nullptr && self(self, *child)) return true;
-            }
-            return false;
-          case CStatementKind::kExpressionStatement:
-            return expr_has_call(static_cast<const ExpressionStatement&>(s).Expression());
-          case CStatementKind::kVariableDeclarationStatement: {
-            const auto& vd = static_cast<const VariableDeclarationStatement&>(s);
-            return vd.Initializer() != nullptr && expr_has_call(*vd.Initializer());
-          }
-          case CStatementKind::kIfStatement: {
-            const auto& ifs = static_cast<const IfStatement&>(s);
-            return expr_has_call(ifs.Condition()) || self(self, ifs.ThenBranch()) ||
-                   (ifs.ElseBranch() != nullptr && self(self, *ifs.ElseBranch()));
-          }
-          case CStatementKind::kWhileStatement: {
-            const auto& ws = static_cast<const WhileStatement&>(s);
-            return expr_has_call(ws.Condition()) || self(self, ws.Body());
-          }
-          case CStatementKind::kDoWhileStatement: {
-            const auto& dws = static_cast<const DoWhileStatement&>(s);
-            return self(self, dws.Body()) || expr_has_call(dws.Condition());
-          }
-          case CStatementKind::kForStatement: {
-            const auto& fs = static_cast<const ForStatement&>(s);
-            return (fs.Init() != nullptr && self(self, *fs.Init())) ||
-                   (fs.Condition() != nullptr && expr_has_call(*fs.Condition())) ||
-                   (fs.Step() != nullptr && expr_has_call(*fs.Step())) || self(self, fs.Body());
-          }
-          case CStatementKind::kReturnStatement: {
-            const auto& rs = static_cast<const ReturnStatement&>(s);
-            return rs.ReturnValue() != nullptr && expr_has_call(*rs.ReturnValue());
-          }
-          case CStatementKind::kSwitchStatement: {
-            const auto& ss = static_cast<const SwitchStatement&>(s);
-            if (expr_has_call(ss.Condition())) return true;
-            for (const auto& c : ss.Cases()) {
-              if (c.body != nullptr && self(self, *c.body)) return true;
-            }
-            return false;
-          }
-          default:
-            return false;
-        }
-      };
-      return impl(impl, root_stmt);
-    };
-
-    const bool is_leaf_func = !stmt_has_call(*body);
-
-    auto unwrap_direct_call = [](const CExpression& expr) -> const CallExpression* {
-      const CExpression* cur = &expr;
-      while (cur->Kind() == CExpressionKind::kCastExpression) {
-        cur = &static_cast<const CastExpression*>(cur)->Operand();
-      }
-      if (cur->Kind() == CExpressionKind::kCallExpression) {
-        return static_cast<const CallExpression*>(cur);
-      }
-      return nullptr;
-    };
-
-    auto check_arg_reg_in_call = [&](std::string_view r, const CExpression& expr) -> bool {
-      bool is_gpr_arg = (r == "arg0" || r == "arg1" || r == "arg2" || r == "arg3");
-      bool is_fpr_arg = (r == "f12" || r == "f12_d" || r == "f14" || r == "f14_d");
-      if (!is_gpr_arg && !is_fpr_arg) return true;
-      if (!expr_uses_var(expr, r)) return true;
-      const CallExpression* call = unwrap_direct_call(expr);
-      if (call == nullptr) return false;
-      if (expr_uses_var(call->Callee(), r)) return false;
-      size_t slot =
-          is_gpr_arg ? static_cast<size_t>(r[3] - '0') : ((r == "f12" || r == "f12_d") ? 0 : 1);
-      if (slot >= call->Arguments().size() || call->Arguments()[slot] == nullptr) return false;
-      if (call->Arguments()[slot]->Kind() != CExpressionKind::kIdentifier ||
-          static_cast<const IdentifierExpression&>(*call->Arguments()[slot]).Name() != r) {
-        return false;
-      }
-      for (size_t i = 0; i < call->Arguments().size(); ++i) {
-        if (i != slot && call->Arguments()[i] != nullptr &&
-            expr_uses_var(*call->Arguments()[i], r)) {
-          return false;
-        }
-      }
-      return true;
-    };
+    const bool is_leaf_func = !StatementHasCall(*body);
 
     auto is_caller_saved_safe_across_calls = [&](std::string_view r) -> bool {
-      if (is_leaf_func) return true;
-      bool clobbered = false;
-      auto check_expr = [&](const CExpression& e) -> bool {
-        if (e.Kind() == CExpressionKind::kAssignmentExpression) {
-          const auto& a = static_cast<const AssignmentExpression&>(e);
-          if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
-            std::string_view lhs_name = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
-            const CExpression& rhs = a.Rhs();
-            bool rhs_has_call = expr_has_call(rhs);
-            bool rhs_uses_r = expr_uses_var(rhs, r);
-            if (rhs_uses_r && clobbered) return false;
-            if (rhs_has_call && rhs_uses_r) {
-              if (!check_arg_reg_in_call(r, rhs)) return false;
-            }
-            if (lhs_name == r) {
-              if (!rhs_has_call) {
-                clobbered = false;
-                return true;
-              }
-              if (unwrap_direct_call(rhs) != nullptr) {
-                clobbered = (r != "v0" && r != "f0" && r != "f0_d");
-                return true;
-              }
-              return false;
-            }
-            if (rhs_has_call) {
-              clobbered = true;
-            }
-            return true;
-          }
-        }
-        bool has_c = expr_has_call(e);
-        bool uses_r = expr_uses_var(e, r);
-        if (uses_r && clobbered) return false;
-        if (has_c && uses_r) {
-          if (!check_arg_reg_in_call(r, e)) return false;
-        }
-        if (has_c) {
-          clobbered = true;
-        }
-        return true;
-      };
-
-      auto check_stmt = [&](auto& self, const CStatement& s) -> bool {
-        switch (s.Kind()) {
-          case CStatementKind::kCompoundStatement:
-            for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-              if (child != nullptr && !self(self, *child)) return false;
-            }
-            return true;
-          case CStatementKind::kExpressionStatement:
-            return check_expr(static_cast<const ExpressionStatement&>(s).Expression());
-          case CStatementKind::kVariableDeclarationStatement: {
-            const auto& vd = static_cast<const VariableDeclarationStatement&>(s);
-            if (vd.Initializer() != nullptr) {
-              return check_expr(*vd.Initializer());
-            }
-            return true;
-          }
-          case CStatementKind::kReturnStatement: {
-            const auto& rs = static_cast<const ReturnStatement&>(s);
-            if (rs.ReturnValue() != nullptr) {
-              return check_expr(*rs.ReturnValue());
-            }
-            return true;
-          }
-          case CStatementKind::kIfStatement: {
-            const auto& ifs = static_cast<const IfStatement&>(s);
-            if (!check_expr(ifs.Condition())) return false;
-            bool before = clobbered;
-            bool then_clobbered = before;
-            clobbered = before;
-            if (!self(self, ifs.ThenBranch())) return false;
-            then_clobbered = clobbered;
-            bool else_clobbered = before;
-            if (ifs.ElseBranch() != nullptr) {
-              clobbered = before;
-              if (!self(self, *ifs.ElseBranch())) return false;
-              else_clobbered = clobbered;
-            }
-            clobbered = then_clobbered || else_clobbered;
-            return true;
-          }
-          case CStatementKind::kWhileStatement: {
-            const auto& ws = static_cast<const WhileStatement&>(s);
-            for (int pass = 0; pass < 2; ++pass) {
-              if (!check_expr(ws.Condition())) return false;
-              if (!self(self, ws.Body())) return false;
-            }
-            return true;
-          }
-          case CStatementKind::kDoWhileStatement: {
-            const auto& dws = static_cast<const DoWhileStatement&>(s);
-            for (int pass = 0; pass < 2; ++pass) {
-              if (!self(self, dws.Body())) return false;
-              if (!check_expr(dws.Condition())) return false;
-            }
-            return true;
-          }
-          case CStatementKind::kForStatement: {
-            const auto& fs = static_cast<const ForStatement&>(s);
-            if (fs.Init() != nullptr && !self(self, *fs.Init())) return false;
-            for (int pass = 0; pass < 2; ++pass) {
-              if (fs.Condition() != nullptr && !check_expr(*fs.Condition())) return false;
-              if (!self(self, fs.Body())) return false;
-              if (fs.Step() != nullptr && !check_expr(*fs.Step())) return false;
-            }
-            return true;
-          }
-          case CStatementKind::kSwitchStatement: {
-            const auto& ss = static_cast<const SwitchStatement&>(s);
-            if (!check_expr(ss.Condition())) return false;
-            bool before = clobbered;
-            bool any_clobbered = before;
-            for (const auto& c : ss.Cases()) {
-              clobbered = before;
-              if (c.body != nullptr && !self(self, *c.body)) return false;
-              any_clobbered = any_clobbered || clobbered;
-            }
-            clobbered = any_clobbered;
-            return true;
-          }
-          case CStatementKind::kGotoStatement:
-          case CStatementKind::kLabelStatement:
-            if (!is_leaf_func) {
-              clobbered = true;
-            }
-            return true;
-          default:
-            return true;
-        }
-      };
-
-      return check_stmt(check_stmt, *body);
+      return IsCallerSavedSafeAcrossCalls(*body, is_leaf_func, r);
     };
 
     size_t unpinned_gpr_locals_count = 0;
     for (const auto& v : local_vars_to_declare) {
-      if (v != "sp" && !is_fp_reg(v) && !absl::EndsWith(v, "_64") && !double_vars.contains(v) &&
-          !IsCalleeSavedGprVarName(v)) {
+      if (v != "sp" && !absl::StartsWith(v, "var_sp_") && !is_fp_reg(v) &&
+          !absl::EndsWith(v, "_64") && !double_vars.contains(v) && !IsCalleeSavedGprVarName(v)) {
         ++unpinned_gpr_locals_count;
       }
     }
@@ -9316,7 +9415,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
         }
         return std::nullopt;
       }
-      if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= 8) {
+      if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= 11) {
         return std::nullopt;
       }
       std::optional<std::string> caller_gpr_reg;
@@ -9326,7 +9425,19 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
               local_vars_to_declare.end() &&
           std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "v1") !=
               local_vars_to_declare.end();
-      if (is_float_return_leaf_with_v0_v1 && var_name == "v0") {
+      bool v0_assigned_many_times = false;
+      if (var_name == "v0" && !is_leaf_func) {
+        int v0_assigns = 0;
+        size_t pos = 0;
+        while ((pos = body_str.find("v0 = ", pos)) != std::string::npos) {
+          if (++v0_assigns >= 4) {
+            v0_assigned_many_times = true;
+            break;
+          }
+          pos += 5;
+        }
+      }
+      if ((is_float_return_leaf_with_v0_v1 || v0_assigned_many_times) && var_name == "v0") {
         caller_gpr_reg = "$2";
       } else if ((is_float_return_leaf_with_v0_v1 || !is_leaf_func) && var_name == "v1") {
         caller_gpr_reg = "$3";

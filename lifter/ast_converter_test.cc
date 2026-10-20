@@ -2969,5 +2969,116 @@ TEST(AstConverterTest, PreservesLoopHoistedConstantRegisterInStoreInsideLoop) {
   EXPECT_THAT(code, HasSubstr("*(s8*)arg0 = v1;"));
 }
 
+TEST(AstConverterTest, PinsCallerSavedTemporariesUsedAfterCallFreeGotoLabel) {
+  // Block 0 (ends at call):
+  // 00: addiu $sp, $sp, -24
+  // 04: sw    $ra, 20($sp)
+  // 08: jal   0x80001000
+  // 0C: nop
+  // Block 1 (branch after call):
+  // 10: beq   $a0, $zero, +2 (to Block 3 at 0x20)
+  // 14: nop
+  // Block 2 (fallthrough):
+  // 18: addiu $a0, $a0, 1
+  // 1C: nop
+  // Block 3 (goto target label):
+  // 20: addiu $t0, $a0, 5
+  // 24: sw    $t0, 0($a1)
+  // 28: sll   $v1, $t0, 2
+  // 2C: sw    $v1, 4($a1)
+  // 30: addu  $v0, $v1, $t0
+  // 34: lw    $ra, 20($sp)
+  // 38: jr    $ra
+  // 3C: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0x0C000400,  // 08: jal   0x80001000
+      0x00000000,  // 0C: nop
+      0x10800002,  // 10: beq   $a0, $zero, +2 (to 0x1C)
+      0x00000000,  // 14: nop
+      0x24840001,  // 18: addiu $a0, $a0, 1
+      0x24880005,  // 1C: addiu $t0, $a0, 5
+      0xACA80000,  // 20: sw    $t0, 0($a1)
+      0x00081880,  // 24: sll   $v1, $t0, 2
+      0xACA30004,  // 28: sw    $v1, 4($a1)
+      0x00681021,  // 2C: addu  $v0, $v1, $t0
+      0x8FBF0014,  // 30: lw    $ra, 20($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0018,  // 38: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto seq = std::make_unique<StructuredRegion>();
+  seq->type = RegionType::kSequence;
+
+  auto b0 = std::make_unique<StructuredRegion>();
+  b0->type = RegionType::kBlock;
+  b0->block_id = 0;
+  seq->children.push_back(std::move(b0));
+
+  auto if_reg = std::make_unique<StructuredRegion>();
+  if_reg->type = RegionType::kIfThenElse;
+  if_reg->condition_block_id = 1;
+  auto goto_b3 = std::make_unique<StructuredRegion>();
+  goto_b3->type = RegionType::kGoto;
+  goto_b3->block_id = 3;
+  if_reg->children.push_back(std::move(goto_b3));
+  seq->children.push_back(std::move(if_reg));
+
+  auto b2 = std::make_unique<StructuredRegion>();
+  b2->type = RegionType::kBlock;
+  b2->block_id = 2;
+  seq->children.push_back(std::move(b2));
+
+  auto b3 = std::make_unique<StructuredRegion>();
+  b3->type = RegionType::kBlock;
+  b3->block_id = 3;
+  seq->children.push_back(std::move(b3));
+
+  AstConverterOptions options;
+  options.function_name = "TestPinAfterGotoLabel";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *seq, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 temp_t0 asm(\"$8\");"));
+  EXPECT_THAT(code, HasSubstr("register s32 v1 asm(\"$3\");"));
+}
+
+TEST(AstConverterTest, SortsStackLocalDeclarationsByNumericOffset) {
+  // Function accessing stack locals at 20($sp) then 16($sp).
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFA50014,  // 08: sw    $a1, 20($sp)
+      0xAFA60010,  // 0C: sw    $a2, 16($sp)
+      0x8FA20014,  // 10: lw    $v0, 20($sp)
+      0x8FA30010,  // 14: lw    $v1, 16($sp)
+      0x00431021,  // 18: addu  $v0, $v0, $v1
+      0x8FBF001C,  // 1C: lw    $ra, 28($sp)
+      0x03E00008,  // 20: jr    $ra
+      0x27BD0020,  // 24: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestSortStackVars";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  size_t pos_16 = code.find("s32 var_sp_16;");
+  size_t pos_20 = code.find("s32 var_sp_20;");
+  ASSERT_NE(pos_16, std::string::npos);
+  ASSERT_NE(pos_20, std::string::npos);
+  EXPECT_LT(pos_16, pos_20);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
