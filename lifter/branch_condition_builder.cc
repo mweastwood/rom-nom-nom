@@ -585,7 +585,48 @@ bool BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(const Contro
   if (cond_block == nullptr) {
     return false;
   }
-  return ShouldDecoupleBranchConditionDelaySlot(*cond_block);
+  if (ShouldDecoupleBranchConditionDelaySlot(*cond_block)) {
+    return true;
+  }
+  if (cond_block->instructions.size() == 2 && cond_block->predecessors.size() == 1) {
+    const auto* term = cond_block->Terminator();
+    const auto& delay_inst = cond_block->instructions.back();
+    if (term != nullptr && term->IsBranch() && !term->IsBranchLikely() && !delay_inst.IsNop()) {
+      RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+      bool defines_arg_reg = false;
+      for (Register r : delay_ud.gpr_defs) {
+        if (r >= Register::kA0 && r <= Register::kA3) {
+          defines_arg_reg = true;
+          break;
+        }
+      }
+      if (defines_arg_reg) {
+        const auto* pred_block = cfg.GetBlock(cond_block->predecessors[0]);
+        bool pred_has_call = false;
+        if (pred_block != nullptr) {
+          for (const auto& inst : pred_block->instructions) {
+            if (inst.IsCall()) {
+              pred_has_call = true;
+              break;
+            }
+          }
+        }
+        if (pred_has_call) {
+          for (uint32_t succ_id : cond_block->successors) {
+            const auto* succ_block = cfg.GetBlock(succ_id);
+            if (succ_block != nullptr) {
+              for (const auto& inst : succ_block->instructions) {
+                if (inst.IsCall()) {
+                  return true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
 }
 
 bool BranchConditionBuilder::ShouldDecoupleLoopConditionDelaySlot(const BasicBlock& cond_block,

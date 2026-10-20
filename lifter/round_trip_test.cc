@@ -3998,5 +3998,171 @@ s32 MultipleCallsWithFiveStackArgsInSwitchCases(s32 cmd) {
 )");
 }
 
+// ============================================================================
+// Category 30: Multi-Call Callee-Saved Preservation, Float Stack Params & Stores
+// ============================================================================
+
+TEST_F(RoundTripTest, PreservePointerAcrossTwoVoidCallsBeforeStore) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct EntityState {
+    s32 flags;
+    s32 timer;
+    s32 mode;
+} EntityState;
+)";
+  AssertRoundTripBitExact("PreservePointerAcrossTwoVoidCallsBeforeStore", R"(
+extern void PrepareEntity(EntityState* e);
+extern void NotifySystem(s32 mode);
+
+void PreservePointerAcrossTwoVoidCallsBeforeStore(EntityState* e, s32 new_mode) {
+    if (e->flags != 0) {
+        PrepareEntity(e);
+        NotifySystem(new_mode);
+        e->mode = new_mode;
+        e->timer = 0;
+    }
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, SixParametersWithFourFloatStackAndRegisterArgs) {
+  AssertRoundTripBitExact("SixParametersWithFourFloatStackAndRegisterArgs", R"(
+extern void WriteVec3(f32* dst, f32 x, f32 y, f32 z);
+
+void SixParametersWithFourFloatStackAndRegisterArgs(f32* dst, s32 mode, f32 x0, f32 y0, f32 x1, f32 y1) {
+    f32 dx = x1 - x0;
+    f32 dy = y1 - y0;
+    if (mode != 0) {
+        WriteVec3(dst, dx, dy, dx + dy);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallResultPassedToSecondCallAndStoredToGlobal) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+extern s32 gLastHandle;
+)";
+  AssertRoundTripBitExact("CallResultPassedToSecondCallAndStoredToGlobal", R"(
+extern s32 AllocateResource(s32 size);
+extern void InitializeResource(s32 handle, s32 flags);
+
+s32 CallResultPassedToSecondCallAndStoredToGlobal(s32 size, s32 flags) {
+    s32 h = AllocateResource(size);
+    gLastHandle = h;
+    InitializeResource(h, flags);
+    return h;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, LoopCallingValidatorAndUpdatingStructFields) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct SlotEntry {
+    s32 active;
+    s32 id;
+    s32 score;
+    s32 bonus;
+} SlotEntry;
+)";
+  AssertRoundTripBitExact("LoopCallingValidatorAndUpdatingStructFields", R"(
+extern s32 ComputeSlotBonus(s32 id, s32 score);
+
+s32 LoopCallingValidatorAndUpdatingStructFields(SlotEntry* slots, s32 count) {
+    s32 updated = 0;
+    s32 i = 0;
+    while (i < count) {
+        if (slots[i].active != 0) {
+            slots[i].bonus = ComputeSlotBonus(slots[i].id, slots[i].score);
+            updated++;
+        }
+        i++;
+    }
+    return updated;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, SignedDivisionByHundredAndAccumulateFloat) {
+  AssertRoundTripBitExact("SignedDivisionByHundredAndAccumulateFloat", R"(
+f32 SignedDivisionByHundredAndAccumulateFloat(const u8* values, s32 idx) {
+    s32 a = (values[idx] * 25) / 100;
+    s32 b = (values[idx + 7] * 25) / 100;
+    return (f32)a + (f32)b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, NestedIfElseChainWithCallsAndSharedCleanup) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+extern s32 gCurrentPhase;
+)";
+  AssertRoundTripBitExact("NestedIfElseChainWithCallsAndSharedCleanup", R"(
+extern s32 CheckConditionA(s32 x);
+extern s32 CheckConditionB(s32 x);
+extern void TriggerEventA(s32 a, s32 b);
+extern void TriggerEventB(s32 a, s32 b);
+extern void FinalizeStep(s32 status);
+
+void NestedIfElseChainWithCallsAndSharedCleanup(s32 x, s32 y) {
+    if (CheckConditionA(x) != 0) {
+        TriggerEventA(x, 10);
+        gCurrentPhase = 1;
+    } else if (CheckConditionB(y) != 0) {
+        TriggerEventB(y, 20);
+        gCurrentPhase = 2;
+    } else {
+        gCurrentPhase = 0;
+    }
+    FinalizeStep(gCurrentPhase);
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, MultipleStructPointerStoresAfterHelperCall) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ActorTransform {
+    s32 x;
+    s32 y;
+    s32 z;
+    s32 vx;
+    s32 vy;
+    s32 vz;
+} ActorTransform;
+)";
+  AssertRoundTripBitExact("MultipleStructPointerStoresAfterHelperCall", R"(
+extern s32 StepVelocity(s32 v, s32 accel);
+
+void MultipleStructPointerStoresAfterHelperCall(ActorTransform* t, s32 ax, s32 ay, s32 az) {
+    t->vx = StepVelocity(t->vx, ax);
+    t->vy = StepVelocity(t->vy, ay);
+    t->vz = StepVelocity(t->vz, az);
+    t->x += t->vx;
+    t->y += t->vy;
+    t->z += t->vz;
+}
+)",
+                          opts);
+}
+
+TEST_F(RoundTripTest, FourFloatStackArgumentsToMatrixHelper) {
+  AssertRoundTripBitExact("FourFloatStackArgumentsToMatrixHelper", R"(
+extern void BuildTransformEightArgs(s32* mtx, s32 flags, f32 rx, f32 ry, f32 rz, f32 tx, f32 ty, f32 tz);
+
+void FourFloatStackArgumentsToMatrixHelper(s32* mtx, const f32* params, s32 flags) {
+    BuildTransformEightArgs(mtx, flags, params[0], params[1], params[2], params[3], params[4], params[5]);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

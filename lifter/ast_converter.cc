@@ -554,7 +554,11 @@ class ConverterContext {
   bool HasFramePointer() const { return frame_analysis_.has_frame_pointer; }
   bool HasCalls() const { return frame_analysis_.has_calls; }
   uint32_t MinSavedRegOffset() const { return frame_analysis_.prologue.min_saved_reg_offset; }
+  uint32_t OutgoingArgsSize() const { return frame_analysis_.outgoing_args_size; }
   uint32_t SpBufferSize() const { return frame_analysis_.sp_buffer_size; }
+  const absl::flat_hash_set<int32_t>& StackStoreOffsets() const {
+    return frame_analysis_.stack_store_offsets;
+  }
   const absl::flat_hash_set<std::string>& DoubleVars() const { return double_vars_; }
 
   FunctionLiftContext BuildLiftContext(
@@ -3525,52 +3529,6 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
     return VarLiveness::kReadBeforeWrite;
   };
 
-  auto is_dead_after_stmt = [&](size_t next_idx, std::string_view var,
-                                int expected_uses_in_next = 1,
-                                const CStatement* def_stmt = nullptr) -> bool {
-    const auto& stmts = comp->Statements();
-    if (next_idx >= stmts.size()) {
-      return false;
-    }
-    if (stmts[next_idx]->Kind() == CStatementKind::kReturnStatement) {
-      return !has_address_of_var_in_stmt(*stmts[next_idx], var);
-    }
-    if (stmts[next_idx]->Kind() != CStatementKind::kIfStatement &&
-        stmts[next_idx]->Kind() != CStatementKind::kSwitchStatement &&
-        has_control_jump_in_stmt(*stmts[next_idx])) {
-      return false;
-    }
-
-    active_ignored_def_stmt = def_stmt;
-    active_ignored_use_stmt = (expected_uses_in_next > 0) ? stmts[next_idx].get() : nullptr;
-    for (size_t k = next_idx + 1; k < stmts.size(); ++k) {
-      const auto& s = *stmts[k];
-      if (s.Kind() == CStatementKind::kBreakStatement && is_switch_case_body) {
-        break;
-      }
-      VarLiveness res = analyze_var_liveness(s, var, is_switch_case_body, 0);
-      if (res == VarLiveness::kKilledBeforeRead) {
-        active_ignored_def_stmt = nullptr;
-        active_ignored_use_stmt = nullptr;
-        return true;
-      }
-      if (res == VarLiveness::kReadBeforeWrite) {
-        active_ignored_def_stmt = nullptr;
-        active_ignored_use_stmt = nullptr;
-        return false;
-      }
-    }
-    active_ignored_def_stmt = nullptr;
-    active_ignored_use_stmt = nullptr;
-    if (comp == root_body || (dead_at_end_vars != nullptr && dead_at_end_vars->contains(var))) {
-      return true;
-    }
-    if ((is_call_arg_var(var) || is_outgoing_stack_arg_var(var)) && !root_has_label) {
-      return true;
-    }
-    return false;
-  };
-
   auto is_comparison_expr = [](const CExpression& e) -> bool {
     if (e.Kind() != CExpressionKind::kBinaryExpression) return false;
     std::string_view op = static_cast<const BinaryExpression&>(e).Op();
@@ -3634,6 +3592,54 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
     return found;
   };
 
+  auto is_dead_after_stmt = [&](size_t next_idx, std::string_view var,
+                                int expected_uses_in_next = 1,
+                                const CStatement* def_stmt = nullptr) -> bool {
+    const auto& stmts = comp->Statements();
+    if (next_idx >= stmts.size()) {
+      return false;
+    }
+    if (stmts[next_idx]->Kind() == CStatementKind::kReturnStatement) {
+      return !has_address_of_var_in_stmt(*stmts[next_idx], var);
+    }
+    if (stmts[next_idx]->Kind() != CStatementKind::kIfStatement &&
+        stmts[next_idx]->Kind() != CStatementKind::kSwitchStatement &&
+        has_control_jump_in_stmt(*stmts[next_idx])) {
+      return false;
+    }
+
+    active_ignored_def_stmt = def_stmt;
+    active_ignored_use_stmt = (expected_uses_in_next > 0) ? stmts[next_idx].get() : nullptr;
+    for (size_t k = next_idx + 1; k < stmts.size(); ++k) {
+      const auto& s = *stmts[k];
+      if (s.Kind() == CStatementKind::kBreakStatement && is_switch_case_body) {
+        break;
+      }
+      VarLiveness res = analyze_var_liveness(s, var, is_switch_case_body, 0);
+      if (res == VarLiveness::kKilledBeforeRead) {
+        active_ignored_def_stmt = nullptr;
+        active_ignored_use_stmt = nullptr;
+        return true;
+      }
+      if (res == VarLiveness::kReadBeforeWrite) {
+        active_ignored_def_stmt = nullptr;
+        active_ignored_use_stmt = nullptr;
+        return false;
+      }
+    }
+    active_ignored_def_stmt = nullptr;
+    active_ignored_use_stmt = nullptr;
+    if (comp == root_body || (dead_at_end_vars != nullptr && dead_at_end_vars->contains(var))) {
+      return true;
+    }
+    if ((is_outgoing_stack_arg_var(var) || (is_call_arg_var(var) && expected_uses_in_next > 0 &&
+                                            has_call_in_stmt(*stmts[next_idx]))) &&
+        !root_has_label) {
+      return true;
+    }
+    return false;
+  };
+
   auto is_duplicable_arg_rhs = [](const CExpression& rhs) -> bool {
     if (rhs.Kind() == CExpressionKind::kIdentifier ||
         rhs.Kind() == CExpressionKind::kIntegerLiteral ||
@@ -3649,6 +3655,98 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
       }
     }
     return false;
+  };
+
+  auto extract_simple_deref_range = [](const CExpression& e, std::string_view* out_base,
+                                       int64_t* out_offset, int64_t* out_size) -> bool {
+    if (e.Kind() != CExpressionKind::kUnaryExpression) return false;
+    const auto& un = static_cast<const UnaryExpression&>(e);
+    if (un.Op() != "*" || un.Operand().Kind() != CExpressionKind::kCastExpression) return false;
+    const auto& cast = static_cast<const CastExpression&>(un.Operand());
+    std::string ts = cast.TargetType().ToString();
+    int64_t size = 4;
+    if (ts == "s8*" || ts == "u8*" || ts == "s8 *" || ts == "u8 *") {
+      size = 1;
+    } else if (ts == "s16*" || ts == "u16*" || ts == "s16 *" || ts == "u16 *") {
+      size = 2;
+    } else if (ts == "s64*" || ts == "u64*" || ts == "f64*" || ts == "s64 *" || ts == "u64 *" ||
+               ts == "f64 *") {
+      size = 8;
+    }
+    const CExpression& addr = cast.Operand();
+    if (addr.Kind() == CExpressionKind::kIdentifier) {
+      *out_base = static_cast<const IdentifierExpression&>(addr).Name();
+      *out_offset = 0;
+      *out_size = size;
+      return true;
+    }
+    if (addr.Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& bin = static_cast<const BinaryExpression&>(addr);
+      if ((bin.Op() == "+" || bin.Op() == "-") &&
+          bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        *out_base = static_cast<const IdentifierExpression&>(bin.Lhs()).Name();
+        int64_t off = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        *out_offset = (bin.Op() == "-") ? -off : off;
+        *out_size = size;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto are_provably_disjoint_derefs = [&](const CExpression& a, const CExpression& b) -> bool {
+    std::string_view base_a;
+    std::string_view base_b;
+    int64_t off_a = 0;
+    int64_t off_b = 0;
+    int64_t size_a = 0;
+    int64_t size_b = 0;
+    if (!extract_simple_deref_range(a, &base_a, &off_a, &size_a) ||
+        !extract_simple_deref_range(b, &base_b, &off_b, &size_b)) {
+      return false;
+    }
+    if (base_a != base_b) return false;
+    return (off_a + size_a <= off_b) || (off_b + size_b <= off_a);
+  };
+
+  auto are_all_derefs_provably_disjoint = [&](const CExpression& expr,
+                                              const CExpression& store_lhs) -> bool {
+    bool found_deref = false;
+    bool all_disjoint = true;
+    std::function<void(const CExpression&)> walk = [&](const CExpression& e) {
+      if (!all_disjoint) return;
+      if (e.Kind() == CExpressionKind::kUnaryExpression) {
+        const auto& un = static_cast<const UnaryExpression&>(e);
+        if (un.Op() == "*") {
+          found_deref = true;
+          if (!are_provably_disjoint_derefs(e, store_lhs)) {
+            all_disjoint = false;
+          }
+          return;
+        }
+        if (un.Op() == "*(s32*)&" || un.Op() == "*(u32*)&" || un.Op() == "*(f32*)&" ||
+            un.Op() == "*(s32 *)&" || un.Op() == "*(u32 *)&" || un.Op() == "*(f32 *)&") {
+          all_disjoint = false;
+          return;
+        }
+        walk(un.Operand());
+      } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& bin = static_cast<const BinaryExpression&>(e);
+        walk(bin.Lhs());
+        walk(bin.Rhs());
+      } else if (e.Kind() == CExpressionKind::kCastExpression) {
+        walk(static_cast<const CastExpression&>(e).Operand());
+      } else if (e.Kind() == CExpressionKind::kIdentifier ||
+                 e.Kind() == CExpressionKind::kIntegerLiteral ||
+                 e.Kind() == CExpressionKind::kFloatLiteral) {
+        return;
+      } else {
+        all_disjoint = false;
+      }
+    };
+    walk(expr);
+    return found_deref && all_disjoint;
   };
 
   bool changed = true;
@@ -3699,15 +3797,22 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                   break;
                 }
               }
-              if (followed_by_call && is_dead_after_stmt(i, var, 0, stmts[i].get())) {
+              bool dead_at_end_arg =
+                  is_call_arg && dead_at_end_vars != nullptr && dead_at_end_vars->contains(var);
+              if ((followed_by_call || dead_at_end_arg) &&
+                  is_dead_after_stmt(i, var, 0, stmts[i].get())) {
                 stmts.erase(stmts.begin() + i);
                 changed = true;
                 break;
               }
             }
 
-            if (var == "temp_at" && is_pure_expr(effective_rhs) &&
-                is_dead_after_stmt(i, var, 0, stmts[i].get())) {
+            if ((var == "temp_at" ||
+                 (var == "v0" && !is_float_bitcast_lhs && dead_at_end_vars != nullptr &&
+                  dead_at_end_vars->contains(var) &&
+                  (assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral ||
+                   is_comparison_expr(effective_rhs)))) &&
+                is_pure_expr(effective_rhs) && is_dead_after_stmt(i, var, 0, stmts[i].get())) {
               stmts.erase(stmts.begin() + i);
               changed = true;
               break;
@@ -3979,9 +4084,17 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                   break;
                 }
               }
+              bool block_has_earlier_call = false;
+              for (size_t k = 0; k < i; ++k) {
+                if (has_call_in_stmt(*stmts[k])) {
+                  block_has_earlier_call = true;
+                  break;
+                }
+              }
+              bool block_has_any_call = block_has_later_call || block_has_earlier_call;
 
               // Case A: In-place redefinition (var = ...; var = ... var ...)
-              size_t max_case_a_lookahead = (is_call_arg || block_has_later_call) ? 10 : 1;
+              size_t max_case_a_lookahead = (is_call_arg || block_has_any_call) ? 10 : 1;
               for (size_t j = i + 1; j < stmts.size() && j <= i + max_case_a_lookahead; ++j) {
                 if (stmts[j]->Kind() != CStatementKind::kExpressionStatement) break;
                 const auto& cand_es = static_cast<const ExpressionStatement&>(*stmts[j]);
@@ -3991,7 +4104,7 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                 if (cand_assign.Op() == "=" &&
                     cand_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
                     static_cast<const IdentifierExpression&>(cand_assign.Lhs()).Name() == var) {
-                  if (j > i + 1 && !is_call_arg && !block_has_later_call &&
+                  if (j > i + 1 && !is_call_arg && !block_has_any_call &&
                       has_memory_deref(assign.Rhs())) {
                     break;
                   }
@@ -4085,34 +4198,56 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                     if (mid_lhs == var || count_expr_uses(effective_rhs, mid_lhs) > 0) {
                       break;
                     }
-                  } else if (has_memory_deref(effective_rhs) || !is_pure_expr(mid_assign.Lhs())) {
+                  } else if ((has_memory_deref(effective_rhs) &&
+                              !are_all_derefs_provably_disjoint(effective_rhs, mid_assign.Lhs())) ||
+                             !is_pure_expr(mid_assign.Lhs())) {
                     break;
                   }
                 }
                 if (changed) break;
                 if (is_stack_arg) continue;
-                bool has_later_call_in_block = false;
-                for (size_t k = i + 1; k < stmts.size(); ++k) {
-                  if (has_call_in_stmt(*stmts[k])) {
-                    has_later_call_in_block = true;
-                    break;
-                  }
-                }
-                if (!has_later_call_in_block) continue;
+                if (!block_has_any_call) continue;
               }
 
               // Case B: Regular single-use folding into next (or across pure setup) expression
               // statement
+              bool is_direct_call_store_rhs = (var == "v0" || var == "f0" || var == "f0_d") &&
+                                              is_call_or_wrapped_call(assign.Rhs());
               size_t max_case_b_lookahead =
-                  (var == "f0" || var == "f0_d") ? 1 : (block_has_later_call ? 6 : 2);
-              if (is_pure_expr(assign.Rhs())) {
+                  (var == "f0" || var == "f0_d" || is_direct_call_store_rhs)
+                      ? 1
+                      : (block_has_any_call ? 6 : 2);
+              if (is_pure_expr(assign.Rhs()) || is_direct_call_store_rhs) {
                 for (size_t j = i + 1; j < stmts.size() && j <= i + max_case_b_lookahead; ++j) {
-                  size_t max_case_b_deref_lookahead = block_has_later_call ? 10 : 1;
+                  size_t max_case_b_deref_lookahead = block_has_any_call ? 10 : 1;
                   if (j > i + max_case_b_deref_lookahead && has_memory_deref(assign.Rhs())) {
                     break;
                   }
                   if (stmts[j]->Kind() != CStatementKind::kExpressionStatement) break;
                   const auto& cand_es = static_cast<const ExpressionStatement&>(*stmts[j]);
+                  if (is_direct_call_store_rhs) {
+                    if (cand_es.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+                      break;
+                    }
+                    const auto& ca = static_cast<const AssignmentExpression&>(cand_es.Expression());
+                    if (ca.Op() != "=" || ca.Lhs().Kind() == CExpressionKind::kIdentifier ||
+                        !is_pure_expr(ca.Lhs()) || count_expr_uses(ca.Lhs(), var) > 0 ||
+                        ca.Rhs().Kind() != CExpressionKind::kIdentifier ||
+                        static_cast<const IdentifierExpression&>(ca.Rhs()).Name() != var) {
+                      break;
+                    }
+                  }
+                  if (j > i + 1 && is_fp_scratch && var != "f0" && var != "f0_d" &&
+                      has_memory_deref(assign.Rhs())) {
+                    if (cand_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                      const auto& ca =
+                          static_cast<const AssignmentExpression&>(cand_es.Expression());
+                      std::string_view ca_lhs = extract_assigned_lhs_var(ca.Lhs());
+                      if (is_outgoing_stack_arg_var(ca_lhs)) {
+                        break;
+                      }
+                    }
+                  }
                   int uses_in_cand = count_uses(*stmts[j], var);
                   if (uses_in_cand == 1) {
                     if ((var == "f0" || var == "f0_d") && comp == root_body &&
@@ -4336,17 +4471,38 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
                     }
                     break;
                   }
-                  if (uses_in_cand > 1) break;
+                  if (uses_in_cand > 1) {
+                    if (j == i + 1 && is_scratch && !is_fp_scratch &&
+                        assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                        is_call_arg_var(
+                            static_cast<const IdentifierExpression&>(assign.Rhs()).Name()) &&
+                        has_call_in_stmt(*stmts[j]) &&
+                        !has_address_of_var(cand_es.Expression(), var) &&
+                        is_dead_after_stmt(j, var, uses_in_cand, stmts[i].get())) {
+                      auto new_expr = SubstituteIdentifier(cand_es.Expression(), var, assign.Rhs());
+                      if (count_expr_uses(*new_expr, var) == 0) {
+                        stmts[j] = CStatement::Expression(std::move(new_expr));
+                        stmts.erase(stmts.begin() + i);
+                        changed = true;
+                      }
+                    }
+                    break;
+                  }
                   if (cand_es.Expression().Kind() != CExpressionKind::kAssignmentExpression) break;
                   const auto& mid_assign =
                       static_cast<const AssignmentExpression&>(cand_es.Expression());
-                  std::string_view mid_lhs_sv =
-                      (mid_assign.Op() == "=") ? extract_assigned_lhs_var(mid_assign.Lhs()) : "";
-                  if (mid_lhs_sv.empty() || !is_pure_expr(mid_assign.Rhs())) {
+                  if (mid_assign.Op() != "=" || !is_pure_expr(mid_assign.Rhs())) {
                     break;
                   }
-                  std::string mid_lhs(mid_lhs_sv);
-                  if (mid_lhs == var || count_expr_uses(assign.Rhs(), mid_lhs) > 0) {
+                  std::string_view mid_lhs_sv = extract_assigned_lhs_var(mid_assign.Lhs());
+                  if (!mid_lhs_sv.empty()) {
+                    std::string mid_lhs(mid_lhs_sv);
+                    if (mid_lhs == var || count_expr_uses(assign.Rhs(), mid_lhs) > 0) {
+                      break;
+                    }
+                  } else if ((has_memory_deref(assign.Rhs()) &&
+                              !are_all_derefs_provably_disjoint(assign.Rhs(), mid_assign.Lhs())) ||
+                             !is_pure_expr(mid_assign.Lhs())) {
                     break;
                   }
                 }
@@ -4548,6 +4704,30 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
               }
             }
           }
+          // Hoist identical single-statement `else` branch duplicated by branch-likely (`beql`)
+          // target-stealing when `then` contains a function call (`if (c) { ...; S; } else { S; }`
+          // -> `if (c) { ... } S;`).
+          auto& cur_ifs = static_cast<IfStatement&>(*stmts[i]);
+          if (cur_ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+              cur_ifs.MutableElseBranch() != nullptr &&
+              cur_ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement &&
+              has_call_in_stmt(*cur_ifs.MutableThenBranch())) {
+            auto& then_comp = static_cast<CompoundStatement&>(*cur_ifs.MutableThenBranch());
+            auto& else_comp = static_cast<CompoundStatement&>(*cur_ifs.MutableElseBranch());
+            if (then_comp.Statements().size() >= 2 && else_comp.Statements().size() == 1 &&
+                else_comp.Statements()[0]->Kind() == CStatementKind::kExpressionStatement &&
+                !has_call_in_stmt(*else_comp.Statements()[0]) &&
+                then_comp.Statements().back()->ToString() ==
+                    else_comp.Statements()[0]->ToString()) {
+              auto hoisted_stmt = std::move(else_comp.MutableStatements()[0]);
+              then_comp.MutableStatements().pop_back();
+              stmts[i] = CStatement::If(cur_ifs.Condition().Clone(),
+                                        cur_ifs.MutableThenBranch()->Clone(), nullptr);
+              stmts.insert(stmts.begin() + i + 1, std::move(hoisted_stmt));
+              changed = true;
+              break;
+            }
+          }
         } else {
           auto& sw = static_cast<SwitchStatement&>(*stmts[i]);
           for (auto& sc : sw.MutableCases()) {
@@ -4580,8 +4760,22 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
       } else if (stmts[i]->Kind() == CStatementKind::kDoWhileStatement) {
         auto& dws = static_cast<DoWhileStatement&>(*stmts[i]);
         if (dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
-          FoldSingleUseExpressions(static_cast<CompoundStatement*>(dws.MutableBody()), root_body,
-                                   nullptr, false, root_has_label_cached);
+          auto* body_comp = static_cast<CompoundStatement*>(dws.MutableBody());
+          absl::flat_hash_set<std::string> loop_dead_vars;
+          if (has_call_in_stmt(*body_comp)) {
+            for (std::string_view tv : kTrackedVars) {
+              std::string tv_str(tv);
+              if (count_expr_uses(dws.Condition(), tv_str) == 0 &&
+                  analyze_var_liveness(*body_comp, tv_str, false, 0) ==
+                      VarLiveness::kKilledBeforeRead &&
+                  is_dead_after_stmt(i, tv_str, 0)) {
+                loop_dead_vars.insert(std::move(tv_str));
+              }
+            }
+          }
+          FoldSingleUseExpressions(body_comp, root_body,
+                                   loop_dead_vars.empty() ? nullptr : &loop_dead_vars, false,
+                                   root_has_label_cached);
         }
       } else if (stmts[i]->Kind() == CStatementKind::kForStatement) {
         auto& fs = static_cast<ForStatement&>(*stmts[i]);
@@ -5233,7 +5427,8 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
           }
           if (inner_u.Op() == "*" && inner_u.Operand().Kind() == CExpressionKind::kCastExpression) {
             const auto& ct = static_cast<const CastExpression&>(inner_u.Operand()).TargetType();
-            if (ct.pointer_depth == 1 && ct.name == "f32") {
+            if (ct.pointer_depth == 1 &&
+                (ct.name == "f32" || ct.name == "const f32" || ct.name == "volatile f32")) {
               return op.Clone();
             }
           }
@@ -5742,6 +5937,45 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
     local_vars_to_declare.push_back(var_name);
   }
 
+  uint32_t unreferenced_sp_gap_size = 0;
+  if (ctx.HasCalls() && !ctx.HasFramePointer() && ctx.MinSavedRegOffset() != 0xFFFFFFFF &&
+      ctx.MinSavedRegOffset() > ctx.OutgoingArgsSize() && ctx.SpBufferSize() == 0) {
+    bool has_sp_local = false;
+    for (const auto& v : local_vars_to_declare) {
+      if (v == "sp" || absl::StartsWith(v, "var_sp_")) {
+        has_sp_local = true;
+        break;
+      }
+    }
+    for (int32_t off : ctx.StackStoreOffsets()) {
+      if (off >= static_cast<int32_t>(ctx.OutgoingArgsSize()) &&
+          off < static_cast<int32_t>(ctx.MinSavedRegOffset())) {
+        has_sp_local = true;
+        break;
+      }
+    }
+    if (!has_sp_local) {
+      std::string check_str = body->ToString();
+      bool any_local_addr_taken = false;
+      for (const auto& v : local_vars_to_declare) {
+        if (absl::StrContains(check_str, absl::StrCat("&", v))) {
+          any_local_addr_taken = true;
+          break;
+        }
+      }
+      for (const auto& p : parameters) {
+        if (absl::StrContains(check_str, absl::StrCat("&", p.name))) {
+          any_local_addr_taken = true;
+          break;
+        }
+      }
+      if (!any_local_addr_taken) {
+        unreferenced_sp_gap_size = ctx.MinSavedRegOffset() - ctx.OutgoingArgsSize();
+        local_vars_to_declare.push_back("sp");
+      }
+    }
+  }
+
   if (!local_vars_to_declare.empty()) {
     if (ctx.SpAddressTaken() && ctx.FrameSize() == 0) {
       return absl::InternalError(
@@ -5749,7 +5983,8 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
                           "but no stack allocation detected.",
                           options.function_name));
     }
-    uint32_t sp_buffer_size = ctx.SpBufferSize();
+    uint32_t sp_buffer_size =
+        (unreferenced_sp_gap_size > 0) ? unreferenced_sp_gap_size : ctx.SpBufferSize();
 
     const absl::flat_hash_set<std::string>& double_vars = ctx.DoubleVars();
 
@@ -6248,8 +6483,9 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
           }
           if (base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
               base == "f16" || base == "f18" ||
-              (base == "f0" && is_leaf_func && has_shared_fp_base &&
-               return_type.ToString() == "void")) {
+              (base == "f0" && return_type.ToString() == "void" &&
+               ((is_leaf_func && has_shared_fp_base) ||
+                (!is_leaf_func && fp_base_counts.contains("f2"))))) {
             if (is_caller_saved_safe_across_calls(var_name)) {
               return absl::StrCat("$", base);
             }
@@ -6261,7 +6497,15 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
         return std::nullopt;
       }
       std::optional<std::string> caller_gpr_reg;
-      if (!is_leaf_func && var_name == "v1") {
+      bool is_float_return_leaf_with_v0_v1 =
+          is_leaf_func && (return_type.ToString() == "f32" || return_type.ToString() == "f64") &&
+          std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "v0") !=
+              local_vars_to_declare.end() &&
+          std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "v1") !=
+              local_vars_to_declare.end();
+      if (is_float_return_leaf_with_v0_v1 && var_name == "v0") {
+        caller_gpr_reg = "$2";
+      } else if ((is_float_return_leaf_with_v0_v1 || !is_leaf_func) && var_name == "v1") {
         caller_gpr_reg = "$3";
       } else if (!is_leaf_func && !any_param_modified && var_name.size() == 4 &&
                  absl::StartsWith(var_name, "arg") && var_name[3] >= '0' && var_name[3] <= '3') {

@@ -488,15 +488,16 @@ void ExpressionBuilder::LiftCallInstruction(
     }
   }
   bool is_entry_block = (cfg == nullptr || current_block_id == cfg->EntryBlockId());
-  if (is_entry_block && highest_defined_argument_index < 0 &&
-      !tracker.GetReachingDefinition(Register::kA0).has_value()) {
-    bool has_prior_call_or_a0_def = false;
+  if (is_entry_block && highest_defined_argument_index < 3) {
+    bool has_prior_call = false;
     bool has_prologue_ra_save = false;
-    bool higher_arg_saved_before_call = false;
+    bool arg_defined_before_call[4] = {false, false, false, false};
+    bool arg_read_before_call[4] = {false, false, false, false};
+    bool f12_defined_before_call = false;
     for (size_t j = 0; j < i; ++j) {
       const auto& prev = instructions_to_process[j];
       if (prev.IsCall()) {
-        has_prior_call_or_a0_def = true;
+        has_prior_call = true;
         break;
       }
       if (prev.IsStore() && prev.rs == Register::kSp && prev.rt == Register::kRa) {
@@ -504,23 +505,44 @@ void ExpressionBuilder::LiftCallInstruction(
       }
       RegisterUseDef ud = GetInstructionUseDef(prev);
       for (Register d : ud.gpr_defs) {
-        if (d == Register::kA0) {
-          has_prior_call_or_a0_def = true;
+        for (int k = 0; k < 4; ++k) {
+          if (d == argument_registers[k]) {
+            arg_defined_before_call[k] = true;
+          }
         }
       }
       for (FpRegister fd : ud.fpr_defs) {
         if (fd == FpRegister::kF12) {
-          has_prior_call_or_a0_def = true;
+          f12_defined_before_call = true;
         }
       }
       for (Register u : ud.gpr_uses) {
-        if (u == Register::kA1 || u == Register::kA2 || u == Register::kA3) {
-          higher_arg_saved_before_call = true;
+        for (int k = 0; k < 4; ++k) {
+          if (u == argument_registers[k]) {
+            arg_read_before_call[k] = true;
+          }
         }
       }
     }
-    if (!has_prior_call_or_a0_def && has_prologue_ra_save && higher_arg_saved_before_call) {
-      highest_defined_argument_index = 0;
+    if (!has_prior_call && has_prologue_ra_save) {
+      for (int k = 0; k < 3; ++k) {
+        if (k == highest_defined_argument_index + 1) {
+          auto def_k = tracker.GetReachingDefinition(argument_registers[k]);
+          bool k_unmodified = (!def_k.has_value() || !def_k->is_local) &&
+                              !arg_defined_before_call[k] && (k > 0 || !f12_defined_before_call) &&
+                              !arg_read_before_call[k];
+          bool higher_arg_read = false;
+          for (int m = k + 1; m < 4; ++m) {
+            if (arg_read_before_call[m]) {
+              higher_arg_read = true;
+              break;
+            }
+          }
+          if (k_unmodified && higher_arg_read) {
+            highest_defined_argument_index = k;
+          }
+        }
+      }
     }
   }
 
@@ -1126,6 +1148,16 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
   size_t loop_end = instructions_to_process.size();
   if (omit_last_instruction && loop_end > 0) {
     --loop_end;
+  }
+
+  std::optional<size_t> sp_alloc_idx;
+  for (size_t k = 0; k < loop_end; ++k) {
+    const auto& k_inst = instructions_to_process[k];
+    if ((k_inst.opcode == Opcode::kAddiu || k_inst.opcode == Opcode::kAddi) &&
+        k_inst.rt == Register::kSp && k_inst.rs == Register::kSp && k_inst.immediate < 0) {
+      sp_alloc_idx = k;
+      break;
+    }
   }
 
   absl::flat_hash_set<size_t> skipped_instruction_indices;
@@ -2161,6 +2193,8 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               if (const_addr >= 0xA0000000 && const_addr <= 0xBFFFFFFF) {
                 effective_load_type = "volatile " + std::string(load_type);
               }
+            } else if (sp_alloc_idx.has_value() && i < *sp_alloc_idx) {
+              effective_load_type = "const " + std::string(load_type);
             }
             statement.expression = LiftedExpression::Load(
                 effective_load_type, make_reg_offset_expr(*inst.rs, inst.immediate));
@@ -2490,8 +2524,10 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
               }
             }
           } else {
-            statement.expression =
-                LiftedExpression::Load("f32", make_reg_offset_expr(*inst.rs, inst.immediate));
+            const char* fp_load_type =
+                (sp_alloc_idx.has_value() && i < *sp_alloc_idx) ? "const f32" : "f32";
+            statement.expression = LiftedExpression::Load(
+                fp_load_type, make_reg_offset_expr(*inst.rs, inst.immediate));
           }
           statements.push_back(std::move(statement));
         }

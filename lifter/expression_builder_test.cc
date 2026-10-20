@@ -2650,5 +2650,59 @@ TEST(ExpressionBuilderTest, Lwc1FollowedByCvtSWLiftsAsDirectIntToFloatMemoryLoad
   EXPECT_EQ(stmts[0].ToString(), "f2 = (f32)*(s32*)(arg0 + 4);\n");
 }
 
+TEST(ExpressionBuilderTest, InPlaceEntryArg1DetectedWhenArg0DefinedAndArg2SavedInPrologue) {
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $s0, 16($sp)
+  // 08: addu  $s0, $a0, $zero
+  // 0C: sw    $ra, 28($sp)
+  // 10: lw    $a0, 12($s0)
+  // 14: addu  $s1, $a2, $zero   # $a2 saved in $s1 before call; $a1 passed in-place
+  // 18: jal   0x80001000
+  // 1C: nop
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // addiu $sp, $sp, -32
+      0xAFB00010,  // sw    $s0, 16($sp)
+      0x00808021,  // addu  $s0, $a0, $zero
+      0xAFBF001C,  // sw    $ra, 28($sp)
+      0x8E04000C,  // lw    $a0, 12($s0)
+      0x00C08821,  // addu  $s1, $a2, $zero
+      0x0C000400,  // jal   0x80001000
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  absl::flat_hash_map<Register, int32_t> saved_regs = {{Register::kS0, 16}};
+  FunctionLiftContext ctx;
+  ctx.frame_size = 32;
+  ctx.has_calls = true;
+  ctx.saved_reg_offsets = &saved_regs;
+  ctx.cfg = &cfg;
+  ctx.current_block_id = cfg.EntryBlockId();
+
+  auto stmts = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_FALSE(stmts.empty());
+  EXPECT_EQ(stmts.back().ToString(), "func_80001000(arg0, arg1);\n");
+}
+
+TEST(ExpressionBuilderTest, LoadsBeforeStackFrameAllocationLiftWithConstQualification) {
+  // 00: lwc1  $f0, 8($a1)       # scheduled before addiu $sp, $sp, -40
+  // 04: lw    $a2, 0($a1)       # scheduled before addiu $sp, $sp, -40
+  // 08: addiu $sp, $sp, -40
+  // 0C: lw    $a3, 4($a1)       # scheduled after addiu $sp, $sp, -40
+  std::vector<uint32_t> words = {
+      0xC4A00008,  // lwc1  $f0, 8($a1)
+      0x8CA60000,  // lw    $a2, 0($a1)
+      0x27BDFFD8,  // addiu $sp, $sp, -40
+      0x8CA70004,  // lw    $a3, 4($a1)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 3u);
+  EXPECT_EQ(stmts[0].ToString(), "f0 = *(const f32*)(arg1 + 8);\n");
+  EXPECT_EQ(stmts[1].ToString(), "arg2 = *(const s32*)arg1;\n");
+  EXPECT_EQ(stmts[2].ToString(), "arg3 = *(s32*)(arg1 + 4);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

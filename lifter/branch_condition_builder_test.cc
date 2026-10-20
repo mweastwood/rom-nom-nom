@@ -136,5 +136,34 @@ TEST(BranchConditionBuilderTest, DoesNotDecoupleLoopLatchDelaySlotWhenLoopBodyCa
   EXPECT_FALSE(BranchConditionBuilder::ShouldDecoupleLoopConditionDelaySlot(cfg, 1, 1));
 }
 
+TEST(BranchConditionBuilderTest, DecouplesDelaySlotWritingCallArgWhenPredecessorEndsWithCall) {
+  // Block 0 (0x80000000):
+  //   0x80000000: jal 0x80001000
+  //   0x80000004: nop
+  // Block 1 (0x80000008, split after jal by ControlFlowGraph::Build):
+  //   0x80000008: beq  $v0, $zero, 0x80000018
+  //   0x8000000C: addu $a0, $s0, $zero
+  // Block 2 (0x80000010):
+  //   0x80000010: jal 0x80002000
+  //   0x80000014: nop
+  // Block 3 (0x80000018):
+  //   0x80000018: jr $ra
+  //   0x8000001C: nop
+  std::vector<uint32_t> words = {
+      0x0C000400,  // jal  0x80001000
+      0x00000000,  // nop
+      0x10400003,  // beq  $v0, $zero, 0x80000018
+      0x02002021,  // addu $a0, $s0, $zero
+      0x0C000800,  // jal  0x80002000
+      0x00000000,  // nop
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_TRUE(BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(cfg, 1));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

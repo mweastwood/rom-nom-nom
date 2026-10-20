@@ -2380,5 +2380,80 @@ TEST(AstConverterTest, InlinesCrossJumpedCallTailsAndSimplifiesSignExtensionShif
   EXPECT_THAT(code, Not(HasSubstr("goto ")));
 }
 
+TEST(AstConverterTest, FoldsCallReturnAndLoadsAcrossProvablyDisjointStructStores) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "StepVal" address: 0x80001000 type: SYMBOL_FUNC }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  // 00: addiu $sp, $sp, -32
+  // 04: sw    $s0, 16($sp)
+  // 08: addu  $s0, $a0, $zero
+  // 0C: sw    $ra, 28($sp)
+  // 10: lw    $a0, 12($s0)
+  // 14: jal   0x80001000 (StepVal)
+  // 18: nop
+  // 1C: lw    $a0, 16($s0)
+  // 20: jal   0x80001000 (StepVal)
+  // 24: sw    $v0, 12($s0)       # delay slot stores first StepVal result to +12
+  // 28: sw    $v0, 16($s0)       # stores second StepVal result to +16
+  // 2C: lw    $v0, 0($s0)
+  // 30: lw    $a1, 12($s0)
+  // 34: lw    $v1, 4($s0)
+  // 38: lw    $a2, 16($s0)
+  // 3C: addu  $v0, $v0, $a1
+  // 40: addu  $v1, $v1, $a2
+  // 44: sw    $v0, 0($s0)
+  // 48: sw    $v1, 4($s0)
+  // 4C: lw    $ra, 28($sp)
+  // 50: lw    $s0, 16($sp)
+  // 54: jr    $ra
+  // 58: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFB00010,  // 04: sw    $s0, 16($sp)
+      0x00808021,  // 08: addu  $s0, $a0, $zero
+      0xAFBF001C,  // 0C: sw    $ra, 28($sp)
+      0x8E04000C,  // 10: lw    $a0, 12($s0)
+      0x0C000400,  // 14: jal   0x80001000 (StepVal)
+      0x00000000,  // 18: nop
+      0x8E040010,  // 1C: lw    $a0, 16($s0)
+      0x0C000400,  // 20: jal   0x80001000 (StepVal)
+      0xAE02000C,  // 24: sw    $v0, 12($s0)
+      0xAE020010,  // 28: sw    $v0, 16($s0)
+      0x8E020000,  // 2C: lw    $v0, 0($s0)
+      0x8E05000C,  // 30: lw    $a1, 12($s0)
+      0x8E030004,  // 34: lw    $v1, 4($s0)
+      0x8E060010,  // 38: lw    $a2, 16($s0)
+      0x00451021,  // 3C: addu  $v0, $v0, $a1
+      0x00661821,  // 40: addu  $v1, $v1, $a2
+      0xAE020000,  // 44: sw    $v0, 0($s0)
+      0xAE030004,  // 48: sw    $v1, 4($s0)
+      0x8FBF001C,  // 4C: lw    $ra, 28($sp)
+      0x8FB00010,  // 50: lw    $s0, 16($sp)
+      0x03E00008,  // 54: jr    $ra
+      0x27BD0020,  // 58: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestDisjointStructStores";
+  absl::flat_hash_set<std::string> funcs_returning_v0 = {"StepVal"};
+  options.functions_returning_v0 = &funcs_returning_v0;
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("*(s32*)(arg0 + 12) = StepVal(*(s32*)(arg0 + 12));"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)(arg0 + 16) = StepVal(*(s32*)(arg0 + 16));"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)arg0 = (*(s32*)arg0 + *(s32*)(arg0 + 12));"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)(arg0 + 4) = (*(s32*)(arg0 + 4) + *(s32*)(arg0 + 16));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
