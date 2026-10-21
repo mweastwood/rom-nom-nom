@@ -1534,7 +1534,7 @@ class ConverterContext {
     RegisterTracker tracker;
   };
 
-  static void StepBlockState(BlockState& state, const Instruction& inst) {
+  void StepBlockState(BlockState& state, const Instruction& inst) const {
     if (inst.IsCall()) {
       for (int f = 0; f < 20; ++f) {
         state.fpr_const_bits[f] = std::nullopt;
@@ -1564,8 +1564,9 @@ class ConverterContext {
       }
     }
     state.tracker.Step(inst);
-    for (Register d : GetInstructionUseDef(inst).gpr_defs) {
-      if (d >= Register::kS0 && d <= Register::kS7) {
+    if (symbol_index_ != nullptr &&
+        (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi)) {
+      for (Register d : GetInstructionUseDef(inst).gpr_defs) {
         TrackedValue tv = state.tracker.GetRegisterValue(d);
         if (tv.kind == ValueKind::kSymbolAddress && !IsDirectMappedAddress(tv.constant_value)) {
           state.tracker.SetRegisterValue(d, TrackedValue());
@@ -1723,7 +1724,7 @@ class ConverterContext {
         const auto* term = block->Terminator();
         bool is_likely = (term != nullptr && term->IsBranchLikely());
 
-        auto step_inst = [](BlockState& state, const Instruction& inst) {
+        auto step_inst = [this](BlockState& state, const Instruction& inst) {
           StepBlockState(state, inst);
         };
 

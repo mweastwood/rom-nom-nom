@@ -2824,5 +2824,35 @@ TEST(ExpressionBuilderTest, CalleeSavedRomSymbolAddressNotReplacedByHexConstant)
   EXPECT_EQ(stmts[1].ToString(), "arg0 = temp_s2;\n");
 }
 
+TEST(ExpressionBuilderTest, RomSymbolAddressInArgAndScratchRegistersNotReplacedByHexConstant) {
+  std::string textproto = R"pb(
+    entries { name: "D_00D52670" address: 0x00D52670 type: SYMBOL_DATA }
+    entries { name: "D_00D5A670" address: 0x00D5A670 type: SYMBOL_DATA }
+    entries { name: "DmaCopy" address: 0x80040000 type: SYMBOL_FUNC }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x3C0500D5,  // 00: lui   $a1, 0x00D5
+      0x24A52670,  // 04: addiu $a1, $a1, 0x2670   # &D_00D52670
+      0x3C0200D6,  // 08: lui   $v0, 0x00D6
+      0x2442A670,  // 0C: addiu $v0, $v0, -0x5990  # &D_00D5A670
+      0xAC450000,  // 10: sw    $a1, 0($v0)
+      0x0C010000,  // 14: jal   0x80040000         # DmaCopy
+      0x00403021,  // 18: addu  $a2, $v0, $zero
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  FunctionLiftContext ctx;
+  ctx.symbol_index = &(*index_or);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_EQ(stmts.size(), 5u);
+  EXPECT_EQ(stmts[0].ToString(), "arg1 = &D_00D52670;\n");
+  EXPECT_EQ(stmts[1].ToString(), "v0 = &D_00D5A670;\n");
+  EXPECT_EQ(stmts[2].ToString(), "*(s32*)v0 = arg1;\n");
+  EXPECT_EQ(stmts[3].ToString(), "arg2 = v0;\n");
+  EXPECT_EQ(stmts[4].ToString(), "DmaCopy(arg0, arg1, arg2);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

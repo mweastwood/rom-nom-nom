@@ -176,6 +176,7 @@ void RoundTripTest::AssertRoundTripBitExact(std::string_view func_name, std::str
     SymbolRegistry reg;
     uint32_t next_func_vram = 0x80040000;
     uint32_t next_data_vram = 0x80050000;
+    uint32_t next_rom_vram = 0x00D5A670;
 
     absl::flat_hash_map<std::string, uint32_t> sym_to_vram;
     for (const auto& rel : orig_func.relocations) {
@@ -192,6 +193,11 @@ void RoundTripTest::AssertRoundTripBitExact(std::string_view func_name, std::str
         entry->set_address(next_func_vram);
         entry->set_type(SYMBOL_FUNC);
         next_func_vram += 0x1000;
+      } else if (absl::StartsWith(rel.symbol_name, "rom_")) {
+        sym_to_vram[rel.symbol_name] = next_rom_vram;
+        entry->set_address(next_rom_vram);
+        entry->set_type(SYMBOL_DATA);
+        next_rom_vram += 0x8000;
       } else {
         sym_to_vram[rel.symbol_name] = next_data_vram;
         entry->set_address(next_data_vram);

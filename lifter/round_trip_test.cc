@@ -4963,5 +4963,47 @@ s32 MaskedCallReturnUsedInIndexedAddressCalculation(u8* base, s32 flag) {
 )");
 }
 
+TEST_F(RoundTripTest, RomSegmentSymbolAddressesPassedToCall) {
+  AssertRoundTripBitExact("RomSegmentSymbolAddressesPassedToCall", R"(
+extern u8 rom_asset_start[];
+extern u8 rom_asset_end[];
+void dma_read_rom(s32 slot, u8* rom_start, u8* rom_end, s32 mode);
+
+void RomSegmentSymbolAddressesPassedToCall(s32 slot, s32 mode) {
+    dma_read_rom(slot, rom_asset_start, rom_asset_end, mode);
+}
+)");
+}
+
+TEST_F(RoundTripTest, RomSegmentSymbolAddressesStoredToOutgoingStackArgs) {
+  AssertRoundTripBitExact("RomSegmentSymbolAddressesStoredToOutgoingStackArgs", R"(
+extern u8 rom_bank_a[];
+extern u8 rom_bank_b[];
+extern u8 rom_bank_c[];
+void load_rom_banks(s32 slot, u8* a, s32 count, u8* b, u8* c, s32 flags);
+
+void RomSegmentSymbolAddressesStoredToOutgoingStackArgs(s32 slot, s32 count, s32 flags) {
+    load_rom_banks(slot, rom_bank_a, count, rom_bank_b, rom_bank_c, flags);
+}
+)");
+}
+
+TEST_F(RoundTripTest, RomSegmentSymbolAddressPassedAcrossBranches) {
+  AssertRoundTripBitExact("RomSegmentSymbolAddressPassedAcrossBranches", R"(
+extern u8 rom_sprite_table[];
+extern u8 rom_palette_table[];
+void setup_sprite_bank(s32 id, u8* table, u8* palette);
+void clear_sprite_bank(u8* table);
+
+void RomSegmentSymbolAddressPassedAcrossBranches(s32 id, s32 flag) {
+    u8* tbl = rom_sprite_table;
+    if (flag != 0) {
+        clear_sprite_bank(tbl);
+    }
+    setup_sprite_bank(id, tbl, rom_palette_table);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
