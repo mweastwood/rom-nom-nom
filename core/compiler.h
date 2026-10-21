@@ -30,6 +30,7 @@ struct CCompileOptions {
   absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
   uint32_t module_target_size = 0;
   uint32_t initial_vram_offset = 0;
+  absl::flat_hash_map<std::string, int32_t> external_jal_counts;
 };
 
 // Options for compiling a C source file where individual functions use distinct compiler flags.
@@ -44,6 +45,7 @@ struct PerFunctionCCompileOptions {
   absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
   uint32_t module_target_size = 0;
   uint32_t initial_vram_offset = 0;
+  absl::flat_hash_map<std::string, int32_t> external_jal_counts;
 };
 
 // Options for compiling a C++ source file.

@@ -5005,5 +5005,22 @@ void RomSegmentSymbolAddressPassedAcrossBranches(s32 id, s32 flag) {
 )");
 }
 
+TEST_F(RoundTripTest, MultiCallHotTargetDispatcherWithBranches) {
+  AssertRoundTripBitExact("MultiCallHotTargetDispatcherWithBranches", R"(
+s32 actor_check_active(s32 slot);
+void actor_set_position(s32 slot, s32 x, s32 y, s32 z);
+void actor_clear_slot(s32 slot);
+
+s32 MultiCallHotTargetDispatcherWithBranches(s32 slot, s32 x, s32 y, s32 z) {
+    if (actor_check_active(slot) != 0) {
+        actor_set_position(slot, x, y, z);
+        return 1;
+    }
+    actor_clear_slot(slot);
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

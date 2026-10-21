@@ -770,5 +770,121 @@ TEST_F(CompilerTest, CompileCDoesNotPadBeyondModuleTargetSizeWhenModuleFits) {
   ASSERT_EQ(assembled_inputs.size(), 1u);
 }
 
+TEST_F(CompilerTest, CompileCPrioritizesExternallyCalledFunctionsDuringAlignment) {
+  auto real_tc_or = Toolchain::Discover({
+      .repo_root = std::filesystem::current_path(),
+      .mode = ToolchainMode::kOriginal,
+  });
+  if (!real_tc_or.ok()) {
+    GTEST_SKIP() << "Original toolchain not available";
+  }
+
+  std::vector<std::string> assembled_inputs;
+  auto tracking_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.program == real_tc_or->KmcAs().string()) {
+      for (const auto& arg : opts.args) {
+        if (absl::EndsWith(arg, ".s272")) {
+          std::ifstream ifs(arg);
+          assembled_inputs.emplace_back((std::istreambuf_iterator<char>(ifs)),
+                                        std::istreambuf_iterator<char>());
+        }
+      }
+    }
+    return RunProcess(opts);
+  };
+
+  Compiler compiler(*real_tc_or, tracking_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "external_jal_priority.c";
+  std::filesystem::create_directories(src_file.parent_path());
+  {
+    std::ofstream(src_file) << "int FuncBase(int a) { return a + 1; }\n"
+                            << "int FuncCold1(int a) { return a + 2; }\n"
+                            << "int FuncCold2(int a) { return a + 3; }\n"
+                            << "int FuncHot(int a) { return a + 4; }\n";
+  }
+  std::filesystem::path out_obj = test_dir_ / "obj" / "external_jal_priority.o";
+
+  // Each function is 8 bytes (unpadded offsets: 0, 8, 16, 24).
+  // FuncCold1 (target +24, need +16) and FuncCold2 (target +32, need +16) conflict with
+  // FuncHot (target +32, need +8) because 16 > 8. With external_jal_counts weighting
+  // FuncHot at 20 cross-module calls, the DP selects FuncHot (2 words of .word 0 before
+  // FuncHot) instead of FuncCold1/FuncCold2 (4 words of .word 0).
+  CCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .opt_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      .function_target_vrams =
+          {
+              {"FuncBase", 0x80025C00},
+              {"FuncCold1", 0x80025C18},
+              {"FuncCold2", 0x80025C20},
+              {"FuncHot", 0x80025C20},
+          },
+      .module_target_size = 64,
+      .external_jal_counts = {{"FuncHot", 20}},
+  };
+
+  ASSERT_TRUE(compiler.CompileC(opts).ok());
+  ASSERT_EQ(assembled_inputs.size(), 2u);
+  EXPECT_THAT(assembled_inputs[1], ::testing::HasSubstr("\t.word\t0\n\t.word\t0\n"));
+  EXPECT_THAT(assembled_inputs[1],
+              ::testing::Not(::testing::HasSubstr("\t.word\t0\n\t.word\t0\n\t.word\t0\n")));
+}
+
+TEST_F(CompilerTest, CompileCSuppressesSoftOverflowPaddingWhenCallWeightDoesNotJustifyOverflow) {
+  auto real_tc_or = Toolchain::Discover({
+      .repo_root = std::filesystem::current_path(),
+      .mode = ToolchainMode::kOriginal,
+  });
+  if (!real_tc_or.ok()) {
+    GTEST_SKIP() << "Original toolchain not available";
+  }
+
+  std::vector<std::string> assembled_inputs;
+  auto tracking_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.program == real_tc_or->KmcAs().string()) {
+      for (const auto& arg : opts.args) {
+        if (absl::EndsWith(arg, ".s272")) {
+          std::ifstream ifs(arg);
+          assembled_inputs.emplace_back((std::istreambuf_iterator<char>(ifs)),
+                                        std::istreambuf_iterator<char>());
+        }
+      }
+    }
+    return RunProcess(opts);
+  };
+
+  Compiler compiler(*real_tc_or, tracking_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "soft_overflow_penalty.c";
+  std::filesystem::create_directories(src_file.parent_path());
+  {
+    std::ofstream(src_file) << "int FuncA(int a) { return a + 1; }\n"
+                            << "int FuncB(int b) { return b + 2; }\n"
+                            << "int FuncC(int c) { return (c << 2) + (c << 1) + 7; }\n";
+  }
+  std::filesystem::path out_obj = test_dir_ / "obj" / "soft_overflow_penalty.o";
+
+  // Total unpadded size is 8 + 8 + 16 = 32 bytes > module_target_size (24 bytes).
+  // Aligning FuncB at +24 would require 16 bytes of soft-overflow padding (penalty 32),
+  // which exceeds FuncB's uncalled weight (2), so no soft-overflow padding is emitted.
+  CCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .opt_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      .function_target_vrams =
+          {
+              {"FuncA", 0x80025C00},
+              {"FuncB", 0x80025C18},
+              {"FuncC", 0x80025C20},
+          },
+      .module_target_size = 24,
+  };
+
+  ASSERT_TRUE(compiler.CompileC(opts).ok());
+  ASSERT_EQ(assembled_inputs.size(), 1u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -151,7 +151,7 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
     auto align_status = AlignFunctionsInAssemblyAndReassemble(
         toolchain_, runner_, temp_s272, options.out_obj, options.opt_flags, as_include_dirs,
         options.macro_inc, options.timeout, options.function_target_vrams,
-        options.module_target_size, options.initial_vram_offset);
+        options.module_target_size, options.initial_vram_offset, options.external_jal_counts);
     std::error_code ec;
     std::filesystem::remove(temp_s272, ec);
     return align_status;
@@ -187,6 +187,7 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
         .function_target_vrams = options.function_target_vrams,
         .module_target_size = options.module_target_size,
         .initial_vram_offset = options.initial_vram_offset,
+        .external_jal_counts = options.external_jal_counts,
     });
   };
 
@@ -352,7 +353,7 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
   auto align_status = AlignFunctionsInAssemblyAndReassemble(
       toolchain_, runner_, temp_spliced_s272, options.out_obj, as_opt_flags, as_include_dirs,
       options.macro_inc, options.timeout, options.function_target_vrams, options.module_target_size,
-      options.initial_vram_offset);
+      options.initial_vram_offset, options.external_jal_counts);
   cleanup_temps();
   return align_status;
 }

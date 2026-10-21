@@ -216,6 +216,87 @@ absl::flat_hash_map<std::string, uint32_t> CollectFunctionTargetVrams(
   return function_target_vrams;
 }
 
+struct GlobalJalCounts {
+  absl::flat_hash_map<std::string, int32_t> total;
+  absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, int32_t>> by_module;
+
+  absl::flat_hash_map<std::string, int32_t> ExternalForModule(std::string_view module_stem) const {
+    absl::flat_hash_map<std::string, int32_t> ext = total;
+    if (auto it = by_module.find(module_stem); it != by_module.end()) {
+      for (const auto& [sym, cnt] : it->second) {
+        auto tot_it = ext.find(sym);
+        if (tot_it != ext.end()) {
+          tot_it->second = std::max(0, tot_it->second - cnt);
+        }
+      }
+    }
+    return ext;
+  }
+};
+
+GlobalJalCounts CollectGlobalJalCounts(
+    const std::filesystem::path& asm_dir,
+    const absl::flat_hash_map<std::string, uint32_t>& function_target_vrams) {
+  GlobalJalCounts result;
+  std::error_code ec;
+  if (asm_dir.empty() || !std::filesystem::exists(asm_dir, ec)) {
+    return result;
+  }
+
+  absl::flat_hash_map<uint32_t, std::vector<std::string>> vram_to_names;
+  for (const auto& [name, vram] : function_target_vrams) {
+    vram_to_names[vram].push_back(name);
+    vram_to_names[vram].push_back(absl::StrFormat("func_%08X", vram));
+  }
+
+  for (const auto& dir_entry : std::filesystem::recursive_directory_iterator(asm_dir, ec)) {
+    if (!dir_entry.is_regular_file() || dir_entry.path().extension() != ".s") {
+      continue;
+    }
+    std::string stem = dir_entry.path().stem().string();
+    std::ifstream ifs(dir_entry.path());
+    std::string line;
+    while (std::getline(ifs, line)) {
+      std::string_view sv = line;
+      if (size_t close_comment = sv.find("*/"); close_comment != std::string_view::npos) {
+        sv.remove_prefix(close_comment + 2);
+      }
+      sv = absl::StripAsciiWhitespace(sv);
+      if (absl::StartsWith(sv, "jal\t") || absl::StartsWith(sv, "jal ")) {
+        std::string_view target = absl::StripAsciiWhitespace(sv.substr(3));
+        if (target.empty()) {
+          continue;
+        }
+        std::string target_str(target);
+        result.total[target_str]++;
+        result.by_module[stem][target_str]++;
+        if (auto it_vram = function_target_vrams.find(target_str);
+            it_vram != function_target_vrams.end()) {
+          for (const auto& alias : vram_to_names[it_vram->second]) {
+            if (alias != target_str) {
+              result.total[alias]++;
+              result.by_module[stem][alias]++;
+            }
+          }
+        } else if (absl::StartsWith(target_str, "func_") && target_str.size() == 13) {
+          uint32_t addr = 0;
+          if (absl::SimpleHexAtoi(target.substr(5), &addr)) {
+            if (auto it_aliases = vram_to_names.find(addr); it_aliases != vram_to_names.end()) {
+              for (const auto& alias : it_aliases->second) {
+                if (alias != target_str) {
+                  result.total[alias]++;
+                  result.by_module[stem][alias]++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return result;
+}
+
 absl::StatusOr<RomBuildResult> VerifyBuiltRom(const RomBuilderOptions& options,
                                               const std::filesystem::path& repo_root,
                                               std::string_view expected_sha1,
@@ -381,6 +462,8 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
 
   absl::flat_hash_map<std::string, uint32_t> function_target_vrams =
       CollectFunctionTargetVrams(symbol_index.get(), options_.src_dir);
+  GlobalJalCounts global_jal_counts =
+      CollectGlobalJalCounts(options_.asm_dir, function_target_vrams);
 
   // 5. Resolve and compile all objects
   std::filesystem::path src_dir = options_.src_dir;
@@ -492,6 +575,8 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
           }
         }
 
+        absl::flat_hash_map<std::string, int32_t> external_jal_counts =
+            global_jal_counts.ExternalForModule(resolved_or->object_stem);
         absl::Status status;
         if (has_distinct_flags) {
           status = compiler_.CompileCWithPerFunctionFlags({
@@ -504,6 +589,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
               .function_target_vrams = function_target_vrams,
               .module_target_size = mod_target_size,
               .initial_vram_offset = initial_overflow,
+              .external_jal_counts = std::move(external_jal_counts),
           });
         } else {
           status = compiler_.CompileC({
@@ -515,6 +601,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
               .function_target_vrams = function_target_vrams,
               .module_target_size = mod_target_size,
               .initial_vram_offset = initial_overflow,
+              .external_jal_counts = std::move(external_jal_counts),
           });
         }
         if (!status.ok()) {

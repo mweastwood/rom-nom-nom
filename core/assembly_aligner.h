@@ -52,7 +52,8 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
     const std::vector<std::filesystem::path>& as_include_dirs,
     const std::filesystem::path& macro_inc, absl::Duration timeout,
     const absl::flat_hash_map<std::string, uint32_t>& function_target_vrams,
-    uint32_t module_target_size = 0, uint32_t initial_vram_offset = 0);
+    uint32_t module_target_size = 0, uint32_t initial_vram_offset = 0,
+    const absl::flat_hash_map<std::string, int32_t>& external_jal_counts = {});
 
 }  // namespace rom_nom_nom
 

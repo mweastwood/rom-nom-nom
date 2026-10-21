@@ -261,7 +261,8 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
     const std::vector<std::filesystem::path>& as_include_dirs,
     const std::filesystem::path& macro_inc, absl::Duration timeout,
     const absl::flat_hash_map<std::string, uint32_t>& function_target_vrams,
-    uint32_t module_target_size, uint32_t initial_vram_offset) {
+    uint32_t module_target_size, uint32_t initial_vram_offset,
+    const absl::flat_hash_map<std::string, int32_t>& external_jal_counts) {
   std::error_code ec;
   if (function_target_vrams.empty() || !std::filesystem::exists(out_obj, ec) ||
       !std::filesystem::exists(s272_path, ec)) {
@@ -348,7 +349,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
           ? ((effective_used > module_target_size) ? kMaxSoftOverflowBytes : free_pad_bytes)
           : (1LL << 30);
 
-  absl::flat_hash_map<std::string, int32_t> jal_counts;
+  absl::flat_hash_map<std::string, int32_t> jal_counts = external_jal_counts;
   for (const auto& raw_line : lines) {
     std::string_view sv = absl::StripAsciiWhitespace(raw_line);
     if (absl::StartsWith(sv, "jal\t") || absl::StartsWith(sv, "jal ")) {
@@ -407,7 +408,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
       }
     }
     int64_t overflow_bytes = std::max<int64_t>(0, req_pad_before[i] - free_pad_bytes);
-    int32_t net_score = dp[i] - static_cast<int32_t>(overflow_bytes / 8);
+    int32_t net_score = dp[i] - static_cast<int32_t>(overflow_bytes * 2);
     if (net_score > best_score) {
       best_score = net_score;
       best_end = static_cast<int32_t>(i);
