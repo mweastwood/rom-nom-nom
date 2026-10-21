@@ -193,7 +193,8 @@ void RoundTripTest::AssertRoundTripBitExact(std::string_view func_name, std::str
         entry->set_address(next_func_vram);
         entry->set_type(SYMBOL_FUNC);
         next_func_vram += 0x1000;
-      } else if (absl::StartsWith(rel.symbol_name, "rom_")) {
+      } else if (absl::StartsWith(rel.symbol_name, "rom_") ||
+                 absl::StartsWith(rel.symbol_name, "D_00")) {
         sym_to_vram[rel.symbol_name] = next_rom_vram;
         entry->set_address(next_rom_vram);
         entry->set_type(SYMBOL_DATA);

@@ -81,6 +81,46 @@ absl::Status RunToolProcess(const Compiler::ProcessRunner& runner, const std::fi
   return absl::OkStatus();
 }
 
+void StripDuplicateRomSymbolSuffixesInAssemblyFile(const std::filesystem::path& s272_path) {
+  std::ifstream ifs(s272_path);
+  if (!ifs.is_open()) {
+    return;
+  }
+  std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  ifs.close();
+
+  if (!absl::StrContains(content, "__dup")) {
+    return;
+  }
+
+  std::string cleaned;
+  cleaned.reserve(content.size());
+  size_t pos = 0;
+  while (pos < content.size()) {
+    size_t dup_pos = content.find("__dup", pos);
+    if (dup_pos == std::string::npos) {
+      cleaned.append(content, pos, std::string::npos);
+      break;
+    }
+    cleaned.append(content, pos, dup_pos - pos);
+    size_t digit_end = dup_pos + 5;
+    while (digit_end < content.size() && content[digit_end] >= '0' && content[digit_end] <= '9') {
+      ++digit_end;
+    }
+    if (digit_end > dup_pos + 5) {
+      pos = digit_end;
+    } else {
+      cleaned.append("__dup");
+      pos = dup_pos + 5;
+    }
+  }
+
+  std::ofstream ofs(s272_path, std::ios::out | std::ios::trunc);
+  if (ofs.is_open()) {
+    ofs << cleaned;
+  }
+}
+
 }  // namespace
 
 std::filesystem::path FindMacroInc(const std::filesystem::path& repo_root,
@@ -133,6 +173,7 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
       std::filesystem::remove(temp_s272, ec);
       return gcc_status;
     }
+    StripDuplicateRomSymbolSuffixesInAssemblyFile(temp_s272);
 
     std::vector<std::filesystem::path> as_include_dirs =
         ResolveKmcAsIncludeDirs(options.include_dirs);
@@ -265,6 +306,7 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
     if (!std::filesystem::exists(temp_s272)) {
       std::ofstream(temp_s272) << "";
     }
+    StripDuplicateRomSymbolSuffixesInAssemblyFile(temp_s272);
   }
 
   // 3. Determine whether any flag set enables KMC AS optimization (`-Wa,-O...`).

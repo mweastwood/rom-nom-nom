@@ -582,5 +582,36 @@ TEST(CEmitterTest, EmitTypesHeaderRespectsIntrinsicFilterAndExtraDeclarations) {
   EXPECT_EQ(emitted_intrinsics.count("sqrtf"), 0u);
 }
 
+TEST(CEmitterTest, EmitTranslationUnitDisambiguatesDuplicateRomSegmentSymbolsPerFunction) {
+  CTranslationUnit translation_unit;
+  translation_unit.includes = {"types.h"};
+
+  auto body = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> args1;
+  args1.push_back(CExpression::Integer(1));
+  args1.push_back(CExpression::Unary("&", CExpression::Identifier("D_00DBA100")));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("LoadRom"), std::move(args1))));
+
+  std::vector<std::unique_ptr<CExpression>> args2;
+  args2.push_back(CExpression::Integer(2));
+  args2.push_back(CExpression::Unary("&", CExpression::Identifier("D_00DBA100")));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("LoadRom"), std::move(args2))));
+  body->AddStatement(CStatement::Return());
+
+  translation_unit.functions.push_back(
+      FunctionDeclaration(CType::Void(), "LoadTwoRomChunks", {}, std::move(body)));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted_code = CEmitter::EmitTranslationUnit(translation_unit, options);
+
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 D_00DBA100;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("extern s32 D_00DBA100__dup2;\n"));
+  EXPECT_THAT(emitted_code, HasSubstr("LoadRom(1, &D_00DBA100);"));
+  EXPECT_THAT(emitted_code, HasSubstr("LoadRom(2, &D_00DBA100__dup2);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

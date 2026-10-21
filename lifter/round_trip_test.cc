@@ -5234,5 +5234,19 @@ s32 LeafWithModifiedParamAndMultipleCallerSavedScratch(s32* p, s32 n) {
 )");
 }
 
+TEST_F(RoundTripTest, DuplicateRomSegmentSymbolsAcrossMultipleCallsAvoidCse) {
+  AssertRoundTripBitExact("DuplicateRomSegmentSymbolsAcrossMultipleCallsAvoidCse", R"(
+extern s32 D_00DBA100;
+extern s32 D_00DBA100__dup2;
+
+void submit_rom_chunk(s32 id, s32* rom_addr);
+
+void DuplicateRomSegmentSymbolsAcrossMultipleCallsAvoidCse(void) {
+    submit_rom_chunk(1, &D_00DBA100);
+    submit_rom_chunk(2, &D_00DBA100__dup2);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
