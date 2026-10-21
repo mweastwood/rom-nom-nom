@@ -235,5 +235,65 @@ TEST(StackFrameAnalyzerTest, CallerFrameAddressTakenDoesNotSetSpAddressTaken) {
   EXPECT_EQ(analysis.sp_buffer_size, 0);
 }
 
+TEST(StackFrameAnalyzerTest, ByteStoreBeforeSavedRegistersDoesNotOverroundSpBufferSize) {
+  // 112-byte frame, outgoing_args_size = 32 (arg4 at 16($sp), arg5 at 20($sp)),
+  // saved registers at 72..108($sp) -> sp_buffer_size should be 72 - 32 = 40.
+  // A byte store `sb $t0, 71($sp)` accesses [39, 40) within the 40-byte buffer
+  // and must not over-round sp_buffer_size to 48.
+  std::vector<uint32_t> words = {
+      0x27BDFF90,  // 00: addiu $sp, $sp, -112
+      0xAFBF006C,  // 04: sw    $ra, 108($sp)
+      0xAFB00048,  // 08: sw    $s0, 72($sp)
+      0x27A40020,  // 0C: addiu $a0, $sp, 32
+      0xA3A80047,  // 10: sb    $t0, 71($sp)
+      0xAFA50010,  // 14: sw    $a1, 16($sp)
+      0xAFA60014,  // 18: sw    $a2, 20($sp)
+      0x0C000400,  // 1C: jal   0x80001000
+      0xAFA70018,  // 20: sw    $a3, 24($sp)
+      0x8FBF006C,  // 24: lw    $ra, 108($sp)
+      0x8FB00048,  // 28: lw    $s0, 72($sp)
+      0x03E00008,  // 2C: jr    $ra
+      0x27BD0070,  // 30: addiu $sp, $sp, 112
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 112);
+  EXPECT_EQ(analysis.outgoing_args_size, 32);
+  EXPECT_EQ(analysis.sp_buffer_size, 40);
+}
+
+TEST(StackFrameAnalyzerTest, StoresAt16SpAfterPriorCallWithoutArg2Or3DoNotInflateOutgoingArgsSize) {
+  // Two 2-arg calls where local float array elements at 16($sp)..28($sp) are
+  // initialized between the first call and the second call, without writing
+  // $a2, $a3, or $f14 before the second call.
+  std::vector<uint32_t> words = {
+      0x27BDFF98,  // 00: addiu $sp, $sp, -104
+      0xAFBF0060,  // 04: sw    $ra, 96($sp)
+      0xE7B40058,  // 08: swc1  $f20, 88($sp)
+      0x27A40010,  // 0C: addiu $a0, $sp, 16
+      0x0C000400,  // 10: jal   0x80001000
+      0x24050001,  // 14: addiu $a1, $zero, 1
+      0xE7B40010,  // 18: swc1  $f20, 16($sp)
+      0xE7B40014,  // 1C: swc1  $f20, 20($sp)
+      0xE7B40018,  // 20: swc1  $f20, 24($sp)
+      0xE7B4001C,  // 24: swc1  $f20, 28($sp)
+      0x27A40030,  // 28: addiu $a0, $sp, 48
+      0x0C000400,  // 2C: jal   0x80001000
+      0x24050002,  // 30: addiu $a1, $zero, 2
+      0x8FBF0060,  // 34: lw    $ra, 96($sp)
+      0xC7B40058,  // 38: lwc1  $f20, 88($sp)
+      0x03E00008,  // 3C: jr    $ra
+      0x27BD0068,  // 40: addiu $sp, $sp, 104
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.outgoing_args_size, 16);
+  EXPECT_EQ(analysis.sp_buffer_size, 72);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

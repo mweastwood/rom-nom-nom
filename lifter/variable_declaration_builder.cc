@@ -451,16 +451,24 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
 
   uint32_t unreferenced_sp_gap_size = 0;
-  if (frame_analysis.has_calls && !frame_analysis.has_frame_pointer &&
+  if (!frame_analysis.has_frame_pointer &&
       frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF &&
       frame_analysis.prologue.min_saved_reg_offset >
           static_cast<uint32_t>(frame_analysis.outgoing_args_size) &&
       frame_analysis.sp_buffer_size == 0) {
     bool has_sp_local = false;
     for (const auto& v : local_vars_to_declare) {
-      if (v == "sp" || absl::StartsWith(v, "var_sp_")) {
+      if (v == "sp") {
         has_sp_local = true;
         break;
+      }
+      if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
+        int32_t off = 0;
+        if (absl::SimpleAtoi(v.substr(7), &off) && off >= frame_analysis.outgoing_args_size &&
+            off < static_cast<int32_t>(frame_analysis.prologue.min_saved_reg_offset)) {
+          has_sp_local = true;
+          break;
+        }
       }
     }
     for (int32_t off : frame_analysis.stack_store_offsets) {
@@ -476,13 +484,6 @@ absl::Status PrependSynthesizedLocalDeclarations(
       for (const auto& v : local_vars_to_declare) {
         if (absl::StrContains(check_str, absl::StrCat("&", v)) ||
             absl::StrContains(check_str, absl::StrCat("&(", v))) {
-          any_local_addr_taken = true;
-          break;
-        }
-      }
-      for (const auto& p : parameters) {
-        if (absl::StrContains(check_str, absl::StrCat("&", p.name)) ||
-            absl::StrContains(check_str, absl::StrCat("&(", p.name))) {
           any_local_addr_taken = true;
           break;
         }

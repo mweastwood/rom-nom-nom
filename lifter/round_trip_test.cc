@@ -5115,5 +5115,39 @@ s32 ModifiedParamWithLocalArgScratchUsedInSingleArgCall(s32* p) {
 )");
 }
 
+TEST_F(RoundTripTest, GprFloatParameterSavedInCalleeSavedFprWithLocalFloatArrayAndTwoArgCalls) {
+  AssertRoundTripBitExact("GprFloatParameterSavedInCalleeSavedFprWithLocalFloatArrayAndTwoArgCalls",
+                          R"(
+void init_vec4(f32* v, s32 tag);
+
+void GprFloatParameterSavedInCalleeSavedFprWithLocalFloatArrayAndTwoArgCalls(
+    f32* out, f32 scale, f32 offset) {
+    f32 buf_a[4];
+    f32 buf_b[4];
+    init_vec4(buf_a, 1);
+    buf_a[0] = scale;
+    buf_a[1] = offset;
+    buf_a[2] = scale + offset;
+    buf_a[3] = scale - offset;
+    init_vec4(buf_b, 2);
+    out[0] = buf_a[0] + buf_b[0] + scale;
+    out[1] = buf_a[1] + buf_b[1] + offset;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SubwordStackBufferAccessRightBelowSavedRegisters) {
+  AssertRoundTripBitExact("SubwordStackBufferAccessRightBelowSavedRegisters", R"(
+s32 consume_bytes(u8* buf, s32 a, s32 b, s32 c, s32 d, s32 e);
+
+s32 SubwordStackBufferAccessRightBelowSavedRegisters(s32 x, s32 y) {
+    u8 buf[40];
+    buf[0] = (u8)x;
+    buf[39] = (u8)y;
+    return consume_bytes(buf, x, y, x + 1, y + 1, x + y) + x;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -250,12 +250,27 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
         };
 
         bool saw_prior_call = false;
+        bool defined_arg2_or_3 = false;
+        auto check_arg_def = [&](const Instruction& inst) {
+          RegisterUseDef ud = GetInstructionUseDef(inst);
+          for (Register d : ud.gpr_defs) {
+            if (d == Register::kA2 || d == Register::kA3) {
+              defined_arg2_or_3 = true;
+            }
+          }
+          for (FpRegister fd : ud.fpr_defs) {
+            if (fd == FpRegister::kF14 || fd == FpRegister::kF15) {
+              defined_arg2_or_3 = true;
+            }
+          }
+        };
         for (int k = static_cast<int>(i) - 1; k >= 0; --k) {
           if (block.instructions[k].IsCall()) {
             saw_prior_call = true;
             break;
           }
           check_candidate(block.instructions[k]);
+          check_arg_def(block.instructions[k]);
         }
 
         if (!saw_prior_call) {
@@ -265,15 +280,17 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
             for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
               if (pred->instructions[k].IsCall()) break;
               check_candidate(pred->instructions[k]);
+              check_arg_def(pred->instructions[k]);
             }
           }
         }
 
         if (i + 1 < block.instructions.size()) {
           check_candidate(block.instructions[i + 1]);
+          check_arg_def(block.instructions[i + 1]);
         }
 
-        if (call_candidate_stores.contains(16)) {
+        if (call_candidate_stores.contains(16) && (!saw_prior_call || defined_arg2_or_3)) {
           int32_t curr = 16;
           int32_t max_arg_end = 16;
           while (call_candidate_stores.contains(curr)) {
@@ -321,10 +338,17 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
         if ((inst.IsLoad() || inst.IsStore()) && inst.immediate > 0) {
           int32_t adj = static_cast<int32_t>(inst.immediate) - sp_base_offset;
           if (adj > 0) {
-            int32_t access_size = (inst.opcode == Opcode::kSdc1 || inst.opcode == Opcode::kLdc1 ||
-                                   inst.opcode == Opcode::kSd || inst.opcode == Opcode::kLd)
-                                      ? 8
-                                      : 4;
+            int32_t access_size = 4;
+            if (inst.opcode == Opcode::kSdc1 || inst.opcode == Opcode::kLdc1 ||
+                inst.opcode == Opcode::kSd || inst.opcode == Opcode::kLd) {
+              access_size = 8;
+            } else if (inst.opcode == Opcode::kLh || inst.opcode == Opcode::kLhu ||
+                       inst.opcode == Opcode::kSh) {
+              access_size = 2;
+            } else if (inst.opcode == Opcode::kLb || inst.opcode == Opcode::kLbu ||
+                       inst.opcode == Opcode::kSb) {
+              access_size = 1;
+            }
             analysis.max_sp_access = std::max(analysis.max_sp_access, adj + access_size);
           }
         } else if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||

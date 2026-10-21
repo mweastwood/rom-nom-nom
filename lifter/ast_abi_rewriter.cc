@@ -326,14 +326,10 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
   if (comp == nullptr) return;
   absl::flat_hash_set<std::string> param_names;
   absl::flat_hash_set<std::string> float_param_names;
-  absl::flat_hash_set<std::string> float_stack_param_names;
   for (const auto& p : parameters) {
     param_names.insert(p.name);
     if (p.type.ToString() == "f32" && absl::StartsWith(p.name, "arg")) {
       float_param_names.insert(p.name);
-      if (p.name != "arg0" && p.name != "arg1" && p.name != "arg2" && p.name != "arg3") {
-        float_stack_param_names.insert(p.name);
-      }
     }
   }
 
@@ -523,8 +519,8 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
           if (param_names.contains(rhs) &&
               (is_s_reg || is_f_reg || is_homed_param_slot || is_single_assign_prologue_v_copy) &&
               !(float_param_names.contains(rhs) &&
-                (is_s_reg || is_homed_param_slot || is_single_assign_prologue_v_copy)) &&
-              !(float_stack_param_names.contains(rhs) && is_callee_saved_f_reg)) {
+                (is_s_reg || is_homed_param_slot || is_single_assign_prologue_v_copy ||
+                 is_callee_saved_f_reg))) {
             std::string body_text = comp->ToString();
             bool lhs_addr_taken = absl::StrContains(body_text, absl::StrCat("&", lhs)) ||
                                   absl::StrContains(body_text, absl::StrCat("&(", lhs));
