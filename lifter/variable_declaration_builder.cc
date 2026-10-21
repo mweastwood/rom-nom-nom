@@ -755,9 +755,14 @@ absl::Status PrependSynthesizedLocalDeclarations(
       }
       return std::nullopt;
     }
+    if ((var_name == "temp_k0" || var_name == "temp_k1") &&
+        !absl::StrContains(body_str, "*(s64*)")) {
+      return (var_name == "temp_k0") ? "$26" : "$27";
+    }
     if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
         var_name[6] <= '7') {
-      if (frame_analysis.frame_size == 0) {
+      if (frame_analysis.frame_size == 0 ||
+          (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
         return std::nullopt;
       }
       if (var_name == "temp_s0" && !is_leaf_func &&
@@ -776,7 +781,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
       if (fp_base_counts[std::string(base)] == 1) {
         if (base == "f20" || base == "f22" || base == "f24" || base == "f26" || base == "f28" ||
             base == "f30") {
-          if (frame_analysis.frame_size == 0) {
+          if (frame_analysis.frame_size == 0 ||
+              (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
             return std::nullopt;
           }
           return absl::StrCat("$", base);
@@ -785,13 +791,14 @@ absl::Status PrependSynthesizedLocalDeclarations(
             (base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
              base == "f16" || base == "f18" ||
              ((base == "f0" || base == "f12" || base == "f14") &&
-              ((return_type.ToString() != "f32" && return_type.ToString() != "f64" &&
-                ((is_leaf_func && (return_type.ToString() == "void"
-                                       ? (has_shared_fp_base || callee_saved_fp_count >= 1)
-                                       : (fp_base_counts.size() >= 8))) ||
-                 (!is_leaf_func && base != "f14" && fp_base_counts.size() <= 10 &&
-                  (return_type.ToString() == "void" ||
-                   (base == "f0" && callee_saved_fp_count >= 1))))))))) {
+              ((is_leaf_func && return_type.ToString() != "f32" &&
+                return_type.ToString() != "f64" &&
+                (return_type.ToString() == "void"
+                     ? (has_shared_fp_base || callee_saved_fp_count >= 1)
+                     : (fp_base_counts.size() >= 8))) ||
+               (!is_leaf_func && (base == "f12" || base == "f14" ||
+                                  (base == "f0" && return_type.ToString() != "f32" &&
+                                   return_type.ToString() != "f64"))))))) {
           if (is_caller_saved_safe_across_calls(var_name)) {
             pinned_caller_fp_count++;
             return absl::StrCat("$", base);

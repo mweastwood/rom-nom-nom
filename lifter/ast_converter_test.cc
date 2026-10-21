@@ -3637,5 +3637,41 @@ TEST(AstConverterTest, ZeroFrameFunctionDoesNotPinCalleeSavedRegisters) {
   EXPECT_THAT(code, ::testing::Not(HasSubstr("asm(\"$16\")")));
 }
 
+TEST(AstConverterTest, TrimsUnassignedTrailingArgRegistersForKnownCalleeWithPrototypeCast) {
+  auto index_or = SymbolIndex::ParseFromTextproto(R"(
+    entries { name: "VarargsHelper" address: 0x80001000 type: SYMBOL_FUNC }
+  )");
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0x0C000400,  // 08: jal   0x80001000 (VarargsHelper)
+      0x24040007,  // 0C: addiu $a0, $zero, 7
+      0x8FBF0014,  // 10: lw    $ra, 20($sp)
+      0x03E00008,  // 14: jr    $ra
+      0x27BD0018,  // 18: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_map<std::string, int> param_counts = {{"VarargsHelper", 4}};
+  AstConverterOptions options;
+  options.function_name = "CallVarargsWithOneArg";
+  options.function_parameter_counts = &param_counts;
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &(*index_or), options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("((s32 (*)(s32))VarargsHelper)(7)"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg2")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg3")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

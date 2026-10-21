@@ -365,5 +365,53 @@ TEST(AbiAnalyzerTest, DetectsCalleeSavedFloatCarriersWithPrologueStackSavesAndHo
   EXPECT_TRUE(float_locals.contains(48));
 }
 
+TEST(AbiAnalyzerTest, SyntheticExtBlockDoesNotFalselyPromoteParameterCountWhenEntryOverwritesArg) {
+  // Models __osEnqueueAndYield:
+  //   00: lui   $a1, 0x8011
+  //   04: lw    $a1, 0xCCF0($a1)
+  //   08: beqz  $a0, 0x80000018
+  //   0C: nop
+  //   10: jal   0x80001000
+  //   14: nop
+  //   18: j     0x80002000 (external tail jump)
+  //   1C: nop
+  std::vector<uint32_t> words = {
+      0x3C058011,  // 00: lui  $a1, 0x8011
+      0x8CA5CCF0,  // 04: lw   $a1, -13072($a1)
+      0x10800003,  // 08: beqz $a0, 0x80000018
+      0x00000000,  // 0C: nop
+      0x0C000400,  // 10: jal  0x80001000
+      0x00000000,  // 14: nop
+      0x08000800,  // 18: j    0x80002000
+      0x00000000,  // 1C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts), 1);
+}
+
+TEST(AbiAnalyzerTest, RaSavedInGprHelperInfersFourParameters) {
+  // Models __ull_div / __ll_div helper that checks $a2, saves $ra in $t5, and calls helper:
+  //   00: bnez $a2, 0x80000018
+  //   04: nop
+  //   08: addu $t5, $ra, $zero
+  //   0C: jal  0x80001000
+  //   10: nop
+  //   14: addu $ra, $t5, $zero
+  //   18: jr   $ra
+  //   1C: addu $v0, $a0, $zero
+  std::vector<uint32_t> words = {
+      0x14C00005,  // 00: bnez $a2, 0x80000018
+      0x00000000,  // 04: nop
+      0x03E06821,  // 08: addu $t5, $ra, $zero
+      0x0C000400,  // 0C: jal  0x80001000
+      0x00000000,  // 10: nop
+      0x01A0F821,  // 14: addu $ra, $t5, $zero
+      0x03E00008,  // 18: jr   $ra
+      0x00801021,  // 1C: addu $v0, $a0, $zero
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts), 4);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

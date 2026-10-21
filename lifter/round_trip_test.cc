@@ -5295,5 +5295,23 @@ void O0FramePointerWhileLoopAndUnsignedByteStore(ChannelState* ch, u8* buf) {
                           opts);
 }
 
+TEST_F(RoundTripTest, NonLeafFloatScratchStoreBeforeHelperCall) {
+  AssertRoundTripBitExact("NonLeafFloatScratchStoreBeforeHelperCall", R"(
+typedef struct {
+    f32 x;
+    f32 y;
+    f32 sum;
+    s32 tag;
+} VecNode;
+
+void notify_vec_updated(VecNode* node);
+
+void NonLeafFloatScratchStoreBeforeHelperCall(VecNode* node, f32 scale) {
+    node->sum = (node->x + node->y) * scale;
+    notify_vec_updated(node);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

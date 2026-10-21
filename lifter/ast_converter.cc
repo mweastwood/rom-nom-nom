@@ -2029,6 +2029,8 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
                                            ctx.HasFramePointer()) &&
       !ctx.HasFramePointer()) {
     FoldSingleUseExpressions(body.get());
+    TrimUnassignedTrailingCallArgRegisters(body.get(), parameters,
+                                           options.function_parameter_counts);
   }
   if (ctx.HasFramePointer()) {
     RewriteFramePointerStructOffsetAccesses(body.get());

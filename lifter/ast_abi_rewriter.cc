@@ -1929,50 +1929,96 @@ void TrimUnassignedTrailingCallArgRegisters(
   };
   collect_s(*body);
 
-  std::function<std::unique_ptr<CExpression>(const CExpression&)> rewrite_e =
-      [&](const CExpression& e) -> std::unique_ptr<CExpression> {
+  absl::flat_hash_set<std::string> defined_so_far;
+  for (const auto& p : parameters) {
+    defined_so_far.insert(p.name);
+  }
+  bool in_entry_linear_prefix = true;
+
+  std::function<std::unique_ptr<CExpression>(const CExpression&, std::string_view)> rewrite_e =
+      [&](const CExpression& e, std::string_view ret_type) -> std::unique_ptr<CExpression> {
     switch (e.Kind()) {
       case CExpressionKind::kCallExpression: {
         const auto& c = static_cast<const CallExpression&>(e);
         std::vector<std::unique_ptr<CExpression>> args;
         for (const auto& arg : c.Arguments()) {
-          args.push_back(arg != nullptr ? rewrite_e(*arg) : nullptr);
+          args.push_back(arg != nullptr ? rewrite_e(*arg, "s32") : nullptr);
         }
         std::string callee_name = (c.Callee().Kind() == CExpressionKind::kIdentifier)
                                       ? static_cast<const IdentifierExpression&>(c.Callee()).Name()
                                       : "";
-        bool known_param_count = (!callee_name.empty() && function_parameter_counts != nullptr &&
-                                  function_parameter_counts->contains(callee_name));
-        if (!known_param_count && args.size() <= 4) {
+        std::string raw_callee_name = callee_name;
+        if (absl::StartsWith(raw_callee_name, "((") && absl::EndsWith(raw_callee_name, ")")) {
+          size_t proto_end = raw_callee_name.rfind("))");
+          if (proto_end != std::string::npos && proto_end + 2 < raw_callee_name.size() - 1) {
+            raw_callee_name =
+                raw_callee_name.substr(proto_end + 2, raw_callee_name.size() - (proto_end + 2) - 1);
+          }
+        }
+        bool known_param_count =
+            (!raw_callee_name.empty() && function_parameter_counts != nullptr &&
+             function_parameter_counts->contains(raw_callee_name));
+        const size_t orig_args_size = args.size();
+        if (args.size() <= 4) {
           while (!args.empty() && args.back() != nullptr &&
                  args.back()->Kind() == CExpressionKind::kIdentifier) {
             const std::string& aname =
                 static_cast<const IdentifierExpression&>(*args.back()).Name();
-            if ((aname == "arg0" || aname == "arg1" || aname == "arg2" || aname == "arg3") &&
-                !defined_vars.contains(aname)) {
+            bool is_arg_reg = (!known_param_count && (aname == "arg0" || aname == "temp_a0")) ||
+                              (aname == "arg1" || aname == "arg2" || aname == "arg3" ||
+                               aname == "temp_a1" || aname == "temp_a2" || aname == "temp_a3");
+            if (is_arg_reg && (!defined_vars.contains(aname) ||
+                               (in_entry_linear_prefix && !defined_so_far.contains(aname)))) {
               args.pop_back();
             } else {
               break;
             }
           }
         }
-        return CExpression::Call(rewrite_e(c.Callee()), std::move(args));
+        auto callee_expr = rewrite_e(c.Callee(), "s32");
+        if (known_param_count && args.size() < orig_args_size) {
+          std::string sig = args.empty() ? "void" : "";
+          for (size_t k = 0; k < args.size(); ++k) {
+            if (k > 0) sig += ", ";
+            sig += "s32";
+          }
+          callee_expr = CExpression::Identifier(
+              absl::StrFormat("((%s (*)(%s))%s)", ret_type, sig, raw_callee_name));
+        }
+        return CExpression::Call(std::move(callee_expr), std::move(args));
       }
       case CExpressionKind::kAssignmentExpression: {
         const auto& a = static_cast<const AssignmentExpression&>(e);
-        return CExpression::Assignment(a.Op(), rewrite_e(a.Lhs()), rewrite_e(a.Rhs()));
+        std::string_view rhs_ret_type = "s32";
+        if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+          std::string_view lhs_name = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
+          if (lhs_name == "f0") {
+            rhs_ret_type = "f32";
+          } else if (lhs_name == "f0_d") {
+            rhs_ret_type = "f64";
+          }
+        }
+        auto rhs = rewrite_e(a.Rhs(), rhs_ret_type);
+        auto lhs = rewrite_e(a.Lhs(), "s32");
+        if (a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+          defined_so_far.insert(static_cast<const IdentifierExpression&>(a.Lhs()).Name());
+        }
+        return CExpression::Assignment(a.Op(), std::move(lhs), std::move(rhs));
       }
       case CExpressionKind::kBinaryExpression: {
         const auto& b = static_cast<const BinaryExpression&>(e);
-        return CExpression::Binary(b.Op(), rewrite_e(b.Lhs()), rewrite_e(b.Rhs()));
+        return CExpression::Binary(b.Op(), rewrite_e(b.Lhs(), "s32"), rewrite_e(b.Rhs(), "s32"));
       }
       case CExpressionKind::kUnaryExpression: {
         const auto& u = static_cast<const UnaryExpression&>(e);
-        return CExpression::Unary(u.Op(), rewrite_e(u.Operand()), u.IsPrefix());
+        if (u.Op() == "&" && u.Operand().Kind() == CExpressionKind::kIdentifier) {
+          defined_so_far.insert(static_cast<const IdentifierExpression&>(u.Operand()).Name());
+        }
+        return CExpression::Unary(u.Op(), rewrite_e(u.Operand(), "s32"), u.IsPrefix());
       }
       case CExpressionKind::kCastExpression: {
         const auto& c = static_cast<const CastExpression&>(e);
-        return CExpression::Cast(c.TargetType(), rewrite_e(c.Operand()));
+        return CExpression::Cast(c.TargetType(), rewrite_e(c.Operand(), "s32"));
       }
       default:
         return e.Clone();
@@ -1984,48 +2030,61 @@ void TrimUnassignedTrailingCallArgRegisters(
     for (auto& s : stmts) {
       if (s == nullptr) continue;
       switch (s->Kind()) {
+        case CStatementKind::kLabelStatement:
+          in_entry_linear_prefix = false;
+          break;
         case CStatementKind::kExpressionStatement: {
           const auto& es = static_cast<const ExpressionStatement&>(*s);
-          s = CStatement::Expression(rewrite_e(es.Expression()));
+          s = CStatement::Expression(rewrite_e(es.Expression(), "s32"));
           break;
         }
         case CStatementKind::kReturnStatement: {
           const auto& rs = static_cast<const ReturnStatement&>(*s);
           if (rs.ReturnValue() != nullptr) {
-            s = CStatement::Return(rewrite_e(*rs.ReturnValue()));
+            s = CStatement::Return(rewrite_e(*rs.ReturnValue(), "s32"));
           }
           break;
         }
         case CStatementKind::kIfStatement: {
           auto& ifs = static_cast<IfStatement&>(*s);
+          auto cond = rewrite_e(ifs.Condition(), "s32");
+          auto before_if = defined_so_far;
           if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(ifs.MutableThenBranch()));
           }
+          auto after_then = defined_so_far;
+          defined_so_far = before_if;
           if (ifs.MutableElseBranch() != nullptr &&
               ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(ifs.MutableElseBranch()));
           }
-          s = CStatement::If(rewrite_e(ifs.Condition()), ifs.ThenBranch().Clone(),
+          for (const auto& v : after_then) {
+            defined_so_far.insert(v);
+          }
+          s = CStatement::If(std::move(cond), ifs.ThenBranch().Clone(),
                              ifs.ElseBranch() != nullptr ? ifs.ElseBranch()->Clone() : nullptr);
           break;
         }
         case CStatementKind::kWhileStatement: {
+          in_entry_linear_prefix = false;
           auto& ws = static_cast<WhileStatement&>(*s);
           if (ws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(ws.MutableBody()));
           }
-          s = CStatement::While(rewrite_e(ws.Condition()), ws.Body().Clone());
+          s = CStatement::While(rewrite_e(ws.Condition(), "s32"), ws.Body().Clone());
           break;
         }
         case CStatementKind::kDoWhileStatement: {
+          in_entry_linear_prefix = false;
           auto& dws = static_cast<DoWhileStatement&>(*s);
           if (dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(dws.MutableBody()));
           }
-          s = CStatement::DoWhile(dws.Body().Clone(), rewrite_e(dws.Condition()));
+          s = CStatement::DoWhile(dws.Body().Clone(), rewrite_e(dws.Condition(), "s32"));
           break;
         }
         case CStatementKind::kForStatement: {
+          in_entry_linear_prefix = false;
           auto& fs = static_cast<ForStatement&>(*s);
           if (fs.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(fs.MutableBody()));
