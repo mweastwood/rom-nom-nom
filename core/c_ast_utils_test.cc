@@ -1,0 +1,76 @@
+#include "core/c_ast_utils.h"
+
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
+#include "core/c_ast.h"
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+
+namespace rom_nom_nom {
+namespace {
+
+using ::testing::ElementsAre;
+
+TEST(CAstUtilsTest, ExtractsFunctionPointerCastCalleeIdentifier) {
+  std::string_view prefix;
+  std::string_view id;
+  EXPECT_TRUE(ExtractFunctionPointerCastCalleeIdentifier("((void (*)())func_ptr)", &prefix, &id));
+  EXPECT_EQ(prefix, "((void (*)())");
+  EXPECT_EQ(id, "func_ptr");
+  EXPECT_FALSE(ExtractFunctionPointerCastCalleeIdentifier("normal_func", &prefix, &id));
+}
+
+TEST(CAstUtilsTest, ChecksPurityAndCommutability) {
+  auto pure_bin =
+      CExpression::Binary("<", CExpression::Identifier("a"), CExpression::Identifier("b"));
+  EXPECT_TRUE(IsPureExpression(*pure_bin));
+  EXPECT_TRUE(IsCommutableBinary(static_cast<const BinaryExpression&>(*pure_bin)));
+  EXPECT_EQ(CommutedBinaryOperator("<"), ">");
+
+  auto negated = NegateCondition(*pure_bin);
+  EXPECT_EQ(negated->ToString(), "(a >= b)");
+
+  auto call_expr = CExpression::Call(CExpression::Identifier("foo"), {});
+  EXPECT_FALSE(IsPureExpression(*call_expr));
+}
+
+TEST(CAstUtilsTest, DetectsCallsAndHandlesMathIntrinsicsFilter) {
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("f12"));
+  auto intrinsic_call = CExpression::Call(CExpression::Identifier("N64Sqrtf"), std::move(args));
+  EXPECT_TRUE(ExpressionContainsCall(*intrinsic_call, /*ignore_math_intrinsics=*/false));
+  EXPECT_FALSE(ExpressionContainsCall(*intrinsic_call, /*ignore_math_intrinsics=*/true));
+
+  auto regular_call = CExpression::Call(CExpression::Identifier("func_80001000"), {});
+  auto stmt = CStatement::Return(std::move(regular_call));
+  EXPECT_TRUE(StatementContainsCall(*stmt, /*ignore_math_intrinsics=*/true));
+  EXPECT_TRUE(HasReturnValue(*stmt));
+}
+
+TEST(CAstUtilsTest, CountsAndCollectsVariablesAndSubstitutesIdentifiers) {
+  auto expr = CExpression::Binary(
+      "+", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("*", CExpression::Identifier("temp_s0"), CExpression::Identifier("v0")));
+  EXPECT_EQ(CountIdentifierOccurrencesInExpression(*expr, "temp_s0"), 2);
+  EXPECT_EQ(CountIdentifierOccurrencesInExpression(*expr, "v0"), 1);
+  EXPECT_TRUE(ExpressionUsesVariable(*expr, "temp_s0"));
+  EXPECT_FALSE(ExpressionUsesVariable(*expr, "arg1"));
+
+  std::vector<std::string> vars;
+  absl::flat_hash_set<std::string> seen;
+  auto stmt = CStatement::Return(std::move(expr));
+  CollectUsedVariables(*stmt, &vars, &seen);
+  EXPECT_THAT(vars, ElementsAre("temp_s0", "v0"));
+  EXPECT_TRUE(StatementReferencesVariable(*stmt, "v0"));
+
+  auto rewritten = SubstituteIdentifierInStatement(std::move(stmt), "temp_s0", "arg0");
+  EXPECT_EQ(rewritten->ToString(0), "return (arg0 + (arg0 * v0));\n");
+}
+
+}  // namespace
+}  // namespace rom_nom_nom
