@@ -5025,5 +5025,71 @@ s32 LoopWithEarlyExitHelperCallAndScratchWriteback(s32* table, s32 len) {
 )");
 }
 
+// ============================================================================
+// Category 37: Global Indexed Int-to-Double Conversion & Modulo Subexpressions
+// ============================================================================
+
+TEST_F(RoundTripTest, SignedModuloByFiveInConditionalBranch) {
+  AssertRoundTripBitExact("SignedModuloByFiveInConditionalBranch", R"(
+void SignedModuloByFiveInConditionalBranch(s32* p, s32* out) {
+    s32 v = p[0];
+    if (v > 0) {
+        out[0] = v % 5;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, SignedDivisionByThreeInLoopArrayIndexing) {
+  AssertRoundTripBitExact("SignedDivisionByThreeInLoopArrayIndexing", R"(
+s32 SignedDivisionByThreeInLoopArrayIndexing(s32* p, u16* table) {
+    s32 idx = p[0];
+    return table[idx / 3];
+}
+)");
+}
+
+TEST_F(RoundTripTest, CalleeSavedFramePointerRegisterPreservationAcrossCalls) {
+  AssertRoundTripBitExact("CalleeSavedFramePointerRegisterPreservationAcrossCalls", R"(
+s32 step_work(s32 a, s32 b);
+
+s32 CalleeSavedFramePointerRegisterPreservationAcrossCalls(s32* p, s32 n) {
+    s32 a = step_work(p[0], n);
+    s32 b = step_work(p[1], a);
+    p[2] = a + b;
+    return p[2] + n;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SingleParamCopiedToSavedAndReusedAcrossBranchCall) {
+  AssertRoundTripBitExact("SingleParamCopiedToSavedAndReusedAcrossBranchCall", R"(
+void notify_value(s32 v);
+
+s32 SingleParamCopiedToSavedAndReusedAcrossBranchCall(s32* ctx) {
+    if (ctx[0] != 0) {
+        notify_value(ctx[1] + 3);
+    }
+    return ctx[2];
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiCallReturnValueAccumulationWithBranchUpdates) {
+  AssertRoundTripBitExact("MultiCallReturnValueAccumulationWithBranchUpdates", R"(
+s32 query_state(s32 id, s32 mode);
+
+s32 MultiCallReturnValueAccumulationWithBranchUpdates(s32* s, s32 id) {
+    s32 a = query_state(id, s[0]);
+    s[2] = a;
+    if (a > 0) {
+        s32 b = query_state(id + 1, s[1]);
+        s[2] = a - b;
+    }
+    return s[2] + id;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

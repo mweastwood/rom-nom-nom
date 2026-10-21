@@ -3155,5 +3155,46 @@ TEST(AstConverterTest, SplitsParameterRegisterReusedAsScratchAfterPrologueCopy) 
   EXPECT_THAT(code, HasSubstr("temp_s0 = arg0;"));
 }
 
+TEST(AstConverterTest, SplitsParameterReusedInsideConditionalBranchAfterCall) {
+  // Single parameter ($a0) copied to $s0, $s1 used as callee-saved register,
+  // and $a0 overwritten and used multiple times inside a conditional branch after a call.
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB10018,  // 08: sw    $s1, 24($sp)
+      0xAFB00014,  // 0C: sw    $s0, 20($sp)
+      0x00808021,  // 10: addu  $s0, $a0, $zero
+      0x8E110000,  // 14: lw    $s1, 0($s0)
+      0x12200006,  // 18: beq   $s1, $zero, 0x34
+      0x00000000,  // 1C: nop
+      0x0C000400,  // 20: jal   0x80001000
+      0x8E040004,  // 24: lw    $a0, 4($s0)
+      0x8E040008,  // 28: lw    $a0, 8($s0)
+      0x02248821,  // 2C: addu  $s1, $s1, $a0
+      0xAE04000C,  // 30: sw    $a0, 12($s0)
+      0x02201021,  // 34: addu  $v0, $s1, $zero
+      0x8FBF001C,  // 38: lw    $ra, 28($sp)
+      0x8FB10018,  // 3C: lw    $s1, 24($sp)
+      0x8FB00014,  // 40: lw    $s0, 20($sp)
+      0x03E00008,  // 44: jr    $ra
+      0x27BD0020,  // 48: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestSplitParamInIf";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 temp_s1 asm(\"$17\");"));
+  EXPECT_THAT(code, HasSubstr("temp_a0"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

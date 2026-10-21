@@ -180,7 +180,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
     unpadded_text_size = sym_offsets.back() + last_sym->size;
   }
   uint32_t effective_used = initial_vram_offset + unpadded_text_size;
-  constexpr int64_t kMaxSoftOverflowBytes = 1024;
+  constexpr int64_t kMaxSoftOverflowBytes = 512;
   int64_t free_pad_bytes =
       (module_target_size > 0)
           ? ((module_target_size > effective_used)
@@ -188,7 +188,9 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
                  : 0)
           : (1LL << 30);
   int64_t max_pad_bytes =
-      (module_target_size > 0) ? (free_pad_bytes + kMaxSoftOverflowBytes) : (1LL << 30);
+      (module_target_size > 0)
+          ? ((effective_used > module_target_size) ? kMaxSoftOverflowBytes : free_pad_bytes)
+          : (1LL << 30);
 
   absl::flat_hash_map<std::string, int32_t> jal_counts;
   for (const auto& raw_line : lines) {
@@ -213,7 +215,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
       }
     }
     internal_j_count[i] = j_cnt;
-    func_weight[i] = 2 + jal_counts[sorted_funcs[i].name] * 2 + j_cnt;
+    func_weight[i] = 2 + jal_counts[sorted_funcs[i].name] * 2;
 
     auto vram_opt = lookup_vram(sorted_funcs[i].name);
     if (!vram_opt.has_value() || *vram_opt < module_base_vram) {
@@ -228,7 +230,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
   }
   for (size_t i = 0; i + 1 < n; ++i) {
     if (req_pad_before[i] >= 0 && req_pad_before[i] == req_pad_before[i + 1]) {
-      func_weight[i] += internal_j_count[i];
+      func_weight[i] += internal_j_count[i] * 2;
     }
   }
 
@@ -249,7 +251,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
       }
     }
     int64_t overflow_bytes = std::max<int64_t>(0, req_pad_before[i] - free_pad_bytes);
-    int32_t net_score = dp[i] - static_cast<int32_t>(overflow_bytes);
+    int32_t net_score = dp[i] - static_cast<int32_t>(overflow_bytes / 8);
     if (net_score > best_score) {
       best_score = net_score;
       best_end = static_cast<int32_t>(i);

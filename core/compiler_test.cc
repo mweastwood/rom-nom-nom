@@ -718,5 +718,57 @@ TEST_F(CompilerTest, CompileCAlignsPrefixFunctionsWhenModuleSizeMatchesUnpaddedS
   EXPECT_THAT(assembled_inputs[1], ::testing::HasSubstr("\t.word\t0\n"));
 }
 
+TEST_F(CompilerTest, CompileCDoesNotPadBeyondModuleTargetSizeWhenModuleFits) {
+  auto real_tc_or = Toolchain::Discover({
+      .repo_root = std::filesystem::current_path(),
+      .mode = ToolchainMode::kOriginal,
+  });
+  if (!real_tc_or.ok()) {
+    GTEST_SKIP() << "Original toolchain not available";
+  }
+
+  std::vector<std::string> assembled_inputs;
+  auto tracking_runner = [&](const ProcessOptions& opts) -> absl::StatusOr<ProcessResult> {
+    if (opts.program == real_tc_or->KmcAs().string()) {
+      for (const auto& arg : opts.args) {
+        if (absl::EndsWith(arg, ".s272")) {
+          std::ifstream ifs(arg);
+          assembled_inputs.emplace_back((std::istreambuf_iterator<char>(ifs)),
+                                        std::istreambuf_iterator<char>());
+        }
+      }
+    }
+    return RunProcess(opts);
+  };
+
+  Compiler compiler(*real_tc_or, tracking_runner);
+
+  std::filesystem::path src_file = test_dir_ / "src" / "no_soft_overflow_when_fitting.c";
+  std::filesystem::create_directories(src_file.parent_path());
+  {
+    std::ofstream(src_file) << "int FuncA(int a) { return a + 1; }\n"
+                            << "int FuncB(int b) { return b + 2; }\n";
+  }
+  std::filesystem::path out_obj = test_dir_ / "obj" / "no_soft_overflow_when_fitting.o";
+
+  // FuncA and FuncB are 8 bytes each (16 bytes total unpadded), and module_target_size = 16.
+  // Requesting FuncB at +12 would require 4 bytes of padding, exceeding module_target_size (16),
+  // so no padding should be inserted when the unpadded module fits within module_target_size.
+  CCompileOptions opts{
+      .src_file = src_file,
+      .out_obj = out_obj,
+      .opt_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      .function_target_vrams =
+          {
+              {"FuncA", 0x80025C00},
+              {"FuncB", 0x80025C0C},
+          },
+      .module_target_size = 16,
+  };
+
+  ASSERT_TRUE(compiler.CompileC(opts).ok());
+  ASSERT_EQ(assembled_inputs.size(), 1u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

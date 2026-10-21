@@ -1412,6 +1412,86 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
 
     // If this instruction is the low half of a folded pair, emit high-level folded access
     if (const auto* lo = folder.GetFoldedLo(i)) {
+      if (inst.opcode == Opcode::kLwc1 && lo->dest_fp_reg.has_value() &&
+          (lo->type == FoldedPatternType::kGlobalLoad ||
+           lo->type == FoldedPatternType::kGlobalIndexedLoad)) {
+        int ft_idx = static_cast<int>(*lo->dest_fp_reg);
+        bool only_used_by_int_to_fp_cvt = false;
+        for (size_t look = i + 1; look < loop_end; ++look) {
+          const Instruction& future_inst = instructions_to_process[look];
+          if ((future_inst.opcode == Opcode::kCvtSW || future_inst.opcode == Opcode::kCvtDW) &&
+              future_inst.fs == *lo->dest_fp_reg) {
+            bool reused_after_cvt = false;
+            if (future_inst.fd != *lo->dest_fp_reg) {
+              for (size_t k = look + 1; k < loop_end; ++k) {
+                RegisterUseDef kud = GetInstructionUseDef(instructions_to_process[k]);
+                for (FpRegister u : kud.fpr_uses) {
+                  if (u == *lo->dest_fp_reg || (static_cast<int>(u) & ~1) == (ft_idx & ~1)) {
+                    reused_after_cvt = true;
+                    break;
+                  }
+                }
+                if (reused_after_cvt) break;
+                bool redefined = false;
+                for (FpRegister d : kud.fpr_defs) {
+                  if (d == *lo->dest_fp_reg || (static_cast<int>(d) & ~1) == (ft_idx & ~1)) {
+                    redefined = true;
+                    break;
+                  }
+                }
+                if (redefined || instructions_to_process[k].IsCall()) break;
+              }
+            }
+            only_used_by_int_to_fp_cvt = !reused_after_cvt;
+            break;
+          }
+          RegisterUseDef fud = GetInstructionUseDef(future_inst);
+          bool touches_ft_or_rs = false;
+          for (FpRegister u : fud.fpr_uses) {
+            if (u == *lo->dest_fp_reg || (static_cast<int>(u) & ~1) == (ft_idx & ~1)) {
+              touches_ft_or_rs = true;
+            }
+          }
+          for (FpRegister d : fud.fpr_defs) {
+            if (d == *lo->dest_fp_reg || (static_cast<int>(d) & ~1) == (ft_idx & ~1)) {
+              touches_ft_or_rs = true;
+            }
+          }
+          if (lo->type == FoldedPatternType::kGlobalIndexedLoad) {
+            for (Register d : fud.gpr_defs) {
+              if (d == lo->index_reg) {
+                touches_ft_or_rs = true;
+              }
+            }
+          }
+          if (touches_ft_or_rs || future_inst.IsCall() || future_inst.IsStore()) {
+            break;
+          }
+        }
+        if (only_used_by_int_to_fp_cvt) {
+          if (lo->type == FoldedPatternType::kGlobalLoad) {
+            if (lo->symbol_name.empty()) {
+              pending_int_to_fp[ft_idx] =
+                  LiftedExpression::Load("s32", LiftedExpression::Integer(lo->address, true));
+            } else {
+              pending_int_to_fp[ft_idx] = LiftedExpression::GlobalRef(lo->symbol_name);
+            }
+          } else {
+            std::unique_ptr<LiftedExpression> base_addr_expr =
+                lo->symbol_name.empty()
+                    ? LiftedExpression::Integer(lo->address, true)
+                    : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
+            auto indexed_addr = LiftedExpression::Binary(
+                "+", LiftedExpression::Unary("(u8*)", std::move(base_addr_expr)),
+                LiftRegisterOrConstant(lo->index_reg, tracker));
+            pending_int_to_fp[ft_idx] = LiftedExpression::Load("s32", std::move(indexed_addr));
+          }
+          fpr_const_bits[ft_idx] = std::nullopt;
+          record_gpr_defs(inst);
+          tracker.Step(inst);
+          continue;
+        }
+      }
       record_gpr_defs(inst);
       LiftFoldedAccess(*lo, inst, tracker, statements);
       continue;
