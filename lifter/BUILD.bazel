@@ -249,12 +249,14 @@ cc_library(
         "ast_abi_rewriter.cc",
         "ast_arithmetic_simplifier.cc",
         "ast_converter.cc",
+        "ast_expression_folder.cc",
         "variable_declaration_builder.cc",
     ],
     hdrs = [
         "ast_abi_rewriter.h",
         "ast_arithmetic_simplifier.h",
         "ast_converter.h",
+        "ast_expression_folder.h",
         "variable_declaration_builder.h",
     ],
     deps = [
