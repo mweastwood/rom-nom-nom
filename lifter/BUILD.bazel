@@ -52,14 +52,22 @@ cc_test(
 
 cc_library(
     name = "control_flow_structurer",
-    srcs = ["control_flow_structurer.cc"],
-    hdrs = ["control_flow_structurer.h"],
+    srcs = [
+        "control_flow_pattern_matcher.cc",
+        "control_flow_structurer.cc",
+    ],
+    hdrs = [
+        "control_flow_pattern_matcher.h",
+        "control_flow_structurer.h",
+    ],
     deps = [
         ":branch_condition_builder",
         ":dominator_tree",
         ":loop_analyzer",
         "//core:control_flow_graph",
+        "//core:mips",
         "//core:register_tracker",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
