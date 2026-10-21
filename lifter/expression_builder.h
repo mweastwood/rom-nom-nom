@@ -241,20 +241,6 @@ class ExpressionBuilder {
   static std::unique_ptr<LiftedExpression> LiftRegisterOrConstant(Register reg,
                                                                   const RegisterTracker& tracker,
                                                                   bool has_frame_pointer = false);
-
- private:
-  static void LiftCallInstruction(
-      const Instruction& inst, size_t i, absl::Span<const Instruction> instructions_to_process,
-      const SymbolIndex* symbol_index,
-      const absl::flat_hash_map<std::string, int>* function_parameter_counts,
-      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
-      const absl::flat_hash_set<std::string>* functions_returning_v0,
-      const absl::flat_hash_set<std::string>* functions_returning_f0, RegisterTracker& tracker,
-      std::vector<LiftedStatement>& statements, bool sp_address_taken = false,
-      const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr,
-      int32_t sp_base_offset = 16,
-      const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr,
-      const ControlFlowGraph* cfg = nullptr, uint32_t current_block_id = 0);
 };
 
 }  // namespace rom_nom_nom

@@ -220,10 +220,12 @@ cc_library(
     name = "expression_builder",
     srcs = [
         "call_lifter.cc",
+        "cop1_lifter.cc",
         "expression_builder.cc",
     ],
     hdrs = [
         "call_lifter.h",
+        "cop1_lifter.h",
         "expression_builder.h",
     ],
     deps = [

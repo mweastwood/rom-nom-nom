@@ -289,7 +289,7 @@ class ConverterContext {
     }
     ComputeBlockEntryStates();
     PreScanPeeledLoopRotations(root_region);
-    call_return_info_ = ExpressionBuilder::ComputeCallReturnInfo(cfg_, returns_v0_, returns_f0_);
+    call_return_info_ = AbiAnalyzer::ComputeCallReturnInfo(cfg_, returns_v0_, returns_f0_);
   }
 
   const absl::flat_hash_set<uint32_t>& GotoTargets() const { return goto_targets_; }
@@ -750,7 +750,7 @@ class ConverterContext {
                   cond_regs.insert(*term->rt);
                 }
                 auto folded_comp =
-                    ExpressionBuilder::FindFoldedComparison(cond_block->instructions);
+                    BranchConditionBuilder::FindFoldedComparison(cond_block->instructions);
                 if (folded_comp.has_value() &&
                     folded_comp->instruction_index < cond_block->instructions.size()) {
                   RegisterUseDef def_ud = GetInstructionUseDef(
@@ -794,7 +794,7 @@ class ConverterContext {
             if (!condition_block_was_emitted_in_body) {
               size_t condition_instruction_index = cond_block->instructions.size() - 2;
               auto folded_comparison =
-                  ExpressionBuilder::FindFoldedComparison(cond_block->instructions);
+                  BranchConditionBuilder::FindFoldedComparison(cond_block->instructions);
               if (folded_comparison.has_value() &&
                   folded_comparison->instruction_index < cond_block->instructions.size()) {
                 condition_instruction_index = folded_comparison->instruction_index;
@@ -908,7 +908,8 @@ class ConverterContext {
                 break;
               }
             }
-            auto folded_comp = ExpressionBuilder::FindFoldedComparison(header_block->instructions);
+            auto folded_comp =
+                BranchConditionBuilder::FindFoldedComparison(header_block->instructions);
             if (folded_comp.has_value() && folded_comp->instruction_index < cond_inst_idx) {
               cond_inst_idx = folded_comp->instruction_index;
             }
@@ -1170,7 +1171,7 @@ class ConverterContext {
           if (returns_v0_) {
             target_block->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
           } else if (returns_f0_) {
-            bool is_double = ExpressionBuilder::DetermineReturnsF0Double(cfg_);
+            bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg_);
             target_block->AddStatement(
                 CStatement::Return(CExpression::Identifier(is_double ? "f0_d" : "f0")));
           } else {
@@ -1514,7 +1515,7 @@ class ConverterContext {
           }
         } else if (returns_f0_) {
           if (!lifted_stmt.expression) {
-            bool is_double = ExpressionBuilder::DetermineReturnsF0Double(cfg_);
+            bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg_);
             lifted_stmt.expression = LiftedExpression::Variable(is_double ? "f0_d" : "f0");
           }
         } else {
@@ -1818,7 +1819,7 @@ void DetermineReturnFlags(const ControlFlowGraph& cfg, const SymbolIndex* symbol
     *returns_f0 = (rt == "f32" || rt == "f64");
     return;
   }
-  *returns_f0 = ExpressionBuilder::DetermineReturnsF0(cfg);
+  *returns_f0 = AbiAnalyzer::DetermineReturnsF0(cfg);
   if (!*returns_f0 && options.functions_returning_f0 != nullptr &&
       options.functions_returning_f0->contains(options.function_name)) {
     for (const auto& block : cfg.Blocks()) {
@@ -1841,7 +1842,7 @@ void DetermineReturnFlags(const ControlFlowGraph& cfg, const SymbolIndex* symbol
   }
   if (!*returns_f0) {
     *returns_v0 =
-        ExpressionBuilder::DetermineReturnsV0(cfg, symbol_index, options.functions_returning_v0);
+        AbiAnalyzer::DetermineReturnsV0(cfg, symbol_index, options.functions_returning_v0);
     if (!*returns_v0 && options.functions_returning_v0 != nullptr &&
         options.functions_returning_v0->contains(options.function_name)) {
       for (const auto& block : cfg.Blocks()) {
@@ -1884,7 +1885,7 @@ std::vector<CParameter> BuildFunctionParameters(const ControlFlowGraph& cfg,
                             block.instructions.end());
   }
   if (parameter_count < 0 && !all_instructions.empty()) {
-    parameter_count = ExpressionBuilder::DetermineParameterCount(all_instructions);
+    parameter_count = AbiAnalyzer::DetermineParameterCount(all_instructions);
   }
 
   int fp_param_count = 0;
@@ -1895,7 +1896,7 @@ std::vector<CParameter> BuildFunctionParameters(const ControlFlowGraph& cfg,
     }
   }
   if (fp_param_count == 0 && !all_instructions.empty()) {
-    fp_param_count = ExpressionBuilder::DetermineFpParameterCount(all_instructions);
+    fp_param_count = AbiAnalyzer::DetermineFpParameterCount(all_instructions);
   }
 
   int total_param_count = std::max(parameter_count, fp_param_count);
@@ -1963,7 +1964,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
   if (options.return_type.has_value()) {
     return_type = *options.return_type;
   } else if (returns_f0) {
-    bool is_double = ExpressionBuilder::DetermineReturnsF0Double(cfg);
+    bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg);
     return_type = is_double ? CType::F64() : CType::F32();
   } else if (returns_v0) {
     return_type = CType::S32();
@@ -1980,7 +1981,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
       }
     }
     if (body_returns_f0) {
-      bool is_double = ExpressionBuilder::DetermineReturnsF0Double(cfg);
+      bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg);
       return_type = is_double ? CType::F64() : CType::F32();
     } else {
       return_type = CType::S32();
