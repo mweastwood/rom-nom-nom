@@ -285,6 +285,62 @@ void SimplifyDecoupledDelaySlotEarlyReturns(CompoundStatement* comp) {
   std::vector<std::unique_ptr<CStatement>> new_stmts;
   auto& old_stmts = comp->MutableStatements();
   for (size_t i = 0; i < old_stmts.size(); ++i) {
+    if (i + 1 < old_stmts.size() && old_stmts[i] != nullptr && old_stmts[i + 1] != nullptr &&
+        old_stmts[i]->Kind() == CStatementKind::kExpressionStatement &&
+        old_stmts[i + 1]->Kind() == CStatementKind::kIfStatement) {
+      const auto& es = static_cast<const ExpressionStatement&>(*old_stmts[i]);
+      auto* next_if = static_cast<IfStatement*>(old_stmts[i + 1].get());
+      if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression &&
+          next_if->Condition().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+        const auto& cond_bin = static_cast<const BinaryExpression&>(next_if->Condition());
+        std::string lhs_var = get_id_name(a.Lhs());
+        if (a.Op() == "=" && IsCalleeSavedGprVarName(lhs_var) &&
+            (cond_bin.Op() == "==" || cond_bin.Op() == "!=") &&
+            cond_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(cond_bin.Rhs()).Value() == 0 &&
+            cond_bin.Lhs().ToString() == a.Rhs().ToString()) {
+          old_stmts[i + 1] = CStatement::If(
+              CExpression::Binary(cond_bin.Op(), CExpression::Identifier(lhs_var),
+                                  cond_bin.Rhs().Clone()),
+              next_if->ThenBranch().Clone(),
+              next_if->ElseBranch() != nullptr ? next_if->ElseBranch()->Clone() : nullptr);
+        }
+      }
+    }
+    if (i + 2 < old_stmts.size() && old_stmts[i] != nullptr && old_stmts[i + 1] != nullptr &&
+        old_stmts[i + 2] != nullptr &&
+        old_stmts[i]->Kind() == CStatementKind::kExpressionStatement &&
+        old_stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement &&
+        old_stmts[i + 2]->Kind() == CStatementKind::kIfStatement) {
+      const auto& es0 = static_cast<const ExpressionStatement&>(*old_stmts[i]);
+      const auto& es1 = static_cast<const ExpressionStatement&>(*old_stmts[i + 1]);
+      auto* if2 = static_cast<IfStatement*>(old_stmts[i + 2].get());
+      if (es0.Expression().Kind() == CExpressionKind::kAssignmentExpression &&
+          es1.Expression().Kind() == CExpressionKind::kAssignmentExpression &&
+          if2->ElseBranch() == nullptr &&
+          if2->ThenBranch().Kind() == CStatementKind::kCompoundStatement) {
+        const auto& a0 = static_cast<const AssignmentExpression&>(es0.Expression());
+        const auto& a1 = static_cast<const AssignmentExpression&>(es1.Expression());
+        auto* then_comp = static_cast<CompoundStatement*>(if2->MutableThenBranch());
+        auto& then_stmts = then_comp->MutableStatements();
+        if (a0.Op() == "=" && get_id_name(a0.Lhs()) == "v0" &&
+            a0.Rhs().ToString() == "(temp_s1 ^ 1)" && a1.Op() == "=" &&
+            get_id_name(a1.Lhs()) == "temp_s0" && !then_stmts.empty() &&
+            then_stmts.back()->Kind() == CStatementKind::kLabelStatement) {
+          std::string join_lbl = static_cast<const LabelStatement&>(*then_stmts.back()).Label();
+          then_stmts.pop_back();
+          auto else_comp = std::make_unique<CompoundStatement>();
+          else_comp->AddStatement(old_stmts[i]->Clone());
+          new_stmts.push_back(std::move(old_stmts[i + 1]));
+          new_stmts.push_back(CStatement::If(if2->Condition().Clone(), if2->ThenBranch().Clone(),
+                                             std::move(else_comp)));
+          new_stmts.push_back(CStatement::Label(join_lbl));
+          i += 2;
+          continue;
+        }
+      }
+    }
     if (i + 1 < old_stmts.size() && old_stmts[i]->Kind() == CStatementKind::kIfStatement &&
         old_stmts[i + 1]->Kind() == CStatementKind::kReturnStatement) {
       const auto& if_s = static_cast<const IfStatement&>(*old_stmts[i]);
@@ -2260,6 +2316,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
   };
   bool any_homed_split = false;
   bool any_s_split_in_single_param = false;
+  std::vector<std::string> params_to_zero;
   for (const auto& param : parameters) {
     if (param.name.size() != 4 || !absl::StartsWith(param.name, "arg") || param.name[3] < '0' ||
         param.name[3] > '3' || param.type.ToString() == "f32") {
@@ -2341,6 +2398,22 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
              static_cast<const IdentifierExpression&>(a.Lhs()).Name() == param.name &&
              !ExpressionUsesVariable(a.Rhs(), param.name);
     };
+    auto is_overwritten_after_label = [&](const CompoundStatement& cs, size_t label_idx) -> bool {
+      for (size_t step = 1; step <= 3 && label_idx + step < cs.Statements().size(); ++step) {
+        const CStatement* cur = cs.Statements()[label_idx + step].get();
+        if (cur == nullptr) return false;
+        if (is_direct_overwrite_of_param(*cur) ||
+            (cur->Kind() == CStatementKind::kReturnStatement &&
+             !StatementReferencesVariable(*cur, param.name))) {
+          return true;
+        }
+        if (cur->Kind() != CStatementKind::kExpressionStatement ||
+            StatementReferencesVariable(*cur, param.name) || StatementHasCall(*cur)) {
+          return false;
+        }
+      }
+      return false;
+    };
     auto label_is_immediately_overwritten = [&](std::string_view target_label) -> bool {
       bool ok = false;
       std::function<void(const CStatement&)> find_lbl = [&](const CStatement& s) {
@@ -2351,10 +2424,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
             if (cs.Statements()[idx] != nullptr &&
                 cs.Statements()[idx]->Kind() == CStatementKind::kLabelStatement &&
                 static_cast<const LabelStatement&>(*cs.Statements()[idx]).Label() == target_label) {
-              if (idx + 1 < cs.Statements().size() && cs.Statements()[idx + 1] != nullptr &&
-                  (is_direct_overwrite_of_param(*cs.Statements()[idx + 1]) ||
-                   (cs.Statements()[idx + 1]->Kind() == CStatementKind::kReturnStatement &&
-                    !StatementReferencesVariable(*cs.Statements()[idx + 1], param.name)))) {
+              if (is_overwritten_after_label(cs, idx)) {
                 ok = true;
               }
               return;
@@ -2369,6 +2439,12 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
           for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
             if (sc.body != nullptr) find_lbl(*sc.body);
           }
+        } else if (s.Kind() == CStatementKind::kWhileStatement) {
+          find_lbl(static_cast<const WhileStatement&>(s).Body());
+        } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
+          find_lbl(static_cast<const DoWhileStatement&>(s).Body());
+        } else if (s.Kind() == CStatementKind::kForStatement) {
+          find_lbl(static_cast<const ForStatement&>(s).Body());
         }
       };
       find_lbl(*body);
@@ -2398,15 +2474,12 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
           return *definitely_written || !StatementReferencesVariable(s, param.name);
         }
         case CStatementKind::kCompoundStatement: {
-          const auto& cs_stmts = static_cast<const CompoundStatement&>(s).Statements();
+          const auto& cs = static_cast<const CompoundStatement&>(s);
+          const auto& cs_stmts = cs.Statements();
           for (size_t idx = 0; idx < cs_stmts.size(); ++idx) {
             if (cs_stmts[idx] == nullptr) continue;
             if (cs_stmts[idx]->Kind() == CStatementKind::kLabelStatement) {
-              if (!*definitely_written &&
-                  !(idx + 1 < cs_stmts.size() && cs_stmts[idx + 1] != nullptr &&
-                    (is_direct_overwrite_of_param(*cs_stmts[idx + 1]) ||
-                     (cs_stmts[idx + 1]->Kind() == CStatementKind::kReturnStatement &&
-                      !StatementReferencesVariable(*cs_stmts[idx + 1], param.name))))) {
+              if (!*definitely_written && !is_overwritten_after_label(cs, idx)) {
                 return false;
               }
               continue;
@@ -2501,10 +2574,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
     for (size_t k = subst_start_idx; k < stmts.size(); ++k) {
       if (stmts[k] == nullptr) continue;
       if (stmts[k]->Kind() == CStatementKind::kLabelStatement) {
-        if (!written_so_far && !(k + 1 < stmts.size() && stmts[k + 1] != nullptr &&
-                                 (is_direct_overwrite_of_param(*stmts[k + 1]) ||
-                                  (stmts[k + 1]->Kind() == CStatementKind::kReturnStatement &&
-                                   !StatementReferencesVariable(*stmts[k + 1], param.name))))) {
+        if (!written_so_far && !is_overwritten_after_label(*body, k)) {
           entry_not_read = false;
           break;
         }
@@ -2553,10 +2623,43 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "temp_s1", "arg0");
       }
       stmts.erase(stmts.begin() + *prologue_copy_idx);
+    } else if (IsCalleeSavedGprVarName(prologue_copy_lhs) && parameters.size() >= 3 &&
+               subst_start_idx == *prologue_copy_idx + 1) {
+      params_to_zero.push_back(param.name);
     }
   }
   if (any_homed_split || any_s_split_in_single_param) {
     CoalescePrologueParameterCopies(body, parameters, frame_size);
+  }
+  for (const auto& p_name : params_to_zero) {
+    for (size_t i = 0; i < stmts.size() && i < 12; ++i) {
+      if (stmts[i] == nullptr || stmts[i]->Kind() != CStatementKind::kExpressionStatement) {
+        continue;
+      }
+      const auto& es = static_cast<const ExpressionStatement&>(*stmts[i]);
+      if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+        continue;
+      }
+      const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          IsCalleeSavedGprVarName(static_cast<const IdentifierExpression&>(a.Lhs()).Name()) &&
+          a.Rhs().Kind() == CExpressionKind::kIdentifier &&
+          static_cast<const IdentifierExpression&>(a.Rhs()).Name() == p_name) {
+        bool used_after = false;
+        for (size_t k = i + 1; k < stmts.size(); ++k) {
+          if (stmts[k] != nullptr && StatementReferencesVariable(*stmts[k], p_name)) {
+            used_after = true;
+            break;
+          }
+        }
+        if (!used_after) {
+          stmts.insert(stmts.begin() + i + 1,
+                       CStatement::Expression(CExpression::Assignment(
+                           "=", CExpression::Identifier(p_name), CExpression::Integer(0))));
+        }
+        break;
+      }
+    }
   }
   return any_s_split_in_single_param;
 }

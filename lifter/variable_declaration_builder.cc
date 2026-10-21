@@ -698,12 +698,16 @@ absl::Status PrependSynthesizedLocalDeclarations(
   const int max_caller_gpr_pins =
       (total_temp_t_count >= 10 && callee_saved_gpr_count >= 9)
           ? 10
-          : ((is_leaf_func && callee_saved_gpr_count >= 1 && callee_saved_gpr_count <= 7) ? 16
-                                                                                          : 14);
+          : ((is_leaf_func && total_temp_t_count >= 10 && callee_saved_gpr_count >= 4)
+                 ? 12
+                 : ((is_leaf_func && callee_saved_gpr_count >= 1 && callee_saved_gpr_count <= 7)
+                        ? 16
+                        : 14));
   int pinned_caller_gpr_count = 0;
   bool any_param_modified = false;
   for (const auto& param : parameters) {
     if (absl::StrContains(body_str, absl::StrCat(param.name, " = ")) &&
+        !absl::StrContains(body_str, absl::StrCat(param.name, " = 0;\n")) &&
         !(!is_leaf_func && parameters.size() <= 2 &&
           absl::StrContains(body_str, absl::StrCat("temp_s0 = ", param.name, ";\n")))) {
       any_param_modified = true;

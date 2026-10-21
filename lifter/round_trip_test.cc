@@ -5343,5 +5343,23 @@ s32 MultiParamSavedToCalleeRegistersAndReusedAcrossCalls(StreamState* st, u8* ou
 )");
 }
 
+TEST_F(RoundTripTest, HalfwordBitmaskClearAndStoreAfterHelperCall) {
+  AssertRoundTripBitExact("HalfwordBitmaskClearAndStoreAfterHelperCall", R"(
+typedef struct {
+    u16 flags;
+    u16 state;
+    s32 pad[12];
+} ActorSlot;
+
+extern ActorSlot g_actors[16];
+void reset_actor_slot(s32 idx);
+
+void HalfwordBitmaskClearAndStoreAfterHelperCall(s32 idx) {
+    reset_actor_slot(idx);
+    g_actors[idx].flags &= 0xFFEF;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

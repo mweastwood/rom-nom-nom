@@ -881,6 +881,12 @@ struct FolderContext {
         for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
           if (sc.body != nullptr) find_label(*sc.body);
         }
+      } else if (s.Kind() == CStatementKind::kWhileStatement) {
+        find_label(static_cast<const WhileStatement&>(s).Body());
+      } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
+        find_label(static_cast<const DoWhileStatement&>(s).Body());
+      } else if (s.Kind() == CStatementKind::kForStatement) {
+        find_label(static_cast<const ForStatement&>(s).Body());
       }
     };
     find_label(*root_body);
@@ -1004,6 +1010,104 @@ struct FolderContext {
       return false;
     }
 
+    if (IsOutgoingStackArgVar(var) && expected_uses_in_next > 0 &&
+        HasCallInStmt(*stmts[next_idx]) && root_body != nullptr &&
+        !HasAddressOfVarInStmt(*root_body, var)) {
+      int total_uses_in_root = CountUses(*root_body, var);
+      if (total_uses_in_root == expected_uses_in_next) {
+        return true;
+      }
+      int uses_in_calls = 0;
+      std::function<void(const CExpression&)> count_call_uses_expr = [&](const CExpression& e) {
+        if (e.Kind() == CExpressionKind::kCallExpression) {
+          for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
+            uses_in_calls += CountExprUses(*arg, var);
+          }
+          return;
+        }
+        if (e.Kind() == CExpressionKind::kUnaryExpression) {
+          count_call_uses_expr(static_cast<const UnaryExpression&>(e).Operand());
+        } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+          count_call_uses_expr(static_cast<const BinaryExpression&>(e).Lhs());
+          count_call_uses_expr(static_cast<const BinaryExpression&>(e).Rhs());
+        } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+          count_call_uses_expr(static_cast<const AssignmentExpression&>(e).Lhs());
+          count_call_uses_expr(static_cast<const AssignmentExpression&>(e).Rhs());
+        } else if (e.Kind() == CExpressionKind::kCastExpression) {
+          count_call_uses_expr(static_cast<const CastExpression&>(e).Operand());
+        } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
+          const auto& tern = static_cast<const TernaryExpression&>(e);
+          count_call_uses_expr(tern.Condition());
+          count_call_uses_expr(tern.TrueExpression());
+          count_call_uses_expr(tern.FalseExpression());
+        }
+      };
+      bool all_call_uses_locally_defined = true;
+      std::function<void(const CStatement&)> count_call_uses_stmt = [&](const CStatement& s) {
+        if (s.Kind() == CStatementKind::kExpressionStatement) {
+          count_call_uses_expr(static_cast<const ExpressionStatement&>(s).Expression());
+        } else if (s.Kind() == CStatementKind::kReturnStatement) {
+          const auto& ret = static_cast<const ReturnStatement&>(s);
+          if (ret.ReturnValue() != nullptr) count_call_uses_expr(*ret.ReturnValue());
+        } else if (s.Kind() == CStatementKind::kCompoundStatement) {
+          const auto& cs_stmts = static_cast<const CompoundStatement&>(s).Statements();
+          bool defined_in_comp = false;
+          for (const auto& child : cs_stmts) {
+            if (child == nullptr) continue;
+            if (child->Kind() == CStatementKind::kLabelStatement) {
+              defined_in_comp = false;
+            }
+            if (child->Kind() == CStatementKind::kExpressionStatement) {
+              const auto& es = static_cast<const ExpressionStatement&>(*child);
+              if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+                if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                    static_cast<const IdentifierExpression&>(a.Lhs()).Name() == var &&
+                    CountExprUses(a.Rhs(), var) == 0) {
+                  defined_in_comp = true;
+                  continue;
+                }
+              }
+            }
+            if (child.get() != stmts[next_idx].get() && CountUses(*child, var) > 0 &&
+                !defined_in_comp) {
+              all_call_uses_locally_defined = false;
+            }
+            count_call_uses_stmt(*child);
+          }
+        } else if (s.Kind() == CStatementKind::kIfStatement) {
+          const auto& ifs = static_cast<const IfStatement&>(s);
+          count_call_uses_expr(ifs.Condition());
+          count_call_uses_stmt(ifs.ThenBranch());
+          if (ifs.ElseBranch() != nullptr) count_call_uses_stmt(*ifs.ElseBranch());
+        } else if (s.Kind() == CStatementKind::kSwitchStatement) {
+          const auto& ss = static_cast<const SwitchStatement&>(s);
+          count_call_uses_expr(ss.Condition());
+          for (const auto& sc : ss.Cases()) {
+            if (sc.body != nullptr) count_call_uses_stmt(*sc.body);
+          }
+        } else if (s.Kind() == CStatementKind::kWhileStatement) {
+          const auto& ws = static_cast<const WhileStatement&>(s);
+          count_call_uses_expr(ws.Condition());
+          count_call_uses_stmt(ws.Body());
+        } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
+          const auto& dws = static_cast<const DoWhileStatement&>(s);
+          count_call_uses_stmt(dws.Body());
+          count_call_uses_expr(dws.Condition());
+        } else if (s.Kind() == CStatementKind::kForStatement) {
+          const auto& fs = static_cast<const ForStatement&>(s);
+          if (fs.Init() != nullptr) count_call_uses_stmt(*fs.Init());
+          if (fs.Condition() != nullptr) count_call_uses_expr(*fs.Condition());
+          if (fs.Step() != nullptr) count_call_uses_expr(*fs.Step());
+          count_call_uses_stmt(fs.Body());
+        }
+      };
+      count_call_uses_stmt(*root_body);
+      if (total_uses_in_root == uses_in_calls && all_call_uses_locally_defined) {
+        return true;
+      }
+    }
+
     active_ignored_def_stmt = def_stmt;
     active_ignored_use_stmt = (expected_uses_in_next > 0) ? stmts[next_idx].get() : nullptr;
     for (size_t k = next_idx + 1; k < stmts.size(); ++k) {
@@ -1043,76 +1147,6 @@ struct FolderContext {
          (IsCallArgVar(var) && expected_uses_in_next > 0 && HasCallInStmt(*stmts[next_idx]))) &&
         !root_has_label) {
       return true;
-    }
-    if (IsOutgoingStackArgVar(var) && expected_uses_in_next > 0 &&
-        HasCallInStmt(*stmts[next_idx]) && root_body != nullptr) {
-      int total_uses_in_root = CountUses(*root_body, var);
-      int uses_in_calls = 0;
-      std::function<void(const CExpression&)> count_call_uses_expr = [&](const CExpression& e) {
-        if (e.Kind() == CExpressionKind::kCallExpression) {
-          for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
-            uses_in_calls += CountExprUses(*arg, var);
-          }
-          return;
-        }
-        if (e.Kind() == CExpressionKind::kUnaryExpression) {
-          count_call_uses_expr(static_cast<const UnaryExpression&>(e).Operand());
-        } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-          count_call_uses_expr(static_cast<const BinaryExpression&>(e).Lhs());
-          count_call_uses_expr(static_cast<const BinaryExpression&>(e).Rhs());
-        } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
-          count_call_uses_expr(static_cast<const AssignmentExpression&>(e).Lhs());
-          count_call_uses_expr(static_cast<const AssignmentExpression&>(e).Rhs());
-        } else if (e.Kind() == CExpressionKind::kCastExpression) {
-          count_call_uses_expr(static_cast<const CastExpression&>(e).Operand());
-        } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
-          const auto& tern = static_cast<const TernaryExpression&>(e);
-          count_call_uses_expr(tern.Condition());
-          count_call_uses_expr(tern.TrueExpression());
-          count_call_uses_expr(tern.FalseExpression());
-        }
-      };
-      std::function<void(const CStatement&)> count_call_uses_stmt = [&](const CStatement& s) {
-        if (s.Kind() == CStatementKind::kExpressionStatement) {
-          count_call_uses_expr(static_cast<const ExpressionStatement&>(s).Expression());
-        } else if (s.Kind() == CStatementKind::kReturnStatement) {
-          const auto& ret = static_cast<const ReturnStatement&>(s);
-          if (ret.ReturnValue() != nullptr) count_call_uses_expr(*ret.ReturnValue());
-        } else if (s.Kind() == CStatementKind::kCompoundStatement) {
-          for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-            count_call_uses_stmt(*child);
-          }
-        } else if (s.Kind() == CStatementKind::kIfStatement) {
-          const auto& ifs = static_cast<const IfStatement&>(s);
-          count_call_uses_expr(ifs.Condition());
-          count_call_uses_stmt(ifs.ThenBranch());
-          if (ifs.ElseBranch() != nullptr) count_call_uses_stmt(*ifs.ElseBranch());
-        } else if (s.Kind() == CStatementKind::kSwitchStatement) {
-          const auto& ss = static_cast<const SwitchStatement&>(s);
-          count_call_uses_expr(ss.Condition());
-          for (const auto& sc : ss.Cases()) {
-            if (sc.body != nullptr) count_call_uses_stmt(*sc.body);
-          }
-        } else if (s.Kind() == CStatementKind::kWhileStatement) {
-          const auto& ws = static_cast<const WhileStatement&>(s);
-          count_call_uses_expr(ws.Condition());
-          count_call_uses_stmt(ws.Body());
-        } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
-          const auto& dws = static_cast<const DoWhileStatement&>(s);
-          count_call_uses_stmt(dws.Body());
-          count_call_uses_expr(dws.Condition());
-        } else if (s.Kind() == CStatementKind::kForStatement) {
-          const auto& fs = static_cast<const ForStatement&>(s);
-          if (fs.Init() != nullptr) count_call_uses_stmt(*fs.Init());
-          if (fs.Condition() != nullptr) count_call_uses_expr(*fs.Condition());
-          if (fs.Step() != nullptr) count_call_uses_expr(*fs.Step());
-          count_call_uses_stmt(fs.Body());
-        }
-      };
-      count_call_uses_stmt(*root_body);
-      if (total_uses_in_root == uses_in_calls && !HasAddressOfVarInStmt(*root_body, var)) {
-        return true;
-      }
     }
     return false;
   }
@@ -2316,6 +2350,27 @@ struct FolderContext {
                           if (absl::StartsWith(var, "temp_t") &&
                               assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
                             break;
+                          }
+                          if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                            const auto& rhs_bin =
+                                static_cast<const BinaryExpression&>(assign.Rhs());
+                            if (rhs_bin.Op() == "&" &&
+                                rhs_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+                              int64_t mask =
+                                  static_cast<const IntegerLiteralExpression&>(rhs_bin.Rhs())
+                                      .Value();
+                              std::string lhs_s = cand_assign.Lhs().ToString();
+                              if (mask >= 0x8000 && mask <= 0xFFFE &&
+                                  (absl::StartsWith(lhs_s, "*(u16*)") ||
+                                   absl::StartsWith(lhs_s, "*(u16 *)") ||
+                                   absl::StartsWith(lhs_s, "*(s16*)") ||
+                                   absl::StartsWith(lhs_s, "*(s16 *)")) &&
+                                  cand_assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                                  static_cast<const IdentifierExpression&>(cand_assign.Rhs())
+                                          .Name() == var) {
+                                break;
+                              }
+                            }
                           }
                         }
                       }

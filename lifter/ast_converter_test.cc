@@ -3732,5 +3732,45 @@ TEST(AstConverterTest, SplitsScratchReusedParametersAcrossMultiParamGotoFunction
   EXPECT_THAT(code, HasSubstr("*(s32*)arg1 = temp_a0;"));
 }
 
+TEST(AstConverterTest, FoldsOutgoingStackArgInsideDoWhileLoopWithGotoExit) {
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB00018,  // 08: sw    $s0, 24($sp)
+      0x00808021,  // 0C: move  $s0, $a0
+      0x24020007,  // 10: addiu $v0, $zero, 7 (loop body block 1)
+      0xAFA20010,  // 14: sw    $v0, 16($sp)
+      0x00002021,  // 18: move  $a0, $zero
+      0x00002821,  // 1C: move  $a1, $zero
+      0x00003021,  // 20: move  $a2, $zero
+      0x0C000400,  // 24: jal   0x80001000
+      0x00003821,  // 28: move  $a3, $zero
+      0x14400004,  // 2C: bne   $v0, $zero, +4 (to 0x40 early exit)
+      0x00000000,  // 30: nop
+      0x2610FFFF,  // 34: addiu $s0, $s0, -1 (block 2)
+      0x1600FFF6,  // 38: bne   $s0, $zero, -10 (to 0x10)
+      0x00000000,  // 3C: nop
+      0x8FBF001C,  // 40: lw    $ra, 28($sp) (block 3 exit)
+      0x8FB00018,  // 44: lw    $s0, 24($sp)
+      0x03E00008,  // 48: jr    $ra
+      0x27BD0020,  // 4C: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestOutgoingStackArgInLoop";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("func_80001000(0, 0, 0, 0, v0)"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_16")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
