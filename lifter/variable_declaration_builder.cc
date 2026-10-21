@@ -754,44 +754,59 @@ absl::Status PrependSynthesizedLocalDeclarations(
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;
+    const bool has_v0_local = std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(),
+                                        "v0") != local_vars_to_declare.end();
+    const bool has_v1_local = std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(),
+                                        "v1") != local_vars_to_declare.end();
     bool is_float_return_leaf_with_v0_v1 =
         is_leaf_func && (return_type.ToString() == "f32" || return_type.ToString() == "f64") &&
-        std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "v1") !=
-            local_vars_to_declare.end();
-    bool is_void_leaf_with_all_s_regs =
-        is_leaf_func && return_type.ToString() == "void" && callee_saved_gpr_count >= 8;
-    bool v0_assigned_many_times = false;
-    if (var_name == "v0" && !is_leaf_func) {
-      int v0_assigns = 0;
+        has_v1_local;
+    int v0_assigns = 0;
+    int v0_mentions = 0;
+    {
       size_t pos = 0;
-      const bool is_guarded_v0_redef_return =
-          !absl::StrContains(body_str, "goto ") &&
-          absl::StrContains(body_str, "if ((v0 != 0)) {\n        v0 = ") &&
-          absl::StrContains(body_str, "return v0;");
-      const int min_v0_assigns = is_guarded_v0_redef_return ? 3 : 4;
-      while ((pos = body_str.find("v0 = ", pos)) != std::string::npos) {
-        if (++v0_assigns >= min_v0_assigns) {
-          v0_assigned_many_times = true;
-          break;
+      while ((pos = body_str.find("v0", pos)) != std::string::npos) {
+        const bool left_ok =
+            (pos == 0 || (!std::isalnum(static_cast<unsigned char>(body_str[pos - 1])) &&
+                          body_str[pos - 1] != '_'));
+        const bool right_ok = (pos + 2 >= body_str.size() ||
+                               (!std::isalnum(static_cast<unsigned char>(body_str[pos + 2])) &&
+                                body_str[pos + 2] != '_'));
+        if (left_ok && right_ok) {
+          v0_mentions++;
+          if (pos + 5 <= body_str.size() && body_str.compare(pos, 5, "v0 = ") == 0) {
+            v0_assigns++;
+          }
         }
-        pos += 5;
+        pos += 2;
       }
     }
-    if ((is_float_return_leaf_with_v0_v1 || is_void_leaf_with_all_s_regs ||
+    const int v0_reads = v0_mentions - v0_assigns;
+    bool is_multi_reg_leaf_with_v0_v1 =
+        is_leaf_func && has_v0_local && has_v1_local &&
+        (callee_saved_gpr_count >= 1 || (fp_base_counts.empty() && unpinned_gpr_locals_count >= 4 &&
+                                         v0_assigns >= 2 && v0_reads >= 1));
+    bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
+    bool v0_assigned_many_times = false;
+    if (var_name == "v0" && !is_leaf_func) {
+      v0_assigned_many_times = (v0_assigns >= 2 && v0_reads >= 1);
+    }
+    if ((is_float_return_leaf_with_v0_v1 || is_multi_reg_leaf_with_v0_v1 || is_leaf_with_s_regs ||
          v0_assigned_many_times) &&
         var_name == "v0") {
       caller_gpr_reg = "$2";
-    } else if ((is_float_return_leaf_with_v0_v1 || is_void_leaf_with_all_s_regs || !is_leaf_func) &&
+    } else if ((is_float_return_leaf_with_v0_v1 || is_multi_reg_leaf_with_v0_v1 ||
+                is_leaf_with_s_regs || !is_leaf_func) &&
                var_name == "v1") {
       caller_gpr_reg = "$3";
-    } else if ((!is_leaf_func ||
+    } else if ((!is_leaf_func || is_leaf_with_s_regs ||
                 (unpinned_gpr_locals_count >= 4 && !is_float_return_leaf_with_v0_v1)) &&
-               !any_param_modified && var_name.size() == 4 && absl::StartsWith(var_name, "arg") &&
-               var_name[3] >= '0' && var_name[3] <= '3') {
+               (!any_param_modified || is_leaf_with_s_regs) && var_name.size() == 4 &&
+               absl::StartsWith(var_name, "arg") && var_name[3] >= '0' && var_name[3] <= '3') {
       int reg_num = 4 + (var_name[3] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
-    } else if (!is_leaf_func && var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") &&
-               var_name[6] >= '0' && var_name[6] <= '3') {
+    } else if ((!is_leaf_func || is_leaf_with_s_regs) && var_name.size() == 7 &&
+               absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' && var_name[6] <= '3') {
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&

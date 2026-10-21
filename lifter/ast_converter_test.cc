@@ -3424,5 +3424,43 @@ TEST(AstConverterTest, PinsCallerSavedScratchUsedInWrappedCallConditionAndMasked
   EXPECT_THAT(code, HasSubstr("register s32 v1 asm(\"$3\");"));
 }
 
+TEST(AstConverterTest, PinsScratchRegistersInLeafWithCalleeSavedRegs) {
+  std::vector<uint32_t> words = {
+      0x27BDFFF0,  // 00: addiu $sp, $sp, -16
+      0xAFB00008,  // 04: sw    $s0, 8($sp)
+      0xAFB1000C,  // 08: sw    $s1, 12($sp)
+      0x8C820000,  // 0C: lw    $v0, 0($a0)
+      0x8C830004,  // 10: lw    $v1, 4($a0)
+      0x8C850008,  // 14: lw    $a1, 8($a0)
+      0x00438021,  // 18: addu  $s0, $v0, $v1
+      0x02058821,  // 1C: addu  $s1, $s0, $a1
+      0x10400003,  // 20: beq   $v0, $zero, 0x30
+      0x00000000,  // 24: nop
+      0x02231021,  // 28: addu  $v0, $s1, $v1
+      0xAC82000C,  // 2C: sw    $v0, 12($a0)
+      0x02051021,  // 30: addu  $v0, $s0, $a1
+      0x8FB00008,  // 34: lw    $s0, 8($sp)
+      0x8FB1000C,  // 38: lw    $s1, 12($sp)
+      0x03E00008,  // 3C: jr    $ra
+      0x27BD0010,  // 40: addiu $sp, $sp, 16
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestLeafWithCalleeSavedScratchPinning";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 v0 asm(\"$2\");"));
+  EXPECT_THAT(code, HasSubstr("register s32 v1 asm(\"$3\");"));
+  EXPECT_THAT(code, HasSubstr("register s32 arg1 asm(\"$5\");"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

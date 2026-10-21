@@ -5071,5 +5071,26 @@ void VoidFunctionWithIgnoredNonVoidCallOnOneBranchAndStoreTail(s32 action) {
 )");
 }
 
+TEST_F(RoundTripTest, NonLeafTwoBranchReturnValuesInV0WithCalls) {
+  AssertRoundTripBitExact("NonLeafTwoBranchReturnValuesInV0WithCalls", R"(
+void notify_slot(s32 slot, s32 val);
+
+s32 NonLeafTwoBranchReturnValuesInV0WithCalls(s32* p, s32 mode) {
+    s32 a = p[0];
+    s32 b = p[1];
+    s32 res;
+    notify_slot(a, b);
+    if (mode > 0) {
+        res = p[2] + a;
+        p[4] = res;
+    } else {
+        res = p[3] - b;
+        p[5] = res;
+    }
+    return res + 1;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
