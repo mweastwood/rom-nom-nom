@@ -246,11 +246,13 @@ cc_test(
 cc_library(
     name = "ast_converter",
     srcs = [
+        "ast_abi_rewriter.cc",
         "ast_arithmetic_simplifier.cc",
         "ast_converter.cc",
         "variable_declaration_builder.cc",
     ],
     hdrs = [
+        "ast_abi_rewriter.h",
         "ast_arithmetic_simplifier.h",
         "ast_converter.h",
         "variable_declaration_builder.h",
