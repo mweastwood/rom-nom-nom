@@ -245,8 +245,14 @@ cc_test(
 
 cc_library(
     name = "ast_converter",
-    srcs = ["ast_converter.cc"],
-    hdrs = ["ast_converter.h"],
+    srcs = [
+        "ast_converter.cc",
+        "variable_declaration_builder.cc",
+    ],
+    hdrs = [
+        "ast_converter.h",
+        "variable_declaration_builder.h",
+    ],
     deps = [
         ":abi_analyzer",
         ":branch_condition_builder",
