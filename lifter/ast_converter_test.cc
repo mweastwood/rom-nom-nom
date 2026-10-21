@@ -3196,5 +3196,71 @@ TEST(AstConverterTest, SplitsParameterReusedInsideConditionalBranchAfterCall) {
   EXPECT_THAT(code, HasSubstr("temp_a0"));
 }
 
+TEST(AstConverterTest, CoalescesZeroFrameFloatParamBitcastThroughStackSlot) {
+  // Frame-size 0 function storing $f12 to 0($sp) and immediately loading it as s32 into $v0.
+  std::vector<uint32_t> words = {
+      0xE7AC0000,  // 00: swc1  $f12, 0($sp)
+      0x8FA20000,  // 04: lw    $v0, 0($sp)
+      0x00021583,  // 08: sra   $v0, $v0, 22
+      0x304201FF,  // 0C: andi  $v0, $v0, 0x1FF
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestZeroFrameFloatBitcast";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("*(s32*)&f12"));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_0")));
+}
+
+TEST(AstConverterTest, PreservesDoubleGlobalLoadAfterDoubleToIntTruncate) {
+  // trunc.w.d $f2, $f0; mfc1 $v1, $f2; lui $at, 0x8012; ldc1 $f0, 0x3B60($at);
+  // mtc1 $v1, $f4; cvt.d.w $f4, $f4; sub.d $f0, $f4, $f0
+  std::vector<uint32_t> words = {
+      0x4620008D,  // 00: trunc.w.d $f2, $f0
+      0x44031000,  // 04: mfc1      $v1, $f2
+      0x3C018012,  // 08: lui       $at, 0x8012
+      0xD4203B60,  // 0C: ldc1      $f0, 0x3B60($at)
+      0x44832000,  // 10: mtc1      $v1, $f4
+      0x00000000,  // 14: nop
+      0x46802121,  // 18: cvt.d.w   $f4, $f4
+      0x46202101,  // 1C: sub.d     $f4, $f4, $f0
+      0x46242002,  // 20: mul.d     $f0, $f4, $f4
+      0x30630001,  // 24: andi      $v1, $v1, 1
+      0x10600002,  // 28: beq       $v1, $zero, 0x34
+      0x00000000,  // 2C: nop
+      0x46200007,  // 30: neg.d     $f0, $f0
+      0x03E00008,  // 34: jr        $ra
+      0x00000000,  // 38: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  SymbolIndex sym_index;
+
+  AstConverterOptions options;
+  options.function_name = "TestDoubleLoadOrdering";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &sym_index, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("v1 = (s32)f0_d;"));
+  EXPECT_THAT(code, HasSubstr("f0_d = *(f64*)&D_80123B60;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

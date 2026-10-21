@@ -5091,5 +5091,114 @@ s32 MultiCallReturnValueAccumulationWithBranchUpdates(s32* s, s32 id) {
 )");
 }
 
+// ============================================================================
+// Category 38: Float Bitcast, Unsigned Shift Before Float Cast & Stride Offsets
+// ============================================================================
+
+TEST_F(RoundTripTest, FloatBitcastExponentExtractBranch) {
+  AssertRoundTripBitExact("FloatBitcastExponentExtractBranch", R"(
+f32 FloatBitcastExponentExtractBranch(f32 x, f32 fallback) {
+    s32 bits = *(s32*)&x;
+    if (((bits >> 22) & 511) < 310) {
+        return x * 0.5f;
+    }
+    return fallback;
+}
+)");
+}
+
+TEST_F(RoundTripTest, DoublePolynomialHornerEvaluationWithParitySign) {
+  AssertRoundTripBitExact("DoublePolynomialHornerEvaluationWithParitySign", R"(
+f32 DoublePolynomialHornerEvaluationWithParitySign(f64 x, f64 c1, f64 c2, s32 n) {
+    f64 x2 = x * x;
+    f64 poly = x + x * x2 * (c1 + x2 * c2);
+    if ((n & 1) == 0) {
+        return (f32)poly;
+    }
+    return -(f32)poly;
+}
+)");
+}
+
+TEST_F(RoundTripTest, TwoParamSaveBeforeZeroArgInitCall) {
+  AssertRoundTripBitExact("TwoParamSaveBeforeZeroArgInitCall", R"(
+void init_subsystems(void);
+s32 run_step(s32* buf, s32 mode);
+
+s32 TwoParamSaveBeforeZeroArgInitCall(s32* buf, s32 mode) {
+    init_subsystems();
+    if (buf[0] != 0) {
+        return run_step(buf, mode);
+    }
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, UnsignedShiftBitwiseOrBeforeSignedFloatCast) {
+  AssertRoundTripBitExact("UnsignedShiftBitwiseOrBeforeSignedFloatCast", R"(
+f32 UnsignedShiftBitwiseOrBeforeSignedFloatCast(s32 a, s32 mask, u32 b) {
+    s32 combined = (a & mask) | (b >> 16);
+    return (f32)combined;
+}
+)");
+}
+
+TEST_F(RoundTripTest, SwitchInsideIfBranchWithPostSwitchProcessing) {
+  AssertRoundTripBitExact("SwitchInsideIfBranchWithPostSwitchProcessing", R"(
+s32 handle_a(void);
+s32 handle_b(void);
+s32 handle_c(void);
+s32 handle_d(void);
+s32 handle_e(void);
+s32 handle_f(void);
+void commit_id(s32 id);
+
+s32 SwitchInsideIfBranchWithPostSwitchProcessing(s32 flags, s32 cmd) {
+    s32 id = 65535;
+    if ((flags & 1) == 0) {
+        switch (cmd & 65535) {
+        case 0:
+            id = handle_a();
+            break;
+        case 1:
+            id = handle_b();
+            break;
+        case 2:
+            id = handle_c();
+            break;
+        case 3:
+            id = handle_d();
+            break;
+        case 4:
+            id = handle_e();
+            break;
+        case 5:
+            id = handle_f();
+            break;
+        default:
+            break;
+        }
+        if ((id & 65535) != 65535) {
+            commit_id(id & 65535);
+        }
+    }
+    return id & 65535;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MultiValueSparseEqualityDispatchToSingleAction) {
+  AssertRoundTripBitExact("MultiValueSparseEqualityDispatchToSingleAction", R"(
+void trigger_event(s32 code);
+
+void MultiValueSparseEqualityDispatchToSingleAction(s32 id) {
+    if (id == 428 || id == 523 || id == 950 || id == 1050 || id == 1200 || id == 1250) {
+        trigger_event(75);
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

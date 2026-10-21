@@ -941,5 +941,38 @@ TEST(ControlFlowStructurerTest, DoubleToUintConversionDiamond) {
   EXPECT_THAT(s, HasSubstr("$v0 = (u32)(f64)$f12;"));
 }
 
+TEST(ControlFlowStructurerTest, DoesNotMergeOrChainWhenBranchDelaySlotOverwritesRegister) {
+  // Block 0 tests beq $v1, $v0, 0x18 with delay slot addiu $v0, $zero, 1250;
+  // Block 1 tests beq $v1, $v0, 0x18 with nop delay slot.
+  // Because Block 0's delay slot overwrites $v0, Block 0 and Block 1 must NOT be merged into ||.
+  std::vector<uint32_t> words = {
+      0x240204B0,  // 0x00: addiu $v0, $zero, 1200
+      0x10620004,  // 0x04: beq   $v1, $v0, 0x18
+      0x240204E2,  // 0x08: addiu $v0, $zero, 1250
+      0x10620002,  // 0x0C: beq   $v1, $v0, 0x18
+      0x00000000,  // 0x10: nop
+      0x08000007,  // 0x14: j     0x8000001C
+      0x00000000,  // 0x18: nop
+      0x2404004B,  // 0x18: addiu $a0, $zero, 75
+      0x03E00008,  // 0x1C: jr    $ra
+      0x00000000,  // 0x20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, Not(HasSubstr("||")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

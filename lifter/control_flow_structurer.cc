@@ -91,6 +91,15 @@ std::unique_ptr<StructuredRegion> CreateSwitch(uint32_t block_id, const JumpTabl
   return r;
 }
 
+bool HasNopBranchDelaySlot(const ControlFlowGraph& cfg, uint32_t block_id) {
+  const auto* b = cfg.GetBlock(block_id);
+  if (b == nullptr || b->instructions.size() < 2) return true;
+  if (b->instructions[b->instructions.size() - 2].IsBranch()) {
+    return b->instructions.back().IsNop();
+  }
+  return true;
+}
+
 bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
   const auto* b = cfg.GetBlock(block_id);
   if (b == nullptr || b->instructions.empty() || b->instructions.size() > 3) return false;
@@ -519,11 +528,8 @@ std::optional<uint32_t> ControlFlowStructurer::FindSwitchJoinBlock(
               }
             }
           }
-          if (follow.has_value() && (current_loop == nullptr || current_loop->Contains(*follow)) &&
-              successor_block_id == *follow && successor_reach_count == non_returning_count) {
-            eliminated.insert(candidate_one);
-          } else if (candidate_one_reach_count >= successor_reach_count &&
-                     candidate_one_post_dominates_all_targets) {
+          if (candidate_one_reach_count >= successor_reach_count &&
+              candidate_one_post_dominates_all_targets) {
             eliminated.insert(successor_block_id);
           } else {
             eliminated.insert(candidate_one);
@@ -1088,7 +1094,7 @@ ControlFlowStructurer::DetectDecisionTreeSwitch(uint32_t root_id) {
     total_cases += vals.size();
   }
 
-  if (total_cases < 2 || total_cases > 5) {
+  if (total_cases < 2 || total_cases > 5 || target_to_cases.size() < 2) {
     return std::nullopt;
   }
 
@@ -1726,7 +1732,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     }
 
     // Short-Circuit OR (||): entry branches to succ_taken; succ_fallthrough also reaches succ_taken
-    if (!visited_.contains(succ_fallthrough)) {
+    if (!visited_.contains(succ_fallthrough) && HasNopBranchDelaySlot(*cfg_, entry)) {
       const auto* b_fallthrough = cfg_->GetBlock(succ_fallthrough);
       if (b_fallthrough != nullptr && b_fallthrough->successors.size() == 2 &&
           b_fallthrough->predecessors.size() == 1 && b_fallthrough->predecessors[0] == entry &&
@@ -1763,9 +1769,9 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
             or_inverts.push_back(invert);
 
             const auto* next_b = cfg_->GetBlock(other);
-            if (next_b != nullptr && next_b->successors.size() == 2 &&
-                next_b->predecessors.size() == 1 && !visited_.contains(other) &&
-                IsPureConditionBlock(*cfg_, other) &&
+            if (HasNopBranchDelaySlot(*cfg_, curr_id) && next_b != nullptr &&
+                next_b->successors.size() == 2 && next_b->predecessors.size() == 1 &&
+                !visited_.contains(other) && IsPureConditionBlock(*cfg_, other) &&
                 (next_b->successors[0] == succ_taken || next_b->successors[1] == succ_taken)) {
               curr_id = other;
               curr_taken = 0;
@@ -1841,7 +1847,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     // Check for short-circuit AND (&&): entry branches to after on false; succ_fallthrough also
     // branches to after on false
     uint32_t and_after = succ_taken;
-    if (!visited_.contains(succ_fallthrough)) {
+    if (!visited_.contains(succ_fallthrough) && HasNopBranchDelaySlot(*cfg_, entry)) {
       const auto* b_fallthrough = cfg_->GetBlock(succ_fallthrough);
       if (b_fallthrough != nullptr && b_fallthrough->successors.size() == 2 &&
           b_fallthrough->predecessors.size() == 1 && b_fallthrough->predecessors[0] == entry &&
@@ -1878,9 +1884,9 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
             and_inverts.push_back(invert);
 
             const auto* next_b = cfg_->GetBlock(other);
-            if (next_b != nullptr && next_b->successors.size() == 2 &&
-                next_b->predecessors.size() == 1 && !visited_.contains(other) &&
-                IsPureConditionBlock(*cfg_, other) &&
+            if (HasNopBranchDelaySlot(*cfg_, curr_id) && next_b != nullptr &&
+                next_b->successors.size() == 2 && next_b->predecessors.size() == 1 &&
+                !visited_.contains(other) && IsPureConditionBlock(*cfg_, other) &&
                 (next_b->successors[0] == and_after || next_b->successors[1] == and_after)) {
               curr_id = other;
               curr_taken = 0;
