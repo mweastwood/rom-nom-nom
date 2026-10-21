@@ -5214,5 +5214,25 @@ s32 EntryBlockDecisionTreeSwitchWithCalleeSavedRegisters(s32 x, s32 y, s32 mode)
 )");
 }
 
+TEST_F(RoundTripTest, LeafWithModifiedParamAndMultipleCallerSavedScratch) {
+  AssertRoundTripBitExact("LeafWithModifiedParamAndMultipleCallerSavedScratch", R"(
+s32 LeafWithModifiedParamAndMultipleCallerSavedScratch(s32* p, s32 n) {
+    s32 sum = 0;
+    while (n > 0) {
+        s32 a = p[0];
+        s32 b = p[1];
+        if (a > b) {
+            sum += (a - b) * 3;
+        } else {
+            sum += (b - a) * 2;
+        }
+        p += 2;
+        n--;
+    }
+    return sum;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

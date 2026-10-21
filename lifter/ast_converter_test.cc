@@ -3544,5 +3544,41 @@ TEST(AstConverterTest, PreservesCalleeSavedFprCopyFromGprFloatParameterAcrossCal
   EXPECT_THAT(code, HasSubstr("f20 = arg1;"));
 }
 
+TEST(AstConverterTest, PreservesSeparateGlobalIndexLoadBeforeGlobalArrayLookupInCondition) {
+  std::vector<uint32_t> words = {
+      0x00808021,  // 00: addu  $s0, $a0, $zero
+      0x3C038020,  // 04: lui   $v1, 0x8020
+      0x00701821,  // 08: addu  $v1, $v1, $s0
+      0x9463C1B0,  // 0C: lhu   $v1, -15952($v1)
+      0x00031080,  // 10: sll   $v0, $v1, 2
+      0x00431021,  // 14: addu  $v0, $v0, $v1
+      0x000210C0,  // 18: sll   $v0, $v0, 3
+      0x3C038016,  // 1C: lui   $v1, 0x8016
+      0x00621821,  // 20: addu  $v1, $v1, $v0
+      0x90638512,  // 24: lbu   $v1, -31470($v1)
+      0x240200FF,  // 28: addiu $v0, $zero, 255
+      0x10620002,  // 2C: beq   $v1, $v0, 0x38
+      0x00000000,  // 30: nop
+      0xAE040000,  // 34: sw    $a0, 0($s0)
+      0x03E00008,  // 38: jr    $ra
+      0x00000000,  // 3C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestSeparateGlobalIndexLoad";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("v0 = (*(u16*)((u8*)0x801FC1B0 + arg0) * 40);"));
+  EXPECT_THAT(code, HasSubstr("if ((*(u8*)((u8*)0x80158512 + v0) != 255))"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

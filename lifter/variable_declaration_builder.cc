@@ -751,9 +751,11 @@ absl::Status PrependSynthesizedLocalDeclarations(
             (base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
              base == "f16" || base == "f18" ||
              ((base == "f0" || base == "f12" || base == "f14") &&
-              return_type.ToString() == "void" &&
-              ((is_leaf_func && has_shared_fp_base) ||
-               (!is_leaf_func && base != "f14" && fp_base_counts.size() <= 10))))) {
+              ((return_type.ToString() == "void" &&
+                ((is_leaf_func && (has_shared_fp_base || callee_saved_fp_count >= 1)) ||
+                 (!is_leaf_func && base != "f14" && fp_base_counts.size() <= 10))) ||
+               (is_leaf_func && return_type.ToString() != "f32" &&
+                return_type.ToString() != "f64" && fp_base_counts.size() >= 8))))) {
           if (is_caller_saved_safe_across_calls(var_name)) {
             pinned_caller_fp_count++;
             return absl::StrCat("$", base);
@@ -813,14 +815,15 @@ absl::Status PrependSynthesizedLocalDeclarations(
       caller_gpr_reg = "$3";
     } else if ((!is_leaf_func || is_leaf_with_s_regs ||
                 (unpinned_gpr_locals_count >= 4 && !is_float_return_leaf_with_v0_v1)) &&
-               (!any_param_modified || is_leaf_with_s_regs ||
+               (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
                 (!is_leaf_func && !absl::StrContains(body_str, "arg1, arg2, arg3"))) &&
                var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
                var_name[3] <= '3') {
       int reg_num = 4 + (var_name[3] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
-    } else if ((!is_leaf_func || is_leaf_with_s_regs) && var_name.size() == 7 &&
-               absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' && var_name[6] <= '3') {
+    } else if ((!is_leaf_func || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1) &&
+               var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
+               var_name[6] <= '3') {
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&

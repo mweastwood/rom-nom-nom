@@ -345,9 +345,7 @@ absl::Status AlignFunctionsInAssemblyAndReassemble(
                  : 0)
           : (1LL << 30);
   int64_t max_pad_bytes =
-      (module_target_size > 0)
-          ? ((effective_used > module_target_size) ? kMaxSoftOverflowBytes : free_pad_bytes)
-          : (1LL << 30);
+      (module_target_size > 0) ? (free_pad_bytes + kMaxSoftOverflowBytes) : (1LL << 30);
 
   absl::flat_hash_map<std::string, int32_t> jal_counts = external_jal_counts;
   for (const auto& raw_line : lines) {
