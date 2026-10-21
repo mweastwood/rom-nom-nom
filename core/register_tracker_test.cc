@@ -586,5 +586,58 @@ TEST(RegisterTrackerTest, StepMtc1PropagatesLuiOriSymbolAddressConstantToFpr) {
   EXPECT_EQ(*f4_bits, 0x3E4CCCCD);
 }
 
+TEST(RegisterTrackerTest, DetermineReturnsV0StripsDelaySlotV0DefConsumedAcrossUnconditionalJump) {
+  // Pattern from HM64 func_800E1FAC (B97C0.s):
+  //   0x80000000: lw    $v0, 0($a0)
+  //   0x80000004: bne   $v0, $zero, 0x80000018 (epilogue)
+  //   0x80000008: addiu $v0, $zero, 2          (delay slot for fallthrough j -> store tail)
+  //   0x8000000C: j     0x80000014             (single-hop unconditional jump to store tail)
+  //   0x80000010: nop
+  //   0x80000014: sb    $v0, 4($a0)            (consumes $v0 in store tail)
+  //   0x80000018: jr    $ra
+  //   0x8000001C: nop
+  std::vector<uint32_t> words = {
+      0x8C820000,  // 00: lw    $v0, 0($a0)
+      0x14400004,  // 04: bne   $v0, $zero, 0x80000018
+      0x24020002,  // 08: addiu $v0, $zero, 2
+      0x08000005,  // 0C: j     0x80000014
+      0x00000000,  // 10: nop
+      0xA0820004,  // 14: sb    $v0, 4($a0)
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_FALSE(DetermineReturnsV0(cfg));
+}
+
+TEST(RegisterTrackerTest, DetermineReturnsV0RejectsVoidFunctionWithIgnoredCalleeReturnOnOneBranch) {
+  // Pattern from HM64 func_8005D2B0 / func_8006C628:
+  //   0x80000000: beq   $a0, $zero, 0x80000018 (early exit to epilogue without setting $v0)
+  //   0x80000004: nop
+  //   0x80000008: jal   0x80001000             (callee that returns $v0, ignored by caller)
+  //   0x8000000C: nop
+  //   0x80000010: j     0x80000018
+  //   0x80000014: nop
+  //   0x80000018: jr    $ra
+  //   0x8000001C: nop
+  std::vector<uint32_t> words = {
+      0x10800005,  // 00: beq $a0, $zero, 0x80000018
+      0x00000000,  // 04: nop
+      0x0C000400,  // 08: jal 0x80001000
+      0x00000000,  // 0C: nop
+      0x08000006,  // 10: j   0x80000018
+      0x00000000,  // 14: nop
+      0x03E00008,  // 18: jr  $ra
+      0x00000000,  // 1C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  absl::flat_hash_set<std::string> funcs_returning_v0 = {"func_80001000"};
+
+  EXPECT_FALSE(DetermineReturnsV0(cfg, nullptr, &funcs_returning_v0));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

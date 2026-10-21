@@ -91,7 +91,8 @@ void ScanCallReturnRegisterUses(absl::Span<const Instruction> insts, size_t call
       }
     }
     if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr ||
-        (next_inst.opcode == Opcode::kJr && next_inst.rs == Register::kRa)) {
+        next_inst.opcode == Opcode::kJ || next_inst.opcode == Opcode::kJr ||
+        next_inst.IsUnconditionalBranch()) {
       // Also inspect the delay slot of this subsequent call/return before terminating scan
       if (next_i + 1 < insts.size()) {
         RegisterUseDef ds_ud = GetInstructionUseDef(insts[next_i + 1]);

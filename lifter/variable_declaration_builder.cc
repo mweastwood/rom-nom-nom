@@ -284,7 +284,14 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
         const auto& ss = static_cast<const SwitchStatement&>(s);
         if (!check_expr(ss.Condition())) return false;
         bool before = clobbered;
-        bool any_clobbered = before;
+        bool has_default = false;
+        for (const auto& c : ss.Cases()) {
+          if (c.is_default) {
+            has_default = true;
+            break;
+          }
+        }
+        bool any_clobbered = has_default ? false : before;
         bool saved_break = break_clobbered;
         break_clobbered = false;
         for (const auto& c : ss.Cases()) {
@@ -751,6 +758,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
         is_leaf_func && (return_type.ToString() == "f32" || return_type.ToString() == "f64") &&
         std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "v1") !=
             local_vars_to_declare.end();
+    bool is_void_leaf_with_all_s_regs =
+        is_leaf_func && return_type.ToString() == "void" && callee_saved_gpr_count >= 8;
     bool v0_assigned_many_times = false;
     if (var_name == "v0" && !is_leaf_func) {
       int v0_assigns = 0;
@@ -768,9 +777,12 @@ absl::Status PrependSynthesizedLocalDeclarations(
         pos += 5;
       }
     }
-    if ((is_float_return_leaf_with_v0_v1 || v0_assigned_many_times) && var_name == "v0") {
+    if ((is_float_return_leaf_with_v0_v1 || is_void_leaf_with_all_s_regs ||
+         v0_assigned_many_times) &&
+        var_name == "v0") {
       caller_gpr_reg = "$2";
-    } else if ((is_float_return_leaf_with_v0_v1 || !is_leaf_func) && var_name == "v1") {
+    } else if ((is_float_return_leaf_with_v0_v1 || is_void_leaf_with_all_s_regs || !is_leaf_func) &&
+               var_name == "v1") {
       caller_gpr_reg = "$3";
     } else if ((!is_leaf_func ||
                 (unpinned_gpr_locals_count >= 4 && !is_float_return_leaf_with_v0_v1)) &&

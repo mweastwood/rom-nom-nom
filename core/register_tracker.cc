@@ -78,29 +78,42 @@ CfgReachabilityGraph BuildCfgReachabilityGraph(const ControlFlowGraph& cfg,
   return graph;
 }
 
-bool BlockUsesV0BeforeRedef(const BasicBlock& blk) {
-  for (size_t idx = 0; idx < blk.instructions.size(); ++idx) {
-    const auto& inst = blk.instructions[idx];
-    if (inst.IsCall()) {
-      if (idx + 1 < blk.instructions.size()) {
-        RegisterUseDef delay_ud = GetInstructionUseDef(blk.instructions[idx + 1]);
-        for (Register u : delay_ud.gpr_uses) {
+bool BlockUsesV0BeforeRedef(const ControlFlowGraph& cfg,
+                            const absl::flat_hash_map<uint32_t, size_t>& id_to_index,
+                            const BasicBlock& start_blk) {
+  const BasicBlock* blk = &start_blk;
+  for (int hop = 0; hop < 4 && blk != nullptr; ++hop) {
+    for (size_t idx = 0; idx < blk->instructions.size(); ++idx) {
+      const auto& inst = blk->instructions[idx];
+      if (inst.IsCall()) {
+        if (idx + 1 < blk->instructions.size()) {
+          RegisterUseDef delay_ud = GetInstructionUseDef(blk->instructions[idx + 1]);
+          for (Register u : delay_ud.gpr_uses) {
+            if (u == Register::kV0) return true;
+          }
+        }
+        RegisterUseDef call_ud = GetInstructionUseDef(inst);
+        for (Register u : call_ud.gpr_uses) {
           if (u == Register::kV0) return true;
         }
+        return false;
       }
-      RegisterUseDef call_ud = GetInstructionUseDef(inst);
-      for (Register u : call_ud.gpr_uses) {
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      for (Register u : ud.gpr_uses) {
         if (u == Register::kV0) return true;
       }
-      return false;
+      for (Register d : ud.gpr_defs) {
+        if (d == Register::kV0) return false;
+      }
     }
-    RegisterUseDef ud = GetInstructionUseDef(inst);
-    for (Register u : ud.gpr_uses) {
-      if (u == Register::kV0) return true;
+    if (blk->HasReturn() || blk->successors.size() != 1) {
+      break;
     }
-    for (Register d : ud.gpr_defs) {
-      if (d == Register::kV0) return false;
+    auto next_it = id_to_index.find(blk->successors[0]);
+    if (next_it == id_to_index.end()) {
+      break;
     }
+    blk = &cfg.Blocks()[next_it->second];
   }
   return false;
 }
@@ -147,7 +160,7 @@ bool ShouldStripDelaySlotV0DefOnEdge(const ControlFlowGraph& cfg, const BasicBlo
     if (edge.type == *opposite_edge_type) {
       auto opp_it = id_to_index.find(edge.to_block_id);
       if (opp_it != id_to_index.end()) {
-        return BlockUsesV0BeforeRedef(cfg.Blocks()[opp_it->second]);
+        return BlockUsesV0BeforeRedef(cfg, id_to_index, cfg.Blocks()[opp_it->second]);
       }
       break;
     }
@@ -1083,6 +1096,36 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
     }
   }
 
+  const bool has_direct_v0_return =
+      (functions_returning_v0 == nullptr || functions_returning_v0->empty())
+          ? true
+          : DetermineReturnsV0(cfg, nullptr, nullptr);
+
+  auto eval_pred_edge_avail = [&](size_t p, size_t b) -> bool {
+    const auto& p_block = cfg.Blocks()[p];
+    const auto* term = p_block.Terminator();
+    absl::Span<const Instruction> executed = p_block.instructions;
+    bool is_likely_fallthrough = false;
+    if (term != nullptr && term->IsBranchLikely()) {
+      for (const auto& edge : p_block.outgoing_edges) {
+        if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kFallthrough) {
+          is_likely_fallthrough = true;
+          break;
+        }
+      }
+    }
+    if (is_likely_fallthrough && executed.size() > 1) {
+      executed = executed.subspan(0, executed.size() - 1);
+    }
+    if (ShouldStripDelaySlotV0DefOnEdge(cfg, p_block, cfg.Blocks()[b].id, executed, id_to_index)) {
+      executed = executed.subspan(0, executed.size() - 1);
+    }
+    int effect = eval_seq(executed);
+    if (effect == 1) return true;
+    if (effect == -1) return false;
+    return in_avail[p];
+  };
+
   bool any_return_avail = false;
   for (size_t b = 0; b < cfg.Blocks().size(); ++b) {
     if (!reachable[b]) continue;
@@ -1097,6 +1140,23 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
       return_avail = false;
     } else {
       return_avail = in_avail[b];
+    }
+
+    if (return_avail && !has_direct_v0_return && effect == 0 && !predecessors[b].empty()) {
+      for (size_t p : predecessors[b]) {
+        if (eval_pred_edge_avail(p, b)) continue;
+        bool pred_has_call = false;
+        for (const auto& inst : cfg.Blocks()[p].instructions) {
+          if (inst.IsCall()) {
+            pred_has_call = true;
+            break;
+          }
+        }
+        if (!pred_has_call) {
+          return_avail = false;
+          break;
+        }
+      }
     }
 
     if (return_avail) {

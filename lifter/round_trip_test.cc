@@ -5048,5 +5048,28 @@ s32 NineCalleeSavedRegistersAcrossCallsUsesFpS8(s32* p) {
 )");
 }
 
+TEST_F(RoundTripTest, VoidFunctionWithIgnoredNonVoidCallOnOneBranchAndStoreTail) {
+  AssertRoundTripBitExact("VoidFunctionWithIgnoredNonVoidCallOnOneBranchAndStoreTail", R"(
+extern u8 g_mode_state;
+s32 set_loop_callback(s32 mode);
+void play_mode_sfx(s32 sfx);
+
+void VoidFunctionWithIgnoredNonVoidCallOnOneBranchAndStoreTail(s32 action) {
+    if (g_mode_state != 0) {
+        switch (action) {
+            case 1:
+                play_mode_sfx(10);
+                set_loop_callback(4);
+                break;
+            case 2:
+                g_mode_state = 2;
+                play_mode_sfx(20);
+                break;
+        }
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
