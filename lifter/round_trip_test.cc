@@ -76,30 +76,9 @@ class RoundTripTest : public ::testing::Test {
 
     // Setup types.h
     std::filesystem::path types_h = work_dir_ / "types.h";
-    std::string types_content = R"(#ifndef TYPES_H
-#define TYPES_H
-
-typedef signed char s8;
-typedef unsigned char u8;
-typedef signed short s16;
-typedef unsigned short u16;
-typedef signed int s32;
-typedef unsigned int u32;
-typedef signed long long s64;
-typedef unsigned long long u64;
-
-typedef float f32;
-typedef double f64;
-
-typedef struct { u8 b[4]; } UnalignedWord;
-typedef struct { u8 b[6]; } UnalignedBlock6;
-typedef struct { u8 b[8]; } UnalignedBlock8;
-typedef struct { u8 b[12]; } UnalignedBlock12;
-typedef struct { u8 b[16]; } UnalignedBlock16;
-
-#endif // TYPES_H
-)";
-    WriteTextFile(types_h, types_content);
+    TypesHeaderOptions types_opts;
+    types_opts.include_math_intrinsics = false;
+    WriteTextFile(types_h, CEmitter::EmitTypesHeader(types_opts));
 
     ToolchainOptions toolchain_opts;
     toolchain_opts.repo_root = FindWorkspaceFile(".");
@@ -120,23 +99,10 @@ typedef struct { u8 b[16]; } UnalignedBlock16;
     // 1. Prepare types header if custom types requested
     if (!options.extra_types_header.empty()) {
       std::filesystem::path types_h = work_dir_ / "types.h";
-      std::string types_content = R"(#ifndef TYPES_H
-#define TYPES_H
-
-typedef signed char s8;
-typedef unsigned char u8;
-typedef signed short s16;
-typedef unsigned short u16;
-typedef signed int s32;
-typedef unsigned int u32;
-typedef signed long long s64;
-typedef unsigned long long u64;
-
-typedef float f32;
-typedef double f64;
-
-)" + options.extra_types_header + "\n#endif // TYPES_H\n";
-      WriteTextFile(types_h, types_content);
+      TypesHeaderOptions types_opts;
+      types_opts.include_math_intrinsics = false;
+      types_opts.extra_declarations = options.extra_types_header;
+      WriteTextFile(types_h, CEmitter::EmitTypesHeader(types_opts));
     }
 
     // 2. Prepare original C source file

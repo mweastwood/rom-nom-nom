@@ -22,6 +22,29 @@ namespace rom_nom_nom {
 
 namespace {
 
+struct MathIntrinsic {
+  std::string_view name;
+  std::string_view type;  // "f32" or "f64"
+  std::string_view asm_inst;
+};
+
+constexpr MathIntrinsic kMathIntrinsics[] = {
+    {"N64Sqrtf", "f32", "sqrt.s %0, %1"},
+    {"N64Sqrt", "f64", "sqrt.d %0, %1"},
+    {"sqrtf", "f32", "sqrt.s %0, %1"},
+    {"sqrt", "f64", "sqrt.d %0, %1"},
+    {"fabsf", "f32", "abs.s %0, %1"},
+    {"fabs", "f64", "abs.d %0, %1"},
+    {"ceilf", "f32", "ceil.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"floorf", "f32", "floor.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"roundf", "f32", "round.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"truncf", "f32", "trunc.w.s %0, %1\n\tcvt.s.w %0, %0"},
+    {"ceil", "f64", "ceil.w.d %0, %1\n\tcvt.d.w %0, %0"},
+    {"floor", "f64", "floor.w.d %0, %1\n\tcvt.d.w %0, %0"},
+    {"round", "f64", "round.w.d %0, %1\n\tcvt.d.w %0, %0"},
+    {"trunc", "f64", "trunc.w.d %0, %1\n\tcvt.d.w %0, %0"},
+};
+
 bool IsCompilerIntrinsic(std::string_view name) {
   return absl::StartsWith(name, "__n64_") || absl::StartsWith(name, "__builtin_");
 }
@@ -644,6 +667,81 @@ std::string CTranslationUnit::ToString() const {
 
   output += combined_function_code;
   return output;
+}
+
+std::vector<std::string_view> CEmitter::StandardMathIntrinsicNames() {
+  std::vector<std::string_view> names;
+  names.reserve(sizeof(kMathIntrinsics) / sizeof(kMathIntrinsics[0]));
+  for (const auto& intrin : kMathIntrinsics) {
+    names.push_back(intrin.name);
+  }
+  return names;
+}
+
+std::string CEmitter::EmitTypesHeader(const TypesHeaderOptions& options) {
+  std::string out = R"(#ifndef TYPES_H
+#define TYPES_H
+
+typedef signed char s8;
+typedef unsigned char u8;
+typedef signed short s16;
+typedef unsigned short u16;
+typedef signed int s32;
+typedef unsigned int u32;
+typedef signed long long s64;
+typedef unsigned long long u64;
+
+typedef float f32;
+typedef double f64;
+)";
+
+  if (options.include_unaligned_structs) {
+    out += R"(
+typedef struct { u8 b[4]; } UnalignedWord;
+typedef struct { u8 b[6]; } UnalignedBlock6;
+typedef struct { u8 b[8]; } UnalignedBlock8;
+typedef struct { u8 b[12]; } UnalignedBlock12;
+typedef struct { u8 b[16]; } UnalignedBlock16;
+)";
+  }
+
+  if (options.include_math_intrinsics) {
+    out += "\n#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))\n";
+    for (const auto& intrin : kMathIntrinsics) {
+      if (options.should_skip_math_intrinsic && options.should_skip_math_intrinsic(intrin.name)) {
+        continue;
+      }
+      if (options.emitted_math_intrinsics != nullptr) {
+        options.emitted_math_intrinsics->insert(std::string(intrin.name));
+      }
+      out += absl::StrFormat(
+          "static inline %s %s(%s x) {\n"
+          "  %s res;\n"
+          "  __asm__(\"%s\" : \"=f\"(res) : \"f\"(x));\n"
+          "  return res;\n"
+          "}\n",
+          intrin.type, intrin.name, intrin.type, intrin.type, intrin.asm_inst);
+    }
+    out += R"(#else
+#ifdef __cplusplus
+#include <cmath>
+static inline f32 N64Sqrtf(f32 x) { return std::sqrt(x); }
+static inline f64 N64Sqrt(f64 x) { return std::sqrt(x); }
+#else
+#include <math.h>
+static inline f32 N64Sqrtf(f32 x) { return sqrtf(x); }
+static inline f64 N64Sqrt(f64 x) { return sqrt(x); }
+#endif
+#endif
+)";
+  }
+
+  if (!options.extra_declarations.empty()) {
+    out += "\n" + options.extra_declarations + "\n";
+  }
+
+  out += "\n#endif  // TYPES_H\n";
+  return out;
 }
 
 std::string CEmitter::EmitFunction(const FunctionDeclaration& func,

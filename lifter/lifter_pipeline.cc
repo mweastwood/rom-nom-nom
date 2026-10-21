@@ -29,33 +29,6 @@
 
 namespace rom_nom_nom {
 
-namespace {
-
-struct MathIntrinsic {
-  std::string_view name;
-  std::string_view type;  // "f32" or "f64"
-  std::string_view asm_inst;
-};
-
-constexpr MathIntrinsic kMathIntrinsics[] = {
-    {"N64Sqrtf", "f32", "sqrt.s %0, %1"},
-    {"N64Sqrt", "f64", "sqrt.d %0, %1"},
-    {"sqrtf", "f32", "sqrt.s %0, %1"},
-    {"sqrt", "f64", "sqrt.d %0, %1"},
-    {"fabsf", "f32", "abs.s %0, %1"},
-    {"fabs", "f64", "abs.d %0, %1"},
-    {"ceilf", "f32", "ceil.w.s %0, %1\n\tcvt.s.w %0, %0"},
-    {"floorf", "f32", "floor.w.s %0, %1\n\tcvt.s.w %0, %0"},
-    {"roundf", "f32", "round.w.s %0, %1\n\tcvt.s.w %0, %0"},
-    {"truncf", "f32", "trunc.w.s %0, %1\n\tcvt.s.w %0, %0"},
-    {"ceil", "f64", "ceil.w.d %0, %1\n\tcvt.d.w %0, %0"},
-    {"floor", "f64", "floor.w.d %0, %1\n\tcvt.d.w %0, %0"},
-    {"round", "f64", "round.w.d %0, %1\n\tcvt.d.w %0, %0"},
-    {"trunc", "f64", "trunc.w.d %0, %1\n\tcvt.d.w %0, %0"},
-};
-
-}  // namespace
-
 LifterPipeline::LifterPipeline(LifterPipelineOptions options,
                                std::unique_ptr<FunctionLoader> loader)
     : options_(std::move(options)), loader_(std::move(loader)) {
@@ -228,9 +201,9 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFu
     }
   }
   if (includes_types_h) {
-    for (const auto& intrin : kMathIntrinsics) {
-      if (tu.symbol_index == nullptr || tu.symbol_index->FindByName(intrin.name) == nullptr) {
-        tu.header_provided_functions.insert(std::string(intrin.name));
+    for (std::string_view intrin_name : CEmitter::StandardMathIntrinsicNames()) {
+      if (tu.symbol_index == nullptr || tu.symbol_index->FindByName(intrin_name) == nullptr) {
+        tu.header_provided_functions.insert(std::string(intrin_name));
       }
     }
   }
@@ -590,54 +563,10 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
   std::filesystem::path types_file_path = output_dir / "types.h";
   std::ofstream types_output_stream(types_file_path);
   if (types_output_stream.is_open()) {
-    types_output_stream << R"(#ifndef TYPES_H
-#define TYPES_H
-
-typedef signed char s8;
-typedef unsigned char u8;
-typedef signed short s16;
-typedef unsigned short u16;
-typedef signed int s32;
-typedef unsigned int u32;
-typedef signed long long s64;
-typedef unsigned long long u64;
-
-typedef float f32;
-typedef double f64;
-
-typedef struct { u8 b[4]; } UnalignedWord;
-typedef struct { u8 b[6]; } UnalignedBlock6;
-typedef struct { u8 b[8]; } UnalignedBlock8;
-typedef struct { u8 b[12]; } UnalignedBlock12;
-typedef struct { u8 b[16]; } UnalignedBlock16;
-
-)";
-    types_output_stream << "#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))\n";
-    for (const auto& intrin : kMathIntrinsics) {
-      if (!has_symbol_or_func(intrin.name)) {
-        header_provided_functions.insert(std::string(intrin.name));
-        types_output_stream << absl::StrFormat(
-            "static inline %s %s(%s x) {\n"
-            "  %s res;\n"
-            "  __asm__(\"%s\" : \"=f\"(res) : \"f\"(x));\n"
-            "  return res;\n"
-            "}\n",
-            intrin.type, intrin.name, intrin.type, intrin.type, intrin.asm_inst);
-      }
-    }
-    types_output_stream << R"(#else
-#ifdef __cplusplus
-#include <cmath>
-static inline f32 N64Sqrtf(f32 x) { return std::sqrt(x); }
-static inline f64 N64Sqrt(f64 x) { return std::sqrt(x); }
-#else
-#include <math.h>
-static inline f32 N64Sqrtf(f32 x) { return sqrtf(x); }
-static inline f64 N64Sqrt(f64 x) { return sqrt(x); }
-#endif
-#endif
-)";
-    types_output_stream << "\n#endif  // TYPES_H\n";
+    TypesHeaderOptions types_opts;
+    types_opts.should_skip_math_intrinsic = has_symbol_or_func;
+    types_opts.emitted_math_intrinsics = &header_provided_functions;
+    types_output_stream << CEmitter::EmitTypesHeader(types_opts);
   }
 
   std::vector<std::string> default_headers = {"types.h"};

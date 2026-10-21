@@ -51,43 +51,6 @@ std::string EmitSingleFunctionWithExterns(const FunctionDeclaration& func,
   return CEmitter::EmitTranslationUnit(single_tu, emitter_opts);
 }
 
-std::string WriteTypesHeaderContent() {
-  return R"(#ifndef TYPES_H
-#define TYPES_H
-
-typedef signed char s8;
-typedef unsigned char u8;
-typedef signed short s16;
-typedef unsigned short u16;
-typedef signed int s32;
-typedef unsigned int u32;
-typedef signed long long s64;
-typedef unsigned long long u64;
-
-typedef float f32;
-typedef double f64;
-
-#if defined(__GNUC__) && (defined(__mips__) || defined(__mips))
-static inline f32 N64Sqrtf(f32 x) {
-  f32 res;
-  __asm__("sqrt.s %0, %1" : "=f"(res) : "f"(x));
-  return res;
-}
-static inline f64 N64Sqrt(f64 x) {
-  f64 res;
-  __asm__("sqrt.d %0, %1" : "=f"(res) : "f"(x));
-  return res;
-}
-#else
-#include <math.h>
-static inline f32 N64Sqrtf(f32 x) { return sqrtf(x); }
-static inline f64 N64Sqrt(f64 x) { return sqrt(x); }
-#endif
-
-#endif  // TYPES_H
-)";
-}
-
 }  // namespace
 
 TunerPipeline::TunerPipeline(TunerPipelineOptions options, std::unique_ptr<LifterPipeline> lifter,
@@ -259,7 +222,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   std::filesystem::create_directories(temporary_include_dir, error_code);
   {
     std::ofstream types_out(temporary_include_dir / "types.h");
-    types_out << WriteTypesHeaderContent();
+    types_out << CEmitter::EmitTypesHeader();
   }
   std::vector<std::filesystem::path> extra_include_dirs = {temporary_include_dir};
   if (!options_.lifted_dir.empty()) {

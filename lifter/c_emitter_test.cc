@@ -564,5 +564,23 @@ TEST(CEmitterTest, EmitTranslationUnitPromotesConsistentScalarCastDerefGlobals) 
   EXPECT_THAT(emitted_code, HasSubstr("*(u16*)&D_800AF3C8 = 2;"));
 }
 
+TEST(CEmitterTest, EmitTypesHeaderRespectsIntrinsicFilterAndExtraDeclarations) {
+  std::set<std::string> emitted_intrinsics;
+  TypesHeaderOptions options;
+  options.should_skip_math_intrinsic = [](std::string_view name) { return name == "sqrtf"; };
+  options.emitted_math_intrinsics = &emitted_intrinsics;
+  options.extra_declarations = "typedef struct { s32 x; } CustomVec;";
+
+  std::string header = CEmitter::EmitTypesHeader(options);
+
+  EXPECT_THAT(header, HasSubstr("typedef signed int s32;"));
+  EXPECT_THAT(header, HasSubstr("UnalignedBlock16;"));
+  EXPECT_THAT(header, HasSubstr("static inline f32 N64Sqrtf(f32 x)"));
+  EXPECT_THAT(header, ::testing::Not(HasSubstr("static inline f32 sqrtf(f32 x)")));
+  EXPECT_THAT(header, HasSubstr("typedef struct { s32 x; } CustomVec;"));
+  EXPECT_TRUE(emitted_intrinsics.count("N64Sqrtf") > 0);
+  EXPECT_EQ(emitted_intrinsics.count("sqrtf"), 0u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
