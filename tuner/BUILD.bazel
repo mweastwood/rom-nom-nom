@@ -26,12 +26,24 @@ cc_test(
 )
 
 cc_library(
+    name = "ast_global_mutations",
+    srcs = ["ast_global_mutations.cc"],
+    hdrs = ["ast_global_mutations.h"],
+    deps = [
+        "//core:c_ast",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
     name = "ast_mutator",
     srcs = ["ast_mutator.cc"],
     hdrs = ["ast_mutator.h"],
     deps = [
+        ":ast_global_mutations",
         "//core:c_ast",
         "//core:game_config_cc_proto",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
     ],
