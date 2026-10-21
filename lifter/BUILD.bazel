@@ -406,14 +406,11 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "round_trip_test",
-    size = "small",
-    srcs = ["round_trip_test.cc"],
-    copts = ["-std=c++20"],
-    data = [
-        "//toolchain:all_files",
-    ],
+cc_library(
+    name = "round_trip_test_util",
+    testonly = True,
+    srcs = ["round_trip_test_util.cc"],
+    hdrs = ["round_trip_test_util.h"],
     deps = [
         ":c_emitter",
         ":function_loader",
@@ -422,14 +419,28 @@ cc_test(
         "//core:compiler",
         "//core:disassembler",
         "//core:elf_reader",
-        "//core:mips",
         "//core:relocation_applier",
         "//core:symbol_registry",
         "//core:toolchain",
-        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "round_trip_test",
+    size = "small",
+    srcs = ["round_trip_test.cc"],
+    copts = ["-std=c++20"],
+    data = [
+        "//toolchain:all_files",
+    ],
+    shard_count = 8,
+    deps = [
+        ":round_trip_test_util",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
