@@ -8961,6 +8961,32 @@ const CallExpression* UnwrapDirectCall(const CExpression& expr) {
   return nullptr;
 }
 
+const CallExpression* UnwrapCallOrPureUnaryOnCall(const CExpression& expr) {
+  const CExpression* cur = &expr;
+  while (true) {
+    if (cur->Kind() == CExpressionKind::kCastExpression) {
+      cur = &static_cast<const CastExpression*>(cur)->Operand();
+      continue;
+    }
+    if (cur->Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& bin = static_cast<const BinaryExpression&>(*cur);
+      if (!ExpressionHasCall(bin.Rhs()) && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        cur = &bin.Lhs();
+        continue;
+      }
+      if (!ExpressionHasCall(bin.Lhs()) && bin.Lhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        cur = &bin.Rhs();
+        continue;
+      }
+    }
+    break;
+  }
+  if (cur->Kind() == CExpressionKind::kCallExpression) {
+    return static_cast<const CallExpression*>(cur);
+  }
+  return nullptr;
+}
+
 bool CheckArgRegInCall(std::string_view r, const CExpression& expr) {
   if (!ExpressionUsesVariable(expr, r)) return true;
   const CallExpression* call = UnwrapDirectCall(expr);
@@ -9013,7 +9039,8 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
           if (!CheckArgRegInCall(r, rhs)) return false;
         }
         if (lhs_name == r) {
-          if (!rhs_has_call || UnwrapDirectCall(rhs) != nullptr) {
+          if (!rhs_has_call || UnwrapDirectCall(rhs) != nullptr ||
+              (r == "v0" && !rhs_uses_r && UnwrapCallOrPureUnaryOnCall(rhs) != nullptr)) {
             clobbered = false;
             return true;
           }

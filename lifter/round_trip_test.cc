@@ -5297,5 +5297,99 @@ s32 TwoCaseHighValueSwitchWithSharedTailAndReturn(s32* p, s32 cmd) {
 )");
 }
 
+// ============================================================================
+// Category 40: Masked Call Return Assignments & Multi-Call Scratch Pinning
+// ============================================================================
+
+TEST_F(RoundTripTest, MaskedByteCallReturnStoredAndPassedAcrossCalls) {
+  AssertRoundTripBitExact("MaskedByteCallReturnStoredAndPassedAcrossCalls", R"(
+u8 fetch_byte_id(s32 slot);
+void apply_byte_offset(s32 id, s32* table, s32 len);
+
+void MaskedByteCallReturnStoredAndPassedAcrossCalls(s32* table, s32 slot) {
+    s32 a;
+    s32 b;
+    a = fetch_byte_id(slot) & 255;
+    table[0] = a;
+    apply_byte_offset(a * 4, table, 6);
+    b = fetch_byte_id(slot + 1) & 255;
+    table[1] = b;
+    apply_byte_offset(b * 4, table, 6);
+}
+)");
+}
+
+TEST_F(RoundTripTest, MaskedHalfwordCallReturnStoredAndPassedAcrossCalls) {
+  AssertRoundTripBitExact("MaskedHalfwordCallReturnStoredAndPassedAcrossCalls", R"(
+u16 fetch_half_id(s32 slot);
+void apply_half_offset(s32 id, s32* table, s32 len);
+
+void MaskedHalfwordCallReturnStoredAndPassedAcrossCalls(s32* table, s32 slot) {
+    s32 a;
+    s32 b;
+    a = fetch_half_id(slot) & 65535;
+    table[0] = a;
+    apply_half_offset(a * 8, table, 12);
+    b = fetch_half_id(slot + 2) & 65535;
+    table[1] = b;
+    apply_half_offset(b * 8, table, 12);
+}
+)");
+}
+
+TEST_F(RoundTripTest, MaskedByteCallReturnStoredAndPassedAcrossThreeCalls) {
+  AssertRoundTripBitExact("MaskedByteCallReturnStoredAndPassedAcrossThreeCalls", R"(
+u8 fetch_byte_id(s32 slot);
+void apply_byte_offset(s32 id, s32* table, s32 len);
+
+void MaskedByteCallReturnStoredAndPassedAcrossThreeCalls(s32* table, s32 slot) {
+    s32 a;
+    s32 b;
+    s32 c;
+    a = fetch_byte_id(slot) & 255;
+    table[0] = a;
+    apply_byte_offset(a * 4, table, 6);
+    b = fetch_byte_id(slot + 1) & 255;
+    table[1] = b;
+    apply_byte_offset(b * 4, table, 6);
+    c = fetch_byte_id(slot + 2) & 255;
+    table[2] = c;
+    apply_byte_offset(c * 4, table, 6);
+}
+)");
+}
+
+TEST_F(RoundTripTest, MaskedHalfwordCallReturnUsedInIndexedAddressCalculation) {
+  AssertRoundTripBitExact("MaskedHalfwordCallReturnUsedInIndexedAddressCalculation", R"(
+u16 get_npc_half_slot(void);
+s32 copy_npc_record(s32 dst_id, u8* src, s32 max_len);
+
+s32 MaskedHalfwordCallReturnUsedInIndexedAddressCalculation(u8* base, s32 flag) {
+    s32 idx;
+    if (flag != 0) {
+        idx = get_npc_half_slot() & 65535;
+        return copy_npc_record(14, base + (idx * 32), 12);
+    }
+    return 0;
+}
+)");
+}
+
+TEST_F(RoundTripTest, MaskedCallReturnUsedInIndexedAddressCalculation) {
+  AssertRoundTripBitExact("MaskedCallReturnUsedInIndexedAddressCalculation", R"(
+u8 get_npc_slot(void);
+s32 copy_npc_name(s32 dst_id, u8* src, s32 max_len);
+
+s32 MaskedCallReturnUsedInIndexedAddressCalculation(u8* base, s32 flag) {
+    s32 idx;
+    if (flag != 0) {
+        idx = get_npc_slot() & 255;
+        return copy_npc_name(14, base + (idx * 16), 6);
+    }
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

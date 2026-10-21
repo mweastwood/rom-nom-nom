@@ -3262,5 +3262,67 @@ TEST(AstConverterTest, PreservesDoubleGlobalLoadAfterDoubleToIntTruncate) {
   EXPECT_THAT(code, HasSubstr("f0_d = *(f64*)&D_80123B60;"));
 }
 
+TEST(AstConverterTest, PinsReturnScratchWhenAssignedMaskedCallReturnAcrossCalls) {
+  std::string textproto = R"pb(
+    entries { name: "func_80001000" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+    entries { name: "func_80001100" address: 0x80001100 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFB00010,  // 08: sw    $s0, 16($sp)
+      0x00808025,  // 0C: move  $s0, $a0
+      0x0C000400,  // 10: jal   0x80001000
+      0x00000000,  // 14: nop
+      0x304200FF,  // 18: andi  $v0, $v0, 0xFF
+      0xAC820000,  // 1C: sw    $v0, 0($s0)
+      0x0C000440,  // 20: jal   0x80001100
+      0x00402025,  // 24: move  $a0, $v0
+      0x304200FF,  // 28: andi  $v0, $v0, 0xFF
+      0xAC820004,  // 2C: sw    $v0, 4($s0)
+      0x0C000400,  // 30: jal   0x80001000
+      0x00000000,  // 34: nop
+      0x304200FF,  // 38: andi  $v0, $v0, 0xFF
+      0xAC820008,  // 3C: sw    $v0, 8($s0)
+      0x0C000440,  // 40: jal   0x80001100
+      0x00402025,  // 44: move  $a0, $v0
+      0x304200FF,  // 48: andi  $v0, $v0, 0xFF
+      0xAC82000C,  // 4C: sw    $v0, 12($s0)
+      0x0C000400,  // 50: jal   0x80001000
+      0x00000000,  // 54: nop
+      0x304200FF,  // 58: andi  $v0, $v0, 0xFF
+      0xAC820010,  // 5C: sw    $v0, 16($s0)
+      0x0C000440,  // 60: jal   0x80001100
+      0x00402025,  // 64: move  $a0, $v0
+      0x0C000400,  // 68: jal   0x80001000
+      0x00000000,  // 6C: nop
+      0x304200FF,  // 70: andi  $v0, $v0, 0xFF
+      0xAC820014,  // 74: sw    $v0, 20($s0)
+      0x0C000440,  // 78: jal   0x80001100
+      0x00402025,  // 7C: move  $a0, $v0
+      0x8FBF0014,  // 80: lw    $ra, 20($sp)
+      0x8FB00010,  // 84: lw    $s0, 16($sp)
+      0x03E00008,  // 88: jr    $ra
+      0x27BD0018,  // 8C: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestMaskedCallReturnPinning";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &*index_or, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 v0 asm(\"$2\");"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
