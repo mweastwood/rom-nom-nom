@@ -221,12 +221,30 @@ cc_test(
 )
 
 cc_library(
+    name = "assembly_aligner",
+    srcs = ["assembly_aligner.cc"],
+    hdrs = ["assembly_aligner.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":elf_reader",
+        ":process",
+        ":toolchain",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
     name = "compiler",
     srcs = ["compiler.cc"],
     hdrs = ["compiler.h"],
     copts = ["-std=c++20"],
     deps = [
-        ":elf_reader",
+        ":assembly_aligner",
         ":process",
         ":toolchain",
         "@abseil-cpp//absl/container:flat_hash_map",
