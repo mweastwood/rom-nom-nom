@@ -119,6 +119,17 @@ bool CheckArgRegInCall(std::string_view r, const CExpression& expr) {
   if (ExpressionUsesVariable(call->Callee(), r)) return false;
   size_t slot =
       is_gpr_arg ? static_cast<size_t>(r.back() - '0') : ((r == "f12" || r == "f12_d") ? 0 : 1);
+  if (is_gpr_arg) {
+    for (size_t i = 0; i < call->Arguments().size(); ++i) {
+      if (call->Arguments()[i] == nullptr || !ExpressionUsesVariable(*call->Arguments()[i], r)) {
+        continue;
+      }
+      if (i > slot && slot < call->Arguments().size()) {
+        return false;
+      }
+    }
+    return true;
+  }
   if (slot >= call->Arguments().size() || call->Arguments()[slot] == nullptr) return false;
   if (call->Arguments()[slot]->Kind() != CExpressionKind::kIdentifier ||
       static_cast<const IdentifierExpression&>(*call->Arguments()[slot]).Name() != r) {
@@ -801,8 +812,10 @@ absl::Status PrependSynthesizedLocalDeclarations(
       caller_gpr_reg = "$3";
     } else if ((!is_leaf_func || is_leaf_with_s_regs ||
                 (unpinned_gpr_locals_count >= 4 && !is_float_return_leaf_with_v0_v1)) &&
-               (!any_param_modified || is_leaf_with_s_regs) && var_name.size() == 4 &&
-               absl::StartsWith(var_name, "arg") && var_name[3] >= '0' && var_name[3] <= '3') {
+               (!any_param_modified || is_leaf_with_s_regs ||
+                (!is_leaf_func && !absl::StrContains(body_str, "arg1, arg2, arg3"))) &&
+               var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
+               var_name[3] <= '3') {
       int reg_num = 4 + (var_name[3] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if ((!is_leaf_func || is_leaf_with_s_regs) && var_name.size() == 7 &&

@@ -3462,5 +3462,47 @@ TEST(AstConverterTest, PinsScratchRegistersInLeafWithCalleeSavedRegs) {
   EXPECT_THAT(code, HasSubstr("register s32 arg1 asm(\"$5\");"));
 }
 
+TEST(AstConverterTest, PinsLocalArgRegistersWhenFirstParamModifiedAndUsedInCallArgExpr) {
+  std::string textproto = R"pb(
+    entries { name: "ProcessNode" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFB00010,  // 08: sw    $s0, 16($sp)
+      0x00808021,  // 0C: addu  $s0, $a0, $zero
+      0x8E050000,  // 10: lw    $a1, 0($s0)
+      0x10A00005,  // 14: beq   $a1, $zero, 0x2C
+      0x00000000,  // 18: nop
+      0x8CA40004,  // 1C: lw    $a0, 4($a1)
+      0x0C000400,  // 20: jal   0x80001000 (ProcessNode)
+      0x24A50008,  // 24: addiu $a1, $a1, 8
+      0xAE020008,  // 28: sw    $v0, 8($s0)
+      0x8FBF0014,  // 2C: lw    $ra, 20($sp)
+      0x8FB00010,  // 30: lw    $s0, 16($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0018,  // 38: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestLocalArgPinningWithModifiedParam";
+  absl::flat_hash_set<std::string> funcs_returning_v0 = {"ProcessNode"};
+  options.functions_returning_v0 = &funcs_returning_v0;
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &*index_or, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 arg1 asm(\"$5\");"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

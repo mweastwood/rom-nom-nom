@@ -5092,5 +5092,28 @@ s32 NonLeafTwoBranchReturnValuesInV0WithCalls(s32* p, s32 mode) {
 )");
 }
 
+TEST_F(RoundTripTest, ModifiedParamWithLocalArgScratchUsedInSingleArgCall) {
+  AssertRoundTripBitExact("ModifiedParamWithLocalArgScratchUsedInSingleArgCall", R"(
+s32 eval_item_key(s32 key);
+
+s32 ModifiedParamWithLocalArgScratchUsedInSingleArgCall(s32* p) {
+    s32 a = p[0];
+    s32 b = p[1];
+    s32 c = p[2];
+    s32 v;
+    if (a > b) {
+        v = a + c;
+        p[3] = v;
+        p[4] = v ^ 1;
+        return eval_item_key(b + c) + 1;
+    }
+    v = b - c;
+    p[3] = v;
+    p[4] = v ^ 1;
+    return eval_item_key(a - c) + 1;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
