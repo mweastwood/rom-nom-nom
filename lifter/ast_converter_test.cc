@@ -3324,5 +3324,105 @@ TEST(AstConverterTest, PinsReturnScratchWhenAssignedMaskedCallReturnAcrossCalls)
   EXPECT_THAT(code, HasSubstr("register s32 v0 asm(\"$2\");"));
 }
 
+TEST(AstConverterTest, CapsCallerSavedTempPinsUnderHighRegisterPressure) {
+  std::vector<uint32_t> words = {
+      0x24880001,  // 00: addiu $t0, $a0, 1
+      0x24890002,  // 04: addiu $t1, $a0, 2
+      0x248A0003,  // 08: addiu $t2, $a0, 3
+      0x248B0004,  // 0C: addiu $t3, $a0, 4
+      0x248C0005,  // 10: addiu $t4, $a0, 5
+      0x248D0006,  // 14: addiu $t5, $a0, 6
+      0x248E0007,  // 18: addiu $t6, $a0, 7
+      0x248F0008,  // 1C: addiu $t7, $a0, 8
+      0x24980009,  // 20: addiu $t8, $a0, 9
+      0x2499000A,  // 24: addiu $t9, $a0, 10
+      0xACA80000,  // 28: sw    $t0, 0($a1)
+      0xACA90004,  // 2C: sw    $t1, 4($a1)
+      0xACAA0008,  // 30: sw    $t2, 8($a1)
+      0xACAB000C,  // 34: sw    $t3, 12($a1)
+      0xACAC0010,  // 38: sw    $t4, 16($a1)
+      0xACAD0014,  // 3C: sw    $t5, 20($a1)
+      0xACAE0018,  // 40: sw    $t6, 24($a1)
+      0xACAF001C,  // 44: sw    $t7, 28($a1)
+      0xACB80020,  // 48: sw    $t8, 32($a1)
+      0xACB90024,  // 4C: sw    $t9, 36($a1)
+      0x01091021,  // 50: addu  $v0, $t0, $t1
+      0x004A1021,  // 54: addu  $v0, $v0, $t2
+      0x004B1021,  // 58: addu  $v0, $v0, $t3
+      0x004C1021,  // 5C: addu  $v0, $v0, $t4
+      0x004D1021,  // 60: addu  $v0, $v0, $t5
+      0x004E1021,  // 64: addu  $v0, $v0, $t6
+      0x004F1021,  // 68: addu  $v0, $v0, $t7
+      0x00581021,  // 6C: addu  $v0, $v0, $t8
+      0x03E00008,  // 70: jr    $ra
+      0x00591021,  // 74: addu  $v0, $v0, $t9
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestCapTempTPins";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 temp_t0 asm(\"$8\");"));
+  EXPECT_THAT(code, HasSubstr("register s32 temp_t7 asm(\"$15\");"));
+  EXPECT_THAT(code, HasSubstr("s32 temp_t8;"));
+  EXPECT_THAT(code, HasSubstr("s32 temp_t9;"));
+}
+
+TEST(AstConverterTest, PinsCallerSavedScratchUsedInWrappedCallConditionAndMaskedReturn) {
+  std::string textproto = R"pb(
+    entries { name: "CheckSlot" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
+    entries { name: "StepSlot" address: 0x80001100 type: SYMBOL_FUNC size: 32 }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFB00010,  // 08: sw    $s0, 16($sp)
+      0x00808021,  // 0C: addu  $s0, $a0, $zero
+      0x8E030000,  // 10: lw    $v1, 0($s0)
+      0x24630001,  // 14: addiu $v1, $v1, 1
+      0xAE030000,  // 18: sw    $v1, 0($s0)
+      0x0C000400,  // 1C: jal   0x80001000 (CheckSlot)
+      0x00602021,  // 20: addu  $a0, $v1, $zero
+      0x10400005,  // 24: beq   $v0, $zero, 0x3C
+      0x00000000,  // 28: nop
+      0x0C000440,  // 2C: jal   0x80001100 (StepSlot)
+      0x8E040000,  // 30: lw    $a0, 0($s0)
+      0x304300FF,  // 34: andi  $v1, $v0, 0xFF
+      0xAE030004,  // 38: sw    $v1, 4($s0)
+      0x8E020004,  // 3C: lw    $v0, 4($s0)
+      0x8FBF0014,  // 40: lw    $ra, 20($sp)
+      0x8FB00010,  // 44: lw    $s0, 16($sp)
+      0x03E00008,  // 48: jr    $ra
+      0x27BD0018,  // 4C: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestWrappedCallCondPinning";
+  absl::flat_hash_set<std::string> funcs_returning_v0 = {"CheckSlot", "StepSlot"};
+  options.functions_returning_v0 = &funcs_returning_v0;
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &*index_or, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("register s32 v1 asm(\"$3\");"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

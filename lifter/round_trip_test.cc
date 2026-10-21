@@ -5022,5 +5022,31 @@ s32 MultiCallHotTargetDispatcherWithBranches(s32 slot, s32 x, s32 y, s32 z) {
 )");
 }
 
+TEST_F(RoundTripTest, NineCalleeSavedRegistersAcrossCallsUsesFpS8) {
+  AssertRoundTripBitExact("NineCalleeSavedRegistersAcrossCallsUsesFpS8", R"(
+s32 step_channel(s32 x);
+
+s32 NineCalleeSavedRegistersAcrossCallsUsesFpS8(s32* p) {
+    s32 a = p[0];
+    s32 b = p[1];
+    s32 c = p[2];
+    s32 d = p[3];
+    s32 e = p[4];
+    s32 f = p[5];
+    s32 g = p[6];
+    s32 h = p[7];
+    s32 r = step_channel(a);
+    r += step_channel(b + a);
+    r += step_channel(c + b);
+    r += step_channel(d + c);
+    r += step_channel(e + d);
+    r += step_channel(f + e);
+    r += step_channel(g + f);
+    r += step_channel(h + g);
+    return r + a + b + c + d + e + f + g + h;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -46,17 +46,6 @@ bool IsCalleeSavedGprVarName(std::string_view v) {
          (v.size() == 7 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7');
 }
 
-const CallExpression* UnwrapDirectCall(const CExpression& expr) {
-  const CExpression* cur = &expr;
-  while (cur->Kind() == CExpressionKind::kCastExpression) {
-    cur = &static_cast<const CastExpression*>(cur)->Operand();
-  }
-  if (cur->Kind() == CExpressionKind::kCallExpression) {
-    return static_cast<const CallExpression*>(cur);
-  }
-  return nullptr;
-}
-
 const CallExpression* UnwrapCallOrPureUnaryOnCall(const CExpression& expr) {
   const CExpression* cur = &expr;
   while (true) {
@@ -64,13 +53,20 @@ const CallExpression* UnwrapCallOrPureUnaryOnCall(const CExpression& expr) {
       cur = &static_cast<const CastExpression*>(cur)->Operand();
       continue;
     }
+    if (cur->Kind() == CExpressionKind::kUnaryExpression) {
+      const auto& un = static_cast<const UnaryExpression&>(*cur);
+      if (un.Op() == "!" || un.Op() == "~" || un.Op() == "-") {
+        cur = &un.Operand();
+        continue;
+      }
+    }
     if (cur->Kind() == CExpressionKind::kBinaryExpression) {
       const auto& bin = static_cast<const BinaryExpression&>(*cur);
-      if (!ExpressionHasCall(bin.Rhs()) && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+      if (!ExpressionHasCall(bin.Rhs())) {
         cur = &bin.Lhs();
         continue;
       }
-      if (!ExpressionHasCall(bin.Lhs()) && bin.Lhs().Kind() == CExpressionKind::kIntegerLiteral) {
+      if (!ExpressionHasCall(bin.Lhs())) {
         cur = &bin.Rhs();
         continue;
       }
@@ -85,8 +81,30 @@ const CallExpression* UnwrapCallOrPureUnaryOnCall(const CExpression& expr) {
 
 bool CheckArgRegInCall(std::string_view r, const CExpression& expr) {
   if (!ExpressionUsesVariable(expr, r)) return true;
-  const CallExpression* call = UnwrapDirectCall(expr);
+  const CallExpression* call = UnwrapCallOrPureUnaryOnCall(expr);
   if (call == nullptr) return false;
+  auto expr_uses_var_outside_call = [&](auto& self, const CExpression& e) -> bool {
+    if (&e == call) return false;
+    switch (e.Kind()) {
+      case CExpressionKind::kIdentifier:
+        return static_cast<const IdentifierExpression&>(e).Name() == r;
+      case CExpressionKind::kIntegerLiteral:
+      case CExpressionKind::kFloatLiteral:
+      case CExpressionKind::kStringLiteral:
+        return false;
+      case CExpressionKind::kUnaryExpression:
+        return self(self, static_cast<const UnaryExpression&>(e).Operand());
+      case CExpressionKind::kCastExpression:
+        return self(self, static_cast<const CastExpression&>(e).Operand());
+      case CExpressionKind::kBinaryExpression: {
+        const auto& b = static_cast<const BinaryExpression&>(e);
+        return self(self, b.Lhs()) || self(self, b.Rhs());
+      }
+      default:
+        return true;
+    }
+  };
+  if (expr_uses_var_outside_call(expr_uses_var_outside_call, expr)) return false;
   for (const auto& arg : call->Arguments()) {
     if (arg != nullptr && ExpressionHasCall(*arg)) {
       return false;
@@ -105,12 +123,6 @@ bool CheckArgRegInCall(std::string_view r, const CExpression& expr) {
   if (call->Arguments()[slot]->Kind() != CExpressionKind::kIdentifier ||
       static_cast<const IdentifierExpression&>(*call->Arguments()[slot]).Name() != r) {
     return false;
-  }
-  for (size_t i = 0; i < call->Arguments().size(); ++i) {
-    if (i != slot && call->Arguments()[i] != nullptr &&
-        ExpressionUsesVariable(*call->Arguments()[i], r)) {
-      return false;
-    }
   }
   return true;
 }
@@ -137,8 +149,7 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
           if (!CheckArgRegInCall(r, rhs)) return false;
         }
         if (lhs_name == r) {
-          if (!rhs_has_call || UnwrapDirectCall(rhs) != nullptr ||
-              (r == "v0" && !rhs_uses_r && UnwrapCallOrPureUnaryOnCall(rhs) != nullptr)) {
+          if (!rhs_has_call || UnwrapCallOrPureUnaryOnCall(rhs) != nullptr) {
             clobbered = false;
             return true;
           }
@@ -303,11 +314,7 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
       }
       case CStatementKind::kLabelStatement: {
         const auto& ls = static_cast<const LabelStatement&>(s);
-        if (clobbered) {
-          label_clobbered[ls.Label()] = true;
-        } else {
-          clobbered = label_clobbered[ls.Label()];
-        }
+        clobbered = clobbered || label_clobbered[ls.Label()];
         return true;
       }
       default:
@@ -649,7 +656,15 @@ absl::Status PrependSynthesizedLocalDeclarations(
   };
 
   size_t unpinned_gpr_locals_count = 0;
+  int callee_saved_gpr_count = 0;
+  int total_temp_t_count = 0;
   for (const auto& v : local_vars_to_declare) {
+    if (IsCalleeSavedGprVarName(v)) {
+      ++callee_saved_gpr_count;
+    }
+    if (v.size() == 7 && absl::StartsWith(v, "temp_t") && v[6] >= '0' && v[6] <= '9') {
+      ++total_temp_t_count;
+    }
     if (v != "sp" && v != "lo" && v != "hi" && v != "fcr31" && v != "temp_at" &&
         !absl::StartsWith(v, "var_sp_") && !is_fp_reg(v) && !absl::EndsWith(v, "_64") &&
         !double_vars.contains(v) && !IsCalleeSavedGprVarName(v)) {
@@ -657,10 +672,14 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
   const bool allow_caller_saved_gpr_pins = (unpinned_gpr_locals_count <= 18);
+  const int max_caller_gpr_pins =
+      (total_temp_t_count >= 10 && callee_saved_gpr_count >= 9) ? 10 : 14;
   int pinned_caller_gpr_count = 0;
   bool any_param_modified = false;
   for (const auto& param : parameters) {
-    if (absl::StrContains(body_str, absl::StrCat(param.name, " = "))) {
+    if (absl::StrContains(body_str, absl::StrCat(param.name, " = ")) &&
+        !(!is_leaf_func && parameters.size() <= 2 &&
+          absl::StrContains(body_str, absl::StrCat("temp_s0 = ", param.name, ";\n")))) {
       any_param_modified = true;
       break;
     }
@@ -724,7 +743,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
       }
       return std::nullopt;
     }
-    if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= 14) {
+    if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= max_caller_gpr_pins) {
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;
@@ -764,7 +783,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&
-               var_name[6] <= '9') {
+               var_name[6] <= '9' &&
+               !(total_temp_t_count >= 10 && (!is_leaf_func || callee_saved_gpr_count == 0) &&
+                 callee_saved_gpr_count < 9 && (var_name == "temp_t8" || var_name == "temp_t9"))) {
       int t_idx = var_name[6] - '0';
       int reg_num = (t_idx <= 7) ? (8 + t_idx) : (24 + (t_idx - 8));
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
