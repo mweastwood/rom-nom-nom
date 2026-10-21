@@ -210,8 +210,14 @@ cc_test(
 
 cc_library(
     name = "expression_builder",
-    srcs = ["expression_builder.cc"],
-    hdrs = ["expression_builder.h"],
+    srcs = [
+        "call_lifter.cc",
+        "expression_builder.cc",
+    ],
+    hdrs = [
+        "call_lifter.h",
+        "expression_builder.h",
+    ],
     deps = [
         ":abi_analyzer",
         ":branch_condition_builder",

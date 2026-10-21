@@ -238,11 +238,11 @@ class ExpressionBuilder {
   static void LiftFoldedAccess(const FoldedSymbolAccess& lo, const Instruction& inst,
                                RegisterTracker& tracker, std::vector<LiftedStatement>& statements);
 
- private:
   static std::unique_ptr<LiftedExpression> LiftRegisterOrConstant(Register reg,
                                                                   const RegisterTracker& tracker,
                                                                   bool has_frame_pointer = false);
 
+ private:
   static void LiftCallInstruction(
       const Instruction& inst, size_t i, absl::Span<const Instruction> instructions_to_process,
       const SymbolIndex* symbol_index,
