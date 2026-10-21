@@ -36,11 +36,22 @@ cc_library(
 )
 
 cc_library(
+    name = "ast_temp_inliner",
+    srcs = ["ast_temp_inliner.cc"],
+    hdrs = ["ast_temp_inliner.h"],
+    deps = [
+        ":ast_global_mutations",
+        "//core:c_ast",
+    ],
+)
+
+cc_library(
     name = "ast_mutator",
     srcs = ["ast_mutator.cc"],
     hdrs = ["ast_mutator.h"],
     deps = [
         ":ast_global_mutations",
+        ":ast_temp_inliner",
         "//core:c_ast",
         "//core:game_config_cc_proto",
         "@abseil-cpp//absl/strings",
