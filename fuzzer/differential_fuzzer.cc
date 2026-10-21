@@ -153,6 +153,164 @@ void DifferentialFuzzer::SetupEmulator(MipsEmulator* emu, const FuzzTestCase& te
   emu->SetMockMmio(options_.mock_mmio);
 }
 
+void DifferentialFuzzer::CompareMemoryWrites(DifferentialComparison* comp,
+                                             const FuzzTestCase& test_case) const {
+  std::vector<MemoryWrite> target_writes = comp->target_result.write_log;
+  std::vector<MemoryWrite> candidate_writes = comp->candidate_result.write_log;
+
+  if (options_.filter_local_stack_writes) {
+    auto is_local_stack = [&](const MemoryWrite& w) {
+      if (w.is_stack_relative && w.base_reg != 30) return true;
+      if (w.address < options_.initial_sp + 0x100 && w.address >= options_.initial_sp - 0x10000) {
+        return true;
+      }
+      return false;
+    };
+    target_writes.erase(std::remove_if(target_writes.begin(), target_writes.end(), is_local_stack),
+                        target_writes.end());
+    candidate_writes.erase(
+        std::remove_if(candidate_writes.begin(), candidate_writes.end(), is_local_stack),
+        candidate_writes.end());
+  }
+
+  if (options_.candidate_to_target_address &&
+      !(target_writes.empty() && candidate_writes.empty())) {
+    absl::flat_hash_set<std::tuple<uint32_t, uint64_t, uint8_t>> exact_target_stores;
+    absl::flat_hash_set<uint32_t> target_addresses;
+    for (const auto& tw : target_writes) {
+      exact_target_stores.insert({tw.address, tw.value, tw.size});
+      target_addresses.insert(tw.address);
+    }
+    uint32_t buf_start = options_.pointer_buffer_vram;
+    uint32_t buf_end = options_.pointer_buffer_vram + options_.pointer_buffer_size;
+    bool is_pointer_case = (test_case.a0 >= buf_start && test_case.a0 < buf_end) ||
+                           (test_case.a1 >= buf_start && test_case.a1 < buf_end) ||
+                           (test_case.a2 >= buf_start && test_case.a2 < buf_end) ||
+                           (test_case.a3 >= buf_start && test_case.a3 < buf_end);
+    for (auto& cw : candidate_writes) {
+      if (!is_pointer_case || !(cw.address >= buf_start && cw.address < buf_end)) {
+        uint32_t mapped_addr = options_.candidate_to_target_address(cw.address);
+        if (target_addresses.contains(mapped_addr) || !target_addresses.contains(cw.address)) {
+          cw.address = mapped_addr;
+        }
+      }
+      if (cw.size == 4 && !exact_target_stores.contains({cw.address, cw.value, cw.size})) {
+        uint32_t mapped_val = options_.candidate_to_target_address(static_cast<uint32_t>(cw.value));
+        if (exact_target_stores.contains({cw.address, mapped_val, cw.size})) {
+          cw.value = mapped_val;
+        }
+      }
+    }
+  }
+
+  bool writes_match = (target_writes == candidate_writes);
+  if (!writes_match) {
+    absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
+    for (const auto& tw : target_writes) {
+      for (uint8_t b = 0; b < tw.size; ++b) {
+        uint8_t byte_val = static_cast<uint8_t>((tw.value >> ((tw.size - 1 - b) * 8)) & 0xFF);
+        target_bytes[tw.address + b] = byte_val;
+      }
+    }
+    absl::flat_hash_map<uint32_t, uint8_t> candidate_bytes;
+    for (const auto& cw : candidate_writes) {
+      for (uint8_t b = 0; b < cw.size; ++b) {
+        uint8_t byte_val = static_cast<uint8_t>((cw.value >> ((cw.size - 1 - b) * 8)) & 0xFF);
+        candidate_bytes[cw.address + b] = byte_val;
+      }
+    }
+
+    writes_match = (target_bytes == candidate_bytes);
+    if (!writes_match && target_writes.size() == candidate_writes.size()) {
+      std::sort(target_writes.begin(), target_writes.end(),
+                [](const MemoryWrite& a, const MemoryWrite& b) {
+                  if (a.address != b.address) return a.address < b.address;
+                  if (a.size != b.size) return a.size < b.size;
+                  return a.value < b.value;
+                });
+      std::sort(candidate_writes.begin(), candidate_writes.end(),
+                [](const MemoryWrite& a, const MemoryWrite& b) {
+                  if (a.address != b.address) return a.address < b.address;
+                  if (a.size != b.size) return a.size < b.size;
+                  return a.value < b.value;
+                });
+      writes_match = true;
+      for (size_t i = 0; i < target_writes.size(); ++i) {
+        if (!(target_writes[i] == candidate_writes[i])) {
+          writes_match = false;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!writes_match) {
+    comp->result = EquivalenceResult::kMemoryWriteMismatch;
+    if (target_writes.size() != candidate_writes.size()) {
+      std::string tw_str;
+      for (const auto& w : target_writes) {
+        absl::StrAppend(&tw_str, absl::StrFormat(" [0x%X:0x%X]", w.address, w.value));
+      }
+      std::string cw_str;
+      for (const auto& w : candidate_writes) {
+        absl::StrAppend(&cw_str, absl::StrFormat(" [0x%X:0x%X]", w.address, w.value));
+      }
+      comp->failure_reason = absl::StrFormat(
+          "Write log size mismatch: target logged %zu writes (%s) vs candidate logged %zu writes "
+          "(%s)",
+          target_writes.size(), tw_str, candidate_writes.size(), cw_str);
+    } else {
+      for (size_t i = 0; i < target_writes.size(); ++i) {
+        const auto& tw = target_writes[i];
+        const auto& cw = candidate_writes[i];
+        if (!(tw == cw)) {
+          std::string sample;
+          for (size_t k = (i > 2 ? i - 2 : 0); k < std::min(target_writes.size(), i + 5); ++k) {
+            absl::StrAppend(
+                &sample,
+                absl::StrFormat(
+                    "\n  #%zu: target(0x%X, val=0x%X, sz=%d) vs cand(0x%X, val=0x%X, sz=%d)", k,
+                    target_writes[k].address, target_writes[k].value, target_writes[k].size,
+                    candidate_writes[k].address, candidate_writes[k].value,
+                    candidate_writes[k].size));
+          }
+          comp->failure_reason = absl::StrFormat(
+              "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
+              "candidate(addr=0x%08X, val=0x%llX, size=%d)%s",
+              i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size, sample);
+          break;
+        }
+      }
+    }
+  } else {
+    comp->result = EquivalenceResult::kEquivalent;
+  }
+}
+
+void DifferentialFuzzer::CompareExternalCalls(DifferentialComparison* comp) const {
+  if (comp->target_result.call_log.size() != comp->candidate_result.call_log.size()) {
+    comp->result = EquivalenceResult::kCallMismatch;
+    comp->failure_reason = absl::StrFormat(
+        "Call log size mismatch: target logged %zu calls vs candidate logged %zu calls",
+        comp->target_result.call_log.size(), comp->candidate_result.call_log.size());
+    return;
+  }
+  for (size_t i = 0; i < comp->target_result.call_log.size(); ++i) {
+    const auto& tc = comp->target_result.call_log[i];
+    const auto& cc = comp->candidate_result.call_log[i];
+    if (!(tc == cc)) {
+      comp->result = EquivalenceResult::kCallMismatch;
+      comp->failure_reason = absl::StrFormat(
+          "Call log mismatch at call #%zu: target(addr=0x%08X, a0=0x%X, a1=0x%X, a2=0x%X, "
+          "a3=0x%X) vs "
+          "candidate(addr=0x%08X, a0=0x%X, a1=0x%X, a2=0x%X, a3=0x%X)",
+          i, tc.target_address, tc.a0, tc.a1, tc.a2, tc.a3, cc.target_address, cc.a0, cc.a1, cc.a2,
+          cc.a3);
+      return;
+    }
+  }
+}
+
 void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
                                             absl::Span<const uint32_t> target_code,
                                             uint32_t target_vram,
@@ -265,164 +423,13 @@ void DifferentialFuzzer::EvaluateComparison(DifferentialComparison* comp,
           comp->candidate_result.f0_double, comp->candidate_result.f0_double_bits);
     }
   } else if (options_.check_memory_writes) {
-    std::vector<MemoryWrite> target_writes = comp->target_result.write_log;
-    std::vector<MemoryWrite> candidate_writes = comp->candidate_result.write_log;
-
-    if (options_.filter_local_stack_writes) {
-      auto is_local_stack = [&](const MemoryWrite& w) {
-        if (w.is_stack_relative && w.base_reg != 30) return true;
-        if (w.address < options_.initial_sp + 0x100 && w.address >= options_.initial_sp - 0x10000) {
-          return true;
-        }
-        return false;
-      };
-      target_writes.erase(
-          std::remove_if(target_writes.begin(), target_writes.end(), is_local_stack),
-          target_writes.end());
-      candidate_writes.erase(
-          std::remove_if(candidate_writes.begin(), candidate_writes.end(), is_local_stack),
-          candidate_writes.end());
-    }
-
-    if (options_.candidate_to_target_address &&
-        !(target_writes.empty() && candidate_writes.empty())) {
-      absl::flat_hash_set<std::tuple<uint32_t, uint64_t, uint8_t>> exact_target_stores;
-      absl::flat_hash_set<uint32_t> target_addresses;
-      for (const auto& tw : target_writes) {
-        exact_target_stores.insert({tw.address, tw.value, tw.size});
-        target_addresses.insert(tw.address);
-      }
-      uint32_t buf_start = options_.pointer_buffer_vram;
-      uint32_t buf_end = options_.pointer_buffer_vram + options_.pointer_buffer_size;
-      bool is_pointer_case = (test_case.a0 >= buf_start && test_case.a0 < buf_end) ||
-                             (test_case.a1 >= buf_start && test_case.a1 < buf_end) ||
-                             (test_case.a2 >= buf_start && test_case.a2 < buf_end) ||
-                             (test_case.a3 >= buf_start && test_case.a3 < buf_end);
-      for (auto& cw : candidate_writes) {
-        if (!is_pointer_case || !(cw.address >= buf_start && cw.address < buf_end)) {
-          uint32_t mapped_addr = options_.candidate_to_target_address(cw.address);
-          if (target_addresses.contains(mapped_addr) || !target_addresses.contains(cw.address)) {
-            cw.address = mapped_addr;
-          }
-        }
-        if (cw.size == 4 && !exact_target_stores.contains({cw.address, cw.value, cw.size})) {
-          uint32_t mapped_val =
-              options_.candidate_to_target_address(static_cast<uint32_t>(cw.value));
-          if (exact_target_stores.contains({cw.address, mapped_val, cw.size})) {
-            cw.value = mapped_val;
-          }
-        }
-      }
-    }
-
-    bool writes_match = (target_writes == candidate_writes);
-    if (!writes_match) {
-      absl::flat_hash_map<uint32_t, uint8_t> target_bytes;
-      for (const auto& tw : target_writes) {
-        for (uint8_t b = 0; b < tw.size; ++b) {
-          uint8_t byte_val = static_cast<uint8_t>((tw.value >> ((tw.size - 1 - b) * 8)) & 0xFF);
-          target_bytes[tw.address + b] = byte_val;
-        }
-      }
-      absl::flat_hash_map<uint32_t, uint8_t> candidate_bytes;
-      for (const auto& cw : candidate_writes) {
-        for (uint8_t b = 0; b < cw.size; ++b) {
-          uint8_t byte_val = static_cast<uint8_t>((cw.value >> ((cw.size - 1 - b) * 8)) & 0xFF);
-          candidate_bytes[cw.address + b] = byte_val;
-        }
-      }
-
-      writes_match = (target_bytes == candidate_bytes);
-      if (!writes_match && target_writes.size() == candidate_writes.size()) {
-        std::sort(target_writes.begin(), target_writes.end(),
-                  [](const MemoryWrite& a, const MemoryWrite& b) {
-                    if (a.address != b.address) return a.address < b.address;
-                    if (a.size != b.size) return a.size < b.size;
-                    return a.value < b.value;
-                  });
-        std::sort(candidate_writes.begin(), candidate_writes.end(),
-                  [](const MemoryWrite& a, const MemoryWrite& b) {
-                    if (a.address != b.address) return a.address < b.address;
-                    if (a.size != b.size) return a.size < b.size;
-                    return a.value < b.value;
-                  });
-        writes_match = true;
-        for (size_t i = 0; i < target_writes.size(); ++i) {
-          if (!(target_writes[i] == candidate_writes[i])) {
-            writes_match = false;
-            break;
-          }
-        }
-      }
-    }
-
-    if (!writes_match) {
-      comp->result = EquivalenceResult::kMemoryWriteMismatch;
-      if (target_writes.size() != candidate_writes.size()) {
-        std::string tw_str;
-        for (const auto& w : target_writes) {
-          absl::StrAppend(&tw_str, absl::StrFormat(" [0x%X:0x%X]", w.address, w.value));
-        }
-        std::string cw_str;
-        for (const auto& w : candidate_writes) {
-          absl::StrAppend(&cw_str, absl::StrFormat(" [0x%X:0x%X]", w.address, w.value));
-        }
-        comp->failure_reason = absl::StrFormat(
-            "Write log size mismatch: target logged %zu writes (%s) vs candidate logged %zu writes "
-            "(%s)",
-            target_writes.size(), tw_str, candidate_writes.size(), cw_str);
-      } else {
-        for (size_t i = 0; i < target_writes.size(); ++i) {
-          const auto& tw = target_writes[i];
-          const auto& cw = candidate_writes[i];
-          if (!(tw == cw)) {
-            std::string sample;
-            for (size_t k = (i > 2 ? i - 2 : 0); k < std::min(target_writes.size(), i + 5); ++k) {
-              absl::StrAppend(
-                  &sample,
-                  absl::StrFormat(
-                      "\n  #%zu: target(0x%X, val=0x%X, sz=%d) vs cand(0x%X, val=0x%X, sz=%d)", k,
-                      target_writes[k].address, target_writes[k].value, target_writes[k].size,
-                      candidate_writes[k].address, candidate_writes[k].value,
-                      candidate_writes[k].size));
-            }
-            comp->failure_reason = absl::StrFormat(
-                "Write log mismatch at store #%zu: target(addr=0x%08X, val=0x%llX, size=%d) vs "
-                "candidate(addr=0x%08X, val=0x%llX, size=%d)%s",
-                i, tw.address, tw.value, tw.size, cw.address, cw.value, cw.size, sample);
-            break;
-          }
-        }
-      }
-    } else {
-      comp->result = EquivalenceResult::kEquivalent;
-    }
+    CompareMemoryWrites(comp, test_case);
   } else {
     comp->result = EquivalenceResult::kEquivalent;
   }
 
   if (comp->result == EquivalenceResult::kEquivalent && options_.check_external_calls) {
-    if (comp->target_result.call_log.size() != comp->candidate_result.call_log.size()) {
-      comp->result = EquivalenceResult::kCallMismatch;
-      comp->failure_reason = absl::StrFormat(
-          "Call log size mismatch: target logged %zu calls vs candidate logged %zu calls",
-          comp->target_result.call_log.size(), comp->candidate_result.call_log.size());
-    } else {
-      for (size_t i = 0; i < comp->target_result.call_log.size(); ++i) {
-        const auto& tc = comp->target_result.call_log[i];
-        const auto& cc = comp->candidate_result.call_log[i];
-        if (!(tc == cc)) {
-          comp->result = EquivalenceResult::kCallMismatch;
-          comp->failure_reason = absl::StrFormat(
-              "Call log mismatch at call #%zu: target(addr=0x%08X, a0=0x%X, a1=0x%X, a2=0x%X, "
-              "a3=0x%X) vs "
-              "candidate(addr=0x%08X, a0=0x%X, a1=0x%X, a2=0x%X, a3=0x%X)",
-              i, tc.target_address, tc.a0, tc.a1, tc.a2, tc.a3, cc.target_address, cc.a0, cc.a1,
-              cc.a2, cc.a3);
-          break;
-        }
-      }
-    }
+    CompareExternalCalls(comp);
   }
 
   // Roll back memory writes recorded during execution

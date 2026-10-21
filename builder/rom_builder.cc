@@ -27,6 +27,266 @@
 #include "core/symbol_registry.h"
 
 namespace rom_nom_nom {
+namespace {
+
+using ModuleFunctionFlagsMap =
+    absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, std::vector<std::string>>>;
+
+struct LoadedConfigAndFlags {
+  GameConfig config;
+  ModuleFunctionFlagsMap function_flags_by_module;
+};
+
+absl::StatusOr<LoadedConfigAndFlags> LoadGameConfigAndTuningFlags(
+    const RomBuilderOptions& options, const std::filesystem::path& repo_root) {
+  LoadedConfigAndFlags loaded;
+  std::error_code ec;
+  if (!options.config_path.empty() && std::filesystem::exists(options.config_path, ec)) {
+    auto config_or = LoadGameConfig(options.config_path);
+    if (!config_or.ok()) {
+      return config_or.status();
+    }
+    loaded.config = std::move(*config_or);
+  }
+
+  auto index_tuning_cache = [&](const TuningCache& cache) {
+    for (const auto& [module_name, flags] : cache.module_c_flags()) {
+      (*loaded.config.mutable_c_flags())[module_name] = flags;
+    }
+    for (const auto& entry : cache.entries()) {
+      if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
+        std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
+        loaded.function_flags_by_module[std::string(entry.module_name())]
+                                       [std::string(entry.function_name())] = std::move(flags);
+      }
+    }
+  };
+
+  for (const auto& entry : loaded.config.tuning_entries()) {
+    if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
+      std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
+      loaded.function_flags_by_module[std::string(entry.module_name())]
+                                     [std::string(entry.function_name())] = std::move(flags);
+    }
+  }
+
+  std::filesystem::path cache_file;
+  if (!loaded.config.tuning_cache_file().empty()) {
+    cache_file = loaded.config.tuning_cache_file();
+    if (cache_file.is_relative()) {
+      cache_file = repo_root / cache_file;
+    }
+  } else if (!loaded.config.basename().empty()) {
+    std::filesystem::path default_cache =
+        repo_root / "config" / absl::StrCat(loaded.config.basename(), ".tuning.textproto");
+    if (std::filesystem::exists(default_cache, ec)) {
+      cache_file = default_cache;
+    }
+  }
+  if (!cache_file.empty() && std::filesystem::exists(cache_file, ec)) {
+    auto cache_or = LoadTuningCache(cache_file);
+    if (cache_or.ok()) {
+      index_tuning_cache(*cache_or);
+    }
+  }
+
+  if (!options.src_dir.empty()) {
+    std::filesystem::path tuned_flags_path = options.src_dir / "tuned_c_flags.textproto";
+    if (std::filesystem::exists(tuned_flags_path, ec)) {
+      auto cache_or = LoadTuningCache(tuned_flags_path);
+      if (cache_or.ok()) {
+        index_tuning_cache(*cache_or);
+      }
+    }
+  }
+
+  return loaded;
+}
+
+void RewriteCodeSegmentLinkerScript(const GameConfig& config, const std::filesystem::path& obj_dir,
+                                    std::string* rewritten_ld) {
+  // Align each subsegment (.text and .data) in SEGMENT_CODE segments to at least its retail
+  // section-relative offset so shrinkage in an earlier module does not cascade-shift all
+  // subsequent modules and .data/.bss. Also move <seg>_RODATA after <seg>_DATA so compiler-
+  // generated .rodata sections (from jump tables and float constants in lifted C) do not push
+  // the retail .data subsegments forward from their retail VRAM addresses.
+  for (const auto& seg : config.segments()) {
+    if (seg.type() != SEGMENT_CODE || seg.vram() == 0) {
+      continue;
+    }
+    if (!seg.name().empty()) {
+      std::string rodata_start_marker = absl::StrCat("        ", seg.name(), "_RODATA_START = .;");
+      std::string data_start_marker = absl::StrCat("        ", seg.name(), "_DATA_START = .;");
+      std::string rom_pos_inc_marker = absl::StrCat("    __romPos += SIZEOF(.", seg.name(), ");");
+      size_t rodata_pos = rewritten_ld->find(rodata_start_marker);
+      size_t data_pos = rewritten_ld->find(data_start_marker);
+      if (rodata_pos != std::string::npos && data_pos != std::string::npos &&
+          rodata_pos < data_pos) {
+        std::string rodata_block = rewritten_ld->substr(rodata_pos, data_pos - rodata_pos);
+        rewritten_ld->erase(rodata_pos, data_pos - rodata_pos);
+        size_t rom_pos_inc = rewritten_ld->find(rom_pos_inc_marker);
+        if (rom_pos_inc != std::string::npos) {
+          size_t align_line_end = rewritten_ld->find('\n', rom_pos_inc);
+          if (align_line_end != std::string::npos) {
+            size_t next_line_end = rewritten_ld->find('\n', align_line_end + 1);
+            if (next_line_end != std::string::npos) {
+              align_line_end = next_line_end;
+            }
+            std::string rodata_section = absl::StrCat(
+                "    .", seg.name(), "_rodata (ADDR(.", seg.name(), "_bss) + SIZEOF(.", seg.name(),
+                "_bss)) : AT(__romPos) SUBALIGN(16)\n    {\n        FILL(0x00000000);\n",
+                rodata_block, "    }\n    __romPos += SIZEOF(.", seg.name(),
+                "_rodata);\n    __romPos = ALIGN(__romPos, 16);\n");
+            rewritten_ld->insert(align_line_end + 1, rodata_section);
+          }
+        }
+      }
+    }
+    for (const auto& sub : seg.subsegments()) {
+      if (sub.name().empty() || sub.rom_start() <= seg.rom_start()) {
+        continue;
+      }
+      uint32_t sub_offset = sub.rom_start() - seg.rom_start();
+      uint32_t sub_vram = seg.vram() + sub_offset;
+      std::string align_expr =
+          absl::StrFormat(". = (ABSOLUTE(.) < 0x%08X) ? 0x%X : .;\n        ", sub_vram, sub_offset);
+      if (sub.type() == SUBSEGMENT_DATA) {
+        std::string target = (obj_dir / absl::StrCat(sub.name(), ".data.o")).string() + "(.data);";
+        size_t pos = rewritten_ld->find(target);
+        if (pos != std::string::npos) {
+          rewritten_ld->insert(pos, align_expr);
+        }
+      } else if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) {
+        std::string obj_path = (obj_dir / absl::StrCat(sub.name(), ".o")).string();
+        std::string target_exact = obj_path + "(.text);";
+        size_t pos = rewritten_ld->find(target_exact);
+        if (pos == std::string::npos) {
+          std::string target_wild = obj_path + "(.text*);";
+          pos = rewritten_ld->find(target_wild);
+        }
+        if (pos != std::string::npos) {
+          rewritten_ld->insert(pos, align_expr);
+        }
+      }
+    }
+  }
+}
+
+absl::flat_hash_map<std::string, uint32_t> CollectFunctionTargetVrams(
+    const SymbolIndex* symbol_index, const std::filesystem::path& src_dir) {
+  absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
+  if (symbol_index != nullptr) {
+    for (const SymbolRegistryEntry* entry : symbol_index->SortedEntries()) {
+      if (entry->type() == SYMBOL_FUNC && !entry->name().empty() && entry->address() != 0) {
+        function_target_vrams[std::string(entry->name())] = entry->address();
+      }
+    }
+  }
+  std::error_code ec;
+  if (!src_dir.empty()) {
+    std::filesystem::path lifted_symbols_path = src_dir / "lifted_symbols.ld";
+    if (std::filesystem::exists(lifted_symbols_path, ec)) {
+      std::ifstream ls_ifs(lifted_symbols_path);
+      std::string line;
+      while (std::getline(ls_ifs, line)) {
+        size_t eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) {
+          continue;
+        }
+        std::string_view line_view = line;
+        std::string_view lhs = absl::StripAsciiWhitespace(line_view.substr(0, eq_pos));
+        if (absl::StartsWith(lhs, "PROVIDE(")) {
+          lhs.remove_prefix(8);
+          lhs = absl::StripAsciiWhitespace(lhs);
+        }
+        std::string_view rhs = absl::StripAsciiWhitespace(line_view.substr(eq_pos + 1));
+        while (!rhs.empty() && (rhs.back() == ';' || rhs.back() == ')' ||
+                                absl::ascii_isspace(static_cast<unsigned char>(rhs.back())))) {
+          rhs.remove_suffix(1);
+        }
+        if (!lhs.empty() && (absl::StartsWith(rhs, "0x") || absl::StartsWith(rhs, "0X"))) {
+          uint32_t addr = 0;
+          if (absl::SimpleHexAtoi(rhs.substr(2), &addr) && addr != 0) {
+            function_target_vrams.try_emplace(std::string(lhs), addr);
+          }
+        }
+      }
+    }
+  }
+  return function_target_vrams;
+}
+
+absl::StatusOr<RomBuildResult> VerifyBuiltRom(const RomBuilderOptions& options,
+                                              const std::filesystem::path& repo_root,
+                                              std::string_view expected_sha1,
+                                              size_t total_objects) {
+  RomBuildResult result;
+  result.total_objects = total_objects;
+
+  auto sha1_or = ComputeFileSha1(options.out_rom);
+  if (!sha1_or.ok()) {
+    return sha1_or.status();
+  }
+  result.built_sha1 = *sha1_or;
+  result.expected_sha1 = std::string(expected_sha1);
+
+  if (!expected_sha1.empty()) {
+    result.sha1_matches =
+        (absl::AsciiStrToLower(result.built_sha1) == absl::AsciiStrToLower(expected_sha1));
+  } else {
+    result.sha1_matches = true;
+  }
+
+  std::error_code ec;
+  std::filesystem::path target_rom = options.verify_rom;
+  if (target_rom.empty()) {
+    std::filesystem::path candidate = repo_root / "roms" / absl::StrCat(options.game_name, ".z64");
+    if (std::filesystem::exists(candidate, ec)) {
+      target_rom = candidate;
+    }
+  }
+
+  result.byte_matches = true;
+  if (!target_rom.empty() && std::filesystem::exists(target_rom, ec)) {
+    std::ifstream f_target(target_rom, std::ios::binary);
+    std::ifstream f_built(options.out_rom, std::ios::binary);
+    if (f_target && f_built) {
+      std::vector<uint8_t> target_bytes((std::istreambuf_iterator<char>(f_target)),
+                                        std::istreambuf_iterator<char>());
+      std::vector<uint8_t> built_bytes((std::istreambuf_iterator<char>(f_built)),
+                                       std::istreambuf_iterator<char>());
+      if (target_bytes != built_bytes) {
+        result.byte_matches = false;
+        size_t min_len = std::min(target_bytes.size(), built_bytes.size());
+        size_t diff_count = 0;
+        for (size_t i = 0; i < min_len; ++i) {
+          if (target_bytes[i] != built_bytes[i]) {
+            diff_count++;
+          }
+        }
+        diff_count += std::max(target_bytes.size(), built_bytes.size()) - min_len;
+        result.differing_bytes = diff_count;
+      }
+    }
+  }
+
+  if (options.toolchain_mode == ToolchainMode::kModern) {
+    result.success = true;
+  } else {
+    result.success = result.sha1_matches && result.byte_matches;
+  }
+
+  if (options.is_test && !result.success) {
+    return absl::InternalError(absl::StrFormat(
+        "RomBuilder: Verification failed for %s. Built SHA-1: %s, Expected SHA-1: %s, "
+        "Differing bytes: %d",
+        options.game_name, result.built_sha1, result.expected_sha1, result.differing_bytes));
+  }
+
+  return result;
+}
+
+}  // namespace
 
 RomBuilder::RomBuilder(Toolchain toolchain, RomBuilderOptions options)
     : toolchain_(std::move(toolchain)), options_(std::move(options)), compiler_(toolchain_) {}
@@ -55,69 +315,13 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     std::filesystem::create_directories(options_.out_rom.parent_path(), ec);
   }
 
-  // 1. Load GameConfig if provided
-  GameConfig config;
-  if (!options_.config_path.empty() && std::filesystem::exists(options_.config_path, ec)) {
-    auto config_or = LoadGameConfig(options_.config_path);
-    if (!config_or.ok()) {
-      return config_or.status();
-    }
-    config = std::move(*config_or);
+  // 1. Load GameConfig and tuning flags
+  auto loaded_or = LoadGameConfigAndTuningFlags(options_, toolchain_.RepoRoot());
+  if (!loaded_or.ok()) {
+    return loaded_or.status();
   }
-  absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, std::vector<std::string>>>
-      function_flags_by_module;
-
-  auto index_tuning_cache = [&](const TuningCache& cache) {
-    for (const auto& [module_name, flags] : cache.module_c_flags()) {
-      (*config.mutable_c_flags())[module_name] = flags;
-    }
-    for (const auto& entry : cache.entries()) {
-      if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
-        std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
-        function_flags_by_module[std::string(entry.module_name())]
-                                [std::string(entry.function_name())] = std::move(flags);
-      }
-    }
-  };
-
-  for (const auto& entry : config.tuning_entries()) {
-    if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
-      std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
-      function_flags_by_module[std::string(entry.module_name())]
-                              [std::string(entry.function_name())] = std::move(flags);
-    }
-  }
-
-  std::filesystem::path cache_file;
-  if (!config.tuning_cache_file().empty()) {
-    cache_file = config.tuning_cache_file();
-    if (cache_file.is_relative()) {
-      cache_file = toolchain_.RepoRoot() / cache_file;
-    }
-  } else if (!config.basename().empty()) {
-    std::filesystem::path default_cache =
-        toolchain_.RepoRoot() / "config" / absl::StrCat(config.basename(), ".tuning.textproto");
-    if (std::filesystem::exists(default_cache, ec)) {
-      cache_file = default_cache;
-    }
-  }
-  if (!cache_file.empty() && std::filesystem::exists(cache_file, ec)) {
-    auto cache_or = LoadTuningCache(cache_file);
-    if (cache_or.ok()) {
-      index_tuning_cache(*cache_or);
-    }
-  }
-
-  if (!options_.src_dir.empty()) {
-    std::filesystem::path tuned_flags_path = options_.src_dir / "tuned_c_flags.textproto";
-    if (std::filesystem::exists(tuned_flags_path, ec)) {
-      auto cache_or = LoadTuningCache(tuned_flags_path);
-      if (cache_or.ok()) {
-        index_tuning_cache(*cache_or);
-      }
-    }
-  }
-
+  GameConfig config = std::move(loaded_or->config);
+  ModuleFunctionFlagsMap function_flags_by_module = std::move(loaded_or->function_flags_by_module);
   std::string expected_sha1 = std::string(config.sha1());
 
   // 2. Prepare isolated object directory
@@ -167,72 +371,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
 
   const auto& obj_refs = adapter_or->ObjectReferences();
   std::string rewritten_ld = adapter_or->RewriteObjectPaths(obj_dir);
-
-  // Align each subsegment (.text and .data) in SEGMENT_CODE segments to at least its retail
-  // section-relative offset so shrinkage in an earlier module does not cascade-shift all
-  // subsequent modules and .data/.bss. Also move <seg>_RODATA after <seg>_DATA so compiler-
-  // generated .rodata sections (from jump tables and float constants in lifted C) do not push
-  // the retail .data subsegments forward from their retail VRAM addresses.
-  for (const auto& seg : config.segments()) {
-    if (seg.type() != SEGMENT_CODE || seg.vram() == 0) {
-      continue;
-    }
-    if (!seg.name().empty()) {
-      std::string rodata_start_marker = absl::StrCat("        ", seg.name(), "_RODATA_START = .;");
-      std::string data_start_marker = absl::StrCat("        ", seg.name(), "_DATA_START = .;");
-      std::string rom_pos_inc_marker = absl::StrCat("    __romPos += SIZEOF(.", seg.name(), ");");
-      size_t rodata_pos = rewritten_ld.find(rodata_start_marker);
-      size_t data_pos = rewritten_ld.find(data_start_marker);
-      if (rodata_pos != std::string::npos && data_pos != std::string::npos &&
-          rodata_pos < data_pos) {
-        std::string rodata_block = rewritten_ld.substr(rodata_pos, data_pos - rodata_pos);
-        rewritten_ld.erase(rodata_pos, data_pos - rodata_pos);
-        size_t rom_pos_inc = rewritten_ld.find(rom_pos_inc_marker);
-        if (rom_pos_inc != std::string::npos) {
-          size_t align_line_end = rewritten_ld.find('\n', rom_pos_inc);
-          if (align_line_end != std::string::npos) {
-            size_t next_line_end = rewritten_ld.find('\n', align_line_end + 1);
-            if (next_line_end != std::string::npos) {
-              align_line_end = next_line_end;
-            }
-            std::string rodata_section = absl::StrCat(
-                "    .", seg.name(), "_rodata (ADDR(.", seg.name(), "_bss) + SIZEOF(.", seg.name(),
-                "_bss)) : AT(__romPos) SUBALIGN(16)\n    {\n        FILL(0x00000000);\n",
-                rodata_block, "    }\n    __romPos += SIZEOF(.", seg.name(),
-                "_rodata);\n    __romPos = ALIGN(__romPos, 16);\n");
-            rewritten_ld.insert(align_line_end + 1, rodata_section);
-          }
-        }
-      }
-    }
-    for (const auto& sub : seg.subsegments()) {
-      if (sub.name().empty() || sub.rom_start() <= seg.rom_start()) {
-        continue;
-      }
-      uint32_t sub_offset = sub.rom_start() - seg.rom_start();
-      uint32_t sub_vram = seg.vram() + sub_offset;
-      std::string align_expr =
-          absl::StrFormat(". = (ABSOLUTE(.) < 0x%08X) ? 0x%X : .;\n        ", sub_vram, sub_offset);
-      if (sub.type() == SUBSEGMENT_DATA) {
-        std::string target = (obj_dir / absl::StrCat(sub.name(), ".data.o")).string() + "(.data);";
-        size_t pos = rewritten_ld.find(target);
-        if (pos != std::string::npos) {
-          rewritten_ld.insert(pos, align_expr);
-        }
-      } else if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) {
-        std::string obj_path = (obj_dir / absl::StrCat(sub.name(), ".o")).string();
-        std::string target_exact = obj_path + "(.text);";
-        size_t pos = rewritten_ld.find(target_exact);
-        if (pos == std::string::npos) {
-          std::string target_wild = obj_path + "(.text*);";
-          pos = rewritten_ld.find(target_wild);
-        }
-        if (pos != std::string::npos) {
-          rewritten_ld.insert(pos, align_expr);
-        }
-      }
-    }
-  }
+  RewriteCodeSegmentLinkerScript(config, obj_dir, &rewritten_ld);
 
   std::filesystem::path rewritten_ld_path = obj_dir / absl::StrCat(obj_prefix, ".ld");
   {
@@ -240,45 +379,8 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     ofs << rewritten_ld;
   }
 
-  // Build map of function target VRAMs for inter-function retail alignment.
-  absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
-  if (symbol_index != nullptr) {
-    for (const SymbolRegistryEntry* entry : symbol_index->SortedEntries()) {
-      if (entry->type() == SYMBOL_FUNC && !entry->name().empty() && entry->address() != 0) {
-        function_target_vrams[std::string(entry->name())] = entry->address();
-      }
-    }
-  }
-  if (!options_.src_dir.empty()) {
-    std::filesystem::path lifted_symbols_path = options_.src_dir / "lifted_symbols.ld";
-    if (std::filesystem::exists(lifted_symbols_path, ec)) {
-      std::ifstream ls_ifs(lifted_symbols_path);
-      std::string line;
-      while (std::getline(ls_ifs, line)) {
-        size_t eq_pos = line.find('=');
-        if (eq_pos == std::string::npos) {
-          continue;
-        }
-        std::string_view line_view = line;
-        std::string_view lhs = absl::StripAsciiWhitespace(line_view.substr(0, eq_pos));
-        if (absl::StartsWith(lhs, "PROVIDE(")) {
-          lhs.remove_prefix(8);
-          lhs = absl::StripAsciiWhitespace(lhs);
-        }
-        std::string_view rhs = absl::StripAsciiWhitespace(line_view.substr(eq_pos + 1));
-        while (!rhs.empty() && (rhs.back() == ';' || rhs.back() == ')' ||
-                                absl::ascii_isspace(static_cast<unsigned char>(rhs.back())))) {
-          rhs.remove_suffix(1);
-        }
-        if (!lhs.empty() && (absl::StartsWith(rhs, "0x") || absl::StartsWith(rhs, "0X"))) {
-          uint32_t addr = 0;
-          if (absl::SimpleHexAtoi(rhs.substr(2), &addr) && addr != 0) {
-            function_target_vrams.try_emplace(std::string(lhs), addr);
-          }
-        }
-      }
-    }
-  }
+  absl::flat_hash_map<std::string, uint32_t> function_target_vrams =
+      CollectFunctionTargetVrams(symbol_index.get(), options_.src_dir);
 
   // 5. Resolve and compile all objects
   std::filesystem::path src_dir = options_.src_dir;
@@ -526,70 +628,7 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
   }
 
   // 8. Verification
-  RomBuildResult result;
-  result.total_objects = obj_refs.size();
-
-  auto sha1_or = ComputeFileSha1(options_.out_rom);
-  if (!sha1_or.ok()) {
-    return sha1_or.status();
-  }
-  result.built_sha1 = *sha1_or;
-  result.expected_sha1 = expected_sha1;
-
-  if (!expected_sha1.empty()) {
-    result.sha1_matches =
-        (absl::AsciiStrToLower(result.built_sha1) == absl::AsciiStrToLower(expected_sha1));
-  } else {
-    result.sha1_matches = true;
-  }
-
-  std::filesystem::path target_rom = options_.verify_rom;
-  if (target_rom.empty()) {
-    std::filesystem::path candidate =
-        toolchain_.RepoRoot() / "roms" / absl::StrCat(options_.game_name, ".z64");
-    if (std::filesystem::exists(candidate, ec)) {
-      target_rom = candidate;
-    }
-  }
-
-  result.byte_matches = true;
-  if (!target_rom.empty() && std::filesystem::exists(target_rom, ec)) {
-    std::ifstream f_target(target_rom, std::ios::binary);
-    std::ifstream f_built(options_.out_rom, std::ios::binary);
-    if (f_target && f_built) {
-      std::vector<uint8_t> target_bytes((std::istreambuf_iterator<char>(f_target)),
-                                        std::istreambuf_iterator<char>());
-      std::vector<uint8_t> built_bytes((std::istreambuf_iterator<char>(f_built)),
-                                       std::istreambuf_iterator<char>());
-      if (target_bytes != built_bytes) {
-        result.byte_matches = false;
-        size_t min_len = std::min(target_bytes.size(), built_bytes.size());
-        size_t diff_count = 0;
-        for (size_t i = 0; i < min_len; ++i) {
-          if (target_bytes[i] != built_bytes[i]) {
-            diff_count++;
-          }
-        }
-        diff_count += std::max(target_bytes.size(), built_bytes.size()) - min_len;
-        result.differing_bytes = diff_count;
-      }
-    }
-  }
-
-  if (options_.toolchain_mode == ToolchainMode::kModern) {
-    result.success = true;
-  } else {
-    result.success = result.sha1_matches && result.byte_matches;
-  }
-
-  if (options_.is_test && !result.success) {
-    return absl::InternalError(absl::StrFormat(
-        "RomBuilder: Verification failed for %s. Built SHA-1: %s, Expected SHA-1: %s, "
-        "Differing bytes: %d",
-        options_.game_name, result.built_sha1, result.expected_sha1, result.differing_bytes));
-  }
-
-  return result;
+  return VerifyBuiltRom(options_, toolchain_.RepoRoot(), expected_sha1, obj_refs.size());
 }
 
 absl::Status RomBuilder::CompileCWithPerFunctionFlags(

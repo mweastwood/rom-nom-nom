@@ -20,6 +20,141 @@ size_t RegIdx(Register reg) {
   return static_cast<size_t>(reg);
 }
 
+struct CfgReachabilityGraph {
+  absl::flat_hash_map<uint32_t, size_t> id_to_index;
+  std::vector<bool> reachable;
+  std::vector<std::vector<size_t>> predecessors;
+  bool has_reachable_return = false;
+};
+
+CfgReachabilityGraph BuildCfgReachabilityGraph(const ControlFlowGraph& cfg,
+                                               bool reachable_only_predecessors = true) {
+  CfgReachabilityGraph graph;
+  const size_t num_blocks = cfg.Blocks().size();
+  if (num_blocks == 0) {
+    return graph;
+  }
+
+  graph.id_to_index.reserve(num_blocks);
+  for (size_t i = 0; i < num_blocks; ++i) {
+    graph.id_to_index[cfg.Blocks()[i].id] = i;
+  }
+
+  graph.reachable.assign(num_blocks, false);
+  std::vector<size_t> worklist = {0};
+  graph.reachable[0] = true;
+  while (!worklist.empty()) {
+    size_t curr = worklist.back();
+    worklist.pop_back();
+    for (uint32_t succ_id : cfg.Blocks()[curr].successors) {
+      auto it = graph.id_to_index.find(succ_id);
+      if (it != graph.id_to_index.end() && !graph.reachable[it->second]) {
+        graph.reachable[it->second] = true;
+        worklist.push_back(it->second);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < num_blocks; ++i) {
+    if (graph.reachable[i] && cfg.Blocks()[i].HasReturn()) {
+      graph.has_reachable_return = true;
+      break;
+    }
+  }
+
+  graph.predecessors.resize(num_blocks);
+  for (size_t u = 0; u < num_blocks; ++u) {
+    if (reachable_only_predecessors && !graph.reachable[u]) {
+      continue;
+    }
+    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
+      auto it = graph.id_to_index.find(succ_id);
+      if (it != graph.id_to_index.end()) {
+        graph.predecessors[it->second].push_back(u);
+      }
+    }
+  }
+
+  return graph;
+}
+
+bool BlockUsesV0BeforeRedef(const BasicBlock& blk) {
+  for (size_t idx = 0; idx < blk.instructions.size(); ++idx) {
+    const auto& inst = blk.instructions[idx];
+    if (inst.IsCall()) {
+      if (idx + 1 < blk.instructions.size()) {
+        RegisterUseDef delay_ud = GetInstructionUseDef(blk.instructions[idx + 1]);
+        for (Register u : delay_ud.gpr_uses) {
+          if (u == Register::kV0) return true;
+        }
+      }
+      RegisterUseDef call_ud = GetInstructionUseDef(inst);
+      for (Register u : call_ud.gpr_uses) {
+        if (u == Register::kV0) return true;
+      }
+      return false;
+    }
+    RegisterUseDef ud = GetInstructionUseDef(inst);
+    for (Register u : ud.gpr_uses) {
+      if (u == Register::kV0) return true;
+    }
+    for (Register d : ud.gpr_defs) {
+      if (d == Register::kV0) return false;
+    }
+  }
+  return false;
+}
+
+bool ShouldStripDelaySlotV0DefOnEdge(const ControlFlowGraph& cfg, const BasicBlock& pred_block,
+                                     uint32_t target_block_id,
+                                     absl::Span<const Instruction> executed,
+                                     const absl::flat_hash_map<uint32_t, size_t>& id_to_index) {
+  const auto* term = pred_block.Terminator();
+  if (term == nullptr || !term->IsBranch() || executed.size() <= 1) {
+    return false;
+  }
+
+  std::optional<EdgeType> opposite_edge_type;
+  for (const auto& edge : pred_block.outgoing_edges) {
+    if (edge.to_block_id == target_block_id) {
+      if (edge.type == EdgeType::kBranch) {
+        opposite_edge_type = EdgeType::kFallthrough;
+        break;
+      }
+      if (edge.type == EdgeType::kFallthrough && !term->IsBranchLikely()) {
+        opposite_edge_type = EdgeType::kBranch;
+        break;
+      }
+    }
+  }
+  if (!opposite_edge_type.has_value()) {
+    return false;
+  }
+
+  RegisterUseDef delay_ud = GetInstructionUseDef(executed.back());
+  bool delay_defs_v0 = false;
+  for (Register d : delay_ud.gpr_defs) {
+    if (d == Register::kV0) {
+      delay_defs_v0 = true;
+      break;
+    }
+  }
+  if (!delay_defs_v0) {
+    return false;
+  }
+
+  for (const auto& edge : pred_block.outgoing_edges) {
+    if (edge.type == *opposite_edge_type) {
+      auto opp_it = id_to_index.find(edge.to_block_id);
+      if (opp_it != id_to_index.end()) {
+        return BlockUsesV0BeforeRedef(cfg.Blocks()[opp_it->second]);
+      }
+      break;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 const std::vector<size_t>& RegisterTracker::EmptyVector() {
@@ -726,40 +861,13 @@ void RegisterTracker::Invalidate(Register reg) {
 
 bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
                         const absl::flat_hash_set<std::string>* functions_returning_v0) {
-  if (cfg.Blocks().empty()) {
+  CfgReachabilityGraph graph = BuildCfgReachabilityGraph(cfg);
+  if (!graph.has_reachable_return) {
     return false;
   }
-
-  absl::flat_hash_map<uint32_t, size_t> id_to_index;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    id_to_index[cfg.Blocks()[i].id] = i;
-  }
-
-  std::vector<bool> reachable(cfg.Blocks().size(), false);
-  std::vector<size_t> reach_worklist = {0};
-  reachable[0] = true;
-  while (!reach_worklist.empty()) {
-    size_t curr = reach_worklist.back();
-    reach_worklist.pop_back();
-    for (uint32_t succ_id : cfg.Blocks()[curr].successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end() && !reachable[it->second]) {
-        reachable[it->second] = true;
-        reach_worklist.push_back(it->second);
-      }
-    }
-  }
-
-  bool has_reachable_return = false;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    if (reachable[i] && cfg.Blocks()[i].HasReturn()) {
-      has_reachable_return = true;
-      break;
-    }
-  }
-  if (!has_reachable_return) {
-    return false;
-  }
+  const auto& id_to_index = graph.id_to_index;
+  const auto& reachable = graph.reachable;
+  const auto& predecessors = graph.predecessors;
 
   auto uninit_callee_saved = DetectUninitializedCalleeSavedRegisters(cfg);
 
@@ -898,17 +1006,6 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
     return 0;
   };
 
-  std::vector<std::vector<size_t>> predecessors(cfg.Blocks().size());
-  for (size_t u = 0; u < cfg.Blocks().size(); ++u) {
-    if (!reachable[u]) continue;
-    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end()) {
-        predecessors[it->second].push_back(u);
-      }
-    }
-  }
-
   std::vector<bool> in_avail(cfg.Blocks().size(), false);
   std::vector<bool> out_avail(cfg.Blocks().size(), false);
   in_avail[0] = false;
@@ -942,96 +1039,9 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
             executed = executed.subspan(0, executed.size() - 1);
           }
 
-          bool is_taken_branch = false;
-          if (term != nullptr && term->IsBranch()) {
-            for (const auto& edge : p_block.outgoing_edges) {
-              if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kBranch) {
-                is_taken_branch = true;
-                break;
-              }
-            }
-          }
-          auto block_uses_v0_before_redef = [](const BasicBlock& blk) -> bool {
-            for (size_t idx = 0; idx < blk.instructions.size(); ++idx) {
-              const auto& inst = blk.instructions[idx];
-              if (inst.IsCall()) {
-                if (idx + 1 < blk.instructions.size()) {
-                  RegisterUseDef delay_ud = GetInstructionUseDef(blk.instructions[idx + 1]);
-                  for (Register u : delay_ud.gpr_uses) {
-                    if (u == Register::kV0) return true;
-                  }
-                }
-                RegisterUseDef call_ud = GetInstructionUseDef(inst);
-                for (Register u : call_ud.gpr_uses) {
-                  if (u == Register::kV0) return true;
-                }
-                return false;
-              }
-              RegisterUseDef ud = GetInstructionUseDef(inst);
-              for (Register u : ud.gpr_uses) {
-                if (u == Register::kV0) return true;
-              }
-              for (Register d : ud.gpr_defs) {
-                if (d == Register::kV0) return false;
-              }
-            }
-            return false;
-          };
-
-          if (is_taken_branch && executed.size() > 1) {
-            RegisterUseDef delay_ud = GetInstructionUseDef(executed.back());
-            bool delay_defs_v0 = false;
-            for (Register d : delay_ud.gpr_defs) {
-              if (d == Register::kV0) delay_defs_v0 = true;
-            }
-            if (delay_defs_v0) {
-              for (const auto& edge : p_block.outgoing_edges) {
-                if (edge.type == EdgeType::kFallthrough) {
-                  auto ft_it = id_to_index.find(edge.to_block_id);
-                  if (ft_it != id_to_index.end()) {
-                    const auto& ft_block = cfg.Blocks()[ft_it->second];
-                    if (block_uses_v0_before_redef(ft_block)) {
-                      executed = executed.subspan(0, executed.size() - 1);
-                    }
-                  }
-                  break;
-                }
-              }
-            }
-          }
-
-          bool is_fallthrough_branch = false;
-          if (term != nullptr && term->IsBranch() && !term->IsBranchLikely()) {
-            for (const auto& edge : p_block.outgoing_edges) {
-              if (edge.to_block_id == cfg.Blocks()[b].id && edge.type == EdgeType::kFallthrough) {
-                is_fallthrough_branch = true;
-                break;
-              }
-            }
-          }
-          if (is_fallthrough_branch && executed.size() > 1) {
-            RegisterUseDef delay_instruction_use_def = GetInstructionUseDef(executed.back());
-            bool delay_defines_v0 = false;
-            for (Register destination_register : delay_instruction_use_def.gpr_defs) {
-              if (destination_register == Register::kV0) {
-                delay_defines_v0 = true;
-                break;
-              }
-            }
-            if (delay_defines_v0) {
-              for (const auto& edge : p_block.outgoing_edges) {
-                if (edge.type == EdgeType::kBranch) {
-                  auto branch_target_iterator = id_to_index.find(edge.to_block_id);
-                  if (branch_target_iterator != id_to_index.end()) {
-                    const auto& branch_target_block = cfg.Blocks()[branch_target_iterator->second];
-                    if (block_uses_v0_before_redef(branch_target_block)) {
-                      executed = executed.subspan(0, executed.size() - 1);
-                    }
-                  }
-                  break;
-                }
-              }
-            }
+          if (ShouldStripDelaySlotV0DefOnEdge(cfg, p_block, cfg.Blocks()[b].id, executed,
+                                              id_to_index)) {
+            executed = executed.subspan(0, executed.size() - 1);
           }
 
           int effect = eval_seq(executed);
@@ -1098,40 +1108,12 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
 }
 
 bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
-  if (cfg.Blocks().empty()) {
+  CfgReachabilityGraph graph = BuildCfgReachabilityGraph(cfg);
+  if (!graph.has_reachable_return) {
     return false;
   }
-
-  absl::flat_hash_map<uint32_t, size_t> id_to_index;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    id_to_index[cfg.Blocks()[i].id] = i;
-  }
-
-  std::vector<bool> reachable(cfg.Blocks().size(), false);
-  std::vector<size_t> reach_worklist = {0};
-  reachable[0] = true;
-  while (!reach_worklist.empty()) {
-    size_t curr = reach_worklist.back();
-    reach_worklist.pop_back();
-    for (uint32_t succ_id : cfg.Blocks()[curr].successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end() && !reachable[it->second]) {
-        reachable[it->second] = true;
-        reach_worklist.push_back(it->second);
-      }
-    }
-  }
-
-  bool has_reachable_return = false;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    if (reachable[i] && cfg.Blocks()[i].HasReturn()) {
-      has_reachable_return = true;
-      break;
-    }
-  }
-  if (!has_reachable_return) {
-    return false;
-  }
+  const auto& reachable = graph.reachable;
+  const auto& predecessors = graph.predecessors;
 
   auto eval_seq = [](absl::Span<const Instruction> instructions) -> int {
     int last_def = -1;
@@ -1186,17 +1168,6 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
     }
     return 0;
   };
-
-  std::vector<std::vector<size_t>> predecessors(cfg.Blocks().size());
-  for (size_t u = 0; u < cfg.Blocks().size(); ++u) {
-    if (!reachable[u]) continue;
-    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end()) {
-        predecessors[it->second].push_back(u);
-      }
-    }
-  }
 
   std::vector<bool> in_avail(cfg.Blocks().size(), true);
   std::vector<bool> out_avail(cfg.Blocks().size(), true);
@@ -1392,20 +1363,9 @@ absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(const Cont
   uint32_t init_def_mask = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 28) |
                            (1u << 29) | (1u << 31);
 
-  absl::flat_hash_map<uint32_t, size_t> id_to_index;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    id_to_index[cfg.Blocks()[i].id] = i;
-  }
-
-  std::vector<std::vector<size_t>> predecessors(cfg.Blocks().size());
-  for (size_t u = 0; u < cfg.Blocks().size(); ++u) {
-    for (uint32_t succ_id : cfg.Blocks()[u].successors) {
-      auto it = id_to_index.find(succ_id);
-      if (it != id_to_index.end()) {
-        predecessors[it->second].push_back(u);
-      }
-    }
-  }
+  CfgReachabilityGraph graph =
+      BuildCfgReachabilityGraph(cfg, /*reachable_only_predecessors=*/false);
+  const auto& predecessors = graph.predecessors;
 
   std::vector<uint32_t> in_defs(cfg.Blocks().size(), 0);
   std::vector<uint32_t> out_defs(cfg.Blocks().size(), 0xFFFFFFFF);

@@ -36,6 +36,77 @@ FpRegister ToFpRegister(uint32_t val) {
   return static_cast<FpRegister>(val & 0x1F);
 }
 
+Opcode DecodeCop1FloatOp(uint32_t funct, bool is_double) {
+  switch (funct) {
+    case 0x00:
+      return is_double ? Opcode::kAddD : Opcode::kAddS;
+    case 0x01:
+      return is_double ? Opcode::kSubD : Opcode::kSubS;
+    case 0x02:
+      return is_double ? Opcode::kMulD : Opcode::kMulS;
+    case 0x03:
+      return is_double ? Opcode::kDivD : Opcode::kDivS;
+    case 0x04:
+      return is_double ? Opcode::kSqrtD : Opcode::kSqrtS;
+    case 0x05:
+      return is_double ? Opcode::kAbsD : Opcode::kAbsS;
+    case 0x06:
+      return is_double ? Opcode::kMovD : Opcode::kMovS;
+    case 0x07:
+      return is_double ? Opcode::kNegD : Opcode::kNegS;
+    case 0x0C:
+      return is_double ? Opcode::kRoundWD : Opcode::kRoundWS;
+    case 0x0D:
+      return is_double ? Opcode::kTruncWD : Opcode::kTruncWS;
+    case 0x0E:
+      return is_double ? Opcode::kCeilWD : Opcode::kCeilWS;
+    case 0x0F:
+      return is_double ? Opcode::kFloorWD : Opcode::kFloorWS;
+    case 0x20:
+      return is_double ? Opcode::kCvtSD : Opcode::kUnknown;
+    case 0x21:
+      return is_double ? Opcode::kUnknown : Opcode::kCvtDS;
+    case 0x24:
+      return is_double ? Opcode::kCvtWD : Opcode::kCvtWS;
+    case 0x25:
+      return is_double ? Opcode::kCvtLD : Opcode::kCvtLS;
+    case 0x30:
+      return is_double ? Opcode::kCFD : Opcode::kCFS;
+    case 0x31:
+      return is_double ? Opcode::kCUnD : Opcode::kCUnS;
+    case 0x32:
+      return is_double ? Opcode::kCEqD : Opcode::kCEqS;
+    case 0x33:
+      return is_double ? Opcode::kCUeqD : Opcode::kCUeqS;
+    case 0x34:
+      return is_double ? Opcode::kCOltD : Opcode::kCOltS;
+    case 0x35:
+      return is_double ? Opcode::kCUltD : Opcode::kCUltS;
+    case 0x36:
+      return is_double ? Opcode::kCOleD : Opcode::kCOleS;
+    case 0x37:
+      return is_double ? Opcode::kCUleD : Opcode::kCUleS;
+    case 0x38:
+      return is_double ? Opcode::kCSfD : Opcode::kCSfS;
+    case 0x39:
+      return is_double ? Opcode::kCNgleD : Opcode::kCNgleS;
+    case 0x3A:
+      return is_double ? Opcode::kCSeqD : Opcode::kCSeqS;
+    case 0x3B:
+      return is_double ? Opcode::kCNglD : Opcode::kCNglS;
+    case 0x3C:
+      return is_double ? Opcode::kCLtD : Opcode::kCLtS;
+    case 0x3D:
+      return is_double ? Opcode::kCNgeD : Opcode::kCNgeS;
+    case 0x3E:
+      return is_double ? Opcode::kCLeD : Opcode::kCLeS;
+    case 0x3F:
+      return is_double ? Opcode::kCNgtD : Opcode::kCNgtS;
+    default:
+      return Opcode::kUnknown;
+  }
+}
+
 }  // namespace
 
 std::string_view RegisterName(Register reg) {
@@ -960,209 +1031,9 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
       return inst;
     }
 
-    // Single Precision Float Ops: rs == 0x10
-    if (rs_val == 0x10) {
-      switch (funct) {
-        case 0x00:
-          inst.opcode = Opcode::kAddS;
-          break;
-        case 0x01:
-          inst.opcode = Opcode::kSubS;
-          break;
-        case 0x02:
-          inst.opcode = Opcode::kMulS;
-          break;
-        case 0x03:
-          inst.opcode = Opcode::kDivS;
-          break;
-        case 0x04:
-          inst.opcode = Opcode::kSqrtS;
-          break;
-        case 0x05:
-          inst.opcode = Opcode::kAbsS;
-          break;
-        case 0x06:
-          inst.opcode = Opcode::kMovS;
-          break;
-        case 0x07:
-          inst.opcode = Opcode::kNegS;
-          break;
-        case 0x0C:
-          inst.opcode = Opcode::kRoundWS;
-          break;
-        case 0x0D:
-          inst.opcode = Opcode::kTruncWS;
-          break;
-        case 0x0E:
-          inst.opcode = Opcode::kCeilWS;
-          break;
-        case 0x0F:
-          inst.opcode = Opcode::kFloorWS;
-          break;
-        case 0x21:
-          inst.opcode = Opcode::kCvtDS;
-          break;
-        case 0x24:
-          inst.opcode = Opcode::kCvtWS;
-          break;
-        case 0x25:
-          inst.opcode = Opcode::kCvtLS;
-          break;
-        case 0x30:
-          inst.opcode = Opcode::kCFS;
-          break;
-        case 0x31:
-          inst.opcode = Opcode::kCUnS;
-          break;
-        case 0x32:
-          inst.opcode = Opcode::kCEqS;
-          break;
-        case 0x33:
-          inst.opcode = Opcode::kCUeqS;
-          break;
-        case 0x34:
-          inst.opcode = Opcode::kCOltS;
-          break;
-        case 0x35:
-          inst.opcode = Opcode::kCUltS;
-          break;
-        case 0x36:
-          inst.opcode = Opcode::kCOleS;
-          break;
-        case 0x37:
-          inst.opcode = Opcode::kCUleS;
-          break;
-        case 0x38:
-          inst.opcode = Opcode::kCSfS;
-          break;
-        case 0x39:
-          inst.opcode = Opcode::kCNgleS;
-          break;
-        case 0x3A:
-          inst.opcode = Opcode::kCSeqS;
-          break;
-        case 0x3B:
-          inst.opcode = Opcode::kCNglS;
-          break;
-        case 0x3C:
-          inst.opcode = Opcode::kCLtS;
-          break;
-        case 0x3D:
-          inst.opcode = Opcode::kCNgeS;
-          break;
-        case 0x3E:
-          inst.opcode = Opcode::kCLeS;
-          break;
-        case 0x3F:
-          inst.opcode = Opcode::kCNgtS;
-          break;
-        default:
-          inst.opcode = Opcode::kUnknown;
-          break;
-      }
-      return inst;
-    }
-
-    // Double Precision Float Ops: rs == 0x11
-    if (rs_val == 0x11) {
-      switch (funct) {
-        case 0x00:
-          inst.opcode = Opcode::kAddD;
-          break;
-        case 0x01:
-          inst.opcode = Opcode::kSubD;
-          break;
-        case 0x02:
-          inst.opcode = Opcode::kMulD;
-          break;
-        case 0x03:
-          inst.opcode = Opcode::kDivD;
-          break;
-        case 0x04:
-          inst.opcode = Opcode::kSqrtD;
-          break;
-        case 0x05:
-          inst.opcode = Opcode::kAbsD;
-          break;
-        case 0x06:
-          inst.opcode = Opcode::kMovD;
-          break;
-        case 0x07:
-          inst.opcode = Opcode::kNegD;
-          break;
-        case 0x0C:
-          inst.opcode = Opcode::kRoundWD;
-          break;
-        case 0x0D:
-          inst.opcode = Opcode::kTruncWD;
-          break;
-        case 0x0E:
-          inst.opcode = Opcode::kCeilWD;
-          break;
-        case 0x0F:
-          inst.opcode = Opcode::kFloorWD;
-          break;
-        case 0x20:
-          inst.opcode = Opcode::kCvtSD;
-          break;
-        case 0x24:
-          inst.opcode = Opcode::kCvtWD;
-          break;
-        case 0x25:
-          inst.opcode = Opcode::kCvtLD;
-          break;
-        case 0x30:
-          inst.opcode = Opcode::kCFD;
-          break;
-        case 0x31:
-          inst.opcode = Opcode::kCUnD;
-          break;
-        case 0x32:
-          inst.opcode = Opcode::kCEqD;
-          break;
-        case 0x33:
-          inst.opcode = Opcode::kCUeqD;
-          break;
-        case 0x34:
-          inst.opcode = Opcode::kCOltD;
-          break;
-        case 0x35:
-          inst.opcode = Opcode::kCUltD;
-          break;
-        case 0x36:
-          inst.opcode = Opcode::kCOleD;
-          break;
-        case 0x37:
-          inst.opcode = Opcode::kCUleD;
-          break;
-        case 0x38:
-          inst.opcode = Opcode::kCSfD;
-          break;
-        case 0x39:
-          inst.opcode = Opcode::kCNgleD;
-          break;
-        case 0x3A:
-          inst.opcode = Opcode::kCSeqD;
-          break;
-        case 0x3B:
-          inst.opcode = Opcode::kCNglD;
-          break;
-        case 0x3C:
-          inst.opcode = Opcode::kCLtD;
-          break;
-        case 0x3D:
-          inst.opcode = Opcode::kCNgeD;
-          break;
-        case 0x3E:
-          inst.opcode = Opcode::kCLeD;
-          break;
-        case 0x3F:
-          inst.opcode = Opcode::kCNgtD;
-          break;
-        default:
-          inst.opcode = Opcode::kUnknown;
-          break;
-      }
+    // Single/Double Precision Float Ops: rs == 0x10 (S) or rs == 0x11 (D)
+    if (rs_val == 0x10 || rs_val == 0x11) {
+      inst.opcode = DecodeCop1FloatOp(funct, /*is_double=*/rs_val == 0x11);
       return inst;
     }
 

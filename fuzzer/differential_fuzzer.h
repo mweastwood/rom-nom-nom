@@ -108,6 +108,8 @@ class DifferentialFuzzer {
 
  private:
   void SetupEmulator(MipsEmulator* emu, const FuzzTestCase& test_case) const;
+  void CompareMemoryWrites(DifferentialComparison* comp, const FuzzTestCase& test_case) const;
+  void CompareExternalCalls(DifferentialComparison* comp) const;
   void EvaluateComparison(DifferentialComparison* comp, absl::Span<const uint32_t> target_code,
                           uint32_t target_vram, absl::Span<const uint32_t> candidate_code,
                           uint32_t candidate_vram, const FuzzTestCase& test_case);
