@@ -2025,8 +2025,13 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
   SimplifyReciprocalDivisionAndUnsignedFloatConversions(body.get());
   FoldSingleUseExpressions(body.get());
   TrimUnassignedTrailingCallArgRegisters(body.get(), parameters, options.function_parameter_counts);
-  if (SplitScratchReusedParameterRegisters(body.get(), parameters, ctx.FrameSize())) {
+  if (SplitScratchReusedParameterRegisters(body.get(), parameters, ctx.FrameSize(),
+                                           ctx.HasFramePointer()) &&
+      !ctx.HasFramePointer()) {
     FoldSingleUseExpressions(body.get());
+  }
+  if (ctx.HasFramePointer()) {
+    RewriteFramePointerStructOffsetAccesses(body.get());
   }
 
   if (ctx.HasFramePointer() && return_type.ToString() == "void" && !body->Statements().empty()) {

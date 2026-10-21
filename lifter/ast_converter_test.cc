@@ -3580,5 +3580,38 @@ TEST(AstConverterTest, PreservesSeparateGlobalIndexLoadBeforeGlobalArrayLookupIn
   EXPECT_THAT(code, HasSubstr("if ((*(u8*)((u8*)0x80158512 + v0) != 255))"));
 }
 
+TEST(AstConverterTest, FramePointerFunctionCoalescesHomedParamsAndEmitsStructOffsetAccess) {
+  std::vector<uint32_t> words = {
+      0x27BDFFF8,  // 00: addiu $sp, $sp, -8
+      0xAFBE0004,  // 04: sw    $fp, 4($sp)
+      0x03A0F021,  // 08: addu  $fp, $sp, $zero
+      0xAFC40008,  // 0C: sw    $a0, 8($fp)
+      0xAFC5000C,  // 10: sw    $a1, 12($fp)
+      0x8FC20008,  // 14: lw    $v0, 8($fp)
+      0x8FC3000C,  // 18: lw    $v1, 12($fp)
+      0xAC430004,  // 1C: sw    $v1, 4($v0)
+      0x03C0E821,  // 20: addu  $sp, $fp, $zero
+      0x8FBE0004,  // 24: lw    $fp, 4($sp)
+      0x03E00008,  // 28: jr    $ra
+      0x27BD0008,  // 2C: addiu $sp, $sp, 8
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestFramePointerStructOffset";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("((struct { u8 _p[4]; s32 _v; }*)arg0)->_v = arg1;"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_8")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_12")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

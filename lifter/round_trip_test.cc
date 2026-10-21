@@ -5248,5 +5248,27 @@ void DuplicateRomSegmentSymbolsAcrossMultipleCallsAvoidCse(void) {
 )");
 }
 
+TEST_F(RoundTripTest, O0FramePointerStructFieldAndCall) {
+  RoundTripOptions opts;
+  opts.c_flags = {"-O0", "-mips2", "-mcpu=r4000"};
+  AssertRoundTripBitExact("O0FramePointerStructFieldAndCall", R"(
+typedef struct {
+    s32 id;
+    s32 count;
+    u16 flags;
+} NodeState;
+
+void notify_node(s32 id, s32 val);
+
+void O0FramePointerStructFieldAndCall(NodeState* node, s32 delta) {
+    node->count = node->count + delta;
+    if (node->flags != 0) {
+        notify_node(node->id, node->count);
+    }
+}
+)",
+                          opts);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

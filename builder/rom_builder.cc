@@ -49,11 +49,27 @@ absl::StatusOr<LoadedConfigAndFlags> LoadGameConfigAndTuningFlags(
     loaded.config = std::move(*config_or);
   }
 
+  absl::flat_hash_set<std::string> explicit_o0_modules;
+  for (const auto& [module_name, flag_list] : loaded.config.c_flags()) {
+    for (const auto& f : flag_list.flags()) {
+      if (f == "-O0") {
+        explicit_o0_modules.insert(module_name);
+        break;
+      }
+    }
+  }
+
   auto index_tuning_cache = [&](const TuningCache& cache) {
     for (const auto& [module_name, flags] : cache.module_c_flags()) {
+      if (explicit_o0_modules.contains(module_name)) {
+        continue;
+      }
       (*loaded.config.mutable_c_flags())[module_name] = flags;
     }
     for (const auto& entry : cache.entries()) {
+      if (explicit_o0_modules.contains(entry.module_name())) {
+        continue;
+      }
       if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
         std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
         loaded.function_flags_by_module[std::string(entry.module_name())]

@@ -265,6 +265,12 @@ std::unique_ptr<CExpression> CastExpression::Clone() const {
 // --- MemberAccessExpression ---
 
 std::string MemberAccessExpression::ToString() const {
+  if (object_->Kind() == CExpressionKind::kCastExpression ||
+      object_->Kind() == CExpressionKind::kUnaryExpression ||
+      object_->Kind() == CExpressionKind::kBinaryExpression ||
+      object_->Kind() == CExpressionKind::kAssignmentExpression) {
+    return absl::StrFormat("(%s)%s%s", object_->ToString(), is_arrow_ ? "->" : ".", member_name_);
+  }
   return absl::StrFormat("%s%s%s", object_->ToString(), is_arrow_ ? "->" : ".", member_name_);
 }
 
