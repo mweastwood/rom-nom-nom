@@ -5313,5 +5313,35 @@ void NonLeafFloatScratchStoreBeforeHelperCall(VecNode* node, f32 scale) {
 )");
 }
 
+TEST_F(RoundTripTest, MultiParamSavedToCalleeRegistersAndReusedAcrossCalls) {
+  AssertRoundTripBitExact("MultiParamSavedToCalleeRegistersAndReusedAcrossCalls", R"(
+typedef struct {
+    u8* data;
+    s32 len;
+    s32 pos;
+} StreamState;
+
+void clear_buffer(u8* dst, s32 len);
+s32 process_byte(u8* dst, s32 val);
+
+s32 MultiParamSavedToCalleeRegistersAndReusedAcrossCalls(StreamState* st, u8* out) {
+    s32 pos;
+    s32 ch;
+    clear_buffer(out, 300);
+    pos = st->pos;
+    if (pos < st->len) {
+        st->pos = pos + 1;
+        ch = st->data[pos];
+    } else {
+        ch = -1;
+    }
+    if (ch != -1) {
+        return process_byte(out, ch);
+    }
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

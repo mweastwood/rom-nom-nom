@@ -2238,25 +2238,26 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
   }
   std::string body_text = body->ToString();
   bool has_goto = absl::StrContains(body_text, "goto ");
-  if (has_goto && parameters.size() != 1) {
-    if (parameters.size() == 2 && absl::StrContains(body_text, "fp = ") && stmts.size() > 3 &&
-        stmts[0] != nullptr && stmts[1] != nullptr && stmts[2] != nullptr &&
-        stmts[0]->ToString(0) == "temp_s0 = arg1;\n" &&
-        absl::EndsWith(stmts[1]->ToString(0), " = arg0;\n") &&
-        stmts[2]->Kind() == CStatementKind::kExpressionStatement &&
-        static_cast<const ExpressionStatement&>(*stmts[2]).Expression().Kind() ==
-            CExpressionKind::kCallExpression &&
-        !StatementReferencesVariable(*stmts[2], "arg0") &&
-        !StatementReferencesVariable(*stmts[2], "arg1")) {
-      for (size_t k = 2; k < stmts.size(); ++k) {
-        stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg0", "temp_a0");
-        stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg1", "temp_a1");
-        stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg2", "temp_a2");
-        stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg3", "temp_a3");
-      }
+  if (has_goto && parameters.size() == 2 && absl::StrContains(body_text, "fp = ") &&
+      stmts.size() > 3 && stmts[0] != nullptr && stmts[1] != nullptr && stmts[2] != nullptr &&
+      stmts[0]->ToString(0) == "temp_s0 = arg1;\n" &&
+      absl::EndsWith(stmts[1]->ToString(0), " = arg0;\n") &&
+      stmts[2]->Kind() == CStatementKind::kExpressionStatement &&
+      static_cast<const ExpressionStatement&>(*stmts[2]).Expression().Kind() ==
+          CExpressionKind::kCallExpression &&
+      !StatementReferencesVariable(*stmts[2], "arg0") &&
+      !StatementReferencesVariable(*stmts[2], "arg1")) {
+    for (size_t k = 2; k < stmts.size(); ++k) {
+      stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg0", "temp_a0");
+      stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg1", "temp_a1");
+      stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg2", "temp_a2");
+      stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), "arg3", "temp_a3");
     }
     return false;
   }
+  auto is_temp_t_var = [](std::string_view v) {
+    return v.size() == 7 && absl::StartsWith(v, "temp_t") && v[6] >= '0' && v[6] <= '9';
+  };
   bool any_homed_split = false;
   bool any_s_split_in_single_param = false;
   for (const auto& param : parameters) {
@@ -2286,7 +2287,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
             a.Rhs().Kind() == CExpressionKind::kIdentifier) {
           std::string_view lhs = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
           std::string_view rhs = static_cast<const IdentifierExpression&>(a.Rhs()).Name();
-          if (rhs == param.name && (IsCalleeSavedGprVarName(lhs) ||
+          if (rhs == param.name && (IsCalleeSavedGprVarName(lhs) || is_temp_t_var(lhs) ||
                                     (!homed_slot_name.empty() && lhs == homed_slot_name))) {
             prologue_copy_idx = i;
             prologue_copy_lhs = std::string(lhs);
@@ -2299,10 +2300,34 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         break;
       }
     }
-    if (!prologue_copy_idx.has_value()) {
-      continue;
+    bool is_self_update_before_switch = false;
+    size_t switch_stmt_idx = 0;
+    if (!prologue_copy_idx.has_value() && parameters.size() == 1 && param.name == "arg0" &&
+        absl::StrContains(body_text, "fp = ") && stmts.size() >= 3) {
+      size_t m = 0;
+      while (m < stmts.size() && m < 4 && stmts[m] != nullptr &&
+             stmts[m]->Kind() == CStatementKind::kExpressionStatement &&
+             !StatementHasCall(*stmts[m])) {
+        const auto& es = static_cast<const ExpressionStatement&>(*stmts[m]);
+        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+          if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(a.Lhs()).Name() == param.name &&
+              ExpressionUsesVariable(a.Rhs(), param.name)) {
+            ++m;
+            continue;
+          }
+        }
+        break;
+      }
+      if (m >= 1 && m < stmts.size() && stmts[m] != nullptr &&
+          stmts[m]->Kind() == CStatementKind::kSwitchStatement) {
+        is_self_update_before_switch = true;
+        switch_stmt_idx = m;
+        prologue_copy_idx = 0;
+      }
     }
-    if (has_goto && *prologue_copy_idx != 0) {
+    if (!prologue_copy_idx.has_value()) {
       continue;
     }
     bool any_redef_seen = false;
@@ -2327,7 +2352,9 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
                 cs.Statements()[idx]->Kind() == CStatementKind::kLabelStatement &&
                 static_cast<const LabelStatement&>(*cs.Statements()[idx]).Label() == target_label) {
               if (idx + 1 < cs.Statements().size() && cs.Statements()[idx + 1] != nullptr &&
-                  is_direct_overwrite_of_param(*cs.Statements()[idx + 1])) {
+                  (is_direct_overwrite_of_param(*cs.Statements()[idx + 1]) ||
+                   (cs.Statements()[idx + 1]->Kind() == CStatementKind::kReturnStatement &&
+                    !StatementReferencesVariable(*cs.Statements()[idx + 1], param.name)))) {
                 ok = true;
               }
               return;
@@ -2377,7 +2404,9 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
             if (cs_stmts[idx]->Kind() == CStatementKind::kLabelStatement) {
               if (!*definitely_written &&
                   !(idx + 1 < cs_stmts.size() && cs_stmts[idx + 1] != nullptr &&
-                    is_direct_overwrite_of_param(*cs_stmts[idx + 1]))) {
+                    (is_direct_overwrite_of_param(*cs_stmts[idx + 1]) ||
+                     (cs_stmts[idx + 1]->Kind() == CStatementKind::kReturnStatement &&
+                      !StatementReferencesVariable(*cs_stmts[idx + 1], param.name))))) {
                 return false;
               }
               continue;
@@ -2412,7 +2441,8 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         case CStatementKind::kSwitchStatement: {
           if (!has_goto) return !StatementReferencesVariable(s, param.name);
           const auto& ss = static_cast<const SwitchStatement&>(s);
-          if (!*definitely_written && ExpressionUsesVariable(ss.Condition(), param.name)) {
+          if (!is_self_update_before_switch && !*definitely_written &&
+              ExpressionUsesVariable(ss.Condition(), param.name)) {
             return false;
           }
           for (const auto& sc : ss.Cases()) {
@@ -2440,10 +2470,46 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
           return *definitely_written || !StatementReferencesVariable(s, param.name);
       }
     };
+    size_t subst_start_idx =
+        is_self_update_before_switch ? switch_stmt_idx : (*prologue_copy_idx + 1);
+    if (!is_self_update_before_switch && !is_homed_copy) {
+      for (size_t pre_idx = *prologue_copy_idx + 1; pre_idx < stmts.size() && pre_idx < 8;
+           ++pre_idx) {
+        if (stmts[pre_idx] == nullptr ||
+            stmts[pre_idx]->Kind() != CStatementKind::kExpressionStatement) {
+          break;
+        }
+        const auto& es = static_cast<const ExpressionStatement&>(*stmts[pre_idx]);
+        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+          if (a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(a.Lhs()).Name() == param.name) {
+            break;
+          }
+        }
+        if (StatementReferencesVariable(*stmts[pre_idx], param.name)) {
+          subst_start_idx = pre_idx + 1;
+        }
+        if (StatementHasCall(*stmts[pre_idx])) {
+          saw_call_before_write = true;
+          break;
+        }
+      }
+    }
     bool entry_not_read = true;
     bool written_so_far = false;
-    for (size_t k = *prologue_copy_idx + 1; k < stmts.size(); ++k) {
+    for (size_t k = subst_start_idx; k < stmts.size(); ++k) {
       if (stmts[k] == nullptr) continue;
+      if (stmts[k]->Kind() == CStatementKind::kLabelStatement) {
+        if (!written_so_far && !(k + 1 < stmts.size() && stmts[k + 1] != nullptr &&
+                                 (is_direct_overwrite_of_param(*stmts[k + 1]) ||
+                                  (stmts[k + 1]->Kind() == CStatementKind::kReturnStatement &&
+                                   !StatementReferencesVariable(*stmts[k + 1], param.name))))) {
+          entry_not_read = false;
+          break;
+        }
+        continue;
+      }
       if (!check_entry_not_read(*stmts[k], &written_so_far)) {
         entry_not_read = false;
         break;
@@ -2452,16 +2518,32 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         break;
       }
     }
-    if (!entry_not_read || !any_redef_seen || (parameters.size() < 2 && !saw_call_before_write)) {
+    if (!entry_not_read || !any_redef_seen ||
+        (parameters.size() < 2 && !saw_call_before_write && !is_temp_t_var(prologue_copy_lhs) &&
+         !is_self_update_before_switch)) {
       continue;
     }
     std::string scratch_name = absl::StrCat("temp_a", param.name.substr(3));
-    for (size_t k = *prologue_copy_idx + 1; k < stmts.size(); ++k) {
+    if (is_self_update_before_switch) {
+      const auto& es0 = static_cast<const ExpressionStatement&>(*stmts[0]);
+      const auto& a0 = static_cast<const AssignmentExpression&>(es0.Expression());
+      stmts[0] = CStatement::Expression(
+          CExpression::Assignment("=", CExpression::Identifier(scratch_name), a0.Rhs().Clone()));
+      for (size_t k = 1; k < stmts.size(); ++k) {
+        stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), param.name, scratch_name);
+      }
+      continue;
+    }
+    for (size_t k = subst_start_idx; k < stmts.size(); ++k) {
       stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), param.name, scratch_name);
     }
     if (is_homed_copy) {
       any_homed_split = true;
-    } else if (has_goto && parameters.size() == 1) {
+    } else if (((has_goto && parameters.size() == 1) ||
+                (!has_goto && absl::StrContains(body_text, "temp_s0 = arg0;") &&
+                 absl::StrContains(body_text, "temp_s1 = arg1;") &&
+                 !absl::StrContains(body_text, "temp_s2"))) &&
+               IsCalleeSavedGprVarName(prologue_copy_lhs)) {
       any_s_split_in_single_param = true;
     } else if (param.name == "arg0" && prologue_copy_lhs == "temp_s1" &&
                absl::StrContains(body_text, "temp_s0 = ") &&

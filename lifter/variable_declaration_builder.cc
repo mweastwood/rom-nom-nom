@@ -125,7 +125,11 @@ bool CheckArgRegInCall(std::string_view r, const CExpression& expr) {
         continue;
       }
       if (i > slot && slot < call->Arguments().size()) {
-        return false;
+        if (call->Arguments()[slot] == nullptr ||
+            call->Arguments()[slot]->Kind() != CExpressionKind::kIdentifier ||
+            static_cast<const IdentifierExpression&>(*call->Arguments()[slot]).Name() != r) {
+          return false;
+        }
       }
     }
     return true;
@@ -692,7 +696,10 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
   const bool allow_caller_saved_gpr_pins = (unpinned_gpr_locals_count <= 18);
   const int max_caller_gpr_pins =
-      (total_temp_t_count >= 10 && callee_saved_gpr_count >= 9) ? 10 : 14;
+      (total_temp_t_count >= 10 && callee_saved_gpr_count >= 9)
+          ? 10
+          : ((is_leaf_func && callee_saved_gpr_count >= 1 && callee_saved_gpr_count <= 7) ? 16
+                                                                                          : 14);
   int pinned_caller_gpr_count = 0;
   bool any_param_modified = false;
   for (const auto& param : parameters) {
@@ -715,12 +722,13 @@ absl::Status PrependSynthesizedLocalDeclarations(
 
   int callee_saved_fp_count = 0;
   for (const auto& [base_name, count] : fp_base_counts) {
-    if (count == 1 && (base_name == "f20" || base_name == "f22" || base_name == "f24" ||
-                       base_name == "f26" || base_name == "f28" || base_name == "f30")) {
+    if (base_name == "f20" || base_name == "f22" || base_name == "f24" || base_name == "f26" ||
+        base_name == "f28" || base_name == "f30") {
       callee_saved_fp_count++;
     }
   }
   int pinned_caller_fp_count = 0;
+  absl::flat_hash_set<std::string> pinned_fp_bases;
 
   auto get_callee_saved_register_annotation =
       [&](std::string_view var_name) -> std::optional<std::string> {
@@ -778,15 +786,22 @@ absl::Status PrependSynthesizedLocalDeclarations(
     if (is_fp_reg(var_name)) {
       std::string_view base =
           absl::EndsWith(var_name, "_d") ? var_name.substr(0, var_name.size() - 2) : var_name;
-      if (fp_base_counts[std::string(base)] == 1) {
-        if (base == "f20" || base == "f22" || base == "f24" || base == "f26" || base == "f28" ||
-            base == "f30") {
-          if (frame_analysis.frame_size == 0 ||
-              (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
-            return std::nullopt;
-          }
-          return absl::StrCat("$", base);
+      if (pinned_fp_bases.contains(std::string(base))) {
+        return std::nullopt;
+      }
+      bool is_callee_saved_fp = (base == "f20" || base == "f22" || base == "f24" || base == "f26" ||
+                                 base == "f28" || base == "f30");
+      if (is_callee_saved_fp &&
+          (fp_base_counts[std::string(base)] == 1 || absl::EndsWith(var_name, "_d") ||
+           has_address_taken(absl::StrCat(base, "_d")))) {
+        if (frame_analysis.frame_size == 0 ||
+            (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
+          return std::nullopt;
         }
+        pinned_fp_bases.insert(std::string(base));
+        return absl::StrCat("$", base);
+      }
+      if (fp_base_counts[std::string(base)] == 1) {
         if (callee_saved_fp_count + pinned_caller_fp_count < 12 &&
             (base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
              base == "f16" || base == "f18" ||
@@ -794,13 +809,15 @@ absl::Status PrependSynthesizedLocalDeclarations(
               ((is_leaf_func && return_type.ToString() != "f32" &&
                 return_type.ToString() != "f64" &&
                 (return_type.ToString() == "void"
-                     ? (has_shared_fp_base || callee_saved_fp_count >= 1)
+                     ? (has_shared_fp_base || callee_saved_fp_count >= 1 ||
+                        (fp_base_counts.size() >= 3 && absl::StrContains(body_str, "(f32)(u32)")))
                      : (fp_base_counts.size() >= 8))) ||
                (!is_leaf_func && (base == "f12" || base == "f14" ||
                                   (base == "f0" && return_type.ToString() != "f32" &&
                                    return_type.ToString() != "f64"))))))) {
           if (is_caller_saved_safe_across_calls(var_name)) {
             pinned_caller_fp_count++;
+            pinned_fp_bases.insert(std::string(base));
             return absl::StrCat("$", base);
           }
         }
@@ -841,8 +858,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
     const int v0_reads = v0_mentions - v0_assigns;
     bool is_multi_reg_leaf_with_v0_v1 =
         is_leaf_func && has_v0_local && has_v1_local &&
-        (callee_saved_gpr_count >= 1 || (fp_base_counts.empty() && unpinned_gpr_locals_count >= 4 &&
-                                         v0_assigns >= 2 && v0_reads >= 1));
+        (callee_saved_gpr_count >= 1 ||
+         (!is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
+          unpinned_gpr_locals_count >= 4 && v0_assigns >= 2 && v0_reads >= 1));
     bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
     bool v0_assigned_many_times = false;
     if (var_name == "v0" && !is_leaf_func) {
@@ -916,7 +934,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
       std::optional<std::string> reg_annot = (init_expr == nullptr || is_callee_gpr)
                                                  ? get_callee_saved_register_annotation(var_name)
                                                  : std::nullopt;
-      if (reg_annot.has_value()) {
+      if (reg_annot.has_value() || is_callee_gpr) {
         init_expr = nullptr;
       }
       CType var_type = CType::S32();

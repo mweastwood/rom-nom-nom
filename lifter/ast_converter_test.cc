@@ -3673,5 +3673,64 @@ TEST(AstConverterTest, TrimsUnassignedTrailingArgRegistersForKnownCalleeWithProt
   EXPECT_THAT(code, ::testing::Not(HasSubstr("arg3")));
 }
 
+TEST(AstConverterTest, SplitsScratchReusedParametersAcrossMultiParamGotoFunction) {
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB10018,  // 08: sw    $s1, 24($sp)
+      0xAFB00014,  // 0C: sw    $s0, 20($sp)
+      0x00808821,  // 10: move  $s1, $a0
+      0x00A08021,  // 14: move  $s0, $a1
+      0x0C000400,  // 18: jal   0x80001000
+      0x2405012C,  // 1C: addiu $a1, $zero, 300
+      0x8E240000,  // 20: lw    $a0, 0($s1)
+      0x10800003,  // 24: beq   $a0, $zero, +3 (to 0x34)
+      0x00000000,  // 28: nop
+      0x24840001,  // 2C: addiu $a0, $a0, 1
+      0xAE040000,  // 30: sw    $a0, 0($s0)
+      0x00801021,  // 34: move  $v0, $a0
+      0x8FB10018,  // 38: lw    $s1, 24($sp)
+      0x8FB00014,  // 3C: lw    $s0, 20($sp)
+      0x8FBF001C,  // 40: lw    $ra, 28($sp)
+      0x03E00008,  // 44: jr    $ra
+      0x27BD0020,  // 48: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  auto seq = std::make_unique<StructuredRegion>();
+  seq->type = RegionType::kSequence;
+  auto b0 = std::make_unique<StructuredRegion>();
+  b0->type = RegionType::kBlock;
+  b0->block_id = 0;
+  seq->children.push_back(std::move(b0));
+  auto if_reg = std::make_unique<StructuredRegion>();
+  if_reg->type = RegionType::kIfThenElse;
+  if_reg->condition_block_id = 1;
+  auto goto_b3 = std::make_unique<StructuredRegion>();
+  goto_b3->type = RegionType::kGoto;
+  goto_b3->block_id = 3;
+  if_reg->children.push_back(std::move(goto_b3));
+  seq->children.push_back(std::move(if_reg));
+  auto b2 = std::make_unique<StructuredRegion>();
+  b2->type = RegionType::kBlock;
+  b2->block_id = 2;
+  seq->children.push_back(std::move(b2));
+  auto b3 = std::make_unique<StructuredRegion>();
+  b3->type = RegionType::kBlock;
+  b3->block_id = 3;
+  seq->children.push_back(std::move(b3));
+
+  AstConverterOptions options;
+  options.function_name = "TestSplitMultiParamGoto";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *seq, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("temp_s1 = arg0;"));
+  EXPECT_THAT(code, HasSubstr("register s32 temp_a0 asm(\"$4\");"));
+  EXPECT_THAT(code, HasSubstr("temp_a0 = *(s32*)temp_s1;"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)arg1 = temp_a0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
