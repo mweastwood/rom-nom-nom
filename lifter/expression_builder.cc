@@ -324,6 +324,10 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
     statements.push_back(std::move(statement));
   }
   tracker.Step(inst);
+  if (lo.type == FoldedPatternType::kAddressLoad && !lo.symbol_name.empty() &&
+      lo.dest_reg >= Register::kS0 && lo.dest_reg <= Register::kS7) {
+    tracker.SetRegisterValue(lo.dest_reg, TrackedValue());
+  }
 }
 
 void ExpressionBuilder::LiftCallInstruction(

@@ -974,5 +974,38 @@ TEST(ControlFlowStructurerTest, DoesNotMergeOrChainWhenBranchDelaySlotOverwrites
   EXPECT_THAT(s, Not(HasSubstr("||")));
 }
 
+TEST(ControlFlowStructurerTest, MergesAndChainWhenBranchDelaySlotDoesNotOverwriteTestedRegister) {
+  // Block 0 tests beq $a0, $zero, 0x18 with delay slot slti $v0, $a1, 10;
+  // Block 1 tests beq $v0, $zero, 0x18 with nop delay slot.
+  // Because Block 0's delay slot writes $v0 (not tested by Block 0's beq $a0, $zero),
+  // Block 0 and Block 1 should merge into a short-circuit && condition.
+  std::vector<uint32_t> words = {
+      0x10800004,  // 0x00: beq   $a0, $zero, 0x18
+      0x28A2000A,  // 0x04: slti  $v0, $a1, 10
+      0x10400002,  // 0x08: beq   $v0, $zero, 0x18
+      0x00000000,  // 0x0C: nop
+      0x24020001,  // 0x10: addiu $v0, $zero, 1
+      0x03E00008,  // 0x14: jr    $ra
+      0x00000000,  // 0x18: nop
+      0x03E00008,  // 0x18: jr    $ra
+      0x00000000,  // 0x1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("block_0 || block_1"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

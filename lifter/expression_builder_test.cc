@@ -2803,5 +2803,26 @@ TEST(ExpressionBuilderTest, PredecessorCallDelaySlotDoesNotLeakIntoSuccessorCall
   EXPECT_EQ(stmts[1].ToString(), "func_80002000(1);\n");
 }
 
+TEST(ExpressionBuilderTest, CalleeSavedRomSymbolAddressNotReplacedByHexConstant) {
+  std::string textproto = R"pb(
+    entries { name: "D_00DBA100" address: 0x00DBA100 type: SYMBOL_DATA }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x3C1200DC,  // 00: lui   $s2, 0x00DC
+      0x2652A100,  // 04: addiu $s2, $s2, -24320  # &D_00DBA100
+      0x02402021,  // 08: addu  $a0, $s2, $zero
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  FunctionLiftContext ctx;
+  ctx.symbol_index = &(*index_or);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_EQ(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].ToString(), "temp_s2 = &D_00DBA100;\n");
+  EXPECT_EQ(stmts[1].ToString(), "arg0 = temp_s2;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

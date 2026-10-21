@@ -12,6 +12,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "core/control_flow_graph.h"
 #include "core/register_tracker.h"
+#include "lifter/branch_condition_builder.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/loop_analyzer.h"
 
@@ -94,10 +95,11 @@ std::unique_ptr<StructuredRegion> CreateSwitch(uint32_t block_id, const JumpTabl
 bool HasNopBranchDelaySlot(const ControlFlowGraph& cfg, uint32_t block_id) {
   const auto* b = cfg.GetBlock(block_id);
   if (b == nullptr || b->instructions.size() < 2) return true;
-  if (b->instructions[b->instructions.size() - 2].IsBranch()) {
-    return b->instructions.back().IsNop();
+  const auto* term = b->Terminator();
+  if (term != nullptr && term->IsBranchLikely() && !b->instructions.back().IsNop()) {
+    return false;
   }
-  return true;
+  return !BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(cfg, block_id);
 }
 
 bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
@@ -528,8 +530,12 @@ std::optional<uint32_t> ControlFlowStructurer::FindSwitchJoinBlock(
               }
             }
           }
-          if (candidate_one_reach_count >= successor_reach_count &&
-              candidate_one_post_dominates_all_targets) {
+          if (follow.has_value() && (current_loop == nullptr || current_loop->Contains(*follow)) &&
+              successor_block_id == *follow && successor_reach_count == non_returning_count &&
+              reaches[candidate_one].size() < targets.size()) {
+            eliminated.insert(candidate_one);
+          } else if (candidate_one_reach_count >= successor_reach_count &&
+                     candidate_one_post_dominates_all_targets) {
             eliminated.insert(successor_block_id);
           } else {
             eliminated.insert(candidate_one);

@@ -55,6 +55,7 @@ cc_library(
     srcs = ["control_flow_structurer.cc"],
     hdrs = ["control_flow_structurer.h"],
     deps = [
+        ":branch_condition_builder",
         ":dominator_tree",
         ":loop_analyzer",
         "//core:control_flow_graph",

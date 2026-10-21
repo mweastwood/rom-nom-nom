@@ -1834,6 +1834,14 @@ class ConverterContext {
       }
     }
     state.tracker.Step(inst);
+    for (Register d : GetInstructionUseDef(inst).gpr_defs) {
+      if (d >= Register::kS0 && d <= Register::kS7) {
+        TrackedValue tv = state.tracker.GetRegisterValue(d);
+        if (tv.kind == ValueKind::kSymbolAddress && !IsDirectMappedAddress(tv.constant_value)) {
+          state.tracker.SetRegisterValue(d, TrackedValue());
+        }
+      }
+    }
     if (inst.IsCall()) {
       state.tracker.Invalidate(Register::kV0);
       state.tracker.Invalidate(Register::kV1);

@@ -5200,5 +5200,102 @@ void MultiValueSparseEqualityDispatchToSingleAction(s32 id) {
 )");
 }
 
+// ============================================================================
+// Category 39: Short-Circuit Delay-Slot Setup & Decision-Tree Switch Joins
+// ============================================================================
+
+TEST_F(RoundTripTest, ShortCircuitAndWithStructFieldLoadsAndUpdate) {
+  AssertRoundTripBitExact("ShortCircuitAndWithStructFieldLoadsAndUpdate", R"(
+typedef struct {
+    s32 active;
+    s32 state;
+    s32 timer;
+    s32 count;
+} ActorSlot;
+
+void tick_actor(ActorSlot* slot);
+
+void ShortCircuitAndWithStructFieldLoadsAndUpdate(ActorSlot* slot) {
+    if (slot->active != 0 && slot->state == 2 && slot->timer > 0) {
+        slot->timer -= 1;
+        tick_actor(slot);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ShortCircuitOrWithStructFieldLoadsAndCall) {
+  AssertRoundTripBitExact("ShortCircuitOrWithStructFieldLoadsAndCall", R"(
+typedef struct {
+    s32 flags;
+    s32 health;
+    s32 timer;
+} EntityState;
+
+void reset_entity(EntityState* e);
+
+void ShortCircuitOrWithStructFieldLoadsAndCall(EntityState* e) {
+    if (e->flags == 0 || e->health <= 0 || e->timer < 0) {
+        reset_entity(e);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, TwoCaseHighValueSwitchWithSharedTailAndDefaultExit) {
+  AssertRoundTripBitExact("TwoCaseHighValueSwitchWithSharedTailAndDefaultExit", R"(
+void handle_mode_a(s32* p);
+void handle_mode_b(s32* p);
+void finalize_mode(s32* p);
+
+void TwoCaseHighValueSwitchWithSharedTailAndDefaultExit(s32* p, s32 cmd) {
+    if (cmd == 4097) {
+        handle_mode_a(p);
+        finalize_mode(p);
+    } else if (cmd == 4098) {
+        handle_mode_b(p);
+        finalize_mode(p);
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, CalleeSavedSymbolAddressesAcrossMultipleCalls) {
+  AssertRoundTripBitExact("CalleeSavedSymbolAddressesAcrossMultipleCalls", R"(
+extern s32 D_00DBA100;
+extern s32 D_00DD38F0;
+extern s32 D_00DD3910;
+
+void submit_dma_chunk(s32 id, s32* a, s32* b, s32* c);
+
+void CalleeSavedSymbolAddressesAcrossMultipleCalls(void) {
+    submit_dma_chunk(1, &D_00DBA100, &D_00DD38F0, &D_00DD3910);
+    submit_dma_chunk(2, &D_00DBA100, &D_00DD38F0, &D_00DD3910);
+    submit_dma_chunk(3, &D_00DBA100, &D_00DD38F0, &D_00DD3910);
+}
+)");
+}
+
+TEST_F(RoundTripTest, TwoCaseHighValueSwitchWithSharedTailAndReturn) {
+  AssertRoundTripBitExact("TwoCaseHighValueSwitchWithSharedTailAndReturn", R"(
+void handle_mode_a(s32* p);
+void handle_mode_b(s32* p);
+void finalize_mode(s32* p);
+
+s32 TwoCaseHighValueSwitchWithSharedTailAndReturn(s32* p, s32 cmd) {
+    if (cmd == 1025) {
+        handle_mode_a(p);
+        finalize_mode(p);
+        return 1;
+    } else if (cmd == 1026) {
+        handle_mode_b(p);
+        finalize_mode(p);
+        return 1;
+    }
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
