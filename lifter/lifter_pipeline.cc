@@ -20,6 +20,7 @@
 #include "core/c_ast.h"
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
+#include "lifter/abi_analyzer.h"
 #include "lifter/ast_converter.h"
 #include "lifter/c_emitter.h"
 #include "lifter/control_flow_structurer.h"
@@ -28,6 +29,249 @@
 #include "lifter/loop_analyzer.h"
 
 namespace rom_nom_nom {
+namespace {
+
+void PopulateFunctionAbiMetadata(absl::Span<const Instruction> instructions,
+                                 const std::string& func_name, const SymbolIndex* symbol_index,
+                                 absl::flat_hash_map<std::string, int>* parameter_counts,
+                                 absl::flat_hash_map<std::string, int>* fp_parameter_counts,
+                                 absl::flat_hash_set<std::string>* callers_use_v0,
+                                 absl::flat_hash_set<std::string>* callers_use_f0) {
+  (*parameter_counts)[func_name] = AbiAnalyzer::DetermineParameterCount(instructions);
+  (*fp_parameter_counts)[func_name] = AbiAnalyzer::DetermineFpParameterCount(instructions);
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  if (cfg_or.ok()) {
+    if (AbiAnalyzer::DetermineReturnsF0(*cfg_or)) {
+      callers_use_f0->insert(func_name);
+    } else if (AbiAnalyzer::DetermineReturnsV0(*cfg_or, symbol_index, callers_use_v0)) {
+      callers_use_v0->insert(func_name);
+    }
+  }
+}
+
+void ScanCallReturnRegisterUses(absl::Span<const Instruction> insts, size_t call_idx,
+                                const std::string& callee_name,
+                                absl::flat_hash_set<std::string>* callers_use_v0,
+                                absl::flat_hash_set<std::string>* callers_use_f0) {
+  bool v0_active = true;
+  bool f0_active = true;
+  for (size_t next_i = call_idx + 2; next_i < insts.size(); ++next_i) {
+    const auto& next_inst = insts[next_i];
+    RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
+    if (v0_active) {
+      for (Register r : next_ud.gpr_uses) {
+        if (r == Register::kV0) {
+          callers_use_v0->insert(callee_name);
+          v0_active = false;
+          break;
+        }
+      }
+      for (Register r : next_ud.gpr_defs) {
+        if (r == Register::kV0) {
+          v0_active = false;
+          break;
+        }
+      }
+    }
+    if (f0_active) {
+      for (FpRegister r : next_ud.fpr_uses) {
+        if (r == FpRegister::kF0) {
+          if (!callers_use_v0->contains(callee_name)) {
+            callers_use_f0->insert(callee_name);
+          }
+          f0_active = false;
+          break;
+        }
+      }
+      for (FpRegister r : next_ud.fpr_defs) {
+        if (r == FpRegister::kF0) {
+          f0_active = false;
+          break;
+        }
+      }
+    }
+    if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr ||
+        (next_inst.opcode == Opcode::kJr && next_inst.rs == Register::kRa)) {
+      // Also inspect the delay slot of this subsequent call/return before terminating scan
+      if (next_i + 1 < insts.size()) {
+        RegisterUseDef ds_ud = GetInstructionUseDef(insts[next_i + 1]);
+        if (v0_active) {
+          for (Register r : ds_ud.gpr_uses) {
+            if (r == Register::kV0) {
+              callers_use_v0->insert(callee_name);
+              v0_active = false;
+              break;
+            }
+          }
+        }
+        if (f0_active) {
+          for (FpRegister r : ds_ud.fpr_uses) {
+            if (r == FpRegister::kF0) {
+              if (!callers_use_v0->contains(callee_name)) {
+                callers_use_f0->insert(callee_name);
+              }
+              f0_active = false;
+              break;
+            }
+          }
+        }
+      }
+      break;
+    }
+    if (!v0_active && !f0_active) {
+      break;
+    }
+  }
+}
+
+void WriteLiftedSymbolsLinkerScript(
+    const std::filesystem::path& output_dir, const FunctionLoader* loader,
+    const SymbolIndex* symbols, const absl::flat_hash_set<std::string>& defined_function_names,
+    const std::vector<std::pair<std::string, std::string>>& undefined_auto_symbols) {
+  std::filesystem::path lifted_symbols_file_path = output_dir / "lifted_symbols.ld";
+  std::ofstream symbols_output_stream(lifted_symbols_file_path);
+  if (!symbols_output_stream.is_open()) {
+    return;
+  }
+  symbols_output_stream << "/* Auto-generated symbol definitions for lifted C */\n";
+
+  std::map<uint32_t, std::string> all_known_functions;
+  if (symbols != nullptr) {
+    for (const auto* entry : symbols->SortedEntries()) {
+      if (entry->type() == SYMBOL_FUNC) {
+        all_known_functions[entry->address()] = entry->name();
+      }
+    }
+  }
+  for (const auto& func_name : defined_function_names) {
+    uint32_t addr = 0;
+    if (func_name.size() == 13 && absl::StartsWith(func_name, "func_") &&
+        absl::SimpleHexAtoi(func_name.substr(5), &addr)) {
+      all_known_functions[addr] = func_name;
+    }
+  }
+
+  // Data and BSS subsegments are each emitted as one contiguous blob with a single base label.
+  // When lifted C code is larger or smaller than the original, these blobs move, so every
+  // symbol inside them must be defined relative to the blob's base label rather than at its
+  // original absolute address.
+  struct DataSubsegmentRange {
+    uint32_t vram_start = 0;
+    uint32_t vram_end = 0;
+    std::string label_name;
+  };
+  std::vector<DataSubsegmentRange> data_subsegments;
+  auto label_for_vram = [&](uint32_t vram) {
+    if (symbols != nullptr) {
+      const auto* sym = symbols->FindByAddress(vram);
+      if (sym != nullptr) {
+        return std::string(sym->name());
+      }
+    }
+    return absl::StrFormat("D_%08X", vram);
+  };
+  if (loader != nullptr && loader->Extractor() != nullptr) {
+    const auto* cfg = loader->Extractor()->Config();
+    if (cfg != nullptr) {
+      for (const auto& seg : cfg->segments()) {
+        if (seg.type() != SEGMENT_CODE) continue;
+        size_t seg_start = seg.rom_start();
+        size_t seg_end = seg.rom_end();
+        uint32_t seg_vram = seg.vram();
+        for (int j = 0; j < seg.subsegments_size(); ++j) {
+          const auto& sub = seg.subsegments(j);
+          if (sub.type() == SUBSEGMENT_DATA) {
+            size_t sub_start = sub.rom_start();
+            size_t sub_end = seg_end;
+            for (int k = j + 1; k < seg.subsegments_size(); ++k) {
+              if (seg.subsegments(k).type() != SUBSEGMENT_BSS &&
+                  seg.subsegments(k).rom_start() > 0) {
+                sub_end = seg.subsegments(k).rom_start();
+                break;
+              }
+            }
+            uint32_t sub_vram = sub.vram();
+            if (sub_vram == 0 && seg_vram != 0) {
+              sub_vram = seg_vram + static_cast<uint32_t>(sub_start - seg_start);
+            }
+            uint32_t sub_size = static_cast<uint32_t>(sub_end - sub_start);
+            data_subsegments.push_back({sub_vram, sub_vram + sub_size, label_for_vram(sub_vram)});
+          } else if (sub.type() == SUBSEGMENT_BSS && sub.vram() != 0 && seg.bss_size() != 0) {
+            data_subsegments.push_back(
+                {sub.vram(), sub.vram() + seg.bss_size(), label_for_vram(sub.vram())});
+          }
+        }
+      }
+    }
+  }
+
+  // Returns "<label> + 0xOFF" (or "<label>") for an address inside a relocatable data/BSS
+  // range, or nullopt if the address is not inside any such range.
+  auto relative_data_expr = [&](uint32_t addr) -> std::optional<std::pair<std::string, bool>> {
+    for (const auto& ds : data_subsegments) {
+      if (addr >= ds.vram_start && addr < ds.vram_end) {
+        uint32_t offset = addr - ds.vram_start;
+        if (offset == 0) return std::make_pair(ds.label_name, true);
+        return std::make_pair(absl::StrFormat("%s + 0x%X", ds.label_name, offset), false);
+      }
+    }
+    return std::nullopt;
+  };
+
+  for (const auto& [symbol_name, address_hex] : undefined_auto_symbols) {
+    bool resolved = false;
+    uint32_t addr = 0;
+    if (absl::SimpleHexAtoi(address_hex, &addr)) {
+      if (absl::StartsWith(symbol_name, "func_") && loader != nullptr) {
+        // If this is an unexported internal code label or sub-entrypoint inside a known function,
+        // resolve it relative to the preceding registered or defined function symbol.
+        auto it = all_known_functions.upper_bound(addr);
+        if (it != all_known_functions.begin()) {
+          const auto& prev = *std::prev(it);
+          auto prev_loaded = loader->LoadFunction(prev.second);
+          if (prev_loaded.ok()) {
+            uint32_t prev_end =
+                prev.first + static_cast<uint32_t>(prev_loaded->instructions.size() * 4);
+            if (addr > prev.first && addr < prev_end &&
+                defined_function_names.contains(prev.second)) {
+              uint32_t offset = addr - prev.first;
+              symbols_output_stream << absl::StrFormat("PROVIDE(%s = %s + 0x%X);\n", symbol_name,
+                                                       prev.second, offset);
+              resolved = true;
+            }
+          }
+        }
+      } else if (absl::StartsWith(symbol_name, "D_")) {
+        if (auto rel = relative_data_expr(addr); rel.has_value()) {
+          // A symbol that *is* the base label is already defined by the data/BSS object.
+          if (!(rel->second && rel->first == symbol_name)) {
+            symbols_output_stream << absl::StrFormat("%s = %s;\n", symbol_name, rel->first);
+          }
+          resolved = true;
+        }
+      }
+    }
+    if (!resolved) {
+      symbols_output_stream << absl::StrFormat("PROVIDE(%s = 0x%s);\n", symbol_name, address_hex);
+    }
+  }
+
+  // Registered (named) data symbols are PROVIDEd at their original absolute address by the
+  // splitter's symbols.ld, which is only correct when nothing before them changes size. Re-anchor
+  // every named data symbol that lives inside a data/BSS blob to that blob's base label. A plain
+  // assignment is used because, in GNU ld, it overrides a PROVIDE regardless of script order.
+  if (symbols != nullptr) {
+    for (const auto* entry : symbols->SortedEntries()) {
+      if (entry->type() != SYMBOL_DATA) continue;
+      auto rel = relative_data_expr(entry->address());
+      if (!rel.has_value()) continue;
+      if (rel->second && rel->first == entry->name()) continue;  // This is the base label.
+      symbols_output_stream << absl::StrFormat("%s = %s;\n", entry->name(), rel->first);
+    }
+  }
+}
+
+}  // namespace
 
 LifterPipeline::LifterPipeline(LifterPipelineOptions options,
                                std::unique_ptr<FunctionLoader> loader)
@@ -214,18 +458,9 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFu
   absl::flat_hash_set<std::string> callers_use_f0;
 
   for (const auto& loaded_func : loaded_functions) {
-    parameter_counts[loaded_func.name] =
-        ExpressionBuilder::DetermineParameterCount(loaded_func.instructions);
-    fp_parameter_counts[loaded_func.name] =
-        ExpressionBuilder::DetermineFpParameterCount(loaded_func.instructions);
-    auto cfg_or = ControlFlowGraph::Build(loaded_func.instructions);
-    if (cfg_or.ok()) {
-      if (ExpressionBuilder::DetermineReturnsF0(*cfg_or)) {
-        callers_use_f0.insert(loaded_func.name);
-      } else if (ExpressionBuilder::DetermineReturnsV0(*cfg_or, tu.symbol_index, &callers_use_v0)) {
-        callers_use_v0.insert(loaded_func.name);
-      }
-    }
+    PopulateFunctionAbiMetadata(loaded_func.instructions, loaded_func.name, tu.symbol_index,
+                                &parameter_counts, &fp_parameter_counts, &callers_use_v0,
+                                &callers_use_f0);
   }
 
   for (const auto& loaded_func : loaded_functions) {
@@ -248,91 +483,13 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFu
         if (!parameter_counts.contains(callee_name) && loader_ != nullptr) {
           auto callee_loaded = loader_->LoadFunction(callee_name);
           if (callee_loaded.ok()) {
-            parameter_counts[callee_name] =
-                ExpressionBuilder::DetermineParameterCount(callee_loaded->instructions);
-            fp_parameter_counts[callee_name] =
-                ExpressionBuilder::DetermineFpParameterCount(callee_loaded->instructions);
-            auto callee_cfg = ControlFlowGraph::Build(callee_loaded->instructions);
-            if (callee_cfg.ok()) {
-              if (ExpressionBuilder::DetermineReturnsF0(*callee_cfg)) {
-                callers_use_f0.insert(callee_name);
-              } else if (ExpressionBuilder::DetermineReturnsV0(*callee_cfg, tu.symbol_index,
-                                                               &callers_use_v0)) {
-                callers_use_v0.insert(callee_name);
-              }
-            }
+            PopulateFunctionAbiMetadata(callee_loaded->instructions, callee_name, tu.symbol_index,
+                                        &parameter_counts, &fp_parameter_counts, &callers_use_v0,
+                                        &callers_use_f0);
           }
         }
 
-        bool v0_active = true;
-        bool f0_active = true;
-        for (size_t next_i = i + 2; next_i < insts.size(); ++next_i) {
-          const auto& next_inst = insts[next_i];
-          RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
-          if (v0_active) {
-            for (Register r : next_ud.gpr_uses) {
-              if (r == Register::kV0) {
-                callers_use_v0.insert(callee_name);
-                v0_active = false;
-                break;
-              }
-            }
-            for (Register r : next_ud.gpr_defs) {
-              if (r == Register::kV0) {
-                v0_active = false;
-                break;
-              }
-            }
-          }
-          if (f0_active) {
-            for (FpRegister r : next_ud.fpr_uses) {
-              if (r == FpRegister::kF0) {
-                if (!callers_use_v0.contains(callee_name)) {
-                  callers_use_f0.insert(callee_name);
-                }
-                f0_active = false;
-                break;
-              }
-            }
-            for (FpRegister r : next_ud.fpr_defs) {
-              if (r == FpRegister::kF0) {
-                f0_active = false;
-                break;
-              }
-            }
-          }
-          if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr ||
-              (next_inst.opcode == Opcode::kJr && next_inst.rs == Register::kRa)) {
-            // Also inspect the delay slot of this subsequent call/return before terminating scan
-            if (next_i + 1 < insts.size()) {
-              RegisterUseDef ds_ud = GetInstructionUseDef(insts[next_i + 1]);
-              if (v0_active) {
-                for (Register r : ds_ud.gpr_uses) {
-                  if (r == Register::kV0) {
-                    callers_use_v0.insert(callee_name);
-                    v0_active = false;
-                    break;
-                  }
-                }
-              }
-              if (f0_active) {
-                for (FpRegister r : ds_ud.fpr_uses) {
-                  if (r == FpRegister::kF0) {
-                    if (!callers_use_v0.contains(callee_name)) {
-                      callers_use_f0.insert(callee_name);
-                    }
-                    f0_active = false;
-                    break;
-                  }
-                }
-              }
-            }
-            break;
-          }
-          if (!v0_active && !f0_active) {
-            break;
-          }
-        }
+        ScanCallReturnRegisterUses(insts, i, callee_name, &callers_use_v0, &callers_use_f0);
       }
     }
   }
@@ -648,147 +805,8 @@ absl::StatusOr<std::vector<std::filesystem::path>> LifterPipeline::DecompileAllM
     }
   }
 
-  // Generate self-contained linker script for undefined auto-symbols
-  std::filesystem::path lifted_symbols_file_path = output_dir / "lifted_symbols.ld";
-  std::ofstream symbols_output_stream(lifted_symbols_file_path);
-  if (symbols_output_stream.is_open()) {
-    symbols_output_stream << "/* Auto-generated symbol definitions for lifted C */\n";
-
-    std::map<uint32_t, std::string> all_known_functions;
-    if (symbols != nullptr) {
-      for (const auto* entry : symbols->SortedEntries()) {
-        if (entry->type() == SYMBOL_FUNC) {
-          all_known_functions[entry->address()] = entry->name();
-        }
-      }
-    }
-    for (const auto& func_name : defined_function_names) {
-      uint32_t addr = 0;
-      if (func_name.size() == 13 && absl::StartsWith(func_name, "func_") &&
-          absl::SimpleHexAtoi(func_name.substr(5), &addr)) {
-        all_known_functions[addr] = func_name;
-      }
-    }
-
-    // Data and BSS subsegments are each emitted as one contiguous blob with a single base label.
-    // When lifted C code is larger or smaller than the original, these blobs move, so every
-    // symbol inside them must be defined relative to the blob's base label rather than at its
-    // original absolute address.
-    struct DataSubsegmentRange {
-      uint32_t vram_start = 0;
-      uint32_t vram_end = 0;
-      std::string label_name;
-    };
-    std::vector<DataSubsegmentRange> data_subsegments;
-    auto label_for_vram = [&](uint32_t vram) {
-      if (symbols != nullptr) {
-        const auto* sym = symbols->FindByAddress(vram);
-        if (sym != nullptr) {
-          return std::string(sym->name());
-        }
-      }
-      return absl::StrFormat("D_%08X", vram);
-    };
-    if (loader_ != nullptr && loader_->Extractor() != nullptr) {
-      const auto* cfg = loader_->Extractor()->Config();
-      if (cfg != nullptr) {
-        for (const auto& seg : cfg->segments()) {
-          if (seg.type() != SEGMENT_CODE) continue;
-          size_t seg_start = seg.rom_start();
-          size_t seg_end = seg.rom_end();
-          uint32_t seg_vram = seg.vram();
-          for (int j = 0; j < seg.subsegments_size(); ++j) {
-            const auto& sub = seg.subsegments(j);
-            if (sub.type() == SUBSEGMENT_DATA) {
-              size_t sub_start = sub.rom_start();
-              size_t sub_end = seg_end;
-              for (int k = j + 1; k < seg.subsegments_size(); ++k) {
-                if (seg.subsegments(k).type() != SUBSEGMENT_BSS &&
-                    seg.subsegments(k).rom_start() > 0) {
-                  sub_end = seg.subsegments(k).rom_start();
-                  break;
-                }
-              }
-              uint32_t sub_vram = sub.vram();
-              if (sub_vram == 0 && seg_vram != 0) {
-                sub_vram = seg_vram + static_cast<uint32_t>(sub_start - seg_start);
-              }
-              uint32_t sub_size = static_cast<uint32_t>(sub_end - sub_start);
-              data_subsegments.push_back({sub_vram, sub_vram + sub_size, label_for_vram(sub_vram)});
-            } else if (sub.type() == SUBSEGMENT_BSS && sub.vram() != 0 && seg.bss_size() != 0) {
-              data_subsegments.push_back(
-                  {sub.vram(), sub.vram() + seg.bss_size(), label_for_vram(sub.vram())});
-            }
-          }
-        }
-      }
-    }
-
-    // Returns "<label> + 0xOFF" (or "<label>") for an address inside a relocatable data/BSS
-    // range, or nullopt if the address is not inside any such range.
-    auto relative_data_expr = [&](uint32_t addr) -> std::optional<std::pair<std::string, bool>> {
-      for (const auto& ds : data_subsegments) {
-        if (addr >= ds.vram_start && addr < ds.vram_end) {
-          uint32_t offset = addr - ds.vram_start;
-          if (offset == 0) return std::make_pair(ds.label_name, true);
-          return std::make_pair(absl::StrFormat("%s + 0x%X", ds.label_name, offset), false);
-        }
-      }
-      return std::nullopt;
-    };
-
-    for (const auto& [symbol_name, address_hex] : undefined_auto_symbols) {
-      bool resolved = false;
-      uint32_t addr = 0;
-      if (absl::SimpleHexAtoi(address_hex, &addr)) {
-        if (absl::StartsWith(symbol_name, "func_") && loader_ != nullptr) {
-          // If this is an unexported internal code label or sub-entrypoint inside a known function,
-          // resolve it relative to the preceding registered or defined function symbol.
-          auto it = all_known_functions.upper_bound(addr);
-          if (it != all_known_functions.begin()) {
-            const auto& prev = *std::prev(it);
-            auto prev_loaded = loader_->LoadFunction(prev.second);
-            if (prev_loaded.ok()) {
-              uint32_t prev_end =
-                  prev.first + static_cast<uint32_t>(prev_loaded->instructions.size() * 4);
-              if (addr > prev.first && addr < prev_end &&
-                  defined_function_names.contains(prev.second)) {
-                uint32_t offset = addr - prev.first;
-                symbols_output_stream << absl::StrFormat("PROVIDE(%s = %s + 0x%X);\n", symbol_name,
-                                                         prev.second, offset);
-                resolved = true;
-              }
-            }
-          }
-        } else if (absl::StartsWith(symbol_name, "D_")) {
-          if (auto rel = relative_data_expr(addr); rel.has_value()) {
-            // A symbol that *is* the base label is already defined by the data/BSS object.
-            if (!(rel->second && rel->first == symbol_name)) {
-              symbols_output_stream << absl::StrFormat("%s = %s;\n", symbol_name, rel->first);
-            }
-            resolved = true;
-          }
-        }
-      }
-      if (!resolved) {
-        symbols_output_stream << absl::StrFormat("PROVIDE(%s = 0x%s);\n", symbol_name, address_hex);
-      }
-    }
-
-    // Registered (named) data symbols are PROVIDEd at their original absolute address by the
-    // splitter's symbols.ld, which is only correct when nothing before them changes size. Re-anchor
-    // every named data symbol that lives inside a data/BSS blob to that blob's base label. A plain
-    // assignment is used because, in GNU ld, it overrides a PROVIDE regardless of script order.
-    if (symbols != nullptr) {
-      for (const auto* entry : symbols->SortedEntries()) {
-        if (entry->type() != SYMBOL_DATA) continue;
-        auto rel = relative_data_expr(entry->address());
-        if (!rel.has_value()) continue;
-        if (rel->second && rel->first == entry->name()) continue;  // This is the base label.
-        symbols_output_stream << absl::StrFormat("%s = %s;\n", entry->name(), rel->first);
-      }
-    }
-  }
+  WriteLiftedSymbolsLinkerScript(output_dir, loader_.get(), symbols, defined_function_names,
+                                 undefined_auto_symbols);
 
   return emitted_files;
 }
