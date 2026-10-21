@@ -3613,5 +3613,29 @@ TEST(AstConverterTest, FramePointerFunctionCoalescesHomedParamsAndEmitsStructOff
   EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_12")));
 }
 
+TEST(AstConverterTest, ZeroFrameFunctionDoesNotPinCalleeSavedRegisters) {
+  std::vector<uint32_t> words = {
+      0x8C820000,  // 00: lw    $v0, 0($a0)
+      0x8C500004,  // 04: lw    $s0, 4($v0)
+      0xAC900008,  // 08: sw    $s0, 8($a0)
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestZeroFrameUnpinnedS0";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("asm(\"$16\")")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

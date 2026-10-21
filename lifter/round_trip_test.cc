@@ -5270,5 +5270,30 @@ void O0FramePointerStructFieldAndCall(NodeState* node, s32 delta) {
                           opts);
 }
 
+TEST_F(RoundTripTest, O0FramePointerWhileLoopAndUnsignedByteStore) {
+  RoundTripOptions opts;
+  opts.c_flags = {"-O0", "-mips2", "-mcpu=r4000"};
+  AssertRoundTripBitExact("O0FramePointerWhileLoopAndUnsignedByteStore", R"(
+typedef struct {
+    s32 count;
+    u8 status;
+    u8 limit;
+    u16 mask;
+} ChannelState;
+
+void O0FramePointerWhileLoopAndUnsignedByteStore(ChannelState* ch, u8* buf) {
+    s32 i = 0;
+    while (i < ch->count) {
+        *buf++ = 0;
+        i = i + 1;
+    }
+    ch->mask = 65535;
+    ch->status = 255;
+    ch->limit = 127;
+}
+)",
+                          opts);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

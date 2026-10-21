@@ -587,6 +587,34 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
         return seq;
       }
     }
+    if (current_switch_break_.has_value()) {
+      const auto* term = block->Terminator();
+      if (term != nullptr && term->opcode == Opcode::kJ) {
+        const auto* succ_blk = cfg_->GetBlock(succ);
+        if (succ_blk != nullptr && succ_blk->predecessors.size() > 1) {
+          bool has_unvisited_fallthrough_pred = false;
+          for (uint32_t pred : succ_blk->predecessors) {
+            if (pred != entry && !visited_.contains(pred)) {
+              const auto* pred_blk = cfg_->GetBlock(pred);
+              if (pred_blk != nullptr && pred_blk->end_vram == succ_blk->start_vram) {
+                const auto* pred_term = pred_blk->Terminator();
+                if (pred_term == nullptr ||
+                    (pred_term->opcode != Opcode::kJ && !pred_term->IsBranch())) {
+                  has_unvisited_fallthrough_pred = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (has_unvisited_fallthrough_pred) {
+            auto seq = CreateSequence();
+            seq->children.push_back(std::move(block_region));
+            seq->children.push_back(CreateGoto(succ));
+            return seq;
+          }
+        }
+      }
+    }
 
     auto next_region = StructureRegion(succ, follow, current_loop);
     if (next_region == nullptr) {

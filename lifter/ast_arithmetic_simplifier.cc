@@ -924,6 +924,15 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                                   : "";
           const CExpression* q_rhs = &assign_j.Rhs();
 
+          // Check intermediate step 0: register/stack copy `q_var = cur_var`
+          if (!q_var.empty() && (is_local_reg_var(q_var) || absl::StartsWith(q_var, "var_sp_")) &&
+              q_rhs->Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(*q_rhs).Name() == cur_var) {
+            cur_var = q_var;
+            chain_stmts.push_back(j);
+            continue;
+          }
+
           // Check intermediate step 1: `next_var = (cur_var + X)`
           if (!q_var.empty() && is_local_reg_var(q_var) && !chain_has_add_x && chain_s_val == 0 &&
               q_rhs->Kind() == CExpressionKind::kBinaryExpression) {

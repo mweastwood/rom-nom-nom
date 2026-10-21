@@ -302,7 +302,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       scan_start = std::max(0, branch_idx - 4);
       for (int i = branch_idx - 1; i >= scan_start; --i) {
         const auto& inst = blk->instructions[i];
-        if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) {
+        if (inst.IsCall()) {
           scan_start = i + 1;
           break;
         }
@@ -345,11 +345,20 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           splits[*inst.rd] = consts[*inst.rt];
           split_sels[*inst.rd] = *inst.rs;
         }
+      } else {
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register def_reg : ud.gpr_defs) {
+          consts.erase(def_reg);
+          splits.erase(def_reg);
+          split_sels.erase(def_reg);
+          bool_flags.erase(def_reg);
+        }
       }
     }
 
     if (known_selector != Register::kZero) {
-      for (const auto& inst : blk->instructions) {
+      for (int i = scan_start; i <= branch_idx; ++i) {
+        const auto& inst = blk->instructions[i];
         if (inst.rd.has_value() && *inst.rd == known_selector) return ba;
         if (inst.rt.has_value() &&
             (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kOri ||
@@ -439,7 +448,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       }
     }
 
-    if (branch.opcode == Opcode::kBeq || branch.opcode == Opcode::kBne) {
+    if (branch.opcode == Opcode::kBeq || branch.opcode == Opcode::kBne ||
+        branch.opcode == Opcode::kBeql || branch.opcode == Opcode::kBnel) {
       Register rs = branch.rs.value_or(Register::kZero);
       Register rt = branch.rt.value_or(Register::kZero);
 
@@ -470,6 +480,10 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             return ba;
           }
         }
+      }
+
+      if (branch.opcode == Opcode::kBeql || branch.opcode == Opcode::kBnel) {
+        return ba;
       }
 
       if (consts.contains(rt) && !consts.contains(rs) && rs != Register::kZero &&
@@ -756,6 +770,40 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         block_splits[ba.split_taken] = succ_s;
         block_split_sels[ba.split_taken] = succ_sels;
         queue.push_back(ba.split_taken);
+      } else if (!ba_taken.valid && ba_ft.valid && root_ba.is_equality &&
+                 root_ba.delay_slot_sets_split &&
+                 root_ba.delay_slot_split_val == root_ba.case_val + 1 &&
+                 !seen_case_vals.contains(root_ba.case_val - 1)) {
+        uint32_t eff_taken = resolve_trampoline(ba.split_taken);
+        if (!default_target.has_value()) {
+          default_target = eff_taken;
+        } else if (*default_target != eff_taken) {
+          return std::nullopt;
+        }
+        int64_t implied_case_val = root_ba.case_val - 1;
+        seen_case_vals.insert(implied_case_val);
+        if (!target_to_cases.contains(eff_taken)) {
+          target_order.push_back(eff_taken);
+        }
+        target_to_cases[eff_taken].push_back(implied_case_val);
+        DecisionCase dc;
+        dc.case_values = {implied_case_val};
+        dc.target_block = eff_taken;
+        if (ba.delay_slot_sets_const) {
+          dc.const_reg = ba.delay_slot_const_reg;
+          dc.const_val = ba.delay_slot_const_val;
+          if (!default_const_reg.has_value()) {
+            default_const_reg = ba.delay_slot_const_reg;
+            default_const_val = ba.delay_slot_const_val;
+          }
+        }
+        if (ba.delay_instruction.has_value()) {
+          dc.delay_instructions.push_back(*ba.delay_instruction);
+          if (default_delay_instructions.empty()) {
+            default_delay_instructions.push_back(*ba.delay_instruction);
+          }
+        }
+        decision_cases.push_back(std::move(dc));
       } else {
         return std::nullopt;
       }

@@ -1748,6 +1748,12 @@ struct FolderContext {
                                !HasMemoryDeref(cand_assign.Rhs())) {
                       can_fold_in_place = true;
                     }
+                    if (can_fold_in_place && is_fp_scratch && var != "f0" && var != "f0_d" &&
+                        assign.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
+                        cand_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression && i > 0 &&
+                        CountUses(*stmts[i - 1], var) > 0) {
+                      can_fold_in_place = false;
+                    }
                     if (can_fold_in_place && uses_in_rhs == 1 &&
                         !HasAddressOfVar(cand_assign.Rhs(), var) &&
                         (!HasAddressOf(assign.Rhs()) ||
@@ -2296,6 +2302,11 @@ struct FolderContext {
                           if (ca_lhs != var && CountExprUses(cand_assign.Rhs(), ca_lhs) == 0) {
                             break;
                           }
+                        }
+                        if (cand_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(cand_assign.Lhs()).Name() ==
+                                var) {
+                          break;
                         }
                         if (cand_assign.Lhs().Kind() != CExpressionKind::kIdentifier) {
                           if (CountExprUses(cand_assign.Lhs(), var) > 0 &&
