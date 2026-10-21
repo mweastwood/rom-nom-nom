@@ -1007,5 +1007,100 @@ TEST(ControlFlowStructurerTest, MergesAndChainWhenBranchDelaySlotDoesNotOverwrit
   EXPECT_THAT(s, HasSubstr("block_0 || block_1"));
 }
 
+TEST(ControlFlowStructurerTest, OrdersJumpTableSwitchCasesByTargetBlockVramOrder) {
+  // Case 2's target block (0x80000008) precedes Case 0's target block (0x80000014) in .text.
+  std::vector<uint32_t> words = {
+      0x00800008,  // 0x00: jr $a0
+      0x00000000,  // 0x04: nop
+      0x24020014,  // 0x08: addiu $v0, $zero, 20 (case 2 target at 0x08)
+      0x08000008,  // 0x0C: j 0x80000020
+      0x00000000,  // 0x10: nop
+      0x2402000A,  // 0x14: addiu $v0, $zero, 10 (case 0 target at 0x14)
+      0x08000008,  // 0x18: j 0x80000020
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20: jr $ra
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  JumpTable table;
+  table.switch_vram = 0x80000000;
+  table.default_target_vram = 0x80000020;
+  table.entries = {
+      JumpTableEntry{.case_index = 0, .case_value = 0, .target_vram = 0x80000014},
+      JumpTableEntry{.case_index = 1, .case_value = 1, .target_vram = 0x80000020},
+      JumpTableEntry{.case_index = 2, .case_value = 2, .target_vram = 0x80000008},
+  };
+
+  auto cfg_or = ControlFlowGraph::Build(insts, {table});
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  size_t pos_case2 = s.find("case 2:");
+  size_t pos_case0 = s.find("case 0:");
+  ASSERT_NE(pos_case2, std::string::npos);
+  ASSERT_NE(pos_case0, std::string::npos);
+  EXPECT_LT(pos_case2, pos_case0);
+}
+
+TEST(ControlFlowStructurerTest, DetectsDecisionTreeSwitchInEntryBlockWithPrologueSaves) {
+  // Entry block has 7 prologue/setup instructions (including sw stores) before a 3-case switch:
+  std::vector<uint32_t> exact_words = {
+      0x27BDFFE0,  // 0x00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 0x04: sw    $ra, 28($sp)
+      0xAFB20018,  // 0x08: sw    $s2, 24($sp)
+      0xAFB10014,  // 0x0C: sw    $s1, 20($sp)
+      0xAFB00010,  // 0x10: sw    $s0, 16($sp)
+      0x308400FF,  // 0x14: andi  $a0, $a0, 0xFF
+      0x24010001,  // 0x18: addiu $at, $zero, 1
+      0x10810009,  // 0x1C: beq   $a0, $at, +9 (0x44: Case 1)
+      0x00000000,  // 0x20: nop
+      0x24010002,  // 0x24: addiu $at, $zero, 2
+      0x10810009,  // 0x28: beq   $a0, $at, +9 (0x50: Case 2)
+      0x00000000,  // 0x2C: nop
+      0x24010003,  // 0x30: addiu $at, $zero, 3
+      0x10810009,  // 0x34: beq   $a0, $at, +9 (0x5C: Case 3)
+      0x00000000,  // 0x38: nop
+      0x0800001A,  // 0x3C: j     0x80000068 (Join)
+      0x00000000,  // 0x40: nop
+      0x2402000A,  // 0x44: addiu $v0, $zero, 10 (Case 1)
+      0x0800001A,  // 0x48: j     0x80000068 (Join)
+      0x00000000,  // 0x4C: nop
+      0x24020014,  // 0x50: addiu $v0, $zero, 20 (Case 2)
+      0x0800001A,  // 0x54: j     0x80000068 (Join)
+      0x00000000,  // 0x58: nop
+      0x2402001E,  // 0x5C: addiu $v0, $zero, 30 (Case 3)
+      0x0800001A,  // 0x60: j     0x80000068 (Join)
+      0x00000000,  // 0x64: nop
+      0x8FBF001C,  // 0x68: lw    $ra, 28($sp)
+      0x03E00008,  // 0x6C: jr    $ra
+      0x27BD0020,  // 0x70: addiu $sp, $sp, 32
+  };
+
+  auto insts = *DecodeSequence(exact_words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("switch ($a0)"));
+  EXPECT_THAT(s, HasSubstr("case 1:"));
+  EXPECT_THAT(s, HasSubstr("case 2:"));
+  EXPECT_THAT(s, HasSubstr("case 3:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -237,8 +237,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     const ControlFlowGraph& cfg, const LoopInfo* loop_info,
     const absl::flat_hash_set<uint32_t>& visited, uint32_t root_id) {
   const auto* root_blk = cfg.GetBlock(root_id);
-  if (root_blk == nullptr || root_blk->successors.size() != 2 ||
-      root_blk->instructions.size() > 6 || root_blk->instructions.empty()) {
+  if (root_blk == nullptr || root_blk->successors.size() != 2 || root_blk->instructions.empty()) {
     return std::nullopt;
   }
 
@@ -270,17 +269,9 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
                            Register known_selector) -> BlockAnalysis {
     BlockAnalysis ba;
     const auto* blk = cfg.GetBlock(b_id);
-    if (blk == nullptr || blk->successors.size() != 2 || blk->instructions.size() > 6) {
+    if (blk == nullptr || blk->successors.size() != 2) {
       return ba;
     }
-    for (const auto& inst : blk->instructions) {
-      if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) return ba;
-    }
-
-    absl::flat_hash_map<Register, int64_t> consts = in_consts;
-    absl::flat_hash_map<Register, int64_t> splits = in_splits;
-    absl::flat_hash_map<Register, Register> split_sels = in_split_sels;
-    consts[Register::kZero] = 0;
 
     int branch_idx = -1;
     for (int i = static_cast<int>(blk->instructions.size()) - 1; i >= 0; --i) {
@@ -291,8 +282,40 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     }
     if (branch_idx == -1) return ba;
 
+    int scan_start = 0;
+    if (b_id != root_id) {
+      if (blk->instructions.size() > 6) {
+        return ba;
+      }
+      for (const auto& inst : blk->instructions) {
+        if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) return ba;
+      }
+    } else {
+      for (size_t i = static_cast<size_t>(branch_idx); i < blk->instructions.size(); ++i) {
+        const auto& inst = blk->instructions[i];
+        bool is_prologue_sp_save =
+            (inst.opcode == Opcode::kSw && inst.rs == Register::kSp && inst.rt.has_value() &&
+             (*inst.rt == Register::kRa || *inst.rt == Register::kFp ||
+              (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7)));
+        if (inst.IsCall() || (inst.IsStore() && !is_prologue_sp_save) || inst.IsLoad()) return ba;
+      }
+      scan_start = std::max(0, branch_idx - 4);
+      for (int i = branch_idx - 1; i >= scan_start; --i) {
+        const auto& inst = blk->instructions[i];
+        if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) {
+          scan_start = i + 1;
+          break;
+        }
+      }
+    }
+
+    absl::flat_hash_map<Register, int64_t> consts = in_consts;
+    absl::flat_hash_map<Register, int64_t> splits = in_splits;
+    absl::flat_hash_map<Register, Register> split_sels = in_split_sels;
+    consts[Register::kZero] = 0;
+
     absl::flat_hash_set<Register> bool_flags;
-    for (int i = 0; i < branch_idx; ++i) {
+    for (int i = scan_start; i < branch_idx; ++i) {
       const auto& inst = blk->instructions[i];
       if (inst.opcode == Opcode::kAddiu && inst.rs == Register::kZero && inst.rt.has_value()) {
         consts[*inst.rt] = static_cast<int16_t>(inst.immediate);
@@ -355,19 +378,31 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
 
     if (branch_idx + 1 < static_cast<int>(blk->instructions.size())) {
       const auto& ds = blk->instructions[branch_idx + 1];
-      if (!ds.IsNop()) {
+      RegisterUseDef ds_ud = GetInstructionUseDef(ds);
+      bool ds_defines_callee_saved_in_root = false;
+      if (b_id == root_id) {
+        for (Register def_reg : ds_ud.gpr_defs) {
+          if ((def_reg >= Register::kS0 && def_reg <= Register::kS7) || def_reg == Register::kFp) {
+            ds_defines_callee_saved_in_root = true;
+            break;
+          }
+        }
+      }
+      if (!ds.IsNop() && !ds_defines_callee_saved_in_root) {
         ba.delay_instruction = ds;
       }
-      if (ds.opcode == Opcode::kAddiu && ds.rs == Register::kZero && ds.rt.has_value()) {
+      if (!ds_defines_callee_saved_in_root && ds.opcode == Opcode::kAddiu &&
+          ds.rs == Register::kZero && ds.rt.has_value()) {
         ba.delay_slot_sets_const = true;
         ba.delay_slot_const_reg = *ds.rt;
         ba.delay_slot_const_val = static_cast<int16_t>(ds.immediate);
-      } else if (ds.opcode == Opcode::kAddu && ds.rs == Register::kZero &&
-                 ds.rt == Register::kZero && ds.rd.has_value()) {
+      } else if (!ds_defines_callee_saved_in_root && ds.opcode == Opcode::kAddu &&
+                 ds.rs == Register::kZero && ds.rt == Register::kZero && ds.rd.has_value()) {
         ba.delay_slot_sets_const = true;
         ba.delay_slot_const_reg = *ds.rd;
         ba.delay_slot_const_val = 0;
-      } else if (ds.opcode == Opcode::kOri && ds.rs == Register::kZero && ds.rt.has_value()) {
+      } else if (!ds_defines_callee_saved_in_root && ds.opcode == Opcode::kOri &&
+                 ds.rs == Register::kZero && ds.rt.has_value()) {
         ba.delay_slot_sets_const = true;
         ba.delay_slot_const_reg = *ds.rt;
         ba.delay_slot_const_val = static_cast<uint16_t>(ds.immediate);
@@ -753,7 +788,15 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     total_cases += vals.size();
   }
 
-  if (total_cases < 2 || total_cases > 5 || target_to_cases.size() < 2) {
+  bool root_has_extra_instructions = (root_blk->instructions.size() > 6);
+  for (const auto& inst : root_blk->instructions) {
+    if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) {
+      root_has_extra_instructions = true;
+      break;
+    }
+  }
+  const size_t min_cases = root_has_extra_instructions ? 3 : 2;
+  if (total_cases < min_cases || total_cases > 5 || target_to_cases.size() < min_cases) {
     return std::nullopt;
   }
 
@@ -771,12 +814,11 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
   if (default_target.has_value() && !target_to_cases.contains(*default_target)) {
     target_order.push_back(*default_target);
   }
+  std::sort(target_order.begin(), target_order.end());
 
-  std::sort(decision_cases.begin(), decision_cases.end(),
-            [](const DecisionCase& a, const DecisionCase& b) {
-              if (a.case_values.empty() || b.case_values.empty()) return false;
-              return a.case_values[0] < b.case_values[0];
-            });
+  std::sort(
+      decision_cases.begin(), decision_cases.end(),
+      [](const DecisionCase& a, const DecisionCase& b) { return a.target_block < b.target_block; });
 
   if (default_target.has_value()) {
     DecisionCase def_dc;

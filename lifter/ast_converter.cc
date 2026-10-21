@@ -1450,9 +1450,21 @@ class ConverterContext {
       return;
     }
 
-    if (pre_switch_count > 0) {
-      auto lifted =
-          LiftInstructionsHelper(absl::MakeSpan(block->instructions.data(), pre_switch_count));
+    std::vector<Instruction> pre_switch_insts(
+        block->instructions.begin(),
+        block->instructions.begin() + static_cast<ptrdiff_t>(pre_switch_count));
+    if (branch_index >= 0 && branch_index + 1 < static_cast<int>(block->instructions.size())) {
+      const auto& ds = block->instructions[branch_index + 1];
+      RegisterUseDef ds_ud = GetInstructionUseDef(ds);
+      for (Register def_reg : ds_ud.gpr_defs) {
+        if ((def_reg >= Register::kS0 && def_reg <= Register::kS7) || def_reg == Register::kFp) {
+          pre_switch_insts.push_back(ds);
+          break;
+        }
+      }
+    }
+    if (!pre_switch_insts.empty()) {
+      auto lifted = LiftInstructionsHelper(pre_switch_insts);
       for (auto& s : lifted) {
         auto cs = AstConverter::ConvertStatement(s, function_name_);
         if (cs != nullptr) {

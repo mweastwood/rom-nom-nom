@@ -488,6 +488,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
         unique_target_blocks.push_back(def_blk_id);
       }
     }
+    std::sort(unique_target_blocks.begin(), unique_target_blocks.end());
 
     absl::flat_hash_set<uint32_t> decision_blocks = {entry};
     if (has_bounds_block) {

@@ -5149,5 +5149,70 @@ s32 SubwordStackBufferAccessRightBelowSavedRegisters(s32 x, s32 y) {
 )");
 }
 
+TEST_F(RoundTripTest, SwitchJumpTableWithNonMonotonicCaseOrder) {
+  AssertRoundTripBitExact("SwitchJumpTableWithNonMonotonicCaseOrder", R"(
+void handle_step(s32 code, s32 val);
+
+s32 SwitchJumpTableWithNonMonotonicCaseOrder(s32 cmd, s32 x) {
+    s32 res = 0;
+    switch (cmd) {
+        case 5:
+            handle_step(50, x + 5);
+            res = x + 100;
+            break;
+        case 0:
+            handle_step(10, x);
+            res = x + 10;
+            break;
+        case 3:
+            handle_step(30, x * 2);
+            res = x + 30;
+            break;
+        case 1:
+            handle_step(20, x - 1);
+            res = x - 50;
+            break;
+        case 4:
+            handle_step(40, x + 4);
+            res = x + 40;
+            break;
+        case 2:
+            handle_step(25, x ^ 3);
+            res = x + 20;
+            break;
+        default:
+            res = -1;
+            break;
+    }
+    return res;
+}
+)");
+}
+
+TEST_F(RoundTripTest, EntryBlockDecisionTreeSwitchWithCalleeSavedRegisters) {
+  AssertRoundTripBitExact("EntryBlockDecisionTreeSwitchWithCalleeSavedRegisters", R"(
+s32 step_action(s32 a, s32 b);
+
+s32 EntryBlockDecisionTreeSwitchWithCalleeSavedRegisters(s32 x, s32 y, s32 mode) {
+    s32 res = 0;
+    switch (mode) {
+        case 1:
+            res = step_action(x + 1, y) + x;
+            break;
+        case 2:
+            res = step_action(x + 2, y) + y;
+            break;
+        case 3:
+            res = step_action(x + 3, y) - x;
+            break;
+        case 4:
+            res = step_action(x + 4, y) - y;
+            break;
+    }
+    return res;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
