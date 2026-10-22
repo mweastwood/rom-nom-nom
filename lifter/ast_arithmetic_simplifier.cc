@@ -37,17 +37,6 @@ std::unique_ptr<CExpression> SimplifyShiftAddExpression(const CExpression& expr)
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& assign = static_cast<const AssignmentExpression&>(expr);
-      std::string rhs_s = assign.Rhs().ToString();
-      if (assign.Lhs().Kind() == CExpressionKind::kIdentifier) {
-        std::string_view lhs_name = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
-        if (lhs_name.size() == 7 && absl::StartsWith(lhs_name, "temp_s") && lhs_name[6] >= '0' &&
-            lhs_name[6] <= '7' && absl::StrContains(rhs_s, lhs_name)) {
-          return expr.Clone();
-        }
-      }
-      if (absl::StrContains(rhs_s, " - temp_s")) {
-        return expr.Clone();
-      }
       rewritten = CExpression::Assignment(assign.Op(), assign.Lhs().Clone(),
                                           SimplifyShiftAddExpression(assign.Rhs()));
       break;

@@ -82,185 +82,6 @@ absl::Status RunToolProcess(const Compiler::ProcessRunner& runner, const std::fi
   return absl::OkStatus();
 }
 
-std::string CompactO0FramePointerFunctionBlock(std::string_view fn_block, bool* modified) {
-  size_t frame_pos = fn_block.find(".frame\t$fp,");
-  if (frame_pos == std::string_view::npos) {
-    return std::string(fn_block);
-  }
-  size_t frame_line_end = fn_block.find('\n', frame_pos);
-  if (frame_line_end == std::string_view::npos) {
-    return std::string(fn_block);
-  }
-  std::string_view frame_line = fn_block.substr(frame_pos, frame_line_end - frame_pos);
-  size_t fp_comma = frame_line.find("$fp,");
-  size_t ra_comma = frame_line.find(",$31");
-  size_t vars_tag = frame_line.find("vars=");
-  size_t regs_tag = frame_line.find(", regs=");
-  size_t args_tag = frame_line.find("args=");
-  size_t extra_tag = frame_line.find(", extra=");
-  if (fp_comma == std::string_view::npos || ra_comma == std::string_view::npos ||
-      vars_tag == std::string_view::npos || regs_tag == std::string_view::npos ||
-      args_tag == std::string_view::npos || extra_tag == std::string_view::npos) {
-    return std::string(fn_block);
-  }
-
-  int frame_size = 0;
-  int vars_size = 0;
-  int args_size = 0;
-  if (!absl::SimpleAtoi(frame_line.substr(fp_comma + 4, ra_comma - (fp_comma + 4)), &frame_size) ||
-      !absl::SimpleAtoi(frame_line.substr(vars_tag + 5, regs_tag - (vars_tag + 5)), &vars_size) ||
-      !absl::SimpleAtoi(frame_line.substr(args_tag + 5, extra_tag - (args_tag + 5)), &args_size) ||
-      vars_size <= 0) {
-    return std::string(fn_block);
-  }
-
-  int used_local_max = 0;
-  size_t search_pos = 0;
-  while ((search_pos = fn_block.find("($fp)", search_pos)) != std::string_view::npos) {
-    size_t num_end = search_pos;
-    size_t num_start = num_end;
-    while (num_start > 0 && fn_block[num_start - 1] >= '0' && fn_block[num_start - 1] <= '9') {
-      --num_start;
-    }
-    if (num_start < num_end && (num_start == 0 || fn_block[num_start - 1] != '-')) {
-      int off = 0;
-      if (absl::SimpleAtoi(fn_block.substr(num_start, num_end - num_start), &off)) {
-        if (off >= args_size && off < args_size + vars_size) {
-          used_local_max = std::max(used_local_max, (off - args_size) + 4);
-        }
-      }
-    }
-    search_pos += 5;
-  }
-
-  int actual_vars_size = (used_local_max + 7) & ~7;
-  int delta = vars_size - actual_vars_size;
-  if (delta <= 0) {
-    return std::string(fn_block);
-  }
-
-  *modified = true;
-  int new_frame_size = frame_size - delta;
-  std::string result(fn_block);
-
-  auto replace_all = [&](std::string_view from, std::string_view to) {
-    size_t p = 0;
-    while ((p = result.find(from, p)) != std::string::npos) {
-      result.replace(p, from.size(), to);
-      p += to.size();
-    }
-  };
-
-  replace_all(absl::StrFormat(".frame\t$fp,%d,$31", frame_size),
-              absl::StrFormat(".frame\t$fp,%d,$31", new_frame_size));
-  replace_all(absl::StrFormat("subu\t$sp,$sp,%d\n", frame_size),
-              absl::StrFormat("subu\t$sp,$sp,%d\n", new_frame_size));
-  replace_all(absl::StrFormat("addu\t$sp,$sp,%d\n", frame_size),
-              absl::StrFormat("addu\t$sp,$sp,%d\n", new_frame_size));
-
-  for (std::string_view reg_suffix : {"($sp)", "($fp)"}) {
-    std::string updated;
-    updated.reserve(result.size());
-    size_t pos = 0;
-    while (pos < result.size()) {
-      size_t match_pos = result.find(reg_suffix, pos);
-      if (match_pos == std::string::npos) {
-        updated.append(result, pos, std::string::npos);
-        break;
-      }
-      size_t num_end = match_pos;
-      size_t num_start = num_end;
-      while (num_start > pos && result[num_start - 1] >= '0' && result[num_start - 1] <= '9') {
-        --num_start;
-      }
-      updated.append(result, pos, num_start - pos);
-      if (num_start < num_end && (num_start == 0 || result[num_start - 1] != '-')) {
-        int off = 0;
-        if (absl::SimpleAtoi(result.substr(num_start, num_end - num_start), &off) &&
-            off >= args_size + vars_size) {
-          absl::StrAppendFormat(&updated, "%d%s", off - delta, reg_suffix);
-          pos = match_pos + reg_suffix.size();
-          continue;
-        }
-      }
-      updated.append(result, num_start, (match_pos + reg_suffix.size()) - num_start);
-      pos = match_pos + reg_suffix.size();
-    }
-    result = std::move(updated);
-  }
-  return result;
-}
-
-void StripDuplicateRomSymbolSuffixesInAssemblyFile(const std::filesystem::path& s272_path) {
-  std::ifstream ifs(s272_path);
-  if (!ifs.is_open()) {
-    return;
-  }
-  std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-  ifs.close();
-
-  bool modified = false;
-  if (absl::StrContains(content, "__dup")) {
-    std::string cleaned;
-    cleaned.reserve(content.size());
-    size_t pos = 0;
-    while (pos < content.size()) {
-      size_t dup_pos = content.find("__dup", pos);
-      if (dup_pos == std::string::npos) {
-        cleaned.append(content, pos, std::string::npos);
-        break;
-      }
-      cleaned.append(content, pos, dup_pos - pos);
-      size_t digit_end = dup_pos + 5;
-      while (digit_end < content.size() && content[digit_end] >= '0' && content[digit_end] <= '9') {
-        ++digit_end;
-      }
-      if (digit_end > dup_pos + 5) {
-        pos = digit_end;
-        modified = true;
-      } else {
-        cleaned.append("__dup");
-        pos = dup_pos + 5;
-      }
-    }
-    content = std::move(cleaned);
-  }
-
-  if (absl::StrContains(content, ".frame\t$fp,")) {
-    std::string compacted;
-    compacted.reserve(content.size());
-    size_t pos = 0;
-    while (pos < content.size()) {
-      size_t ent_pos = content.find("\t.ent\t", pos);
-      if (ent_pos == std::string::npos) {
-        compacted.append(content, pos, std::string::npos);
-        break;
-      }
-      compacted.append(content, pos, ent_pos - pos);
-      size_t end_pos = content.find("\t.end\t", ent_pos);
-      if (end_pos == std::string::npos) {
-        compacted.append(content, ent_pos, std::string::npos);
-        break;
-      }
-      size_t end_line = content.find('\n', end_pos);
-      size_t block_end = (end_line == std::string::npos) ? content.size() : (end_line + 1);
-      compacted.append(CompactO0FramePointerFunctionBlock(
-          content.substr(ent_pos, block_end - ent_pos), &modified));
-      pos = block_end;
-    }
-    content = std::move(compacted);
-  }
-
-  if (!modified) {
-    return;
-  }
-
-  std::ofstream ofs(s272_path, std::ios::out | std::ios::trunc);
-  if (ofs.is_open()) {
-    ofs << content;
-  }
-}
-
 }  // namespace
 
 std::filesystem::path FindMacroInc(const std::filesystem::path& repo_root,
@@ -313,7 +134,6 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
       std::filesystem::remove(temp_s272, ec);
       return gcc_status;
     }
-    StripDuplicateRomSymbolSuffixesInAssemblyFile(temp_s272);
 
     std::vector<std::filesystem::path> as_include_dirs =
         ResolveKmcAsIncludeDirs(options.include_dirs);
@@ -329,13 +149,9 @@ absl::Status Compiler::CompileC(const CCompileOptions& options) const {
       return as_status;
     }
 
-    auto align_status = AlignFunctionsInAssemblyAndReassemble(
-        toolchain_, runner_, temp_s272, options.out_obj, options.opt_flags, as_include_dirs,
-        options.macro_inc, options.timeout, options.function_target_vrams,
-        options.module_target_size, options.initial_vram_offset, options.external_jal_counts);
     std::error_code ec;
     std::filesystem::remove(temp_s272, ec);
-    return align_status;
+    return absl::OkStatus();
   }
 
   // Modern toolchain mode
@@ -365,10 +181,6 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
         .include_dirs = options.include_dirs,
         .macro_inc = options.macro_inc,
         .timeout = options.timeout,
-        .function_target_vrams = options.function_target_vrams,
-        .module_target_size = options.module_target_size,
-        .initial_vram_offset = options.initial_vram_offset,
-        .external_jal_counts = options.external_jal_counts,
     });
   };
 
@@ -446,7 +258,6 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
     if (!std::filesystem::exists(temp_s272)) {
       std::ofstream(temp_s272) << "";
     }
-    StripDuplicateRomSymbolSuffixesInAssemblyFile(temp_s272);
   }
 
   // 3. Determine whether any flag set enables KMC AS optimization (`-Wa,-O...`).
@@ -523,21 +334,12 @@ absl::Status Compiler::CompileCWithPerFunctionFlags(
 
   auto as_args = toolchain_.BuildKmcAsArgs(as_opt_flags, as_include_dirs, options.macro_inc,
                                            temp_spliced_s272, options.out_obj);
-  if (absl::Status as_status =
-          RunToolProcess(runner_, toolchain_.RepoRoot(), toolchain_.KmcAs(), std::move(as_args),
-                         options.timeout, "CompileCWithPerFunctionFlags: KMC AS assembly failed",
-                         options.src_file, /*include_command_in_error=*/true);
-      !as_status.ok()) {
-    cleanup_temps();
-    return as_status;
-  }
-
-  auto align_status = AlignFunctionsInAssemblyAndReassemble(
-      toolchain_, runner_, temp_spliced_s272, options.out_obj, as_opt_flags, as_include_dirs,
-      options.macro_inc, options.timeout, options.function_target_vrams, options.module_target_size,
-      options.initial_vram_offset, options.external_jal_counts);
+  absl::Status as_status =
+      RunToolProcess(runner_, toolchain_.RepoRoot(), toolchain_.KmcAs(), std::move(as_args),
+                     options.timeout, "CompileCWithPerFunctionFlags: KMC AS assembly failed",
+                     options.src_file, /*include_command_in_error=*/true);
   cleanup_temps();
-  return align_status;
+  return as_status;
 }
 
 absl::Status Compiler::CompileCpp(const CppCompileOptions& options) const {

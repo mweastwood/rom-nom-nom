@@ -263,38 +263,10 @@ bool AbiAnalyzer::IsRegisterLiveIn(const ControlFlowGraph& cfg, Register reg) {
   std::vector<bool> uses_before_def(cfg.Blocks().size(), false);
   std::vector<bool> defines(cfg.Blocks().size(), false);
 
-  bool has_real_call = false;
-  bool entry_defines_a0_or_a1 = false;
-  for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
-    const auto& block = cfg.Blocks()[i];
-    bool is_synthetic_ext_block =
-        (block.instructions.size() == 6 && block.instructions[0].raw_word == 0x00850025 &&
-         block.instructions[1].raw_word == 0x00C70025);
-    for (const auto& inst : block.instructions) {
-      if (!is_synthetic_ext_block &&
-          (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr)) {
-        has_real_call = true;
-      }
-      if (i == 0) {
-        RegisterUseDef ud = GetInstructionUseDef(inst);
-        for (Register d : ud.gpr_defs) {
-          if (d == Register::kA0 || d == Register::kA1) {
-            entry_defines_a0_or_a1 = true;
-          }
-        }
-      }
-    }
-  }
-
   for (size_t i = 0; i < cfg.Blocks().size(); ++i) {
     const auto& block = cfg.Blocks()[i];
     for (size_t j = 0; j < block.instructions.size(); ++j) {
       const auto& inst = block.instructions[j];
-      if ((has_real_call || entry_defines_a0_or_a1) && inst.opcode == Opcode::kOr &&
-          inst.rd == Register::kZero &&
-          (inst.raw_word == 0x00850025 || inst.raw_word == 0x00C70025)) {
-        continue;
-      }
       bool is_call = (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr);
 
       if (is_call && j + 1 < block.instructions.size()) {
@@ -477,31 +449,6 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
     count = 4;
   } else if (check_reg(Register::kA2)) {
     count = 3;
-    bool saves_ra_in_gpr_before_call = false;
-    bool a0_defined_before_call = false;
-    bool a1_defined_before_call = false;
-    bool a3_defined_before_call = false;
-    for (const auto& inst : instructions) {
-      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kDaddu ||
-           inst.opcode == Opcode::kOr) &&
-          inst.rs == Register::kRa && inst.rt == Register::kZero && inst.rd.has_value() &&
-          *inst.rd != Register::kZero && *inst.rd != Register::kSp) {
-        saves_ra_in_gpr_before_call = true;
-      }
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (Register d : ud.gpr_defs) {
-        if (d == Register::kA0) a0_defined_before_call = true;
-        if (d == Register::kA1) a1_defined_before_call = true;
-        if (d == Register::kA3) a3_defined_before_call = true;
-      }
-      if (inst.opcode == Opcode::kJal || inst.opcode == Opcode::kJalr) {
-        break;
-      }
-    }
-    if (saves_ra_in_gpr_before_call && !a0_defined_before_call && !a1_defined_before_call &&
-        !a3_defined_before_call) {
-      count = 4;
-    }
   } else if (check_reg(Register::kA1)) {
     count = 2;
   } else if (check_reg(Register::kA0)) {

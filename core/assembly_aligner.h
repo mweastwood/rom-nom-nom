@@ -41,20 +41,6 @@ absl::StatusOr<std::vector<std::string>> SplicePerFunctionAssembly(
     const std::vector<std::vector<std::string>>& unique_flag_sets,
     const absl::flat_hash_map<std::string, size_t>& func_to_flag_set, bool overall_has_wa_opt);
 
-// Pads inter-function gaps with `.word 0` using dynamic programming so functions align with their
-// target retail VRAM addresses without exceeding the module size budget, then re-assembles
-// `out_obj` with KMC AS.
-absl::Status AlignFunctionsInAssemblyAndReassemble(
-    const Toolchain& toolchain,
-    const std::function<absl::StatusOr<ProcessResult>(const ProcessOptions&)>& runner,
-    const std::filesystem::path& s272_path, const std::filesystem::path& out_obj,
-    const std::vector<std::string>& as_opt_flags,
-    const std::vector<std::filesystem::path>& as_include_dirs,
-    const std::filesystem::path& macro_inc, absl::Duration timeout,
-    const absl::flat_hash_map<std::string, uint32_t>& function_target_vrams,
-    uint32_t module_target_size = 0, uint32_t initial_vram_offset = 0,
-    const absl::flat_hash_map<std::string, int32_t>& external_jal_counts = {});
-
 }  // namespace rom_nom_nom
 
 #endif  // ROM_NOM_NOM_CORE_ASSEMBLY_ALIGNER_H_

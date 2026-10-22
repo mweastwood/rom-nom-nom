@@ -397,6 +397,8 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     }
     if (current_loop->IsExitBlock(entry)) {
       auto lf_it = loop_follow_map_.find(current_loop);
+      std::optional<uint32_t> loop_follow_target =
+          (lf_it != loop_follow_map_.end()) ? std::optional<uint32_t>(lf_it->second) : follow;
       if ((follow.has_value() && entry == *follow) ||
           (lf_it != loop_follow_map_.end() && entry == lf_it->second)) {
         return CreateBreak(entry);
@@ -405,10 +407,13 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
           entry == current_loop->parent->header) {
         return CreateGoto(entry);
       }
-      auto exit_body = StructureRegion(
-          entry,
-          (lf_it != loop_follow_map_.end()) ? std::optional<uint32_t>(lf_it->second) : follow,
-          current_loop->parent);
+      if (loop_follow_target.has_value()) {
+        const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
+        if (lf_blk != nullptr && lf_blk->successors.size() == 1 && lf_blk->successors[0] == entry) {
+          return CreateGoto(entry);
+        }
+      }
+      auto exit_body = StructureRegion(entry, loop_follow_target, nullptr);
       if (exit_body) {
         auto seq = CreateSequence();
         seq->children.push_back(std::move(exit_body));
@@ -770,16 +775,23 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       auto lf_it = loop_follow_map_.find(current_loop);
       std::optional<uint32_t> loop_follow_target =
           (lf_it != loop_follow_map_.end()) ? std::optional<uint32_t>(lf_it->second) : follow;
+      auto is_successor_of_loop_follow = [&](uint32_t target_id) {
+        if (!loop_follow_target.has_value()) return false;
+        const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
+        return lf_blk != nullptr && lf_blk->successors.size() == 1 &&
+               lf_blk->successors[0] == target_id;
+      };
       if (current_loop->IsExitBlock(succ_taken) && !current_loop->IsExitBlock(succ_fallthrough)) {
         auto if_break = CreateIfThen(entry, /*invert=*/false);
         if ((follow.has_value() && succ_taken == *follow) ||
             (lf_it != loop_follow_map_.end() && succ_taken == lf_it->second)) {
           if_break->children.push_back(CreateBreak(succ_taken));
-        } else if (current_loop->parent != nullptr && visited_.contains(succ_taken) &&
-                   succ_taken == current_loop->parent->header) {
+        } else if ((current_loop->parent != nullptr && visited_.contains(succ_taken) &&
+                    succ_taken == current_loop->parent->header) ||
+                   is_successor_of_loop_follow(succ_taken)) {
           if_break->children.push_back(CreateGoto(succ_taken));
         } else {
-          auto exit_body = StructureRegion(succ_taken, loop_follow_target, current_loop->parent);
+          auto exit_body = StructureRegion(succ_taken, loop_follow_target, nullptr);
           if (exit_body) {
             auto seq = CreateSequence();
             seq->children.push_back(std::move(exit_body));
@@ -803,12 +815,12 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
         if ((follow.has_value() && succ_fallthrough == *follow) ||
             (lf_it != loop_follow_map_.end() && succ_fallthrough == lf_it->second)) {
           if_break->children.push_back(CreateBreak(succ_fallthrough));
-        } else if (current_loop->parent != nullptr && visited_.contains(succ_fallthrough) &&
-                   succ_fallthrough == current_loop->parent->header) {
+        } else if ((current_loop->parent != nullptr && visited_.contains(succ_fallthrough) &&
+                    succ_fallthrough == current_loop->parent->header) ||
+                   is_successor_of_loop_follow(succ_fallthrough)) {
           if_break->children.push_back(CreateGoto(succ_fallthrough));
         } else {
-          auto exit_body =
-              StructureRegion(succ_fallthrough, loop_follow_target, current_loop->parent);
+          auto exit_body = StructureRegion(succ_fallthrough, loop_follow_target, nullptr);
           if (exit_body) {
             auto seq = CreateSequence();
             seq->children.push_back(std::move(exit_body));

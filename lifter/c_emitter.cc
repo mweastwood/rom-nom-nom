@@ -49,212 +49,6 @@ bool IsCompilerIntrinsic(std::string_view name) {
   return absl::StartsWith(name, "__n64_") || absl::StartsWith(name, "__builtin_");
 }
 
-bool IsRomSegmentSymbolName(std::string_view name) {
-  if (name.size() != 10 || !absl::StartsWith(name, "D_00") || name[4] == '0') {
-    return false;
-  }
-  for (size_t i = 4; i < 10; ++i) {
-    char c = name[i];
-    bool is_hex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
-    if (!is_hex) {
-      return false;
-    }
-  }
-  return true;
-}
-
-std::unique_ptr<CExpression> DisambiguateDuplicateRomSymbolsInExpr(
-    const CExpression& expr, std::map<std::string, int>* rom_sym_counts,
-    std::set<std::string>* external_data_symbols) {
-  switch (expr.Kind()) {
-    case CExpressionKind::kIdentifier: {
-      const auto& id = static_cast<const IdentifierExpression&>(expr);
-      if (IsRomSegmentSymbolName(id.Name())) {
-        int occ = ++(*rom_sym_counts)[id.Name()];
-        if (occ >= 2) {
-          std::string dup_name = absl::StrFormat("%s__dup%d", id.Name(), occ);
-          external_data_symbols->insert(dup_name);
-          if (id.SymbolType().has_value()) {
-            return std::make_unique<IdentifierExpression>(dup_name, *id.SymbolType(),
-                                                          id.IsArraySymbol());
-          }
-          return CExpression::Identifier(dup_name);
-        }
-      }
-      return expr.Clone();
-    }
-    case CExpressionKind::kUnaryExpression: {
-      const auto& u = static_cast<const UnaryExpression&>(expr);
-      return CExpression::Unary(
-          u.Op(),
-          DisambiguateDuplicateRomSymbolsInExpr(u.Operand(), rom_sym_counts, external_data_symbols),
-          u.IsPrefix());
-    }
-    case CExpressionKind::kBinaryExpression: {
-      const auto& b = static_cast<const BinaryExpression&>(expr);
-      auto lhs =
-          DisambiguateDuplicateRomSymbolsInExpr(b.Lhs(), rom_sym_counts, external_data_symbols);
-      auto rhs =
-          DisambiguateDuplicateRomSymbolsInExpr(b.Rhs(), rom_sym_counts, external_data_symbols);
-      return CExpression::Binary(b.Op(), std::move(lhs), std::move(rhs));
-    }
-    case CExpressionKind::kAssignmentExpression: {
-      const auto& a = static_cast<const AssignmentExpression&>(expr);
-      auto lhs =
-          DisambiguateDuplicateRomSymbolsInExpr(a.Lhs(), rom_sym_counts, external_data_symbols);
-      auto rhs =
-          DisambiguateDuplicateRomSymbolsInExpr(a.Rhs(), rom_sym_counts, external_data_symbols);
-      return CExpression::Assignment(a.Op(), std::move(lhs), std::move(rhs));
-    }
-    case CExpressionKind::kCallExpression: {
-      const auto& c = static_cast<const CallExpression&>(expr);
-      auto callee =
-          DisambiguateDuplicateRomSymbolsInExpr(c.Callee(), rom_sym_counts, external_data_symbols);
-      std::vector<std::unique_ptr<CExpression>> args;
-      args.reserve(c.Arguments().size());
-      for (const auto& arg : c.Arguments()) {
-        args.push_back(
-            DisambiguateDuplicateRomSymbolsInExpr(*arg, rom_sym_counts, external_data_symbols));
-      }
-      return CExpression::Call(std::move(callee), std::move(args));
-    }
-    case CExpressionKind::kCastExpression: {
-      const auto& c = static_cast<const CastExpression&>(expr);
-      return CExpression::Cast(c.TargetType(),
-                               DisambiguateDuplicateRomSymbolsInExpr(c.Operand(), rom_sym_counts,
-                                                                     external_data_symbols));
-    }
-    case CExpressionKind::kMemberAccessExpression: {
-      const auto& m = static_cast<const MemberAccessExpression&>(expr);
-      return CExpression::MemberAccess(
-          DisambiguateDuplicateRomSymbolsInExpr(m.Object(), rom_sym_counts, external_data_symbols),
-          m.MemberName(), m.IsArrow());
-    }
-    case CExpressionKind::kArrayIndexExpression: {
-      const auto& a = static_cast<const ArrayIndexExpression&>(expr);
-      auto arr =
-          DisambiguateDuplicateRomSymbolsInExpr(a.Array(), rom_sym_counts, external_data_symbols);
-      auto idx =
-          DisambiguateDuplicateRomSymbolsInExpr(a.Index(), rom_sym_counts, external_data_symbols);
-      return CExpression::ArrayIndex(std::move(arr), std::move(idx));
-    }
-    case CExpressionKind::kTernaryExpression: {
-      const auto& t = static_cast<const TernaryExpression&>(expr);
-      auto cond = DisambiguateDuplicateRomSymbolsInExpr(t.Condition(), rom_sym_counts,
-                                                        external_data_symbols);
-      auto te = DisambiguateDuplicateRomSymbolsInExpr(t.TrueExpression(), rom_sym_counts,
-                                                      external_data_symbols);
-      auto fe = DisambiguateDuplicateRomSymbolsInExpr(t.FalseExpression(), rom_sym_counts,
-                                                      external_data_symbols);
-      return CExpression::Ternary(std::move(cond), std::move(te), std::move(fe));
-    }
-    default:
-      return expr.Clone();
-  }
-}
-
-std::unique_ptr<CStatement> DisambiguateDuplicateRomSymbolsInStmt(
-    const CStatement& stmt, std::map<std::string, int>* rom_sym_counts,
-    std::set<std::string>* external_data_symbols) {
-  switch (stmt.Kind()) {
-    case CStatementKind::kCompoundStatement: {
-      const auto& comp = static_cast<const CompoundStatement&>(stmt);
-      std::vector<std::unique_ptr<CStatement>> stmts;
-      stmts.reserve(comp.Statements().size());
-      for (const auto& s : comp.Statements()) {
-        stmts.push_back(
-            DisambiguateDuplicateRomSymbolsInStmt(*s, rom_sym_counts, external_data_symbols));
-      }
-      return std::make_unique<CompoundStatement>(std::move(stmts));
-    }
-    case CStatementKind::kExpressionStatement:
-      return CStatement::Expression(DisambiguateDuplicateRomSymbolsInExpr(
-          static_cast<const ExpressionStatement&>(stmt).Expression(), rom_sym_counts,
-          external_data_symbols));
-    case CStatementKind::kVariableDeclarationStatement: {
-      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
-      std::unique_ptr<CExpression> init =
-          vd.Initializer() != nullptr
-              ? DisambiguateDuplicateRomSymbolsInExpr(*vd.Initializer(), rom_sym_counts,
-                                                      external_data_symbols)
-              : nullptr;
-      return CStatement::VariableDeclaration(vd.Type(), vd.Name(), std::move(init), vd.ArraySize(),
-                                             vd.RegisterAnnotation());
-    }
-    case CStatementKind::kIfStatement: {
-      const auto& ifs = static_cast<const IfStatement&>(stmt);
-      auto cond = DisambiguateDuplicateRomSymbolsInExpr(ifs.Condition(), rom_sym_counts,
-                                                        external_data_symbols);
-      auto then_b = DisambiguateDuplicateRomSymbolsInStmt(ifs.ThenBranch(), rom_sym_counts,
-                                                          external_data_symbols);
-      auto else_b = ifs.ElseBranch() != nullptr
-                        ? DisambiguateDuplicateRomSymbolsInStmt(*ifs.ElseBranch(), rom_sym_counts,
-                                                                external_data_symbols)
-                        : nullptr;
-      return CStatement::If(std::move(cond), std::move(then_b), std::move(else_b));
-    }
-    case CStatementKind::kWhileStatement: {
-      const auto& ws = static_cast<const WhileStatement&>(stmt);
-      auto cond = DisambiguateDuplicateRomSymbolsInExpr(ws.Condition(), rom_sym_counts,
-                                                        external_data_symbols);
-      auto body =
-          DisambiguateDuplicateRomSymbolsInStmt(ws.Body(), rom_sym_counts, external_data_symbols);
-      return CStatement::While(std::move(cond), std::move(body));
-    }
-    case CStatementKind::kDoWhileStatement: {
-      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
-      auto body =
-          DisambiguateDuplicateRomSymbolsInStmt(dws.Body(), rom_sym_counts, external_data_symbols);
-      auto cond = DisambiguateDuplicateRomSymbolsInExpr(dws.Condition(), rom_sym_counts,
-                                                        external_data_symbols);
-      return CStatement::DoWhile(std::move(body), std::move(cond));
-    }
-    case CStatementKind::kForStatement: {
-      const auto& fs = static_cast<const ForStatement&>(stmt);
-      auto init = fs.Init() != nullptr ? DisambiguateDuplicateRomSymbolsInStmt(
-                                             *fs.Init(), rom_sym_counts, external_data_symbols)
-                                       : nullptr;
-      auto cond = fs.Condition() != nullptr
-                      ? DisambiguateDuplicateRomSymbolsInExpr(*fs.Condition(), rom_sym_counts,
-                                                              external_data_symbols)
-                      : nullptr;
-      auto step = fs.Step() != nullptr ? DisambiguateDuplicateRomSymbolsInExpr(
-                                             *fs.Step(), rom_sym_counts, external_data_symbols)
-                                       : nullptr;
-      auto body =
-          DisambiguateDuplicateRomSymbolsInStmt(fs.Body(), rom_sym_counts, external_data_symbols);
-      return CStatement::For(std::move(init), std::move(cond), std::move(step), std::move(body));
-    }
-    case CStatementKind::kReturnStatement: {
-      const auto& rs = static_cast<const ReturnStatement&>(stmt);
-      if (rs.ReturnValue() == nullptr) return CStatement::Return();
-      return CStatement::Return(DisambiguateDuplicateRomSymbolsInExpr(
-          *rs.ReturnValue(), rom_sym_counts, external_data_symbols));
-    }
-    case CStatementKind::kSwitchStatement: {
-      const auto& ss = static_cast<const SwitchStatement&>(stmt);
-      auto cond = DisambiguateDuplicateRomSymbolsInExpr(ss.Condition(), rom_sym_counts,
-                                                        external_data_symbols);
-      std::vector<SwitchCase> cases;
-      cases.reserve(ss.Cases().size());
-      for (const auto& c : ss.Cases()) {
-        SwitchCase sc;
-        sc.case_values = c.case_values;
-        sc.is_default = c.is_default;
-        if (c.body != nullptr) {
-          sc.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
-              DisambiguateDuplicateRomSymbolsInStmt(*c.body, rom_sym_counts, external_data_symbols)
-                  .release()));
-        }
-        cases.push_back(std::move(sc));
-      }
-      return CStatement::Switch(std::move(cond), std::move(cases));
-    }
-    default:
-      return stmt.Clone();
-  }
-}
-
 std::optional<std::pair<std::string, CType>> MatchScalarCastDerefGlobal(
     const CExpression& expr, const std::set<std::string>& local_vars) {
   if (expr.Kind() != CExpressionKind::kUnaryExpression) return std::nullopt;
@@ -831,11 +625,6 @@ std::string CTranslationUnit::ToString() const {
       body_to_emit = std::unique_ptr<CompoundStatement>(
           static_cast<CompoundStatement*>(functions[i].Body().Clone().release()));
     }
-    std::map<std::string, int> func_rom_sym_counts;
-    body_to_emit = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
-        DisambiguateDuplicateRomSymbolsInStmt(*body_to_emit, &func_rom_sym_counts,
-                                              &external_data_symbols)
-            .release()));
     FunctionDeclaration norm_fn(functions[i].ReturnType(), functions[i].Name(),
                                 functions[i].Parameters(), std::move(body_to_emit),
                                 functions[i].IsStatic());
@@ -859,16 +648,12 @@ std::string CTranslationUnit::ToString() const {
 
   if (!external_data_symbols.empty()) {
     for (const auto& data_symbol : external_data_symbols) {
-      std::string lookup_symbol = data_symbol;
-      if (size_t dup_pos = data_symbol.find("__dup"); dup_pos != std::string::npos) {
-        lookup_symbol = data_symbol.substr(0, dup_pos);
-      }
       CType data_type = CType::S32();
-      auto it = inferred_data_types.find(lookup_symbol);
+      auto it = inferred_data_types.find(data_symbol);
       if (it != inferred_data_types.end()) {
         data_type = it->second;
       }
-      std::string array_suffix = array_data_symbols.count(lookup_symbol) > 0 ? "[]" : "";
+      std::string array_suffix = array_data_symbols.count(data_symbol) > 0 ? "[]" : "";
       output +=
           absl::StrFormat("extern %s %s%s;\n", data_type.ToString(), data_symbol, array_suffix);
     }

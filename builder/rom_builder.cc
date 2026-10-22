@@ -49,27 +49,11 @@ absl::StatusOr<LoadedConfigAndFlags> LoadGameConfigAndTuningFlags(
     loaded.config = std::move(*config_or);
   }
 
-  absl::flat_hash_set<std::string> explicit_o0_modules;
-  for (const auto& [module_name, flag_list] : loaded.config.c_flags()) {
-    for (const auto& f : flag_list.flags()) {
-      if (f == "-O0") {
-        explicit_o0_modules.insert(module_name);
-        break;
-      }
-    }
-  }
-
   auto index_tuning_cache = [&](const TuningCache& cache) {
     for (const auto& [module_name, flags] : cache.module_c_flags()) {
-      if (explicit_o0_modules.contains(module_name)) {
-        continue;
-      }
       (*loaded.config.mutable_c_flags())[module_name] = flags;
     }
     for (const auto& entry : cache.entries()) {
-      if (explicit_o0_modules.contains(entry.module_name())) {
-        continue;
-      }
       if (entry.c_flags_size() > 0 && !entry.function_name().empty()) {
         std::vector<std::string> flags(entry.c_flags().begin(), entry.c_flags().end());
         loaded.function_flags_by_module[std::string(entry.module_name())]
@@ -186,131 +170,6 @@ void RewriteCodeSegmentLinkerScript(const GameConfig& config, const std::filesys
       }
     }
   }
-}
-
-absl::flat_hash_map<std::string, uint32_t> CollectFunctionTargetVrams(
-    const SymbolIndex* symbol_index, const std::filesystem::path& src_dir) {
-  absl::flat_hash_map<std::string, uint32_t> function_target_vrams;
-  if (symbol_index != nullptr) {
-    for (const SymbolRegistryEntry* entry : symbol_index->SortedEntries()) {
-      if (entry->type() == SYMBOL_FUNC && !entry->name().empty() && entry->address() != 0) {
-        function_target_vrams[std::string(entry->name())] = entry->address();
-      }
-    }
-  }
-  std::error_code ec;
-  if (!src_dir.empty()) {
-    std::filesystem::path lifted_symbols_path = src_dir / "lifted_symbols.ld";
-    if (std::filesystem::exists(lifted_symbols_path, ec)) {
-      std::ifstream ls_ifs(lifted_symbols_path);
-      std::string line;
-      while (std::getline(ls_ifs, line)) {
-        size_t eq_pos = line.find('=');
-        if (eq_pos == std::string::npos) {
-          continue;
-        }
-        std::string_view line_view = line;
-        std::string_view lhs = absl::StripAsciiWhitespace(line_view.substr(0, eq_pos));
-        if (absl::StartsWith(lhs, "PROVIDE(")) {
-          lhs.remove_prefix(8);
-          lhs = absl::StripAsciiWhitespace(lhs);
-        }
-        std::string_view rhs = absl::StripAsciiWhitespace(line_view.substr(eq_pos + 1));
-        while (!rhs.empty() && (rhs.back() == ';' || rhs.back() == ')' ||
-                                absl::ascii_isspace(static_cast<unsigned char>(rhs.back())))) {
-          rhs.remove_suffix(1);
-        }
-        if (!lhs.empty() && (absl::StartsWith(rhs, "0x") || absl::StartsWith(rhs, "0X"))) {
-          uint32_t addr = 0;
-          if (absl::SimpleHexAtoi(rhs.substr(2), &addr) && addr != 0) {
-            function_target_vrams.try_emplace(std::string(lhs), addr);
-          }
-        }
-      }
-    }
-  }
-  return function_target_vrams;
-}
-
-struct GlobalJalCounts {
-  absl::flat_hash_map<std::string, int32_t> total;
-  absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, int32_t>> by_module;
-
-  absl::flat_hash_map<std::string, int32_t> ExternalForModule(std::string_view module_stem) const {
-    absl::flat_hash_map<std::string, int32_t> ext = total;
-    if (auto it = by_module.find(module_stem); it != by_module.end()) {
-      for (const auto& [sym, cnt] : it->second) {
-        auto tot_it = ext.find(sym);
-        if (tot_it != ext.end()) {
-          tot_it->second = std::max(0, tot_it->second - cnt);
-        }
-      }
-    }
-    return ext;
-  }
-};
-
-GlobalJalCounts CollectGlobalJalCounts(
-    const std::filesystem::path& asm_dir,
-    const absl::flat_hash_map<std::string, uint32_t>& function_target_vrams) {
-  GlobalJalCounts result;
-  std::error_code ec;
-  if (asm_dir.empty() || !std::filesystem::exists(asm_dir, ec)) {
-    return result;
-  }
-
-  absl::flat_hash_map<uint32_t, std::vector<std::string>> vram_to_names;
-  for (const auto& [name, vram] : function_target_vrams) {
-    vram_to_names[vram].push_back(name);
-    vram_to_names[vram].push_back(absl::StrFormat("func_%08X", vram));
-  }
-
-  for (const auto& dir_entry : std::filesystem::recursive_directory_iterator(asm_dir, ec)) {
-    if (!dir_entry.is_regular_file() || dir_entry.path().extension() != ".s") {
-      continue;
-    }
-    std::string stem = dir_entry.path().stem().string();
-    std::ifstream ifs(dir_entry.path());
-    std::string line;
-    while (std::getline(ifs, line)) {
-      std::string_view sv = line;
-      if (size_t close_comment = sv.find("*/"); close_comment != std::string_view::npos) {
-        sv.remove_prefix(close_comment + 2);
-      }
-      sv = absl::StripAsciiWhitespace(sv);
-      if (absl::StartsWith(sv, "jal\t") || absl::StartsWith(sv, "jal ")) {
-        std::string_view target = absl::StripAsciiWhitespace(sv.substr(3));
-        if (target.empty()) {
-          continue;
-        }
-        std::string target_str(target);
-        result.total[target_str]++;
-        result.by_module[stem][target_str]++;
-        if (auto it_vram = function_target_vrams.find(target_str);
-            it_vram != function_target_vrams.end()) {
-          for (const auto& alias : vram_to_names[it_vram->second]) {
-            if (alias != target_str) {
-              result.total[alias]++;
-              result.by_module[stem][alias]++;
-            }
-          }
-        } else if (absl::StartsWith(target_str, "func_") && target_str.size() == 13) {
-          uint32_t addr = 0;
-          if (absl::SimpleHexAtoi(target.substr(5), &addr)) {
-            if (auto it_aliases = vram_to_names.find(addr); it_aliases != vram_to_names.end()) {
-              for (const auto& alias : it_aliases->second) {
-                if (alias != target_str) {
-                  result.total[alias]++;
-                  result.by_module[stem][alias]++;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  return result;
 }
 
 absl::StatusOr<RomBuildResult> VerifyBuiltRom(const RomBuilderOptions& options,
@@ -476,11 +335,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     ofs << rewritten_ld;
   }
 
-  absl::flat_hash_map<std::string, uint32_t> function_target_vrams =
-      CollectFunctionTargetVrams(symbol_index.get(), options_.src_dir);
-  GlobalJalCounts global_jal_counts =
-      CollectGlobalJalCounts(options_.asm_dir, function_target_vrams);
-
   // 5. Resolve and compile all objects
   std::filesystem::path src_dir = options_.src_dir;
 
@@ -519,8 +373,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     macro_inc = p.is_relative() ? (toolchain_.RepoRoot() / p) : p;
   }
 
-  absl::flat_hash_map<std::string, uint32_t> module_target_sizes;
-  absl::flat_hash_map<std::string, std::string> module_segment_names;
   absl::flat_hash_map<std::string, uint32_t> module_rom_starts;
   for (const auto& seg : config.segments()) {
     if (seg.type() != SEGMENT_CODE) {
@@ -528,15 +380,8 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
     }
     for (int i = 0; i < seg.subsegments_size(); ++i) {
       const auto& sub = seg.subsegments(i);
-      uint32_t sub_end =
-          (i + 1 < seg.subsegments_size()) ? seg.subsegments(i + 1).rom_start() : seg.rom_end();
       if (!sub.name().empty()) {
         module_rom_starts.try_emplace(std::string(sub.name()), sub.rom_start());
-      }
-      if ((sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) && !sub.name().empty() &&
-          sub_end > sub.rom_start()) {
-        module_target_sizes[std::string(sub.name())] = sub_end - sub.rom_start();
-        module_segment_names[std::string(sub.name())] = std::string(seg.name());
       }
     }
   }
@@ -554,7 +399,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
         return rom_a < rom_b;
       });
 
-  absl::flat_hash_map<std::string, uint32_t> segment_overflow_bytes;
   for (const auto& obj_ref : ordered_obj_refs) {
     auto resolved_or = resolver.Resolve(obj_ref);
     if (!resolved_or.ok()) {
@@ -568,18 +412,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
         const auto* mod_fn_flags = function_flags_by_module.contains(resolved_or->object_stem)
                                        ? &function_flags_by_module.at(resolved_or->object_stem)
                                        : nullptr;
-        uint32_t mod_target_size = 0;
-        if (auto it_sz = module_target_sizes.find(resolved_or->object_stem);
-            it_sz != module_target_sizes.end()) {
-          mod_target_size = it_sz->second;
-        }
-        std::string seg_name;
-        uint32_t initial_overflow = 0;
-        if (auto it_seg = module_segment_names.find(resolved_or->object_stem);
-            it_seg != module_segment_names.end()) {
-          seg_name = it_seg->second;
-          initial_overflow = segment_overflow_bytes[seg_name];
-        }
 
         bool has_distinct_flags = false;
         if (mod_fn_flags != nullptr && toolchain_.Mode() == ToolchainMode::kOriginal) {
@@ -591,8 +423,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
           }
         }
 
-        absl::flat_hash_map<std::string, int32_t> external_jal_counts =
-            global_jal_counts.ExternalForModule(resolved_or->object_stem);
         absl::Status status;
         if (has_distinct_flags) {
           status = compiler_.CompileCWithPerFunctionFlags({
@@ -602,10 +432,6 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
               .function_flags = *mod_fn_flags,
               .include_dirs = extra_includes,
               .macro_inc = macro_inc,
-              .function_target_vrams = function_target_vrams,
-              .module_target_size = mod_target_size,
-              .initial_vram_offset = initial_overflow,
-              .external_jal_counts = std::move(external_jal_counts),
           });
         } else {
           status = compiler_.CompileC({
@@ -614,27 +440,10 @@ absl::StatusOr<RomBuildResult> RomBuilder::Build() const {
               .opt_flags = std::move(flags),
               .include_dirs = extra_includes,
               .macro_inc = macro_inc,
-              .function_target_vrams = function_target_vrams,
-              .module_target_size = mod_target_size,
-              .initial_vram_offset = initial_overflow,
-              .external_jal_counts = std::move(external_jal_counts),
           });
         }
         if (!status.ok()) {
           return status;
-        }
-        if (!seg_name.empty() && mod_target_size > 0) {
-          auto elf_or = ElfReader::LoadFromFile(target_obj);
-          if (elf_or.ok()) {
-            const ElfSection* text_sec = elf_or->FindSection(".text");
-            if (text_sec != nullptr) {
-              uint32_t text_sz = static_cast<uint32_t>(text_sec->data.size());
-              uint32_t aligned_sz = (text_sz + 15u) & ~15u;
-              uint32_t total_end = initial_overflow + aligned_sz;
-              segment_overflow_bytes[seg_name] =
-                  (total_end > mod_target_size) ? (total_end - mod_target_size) : 0;
-            }
-          }
         }
         break;
       }

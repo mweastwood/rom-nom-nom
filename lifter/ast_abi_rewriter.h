@@ -58,13 +58,7 @@ void TrimUnassignedTrailingCallArgRegisters(
 // should be re-run after coalescing.
 bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
                                           const std::vector<CParameter>& parameters,
-                                          uint32_t frame_size = 0, bool has_frame_pointer = false);
-
-// Rewrites `-O0` frame-pointer idioms (post-increment loads and `*(TYPE *)(base + offset)`
-// positive constant-offset pointer dereferences into anonymous struct member accesses
-// `((struct { u8 _p[offset]; TYPE _v; }*)base)->_v` so GCC 2.7.2 at `-O0` emits single-
-// instruction immediate-offset loads/stores instead of `addu` + `0(reg)`).
-void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body);
+                                          uint32_t frame_size = 0);
 
 }  // namespace rom_nom_nom
 

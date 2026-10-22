@@ -540,17 +540,13 @@ class ConverterContext {
         } else if (decouple_delay && cond_block != nullptr) {
           auto delay_stmts = LiftDelaySlotFromBlock(*cond_block);
           for (const auto& s : delay_stmts) {
-            bool is_arg_assignment = (s.kind == StatementKind::kAssignment &&
-                                      absl::StartsWith(s.destination_variable, "arg"));
             auto cs1 = AstConverter::ConvertStatement(s);
             if (cs1 != nullptr) {
               then_body->AddStatement(std::move(cs1));
             }
-            if (!is_arg_assignment) {
-              auto cs2 = AstConverter::ConvertStatement(s);
-              if (cs2 != nullptr) {
-                else_body->AddStatement(std::move(cs2));
-              }
+            auto cs2 = AstConverter::ConvertStatement(s);
+            if (cs2 != nullptr) {
+              else_body->AddStatement(std::move(cs2));
             }
           }
         }
@@ -1155,27 +1151,45 @@ class ConverterContext {
           target_block->AddStatement(CStatement::Break());
           break;
         }
+        auto block_has_only_return = [&](const BasicBlock& blk) {
+          auto lifted = ExpressionBuilder::LiftBlock(blk, BuildLiftContext(),
+                                                     /*omit_last_instruction=*/false);
+          for (const auto& s : lifted) {
+            if (s.kind != StatementKind::kReturn) {
+              return false;
+            }
+          }
+          return true;
+        };
+        bool already_ended_with_return =
+            !target_block->Statements().empty() &&
+            target_block->Statements().back()->Kind() == CStatementKind::kReturnStatement;
         bool is_return = false;
         const auto* target_blk = cfg_.GetBlock(region.block_id);
         if (target_blk != nullptr) {
+          bool target_already_emitted = emitted_blocks_.contains(target_blk->id);
           if (target_blk->successors.empty()) {
-            is_return = true;
+            is_return = already_ended_with_return || block_has_only_return(*target_blk);
           } else if (target_blk->successors.size() == 1) {
             const auto* succ_blk = cfg_.GetBlock(target_blk->successors[0]);
             if (succ_blk != nullptr && succ_blk->successors.empty()) {
-              is_return = true;
+              is_return = already_ended_with_return ||
+                          ((target_already_emitted || block_has_only_return(*target_blk)) &&
+                           block_has_only_return(*succ_blk));
             }
           }
         }
         if (is_return) {
-          if (returns_v0_) {
-            target_block->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
-          } else if (returns_f0_) {
-            bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg_);
-            target_block->AddStatement(
-                CStatement::Return(CExpression::Identifier(is_double ? "f0_d" : "f0")));
-          } else {
-            target_block->AddStatement(CStatement::Return());
+          if (!already_ended_with_return) {
+            if (returns_v0_) {
+              target_block->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+            } else if (returns_f0_) {
+              bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg_);
+              target_block->AddStatement(
+                  CStatement::Return(CExpression::Identifier(is_double ? "f0_d" : "f0")));
+            } else {
+              target_block->AddStatement(CStatement::Return());
+            }
           }
         } else {
           target_block->AddStatement(CStatement::Break());
@@ -2025,28 +2039,10 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
   SimplifyReciprocalDivisionAndUnsignedFloatConversions(body.get());
   FoldSingleUseExpressions(body.get());
   TrimUnassignedTrailingCallArgRegisters(body.get(), parameters, options.function_parameter_counts);
-  if (SplitScratchReusedParameterRegisters(body.get(), parameters, ctx.FrameSize(),
-                                           ctx.HasFramePointer()) &&
-      !ctx.HasFramePointer()) {
+  if (SplitScratchReusedParameterRegisters(body.get(), parameters, ctx.FrameSize())) {
     FoldSingleUseExpressions(body.get());
     TrimUnassignedTrailingCallArgRegisters(body.get(), parameters,
                                            options.function_parameter_counts);
-  }
-  if (ctx.HasFramePointer()) {
-    RewriteFramePointerStructOffsetAccesses(body.get());
-  }
-
-  if (ctx.HasFramePointer() && return_type.ToString() == "void" && !body->Statements().empty()) {
-    const auto& last_stmt = *body->Statements().back();
-    if (last_stmt.Kind() == CStatementKind::kReturnStatement &&
-        static_cast<const ReturnStatement&>(last_stmt).ReturnValue() == nullptr) {
-      bool preceded_by_label = (body->Statements().size() >= 2 &&
-                                body->Statements()[body->Statements().size() - 2]->Kind() ==
-                                    CStatementKind::kLabelStatement);
-      if (!preceded_by_label) {
-        body->MutableStatements().pop_back();
-      }
-    }
   }
 
   absl::Status decl_status =

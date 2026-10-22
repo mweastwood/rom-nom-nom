@@ -210,10 +210,8 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
             }
           }
         } else {
-          const char* fp_load_type =
-              (state.sp_alloc_idx.has_value() && i < *state.sp_alloc_idx) ? "const f32" : "f32";
-          statement.expression = LiftedExpression::Load(
-              fp_load_type, MakeRegOffsetExpr(state, *inst.rs, inst.immediate));
+          statement.expression =
+              LiftedExpression::Load("f32", MakeRegOffsetExpr(state, *inst.rs, inst.immediate));
         }
         statements.push_back(std::move(statement));
       }

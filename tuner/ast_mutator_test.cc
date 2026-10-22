@@ -1608,5 +1608,34 @@ TEST(AstMutatorTest, PropagateRegisterCopySoundnessGuardsRejectLoopsAndMemoryAli
   }
 }
 
+TEST(AstMutatorTest, ZeroReturnVariableSubstitutionExcludesVariablesReassignedInBranches) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v1"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "arg0"));
+
+  // v1 = 0;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v1"), CExpression::Integer(0))));
+
+  // if (arg0 != 0) { v1 = 5; }
+  auto if_body = std::make_unique<CompoundStatement>();
+  if_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v1"), CExpression::Integer(5))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(if_body)));
+
+  // return 0;
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FunctionDeclaration func(CType::S32(), "ZeroVarReassignedInIfFunc", {}, std::move(body));
+  auto mutations = AstMutator::DiscoverMutations(func, 64);
+  for (const auto& step : mutations) {
+    EXPECT_NE(step.kind(), AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR)
+        << "v1 is reassigned inside an if-branch and must not be treated as a constant zero!";
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

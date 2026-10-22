@@ -3196,72 +3196,6 @@ TEST(AstConverterTest, SplitsParameterReusedInsideConditionalBranchAfterCall) {
   EXPECT_THAT(code, HasSubstr("temp_a0"));
 }
 
-TEST(AstConverterTest, CoalescesZeroFrameFloatParamBitcastThroughStackSlot) {
-  // Frame-size 0 function storing $f12 to 0($sp) and immediately loading it as s32 into $v0.
-  std::vector<uint32_t> words = {
-      0xE7AC0000,  // 00: swc1  $f12, 0($sp)
-      0x8FA20000,  // 04: lw    $v0, 0($sp)
-      0x00021583,  // 08: sra   $v0, $v0, 22
-      0x304201FF,  // 0C: andi  $v0, $v0, 0x1FF
-      0x03E00008,  // 10: jr    $ra
-      0x00000000,  // 14: nop
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto cfg = *ControlFlowGraph::Build(insts);
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  ASSERT_THAT(root_region, NotNull());
-
-  AstConverterOptions options;
-  options.function_name = "TestZeroFrameFloatBitcast";
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
-  std::string code = func.ToString();
-
-  EXPECT_THAT(code, HasSubstr("*(s32*)&f12"));
-  EXPECT_THAT(code, Not(HasSubstr("var_sp_0")));
-}
-
-TEST(AstConverterTest, PreservesDoubleGlobalLoadAfterDoubleToIntTruncate) {
-  // trunc.w.d $f2, $f0; mfc1 $v1, $f2; lui $at, 0x8012; ldc1 $f0, 0x3B60($at);
-  // mtc1 $v1, $f4; cvt.d.w $f4, $f4; sub.d $f0, $f4, $f0
-  std::vector<uint32_t> words = {
-      0x4620008D,  // 00: trunc.w.d $f2, $f0
-      0x44031000,  // 04: mfc1      $v1, $f2
-      0x3C018012,  // 08: lui       $at, 0x8012
-      0xD4203B60,  // 0C: ldc1      $f0, 0x3B60($at)
-      0x44832000,  // 10: mtc1      $v1, $f4
-      0x00000000,  // 14: nop
-      0x46802121,  // 18: cvt.d.w   $f4, $f4
-      0x46202101,  // 1C: sub.d     $f4, $f4, $f0
-      0x46242002,  // 20: mul.d     $f0, $f4, $f4
-      0x30630001,  // 24: andi      $v1, $v1, 1
-      0x10600002,  // 28: beq       $v1, $zero, 0x34
-      0x00000000,  // 2C: nop
-      0x46200007,  // 30: neg.d     $f0, $f0
-      0x03E00008,  // 34: jr        $ra
-      0x00000000,  // 38: nop
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto cfg = *ControlFlowGraph::Build(insts);
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  ASSERT_THAT(root_region, NotNull());
-
-  SymbolIndex sym_index;
-
-  AstConverterOptions options;
-  options.function_name = "TestDoubleLoadOrdering";
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &sym_index, options);
-  std::string code = func.ToString();
-
-  EXPECT_THAT(code, HasSubstr("v1 = (s32)f0_d;"));
-  EXPECT_THAT(code, HasSubstr("f0_d = *(f64*)&D_80123B60;"));
-}
-
 TEST(AstConverterTest, PinsReturnScratchWhenAssignedMaskedCallReturnAcrossCalls) {
   std::string textproto = R"pb(
     entries { name: "func_80001000" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
@@ -3322,58 +3256,6 @@ TEST(AstConverterTest, PinsReturnScratchWhenAssignedMaskedCallReturnAcrossCalls)
   std::string code = func.ToString();
 
   EXPECT_THAT(code, HasSubstr("register s32 v0 asm(\"$2\");"));
-}
-
-TEST(AstConverterTest, CapsCallerSavedTempPinsUnderHighRegisterPressure) {
-  std::vector<uint32_t> words = {
-      0x24880001,  // 00: addiu $t0, $a0, 1
-      0x24890002,  // 04: addiu $t1, $a0, 2
-      0x248A0003,  // 08: addiu $t2, $a0, 3
-      0x248B0004,  // 0C: addiu $t3, $a0, 4
-      0x248C0005,  // 10: addiu $t4, $a0, 5
-      0x248D0006,  // 14: addiu $t5, $a0, 6
-      0x248E0007,  // 18: addiu $t6, $a0, 7
-      0x248F0008,  // 1C: addiu $t7, $a0, 8
-      0x24980009,  // 20: addiu $t8, $a0, 9
-      0x2499000A,  // 24: addiu $t9, $a0, 10
-      0xACA80000,  // 28: sw    $t0, 0($a1)
-      0xACA90004,  // 2C: sw    $t1, 4($a1)
-      0xACAA0008,  // 30: sw    $t2, 8($a1)
-      0xACAB000C,  // 34: sw    $t3, 12($a1)
-      0xACAC0010,  // 38: sw    $t4, 16($a1)
-      0xACAD0014,  // 3C: sw    $t5, 20($a1)
-      0xACAE0018,  // 40: sw    $t6, 24($a1)
-      0xACAF001C,  // 44: sw    $t7, 28($a1)
-      0xACB80020,  // 48: sw    $t8, 32($a1)
-      0xACB90024,  // 4C: sw    $t9, 36($a1)
-      0x01091021,  // 50: addu  $v0, $t0, $t1
-      0x004A1021,  // 54: addu  $v0, $v0, $t2
-      0x004B1021,  // 58: addu  $v0, $v0, $t3
-      0x004C1021,  // 5C: addu  $v0, $v0, $t4
-      0x004D1021,  // 60: addu  $v0, $v0, $t5
-      0x004E1021,  // 64: addu  $v0, $v0, $t6
-      0x004F1021,  // 68: addu  $v0, $v0, $t7
-      0x00581021,  // 6C: addu  $v0, $v0, $t8
-      0x03E00008,  // 70: jr    $ra
-      0x00591021,  // 74: addu  $v0, $v0, $t9
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto cfg = *ControlFlowGraph::Build(insts);
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  ASSERT_THAT(root_region, NotNull());
-
-  AstConverterOptions options;
-  options.function_name = "TestCapTempTPins";
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
-  std::string code = func.ToString();
-
-  EXPECT_THAT(code, HasSubstr("register s32 temp_t0 asm(\"$8\");"));
-  EXPECT_THAT(code, HasSubstr("register s32 temp_t7 asm(\"$15\");"));
-  EXPECT_THAT(code, HasSubstr("s32 temp_t8;"));
-  EXPECT_THAT(code, HasSubstr("s32 temp_t9;"));
 }
 
 TEST(AstConverterTest, PinsCallerSavedScratchUsedInWrappedCallConditionAndMaskedReturn) {
@@ -3462,48 +3344,6 @@ TEST(AstConverterTest, PinsScratchRegistersInLeafWithCalleeSavedRegs) {
   EXPECT_THAT(code, HasSubstr("register s32 arg1 asm(\"$5\");"));
 }
 
-TEST(AstConverterTest, PinsLocalArgRegistersWhenFirstParamModifiedAndUsedInCallArgExpr) {
-  std::string textproto = R"pb(
-    entries { name: "ProcessNode" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
-  )pb";
-  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
-  ASSERT_TRUE(index_or.ok());
-
-  std::vector<uint32_t> words = {
-      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
-      0xAFBF0014,  // 04: sw    $ra, 20($sp)
-      0xAFB00010,  // 08: sw    $s0, 16($sp)
-      0x00808021,  // 0C: addu  $s0, $a0, $zero
-      0x8E050000,  // 10: lw    $a1, 0($s0)
-      0x10A00005,  // 14: beq   $a1, $zero, 0x2C
-      0x00000000,  // 18: nop
-      0x8CA40004,  // 1C: lw    $a0, 4($a1)
-      0x0C000400,  // 20: jal   0x80001000 (ProcessNode)
-      0x24A50008,  // 24: addiu $a1, $a1, 8
-      0xAE020008,  // 28: sw    $v0, 8($s0)
-      0x8FBF0014,  // 2C: lw    $ra, 20($sp)
-      0x8FB00010,  // 30: lw    $s0, 16($sp)
-      0x03E00008,  // 34: jr    $ra
-      0x27BD0018,  // 38: addiu $sp, $sp, 24
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto cfg = *ControlFlowGraph::Build(insts);
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  ASSERT_THAT(root_region, NotNull());
-
-  AstConverterOptions options;
-  options.function_name = "TestLocalArgPinningWithModifiedParam";
-  absl::flat_hash_set<std::string> funcs_returning_v0 = {"ProcessNode"};
-  options.functions_returning_v0 = &funcs_returning_v0;
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, &*index_or, options);
-  std::string code = func.ToString();
-
-  EXPECT_THAT(code, HasSubstr("register s32 arg1 asm(\"$5\");"));
-}
-
 TEST(AstConverterTest, PreservesCalleeSavedFprCopyFromGprFloatParameterAcrossCalls) {
   std::string textproto = R"pb(
     entries { name: "InitMatrix" address: 0x80001000 type: SYMBOL_FUNC size: 32 }
@@ -3542,75 +3382,6 @@ TEST(AstConverterTest, PreservesCalleeSavedFprCopyFromGprFloatParameterAcrossCal
 
   EXPECT_THAT(code, HasSubstr("register f32 f20 asm(\"$f20\");"));
   EXPECT_THAT(code, HasSubstr("f20 = arg1;"));
-}
-
-TEST(AstConverterTest, PreservesSeparateGlobalIndexLoadBeforeGlobalArrayLookupInCondition) {
-  std::vector<uint32_t> words = {
-      0x00808021,  // 00: addu  $s0, $a0, $zero
-      0x3C038020,  // 04: lui   $v1, 0x8020
-      0x00701821,  // 08: addu  $v1, $v1, $s0
-      0x9463C1B0,  // 0C: lhu   $v1, -15952($v1)
-      0x00031080,  // 10: sll   $v0, $v1, 2
-      0x00431021,  // 14: addu  $v0, $v0, $v1
-      0x000210C0,  // 18: sll   $v0, $v0, 3
-      0x3C038016,  // 1C: lui   $v1, 0x8016
-      0x00621821,  // 20: addu  $v1, $v1, $v0
-      0x90638512,  // 24: lbu   $v1, -31470($v1)
-      0x240200FF,  // 28: addiu $v0, $zero, 255
-      0x10620002,  // 2C: beq   $v1, $v0, 0x38
-      0x00000000,  // 30: nop
-      0xAE040000,  // 34: sw    $a0, 0($s0)
-      0x03E00008,  // 38: jr    $ra
-      0x00000000,  // 3C: nop
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto cfg = *ControlFlowGraph::Build(insts);
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  ASSERT_THAT(root_region, NotNull());
-
-  AstConverterOptions options;
-  options.function_name = "TestSeparateGlobalIndexLoad";
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
-  std::string code = func.ToString();
-
-  EXPECT_THAT(code, HasSubstr("v0 = (*(u16*)((u8*)0x801FC1B0 + arg0) * 40);"));
-  EXPECT_THAT(code, HasSubstr("if ((*(u8*)((u8*)0x80158512 + v0) != 255))"));
-}
-
-TEST(AstConverterTest, FramePointerFunctionCoalescesHomedParamsAndEmitsStructOffsetAccess) {
-  std::vector<uint32_t> words = {
-      0x27BDFFF8,  // 00: addiu $sp, $sp, -8
-      0xAFBE0004,  // 04: sw    $fp, 4($sp)
-      0x03A0F021,  // 08: addu  $fp, $sp, $zero
-      0xAFC40008,  // 0C: sw    $a0, 8($fp)
-      0xAFC5000C,  // 10: sw    $a1, 12($fp)
-      0x8FC20008,  // 14: lw    $v0, 8($fp)
-      0x8FC3000C,  // 18: lw    $v1, 12($fp)
-      0xAC430004,  // 1C: sw    $v1, 4($v0)
-      0x03C0E821,  // 20: addu  $sp, $fp, $zero
-      0x8FBE0004,  // 24: lw    $fp, 4($sp)
-      0x03E00008,  // 28: jr    $ra
-      0x27BD0008,  // 2C: addiu $sp, $sp, 8
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto cfg = *ControlFlowGraph::Build(insts);
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  ASSERT_THAT(root_region, NotNull());
-
-  AstConverterOptions options;
-  options.function_name = "TestFramePointerStructOffset";
-  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
-  std::string code = func.ToString();
-
-  EXPECT_THAT(code, HasSubstr("((struct { u8 _p[4]; s32 _v; }*)arg0)->_v = arg1;"));
-  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_8")));
-  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_12")));
 }
 
 TEST(AstConverterTest, ZeroFrameFunctionDoesNotPinCalleeSavedRegisters) {
@@ -3812,6 +3583,54 @@ TEST(AstConverterTest, FoldsUnsignedReciprocalDivisionWhenNumeratorClobberedBefo
 
   EXPECT_THAT(code, HasSubstr("/ 10"));
   EXPECT_THAT(code, Not(HasSubstr("0xCCCCCCCD")));
+}
+
+TEST(AstConverterTest, LoopBreakTargetingEpilogueThatModifiesV0EmitsBreak) {
+  // Loop where an early exit jumps to the epilogue block (0x1C), and the epilogue
+  // block sets $v0 = $s0 before returning (rather than returning the loop's $v0):
+  //   00: addiu $sp, $sp, -24
+  //   04: sw    $s0, 16($sp)
+  //   08: move  $s0, $a1
+  // .Lloop:
+  //   0C: addiu $a0, $a0, -1
+  //   10: beqz  $a0, .Lexit (0x20)
+  //   14: addiu $v0, $zero, 99
+  //   18: bnez  $a0, .Lloop (0x0C)
+  //   1C: nop
+  // .Lexit:
+  //   20: move  $v0, $s0
+  //   24: lw    $s0, 16($sp)
+  //   28: jr    $ra
+  //   2C: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFB00010,  // 04: sw    $s0, 16($sp)
+      0x00A08021,  // 08: addu  $s0, $a1, $zero
+      0x2484FFFF,  // 0C: addiu $a0, $a0, -1
+      0x10800003,  // 10: beqz  $a0, +3 (to 0x20)
+      0x24020063,  // 14: addiu $v0, $zero, 99
+      0x1480FFFC,  // 18: bnez  $a0, -4 (to 0x0C)
+      0x00000000,  // 1C: nop
+      0x02001021,  // 20: addu  $v0, $s0, $zero
+      0x8FB00010,  // 24: lw    $s0, 16($sp)
+      0x03E00008,  // 28: jr    $ra
+      0x27BD0018,  // 2C: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestLoopBreakToNonTrivialEpilogue";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("break;"));
+  EXPECT_THAT(code, Not(HasSubstr("return 99;")));
 }
 
 }  // namespace

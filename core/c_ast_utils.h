@@ -51,6 +51,14 @@ int CountIdentifierOccurrencesInStatement(const CStatement& statement, std::stri
 bool ExpressionUsesVariable(const CExpression& expr, std::string_view target_var);
 bool StatementReferencesVariable(const CStatement& stmt, std::string_view target_var);
 
+// Returns true if `expr` or `stmt` takes the address of `target_var` (e.g., `&x`, `*(f32*)&x`).
+bool ExpressionTakesAddressOf(const CExpression& expr, std::string_view target_var);
+bool StatementTakesAddressOf(const CStatement& stmt, std::string_view target_var);
+
+// Returns true if `expr` or `stmt` assigns to or increments/decrements `target_var`.
+bool ExpressionModifiesVariable(const CExpression& expr, std::string_view target_var);
+bool StatementModifiesVariable(const CStatement& stmt, std::string_view target_var);
+
 // Collects all variable identifiers referenced in `expr` or `stmt` in encounter order.
 void CollectVariablesInExpression(const CExpression& expr, std::vector<std::string>* vars,
                                   absl::flat_hash_set<std::string>* seen);

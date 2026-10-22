@@ -350,6 +350,19 @@ std::vector<std::string> FindZeroValuedVariables(const CompoundStatement* root_b
   if (root_body == nullptr) return zero_vars;
   for (const auto& s : root_body->Statements()) {
     if (s.get() == before_statement) break;
+    if (s->Kind() == CStatementKind::kLabelStatement ||
+        s->Kind() == CStatementKind::kWhileStatement ||
+        s->Kind() == CStatementKind::kDoWhileStatement ||
+        s->Kind() == CStatementKind::kForStatement) {
+      zero_vars.clear();
+    } else {
+      zero_vars.erase(std::remove_if(zero_vars.begin(), zero_vars.end(),
+                                     [&](const std::string& v) {
+                                       return StatementModifiesVariable(*s, v) ||
+                                              StatementTakesAddressOf(*s, v);
+                                     }),
+                      zero_vars.end());
+    }
     if (s->Kind() == CStatementKind::kVariableDeclarationStatement) {
       const auto& decl = static_cast<const VariableDeclarationStatement&>(*s);
       if (decl.Initializer() != nullptr &&

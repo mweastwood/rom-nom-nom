@@ -52,10 +52,12 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
   // Fallback if no code segments found in config
   if (regions.empty()) {
     uint32_t entrypoint = ReadBigEndian32(rom_bytes.data() + 8);
-    size_t code_start = 0x1050;
-    size_t code_end = rom_bytes.size();
-    uint32_t base_vram = entrypoint != 0 ? (entrypoint + 0x50) : 0x80025C50;
-    regions.push_back({code_start, code_end, base_vram});
+    if (entrypoint != 0) {
+      size_t code_start = 0x1050;
+      size_t code_end = rom_bytes.size();
+      uint32_t base_vram = entrypoint + 0x50;
+      regions.push_back({code_start, code_end, base_vram});
+    }
   }
 
   DisassemblerOptions disasm_opts;

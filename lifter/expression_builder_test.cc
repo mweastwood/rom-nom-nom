@@ -2685,25 +2685,6 @@ TEST(ExpressionBuilderTest, InPlaceEntryArg1DetectedWhenArg0DefinedAndArg2SavedI
   EXPECT_EQ(stmts.back().ToString(), "func_80001000(arg0, arg1);\n");
 }
 
-TEST(ExpressionBuilderTest, LoadsBeforeStackFrameAllocationLiftWithConstQualification) {
-  // 00: lwc1  $f0, 8($a1)       # scheduled before addiu $sp, $sp, -40
-  // 04: lw    $a2, 0($a1)       # scheduled before addiu $sp, $sp, -40
-  // 08: addiu $sp, $sp, -40
-  // 0C: lw    $a3, 4($a1)       # scheduled after addiu $sp, $sp, -40
-  std::vector<uint32_t> words = {
-      0xC4A00008,  // lwc1  $f0, 8($a1)
-      0x8CA60000,  // lw    $a2, 0($a1)
-      0x27BDFFD8,  // addiu $sp, $sp, -40
-      0x8CA70004,  // lw    $a3, 4($a1)
-  };
-  auto insts = *DecodeSequence(words, 0x80000000);
-  auto stmts = ExpressionBuilder::LiftInstructions(insts);
-  ASSERT_EQ(stmts.size(), 3u);
-  EXPECT_EQ(stmts[0].ToString(), "f0 = *(const f32*)(arg1 + 8);\n");
-  EXPECT_EQ(stmts[1].ToString(), "arg2 = *(const s32*)arg1;\n");
-  EXPECT_EQ(stmts[2].ToString(), "arg3 = *(s32*)(arg1 + 4);\n");
-}
-
 TEST(ExpressionBuilderTest, TruncWSFollowedBySwc1LiftsAsIntegerCastStore) {
   // 00: trunc.w.s $f2, $f12
   // 04: swc1      $f2, 8($a0)

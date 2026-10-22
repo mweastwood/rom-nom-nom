@@ -1135,5 +1135,49 @@ TEST(ControlFlowStructurerTest, EmitsBreakForLoopExitInsideNestedConditional) {
   EXPECT_THAT(s, Not(HasSubstr("goto block_5")));
 }
 
+TEST(ControlFlowStructurerTest, InnerLoopExitToSuccessorOfLatchFollowEmitsGotoInsteadOfInlining) {
+  // Outer do-while loop (header 0x00) containing an inner do-while loop (header 0x04)
+  // whose early exit branches to 0x18 (the successor of the inner loop's latch fallthrough
+  // block 0x14):
+  //   00 (block 0, outer header): addiu $a2, $a2, 1
+  //   04 (block 1, inner header): beq   $a0, $a1, +5 (to 0x1C block 4)
+  //   08:                         addiu $v0, $zero, 32
+  //   0C (block 2, inner latch):  addiu $a0, $a0, 1
+  //   10:                         bne   $a0, $a3, -4 (to 0x04 block 1)
+  //   14:                         nop
+  //   18 (block 3, latch follow): addiu $v0, $zero, 32 (falls through to 0x1C block 4)
+  //   1C (block 4, outer body):   bne   $a2, $v0, -8 (to 0x00 block 0)
+  //   20:                         nop
+  //   24 (block 5, return):       jr    $ra
+  //   28:                         nop
+  std::vector<uint32_t> words = {
+      0x24C60001,  // 00: addiu $a2, $a2, 1
+      0x10850005,  // 04: beq   $a0, $a1, +5 (to 0x1C)
+      0x24020020,  // 08: addiu $v0, $zero, 32
+      0x24840001,  // 0C: addiu $a0, $a0, 1
+      0x1487FFFC,  // 10: bne   $a0, $a3, -4 (to 0x04)
+      0x00000000,  // 14: nop
+      0x24020020,  // 18: addiu $v0, $zero, 32
+      0x14C2FFF8,  // 1C: bne   $a2, $v0, -8 (to 0x00)
+      0x00000000,  // 20: nop
+      0x03E00008,  // 24: jr    $ra
+      0x00000000,  // 28: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("goto block_4"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

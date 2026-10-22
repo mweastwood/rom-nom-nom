@@ -72,5 +72,22 @@ TEST(CAstUtilsTest, CountsAndCollectsVariablesAndSubstitutesIdentifiers) {
   EXPECT_EQ(rewritten->ToString(0), "return (arg0 + (arg0 * v0));\n");
 }
 
+TEST(CAstUtilsTest, DetectsAddressOfAndVariableModifications) {
+  auto addr_expr = CExpression::Cast(CType::S32().MakePointer(),
+                                     CExpression::Unary("&", CExpression::Identifier("var_sp_16")));
+  EXPECT_TRUE(ExpressionTakesAddressOf(*addr_expr, "var_sp_16"));
+  EXPECT_FALSE(ExpressionTakesAddressOf(*addr_expr, "var_sp_20"));
+
+  auto deref_store = CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*", std::move(addr_expr)), CExpression::Identifier("arg0")));
+  EXPECT_TRUE(StatementTakesAddressOf(*deref_store, "var_sp_16"));
+  EXPECT_FALSE(StatementModifiesVariable(*deref_store, "var_sp_16"));
+
+  auto direct_assign = CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg0"), CExpression::Integer(42)));
+  EXPECT_TRUE(StatementModifiesVariable(*direct_assign, "arg0"));
+  EXPECT_FALSE(StatementModifiesVariable(*direct_assign, "arg1"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

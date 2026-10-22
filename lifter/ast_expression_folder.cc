@@ -2016,16 +2016,6 @@ struct FolderContext {
                           j + 1 == stmts.size() && !HasCallInStmt(*stmts[j])) {
                         break;
                       }
-                      if (var == "f0_d" && i > 0 &&
-                          (CountUses(*stmts[i - 1], var) > 0 ||
-                           (i > 1 && CountUses(*stmts[i - 2], var) > 0))) {
-                        std::string rhs_str = assign.Rhs().ToString();
-                        if (absl::StartsWith(rhs_str, "D_") ||
-                            absl::StartsWith(rhs_str, "*(f64*)&D_") ||
-                            absl::StartsWith(rhs_str, "*(f64 *)&D_")) {
-                          break;
-                        }
-                      }
                       if (HasAddressOf(assign.Rhs()) &&
                           UsedInAdditionOrSubtraction(cand_es.Expression(), var)) {
                         break;
@@ -2247,20 +2237,6 @@ struct FolderContext {
                       if (cand_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
                         const auto& cand_assign =
                             static_cast<const AssignmentExpression&>(cand_es.Expression());
-                        auto is_magic_high_mult = [](const CExpression& e) -> bool {
-                          if (e.Kind() != CExpressionKind::kBinaryExpression) return false;
-                          const auto& b = static_cast<const BinaryExpression&>(e);
-                          if (b.Op() != ">>" ||
-                              b.Rhs().Kind() != CExpressionKind::kIntegerLiteral ||
-                              static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value() != 32 ||
-                              b.Lhs().Kind() != CExpressionKind::kBinaryExpression) {
-                            return false;
-                          }
-                          const auto& mul = static_cast<const BinaryExpression&>(b.Lhs());
-                          if (mul.Op() != "*") return false;
-                          return mul.Lhs().Kind() == CExpressionKind::kCastExpression ||
-                                 mul.Lhs().Kind() == CExpressionKind::kUnaryExpression;
-                        };
                         auto is_stack_param_or_local_expr = [&](const CExpression& e) -> bool {
                           if (e.Kind() == CExpressionKind::kIdentifier) {
                             return IsStackParamOrLocalName(
@@ -2291,43 +2267,6 @@ struct FolderContext {
                                   "(f32)"))) {
                           break;
                         }
-                        if (j > i + 1 && is_fp_scratch && var != "f0" && var != "f0_d" &&
-                            cand_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
-                            cand_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
-                          std::string_view ca_lhs =
-                              static_cast<const IdentifierExpression&>(cand_assign.Lhs()).Name();
-                          if (ca_lhs != var && CountExprUses(cand_assign.Rhs(), ca_lhs) > 0) {
-                            bool crossed_magic_mult = false;
-                            for (size_t m = i + 1; m < j; ++m) {
-                              if (stmts[m]->Kind() == CStatementKind::kExpressionStatement) {
-                                const auto& mes =
-                                    static_cast<const ExpressionStatement&>(*stmts[m]);
-                                if (mes.Expression().Kind() ==
-                                    CExpressionKind::kAssignmentExpression) {
-                                  const auto& ma =
-                                      static_cast<const AssignmentExpression&>(mes.Expression());
-                                  if (is_magic_high_mult(ma.Rhs()) ||
-                                      (ma.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
-                                       static_cast<const BinaryExpression&>(ma.Rhs()).Op() ==
-                                           ">>" &&
-                                       static_cast<const BinaryExpression&>(ma.Rhs())
-                                               .Lhs()
-                                               .Kind() == CExpressionKind::kCastExpression &&
-                                       is_magic_high_mult(
-                                           static_cast<const CastExpression&>(
-                                               static_cast<const BinaryExpression&>(ma.Rhs()).Lhs())
-                                               .Operand()))) {
-                                    crossed_magic_mult = true;
-                                    break;
-                                  }
-                                }
-                              }
-                            }
-                            if (crossed_magic_mult) {
-                              break;
-                            }
-                          }
-                        }
                         if (is_fp_scratch &&
                             cand_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
                             is_stack_param_or_local_expr(assign.Rhs())) {
@@ -2347,70 +2286,7 @@ struct FolderContext {
                               !IsPureExpr(cand_assign.Rhs())) {
                             break;
                           }
-                          if (absl::StartsWith(var, "temp_t") &&
-                              assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
-                            break;
-                          }
-                          if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
-                            const auto& rhs_bin =
-                                static_cast<const BinaryExpression&>(assign.Rhs());
-                            if (rhs_bin.Op() == "&" &&
-                                rhs_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
-                              int64_t mask =
-                                  static_cast<const IntegerLiteralExpression&>(rhs_bin.Rhs())
-                                      .Value();
-                              std::string lhs_s = cand_assign.Lhs().ToString();
-                              if (mask >= 0x8000 && mask <= 0xFFFE &&
-                                  (absl::StartsWith(lhs_s, "*(u16*)") ||
-                                   absl::StartsWith(lhs_s, "*(u16 *)") ||
-                                   absl::StartsWith(lhs_s, "*(s16*)") ||
-                                   absl::StartsWith(lhs_s, "*(s16 *)")) &&
-                                  cand_assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
-                                  static_cast<const IdentifierExpression&>(cand_assign.Rhs())
-                                          .Name() == var) {
-                                break;
-                              }
-                            }
-                          }
                         }
-                      }
-                      auto is_global_byte_offset_expr = [](std::string_view s) {
-                        return absl::StrContains(s, "(u8*)&D_") ||
-                               absl::StrContains(s, "(u8 *)&D_") ||
-                               absl::StrContains(s, "(u8*)0x80") ||
-                               absl::StrContains(s, "(u8 *)0x80");
-                      };
-                      auto rhs_or_prev_has_global_byte_offset = [&]() {
-                        if (is_global_byte_offset_expr(assign.Rhs().ToString())) {
-                          return true;
-                        }
-                        if (i > 0 && stmts[i - 1]->Kind() == CStatementKind::kExpressionStatement) {
-                          const auto& prev_es =
-                              static_cast<const ExpressionStatement&>(*stmts[i - 1]);
-                          if (prev_es.Expression().Kind() ==
-                              CExpressionKind::kAssignmentExpression) {
-                            const auto& prev_a =
-                                static_cast<const AssignmentExpression&>(prev_es.Expression());
-                            if (prev_a.Op() == "=" &&
-                                prev_a.Lhs().Kind() == CExpressionKind::kIdentifier) {
-                              std::string_view prev_var =
-                                  static_cast<const IdentifierExpression&>(prev_a.Lhs()).Name();
-                              if (CountExprUses(assign.Rhs(), prev_var) > 0 &&
-                                  is_global_byte_offset_expr(prev_a.Rhs().ToString())) {
-                                return true;
-                              }
-                            }
-                          }
-                        }
-                        return false;
-                      };
-                      if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
-                          (static_cast<const BinaryExpression&>(assign.Rhs()).Op() == "*" ||
-                           static_cast<const BinaryExpression&>(assign.Rhs()).Op() == "<<") &&
-                          UsedInAdditionOrSubtraction(cand_es.Expression(), var) &&
-                          rhs_or_prev_has_global_byte_offset() &&
-                          is_global_byte_offset_expr(cand_es.Expression().ToString())) {
-                        break;
                       }
                       if (IsDeadAfterStmt(j, var, 1, stmts[i].get())) {
                         auto new_expr =
@@ -2488,13 +2364,6 @@ struct FolderContext {
                       !HasAddressOf(assign.Rhs()) && IsDeadAfterStmt(j, var, 1, stmts[i].get())) {
                     auto try_fold_into_branch_comp = [&](const CompoundStatement& branch_comp)
                         -> std::unique_ptr<CompoundStatement> {
-                      if (branch_comp.Statements().size() > 1 &&
-                          assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
-                          absl::StartsWith(
-                              static_cast<const IdentifierExpression&>(assign.Rhs()).Name(),
-                              "temp_s")) {
-                        return nullptr;
-                      }
                       for (size_t k = 0; k < branch_comp.Statements().size() && k < 4; ++k) {
                         const CStatement& bs = *branch_comp.Statements()[k];
                         int k_uses = CountUses(bs, var);
@@ -2612,43 +2481,6 @@ struct FolderContext {
                   active_ignored_use_stmt = nullptr;
                   if (uses_in_cond == 1 && then_live != VarLiveness::kReadBeforeWrite &&
                       else_live != VarLiveness::kReadBeforeWrite) {
-                    auto is_global_byte_offset_expr = [](std::string_view s) {
-                      return absl::StrContains(s, "(u8*)&D_") ||
-                             absl::StrContains(s, "(u8 *)&D_") ||
-                             absl::StrContains(s, "(u8*)0x80") ||
-                             absl::StrContains(s, "(u8 *)0x80");
-                    };
-                    auto rhs_or_prev_has_global_byte_offset = [&]() {
-                      if (is_global_byte_offset_expr(assign.Rhs().ToString())) {
-                        return true;
-                      }
-                      if (i > 0 && stmts[i - 1]->Kind() == CStatementKind::kExpressionStatement) {
-                        const auto& prev_es =
-                            static_cast<const ExpressionStatement&>(*stmts[i - 1]);
-                        if (prev_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-                          const auto& prev_a =
-                              static_cast<const AssignmentExpression&>(prev_es.Expression());
-                          if (prev_a.Op() == "=" &&
-                              prev_a.Lhs().Kind() == CExpressionKind::kIdentifier) {
-                            std::string_view prev_var =
-                                static_cast<const IdentifierExpression&>(prev_a.Lhs()).Name();
-                            if (CountExprUses(assign.Rhs(), prev_var) > 0 &&
-                                is_global_byte_offset_expr(prev_a.Rhs().ToString())) {
-                              return true;
-                            }
-                          }
-                        }
-                      }
-                      return false;
-                    };
-                    if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
-                        (static_cast<const BinaryExpression&>(assign.Rhs()).Op() == "*" ||
-                         static_cast<const BinaryExpression&>(assign.Rhs()).Op() == "<<") &&
-                        UsedInAdditionOrSubtraction(if_stmt.Condition(), var) &&
-                        rhs_or_prev_has_global_byte_offset() &&
-                        is_global_byte_offset_expr(if_stmt.Condition().ToString())) {
-                      break;
-                    }
                     bool killed_by_both = (then_live == VarLiveness::kKilledBeforeRead &&
                                            else_live == VarLiveness::kKilledBeforeRead);
                     if (killed_by_both || IsDeadAfterStmt(j, var, 1, stmts[i].get())) {

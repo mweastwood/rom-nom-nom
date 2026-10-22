@@ -483,11 +483,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
       }
     }
     if (!has_sp_local) {
-      std::string check_str = (*body)->ToString();
       bool any_local_addr_taken = false;
       for (const auto& v : local_vars_to_declare) {
-        if (absl::StrContains(check_str, absl::StrCat("&", v)) ||
-            absl::StrContains(check_str, absl::StrCat("&(", v))) {
+        if (StatementTakesAddressOf(**body, v)) {
           any_local_addr_taken = true;
           break;
         }
@@ -657,8 +655,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
 
   std::string body_str = (*body)->ToString();
   auto has_address_taken = [&](std::string_view target_var) -> bool {
-    return absl::StrContains(body_str, absl::StrCat("&", target_var)) ||
-           absl::StrContains(body_str, absl::StrCat("&(", target_var));
+    return StatementTakesAddressOf(**body, target_var);
   };
 
   absl::flat_hash_map<std::string, int> fp_base_counts;
@@ -680,13 +677,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
 
   size_t unpinned_gpr_locals_count = 0;
   int callee_saved_gpr_count = 0;
-  int total_temp_t_count = 0;
   for (const auto& v : local_vars_to_declare) {
     if (IsCalleeSavedGprVarName(v)) {
       ++callee_saved_gpr_count;
-    }
-    if (v.size() == 7 && absl::StartsWith(v, "temp_t") && v[6] >= '0' && v[6] <= '9') {
-      ++total_temp_t_count;
     }
     if (v != "sp" && v != "lo" && v != "hi" && v != "fcr31" && v != "temp_at" &&
         !absl::StartsWith(v, "var_sp_") && !is_fp_reg(v) && !absl::EndsWith(v, "_64") &&
@@ -695,21 +688,11 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
   const bool allow_caller_saved_gpr_pins = (unpinned_gpr_locals_count <= 18);
-  const int max_caller_gpr_pins =
-      (total_temp_t_count >= 10 && callee_saved_gpr_count >= 9)
-          ? 10
-          : ((is_leaf_func && total_temp_t_count >= 10 && callee_saved_gpr_count >= 4)
-                 ? 12
-                 : ((is_leaf_func && callee_saved_gpr_count >= 1 && callee_saved_gpr_count <= 7)
-                        ? 16
-                        : 14));
+  constexpr int kMaxCallerGprPins = 14;
   int pinned_caller_gpr_count = 0;
   bool any_param_modified = false;
   for (const auto& param : parameters) {
-    if (absl::StrContains(body_str, absl::StrCat(param.name, " = ")) &&
-        !absl::StrContains(body_str, absl::StrCat(param.name, " = 0;\n")) &&
-        !(!is_leaf_func && parameters.size() <= 2 &&
-          absl::StrContains(body_str, absl::StrCat("temp_s0 = ", param.name, ";\n")))) {
+    if (StatementModifiesVariable(**body, param.name)) {
       any_param_modified = true;
       break;
     }
@@ -739,34 +722,6 @@ absl::Status PrependSynthesizedLocalDeclarations(
     if (has_address_taken(var_name)) {
       return std::nullopt;
     }
-    if (frame_analysis.has_frame_pointer) {
-      if (var_name == "v0") return "$2";
-      if (var_name == "v1") return "$3";
-      if (var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
-          var_name[3] <= '3') {
-        return absl::StrFormat("$%d", 4 + (var_name[3] - '0'));
-      }
-      if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
-          var_name[6] <= '3') {
-        return absl::StrFormat("$%d", 4 + (var_name[6] - '0'));
-      }
-      if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&
-          var_name[6] <= '9') {
-        int t_idx = var_name[6] - '0';
-        int reg_num = (t_idx <= 7) ? (8 + t_idx) : (24 + (t_idx - 8));
-        return absl::StrFormat("$%d", reg_num);
-      }
-      if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
-          var_name[6] <= '7') {
-        return absl::StrFormat("$%d", 16 + (var_name[6] - '0'));
-      }
-      if (is_fp_reg(var_name)) {
-        std::string_view base =
-            absl::EndsWith(var_name, "_d") ? var_name.substr(0, var_name.size() - 2) : var_name;
-        return absl::StrCat("$", base);
-      }
-      return std::nullopt;
-    }
     if ((var_name == "temp_k0" || var_name == "temp_k1") &&
         !absl::StrContains(body_str, "*(s64*)")) {
       return (var_name == "temp_k0") ? "$26" : "$27";
@@ -775,13 +730,6 @@ absl::Status PrependSynthesizedLocalDeclarations(
         var_name[6] <= '7') {
       if (frame_analysis.frame_size == 0 ||
           (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
-        return std::nullopt;
-      }
-      if (var_name == "temp_s0" && !is_leaf_func &&
-          absl::StrContains(body_str, "temp_s0 = v0;\n") &&
-          absl::StrContains(body_str, "*(s32*)temp_s0 = 0;") &&
-          absl::StrContains(body_str, "temp_s1") && absl::StrContains(body_str, "temp_s2") &&
-          absl::StrContains(body_str, "temp_s3") && !absl::StrContains(body_str, "temp_s4")) {
         return std::nullopt;
       }
       int reg_num = 16 + (var_name[6] - '0');
@@ -813,8 +761,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
               ((is_leaf_func && return_type.ToString() != "f32" &&
                 return_type.ToString() != "f64" &&
                 (return_type.ToString() == "void"
-                     ? (has_shared_fp_base || callee_saved_fp_count >= 1 ||
-                        (fp_base_counts.size() >= 3 && absl::StrContains(body_str, "(f32)(u32)")))
+                     ? (has_shared_fp_base || callee_saved_fp_count >= 1)
                      : (fp_base_counts.size() >= 8))) ||
                (!is_leaf_func && (base == "f12" || base == "f14" ||
                                   (base == "f0" && return_type.ToString() != "f32" &&
@@ -828,7 +775,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
       }
       return std::nullopt;
     }
-    if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= max_caller_gpr_pins) {
+    if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= kMaxCallerGprPins) {
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;
@@ -880,8 +827,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
       caller_gpr_reg = "$3";
     } else if ((!is_leaf_func || is_leaf_with_s_regs ||
                 (unpinned_gpr_locals_count >= 4 && !is_float_return_leaf_with_v0_v1)) &&
-               (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
-                (!is_leaf_func && !absl::StrContains(body_str, "arg1, arg2, arg3"))) &&
+               (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1) &&
                var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
                var_name[3] <= '3') {
       int reg_num = 4 + (var_name[3] - '0');
@@ -892,9 +838,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&
-               var_name[6] <= '9' &&
-               !(total_temp_t_count >= 10 && (!is_leaf_func || callee_saved_gpr_count == 0) &&
-                 callee_saved_gpr_count < 9 && (var_name == "temp_t8" || var_name == "temp_t9"))) {
+               var_name[6] <= '9') {
       int t_idx = var_name[6] - '0';
       int reg_num = (t_idx <= 7) ? (8 + t_idx) : (24 + (t_idx - 8));
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
@@ -932,58 +876,15 @@ absl::Status PrependSynthesizedLocalDeclarations(
       new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name));
     } else {
       bool is_callee_gpr = IsCalleeSavedGprVarName(var_name);
-      auto init_expr = (!frame_analysis.has_frame_pointer && vars_needing_init.contains(var_name))
-                           ? CExpression::Integer(0)
-                           : nullptr;
+      auto init_expr = vars_needing_init.contains(var_name) ? CExpression::Integer(0) : nullptr;
       std::optional<std::string> reg_annot = (init_expr == nullptr || is_callee_gpr)
                                                  ? get_callee_saved_register_annotation(var_name)
                                                  : std::nullopt;
       if (reg_annot.has_value() || is_callee_gpr) {
         init_expr = nullptr;
       }
-      CType var_type = CType::S32();
-      if (frame_analysis.has_frame_pointer && absl::StartsWith(var_name, "var_sp_")) {
-        std::string assign_prefix = absl::StrCat(var_name, " = ");
-        size_t search_pos = 0;
-        int assign_count = 0;
-        bool all_u16 = true;
-        bool all_s16 = true;
-        bool all_u8 = true;
-        bool all_s8 = true;
-        while ((search_pos = body_str.find(assign_prefix, search_pos)) != std::string::npos) {
-          char prev = search_pos > 0 ? body_str[search_pos - 1] : ' ';
-          if (prev == ' ' || prev == '\n' || prev == '\t' || prev == ';' || prev == '{') {
-            ++assign_count;
-            absl::string_view rhs_full = body_str;
-            absl::string_view rhs = rhs_full.substr(search_pos + assign_prefix.size());
-            while (!rhs.empty() && (rhs.front() == ' ' || rhs.front() == '\t')) {
-              rhs.remove_prefix(1);
-            }
-            bool is_u16 = absl::StartsWith(rhs, "(u16)") || absl::StartsWith(rhs, "*(u16");
-            bool is_s16 = absl::StartsWith(rhs, "(s16)") || absl::StartsWith(rhs, "*(s16");
-            bool is_u8 = absl::StartsWith(rhs, "(u8)") || absl::StartsWith(rhs, "*(u8");
-            bool is_s8 = absl::StartsWith(rhs, "(s8)") || absl::StartsWith(rhs, "*(s8");
-            if (!is_u16) all_u16 = false;
-            if (!is_s16) all_s16 = false;
-            if (!is_u8) all_u8 = false;
-            if (!is_s8) all_s8 = false;
-          }
-          search_pos += assign_prefix.size();
-        }
-        if (assign_count > 0) {
-          if (all_u16) {
-            var_type = CType::U16();
-          } else if (all_s16) {
-            var_type = CType::S16();
-          } else if (all_u8) {
-            var_type = CType::U8();
-          } else if (all_s8) {
-            var_type = CType::S8();
-          }
-        }
-      }
       new_body->AddStatement(CStatement::VariableDeclaration(
-          var_type, var_name, std::move(init_expr), std::nullopt, std::move(reg_annot)));
+          CType::S32(), var_name, std::move(init_expr), std::nullopt, std::move(reg_annot)));
     }
   }
   for (const auto& stmt : (*body)->Statements()) {
