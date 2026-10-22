@@ -2099,7 +2099,9 @@ struct FolderContext {
                               rhs_un.Operand().Kind() == CExpressionKind::kCastExpression) {
                             const auto& rhs_cast =
                                 static_cast<const CastExpression&>(rhs_un.Operand());
-                            if (rhs_cast.TargetType().name == "f32" &&
+                            if ((rhs_cast.TargetType().name == "f32" ||
+                                 rhs_cast.TargetType().name == "const f32" ||
+                                 rhs_cast.TargetType().name == "volatile f32") &&
                                 rhs_cast.TargetType().pointer_depth == 1) {
                               is_float_arg_bitcast_assign = true;
                             }

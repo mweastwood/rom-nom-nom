@@ -3633,5 +3633,65 @@ TEST(AstConverterTest, LoopBreakTargetingEpilogueThatModifiesV0EmitsBreak) {
   EXPECT_THAT(code, Not(HasSubstr("return 99;")));
 }
 
+TEST(AstConverterTest, CoalescesPrologueV0CopyUsedInConditionalCallArguments) {
+  // Prologue copies $a1 to $v0 in the branch delay slot before an if/else where
+  // both branches overwrite $a1 with an outgoing call argument while reading
+  // float stack arguments from $v0:
+  //   00: addiu $sp, $sp, -32
+  //   04: sw    $ra, 24($sp)
+  //   08: blez  $a0, .Lelse (0x28)
+  //   0C: addu  $v0, $a1, $zero
+  //   10: lwc1  $f0, 0($v0)
+  //   14: addiu $a1, $zero, 1
+  //   18: jal   0x80001000
+  //   1C: swc1  $f0, 16($sp)
+  //   20: j     .Lend (0x38)
+  //   24: nop
+  // .Lelse:
+  //   28: lwc1  $f2, 4($v0)
+  //   2C: addiu $a1, $zero, 2
+  //   30: jal   0x80002000
+  //   34: swc1  $f2, 16($sp)
+  // .Lend:
+  //   38: lw    $ra, 24($sp)
+  //   3C: jr    $ra
+  //   40: addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF0018,  // 04: sw    $ra, 24($sp)
+      0x18800006,  // 08: blez  $a0, +6 (to 0x28)
+      0x00A01021,  // 0C: addu  $v0, $a1, $zero
+      0xC4400000,  // 10: lwc1  $f0, 0($v0)
+      0x24050001,  // 14: addiu $a1, $zero, 1
+      0x0C000400,  // 18: jal   0x80001000
+      0xE7A00010,  // 1C: swc1  $f0, 16($sp)
+      0x0800000E,  // 20: j     0x80000038
+      0x00000000,  // 24: nop
+      0xC4420004,  // 28: lwc1  $f2, 4($v0)
+      0x24050002,  // 2C: addiu $a1, $zero, 2
+      0x0C000800,  // 30: jal   0x80002000
+      0xE7A20010,  // 34: swc1  $f2, 16($sp)
+      0x8FBF0018,  // 38: lw    $ra, 24($sp)
+      0x03E00008,  // 3C: jr    $ra
+      0x27BD0020,  // 40: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestPrologueV0CopyCoalesced";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("v0 = arg1;")));
+  EXPECT_THAT(code, HasSubstr("*(f32*)arg1"));
+  EXPECT_THAT(code, HasSubstr("*(f32*)(arg1 + 4)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -1039,7 +1039,21 @@ std::unique_ptr<CExpression> SubstituteIdentifier(const CExpression& expr, std::
   if (expr.Kind() == CExpressionKind::kCallExpression) {
     const auto& call = static_cast<const CallExpression&>(expr);
     std::vector<std::unique_ptr<CExpression>> new_args;
-    for (const auto& arg : call.Arguments()) {
+    new_args.reserve(call.Arguments().size());
+    for (size_t ai = 0; ai < call.Arguments().size(); ++ai) {
+      const auto& arg = call.Arguments()[ai];
+      if (ai >= 1 && arg != nullptr && arg->Kind() == CExpressionKind::kUnaryExpression &&
+          target.size() >= 2 && target[0] == 'f' &&
+          std::isdigit(static_cast<unsigned char>(target[1])) &&
+          replacement.Kind() != CExpressionKind::kFloatLiteral) {
+        const auto& un = static_cast<const UnaryExpression&>(*arg);
+        if ((un.Op() == "*(s32*)&" || un.Op() == "*(s32 *)&") &&
+            un.Operand().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(un.Operand()).Name() == target) {
+          new_args.push_back(CExpression::Unary(un.Op(), replacement.Clone(), un.IsPrefix()));
+          continue;
+        }
+      }
       new_args.push_back(SubstituteIdentifier(*arg, target, replacement));
     }
     return CExpression::Call(SubstituteIdentifier(call.Callee(), target, replacement),

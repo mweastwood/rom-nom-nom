@@ -1625,6 +1625,8 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
             if (const_addr >= 0xA0000000 && const_addr <= 0xBFFFFFFF) {
               effective_load_type = "volatile " + std::string(load_type);
             }
+          } else if (sp_alloc_idx.has_value() && i < *sp_alloc_idx) {
+            effective_load_type = "const " + std::string(load_type);
           }
           statement.expression = LiftedExpression::Load(
               effective_load_type, MakeRegOffsetExpr(*inst.rs, inst.immediate));

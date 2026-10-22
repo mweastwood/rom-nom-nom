@@ -529,11 +529,117 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
               is_homed_param_slot = true;
             }
           }
-          if (param_names.contains(rhs) && (is_s_reg || is_f_reg || is_homed_param_slot) &&
+          bool is_single_assign_prologue_v_copy =
+              (i < 3 && (lhs == "v0" || lhs == "v1") &&
+               (rhs == "arg1" || rhs == "arg2" || rhs == "arg3") &&
+               i + 1 < comp->Statements().size() &&
+               (comp->Statements()[i + 1]->Kind() == CStatementKind::kIfStatement ||
+                (i + 2 < comp->Statements().size() &&
+                 comp->Statements()[i + 2]->Kind() == CStatementKind::kIfStatement)));
+          if (param_names.contains(rhs) &&
+              (is_s_reg || is_f_reg || is_homed_param_slot || is_single_assign_prologue_v_copy) &&
               !(float_param_names.contains(rhs) &&
-                (is_s_reg || is_homed_param_slot || is_callee_saved_f_reg))) {
+                (is_s_reg || is_homed_param_slot || is_single_assign_prologue_v_copy ||
+                 is_callee_saved_f_reg))) {
             std::string body_text = comp->ToString();
             bool lhs_addr_taken = StatementTakesAddressOf(*comp, lhs);
+            bool v_copy_ok = true;
+            if (is_single_assign_prologue_v_copy) {
+              const CStatement& branch_s =
+                  (comp->Statements()[i + 1]->Kind() == CStatementKind::kIfStatement)
+                      ? *comp->Statements()[i + 1]
+                      : *comp->Statements()[i + 2];
+              std::function<bool(const CExpression&)> expr_uses_in_call_arg =
+                  [&](const CExpression& e) -> bool {
+                if (e.Kind() == CExpressionKind::kCallExpression) {
+                  const auto& call = static_cast<const CallExpression&>(e);
+                  if (!IsInlineAsmIntrinsicCall(call)) {
+                    for (const auto& arg : call.Arguments()) {
+                      if (arg != nullptr && ExpressionUsesVariable(*arg, lhs)) {
+                        return true;
+                      }
+                    }
+                  }
+                  for (const auto& arg : call.Arguments()) {
+                    if (arg != nullptr && expr_uses_in_call_arg(*arg)) return true;
+                  }
+                  return false;
+                }
+                if (e.Kind() == CExpressionKind::kUnaryExpression) {
+                  return expr_uses_in_call_arg(static_cast<const UnaryExpression&>(e).Operand());
+                }
+                if (e.Kind() == CExpressionKind::kBinaryExpression) {
+                  const auto& b = static_cast<const BinaryExpression&>(e);
+                  return expr_uses_in_call_arg(b.Lhs()) || expr_uses_in_call_arg(b.Rhs());
+                }
+                if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& a = static_cast<const AssignmentExpression&>(e);
+                  return expr_uses_in_call_arg(a.Lhs()) || expr_uses_in_call_arg(a.Rhs());
+                }
+                if (e.Kind() == CExpressionKind::kCastExpression) {
+                  return expr_uses_in_call_arg(static_cast<const CastExpression&>(e).Operand());
+                }
+                if (e.Kind() == CExpressionKind::kTernaryExpression) {
+                  const auto& t = static_cast<const TernaryExpression&>(e);
+                  return expr_uses_in_call_arg(t.Condition()) ||
+                         expr_uses_in_call_arg(t.TrueExpression()) ||
+                         expr_uses_in_call_arg(t.FalseExpression());
+                }
+                return false;
+              };
+              std::function<bool(const CStatement&)> stmt_uses_in_call_arg =
+                  [&](const CStatement& st) -> bool {
+                if (st.Kind() == CStatementKind::kExpressionStatement) {
+                  return expr_uses_in_call_arg(
+                      static_cast<const ExpressionStatement&>(st).Expression());
+                }
+                if (st.Kind() == CStatementKind::kCompoundStatement) {
+                  for (const auto& child : static_cast<const CompoundStatement&>(st).Statements()) {
+                    if (child != nullptr && stmt_uses_in_call_arg(*child)) return true;
+                  }
+                } else if (st.Kind() == CStatementKind::kIfStatement) {
+                  const auto& ifs = static_cast<const IfStatement&>(st);
+                  if (expr_uses_in_call_arg(ifs.Condition()) ||
+                      stmt_uses_in_call_arg(ifs.ThenBranch())) {
+                    return true;
+                  }
+                  if (ifs.ElseBranch() != nullptr && stmt_uses_in_call_arg(*ifs.ElseBranch())) {
+                    return true;
+                  }
+                }
+                return false;
+              };
+              std::function<bool(const CStatement&)> stmt_returns_lhs =
+                  [&](const CStatement& st) -> bool {
+                if (st.Kind() == CStatementKind::kReturnStatement) {
+                  const auto* rv = static_cast<const ReturnStatement&>(st).ReturnValue();
+                  return rv != nullptr && ExpressionUsesVariable(*rv, lhs);
+                }
+                if (st.Kind() == CStatementKind::kCompoundStatement) {
+                  for (const auto& child : static_cast<const CompoundStatement&>(st).Statements()) {
+                    if (child != nullptr && stmt_returns_lhs(*child)) return true;
+                  }
+                } else if (st.Kind() == CStatementKind::kIfStatement) {
+                  const auto& ifs = static_cast<const IfStatement&>(st);
+                  if (stmt_returns_lhs(ifs.ThenBranch())) return true;
+                  if (ifs.ElseBranch() != nullptr && stmt_returns_lhs(*ifs.ElseBranch())) {
+                    return true;
+                  }
+                } else if (st.Kind() == CStatementKind::kWhileStatement) {
+                  return stmt_returns_lhs(static_cast<const WhileStatement&>(st).Body());
+                } else if (st.Kind() == CStatementKind::kDoWhileStatement) {
+                  return stmt_returns_lhs(static_cast<const DoWhileStatement&>(st).Body());
+                } else if (st.Kind() == CStatementKind::kForStatement) {
+                  return stmt_returns_lhs(static_cast<const ForStatement&>(st).Body());
+                } else if (st.Kind() == CStatementKind::kSwitchStatement) {
+                  for (const auto& sc : static_cast<const SwitchStatement&>(st).Cases()) {
+                    if (sc.body != nullptr && stmt_returns_lhs(*sc.body)) return true;
+                  }
+                }
+                return false;
+              };
+              v_copy_ok = stmt_uses_in_call_arg(branch_s) && !stmt_returns_lhs(*comp);
+            }
             bool homed_param_coalesce_ok = false;
             if (is_homed_param_slot && !is_assigned(rhs) &&
                 !absl::StrContains(body_text, absl::StrCat("&", lhs, " +")) &&
@@ -548,7 +654,7 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
                 }
               }
             }
-            if (!is_assigned(rhs) &&
+            if (!is_assigned(rhs) && v_copy_ok &&
                 (is_homed_param_slot ? homed_param_coalesce_ok
                                      : (count_assignments(lhs) == 1 && !lhs_addr_taken)) &&
                 !absl::StrContains(body_text, absl::StrCat("(*)())", lhs))) {

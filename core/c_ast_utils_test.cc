@@ -89,5 +89,22 @@ TEST(CAstUtilsTest, DetectsAddressOfAndVariableModifications) {
   EXPECT_FALSE(StatementModifiesVariable(*direct_assign, "arg1"));
 }
 
+TEST(CAstUtilsTest, PreservesFloatBitcastWrapperInCallArgumentsWhenSubstitutingF32Deref) {
+  auto f32_load = CExpression::Unary(
+      "*", CExpression::Cast(CType::F32().MakePointer(), CExpression::Identifier("arg1")));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  call_args.push_back(CExpression::Unary("*(s32*)&", CExpression::Identifier("f2")));
+  auto call = CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args));
+
+  auto substituted_call = SubstituteIdentifier(*call, "f2", *f32_load);
+  EXPECT_EQ(substituted_call->ToString(), "func_80001000(arg0, *(s32*)&*(f32*)arg1)");
+
+  // Outside a call argument, *(s32*)&f2 collapses directly to *(s32*)arg1.
+  auto non_call = CExpression::Unary("*(s32*)&", CExpression::Identifier("f2"));
+  auto substituted_non_call = SubstituteIdentifier(*non_call, "f2", *f32_load);
+  EXPECT_EQ(substituted_non_call->ToString(), "*(s32*)arg1");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
