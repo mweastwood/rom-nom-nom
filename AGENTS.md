@@ -32,6 +32,9 @@ verification platform for Nintendo 64 software.
    - Structural integrity must be preserved: valid N64 header magic,
      entrypoint, and bit-exact downstream asset segments when code expansion
      shifts occur.
+   - The lifter itself must be completely general, such that if we added a new
+     ROM and ran it through the pipeline, it would immediately achieve 100%
+     equivalence.
 
 4. **Thorough Unit Testing**:
    - All changes should be accompanied with unit tests to verify that
