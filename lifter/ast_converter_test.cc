@@ -3816,5 +3816,39 @@ TEST(AstConverterTest, SplitsAndCoalescesMultiplePrologueSavedParametersReusedAs
   EXPECT_THAT(code, HasSubstr("*(s32*)(arg1 + 4)"));
 }
 
+TEST(AstConverterTest, CoalescesHomedFloatParameterStoreIntoIntegerBitcastRead) {
+  // Zero-frame leaf function homes $f12 to 0($sp) and loads it into $v0 as an
+  // integer to extract IEEE-754 exponent bits:
+  //   00: swc1  $f12, 0($sp)
+  //   04: lw    $v0, 0($sp)
+  //   08: sra   $v0, $v0, 22
+  //   0C: andi  $v0, $v0, 0x1FF
+  //   10: jr    $ra
+  //   14: nop
+  std::vector<uint32_t> words = {
+      0xE7AC0000,  // 00: swc1  $f12, 0($sp)
+      0x8FA20000,  // 04: lw    $v0, 0($sp)
+      0x00021583,  // 08: sra   $v0, $v0, 22
+      0x304201FF,  // 0C: andi  $v0, $v0, 0x1FF
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestHomedFloatBitcastRead";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_0")));
+  EXPECT_THAT(code, HasSubstr("*(s32*)&f12"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

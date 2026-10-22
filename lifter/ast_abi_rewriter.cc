@@ -349,10 +349,22 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
   if (comp == nullptr) return;
   absl::flat_hash_set<std::string> param_names;
   absl::flat_hash_set<std::string> float_param_names;
+  absl::flat_hash_map<std::string, std::string> f32_param_homing_slots;
+  uint32_t param_slot = 0;
   for (const auto& p : parameters) {
     param_names.insert(p.name);
-    if (p.type.ToString() == "f32" && absl::StartsWith(p.name, "arg")) {
-      float_param_names.insert(p.name);
+    std::string p_type = p.type.ToString();
+    if (p_type == "f64") {
+      if (param_slot % 2 != 0) ++param_slot;
+      param_slot += 2;
+    } else {
+      if (p_type == "f32") {
+        f32_param_homing_slots[p.name] = absl::StrCat("var_sp_", frame_size + param_slot * 4);
+        if (absl::StartsWith(p.name, "arg")) {
+          float_param_names.insert(p.name);
+        }
+      }
+      ++param_slot;
     }
   }
 
@@ -433,6 +445,7 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
   };
 
   absl::flat_hash_map<std::string, std::string> coalesced_aliases;
+  absl::flat_hash_map<std::string, std::unique_ptr<CExpression>> coalesced_expr_aliases;
   std::vector<size_t> stmts_to_erase;
 
   auto count_assignments = [&](std::string_view name) {
@@ -681,17 +694,61 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
               stmts_to_erase.push_back(i);
             }
           }
+        } else if (i < 6 && a.Op() == "=" && a.Rhs().Kind() == CExpressionKind::kIdentifier) {
+          auto extract_f32_store_slot_var = [](const CExpression& lhs_expr) -> std::string_view {
+            if (lhs_expr.Kind() != CExpressionKind::kUnaryExpression) return "";
+            const auto& un = static_cast<const UnaryExpression&>(lhs_expr);
+            if ((un.Op() == "*(f32*)&" || un.Op() == "*(f32 *)&") &&
+                un.Operand().Kind() == CExpressionKind::kIdentifier) {
+              return static_cast<const IdentifierExpression&>(un.Operand()).Name();
+            }
+            if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression) {
+              const auto& cast = static_cast<const CastExpression&>(un.Operand());
+              if (cast.TargetType().name == "f32" && cast.TargetType().pointer_depth == 1 &&
+                  cast.Operand().Kind() == CExpressionKind::kUnaryExpression) {
+                const auto& addr_un = static_cast<const UnaryExpression&>(cast.Operand());
+                if (addr_un.Op() == "&" &&
+                    addr_un.Operand().Kind() == CExpressionKind::kIdentifier) {
+                  return static_cast<const IdentifierExpression&>(addr_un.Operand()).Name();
+                }
+              }
+            }
+            return "";
+          };
+          std::string rhs = static_cast<const IdentifierExpression&>(a.Rhs()).Name();
+          std::string_view slot_var = extract_f32_store_slot_var(a.Lhs());
+          auto it = f32_param_homing_slots.find(rhs);
+          if (!slot_var.empty() && it != f32_param_homing_slots.end() && it->second == slot_var &&
+              !is_assigned(rhs) && count_assignments(slot_var) == 0) {
+            bool slot_only_homed_here = true;
+            for (size_t k = 0; k < comp->Statements().size(); ++k) {
+              if (k == i || comp->Statements()[k] == nullptr) continue;
+              if (StatementModifiesVariable(*comp->Statements()[k], slot_var) ||
+                  StatementTakesAddressOf(*comp->Statements()[k], slot_var)) {
+                slot_only_homed_here = false;
+                break;
+              }
+            }
+            if (slot_only_homed_here) {
+              coalesced_expr_aliases[std::string(slot_var)] =
+                  CExpression::Unary("*(s32*)&", CExpression::Identifier(rhs));
+              stmts_to_erase.push_back(i);
+            }
+          }
         }
       }
     }
   }
 
-  if (coalesced_aliases.empty()) return;
+  if (coalesced_aliases.empty() && coalesced_expr_aliases.empty()) return;
 
   auto apply_aliases_to_expr =
       [&](std::unique_ptr<CExpression> expr) -> std::unique_ptr<CExpression> {
     for (const auto& [from, to] : coalesced_aliases) {
       expr = SubstituteIdentifier(*expr, from, *CExpression::Identifier(to));
+    }
+    for (const auto& [from, to_expr] : coalesced_expr_aliases) {
+      expr = SubstituteIdentifier(*expr, from, *to_expr);
     }
     return expr;
   };
