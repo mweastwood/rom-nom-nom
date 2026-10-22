@@ -1102,5 +1102,38 @@ TEST(ControlFlowStructurerTest, DetectsDecisionTreeSwitchInEntryBlockWithPrologu
   EXPECT_THAT(s, HasSubstr("case 3:"));
 }
 
+TEST(ControlFlowStructurerTest, EmitsBreakForLoopExitInsideNestedConditional) {
+  // Loop header (block 0) -> if/else (block 1) where one branch (block 2) exits
+  // the loop to block 5 (loop_follow) while the other branch (block 3) merges at
+  // the loop latch (block 4) which branches back to block 0.
+  std::vector<uint32_t> words = {
+      0x24840001,  // 00 (block 0): addiu $a0, $a0, 1
+      0x10850003,  // 04 (block 1): beq   $a0, $a1, +3 (to 0x14 block 3)
+      0x00000000,  // 08:           nop
+      0x10860004,  // 0C (block 2): beq   $a0, $a2, +4 (to 0x20 block 5 exit)
+      0x00000000,  // 10:           nop
+      0x24840002,  // 14 (block 3): addiu $a0, $a0, 2
+      0x1480FFF9,  // 18 (block 4): bne   $a0, $zero, -7 (to 0x00 block 0)
+      0x00000000,  // 1C:           nop
+      0x03E00008,  // 20 (block 5): jr    $ra
+      0x00801021,  // 24:           move  $v0, $a0
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("break"));
+  EXPECT_THAT(s, Not(HasSubstr("goto block_5")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

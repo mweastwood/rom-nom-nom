@@ -762,18 +762,22 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
           static_cast<const BinaryExpression*>(rhs_expr)->Op() == ">>" &&
           is_int_literal(static_cast<const BinaryExpression*>(rhs_expr)->Rhs(), &sh_val) &&
           sh_val == 31) {
-        sign_bit_map[lhs_var] = static_cast<const BinaryExpression*>(rhs_expr)->Lhs().ToString();
+        std::string sh_lhs = static_cast<const BinaryExpression*>(rhs_expr)->Lhs().ToString();
+        auto eq_it = sign_equiv_map.find(sh_lhs);
+        sign_bit_map[lhs_var] = (eq_it != sign_equiv_map.end()) ? eq_it->second : sh_lhs;
       } else {
         sign_bit_map.erase(lhs_var);
       }
       absl::erase_if(sign_equiv_map,
                      [&](const auto& kv) { return kv.first == lhs_var || kv.second == lhs_var; });
-      if (rhs_expr->Kind() == CExpressionKind::kBinaryExpression &&
-          static_cast<const BinaryExpression*>(rhs_expr)->Op() == ">>" &&
-          is_int_literal(static_cast<const BinaryExpression*>(rhs_expr)->Rhs(), &sh_val) &&
-          (sh_val == 16 || sh_val == 24) &&
-          static_cast<const BinaryExpression*>(rhs_expr)->Lhs().Kind() ==
-              CExpressionKind::kIdentifier) {
+      if (rhs_expr->Kind() == CExpressionKind::kIdentifier) {
+        sign_equiv_map[lhs_var] = static_cast<const IdentifierExpression*>(rhs_expr)->Name();
+      } else if (rhs_expr->Kind() == CExpressionKind::kBinaryExpression &&
+                 static_cast<const BinaryExpression*>(rhs_expr)->Op() == ">>" &&
+                 is_int_literal(static_cast<const BinaryExpression*>(rhs_expr)->Rhs(), &sh_val) &&
+                 (sh_val == 16 || sh_val == 24) &&
+                 static_cast<const BinaryExpression*>(rhs_expr)->Lhs().Kind() ==
+                     CExpressionKind::kIdentifier) {
         sign_equiv_map[lhs_var] = static_cast<const BinaryExpression*>(rhs_expr)->Lhs().ToString();
       }
     }
@@ -890,10 +894,31 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                       break;
                     }
                   }
-                  if (x_clobbered_between && (q_var.empty() || q_var != lhs_var)) {
+                  bool can_place_at_i = !q_var.empty() && q_var == lhs_var;
+                  if (x_clobbered_between && !can_place_at_i && !q_var.empty()) {
+                    bool q_or_lhs_used_between = false;
+                    for (size_t p = i + 1; p < j; ++p) {
+                      if (count_var_uses_in_stmt(*stmts[p], q_var) > 0 ||
+                          count_var_uses_in_stmt(*stmts[p], lhs_var) > 0) {
+                        q_or_lhs_used_between = true;
+                        break;
+                      }
+                    }
+                    bool lhs_used_after_j = false;
+                    for (size_t p = j + 1; p < stmts.size(); ++p) {
+                      if (count_var_uses_in_stmt(*stmts[p], lhs_var) > 0) {
+                        lhs_used_after_j = true;
+                        break;
+                      }
+                    }
+                    if (!q_or_lhs_used_between && !lhs_used_after_j) {
+                      can_place_at_i = true;
+                    }
+                  }
+                  if (x_clobbered_between && !can_place_at_i) {
                     break;
                   }
-                  if (x_clobbered_between && !q_var.empty() && q_var == lhs_var) {
+                  if (x_clobbered_between && can_place_at_i) {
                     stmts[i] = CStatement::Expression(
                         CExpression::Assignment("=", assign_j.Lhs().Clone(), std::move(new_rhs)));
                     stmts.erase(stmts.begin() + j);

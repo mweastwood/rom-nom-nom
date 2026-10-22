@@ -3772,5 +3772,47 @@ TEST(AstConverterTest, FoldsOutgoingStackArgInsideDoWhileLoopWithGotoExit) {
   EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_16")));
 }
 
+TEST(AstConverterTest, FoldsUnsignedReciprocalDivisionWhenNumeratorClobberedBeforeShift) {
+  // Unsigned division of $a0 by 10 (`magic = 0xCCCCCCCD`, shift = 3) where $a0 is
+  // overwritten before the final `srl $v0, $t0, 3` into a distinct register:
+  //   lui   $at, 0xCCCC
+  //   ori   $at, $at, 0xCCCD
+  //   multu $a0, $at
+  //   mfhi  $t0
+  //   addiu $a0, $a1, 1       <-- clobbers numerator $a0 before `srl`
+  //   srl   $v0, $t0, 3
+  //   sw    $v0, 0($a1)
+  //   addu  $v0, $v0, $a0
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x3C01CCCC,  // 00: lui   $at, 0xCCCC
+      0x3421CCCD,  // 04: ori   $at, $at, 0xCCCD
+      0x00810019,  // 08: multu $a0, $at
+      0x00004010,  // 0C: mfhi  $t0
+      0x24A40001,  // 10: addiu $a0, $a1, 1
+      0x000810C2,  // 14: srl   $v0, $t0, 3
+      0xACA20000,  // 18: sw    $v0, 0($a1)
+      0x00441021,  // 1C: addu  $v0, $v0, $a0
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestUnsignedDivClobberedNumerator";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("/ 10"));
+  EXPECT_THAT(code, Not(HasSubstr("0xCCCCCCCD")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

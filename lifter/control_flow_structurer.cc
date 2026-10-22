@@ -272,6 +272,9 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureLoop(
       loop_follow = cand;
     }
   }
+  if (loop_follow.has_value()) {
+    loop_follow_map_[loop] = *loop_follow;
+  }
 
   if (loop->type == LoopType::kWhile) {
     loop_region->condition_block_id = loop->header;
@@ -393,10 +396,19 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       return CreateContinue(entry);
     }
     if (current_loop->IsExitBlock(entry)) {
-      if (follow.has_value() && entry == *follow) {
+      auto lf_it = loop_follow_map_.find(current_loop);
+      if ((follow.has_value() && entry == *follow) ||
+          (lf_it != loop_follow_map_.end() && entry == lf_it->second)) {
         return CreateBreak(entry);
       }
-      auto exit_body = StructureRegion(entry, follow, current_loop->parent);
+      if (current_loop->parent != nullptr && visited_.contains(entry) &&
+          entry == current_loop->parent->header) {
+        return CreateGoto(entry);
+      }
+      auto exit_body = StructureRegion(
+          entry,
+          (lf_it != loop_follow_map_.end()) ? std::optional<uint32_t>(lf_it->second) : follow,
+          current_loop->parent);
       if (exit_body) {
         auto seq = CreateSequence();
         seq->children.push_back(std::move(exit_body));
@@ -755,12 +767,19 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
 
     // Case 3-break: If inside a loop and one successor is a loop exit before the latch
     if (current_loop != nullptr && !current_loop->IsLatch(entry)) {
+      auto lf_it = loop_follow_map_.find(current_loop);
+      std::optional<uint32_t> loop_follow_target =
+          (lf_it != loop_follow_map_.end()) ? std::optional<uint32_t>(lf_it->second) : follow;
       if (current_loop->IsExitBlock(succ_taken) && !current_loop->IsExitBlock(succ_fallthrough)) {
         auto if_break = CreateIfThen(entry, /*invert=*/false);
-        if (follow.has_value() && succ_taken == *follow) {
+        if ((follow.has_value() && succ_taken == *follow) ||
+            (lf_it != loop_follow_map_.end() && succ_taken == lf_it->second)) {
           if_break->children.push_back(CreateBreak(succ_taken));
+        } else if (current_loop->parent != nullptr && visited_.contains(succ_taken) &&
+                   succ_taken == current_loop->parent->header) {
+          if_break->children.push_back(CreateGoto(succ_taken));
         } else {
-          auto exit_body = StructureRegion(succ_taken, follow, current_loop->parent);
+          auto exit_body = StructureRegion(succ_taken, loop_follow_target, current_loop->parent);
           if (exit_body) {
             auto seq = CreateSequence();
             seq->children.push_back(std::move(exit_body));
@@ -781,10 +800,15 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       }
       if (current_loop->IsExitBlock(succ_fallthrough) && !current_loop->IsExitBlock(succ_taken)) {
         auto if_break = CreateIfThen(entry, /*invert=*/true);
-        if (follow.has_value() && succ_fallthrough == *follow) {
+        if ((follow.has_value() && succ_fallthrough == *follow) ||
+            (lf_it != loop_follow_map_.end() && succ_fallthrough == lf_it->second)) {
           if_break->children.push_back(CreateBreak(succ_fallthrough));
+        } else if (current_loop->parent != nullptr && visited_.contains(succ_fallthrough) &&
+                   succ_fallthrough == current_loop->parent->header) {
+          if_break->children.push_back(CreateGoto(succ_fallthrough));
         } else {
-          auto exit_body = StructureRegion(succ_fallthrough, follow, current_loop->parent);
+          auto exit_body =
+              StructureRegion(succ_fallthrough, loop_follow_target, current_loop->parent);
           if (exit_body) {
             auto seq = CreateSequence();
             seq->children.push_back(std::move(exit_body));

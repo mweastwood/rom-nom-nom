@@ -111,6 +111,7 @@ class ControlFlowStructurer {
 
   absl::flat_hash_set<uint32_t> visited_;
   std::optional<uint32_t> current_switch_break_;
+  absl::flat_hash_map<const Loop*, uint32_t> loop_follow_map_;
 
   std::unique_ptr<StructuredRegion> StructureRegion(uint32_t entry, std::optional<uint32_t> follow,
                                                     const Loop* current_loop);
