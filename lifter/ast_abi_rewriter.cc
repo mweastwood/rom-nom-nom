@@ -654,9 +654,28 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
                 }
               }
             }
+            bool has_other_s_regs = false;
+            for (int s_idx = 1; s_idx <= 7; ++s_idx) {
+              if (StatementReferencesVariable(*comp, absl::StrCat("temp_s", s_idx))) {
+                has_other_s_regs = true;
+                break;
+              }
+            }
+            bool later_param_used = false;
+            for (size_t p_idx = 1; p_idx < parameters.size(); ++p_idx) {
+              if (StatementReferencesVariable(*comp, parameters[p_idx].name)) {
+                later_param_used = true;
+                break;
+              }
+            }
+            bool s_reg_mutated_param_coalesce_ok =
+                is_s_reg && i == 0 && !lhs_addr_taken && lhs == "temp_s0" && rhs == "arg0" &&
+                later_param_used && !has_other_s_regs && StatementHasCall(*comp) &&
+                CountIdentifierOccurrencesInStatement(*comp, rhs) == 1;
             if (!is_assigned(rhs) && v_copy_ok &&
                 (is_homed_param_slot ? homed_param_coalesce_ok
-                                     : (count_assignments(lhs) == 1 && !lhs_addr_taken)) &&
+                                     : ((count_assignments(lhs) == 1 && !lhs_addr_taken) ||
+                                        s_reg_mutated_param_coalesce_ok)) &&
                 !absl::StrContains(body_text, absl::StrCat("(*)())", lhs))) {
               coalesced_aliases[lhs] = rhs;
               stmts_to_erase.push_back(i);
@@ -2178,6 +2197,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
   };
   bool any_homed_split = false;
   bool any_s_split_in_single_param = false;
+  size_t matching_s_splits = 0;
   for (const auto& param : parameters) {
     if (param.name.size() != 4 || !absl::StartsWith(param.name, "arg") || param.name[3] < '0' ||
         param.name[3] > '3' || param.type.ToString() == "f32") {
@@ -2430,7 +2450,24 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
     }
     if (is_homed_copy) {
       any_homed_split = true;
-    } else if (has_goto && parameters.size() == 1 && IsCalleeSavedGprVarName(prologue_copy_lhs)) {
+    } else if (IsCalleeSavedGprVarName(prologue_copy_lhs)) {
+      if (has_goto && parameters.size() == 1) {
+        any_s_split_in_single_param = true;
+      }
+      if (prologue_copy_lhs == absl::StrCat("temp_s", param.name.substr(3))) {
+        ++matching_s_splits;
+      }
+    }
+  }
+  if (matching_s_splits == parameters.size()) {
+    bool has_higher_s_reg = false;
+    for (size_t s_idx = parameters.size(); s_idx <= 7; ++s_idx) {
+      if (StatementReferencesVariable(*body, absl::StrCat("temp_s", s_idx))) {
+        has_higher_s_reg = true;
+        break;
+      }
+    }
+    if (!has_higher_s_reg) {
       any_s_split_in_single_param = true;
     }
   }

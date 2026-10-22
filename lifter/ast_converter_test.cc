@@ -3693,5 +3693,128 @@ TEST(AstConverterTest, CoalescesPrologueV0CopyUsedInConditionalCallArguments) {
   EXPECT_THAT(code, HasSubstr("*(f32*)(arg1 + 4)"));
 }
 
+TEST(AstConverterTest, CoalescesMutatedFirstParameterWhenSecondParameterLivesAcrossCall) {
+  // Prologue saves $a0 -> $s0 and $a1 -> $s1, then loops advancing $s0 = *($s0)
+  // while passing $s1 to a call on each iteration:
+  //   00: addiu $sp, $sp, -32
+  //   04: sw    $s0, 16($sp)
+  //   08: addu  $s0, $a0, $zero
+  //   0C: sw    $s1, 20($sp)
+  //   10: addu  $s1, $a1, $zero
+  //   14: beq   $s0, $zero, .Lend (0x34)
+  //   18: sw    $ra, 24($sp)
+  // .Lloop (0x1C):
+  //   1C: lw    $a0, 4($s0)
+  //   20: jal   0x80001000
+  //   24: addu  $a1, $s1, $zero
+  //   28: lw    $s0, 0($s0)
+  //   2C: bne   $s0, $zero, .Lloop (0x1C)
+  //   30: nop
+  // .Lend (0x34):
+  //   34: lw    $ra, 24($sp)
+  //   38: lw    $s1, 20($sp)
+  //   3C: lw    $s0, 16($sp)
+  //   40: addiu $sp, $sp, 32
+  //   44: jr    $ra
+  //   48: nop
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFB00010,  // 04: sw    $s0, 16($sp)
+      0x00808021,  // 08: addu  $s0, $a0, $zero
+      0xAFB10014,  // 0C: sw    $s1, 20($sp)
+      0x00A08821,  // 10: addu  $s1, $a1, $zero
+      0x12000007,  // 14: beq   $s0, $zero, +7 (to 0x34)
+      0xAFBF0018,  // 18: sw    $ra, 24($sp)
+      0x8E040004,  // 1C: lw    $a0, 4($s0)
+      0x0C000400,  // 20: jal   0x80001000
+      0x02202821,  // 24: addu  $a1, $s1, $zero
+      0x8E100000,  // 28: lw    $s0, 0($s0)
+      0x1600FFFB,  // 2C: bne   $s0, $zero, -5 (to 0x1C)
+      0x00000000,  // 30: nop
+      0x8FBF0018,  // 34: lw    $ra, 24($sp)
+      0x8FB10014,  // 38: lw    $s1, 20($sp)
+      0x8FB00010,  // 3C: lw    $s0, 16($sp)
+      0x27BD0020,  // 40: addiu $sp, $sp, 32
+      0x03E00008,  // 44: jr    $ra
+      0x00000000,  // 48: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestMutatedParam0Coalesced";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("temp_s0")));
+  EXPECT_THAT(code, Not(HasSubstr("temp_s1")));
+  EXPECT_THAT(code, HasSubstr("arg0 = *(s32*)arg0;"));
+}
+
+TEST(AstConverterTest, SplitsAndCoalescesMultiplePrologueSavedParametersReusedAsScratch) {
+  // Prologue saves $a0 -> $s0 and $a1 -> $s1, calls a function using $s1, and
+  // then reuses $a0 and $a1 as scratch registers while reading from $s0 and $s1:
+  //   00: addiu $sp, $sp, -32
+  //   04: sw    $s0, 16($sp)
+  //   08: addu  $s0, $a0, $zero
+  //   0C: sw    $s1, 20($sp)
+  //   10: addu  $s1, $a1, $zero
+  //   14: addu  $a0, $s1, $zero
+  //   18: sw    $ra, 24($sp)
+  //   1C: jal   0x80001000
+  //   20: addiu $a1, $zero, 300
+  //   24: lw    $a0, 8($s0)
+  //   28: lw    $a1, 4($s1)
+  //   2C: addu  $v0, $a0, $a1
+  //   30: lw    $ra, 24($sp)
+  //   34: lw    $s1, 20($sp)
+  //   38: lw    $s0, 16($sp)
+  //   3C: addiu $sp, $sp, 32
+  //   40: jr    $ra
+  //   44: nop
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFB00010,  // 04: sw    $s0, 16($sp)
+      0x00808021,  // 08: addu  $s0, $a0, $zero
+      0xAFB10014,  // 0C: sw    $s1, 20($sp)
+      0x00A08821,  // 10: addu  $s1, $a1, $zero
+      0x02202021,  // 14: addu  $a0, $s1, $zero
+      0xAFBF0018,  // 18: sw    $ra, 24($sp)
+      0x0C000400,  // 1C: jal   0x80001000
+      0x2405012C,  // 20: addiu $a1, $zero, 300
+      0x8E040008,  // 24: lw    $a0, 8($s0)
+      0x8E250004,  // 28: lw    $a1, 4($s1)
+      0x00851021,  // 2C: addu  $v0, $a0, $a1
+      0x8FBF0018,  // 30: lw    $ra, 24($sp)
+      0x8FB10014,  // 34: lw    $s1, 20($sp)
+      0x8FB00010,  // 38: lw    $s0, 16($sp)
+      0x27BD0020,  // 3C: addiu $sp, $sp, 32
+      0x03E00008,  // 40: jr    $ra
+      0x00000000,  // 44: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestMultiParamSavedAndSplit";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("temp_s0")));
+  EXPECT_THAT(code, Not(HasSubstr("temp_s1")));
+  EXPECT_THAT(code, HasSubstr("*(s32*)(arg0 + 8)"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)(arg1 + 4)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
