@@ -5439,5 +5439,39 @@ f32 ExtractFloatWordsFromDoubleOnStack(f64 x) {
 )");
 }
 
+TEST_F(RoundTripTest, StoreUintAsFloatAndDouble) {
+  AssertRoundTripBitExact("StoreUintAsFloatAndDouble", R"(
+void StoreUintAsFloatAndDouble(u32 x, f32* out_f, f64* out_d) {
+    *out_f = (f32)x;
+    *out_d = (f64)x;
+}
+)");
+}
+
+TEST_F(RoundTripTest, TwoUintsToFloatAndDoubleRatio) {
+  AssertRoundTripBitExact("TwoUintsToFloatAndDoubleRatio", R"(
+f64 TwoUintsToFloatAndDoubleRatio(u32 a, u32 b) {
+    return (f64)a / (f64)(f32)b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, AddTwoUnsignedToDouble) {
+  AssertRoundTripBitExact("AddTwoUnsignedToDouble", R"(
+f64 AddTwoUnsignedToDouble(u32 a, u32 b) {
+    return (f64)a + (f64)b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ConvertTwoUnsignedToFloatAndStore) {
+  AssertRoundTripBitExact("ConvertTwoUnsignedToFloatAndStore", R"(
+void ConvertTwoUnsignedToFloatAndStore(u32 a, u32 b, f32* out) {
+    out[0] = (f32)a * 0.5f;
+    out[1] = (f32)b * 0.25f;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

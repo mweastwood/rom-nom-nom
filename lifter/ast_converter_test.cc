@@ -12,6 +12,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "lifter/ast_abi_rewriter.h"
+#include "lifter/ast_arithmetic_simplifier.h"
 #include "lifter/ast_memory_idiom_rewriter.h"
 #include "lifter/ast_parameter_coalescer.h"
 #include "lifter/ast_pass_pipeline.h"
@@ -2712,6 +2713,144 @@ TEST(AstConverterTest, FoldsReciprocalConstantDivisionsAndUnsignedToFloatDiamond
   EXPECT_THAT(code, HasSubstr("(f32)(u32)"));
   EXPECT_THAT(code, Not(HasSubstr("0x80808081")));
   EXPECT_THAT(code, Not(HasSubstr("f2_d")));
+}
+
+TEST(AstConverterTest, UnsignedFloatDiamondSupportsFoldedFloatLiteralCustomSymbolAndRawAddress) {
+  // 1. Folded FloatLiteral(4294967296.0) bias and (f32)f2_d on the LHS of a binary expression.
+  {
+    CompoundStatement block;
+    block.AddStatement(std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+        "=", std::make_unique<IdentifierExpression>("f2_d"),
+        std::make_unique<CastExpression>(CType::F64(),
+                                         std::make_unique<IdentifierExpression>("arg0")))));
+    auto then_b = std::make_unique<CompoundStatement>();
+    then_b->AddStatement(
+        std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+            "=", std::make_unique<IdentifierExpression>("f2_d"),
+            std::make_unique<BinaryExpression>(
+                "+", std::make_unique<IdentifierExpression>("f2_d"),
+                std::make_unique<FloatLiteralExpression>(4294967296.0, false)))));
+    block.AddStatement(std::make_unique<IfStatement>(
+        std::make_unique<BinaryExpression>("<", std::make_unique<IdentifierExpression>("arg0"),
+                                           std::make_unique<IntegerLiteralExpression>(0)),
+        std::move(then_b)));
+    block.AddStatement(std::make_unique<ReturnStatement>(std::make_unique<BinaryExpression>(
+        "*",
+        std::make_unique<CastExpression>(CType::F32(),
+                                         std::make_unique<IdentifierExpression>("f2_d")),
+        std::make_unique<IdentifierExpression>("arg1_f"))));
+
+    SimplifyReciprocalDivisionAndUnsignedFloatConversions(&block);
+    std::string code = block.ToString(0);
+    EXPECT_THAT(code, HasSubstr("return ((f32)(u32)arg0 * arg1_f);"));
+    EXPECT_THAT(code, Not(HasSubstr("if (")));
+    EXPECT_THAT(code, Not(HasSubstr("4294967296")));
+  }
+
+  // 2. Non-2^32 FloatLiteral(1.0) must NOT be folded as an unsigned float conversion diamond.
+  {
+    CompoundStatement block;
+    block.AddStatement(std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+        "=", std::make_unique<IdentifierExpression>("f2_d"),
+        std::make_unique<CastExpression>(CType::F64(),
+                                         std::make_unique<IdentifierExpression>("arg0")))));
+    auto then_b = std::make_unique<CompoundStatement>();
+    then_b->AddStatement(
+        std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+            "=", std::make_unique<IdentifierExpression>("f2_d"),
+            std::make_unique<BinaryExpression>(
+                "+", std::make_unique<IdentifierExpression>("f2_d"),
+                std::make_unique<FloatLiteralExpression>(1.0, false)))));
+    block.AddStatement(std::make_unique<IfStatement>(
+        std::make_unique<BinaryExpression>("<", std::make_unique<IdentifierExpression>("arg0"),
+                                           std::make_unique<IntegerLiteralExpression>(0)),
+        std::move(then_b)));
+    block.AddStatement(std::make_unique<ReturnStatement>(std::make_unique<CastExpression>(
+        CType::F32(), std::make_unique<IdentifierExpression>("f2_d"))));
+
+    SimplifyReciprocalDivisionAndUnsignedFloatConversions(&block);
+    std::string code = block.ToString(0);
+    EXPECT_THAT(code, HasSubstr("if ((arg0 < 0))"));
+    EXPECT_THAT(code, Not(HasSubstr("(u32)arg0")));
+  }
+
+  // 3. Custom named symbol *(const f64*)&kUintBias and standalone f64 unsigned conversion in store.
+  {
+    CompoundStatement block;
+    block.AddStatement(std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+        "=", std::make_unique<IdentifierExpression>("f2_d"),
+        std::make_unique<CastExpression>(CType::F64(),
+                                         std::make_unique<IdentifierExpression>("arg0")))));
+    auto then_b = std::make_unique<CompoundStatement>();
+    then_b->AddStatement(
+        std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+            "=", std::make_unique<IdentifierExpression>("f2_d"),
+            std::make_unique<BinaryExpression>(
+                "+",
+                std::make_unique<UnaryExpression>(
+                    "*", std::make_unique<CastExpression>(
+                             CType{"f64", true, 1},
+                             std::make_unique<UnaryExpression>(
+                                 "&", std::make_unique<IdentifierExpression>("kUintBias")))),
+                std::make_unique<IdentifierExpression>("f2_d")))));
+    block.AddStatement(std::make_unique<IfStatement>(
+        std::make_unique<BinaryExpression>("<", std::make_unique<IdentifierExpression>("arg0"),
+                                           std::make_unique<IntegerLiteralExpression>(0)),
+        std::move(then_b)));
+    block.AddStatement(std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+        "=",
+        std::make_unique<UnaryExpression>(
+            "*", std::make_unique<CastExpression>(CType::F64().MakePointer(),
+                                                  std::make_unique<IdentifierExpression>("out_d"))),
+        std::make_unique<IdentifierExpression>("f2_d"))));
+
+    SimplifyReciprocalDivisionAndUnsignedFloatConversions(&block);
+    std::string code = block.ToString(0);
+    EXPECT_THAT(code, HasSubstr("*(f64*)out_d = (f64)(u32)arg0;"));
+    EXPECT_THAT(code, Not(HasSubstr("if (")));
+  }
+
+  // 4. Shared 2^32 bias variable (f4_d) used across a block and nested conditional block.
+  {
+    CompoundStatement block;
+    block.AddStatement(std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+        "=", std::make_unique<IdentifierExpression>("f4_d"),
+        std::make_unique<UnaryExpression>(
+            "*", std::make_unique<CastExpression>(
+                     CType::F64().MakePointer(),
+                     std::make_unique<IntegerLiteralExpression>(0x8011DD50, true))))));
+    auto outer_then = std::make_unique<CompoundStatement>();
+    outer_then->AddStatement(
+        std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+            "=", std::make_unique<IdentifierExpression>("f2_d"),
+            std::make_unique<CastExpression>(CType::F64(),
+                                             std::make_unique<IdentifierExpression>("arg2")))));
+    auto then_b = std::make_unique<CompoundStatement>();
+    then_b->AddStatement(
+        std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+            "=", std::make_unique<IdentifierExpression>("f2_d"),
+            std::make_unique<BinaryExpression>("+", std::make_unique<IdentifierExpression>("f2_d"),
+                                               std::make_unique<IdentifierExpression>("f4_d")))));
+    outer_then->AddStatement(std::make_unique<IfStatement>(
+        std::make_unique<BinaryExpression>("<", std::make_unique<IdentifierExpression>("arg2"),
+                                           std::make_unique<IntegerLiteralExpression>(0)),
+        std::move(then_b)));
+    outer_then->AddStatement(
+        std::make_unique<ExpressionStatement>(std::make_unique<AssignmentExpression>(
+            "=", std::make_unique<IdentifierExpression>("f6_d"),
+            std::make_unique<BinaryExpression>("+", std::make_unique<IdentifierExpression>("f6_d"),
+                                               std::make_unique<IdentifierExpression>("f2_d")))));
+    block.AddStatement(std::make_unique<IfStatement>(
+        std::make_unique<BinaryExpression>("<", std::make_unique<IdentifierExpression>("v1"),
+                                           std::make_unique<IdentifierExpression>("arg1")),
+        std::move(outer_then)));
+
+    SimplifyReciprocalDivisionAndUnsignedFloatConversions(&block);
+    std::string code = block.ToString(0);
+    EXPECT_THAT(code, HasSubstr("f6_d = (f6_d + (f64)(u32)arg2);"));
+    EXPECT_THAT(code, Not(HasSubstr("f4_d")));
+    EXPECT_THAT(code, Not(HasSubstr("arg2 < 0")));
+  }
 }
 
 TEST(AstConverterTest, CollapsesUnalignedBlock8CopyFromLwlLwrSwlSwr) {

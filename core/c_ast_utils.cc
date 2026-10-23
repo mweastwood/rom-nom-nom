@@ -1301,8 +1301,19 @@ std::unique_ptr<CExpression> SubstituteIdentifier(const CExpression& expr, std::
   }
   if (expr.Kind() == CExpressionKind::kCastExpression) {
     const auto& cast = static_cast<const CastExpression&>(expr);
-    return CExpression::Cast(cast.TargetType(),
-                             SubstituteIdentifier(cast.Operand(), target, replacement));
+    auto new_op = SubstituteIdentifier(cast.Operand(), target, replacement);
+    if (cast.TargetType().name == "f32" && cast.TargetType().pointer_depth == 0 &&
+        new_op->Kind() == CExpressionKind::kCastExpression) {
+      const auto& inner_cast = static_cast<const CastExpression&>(*new_op);
+      if (inner_cast.TargetType().name == "f64" && inner_cast.TargetType().pointer_depth == 0 &&
+          inner_cast.Operand().Kind() == CExpressionKind::kCastExpression) {
+        const auto& u32_cast = static_cast<const CastExpression&>(inner_cast.Operand());
+        if (u32_cast.TargetType().name == "u32" && u32_cast.TargetType().pointer_depth == 0) {
+          return CExpression::Cast(cast.TargetType(), inner_cast.Operand().Clone());
+        }
+      }
+    }
+    return CExpression::Cast(cast.TargetType(), std::move(new_op));
   }
   if (expr.Kind() == CExpressionKind::kArrayIndexExpression) {
     const auto& arr = static_cast<const ArrayIndexExpression&>(expr);

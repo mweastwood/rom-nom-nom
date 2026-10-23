@@ -13,6 +13,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
@@ -213,10 +214,14 @@ int CountRhsVariableUsesInStatement(const CStatement& root_s, std::string_view v
 
 bool IsLocalRegVarName(std::string_view name) {
   if (name == "v0" || name == "v1" || name == "arg0" || name == "arg1" || name == "arg2" ||
-      name == "arg3" || name == "fp") {
+      name == "arg3" || name == "fp" || name == "at") {
     return true;
   }
   if (absl::StartsWith(name, "temp_")) return true;
+  if (name.size() == 2 && (name[0] == 's' || name[0] == 't') &&
+      std::isdigit(static_cast<unsigned char>(name[1]))) {
+    return true;
+  }
   if (name.size() >= 2 && name[0] == 'f' && std::isdigit(static_cast<unsigned char>(name[1]))) {
     return true;
   }
@@ -415,10 +420,64 @@ bool IsReciprocalSignBitShiftOf(const CExpression& e, const CExpression& x_expr,
   return false;
 }
 
+bool IsUnsignedFloatBiasExpr(const CExpression& expr,
+                             const absl::flat_hash_set<std::string>* bias_vars = nullptr,
+                             std::string* consumed_bias_var_out = nullptr) {
+  if (consumed_bias_var_out != nullptr) {
+    consumed_bias_var_out->clear();
+  }
+  if (expr.Kind() == CExpressionKind::kFloatLiteral) {
+    return static_cast<const FloatLiteralExpression&>(expr).Value() == 4294967296.0;
+  }
+  if (expr.Kind() == CExpressionKind::kIdentifier) {
+    const std::string& name = static_cast<const IdentifierExpression&>(expr).Name();
+    double d_val = 0.0;
+    if (absl::SimpleAtod(name, &d_val)) {
+      return d_val == 4294967296.0;
+    }
+    if (bias_vars != nullptr && bias_vars->contains(name)) {
+      if (consumed_bias_var_out != nullptr) {
+        *consumed_bias_var_out = name;
+      }
+      return true;
+    }
+    return absl::StartsWith(name, "D_") || absl::StartsWith(name, "RO_");
+  }
+  if (expr.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& ue = static_cast<const UnaryExpression&>(expr);
+    if (ue.Op() == "*(f64*)&" || ue.Op() == "*(f64 *)&" || ue.Op() == "*(const f64*)&" ||
+        ue.Op() == "*(const f64 *)&") {
+      return true;
+    }
+    if (ue.Op() == "*" && ue.Operand().Kind() == CExpressionKind::kCastExpression) {
+      const auto& ce = static_cast<const CastExpression&>(ue.Operand());
+      if (ce.TargetType().pointer_depth == 1 &&
+          (ce.TargetType().name == "f64" || ce.TargetType().name == "const f64" ||
+           ce.TargetType().name == "volatile f64")) {
+        return true;
+      }
+    }
+  }
+  if (expr.Kind() == CExpressionKind::kCastExpression) {
+    const auto& ce = static_cast<const CastExpression&>(expr);
+    if (ce.TargetType().name == "f64" && ce.TargetType().pointer_depth == 0) {
+      return IsUnsignedFloatBiasExpr(ce.Operand(), bias_vars, consumed_bias_var_out);
+    }
+  }
+  std::string expr_str = expr.ToString();
+  return absl::StrContains(expr_str, "D_") || absl::StrContains(expr_str, "RO_");
+}
+
+void SimplifyModuloAndUnsignedFloatDiamondsInBlockImpl(
+    CompoundStatement* comp, const absl::flat_hash_set<std::string>* parent_bias_vars,
+    absl::flat_hash_set<std::string>* consumed_bias_vars);
+
 void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
     CompoundStatement* comp, const absl::flat_hash_map<std::string, uint32_t>* parent_const_map,
     absl::flat_hash_set<uint32_t>* shared_consumed_magics,
-    const absl::flat_hash_map<std::string, std::string>* parent_sign_equiv_map) {
+    const absl::flat_hash_map<std::string, std::string>* parent_sign_equiv_map,
+    const absl::flat_hash_set<std::string>* parent_bias_vars = nullptr,
+    absl::flat_hash_set<std::string>* shared_consumed_bias_vars = nullptr) {
   if (comp == nullptr) return;
 
   absl::flat_hash_map<std::string, uint32_t> const_map;
@@ -429,9 +488,16 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
   if (parent_sign_equiv_map != nullptr) {
     sign_equiv_map = *parent_sign_equiv_map;
   }
+  absl::flat_hash_set<std::string> bias_vars;
+  if (parent_bias_vars != nullptr) {
+    bias_vars = *parent_bias_vars;
+  }
   absl::flat_hash_set<uint32_t> root_consumed_magics;
   absl::flat_hash_set<uint32_t>* consumed_magics =
       (shared_consumed_magics != nullptr) ? shared_consumed_magics : &root_consumed_magics;
+  absl::flat_hash_set<std::string> root_consumed_bias_vars;
+  absl::flat_hash_set<std::string>* consumed_bias_vars =
+      (shared_consumed_bias_vars != nullptr) ? shared_consumed_bias_vars : &root_consumed_bias_vars;
 
   auto is_int_literal = [](const CExpression& e, int64_t* val_out = nullptr) -> bool {
     if (e.Kind() == CExpressionKind::kIntegerLiteral) {
@@ -668,6 +734,13 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                  static_cast<const BinaryExpression*>(rhs_expr)->Lhs().Kind() ==
                      CExpressionKind::kIdentifier) {
         sign_equiv_map[lhs_var] = static_cast<const BinaryExpression*>(rhs_expr)->Lhs().ToString();
+      }
+      if (absl::EndsWith(lhs_var, "_d")) {
+        if (IsUnsignedFloatBiasExpr(*rhs_expr, &bias_vars)) {
+          bias_vars.insert(lhs_var);
+        } else {
+          bias_vars.erase(lhs_var);
+        }
       }
     }
 
@@ -1054,24 +1127,28 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
 
     // Recurse into child blocks at statement `i` so `const_map` reflects constants live at `i`.
     if (stmts[i] != nullptr) {
+      absl::flat_hash_set<std::string> child_bias_vars = bias_vars;
+      absl::erase_if(child_bias_vars, [&](const std::string& bv) {
+        return StatementModifiesVariable(*stmts[i], bv);
+      });
       switch (stmts[i]->Kind()) {
         case CStatementKind::kCompoundStatement:
           SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
               static_cast<CompoundStatement*>(stmts[i].get()), &const_map, consumed_magics,
-              &sign_equiv_map);
+              &sign_equiv_map, &child_bias_vars, consumed_bias_vars);
           break;
         case CStatementKind::kIfStatement: {
           auto& ifs = static_cast<IfStatement&>(*stmts[i]);
           if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
             SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                 static_cast<CompoundStatement*>(ifs.MutableThenBranch()), &const_map,
-                consumed_magics, &sign_equiv_map);
+                consumed_magics, &sign_equiv_map, &child_bias_vars, consumed_bias_vars);
           }
           if (ifs.MutableElseBranch() != nullptr &&
               ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
             SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                 static_cast<CompoundStatement*>(ifs.MutableElseBranch()), &const_map,
-                consumed_magics, &sign_equiv_map);
+                consumed_magics, &sign_equiv_map, &child_bias_vars, consumed_bias_vars);
           }
           break;
         }
@@ -1107,7 +1184,8 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
           for (auto& sc : sw.MutableCases()) {
             if (sc.body != nullptr) {
               SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
-                  sc.body.get(), &const_map, consumed_magics, &sign_equiv_map);
+                  sc.body.get(), &const_map, consumed_magics, &sign_equiv_map, &child_bias_vars,
+                  consumed_bias_vars);
             }
           }
           break;
@@ -1115,10 +1193,19 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
         default:
           break;
       }
+      if (stmts[i]->Kind() != CStatementKind::kExpressionStatement) {
+        for (auto it = bias_vars.begin(); it != bias_vars.end();) {
+          if (StatementModifiesVariable(*stmts[i], *it)) {
+            bias_vars.erase(it++);
+          } else {
+            ++it;
+          }
+        }
+      }
     }
   }
 
-  SimplifyModuloAndUnsignedFloatDiamondsInBlock(comp);
+  SimplifyModuloAndUnsignedFloatDiamondsInBlockImpl(comp, parent_bias_vars, consumed_bias_vars);
 
   // Remove dead magic constant assignments (`arg1 = 0x80808081;`, `fp = 0xB21642C9;`, etc.)
   // whose uses were completely eliminated by reciprocal division folding.
@@ -1149,101 +1236,39 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
       }
     }
   }
-}
 
-}  // namespace
-
-void SimplifyShiftAddMultiplication(CompoundStatement* comp) {
-  if (comp == nullptr) return;
-
-  std::function<std::unique_ptr<CStatement>(std::unique_ptr<CStatement>)> rewrite_stmt =
-      [&](std::unique_ptr<CStatement> s) -> std::unique_ptr<CStatement> {
-    if (s == nullptr) return nullptr;
-    switch (s->Kind()) {
-      case CStatementKind::kCompoundStatement: {
-        auto* c = static_cast<CompoundStatement*>(s.get());
-        for (auto& child : c->MutableStatements()) {
-          child = rewrite_stmt(std::move(child));
-        }
-        return s;
-      }
-      case CStatementKind::kExpressionStatement: {
-        const auto& es = static_cast<const ExpressionStatement&>(*s);
-        return CStatement::Expression(SimplifyShiftAddExpression(es.Expression()));
-      }
-      case CStatementKind::kReturnStatement: {
-        const auto& ret = static_cast<const ReturnStatement&>(*s);
-        if (ret.ReturnValue() != nullptr) {
-          return CStatement::Return(SimplifyShiftAddExpression(*ret.ReturnValue()));
-        }
-        return CStatement::Return(nullptr);
-      }
-      case CStatementKind::kIfStatement: {
-        const auto& ifs = static_cast<const IfStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(ifs.Condition());
-        auto new_then = rewrite_stmt(ifs.ThenBranch().Clone());
-        std::unique_ptr<CStatement> new_else = nullptr;
-        if (ifs.ElseBranch() != nullptr) {
-          new_else = rewrite_stmt(ifs.ElseBranch()->Clone());
-        }
-        return CStatement::If(std::move(new_cond), std::move(new_then), std::move(new_else));
-      }
-      case CStatementKind::kWhileStatement: {
-        const auto& ws = static_cast<const WhileStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(ws.Condition());
-        auto new_body = rewrite_stmt(ws.Body().Clone());
-        return CStatement::While(std::move(new_cond), std::move(new_body));
-      }
-      case CStatementKind::kDoWhileStatement: {
-        const auto& dws = static_cast<const DoWhileStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(dws.Condition());
-        auto new_body = rewrite_stmt(dws.Body().Clone());
-        return CStatement::DoWhile(std::move(new_body), std::move(new_cond));
-      }
-      case CStatementKind::kForStatement: {
-        const auto& fs = static_cast<const ForStatement&>(*s);
-        std::unique_ptr<CStatement> new_init = nullptr;
-        if (fs.Init() != nullptr) {
-          new_init = rewrite_stmt(fs.Init()->Clone());
-        }
-        std::unique_ptr<CExpression> new_cond = nullptr;
-        if (fs.Condition() != nullptr) {
-          new_cond = SimplifyShiftAddExpression(*fs.Condition());
-        }
-        std::unique_ptr<CExpression> new_step = nullptr;
-        if (fs.Step() != nullptr) {
-          new_step = SimplifyShiftAddExpression(*fs.Step());
-        }
-        auto new_body = rewrite_stmt(fs.Body().Clone());
-        return CStatement::For(std::move(new_init), std::move(new_cond), std::move(new_step),
-                               std::move(new_body));
-      }
-      case CStatementKind::kSwitchStatement: {
-        const auto& ss = static_cast<const SwitchStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(ss.Condition());
-        std::vector<SwitchCase> new_cases;
-        for (const auto& c : ss.Cases()) {
-          SwitchCase sc = c.Clone();
-          if (c.body != nullptr) {
-            auto rewritten_body = rewrite_stmt(c.body->Clone());
-            sc.body = std::unique_ptr<CompoundStatement>(
-                static_cast<CompoundStatement*>(rewritten_body.release()));
+  // Remove dead 2^32 bias double assignments (`f4_d = *(f64*)&D_...;`, `f0_d = 4294967296.0;`,
+  // etc.) whose uses were completely eliminated by unsigned float conversion diamond recovery.
+  if (!consumed_bias_vars->empty()) {
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      std::string lhs_var;
+      const CExpression* rhs_expr = nullptr;
+      if (extract_simple_var_assign(*stmts[i], &lhs_var, &rhs_expr) &&
+          consumed_bias_vars->contains(lhs_var) && IsUnsignedFloatBiasExpr(*rhs_expr)) {
+        bool used_after = false;
+        for (size_t k = i + 1; k < stmts.size(); ++k) {
+          if (count_var_uses_in_stmt(*stmts[k], lhs_var) > 0) {
+            used_after = true;
+            break;
           }
-          new_cases.push_back(std::move(sc));
+          std::string klhs;
+          const CExpression* krhs = nullptr;
+          if (extract_simple_var_assign(*stmts[k], &klhs, &krhs) && klhs == lhs_var) {
+            break;
+          }
         }
-        return CStatement::Switch(std::move(new_cond), std::move(new_cases));
+        if (!used_after) {
+          stmts.erase(stmts.begin() + i);
+          --i;
+        }
       }
-      default:
-        return s;
     }
-  };
-
-  for (auto& s : comp->MutableStatements()) {
-    s = rewrite_stmt(std::move(s));
   }
 }
 
-void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
+void SimplifyModuloAndUnsignedFloatDiamondsInBlockImpl(
+    CompoundStatement* comp, const absl::flat_hash_set<std::string>* parent_bias_vars,
+    absl::flat_hash_set<std::string>* consumed_bias_vars) {
   if (comp == nullptr) return;
 
   auto is_int_literal = [](const CExpression& e, int64_t* val_out = nullptr) -> bool {
@@ -1437,156 +1462,418 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
     return false;
   };
 
+  auto is_f64_cast_of = [](const CExpression& expr, std::string_view target_var) -> bool {
+    if (expr.Kind() == CExpressionKind::kCastExpression) {
+      const auto& ce = static_cast<const CastExpression&>(expr);
+      return ce.TargetType().name == "f64" && ce.TargetType().pointer_depth == 0 &&
+             ce.Operand().Kind() == CExpressionKind::kIdentifier &&
+             static_cast<const IdentifierExpression&>(ce.Operand()).Name() == target_var;
+    }
+    return false;
+  };
+
+  auto is_id_of = [](const CExpression& expr, std::string_view target_var) -> bool {
+    return expr.Kind() == CExpressionKind::kIdentifier &&
+           static_cast<const IdentifierExpression&>(expr).Name() == target_var;
+  };
+
+  auto rewrite_unsigned_float_var_in_expr =
+      [&](const CExpression& root_expr, std::string_view target_var, std::string_view int_var,
+          int* out_f32_uses, int* out_f64_uses) -> std::unique_ptr<CExpression> {
+    std::function<std::unique_ptr<CExpression>(const CExpression&)> walk =
+        [&](const CExpression& e) -> std::unique_ptr<CExpression> {
+      if (e.Kind() == CExpressionKind::kCastExpression) {
+        const auto& ce = static_cast<const CastExpression&>(e);
+        if (ce.TargetType().pointer_depth == 0 && is_id_of(ce.Operand(), target_var)) {
+          if (ce.TargetType().name == "f32") {
+            if (out_f32_uses != nullptr) ++(*out_f32_uses);
+            return CExpression::Cast(
+                CType::F32(),
+                CExpression::Cast(CType::U32(), CExpression::Identifier(std::string(int_var))));
+          }
+          if (ce.TargetType().name == "f64") {
+            if (out_f64_uses != nullptr) ++(*out_f64_uses);
+            return CExpression::Cast(
+                CType::F64(),
+                CExpression::Cast(CType::U32(), CExpression::Identifier(std::string(int_var))));
+          }
+        }
+        return CExpression::Cast(ce.TargetType(), walk(ce.Operand()));
+      }
+      if (is_id_of(e, target_var)) {
+        if (out_f64_uses != nullptr) ++(*out_f64_uses);
+        return CExpression::Cast(
+            CType::F64(),
+            CExpression::Cast(CType::U32(), CExpression::Identifier(std::string(int_var))));
+      }
+      switch (e.Kind()) {
+        case CExpressionKind::kBinaryExpression: {
+          const auto& b = static_cast<const BinaryExpression&>(e);
+          return CExpression::Binary(b.Op(), walk(b.Lhs()), walk(b.Rhs()));
+        }
+        case CExpressionKind::kUnaryExpression: {
+          const auto& u = static_cast<const UnaryExpression&>(e);
+          return CExpression::Unary(u.Op(), walk(u.Operand()), u.IsPrefix());
+        }
+        case CExpressionKind::kAssignmentExpression: {
+          const auto& a = static_cast<const AssignmentExpression&>(e);
+          auto new_lhs = is_id_of(a.Lhs(), target_var) ? a.Lhs().Clone() : walk(a.Lhs());
+          return CExpression::Assignment(a.Op(), std::move(new_lhs), walk(a.Rhs()));
+        }
+        case CExpressionKind::kCallExpression: {
+          const auto& c = static_cast<const CallExpression&>(e);
+          std::vector<std::unique_ptr<CExpression>> args;
+          args.reserve(c.Arguments().size());
+          for (const auto& arg : c.Arguments()) {
+            args.push_back(walk(*arg));
+          }
+          return CExpression::Call(c.Callee().Clone(), std::move(args));
+        }
+        case CExpressionKind::kTernaryExpression: {
+          const auto& t = static_cast<const TernaryExpression&>(e);
+          return CExpression::Ternary(walk(t.Condition()), walk(t.TrueExpression()),
+                                      walk(t.FalseExpression()));
+        }
+        case CExpressionKind::kArrayIndexExpression: {
+          const auto& ai = static_cast<const ArrayIndexExpression&>(e);
+          return CExpression::ArrayIndex(walk(ai.Array()), walk(ai.Index()));
+        }
+        case CExpressionKind::kMemberAccessExpression: {
+          const auto& ma = static_cast<const MemberAccessExpression&>(e);
+          return CExpression::MemberAccess(walk(ma.Object()), ma.MemberName(), ma.IsArrow());
+        }
+        default:
+          return e.Clone();
+      }
+    };
+    return walk(root_expr);
+  };
+
+  auto is_var_dead_after_index = [&](size_t idx, std::string_view var,
+                                     bool allow_end_of_block) -> bool {
+    for (size_t u = idx + 1; u < stmts.size(); ++u) {
+      std::string ulhs;
+      const CExpression* urhs = nullptr;
+      if (extract_simple_var_assign(*stmts[u], &ulhs, &urhs) && ulhs == var &&
+          CountVariableReadUsesInExpression(*urhs, var) == 0) {
+        return true;
+      }
+      if (stmts[u]->Kind() == CStatementKind::kReturnStatement) {
+        return count_var_uses_in_stmt(*stmts[u], var) == 0;
+      }
+      if (count_var_uses_in_stmt(*stmts[u], var) > 0 || StatementContainsLabel(*stmts[u]) ||
+          StatementContainsControlFlowJump(*stmts[u]) || StatementContainsLoop(*stmts[u])) {
+        return false;
+      }
+    }
+    return allow_end_of_block;
+  };
+
   for (size_t i = 0; i < stmts.size(); ++i) {
     if (stmts[i]->Kind() != CStatementKind::kIfStatement) continue;
     const auto& ifs = static_cast<const IfStatement&>(*stmts[i]);
     if (ifs.Condition().Kind() != CExpressionKind::kBinaryExpression) continue;
     const auto& cond_bin = static_cast<const BinaryExpression&>(ifs.Condition());
     int64_t zero_val = -1;
-    if (cond_bin.Op() != "<" || cond_bin.Lhs().Kind() != CExpressionKind::kIdentifier ||
-        !is_int_literal(cond_bin.Rhs(), &zero_val) || zero_val != 0) {
+    std::string int_var;
+    bool neg_in_then = false;
+    if (cond_bin.Op() == "<" && cond_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+        is_int_literal(cond_bin.Rhs(), &zero_val) && zero_val == 0) {
+      int_var = static_cast<const IdentifierExpression&>(cond_bin.Lhs()).Name();
+      neg_in_then = true;
+    } else if (cond_bin.Op() == ">" && cond_bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+               is_int_literal(cond_bin.Lhs(), &zero_val) && zero_val == 0) {
+      int_var = static_cast<const IdentifierExpression&>(cond_bin.Rhs()).Name();
+      neg_in_then = true;
+    } else if (cond_bin.Op() == ">=" && cond_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+               is_int_literal(cond_bin.Rhs(), &zero_val) && zero_val == 0 &&
+               ifs.ElseBranch() != nullptr) {
+      int_var = static_cast<const IdentifierExpression&>(cond_bin.Lhs()).Name();
+      neg_in_then = false;
+    } else if (cond_bin.Op() == "<=" && cond_bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+               is_int_literal(cond_bin.Lhs(), &zero_val) && zero_val == 0 &&
+               ifs.ElseBranch() != nullptr) {
+      int_var = static_cast<const IdentifierExpression&>(cond_bin.Rhs()).Name();
+      neg_in_then = false;
+    } else {
       continue;
     }
-    std::string int_var = static_cast<const IdentifierExpression&>(cond_bin.Lhs()).Name();
-    if (ifs.ThenBranch().Kind() != CStatementKind::kCompoundStatement) continue;
-    const auto& then_comp = static_cast<const CompoundStatement&>(ifs.ThenBranch());
-    if (then_comp.Statements().empty() || then_comp.Statements().size() > 2) continue;
-    std::string then_lhs;
-    const CExpression* then_rhs = nullptr;
-    if (!extract_simple_var_assign(*then_comp.Statements()[0], &then_lhs, &then_rhs) ||
-        !absl::EndsWith(then_lhs, "_d")) {
-      continue;
-    }
-    std::string branch_narrow_dst;
-    if (then_comp.Statements().size() == 2) {
-      if (ifs.ElseBranch() == nullptr ||
-          ifs.ElseBranch()->Kind() != CStatementKind::kCompoundStatement) {
-        continue;
-      }
-      const auto& else_comp = static_cast<const CompoundStatement&>(*ifs.ElseBranch());
-      if (else_comp.Statements().size() != 1) continue;
-      std::string tlhs2, elhs1;
-      const CExpression* trhs2 = nullptr;
-      const CExpression* erhs1 = nullptr;
-      if (!extract_simple_var_assign(*then_comp.Statements()[1], &tlhs2, &trhs2) ||
-          !extract_simple_var_assign(*else_comp.Statements()[0], &elhs1, &erhs1) ||
-          tlhs2 != elhs1 || !is_f32_cast_of(*trhs2, then_lhs) ||
-          !is_f32_cast_of(*erhs1, then_lhs)) {
-        continue;
-      }
-      branch_narrow_dst = tlhs2;
-    } else if (ifs.ElseBranch() != nullptr) {
-      continue;
-    }
-    if (then_rhs->Kind() != CExpressionKind::kBinaryExpression) continue;
-    const auto& add_bin = static_cast<const BinaryExpression&>(*then_rhs);
-    if (add_bin.Op() != "+" || add_bin.Lhs().Kind() != CExpressionKind::kIdentifier ||
-        static_cast<const IdentifierExpression&>(add_bin.Lhs()).Name() != then_lhs) {
-      continue;
-    }
-    bool rhs_uses_rodata_symbol = absl::StrContains(add_bin.Rhs().ToString(), "D_") ||
-                                  absl::StrContains(add_bin.Rhs().ToString(), "RO_");
-    if (!rhs_uses_rodata_symbol) continue;
 
-    int cvt_idx = -1;
-    for (int k = static_cast<int>(i) - 1; k >= 0 && k >= static_cast<int>(i) - 2; --k) {
-      std::string clhs;
-      const CExpression* crhs = nullptr;
-      if (extract_simple_var_assign(*stmts[k], &clhs, &crhs) && clhs == then_lhs) {
-        if (crhs->Kind() == CExpressionKind::kCastExpression) {
-          const auto& ce = static_cast<const CastExpression&>(*crhs);
-          if (ce.TargetType().name == "f64" && ce.TargetType().pointer_depth == 0 &&
-              ce.Operand().Kind() == CExpressionKind::kIdentifier &&
-              static_cast<const IdentifierExpression&>(ce.Operand()).Name() == int_var) {
-            cvt_idx = k;
+    const CStatement* neg_branch = neg_in_then ? &ifs.ThenBranch() : ifs.ElseBranch();
+    const CStatement* pos_branch = neg_in_then ? ifs.ElseBranch() : &ifs.ThenBranch();
+    if (neg_branch == nullptr || neg_branch->Kind() != CStatementKind::kCompoundStatement) continue;
+    if (pos_branch != nullptr && pos_branch->Kind() != CStatementKind::kCompoundStatement) continue;
+    const auto& neg_comp = static_cast<const CompoundStatement&>(*neg_branch);
+    const auto* pos_comp = static_cast<const CompoundStatement*>(pos_branch);
+    const auto& neg_stmts = neg_comp.Statements();
+    if (neg_stmts.empty() || neg_stmts.size() > 6) continue;
+
+    absl::flat_hash_set<std::string> active_bias_vars;
+    if (parent_bias_vars != nullptr) {
+      active_bias_vars = *parent_bias_vars;
+    }
+    for (size_t b = 0; b < i; ++b) {
+      std::string blhs;
+      const CExpression* brhs = nullptr;
+      if (extract_simple_var_assign(*stmts[b], &blhs, &brhs)) {
+        if (absl::EndsWith(blhs, "_d")) {
+          if (IsUnsignedFloatBiasExpr(*brhs, &active_bias_vars)) {
+            active_bias_vars.insert(blhs);
+          } else {
+            active_bias_vars.erase(blhs);
+          }
+        }
+      } else {
+        for (auto it = active_bias_vars.begin(); it != active_bias_vars.end();) {
+          if (StatementModifiesVariable(*stmts[b], *it)) {
+            active_bias_vars.erase(it++);
+          } else {
+            ++it;
+          }
+        }
+      }
+    }
+
+    absl::flat_hash_set<std::string> branch_bias_vars = active_bias_vars;
+    std::vector<std::string> branch_setup_vars;
+    int add_stmt_idx = -1;
+    std::string then_lhs;
+    std::string used_bias_var;
+    bool valid_setup = true;
+    for (size_t s_idx = 0; s_idx < neg_stmts.size(); ++s_idx) {
+      std::string slhs;
+      const CExpression* srhs = nullptr;
+      if (!extract_simple_var_assign(*neg_stmts[s_idx], &slhs, &srhs)) {
+        valid_setup = false;
+        break;
+      }
+      if (absl::EndsWith(slhs, "_d") && srhs->Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& add_bin = static_cast<const BinaryExpression&>(*srhs);
+        if (add_bin.Op() == "+") {
+          std::string cand_bias_var;
+          if (is_id_of(add_bin.Lhs(), slhs) &&
+              IsUnsignedFloatBiasExpr(add_bin.Rhs(), &branch_bias_vars, &cand_bias_var)) {
+            add_stmt_idx = static_cast<int>(s_idx);
+            then_lhs = slhs;
+            used_bias_var = cand_bias_var;
+            break;
+          }
+          if (is_id_of(add_bin.Rhs(), slhs) &&
+              IsUnsignedFloatBiasExpr(add_bin.Lhs(), &branch_bias_vars, &cand_bias_var)) {
+            add_stmt_idx = static_cast<int>(s_idx);
+            then_lhs = slhs;
+            used_bias_var = cand_bias_var;
             break;
           }
         }
+      }
+      if (!IsPureExpression(*srhs) || slhs == int_var) {
+        valid_setup = false;
+        break;
+      }
+      branch_setup_vars.push_back(slhs);
+      if (absl::EndsWith(slhs, "_d")) {
+        if (IsUnsignedFloatBiasExpr(*srhs, &branch_bias_vars)) {
+          branch_bias_vars.insert(slhs);
+        } else {
+          branch_bias_vars.erase(slhs);
+        }
+      }
+    }
+    if (!valid_setup || add_stmt_idx < 0 || then_lhs.empty()) continue;
+
+    bool setup_clobbers_then_lhs = false;
+    for (const std::string& sv : branch_setup_vars) {
+      if (sv == then_lhs || absl::StrCat(sv, "_d") == then_lhs) {
+        setup_clobbers_then_lhs = true;
+        break;
+      }
+    }
+    if (setup_clobbers_then_lhs) continue;
+
+    size_t rem_neg = neg_stmts.size() - static_cast<size_t>(add_stmt_idx + 1);
+    size_t rem_pos = (pos_comp != nullptr) ? pos_comp->Statements().size() : 0;
+    std::string branch_narrow_dst;
+    std::string branch_copy_f64_dst;
+    bool then_lhs_restored_in_branch = false;
+    if (rem_neg == 0) {
+      if (rem_pos != 0) continue;
+    } else if ((rem_neg == 1 || rem_neg == 2) && rem_pos == 1) {
+      std::string tlhs2, elhs1;
+      const CExpression* trhs2 = nullptr;
+      const CExpression* erhs1 = nullptr;
+      if (!extract_simple_var_assign(*neg_stmts[add_stmt_idx + 1], &tlhs2, &trhs2) ||
+          !extract_simple_var_assign(*pos_comp->Statements()[0], &elhs1, &erhs1) ||
+          tlhs2 != elhs1) {
+        continue;
+      }
+      if (is_f32_cast_of(*trhs2, then_lhs) && is_f32_cast_of(*erhs1, then_lhs)) {
+        branch_narrow_dst = tlhs2;
+      } else if (absl::EndsWith(tlhs2, "_d") && is_id_of(*trhs2, then_lhs) &&
+                 is_id_of(*erhs1, then_lhs)) {
+        branch_copy_f64_dst = tlhs2;
+      } else {
+        continue;
+      }
+      if (rem_neg == 2) {
+        std::string tlhs3;
+        const CExpression* trhs3 = nullptr;
+        if (!extract_simple_var_assign(*neg_stmts[add_stmt_idx + 2], &tlhs3, &trhs3) ||
+            tlhs3 != then_lhs || tlhs2 == then_lhs || !is_f64_cast_of(*trhs3, int_var)) {
+          continue;
+        }
+        then_lhs_restored_in_branch = true;
+      }
+    } else {
+      continue;
+    }
+
+    bool setup_vars_dead = true;
+    for (const std::string& sv : branch_setup_vars) {
+      if (!branch_narrow_dst.empty() &&
+          (sv == branch_narrow_dst || sv == absl::StrCat(branch_narrow_dst, "_d"))) {
+        continue;
+      }
+      if (!branch_copy_f64_dst.empty() && sv == branch_copy_f64_dst) {
+        continue;
+      }
+      if (!is_var_dead_after_index(
+              i, sv, /*allow_end_of_block=*/sv != "f0" && sv != "f0_d" && sv != "v0")) {
+        setup_vars_dead = false;
+        break;
+      }
+    }
+    if (!setup_vars_dead) continue;
+
+    int cvt_idx = -1;
+    for (int k = static_cast<int>(i) - 1; k >= 0 && k >= static_cast<int>(i) - 6; --k) {
+      std::string clhs;
+      const CExpression* crhs = nullptr;
+      if (extract_simple_var_assign(*stmts[k], &clhs, &crhs) && clhs == then_lhs) {
+        if (is_f64_cast_of(*crhs, int_var)) {
+          cvt_idx = k;
+        }
+        break;
+      }
+      if (StatementModifiesVariable(*stmts[k], then_lhs) ||
+          StatementModifiesVariable(*stmts[k], int_var) ||
+          count_var_uses_in_stmt(*stmts[k], then_lhs) > 0 || StatementContainsLabel(*stmts[k]) ||
+          StatementContainsControlFlowJump(*stmts[k]) || StatementContainsCall(*stmts[k]) ||
+          StatementContainsLoop(*stmts[k])) {
+        break;
       }
     }
     if (cvt_idx < 0) continue;
 
+    if (!used_bias_var.empty() && consumed_bias_vars != nullptr &&
+        active_bias_vars.contains(used_bias_var)) {
+      consumed_bias_vars->insert(used_bias_var);
+    }
+
     if (!branch_narrow_dst.empty()) {
-      stmts[cvt_idx] = CStatement::Expression(CExpression::Assignment(
+      auto f32_u32_stmt = CStatement::Expression(CExpression::Assignment(
           "=", CExpression::Identifier(branch_narrow_dst),
           CExpression::Cast(CType::F32(),
                             CExpression::Cast(CType::U32(), CExpression::Identifier(int_var)))));
-      stmts.erase(stmts.begin() + i);
-      --i;
+      if (then_lhs_restored_in_branch &&
+          !is_var_dead_after_index(i, then_lhs, /*allow_end_of_block=*/false)) {
+        stmts[i] = std::move(f32_u32_stmt);
+        continue;
+      }
+      bool dst_touched_between = false;
+      for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < i; ++p) {
+        if (count_var_uses_in_stmt(*stmts[p], branch_narrow_dst) > 0 ||
+            StatementModifiesVariable(*stmts[p], branch_narrow_dst)) {
+          dst_touched_between = true;
+          break;
+        }
+      }
+      if (!dst_touched_between) {
+        stmts[cvt_idx] = std::move(f32_u32_stmt);
+        stmts.erase(stmts.begin() + i);
+        --i;
+      } else {
+        stmts[i] = std::move(f32_u32_stmt);
+        stmts.erase(stmts.begin() + cvt_idx);
+        --i;
+      }
       continue;
     }
 
+    std::string target_f64_var = branch_copy_f64_dst.empty() ? then_lhs : branch_copy_f64_dst;
     auto u32_cast = CExpression::Cast(CType::U32(), CExpression::Identifier(int_var));
-    stmts[cvt_idx] = CStatement::Expression(
-        CExpression::Assignment("=", CExpression::Identifier(then_lhs),
+    auto f64_u32_stmt = CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier(target_f64_var),
                                 CExpression::Cast(CType::F64(), std::move(u32_cast))));
-    stmts.erase(stmts.begin() + i);
-    --i;
-
-    for (size_t m = static_cast<size_t>(cvt_idx) + 1;
-         m < stmts.size() && m <= static_cast<size_t>(cvt_idx) + 3; ++m) {
-      if (stmts[m]->Kind() == CStatementKind::kReturnStatement) {
-        const auto& rs = static_cast<const ReturnStatement&>(*stmts[m]);
-        if (rs.ReturnValue() != nullptr && is_f32_cast_of(*rs.ReturnValue(), then_lhs)) {
-          bool int_var_clobbered = false;
-          for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < m; ++p) {
-            std::string plhs;
-            const CExpression* prhs = nullptr;
-            if (extract_simple_var_assign(*stmts[p], &plhs, &prhs) && plhs == int_var) {
-              int_var_clobbered = true;
-              break;
-            }
-          }
-          if (!int_var_clobbered) {
-            stmts[m] = CStatement::Return(CExpression::Cast(
-                CType::F32(), CExpression::Cast(CType::U32(), CExpression::Identifier(int_var))));
-            stmts.erase(stmts.begin() + cvt_idx);
-            if (m <= i) --i;
-          }
-          break;
-        }
-        if (rs.ReturnValue() != nullptr &&
-            rs.ReturnValue()->Kind() == CExpressionKind::kBinaryExpression) {
-          const auto& rbin = static_cast<const BinaryExpression&>(*rs.ReturnValue());
-          if (is_f32_cast_of(rbin.Rhs(), then_lhs)) {
-            bool int_var_clobbered = false;
-            for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < m; ++p) {
-              std::string plhs;
-              const CExpression* prhs = nullptr;
-              if (extract_simple_var_assign(*stmts[p], &plhs, &prhs) && plhs == int_var) {
-                int_var_clobbered = true;
-                break;
-              }
-            }
-            if (!int_var_clobbered) {
-              stmts[m] = CStatement::Return(CExpression::Binary(
-                  rbin.Op(), rbin.Lhs().Clone(),
-                  CExpression::Cast(
-                      CType::F32(),
-                      CExpression::Cast(CType::U32(), CExpression::Identifier(int_var)))));
-              stmts.erase(stmts.begin() + cvt_idx);
-              if (m <= i) --i;
-            }
+    if (then_lhs_restored_in_branch &&
+        !is_var_dead_after_index(i, then_lhs, /*allow_end_of_block=*/false)) {
+      stmts[i] = std::move(f64_u32_stmt);
+      cvt_idx = static_cast<int>(i);
+    } else {
+      bool dst_touched_between = false;
+      if (target_f64_var != then_lhs) {
+        for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < i; ++p) {
+          if (count_var_uses_in_stmt(*stmts[p], target_f64_var) > 0 ||
+              StatementModifiesVariable(*stmts[p], target_f64_var)) {
+            dst_touched_between = true;
             break;
           }
         }
       }
-      std::string nlhs;
-      const CExpression* nrhs = nullptr;
-      if (extract_simple_var_assign(*stmts[m], &nlhs, &nrhs) && is_f32_cast_of(*nrhs, then_lhs)) {
-        bool int_var_clobbered = false;
-        for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < m; ++p) {
-          std::string plhs;
-          const CExpression* prhs = nullptr;
-          if (extract_simple_var_assign(*stmts[p], &plhs, &prhs) && plhs == int_var) {
-            int_var_clobbered = true;
-            break;
+      if (!dst_touched_between) {
+        stmts[cvt_idx] = std::move(f64_u32_stmt);
+        stmts.erase(stmts.begin() + i);
+        --i;
+      } else {
+        stmts[i] = std::move(f64_u32_stmt);
+        stmts.erase(stmts.begin() + cvt_idx);
+        --i;
+        cvt_idx = static_cast<int>(i);
+      }
+    }
+
+    for (size_t m = static_cast<size_t>(cvt_idx) + 1;
+         m < stmts.size() && m <= static_cast<size_t>(cvt_idx) + 6; ++m) {
+      int uses_in_m = count_var_uses_in_stmt(*stmts[m], target_f64_var);
+      if (uses_in_m == 0) {
+        if (StatementModifiesVariable(*stmts[m], target_f64_var) ||
+            StatementModifiesVariable(*stmts[m], int_var) || StatementContainsLabel(*stmts[m]) ||
+            StatementContainsControlFlowJump(*stmts[m]) || StatementContainsCall(*stmts[m]) ||
+            StatementContainsLoop(*stmts[m])) {
+          break;
+        }
+        continue;
+      }
+      if (uses_in_m != 1 || StatementTakesAddressOf(*stmts[m], target_f64_var)) {
+        break;
+      }
+
+      if (stmts[m]->Kind() == CStatementKind::kReturnStatement) {
+        const auto& rs = static_cast<const ReturnStatement&>(*stmts[m]);
+        if (rs.ReturnValue() != nullptr) {
+          int f32_uses = 0;
+          int f64_uses = 0;
+          auto new_ret = rewrite_unsigned_float_var_in_expr(*rs.ReturnValue(), target_f64_var,
+                                                            int_var, &f32_uses, &f64_uses);
+          if (f32_uses + f64_uses == 1) {
+            stmts[m] = CStatement::Return(std::move(new_ret));
+            stmts.erase(stmts.begin() + cvt_idx);
+            if (m <= i) --i;
           }
         }
-        if (!int_var_clobbered) {
+        break;
+      }
+
+      std::string nlhs;
+      const CExpression* nrhs = nullptr;
+      if (extract_simple_var_assign(*stmts[m], &nlhs, &nrhs) &&
+          is_f32_cast_of(*nrhs, target_f64_var)) {
+        if (nlhs == target_f64_var || absl::StrCat(nlhs, "_d") == target_f64_var ||
+            is_var_dead_after_index(m, target_f64_var, /*allow_end_of_block=*/true)) {
           bool f_dst_touched_between = false;
           for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < m; ++p) {
-            if (count_var_uses_in_stmt(*stmts[p], nlhs) > 0) {
+            if (count_var_uses_in_stmt(*stmts[p], nlhs) > 0 ||
+                StatementModifiesVariable(*stmts[p], nlhs)) {
               f_dst_touched_between = true;
               break;
             }
@@ -1596,16 +1883,256 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
               CExpression::Cast(
                   CType::F32(),
                   CExpression::Cast(CType::U32(), CExpression::Identifier(int_var)))));
+          size_t narrow_idx = 0;
           if (!f_dst_touched_between) {
             stmts[cvt_idx] = std::move(f32_u32_stmt);
             stmts.erase(stmts.begin() + m);
+            narrow_idx = static_cast<size_t>(cvt_idx);
           } else {
             stmts[m] = std::move(f32_u32_stmt);
             stmts.erase(stmts.begin() + cvt_idx);
+            narrow_idx = m - 1;
           }
           if (m <= i) --i;
+          if (narrow_idx + 1 < stmts.size() &&
+              stmts[narrow_idx + 1]->Kind() == CStatementKind::kReturnStatement) {
+            const auto& next_rs = static_cast<const ReturnStatement&>(*stmts[narrow_idx + 1]);
+            if (next_rs.ReturnValue() != nullptr &&
+                CountVariableReadUsesInExpression(*next_rs.ReturnValue(), nlhs) == 1 &&
+                !ExpressionTakesAddressOf(*next_rs.ReturnValue(), nlhs)) {
+              const auto& narrow_assign = static_cast<const AssignmentExpression&>(
+                  static_cast<const ExpressionStatement&>(*stmts[narrow_idx]).Expression());
+              stmts[narrow_idx + 1] = CStatement::Return(
+                  SubstituteIdentifier(*next_rs.ReturnValue(), nlhs, narrow_assign.Rhs()));
+              stmts.erase(stmts.begin() + narrow_idx);
+              if (narrow_idx <= i && i > 0) --i;
+            }
+          }
         }
         break;
+      }
+
+      if (stmts[m]->Kind() == CStatementKind::kExpressionStatement) {
+        const auto& es_m = static_cast<const ExpressionStatement&>(*stmts[m]);
+        if (es_m.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& a_m = static_cast<const AssignmentExpression&>(es_m.Expression());
+          if (a_m.Op() == "=" &&
+              CountVariableReadUsesInExpression(a_m.Lhs(), target_f64_var) == 0 &&
+              CountVariableReadUsesInExpression(a_m.Rhs(), target_f64_var) == 1) {
+            int f32_uses = 0;
+            int f64_uses = 0;
+            auto new_rhs = rewrite_unsigned_float_var_in_expr(a_m.Rhs(), target_f64_var, int_var,
+                                                              &f32_uses, &f64_uses);
+            bool overwrites_target = is_id_of(a_m.Lhs(), target_f64_var);
+            bool allow_eof = (f32_uses == 1) || (target_f64_var != "f0_d");
+            if (f32_uses + f64_uses == 1 &&
+                (overwrites_target || is_var_dead_after_index(m, target_f64_var, allow_eof))) {
+              if (!nlhs.empty() && is_id_of(a_m.Rhs(), target_f64_var)) {
+                bool dst_touched = false;
+                for (size_t p = static_cast<size_t>(cvt_idx) + 1; p < m; ++p) {
+                  if (count_var_uses_in_stmt(*stmts[p], nlhs) > 0 ||
+                      StatementModifiesVariable(*stmts[p], nlhs)) {
+                    dst_touched = true;
+                    break;
+                  }
+                }
+                auto copy_stmt = CStatement::Expression(
+                    CExpression::Assignment("=", a_m.Lhs().Clone(), std::move(new_rhs)));
+                size_t copy_idx = 0;
+                if (!dst_touched) {
+                  stmts[cvt_idx] = std::move(copy_stmt);
+                  stmts.erase(stmts.begin() + m);
+                  copy_idx = static_cast<size_t>(cvt_idx);
+                } else {
+                  stmts[m] = std::move(copy_stmt);
+                  stmts.erase(stmts.begin() + cvt_idx);
+                  copy_idx = m - 1;
+                }
+                if (m <= i) --i;
+                if (copy_idx + 1 < stmts.size() &&
+                    stmts[copy_idx + 1]->Kind() == CStatementKind::kReturnStatement) {
+                  const auto& next_rs = static_cast<const ReturnStatement&>(*stmts[copy_idx + 1]);
+                  if (next_rs.ReturnValue() != nullptr &&
+                      CountVariableReadUsesInExpression(*next_rs.ReturnValue(), nlhs) == 1 &&
+                      !ExpressionTakesAddressOf(*next_rs.ReturnValue(), nlhs)) {
+                    const auto& copy_assign = static_cast<const AssignmentExpression&>(
+                        static_cast<const ExpressionStatement&>(*stmts[copy_idx]).Expression());
+                    stmts[copy_idx + 1] = CStatement::Return(
+                        SubstituteIdentifier(*next_rs.ReturnValue(), nlhs, copy_assign.Rhs()));
+                    stmts.erase(stmts.begin() + copy_idx);
+                    if (copy_idx <= i && i > 0) --i;
+                  }
+                }
+              } else {
+                stmts[m] = CStatement::Expression(
+                    CExpression::Assignment("=", a_m.Lhs().Clone(), std::move(new_rhs)));
+                stmts.erase(stmts.begin() + cvt_idx);
+                if (m <= i) --i;
+              }
+            }
+          }
+        } else if (es_m.Expression().Kind() == CExpressionKind::kCallExpression) {
+          int f32_uses = 0;
+          int f64_uses = 0;
+          auto new_call = rewrite_unsigned_float_var_in_expr(es_m.Expression(), target_f64_var,
+                                                             int_var, &f32_uses, &f64_uses);
+          if (f32_uses + f64_uses == 1 &&
+              is_var_dead_after_index(m, target_f64_var,
+                                      /*allow_end_of_block=*/target_f64_var != "f0_d")) {
+            stmts[m] = CStatement::Expression(std::move(new_call));
+            stmts.erase(stmts.begin() + cvt_idx);
+            if (m <= i) --i;
+          }
+        }
+        break;
+      }
+
+      if (stmts[m]->Kind() == CStatementKind::kIfStatement) {
+        const auto& ifs_m = static_cast<const IfStatement&>(*stmts[m]);
+        if (CountVariableReadUsesInExpression(ifs_m.Condition(), target_f64_var) == 1 &&
+            count_var_uses_in_stmt(ifs_m.ThenBranch(), target_f64_var) == 0 &&
+            (ifs_m.ElseBranch() == nullptr ||
+             count_var_uses_in_stmt(*ifs_m.ElseBranch(), target_f64_var) == 0)) {
+          int f32_uses = 0;
+          int f64_uses = 0;
+          auto new_cond = rewrite_unsigned_float_var_in_expr(ifs_m.Condition(), target_f64_var,
+                                                             int_var, &f32_uses, &f64_uses);
+          if (f32_uses + f64_uses == 1 &&
+              is_var_dead_after_index(m, target_f64_var,
+                                      /*allow_end_of_block=*/target_f64_var != "f0_d")) {
+            stmts[m] = CStatement::If(
+                std::move(new_cond), ifs_m.ThenBranch().Clone(),
+                ifs_m.ElseBranch() != nullptr ? ifs_m.ElseBranch()->Clone() : nullptr);
+            stmts.erase(stmts.begin() + cvt_idx);
+            if (m <= i) --i;
+          }
+        }
+        break;
+      }
+      break;
+    }
+  }
+}
+
+}  // namespace
+
+void SimplifyShiftAddMultiplication(CompoundStatement* comp) {
+  if (comp == nullptr) return;
+
+  std::function<std::unique_ptr<CStatement>(std::unique_ptr<CStatement>)> rewrite_stmt =
+      [&](std::unique_ptr<CStatement> s) -> std::unique_ptr<CStatement> {
+    if (s == nullptr) return nullptr;
+    switch (s->Kind()) {
+      case CStatementKind::kCompoundStatement: {
+        auto* c = static_cast<CompoundStatement*>(s.get());
+        for (auto& child : c->MutableStatements()) {
+          child = rewrite_stmt(std::move(child));
+        }
+        return s;
+      }
+      case CStatementKind::kExpressionStatement: {
+        const auto& es = static_cast<const ExpressionStatement&>(*s);
+        return CStatement::Expression(SimplifyShiftAddExpression(es.Expression()));
+      }
+      case CStatementKind::kReturnStatement: {
+        const auto& ret = static_cast<const ReturnStatement&>(*s);
+        if (ret.ReturnValue() != nullptr) {
+          return CStatement::Return(SimplifyShiftAddExpression(*ret.ReturnValue()));
+        }
+        return CStatement::Return(nullptr);
+      }
+      case CStatementKind::kIfStatement: {
+        const auto& ifs = static_cast<const IfStatement&>(*s);
+        auto new_cond = SimplifyShiftAddExpression(ifs.Condition());
+        auto new_then = rewrite_stmt(ifs.ThenBranch().Clone());
+        std::unique_ptr<CStatement> new_else = nullptr;
+        if (ifs.ElseBranch() != nullptr) {
+          new_else = rewrite_stmt(ifs.ElseBranch()->Clone());
+        }
+        return CStatement::If(std::move(new_cond), std::move(new_then), std::move(new_else));
+      }
+      case CStatementKind::kWhileStatement: {
+        const auto& ws = static_cast<const WhileStatement&>(*s);
+        auto new_cond = SimplifyShiftAddExpression(ws.Condition());
+        auto new_body = rewrite_stmt(ws.Body().Clone());
+        return CStatement::While(std::move(new_cond), std::move(new_body));
+      }
+      case CStatementKind::kDoWhileStatement: {
+        const auto& dws = static_cast<const DoWhileStatement&>(*s);
+        auto new_cond = SimplifyShiftAddExpression(dws.Condition());
+        auto new_body = rewrite_stmt(dws.Body().Clone());
+        return CStatement::DoWhile(std::move(new_body), std::move(new_cond));
+      }
+      case CStatementKind::kForStatement: {
+        const auto& fs = static_cast<const ForStatement&>(*s);
+        std::unique_ptr<CStatement> new_init = nullptr;
+        if (fs.Init() != nullptr) {
+          new_init = rewrite_stmt(fs.Init()->Clone());
+        }
+        std::unique_ptr<CExpression> new_cond = nullptr;
+        if (fs.Condition() != nullptr) {
+          new_cond = SimplifyShiftAddExpression(*fs.Condition());
+        }
+        std::unique_ptr<CExpression> new_step = nullptr;
+        if (fs.Step() != nullptr) {
+          new_step = SimplifyShiftAddExpression(*fs.Step());
+        }
+        auto new_body = rewrite_stmt(fs.Body().Clone());
+        return CStatement::For(std::move(new_init), std::move(new_cond), std::move(new_step),
+                               std::move(new_body));
+      }
+      case CStatementKind::kSwitchStatement: {
+        const auto& ss = static_cast<const SwitchStatement&>(*s);
+        auto new_cond = SimplifyShiftAddExpression(ss.Condition());
+        std::vector<SwitchCase> new_cases;
+        for (const auto& c : ss.Cases()) {
+          SwitchCase sc = c.Clone();
+          if (c.body != nullptr) {
+            auto rewritten_body = rewrite_stmt(c.body->Clone());
+            sc.body = std::unique_ptr<CompoundStatement>(
+                static_cast<CompoundStatement*>(rewritten_body.release()));
+          }
+          new_cases.push_back(std::move(sc));
+        }
+        return CStatement::Switch(std::move(new_cond), std::move(new_cases));
+      }
+      default:
+        return s;
+    }
+  };
+
+  for (auto& s : comp->MutableStatements()) {
+    s = rewrite_stmt(std::move(s));
+  }
+}
+
+void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
+  absl::flat_hash_set<std::string> consumed_bias_vars;
+  SimplifyModuloAndUnsignedFloatDiamondsInBlockImpl(comp, /*parent_bias_vars=*/nullptr,
+                                                    &consumed_bias_vars);
+  if (comp != nullptr && !consumed_bias_vars.empty()) {
+    auto& stmts = comp->MutableStatements();
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      std::string lhs_var;
+      const CExpression* rhs_expr = nullptr;
+      if (ExtractSimpleRegVarAssignment(*stmts[i], &lhs_var, &rhs_expr) &&
+          consumed_bias_vars.contains(lhs_var) && IsUnsignedFloatBiasExpr(*rhs_expr)) {
+        bool used_after = false;
+        for (size_t k = i + 1; k < stmts.size(); ++k) {
+          if (CountRhsVariableUsesInStatement(*stmts[k], lhs_var) > 0) {
+            used_after = true;
+            break;
+          }
+          std::string klhs;
+          const CExpression* krhs = nullptr;
+          if (ExtractSimpleRegVarAssignment(*stmts[k], &klhs, &krhs) && klhs == lhs_var) {
+            break;
+          }
+        }
+        if (!used_after) {
+          stmts.erase(stmts.begin() + i);
+          --i;
+        }
       }
     }
   }

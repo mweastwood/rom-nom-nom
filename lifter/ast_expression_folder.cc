@@ -1865,7 +1865,18 @@ struct FolderContext {
                             static_cast<const CastExpression&>(cand_assign.Rhs())
                                     .TargetType()
                                     .name == "f32") {
-                          break;
+                          const auto& f64_op =
+                              static_cast<const CastExpression&>(assign.Rhs()).Operand();
+                          bool is_u32_f64 =
+                              f64_op.Kind() == CExpressionKind::kCastExpression &&
+                              static_cast<const CastExpression&>(f64_op).TargetType().name ==
+                                  "u32" &&
+                              static_cast<const CastExpression&>(f64_op)
+                                      .TargetType()
+                                      .pointer_depth == 0;
+                          if (!is_u32_f64) {
+                            break;
+                          }
                         }
                         if (is_fp_scratch &&
                             cand_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
@@ -2316,30 +2327,56 @@ struct FolderContext {
                                    loop_dead_vars.empty() ? nullptr : &loop_dead_vars, false,
                                    root_has_label_cached);
           // Remove redundant trailing comparison assignment (`v0 = (i < n);` or `v1 = (i < n);`)
-          // at the end of a `do { ... } while (i < n);` body when the variable is dead on both
+          // at the end of a `do { ... } while (i < n);` body (or immediately preceding a pure
+          // branch-delay-slot statement at the end of the body) when the variable is dead on both
           // the loop back-edge and loop exit.
-          if (!body_comp->Statements().empty() &&
-              body_comp->Statements().back()->Kind() == CStatementKind::kExpressionStatement) {
-            const auto& last_es =
-                static_cast<const ExpressionStatement&>(*body_comp->Statements().back());
-            if (last_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-              const auto& last_assign =
-                  static_cast<const AssignmentExpression&>(last_es.Expression());
-              if (last_assign.Op() == "=" &&
-                  last_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
-                  IsPureExpr(last_assign.Rhs())) {
-                const std::string& last_var =
-                    static_cast<const IdentifierExpression&>(last_assign.Lhs()).Name();
-                if ((last_var == "v0" || last_var == "v1") &&
-                    CountExprUses(dws.Condition(), last_var) == 0 &&
-                    IsDeadAfterStmt(i, last_var, 0)) {
-                  active_ignored_def_stmt = body_comp->Statements().back().get();
-                  VarLiveness prefix_live = AnalyzeVarLiveness(*body_comp, last_var, false, 0);
-                  active_ignored_def_stmt = nullptr;
-                  if (prefix_live != VarLiveness::kReadBeforeWrite &&
-                      (root_has_label_cached == 0 || !HasLabelInStmt(*body_comp))) {
-                    body_comp->MutableStatements().pop_back();
+          if (!body_comp->Statements().empty()) {
+            size_t body_sz = body_comp->Statements().size();
+            for (size_t offset : {size_t{1}, size_t{2}}) {
+              if (body_sz < offset) continue;
+              size_t cand_idx = body_sz - offset;
+              if (body_comp->Statements()[cand_idx]->Kind() !=
+                  CStatementKind::kExpressionStatement) {
+                continue;
+              }
+              const auto& cand_es =
+                  static_cast<const ExpressionStatement&>(*body_comp->Statements()[cand_idx]);
+              if (cand_es.Expression().Kind() != CExpressionKind::kAssignmentExpression) continue;
+              const auto& cand_assign =
+                  static_cast<const AssignmentExpression&>(cand_es.Expression());
+              if (cand_assign.Op() != "=" ||
+                  cand_assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+                  !IsPureExpr(cand_assign.Rhs())) {
+                continue;
+              }
+              if (offset == 2 && !IsComparisonExpr(cand_assign.Rhs())) {
+                continue;
+              }
+              const std::string& last_var =
+                  static_cast<const IdentifierExpression&>(cand_assign.Lhs()).Name();
+              if (offset == 2 &&
+                  (CountUses(*body_comp->Statements().back(), last_var) > 0 ||
+                   HasAddressOfVarInStmt(*body_comp->Statements().back(), last_var) ||
+                   HasCallInStmt(*body_comp->Statements().back()) ||
+                   HasControlJumpInStmt(*body_comp->Statements().back()))) {
+                continue;
+              }
+              if ((last_var == "v0" || last_var == "v1") &&
+                  CountExprUses(dws.Condition(), last_var) == 0 &&
+                  IsDeadAfterStmt(i, last_var, 0)) {
+                active_ignored_def_stmt = body_comp->Statements()[cand_idx].get();
+                VarLiveness prefix_live = AnalyzeVarLiveness(*body_comp, last_var, false, 0);
+                active_ignored_def_stmt = nullptr;
+                if (prefix_live != VarLiveness::kReadBeforeWrite &&
+                    (root_has_label_cached == 0 || !HasLabelInStmt(*body_comp))) {
+                  body_comp->MutableStatements().erase(body_comp->MutableStatements().begin() +
+                                                       cand_idx);
+                  if (offset == 2) {
+                    FoldSingleUseExpressions(body_comp, root_body,
+                                             loop_dead_vars.empty() ? nullptr : &loop_dead_vars,
+                                             false, root_has_label_cached);
                   }
+                  break;
                 }
               }
             }
