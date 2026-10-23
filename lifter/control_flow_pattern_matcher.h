@@ -66,7 +66,7 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
 // Detects a short-circuit || or && condition chain starting at entry.
 std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     const ControlFlowGraph& cfg, const absl::flat_hash_set<uint32_t>& visited, uint32_t entry,
-    uint32_t succ_taken, uint32_t succ_fallthrough);
+    uint32_t succ_taken, uint32_t succ_fallthrough, std::optional<uint32_t> join = std::nullopt);
 
 }  // namespace rom_nom_nom
 

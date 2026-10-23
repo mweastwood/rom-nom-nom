@@ -876,7 +876,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     }
 
     auto sc_chain =
-        TryCollapseShortCircuitChain(*cfg_, visited_, entry, succ_taken, succ_fallthrough);
+        TryCollapseShortCircuitChain(*cfg_, visited_, entry, succ_taken, succ_fallthrough, join);
     if (sc_chain.has_value()) {
       for (uint32_t b_id : sc_chain->additional_condition_blocks) {
         visited_.insert(b_id);

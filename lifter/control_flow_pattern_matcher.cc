@@ -1058,7 +1058,7 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
 
 std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     const ControlFlowGraph& cfg, const absl::flat_hash_set<uint32_t>& visited, uint32_t entry,
-    uint32_t succ_taken, uint32_t succ_fallthrough) {
+    uint32_t succ_taken, uint32_t succ_fallthrough, std::optional<uint32_t> join) {
   if (visited.contains(succ_fallthrough) || !HasNopBranchDelaySlot(cfg, entry)) {
     return std::nullopt;
   }
@@ -1088,25 +1088,27 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     return std::nullopt;
   }
 
-  // Note: When `b_taken == succ_taken || b_ft == succ_taken`, in ControlFlowStructurer:
-  // Short-Circuit OR (||) was checked first (`b_taken == succ_taken || b_ft == succ_taken`)!
-  // Let's preserve the exact behavior:
-  std::vector<uint32_t> or_chain;
+  std::vector<uint32_t> chain_blocks;
   std::vector<bool> or_inverts;
+  std::vector<bool> and_inverts;
   uint32_t curr_id = succ_fallthrough;
   uint32_t curr_taken = b_taken;
   uint32_t curr_ft = b_ft;
   std::optional<uint32_t> final_after;
+  bool last_matches_taken = false;
 
   while (true) {
     bool matches_taken = (curr_taken == succ_taken);
     bool matches_ft = (curr_ft == succ_taken);
-    if (!matches_taken && !matches_ft) break;
+    if (!matches_taken && !matches_ft) {
+      break;
+    }
 
+    last_matches_taken = matches_taken;
     uint32_t other = matches_taken ? curr_ft : curr_taken;
-    bool invert = matches_ft;
-    or_chain.push_back(curr_id);
-    or_inverts.push_back(invert);
+    chain_blocks.push_back(curr_id);
+    or_inverts.push_back(matches_ft);
+    and_inverts.push_back(matches_taken);
 
     const auto* next_b = cfg.GetBlock(other);
     if (HasNopBranchDelaySlot(cfg, curr_id) && next_b != nullptr &&
@@ -1133,14 +1135,34 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     }
   }
 
-  if (!or_chain.empty()) {
+  if (!chain_blocks.empty()) {
+    bool is_and_chain = false;
+    if (final_after.has_value()) {
+      if (join.has_value() && succ_taken == *join && *final_after != *join) {
+        is_and_chain = true;
+      } else if (join.has_value() && *final_after == *join && succ_taken != *join) {
+        is_and_chain = false;
+      } else {
+        is_and_chain = last_matches_taken;
+      }
+    }
+
     ShortCircuitChainInfo info;
-    info.condition_op = "||";
-    info.root_invert = false;
-    info.additional_condition_blocks = std::move(or_chain);
-    info.additional_invert_conditions = std::move(or_inverts);
-    info.then_target_block = succ_taken;
-    info.else_target_block = final_after;
+    if (is_and_chain) {
+      info.condition_op = "&&";
+      info.root_invert = true;
+      info.additional_condition_blocks = std::move(chain_blocks);
+      info.additional_invert_conditions = std::move(and_inverts);
+      info.then_target_block = *final_after;
+      info.else_target_block = succ_taken;
+    } else {
+      info.condition_op = "||";
+      info.root_invert = false;
+      info.additional_condition_blocks = std::move(chain_blocks);
+      info.additional_invert_conditions = std::move(or_inverts);
+      info.then_target_block = succ_taken;
+      info.else_target_block = final_after;
+    }
     return info;
   }
 

@@ -1004,7 +1004,77 @@ TEST(ControlFlowStructurerTest, MergesAndChainWhenBranchDelaySlotDoesNotOverwrit
   ASSERT_THAT(region, NotNull());
 
   std::string s = region->ToString();
-  EXPECT_THAT(s, HasSubstr("block_0 || block_1"));
+  EXPECT_THAT(s, HasSubstr("!block_0 && !block_1"));
+}
+
+TEST(ControlFlowStructurerTest, CollapsesThreeWayShortCircuitAndChain) {
+  // Block 0 (0x00): beq $a0, $zero, 0x20; nop
+  // Block 1 (0x08): beq $a1, $zero, 0x20; nop
+  // Block 2 (0x10): beq $a2, $zero, 0x20; nop
+  // Block 3 (0x18): addiu $v0, $zero, 1; jr $ra; nop
+  // Block 4 (0x20): jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x10800007,  // 0x00: beq   $a0, $zero, 0x20
+      0x00000000,  // 0x04: nop
+      0x10A00005,  // 0x08: beq   $a1, $zero, 0x20
+      0x00000000,  // 0x0C: nop
+      0x10C00003,  // 0x10: beq   $a2, $zero, 0x20
+      0x00000000,  // 0x14: nop
+      0x24020001,  // 0x18: addiu $v0, $zero, 1
+      0x03E00008,  // 0x1C: jr    $ra
+      0x03E00008,  // 0x20: jr    $ra
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("if (!block_0 && !block_1 && !block_2) {\n  block_3\n}"));
+}
+
+TEST(ControlFlowStructurerTest, CollapsesThreeWayShortCircuitOrChain) {
+  // Block 0 (0x00): bne $a0, $zero, 0x18; nop
+  // Block 1 (0x08): bne $a1, $zero, 0x18; nop
+  // Block 2 (0x10): beq $a2, $zero, 0x20; nop
+  // Block 3 (0x18): addiu $v0, $zero, 1; jr $ra
+  // Block 4 (0x20): jr $ra; nop
+  std::vector<uint32_t> words = {
+      0x14800005,  // 0x00: bne   $a0, $zero, 0x18
+      0x00000000,  // 0x04: nop
+      0x14A00003,  // 0x08: bne   $a1, $zero, 0x18
+      0x00000000,  // 0x0C: nop
+      0x10C00003,  // 0x10: beq   $a2, $zero, 0x20
+      0x00000000,  // 0x14: nop
+      0x24020001,  // 0x18: addiu $v0, $zero, 1
+      0x03E00008,  // 0x1C: jr    $ra
+      0x03E00008,  // 0x20: jr    $ra
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("if (block_0 || block_1 || !block_2) {\n  block_3\n}"));
 }
 
 TEST(ControlFlowStructurerTest, OrdersJumpTableSwitchCasesByTargetBlockVramOrder) {

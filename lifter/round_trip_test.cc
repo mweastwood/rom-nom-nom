@@ -5361,5 +5361,29 @@ void HalfwordBitmaskClearAndStoreAfterHelperCall(s32 idx) {
 )");
 }
 
+TEST_F(RoundTripTest, ShortCircuitFloatAndStoreGlobal) {
+  AssertRoundTripBitExact("ShortCircuitFloatAndStoreGlobal", R"(
+extern s32 g_ready_flag;
+
+void ShortCircuitFloatAndStoreGlobal(f32 x, f32 y, f32 z) {
+    if (x > 0.0f && y > 0.0f && z > 0.0f) {
+        g_ready_flag = 0;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, ShortCircuitFloatOrStoreGlobal) {
+  AssertRoundTripBitExact("ShortCircuitFloatOrStoreGlobal", R"(
+extern s32 g_error_flag;
+
+void ShortCircuitFloatOrStoreGlobal(f32 x, f32 y, f32 z) {
+    if (x < 0.0f || y < 0.0f || z < 0.0f) {
+        g_error_flag = 0;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

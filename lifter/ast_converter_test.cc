@@ -1581,8 +1581,52 @@ TEST(AstConverterTest, ShortCircuitConditionSynthesis) {
   FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
   std::string code = func.ToString();
 
-  // Short-circuit || condition should be synthesized into if (...)
-  EXPECT_THAT(code, HasSubstr("||"));
+  // Short-circuit && condition should be synthesized into if (...)
+  EXPECT_THAT(code, HasSubstr("if (((arg0 < 10) && (arg1 < 20)))"));
+}
+
+TEST(AstConverterTest, ShortCircuitOrConditionSynthesis) {
+  // Cascading branches for (arg0 < 10 || arg1 < 20):
+  // 00: slti  $at, $a0, 10       (a0 < 10)
+  // 04: bne   $at, $zero, +4 -> 0x18 (true -> then)
+  // 08: nop
+  // 0C: slti  $at, $a1, 20       (a1 < 20)
+  // 10: beq   $at, $zero, +2 -> 0x1C (false -> exit)
+  // 14: nop
+  // 18: addiu $v0, $zero, 1      (then: v0 = 1)
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> words = {
+      0x2881000A,  // 00: slti $at, $a0, 10
+      0x14200004,  // 04: bne  $at, $zero, +4 -> 0x18
+      0x00000000,  // 08: nop
+      0x28A10014,  // 0C: slti $at, $a1, 20
+      0x10200002,  // 10: beq  $at, $zero, +2 -> 0x1C
+      0x00000000,  // 14: nop
+      0x24020001,  // 18: addiu $v0, $zero, 1
+      0x03E00008,  // 1C: jr $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "CascadingBranchOr";
+
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("if (((arg0 < 10) || (arg1 < 20)))"));
 }
 
 TEST(AstConverterTest, ChainedSelfAssignmentPreservesLvalueAndDefinitions) {
