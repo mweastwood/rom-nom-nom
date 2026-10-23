@@ -145,82 +145,17 @@ struct FunctionLiftContext {
 // Lifts instructions within basic blocks into structured statements and expressions.
 class ExpressionBuilder {
  public:
-  using FoldedComparison = ::rom_nom_nom::FoldedComparison;
-
   ExpressionBuilder() = default;
 
   // Lifts a basic block into a sequence of high-level statements using a FunctionLiftContext.
   static std::vector<LiftedStatement> LiftBlock(const BasicBlock& block,
-                                                const FunctionLiftContext& ctx,
+                                                const FunctionLiftContext& ctx = {},
                                                 bool omit_last_instruction = false);
-
-  // Lifts a basic block into a sequence of high-level statements.
-  static std::vector<LiftedStatement> LiftBlock(
-      const BasicBlock& block, const SymbolIndex* symbol_index = nullptr,
-      const GameConfig* game_config = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr,
-      bool omit_last_instruction = false, uint32_t frame_size = 0,
-      const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr,
-      const absl::flat_hash_set<std::string>* functions_returning_f0 = nullptr,
-      bool has_frame_pointer = false, bool has_calls = false, bool sp_address_taken = false,
-      const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr,
-      const absl::flat_hash_map<FpRegister, int32_t>* saved_fpr_offsets = nullptr,
-      const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits = nullptr,
-      const RegisterTracker* initial_tracker = nullptr,
-      const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr,
-      const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr);
 
   // Lifts a raw sequence of instructions into high-level statements using a FunctionLiftContext.
   static std::vector<LiftedStatement> LiftInstructions(absl::Span<const Instruction> instructions,
-                                                       const FunctionLiftContext& ctx,
+                                                       const FunctionLiftContext& ctx = {},
                                                        bool omit_last_instruction = false);
-
-  // Lifts a raw sequence of instructions into high-level statements.
-  static std::vector<LiftedStatement> LiftInstructions(
-      absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index = nullptr,
-      const GameConfig* game_config = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr,
-      const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr,
-      bool omit_last_instruction = false, uint32_t frame_size = 0,
-      const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr,
-      const absl::flat_hash_set<std::string>* functions_returning_f0 = nullptr,
-      bool has_frame_pointer = false, bool has_calls = false, bool sp_address_taken = false,
-      const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets = nullptr,
-      const absl::flat_hash_map<FpRegister, int32_t>* saved_fpr_offsets = nullptr,
-      const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits = nullptr,
-      const RegisterTracker* initial_tracker = nullptr,
-      const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr,
-      const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr);
-
-  // Computes return types of calls across basic blocks in a CFG.
-  static absl::flat_hash_map<uint32_t, CallReturnInfo> ComputeCallReturnInfo(
-      const ControlFlowGraph& cfg, bool function_returns_v0 = false,
-      bool function_returns_f0 = false);
-
-  // Analyzes register usage across instructions to determine the number of parameters ($a0-$a3)
-  // expected by a function (via use-before-definition).
-  static int DetermineParameterCount(absl::Span<const Instruction> instructions);
-
-  // Analyzes register usage across instructions to determine the number of float parameters ($f12,
-  // $f14) expected by a function (via use-before-definition).
-  static int DetermineFpParameterCount(absl::Span<const Instruction> instructions);
-
-  // Analyzes the CFG to determine if the function returns a value in $v0.
-  // Returns true if there is an unconsumed definition of $v0 that reaches a return instruction.
-  static bool DetermineReturnsV0(
-      const ControlFlowGraph& cfg, const SymbolIndex* symbol_index = nullptr,
-      const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr);
-
-  // Analyzes the CFG to determine if the function returns a float value in $f0.
-  static bool DetermineReturnsF0(const ControlFlowGraph& cfg);
-  static bool DetermineReturnsF0Double(const ControlFlowGraph& cfg);
-
-  // Detects callee-saved registers ($s0-$s7, $fp) that are used before definition in the
-  // function body (excluding standard prologue spills like `sw $sX, offset($sp)`).
-  // These represent uninitialized local variables in the original compiled binary.
-  static absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(
-      const ControlFlowGraph& cfg);
 
   // Maps an ABI register to its clean variable name (e.g. "v0", "arg0", "temp_t0").
   static std::string RegisterVarName(Register reg);
@@ -231,11 +166,6 @@ class ExpressionBuilder {
 
   // Maps a local stack frame offset to its variable name (e.g. "var_sp_20").
   static std::string StackVarName(int32_t offset);
-
-  // Finds a comparison instruction in `instructions` that is folded into a subsequent conditional
-  // branch. Returns std::nullopt if no instruction is folded.
-  static std::optional<FoldedComparison> FindFoldedComparison(
-      absl::Span<const Instruction> instructions);
 
   // Lifts a folded symbol access into one or more high-level statements.
   static void LiftFoldedAccess(const FoldedSymbolAccess& lo, const Instruction& inst,

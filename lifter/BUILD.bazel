@@ -254,6 +254,8 @@ cc_test(
     name = "expression_builder_test",
     srcs = ["expression_builder_test.cc"],
     deps = [
+        ":abi_analyzer",
+        ":branch_condition_builder",
         ":expression_builder",
         "//core:mips",
         "//core:symbol_registry",
@@ -269,6 +271,9 @@ cc_library(
         "ast_arithmetic_simplifier.cc",
         "ast_converter.cc",
         "ast_expression_folder.cc",
+        "ast_memory_idiom_rewriter.cc",
+        "ast_parameter_coalescer.cc",
+        "ast_pass_pipeline.cc",
         "variable_declaration_builder.cc",
     ],
     hdrs = [
@@ -276,6 +281,9 @@ cc_library(
         "ast_arithmetic_simplifier.h",
         "ast_converter.h",
         "ast_expression_folder.h",
+        "ast_memory_idiom_rewriter.h",
+        "ast_parameter_coalescer.h",
+        "ast_pass_pipeline.h",
         "variable_declaration_builder.h",
     ],
     deps = [
@@ -303,7 +311,9 @@ cc_test(
     name = "ast_converter_test",
     srcs = ["ast_converter_test.cc"],
     deps = [
+        ":abi_analyzer",
         ":ast_converter",
+        ":branch_condition_builder",
         ":control_flow_structurer",
         ":dominator_tree",
         ":expression_builder",
@@ -377,8 +387,14 @@ cc_test(
 
 cc_library(
     name = "lifter_pipeline",
-    srcs = ["lifter_pipeline.cc"],
-    hdrs = ["lifter_pipeline.h"],
+    srcs = [
+        "lifter_pipeline.cc",
+        "module_symbol_scanner.cc",
+    ],
+    hdrs = [
+        "lifter_pipeline.h",
+        "module_symbol_scanner.h",
+    ],
     visibility = ["//tuner:__pkg__"],
     deps = [
         ":abi_analyzer",
@@ -390,9 +406,16 @@ cc_library(
         ":loop_analyzer",
         "//core:c_ast",
         "//core:control_flow_graph",
+        "//core:game_config",
         "//core:jump_table",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 

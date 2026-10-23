@@ -5,11 +5,17 @@
 #include <vector>
 
 #include "core/c_ast.h"
+#include "core/c_ast_utils.h"
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
 #include "core/symbol_registry.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "lifter/ast_abi_rewriter.h"
+#include "lifter/ast_memory_idiom_rewriter.h"
+#include "lifter/ast_parameter_coalescer.h"
+#include "lifter/ast_pass_pipeline.h"
+#include "lifter/branch_condition_builder.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/expression_builder.h"
@@ -1076,41 +1082,49 @@ TEST(AstConverterTest, FoldsNewFpuComparisonOpcodesInBranchConditions) {
   // c.ueq.s $f2, $f4 (0x46041033) + bc1t (0x45010002)
   {
     auto block = make_fpu_branch_block(0x46041033, 0x45010002);
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/false)
+                  ->ToString(),
               "(f2 == f4)");
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/true)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/true)
+                  ->ToString(),
               "(f2 != f4)");
   }
 
   // c.ult.s $f2, $f4 (0x46041035) + bc1f (0x45000002)
   {
     auto block = make_fpu_branch_block(0x46041035, 0x45000002);
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/false)
+                  ->ToString(),
               "!(f2 < f4)");
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/true)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/true)
+                  ->ToString(),
               "(f2 < f4)");
   }
 
   // c.ule.d $f12, $f14 (0x462E6037) + bc1t (0x45010002)
   {
     auto block = make_fpu_branch_block(0x462E6037, 0x45010002);
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/false)
+                  ->ToString(),
               "(f12_d <= f14_d)");
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/true)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/true)
+                  ->ToString(),
               "!(f12_d <= f14_d)");
   }
 
   // c.ngle.s $f2, $f4 (0x46041039) + bc1t (0x45010002)
   {
     auto block = make_fpu_branch_block(0x46041039, 0x45010002);
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/false)
+                  ->ToString(),
               "(f2 <= f4)");
   }
 
   // c.ngl.d $f12, $f14 (0x462E603B) + bc1f (0x45000002)
   {
     auto block = make_fpu_branch_block(0x462E603B, 0x45000002);
-    EXPECT_EQ(AstConverter::ExtractBranchCondition(block, /*invert_condition=*/false)->ToString(),
+    EXPECT_EQ(BranchConditionBuilder::ExtractBranchCondition(block, /*invert_condition=*/false)
+                  ->ToString(),
               "(f12_d != f14_d)");
   }
 
@@ -1264,7 +1278,7 @@ TEST(AstConverterTest, CollectUsedVariablesProperlyCollectsVariablesInForStateme
 
   std::vector<std::string> vars;
   absl::flat_hash_set<std::string> seen;
-  AstConverter::CollectUsedVariables(*for_stmt, &vars, &seen);
+  CollectUsedVariables(*for_stmt, &vars, &seen);
 
   EXPECT_THAT(vars, UnorderedElementsAre("i", "limit", "total", "item"));
 }
@@ -1277,7 +1291,7 @@ TEST(AstConverterTest, SimplifyReturnStatementsTerminalAssignmentFoldsIntoDirect
       CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b")))));
   comp.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
 
-  AstConverter::SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
+  SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
 
   ASSERT_EQ(comp.Statements().size(), 1u);
   EXPECT_EQ(comp.Statements()[0]->Kind(), CStatementKind::kReturnStatement);
@@ -1302,7 +1316,7 @@ TEST(AstConverterTest, SimplifyReturnStatementsEarlyReturnRestructuring) {
       std::move(then_branch)));
   comp.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
 
-  AstConverter::SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
+  SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
 
   ASSERT_EQ(comp.Statements().size(), 2u);
   EXPECT_EQ(comp.Statements()[0]->Kind(), CStatementKind::kIfStatement);
@@ -1331,7 +1345,7 @@ TEST(AstConverterTest, SimplifyReturnStatementsBranchLikelyReturnInversion) {
       std::move(then_branch)));
   comp.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
 
-  AstConverter::SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
+  SimplifyReturnStatements(&comp, /*returns_v0=*/true, /*returns_f0=*/false);
 
   ASSERT_EQ(comp.Statements().size(), 2u);
   EXPECT_EQ(comp.Statements()[0]->Kind(), CStatementKind::kIfStatement);
@@ -3987,6 +4001,146 @@ TEST(AstConverterTest, FoldsFramePointerWhileLoopConditionAndPostIncrementPointe
   EXPECT_THAT(code, HasSubstr("*(s8*)arg1++ = 0;"));
   EXPECT_THAT(code, HasSubstr("var_sp_8 = (var_sp_8 + 1);"));
   EXPECT_THAT(code, HasSubstr("((struct { u8 _p[4]; u8 _v; }*)arg0)->_v = 255;"));
+}
+
+TEST(AstPassPipelineTest, RunToFixedPointStopsEarlyWhenPassesConverge) {
+  CompoundStatement body;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("temp_s0")));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  AstPassContext ctx{.parameters = params, .frame_size = 24};
+
+  static int call_count = 0;
+  call_count = 0;
+  AstPass coalesce_pass{
+      .name = "CoalescePrologueParameterCopies",
+      .run =
+          [](CompoundStatement* comp, const AstPassContext& pass_ctx) {
+            ++call_count;
+            CoalescePrologueParameterCopies(comp, pass_ctx.parameters, pass_ctx.frame_size);
+          },
+  };
+
+  // First iteration coalesces temp_s0 -> arg0; second iteration observes no change and stops.
+  int iterations = AstPassPipeline::RunToFixedPoint(&body, ctx, {&coalesce_pass, 1},
+                                                    /*max_iterations=*/5);
+  EXPECT_EQ(iterations, 2);
+  EXPECT_EQ(call_count, 2);
+  EXPECT_THAT(body.ToString(), HasSubstr("return arg0;"));
+  EXPECT_THAT(body.ToString(), Not(HasSubstr("temp_s0")));
+}
+
+TEST(AstPassPipelineTest, RunToFixedPointRespectsMaxIterationsAndHandlesNullBody) {
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params};
+
+  static int toggle_count = 0;
+  toggle_count = 0;
+  AstPass mutating_pass{
+      .name = "AlwaysMutatingPass",
+      .run =
+          [](CompoundStatement* comp, const AstPassContext&) {
+            ++toggle_count;
+            comp->AddStatement(CStatement::Expression(CExpression::Integer(toggle_count)));
+          },
+  };
+
+  EXPECT_EQ(AstPassPipeline::RunToFixedPoint(nullptr, ctx, {&mutating_pass, 1}, 4), 0);
+
+  CompoundStatement body;
+  int iterations = AstPassPipeline::RunToFixedPoint(&body, ctx, {&mutating_pass, 1}, 3);
+  EXPECT_EQ(iterations, 3);
+  EXPECT_EQ(toggle_count, 3);
+}
+
+TEST(AstParameterCoalescerTest, SplitReusedFloatGprParametersRewritesSubsequentIntUseToTemp) {
+  CompoundStatement body;
+  // f2 = arg1 + 1.0f;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f2"),
+      CExpression::Binary("+", CExpression::Identifier("arg1"), CExpression::Float(1.0)))));
+  // arg1 = 42;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg1"), CExpression::Integer(42))));
+  // return arg1;
+  body.AddStatement(CStatement::Return(CExpression::Identifier("arg1")));
+
+  std::vector<CParameter> params = {
+      {.type = CType::F32(), .name = "f12"},
+      {.type = CType::F32(), .name = "arg1"},
+  };
+  SplitReusedFloatGprParameters(&body, params);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, HasSubstr("f2 = (arg1 + 1.0f);"));
+  EXPECT_THAT(code, HasSubstr("temp_a1 = 42;"));
+  EXPECT_THAT(code, HasSubstr("return temp_a1;"));
+}
+
+TEST(AstParameterCoalescerTest, SplitScratchReusedParameterRegistersSplitsDeadEntryArgAfterCopy) {
+  CompoundStatement body;
+  // temp_t0 = arg0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"), CExpression::Identifier("arg0"))));
+  // arg0 = temp_t0 + 4;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t0"), CExpression::Integer(4)))));
+  // return arg0;
+  body.AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/24);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, HasSubstr("temp_a0 = (temp_t0 + 4);"));
+  EXPECT_THAT(code, HasSubstr("return temp_a0;"));
+}
+
+TEST(AstMemoryIdiomRewriterTest, CollapseUnalignedBlockCopiesCollapsesWordStore) {
+  CompoundStatement body;
+  // v0 = *(s32*)arg1;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("arg1"))))));
+  // *(u8*)arg0 = v0 >> 24;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"u8", false, 1}, CExpression::Identifier("arg0"))),
+      CExpression::Binary(">>", CExpression::Identifier("v0"), CExpression::Integer(24)))));
+  // *(u8*)(arg0 + 1) = v0 >> 16;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"u8", false, 1},
+                                           CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                               CExpression::Integer(1)))),
+      CExpression::Binary(">>", CExpression::Identifier("v0"), CExpression::Integer(16)))));
+  // *(u8*)(arg0 + 2) = v0 >> 8;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"u8", false, 1},
+                                           CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                               CExpression::Integer(2)))),
+      CExpression::Binary(">>", CExpression::Identifier("v0"), CExpression::Integer(8)))));
+  // *(u8*)(arg0 + 3) = v0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"u8", false, 1},
+                                           CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                               CExpression::Integer(3)))),
+      CExpression::Identifier("v0"))));
+
+  CollapseUnalignedBlockCopies(&body);
+  std::string code = body.ToString();
+  EXPECT_THAT(code, HasSubstr("*(UnalignedWord*)arg0 = *(UnalignedWord*)arg1;"));
+  EXPECT_THAT(code, Not(HasSubstr(">> 24")));
 }
 
 }  // namespace

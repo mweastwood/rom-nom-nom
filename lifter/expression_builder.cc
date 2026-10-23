@@ -275,7 +275,7 @@ struct BlockLiftRunner {
   std::unique_ptr<PendingUnalignedAccess> pending_lwl;
   std::unique_ptr<PendingUnalignedAccess> pending_swl;
   absl::flat_hash_set<int32_t> local_stack_stores;
-  std::optional<ExpressionBuilder::FoldedComparison> folded_comp;
+  std::optional<FoldedComparison> folded_comp;
   absl::flat_hash_set<size_t> skipped_instruction_indices;
   absl::flat_hash_set<Register> gprs_defined_in_block;
   std::optional<uint32_t> fpr_const_bits[32];
@@ -495,7 +495,7 @@ void BlockLiftRunner::Initialize(bool omit_last_instruction) {
     }
   }
 
-  folded_comp = ExpressionBuilder::FindFoldedComparison(instructions_to_process);
+  folded_comp = BranchConditionBuilder::FindFoldedComparison(instructions_to_process);
 
   loop_end = instructions_to_process.size();
   if (omit_last_instruction && loop_end > 0) {
@@ -2315,117 +2315,11 @@ std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(const BasicBlock& bloc
   return LiftInstructions(block.instructions, block_ctx, omit_last_instruction);
 }
 
-std::vector<LiftedStatement> ExpressionBuilder::LiftBlock(
-    const BasicBlock& block, const SymbolIndex* symbol_index, const GameConfig* game_config,
-    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
-    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
-    bool omit_last_instruction, uint32_t frame_size,
-    const absl::flat_hash_set<std::string>* functions_returning_v0,
-    const absl::flat_hash_set<std::string>* functions_returning_f0, bool has_frame_pointer,
-    bool has_calls, bool sp_address_taken,
-    const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets,
-    const absl::flat_hash_map<FpRegister, int32_t>* saved_fpr_offsets,
-    const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits,
-    const RegisterTracker* initial_tracker,
-    const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info,
-    const absl::flat_hash_set<int32_t>* function_stack_stores) {
-  FunctionLiftContext ctx;
-  ctx.symbol_index = symbol_index;
-  ctx.game_config = game_config;
-  ctx.function_parameter_counts = function_parameter_counts;
-  ctx.function_fp_parameter_counts = function_fp_parameter_counts;
-  ctx.frame_size = frame_size;
-  ctx.functions_returning_v0 = functions_returning_v0;
-  ctx.functions_returning_f0 = functions_returning_f0;
-  ctx.has_frame_pointer = has_frame_pointer;
-  ctx.has_calls = has_calls;
-  ctx.sp_address_taken = sp_address_taken;
-  ctx.saved_reg_offsets = saved_reg_offsets;
-  ctx.saved_fpr_offsets = saved_fpr_offsets;
-  ctx.initial_fpr_const_bits = initial_fpr_const_bits;
-  ctx.initial_tracker = initial_tracker;
-  ctx.call_return_info = call_return_info;
-  ctx.function_stack_stores = function_stack_stores;
-  return LiftBlock(block, ctx, omit_last_instruction);
-}
-
-std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
-    absl::Span<const Instruction> instructions, const SymbolIndex* symbol_index,
-    const GameConfig* game_config,
-    const absl::flat_hash_map<std::string, int>* function_parameter_counts,
-    const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
-    bool omit_last_instruction, uint32_t frame_size,
-    const absl::flat_hash_set<std::string>* functions_returning_v0,
-    const absl::flat_hash_set<std::string>* functions_returning_f0, bool has_frame_pointer,
-    bool has_calls, bool sp_address_taken,
-    const absl::flat_hash_map<Register, int32_t>* saved_reg_offsets,
-    const absl::flat_hash_map<FpRegister, int32_t>* saved_fpr_offsets,
-    const std::array<std::optional<uint32_t>, 32>* initial_fpr_const_bits,
-    const RegisterTracker* initial_tracker,
-    const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info,
-    const absl::flat_hash_set<int32_t>* function_stack_stores) {
-  FunctionLiftContext ctx;
-  ctx.symbol_index = symbol_index;
-  ctx.game_config = game_config;
-  ctx.function_parameter_counts = function_parameter_counts;
-  ctx.function_fp_parameter_counts = function_fp_parameter_counts;
-  ctx.frame_size = frame_size;
-  ctx.functions_returning_v0 = functions_returning_v0;
-  ctx.functions_returning_f0 = functions_returning_f0;
-  ctx.has_frame_pointer = has_frame_pointer;
-  ctx.has_calls = has_calls;
-  ctx.sp_address_taken = sp_address_taken;
-  ctx.saved_reg_offsets = saved_reg_offsets;
-  ctx.saved_fpr_offsets = saved_fpr_offsets;
-  ctx.initial_fpr_const_bits = initial_fpr_const_bits;
-  ctx.initial_tracker = initial_tracker;
-  ctx.call_return_info = call_return_info;
-  ctx.function_stack_stores = function_stack_stores;
-  return LiftInstructions(instructions, ctx, omit_last_instruction);
-}
-
 std::vector<LiftedStatement> ExpressionBuilder::LiftInstructions(
     absl::Span<const Instruction> instructions, const FunctionLiftContext& ctx,
     bool omit_last_instruction) {
   BlockLiftRunner runner(instructions, ctx, omit_last_instruction);
   return runner.Run();
-}
-
-int ExpressionBuilder::DetermineParameterCount(absl::Span<const Instruction> instructions) {
-  return AbiAnalyzer::DetermineParameterCount(instructions);
-}
-
-int ExpressionBuilder::DetermineFpParameterCount(absl::Span<const Instruction> instructions) {
-  return AbiAnalyzer::DetermineFpParameterCount(instructions);
-}
-
-bool ExpressionBuilder::DetermineReturnsV0(
-    const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,
-    const absl::flat_hash_set<std::string>* functions_returning_v0) {
-  return AbiAnalyzer::DetermineReturnsV0(cfg, symbol_index, functions_returning_v0);
-}
-
-bool ExpressionBuilder::DetermineReturnsF0(const ControlFlowGraph& cfg) {
-  return AbiAnalyzer::DetermineReturnsF0(cfg);
-}
-
-bool ExpressionBuilder::DetermineReturnsF0Double(const ControlFlowGraph& cfg) {
-  return AbiAnalyzer::DetermineReturnsF0Double(cfg);
-}
-
-absl::flat_hash_set<Register> ExpressionBuilder::DetectUninitializedCalleeSavedRegisters(
-    const ControlFlowGraph& cfg) {
-  return AbiAnalyzer::DetectUninitializedCalleeSavedRegisters(cfg);
-}
-
-absl::flat_hash_map<uint32_t, CallReturnInfo> ExpressionBuilder::ComputeCallReturnInfo(
-    const ControlFlowGraph& cfg, bool function_returns_v0, bool function_returns_f0) {
-  return AbiAnalyzer::ComputeCallReturnInfo(cfg, function_returns_v0, function_returns_f0);
-}
-
-std::optional<ExpressionBuilder::FoldedComparison> ExpressionBuilder::FindFoldedComparison(
-    absl::Span<const Instruction> instructions) {
-  return BranchConditionBuilder::FindFoldedComparison(instructions);
 }
 
 }  // namespace rom_nom_nom

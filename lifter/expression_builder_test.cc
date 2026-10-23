@@ -8,6 +8,8 @@
 #include "core/symbol_registry.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "lifter/abi_analyzer.h"
+#include "lifter/branch_condition_builder.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -45,7 +47,8 @@ TEST(ExpressionBuilderTest, FoldedSymbolAccess) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   // lui is folded, so only the loaded symbol statement is emitted
   ASSERT_THAT(statements, SizeIs(1));
@@ -69,7 +72,8 @@ TEST(ExpressionBuilderTest, FoldedAddressLoadAndConstantLiteral) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(2));
   EXPECT_EQ(statements[0].ToString(), "arg0 = &g_target_buf;\n");
@@ -96,7 +100,8 @@ TEST(ExpressionBuilderTest, FoldedGlobalStoreTypedAndUntyped) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(3));
   EXPECT_EQ(statements[0].ToString(), "g_flag = arg0;\n");
@@ -104,7 +109,7 @@ TEST(ExpressionBuilderTest, FoldedGlobalStoreTypedAndUntyped) {
   EXPECT_EQ(statements[2].ToString(), "D_80305000 = arg2;\n");
 
   // Without a symbol index, raw hex addresses are emitted for both s32 and sized stores.
-  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts, nullptr);
+  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_THAT(untyped_statements, SizeIs(3));
   EXPECT_EQ(untyped_statements[0].ToString(), "*(0x80204000) = arg0;\n");
   EXPECT_EQ(untyped_statements[1].ToString(), "*(u8*)0x80204000 = arg1;\n");
@@ -134,7 +139,8 @@ TEST(ExpressionBuilderTest, FoldedGlobalLoadTypedAndFp) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(4));
   EXPECT_EQ(statements[0].ToString(), "v0 = *(u8*)&g_flag;\n");
@@ -143,7 +149,7 @@ TEST(ExpressionBuilderTest, FoldedGlobalLoadTypedAndFp) {
   EXPECT_EQ(statements[3].ToString(), "*(f32*)&g_flag = f12;\n");
 
   // Without a symbol index, raw hex addresses are emitted for loads.
-  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts, nullptr);
+  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_THAT(untyped_statements, SizeIs(4));
   EXPECT_EQ(untyped_statements[0].ToString(), "v0 = *(u8*)0x80204000;\n");
   EXPECT_EQ(untyped_statements[1].ToString(), "v1 = *(s32*)0x80305000;\n");
@@ -178,7 +184,8 @@ TEST(ExpressionBuilderTest, FoldedGlobalIndexedLoadAndStore) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(4));
   EXPECT_EQ(statements[0].ToString(), "v0 = *(s32*)((u8*)&g_arr + v1);\n");
@@ -187,7 +194,7 @@ TEST(ExpressionBuilderTest, FoldedGlobalIndexedLoadAndStore) {
   EXPECT_EQ(statements[3].ToString(), "*(f32*)((u8*)&g_arr + arg0) = f12;\n");
 
   // Without symbol index:
-  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts, nullptr);
+  auto untyped_statements = ExpressionBuilder::LiftInstructions(insts);
   ASSERT_THAT(untyped_statements, SizeIs(4));
   EXPECT_EQ(untyped_statements[0].ToString(), "v0 = *(s32*)((u8*)0x80188BFC + v1);\n");
   EXPECT_EQ(untyped_statements[1].ToString(), "*(u8*)((u8*)0x80188BFC + arg0) = 0;\n");
@@ -244,7 +251,8 @@ TEST(ExpressionBuilderTest, FunctionCallAndReturn) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(3));
   EXPECT_EQ(statements[0].ToString(), "arg0 = 5;\n");
@@ -329,7 +337,7 @@ TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesUsedArguments) {
       0x00000000,  // nop
   };
   auto one_arg_insts = *DecodeSequence(one_arg_words);
-  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(one_arg_insts), 1);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(one_arg_insts), 1);
 
   // 3 args: addu $v0, $a0, $a1; addu $v0, $v0, $a2
   std::vector<uint32_t> three_args_words = {
@@ -339,7 +347,7 @@ TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesUsedArguments) {
       0x00000000,  // nop
   };
   auto three_args_insts = *DecodeSequence(three_args_words);
-  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(three_args_insts), 3);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(three_args_insts), 3);
 
   // 0 args: addiu $v0, $zero, 1
   std::vector<uint32_t> zero_args_words = {
@@ -348,7 +356,7 @@ TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesUsedArguments) {
       0x00000000,  // nop
   };
   auto zero_args_insts = *DecodeSequence(zero_args_words);
-  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(zero_args_insts), 0);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(zero_args_insts), 0);
 }
 
 TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesArgumentsUsedInCallDelaySlot) {
@@ -366,7 +374,7 @@ TEST(ExpressionBuilderTest, DetermineParameterCountIdentifiesArgumentsUsedInCall
       0x00000000,  // 10: nop
   };
   auto insts = *DecodeSequence(words);
-  EXPECT_EQ(ExpressionBuilder::DetermineParameterCount(insts), 2);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts), 2);
 }
 
 TEST(ExpressionBuilderTest, JalDelaySlotReorderingPassesArgumentToCall) {
@@ -389,7 +397,8 @@ TEST(ExpressionBuilderTest, JalDelaySlotReorderingPassesArgumentToCall) {
   ASSERT_TRUE(index_or.ok());
 
   auto instructions = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(instructions, &(*index_or));
+  auto statements = ExpressionBuilder::LiftInstructions(
+      instructions, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   // The delay-slot assignment arg0 = 42 must execute before TargetFunc, so the call passes 42
   ASSERT_THAT(statements, SizeIs(3));
@@ -442,8 +451,9 @@ TEST(ExpressionBuilderTest, JalParameterArityUsesKnownCount) {
   parameter_counts["BinaryFunc"] = 2;
 
   auto instructions = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(instructions, &(*index_or),
-                                                        /*game_config=*/nullptr, &parameter_counts);
+  auto statements = ExpressionBuilder::LiftInstructions(
+      instructions, FunctionLiftContext{.symbol_index = &(*index_or),
+                                        .function_parameter_counts = &parameter_counts});
 
   ASSERT_THAT(statements, SizeIs(4));
   EXPECT_EQ(statements[3].ToString(), "BinaryFunc(1, 2);\n");
@@ -525,7 +535,8 @@ TEST(ExpressionBuilderTest, FoldedSymbolAddressLoad) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(1));
   EXPECT_EQ(statements[0].ToString(), "arg0 = &g_audio_status;\n");
@@ -554,7 +565,8 @@ TEST(ExpressionBuilderTest, FoldedSymbolStoreZero) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(1));
   EXPECT_EQ(statements[0].ToString(), "g_audio_status = 0;\n");
@@ -594,7 +606,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0MultiBlock) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0LoopVoidFunction) {
@@ -626,7 +638,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0LoopVoidFunction) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0LoopWithBeqlCondition) {
@@ -646,7 +658,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0LoopWithBeqlCondition) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) {
@@ -668,7 +680,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) 
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0PartiallyDefinedVoidFunction) {
@@ -696,7 +708,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0PartiallyDefinedVoidFunction) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0WithCalleeReturningV0) {
@@ -713,16 +725,16 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0WithCalleeReturningV0) {
   ASSERT_TRUE(cfg_or.ok());
 
   // Without known callee returning v0, call clobbers v0, so returns false.
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 
   // With known callee returning v0, returns true.
   absl::flat_hash_set<std::string> returning_v0 = {"func_80001000"};
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or, nullptr, &returning_v0));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or, nullptr, &returning_v0));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0EmptyCfg) {
   ControlFlowGraph cfg;
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(cfg));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(cfg));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0InfiniteLoopNoReturn) {
@@ -736,7 +748,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0InfiniteLoopNoReturn) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0UnreachableReturnIgnored) {
@@ -752,7 +764,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0UnreachableReturnIgnored) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedThenConsumedBeforeReturn) {
@@ -768,7 +780,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedThenConsumedBeforeReturn) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedInReturnDelaySlot) {
@@ -781,7 +793,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedInReturnDelaySlot) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedInBranchDelaySlotToReturn) {
@@ -797,7 +809,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0DefinedInBranchDelaySlotToReturn) 
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0LoopAccumulatorReturned) {
@@ -816,7 +828,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0LoopAccumulatorReturned) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsV0WithSymbolIndexLookup) {
@@ -839,11 +851,11 @@ TEST(ExpressionBuilderTest, DetermineReturnsV0WithSymbolIndexLookup) {
   ASSERT_TRUE(cfg_or.ok());
 
   // Unknown callee -> returns false
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsV0(*cfg_or, &(*index_or), nullptr));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or, &(*index_or), nullptr));
 
   // Callee known to return v0 -> returns true
   absl::flat_hash_set<std::string> returning_v0 = {"ReadHardwareStatus"};
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsV0(*cfg_or, &(*index_or), &returning_v0));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or, &(*index_or), &returning_v0));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsTrueForDoubleOps) {
@@ -859,8 +871,8 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsTrueForDoubleOps) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsFalseForSinglePrecision) {
@@ -876,8 +888,8 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsFalseForSinglePrecisi
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleAcrossBlocks) {
@@ -900,10 +912,9 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleAcrossBlocks) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));  // Reachable definition in predecessor
   EXPECT_TRUE(
-      ExpressionBuilder::DetermineReturnsF0(*cfg_or));  // Reachable definition in predecessor
-  EXPECT_TRUE(
-      ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));  // Reachable definition in predecessor
+      AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));  // Reachable definition in predecessor
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0FalseWhenCallClobbers) {
@@ -923,7 +934,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0FalseWhenCallClobbers) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0TrueWhenCallFollowedByF0Def) {
@@ -943,7 +954,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0TrueWhenCallFollowedByF0Def) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0FalseWhenV0DefinedAfterF0) {
@@ -961,7 +972,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0FalseWhenV0DefinedAfterF0) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0BranchDelaySlot) {
@@ -983,7 +994,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0BranchDelaySlot) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0ReturnDelaySlot) {
@@ -997,7 +1008,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0ReturnDelaySlot) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0LoopWithBeql) {
@@ -1022,7 +1033,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0LoopWithBeql) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0MultipleExitsOneNotReturningF0) {
@@ -1046,7 +1057,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0MultipleExitsOneNotReturningF0) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0MultipleExitsBothReturningF0) {
@@ -1072,7 +1083,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0MultipleExitsBothReturningF0) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0UsedAfterLastDefAsTemporary) {
@@ -1090,7 +1101,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0UsedAfterLastDefAsTemporary) {
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsFalseForVoidOrInteger) {
@@ -1106,8 +1117,8 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleReturnsFalseForVoidOrInteger
   auto insts = *DecodeSequence(words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0(*cfg_or));
-  EXPECT_FALSE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
@@ -1120,7 +1131,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
   auto insts = *DecodeSequence(ldc1_words, 0x80020000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 
   // Test sub.d $f0, $f12, $f14
   std::vector<uint32_t> subd_words = {
@@ -1131,7 +1142,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
   insts = *DecodeSequence(subd_words, 0x80020000);
   cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 
   // Test mul.d $f0, $f12, $f14
   std::vector<uint32_t> muld_words = {
@@ -1142,7 +1153,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
   insts = *DecodeSequence(muld_words, 0x80020000);
   cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 
   // Test div.d $f0, $f12, $f14
   std::vector<uint32_t> divd_words = {
@@ -1153,7 +1164,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
   insts = *DecodeSequence(divd_words, 0x80020000);
   cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 
   // Test cvt.d.s $f0, $f2
   std::vector<uint32_t> cvtds_words = {
@@ -1164,7 +1175,7 @@ TEST(ExpressionBuilderTest, DetermineReturnsF0DoubleVariousOpcodes) {
   insts = *DecodeSequence(cvtds_words, 0x80020000);
   cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  EXPECT_TRUE(ExpressionBuilder::DetermineReturnsF0Double(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 }
 
 TEST(ExpressionBuilderTest, NorBitwiseNot) {
@@ -1428,7 +1439,8 @@ TEST(ExpressionBuilderTest, SizedGlobalLoadAndStore) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(3));
   EXPECT_EQ(statements[0].kind, StatementKind::kStore);
@@ -1454,7 +1466,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonSltAtSuppressed) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   ASSERT_TRUE(folded.has_value());
   EXPECT_EQ(folded->instruction_index, 0u);
   EXPECT_TRUE(folded->can_suppress_statement);
@@ -1475,7 +1487,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonV0PreservedWhenNotOverwritten) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   ASSERT_TRUE(folded.has_value());
   EXPECT_EQ(folded->instruction_index, 0u);
   // $v0 is not $at and not overwritten in delay slot, so statement is preserved
@@ -1499,7 +1511,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonV0SuppressedWhenOverwrittenInDel
   };
 
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   ASSERT_TRUE(folded.has_value());
   EXPECT_EQ(folded->instruction_index, 0u);
   // Overwritten in delay slot before any exit, so statement can be safely suppressed
@@ -1524,7 +1536,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonHazardRejectsFolding) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   // Hazard on $a0 prevents folding
   EXPECT_FALSE(folded.has_value());
 
@@ -1547,7 +1559,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonIntermediateUseRejectsFolding) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   // Intermediate use of $at prevents folding
   EXPECT_FALSE(folded.has_value());
 
@@ -1567,7 +1579,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonXoriAndAndi) {
   };
 
   auto xor_insts = *DecodeSequence(xor_words);
-  auto xor_folded = ExpressionBuilder::FindFoldedComparison(xor_insts);
+  auto xor_folded = BranchConditionBuilder::FindFoldedComparison(xor_insts);
   ASSERT_TRUE(xor_folded.has_value());
   EXPECT_EQ(xor_folded->instruction_index, 0u);
   EXPECT_TRUE(xor_folded->can_suppress_statement);
@@ -1582,7 +1594,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonXoriAndAndi) {
   };
 
   auto and_insts = *DecodeSequence(and_words);
-  auto and_folded = ExpressionBuilder::FindFoldedComparison(and_insts);
+  auto and_folded = BranchConditionBuilder::FindFoldedComparison(and_insts);
   ASSERT_TRUE(and_folded.has_value());
   EXPECT_EQ(and_folded->instruction_index, 0u);
   EXPECT_TRUE(and_folded->can_suppress_statement);
@@ -1601,7 +1613,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonWithInterveningFpuInstruction) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   ASSERT_TRUE(folded.has_value());
   EXPECT_EQ(folded->instruction_index, 0u);
   EXPECT_TRUE(folded->can_suppress_statement);
@@ -1689,7 +1701,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonCop1Branch) {
       0x00000000,  // C: nop
   };
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   ASSERT_TRUE(folded.has_value());
   EXPECT_EQ(folded->instruction_index, 0u);
   EXPECT_TRUE(folded->can_suppress_statement);
@@ -1741,7 +1753,7 @@ TEST(ExpressionBuilderTest, DetermineFpParameterCountAndPassesFpArgsToCalls) {
       0x00000000,  // nop
   };
   auto callee_insts = *DecodeSequence(callee_words);
-  EXPECT_EQ(ExpressionBuilder::DetermineFpParameterCount(callee_insts), 2);
+  EXPECT_EQ(AbiAnalyzer::DetermineFpParameterCount(callee_insts), 2);
 
   // Function that defines f12 before use (takes 0 FP parameters)
   std::vector<uint32_t> non_callee_words = {
@@ -1751,7 +1763,7 @@ TEST(ExpressionBuilderTest, DetermineFpParameterCountAndPassesFpArgsToCalls) {
       0x00000000,  // nop
   };
   auto non_callee_insts = *DecodeSequence(non_callee_words);
-  EXPECT_EQ(ExpressionBuilder::DetermineFpParameterCount(non_callee_insts), 0);
+  EXPECT_EQ(AbiAnalyzer::DetermineFpParameterCount(non_callee_insts), 0);
 
   // Caller that calls func_fp_2 via jal
   std::vector<uint32_t> caller_words = {
@@ -1762,8 +1774,9 @@ TEST(ExpressionBuilderTest, DetermineFpParameterCountAndPassesFpArgsToCalls) {
   absl::flat_hash_map<std::string, int> gpr_counts = {{"func_80080000", 0}};
   absl::flat_hash_map<std::string, int> fp_counts = {{"func_80080000", 2}};
 
-  auto caller_stmts =
-      ExpressionBuilder::LiftInstructions(caller_insts, nullptr, nullptr, &gpr_counts, &fp_counts);
+  auto caller_stmts = ExpressionBuilder::LiftInstructions(
+      caller_insts, FunctionLiftContext{.function_parameter_counts = &gpr_counts,
+                                        .function_fp_parameter_counts = &fp_counts});
   ASSERT_GE(caller_stmts.size(), 1u);
   EXPECT_EQ(caller_stmts[0].ToString(), "func_80080000(f12, f14);\n");
 }
@@ -1781,7 +1794,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonDoesNotFoldSelfMutatingInstructi
       0x00001821,  // 8: addu $v1, $zero, $zero
   };
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   EXPECT_FALSE(folded.has_value());
 }
 
@@ -1798,7 +1811,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonDoesNotFoldWhenDelaySlotClobbers
       0x24020001,  // 8: addiu $v0, $zero, 1
   };
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   EXPECT_FALSE(folded.has_value());
 }
 
@@ -1813,7 +1826,7 @@ TEST(ExpressionBuilderTest, FindFoldedComparisonFoldsWhenDelaySlotDoesNotClobber
       0x24040001,  // 8: addiu $a0, $zero, 1
   };
   auto insts = *DecodeSequence(words);
-  auto folded = ExpressionBuilder::FindFoldedComparison(insts);
+  auto folded = BranchConditionBuilder::FindFoldedComparison(insts);
   EXPECT_TRUE(folded.has_value());
 }
 
@@ -2370,7 +2383,8 @@ TEST(ExpressionBuilderTest, FoldedGlobalIndexedLoadAndStoreDoublePrecision) {
   };
 
   auto insts = *DecodeSequence(words);
-  auto statements = ExpressionBuilder::LiftInstructions(insts, &(*index_or));
+  auto statements =
+      ExpressionBuilder::LiftInstructions(insts, FunctionLiftContext{.symbol_index = &(*index_or)});
 
   ASSERT_THAT(statements, SizeIs(2));
   EXPECT_EQ(statements[0].ToString(), "f0_d = *(f64*)((u8*)&g_double_arr + v1);\n");
@@ -2420,12 +2434,7 @@ TEST(ExpressionBuilderTest, Ldc1AndSdc1SuppressSavedFprStackSpillsAndRestores) {
 
   auto insts = *DecodeSequence(words);
   auto statements = ExpressionBuilder::LiftInstructions(
-      insts, /*symbol_index=*/nullptr, /*game_config=*/nullptr,
-      /*function_parameter_counts=*/nullptr, /*function_fp_parameter_counts=*/nullptr,
-      /*omit_last_instruction=*/false, /*frame_size=*/64,
-      /*functions_returning_v0=*/nullptr, /*functions_returning_f0=*/nullptr,
-      /*has_frame_pointer=*/false, /*has_calls=*/false, /*sp_address_taken=*/false,
-      /*saved_reg_offsets=*/nullptr, &saved_fpr_offsets);
+      insts, FunctionLiftContext{.frame_size = 64, .saved_fpr_offsets = &saved_fpr_offsets});
 
   ASSERT_THAT(statements, SizeIs(2));
   EXPECT_EQ(statements[0].ToString(), "*(f64*)&var_sp_32 = f22_d;\n");

@@ -20,6 +20,7 @@
 #include "lifter/ast_abi_rewriter.h"
 #include "lifter/ast_arithmetic_simplifier.h"
 #include "lifter/ast_expression_folder.h"
+#include "lifter/ast_pass_pipeline.h"
 #include "lifter/branch_condition_builder.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/cop1_lifter.h"
@@ -28,15 +29,6 @@
 #include "lifter/variable_declaration_builder.h"
 
 namespace rom_nom_nom {
-
-absl::flat_hash_set<std::string> AstConverter::IdentifyDoubleVariables(
-    const ControlFlowGraph& cfg) {
-  return AbiAnalyzer::IdentifyDoubleVariables(cfg);
-}
-
-bool AstConverter::IsFpParameterDouble(const ControlFlowGraph& cfg, FpRegister reg) {
-  return AbiAnalyzer::IsFpParameterDouble(cfg, reg);
-}
 
 namespace {
 
@@ -157,11 +149,6 @@ std::unique_ptr<CStatement> AstConverter::ConvertStatement(const LiftedStatement
   return nullptr;
 }
 
-std::unique_ptr<CExpression> AstConverter::ExtractBranchCondition(const BasicBlock& block,
-                                                                  bool invert_condition) {
-  return BranchConditionBuilder::ExtractBranchCondition(block, invert_condition);
-}
-
 namespace {
 
 class ConverterContext {
@@ -184,7 +171,7 @@ class ConverterContext {
         functions_returning_v0_(functions_returning_v0),
         functions_returning_f0_(functions_returning_f0),
         function_name_(std::move(function_name)),
-        double_vars_(AstConverter::IdentifyDoubleVariables(cfg_)),
+        double_vars_(AbiAnalyzer::IdentifyDoubleVariables(cfg_)),
         frame_analysis_(StackFrameAnalyzer::Analyze(cfg_)),
         float_parameters_in_general_registers_(
             AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg_)),
@@ -501,9 +488,9 @@ class ConverterContext {
 
         EmitBlockStatements(region.condition_block_id, target_block,
                             /*omit_last_instruction=*/has_branch_likely || decouple_delay);
-        auto cond = cond_block != nullptr
-                        ? AstConverter::ExtractBranchCondition(*cond_block, region.invert_condition)
-                        : CExpression::Integer(1);
+        auto cond = cond_block != nullptr ? BranchConditionBuilder::ExtractBranchCondition(
+                                                *cond_block, region.invert_condition)
+                                          : CExpression::Integer(1);
 
         if (!region.condition_op.empty()) {
           for (size_t ci = 0; ci < region.additional_condition_blocks.size(); ++ci) {
@@ -515,7 +502,7 @@ class ConverterContext {
             if (add_block != nullptr) {
               omit_last_instruction_blocks_.insert(add_blk_id);
               EmitBlockStatements(add_blk_id, target_block, /*omit_last_instruction=*/true);
-              auto next_cond = AstConverter::ExtractBranchCondition(*add_block, add_inv);
+              auto next_cond = BranchConditionBuilder::ExtractBranchCondition(*add_block, add_inv);
               cond =
                   CExpression::Binary(region.condition_op, std::move(cond), std::move(next_cond));
             }
@@ -654,9 +641,9 @@ class ConverterContext {
 
         EmitBlockStatements(region.condition_block_id, target_block,
                             /*omit_last_instruction=*/has_branch_likely || decouple_delay);
-        auto cond = cond_block != nullptr
-                        ? AstConverter::ExtractBranchCondition(*cond_block, region.invert_condition)
-                        : CExpression::Integer(1);
+        auto cond = cond_block != nullptr ? BranchConditionBuilder::ExtractBranchCondition(
+                                                *cond_block, region.invert_condition)
+                                          : CExpression::Integer(1);
 
         if (!region.condition_op.empty()) {
           for (size_t ci = 0; ci < region.additional_condition_blocks.size(); ++ci) {
@@ -668,7 +655,7 @@ class ConverterContext {
             if (add_block != nullptr) {
               omit_last_instruction_blocks_.insert(add_blk_id);
               EmitBlockStatements(add_blk_id, target_block, /*omit_last_instruction=*/true);
-              auto next_cond = AstConverter::ExtractBranchCondition(*add_block, add_inv);
+              auto next_cond = BranchConditionBuilder::ExtractBranchCondition(*add_block, add_inv);
               cond =
                   CExpression::Binary(region.condition_op, std::move(cond), std::move(next_cond));
             }
@@ -806,8 +793,8 @@ class ConverterContext {
                 }
               }
             }
-            auto break_cond =
-                AstConverter::ExtractBranchCondition(*cond_block, !region.invert_condition);
+            auto break_cond = BranchConditionBuilder::ExtractBranchCondition(
+                *cond_block, !region.invert_condition);
             const auto& delay_inst = cond_block->instructions.back();
             bool branch_taken_is_break = region.invert_condition;
             bool emit_in_break =
@@ -869,7 +856,7 @@ class ConverterContext {
                 }
               }
             }
-            auto cond = cond_block != nullptr ? AstConverter::ExtractBranchCondition(
+            auto cond = cond_block != nullptr ? BranchConditionBuilder::ExtractBranchCondition(
                                                     *cond_block, region.invert_condition)
                                               : CExpression::Integer(1);
             target_block->AddStatement(CStatement::DoWhile(std::move(loop_body), std::move(cond)));
@@ -944,37 +931,9 @@ class ConverterContext {
                 std::string lhs_name =
                     static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
 
-                auto is_pure_expr = [](const CExpression& expr) {
-                  bool has_call = false;
-                  std::function<void(const CExpression&)> check = [&](const CExpression& e) {
-                    if (e.Kind() == CExpressionKind::kCallExpression ||
-                        e.Kind() == CExpressionKind::kAssignmentExpression) {
-                      has_call = true;
-                      return;
-                    }
-                    if (e.Kind() == CExpressionKind::kUnaryExpression) {
-                      check(static_cast<const UnaryExpression&>(e).Operand());
-                    } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-                      const auto& b = static_cast<const BinaryExpression&>(e);
-                      check(b.Lhs());
-                      check(b.Rhs());
-                    } else if (e.Kind() == CExpressionKind::kCastExpression) {
-                      check(static_cast<const CastExpression&>(e).Operand());
-                    } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
-                      const auto& a = static_cast<const ArrayIndexExpression&>(e);
-                      check(a.Array());
-                      check(a.Index());
-                    } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
-                      check(static_cast<const MemberAccessExpression&>(e).Object());
-                    }
-                  };
-                  check(expr);
-                  return !has_call;
-                };
-
-                if (is_pure_expr(assign.Rhs())) {
+                if (IsPureExpression(assign.Rhs())) {
                   auto raw_cond = header_block != nullptr
-                                      ? AstConverter::ExtractBranchCondition(
+                                      ? BranchConditionBuilder::ExtractBranchCondition(
                                             *header_block, region.invert_condition)
                                       : CExpression::Integer(1);
                   std::vector<std::string> cond_vars;
@@ -1030,9 +989,10 @@ class ConverterContext {
           }
 
           if (can_inline_pre_cond) {
-            auto raw_cond = header_block != nullptr ? AstConverter::ExtractBranchCondition(
-                                                          *header_block, region.invert_condition)
-                                                    : CExpression::Integer(1);
+            auto raw_cond = header_block != nullptr
+                                ? BranchConditionBuilder::ExtractBranchCondition(
+                                      *header_block, region.invert_condition)
+                                : CExpression::Integer(1);
             auto cond = SubstituteIdentifier(*raw_cond, inlined_reg, *inlined_rhs);
             auto loop_body = std::make_unique<CompoundStatement>();
             bool branch_taken_is_break = region.invert_condition;
@@ -1061,9 +1021,10 @@ class ConverterContext {
             for (auto& s : pre_cond_stmts) {
               loop_body->AddStatement(std::move(s));
             }
-            auto break_cond = header_block != nullptr ? AstConverter::ExtractBranchCondition(
-                                                            *header_block, !region.invert_condition)
-                                                      : CExpression::Integer(0);
+            auto break_cond = header_block != nullptr
+                                  ? BranchConditionBuilder::ExtractBranchCondition(
+                                        *header_block, !region.invert_condition)
+                                  : CExpression::Integer(0);
             auto break_body = std::make_unique<CompoundStatement>();
 
             bool branch_taken_is_break = region.invert_condition;
@@ -1104,7 +1065,7 @@ class ConverterContext {
             target_block->AddStatement(
                 CStatement::While(CExpression::Integer(1), std::move(loop_body)));
           } else {
-            auto cond = header_block != nullptr ? AstConverter::ExtractBranchCondition(
+            auto cond = header_block != nullptr ? BranchConditionBuilder::ExtractBranchCondition(
                                                       *header_block, region.invert_condition)
                                                 : CExpression::Integer(1);
             auto loop_body = std::make_unique<CompoundStatement>();
@@ -1987,46 +1948,16 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
     }
   }
 
-  // Run AST post-processing
-  CollapseUnalignedBlockCopies(body.get());
-  CoalescePrologueParameterCopies(body.get(), parameters, ctx.FrameSize());
-  InlineCrossJumpedCallTails(body.get());
-  SinkCommonBranchTailArgAssignments(body.get());
-  SimplifyShiftAddMultiplication(body.get());
-  FoldSingleUseExpressions(body.get());
-  SimplifyShiftAddMultiplication(body.get());
-  SimplifyReciprocalDivisionAndUnsignedFloatConversions(body.get());
-  FoldSingleUseExpressions(body.get());
-  TrimUnassignedTrailingCallArgRegisters(body.get(), parameters, options.function_parameter_counts);
-  RewriteFloatInGprAndStackCallArguments(body.get());
-  SplitReusedFloatGprParameters(body.get(), parameters);
-  CoalescePrologueParameterCopies(body.get(), parameters, ctx.FrameSize());
-  FoldSingleUseExpressions(body.get());
-  RewriteFloatInGprAndStackCallArguments(body.get());
-  CoalescePrologueParameterCopies(body.get(), parameters, ctx.FrameSize());
-  FoldSingleUseExpressions(body.get());
-  RewriteFloatInGprAndStackCallArguments(body.get());
-  SimplifyDecoupledDelaySlotEarlyReturns(body.get());
-  SimplifyShiftAddMultiplication(body.get());
-  SimplifyReciprocalDivisionAndUnsignedFloatConversions(body.get());
-  FoldSingleUseExpressions(body.get());
-  TrimUnassignedTrailingCallArgRegisters(body.get(), parameters, options.function_parameter_counts);
-  if (SplitScratchReusedParameterRegisters(body.get(), parameters, ctx.FrameSize())) {
-    FoldSingleUseExpressions(body.get());
-    TrimUnassignedTrailingCallArgRegisters(body.get(), parameters,
-                                           options.function_parameter_counts);
-  }
-  if (ctx.FrameAnalysis().has_frame_pointer) {
-    RewriteFramePointerStructOffsetAccesses(body.get());
-    if (return_type.ToString() == "void" && ctx.GotoTargets().empty() &&
-        !body->Statements().empty()) {
-      const auto& last_stmt = *body->Statements().back();
-      if (last_stmt.Kind() == CStatementKind::kReturnStatement &&
-          static_cast<const ReturnStatement&>(last_stmt).ReturnValue() == nullptr) {
-        body->MutableStatements().pop_back();
-      }
-    }
-  }
+  // Run AST post-processing pipeline
+  AstPassContext pass_ctx{
+      .parameters = parameters,
+      .frame_size = ctx.FrameSize(),
+      .has_frame_pointer = ctx.FrameAnalysis().has_frame_pointer,
+      .return_type = return_type,
+      .has_goto_targets = !ctx.GotoTargets().empty(),
+      .function_parameter_counts = options.function_parameter_counts,
+  };
+  AstPassPipeline::Run(body.get(), pass_ctx);
 
   absl::Status decl_status =
       PrependSynthesizedLocalDeclarations(cfg, ctx.FrameAnalysis(), ctx.DoubleVars(), parameters,
@@ -2037,16 +1968,6 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
 
   return FunctionDeclaration(return_type, options.function_name, std::move(parameters),
                              std::move(body), options.is_static);
-}
-
-void AstConverter::CollectUsedVariables(const CStatement& stmt, std::vector<std::string>* vars,
-                                        absl::flat_hash_set<std::string>* seen) {
-  rom_nom_nom::CollectUsedVariables(stmt, vars, seen);
-}
-
-void AstConverter::SimplifyReturnStatements(CompoundStatement* comp, bool returns_v0,
-                                            bool returns_f0) {
-  rom_nom_nom::SimplifyReturnStatements(comp, returns_v0, returns_f0);
 }
 
 }  // namespace rom_nom_nom

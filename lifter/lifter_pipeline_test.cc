@@ -15,6 +15,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "lifter/function_loader.h"
+#include "lifter/module_symbol_scanner.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -1189,6 +1190,82 @@ entries {
   EXPECT_THAT(decompile_or->c_code, ::testing::Not(HasSubstr("return v0;")));
 
   std::filesystem::remove_all(test_dir);
+}
+
+TEST(ModuleSymbolScannerTest, DiscoverAllCodeModulesFiltersToCodeSegmentCAndAsmSubsegments) {
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x3000
+  vram: 0x80020000
+  subsegments { name: "mod_c" type: SUBSEGMENT_C rom_start: 0x1000 }
+  subsegments { name: "mod_asm" type: SUBSEGMENT_ASM rom_start: 0x1400 }
+  subsegments { name: "mod_data" type: SUBSEGMENT_DATA rom_start: 0x1800 }
+  subsegments { name: "mod_bss" type: SUBSEGMENT_BSS vram: 0x80030000 }
+}
+segments {
+  name: "assets"
+  type: SEGMENT_BIN
+  rom_start: 0x3000
+  rom_end: 0x4000
+}
+)";
+  auto cfg_or = ParseGameConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::vector<std::string> modules = ModuleSymbolScanner::DiscoverAllCodeModules(*cfg_or);
+  EXPECT_THAT(modules, ::testing::ElementsAre("mod_c", "mod_asm"));
+}
+
+TEST(ModuleSymbolScannerTest, DiscoverFunctionsInModuleResolvesSymbolRangeAndSynthesizesFallback) {
+  std::string proto_cfg = R"(
+game_name: "test-game"
+sha1: "0123456789abcdef0123456789abcdef01234567"
+basename: "test-game"
+segments {
+  name: "code"
+  type: SEGMENT_CODE
+  rom_start: 0x1000
+  rom_end: 0x2000
+  vram: 0x80020000
+  subsegments { name: "src/mod_a" type: SUBSEGMENT_C rom_start: 0x1000 }
+  subsegments { name: "src/mod_empty" type: SUBSEGMENT_C rom_start: 0x1800 }
+}
+)";
+  auto cfg_or = ParseGameConfig(proto_cfg);
+  ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
+
+  std::string proto_syms = R"(
+entries { name: "FuncA1" address: 0x80020000 type: SYMBOL_FUNC }
+entries { name: "FuncA2" address: 0x80020100 type: SYMBOL_FUNC }
+)";
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(proto_syms);
+  ASSERT_TRUE(sym_idx_or.ok()) << sym_idx_or.status();
+
+  auto test_dir = std::filesystem::temp_directory_path() / "module_symbol_scanner_unit_test";
+  std::filesystem::remove_all(test_dir);
+
+  // Lookup by filename stem "mod_a" resolves FuncA1 and FuncA2
+  auto funcs_a = ModuleSymbolScanner::DiscoverFunctionsInModule("mod_a", *cfg_or, *sym_idx_or,
+                                                                test_dir, "test-game", "");
+  ASSERT_TRUE(funcs_a.ok()) << funcs_a.status();
+  EXPECT_THAT(*funcs_a, ::testing::ElementsAre("FuncA1", "FuncA2"));
+
+  // Module with no registered function symbols synthesizes start_vram symbol name
+  auto funcs_empty = ModuleSymbolScanner::DiscoverFunctionsInModule(
+      "mod_empty", *cfg_or, *sym_idx_or, test_dir, "test-game", "");
+  ASSERT_TRUE(funcs_empty.ok()) << funcs_empty.status();
+  EXPECT_THAT(*funcs_empty, ::testing::ElementsAre("func_80020800"));
+
+  // Unknown module returns NotFoundError
+  auto funcs_missing = ModuleSymbolScanner::DiscoverFunctionsInModule(
+      "does_not_exist", *cfg_or, *sym_idx_or, test_dir, "test-game", "");
+  EXPECT_FALSE(funcs_missing.ok());
 }
 
 }  // namespace
