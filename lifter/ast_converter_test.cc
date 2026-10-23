@@ -3850,5 +3850,120 @@ TEST(AstConverterTest, CoalescesHomedFloatParameterStoreIntoIntegerBitcastRead) 
   EXPECT_THAT(code, HasSubstr("*(s32*)&f12"));
 }
 
+TEST(AstConverterTest, RewritesFramePointerConstantOffsetDereferencesToStructMembers) {
+  // -O0 frame-pointer function ($fp = $sp) that stores an unsigned 16-bit
+  // immediate (0x8000) to offset +4 of arg0 and passes a 32-bit field at
+  // offset +20 of arg0 to a call:
+  //   00: addiu $sp, $sp, -24
+  //   04: sw    $ra, 20($sp)
+  //   08: sw    $fp, 16($sp)
+  //   0C: addu  $fp, $sp, $zero
+  //   10: sw    $a0, 24($fp)
+  //   14: lw    $v0, 24($fp)
+  //   18: ori   $v1, $zero, 0x8000
+  //   1C: sh    $v1, 4($v0)
+  //   20: lw    $v0, 24($fp)
+  //   24: lw    $a0, 20($v0)
+  //   28: jal   0x80001000
+  //   2C: nop
+  //   30: addu  $sp, $fp, $zero
+  //   34: lw    $ra, 20($sp)
+  //   38: lw    $fp, 16($sp)
+  //   3C: addiu $sp, $sp, 24
+  //   40: jr    $ra
+  //   44: nop
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 04: sw    $ra, 20($sp)
+      0xAFBE0010,  // 08: sw    $fp, 16($sp)
+      0x03A0F021,  // 0C: addu  $fp, $sp, $zero
+      0xAFC40018,  // 10: sw    $a0, 24($fp)
+      0x8FC20018,  // 14: lw    $v0, 24($fp)
+      0x34038000,  // 18: ori   $v1, $zero, 0x8000
+      0xA4430004,  // 1C: sh    $v1, 4($v0)
+      0x8FC20018,  // 20: lw    $v0, 24($fp)
+      0x8C440014,  // 24: lw    $a0, 20($v0)
+      0x0C000400,  // 28: jal   0x80001000
+      0x00000000,  // 2C: nop
+      0x03C0E821,  // 30: addu  $sp, $fp, $zero
+      0x8FBF0014,  // 34: lw    $ra, 20($sp)
+      0x8FBE0010,  // 38: lw    $fp, 16($sp)
+      0x27BD0018,  // 3C: addiu $sp, $sp, 24
+      0x03E00008,  // 40: jr    $ra
+      0x00000000,  // 44: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestO0StructOffsetAndCall";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("((struct { u8 _p[4]; u16 _v; }*)arg0)->_v = 32768;"));
+  EXPECT_THAT(code, HasSubstr("((struct { u8 _p[20]; s32 _v; }*)arg0)->_v"));
+  EXPECT_THAT(code, Not(HasSubstr("return;")));
+}
+
+TEST(AstConverterTest, FoldsFramePointerWhileLoopConditionAndPostIncrementPointerStore) {
+  // -O0 frame-pointer function ($fp = $sp) with a while loop that zeroes 16
+  // bytes via post-increment on arg1 and then stores 0xFF to offset +4 of arg0:
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBE0010,  // 04: sw    $fp, 16($sp)
+      0x03A0F021,  // 08: addu  $fp, $sp, $zero
+      0xAFC40018,  // 0C: sw    $a0, 24($fp)
+      0xAFC5001C,  // 10: sw    $a1, 28($fp)
+      0xAFC00008,  // 14: sw    $zero, 8($fp)
+      0x8FC20008,  // 18: lw    $v0, 8($fp)
+      0x28430010,  // 1C: slti  $v1, $v0, 16
+      0x14600003,  // 20: bne   $v1, $zero, 0x80000030
+      0x00000000,  // 24: nop
+      0x08000015,  // 28: j     0x80000054
+      0x00000000,  // 2C: nop
+      0x8FC2001C,  // 30: lw    $v0, 28($fp)
+      0x24430001,  // 34: addiu $v1, $v0, 1
+      0xAFC3001C,  // 38: sw    $v1, 28($fp)
+      0xA0400000,  // 3C: sb    $zero, 0($v0)
+      0x8FC20008,  // 40: lw    $v0, 8($fp)
+      0x24430001,  // 44: addiu $v1, $v0, 1
+      0xAFC30008,  // 48: sw    $v1, 8($fp)
+      0x08000006,  // 4C: j     0x80000018
+      0x00000000,  // 50: nop
+      0x8FC20018,  // 54: lw    $v0, 24($fp)
+      0x240300FF,  // 58: addiu $v1, $zero, 255
+      0xA0430004,  // 5C: sb    $v1, 4($v0)
+      0x03C0E821,  // 60: addu  $sp, $fp, $zero
+      0x8FBE0010,  // 64: lw    $fp, 16($sp)
+      0x27BD0018,  // 68: addiu $sp, $sp, 24
+      0x03E00008,  // 6C: jr    $ra
+      0x00000000,  // 70: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  AstConverterOptions options;
+  options.function_name = "TestO0WhileLoopAndUnsignedByteStore";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, Not(HasSubstr("s32 v0")));
+  EXPECT_THAT(code, Not(HasSubstr("s32 v1")));
+  EXPECT_THAT(code, HasSubstr("while ((var_sp_8 < 16))"));
+  EXPECT_THAT(code, HasSubstr("*(s8*)arg1++ = 0;"));
+  EXPECT_THAT(code, HasSubstr("var_sp_8 = (var_sp_8 + 1);"));
+  EXPECT_THAT(code, HasSubstr("((struct { u8 _p[4]; u8 _v; }*)arg0)->_v = 255;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

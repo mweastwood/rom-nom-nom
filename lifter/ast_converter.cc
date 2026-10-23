@@ -2044,6 +2044,17 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
     TrimUnassignedTrailingCallArgRegisters(body.get(), parameters,
                                            options.function_parameter_counts);
   }
+  if (ctx.FrameAnalysis().has_frame_pointer) {
+    RewriteFramePointerStructOffsetAccesses(body.get());
+    if (return_type.ToString() == "void" && ctx.GotoTargets().empty() &&
+        !body->Statements().empty()) {
+      const auto& last_stmt = *body->Statements().back();
+      if (last_stmt.Kind() == CStatementKind::kReturnStatement &&
+          static_cast<const ReturnStatement&>(last_stmt).ReturnValue() == nullptr) {
+        body->MutableStatements().pop_back();
+      }
+    }
+  }
 
   absl::Status decl_status =
       PrependSynthesizedLocalDeclarations(cfg, ctx.FrameAnalysis(), ctx.DoubleVars(), parameters,

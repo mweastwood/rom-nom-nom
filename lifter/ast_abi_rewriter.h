@@ -60,6 +60,13 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
                                           const std::vector<CParameter>& parameters,
                                           uint32_t frame_size = 0);
 
+// Folds `-O0` frame-pointer scratch evaluation sequences (while-loop header conditions,
+// post-increment pointer dereferences, local update chains, and dead constant loads) and
+// rewrites positive constant-offset pointer dereferences `*(TYPE*)(base + offset)` into
+// anonymous struct member accesses `((struct { u8 _p[offset]; TYPE _v; }*)base)->_v` so
+// GCC 2.7.2 at `-O0` emits single-instruction `offset(base)` loads and stores.
+void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body);
+
 }  // namespace rom_nom_nom
 
 #endif  // LIFTER_AST_ABI_REWRITER_H_
