@@ -5499,5 +5499,22 @@ s32 ForLoopCountdownGreaterEqualOneStrideThree(s32 start) {
 )");
 }
 
+TEST_F(RoundTripTest, LeafWithMultipleScratchAndCalleeSavedRegisters) {
+  AssertRoundTripBitExact("LeafWithMultipleScratchAndCalleeSavedRegisters", R"(
+s32 LeafWithMultipleScratchAndCalleeSavedRegisters(s32* p) {
+    s32 x0 = p[0];
+    s32 x1 = p[1];
+    s32 x2 = p[2];
+    s32 x3 = p[3];
+    if (x0 > x1) {
+        p[0] = x2 + x3;
+        return x0 - x1;
+    }
+    p[1] = x0 ^ x2;
+    return x1 + x3;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

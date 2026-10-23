@@ -4666,5 +4666,58 @@ TEST(AstConverterTest, DaddiuStackFrameAllocationMapsIncomingStackArgsCorrectly)
   EXPECT_THAT(code, Not(HasSubstr("arg8")));
 }
 
+TEST(AstConverterTest, StructuralRegisterPinningAndS64PointerDerefInterferenceChecks) {
+  // 1. Integer-returning leaf function with callee-saved FPR ($f20) and caller-saved ABI FPR ($f0)
+  // pins both $f20 and $f0 without requiring 8+ distinct FPR bases:
+  std::vector<uint32_t> fp_leaf_words = {
+      0x27BDFFF0,  // 00: addiu $sp, $sp, -16
+      0xE7B40008,  // 04: swc1  $f20, 8($sp)
+      0xC4800000,  // 08: lwc1  $f0, 0($a0)
+      0xC4940004,  // 0C: lwc1  $f20, 4($a0)
+      0x4600A000,  // 10: add.s $f0, $f20, $f0
+      0xE4800008,  // 14: swc1  $f0, 8($a0)
+      0x24020001,  // 18: addiu $v0, $zero, 1
+      0xC7B40008,  // 1C: lwc1  $f20, 8($sp)
+      0x03E00008,  // 20: jr    $ra
+      0x27BD0010,  // 24: addiu $sp, $sp, 16
+  };
+  auto fp_leaf_cfg = *ControlFlowGraph::Build(*DecodeSequence(fp_leaf_words, 0x80001000));
+  DominatorTree fp_leaf_dom = DominatorTree::Compute(fp_leaf_cfg);
+  DominatorTree fp_leaf_pdom = DominatorTree::ComputePostDominators(fp_leaf_cfg);
+  LoopInfo fp_leaf_loops = LoopInfo::Analyze(fp_leaf_cfg, fp_leaf_dom);
+  auto fp_leaf_region =
+      ControlFlowStructurer::Structure(fp_leaf_cfg, fp_leaf_dom, fp_leaf_pdom, fp_leaf_loops);
+  ASSERT_THAT(fp_leaf_region, NotNull());
+
+  AstConverterOptions fp_leaf_opts;
+  fp_leaf_opts.function_name = "IntReturnLeafWithF20AndF0";
+  auto fp_leaf_func = *AstConverter::Convert(fp_leaf_cfg, *fp_leaf_region, nullptr, fp_leaf_opts);
+  std::string fp_leaf_code = fp_leaf_func.ToString();
+  EXPECT_THAT(fp_leaf_code, HasSubstr("register f32 f20 asm(\"$f20\");"));
+  EXPECT_THAT(fp_leaf_code, HasSubstr("register f32 f0 asm(\"$f0\");"));
+
+  // 2. Structural *(s64*) pointer dereference check suppresses $26/$27 kernel register pinning:
+  std::vector<uint32_t> s64_deref_words = {
+      0xDC9A0000,  // 00: ld   $k0, 0($a0)
+      0xFC9A0008,  // 04: sd   $k0, 8($a0)
+      0x03401021,  // 08: addu $v0, $k0, $zero
+      0x03E00008,  // 0C: jr   $ra
+      0x00000000,  // 10: nop
+  };
+  auto s64_cfg = *ControlFlowGraph::Build(*DecodeSequence(s64_deref_words, 0x80001000));
+  DominatorTree s64_dom = DominatorTree::Compute(s64_cfg);
+  DominatorTree s64_pdom = DominatorTree::ComputePostDominators(s64_cfg);
+  LoopInfo s64_loops = LoopInfo::Analyze(s64_cfg, s64_dom);
+  auto s64_region = ControlFlowStructurer::Structure(s64_cfg, s64_dom, s64_pdom, s64_loops);
+  ASSERT_THAT(s64_region, NotNull());
+
+  AstConverterOptions s64_opts;
+  s64_opts.function_name = "S64DerefWithK0";
+  auto s64_func = *AstConverter::Convert(s64_cfg, *s64_region, nullptr, s64_opts);
+  std::string s64_code = s64_func.ToString();
+  EXPECT_THAT(s64_code, HasSubstr("*(s64*)arg0"));
+  EXPECT_THAT(s64_code, Not(HasSubstr("asm(\"$26\")")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

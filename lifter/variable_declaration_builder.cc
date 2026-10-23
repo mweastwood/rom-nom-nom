@@ -46,6 +46,392 @@ bool IsCalleeSavedGprVarName(std::string_view v) {
          (v.size() == 7 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7');
 }
 
+bool IsCalleeSavedFprBaseName(std::string_view base) {
+  return base == "f20" || base == "f22" || base == "f24" || base == "f26" || base == "f28" ||
+         base == "f30";
+}
+
+bool IsDedicatedCallerScratchFprBaseName(std::string_view base) {
+  return base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
+         base == "f16" || base == "f18";
+}
+
+bool IsAbiArgOrReturnFprBaseName(std::string_view base) {
+  return base == "f0" || base == "f12" || base == "f14";
+}
+
+bool IsFloatingPointReturnType(const CType& type) {
+  return type.pointer_depth == 0 && (type.name == "f32" || type.name == "f64");
+}
+
+bool ExpressionContainsS64PointerDeref(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      if (un.IsPrefix() && un.Op() == "*" &&
+          un.Operand().Kind() == CExpressionKind::kCastExpression) {
+        const auto& cast = static_cast<const CastExpression&>(un.Operand());
+        if (cast.TargetType().name == "s64" && cast.TargetType().pointer_depth >= 1) {
+          return true;
+        }
+      }
+      return ExpressionContainsS64PointerDeref(un.Operand());
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      return ExpressionContainsS64PointerDeref(bin.Lhs()) ||
+             ExpressionContainsS64PointerDeref(bin.Rhs());
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      return ExpressionContainsS64PointerDeref(assign.Lhs()) ||
+             ExpressionContainsS64PointerDeref(assign.Rhs());
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      if (ExpressionContainsS64PointerDeref(call.Callee())) return true;
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr && ExpressionContainsS64PointerDeref(*arg)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionContainsS64PointerDeref(static_cast<const CastExpression&>(expr).Operand());
+    case CExpressionKind::kMemberAccessExpression:
+      return ExpressionContainsS64PointerDeref(
+          static_cast<const MemberAccessExpression&>(expr).Object());
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      return ExpressionContainsS64PointerDeref(arr.Array()) ||
+             ExpressionContainsS64PointerDeref(arr.Index());
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return ExpressionContainsS64PointerDeref(tern.Condition()) ||
+             ExpressionContainsS64PointerDeref(tern.TrueExpression()) ||
+             ExpressionContainsS64PointerDeref(tern.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StatementContainsS64PointerDeref(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementContainsS64PointerDeref(*child)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement:
+      return ExpressionContainsS64PointerDeref(
+          static_cast<const ExpressionStatement&>(stmt).Expression());
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
+      return vd.Initializer() != nullptr && ExpressionContainsS64PointerDeref(*vd.Initializer());
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return ExpressionContainsS64PointerDeref(ifs.Condition()) ||
+             StatementContainsS64PointerDeref(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StatementContainsS64PointerDeref(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return ExpressionContainsS64PointerDeref(ws.Condition()) ||
+             StatementContainsS64PointerDeref(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return StatementContainsS64PointerDeref(dws.Body()) ||
+             ExpressionContainsS64PointerDeref(dws.Condition());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StatementContainsS64PointerDeref(*fs.Init())) ||
+             (fs.Condition() != nullptr && ExpressionContainsS64PointerDeref(*fs.Condition())) ||
+             (fs.Step() != nullptr && ExpressionContainsS64PointerDeref(*fs.Step())) ||
+             StatementContainsS64PointerDeref(fs.Body());
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return rs.ReturnValue() != nullptr && ExpressionContainsS64PointerDeref(*rs.ReturnValue());
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExpressionContainsS64PointerDeref(ss.Condition())) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StatementContainsS64PointerDeref(*c.body)) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+int CountDirectAssignmentsInExpression(const CExpression& expr, std::string_view target_var) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      int self_assign =
+          (assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+           static_cast<const IdentifierExpression&>(assign.Lhs()).Name() == target_var)
+              ? 1
+              : 0;
+      return self_assign + CountDirectAssignmentsInExpression(assign.Lhs(), target_var) +
+             CountDirectAssignmentsInExpression(assign.Rhs(), target_var);
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      int self_inc = ((un.Op() == "++" || un.Op() == "--") &&
+                      un.Operand().Kind() == CExpressionKind::kIdentifier &&
+                      static_cast<const IdentifierExpression&>(un.Operand()).Name() == target_var)
+                         ? 1
+                         : 0;
+      return self_inc + CountDirectAssignmentsInExpression(un.Operand(), target_var);
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      return CountDirectAssignmentsInExpression(bin.Lhs(), target_var) +
+             CountDirectAssignmentsInExpression(bin.Rhs(), target_var);
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      int total = CountDirectAssignmentsInExpression(call.Callee(), target_var);
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr) {
+          total += CountDirectAssignmentsInExpression(*arg, target_var);
+        }
+      }
+      return total;
+    }
+    case CExpressionKind::kCastExpression:
+      return CountDirectAssignmentsInExpression(static_cast<const CastExpression&>(expr).Operand(),
+                                                target_var);
+    case CExpressionKind::kMemberAccessExpression:
+      return CountDirectAssignmentsInExpression(
+          static_cast<const MemberAccessExpression&>(expr).Object(), target_var);
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      return CountDirectAssignmentsInExpression(arr.Array(), target_var) +
+             CountDirectAssignmentsInExpression(arr.Index(), target_var);
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return CountDirectAssignmentsInExpression(tern.Condition(), target_var) +
+             CountDirectAssignmentsInExpression(tern.TrueExpression(), target_var) +
+             CountDirectAssignmentsInExpression(tern.FalseExpression(), target_var);
+    }
+    default:
+      return 0;
+  }
+}
+
+int CountDirectAssignmentsInStatement(const CStatement& stmt, std::string_view target_var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      int total = 0;
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr) {
+          total += CountDirectAssignmentsInStatement(*child, target_var);
+        }
+      }
+      return total;
+    }
+    case CStatementKind::kExpressionStatement:
+      return CountDirectAssignmentsInExpression(
+          static_cast<const ExpressionStatement&>(stmt).Expression(), target_var);
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
+      return vd.Initializer() != nullptr
+                 ? CountDirectAssignmentsInExpression(*vd.Initializer(), target_var)
+                 : 0;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      int total = CountDirectAssignmentsInExpression(ifs.Condition(), target_var) +
+                  CountDirectAssignmentsInStatement(ifs.ThenBranch(), target_var);
+      if (ifs.ElseBranch() != nullptr) {
+        total += CountDirectAssignmentsInStatement(*ifs.ElseBranch(), target_var);
+      }
+      return total;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CountDirectAssignmentsInExpression(ws.Condition(), target_var) +
+             CountDirectAssignmentsInStatement(ws.Body(), target_var);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CountDirectAssignmentsInStatement(dws.Body(), target_var) +
+             CountDirectAssignmentsInExpression(dws.Condition(), target_var);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      int total = CountDirectAssignmentsInStatement(fs.Body(), target_var);
+      if (fs.Init() != nullptr) {
+        total += CountDirectAssignmentsInStatement(*fs.Init(), target_var);
+      }
+      if (fs.Condition() != nullptr) {
+        total += CountDirectAssignmentsInExpression(*fs.Condition(), target_var);
+      }
+      if (fs.Step() != nullptr) {
+        total += CountDirectAssignmentsInExpression(*fs.Step(), target_var);
+      }
+      return total;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return rs.ReturnValue() != nullptr
+                 ? CountDirectAssignmentsInExpression(*rs.ReturnValue(), target_var)
+                 : 0;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      int total = CountDirectAssignmentsInExpression(ss.Condition(), target_var);
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr) {
+          total += CountDirectAssignmentsInStatement(*c.body, target_var);
+        }
+      }
+      return total;
+    }
+    default:
+      return 0;
+  }
+}
+
+int CountNonReturnVariableReadUsesInStatement(const CStatement& stmt, std::string_view var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kReturnStatement:
+      return 0;
+    case CStatementKind::kCompoundStatement: {
+      int total = 0;
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr) {
+          total += CountNonReturnVariableReadUsesInStatement(*child, var);
+        }
+      }
+      return total;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      int total = CountVariableReadUsesInExpression(ifs.Condition(), var) +
+                  CountNonReturnVariableReadUsesInStatement(ifs.ThenBranch(), var);
+      if (ifs.ElseBranch() != nullptr) {
+        total += CountNonReturnVariableReadUsesInStatement(*ifs.ElseBranch(), var);
+      }
+      return total;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CountVariableReadUsesInExpression(ws.Condition(), var) +
+             CountNonReturnVariableReadUsesInStatement(ws.Body(), var);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CountNonReturnVariableReadUsesInStatement(dws.Body(), var) +
+             CountVariableReadUsesInExpression(dws.Condition(), var);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      int total = CountNonReturnVariableReadUsesInStatement(fs.Body(), var);
+      if (fs.Init() != nullptr) {
+        total += CountNonReturnVariableReadUsesInStatement(*fs.Init(), var);
+      }
+      if (fs.Condition() != nullptr) {
+        total += CountVariableReadUsesInExpression(*fs.Condition(), var);
+      }
+      if (fs.Step() != nullptr) {
+        total += CountVariableReadUsesInExpression(*fs.Step(), var);
+      }
+      return total;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      int total = CountVariableReadUsesInExpression(ss.Condition(), var);
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr) {
+          total += CountNonReturnVariableReadUsesInStatement(*c.body, var);
+        }
+      }
+      return total;
+    }
+    default:
+      return CountVariableReadUsesInStatement(stmt, var);
+  }
+}
+
+// Returns true if a split argument scratch variable (`temp_a0`..`temp_a3`) is modified before a
+// subsequent read of the corresponding incoming parameter (`arg0`..`arg3`), meaning their live
+// ranges overlap on the same physical argument register (`$4`..`$7`).
+bool DoesScratchArgInterfereWithEntryParam(const CompoundStatement& body,
+                                           std::string_view temp_a_var) {
+  if (temp_a_var.size() != 7 || !absl::StartsWith(temp_a_var, "temp_a") || temp_a_var[6] < '0' ||
+      temp_a_var[6] > '3') {
+    return false;
+  }
+  const std::string param_var = absl::StrCat("arg", temp_a_var.substr(6, 1));
+  bool temp_modified = false;
+  auto check_stmt = [&](auto& self, const CStatement& s) -> bool {
+    switch (s.Kind()) {
+      case CStatementKind::kCompoundStatement:
+        for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
+          if (child != nullptr && self(self, *child)) return true;
+        }
+        return false;
+      case CStatementKind::kIfStatement: {
+        const auto& ifs = static_cast<const IfStatement&>(s);
+        if (temp_modified && CountVariableReadUsesInExpression(ifs.Condition(), param_var) > 0) {
+          return true;
+        }
+        if (ExpressionModifiesVariable(ifs.Condition(), temp_a_var)) {
+          temp_modified = true;
+        }
+        bool saved = temp_modified;
+        bool then_mod = saved;
+        temp_modified = saved;
+        if (self(self, ifs.ThenBranch())) return true;
+        then_mod = temp_modified;
+        bool else_mod = saved;
+        if (ifs.ElseBranch() != nullptr) {
+          temp_modified = saved;
+          if (self(self, *ifs.ElseBranch())) return true;
+          else_mod = temp_modified;
+        }
+        temp_modified = then_mod || else_mod;
+        return false;
+      }
+      case CStatementKind::kWhileStatement:
+      case CStatementKind::kDoWhileStatement:
+      case CStatementKind::kForStatement: {
+        if (StatementModifiesVariable(s, temp_a_var) &&
+            CountVariableReadUsesInStatement(s, param_var) > 0) {
+          return true;
+        }
+        if (temp_modified && CountVariableReadUsesInStatement(s, param_var) > 0) {
+          return true;
+        }
+        if (StatementModifiesVariable(s, temp_a_var)) {
+          temp_modified = true;
+        }
+        return false;
+      }
+      default: {
+        if (temp_modified && CountVariableReadUsesInStatement(s, param_var) > 0) {
+          return true;
+        }
+        if (StatementModifiesVariable(s, temp_a_var)) {
+          temp_modified = true;
+        }
+        return false;
+      }
+    }
+  };
+  return check_stmt(check_stmt, body);
+}
+
 const CallExpression* UnwrapCallOrPureUnaryOnCall(const CExpression& expr) {
   const CExpression* cur = &expr;
   while (true) {
@@ -653,7 +1039,6 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
 
-  std::string body_str = (*body)->ToString();
   auto has_address_taken = [&](std::string_view target_var) -> bool {
     return StatementTakesAddressOf(**body, target_var);
   };
@@ -670,14 +1055,37 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
 
   const bool is_leaf_func = !StatementHasCall(**body);
+  const bool has_s64_pointer_deref = StatementContainsS64PointerDeref(**body);
+  const bool returns_fp = IsFloatingPointReturnType(return_type);
 
   auto is_caller_saved_safe_across_calls = [&](std::string_view r) -> bool {
     return IsCallerSavedSafeAcrossCalls(**body, is_leaf_func, r);
   };
 
+  // MIPS O32 register file capacities and GCC 2.7.2 reload reserve margins:
+  // - 16 even FPRs total ($f0..$f30); reserve 4 even FPRs for expression evaluation / conversions.
+  // - 7 dedicated caller-saved scratch FPRs ($f2, $f4, $f6, $f8, $f10, $f16, $f18) before ABI
+  //   argument/return FPRs ($f0, $f12, $f14) are needed as extra scratch registers in leaf code.
+  // - 16 caller-saved GPRs total ($v0..$v1, $a0..$a3, $t0..$t9); reserve 2 GPRs for reloads.
+  // - 18 allocatable GPRs total before hard-register pinning risks spilling fixed registers.
+  // - 4 GPR argument registers ($a0..$a3).
+  constexpr int kTotalEvenFprs = 16;
+  constexpr int kReservedScratchEvenFprs = 4;
+  constexpr int kMaxPinnedEvenFprs = kTotalEvenFprs - kReservedScratchEvenFprs;
+  constexpr size_t kNumDedicatedCallerScratchFprs = 7;
+  constexpr int kTotalCallerSavedGprs = 16;
+  constexpr int kReservedScratchGprs = 2;
+  constexpr int kMaxCallerGprPins = kTotalCallerSavedGprs - kReservedScratchGprs;
+  constexpr size_t kMaxUnpinnedGprLocalsBeforeSpillRisk = 18;
+  constexpr size_t kNumGprArgumentRegisters = 4;
+
   size_t unpinned_gpr_locals_count = 0;
   int callee_saved_gpr_count = 0;
+  bool has_v0_local = false;
+  bool has_v1_local = false;
   for (const auto& v : local_vars_to_declare) {
+    if (v == "v0") has_v0_local = true;
+    if (v == "v1") has_v1_local = true;
     if (IsCalleeSavedGprVarName(v)) {
       ++callee_saved_gpr_count;
     }
@@ -687,8 +1095,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
       ++unpinned_gpr_locals_count;
     }
   }
-  const bool allow_caller_saved_gpr_pins = (unpinned_gpr_locals_count <= 18);
-  constexpr int kMaxCallerGprPins = 14;
+  const bool allow_caller_saved_gpr_pins =
+      (unpinned_gpr_locals_count <= kMaxUnpinnedGprLocalsBeforeSpillRisk);
   int pinned_caller_gpr_count = 0;
   bool any_param_modified = false;
   for (const auto& param : parameters) {
@@ -697,6 +1105,19 @@ absl::Status PrependSynthesizedLocalDeclarations(
       break;
     }
   }
+
+  const int v0_assigns = has_v0_local ? CountDirectAssignmentsInStatement(**body, "v0") : 0;
+  const int v0_reads = has_v0_local ? CountVariableReadUsesInStatement(**body, "v0") : 0;
+  const int v0_non_return_reads =
+      has_v0_local ? CountNonReturnVariableReadUsesInStatement(**body, "v0") : 0;
+  const bool v0_reused_as_working_temp = (v0_assigns >= 2 && v0_reads >= 1);
+  const bool is_float_return_leaf_with_v0_v1 = is_leaf_func && returns_fp && has_v1_local;
+  const bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
+  const bool is_multi_reg_leaf_with_v0_v1 =
+      is_leaf_func && has_v0_local && has_v1_local &&
+      (is_leaf_with_s_regs || (!is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
+                               unpinned_gpr_locals_count >= kNumGprArgumentRegisters &&
+                               v0_assigns >= 2 && v0_non_return_reads >= 1));
 
   absl::flat_hash_set<std::string> float_gpr_var_names;
   for (Register r : AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg)) {
@@ -722,27 +1143,35 @@ absl::Status PrependSynthesizedLocalDeclarations(
 
   int callee_saved_fp_count = 0;
   for (const auto& [base_name, count] : fp_base_counts) {
-    if (base_name == "f20" || base_name == "f22" || base_name == "f24" || base_name == "f26" ||
-        base_name == "f28" || base_name == "f30") {
+    if (IsCalleeSavedFprBaseName(base_name)) {
       callee_saved_fp_count++;
     }
   }
   int pinned_caller_fp_count = 0;
   absl::flat_hash_set<std::string> pinned_fp_bases;
 
+  auto can_pin_abi_fpr_base = [&](std::string_view base) -> bool {
+    if (!IsAbiArgOrReturnFprBaseName(base)) {
+      return false;
+    }
+    if (is_leaf_func) {
+      return !returns_fp && (has_shared_fp_base || callee_saved_fp_count >= 1 ||
+                             fp_base_counts.size() > kNumDedicatedCallerScratchFprs);
+    }
+    return base == "f12" || base == "f14" || (base == "f0" && !returns_fp);
+  };
+
   auto get_callee_saved_register_annotation =
       [&](std::string_view var_name) -> std::optional<std::string> {
     if (has_address_taken(var_name)) {
       return std::nullopt;
     }
-    if ((var_name == "temp_k0" || var_name == "temp_k1") &&
-        !absl::StrContains(body_str, "*(s64*)")) {
+    if ((var_name == "temp_k0" || var_name == "temp_k1") && !has_s64_pointer_deref) {
       return (var_name == "temp_k0") ? "$26" : "$27";
     }
     if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
         var_name[6] <= '7') {
-      if (frame_analysis.frame_size == 0 ||
-          (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
+      if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref)) {
         return std::nullopt;
       }
       int reg_num = 16 + (var_name[6] - '0');
@@ -754,37 +1183,22 @@ absl::Status PrependSynthesizedLocalDeclarations(
       if (pinned_fp_bases.contains(std::string(base))) {
         return std::nullopt;
       }
-      bool is_callee_saved_fp = (base == "f20" || base == "f22" || base == "f24" || base == "f26" ||
-                                 base == "f28" || base == "f30");
-      if (is_callee_saved_fp &&
+      if (IsCalleeSavedFprBaseName(base) &&
           (fp_base_counts[std::string(base)] == 1 || absl::EndsWith(var_name, "_d") ||
            has_address_taken(absl::StrCat(base, "_d")))) {
-        if (frame_analysis.frame_size == 0 ||
-            (sp_buffer_size == 0 && absl::StrContains(body_str, "*(s64*)"))) {
+        if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref)) {
           return std::nullopt;
         }
         pinned_fp_bases.insert(std::string(base));
         return absl::StrCat("$", base);
       }
-      if (fp_base_counts[std::string(base)] == 1) {
-        if (callee_saved_fp_count + pinned_caller_fp_count < 12 &&
-            (base == "f2" || base == "f4" || base == "f6" || base == "f8" || base == "f10" ||
-             base == "f16" || base == "f18" ||
-             ((base == "f0" || base == "f12" || base == "f14") &&
-              ((is_leaf_func && return_type.ToString() != "f32" &&
-                return_type.ToString() != "f64" &&
-                (return_type.ToString() == "void"
-                     ? (has_shared_fp_base || callee_saved_fp_count >= 1)
-                     : (fp_base_counts.size() >= 8))) ||
-               (!is_leaf_func && (base == "f12" || base == "f14" ||
-                                  (base == "f0" && return_type.ToString() != "f32" &&
-                                   return_type.ToString() != "f64"))))))) {
-          if (is_caller_saved_safe_across_calls(var_name)) {
-            pinned_caller_fp_count++;
-            pinned_fp_bases.insert(std::string(base));
-            return absl::StrCat("$", base);
-          }
-        }
+      if (fp_base_counts[std::string(base)] == 1 &&
+          callee_saved_fp_count + pinned_caller_fp_count < kMaxPinnedEvenFprs &&
+          (IsDedicatedCallerScratchFprBaseName(base) || can_pin_abi_fpr_base(base)) &&
+          is_caller_saved_safe_across_calls(var_name)) {
+        pinned_caller_fp_count++;
+        pinned_fp_bases.insert(std::string(base));
+        return absl::StrCat("$", base);
       }
       return std::nullopt;
     }
@@ -792,62 +1206,28 @@ absl::Status PrependSynthesizedLocalDeclarations(
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;
-    const bool has_v0_local = std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(),
-                                        "v0") != local_vars_to_declare.end();
-    const bool has_v1_local = std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(),
-                                        "v1") != local_vars_to_declare.end();
-    bool is_float_return_leaf_with_v0_v1 =
-        is_leaf_func && (return_type.ToString() == "f32" || return_type.ToString() == "f64") &&
-        has_v1_local;
-    int v0_assigns = 0;
-    int v0_mentions = 0;
-    {
-      size_t pos = 0;
-      while ((pos = body_str.find("v0", pos)) != std::string::npos) {
-        const bool left_ok =
-            (pos == 0 || (!std::isalnum(static_cast<unsigned char>(body_str[pos - 1])) &&
-                          body_str[pos - 1] != '_'));
-        const bool right_ok = (pos + 2 >= body_str.size() ||
-                               (!std::isalnum(static_cast<unsigned char>(body_str[pos + 2])) &&
-                                body_str[pos + 2] != '_'));
-        if (left_ok && right_ok) {
-          v0_mentions++;
-          if (pos + 5 <= body_str.size() && body_str.compare(pos, 5, "v0 = ") == 0) {
-            v0_assigns++;
-          }
-        }
-        pos += 2;
-      }
-    }
-    const int v0_reads = v0_mentions - v0_assigns;
-    bool is_multi_reg_leaf_with_v0_v1 =
-        is_leaf_func && has_v0_local && has_v1_local &&
-        (callee_saved_gpr_count >= 1 ||
-         (!is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
-          unpinned_gpr_locals_count >= 4 && v0_assigns >= 2 && v0_reads >= 1));
-    bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
-    bool v0_assigned_many_times = false;
-    if (var_name == "v0" && !is_leaf_func) {
-      v0_assigned_many_times = (v0_assigns >= 2 && v0_reads >= 1);
-    }
+    const bool v0_safe_in_non_leaf = !is_leaf_func && v0_reused_as_working_temp;
     if ((is_float_return_leaf_with_v0_v1 || is_multi_reg_leaf_with_v0_v1 || is_leaf_with_s_regs ||
-         v0_assigned_many_times) &&
+         v0_safe_in_non_leaf) &&
         var_name == "v0") {
       caller_gpr_reg = "$2";
     } else if ((is_float_return_leaf_with_v0_v1 || is_multi_reg_leaf_with_v0_v1 ||
                 is_leaf_with_s_regs || !is_leaf_func) &&
                var_name == "v1") {
       caller_gpr_reg = "$3";
-    } else if ((!is_leaf_func || is_leaf_with_s_regs ||
-                (unpinned_gpr_locals_count >= 4 && !is_float_return_leaf_with_v0_v1)) &&
+    } else if ((!is_leaf_func || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
+                (v0_non_return_reads >= 1 &&
+                 unpinned_gpr_locals_count >= kNumGprArgumentRegisters &&
+                 !is_float_return_leaf_with_v0_v1)) &&
                (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1) &&
                var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
                var_name[3] <= '3') {
       int reg_num = 4 + (var_name[3] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
-    } else if ((!is_leaf_func || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1) &&
-               var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
-               var_name[6] <= '3') {
+    } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
+               var_name[6] <= '3' &&
+               (!is_leaf_func || is_leaf_with_s_regs ||
+                !DoesScratchArgInterfereWithEntryParam(**body, var_name))) {
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&
