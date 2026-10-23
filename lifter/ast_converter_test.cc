@@ -4800,5 +4800,69 @@ TEST(AstConverterTest, StructuralRegisterPinningAndS64PointerDerefInterferenceCh
   EXPECT_THAT(s64_code, Not(HasSubstr("asm(\"$26\")")));
 }
 
+TEST(AstConverterTest, GeneralizedCallArgumentCountInferenceAcrossPrologueAndPredecessor) {
+  // 1. Entry block saves $a1 (k == 1) to $s1 before mtc1 $a2, $f20, modifies $a0, and calls
+  // func_80001000(arg0 + 1, arg1):
+  std::vector<uint32_t> entry_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB10018,  // 08: sw    $s1, 24($sp)
+      0xE7B40014,  // 0C: swc1  $f20, 20($sp)
+      0x00A08821,  // 10: addu  $s1, $a1, $zero  (save $a1 -> $s1)
+      0x4486A000,  // 14: mtc1  $a2, $f20        (move $a2 -> $f20)
+      0x24840001,  // 18: addiu $a0, $a0, 1      (define $a0)
+      0x0C000400,  // 1C: jal   0x80001000       (should infer 2 args: $a0, $a1!)
+      0x00000000,  // 20: nop
+      0x4600A006,  // 24: mov.s $f0, $f20
+      0xC7B40014,  // 28: lwc1  $f20, 20($sp)
+      0x8FB10018,  // 2C: lw    $s1, 24($sp)
+      0x8FBF001C,  // 30: lw    $ra, 28($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0020,  // 38: addiu $sp, $sp, 32
+  };
+  auto entry_cfg = *ControlFlowGraph::Build(*DecodeSequence(entry_words, 0x80002000));
+  DominatorTree entry_dom = DominatorTree::Compute(entry_cfg);
+  DominatorTree entry_pdom = DominatorTree::ComputePostDominators(entry_cfg);
+  LoopInfo entry_loops = LoopInfo::Analyze(entry_cfg, entry_dom);
+  auto entry_region =
+      ControlFlowStructurer::Structure(entry_cfg, entry_dom, entry_pdom, entry_loops);
+  ASSERT_THAT(entry_region, NotNull());
+
+  AstConverterOptions entry_opts;
+  entry_opts.function_name = "EntrySecondArgSavedBeforeMtc1";
+  auto entry_func = *AstConverter::Convert(entry_cfg, *entry_region, nullptr, entry_opts);
+  std::string entry_code = entry_func.ToString();
+  EXPECT_THAT(entry_code, HasSubstr("func_80001000(arg0, arg1)"));
+
+  // 2. Predecessor block defines $a0 and $a1, tests $a1 with slti/beq before calling
+  // func_80001000($a0, $a1) in the branch block:
+  std::vector<uint32_t> pred_words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xAFBF0010,  // 04: sw    $ra, 16($sp)
+      0x2484000A,  // 08: addiu $a0, $a0, 10
+      0x24A50004,  // 0C: addiu $a1, $a1, 4
+      0x28A10001,  // 10: slti  $at, $a1, 1
+      0x14200003,  // 14: bne   $at, $zero, +3 -> 0x24
+      0x00000000,  // 18: nop
+      0x0C000400,  // 1C: jal   0x80001000
+      0x00000000,  // 20: nop
+      0x8FBF0010,  // 24: lw    $ra, 16($sp)
+      0x03E00008,  // 28: jr    $ra
+      0x27BD0018,  // 2C: addiu $sp, $sp, 24
+  };
+  auto pred_cfg = *ControlFlowGraph::Build(*DecodeSequence(pred_words, 0x80002000));
+  DominatorTree pred_dom = DominatorTree::Compute(pred_cfg);
+  DominatorTree pred_pdom = DominatorTree::ComputePostDominators(pred_cfg);
+  LoopInfo pred_loops = LoopInfo::Analyze(pred_cfg, pred_dom);
+  auto pred_region = ControlFlowStructurer::Structure(pred_cfg, pred_dom, pred_pdom, pred_loops);
+  ASSERT_THAT(pred_region, NotNull());
+
+  AstConverterOptions pred_opts;
+  pred_opts.function_name = "PredSecondArgBranchGuard";
+  auto pred_func = *AstConverter::Convert(pred_cfg, *pred_region, nullptr, pred_opts);
+  std::string pred_code = pred_func.ToString();
+  EXPECT_THAT(pred_code, HasSubstr("func_80001000(arg0, arg1)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

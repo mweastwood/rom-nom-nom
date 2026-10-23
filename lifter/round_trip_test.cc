@@ -5565,5 +5565,16 @@ s32 SixCaseSparseDecisionTreeSwitch(s32 x, s32 y, s32 mode) {
 )");
 }
 
+TEST_F(RoundTripTest, SecondIntParamSavedAndPassedWithThirdFloatGprParam) {
+  AssertRoundTripBitExact("SecondIntParamSavedAndPassedWithThirdFloatGprParam", R"(
+s32 helper_pair(s32 a, s32 b);
+
+f32 SecondIntParamSavedAndPassedWithThirdFloatGprParam(s32 a, s32 b, f32 c) {
+    s32 r = helper_pair(a + 1, b);
+    return (f32)(r + b) + c;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

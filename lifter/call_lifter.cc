@@ -146,18 +146,21 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
         for (int k = 0; k < 4; ++k) {
           if (u == kArgumentRegisters[k]) {
             bool is_s_copy_before_mtc1 = false;
-            if (k == 0 &&
-                (prev.opcode == Opcode::kAddu || prev.opcode == Opcode::kOr ||
+            if ((prev.opcode == Opcode::kAddu || prev.opcode == Opcode::kOr ||
                  prev.opcode == Opcode::kDaddu) &&
-                prev.rt == Register::kZero && prev.rd.has_value() && *prev.rd >= Register::kS0 &&
-                *prev.rd <= Register::kS7) {
+                prev.rt == Register::kZero && prev.rd.has_value() &&
+                ((*prev.rd >= Register::kS0 && *prev.rd <= Register::kS7) ||
+                 *prev.rd == Register::kFp)) {
               for (size_t m_idx = j + 1; m_idx < i; ++m_idx) {
                 const auto& later = instructions_to_process[m_idx];
-                if (later.opcode == Opcode::kMtc1 && later.rt.has_value() &&
-                    (*later.rt == Register::kA1 || *later.rt == Register::kA2 ||
-                     *later.rt == Register::kA3)) {
-                  is_s_copy_before_mtc1 = true;
-                  break;
+                if (later.opcode == Opcode::kMtc1 && later.rt.has_value()) {
+                  for (int m = k + 1; m < 4; ++m) {
+                    if (*later.rt == kArgumentRegisters[m]) {
+                      is_s_copy_before_mtc1 = true;
+                      break;
+                    }
+                  }
+                  if (is_s_copy_before_mtc1) break;
                 }
               }
             }
@@ -251,7 +254,8 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
         for (uint32_t pred_id : curr_block->predecessors) {
           const BasicBlock* pred = cfg->GetBlock(pred_id);
           for (int hop = 0; hop < 2 && pred != nullptr && !pred->instructions.empty(); ++hop) {
-            bool read_since_end = false;
+            bool read_by_non_branch = false;
+            bool read_by_branch_or_slt = false;
             bool hit_stop = false;
             size_t sz = pred->instructions.size();
             std::optional<Register> branch_cond_temp;
@@ -261,11 +265,10 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
               const auto& br_inst = pred->instructions[sz - 2];
               RegisterUseDef br_ud = GetInstructionUseDef(br_inst);
               for (Register u : br_ud.gpr_uses) {
-                if (u == reg && arg_index > 0) read_since_end = true;
+                if (u == reg) read_by_branch_or_slt = true;
               }
-              if (arg_index == 0 &&
-                  (br_inst.opcode == Opcode::kBeq || br_inst.opcode == Opcode::kBne ||
-                   br_inst.opcode == Opcode::kBeql || br_inst.opcode == Opcode::kBnel)) {
+              if (br_inst.opcode == Opcode::kBeq || br_inst.opcode == Opcode::kBne ||
+                  br_inst.opcode == Opcode::kBeql || br_inst.opcode == Opcode::kBnel) {
                 if (br_inst.rt == Register::kZero && br_inst.rs.has_value() &&
                     *br_inst.rs != Register::kZero) {
                   branch_cond_temp = *br_inst.rs;
@@ -281,7 +284,7 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
                 hit_stop = true;
                 break;
               }
-              if (arg_index == 0 && static_cast<size_t>(k) + 2 == sz && pinst.IsBranch()) {
+              if (static_cast<size_t>(k) + 2 == sz && pinst.IsBranch()) {
                 continue;
               }
               RegisterUseDef pud = GetInstructionUseDef(pinst);
@@ -290,26 +293,71 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
                 if (d == reg) defs_reg = true;
               }
               if (defs_reg) {
-                if (!read_since_end) {
-                  defined_for_call_in_pred = true;
+                bool is_branch_cond_flag_def =
+                    branch_cond_temp.has_value() && *branch_cond_temp == reg &&
+                    (pinst.opcode == Opcode::kSlt || pinst.opcode == Opcode::kSltu ||
+                     pinst.opcode == Opcode::kSlti || pinst.opcode == Opcode::kSltiu);
+                if (!read_by_non_branch && !is_branch_cond_flag_def) {
+                  if (!read_by_branch_or_slt) {
+                    defined_for_call_in_pred = true;
+                  } else {
+                    bool lower_args_ready = true;
+                    for (int low_idx = 0; low_idx < arg_index; ++low_idx) {
+                      Register low_reg = kArgumentRegisters[low_idx];
+                      for (Register u : pud.gpr_uses) {
+                        if (u == low_reg) lower_args_ready = false;
+                      }
+                      for (size_t after = static_cast<size_t>(k) + 1; after < sz; ++after) {
+                        for (Register d :
+                             GetInstructionUseDef(pred->instructions[after]).gpr_defs) {
+                          if (d == low_reg) lower_args_ready = false;
+                        }
+                      }
+                      for (size_t cj = 0; cj < i; ++cj) {
+                        for (Register d :
+                             GetInstructionUseDef(instructions_to_process[cj]).gpr_defs) {
+                          if (d == low_reg) lower_args_ready = false;
+                        }
+                      }
+                      bool defined_before_k = false;
+                      for (int before = k - 1; before >= 0; --before) {
+                        if (pred->instructions[before].IsCall()) break;
+                        for (Register d :
+                             GetInstructionUseDef(pred->instructions[before]).gpr_defs) {
+                          if (d == low_reg) defined_before_k = true;
+                        }
+                        if (defined_before_k) break;
+                      }
+                      if (!defined_before_k) lower_args_ready = false;
+                      if (!lower_args_ready) break;
+                    }
+                    if (lower_args_ready) {
+                      defined_for_call_in_pred = true;
+                    }
+                  }
                 }
                 hit_stop = true;
                 break;
               }
               bool is_branch_slt_use =
-                  (arg_index == 0 && branch_cond_temp.has_value() &&
+                  (branch_cond_temp.has_value() &&
                    (pinst.opcode == Opcode::kSlt || pinst.opcode == Opcode::kSltu ||
                     pinst.opcode == Opcode::kSlti || pinst.opcode == Opcode::kSltiu) &&
                    ((pinst.rd.has_value() && *pinst.rd == *branch_cond_temp) ||
                     (pinst.rt.has_value() && *pinst.rt == *branch_cond_temp)));
-              if (!is_branch_slt_use) {
-                for (Register u : pud.gpr_uses) {
-                  if (u == reg) read_since_end = true;
+              for (Register u : pud.gpr_uses) {
+                if (u == reg) {
+                  if (is_branch_slt_use) {
+                    read_by_branch_or_slt = true;
+                  } else {
+                    read_by_non_branch = true;
+                  }
                 }
               }
             }
-            if (defined_for_call_in_pred || hit_stop || read_since_end ||
-                pred->predecessors.size() != 1 || pred->predecessors[0] == pred->id) {
+            if (defined_for_call_in_pred || hit_stop || read_by_non_branch ||
+                read_by_branch_or_slt || pred->predecessors.size() != 1 ||
+                pred->predecessors[0] == pred->id) {
               break;
             }
             pred = cfg->GetBlock(pred->predecessors[0]);
