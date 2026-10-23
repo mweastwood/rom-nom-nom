@@ -4282,6 +4282,87 @@ TEST(AstParameterCoalescerTest, SplitScratchReusedParameterRegistersSplitsDeadEn
   EXPECT_THAT(code, HasSubstr("return temp_a0;"));
 }
 
+TEST(AstParameterCoalescerTest, CoalescePrologueParameterCopiesGeneralizesMutatedParamAndV0Copy) {
+  // 1. Mutated second parameter (temp_s1 = arg1) coalesced when arg0 is also saved/used and no
+  // other uncoalesced $s registers remain:
+  {
+    CompoundStatement body;
+    // temp_s0 = arg0;
+    body.AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+    // temp_s1 = arg1;
+    body.AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_s1"), CExpression::Identifier("arg1"))));
+    // while (temp_s1 != 0) { func_80001000(temp_s0, temp_s1); temp_s1 = *(s32*)temp_s1; }
+    auto loop_body = std::make_unique<CompoundStatement>();
+    std::vector<std::unique_ptr<CExpression>> call_args;
+    call_args.push_back(CExpression::Identifier("temp_s0"));
+    call_args.push_back(CExpression::Identifier("temp_s1"));
+    loop_body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args))));
+    loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_s1"),
+        CExpression::Unary(
+            "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("temp_s1"))))));
+    body.AddStatement(CStatement::While(
+        CExpression::Binary("!=", CExpression::Identifier("temp_s1"), CExpression::Integer(0)),
+        std::move(loop_body)));
+
+    std::vector<CParameter> params = {
+        {.type = CType::S32(), .name = "arg0"},
+        {.type = CType::S32(), .name = "arg1"},
+    };
+    CoalescePrologueParameterCopies(&body, params, /*frame_size=*/32);
+
+    std::string code = body.ToString();
+    EXPECT_THAT(code, Not(HasSubstr("temp_s0")));
+    EXPECT_THAT(code, Not(HasSubstr("temp_s1")));
+    EXPECT_THAT(code, HasSubstr("func_80001000(arg0, arg1);"));
+    EXPECT_THAT(code, HasSubstr("arg1 = *(s32*)arg1;"));
+  }
+
+  // 2. Prologue v0 = arg0 copy at statement index i >= 3 before an if-statement that overwrites
+  // arg0 while reading v0 in a call argument:
+  {
+    CompoundStatement body;
+    // Four call-free prologue statements before v0 = arg0 (so v0 = arg0 is at index 3 >= 3):
+    for (int idx = 0; idx < 3; ++idx) {
+      body.AddStatement(CStatement::Expression(CExpression::Assignment(
+          "=",
+          CExpression::Unary(
+              "*", CExpression::Cast(CType{"s32", false, 1},
+                                     CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                         CExpression::Integer(idx * 4)))),
+          CExpression::Integer(idx))));
+    }
+    // v0 = arg0;
+    body.AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("v0"), CExpression::Identifier("arg0"))));
+    // if (arg2 > 0) { func_80001000(1, *(s32*)v0); }
+    auto then_branch = std::make_unique<CompoundStatement>();
+    std::vector<std::unique_ptr<CExpression>> call_args;
+    call_args.push_back(CExpression::Integer(1));
+    call_args.push_back(CExpression::Unary(
+        "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("v0"))));
+    then_branch->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args))));
+    body.AddStatement(CStatement::If(
+        CExpression::Binary(">", CExpression::Identifier("arg2"), CExpression::Integer(0)),
+        std::move(then_branch), nullptr));
+
+    std::vector<CParameter> params = {
+        {.type = CType::S32(), .name = "arg0"},
+        {.type = CType::S32(), .name = "arg1"},
+        {.type = CType::S32(), .name = "arg2"},
+    };
+    CoalescePrologueParameterCopies(&body, params, /*frame_size=*/24);
+
+    std::string code = body.ToString();
+    EXPECT_THAT(code, Not(HasSubstr("v0 = arg0;")));
+    EXPECT_THAT(code, HasSubstr("func_80001000(1, *(s32*)arg0);"));
+  }
+}
+
 TEST(AstMemoryIdiomRewriterTest, CollapseUnalignedBlockCopiesCollapsesWordStore) {
   CompoundStatement body;
   // v0 = *(s32*)arg1;

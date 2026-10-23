@@ -5516,5 +5516,23 @@ s32 LeafWithMultipleScratchAndCalleeSavedRegisters(s32* p) {
 )");
 }
 
+TEST_F(RoundTripTest, LinkedListCursorInSecondParamWithFirstParamPreservedAcrossCall) {
+  AssertRoundTripBitExact("LinkedListCursorInSecondParamWithFirstParamPreservedAcrossCall", R"(
+typedef struct ListNode {
+    struct ListNode* next;
+    s32 payload;
+} ListNode;
+
+void visit_payload(s32 ctx, s32 payload);
+
+void LinkedListCursorInSecondParamWithFirstParamPreservedAcrossCall(s32 ctx, ListNode* cursor) {
+    while (cursor != (ListNode*)0) {
+        visit_payload(ctx, cursor->payload);
+        cursor = cursor->next;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
