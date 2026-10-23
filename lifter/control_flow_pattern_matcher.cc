@@ -249,6 +249,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     uint32_t case_target = 0;
     uint32_t cont_target = 0;
     bool is_range_split = false;
+    int64_t split_val = 0;
+    bool taken_is_lt = false;
     uint32_t split_taken = 0;
     uint32_t split_ft = 0;
 
@@ -461,6 +463,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             ba.valid = true;
             ba.selector_reg = sel;
             ba.is_range_split = true;
+            ba.split_val = splits[rs];
+            ba.taken_is_lt = (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel);
             ba.split_taken = taken;
             ba.split_ft = ft;
             return ba;
@@ -475,6 +479,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             ba.valid = true;
             ba.selector_reg = sel;
             ba.is_range_split = true;
+            ba.split_val = splits[rt];
+            ba.taken_is_lt = (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel);
             ba.split_taken = taken;
             ba.split_ft = ft;
             return ba;
@@ -524,9 +530,16 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
   absl::flat_hash_set<uint32_t> decision_blocks = {root_id};
   std::vector<uint32_t> queue = {root_id};
 
+  struct BlockInterval {
+    std::optional<int64_t> low;
+    std::optional<int64_t> high;
+    std::optional<int64_t> last_pivot;
+  };
+
   absl::flat_hash_map<uint32_t, absl::flat_hash_map<Register, int64_t>> block_consts;
   absl::flat_hash_map<uint32_t, absl::flat_hash_map<Register, int64_t>> block_splits;
   absl::flat_hash_map<uint32_t, absl::flat_hash_map<Register, Register>> block_split_sels;
+  absl::flat_hash_map<uint32_t, BlockInterval> block_intervals;
 
   absl::flat_hash_map<uint32_t, std::vector<int64_t>> target_to_cases;
   std::vector<uint32_t> target_order;
@@ -685,10 +698,19 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       decision_cases.push_back(std::move(dc));
 
       if (continuation_is_decision_block) {
+        BlockInterval cont_interval = block_intervals[b_id];
+        if (cont_interval.low.has_value() && *cont_interval.low == ba.case_val) {
+          cont_interval.low = ba.case_val + 1;
+        }
+        if (cont_interval.high.has_value() && *cont_interval.high == ba.case_val) {
+          cont_interval.high = ba.case_val - 1;
+        }
+        cont_interval.last_pivot = ba.case_val;
         decision_blocks.insert(cont);
         block_consts[cont] = std::move(cont_consts);
         block_splits[cont] = std::move(cont_splits);
         block_split_sels[cont] = std::move(cont_sels);
+        block_intervals[cont] = cont_interval;
         queue.push_back(cont);
       } else {
         uint32_t eff_cont = resolve_trampoline(cont);
@@ -751,44 +773,86 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       BlockAnalysis ba_taken = analyze_block(ba.split_taken, succ_c, succ_s, succ_sels, selector);
       BlockAnalysis ba_ft = analyze_block(ba.split_ft, succ_c, succ_s, succ_sels, selector);
 
-      if (ba_taken.valid && !visited.contains(ba.split_taken) &&
-          !decision_blocks.contains(ba.split_taken)) {
-        if (loop_info != nullptr) {
-          const Loop* taken_loop = loop_info->GetLoopFor(ba.split_taken);
-          if (taken_loop != loop_info->GetLoopFor(root_id)) {
-            ba_taken.valid = false;
-          } else if (taken_loop != nullptr && (taken_loop->header == ba.split_taken ||
-                                               taken_loop->IsLatch(ba.split_taken))) {
-            ba_taken.valid = false;
+      auto check_branch_loop_valid = [&](uint32_t target_id, BlockAnalysis* child_ba) {
+        if (child_ba->valid && !visited.contains(target_id) &&
+            !decision_blocks.contains(target_id)) {
+          if (loop_info != nullptr) {
+            const Loop* child_loop = loop_info->GetLoopFor(target_id);
+            if (child_loop != loop_info->GetLoopFor(root_id)) {
+              child_ba->valid = false;
+            } else if (child_loop != nullptr &&
+                       (child_loop->header == target_id || child_loop->IsLatch(target_id))) {
+              child_ba->valid = false;
+            }
           }
         }
-      }
-      if (ba_taken.valid && !visited.contains(ba.split_taken) &&
-          !decision_blocks.contains(ba.split_taken)) {
-        decision_blocks.insert(ba.split_taken);
-        block_consts[ba.split_taken] = succ_c;
-        block_splits[ba.split_taken] = succ_s;
-        block_split_sels[ba.split_taken] = succ_sels;
-        queue.push_back(ba.split_taken);
-      } else if (!ba_taken.valid && ba_ft.valid && root_ba.is_equality &&
-                 root_ba.delay_slot_sets_split &&
-                 root_ba.delay_slot_split_val == root_ba.case_val + 1 &&
-                 !seen_case_vals.contains(root_ba.case_val - 1)) {
-        uint32_t eff_taken = resolve_trampoline(ba.split_taken);
+      };
+      check_branch_loop_valid(ba.split_taken, &ba_taken);
+      check_branch_loop_valid(ba.split_ft, &ba_ft);
+
+      bool taken_is_decision = ba_taken.valid && !visited.contains(ba.split_taken) &&
+                               !decision_blocks.contains(ba.split_taken);
+      bool ft_is_decision =
+          ba_ft.valid && !visited.contains(ba.split_ft) && !decision_blocks.contains(ba.split_ft);
+
+      const BlockInterval& cur_interval = block_intervals[b_id];
+      auto make_branch_interval = [&](bool is_lt_branch) -> BlockInterval {
+        BlockInterval child_iv = cur_interval;
+        if (is_lt_branch) {
+          int64_t new_high = ba.split_val - 1;
+          if (cur_interval.last_pivot.has_value() && *cur_interval.last_pivot == new_high &&
+              seen_case_vals.contains(new_high)) {
+            --new_high;
+          }
+          child_iv.high = child_iv.high.has_value() ? std::min(*child_iv.high, new_high) : new_high;
+        } else {
+          int64_t new_low = ba.split_val;
+          if (cur_interval.last_pivot.has_value() && *cur_interval.last_pivot == new_low &&
+              seen_case_vals.contains(new_low)) {
+            ++new_low;
+          }
+          child_iv.low = child_iv.low.has_value() ? std::max(*child_iv.low, new_low) : new_low;
+        }
+        return child_iv;
+      };
+
+      BlockInterval taken_interval = make_branch_interval(ba.taken_is_lt);
+      BlockInterval ft_interval = make_branch_interval(!ba.taken_is_lt);
+
+      auto derive_implied_leaf_case = [&](const BlockInterval& iv,
+                                          bool is_lt_branch) -> std::optional<int64_t> {
+        if (iv.low.has_value() && iv.high.has_value() && *iv.low == *iv.high &&
+            !seen_case_vals.contains(*iv.low)) {
+          return *iv.low;
+        }
+        if (cur_interval.last_pivot.has_value()) {
+          if (is_lt_branch && iv.high.has_value() && *iv.high == *cur_interval.last_pivot - 1 &&
+              (!iv.low.has_value() || *iv.low <= *iv.high) && !seen_case_vals.contains(*iv.high)) {
+            return *iv.high;
+          }
+          if (!is_lt_branch && iv.low.has_value() && *iv.low == *cur_interval.last_pivot + 1 &&
+              (!iv.high.has_value() || *iv.low <= *iv.high) && !seen_case_vals.contains(*iv.low)) {
+            return *iv.low;
+          }
+        }
+        return std::nullopt;
+      };
+
+      auto record_implied_leaf_case = [&](uint32_t leaf_target, int64_t implied_case_val) -> bool {
+        uint32_t eff_target = resolve_trampoline(leaf_target);
         if (!default_target.has_value()) {
-          default_target = eff_taken;
-        } else if (*default_target != eff_taken) {
-          return std::nullopt;
+          default_target = eff_target;
+        } else if (*default_target != eff_target) {
+          return false;
         }
-        int64_t implied_case_val = root_ba.case_val - 1;
         seen_case_vals.insert(implied_case_val);
-        if (!target_to_cases.contains(eff_taken)) {
-          target_order.push_back(eff_taken);
+        if (!target_to_cases.contains(eff_target)) {
+          target_order.push_back(eff_target);
         }
-        target_to_cases[eff_taken].push_back(implied_case_val);
+        target_to_cases[eff_target].push_back(implied_case_val);
         DecisionCase dc;
         dc.case_values = {implied_case_val};
-        dc.target_block = eff_taken;
+        dc.target_block = eff_target;
         if (ba.delay_slot_sets_const) {
           dc.const_reg = ba.delay_slot_const_reg;
           dc.const_val = ba.delay_slot_const_val;
@@ -804,27 +868,37 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           }
         }
         decision_cases.push_back(std::move(dc));
+        return true;
+      };
+
+      if (taken_is_decision) {
+        decision_blocks.insert(ba.split_taken);
+        block_consts[ba.split_taken] = succ_c;
+        block_splits[ba.split_taken] = succ_s;
+        block_split_sels[ba.split_taken] = succ_sels;
+        block_intervals[ba.split_taken] = taken_interval;
+        queue.push_back(ba.split_taken);
+      } else if (ft_is_decision) {
+        std::optional<int64_t> implied = derive_implied_leaf_case(taken_interval, ba.taken_is_lt);
+        if (!implied.has_value() || !record_implied_leaf_case(ba.split_taken, *implied)) {
+          return std::nullopt;
+        }
       } else {
         return std::nullopt;
       }
 
-      if (ba_ft.valid && !visited.contains(ba.split_ft) && !decision_blocks.contains(ba.split_ft)) {
-        if (loop_info != nullptr) {
-          const Loop* ft_loop = loop_info->GetLoopFor(ba.split_ft);
-          if (ft_loop != loop_info->GetLoopFor(root_id)) {
-            ba_ft.valid = false;
-          } else if (ft_loop != nullptr &&
-                     (ft_loop->header == ba.split_ft || ft_loop->IsLatch(ba.split_ft))) {
-            ba_ft.valid = false;
-          }
-        }
-      }
-      if (ba_ft.valid && !visited.contains(ba.split_ft) && !decision_blocks.contains(ba.split_ft)) {
+      if (ft_is_decision) {
         decision_blocks.insert(ba.split_ft);
         block_consts[ba.split_ft] = succ_c;
         block_splits[ba.split_ft] = succ_s;
         block_split_sels[ba.split_ft] = succ_sels;
+        block_intervals[ba.split_ft] = ft_interval;
         queue.push_back(ba.split_ft);
+      } else if (taken_is_decision) {
+        std::optional<int64_t> implied = derive_implied_leaf_case(ft_interval, !ba.taken_is_lt);
+        if (!implied.has_value() || !record_implied_leaf_case(ba.split_ft, *implied)) {
+          return std::nullopt;
+        }
       } else {
         return std::nullopt;
       }
@@ -844,7 +918,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     }
   }
   const size_t min_cases = root_has_extra_instructions ? 3 : 2;
-  if (total_cases < min_cases || total_cases > 5 || target_to_cases.size() < min_cases) {
+  if (total_cases < min_cases || target_to_cases.size() < min_cases) {
     return std::nullopt;
   }
 

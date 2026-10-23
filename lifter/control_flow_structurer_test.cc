@@ -1249,5 +1249,118 @@ TEST(ControlFlowStructurerTest, InnerLoopExitToSuccessorOfLatchFollowEmitsGotoIn
   EXPECT_THAT(s, HasSubstr("goto block_4"));
 }
 
+TEST(ControlFlowStructurerTest, DecisionTreeSwitchSixCasesAndImpliedIntervalLeaf) {
+  // 1. 6-case sparse decision tree (cases 10, 20, 30, 40, 50, 60 -> previously rejected by
+  // total_cases > 5):
+  //   0x00: addiu $at, $zero, 10; beq $a0, $at, 0x50 (case 10); nop
+  //   0x0C: addiu $at, $zero, 20; beq $a0, $at, 0x5C (case 20); nop
+  //   0x18: addiu $at, $zero, 30; beq $a0, $at, 0x68 (case 30); nop
+  //   0x24: addiu $at, $zero, 40; beq $a0, $at, 0x74 (case 40); nop
+  //   0x30: addiu $at, $zero, 50; beq $a0, $at, 0x80 (case 50); nop
+  //   0x3C: addiu $at, $zero, 60; beq $a0, $at, 0x8C (case 60); nop
+  //   0x48: j 0x98 (default); nop
+  std::vector<uint32_t> six_case_words = {
+      0x2401000A,  // 0x00: addiu $at, $zero, 10
+      0x10810012,  // 0x04: beq   $a0, $at, +18 -> 0x50
+      0x00000000,  // 0x08: nop
+      0x24010014,  // 0x0C: addiu $at, $zero, 20
+      0x10810012,  // 0x10: beq   $a0, $at, +18 -> 0x5C
+      0x00000000,  // 0x14: nop
+      0x2401001E,  // 0x18: addiu $at, $zero, 30
+      0x10810012,  // 0x1C: beq   $a0, $at, +18 -> 0x68
+      0x00000000,  // 0x20: nop
+      0x24010028,  // 0x24: addiu $at, $zero, 40
+      0x10810012,  // 0x28: beq   $a0, $at, +18 -> 0x74
+      0x00000000,  // 0x2C: nop
+      0x24010032,  // 0x30: addiu $at, $zero, 50
+      0x10810012,  // 0x34: beq   $a0, $at, +18 -> 0x80
+      0x00000000,  // 0x38: nop
+      0x2401003C,  // 0x3C: addiu $at, $zero, 60
+      0x10810012,  // 0x40: beq   $a0, $at, +18 -> 0x8C
+      0x00000000,  // 0x44: nop
+      0x08000026,  // 0x48: j     0x80000098 (default)
+      0x00000000,  // 0x4C: nop
+      0x24020001,  // 0x50: addiu $v0, $zero, 1
+      0x08000028,  // 0x54: j     0x800000A0 (join)
+      0x00000000,  // 0x58: nop
+      0x24020002,  // 0x5C: addiu $v0, $zero, 2
+      0x08000028,  // 0x60: j     0x800000A0
+      0x00000000,  // 0x64: nop
+      0x24020003,  // 0x68: addiu $v0, $zero, 3
+      0x08000028,  // 0x6C: j     0x800000A0
+      0x00000000,  // 0x70: nop
+      0x24020004,  // 0x74: addiu $v0, $zero, 4
+      0x08000028,  // 0x78: j     0x800000A0
+      0x00000000,  // 0x7C: nop
+      0x24020005,  // 0x80: addiu $v0, $zero, 5
+      0x08000028,  // 0x84: j     0x800000A0
+      0x00000000,  // 0x88: nop
+      0x24020006,  // 0x8C: addiu $v0, $zero, 6
+      0x08000028,  // 0x90: j     0x800000A0
+      0x00000000,  // 0x94: nop
+      0x2402FFFF,  // 0x98: addiu $v0, $zero, -1 (default)
+      0x00000000,  // 0x9C: nop
+      0x03E00008,  // 0xA0: jr    $ra (join)
+      0x00000000,  // 0xA4: nop
+  };
+  auto six_cfg = *ControlFlowGraph::Build(*DecodeSequence(six_case_words, 0x80000000));
+  DominatorTree six_dt = DominatorTree::Compute(six_cfg);
+  DominatorTree six_pdt = DominatorTree::ComputePostDominators(six_cfg);
+  LoopInfo six_loops = LoopInfo::Analyze(six_cfg, six_dt);
+  auto six_region = ControlFlowStructurer::Structure(six_cfg, six_dt, six_pdt, six_loops);
+  ASSERT_THAT(six_region, NotNull());
+  std::string six_s = six_region->ToString();
+  EXPECT_THAT(six_s, HasSubstr("switch ($a0)"));
+  EXPECT_THAT(six_s, HasSubstr("case 10:"));
+  EXPECT_THAT(six_s, HasSubstr("case 60:"));
+
+  // 2. Non-root bounded interval [3, 3] implied leaf case:
+  std::vector<uint32_t> implied_words = {
+      0x24020002,  // 0x00: addiu $v0, $zero, 2
+      0x10820012,  // 0x04: beq   $a0, $v0, +18 -> 0x50 (case 2)
+      0x28810003,  // 0x08: slti  $at, $a0, 3
+      0x1420000A,  // 0x0C: bne   $at, $zero, +10 -> 0x38 (left subtree: < 2)
+      0x00000000,  // 0x10: nop
+      0x24020004,  // 0x14: addiu $v0, $zero, 4
+      0x1082000F,  // 0x18: beq   $a0, $v0, +15 -> 0x58 (case 4)
+      0x28810005,  // 0x1C: slti  $at, $a0, 5
+      0x14200012,  // 0x20: bne   $at, $zero, +18 -> 0x6C (interval [3, 3] -> implied case 3!)
+      0x24020005,  // 0x24: addiu $v0, $zero, 5
+      0x1082000D,  // 0x28: beq   $a0, $v0, +13 -> 0x60 (case 5)
+      0x00000000,  // 0x2C: nop
+      0x0800001B,  // 0x30: j     0x8000006C (default/join)
+      0x00000000,  // 0x34: nop
+      0x24020001,  // 0x38: addiu $v0, $zero, 1
+      0x10820003,  // 0x3C: beq   $a0, $v0, +3 -> 0x4C (case 1)
+      0x00000000,  // 0x40: nop
+      0x0800001B,  // 0x44: j     0x8000006C (default/join)
+      0x00000000,  // 0x48: nop
+      0x2402000A,  // 0x4C: addiu $v0, $zero, 10 (case 1 falls through to case 2)
+      0x24020014,  // 0x50: addiu $v0, $zero, 20 (case 2)
+      0x0800001B,  // 0x54: j     0x8000006C
+      0x24020028,  // 0x58: addiu $v0, $zero, 40 (case 4)
+      0x0800001B,  // 0x5C: j     0x8000006C
+      0x24020032,  // 0x60: addiu $v0, $zero, 50 (case 5)
+      0x0800001B,  // 0x64: j     0x8000006C
+      0x00000000,  // 0x68: nop
+      0x03E00008,  // 0x6C: jr    $ra (join/default)
+      0x00000000,  // 0x70: nop
+  };
+  auto implied_cfg = *ControlFlowGraph::Build(*DecodeSequence(implied_words, 0x80000000));
+  DominatorTree implied_dt = DominatorTree::Compute(implied_cfg);
+  DominatorTree implied_pdt = DominatorTree::ComputePostDominators(implied_cfg);
+  LoopInfo implied_loops = LoopInfo::Analyze(implied_cfg, implied_dt);
+  auto implied_region =
+      ControlFlowStructurer::Structure(implied_cfg, implied_dt, implied_pdt, implied_loops);
+  ASSERT_THAT(implied_region, NotNull());
+  std::string implied_s = implied_region->ToString();
+  EXPECT_THAT(implied_s, HasSubstr("switch ($a0)"));
+  EXPECT_THAT(implied_s, HasSubstr("case 1:"));
+  EXPECT_THAT(implied_s, HasSubstr("case 2:"));
+  EXPECT_THAT(implied_s, HasSubstr("case 3:"));
+  EXPECT_THAT(implied_s, HasSubstr("case 4:"));
+  EXPECT_THAT(implied_s, HasSubstr("case 5:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

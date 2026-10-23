@@ -5534,5 +5534,36 @@ void LinkedListCursorInSecondParamWithFirstParamPreservedAcrossCall(s32 ctx, Lis
 )");
 }
 
+TEST_F(RoundTripTest, SixCaseSparseDecisionTreeSwitch) {
+  AssertRoundTripBitExact("SixCaseSparseDecisionTreeSwitch", R"(
+s32 step_op(s32 a, s32 b);
+
+s32 SixCaseSparseDecisionTreeSwitch(s32 x, s32 y, s32 mode) {
+    s32 res = 0;
+    switch (mode) {
+        case 10:
+            res = step_op(x + 1, y) + x;
+            break;
+        case 20:
+            res = step_op(x + 2, y) + y;
+            break;
+        case 30:
+            res = step_op(x + 3, y) - x;
+            break;
+        case 40:
+            res = step_op(x + 4, y) - y;
+            break;
+        case 50:
+            res = step_op(x + 5, y) ^ x;
+            break;
+        case 60:
+            res = step_op(x + 6, y) ^ y;
+            break;
+    }
+    return res;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
