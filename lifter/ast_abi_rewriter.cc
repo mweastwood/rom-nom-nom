@@ -618,8 +618,110 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
   }
 }
 
-void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
+void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,
+                                            const std::vector<CParameter>& parameters) {
   if (comp == nullptr) return;
+  absl::flat_hash_set<std::string> defined_vars;
+  for (const auto& p : parameters) {
+    defined_vars.insert(p.name);
+  }
+  std::function<void(const CExpression&)> collect_defined_e = [&](const CExpression& e) {
+    switch (e.Kind()) {
+      case CExpressionKind::kAssignmentExpression: {
+        const auto& a = static_cast<const AssignmentExpression&>(e);
+        if (a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+          defined_vars.insert(static_cast<const IdentifierExpression&>(a.Lhs()).Name());
+        } else {
+          collect_defined_e(a.Lhs());
+        }
+        collect_defined_e(a.Rhs());
+        break;
+      }
+      case CExpressionKind::kUnaryExpression: {
+        const auto& u = static_cast<const UnaryExpression&>(e);
+        if (u.Op() == "&" && u.Operand().Kind() == CExpressionKind::kIdentifier) {
+          defined_vars.insert(static_cast<const IdentifierExpression&>(u.Operand()).Name());
+        }
+        collect_defined_e(u.Operand());
+        break;
+      }
+      case CExpressionKind::kBinaryExpression: {
+        const auto& b = static_cast<const BinaryExpression&>(e);
+        collect_defined_e(b.Lhs());
+        collect_defined_e(b.Rhs());
+        break;
+      }
+      case CExpressionKind::kCastExpression:
+        collect_defined_e(static_cast<const CastExpression&>(e).Operand());
+        break;
+      case CExpressionKind::kCallExpression: {
+        const auto& c = static_cast<const CallExpression&>(e);
+        collect_defined_e(c.Callee());
+        for (const auto& arg : c.Arguments()) {
+          if (arg != nullptr) collect_defined_e(*arg);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  };
+  std::function<void(const CStatement&)> collect_defined_s = [&](const CStatement& s) {
+    switch (s.Kind()) {
+      case CStatementKind::kExpressionStatement:
+        collect_defined_e(static_cast<const ExpressionStatement&>(s).Expression());
+        break;
+      case CStatementKind::kReturnStatement: {
+        const auto& r = static_cast<const ReturnStatement&>(s);
+        if (r.ReturnValue() != nullptr) collect_defined_e(*r.ReturnValue());
+        break;
+      }
+      case CStatementKind::kIfStatement: {
+        const auto& ifs = static_cast<const IfStatement&>(s);
+        collect_defined_e(ifs.Condition());
+        collect_defined_s(ifs.ThenBranch());
+        if (ifs.ElseBranch() != nullptr) collect_defined_s(*ifs.ElseBranch());
+        break;
+      }
+      case CStatementKind::kWhileStatement: {
+        const auto& ws = static_cast<const WhileStatement&>(s);
+        collect_defined_e(ws.Condition());
+        collect_defined_s(ws.Body());
+        break;
+      }
+      case CStatementKind::kDoWhileStatement: {
+        const auto& dws = static_cast<const DoWhileStatement&>(s);
+        collect_defined_s(dws.Body());
+        collect_defined_e(dws.Condition());
+        break;
+      }
+      case CStatementKind::kForStatement: {
+        const auto& fs = static_cast<const ForStatement&>(s);
+        if (fs.Init() != nullptr) collect_defined_s(*fs.Init());
+        if (fs.Condition() != nullptr) collect_defined_e(*fs.Condition());
+        if (fs.Step() != nullptr) collect_defined_e(*fs.Step());
+        collect_defined_s(fs.Body());
+        break;
+      }
+      case CStatementKind::kSwitchStatement: {
+        const auto& sw = static_cast<const SwitchStatement&>(s);
+        collect_defined_e(sw.Condition());
+        for (const auto& sc : sw.Cases()) {
+          if (sc.body != nullptr) collect_defined_s(*sc.body);
+        }
+        break;
+      }
+      case CStatementKind::kCompoundStatement:
+        for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
+          if (child != nullptr) collect_defined_s(*child);
+        }
+        break;
+      default:
+        break;
+    }
+  };
+  collect_defined_s(*comp);
+
   auto is_fp_var_name = [](std::string_view name) -> bool {
     if (name.size() < 2 || name[0] != 'f' || !std::isdigit(name[1])) return false;
     for (size_t i = 1; i < name.size(); ++i) {
@@ -771,6 +873,33 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
       return "f32";
     };
 
+    auto extract_s64_bitcast_of_f64 = [&](const CExpression& arg) -> std::unique_ptr<CExpression> {
+      if (arg.Kind() == CExpressionKind::kUnaryExpression) {
+        const auto& un = static_cast<const UnaryExpression&>(arg);
+        if (un.Op() == "*(s64*)&" || un.Op() == "*(s64 *)&") {
+          return un.Operand().Clone();
+        }
+      }
+      return nullptr;
+    };
+
+    auto extract_fpr_half_reg = [&](const CExpression& arg) -> int {
+      if (arg.Kind() == CExpressionKind::kUnaryExpression) {
+        const auto& un = static_cast<const UnaryExpression&>(arg);
+        if ((un.Op() == "*(s32*)&" || un.Op() == "*(s32 *)&") &&
+            un.Operand().Kind() == CExpressionKind::kIdentifier) {
+          std::string_view name = static_cast<const IdentifierExpression&>(un.Operand()).Name();
+          if (name.size() >= 2 && name[0] == 'f' && !absl::EndsWith(name, "_d")) {
+            int reg = -1;
+            if (absl::SimpleAtoi(name.substr(1), &reg) && reg >= 0) {
+              return reg;
+            }
+          }
+        }
+      }
+      return -1;
+    };
+
     bool has_float_arg = false;
     std::vector<std::string> param_types;
     std::vector<std::unique_ptr<CExpression>> new_args;
@@ -784,6 +913,7 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
       has_float_arg = true;
     }
     new_args.push_back(args[0]->Clone());
+    int abi_slot = (param_types[0] == "f64") ? 2 : 1;
 
     for (size_t k = 1; k < args.size(); ++k) {
       if (k == 1 && arg0_is_float) {
@@ -793,20 +923,81 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
           if (existing_param_types.empty() && p1_type == "f32") {
             has_float_arg = true;
           }
+          if (p1_type == "f64") {
+            if (abi_slot % 2 != 0) ++abi_slot;
+            abi_slot += 2;
+          } else {
+            ++abi_slot;
+          }
           param_types.push_back(std::move(p1_type));
-        } else {
-          param_types.push_back(existing_param_types.empty() ? "s32" : existing_param_types[1]);
+          new_args.push_back(args[1]->Clone());
+          continue;
         }
-        new_args.push_back(args[1]->Clone());
-        continue;
       }
+
+      if (abi_slot >= 2 && (abi_slot % 2 == 0) && k + 1 < args.size()) {
+        std::unique_ptr<CExpression> f64_expr;
+        if (abi_slot >= 4) {
+          auto s64_unwrapped = extract_s64_bitcast_of_f64(*args[k]);
+          std::string hi_stack_name = absl::StrFormat("var_sp_%d", 16 + (abi_slot + 1 - 4) * 4);
+          if (s64_unwrapped != nullptr && args[k + 1]->Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(*args[k + 1]).Name() == hi_stack_name) {
+            f64_expr = std::move(s64_unwrapped);
+          }
+        }
+        if (f64_expr == nullptr) {
+          int odd_reg = extract_fpr_half_reg(*args[k]);
+          int even_reg = extract_fpr_half_reg(*args[k + 1]);
+          if (even_reg >= 0 && (even_reg % 2 == 0) && odd_reg == even_reg + 1) {
+            f64_expr = CExpression::Identifier(absl::StrFormat("f%d_d", even_reg));
+          }
+        }
+        if (f64_expr != nullptr) {
+          if (!new_args.empty() && new_args.back()->Kind() == CExpressionKind::kIdentifier) {
+            std::string_view prev_name =
+                static_cast<const IdentifierExpression&>(*new_args.back()).Name();
+            bool is_unassigned_odd_padding = false;
+            if (abi_slot >= 6) {
+              std::string pad_stack_name =
+                  absl::StrFormat("var_sp_%d", 16 + (abi_slot - 1 - 4) * 4);
+              if (prev_name == pad_stack_name) {
+                is_unassigned_odd_padding = true;
+              }
+            } else if (abi_slot == 2 || abi_slot == 4) {
+              std::string pad_arg_name = absl::StrFormat("arg%d", abi_slot - 1);
+              if (prev_name == pad_arg_name) {
+                is_unassigned_odd_padding = true;
+              }
+            }
+            if (is_unassigned_odd_padding) {
+              new_args.pop_back();
+              param_types.pop_back();
+            }
+          }
+          has_float_arg = true;
+          param_types.push_back("f64");
+          new_args.push_back(std::move(f64_expr));
+          ++k;
+          abi_slot += 2;
+          continue;
+        }
+      }
+
       auto unwrapped = extract_s32_bitcast_of_f32(*args[k]);
       if (unwrapped != nullptr) {
         has_float_arg = true;
         param_types.push_back("f32");
         new_args.push_back(std::move(unwrapped));
+        ++abi_slot;
       } else {
-        param_types.push_back(existing_param_types.empty() ? "s32" : existing_param_types[k]);
+        std::string p_type = existing_param_types.empty() ? "s32" : existing_param_types[k];
+        if (p_type == "f64") {
+          if (abi_slot % 2 != 0) ++abi_slot;
+          abi_slot += 2;
+        } else {
+          ++abi_slot;
+        }
+        param_types.push_back(std::move(p_type));
         new_args.push_back(args[k]->Clone());
       }
     }
@@ -899,16 +1090,16 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
       auto& ifs = static_cast<IfStatement&>(*stmt);
       if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
         RewriteFloatInGprAndStackCallArguments(
-            static_cast<CompoundStatement*>(ifs.MutableThenBranch()));
+            static_cast<CompoundStatement*>(ifs.MutableThenBranch()), parameters);
       }
       if (ifs.MutableElseBranch() != nullptr) {
         if (ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
           RewriteFloatInGprAndStackCallArguments(
-              static_cast<CompoundStatement*>(ifs.MutableElseBranch()));
+              static_cast<CompoundStatement*>(ifs.MutableElseBranch()), parameters);
         } else if (ifs.MutableElseBranch()->Kind() == CStatementKind::kIfStatement) {
           CompoundStatement wrapper;
           wrapper.AddStatement(ifs.MutableElseBranch()->Clone());
-          RewriteFloatInGprAndStackCallArguments(&wrapper);
+          RewriteFloatInGprAndStackCallArguments(&wrapper, parameters);
           if (wrapper.Statements().size() == 1) {
             stmt = CStatement::If(rewrite_expr(ifs.Condition(), "s32"), ifs.ThenBranch().Clone(),
                                   std::move(wrapper.MutableStatements()[0]));
@@ -919,7 +1110,9 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
       stmt = CStatement::If(rewrite_expr(ifs.Condition(), "s32"), ifs.ThenBranch().Clone(),
                             ifs.ElseBranch() != nullptr ? ifs.ElseBranch()->Clone() : nullptr);
     } else {
-      ForEachSubCompoundStatement(stmt.get(), RewriteFloatInGprAndStackCallArguments);
+      ForEachSubCompoundStatement(stmt.get(), [&](CompoundStatement* sub) {
+        RewriteFloatInGprAndStackCallArguments(sub, parameters);
+      });
     }
   }
 }
@@ -1058,8 +1251,10 @@ void TrimUnassignedTrailingCallArgRegisters(
         bool known_param_count =
             (!raw_callee_name.empty() && function_parameter_counts != nullptr &&
              function_parameter_counts->contains(raw_callee_name));
+        const bool has_explicit_prototype =
+            absl::StartsWith(callee_name, "((") && !absl::StrContains(callee_name, "(*)()");
         const size_t orig_args_size = args.size();
-        if (args.size() <= 4) {
+        if (!has_explicit_prototype && args.size() <= 4) {
           while (!args.empty() && args.back() != nullptr &&
                  args.back()->Kind() == CExpressionKind::kIdentifier) {
             const std::string& aname =

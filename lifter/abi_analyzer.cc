@@ -122,6 +122,11 @@ bool IsDoublePrecisionUseOp(Opcode op) {
 bool DefinesFprAsDouble(const Instruction& inst, FpRegister reg) {
   if (inst.opcode == Opcode::kLdc1 && inst.ft == reg) return true;
   if (inst.opcode == Opcode::kDmtc1 && inst.fs == reg) return true;
+  if ((static_cast<int>(reg) % 2 == 0) && static_cast<int>(reg) + 1 < 32) {
+    FpRegister odd_reg = static_cast<FpRegister>(static_cast<int>(reg) + 1);
+    if (inst.opcode == Opcode::kMtc1 && inst.fs == odd_reg) return true;
+    if (inst.opcode == Opcode::kLwc1 && inst.ft == odd_reg) return true;
+  }
   if (IsDoublePrecisionWriteOp(inst.opcode) && inst.fd == reg) {
     return true;
   }
@@ -401,12 +406,15 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
     if (instruction.rs == Register::kSp || instruction.rs == Register::kFp) {
       if (instruction.opcode == Opcode::kSw || instruction.opcode == Opcode::kSh ||
           instruction.opcode == Opcode::kSb || instruction.opcode == Opcode::kSwc1 ||
-          instruction.opcode == Opcode::kSdc1) {
+          instruction.opcode == Opcode::kSdc1 || instruction.opcode == Opcode::kSd) {
         stored_stack_offsets.insert(instruction.immediate);
+        if (instruction.opcode == Opcode::kSdc1 || instruction.opcode == Opcode::kSd) {
+          stored_stack_offsets.insert(instruction.immediate + 4);
+        }
       } else if (instruction.opcode == Opcode::kLw || instruction.opcode == Opcode::kLh ||
                  instruction.opcode == Opcode::kLhu || instruction.opcode == Opcode::kLb ||
                  instruction.opcode == Opcode::kLbu || instruction.opcode == Opcode::kLwc1 ||
-                 instruction.opcode == Opcode::kLdc1) {
+                 instruction.opcode == Opcode::kLdc1 || instruction.opcode == Opcode::kLd) {
         int32_t offset = instruction.immediate;
         uint32_t base_offset = frame_size + 16;
         bool valid_alignment = true;
@@ -421,7 +429,11 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
             offset < static_cast<int32_t>(base_offset + 64)) {
           int arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
           if (!stored_stack_offsets.contains(offset)) {
-            max_stack_arg = std::max(max_stack_arg, arg_idx);
+            int last_arg_idx =
+                (instruction.opcode == Opcode::kLdc1 || instruction.opcode == Opcode::kLd)
+                    ? arg_idx + 1
+                    : arg_idx;
+            max_stack_arg = std::max(max_stack_arg, last_arg_idx);
           }
         }
       }
@@ -564,6 +576,163 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectUninitializedCalleeSavedRegiste
   return ::rom_nom_nom::DetectUninitializedCalleeSavedRegisters(cfg);
 }
 
+namespace {
+
+int FirstGprFloatCandidateSlot(const ControlFlowGraph& cfg) {
+  if (!AbiAnalyzer::IsFpRegisterLiveIn(cfg, FpRegister::kF12)) {
+    return 1;
+  }
+  int next_slot = AbiAnalyzer::IsFpParameterDouble(cfg, FpRegister::kF12) ? 2 : 1;
+  if (AbiAnalyzer::IsFpRegisterLiveIn(cfg, FpRegister::kF14)) {
+    if (AbiAnalyzer::IsFpParameterDouble(cfg, FpRegister::kF14)) {
+      return 4;
+    }
+    return next_slot + 1;
+  }
+  // If $f14 is not live-in, the parameter immediately following $f12 must be an integer
+  // parameter in a GPR, so any subsequent float/double parameter in GPRs starts after it.
+  return next_slot + 1;
+}
+
+}  // namespace
+
+bool AbiAnalyzer::DetectDoubleParameterInGeneralRegisters(const ControlFlowGraph& cfg) {
+  if (cfg.Blocks().empty()) {
+    return false;
+  }
+  if (FirstGprFloatCandidateSlot(cfg) > 2) {
+    return false;
+  }
+  if (!IsRegisterLiveIn(cfg, Register::kA2) || !IsRegisterLiveIn(cfg, Register::kA3)) {
+    return false;
+  }
+
+  const auto id_to_index = BuildBlockIdToIndex(cfg);
+  auto is_fpr_converted_from_int = [&](uint32_t start_block_id, size_t start_inst_idx,
+                                       FpRegister fpr) -> bool {
+    return IsFprConvertedFromInt(cfg, id_to_index, start_block_id, start_inst_idx, fpr);
+  };
+
+  const uint32_t frame_size = ComputeMaxFrameSize(cfg);
+  const BasicBlock* entry_block = cfg.GetBlock(cfg.EntryBlockId());
+
+  auto find_entry_first_def = [&](Register reg) -> std::optional<size_t> {
+    if (entry_block == nullptr || !entry_block->predecessors.empty()) {
+      return std::nullopt;
+    }
+    for (size_t j = 0; j < entry_block->instructions.size(); ++j) {
+      if (j > 0 && entry_block->instructions[j - 1].IsBranchLikely()) {
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(entry_block->instructions[j]);
+      for (Register d : ud.gpr_defs) {
+        if (d == reg) {
+          return j;
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
+  const std::optional<size_t> a2_first_def = find_entry_first_def(Register::kA2);
+  const std::optional<size_t> a3_first_def = find_entry_first_def(Register::kA3);
+
+  absl::flat_hash_set<int> a2_double_fprs;
+  absl::flat_hash_set<int> a3_double_fprs;
+  bool a2_spilled_to_home = false;
+  bool a3_spilled_to_home = false;
+  int a2_integer_uses = 0;
+  int a3_integer_uses = 0;
+  int home_ldc1_reads = 0;
+  int home_other_accesses = 0;
+
+  for (const auto& block : cfg.Blocks()) {
+    bool a2_defined = false;
+    bool a3_defined = false;
+    for (size_t j = 0; j < block.instructions.size(); ++j) {
+      const auto& inst = block.instructions[j];
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+
+      const bool reads_incoming_a2 = a2_first_def.has_value()
+                                         ? (block.id == cfg.EntryBlockId() && j < *a2_first_def)
+                                         : !a2_defined;
+      const bool reads_incoming_a3 = a3_first_def.has_value()
+                                         ? (block.id == cfg.EntryBlockId() && j < *a3_first_def)
+                                         : !a3_defined;
+
+      for (Register u : ud.gpr_uses) {
+        if (u == Register::kA2 && reads_incoming_a2) {
+          if (inst.opcode == Opcode::kMtc1 && inst.rt == Register::kA2 && inst.fs.has_value() &&
+              (static_cast<int>(*inst.fs) % 2 == 1)) {
+            a2_double_fprs.insert(static_cast<int>(*inst.fs) - 1);
+          } else if (block.id == cfg.EntryBlockId() && inst.opcode == Opcode::kSw &&
+                     inst.rt == Register::kA2 && inst.rs == Register::kSp &&
+                     inst.immediate == static_cast<int32_t>(frame_size + 8)) {
+            a2_spilled_to_home = true;
+          } else {
+            a2_integer_uses++;
+          }
+        }
+        if (u == Register::kA3 && reads_incoming_a3) {
+          if (inst.opcode == Opcode::kMtc1 && inst.rt == Register::kA3 && inst.fs.has_value() &&
+              (static_cast<int>(*inst.fs) % 2 == 0)) {
+            if (is_fpr_converted_from_int(block.id, j, *inst.fs)) {
+              a3_integer_uses++;
+            } else {
+              a3_double_fprs.insert(static_cast<int>(*inst.fs));
+            }
+          } else if (block.id == cfg.EntryBlockId() && inst.opcode == Opcode::kSw &&
+                     inst.rt == Register::kA3 && inst.rs == Register::kSp &&
+                     inst.immediate == static_cast<int32_t>(frame_size + 12)) {
+            a3_spilled_to_home = true;
+          } else {
+            a3_integer_uses++;
+          }
+        }
+      }
+
+      if (inst.rs == Register::kSp && (inst.immediate == static_cast<int32_t>(frame_size + 8) ||
+                                       inst.immediate == static_cast<int32_t>(frame_size + 12))) {
+        bool is_prologue_home_spill =
+            (block.id == cfg.EntryBlockId() && inst.opcode == Opcode::kSw &&
+             ((inst.rt == Register::kA2 && reads_incoming_a2 &&
+               inst.immediate == static_cast<int32_t>(frame_size + 8)) ||
+              (inst.rt == Register::kA3 && reads_incoming_a3 &&
+               inst.immediate == static_cast<int32_t>(frame_size + 12))));
+        if (!is_prologue_home_spill) {
+          if (inst.opcode == Opcode::kLdc1 &&
+              inst.immediate == static_cast<int32_t>(frame_size + 8)) {
+            home_ldc1_reads++;
+          } else if (inst.opcode != Opcode::kSdc1 ||
+                     inst.immediate != static_cast<int32_t>(frame_size + 8)) {
+            if (inst.IsLoad() || inst.IsStore()) {
+              home_other_accesses++;
+            }
+          }
+        }
+      }
+
+      for (Register d : ud.gpr_defs) {
+        if (d == Register::kA2) a2_defined = true;
+        if (d == Register::kA3) a3_defined = true;
+      }
+    }
+  }
+
+  if (a2_integer_uses > 0 || a3_integer_uses > 0) {
+    return false;
+  }
+
+  for (int even_fpr : a2_double_fprs) {
+    if (a3_double_fprs.contains(even_fpr)) {
+      return true;
+    }
+  }
+
+  return a2_spilled_to_home && a3_spilled_to_home && home_ldc1_reads > 0 &&
+         home_other_accesses == 0;
+}
+
 absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegisters(
     const ControlFlowGraph& cfg) {
   absl::flat_hash_set<Register> result;
@@ -571,11 +740,15 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
     return result;
   }
 
+  const bool double_in_a2_a3 = DetectDoubleParameterInGeneralRegisters(cfg);
   std::vector<Register> candidates;
-  if (!IsFpRegisterLiveIn(cfg, FpRegister::kF12)) {
-    candidates = {Register::kA1, Register::kA2, Register::kA3};
-  } else {
-    candidates = {Register::kA2, Register::kA3};
+  const int first_slot = FirstGprFloatCandidateSlot(cfg);
+  for (int slot = first_slot; slot < 4; ++slot) {
+    Register reg = static_cast<Register>(static_cast<int>(Register::kA0) + slot);
+    if (double_in_a2_a3 && (reg == Register::kA2 || reg == Register::kA3)) {
+      continue;
+    }
+    candidates.push_back(reg);
   }
 
   const auto id_to_index = BuildBlockIdToIndex(cfg);
@@ -940,6 +1113,85 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
   return result;
 }
 
+absl::flat_hash_set<int> AbiAnalyzer::DetectDoubleStackParameterSlots(const ControlFlowGraph& cfg) {
+  absl::flat_hash_set<int> result;
+  if (cfg.Blocks().empty()) return result;
+
+  const uint32_t frame_size = ComputeMaxFrameSize(cfg);
+  const auto id_to_index = BuildBlockIdToIndex(cfg);
+  auto is_fpr_converted_from_int = [&](uint32_t start_block_id, size_t start_inst_idx,
+                                       FpRegister fpr) -> bool {
+    return IsFprConvertedFromInt(cfg, id_to_index, start_block_id, start_inst_idx, fpr);
+  };
+
+  const int32_t base_offset = static_cast<int32_t>(frame_size + 16);
+  absl::flat_hash_map<int, int> double_accesses;
+  absl::flat_hash_map<int, absl::flat_hash_set<int>> split_hi_fprs;
+  absl::flat_hash_map<int, absl::flat_hash_set<int>> split_lo_fprs;
+  absl::flat_hash_map<int, int> non_double_accesses;
+  absl::flat_hash_set<int> candidate_even_slots;
+
+  for (const auto& block : cfg.Blocks()) {
+    for (size_t j = 0; j < block.instructions.size(); ++j) {
+      const auto& inst = block.instructions[j];
+      if (inst.rs != Register::kSp || inst.immediate < base_offset) continue;
+      int32_t rel = inst.immediate - base_offset;
+      int slot = 4 + (rel / 4);
+      if (rel % 4 != 0) {
+        non_double_accesses[slot]++;
+        continue;
+      }
+      if (inst.opcode == Opcode::kLdc1 || inst.opcode == Opcode::kSdc1) {
+        if ((slot % 2) == 0) {
+          double_accesses[slot]++;
+          candidate_even_slots.insert(slot);
+        } else {
+          non_double_accesses[slot]++;
+          non_double_accesses[slot + 1]++;
+        }
+      } else if (inst.opcode == Opcode::kLwc1 && inst.ft.has_value()) {
+        int ft_idx = static_cast<int>(*inst.ft);
+        if ((slot % 2) == 0 && (ft_idx % 2) == 1) {
+          split_hi_fprs[slot].insert(ft_idx - 1);
+          candidate_even_slots.insert(slot);
+        } else if ((slot % 2) == 1 && (ft_idx % 2) == 0 &&
+                   !is_fpr_converted_from_int(block.id, j, *inst.ft)) {
+          split_lo_fprs[slot - 1].insert(ft_idx);
+          candidate_even_slots.insert(slot - 1);
+        } else {
+          non_double_accesses[slot]++;
+        }
+      } else if (inst.IsLoad() || inst.IsStore() || inst.opcode == Opcode::kAddiu ||
+                 inst.opcode == Opcode::kAddi) {
+        non_double_accesses[slot]++;
+        if (inst.opcode == Opcode::kLd || inst.opcode == Opcode::kSd) {
+          non_double_accesses[slot + 1]++;
+        }
+      }
+    }
+  }
+
+  for (int slot : candidate_even_slots) {
+    if (non_double_accesses[slot] > 0 || non_double_accesses[slot + 1] > 0) {
+      continue;
+    }
+    bool has_split_pair = false;
+    for (int even_fpr : split_hi_fprs[slot]) {
+      if (split_lo_fprs[slot].contains(even_fpr)) {
+        has_split_pair = true;
+        break;
+      }
+    }
+    if (!has_split_pair && (!split_hi_fprs[slot].empty() || !split_lo_fprs[slot].empty())) {
+      continue;
+    }
+    if (double_accesses[slot] > 0 || has_split_pair) {
+      result.insert(slot);
+    }
+  }
+  return result;
+}
+
 absl::flat_hash_set<int> AbiAnalyzer::DetectFloatStackParameterSlots(const ControlFlowGraph& cfg) {
   absl::flat_hash_set<int> result;
   if (cfg.Blocks().empty()) return result;
@@ -952,6 +1204,7 @@ absl::flat_hash_set<int> AbiAnalyzer::DetectFloatStackParameterSlots(const Contr
   };
 
   const absl::flat_hash_set<Register> float_gprs = DetectFloatParametersInGeneralRegisters(cfg);
+  const absl::flat_hash_set<int> double_slots = DetectDoubleStackParameterSlots(cfg);
   const int32_t base_offset = static_cast<int32_t>(frame_size + 16);
 
   absl::flat_hash_map<int, int> fp_accesses;
@@ -1010,11 +1263,18 @@ absl::flat_hash_set<int> AbiAnalyzer::DetectFloatStackParameterSlots(const Contr
       } else if (inst.IsLoad() || inst.IsStore() || inst.opcode == Opcode::kAddiu ||
                  inst.opcode == Opcode::kAddi) {
         non_fp_accesses[slot]++;
+        if (inst.opcode == Opcode::kLdc1 || inst.opcode == Opcode::kSdc1 ||
+            inst.opcode == Opcode::kLd || inst.opcode == Opcode::kSd) {
+          non_fp_accesses[slot + 1]++;
+        }
       }
     }
   }
 
   for (const auto& [slot, count] : fp_accesses) {
+    if (double_slots.contains(slot & ~1)) {
+      continue;
+    }
     if (count > 0 && gpr_float_or_swc1_accesses[slot] > 0 && non_fp_accesses[slot] == 0) {
       result.insert(slot);
     }
@@ -1251,6 +1511,20 @@ absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const Cont
             }
           }
           break;
+        case Opcode::kLwc1:
+        case Opcode::kSwc1:
+          if (inst.ft.has_value() && (static_cast<int>(*inst.ft) % 2 == 1)) {
+            FpRegister even_reg = static_cast<FpRegister>(static_cast<int>(*inst.ft) - 1);
+            double_vars.insert(FpRegisterVarName(even_reg, true));
+          }
+          break;
+        case Opcode::kMfc1:
+        case Opcode::kMtc1:
+          if (inst.fs.has_value() && (static_cast<int>(*inst.fs) % 2 == 1)) {
+            FpRegister even_reg = static_cast<FpRegister>(static_cast<int>(*inst.fs) - 1);
+            double_vars.insert(FpRegisterVarName(even_reg, true));
+          }
+          break;
         case Opcode::kDmfc1:
         case Opcode::kDmtc1:
           if (inst.fs) double_vars.insert(FpRegisterVarName(*inst.fs, true));
@@ -1276,6 +1550,12 @@ absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const Cont
 
 bool AbiAnalyzer::IsFpParameterDouble(const ControlFlowGraph& cfg, FpRegister reg) {
   if (cfg.Blocks().empty()) return false;
+  if ((static_cast<int>(reg) % 2 == 0) && static_cast<int>(reg) + 1 < 32) {
+    FpRegister odd_reg = static_cast<FpRegister>(static_cast<int>(reg) + 1);
+    if (IsFpRegisterLiveIn(cfg, odd_reg)) {
+      return true;
+    }
+  }
   std::vector<size_t> queue = {0};
   absl::flat_hash_set<size_t> visited = {0};
 

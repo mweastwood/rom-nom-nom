@@ -134,7 +134,9 @@ struct FunctionLiftContext {
   const absl::flat_hash_map<uint32_t, CallReturnInfo>* call_return_info = nullptr;
   const absl::flat_hash_set<int32_t>* function_stack_stores = nullptr;
   const absl::flat_hash_set<Register>* float_parameters_in_general_registers = nullptr;
+  bool double_parameter_in_a2_a3 = false;
   const absl::flat_hash_set<int>* float_stack_param_slots = nullptr;
+  const absl::flat_hash_set<int>* double_stack_param_slots = nullptr;
   const absl::flat_hash_set<int32_t>* float_local_stack_offsets = nullptr;
   uint32_t outgoing_args_size = 0;
   int32_t sp_buffer_size = 0;

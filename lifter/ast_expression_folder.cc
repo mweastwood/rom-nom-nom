@@ -961,9 +961,26 @@ struct FolderContext {
                      (dead_at_end_vars != nullptr && dead_at_end_vars->contains(var)));
                 if (can_drop_unread_fpr && root_body != nullptr &&
                     CountUses(*root_body, var) == 0 && !HasAddressOfVarInStmt(*root_body, var)) {
-                  stmts.erase(stmts.begin() + i);
-                  changed = true;
-                  break;
+                  bool half_referenced = false;
+                  if (absl::EndsWith(var, "_d")) {
+                    int even_reg = -1;
+                    if (absl::SimpleAtoi(var.substr(1, var.size() - 3), &even_reg) &&
+                        even_reg >= 0) {
+                      std::string even_name = absl::StrFormat("f%d", even_reg);
+                      std::string odd_name = absl::StrFormat("f%d", even_reg + 1);
+                      if (CountUses(*root_body, even_name) > 0 ||
+                          HasAddressOfVarInStmt(*root_body, even_name) ||
+                          CountUses(*root_body, odd_name) > 0 ||
+                          HasAddressOfVarInStmt(*root_body, odd_name)) {
+                        half_referenced = true;
+                      }
+                    }
+                  }
+                  if (!half_referenced) {
+                    stmts.erase(stmts.begin() + i);
+                    changed = true;
+                    break;
+                  }
                 }
               }
               if (!is_scratch && !is_stack_arg && !is_call_arg) continue;
@@ -978,7 +995,16 @@ struct FolderContext {
               std::unique_ptr<CExpression> effective_rhs_holder;
               if (is_float_bitcast_lhs) {
                 if (!IsPureExpr(assign.Rhs())) continue;
-                effective_rhs_holder = CExpression::Unary("*(s32*)&", assign.Rhs().Clone());
+                bool is_f64_lhs =
+                    assign.Lhs().Kind() == CExpressionKind::kUnaryExpression &&
+                    static_cast<const UnaryExpression&>(assign.Lhs()).Operand().Kind() ==
+                        CExpressionKind::kCastExpression &&
+                    static_cast<const CastExpression&>(
+                        static_cast<const UnaryExpression&>(assign.Lhs()).Operand())
+                            .TargetType()
+                            .name == "f64";
+                effective_rhs_holder =
+                    CExpression::Unary(is_f64_lhs ? "*(s64*)&" : "*(s32*)&", assign.Rhs().Clone());
               }
               const CExpression& effective_rhs =
                   is_float_bitcast_lhs ? *effective_rhs_holder : assign.Rhs();
@@ -1068,7 +1094,23 @@ struct FolderContext {
                       break;
                     }
                   }
-                  if (CountUses(*stmts[k], var) > 0) break;
+                  if (CountUses(*stmts[k], var) > 0 || HasAddressOfVarInStmt(*stmts[k], var)) {
+                    break;
+                  }
+                  if (absl::EndsWith(var, "_d")) {
+                    int even_reg = -1;
+                    if (absl::SimpleAtoi(var.substr(1, var.size() - 3), &even_reg) &&
+                        even_reg >= 0) {
+                      std::string even_name = absl::StrFormat("f%d", even_reg);
+                      std::string odd_name = absl::StrFormat("f%d", even_reg + 1);
+                      if (CountUses(*stmts[k], even_name) > 0 ||
+                          HasAddressOfVarInStmt(*stmts[k], even_name) ||
+                          CountUses(*stmts[k], odd_name) > 0 ||
+                          HasAddressOfVarInStmt(*stmts[k], odd_name)) {
+                        break;
+                      }
+                    }
+                  }
                   if (HasCallInStmt(*stmts[k])) {
                     saw_intervening_call = true;
                     bool call_has_stack_args = false;
@@ -1571,6 +1613,9 @@ struct FolderContext {
                         if (IsOutgoingStackArgVar(ca_lhs)) {
                           break;
                         }
+                      } else if (cand_es.Expression().Kind() == CExpressionKind::kCallExpression &&
+                                 absl::EndsWith(var, "_d")) {
+                        break;
                       }
                     }
                     int uses_in_cand = CountUses(*stmts[j], var);

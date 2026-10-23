@@ -1820,6 +1820,11 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
                 statement.expression = std::move(val_expr);
               }
             } else {
+              if (ctx.double_parameter_in_a2_a3 && inst.opcode == Opcode::kSw &&
+                  *inst.rt == Register::kA3 && !gprs_defined_in_block.contains(Register::kA3) &&
+                  offset == static_cast<int32_t>(frame_size + 12)) {
+                break;
+              }
               statement.kind = StatementKind::kAssignment;
               statement.destination_variable = ExpressionBuilder::StackVarName(offset);
               auto val_expr = LiftReg(*inst.rt);

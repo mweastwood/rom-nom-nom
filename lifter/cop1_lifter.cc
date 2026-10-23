@@ -236,6 +236,21 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
               arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
             }
             if (arg_idx >= 0) {
+              if (ctx.double_stack_param_slots != nullptr) {
+                if ((arg_idx % 2 == 0) && ctx.double_stack_param_slots->contains(arg_idx) &&
+                    (ft_idx % 2 == 1)) {
+                  break;
+                }
+                if ((arg_idx % 2 == 1) && ctx.double_stack_param_slots->contains(arg_idx - 1) &&
+                    (ft_idx % 2 == 0)) {
+                  statement.destination_variable =
+                      ExpressionBuilder::FpRegisterVarName(*inst.ft, /*is_double=*/true);
+                  statement.expression =
+                      LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx - 1));
+                  statements.push_back(std::move(statement));
+                  break;
+                }
+              }
               std::string arg_name = absl::StrFormat("arg%d", arg_idx);
               if (ctx.float_stack_param_slots != nullptr &&
                   ctx.float_stack_param_slots->contains(arg_idx)) {
@@ -348,8 +363,18 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
               arg_idx = 4 + (offset - static_cast<int32_t>(base_offset)) / 4;
             }
             if (arg_idx >= 0) {
-              statement.expression = LiftedExpression::Unary(
-                  "*(f64*)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
+              std::string arg_name = absl::StrFormat("arg%d", arg_idx);
+              if (ctx.double_stack_param_slots != nullptr &&
+                  ctx.double_stack_param_slots->contains(arg_idx)) {
+                statement.expression = LiftedExpression::Variable(arg_name);
+              } else {
+                statement.expression =
+                    LiftedExpression::Unary("*(f64*)&", LiftedExpression::Variable(arg_name));
+              }
+            } else if (ctx.double_parameter_in_a2_a3 &&
+                       offset == static_cast<int32_t>(frame_size + 8)) {
+              statement.expression =
+                  LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
             } else {
               statement.expression = LiftedExpression::Load(
                   "f64",
@@ -381,8 +406,22 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
           if (IsSpOffset(state, inst.immediate)) {
             statement.destination_address = MakeSpAddr(state, inst.immediate);
           } else {
-            statement.destination_address = LiftedExpression::Unary(
-                "&", LiftedExpression::Variable(ExpressionBuilder::StackVarName(inst.immediate)));
+            uint32_t base_offset = frame_size + 16;
+            int arg_idx = -1;
+            if (inst.immediate >= static_cast<int32_t>(base_offset)) {
+              int candidate_idx = 4 + (inst.immediate - static_cast<int32_t>(base_offset)) / 4;
+              if (ctx.double_stack_param_slots != nullptr &&
+                  ctx.double_stack_param_slots->contains(candidate_idx)) {
+                arg_idx = candidate_idx;
+              }
+            }
+            if (arg_idx >= 0) {
+              statement.kind = StatementKind::kAssignment;
+              statement.destination_variable = absl::StrFormat("arg%d", arg_idx);
+            } else {
+              statement.destination_address = LiftedExpression::Unary(
+                  "&", LiftedExpression::Variable(ExpressionBuilder::StackVarName(inst.immediate)));
+            }
           }
         } else {
           statement.destination_address = MakeRegOffsetExpr(state, *inst.rs, inst.immediate);
@@ -558,6 +597,25 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
             skipped_instruction_indices.insert(cvt_look_idx);
             fpr_const_bits[fs_idx] = std::nullopt;
             fpr_const_bits[target_fd_idx] = std::nullopt;
+            break;
+          }
+        }
+
+        if (ctx.double_parameter_in_a2_a3) {
+          if (*inst.rt == Register::kA2 && !state.gprs_defined_in_block.contains(Register::kA2) &&
+              (fs_idx % 2 == 1)) {
+            fpr_const_bits[fs_idx] = std::nullopt;
+            break;
+          }
+          if (*inst.rt == Register::kA3 && !state.gprs_defined_in_block.contains(Register::kA3) &&
+              (fs_idx % 2 == 0)) {
+            fpr_const_bits[fs_idx] = std::nullopt;
+            LiftedStatement statement;
+            statement.kind = StatementKind::kAssignment;
+            statement.destination_variable =
+                ExpressionBuilder::FpRegisterVarName(*inst.fs, /*is_double=*/true);
+            statement.expression = LiftedExpression::Variable("arg2");
+            statements.push_back(std::move(statement));
             break;
           }
         }

@@ -350,11 +350,22 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
 
   if (max_stack_arg_offset > 16) {
     absl::flat_hash_set<int32_t> stack_arg_offsets;
+    absl::flat_hash_set<int32_t> eight_byte_stack_offsets;
+    auto record_stack_arg_store = [&](const Instruction& store_inst) {
+      stack_arg_offsets.insert(store_inst.immediate);
+      if (store_inst.opcode == Opcode::kSdc1 || store_inst.opcode == Opcode::kSd) {
+        stack_arg_offsets.insert(store_inst.immediate + 4);
+        eight_byte_stack_offsets.insert(store_inst.immediate);
+      } else if (store_inst.opcode == Opcode::kSwc1 && store_inst.ft.has_value() &&
+                 (static_cast<int>(*store_inst.ft) % 2 == 1) && (store_inst.immediate % 8 == 0)) {
+        eight_byte_stack_offsets.insert(store_inst.immediate);
+      }
+    };
     for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
       const auto& prev_inst = instructions_to_process[j];
       if (prev_inst.IsCall()) break;
       if (is_stack_arg_store(prev_inst)) {
-        stack_arg_offsets.insert(prev_inst.immediate);
+        record_stack_arg_store(prev_inst);
       }
     }
     if (!has_prior_call_in_block && cfg != nullptr) {
@@ -366,7 +377,7 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
           for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
             if (pred->instructions[k].IsCall()) break;
             if (is_stack_arg_store(pred->instructions[k])) {
-              stack_arg_offsets.insert(pred->instructions[k].immediate);
+              record_stack_arg_store(pred->instructions[k]);
             }
           }
         }
@@ -374,8 +385,16 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
     }
     if (stack_arg_offsets.contains(16)) {
       highest_defined_argument_index = std::max(highest_defined_argument_index, 3);
-      while (stack_arg_offsets.contains(16 + (highest_defined_argument_index + 1 - 4) * 4)) {
-        ++highest_defined_argument_index;
+      while (true) {
+        int32_t next_offset = 16 + (highest_defined_argument_index + 1 - 4) * 4;
+        if (stack_arg_offsets.contains(next_offset)) {
+          ++highest_defined_argument_index;
+        } else if ((next_offset % 8 != 0) && eight_byte_stack_offsets.contains(next_offset + 4) &&
+                   stack_arg_offsets.contains(next_offset + 4)) {
+          ++highest_defined_argument_index;
+        } else {
+          break;
+        }
       }
     }
   }
@@ -391,10 +410,40 @@ std::vector<std::unique_ptr<LiftedExpression>> BuildCallArgumentExpressions(
   static constexpr Register kArgumentRegisters[] = {Register::kA0, Register::kA1, Register::kA2,
                                                     Register::kA3};
   int fp_arg_count = 0;
+  bool known_fp_arg_count = false;
   if (function_fp_parameter_counts != nullptr) {
     auto it = function_fp_parameter_counts->find(function_name);
     if (it != function_fp_parameter_counts->end()) {
       fp_arg_count = it->second;
+      known_fp_arg_count = true;
+    }
+  }
+  if (!known_fp_arg_count) {
+    auto a0_def = tracker.GetReachingDefinition(Register::kA0);
+    bool a0_defined_for_call = a0_def.has_value() && a0_def->is_local;
+    if (!a0_defined_for_call) {
+      bool defines_f12 = false;
+      bool defines_f14 = false;
+      auto scan_fp_defs = [&](const Instruction& candidate) {
+        RegisterUseDef ud = GetInstructionUseDef(candidate);
+        for (FpRegister r : ud.fpr_defs) {
+          if (r == FpRegister::kF12 || r == FpRegister::kF13) defines_f12 = true;
+          if (r == FpRegister::kF14 || r == FpRegister::kF15) defines_f14 = true;
+        }
+      };
+      if (i + 1 < instructions_to_process.size()) {
+        scan_fp_defs(instructions_to_process[i + 1]);
+      }
+      for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+        if (instructions_to_process[j].opcode == Opcode::kJal ||
+            instructions_to_process[j].opcode == Opcode::kJalr) {
+          break;
+        }
+        scan_fp_defs(instructions_to_process[j]);
+      }
+      if (defines_f12) {
+        fp_arg_count = defines_f14 ? 2 : 1;
+      }
     }
   }
 
@@ -409,16 +458,12 @@ std::vector<std::unique_ptr<LiftedExpression>> BuildCallArgumentExpressions(
         f14_double = it->second.arg_f14_double;
       }
     }
-    for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
-      if (instructions_to_process[j].opcode == Opcode::kJal ||
-          instructions_to_process[j].opcode == Opcode::kJalr) {
-        break;
-      }
-      const auto& prev_inst = instructions_to_process[j];
+    auto check_inst_double_fp_arg = [&](const Instruction& prev_inst) {
       if (prev_inst.opcode == Opcode::kCvtDW || prev_inst.opcode == Opcode::kCvtDS ||
           prev_inst.opcode == Opcode::kMovD || prev_inst.opcode == Opcode::kMulD ||
           prev_inst.opcode == Opcode::kAddD || prev_inst.opcode == Opcode::kSubD ||
-          prev_inst.opcode == Opcode::kDivD || prev_inst.opcode == Opcode::kLdc1) {
+          prev_inst.opcode == Opcode::kDivD || prev_inst.opcode == Opcode::kLdc1 ||
+          prev_inst.opcode == Opcode::kDmtc1) {
         if (prev_inst.fd == FpRegister::kF12 || prev_inst.fs == FpRegister::kF12 ||
             prev_inst.ft == FpRegister::kF12) {
           f12_double = true;
@@ -427,7 +472,23 @@ std::vector<std::unique_ptr<LiftedExpression>> BuildCallArgumentExpressions(
             prev_inst.ft == FpRegister::kF14) {
           f14_double = true;
         }
+      } else if (prev_inst.opcode == Opcode::kMtc1) {
+        if (prev_inst.fs == FpRegister::kF13) f12_double = true;
+        if (prev_inst.fs == FpRegister::kF15) f14_double = true;
+      } else if (prev_inst.opcode == Opcode::kLwc1) {
+        if (prev_inst.ft == FpRegister::kF13) f12_double = true;
+        if (prev_inst.ft == FpRegister::kF15) f14_double = true;
       }
+    };
+    if (i + 1 < instructions_to_process.size()) {
+      check_inst_double_fp_arg(instructions_to_process[i + 1]);
+    }
+    for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+      if (instructions_to_process[j].opcode == Opcode::kJal ||
+          instructions_to_process[j].opcode == Opcode::kJalr) {
+        break;
+      }
+      check_inst_double_fp_arg(instructions_to_process[j]);
     }
     int slot = 0;
     int fp_idx = 0;

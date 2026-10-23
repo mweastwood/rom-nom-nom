@@ -25,9 +25,11 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp);
 // emits a structured call + return/break.
 void InlineCrossJumpedCallTails(CompoundStatement* root_body);
 
-// Rewrites calls that pass `f32` values in GPRs or stack slots via
-// `*(s32*)&fX` into typed function-pointer casts with direct float arguments.
-void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp);
+// Rewrites calls that pass `f32`/`f64` values in GPRs or stack slots via
+// `*(s32*)&fX` / `*(s64*)&fX_d` into typed function-pointer casts with direct
+// float/double arguments.
+void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,
+                                            const std::vector<CParameter>& parameters = {});
 
 // Trims trailing `arg0..arg3` arguments from calls to functions with unknown
 // parameter counts when those argument registers were never assigned in `body`.

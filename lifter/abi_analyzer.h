@@ -80,9 +80,17 @@ class AbiAnalyzer {
   static absl::flat_hash_set<Register> DetectFloatParametersInGeneralRegisters(
       const ControlFlowGraph& cfg);
 
+  // Detects whether the incoming aligned GPR pair ($a2, $a3) represents an O32 double-precision
+  // floating-point parameter (f64 arg2).
+  static bool DetectDoubleParameterInGeneralRegisters(const ControlFlowGraph& cfg);
+
   // Detects incoming stack parameter slots (slot >= 4, corresponding to arg4+) that represent
   // single-precision float parameters (f32).
   static absl::flat_hash_set<int> DetectFloatStackParameterSlots(const ControlFlowGraph& cfg);
+
+  // Detects incoming even stack parameter slots (slot >= 4, slot % 2 == 0, corresponding to arg4,
+  // arg6, ...) that represent double-precision float parameters (f64).
+  static absl::flat_hash_set<int> DetectDoubleStackParameterSlots(const ControlFlowGraph& cfg);
 
   // Detects local stack frame offsets (0 <= offset < frame_size) that are used exclusively as
   // single-precision float local variables (var_sp_<offset>).

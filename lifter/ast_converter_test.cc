@@ -4286,5 +4286,84 @@ TEST(AstMemoryIdiomRewriterTest, CollapseUnalignedBlockCopiesHandlesHalfwordTail
   EXPECT_THAT(body22.ToString(), HasSubstr("*(UnalignedBlock22*)arg0 = *(UnalignedBlock22*)arg1;"));
 }
 
+TEST(AstConverterTest, DoubleParameterInA2A3AndStackSlotsAndCallerRewriting) {
+  // 1. Callee taking (s32 arg0, f64 arg2, f64 arg4) where slot 1 ($a1) is skipped O32 alignment
+  // padding:
+  //   00: mtc1  $a2, $f5
+  //   04: mtc1  $a3, $f4
+  //   08: ldc1  $f6, 16($sp)
+  //   0C: add.d $f0, $f4, $f6
+  //   10: jr    $ra
+  //   14: nop
+  std::vector<uint32_t> callee_words = {
+      0x44862800,  // mtc1  $a2, $f5
+      0x44872000,  // mtc1  $a3, $f4
+      0xD7A60010,  // ldc1  $f6, 16($sp)
+      0x46262000,  // add.d $f0, $f4, $f6
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  auto callee_cfg = *ControlFlowGraph::Build(*DecodeSequence(callee_words, 0x80001000));
+  DominatorTree callee_dom = DominatorTree::Compute(callee_cfg);
+  DominatorTree callee_pdom = DominatorTree::ComputePostDominators(callee_cfg);
+  LoopInfo callee_loops = LoopInfo::Analyze(callee_cfg, callee_dom);
+  auto callee_region =
+      ControlFlowStructurer::Structure(callee_cfg, callee_dom, callee_pdom, callee_loops);
+  ASSERT_THAT(callee_region, NotNull());
+
+  AstConverterOptions callee_opts;
+  callee_opts.function_name = "CalleeIntDoubleDouble";
+  FunctionDeclaration callee_func =
+      *AstConverter::Convert(callee_cfg, *callee_region, nullptr, callee_opts);
+  std::string callee_code = callee_func.ToString();
+  EXPECT_THAT(callee_code, HasSubstr("f64 CalleeIntDoubleDouble(s32 arg0, f64 arg2, f64 arg4)"));
+  EXPECT_THAT(callee_code, HasSubstr("return (arg2 + arg4);"));
+
+  // 2. Caller passing (s32, f64, f64) where f64 in ($a2, $a3) is passed via mfc1 $a2, $f5;
+  // mfc1 $a3, $f4 and f64 at 16($sp) is passed via sdc1 $f6, 16($sp):
+  //   00: addiu $sp, $sp, -32
+  //   04: sw    $ra, 28($sp)
+  //   08: ldc1  $f4, 0($a1)
+  //   0C: ldc1  $f6, 8($a1)
+  //   10: mfc1  $a2, $f5
+  //   14: mfc1  $a3, $f4
+  //   18: sdc1  $f6, 16($sp)
+  //   1C: jal   0x80001000
+  //   20: nop
+  //   24: lw    $ra, 28($sp)
+  //   28: jr    $ra
+  //   2C: addiu $sp, $sp, 32
+  std::vector<uint32_t> caller_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xD4A40000,  // 08: ldc1  $f4, 0($a1)
+      0xD4A60008,  // 0C: ldc1  $f6, 8($a1)
+      0x44062800,  // 10: mfc1  $a2, $f5
+      0x44072000,  // 14: mfc1  $a3, $f4
+      0xF7A60010,  // 18: sdc1  $f6, 16($sp)
+      0x0C000400,  // 1C: jal   0x80001000
+      0x00000000,  // 20: nop
+      0x8FBF001C,  // 24: lw    $ra, 28($sp)
+      0x03E00008,  // 28: jr    $ra
+      0x27BD0020,  // 2C: addiu $sp, $sp, 32
+  };
+  auto caller_cfg = *ControlFlowGraph::Build(*DecodeSequence(caller_words, 0x80002000));
+  DominatorTree caller_dom = DominatorTree::Compute(caller_cfg);
+  DominatorTree caller_pdom = DominatorTree::ComputePostDominators(caller_cfg);
+  LoopInfo caller_loops = LoopInfo::Analyze(caller_cfg, caller_dom);
+  auto caller_region =
+      ControlFlowStructurer::Structure(caller_cfg, caller_dom, caller_pdom, caller_loops);
+  ASSERT_THAT(caller_region, NotNull());
+
+  AstConverterOptions caller_opts;
+  caller_opts.function_name = "CallerIntDoubleDouble";
+  FunctionDeclaration caller_func =
+      *AstConverter::Convert(caller_cfg, *caller_region, nullptr, caller_opts);
+  std::string caller_code = caller_func.ToString();
+  EXPECT_THAT(caller_code, HasSubstr("*(f64*)arg1"));
+  EXPECT_THAT(caller_code, HasSubstr("(s32, f64, f64))func_80001000)(arg0, "));
+  EXPECT_THAT(caller_code, HasSubstr("*(f64*)(arg1 + 8))"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

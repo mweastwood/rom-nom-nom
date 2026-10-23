@@ -638,7 +638,10 @@ std::string_view ExtractFloatBitcastLhsVar(const CExpression& lhs) {
   if (deref.Op() != "*" || !deref.IsPrefix()) return {};
   if (deref.Operand().Kind() != CExpressionKind::kCastExpression) return {};
   const auto& cast = static_cast<const CastExpression&>(deref.Operand());
-  if (cast.TargetType().name != "f32" || cast.TargetType().pointer_depth != 1) return {};
+  if ((cast.TargetType().name != "f32" && cast.TargetType().name != "f64") ||
+      cast.TargetType().pointer_depth != 1) {
+    return {};
+  }
   if (cast.Operand().Kind() != CExpressionKind::kUnaryExpression) return {};
   const auto& addr = static_cast<const UnaryExpression&>(cast.Operand());
   if (addr.Op() != "&" || !addr.IsPrefix()) return {};

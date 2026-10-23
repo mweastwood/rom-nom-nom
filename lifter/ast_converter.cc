@@ -175,7 +175,9 @@ class ConverterContext {
         frame_analysis_(StackFrameAnalyzer::Analyze(cfg_)),
         float_parameters_in_general_registers_(
             AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg_)),
+        double_parameter_in_a2_a3_(AbiAnalyzer::DetectDoubleParameterInGeneralRegisters(cfg_)),
         float_stack_param_slots_(AbiAnalyzer::DetectFloatStackParameterSlots(cfg_)),
+        double_stack_param_slots_(AbiAnalyzer::DetectDoubleStackParameterSlots(cfg_)),
         float_local_stack_offsets_(AbiAnalyzer::DetectFloatLocalStackOffsets(cfg_)) {
     CollectGotoTargets(root_region);
     for (const auto& jt : cfg_.JumpTables()) {
@@ -314,7 +316,9 @@ class ConverterContext {
     ctx.call_return_info = &call_return_info_;
     ctx.function_stack_stores = &frame_analysis_.stack_store_offsets;
     ctx.float_parameters_in_general_registers = &float_parameters_in_general_registers_;
+    ctx.double_parameter_in_a2_a3 = double_parameter_in_a2_a3_;
     ctx.float_stack_param_slots = &float_stack_param_slots_;
+    ctx.double_stack_param_slots = &double_stack_param_slots_;
     ctx.float_local_stack_offsets = &float_local_stack_offsets_;
     ctx.outgoing_args_size = frame_analysis_.outgoing_args_size;
     ctx.sp_buffer_size = frame_analysis_.sp_buffer_size;
@@ -1597,7 +1601,8 @@ class ConverterContext {
           if (!entry_has_call) {
             for (Register reg : {Register::kA0, Register::kA1, Register::kA2, Register::kA3}) {
               if (!AbiAnalyzer::IsRegisterLiveIn(cfg_, reg) ||
-                  float_parameters_in_general_registers_.contains(reg)) {
+                  float_parameters_in_general_registers_.contains(reg) ||
+                  (double_parameter_in_a2_a3_ && (reg == Register::kA2 || reg == Register::kA3))) {
                 continue;
               }
               bool used_directly_in_entry = false;
@@ -1760,7 +1765,9 @@ class ConverterContext {
   absl::flat_hash_set<uint32_t> setup_instruction_vrams_;
   absl::flat_hash_map<uint32_t, BlockState> block_entry_states_;
   absl::flat_hash_set<Register> float_parameters_in_general_registers_;
+  bool double_parameter_in_a2_a3_ = false;
   absl::flat_hash_set<int> float_stack_param_slots_;
+  absl::flat_hash_set<int> double_stack_param_slots_;
   absl::flat_hash_set<int32_t> float_local_stack_offsets_;
   std::optional<uint32_t> current_switch_break_block_;
   absl::flat_hash_map<uint32_t, CallReturnInfo> call_return_info_;
@@ -1862,7 +1869,20 @@ std::vector<CParameter> BuildFunctionParameters(const ControlFlowGraph& cfg,
   int total_param_count = std::max(parameter_count, fp_param_count);
   auto float_parameters_in_general_registers =
       AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg);
+  bool double_parameter_in_a2_a3 = AbiAnalyzer::DetectDoubleParameterInGeneralRegisters(cfg);
   auto float_stack_param_slots = AbiAnalyzer::DetectFloatStackParameterSlots(cfg);
+  auto double_stack_param_slots = AbiAnalyzer::DetectDoubleStackParameterSlots(cfg);
+  uint32_t frame_size = StackFrameAnalyzer::ComputeFrameSize(cfg);
+  auto is_stack_slot_accessed = [&](int s) -> bool {
+    int32_t target_off = static_cast<int32_t>(frame_size + 16) + (s - 4) * 4;
+    for (const auto& inst : all_instructions) {
+      if ((inst.rs == Register::kSp || inst.rs == Register::kFp) && inst.immediate == target_off &&
+          (inst.IsLoad() || inst.IsStore())) {
+        return true;
+      }
+    }
+    return false;
+  };
   int slot = 0;
   int fp_idx = 0;
   while (slot < total_param_count || fp_idx < fp_param_count) {
@@ -1877,6 +1897,22 @@ std::vector<CParameter> BuildFunctionParameters(const ControlFlowGraph& cfg,
       parameters.push_back(CParameter{.type = t, .name = is_double ? (fp_name + "_d") : fp_name});
       slot += (is_double ? 2 : 1);
       fp_idx++;
+    } else if (slot == 1 && double_parameter_in_a2_a3 &&
+               !AbiAnalyzer::IsRegisterLiveIn(cfg, Register::kA1)) {
+      slot++;
+    } else if (slot == 2 && double_parameter_in_a2_a3) {
+      parameters.push_back(CParameter{.type = CType::F64(), .name = "arg2"});
+      slot += 2;
+    } else if (slot == 3 && double_stack_param_slots.contains(4) &&
+               !AbiAnalyzer::IsRegisterLiveIn(cfg, Register::kA3)) {
+      slot++;
+    } else if (slot >= 5 && (slot % 2 == 1) && double_stack_param_slots.contains(slot + 1) &&
+               !is_stack_slot_accessed(slot)) {
+      slot++;
+    } else if (slot >= 4 && double_stack_param_slots.contains(slot)) {
+      parameters.push_back(
+          CParameter{.type = CType::F64(), .name = absl::StrFormat("arg%d", slot)});
+      slot += 2;
     } else {
       Register reg = static_cast<Register>(static_cast<int>(Register::kA0) + slot);
       bool is_float_param = (slot < 4 && float_parameters_in_general_registers.contains(reg)) ||

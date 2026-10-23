@@ -45,9 +45,8 @@ void RunTrimUnassignedTrailingCallArgRegisters(CompoundStatement* body, const As
   TrimUnassignedTrailingCallArgRegisters(body, ctx.parameters, ctx.function_parameter_counts);
 }
 
-void RunRewriteFloatInGprAndStackCallArguments(CompoundStatement* body,
-                                               const AstPassContext& /*ctx*/) {
-  RewriteFloatInGprAndStackCallArguments(body);
+void RunRewriteFloatInGprAndStackCallArguments(CompoundStatement* body, const AstPassContext& ctx) {
+  RewriteFloatInGprAndStackCallArguments(body, ctx.parameters);
 }
 
 void RunSplitReusedFloatGprParameters(CompoundStatement* body, const AstPassContext& ctx) {
@@ -80,6 +79,7 @@ constexpr AstPass kParameterAndFloatCallCoalescingPasses[] = {
     {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
     {.name = "RewriteFloatInGprAndStackCallArguments",
      .run = &RunRewriteFloatInGprAndStackCallArguments},
+    {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
 };
 
 constexpr AstPass kPostEarlyReturnPasses[] = {

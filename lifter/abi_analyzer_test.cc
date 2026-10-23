@@ -435,5 +435,63 @@ TEST(AbiAnalyzerTest, CompleteDoubleComparisonAndConversionOpcodeCoverage) {
   EXPECT_TRUE(double_vars.contains("f0_d"));
 }
 
+TEST(AbiAnalyzerTest, DetectsDoubleInA2A3AndDoubleStackParametersAndCandidateGprSlots) {
+  // 1. Callee with (s32 arg0, f64 arg2) in ($a2, $a3) via mtc1 $a2, $f5; mtc1 $a3, $f4
+  // and f64 stack arg at slot 4 (16($sp)) via ldc1 $f6, 16($sp), plus split lwc1 pair at slot 6
+  // (24($sp) -> $f9, 28($sp) -> $f8):
+  std::vector<uint32_t> words_direct = {
+      0x44862800,  // 00: mtc1  $a2, $f5
+      0x44872000,  // 04: mtc1  $a3, $f4
+      0xD7A60010,  // 08: ldc1  $f6, 16($sp)
+      0xC7A90018,  // 0C: lwc1  $f9, 24($sp)
+      0xC7A8001C,  // 10: lwc1  $f8, 28($sp)
+      0x46262000,  // 14: add.d $f0, $f4, $f6
+      0x46280000,  // 18: add.d $f0, $f0, $f8
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+  auto insts_direct = *DecodeSequence(words_direct, 0x80000000);
+  auto cfg_direct = *ControlFlowGraph::Build(insts_direct);
+  EXPECT_TRUE(AbiAnalyzer::DetectDoubleParameterInGeneralRegisters(cfg_direct));
+  auto float_gprs_direct = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg_direct);
+  EXPECT_FALSE(float_gprs_direct.contains(Register::kA2));
+  EXPECT_FALSE(float_gprs_direct.contains(Register::kA3));
+  auto double_stack_direct = AbiAnalyzer::DetectDoubleStackParameterSlots(cfg_direct);
+  EXPECT_TRUE(double_stack_direct.contains(4));
+  EXPECT_TRUE(double_stack_direct.contains(6));
+  auto float_stack_direct = AbiAnalyzer::DetectFloatStackParameterSlots(cfg_direct);
+  EXPECT_FALSE(float_stack_direct.contains(4));
+  EXPECT_FALSE(float_stack_direct.contains(6));
+  EXPECT_FALSE(float_stack_direct.contains(7));
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts_direct), 8);
+
+  // 2. Callee with (s32 arg0, f64 arg2) spilled to caller home slots 8($sp) and 12($sp) and
+  // reloaded via ldc1 $f0, 8($sp):
+  std::vector<uint32_t> words_home_spill = {
+      0xAFA60008,  // 00: sw   $a2, 8($sp)
+      0xAFA7000C,  // 04: sw   $a3, 12($sp)
+      0xD7A00008,  // 08: ldc1 $f0, 8($sp)
+      0x03E00008,  // 0C: jr   $ra
+      0x00000000,  // 10: nop
+  };
+  auto cfg_home_spill = *ControlFlowGraph::Build(*DecodeSequence(words_home_spill, 0x80000000));
+  EXPECT_TRUE(AbiAnalyzer::DetectDoubleParameterInGeneralRegisters(cfg_home_spill));
+
+  // 3. When $f12_d and $f14_d are both live-in (taking 4 parameter slots), no GPR ($a0-$a3) is an
+  // eligible float/double parameter slot even if $a2/$a3 are moved to FPRs inside the body:
+  std::vector<uint32_t> words_f12d_f14d = {
+      0x462E6000,  // 00: add.d $f0, $f12, $f14
+      0x44862800,  // 04: mtc1  $a2, $f5
+      0x44872000,  // 08: mtc1  $a3, $f4
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+  auto cfg_f12d_f14d = *ControlFlowGraph::Build(*DecodeSequence(words_f12d_f14d, 0x80000000));
+  EXPECT_FALSE(AbiAnalyzer::DetectDoubleParameterInGeneralRegisters(cfg_f12d_f14d));
+  auto float_gprs_f12d_f14d = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg_f12d_f14d);
+  EXPECT_FALSE(float_gprs_f12d_f14d.contains(Register::kA2));
+  EXPECT_FALSE(float_gprs_f12d_f14d.contains(Register::kA3));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

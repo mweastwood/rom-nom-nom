@@ -44,6 +44,9 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
     std::string p_type = p.type.ToString();
     if (p_type == "f64") {
       if (param_slot % 2 != 0) ++param_slot;
+      if (absl::StartsWith(p.name, "arg")) {
+        float_param_names.insert(p.name);
+      }
       param_slot += 2;
     } else {
       if (p_type == "f32") {
@@ -220,8 +223,10 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
           bool is_s_reg = (absl::StartsWith(lhs, "temp_s") || lhs == "fp" ||
                            (lhs.size() == 2 && lhs[0] == 's' && std::isdigit(lhs[1])));
           bool is_f_reg = (lhs.size() >= 2 && lhs[0] == 'f' && std::isdigit(lhs[1]));
-          bool is_callee_saved_f_reg = (lhs == "f20" || lhs == "f22" || lhs == "f24" ||
-                                        lhs == "f26" || lhs == "f28" || lhs == "f30");
+          bool is_callee_saved_f_reg =
+              (lhs == "f20" || lhs == "f22" || lhs == "f24" || lhs == "f26" || lhs == "f28" ||
+               lhs == "f30" || lhs == "f20_d" || lhs == "f22_d" || lhs == "f24_d" ||
+               lhs == "f26_d" || lhs == "f28_d" || lhs == "f30_d");
           bool is_homed_param_slot = false;
           if (frame_size > 0 && rhs.size() == 4 && absl::StartsWith(rhs, "arg") && rhs[3] >= '0' &&
               rhs[3] <= '3') {

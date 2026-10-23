@@ -5409,5 +5409,26 @@ void DoublePrecisionCompareAndTruncateToInt(f64 a, f64 b) {
 )");
 }
 
+TEST_F(RoundTripTest, DoublePrecisionInA2A3AndStackParameters) {
+  AssertRoundTripBitExact("DoublePrecisionInA2A3AndStackParameters", R"(
+f64 DoublePrecisionInA2A3AndStackParameters(s32 mode, f64 a, f64 b) {
+    if (mode > 0) {
+        return a + b;
+    }
+    return a - b;
+}
+)");
+}
+
+TEST_F(RoundTripTest, CallerPassesDoubleInA2A3AndStackToHelper) {
+  AssertRoundTripBitExact("CallerPassesDoubleInA2A3AndStackToHelper", R"(
+void combine_doubles(s32 mode, f64 a, f64 b);
+
+void CallerPassesDoubleInA2A3AndStackToHelper(s32 mode, f64* values) {
+    combine_doubles(mode, values[0], values[1]);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
