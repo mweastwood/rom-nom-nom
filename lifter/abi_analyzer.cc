@@ -122,12 +122,7 @@ bool IsDoublePrecisionUseOp(Opcode op) {
 bool DefinesFprAsDouble(const Instruction& inst, FpRegister reg) {
   if (inst.opcode == Opcode::kLdc1 && inst.ft == reg) return true;
   if (inst.opcode == Opcode::kDmtc1 && inst.fs == reg) return true;
-  if ((inst.opcode == Opcode::kAddD || inst.opcode == Opcode::kSubD ||
-       inst.opcode == Opcode::kMulD || inst.opcode == Opcode::kDivD ||
-       inst.opcode == Opcode::kSqrtD || inst.opcode == Opcode::kAbsD ||
-       inst.opcode == Opcode::kMovD || inst.opcode == Opcode::kNegD ||
-       inst.opcode == Opcode::kCvtDW || inst.opcode == Opcode::kCvtDS) &&
-      inst.fd == reg) {
+  if (IsDoublePrecisionWriteOp(inst.opcode) && inst.fd == reg) {
     return true;
   }
   return false;
@@ -198,12 +193,7 @@ void RecordReturnRegisterDefs(const RegisterUseDef& ud, bool* v0_live, bool* v1_
 }  // namespace
 
 bool AbiAnalyzer::IsDoublePrecisionUseOp(Opcode op) {
-  return (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
-          op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
-          op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtSD ||
-          op == Opcode::kTruncWD || op == Opcode::kRoundWD || op == Opcode::kCeilWD ||
-          op == Opcode::kFloorWD || op == Opcode::kCEqD || op == Opcode::kCLtD ||
-          op == Opcode::kCLeD || op == Opcode::kSdc1 || op == Opcode::kDmfc1);
+  return IsDoublePrecisionReadOp(op);
 }
 
 CallReturnInfo AbiAnalyzer::ScanCallReturnUsage(absl::Span<const Instruction> instructions,
@@ -597,12 +587,7 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
   absl::flat_hash_set<FpRegister> fixed_point_fprs;
   for (const auto& block : cfg.Blocks()) {
     for (const auto& inst : block.instructions) {
-      if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD ||
-           inst.opcode == Opcode::kCvtWS || inst.opcode == Opcode::kCvtWD ||
-           inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
-           inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
-           inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) &&
-          inst.fd.has_value()) {
+      if (IsFloatToIntConvertOp(inst.opcode) && inst.fd.has_value()) {
         fixed_point_fprs.insert(*inst.fd);
       }
     }
@@ -1232,6 +1217,11 @@ absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const Cont
   absl::flat_hash_set<std::string> double_vars;
   for (const auto& block : cfg.Blocks()) {
     for (const auto& inst : block.instructions) {
+      if (IsDoubleComparisonOp(inst.opcode)) {
+        if (inst.fs) double_vars.insert(FpRegisterVarName(*inst.fs, true));
+        if (inst.ft) double_vars.insert(FpRegisterVarName(*inst.ft, true));
+        continue;
+      }
       switch (inst.opcode) {
         case Opcode::kAddD:
         case Opcode::kSubD:
@@ -1241,9 +1231,11 @@ absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const Cont
         case Opcode::kAbsD:
         case Opcode::kMovD:
         case Opcode::kNegD:
-        case Opcode::kCEqD:
-        case Opcode::kCLtD:
-        case Opcode::kCLeD:
+        case Opcode::kRoundWD:
+        case Opcode::kCeilWD:
+        case Opcode::kFloorWD:
+        case Opcode::kCvtLD:
+        case Opcode::kCvtDL:
           if (inst.fd) double_vars.insert(FpRegisterVarName(*inst.fd, true));
           if (inst.fs) double_vars.insert(FpRegisterVarName(*inst.fs, true));
           if (inst.ft) double_vars.insert(FpRegisterVarName(*inst.ft, true));
@@ -1265,9 +1257,12 @@ absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const Cont
           break;
         case Opcode::kCvtDS:
         case Opcode::kCvtDW:
+        case Opcode::kCvtLS:
           if (inst.fd) double_vars.insert(FpRegisterVarName(*inst.fd, true));
           break;
         case Opcode::kCvtSD:
+        case Opcode::kCvtWD:
+        case Opcode::kCvtSL:
         case Opcode::kTruncWD:
           if (inst.fs) double_vars.insert(FpRegisterVarName(*inst.fs, true));
           break;

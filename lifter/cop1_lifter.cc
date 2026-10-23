@@ -976,13 +976,7 @@ void LiftCop1ComparisonInstruction(const Instruction& inst,
     case Opcode::kCNgtD:
     case Opcode::kCNgleD:
       if (inst.fs.has_value() && inst.ft.has_value()) {
-        bool is_double = (inst.opcode == Opcode::kCEqD || inst.opcode == Opcode::kCSeqD ||
-                          inst.opcode == Opcode::kCUeqD || inst.opcode == Opcode::kCNglD ||
-                          inst.opcode == Opcode::kCUnD || inst.opcode == Opcode::kCLtD ||
-                          inst.opcode == Opcode::kCOltD || inst.opcode == Opcode::kCUltD ||
-                          inst.opcode == Opcode::kCNgeD || inst.opcode == Opcode::kCLeD ||
-                          inst.opcode == Opcode::kCOleD || inst.opcode == Opcode::kCUleD ||
-                          inst.opcode == Opcode::kCNgtD || inst.opcode == Opcode::kCNgleD);
+        bool is_double = IsDoubleComparisonOp(inst.opcode);
         const char* op = "==";
         if (inst.opcode == Opcode::kCLtS || inst.opcode == Opcode::kCOltS ||
             inst.opcode == Opcode::kCUltS || inst.opcode == Opcode::kCNgeS ||

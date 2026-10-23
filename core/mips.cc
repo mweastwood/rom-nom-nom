@@ -265,30 +265,8 @@ bool Instruction::IsNop() const {
                            rt.has_value() && *rt == Register::kZero && shift_amount == 0);
 }
 
-bool Instruction::IsDoublePrecision() const {
-  switch (opcode) {
-    case Opcode::kLdc1:
-    case Opcode::kSdc1:
-    case Opcode::kDmfc1:
-    case Opcode::kDmtc1:
-    case Opcode::kAddD:
-    case Opcode::kSubD:
-    case Opcode::kMulD:
-    case Opcode::kDivD:
-    case Opcode::kSqrtD:
-    case Opcode::kAbsD:
-    case Opcode::kMovD:
-    case Opcode::kNegD:
-    case Opcode::kCvtSD:
-    case Opcode::kCvtDS:
-    case Opcode::kCvtDW:
-    case Opcode::kCvtWD:
-    case Opcode::kCvtLD:
-    case Opcode::kCvtDL:
-    case Opcode::kTruncWD:
-    case Opcode::kRoundWD:
-    case Opcode::kCeilWD:
-    case Opcode::kFloorWD:
+bool IsDoubleComparisonOp(Opcode op) {
+  switch (op) {
     case Opcode::kCFD:
     case Opcode::kCUnD:
     case Opcode::kCEqD:
@@ -309,6 +287,77 @@ bool Instruction::IsDoublePrecision() const {
     default:
       return false;
   }
+}
+
+bool IsDoublePrecisionReadOp(Opcode op) {
+  if (IsDoubleComparisonOp(op)) {
+    return true;
+  }
+  switch (op) {
+    case Opcode::kAddD:
+    case Opcode::kSubD:
+    case Opcode::kMulD:
+    case Opcode::kDivD:
+    case Opcode::kSqrtD:
+    case Opcode::kAbsD:
+    case Opcode::kMovD:
+    case Opcode::kNegD:
+    case Opcode::kCvtSD:
+    case Opcode::kCvtWD:
+    case Opcode::kCvtLD:
+    case Opcode::kTruncWD:
+    case Opcode::kRoundWD:
+    case Opcode::kCeilWD:
+    case Opcode::kFloorWD:
+    case Opcode::kSdc1:
+    case Opcode::kDmfc1:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsDoublePrecisionWriteOp(Opcode op) {
+  switch (op) {
+    case Opcode::kAddD:
+    case Opcode::kSubD:
+    case Opcode::kMulD:
+    case Opcode::kDivD:
+    case Opcode::kSqrtD:
+    case Opcode::kAbsD:
+    case Opcode::kMovD:
+    case Opcode::kNegD:
+    case Opcode::kCvtDS:
+    case Opcode::kCvtDW:
+    case Opcode::kCvtDL:
+    case Opcode::kLdc1:
+    case Opcode::kDmtc1:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsFloatToIntConvertOp(Opcode op) {
+  switch (op) {
+    case Opcode::kCvtWS:
+    case Opcode::kCvtWD:
+    case Opcode::kTruncWS:
+    case Opcode::kTruncWD:
+    case Opcode::kRoundWS:
+    case Opcode::kRoundWD:
+    case Opcode::kCeilWS:
+    case Opcode::kCeilWD:
+    case Opcode::kFloorWS:
+    case Opcode::kFloorWD:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Instruction::IsDoublePrecision() const {
+  return IsDoublePrecisionReadOp(opcode) || IsDoublePrecisionWriteOp(opcode);
 }
 
 uint32_t Instruction::BranchTarget() const {

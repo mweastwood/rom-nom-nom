@@ -50,6 +50,43 @@ TEST(InstructionPatternsTest, FloatToIntWithTrunc) {
   EXPECT_EQ(pattern->end_index, 1u);
 }
 
+TEST(InstructionPatternsTest, FloatToIntWithCvtWSAndCvtWD) {
+  // cvt.w.s $f6, $f12; nop; mfc1 $v0, $f6
+  std::vector<uint32_t> single_words = {
+      0x460061A4,  // cvt.w.s $f6, $f12
+      0x00000000,  // nop
+      0x44023000,  // mfc1 $v0, $f6
+  };
+  auto single_insts = *DecodeSequence(single_words, 0x80000000);
+  auto single_pattern = MatchFloatingPointConversionPattern(single_insts, 0);
+  ASSERT_TRUE(single_pattern.has_value());
+  EXPECT_EQ(single_pattern->type, FloatingPointConversionType::kFloatToInt);
+  EXPECT_FALSE(single_pattern->is_int_to_float);
+  EXPECT_FALSE(single_pattern->is_rounding);
+  EXPECT_FALSE(single_pattern->is_double);
+  EXPECT_EQ(single_pattern->src_floating_point_reg, FpRegister::kF12);
+  EXPECT_EQ(single_pattern->dest_gpr, Register::kV0);
+  EXPECT_TRUE(single_pattern->round_func.empty());
+  EXPECT_EQ(single_pattern->end_index, 2u);
+
+  // cvt.w.d $f4, $f14; mfc1 $v1, $f4
+  std::vector<uint32_t> double_words = {
+      0x46207124,  // cvt.w.d $f4, $f14
+      0x44032000,  // mfc1 $v1, $f4
+  };
+  auto double_insts = *DecodeSequence(double_words, 0x80000000);
+  auto double_pattern = MatchFloatingPointConversionPattern(double_insts, 0);
+  ASSERT_TRUE(double_pattern.has_value());
+  EXPECT_EQ(double_pattern->type, FloatingPointConversionType::kFloatToInt);
+  EXPECT_FALSE(double_pattern->is_int_to_float);
+  EXPECT_FALSE(double_pattern->is_rounding);
+  EXPECT_TRUE(double_pattern->is_double);
+  EXPECT_EQ(double_pattern->src_floating_point_reg, FpRegister::kF14);
+  EXPECT_EQ(double_pattern->dest_gpr, Register::kV1);
+  EXPECT_TRUE(double_pattern->round_func.empty());
+  EXPECT_EQ(double_pattern->end_index, 1u);
+}
+
 TEST(InstructionPatternsTest, FloatRoundingPattern) {
   // floor.w.s $f4, $f12
   // cvt.s.w $f0, $f4

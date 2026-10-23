@@ -5385,5 +5385,17 @@ void ShortCircuitFloatOrStoreGlobal(f32 x, f32 y, f32 z) {
 )");
 }
 
+TEST_F(RoundTripTest, DoublePrecisionCompareAndTruncateToInt) {
+  AssertRoundTripBitExact("DoublePrecisionCompareAndTruncateToInt", R"(
+extern s32 g_clamped_int;
+
+void DoublePrecisionCompareAndTruncateToInt(f64 a, f64 b) {
+    if (a < b) {
+        g_clamped_int = (s32)a;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

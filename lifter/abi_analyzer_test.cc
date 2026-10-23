@@ -380,5 +380,60 @@ TEST(AbiAnalyzerTest, ScansPostCallReturnRegisterUsage) {
   EXPECT_TRUE(info.returns_v0);
 }
 
+TEST(AbiAnalyzerTest, CompleteDoubleComparisonAndConversionOpcodeCoverage) {
+  // Verify IsDoublePrecisionUseOp covers all 16 c.*.d comparison opcodes and all .d read
+  // conversions
+  const std::vector<Opcode> double_use_ops = {
+      Opcode::kCFD,     Opcode::kCUnD,   Opcode::kCEqD,    Opcode::kCUeqD, Opcode::kCOltD,
+      Opcode::kCUltD,   Opcode::kCOleD,  Opcode::kCUleD,   Opcode::kCSfD,  Opcode::kCNgleD,
+      Opcode::kCSeqD,   Opcode::kCNglD,  Opcode::kCLtD,    Opcode::kCNgeD, Opcode::kCLeD,
+      Opcode::kCNgtD,   Opcode::kCvtSD,  Opcode::kCvtWD,   Opcode::kCvtLD, Opcode::kTruncWD,
+      Opcode::kRoundWD, Opcode::kCeilWD, Opcode::kFloorWD,
+  };
+  for (Opcode op : double_use_ops) {
+    EXPECT_TRUE(AbiAnalyzer::IsDoublePrecisionUseOp(op))
+        << "Expected IsDoublePrecisionUseOp true for opcode " << static_cast<int>(op);
+  }
+
+  // CFG exercising c.ult.d, cvt.w.d, round.w.d, ceil.w.d, floor.w.d, cvt.l.d, and cvt.d.l:
+  //   00: c.ult.d   $f12, $f14
+  //   04: cvt.w.d   $f2, $f16
+  //   08: round.w.d $f4, $f18
+  //   0C: ceil.w.d  $f6, $f20
+  //   10: floor.w.d $f8, $f22
+  //   14: cvt.l.d   $f10, $f24
+  //   18: cvt.d.l   $f0, $f26
+  //   1C: jr        $ra
+  //   20: nop
+  std::vector<uint32_t> words = {
+      0x462E6035,  // c.ult.d   $f12, $f14
+      0x462080A4,  // cvt.w.d   $f2, $f16
+      0x4620910C,  // round.w.d $f4, $f18
+      0x4620A18E,  // ceil.w.d  $f6, $f20
+      0x4620B20F,  // floor.w.d $f8, $f22
+      0x4620C2A5,  // cvt.l.d   $f10, $f24
+      0x46A0D021,  // cvt.d.l   $f0, $f26
+      0x03E00008,  // jr        $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+
+  EXPECT_TRUE(AbiAnalyzer::IsFpParameterDouble(cfg, FpRegister::kF12));
+  EXPECT_TRUE(AbiAnalyzer::IsFpParameterDouble(cfg, FpRegister::kF14));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(cfg));
+
+  auto double_vars = AbiAnalyzer::IdentifyDoubleVariables(cfg);
+  EXPECT_TRUE(double_vars.contains("f12_d"));
+  EXPECT_TRUE(double_vars.contains("f14_d"));
+  EXPECT_TRUE(double_vars.contains("f16_d"));
+  EXPECT_TRUE(double_vars.contains("f18_d"));
+  EXPECT_TRUE(double_vars.contains("f20_d"));
+  EXPECT_TRUE(double_vars.contains("f22_d"));
+  EXPECT_TRUE(double_vars.contains("f24_d"));
+  EXPECT_TRUE(double_vars.contains("f26_d"));
+  EXPECT_TRUE(double_vars.contains("f0_d"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

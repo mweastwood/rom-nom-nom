@@ -470,5 +470,52 @@ TEST(MipsTest, IsDoublePrecisionPredicate) {
   }
 }
 
+TEST(MipsTest, Cop1ClassificationPredicates) {
+  const std::vector<Opcode> double_comparisons = {
+      Opcode::kCFD,   Opcode::kCUnD,   Opcode::kCEqD,  Opcode::kCUeqD,
+      Opcode::kCOltD, Opcode::kCUltD,  Opcode::kCOleD, Opcode::kCUleD,
+      Opcode::kCSfD,  Opcode::kCNgleD, Opcode::kCSeqD, Opcode::kCNglD,
+      Opcode::kCLtD,  Opcode::kCNgeD,  Opcode::kCLeD,  Opcode::kCNgtD,
+  };
+  for (Opcode op : double_comparisons) {
+    EXPECT_TRUE(IsDoubleComparisonOp(op));
+    EXPECT_TRUE(IsDoublePrecisionReadOp(op));
+    EXPECT_FALSE(IsDoublePrecisionWriteOp(op));
+  }
+  EXPECT_FALSE(IsDoubleComparisonOp(Opcode::kCEqS));
+  EXPECT_FALSE(IsDoubleComparisonOp(Opcode::kCLtS));
+
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kCvtSD));
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kCvtWD));
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kCvtLD));
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kTruncWD));
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kRoundWD));
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kCeilWD));
+  EXPECT_TRUE(IsDoublePrecisionReadOp(Opcode::kFloorWD));
+  EXPECT_FALSE(IsDoublePrecisionReadOp(Opcode::kCvtDS));
+  EXPECT_FALSE(IsDoublePrecisionReadOp(Opcode::kCvtDW));
+  EXPECT_FALSE(IsDoublePrecisionReadOp(Opcode::kCvtDL));
+
+  EXPECT_TRUE(IsDoublePrecisionWriteOp(Opcode::kCvtDS));
+  EXPECT_TRUE(IsDoublePrecisionWriteOp(Opcode::kCvtDW));
+  EXPECT_TRUE(IsDoublePrecisionWriteOp(Opcode::kCvtDL));
+  EXPECT_TRUE(IsDoublePrecisionWriteOp(Opcode::kLdc1));
+  EXPECT_TRUE(IsDoublePrecisionWriteOp(Opcode::kDmtc1));
+  EXPECT_FALSE(IsDoublePrecisionWriteOp(Opcode::kCvtSD));
+  EXPECT_FALSE(IsDoublePrecisionWriteOp(Opcode::kCvtWD));
+  EXPECT_FALSE(IsDoublePrecisionWriteOp(Opcode::kCvtLD));
+  EXPECT_FALSE(IsDoublePrecisionWriteOp(Opcode::kDmfc1));
+
+  const std::vector<Opcode> float_to_int_ops = {
+      Opcode::kCvtWS,   Opcode::kCvtWD,  Opcode::kTruncWS, Opcode::kTruncWD, Opcode::kRoundWS,
+      Opcode::kRoundWD, Opcode::kCeilWS, Opcode::kCeilWD,  Opcode::kFloorWS, Opcode::kFloorWD,
+  };
+  for (Opcode op : float_to_int_ops) {
+    EXPECT_TRUE(IsFloatToIntConvertOp(op));
+  }
+  EXPECT_FALSE(IsFloatToIntConvertOp(Opcode::kCvtSW));
+  EXPECT_FALSE(IsFloatToIntConvertOp(Opcode::kCvtDW));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

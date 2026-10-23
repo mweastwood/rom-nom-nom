@@ -710,6 +710,36 @@ bool BlockLiftRunner::TryLiftMultiInstructionPatterns(size_t& i) {
         return true;
       }
     }
+    if (inst.opcode == Opcode::kSwc1 && lo->source_float_register.has_value() &&
+        (lo->type == FoldedPatternType::kGlobalStore ||
+         lo->type == FoldedPatternType::kGlobalIndexedStore)) {
+      int ft_idx = static_cast<int>(*lo->source_float_register);
+      if (ft_idx >= 0 && ft_idx < 32 && pending_fp_to_int[ft_idx] != nullptr) {
+        LiftedStatement statement;
+        if (lo->type == FoldedPatternType::kGlobalStore) {
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable =
+              lo->symbol_name.empty() ? absl::StrFormat("*(0x%X)", lo->address) : lo->symbol_name;
+          statement.expression = std::move(pending_fp_to_int[ft_idx]);
+        } else {
+          std::unique_ptr<LiftedExpression> base_addr_expr =
+              lo->symbol_name.empty()
+                  ? LiftedExpression::Integer(lo->address, true)
+                  : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
+          auto indexed_addr = LiftedExpression::Binary(
+              "+", LiftedExpression::Unary("(u8*)", std::move(base_addr_expr)),
+              ExpressionBuilder::LiftRegisterOrConstant(lo->index_reg, tracker));
+          statement.kind = StatementKind::kStore;
+          statement.store_type = "s32";
+          statement.destination_address = std::move(indexed_addr);
+          statement.expression = std::move(pending_fp_to_int[ft_idx]);
+        }
+        statements.push_back(std::move(statement));
+        RecordGprDefs(inst);
+        tracker.Step(inst);
+        return true;
+      }
+    }
     RecordGprDefs(inst);
     ExpressionBuilder::LiftFoldedAccess(*lo, inst, tracker, statements);
     return true;
@@ -1870,20 +1900,13 @@ void BlockLiftRunner::EmitPendingReturn() {
   bool has_live_f0 = (last_def_f0 != -1 && !f0_used_after);
   bool has_live_v0 = (last_def_v0 != -1 && !v0_used_after);
 
-  auto is_double_op = [](Opcode op) {
-    return (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
-            op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
-            op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtDS ||
-            op == Opcode::kCvtDW || op == Opcode::kLdc1 || op == Opcode::kDmfc1);
-  };
-
   if (has_live_f0 && (!has_live_v0 || last_def_f0 > last_def_v0)) {
-    bool is_double = is_double_op(raw_instructions[last_def_f0].opcode);
+    bool is_double = IsDoublePrecisionWriteOp(raw_instructions[last_def_f0].opcode);
     ret.expression = LiftedExpression::Variable(is_double ? "f0_d" : "f0");
   } else if (has_live_v0) {
     ret.expression = LiftedExpression::Variable("v0");
   } else if (has_live_f0) {
-    bool is_double = is_double_op(raw_instructions[last_def_f0].opcode);
+    bool is_double = IsDoublePrecisionWriteOp(raw_instructions[last_def_f0].opcode);
     ret.expression = LiftedExpression::Variable(is_double ? "f0_d" : "f0");
   }
   statements.push_back(std::move(ret));

@@ -322,6 +322,21 @@ enum class Opcode : uint16_t {
   kMtc0,
 };
 
+// --- COP1 Opcode Classification Queries ---
+
+// Returns true if `op` is a double-precision COP1 comparison instruction (c.*.d).
+bool IsDoubleComparisonOp(Opcode op);
+
+// Returns true if `op` consumes its floating-point source operand(s) as double-precision values.
+bool IsDoublePrecisionReadOp(Opcode op);
+
+// Returns true if `op` defines its floating-point destination operand as a double-precision value.
+bool IsDoublePrecisionWriteOp(Opcode op);
+
+// Returns true if `op` converts a single- or double-precision floating-point value to a 32-bit
+// integer word in an FPR (cvt.w.{s,d}, trunc.w.{s,d}, round.w.{s,d}, ceil.w.{s,d}, floor.w.{s,d}).
+bool IsFloatToIntConvertOp(Opcode op);
+
 // Represents a fully decoded 32-bit MIPS instruction.
 struct Instruction {
   uint32_t raw_word = 0;  // Original 32-bit instruction

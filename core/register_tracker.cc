@@ -1384,10 +1384,7 @@ bool DetermineReturnsF0Double(const ControlFlowGraph& cfg) {
           if (r == FpRegister::kF0) {
             defined_in_block = true;
             Opcode op = curr_block.instructions[i].opcode;
-            if (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
-                op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
-                op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtDS ||
-                op == Opcode::kCvtDW || op == Opcode::kLdc1 || op == Opcode::kDmfc1) {
+            if (IsDoublePrecisionWriteOp(op)) {
               return true;
             }
             break;

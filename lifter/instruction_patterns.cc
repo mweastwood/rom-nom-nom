@@ -38,12 +38,8 @@ std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPatter
     }
   }
 
-  // 2. Float to Integer: (trunc/ceil/floor/round).w.(s/d) $fd, $fs [-> nop]* -> mfc1 $rt, $fd
-  if ((inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kTruncWD ||
-       inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD ||
-       inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD ||
-       inst.opcode == Opcode::kRoundWS || inst.opcode == Opcode::kRoundWD) &&
-      inst.fd.has_value() && inst.fs.has_value()) {
+  // 2. Float to Integer: (trunc/ceil/floor/round/cvt).w.(s/d) $fd, $fs [-> nop]* -> mfc1 $rt, $fd
+  if (IsFloatToIntConvertOp(inst.opcode) && inst.fd.has_value() && inst.fs.has_value()) {
     size_t j = i + 1;
     while (j < instructions.size() && instructions[j].IsNop()) {
       ++j;
@@ -59,8 +55,7 @@ std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPatter
         pattern.is_int_to_float = false;
         pattern.src_floating_point_reg = *inst.fs;
         pattern.dest_gpr = *next_inst.rt;
-        pattern.is_double = (inst.opcode == Opcode::kTruncWD || inst.opcode == Opcode::kCeilWD ||
-                             inst.opcode == Opcode::kFloorWD || inst.opcode == Opcode::kRoundWD);
+        pattern.is_double = IsDoublePrecisionReadOp(inst.opcode);
         if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
           pattern.round_func = pattern.is_double ? "ceil" : "ceilf";
         } else if (inst.opcode == Opcode::kFloorWS || inst.opcode == Opcode::kFloorWD) {
@@ -88,9 +83,7 @@ std::optional<FloatingPointConversionPattern> MatchFloatingPointConversionPatter
       const auto& next_inst = instructions[j];
       if ((next_inst.opcode == Opcode::kCvtSW || next_inst.opcode == Opcode::kCvtDW) &&
           next_inst.fs.has_value() && *next_inst.fs == *inst.fd && next_inst.fd.has_value()) {
-        bool is_double = (inst.opcode == Opcode::kCeilWD || inst.opcode == Opcode::kFloorWD ||
-                          inst.opcode == Opcode::kRoundWD || inst.opcode == Opcode::kTruncWD ||
-                          next_inst.opcode == Opcode::kCvtDW);
+        bool is_double = IsDoublePrecisionReadOp(inst.opcode) || next_inst.opcode == Opcode::kCvtDW;
         std::string func_name;
         if (inst.opcode == Opcode::kCeilWS || inst.opcode == Opcode::kCeilWD) {
           func_name = is_double ? "ceil" : "ceilf";
