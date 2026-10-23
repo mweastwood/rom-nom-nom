@@ -582,5 +582,31 @@ TEST(CEmitterTest, EmitTypesHeaderRespectsIntrinsicFilterAndExtraDeclarations) {
   EXPECT_EQ(emitted_intrinsics.count("sqrtf"), 0u);
 }
 
+TEST(CEmitterTest, EmitTranslationUnitEmitsCustomUnalignedBlockTypedefs) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  CType ptr10 = CType::Named("UnalignedBlock10").MakePointer();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*", CExpression::Cast(ptr10, CExpression::Identifier("arg0"))),
+      CExpression::Unary("*", CExpression::Cast(ptr10, CExpression::Identifier("arg1"))))));
+  CType ptr20 = CType::Named("UnalignedBlock20").MakePointer();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*", CExpression::Cast(ptr20, CExpression::Identifier("arg2"))),
+      CExpression::Unary("*", CExpression::Cast(ptr20, CExpression::Identifier("arg3"))))));
+  body->AddStatement(CStatement::Return());
+  tu.functions.emplace_back(
+      CType::Void(), "CopyCustomBlocks",
+      std::vector<CParameter>{CParameter{CType::S32(), "arg0"}, CParameter{CType::S32(), "arg1"},
+                              CParameter{CType::S32(), "arg2"}, CParameter{CType::S32(), "arg3"}},
+      std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("typedef struct { u8 b[10]; } UnalignedBlock10;"));
+  EXPECT_THAT(emitted, HasSubstr("typedef struct { u8 b[20]; } UnalignedBlock20;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -12,6 +13,7 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/c_ast.h"
@@ -47,6 +49,27 @@ constexpr MathIntrinsic kMathIntrinsics[] = {
 
 bool IsCompilerIntrinsic(std::string_view name) {
   return absl::StartsWith(name, "__n64_") || absl::StartsWith(name, "__builtin_");
+}
+
+void CollectCustomUnalignedBlockSizes(std::string_view code, std::set<int>* out_sizes) {
+  constexpr std::string_view kPrefix = "UnalignedBlock";
+  size_t pos = 0;
+  while ((pos = code.find(kPrefix, pos)) != std::string_view::npos) {
+    pos += kPrefix.size();
+    size_t end = pos;
+    while (end < code.size() && std::isdigit(static_cast<unsigned char>(code[end]))) {
+      ++end;
+    }
+    if (end > pos) {
+      int block_size = 0;
+      if (absl::SimpleAtoi(code.substr(pos, end - pos), &block_size) && block_size > 0 &&
+          block_size != 4 && block_size != 6 && block_size != 8 && block_size != 12 &&
+          block_size != 16) {
+        out_sizes->insert(block_size);
+      }
+    }
+    pos = end;
+  }
 }
 
 std::optional<std::pair<std::string, CType>> MatchScalarCastDerefGlobal(
@@ -632,6 +655,20 @@ std::string CTranslationUnit::ToString() const {
     if (combined_function_code.back() != '\n') {
       combined_function_code += "\n";
     }
+  }
+
+  std::set<int> custom_unaligned_block_sizes;
+  CollectCustomUnalignedBlockSizes(combined_function_code, &custom_unaligned_block_sizes);
+  if (!custom_unaligned_block_sizes.empty()) {
+    for (int block_size : custom_unaligned_block_sizes) {
+      output += absl::StrFormat(
+          "#ifndef UNALIGNED_BLOCK_%d_DEFINED\n"
+          "#define UNALIGNED_BLOCK_%d_DEFINED\n"
+          "typedef struct { u8 b[%d]; } UnalignedBlock%d;\n"
+          "#endif\n",
+          block_size, block_size, block_size, block_size);
+    }
+    output += "\n";
   }
 
   if (!external_function_names.empty()) {

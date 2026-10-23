@@ -1397,6 +1397,61 @@ TEST(ExpressionBuilderTest, StandaloneUnalignedStoreFlushedAtFunctionEnd) {
   EXPECT_EQ(statements[0].ToString(), "*(u8*)(arg0 + 4) = arg1;\n");
 }
 
+TEST(ExpressionBuilderTest, UnalignedLoadStoreRightFirstOrder) {
+  // lwr $v0, 7($a0)
+  // lwl $v0, 4($a0)
+  // swr $a1, 7($a0)
+  // swl $a1, 4($a0)
+  std::vector<uint32_t> words = {
+      0x98820007,  // lwr $v0, 7($a0)
+      0x88820004,  // lwl $v0, 4($a0)
+      0xB8850007,  // swr $a1, 7($a0)
+      0xA8850004,  // swl $a1, 4($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(5));
+  EXPECT_EQ(statements[0].ToString(), "v0 = *(s32*)(arg0 + 4);\n");
+  EXPECT_EQ(statements[1].ToString(), "*(u8*)(arg0 + 4) = arg1 >> 24;\n");
+  EXPECT_EQ(statements[2].ToString(), "*(u8*)(arg0 + 5) = arg1 >> 16;\n");
+  EXPECT_EQ(statements[3].ToString(), "*(u8*)(arg0 + 6) = arg1 >> 8;\n");
+  EXPECT_EQ(statements[4].ToString(), "*(u8*)(arg0 + 7) = arg1;\n");
+}
+
+TEST(ExpressionBuilderTest, Unaligned64BitLoadStoreBothOrders) {
+  // ldl $v0, 0($a0)
+  // ldr $v0, 7($a0)
+  // ldr $v1, 15($a0)
+  // ldl $v1, 8($a0)
+  // sdl $a1, 0($a0)
+  // sdr $a1, 7($a0)
+  std::vector<uint32_t> words = {
+      0x68820000,  // ldl $v0, 0($a0)
+      0x6C820007,  // ldr $v0, 7($a0)
+      0x6C83000F,  // ldr $v1, 15($a0)
+      0x68830008,  // ldl $v1, 8($a0)
+      0xB0850000,  // sdl $a1, 0($a0)
+      0xB4850007,  // sdr $a1, 7($a0)
+  };
+
+  auto insts = *DecodeSequence(words);
+  auto statements = ExpressionBuilder::LiftInstructions(insts);
+
+  ASSERT_THAT(statements, SizeIs(10));
+  EXPECT_EQ(statements[0].ToString(), "v0 = *(s64*)arg0;\n");
+  EXPECT_EQ(statements[1].ToString(), "v1 = *(s64*)(arg0 + 8);\n");
+  EXPECT_EQ(statements[2].ToString(), "*(u8*)arg0 = arg1 >> 56;\n");
+  EXPECT_EQ(statements[3].ToString(), "*(u8*)(arg0 + 1) = arg1 >> 48;\n");
+  EXPECT_EQ(statements[4].ToString(), "*(u8*)(arg0 + 2) = arg1 >> 40;\n");
+  EXPECT_EQ(statements[5].ToString(), "*(u8*)(arg0 + 3) = arg1 >> 32;\n");
+  EXPECT_EQ(statements[6].ToString(), "*(u8*)(arg0 + 4) = arg1 >> 24;\n");
+  EXPECT_EQ(statements[7].ToString(), "*(u8*)(arg0 + 5) = arg1 >> 16;\n");
+  EXPECT_EQ(statements[8].ToString(), "*(u8*)(arg0 + 6) = arg1 >> 8;\n");
+  EXPECT_EQ(statements[9].ToString(), "*(u8*)(arg0 + 7) = arg1;\n");
+}
+
 TEST(ExpressionBuilderTest, IndirectCallJalr) {
   // jalr $t9
   // nop

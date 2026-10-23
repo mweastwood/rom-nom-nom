@@ -5,9 +5,9 @@
 
 namespace rom_nom_nom {
 
-// Collapses sequences of unaligned load/byte-store statements into typed
-// `UnalignedWord` / `UnalignedBlock6` / `UnalignedBlock8` / `UnalignedBlock12`
-// / `UnalignedBlock16` struct copies.
+// Collapses sequences of unaligned load/byte-store statements (`lwl`/`lwr` +
+// `swl`/`swr` or `ldl`/`ldr` + `sdl`/`sdr` plus optional scalar tail copies)
+// into typed `UnalignedWord` / `UnalignedBlock<N>` struct copies.
 void CollapseUnalignedBlockCopies(CompoundStatement* comp);
 
 // Folds `-O0` frame-pointer scratch evaluation sequences (while-loop header conditions,

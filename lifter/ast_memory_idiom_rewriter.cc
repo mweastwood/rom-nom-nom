@@ -11,6 +11,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
@@ -144,9 +145,26 @@ void CollapseUnalignedBlockCopies(CompoundStatement* comp) {
     return true;
   };
 
-  auto match_s8_byte_store = [&](const CStatement& s, std::string_view expected_src_var,
-                                 std::string_view expected_dst_base,
-                                 int64_t expected_dst_offset) -> bool {
+  auto extract_scalar_tail_load = [&](const CStatement& s, std::string* lhs_var_out,
+                                      int64_t* width_out, std::string* base_out,
+                                      int64_t* offset_out) -> bool {
+    const CExpression* dummy_expr = nullptr;
+    if (extract_typed_load(s, "s16", lhs_var_out, base_out, offset_out, &dummy_expr) ||
+        extract_typed_load(s, "u16", lhs_var_out, base_out, offset_out, &dummy_expr)) {
+      *width_out = 2;
+      return true;
+    }
+    if (extract_typed_load(s, "s8", lhs_var_out, base_out, offset_out, &dummy_expr) ||
+        extract_typed_load(s, "u8", lhs_var_out, base_out, offset_out, &dummy_expr)) {
+      *width_out = 1;
+      return true;
+    }
+    return false;
+  };
+
+  auto match_scalar_tail_store = [&](const CStatement& s, std::string_view expected_src_var,
+                                     int64_t expected_width, std::string_view expected_dst_base,
+                                     int64_t expected_dst_offset) -> bool {
     if (s.Kind() != CStatementKind::kExpressionStatement) return false;
     const auto& es = static_cast<const ExpressionStatement&>(s);
     if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) return false;
@@ -155,8 +173,12 @@ void CollapseUnalignedBlockCopies(CompoundStatement* comp) {
     const auto& un = static_cast<const UnaryExpression&>(a.Lhs());
     if (un.Op() != "*" || un.Operand().Kind() != CExpressionKind::kCastExpression) return false;
     const auto& cast = static_cast<const CastExpression&>(un.Operand());
-    if ((cast.TargetType().name != "s8" && cast.TargetType().name != "u8") ||
-        cast.TargetType().pointer_depth != 1) {
+    if (cast.TargetType().pointer_depth != 1) return false;
+    if (expected_width == 2) {
+      if (cast.TargetType().name != "s16" && cast.TargetType().name != "u16") return false;
+    } else if (expected_width == 1) {
+      if (cast.TargetType().name != "s8" && cast.TargetType().name != "u8") return false;
+    } else {
       return false;
     }
     if (a.Rhs().Kind() != CExpressionKind::kIdentifier ||
@@ -167,6 +189,74 @@ void CollapseUnalignedBlockCopies(CompoundStatement* comp) {
     int64_t off = 0;
     if (!extract_base_and_offset(cast.Operand(), &b, &off)) return false;
     return b == expected_dst_base && off == expected_dst_offset;
+  };
+
+  auto unaligned_block_type_name = [](int64_t num_bytes) -> std::string {
+    if (num_bytes == 4) {
+      return "UnalignedWord";
+    }
+    return absl::StrFormat("UnalignedBlock%d", num_bytes);
+  };
+
+  auto parse_unaligned_block_size = [](std::string_view type_name, int64_t* size_out) -> bool {
+    if (type_name == "UnalignedWord") {
+      *size_out = 4;
+      return true;
+    }
+    if (absl::StartsWith(type_name, "UnalignedBlock")) {
+      int64_t val = 0;
+      if (absl::SimpleAtoi(type_name.substr(14), &val) && val > 0) {
+        *size_out = val;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto extract_unaligned_block_deref = [&](const CExpression& e, int64_t* size_out,
+                                           std::string* b_out, int64_t* off_out,
+                                           const CExpression** be_out) -> bool {
+    if (e.Kind() != CExpressionKind::kUnaryExpression) return false;
+    const auto& u = static_cast<const UnaryExpression&>(e);
+    if (u.Op() != "*" || u.Operand().Kind() != CExpressionKind::kCastExpression) {
+      return false;
+    }
+    const auto& c = static_cast<const CastExpression&>(u.Operand());
+    if (c.TargetType().pointer_depth != 1 ||
+        !parse_unaligned_block_size(c.TargetType().name, size_out)) {
+      return false;
+    }
+    if (!extract_base_and_offset(c.Operand(), b_out, off_out)) return false;
+    if (c.Operand().Kind() == CExpressionKind::kBinaryExpression &&
+        static_cast<const BinaryExpression&>(c.Operand()).Op() == "+" &&
+        static_cast<const BinaryExpression&>(c.Operand()).Rhs().Kind() ==
+            CExpressionKind::kIntegerLiteral) {
+      *be_out = &static_cast<const BinaryExpression&>(c.Operand()).Lhs();
+    } else {
+      *be_out = &c.Operand();
+    }
+    return true;
+  };
+
+  auto extract_unaligned_block_copy_stmt =
+      [&](const CStatement& s, int64_t* size_out, std::string* dst_base_out, int64_t* dst_off_out,
+          const CExpression** dst_expr_out, std::string* src_base_out, int64_t* src_off_out,
+          const CExpression** src_expr_out) -> bool {
+    if (s.Kind() != CStatementKind::kExpressionStatement) return false;
+    const auto& es = static_cast<const ExpressionStatement&>(s);
+    if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) return false;
+    const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+    if (a.Op() != "=") return false;
+    int64_t lhs_size = 0, rhs_size = 0;
+    if (!extract_unaligned_block_deref(a.Lhs(), &lhs_size, dst_base_out, dst_off_out,
+                                       dst_expr_out) ||
+        !extract_unaligned_block_deref(a.Rhs(), &rhs_size, src_base_out, src_off_out,
+                                       src_expr_out) ||
+        lhs_size != rhs_size) {
+      return false;
+    }
+    *size_out = lhs_size;
+    return true;
   };
 
   auto make_addr_with_offset = [](const CExpression& base_expr,
@@ -187,157 +277,191 @@ void CollapseUnalignedBlockCopies(CompoundStatement* comp) {
   };
 
   auto& stmts = comp->MutableStatements();
-  for (size_t i = 0; i < stmts.size(); ++i) {
-    // Try matching 6-byte copy: 1 word load + 2 s8 loads + 4 u8 byte stores + 2 s8 byte stores
-    if (i + 9 <= stmts.size()) {
-      std::string v0, v1, v2, src_b0, src_b1, src_b2, dst_b0;
-      int64_t src_off0 = 0, src_off1 = 0, src_off2 = 0, dst_off0 = 0;
-      const CExpression* src_expr0 = nullptr;
-      const CExpression* dummy_expr = nullptr;
-      const CExpression* dst_expr0 = nullptr;
-      if (extract_typed_load(*stmts[i], "s32", &v0, &src_b0, &src_off0, &src_expr0) &&
-          extract_typed_load(*stmts[i + 1], "s8", &v1, &src_b1, &src_off1, &dummy_expr) &&
-          extract_typed_load(*stmts[i + 2], "s8", &v2, &src_b2, &src_off2, &dummy_expr) &&
-          src_b1 == src_b0 && src_b2 == src_b0 && src_off1 == src_off0 + 4 &&
-          src_off2 == src_off0 + 5 &&
-          match_u8_byte_store(*stmts[i + 3], v0, 24, &dst_b0, &dst_off0, &dst_expr0)) {
-        bool all_stores_ok = true;
-        for (int b = 1; b < 4; ++b) {
-          std::string db;
-          int64_t doff = 0;
-          if (!match_u8_byte_store(*stmts[i + 3 + b], v0, (3 - b) * 8, &db, &doff, &dummy_expr) ||
-              db != dst_b0 || doff != dst_off0 + b) {
-            all_stores_ok = false;
+
+  auto try_absorb_trailing_scalar_copies = [&](size_t idx) {
+    while (idx + 2 < stmts.size()) {
+      int64_t cur_size = 0, dst_off = 0, src_off = 0;
+      std::string dst_base, src_base;
+      const CExpression* dst_expr = nullptr;
+      const CExpression* src_expr = nullptr;
+      if (!extract_unaligned_block_copy_stmt(*stmts[idx], &cur_size, &dst_base, &dst_off, &dst_expr,
+                                             &src_base, &src_off, &src_expr)) {
+        break;
+      }
+      struct TailLoadInfo {
+        std::string var;
+        int64_t width = 0;
+        int64_t rel_off = 0;
+      };
+      std::vector<TailLoadInfo> tails;
+      int64_t tail_bytes = 0;
+      while (idx + 1 + tails.size() < stmts.size() && tail_bytes < 3) {
+        std::string tv, tb;
+        int64_t tw = 0, toff = 0;
+        if (!extract_scalar_tail_load(*stmts[idx + 1 + tails.size()], &tv, &tw, &tb, &toff) ||
+            tb != src_base || toff != src_off + cur_size + tail_bytes || tail_bytes + tw > 3) {
+          break;
+        }
+        tails.push_back(TailLoadInfo{tv, tw, cur_size + tail_bytes});
+        tail_bytes += tw;
+      }
+      bool absorbed = false;
+      for (size_t n_tail = tails.size(); n_tail >= 1; --n_tail) {
+        if (idx + 1 + 2 * n_tail > stmts.size()) continue;
+        bool stores_ok = true;
+        int64_t matched_bytes = 0;
+        for (size_t t = 0; t < n_tail; ++t) {
+          if (!match_scalar_tail_store(*stmts[idx + 1 + n_tail + t], tails[t].var, tails[t].width,
+                                       dst_base, dst_off + tails[t].rel_off)) {
+            stores_ok = false;
             break;
           }
+          matched_bytes += tails[t].width;
         }
-        if (all_stores_ok && match_s8_byte_store(*stmts[i + 7], v1, dst_b0, dst_off0 + 4) &&
-            match_s8_byte_store(*stmts[i + 8], v2, dst_b0, dst_off0 + 5)) {
-          auto copy_stmt =
-              make_block_copy_stmt("UnalignedBlock6", *dst_expr0, dst_off0, *src_expr0, src_off0);
-          stmts[i] = std::move(copy_stmt);
-          stmts.erase(stmts.begin() + i + 1, stmts.begin() + i + 9);
-          continue;
+        if (stores_ok) {
+          std::string merged_type = unaligned_block_type_name(cur_size + matched_bytes);
+          stmts[idx] = make_block_copy_stmt(merged_type, *dst_expr, dst_off, *src_expr, src_off);
+          stmts.erase(stmts.begin() + idx + 1, stmts.begin() + idx + 1 + 2 * n_tail);
+          absorbed = true;
+          break;
         }
       }
+      if (!absorbed) break;
     }
+  };
 
-    // Try matching N-word copy (N = 4, 3, 2, 1): N s32 loads + 4*N u8 byte stores
-    bool matched_n = false;
-    for (int n_words : {4, 3, 2, 1}) {
-      size_t total_stmts = static_cast<size_t>(n_words * 5);
-      if (i + total_stmts > stmts.size()) continue;
-      std::vector<std::string> vars(n_words);
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    bool matched_block = false;
+    for (std::pair<std::string_view, int64_t> word_spec :
+         {std::pair<std::string_view, int64_t>{"s32", 4},
+          std::pair<std::string_view, int64_t>{"s64", 8}}) {
+      std::string_view word_type = word_spec.first;
+      int64_t word_size = word_spec.second;
+
+      std::vector<std::string> word_vars;
       std::string src_base;
       int64_t src_off0 = 0;
       const CExpression* src_base_expr = nullptr;
-      bool loads_ok = true;
-      for (int w = 0; w < n_words; ++w) {
-        std::string b;
+      while (i + word_vars.size() < stmts.size()) {
+        std::string v, b;
         int64_t off = 0;
         const CExpression* be = nullptr;
-        if (!extract_typed_load(*stmts[i + w], "s32", &vars[w], &b, &off, &be)) {
-          loads_ok = false;
+        if (!extract_typed_load(*stmts[i + word_vars.size()], word_type, &v, &b, &off, &be)) {
           break;
         }
-        if (w == 0) {
+        if (word_vars.empty()) {
           src_base = b;
           src_off0 = off;
           src_base_expr = be;
-        } else if (b != src_base || off != src_off0 + w * 4) {
-          loads_ok = false;
+        } else if (b != src_base ||
+                   off != src_off0 + static_cast<int64_t>(word_vars.size()) * word_size) {
+          break;
+        }
+        word_vars.push_back(std::move(v));
+      }
+      if (word_vars.empty()) continue;
+
+      for (int n_words = static_cast<int>(word_vars.size()); n_words >= 1 && !matched_block;
+           --n_words) {
+        struct TailLoad {
+          std::string var;
+          int64_t width = 0;
+          int64_t rel_off = 0;
+        };
+        std::vector<TailLoad> tail_loads;
+        int64_t tail_bytes = 0;
+        int64_t word_bytes = static_cast<int64_t>(n_words) * word_size;
+        while (i + n_words + tail_loads.size() < stmts.size() && tail_bytes < word_size - 1) {
+          std::string tv, tb;
+          int64_t tw = 0, toff = 0;
+          if (!extract_scalar_tail_load(*stmts[i + n_words + tail_loads.size()], &tv, &tw, &tb,
+                                        &toff) ||
+              tb != src_base || toff != src_off0 + word_bytes + tail_bytes ||
+              tail_bytes + tw >= word_size) {
+            break;
+          }
+          tail_loads.push_back(TailLoad{tv, tw, word_bytes + tail_bytes});
+          tail_bytes += tw;
+        }
+
+        for (int n_tail = static_cast<int>(tail_loads.size()); n_tail >= 0; --n_tail) {
+          size_t total_loads = static_cast<size_t>(n_words + n_tail);
+          size_t total_word_stores = static_cast<size_t>(n_words * word_size);
+          size_t total_stmts = total_loads + total_word_stores + static_cast<size_t>(n_tail);
+          if (i + total_stmts > stmts.size()) continue;
+
+          std::string dst_base;
+          int64_t dst_off0 = 0;
+          const CExpression* dst_base_expr = nullptr;
+          bool stores_ok = true;
+          for (int w = 0; w < n_words && stores_ok; ++w) {
+            for (int b = 0; b < word_size; ++b) {
+              std::string db;
+              int64_t doff = 0;
+              const CExpression* dbe = nullptr;
+              size_t stmt_idx = i + total_loads + static_cast<size_t>(w * word_size + b);
+              if (!match_u8_byte_store(*stmts[stmt_idx], word_vars[w], (word_size - 1 - b) * 8, &db,
+                                       &doff, &dbe)) {
+                stores_ok = false;
+                break;
+              }
+              if (w == 0 && b == 0) {
+                dst_base = db;
+                dst_off0 = doff;
+                dst_base_expr = dbe;
+              } else if (db != dst_base || doff != dst_off0 + w * word_size + b) {
+                stores_ok = false;
+                break;
+              }
+            }
+          }
+          if (!stores_ok) continue;
+
+          int64_t matched_tail_bytes = 0;
+          for (int t = 0; t < n_tail; ++t) {
+            size_t stmt_idx = i + total_loads + total_word_stores + static_cast<size_t>(t);
+            if (!match_scalar_tail_store(*stmts[stmt_idx], tail_loads[t].var, tail_loads[t].width,
+                                         dst_base, dst_off0 + tail_loads[t].rel_off)) {
+              stores_ok = false;
+              break;
+            }
+            matched_tail_bytes += tail_loads[t].width;
+          }
+          if (!stores_ok) continue;
+
+          int64_t total_bytes = word_bytes + matched_tail_bytes;
+          std::string block_type = unaligned_block_type_name(total_bytes);
+          auto copy_stmt =
+              make_block_copy_stmt(block_type, *dst_base_expr, dst_off0, *src_base_expr, src_off0);
+          stmts[i] = std::move(copy_stmt);
+          stmts.erase(stmts.begin() + i + 1, stmts.begin() + i + total_stmts);
+          matched_block = true;
           break;
         }
       }
-      if (!loads_ok) continue;
-
-      std::string dst_base;
-      int64_t dst_off0 = 0;
-      const CExpression* dst_base_expr = nullptr;
-      bool stores_ok = true;
-      for (int w = 0; w < n_words && stores_ok; ++w) {
-        for (int b = 0; b < 4; ++b) {
-          std::string db;
-          int64_t doff = 0;
-          const CExpression* dbe = nullptr;
-          size_t stmt_idx = i + n_words + w * 4 + b;
-          if (!match_u8_byte_store(*stmts[stmt_idx], vars[w], (3 - b) * 8, &db, &doff, &dbe)) {
-            stores_ok = false;
-            break;
-          }
-          if (w == 0 && b == 0) {
-            dst_base = db;
-            dst_off0 = doff;
-            dst_base_expr = dbe;
-          } else if (db != dst_base || doff != dst_off0 + w * 4 + b) {
-            stores_ok = false;
-            break;
-          }
-        }
-      }
-      if (!stores_ok) continue;
-
-      std::string_view block_type = "UnalignedWord";
-      if (n_words == 4) {
-        block_type = "UnalignedBlock16";
-      } else if (n_words == 3) {
-        block_type = "UnalignedBlock12";
-      } else if (n_words == 2) {
-        block_type = "UnalignedBlock8";
-      }
-      auto copy_stmt =
-          make_block_copy_stmt(block_type, *dst_base_expr, dst_off0, *src_base_expr, src_off0);
-      stmts[i] = std::move(copy_stmt);
-      stmts.erase(stmts.begin() + i + 1, stmts.begin() + i + total_stmts);
-      matched_n = true;
-      break;
+      if (matched_block) break;
     }
-    if (matched_n) {
-      if (i > 0 && stmts[i - 1]->Kind() == CStatementKind::kExpressionStatement &&
-          stmts[i]->Kind() == CStatementKind::kExpressionStatement) {
-        // Merge two consecutive UnalignedBlock8 copies at offset 0 and +8 into UnalignedBlock16!
-        const auto& prev_es = static_cast<const ExpressionStatement&>(*stmts[i - 1]);
-        const auto& cur_es = static_cast<const ExpressionStatement&>(*stmts[i]);
-        if (prev_es.Expression().Kind() == CExpressionKind::kAssignmentExpression &&
-            cur_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-          const auto& pa = static_cast<const AssignmentExpression&>(prev_es.Expression());
-          const auto& ca = static_cast<const AssignmentExpression&>(cur_es.Expression());
-          auto extract_block8 = [&](const CExpression& e, std::string* b_out, int64_t* off_out,
-                                    const CExpression** be_out) -> bool {
-            if (e.Kind() != CExpressionKind::kUnaryExpression) return false;
-            const auto& u = static_cast<const UnaryExpression&>(e);
-            if (u.Op() != "*" || u.Operand().Kind() != CExpressionKind::kCastExpression) {
-              return false;
-            }
-            const auto& c = static_cast<const CastExpression&>(u.Operand());
-            if (c.TargetType().name != "UnalignedBlock8" || c.TargetType().pointer_depth != 1) {
-              return false;
-            }
-            if (!extract_base_and_offset(c.Operand(), b_out, off_out)) return false;
-            if (c.Operand().Kind() == CExpressionKind::kBinaryExpression &&
-                static_cast<const BinaryExpression&>(c.Operand()).Op() == "+" &&
-                static_cast<const BinaryExpression&>(c.Operand()).Rhs().Kind() ==
-                    CExpressionKind::kIntegerLiteral) {
-              *be_out = &static_cast<const BinaryExpression&>(c.Operand()).Lhs();
-            } else {
-              *be_out = &c.Operand();
-            }
-            return true;
-          };
-          std::string pd, ps, cd, cs;
-          int64_t pdo = 0, pso = 0, cdo = 0, cso = 0;
-          const CExpression* pde = nullptr;
-          const CExpression* pse = nullptr;
-          const CExpression* dummy = nullptr;
-          if (extract_block8(pa.Lhs(), &pd, &pdo, &pde) &&
-              extract_block8(pa.Rhs(), &ps, &pso, &pse) &&
-              extract_block8(ca.Lhs(), &cd, &cdo, &dummy) &&
-              extract_block8(ca.Rhs(), &cs, &cso, &dummy) && pd == cd && ps == cs &&
-              cdo == pdo + 8 && cso == pso + 8) {
-            stmts[i - 1] = make_block_copy_stmt("UnalignedBlock16", *pde, pdo, *pse, pso);
-            stmts.erase(stmts.begin() + i);
-            --i;
-          }
+
+    if (matched_block) {
+      try_absorb_trailing_scalar_copies(i);
+      if (i > 0) {
+        int64_t prev_size = 0, cur_size = 0;
+        std::string pd, ps, cd, cs;
+        int64_t pdo = 0, pso = 0, cdo = 0, cso = 0;
+        const CExpression* pde = nullptr;
+        const CExpression* pse = nullptr;
+        const CExpression* dummy1 = nullptr;
+        const CExpression* dummy2 = nullptr;
+        if (extract_unaligned_block_copy_stmt(*stmts[i - 1], &prev_size, &pd, &pdo, &pde, &ps, &pso,
+                                              &pse) &&
+            extract_unaligned_block_copy_stmt(*stmts[i], &cur_size, &cd, &cdo, &dummy1, &cs, &cso,
+                                              &dummy2) &&
+            pd == cd && ps == cs && cdo == pdo + prev_size && cso == pso + prev_size) {
+          std::string merged_type = unaligned_block_type_name(prev_size + cur_size);
+          stmts[i - 1] = make_block_copy_stmt(merged_type, *pde, pdo, *pse, pso);
+          stmts.erase(stmts.begin() + i);
+          --i;
+          try_absorb_trailing_scalar_copies(i);
         }
       }
       continue;

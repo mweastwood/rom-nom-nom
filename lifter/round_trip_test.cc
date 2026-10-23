@@ -4056,6 +4056,18 @@ void UnalignedStructBlock8Copy(UnalignedBlock8* dst, UnalignedBlock8* src) {
 )");
 }
 
+TEST_F(RoundTripTest, UnalignedStructBlock10And20Copy) {
+  AssertRoundTripBitExact("UnalignedStructBlock10And20Copy", R"(
+typedef struct { u8 b[10]; } CustomBlock10;
+typedef struct { u8 b[20]; } CustomBlock20;
+void UnalignedStructBlock10And20Copy(CustomBlock10* dst10, CustomBlock10* src10,
+                                     CustomBlock20* dst20, CustomBlock20* src20) {
+    *dst10 = *src10;
+    *dst20 = *src20;
+}
+)");
+}
+
 TEST_F(RoundTripTest, UnalignedStructBlock16CopyLoop) {
   AssertRoundTripBitExact("UnalignedStructBlock16CopyLoop", R"(
 void UnalignedStructBlock16CopyLoop(UnalignedBlock16* dst, UnalignedBlock16* src, s32 count) {

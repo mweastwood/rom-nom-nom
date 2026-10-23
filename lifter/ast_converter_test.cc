@@ -4187,5 +4187,104 @@ TEST(AstMemoryIdiomRewriterTest, CollapseUnalignedBlockCopiesCollapsesWordStore)
   EXPECT_THAT(code, Not(HasSubstr(">> 24")));
 }
 
+TEST(AstMemoryIdiomRewriterTest, CollapseUnalignedBlockCopiesHandlesHalfwordTailAndCustomSizes) {
+  // Test 10-byte copy: 2 s32 loads + 1 s16 tail load + 8 u8 stores + 1 s16 tail store
+  CompoundStatement body10;
+  body10.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("arg1"))))));
+  body10.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"s32", false, 1},
+                                           CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                               CExpression::Integer(4)))))));
+  body10.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("t0"),
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"s16", false, 1},
+                                           CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                               CExpression::Integer(8)))))));
+  for (int w = 0; w < 2; ++w) {
+    std::string var = (w == 0) ? "v0" : "v1";
+    for (int b = 0; b < 4; ++b) {
+      int off = w * 4 + b;
+      auto addr = (off == 0) ? CExpression::Identifier("arg0")
+                             : CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                   CExpression::Integer(off));
+      auto val = (b == 3) ? CExpression::Identifier(var)
+                          : CExpression::Binary(">>", CExpression::Identifier(var),
+                                                CExpression::Integer((3 - b) * 8));
+      body10.AddStatement(CStatement::Expression(CExpression::Assignment(
+          "=", CExpression::Unary("*", CExpression::Cast(CType{"u8", false, 1}, std::move(addr))),
+          std::move(val))));
+    }
+  }
+  body10.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"s16", false, 1},
+                                           CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                               CExpression::Integer(8)))),
+      CExpression::Identifier("t0"))));
+
+  CollapseUnalignedBlockCopies(&body10);
+  EXPECT_THAT(body10.ToString(), HasSubstr("*(UnalignedBlock10*)arg0 = *(UnalignedBlock10*)arg1;"));
+
+  // Test merging UnalignedBlock16 (+0) + UnalignedWord (+16) + 2 trailing s8 copies (+20, +21)
+  // into UnalignedBlock22
+  CompoundStatement body22;
+  for (int chunk = 0; chunk < 2; ++chunk) {
+    int n_words = (chunk == 0) ? 4 : 1;
+    int base_off = (chunk == 0) ? 0 : 16;
+    for (int w = 0; w < n_words; ++w) {
+      int off = base_off + w * 4;
+      auto addr = (off == 0) ? CExpression::Identifier("arg1")
+                             : CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                   CExpression::Integer(off));
+      body22.AddStatement(CStatement::Expression(CExpression::Assignment(
+          "=", CExpression::Identifier(absl::StrFormat("t%d", w)),
+          CExpression::Unary("*", CExpression::Cast(CType{"s32", false, 1}, std::move(addr))))));
+    }
+    for (int w = 0; w < n_words; ++w) {
+      std::string var = absl::StrFormat("t%d", w);
+      for (int b = 0; b < 4; ++b) {
+        int off = base_off + w * 4 + b;
+        auto addr = (off == 0) ? CExpression::Identifier("arg0")
+                               : CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                     CExpression::Integer(off));
+        auto val = (b == 3) ? CExpression::Identifier(var)
+                            : CExpression::Binary(">>", CExpression::Identifier(var),
+                                                  CExpression::Integer((3 - b) * 8));
+        body22.AddStatement(CStatement::Expression(CExpression::Assignment(
+            "=", CExpression::Unary("*", CExpression::Cast(CType{"u8", false, 1}, std::move(addr))),
+            std::move(val))));
+      }
+    }
+  }
+  // Trailing 2-byte s8 loads and stores at +20 and +21
+  for (int t = 0; t < 2; ++t) {
+    body22.AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier(absl::StrFormat("v%d", t)),
+        CExpression::Unary(
+            "*", CExpression::Cast(CType{"u8", false, 1},
+                                   CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                       CExpression::Integer(20 + t)))))));
+  }
+  for (int t = 0; t < 2; ++t) {
+    body22.AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=",
+        CExpression::Unary(
+            "*", CExpression::Cast(CType{"s8", false, 1},
+                                   CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                       CExpression::Integer(20 + t)))),
+        CExpression::Identifier(absl::StrFormat("v%d", t)))));
+  }
+
+  CollapseUnalignedBlockCopies(&body22);
+  EXPECT_THAT(body22.ToString(), HasSubstr("*(UnalignedBlock22*)arg0 = *(UnalignedBlock22*)arg1;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

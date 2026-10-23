@@ -248,10 +248,46 @@ struct PendingMult {
 };
 
 struct PendingUnalignedAccess {
+  Opcode opcode = Opcode::kUnknown;
   Register rt = Register::kZero;
   Register rs = Register::kZero;
   int16_t offset = 0;
 };
+
+bool IsUnalignedLoadOpcode(Opcode op) {
+  return op == Opcode::kLwl || op == Opcode::kLwr || op == Opcode::kLdl || op == Opcode::kLdr;
+}
+
+Opcode PartnerUnalignedOpcode(Opcode op) {
+  switch (op) {
+    case Opcode::kLwl:
+      return Opcode::kLwr;
+    case Opcode::kLwr:
+      return Opcode::kLwl;
+    case Opcode::kLdl:
+      return Opcode::kLdr;
+    case Opcode::kLdr:
+      return Opcode::kLdl;
+    case Opcode::kSwl:
+      return Opcode::kSwr;
+    case Opcode::kSwr:
+      return Opcode::kSwl;
+    case Opcode::kSdl:
+      return Opcode::kSdr;
+    case Opcode::kSdr:
+      return Opcode::kSdl;
+    default:
+      return Opcode::kUnknown;
+  }
+}
+
+bool IsLeftUnalignedOpcode(Opcode op) {
+  return op == Opcode::kLwl || op == Opcode::kLdl || op == Opcode::kSwl || op == Opcode::kSdl;
+}
+
+bool Is64BitUnalignedOpcode(Opcode op) {
+  return op == Opcode::kLdl || op == Opcode::kLdr || op == Opcode::kSdl || op == Opcode::kSdr;
+}
 
 struct BlockLiftRunner {
   const FunctionLiftContext& ctx;
@@ -336,24 +372,66 @@ struct BlockLiftRunner {
     return LiftedExpression::Binary("+", LiftReg(r), LiftedExpression::Integer(imm));
   }
 
-  void FlushPendingLwl() {
-    if (pending_lwl == nullptr) return;
+  void EmitUnalignedLoad(Register rt, Register base_reg, int16_t offset, bool is_64bit) {
+    const char* load_type = is_64bit ? "s64" : "s32";
     LiftedStatement statement;
     statement.kind = StatementKind::kAssignment;
-    statement.destination_variable = ExpressionBuilder::RegisterVarName(pending_lwl->rt);
-    if (pending_lwl->rs == Register::kSp) {
-      if (IsSpOffset(pending_lwl->offset)) {
-        statement.expression = LiftedExpression::Load("s32", MakeSpAddr(pending_lwl->offset));
+    statement.destination_variable = ExpressionBuilder::RegisterVarName(rt);
+    if (base_reg == Register::kSp) {
+      if (IsSpOffset(offset)) {
+        statement.expression = LiftedExpression::Load(load_type, MakeSpAddr(offset));
       } else {
-        statement.expression =
-            LiftedExpression::Variable(ExpressionBuilder::StackVarName(pending_lwl->offset));
+        statement.expression = LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
       }
     } else {
-      statement.expression =
-          LiftedExpression::Load("s32", MakeRegOffsetExpr(pending_lwl->rs, pending_lwl->offset));
+      statement.expression = LiftedExpression::Load(load_type, MakeRegOffsetExpr(base_reg, offset));
     }
     statements.push_back(std::move(statement));
+  }
+
+  void FlushPendingLwl() {
+    if (pending_lwl == nullptr) return;
+    EmitUnalignedLoad(pending_lwl->rt, pending_lwl->rs, pending_lwl->offset,
+                      Is64BitUnalignedOpcode(pending_lwl->opcode));
     pending_lwl = nullptr;
+  }
+
+  void EmitUnalignedStore(Register rt, Register base_reg, int16_t offset, bool is_64bit) {
+    if (base_reg == Register::kSp) {
+      LiftedStatement statement;
+      if (IsSpOffset(offset)) {
+        statement.kind = StatementKind::kStore;
+        statement.store_type = is_64bit ? "s64" : "s32";
+        statement.destination_address = MakeSpAddr(offset);
+        statement.expression = LiftReg(rt);
+      } else {
+        statement.kind = StatementKind::kAssignment;
+        statement.destination_variable = ExpressionBuilder::StackVarName(offset);
+        statement.expression = LiftReg(rt);
+      }
+      statements.push_back(std::move(statement));
+    } else {
+      int num_bytes = is_64bit ? 8 : 4;
+      for (int b = 0; b < num_bytes; ++b) {
+        LiftedStatement statement;
+        statement.kind = StatementKind::kStore;
+        statement.store_type = "u8";
+        int32_t byte_offset = static_cast<int32_t>(offset) + b;
+        if (byte_offset == 0) {
+          statement.destination_address = LiftReg(base_reg);
+        } else {
+          statement.destination_address = LiftedExpression::Binary(
+              "+", LiftReg(base_reg), LiftedExpression::Integer(byte_offset));
+        }
+        if (b == num_bytes - 1) {
+          statement.expression = LiftReg(rt);
+        } else {
+          statement.expression = LiftedExpression::Binary(
+              ">>", LiftReg(rt), LiftedExpression::Integer((num_bytes - 1 - b) * 8));
+        }
+        statements.push_back(std::move(statement));
+      }
+    }
   }
 
   void FlushPendingSwl() {
@@ -1661,45 +1739,27 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
       break;
 
     case Opcode::kLwl:
-      if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
-          (!has_frame_pointer || *inst.rt != Register::kFp) && inst.rs.has_value()) {
-        FlushPendingLwl();
-        pending_lwl = std::make_unique<PendingUnalignedAccess>();
-        pending_lwl->rt = *inst.rt;
-        pending_lwl->rs =
-            (has_frame_pointer && *inst.rs == Register::kFp) ? Register::kSp : *inst.rs;
-        pending_lwl->offset = inst.immediate;
-      }
-      break;
-
     case Opcode::kLwr:
+    case Opcode::kLdl:
+    case Opcode::kLdr:
       if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kSp &&
           (!has_frame_pointer || *inst.rt != Register::kFp) && inst.rs.has_value()) {
-        int16_t offset = inst.immediate;
         Register base_reg =
             (has_frame_pointer && *inst.rs == Register::kFp) ? Register::kSp : *inst.rs;
-        if (pending_lwl != nullptr) {
-          if (pending_lwl->rt == *inst.rt && pending_lwl->rs == base_reg) {
-            offset = pending_lwl->offset;
-            pending_lwl = nullptr;
-          } else {
-            FlushPendingLwl();
-          }
-        }
-        LiftedStatement statement;
-        statement.kind = StatementKind::kAssignment;
-        statement.destination_variable = ExpressionBuilder::RegisterVarName(*inst.rt);
-        if (base_reg == Register::kSp) {
-          if (IsSpOffset(offset)) {
-            statement.expression = LiftedExpression::Load("s32", MakeSpAddr(offset));
-          } else {
-            statement.expression =
-                LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
-          }
+        if (pending_lwl != nullptr && pending_lwl->opcode == PartnerUnalignedOpcode(inst.opcode) &&
+            pending_lwl->rt == *inst.rt && pending_lwl->rs == base_reg) {
+          int16_t left_offset =
+              IsLeftUnalignedOpcode(inst.opcode) ? inst.immediate : pending_lwl->offset;
+          pending_lwl = nullptr;
+          EmitUnalignedLoad(*inst.rt, base_reg, left_offset, Is64BitUnalignedOpcode(inst.opcode));
         } else {
-          statement.expression = LiftedExpression::Load("s32", MakeRegOffsetExpr(base_reg, offset));
+          FlushPendingLwl();
+          pending_lwl = std::make_unique<PendingUnalignedAccess>();
+          pending_lwl->opcode = inst.opcode;
+          pending_lwl->rt = *inst.rt;
+          pending_lwl->rs = base_reg;
+          pending_lwl->offset = inst.immediate;
         }
-        statements.push_back(std::move(statement));
       }
       break;
 
@@ -1790,57 +1850,25 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
       break;
 
     case Opcode::kSwl:
-      if (inst.rt.has_value() && inst.rs.has_value()) {
-        pending_swl = std::make_unique<PendingUnalignedAccess>();
-        pending_swl->rt = *inst.rt;
-        pending_swl->rs =
-            (has_frame_pointer && *inst.rs == Register::kFp) ? Register::kSp : *inst.rs;
-        pending_swl->offset = inst.immediate;
-      }
-      break;
-
     case Opcode::kSwr:
+    case Opcode::kSdl:
+    case Opcode::kSdr:
       if (inst.rt.has_value() && inst.rs.has_value()) {
-        int16_t offset = inst.immediate;
         Register base_reg =
             (has_frame_pointer && *inst.rs == Register::kFp) ? Register::kSp : *inst.rs;
-        if (pending_swl != nullptr && pending_swl->rt == *inst.rt && pending_swl->rs == base_reg) {
-          offset = pending_swl->offset;
+        if (pending_swl != nullptr && pending_swl->opcode == PartnerUnalignedOpcode(inst.opcode) &&
+            pending_swl->rt == *inst.rt && pending_swl->rs == base_reg) {
+          int16_t left_offset =
+              IsLeftUnalignedOpcode(inst.opcode) ? inst.immediate : pending_swl->offset;
           pending_swl = nullptr;
-        }
-        if (base_reg == Register::kSp) {
-          LiftedStatement statement;
-          if (IsSpOffset(offset)) {
-            statement.kind = StatementKind::kStore;
-            statement.store_type = "s32";
-            statement.destination_address = MakeSpAddr(offset);
-            statement.expression = LiftReg(*inst.rt);
-          } else {
-            statement.kind = StatementKind::kAssignment;
-            statement.destination_variable = ExpressionBuilder::StackVarName(offset);
-            statement.expression = LiftReg(*inst.rt);
-          }
-          statements.push_back(std::move(statement));
+          EmitUnalignedStore(*inst.rt, base_reg, left_offset, Is64BitUnalignedOpcode(inst.opcode));
         } else {
-          for (int b = 0; b < 4; ++b) {
-            LiftedStatement statement;
-            statement.kind = StatementKind::kStore;
-            statement.store_type = "u8";
-            int32_t byte_offset = static_cast<int32_t>(offset) + b;
-            if (byte_offset == 0) {
-              statement.destination_address = LiftReg(base_reg);
-            } else {
-              statement.destination_address = LiftedExpression::Binary(
-                  "+", LiftReg(base_reg), LiftedExpression::Integer(byte_offset));
-            }
-            if (b == 3) {
-              statement.expression = LiftReg(*inst.rt);
-            } else {
-              statement.expression = LiftedExpression::Binary(
-                  ">>", LiftReg(*inst.rt), LiftedExpression::Integer((3 - b) * 8));
-            }
-            statements.push_back(std::move(statement));
-          }
+          FlushPendingSwl();
+          pending_swl = std::make_unique<PendingUnalignedAccess>();
+          pending_swl->opcode = inst.opcode;
+          pending_swl->rt = *inst.rt;
+          pending_swl->rs = base_reg;
+          pending_swl->offset = inst.immediate;
         }
       }
       break;
@@ -1920,7 +1948,7 @@ std::vector<LiftedStatement> BlockLiftRunner::Run() {
   for (size_t i = 0; i < loop_end; ++i) {
     const auto& inst = instructions_to_process[i];
 
-    if (pending_lwl != nullptr && inst.opcode != Opcode::kLwr) {
+    if (pending_lwl != nullptr && inst.opcode != PartnerUnalignedOpcode(pending_lwl->opcode)) {
       RegisterUseDef ud = GetInstructionUseDef(inst);
       bool touches_rt = false;
       for (Register r : ud.gpr_uses) {
@@ -1929,7 +1957,7 @@ std::vector<LiftedStatement> BlockLiftRunner::Run() {
       for (Register r : ud.gpr_defs) {
         if (r == pending_lwl->rt) touches_rt = true;
       }
-      if (touches_rt || inst.opcode == Opcode::kLwl || inst.IsBranch() ||
+      if (touches_rt || IsUnalignedLoadOpcode(inst.opcode) || inst.IsBranch() ||
           inst.opcode == Opcode::kJ || inst.opcode == Opcode::kJr || inst.opcode == Opcode::kJal ||
           inst.opcode == Opcode::kJalr) {
         FlushPendingLwl();
@@ -1955,7 +1983,7 @@ std::vector<LiftedStatement> BlockLiftRunner::Run() {
       continue;
     }
 
-    if (inst.opcode != Opcode::kSwr && pending_swl != nullptr) {
+    if (pending_swl != nullptr && inst.opcode != PartnerUnalignedOpcode(pending_swl->opcode)) {
       FlushPendingSwl();
     }
 
@@ -2027,6 +2055,8 @@ std::vector<LiftedStatement> BlockLiftRunner::Run() {
       case Opcode::kLbu:
       case Opcode::kLwl:
       case Opcode::kLwr:
+      case Opcode::kLdl:
+      case Opcode::kLdr:
       case Opcode::kSd:
       case Opcode::kScd:
       case Opcode::kSw:
@@ -2034,6 +2064,8 @@ std::vector<LiftedStatement> BlockLiftRunner::Run() {
       case Opcode::kSb:
       case Opcode::kSwl:
       case Opcode::kSwr:
+      case Opcode::kSdl:
+      case Opcode::kSdr:
         LiftMemoryInstruction(inst, i);
         break;
 
