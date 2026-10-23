@@ -4557,5 +4557,114 @@ TEST(AstConverterTest, ExtractsHighAndLowSignedHalfwordsFrom32BitStackStore) {
   EXPECT_THAT(code, HasSubstr("(s16)var_sp_0"));
 }
 
+TEST(AstConverterTest, GeneralizedForLoopReconstructionCountdownAndNonUnitStride) {
+  // 1. Countdown loop: for (temp_t0 = arg0; (temp_t0 > 0); temp_t0--)
+  // 00: addu  $t0, $a0, $zero    (temp_t0 = arg0)
+  // 04: blez  $t0, +5 -> 0x1C    (guard: temp_t0 > 0)
+  // 08: nop
+  // 0C: addu  $v0, $v0, $t0      (v0 = v0 + temp_t0)
+  // 10: addiu $t0, $t0, -1       (temp_t0 = temp_t0 - 1)
+  // 14: bgtz  $t0, -3 -> 0x0C    (latch: temp_t0 > 0)
+  // 18: nop
+  // 1C: jr    $ra
+  // 20: nop
+  std::vector<uint32_t> countdown_words = {
+      0x00804021,  // 00: addu  $t0, $a0, $zero
+      0x19000005,  // 04: blez  $t0, +5 -> 0x1C
+      0x00000000,  // 08: nop
+      0x00481021,  // 0C: addu  $v0, $v0, $t0
+      0x2508FFFF,  // 10: addiu $t0, $t0, -1
+      0x1D00FFFD,  // 14: bgtz  $t0, -3 -> 0x0C
+      0x00000000,  // 18: nop
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+  auto countdown_cfg = *ControlFlowGraph::Build(*DecodeSequence(countdown_words, 0x80020000));
+  DominatorTree countdown_dom = DominatorTree::Compute(countdown_cfg);
+  DominatorTree countdown_pdom = DominatorTree::ComputePostDominators(countdown_cfg);
+  LoopInfo countdown_loops = LoopInfo::Analyze(countdown_cfg, countdown_dom);
+  auto countdown_region = ControlFlowStructurer::Structure(countdown_cfg, countdown_dom,
+                                                           countdown_pdom, countdown_loops);
+  ASSERT_THAT(countdown_region, NotNull());
+
+  AstConverterOptions countdown_opts;
+  countdown_opts.function_name = "CountdownForLoop";
+  FunctionDeclaration countdown_func =
+      *AstConverter::Convert(countdown_cfg, *countdown_region, nullptr, countdown_opts);
+  std::string countdown_code = countdown_func.ToString();
+  EXPECT_THAT(countdown_code, HasSubstr("for (temp_t0 = arg0; (temp_t0 > 0); temp_t0--)"));
+  EXPECT_THAT(countdown_code, Not(HasSubstr("temp_t0 = arg0;\n    for")));
+
+  // 2. Non-zero init and stride += 2 with <= bound:
+  // for (temp_t0 = 1; (temp_t0 <= arg0); temp_t0 += 2)
+  // 00: addiu $t0, $zero, 1      (temp_t0 = 1)
+  // 04: blez  $a0, +6 -> 0x20    (guard: arg0 > 0, equivalent to 1 <= arg0)
+  // 08: nop
+  // 0C: addu  $v0, $v0, $t0      (v0 = v0 + temp_t0)
+  // 10: addiu $t0, $t0, 2        (temp_t0 = temp_t0 + 2)
+  // 14: slt   $at, $a0, $t0      (at = arg0 < temp_t0)
+  // 18: beqz  $at, -4 -> 0x0C    (latch: temp_t0 <= arg0)
+  // 1C: nop
+  // 20: jr    $ra
+  // 24: nop
+  std::vector<uint32_t> stride_words = {
+      0x24080001,  // 00: addiu $t0, $zero, 1
+      0x18800006,  // 04: blez  $a0, +6 -> 0x20
+      0x00000000,  // 08: nop
+      0x00481021,  // 0C: addu  $v0, $v0, $t0
+      0x25080002,  // 10: addiu $t0, $t0, 2
+      0x0088082A,  // 14: slt   $at, $a0, $t0
+      0x1020FFFC,  // 18: beqz  $at, -4 -> 0x0C
+      0x00000000,  // 1C: nop
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+  auto stride_cfg = *ControlFlowGraph::Build(*DecodeSequence(stride_words, 0x80020000));
+  DominatorTree stride_dom = DominatorTree::Compute(stride_cfg);
+  DominatorTree stride_pdom = DominatorTree::ComputePostDominators(stride_cfg);
+  LoopInfo stride_loops = LoopInfo::Analyze(stride_cfg, stride_dom);
+  auto stride_region =
+      ControlFlowStructurer::Structure(stride_cfg, stride_dom, stride_pdom, stride_loops);
+  ASSERT_THAT(stride_region, NotNull());
+
+  AstConverterOptions stride_opts;
+  stride_opts.function_name = "StrideForLoop";
+  FunctionDeclaration stride_func =
+      *AstConverter::Convert(stride_cfg, *stride_region, nullptr, stride_opts);
+  std::string stride_code = stride_func.ToString();
+  EXPECT_THAT(stride_code, HasSubstr("for (temp_t0 = 1; (temp_t0 <= arg0); temp_t0 += 2)"));
+  EXPECT_THAT(stride_code, Not(HasSubstr("temp_t0 = 1;\n    for")));
+}
+
+TEST(AstConverterTest, DaddiuStackFrameAllocationMapsIncomingStackArgsCorrectly) {
+  // Function using 64-bit daddiu $sp, $sp, -16 prologue, storing a local at 8($sp) and reading
+  // 5th argument (arg4) at 32($sp):
+  std::vector<uint32_t> words = {
+      0x67BDFFF0,  // 00: daddiu $sp, $sp, -16
+      0xAFA40008,  // 04: sw     $a0, 8($sp)
+      0x8FA20020,  // 08: lw     $v0, 32($sp)
+      0x8FA30008,  // 0C: lw     $v1, 8($sp)
+      0x00431021,  // 10: addu   $v0, $v0, $v1
+      0x03E00008,  // 14: jr     $ra
+      0x67BD0010,  // 18: daddiu $sp, $sp, 16
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "DaddiuFrameFunc";
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code,
+              HasSubstr("s32 DaddiuFrameFunc(s32 arg0, s32 arg1, s32 arg2, s32 arg3, s32 arg4)"));
+  EXPECT_THAT(code, HasSubstr("arg4"));
+  EXPECT_THAT(code, Not(HasSubstr("arg8")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

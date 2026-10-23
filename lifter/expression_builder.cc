@@ -650,7 +650,8 @@ void BlockLiftRunner::Initialize(bool omit_last_instruction) {
 
   for (size_t k = 0; k < loop_end; ++k) {
     const auto& k_inst = instructions_to_process[k];
-    if ((k_inst.opcode == Opcode::kAddiu || k_inst.opcode == Opcode::kAddi) &&
+    if ((k_inst.opcode == Opcode::kAddiu || k_inst.opcode == Opcode::kAddi ||
+         k_inst.opcode == Opcode::kDaddiu || k_inst.opcode == Opcode::kDaddi) &&
         k_inst.rt == Register::kSp && k_inst.rs == Register::kSp && k_inst.immediate < 0) {
       sp_alloc_idx = k;
       break;

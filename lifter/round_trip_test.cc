@@ -5473,5 +5473,31 @@ void ConvertTwoUnsignedToFloatAndStore(u32 a, u32 b, f32* out) {
 )");
 }
 
+TEST_F(RoundTripTest, ForLoopInclusiveUpperBoundStrideTwo) {
+  AssertRoundTripBitExact("ForLoopInclusiveUpperBoundStrideTwo", R"(
+s32 ForLoopInclusiveUpperBoundStrideTwo(s32 limit) {
+    s32 sum = 0;
+    s32 i;
+    for (i = 1; i <= limit; i += 2) {
+        sum += (i ^ 3);
+    }
+    return sum;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ForLoopCountdownGreaterEqualOneStrideThree) {
+  AssertRoundTripBitExact("ForLoopCountdownGreaterEqualOneStrideThree", R"(
+s32 ForLoopCountdownGreaterEqualOneStrideThree(s32 start) {
+    s32 acc = 0;
+    s32 i;
+    for (i = start; i >= 1; i -= 3) {
+        acc += (i * 2);
+    }
+    return acc;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

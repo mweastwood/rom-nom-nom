@@ -493,5 +493,44 @@ TEST(AbiAnalyzerTest, DetectsDoubleInA2A3AndDoubleStackParametersAndCandidateGpr
   EXPECT_FALSE(float_gprs_f12d_f14d.contains(Register::kA3));
 }
 
+TEST(AbiAnalyzerTest, RecognizesDaddiuAndDaddiStackFrameAllocationAndAddressTaking) {
+  // 16-byte stack frame allocated with daddiu $sp, $sp, -16:
+  // 32($sp) is at frame_size(16) + 16 -> incoming stack parameter slot 4 (5 parameters total).
+  std::vector<uint32_t> words_daddiu = {
+      0x67BDFFF0,  // 00: daddiu $sp, $sp, -16
+      0x8FA20020,  // 04: lw     $v0, 32($sp)
+      0x00441021,  // 08: addu   $v0, $v0, $a0
+      0x03E00008,  // 0C: jr     $ra
+      0x67BD0010,  // 10: daddiu $sp, $sp, 16
+  };
+  auto insts_daddiu = *DecodeSequence(words_daddiu, 0x80000000);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts_daddiu), 5);
+
+  // Same with daddi $sp, $sp, -16:
+  std::vector<uint32_t> words_daddi = {
+      0x63BDFFF0,  // 00: daddi  $sp, $sp, -16
+      0x8FA20020,  // 04: lw     $v0, 32($sp)
+      0x00441021,  // 08: addu   $v0, $v0, $a0
+      0x03E00008,  // 0C: jr     $ra
+      0x63BD0010,  // 10: daddi  $sp, $sp, 16
+  };
+  auto insts_daddi = *DecodeSequence(words_daddi, 0x80000000);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts_daddi), 5);
+
+  // Address taken via daddiu $t0, $sp, 8 should prevent 8($sp) from being classified as a pure
+  // scalar float local:
+  std::vector<uint32_t> words_addr = {
+      0x67BDFFF0,  // 00: daddiu $sp, $sp, -16
+      0xE7A40008,  // 04: swc1   $f4, 8($sp)
+      0x67A80008,  // 08: daddiu $t0, $sp, 8
+      0xC7A00008,  // 0C: lwc1   $f0, 8($sp)
+      0x03E00008,  // 10: jr     $ra
+      0x67BD0010,  // 14: daddiu $sp, $sp, 16
+  };
+  auto cfg_addr = *ControlFlowGraph::Build(*DecodeSequence(words_addr, 0x80000000));
+  auto float_locals = AbiAnalyzer::DetectFloatLocalStackOffsets(cfg_addr);
+  EXPECT_FALSE(float_locals.contains(8));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

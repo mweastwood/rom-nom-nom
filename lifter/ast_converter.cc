@@ -39,6 +39,329 @@ std::unique_ptr<CExpression> RegExpr(Register reg) {
   return CExpression::Identifier(ExpressionBuilder::RegisterVarName(reg));
 }
 
+const CExpression& UnwrapScalarCast(const CExpression& expr) {
+  if (expr.Kind() == CExpressionKind::kCastExpression) {
+    const auto& cast = static_cast<const CastExpression&>(expr);
+    if (cast.TargetType().pointer_depth == 0 &&
+        (cast.TargetType().name == "s32" || cast.TargetType().name == "u32" ||
+         cast.TargetType().name == "s64" || cast.TargetType().name == "u64")) {
+      return cast.Operand();
+    }
+  }
+  return expr;
+}
+
+bool ExpressionsStructurallyEqual(const CExpression& a, const CExpression& b) {
+  if (a.Kind() != b.Kind()) {
+    return false;
+  }
+  switch (a.Kind()) {
+    case CExpressionKind::kIntegerLiteral: {
+      const auto& ia = static_cast<const IntegerLiteralExpression&>(a);
+      const auto& ib = static_cast<const IntegerLiteralExpression&>(b);
+      return ia.Value() == ib.Value();
+    }
+    case CExpressionKind::kFloatLiteral: {
+      const auto& fa = static_cast<const FloatLiteralExpression&>(a);
+      const auto& fb = static_cast<const FloatLiteralExpression&>(b);
+      return fa.Value() == fb.Value() && fa.IsFloat() == fb.IsFloat();
+    }
+    case CExpressionKind::kStringLiteral: {
+      const auto& sa = static_cast<const StringLiteralExpression&>(a);
+      const auto& sb = static_cast<const StringLiteralExpression&>(b);
+      return sa.Value() == sb.Value();
+    }
+    case CExpressionKind::kIdentifier: {
+      const auto& ida = static_cast<const IdentifierExpression&>(a);
+      const auto& idb = static_cast<const IdentifierExpression&>(b);
+      return ida.Name() == idb.Name();
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& ua = static_cast<const UnaryExpression&>(a);
+      const auto& ub = static_cast<const UnaryExpression&>(b);
+      return ua.Op() == ub.Op() && ua.IsPrefix() == ub.IsPrefix() &&
+             ExpressionsStructurallyEqual(ua.Operand(), ub.Operand());
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& ba = static_cast<const BinaryExpression&>(a);
+      const auto& bb = static_cast<const BinaryExpression&>(b);
+      return ba.Op() == bb.Op() && ExpressionsStructurallyEqual(ba.Lhs(), bb.Lhs()) &&
+             ExpressionsStructurallyEqual(ba.Rhs(), bb.Rhs());
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& aa = static_cast<const AssignmentExpression&>(a);
+      const auto& ab = static_cast<const AssignmentExpression&>(b);
+      return aa.Op() == ab.Op() && ExpressionsStructurallyEqual(aa.Lhs(), ab.Lhs()) &&
+             ExpressionsStructurallyEqual(aa.Rhs(), ab.Rhs());
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& ca = static_cast<const CallExpression&>(a);
+      const auto& cb = static_cast<const CallExpression&>(b);
+      if (!ExpressionsStructurallyEqual(ca.Callee(), cb.Callee()) ||
+          ca.Arguments().size() != cb.Arguments().size()) {
+        return false;
+      }
+      for (size_t i = 0; i < ca.Arguments().size(); ++i) {
+        if (!ExpressionsStructurallyEqual(*ca.Arguments()[i], *cb.Arguments()[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case CExpressionKind::kCastExpression: {
+      const auto& ca = static_cast<const CastExpression&>(a);
+      const auto& cb = static_cast<const CastExpression&>(b);
+      return ca.TargetType().name == cb.TargetType().name &&
+             ca.TargetType().is_const == cb.TargetType().is_const &&
+             ca.TargetType().pointer_depth == cb.TargetType().pointer_depth &&
+             ExpressionsStructurallyEqual(ca.Operand(), cb.Operand());
+    }
+    case CExpressionKind::kMemberAccessExpression: {
+      const auto& ma = static_cast<const MemberAccessExpression&>(a);
+      const auto& mb = static_cast<const MemberAccessExpression&>(b);
+      return ma.MemberName() == mb.MemberName() && ma.IsArrow() == mb.IsArrow() &&
+             ExpressionsStructurallyEqual(ma.Object(), mb.Object());
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& sa = static_cast<const ArrayIndexExpression&>(a);
+      const auto& sb = static_cast<const ArrayIndexExpression&>(b);
+      return ExpressionsStructurallyEqual(sa.Array(), sb.Array()) &&
+             ExpressionsStructurallyEqual(sa.Index(), sb.Index());
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& ca = static_cast<const TernaryExpression&>(a);
+      const auto& cb = static_cast<const TernaryExpression&>(b);
+      return ExpressionsStructurallyEqual(ca.Condition(), cb.Condition()) &&
+             ExpressionsStructurallyEqual(ca.TrueExpression(), cb.TrueExpression()) &&
+             ExpressionsStructurallyEqual(ca.FalseExpression(), cb.FalseExpression());
+    }
+  }
+  return false;
+}
+
+bool IsSupportedForLoopComparisonOp(std::string_view op) {
+  return op == "<" || op == "<=" || op == ">" || op == ">=" || op == "!=";
+}
+
+std::string_view ExtractForLoopConditionVar(const BinaryExpression& bin_cond) {
+  if (!IsSupportedForLoopComparisonOp(bin_cond.Op())) {
+    return {};
+  }
+  const CExpression& lhs = UnwrapScalarCast(bin_cond.Lhs());
+  if (lhs.Kind() != CExpressionKind::kIdentifier) {
+    return {};
+  }
+  std::string_view loop_var = static_cast<const IdentifierExpression&>(lhs).Name();
+  if (ExpressionUsesVariable(bin_cond.Rhs(), loop_var)) {
+    return {};
+  }
+  return loop_var;
+}
+
+struct ForLoopStepMatch {
+  std::unique_ptr<CExpression> step_expr;
+  int direction = 0;  // +1 for positive, -1 for negative, 0 for symbolic stride
+};
+
+std::optional<ForLoopStepMatch> TryBuildForLoopStep(const CStatement& stmt,
+                                                    std::string_view loop_var) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) {
+    return std::nullopt;
+  }
+  const CExpression& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+  if (expr.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& unary = static_cast<const UnaryExpression&>(expr);
+    if ((unary.Op() == "++" || unary.Op() == "--") &&
+        unary.Operand().Kind() == CExpressionKind::kIdentifier &&
+        static_cast<const IdentifierExpression&>(unary.Operand()).Name() == loop_var) {
+      return ForLoopStepMatch{expr.Clone(), unary.Op() == "++" ? 1 : -1};
+    }
+    return std::nullopt;
+  }
+  if (expr.Kind() != CExpressionKind::kAssignmentExpression) {
+    return std::nullopt;
+  }
+  const auto& assign = static_cast<const AssignmentExpression&>(expr);
+  if (assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+      static_cast<const IdentifierExpression&>(assign.Lhs()).Name() != loop_var) {
+    return std::nullopt;
+  }
+
+  auto make_const_step = [&](int64_t signed_delta) -> std::optional<ForLoopStepMatch> {
+    if (signed_delta == 0) {
+      return std::nullopt;
+    }
+    if (signed_delta == 1) {
+      return ForLoopStepMatch{
+          CExpression::Unary("++", CExpression::Identifier(std::string(loop_var)),
+                             /*is_prefix=*/false),
+          1};
+    }
+    if (signed_delta == -1) {
+      return ForLoopStepMatch{
+          CExpression::Unary("--", CExpression::Identifier(std::string(loop_var)),
+                             /*is_prefix=*/false),
+          -1};
+    }
+    if (signed_delta > 1) {
+      return ForLoopStepMatch{
+          CExpression::Assignment("+=", CExpression::Identifier(std::string(loop_var)),
+                                  CExpression::Integer(signed_delta)),
+          1};
+    }
+    return ForLoopStepMatch{
+        CExpression::Assignment("-=", CExpression::Identifier(std::string(loop_var)),
+                                CExpression::Integer(-signed_delta)),
+        -1};
+  };
+
+  if (assign.Op() == "+=" || assign.Op() == "-=") {
+    if (!IsPureExpression(assign.Rhs()) || ExpressionUsesVariable(assign.Rhs(), loop_var)) {
+      return std::nullopt;
+    }
+    if (assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+      int64_t val = static_cast<const IntegerLiteralExpression&>(assign.Rhs()).Value();
+      return make_const_step(assign.Op() == "+=" ? val : -val);
+    }
+    return ForLoopStepMatch{expr.Clone(), 0};
+  }
+
+  if (assign.Op() == "=" && assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& bin = static_cast<const BinaryExpression&>(assign.Rhs());
+    if (bin.Op() != "+" && bin.Op() != "-") {
+      return std::nullopt;
+    }
+    const CExpression* stride = nullptr;
+    if (bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+        static_cast<const IdentifierExpression&>(bin.Lhs()).Name() == loop_var) {
+      stride = &bin.Rhs();
+    } else if (bin.Op() == "+" && bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+               static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == loop_var) {
+      stride = &bin.Lhs();
+    }
+    if (stride == nullptr || !IsPureExpression(*stride) ||
+        ExpressionUsesVariable(*stride, loop_var)) {
+      return std::nullopt;
+    }
+    if (stride->Kind() == CExpressionKind::kIntegerLiteral) {
+      int64_t val = static_cast<const IntegerLiteralExpression&>(*stride).Value();
+      return make_const_step(bin.Op() == "+" ? val : -val);
+    }
+    return ForLoopStepMatch{
+        CExpression::Assignment(bin.Op() == "+" ? "+=" : "-=",
+                                CExpression::Identifier(std::string(loop_var)), stride->Clone()),
+        0};
+  }
+  return std::nullopt;
+}
+
+bool IsStepDirectionCompatibleWithCondition(std::string_view cond_op, int step_direction) {
+  if (cond_op == "<" || cond_op == "<=") {
+    return step_direction >= 0;
+  }
+  if (cond_op == ">" || cond_op == ">=") {
+    return step_direction <= 0;
+  }
+  return cond_op == "!=";
+}
+
+const CExpression* MatchSimpleInitializerAssignment(const CStatement& stmt,
+                                                    std::string_view loop_var) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) {
+    return nullptr;
+  }
+  const CExpression& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+  if (expr.Kind() != CExpressionKind::kAssignmentExpression) {
+    return nullptr;
+  }
+  const auto& assign = static_cast<const AssignmentExpression&>(expr);
+  if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+      static_cast<const IdentifierExpression&>(assign.Lhs()).Name() != loop_var) {
+    return nullptr;
+  }
+  if (!IsPureExpression(assign.Rhs()) || ExpressionUsesVariable(assign.Rhs(), loop_var)) {
+    return nullptr;
+  }
+  return &assign.Rhs();
+}
+
+bool IsRedundantLatchComparisonAssignment(const CStatement& stmt, const CExpression& loop_cond) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) {
+    return false;
+  }
+  const CExpression& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+  if (expr.Kind() != CExpressionKind::kAssignmentExpression) {
+    return false;
+  }
+  const auto& assign = static_cast<const AssignmentExpression&>(expr);
+  if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier) {
+    return false;
+  }
+  std::string_view lhs_name = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+  if (lhs_name != "v0" && lhs_name != "v1" && lhs_name != "at") {
+    return false;
+  }
+  return ExpressionsStructurallyEqual(UnwrapScalarCast(assign.Rhs()), UnwrapScalarCast(loop_cond));
+}
+
+bool IsCompatibleForLoopEntryGuard(const CExpression& guard_cond, const BinaryExpression& loop_cond,
+                                   std::string_view loop_var, const CExpression& init_rhs) {
+  if (ExpressionsStructurallyEqual(guard_cond, loop_cond)) {
+    return true;
+  }
+  auto substituted = SubstituteIdentifier(loop_cond, loop_var, init_rhs);
+  if (ExpressionsStructurallyEqual(guard_cond, *substituted)) {
+    return true;
+  }
+  if (guard_cond.Kind() != CExpressionKind::kBinaryExpression ||
+      substituted->Kind() != CExpressionKind::kBinaryExpression) {
+    return false;
+  }
+  const auto& g_bin = static_cast<const BinaryExpression&>(guard_cond);
+  const auto& s_bin = static_cast<const BinaryExpression&>(*substituted);
+  const CExpression& g_lhs = UnwrapScalarCast(g_bin.Lhs());
+  const CExpression& g_rhs = UnwrapScalarCast(g_bin.Rhs());
+  const CExpression& s_lhs = UnwrapScalarCast(s_bin.Lhs());
+  const CExpression& s_rhs = UnwrapScalarCast(s_bin.Rhs());
+
+  if (g_bin.Op() == s_bin.Op() && ExpressionsStructurallyEqual(g_lhs, s_lhs) &&
+      ExpressionsStructurallyEqual(g_rhs, s_rhs)) {
+    return true;
+  }
+  auto comm_op = CommutedBinaryOperator(s_bin.Op());
+  if (comm_op.has_value() && g_bin.Op() == *comm_op && ExpressionsStructurallyEqual(g_lhs, s_rhs) &&
+      ExpressionsStructurallyEqual(g_rhs, s_lhs)) {
+    return true;
+  }
+
+  if (ExpressionsStructurallyEqual(g_lhs, s_lhs) &&
+      g_rhs.Kind() == CExpressionKind::kIntegerLiteral &&
+      s_rhs.Kind() == CExpressionKind::kIntegerLiteral) {
+    int64_t g_val = static_cast<const IntegerLiteralExpression&>(g_rhs).Value();
+    int64_t s_val = static_cast<const IntegerLiteralExpression&>(s_rhs).Value();
+    if ((s_bin.Op() == "<=" && g_bin.Op() == "<" && g_val == s_val + 1) ||
+        (s_bin.Op() == "<" && g_bin.Op() == "<=" && g_val == s_val - 1) ||
+        (s_bin.Op() == ">=" && g_bin.Op() == ">" && g_val == s_val - 1) ||
+        (s_bin.Op() == ">" && g_bin.Op() == ">=" && g_val == s_val + 1)) {
+      return true;
+    }
+  }
+
+  if (ExpressionsStructurallyEqual(g_lhs, s_rhs) &&
+      g_rhs.Kind() == CExpressionKind::kIntegerLiteral &&
+      s_lhs.Kind() == CExpressionKind::kIntegerLiteral) {
+    int64_t g_val = static_cast<const IntegerLiteralExpression&>(g_rhs).Value();
+    int64_t s_val = static_cast<const IntegerLiteralExpression&>(s_lhs).Value();
+    if ((s_bin.Op() == "<=" && g_bin.Op() == ">" && g_val == s_val - 1) ||
+        (s_bin.Op() == "<" && g_bin.Op() == ">=" && g_val == s_val + 1) ||
+        (s_bin.Op() == ">=" && g_bin.Op() == "<" && g_val == s_val + 1) ||
+        (s_bin.Op() == ">" && g_bin.Op() == "<=" && g_val == s_val - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 std::unique_ptr<CExpression> AstConverter::ConvertExpression(
@@ -552,62 +875,125 @@ class ConverterContext {
               static_cast<const DoWhileStatement*>(then_body->Statements()[0].get());
           const auto& loop_cond = do_while->Condition();
           if (loop_cond.Kind() == CExpressionKind::kBinaryExpression) {
-            const auto& bin_cond = static_cast<const BinaryExpression&>(loop_cond);
-            if (bin_cond.Op() == "<" && bin_cond.Lhs().Kind() == CExpressionKind::kIdentifier) {
-              std::string loop_var =
-                  static_cast<const IdentifierExpression&>(bin_cond.Lhs()).Name();
-              const auto& loop_body_stmt = do_while->Body();
-              if (loop_body_stmt.Kind() == CStatementKind::kCompoundStatement) {
-                const auto& loop_compound = static_cast<const CompoundStatement&>(loop_body_stmt);
+            const auto& orig_bin_cond = static_cast<const BinaryExpression&>(loop_cond);
+            const auto& loop_body_stmt = do_while->Body();
+            if (loop_body_stmt.Kind() == CStatementKind::kCompoundStatement) {
+              const auto& loop_compound = static_cast<const CompoundStatement&>(loop_body_stmt);
+              std::vector<std::unique_ptr<BinaryExpression>> cond_candidates;
+              cond_candidates.push_back(std::make_unique<BinaryExpression>(
+                  orig_bin_cond.Op(), orig_bin_cond.Lhs().Clone(), orig_bin_cond.Rhs().Clone()));
+              if (auto comm_op = CommutedBinaryOperator(orig_bin_cond.Op()); comm_op.has_value()) {
+                cond_candidates.push_back(std::make_unique<BinaryExpression>(
+                    *comm_op, orig_bin_cond.Rhs().Clone(), orig_bin_cond.Lhs().Clone()));
+              }
+
+              for (const auto& candidate_cond : cond_candidates) {
+                if (emitted_for) break;
+                const BinaryExpression& bin_cond = *candidate_cond;
+                std::string_view loop_var_view = ExtractForLoopConditionVar(bin_cond);
+                if (loop_var_view.empty()) continue;
+                std::string loop_var(loop_var_view);
+
                 int inc_idx = -1;
+                std::optional<ForLoopStepMatch> step_match;
                 for (int i = static_cast<int>(loop_compound.Statements().size()) - 1; i >= 0; --i) {
-                  std::string stmt_str = loop_compound.Statements()[i]->ToString();
-                  if (absl::StrContains(stmt_str, loop_var) &&
-                      (absl::StrContains(stmt_str, "+ 1") || absl::StrContains(stmt_str, "+= 1") ||
-                       absl::StrContains(stmt_str, "++"))) {
+                  auto candidate = TryBuildForLoopStep(*loop_compound.Statements()[i], loop_var);
+                  if (candidate.has_value() &&
+                      IsStepDirectionCompatibleWithCondition(bin_cond.Op(), candidate->direction)) {
                     inc_idx = i;
+                    step_match = std::move(candidate);
                     break;
                   }
                 }
-                int init_zero_idx = -1;
+
+                bool step_placement_valid = (inc_idx >= 0);
+                for (size_t i = 0; step_placement_valid && i < loop_compound.Statements().size();
+                     ++i) {
+                  if (static_cast<int>(i) == inc_idx) continue;
+                  const CStatement& s = *loop_compound.Statements()[i];
+                  if (IsRedundantLatchComparisonAssignment(s, loop_cond) ||
+                      IsRedundantLatchComparisonAssignment(s, bin_cond)) {
+                    continue;
+                  }
+                  if (StatementModifiesVariable(s, loop_var)) {
+                    step_placement_valid = false;
+                    break;
+                  }
+                  if (static_cast<int>(i) > inc_idx &&
+                      (StatementReferencesVariable(s, loop_var) || StatementContainsCall(s))) {
+                    step_placement_valid = false;
+                    break;
+                  }
+                }
+
+                int init_idx = -1;
+                const CExpression* init_rhs = nullptr;
                 for (int si = static_cast<int>(target_block->Statements().size()) - 1; si >= 0;
                      --si) {
-                  std::string s_str = target_block->Statements()[si]->ToString();
-                  if (absl::StartsWith(s_str, loop_var + " = 0;") ||
-                      absl::StrContains(s_str, loop_var + " = 0;")) {
-                    init_zero_idx = si;
+                  if (static_cast<size_t>(si + 4) < target_block->Statements().size()) {
+                    break;
+                  }
+                  const CExpression* rhs =
+                      MatchSimpleInitializerAssignment(*target_block->Statements()[si], loop_var);
+                  if (rhs != nullptr) {
+                    init_idx = si;
+                    init_rhs = rhs;
                     break;
                   }
                 }
-                bool has_init_zero =
-                    (init_zero_idx >= 0 &&
-                     static_cast<size_t>(init_zero_idx + 4) >= target_block->Statements().size());
 
-                if (inc_idx >= 0 && has_init_zero) {
-                  target_block->RemoveStatementIf([&](const CStatement& s) {
-                    std::string s_str = s.ToString();
-                    return absl::StartsWith(s_str, loop_var + " = 0;") ||
-                           absl::StrContains(s_str, loop_var + " = 0;");
-                  });
+                bool init_placement_valid =
+                    (init_idx >= 0 && init_rhs != nullptr &&
+                     IsCompatibleForLoopEntryGuard(*cond, bin_cond, loop_var, *init_rhs));
+                if (init_placement_valid) {
+                  const bool is_callee_saved_loop_var =
+                      absl::StartsWith(loop_var, "temp_s") || loop_var == "temp_fp";
+                  std::vector<std::string> init_vars;
+                  absl::flat_hash_set<std::string> init_seen;
+                  CollectVariablesInExpression(*init_rhs, &init_vars, &init_seen);
+                  for (size_t k = static_cast<size_t>(init_idx + 1);
+                       k < target_block->Statements().size(); ++k) {
+                    const CStatement& after_s = *target_block->Statements()[k];
+                    if (IsRedundantLatchComparisonAssignment(after_s, *cond) ||
+                        IsRedundantLatchComparisonAssignment(after_s, loop_cond) ||
+                        IsRedundantLatchComparisonAssignment(after_s, bin_cond)) {
+                      continue;
+                    }
+                    if (is_callee_saved_loop_var ||
+                        StatementReferencesVariable(after_s, loop_var)) {
+                      init_placement_valid = false;
+                      break;
+                    }
+                    for (const auto& iv : init_vars) {
+                      if (StatementModifiesVariable(after_s, iv)) {
+                        init_placement_valid = false;
+                        break;
+                      }
+                    }
+                    if (!init_placement_valid) break;
+                  }
+                }
+
+                if (step_placement_valid && init_placement_valid) {
+                  auto init_rhs_clone = init_rhs->Clone();
+                  auto& target_stmts = target_block->MutableStatements();
+                  target_stmts.erase(target_stmts.begin() + init_idx);
+
                   auto for_body = std::make_unique<CompoundStatement>();
-                  std::string loop_cond_str = loop_cond.ToString();
                   for (size_t i = 0; i < loop_compound.Statements().size(); ++i) {
                     if (static_cast<int>(i) == inc_idx) continue;
-                    std::string stmt_str = loop_compound.Statements()[i]->ToString();
-                    if (absl::StrContains(stmt_str, loop_cond_str) &&
-                        (absl::StartsWith(stmt_str, "v0 = ") ||
-                         absl::StartsWith(stmt_str, "v1 = ") ||
-                         absl::StartsWith(stmt_str, "at = "))) {
+                    if (IsRedundantLatchComparisonAssignment(*loop_compound.Statements()[i],
+                                                             loop_cond) ||
+                        IsRedundantLatchComparisonAssignment(*loop_compound.Statements()[i],
+                                                             bin_cond)) {
                       continue;
                     }
                     for_body->AddStatement(loop_compound.Statements()[i]->Clone());
                   }
                   auto for_init = CStatement::Expression(CExpression::Assignment(
-                      "=", CExpression::Identifier(loop_var), CExpression::Integer(0)));
-                  auto for_step = CExpression::Unary("++", CExpression::Identifier(loop_var),
-                                                     /*is_prefix=*/false);
-                  target_block->AddStatement(CStatement::For(std::move(for_init), loop_cond.Clone(),
-                                                             std::move(for_step),
+                      "=", CExpression::Identifier(loop_var), std::move(init_rhs_clone)));
+                  target_block->AddStatement(CStatement::For(std::move(for_init), bin_cond.Clone(),
+                                                             std::move(step_match->step_expr),
                                                              std::move(for_body)));
                   emitted_for = true;
                 }
@@ -1528,7 +1914,8 @@ class ConverterContext {
     StepFprConstantBits(inst, state.tracker, state.fpr_const_bits.data());
     state.tracker.Step(inst);
     if (symbol_index_ != nullptr &&
-        (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi)) {
+        (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi)) {
       for (Register d : GetInstructionUseDef(inst).gpr_defs) {
         TrackedValue tv = state.tracker.GetRegisterValue(d);
         if (tv.kind == ValueKind::kSymbolAddress && !IsDirectMappedAddress(tv.constant_value)) {

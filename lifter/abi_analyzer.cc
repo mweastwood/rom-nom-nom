@@ -390,8 +390,10 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
 
   int frame_size = 0;
   for (const auto& inst : instructions) {
-    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) && inst.rt.has_value() &&
-        *inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
+    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+        inst.rt.has_value() && *inst.rt == Register::kSp && inst.rs == Register::kSp &&
+        inst.immediate < 0) {
       frame_size = std::max(frame_size, static_cast<int>(-inst.immediate));
     }
   }
@@ -1092,7 +1094,8 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
                    !defined_in_block.contains(*inst.rt)) {
           stats[off].prologue_gpr_spills++;
         } else if (inst.IsLoad() || inst.IsStore() ||
-                   ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) &&
+                   ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+                     inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
                     inst.rt != Register::kSp)) {
           stats[off].other_accesses++;
         }
@@ -1162,7 +1165,8 @@ absl::flat_hash_set<int> AbiAnalyzer::DetectDoubleStackParameterSlots(const Cont
           non_double_accesses[slot]++;
         }
       } else if (inst.IsLoad() || inst.IsStore() || inst.opcode == Opcode::kAddiu ||
-                 inst.opcode == Opcode::kAddi) {
+                 inst.opcode == Opcode::kAddi || inst.opcode == Opcode::kDaddiu ||
+                 inst.opcode == Opcode::kDaddi) {
         non_double_accesses[slot]++;
         if (inst.opcode == Opcode::kLd || inst.opcode == Opcode::kSd) {
           non_double_accesses[slot + 1]++;
@@ -1261,7 +1265,8 @@ absl::flat_hash_set<int> AbiAnalyzer::DetectFloatStackParameterSlots(const Contr
           non_fp_accesses[slot]++;
         }
       } else if (inst.IsLoad() || inst.IsStore() || inst.opcode == Opcode::kAddiu ||
-                 inst.opcode == Opcode::kAddi) {
+                 inst.opcode == Opcode::kAddi || inst.opcode == Opcode::kDaddiu ||
+                 inst.opcode == Opcode::kDaddi) {
         non_fp_accesses[slot]++;
         if (inst.opcode == Opcode::kLdc1 || inst.opcode == Opcode::kSdc1 ||
             inst.opcode == Opcode::kLd || inst.opcode == Opcode::kSd) {
