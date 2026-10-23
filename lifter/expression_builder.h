@@ -27,6 +27,7 @@ enum class ExpressionKind {
   kVariable,
   kGlobalRef,
   kUnaryOp,
+  kCast,
   kBinaryOp,
   kMemoryLoad,
   kFunctionCall,
@@ -72,6 +73,8 @@ struct LiftedExpression {
   static std::unique_ptr<LiftedExpression> GlobalRef(std::string name);
   static std::unique_ptr<LiftedExpression> Unary(std::string op,
                                                  std::unique_ptr<LiftedExpression> operand);
+  static std::unique_ptr<LiftedExpression> Cast(std::string type,
+                                                std::unique_ptr<LiftedExpression> operand);
   static std::unique_ptr<LiftedExpression> Binary(std::string op,
                                                   std::unique_ptr<LiftedExpression> lhs,
                                                   std::unique_ptr<LiftedExpression> rhs);

@@ -1316,8 +1316,8 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
     }
     if (arg0.Kind() == CExpressionKind::kUnaryExpression) {
       const auto& un = static_cast<const UnaryExpression&>(arg0);
-      if (un.Op() == "-" || un.Op() == "(f32)" || un.Op() == "(f64)" || un.Op() == "*(f32*)&" ||
-          un.Op() == "*(f32 *)&" || un.Op() == "*(f64*)&" || un.Op() == "*(f64 *)&") {
+      if (un.Op() == "-" || un.Op() == "*(f32*)&" || un.Op() == "*(f32 *)&" ||
+          un.Op() == "*(f64*)&" || un.Op() == "*(f64 *)&") {
         return true;
       }
       if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression) {
@@ -1355,8 +1355,7 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
           }
         } else if (op.Kind() == CExpressionKind::kUnaryExpression) {
           const auto& inner_u = static_cast<const UnaryExpression&>(op);
-          if (inner_u.Op() == "(f32)" || inner_u.Op() == "*(f32*)&" ||
-              inner_u.Op() == "*(f32 *)&") {
+          if (inner_u.Op() == "*(f32*)&" || inner_u.Op() == "*(f32 *)&") {
             return op.Clone();
           }
           if (inner_u.Op() == "*" && inner_u.Operand().Kind() == CExpressionKind::kCastExpression) {
@@ -1431,7 +1430,7 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp) {
       }
       if (e.Kind() == CExpressionKind::kUnaryExpression) {
         const auto& un = static_cast<const UnaryExpression&>(e);
-        if (un.Op() == "(f64)" || un.Op() == "*(f64*)&" || un.Op() == "*(f64 *)&") return "f64";
+        if (un.Op() == "*(f64*)&" || un.Op() == "*(f64 *)&") return "f64";
         if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression &&
             static_cast<const CastExpression&>(un.Operand()).TargetType().name == "f64") {
           return "f64";

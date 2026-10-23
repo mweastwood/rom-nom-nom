@@ -2035,7 +2035,6 @@ struct FolderContext {
                             }
                             if (e.Kind() == CExpressionKind::kUnaryExpression) {
                               const auto& un = static_cast<const UnaryExpression&>(e);
-                              if (un.Op() == "(u32)") return true;
                               return self(self, un.Operand());
                             }
                             if (e.Kind() == CExpressionKind::kBinaryExpression) {
@@ -2059,10 +2058,6 @@ struct FolderContext {
                             }
                             if (e.Kind() == CExpressionKind::kUnaryExpression) {
                               const auto& un = static_cast<const UnaryExpression&>(e);
-                              if ((un.Op() == "(f32)" || un.Op() == "(f64)") &&
-                                  CountExprUses(un.Operand(), var) > 0) {
-                                return true;
-                              }
                               return self(self, un.Operand());
                             }
                             if (e.Kind() == CExpressionKind::kBinaryExpression) {
@@ -2255,18 +2250,13 @@ struct FolderContext {
                           return false;
                         };
                         if (is_fp_scratch && var != "f0" && var != "f0_d" &&
-                            ((assign.Rhs().Kind() == CExpressionKind::kCastExpression &&
-                              static_cast<const CastExpression&>(assign.Rhs()).TargetType().name ==
-                                  "f64") ||
-                             (assign.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
-                              static_cast<const UnaryExpression&>(assign.Rhs()).Op() == "(f64)")) &&
-                            ((cand_assign.Rhs().Kind() == CExpressionKind::kCastExpression &&
-                              static_cast<const CastExpression&>(cand_assign.Rhs())
-                                      .TargetType()
-                                      .name == "f32") ||
-                             (cand_assign.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
-                              static_cast<const UnaryExpression&>(cand_assign.Rhs()).Op() ==
-                                  "(f32)"))) {
+                            assign.Rhs().Kind() == CExpressionKind::kCastExpression &&
+                            static_cast<const CastExpression&>(assign.Rhs()).TargetType().name ==
+                                "f64" &&
+                            cand_assign.Rhs().Kind() == CExpressionKind::kCastExpression &&
+                            static_cast<const CastExpression&>(cand_assign.Rhs())
+                                    .TargetType()
+                                    .name == "f32") {
                           break;
                         }
                         if (is_fp_scratch &&

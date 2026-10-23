@@ -60,19 +60,17 @@ std::unique_ptr<CExpression> AstConverter::ConvertExpression(
 
     case ExpressionKind::kUnaryOp:
       if (!expr.args.empty() && expr.args[0]) {
-        if (expr.op == "(u32)") {
-          return CExpression::Cast(CType::U32(),
-                                   ConvertExpression(*expr.args[0], current_function_name));
-        }
-        if (expr.op == "(s32)") {
-          return CExpression::Cast(CType::S32(),
-                                   ConvertExpression(*expr.args[0], current_function_name));
-        }
-        if (expr.op == "(u8*)" || expr.op == "(u8 *)") {
-          return CExpression::Cast(CType::Named("u8").MakePointer(),
-                                   ConvertExpression(*expr.args[0], current_function_name));
-        }
         return CExpression::Unary(expr.op, ConvertExpression(*expr.args[0], current_function_name));
+      }
+      return CExpression::Identifier(expr.name);
+
+    case ExpressionKind::kCast:
+      if (!expr.args.empty() && expr.args[0]) {
+        auto operand = ConvertExpression(*expr.args[0], current_function_name);
+        if (expr.name == "u8*" || expr.name == "u8 *") {
+          return CExpression::Cast(CType::Named("u8").MakePointer(), std::move(operand));
+        }
+        return CExpression::Cast(CType::Named(expr.name), std::move(operand));
       }
       return CExpression::Identifier(expr.name);
 

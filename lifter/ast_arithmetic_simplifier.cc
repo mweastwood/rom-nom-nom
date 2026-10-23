@@ -333,17 +333,6 @@ const CExpression* ExtractHighMultOperand(const CExpression& e, bool* is_unsigne
       }
     }
   }
-  if (e.Kind() == CExpressionKind::kUnaryExpression) {
-    const auto& u = static_cast<const UnaryExpression&>(e);
-    if (u.Op() == "(s64)") {
-      *is_unsigned_out = false;
-      return &u.Operand();
-    }
-    if (u.Op() == "(u64)(u32)") {
-      *is_unsigned_out = true;
-      return &u.Operand();
-    }
-  }
   return nullptr;
 }
 
@@ -393,17 +382,8 @@ bool ExtractReciprocalMagicConst(const CExpression& e,
                                  const absl::flat_hash_map<std::string, uint32_t>& const_map,
                                  uint32_t* magic_out, std::string* var_name_out = nullptr) {
   const CExpression* cur = &e;
-  while (cur->Kind() == CExpressionKind::kCastExpression ||
-         (cur->Kind() == CExpressionKind::kUnaryExpression &&
-          (static_cast<const UnaryExpression*>(cur)->Op() == "(u64)(u32)" ||
-           static_cast<const UnaryExpression*>(cur)->Op() == "(s64)" ||
-           static_cast<const UnaryExpression*>(cur)->Op() == "(u32)" ||
-           static_cast<const UnaryExpression*>(cur)->Op() == "(s32)"))) {
-    if (cur->Kind() == CExpressionKind::kCastExpression) {
-      cur = &static_cast<const CastExpression*>(cur)->Operand();
-    } else {
-      cur = &static_cast<const UnaryExpression*>(cur)->Operand();
-    }
+  while (cur->Kind() == CExpressionKind::kCastExpression) {
+    cur = &static_cast<const CastExpression*>(cur)->Operand();
   }
   if (cur->Kind() == CExpressionKind::kIntegerLiteral) {
     *magic_out = static_cast<uint32_t>(static_cast<const IntegerLiteralExpression*>(cur)->Value());
@@ -856,9 +836,6 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
               if (shift_lhs->Kind() == CExpressionKind::kCastExpression &&
                   static_cast<const CastExpression*>(shift_lhs)->TargetType().name == "u32") {
                 shift_lhs = &static_cast<const CastExpression*>(shift_lhs)->Operand();
-              } else if (shift_lhs->Kind() == CExpressionKind::kUnaryExpression &&
-                         static_cast<const UnaryExpression*>(shift_lhs)->Op() == "(u32)") {
-                shift_lhs = &static_cast<const UnaryExpression*>(shift_lhs)->Operand();
               }
               if (shift_lhs->Kind() == CExpressionKind::kIdentifier &&
                   static_cast<const IdentifierExpression*>(shift_lhs)->Name() == lhs_var) {
@@ -1384,9 +1361,6 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
                 if (is_u_div && dx->Kind() == CExpressionKind::kCastExpression &&
                     static_cast<const CastExpression*>(dx)->TargetType().name == "u32") {
                   dx = &static_cast<const CastExpression*>(dx)->Operand();
-                } else if (is_u_div && dx->Kind() == CExpressionKind::kUnaryExpression &&
-                           static_cast<const UnaryExpression*>(dx)->Op() == "(u32)") {
-                  dx = &static_cast<const UnaryExpression*>(dx)->Operand();
                 }
                 if (dx->ToString() == sub_bin.Lhs().ToString()) {
                   auto mod_expr =
@@ -1417,9 +1391,6 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
     if (is_u_div && x_expr->Kind() == CExpressionKind::kCastExpression &&
         static_cast<const CastExpression*>(x_expr)->TargetType().name == "u32") {
       x_expr = &static_cast<const CastExpression*>(x_expr)->Operand();
-    } else if (is_u_div && x_expr->Kind() == CExpressionKind::kUnaryExpression &&
-               static_cast<const UnaryExpression*>(x_expr)->Op() == "(u32)") {
-      x_expr = &static_cast<const UnaryExpression*>(x_expr)->Operand();
     }
     std::string x_str = x_expr->ToString();
 
@@ -1543,11 +1514,6 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
              ce.Operand().Kind() == CExpressionKind::kIdentifier &&
              static_cast<const IdentifierExpression&>(ce.Operand()).Name() == target_var;
     }
-    if (expr.Kind() == CExpressionKind::kUnaryExpression) {
-      const auto& ue = static_cast<const UnaryExpression&>(expr);
-      return ue.Op() == "(f32)" && ue.Operand().Kind() == CExpressionKind::kIdentifier &&
-             static_cast<const IdentifierExpression&>(ue.Operand()).Name() == target_var;
-    }
     return false;
   };
 
@@ -1612,13 +1578,6 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
           if (ce.TargetType().name == "f64" && ce.TargetType().pointer_depth == 0 &&
               ce.Operand().Kind() == CExpressionKind::kIdentifier &&
               static_cast<const IdentifierExpression&>(ce.Operand()).Name() == int_var) {
-            cvt_idx = k;
-            break;
-          }
-        } else if (crhs->Kind() == CExpressionKind::kUnaryExpression) {
-          const auto& ue = static_cast<const UnaryExpression&>(*crhs);
-          if (ue.Op() == "(f64)" && ue.Operand().Kind() == CExpressionKind::kIdentifier &&
-              static_cast<const IdentifierExpression&>(ue.Operand()).Name() == int_var) {
             cvt_idx = k;
             break;
           }

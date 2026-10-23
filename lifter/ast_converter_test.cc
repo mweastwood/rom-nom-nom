@@ -48,6 +48,30 @@ TEST(AstConverterTest, ExpressionConversion) {
   auto c_load = AstConverter::ConvertExpression(*load_expr);
   EXPECT_EQ(c_load->Kind(), CExpressionKind::kUnaryExpression);
   EXPECT_EQ(c_load->ToString(), "*(s32*)arg0");
+
+  // Value casts lower to ExpressionKind::kCast and CastExpression rather than UnaryExpression
+  for (const char* cast_op :
+       {"(u32)", "(s32)", "(u16)", "(s16)", "(u8)", "(s8)", "(f32)", "(f64)", "(s64)", "(u64)"}) {
+    auto cast_expr = LiftedExpression::Unary(cast_op, LiftedExpression::Variable("arg0"));
+    EXPECT_EQ(cast_expr->kind, ExpressionKind::kCast) << "for " << cast_op;
+    auto c_cast = AstConverter::ConvertExpression(*cast_expr);
+    EXPECT_EQ(c_cast->Kind(), CExpressionKind::kCastExpression) << "for " << cast_op;
+  }
+
+  auto u64_u32_expr = LiftedExpression::Unary("(u64)(u32)", LiftedExpression::Variable("arg0"));
+  auto c_u64_u32 = AstConverter::ConvertExpression(*u64_u32_expr);
+  ASSERT_EQ(c_u64_u32->Kind(), CExpressionKind::kCastExpression);
+  const auto& outer_cast = static_cast<const CastExpression&>(*c_u64_u32);
+  EXPECT_EQ(outer_cast.TargetType().ToString(), "u64");
+  ASSERT_EQ(outer_cast.Operand().Kind(), CExpressionKind::kCastExpression);
+  EXPECT_EQ(static_cast<const CastExpression&>(outer_cast.Operand()).TargetType().ToString(),
+            "u32");
+
+  auto cvt_s_w_expr = LiftedExpression::Unary("(f32)*(s32*)&", LiftedExpression::Variable("f0"));
+  auto c_cvt_s_w = AstConverter::ConvertExpression(*cvt_s_w_expr);
+  ASSERT_EQ(c_cvt_s_w->Kind(), CExpressionKind::kCastExpression);
+  EXPECT_EQ(static_cast<const CastExpression&>(*c_cvt_s_w).TargetType().ToString(), "f32");
+  EXPECT_EQ(c_cvt_s_w->ToString(), "(f32)*(s32*)&f0");
 }
 
 TEST(AstConverterTest, StatementConversion) {

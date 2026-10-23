@@ -47,8 +47,42 @@ std::unique_ptr<LiftedExpression> LiftedExpression::GlobalRef(std::string name) 
   return e;
 }
 
+std::unique_ptr<LiftedExpression> LiftedExpression::Cast(
+    std::string type, std::unique_ptr<LiftedExpression> operand) {
+  auto e = std::make_unique<LiftedExpression>();
+  e->kind = ExpressionKind::kCast;
+  e->name = std::move(type);
+  e->args.push_back(std::move(operand));
+  return e;
+}
+
 std::unique_ptr<LiftedExpression> LiftedExpression::Unary(
     std::string op, std::unique_ptr<LiftedExpression> operand) {
+  if (op == "(u32)" || op == "(s32)" || op == "(u16)" || op == "(s16)" || op == "(u8)" ||
+      op == "(s8)" || op == "(f32)" || op == "(f64)" || op == "(s64)" || op == "(u64)") {
+    return Cast(op.substr(1, op.size() - 2), std::move(operand));
+  }
+  if (op == "(u8*)" || op == "(u8 *)") {
+    return Cast("u8*", std::move(operand));
+  }
+  if (op == "(u64)(u32)") {
+    return Cast("u64", Cast("u32", std::move(operand)));
+  }
+  if (op == "(s32)&") {
+    return Cast("s32", Unary("&", std::move(operand)));
+  }
+  if (op == "(f32)*(s32*)&") {
+    return Cast("f32", Unary("*(s32*)&", std::move(operand)));
+  }
+  if (op == "(f64)*(s32*)&") {
+    return Cast("f64", Unary("*(s32*)&", std::move(operand)));
+  }
+  if (op == "(f32)*(s64*)&") {
+    return Cast("f32", Unary("*(s64*)&", std::move(operand)));
+  }
+  if (op == "(f64)*(s64*)&") {
+    return Cast("f64", Unary("*(s64*)&", std::move(operand)));
+  }
   auto e = std::make_unique<LiftedExpression>();
   e->kind = ExpressionKind::kUnaryOp;
   e->op = std::move(op);
@@ -101,6 +135,13 @@ std::string LiftedExpression::ToString() const {
         operand = "(" + operand + ")";
       }
       return op + operand;
+    }
+    case ExpressionKind::kCast: {
+      std::string operand = args.empty() ? "" : args[0]->ToString();
+      if (!args.empty() && args[0]->kind == ExpressionKind::kBinaryOp) {
+        operand = "(" + operand + ")";
+      }
+      return "(" + name + ")" + operand;
     }
     case ExpressionKind::kBinaryOp:
       if (args.size() >= 2) {
