@@ -190,7 +190,8 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
 
 StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
   StackFrameAnalysis analysis;
-  absl::flat_hash_map<int32_t, int> stack_access_sizes;
+  absl::flat_hash_map<int32_t, int> stack_store_sizes;
+  std::vector<std::pair<int32_t, int>> stack_loads;
   absl::flat_hash_set<int32_t> loaded_offsets;
   absl::flat_hash_set<int32_t> addr_taken_offsets;
 
@@ -232,11 +233,48 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           size = 1;
         }
         if (size > 0) {
-          auto [it, inserted] = stack_access_sizes.try_emplace(inst.immediate, size);
-          if (!inserted && it->second != size) {
-            analysis.sp_address_taken = true;
+          if (inst.IsStore()) {
+            auto [it, inserted] = stack_store_sizes.try_emplace(inst.immediate, size);
+            if (!inserted && it->second != size) {
+              analysis.sp_address_taken = true;
+            }
+          } else if (inst.IsLoad()) {
+            stack_loads.emplace_back(inst.immediate, size);
           }
         }
+      }
+    }
+  }
+
+  absl::flat_hash_map<int32_t, int> stack_load_sizes;
+  for (const auto& [offset, load_size] : stack_loads) {
+    auto store_it = stack_store_sizes.find(offset);
+    if (store_it != stack_store_sizes.end()) {
+      int store_size = store_it->second;
+      if (load_size > store_size) {
+        analysis.sp_address_taken = true;
+      } else if (load_size < store_size) {
+        for (int32_t sub = offset + 1; sub < offset + store_size; ++sub) {
+          if (stack_store_sizes.contains(sub)) {
+            analysis.sp_address_taken = true;
+            break;
+          }
+        }
+      }
+      continue;
+    }
+    int enclosing_store_size = 0;
+    if (auto it4 = stack_store_sizes.find(offset & ~3);
+        it4 != stack_store_sizes.end() && it4->second == 4) {
+      enclosing_store_size = 4;
+    } else if (auto it8 = stack_store_sizes.find(offset & ~7);
+               it8 != stack_store_sizes.end() && it8->second == 8) {
+      enclosing_store_size = 8;
+    }
+    if (enclosing_store_size == 0 || load_size > enclosing_store_size) {
+      auto [lit, inserted] = stack_load_sizes.try_emplace(offset, load_size);
+      if (!inserted && lit->second != load_size) {
+        analysis.sp_address_taken = true;
       }
     }
   }

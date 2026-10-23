@@ -4365,5 +4365,58 @@ TEST(AstConverterTest, DoubleParameterInA2A3AndStackSlotsAndCallerRewriting) {
   EXPECT_THAT(caller_code, HasSubstr("*(f64*)(arg1 + 8))"));
 }
 
+TEST(AstConverterTest, Declares64BitStackVariableAndExtractsSubwordsFromSdStore) {
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0xFFA40008,  // 04: sd    $a0, 8($sp)
+      0x8FA20008,  // 08: lw    $v0, 8($sp)    (high 32-bit word at base offset)
+      0x87A3000A,  // 0C: lh    $v1, 10($sp)   (halfword 1)
+      0x00431021,  // 10: addu  $v0, $v0, $v1
+      0x03E00008,  // 14: jr    $ra
+      0x27BD0018,  // 18: addiu $sp, $sp, 24
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "ExtractFromSdLocal";
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *region, nullptr, opts);
+  std::string code = func.ToString();
+  EXPECT_THAT(code, HasSubstr("s64 var_sp_8;"));
+  EXPECT_THAT(code, HasSubstr("var_sp_8 = arg0;"));
+  EXPECT_THAT(code, HasSubstr("(s32)((u64)var_sp_8 >> 32)"));
+  EXPECT_THAT(code, HasSubstr("(s16)((u64)var_sp_8 >> 32)"));
+}
+
+TEST(AstConverterTest, ExtractsHighAndLowSignedHalfwordsFrom32BitStackStore) {
+  // Leaf function homing a 4-byte struct { s16 hi; s16 lo; } passed in $a0 at 0($sp):
+  std::vector<uint32_t> words = {
+      0xAFA40000,  // 00: sw   $a0, 0($sp)
+      0x87A20000,  // 04: lh   $v0, 0($sp)
+      0x87A30002,  // 08: lh   $v1, 2($sp)
+      0x00431021,  // 0C: addu $v0, $v0, $v1
+      0x03E00008,  // 10: jr   $ra
+      0x00000000,  // 14: nop
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "SumPairS16";
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("(s16)((u32)var_sp_0 >> 16)"));
+  EXPECT_THAT(code, HasSubstr("(s16)var_sp_0"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -706,6 +706,19 @@ absl::Status PrependSynthesizedLocalDeclarations(
   for (int32_t off : AbiAnalyzer::DetectFloatLocalStackOffsets(cfg)) {
     float_local_var_names.insert(ExpressionBuilder::StackVarName(off));
   }
+  absl::flat_hash_set<std::string> s64_local_var_names;
+  for (const auto& block : cfg.Blocks()) {
+    for (const auto& inst : block.instructions) {
+      if ((inst.opcode == Opcode::kSd || inst.opcode == Opcode::kScd ||
+           inst.opcode == Opcode::kLd || inst.opcode == Opcode::kLld) &&
+          inst.rs.has_value() &&
+          (*inst.rs == Register::kSp ||
+           (frame_analysis.has_frame_pointer && *inst.rs == Register::kFp)) &&
+          !is_callee_saved_stack_access(inst)) {
+        s64_local_var_names.insert(ExpressionBuilder::StackVarName(inst.immediate));
+      }
+    }
+  }
 
   int callee_saved_fp_count = 0;
   for (const auto& [base_name, count] : fp_base_counts) {
@@ -870,7 +883,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
                                                              std::nullopt, std::move(reg_annot)));
     } else if (float_local_var_names.contains(var_name)) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::F32(), var_name));
-    } else if (absl::EndsWith(var_name, "_64")) {
+    } else if (absl::EndsWith(var_name, "_64") ||
+               (s64_local_var_names.contains(var_name) && !double_vars.contains(var_name))) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::Named("s64"), var_name));
     } else if (double_vars.contains(var_name)) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name));

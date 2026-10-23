@@ -2927,5 +2927,95 @@ TEST(ExpressionBuilderTest, RomSymbolAddressInArgAndScratchRegistersNotReplacedB
   EXPECT_EQ(stmts[4].ToString(), "DmaCopy(arg0, arg1, arg2);\n");
 }
 
+TEST(ExpressionBuilderTest, SubwordStackReadsFrom32BitWordStoreIncludeHighHalfSignCast) {
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFA40010,  // 04: sw    $a0, 16($sp)
+      0x87A20010,  // 08: lh    $v0, 16($sp)   (high halfword, signed)
+      0x97A30010,  // 0C: lhu   $v1, 16($sp)   (high halfword, unsigned)
+      0x87A80012,  // 10: lh    $t0, 18($sp)   (low halfword, signed)
+      0x97A90012,  // 14: lhu   $t1, 18($sp)   (low halfword, unsigned)
+      0x83AA0010,  // 18: lb    $t2, 16($sp)   (byte 0, signed)
+      0x93AB0011,  // 1C: lbu   $t3, 17($sp)   (byte 1, unsigned)
+      0x83AC0012,  // 20: lb    $t4, 18($sp)   (byte 2, signed)
+      0x93AD0013,  // 24: lbu   $t5, 19($sp)   (byte 3, unsigned)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts);
+  ASSERT_EQ(stmts.size(), 9u);
+  EXPECT_EQ(stmts[0].ToString(), "var_sp_16 = arg0;\n");
+  EXPECT_EQ(stmts[1].ToString(), "v0 = (s16)((u32)var_sp_16 >> 16);\n");
+  EXPECT_EQ(stmts[2].ToString(), "v1 = (u16)((u32)var_sp_16 >> 16);\n");
+  EXPECT_EQ(stmts[3].ToString(), "temp_t0 = (s16)var_sp_16;\n");
+  EXPECT_EQ(stmts[4].ToString(), "temp_t1 = (u16)var_sp_16;\n");
+  EXPECT_EQ(stmts[5].ToString(), "temp_t2 = (s8)((u32)var_sp_16 >> 24);\n");
+  EXPECT_EQ(stmts[6].ToString(), "temp_t3 = (u8)((u32)var_sp_16 >> 16);\n");
+  EXPECT_EQ(stmts[7].ToString(), "temp_t4 = (s8)((u32)var_sp_16 >> 8);\n");
+  EXPECT_EQ(stmts[8].ToString(), "temp_t5 = (u8)var_sp_16;\n");
+}
+
+TEST(ExpressionBuilderTest, WordAndSubwordStackReadsExtractedFrom64BitSdAndSdc1Stores) {
+  // 1. 64-bit integer store (sd $a0, 16($sp)):
+  std::vector<uint32_t> sd_words = {
+      0x27BDFFE0,  // 00: addiu   $sp, $sp, -32
+      0xFFA40010,  // 04: sd      $a0, 16($sp)
+      0x8FA20010,  // 08: lw      $v0, 16($sp)   (high 32-bit word)
+      0x9FA30014,  // 0C: lwu     $v1, 20($sp)   (low 32-bit word, unsigned)
+      0x87A80010,  // 10: lh      $t0, 16($sp)   (halfword 0)
+      0x97A90012,  // 14: lhu     $t1, 18($sp)   (halfword 1)
+      0x87AA0014,  // 18: lh      $t2, 20($sp)   (halfword 2)
+      0x97AB0016,  // 1C: lhu     $t3, 22($sp)   (halfword 3)
+      0x83AC0010,  // 20: lb      $t4, 16($sp)   (byte 0)
+      0x93AD0015,  // 24: lbu     $t5, 21($sp)   (byte 5)
+      0x83AE0017,  // 28: lb      $t6, 23($sp)   (byte 7)
+      0xC7A00010,  // 2C: lwc1    $f0, 16($sp)   (high float word)
+      0xC7A20014,  // 30: lwc1    $f2, 20($sp)   (low float word)
+      0xC7A40010,  // 34: lwc1    $f4, 16($sp)   (followed by cvt.s.w)
+      0x468021A0,  // 38: cvt.s.w $f6, $f4
+  };
+  auto sd_insts = *DecodeSequence(sd_words, 0x80000000);
+  auto sd_stmts = ExpressionBuilder::LiftInstructions(sd_insts);
+  ASSERT_EQ(sd_stmts.size(), 13u);
+  EXPECT_EQ(sd_stmts[0].ToString(), "var_sp_16 = arg0;\n");
+  EXPECT_EQ(sd_stmts[1].ToString(), "v0 = (s32)((u64)var_sp_16 >> 32);\n");
+  EXPECT_EQ(sd_stmts[2].ToString(), "v1 = (u32)var_sp_16;\n");
+  EXPECT_EQ(sd_stmts[3].ToString(), "temp_t0 = (s16)((u64)var_sp_16 >> 48);\n");
+  EXPECT_EQ(sd_stmts[4].ToString(), "temp_t1 = (u16)((u64)var_sp_16 >> 32);\n");
+  EXPECT_EQ(sd_stmts[5].ToString(), "temp_t2 = (s16)((u64)var_sp_16 >> 16);\n");
+  EXPECT_EQ(sd_stmts[6].ToString(), "temp_t3 = (u16)var_sp_16;\n");
+  EXPECT_EQ(sd_stmts[7].ToString(), "temp_t4 = (s8)((u64)var_sp_16 >> 56);\n");
+  EXPECT_EQ(sd_stmts[8].ToString(), "temp_t5 = (u8)((u64)var_sp_16 >> 16);\n");
+  EXPECT_EQ(sd_stmts[9].ToString(), "temp_t6 = (s8)var_sp_16;\n");
+  EXPECT_EQ(sd_stmts[10].ToString(), "f0 = *(f32*)&var_sp_16;\n");
+  EXPECT_EQ(sd_stmts[11].ToString(), "f2 = *(f32*)((u8*)&var_sp_16 + 4);\n");
+  EXPECT_EQ(sd_stmts[12].ToString(), "f6 = (f32)(s32)((u64)var_sp_16 >> 32);\n");
+
+  // 2. 64-bit floating-point store (sdc1 $f12, 16($sp)):
+  std::vector<uint32_t> sdc1_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xF7AC0010,  // 04: sdc1  $f12, 16($sp)
+      0x8FA20010,  // 08: lw    $v0, 16($sp)   (high 32-bit word)
+      0x8FA30014,  // 0C: lw    $v1, 20($sp)   (low 32-bit word)
+      0x87A80012,  // 10: lh    $t0, 18($sp)   (halfword 1)
+      0x97A90016,  // 14: lhu   $t1, 22($sp)   (halfword 3)
+      0x83AA0011,  // 18: lb    $t2, 17($sp)   (byte 1)
+      0x93AB0017,  // 1C: lbu   $t3, 23($sp)   (byte 7)
+      0xC7A00010,  // 20: lwc1  $f0, 16($sp)   (high float word)
+      0xC7A20014,  // 24: lwc1  $f2, 20($sp)   (low float word)
+  };
+  auto sdc1_insts = *DecodeSequence(sdc1_words, 0x80000000);
+  auto sdc1_stmts = ExpressionBuilder::LiftInstructions(sdc1_insts);
+  ASSERT_EQ(sdc1_stmts.size(), 9u);
+  EXPECT_EQ(sdc1_stmts[0].ToString(), "*(f64*)&var_sp_16 = f12_d;\n");
+  EXPECT_EQ(sdc1_stmts[1].ToString(), "v0 = (s32)(*(u64*)&var_sp_16 >> 32);\n");
+  EXPECT_EQ(sdc1_stmts[2].ToString(), "v1 = (s32)*(u64*)&var_sp_16;\n");
+  EXPECT_EQ(sdc1_stmts[3].ToString(), "temp_t0 = (s16)(*(u64*)&var_sp_16 >> 32);\n");
+  EXPECT_EQ(sdc1_stmts[4].ToString(), "temp_t1 = (u16)*(u64*)&var_sp_16;\n");
+  EXPECT_EQ(sdc1_stmts[5].ToString(), "temp_t2 = (s8)(*(u64*)&var_sp_16 >> 48);\n");
+  EXPECT_EQ(sdc1_stmts[6].ToString(), "temp_t3 = (u8)*(u64*)&var_sp_16;\n");
+  EXPECT_EQ(sdc1_stmts[7].ToString(), "f0 = *(f32*)&var_sp_16;\n");
+  EXPECT_EQ(sdc1_stmts[8].ToString(), "f2 = *(f32*)((u8*)&var_sp_16 + 4);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

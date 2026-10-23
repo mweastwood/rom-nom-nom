@@ -5430,5 +5430,14 @@ void CallerPassesDoubleInA2A3AndStackToHelper(s32 mode, f64* values) {
 )");
 }
 
+TEST_F(RoundTripTest, ExtractFloatWordsFromDoubleOnStack) {
+  AssertRoundTripBitExact("ExtractFloatWordsFromDoubleOnStack", R"(
+f32 ExtractFloatWordsFromDoubleOnStack(f64 x) {
+    f64 local_d = x * 2.0;
+    return *(f32*)&local_d + *(f32*)((u8*)&local_d + 4);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

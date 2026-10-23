@@ -309,5 +309,38 @@ TEST(StackFrameAnalyzerTest, FormatsStackVarNameAndComputesDaddiuFrameSize) {
   EXPECT_EQ(StackFrameAnalyzer::ComputeFrameSize(cfg), 32u);
 }
 
+TEST(StackFrameAnalyzerTest, SubwordReadsFromWordAndDwordStoresDoNotSetSpAddressTaken) {
+  // 1) 64-bit store at 8($sp) and 32-bit store at 16($sp) with narrower loads at base and
+  // sub-offsets:
+  std::vector<uint32_t> extract_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xFFA40008,  // 04: sd    $a0, 8($sp)
+      0x8FA20008,  // 08: lw    $v0, 8($sp)
+      0x8FA3000C,  // 0C: lw    $v1, 12($sp)
+      0xAFA50010,  // 10: sw    $a1, 16($sp)
+      0x87A80010,  // 14: lh    $t0, 16($sp)
+      0x87A90012,  // 18: lh    $t1, 18($sp)
+      0x03E00008,  // 1C: jr    $ra
+      0x27BD0020,  // 20: addiu $sp, $sp, 32
+  };
+  auto extract_cfg = *ControlFlowGraph::Build(*DecodeSequence(extract_words, 0x80000000));
+  StackFrameAnalysis extract_analysis = StackFrameAnalyzer::Analyze(extract_cfg);
+  EXPECT_FALSE(extract_analysis.sp_address_taken);
+
+  // 2) Narrower store (sh at 16($sp)) followed by wider load (lw at 16($sp)) MUST set
+  // sp_address_taken:
+  std::vector<uint32_t> wider_load_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xA7A40010,  // 04: sh    $a0, 16($sp)
+      0xA7A50012,  // 08: sh    $a1, 18($sp)
+      0x8FA20010,  // 0C: lw    $v0, 16($sp)
+      0x03E00008,  // 10: jr    $ra
+      0x27BD0020,  // 14: addiu $sp, $sp, 32
+  };
+  auto wider_load_cfg = *ControlFlowGraph::Build(*DecodeSequence(wider_load_words, 0x80000000));
+  StackFrameAnalysis wider_load_analysis = StackFrameAnalyzer::Analyze(wider_load_cfg);
+  EXPECT_TRUE(wider_load_analysis.sp_address_taken);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

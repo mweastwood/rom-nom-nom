@@ -210,8 +210,31 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
                 pending_int_to_fp[ft_idx] =
                     LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx));
               } else {
-                pending_int_to_fp[ft_idx] =
-                    LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
+                int32_t base_dword_offset = offset & ~7;
+                int32_t byte_in_dword = offset & 7;
+                if (!state.local_stack_word_stores.contains(offset) &&
+                    state.local_stack_dword_stores.contains(base_dword_offset)) {
+                  auto base_var = LiftedExpression::Variable(
+                      ExpressionBuilder::StackVarName(base_dword_offset));
+                  auto base_u64 = state.local_stack_fp_dword_stores.contains(base_dword_offset)
+                                      ? LiftedExpression::Load("u64", LiftedExpression::Unary(
+                                                                          "&", std::move(base_var)))
+                                      : LiftedExpression::Unary("(u64)", base_var->Clone());
+                  if (byte_in_dword == 4) {
+                    pending_int_to_fp[ft_idx] = LiftedExpression::Unary(
+                        "(s32)", state.local_stack_fp_dword_stores.contains(base_dword_offset)
+                                     ? std::move(base_u64)
+                                     : std::move(base_var));
+                  } else {
+                    pending_int_to_fp[ft_idx] = LiftedExpression::Unary(
+                        "(s32)", LiftedExpression::Binary(
+                                     ">>", std::move(base_u64),
+                                     LiftedExpression::Integer((4 - byte_in_dword) * 8)));
+                  }
+                } else {
+                  pending_int_to_fp[ft_idx] =
+                      LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
+                }
               }
             }
           } else {
@@ -260,8 +283,23 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
                     LiftedExpression::Unary("*(f32*)&", LiftedExpression::Variable(arg_name));
               }
             } else {
-              if (ctx.float_local_stack_offsets != nullptr &&
-                  ctx.float_local_stack_offsets->contains(offset)) {
+              int32_t base_dword_offset = offset & ~7;
+              int32_t byte_in_dword = offset & 7;
+              if (!state.local_stack_word_stores.contains(offset) &&
+                  state.local_stack_dword_stores.contains(base_dword_offset)) {
+                auto base_addr = LiftedExpression::Unary(
+                    "&",
+                    LiftedExpression::Variable(ExpressionBuilder::StackVarName(base_dword_offset)));
+                if (byte_in_dword == 0) {
+                  statement.expression = LiftedExpression::Load("f32", std::move(base_addr));
+                } else {
+                  statement.expression = LiftedExpression::Load(
+                      "f32", LiftedExpression::Binary(
+                                 "+", LiftedExpression::Unary("(u8*)", std::move(base_addr)),
+                                 LiftedExpression::Integer(byte_in_dword)));
+                }
+              } else if (ctx.float_local_stack_offsets != nullptr &&
+                         ctx.float_local_stack_offsets->contains(offset)) {
                 statement.expression =
                     LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
               } else {

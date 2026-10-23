@@ -311,6 +311,11 @@ struct BlockLiftRunner {
   std::unique_ptr<PendingUnalignedAccess> pending_lwl;
   std::unique_ptr<PendingUnalignedAccess> pending_swl;
   absl::flat_hash_set<int32_t> local_stack_stores;
+  absl::flat_hash_set<int32_t> local_stack_dword_stores;
+  absl::flat_hash_set<int32_t> local_stack_fp_dword_stores;
+  absl::flat_hash_set<int32_t> local_stack_word_stores;
+  absl::flat_hash_set<int32_t> local_stack_half_stores;
+  absl::flat_hash_set<int32_t> local_stack_byte_stores;
   std::optional<FoldedComparison> folded_comp;
   absl::flat_hash_set<size_t> skipped_instruction_indices;
   absl::flat_hash_set<Register> gprs_defined_in_block;
@@ -478,6 +483,9 @@ struct BlockLiftRunner {
         .tracker = tracker,
         .skipped_instruction_indices = skipped_instruction_indices,
         .gprs_defined_in_block = gprs_defined_in_block,
+        .local_stack_word_stores = local_stack_word_stores,
+        .local_stack_dword_stores = local_stack_dword_stores,
+        .local_stack_fp_dword_stores = local_stack_fp_dword_stores,
         .fpr_const_bits = fpr_const_bits,
         .pending_int_to_fp = pending_int_to_fp,
         .pending_fp_to_int = pending_fp_to_int,
@@ -562,13 +570,73 @@ void BlockLiftRunner::Initialize(bool omit_last_instruction) {
     tracker.PrepareForBlock();
   }
 
+  auto record_stack_store = [&](const Instruction& inst) {
+    if (!inst.IsStore() || !inst.rs.has_value()) {
+      return;
+    }
+    if (*inst.rs != Register::kSp && (!has_frame_pointer || *inst.rs != Register::kFp)) {
+      return;
+    }
+    local_stack_stores.insert(inst.immediate);
+    if (inst.rt.has_value()) {
+      if (*inst.rt == Register::kRa || (has_frame_pointer && *inst.rt == Register::kFp)) {
+        return;
+      }
+      if (ctx.saved_reg_offsets != nullptr) {
+        auto it = ctx.saved_reg_offsets->find(*inst.rt);
+        if (it != ctx.saved_reg_offsets->end() && it->second == inst.immediate) {
+          return;
+        }
+      }
+    }
+    if (inst.ft.has_value() && ctx.saved_fpr_offsets != nullptr) {
+      auto it = ctx.saved_fpr_offsets->find(*inst.ft);
+      if (it != ctx.saved_fpr_offsets->end() && it->second == inst.immediate) {
+        return;
+      }
+    }
+    switch (inst.opcode) {
+      case Opcode::kSd:
+      case Opcode::kScd:
+      case Opcode::kSdl:
+        local_stack_dword_stores.insert(inst.immediate);
+        break;
+      case Opcode::kSdc1:
+        local_stack_dword_stores.insert(inst.immediate);
+        local_stack_fp_dword_stores.insert(inst.immediate);
+        break;
+      case Opcode::kSw:
+      case Opcode::kSwl:
+      case Opcode::kSwc1:
+        local_stack_word_stores.insert(inst.immediate);
+        break;
+      case Opcode::kSh:
+        local_stack_half_stores.insert(inst.immediate);
+        break;
+      case Opcode::kSb:
+        local_stack_byte_stores.insert(inst.immediate);
+        break;
+      default:
+        break;
+    }
+  };
+
+  for (const auto& inst : instructions_to_process) {
+    record_stack_store(inst);
+  }
+  if (ctx.cfg != nullptr) {
+    for (const auto& block : ctx.cfg->Blocks()) {
+      for (const auto& inst : block.instructions) {
+        record_stack_store(inst);
+      }
+    }
+  }
   if (ctx.function_stack_stores != nullptr) {
-    local_stack_stores = *ctx.function_stack_stores;
-  } else {
-    for (const auto& inst : instructions_to_process) {
-      if (inst.IsStore() && inst.rs.has_value() &&
-          (*inst.rs == Register::kSp || (has_frame_pointer && *inst.rs == Register::kFp))) {
-        local_stack_stores.insert(inst.immediate);
+    for (int32_t off : *ctx.function_stack_stores) {
+      local_stack_stores.insert(off);
+      if (!local_stack_dword_stores.contains(off) && !local_stack_half_stores.contains(off) &&
+          !local_stack_byte_stores.contains(off)) {
+        local_stack_word_stores.insert(off);
       }
     }
   }
@@ -1656,10 +1724,65 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
             } else {
               int32_t base_word_offset = offset & ~3;
               int32_t byte_in_word = offset & 3;
-              bool is_subword_from_word =
-                  (byte_in_word != 0 && !local_stack_stores.contains(offset) &&
-                   local_stack_stores.contains(base_word_offset));
-              if (!is_subword_from_word) {
+              int32_t base_dword_offset = offset & ~7;
+              int32_t byte_in_dword = offset & 7;
+              bool is_subword_load = (inst.opcode == Opcode::kLh || inst.opcode == Opcode::kLhu ||
+                                      inst.opcode == Opcode::kLb || inst.opcode == Opcode::kLbu);
+              bool is_word_load = (inst.opcode == Opcode::kLw || inst.opcode == Opcode::kLwu);
+              bool has_direct_subword_store = local_stack_half_stores.contains(offset) ||
+                                              local_stack_byte_stores.contains(offset);
+              bool is_subword_from_word = is_subword_load && !has_direct_subword_store &&
+                                          local_stack_word_stores.contains(base_word_offset);
+              bool is_from_dword =
+                  ((is_word_load && !local_stack_word_stores.contains(offset)) ||
+                   (is_subword_load && !has_direct_subword_store && !is_subword_from_word)) &&
+                  local_stack_dword_stores.contains(base_dword_offset);
+              if (is_from_dword) {
+                auto base_var =
+                    LiftedExpression::Variable(ExpressionBuilder::StackVarName(base_dword_offset));
+                bool is_fp_dword = local_stack_fp_dword_stores.contains(base_dword_offset);
+                auto make_base_u64 = [&]() {
+                  return is_fp_dword ? LiftedExpression::Load(
+                                           "u64", LiftedExpression::Unary("&", base_var->Clone()))
+                                     : LiftedExpression::Unary("(u64)", base_var->Clone());
+                };
+                auto make_base_unshifted = [&]() {
+                  return is_fp_dword ? make_base_u64() : std::move(base_var);
+                };
+                if (inst.opcode == Opcode::kLwu || inst.opcode == Opcode::kLw) {
+                  const char* cast_op = (inst.opcode == Opcode::kLwu) ? "(u32)" : "(s32)";
+                  if (byte_in_dword == 4) {
+                    statement.expression = LiftedExpression::Unary(cast_op, make_base_unshifted());
+                  } else {
+                    statement.expression = LiftedExpression::Unary(
+                        cast_op, LiftedExpression::Binary(
+                                     ">>", make_base_u64(),
+                                     LiftedExpression::Integer((4 - byte_in_dword) * 8)));
+                  }
+                } else if (inst.opcode == Opcode::kLhu || inst.opcode == Opcode::kLh) {
+                  const char* cast_op = (inst.opcode == Opcode::kLhu) ? "(u16)" : "(s16)";
+                  if (byte_in_dword == 6) {
+                    statement.expression = LiftedExpression::Unary(cast_op, make_base_unshifted());
+                  } else {
+                    statement.expression = LiftedExpression::Unary(
+                        cast_op, LiftedExpression::Binary(
+                                     ">>", make_base_u64(),
+                                     LiftedExpression::Integer((6 - byte_in_dword) * 8)));
+                  }
+                } else if (inst.opcode == Opcode::kLbu || inst.opcode == Opcode::kLb) {
+                  const char* cast_op = (inst.opcode == Opcode::kLbu) ? "(u8)" : "(s8)";
+                  if (byte_in_dword == 7) {
+                    statement.expression = LiftedExpression::Unary(cast_op, make_base_unshifted());
+                  } else {
+                    statement.expression = LiftedExpression::Unary(
+                        cast_op, LiftedExpression::Binary(
+                                     ">>", make_base_u64(),
+                                     LiftedExpression::Integer((7 - byte_in_dword) * 8)));
+                  }
+                } else {
+                  statement.expression = std::move(base_var);
+                }
+              } else if (!is_subword_from_word) {
                 auto var_expr = LiftedExpression::Variable(ExpressionBuilder::StackVarName(offset));
                 if (inst.opcode == Opcode::kLhu) {
                   statement.expression = LiftedExpression::Unary("(u16)", std::move(var_expr));
@@ -1688,9 +1811,10 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
                   if (byte_in_word == 2) {
                     statement.expression = LiftedExpression::Unary("(s16)", std::move(base_var));
                   } else {
-                    statement.expression =
-                        LiftedExpression::Binary(">>", std::move(base_var),
-                                                 LiftedExpression::Integer((2 - byte_in_word) * 8));
+                    statement.expression = LiftedExpression::Unary(
+                        "(s16)", LiftedExpression::Binary(
+                                     ">>", LiftedExpression::Unary("(u32)", std::move(base_var)),
+                                     LiftedExpression::Integer((2 - byte_in_word) * 8)));
                   }
                 } else if (inst.opcode == Opcode::kLbu) {
                   if (byte_in_word == 3) {

@@ -28,6 +28,9 @@ struct Cop1LiftState {
   RegisterTracker& tracker;
   absl::flat_hash_set<size_t>& skipped_instruction_indices;
   const absl::flat_hash_set<Register>& gprs_defined_in_block;
+  const absl::flat_hash_set<int32_t>& local_stack_word_stores;
+  const absl::flat_hash_set<int32_t>& local_stack_dword_stores;
+  const absl::flat_hash_set<int32_t>& local_stack_fp_dword_stores;
   std::optional<uint32_t>* fpr_const_bits = nullptr;
   std::unique_ptr<LiftedExpression>* pending_int_to_fp = nullptr;
   std::unique_ptr<LiftedExpression>* pending_fp_to_int = nullptr;
