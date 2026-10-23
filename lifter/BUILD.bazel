@@ -145,6 +145,7 @@ cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -165,6 +166,7 @@ cc_library(
     srcs = ["abi_analyzer.cc"],
     hdrs = ["abi_analyzer.h"],
     deps = [
+        ":stack_frame_analyzer",
         "//core:control_flow_graph",
         "//core:mips",
         "//core:register_tracker",
@@ -232,6 +234,7 @@ cc_library(
         ":abi_analyzer",
         ":branch_condition_builder",
         ":instruction_patterns",
+        ":stack_frame_analyzer",
         ":symbol_folder",
         "//core:control_flow_graph",
         "//core:division_pattern",

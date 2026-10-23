@@ -52,75 +52,18 @@ CallReturnUsage DetermineCallReturnUsage(
     }
   }
 
-  bool v0_active = !usage.v0_used_after_call;
-  bool v1_active = !usage.v1_used_after_call;
-  bool f0_active = !usage.f0_used_after_call;
-  for (size_t next_i = i + 1; next_i < instructions_to_process.size(); ++next_i) {
-    const auto& next_inst = instructions_to_process[next_i];
-    if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr) {
-      break;
-    }
-    RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
-    if (v0_active) {
-      for (Register r : next_ud.gpr_uses) {
-        if (r == Register::kV0) {
-          usage.v0_used_after_call = true;
-          v0_active = false;
-          break;
-        }
-      }
-      for (Register r : next_ud.gpr_defs) {
-        if (r == Register::kV0) {
-          v0_active = false;
-          break;
-        }
-      }
-    }
-
-    if (v1_active) {
-      for (Register r : next_ud.gpr_uses) {
-        if (r == Register::kV1) {
-          usage.v1_used_after_call = true;
-          v1_active = false;
-          break;
-        }
-      }
-      for (Register r : next_ud.gpr_defs) {
-        if (r == Register::kV1) {
-          v1_active = false;
-          break;
-        }
-      }
-    }
-
-    if (f0_active) {
-      for (FpRegister r : next_ud.fpr_uses) {
-        if (r == FpRegister::kF0) {
-          usage.f0_used_after_call = true;
-          f0_active = false;
-          Opcode next_op = next_inst.opcode;
-          if (next_op == Opcode::kAddD || next_op == Opcode::kSubD || next_op == Opcode::kMulD ||
-              next_op == Opcode::kDivD || next_op == Opcode::kSqrtD || next_op == Opcode::kAbsD ||
-              next_op == Opcode::kMovD || next_op == Opcode::kNegD || next_op == Opcode::kCvtSD ||
-              next_op == Opcode::kTruncWD || next_op == Opcode::kRoundWD ||
-              next_op == Opcode::kCeilWD || next_op == Opcode::kFloorWD ||
-              next_op == Opcode::kCEqD || next_op == Opcode::kCLtD || next_op == Opcode::kCLeD ||
-              next_op == Opcode::kSdc1 || next_op == Opcode::kDmfc1) {
-            usage.f0_is_double = true;
-          }
-          break;
-        }
-      }
-      for (FpRegister r : next_ud.fpr_defs) {
-        if (r == FpRegister::kF0) {
-          f0_active = false;
-          break;
-        }
-      }
-    }
-
-    if (!v0_active && !v1_active && !f0_active) {
-      break;
+  CallReturnInfo scanned =
+      AbiAnalyzer::ScanCallReturnUsage(instructions_to_process, i + 1, /*stop_at_branches=*/false);
+  if (!usage.v0_used_after_call && scanned.returns_v0) {
+    usage.v0_used_after_call = true;
+  }
+  if (!usage.v1_used_after_call && scanned.returns_s64) {
+    usage.v1_used_after_call = true;
+  }
+  if (!usage.f0_used_after_call && scanned.returns_f0) {
+    usage.f0_used_after_call = true;
+    if (scanned.returns_f0_double) {
+      usage.f0_is_double = true;
     }
   }
   return usage;

@@ -15,6 +15,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/c_ast.h"
+#include "core/c_ast_utils.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -207,88 +208,7 @@ std::unique_ptr<CExpression> SimplifyShiftAddExpression(const CExpression& expr)
 }
 
 int CountRhsVariableUsesInStatement(const CStatement& root_s, std::string_view var) {
-  int count = 0;
-  std::function<void(const CExpression&)> walk_e = [&](const CExpression& e) {
-    if (e.Kind() == CExpressionKind::kIdentifier) {
-      if (static_cast<const IdentifierExpression&>(e).Name() == var) ++count;
-      return;
-    }
-    if (e.Kind() == CExpressionKind::kUnaryExpression) {
-      walk_e(static_cast<const UnaryExpression&>(e).Operand());
-    } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-      const auto& b = static_cast<const BinaryExpression&>(e);
-      walk_e(b.Lhs());
-      walk_e(b.Rhs());
-    } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
-      const auto& a = static_cast<const AssignmentExpression&>(e);
-      if (a.Lhs().Kind() != CExpressionKind::kIdentifier) walk_e(a.Lhs());
-      walk_e(a.Rhs());
-    } else if (e.Kind() == CExpressionKind::kCastExpression) {
-      walk_e(static_cast<const CastExpression&>(e).Operand());
-    } else if (e.Kind() == CExpressionKind::kCallExpression) {
-      const auto& c = static_cast<const CallExpression&>(e);
-      walk_e(c.Callee());
-      for (const auto& arg : c.Arguments()) {
-        if (arg != nullptr) walk_e(*arg);
-      }
-    }
-  };
-  std::function<void(const CStatement&)> walk_s = [&](const CStatement& s) {
-    switch (s.Kind()) {
-      case CStatementKind::kExpressionStatement:
-        walk_e(static_cast<const ExpressionStatement&>(s).Expression());
-        break;
-      case CStatementKind::kReturnStatement: {
-        const auto& r = static_cast<const ReturnStatement&>(s);
-        if (r.ReturnValue() != nullptr) walk_e(*r.ReturnValue());
-        break;
-      }
-      case CStatementKind::kIfStatement: {
-        const auto& ifs = static_cast<const IfStatement&>(s);
-        walk_e(ifs.Condition());
-        walk_s(ifs.ThenBranch());
-        if (ifs.ElseBranch() != nullptr) walk_s(*ifs.ElseBranch());
-        break;
-      }
-      case CStatementKind::kWhileStatement: {
-        const auto& ws = static_cast<const WhileStatement&>(s);
-        walk_e(ws.Condition());
-        walk_s(ws.Body());
-        break;
-      }
-      case CStatementKind::kDoWhileStatement: {
-        const auto& dws = static_cast<const DoWhileStatement&>(s);
-        walk_s(dws.Body());
-        walk_e(dws.Condition());
-        break;
-      }
-      case CStatementKind::kForStatement: {
-        const auto& fs = static_cast<const ForStatement&>(s);
-        if (fs.Init() != nullptr) walk_s(*fs.Init());
-        if (fs.Condition() != nullptr) walk_e(*fs.Condition());
-        if (fs.Step() != nullptr) walk_e(*fs.Step());
-        walk_s(fs.Body());
-        break;
-      }
-      case CStatementKind::kSwitchStatement: {
-        const auto& sw = static_cast<const SwitchStatement&>(s);
-        walk_e(sw.Condition());
-        for (const auto& sc : sw.Cases()) {
-          if (sc.body != nullptr) walk_s(*sc.body);
-        }
-        break;
-      }
-      case CStatementKind::kCompoundStatement:
-        for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-          if (child != nullptr) walk_s(*child);
-        }
-        break;
-      default:
-        break;
-    }
-  };
-  walk_s(root_s);
-  return count;
+  return CountVariableReadUsesInStatement(root_s, var);
 }
 
 bool IsLocalRegVarName(std::string_view name) {

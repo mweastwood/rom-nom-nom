@@ -365,5 +365,20 @@ TEST(AbiAnalyzerTest, DetectsCalleeSavedFloatCarriersWithPrologueStackSavesAndHo
   EXPECT_TRUE(float_locals.contains(48));
 }
 
+TEST(AbiAnalyzerTest, ScansPostCallReturnRegisterUsage) {
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 00: jal   0x80001000
+      0x00000000,  // 04: nop
+      0x46200080,  // 08: add.d $f2, $f0, $f0
+      0x03E00008,  // 0C: jr    $ra
+      0x00401821,  // 10: addu  $v1, $v0, $zero (in jr delay slot)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  CallReturnInfo info = AbiAnalyzer::ScanCallReturnUsage(insts, 2, /*stop_at_branches=*/true);
+  EXPECT_TRUE(info.returns_f0);
+  EXPECT_TRUE(info.returns_f0_double);
+  EXPECT_TRUE(info.returns_v0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

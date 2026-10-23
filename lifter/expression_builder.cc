@@ -21,6 +21,7 @@
 #include "lifter/call_lifter.h"
 #include "lifter/cop1_lifter.h"
 #include "lifter/instruction_patterns.h"
+#include "lifter/stack_frame_analyzer.h"
 #include "lifter/symbol_folder.h"
 
 namespace rom_nom_nom {
@@ -231,10 +232,7 @@ std::string ExpressionBuilder::FpRegisterVarName(FpRegister reg, bool is_double)
 }
 
 std::string ExpressionBuilder::StackVarName(int32_t offset) {
-  if (offset < 0) {
-    return absl::StrFormat("var_sp_neg_%d", -offset);
-  }
-  return absl::StrFormat("var_sp_%d", offset);
+  return StackFrameAnalyzer::StackVarName(offset);
 }
 
 namespace {
@@ -298,21 +296,8 @@ struct BlockLiftRunner {
   }
 
   bool IsCallerHomedScalarAddr(int32_t imm) const {
-    if (frame_size == 0 || imm < caller_frame_start || imm >= caller_frame_start + 16 ||
-        (imm % 4) != 0) {
-      return false;
-    }
-    if (ctx.function_stack_stores != nullptr) {
-      return ctx.function_stack_stores->contains(imm);
-    }
-    for (const auto& ins : instructions_to_process) {
-      if (ins.IsStore() && ins.rs.has_value() &&
-          (*ins.rs == Register::kSp || (has_frame_pointer && *ins.rs == Register::kFp)) &&
-          ins.immediate == imm) {
-        return true;
-      }
-    }
-    return false;
+    return StackFrameAnalyzer::IsCallerHomedScalarAddr(static_cast<int32_t>(frame_size), imm,
+                                                       local_stack_stores);
   }
 
   std::unique_ptr<LiftedExpression> MakeSpAddr(int32_t offset) const {
@@ -436,30 +421,16 @@ void BlockLiftRunner::Initialize(bool omit_last_instruction) {
     return;
   }
 
+  StackFrameAnalysis local_stack_analysis;
+  local_stack_analysis.has_frame_pointer = has_frame_pointer;
+  local_stack_analysis.has_calls = has_calls;
+  local_stack_analysis.frame_size = static_cast<int32_t>(frame_size);
+  StackFrameAnalyzer::ScanInstructionsPass1(raw_instructions, &local_stack_analysis);
   if (!has_frame_pointer) {
-    for (const auto& inst : raw_instructions) {
-      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd) && inst.rd.has_value() &&
-          *inst.rd == Register::kFp &&
-          ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
-           (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
-        has_frame_pointer = true;
-        break;
-      }
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) && inst.rt.has_value() &&
-          *inst.rt == Register::kFp && inst.rs == Register::kSp && inst.immediate == 0) {
-        has_frame_pointer = true;
-        break;
-      }
-    }
+    has_frame_pointer = local_stack_analysis.has_frame_pointer;
   }
-
-  if (frame_size == 0) {
-    for (const auto& inst : raw_instructions) {
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) && inst.rt.has_value() &&
-          *inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
-        frame_size = std::max(frame_size, static_cast<uint32_t>(-inst.immediate));
-      }
-    }
+  if (frame_size == 0 && local_stack_analysis.frame_size > 0) {
+    frame_size = static_cast<uint32_t>(local_stack_analysis.frame_size);
   }
 
   bool has_delayed_branch = false;
@@ -488,43 +459,21 @@ void BlockLiftRunner::Initialize(bool omit_last_instruction) {
   }
 
   if (!has_calls) {
-    for (const auto& instruction : raw_instructions) {
-      if (instruction.opcode == Opcode::kJal || instruction.opcode == Opcode::kJalr) {
-        has_calls = true;
-        break;
-      }
-    }
+    has_calls = local_stack_analysis.has_calls;
   }
 
   folder.Fold(instructions_to_process, ctx.symbol_index, ctx.game_config, ctx.initial_tracker);
 
   caller_frame_start = (frame_size > 0) ? static_cast<int32_t>(frame_size) : 0x7FFFFFFF;
   if (!sp_address_taken) {
-    for (const auto& inst : instructions_to_process) {
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) &&
-          (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
-          inst.rt.has_value() && *inst.rt != Register::kSp &&
-          (!has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0 &&
-          !IsCallerHomedScalarAddr(inst.immediate)) {
-        sp_address_taken = true;
-        break;
-      }
-      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
-           inst.opcode == Opcode::kOr) &&
-          (inst.rs == Register::kSp || inst.rt == Register::kSp ||
-           (has_frame_pointer && (inst.rs == Register::kFp || inst.rt == Register::kFp))) &&
-          inst.rd.has_value() && *inst.rd != Register::kSp &&
-          (!has_frame_pointer || *inst.rd != Register::kFp)) {
-        sp_address_taken = true;
-        break;
-      }
-      if ((inst.opcode == Opcode::kLwl || inst.opcode == Opcode::kLwr ||
-           inst.opcode == Opcode::kSwl || inst.opcode == Opcode::kSwr) &&
-          (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp))) {
-        sp_address_taken = true;
-        break;
-      }
+    local_stack_analysis.frame_size = static_cast<int32_t>(frame_size);
+    local_stack_analysis.has_frame_pointer = has_frame_pointer;
+    if (ctx.function_stack_stores != nullptr) {
+      local_stack_analysis.stack_store_offsets = *ctx.function_stack_stores;
     }
+    StackFrameAnalyzer::ScanInstructionsAddressTaken(instructions_to_process,
+                                                     &local_stack_analysis);
+    sp_address_taken = local_stack_analysis.sp_address_taken;
   }
 
   sp_base_offset = ctx.outgoing_args_size > 0 ? static_cast<int32_t>(ctx.outgoing_args_size)
@@ -1965,17 +1914,9 @@ std::vector<LiftedStatement> BlockLiftRunner::Run() {
     }
 
     if (inst.opcode != Opcode::kMtc1) {
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (FpRegister d : ud.fpr_defs) {
-        int idx = static_cast<int>(d);
-        fpr_const_bits[idx] = std::nullopt;
-        if ((idx % 2) == 0 && idx + 1 < 32) {
-          fpr_const_bits[idx + 1] = std::nullopt;
-        }
-      }
+      InvalidateNonMtc1FprConstantBits(inst, fpr_const_bits);
       if (inst.IsCall()) {
         for (int k = 0; k < 20; ++k) {
-          fpr_const_bits[k] = std::nullopt;
           pending_int_to_fp[k] = nullptr;
           pending_fp_to_int[k] = nullptr;
         }

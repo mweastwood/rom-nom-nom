@@ -39,130 +39,10 @@ struct FolderContext {
   }
 
   static int CountUses(const CStatement& s, std::string_view var) {
-    int count = 0;
-    std::function<void(const CExpression&)> check_expr = [&](const CExpression& e) {
-      if (e.Kind() == CExpressionKind::kIdentifier) {
-        if (MatchesVarIdentifier(static_cast<const IdentifierExpression&>(e).Name(), var)) {
-          count++;
-        }
-      } else if (e.Kind() == CExpressionKind::kUnaryExpression) {
-        check_expr(static_cast<const UnaryExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-        check_expr(static_cast<const BinaryExpression&>(e).Lhs());
-        check_expr(static_cast<const BinaryExpression&>(e).Rhs());
-      } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
-        const auto& assign = static_cast<const AssignmentExpression&>(e);
-        // If LHS is not a direct identifier (e.g. *(s32*)v0 or arr[v0]), its subexpressions are
-        // reads!
-        if (assign.Lhs().Kind() != CExpressionKind::kIdentifier) {
-          check_expr(assign.Lhs());
-        }
-        check_expr(assign.Rhs());
-      } else if (e.Kind() == CExpressionKind::kCastExpression) {
-        check_expr(static_cast<const CastExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
-        check_expr(static_cast<const ArrayIndexExpression&>(e).Array());
-        check_expr(static_cast<const ArrayIndexExpression&>(e).Index());
-      } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
-        check_expr(static_cast<const MemberAccessExpression&>(e).Object());
-      } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
-        check_expr(static_cast<const TernaryExpression&>(e).Condition());
-        check_expr(static_cast<const TernaryExpression&>(e).TrueExpression());
-        check_expr(static_cast<const TernaryExpression&>(e).FalseExpression());
-      } else if (e.Kind() == CExpressionKind::kCallExpression) {
-        check_expr(static_cast<const CallExpression&>(e).Callee());
-        for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
-          check_expr(*arg);
-        }
-      }
-    };
-
-    std::function<void(const CStatement&)> check_stmt = [&](const CStatement& stmt) {
-      switch (stmt.Kind()) {
-        case CStatementKind::kExpressionStatement:
-          check_expr(static_cast<const ExpressionStatement&>(stmt).Expression());
-          break;
-        case CStatementKind::kReturnStatement:
-          if (static_cast<const ReturnStatement&>(stmt).ReturnValue()) {
-            check_expr(*static_cast<const ReturnStatement&>(stmt).ReturnValue());
-          }
-          break;
-        case CStatementKind::kIfStatement: {
-          const auto& ifs = static_cast<const IfStatement&>(stmt);
-          check_expr(ifs.Condition());
-          check_stmt(ifs.ThenBranch());
-          if (ifs.ElseBranch() != nullptr) check_stmt(*ifs.ElseBranch());
-          break;
-        }
-        case CStatementKind::kWhileStatement: {
-          const auto& ws = static_cast<const WhileStatement&>(stmt);
-          check_expr(ws.Condition());
-          check_stmt(ws.Body());
-          break;
-        }
-        case CStatementKind::kDoWhileStatement: {
-          const auto& dws = static_cast<const DoWhileStatement&>(stmt);
-          check_expr(dws.Condition());
-          check_stmt(dws.Body());
-          break;
-        }
-        case CStatementKind::kForStatement: {
-          const auto& fs = static_cast<const ForStatement&>(stmt);
-          if (fs.Init() != nullptr) check_stmt(*fs.Init());
-          if (fs.Condition() != nullptr) check_expr(*fs.Condition());
-          if (fs.Step() != nullptr) check_expr(*fs.Step());
-          check_stmt(fs.Body());
-          break;
-        }
-        case CStatementKind::kCompoundStatement: {
-          for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-            check_stmt(*child);
-          }
-          break;
-        }
-        case CStatementKind::kSwitchStatement: {
-          const auto& ss = static_cast<const SwitchStatement&>(stmt);
-          check_expr(ss.Condition());
-          for (const auto& sc : ss.Cases()) {
-            if (sc.body != nullptr) check_stmt(*sc.body);
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    };
-    check_stmt(s);
-    return count;
+    return CountVariableReadUsesInStatement(s, var);
   }
 
-  static bool IsPureExpr(const CExpression& expr) {
-    bool has_side_effects = false;
-    std::function<void(const CExpression&)> check = [&](const CExpression& e) {
-      if (e.Kind() == CExpressionKind::kCallExpression ||
-          e.Kind() == CExpressionKind::kAssignmentExpression) {
-        has_side_effects = true;
-      } else if (e.Kind() == CExpressionKind::kUnaryExpression) {
-        check(static_cast<const UnaryExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-        check(static_cast<const BinaryExpression&>(e).Lhs());
-        check(static_cast<const BinaryExpression&>(e).Rhs());
-      } else if (e.Kind() == CExpressionKind::kCastExpression) {
-        check(static_cast<const CastExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
-        check(static_cast<const ArrayIndexExpression&>(e).Array());
-        check(static_cast<const ArrayIndexExpression&>(e).Index());
-      } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
-        check(static_cast<const MemberAccessExpression&>(e).Object());
-      } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
-        check(static_cast<const TernaryExpression&>(e).Condition());
-        check(static_cast<const TernaryExpression&>(e).TrueExpression());
-        check(static_cast<const TernaryExpression&>(e).FalseExpression());
-      }
-    };
-    check(expr);
-    return !has_side_effects;
-  }
+  static bool IsPureExpr(const CExpression& expr) { return IsPureExpression(expr); }
 
   static bool HasAddressOf(const CExpression& expr) {
     bool found = false;
@@ -195,68 +75,15 @@ struct FolderContext {
   }
 
   static std::string_view ExtractFloatBitcastLhsVar(const CExpression& lhs) {
-    if (lhs.Kind() != CExpressionKind::kUnaryExpression) return {};
-    const auto& deref = static_cast<const UnaryExpression&>(lhs);
-    if (deref.Op() != "*" || !deref.IsPrefix()) return {};
-    if (deref.Operand().Kind() != CExpressionKind::kCastExpression) return {};
-    const auto& cast = static_cast<const CastExpression&>(deref.Operand());
-    if (cast.TargetType().name != "f32" || cast.TargetType().pointer_depth != 1) return {};
-    if (cast.Operand().Kind() != CExpressionKind::kUnaryExpression) return {};
-    const auto& addr = static_cast<const UnaryExpression&>(cast.Operand());
-    if (addr.Op() != "&" || !addr.IsPrefix()) return {};
-    if (addr.Operand().Kind() != CExpressionKind::kIdentifier) return {};
-    return static_cast<const IdentifierExpression&>(addr.Operand()).Name();
+    return ::rom_nom_nom::ExtractFloatBitcastLhsVar(lhs);
   }
 
   static std::string_view ExtractAssignedLhsVar(const CExpression& lhs) {
-    if (lhs.Kind() == CExpressionKind::kIdentifier) {
-      return static_cast<const IdentifierExpression&>(lhs).Name();
-    }
-    return ExtractFloatBitcastLhsVar(lhs);
+    return ::rom_nom_nom::ExtractAssignedLhsVar(lhs);
   }
 
   static bool HasAddressOfVar(const CExpression& expr, std::string_view var) {
-    bool found = false;
-    std::function<void(const CExpression&)> check = [&](const CExpression& e) {
-      if (found) return;
-      if (e.Kind() == CExpressionKind::kUnaryExpression) {
-        const auto& un = static_cast<const UnaryExpression&>(e);
-        if (un.Op().find('&') != std::string::npos &&
-            un.Operand().Kind() == CExpressionKind::kIdentifier &&
-            static_cast<const IdentifierExpression&>(un.Operand()).Name() == var) {
-          found = true;
-          return;
-        }
-        check(un.Operand());
-      } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-        check(static_cast<const BinaryExpression&>(e).Lhs());
-        check(static_cast<const BinaryExpression&>(e).Rhs());
-      } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
-        const auto& assign = static_cast<const AssignmentExpression&>(e);
-        if (assign.Op() != "=" || ExtractAssignedLhsVar(assign.Lhs()).empty()) {
-          check(assign.Lhs());
-        }
-        check(assign.Rhs());
-      } else if (e.Kind() == CExpressionKind::kCastExpression) {
-        check(static_cast<const CastExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
-        check(static_cast<const ArrayIndexExpression&>(e).Array());
-        check(static_cast<const ArrayIndexExpression&>(e).Index());
-      } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
-        check(static_cast<const MemberAccessExpression&>(e).Object());
-      } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
-        check(static_cast<const TernaryExpression&>(e).Condition());
-        check(static_cast<const TernaryExpression&>(e).TrueExpression());
-        check(static_cast<const TernaryExpression&>(e).FalseExpression());
-      } else if (e.Kind() == CExpressionKind::kCallExpression) {
-        check(static_cast<const CallExpression&>(e).Callee());
-        for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
-          check(*arg);
-        }
-      }
-    };
-    check(expr);
-    return found;
+    return ExpressionTakesAddressOf(expr, var, /*ignore_assigned_float_bitcast_lhs=*/true);
   }
 
   static bool UsedInAdditionOrSubtraction(const CExpression& expr, std::string_view var) {
@@ -312,202 +139,17 @@ struct FolderContext {
   }
 
   static int CountExprUses(const CExpression& e, std::string_view var) {
-    int count = 0;
-    std::function<void(const CExpression&)> check_expr = [&](const CExpression& expr) {
-      if (expr.Kind() == CExpressionKind::kIdentifier) {
-        if (MatchesVarIdentifier(static_cast<const IdentifierExpression&>(expr).Name(), var)) {
-          count++;
-        }
-      } else if (expr.Kind() == CExpressionKind::kUnaryExpression) {
-        check_expr(static_cast<const UnaryExpression&>(expr).Operand());
-      } else if (expr.Kind() == CExpressionKind::kBinaryExpression) {
-        check_expr(static_cast<const BinaryExpression&>(expr).Lhs());
-        check_expr(static_cast<const BinaryExpression&>(expr).Rhs());
-      } else if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
-        const auto& assign = static_cast<const AssignmentExpression&>(expr);
-        if (assign.Op() != "=" || ExtractAssignedLhsVar(assign.Lhs()).empty()) {
-          check_expr(assign.Lhs());
-        }
-        check_expr(assign.Rhs());
-      } else if (expr.Kind() == CExpressionKind::kCastExpression) {
-        check_expr(static_cast<const CastExpression&>(expr).Operand());
-      } else if (expr.Kind() == CExpressionKind::kArrayIndexExpression) {
-        check_expr(static_cast<const ArrayIndexExpression&>(expr).Array());
-        check_expr(static_cast<const ArrayIndexExpression&>(expr).Index());
-      } else if (expr.Kind() == CExpressionKind::kMemberAccessExpression) {
-        check_expr(static_cast<const MemberAccessExpression&>(expr).Object());
-      } else if (expr.Kind() == CExpressionKind::kTernaryExpression) {
-        check_expr(static_cast<const TernaryExpression&>(expr).Condition());
-        check_expr(static_cast<const TernaryExpression&>(expr).TrueExpression());
-        check_expr(static_cast<const TernaryExpression&>(expr).FalseExpression());
-      } else if (expr.Kind() == CExpressionKind::kCallExpression) {
-        check_expr(static_cast<const CallExpression&>(expr).Callee());
-        for (const auto& arg : static_cast<const CallExpression&>(expr).Arguments()) {
-          check_expr(*arg);
-        }
-      }
-    };
-    check_expr(e);
-    return count;
+    return CountVariableReadUsesInExpression(e, var);
   }
 
   static bool HasAddressOfVarInStmt(const CStatement& root_s, std::string_view var) {
-    bool found = false;
-    std::function<void(const CStatement&)> walk = [&](const CStatement& s) {
-      if (found) return;
-      switch (s.Kind()) {
-        case CStatementKind::kExpressionStatement:
-          if (HasAddressOfVar(static_cast<const ExpressionStatement&>(s).Expression(), var)) {
-            found = true;
-          }
-          break;
-        case CStatementKind::kReturnStatement: {
-          const auto& ret = static_cast<const ReturnStatement&>(s);
-          if (ret.ReturnValue() != nullptr && HasAddressOfVar(*ret.ReturnValue(), var)) {
-            found = true;
-          }
-          break;
-        }
-        case CStatementKind::kIfStatement: {
-          const auto& ifs = static_cast<const IfStatement&>(s);
-          if (HasAddressOfVar(ifs.Condition(), var)) found = true;
-          walk(ifs.ThenBranch());
-          if (ifs.ElseBranch() != nullptr) walk(*ifs.ElseBranch());
-          break;
-        }
-        case CStatementKind::kWhileStatement: {
-          const auto& ws = static_cast<const WhileStatement&>(s);
-          if (HasAddressOfVar(ws.Condition(), var)) found = true;
-          walk(ws.Body());
-          break;
-        }
-        case CStatementKind::kDoWhileStatement: {
-          const auto& dws = static_cast<const DoWhileStatement&>(s);
-          if (HasAddressOfVar(dws.Condition(), var)) found = true;
-          walk(dws.Body());
-          break;
-        }
-        case CStatementKind::kForStatement: {
-          const auto& fs = static_cast<const ForStatement&>(s);
-          if (fs.Init() != nullptr) walk(*fs.Init());
-          if (fs.Condition() != nullptr && HasAddressOfVar(*fs.Condition(), var)) found = true;
-          if (fs.Step() != nullptr && HasAddressOfVar(*fs.Step(), var)) found = true;
-          walk(fs.Body());
-          break;
-        }
-        case CStatementKind::kCompoundStatement: {
-          for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-            walk(*child);
-          }
-          break;
-        }
-        case CStatementKind::kSwitchStatement: {
-          const auto& ss = static_cast<const SwitchStatement&>(s);
-          if (HasAddressOfVar(ss.Condition(), var)) found = true;
-          for (const auto& sc : ss.Cases()) {
-            if (sc.body != nullptr) walk(*sc.body);
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    };
-    walk(root_s);
-    return found;
+    return StatementTakesAddressOf(root_s, var, /*ignore_assigned_float_bitcast_lhs=*/true);
   }
 
-  static bool HasLabelInStmt(const CStatement& root_s) {
-    bool found = false;
-    std::function<void(const CStatement&)> walk = [&](const CStatement& s) {
-      if (found) return;
-      if (s.Kind() == CStatementKind::kLabelStatement) {
-        found = true;
-        return;
-      }
-      switch (s.Kind()) {
-        case CStatementKind::kIfStatement: {
-          const auto& ifs = static_cast<const IfStatement&>(s);
-          walk(ifs.ThenBranch());
-          if (ifs.ElseBranch() != nullptr) walk(*ifs.ElseBranch());
-          break;
-        }
-        case CStatementKind::kWhileStatement:
-          walk(static_cast<const WhileStatement&>(s).Body());
-          break;
-        case CStatementKind::kDoWhileStatement:
-          walk(static_cast<const DoWhileStatement&>(s).Body());
-          break;
-        case CStatementKind::kForStatement: {
-          const auto& fs = static_cast<const ForStatement&>(s);
-          if (fs.Init() != nullptr) walk(*fs.Init());
-          walk(fs.Body());
-          break;
-        }
-        case CStatementKind::kCompoundStatement:
-          for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-            walk(*child);
-          }
-          break;
-        case CStatementKind::kSwitchStatement:
-          for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
-            if (sc.body != nullptr) walk(*sc.body);
-          }
-          break;
-        default:
-          break;
-      }
-    };
-    walk(root_s);
-    return found;
-  }
+  static bool HasLabelInStmt(const CStatement& root_s) { return StatementContainsLabel(root_s); }
 
   static bool HasControlJumpInStmt(const CStatement& root_s) {
-    bool found = false;
-    std::function<void(const CStatement&)> walk = [&](const CStatement& s) {
-      if (found) return;
-      if (s.Kind() == CStatementKind::kBreakStatement ||
-          s.Kind() == CStatementKind::kContinueStatement ||
-          s.Kind() == CStatementKind::kGotoStatement ||
-          s.Kind() == CStatementKind::kLabelStatement) {
-        found = true;
-        return;
-      }
-      switch (s.Kind()) {
-        case CStatementKind::kIfStatement: {
-          const auto& ifs = static_cast<const IfStatement&>(s);
-          walk(ifs.ThenBranch());
-          if (ifs.ElseBranch() != nullptr) walk(*ifs.ElseBranch());
-          break;
-        }
-        case CStatementKind::kWhileStatement:
-          walk(static_cast<const WhileStatement&>(s).Body());
-          break;
-        case CStatementKind::kDoWhileStatement:
-          walk(static_cast<const DoWhileStatement&>(s).Body());
-          break;
-        case CStatementKind::kForStatement: {
-          const auto& fs = static_cast<const ForStatement&>(s);
-          if (fs.Init() != nullptr) walk(*fs.Init());
-          walk(fs.Body());
-          break;
-        }
-        case CStatementKind::kCompoundStatement:
-          for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-            walk(*child);
-          }
-          break;
-        case CStatementKind::kSwitchStatement:
-          for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
-            if (sc.body != nullptr) walk(*sc.body);
-          }
-          break;
-        default:
-          break;
-      }
-    };
-    walk(root_s);
-    return found;
+    return StatementContainsControlFlowJump(root_s);
   }
 
   static bool IsStackParamOrLocalName(std::string_view id_name) {
@@ -911,89 +553,10 @@ struct FolderContext {
   }
 
   static bool HasCallInStmt(const CStatement& root_s) {
-    bool found = false;
-    std::function<void(const CExpression&)> walk_expr = [&](const CExpression& e) {
-      if (found) return;
-      if (e.Kind() == CExpressionKind::kCallExpression) {
-        found = true;
-        return;
-      }
-      if (e.Kind() == CExpressionKind::kUnaryExpression) {
-        walk_expr(static_cast<const UnaryExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
-        walk_expr(static_cast<const BinaryExpression&>(e).Lhs());
-        walk_expr(static_cast<const BinaryExpression&>(e).Rhs());
-      } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
-        walk_expr(static_cast<const AssignmentExpression&>(e).Lhs());
-        walk_expr(static_cast<const AssignmentExpression&>(e).Rhs());
-      } else if (e.Kind() == CExpressionKind::kCastExpression) {
-        walk_expr(static_cast<const CastExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
-        walk_expr(static_cast<const ArrayIndexExpression&>(e).Array());
-        walk_expr(static_cast<const ArrayIndexExpression&>(e).Index());
-      } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
-        walk_expr(static_cast<const MemberAccessExpression&>(e).Object());
-      } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
-        walk_expr(static_cast<const TernaryExpression&>(e).Condition());
-        walk_expr(static_cast<const TernaryExpression&>(e).TrueExpression());
-        walk_expr(static_cast<const TernaryExpression&>(e).FalseExpression());
-      }
-    };
-    std::function<void(const CStatement&)> walk_stmt = [&](const CStatement& s) {
-      if (found) return;
-      if (s.Kind() == CStatementKind::kExpressionStatement) {
-        walk_expr(static_cast<const ExpressionStatement&>(s).Expression());
-      } else if (s.Kind() == CStatementKind::kReturnStatement) {
-        const auto& ret = static_cast<const ReturnStatement&>(s);
-        if (ret.ReturnValue() != nullptr) walk_expr(*ret.ReturnValue());
-      } else if (s.Kind() == CStatementKind::kIfStatement) {
-        const auto& ifs = static_cast<const IfStatement&>(s);
-        walk_expr(ifs.Condition());
-        walk_stmt(ifs.ThenBranch());
-        if (ifs.ElseBranch() != nullptr) walk_stmt(*ifs.ElseBranch());
-      } else if (s.Kind() == CStatementKind::kSwitchStatement) {
-        const auto& ss = static_cast<const SwitchStatement&>(s);
-        walk_expr(ss.Condition());
-        for (const auto& sc : ss.Cases()) {
-          if (sc.body != nullptr) walk_stmt(*sc.body);
-        }
-      } else if (s.Kind() == CStatementKind::kCompoundStatement) {
-        for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-          walk_stmt(*child);
-        }
-      }
-    };
-    walk_stmt(root_s);
-    return found;
+    return StatementContainsCall(root_s, /*ignore_math_intrinsics=*/false);
   }
 
-  static bool HasLoopInStmt(const CStatement& root_s) {
-    bool found = false;
-    std::function<void(const CStatement&)> walk = [&](const CStatement& s) {
-      if (found) return;
-      if (s.Kind() == CStatementKind::kWhileStatement ||
-          s.Kind() == CStatementKind::kDoWhileStatement ||
-          s.Kind() == CStatementKind::kForStatement) {
-        found = true;
-        return;
-      }
-      if (s.Kind() == CStatementKind::kIfStatement) {
-        const auto& ifs = static_cast<const IfStatement&>(s);
-        walk(ifs.ThenBranch());
-        if (ifs.ElseBranch() != nullptr) walk(*ifs.ElseBranch());
-      } else if (s.Kind() == CStatementKind::kSwitchStatement) {
-        for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
-          if (sc.body != nullptr) walk(*sc.body);
-        }
-      } else if (s.Kind() == CStatementKind::kCompoundStatement) {
-        for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
-          walk(*child);
-        }
-      }
-    };
-    walk(root_s);
-    return found;
-  }
+  static bool HasLoopInStmt(const CStatement& root_s) { return StatementContainsLoop(root_s); }
 
   bool IsDeadAfterStmt(size_t next_idx, std::string_view var, int expected_uses_in_next = 1,
                        const CStatement* def_stmt = nullptr) {

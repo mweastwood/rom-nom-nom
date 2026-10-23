@@ -22,6 +22,7 @@
 #include "lifter/ast_expression_folder.h"
 #include "lifter/branch_condition_builder.h"
 #include "lifter/control_flow_structurer.h"
+#include "lifter/cop1_lifter.h"
 #include "lifter/expression_builder.h"
 #include "lifter/stack_frame_analyzer.h"
 #include "lifter/variable_declaration_builder.h"
@@ -1559,34 +1560,7 @@ class ConverterContext {
   };
 
   void StepBlockState(BlockState& state, const Instruction& inst) const {
-    if (inst.IsCall()) {
-      for (int f = 0; f < 20; ++f) {
-        state.fpr_const_bits[f] = std::nullopt;
-      }
-    } else if (inst.opcode != Opcode::kMtc1) {
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (FpRegister d : ud.fpr_defs) {
-        int f_idx = static_cast<int>(d);
-        state.fpr_const_bits[f_idx] = std::nullopt;
-        if ((f_idx % 2) == 0 && f_idx + 1 < 32) {
-          state.fpr_const_bits[f_idx + 1] = std::nullopt;
-        }
-      }
-    } else if (inst.fs.has_value() && inst.rt.has_value()) {
-      int fs_idx = static_cast<int>(*inst.fs);
-      if (*inst.rt == Register::kZero) {
-        state.fpr_const_bits[fs_idx] = 0;
-      } else {
-        TrackedValue tv = state.tracker.GetRegisterValue(*inst.rt);
-        if (tv.kind == ValueKind::kConstant || tv.kind == ValueKind::kSymbolAddress) {
-          state.fpr_const_bits[fs_idx] = tv.constant_value;
-        } else if (tv.kind == ValueKind::kSymbolHi) {
-          state.fpr_const_bits[fs_idx] = tv.symbol_hi;
-        } else {
-          state.fpr_const_bits[fs_idx] = std::nullopt;
-        }
-      }
-    }
+    StepFprConstantBits(inst, state.tracker, state.fpr_const_bits.data());
     state.tracker.Step(inst);
     if (symbol_index_ != nullptr &&
         (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi)) {

@@ -6,6 +6,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/types/span.h"
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
 
@@ -35,6 +36,27 @@ struct StackFrameAnalysis {
 // Analyzes stack frame layout, callee-saved register spills, and stack buffer usage across a CFG.
 class StackFrameAnalyzer {
  public:
+  // Formats a stack offset into its canonical local variable name (`var_sp_<offset>` or
+  // `var_sp_neg_<offset>`).
+  static std::string StackVarName(int32_t offset);
+
+  // Computes the maximum allocated stack frame size across all blocks in a CFG.
+  static uint32_t ComputeFrameSize(const ControlFlowGraph& cfg);
+
+  // Returns true if `imm` is a 4-byte-aligned caller-homed register argument slot (`arg0`..`arg3`
+  // at `[frame_size, frame_size + 16)`) that is stored to in the function.
+  static bool IsCallerHomedScalarAddr(int32_t frame_size, int32_t imm,
+                                      const absl::flat_hash_set<int32_t>& stack_store_offsets);
+
+  // Scans a sequence of instructions for frame size, frame pointer setup, calls, and stack stores.
+  static void ScanInstructionsPass1(absl::Span<const Instruction> instructions,
+                                    StackFrameAnalysis* analysis);
+
+  // Scans a sequence of instructions for stack-address-taken uses using results from Pass 1.
+  static void ScanInstructionsAddressTaken(
+      absl::Span<const Instruction> instructions, StackFrameAnalysis* analysis,
+      absl::flat_hash_set<int32_t>* addr_taken_offsets = nullptr);
+
   // Computes all stack frame properties in a unified analysis pass over the CFG.
   static StackFrameAnalysis Analyze(const ControlFlowGraph& cfg);
 

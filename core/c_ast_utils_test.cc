@@ -106,5 +106,30 @@ TEST(CAstUtilsTest, PreservesFloatBitcastWrapperInCallArgumentsWhenSubstitutingF
   EXPECT_EQ(substituted_non_call->ToString(), "*(s32*)arg1");
 }
 
+TEST(CAstUtilsTest, ExtractsAssignedLhsAndCountsReadUsesAndControlConstructs) {
+  auto float_lhs = CExpression::Unary(
+      "*", CExpression::Cast(CType::F32().MakePointer(),
+                             CExpression::Unary("&", CExpression::Identifier("var_sp_16"))));
+  EXPECT_EQ(ExtractFloatBitcastLhsVar(*float_lhs), "var_sp_16");
+  EXPECT_EQ(ExtractAssignedLhsVar(*float_lhs), "var_sp_16");
+  EXPECT_EQ(ExtractAssignedLhsVar(*CExpression::Identifier("arg0")), "arg0");
+
+  auto bitcast_assign = CStatement::Expression(
+      CExpression::Assignment("=", std::move(float_lhs), CExpression::Identifier("var_sp_16")));
+  EXPECT_EQ(CountVariableReadUsesInStatement(*bitcast_assign, "var_sp_16"), 1);
+  EXPECT_TRUE(StatementTakesAddressOf(*bitcast_assign, "var_sp_16",
+                                      /*ignore_assigned_float_bitcast_lhs=*/false));
+  EXPECT_FALSE(StatementTakesAddressOf(*bitcast_assign, "var_sp_16",
+                                       /*ignore_assigned_float_bitcast_lhs=*/true));
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Label("loop_lbl"));
+  body->AddStatement(CStatement::Break());
+  auto while_stmt = CStatement::While(CExpression::Integer(1), std::move(body));
+  EXPECT_TRUE(StatementContainsLabel(*while_stmt));
+  EXPECT_TRUE(StatementContainsControlFlowJump(*while_stmt));
+  EXPECT_TRUE(StatementContainsLoop(*while_stmt));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

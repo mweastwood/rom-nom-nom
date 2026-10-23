@@ -295,5 +295,19 @@ TEST(StackFrameAnalyzerTest, StoresAt16SpAfterPriorCallWithoutArg2Or3DoNotInflat
   EXPECT_EQ(analysis.sp_buffer_size, 72);
 }
 
+TEST(StackFrameAnalyzerTest, FormatsStackVarNameAndComputesDaddiuFrameSize) {
+  EXPECT_EQ(StackFrameAnalyzer::StackVarName(24), "var_sp_24");
+  EXPECT_EQ(StackFrameAnalyzer::StackVarName(-8), "var_sp_neg_8");
+
+  std::vector<uint32_t> words = {
+      0x67BDFFE0,  // 00: daddiu $sp, $sp, -32
+      0x03E00008,  // 04: jr     $ra
+      0x67BD0020,  // 08: daddiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  EXPECT_EQ(StackFrameAnalyzer::ComputeFrameSize(cfg), 32u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

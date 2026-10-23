@@ -72,6 +72,54 @@ bool IsActiveFloatGpr(const Cop1LiftState& state, Register r) {
 
 }  // namespace
 
+std::optional<uint32_t> ExtractMtc1ConstantBits(Register rt, const RegisterTracker& tracker) {
+  if (rt == Register::kZero) {
+    return 0u;
+  }
+  TrackedValue tv = tracker.GetRegisterValue(rt);
+  if (tv.kind == ValueKind::kConstant || tv.kind == ValueKind::kSymbolAddress) {
+    return tv.constant_value;
+  }
+  if (tv.kind == ValueKind::kSymbolHi) {
+    return tv.symbol_hi;
+  }
+  return std::nullopt;
+}
+
+void InvalidateNonMtc1FprConstantBits(const Instruction& inst,
+                                      std::optional<uint32_t>* fpr_const_bits) {
+  if (inst.opcode == Opcode::kMtc1 || fpr_const_bits == nullptr) {
+    return;
+  }
+  RegisterUseDef ud = GetInstructionUseDef(inst);
+  for (FpRegister d : ud.fpr_defs) {
+    int f_idx = static_cast<int>(d);
+    fpr_const_bits[f_idx] = std::nullopt;
+    if ((f_idx % 2) == 0 && f_idx + 1 < 32) {
+      fpr_const_bits[f_idx + 1] = std::nullopt;
+    }
+  }
+  if (inst.IsCall()) {
+    for (int f = 0; f < 20; ++f) {
+      fpr_const_bits[f] = std::nullopt;
+    }
+  }
+}
+
+void StepFprConstantBits(const Instruction& inst, const RegisterTracker& tracker,
+                         std::optional<uint32_t>* fpr_const_bits) {
+  if (fpr_const_bits == nullptr) {
+    return;
+  }
+  if (inst.opcode == Opcode::kMtc1) {
+    if (inst.fs.has_value() && inst.rt.has_value()) {
+      fpr_const_bits[static_cast<int>(*inst.fs)] = ExtractMtc1ConstantBits(*inst.rt, tracker);
+    }
+    return;
+  }
+  InvalidateNonMtc1FprConstantBits(inst, fpr_const_bits);
+}
+
 void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1LiftState& state) {
   const auto& ctx = state.ctx;
   const auto& instructions_to_process = state.instructions_to_process;
@@ -514,27 +562,10 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
           }
         }
 
-        uint32_t val_bits = 0;
-        bool has_val_bits = false;
-        if (*inst.rt == Register::kZero) {
-          val_bits = 0;
-          has_val_bits = true;
-        } else {
-          TrackedValue tv = tracker.GetRegisterValue(*inst.rt);
-          if (tv.kind == ValueKind::kConstant || tv.kind == ValueKind::kSymbolAddress) {
-            val_bits = tv.constant_value;
-            has_val_bits = true;
-          } else if (tv.kind == ValueKind::kSymbolHi) {
-            val_bits = tv.symbol_hi;
-            has_val_bits = true;
-          }
-        }
-
-        if (has_val_bits) {
-          fpr_const_bits[fs_idx] = val_bits;
-        } else {
-          fpr_const_bits[fs_idx] = std::nullopt;
-        }
+        std::optional<uint32_t> const_bits = ExtractMtc1ConstantBits(*inst.rt, tracker);
+        fpr_const_bits[fs_idx] = const_bits;
+        const bool has_val_bits = const_bits.has_value();
+        const uint32_t val_bits = const_bits.value_or(0);
 
         LiftedStatement statement;
         statement.kind = StatementKind::kAssignment;

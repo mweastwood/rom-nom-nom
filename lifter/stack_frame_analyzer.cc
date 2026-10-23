@@ -14,6 +14,101 @@
 
 namespace rom_nom_nom {
 
+std::string StackFrameAnalyzer::StackVarName(int32_t offset) {
+  if (offset < 0) {
+    return absl::StrFormat("var_sp_neg_%d", -offset);
+  }
+  return absl::StrFormat("var_sp_%d", offset);
+}
+
+uint32_t StackFrameAnalyzer::ComputeFrameSize(const ControlFlowGraph& cfg) {
+  uint32_t frame_size = 0;
+  for (const auto& block : cfg.Blocks()) {
+    for (const auto& inst : block.instructions) {
+      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+           inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+          inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
+        frame_size = std::max(frame_size, static_cast<uint32_t>(-inst.immediate));
+      }
+    }
+  }
+  return frame_size;
+}
+
+void StackFrameAnalyzer::ScanInstructionsPass1(absl::Span<const Instruction> instructions,
+                                               StackFrameAnalysis* analysis) {
+  for (const auto& inst : instructions) {
+    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+        inst.rt.has_value() && *inst.rt == Register::kSp && inst.rs == Register::kSp &&
+        inst.immediate < 0) {
+      analysis->frame_size = std::max(analysis->frame_size, static_cast<int32_t>(-inst.immediate));
+    }
+    if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
+         inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd) &&
+        inst.rd.has_value() && *inst.rd == Register::kFp &&
+        ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
+         (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
+      analysis->has_frame_pointer = true;
+    }
+    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+        inst.rt.has_value() && *inst.rt == Register::kFp && inst.rs == Register::kSp &&
+        inst.immediate == 0) {
+      analysis->has_frame_pointer = true;
+    }
+    if (inst.IsCall()) {
+      analysis->has_calls = true;
+    }
+    if (inst.IsStore() &&
+        (inst.rs == Register::kSp || (analysis->has_frame_pointer && inst.rs == Register::kFp))) {
+      analysis->stack_store_offsets.insert(inst.immediate);
+    }
+  }
+}
+
+bool StackFrameAnalyzer::IsCallerHomedScalarAddr(
+    int32_t frame_size, int32_t imm, const absl::flat_hash_set<int32_t>& stack_store_offsets) {
+  const int32_t caller_frame_start = (frame_size > 0) ? frame_size : 16;
+  return frame_size > 0 && imm >= caller_frame_start && imm < caller_frame_start + 16 &&
+         (imm % 4) == 0 && stack_store_offsets.contains(imm);
+}
+
+void StackFrameAnalyzer::ScanInstructionsAddressTaken(
+    absl::Span<const Instruction> instructions, StackFrameAnalysis* analysis,
+    absl::flat_hash_set<int32_t>* addr_taken_offsets) {
+  for (const auto& inst : instructions) {
+    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+        (inst.rs == Register::kSp || (analysis->has_frame_pointer && inst.rs == Register::kFp)) &&
+        inst.rt.has_value() && *inst.rt != Register::kSp &&
+        (!analysis->has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0 &&
+        !IsCallerHomedScalarAddr(analysis->frame_size, inst.immediate,
+                                 analysis->stack_store_offsets)) {
+      analysis->sp_address_taken = true;
+      if (addr_taken_offsets != nullptr) {
+        addr_taken_offsets->insert(inst.immediate);
+      }
+    }
+    if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
+         inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd ||
+         inst.opcode == Opcode::kOr) &&
+        (inst.rs == Register::kSp || inst.rt == Register::kSp ||
+         (analysis->has_frame_pointer && (inst.rs == Register::kFp || inst.rt == Register::kFp))) &&
+        inst.rd.has_value() && *inst.rd != Register::kSp &&
+        (!analysis->has_frame_pointer || *inst.rd != Register::kFp)) {
+      analysis->sp_address_taken = true;
+    }
+    if ((inst.opcode == Opcode::kLwl || inst.opcode == Opcode::kLwr ||
+         inst.opcode == Opcode::kSwl || inst.opcode == Opcode::kSwr ||
+         inst.opcode == Opcode::kLdl || inst.opcode == Opcode::kLdr ||
+         inst.opcode == Opcode::kSdl || inst.opcode == Opcode::kSdr) &&
+        (inst.rs == Register::kSp || (analysis->has_frame_pointer && inst.rs == Register::kFp))) {
+      analysis->sp_address_taken = true;
+    }
+  }
+}
+
 PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg,
                                                      bool has_frame_pointer) {
   PrologueAnalysis result;
@@ -100,70 +195,14 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
   absl::flat_hash_set<int32_t> addr_taken_offsets;
 
   for (const auto& block : cfg.Blocks()) {
-    for (const auto& inst : block.instructions) {
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-           inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-          inst.rt.has_value() && *inst.rt == Register::kSp && inst.rs == Register::kSp &&
-          inst.immediate < 0) {
-        analysis.frame_size = std::max(analysis.frame_size, static_cast<int32_t>(-inst.immediate));
-      }
-      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
-           inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd) &&
-          inst.rd.has_value() && *inst.rd == Register::kFp &&
-          ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
-           (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
-        analysis.has_frame_pointer = true;
-      }
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-           inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-          inst.rt.has_value() && *inst.rt == Register::kFp && inst.rs == Register::kSp &&
-          inst.immediate == 0) {
-        analysis.has_frame_pointer = true;
-      }
-      if (inst.IsCall()) {
-        analysis.has_calls = true;
-      }
-      if (inst.IsStore() &&
-          (inst.rs == Register::kSp || (analysis.has_frame_pointer && inst.rs == Register::kFp))) {
-        analysis.stack_store_offsets.insert(inst.immediate);
-      }
-    }
+    ScanInstructionsPass1(block.instructions, &analysis);
   }
 
   const int32_t caller_frame_start = (analysis.frame_size > 0) ? analysis.frame_size : 16;
-  auto is_caller_homed_scalar_addr = [&](int32_t imm) -> bool {
-    return analysis.frame_size > 0 && imm >= caller_frame_start && imm < caller_frame_start + 16 &&
-           (imm % 4) == 0 && analysis.stack_store_offsets.contains(imm);
-  };
 
   for (const auto& block : cfg.Blocks()) {
+    ScanInstructionsAddressTaken(block.instructions, &analysis, &addr_taken_offsets);
     for (const auto& inst : block.instructions) {
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
-           inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-          (inst.rs == Register::kSp || (analysis.has_frame_pointer && inst.rs == Register::kFp)) &&
-          inst.rt.has_value() && *inst.rt != Register::kSp &&
-          (!analysis.has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0 &&
-          !is_caller_homed_scalar_addr(inst.immediate)) {
-        analysis.sp_address_taken = true;
-        addr_taken_offsets.insert(inst.immediate);
-      }
-      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
-           inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd ||
-           inst.opcode == Opcode::kOr) &&
-          (inst.rs == Register::kSp || inst.rt == Register::kSp ||
-           (analysis.has_frame_pointer &&
-            (inst.rs == Register::kFp || inst.rt == Register::kFp))) &&
-          inst.rd.has_value() && *inst.rd != Register::kSp &&
-          (!analysis.has_frame_pointer || *inst.rd != Register::kFp)) {
-        analysis.sp_address_taken = true;
-      }
-      if ((inst.opcode == Opcode::kLwl || inst.opcode == Opcode::kLwr ||
-           inst.opcode == Opcode::kSwl || inst.opcode == Opcode::kSwr ||
-           inst.opcode == Opcode::kLdl || inst.opcode == Opcode::kLdr ||
-           inst.opcode == Opcode::kSdl || inst.opcode == Opcode::kSdr) &&
-          (inst.rs == Register::kSp || (analysis.has_frame_pointer && inst.rs == Register::kFp))) {
-        analysis.sp_address_taken = true;
-      }
       if (inst.rs == Register::kSp || (analysis.has_frame_pointer && inst.rs == Register::kFp)) {
         int32_t offset = inst.immediate;
         if (inst.IsStore()) {
@@ -173,9 +212,7 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           continue;
         }
         if (inst.IsStore()) {
-          std::string var_name = offset < 0 ? absl::StrFormat("var_sp_neg_%d", -offset)
-                                            : absl::StrFormat("var_sp_%d", offset);
-          analysis.stack_stores.try_emplace(offset, std::move(var_name));
+          analysis.stack_stores.try_emplace(offset, StackVarName(offset));
         }
         if (inst.IsLoad()) {
           loaded_offsets.insert(offset);

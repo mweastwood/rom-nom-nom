@@ -479,111 +479,392 @@ bool StatementReferencesVariable(const CStatement& stmt, std::string_view target
   }
 }
 
-bool ExpressionTakesAddressOf(const CExpression& expr, std::string_view target_var) {
+bool ExpressionTakesAddressOf(const CExpression& expr, std::string_view target_var,
+                              bool ignore_assigned_float_bitcast_lhs) {
   switch (expr.Kind()) {
     case CExpressionKind::kUnaryExpression: {
       const auto& un = static_cast<const UnaryExpression&>(expr);
-      if (un.IsPrefix() && (un.Op() == "&" || absl::EndsWith(un.Op(), "*&")) &&
+      if (un.IsPrefix() &&
+          (un.Op() == "&" || absl::EndsWith(un.Op(), "*&") ||
+           un.Op().find('&') != std::string::npos) &&
           un.Operand().Kind() == CExpressionKind::kIdentifier &&
           static_cast<const IdentifierExpression&>(un.Operand()).Name() == target_var) {
         return true;
       }
-      return ExpressionTakesAddressOf(un.Operand(), target_var);
+      return ExpressionTakesAddressOf(un.Operand(), target_var, ignore_assigned_float_bitcast_lhs);
     }
     case CExpressionKind::kBinaryExpression: {
       const auto& bin = static_cast<const BinaryExpression&>(expr);
-      return ExpressionTakesAddressOf(bin.Lhs(), target_var) ||
-             ExpressionTakesAddressOf(bin.Rhs(), target_var);
+      return ExpressionTakesAddressOf(bin.Lhs(), target_var, ignore_assigned_float_bitcast_lhs) ||
+             ExpressionTakesAddressOf(bin.Rhs(), target_var, ignore_assigned_float_bitcast_lhs);
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& assign = static_cast<const AssignmentExpression&>(expr);
-      return ExpressionTakesAddressOf(assign.Lhs(), target_var) ||
-             ExpressionTakesAddressOf(assign.Rhs(), target_var);
+      if (!ignore_assigned_float_bitcast_lhs || assign.Op() != "=" ||
+          ExtractAssignedLhsVar(assign.Lhs()).empty()) {
+        if (ExpressionTakesAddressOf(assign.Lhs(), target_var, ignore_assigned_float_bitcast_lhs)) {
+          return true;
+        }
+      }
+      return ExpressionTakesAddressOf(assign.Rhs(), target_var, ignore_assigned_float_bitcast_lhs);
     }
     case CExpressionKind::kCastExpression:
       return ExpressionTakesAddressOf(static_cast<const CastExpression&>(expr).Operand(),
-                                      target_var);
+                                      target_var, ignore_assigned_float_bitcast_lhs);
     case CExpressionKind::kCallExpression: {
       const auto& call = static_cast<const CallExpression&>(expr);
-      if (ExpressionTakesAddressOf(call.Callee(), target_var)) return true;
+      if (ExpressionTakesAddressOf(call.Callee(), target_var, ignore_assigned_float_bitcast_lhs)) {
+        return true;
+      }
       for (const auto& arg : call.Arguments()) {
-        if (arg != nullptr && ExpressionTakesAddressOf(*arg, target_var)) return true;
+        if (arg != nullptr &&
+            ExpressionTakesAddressOf(*arg, target_var, ignore_assigned_float_bitcast_lhs)) {
+          return true;
+        }
       }
       return false;
     }
     case CExpressionKind::kMemberAccessExpression:
       return ExpressionTakesAddressOf(static_cast<const MemberAccessExpression&>(expr).Object(),
-                                      target_var);
+                                      target_var, ignore_assigned_float_bitcast_lhs);
     case CExpressionKind::kArrayIndexExpression: {
       const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
-      return ExpressionTakesAddressOf(arr.Array(), target_var) ||
-             ExpressionTakesAddressOf(arr.Index(), target_var);
+      return ExpressionTakesAddressOf(arr.Array(), target_var, ignore_assigned_float_bitcast_lhs) ||
+             ExpressionTakesAddressOf(arr.Index(), target_var, ignore_assigned_float_bitcast_lhs);
     }
     case CExpressionKind::kTernaryExpression: {
       const auto& tern = static_cast<const TernaryExpression&>(expr);
-      return ExpressionTakesAddressOf(tern.Condition(), target_var) ||
-             ExpressionTakesAddressOf(tern.TrueExpression(), target_var) ||
-             ExpressionTakesAddressOf(tern.FalseExpression(), target_var);
+      return ExpressionTakesAddressOf(tern.Condition(), target_var,
+                                      ignore_assigned_float_bitcast_lhs) ||
+             ExpressionTakesAddressOf(tern.TrueExpression(), target_var,
+                                      ignore_assigned_float_bitcast_lhs) ||
+             ExpressionTakesAddressOf(tern.FalseExpression(), target_var,
+                                      ignore_assigned_float_bitcast_lhs);
     }
     default:
       return false;
   }
 }
 
-bool StatementTakesAddressOf(const CStatement& stmt, std::string_view target_var) {
+bool StatementTakesAddressOf(const CStatement& stmt, std::string_view target_var,
+                             bool ignore_assigned_float_bitcast_lhs) {
   switch (stmt.Kind()) {
     case CStatementKind::kExpressionStatement:
       return ExpressionTakesAddressOf(static_cast<const ExpressionStatement&>(stmt).Expression(),
-                                      target_var);
+                                      target_var, ignore_assigned_float_bitcast_lhs);
     case CStatementKind::kVariableDeclarationStatement: {
       const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
-      return vd.Initializer() != nullptr && ExpressionTakesAddressOf(*vd.Initializer(), target_var);
+      return vd.Initializer() != nullptr &&
+             ExpressionTakesAddressOf(*vd.Initializer(), target_var,
+                                      ignore_assigned_float_bitcast_lhs);
     }
     case CStatementKind::kCompoundStatement: {
       for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-        if (child != nullptr && StatementTakesAddressOf(*child, target_var)) return true;
+        if (child != nullptr &&
+            StatementTakesAddressOf(*child, target_var, ignore_assigned_float_bitcast_lhs)) {
+          return true;
+        }
       }
       return false;
     }
     case CStatementKind::kIfStatement: {
       const auto& ifs = static_cast<const IfStatement&>(stmt);
-      if (ExpressionTakesAddressOf(ifs.Condition(), target_var) ||
-          StatementTakesAddressOf(ifs.ThenBranch(), target_var)) {
+      if (ExpressionTakesAddressOf(ifs.Condition(), target_var,
+                                   ignore_assigned_float_bitcast_lhs) ||
+          StatementTakesAddressOf(ifs.ThenBranch(), target_var,
+                                  ignore_assigned_float_bitcast_lhs)) {
         return true;
       }
-      return ifs.ElseBranch() != nullptr && StatementTakesAddressOf(*ifs.ElseBranch(), target_var);
+      return ifs.ElseBranch() != nullptr &&
+             StatementTakesAddressOf(*ifs.ElseBranch(), target_var,
+                                     ignore_assigned_float_bitcast_lhs);
     }
     case CStatementKind::kWhileStatement: {
       const auto& ws = static_cast<const WhileStatement&>(stmt);
-      return ExpressionTakesAddressOf(ws.Condition(), target_var) ||
-             StatementTakesAddressOf(ws.Body(), target_var);
+      return ExpressionTakesAddressOf(ws.Condition(), target_var,
+                                      ignore_assigned_float_bitcast_lhs) ||
+             StatementTakesAddressOf(ws.Body(), target_var, ignore_assigned_float_bitcast_lhs);
     }
     case CStatementKind::kDoWhileStatement: {
       const auto& dws = static_cast<const DoWhileStatement&>(stmt);
-      return StatementTakesAddressOf(dws.Body(), target_var) ||
-             ExpressionTakesAddressOf(dws.Condition(), target_var);
+      return StatementTakesAddressOf(dws.Body(), target_var, ignore_assigned_float_bitcast_lhs) ||
+             ExpressionTakesAddressOf(dws.Condition(), target_var,
+                                      ignore_assigned_float_bitcast_lhs);
     }
     case CStatementKind::kForStatement: {
       const auto& fs = static_cast<const ForStatement&>(stmt);
-      if (fs.Init() != nullptr && StatementTakesAddressOf(*fs.Init(), target_var)) return true;
-      if (fs.Condition() != nullptr && ExpressionTakesAddressOf(*fs.Condition(), target_var)) {
+      if (fs.Init() != nullptr &&
+          StatementTakesAddressOf(*fs.Init(), target_var, ignore_assigned_float_bitcast_lhs)) {
         return true;
       }
-      if (fs.Step() != nullptr && ExpressionTakesAddressOf(*fs.Step(), target_var)) return true;
-      return StatementTakesAddressOf(fs.Body(), target_var);
+      if (fs.Condition() != nullptr &&
+          ExpressionTakesAddressOf(*fs.Condition(), target_var,
+                                   ignore_assigned_float_bitcast_lhs)) {
+        return true;
+      }
+      if (fs.Step() != nullptr &&
+          ExpressionTakesAddressOf(*fs.Step(), target_var, ignore_assigned_float_bitcast_lhs)) {
+        return true;
+      }
+      return StatementTakesAddressOf(fs.Body(), target_var, ignore_assigned_float_bitcast_lhs);
     }
     case CStatementKind::kReturnStatement: {
       const auto& rs = static_cast<const ReturnStatement&>(stmt);
-      return rs.ReturnValue() != nullptr && ExpressionTakesAddressOf(*rs.ReturnValue(), target_var);
+      return rs.ReturnValue() != nullptr &&
+             ExpressionTakesAddressOf(*rs.ReturnValue(), target_var,
+                                      ignore_assigned_float_bitcast_lhs);
     }
     case CStatementKind::kSwitchStatement: {
       const auto& ss = static_cast<const SwitchStatement&>(stmt);
-      if (ExpressionTakesAddressOf(ss.Condition(), target_var)) return true;
+      if (ExpressionTakesAddressOf(ss.Condition(), target_var, ignore_assigned_float_bitcast_lhs)) {
+        return true;
+      }
       for (const auto& c : ss.Cases()) {
-        if (c.body != nullptr && StatementTakesAddressOf(*c.body, target_var)) return true;
+        if (c.body != nullptr &&
+            StatementTakesAddressOf(*c.body, target_var, ignore_assigned_float_bitcast_lhs)) {
+          return true;
+        }
       }
       return false;
     }
+    default:
+      return false;
+  }
+}
+
+std::string_view ExtractFloatBitcastLhsVar(const CExpression& lhs) {
+  if (lhs.Kind() != CExpressionKind::kUnaryExpression) return {};
+  const auto& deref = static_cast<const UnaryExpression&>(lhs);
+  if (deref.Op() != "*" || !deref.IsPrefix()) return {};
+  if (deref.Operand().Kind() != CExpressionKind::kCastExpression) return {};
+  const auto& cast = static_cast<const CastExpression&>(deref.Operand());
+  if (cast.TargetType().name != "f32" || cast.TargetType().pointer_depth != 1) return {};
+  if (cast.Operand().Kind() != CExpressionKind::kUnaryExpression) return {};
+  const auto& addr = static_cast<const UnaryExpression&>(cast.Operand());
+  if (addr.Op() != "&" || !addr.IsPrefix()) return {};
+  if (addr.Operand().Kind() != CExpressionKind::kIdentifier) return {};
+  return static_cast<const IdentifierExpression&>(addr.Operand()).Name();
+}
+
+std::string_view ExtractAssignedLhsVar(const CExpression& lhs) {
+  if (lhs.Kind() == CExpressionKind::kIdentifier) {
+    return static_cast<const IdentifierExpression&>(lhs).Name();
+  }
+  return ExtractFloatBitcastLhsVar(lhs);
+}
+
+int CountVariableReadUsesInExpression(const CExpression& expression, std::string_view var) {
+  switch (expression.Kind()) {
+    case CExpressionKind::kIdentifier: {
+      const std::string& id_name = static_cast<const IdentifierExpression&>(expression).Name();
+      if (id_name == var) return 1;
+      if (absl::StartsWith(id_name, "((") && absl::EndsWith(id_name, ")")) {
+        std::string suffix = absl::StrCat(")", var, ")");
+        if (absl::EndsWith(id_name, suffix)) return 1;
+      }
+      return 0;
+    }
+    case CExpressionKind::kUnaryExpression:
+      return CountVariableReadUsesInExpression(
+          static_cast<const UnaryExpression&>(expression).Operand(), var);
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expression);
+      return CountVariableReadUsesInExpression(bin.Lhs(), var) +
+             CountVariableReadUsesInExpression(bin.Rhs(), var);
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expression);
+      int lhs_uses = 0;
+      if (assign.Op() != "=" || ExtractAssignedLhsVar(assign.Lhs()).empty()) {
+        lhs_uses = CountVariableReadUsesInExpression(assign.Lhs(), var);
+      }
+      return lhs_uses + CountVariableReadUsesInExpression(assign.Rhs(), var);
+    }
+    case CExpressionKind::kCastExpression:
+      return CountVariableReadUsesInExpression(
+          static_cast<const CastExpression&>(expression).Operand(), var);
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expression);
+      return CountVariableReadUsesInExpression(arr.Array(), var) +
+             CountVariableReadUsesInExpression(arr.Index(), var);
+    }
+    case CExpressionKind::kMemberAccessExpression:
+      return CountVariableReadUsesInExpression(
+          static_cast<const MemberAccessExpression&>(expression).Object(), var);
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expression);
+      return CountVariableReadUsesInExpression(tern.Condition(), var) +
+             CountVariableReadUsesInExpression(tern.TrueExpression(), var) +
+             CountVariableReadUsesInExpression(tern.FalseExpression(), var);
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expression);
+      int total = CountVariableReadUsesInExpression(call.Callee(), var);
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr) total += CountVariableReadUsesInExpression(*arg, var);
+      }
+      return total;
+    }
+    default:
+      return 0;
+  }
+}
+
+int CountVariableReadUsesInStatement(const CStatement& statement, std::string_view var) {
+  switch (statement.Kind()) {
+    case CStatementKind::kExpressionStatement:
+      return CountVariableReadUsesInExpression(
+          static_cast<const ExpressionStatement&>(statement).Expression(), var);
+    case CStatementKind::kReturnStatement: {
+      const auto& ret = static_cast<const ReturnStatement&>(statement);
+      return ret.ReturnValue() != nullptr
+                 ? CountVariableReadUsesInExpression(*ret.ReturnValue(), var)
+                 : 0;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(statement);
+      int total = CountVariableReadUsesInExpression(ifs.Condition(), var) +
+                  CountVariableReadUsesInStatement(ifs.ThenBranch(), var);
+      if (ifs.ElseBranch() != nullptr) {
+        total += CountVariableReadUsesInStatement(*ifs.ElseBranch(), var);
+      }
+      return total;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(statement);
+      return CountVariableReadUsesInExpression(ws.Condition(), var) +
+             CountVariableReadUsesInStatement(ws.Body(), var);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(statement);
+      return CountVariableReadUsesInExpression(dws.Condition(), var) +
+             CountVariableReadUsesInStatement(dws.Body(), var);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(statement);
+      int total = CountVariableReadUsesInStatement(fs.Body(), var);
+      if (fs.Init() != nullptr) {
+        total += CountVariableReadUsesInStatement(*fs.Init(), var);
+      }
+      if (fs.Condition() != nullptr) {
+        total += CountVariableReadUsesInExpression(*fs.Condition(), var);
+      }
+      if (fs.Step() != nullptr) {
+        total += CountVariableReadUsesInExpression(*fs.Step(), var);
+      }
+      return total;
+    }
+    case CStatementKind::kCompoundStatement: {
+      int total = 0;
+      for (const auto& child : static_cast<const CompoundStatement&>(statement).Statements()) {
+        if (child != nullptr) total += CountVariableReadUsesInStatement(*child, var);
+      }
+      return total;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(statement);
+      int total = CountVariableReadUsesInExpression(ss.Condition(), var);
+      for (const auto& sc : ss.Cases()) {
+        if (sc.body != nullptr) total += CountVariableReadUsesInStatement(*sc.body, var);
+      }
+      return total;
+    }
+    default:
+      return 0;
+  }
+}
+
+bool StatementContainsLabel(const CStatement& stmt) {
+  if (stmt.Kind() == CStatementKind::kLabelStatement) return true;
+  switch (stmt.Kind()) {
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return StatementContainsLabel(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StatementContainsLabel(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement:
+      return StatementContainsLabel(static_cast<const WhileStatement&>(stmt).Body());
+    case CStatementKind::kDoWhileStatement:
+      return StatementContainsLabel(static_cast<const DoWhileStatement&>(stmt).Body());
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StatementContainsLabel(*fs.Init())) ||
+             StatementContainsLabel(fs.Body());
+    }
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementContainsLabel(*child)) return true;
+      }
+      return false;
+    case CStatementKind::kSwitchStatement:
+      for (const auto& sc : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (sc.body != nullptr && StatementContainsLabel(*sc.body)) return true;
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+bool StatementContainsControlFlowJump(const CStatement& stmt) {
+  if (stmt.Kind() == CStatementKind::kBreakStatement ||
+      stmt.Kind() == CStatementKind::kContinueStatement ||
+      stmt.Kind() == CStatementKind::kGotoStatement ||
+      stmt.Kind() == CStatementKind::kLabelStatement) {
+    return true;
+  }
+  switch (stmt.Kind()) {
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return StatementContainsControlFlowJump(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StatementContainsControlFlowJump(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement:
+      return StatementContainsControlFlowJump(static_cast<const WhileStatement&>(stmt).Body());
+    case CStatementKind::kDoWhileStatement:
+      return StatementContainsControlFlowJump(static_cast<const DoWhileStatement&>(stmt).Body());
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StatementContainsControlFlowJump(*fs.Init())) ||
+             StatementContainsControlFlowJump(fs.Body());
+    }
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementContainsControlFlowJump(*child)) return true;
+      }
+      return false;
+    case CStatementKind::kSwitchStatement:
+      for (const auto& sc : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (sc.body != nullptr && StatementContainsControlFlowJump(*sc.body)) return true;
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+bool StatementContainsLoop(const CStatement& stmt) {
+  if (stmt.Kind() == CStatementKind::kWhileStatement ||
+      stmt.Kind() == CStatementKind::kDoWhileStatement ||
+      stmt.Kind() == CStatementKind::kForStatement) {
+    return true;
+  }
+  switch (stmt.Kind()) {
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return StatementContainsLoop(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StatementContainsLoop(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kSwitchStatement:
+      for (const auto& sc : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (sc.body != nullptr && StatementContainsLoop(*sc.body)) return true;
+      }
+      return false;
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementContainsLoop(*child)) return true;
+      }
+      return false;
     default:
       return false;
   }

@@ -16,6 +16,7 @@
 #include "core/mips.h"
 #include "core/register_tracker.h"
 #include "core/symbol_registry.h"
+#include "lifter/stack_frame_analyzer.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -30,16 +31,7 @@ absl::flat_hash_map<uint32_t, size_t> BuildBlockIdToIndex(const ControlFlowGraph
 }
 
 uint32_t ComputeMaxFrameSize(const ControlFlowGraph& cfg) {
-  uint32_t frame_size = 0;
-  for (const auto& block : cfg.Blocks()) {
-    for (const auto& inst : block.instructions) {
-      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi) &&
-          inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
-        frame_size = std::max(frame_size, static_cast<uint32_t>(-inst.immediate));
-      }
-    }
-  }
-  return frame_size;
+  return StackFrameAnalyzer::ComputeFrameSize(cfg);
 }
 
 bool IsLiveInOnCfg(const ControlFlowGraph& cfg,
@@ -124,12 +116,7 @@ bool IsFprConvertedFromInt(const ControlFlowGraph& cfg,
 }
 
 bool IsDoublePrecisionUseOp(Opcode op) {
-  return (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
-          op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
-          op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtSD ||
-          op == Opcode::kTruncWD || op == Opcode::kRoundWD || op == Opcode::kCeilWD ||
-          op == Opcode::kFloorWD || op == Opcode::kCEqD || op == Opcode::kCLtD ||
-          op == Opcode::kCLeD || op == Opcode::kSdc1 || op == Opcode::kDmfc1);
+  return AbiAnalyzer::IsDoublePrecisionUseOp(op);
 }
 
 bool DefinesFprAsDouble(const Instruction& inst, FpRegister reg) {
@@ -209,6 +196,52 @@ void RecordReturnRegisterDefs(const RegisterUseDef& ud, bool* v0_live, bool* v1_
 }
 
 }  // namespace
+
+bool AbiAnalyzer::IsDoublePrecisionUseOp(Opcode op) {
+  return (op == Opcode::kAddD || op == Opcode::kSubD || op == Opcode::kMulD ||
+          op == Opcode::kDivD || op == Opcode::kSqrtD || op == Opcode::kAbsD ||
+          op == Opcode::kMovD || op == Opcode::kNegD || op == Opcode::kCvtSD ||
+          op == Opcode::kTruncWD || op == Opcode::kRoundWD || op == Opcode::kCeilWD ||
+          op == Opcode::kFloorWD || op == Opcode::kCEqD || op == Opcode::kCLtD ||
+          op == Opcode::kCLeD || op == Opcode::kSdc1 || op == Opcode::kDmfc1);
+}
+
+CallReturnInfo AbiAnalyzer::ScanCallReturnUsage(absl::Span<const Instruction> instructions,
+                                                size_t start_idx, bool stop_at_branches) {
+  CallReturnInfo info;
+  bool v0_live = true;
+  bool v1_live = true;
+  bool f0_live = true;
+
+  for (size_t next_i = start_idx; next_i < instructions.size(); ++next_i) {
+    const auto& next_inst = instructions[next_i];
+    if (!stop_at_branches &&
+        (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr)) {
+      break;
+    }
+
+    RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
+    RecordReturnRegisterUses(next_inst, next_ud, &v0_live, &v1_live, &f0_live, &info);
+    RecordReturnRegisterDefs(next_ud, &v0_live, &v1_live, &f0_live);
+
+    if (stop_at_branches &&
+        (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr ||
+         next_inst.opcode == Opcode::kJ || next_inst.opcode == Opcode::kJr ||
+         next_inst.IsUnconditionalBranch())) {
+      if (next_i + 1 < instructions.size()) {
+        const auto& ds_inst = instructions[next_i + 1];
+        RegisterUseDef ds_ud = GetInstructionUseDef(ds_inst);
+        RecordReturnRegisterUses(ds_inst, ds_ud, &v0_live, &v1_live, &f0_live, &info);
+      }
+      break;
+    }
+
+    if (!v0_live && !v1_live && !f0_live) {
+      break;
+    }
+  }
+  return info;
+}
 
 std::string AbiAnalyzer::RegisterVarName(Register reg) {
   switch (reg) {

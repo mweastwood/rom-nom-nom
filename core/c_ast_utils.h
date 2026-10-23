@@ -47,13 +47,33 @@ bool StatementContainsCall(const CStatement& stmt, bool ignore_math_intrinsics =
 int CountIdentifierOccurrencesInExpression(const CExpression& expression, std::string_view name);
 int CountIdentifierOccurrencesInStatement(const CStatement& statement, std::string_view name);
 
+// Extracts the variable name from an `*(f32*)&var` LHS expression, or empty if not matching.
+std::string_view ExtractFloatBitcastLhsVar(const CExpression& lhs);
+
+// Extracts the assigned variable name from a direct identifier LHS (`var`) or `*(f32*)&var`.
+std::string_view ExtractAssignedLhsVar(const CExpression& lhs);
+
+// Counts read uses of `var` in `expression` or `statement` (excluding simple `var = ...` or
+// `*(f32*)&var = ...` assignment targets).
+int CountVariableReadUsesInExpression(const CExpression& expression, std::string_view var);
+int CountVariableReadUsesInStatement(const CStatement& statement, std::string_view var);
+
 // Returns true if `expr` or `stmt` references `target_var`.
 bool ExpressionUsesVariable(const CExpression& expr, std::string_view target_var);
 bool StatementReferencesVariable(const CStatement& stmt, std::string_view target_var);
 
 // Returns true if `expr` or `stmt` takes the address of `target_var` (e.g., `&x`, `*(f32*)&x`).
-bool ExpressionTakesAddressOf(const CExpression& expr, std::string_view target_var);
-bool StatementTakesAddressOf(const CStatement& stmt, std::string_view target_var);
+// When `ignore_assigned_float_bitcast_lhs` is true, `*(f32*)&x = ...` on the LHS of `=` is ignored.
+bool ExpressionTakesAddressOf(const CExpression& expr, std::string_view target_var,
+                              bool ignore_assigned_float_bitcast_lhs = false);
+bool StatementTakesAddressOf(const CStatement& stmt, std::string_view target_var,
+                             bool ignore_assigned_float_bitcast_lhs = false);
+
+// Returns true if `stmt` contains any `LabelStatement`, control-flow jump (`break`, `continue`,
+// `goto`, `label`), or loop (`while`, `do-while`, `for`).
+bool StatementContainsLabel(const CStatement& stmt);
+bool StatementContainsControlFlowJump(const CStatement& stmt);
+bool StatementContainsLoop(const CStatement& stmt);
 
 // Returns true if `expr` or `stmt` assigns to or increments/decrements `target_var`.
 bool ExpressionModifiesVariable(const CExpression& expr, std::string_view target_var);

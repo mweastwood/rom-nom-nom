@@ -53,75 +53,13 @@ void ScanCallReturnRegisterUses(absl::Span<const Instruction> insts, size_t call
                                 const std::string& callee_name,
                                 absl::flat_hash_set<std::string>* callers_use_v0,
                                 absl::flat_hash_set<std::string>* callers_use_f0) {
-  bool v0_active = true;
-  bool f0_active = true;
-  for (size_t next_i = call_idx + 2; next_i < insts.size(); ++next_i) {
-    const auto& next_inst = insts[next_i];
-    RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
-    if (v0_active) {
-      for (Register r : next_ud.gpr_uses) {
-        if (r == Register::kV0) {
-          callers_use_v0->insert(callee_name);
-          v0_active = false;
-          break;
-        }
-      }
-      for (Register r : next_ud.gpr_defs) {
-        if (r == Register::kV0) {
-          v0_active = false;
-          break;
-        }
-      }
-    }
-    if (f0_active) {
-      for (FpRegister r : next_ud.fpr_uses) {
-        if (r == FpRegister::kF0) {
-          if (!callers_use_v0->contains(callee_name)) {
-            callers_use_f0->insert(callee_name);
-          }
-          f0_active = false;
-          break;
-        }
-      }
-      for (FpRegister r : next_ud.fpr_defs) {
-        if (r == FpRegister::kF0) {
-          f0_active = false;
-          break;
-        }
-      }
-    }
-    if (next_inst.opcode == Opcode::kJal || next_inst.opcode == Opcode::kJalr ||
-        next_inst.opcode == Opcode::kJ || next_inst.opcode == Opcode::kJr ||
-        next_inst.IsUnconditionalBranch()) {
-      // Also inspect the delay slot of this subsequent call/return before terminating scan
-      if (next_i + 1 < insts.size()) {
-        RegisterUseDef ds_ud = GetInstructionUseDef(insts[next_i + 1]);
-        if (v0_active) {
-          for (Register r : ds_ud.gpr_uses) {
-            if (r == Register::kV0) {
-              callers_use_v0->insert(callee_name);
-              v0_active = false;
-              break;
-            }
-          }
-        }
-        if (f0_active) {
-          for (FpRegister r : ds_ud.fpr_uses) {
-            if (r == FpRegister::kF0) {
-              if (!callers_use_v0->contains(callee_name)) {
-                callers_use_f0->insert(callee_name);
-              }
-              f0_active = false;
-              break;
-            }
-          }
-        }
-      }
-      break;
-    }
-    if (!v0_active && !f0_active) {
-      break;
-    }
+  CallReturnInfo info =
+      AbiAnalyzer::ScanCallReturnUsage(insts, call_idx + 2, /*stop_at_branches=*/true);
+  if (info.returns_v0) {
+    callers_use_v0->insert(callee_name);
+  }
+  if (info.returns_f0 && !callers_use_v0->contains(callee_name)) {
+    callers_use_f0->insert(callee_name);
   }
 }
 

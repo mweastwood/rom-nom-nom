@@ -45,6 +45,15 @@ class AbiAnalyzer {
       const ControlFlowGraph& cfg, bool function_returns_v0 = false,
       bool function_returns_f0 = false);
 
+  // Returns true if `op` consumes its floating-point source operands as double-precision values.
+  static bool IsDoublePrecisionUseOp(Opcode op);
+
+  // Scans instructions starting at `start_idx` for post-call uses of `$v0`, `$v1`, and `$f0`.
+  // When `stop_at_branches` is true, stops at unconditional jumps/returns (inspecting their delay
+  // slot) in addition to subsequent calls.
+  static CallReturnInfo ScanCallReturnUsage(absl::Span<const Instruction> instructions,
+                                            size_t start_idx, bool stop_at_branches = false);
+
   // Identifies double-precision float variables used in the CFG.
   static absl::flat_hash_set<std::string> IdentifyDoubleVariables(const ControlFlowGraph& cfg);
 

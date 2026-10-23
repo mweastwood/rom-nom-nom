@@ -40,6 +40,17 @@ void LiftCop1ArithmeticAndConvertInstruction(const Instruction& inst, size_t i,
 void LiftCop1ComparisonInstruction(const Instruction& inst,
                                    std::vector<LiftedStatement>& statements);
 
+// Extracts the constant 32-bit bit pattern moved by `mtc1 rt, fs` if `rt` holds a known constant.
+std::optional<uint32_t> ExtractMtc1ConstantBits(Register rt, const RegisterTracker& tracker);
+
+// Invalidates `fpr_const_bits` entries modified or clobbered by a non-`mtc1` instruction.
+void InvalidateNonMtc1FprConstantBits(const Instruction& inst,
+                                      std::optional<uint32_t>* fpr_const_bits);
+
+// Steps `fpr_const_bits` across `inst` (handling `mtc1`, FPR definitions, and calls).
+void StepFprConstantBits(const Instruction& inst, const RegisterTracker& tracker,
+                         std::optional<uint32_t>* fpr_const_bits);
+
 }  // namespace rom_nom_nom
 
 #endif  // ROM_NOM_NOM_LIFTER_COP1_LIFTER_H_
