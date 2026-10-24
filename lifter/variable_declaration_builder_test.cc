@@ -1067,5 +1067,55 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(code, HasSubstr("register s32 temp_s1 asm(\"$17\");"));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     PreservesUnreferencedLocalStackFrameSizeInLeafAndPartialSpillFunctions) {
+  std::vector<uint32_t> leaf_words = {
+      0x27BDFFF8,  // 00: addiu $sp, $sp, -8
+      0x24820001,  // 04: addiu $v0, $a0, 1
+      0x27BD0008,  // 08: addiu $sp, $sp, 8
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+  auto leaf_cfg = *ControlFlowGraph::Build(*DecodeSequence(leaf_words, 0x80003000));
+  DominatorTree dom = DominatorTree::Compute(leaf_cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(leaf_cfg);
+  LoopInfo loops = LoopInfo::Analyze(leaf_cfg, dom);
+  auto region = ControlFlowStructurer::Structure(leaf_cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "LeafWith8ByteFrame";
+  auto leaf_func = AstConverter::Convert(leaf_cfg, *region, nullptr, opts);
+  ASSERT_TRUE(leaf_func.ok()) << leaf_func.status();
+  EXPECT_THAT(leaf_func->ToString(), HasSubstr("u8 sp[8];"));
+
+  std::vector<uint32_t> partial_words = {
+      0x27BDFFF0,  // 00: addiu $sp, $sp, -16
+      0xAFA00004,  // 04: sw    $zero, 4($sp)
+      0xE7AC0000,  // 08: swc1  $f12, 0($sp)
+      0xE7AE0008,  // 0C: swc1  $f14, 8($sp)
+      0x8FA20000,  // 10: lw    $v0, 0($sp)
+      0x8FA30004,  // 14: lw    $v1, 4($sp)
+      0x8FA50008,  // 18: lw    $a1, 8($sp)
+      0xAC820000,  // 1C: sw    $v0, 0($a0)
+      0xAC830004,  // 20: sw    $v1, 4($a0)
+      0xAC850008,  // 24: sw    $a1, 8($a0)
+      0x27BD0010,  // 28: addiu $sp, $sp, 16
+      0x03E00008,  // 2C: jr    $ra
+      0x00000000,  // 30: nop
+  };
+  auto partial_cfg = *ControlFlowGraph::Build(*DecodeSequence(partial_words, 0x80003100));
+  DominatorTree p_dom = DominatorTree::Compute(partial_cfg);
+  DominatorTree p_pdom = DominatorTree::ComputePostDominators(partial_cfg);
+  LoopInfo p_loops = LoopInfo::Analyze(partial_cfg, p_dom);
+  auto p_region = ControlFlowStructurer::Structure(partial_cfg, p_dom, p_pdom, p_loops);
+  ASSERT_THAT(p_region, NotNull());
+
+  opts.function_name = "LeafWithPartialSpillFrame";
+  auto partial_func = AstConverter::Convert(partial_cfg, *p_region, nullptr, opts);
+  ASSERT_TRUE(partial_func.ok()) << partial_func.status();
+  EXPECT_THAT(partial_func->ToString(), HasSubstr("u8 sp[8];"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

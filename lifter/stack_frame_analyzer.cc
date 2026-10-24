@@ -349,14 +349,23 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
         }
 
         if (!saw_prior_call) {
+          bool all_preds_end_with_call = !block.predecessors.empty();
           for (uint32_t pred_id : block.predecessors) {
             const auto* pred = cfg.GetBlock(pred_id);
             if (pred == nullptr) continue;
+            if (pred->instructions.size() >= 2 &&
+                pred->instructions[pred->instructions.size() - 2].IsCall()) {
+              continue;
+            }
+            all_preds_end_with_call = false;
             for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
               if (pred->instructions[k].IsCall()) break;
               check_candidate(pred->instructions[k]);
               check_arg_def(pred->instructions[k]);
             }
+          }
+          if (all_preds_end_with_call) {
+            saw_prior_call = true;
           }
         }
 

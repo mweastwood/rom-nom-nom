@@ -342,5 +342,35 @@ TEST(StackFrameAnalyzerTest, SubwordReadsFromWordAndDwordStoresDoNotSetSpAddress
   EXPECT_TRUE(wider_load_analysis.sp_address_taken);
 }
 
+TEST(StackFrameAnalyzerTest,
+     DoesNotCountLocalStackStoresBeforeSecondCallInStraightLineSplitBlocksAsOutgoingArgs) {
+  std::vector<uint32_t> words = {
+      0x27BDFF98,  // 00: addiu $sp, $sp, -104
+      0xAFBF0060,  // 04: sw    $ra, 96($sp)
+      0xF7B40058,  // 08: sdc1  $f20, 88($sp)
+      0x27A40020,  // 0C: addiu $a0, $sp, 32
+      0x0C000400,  // 10: jal   0x80001000
+      0x24050001,  // 14: addiu $a1, $zero, 1
+      // Block 1 (split after jal): stores local floats at 16..28($sp) before 2-arg call
+      0x27A40020,  // 18: addiu $a0, $sp, 32
+      0x24050002,  // 1C: addiu $a1, $zero, 2
+      0xE7B40010,  // 20: swc1  $f20, 16($sp)
+      0xE7B40014,  // 24: swc1  $f20, 20($sp)
+      0xE7B40018,  // 28: swc1  $f20, 24($sp)
+      0x0C000400,  // 2C: jal   0x80001000
+      0xE7B4001C,  // 30: swc1  $f20, 28($sp)
+      0x8FBF0060,  // 34: lw    $ra, 96($sp)
+      0xD7B40058,  // 38: ldc1  $f20, 88($sp)
+      0x03E00008,  // 3C: jr    $ra
+      0x27BD0068,  // 40: addiu $sp, $sp, 104
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.outgoing_args_size, 16);
+  EXPECT_EQ(analysis.sp_buffer_size, 72);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

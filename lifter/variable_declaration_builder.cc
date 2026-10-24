@@ -170,6 +170,162 @@ bool StatementContainsS64PointerDeref(const CStatement& stmt) {
   }
 }
 
+bool ExpressionContainsMaskedSignBitFloatFix(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      if (bin.Op() == "&" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        int64_t mask = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        if ((mask == 255 || mask == 65535) &&
+            bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
+          if ((inner.Op() == "|" || inner.Op() == "^") &&
+              inner.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+              static_cast<uint32_t>(
+                  static_cast<const IntegerLiteralExpression&>(inner.Rhs()).Value()) ==
+                  0x80000000u &&
+              inner.Lhs().Kind() == CExpressionKind::kCastExpression) {
+            return true;
+          }
+        }
+      }
+      return ExpressionContainsMaskedSignBitFloatFix(bin.Lhs()) ||
+             ExpressionContainsMaskedSignBitFloatFix(bin.Rhs());
+    }
+    case CExpressionKind::kUnaryExpression:
+      return ExpressionContainsMaskedSignBitFloatFix(
+          static_cast<const UnaryExpression&>(expr).Operand());
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      return ExpressionContainsMaskedSignBitFloatFix(assign.Lhs()) ||
+             ExpressionContainsMaskedSignBitFloatFix(assign.Rhs());
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      if (ExpressionContainsMaskedSignBitFloatFix(call.Callee())) return true;
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr && ExpressionContainsMaskedSignBitFloatFix(*arg)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionContainsMaskedSignBitFloatFix(
+          static_cast<const CastExpression&>(expr).Operand());
+    case CExpressionKind::kMemberAccessExpression:
+      return ExpressionContainsMaskedSignBitFloatFix(
+          static_cast<const MemberAccessExpression&>(expr).Object());
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      return ExpressionContainsMaskedSignBitFloatFix(arr.Array()) ||
+             ExpressionContainsMaskedSignBitFloatFix(arr.Index());
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return ExpressionContainsMaskedSignBitFloatFix(tern.Condition()) ||
+             ExpressionContainsMaskedSignBitFloatFix(tern.TrueExpression()) ||
+             ExpressionContainsMaskedSignBitFloatFix(tern.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StatementContainsMaskedSignBitFloatFix(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementContainsMaskedSignBitFloatFix(*child)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement:
+      return ExpressionContainsMaskedSignBitFloatFix(
+          static_cast<const ExpressionStatement&>(stmt).Expression());
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
+      return vd.Initializer() != nullptr &&
+             ExpressionContainsMaskedSignBitFloatFix(*vd.Initializer());
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return ExpressionContainsMaskedSignBitFloatFix(ifs.Condition()) ||
+             StatementContainsMaskedSignBitFloatFix(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr &&
+              StatementContainsMaskedSignBitFloatFix(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return ExpressionContainsMaskedSignBitFloatFix(ws.Condition()) ||
+             StatementContainsMaskedSignBitFloatFix(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return StatementContainsMaskedSignBitFloatFix(dws.Body()) ||
+             ExpressionContainsMaskedSignBitFloatFix(dws.Condition());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StatementContainsMaskedSignBitFloatFix(*fs.Init())) ||
+             (fs.Condition() != nullptr &&
+              ExpressionContainsMaskedSignBitFloatFix(*fs.Condition())) ||
+             (fs.Step() != nullptr && ExpressionContainsMaskedSignBitFloatFix(*fs.Step())) ||
+             StatementContainsMaskedSignBitFloatFix(fs.Body());
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return rs.ReturnValue() != nullptr &&
+             ExpressionContainsMaskedSignBitFloatFix(*rs.ReturnValue());
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExpressionContainsMaskedSignBitFloatFix(ss.Condition())) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StatementContainsMaskedSignBitFloatFix(*c.body)) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+uint32_t CountForStatements(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      uint32_t count = 0;
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr) {
+          count += CountForStatements(*child);
+        }
+      }
+      return count;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return CountForStatements(ifs.ThenBranch()) +
+             (ifs.ElseBranch() != nullptr ? CountForStatements(*ifs.ElseBranch()) : 0u);
+    }
+    case CStatementKind::kWhileStatement:
+      return CountForStatements(static_cast<const WhileStatement&>(stmt).Body());
+    case CStatementKind::kDoWhileStatement:
+      return CountForStatements(static_cast<const DoWhileStatement&>(stmt).Body());
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return 1u + CountForStatements(fs.Body());
+    }
+    case CStatementKind::kSwitchStatement: {
+      uint32_t count = 0;
+      for (const auto& c : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (c.body != nullptr) {
+          count += CountForStatements(*c.body);
+        }
+      }
+      return count;
+    }
+    default:
+      return 0u;
+  }
+}
+
 int CountDirectAssignmentsInExpression(const CExpression& expr, std::string_view target_var) {
   switch (expr.Kind()) {
     case CExpressionKind::kAssignmentExpression: {
@@ -1433,45 +1589,78 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
 
   uint32_t unreferenced_sp_gap_size = 0;
-  if (!frame_analysis.has_frame_pointer &&
-      frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF &&
-      frame_analysis.prologue.min_saved_reg_offset >
-          static_cast<uint32_t>(frame_analysis.outgoing_args_size) &&
-      frame_analysis.sp_buffer_size == 0) {
-    bool has_sp_local = false;
-    for (const auto& v : local_vars_to_declare) {
-      if (v == "sp") {
-        has_sp_local = true;
-        break;
-      }
-      if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
-        int32_t off = 0;
-        if (absl::SimpleAtoi(v.substr(7), &off) && off >= frame_analysis.outgoing_args_size &&
-            off < static_cast<int32_t>(frame_analysis.prologue.min_saved_reg_offset)) {
-          has_sp_local = true;
-          break;
-        }
-      }
+  if (!frame_analysis.has_frame_pointer && frame_analysis.sp_buffer_size == 0) {
+    uint32_t local_frame_top = 0;
+    uint32_t local_frame_bottom = 0;
+    if (frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF) {
+      local_frame_top = frame_analysis.prologue.min_saved_reg_offset & ~7u;
+      local_frame_bottom = (static_cast<uint32_t>(frame_analysis.outgoing_args_size) + 7u) & ~7u;
+    } else if (!frame_analysis.has_calls && frame_analysis.frame_size > 0) {
+      local_frame_top = static_cast<uint32_t>(frame_analysis.frame_size) & ~7u;
+      local_frame_bottom = 0;
     }
-    for (int32_t off : frame_analysis.stack_store_offsets) {
-      if (off >= frame_analysis.outgoing_args_size &&
-          off < static_cast<int32_t>(frame_analysis.prologue.min_saved_reg_offset)) {
-        has_sp_local = true;
-        break;
-      }
-    }
-    if (!has_sp_local) {
-      bool any_local_addr_taken = false;
+
+    if (local_frame_top > local_frame_bottom) {
+      const uint32_t target_local_size = local_frame_top - local_frame_bottom;
+      bool has_sp_buffer = false;
+      bool any_non_sp_local_addr_taken = false;
+      size_t sp_locals_in_gap = 0;
+      uint32_t addr_taken_sp_bytes = 0;
+      int callee_saved_gprs = 0;
+
       for (const auto& v : local_vars_to_declare) {
-        if (StatementTakesAddressOf(**body, v)) {
-          any_local_addr_taken = true;
+        if (v == "sp") {
+          has_sp_buffer = true;
           break;
         }
+        if (IsCalleeSavedGprVarName(v)) {
+          ++callee_saved_gprs;
+        }
+        const bool is_addr_taken = StatementTakesAddressOf(**body, v);
+        if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
+          int32_t off = 0;
+          if (absl::SimpleAtoi(v.substr(7), &off) &&
+              off >= static_cast<int32_t>(local_frame_bottom) &&
+              off < static_cast<int32_t>(local_frame_top)) {
+            ++sp_locals_in_gap;
+            if (is_addr_taken) {
+              addr_taken_sp_bytes +=
+                  (absl::EndsWith(v, "_64") || double_vars.contains(v)) ? 8u : 4u;
+            }
+          } else if (is_addr_taken) {
+            any_non_sp_local_addr_taken = true;
+          }
+        } else if (is_addr_taken) {
+          any_non_sp_local_addr_taken = true;
+        }
       }
-      if (!any_local_addr_taken) {
-        unreferenced_sp_gap_size = frame_analysis.prologue.min_saved_reg_offset -
-                                   static_cast<uint32_t>(frame_analysis.outgoing_args_size);
-        local_vars_to_declare.push_back("sp");
+
+      if (!has_sp_buffer && !any_non_sp_local_addr_taken &&
+          !StatementContainsS64PointerDeref(**body)) {
+        const uint32_t for_loop_spill_bytes = 8u * CountForStatements(**body);
+        if (sp_locals_in_gap == 0 || (frame_analysis.prologue.min_saved_reg_offset == 0xFFFFFFFF &&
+                                      !frame_analysis.has_calls && addr_taken_sp_bytes == 0)) {
+          if (target_local_size > for_loop_spill_bytes) {
+            unreferenced_sp_gap_size = target_local_size - for_loop_spill_bytes;
+          }
+        } else if (callee_saved_gprs < 8 && addr_taken_sp_bytes > 0) {
+          uint32_t gcc_local_bytes = ((addr_taken_sp_bytes + 7u) & ~7u) + for_loop_spill_bytes;
+          if (StatementContainsMaskedSignBitFloatFix(**body)) {
+            gcc_local_bytes += 8u;
+          }
+          if (target_local_size > gcc_local_bytes) {
+            unreferenced_sp_gap_size = target_local_size - gcc_local_bytes;
+          }
+        } else if (callee_saved_gprs == 8 && sp_locals_in_gap <= 2 && addr_taken_sp_bytes == 0) {
+          uint32_t max_spill_bytes =
+              static_cast<uint32_t>(sp_locals_in_gap) * 8u + for_loop_spill_bytes;
+          if (target_local_size > max_spill_bytes) {
+            unreferenced_sp_gap_size = target_local_size - max_spill_bytes;
+          }
+        }
+        if (unreferenced_sp_gap_size > 0) {
+          local_vars_to_declare.push_back("sp");
+        }
       }
     }
   }

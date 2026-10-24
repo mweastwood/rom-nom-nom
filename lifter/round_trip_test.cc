@@ -5711,5 +5711,15 @@ void UnpinsS0CopyFromUnmodifiedParameterBeforeCallAndPostCallStore(s16* state) {
 )");
 }
 
+TEST_F(RoundTripTest, LeafWithUnusedLocalStackBuffer) {
+  AssertRoundTripBitExact("LeafWithUnusedLocalStackBuffer", R"(
+void LeafWithUnusedLocalStackBuffer(s32* out, s32 a, s32 b) {
+    u8 unused[16];
+    out[0] = a + b;
+    out[1] = a - b;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
