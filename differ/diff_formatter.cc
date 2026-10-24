@@ -324,6 +324,45 @@ std::string DiffFormatter::FormatRomDiff(const RomDiffResult& result, bool use_c
                           asset.MatchPercentage());
   }
 
+  if (result.readiness.total_functions > 0) {
+    absl::StrAppend(
+        &report,
+        "--------------------------------------------------------------------------------\n");
+    absl::StrAppend(&report, bold, "[TUNER STRUCTURAL READINESS METRICS]", reset, "\n");
+    absl::StrAppendFormat(&report,
+                          "   1. Stack Frame Size Match:      %s / %s functions (%.2f%%)\n",
+                          format_commas(result.readiness.frame_size_matches),
+                          format_commas(result.readiness.total_functions),
+                          result.readiness.FrameSizeMatchPercentage());
+    absl::StrAppendFormat(&report,
+                          "   2. Callee-Saved Register Match: %s / %s functions (%.2f%%)\n",
+                          format_commas(result.readiness.saved_registers_matches),
+                          format_commas(result.readiness.total_functions),
+                          result.readiness.SavedRegistersMatchPercentage());
+    absl::StrAppendFormat(&report,
+                          "   3. CFG Block & Branch Match:    %s / %s functions (%.2f%%)\n",
+                          format_commas(result.readiness.cfg_topology_matches),
+                          format_commas(result.readiness.total_functions),
+                          result.readiness.CfgTopologyMatchPercentage());
+    absl::StrAppendFormat(&report,
+                          "      Structurally Isomorphic:     %s / %s functions (%.2f%%)\n",
+                          format_commas(result.readiness.structurally_isomorphic_functions),
+                          format_commas(result.readiness.total_functions),
+                          result.readiness.StructurallyIsomorphicPercentage());
+    absl::StrAppendFormat(&report,
+                          "   4. Normalized Instruction LCS:  %s / %s instructions (%.2f%%)\n",
+                          format_commas(result.readiness.total_normalized_lcs_instructions),
+                          format_commas(result.readiness.total_target_instructions),
+                          result.readiness.NormalizedLcsPercentage());
+    if (!result.code_segments.empty()) {
+      const auto& code_diff = result.code_segments.front();
+      absl::StrAppendFormat(&report, "   5. Raw Code Segment Myers LCS:  %s / %s words (%.2f%%)\n",
+                            format_commas(code_diff.matched_words_count),
+                            format_commas(code_diff.retail_words_count),
+                            code_diff.MatchPercentageRetail());
+    }
+  }
+
   absl::StrAppend(
       &report,
       "--------------------------------------------------------------------------------\n");

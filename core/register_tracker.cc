@@ -1487,4 +1487,200 @@ absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(const Cont
   return uninit;
 }
 
+namespace {
+
+constexpr uint32_t kCanonicalNop = 0x10000u;
+constexpr uint32_t kCanonicalMove = 0x10001u;
+
+uint32_t CanonicalizeInstructionOp(const Instruction& inst) {
+  if (inst.IsNop()) {
+    return kCanonicalNop;
+  }
+  if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kOr ||
+       inst.opcode == Opcode::kDaddu) &&
+      (inst.rt == Register::kZero || inst.rs == Register::kZero)) {
+    return kCanonicalMove;
+  }
+  if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kOri) &&
+      inst.rs == Register::kZero && inst.immediate == 0) {
+    return kCanonicalMove;
+  }
+  if (inst.opcode == Opcode::kAddi) {
+    return static_cast<uint32_t>(Opcode::kAddiu);
+  }
+  return static_cast<uint32_t>(inst.opcode);
+}
+
+size_t ComputeCanonicalSequenceLcs(absl::Span<const uint32_t> target_ops,
+                                   absl::Span<const uint32_t> candidate_ops) {
+  const size_t target_len = target_ops.size();
+  const size_t cand_len = candidate_ops.size();
+  if (target_len == 0 || cand_len == 0) {
+    return 0;
+  }
+
+  size_t prefix_len = 0;
+  const size_t min_len = std::min(target_len, cand_len);
+  while (prefix_len < min_len && target_ops[prefix_len] == candidate_ops[prefix_len]) {
+    ++prefix_len;
+  }
+  if (prefix_len == target_len || prefix_len == cand_len) {
+    return prefix_len;
+  }
+
+  size_t suffix_len = 0;
+  while (suffix_len < (target_len - prefix_len) && suffix_len < (cand_len - prefix_len) &&
+         target_ops[target_len - 1 - suffix_len] == candidate_ops[cand_len - 1 - suffix_len]) {
+    ++suffix_len;
+  }
+
+  absl::Span<const uint32_t> mid_target =
+      target_ops.subspan(prefix_len, target_len - prefix_len - suffix_len);
+  absl::Span<const uint32_t> mid_cand =
+      candidate_ops.subspan(prefix_len, cand_len - prefix_len - suffix_len);
+
+  absl::flat_hash_map<uint32_t, std::vector<int>> target_positions;
+  target_positions.reserve(mid_target.size());
+  for (int i = 0; i < static_cast<int>(mid_target.size()); ++i) {
+    target_positions[mid_target[i]].push_back(i);
+  }
+
+  std::vector<int> lis;
+  lis.reserve(std::min(mid_target.size(), mid_cand.size()));
+  for (uint32_t op : mid_cand) {
+    auto it = target_positions.find(op);
+    if (it == target_positions.end()) {
+      continue;
+    }
+    const std::vector<int>& positions = it->second;
+    for (auto r_it = positions.rbegin(); r_it != positions.rend(); ++r_it) {
+      int pos = *r_it;
+      auto lb = std::lower_bound(lis.begin(), lis.end(), pos);
+      if (lb == lis.end()) {
+        lis.push_back(pos);
+      } else {
+        *lb = pos;
+      }
+    }
+  }
+
+  return prefix_len + lis.size() + suffix_len;
+}
+
+}  // namespace
+
+FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> words,
+                                                   uint32_t base_vram) {
+  FunctionStructuralProfile profile;
+  if (words.empty()) {
+    return profile;
+  }
+
+  // Trim trailing section-alignment NOPs beyond the function's final instruction + delay slot.
+  size_t trimmed_len = words.size();
+  while (trimmed_len > 2 && words[trimmed_len - 1] == 0 && words[trimmed_len - 2] == 0) {
+    --trimmed_len;
+  }
+  if (trimmed_len > 1 && words[trimmed_len - 1] == 0) {
+    auto prev_or = DecodeInstruction(words[trimmed_len - 2],
+                                     base_vram + static_cast<uint32_t>((trimmed_len - 2) * 4));
+    if (prev_or.ok() && !prev_or->IsBranch() && !prev_or->IsJump() && !prev_or->IsCall() &&
+        !prev_or->IsReturn()) {
+      --trimmed_len;
+    }
+  }
+
+  absl::Span<const uint32_t> active_words = words.first(trimmed_len);
+  auto insts_or = DecodeSequence(active_words, base_vram);
+  if (!insts_or.ok() || insts_or->empty()) {
+    return profile;
+  }
+  const auto& instructions = *insts_or;
+  profile.instruction_count = instructions.size();
+
+  // 1. Prologue stack frame size & callee-saved register analysis
+  bool found_frame_alloc = false;
+  uint32_t clobbered_gprs = 0;
+  uint32_t clobbered_fprs = 0;
+  size_t prologue_limit = instructions.size();
+  for (size_t i = 0; i < instructions.size(); ++i) {
+    const Instruction& inst = instructions[i];
+    if (inst.IsBranch() || inst.IsJump() || inst.IsCall() || inst.IsReturn()) {
+      prologue_limit = std::min(instructions.size(), i + 2);
+      break;
+    }
+  }
+
+  for (size_t i = 0; i < prologue_limit; ++i) {
+    const Instruction& inst = instructions[i];
+    if (!found_frame_alloc &&
+        (inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+        inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
+      profile.frame_size = static_cast<uint32_t>(-static_cast<int32_t>(inst.immediate));
+      found_frame_alloc = true;
+    }
+
+    if ((inst.opcode == Opcode::kSw || inst.opcode == Opcode::kSd) && inst.rs == Register::kSp &&
+        inst.rt.has_value() && inst.immediate >= 0) {
+      uint32_t reg_idx = static_cast<uint32_t>(*inst.rt);
+      bool is_callee_saved_gpr = (reg_idx >= 16 && reg_idx <= 23) || reg_idx == 30 || reg_idx == 31;
+      if (is_callee_saved_gpr && (clobbered_gprs & (1u << reg_idx)) == 0) {
+        profile.saved_gpr_mask |= (1u << reg_idx);
+      }
+    } else if (inst.opcode == Opcode::kSwc1 && inst.rs == Register::kSp && inst.ft.has_value() &&
+               inst.immediate >= 0) {
+      uint32_t fpr_idx = static_cast<uint32_t>(*inst.ft);
+      if (fpr_idx >= 20 && fpr_idx <= 31 && (clobbered_fprs & (1u << fpr_idx)) == 0) {
+        profile.saved_fpr_mask |= (1u << fpr_idx);
+      }
+    } else if (inst.opcode == Opcode::kSdc1 && inst.rs == Register::kSp && inst.ft.has_value() &&
+               inst.immediate >= 0) {
+      uint32_t fpr_idx = static_cast<uint32_t>(*inst.ft) & ~1u;
+      if (fpr_idx >= 20 && fpr_idx <= 30 && (clobbered_fprs & (3u << fpr_idx)) == 0) {
+        profile.saved_fpr_mask |= (3u << fpr_idx);
+      }
+    }
+
+    RegisterUseDef ud = GetInstructionUseDef(inst);
+    for (Register d : ud.gpr_defs) {
+      clobbered_gprs |= (1u << static_cast<uint32_t>(d));
+    }
+    for (FpRegister fd : ud.fpr_defs) {
+      clobbered_fprs |= (1u << static_cast<uint32_t>(fd));
+    }
+  }
+
+  // 2. Control-flow graph block and branch topology
+  auto cfg_or = ControlFlowGraph::Build(instructions);
+  profile.basic_block_count = cfg_or.ok() ? cfg_or->Blocks().size() : 1;
+  profile.canonical_ops.reserve(instructions.size());
+  for (const auto& inst : instructions) {
+    if (inst.IsBranch() || inst.opcode == Opcode::kJ ||
+        (inst.opcode == Opcode::kJr && inst.rs != Register::kRa)) {
+      ++profile.branch_count;
+    }
+    profile.canonical_ops.push_back(CanonicalizeInstructionOp(inst));
+  }
+
+  return profile;
+}
+
+FunctionStructuralComparison CompareFunctionStructure(absl::Span<const uint32_t> target_words,
+                                                      uint32_t target_vram,
+                                                      absl::Span<const uint32_t> candidate_words,
+                                                      uint32_t candidate_vram) {
+  FunctionStructuralComparison comp;
+  comp.target = AnalyzeFunctionStructure(target_words, target_vram);
+  comp.candidate = AnalyzeFunctionStructure(candidate_words, candidate_vram);
+  comp.frame_size_matches = (comp.target.frame_size == comp.candidate.frame_size);
+  comp.saved_registers_match = (comp.target.saved_gpr_mask == comp.candidate.saved_gpr_mask &&
+                                comp.target.saved_fpr_mask == comp.candidate.saved_fpr_mask);
+  comp.cfg_topology_matches = (comp.target.basic_block_count == comp.candidate.basic_block_count &&
+                               comp.target.branch_count == comp.candidate.branch_count);
+  comp.normalized_lcs_instructions =
+      ComputeCanonicalSequenceLcs(comp.target.canonical_ops, comp.candidate.canonical_ops);
+  return comp;
+}
+
 }  // namespace rom_nom_nom

@@ -250,5 +250,40 @@ TEST(DiffFormatterTest, FormatsRomDiffReport) {
   EXPECT_THAT(report, HasSubstr("100.00%"));
 }
 
+TEST(DiffFormatterTest, FormatsRomDiffReportWithStructuralReadinessMetrics) {
+  RomDiffResult result;
+  result.structural.is_valid = true;
+  result.structural.target_sha1 = "aaa";
+  result.structural.built_sha1 = "bbb";
+  result.structural.target_size = 4096;
+  result.structural.built_size = 4096;
+  result.structural.size_matches = true;
+  result.header_matching_bytes = 64;
+  result.header_total_bytes = 64;
+  result.code_segments.push_back(CodeSegmentDiffResult{
+      .segment_name = "main",
+      .retail_words_count = 100,
+      .built_words_count = 100,
+      .matched_words_count = 80,
+  });
+  result.readiness.total_functions = 10;
+  result.readiness.frame_size_matches = 8;
+  result.readiness.saved_registers_matches = 7;
+  result.readiness.cfg_topology_matches = 9;
+  result.readiness.structurally_isomorphic_functions = 6;
+  result.readiness.total_target_instructions = 100;
+  result.readiness.total_normalized_lcs_instructions = 92;
+
+  DiffFormatter formatter(DiffFormatterOptions{.use_color = false});
+  std::string report = formatter.FormatRomDiff(result);
+  EXPECT_THAT(report, HasSubstr("[TUNER STRUCTURAL READINESS METRICS]"));
+  EXPECT_THAT(report, HasSubstr("1. Stack Frame Size Match:      8 / 10 functions (80.00%)"));
+  EXPECT_THAT(report, HasSubstr("2. Callee-Saved Register Match: 7 / 10 functions (70.00%)"));
+  EXPECT_THAT(report, HasSubstr("3. CFG Block & Branch Match:    9 / 10 functions (90.00%)"));
+  EXPECT_THAT(report, HasSubstr("Structurally Isomorphic:     6 / 10 functions (60.00%)"));
+  EXPECT_THAT(report, HasSubstr("4. Normalized Instruction LCS:  92 / 100 instructions (92.00%)"));
+  EXPECT_THAT(report, HasSubstr("5. Raw Code Segment Myers LCS:  80 / 100 words (80.00%)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -258,12 +258,21 @@ ACTUAL_DIFFER=$(resolve_path "$DIFFER_BIN")
         is_executable = True,
     )
 
+    runfiles_files = [candidate_rom, base_rom, config, differ]
+    if OutputGroupInfo in ctx.attr.candidate_rom and hasattr(ctx.attr.candidate_rom[OutputGroupInfo], "elf"):
+        elf_list = ctx.attr.candidate_rom[OutputGroupInfo].elf.to_list()
+        if elf_list:
+            runfiles_files.append(elf_list[0])
+    runfiles = ctx.runfiles(files = runfiles_files).merge(
+        ctx.attr._differ[DefaultInfo].default_runfiles,
+    )
+    if DefaultInfo in ctx.attr.candidate_rom:
+        runfiles = runfiles.merge(ctx.attr.candidate_rom[DefaultInfo].default_runfiles)
+
     return [
         DefaultInfo(
             executable = script,
-            runfiles = ctx.runfiles(files = [candidate_rom, base_rom, config, differ]).merge(
-                ctx.attr._differ[DefaultInfo].default_runfiles,
-            ),
+            runfiles = runfiles,
         ),
     ]
 

@@ -456,5 +456,79 @@ segments {
   EXPECT_DOUBLE_EQ(result_or->asset_segments[0].MatchPercentage(), 100.0);
 }
 
+TEST_F(RomDifferEndToEndTest, ComputesPerFunctionStructuralReadinessMetrics) {
+  std::filesystem::path target_path = test_dir_ / "target_readiness.z64";
+  std::filesystem::path built_path = test_dir_ / "built_readiness.z64";
+  std::filesystem::path config_path = test_dir_ / "config_readiness.textproto";
+
+  const std::string config_content = R"(
+game_name: "test"
+sha1: "0000000000000000000000000000000000000000"
+basename: "test"
+segments {
+  name: "main"
+  rom_start: 0x1050
+  rom_end: 0x1060
+  vram: 0x80025C00
+  type: SEGMENT_CODE
+  subsegments {
+    name: "main"
+    rom_start: 0x1050
+    type: SUBSEGMENT_C
+  }
+}
+)";
+  {
+    std::ofstream config_file(config_path);
+    config_file << config_content;
+  }
+
+  auto write_word = [](std::vector<uint8_t>& buf, size_t offset, uint32_t word) {
+    buf[offset + 0] = static_cast<uint8_t>((word >> 24) & 0xFF);
+    buf[offset + 1] = static_cast<uint8_t>((word >> 16) & 0xFF);
+    buf[offset + 2] = static_cast<uint8_t>((word >> 8) & 0xFF);
+    buf[offset + 3] = static_cast<uint8_t>(word & 0xFF);
+  };
+
+  std::vector<uint8_t> target_bytes(0x1060, 0);
+  write_word(target_bytes, 0, 0x80371240);
+  write_word(target_bytes, 8, 0x80025C00);
+  // Function at 0x1050: addiu $v0, $a0, 1; jr $ra; nop; nop
+  write_word(target_bytes, 0x1050, 0x24820001);
+  write_word(target_bytes, 0x1054, 0x03E00008);
+  write_word(target_bytes, 0x1058, 0x00000000);
+  write_word(target_bytes, 0x105C, 0x00000000);
+
+  std::vector<uint8_t> built_bytes = target_bytes;
+  // Built function uses different immediate (addiu $v0, $a0, 2)
+  write_word(built_bytes, 0x1050, 0x24820002);
+
+  {
+    std::ofstream target_file(target_path, std::ios::binary);
+    target_file.write(reinterpret_cast<const char*>(target_bytes.data()), target_bytes.size());
+  }
+  {
+    std::ofstream built_file(built_path, std::ios::binary);
+    built_file.write(reinterpret_cast<const char*>(built_bytes.data()), built_bytes.size());
+  }
+
+  RomDiffer differ(RomDiffOptions{
+      .base_rom_path = target_path,
+      .candidate_rom_path = built_path,
+      .config_path = config_path,
+      .use_color = false,
+  });
+
+  auto result_or = differ.Diff();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+  EXPECT_EQ(result_or->readiness.total_functions, 1u);
+  EXPECT_EQ(result_or->readiness.frame_size_matches, 1u);
+  EXPECT_EQ(result_or->readiness.saved_registers_matches, 1u);
+  EXPECT_EQ(result_or->readiness.cfg_topology_matches, 1u);
+  EXPECT_EQ(result_or->readiness.structurally_isomorphic_functions, 1u);
+  EXPECT_EQ(result_or->readiness.total_target_instructions, 3u);
+  EXPECT_EQ(result_or->readiness.total_normalized_lcs_instructions, 3u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

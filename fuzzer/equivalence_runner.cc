@@ -33,6 +33,15 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
     return res;
   }
 
+  uint32_t cand_vram = target.candidate_vram != 0 ? target.candidate_vram : target.vram;
+  FunctionStructuralComparison struct_comp =
+      CompareFunctionStructure(target.target_words, target.vram, target.candidate_words, cand_vram);
+  res.frame_size_matches = struct_comp.frame_size_matches;
+  res.saved_registers_match = struct_comp.saved_registers_match;
+  res.cfg_topology_matches = struct_comp.cfg_topology_matches;
+  res.normalized_lcs_instructions = struct_comp.normalized_lcs_instructions;
+  res.trimmed_target_instruction_count = struct_comp.target.instruction_count;
+
   // Fast-Pass: If instructions match 100% byte-for-byte, trivially equivalent
   if (target.target_words == target.candidate_words) {
     res.status = FunctionEquivalenceStatus::kExactBinaryMatch;
@@ -58,7 +67,6 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
 
   res.fuzz_vectors_evaluated = test_cases.size();
 
-  uint32_t cand_vram = target.candidate_vram != 0 ? target.candidate_vram : target.vram;
   DifferentialFuzzer::Options func_options = options_.fuzzer_options;
   if (!target.target_initial_memory.empty()) {
     func_options.target_initial_memory = target.target_initial_memory;
@@ -220,6 +228,14 @@ ModuleEquivalenceSummary EquivalenceRunner::EvaluateModule(
         summary.error_functions++;
         break;
     }
+    if (res.frame_size_matches) summary.frame_size_matches++;
+    if (res.saved_registers_match) summary.saved_registers_matches++;
+    if (res.cfg_topology_matches) summary.cfg_topology_matches++;
+    if (res.frame_size_matches && res.saved_registers_match && res.cfg_topology_matches) {
+      summary.structurally_isomorphic_functions++;
+    }
+    summary.total_target_instructions += res.trimmed_target_instruction_count;
+    summary.total_normalized_lcs_instructions += res.normalized_lcs_instructions;
   }
 
   return summary;
@@ -257,6 +273,24 @@ std::string EquivalenceRunner::FormatReport(const ModuleEquivalenceSummary& summ
                         summary.error_functions, pct_err);
   absl::StrAppendFormat(&out, "Overall Functional Equivalence:    %.1f%%\n",
                         summary.EquivalencePercentage());
+  absl::StrAppend(
+      &out, "--------------------------------------------------------------------------------\n");
+  absl::StrAppend(&out, "Structural Readiness Metrics:\n");
+  absl::StrAppendFormat(&out, "  1. Stack Frame Size Match:        %zu / %zu (%.1f%%)\n",
+                        summary.frame_size_matches, summary.total_functions,
+                        summary.FrameSizeMatchPercentage());
+  absl::StrAppendFormat(&out, "  2. Callee-Saved Register Match:   %zu / %zu (%.1f%%)\n",
+                        summary.saved_registers_matches, summary.total_functions,
+                        summary.SavedRegistersMatchPercentage());
+  absl::StrAppendFormat(&out, "  3. CFG Block & Branch Match:      %zu / %zu (%.1f%%)\n",
+                        summary.cfg_topology_matches, summary.total_functions,
+                        summary.CfgTopologyMatchPercentage());
+  absl::StrAppendFormat(&out, "     Structurally Isomorphic (1-3): %zu / %zu (%.1f%%)\n",
+                        summary.structurally_isomorphic_functions, summary.total_functions,
+                        summary.StructurallyIsomorphicPercentage());
+  absl::StrAppendFormat(&out, "  4. Normalized Instruction LCS:    %zu / %zu (%.1f%%)\n",
+                        summary.total_normalized_lcs_instructions,
+                        summary.total_target_instructions, summary.NormalizedLcsPercentage());
   absl::StrAppend(
       &out, "--------------------------------------------------------------------------------\n");
 

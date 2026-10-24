@@ -121,6 +121,51 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg);
 bool DetermineReturnsF0Double(const ControlFlowGraph& cfg);
 absl::flat_hash_set<Register> DetectUninitializedCalleeSavedRegisters(const ControlFlowGraph& cfg);
 
+// Structural profile of a single compiled MIPS function for lifter/tuner readiness analysis.
+struct FunctionStructuralProfile {
+  uint32_t frame_size = 0;       // Stack frame size in bytes allocated in prologue
+  uint32_t saved_gpr_mask = 0;   // Bitmask of callee-saved GPRs ($s0-$s8, $ra) saved to stack
+  uint32_t saved_fpr_mask = 0;   // Bitmask of callee-saved FPRs ($f20-$f31) saved to stack
+  size_t basic_block_count = 0;  // Number of basic blocks in the function CFG
+  size_t branch_count = 0;       // Number of conditional branches + intra-function jumps
+  size_t instruction_count = 0;  // Total decoded instructions (excluding trailing padding NOPs)
+  std::vector<uint32_t> canonical_ops;  // Register-independent canonical opcode sequence for LCS
+};
+
+// Per-function structural comparison between target retail code and candidate compiled code.
+struct FunctionStructuralComparison {
+  FunctionStructuralProfile target;
+  FunctionStructuralProfile candidate;
+  bool frame_size_matches = false;
+  bool saved_registers_match = false;
+  bool cfg_topology_matches = false;
+  size_t normalized_lcs_instructions = 0;
+
+  bool IsStructurallyIsomorphic() const {
+    return frame_size_matches && saved_registers_match && cfg_topology_matches;
+  }
+
+  double NormalizedLcsPercentage() const {
+    if (target.instruction_count == 0) {
+      return candidate.instruction_count == 0 ? 100.0 : 0.0;
+    }
+    return (static_cast<double>(normalized_lcs_instructions) /
+            static_cast<double>(target.instruction_count)) *
+           100.0;
+  }
+};
+
+// Extracts the structural profile of a function from its raw 32-bit instruction words.
+FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> words,
+                                                   uint32_t base_vram = 0x80000000);
+
+// Compares the structural profiles and register-independent normalized instruction LCS
+// between target retail function words and candidate compiled function words.
+FunctionStructuralComparison CompareFunctionStructure(absl::Span<const uint32_t> target_words,
+                                                      uint32_t target_vram,
+                                                      absl::Span<const uint32_t> candidate_words,
+                                                      uint32_t candidate_vram);
+
 // Represents a register definition site.
 struct Definition {
   uint32_t vram = 0;

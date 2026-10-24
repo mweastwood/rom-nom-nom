@@ -115,6 +115,18 @@ TEST(EquivalenceRunnerTest, WholeModuleBatchEvaluation) {
   EXPECT_EQ(summary.error_functions, 0u);
   EXPECT_DOUBLE_EQ(summary.EquivalencePercentage(), 75.0);
 
+  // Verify structural readiness metrics on the 4 functions
+  EXPECT_EQ(summary.frame_size_matches, 4u);
+  EXPECT_EQ(summary.saved_registers_matches, 4u);
+  EXPECT_EQ(summary.cfg_topology_matches, 4u);
+  EXPECT_EQ(summary.structurally_isomorphic_functions, 4u);
+  EXPECT_DOUBLE_EQ(summary.FrameSizeMatchPercentage(), 100.0);
+  EXPECT_DOUBLE_EQ(summary.SavedRegistersMatchPercentage(), 100.0);
+  EXPECT_DOUBLE_EQ(summary.CfgTopologyMatchPercentage(), 100.0);
+  EXPECT_DOUBLE_EQ(summary.StructurallyIsomorphicPercentage(), 100.0);
+  EXPECT_EQ(summary.total_target_instructions, 12u);
+  EXPECT_EQ(summary.total_normalized_lcs_instructions, 11u);
+
   // Verify formatted report
   std::string report = EquivalenceRunner::FormatReport(summary, /*verbose=*/true);
   EXPECT_NE(report.find("EQUIVALENCE FUZZING REPORT: player_movement"), std::string::npos);
@@ -122,6 +134,11 @@ TEST(EquivalenceRunnerTest, WholeModuleBatchEvaluation) {
   EXPECT_NE(report.find("Fuzz-Proven Equivalent:           1 (25.0%)"), std::string::npos);
   EXPECT_NE(report.find("Divergent (Behavioral Bugs):      1 (25.0%)"), std::string::npos);
   EXPECT_NE(report.find("Overall Functional Equivalence:    75.0%"), std::string::npos);
+  EXPECT_NE(report.find("Structural Readiness Metrics:"), std::string::npos);
+  EXPECT_NE(report.find("1. Stack Frame Size Match:        4 / 4 (100.0%)"), std::string::npos);
+  EXPECT_NE(report.find("2. Callee-Saved Register Match:   4 / 4 (100.0%)"), std::string::npos);
+  EXPECT_NE(report.find("3. CFG Block & Branch Match:      4 / 4 (100.0%)"), std::string::npos);
+  EXPECT_NE(report.find("4. Normalized Instruction LCS:    11 / 12 (91.7%)"), std::string::npos);
   EXPECT_NE(report.find("FuncDivergent"), std::string::npos);
   EXPECT_NE(report.find("FuncFuzzProven"), std::string::npos);
 }

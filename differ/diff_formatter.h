@@ -77,6 +77,58 @@ struct AssetSegmentDiffResult {
   }
 };
 
+// Per-function structural readiness metrics across the code segment.
+struct StructuralReadinessStats {
+  size_t total_functions = 0;
+  size_t frame_size_matches = 0;
+  size_t saved_registers_matches = 0;
+  size_t cfg_topology_matches = 0;
+  size_t structurally_isomorphic_functions = 0;
+  size_t total_target_instructions = 0;
+  size_t total_normalized_lcs_instructions = 0;
+
+  double FrameSizeMatchPercentage() const {
+    if (total_functions == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(frame_size_matches) / static_cast<double>(total_functions)) * 100.0;
+  }
+
+  double SavedRegistersMatchPercentage() const {
+    if (total_functions == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(saved_registers_matches) / static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double CfgTopologyMatchPercentage() const {
+    if (total_functions == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(cfg_topology_matches) / static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double StructurallyIsomorphicPercentage() const {
+    if (total_functions == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(structurally_isomorphic_functions) /
+            static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double NormalizedLcsPercentage() const {
+    if (total_target_instructions == 0) {
+      return 0.0;
+    }
+    return (static_cast<double>(total_normalized_lcs_instructions) /
+            static_cast<double>(total_target_instructions)) *
+           100.0;
+  }
+};
+
 // Complete result of ROM difference analysis.
 struct RomDiffResult {
   StructuralValidationResult structural;
@@ -84,6 +136,7 @@ struct RomDiffResult {
   size_t header_total_bytes = 0;
   std::vector<CodeSegmentDiffResult> code_segments;
   std::vector<AssetSegmentDiffResult> asset_segments;
+  StructuralReadinessStats readiness;
   size_t total_logical_matching_bytes = 0;
   size_t total_rom_bytes = 0;
   double overall_match_percentage = 0.0;

@@ -639,5 +639,82 @@ TEST(RegisterTrackerTest, DetermineReturnsV0RejectsVoidFunctionWithIgnoredCallee
   EXPECT_FALSE(DetermineReturnsV0(cfg, nullptr, &funcs_returning_v0));
 }
 
+TEST(RegisterTrackerTest, AnalyzeFunctionStructureAndIsomorphicComparison) {
+  // Target: 32-byte frame, saves $ra and $s0, has 1 branch, plus 2 trailing alignment NOPs.
+  std::vector<uint32_t> target_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB00018,  // 08: sw    $s0, 24($sp)
+      0x10800002,  // 0C: beq   $a0, $zero, +2 (0x80000018)
+      0x00808021,  // 10: addu  $s0, $a0, $zero (move $s0, $a0)
+      0x26100001,  // 14: addiu $s0, $s0, 1
+      0x02001021,  // 18: addu  $v0, $s0, $zero (move $v0, $s0)
+      0x8FBF001C,  // 1C: lw    $ra, 28($sp)
+      0x8FB00018,  // 20: lw    $s0, 24($sp)
+      0x27BD0020,  // 24: addiu $sp, $sp, 32
+      0x03E00008,  // 28: jr    $ra
+      0x00000000,  // 2C: nop (return delay slot - preserved)
+      0x00000000,  // 30: nop (trailing alignment padding - trimmed)
+      0x00000000,  // 34: nop (trailing alignment padding - trimmed)
+  };
+
+  // Candidate: same 32-byte frame, saves $ra and $s0 at swapped offsets, uses `or $s0, $a0, $zero`
+  // for move, without trailing alignment NOPs.
+  std::vector<uint32_t> candidate_words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFB0001C,  // 04: sw    $s0, 28($sp)
+      0xAFBF0018,  // 08: sw    $ra, 24($sp)
+      0x10800002,  // 0C: beq   $a0, $zero, +2 (0x80001018)
+      0x00808025,  // 10: or    $s0, $a0, $zero (move $s0, $a0)
+      0x26100005,  // 14: addiu $s0, $s0, 5 (different immediate, same canonical opcode)
+      0x02001025,  // 18: or    $v0, $s0, $zero (move $v0, $s0)
+      0x8FB0001C,  // 1C: lw    $s0, 28($sp)
+      0x8FBF0018,  // 20: lw    $ra, 24($sp)
+      0x27BD0020,  // 24: addiu $sp, $sp, 32
+      0x03E00008,  // 28: jr    $ra
+      0x00000000,  // 2C: nop (return delay slot)
+  };
+
+  FunctionStructuralComparison comp =
+      CompareFunctionStructure(target_words, 0x80000000, candidate_words, 0x80001000);
+  EXPECT_EQ(comp.target.frame_size, 32u);
+  EXPECT_EQ(comp.target.instruction_count, 12u);
+  EXPECT_TRUE(comp.frame_size_matches);
+  EXPECT_TRUE(comp.saved_registers_match);
+  EXPECT_TRUE(comp.cfg_topology_matches);
+  EXPECT_TRUE(comp.IsStructurallyIsomorphic());
+  EXPECT_EQ(comp.normalized_lcs_instructions, 12u);
+  EXPECT_DOUBLE_EQ(comp.NormalizedLcsPercentage(), 100.0);
+}
+
+TEST(RegisterTrackerTest, CompareFunctionStructureDetectsFrameRegisterAndCfgMismatches) {
+  // Target: leaf function with 0 frame size, no saved registers, 1 basic block (0 branches)
+  std::vector<uint32_t> target_words = {
+      0x24820001,  // addiu $v0, $a0, 1
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  // Candidate: allocates 16-byte frame, saves $s0, has a conditional branch
+  std::vector<uint32_t> candidate_words = {
+      0x27BDFFF0,  // addiu $sp, $sp, -16
+      0xAFB0000C,  // sw    $s0, 12($sp)
+      0x10800001,  // beq   $a0, $zero, +1
+      0x24820001,  // addiu $v0, $a0, 1
+      0x8FB0000C,  // lw    $s0, 12($sp)
+      0x03E00008,  // jr    $ra
+      0x27BD0010,  // addiu $sp, $sp, 16
+  };
+
+  FunctionStructuralComparison comp =
+      CompareFunctionStructure(target_words, 0x80000000, candidate_words, 0x80000000);
+  EXPECT_FALSE(comp.frame_size_matches);
+  EXPECT_FALSE(comp.saved_registers_match);
+  EXPECT_FALSE(comp.cfg_topology_matches);
+  EXPECT_FALSE(comp.IsStructurallyIsomorphic());
+  EXPECT_EQ(comp.target.instruction_count, 3u);
+  EXPECT_EQ(comp.normalized_lcs_instructions, 2u);  // addiu + jr
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

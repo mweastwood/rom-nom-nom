@@ -37,6 +37,11 @@ struct FunctionEquivalenceResult {
   size_t target_instruction_count = 0;
   size_t candidate_instruction_count = 0;
   size_t fuzz_vectors_evaluated = 0;
+  bool frame_size_matches = false;
+  bool saved_registers_match = false;
+  bool cfg_topology_matches = false;
+  size_t normalized_lcs_instructions = 0;
+  size_t trimmed_target_instruction_count = 0;
   std::optional<DifferentialComparison> counterexample;
   std::string details;
 };
@@ -49,10 +54,49 @@ struct ModuleEquivalenceSummary {
   size_t divergent_functions = 0;
   size_t error_functions = 0;
 
+  // Per-function structural readiness metrics
+  size_t frame_size_matches = 0;
+  size_t saved_registers_matches = 0;
+  size_t cfg_topology_matches = 0;
+  size_t structurally_isomorphic_functions = 0;
+  size_t total_target_instructions = 0;
+  size_t total_normalized_lcs_instructions = 0;
+
   double EquivalencePercentage() const {
     if (total_functions == 0) return 100.0;
     return (static_cast<double>(exact_binary_matches + fuzz_proven_equivalent) /
             static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double FrameSizeMatchPercentage() const {
+    if (total_functions == 0) return 100.0;
+    return (static_cast<double>(frame_size_matches) / static_cast<double>(total_functions)) * 100.0;
+  }
+
+  double SavedRegistersMatchPercentage() const {
+    if (total_functions == 0) return 100.0;
+    return (static_cast<double>(saved_registers_matches) / static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double CfgTopologyMatchPercentage() const {
+    if (total_functions == 0) return 100.0;
+    return (static_cast<double>(cfg_topology_matches) / static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double StructurallyIsomorphicPercentage() const {
+    if (total_functions == 0) return 100.0;
+    return (static_cast<double>(structurally_isomorphic_functions) /
+            static_cast<double>(total_functions)) *
+           100.0;
+  }
+
+  double NormalizedLcsPercentage() const {
+    if (total_target_instructions == 0) return 100.0;
+    return (static_cast<double>(total_normalized_lcs_instructions) /
+            static_cast<double>(total_target_instructions)) *
            100.0;
   }
 
