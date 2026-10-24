@@ -5622,5 +5622,25 @@ void DoWhileLoopWithUnsigned16BitIndexArrayFill(s32* words, s32 fill_val) {
 )");
 }
 
+TEST_F(RoundTripTest, DoWhileLoopWithConditionalNarrowCounterIncrement) {
+  AssertRoundTripBitExact("DoWhileLoopWithConditionalNarrowCounterIncrement", R"(
+s32 DoWhileLoopWithConditionalNarrowCounterIncrement(const u8* table, s32 target) {
+    u8 count = 0;
+    u8 i = 0;
+    u8 key = (u8)target;
+    do {
+        const u8* row = table + (i * 48);
+        if ((*(const u16*)(row + 16) & 1) != 0) {
+            if (row[3] == key) {
+                count++;
+            }
+        }
+        i++;
+    } while (i < 8);
+    return count;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

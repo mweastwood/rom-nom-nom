@@ -911,5 +911,48 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(s64_code, Not(HasSubstr("asm(\"$26\")")));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     InfersNarrowUnsignedTypesForConditionallyIncrementedLocalCounters) {
+  // Loop that conditionally increments $a1 inside a branch-likely (`beql $v0, $zero, .Ljoin; addiu
+  // $a1, $a1, 1`) and returns `($a1 & 0xFF) == 4` (`andi $v0, $a1, 0xFF; xori $v0, $v0, 4; sltiu
+  // $v0, $v0, 1`):
+  std::vector<uint32_t> words = {
+      0x00002821,  // 00: addu  $a1, $zero, $zero
+      0x00002021,  // 04: addu  $a0, $zero, $zero
+      0x308200FF,  // 08: andi  $v0, $a0, 0xFF
+      // .Lloop (0x0C):
+      0x00021840,  // 0C: sll   $v1, $v0, 1
+      0x3C028020,  // 10: lui   $v0, 0x8020
+      0x00431021,  // 14: addu  $v0, $v0, $v1
+      0x94420000,  // 18: lhu   $v0, 0($v0)
+      0x50400001,  // 1C: beql  $v0, $zero, .Lnext (0x24)
+      0x24A50001,  // 20:  addiu $a1, $a1, 1
+      // .Lnext (0x24):
+      0x24840001,  // 24: addiu $a0, $a0, 1
+      0x308200FF,  // 28: andi  $v0, $a0, 0xFF
+      0x2C420004,  // 2C: sltiu $v0, $v0, 4
+      0x5440FFF6,  // 30: bnel  $v0, $zero, .Lloop (0x0C)
+      0x308200FF,  // 34:  andi  $v0, $a0, 0xFF
+      0x30A200FF,  // 38: andi  $v0, $a1, 0xFF
+      0x38420004,  // 3C: xori  $v0, $v0, 4
+      0x03E00008,  // 40: jr    $ra
+      0x2C420001,  // 44:  sltiu $v0, $v0, 1
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x800ACD18));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "CountInactiveVoices";
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("u8 arg1;"));
+  EXPECT_THAT(code, HasSubstr("return ((arg1 & 255) == 4);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

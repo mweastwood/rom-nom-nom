@@ -739,6 +739,505 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
   return true;
 }
 
+bool IsNarrowPointerStoreLhs(const CExpression& lhs, int64_t* out_mask) {
+  if (lhs.Kind() != CExpressionKind::kUnaryExpression) return false;
+  const auto& un = static_cast<const UnaryExpression&>(lhs);
+  if (!un.IsPrefix() || un.Op() != "*") return false;
+  if (un.Operand().Kind() != CExpressionKind::kCastExpression) return false;
+  const auto& cast = static_cast<const CastExpression&>(un.Operand());
+  if (cast.TargetType().pointer_depth != 1) return false;
+  if (cast.TargetType().name == "u8" || cast.TargetType().name == "s8") {
+    *out_mask = 255;
+    return true;
+  }
+  if (cast.TargetType().name == "u16" || cast.TargetType().name == "s16") {
+    *out_mask = 65535;
+    return true;
+  }
+  return false;
+}
+
+bool IsIdentifierStepByConst(const CExpression& rhs, std::string_view expected_var,
+                             bool require_unit_step) {
+  if (rhs.Kind() != CExpressionKind::kBinaryExpression) return false;
+  const auto& bin = static_cast<const BinaryExpression&>(rhs);
+  if (bin.Op() != "+" && bin.Op() != "-") return false;
+  if (bin.Lhs().Kind() != CExpressionKind::kIdentifier ||
+      bin.Rhs().Kind() != CExpressionKind::kIntegerLiteral) {
+    return false;
+  }
+  const auto& id = static_cast<const IdentifierExpression&>(bin.Lhs());
+  if (!expected_var.empty() && id.Name() != expected_var) {
+    return false;
+  }
+  const int64_t step = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+  return require_unit_step ? (step == 1 || step == -1) : true;
+}
+
+void CollectConditionallySteppedVars(const CStatement& stmt,
+                                     absl::flat_hash_set<std::string>* out_vars) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr) CollectConditionallySteppedVars(*child, out_vars);
+      }
+      break;
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      const CStatement* single_then = &ifs.ThenBranch();
+      if (single_then->Kind() == CStatementKind::kCompoundStatement) {
+        const auto& comp = static_cast<const CompoundStatement&>(*single_then);
+        single_then = (comp.Statements().size() == 1) ? comp.Statements()[0].get() : nullptr;
+      }
+      if (single_then != nullptr && single_then->Kind() == CStatementKind::kExpressionStatement) {
+        const auto& expr = static_cast<const ExpressionStatement&>(*single_then).Expression();
+        if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& assign = static_cast<const AssignmentExpression&>(expr);
+          if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              IsIdentifierStepByConst(assign.Rhs(), /*expected_var=*/"",
+                                      /*require_unit_step=*/true)) {
+            const std::string& lhs_name =
+                static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+            if (ifs.ElseBranch() == nullptr ||
+                !StatementModifiesVariable(*ifs.ElseBranch(), lhs_name)) {
+              out_vars->insert(lhs_name);
+            }
+          }
+        }
+      }
+      CollectConditionallySteppedVars(ifs.ThenBranch(), out_vars);
+      if (ifs.ElseBranch() != nullptr) {
+        CollectConditionallySteppedVars(*ifs.ElseBranch(), out_vars);
+      }
+      break;
+    }
+    case CStatementKind::kWhileStatement:
+      CollectConditionallySteppedVars(static_cast<const WhileStatement&>(stmt).Body(), out_vars);
+      break;
+    case CStatementKind::kDoWhileStatement:
+      CollectConditionallySteppedVars(static_cast<const DoWhileStatement&>(stmt).Body(), out_vars);
+      break;
+    case CStatementKind::kForStatement:
+      CollectConditionallySteppedVars(static_cast<const ForStatement&>(stmt).Body(), out_vars);
+      break;
+    case CStatementKind::kSwitchStatement:
+      for (const auto& c : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (c.body != nullptr) CollectConditionallySteppedVars(*c.body, out_vars);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void CheckNarrowMaskedReadsInExpr(const CExpression& expr, std::string_view var_name,
+                                  int* mask_255_count, int* mask_65535_count,
+                                  bool* has_unmasked_read) {
+  if (*has_unmasked_read) return;
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier:
+      if (static_cast<const IdentifierExpression&>(expr).Name() == var_name) {
+        *has_unmasked_read = true;
+      }
+      return;
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      if (bin.Op() == "&" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        int64_t mask = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        if ((mask == 255 || mask == 65535) && bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(bin.Lhs()).Name() == var_name) {
+          if (mask == 255) {
+            ++(*mask_255_count);
+          } else {
+            ++(*mask_65535_count);
+          }
+          return;
+        }
+        if ((mask == 255 || mask == 65535) &&
+            bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
+          if (inner.Op() == "+" || inner.Op() == "-") {
+            bool lhs_is_var =
+                inner.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                static_cast<const IdentifierExpression&>(inner.Lhs()).Name() == var_name;
+            bool rhs_is_var =
+                inner.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                static_cast<const IdentifierExpression&>(inner.Rhs()).Name() == var_name;
+            if (lhs_is_var || rhs_is_var) {
+              if (mask == 255) {
+                ++(*mask_255_count);
+              } else {
+                ++(*mask_65535_count);
+              }
+              if (!lhs_is_var) {
+                CheckNarrowMaskedReadsInExpr(inner.Lhs(), var_name, mask_255_count,
+                                             mask_65535_count, has_unmasked_read);
+              }
+              if (!rhs_is_var) {
+                CheckNarrowMaskedReadsInExpr(inner.Rhs(), var_name, mask_255_count,
+                                             mask_65535_count, has_unmasked_read);
+              }
+              return;
+            }
+          }
+        }
+      }
+      CheckNarrowMaskedReadsInExpr(bin.Lhs(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInExpr(bin.Rhs(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      return;
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          static_cast<const IdentifierExpression&>(assign.Lhs()).Name() == var_name) {
+        if (IsIdentifierStepByConst(assign.Rhs(), var_name, /*require_unit_step=*/false)) {
+          return;
+        }
+        CheckNarrowMaskedReadsInExpr(assign.Rhs(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+        return;
+      }
+      int64_t store_mask = 0;
+      if (assign.Op() == "=" && assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+          static_cast<const IdentifierExpression&>(assign.Rhs()).Name() == var_name &&
+          IsNarrowPointerStoreLhs(assign.Lhs(), &store_mask)) {
+        CheckNarrowMaskedReadsInExpr(assign.Lhs(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+        return;
+      }
+      CheckNarrowMaskedReadsInExpr(assign.Lhs(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInExpr(assign.Rhs(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      return;
+    }
+    case CExpressionKind::kUnaryExpression:
+      CheckNarrowMaskedReadsInExpr(static_cast<const UnaryExpression&>(expr).Operand(), var_name,
+                                   mask_255_count, mask_65535_count, has_unmasked_read);
+      return;
+    case CExpressionKind::kCastExpression:
+      CheckNarrowMaskedReadsInExpr(static_cast<const CastExpression&>(expr).Operand(), var_name,
+                                   mask_255_count, mask_65535_count, has_unmasked_read);
+      return;
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      CheckNarrowMaskedReadsInExpr(call.Callee(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr) {
+          CheckNarrowMaskedReadsInExpr(*arg, var_name, mask_255_count, mask_65535_count,
+                                       has_unmasked_read);
+        }
+      }
+      return;
+    }
+    case CExpressionKind::kMemberAccessExpression:
+      CheckNarrowMaskedReadsInExpr(static_cast<const MemberAccessExpression&>(expr).Object(),
+                                   var_name, mask_255_count, mask_65535_count, has_unmasked_read);
+      return;
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      CheckNarrowMaskedReadsInExpr(arr.Array(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInExpr(arr.Index(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      return;
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      CheckNarrowMaskedReadsInExpr(tern.Condition(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInExpr(tern.TrueExpression(), var_name, mask_255_count,
+                                   mask_65535_count, has_unmasked_read);
+      CheckNarrowMaskedReadsInExpr(tern.FalseExpression(), var_name, mask_255_count,
+                                   mask_65535_count, has_unmasked_read);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+void CheckNarrowMaskedReadsInStmt(const CStatement& stmt, std::string_view var_name,
+                                  int* mask_255_count, int* mask_65535_count,
+                                  bool* has_unmasked_read) {
+  if (*has_unmasked_read) return;
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr) {
+          CheckNarrowMaskedReadsInStmt(*child, var_name, mask_255_count, mask_65535_count,
+                                       has_unmasked_read);
+        }
+      }
+      return;
+    case CStatementKind::kExpressionStatement:
+      CheckNarrowMaskedReadsInExpr(static_cast<const ExpressionStatement&>(stmt).Expression(),
+                                   var_name, mask_255_count, mask_65535_count, has_unmasked_read);
+      return;
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
+      if (vd.Initializer() != nullptr) {
+        CheckNarrowMaskedReadsInExpr(*vd.Initializer(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+      }
+      return;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      CheckNarrowMaskedReadsInExpr(ifs.Condition(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInStmt(ifs.ThenBranch(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      if (ifs.ElseBranch() != nullptr) {
+        CheckNarrowMaskedReadsInStmt(*ifs.ElseBranch(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+      }
+      return;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      CheckNarrowMaskedReadsInExpr(ws.Condition(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInStmt(ws.Body(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      return;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      CheckNarrowMaskedReadsInStmt(dws.Body(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      CheckNarrowMaskedReadsInExpr(dws.Condition(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      return;
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      if (fs.Init() != nullptr) {
+        CheckNarrowMaskedReadsInStmt(*fs.Init(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+      }
+      if (fs.Condition() != nullptr) {
+        CheckNarrowMaskedReadsInExpr(*fs.Condition(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+      }
+      if (fs.Step() != nullptr) {
+        CheckNarrowMaskedReadsInExpr(*fs.Step(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+      }
+      CheckNarrowMaskedReadsInStmt(fs.Body(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      return;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      if (rs.ReturnValue() != nullptr) {
+        CheckNarrowMaskedReadsInExpr(*rs.ReturnValue(), var_name, mask_255_count, mask_65535_count,
+                                     has_unmasked_read);
+      }
+      return;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      CheckNarrowMaskedReadsInExpr(ss.Condition(), var_name, mask_255_count, mask_65535_count,
+                                   has_unmasked_read);
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr) {
+          CheckNarrowMaskedReadsInStmt(*c.body, var_name, mask_255_count, mask_65535_count,
+                                       has_unmasked_read);
+        }
+      }
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
+    const CExpression& expr, const absl::flat_hash_map<std::string, CType>& narrow_types,
+    bool is_return_root) {
+  if (is_return_root && expr.Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& lt = static_cast<const BinaryExpression&>(expr);
+    if (lt.Op() == "<" && lt.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+        static_cast<const IntegerLiteralExpression&>(lt.Rhs()).Value() == 1 &&
+        lt.Lhs().Kind() == CExpressionKind::kCastExpression) {
+      const auto& cast = static_cast<const CastExpression&>(lt.Lhs());
+      if (cast.TargetType().name == "u32" && cast.TargetType().pointer_depth == 0 &&
+          cast.Operand().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& xor_bin = static_cast<const BinaryExpression&>(cast.Operand());
+        if (xor_bin.Op() == "^" && xor_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+            xor_bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& mask_bin = static_cast<const BinaryExpression&>(xor_bin.Lhs());
+          if (mask_bin.Op() == "&" && mask_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              narrow_types.contains(
+                  static_cast<const IdentifierExpression&>(mask_bin.Lhs()).Name())) {
+            return CExpression::Binary("==", xor_bin.Lhs().Clone(), xor_bin.Rhs().Clone());
+          }
+        }
+      }
+    }
+  }
+  switch (expr.Kind()) {
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      if (bin.Op() == "&" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+          static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 65535 &&
+          bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
+        if (inner.Op() == "+" || inner.Op() == "-") {
+          bool lhs_u16 = false;
+          bool rhs_u16 = false;
+          if (inner.Lhs().Kind() == CExpressionKind::kIdentifier) {
+            auto it =
+                narrow_types.find(static_cast<const IdentifierExpression&>(inner.Lhs()).Name());
+            lhs_u16 = (it != narrow_types.end() && it->second.name == "u16");
+          }
+          if (inner.Rhs().Kind() == CExpressionKind::kIdentifier) {
+            auto it =
+                narrow_types.find(static_cast<const IdentifierExpression&>(inner.Rhs()).Name());
+            rhs_u16 = (it != narrow_types.end() && it->second.name == "u16");
+          }
+          if (lhs_u16 || rhs_u16) {
+            auto new_lhs = lhs_u16 ? inner.Lhs().Clone()
+                                   : CExpression::Cast(CType::U16(), inner.Lhs().Clone());
+            auto new_rhs = rhs_u16 ? inner.Rhs().Clone()
+                                   : CExpression::Cast(CType::U16(), inner.Rhs().Clone());
+            return CExpression::Binary(
+                "&",
+                CExpression::Cast(CType::U16(), CExpression::Binary(inner.Op(), std::move(new_lhs),
+                                                                    std::move(new_rhs))),
+                bin.Rhs().Clone());
+          }
+        }
+      }
+      return CExpression::Binary(
+          bin.Op(), RewriteNarrowCondIncExpr(bin.Lhs(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(bin.Rhs(), narrow_types, /*is_return_root=*/false));
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      return CExpression::Assignment(
+          assign.Op(),
+          RewriteNarrowCondIncExpr(assign.Lhs(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(assign.Rhs(), narrow_types, /*is_return_root=*/false));
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      return CExpression::Unary(
+          un.Op(), RewriteNarrowCondIncExpr(un.Operand(), narrow_types, /*is_return_root=*/false),
+          un.IsPrefix());
+    }
+    case CExpressionKind::kCastExpression: {
+      const auto& cast = static_cast<const CastExpression&>(expr);
+      return CExpression::Cast(
+          cast.TargetType(),
+          RewriteNarrowCondIncExpr(cast.Operand(), narrow_types, /*is_return_root=*/false));
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      std::vector<std::unique_ptr<CExpression>> args;
+      args.reserve(call.Arguments().size());
+      for (const auto& arg : call.Arguments()) {
+        args.push_back(arg != nullptr
+                           ? RewriteNarrowCondIncExpr(*arg, narrow_types, /*is_return_root=*/false)
+                           : nullptr);
+      }
+      return CExpression::Call(
+          RewriteNarrowCondIncExpr(call.Callee(), narrow_types, /*is_return_root=*/false),
+          std::move(args));
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return CExpression::Ternary(
+          RewriteNarrowCondIncExpr(tern.Condition(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(tern.TrueExpression(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(tern.FalseExpression(), narrow_types, /*is_return_root=*/false));
+    }
+    default:
+      return expr.Clone();
+  }
+}
+
+std::unique_ptr<CStatement> RewriteNarrowCondIncStmt(
+    const CStatement& stmt, const absl::flat_hash_map<std::string, CType>& narrow_types) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      auto out = std::make_unique<CompoundStatement>();
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr) {
+          out->AddStatement(RewriteNarrowCondIncStmt(*child, narrow_types));
+        }
+      }
+      return out;
+    }
+    case CStatementKind::kExpressionStatement: {
+      const auto& es = static_cast<const ExpressionStatement&>(stmt);
+      return CStatement::Expression(
+          RewriteNarrowCondIncExpr(es.Expression(), narrow_types, /*is_return_root=*/false));
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(
+          RewriteNarrowCondIncExpr(ifs.Condition(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncStmt(ifs.ThenBranch(), narrow_types),
+          ifs.ElseBranch() != nullptr ? RewriteNarrowCondIncStmt(*ifs.ElseBranch(), narrow_types)
+                                      : nullptr);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(
+          RewriteNarrowCondIncExpr(ws.Condition(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncStmt(ws.Body(), narrow_types));
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(
+          RewriteNarrowCondIncStmt(dws.Body(), narrow_types),
+          RewriteNarrowCondIncExpr(dws.Condition(), narrow_types, /*is_return_root=*/false));
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(
+          fs.Init() != nullptr ? RewriteNarrowCondIncStmt(*fs.Init(), narrow_types) : nullptr,
+          fs.Condition() != nullptr
+              ? RewriteNarrowCondIncExpr(*fs.Condition(), narrow_types, /*is_return_root=*/false)
+              : nullptr,
+          fs.Step() != nullptr
+              ? RewriteNarrowCondIncExpr(*fs.Step(), narrow_types, /*is_return_root=*/false)
+              : nullptr,
+          RewriteNarrowCondIncStmt(fs.Body(), narrow_types));
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return CStatement::Return(
+          rs.ReturnValue() != nullptr
+              ? RewriteNarrowCondIncExpr(*rs.ReturnValue(), narrow_types, /*is_return_root=*/true)
+              : nullptr);
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      std::vector<SwitchCase> cases;
+      cases.reserve(ss.Cases().size());
+      for (const auto& c : ss.Cases()) {
+        SwitchCase sc = c.Clone();
+        if (c.body != nullptr) {
+          auto rewritten = RewriteNarrowCondIncStmt(*c.body, narrow_types);
+          sc.body.reset(static_cast<CompoundStatement*>(rewritten.release()));
+        }
+        cases.push_back(std::move(sc));
+      }
+      return CStatement::Switch(
+          RewriteNarrowCondIncExpr(ss.Condition(), narrow_types, /*is_return_root=*/false),
+          std::move(cases));
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
 absl::Status PrependSynthesizedLocalDeclarations(
     const ControlFlowGraph& cfg, const StackFrameAnalysis& frame_analysis,
     const absl::flat_hash_set<std::string>& double_vars, const std::vector<CParameter>& parameters,
@@ -1243,6 +1742,34 @@ absl::Status PrependSynthesizedLocalDeclarations(
     return std::nullopt;
   };
 
+  absl::flat_hash_set<std::string> cond_stepped_vars;
+  CollectConditionallySteppedVars(**body, &cond_stepped_vars);
+  absl::flat_hash_map<std::string, CType> narrow_cond_inc_var_types;
+  for (const auto& var_name : local_vars_to_declare) {
+    if (!cond_stepped_vars.contains(var_name) || var_name == "sp" || is_fp_reg(var_name) ||
+        float_gpr_var_names.contains(var_name) || float_local_var_names.contains(var_name) ||
+        absl::EndsWith(var_name, "_64") || s64_local_var_names.contains(var_name) ||
+        double_vars.contains(var_name) || has_address_taken(var_name)) {
+      continue;
+    }
+    int mask_255_count = 0;
+    int mask_65535_count = 0;
+    bool has_unmasked_read = false;
+    CheckNarrowMaskedReadsInStmt(**body, var_name, &mask_255_count, &mask_65535_count,
+                                 &has_unmasked_read);
+    if (!has_unmasked_read) {
+      if (mask_255_count > 0 && mask_65535_count == 0) {
+        narrow_cond_inc_var_types.emplace(var_name, CType::U8());
+      } else if (mask_65535_count > 0 && mask_255_count == 0) {
+        narrow_cond_inc_var_types.emplace(var_name, CType::U16());
+      }
+    }
+  }
+  if (!narrow_cond_inc_var_types.empty()) {
+    auto rewritten_body = RewriteNarrowCondIncStmt(**body, narrow_cond_inc_var_types);
+    body->reset(static_cast<CompoundStatement*>(rewritten_body.release()));
+  }
+
   auto new_body = std::make_unique<CompoundStatement>();
   for (const auto& var_name : local_vars_to_declare) {
     if (var_name == "sp") {
@@ -1277,8 +1804,13 @@ absl::Status PrependSynthesizedLocalDeclarations(
       if (reg_annot.has_value() || is_callee_gpr) {
         init_expr = nullptr;
       }
+      CType var_type = CType::S32();
+      if (auto it = narrow_cond_inc_var_types.find(var_name);
+          it != narrow_cond_inc_var_types.end()) {
+        var_type = it->second;
+      }
       new_body->AddStatement(CStatement::VariableDeclaration(
-          CType::S32(), var_name, std::move(init_expr), std::nullopt, std::move(reg_annot)));
+          std::move(var_type), var_name, std::move(init_expr), std::nullopt, std::move(reg_annot)));
     }
   }
   for (const auto& stmt : (*body)->Statements()) {
