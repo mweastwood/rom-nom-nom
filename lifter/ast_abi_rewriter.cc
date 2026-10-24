@@ -341,28 +341,51 @@ void SimplifyDecoupledDelaySlotEarlyReturns(CompoundStatement* comp) {
 
 void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
   if (comp == nullptr) return;
-  auto extract_arg_assign = [](const CStatement& s, std::string* lhs_out,
-                               std::string* rhs_str_out) -> bool {
+  auto extract_sinkable_assign = [](const CStatement& s, std::string* lhs_out,
+                                    std::string* rhs_str_out,
+                                    const CExpression** rhs_expr_out) -> bool {
     if (s.Kind() != CStatementKind::kExpressionStatement) return false;
     const auto& es = static_cast<const ExpressionStatement&>(s);
     if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) return false;
     const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
     if (a.Op() != "=" || a.Lhs().Kind() != CExpressionKind::kIdentifier) return false;
     std::string lhs = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
-    if (lhs != "arg0" && lhs != "arg1" && lhs != "arg2" && lhs != "arg3" &&
-        !absl::StartsWith(lhs, "var_sp_")) {
+    if (lhs == "sp" || lhs == "fcond" || !IsPureExpression(a.Rhs()) ||
+        ExpressionUsesVariable(a.Rhs(), lhs)) {
       return false;
     }
-    if (a.Rhs().Kind() != CExpressionKind::kIdentifier &&
-        a.Rhs().Kind() != CExpressionKind::kIntegerLiteral &&
-        a.Rhs().Kind() != CExpressionKind::kFloatLiteral &&
-        !(a.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
-          (static_cast<const UnaryExpression&>(a.Rhs()).Op() == "*(s32*)&" ||
-           static_cast<const UnaryExpression&>(a.Rhs()).Op() == "*(s32 *)&"))) {
-      return false;
-    }
+    bool rhs_has_mem_deref = false;
+    std::function<void(const CExpression&)> check_mem = [&](const CExpression& e) {
+      if (rhs_has_mem_deref) return;
+      if (e.Kind() == CExpressionKind::kUnaryExpression) {
+        const auto& un = static_cast<const UnaryExpression&>(e);
+        if (un.Op().find('*') != std::string::npos && un.Op() != "*(s32*)&" &&
+            un.Op() != "*(u32*)&" && un.Op() != "*(f32*)&" && un.Op() != "*(s32 *)&" &&
+            un.Op() != "*(u32 *)&" && un.Op() != "*(f32 *)&") {
+          rhs_has_mem_deref = true;
+          return;
+        }
+        check_mem(un.Operand());
+      } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
+        rhs_has_mem_deref = true;
+      } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
+        if (static_cast<const MemberAccessExpression&>(e).IsArrow()) {
+          rhs_has_mem_deref = true;
+          return;
+        }
+        check_mem(static_cast<const MemberAccessExpression&>(e).Object());
+      } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+        check_mem(static_cast<const BinaryExpression&>(e).Lhs());
+        check_mem(static_cast<const BinaryExpression&>(e).Rhs());
+      } else if (e.Kind() == CExpressionKind::kCastExpression) {
+        check_mem(static_cast<const CastExpression&>(e).Operand());
+      }
+    };
+    check_mem(a.Rhs());
+    if (rhs_has_mem_deref) return false;
     *lhs_out = std::move(lhs);
     *rhs_str_out = a.Rhs().ToString();
+    if (rhs_expr_out != nullptr) *rhs_expr_out = &a.Rhs();
     return true;
   };
 
@@ -374,6 +397,56 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
     if (a.Op() != "=" || a.Lhs().Kind() != CExpressionKind::kIdentifier) return false;
     *lhs_out = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
     return true;
+  };
+
+  std::function<bool(const CStatement&, std::string_view, bool*)> prefix_reads_before_write =
+      [&](const CStatement& s, std::string_view var, bool* written) -> bool {
+    if (*written) return false;
+    switch (s.Kind()) {
+      case CStatementKind::kReturnStatement:
+      case CStatementKind::kBreakStatement:
+      case CStatementKind::kContinueStatement:
+        return true;
+      case CStatementKind::kExpressionStatement: {
+        const auto& es = static_cast<const ExpressionStatement&>(s);
+        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+          if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(a.Lhs()).Name() == var) {
+            if (ExpressionUsesVariable(a.Rhs(), var)) return true;
+            *written = true;
+            return false;
+          }
+        }
+        return StatementReferencesVariable(s, var);
+      }
+      case CStatementKind::kCompoundStatement: {
+        const auto& cs = static_cast<const CompoundStatement&>(s);
+        for (const auto& ch : cs.Statements()) {
+          if (ch == nullptr) continue;
+          if (ch->Kind() == CStatementKind::kLabelStatement) {
+            *written = false;
+            continue;
+          }
+          if (prefix_reads_before_write(*ch, var, written)) return true;
+        }
+        return false;
+      }
+      case CStatementKind::kIfStatement: {
+        const auto& ifs = static_cast<const IfStatement&>(s);
+        if (!*written && ExpressionUsesVariable(ifs.Condition(), var)) return true;
+        bool tw = *written;
+        if (prefix_reads_before_write(ifs.ThenBranch(), var, &tw)) return true;
+        bool ew = *written;
+        if (ifs.ElseBranch() != nullptr) {
+          if (prefix_reads_before_write(*ifs.ElseBranch(), var, &ew)) return true;
+          if (tw && ew) *written = true;
+        }
+        return false;
+      }
+      default:
+        return StatementReferencesVariable(s, var);
+    }
   };
 
   auto& stmts = comp->MutableStatements();
@@ -404,13 +477,16 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
           for (size_t ti = then_stmts.size(); ti > then_min; --ti) {
             std::string t_lhs;
             std::string t_rhs;
-            if (!extract_arg_assign(*then_stmts[ti - 1], &t_lhs, &t_rhs)) continue;
+            const CExpression* t_rhs_expr = nullptr;
+            if (!extract_sinkable_assign(*then_stmts[ti - 1], &t_lhs, &t_rhs, &t_rhs_expr)) {
+              continue;
+            }
             bool t_blocked = false;
             for (size_t tk = ti; tk < then_stmts.size(); ++tk) {
               std::string after_lhs;
               if (!is_simple_reg_assign(*then_stmts[tk], &after_lhs) || after_lhs == t_lhs ||
-                  absl::StrContains(then_stmts[tk]->ToString(), t_lhs) ||
-                  absl::StrContains(t_rhs, after_lhs)) {
+                  StatementReferencesVariable(*then_stmts[tk], t_lhs) ||
+                  ExpressionUsesVariable(*t_rhs_expr, after_lhs)) {
                 t_blocked = true;
                 break;
               }
@@ -420,14 +496,17 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
             for (size_t ei = else_stmts.size(); ei > else_min; --ei) {
               std::string e_lhs;
               std::string e_rhs;
-              if (!extract_arg_assign(*else_stmts[ei - 1], &e_lhs, &e_rhs)) continue;
+              const CExpression* e_rhs_expr = nullptr;
+              if (!extract_sinkable_assign(*else_stmts[ei - 1], &e_lhs, &e_rhs, &e_rhs_expr)) {
+                continue;
+              }
               if (e_lhs != t_lhs || e_rhs != t_rhs) continue;
               bool e_blocked = false;
               for (size_t ek = ei; ek < else_stmts.size(); ++ek) {
                 std::string after_lhs;
                 if (!is_simple_reg_assign(*else_stmts[ek], &after_lhs) || after_lhs == e_lhs ||
-                    absl::StrContains(else_stmts[ek]->ToString(), e_lhs) ||
-                    absl::StrContains(e_rhs, after_lhs)) {
+                    StatementReferencesVariable(*else_stmts[ek], e_lhs) ||
+                    ExpressionUsesVariable(*e_rhs_expr, after_lhs)) {
                   e_blocked = true;
                   break;
                 }
@@ -442,6 +521,69 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
               break;
             }
             if (sunk_any) break;
+          }
+        }
+        if (else_stmts.empty() && !then_stmts.empty()) {
+          stmts[i] =
+              CStatement::If(ifs.Condition().Clone(), ifs.MutableThenBranch()->Clone(), nullptr);
+        }
+      }
+      auto& cur_ifs = static_cast<IfStatement&>(*stmts[i]);
+      if (i > 0 && cur_ifs.MutableElseBranch() == nullptr &&
+          cur_ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+          IsPureExpression(cur_ifs.Condition())) {
+        std::string pre_lhs;
+        std::string pre_rhs;
+        const CExpression* pre_rhs_expr = nullptr;
+        if (extract_sinkable_assign(*stmts[i - 1], &pre_lhs, &pre_rhs, &pre_rhs_expr) &&
+            !ExpressionUsesVariable(cur_ifs.Condition(), pre_lhs) &&
+            !StatementTakesAddressOf(*cur_ifs.MutableThenBranch(), pre_lhs)) {
+          auto* then_comp = static_cast<CompoundStatement*>(cur_ifs.MutableThenBranch());
+          auto& then_stmts = then_comp->MutableStatements();
+          if (then_stmts.size() >= 2) {
+            std::string tail_lhs;
+            std::string tail_rhs;
+            const CExpression* tail_rhs_expr = nullptr;
+            if (extract_sinkable_assign(*then_stmts.back(), &tail_lhs, &tail_rhs, &tail_rhs_expr) &&
+                tail_lhs == pre_lhs && tail_rhs == pre_rhs) {
+              size_t prefix_end = then_stmts.size() - 1;
+              bool has_join_label = false;
+              if (prefix_end >= 1 &&
+                  then_stmts[prefix_end - 1]->Kind() == CStatementKind::kLabelStatement) {
+                has_join_label = true;
+                --prefix_end;
+              }
+              bool prefix_ok = (prefix_end >= 1);
+              bool written = false;
+              for (size_t pk = 0; pk < prefix_end && prefix_ok; ++pk) {
+                const auto& ps = *then_stmts[pk];
+                if (!has_join_label && StatementContainsControlFlowJump(ps)) {
+                  prefix_ok = false;
+                  break;
+                }
+                if (prefix_reads_before_write(ps, pre_lhs, &written)) {
+                  prefix_ok = false;
+                  break;
+                }
+              }
+              if (prefix_ok) {
+                auto sunk_assign = std::move(then_stmts.back());
+                then_stmts.pop_back();
+                std::unique_ptr<CStatement> sunk_label;
+                if (has_join_label) {
+                  sunk_label = std::move(then_stmts.back());
+                  then_stmts.pop_back();
+                }
+                stmts.erase(stmts.begin() + (i - 1));
+                --i;
+                if (sunk_label != nullptr) {
+                  stmts.insert(stmts.begin() + i + 1, std::move(sunk_label));
+                  stmts.insert(stmts.begin() + i + 2, std::move(sunk_assign));
+                } else {
+                  stmts.insert(stmts.begin() + i + 1, std::move(sunk_assign));
+                }
+              }
+            }
           }
         }
       }

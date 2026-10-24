@@ -1148,7 +1148,24 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
         bool pred_has_unconsumed_call = false;
         for (const auto& inst : cfg.Blocks()[p].instructions) {
           if (inst.IsCall()) {
-            pred_has_unconsumed_call = true;
+            bool call_may_return_v0 = (functions_returning_v0 == nullptr);
+            if (!call_may_return_v0 && inst.opcode == Opcode::kJal) {
+              uint32_t target_vram = inst.JumpTarget();
+              std::string callee_name;
+              if (symbol_index != nullptr) {
+                const auto* sym = symbol_index->FindByAddress(target_vram);
+                if (sym != nullptr) {
+                  callee_name = sym->name();
+                }
+              }
+              if (callee_name.empty()) {
+                callee_name = absl::StrFormat("func_%08X", target_vram);
+              }
+              call_may_return_v0 = functions_returning_v0->contains(callee_name);
+            } else if (!call_may_return_v0 && inst.opcode == Opcode::kJalr) {
+              call_may_return_v0 = true;
+            }
+            pred_has_unconsumed_call = call_may_return_v0;
             continue;
           }
           if (pred_has_unconsumed_call) {

@@ -1010,6 +1010,150 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
       find_lbl(*body);
       return ok;
     };
+    std::function<bool(const CStatement&, bool*, int)> can_reach_read_before_write =
+        [&](const CStatement& s, bool* definitely_written, int goto_depth) -> bool {
+      if (*definitely_written) return false;
+      switch (s.Kind()) {
+        case CStatementKind::kExpressionStatement: {
+          const auto& es = static_cast<const ExpressionStatement&>(s);
+          if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+            if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                static_cast<const IdentifierExpression&>(a.Lhs()).Name() == param.name) {
+              if (ExpressionUsesVariable(a.Rhs(), param.name)) {
+                return true;
+              }
+              *definitely_written = true;
+              return false;
+            }
+          }
+          return StatementReferencesVariable(s, param.name);
+        }
+        case CStatementKind::kCompoundStatement: {
+          const auto& cs = static_cast<const CompoundStatement&>(s);
+          for (const auto& child : cs.Statements()) {
+            if (child == nullptr || child->Kind() == CStatementKind::kLabelStatement) continue;
+            if (can_reach_read_before_write(*child, definitely_written, goto_depth)) {
+              return true;
+            }
+            if (*definitely_written) return false;
+            if (child->Kind() == CStatementKind::kReturnStatement ||
+                child->Kind() == CStatementKind::kBreakStatement ||
+                child->Kind() == CStatementKind::kContinueStatement ||
+                child->Kind() == CStatementKind::kGotoStatement) {
+              *definitely_written = true;
+              return false;
+            }
+          }
+          return false;
+        }
+        case CStatementKind::kIfStatement: {
+          const auto& ifs = static_cast<const IfStatement&>(s);
+          if (ExpressionUsesVariable(ifs.Condition(), param.name)) return true;
+          bool then_w = *definitely_written;
+          if (can_reach_read_before_write(ifs.ThenBranch(), &then_w, goto_depth)) return true;
+          bool else_w = *definitely_written;
+          if (ifs.ElseBranch() != nullptr) {
+            if (can_reach_read_before_write(*ifs.ElseBranch(), &else_w, goto_depth)) return true;
+            if (then_w && else_w) *definitely_written = true;
+          }
+          return false;
+        }
+        case CStatementKind::kDoWhileStatement: {
+          const auto& dws = static_cast<const DoWhileStatement&>(s);
+          if (can_reach_read_before_write(dws.Body(), definitely_written, goto_depth)) {
+            return true;
+          }
+          return !*definitely_written && ExpressionUsesVariable(dws.Condition(), param.name);
+        }
+        case CStatementKind::kWhileStatement: {
+          const auto& ws = static_cast<const WhileStatement&>(s);
+          if (ExpressionUsesVariable(ws.Condition(), param.name)) return true;
+          bool body_w = *definitely_written;
+          return can_reach_read_before_write(ws.Body(), &body_w, goto_depth);
+        }
+        case CStatementKind::kForStatement: {
+          const auto& fs = static_cast<const ForStatement&>(s);
+          if (fs.Init() != nullptr &&
+              can_reach_read_before_write(*fs.Init(), definitely_written, goto_depth)) {
+            return true;
+          }
+          if (!*definitely_written && fs.Condition() != nullptr &&
+              ExpressionUsesVariable(*fs.Condition(), param.name)) {
+            return true;
+          }
+          bool body_w = *definitely_written;
+          if (can_reach_read_before_write(fs.Body(), &body_w, goto_depth)) return true;
+          if (!body_w && fs.Step() != nullptr && ExpressionUsesVariable(*fs.Step(), param.name)) {
+            return true;
+          }
+          return false;
+        }
+        case CStatementKind::kGotoStatement: {
+          if (goto_depth > 4) return true;
+          const auto& gs = static_cast<const GotoStatement&>(s);
+          if (label_is_immediately_overwritten(gs.Label())) {
+            *definitely_written = true;
+            return false;
+          }
+          return true;
+        }
+        default:
+          return StatementReferencesVariable(s, param.name);
+      }
+    };
+    auto label_can_reach_read_before_write = [&](std::string_view target_label) -> bool {
+      bool found = false;
+      bool can_read = false;
+      std::function<void(const CStatement&)> find_lbl = [&](const CStatement& s) {
+        if (found) return;
+        if (s.Kind() == CStatementKind::kCompoundStatement) {
+          const auto& cs = static_cast<const CompoundStatement&>(s);
+          for (size_t idx = 0; idx < cs.Statements().size(); ++idx) {
+            if (cs.Statements()[idx] != nullptr &&
+                cs.Statements()[idx]->Kind() == CStatementKind::kLabelStatement &&
+                static_cast<const LabelStatement&>(*cs.Statements()[idx]).Label() == target_label) {
+              found = true;
+              bool written = false;
+              for (size_t rem = idx + 1; rem < cs.Statements().size(); ++rem) {
+                if (cs.Statements()[rem] == nullptr ||
+                    cs.Statements()[rem]->Kind() == CStatementKind::kLabelStatement) {
+                  continue;
+                }
+                if (can_reach_read_before_write(*cs.Statements()[rem], &written, 1)) {
+                  can_read = true;
+                  return;
+                }
+                if (written || cs.Statements()[rem]->Kind() == CStatementKind::kReturnStatement ||
+                    cs.Statements()[rem]->Kind() == CStatementKind::kBreakStatement ||
+                    cs.Statements()[rem]->Kind() == CStatementKind::kContinueStatement ||
+                    cs.Statements()[rem]->Kind() == CStatementKind::kGotoStatement) {
+                  return;
+                }
+              }
+              return;
+            }
+            if (cs.Statements()[idx] != nullptr) find_lbl(*cs.Statements()[idx]);
+          }
+        } else if (s.Kind() == CStatementKind::kIfStatement) {
+          const auto& ifs = static_cast<const IfStatement&>(s);
+          find_lbl(ifs.ThenBranch());
+          if (ifs.ElseBranch() != nullptr) find_lbl(*ifs.ElseBranch());
+        } else if (s.Kind() == CStatementKind::kSwitchStatement) {
+          for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
+            if (sc.body != nullptr) find_lbl(*sc.body);
+          }
+        } else if (s.Kind() == CStatementKind::kWhileStatement) {
+          find_lbl(static_cast<const WhileStatement&>(s).Body());
+        } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
+          find_lbl(static_cast<const DoWhileStatement&>(s).Body());
+        } else if (s.Kind() == CStatementKind::kForStatement) {
+          find_lbl(static_cast<const ForStatement&>(s).Body());
+        }
+      };
+      find_lbl(*body);
+      return !found || can_read;
+    };
     std::function<bool(const CStatement&, bool*)> check_entry_not_read =
         [&](const CStatement& s, bool* definitely_written) -> bool {
       if (!has_goto && *definitely_written) return true;
@@ -1040,7 +1184,28 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
             if (cs_stmts[idx] == nullptr) continue;
             if (cs_stmts[idx]->Kind() == CStatementKind::kLabelStatement) {
               if (!*definitely_written && !is_overwritten_after_label(cs, idx)) {
-                return false;
+                bool written_after_lbl = false;
+                bool reads_before_write_after_lbl = false;
+                for (size_t rem = idx + 1; rem < cs_stmts.size(); ++rem) {
+                  if (cs_stmts[rem] == nullptr ||
+                      cs_stmts[rem]->Kind() == CStatementKind::kLabelStatement) {
+                    continue;
+                  }
+                  if (can_reach_read_before_write(*cs_stmts[rem], &written_after_lbl, 0)) {
+                    reads_before_write_after_lbl = true;
+                    break;
+                  }
+                  if (written_after_lbl ||
+                      cs_stmts[rem]->Kind() == CStatementKind::kReturnStatement ||
+                      cs_stmts[rem]->Kind() == CStatementKind::kBreakStatement ||
+                      cs_stmts[rem]->Kind() == CStatementKind::kContinueStatement ||
+                      cs_stmts[rem]->Kind() == CStatementKind::kGotoStatement) {
+                    break;
+                  }
+                }
+                if (reads_before_write_after_lbl) {
+                  return false;
+                }
               }
               continue;
             }
@@ -1071,6 +1236,52 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
           }
           return true;
         }
+        case CStatementKind::kDoWhileStatement: {
+          const auto& dws = static_cast<const DoWhileStatement&>(s);
+          if (!*definitely_written && !has_goto && parameters.size() <= 4 &&
+              StatementHasCall(dws) &&
+              prologue_copy_lhs == absl::StrCat("temp_s", param.name.substr(3))) {
+            return !StatementReferencesVariable(s, param.name);
+          }
+          if (!check_entry_not_read(dws.Body(), definitely_written)) {
+            return false;
+          }
+          if (!*definitely_written && ExpressionUsesVariable(dws.Condition(), param.name)) {
+            return false;
+          }
+          return true;
+        }
+        case CStatementKind::kWhileStatement: {
+          const auto& ws = static_cast<const WhileStatement&>(s);
+          if (!*definitely_written && !has_goto && parameters.size() <= 4 && StatementHasCall(ws) &&
+              prologue_copy_lhs == absl::StrCat("temp_s", param.name.substr(3))) {
+            return !StatementReferencesVariable(s, param.name);
+          }
+          if (!*definitely_written && ExpressionUsesVariable(ws.Condition(), param.name)) {
+            return false;
+          }
+          bool body_written = *definitely_written;
+          return check_entry_not_read(ws.Body(), &body_written);
+        }
+        case CStatementKind::kForStatement: {
+          const auto& fs = static_cast<const ForStatement&>(s);
+          if (fs.Init() != nullptr && !check_entry_not_read(*fs.Init(), definitely_written)) {
+            return false;
+          }
+          if (!*definitely_written && fs.Condition() != nullptr &&
+              ExpressionUsesVariable(*fs.Condition(), param.name)) {
+            return false;
+          }
+          bool body_written = *definitely_written;
+          if (!check_entry_not_read(fs.Body(), &body_written)) {
+            return false;
+          }
+          if (!body_written && fs.Step() != nullptr &&
+              ExpressionUsesVariable(*fs.Step(), param.name)) {
+            return false;
+          }
+          return true;
+        }
         case CStatementKind::kSwitchStatement: {
           if (!has_goto) return !StatementReferencesVariable(s, param.name);
           const auto& ss = static_cast<const SwitchStatement&>(s);
@@ -1090,7 +1301,8 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
           if (!has_goto) return false;
           if (*definitely_written) return true;
           const auto& gs = static_cast<const GotoStatement&>(s);
-          if (label_is_immediately_overwritten(gs.Label())) {
+          if (label_is_immediately_overwritten(gs.Label()) ||
+              !label_can_reach_read_before_write(gs.Label())) {
             *definitely_written = true;
             return true;
           }
@@ -1133,8 +1345,27 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
       if (stmts[k] == nullptr) continue;
       if (stmts[k]->Kind() == CStatementKind::kLabelStatement) {
         if (!written_so_far && !is_overwritten_after_label(*body, k)) {
-          entry_not_read = false;
-          break;
+          bool written_after_lbl = false;
+          bool reads_before_write_after_lbl = false;
+          for (size_t rem = k + 1; rem < stmts.size(); ++rem) {
+            if (stmts[rem] == nullptr || stmts[rem]->Kind() == CStatementKind::kLabelStatement) {
+              continue;
+            }
+            if (can_reach_read_before_write(*stmts[rem], &written_after_lbl, 0)) {
+              reads_before_write_after_lbl = true;
+              break;
+            }
+            if (written_after_lbl || stmts[rem]->Kind() == CStatementKind::kReturnStatement ||
+                stmts[rem]->Kind() == CStatementKind::kBreakStatement ||
+                stmts[rem]->Kind() == CStatementKind::kContinueStatement ||
+                stmts[rem]->Kind() == CStatementKind::kGotoStatement) {
+              break;
+            }
+          }
+          if (reads_before_write_after_lbl) {
+            entry_not_read = false;
+            break;
+          }
         }
         continue;
       }
@@ -1146,9 +1377,14 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         break;
       }
     }
+    const bool copies_to_non_matching_s_with_calls =
+        IsCalleeSavedGprVarName(prologue_copy_lhs) &&
+        prologue_copy_lhs != absl::StrCat("temp_s", param.name.substr(3)) &&
+        StatementHasCall(*body);
     if (!entry_not_read || !any_redef_seen ||
         (!is_homed_copy && !saw_call_before_write && !is_temp_t_var(prologue_copy_lhs) &&
-         !has_goto && s_saved_params_count == 1 && parameters.size() == 1)) {
+         !has_goto && !copies_to_non_matching_s_with_calls && s_saved_params_count == 1 &&
+         parameters.size() == 1)) {
       continue;
     }
     std::string scratch_name = absl::StrCat("temp_a", param.name.substr(3));

@@ -365,5 +365,27 @@ TEST(CallLifterTest, PredecessorCallDelaySlotDoesNotLeakIntoSuccessorCallArgumen
   EXPECT_EQ(stmts[1].ToString(), "func_80002000(1);\n");
 }
 
+TEST(CallLifterTest, EarlierDoublePrecisionUseOfF12DoesNotOverrideSinglePrecisionCallArgument) {
+  // 00: cvt.d.s $f12, $f12
+  // 04: mul.d   $f2, $f12, $f12
+  // 08: cvt.s.d $f12, $f2       # redefines $f12 as single-precision before call!
+  // 0C: jal     0x80001000
+  // 10: nop
+  std::vector<uint32_t> words = {
+      0x46006321,  // 00: cvt.d.s $f12, $f12
+      0x462C6082,  // 04: mul.d   $f2, $f12, $f12
+      0x46201320,  // 08: cvt.s.d $f12, $f2
+      0x0C000400,  // 0C: jal     0x80001000
+      0x00000000,  // 10: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  absl::flat_hash_map<std::string, int> fp_param_counts = {{"func_80001000", 1}};
+  FunctionLiftContext ctx;
+  ctx.function_fp_parameter_counts = &fp_param_counts;
+  auto stmts = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_FALSE(stmts.empty());
+  EXPECT_EQ(stmts.back().ToString(), "func_80001000(f12);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

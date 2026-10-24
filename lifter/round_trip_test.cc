@@ -5696,5 +5696,20 @@ s32 DoWhileLoopWithPostDecrementNarrowCounterAndCall(u8* row, s32 mode) {
 )");
 }
 
+TEST_F(RoundTripTest, UnpinsS0CopyFromUnmodifiedParameterBeforeCallAndPostCallStore) {
+  AssertRoundTripBitExact("UnpinsS0CopyFromUnmodifiedParameterBeforeCallAndPostCallStore", R"(
+s32 step_interp(s16* state);
+
+void UnpinsS0CopyFromUnmodifiedParameterBeforeCallAndPostCallStore(s16* state) {
+    s32 old_val = state[0];
+    if (step_interp(state) != 0) {
+        if (old_val == state[0]) {
+            state[2] = 0;
+        }
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

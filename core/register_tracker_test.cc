@@ -752,5 +752,40 @@ TEST(RegisterTrackerTest, CompareFunctionStructureDetectsFrameRegisterAndCfgMism
   EXPECT_EQ(comp.normalized_lcs_instructions, 2u);  // addiu + jr
 }
 
+TEST(RegisterTrackerTest, DetermineReturnsV0RejectsSharedEpilogueWithKnownVoidPredecessorCall) {
+  // Block 0:
+  //   00: beq $a0, $zero, 0x10 (Block 2)
+  //   04: nop
+  // Block 1:
+  //   08: jal 0x80001000 (returns v0)
+  //   0C: nop
+  //   10: j   0x18 (Block 3)
+  //   14: nop
+  // Block 2:
+  //   18 (at 0x10): jal 0x80002000 (known void!)
+  //   1C (at 0x14): nop
+  // Block 3 (shared epilogue at 0x18):
+  //   20 (at 0x18): jr $ra
+  //   24 (at 0x1C): nop
+  std::vector<uint32_t> words = {
+      0x10800004,  // 00: beq $a0, $zero, +4 -> 0x14
+      0x00000000,  // 04: nop
+      0x0C000400,  // 08: jal 0x80001000
+      0x00000000,  // 0C: nop
+      0x08000007,  // 10: j   0x8000001C
+      0x00000000,  // 14: nop
+      0x0C000800,  // 18: jal 0x80002000
+      0x00000000,  // 1C: nop
+      0x03E00008,  // 20: jr  $ra
+      0x00000000,  // 24: nop
+  };
+  words[0] = 0x10800005;  // beq $a0, $zero, +5 -> 0x18
+  words[4] = 0x08000008;  // j 0x80000020
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  absl::flat_hash_set<std::string> funcs_returning_v0 = {"func_80001000"};
+  EXPECT_FALSE(DetermineReturnsV0(cfg, nullptr, &funcs_returning_v0));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

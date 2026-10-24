@@ -1018,5 +1018,54 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(code, Not(HasSubstr("v0 = (temp_s0 & 255);")));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     UnpinsTempS0WhenInitializedOnceFromUnmodifiedParameterBeforeCall) {
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB10018,  // 08: sw    $s1, 24($sp)
+      0xAFB00014,  // 0C: sw    $s0, 20($sp)
+      0x00808021,  // 10: addu  $s0, $a0, $zero
+      0x8C910000,  // 14: lw    $s1, 0($a0)
+      0x0C000400,  // 18: jal   0x80001000
+      0x00000000,  // 1C: nop
+      0xAE110004,  // 20: sw    $s1, 4($s0)
+      0x8FBF001C,  // 24: lw    $ra, 28($sp)
+      0x8FB10018,  // 28: lw    $s1, 24($sp)
+      0x8FB00014,  // 2C: lw    $s0, 20($sp)
+      0x03E00008,  // 30: jr    $ra
+      0x27BD0020,  // 34: addiu $sp, $sp, 32
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80002000));
+  StackFrameAnalysis frame_analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("arg0"))))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("temp_s0"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_s1")));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 1}};
+  AstConverterOptions opts;
+  opts.function_name = "UnpinS0CopyFromArg0";
+  opts.function_parameter_counts = &param_counts;
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame_analysis, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string code = body->ToString();
+  EXPECT_THAT(code, HasSubstr("s32 temp_s0;"));
+  EXPECT_THAT(code, Not(HasSubstr("register s32 temp_s0 asm(\"$16\");")));
+  EXPECT_THAT(code, HasSubstr("register s32 temp_s1 asm(\"$17\");"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

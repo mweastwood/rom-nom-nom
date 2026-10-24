@@ -500,5 +500,30 @@ TEST(AstAbiRewriterTest, InlineCrossJumpedCallTailsPreservesBreakInSwitchCases) 
   EXPECT_EQ(sw.Cases()[1].body->Statements()[1]->Kind(), CStatementKind::kBreakStatement);
 }
 
+TEST(AstAbiRewriterTest, SinkCommonBranchTailArgAssignmentsSinksDelaySlotDuplicatedSingleIf) {
+  CompoundStatement body;
+  // temp_s0 = (arg0 + 4);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(4)))));
+  // if (v0 != 0) { func_80001000(arg0); temp_s0 = (arg0 + 4); }
+  auto then_branch = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args))));
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(4)))));
+  body.AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0)),
+      std::move(then_branch), nullptr));
+
+  SinkCommonBranchTailArgAssignments(&body);
+  ASSERT_EQ(body.Statements().size(), 2u);
+  EXPECT_EQ(body.Statements()[0]->Kind(), CStatementKind::kIfStatement);
+  EXPECT_EQ(body.Statements()[1]->ToString(), "temp_s0 = (arg0 + 4);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

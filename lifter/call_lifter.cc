@@ -501,32 +501,78 @@ std::vector<std::unique_ptr<LiftedExpression>> BuildCallArgumentExpressions(
         f14_double = it->second.arg_f14_double;
       }
     }
+    bool f12_seen = false;
+    bool f14_seen = false;
     auto check_inst_double_fp_arg = [&](const Instruction& prev_inst) {
       if (prev_inst.opcode == Opcode::kCvtDW || prev_inst.opcode == Opcode::kCvtDS ||
           prev_inst.opcode == Opcode::kMovD || prev_inst.opcode == Opcode::kMulD ||
           prev_inst.opcode == Opcode::kAddD || prev_inst.opcode == Opcode::kSubD ||
-          prev_inst.opcode == Opcode::kDivD || prev_inst.opcode == Opcode::kLdc1 ||
-          prev_inst.opcode == Opcode::kDmtc1) {
-        if (prev_inst.fd == FpRegister::kF12 || prev_inst.fs == FpRegister::kF12 ||
-            prev_inst.ft == FpRegister::kF12) {
+          prev_inst.opcode == Opcode::kDivD || prev_inst.opcode == Opcode::kNegD ||
+          prev_inst.opcode == Opcode::kAbsD || prev_inst.opcode == Opcode::kSqrtD) {
+        if (prev_inst.fd == FpRegister::kF12 && !f12_seen) {
           f12_double = true;
+          f12_seen = true;
         }
-        if (prev_inst.fd == FpRegister::kF14 || prev_inst.fs == FpRegister::kF14 ||
-            prev_inst.ft == FpRegister::kF14) {
+        if (prev_inst.fd == FpRegister::kF14 && !f14_seen) {
           f14_double = true;
+          f14_seen = true;
+        }
+      } else if (prev_inst.opcode == Opcode::kLdc1) {
+        if (prev_inst.ft == FpRegister::kF12 && !f12_seen) {
+          f12_double = true;
+          f12_seen = true;
+        }
+        if (prev_inst.ft == FpRegister::kF14 && !f14_seen) {
+          f14_double = true;
+          f14_seen = true;
+        }
+      } else if (prev_inst.opcode == Opcode::kDmtc1) {
+        if (prev_inst.fs == FpRegister::kF12 && !f12_seen) {
+          f12_double = true;
+          f12_seen = true;
+        }
+        if (prev_inst.fs == FpRegister::kF14 && !f14_seen) {
+          f14_double = true;
+          f14_seen = true;
         }
       } else if (prev_inst.opcode == Opcode::kMtc1) {
-        if (prev_inst.fs == FpRegister::kF13) f12_double = true;
-        if (prev_inst.fs == FpRegister::kF15) f14_double = true;
+        if (prev_inst.fs == FpRegister::kF13 && !f12_seen) {
+          f12_double = true;
+          f12_seen = true;
+        } else if (prev_inst.fs == FpRegister::kF12 && !f12_seen) {
+          f12_seen = true;
+        }
+        if (prev_inst.fs == FpRegister::kF15 && !f14_seen) {
+          f14_double = true;
+          f14_seen = true;
+        } else if (prev_inst.fs == FpRegister::kF14 && !f14_seen) {
+          f14_seen = true;
+        }
       } else if (prev_inst.opcode == Opcode::kLwc1) {
-        if (prev_inst.ft == FpRegister::kF13) f12_double = true;
-        if (prev_inst.ft == FpRegister::kF15) f14_double = true;
+        if (prev_inst.ft == FpRegister::kF13 && !f12_seen) {
+          f12_double = true;
+          f12_seen = true;
+        } else if (prev_inst.ft == FpRegister::kF12 && !f12_seen) {
+          f12_seen = true;
+        }
+        if (prev_inst.ft == FpRegister::kF15 && !f14_seen) {
+          f14_double = true;
+          f14_seen = true;
+        } else if (prev_inst.ft == FpRegister::kF14 && !f14_seen) {
+          f14_seen = true;
+        }
+      } else {
+        RegisterUseDef ud = GetInstructionUseDef(prev_inst);
+        for (FpRegister d : ud.fpr_defs) {
+          if (d == FpRegister::kF12) f12_seen = true;
+          if (d == FpRegister::kF14) f14_seen = true;
+        }
       }
     };
     if (i + 1 < instructions_to_process.size()) {
       check_inst_double_fp_arg(instructions_to_process[i + 1]);
     }
-    for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+    for (int j = static_cast<int>(i) - 1; j >= 0 && (!f12_seen || !f14_seen); --j) {
       if (instructions_to_process[j].opcode == Opcode::kJal ||
           instructions_to_process[j].opcode == Opcode::kJalr) {
         break;

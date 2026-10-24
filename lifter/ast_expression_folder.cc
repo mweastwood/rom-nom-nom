@@ -87,8 +87,26 @@ struct FolderContext {
   }
 
   static bool IsMultiplicationExpr(const CExpression& expr) {
-    return expr.Kind() == CExpressionKind::kBinaryExpression &&
-           static_cast<const BinaryExpression&>(expr).Op() == "*";
+    if (expr.Kind() != CExpressionKind::kBinaryExpression) return false;
+    const auto& bin = static_cast<const BinaryExpression&>(expr);
+    if (bin.Op() == "*") return true;
+    if ((bin.Op() == "+" || bin.Op() == "-") && !HasAddressOf(bin)) {
+      auto is_shift_or_mul = [](const CExpression& side) {
+        if (side.Kind() != CExpressionKind::kBinaryExpression) return false;
+        const auto& sb = static_cast<const BinaryExpression&>(side);
+        return sb.Op() == "<<" || sb.Op() == "*";
+      };
+      if (is_shift_or_mul(bin.Lhs()) || is_shift_or_mul(bin.Rhs())) {
+        return true;
+      }
+    }
+    if (bin.Op() == "<<" && bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& lb = static_cast<const BinaryExpression&>(bin.Lhs());
+      if ((lb.Op() == "+" || lb.Op() == "-" || lb.Op() == "*") && !HasAddressOf(lb)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   static bool UsedInAdditionWithAddressOf(const CExpression& expr, std::string_view var) {

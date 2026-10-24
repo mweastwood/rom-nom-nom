@@ -848,5 +848,39 @@ TEST(AstExpressionFolderTest, PreservesTempHoldingMultiplicationBeforeGlobalAddr
   EXPECT_THAT(code, HasSubstr("((u8*)&D_80158512 + v0)"));
 }
 
+TEST(AstExpressionFolderTest, PreservesTempHoldingShiftAddChainBeforeGlobalAddressAddition) {
+  auto body = std::make_unique<CompoundStatement>();
+  // v0 = ((arg0 << 3) - arg0) << 2;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary(
+          "<<",
+          CExpression::Binary(
+              "-",
+              CExpression::Binary("<<", CExpression::Identifier("arg0"), CExpression::Integer(3)),
+              CExpression::Identifier("arg0")),
+          CExpression::Integer(2)))));
+  // *(u8*)((u8*)&D_80158512 + v0) = 1;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*",
+          CExpression::Cast(
+              CType::U8().MakePointer(),
+              CExpression::Binary(
+                  "+",
+                  CExpression::Cast(CType::U8().MakePointer(),
+                                    CExpression::Unary("&", CExpression::Identifier("D_80158512"))),
+                  CExpression::Identifier("v0")))),
+      CExpression::Integer(1))));
+  body->AddStatement(CStatement::Return());
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, HasSubstr("v0 = (((arg0 << 3) - arg0) << 2);"));
+  EXPECT_THAT(code, HasSubstr("((u8*)&D_80158512 + v0)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

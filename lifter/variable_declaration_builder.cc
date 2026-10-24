@@ -1753,6 +1753,30 @@ absl::Status PrependSynthesizedLocalDeclarations(
     return base == "f12" || base == "f14" || (base == "f0" && !returns_fp);
   };
 
+  absl::flat_hash_set<std::string> unpinned_s_vars;
+  if (!is_leaf_func && frame_analysis.frame_size > 0 &&
+      !(sp_buffer_size == 0 && has_s64_pointer_deref)) {
+    const auto& body_stmts = (*body)->Statements();
+    for (size_t i = 0; i < body_stmts.size() && i < 8; ++i) {
+      if (body_stmts[i] == nullptr) continue;
+      if (StatementHasCall(*body_stmts[i])) break;
+      if (body_stmts[i]->Kind() != CStatementKind::kExpressionStatement) continue;
+      const auto& es = static_cast<const ExpressionStatement&>(*body_stmts[i]);
+      if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) continue;
+      const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          a.Rhs().Kind() == CExpressionKind::kIdentifier) {
+        std::string_view lhs = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
+        std::string_view rhs = static_cast<const IdentifierExpression&>(a.Rhs()).Name();
+        if (lhs == "temp_s0" && rhs.size() == 4 && absl::StartsWith(rhs, "arg") && rhs[3] >= '0' &&
+            rhs[3] <= '3' && CountDirectAssignmentsInStatement(**body, lhs) == 1 &&
+            !StatementModifiesVariable(**body, rhs) && !has_address_taken(rhs)) {
+          unpinned_s_vars.insert(std::string(lhs));
+        }
+      }
+    }
+  }
+
   auto get_callee_saved_register_annotation =
       [&](std::string_view var_name) -> std::optional<std::string> {
     if (has_address_taken(var_name)) {
@@ -1763,7 +1787,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
     if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
         var_name[6] <= '7') {
-      if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref)) {
+      if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref) ||
+          unpinned_s_vars.contains(std::string(var_name))) {
         return std::nullopt;
       }
       int reg_num = 16 + (var_name[6] - '0');

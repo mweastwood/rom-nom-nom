@@ -681,5 +681,33 @@ TEST(AstParameterCoalescerTest, CoalescePrologueParameterCopiesGeneralizesMutate
   }
 }
 
+TEST(AstParameterCoalescerTest,
+     SplitScratchReusedParameterRegistersHandlesDoWhileLoopsAndNonMatchingCalleeSavedCopies) {
+  CompoundStatement body;
+  // temp_s2 = arg0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"), CExpression::Identifier("arg0"))));
+  // do { arg0 = 0; func_80001000(arg0); } while (temp_s2 != 0);
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg0"), CExpression::Integer(0))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args))));
+  body.AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("temp_s2"), CExpression::Integer(0))));
+  body.AddStatement(CStatement::Return());
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/32);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, HasSubstr("temp_s2 = arg0;"));
+  EXPECT_THAT(code, HasSubstr("temp_a0 = 0;"));
+  EXPECT_THAT(code, HasSubstr("func_80001000(temp_a0);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
