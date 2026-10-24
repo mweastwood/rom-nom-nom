@@ -1175,7 +1175,8 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
     }
   }
 
-  for (const auto& inst : b_entry->instructions) {
+  for (int i = static_cast<int>(b_entry->instructions.size()) - 1; i >= 0; --i) {
+    const auto& inst = b_entry->instructions[i];
     if (inst.opcode == Opcode::kCLeS || inst.opcode == Opcode::kCLtS ||
         inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kCLtD) {
       has_float_cmp = true;
@@ -1198,11 +1199,15 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
   const auto* b_ft = cfg.GetBlock(succ_fallthrough);
   if (b_taken == nullptr || b_ft == nullptr) return std::nullopt;
 
-  auto check_low_path = [&](const BasicBlock* blk, Register* dest_reg) -> bool {
+  auto check_low_path = [&](const BasicBlock* blk, Register* dest_reg,
+                            bool ignore_last_inst) -> bool {
     if (blk == nullptr) return false;
+    if (ignore_last_inst && blk->instructions.empty()) return false;
+    const size_t limit = blk->instructions.size() - (ignore_last_inst ? 1 : 0);
     bool has_trunc = false;
     Register curr_dest = Register::kZero;
-    for (const auto& inst : blk->instructions) {
+    for (size_t i = 0; i < limit; ++i) {
+      const auto& inst = blk->instructions[i];
       if (inst.IsNop()) continue;
       if (inst.IsBranch() || inst.IsJump()) continue;
       if (inst.opcode == Opcode::kTruncWS || inst.opcode == Opcode::kCvtWS ||
@@ -1228,19 +1233,24 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
     return false;
   };
 
-  auto check_high_path = [&](const BasicBlock* blk, Register* dest_reg) -> bool {
+  auto check_high_path = [&](const BasicBlock* blk, Register* dest_reg,
+                             bool ignore_last_inst) -> bool {
     if (blk == nullptr) return false;
+    if (ignore_last_inst && blk->instructions.empty()) return false;
+    const size_t limit = blk->instructions.size() - (ignore_last_inst ? 1 : 0);
     bool has_sub = false;
     bool has_trunc = false;
     bool has_or_mask = false;
     Register curr_dest = Register::kZero;
     if (!b_entry->instructions.empty()) {
       const auto& delay_inst = b_entry->instructions.back();
-      if (delay_inst.opcode == Opcode::kSubS || delay_inst.opcode == Opcode::kSubD) {
+      if ((delay_inst.opcode == Opcode::kSubS || delay_inst.opcode == Opcode::kSubD) &&
+          (term->IsBranchLikely() || (delay_inst.fs.has_value() && *delay_inst.fs == src_fp))) {
         has_sub = true;
       }
     }
-    for (const auto& inst : blk->instructions) {
+    for (size_t i = 0; i < limit; ++i) {
+      const auto& inst = blk->instructions[i];
       if (inst.IsNop()) continue;
       if (inst.IsBranch() || inst.IsJump()) continue;
       if (inst.opcode == Opcode::kSubS || inst.opcode == Opcode::kSubD) {
@@ -1286,9 +1296,35 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
 
   Register dest_low = Register::kZero;
   Register dest_high = Register::kZero;
+  std::optional<Instruction> trailing_inst = std::nullopt;
 
-  bool taken_is_high = check_high_path(b_taken, &dest_high) && check_low_path(b_ft, &dest_low);
-  bool taken_is_low = check_low_path(b_taken, &dest_low) && check_high_path(b_ft, &dest_high);
+  bool taken_is_high = check_high_path(b_taken, &dest_high, /*ignore_last_inst=*/false) &&
+                       check_low_path(b_ft, &dest_low, /*ignore_last_inst=*/false);
+  bool taken_is_low = check_low_path(b_taken, &dest_low, /*ignore_last_inst=*/false) &&
+                      check_high_path(b_ft, &dest_high, /*ignore_last_inst=*/false);
+
+  if ((!taken_is_high && !taken_is_low) || dest_low == Register::kZero || dest_low != dest_high) {
+    if (!b_taken->instructions.empty() && !b_ft->instructions.empty()) {
+      const auto& last_taken = b_taken->instructions.back();
+      const auto& last_ft = b_ft->instructions.back();
+      if (!last_taken.IsNop() && !last_taken.IsBranch() && !last_taken.IsJump() &&
+          last_taken.opcode == last_ft.opcode && last_taken.rs == last_ft.rs &&
+          last_taken.rt == last_ft.rt && last_taken.rd == last_ft.rd &&
+          last_taken.immediate == last_ft.immediate && last_taken.fs == last_ft.fs &&
+          last_taken.ft == last_ft.ft && last_taken.fd == last_ft.fd) {
+        dest_low = Register::kZero;
+        dest_high = Register::kZero;
+        taken_is_high = check_high_path(b_taken, &dest_high, /*ignore_last_inst=*/true) &&
+                        check_low_path(b_ft, &dest_low, /*ignore_last_inst=*/true);
+        taken_is_low = check_low_path(b_taken, &dest_low, /*ignore_last_inst=*/true) &&
+                       check_high_path(b_ft, &dest_high, /*ignore_last_inst=*/true);
+        if ((taken_is_high || taken_is_low) && dest_low != Register::kZero &&
+            dest_low == dest_high) {
+          trailing_inst = last_taken;
+        }
+      }
+    }
+  }
 
   if (!taken_is_high && !taken_is_low) return std::nullopt;
   if (dest_low == Register::kZero || dest_low != dest_high) return std::nullopt;
@@ -1307,6 +1343,7 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
   info.source_float_register = src_fp;
   info.destination_integer_register = dest_low;
   info.is_double = is_double;
+  info.trailing_instruction = trailing_inst;
   return info;
 }
 

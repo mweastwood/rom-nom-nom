@@ -1502,5 +1502,59 @@ TEST(AstConverterTest,
   EXPECT_THAT(code, Not(HasSubstr("goto")));
 }
 
+TEST(AstConverterTest,
+     FloatToUintRegionEmitsTrailingMaskAndPreservesNonDiamondBranchDelayInstruction) {
+  // Single-precision float-to-uint conversion diamond where:
+  // 1. The non-likely `bc1t` branch has an unrelated `sub.s $f8, $f14, $f12` in its delay slot.
+  // 2. Both branches have a stolen trailing `andi $v0, $v0, 0xFF` instruction.
+  std::vector<uint32_t> words = {
+      0x3C014F00,  // 0x00: lui       $at, 0x4F00
+      0x44811000,  // 0x04: mtc1      $at, $f2
+      0x460C103E,  // 0x08: c.le.s    $f2, $f12
+      0x45010004,  // 0x0C: bc1t      +4 -> 0x20 (high path)
+      0x460C7201,  // 0x10: sub.s     $f8, $f14, $f12 (unrelated delay slot instruction!)
+      0x4600600D,  // 0x14: trunc.w.s $f0, $f12 (low path)
+      0x44020000,  // 0x18: mfc1      $v0, $f0
+      0x0800000E,  // 0x1C: j         0x80000038 (join)
+      0x304200FF,  // 0x20: andi      $v0, $v0, 0xFF -> wait: 0x20 is delay slot of j, so high path
+                   // is 0x24!
+  };
+  words = {
+      0x3C014F00,  // 0x00: lui       $at, 0x4F00
+      0x44811000,  // 0x04: mtc1      $at, $f2
+      0x460C103E,  // 0x08: c.le.s    $f2, $f12
+      0x45010005,  // 0x0C: bc1t      +5 -> 0x24 (high path)
+      0x460C7201,  // 0x10: sub.s     $f8, $f14, $f12 (unrelated delay slot instruction)
+      0x4600600D,  // 0x14: trunc.w.s $f0, $f12 (low path)
+      0x44020000,  // 0x18: mfc1      $v0, $f0
+      0x0800000F,  // 0x1C: j         0x8000003C (join)
+      0x304200FF,  // 0x20: andi      $v0, $v0, 0xFF (delay slot of j)
+      0x46026101,  // 0x24: sub.s     $f4, $f12, $f2 (high path)
+      0x4600200D,  // 0x28: trunc.w.s $f0, $f4
+      0x44020000,  // 0x2C: mfc1      $v0, $f0
+      0x3C018000,  // 0x30: lui       $at, 0x8000
+      0x00411025,  // 0x34: or        $v0, $v0, $at
+      0x304200FF,  // 0x38: andi      $v0, $v0, 0xFF (trailing instruction at end of high path)
+      0xE7A80000,  // 0x3C: swc1      $f8, 0($sp) (join block uses $f8 and returns $v0)
+      0x03E00008,  // 0x40: jr        $ra
+      0x00000000,  // 0x44: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "FloatToUintWithDelaySubAndTrailingMask";
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("(f14 - f12)"));
+  EXPECT_THAT(code, HasSubstr("((u32)f12 & 255)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

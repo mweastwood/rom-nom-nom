@@ -668,22 +668,27 @@ class ConverterContext {
 
       absl::flat_hash_set<size_t> diamond_instruction_indices;
       int comparison_instruction_index = -1;
-      for (size_t i = 0; i < cond_block->instructions.size(); ++i) {
+      for (int i = static_cast<int>(cond_block->instructions.size()) - 1; i >= 0; --i) {
         const auto& inst = cond_block->instructions[i];
         if (inst.opcode == Opcode::kCLeS || inst.opcode == Opcode::kCLtS ||
             inst.opcode == Opcode::kCLeD || inst.opcode == Opcode::kCLtD) {
-          comparison_instruction_index = static_cast<int>(i);
-          diamond_instruction_indices.insert(i);
+          comparison_instruction_index = i;
+          diamond_instruction_indices.insert(static_cast<size_t>(i));
           break;
         }
       }
 
+      FpRegister const_fp = FpRegister::kF0;
       if (comparison_instruction_index >= 0) {
+        const auto& cmp_inst = cond_block->instructions[comparison_instruction_index];
+        if (cmp_inst.fs.has_value() && cmp_inst.ft.has_value()) {
+          const_fp = (*cmp_inst.fs == info.source_float_register) ? *cmp_inst.ft : *cmp_inst.fs;
+        }
         for (int i = comparison_instruction_index - 1; i >= 0; --i) {
           const auto& inst = cond_block->instructions[i];
           if (inst.IsNop()) continue;
-          if (inst.opcode == Opcode::kMtc1 || inst.opcode == Opcode::kDmtc1) {
-            diamond_instruction_indices.insert(static_cast<size_t>(i));
+          if ((inst.opcode == Opcode::kMtc1 || inst.opcode == Opcode::kDmtc1) &&
+              inst.fs == const_fp) {
             Register reg = inst.rt.value_or(Register::kZero);
             for (int j = i - 1; j >= 0; --j) {
               const auto& prev = cond_block->instructions[j];
@@ -691,6 +696,7 @@ class ConverterContext {
               if (prev.opcode == Opcode::kLui && prev.rt == reg) {
                 uint32_t imm = prev.immediate & 0xFFFF;
                 if (imm == 0x4F00 || imm == 0x41E0) {
+                  diamond_instruction_indices.insert(static_cast<size_t>(i));
                   diamond_instruction_indices.insert(static_cast<size_t>(j));
                 }
                 break;
@@ -698,7 +704,7 @@ class ConverterContext {
             }
             break;
           } else if ((inst.opcode == Opcode::kLdc1 || inst.opcode == Opcode::kLwc1) &&
-                     inst.ft.has_value() && *inst.ft == FpRegister::kF0) {
+                     inst.ft == const_fp) {
             diamond_instruction_indices.insert(static_cast<size_t>(i));
             Register reg = inst.rs.value_or(Register::kZero);
             for (int j = i - 1; j >= 0; --j) {
@@ -724,6 +730,9 @@ class ConverterContext {
              cond_block->instructions[i - 1].IsJump())) {
           break;
         }
+        if (setup_instruction_vrams_.contains(inst.vram)) {
+          continue;
+        }
 
         if (diamond_instruction_indices.contains(i)) {
           continue;
@@ -732,8 +741,32 @@ class ConverterContext {
         non_diamond_instructions.push_back(inst);
       }
 
+      if (cond_block->instructions.size() >= 2 &&
+          cond_block->instructions[cond_block->instructions.size() - 2].IsBranch()) {
+        const auto& branch_inst = cond_block->instructions[cond_block->instructions.size() - 2];
+        const auto& delay_inst = cond_block->instructions.back();
+        bool is_diamond_delay =
+            (delay_inst.opcode == Opcode::kSubS || delay_inst.opcode == Opcode::kSubD) &&
+            (branch_inst.IsBranchLikely() ||
+             (delay_inst.fs.has_value() && *delay_inst.fs == info.source_float_register));
+        if (!delay_inst.IsNop() && !is_diamond_delay &&
+            !setup_instruction_vrams_.contains(delay_inst.vram)) {
+          non_diamond_instructions.push_back(delay_inst);
+        }
+      }
+
       if (!non_diamond_instructions.empty()) {
-        auto pre_stmts = LiftInstructionsHelper(absl::MakeSpan(non_diamond_instructions));
+        const std::array<std::optional<uint32_t>, 32>* initial_fpr = nullptr;
+        const RegisterTracker* initial_tracker = nullptr;
+        auto it_state = block_entry_states_.find(region.condition_block_id);
+        if (it_state != block_entry_states_.end()) {
+          initial_fpr = &it_state->second.fpr_const_bits;
+          initial_tracker = &it_state->second.tracker;
+        }
+        auto pre_stmts =
+            ExpressionBuilder::LiftInstructions(absl::MakeSpan(non_diamond_instructions),
+                                                BuildLiftContext(initial_fpr, initial_tracker),
+                                                /*omit_last_instruction=*/false);
         for (auto& s : pre_stmts) {
           auto cs = AstConverter::ConvertStatement(s, function_name_);
           if (cs != nullptr) {
@@ -759,25 +792,6 @@ class ConverterContext {
       if (child) mark_blocks_emitted(*child);
     }
 
-    if (cond_block != nullptr && cond_block->instructions.size() >= 2 &&
-        cond_block->instructions[cond_block->instructions.size() - 2].IsBranch()) {
-      const auto& delay_inst = cond_block->instructions.back();
-      if (!delay_inst.IsNop() && delay_inst.opcode != Opcode::kMtc1 &&
-          delay_inst.opcode != Opcode::kDmtc1 && delay_inst.opcode != Opcode::kCLeS &&
-          delay_inst.opcode != Opcode::kCLtS && delay_inst.opcode != Opcode::kCLeD &&
-          delay_inst.opcode != Opcode::kCLtD && delay_inst.opcode != Opcode::kSubS &&
-          delay_inst.opcode != Opcode::kSubD && delay_inst.opcode != Opcode::kLdc1 &&
-          delay_inst.opcode != Opcode::kLwc1) {
-        auto delay_stmts = LiftInstructionsHelper(absl::MakeSpan(&delay_inst, 1));
-        for (auto& s : delay_stmts) {
-          auto cs = AstConverter::ConvertStatement(s, function_name_);
-          if (cs != nullptr) {
-            target_block->AddStatement(std::move(cs));
-          }
-        }
-      }
-    }
-
     std::string dest_var = ExpressionBuilder::RegisterVarName(info.destination_integer_register);
     std::string src_fp_var =
         ExpressionBuilder::FpRegisterVarName(info.source_float_register, info.is_double);
@@ -786,6 +800,16 @@ class ConverterContext {
     auto assign_stmt = CStatement::Expression(
         CExpression::Assignment("=", CExpression::Identifier(dest_var), std::move(cast_expr)));
     target_block->AddStatement(std::move(assign_stmt));
+
+    if (info.trailing_instruction.has_value()) {
+      auto trailing_stmts = LiftInstructionsHelper(absl::MakeSpan(&*info.trailing_instruction, 1));
+      for (auto& s : trailing_stmts) {
+        auto cs = AstConverter::ConvertStatement(s, function_name_);
+        if (cs != nullptr) {
+          target_block->AddStatement(std::move(cs));
+        }
+      }
+    }
   }
 
   void ConvertRegion(const StructuredRegion& region, CompoundStatement* target_block) {

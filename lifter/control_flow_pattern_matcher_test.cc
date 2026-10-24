@@ -732,5 +732,73 @@ TEST(ControlFlowPatternMatcherTest,
   EXPECT_THAT(s, Not(HasSubstr("&&")));
 }
 
+TEST(ControlFlowPatternMatcherTest,
+     FloatToUintConversionDiamondWithDelaySlotAndiMaskAndEarlierComparison) {
+  // Single-precision 0x4F000000 float-to-uint conversion diamond where:
+  // 1. c.le.s $f2, $f12 appears before an intervening instruction in the entry block.
+  // 2. Both the low path's jump delay slot and the end of the high path contain a stolen
+  //    join-block mask instruction `andi $a1, $v0, 0xFF` (for `(u8)(u32)f`).
+  std::vector<uint32_t> words = {
+      0x3C014F00,  // 0x00: lui     $at, 0x4F00
+      0x44811000,  // 0x04: mtc1    $at, $f2
+      0x460C103E,  // 0x08: c.le.s  $f2, $f12
+      0x24040001,  // 0x0C: addiu   $a0, $zero, 1 (intervening instruction after c.le.s)
+      0x45010004,  // 0x10: bc1t    +4 -> 0x24 (high path)
+      0x00000000,  // 0x14: nop
+      0x4600600D,  // 0x18: trunc.w.s $f0, $f12 (low path)
+      0x44020000,  // 0x1C: mfc1    $v0, $f0
+      0x0800000F,  // 0x20: j       0x8000003C (join)
+      0x304500FF,  // 0x24: andi    $a1, $v0, 0xFF (Wait: 0x24 is delay slot of j, so high path is
+                   // 0x28!)
+  };
+  words = {
+      0x3C014F00,  // 0x00: lui       $at, 0x4F00
+      0x44811000,  // 0x04: mtc1      $at, $f2
+      0x460C103E,  // 0x08: c.le.s    $f2, $f12
+      0x24040001,  // 0x0C: addiu     $a0, $zero, 1
+      0x45010005,  // 0x10: bc1t      +5 -> 0x28 (high path)
+      0x00000000,  // 0x14: nop
+      0x4600600D,  // 0x18: trunc.w.s $f0, $f12 (low path)
+      0x44020000,  // 0x1C: mfc1      $v0, $f0
+      0x08000010,  // 0x20: j         0x80000040 (join)
+      0x304500FF,  // 0x24: andi      $a1, $v0, 0xFF (delay slot of j)
+      0x46026101,  // 0x28: sub.s     $f4, $f12, $f2 (high path)
+      0x4600200D,  // 0x2C: trunc.w.s $f0, $f4
+      0x44020000,  // 0x30: mfc1      $v0, $f0
+      0x3C018000,  // 0x34: lui       $at, 0x8000
+      0x00411025,  // 0x38: or        $v0, $v0, $at
+      0x304500FF,  // 0x3C: andi      $a1, $v0, 0xFF (trailing instruction at end of high path)
+      0x03E00008,  // 0x40: jr        $ra (join)
+      0x00000000,  // 0x44: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  const auto* b_entry = cfg.GetBlock(cfg.EntryBlockId());
+  ASSERT_THAT(b_entry, NotNull());
+  uint32_t succ_taken = 0;
+  uint32_t succ_fallthrough = 0;
+  for (const auto& edge : b_entry->outgoing_edges) {
+    if (edge.type == EdgeType::kBranch) {
+      succ_taken = edge.to_block_id;
+    } else {
+      succ_fallthrough = edge.to_block_id;
+    }
+  }
+  ASSERT_THAT(cfg.GetBlock(succ_taken), NotNull());
+  ASSERT_EQ(cfg.GetBlock(succ_taken)->successors.size(), 1u);
+  uint32_t join_id = cfg.GetBlock(succ_taken)->successors[0];
+
+  auto f2u =
+      DetectFloatToUintDiamond(cfg, cfg.EntryBlockId(), succ_taken, succ_fallthrough, join_id);
+  ASSERT_TRUE(f2u.has_value());
+  EXPECT_EQ(f2u->destination_integer_register, Register::kV0);
+  EXPECT_EQ(f2u->source_float_register, FpRegister::kF12);
+  EXPECT_FALSE(f2u->is_double);
+  ASSERT_TRUE(f2u->trailing_instruction.has_value());
+  EXPECT_EQ(f2u->trailing_instruction->opcode, Opcode::kAndi);
+  EXPECT_EQ(f2u->trailing_instruction->rt, Register::kA1);
+  EXPECT_EQ(f2u->trailing_instruction->rs, Register::kV0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

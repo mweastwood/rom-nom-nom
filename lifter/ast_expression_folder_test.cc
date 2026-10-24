@@ -882,5 +882,66 @@ TEST(AstExpressionFolderTest, PreservesTempHoldingShiftAddChainBeforeGlobalAddre
   EXPECT_THAT(code, HasSubstr("((u8*)&D_80158512 + v0)"));
 }
 
+TEST(AstExpressionFolderTest,
+     EliminatesDeadFloatToUintConstantsAndFoldsLocallyRedefinedFpScratchAcrossBlocks) {
+  auto body = std::make_unique<CompoundStatement>();
+  // Pre-loop hoisted float-to-uint constants (dead once all float-to-uint diamonds folded):
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f12"),
+      std::make_unique<FloatLiteralExpression>(2.14748365e+09f, /*is_float=*/true))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t6"), CExpression::Integer(-2147483648LL))));
+
+  auto loop_body = std::make_unique<CompoundStatement>();
+  // First if block defines f2 and folds it into (u32)f2:
+  auto then1 = std::make_unique<CompoundStatement>();
+  then1->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f2"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::F32().MakePointer(), CExpression::Identifier("arg0"))))));
+  then1->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Cast(CType::U32(), CExpression::Identifier("f2")))));
+  then1->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U32().MakePointer(), CExpression::Identifier("arg1"))),
+      CExpression::Identifier("v0"))));
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then1)));
+
+  // Second if block also defines f2 locally before reading it:
+  auto then2 = std::make_unique<CompoundStatement>();
+  then2->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f2"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::F32().MakePointer(), CExpression::Identifier("arg2"))))));
+  then2->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Cast(CType::U32(), CExpression::Identifier("f2")))));
+  then2->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U32().MakePointer(), CExpression::Identifier("arg1"))),
+      CExpression::Identifier("v0"))));
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg2"), CExpression::Integer(0)),
+      std::move(then2)));
+  body->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("arg3"), CExpression::Integer(0))));
+  body->AddStatement(CStatement::Return());
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("2.14748365e+09f")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t6")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("f2 = ")));
+  EXPECT_THAT(code, HasSubstr("(u32)*(f32*)arg0"));
+  EXPECT_THAT(code, HasSubstr("(u32)*(f32*)arg2"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

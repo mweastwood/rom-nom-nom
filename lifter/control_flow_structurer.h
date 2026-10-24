@@ -48,6 +48,7 @@ struct FloatToUintInfo {
   FpRegister source_float_register = FpRegister::kF0;
   Register destination_integer_register = Register::kZero;
   bool is_double = false;
+  std::optional<Instruction> trailing_instruction = std::nullopt;
 };
 
 // Represents a node in the structured control flow AST tree.

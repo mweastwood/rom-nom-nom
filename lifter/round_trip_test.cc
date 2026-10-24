@@ -5721,5 +5721,30 @@ void LeafWithUnusedLocalStackBuffer(s32* out, s32 a, s32 b) {
 )");
 }
 
+TEST_F(RoundTripTest, DoWhileLoopWithFourNarrowFloatToUintByteCallArgs) {
+  RoundTripOptions opts;
+  opts.extra_types_header = R"(
+typedef struct ColorF {
+    f32 r;
+    f32 g;
+    f32 b;
+    f32 a;
+} ColorF;
+)";
+  AssertRoundTripBitExact("DoWhileLoopWithFourNarrowFloatToUintByteCallArgs", R"(
+void apply_rgba_slot(u8 r, u8 g, u8 b, u8 a);
+
+void DoWhileLoopWithFourNarrowFloatToUintByteCallArgs(ColorF* slots) {
+    u16 i = 0;
+    do {
+        apply_rgba_slot((u8)(u32)slots[i].r, (u8)(u32)slots[i].g,
+                        (u8)(u32)slots[i].b, (u8)(u32)slots[i].a);
+        i++;
+    } while (i < 4);
+}
+)",
+                          opts);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

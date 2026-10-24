@@ -789,12 +789,126 @@ struct FolderContext {
         !HasAddressOfVarInStmt(*root_body, var)) {
       return true;
     }
+    if (expected_uses_in_next > 0 && def_stmt != nullptr && root_body != nullptr &&
+        !has_label_between_def_and_use && var != "f0" && var != "f0_d" && var.size() >= 2 &&
+        var[0] == 'f' && std::isdigit(static_cast<unsigned char>(var[1])) && IsScratchVar(var) &&
+        !HasLoopInStmt(*stmts[next_idx]) && !HasAddressOfVarInStmt(*root_body, var) &&
+        IsLocallyDefinedBeforeEveryReadInRoot(*root_body, var, def_stmt, stmts[next_idx].get(),
+                                              expected_uses_in_next)) {
+      return true;
+    }
     if ((IsOutgoingStackArgVar(var) ||
          (IsCallArgVar(var) && expected_uses_in_next > 0 && HasCallInStmt(*stmts[next_idx]))) &&
         !root_has_label) {
       return true;
     }
     return false;
+  }
+
+  static bool IsLocallyDefinedBeforeEveryReadInRoot(const CStatement& root, std::string_view var,
+                                                    const CStatement* ignored_def,
+                                                    const CStatement* ignored_use,
+                                                    int ignored_use_count) {
+    std::function<bool(const CStatement&)> check_stmt = [&](const CStatement& s) -> bool {
+      if (&s == ignored_def) return true;
+      if (&s == ignored_use) {
+        return CountUses(s, var) <= ignored_use_count;
+      }
+      switch (s.Kind()) {
+        case CStatementKind::kCompoundStatement: {
+          const auto& cs = static_cast<const CompoundStatement&>(s);
+          bool locally_defined = false;
+          for (const auto& child : cs.Statements()) {
+            if (child == nullptr || child.get() == ignored_def) continue;
+            if (child.get() == ignored_use) {
+              int rem_uses = CountUses(*child, var) - ignored_use_count;
+              if (rem_uses > 0 && !locally_defined) return false;
+              if (child->Kind() == CStatementKind::kExpressionStatement) {
+                const auto& es = static_cast<const ExpressionStatement&>(*child);
+                if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+                  std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
+                  if (lhs_var == var && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                    locally_defined = true;
+                  }
+                }
+              }
+              continue;
+            }
+            if (child->Kind() == CStatementKind::kLabelStatement) {
+              locally_defined = false;
+              continue;
+            }
+            if (child->Kind() == CStatementKind::kExpressionStatement) {
+              const auto& es = static_cast<const ExpressionStatement&>(*child);
+              if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+                std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
+                if (lhs_var == var && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                  if (!locally_defined && CountExprUses(a.Rhs(), var) > 0) {
+                    return false;
+                  }
+                  locally_defined = true;
+                  continue;
+                }
+              }
+              if (!locally_defined && CountUses(*child, var) > 0) {
+                return false;
+              }
+              continue;
+            }
+            if (child->Kind() == CStatementKind::kReturnStatement) {
+              if (!locally_defined && CountUses(*child, var) > 0) {
+                return false;
+              }
+              continue;
+            }
+            if (!check_stmt(*child)) {
+              return false;
+            }
+            if (CountUses(*child, var) > 0 || HasLabelInStmt(*child)) {
+              locally_defined = false;
+            }
+          }
+          return true;
+        }
+        case CStatementKind::kIfStatement: {
+          const auto& ifs = static_cast<const IfStatement&>(s);
+          if (CountExprUses(ifs.Condition(), var) > 0) return false;
+          if (!check_stmt(ifs.ThenBranch())) return false;
+          if (ifs.ElseBranch() != nullptr && !check_stmt(*ifs.ElseBranch())) return false;
+          return true;
+        }
+        case CStatementKind::kSwitchStatement: {
+          const auto& ss = static_cast<const SwitchStatement&>(s);
+          if (CountExprUses(ss.Condition(), var) > 0) return false;
+          for (const auto& sc : ss.Cases()) {
+            if (sc.body != nullptr && !check_stmt(*sc.body)) return false;
+          }
+          return true;
+        }
+        case CStatementKind::kWhileStatement: {
+          const auto& ws = static_cast<const WhileStatement&>(s);
+          if (CountExprUses(ws.Condition(), var) > 0) return false;
+          return check_stmt(ws.Body());
+        }
+        case CStatementKind::kDoWhileStatement: {
+          const auto& dws = static_cast<const DoWhileStatement&>(s);
+          if (CountExprUses(dws.Condition(), var) > 0) return false;
+          return check_stmt(dws.Body());
+        }
+        case CStatementKind::kForStatement: {
+          const auto& fs = static_cast<const ForStatement&>(s);
+          if (fs.Init() != nullptr && CountUses(*fs.Init(), var) > 0) return false;
+          if (fs.Condition() != nullptr && CountExprUses(*fs.Condition(), var) > 0) return false;
+          if (fs.Step() != nullptr && CountExprUses(*fs.Step(), var) > 0) return false;
+          return check_stmt(fs.Body());
+        }
+        default:
+          return CountUses(s, var) == 0;
+      }
+    };
+    return check_stmt(root);
   }
 
   static bool IsDuplicableArgRhs(const CExpression& rhs) {
@@ -1035,8 +1149,8 @@ struct FolderContext {
                   }
                 }
                 // 2. Completely unread FPR literal assignment (e.g., dead odd/even half of a
-                // synthesized double literal).
-                bool is_literal_rhs = (assign.Rhs().Kind() == CExpressionKind::kFloatLiteral ||
+                // synthesized double literal or loop-hoisted 0x4F000000 float-to-uint constant).
+                bool is_literal_rhs = (is_float_literal_expr(assign.Rhs()) ||
                                        assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral);
                 bool can_drop_unread_fpr =
                     is_literal_rhs &&
@@ -1064,6 +1178,19 @@ struct FolderContext {
                     changed = true;
                     break;
                   }
+                }
+              }
+              if (!is_float_bitcast_lhs &&
+                  assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral && root_body != nullptr &&
+                  var != "v0") {
+                uint32_t imm32 = static_cast<uint32_t>(
+                    static_cast<const IntegerLiteralExpression&>(assign.Rhs()).Value());
+                if ((imm32 == 0x80000000u || imm32 == 0x4F000000u || imm32 == 0x41E00000u) &&
+                    (var == "temp_at" || HasLoopInStmt(*root_body)) &&
+                    CountUses(*root_body, var) == 0 && !HasAddressOfVarInStmt(*root_body, var)) {
+                  stmts.erase(stmts.begin() + i);
+                  changed = true;
+                  break;
                 }
               }
               if (!is_scratch && !is_stack_arg && !is_call_arg) continue;
