@@ -5576,5 +5576,19 @@ f32 SecondIntParamSavedAndPassedWithThirdFloatGprParam(s32 a, s32 b, f32 c) {
 )");
 }
 
+TEST_F(RoundTripTest, CallResultComparedWithSltiBeforeConditionalCallWithSavedArg) {
+  AssertRoundTripBitExact("CallResultComparedWithSltiBeforeConditionalCallWithSavedArg", R"(
+s32 poll_level(s32 ch);
+void apply_level(s32 ch, s32 level);
+
+void CallResultComparedWithSltiBeforeConditionalCallWithSavedArg(s32 ch) {
+    s32 lvl = poll_level(ch);
+    if (lvl < 5) {
+        apply_level(ch, lvl);
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

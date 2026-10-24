@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/c_ast.h"
 #include "core/control_flow_graph.h"
@@ -24,6 +25,58 @@ std::unique_ptr<CExpression> RegExpr(Register reg) {
     return CExpression::Integer(0);
   }
   return CExpression::Identifier(AbiAnalyzer::RegisterVarName(reg));
+}
+
+bool IsFpuCompareOpcode(Opcode op) {
+  return op == Opcode::kCEqS || op == Opcode::kCEqD || op == Opcode::kCSeqS ||
+         op == Opcode::kCSeqD || op == Opcode::kCUeqS || op == Opcode::kCUeqD ||
+         op == Opcode::kCNglS || op == Opcode::kCNglD || op == Opcode::kCUnS ||
+         op == Opcode::kCUnD || op == Opcode::kCLtS || op == Opcode::kCLtD ||
+         op == Opcode::kCOltS || op == Opcode::kCOltD || op == Opcode::kCUltS ||
+         op == Opcode::kCUltD || op == Opcode::kCNgeS || op == Opcode::kCNgeD ||
+         op == Opcode::kCLeS || op == Opcode::kCLeD || op == Opcode::kCOleS ||
+         op == Opcode::kCOleD || op == Opcode::kCUleS || op == Opcode::kCUleD ||
+         op == Opcode::kCNgtS || op == Opcode::kCNgtD || op == Opcode::kCNgleS ||
+         op == Opcode::kCNgleD;
+}
+
+bool ExpressionReferencesIdentifier(const CExpression& expr, std::string_view name) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier:
+      return static_cast<const IdentifierExpression&>(expr).Name() == name;
+    case CExpressionKind::kUnaryExpression:
+      return ExpressionReferencesIdentifier(static_cast<const UnaryExpression&>(expr).Operand(),
+                                            name);
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      return ExpressionReferencesIdentifier(bin.Lhs(), name) ||
+             ExpressionReferencesIdentifier(bin.Rhs(), name);
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      return ExpressionReferencesIdentifier(assign.Lhs(), name) ||
+             ExpressionReferencesIdentifier(assign.Rhs(), name);
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionReferencesIdentifier(static_cast<const CastExpression&>(expr).Operand(),
+                                            name);
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return ExpressionReferencesIdentifier(tern.Condition(), name) ||
+             ExpressionReferencesIdentifier(tern.TrueExpression(), name) ||
+             ExpressionReferencesIdentifier(tern.FalseExpression(), name);
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      if (ExpressionReferencesIdentifier(call.Callee(), name)) return true;
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr && ExpressionReferencesIdentifier(*arg, name)) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
 }
 
 }  // namespace
@@ -529,8 +582,30 @@ bool BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(const BasicB
   }
 
   RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-  if (delay_ud.gpr_defs.empty() && delay_ud.fpr_defs.empty()) {
+  const bool delay_modifies_fcond =
+      IsFpuCompareOpcode(delay_inst.opcode) || delay_inst.opcode == Opcode::kCtc1;
+  if (delay_ud.gpr_defs.empty() && delay_ud.fpr_defs.empty() && !delay_modifies_fcond) {
     return false;
+  }
+
+  auto extracted_cond = ExtractBranchCondition(cond_block, /*invert_condition=*/false);
+  if (extracted_cond != nullptr) {
+    if (delay_modifies_fcond && ExpressionReferencesIdentifier(*extracted_cond, "fcond")) {
+      return true;
+    }
+    for (Register r : delay_ud.gpr_defs) {
+      if (r != Register::kZero &&
+          ExpressionReferencesIdentifier(*extracted_cond, AbiAnalyzer::RegisterVarName(r))) {
+        return true;
+      }
+    }
+    for (FpRegister f : delay_ud.fpr_defs) {
+      std::string fp_name = AbiAnalyzer::FpRegisterVarName(f);
+      if (ExpressionReferencesIdentifier(*extracted_cond, fp_name) ||
+          ExpressionReferencesIdentifier(*extracted_cond, absl::StrCat(fp_name, "_d"))) {
+        return true;
+      }
+    }
   }
 
   absl::flat_hash_set<Register> cond_gprs;
@@ -554,25 +629,26 @@ bool BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(const BasicB
       cond_fprs.insert(f);
     }
   }
+  bool has_call_in_block = false;
+  for (const auto& inst : cond_block.instructions) {
+    if (inst.IsCall()) {
+      has_call_in_block = true;
+      break;
+    }
+  }
   for (Register r : delay_ud.gpr_defs) {
     if (cond_gprs.contains(r)) {
       return true;
     }
-    if (r >= Register::kA0 && r <= Register::kA3) {
-      bool has_call = false;
-      for (const auto& inst : cond_block.instructions) {
-        if (inst.IsCall()) {
-          has_call = true;
-          break;
-        }
-      }
-      if (has_call) {
-        return true;
-      }
+    if (has_call_in_block && r >= Register::kA0 && r <= Register::kA3) {
+      return true;
     }
   }
   for (FpRegister f : delay_ud.fpr_defs) {
     if (cond_fprs.contains(f)) {
+      return true;
+    }
+    if (has_call_in_block && f >= FpRegister::kF12 && f <= FpRegister::kF15) {
       return true;
     }
   }
@@ -588,39 +664,62 @@ bool BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(const Contro
   if (ShouldDecoupleBranchConditionDelaySlot(*cond_block)) {
     return true;
   }
-  if (cond_block->instructions.size() == 2 && cond_block->predecessors.size() == 1) {
-    const auto* term = cond_block->Terminator();
-    const auto& delay_inst = cond_block->instructions.back();
-    if (term != nullptr && term->IsBranch() && !term->IsBranchLikely() && !delay_inst.IsNop()) {
-      RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-      bool defines_arg_reg = false;
-      for (Register r : delay_ud.gpr_defs) {
-        if (r >= Register::kA0 && r <= Register::kA3) {
-          defines_arg_reg = true;
+  if (cond_block->instructions.size() < 2) {
+    return false;
+  }
+  const auto* term = cond_block->Terminator();
+  const auto& delay_inst = cond_block->instructions.back();
+  if (term == nullptr || !term->IsBranch() || term->IsBranchLikely() || delay_inst.IsNop()) {
+    return false;
+  }
+  bool only_condition_instructions = (cond_block->instructions.size() == 2);
+  if (!only_condition_instructions && cond_block->instructions.size() == 3) {
+    auto folded_comp = FindFoldedComparison(cond_block->instructions);
+    if (folded_comp.has_value() && folded_comp->instruction_index == 0 &&
+        folded_comp->can_suppress_statement) {
+      only_condition_instructions = true;
+    }
+  }
+  if (!only_condition_instructions) {
+    return false;
+  }
+  RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+  bool defines_arg_reg = false;
+  for (Register r : delay_ud.gpr_defs) {
+    if (r >= Register::kA0 && r <= Register::kA3) {
+      defines_arg_reg = true;
+      break;
+    }
+  }
+  for (FpRegister f : delay_ud.fpr_defs) {
+    if (f >= FpRegister::kF12 && f <= FpRegister::kF15) {
+      defines_arg_reg = true;
+      break;
+    }
+  }
+  if (!defines_arg_reg) {
+    return false;
+  }
+  bool pred_has_call = false;
+  for (uint32_t pred_id : cond_block->predecessors) {
+    const auto* pred_block = cfg.GetBlock(pred_id);
+    if (pred_block != nullptr) {
+      for (const auto& inst : pred_block->instructions) {
+        if (inst.IsCall()) {
+          pred_has_call = true;
           break;
         }
       }
-      if (defines_arg_reg) {
-        const auto* pred_block = cfg.GetBlock(cond_block->predecessors[0]);
-        bool pred_has_call = false;
-        if (pred_block != nullptr) {
-          for (const auto& inst : pred_block->instructions) {
-            if (inst.IsCall()) {
-              pred_has_call = true;
-              break;
-            }
-          }
-        }
-        if (pred_has_call) {
-          for (uint32_t succ_id : cond_block->successors) {
-            const auto* succ_block = cfg.GetBlock(succ_id);
-            if (succ_block != nullptr) {
-              for (const auto& inst : succ_block->instructions) {
-                if (inst.IsCall()) {
-                  return true;
-                }
-              }
-            }
+    }
+    if (pred_has_call) break;
+  }
+  if (pred_has_call) {
+    for (uint32_t succ_id : cond_block->successors) {
+      const auto* succ_block = cfg.GetBlock(succ_id);
+      if (succ_block != nullptr) {
+        for (const auto& inst : succ_block->instructions) {
+          if (inst.IsCall()) {
+            return true;
           }
         }
       }

@@ -165,5 +165,36 @@ TEST(BranchConditionBuilderTest, DecouplesDelaySlotWritingCallArgWhenPredecessor
   EXPECT_TRUE(BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(cfg, 1));
 }
 
+TEST(BranchConditionBuilderTest,
+     DecouplesDelaySlotModifingExtractedConditionOrFollowingFoldedSltAfterCall) {
+  // 1. bc1f with c.lt.s in delay slot (modifies fcond referenced by extracted condition):
+  std::vector<uint32_t> fcond_words = {
+      0x45000002,  // 00: bc1f  +2 -> 0x0C
+      0x4602603C,  // 04: c.lt.s $f12, $f2 (modifies fcond in delay slot)
+      0x03E00008,  // 08: jr    $ra
+      0x00000000,  // 0C: nop
+      0x03E00008,  // 10: jr    $ra
+      0x00000000,  // 14: nop
+  };
+  auto fcond_cfg = *ControlFlowGraph::Build(*DecodeSequence(fcond_words, 0x80000000));
+  EXPECT_TRUE(BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(fcond_cfg, 0));
+
+  // 2. 3-instruction condition block (slti $at, $v0, 5; beq $at, $zero; mov.s $f12, $f20)
+  // following a predecessor with a call and leading to a successor with a call:
+  std::vector<uint32_t> call_slt_words = {
+      0x0C000400,  // 00 (block 0): jal   0x80001000
+      0x00000000,  // 04:           nop
+      0x28410005,  // 08 (block 1): slti  $at, $v0, 5
+      0x10200003,  // 0C:           beq   $at, $zero, +3 -> 0x1C
+      0x4600A306,  // 10:           mov.s $f12, $f20 (defines float arg $f12 in delay slot)
+      0x0C000800,  // 14 (block 2): jal   0x80002000
+      0x00000000,  // 18:           nop
+      0x03E00008,  // 1C (block 3): jr    $ra
+      0x00000000,  // 20:           nop
+  };
+  auto call_slt_cfg = *ControlFlowGraph::Build(*DecodeSequence(call_slt_words, 0x80000000));
+  EXPECT_TRUE(BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(call_slt_cfg, 1));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

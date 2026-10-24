@@ -307,16 +307,11 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
                       for (Register u : pud.gpr_uses) {
                         if (u == low_reg) lower_args_ready = false;
                       }
-                      for (size_t after = static_cast<size_t>(k) + 1; after < sz; ++after) {
-                        for (Register d :
-                             GetInstructionUseDef(pred->instructions[after]).gpr_defs) {
-                          if (d == low_reg) lower_args_ready = false;
-                        }
-                      }
+                      bool defined_in_curr = false;
                       for (size_t cj = 0; cj < i; ++cj) {
                         for (Register d :
                              GetInstructionUseDef(instructions_to_process[cj]).gpr_defs) {
-                          if (d == low_reg) lower_args_ready = false;
+                          if (d == low_reg) defined_in_curr = true;
                         }
                       }
                       bool defined_before_k = false;
@@ -328,7 +323,7 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
                         }
                         if (defined_before_k) break;
                       }
-                      if (!defined_before_k) lower_args_ready = false;
+                      if (!defined_in_curr && !defined_before_k) lower_args_ready = false;
                       if (!lower_args_ready) break;
                     }
                     if (lower_args_ready) {
