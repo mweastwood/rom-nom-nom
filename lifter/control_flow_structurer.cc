@@ -10,6 +10,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "core/control_flow_graph.h"
+#include "core/register_tracker.h"
 #include "lifter/control_flow_pattern_matcher.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/loop_analyzer.h"
@@ -964,6 +965,155 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       auto if_else = CreateIfThenElse(entry, /*invert=*/true);
       auto then_body = StructureRegion(succ_fallthrough, join, current_loop);
       auto else_body = StructureRegion(succ_taken, join, current_loop);
+
+      auto try_fold_root_pivot_into_switch =
+          [&](std::unique_ptr<StructuredRegion>& child_switch,
+              std::unique_ptr<StructuredRegion>& pivot_arm) -> std::unique_ptr<StructuredRegion> {
+        if (!child_switch || child_switch->type != RegionType::kSwitch ||
+            child_switch->owned_jump_table == nullptr ||
+            child_switch->switch_register == Register::kZero) {
+          return nullptr;
+        }
+        Register selector = child_switch->switch_register;
+        const auto* entry_blk = cfg_->GetBlock(entry);
+        if (entry_blk == nullptr || entry_blk->instructions.empty()) {
+          return nullptr;
+        }
+        int branch_idx = -1;
+        for (int i = static_cast<int>(entry_blk->instructions.size()) - 1; i >= 0; --i) {
+          if (entry_blk->instructions[i].IsBranch()) {
+            branch_idx = i;
+            break;
+          }
+        }
+        if (branch_idx < 0) return nullptr;
+        const auto& branch = entry_blk->instructions[branch_idx];
+        if (branch.opcode != Opcode::kBeq && branch.opcode != Opcode::kBne &&
+            branch.opcode != Opcode::kBeql && branch.opcode != Opcode::kBnel) {
+          return nullptr;
+        }
+        absl::flat_hash_map<Register, int64_t> consts;
+        consts[Register::kZero] = 0;
+        for (int i = 0; i < branch_idx; ++i) {
+          const auto& inst = entry_blk->instructions[i];
+          if (inst.opcode == Opcode::kAddiu && inst.rs == Register::kZero && inst.rt.has_value()) {
+            consts[*inst.rt] = static_cast<int16_t>(inst.immediate);
+          } else if (inst.opcode == Opcode::kOri && inst.rs == Register::kZero &&
+                     inst.rt.has_value()) {
+            consts[*inst.rt] = static_cast<uint16_t>(inst.immediate);
+          } else if (inst.opcode == Opcode::kLui && inst.rt.has_value()) {
+            consts[*inst.rt] = static_cast<int64_t>(inst.immediate) << 16;
+          } else {
+            RegisterUseDef ud = GetInstructionUseDef(inst);
+            for (Register def_reg : ud.gpr_defs) {
+              consts.erase(def_reg);
+            }
+          }
+        }
+        Register rs = branch.rs.value_or(Register::kZero);
+        Register rt = branch.rt.value_or(Register::kZero);
+        std::optional<int64_t> pivot_val;
+        if (rs == selector && consts.contains(rt)) {
+          pivot_val = consts[rt];
+        } else if (rt == selector && consts.contains(rs)) {
+          pivot_val = consts[rs];
+        }
+        if (!pivot_val.has_value()) return nullptr;
+
+        bool taken_is_eq = (branch.opcode == Opcode::kBeq || branch.opcode == Opcode::kBeql);
+        if (!taken_is_eq) {
+          return nullptr;
+        }
+        bool pivot_arm_is_taken = (pivot_arm.get() == else_body.get());
+        if (!pivot_arm_is_taken) {
+          return nullptr;
+        }
+        for (const auto& sc : child_switch->cases) {
+          for (int64_t v : sc.case_values) {
+            if (v == *pivot_val) return nullptr;
+          }
+        }
+
+        StructuredCase pivot_case;
+        pivot_case.case_values = {*pivot_val};
+        pivot_case.body = std::move(pivot_arm);
+        if (branch_idx + 1 < static_cast<int>(entry_blk->instructions.size()) &&
+            branch.IsBranchLikely()) {
+          const auto& ds = entry_blk->instructions[branch_idx + 1];
+          RegisterUseDef ds_ud = GetInstructionUseDef(ds);
+          bool ds_defines_callee_saved = false;
+          for (Register def_reg : ds_ud.gpr_defs) {
+            if ((def_reg >= Register::kS0 && def_reg <= Register::kS7) ||
+                def_reg == Register::kFp) {
+              ds_defines_callee_saved = true;
+              break;
+            }
+          }
+          if (!ds.IsNop() && !ds_defines_callee_saved) {
+            pivot_case.delay_instructions.push_back(ds);
+          }
+        }
+
+        auto get_region_entry_block = [](const StructuredRegion* r) -> std::optional<uint32_t> {
+          const StructuredRegion* cur = r;
+          while (cur != nullptr) {
+            if (cur->type == RegionType::kBlock) return cur->block_id;
+            if (cur->type == RegionType::kSequence && !cur->children.empty()) {
+              cur = cur->children[0].get();
+            } else {
+              break;
+            }
+          }
+          return std::nullopt;
+        };
+        std::optional<uint32_t> pivot_blk_id = get_region_entry_block(pivot_case.body.get());
+
+        auto insert_it = child_switch->cases.end();
+        for (auto it = child_switch->cases.begin(); it != child_switch->cases.end(); ++it) {
+          if (it->is_default) {
+            insert_it = it;
+            break;
+          }
+          if (pivot_blk_id.has_value()) {
+            std::optional<uint32_t> case_blk_id = get_region_entry_block(it->body.get());
+            if (case_blk_id.has_value() && *pivot_blk_id < *case_blk_id) {
+              insert_it = it;
+              break;
+            }
+          }
+        }
+        child_switch->cases.insert(insert_it, std::move(pivot_case));
+        child_switch->switch_block_id = entry;
+        if (!child_switch->switch_join_block.has_value()) {
+          child_switch->switch_join_block = join;
+        }
+        return std::move(child_switch);
+      };
+
+      if (auto folded = try_fold_root_pivot_into_switch(then_body, else_body); folded != nullptr) {
+        if (join.has_value() && join != follow) {
+          auto after_join = StructureRegion(*join, follow, current_loop);
+          if (after_join) {
+            auto seq = CreateSequence();
+            seq->children.push_back(std::move(folded));
+            FlattenSequence(seq.get(), std::move(after_join));
+            return seq;
+          }
+        }
+        return folded;
+      }
+      if (auto folded = try_fold_root_pivot_into_switch(else_body, then_body); folded != nullptr) {
+        if (join.has_value() && join != follow) {
+          auto after_join = StructureRegion(*join, follow, current_loop);
+          if (after_join) {
+            auto seq = CreateSequence();
+            seq->children.push_back(std::move(folded));
+            FlattenSequence(seq.get(), std::move(after_join));
+            return seq;
+          }
+        }
+        return folded;
+      }
 
       if_else->children.push_back(then_body ? std::move(then_body) : CreateSequence());
       if_else->children.push_back(else_body ? std::move(else_body) : CreateSequence());

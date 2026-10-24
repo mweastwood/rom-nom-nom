@@ -354,11 +354,19 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           splits.erase(def_reg);
           split_sels.erase(def_reg);
           bool_flags.erase(def_reg);
+          for (auto it = split_sels.begin(); it != split_sels.end();) {
+            if (it->second == def_reg) {
+              splits.erase(it->first);
+              split_sels.erase(it++);
+            } else {
+              ++it;
+            }
+          }
         }
       }
     }
 
-    if (known_selector != Register::kZero) {
+    if (b_id != root_id && known_selector != Register::kZero) {
       for (int i = scan_start; i <= branch_idx; ++i) {
         const auto& inst = blk->instructions[i];
         if (inst.rd.has_value() && *inst.rd == known_selector) return ba;
@@ -450,72 +458,102 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       }
     }
 
-    if (branch.opcode == Opcode::kBeq || branch.opcode == Opcode::kBne ||
-        branch.opcode == Opcode::kBeql || branch.opcode == Opcode::kBnel) {
+    auto analyze_branch = [&](const Instruction& branch, uint32_t taken, uint32_t ft,
+                              bool allow_branch_likely_equality) -> bool {
+      if (branch.opcode == Opcode::kBeq || branch.opcode == Opcode::kBne ||
+          branch.opcode == Opcode::kBeql || branch.opcode == Opcode::kBnel) {
+        Register rs = branch.rs.value_or(Register::kZero);
+        Register rt = branch.rt.value_or(Register::kZero);
+
+        if (splits.contains(rs) &&
+            (rt == Register::kZero || (consts.contains(rt) && consts[rt] == 0))) {
+          Register sel = split_sels.contains(rs) ? split_sels[rs] : known_selector;
+          if (sel != Register::kZero && sel != Register::kAt && !bool_flags.contains(sel)) {
+            if (known_selector == Register::kZero || sel == known_selector) {
+              ba.valid = true;
+              ba.selector_reg = sel;
+              ba.is_range_split = true;
+              ba.split_val = splits[rs];
+              ba.taken_is_lt = (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel);
+              ba.split_taken = taken;
+              ba.split_ft = ft;
+              return true;
+            }
+          }
+        }
+        if (splits.contains(rt) &&
+            (rs == Register::kZero || (consts.contains(rs) && consts[rs] == 0))) {
+          Register sel = split_sels.contains(rt) ? split_sels[rt] : known_selector;
+          if (sel != Register::kZero && sel != Register::kAt && !bool_flags.contains(sel)) {
+            if (known_selector == Register::kZero || sel == known_selector) {
+              ba.valid = true;
+              ba.selector_reg = sel;
+              ba.is_range_split = true;
+              ba.split_val = splits[rt];
+              ba.taken_is_lt = (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel);
+              ba.split_taken = taken;
+              ba.split_ft = ft;
+              return true;
+            }
+          }
+        }
+
+        if (!allow_branch_likely_equality &&
+            (branch.opcode == Opcode::kBeql || branch.opcode == Opcode::kBnel)) {
+          return false;
+        }
+
+        bool is_eq_branch = (branch.opcode == Opcode::kBeq || branch.opcode == Opcode::kBeql);
+        if (consts.contains(rt) && !consts.contains(rs) && rs != Register::kZero &&
+            rs != Register::kAt && !bool_flags.contains(rs)) {
+          if (known_selector == Register::kZero || rs == known_selector) {
+            ba.valid = true;
+            ba.selector_reg = rs;
+            ba.is_equality = true;
+            ba.case_val = consts[rt];
+            ba.case_target = is_eq_branch ? taken : ft;
+            ba.cont_target = is_eq_branch ? ft : taken;
+            return true;
+          }
+        }
+        if (consts.contains(rs) && !consts.contains(rt) && rt != Register::kZero &&
+            rt != Register::kAt && !bool_flags.contains(rt)) {
+          if (known_selector == Register::kZero || rt == known_selector) {
+            ba.valid = true;
+            ba.selector_reg = rt;
+            ba.is_equality = true;
+            ba.case_val = consts[rs];
+            ba.case_target = is_eq_branch ? taken : ft;
+            ba.cont_target = is_eq_branch ? ft : taken;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    bool allow_likely_eq = (b_id != root_id);
+    if (b_id == root_id && branch.IsBranchLikely()) {
+      // Allow root equality beql/bnel when it leads into a multi-block switch decision tree.
       Register rs = branch.rs.value_or(Register::kZero);
       Register rt = branch.rt.value_or(Register::kZero);
-
-      if (splits.contains(rs) &&
-          (rt == Register::kZero || (consts.contains(rt) && consts[rt] == 0))) {
-        Register sel = split_sels.contains(rs) ? split_sels[rs] : known_selector;
-        if (sel != Register::kZero && sel != Register::kAt && !bool_flags.contains(sel)) {
-          if (known_selector == Register::kZero || sel == known_selector) {
-            ba.valid = true;
-            ba.selector_reg = sel;
-            ba.is_range_split = true;
-            ba.split_val = splits[rs];
-            ba.taken_is_lt = (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel);
-            ba.split_taken = taken;
-            ba.split_ft = ft;
-            return ba;
-          }
-        }
+      if (!splits.contains(rs) && !splits.contains(rt)) {
+        allow_likely_eq = true;
       }
-      if (splits.contains(rt) &&
-          (rs == Register::kZero || (consts.contains(rs) && consts[rs] == 0))) {
-        Register sel = split_sels.contains(rt) ? split_sels[rt] : known_selector;
-        if (sel != Register::kZero && sel != Register::kAt && !bool_flags.contains(sel)) {
-          if (known_selector == Register::kZero || sel == known_selector) {
-            ba.valid = true;
-            ba.selector_reg = sel;
-            ba.is_range_split = true;
-            ba.split_val = splits[rt];
-            ba.taken_is_lt = (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel);
-            ba.split_taken = taken;
-            ba.split_ft = ft;
-            return ba;
-          }
-        }
-      }
-
-      if (branch.opcode == Opcode::kBeql || branch.opcode == Opcode::kBnel) {
-        return ba;
-      }
-
-      if (consts.contains(rt) && !consts.contains(rs) && rs != Register::kZero &&
-          rs != Register::kAt && !bool_flags.contains(rs)) {
-        if (known_selector == Register::kZero || rs == known_selector) {
-          ba.valid = true;
-          ba.selector_reg = rs;
-          ba.is_equality = true;
-          ba.case_val = consts[rt];
-          ba.case_target = (branch.opcode == Opcode::kBeq) ? taken : ft;
-          ba.cont_target = (branch.opcode == Opcode::kBeq) ? ft : taken;
+    }
+    if (analyze_branch(branch, taken, ft, allow_likely_eq)) {
+      if (ba.is_equality && (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel) &&
+          !ba.delay_slot_sets_split && ba.delay_instruction.has_value()) {
+        // A branch-not-equal (bne/bnel) whose case_target is fallthrough and whose
+        // continuation is a taken branch to the next else-if block is an if/else-if
+        // chain (unless its delay slot sets up a range split for a switch tree).
+        const auto* cont_blk = cfg.GetBlock(ba.cont_target);
+        if (cont_blk != nullptr && cont_blk->start_vram > blk->end_vram) {
+          ba = BlockAnalysis{};
           return ba;
         }
       }
-      if (consts.contains(rs) && !consts.contains(rt) && rt != Register::kZero &&
-          rt != Register::kAt && !bool_flags.contains(rt)) {
-        if (known_selector == Register::kZero || rt == known_selector) {
-          ba.valid = true;
-          ba.selector_reg = rt;
-          ba.is_equality = true;
-          ba.case_val = consts[rs];
-          ba.case_target = (branch.opcode == Opcode::kBeq) ? taken : ft;
-          ba.cont_target = (branch.opcode == Opcode::kBeq) ? ft : taken;
-          return ba;
-        }
-      }
+      return ba;
     }
 
     return ba;
@@ -644,9 +682,13 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       }
       target_to_cases[ct].push_back(ba.case_val);
 
-      auto cont_consts = make_succ_consts(ba);
-      auto cont_splits = make_succ_splits(ba);
-      auto cont_sels = make_succ_split_sels(ba);
+      const auto* cur_blk = cfg.GetBlock(b_id);
+      const auto* cur_term = (cur_blk != nullptr) ? cur_blk->Terminator() : nullptr;
+      bool cont_annuls_delay_slot = (cur_term != nullptr && cur_term->opcode == Opcode::kBeql);
+
+      auto cont_consts = cont_annuls_delay_slot ? block_consts[b_id] : make_succ_consts(ba);
+      auto cont_splits = cont_annuls_delay_slot ? block_splits[b_id] : make_succ_splits(ba);
+      auto cont_sels = cont_annuls_delay_slot ? block_split_sels[b_id] : make_succ_split_sels(ba);
       BlockAnalysis cont_ba = analyze_block(cont, cont_consts, cont_splits, cont_sels, selector);
 
       if (cont_ba.valid && !visited.contains(cont) && !decision_blocks.contains(cont)) {
@@ -664,10 +706,33 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       bool continuation_is_decision_block =
           (cont_ba.valid && !visited.contains(cont) && !decision_blocks.contains(cont));
 
+      bool root_delay_emitted_before_switch = false;
+      if (b_id == root_id && ba.delay_instruction.has_value()) {
+        if (cur_term != nullptr && !cur_term->IsBranchLikely() && !ba.delay_slot_sets_split) {
+          const auto& ds = *ba.delay_instruction;
+          bool is_prologue_save =
+              (ds.opcode == Opcode::kSw && ds.rs == Register::kSp && ds.rt.has_value() &&
+               (*ds.rt == Register::kRa || *ds.rt == Register::kFp ||
+                (*ds.rt >= Register::kS0 && *ds.rt <= Register::kS7)));
+          RegisterUseDef ds_ud = GetInstructionUseDef(ds);
+          bool defines_selector_or_at = false;
+          for (Register def_reg : ds_ud.gpr_defs) {
+            if (def_reg == selector || def_reg == Register::kAt) {
+              defines_selector_or_at = true;
+              break;
+            }
+          }
+          if (!is_prologue_save && !defines_selector_or_at) {
+            root_delay_emitted_before_switch = true;
+          }
+        }
+      }
+
       DecisionCase dc;
       dc.case_values = {ba.case_val};
       dc.target_block = ct;
-      if (!continuation_is_decision_block && ba.delay_slot_sets_const) {
+      if (!root_delay_emitted_before_switch && !continuation_is_decision_block &&
+          ba.delay_slot_sets_const) {
         const auto* target_block = cfg.GetBlock(ct);
         bool target_uses_constant_register = false;
         if (target_block != nullptr) {
@@ -692,7 +757,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           dc.const_val = ba.delay_slot_const_val;
         }
       }
-      if (!ba.delay_slot_sets_split && ba.delay_instruction.has_value()) {
+      if (!root_delay_emitted_before_switch && !ba.delay_slot_sets_split &&
+          ba.delay_instruction.has_value()) {
         dc.delay_instructions.push_back(*ba.delay_instruction);
       }
       decision_cases.push_back(std::move(dc));
@@ -716,7 +782,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         uint32_t eff_cont = resolve_trampoline(cont);
         const auto* cont_blk = cfg.GetBlock(cont);
         bool continuation_has_valid_delay_slot = false;
-        if (cont_blk != nullptr && cont_blk->instructions.size() >= 2 &&
+        if (eff_cont != cont && cont_blk != nullptr && cont_blk->instructions.size() >= 2 &&
             !cont_blk->instructions.back().IsNop()) {
           const auto& ds = cont_blk->instructions.back();
           if (ds.opcode == Opcode::kAddiu && ds.rs == Register::kZero && ds.rt.has_value()) {
@@ -737,11 +803,45 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             default_delay_instructions.push_back(ds);
           }
         }
-        if (!continuation_has_valid_delay_slot && ba.delay_slot_sets_const) {
+        bool delay_dead_at_default_return = false;
+        if (ba.delay_instruction.has_value()) {
+          const auto* eff_cont_blk = cfg.GetBlock(eff_cont);
+          bool is_ret_blk =
+              (eff_cont_blk != nullptr &&
+               (eff_cont_blk->successors.empty() ||
+                (eff_cont_blk->Terminator() != nullptr && eff_cont_blk->Terminator()->IsReturn())));
+          if (is_ret_blk) {
+            RegisterUseDef ds_ud = GetInstructionUseDef(*ba.delay_instruction);
+            bool used_or_v0 = false;
+            for (Register def_reg : ds_ud.gpr_defs) {
+              if (def_reg == Register::kV0) {
+                used_or_v0 = true;
+                break;
+              }
+              for (const auto& inst : eff_cont_blk->instructions) {
+                RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+                for (Register u : inst_ud.gpr_uses) {
+                  if (u == def_reg) {
+                    used_or_v0 = true;
+                    break;
+                  }
+                }
+                if (used_or_v0) break;
+              }
+              if (used_or_v0) break;
+            }
+            if (!ds_ud.gpr_defs.empty() && !used_or_v0) {
+              delay_dead_at_default_return = true;
+            }
+          }
+        }
+        if (!cont_annuls_delay_slot && !delay_dead_at_default_return &&
+            !continuation_has_valid_delay_slot && ba.delay_slot_sets_const) {
           default_const_reg = ba.delay_slot_const_reg;
           default_const_val = ba.delay_slot_const_val;
         }
-        if (!continuation_has_valid_delay_slot && ba.delay_instruction.has_value() &&
+        if (!cont_annuls_delay_slot && !delay_dead_at_default_return &&
+            !continuation_has_valid_delay_slot && ba.delay_instruction.has_value() &&
             default_delay_instructions.empty()) {
           default_delay_instructions.push_back(*ba.delay_instruction);
         }
@@ -919,6 +1019,11 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
   }
   const size_t min_cases = root_has_extra_instructions ? 3 : 2;
   if (total_cases < min_cases || target_to_cases.size() < min_cases) {
+    return std::nullopt;
+  }
+  const auto* root_term = root_blk->Terminator();
+  if (root_term != nullptr && root_term->IsBranchLikely() && root_ba.is_equality &&
+      decision_blocks.size() < 2) {
     return std::nullopt;
   }
 

@@ -530,5 +530,112 @@ TEST(ControlFlowPatternMatcherTest, DecisionTreeSwitchSixCasesAndImpliedInterval
   EXPECT_THAT(implied_s, HasSubstr("case 5:"));
 }
 
+TEST(ControlFlowPatternMatcherTest, BranchLikelyEqualityNodeInDecisionTreeAnnulsDelayOnDefault) {
+  // Root pivot checks $a0 == 201 (with non-likely delay slot $v1 = $a2), then splits on
+  // slti $v0, $a0, 202; left leaf checks $a0 == 200 using `beql` with delay slot `move $t0, $t1`.
+  // The `beql` delay slot must be attached to case 200 only and NOT to the default case.
+  std::vector<uint32_t> words = {
+      0x240200C9,  // 0x00: addiu $v0, $zero, 201
+      0x1082000E,  // 0x04: beq   $a0, $v0, +14 -> 0x40 (case 201)
+      0x00C01821,  // 0x08: addu  $v1, $a2, $zero
+      0x288200CA,  // 0x0C: slti  $v0, $a0, 202
+      0x10400005,  // 0x10: beq   $v0, $zero, +5 -> 0x28 (right subtree >= 202)
+      0x240200C8,  // 0x14: addiu $v0, $zero, 200
+      0x50820007,  // 0x18: beql  $a0, $v0, +7 -> 0x38 (case 200)
+      0x01204021,  // 0x1C: addu  $t0, $t1, $zero (branch-likely delay slot!)
+      0x08000014,  // 0x20: j     0x80000050 (default/join)
+      0x00000000,  // 0x24: nop
+      0x240200CA,  // 0x28: addiu $v0, $zero, 202
+      0x10820006,  // 0x2C: beq   $a0, $v0, +6 -> 0x48 (case 202)
+      0x00000000,  // 0x30: nop
+      0x08000014,  // 0x34: j     0x80000050 (default/join)
+      0x00000000,  // 0x38: nop (delay slot of 0x34 AND target of case 200 -> Wait, put case 200 at
+                   // 0x3C!)
+  };
+  words = {
+      0x240200C9,  // 0x00: addiu $v0, $zero, 201
+      0x1082000E,  // 0x04: beq   $a0, $v0, +14 -> 0x40 (case 201)
+      0x00C01821,  // 0x08: addu  $v1, $a2, $zero
+      0x288200CA,  // 0x0C: slti  $v0, $a0, 202
+      0x10400005,  // 0x10: beq   $v0, $zero, +5 -> 0x28 (right subtree >= 202)
+      0x240200C8,  // 0x14: addiu $v0, $zero, 200
+      0x50820009,  // 0x18: beql  $a0, $v0, +9 -> 0x40? No: +7 -> 0x38 (case 200)
+      0x01204021,  // 0x1C: addu  $t0, $t1, $zero (branch-likely delay slot!)
+      0x08000014,  // 0x20: j     0x80000050 (default/join)
+      0x00000000,  // 0x24: nop
+      0x240200CA,  // 0x28: addiu $v0, $zero, 202
+      0x50820005,  // 0x2C: beql  $a0, $v0, +5 -> 0x44 (case 202)
+      0x01204021,  // 0x30: addu  $t0, $t1, $zero
+      0x08000014,  // 0x34: j     0x80000050 (default/join)
+      0x00000000,  // 0x38: nop
+      0x08000014,  // 0x3C: j     0x80000050 (case 200)
+      0x00603821,  // 0x40: addu  $a3, $v1, $zero
+      0x24A8FFFF,  // 0x44: addiu $t0, $a1, -1 (case 201)
+      0x08000014,  // 0x48: j     0x80000050
+      0x00603821,  // 0x4C: addu  $a3, $v1, $zero
+      0x03E00008,  // 0x50: jr    $ra (join)
+      0x00000000,  // 0x54: nop
+  };
+  // Fix exact branch offsets:
+  // 0x04: beq $a0, $v0, to 0x44 -> (0x44 - 0x08)/4 = 15 (0x000F)
+  words[1] = 0x1082000F;
+  // 0x18: beql $a0, $v0, to 0x3C -> (0x3C - 0x1C)/4 = 8 (0x0008)
+  words[6] = 0x50820008;
+  // 0x2C: beql $a0, $v0, to 0x50 -> wait, let's give case 202 its own block at 0x50 and join at
+  // 0x58:
+  words = {
+      0x240200C9,  // 0x00: addiu $v0, $zero, 201
+      0x1082000F,  // 0x04: beq   $a0, $v0, +15 -> 0x44 (case 201)
+      0x00C01821,  // 0x08: addu  $v1, $a2, $zero
+      0x288200CA,  // 0x0C: slti  $v0, $a0, 202
+      0x10400005,  // 0x10: beq   $v0, $zero, +5 -> 0x28 (right subtree >= 202)
+      0x240200C8,  // 0x14: addiu $v0, $zero, 200
+      0x50820008,  // 0x18: beql  $a0, $v0, +8 -> 0x3C (case 200)
+      0x01204021,  // 0x1C: addu  $t0, $t1, $zero (branch-likely delay slot!)
+      0x08000016,  // 0x20: j     0x80000058 (default/join)
+      0x00000000,  // 0x24: nop
+      0x240200CA,  // 0x28: addiu $v0, $zero, 202
+      0x50820007,  // 0x2C: beql  $a0, $v0, +7 -> 0x4C (case 202)
+      0x01204021,  // 0x30: addu  $t0, $t1, $zero
+      0x08000016,  // 0x34: j     0x80000058 (default/join)
+      0x00000000,  // 0x38: nop
+      0x08000016,  // 0x3C: j     0x80000058 (case 200)
+      0x00603821,  // 0x40: addu  $a3, $v1, $zero
+      0x24A8FFFF,  // 0x44: addiu $t0, $a1, -1 (case 201)
+      0x08000016,  // 0x48: j     0x80000058
+      0x00603821,  // 0x4C: addu  $a3, $v1, $zero
+      0x24C7FFFF,  // 0x50: addiu $a3, $a2, -1 (case 202)
+      0x00000000,  // 0x54: nop
+      0x03E00008,  // 0x58: jr    $ra (join)
+      0x00000000,  // 0x5C: nop
+  };
+  // 0x2C: beql $a0, $v0, to 0x50 -> (0x50 - 0x30)/4 = 8 (0x0008)
+  words[11] = 0x50820008;
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  EXPECT_EQ(sw->selector_reg, Register::kA0);
+
+  bool found_case_200 = false;
+  bool found_default = false;
+  for (const auto& dc : sw->cases) {
+    if (!dc.case_values.empty() && dc.case_values[0] == 200) {
+      found_case_200 = true;
+      EXPECT_EQ(dc.delay_instructions.size(), 1u);
+    }
+    if (dc.is_default) {
+      found_default = true;
+      EXPECT_TRUE(dc.delay_instructions.empty());
+    }
+  }
+  EXPECT_TRUE(found_case_200);
+  EXPECT_TRUE(found_default);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

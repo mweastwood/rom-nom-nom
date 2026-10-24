@@ -467,5 +467,38 @@ TEST(AstAbiRewriterTest, GeneralizedCallArgumentCountInferenceAcrossPrologueAndP
   EXPECT_THAT(pred_code, HasSubstr("func_80001000(arg0, arg1)"));
 }
 
+TEST(AstAbiRewriterTest, InlineCrossJumpedCallTailsPreservesBreakInSwitchCases) {
+  CompoundStatement root;
+  std::vector<SwitchCase> cases;
+
+  // case 0: block_1: Dispatch(80, 104); break;
+  SwitchCase c0;
+  c0.case_values = {0};
+  c0.body = std::make_unique<CompoundStatement>();
+  c0.body->AddStatement(CStatement::Label("block_1"));
+  std::vector<std::unique_ptr<CExpression>> args0;
+  args0.push_back(CExpression::Integer(80));
+  args0.push_back(CExpression::Integer(104));
+  c0.body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("Dispatch"), std::move(args0))));
+  c0.body->AddStatement(CStatement::Break());
+  cases.push_back(std::move(c0));
+
+  // case 2: goto block_1;
+  SwitchCase c2;
+  c2.case_values = {2};
+  c2.body = std::make_unique<CompoundStatement>();
+  c2.body->AddStatement(CStatement::Goto("block_1"));
+  cases.push_back(std::move(c2));
+
+  root.AddStatement(CStatement::Switch(CExpression::Identifier("sel"), std::move(cases)));
+  InlineCrossJumpedCallTails(&root);
+
+  const auto& sw = static_cast<const SwitchStatement&>(*root.Statements()[0]);
+  ASSERT_EQ(sw.Cases().size(), 2u);
+  ASSERT_EQ(sw.Cases()[1].body->Statements().size(), 2u);
+  EXPECT_EQ(sw.Cases()[1].body->Statements()[1]->Kind(), CStatementKind::kBreakStatement);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

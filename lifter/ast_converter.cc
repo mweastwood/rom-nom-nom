@@ -1818,13 +1818,37 @@ class ConverterContext {
         block->instructions.begin(),
         block->instructions.begin() + static_cast<ptrdiff_t>(pre_switch_count));
     if (branch_index >= 0 && branch_index + 1 < static_cast<int>(block->instructions.size())) {
+      const auto& branch = block->instructions[branch_index];
       const auto& ds = block->instructions[branch_index + 1];
       RegisterUseDef ds_ud = GetInstructionUseDef(ds);
+      bool emit_delay_before_switch = false;
       for (Register def_reg : ds_ud.gpr_defs) {
         if ((def_reg >= Register::kS0 && def_reg <= Register::kS7) || def_reg == Register::kFp) {
-          pre_switch_insts.push_back(ds);
+          emit_delay_before_switch = true;
           break;
         }
+      }
+      if (!emit_delay_before_switch && !branch.IsBranchLikely() && !ds.IsNop() &&
+          switch_selector_register != Register::kZero) {
+        bool is_prologue_save =
+            (ds.opcode == Opcode::kSw && ds.rs == Register::kSp && ds.rt.has_value() &&
+             (*ds.rt == Register::kRa || *ds.rt == Register::kFp ||
+              (*ds.rt >= Register::kS0 && *ds.rt <= Register::kS7)));
+        bool is_switch_split = (ds.opcode == Opcode::kSlti || ds.opcode == Opcode::kSltiu ||
+                                ds.opcode == Opcode::kSlt || ds.opcode == Opcode::kSltu);
+        bool defines_selector_or_at = false;
+        for (Register def_reg : ds_ud.gpr_defs) {
+          if (def_reg == switch_selector_register || def_reg == Register::kAt) {
+            defines_selector_or_at = true;
+            break;
+          }
+        }
+        if (!is_prologue_save && !is_switch_split && !defines_selector_or_at) {
+          emit_delay_before_switch = true;
+        }
+      }
+      if (emit_delay_before_switch) {
+        pre_switch_insts.push_back(ds);
       }
     }
     if (!pre_switch_insts.empty()) {

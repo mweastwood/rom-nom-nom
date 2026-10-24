@@ -5590,5 +5590,25 @@ void CallResultComparedWithSltiBeforeConditionalCallWithSavedArg(s32 ch) {
 )");
 }
 
+TEST_F(RoundTripTest, ThreeCaseSwitchLoadedSelectorWithCrossJumpedCall) {
+  AssertRoundTripBitExact("ThreeCaseSwitchLoadedSelectorWithCrossJumpedCall", R"(
+void dispatch_pair(s32 a, s32 b);
+
+void ThreeCaseSwitchLoadedSelectorWithCrossJumpedCall(const s32* state_ptr) {
+    switch (*state_ptr) {
+        case 0:
+            dispatch_pair(80, 104);
+            break;
+        case 1:
+            dispatch_pair(88, 112);
+            break;
+        case 2:
+            dispatch_pair(96, 120);
+            break;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

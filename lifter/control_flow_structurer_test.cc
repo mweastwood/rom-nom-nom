@@ -852,5 +852,69 @@ TEST(ControlFlowStructurerTest, InnerLoopExitToSuccessorOfLatchFollowEmitsGotoIn
   EXPECT_THAT(s, HasSubstr("goto block_4"));
 }
 
+TEST(ControlFlowStructurerTest, FoldsRootEqualityPivotIntoChildDecisionTreeSwitch) {
+  // Entry block loads selector $v1 from memory and checks $v1 == 1 (pivot).
+  // Fallthrough splits on $v1 < 2: left checks $v1 == 0, right checks $v1 == 2.
+  // All three cases (0, 1, 2) must fold into a single `switch ($v1)`.
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 0x00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 0x04: sw    $ra, 20($sp)
+      0x3C038019,  // 0x08: lui   $v1, 0x8019
+      0x8C639074,  // 0x0C: lw    $v1, -0x6F8C($v1)
+      0x24020001,  // 0x10: addiu $v0, $zero, 1
+      0x1062000B,  // 0x14: beq   $v1, $v0, +11 -> 0x44 (case 1)
+      0x28620002,  // 0x18: slti  $v0, $v1, 2
+      0x50400005,  // 0x1C: beql  $v0, $zero, +5 -> 0x34 (right subtree: >= 2)
+      0x24020002,  // 0x20: addiu $v0, $zero, 2
+      0x1460000D,  // 0x24: bne   $v1, $zero, +13 -> 0x5C (default/epilogue)
+      0x00000000,  // 0x28: nop
+      0x24040050,  // 0x2C: addiu $a0, $zero, 80 (case 0)
+      0x08000014,  // 0x30: j     0x80000050 (shared call)
+      0x24050068,  // 0x34: addiu $a1, $zero, 104
+      0x14620009,  // 0x38: bne   $v1, $v0, +9 -> 0x60 (default/epilogue)
+      0x00000000,  // 0x3C: nop
+      0x24040060,  // 0x40: addiu $a0, $zero, 96 (case 2)
+      0x08000014,  // 0x44: j     0x80000050 (shared call)
+      0x24050078,  // 0x48: addiu $a1, $zero, 120
+      0x24040058,  // 0x4C: addiu $a0, $zero, 88 (case 1)
+      0x24050070,  // 0x50: addiu $a1, $zero, 112
+      0x0C000400,  // 0x54: jal   0x80001000
+      0x00000000,  // 0x58: nop
+      0x8FBF0014,  // 0x5C: lw    $ra, 20($sp)
+      0x03E00008,  // 0x60: jr    $ra
+      0x27BD0018,  // 0x64: addiu $sp, $sp, 24
+  };
+  // Fix branch offsets in `words`:
+  // 0x14: beq $v1, $v0, to 0x4C -> offset = (0x4C - 0x18)/4 = 13 (0x000D)
+  words[5] = 0x1062000D;
+  // 0x1C: beql $v0, $zero, to 0x38 -> offset = (0x38 - 0x20)/4 = 6 (0x0006)
+  words[7] = 0x50400006;
+  // 0x24: bne $v1, $zero, to 0x5C -> offset = (0x5C - 0x28)/4 = 13 (0x000D)
+  words[9] = 0x1460000D;
+  // 0x30: j 0x80000054 -> target = 0x80000054 >> 2 = 0x00000015
+  words[12] = 0x08000015;
+  // 0x38: bne $v1, $v0, to 0x5C -> offset = (0x5C - 0x3C)/4 = 8 (0x0008)
+  words[14] = 0x14620008;
+  // 0x44: j 0x80000054 -> target = 0x00000015
+  words[17] = 0x08000015;
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("switch ($v1)"));
+  EXPECT_THAT(s, HasSubstr("case 0:"));
+  EXPECT_THAT(s, HasSubstr("case 1:"));
+  EXPECT_THAT(s, HasSubstr("case 2:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

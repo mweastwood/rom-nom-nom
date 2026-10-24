@@ -458,6 +458,7 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
     CompoundStatement* comp = nullptr;
     std::string label_name;
     std::vector<std::unique_ptr<CStatement>> tail_stmts;
+    bool ends_with_break = false;
   };
 
   auto is_simple_call_or_assign_stmt = [](const CStatement& s, bool* out_has_call) -> bool {
@@ -500,8 +501,10 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
       if (!is_root && s->Kind() == CStatementKind::kLabelStatement) {
         std::string lbl(static_cast<const LabelStatement&>(*s).Label());
         size_t end_idx = stmts.size();
+        bool ends_with_break = false;
         if (end_idx > i + 1 && stmts[end_idx - 1]->Kind() == CStatementKind::kBreakStatement) {
           --end_idx;
+          ends_with_break = true;
         }
         size_t tail_count = end_idx - (i + 1);
         if (tail_count >= 1 && tail_count <= 3) {
@@ -516,8 +519,10 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
             tail.push_back(stmts[k]->Clone());
           }
           if (all_valid && has_call) {
-            candidates.push_back(LabelSite{
-                .comp = comp, .label_name = std::move(lbl), .tail_stmts = std::move(tail)});
+            candidates.push_back(LabelSite{.comp = comp,
+                                           .label_name = std::move(lbl),
+                                           .tail_stmts = std::move(tail),
+                                           .ends_with_break = ends_with_break});
           }
         }
       } else if (s->Kind() == CStatementKind::kIfStatement) {
@@ -583,7 +588,8 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
     if (total_gotos == 0 || total_gotos != valid_tail_gotos) continue;
 
     int replaced_gotos = 0;
-    std::function<void(CompoundStatement*)> replace_gotos = [&](CompoundStatement* comp) {
+    std::function<void(CompoundStatement*, bool)> replace_gotos = [&](CompoundStatement* comp,
+                                                                      bool in_switch_or_loop) {
       if (comp == nullptr) return;
       auto& stmts = comp->MutableStatements();
       for (size_t i = 0; i < stmts.size(); ++i) {
@@ -595,13 +601,26 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
           for (size_t k = 0; k < site.tail_stmts.size(); ++k) {
             stmts.insert(stmts.begin() + i + k, site.tail_stmts[k]->Clone());
           }
+          if (site.ends_with_break && in_switch_or_loop) {
+            size_t after_idx = i + site.tail_stmts.size();
+            if (after_idx >= stmts.size() ||
+                stmts[after_idx]->Kind() != CStatementKind::kBreakStatement) {
+              stmts.insert(stmts.begin() + after_idx, CStatement::Break());
+            }
+          }
           ++replaced_gotos;
           return;
         }
-        ForEachSubCompoundStatement(s, replace_gotos);
+        bool child_in_switch_or_loop = in_switch_or_loop ||
+                                       s->Kind() == CStatementKind::kSwitchStatement ||
+                                       s->Kind() == CStatementKind::kWhileStatement ||
+                                       s->Kind() == CStatementKind::kDoWhileStatement ||
+                                       s->Kind() == CStatementKind::kForStatement;
+        ForEachSubCompoundStatement(
+            s, [&](CompoundStatement* sub) { replace_gotos(sub, child_in_switch_or_loop); });
       }
     };
-    replace_gotos(root_body);
+    replace_gotos(root_body, false);
 
     total_gotos = 0;
     check_gotos(*root_body);
