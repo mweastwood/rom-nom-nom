@@ -1450,5 +1450,57 @@ TEST(AstConverterTest, DaddiuStackFrameAllocationMapsIncomingStackArgsCorrectly)
   EXPECT_THAT(code, Not(HasSubstr("arg8")));
 }
 
+TEST(AstConverterTest,
+     PeelsNonBranchLikelyDoWhileLoopRotationAndSkipsDuplicateExitDelayOnEarlyBreak) {
+  // Block 0 (preheader):
+  //   0x00: addiu $v1, $zero, 0
+  //   0x04: andi  $v0, $a0, 0xFF
+  // Block 1 (loop header):
+  //   0x08: bnel  $v0, $zero, +5 -> 0x20 (block 4, after loop_follow)
+  //   0x0C: sh    $v1, 0($a1)            (delay slot matches loop_follow block 3)
+  // Block 2 (loop latch):
+  //   0x10: addiu $v1, $v1, 1
+  //   0x14: srl   $a0, $a0, 8
+  //   0x18: bne   $v1, $a2, -5 -> 0x08 (block 1)
+  //   0x1C: andi  $v0, $a0, 0xFF        (peeled rotation instruction clobbering $v0, dead on exit)
+  // Block 3 (loop_follow):
+  //   0x20: sh    $v1, 0($a1)
+  // Block 4 (return):
+  //   0x24: jr    $ra
+  //   0x28: nop
+  std::vector<uint32_t> words = {
+      0x24030000,  // 0x00: addiu $v1, $zero, 0
+      0x308200FF,  // 0x04: andi  $v0, $a0, 0xFF
+      0x54400005,  // 0x08: bnel  $v0, $zero, +5 -> 0x24 (Wait: 0x0C + 5*4 = 0x20, +6 = 0x24)
+      0xA4A30000,  // 0x0C: sh    $v1, 0($a1)
+      0x24630001,  // 0x10: addiu $v1, $v1, 1
+      0x00042202,  // 0x14: srl   $a0, $a0, 8
+      0x1466FFFB,  // 0x18: bne   $v1, $a2, -5 -> 0x08
+      0x308200FF,  // 0x1C: andi  $v0, $a0, 0xFF
+      0xA4A30000,  // 0x20: sh    $v1, 0($a1)
+      0x03E00008,  // 0x24: jr    $ra
+      0x00000000,  // 0x28: nop
+  };
+  words[2] = 0x54400006;  // 0x08: bnel $v0, $zero, +6 -> 0x24 (block 4)
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "PeeledLoopWithEarlyBreak";
+  opts.return_type = CType::Void();
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("do {"));
+  EXPECT_THAT(code, HasSubstr("break;"));
+  EXPECT_THAT(code, Not(HasSubstr("while (1)")));
+  EXPECT_THAT(code, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

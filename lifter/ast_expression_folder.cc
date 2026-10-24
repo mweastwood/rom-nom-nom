@@ -700,9 +700,23 @@ struct FolderContext {
         !HasAddressOfVarInStmt(*root_body, var)) {
       return true;
     }
+    bool has_label_between_def_and_use = true;
+    if (def_stmt != nullptr) {
+      bool seen_def = false;
+      for (size_t k = 0; k <= next_idx && k < stmts.size(); ++k) {
+        if (stmts[k].get() == def_stmt) {
+          seen_def = true;
+          has_label_between_def_and_use = false;
+        } else if (seen_def && HasLabelInStmt(*stmts[k])) {
+          has_label_between_def_and_use = true;
+          break;
+        }
+      }
+    }
     if (expected_uses_in_next > 0 && def_stmt != nullptr && root_body != nullptr &&
-        !root_has_label && var != "v0" && var != "f0" && var != "f0_d" &&
-        !HasLoopInStmt(*stmts[next_idx]) && CountUses(*root_body, var) == expected_uses_in_next &&
+        (!root_has_label || (!has_label_between_def_and_use && IsCallArgVar(var))) && var != "v0" &&
+        var != "f0" && var != "f0_d" && !HasLoopInStmt(*stmts[next_idx]) &&
+        CountUses(*root_body, var) == expected_uses_in_next &&
         !HasAddressOfVarInStmt(*root_body, var)) {
       return true;
     }
@@ -1036,7 +1050,10 @@ struct FolderContext {
               bool killed_in_same_block = false;
               if (!is_switch_case_body) {
                 for (size_t k = i + 1; k < stmts.size(); ++k) {
-                  if (stmts[k]->Kind() == CStatementKind::kSwitchStatement) {
+                  if (stmts[k]->Kind() == CStatementKind::kSwitchStatement ||
+                      (stmts[k]->Kind() == CStatementKind::kDoWhileStatement &&
+                       AnalyzeVarLiveness(*stmts[k], var, false, 0) ==
+                           VarLiveness::kKilledBeforeRead)) {
                     killed_in_same_block = true;
                     break;
                   }
@@ -1074,6 +1091,21 @@ struct FolderContext {
                 bool overwritten_before_use = false;
                 bool saw_intervening_call = false;
                 for (size_t k = i + 1; k < stmts.size(); ++k) {
+                  if (stmts[k]->Kind() == CStatementKind::kDoWhileStatement &&
+                      AnalyzeVarLiveness(*stmts[k], var, false, 0) ==
+                          VarLiveness::kKilledBeforeRead) {
+                    if (saw_intervening_call) {
+                      overwritten_before_use = true;
+                    } else {
+                      for (size_t m = k; m < stmts.size(); ++m) {
+                        if (HasCallInStmt(*stmts[m])) {
+                          overwritten_before_use = true;
+                          break;
+                        }
+                      }
+                    }
+                    break;
+                  }
                   if (stmts[k]->Kind() != CStatementKind::kExpressionStatement) break;
                   const auto& kes = static_cast<const ExpressionStatement&>(*stmts[k]);
                   if (kes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {

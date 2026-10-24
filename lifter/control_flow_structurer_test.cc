@@ -916,5 +916,54 @@ TEST(ControlFlowStructurerTest, FoldsRootEqualityPivotIntoChildDecisionTreeSwitc
   EXPECT_THAT(s, HasSubstr("case 2:"));
 }
 
+TEST(ControlFlowStructurerTest, DoWhileEarlyExitWithBranchLikelyDelayMatchingLoopFollowEmitsBreak) {
+  // Block 0 (preheader):
+  //   0x00: addiu $v1, $zero, 0
+  //   0x04: andi  $v0, $a0, 0xFF
+  // Block 1 (loop header):
+  //   0x08: bnel  $v0, $zero, +4 -> 0x1C (block 4, successor of loop_follow block 3)
+  //   0x0C: sh    $v1, 0($a1)            (delay slot matches loop_follow block 3)
+  // Block 2 (loop latch):
+  //   0x10: addiu $v1, $v1, 1
+  //   0x14: bne   $v1, $a2, -4 -> 0x08 (block 1)
+  //   0x18: andi  $v0, $a0, 0xFF
+  // Block 3 (loop_follow):
+  //   0x1C: sh    $v1, 0($a1)
+  // Block 4 (after loop_follow):
+  //   0x20: jr    $ra
+  //   0x24: nop
+  std::vector<uint32_t> words = {
+      0x24030000,  // 0x00: addiu $v1, $zero, 0
+      0x308200FF,  // 0x04: andi  $v0, $a0, 0xFF
+      0x54400004,  // 0x08: bnel  $v0, $zero, +4 -> 0x1C (wait: 0x0C + 4*4 = 0x1C, let's target 0x20
+                   // -> +4 is 0x1C, +5 is 0x20)
+      0xA4A30000,  // 0x0C: sh    $v1, 0($a1)
+      0x24630001,  // 0x10: addiu $v1, $v1, 1
+      0x1466FFFC,  // 0x14: bne   $v1, $a2, -4 -> 0x08
+      0x308200FF,  // 0x18: andi  $v0, $a0, 0xFF
+      0xA4A30000,  // 0x1C: sh    $v1, 0($a1)
+      0x03E00008,  // 0x20: jr    $ra
+      0x00000000,  // 0x24: nop
+  };
+  words[2] = 0x54400004;      // 0x08: bnel $v0, $zero, +4 -> 0x0C + 0x10 = 0x1C; +5 -> 0x20
+  words[2] = 0x54400004 + 1;  // +5 -> 0x20
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("do {"));
+  EXPECT_THAT(s, HasSubstr("break"));
+  EXPECT_THAT(s, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

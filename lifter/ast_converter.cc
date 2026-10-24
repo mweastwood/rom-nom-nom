@@ -838,7 +838,35 @@ class ConverterContext {
 
         auto then_body = std::make_unique<CompoundStatement>();
         auto else_body = std::make_unique<CompoundStatement>();
-        if (has_branch_likely && cond_block != nullptr) {
+        bool skip_branch_likely_delay = false;
+        if (has_branch_likely && !region.invert_condition && cond_block != nullptr &&
+            cond_block->instructions.size() >= 2 && region.children.size() == 1 &&
+            region.children[0] != nullptr && region.children[0]->type == RegionType::kBreak) {
+          uint32_t break_id = region.children[0]->block_id;
+          bool directly_targets_break = false;
+          for (uint32_t succ : cond_block->successors) {
+            if (succ == break_id) {
+              directly_targets_break = true;
+              break;
+            }
+          }
+          if (!directly_targets_break) {
+            const auto* break_blk = cfg_.GetBlock(break_id);
+            if (break_blk != nullptr && break_blk->instructions.size() == 1 &&
+                break_blk->successors.size() == 1) {
+              const auto& delay_inst = cond_block->instructions.back();
+              const auto& break_inst = break_blk->instructions.front();
+              if (!delay_inst.IsNop() && delay_inst.opcode == break_inst.opcode &&
+                  delay_inst.rs == break_inst.rs && delay_inst.rt == break_inst.rt &&
+                  delay_inst.rd == break_inst.rd && delay_inst.immediate == break_inst.immediate &&
+                  delay_inst.fs == break_inst.fs && delay_inst.ft == break_inst.ft &&
+                  delay_inst.fd == break_inst.fd) {
+                skip_branch_likely_delay = true;
+              }
+            }
+          }
+        }
+        if (has_branch_likely && !skip_branch_likely_delay && cond_block != nullptr) {
           auto delay_stmts = LiftDelaySlotFromBlock(*cond_block);
           for (auto& s : delay_stmts) {
             auto cs = AstConverter::ConvertStatement(s);
@@ -1054,7 +1082,35 @@ class ConverterContext {
 
         auto then_body = std::make_unique<CompoundStatement>();
         auto else_body = std::make_unique<CompoundStatement>();
-        if (has_branch_likely && cond_block != nullptr) {
+        bool skip_branch_likely_delay = false;
+        if (has_branch_likely && !region.invert_condition && cond_block != nullptr &&
+            cond_block->instructions.size() >= 2 && region.children.size() == 1 &&
+            region.children[0] != nullptr && region.children[0]->type == RegionType::kBreak) {
+          uint32_t break_id = region.children[0]->block_id;
+          bool directly_targets_break = false;
+          for (uint32_t succ : cond_block->successors) {
+            if (succ == break_id) {
+              directly_targets_break = true;
+              break;
+            }
+          }
+          if (!directly_targets_break) {
+            const auto* break_blk = cfg_.GetBlock(break_id);
+            if (break_blk != nullptr && break_blk->instructions.size() == 1 &&
+                break_blk->successors.size() == 1) {
+              const auto& delay_inst = cond_block->instructions.back();
+              const auto& break_inst = break_blk->instructions.front();
+              if (!delay_inst.IsNop() && delay_inst.opcode == break_inst.opcode &&
+                  delay_inst.rs == break_inst.rs && delay_inst.rt == break_inst.rt &&
+                  delay_inst.rd == break_inst.rd && delay_inst.immediate == break_inst.immediate &&
+                  delay_inst.fs == break_inst.fs && delay_inst.ft == break_inst.ft &&
+                  delay_inst.fd == break_inst.fd) {
+                skip_branch_likely_delay = true;
+              }
+            }
+          }
+        }
+        if (has_branch_likely && !skip_branch_likely_delay && cond_block != nullptr) {
           auto delay_stmts = LiftDelaySlotFromBlock(*cond_block);
           for (auto& s : delay_stmts) {
             auto cs = AstConverter::ConvertStatement(s);
@@ -1104,11 +1160,13 @@ class ConverterContext {
             }
           }
 
-          bool decouple_delay = !has_branch_likely && ShouldDecoupleLoopConditionDelaySlot(
-                                                          cond_block_id, region.loop_header);
+          bool decouple_delay =
+              !has_branch_likely && !peeled_loop_delays_.contains(cond_block_id) &&
+              ShouldDecoupleLoopConditionDelaySlot(cond_block_id, region.loop_header);
 
           bool delay_clobbers_cond = false;
-          if (!decouple_delay && cond_block != nullptr && cond_block->instructions.size() >= 2) {
+          if (!decouple_delay && !peeled_loop_delays_.contains(cond_block_id) &&
+              cond_block != nullptr && cond_block->instructions.size() >= 2) {
             const auto* term = cond_block->Terminator();
             if (term != nullptr && term->IsBranch() && !term->IsBranchLikely()) {
               const auto& delay_inst = cond_block->instructions.back();
@@ -1555,118 +1613,195 @@ class ConverterContext {
         target_block->AddStatement(CStatement::Goto(absl::StrFormat("block_%d", region.block_id)));
         break;
 
-      case RegionType::kSwitch: {
-        auto prev_switch_break = current_switch_break_block_;
-        current_switch_break_block_ = region.switch_join_block;
-        bool is_case_block = false;
-        for (const auto& sc : region.cases) {
-          if (sc.body && sc.body->type == RegionType::kBlock &&
-              sc.body->block_id == region.switch_block_id) {
-            is_case_block = true;
-            break;
-          }
-        }
-        Register switch_selector_register = Register::kZero;
-        if (region.jump_table == nullptr || region.owned_jump_table != nullptr) {
-          switch_selector_register = region.switch_register;
-        }
-        if (!is_case_block &&
-            (region.jump_table == nullptr || region.owned_jump_table != nullptr)) {
-          EmitPreSwitchStatements(region.switch_block_id, target_block, switch_selector_register);
-        }
-
-        const auto* jt = region.jump_table;
-        std::unique_ptr<CExpression> cond_expr;
-        if (jt != nullptr && jt->index_register != Register::kZero) {
-          cond_expr = RegExpr(jt->index_register);
-        } else if (region.switch_register != Register::kZero) {
-          cond_expr = RegExpr(region.switch_register);
-        } else {
-          cond_expr = CExpression::Identifier("cond");
-        }
-
-        std::vector<SwitchCase> c_cases;
-        c_cases.reserve(region.cases.size());
-
-        for (const auto& sc : region.cases) {
-          SwitchCase c_case;
-          c_case.case_values = sc.case_values;
-          c_case.is_default = sc.is_default;
-          c_case.body = std::make_unique<CompoundStatement>();
-
-          if (sc.is_default && jt != nullptr && jt->bounds_branch_vram != 0) {
-            const auto* bounds_block = cfg_.FindBlockByVram(jt->bounds_branch_vram);
-            if (bounds_block != nullptr) {
-              const auto* term = bounds_block->Terminator();
-              if (term != nullptr && term->IsBranchLikely() &&
-                  bounds_block->instructions.size() >= 2) {
-                const auto& delay_instruction = bounds_block->instructions.back();
-                bool join_block_executes_delay = false;
-                if (region.switch_join_block.has_value()) {
-                  const auto* join_block = cfg_.GetBlock(*region.switch_join_block);
-                  if (join_block != nullptr && !join_block->instructions.empty()) {
-                    const auto& join_instruction = join_block->instructions.front();
-                    if (delay_instruction.opcode == join_instruction.opcode &&
-                        delay_instruction.rs == join_instruction.rs &&
-                        delay_instruction.rt == join_instruction.rt &&
-                        delay_instruction.immediate == join_instruction.immediate) {
-                      join_block_executes_delay = true;
-                    }
-                  }
-                }
-                if (!join_block_executes_delay && !delay_instruction.IsNop()) {
-                  auto delay_statements =
-                      LiftInstructionsHelper(absl::MakeSpan(&delay_instruction, 1));
-                  for (auto& statement : delay_statements) {
-                    auto converted_statement =
-                        AstConverter::ConvertStatement(statement, function_name_);
-                    if (converted_statement != nullptr) {
-                      c_case.body->AddStatement(std::move(converted_statement));
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          if (!sc.delay_instructions.empty()) {
-            auto delay_statements = LiftInstructionsHelper(sc.delay_instructions);
-            for (auto& statement : delay_statements) {
-              auto converted_statement = AstConverter::ConvertStatement(statement, function_name_);
-              if (converted_statement != nullptr) {
-                c_case.body->AddStatement(std::move(converted_statement));
-              }
-            }
-          } else if (sc.delay_slot_const_reg.has_value() && sc.delay_slot_const_val.has_value()) {
-            std::string variable_name =
-                ExpressionBuilder::RegisterVarName(*sc.delay_slot_const_reg);
-            c_case.body->AddStatement(CStatement::Expression(
-                CExpression::Assignment("=", CExpression::Identifier(variable_name),
-                                        CExpression::Integer(*sc.delay_slot_const_val))));
-          }
-
-          if (sc.body) {
-            ConvertRegion(*sc.body, c_case.body.get());
-          }
-
-          if (c_case.body->IsEmpty() || !HasReturnValue(*c_case.body)) {
-            const auto& stmts = c_case.body->Statements();
-            if (stmts.empty() || stmts.back()->Kind() != CStatementKind::kBreakStatement) {
-              c_case.body->AddStatement(CStatement::Break());
-            }
-          }
-
-          c_cases.push_back(std::move(c_case));
-        }
-
-        current_switch_break_block_ = prev_switch_break;
-        target_block->AddStatement(CStatement::Switch(std::move(cond_expr), std::move(c_cases)));
+      case RegionType::kSwitch:
+        ConvertSwitchRegion(region, target_block);
         break;
-      }
     }
   }
 
  private:
+  void ConvertSwitchRegion(const StructuredRegion& region, CompoundStatement* target_block) {
+    auto prev_switch_break = current_switch_break_block_;
+    current_switch_break_block_ = region.switch_join_block;
+    bool is_case_block = false;
+    for (const auto& sc : region.cases) {
+      if (sc.body && sc.body->type == RegionType::kBlock &&
+          sc.body->block_id == region.switch_block_id) {
+        is_case_block = true;
+        break;
+      }
+    }
+    Register switch_selector_register = Register::kZero;
+    if (region.jump_table == nullptr || region.owned_jump_table != nullptr) {
+      switch_selector_register = region.switch_register;
+    }
+    if (!is_case_block && (region.jump_table == nullptr || region.owned_jump_table != nullptr)) {
+      EmitPreSwitchStatements(region.switch_block_id, target_block, switch_selector_register);
+    }
+
+    const auto* jt = region.jump_table;
+    std::unique_ptr<CExpression> cond_expr;
+    if (jt != nullptr && jt->index_register != Register::kZero) {
+      cond_expr = RegExpr(jt->index_register);
+    } else if (region.switch_register != Register::kZero) {
+      cond_expr = RegExpr(region.switch_register);
+    } else {
+      cond_expr = CExpression::Identifier("cond");
+    }
+
+    std::vector<SwitchCase> c_cases;
+    c_cases.reserve(region.cases.size());
+
+    for (const auto& sc : region.cases) {
+      SwitchCase c_case;
+      c_case.case_values = sc.case_values;
+      c_case.is_default = sc.is_default;
+      c_case.body = std::make_unique<CompoundStatement>();
+
+      if (sc.is_default && jt != nullptr && jt->bounds_branch_vram != 0) {
+        const auto* bounds_block = cfg_.FindBlockByVram(jt->bounds_branch_vram);
+        if (bounds_block != nullptr) {
+          const auto* term = bounds_block->Terminator();
+          if (term != nullptr && term->IsBranchLikely() && bounds_block->instructions.size() >= 2) {
+            const auto& delay_instruction = bounds_block->instructions.back();
+            bool join_block_executes_delay = false;
+            if (region.switch_join_block.has_value()) {
+              const auto* join_block = cfg_.GetBlock(*region.switch_join_block);
+              if (join_block != nullptr && !join_block->instructions.empty()) {
+                const auto& join_instruction = join_block->instructions.front();
+                if (delay_instruction.opcode == join_instruction.opcode &&
+                    delay_instruction.rs == join_instruction.rs &&
+                    delay_instruction.rt == join_instruction.rt &&
+                    delay_instruction.immediate == join_instruction.immediate) {
+                  join_block_executes_delay = true;
+                }
+              }
+            }
+            if (!join_block_executes_delay && !delay_instruction.IsNop()) {
+              auto delay_statements = LiftInstructionsHelper(absl::MakeSpan(&delay_instruction, 1));
+              for (auto& statement : delay_statements) {
+                auto converted_statement =
+                    AstConverter::ConvertStatement(statement, function_name_);
+                if (converted_statement != nullptr) {
+                  c_case.body->AddStatement(std::move(converted_statement));
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (!sc.delay_instructions.empty()) {
+        auto delay_statements = LiftInstructionsHelper(sc.delay_instructions);
+        for (auto& statement : delay_statements) {
+          auto converted_statement = AstConverter::ConvertStatement(statement, function_name_);
+          if (converted_statement != nullptr) {
+            c_case.body->AddStatement(std::move(converted_statement));
+          }
+        }
+      } else if (sc.delay_slot_const_reg.has_value() && sc.delay_slot_const_val.has_value()) {
+        std::string variable_name = ExpressionBuilder::RegisterVarName(*sc.delay_slot_const_reg);
+        c_case.body->AddStatement(CStatement::Expression(
+            CExpression::Assignment("=", CExpression::Identifier(variable_name),
+                                    CExpression::Integer(*sc.delay_slot_const_val))));
+      }
+
+      if (sc.body) {
+        ConvertRegion(*sc.body, c_case.body.get());
+      }
+
+      if (c_case.body->IsEmpty() || !HasReturnValue(*c_case.body)) {
+        const auto& stmts = c_case.body->Statements();
+        if (stmts.empty() || stmts.back()->Kind() != CStatementKind::kBreakStatement) {
+          c_case.body->AddStatement(CStatement::Break());
+        }
+      }
+
+      c_cases.push_back(std::move(c_case));
+    }
+
+    current_switch_break_block_ = prev_switch_break;
+    target_block->AddStatement(CStatement::Switch(std::move(cond_expr), std::move(c_cases)));
+  }
+  bool IsRegisterDeadAtBlockEntry(uint32_t start_block_id, Register reg) const {
+    if (reg == Register::kZero) return true;
+    absl::flat_hash_set<uint32_t> visited;
+    std::vector<uint32_t> worklist = {start_block_id};
+    while (!worklist.empty()) {
+      uint32_t blk_id = worklist.back();
+      worklist.pop_back();
+      if (!visited.insert(blk_id).second) continue;
+      const auto* blk = cfg_.GetBlock(blk_id);
+      if (blk == nullptr) return false;
+      bool killed = false;
+      for (size_t i = 0; i < blk->instructions.size(); ++i) {
+        const auto& inst = blk->instructions[i];
+        if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
+            i + 1 < blk->instructions.size()) {
+          const auto& delay_inst = blk->instructions[i + 1];
+          bool annuls_delay = inst.IsBranchLikely();
+          RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+          for (Register u : inst_ud.gpr_uses) {
+            if (u == reg) return false;
+          }
+          RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+          for (Register u : delay_ud.gpr_uses) {
+            if (u == reg) return false;
+          }
+          if (!annuls_delay) {
+            for (Register d : delay_ud.gpr_defs) {
+              if (d == reg) {
+                killed = true;
+                break;
+              }
+            }
+          }
+          if (killed) break;
+          if (inst.IsCall()) {
+            if (reg >= Register::kA0 && reg <= Register::kA3) {
+              return false;
+            }
+            if (reg == Register::kV0 || reg == Register::kV1 || reg == Register::kAt ||
+                (reg >= Register::kT0 && reg <= Register::kT7) || reg == Register::kT8 ||
+                reg == Register::kT9) {
+              killed = true;
+              break;
+            }
+          } else if (inst.IsReturn()) {
+            if (reg == Register::kV0 && returns_v0_) {
+              return false;
+            }
+            killed = true;
+            break;
+          }
+          ++i;
+          continue;
+        }
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register u : ud.gpr_uses) {
+          if (u == reg) return false;
+        }
+        for (Register d : ud.gpr_defs) {
+          if (d == reg) {
+            killed = true;
+            break;
+          }
+        }
+        if (killed) break;
+      }
+      if (!killed) {
+        if (blk->successors.empty()) {
+          if (reg == Register::kV0 && returns_v0_) return false;
+          continue;
+        }
+        for (uint32_t succ : blk->successors) {
+          worklist.push_back(succ);
+        }
+      }
+    }
+    return true;
+  }
+
   void PreScanPeeledLoopRotations(const StructuredRegion& region) {
     if (region.type == RegionType::kLoop && region.loop_type == LoopType::kDoWhile) {
       uint32_t cond_block_id =
@@ -1674,21 +1809,97 @@ class ConverterContext {
       const auto* cond_block = cfg_.GetBlock(cond_block_id);
       if (cond_block != nullptr && cond_block->instructions.size() >= 2) {
         const auto* term = cond_block->Terminator();
-        if (term != nullptr && term->IsBranchLikely()) {
+        if (term != nullptr && term->IsBranch()) {
           const auto& delay_inst = cond_block->instructions.back();
-          // Find loop entry predecessor (from outside the loop)
-          for (const auto& edge : cfg_.Edges()) {
-            if (edge.to_block_id == region.loop_header && edge.from_block_id != cond_block_id) {
-              const auto* pred_block = cfg_.GetBlock(edge.from_block_id);
-              if (pred_block != nullptr && !pred_block->instructions.empty()) {
-                const auto& pred_inst = pred_block->instructions.back();
-                if (pred_inst.opcode == delay_inst.opcode && pred_inst.rs == delay_inst.rs &&
-                    pred_inst.rt == delay_inst.rt && pred_inst.rd == delay_inst.rd &&
-                    pred_inst.immediate == delay_inst.immediate && !delay_inst.IsNop()) {
-                  omit_last_instruction_blocks_.insert(pred_block->id);
-                  peeled_loop_delays_[cond_block_id] = delay_inst;
-                  peeled_loop_header_insts_[region.loop_header] = delay_inst;
+          bool can_peel = term->IsBranchLikely();
+          if (!can_peel && !region.invert_condition && !delay_inst.IsNop() &&
+              !delay_inst.IsStore() && !delay_inst.IsCall() && !delay_inst.IsBranch() &&
+              !delay_inst.IsJump() && !delay_inst.IsReturn() &&
+              delay_inst.opcode != Opcode::kMfc0 &&
+              !ShouldDecoupleLoopConditionDelaySlot(cond_block_id, region.loop_header)) {
+            RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+            absl::flat_hash_set<Register> cond_regs;
+            if (term->rs.has_value() && *term->rs != Register::kZero) {
+              cond_regs.insert(*term->rs);
+            }
+            if (term->rt.has_value() && *term->rt != Register::kZero) {
+              cond_regs.insert(*term->rt);
+            }
+            auto folded_comp =
+                BranchConditionBuilder::FindFoldedComparison(cond_block->instructions);
+            if (folded_comp.has_value() &&
+                folded_comp->instruction_index < cond_block->instructions.size()) {
+              RegisterUseDef def_ud =
+                  GetInstructionUseDef(cond_block->instructions[folded_comp->instruction_index]);
+              for (Register r : def_ud.gpr_uses) {
+                if (r != Register::kZero) cond_regs.insert(r);
+              }
+              for (Register r : def_ud.gpr_defs) {
+                if (r != Register::kZero) cond_regs.insert(r);
+              }
+            }
+            bool clobbers_cond = false;
+            for (Register r : delay_ud.gpr_defs) {
+              if (cond_regs.contains(r)) {
+                clobbers_cond = true;
+                break;
+              }
+            }
+            if (clobbers_cond && !delay_ud.gpr_defs.empty() && delay_ud.fpr_defs.empty()) {
+              std::optional<uint32_t> exit_block_id;
+              for (uint32_t succ : cond_block->successors) {
+                if (succ != region.loop_header) {
+                  exit_block_id = succ;
                   break;
+                }
+              }
+              if (exit_block_id.has_value()) {
+                bool all_dead = true;
+                for (Register def_reg : delay_ud.gpr_defs) {
+                  if (!IsRegisterDeadAtBlockEntry(*exit_block_id, def_reg)) {
+                    all_dead = false;
+                    break;
+                  }
+                }
+                can_peel = all_dead;
+              }
+            }
+          }
+          if (can_peel) {
+            std::vector<uint32_t> external_preds;
+            for (const auto& edge : cfg_.Edges()) {
+              if (edge.to_block_id == region.loop_header && edge.from_block_id != cond_block_id) {
+                external_preds.push_back(edge.from_block_id);
+              }
+            }
+            if (external_preds.size() == 1 || term->IsBranchLikely()) {
+              for (uint32_t pred_id : external_preds) {
+                const auto* pred_block = cfg_.GetBlock(pred_id);
+                if (pred_block != nullptr && !pred_block->instructions.empty() &&
+                    (term->IsBranchLikely() || pred_block->successors.size() == 1)) {
+                  const auto& pred_inst = pred_block->instructions.back();
+                  bool pred_is_standalone = !pred_inst.IsBranch() && !pred_inst.IsJump() &&
+                                            !pred_inst.IsCall() && !pred_inst.IsReturn();
+                  if (pred_is_standalone && pred_block->instructions.size() >= 2 &&
+                      !term->IsBranchLikely()) {
+                    const auto& prev_inst =
+                        pred_block->instructions[pred_block->instructions.size() - 2];
+                    if (prev_inst.IsBranch() || prev_inst.IsJump() || prev_inst.IsCall() ||
+                        prev_inst.IsReturn()) {
+                      pred_is_standalone = false;
+                    }
+                  }
+                  if (pred_is_standalone && pred_inst.opcode == delay_inst.opcode &&
+                      pred_inst.rs == delay_inst.rs && pred_inst.rt == delay_inst.rt &&
+                      pred_inst.rd == delay_inst.rd &&
+                      pred_inst.immediate == delay_inst.immediate && !delay_inst.IsNop() &&
+                      !peeled_loop_header_insts_.contains(region.loop_header) &&
+                      !omit_last_instruction_blocks_.contains(pred_block->id)) {
+                    omit_last_instruction_blocks_.insert(pred_block->id);
+                    peeled_loop_delays_[cond_block_id] = delay_inst;
+                    peeled_loop_header_insts_[region.loop_header] = delay_inst;
+                    break;
+                  }
                 }
               }
             }
@@ -1698,6 +1909,9 @@ class ConverterContext {
     }
     for (const auto& child : region.children) {
       if (child) PreScanPeeledLoopRotations(*child);
+    }
+    for (const auto& sc : region.cases) {
+      if (sc.body) PreScanPeeledLoopRotations(*sc.body);
     }
   }
 

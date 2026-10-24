@@ -5610,5 +5610,17 @@ void ThreeCaseSwitchLoadedSelectorWithCrossJumpedCall(const s32* state_ptr) {
 )");
 }
 
+TEST_F(RoundTripTest, DoWhileLoopWithUnsigned16BitIndexArrayFill) {
+  AssertRoundTripBitExact("DoWhileLoopWithUnsigned16BitIndexArrayFill", R"(
+void DoWhileLoopWithUnsigned16BitIndexArrayFill(s32* words, s32 fill_val) {
+    u16 i = 0;
+    do {
+        words[i] = fill_val;
+        i++;
+    } while (i < 4);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -772,5 +772,49 @@ TEST(AstExpressionFolderTest, FoldsOutgoingStackArgInsideDoWhileLoopWithGotoExit
   EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_16")));
 }
 
+TEST(AstExpressionFolderTest, FoldsSingleUseCallArgInsideLoopEvenWhenFunctionHasGotoLabel) {
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB00018,  // 08: sw    $s0, 24($sp)
+      0xAFB10014,  // 0C: sw    $s1, 20($sp)
+      0x00808021,  // 10: move  $s0, $a0
+      0x26050020,  // 14: addiu $s1, $s0, 32 (Wait: 0x26110020 is addiu $s1, $s0, 32)
+      0x12000009,  // 18: beq   $s0, $zero, +9 -> 0x40 (shared exit block)
+      0x00000000,  // 1C: nop
+      0x00002021,  // 20: move  $a0, $zero (loop header)
+      0x0C000400,  // 24: jal   0x80001000
+      0x02202821,  // 28: move  $a1, $s1 (delay slot sets arg1)
+      0x14400004,  // 2C: bne   $v0, $zero, +4 -> 0x40 (early exit to shared label)
+      0x00000000,  // 30: nop
+      0x2610FFFF,  // 34: addiu $s0, $s0, -1
+      0x1600FFF9,  // 38: bne   $s0, $zero, -7 -> 0x20
+      0x00000000,  // 3C: nop
+      0x8FBF001C,  // 40: lw    $ra, 28($sp)
+      0x8FB00018,  // 44: lw    $s0, 24($sp)
+      0x8FB10014,  // 48: lw    $s1, 20($sp)
+      0x03E00008,  // 4C: jr    $ra
+      0x27BD0020,  // 50: addiu $sp, $sp, 32
+  };
+  words[5] = 0x26110020;  // addiu $s1, $s0, 32
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dom_tree = DominatorTree::Compute(cfg);
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
+  ASSERT_THAT(root_region, NotNull());
+
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 2}};
+  AstConverterOptions options;
+  options.function_name = "TestSingleUseCallArgInLoop";
+  options.function_parameter_counts = &param_counts;
+  FunctionDeclaration func = *AstConverter::Convert(cfg, *root_region, nullptr, options);
+  std::string code = func.ToString();
+
+  EXPECT_THAT(code, HasSubstr("func_80001000(0, temp_s1)"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1 = temp_s1;")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
