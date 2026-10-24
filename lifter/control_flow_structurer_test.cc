@@ -965,5 +965,66 @@ TEST(ControlFlowStructurerTest, DoWhileEarlyExitWithBranchLikelyDelayMatchingLoo
   EXPECT_THAT(s, Not(HasSubstr("goto")));
 }
 
+TEST(ControlFlowStructurerTest, StructuresNestedDecisionTreeSwitchInsideOuterSwitchCase) {
+  // Outer jump-table switch on $a0 (cases 0, 1):
+  // Case 0 contains an inner 2-case decision-tree switch on $a1 (cases 10, 20) with its own
+  // trampoline jump to the outer join block (0x44).
+  std::vector<uint32_t> words = {
+      0x00800008,  // 0x00: jr    $a0 (outer jump-table switch)
+      0x00000000,  // 0x04: nop
+      0x2402000A,  // 0x08: addiu $v0, $zero, 10 (outer case 0: inner switch root)
+      0x10A20005,  // 0x0C: beq   $a1, $v0, +5 -> 0x24 (inner case 10)
+      0x00000000,  // 0x10: nop
+      0x24020014,  // 0x14: addiu $v0, $zero, 20
+      0x10A20005,  // 0x18: beq   $a1, $v0, +5 -> 0x30 (inner case 20)
+      0x00000000,  // 0x1C: nop
+      0x08000011,  // 0x20: j     0x80000044 (inner default trampoline) -> wait: 0x24 is inner case
+                   // 10, so need nop at 0x24 and inner case 10 at 0x28!
+  };
+  words = {
+      0x00800008,  // 0x00: jr    $a0
+      0x00000000,  // 0x04: nop
+      0x2402000A,  // 0x08: addiu $v0, $zero, 10 (outer case 0: inner switch root)
+      0x10A20006,  // 0x0C: beq   $a1, $v0, +6 -> 0x28 (inner case 10)
+      0x00000000,  // 0x10: nop
+      0x24020014,  // 0x14: addiu $v0, $zero, 20
+      0x10A20006,  // 0x18: beq   $a1, $v0, +6 -> 0x34 (inner case 20)
+      0x00000000,  // 0x1C: nop
+      0x08000012,  // 0x20: j     0x80000048 (join)
+      0x00000000,  // 0x24: nop
+      0x24020001,  // 0x28: addiu $v0, $zero, 1 (inner case 10)
+      0x08000012,  // 0x2C: j     0x80000048 (join)
+      0x00000000,  // 0x30: nop
+      0x24020002,  // 0x34: addiu $v0, $zero, 2 (inner case 20)
+      0x08000012,  // 0x38: j     0x80000048 (join)
+      0x00000000,  // 0x3C: nop
+      0x24020003,  // 0x40: addiu $v0, $zero, 3 (outer case 1)
+      0x00000000,  // 0x44: nop
+      0x03E00008,  // 0x48: jr    $ra (join)
+      0x00000000,  // 0x4C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  JumpTable table;
+  table.switch_vram = 0x80000000;
+  table.default_target_vram = 0x80000048;
+  table.entries = {
+      JumpTableEntry{.case_index = 0, .case_value = 0, .target_vram = 0x80000008},
+      JumpTableEntry{.case_index = 1, .case_value = 1, .target_vram = 0x80000040},
+  };
+
+  auto cfg = *ControlFlowGraph::Build(insts, {table});
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("switch ($a1)"));
+  EXPECT_THAT(s, HasSubstr("case 10:"));
+  EXPECT_THAT(s, HasSubstr("case 20:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

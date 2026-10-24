@@ -647,9 +647,11 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
 
   // Case 3: Conditional branch (2 successors)
   if (block->successors.size() == 2) {
-    std::optional<DecisionTreeSwitchInfo> dt_switch;
-    if (!current_switch_break_.has_value()) {
-      dt_switch = DetectDecisionTreeSwitch(*cfg_, loop_info_, visited_, entry);
+    std::optional<DecisionTreeSwitchInfo> dt_switch =
+        DetectDecisionTreeSwitch(*cfg_, loop_info_, visited_, entry);
+    if (dt_switch.has_value() && current_switch_break_.has_value() &&
+        dt_switch->target_to_cases.contains(*current_switch_break_)) {
+      dt_switch = std::nullopt;
     }
     if (dt_switch.has_value()) {
       std::optional<uint32_t> join =

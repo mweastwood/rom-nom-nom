@@ -44,6 +44,73 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
   return true;
 }
 
+std::optional<Register> GetSingleComparedRegister(const ControlFlowGraph& cfg, uint32_t block_id) {
+  const auto* b = cfg.GetBlock(block_id);
+  if (b == nullptr || b->instructions.empty()) return std::nullopt;
+
+  int branch_idx = -1;
+  for (int i = static_cast<int>(b->instructions.size()) - 1; i >= 0; --i) {
+    if (b->instructions[i].IsBranch()) {
+      branch_idx = i;
+      break;
+    }
+  }
+  if (branch_idx == -1) return std::nullopt;
+
+  const auto& term = b->instructions[branch_idx];
+  auto trace_cond_reg = [&](Register cond_reg) -> std::optional<Register> {
+    if (cond_reg == Register::kZero) return std::nullopt;
+    for (int i = branch_idx - 1; i >= 0; --i) {
+      const auto& prev = b->instructions[i];
+      if ((prev.opcode == Opcode::kSlti || prev.opcode == Opcode::kSltiu) && prev.rt == cond_reg &&
+          prev.rs.has_value() && *prev.rs != Register::kZero) {
+        return *prev.rs;
+      }
+      if ((prev.opcode == Opcode::kSlt || prev.opcode == Opcode::kSltu) && prev.rd == cond_reg &&
+          prev.rs.has_value() && prev.rt.has_value()) {
+        if (*prev.rs == Register::kZero && *prev.rt != Register::kZero) return *prev.rt;
+        if (*prev.rt == Register::kZero && *prev.rs != Register::kZero) return *prev.rs;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(prev);
+      for (Register def_reg : ud.gpr_defs) {
+        if (def_reg == cond_reg) return std::nullopt;
+      }
+    }
+    return cond_reg;
+  };
+
+  switch (term.opcode) {
+    case Opcode::kBltz:
+    case Opcode::kBgez:
+    case Opcode::kBlez:
+    case Opcode::kBgtz:
+    case Opcode::kBltzl:
+    case Opcode::kBgezl:
+    case Opcode::kBlezl:
+    case Opcode::kBgtzl: {
+      if (!term.rs.has_value()) return std::nullopt;
+      return trace_cond_reg(*term.rs);
+    }
+    case Opcode::kBeq:
+    case Opcode::kBne:
+    case Opcode::kBeql:
+    case Opcode::kBnel: {
+      if (!term.rs.has_value() || !term.rt.has_value()) return std::nullopt;
+      if (*term.rs == Register::kZero && *term.rt != Register::kZero) {
+        return trace_cond_reg(*term.rt);
+      }
+      if (*term.rt == Register::kZero && *term.rs != Register::kZero) {
+        return trace_cond_reg(*term.rs);
+      }
+      if (*term.rs == Register::kAt && *term.rt != Register::kAt) return *term.rt;
+      if (*term.rt == Register::kAt && *term.rs != Register::kAt) return *term.rs;
+      return std::nullopt;
+    }
+    default:
+      return std::nullopt;
+  }
+}
+
 }  // namespace
 
 std::optional<uint32_t> FindSwitchJoinBlock(
@@ -298,7 +365,9 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         bool is_prologue_sp_save =
             (inst.opcode == Opcode::kSw && inst.rs == Register::kSp && inst.rt.has_value() &&
              (*inst.rt == Register::kRa || *inst.rt == Register::kFp ||
-              (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7)));
+              (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7))) ||
+            (inst.opcode == Opcode::kAddiu && inst.rs == Register::kSp &&
+             inst.rt == Register::kSp && static_cast<int16_t>(inst.immediate) < 0);
         if (inst.IsCall() || (inst.IsStore() && !is_prologue_sp_save) || inst.IsLoad()) return ba;
       }
       scan_start = std::max(0, branch_idx - 4);
@@ -713,7 +782,9 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           bool is_prologue_save =
               (ds.opcode == Opcode::kSw && ds.rs == Register::kSp && ds.rt.has_value() &&
                (*ds.rt == Register::kRa || *ds.rt == Register::kFp ||
-                (*ds.rt >= Register::kS0 && *ds.rt <= Register::kS7)));
+                (*ds.rt >= Register::kS0 && *ds.rt <= Register::kS7))) ||
+              (ds.opcode == Opcode::kAddiu && ds.rs == Register::kSp && ds.rt == Register::kSp &&
+               static_cast<int16_t>(ds.immediate) < 0);
           RegisterUseDef ds_ud = GetInstructionUseDef(ds);
           bool defines_selector_or_at = false;
           for (Register def_reg : ds_ud.gpr_defs) {
@@ -835,14 +906,18 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             }
           }
         }
+        bool delay_stolen_from_taken_case_before_trampoline =
+            (eff_cont != cont && !continuation_has_valid_delay_slot &&
+             decision_cases.back().const_reg.has_value());
         if (!cont_annuls_delay_slot && !delay_dead_at_default_return &&
-            !continuation_has_valid_delay_slot && ba.delay_slot_sets_const) {
+            !delay_stolen_from_taken_case_before_trampoline && !continuation_has_valid_delay_slot &&
+            ba.delay_slot_sets_const) {
           default_const_reg = ba.delay_slot_const_reg;
           default_const_val = ba.delay_slot_const_val;
         }
         if (!cont_annuls_delay_slot && !delay_dead_at_default_return &&
-            !continuation_has_valid_delay_slot && ba.delay_instruction.has_value() &&
-            default_delay_instructions.empty()) {
+            !delay_stolen_from_taken_case_before_trampoline && !continuation_has_valid_delay_slot &&
+            ba.delay_instruction.has_value() && default_delay_instructions.empty()) {
           default_delay_instructions.push_back(*ba.delay_instruction);
         }
         if (!default_target.has_value()) {
@@ -1017,7 +1092,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       break;
     }
   }
-  const size_t min_cases = root_has_extra_instructions ? 3 : 2;
+  const size_t min_cases = (root_has_extra_instructions && decision_blocks.size() < 3) ? 3 : 2;
   if (total_cases < min_cases || target_to_cases.size() < min_cases) {
     return std::nullopt;
   }
@@ -1264,6 +1339,12 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
   }
 
   if (b_taken != succ_taken && b_ft != succ_taken) {
+    return std::nullopt;
+  }
+
+  std::optional<Register> entry_cmp_reg = GetSingleComparedRegister(cfg, entry);
+  std::optional<Register> ft_cmp_reg = GetSingleComparedRegister(cfg, succ_fallthrough);
+  if (entry_cmp_reg.has_value() && ft_cmp_reg.has_value() && *entry_cmp_reg == *ft_cmp_reg) {
     return std::nullopt;
   }
 

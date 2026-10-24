@@ -637,5 +637,100 @@ TEST(ControlFlowPatternMatcherTest, BranchLikelyEqualityNodeInDecisionTreeAnnuls
   EXPECT_TRUE(found_default);
 }
 
+TEST(ControlFlowPatternMatcherTest,
+     DetectsTwoCaseDecisionTreeSwitchWithLoadedSelectorAndDefaultTrampoline) {
+  // Entry block loads selector $v1 from 0($a0) and branches on case 0, with sp adjustment in delay
+  // slot; second decision block branches on case 2 with a stolen constant load ($v0 = 2) in delay
+  // slot and falls through to a pure-jump trampoline block to the join block.
+  std::vector<uint32_t> words = {
+      0x8C830000,  // 0x00: lw    $v1, 0($a0)
+      0x10600005,  // 0x04: beq   $v1, $zero, +5 -> 0x1C (case 0)
+      0x27BDFFE8,  // 0x08: addiu $sp, $sp, -24 (prologue sp adjust in delay slot)
+      0x24020002,  // 0x0C: addiu $v0, $zero, 2
+      0x10620004,  // 0x10: beq   $v1, $v0, +4 -> 0x24 (case 2)
+      0x24020002,  // 0x14: addiu $v0, $zero, 2 (stolen from case 2)
+      0x0800000B,  // 0x18: j     0x8000002C (join trampoline)
+      0x00000000,  // 0x1C: nop -> wait: 0x1C is case 0! Let's adjust offsets:
+  };
+  words = {
+      0x8C830000,  // 0x00: lw    $v1, 0($a0)
+      0x10600006,  // 0x04: beq   $v1, $zero, +6 -> 0x20 (case 0)
+      0x27BDFFE8,  // 0x08: addiu $sp, $sp, -24
+      0x24020002,  // 0x0C: addiu $v0, $zero, 2
+      0x10620005,  // 0x10: beq   $v1, $v0, +5 -> 0x28 (case 2)
+      0x24020002,  // 0x14: addiu $v0, $zero, 2
+      0x0800000C,  // 0x18: j     0x80000030 (join)
+      0x00000000,  // 0x1C: nop
+      0xAC800004,  // 0x20: sw    $zero, 4($a0) (case 0)
+      0x0800000C,  // 0x24: j     0x80000030 (join)
+      0x00000000,  // 0x28: nop -> wait: let's place case 2 at 0x2C
+  };
+  words = {
+      0x8C830000,  // 0x00: lw    $v1, 0($a0)
+      0x10600006,  // 0x04: beq   $v1, $zero, +6 -> 0x20 (case 0)
+      0x27BDFFE8,  // 0x08: addiu $sp, $sp, -24
+      0x24020002,  // 0x0C: addiu $v0, $zero, 2
+      0x10620006,  // 0x10: beq   $v1, $v0, +6 -> 0x2C (case 2)
+      0x24020002,  // 0x14: addiu $v0, $zero, 2
+      0x0800000D,  // 0x18: j     0x80000034 (join)
+      0x00000000,  // 0x1C: nop
+      0xAC800004,  // 0x20: sw    $zero, 4($a0) (case 0)
+      0x0800000D,  // 0x24: j     0x80000034 (join)
+      0x00000000,  // 0x28: nop
+      0xAC820004,  // 0x2C: sw    $v0, 4($a0) (case 2 uses $v0)
+      0x00000000,  // 0x30: nop
+      0x03E00008,  // 0x34: jr    $ra (join)
+      0x27BD0018,  // 0x38: addiu $sp, $sp, 24
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  EXPECT_EQ(sw->selector_reg, Register::kV1);
+  EXPECT_EQ(sw->decision_blocks.size(), 3u);
+
+  for (const auto& dc : sw->cases) {
+    if (dc.is_default) {
+      EXPECT_FALSE(dc.const_reg.has_value());
+      EXPECT_TRUE(dc.delay_instructions.empty());
+    }
+  }
+}
+
+TEST(ControlFlowPatternMatcherTest,
+     DoesNotCollapseSameRegisterRangeComparisonsIntoShortCircuitAnd) {
+  // Block 0 (0x00): slti $v0, $a0, 2; beq $v0, $zero, 0x1C; nop
+  // Block 1 (0x0C): bltz $a0, 0x1C; nop
+  // Block 2 (0x14): addiu $v0, $zero, 1; jr $ra
+  // Block 3 (0x1C): jr $ra; nop
+  // Because both blocks compare $a0, collapsing into (a0 < 2) && (a0 >= 0) would cause GCC 2.7.2's
+  // fold_range_test to merge them into a single unsigned sltiu branch.
+  std::vector<uint32_t> words = {
+      0x28820002,  // 0x00: slti  $v0, $a0, 2
+      0x10400005,  // 0x04: beq   $v0, $zero, +5 -> 0x1C
+      0x00000000,  // 0x08: nop
+      0x04800003,  // 0x0C: bltz  $a0, +3 -> 0x1C
+      0x00000000,  // 0x10: nop
+      0x24020001,  // 0x14: addiu $v0, $zero, 1
+      0x03E00008,  // 0x18: jr    $ra
+      0x03E00008,  // 0x1C: jr    $ra
+      0x00000000,  // 0x20: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, Not(HasSubstr("&&")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

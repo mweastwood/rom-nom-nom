@@ -5642,5 +5642,38 @@ s32 DoWhileLoopWithConditionalNarrowCounterIncrement(const u8* table, s32 target
 )");
 }
 
+TEST_F(RoundTripTest, TwoCaseSwitchWithPrologueDelaySlotAndStolenCaseConstant) {
+  AssertRoundTripBitExact("TwoCaseSwitchWithPrologueDelaySlotAndStolenCaseConstant", R"(
+void setup_tex_mode(s32 a, s32 b);
+
+void TwoCaseSwitchWithPrologueDelaySlotAndStolenCaseConstant(s32* state, s32 val) {
+    switch (state[0]) {
+        case 0:
+            state[1] = 0;
+            setup_tex_mode(val, 10);
+            break;
+        case 1:
+            state[1] = 2;
+            setup_tex_mode(val, 20);
+            break;
+    }
+}
+)");
+}
+
+TEST_F(RoundTripTest, NestedIfRangeChecksOnSameVariableWithoutFoldRangeTestMerge) {
+  AssertRoundTripBitExact("NestedIfRangeChecksOnSameVariableWithoutFoldRangeTestMerge", R"(
+void apply_slot_action(s32 idx);
+
+void NestedIfRangeChecksOnSameVariableWithoutFoldRangeTestMerge(s32 idx) {
+    if (idx < 2) {
+        if (idx >= 0) {
+            apply_slot_action(idx);
+        }
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
