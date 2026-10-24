@@ -608,5 +608,43 @@ TEST(CEmitterTest, EmitTranslationUnitEmitsCustomUnalignedBlockTypedefs) {
   EXPECT_THAT(emitted, HasSubstr("typedef struct { u8 b[20]; } UnalignedBlock20;"));
 }
 
+TEST(CEmitterTest, PromotesScalarCastDerefGlobalEvenWhenIndexedWithPointerCast) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  // *(u16*)&D_80205622 = 0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U16().MakePointer(),
+                                 CExpression::Unary("&", CExpression::Identifier("D_80205622")))),
+      CExpression::Integer(0))));
+  // *(u16*)((u8*)&D_80205622 + arg0) = 1;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*",
+          CExpression::Cast(
+              CType::U16().MakePointer(),
+              CExpression::Binary(
+                  "+",
+                  CExpression::Cast(CType::U8().MakePointer(),
+                                    CExpression::Unary("&", CExpression::Identifier("D_80205622"))),
+                  CExpression::Identifier("arg0")))),
+      CExpression::Integer(1))));
+  body->AddStatement(CStatement::Return());
+  tu.functions.emplace_back(CType::Void(), "ClearIndexedAndBaseHalfword",
+                            std::vector<CParameter>{CParameter{CType::S32(), "arg0"}},
+                            std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("extern u16 D_80205622;\n"));
+  EXPECT_THAT(emitted, HasSubstr("D_80205622 = 0;"));
+  EXPECT_THAT(emitted, ::testing::Not(HasSubstr("*(u16*)&D_80205622")));
+  EXPECT_THAT(emitted, HasSubstr("*(u16*)((u8*)&D_80205622 + arg0) = 1;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

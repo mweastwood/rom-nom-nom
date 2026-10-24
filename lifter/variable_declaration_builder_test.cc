@@ -954,5 +954,69 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(code, HasSubstr("return ((arg1 & 255) == 4);"));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     InfersNarrowUnsignedTypeForDoWhilePostDecrementCounterAndStripsRedundantMask) {
+  // Pattern from HM64 func_800462B4:
+  //   00: addiu $sp, $sp, -32
+  //   04: sw    $ra, 28($sp)
+  //   08: sw    $s1, 24($sp)
+  //   0C: sw    $s0, 20($sp)
+  //   10: lbu   $s0, 0($a0)
+  //   14: addu  $s1, $a0, $zero
+  // .Lloop (0x18):
+  //   18: lhu   $a0, 2($s1)
+  //   1C: andi  $v0, $s0, 0xFF
+  //   20: addu  $a0, $a0, $v0
+  //   24: jal   0x8002CAA8
+  //   28:  andi  $a0, $a0, 0xFFFF
+  //   2C: andi  $v0, $s0, 0xFF
+  //   30: bne   $v0, $zero, .Lloop (0x18)
+  //   34:  addiu $s0, $s0, -1
+  //   38: lw    $ra, 28($sp)
+  //   3C: lw    $s1, 24($sp)
+  //   40: lw    $s0, 20($sp)
+  //   44: jr    $ra
+  //   48:  addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0xAFBF001C,  // 04: sw    $ra, 28($sp)
+      0xAFB10018,  // 08: sw    $s1, 24($sp)
+      0xAFB00014,  // 0C: sw    $s0, 20($sp)
+      0x90900000,  // 10: lbu   $s0, 0($a0)
+      0x00808821,  // 14: addu  $s1, $a0, $zero
+      // .Lloop (0x18):
+      0x96240002,  // 18: lhu   $a0, 2($s1)
+      0x320200FF,  // 1C: andi  $v0, $s0, 0xFF
+      0x00822021,  // 20: addu  $a0, $a0, $v0
+      0x0C00B2AA,  // 24: jal   0x8002CAA8
+      0x3084FFFF,  // 28:  andi  $a0, $a0, 0xFFFF
+      0x320200FF,  // 2C: andi  $v0, $s0, 0xFF
+      0x1440FFF9,  // 30: bne   $v0, $zero, .Lloop (0x18)
+      0x2610FFFF,  // 34:  addiu $s0, $s0, -1
+      0x8FBF001C,  // 38: lw    $ra, 28($sp)
+      0x8FB10018,  // 3C: lw    $s1, 24($sp)
+      0x8FB00014,  // 40: lw    $s0, 20($sp)
+      0x03E00008,  // 44: jr    $ra
+      0x27BD0020,  // 48:  addiu $sp, $sp, 32
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x800462B4));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_8002CAA8", 1}};
+  AstConverterOptions opts;
+  opts.function_name = "LoopPostDec";
+  opts.function_parameter_counts = &param_counts;
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("register u8 temp_s0 asm(\"$16\");"));
+  EXPECT_THAT(code, HasSubstr("v0 = temp_s0;"));
+  EXPECT_THAT(code, Not(HasSubstr("v0 = (temp_s0 & 255);")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

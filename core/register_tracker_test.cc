@@ -639,6 +639,42 @@ TEST(RegisterTrackerTest, DetermineReturnsV0RejectsVoidFunctionWithIgnoredCallee
   EXPECT_FALSE(DetermineReturnsV0(cfg, nullptr, &funcs_returning_v0));
 }
 
+TEST(RegisterTrackerTest,
+     DetermineReturnsV0RejectsVoidFunctionWhenPredecessorConsumesCalleeV0InBranch) {
+  // Pattern from HM64 func_8005C00C:
+  //   0x00: bne  $a0, $zero, 0x10
+  //   0x04: nop
+  //   0x08: jal  0x80001000   (callee in funcs_returning_v0, ignored by caller)
+  //   0x0C: nop
+  //   0x10: jal  0x80002000   (callee in funcs_returning_v0, consumed by branch below)
+  //   0x14: nop
+  //   0x18: bne  $v0, $zero, 0x28 (branches to shared epilogue after consuming $v0)
+  //   0x1C: nop
+  //   0x20: jal  0x80003000   (void callee)
+  //   0x24: nop
+  //   0x28: jr   $ra
+  //   0x2C: nop
+  std::vector<uint32_t> words = {
+      0x14800003,  // 00: bne $a0, $zero, 0x10
+      0x00000000,  // 04: nop
+      0x0C000400,  // 08: jal 0x80001000
+      0x00000000,  // 0C: nop
+      0x0C000800,  // 10: jal 0x80002000
+      0x00000000,  // 14: nop
+      0x14400003,  // 18: bne $v0, $zero, 0x28
+      0x00000000,  // 1C: nop
+      0x0C000C00,  // 20: jal 0x80003000
+      0x00000000,  // 24: nop
+      0x03E00008,  // 28: jr  $ra
+      0x00000000,  // 2C: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  absl::flat_hash_set<std::string> funcs_returning_v0 = {"func_80001000", "func_80002000"};
+
+  EXPECT_FALSE(DetermineReturnsV0(cfg, nullptr, &funcs_returning_v0));
+}
+
 TEST(RegisterTrackerTest, AnalyzeFunctionStructureAndIsomorphicComparison) {
   // Target: 32-byte frame, saves $ra and $s0, has 1 branch, plus 2 trailing alignment NOPs.
   std::vector<uint32_t> target_words = {

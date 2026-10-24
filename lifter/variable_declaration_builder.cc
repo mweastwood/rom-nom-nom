@@ -774,12 +774,15 @@ bool IsIdentifierStepByConst(const CExpression& rhs, std::string_view expected_v
   return require_unit_step ? (step == 1 || step == -1) : true;
 }
 
-void CollectConditionallySteppedVars(const CStatement& stmt,
-                                     absl::flat_hash_set<std::string>* out_vars) {
+void CollectConditionallySteppedVars(
+    const CStatement& stmt, absl::flat_hash_set<std::string>* out_vars,
+    absl::flat_hash_set<std::string>* out_do_while_post_stepped = nullptr) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement:
       for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-        if (child != nullptr) CollectConditionallySteppedVars(*child, out_vars);
+        if (child != nullptr) {
+          CollectConditionallySteppedVars(*child, out_vars, out_do_while_post_stepped);
+        }
       }
       break;
     case CStatementKind::kIfStatement: {
@@ -805,24 +808,70 @@ void CollectConditionallySteppedVars(const CStatement& stmt,
           }
         }
       }
-      CollectConditionallySteppedVars(ifs.ThenBranch(), out_vars);
+      CollectConditionallySteppedVars(ifs.ThenBranch(), out_vars, out_do_while_post_stepped);
       if (ifs.ElseBranch() != nullptr) {
-        CollectConditionallySteppedVars(*ifs.ElseBranch(), out_vars);
+        CollectConditionallySteppedVars(*ifs.ElseBranch(), out_vars, out_do_while_post_stepped);
       }
       break;
     }
     case CStatementKind::kWhileStatement:
-      CollectConditionallySteppedVars(static_cast<const WhileStatement&>(stmt).Body(), out_vars);
+      CollectConditionallySteppedVars(static_cast<const WhileStatement&>(stmt).Body(), out_vars,
+                                      out_do_while_post_stepped);
       break;
-    case CStatementKind::kDoWhileStatement:
-      CollectConditionallySteppedVars(static_cast<const DoWhileStatement&>(stmt).Body(), out_vars);
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      if (out_do_while_post_stepped != nullptr &&
+          dws.Body().Kind() == CStatementKind::kCompoundStatement && StatementHasCall(dws.Body())) {
+        const auto& comp = static_cast<const CompoundStatement&>(dws.Body());
+        if (comp.Statements().size() >= 2) {
+          const auto* prev_s = comp.Statements()[comp.Statements().size() - 2].get();
+          const auto* last_s = comp.Statements().back().get();
+          if (prev_s != nullptr && last_s != nullptr &&
+              prev_s->Kind() == CStatementKind::kExpressionStatement &&
+              last_s->Kind() == CStatementKind::kExpressionStatement) {
+            const auto& prev_e = static_cast<const ExpressionStatement&>(*prev_s).Expression();
+            const auto& last_e = static_cast<const ExpressionStatement&>(*last_s).Expression();
+            if (prev_e.Kind() == CExpressionKind::kAssignmentExpression &&
+                last_e.Kind() == CExpressionKind::kAssignmentExpression) {
+              const auto& prev_a = static_cast<const AssignmentExpression&>(prev_e);
+              const auto& last_a = static_cast<const AssignmentExpression&>(last_e);
+              if (prev_a.Op() == "=" && last_a.Op() == "=" &&
+                  prev_a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                  last_a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                const std::string& step_var =
+                    static_cast<const IdentifierExpression&>(last_a.Lhs()).Name();
+                if (IsIdentifierStepByConst(last_a.Rhs(), step_var, /*require_unit_step=*/true) &&
+                    prev_a.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                  const auto& mask_bin = static_cast<const BinaryExpression&>(prev_a.Rhs());
+                  if (mask_bin.Op() == "&" &&
+                      mask_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      static_cast<const IdentifierExpression&>(mask_bin.Lhs()).Name() == step_var &&
+                      mask_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+                    int64_t m =
+                        static_cast<const IntegerLiteralExpression&>(mask_bin.Rhs()).Value();
+                    if (m == 255 || m == 65535) {
+                      out_vars->insert(step_var);
+                      out_do_while_post_stepped->insert(step_var);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      CollectConditionallySteppedVars(dws.Body(), out_vars, out_do_while_post_stepped);
       break;
+    }
     case CStatementKind::kForStatement:
-      CollectConditionallySteppedVars(static_cast<const ForStatement&>(stmt).Body(), out_vars);
+      CollectConditionallySteppedVars(static_cast<const ForStatement&>(stmt).Body(), out_vars,
+                                      out_do_while_post_stepped);
       break;
     case CStatementKind::kSwitchStatement:
       for (const auto& c : static_cast<const SwitchStatement&>(stmt).Cases()) {
-        if (c.body != nullptr) CollectConditionallySteppedVars(*c.body, out_vars);
+        if (c.body != nullptr) {
+          CollectConditionallySteppedVars(*c.body, out_vars, out_do_while_post_stepped);
+        }
       }
       break;
     default:
@@ -1058,7 +1107,7 @@ void CheckNarrowMaskedReadsInStmt(const CStatement& stmt, std::string_view var_n
 
 std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
     const CExpression& expr, const absl::flat_hash_map<std::string, CType>& narrow_types,
-    bool is_return_root) {
+    const absl::flat_hash_set<std::string>& do_while_post_stepped_vars, bool is_return_root) {
   if (is_return_root && expr.Kind() == CExpressionKind::kBinaryExpression) {
     const auto& lt = static_cast<const BinaryExpression&>(expr);
     if (lt.Op() == "<" && lt.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
@@ -1084,23 +1133,46 @@ std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
     case CExpressionKind::kBinaryExpression: {
       const auto& bin = static_cast<const BinaryExpression&>(expr);
       if (bin.Op() == "&" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
-          static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 65535 &&
-          bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
-        const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
+          bin.Lhs().Kind() == CExpressionKind::kIdentifier) {
+        const std::string& var_name = static_cast<const IdentifierExpression&>(bin.Lhs()).Name();
+        int64_t mask = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        auto it = narrow_types.find(var_name);
+        if (it != narrow_types.end() && do_while_post_stepped_vars.contains(var_name) &&
+            ((mask == 255 && it->second.name == "u8") ||
+             (mask == 65535 && it->second.name == "u16"))) {
+          return bin.Lhs().Clone();
+        }
+      }
+      auto rewritten_lhs = RewriteNarrowCondIncExpr(
+          bin.Lhs(), narrow_types, do_while_post_stepped_vars, /*is_return_root=*/false);
+      auto rewritten_rhs = RewriteNarrowCondIncExpr(
+          bin.Rhs(), narrow_types, do_while_post_stepped_vars, /*is_return_root=*/false);
+      if (bin.Op() == "&" && rewritten_rhs->Kind() == CExpressionKind::kIntegerLiteral &&
+          static_cast<const IntegerLiteralExpression&>(*rewritten_rhs).Value() == 65535 &&
+          rewritten_lhs->Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& inner = static_cast<const BinaryExpression&>(*rewritten_lhs);
         if (inner.Op() == "+" || inner.Op() == "-") {
           bool lhs_u16 = false;
           bool rhs_u16 = false;
+          bool lhs_narrow_post_step = false;
+          bool rhs_narrow_post_step = false;
           if (inner.Lhs().Kind() == CExpressionKind::kIdentifier) {
-            auto it =
-                narrow_types.find(static_cast<const IdentifierExpression&>(inner.Lhs()).Name());
+            const std::string& lhs_id =
+                static_cast<const IdentifierExpression&>(inner.Lhs()).Name();
+            auto it = narrow_types.find(lhs_id);
             lhs_u16 = (it != narrow_types.end() && it->second.name == "u16");
+            lhs_narrow_post_step =
+                (it != narrow_types.end() && do_while_post_stepped_vars.contains(lhs_id));
           }
           if (inner.Rhs().Kind() == CExpressionKind::kIdentifier) {
-            auto it =
-                narrow_types.find(static_cast<const IdentifierExpression&>(inner.Rhs()).Name());
+            const std::string& rhs_id =
+                static_cast<const IdentifierExpression&>(inner.Rhs()).Name();
+            auto it = narrow_types.find(rhs_id);
             rhs_u16 = (it != narrow_types.end() && it->second.name == "u16");
+            rhs_narrow_post_step =
+                (it != narrow_types.end() && do_while_post_stepped_vars.contains(rhs_id));
           }
-          if (lhs_u16 || rhs_u16) {
+          if (lhs_u16 || rhs_u16 || lhs_narrow_post_step || rhs_narrow_post_step) {
             auto new_lhs = lhs_u16 ? inner.Lhs().Clone()
                                    : CExpression::Cast(CType::U16(), inner.Lhs().Clone());
             auto new_rhs = rhs_u16 ? inner.Rhs().Clone()
@@ -1109,52 +1181,60 @@ std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
                 "&",
                 CExpression::Cast(CType::U16(), CExpression::Binary(inner.Op(), std::move(new_lhs),
                                                                     std::move(new_rhs))),
-                bin.Rhs().Clone());
+                std::move(rewritten_rhs));
           }
         }
       }
-      return CExpression::Binary(
-          bin.Op(), RewriteNarrowCondIncExpr(bin.Lhs(), narrow_types, /*is_return_root=*/false),
-          RewriteNarrowCondIncExpr(bin.Rhs(), narrow_types, /*is_return_root=*/false));
+      return CExpression::Binary(bin.Op(), std::move(rewritten_lhs), std::move(rewritten_rhs));
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& assign = static_cast<const AssignmentExpression&>(expr);
       return CExpression::Assignment(
           assign.Op(),
-          RewriteNarrowCondIncExpr(assign.Lhs(), narrow_types, /*is_return_root=*/false),
-          RewriteNarrowCondIncExpr(assign.Rhs(), narrow_types, /*is_return_root=*/false));
+          RewriteNarrowCondIncExpr(assign.Lhs(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(assign.Rhs(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false));
     }
     case CExpressionKind::kUnaryExpression: {
       const auto& un = static_cast<const UnaryExpression&>(expr);
       return CExpression::Unary(
-          un.Op(), RewriteNarrowCondIncExpr(un.Operand(), narrow_types, /*is_return_root=*/false),
+          un.Op(),
+          RewriteNarrowCondIncExpr(un.Operand(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
           un.IsPrefix());
     }
     case CExpressionKind::kCastExpression: {
       const auto& cast = static_cast<const CastExpression&>(expr);
       return CExpression::Cast(
           cast.TargetType(),
-          RewriteNarrowCondIncExpr(cast.Operand(), narrow_types, /*is_return_root=*/false));
+          RewriteNarrowCondIncExpr(cast.Operand(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false));
     }
     case CExpressionKind::kCallExpression: {
       const auto& call = static_cast<const CallExpression&>(expr);
       std::vector<std::unique_ptr<CExpression>> args;
       args.reserve(call.Arguments().size());
       for (const auto& arg : call.Arguments()) {
-        args.push_back(arg != nullptr
-                           ? RewriteNarrowCondIncExpr(*arg, narrow_types, /*is_return_root=*/false)
-                           : nullptr);
+        args.push_back(arg != nullptr ? RewriteNarrowCondIncExpr(*arg, narrow_types,
+                                                                 do_while_post_stepped_vars,
+                                                                 /*is_return_root=*/false)
+                                      : nullptr);
       }
       return CExpression::Call(
-          RewriteNarrowCondIncExpr(call.Callee(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(call.Callee(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
           std::move(args));
     }
     case CExpressionKind::kTernaryExpression: {
       const auto& tern = static_cast<const TernaryExpression&>(expr);
       return CExpression::Ternary(
-          RewriteNarrowCondIncExpr(tern.Condition(), narrow_types, /*is_return_root=*/false),
-          RewriteNarrowCondIncExpr(tern.TrueExpression(), narrow_types, /*is_return_root=*/false),
-          RewriteNarrowCondIncExpr(tern.FalseExpression(), narrow_types, /*is_return_root=*/false));
+          RewriteNarrowCondIncExpr(tern.Condition(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(tern.TrueExpression(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(tern.FalseExpression(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false));
     }
     default:
       return expr.Clone();
@@ -1162,60 +1242,71 @@ std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
 }
 
 std::unique_ptr<CStatement> RewriteNarrowCondIncStmt(
-    const CStatement& stmt, const absl::flat_hash_map<std::string, CType>& narrow_types) {
+    const CStatement& stmt, const absl::flat_hash_map<std::string, CType>& narrow_types,
+    const absl::flat_hash_set<std::string>& do_while_post_stepped_vars) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement: {
       auto out = std::make_unique<CompoundStatement>();
       for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
         if (child != nullptr) {
-          out->AddStatement(RewriteNarrowCondIncStmt(*child, narrow_types));
+          out->AddStatement(
+              RewriteNarrowCondIncStmt(*child, narrow_types, do_while_post_stepped_vars));
         }
       }
       return out;
     }
     case CStatementKind::kExpressionStatement: {
       const auto& es = static_cast<const ExpressionStatement&>(stmt);
-      return CStatement::Expression(
-          RewriteNarrowCondIncExpr(es.Expression(), narrow_types, /*is_return_root=*/false));
+      return CStatement::Expression(RewriteNarrowCondIncExpr(
+          es.Expression(), narrow_types, do_while_post_stepped_vars, /*is_return_root=*/false));
     }
     case CStatementKind::kIfStatement: {
       const auto& ifs = static_cast<const IfStatement&>(stmt);
       return CStatement::If(
-          RewriteNarrowCondIncExpr(ifs.Condition(), narrow_types, /*is_return_root=*/false),
-          RewriteNarrowCondIncStmt(ifs.ThenBranch(), narrow_types),
-          ifs.ElseBranch() != nullptr ? RewriteNarrowCondIncStmt(*ifs.ElseBranch(), narrow_types)
+          RewriteNarrowCondIncExpr(ifs.Condition(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
+          RewriteNarrowCondIncStmt(ifs.ThenBranch(), narrow_types, do_while_post_stepped_vars),
+          ifs.ElseBranch() != nullptr ? RewriteNarrowCondIncStmt(*ifs.ElseBranch(), narrow_types,
+                                                                 do_while_post_stepped_vars)
                                       : nullptr);
     }
     case CStatementKind::kWhileStatement: {
       const auto& ws = static_cast<const WhileStatement&>(stmt);
       return CStatement::While(
-          RewriteNarrowCondIncExpr(ws.Condition(), narrow_types, /*is_return_root=*/false),
-          RewriteNarrowCondIncStmt(ws.Body(), narrow_types));
+          RewriteNarrowCondIncExpr(ws.Condition(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
+          RewriteNarrowCondIncStmt(ws.Body(), narrow_types, do_while_post_stepped_vars));
     }
     case CStatementKind::kDoWhileStatement: {
       const auto& dws = static_cast<const DoWhileStatement&>(stmt);
       return CStatement::DoWhile(
-          RewriteNarrowCondIncStmt(dws.Body(), narrow_types),
-          RewriteNarrowCondIncExpr(dws.Condition(), narrow_types, /*is_return_root=*/false));
+          RewriteNarrowCondIncStmt(dws.Body(), narrow_types, do_while_post_stepped_vars),
+          RewriteNarrowCondIncExpr(dws.Condition(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false));
     }
     case CStatementKind::kForStatement: {
       const auto& fs = static_cast<const ForStatement&>(stmt);
       return CStatement::For(
-          fs.Init() != nullptr ? RewriteNarrowCondIncStmt(*fs.Init(), narrow_types) : nullptr,
+          fs.Init() != nullptr
+              ? RewriteNarrowCondIncStmt(*fs.Init(), narrow_types, do_while_post_stepped_vars)
+              : nullptr,
           fs.Condition() != nullptr
-              ? RewriteNarrowCondIncExpr(*fs.Condition(), narrow_types, /*is_return_root=*/false)
+              ? RewriteNarrowCondIncExpr(*fs.Condition(), narrow_types, do_while_post_stepped_vars,
+                                         /*is_return_root=*/false)
               : nullptr,
           fs.Step() != nullptr
-              ? RewriteNarrowCondIncExpr(*fs.Step(), narrow_types, /*is_return_root=*/false)
+              ? RewriteNarrowCondIncExpr(*fs.Step(), narrow_types, do_while_post_stepped_vars,
+                                         /*is_return_root=*/false)
               : nullptr,
-          RewriteNarrowCondIncStmt(fs.Body(), narrow_types));
+          RewriteNarrowCondIncStmt(fs.Body(), narrow_types, do_while_post_stepped_vars));
     }
     case CStatementKind::kReturnStatement: {
       const auto& rs = static_cast<const ReturnStatement&>(stmt);
-      return CStatement::Return(
-          rs.ReturnValue() != nullptr
-              ? RewriteNarrowCondIncExpr(*rs.ReturnValue(), narrow_types, /*is_return_root=*/true)
-              : nullptr);
+      return CStatement::Return(rs.ReturnValue() != nullptr
+                                    ? RewriteNarrowCondIncExpr(*rs.ReturnValue(), narrow_types,
+                                                               do_while_post_stepped_vars,
+                                                               /*is_return_root=*/true)
+                                    : nullptr);
     }
     case CStatementKind::kSwitchStatement: {
       const auto& ss = static_cast<const SwitchStatement&>(stmt);
@@ -1224,13 +1315,15 @@ std::unique_ptr<CStatement> RewriteNarrowCondIncStmt(
       for (const auto& c : ss.Cases()) {
         SwitchCase sc = c.Clone();
         if (c.body != nullptr) {
-          auto rewritten = RewriteNarrowCondIncStmt(*c.body, narrow_types);
+          auto rewritten =
+              RewriteNarrowCondIncStmt(*c.body, narrow_types, do_while_post_stepped_vars);
           sc.body.reset(static_cast<CompoundStatement*>(rewritten.release()));
         }
         cases.push_back(std::move(sc));
       }
       return CStatement::Switch(
-          RewriteNarrowCondIncExpr(ss.Condition(), narrow_types, /*is_return_root=*/false),
+          RewriteNarrowCondIncExpr(ss.Condition(), narrow_types, do_while_post_stepped_vars,
+                                   /*is_return_root=*/false),
           std::move(cases));
     }
     default:
@@ -1718,7 +1811,10 @@ absl::Status PrependSynthesizedLocalDeclarations(
                 (v0_non_return_reads >= 1 &&
                  unpinned_gpr_locals_count >= kNumGprArgumentRegisters &&
                  !is_float_return_leaf_with_v0_v1)) &&
-               (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1) &&
+               (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
+                (!is_leaf_func &&
+                 CountNonReturnVariableReadUsesInStatement(**body, var_name) == 0 &&
+                 CountVariableReadUsesInStatement(**body, var_name) >= 1)) &&
                var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
                var_name[3] <= '3') {
       int reg_num = 4 + (var_name[3] - '0');
@@ -1743,7 +1839,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
   };
 
   absl::flat_hash_set<std::string> cond_stepped_vars;
-  CollectConditionallySteppedVars(**body, &cond_stepped_vars);
+  absl::flat_hash_set<std::string> do_while_post_stepped_vars;
+  CollectConditionallySteppedVars(**body, &cond_stepped_vars, &do_while_post_stepped_vars);
   absl::flat_hash_map<std::string, CType> narrow_cond_inc_var_types;
   for (const auto& var_name : local_vars_to_declare) {
     if (!cond_stepped_vars.contains(var_name) || var_name == "sp" || is_fp_reg(var_name) ||
@@ -1766,7 +1863,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
   if (!narrow_cond_inc_var_types.empty()) {
-    auto rewritten_body = RewriteNarrowCondIncStmt(**body, narrow_cond_inc_var_types);
+    auto rewritten_body =
+        RewriteNarrowCondIncStmt(**body, narrow_cond_inc_var_types, do_while_post_stepped_vars);
     body->reset(static_cast<CompoundStatement*>(rewritten_body.release()));
   }
 

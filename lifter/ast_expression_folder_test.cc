@@ -816,5 +816,37 @@ TEST(AstExpressionFolderTest, FoldsSingleUseCallArgInsideLoopEvenWhenFunctionHas
   EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1 = temp_s1;")));
 }
 
+TEST(AstExpressionFolderTest, PreservesTempHoldingMultiplicationBeforeGlobalAddressAddition) {
+  auto body = std::make_unique<CompoundStatement>();
+  // v0 = (temp_s0 * 40);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("*", CExpression::Identifier("temp_s0"), CExpression::Integer(40)))));
+  // if ((*(u8*)((u8*)&D_80158512 + v0) != 0)) { temp_s1 = 1; }
+  auto cond = CExpression::Binary(
+      "!=",
+      CExpression::Unary(
+          "*",
+          CExpression::Cast(
+              CType::U8().MakePointer(),
+              CExpression::Binary(
+                  "+",
+                  CExpression::Cast(CType::U8().MakePointer(),
+                                    CExpression::Unary("&", CExpression::Identifier("D_80158512"))),
+                  CExpression::Identifier("v0")))),
+      CExpression::Integer(0));
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"), CExpression::Integer(1))));
+  body->AddStatement(CStatement::If(std::move(cond), std::move(then_branch)));
+  body->AddStatement(CStatement::Return());
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, HasSubstr("v0 = (temp_s0 * 40);"));
+  EXPECT_THAT(code, HasSubstr("((u8*)&D_80158512 + v0)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

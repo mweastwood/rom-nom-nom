@@ -126,12 +126,32 @@ void CollectGlobalCastDerefsInExpr(
       }
       break;
     }
-    case CExpressionKind::kUnaryExpression:
-      CollectGlobalCastDerefsInExpr(static_cast<const UnaryExpression&>(expr).Operand(), local_vars,
-                                    total_id_uses, cast_deref_uses);
+    case CExpressionKind::kUnaryExpression: {
+      const auto& u = static_cast<const UnaryExpression&>(expr);
+      if (u.IsPrefix() && u.Op() == "&" && u.Operand().Kind() == CExpressionKind::kIdentifier) {
+        break;
+      }
+      CollectGlobalCastDerefsInExpr(u.Operand(), local_vars, total_id_uses, cast_deref_uses);
       break;
+    }
     case CExpressionKind::kBinaryExpression: {
       const auto& b = static_cast<const BinaryExpression&>(expr);
+      if (b.Op() == "+" || b.Op() == "-") {
+        auto check_uncast_addr_of = [&](const CExpression& side) {
+          if (side.Kind() == CExpressionKind::kUnaryExpression) {
+            const auto& u = static_cast<const UnaryExpression&>(side);
+            if (u.IsPrefix() && u.Op() == "&" &&
+                u.Operand().Kind() == CExpressionKind::kIdentifier) {
+              const auto& id = static_cast<const IdentifierExpression&>(u.Operand());
+              if (local_vars.count(id.Name()) == 0) {
+                (*total_id_uses)[id.Name()]++;
+              }
+            }
+          }
+        };
+        check_uncast_addr_of(b.Lhs());
+        check_uncast_addr_of(b.Rhs());
+      }
       CollectGlobalCastDerefsInExpr(b.Lhs(), local_vars, total_id_uses, cast_deref_uses);
       CollectGlobalCastDerefsInExpr(b.Rhs(), local_vars, total_id_uses, cast_deref_uses);
       break;

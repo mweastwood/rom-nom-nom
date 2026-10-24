@@ -5675,5 +5675,26 @@ void NestedIfRangeChecksOnSameVariableWithoutFoldRangeTestMerge(s32 idx) {
 )");
 }
 
+TEST_F(RoundTripTest, DoWhileLoopWithPostDecrementNarrowCounterAndCall) {
+  AssertRoundTripBitExact("DoWhileLoopWithPostDecrementNarrowCounterAndCall", R"(
+s32 update_layer_entry(s32 slot, s32 mode);
+
+s32 DoWhileLoopWithPostDecrementNarrowCounterAndCall(u8* row, s32 mode) {
+    s32 ret = 0;
+    if ((*(u16*)(row + 12) & 1) != 0) {
+        u8 count = row[10];
+        s32 prev;
+        do {
+            update_layer_entry((u16)(*(u16*)(row + 8) + (u16)count), (u8)mode);
+            prev = count;
+            count--;
+        } while (prev != 0);
+        ret = 1;
+    }
+    return ret;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

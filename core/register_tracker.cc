@@ -1145,14 +1145,23 @@ bool DetermineReturnsV0(const ControlFlowGraph& cfg, const SymbolIndex* symbol_i
     if (return_avail && !has_direct_v0_return && effect == 0 && !predecessors[b].empty()) {
       for (size_t p : predecessors[b]) {
         if (eval_pred_edge_avail(p, b)) continue;
-        bool pred_has_call = false;
+        bool pred_has_unconsumed_call = false;
         for (const auto& inst : cfg.Blocks()[p].instructions) {
           if (inst.IsCall()) {
-            pred_has_call = true;
-            break;
+            pred_has_unconsumed_call = true;
+            continue;
+          }
+          if (pred_has_unconsumed_call) {
+            RegisterUseDef ud = GetInstructionUseDef(inst);
+            for (Register u : ud.gpr_uses) {
+              if (u == Register::kV0) {
+                pred_has_unconsumed_call = false;
+                break;
+              }
+            }
           }
         }
-        if (!pred_has_call) {
+        if (!pred_has_unconsumed_call) {
           return_avail = false;
           break;
         }

@@ -86,6 +86,57 @@ struct FolderContext {
     return ExpressionTakesAddressOf(expr, var, /*ignore_assigned_float_bitcast_lhs=*/true);
   }
 
+  static bool IsMultiplicationExpr(const CExpression& expr) {
+    return expr.Kind() == CExpressionKind::kBinaryExpression &&
+           static_cast<const BinaryExpression&>(expr).Op() == "*";
+  }
+
+  static bool UsedInAdditionWithAddressOf(const CExpression& expr, std::string_view var) {
+    bool found = false;
+    std::function<void(const CExpression&)> check = [&](const CExpression& e) {
+      if (found) return;
+      if (e.Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& bin = static_cast<const BinaryExpression&>(e);
+        if (bin.Op() == "+" || bin.Op() == "-") {
+          bool lhs_is_var = bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(bin.Lhs()).Name() == var;
+          bool rhs_is_var = bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var;
+          if ((lhs_is_var && HasAddressOf(bin.Rhs())) || (rhs_is_var && HasAddressOf(bin.Lhs()))) {
+            found = true;
+            return;
+          }
+        }
+        check(bin.Lhs());
+        check(bin.Rhs());
+      } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& assign = static_cast<const AssignmentExpression&>(e);
+        check(assign.Lhs());
+        check(assign.Rhs());
+      } else if (e.Kind() == CExpressionKind::kUnaryExpression) {
+        check(static_cast<const UnaryExpression&>(e).Operand());
+      } else if (e.Kind() == CExpressionKind::kCastExpression) {
+        check(static_cast<const CastExpression&>(e).Operand());
+      } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
+        check(static_cast<const ArrayIndexExpression&>(e).Array());
+        check(static_cast<const ArrayIndexExpression&>(e).Index());
+      } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
+        check(static_cast<const MemberAccessExpression&>(e).Object());
+      } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
+        check(static_cast<const TernaryExpression&>(e).Condition());
+        check(static_cast<const TernaryExpression&>(e).TrueExpression());
+        check(static_cast<const TernaryExpression&>(e).FalseExpression());
+      } else if (e.Kind() == CExpressionKind::kCallExpression) {
+        check(static_cast<const CallExpression&>(e).Callee());
+        for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
+          check(*arg);
+        }
+      }
+    };
+    check(expr);
+    return found;
+  }
+
   static bool UsedInAdditionOrSubtraction(const CExpression& expr, std::string_view var) {
     bool in_add_sub = false;
     std::function<void(const CExpression&)> check = [&](const CExpression& e) {
@@ -1428,7 +1479,9 @@ struct FolderContext {
                     if (can_fold_in_place && uses_in_rhs == 1 &&
                         !HasAddressOfVar(cand_assign.Rhs(), var) &&
                         (!HasAddressOf(assign.Rhs()) ||
-                         !UsedInAdditionOrSubtraction(cand_assign.Rhs(), var))) {
+                         !UsedInAdditionOrSubtraction(cand_assign.Rhs(), var)) &&
+                        (!IsMultiplicationExpr(assign.Rhs()) ||
+                         !UsedInAdditionWithAddressOf(cand_assign.Rhs(), var))) {
                       auto new_rhs = SubstituteIdentifier(cand_assign.Rhs(), var, assign.Rhs());
                       if (CountExprUses(*new_rhs, var) == 0) {
                         stmts[j] = CStatement::Expression(CExpression::Assignment(
@@ -1656,8 +1709,10 @@ struct FolderContext {
                           j + 1 == stmts.size() && !HasCallInStmt(*stmts[j])) {
                         break;
                       }
-                      if (HasAddressOf(assign.Rhs()) &&
-                          UsedInAdditionOrSubtraction(cand_es.Expression(), var)) {
+                      if ((HasAddressOf(assign.Rhs()) &&
+                           UsedInAdditionOrSubtraction(cand_es.Expression(), var)) ||
+                          (IsMultiplicationExpr(assign.Rhs()) &&
+                           UsedInAdditionWithAddressOf(cand_es.Expression(), var))) {
                         break;
                       }
                       if (!is_fp_scratch &&
@@ -2103,8 +2158,10 @@ struct FolderContext {
                       }
                     }
                   }
-                  if (HasAddressOfVar(if_stmt.Condition(), var) &&
-                      assign.Rhs().Kind() != CExpressionKind::kIdentifier) {
+                  if ((HasAddressOfVar(if_stmt.Condition(), var) &&
+                       assign.Rhs().Kind() != CExpressionKind::kIdentifier) ||
+                      (IsMultiplicationExpr(assign.Rhs()) &&
+                       UsedInAdditionWithAddressOf(if_stmt.Condition(), var))) {
                     break;
                   }
                   if (!IsPureExpr(assign.Rhs()) &&
@@ -2175,8 +2232,10 @@ struct FolderContext {
 
                 if (stmts[j]->Kind() == CStatementKind::kSwitchStatement) {
                   const auto& sw_stmt = static_cast<const SwitchStatement&>(*stmts[j]);
-                  if (HasAddressOfVar(sw_stmt.Condition(), var) &&
-                      assign.Rhs().Kind() != CExpressionKind::kIdentifier) {
+                  if ((HasAddressOfVar(sw_stmt.Condition(), var) &&
+                       assign.Rhs().Kind() != CExpressionKind::kIdentifier) ||
+                      (IsMultiplicationExpr(assign.Rhs()) &&
+                       UsedInAdditionWithAddressOf(sw_stmt.Condition(), var))) {
                     break;
                   }
                   if (!IsPureExpr(assign.Rhs()) &&
