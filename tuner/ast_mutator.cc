@@ -206,31 +206,6 @@ bool StatementReadsOrWritesMemoryOrGlobals(const CStatement& statement) {
   }
 }
 
-bool StatementContainsLoop(const CStatement& statement) {
-  switch (statement.Kind()) {
-    case CStatementKind::kWhileStatement:
-    case CStatementKind::kDoWhileStatement:
-    case CStatementKind::kForStatement:
-      return true;
-    case CStatementKind::kCompoundStatement: {
-      for (const auto& child : static_cast<const CompoundStatement&>(statement).Statements()) {
-        if (StatementContainsLoop(*child)) return true;
-      }
-      return false;
-    }
-    case CStatementKind::kIfStatement: {
-      const auto& if_stmt = static_cast<const IfStatement&>(statement);
-      if (StatementContainsLoop(if_stmt.ThenBranch())) return true;
-      if (if_stmt.ElseBranch() != nullptr && StatementContainsLoop(*if_stmt.ElseBranch())) {
-        return true;
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
-}
-
 bool MatchRegisterCopy(const CStatement& statement, std::string* out_dst, std::string* out_src) {
   if (statement.Kind() == CStatementKind::kExpressionStatement) {
     const auto& expr_stmt = static_cast<const ExpressionStatement&>(statement);

@@ -3,8 +3,18 @@
 #include <cstdint>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
+#include "core/symbol_registry.h"
+#include "gmock/gmock.h"
+#include "lifter/expression_builder.h"
+
+using ::testing::ElementsAre;
+using ::testing::HasSubstr;
+using ::testing::IsEmpty;
+using ::testing::Not;
+using ::testing::SizeIs;
 #include "gtest/gtest.h"
 
 namespace rom_nom_nom {
@@ -530,6 +540,655 @@ TEST(AbiAnalyzerTest, RecognizesDaddiuAndDaddiStackFrameAllocationAndAddressTaki
   auto cfg_addr = *ControlFlowGraph::Build(*DecodeSequence(words_addr, 0x80000000));
   auto float_locals = AbiAnalyzer::DetectFloatLocalStackOffsets(cfg_addr);
   EXPECT_FALSE(float_locals.contains(8));
+}
+
+TEST(AbiAnalyzerTest, DetermineParameterCountIdentifiesUsedArguments) {
+  // 1 arg: addu $v0, $a0, $zero
+  std::vector<uint32_t> one_arg_words = {
+      0x00801021,  // addu $v0, $a0, $zero
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto one_arg_insts = *DecodeSequence(one_arg_words);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(one_arg_insts), 1);
+
+  // 3 args: addu $v0, $a0, $a1; addu $v0, $v0, $a2
+  std::vector<uint32_t> three_args_words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x00461021,  // addu $v0, $v0, $a2
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto three_args_insts = *DecodeSequence(three_args_words);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(three_args_insts), 3);
+
+  // 0 args: addiu $v0, $zero, 1
+  std::vector<uint32_t> zero_args_words = {
+      0x24020001,  // addiu $v0, $zero, 1
+      0x03E00008,  // jr $ra
+      0x00000000,  // nop
+  };
+  auto zero_args_insts = *DecodeSequence(zero_args_words);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(zero_args_insts), 0);
+}
+
+TEST(AbiAnalyzerTest, DetermineParameterCountIdentifiesArgumentsUsedInCallDelaySlot) {
+  // Pattern matching RandomRange:
+  // 0: addu $s1, $a0, $zero
+  // 4: jal  0x80001000
+  // 8: addu $s0, $a1, $zero  (delay slot uses $a1 before call clobbers arguments)
+  // C: jr   $ra
+  // 10: nop
+  std::vector<uint32_t> words = {
+      0x00808821,  // 0: addu $s1, $a0, $zero
+      0x0C000400,  // 4: jal  0x80001000
+      0x00A08021,  // 8: addu $s0, $a1, $zero
+      0x03E00008,  // C: jr   $ra
+      0x00000000,  // 10: nop
+  };
+  auto insts = *DecodeSequence(words);
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts), 2);
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0MultiBlock) {
+  // Abs16-like pattern:
+  // Block 0:
+  //   sll   $v0, $a0, 16
+  //   sra   $v0, $v0, 16
+  //   bgez  $v0, .L_exit (+4 instructions)
+  //   nop
+  // Block 1:
+  //   subu  $v0, $zero, $a0
+  //   sll   $v0, $v0, 16
+  //   sra   $v0, $v0, 16
+  // Block 2 (.L_exit):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x00041400,  // sll   $v0, $a0, 16
+      0x00021403,  // sra   $v0, $v0, 16
+      0x04410004,  // bgez  $v0, +4 -> .L_exit
+      0x00000000,  // nop
+      0x00041023,  // subu  $v0, $zero, $a0
+      0x00021400,  // sll   $v0, $v0, 16
+      0x00021403,  // sra   $v0, $v0, 16
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0LoopVoidFunction) {
+  // DmaInit-like pattern:
+  // Block 0:
+  //   addu  $v1, $zero, $zero
+  //   andi  $v0, $v1, 0xFFFF
+  // Block 1 (loop body):
+  //   sll   $v0, $v0, 4
+  //   addiu $v1, $v1, 1
+  //   sltiu $v0, $v0, 40
+  //   bnel  $v0, $zero, Block 1
+  //   andi  $v0, $v1, 0xFFFF
+  // Block 2 (exit):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x00001821,  // 00: addu  $v1, $zero, $zero
+      0x3062FFFF,  // 04: andi  $v0, $v1, 0xFFFF
+      0x00021100,  // 08: sll   $v0, $v0, 4
+      0x24630001,  // 0C: addiu $v1, $v1, 1
+      0x2C420028,  // 10: sltiu $v0, $v0, 40
+      0x5440FFFD,  // 14: bnel  $v0, $zero, -3 (0x80020008)
+      0x3062FFFF,  // 18: andi  $v0, $v1, 0xFFFF
+      0x03E00008,  // 1C: jr    $ra
+      0x00000000,  // 20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0LoopWithBeqlCondition) {
+  // MessageInit-like pattern:
+  // Loop defines $v0 via andi, then loops back with beql $v0, $zero.
+  // On loop exit, falls through to jr $ra. $v0 is only the loop condition.
+  std::vector<uint32_t> words = {
+      0x00002021,  // 00: addu  $a0, $zero, $zero
+      0x3082FFFF,  // 04: andi  $v0, $a0, 0xFFFF
+      0x24840001,  // 08: addiu $a0, $a0, 1
+      0x5040FFFE,  // 0C: beql  $v0, $zero, 0x80020004
+      0x24840001,  // 10: addiu $a0, $a0, 1
+      0x03E00008,  // 14: jr    $ra
+      0x00000000,  // 18: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0VoidFunctionWithCallBeforeReturn) {
+  // Pattern matching GraphicInit:
+  // Loop defines $v0, then on loop exit an external call occurs, then the function returns without
+  // redefining $v0. The call clobbers $v0, so the function should be detected as returning void
+  // (not returning $v0).
+  std::vector<uint32_t> words = {
+      0x308200FF,  // 00: andi  $v0, $a0, 0xFF
+      0x2C420002,  // 04: sltiu $v0, $v0, 2
+      0x1440FFFD,  // 08: bnez  $v0, -3 -> 0x80020000
+      0x308200FF,  // 0C: andi  $v0, $a0, 0xFF
+      0x0C000400,  // 10: jal   0x80001000
+      0x00000000,  // 14: nop
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0PartiallyDefinedVoidFunction) {
+  // Pattern matching func_800D0318:
+  // Block 0:
+  //   beqz $a0, .L_exit
+  //   nop
+  // Block 1:
+  //   addiu $v0, $zero, 3
+  //   beq $a0, $v0, .L_exit
+  //   slti $v0, $a0, 4
+  // Block 2 (.L_exit):
+  //   jr $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x10800004,  // 00: beqz $a0, +4 -> 0x80020014 (.L_exit)
+      0x00000000,  // 04: nop
+      0x24020003,  // 08: addiu $v0, $zero, 3
+      0x10820002,  // 0C: beq $a0, $v0, +2 -> 0x80020014 (.L_exit)
+      0x28820004,  // 10: slti $v0, $a0, 4
+      0x03E00008,  // 14: jr $ra
+      0x00000000,  // 18: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0WithCalleeReturningV0) {
+  // Function calls a callee that returns v0 right before return, so v0 is preserved and returned.
+  std::vector<uint32_t> words = {
+      0x0C000400,  // 00: jal 0x80001000
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr $ra
+      0x00000000,  // 0C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  // Without known callee returning v0, call clobbers v0, so returns false.
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+
+  // With known callee returning v0, returns true.
+  absl::flat_hash_set<std::string> returning_v0 = {"func_80001000"};
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or, nullptr, &returning_v0));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0EmptyCfg) {
+  ControlFlowGraph cfg;
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(cfg));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0InfiniteLoopNoReturn) {
+  // Idle loop pattern: loop contains definitions but never returns
+  std::vector<uint32_t> words = {
+      0x24020001,  // 00: addiu $v0, $zero, 1
+      0x1000FFFD,  // 04: b     -3 -> 0x80020000
+      0x00000000,  // 08: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0UnreachableReturnIgnored) {
+  // Reachable exit returns void, while an unreachable block defines $v0 before returning
+  std::vector<uint32_t> words = {
+      0x03E00008,  // 00: jr    $ra
+      0x00000000,  // 04: nop
+      0x24020001,  // 08: addiu $v0, $zero, 1
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0DefinedThenConsumedBeforeReturn) {
+  // $v0 is used as a temporary scratch register and read before return:
+  std::vector<uint32_t> words = {
+      0x24020005,  // 00: addiu $v0, $zero, 5
+      0x00402021,  // 04: addu  $a0, $v0, $zero
+      0xAFAC0000,  // 08: sw    $a0, 0($sp)
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0DefinedInReturnDelaySlot) {
+  // Single block function where $v0 is defined in the return delay slot:
+  std::vector<uint32_t> words = {
+      0x03E00008,  // 00: jr    $ra
+      0x2402002A,  // 04: addiu $v0, $zero, 42
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0DefinedInBranchDelaySlotToReturn) {
+  // Block 0 branches to return block, defining $v0 in its branch delay slot:
+  std::vector<uint32_t> words = {
+      0x10000002,  // 00: b     +2 -> 0x8002000C
+      0x24020063,  // 04: addiu $v0, $zero, 99
+      0x00000000,  // 08: nop (padding)
+      0x03E00008,  // 0C: jr    $ra
+      0x00000000,  // 10: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0LoopAccumulatorReturned) {
+  // Loop accumulator pattern: $v0 is updated in loop and returned at exit
+  std::vector<uint32_t> words = {
+      0x00001021,  // 00: addu  $v0, $zero, $zero
+      0x2408000A,  // 04: addiu $t0, $zero, 10
+      0x00481021,  // 08: addu  $v0, $v0, $t0
+      0x2108FFFF,  // 0C: addiu $t0, $t0, -1
+      0x1D00FFFD,  // 10: bgtz  $t0, -3 -> 0x80020008
+      0x00000000,  // 14: nop
+      0x03E00008,  // 18: jr    $ra
+      0x00000000,  // 1C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsV0WithSymbolIndexLookup) {
+  // Function calls 0x80045678, mapped to "ReadHardwareStatus" in SymbolIndex
+  std::string textproto = R"pb(
+    entries { name: "ReadHardwareStatus" address: 0x80045678 type: SYMBOL_FUNC }
+  )pb";
+  auto index_or = SymbolIndex::ParseFromTextproto(textproto);
+  ASSERT_TRUE(index_or.ok());
+
+  std::vector<uint32_t> words = {
+      0x0C01159E,  // 00: jal 0x80045678
+      0x00000000,  // 04: nop
+      0x03E00008,  // 08: jr  $ra
+      0x00000000,  // 0C: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+
+  // Unknown callee -> returns false
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsV0(*cfg_or, &(*index_or), nullptr));
+
+  // Callee known to return v0 -> returns true
+  absl::flat_hash_set<std::string> returning_v0 = {"ReadHardwareStatus"};
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsV0(*cfg_or, &(*index_or), &returning_v0));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0DoubleReturnsTrueForDoubleOps) {
+  // add.d $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x462E6000,  // add.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0DoubleReturnsFalseForSinglePrecision) {
+  // add.s $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0DoubleAcrossBlocks) {
+  // Block 0:
+  //   cvt.d.w $f0, $f2
+  //   b       .L_exit
+  //   nop
+  // Block 1 (.L_exit):
+  //   jr      $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x46801021,  // cvt.d.w $f0, $f2
+      0x10000002,  // b       +2 -> 0x80020010
+      0x00000000,  // nop
+      0x00000000,  // nop (padding)
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));  // Reachable definition in predecessor
+  EXPECT_TRUE(
+      AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));  // Reachable definition in predecessor
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0FalseWhenCallClobbers) {
+  // add.s $f0, $f12, $f14
+  // jal   func_80020100
+  // nop
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x0C008040,  // jal   0x80020100
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0TrueWhenCallFollowedByF0Def) {
+  // jal   func_80020100
+  // nop
+  // add.s $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x0C008040,  // jal   0x80020100
+      0x00000000,  // nop
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0FalseWhenV0DefinedAfterF0) {
+  // add.s $f0, $f12, $f14
+  // mfc1  $v0, $f0
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x44020000,  // mfc1  $v0, $f0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0BranchDelaySlot) {
+  // Block 0:
+  //   b     .L_exit
+  //   add.s $f0, $f12, $f14  (delay slot)
+  // Block 1 (.L_exit):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x10000002,  // b     +2 -> 0x80020010
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x00000000,  // nop
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0ReturnDelaySlot) {
+  // jr    $ra
+  // add.s $f0, $f12, $f14
+  std::vector<uint32_t> words = {
+      0x03E00008,  // jr    $ra
+      0x460E6000,  // add.s $f0, $f12, $f14
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0LoopWithBeql) {
+  // 0x80020000: beql  $a0, $zero, 0x8002000C
+  // 0x80020004: add.s $f0, $f12, $f14 (delay slot, annulled on fallthrough)
+  // 0x80020008: b     0x80020014
+  // 0x8002000C: jr    $ra
+  // 0x80020010: nop
+  // 0x80020014: jr    $ra
+  // 0x80020018: nop
+  std::vector<uint32_t> words = {
+      0x50800002,  // beql  $a0, $zero, 0x8002000C
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x10000002,  // b     0x80020014
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra (taken exit)
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra (fallthrough exit, $f0 not available)
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0MultipleExitsOneNotReturningF0) {
+  // beq   $a0, $zero, 0x80020014
+  // nop
+  // add.s $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  // jr    $ra (second exit)
+  // nop
+  std::vector<uint32_t> words = {
+      0x10800004,  // beq   $a0, $zero, 0x80020014
+      0x00000000,  // nop
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+      0x03E00008,  // jr    $ra (second exit without defining $f0)
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0MultipleExitsBothReturningF0) {
+  // beq   $a0, $zero, 0x80020014
+  // nop
+  // add.s $f0, $f12, $f14
+  // jr    $ra
+  // nop
+  // sub.s $f0, $f12, $f14
+  // jr    $ra (second exit)
+  // nop
+  std::vector<uint32_t> words = {
+      0x10800004,  // beq   $a0, $zero, 0x80020014
+      0x00000000,  // nop
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+      0x460E6001,  // sub.s $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0UsedAfterLastDefAsTemporary) {
+  // add.s $f0, $f12, $f14
+  // add.s $f2, $f0, $f12
+  // jr    $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x460E6000,  // add.s $f0, $f12, $f14
+      0x460C0080,  // add.s $f2, $f0, $f12
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0DoubleReturnsFalseForVoidOrInteger) {
+  // addu $v0, $a0, $a1
+  // jr   $ra
+  // nop
+  std::vector<uint32_t> words = {
+      0x00851021,  // addu $v0, $a0, $a1
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0(*cfg_or));
+  EXPECT_FALSE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+}
+
+TEST(AbiAnalyzerTest, DetermineReturnsF0DoubleVariousOpcodes) {
+  // Test ldc1 $f0, 0($a0)
+  std::vector<uint32_t> ldc1_words = {
+      0xD4800000,  // ldc1 $f0, 0($a0)
+      0x03E00008,  // jr   $ra
+      0x00000000,  // nop
+  };
+  auto insts = *DecodeSequence(ldc1_words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+
+  // Test sub.d $f0, $f12, $f14
+  std::vector<uint32_t> subd_words = {
+      0x462E6001,  // sub.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(subd_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+
+  // Test mul.d $f0, $f12, $f14
+  std::vector<uint32_t> muld_words = {
+      0x462E6002,  // mul.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(muld_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+
+  // Test div.d $f0, $f12, $f14
+  std::vector<uint32_t> divd_words = {
+      0x462E6003,  // div.d $f0, $f12, $f14
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(divd_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
+
+  // Test cvt.d.s $f0, $f2
+  std::vector<uint32_t> cvtds_words = {
+      0x46001021,  // cvt.d.s $f0, $f2
+      0x03E00008,  // jr      $ra
+      0x00000000,  // nop
+  };
+  insts = *DecodeSequence(cvtds_words, 0x80020000);
+  cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 }
 
 }  // namespace

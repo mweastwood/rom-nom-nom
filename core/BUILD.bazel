@@ -238,6 +238,19 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "assembly_aligner_test",
+    srcs = ["assembly_aligner_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":assembly_aligner",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "compiler",
     srcs = ["compiler.cc"],
@@ -448,6 +461,20 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "candidate_compiler_test",
+    srcs = ["candidate_compiler_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":candidate_compiler",
+        ":endian",
+        ":mips",
+        ":symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 

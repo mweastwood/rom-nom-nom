@@ -86,6 +86,20 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "control_flow_pattern_matcher_test",
+    srcs = ["control_flow_pattern_matcher_test.cc"],
+    deps = [
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "symbol_folder",
     srcs = ["symbol_folder.cc"],
@@ -184,8 +198,11 @@ cc_test(
     srcs = ["abi_analyzer_test.cc"],
     deps = [
         ":abi_analyzer",
+        ":expression_builder",
         "//core:control_flow_graph",
         "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -211,6 +228,7 @@ cc_test(
     srcs = ["branch_condition_builder_test.cc"],
     deps = [
         ":branch_condition_builder",
+        ":expression_builder",
         "//core:control_flow_graph",
         "//core:mips",
         "@googletest//:gtest",
@@ -257,8 +275,39 @@ cc_test(
         ":abi_analyzer",
         ":branch_condition_builder",
         ":expression_builder",
+        "//core:control_flow_graph",
         "//core:mips",
         "//core:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "call_lifter_test",
+    srcs = ["call_lifter_test.cc"],
+    deps = [
+        ":abi_analyzer",
+        ":expression_builder",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cop1_lifter_test",
+    srcs = ["cop1_lifter_test.cc"],
+    deps = [
+        ":expression_builder",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -320,7 +369,142 @@ cc_test(
         ":loop_analyzer",
         "//core:c_ast",
         "//core:control_flow_graph",
+        "//core:jump_table",
         "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "variable_declaration_builder_test",
+    srcs = ["variable_declaration_builder_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ast_abi_rewriter_test",
+    srcs = ["ast_abi_rewriter_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ast_arithmetic_simplifier_test",
+    srcs = ["ast_arithmetic_simplifier_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ast_expression_folder_test",
+    srcs = ["ast_expression_folder_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ast_memory_idiom_rewriter_test",
+    srcs = ["ast_memory_idiom_rewriter_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ast_parameter_coalescer_test",
+    srcs = ["ast_parameter_coalescer_test.cc"],
+    deps = [
+        ":ast_converter",
+        ":control_flow_structurer",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ast_pass_pipeline_test",
+    srcs = ["ast_pass_pipeline_test.cc"],
+    deps = [
+        ":ast_converter",
+        "//core:c_ast",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -430,6 +614,21 @@ cc_test(
         "//core:mips",
         "//core:symbol_registry",
         "//core:target_extractor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "module_symbol_scanner_test",
+    srcs = ["module_symbol_scanner_test.cc"],
+    deps = [
+        ":function_loader",
+        ":lifter_pipeline",
+        "//core:c_ast",
+        "//core:game_config",
+        "//core:mips",
+        "//core:symbol_registry",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
