@@ -18,3 +18,14 @@ Automated bit-exactness search and compiler/AST tuning engine for lifted N64 C c
 3. **Monotonic Improvement**:
    - Candidate variations are only accepted when they strictly improve
      instruction alignment and bit-exactness score over the baseline.
+
+4. **Separation of Concerns (Lifter vs. Tuner)**:
+   - `tuner` owns compiler-specific codegen exploration (GCC 2.7.2 local
+     declaration ordering, subexpression extraction vs. inlining, commutative
+     operand swapping, condition polarity inversion, and per-function compiler
+     flags).
+   - `tuner` is designed to close the final bit-exactness gap on functions that
+     are already structurally isomorphic to the retail binary (matching stack
+     frame size, callee-saved register set, and basic-block/branch topology);
+     fundamental control-flow, stack-frame, or type-recovery gaps belong in
+     `lifter/`.
