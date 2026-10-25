@@ -17,6 +17,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "lifter/branch_condition_builder.h"
+#include "lifter/cfg_de_reorg.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/expression_builder.h"
@@ -1433,6 +1434,7 @@ TEST(AstConverterTest, DaddiuStackFrameAllocationMapsIncomingStackArgsCorrectly)
       0x67BD0010,  // 18: daddiu $sp, $sp, 16
   };
   auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
   DominatorTree dom = DominatorTree::Compute(cfg);
   DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
   LoopInfo loops = LoopInfo::Analyze(cfg, dom);
@@ -1484,6 +1486,7 @@ TEST(AstConverterTest,
   words[2] = 0x54400006;  // 0x08: bnel $v0, $zero, +6 -> 0x24 (block 4)
 
   auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
   DominatorTree dom = DominatorTree::Compute(cfg);
   DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
   LoopInfo loops = LoopInfo::Analyze(cfg, dom);

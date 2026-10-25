@@ -5897,5 +5897,28 @@ void ChainedFallthroughStolenComparisonDelaySlotsInNestedGuards(
 )");
 }
 
+TEST_F(RoundTripTest, BranchLikelyDiamondWithSharedCallTailAndEarlyReturn) {
+  AssertRoundTripBitExact("BranchLikelyDiamondWithSharedCallTailAndEarlyReturn", R"(
+extern s32 eval_slot_cost(s32 id, s32 bonus);
+extern void commit_slot_cost(s32 id, s32 cost);
+
+s32 BranchLikelyDiamondWithSharedCallTailAndEarlyReturn(s32* dst, s32 kind) {
+    if (kind <= 0) {
+        goto done;
+    }
+    if (kind == 2) {
+        s32 c = eval_slot_cost((s32)dst, 2);
+        dst[0] = c + 20;
+        goto done;
+    }
+    dst[1] = eval_slot_cost((s32)dst, kind);
+    commit_slot_cost((s32)dst, dst[1] * 5);
+    return 1;
+done:
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

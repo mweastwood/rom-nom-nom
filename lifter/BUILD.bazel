@@ -105,6 +105,7 @@ cc_test(
     name = "control_flow_structurer_test",
     srcs = ["control_flow_structurer_test.cc"],
     deps = [
+        ":cfg_de_reorg",
         ":control_flow_structurer",
         ":dominator_tree",
         ":loop_analyzer",
@@ -392,6 +393,7 @@ cc_test(
         ":abi_analyzer",
         ":ast_converter",
         ":branch_condition_builder",
+        ":cfg_de_reorg",
         ":control_flow_structurer",
         ":dominator_tree",
         ":expression_builder",

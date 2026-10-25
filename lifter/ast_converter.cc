@@ -864,33 +864,6 @@ class ConverterContext {
         auto else_body = std::make_unique<CompoundStatement>();
         bool skip_branch_likely_delay =
             hoisted_loop_exit_delay_blocks_.contains(region.condition_block_id);
-        if (has_branch_likely && !region.invert_condition && cond_block != nullptr &&
-            cond_block->instructions.size() >= 2 && region.children.size() == 1 &&
-            region.children[0] != nullptr && region.children[0]->type == RegionType::kBreak) {
-          uint32_t break_id = region.children[0]->block_id;
-          bool directly_targets_break = false;
-          for (uint32_t succ : cond_block->successors) {
-            if (succ == break_id) {
-              directly_targets_break = true;
-              break;
-            }
-          }
-          if (!directly_targets_break) {
-            const auto* break_blk = cfg_.GetBlock(break_id);
-            if (break_blk != nullptr && break_blk->instructions.size() == 1 &&
-                break_blk->successors.size() == 1) {
-              const auto& delay_inst = cond_block->instructions.back();
-              const auto& break_inst = break_blk->instructions.front();
-              if (!delay_inst.IsNop() && delay_inst.opcode == break_inst.opcode &&
-                  delay_inst.rs == break_inst.rs && delay_inst.rt == break_inst.rt &&
-                  delay_inst.rd == break_inst.rd && delay_inst.immediate == break_inst.immediate &&
-                  delay_inst.fs == break_inst.fs && delay_inst.ft == break_inst.ft &&
-                  delay_inst.fd == break_inst.fd) {
-                skip_branch_likely_delay = true;
-              }
-            }
-          }
-        }
         if (has_branch_likely && !skip_branch_likely_delay && cond_block != nullptr) {
           auto delay_stmts = LiftDelaySlotFromBlock(*cond_block);
           for (auto& s : delay_stmts) {
@@ -1109,33 +1082,6 @@ class ConverterContext {
         auto else_body = std::make_unique<CompoundStatement>();
         bool skip_branch_likely_delay =
             hoisted_loop_exit_delay_blocks_.contains(region.condition_block_id);
-        if (has_branch_likely && !region.invert_condition && cond_block != nullptr &&
-            cond_block->instructions.size() >= 2 && region.children.size() == 1 &&
-            region.children[0] != nullptr && region.children[0]->type == RegionType::kBreak) {
-          uint32_t break_id = region.children[0]->block_id;
-          bool directly_targets_break = false;
-          for (uint32_t succ : cond_block->successors) {
-            if (succ == break_id) {
-              directly_targets_break = true;
-              break;
-            }
-          }
-          if (!directly_targets_break) {
-            const auto* break_blk = cfg_.GetBlock(break_id);
-            if (break_blk != nullptr && break_blk->instructions.size() == 1 &&
-                break_blk->successors.size() == 1) {
-              const auto& delay_inst = cond_block->instructions.back();
-              const auto& break_inst = break_blk->instructions.front();
-              if (!delay_inst.IsNop() && delay_inst.opcode == break_inst.opcode &&
-                  delay_inst.rs == break_inst.rs && delay_inst.rt == break_inst.rt &&
-                  delay_inst.rd == break_inst.rd && delay_inst.immediate == break_inst.immediate &&
-                  delay_inst.fs == break_inst.fs && delay_inst.ft == break_inst.ft &&
-                  delay_inst.fd == break_inst.fd) {
-                skip_branch_likely_delay = true;
-              }
-            }
-          }
-        }
         if (has_branch_likely && !skip_branch_likely_delay && cond_block != nullptr) {
           auto delay_stmts = LiftDelaySlotFromBlock(*cond_block);
           for (auto& s : delay_stmts) {

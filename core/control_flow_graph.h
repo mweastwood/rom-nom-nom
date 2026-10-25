@@ -66,6 +66,7 @@ class ControlFlowGraph {
   const std::vector<BasicBlock>& Blocks() const { return blocks_; }
   std::vector<BasicBlock>& MutableBlocks() { return blocks_; }
   const std::vector<CfgEdge>& Edges() const { return edges_; }
+  std::vector<CfgEdge>& MutableEdges() { return edges_; }
   const std::vector<JumpTable>& JumpTables() const { return jump_tables_; }
 
   const BasicBlock* GetBlock(uint32_t id) const;

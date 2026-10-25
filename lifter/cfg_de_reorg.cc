@@ -1,5 +1,6 @@
 #include "lifter/cfg_de_reorg.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -29,6 +30,68 @@ Instruction MakeNopInstruction(uint32_t vram,
   nop.unscheduled_clobber_reg = unscheduled_clobber_reg;
   nop.shift_amount = 0;
   return nop;
+}
+
+Opcode ToNonLikelyBranchOpcode(Opcode op) {
+  switch (op) {
+    case Opcode::kBeql:
+      return Opcode::kBeq;
+    case Opcode::kBnel:
+      return Opcode::kBne;
+    case Opcode::kBlezl:
+      return Opcode::kBlez;
+    case Opcode::kBgtzl:
+      return Opcode::kBgtz;
+    case Opcode::kBltzl:
+      return Opcode::kBltz;
+    case Opcode::kBgezl:
+      return Opcode::kBgez;
+    case Opcode::kBc1tl:
+      return Opcode::kBc1t;
+    case Opcode::kBc1fl:
+      return Opcode::kBc1f;
+    default:
+      return op;
+  }
+}
+
+bool SameDelayInstructionEffect(const Instruction& a, const Instruction& b) {
+  return !a.IsNop() && a.opcode == b.opcode && a.rs == b.rs && a.rt == b.rt && a.rd == b.rd &&
+         a.immediate == b.immediate && a.fs == b.fs && a.ft == b.ft && a.fd == b.fd &&
+         a.shift_amount == b.shift_amount;
+}
+
+void RetargetBranchEdge(ControlFlowGraph* cfg, uint32_t from_block_id, uint32_t old_to_block_id,
+                        uint32_t new_to_block_id) {
+  BasicBlock* from_blk = cfg->GetMutableBlock(from_block_id);
+  BasicBlock* old_to_blk = cfg->GetMutableBlock(old_to_block_id);
+  BasicBlock* new_to_blk = cfg->GetMutableBlock(new_to_block_id);
+  if (from_blk == nullptr || old_to_blk == nullptr || new_to_blk == nullptr) {
+    return;
+  }
+  for (uint32_t& succ : from_blk->successors) {
+    if (succ == old_to_block_id) {
+      succ = new_to_block_id;
+    }
+  }
+  for (auto& edge : from_blk->outgoing_edges) {
+    if (edge.type == EdgeType::kBranch && edge.to_block_id == old_to_block_id) {
+      edge.to_block_id = new_to_block_id;
+    }
+  }
+  for (auto& edge : cfg->MutableEdges()) {
+    if (edge.from_block_id == from_block_id && edge.type == EdgeType::kBranch &&
+        edge.to_block_id == old_to_block_id) {
+      edge.to_block_id = new_to_block_id;
+    }
+  }
+  old_to_blk->predecessors.erase(
+      std::remove(old_to_blk->predecessors.begin(), old_to_blk->predecessors.end(), from_block_id),
+      old_to_blk->predecessors.end());
+  if (std::find(new_to_blk->predecessors.begin(), new_to_blk->predecessors.end(), from_block_id) ==
+      new_to_blk->predecessors.end()) {
+    new_to_blk->predecessors.push_back(from_block_id);
+  }
 }
 
 bool IsFpuCompareOpcode(Opcode op) {
@@ -372,7 +435,87 @@ void CfgDeReorg::UnscheduleDelaySlots(ControlFlowGraph* cfg) {
       }
     }
 
-    // 2. Fallthrough / Taken Sinking (`fill_eager_delay_slots` inverse) for
+    // 2. Branch-likely (`bnezl`/`beqzl`/`bc1tl`/`bc1fl`) target-stolen delay-slot
+    // normalization onto single-predecessor taken blocks.
+    if (term.IsBranchLikely() && block.successors.size() == 2 &&
+        !jump_table_bounds_vrams.contains(term.vram)) {
+      const Loop* enclosing_loop = loop_info.GetLoopFor(block.id);
+      if (enclosing_loop == nullptr || !enclosing_loop->IsLatch(block.id)) {
+        uint32_t succ_taken = 0;
+        uint32_t succ_fallthrough = 0;
+        for (const auto& edge : block.outgoing_edges) {
+          if (edge.type == EdgeType::kBranch) {
+            succ_taken = edge.to_block_id;
+          } else if (edge.type == EdgeType::kFallthrough) {
+            succ_fallthrough = edge.to_block_id;
+          }
+        }
+        if (succ_taken == 0 && succ_fallthrough == 0) {
+          succ_taken = block.successors[0];
+          succ_fallthrough = block.successors[1];
+        }
+        BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
+        const BasicBlock* ft_block = cfg->GetBlock(succ_fallthrough);
+        if (taken_block != nullptr && succ_taken != succ_fallthrough) {
+          std::optional<uint32_t> pred_block_id;
+          for (uint32_t pred_id : taken_block->predecessors) {
+            if (pred_id == block.id) {
+              continue;
+            }
+            const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+            if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
+                pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
+                SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
+                loop_info.GetLoopFor(pred_id) == nullptr && enclosing_loop != nullptr &&
+                enclosing_loop->Contains(block.id)) {
+              pred_block_id = pred_id;
+              break;
+            }
+          }
+          if (pred_block_id.has_value()) {
+            RetargetBranchEdge(cfg, block.id, succ_taken, *pred_block_id);
+            block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+            continue;
+          }
+        }
+        bool ft_identical = ft_block != nullptr && !ft_block->instructions.empty() &&
+                            SameDelayInstructionEffect(delay_inst, ft_block->instructions.front());
+        if (taken_block != nullptr && !ft_identical && succ_taken != succ_fallthrough &&
+            succ_taken != block.id && succ_taken != cfg->EntryBlockId() &&
+            taken_block->predecessors.size() == 1 && taken_block->predecessors[0] == block.id &&
+            loop_info.GetLoopFor(succ_taken) == enclosing_loop &&
+            (enclosing_loop == nullptr || enclosing_loop->header != block.id) &&
+            IsSinkableDelaySlotInstruction(block, delay_inst) &&
+            !taken_block->instructions.empty() && !taken_block->instructions.front().IsReturn() &&
+            (DelaySlotBlocksFoldedComparison(block) ||
+             DelaySlotEnablesSuccessorFoldedComparison(*taken_block, delay_inst) ||
+             (DelaySlotConflictsWithTerminator(term, delay_inst) &&
+              !taken_block->instructions.front().IsCall()))) {
+          RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+          std::optional<Register> clobber_reg;
+          if (delay_ud.gpr_defs.size() == 1) {
+            Register def_r = delay_ud.gpr_defs[0];
+            bool uses_def_r = false;
+            for (Register u : delay_ud.gpr_uses) {
+              if (u == def_r) {
+                uses_def_r = true;
+                break;
+              }
+            }
+            if (!uses_def_r) {
+              clobber_reg = def_r;
+            }
+          }
+          taken_block->instructions.insert(taken_block->instructions.begin(), delay_inst);
+          block.instructions[block.instructions.size() - 2].opcode =
+              ToNonLikelyBranchOpcode(term.opcode);
+          block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
+          continue;
+        }
+      }
+    }
+
+    // 3. Fallthrough / Taken Sinking (`fill_eager_delay_slots` inverse) for
     // non-likely conditional branches.
     if (!term.IsBranch() || term.IsBranchLikely() || term.IsUnconditionalBranch() ||
         block.successors.size() != 2 || jump_table_bounds_vrams.contains(term.vram)) {

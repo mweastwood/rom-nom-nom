@@ -8,6 +8,7 @@
 #include "core/mips.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "lifter/cfg_de_reorg.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/loop_analyzer.h"
 
@@ -33,7 +34,8 @@ TEST(ControlFlowStructurerTest, LinearSequence) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -70,7 +72,8 @@ TEST(ControlFlowStructurerTest, IfThen) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -113,7 +116,8 @@ TEST(ControlFlowStructurerTest, IfThenElse) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -156,7 +160,8 @@ TEST(ControlFlowStructurerTest, WhileLoop) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -199,7 +204,8 @@ TEST(ControlFlowStructurerTest, DoWhileLoop) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -246,7 +252,8 @@ TEST(ControlFlowStructurerTest, MultiBlockDoWhileLoop) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -479,7 +486,8 @@ TEST(ControlFlowStructurerTest, DoWhileLoopEarlyBreak) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -532,7 +540,8 @@ TEST(ControlFlowStructurerTest, DoWhileLoopEarlyBreakInverted) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -795,7 +804,8 @@ TEST(ControlFlowStructurerTest, EmitsBreakForLoopExitInsideNestedConditional) {
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -840,7 +850,8 @@ TEST(ControlFlowStructurerTest, InnerLoopExitToSuccessorOfLatchFollowEmitsGotoIn
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -901,7 +912,8 @@ TEST(ControlFlowStructurerTest, FoldsRootEqualityPivotIntoChildDecisionTreeSwitc
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
@@ -951,7 +963,8 @@ TEST(ControlFlowStructurerTest, DoWhileEarlyExitWithBranchLikelyDelayMatchingLoo
   auto insts = *DecodeSequence(words, 0x80000000);
   auto cfg_or = ControlFlowGraph::Build(insts);
   ASSERT_TRUE(cfg_or.ok());
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   DominatorTree dt = DominatorTree::Compute(cfg);
   DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);

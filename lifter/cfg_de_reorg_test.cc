@@ -105,5 +105,40 @@ TEST(CfgDeReorgTest, SinksDelaySlotBlockingFoldedComparisonIntoFallthrough) {
   EXPECT_EQ(fallthrough->instructions[0].immediate, 5);
 }
 
+TEST(CfgDeReorgTest, NormalizesBranchLikelyTargetStolenDelaySlotOntoSinglePredecessorTakenBlock) {
+  // 0x80000000: beql  $a0, $zero, 0x80000014 (0x50800004)
+  // 0x80000004: slti  $v0, $a1, 10           (0x28A2000A)
+  // 0x80000008: addiu $v0, $zero, 1          (0x24020001)
+  // 0x8000000C: jr    $ra                    (0x03E00008)
+  // 0x80000010: nop                          (0x00000000)
+  // 0x80000014: beq   $v0, $zero, 0x80000024 (0x10400003)
+  // 0x80000018: nop                          (0x00000000)
+  // 0x8000001C: jr    $ra                    (0x03E00008)
+  // 0x80000020: addiu $v0, $zero, 2          (0x24020002)
+  // 0x80000024: jr    $ra                    (0x03E00008)
+  // 0x80000028: addiu $v0, $zero, 0          (0x24020000)
+  std::vector<uint32_t> words = {
+      0x50800004, 0x28A2000A, 0x24020001, 0x03E00008, 0x00000000, 0x10400003,
+      0x00000000, 0x03E00008, 0x24020002, 0x03E00008, 0x24020000,
+  };
+  auto insts_or = DecodeSequence(words, 0x80000000);
+  ASSERT_TRUE(insts_or.ok());
+  auto cfg_or = ControlFlowGraph::Build(*insts_or);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const auto* entry = cfg.GetBlock(0);
+  const auto* taken = cfg.GetBlock(2);
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(taken, nullptr);
+  EXPECT_EQ(entry->instructions[0].opcode, Opcode::kBeq);
+  EXPECT_TRUE(entry->instructions[1].IsNop());
+  ASSERT_GE(taken->instructions.size(), 2u);
+  EXPECT_EQ(taken->instructions[0].opcode, Opcode::kSlti);
+  EXPECT_EQ(taken->instructions[1].opcode, Opcode::kBeq);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

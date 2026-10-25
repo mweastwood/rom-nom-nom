@@ -784,29 +784,11 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
         return lf_blk != nullptr && lf_blk->successors.size() == 1 &&
                lf_blk->successors[0] == target_id;
       };
-      auto branch_likely_delay_matches_loop_follow = [&](uint32_t target_id) {
-        if (!is_successor_of_loop_follow(target_id)) return false;
-        const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
-        if (lf_blk == nullptr || lf_blk->instructions.size() != 1) return false;
-        const auto* term = block->Terminator();
-        if (term == nullptr || !term->IsBranchLikely() || block->instructions.size() < 2) {
-          return false;
-        }
-        const auto& delay_inst = block->instructions.back();
-        const auto& lf_inst = lf_blk->instructions.front();
-        return !delay_inst.IsNop() && delay_inst.opcode == lf_inst.opcode &&
-               delay_inst.rs == lf_inst.rs && delay_inst.rt == lf_inst.rt &&
-               delay_inst.rd == lf_inst.rd && delay_inst.immediate == lf_inst.immediate &&
-               delay_inst.fs == lf_inst.fs && delay_inst.ft == lf_inst.ft &&
-               delay_inst.fd == lf_inst.fd;
-      };
       if (current_loop->IsExitBlock(succ_taken) && !current_loop->IsExitBlock(succ_fallthrough)) {
         auto if_break = CreateIfThen(entry, /*invert=*/false);
         if ((follow.has_value() && succ_taken == *follow) ||
             (lf_it != loop_follow_map_.end() && succ_taken == lf_it->second)) {
           if_break->children.push_back(CreateBreak(succ_taken));
-        } else if (branch_likely_delay_matches_loop_follow(succ_taken)) {
-          if_break->children.push_back(CreateBreak(*loop_follow_target));
         } else if ((current_loop->parent != nullptr && visited_.contains(succ_taken) &&
                     succ_taken == current_loop->parent->header) ||
                    is_successor_of_loop_follow(succ_taken)) {
