@@ -67,8 +67,6 @@ constexpr AstPass kPreCanonicalizationPasses[] = {
 
 constexpr AstPass kArithmeticAndExpressionFoldingPasses[] = {
     {.name = "SimplifyShiftAddMultiplication", .run = &RunSimplifyShiftAddMultiplication},
-    {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
-    {.name = "SimplifyShiftAddMultiplication", .run = &RunSimplifyShiftAddMultiplication},
     {.name = "SimplifyReciprocalDivisionAndUnsignedFloatConversions",
      .run = &RunSimplifyReciprocalAndUnsignedFloat},
     {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
@@ -76,7 +74,6 @@ constexpr AstPass kArithmeticAndExpressionFoldingPasses[] = {
 
 constexpr AstPass kParameterAndFloatCallCoalescingPasses[] = {
     {.name = "CoalescePrologueParameterCopies", .run = &RunCoalescePrologueParameterCopies},
-    {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
     {.name = "RewriteFloatInGprAndStackCallArguments",
      .run = &RunRewriteFloatInGprAndStackCallArguments},
     {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
@@ -85,6 +82,7 @@ constexpr AstPass kParameterAndFloatCallCoalescingPasses[] = {
 constexpr AstPass kPostEarlyReturnPasses[] = {
     {.name = "SimplifyDecoupledDelaySlotEarlyReturns",
      .run = &RunSimplifyDecoupledDelaySlotEarlyReturns},
+    {.name = "SinkCommonBranchTailArgAssignments", .run = &RunSinkCommonBranchTailArgAssignments},
     {.name = "SimplifyShiftAddMultiplication", .run = &RunSimplifyShiftAddMultiplication},
     {.name = "SimplifyReciprocalDivisionAndUnsignedFloatConversions",
      .run = &RunSimplifyReciprocalAndUnsignedFloat},
@@ -125,7 +123,7 @@ void AstPassPipeline::Run(CompoundStatement* body, const AstPassContext& ctx) {
     pass.run(body, ctx);
   }
 
-  RunToFixedPoint(body, ctx, kArithmeticAndExpressionFoldingPasses, /*max_iterations=*/2);
+  RunToFixedPoint(body, ctx, kArithmeticAndExpressionFoldingPasses, /*max_iterations=*/3);
 
   RunTrimUnassignedTrailingCallArgRegisters(body, ctx);
   RunRewriteFloatInGprAndStackCallArguments(body, ctx);

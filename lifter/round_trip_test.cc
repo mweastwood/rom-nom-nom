@@ -6041,5 +6041,21 @@ s32 NonLeafWithMultipleUnusedCallReturnsAndStructInit(u16 idx, s32 x, s32 y) {
 )");
 }
 
+TEST_F(RoundTripTest, ConsolidatedPipelineCoalescesParamAndSinksSharedReturnTail) {
+  AssertRoundTripBitExact("ConsolidatedPipelineCoalescesParamAndSinksSharedReturnTail", R"(
+extern void apply_left_action(s32 base, s32 arg);
+extern void apply_right_action(s32 base, s32 arg);
+
+s32 ConsolidatedPipelineCoalescesParamAndSinksSharedReturnTail(s32 base, s32 mode, s32 arg) {
+    if (mode != 0) {
+        apply_left_action(base, arg);
+    } else {
+        apply_right_action(base, arg);
+    }
+    return base + 4;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
