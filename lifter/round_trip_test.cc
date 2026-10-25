@@ -5787,5 +5787,22 @@ void CalleeSavedFloatWithTransientDoubleScaleAcrossCalls(
 )");
 }
 
+TEST_F(RoundTripTest, DecisionTreeSwitchWithCrossJumpedCallTailAndEmptyDefault) {
+  AssertRoundTripBitExact("DecisionTreeSwitchWithCrossJumpedCallTailAndEmptyDefault", R"(
+void notify_slot_event(s32 slot, s32 code);
+
+void DecisionTreeSwitchWithCrossJumpedCallTailAndEmptyDefault(s32 mode, s32 slot) {
+    switch (mode) {
+        case 1:
+            notify_slot_event(slot, 100);
+            break;
+        case 2:
+            notify_slot_event(slot, 200);
+            break;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

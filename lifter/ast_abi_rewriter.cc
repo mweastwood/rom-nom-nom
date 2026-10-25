@@ -567,7 +567,7 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
                 }
               }
               if (prefix_ok) {
-                auto sunk_assign = std::move(then_stmts.back());
+                std::unique_ptr<CStatement> sunk_assign = std::move(then_stmts.back());
                 then_stmts.pop_back();
                 std::unique_ptr<CStatement> sunk_label;
                 if (has_join_label) {
@@ -727,7 +727,7 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
     };
     check_gotos(*root_body);
 
-    if (total_gotos == 0 || total_gotos != valid_tail_gotos) continue;
+    if (total_gotos == 0 || total_gotos != valid_tail_gotos || site.comp == nullptr) continue;
 
     int replaced_gotos = 0;
     std::function<void(CompoundStatement*, bool)> replace_gotos = [&](CompoundStatement* comp,
@@ -767,14 +767,24 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
     total_gotos = 0;
     check_gotos(*root_body);
     if (total_gotos == 0 && replaced_gotos > 0) {
-      auto& label_stmts = site.comp->MutableStatements();
-      for (size_t i = 0; i < label_stmts.size(); ++i) {
-        if (label_stmts[i]->Kind() == CStatementKind::kLabelStatement &&
-            static_cast<const LabelStatement&>(*label_stmts[i]).Label() == site.label_name) {
-          label_stmts.erase(label_stmts.begin() + i);
-          break;
+      std::function<bool(CompoundStatement*)> remove_label = [&](CompoundStatement* comp) -> bool {
+        if (comp == nullptr) return false;
+        auto& stmts = comp->MutableStatements();
+        for (size_t i = 0; i < stmts.size(); ++i) {
+          if (stmts[i]->Kind() == CStatementKind::kLabelStatement &&
+              static_cast<const LabelStatement&>(*stmts[i]).Label() == site.label_name) {
+            stmts.erase(stmts.begin() + i);
+            return true;
+          }
+          bool removed = false;
+          ForEachSubCompoundStatement(stmts[i].get(), [&](CompoundStatement* sub) {
+            if (!removed && remove_label(sub)) removed = true;
+          });
+          if (removed) return true;
         }
-      }
+        return false;
+      };
+      remove_label(root_body);
     }
   }
 }

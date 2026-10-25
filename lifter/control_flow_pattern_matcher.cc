@@ -254,6 +254,8 @@ std::optional<uint32_t> FindSwitchJoinBlock(
               successor_block_id == *follow && successor_reach_count == non_returning_count &&
               reaches[candidate_one].size() < targets.size()) {
             eliminated.insert(candidate_one);
+          } else if (reaches[successor_block_id].size() > reaches[candidate_one].size()) {
+            eliminated.insert(candidate_one);
           } else if (candidate_one_reach_count >= successor_reach_count &&
                      candidate_one_post_dominates_all_targets) {
             eliminated.insert(successor_block_id);

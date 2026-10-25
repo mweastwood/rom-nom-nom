@@ -800,5 +800,61 @@ TEST(ControlFlowPatternMatcherTest,
   EXPECT_EQ(f2u->trailing_instruction->rs, Register::kV0);
 }
 
+TEST(ControlFlowPatternMatcherTest,
+     FindSwitchJoinBlockEliminatesSubsetSharedTailInFavorOfBroaderReturnJoin) {
+  // 2-case decision tree where Case 1 (0x20) jumps to Case 2's shared tail block (0x2C),
+  // which in turn falls through to the post-switch return join block (0x34), while Default
+  // jumps directly to the return join block (0x34).
+  // Even though all paths reach the return block (0x34), FindSwitchJoinBlock must eliminate
+  // the intermediate shared tail (0x2C, reached by 2 targets) in favor of the broader
+  // post-switch join block (0x34, reached by all 3 targets).
+  std::vector<uint32_t> words = {
+      0x24010001,  // 0x00: addiu $at, $zero, 1
+      0x10810006,  // 0x04: beq   $a0, $at, +6 -> 0x20 (case 1)
+      0x00000000,  // 0x08: nop
+      0x24010002,  // 0x0C: addiu $at, $zero, 2
+      0x10810005,  // 0x10: beq   $a0, $at, +5 -> 0x28 (case 2)
+      0x00000000,  // 0x14: nop
+      0x0800000D,  // 0x18: j     0x80000034 (default -> post-switch join)
+      0x00000000,  // 0x1C: nop
+      0x2404000A,  // 0x20: addiu $a0, $zero, 10 (case 1)
+      0x0800000B,  // 0x24: j     0x8000002C (jumps to shared tail)
+      0x24040014,  // 0x28: addiu $a0, $zero, 20 (delay slot / case 2) -> wait: put nop at 0x28!
+  };
+  words = {
+      0x24010001,  // 0x00: addiu $at, $zero, 1
+      0x10810006,  // 0x04: beq   $a0, $at, +6 -> 0x20 (case 1)
+      0x00000000,  // 0x08: nop
+      0x24010002,  // 0x0C: addiu $at, $zero, 2
+      0x10810006,  // 0x10: beq   $a0, $at, +6 -> 0x2C (case 2)
+      0x00000000,  // 0x14: nop
+      0x0800000E,  // 0x18: j     0x80000038 (default -> post-switch join)
+      0x00000000,  // 0x1C: nop
+      0x2404000A,  // 0x20: addiu $a0, $zero, 10 (case 1)
+      0x0800000C,  // 0x24: j     0x80000030 (jumps to shared tail)
+      0x00000000,  // 0x28: nop
+      0x24040014,  // 0x2C: addiu $a0, $zero, 20 (case 2 falls through to 0x30)
+      0x0C000400,  // 0x30: jal   0x80001000 (shared tail for cases 1 and 2)
+      0x00000000,  // 0x34: nop
+      0x03E00008,  // 0x38: jr    $ra (post-switch join reached by cases 1, 2, and default)
+      0x00000000,  // 0x3C: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  auto join_id = FindSwitchJoinBlock(cfg, &post_dt, visited, sw->decision_blocks,
+                                     sw->target_to_cases, sw->default_target_block, std::nullopt);
+  ASSERT_TRUE(join_id.has_value());
+  const auto* join_blk = cfg.GetBlock(*join_id);
+  ASSERT_THAT(join_blk, NotNull());
+  EXPECT_EQ(join_blk->start_vram, 0x80000038u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -614,7 +614,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
           for (uint32_t pred : succ_blk->predecessors) {
             if (pred != entry && !visited_.contains(pred)) {
               const auto* pred_blk = cfg_->GetBlock(pred);
-              if (pred_blk != nullptr && pred_blk->end_vram == succ_blk->start_vram) {
+              if (pred_blk != nullptr && pred_blk->end_vram + 4 == succ_blk->start_vram) {
                 const auto* pred_term = pred_blk->Terminator();
                 if (pred_term == nullptr ||
                     (pred_term->opcode != Opcode::kJ && !pred_term->IsBranch())) {

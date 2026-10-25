@@ -1026,5 +1026,47 @@ TEST(ControlFlowStructurerTest, StructuresNestedDecisionTreeSwitchInsideOuterSwi
   EXPECT_THAT(s, HasSubstr("case 20:"));
 }
 
+TEST(ControlFlowStructurerTest,
+     EarlySwitchCaseJumpingToSharedTailWithUnvisitedFallthroughEmitsGoto) {
+  // Jump-table switch where Case 0 (0x08) jumps to a shared tail block (0x18),
+  // Case 1 (0x14) falls through into the shared tail block (0x18), and Default
+  // jumps directly to the post-switch return join block (0x20).
+  // Case 0 must emit `goto block_3` so Case 1 can fall through into `block_3`
+  // and `break;`, leaving `default:` as an empty `break;`.
+  std::vector<uint32_t> words = {
+      0x00800008,  // 0x00: jr    $a0 (block 0: switch)
+      0x00000000,  // 0x04: nop
+      0x2404000A,  // 0x08: addiu $a0, $zero, 10 (block 1: case 0)
+      0x08000006,  // 0x0C: j     0x80000018 (jumps to shared tail block 3)
+      0x00000000,  // 0x10: nop
+      0x24040014,  // 0x14: addiu $a0, $zero, 20 (block 2: case 1, falls through to 0x18)
+      0x0C000400,  // 0x18: jal   0x80001000 (block 3: shared tail, falls through to 0x20)
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20: jr    $ra (block 4: post-switch join)
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  JumpTable table;
+  table.switch_vram = 0x80000000;
+  table.default_target_vram = 0x80000020;
+  table.entries = {
+      JumpTableEntry{.case_index = 0, .case_value = 0, .target_vram = 0x80000008},
+      JumpTableEntry{.case_index = 1, .case_value = 1, .target_vram = 0x80000014},
+  };
+
+  auto cfg = *ControlFlowGraph::Build(insts, {table});
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("case 0:\n    block_1\n    goto block_3\n"));
+  EXPECT_THAT(s, HasSubstr("case 1:\n    block_2\n    block_3\n    break;\n"));
+  EXPECT_THAT(s, HasSubstr("default:\n    break;\n"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
