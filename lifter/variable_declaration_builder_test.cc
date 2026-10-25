@@ -1202,5 +1202,77 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(code, Not(HasSubstr("register f64 f20_d")));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     AccountsForNonAddressTakenScalarSpLocalsInStackFrameGapCalculation) {
+  std::vector<uint32_t> words = {
+      0x27BDFFA8,  // addiu $sp, $sp, -88
+      0xAFBF0054,  // sw    $ra, 84($sp)
+      0xAFB00030,  // sw    $s0, 48($sp)
+      0x03E00008,  // jr    $ra
+      0x27BD0058,  // addiu $sp, $sp, 88
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80001000));
+
+  // Case 1: callee_saved_gprs < 8 (e.g. 1 saved GPR), 1 non-address-taken var_sp_24 in gap [16, 48)
+  // -> GCC allocates var_sp_24 in a free register (0 stack bytes), so sp[32] fills the 32-byte gap.
+  StackFrameAnalysis frame_few_s = StackFrameAnalyzer::Analyze(cfg);
+  frame_few_s.frame_size = 88;
+  frame_few_s.outgoing_args_size = 16;
+  frame_few_s.has_calls = true;
+  frame_few_s.prologue.min_saved_reg_offset = 48;
+  frame_few_s.prologue.saved_reg_offsets[Register::kS0] = 48;
+  frame_few_s.prologue.saved_reg_offsets[Register::kRa] = 84;
+
+  auto body_few_s = std::make_unique<CompoundStatement>();
+  body_few_s->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"), CExpression::Integer(1))));
+  body_few_s->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_24"), CExpression::Integer(2))));
+  body_few_s->AddStatement(CStatement::Expression(CExpression::Call(
+      CExpression::Identifier("func_80001000"), std::vector<std::unique_ptr<CExpression>>{})));
+  body_few_s->AddStatement(CStatement::Return(CExpression::Binary(
+      "+", CExpression::Identifier("temp_s0"), CExpression::Identifier("var_sp_24"))));
+
+  std::vector<CParameter> params;
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 0}};
+  AstConverterOptions opts;
+  opts.function_name = "TestGapFewCalleeSaved";
+  opts.function_parameter_counts = &param_counts;
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame_few_s, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body_few_s)
+                  .ok());
+  EXPECT_THAT(body_few_s->ToString(), HasSubstr("u8 sp[32];"));
+
+  // Case 2: callee_saved_gprs == 9 (temp_s0..temp_s7 + fp) and 1 non-address-taken var_sp_24 in
+  // gap [16, 48) -> GCC spills var_sp_24 to 8 stack bytes, so sp[24] fills the remaining 24 bytes.
+  StackFrameAnalysis frame_all_s = frame_few_s;
+  for (int i = 0; i < 8; ++i) {
+    frame_all_s.prologue
+        .saved_reg_offsets[static_cast<Register>(static_cast<int>(Register::kS0) + i)] = 48 + i * 4;
+  }
+  frame_all_s.prologue.saved_reg_offsets[Register::kFp] = 80;
+
+  auto body_all_s = std::make_unique<CompoundStatement>();
+  for (int i = 0; i < 8; ++i) {
+    body_all_s->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier(absl::StrFormat("temp_s%d", i)), CExpression::Integer(i))));
+  }
+  body_all_s->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("fp"), CExpression::Integer(9))));
+  body_all_s->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_24"), CExpression::Integer(2))));
+  body_all_s->AddStatement(CStatement::Expression(CExpression::Call(
+      CExpression::Identifier("func_80001000"), std::vector<std::unique_ptr<CExpression>>{})));
+  body_all_s->AddStatement(CStatement::Return(CExpression::Binary(
+      "+", CExpression::Identifier("fp"), CExpression::Identifier("var_sp_24"))));
+
+  opts.function_name = "TestGapAllNineCalleeSaved";
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame_all_s, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body_all_s)
+                  .ok());
+  EXPECT_THAT(body_all_s->ToString(), HasSubstr("u8 sp[24];"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -1699,7 +1699,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
           if (target_local_size > for_loop_spill_bytes) {
             unreferenced_sp_gap_size = target_local_size - for_loop_spill_bytes;
           }
-        } else if (callee_saved_gprs < 8 && addr_taken_sp_bytes > 0) {
+        } else if (callee_saved_gprs < 8 && (addr_taken_sp_bytes > 0 || sp_locals_in_gap <= 2)) {
           uint32_t gcc_local_bytes = ((addr_taken_sp_bytes + 7u) & ~7u) + for_loop_spill_bytes;
           if (StatementContainsMaskedSignBitFloatFix(**body)) {
             gcc_local_bytes += 8u;
@@ -1707,7 +1707,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
           if (target_local_size > gcc_local_bytes) {
             unreferenced_sp_gap_size = target_local_size - gcc_local_bytes;
           }
-        } else if (callee_saved_gprs == 8 && sp_locals_in_gap <= 2 && addr_taken_sp_bytes == 0) {
+        } else if (callee_saved_gprs >= 8 && sp_locals_in_gap <= 2 && addr_taken_sp_bytes == 0) {
           uint32_t max_spill_bytes =
               static_cast<uint32_t>(sp_locals_in_gap) * 8u + for_loop_spill_bytes;
           if (target_local_size > max_spill_bytes) {

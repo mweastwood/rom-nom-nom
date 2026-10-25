@@ -663,11 +663,25 @@ struct FolderContext {
       return false;
     }
 
+    bool has_label_between_def_and_use = true;
+    if (def_stmt != nullptr) {
+      bool seen_def = false;
+      for (size_t k = 0; k <= next_idx && k < stmts.size(); ++k) {
+        if (stmts[k].get() == def_stmt) {
+          seen_def = true;
+          has_label_between_def_and_use = false;
+        } else if (seen_def && HasLabelInStmt(*stmts[k])) {
+          has_label_between_def_and_use = true;
+          break;
+        }
+      }
+    }
+
     if (IsOutgoingStackArgVar(var) && expected_uses_in_next > 0 &&
         HasCallInStmt(*stmts[next_idx]) && root_body != nullptr &&
         !HasAddressOfVarInStmt(*root_body, var)) {
       int total_uses_in_root = CountUses(*root_body, var);
-      if (total_uses_in_root == expected_uses_in_next) {
+      if (total_uses_in_root == expected_uses_in_next && !has_label_between_def_and_use) {
         return true;
       }
       int uses_in_calls = 0;
@@ -695,7 +709,6 @@ struct FolderContext {
           count_call_uses_expr(tern.FalseExpression());
         }
       };
-      bool all_call_uses_locally_defined = true;
       std::function<void(const CStatement&)> count_call_uses_stmt = [&](const CStatement& s) {
         if (s.Kind() == CStatementKind::kExpressionStatement) {
           count_call_uses_expr(static_cast<const ExpressionStatement&>(s).Expression());
@@ -703,30 +716,8 @@ struct FolderContext {
           const auto& ret = static_cast<const ReturnStatement&>(s);
           if (ret.ReturnValue() != nullptr) count_call_uses_expr(*ret.ReturnValue());
         } else if (s.Kind() == CStatementKind::kCompoundStatement) {
-          const auto& cs_stmts = static_cast<const CompoundStatement&>(s).Statements();
-          bool defined_in_comp = false;
-          for (const auto& child : cs_stmts) {
-            if (child == nullptr) continue;
-            if (child->Kind() == CStatementKind::kLabelStatement) {
-              defined_in_comp = false;
-            }
-            if (child->Kind() == CStatementKind::kExpressionStatement) {
-              const auto& es = static_cast<const ExpressionStatement&>(*child);
-              if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-                const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
-                if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
-                    static_cast<const IdentifierExpression&>(a.Lhs()).Name() == var &&
-                    CountExprUses(a.Rhs(), var) == 0) {
-                  defined_in_comp = true;
-                  continue;
-                }
-              }
-            }
-            if (child.get() != stmts[next_idx].get() && CountUses(*child, var) > 0 &&
-                !defined_in_comp) {
-              all_call_uses_locally_defined = false;
-            }
-            count_call_uses_stmt(*child);
+          for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
+            if (child != nullptr) count_call_uses_stmt(*child);
           }
         } else if (s.Kind() == CStatementKind::kIfStatement) {
           const auto& ifs = static_cast<const IfStatement&>(s);
@@ -756,26 +747,15 @@ struct FolderContext {
         }
       };
       count_call_uses_stmt(*root_body);
-      if (total_uses_in_root == uses_in_calls && all_call_uses_locally_defined) {
+      if (!has_label_between_def_and_use && total_uses_in_root == uses_in_calls &&
+          def_stmt != nullptr &&
+          IsLocallyDefinedBeforeEveryReadInRoot(*root_body, var, def_stmt, stmts[next_idx].get(),
+                                                expected_uses_in_next)) {
         return true;
       }
     }
-
-    bool has_label_between_def_and_use = true;
-    if (def_stmt != nullptr) {
-      bool seen_def = false;
-      for (size_t k = 0; k <= next_idx && k < stmts.size(); ++k) {
-        if (stmts[k].get() == def_stmt) {
-          seen_def = true;
-          has_label_between_def_and_use = false;
-        } else if (seen_def && HasLabelInStmt(*stmts[k])) {
-          has_label_between_def_and_use = true;
-          break;
-        }
-      }
-    }
     if (expected_uses_in_next > 0 && def_stmt != nullptr && root_body != nullptr &&
-        !has_label_between_def_and_use && IsCallArgVar(var) &&
+        !has_label_between_def_and_use && (IsCallArgVar(var) || IsOutgoingStackArgVar(var)) &&
         (stmts[next_idx]->Kind() == CStatementKind::kExpressionStatement ||
          stmts[next_idx]->Kind() == CStatementKind::kReturnStatement) &&
         HasCallInStmt(*stmts[next_idx]) && !HasLoopInStmt(*stmts[next_idx]) &&
@@ -866,7 +846,10 @@ struct FolderContext {
                 if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
                   const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
                   std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
-                  if (lhs_var == var && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                  const bool is_full_var_assign =
+                      a.Lhs().Kind() == CExpressionKind::kIdentifier ||
+                      (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
+                  if (lhs_var == var && is_full_var_assign) {
                     locally_defined = true;
                   }
                 }
@@ -882,7 +865,10 @@ struct FolderContext {
               if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
                 const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
                 std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
-                if (lhs_var == var && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                const bool is_full_var_assign =
+                    a.Lhs().Kind() == CExpressionKind::kIdentifier ||
+                    (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
+                if (lhs_var == var && is_full_var_assign) {
                   if (!locally_defined && CountExprUses(a.Rhs(), var) > 0) {
                     return false;
                   }
@@ -984,7 +970,11 @@ struct FolderContext {
                ts == "f64 *") {
       size = 8;
     }
-    const CExpression& addr = cast.Operand();
+    const CExpression* addr_ptr = &cast.Operand();
+    while (addr_ptr->Kind() == CExpressionKind::kCastExpression) {
+      addr_ptr = &static_cast<const CastExpression&>(*addr_ptr).Operand();
+    }
+    const CExpression& addr = *addr_ptr;
     if (addr.Kind() == CExpressionKind::kIdentifier) {
       *out_base = static_cast<const IdentifierExpression&>(addr).Name();
       *out_offset = 0;
@@ -1006,14 +996,19 @@ struct FolderContext {
       if ((bin.Op() == "+" || bin.Op() == "-") &&
           bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
         int64_t off = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
-        if (bin.Lhs().Kind() == CExpressionKind::kIdentifier) {
-          *out_base = static_cast<const IdentifierExpression&>(bin.Lhs()).Name();
+        const CExpression* lhs_ptr = &bin.Lhs();
+        while (lhs_ptr->Kind() == CExpressionKind::kCastExpression) {
+          lhs_ptr = &static_cast<const CastExpression&>(*lhs_ptr).Operand();
+        }
+        const CExpression& lhs = *lhs_ptr;
+        if (lhs.Kind() == CExpressionKind::kIdentifier) {
+          *out_base = static_cast<const IdentifierExpression&>(lhs).Name();
           *out_offset = (bin.Op() == "-") ? -off : off;
           *out_size = size;
           return true;
         }
-        if (bin.Lhs().Kind() == CExpressionKind::kUnaryExpression) {
-          const auto& lhs_un = static_cast<const UnaryExpression&>(bin.Lhs());
+        if (lhs.Kind() == CExpressionKind::kUnaryExpression) {
+          const auto& lhs_un = static_cast<const UnaryExpression&>(lhs);
           if (lhs_un.Op() == "&" && lhs_un.Operand().Kind() == CExpressionKind::kIdentifier) {
             *out_base = static_cast<const IdentifierExpression&>(lhs_un.Operand()).Name();
             *out_offset = (bin.Op() == "-") ? -off : off;

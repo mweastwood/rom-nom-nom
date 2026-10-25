@@ -978,5 +978,72 @@ TEST(AstExpressionFolderTest, FoldsSingleUseCallArgumentTemporariesAndLoopDelayS
   EXPECT_THAT(code, HasSubstr("HelperCall(1, (temp_s0 + 16));"));
 }
 
+TEST(AstExpressionFolderTest,
+     FoldsOutgoingStackArgsInNestedBranchesAndAcrossCastStackStoresWhilePreservingMultiCallSpills) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // 1. Multi-call spill slot var_sp_84 used in two calls without redefinition must NOT be erased:
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_84"), CExpression::Integer(0x80253B00))));
+
+  // 2. var_sp_24 = *(s32*)((s32)sp + 40) folded across disjoint *(s32*)((s32)sp + 52) = temp_s0:
+  auto sp_plus_40 =
+      CExpression::Binary("+", CExpression::Cast(CType::S32(), CExpression::Identifier("sp")),
+                          CExpression::Integer(40));
+  auto sp_plus_52 =
+      CExpression::Binary("+", CExpression::Cast(CType::S32(), CExpression::Identifier("sp")),
+                          CExpression::Integer(52));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_24"),
+      CExpression::Unary("*",
+                         CExpression::Cast(CType::S32().MakePointer(), std::move(sp_plus_40))))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*", CExpression::Cast(CType::S32().MakePointer(), std::move(sp_plus_52))),
+      CExpression::Identifier("temp_s0"))));
+  std::vector<std::unique_ptr<CExpression>> call1_args;
+  call1_args.push_back(CExpression::Identifier("var_sp_24"));
+  call1_args.push_back(CExpression::Identifier("var_sp_84"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("CallOne"), std::move(call1_args))));
+
+  // 3. Float bitcast outgoing stack arg *(f32*)&var_sp_16 inside nested if branch:
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::F32().MakePointer(),
+                                 CExpression::Unary("&", CExpression::Identifier("var_sp_16")))),
+      CExpression::Identifier("f0"))));
+  std::vector<std::unique_ptr<CExpression>> call2_args;
+  call2_args.push_back(CExpression::Identifier("var_sp_16"));
+  call2_args.push_back(CExpression::Identifier("var_sp_84"));
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("CallTwo"), std::move(call2_args))));
+
+  auto else_branch = std::make_unique<CompoundStatement>();
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_16"), CExpression::Integer(7))));
+  std::vector<std::unique_ptr<CExpression>> call3_args;
+  call3_args.push_back(CExpression::Identifier("var_sp_16"));
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("CallThree"), std::move(call3_args))));
+
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_branch), std::move(else_branch)));
+  body->AddStatement(CStatement::Return());
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_24")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("var_sp_16")));
+  EXPECT_THAT(code, HasSubstr("CallOne(*(s32*)((s32)sp + 40), var_sp_84);"));
+  EXPECT_THAT(code, HasSubstr("CallTwo(*(s32*)&f0, var_sp_84);"));
+  EXPECT_THAT(code, HasSubstr("CallThree(7);"));
+  EXPECT_THAT(code, HasSubstr("var_sp_84 = 0x80253B00;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
