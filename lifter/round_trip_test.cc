@@ -5872,5 +5872,30 @@ s32 NarrowU16ParameterIndexedStructSetupAcrossCalls(u16 idx, s32 base_val) {
 )");
 }
 
+TEST_F(RoundTripTest, ChainedFallthroughStolenComparisonDelaySlotsInNestedGuards) {
+  AssertRoundTripBitExact("ChainedFallthroughStolenComparisonDelaySlotsInNestedGuards", R"(
+extern u16 g_actor_flags[];
+extern void dispatch_actor_update(s32 idx, s32 state, s32 flags);
+
+void ChainedFallthroughStolenComparisonDelaySlotsInNestedGuards(
+    s32 idx, s32 state, s32 mode) {
+    if ((u32)idx < 192) {
+        u16 flags = g_actor_flags[idx];
+        if ((flags & 1) != 0) {
+            if ((flags & 2) == 0) {
+                if (mode != 254) {
+                    if (mode < 255) {
+                        if (mode != 253) {
+                            dispatch_actor_update(idx, state, flags);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

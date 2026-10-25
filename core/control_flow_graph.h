@@ -64,10 +64,12 @@ class ControlFlowGraph {
   // Accessors
   uint32_t EntryBlockId() const { return entry_block_id_; }
   const std::vector<BasicBlock>& Blocks() const { return blocks_; }
+  std::vector<BasicBlock>& MutableBlocks() { return blocks_; }
   const std::vector<CfgEdge>& Edges() const { return edges_; }
   const std::vector<JumpTable>& JumpTables() const { return jump_tables_; }
 
   const BasicBlock* GetBlock(uint32_t id) const;
+  BasicBlock* GetMutableBlock(uint32_t id);
   const BasicBlock* FindBlockByVram(uint32_t vram) const;
 
   // Graph Traversal Algorithms

@@ -285,23 +285,27 @@ std::optional<FoldedComparison> BranchConditionBuilder::FindFoldedComparison(
   bool delay_clobbers_cond = false;
   if (branch_idx + 1 < static_cast<int>(instructions.size())) {
     const auto& delay = instructions[branch_idx + 1];
-    RegisterUseDef delay_ud = GetInstructionUseDef(delay);
-    bool delay_uses_cond = false;
-    for (Register r : delay_ud.gpr_uses) {
-      if (r == *cond_reg) {
-        delay_uses_cond = true;
-        break;
-      }
-    }
-    bool delay_defs_cond = false;
-    for (Register r : delay_ud.gpr_defs) {
-      if (r == *cond_reg) {
-        delay_defs_cond = true;
-        break;
-      }
-    }
-    if (!delay_uses_cond && delay_defs_cond) {
+    if (delay.IsNop() && delay.unscheduled_clobber_reg == *cond_reg) {
       delay_clobbers_cond = true;
+    } else {
+      RegisterUseDef delay_ud = GetInstructionUseDef(delay);
+      bool delay_uses_cond = false;
+      for (Register r : delay_ud.gpr_uses) {
+        if (r == *cond_reg) {
+          delay_uses_cond = true;
+          break;
+        }
+      }
+      bool delay_defs_cond = false;
+      for (Register r : delay_ud.gpr_defs) {
+        if (r == *cond_reg) {
+          delay_defs_cond = true;
+          break;
+        }
+      }
+      if (!delay_uses_cond && delay_defs_cond) {
+        delay_clobbers_cond = true;
+      }
     }
   }
 

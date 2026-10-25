@@ -348,6 +348,7 @@ struct Instruction {
   std::optional<Register> rd;
   std::optional<Register> rs;
   std::optional<Register> rt;
+  std::optional<Register> unscheduled_clobber_reg;
 
   // Floating-point register operands (COP1)
   std::optional<FpRegister> fd;

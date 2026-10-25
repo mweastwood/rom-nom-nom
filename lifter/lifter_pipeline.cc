@@ -23,6 +23,7 @@
 #include "lifter/abi_analyzer.h"
 #include "lifter/ast_converter.h"
 #include "lifter/c_emitter.h"
+#include "lifter/cfg_de_reorg.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/function_loader.h"
@@ -146,7 +147,8 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   if (!cfg_or.ok()) {
     return cfg_or.status();
   }
-  const auto& cfg = *cfg_or;
+  auto& cfg = *cfg_or;
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
 
   // 2. Compute Dominator Trees
   DominatorTree dom_tree = DominatorTree::Compute(cfg);

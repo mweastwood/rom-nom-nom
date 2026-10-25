@@ -33,6 +33,7 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
   if (b == nullptr || b->instructions.empty() || b->instructions.size() > 3) return false;
   for (const auto& inst : b->instructions) {
     if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) return false;
+    if (inst.IsNop() && inst.unscheduled_clobber_reg.has_value()) return false;
     if (inst.IsBranch() || inst.IsNop()) continue;
     if (inst.rd.has_value() && *inst.rd != Register::kZero && *inst.rd != Register::kAt) {
       return false;

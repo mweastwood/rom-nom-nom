@@ -404,6 +404,13 @@ const BasicBlock* ControlFlowGraph::GetBlock(uint32_t id) const {
   return nullptr;
 }
 
+BasicBlock* ControlFlowGraph::GetMutableBlock(uint32_t id) {
+  if (id < blocks_.size()) {
+    return &blocks_[id];
+  }
+  return nullptr;
+}
+
 const BasicBlock* ControlFlowGraph::FindBlockByVram(uint32_t vram) const {
   auto it = vram_to_block_index_.find(vram);
   if (it != vram_to_block_index_.end()) {

@@ -51,6 +51,35 @@ cc_test(
 )
 
 cc_library(
+    name = "cfg_de_reorg",
+    srcs = ["cfg_de_reorg.cc"],
+    hdrs = ["cfg_de_reorg.h"],
+    deps = [
+        ":abi_analyzer",
+        ":branch_condition_builder",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:register_tracker",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "cfg_de_reorg_test",
+    srcs = ["cfg_de_reorg_test.cc"],
+    deps = [
+        ":cfg_de_reorg",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "control_flow_structurer",
     srcs = [
         "control_flow_pattern_matcher.cc",
@@ -584,6 +613,7 @@ cc_library(
         ":abi_analyzer",
         ":ast_converter",
         ":c_emitter",
+        ":cfg_de_reorg",
         ":control_flow_structurer",
         ":dominator_tree",
         ":function_loader",
