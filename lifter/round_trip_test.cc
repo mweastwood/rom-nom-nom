@@ -5804,5 +5804,48 @@ void DecisionTreeSwitchWithCrossJumpedCallTailAndEmptyDefault(s32 mode, s32 slot
 )");
 }
 
+TEST_F(RoundTripTest, WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter) {
+  AssertRoundTripBitExact("WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter", R"(
+typedef struct {
+    s32 id;
+    s32 pad;
+    s32 flags;
+    s32 mode;
+} StreamReq;
+
+typedef struct {
+    u8 active;
+    u8 pad[15];
+    s32 total;
+} StreamHandle;
+
+void lock_stream_bus(s32 enable);
+void reset_stream_bus(void);
+StreamHandle* open_stream_handle(s32 id, s32 flags, s32 mode);
+void report_stream_open_error(s32 id);
+s32 read_stream_chunk(StreamHandle* h, s32* chunk_hdr);
+
+s32 WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter(StreamReq* req) {
+    StreamHandle* h;
+    s32 count;
+    s32 chunk[8];
+    lock_stream_bus(1);
+    reset_stream_bus();
+    h = open_stream_handle(req->id, req->flags, req->mode);
+    if (h == 0) {
+        report_stream_open_error(req->id);
+    }
+    count = 0;
+    while (read_stream_chunk(h, chunk) != 0) {
+        count++;
+        h->total = chunk[2];
+    }
+    h->active = 0;
+    lock_stream_bus(0);
+    return count;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

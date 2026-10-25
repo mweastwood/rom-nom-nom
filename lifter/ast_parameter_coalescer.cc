@@ -677,10 +677,112 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
                 break;
               }
             }
+            bool all_lower_s_regs_used = false;
+            if (lhs.size() == 7 && absl::StartsWith(lhs, "temp_s") && lhs[6] >= '0' &&
+                lhs[6] <= '7' && !StatementReferencesVariable(*comp, "fp")) {
+              int lhs_s_idx = lhs[6] - '0';
+              all_lower_s_regs_used = true;
+              for (int s_idx = 0; s_idx < lhs_s_idx; ++s_idx) {
+                std::string candidate_s = absl::StrCat("temp_s", s_idx);
+                bool used = !coalesced_aliases.contains(candidate_s) &&
+                            StatementReferencesVariable(*comp, candidate_s);
+                if (!used) {
+                  all_lower_s_regs_used = false;
+                  break;
+                }
+              }
+            }
+            bool used_across_call_before_reassignment = false;
+            if (all_lower_s_regs_used && parameters.size() == 1) {
+              auto check_bare_deref_and_offset = [&](const CStatement& st, bool* bare_deref,
+                                                     bool* offset_add) {
+                std::function<void(const CExpression&)> walk_e = [&](const CExpression& e) {
+                  if (e.Kind() == CExpressionKind::kUnaryExpression) {
+                    const auto& u = static_cast<const UnaryExpression&>(e);
+                    if (u.Op() == "*" && u.Operand().Kind() == CExpressionKind::kCastExpression) {
+                      const auto& c = static_cast<const CastExpression&>(u.Operand());
+                      if (c.Operand().Kind() == CExpressionKind::kIdentifier &&
+                          static_cast<const IdentifierExpression&>(c.Operand()).Name() == lhs) {
+                        *bare_deref = true;
+                      }
+                    }
+                    walk_e(u.Operand());
+                  } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+                    const auto& b = static_cast<const BinaryExpression&>(e);
+                    if ((b.Op() == "+" || b.Op() == "-") &&
+                        b.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                        ExpressionUsesVariable(b.Lhs(), lhs)) {
+                      *offset_add = true;
+                    }
+                    walk_e(b.Lhs());
+                    walk_e(b.Rhs());
+                  } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+                    const auto& a_expr = static_cast<const AssignmentExpression&>(e);
+                    walk_e(a_expr.Lhs());
+                    walk_e(a_expr.Rhs());
+                  } else if (e.Kind() == CExpressionKind::kCastExpression) {
+                    walk_e(static_cast<const CastExpression&>(e).Operand());
+                  } else if (e.Kind() == CExpressionKind::kCallExpression) {
+                    for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
+                      if (arg != nullptr) walk_e(*arg);
+                    }
+                  } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
+                    const auto& t = static_cast<const TernaryExpression&>(e);
+                    walk_e(t.Condition());
+                    walk_e(t.TrueExpression());
+                    walk_e(t.FalseExpression());
+                  }
+                };
+                std::function<void(const CStatement&)> walk_s = [&](const CStatement& s_node) {
+                  if (s_node.Kind() == CStatementKind::kExpressionStatement) {
+                    walk_e(static_cast<const ExpressionStatement&>(s_node).Expression());
+                  } else if (s_node.Kind() == CStatementKind::kCompoundStatement) {
+                    for (const auto& ch :
+                         static_cast<const CompoundStatement&>(s_node).Statements()) {
+                      if (ch != nullptr) walk_s(*ch);
+                    }
+                  } else if (s_node.Kind() == CStatementKind::kIfStatement) {
+                    const auto& ifs = static_cast<const IfStatement&>(s_node);
+                    walk_e(ifs.Condition());
+                    walk_s(ifs.ThenBranch());
+                    if (ifs.ElseBranch() != nullptr) walk_s(*ifs.ElseBranch());
+                  }
+                };
+                walk_s(st);
+              };
+              bool saw_call = false;
+              bool saw_bare_deref = false;
+              bool saw_offset_add = false;
+              for (size_t post = i + 1; post < comp->Statements().size(); ++post) {
+                const CStatement* post_s = comp->Statements()[post].get();
+                if (post_s == nullptr) continue;
+                if (post_s->Kind() == CStatementKind::kExpressionStatement) {
+                  const auto& post_es = static_cast<const ExpressionStatement&>(*post_s);
+                  if (post_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                    const auto& post_a =
+                        static_cast<const AssignmentExpression&>(post_es.Expression());
+                    if (post_a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                        static_cast<const IdentifierExpression&>(post_a.Lhs()).Name() == lhs) {
+                      break;
+                    }
+                  }
+                }
+                if (saw_call && StatementReferencesVariable(*post_s, lhs)) {
+                  check_bare_deref_and_offset(*post_s, &saw_bare_deref, &saw_offset_add);
+                  if (saw_bare_deref && saw_offset_add) {
+                    used_across_call_before_reassignment = true;
+                    break;
+                  }
+                }
+                if (StatementHasCall(*post_s)) {
+                  saw_call = true;
+                }
+              }
+            }
             bool s_reg_mutated_param_coalesce_ok =
-                is_s_reg && is_in_call_free_prologue && !lhs_addr_taken && other_param_used &&
-                !has_other_s_regs && StatementHasCall(*comp) &&
-                CountIdentifierOccurrencesInStatement(*comp, rhs) == 1;
+                is_s_reg && is_in_call_free_prologue && !lhs_addr_taken &&
+                ((other_param_used && !has_other_s_regs) || used_across_call_before_reassignment) &&
+                StatementHasCall(*comp) && CountIdentifierOccurrencesInStatement(*comp, rhs) == 1;
             if (!is_assigned(rhs) && v_copy_ok &&
                 (is_homed_param_slot ? homed_param_coalesce_ok
                                      : ((count_assignments(lhs) == 1 && !lhs_addr_taken) ||
@@ -1253,7 +1355,8 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         }
         case CStatementKind::kWhileStatement: {
           const auto& ws = static_cast<const WhileStatement&>(s);
-          if (!*definitely_written && !has_goto && parameters.size() <= 4 && StatementHasCall(ws) &&
+          if (!*definitely_written && !saw_call_before_write && !has_goto &&
+              parameters.size() <= 4 && StatementHasCall(ws) &&
               prologue_copy_lhs == absl::StrCat("temp_s", param.name.substr(3))) {
             return !StatementReferencesVariable(s, param.name);
           }
@@ -1399,6 +1502,21 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
           any_s_split_coalesced = true;
         }
         ++matching_s_splits;
+      }
+      if (parameters.size() == 1 && StatementHasCall(*body)) {
+        bool lhs_reassigned_later = false;
+        for (size_t k = *prologue_copy_idx + 1; k < stmts.size(); ++k) {
+          if (stmts[k] != nullptr && StatementModifiesVariable(*stmts[k], prologue_copy_lhs)) {
+            lhs_reassigned_later = true;
+            break;
+          }
+        }
+        if (lhs_reassigned_later) {
+          CoalescePrologueParameterCopies(body, parameters, frame_size);
+          if (!StatementReferencesVariable(*body, prologue_copy_lhs)) {
+            any_s_split_coalesced = true;
+          }
+        }
       }
     }
   }

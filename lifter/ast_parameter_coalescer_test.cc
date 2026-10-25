@@ -709,5 +709,50 @@ TEST(AstParameterCoalescerTest,
   EXPECT_THAT(code, HasSubstr("func_80001000(temp_a0);"));
 }
 
+TEST(AstParameterCoalescerTest,
+     CoalescesReassignedHigherCalleeSavedParamCopyWithBareAndOffsetDerefsAcrossCall) {
+  CompoundStatement body;
+  // temp_s1 = arg0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"), CExpression::Identifier("arg0"))));
+  // arg0 = 1;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg0"), CExpression::Integer(1))));
+  // func_80001000(arg0);
+  {
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Identifier("arg0"));
+    body.AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("func_80001000"), std::move(args))));
+  }
+  // temp_s0 = func_80002000(*(s32*)temp_s1, *(s32*)(temp_s1 + 8));
+  {
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Unary(
+        "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("temp_s1"))));
+    args.push_back(CExpression::Unary(
+        "*", CExpression::Cast(CType{"s32", false, 1},
+                               CExpression::Binary("+", CExpression::Identifier("temp_s1"),
+                                                   CExpression::Integer(8)))));
+    body.AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_s0"),
+        CExpression::Call(CExpression::Identifier("func_80002000"), std::move(args)))));
+  }
+  // temp_s1 = 0;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"), CExpression::Integer(0))));
+  // return temp_s1 + temp_s0;
+  body.AddStatement(CStatement::Return(CExpression::Binary("+", CExpression::Identifier("temp_s1"),
+                                                           CExpression::Identifier("temp_s0"))));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  EXPECT_TRUE(SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/32));
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("temp_s1")));
+  EXPECT_THAT(code, HasSubstr("func_80002000(*(s32*)arg0, *(s32*)(arg0 + 8))"));
+  EXPECT_THAT(code, HasSubstr("arg0 = 0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

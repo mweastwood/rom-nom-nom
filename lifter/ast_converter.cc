@@ -862,7 +862,8 @@ class ConverterContext {
 
         auto then_body = std::make_unique<CompoundStatement>();
         auto else_body = std::make_unique<CompoundStatement>();
-        bool skip_branch_likely_delay = false;
+        bool skip_branch_likely_delay =
+            hoisted_loop_exit_delay_blocks_.contains(region.condition_block_id);
         if (has_branch_likely && !region.invert_condition && cond_block != nullptr &&
             cond_block->instructions.size() >= 2 && region.children.size() == 1 &&
             region.children[0] != nullptr && region.children[0]->type == RegionType::kBreak) {
@@ -1106,7 +1107,8 @@ class ConverterContext {
 
         auto then_body = std::make_unique<CompoundStatement>();
         auto else_body = std::make_unique<CompoundStatement>();
-        bool skip_branch_likely_delay = false;
+        bool skip_branch_likely_delay =
+            hoisted_loop_exit_delay_blocks_.contains(region.condition_block_id);
         if (has_branch_likely && !region.invert_condition && cond_block != nullptr &&
             cond_block->instructions.size() >= 2 && region.children.size() == 1 &&
             region.children[0] != nullptr && region.children[0]->type == RegionType::kBreak) {
@@ -1345,12 +1347,65 @@ class ConverterContext {
             }
           }
         } else if (region.loop_type == LoopType::kInfinite) {
+          std::optional<uint32_t> hoisted_exit_cond_block_id;
+          if (!region.children.empty() && region.children[0]) {
+            int outer_breaks = 0;
+            bool has_goto = false;
+            std::optional<uint32_t> sole_likely_break_cond_id;
+            std::optional<uint32_t> sole_likely_break_target_id;
+            auto scan_breaks = [&](const auto& self, const StructuredRegion& r) -> void {
+              if (r.type == RegionType::kGoto) {
+                has_goto = true;
+                return;
+              }
+              if (r.type == RegionType::kBreak) {
+                ++outer_breaks;
+                return;
+              }
+              if (r.type == RegionType::kLoop || r.type == RegionType::kSwitch) return;
+              if (r.type == RegionType::kIfThen && !r.invert_condition && r.condition_op.empty() &&
+                  r.children.size() == 1 && r.children[0] != nullptr &&
+                  r.children[0]->type == RegionType::kBreak) {
+                ++outer_breaks;
+                const auto* cb = cfg_.GetBlock(r.condition_block_id);
+                if (cb != nullptr && cb->instructions.size() >= 2 && cb->Terminator() != nullptr &&
+                    cb->Terminator()->IsBranchLikely() && !cb->instructions.back().IsNop()) {
+                  sole_likely_break_cond_id = r.condition_block_id;
+                  sole_likely_break_target_id = r.children[0]->block_id;
+                }
+                return;
+              }
+              for (const auto& child : r.children) {
+                if (child) self(self, *child);
+              }
+            };
+            scan_breaks(scan_breaks, *region.children[0]);
+            if (!has_goto && outer_breaks == 1 && sole_likely_break_cond_id.has_value()) {
+              hoisted_exit_cond_block_id = *sole_likely_break_cond_id;
+              hoisted_loop_exit_delay_blocks_.insert(*hoisted_exit_cond_block_id);
+              if (sole_likely_break_target_id.has_value()) {
+                hoisted_loop_exit_break_blocks_.insert(*sole_likely_break_target_id);
+              }
+            }
+          }
           auto loop_body = std::make_unique<CompoundStatement>();
           if (!region.children.empty() && region.children[0]) {
             ConvertRegion(*region.children[0], loop_body.get());
           }
           target_block->AddStatement(
               CStatement::While(CExpression::Integer(1), std::move(loop_body)));
+          if (hoisted_exit_cond_block_id.has_value()) {
+            const auto* exit_cb = cfg_.GetBlock(*hoisted_exit_cond_block_id);
+            if (exit_cb != nullptr) {
+              auto delay_stmts = LiftDelaySlotFromBlock(*exit_cb);
+              for (auto& s : delay_stmts) {
+                auto cs = AstConverter::ConvertStatement(s);
+                if (cs != nullptr) {
+                  target_block->AddStatement(std::move(cs));
+                }
+              }
+            }
+          }
         } else {
           // Pre-tested while loop
           const auto* header_block = cfg_.GetBlock(region.loop_header);
@@ -1460,6 +1515,18 @@ class ConverterContext {
             }
           }
 
+          auto has_outer_break_in_region = [](const auto& self, const StructuredRegion& r) -> bool {
+            if (r.type == RegionType::kBreak) return true;
+            if (r.type == RegionType::kLoop || r.type == RegionType::kSwitch) return false;
+            for (const auto& child : r.children) {
+              if (child && self(self, *child)) return true;
+            }
+            return false;
+          };
+          const bool body_has_outer_break =
+              !region.children.empty() && region.children[0] &&
+              has_outer_break_in_region(has_outer_break_in_region, *region.children[0]);
+
           if (can_inline_pre_cond) {
             auto raw_cond = header_block != nullptr
                                 ? BranchConditionBuilder::ExtractBranchCondition(
@@ -1474,6 +1541,8 @@ class ConverterContext {
                     : nullptr;
             bool has_delay = (delay_inst != nullptr && !delay_inst->IsNop());
             bool emit_in_loop = has_delay && (!has_branch_likely || !branch_taken_is_break);
+            bool emit_after_loop =
+                has_delay && (has_branch_likely && branch_taken_is_break) && !body_has_outer_break;
 
             if (emit_in_loop) {
               auto delay_stmts = LiftInstructionsHelper(absl::MakeSpan(delay_inst, 1));
@@ -1488,6 +1557,15 @@ class ConverterContext {
               ConvertRegion(*region.children[0], loop_body.get());
             }
             target_block->AddStatement(CStatement::While(std::move(cond), std::move(loop_body)));
+            if (emit_after_loop) {
+              auto delay_stmts = LiftInstructionsHelper(absl::MakeSpan(delay_inst, 1));
+              for (auto& s : delay_stmts) {
+                auto cs = AstConverter::ConvertStatement(s);
+                if (cs != nullptr) {
+                  target_block->AddStatement(std::move(cs));
+                }
+              }
+            }
           } else if (!pre_cond_stmts.empty()) {
             auto loop_body = std::make_unique<CompoundStatement>();
             for (auto& s : pre_cond_stmts) {
@@ -1505,7 +1583,10 @@ class ConverterContext {
                     ? &header_block->instructions.back()
                     : nullptr;
             bool has_delay = (delay_inst != nullptr && !delay_inst->IsNop());
-            bool emit_in_break = has_delay && (!has_branch_likely || branch_taken_is_break);
+            bool emit_after_loop =
+                has_delay && has_branch_likely && branch_taken_is_break && !body_has_outer_break;
+            bool emit_in_break =
+                has_delay && !emit_after_loop && (!has_branch_likely || branch_taken_is_break);
             bool emit_in_loop = has_delay && (!has_branch_likely || !branch_taken_is_break);
 
             if (emit_in_break) {
@@ -1536,6 +1617,15 @@ class ConverterContext {
             }
             target_block->AddStatement(
                 CStatement::While(CExpression::Integer(1), std::move(loop_body)));
+            if (emit_after_loop) {
+              auto delay_stmts = LiftInstructionsHelper(absl::MakeSpan(delay_inst, 1));
+              for (auto& s : delay_stmts) {
+                auto cs = AstConverter::ConvertStatement(s);
+                if (cs != nullptr) {
+                  target_block->AddStatement(std::move(cs));
+                }
+              }
+            }
           } else {
             auto cond = header_block != nullptr ? BranchConditionBuilder::ExtractBranchCondition(
                                                       *header_block, region.invert_condition)
@@ -1577,57 +1667,9 @@ class ConverterContext {
         break;
       }
 
-      case RegionType::kBreak: {
-        if (current_switch_break_block_.has_value() &&
-            region.block_id == *current_switch_break_block_) {
-          target_block->AddStatement(CStatement::Break());
-          break;
-        }
-        auto block_has_only_return = [&](const BasicBlock& blk) {
-          auto lifted = ExpressionBuilder::LiftBlock(blk, BuildLiftContext(),
-                                                     /*omit_last_instruction=*/false);
-          for (const auto& s : lifted) {
-            if (s.kind != StatementKind::kReturn) {
-              return false;
-            }
-          }
-          return true;
-        };
-        bool already_ended_with_return =
-            !target_block->Statements().empty() &&
-            target_block->Statements().back()->Kind() == CStatementKind::kReturnStatement;
-        bool is_return = false;
-        const auto* target_blk = cfg_.GetBlock(region.block_id);
-        if (target_blk != nullptr) {
-          bool target_already_emitted = emitted_blocks_.contains(target_blk->id);
-          if (target_blk->successors.empty()) {
-            is_return = already_ended_with_return || block_has_only_return(*target_blk);
-          } else if (target_blk->successors.size() == 1) {
-            const auto* succ_blk = cfg_.GetBlock(target_blk->successors[0]);
-            if (succ_blk != nullptr && succ_blk->successors.empty()) {
-              is_return = already_ended_with_return ||
-                          ((target_already_emitted || block_has_only_return(*target_blk)) &&
-                           block_has_only_return(*succ_blk));
-            }
-          }
-        }
-        if (is_return) {
-          if (!already_ended_with_return) {
-            if (returns_v0_) {
-              target_block->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
-            } else if (returns_f0_) {
-              bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg_);
-              target_block->AddStatement(
-                  CStatement::Return(CExpression::Identifier(is_double ? "f0_d" : "f0")));
-            } else {
-              target_block->AddStatement(CStatement::Return());
-            }
-          }
-        } else {
-          target_block->AddStatement(CStatement::Break());
-        }
+      case RegionType::kBreak:
+        ConvertBreakRegion(region, target_block);
         break;
-      }
 
       case RegionType::kContinue:
         target_block->AddStatement(CStatement::Continue());
@@ -1644,6 +1686,58 @@ class ConverterContext {
   }
 
  private:
+  void ConvertBreakRegion(const StructuredRegion& region, CompoundStatement* target_block) {
+    if ((current_switch_break_block_.has_value() &&
+         region.block_id == *current_switch_break_block_) ||
+        hoisted_loop_exit_break_blocks_.contains(region.block_id)) {
+      target_block->AddStatement(CStatement::Break());
+      return;
+    }
+    auto block_has_only_return = [&](const BasicBlock& blk) {
+      auto lifted =
+          ExpressionBuilder::LiftBlock(blk, BuildLiftContext(), /*omit_last_instruction=*/false);
+      for (const auto& s : lifted) {
+        if (s.kind != StatementKind::kReturn) {
+          return false;
+        }
+      }
+      return true;
+    };
+    bool already_ended_with_return =
+        !target_block->Statements().empty() &&
+        target_block->Statements().back()->Kind() == CStatementKind::kReturnStatement;
+    bool is_return = false;
+    const auto* target_blk = cfg_.GetBlock(region.block_id);
+    if (target_blk != nullptr) {
+      bool target_already_emitted = emitted_blocks_.contains(target_blk->id);
+      if (target_blk->successors.empty()) {
+        is_return = already_ended_with_return || block_has_only_return(*target_blk);
+      } else if (target_blk->successors.size() == 1) {
+        const auto* succ_blk = cfg_.GetBlock(target_blk->successors[0]);
+        if (succ_blk != nullptr && succ_blk->successors.empty()) {
+          is_return = already_ended_with_return ||
+                      ((target_already_emitted || block_has_only_return(*target_blk)) &&
+                       block_has_only_return(*succ_blk));
+        }
+      }
+    }
+    if (is_return) {
+      if (!already_ended_with_return) {
+        if (returns_v0_) {
+          target_block->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+        } else if (returns_f0_) {
+          bool is_double = AbiAnalyzer::DetermineReturnsF0Double(cfg_);
+          target_block->AddStatement(
+              CStatement::Return(CExpression::Identifier(is_double ? "f0_d" : "f0")));
+        } else {
+          target_block->AddStatement(CStatement::Return());
+        }
+      }
+    } else {
+      target_block->AddStatement(CStatement::Break());
+    }
+  }
+
   void ConvertSwitchRegion(const StructuredRegion& region, CompoundStatement* target_block) {
     auto prev_switch_break = current_switch_break_block_;
     current_switch_break_block_ = region.switch_join_block;
@@ -2423,6 +2517,8 @@ class ConverterContext {
   absl::flat_hash_map<uint32_t, Instruction> peeled_loop_delays_;
   absl::flat_hash_map<uint32_t, Instruction> peeled_loop_header_insts_;
   absl::flat_hash_set<uint32_t> peeled_loop_header_emitted_;
+  absl::flat_hash_set<uint32_t> hoisted_loop_exit_delay_blocks_;
+  absl::flat_hash_set<uint32_t> hoisted_loop_exit_break_blocks_;
 };
 
 void DetermineReturnFlags(const ControlFlowGraph& cfg, const SymbolIndex* symbol_index,

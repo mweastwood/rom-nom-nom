@@ -1045,5 +1045,41 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, HasSubstr("var_sp_84 = 0x80253B00;"));
 }
 
+TEST(AstExpressionFolderTest,
+     HoistsBranchLikelyTargetStealingCalleeSavedAssignmentBeforeTrailingCall) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto then_branch = std::make_unique<CompoundStatement>();
+  // temp_a0 = *(s32*)temp_s1;
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_a0"),
+      CExpression::Unary("*", CExpression::Cast(CType::S32().MakePointer(),
+                                                CExpression::Identifier("temp_s1"))))));
+  // temp_s1 = 0; (lifted from jal delay slot)
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"), CExpression::Integer(0))));
+  // HelperCall(temp_a0);
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("temp_a0"));
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("HelperCall"), std::move(call_args))));
+
+  auto else_branch = std::make_unique<CompoundStatement>();
+  // temp_s1 = 0; (lifted from bnel delay slot)
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"), CExpression::Integer(0))));
+
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("temp_s0"), CExpression::Integer(0)),
+      std::move(then_branch), std::move(else_branch)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_s1")));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("else")));
+  EXPECT_THAT(code, HasSubstr("HelperCall(*(s32*)temp_s1);"));
+  EXPECT_THAT(code, HasSubstr("}\n    temp_s1 = 0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

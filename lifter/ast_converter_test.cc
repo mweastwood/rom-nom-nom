@@ -1556,5 +1556,57 @@ TEST(AstConverterTest,
   EXPECT_THAT(code, HasSubstr("((u32)f12 & 255)"));
 }
 
+TEST(AstConverterTest, HoistsSingleExitBranchLikelyDelaySlotAfterInfiniteLoop) {
+  // Loop with a function call in header (splitting CFG blocks so LoopInfo classifies as kInfinite)
+  // and a `beql $v0, $zero, exit` whose delay slot `sb $zero, 0($s0)` executes on loop exit:
+  //   0x00: addiu $sp, $sp, -24
+  //   0x04: sw    $ra, 20($sp)
+  //   0x08: sw    $s0, 16($sp)
+  //   0x0C: addu  $s0, $a0, $zero
+  //   0x10: jal   0x80001000         (loop header)
+  //   0x14: addu  $a0, $s0, $zero
+  //   0x18: beql  $v0, $zero, +3 -> 0x28 (exit block)
+  //   0x1C: sb    $zero, 0($s0)      (exit delay slot)
+  //   0x20: j     0x80000010         (back-edge to loop header)
+  //   0x24: addiu $s0, $s0, 4
+  //   0x28: lw    $ra, 20($sp)       (exit block)
+  //   0x2C: lw    $s0, 16($sp)
+  //   0x30: jr    $ra
+  //   0x34: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 0x00: addiu $sp, $sp, -24
+      0xAFBF0014,  // 0x04: sw    $ra, 20($sp)
+      0xAFB00010,  // 0x08: sw    $s0, 16($sp)
+      0x00808021,  // 0x0C: addu  $s0, $a0, $zero
+      0x0C000400,  // 0x10: jal   0x80001000
+      0x02002021,  // 0x14: addu  $a0, $s0, $zero
+      0x50400004,  // 0x18: beql  $v0, $zero, +4 -> 0x2C
+      0xA2000000,  // 0x1C: sb    $zero, 0($s0)
+      0x26100004,  // 0x20: addiu $s0, $s0, 4
+      0x08000004,  // 0x24: j     0x80000010
+      0xAE000004,  // 0x28: sw    $zero, 4($s0)
+      0x8FBF0014,  // 0x2C: lw    $ra, 20($sp)
+      0x8FB00010,  // 0x30: lw    $s0, 16($sp)
+      0x03E00008,  // 0x34: jr    $ra
+      0x27BD0018,  // 0x38: addiu $sp, $sp, 24
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "LoopWithBranchLikelyExitStore";
+  opts.return_type = CType::Void();
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("if ((v0 == 0)) {\n            break;\n        }"));
+  EXPECT_THAT(code, HasSubstr("}\n    *(s8*)temp_s0 = 0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -2522,7 +2522,7 @@ struct FolderContext {
           }
           // Hoist identical single-statement `else` branch duplicated by branch-likely (`beql`)
           // target-stealing when `then` contains a function call (`if (c) { ...; S; } else { S; }`
-          // -> `if (c) { ... } S;`).
+          // or `if (c) { ...; S; call(); } else { S; }` -> `if (c) { ... } S;`).
           auto& cur_ifs = static_cast<IfStatement&>(*stmts[i]);
           if (cur_ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
               cur_ifs.MutableElseBranch() != nullptr &&
@@ -2532,16 +2532,51 @@ struct FolderContext {
             auto& else_comp = static_cast<CompoundStatement&>(*cur_ifs.MutableElseBranch());
             if (then_comp.Statements().size() >= 2 && else_comp.Statements().size() == 1 &&
                 else_comp.Statements()[0]->Kind() == CStatementKind::kExpressionStatement &&
-                !HasCallInStmt(*else_comp.Statements()[0]) &&
-                then_comp.Statements().back()->ToString() ==
-                    else_comp.Statements()[0]->ToString()) {
-              auto hoisted_stmt = std::move(else_comp.MutableStatements()[0]);
-              then_comp.MutableStatements().pop_back();
-              stmts[i] = CStatement::If(cur_ifs.Condition().Clone(),
-                                        cur_ifs.MutableThenBranch()->Clone(), nullptr);
-              stmts.insert(stmts.begin() + i + 1, std::move(hoisted_stmt));
-              changed = true;
-              break;
+                !HasCallInStmt(*else_comp.Statements()[0])) {
+              std::string else_str = else_comp.Statements()[0]->ToString();
+              if (then_comp.Statements().back()->ToString() == else_str) {
+                auto hoisted_stmt = std::move(else_comp.MutableStatements()[0]);
+                then_comp.MutableStatements().pop_back();
+                stmts[i] = CStatement::If(cur_ifs.Condition().Clone(),
+                                          cur_ifs.MutableThenBranch()->Clone(), nullptr);
+                stmts.insert(stmts.begin() + i + 1, std::move(hoisted_stmt));
+                changed = true;
+                break;
+              }
+              const size_t then_sz = then_comp.Statements().size();
+              if (then_comp.Statements()[then_sz - 2]->ToString() == else_str &&
+                  then_comp.Statements().back()->Kind() == CStatementKind::kExpressionStatement &&
+                  HasCallInStmt(*then_comp.Statements().back())) {
+                const auto& else_es =
+                    static_cast<const ExpressionStatement&>(*else_comp.Statements()[0]);
+                if (else_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& else_a =
+                      static_cast<const AssignmentExpression&>(else_es.Expression());
+                  if (else_a.Op() == "=" && else_a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      else_a.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+                    std::string_view lhs_var =
+                        static_cast<const IdentifierExpression&>(else_a.Lhs()).Name();
+                    if ((absl::StartsWith(lhs_var, "temp_s") || lhs_var == "temp_fp") &&
+                        CountUses(*then_comp.Statements().back(), lhs_var) == 0 &&
+                        !HasAddressOfVarInStmt(*then_comp.Statements().back(), lhs_var)) {
+                      auto hoisted_stmt = std::move(else_comp.MutableStatements()[0]);
+                      then_comp.MutableStatements().erase(then_comp.MutableStatements().begin() +
+                                                          (then_sz - 2));
+                      stmts[i] = CStatement::If(cur_ifs.Condition().Clone(),
+                                                cur_ifs.MutableThenBranch()->Clone(), nullptr);
+                      if (then_comp.Statements().size() >= 2) {
+                        FoldSingleUseExpressions(
+                            static_cast<CompoundStatement*>(
+                                static_cast<IfStatement&>(*stmts[i]).MutableThenBranch()),
+                            root_body, &child_dead_vars, false, root_has_label_cached);
+                      }
+                      stmts.insert(stmts.begin() + i + 1, std::move(hoisted_stmt));
+                      changed = true;
+                      break;
+                    }
+                  }
+                }
+              }
             }
           }
         } else {
