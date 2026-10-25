@@ -1611,5 +1611,54 @@ TEST(AstConverterTest, HoistsSingleExitBranchLikelyDelaySlotAfterInfiniteLoop) {
   EXPECT_THAT(code, HasSubstr("}\n    *(s8*)temp_s0 = 0;"));
 }
 
+TEST(AstConverterTest,
+     FoldsShortCircuitOrWithMultiInstructionConditionBlockAndEliminatesDeadScratchSetup) {
+  // Block 0 (0x00):
+  //   lhu   $v0, 0($a0)
+  //   andi  $v0, $v0, 0x0004
+  //   bnez  $v0, 0x20 (then_body)
+  //   nop
+  // Block 1 (0x10 - multi-instruction condition block):
+  //   lhu   $v0, 2($a0)
+  //   andi  $v0, $v0, 0x0008
+  //   beqz  $v0, 0x24 (join)
+  //   nop
+  // Block 2 (0x20 - then_body):
+  //   sw    $zero, 4($a0)
+  // Block 3 (0x24 - join):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x94820000,  // 0x00: lhu   $v0, 0($a0)
+      0x30420004,  // 0x04: andi  $v0, $v0, 4
+      0x14400005,  // 0x08: bnez  $v0, +5 -> 0x20
+      0x00000000,  // 0x0C: nop
+      0x94820002,  // 0x10: lhu   $v0, 2($a0)
+      0x30420008,  // 0x14: andi  $v0, $v0, 8
+      0x10400002,  // 0x18: beqz  $v0, +2 -> 0x24
+      0x00000000,  // 0x1C: nop
+      0xAC800004,  // 0x20: sw    $zero, 4($a0)
+      0x03E00008,  // 0x24: jr    $ra
+      0x00000000,  // 0x28: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dom = DominatorTree::Compute(cfg);
+  DominatorTree pdom = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dom);
+  auto region = ControlFlowStructurer::Structure(cfg, dom, pdom, loops);
+  ASSERT_THAT(region, NotNull());
+
+  AstConverterOptions opts;
+  opts.function_name = "ShortCircuitOrBitmask";
+  opts.return_type = CType::Void();
+  auto func_or = AstConverter::Convert(cfg, *region, nullptr, opts);
+  ASSERT_TRUE(func_or.ok()) << func_or.status();
+  std::string code = func_or->ToString();
+  EXPECT_THAT(code, HasSubstr("(((*(u16*)arg0 & 4) != 0) || ((*(u16*)(arg0 + 2) & 8) != 0))"));
+  EXPECT_THAT(code, Not(HasSubstr("v0 =")));
+  EXPECT_THAT(code, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

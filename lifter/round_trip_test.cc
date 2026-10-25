@@ -5920,5 +5920,25 @@ done:
 )");
 }
 
+TEST_F(RoundTripTest, ShortCircuitOrWithBitmaskAndStructFieldChecks) {
+  AssertRoundTripBitExact("ShortCircuitOrWithBitmaskAndStructFieldChecks", R"(
+typedef struct {
+    u16 flags_a;
+    u16 flags_b;
+    s32 state;
+    s32 timer;
+} UnitSlot;
+
+extern void deactivate_unit_slot(UnitSlot* u);
+
+void ShortCircuitOrWithBitmaskAndStructFieldChecks(UnitSlot* u) {
+    if ((u->flags_a & 4) != 0 || (u->flags_b & 8) != 0 || u->timer <= 0) {
+        u->state = 0;
+        deactivate_unit_slot(u);
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

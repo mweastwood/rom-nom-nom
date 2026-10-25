@@ -856,5 +856,47 @@ TEST(ControlFlowPatternMatcherTest,
   EXPECT_EQ(join_blk->start_vram, 0x80000038u);
 }
 
+TEST(ControlFlowPatternMatcherTest, CollapsesShortCircuitOrWithBitmaskComparisonConditionBlock) {
+  // Block 0 (0x00):
+  //   lhu   $v0, 0($a0)
+  //   andi  $v0, $v0, 0x0004
+  //   bnez  $v0, 0x1C (then_body)
+  //   nop
+  // Block 1 (0x10 - multi-instruction condition block with load + andi into dead $v0):
+  //   lhu   $v0, 2($a0)
+  //   andi  $v0, $v0, 0x0008
+  //   beqz  $v0, 0x24 (join)
+  //   nop
+  // Block 2 (0x20 - then_body):
+  //   sw    $zero, 4($a0)
+  // Block 3 (0x24 - join):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x94820000,  // 0x00: lhu   $v0, 0($a0)
+      0x30420004,  // 0x04: andi  $v0, $v0, 4
+      0x14400005,  // 0x08: bnez  $v0, +5 -> 0x20 (then_body)
+      0x00000000,  // 0x0C: nop
+      0x94820002,  // 0x10: lhu   $v0, 2($a0)
+      0x30420008,  // 0x14: andi  $v0, $v0, 8
+      0x10400002,  // 0x18: beqz  $v0, +2 -> 0x24 (join)
+      0x00000000,  // 0x1C: nop
+      0xAC800004,  // 0x20: sw    $zero, 4($a0)
+      0x03E00008,  // 0x24: jr    $ra
+      0x00000000,  // 0x28: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("||"));
+  EXPECT_THAT(s, Not(HasSubstr("GOTO")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

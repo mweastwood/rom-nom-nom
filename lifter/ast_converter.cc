@@ -849,11 +849,8 @@ class ConverterContext {
             bool add_inv = (ci < region.additional_invert_conditions.size())
                                ? region.additional_invert_conditions[ci]
                                : false;
-            const auto* add_block = cfg_.GetBlock(add_blk_id);
-            if (add_block != nullptr) {
-              omit_last_instruction_blocks_.insert(add_blk_id);
-              EmitBlockStatements(add_blk_id, target_block, /*omit_last_instruction=*/true);
-              auto next_cond = BranchConditionBuilder::ExtractBranchCondition(*add_block, add_inv);
+            auto next_cond = ExtractFoldedBlockBranchCondition(add_blk_id, add_inv, target_block);
+            if (next_cond != nullptr) {
               cond =
                   CExpression::Binary(region.condition_op, std::move(cond), std::move(next_cond));
             }
@@ -1067,11 +1064,8 @@ class ConverterContext {
             bool add_inv = (ci < region.additional_invert_conditions.size())
                                ? region.additional_invert_conditions[ci]
                                : false;
-            const auto* add_block = cfg_.GetBlock(add_blk_id);
-            if (add_block != nullptr) {
-              omit_last_instruction_blocks_.insert(add_blk_id);
-              EmitBlockStatements(add_blk_id, target_block, /*omit_last_instruction=*/true);
-              auto next_cond = BranchConditionBuilder::ExtractBranchCondition(*add_block, add_inv);
+            auto next_cond = ExtractFoldedBlockBranchCondition(add_blk_id, add_inv, target_block);
+            if (next_cond != nullptr) {
               cond =
                   CExpression::Binary(region.condition_op, std::move(cond), std::move(next_cond));
             }
@@ -1787,6 +1781,73 @@ class ConverterContext {
     current_switch_break_block_ = prev_switch_break;
     target_block->AddStatement(CStatement::Switch(std::move(cond_expr), std::move(c_cases)));
   }
+  static std::unique_ptr<CExpression> SimplifyFoldedConditionExpr(
+      std::unique_ptr<CExpression> expr) {
+    if (expr == nullptr || expr->Kind() != CExpressionKind::kBinaryExpression) {
+      return expr;
+    }
+    const auto& bin = static_cast<const BinaryExpression&>(*expr);
+    if ((bin.Op() == "==" || bin.Op() == "!=") &&
+        bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+        static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 0 &&
+        bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& lhs_bin = static_cast<const BinaryExpression&>(bin.Lhs());
+      std::string_view lhs_op = lhs_bin.Op();
+      if (lhs_op == "<" || lhs_op == "<=" || lhs_op == ">" || lhs_op == ">=" || lhs_op == "==" ||
+          lhs_op == "!=") {
+        if (bin.Op() == "!=") {
+          return lhs_bin.Clone();
+        }
+        return NegateCondition(lhs_bin);
+      }
+      if (lhs_op == "^") {
+        return CExpression::Binary(bin.Op(), lhs_bin.Lhs().Clone(), lhs_bin.Rhs().Clone());
+      }
+    }
+    return expr;
+  }
+
+  std::unique_ptr<CExpression> ExtractFoldedBlockBranchCondition(uint32_t add_blk_id, bool add_inv,
+                                                                 CompoundStatement* target_block) {
+    const auto* add_block = cfg_.GetBlock(add_blk_id);
+    if (add_block == nullptr) {
+      return nullptr;
+    }
+    omit_last_instruction_blocks_.insert(add_blk_id);
+    CompoundStatement temp_block;
+    EmitBlockStatements(add_blk_id, &temp_block, /*omit_last_instruction=*/true);
+    auto next_cond = BranchConditionBuilder::ExtractBranchCondition(*add_block, add_inv);
+    std::vector<std::unique_ptr<CStatement>> leftover_stmts;
+    for (int si = static_cast<int>(temp_block.Statements().size()) - 1; si >= 0; --si) {
+      const CStatement& s = *temp_block.Statements()[si];
+      if (s.Kind() == CStatementKind::kExpressionStatement) {
+        const auto& es = static_cast<const ExpressionStatement&>(s);
+        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& assign = static_cast<const AssignmentExpression&>(es.Expression());
+          if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              IsPureExpression(assign.Rhs())) {
+            const std::string& lhs_var =
+                static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+            int uses = CountVariableReadUsesInExpression(*next_cond, lhs_var);
+            if (uses > 0 && !ExpressionTakesAddressOf(*next_cond, lhs_var)) {
+              next_cond = SimplifyFoldedConditionExpr(
+                  SubstituteIdentifier(*next_cond, lhs_var, assign.Rhs()));
+              continue;
+            }
+            if (uses == 0) {
+              continue;
+            }
+          }
+        }
+      }
+      leftover_stmts.push_back(temp_block.Statements()[si]->Clone());
+    }
+    for (auto it = leftover_stmts.rbegin(); it != leftover_stmts.rend(); ++it) {
+      target_block->AddStatement(std::move(*it));
+    }
+    return next_cond;
+  }
+
   bool IsRegisterDeadAtBlockEntry(uint32_t start_block_id, Register reg) const {
     if (reg == Register::kZero) return true;
     absl::flat_hash_set<uint32_t> visited;

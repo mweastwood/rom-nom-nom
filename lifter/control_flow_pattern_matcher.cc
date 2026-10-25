@@ -28,7 +28,91 @@ bool HasNopBranchDelaySlot(const ControlFlowGraph& cfg, uint32_t block_id) {
   return !BranchConditionBuilder::ShouldDecoupleBranchConditionDelaySlot(cfg, block_id);
 }
 
-bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
+bool IsScratchConditionRegister(Register reg) {
+  return reg == Register::kAt || reg == Register::kV0 || reg == Register::kV1 ||
+         (reg >= Register::kT0 && reg <= Register::kT7) || reg == Register::kT8 ||
+         reg == Register::kT9;
+}
+
+bool IsRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
+                                Register reg) {
+  if (reg == Register::kZero || reg == Register::kAt) return true;
+  absl::flat_hash_set<uint32_t> visited;
+  std::vector<uint32_t> worklist = {start_block_id};
+  while (!worklist.empty()) {
+    uint32_t blk_id = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(blk_id).second) continue;
+    const auto* blk = cfg.GetBlock(blk_id);
+    if (blk == nullptr) return false;
+    bool killed = false;
+    for (size_t i = 0; i < blk->instructions.size(); ++i) {
+      const auto& inst = blk->instructions[i];
+      if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
+          i + 1 < blk->instructions.size()) {
+        const auto& delay_inst = blk->instructions[i + 1];
+        bool annuls_delay = inst.IsBranchLikely();
+        RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+        for (Register u : inst_ud.gpr_uses) {
+          if (u == reg) return false;
+        }
+        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+        for (Register u : delay_ud.gpr_uses) {
+          if (u == reg) return false;
+        }
+        if (!annuls_delay) {
+          for (Register d : delay_ud.gpr_defs) {
+            if (d == reg) {
+              killed = true;
+              break;
+            }
+          }
+        }
+        if (killed) break;
+        if (inst.IsCall()) {
+          if (reg >= Register::kA0 && reg <= Register::kA3) {
+            return false;
+          }
+          if (IsScratchConditionRegister(reg)) {
+            killed = true;
+            break;
+          }
+        } else if (inst.IsReturn()) {
+          if (reg == Register::kV0 && DetermineReturnsV0(cfg)) {
+            return false;
+          }
+          killed = true;
+          break;
+        }
+        ++i;
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      for (Register u : ud.gpr_uses) {
+        if (u == reg) return false;
+      }
+      for (Register d : ud.gpr_defs) {
+        if (d == reg) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed) break;
+    }
+    if (!killed) {
+      if (blk->successors.empty()) {
+        if (reg == Register::kV0 && DetermineReturnsV0(cfg)) return false;
+        continue;
+      }
+      for (uint32_t succ : blk->successors) {
+        worklist.push_back(succ);
+      }
+    }
+  }
+  return true;
+}
+
+bool IsTrivialPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
   const auto* b = cfg.GetBlock(block_id);
   if (b == nullptr || b->instructions.empty() || b->instructions.size() > 3) return false;
   for (const auto& inst : b->instructions) {
@@ -39,6 +123,148 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
       return false;
     }
     if (inst.rt.has_value() && *inst.rt != Register::kZero && *inst.rt != Register::kAt) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
+  if (IsTrivialPureConditionBlock(cfg, block_id)) {
+    return true;
+  }
+  const auto* b = cfg.GetBlock(block_id);
+  if (b == nullptr || b->instructions.size() < 2 || b->instructions.size() > 8 ||
+      b->successors.size() != 2) {
+    return false;
+  }
+  for (uint32_t succ_id : b->successors) {
+    const auto* succ_blk = cfg.GetBlock(succ_id);
+    if (succ_blk != nullptr && succ_blk->jump_table != nullptr) {
+      return false;
+    }
+  }
+  const int branch_idx = static_cast<int>(b->instructions.size()) - 2;
+  const auto& branch_inst = b->instructions[branch_idx];
+  const auto& delay_inst = b->instructions.back();
+  if (!branch_inst.IsBranch() || branch_inst.IsBranchLikely() || branch_inst.IsCall() ||
+      !delay_inst.IsNop() || delay_inst.unscheduled_clobber_reg.has_value()) {
+    return false;
+  }
+  switch (branch_inst.opcode) {
+    case Opcode::kBeq:
+    case Opcode::kBne:
+    case Opcode::kBlez:
+    case Opcode::kBgtz:
+    case Opcode::kBltz:
+    case Opcode::kBgez:
+      break;
+    default:
+      return false;
+  }
+
+  absl::flat_hash_set<Register> defined_in_block;
+  for (int i = 0; i < branch_idx; ++i) {
+    const auto& inst = b->instructions[i];
+    if (inst.IsNop()) {
+      if (inst.unscheduled_clobber_reg.has_value()) return false;
+      continue;
+    }
+    bool is_allowed_load = false;
+    switch (inst.opcode) {
+      case Opcode::kAddu:
+      case Opcode::kAdd:
+      case Opcode::kSubu:
+      case Opcode::kSub:
+      case Opcode::kAddiu:
+      case Opcode::kAddi:
+      case Opcode::kLui:
+      case Opcode::kAnd:
+      case Opcode::kAndi:
+      case Opcode::kOr:
+      case Opcode::kOri:
+      case Opcode::kXor:
+      case Opcode::kXori:
+      case Opcode::kNor:
+      case Opcode::kSll:
+      case Opcode::kSrl:
+      case Opcode::kSra:
+      case Opcode::kSllv:
+      case Opcode::kSrlv:
+      case Opcode::kSrav:
+      case Opcode::kSlt:
+      case Opcode::kSltu:
+      case Opcode::kSlti:
+      case Opcode::kSltiu:
+        break;
+      case Opcode::kLw:
+      case Opcode::kLwu:
+      case Opcode::kLh:
+      case Opcode::kLhu:
+      case Opcode::kLb:
+      case Opcode::kLbu:
+        is_allowed_load = true;
+        break;
+      default:
+        return false;
+    }
+    if (inst.opcode == Opcode::kLui) {
+      uint32_t hi = static_cast<uint32_t>(inst.immediate) & 0xFFFFu;
+      if (hi >= 0xA000u && hi <= 0xBFFFu) return false;
+    }
+    if (is_allowed_load) {
+      if (!inst.rs.has_value() || *inst.rs == Register::kZero || *inst.rs == Register::kSp ||
+          *inst.rs == Register::kFp) {
+        return false;
+      }
+    }
+    RegisterUseDef ud = GetInstructionUseDef(inst);
+    if (ud.gpr_defs.size() != 1 || !ud.fpr_defs.empty() || !ud.fpr_uses.empty()) {
+      return false;
+    }
+    for (Register u : ud.gpr_uses) {
+      if (u == Register::kAt && !defined_in_block.contains(Register::kAt)) {
+        return false;
+      }
+    }
+    Register def_reg = ud.gpr_defs[0];
+    if (!IsScratchConditionRegister(def_reg)) {
+      return false;
+    }
+    defined_in_block.insert(def_reg);
+
+    int read_uses = 0;
+    for (int j = i + 1; j <= branch_idx; ++j) {
+      const auto& next_inst = b->instructions[j];
+      RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
+      for (Register u : next_ud.gpr_uses) {
+        if (u == def_reg) {
+          ++read_uses;
+        }
+      }
+      if (j < branch_idx) {
+        bool redefined = false;
+        for (Register d : next_ud.gpr_defs) {
+          if (d == def_reg) {
+            redefined = true;
+            break;
+          }
+        }
+        if (redefined) break;
+      }
+    }
+    if (read_uses != 1) {
+      return false;
+    }
+    if (!IsRegisterDeadAtBlockEntry(cfg, b->successors[0], def_reg) ||
+        !IsRegisterDeadAtBlockEntry(cfg, b->successors[1], def_reg)) {
+      return false;
+    }
+  }
+
+  RegisterUseDef branch_ud = GetInstructionUseDef(branch_inst);
+  for (Register u : branch_ud.gpr_uses) {
+    if (u == Register::kAt && !defined_in_block.contains(Register::kAt)) {
       return false;
     }
   }
@@ -109,6 +335,161 @@ std::optional<Register> GetSingleComparedRegister(const ControlFlowGraph& cfg, u
     }
     default:
       return std::nullopt;
+  }
+}
+
+struct ComparedValueKey {
+  absl::flat_hash_set<Register> live_out_regs;
+  std::optional<Register> live_in_reg;
+  std::optional<Opcode> load_op;
+  std::optional<Register> load_base;
+  int32_t load_offset = 0;
+
+  bool Matches(const ComparedValueKey& other) const {
+    if (other.live_in_reg.has_value() && live_out_regs.contains(*other.live_in_reg)) {
+      return true;
+    }
+    if (live_in_reg.has_value() && other.live_in_reg.has_value() &&
+        *live_in_reg == *other.live_in_reg) {
+      return true;
+    }
+    if (load_op.has_value() && other.load_op.has_value() && *load_op == *other.load_op &&
+        load_base == other.load_base && load_offset == other.load_offset) {
+      return true;
+    }
+    return false;
+  }
+};
+
+ComparedValueKey GetComparedValueKey(const ControlFlowGraph& cfg, uint32_t block_id,
+                                     bool /*use_live_in_reg*/) {
+  ComparedValueKey key;
+  const auto* b = cfg.GetBlock(block_id);
+  if (b == nullptr || b->instructions.empty()) return key;
+
+  int branch_idx = -1;
+  for (int i = static_cast<int>(b->instructions.size()) - 1; i >= 0; --i) {
+    if (b->instructions[i].IsBranch()) {
+      branch_idx = i;
+      break;
+    }
+  }
+  if (branch_idx == -1) return key;
+
+  auto is_defined_as_constant = [&](Register r, int before_idx) -> bool {
+    if (r == Register::kZero || r == Register::kAt) return true;
+    for (int i = before_idx - 1; i >= 0; --i) {
+      const auto& inst = b->instructions[i];
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      bool defs_r = false;
+      for (Register d : ud.gpr_defs) {
+        if (d == r) {
+          defs_r = true;
+          break;
+        }
+      }
+      if (!defs_r) continue;
+      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+           inst.opcode == Opcode::kOri || inst.opcode == Opcode::kXori) &&
+          inst.rt == r && inst.rs.has_value() && (*inst.rs == Register::kZero || *inst.rs == r)) {
+        return true;
+      }
+      if (inst.opcode == Opcode::kLui && inst.rt == r) {
+        return true;
+      }
+      return false;
+    }
+    return false;
+  };
+
+  auto record_if_live_out = [&](Register r, int after_idx) {
+    if (r == Register::kZero || r == Register::kAt) return;
+    for (int j = after_idx + 1; j < static_cast<int>(b->instructions.size()); ++j) {
+      RegisterUseDef jud = GetInstructionUseDef(b->instructions[j]);
+      for (Register jd : jud.gpr_defs) {
+        if (jd == r) return;
+      }
+    }
+    key.live_out_regs.insert(r);
+  };
+
+  const auto& term = b->instructions[branch_idx];
+  auto trace_cond_reg = [&](Register cond_reg) -> ComparedValueKey {
+    if (cond_reg == Register::kZero) return key;
+    Register curr_reg = cond_reg;
+    record_if_live_out(curr_reg, branch_idx);
+    for (int i = branch_idx - 1; i >= 0; --i) {
+      const auto& prev = b->instructions[i];
+      if ((prev.opcode == Opcode::kSlti || prev.opcode == Opcode::kSltiu ||
+           prev.opcode == Opcode::kXori || prev.opcode == Opcode::kAddiu ||
+           prev.opcode == Opcode::kAddi || prev.opcode == Opcode::kAndi) &&
+          prev.rt == curr_reg && prev.rs.has_value() && *prev.rs != Register::kZero) {
+        curr_reg = *prev.rs;
+        record_if_live_out(curr_reg, i);
+        continue;
+      }
+      if ((prev.opcode == Opcode::kSlt || prev.opcode == Opcode::kSltu ||
+           prev.opcode == Opcode::kXor || prev.opcode == Opcode::kSubu ||
+           prev.opcode == Opcode::kAnd) &&
+          prev.rd == curr_reg && prev.rs.has_value() && prev.rt.has_value()) {
+        if (is_defined_as_constant(*prev.rs, i) && !is_defined_as_constant(*prev.rt, i)) {
+          curr_reg = *prev.rt;
+          record_if_live_out(curr_reg, i);
+          continue;
+        }
+        if (is_defined_as_constant(*prev.rt, i) && !is_defined_as_constant(*prev.rs, i)) {
+          curr_reg = *prev.rs;
+          record_if_live_out(curr_reg, i);
+          continue;
+        }
+      }
+      RegisterUseDef ud = GetInstructionUseDef(prev);
+      for (Register def_reg : ud.gpr_defs) {
+        if (def_reg == curr_reg) {
+          if (prev.IsLoad() && prev.rs.has_value()) {
+            key.load_op = prev.opcode;
+            key.load_base = *prev.rs;
+            key.load_offset = prev.immediate;
+          }
+          record_if_live_out(curr_reg, i);
+          return key;
+        }
+      }
+    }
+    key.live_in_reg = curr_reg;
+    record_if_live_out(curr_reg, -1);
+    return key;
+  };
+
+  switch (term.opcode) {
+    case Opcode::kBltz:
+    case Opcode::kBgez:
+    case Opcode::kBlez:
+    case Opcode::kBgtz:
+    case Opcode::kBltzl:
+    case Opcode::kBgezl:
+    case Opcode::kBlezl:
+    case Opcode::kBgtzl: {
+      if (!term.rs.has_value()) return key;
+      return trace_cond_reg(*term.rs);
+    }
+    case Opcode::kBeq:
+    case Opcode::kBne:
+    case Opcode::kBeql:
+    case Opcode::kBnel: {
+      if (!term.rs.has_value() || !term.rt.has_value()) return key;
+      if (is_defined_as_constant(*term.rs, branch_idx) &&
+          !is_defined_as_constant(*term.rt, branch_idx)) {
+        return trace_cond_reg(*term.rt);
+      }
+      if (is_defined_as_constant(*term.rt, branch_idx) &&
+          !is_defined_as_constant(*term.rs, branch_idx)) {
+        return trace_cond_reg(*term.rs);
+      }
+      return key;
+    }
+    default:
+      return key;
   }
 }
 
@@ -1357,10 +1738,34 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     return std::nullopt;
   }
 
+  const bool allow_extended_cond_block = join.has_value() && succ_taken != *join;
+  bool used_extended_cond_block = false;
+  auto can_collapse_cond_block = [&](uint32_t prev_id, uint32_t cand_id) -> bool {
+    if (IsTrivialPureConditionBlock(cfg, cand_id)) {
+      return true;
+    }
+    if (!allow_extended_cond_block || !IsPureConditionBlock(cfg, cand_id)) {
+      return false;
+    }
+    const auto* prev_b = cfg.GetBlock(prev_id);
+    if (prev_b == nullptr || prev_b->instructions.empty() || !prev_b->instructions.back().IsNop()) {
+      return false;
+    }
+    if (DetectDecisionTreeSwitch(cfg, nullptr, visited, cand_id).has_value()) {
+      return false;
+    }
+    if (GetComparedValueKey(cfg, prev_id, /*use_live_in_reg=*/false)
+            .Matches(GetComparedValueKey(cfg, cand_id, /*use_live_in_reg=*/true))) {
+      return false;
+    }
+    used_extended_cond_block = true;
+    return true;
+  };
+
   const auto* b_fallthrough = cfg.GetBlock(succ_fallthrough);
   if (b_fallthrough == nullptr || b_fallthrough->successors.size() != 2 ||
       b_fallthrough->predecessors.size() != 1 || b_fallthrough->predecessors[0] != entry ||
-      !IsPureConditionBlock(cfg, succ_fallthrough)) {
+      !can_collapse_cond_block(entry, succ_fallthrough)) {
     return std::nullopt;
   }
 
@@ -1413,7 +1818,7 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     const auto* next_b = cfg.GetBlock(other);
     if (HasNopBranchDelaySlot(cfg, curr_id) && next_b != nullptr &&
         next_b->successors.size() == 2 && next_b->predecessors.size() == 1 &&
-        !visited.contains(other) && IsPureConditionBlock(cfg, other) &&
+        !visited.contains(other) && can_collapse_cond_block(curr_id, other) &&
         (next_b->successors[0] == succ_taken || next_b->successors[1] == succ_taken)) {
       curr_id = other;
       curr_taken = 0;
@@ -1436,6 +1841,10 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
   }
 
   if (!chain_blocks.empty()) {
+    if (used_extended_cond_block &&
+        (!join.has_value() || !final_after.has_value() || *final_after != *join)) {
+      return std::nullopt;
+    }
     bool is_and_chain = false;
     if (final_after.has_value()) {
       if (join.has_value() && succ_taken == *join && *final_after != *join) {
