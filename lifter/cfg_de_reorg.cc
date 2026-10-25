@@ -466,8 +466,8 @@ void CfgDeReorg::UnscheduleDelaySlots(ControlFlowGraph* cfg) {
             if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
                 pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
                 SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
-                loop_info.GetLoopFor(pred_id) == nullptr && enclosing_loop != nullptr &&
-                enclosing_loop->Contains(block.id)) {
+                enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
+                !enclosing_loop->Contains(pred_id)) {
               pred_block_id = pred_id;
               break;
             }

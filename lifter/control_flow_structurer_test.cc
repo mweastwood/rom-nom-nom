@@ -1081,5 +1081,40 @@ TEST(ControlFlowStructurerTest,
   EXPECT_THAT(s, HasSubstr("default:\n    break;\n"));
 }
 
+TEST(ControlFlowStructurerTest, InnerLoopEarlyExitToParentHeaderViaEmptyLatchFollowJumpEmitsBreak) {
+  // Outer infinite loop (header 0x00, block 0) containing an inner do-while loop
+  // (header 0x0C, block 1; latch 0x14, block 2) whose latch falls through to an
+  // empty unconditional jump block (0x1C, block 3: `j 0x80000000; nop`) back to
+  // the outer loop header, while the inner loop's early exit at 0x0C branches
+  // directly to 0x80000000 (block 0, the outer loop header).
+  // Because block 3 is a pure unconditional jump to block 0, breaking out of the
+  // inner loop reaches block 0 directly and must emit `break` instead of `goto block_0`.
+  std::vector<uint32_t> words = {
+      0x10800002,  // 0x00 (block 0, outer header): beqz  $a0, +2 (to 0x0C)
+      0x00000000,  // 0x04:                         nop
+      0x08000000,  // 0x08 (block 1, outer cont):   j     0x80000000
+      0x00000000,  // 0x0C:                         nop
+      0x14A0FFFB,  // 0x10 (block 2, inner header): bnez  $a1, -5 (to 0x00 outer header)
+      0x00000000,  // 0x14:                         nop
+      0x8C840000,  // 0x18 (block 3, inner latch):  lw    $a0, 0($a0)
+      0x1480FFFC,  // 0x1C:                         bnez  $a0, -4 (to 0x10 inner header)
+      0x00000000,  // 0x20:                         nop
+      0x08000000,  // 0x24 (block 4, latch follow): j     0x80000000 (to 0x00 outer header)
+      0x00000000,  // 0x28:                         nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("break"));
+  EXPECT_THAT(s, Not(HasSubstr("goto block_0")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

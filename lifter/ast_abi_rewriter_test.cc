@@ -581,5 +581,55 @@ TEST(AstAbiRewriterTest, SinkCommonBranchTailArgAssignmentsEliminatesCascadeMerg
   EXPECT_EQ(body.Statements()[2]->Kind(), CStatementKind::kReturnStatement);
 }
 
+TEST(AstAbiRewriterTest, SinkCommonBranchTailArgAssignmentsRewritesLoopExitAndContinueGotos) {
+  // Construct a do-while loop where an inner branch jumps to `block_cont` at the end of the
+  // loop body (`continue;`) and another branch jumps to `block_exit` immediately after the
+  // loop (`break;`):
+  //   do {
+  //     if (skip_cond) {
+  //       goto block_cont;
+  //     }
+  //     if (stop_cond) {
+  //       goto block_exit;
+  //     }
+  //     v0 = (v0 + 1);
+  //   block_cont:
+  //   } while (loop_cond);
+  // block_exit:
+  //   return v0;
+  CompoundStatement body;
+  auto loop_body = std::make_unique<CompoundStatement>();
+
+  auto skip_then = std::make_unique<CompoundStatement>();
+  skip_then->AddStatement(CStatement::Goto("block_cont"));
+  loop_body->AddStatement(
+      CStatement::If(CExpression::Identifier("skip_cond"), std::move(skip_then), nullptr));
+
+  auto stop_then = std::make_unique<CompoundStatement>();
+  stop_then->AddStatement(CStatement::Goto("block_exit"));
+  loop_body->AddStatement(
+      CStatement::If(CExpression::Identifier("stop_cond"), std::move(stop_then), nullptr));
+
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("v0"), CExpression::Integer(1)))));
+  loop_body->AddStatement(CStatement::Label("block_cont"));
+
+  body.AddStatement(
+      CStatement::DoWhile(std::move(loop_body), CExpression::Identifier("loop_cond")));
+  body.AddStatement(CStatement::Label("block_exit"));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  SinkCommonBranchTailArgAssignments(&body);
+
+  std::string emitted = body.ToString();
+  EXPECT_THAT(emitted, HasSubstr("continue;"));
+  EXPECT_THAT(emitted, HasSubstr("break;"));
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_cont")));
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_exit")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_cont:")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_exit:")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -677,6 +677,153 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
   };
   sink_in_comp(comp);
 
+  // Rule D: Rewrite loop-exit and loop-continue `goto block_N;` into structured `break;` /
+  // `continue;` when `block_N:` is at the end of a loop body (`continue;`) or immediately after
+  // the loop (with 0 or 1 shared post-loop assignment `S`, `break;`).
+  auto extract_loop_body = [](CStatement* s) -> CompoundStatement* {
+    if (s == nullptr) return nullptr;
+    if (s->Kind() == CStatementKind::kDoWhileStatement) {
+      auto* b = static_cast<DoWhileStatement*>(s)->MutableBody();
+      return (b != nullptr && b->Kind() == CStatementKind::kCompoundStatement)
+                 ? static_cast<CompoundStatement*>(b)
+                 : nullptr;
+    }
+    if (s->Kind() == CStatementKind::kWhileStatement) {
+      auto* b = static_cast<WhileStatement*>(s)->MutableBody();
+      return (b != nullptr && b->Kind() == CStatementKind::kCompoundStatement)
+                 ? static_cast<CompoundStatement*>(b)
+                 : nullptr;
+    }
+    if (s->Kind() == CStatementKind::kForStatement) {
+      auto* b = static_cast<ForStatement*>(s)->MutableBody();
+      return (b != nullptr && b->Kind() == CStatementKind::kCompoundStatement)
+                 ? static_cast<CompoundStatement*>(b)
+                 : nullptr;
+    }
+    return nullptr;
+  };
+  auto extract_guarded_or_direct_loop_body = [&](CStatement* s) -> CompoundStatement* {
+    if (auto* direct = extract_loop_body(s); direct != nullptr) {
+      return direct;
+    }
+    if (s != nullptr && s->Kind() == CStatementKind::kIfStatement) {
+      auto& ifs = *static_cast<IfStatement*>(s);
+      if (ifs.ElseBranch() == nullptr && ifs.MutableThenBranch() != nullptr &&
+          ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+        auto& then_stmts =
+            static_cast<CompoundStatement*>(ifs.MutableThenBranch())->MutableStatements();
+        if (then_stmts.size() == 1) {
+          return extract_loop_body(then_stmts[0].get());
+        }
+      }
+    }
+    return nullptr;
+  };
+
+  std::function<void(CompoundStatement*, std::string_view)> rewrite_loop_continue_gotos =
+      [&](CompoundStatement* cur, std::string_view cont_label) {
+        if (cur == nullptr) return;
+        auto& stmts = cur->MutableStatements();
+        for (size_t i = 0; i < stmts.size(); ++i) {
+          if (stmts[i] == nullptr) continue;
+          if (stmts[i]->Kind() == CStatementKind::kGotoStatement &&
+              static_cast<const GotoStatement&>(*stmts[i]).Label() == cont_label) {
+            stmts[i] = CStatement::Continue();
+          } else if (stmts[i]->Kind() == CStatementKind::kIfStatement) {
+            auto& ifs = *static_cast<IfStatement*>(stmts[i].get());
+            if (ifs.MutableThenBranch() != nullptr &&
+                ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              rewrite_loop_continue_gotos(static_cast<CompoundStatement*>(ifs.MutableThenBranch()),
+                                          cont_label);
+            }
+            if (ifs.MutableElseBranch() != nullptr &&
+                ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              rewrite_loop_continue_gotos(static_cast<CompoundStatement*>(ifs.MutableElseBranch()),
+                                          cont_label);
+            }
+          } else if (stmts[i]->Kind() == CStatementKind::kCompoundStatement) {
+            rewrite_loop_continue_gotos(static_cast<CompoundStatement*>(stmts[i].get()),
+                                        cont_label);
+          } else if (stmts[i]->Kind() == CStatementKind::kSwitchStatement) {
+            for (auto& sc : static_cast<SwitchStatement*>(stmts[i].get())->MutableCases()) {
+              rewrite_loop_continue_gotos(sc.body.get(), cont_label);
+            }
+          }
+        }
+      };
+
+  std::function<void(CompoundStatement*, std::string_view, std::string_view, std::string_view)>
+      rewrite_loop_exit_gotos = [&](CompoundStatement* cur, std::string_view exit_label,
+                                    std::string_view post_lhs, std::string_view post_rhs) {
+        if (cur == nullptr) return;
+        auto& stmts = cur->MutableStatements();
+        if (post_lhs.empty()) {
+          if (!stmts.empty() && stmts.back() != nullptr &&
+              stmts.back()->Kind() == CStatementKind::kGotoStatement &&
+              static_cast<const GotoStatement&>(*stmts.back()).Label() == exit_label) {
+            stmts.back() = CStatement::Break();
+          }
+        } else if (stmts.size() >= 2 && stmts.back() != nullptr &&
+                   stmts.back()->Kind() == CStatementKind::kGotoStatement &&
+                   static_cast<const GotoStatement&>(*stmts.back()).Label() == exit_label) {
+          std::string cand_lhs;
+          std::string cand_rhs;
+          const CExpression* cand_rhs_expr = nullptr;
+          if (stmts[stmts.size() - 2] != nullptr &&
+              extract_sinkable_assign(*stmts[stmts.size() - 2], &cand_lhs, &cand_rhs,
+                                      &cand_rhs_expr) &&
+              cand_lhs == post_lhs && cand_rhs == post_rhs) {
+            stmts.pop_back();
+            stmts.back() = CStatement::Break();
+          }
+        }
+        for (size_t i = 0; i < stmts.size(); ++i) {
+          if (stmts[i] == nullptr) continue;
+          if (stmts[i]->Kind() == CStatementKind::kIfStatement) {
+            auto& ifs = *static_cast<IfStatement*>(stmts[i].get());
+            if (ifs.MutableThenBranch() != nullptr &&
+                ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              rewrite_loop_exit_gotos(static_cast<CompoundStatement*>(ifs.MutableThenBranch()),
+                                      exit_label, post_lhs, post_rhs);
+            }
+            if (ifs.MutableElseBranch() != nullptr &&
+                ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              rewrite_loop_exit_gotos(static_cast<CompoundStatement*>(ifs.MutableElseBranch()),
+                                      exit_label, post_lhs, post_rhs);
+            }
+          } else if (stmts[i]->Kind() == CStatementKind::kCompoundStatement) {
+            rewrite_loop_exit_gotos(static_cast<CompoundStatement*>(stmts[i].get()), exit_label,
+                                    post_lhs, post_rhs);
+          }
+        }
+      };
+
+  std::function<void(CompoundStatement*)> rewrite_loops_in_comp = [&](CompoundStatement* cur_comp) {
+    if (cur_comp == nullptr) return;
+    auto& stmts = cur_comp->MutableStatements();
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      if (stmts[i] == nullptr) continue;
+      ForEachSubCompoundStatement(stmts[i].get(), rewrite_loops_in_comp);
+      if (auto* direct_loop = extract_loop_body(stmts[i].get()); direct_loop != nullptr) {
+        const auto& l_stmts = direct_loop->Statements();
+        if (!l_stmts.empty() && l_stmts.back() != nullptr &&
+            l_stmts.back()->Kind() == CStatementKind::kLabelStatement) {
+          std::string cont_lbl(static_cast<const LabelStatement&>(*l_stmts.back()).Label());
+          rewrite_loop_continue_gotos(direct_loop, cont_lbl);
+        }
+      }
+      if (auto* loop_comp = extract_guarded_or_direct_loop_body(stmts[i].get());
+          loop_comp != nullptr) {
+        if (i + 1 < stmts.size() && stmts[i + 1] != nullptr &&
+            stmts[i + 1]->Kind() == CStatementKind::kLabelStatement) {
+          std::string exit_lbl(static_cast<const LabelStatement&>(*stmts[i + 1]).Label());
+          rewrite_loop_exit_gotos(loop_comp, exit_lbl, "", "");
+        }
+      }
+    }
+  };
+  rewrite_loops_in_comp(comp);
+
   // Rule C: Remove any LabelStatement in `comp` that has no remaining GotoStatement targeting it.
   absl::flat_hash_set<std::string> used_labels;
   std::function<void(const CStatement&)> collect_gotos = [&](const CStatement& s) {

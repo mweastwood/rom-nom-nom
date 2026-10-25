@@ -5985,5 +5985,34 @@ s32 NestedIfCascadeWithSharedDefaultReturnAndElseBranch(ActorRecord* actors, u16
 )");
 }
 
+TEST_F(RoundTripTest, NestedDoWhileEarlyExitToOuterLoopAndPostLoopStep) {
+  AssertRoundTripBitExact("NestedDoWhileEarlyExitToOuterLoopAndPostLoopStep", R"(
+typedef struct CallbackNode {
+    struct CallbackNode* next;
+    s32 (*callback)(s32);
+} CallbackNode;
+
+extern s32 wait_for_event(s32* out_event);
+extern CallbackNode* g_callback_head;
+
+void NestedDoWhileEarlyExitToOuterLoopAndPostLoopStep(s32* event_slot) {
+    while (wait_for_event(event_slot) != 0) {
+        CallbackNode* cur = g_callback_head;
+        if (cur == 0) {
+            continue;
+        }
+        do {
+            if (cur->callback != 0) {
+                if (cur->callback(*event_slot) != 0) {
+                    break;
+                }
+            }
+            cur = cur->next;
+        } while (cur != 0);
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
