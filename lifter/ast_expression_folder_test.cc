@@ -1081,5 +1081,41 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, HasSubstr("}\n    temp_s1 = 0;"));
 }
 
+TEST(AstExpressionFolderTest, FoldsDisjointScratchRegisterWebsInForLoopAndLabeledBranches) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // For-loop with a call where temp_t0 is defined and consumed on every iteration:
+  auto for_body = std::make_unique<CompoundStatement>();
+  for_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(8)))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("temp_t0"));
+  for_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("ProcessSlot"), std::move(call_args))));
+  body->AddStatement(CStatement::For(
+      CStatement::Expression(CExpression::Assignment("=", CExpression::Identifier("temp_s0"),
+                                                     CExpression::Integer(0))),
+      CExpression::Binary("<", CExpression::Identifier("temp_s0"), CExpression::Integer(4)),
+      CExpression::Assignment(
+          "=", CExpression::Identifier("temp_s0"),
+          CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1))),
+      std::move(for_body)));
+
+  // Disjoint reuse of temp_t0 in a subsequent labeled block:
+  body->AddStatement(CStatement::Label("block_exit"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(12)))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_t0")));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t0 =")));
+  EXPECT_THAT(code, HasSubstr("ProcessSlot((temp_s0 + 8));"));
+  EXPECT_THAT(code, HasSubstr("return (arg0 + 12);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

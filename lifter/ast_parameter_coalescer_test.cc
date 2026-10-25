@@ -807,5 +807,27 @@ TEST(AstParameterCoalescerTest, CoalescesPrologueNarrowParameterCopiesAndUpdates
   EXPECT_THAT(code, HasSubstr("return arg1;"));
 }
 
+TEST(AstParameterCoalescerTest, SplitsParameterRegisterAfterNarrowPrologueCopyToTempT) {
+  CompoundStatement body;
+  // temp_t0 = (arg0 & 255);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("&", CExpression::Identifier("arg0"), CExpression::Integer(255)))));
+  // arg0 = (temp_t0 + 4);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t0"), CExpression::Integer(4)))));
+  // return arg0;
+  body.AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/0);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, HasSubstr("temp_t0 = (arg0 & 255);"));
+  EXPECT_THAT(code, HasSubstr("temp_a0 = (temp_t0 + 4);"));
+  EXPECT_THAT(code, HasSubstr("return temp_a0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

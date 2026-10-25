@@ -5940,5 +5940,24 @@ void ShortCircuitOrWithBitmaskAndStructFieldChecks(UnitSlot* u) {
 )");
 }
 
+TEST_F(RoundTripTest, DisjointBranchScratchAndNarrowParamAcrossCalls) {
+  AssertRoundTripBitExact("DisjointBranchScratchAndNarrowParamAcrossCalls", R"(
+extern void notify_channel_event(s32 ch, s32 code);
+extern void clear_channel_state(s32 ch);
+
+s32 DisjointBranchScratchAndNarrowParamAcrossCalls(u16 ch, s32* table) {
+    if (ch < 16) {
+        s32 val = table[ch];
+        if (val > 0) {
+            notify_channel_event(ch, val + 1);
+            return 1;
+        }
+        clear_channel_state(ch);
+    }
+    return 0;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

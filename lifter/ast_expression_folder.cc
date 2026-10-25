@@ -803,8 +803,11 @@ struct FolderContext {
       return true;
     }
     if (expected_uses_in_next > 0 && def_stmt != nullptr && root_body != nullptr &&
-        !has_label_between_def_and_use && var != "f0" && var != "f0_d" && var.size() >= 2 &&
-        var[0] == 'f' && std::isdigit(static_cast<unsigned char>(var[1])) && IsScratchVar(var) &&
+        !has_label_between_def_and_use && var != "v0" && var != "f0" && var != "f0_d" &&
+        IsScratchVar(var) &&
+        ((var.size() >= 2 && var[0] == 'f' && std::isdigit(static_cast<unsigned char>(var[1]))) ||
+         stmts[next_idx]->Kind() == CStatementKind::kExpressionStatement ||
+         stmts[next_idx]->Kind() == CStatementKind::kReturnStatement) &&
         !HasLoopInStmt(*stmts[next_idx]) && !HasAddressOfVarInStmt(*root_body, var) &&
         IsLocallyDefinedBeforeEveryReadInRoot(*root_body, var, def_stmt, stmts[next_idx].get(),
                                               expected_uses_in_next)) {
@@ -2802,8 +2805,23 @@ struct FolderContext {
       } else if (stmts[i]->Kind() == CStatementKind::kForStatement) {
         auto& fs = static_cast<ForStatement&>(*stmts[i]);
         if (fs.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
-          FoldSingleUseExpressions(static_cast<CompoundStatement*>(fs.MutableBody()), root_body,
-                                   nullptr, false, root_has_label_cached);
+          auto* body_comp = static_cast<CompoundStatement*>(fs.MutableBody());
+          absl::flat_hash_set<std::string> loop_dead_vars;
+          if (HasCallInStmt(*body_comp)) {
+            for (std::string_view tv : kTrackedVars) {
+              std::string tv_str(tv);
+              if ((fs.Condition() == nullptr || CountExprUses(*fs.Condition(), tv_str) == 0) &&
+                  (fs.Step() == nullptr || CountExprUses(*fs.Step(), tv_str) == 0) &&
+                  AnalyzeVarLiveness(*body_comp, tv_str, false, 0) ==
+                      VarLiveness::kKilledBeforeRead &&
+                  IsDeadAfterStmt(i, tv_str, 0)) {
+                loop_dead_vars.insert(std::move(tv_str));
+              }
+            }
+          }
+          FoldSingleUseExpressions(body_comp, root_body,
+                                   loop_dead_vars.empty() ? nullptr : &loop_dead_vars, false,
+                                   root_has_label_cached);
         }
       } else if (stmts[i]->Kind() == CStatementKind::kCompoundStatement) {
         FoldSingleUseExpressions(static_cast<CompoundStatement*>(stmts[i].get()), root_body,

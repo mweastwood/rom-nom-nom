@@ -1226,8 +1226,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         std::string narrow_rhs;
         CType narrow_type = CType::S32();
         const bool matches_narrow_rhs =
-            (mutable_parameters != nullptr && a.Op() == "=" &&
-             a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
              ExtractPrologueNarrowParamCopy(a.Rhs(), &narrow_rhs, &narrow_type) &&
              narrow_rhs == param.name);
         if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
@@ -1238,7 +1237,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
                                        : static_cast<const IdentifierExpression&>(a.Rhs()).Name();
           bool narrow_lhs_single_assign = true;
           if (matches_narrow_rhs) {
-            if (!IsCalleeSavedGprVarName(lhs) || lhs == "fp") {
+            if (mutable_parameters == nullptr || !IsCalleeSavedGprVarName(lhs) || lhs == "fp") {
               narrow_lhs_single_assign = false;
             } else {
               for (size_t k = i + 1; k < stmts.size(); ++k) {
@@ -1249,13 +1248,12 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
               }
             }
           }
-          if (rhs == param.name && narrow_lhs_single_assign &&
-              (IsCalleeSavedGprVarName(lhs) || is_temp_t_var(lhs) ||
-               (!homed_slot_name.empty() && lhs == homed_slot_name))) {
+          if (rhs == param.name && (IsCalleeSavedGprVarName(lhs) || is_temp_t_var(lhs) ||
+                                    (!homed_slot_name.empty() && lhs == homed_slot_name))) {
             prologue_copy_idx = i;
             prologue_copy_lhs = std::string(lhs);
             is_homed_copy = (!homed_slot_name.empty() && lhs == homed_slot_name);
-            is_narrow_prologue_copy = matches_narrow_rhs;
+            is_narrow_prologue_copy = matches_narrow_rhs && narrow_lhs_single_assign;
             break;
           }
         }
