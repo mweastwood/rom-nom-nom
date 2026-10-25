@@ -1117,5 +1117,90 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(partial_func->ToString(), HasSubstr("u8 sp[8];"));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     SortsCalleeSavedDeclarationsByPrologueSaveOffsetAndPrefersCallCrossingFpr) {
+  std::vector<uint32_t> words = {
+      0x27BDFFD0,  // 00: addiu $sp, $sp, -48
+      0xAFBF002C,  // 04: sw    $ra, 44($sp)
+      0xAFB20020,  // 08: sw    $s2, 32($sp)
+      0xAFB00018,  // 0C: sw    $s0, 24($sp)
+      0xF7B60028,  // 10: sdc1  $f22, 40($sp)
+      0xF7B40010,  // 14: sdc1  $f20, 16($sp)
+      0x0C000400,  // 18: jal   0x80001000
+      0x00000000,  // 1C: nop
+      0x8FBF002C,  // 20: lw    $ra, 44($sp)
+      0x8FB20020,  // 24: lw    $s2, 32($sp)
+      0x8FB00018,  // 28: lw    $s0, 24($sp)
+      0xD7B60028,  // 2C: ldc1  $f22, 40($sp)
+      0xD7B40010,  // 30: ldc1  $f20, 16($sp)
+      0x03E00008,  // 34: jr    $ra
+      0x27BD0030,  // 38: addiu $sp, $sp, 48
+  };
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80004000));
+  StackFrameAnalysis frame_analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  // Reference temp_s2 before temp_s0, f22 before f20, and an unsaved temp_s1.
+  // Also make f20 live across the call while f20_d is only used before the call.
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"), CExpression::Integer(7))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"), CExpression::Integer(9))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f22"), CExpression::Float(1.0f))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f20"), CExpression::Float(2.0f))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f20_d"),
+                              CExpression::Cast(CType::F64(), CExpression::Identifier("f20")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f22"),
+                              CExpression::Cast(CType::F32(), CExpression::Identifier("f20_d")))));
+  body->AddStatement(CStatement::Expression(CExpression::Call(
+      CExpression::Identifier("func_80001000"), std::vector<std::unique_ptr<CExpression>>{})));
+  body->AddStatement(CStatement::Return(CExpression::Binary(
+      "+", CExpression::Identifier("temp_s0"),
+      CExpression::Binary(
+          "+", CExpression::Identifier("temp_s2"),
+          CExpression::Binary(
+              "+", CExpression::Identifier("temp_s1"),
+              CExpression::Cast(CType::S32(),
+                                CExpression::Binary("+", CExpression::Identifier("f20"),
+                                                    CExpression::Identifier("f22"))))))));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 0}};
+  AstConverterOptions opts;
+  opts.function_name = "TestPrologueOrderAndSharedCalleeFpr";
+  opts.function_parameter_counts = &param_counts;
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame_analysis, /*double_vars=*/{"f20_d"},
+                                                  params, CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string code = body->ToString();
+
+  // Callee-saved GPRs are ordered by prologue save offset (temp_s0 at 24 before temp_s2 at 32),
+  // and unsaved temp_s1 is left unpinned.
+  size_t pos_s0 = code.find("register s32 temp_s0 asm(\"$16\");");
+  size_t pos_s2 = code.find("register s32 temp_s2 asm(\"$18\");");
+  ASSERT_NE(pos_s0, std::string::npos) << code;
+  ASSERT_NE(pos_s2, std::string::npos) << code;
+  EXPECT_LT(pos_s0, pos_s2) << code;
+  EXPECT_THAT(code, HasSubstr("s32 temp_s1;"));
+  EXPECT_THAT(code, Not(HasSubstr("asm(\"$17\")")));
+
+  // Callee-saved FPRs are ordered by prologue save offset (f20 at 16 before f22 at 40),
+  // and call-crossing f20 is pinned to $f20 while local-only f20_d is left unpinned.
+  size_t pos_f20 = code.find("register f32 f20 asm(\"$f20\");");
+  size_t pos_f22 = code.find("register f32 f22 asm(\"$f22\");");
+  ASSERT_NE(pos_f20, std::string::npos) << code;
+  ASSERT_NE(pos_f22, std::string::npos) << code;
+  EXPECT_LT(pos_f20, pos_f22) << code;
+  EXPECT_THAT(code, HasSubstr("f64 f20_d;"));
+  EXPECT_THAT(code, Not(HasSubstr("register f64 f20_d")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

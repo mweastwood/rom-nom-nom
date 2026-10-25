@@ -1586,6 +1586,62 @@ absl::Status PrependSynthesizedLocalDeclarations(
         local_vars_to_declare[sp_var_indices[i]] = sp_vars[i].second;
       }
     }
+
+    std::vector<size_t> callee_gpr_indices;
+    std::vector<std::pair<std::pair<int, int32_t>, std::string>> callee_gpr_vars;
+    for (size_t i = 0; i < local_vars_to_declare.size(); ++i) {
+      const std::string& v = local_vars_to_declare[i];
+      if (!IsCalleeSavedGprVarName(v)) {
+        continue;
+      }
+      Register reg = (v == "fp")
+                         ? Register::kFp
+                         : static_cast<Register>(static_cast<int>(Register::kS0) + (v[6] - '0'));
+      int32_t reg_order = (v == "fp") ? 30 : (16 + (v[6] - '0'));
+      auto it = frame_analysis.prologue.saved_reg_offsets.find(reg);
+      std::pair<int, int32_t> sort_key = (it != frame_analysis.prologue.saved_reg_offsets.end())
+                                             ? std::make_pair(0, it->second)
+                                             : std::make_pair(1, reg_order);
+      callee_gpr_indices.push_back(i);
+      callee_gpr_vars.emplace_back(sort_key, v);
+    }
+    if (callee_gpr_vars.size() >= 2) {
+      std::stable_sort(callee_gpr_vars.begin(), callee_gpr_vars.end(),
+                       [](const auto& a, const auto& b) { return a.first < b.first; });
+      for (size_t i = 0; i < callee_gpr_indices.size(); ++i) {
+        local_vars_to_declare[callee_gpr_indices[i]] = callee_gpr_vars[i].second;
+      }
+    }
+
+    std::vector<size_t> callee_fpr_indices;
+    std::vector<std::pair<std::pair<int, int32_t>, std::string>> callee_fpr_vars;
+    for (size_t i = 0; i < local_vars_to_declare.size(); ++i) {
+      const std::string& v = local_vars_to_declare[i];
+      std::string_view sv = v;
+      std::string_view base = absl::EndsWith(sv, "_d") ? sv.substr(0, sv.size() - 2) : sv;
+      if (!IsCalleeSavedFprBaseName(base)) {
+        continue;
+      }
+      int fpr_num = 0;
+      if (!absl::SimpleAtoi(base.substr(1), &fpr_num)) {
+        continue;
+      }
+      FpRegister fp_reg =
+          static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (fpr_num - 20));
+      auto it = frame_analysis.prologue.saved_fpr_offsets.find(fp_reg);
+      std::pair<int, int32_t> sort_key = (it != frame_analysis.prologue.saved_fpr_offsets.end())
+                                             ? std::make_pair(0, it->second)
+                                             : std::make_pair(1, fpr_num);
+      callee_fpr_indices.push_back(i);
+      callee_fpr_vars.emplace_back(sort_key, v);
+    }
+    if (callee_fpr_vars.size() >= 2) {
+      std::stable_sort(callee_fpr_vars.begin(), callee_fpr_vars.end(),
+                       [](const auto& a, const auto& b) { return a.first < b.first; });
+      for (size_t i = 0; i < callee_fpr_indices.size(); ++i) {
+        local_vars_to_declare[callee_fpr_indices[i]] = callee_fpr_vars[i].second;
+      }
+    }
   }
 
   uint32_t unreferenced_sp_gap_size = 0;
@@ -1976,8 +2032,11 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
     if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
         var_name[6] <= '7') {
+      Register s_reg = static_cast<Register>(static_cast<int>(Register::kS0) + (var_name[6] - '0'));
       if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref) ||
-          unpinned_s_vars.contains(std::string(var_name))) {
+          unpinned_s_vars.contains(std::string(var_name)) ||
+          (!frame_analysis.prologue.saved_reg_offsets.empty() &&
+           !frame_analysis.prologue.saved_reg_offsets.contains(s_reg))) {
         return std::nullopt;
       }
       int reg_num = 16 + (var_name[6] - '0');
@@ -1989,14 +2048,28 @@ absl::Status PrependSynthesizedLocalDeclarations(
       if (pinned_fp_bases.contains(std::string(base))) {
         return std::nullopt;
       }
-      if (IsCalleeSavedFprBaseName(base) &&
-          (fp_base_counts[std::string(base)] == 1 || absl::EndsWith(var_name, "_d") ||
-           has_address_taken(absl::StrCat(base, "_d")))) {
-        if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref)) {
-          return std::nullopt;
+      if (IsCalleeSavedFprBaseName(base)) {
+        const std::string d_name = absl::StrCat(base, "_d");
+        const bool prefer_single =
+            !has_address_taken(base) &&
+            (has_address_taken(d_name) || (!is_caller_saved_safe_across_calls(base) &&
+                                           is_caller_saved_safe_across_calls(d_name)));
+        const bool is_chosen_variant = (fp_base_counts[std::string(base)] == 1) ||
+                                       (prefer_single ? (var_name == base) : (var_name == d_name));
+        int fpr_num = 0;
+        const bool saved_in_prologue =
+            frame_analysis.prologue.saved_fpr_offsets.empty() ||
+            (!absl::SimpleAtoi(base.substr(1), &fpr_num) ||
+             frame_analysis.prologue.saved_fpr_offsets.contains(
+                 static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (fpr_num - 20))));
+        if (is_chosen_variant) {
+          if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref) ||
+              !saved_in_prologue) {
+            return std::nullopt;
+          }
+          pinned_fp_bases.insert(std::string(base));
+          return absl::StrCat("$", base);
         }
-        pinned_fp_bases.insert(std::string(base));
-        return absl::StrCat("$", base);
       }
       if (fp_base_counts[std::string(base)] == 1 &&
           callee_saved_fp_count + pinned_caller_fp_count < kMaxPinnedEvenFprs &&

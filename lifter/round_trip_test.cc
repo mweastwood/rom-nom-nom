@@ -5768,5 +5768,24 @@ void NineCalleeSavedRegistersPassedAsOutgoingStackArgsAcrossCalls(s32* cfg) {
 )");
 }
 
+TEST_F(RoundTripTest, CalleeSavedFloatWithTransientDoubleScaleAcrossCalls) {
+  AssertRoundTripBitExact("CalleeSavedFloatWithTransientDoubleScaleAcrossCalls", R"(
+extern f64 g_scale_factor_d;
+extern f32 EvalStepF(f32 u, f32 v);
+
+void CalleeSavedFloatWithTransientDoubleScaleAcrossCalls(
+    f32* out, f32 a, f32 b, f32 c) {
+    f32 r0;
+    f32 scaled_c;
+    f32 r1;
+    r0 = EvalStepF(a * 2.0f, b * 2.0f);
+    scaled_c = (f32)((f64)c * g_scale_factor_d);
+    r1 = EvalStepF(scaled_c, a);
+    out[0] = r0 + scaled_c;
+    out[1] = r1 + b;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
