@@ -525,5 +525,61 @@ TEST(AstAbiRewriterTest, SinkCommonBranchTailArgAssignmentsSinksDelaySlotDuplica
   EXPECT_EQ(body.Statements()[1]->ToString(), "temp_s0 = (arg0 + 4);\n");
 }
 
+TEST(AstAbiRewriterTest, SinkCommonBranchTailArgAssignmentsEliminatesCascadeMergeGotosAndLabels) {
+  // Construct nested if cascade with trailing label `block_6:` inside innermost `then` and
+  // `else { goto block_6; }` on outer `if`s:
+  //   if (c1) {
+  //     if (c2) {
+  //       if (c3) {
+  //         temp_a2 = 1;
+  //       block_6:
+  //       }
+  //       v0 = (temp_a2 & 255);
+  //     } else {
+  //       goto block_6;
+  //     }
+  //   } else {
+  //     goto block_6;
+  //   }
+  //   return v0;
+  CompoundStatement body;
+
+  auto inner_then = std::make_unique<CompoundStatement>();
+  inner_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_a2"), CExpression::Integer(1))));
+  inner_then->AddStatement(CStatement::Label("block_6"));
+
+  auto mid_then = std::make_unique<CompoundStatement>();
+  mid_then->AddStatement(
+      CStatement::If(CExpression::Identifier("c3"), std::move(inner_then), nullptr));
+  mid_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("&", CExpression::Identifier("temp_a2"), CExpression::Integer(255)))));
+
+  auto mid_else = std::make_unique<CompoundStatement>();
+  mid_else->AddStatement(CStatement::Goto("block_6"));
+
+  auto outer_then = std::make_unique<CompoundStatement>();
+  outer_then->AddStatement(
+      CStatement::If(CExpression::Identifier("c2"), std::move(mid_then), std::move(mid_else)));
+
+  auto outer_else = std::make_unique<CompoundStatement>();
+  outer_else->AddStatement(CStatement::Goto("block_6"));
+
+  body.AddStatement(
+      CStatement::If(CExpression::Identifier("c1"), std::move(outer_then), std::move(outer_else)));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  SinkCommonBranchTailArgAssignments(&body);
+
+  std::string emitted = body.ToString();
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_6")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_6:")));
+  ASSERT_EQ(body.Statements().size(), 3u);
+  EXPECT_EQ(body.Statements()[0]->Kind(), CStatementKind::kIfStatement);
+  EXPECT_EQ(body.Statements()[1]->ToString(), "v0 = (temp_a2 & 255);\n");
+  EXPECT_EQ(body.Statements()[2]->Kind(), CStatementKind::kReturnStatement);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

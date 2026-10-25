@@ -449,148 +449,282 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
     }
   };
 
-  auto& stmts = comp->MutableStatements();
-  for (size_t i = 0; i < stmts.size(); ++i) {
-    if (stmts[i]->Kind() == CStatementKind::kIfStatement) {
-      auto& ifs = static_cast<IfStatement&>(*stmts[i]);
-      if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
-        SinkCommonBranchTailArgAssignments(
-            static_cast<CompoundStatement*>(ifs.MutableThenBranch()));
-      }
-      if (ifs.MutableElseBranch() != nullptr &&
-          ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
-        SinkCommonBranchTailArgAssignments(
-            static_cast<CompoundStatement*>(ifs.MutableElseBranch()));
-      }
-      if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
-          ifs.MutableElseBranch() != nullptr &&
-          ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
-        auto* then_comp = static_cast<CompoundStatement*>(ifs.MutableThenBranch());
-        auto* else_comp = static_cast<CompoundStatement*>(ifs.MutableElseBranch());
-        auto& then_stmts = then_comp->MutableStatements();
-        auto& else_stmts = else_comp->MutableStatements();
-        bool sunk_any = true;
-        while (sunk_any && !then_stmts.empty() && !else_stmts.empty()) {
-          sunk_any = false;
-          size_t then_min = then_stmts.size() > 4 ? then_stmts.size() - 4 : 0;
-          size_t else_min = else_stmts.size() > 4 ? else_stmts.size() - 4 : 0;
-          for (size_t ti = then_stmts.size(); ti > then_min; --ti) {
-            std::string t_lhs;
-            std::string t_rhs;
-            const CExpression* t_rhs_expr = nullptr;
-            if (!extract_sinkable_assign(*then_stmts[ti - 1], &t_lhs, &t_rhs, &t_rhs_expr)) {
-              continue;
-            }
-            bool t_blocked = false;
-            for (size_t tk = ti; tk < then_stmts.size(); ++tk) {
-              std::string after_lhs;
-              if (!is_simple_reg_assign(*then_stmts[tk], &after_lhs) || after_lhs == t_lhs ||
-                  StatementReferencesVariable(*then_stmts[tk], t_lhs) ||
-                  ExpressionUsesVariable(*t_rhs_expr, after_lhs)) {
-                t_blocked = true;
+  auto is_sinkable_tail_stmt = [](const CStatement& s) -> bool {
+    return s.Kind() == CStatementKind::kExpressionStatement && !StatementContainsControlFlowJump(s);
+  };
+
+  std::function<void(CompoundStatement*)> sink_in_comp = [&](CompoundStatement* cur_comp) {
+    if (cur_comp == nullptr) return;
+    auto& stmts = cur_comp->MutableStatements();
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      if (stmts[i]->Kind() == CStatementKind::kIfStatement) {
+        auto& ifs = static_cast<IfStatement&>(*stmts[i]);
+        if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          sink_in_comp(static_cast<CompoundStatement*>(ifs.MutableThenBranch()));
+        }
+        if (ifs.MutableElseBranch() != nullptr &&
+            ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          sink_in_comp(static_cast<CompoundStatement*>(ifs.MutableElseBranch()));
+        }
+
+        // Rule B: If one branch ends with `goto block_N;` and the other branch ends with
+        // `block_N: <0..4 sinkable ExpressionStatements>`, sink `block_N: <tail>` after the
+        // IfStatement and remove the redundant `goto block_N;`.
+        if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            ifs.MutableElseBranch() != nullptr &&
+            ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          auto* then_comp = static_cast<CompoundStatement*>(ifs.MutableThenBranch());
+          auto* else_comp = static_cast<CompoundStatement*>(ifs.MutableElseBranch());
+          auto& then_stmts = then_comp->MutableStatements();
+          auto& else_stmts = else_comp->MutableStatements();
+          if (!else_stmts.empty() && else_stmts.back()->Kind() == CStatementKind::kGotoStatement &&
+              then_stmts.size() >= 2) {
+            std::string target_lbl(static_cast<const GotoStatement&>(*else_stmts.back()).Label());
+            size_t lbl_idx = then_stmts.size();
+            for (size_t k = then_stmts.size(); k > 0; --k) {
+              if (then_stmts[k - 1]->Kind() == CStatementKind::kLabelStatement &&
+                  static_cast<const LabelStatement&>(*then_stmts[k - 1]).Label() == target_lbl) {
+                lbl_idx = k - 1;
+                break;
+              }
+              if (!is_sinkable_tail_stmt(*then_stmts[k - 1]) || (then_stmts.size() - (k - 1)) > 4) {
                 break;
               }
             }
-            if (t_blocked) continue;
+            if (lbl_idx >= 1 && lbl_idx < then_stmts.size()) {
+              else_stmts.pop_back();
+              std::vector<std::unique_ptr<CStatement>> sunk_tail;
+              for (size_t k = lbl_idx; k < then_stmts.size(); ++k) {
+                sunk_tail.push_back(std::move(then_stmts[k]));
+              }
+              then_stmts.erase(then_stmts.begin() + lbl_idx, then_stmts.end());
+              for (size_t k = 0; k < sunk_tail.size(); ++k) {
+                stmts.insert(stmts.begin() + i + 1 + k, std::move(sunk_tail[k]));
+              }
+              if (else_stmts.empty() && !then_stmts.empty()) {
+                stmts[i] = CStatement::If(ifs.Condition().Clone(), ifs.MutableThenBranch()->Clone(),
+                                          nullptr);
+              }
+            }
+          }
+        }
 
-            for (size_t ei = else_stmts.size(); ei > else_min; --ei) {
-              std::string e_lhs;
-              std::string e_rhs;
-              const CExpression* e_rhs_expr = nullptr;
-              if (!extract_sinkable_assign(*else_stmts[ei - 1], &e_lhs, &e_rhs, &e_rhs_expr)) {
+        auto& ifs_after_b = static_cast<IfStatement&>(*stmts[i]);
+        if (ifs_after_b.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            ifs_after_b.MutableElseBranch() != nullptr &&
+            ifs_after_b.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          auto* then_comp = static_cast<CompoundStatement*>(ifs_after_b.MutableThenBranch());
+          auto* else_comp = static_cast<CompoundStatement*>(ifs_after_b.MutableElseBranch());
+          auto& then_stmts = then_comp->MutableStatements();
+          auto& else_stmts = else_comp->MutableStatements();
+          bool sunk_any = true;
+          while (sunk_any && !then_stmts.empty() && !else_stmts.empty()) {
+            sunk_any = false;
+            size_t then_min = then_stmts.size() > 4 ? then_stmts.size() - 4 : 0;
+            size_t else_min = else_stmts.size() > 4 ? else_stmts.size() - 4 : 0;
+            for (size_t ti = then_stmts.size(); ti > then_min; --ti) {
+              std::string t_lhs;
+              std::string t_rhs;
+              const CExpression* t_rhs_expr = nullptr;
+              if (!extract_sinkable_assign(*then_stmts[ti - 1], &t_lhs, &t_rhs, &t_rhs_expr)) {
                 continue;
               }
-              if (e_lhs != t_lhs || e_rhs != t_rhs) continue;
-              bool e_blocked = false;
-              for (size_t ek = ei; ek < else_stmts.size(); ++ek) {
+              bool t_blocked = false;
+              for (size_t tk = ti; tk < then_stmts.size(); ++tk) {
                 std::string after_lhs;
-                if (!is_simple_reg_assign(*else_stmts[ek], &after_lhs) || after_lhs == e_lhs ||
-                    StatementReferencesVariable(*else_stmts[ek], e_lhs) ||
-                    ExpressionUsesVariable(*e_rhs_expr, after_lhs)) {
-                  e_blocked = true;
+                if (!is_simple_reg_assign(*then_stmts[tk], &after_lhs) || after_lhs == t_lhs ||
+                    StatementReferencesVariable(*then_stmts[tk], t_lhs) ||
+                    ExpressionUsesVariable(*t_rhs_expr, after_lhs)) {
+                  t_blocked = true;
                   break;
                 }
               }
-              if (e_blocked) continue;
+              if (t_blocked) continue;
 
-              auto sunk_stmt = then_stmts[ti - 1]->Clone();
-              then_stmts.erase(then_stmts.begin() + (ti - 1));
-              else_stmts.erase(else_stmts.begin() + (ei - 1));
-              stmts.insert(stmts.begin() + i + 1, std::move(sunk_stmt));
-              sunk_any = true;
-              break;
+              for (size_t ei = else_stmts.size(); ei > else_min; --ei) {
+                std::string e_lhs;
+                std::string e_rhs;
+                const CExpression* e_rhs_expr = nullptr;
+                if (!extract_sinkable_assign(*else_stmts[ei - 1], &e_lhs, &e_rhs, &e_rhs_expr)) {
+                  continue;
+                }
+                if (e_lhs != t_lhs || e_rhs != t_rhs) continue;
+                bool e_blocked = false;
+                for (size_t ek = ei; ek < else_stmts.size(); ++ek) {
+                  std::string after_lhs;
+                  if (!is_simple_reg_assign(*else_stmts[ek], &after_lhs) || after_lhs == e_lhs ||
+                      StatementReferencesVariable(*else_stmts[ek], e_lhs) ||
+                      ExpressionUsesVariable(*e_rhs_expr, after_lhs)) {
+                    e_blocked = true;
+                    break;
+                  }
+                }
+                if (e_blocked) continue;
+
+                auto sunk_stmt = then_stmts[ti - 1]->Clone();
+                then_stmts.erase(then_stmts.begin() + (ti - 1));
+                else_stmts.erase(else_stmts.begin() + (ei - 1));
+                stmts.insert(stmts.begin() + i + 1, std::move(sunk_stmt));
+                sunk_any = true;
+                break;
+              }
+              if (sunk_any) break;
             }
-            if (sunk_any) break;
+          }
+          if (else_stmts.empty() && !then_stmts.empty()) {
+            stmts[i] = CStatement::If(ifs_after_b.Condition().Clone(),
+                                      ifs_after_b.MutableThenBranch()->Clone(), nullptr);
           }
         }
-        if (else_stmts.empty() && !then_stmts.empty()) {
-          stmts[i] =
-              CStatement::If(ifs.Condition().Clone(), ifs.MutableThenBranch()->Clone(), nullptr);
-        }
-      }
-      auto& cur_ifs = static_cast<IfStatement&>(*stmts[i]);
-      if (i > 0 && cur_ifs.MutableElseBranch() == nullptr &&
-          cur_ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
-          IsPureExpression(cur_ifs.Condition())) {
-        std::string pre_lhs;
-        std::string pre_rhs;
-        const CExpression* pre_rhs_expr = nullptr;
-        if (extract_sinkable_assign(*stmts[i - 1], &pre_lhs, &pre_rhs, &pre_rhs_expr) &&
-            !ExpressionUsesVariable(cur_ifs.Condition(), pre_lhs) &&
-            !StatementTakesAddressOf(*cur_ifs.MutableThenBranch(), pre_lhs)) {
-          auto* then_comp = static_cast<CompoundStatement*>(cur_ifs.MutableThenBranch());
+
+        // Rule A: Sink trailing LabelStatements at the very end of `then` or `else` to
+        // immediately after the IfStatement.
+        auto& ifs_after_sink = static_cast<IfStatement&>(*stmts[i]);
+        if (ifs_after_sink.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          auto* then_comp = static_cast<CompoundStatement*>(ifs_after_sink.MutableThenBranch());
           auto& then_stmts = then_comp->MutableStatements();
-          if (then_stmts.size() >= 2) {
-            std::string tail_lhs;
-            std::string tail_rhs;
-            const CExpression* tail_rhs_expr = nullptr;
-            if (extract_sinkable_assign(*then_stmts.back(), &tail_lhs, &tail_rhs, &tail_rhs_expr) &&
-                tail_lhs == pre_lhs && tail_rhs == pre_rhs) {
-              size_t prefix_end = then_stmts.size() - 1;
-              bool has_join_label = false;
-              if (prefix_end >= 1 &&
-                  then_stmts[prefix_end - 1]->Kind() == CStatementKind::kLabelStatement) {
-                has_join_label = true;
-                --prefix_end;
-              }
-              bool prefix_ok = (prefix_end >= 1);
-              bool written = false;
-              for (size_t pk = 0; pk < prefix_end && prefix_ok; ++pk) {
-                const auto& ps = *then_stmts[pk];
-                if (!has_join_label && StatementContainsControlFlowJump(ps)) {
-                  prefix_ok = false;
-                  break;
+          while (then_stmts.size() >= 2 &&
+                 then_stmts.back()->Kind() == CStatementKind::kLabelStatement) {
+            auto sunk_lbl = std::move(then_stmts.back());
+            then_stmts.pop_back();
+            stmts.insert(stmts.begin() + i + 1, std::move(sunk_lbl));
+          }
+        }
+        if (ifs_after_sink.MutableElseBranch() != nullptr &&
+            ifs_after_sink.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          auto* then_comp =
+              ifs_after_sink.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement
+                  ? static_cast<CompoundStatement*>(ifs_after_sink.MutableThenBranch())
+                  : nullptr;
+          auto* else_comp = static_cast<CompoundStatement*>(ifs_after_sink.MutableElseBranch());
+          auto& else_stmts = else_comp->MutableStatements();
+          while (!else_stmts.empty() &&
+                 else_stmts.back()->Kind() == CStatementKind::kLabelStatement) {
+            auto sunk_lbl = std::move(else_stmts.back());
+            else_stmts.pop_back();
+            stmts.insert(stmts.begin() + i + 1, std::move(sunk_lbl));
+          }
+          if (else_stmts.empty() && then_comp != nullptr && !then_comp->Statements().empty()) {
+            stmts[i] = CStatement::If(ifs_after_sink.Condition().Clone(),
+                                      ifs_after_sink.MutableThenBranch()->Clone(), nullptr);
+          }
+        }
+
+        auto& cur_ifs = static_cast<IfStatement&>(*stmts[i]);
+        if (i > 0 && cur_ifs.MutableElseBranch() == nullptr &&
+            cur_ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            IsPureExpression(cur_ifs.Condition())) {
+          std::string pre_lhs;
+          std::string pre_rhs;
+          const CExpression* pre_rhs_expr = nullptr;
+          if (extract_sinkable_assign(*stmts[i - 1], &pre_lhs, &pre_rhs, &pre_rhs_expr) &&
+              !ExpressionUsesVariable(cur_ifs.Condition(), pre_lhs) &&
+              !StatementTakesAddressOf(*cur_ifs.MutableThenBranch(), pre_lhs)) {
+            auto* then_comp = static_cast<CompoundStatement*>(cur_ifs.MutableThenBranch());
+            auto& then_stmts = then_comp->MutableStatements();
+            if (then_stmts.size() >= 2) {
+              std::string tail_lhs;
+              std::string tail_rhs;
+              const CExpression* tail_rhs_expr = nullptr;
+              if (extract_sinkable_assign(*then_stmts.back(), &tail_lhs, &tail_rhs,
+                                          &tail_rhs_expr) &&
+                  tail_lhs == pre_lhs && tail_rhs == pre_rhs) {
+                size_t prefix_end = then_stmts.size() - 1;
+                bool has_join_label = false;
+                if (prefix_end >= 1 &&
+                    then_stmts[prefix_end - 1]->Kind() == CStatementKind::kLabelStatement) {
+                  has_join_label = true;
+                  --prefix_end;
                 }
-                if (prefix_reads_before_write(ps, pre_lhs, &written)) {
-                  prefix_ok = false;
-                  break;
+                bool prefix_ok = (prefix_end >= 1);
+                bool written = false;
+                for (size_t pk = 0; pk < prefix_end && prefix_ok; ++pk) {
+                  const auto& ps = *then_stmts[pk];
+                  if (!has_join_label && StatementContainsControlFlowJump(ps)) {
+                    prefix_ok = false;
+                    break;
+                  }
+                  if (prefix_reads_before_write(ps, pre_lhs, &written)) {
+                    prefix_ok = false;
+                    break;
+                  }
                 }
-              }
-              if (prefix_ok) {
-                std::unique_ptr<CStatement> sunk_assign = std::move(then_stmts.back());
-                then_stmts.pop_back();
-                std::unique_ptr<CStatement> sunk_label;
-                if (has_join_label) {
-                  sunk_label = std::move(then_stmts.back());
+                if (prefix_ok) {
+                  std::unique_ptr<CStatement> sunk_assign = std::move(then_stmts.back());
                   then_stmts.pop_back();
-                }
-                stmts.erase(stmts.begin() + (i - 1));
-                --i;
-                if (sunk_label != nullptr) {
-                  stmts.insert(stmts.begin() + i + 1, std::move(sunk_label));
-                  stmts.insert(stmts.begin() + i + 2, std::move(sunk_assign));
-                } else {
-                  stmts.insert(stmts.begin() + i + 1, std::move(sunk_assign));
+                  std::unique_ptr<CStatement> sunk_label;
+                  if (has_join_label) {
+                    sunk_label = std::move(then_stmts.back());
+                    then_stmts.pop_back();
+                  }
+                  stmts.erase(stmts.begin() + (i - 1));
+                  --i;
+                  if (sunk_label != nullptr) {
+                    stmts.insert(stmts.begin() + i + 1, std::move(sunk_label));
+                    stmts.insert(stmts.begin() + i + 2, std::move(sunk_assign));
+                  } else {
+                    stmts.insert(stmts.begin() + i + 1, std::move(sunk_assign));
+                  }
                 }
               }
             }
           }
         }
+      } else {
+        ForEachSubCompoundStatement(stmts[i].get(), sink_in_comp);
       }
-    } else {
-      ForEachSubCompoundStatement(stmts[i].get(), SinkCommonBranchTailArgAssignments);
     }
-  }
+  };
+  sink_in_comp(comp);
+
+  // Rule C: Remove any LabelStatement in `comp` that has no remaining GotoStatement targeting it.
+  absl::flat_hash_set<std::string> used_labels;
+  std::function<void(const CStatement&)> collect_gotos = [&](const CStatement& s) {
+    if (s.Kind() == CStatementKind::kGotoStatement) {
+      used_labels.insert(std::string(static_cast<const GotoStatement&>(s).Label()));
+    } else if (s.Kind() == CStatementKind::kCompoundStatement) {
+      for (const auto& ch : static_cast<const CompoundStatement&>(s).Statements()) {
+        if (ch != nullptr) collect_gotos(*ch);
+      }
+    } else if (s.Kind() == CStatementKind::kIfStatement) {
+      const auto& ifs = static_cast<const IfStatement&>(s);
+      collect_gotos(ifs.ThenBranch());
+      if (ifs.ElseBranch() != nullptr) collect_gotos(*ifs.ElseBranch());
+    } else if (s.Kind() == CStatementKind::kSwitchStatement) {
+      for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
+        if (sc.body != nullptr) collect_gotos(*sc.body);
+      }
+    } else if (s.Kind() == CStatementKind::kWhileStatement) {
+      collect_gotos(static_cast<const WhileStatement&>(s).Body());
+    } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
+      collect_gotos(static_cast<const DoWhileStatement&>(s).Body());
+    } else if (s.Kind() == CStatementKind::kForStatement) {
+      collect_gotos(static_cast<const ForStatement&>(s).Body());
+    }
+  };
+  collect_gotos(*comp);
+
+  std::function<void(CompoundStatement*)> prune_unused_labels = [&](CompoundStatement* cur_comp) {
+    if (cur_comp == nullptr) return;
+    auto& stmts = cur_comp->MutableStatements();
+    for (size_t i = 0; i < stmts.size();) {
+      if (stmts[i] == nullptr) {
+        ++i;
+        continue;
+      }
+      if (stmts[i]->Kind() == CStatementKind::kLabelStatement) {
+        std::string lbl(static_cast<const LabelStatement&>(*stmts[i]).Label());
+        if (!used_labels.contains(lbl)) {
+          stmts.erase(stmts.begin() + i);
+          continue;
+        }
+      } else {
+        ForEachSubCompoundStatement(stmts[i].get(), prune_unused_labels);
+      }
+      ++i;
+    }
+  };
+  prune_unused_labels(comp);
 }
 
 void InlineCrossJumpedCallTails(CompoundStatement* root_body) {

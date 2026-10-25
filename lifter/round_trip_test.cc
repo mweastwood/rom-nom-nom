@@ -5959,5 +5959,31 @@ s32 DisjointBranchScratchAndNarrowParamAcrossCalls(u16 ch, s32* table) {
 )");
 }
 
+TEST_F(RoundTripTest, NestedIfCascadeWithSharedDefaultReturnAndElseBranch) {
+  AssertRoundTripBitExact("NestedIfCascadeWithSharedDefaultReturnAndElseBranch", R"(
+typedef struct {
+    u16 flags;
+    u16 pad;
+    s32* table;
+} ActorRecord;
+
+extern s32 resolve_actor_anim(s32 val_a, s32 val_b);
+
+s32 NestedIfCascadeWithSharedDefaultReturnAndElseBranch(ActorRecord* actors, u16 idx, u16 anim_id) {
+    s32 result = 0;
+    if (idx < 192) {
+        ActorRecord* rec = &actors[idx];
+        if ((rec->flags & 1) != 0) {
+            s32* tbl = rec->table;
+            if (tbl[anim_id] != tbl[anim_id + 1]) {
+                result = resolve_actor_anim(tbl[anim_id], tbl[anim_id + 1]);
+            }
+        }
+    }
+    return result & 255;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
