@@ -646,5 +646,53 @@ TEST(CEmitterTest, PromotesScalarCastDerefGlobalEvenWhenIndexedWithPointerCast) 
   EXPECT_THAT(emitted, HasSubstr("*(u16*)((u8*)&D_80205622 + arg0) = 1;"));
 }
 
+TEST(CEmitterTest, PromotesMixedSignedAndUnsignedByteAndHalfwordGlobals) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  // *(u8*)&D_80180000 = 0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U8().MakePointer(),
+                                 CExpression::Unary("&", CExpression::Identifier("D_80180000")))),
+      CExpression::Integer(0))));
+  // arg0 = *(s8*)&D_80180000;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Unary("*", CExpression::Cast(CType::S8().MakePointer(),
+                                                CExpression::Unary("&", CExpression::Identifier(
+                                                                            "D_80180000")))))));
+  // *(u16*)&D_80180004 = 0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U16().MakePointer(),
+                                 CExpression::Unary("&", CExpression::Identifier("D_80180004")))),
+      CExpression::Integer(0))));
+  // arg0 = *(s16*)&D_80180004;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Unary("*", CExpression::Cast(CType::S16().MakePointer(),
+                                                CExpression::Unary("&", CExpression::Identifier(
+                                                                            "D_80180004")))))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
+  tu.functions.emplace_back(CType::S32(), "TestGlobalScalarPromotion",
+                            std::vector<CParameter>{CParameter{CType::S32(), "arg0"}},
+                            std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("extern s8 D_80180000;\n"));
+  EXPECT_THAT(emitted, HasSubstr("extern s16 D_80180004;\n"));
+  EXPECT_THAT(emitted, HasSubstr("D_80180000 = 0;"));
+  EXPECT_THAT(emitted, HasSubstr("arg0 = D_80180000;"));
+  EXPECT_THAT(emitted, HasSubstr("D_80180004 = 0;"));
+  EXPECT_THAT(emitted, HasSubstr("arg0 = D_80180004;"));
+  EXPECT_THAT(emitted, ::testing::Not(HasSubstr("*(u8*)&D_80180000")));
+  EXPECT_THAT(emitted, ::testing::Not(HasSubstr("*(u16*)&D_80180004")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

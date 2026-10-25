@@ -943,5 +943,40 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, HasSubstr("(u32)*(f32*)arg2"));
 }
 
+TEST(AstExpressionFolderTest, FoldsSingleUseCallArgumentTemporariesAndLoopDelaySlotCallArgs) {
+  auto body = std::make_unique<CompoundStatement>();
+  // Pre-loop initial assignment (from loop entry branch delay slot):
+  // temp_a1 = (temp_s0 + 16);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_a1"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(16)))));
+  auto loop_body = std::make_unique<CompoundStatement>();
+  // temp_a0 = 1;
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_a0"), CExpression::Integer(1))));
+  // HelperCall(temp_a0, temp_a1);
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("temp_a0"));
+  call_args.push_back(CExpression::Identifier("temp_a1"));
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("HelperCall"), std::move(call_args))));
+  // Back-edge branch delay slot re-evaluates identical expression:
+  // temp_a1 = (temp_s0 + 16);
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_a1"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(16)))));
+  body->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0))));
+  body->AddStatement(CStatement::Return());
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_a0 =")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_a1 =")));
+  EXPECT_THAT(code, HasSubstr("HelperCall(1, (temp_s0 + 16));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

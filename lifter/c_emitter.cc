@@ -108,7 +108,10 @@ std::optional<std::pair<std::string, CType>> MatchScalarCastDerefGlobal(
 void CollectGlobalCastDerefsInExpr(
     const CExpression& expr, const std::set<std::string>& local_vars,
     std::map<std::string, int>* total_id_uses,
-    std::map<std::string, std::map<std::string, std::pair<CType, int>>>* cast_deref_uses) {
+    std::map<std::string, std::map<std::string, std::pair<CType, int>>>* cast_deref_uses,
+    std::set<std::string>* uncast_addr_arith_symbols = nullptr,
+    std::map<std::string, std::map<std::string, std::pair<CType, int>>>* id_symbol_type_uses =
+        nullptr) {
   if (auto matched = MatchScalarCastDerefGlobal(expr, local_vars); matched.has_value()) {
     const std::string& sym = matched->first;
     const CType& sc_type = matched->second;
@@ -123,6 +126,12 @@ void CollectGlobalCastDerefsInExpr(
       const auto& id = static_cast<const IdentifierExpression&>(expr);
       if (local_vars.count(id.Name()) == 0) {
         (*total_id_uses)[id.Name()]++;
+        if (id_symbol_type_uses != nullptr && !id.IsArraySymbol()) {
+          CType sym_type = id.SymbolType().value_or(CType::S32());
+          auto& entry = (*id_symbol_type_uses)[id.Name()][sym_type.ToString()];
+          entry.first = sym_type;
+          entry.second++;
+        }
       }
       break;
     }
@@ -131,7 +140,8 @@ void CollectGlobalCastDerefsInExpr(
       if (u.IsPrefix() && u.Op() == "&" && u.Operand().Kind() == CExpressionKind::kIdentifier) {
         break;
       }
-      CollectGlobalCastDerefsInExpr(u.Operand(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(u.Operand(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CExpressionKind::kBinaryExpression: {
@@ -145,6 +155,9 @@ void CollectGlobalCastDerefsInExpr(
               const auto& id = static_cast<const IdentifierExpression&>(u.Operand());
               if (local_vars.count(id.Name()) == 0) {
                 (*total_id_uses)[id.Name()]++;
+                if (uncast_addr_arith_symbols != nullptr) {
+                  uncast_addr_arith_symbols->insert(id.Name());
+                }
               }
             }
           }
@@ -152,46 +165,76 @@ void CollectGlobalCastDerefsInExpr(
         check_uncast_addr_of(b.Lhs());
         check_uncast_addr_of(b.Rhs());
       }
-      CollectGlobalCastDerefsInExpr(b.Lhs(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInExpr(b.Rhs(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(b.Lhs(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInExpr(b.Rhs(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& a = static_cast<const AssignmentExpression&>(expr);
-      CollectGlobalCastDerefsInExpr(a.Lhs(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInExpr(a.Rhs(), local_vars, total_id_uses, cast_deref_uses);
+      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+        const auto& lhs_id = static_cast<const IdentifierExpression&>(a.Lhs());
+        if (local_vars.count(lhs_id.Name()) == 0 && !lhs_id.IsArraySymbol()) {
+          std::string t_str = lhs_id.SymbolType().value_or(CType::S32()).ToString();
+          if (t_str == "s32" && a.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+              static_cast<const IntegerLiteralExpression&>(a.Rhs()).Value() == 0) {
+            if (id_symbol_type_uses != nullptr) {
+              auto& z_entry = (*id_symbol_type_uses)[lhs_id.Name()]["s32_zero_store"];
+              z_entry.first = CType::S32();
+              z_entry.second++;
+            }
+            (*total_id_uses)[lhs_id.Name()]++;
+            CollectGlobalCastDerefsInExpr(a.Rhs(), local_vars, total_id_uses, cast_deref_uses,
+                                          uncast_addr_arith_symbols, id_symbol_type_uses);
+            break;
+          }
+        }
+      }
+      CollectGlobalCastDerefsInExpr(a.Lhs(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInExpr(a.Rhs(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CExpressionKind::kCallExpression: {
       const auto& c = static_cast<const CallExpression&>(expr);
-      CollectGlobalCastDerefsInExpr(c.Callee(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(c.Callee(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       for (const auto& arg : c.Arguments()) {
         if (arg != nullptr) {
-          CollectGlobalCastDerefsInExpr(*arg, local_vars, total_id_uses, cast_deref_uses);
+          CollectGlobalCastDerefsInExpr(*arg, local_vars, total_id_uses, cast_deref_uses,
+                                        uncast_addr_arith_symbols, id_symbol_type_uses);
         }
       }
       break;
     }
     case CExpressionKind::kCastExpression:
       CollectGlobalCastDerefsInExpr(static_cast<const CastExpression&>(expr).Operand(), local_vars,
-                                    total_id_uses, cast_deref_uses);
+                                    total_id_uses, cast_deref_uses, uncast_addr_arith_symbols,
+                                    id_symbol_type_uses);
       break;
     case CExpressionKind::kMemberAccessExpression:
       CollectGlobalCastDerefsInExpr(static_cast<const MemberAccessExpression&>(expr).Object(),
-                                    local_vars, total_id_uses, cast_deref_uses);
+                                    local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     case CExpressionKind::kArrayIndexExpression: {
       const auto& a = static_cast<const ArrayIndexExpression&>(expr);
-      CollectGlobalCastDerefsInExpr(a.Array(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInExpr(a.Index(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(a.Array(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInExpr(a.Index(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CExpressionKind::kTernaryExpression: {
       const auto& t = static_cast<const TernaryExpression&>(expr);
-      CollectGlobalCastDerefsInExpr(t.Condition(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInExpr(t.TrueExpression(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInExpr(t.FalseExpression(), local_vars, total_id_uses,
-                                    cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(t.Condition(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInExpr(t.TrueExpression(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInExpr(t.FalseExpression(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     default:
@@ -202,77 +245,94 @@ void CollectGlobalCastDerefsInExpr(
 void CollectGlobalCastDerefsInStmt(
     const CStatement& stmt, const std::set<std::string>& local_vars,
     std::map<std::string, int>* total_id_uses,
-    std::map<std::string, std::map<std::string, std::pair<CType, int>>>* cast_deref_uses) {
+    std::map<std::string, std::map<std::string, std::pair<CType, int>>>* cast_deref_uses,
+    std::set<std::string>* uncast_addr_arith_symbols = nullptr,
+    std::map<std::string, std::map<std::string, std::pair<CType, int>>>* id_symbol_type_uses =
+        nullptr) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement:
       for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
         if (s != nullptr) {
-          CollectGlobalCastDerefsInStmt(*s, local_vars, total_id_uses, cast_deref_uses);
+          CollectGlobalCastDerefsInStmt(*s, local_vars, total_id_uses, cast_deref_uses,
+                                        uncast_addr_arith_symbols, id_symbol_type_uses);
         }
       }
       break;
     case CStatementKind::kExpressionStatement:
       CollectGlobalCastDerefsInExpr(static_cast<const ExpressionStatement&>(stmt).Expression(),
-                                    local_vars, total_id_uses, cast_deref_uses);
+                                    local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     case CStatementKind::kVariableDeclarationStatement: {
       const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
       if (vd.Initializer() != nullptr) {
-        CollectGlobalCastDerefsInExpr(*vd.Initializer(), local_vars, total_id_uses,
-                                      cast_deref_uses);
+        CollectGlobalCastDerefsInExpr(*vd.Initializer(), local_vars, total_id_uses, cast_deref_uses,
+                                      uncast_addr_arith_symbols, id_symbol_type_uses);
       }
       break;
     }
     case CStatementKind::kIfStatement: {
       const auto& ifs = static_cast<const IfStatement&>(stmt);
-      CollectGlobalCastDerefsInExpr(ifs.Condition(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInStmt(ifs.ThenBranch(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(ifs.Condition(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInStmt(ifs.ThenBranch(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       if (ifs.ElseBranch() != nullptr) {
-        CollectGlobalCastDerefsInStmt(*ifs.ElseBranch(), local_vars, total_id_uses,
-                                      cast_deref_uses);
+        CollectGlobalCastDerefsInStmt(*ifs.ElseBranch(), local_vars, total_id_uses, cast_deref_uses,
+                                      uncast_addr_arith_symbols, id_symbol_type_uses);
       }
       break;
     }
     case CStatementKind::kWhileStatement: {
       const auto& ws = static_cast<const WhileStatement&>(stmt);
-      CollectGlobalCastDerefsInExpr(ws.Condition(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInStmt(ws.Body(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(ws.Condition(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInStmt(ws.Body(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CStatementKind::kDoWhileStatement: {
       const auto& dws = static_cast<const DoWhileStatement&>(stmt);
-      CollectGlobalCastDerefsInStmt(dws.Body(), local_vars, total_id_uses, cast_deref_uses);
-      CollectGlobalCastDerefsInExpr(dws.Condition(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInStmt(dws.Body(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
+      CollectGlobalCastDerefsInExpr(dws.Condition(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CStatementKind::kForStatement: {
       const auto& fs = static_cast<const ForStatement&>(stmt);
       if (fs.Init() != nullptr) {
-        CollectGlobalCastDerefsInStmt(*fs.Init(), local_vars, total_id_uses, cast_deref_uses);
+        CollectGlobalCastDerefsInStmt(*fs.Init(), local_vars, total_id_uses, cast_deref_uses,
+                                      uncast_addr_arith_symbols, id_symbol_type_uses);
       }
       if (fs.Condition() != nullptr) {
-        CollectGlobalCastDerefsInExpr(*fs.Condition(), local_vars, total_id_uses, cast_deref_uses);
+        CollectGlobalCastDerefsInExpr(*fs.Condition(), local_vars, total_id_uses, cast_deref_uses,
+                                      uncast_addr_arith_symbols, id_symbol_type_uses);
       }
       if (fs.Step() != nullptr) {
-        CollectGlobalCastDerefsInExpr(*fs.Step(), local_vars, total_id_uses, cast_deref_uses);
+        CollectGlobalCastDerefsInExpr(*fs.Step(), local_vars, total_id_uses, cast_deref_uses,
+                                      uncast_addr_arith_symbols, id_symbol_type_uses);
       }
-      CollectGlobalCastDerefsInStmt(fs.Body(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInStmt(fs.Body(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       break;
     }
     case CStatementKind::kReturnStatement: {
       const auto& rs = static_cast<const ReturnStatement&>(stmt);
       if (rs.ReturnValue() != nullptr) {
-        CollectGlobalCastDerefsInExpr(*rs.ReturnValue(), local_vars, total_id_uses,
-                                      cast_deref_uses);
+        CollectGlobalCastDerefsInExpr(*rs.ReturnValue(), local_vars, total_id_uses, cast_deref_uses,
+                                      uncast_addr_arith_symbols, id_symbol_type_uses);
       }
       break;
     }
     case CStatementKind::kSwitchStatement: {
       const auto& ss = static_cast<const SwitchStatement&>(stmt);
-      CollectGlobalCastDerefsInExpr(ss.Condition(), local_vars, total_id_uses, cast_deref_uses);
+      CollectGlobalCastDerefsInExpr(ss.Condition(), local_vars, total_id_uses, cast_deref_uses,
+                                    uncast_addr_arith_symbols, id_symbol_type_uses);
       for (const auto& c : ss.Cases()) {
         if (c.body != nullptr) {
-          CollectGlobalCastDerefsInStmt(*c.body, local_vars, total_id_uses, cast_deref_uses);
+          CollectGlobalCastDerefsInStmt(*c.body, local_vars, total_id_uses, cast_deref_uses,
+                                        uncast_addr_arith_symbols, id_symbol_type_uses);
         }
       }
       break;
@@ -297,6 +357,12 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
           if (type_it != module_data_types.end() || is_func) {
             CType accessed_type = id.SymbolType().value_or(CType::S32());
             if (is_func || type_it->second.ToString() != accessed_type.ToString()) {
+              if (!is_func && array_symbols.count(id.Name()) == 0 &&
+                  ((type_it->second.ToString() == "s8" && accessed_type.ToString() == "u8") ||
+                   (type_it->second.ToString() == "s16" && accessed_type.ToString() == "u16"))) {
+                return CExpression::Cast(accessed_type, std::make_unique<IdentifierExpression>(
+                                                            id.Name(), type_it->second));
+              }
               std::unique_ptr<CExpression> addr =
                   (!is_func && array_symbols.count(id.Name()) > 0)
                       ? CExpression::Identifier(id.Name())
@@ -316,9 +382,15 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
     case CExpressionKind::kUnaryExpression: {
       if (auto matched = MatchScalarCastDerefGlobal(expr, local_vars); matched.has_value()) {
         auto prom_it = promoted_scalar_globals.find(matched->first);
-        if (prom_it != promoted_scalar_globals.end() &&
-            prom_it->second.ToString() == matched->second.ToString()) {
-          return std::make_unique<IdentifierExpression>(matched->first, matched->second);
+        if (prom_it != promoted_scalar_globals.end()) {
+          if (prom_it->second.ToString() == matched->second.ToString()) {
+            return std::make_unique<IdentifierExpression>(matched->first, matched->second);
+          }
+          if ((prom_it->second.ToString() == "s8" && matched->second.ToString() == "u8") ||
+              (prom_it->second.ToString() == "s16" && matched->second.ToString() == "u16")) {
+            return CExpression::Cast(matched->second, std::make_unique<IdentifierExpression>(
+                                                          matched->first, prom_it->second));
+          }
         }
       }
       const auto& u = static_cast<const UnaryExpression&>(expr);
@@ -372,6 +444,37 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& a = static_cast<const AssignmentExpression&>(expr);
+      if (a.Op() == "=") {
+        if (auto matched = MatchScalarCastDerefGlobal(a.Lhs(), local_vars); matched.has_value()) {
+          auto prom_it = promoted_scalar_globals.find(matched->first);
+          if (prom_it != promoted_scalar_globals.end() &&
+              (prom_it->second.ToString() == matched->second.ToString() ||
+               (prom_it->second.ToString() == "s8" && matched->second.ToString() == "u8") ||
+               (prom_it->second.ToString() == "s16" && matched->second.ToString() == "u16"))) {
+            return CExpression::Assignment(
+                a.Op(), std::make_unique<IdentifierExpression>(matched->first, prom_it->second),
+                NormalizeArraySymbolsInExpr(a.Rhs(), array_symbols, local_vars, module_data_types,
+                                            external_function_names, promoted_scalar_globals));
+          }
+        } else if (a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+          const auto& lhs_id = static_cast<const IdentifierExpression&>(a.Lhs());
+          if (local_vars.count(lhs_id.Name()) == 0 && !lhs_id.IsArraySymbol()) {
+            CType accessed_type = lhs_id.SymbolType().value_or(CType::S32());
+            auto prom_it = promoted_scalar_globals.find(lhs_id.Name());
+            if (prom_it != promoted_scalar_globals.end() &&
+                ((prom_it->second.ToString() == "s8" && accessed_type.ToString() == "u8") ||
+                 (prom_it->second.ToString() == "s16" && accessed_type.ToString() == "u16") ||
+                 (prom_it->second.ToString() == "f32" && accessed_type.ToString() == "s32" &&
+                  a.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                  static_cast<const IntegerLiteralExpression&>(a.Rhs()).Value() == 0))) {
+              return CExpression::Assignment(
+                  a.Op(), std::make_unique<IdentifierExpression>(lhs_id.Name(), prom_it->second),
+                  NormalizeArraySymbolsInExpr(a.Rhs(), array_symbols, local_vars, module_data_types,
+                                              external_function_names, promoted_scalar_globals));
+            }
+          }
+        }
+      }
       return CExpression::Assignment(
           a.Op(),
           NormalizeArraySymbolsInExpr(a.Lhs(), array_symbols, local_vars, module_data_types,
@@ -398,6 +501,15 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
     }
     case CExpressionKind::kCastExpression: {
       const auto& c = static_cast<const CastExpression&>(expr);
+      if (auto matched = MatchScalarCastDerefGlobal(c.Operand(), local_vars); matched.has_value()) {
+        auto prom_it = promoted_scalar_globals.find(matched->first);
+        if (prom_it != promoted_scalar_globals.end() &&
+            c.TargetType().ToString() == prom_it->second.ToString() &&
+            ((prom_it->second.ToString() == "s8" && matched->second.ToString() == "u8") ||
+             (prom_it->second.ToString() == "s16" && matched->second.ToString() == "u16"))) {
+          return std::make_unique<IdentifierExpression>(matched->first, prom_it->second);
+        }
+      }
       return CExpression::Cast(
           c.TargetType(),
           NormalizeArraySymbolsInExpr(c.Operand(), array_symbols, local_vars, module_data_types,
@@ -573,11 +685,14 @@ std::string CTranslationUnit::ToString() const {
 
   std::map<std::string, int> total_id_uses;
   std::map<std::string, std::map<std::string, std::pair<CType, int>>> cast_deref_uses;
+  std::set<std::string> uncast_addr_arith_symbols;
+  std::map<std::string, std::map<std::string, std::pair<CType, int>>> id_symbol_type_uses;
 
   for (const auto& function : functions) {
     ReferencedSymbols symbols = CollectReferencedSymbols(function);
     CollectGlobalCastDerefsInStmt(function.Body(), symbols.local_variables, &total_id_uses,
-                                  &cast_deref_uses);
+                                  &cast_deref_uses, &uncast_addr_arith_symbols,
+                                  &id_symbol_type_uses);
     for (const auto& [name, ret_type] : symbols.inferred_function_return_types) {
       inferred_return_types[name] = ret_type;
     }
@@ -637,17 +752,58 @@ std::string CTranslationUnit::ToString() const {
 
   std::map<std::string, CType> promoted_scalar_globals;
   for (const auto& data_symbol : external_data_symbols) {
-    if (array_data_symbols.count(data_symbol) > 0 || inferred_data_types.count(data_symbol) > 0) {
+    if (array_data_symbols.count(data_symbol) > 0 ||
+        uncast_addr_arith_symbols.count(data_symbol) > 0) {
       continue;
     }
     auto cast_it = cast_deref_uses.find(data_symbol);
     auto total_it = total_id_uses.find(data_symbol);
-    if (cast_it != cast_deref_uses.end() && cast_it->second.size() == 1 &&
-        total_it != total_id_uses.end()) {
-      const auto& [type_str, type_and_count] = *cast_it->second.begin();
-      if (type_and_count.second == total_it->second && total_it->second > 0) {
-        promoted_scalar_globals[data_symbol] = type_and_count.first;
-        inferred_data_types[data_symbol] = type_and_count.first;
+    if (cast_it == cast_deref_uses.end() || cast_it->second.empty() ||
+        total_it == total_id_uses.end() || total_it->second <= 0) {
+      continue;
+    }
+    int total_uses = total_it->second;
+    std::map<std::string, std::pair<CType, int>> combined_types;
+    if (auto id_it = id_symbol_type_uses.find(data_symbol); id_it != id_symbol_type_uses.end()) {
+      for (const auto& [t_str, tc] : id_it->second) {
+        auto& entry = combined_types[t_str];
+        entry.first = tc.first;
+        entry.second += tc.second;
+      }
+    }
+    for (const auto& [t_str, tc] : cast_it->second) {
+      auto& entry = combined_types[t_str];
+      entry.first = tc.first;
+      entry.second += tc.second;
+    }
+    int s8_uses = combined_types.count("s8") ? combined_types["s8"].second : 0;
+    int u8_uses = combined_types.count("u8") ? combined_types["u8"].second : 0;
+    int byte_uses = s8_uses + u8_uses;
+    if (byte_uses > 0 && byte_uses == total_uses) {
+      CType prom_type = (s8_uses > 0) ? CType::S8() : CType::U8();
+      promoted_scalar_globals[data_symbol] = prom_type;
+      inferred_data_types[data_symbol] = prom_type;
+      continue;
+    }
+    int s16_uses = combined_types.count("s16") ? combined_types["s16"].second : 0;
+    int u16_uses = combined_types.count("u16") ? combined_types["u16"].second : 0;
+    int half_uses = s16_uses + u16_uses;
+    if (half_uses > 0 && half_uses == total_uses) {
+      CType prom_type = (s16_uses > 0) ? CType::S16() : CType::U16();
+      promoted_scalar_globals[data_symbol] = prom_type;
+      inferred_data_types[data_symbol] = prom_type;
+      continue;
+    }
+    int s32_zero_stores =
+        combined_types.count("s32_zero_store") ? combined_types["s32_zero_store"].second : 0;
+    for (const char* t_str : {"f32", "f64"}) {
+      int t_uses = combined_types.count(t_str) ? combined_types[t_str].second : 0;
+      int allowed_zero_stores = (std::string_view(t_str) == "f32") ? s32_zero_stores : 0;
+      if (t_uses > 0 && t_uses + allowed_zero_stores == total_uses) {
+        CType prom_type = combined_types[t_str].first;
+        promoted_scalar_globals[data_symbol] = prom_type;
+        inferred_data_types[data_symbol] = prom_type;
+        break;
       }
     }
   }
