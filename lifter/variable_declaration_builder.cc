@@ -1944,10 +1944,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
 
   const int v0_assigns = has_v0_local ? CountDirectAssignmentsInStatement(**body, "v0") : 0;
-  const int v0_reads = has_v0_local ? CountVariableReadUsesInStatement(**body, "v0") : 0;
   const int v0_non_return_reads =
       has_v0_local ? CountNonReturnVariableReadUsesInStatement(**body, "v0") : 0;
-  const bool v0_reused_as_working_temp = (v0_assigns >= 2 && v0_reads >= 1);
+  const bool v0_reused_as_working_temp = (v0_assigns >= 2 && v0_non_return_reads >= 1);
   const bool is_float_return_leaf_with_v0_v1 = is_leaf_func && returns_fp && has_v1_local;
   const bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
   const bool is_multi_reg_leaf_with_v0_v1 =
@@ -2082,6 +2081,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
       return std::nullopt;
     }
     if (!allow_caller_saved_gpr_pins || pinned_caller_gpr_count >= kMaxCallerGprPins) {
+      return std::nullopt;
+    }
+    if (!is_leaf_func && CountVariableReadUsesInStatement(**body, var_name) == 0) {
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;

@@ -6014,5 +6014,32 @@ void NestedDoWhileEarlyExitToOuterLoopAndPostLoopStep(s32* event_slot) {
 )");
 }
 
+TEST_F(RoundTripTest, NonLeafWithMultipleUnusedCallReturnsAndStructInit) {
+  AssertRoundTripBitExact("NonLeafWithMultipleUnusedCallReturnsAndStructInit", R"(
+extern s32 init_entity_pos(u16 idx, s32 x, s32 y);
+extern s32 init_entity_color(u16 idx, s32 r, s32 g);
+extern s32 init_entity_mode(u16 idx, s32 mode);
+extern s32 g_entity_x[64];
+extern s32 g_entity_y[64];
+extern u16 g_entity_flags[128];
+
+s32 NonLeafWithMultipleUnusedCallReturnsAndStructInit(u16 idx, s32 x, s32 y) {
+    s32 ok = 0;
+    if (idx < 64) {
+        if ((g_entity_flags[idx * 2] & 1) == 0) {
+            g_entity_x[idx] = x;
+            g_entity_y[idx] = y;
+            g_entity_flags[idx * 2] = 1;
+            init_entity_pos(idx, x, y);
+            init_entity_color(idx, 255, 255);
+            init_entity_mode(idx, 2);
+            ok = 1;
+        }
+    }
+    return ok;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

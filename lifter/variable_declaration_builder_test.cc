@@ -1274,5 +1274,46 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(body_all_s->ToString(), HasSubstr("u8 sp[24];"));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     UnpinsCallerSavedTemporariesWithoutNonReturnReadsInNonLeafFunctions) {
+  // In a non-leaf function where `v0` is only assigned dead call return values and read only in
+  // `return v0;` (`v0_non_return_reads == 0`), and `arg2` is only assigned a dead pre-call
+  // constant (`reads == 0`), neither `v0` nor `arg2` should be pinned to hard registers
+  // (`$2`/`$6`).
+  ControlFlowGraph cfg;
+  StackFrameAnalysis frame;
+  frame.frame_size = 24;
+  frame.outgoing_args_size = 16;
+  frame.has_calls = true;
+  frame.prologue.min_saved_reg_offset = 20;
+  frame.prologue.saved_reg_offsets[Register::kRa] = 20;
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg2"), CExpression::Integer(1))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Call(CExpression::Identifier("func_80001000"),
+                                                std::vector<std::unique_ptr<CExpression>>{}))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(1))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  std::vector<CParameter> params;
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 0}};
+  AstConverterOptions opts;
+  opts.function_name = "TestUnpinUnusedCallerSavedInNonLeaf";
+  opts.function_parameter_counts = &param_counts;
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string emitted = body->ToString();
+  EXPECT_THAT(emitted, HasSubstr("s32 v0;"));
+  EXPECT_THAT(emitted, HasSubstr("s32 arg2;"));
+  EXPECT_THAT(emitted, Not(HasSubstr("asm(\"$2\")")));
+  EXPECT_THAT(emitted, Not(HasSubstr("asm(\"$6\")")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
