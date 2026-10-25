@@ -216,10 +216,10 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
     }
     if (prev_inst.rt.has_value()) {
       Register rt = *prev_inst.rt;
-      if (rt == Register::kRa || rt == Register::kFp) {
+      if (rt == Register::kRa) {
         return false;
       }
-      if (rt >= Register::kS0 && rt <= Register::kS7) {
+      if ((rt >= Register::kS0 && rt <= Register::kS7) || rt == Register::kFp) {
         if (saved_reg_offsets == nullptr) {
           return false;
         }

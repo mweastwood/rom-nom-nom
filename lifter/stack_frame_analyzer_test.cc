@@ -372,5 +372,52 @@ TEST(StackFrameAnalyzerTest,
   EXPECT_EQ(analysis.sp_buffer_size, 72);
 }
 
+TEST(StackFrameAnalyzerTest, CountsCalleeSavedFpStoredAsOutgoingStackArgument) {
+  // 88-byte frame saving $ra at 84($sp), $fp at 80($sp), $s0..$s7 at 48..76($sp).
+  // Before the call, $s0 (at 16($sp)), $s1 (at 20($sp)), $fp (at 24($sp)), and
+  // $s2 (at 28($sp)) are stored as outgoing stack arguments 4..7.
+  // Because $fp was saved in the prologue at 80($sp) > 24, `sw $fp, 24($sp)`
+  // must be counted as an outgoing argument store, yielding outgoing_args_size = 32.
+  std::vector<uint32_t> words = {
+      0x27BDFFA8,  // 00: addiu $sp, $sp, -88
+      0xAFBF0054,  // 04: sw    $ra, 84($sp)
+      0xAFBE0050,  // 08: sw    $fp, 80($sp)
+      0xAFB7004C,  // 0C: sw    $s7, 76($sp)
+      0xAFB60048,  // 10: sw    $s6, 72($sp)
+      0xAFB50044,  // 14: sw    $s5, 68($sp)
+      0xAFB40040,  // 18: sw    $s4, 64($sp)
+      0xAFB3003C,  // 1C: sw    $s3, 60($sp)
+      0xAFB20038,  // 20: sw    $s2, 56($sp)
+      0xAFB10034,  // 24: sw    $s1, 52($sp)
+      0xAFB00030,  // 28: sw    $s0, 48($sp)
+      0x24060002,  // 2C: addiu $a2, $zero, 2
+      0xAFB00010,  // 30: sw    $s0, 16($sp)
+      0xAFB10014,  // 34: sw    $s1, 20($sp)
+      0xAFBE0018,  // 38: sw    $fp, 24($sp)
+      0x0C000400,  // 3C: jal   0x80001000
+      0xAFB2001C,  // 40: sw    $s2, 28($sp)
+      0x8FBF0054,  // 44: lw    $ra, 84($sp)
+      0x8FBE0050,  // 48: lw    $fp, 80($sp)
+      0x8FB7004C,  // 4C: lw    $s7, 76($sp)
+      0x8FB60048,  // 50: lw    $s6, 72($sp)
+      0x8FB50044,  // 54: lw    $s5, 68($sp)
+      0x8FB40040,  // 58: lw    $s4, 64($sp)
+      0x8FB3003C,  // 5C: lw    $s3, 60($sp)
+      0x8FB20038,  // 60: lw    $s2, 56($sp)
+      0x8FB10034,  // 64: lw    $s1, 52($sp)
+      0x8FB00030,  // 68: lw    $s0, 48($sp)
+      0x03E00008,  // 6C: jr    $ra
+      0x27BD0058,  // 70: addiu $sp, $sp, 88
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 88);
+  EXPECT_FALSE(analysis.has_frame_pointer);
+  EXPECT_EQ(analysis.prologue.min_saved_reg_offset, 48u);
+  EXPECT_EQ(analysis.outgoing_args_size, 32);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

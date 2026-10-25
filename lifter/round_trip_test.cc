@@ -5746,5 +5746,27 @@ void DoWhileLoopWithFourNarrowFloatToUintByteCallArgs(ColorF* slots) {
                           opts);
 }
 
+TEST_F(RoundTripTest, NineCalleeSavedRegistersPassedAsOutgoingStackArgsAcrossCalls) {
+  AssertRoundTripBitExact("NineCalleeSavedRegistersPassedAsOutgoingStackArgsAcrossCalls", R"(
+s32 init_layer_state(void);
+void apply_layer_config(s32 a0, s32 a1, s32 a2, s32 a3, s32 a4, s32 a5,
+                        s32 a6, s32 a7, s32 a8, s32 a9);
+
+void NineCalleeSavedRegistersPassedAsOutgoingStackArgsAcrossCalls(s32* cfg) {
+    s32 s0 = cfg[0];
+    s32 s1 = cfg[1];
+    s32 s2 = cfg[2];
+    s32 s3 = cfg[3];
+    s32 s4 = cfg[4];
+    s32 s5 = cfg[5];
+    s32 s6 = cfg[6];
+    s32 s7 = cfg[7];
+    s32 r = init_layer_state();
+    apply_layer_config(r, s0, s1, s2, s3, s4, s5, s6, s7, r);
+    apply_layer_config(r + 1, s0, s1, s2, s3, s4, s5, s6, s7, r);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

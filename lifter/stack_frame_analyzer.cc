@@ -124,12 +124,14 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
         (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
         inst.rt.has_value() && inst.immediate >= 0) {
       Register r = *inst.rt;
-      if (((r >= Register::kS0 && r <= Register::kS7) || r == Register::kFp ||
-           r == Register::kRa) &&
-          !defined_gprs.contains(r)) {
-        result.saved_reg_offsets.try_emplace(r, inst.immediate);
-        result.min_saved_reg_offset =
-            std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
+      if (r == Register::kRa ||
+          (((r >= Register::kS0 && r <= Register::kS7) || r == Register::kFp) &&
+           !defined_gprs.contains(r))) {
+        auto [it, inserted] = result.saved_reg_offsets.try_emplace(r, inst.immediate);
+        if (inserted) {
+          result.min_saved_reg_offset =
+              std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
+        }
       }
     }
 
@@ -138,9 +140,11 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
         inst.ft.has_value() && inst.immediate >= 0) {
       FpRegister fr = *inst.ft;
       if (fr >= FpRegister::kF20 && fr <= FpRegister::kF31 && !defined_fprs.contains(fr)) {
-        result.saved_fpr_offsets.try_emplace(fr, inst.immediate);
-        result.min_saved_reg_offset =
-            std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
+        auto [it, inserted] = result.saved_fpr_offsets.try_emplace(fr, inst.immediate);
+        if (inserted) {
+          result.min_saved_reg_offset =
+              std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
+        }
       }
     }
   };
@@ -306,10 +310,10 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
           if (offset >= static_cast<int32_t>(analysis.prologue.min_saved_reg_offset)) return;
           if (inst.rt.has_value()) {
             Register r = *inst.rt;
-            if (r == Register::kRa || r == Register::kFp) {
+            if (r == Register::kRa || (analysis.has_frame_pointer && r == Register::kFp)) {
               return;
             }
-            if (r >= Register::kS0 && r <= Register::kS7) {
+            if ((r >= Register::kS0 && r <= Register::kS7) || r == Register::kFp) {
               auto it = analysis.prologue.saved_reg_offsets.find(r);
               if (it == analysis.prologue.saved_reg_offsets.end() ||
                   static_cast<int32_t>(it->second) <= offset) {

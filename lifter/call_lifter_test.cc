@@ -387,5 +387,36 @@ TEST(CallLifterTest, EarlierDoublePrecisionUseOfF12DoesNotOverrideSinglePrecisio
   EXPECT_EQ(stmts.back().ToString(), "func_80001000(f12);\n");
 }
 
+TEST(CallLifterTest, InfersOutgoingStackArgumentStoredFromCalleeSavedFp) {
+  std::vector<uint32_t> words = {
+      0x27BDFFC8,  // 00: addiu $sp, $sp, -56
+      0xAFBF0034,  // 04: sw    $ra, 52($sp)
+      0xAFBE0030,  // 08: sw    $fp, 48($sp)
+      0xAFB0002C,  // 0C: sw    $s0, 44($sp)
+      0x24040001,  // 10: addiu $a0, $zero, 1
+      0x24050002,  // 14: addiu $a1, $zero, 2
+      0x24060003,  // 18: addiu $a2, $zero, 3
+      0x24070004,  // 1C: addiu $a3, $zero, 4
+      0xAFB00010,  // 20: sw    $s0, 16($sp)
+      0x0C000400,  // 24: jal   0x80001000
+      0xAFBE0014,  // 28: sw    $fp, 20($sp)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  absl::flat_hash_map<Register, int32_t> saved_regs = {
+      {Register::kRa, 52},
+      {Register::kFp, 48},
+      {Register::kS0, 44},
+  };
+  FunctionLiftContext ctx;
+  ctx.frame_size = 56;
+  ctx.has_calls = true;
+  ctx.outgoing_args_size = 24;
+  ctx.saved_reg_offsets = &saved_regs;
+
+  auto stmts = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_FALSE(stmts.empty());
+  EXPECT_EQ(stmts.back().ToString(), "func_80001000(1, 2, 3, 4, var_sp_16, var_sp_20);\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
