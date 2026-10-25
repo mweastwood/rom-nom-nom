@@ -18,7 +18,7 @@ void RunCollapseUnalignedBlockCopies(CompoundStatement* body, const AstPassConte
 }
 
 void RunCoalescePrologueParameterCopies(CompoundStatement* body, const AstPassContext& ctx) {
-  CoalescePrologueParameterCopies(body, ctx.parameters, ctx.frame_size);
+  CoalescePrologueParameterCopies(body, ctx.parameters, ctx.frame_size, ctx.mutable_parameters);
 }
 
 void RunInlineCrossJumpedCallTails(CompoundStatement* body, const AstPassContext& /*ctx*/) {
@@ -137,7 +137,8 @@ void AstPassPipeline::Run(CompoundStatement* body, const AstPassContext& ctx) {
     pass.run(body, ctx);
   }
 
-  if (SplitScratchReusedParameterRegisters(body, ctx.parameters, ctx.frame_size)) {
+  if (SplitScratchReusedParameterRegisters(body, ctx.parameters, ctx.frame_size,
+                                           ctx.mutable_parameters)) {
     FoldSingleUseExpressions(body);
     TrimUnassignedTrailingCallArgRegisters(body, ctx.parameters, ctx.function_parameter_counts);
   }

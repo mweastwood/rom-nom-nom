@@ -2737,6 +2737,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
       .return_type = return_type,
       .has_goto_targets = !ctx.GotoTargets().empty(),
       .function_parameter_counts = options.function_parameter_counts,
+      .mutable_parameters = options.parameters.empty() ? &parameters : nullptr,
   };
   AstPassPipeline::Run(body.get(), pass_ctx);
 

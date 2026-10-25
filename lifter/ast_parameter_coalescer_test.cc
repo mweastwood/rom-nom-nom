@@ -754,5 +754,58 @@ TEST(AstParameterCoalescerTest,
   EXPECT_THAT(code, HasSubstr("arg0 = 0;"));
 }
 
+TEST(AstParameterCoalescerTest, CoalescesPrologueNarrowParameterCopiesAndUpdatesParameterTypes) {
+  CompoundStatement body;
+  // temp_s0 = (arg0 & 65535);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("&", CExpression::Identifier("arg0"), CExpression::Integer(65535)))));
+  // temp_s1 = ((arg1 << 24) >> 24);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"),
+      CExpression::Binary(
+          ">>",
+          CExpression::Binary("<<", CExpression::Identifier("arg1"), CExpression::Integer(24)),
+          CExpression::Integer(24)))));
+  // if (temp_s0 < 40) { arg0 = 7; func_80001000(temp_s0, temp_s1, arg0); func_80002000(temp_s0); }
+  auto then_body = std::make_unique<CompoundStatement>();
+  then_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg0"), CExpression::Integer(7))));
+  {
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Identifier("temp_s0"));
+    args.push_back(CExpression::Identifier("temp_s1"));
+    args.push_back(CExpression::Identifier("arg0"));
+    then_body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("func_80001000"), std::move(args))));
+  }
+  {
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Identifier("temp_s0"));
+    then_body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("func_80002000"), std::move(args))));
+  }
+  body.AddStatement(CStatement::If(
+      CExpression::Binary("<", CExpression::Identifier("temp_s0"), CExpression::Integer(40)),
+      std::move(then_body)));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("temp_s1")));
+
+  std::vector<CParameter> params = {
+      {.type = CType::S32(), .name = "arg0"},
+      {.type = CType::S32(), .name = "arg1"},
+  };
+  EXPECT_TRUE(SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/32, &params));
+
+  EXPECT_EQ(params[0].type.ToString(), "u16");
+  EXPECT_EQ(params[1].type.ToString(), "s8");
+  std::string code = body.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("temp_s0")));
+  EXPECT_THAT(code, Not(HasSubstr("temp_s1")));
+  EXPECT_THAT(code, HasSubstr("temp_a0 = 7;"));
+  EXPECT_THAT(code, HasSubstr("func_80001000(arg0, arg1, temp_a0);"));
+  EXPECT_THAT(code, HasSubstr("func_80002000(arg0);"));
+  EXPECT_THAT(code, HasSubstr("return arg1;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

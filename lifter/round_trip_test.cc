@@ -5847,5 +5847,30 @@ s32 WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter(StreamReq* r
 )");
 }
 
+TEST_F(RoundTripTest, NarrowU16ParameterIndexedStructSetupAcrossCalls) {
+  AssertRoundTripBitExact("NarrowU16ParameterIndexedStructSetupAcrossCalls", R"(
+extern u16 g_slot_flags[];
+extern s32 g_slot_base[];
+extern void init_slot_pos(s32 idx, s32 x, s32 y);
+extern void init_slot_color(s32 idx, s32 r, s32 g, s32 b);
+extern void enable_slot_render(s32 idx, s32 mode);
+
+s32 NarrowU16ParameterIndexedStructSetupAcrossCalls(u16 idx, s32 base_val) {
+    s32 res = 0;
+    if (idx < 192) {
+        if ((g_slot_flags[idx * 78] & 1) == 0) {
+            g_slot_base[idx * 39] = base_val;
+            g_slot_flags[idx * 78] = 1;
+            init_slot_pos(idx, 0, 0);
+            init_slot_color(idx, 255, 255, 255);
+            enable_slot_render(idx, 3);
+            res = 1;
+        }
+    }
+    return res;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

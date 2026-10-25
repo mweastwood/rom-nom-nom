@@ -12,7 +12,8 @@ namespace rom_nom_nom {
 // `var_sp_N = arg0;`, `f20 = f12;`) back into the parameter variable when safe.
 void CoalescePrologueParameterCopies(CompoundStatement* comp,
                                      const std::vector<CParameter>& parameters,
-                                     uint32_t frame_size = 0);
+                                     uint32_t frame_size = 0,
+                                     std::vector<CParameter>* mutable_parameters = nullptr);
 
 // Splits `f32` parameters passed in `$a1-$a3` into `temp_a1..temp_a3` if the
 // underlying GPR is later overwritten with an integer value.
@@ -25,7 +26,8 @@ void SplitReusedFloatGprParameters(CompoundStatement* comp,
 // should be re-run after coalescing.
 bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
                                           const std::vector<CParameter>& parameters,
-                                          uint32_t frame_size = 0);
+                                          uint32_t frame_size = 0,
+                                          std::vector<CParameter>* mutable_parameters = nullptr);
 
 }  // namespace rom_nom_nom
 

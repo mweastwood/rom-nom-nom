@@ -20,6 +20,7 @@ struct AstPassContext {
   CType return_type = CType::Void();
   bool has_goto_targets = false;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr;
+  std::vector<CParameter>* mutable_parameters = nullptr;
 };
 
 // Descriptor for a single AST transformation pass.
