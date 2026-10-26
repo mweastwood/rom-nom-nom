@@ -314,6 +314,77 @@ TEST(CfgDeReorgTest, NormalizesBranchLikelyDelaySlotFeedingSuccessorBranchTermin
   EXPECT_EQ(taken->instructions[1].opcode, Opcode::kBeq);
 }
 
+TEST(CfgDeReorgTest, DuplicatesPureRegisterCrossJumpedTailAndNonPostDominatingReturnTail) {
+  // 1. Pure register-setup cross-jumped tail (`sll $v0, $v0, 2; j 0x8000002C; nop`):
+  // 0x80000000: beq   $a0, $zero, 0x80000018 (0x10800005)
+  // 0x80000004: nop                          (0x00000000)
+  // 0x80000008: addiu $v0, $a1, 1            (0x24A20001)
+  // 0x8000000C: j     0x8000001C             (0x08000007 -> B_tail at 0x8000001C)
+  // 0x80000010: nop                          (0x00000000)
+  // 0x80000014: nop                          (0x00000000)
+  // 0x80000018: addiu $v0, $a1, 2            (0x24A20002)
+  // 0x8000001C: sll   $v0, $v0, 2            (0x00021080) -- B_tail: pure register op
+  // 0x80000020: j     0x8000002C             (0x0800000B -> B_merge at 0x8000002C)
+  // 0x80000024: nop                          (0x00000000)
+  // 0x80000028: nop                          (0x00000000)
+  // 0x8000002C: jr    $ra                    (0x03E00008)
+  // 0x80000030: nop                          (0x00000000)
+  std::vector<uint32_t> reg_words = {
+      0x10800005, 0x00000000, 0x24A20001, 0x08000007, 0x00000000, 0x00000000, 0x24A20002,
+      0x00021080, 0x0800000B, 0x00000000, 0x00000000, 0x03E00008, 0x00000000,
+  };
+  auto reg_insts = DecodeSequence(reg_words, 0x80000000);
+  ASSERT_TRUE(reg_insts.ok());
+  auto reg_cfg_or = ControlFlowGraph::Build(*reg_insts);
+  ASSERT_TRUE(reg_cfg_or.ok());
+  ControlFlowGraph reg_cfg = *reg_cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&reg_cfg);
+
+  const auto* then_blk = reg_cfg.FindBlockByVram(0x80000008);
+  const auto* merge_blk = reg_cfg.FindBlockByVram(0x8000002C);
+  ASSERT_NE(then_blk, nullptr);
+  ASSERT_NE(merge_blk, nullptr);
+  ASSERT_EQ(then_blk->successors.size(), 1u);
+  EXPECT_EQ(then_blk->successors[0], merge_blk->id);
+  ASSERT_GE(then_blk->instructions.size(), 4u);
+  EXPECT_EQ(then_blk->instructions[1].opcode, Opcode::kSll);
+
+  // 2. Non-post-dominating cross-jumped return tail (`sw $v0, 0($a2); jr $ra; nop`):
+  // 0x80000000: beq   $a0, $zero, 0x80000014 (0x10800004 -> B_mid at 0x80000014)
+  // 0x80000004: nop                          (0x00000000)
+  // 0x80000008: addiu $v0, $zero, 1          (0x24020001) -- B_early_jump
+  // 0x8000000C: j     0x80000028             (0x0800000A -> B_ret_tail at 0x80000028)
+  // 0x80000010: nop                          (0x00000000)
+  // 0x80000014: beq   $a1, $zero, 0x80000024 (0x10A00003 -> B_fallthrough at 0x80000024)
+  // 0x80000018: nop                          (0x00000000)
+  // 0x8000001C: jr    $ra                    (0x03E00008) -- separate return block
+  // 0x80000020: addiu $v0, $zero, -1         (0x2402FFFF)
+  // 0x80000024: addiu $v0, $zero, 2          (0x24020002) -- B_fallthrough into B_ret_tail
+  // 0x80000028: sw    $v0, 0($a2)            (0xAC820000) -- B_ret_tail
+  // 0x8000002C: jr    $ra                    (0x03E00008)
+  // 0x80000030: nop                          (0x00000000)
+  std::vector<uint32_t> ret_words = {
+      0x10800004, 0x00000000, 0x24020001, 0x0800000A, 0x00000000, 0x10A00003, 0x00000000,
+      0x03E00008, 0x2402FFFF, 0x24020002, 0xAC820000, 0x03E00008, 0x00000000,
+  };
+  auto ret_insts = DecodeSequence(ret_words, 0x80000000);
+  ASSERT_TRUE(ret_insts.ok());
+  auto ret_cfg_or = ControlFlowGraph::Build(*ret_insts);
+  ASSERT_TRUE(ret_cfg_or.ok());
+  ControlFlowGraph ret_cfg = *ret_cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&ret_cfg);
+
+  const auto* early_jump_blk = ret_cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(early_jump_blk, nullptr);
+  EXPECT_TRUE(early_jump_blk->successors.empty());
+  ASSERT_GE(early_jump_blk->instructions.size(), 4u);
+  EXPECT_EQ(early_jump_blk->instructions[1].opcode, Opcode::kSw);
+  EXPECT_NE(early_jump_blk->Terminator(), nullptr);
+  EXPECT_TRUE(early_jump_blk->Terminator()->IsReturn());
+}
+
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
   ASSERT_EQ(pipeline.PassCount(), 5u);

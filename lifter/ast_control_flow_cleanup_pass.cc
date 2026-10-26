@@ -724,59 +724,45 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
     bool requires_tail_goto = false;
   };
 
-  auto is_simple_call_or_assign_stmt = [](const CStatement& s, bool* out_has_call) -> bool {
-    if (s.Kind() == CStatementKind::kReturnStatement) {
-      const auto& ret = static_cast<const ReturnStatement&>(s);
-      if (ret.ReturnValue() == nullptr) return true;
-      return ret.ReturnValue()->Kind() == CExpressionKind::kIdentifier ||
-             ret.ReturnValue()->Kind() == CExpressionKind::kIntegerLiteral;
-    }
-    if (s.Kind() != CStatementKind::kExpressionStatement) return false;
-    const auto& es = static_cast<const ExpressionStatement&>(s);
-    if (es.Expression().Kind() == CExpressionKind::kCallExpression) {
-      *out_has_call = true;
+  auto is_register_or_local_var_name = [](std::string_view name) -> bool {
+    return name == "v0" || name == "v1" || name == "at" || name == "sp" || name == "fp" ||
+           name == "ra" || name == "gp" || name == "zero" || name == "hi" || name == "lo" ||
+           name == "fcond" || absl::StartsWith(name, "arg") || absl::StartsWith(name, "temp_") ||
+           absl::StartsWith(name, "var_") ||
+           (name.size() >= 2 && name[0] == 'f' && name[1] >= '0' && name[1] <= '9');
+  };
+
+  auto lhs_writes_memory_or_global = [&](const CExpression& lhs) -> bool {
+    if (lhs.Kind() == CExpressionKind::kUnaryExpression ||
+        lhs.Kind() == CExpressionKind::kArrayIndexExpression ||
+        lhs.Kind() == CExpressionKind::kMemberAccessExpression) {
       return true;
     }
-    if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-      const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
-      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
-        if (a.Rhs().Kind() == CExpressionKind::kCallExpression) {
-          *out_has_call = true;
-          return true;
-        }
-        if (a.Rhs().Kind() == CExpressionKind::kIdentifier ||
-            a.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
-          return true;
-        }
-      }
+    if (lhs.Kind() == CExpressionKind::kIdentifier) {
+      return !is_register_or_local_var_name(static_cast<const IdentifierExpression&>(lhs).Name());
     }
     return false;
   };
 
-  auto is_switch_tail_stmt = [](const CStatement& s, bool* out_writes_memory) -> bool {
+  auto is_inlinable_tail_stmt = [&](const CStatement& s, bool* out_has_call,
+                                    bool* out_writes_memory) -> bool {
     if (s.Kind() == CStatementKind::kReturnStatement) {
-      const auto& ret = static_cast<const ReturnStatement&>(s);
-      return ret.ReturnValue() == nullptr || !ExpressionContainsCall(*ret.ReturnValue());
+      return true;
     }
     if (s.Kind() == CStatementKind::kExpressionStatement) {
       const auto& es = static_cast<const ExpressionStatement&>(s);
-      if (es.Expression().Kind() == CExpressionKind::kCallExpression) {
+      if (ExpressionContainsCall(es.Expression())) {
+        *out_has_call = true;
         *out_writes_memory = true;
+      }
+      if (es.Expression().Kind() == CExpressionKind::kCallExpression) {
         return true;
       }
       if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
         const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
         if (a.Op() != "=") return false;
-        if (a.Lhs().Kind() == CExpressionKind::kUnaryExpression ||
-            a.Lhs().Kind() == CExpressionKind::kArrayIndexExpression ||
-            a.Lhs().Kind() == CExpressionKind::kMemberAccessExpression) {
+        if (lhs_writes_memory_or_global(a.Lhs())) {
           *out_writes_memory = true;
-        } else if (a.Lhs().Kind() == CExpressionKind::kIdentifier) {
-          std::string_view lhs_name = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
-          if (absl::StartsWith(lhs_name, "g_") || absl::StartsWith(lhs_name, "D_") ||
-              absl::StartsWith(lhs_name, "s_")) {
-            *out_writes_memory = true;
-          }
         }
         return true;
       }
@@ -798,12 +784,7 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
         return false;
       }
       const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
-      if (a.Lhs().Kind() == CExpressionKind::kUnaryExpression ||
-          a.Lhs().Kind() == CExpressionKind::kArrayIndexExpression ||
-          a.Lhs().Kind() == CExpressionKind::kMemberAccessExpression ||
-          (a.Lhs().Kind() == CExpressionKind::kIdentifier &&
-           (absl::StartsWith(static_cast<const IdentifierExpression&>(a.Lhs()).Name(), "g_") ||
-            absl::StartsWith(static_cast<const IdentifierExpression&>(a.Lhs()).Name(), "D_")))) {
+      if (lhs_writes_memory_or_global(a.Lhs())) {
         *out_writes_memory = true;
       }
       return true;
@@ -830,34 +811,29 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
             }
             std::vector<std::unique_ptr<CStatement>> tail;
             bool has_call = false;
-            bool all_call_valid = true;
             bool writes_memory = false;
-            bool all_tail_stmts_valid = i > 0;
-            bool all_switch_tail_valid = is_switch_case_body && i > 0 && ends_with_break;
+            bool has_inner_label = false;
+            bool all_tail_stmts_valid = true;
             for (size_t k = i + 1; k < end_idx; ++k) {
               if (stmts[k] == nullptr) {
-                all_call_valid = false;
                 all_tail_stmts_valid = false;
-                all_switch_tail_valid = false;
                 break;
               }
               if (stmts[k]->Kind() == CStatementKind::kLabelStatement) {
-                all_call_valid = false;
+                has_inner_label = true;
                 continue;
               }
-              if (!is_simple_call_or_assign_stmt(*stmts[k], &has_call)) {
-                all_call_valid = false;
-              }
-              if (!is_switch_tail_stmt(*stmts[k], &writes_memory)) {
+              if (!is_inlinable_tail_stmt(*stmts[k], &has_call, &writes_memory)) {
                 all_tail_stmts_valid = false;
-                all_switch_tail_valid = false;
+                break;
               }
               tail.push_back(stmts[k]->Clone());
             }
-            bool valid_call_tail = all_call_valid && has_call && tail.size() <= 3;
-            bool valid_switch_tail = all_switch_tail_valid && writes_memory && tail.size() <= 8;
+            bool valid_call_tail = all_tail_stmts_valid && !has_inner_label && has_call;
+            bool valid_switch_tail = all_tail_stmts_valid && writes_memory && is_switch_case_body &&
+                                     i > 0 && ends_with_break;
             bool valid_diamond_tail =
-                allow_diamond_tails && all_tail_stmts_valid && writes_memory && tail.size() <= 4;
+                allow_diamond_tails && all_tail_stmts_valid && writes_memory && i > 0;
             if (!tail.empty() && (valid_call_tail || valid_switch_tail || valid_diamond_tail)) {
               candidates.push_back(LabelSite{
                   .comp = comp,
@@ -1171,7 +1147,7 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
         }
 
         // Rule B: If one branch ends with `goto block_N;` and the other branch ends with
-        // `block_N: <0..4 sinkable ExpressionStatements>`, sink `block_N: <tail>` after the
+        // `block_N: <sinkable ExpressionStatements>`, sink `block_N: <tail>` after the
         // IfStatement and remove the redundant `goto block_N;`.
         if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
             ifs.MutableElseBranch() != nullptr &&
@@ -1190,7 +1166,7 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
                 lbl_idx = k - 1;
                 break;
               }
-              if (!is_sinkable_tail_stmt(*then_stmts[k - 1]) || (then_stmts.size() - (k - 1)) > 4) {
+              if (!is_sinkable_tail_stmt(*then_stmts[k - 1])) {
                 break;
               }
             }
@@ -1223,9 +1199,7 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
           bool sunk_any = true;
           while (sunk_any && !then_stmts.empty() && !else_stmts.empty()) {
             sunk_any = false;
-            size_t then_min = then_stmts.size() > 4 ? then_stmts.size() - 4 : 0;
-            size_t else_min = else_stmts.size() > 4 ? else_stmts.size() - 4 : 0;
-            for (size_t ti = then_stmts.size(); ti > then_min; --ti) {
+            for (size_t ti = then_stmts.size(); ti > 0; --ti) {
               std::string t_lhs;
               std::string t_rhs;
               const CExpression* t_rhs_expr = nullptr;
@@ -1244,7 +1218,7 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
               }
               if (t_blocked) continue;
 
-              for (size_t ei = else_stmts.size(); ei > else_min; --ei) {
+              for (size_t ei = else_stmts.size(); ei > 0; --ei) {
                 std::string e_lhs;
                 std::string e_rhs;
                 const CExpression* e_rhs_expr = nullptr;

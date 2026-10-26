@@ -122,6 +122,35 @@ void RetargetBranchEdge(ControlFlowGraph* cfg, uint32_t from_block_id, uint32_t 
   }
 }
 
+void RemoveBranchEdge(ControlFlowGraph* cfg, uint32_t from_block_id, uint32_t old_to_block_id) {
+  BasicBlock* from_blk = cfg->GetMutableBlock(from_block_id);
+  BasicBlock* old_to_blk = cfg->GetMutableBlock(old_to_block_id);
+  if (from_blk == nullptr || old_to_blk == nullptr) {
+    return;
+  }
+  from_blk->successors.erase(
+      std::remove(from_blk->successors.begin(), from_blk->successors.end(), old_to_block_id),
+      from_blk->successors.end());
+  from_blk->outgoing_edges.erase(
+      std::remove_if(from_blk->outgoing_edges.begin(), from_blk->outgoing_edges.end(),
+                     [&](const CfgEdge& edge) {
+                       return (edge.type == EdgeType::kBranch || edge.type == EdgeType::kJump) &&
+                              edge.to_block_id == old_to_block_id;
+                     }),
+      from_blk->outgoing_edges.end());
+  cfg->MutableEdges().erase(
+      std::remove_if(cfg->MutableEdges().begin(), cfg->MutableEdges().end(),
+                     [&](const CfgEdge& edge) {
+                       return edge.from_block_id == from_block_id &&
+                              (edge.type == EdgeType::kBranch || edge.type == EdgeType::kJump) &&
+                              edge.to_block_id == old_to_block_id;
+                     }),
+      cfg->MutableEdges().end());
+  old_to_blk->predecessors.erase(
+      std::remove(old_to_blk->predecessors.begin(), old_to_blk->predecessors.end(), from_block_id),
+      old_to_blk->predecessors.end());
+}
+
 bool IsInverseAdjustmentInstruction(const Instruction& delay_inst, const Instruction& comp_inst) {
   if (delay_inst.IsNop() || comp_inst.IsNop()) {
     return false;
@@ -916,7 +945,6 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
   } else {
     analyses->SetCfg(cfg);
   }
-  const LoopInfo& loop_info = analyses->GetLoopInfo();
   const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
   absl::flat_hash_set<uint32_t> jump_table_target_vrams;
   for (const auto& jt : cfg->JumpTables()) {
@@ -928,94 +956,159 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
     }
   }
 
-  bool changed = false;
-  for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
-    BasicBlock& tail_blk = cfg->MutableBlocks()[b];
-    const Loop* tail_loop = loop_info.GetLoopFor(tail_blk.id);
-    if (tail_blk.id == cfg->EntryBlockId() || tail_blk.predecessors.size() < 2 ||
-        tail_blk.successors.size() != 1 || tail_blk.HasSwitch() ||
-        jump_table_target_vrams.contains(tail_blk.start_vram) ||
-        (tail_loop != nullptr && tail_loop->header == tail_blk.id)) {
-      continue;
-    }
-    const Instruction* tail_term = tail_blk.Terminator();
-    if (tail_term == nullptr || tail_term->opcode != Opcode::kJ ||
-        tail_term != &tail_blk.instructions[tail_blk.instructions.size() - 2] ||
-        !tail_blk.instructions.back().IsNop() ||
-        jump_table_bounds_vrams.contains(tail_term->vram)) {
-      continue;
-    }
+  bool any_changed = false;
+  for (int iter = 0; iter < 4; ++iter) {
+    const LoopInfo& loop_info = analyses->GetLoopInfo();
+    const DominatorTree& dom_tree = analyses->GetDominatorTree();
+    const DominatorTree& post_dom_tree = analyses->GetPostDominatorTree();
+    bool iter_changed = false;
 
-    const size_t body_count = tail_blk.instructions.size() - 2;
-    if (body_count == 0 || body_count > 6) {
-      continue;
-    }
-    bool valid_tail_body = true;
-    bool has_memory_or_call_effect = false;
-    for (size_t i = 0; i < body_count; ++i) {
-      const Instruction& inst = tail_blk.instructions[i];
-      if (inst.IsBranch() || inst.IsJump()) {
-        valid_tail_body = false;
-        break;
-      }
-      if (inst.IsCall() || inst.IsStore()) {
-        has_memory_or_call_effect = true;
-      }
-    }
-    if (!valid_tail_body || !has_memory_or_call_effect) {
-      continue;
-    }
-
-    const uint32_t merge_block_id = tail_blk.successors[0];
-    if (merge_block_id == tail_blk.id) {
-      continue;
-    }
-    if (loop_info.GetLoopFor(merge_block_id) != tail_loop) {
-      continue;
-    }
-
-    std::vector<uint32_t> jump_preds;
-    for (uint32_t pred_id : tail_blk.predecessors) {
-      if (pred_id == tail_blk.id || loop_info.GetLoopFor(pred_id) != tail_loop) {
+    for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
+      BasicBlock& tail_blk = cfg->MutableBlocks()[b];
+      const Loop* tail_loop = loop_info.GetLoopFor(tail_blk.id);
+      if (tail_blk.id == cfg->EntryBlockId() || tail_blk.predecessors.size() < 2 ||
+          tail_blk.successors.size() > 1 || tail_blk.HasSwitch() ||
+          jump_table_target_vrams.contains(tail_blk.start_vram) ||
+          (tail_loop != nullptr && tail_loop->header == tail_blk.id)) {
         continue;
       }
-      const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
-      if (pred_blk == nullptr || pred_blk->successors.size() != 1 ||
-          pred_blk->successors[0] != tail_blk.id || pred_blk->instructions.size() < 2) {
+
+      const Instruction* tail_term = tail_blk.Terminator();
+      const bool is_jump_tail =
+          tail_blk.successors.size() == 1 && tail_term != nullptr &&
+          tail_term->opcode == Opcode::kJ &&
+          tail_term == &tail_blk.instructions[tail_blk.instructions.size() - 2] &&
+          tail_blk.instructions.back().IsNop() &&
+          !jump_table_bounds_vrams.contains(tail_term->vram);
+      const bool is_fallthrough_tail = tail_blk.successors.size() == 1 && tail_term == nullptr &&
+                                       tail_blk.outgoing_edges.size() == 1 &&
+                                       tail_blk.outgoing_edges[0].type == EdgeType::kFallthrough;
+      const bool is_return_tail =
+          tail_blk.successors.empty() && tail_term != nullptr && tail_term->IsReturn() &&
+          tail_blk.instructions.size() >= 2 &&
+          tail_term == &tail_blk.instructions[tail_blk.instructions.size() - 2] &&
+          tail_blk.instructions.back().IsNop();
+      if (!is_jump_tail && !is_fallthrough_tail && !is_return_tail) {
         continue;
       }
-      const Instruction* pred_term = pred_blk->Terminator();
-      if (pred_term != nullptr && pred_term->opcode == Opcode::kJ &&
-          pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
-          pred_blk->instructions.back().IsNop()) {
-        jump_preds.push_back(pred_id);
+
+      const size_t body_count =
+          is_fallthrough_tail ? tail_blk.instructions.size() : (tail_blk.instructions.size() - 2);
+      if (body_count == 0 || body_count > 6) {
+        continue;
+      }
+      bool valid_tail_body = true;
+      for (size_t i = 0; i < body_count; ++i) {
+        const Instruction& inst = tail_blk.instructions[i];
+        if (inst.IsBranch() || inst.IsJump()) {
+          valid_tail_body = false;
+          break;
+        }
+        if (is_return_tail) {
+          RegisterUseDef ud = GetInstructionUseDef(inst);
+          for (Register def_reg : ud.gpr_defs) {
+            if (def_reg == Register::kSp || def_reg == Register::kRa) {
+              valid_tail_body = false;
+              break;
+            }
+          }
+          if (!valid_tail_body) break;
+        }
+      }
+      if (!valid_tail_body) {
+        continue;
+      }
+
+      if (is_fallthrough_tail || is_return_tail) {
+        std::optional<uint32_t> idom = dom_tree.ImmediateDominator(tail_blk.id);
+        if (!idom.has_value() || post_dom_tree.Dominates(tail_blk.id, *idom)) {
+          continue;
+        }
+      }
+
+      uint32_t merge_block_id = 0;
+      uint32_t new_target_field = 0;
+      if (!is_return_tail) {
+        merge_block_id = tail_blk.successors[0];
+        if (merge_block_id == tail_blk.id || loop_info.GetLoopFor(merge_block_id) != tail_loop) {
+          continue;
+        }
+        const BasicBlock* merge_blk = cfg->GetBlock(merge_block_id);
+        if (merge_blk == nullptr) {
+          continue;
+        }
+        new_target_field =
+            is_jump_tail ? tail_term->target : ((merge_blk->start_vram >> 2) & 0x03FFFFFF);
+      }
+
+      bool has_fallthrough_pred = false;
+      std::vector<uint32_t> jump_preds;
+      for (uint32_t pred_id : tail_blk.predecessors) {
+        const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+        if (pred_blk == nullptr) continue;
+        for (const auto& edge : pred_blk->outgoing_edges) {
+          if (edge.to_block_id == tail_blk.id && edge.type == EdgeType::kFallthrough) {
+            has_fallthrough_pred = true;
+            break;
+          }
+        }
+        if (pred_id == tail_blk.id || loop_info.GetLoopFor(pred_id) != tail_loop ||
+            pred_blk->successors.size() != 1 || pred_blk->successors[0] != tail_blk.id ||
+            pred_blk->instructions.size() < 2) {
+          continue;
+        }
+        const Instruction* pred_term = pred_blk->Terminator();
+        if (pred_term != nullptr && pred_term->opcode == Opcode::kJ &&
+            pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
+            pred_blk->instructions.back().IsNop()) {
+          jump_preds.push_back(pred_id);
+        }
+      }
+
+      if (jump_preds.empty() ||
+          ((is_fallthrough_tail || is_return_tail) && !has_fallthrough_pred)) {
+        continue;
+      }
+
+      if (is_return_tail) {
+        const std::vector<Instruction> tail_all_insts = tail_blk.instructions;
+        for (uint32_t pred_id : jump_preds) {
+          BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
+          if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
+            continue;
+          }
+          pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
+                                       pred_blk->instructions.end());
+          pred_blk->instructions.insert(pred_blk->instructions.end(), tail_all_insts.begin(),
+                                        tail_all_insts.end());
+          RemoveBranchEdge(cfg, pred_id, tail_blk.id);
+          iter_changed = true;
+        }
+      } else {
+        const std::vector<Instruction> tail_body_insts(
+            tail_blk.instructions.begin(),
+            tail_blk.instructions.begin() + static_cast<ptrdiff_t>(body_count));
+        for (uint32_t pred_id : jump_preds) {
+          BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
+          if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
+            continue;
+          }
+          auto insert_pos = pred_blk->instructions.end() - 2;
+          pred_blk->instructions.insert(insert_pos, tail_body_insts.begin(), tail_body_insts.end());
+          pred_blk->instructions[pred_blk->instructions.size() - 2].target = new_target_field;
+          RetargetBranchEdge(cfg, pred_id, tail_blk.id, merge_block_id);
+          iter_changed = true;
+        }
       }
     }
 
-    if (jump_preds.empty()) {
-      continue;
+    if (!iter_changed) {
+      break;
     }
-
-    const uint32_t new_target_field = tail_term->target;
-    const std::vector<Instruction> tail_body_insts(
-        tail_blk.instructions.begin(),
-        tail_blk.instructions.begin() + static_cast<ptrdiff_t>(body_count));
-    for (uint32_t pred_id : jump_preds) {
-      BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
-      if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
-        continue;
-      }
-      auto insert_pos = pred_blk->instructions.end() - 2;
-      pred_blk->instructions.insert(insert_pos, tail_body_insts.begin(), tail_body_insts.end());
-      pred_blk->instructions[pred_blk->instructions.size() - 2].target = new_target_field;
-      RetargetBranchEdge(cfg, pred_id, tail_blk.id, merge_block_id);
-      changed = true;
-    }
-  }
-  if (changed) {
+    any_changed = true;
     analyses->InvalidateAll();
   }
-  return changed;
+  return any_changed;
 }
 
 CfgPassPipeline CfgDeReorg::BuildDefaultPipeline() {
