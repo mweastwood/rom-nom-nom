@@ -478,5 +478,44 @@ TEST(AstPassPipelineTest,
   EXPECT_THAT(rendered, HasSubstr("*(s32*)(arg0 + (temp_s7 * 12)) = temp_s7;"));
 }
 
+TEST(AstPassPipelineTest,
+     StoreFlagConditionalRecoveryHandlesPinnedRegistersArgsAndTwoStatementChains) {
+  CompoundStatement body;
+
+  // 1. Callee-saved register `temp_s0 = temp_s0 + (arg1 < 0)`:
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary(
+          "+", CExpression::Identifier("temp_s0"),
+          CExpression::Binary("<", CExpression::Identifier("arg1"), CExpression::Integer(0))))));
+
+  // 2. Argument register `arg0 = arg0 - (arg2 >= 10)`:
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary(
+          "-", CExpression::Identifier("arg0"),
+          CExpression::Binary(">=", CExpression::Identifier("arg2"), CExpression::Integer(10))))));
+
+  // 3. Two-statement store-flag chain `temp_t0 = (arg3 == 0); temp_s1 = temp_s1 + temp_t0;`:
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("==", CExpression::Identifier("arg3"), CExpression::Integer(0)))));
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Binary("+", CExpression::Identifier("temp_s1"),
+                                                  CExpression::Identifier("temp_t0")))));
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  StoreFlagConditionalRecoveryPass pass;
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("if ((arg1 < 0)) {\n        temp_s0 = (temp_s0 + 1);\n    }"));
+  EXPECT_THAT(rendered, HasSubstr("if ((arg2 >= 10)) {\n        arg0 = (arg0 - 1);\n    }"));
+  EXPECT_THAT(rendered, HasSubstr("if ((arg3 == 0)) {\n        temp_s1 = (temp_s1 + 1);\n    }"));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t0")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

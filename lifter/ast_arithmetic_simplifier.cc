@@ -2098,22 +2098,16 @@ const CExpression* ExtractRelationalConditionFromStoreFlag(
   return cur;
 }
 
-bool IsEligibleStoreFlagConditionalTarget(const CExpression& lhs, bool require_unpinned_local) {
+bool IsEligibleStoreFlagConditionalTarget(const CExpression& lhs) {
   if (!IsPureExpression(lhs)) {
     return false;
   }
   if (lhs.Kind() == CExpressionKind::kIdentifier) {
     std::string_view name = static_cast<const IdentifierExpression&>(lhs).Name();
-    if (name == "sp" || name == "ra" || name == "lo" || name == "hi" || name == "fcr31" ||
-        name == "v0" || name == "v1" || name == "at" || absl::StartsWith(name, "temp_t") ||
-        absl::StartsWith(name, "temp_a") || absl::StartsWith(name, "f")) {
-      return false;
-    }
-    if (require_unpinned_local &&
-        (absl::StartsWith(name, "temp_s") || name == "fp" || absl::StartsWith(name, "arg"))) {
-      return false;
-    }
-    return true;
+    return !(
+        name == "sp" || name == "ra" || name == "lo" || name == "hi" || name == "fcr31" ||
+        name == "fcond" ||
+        (name.size() >= 2 && name[0] == 'f' && std::isdigit(static_cast<unsigned char>(name[1]))));
   }
   return lhs.Kind() == CExpressionKind::kUnaryExpression ||
          lhs.Kind() == CExpressionKind::kArrayIndexExpression ||
@@ -2122,11 +2116,96 @@ bool IsEligibleStoreFlagConditionalTarget(const CExpression& lhs, bool require_u
 
 class StoreFlagConditionalRecoveryMutator : public AstMutator {
  public:
-  explicit StoreFlagConditionalRecoveryMutator(bool require_unpinned_local)
-      : require_unpinned_local_(require_unpinned_local) {}
+  explicit StoreFlagConditionalRecoveryMutator(const CompoundStatement* root_body = nullptr)
+      : root_body_(root_body) {}
 
   void MutateVariableDeclarationStatement(std::unique_ptr<CStatement>* /*stmt*/,
                                           VariableDeclarationStatement* /*decl_stmt*/) override {}
+
+  void MutateCompoundStatement(CompoundStatement* comp) override {
+    if (comp == nullptr) return;
+    if (root_body_ == nullptr) {
+      root_body_ = comp;
+    }
+    auto& stmts = comp->MutableStatements();
+    for (size_t i = 0; i + 1 < stmts.size(); ++i) {
+      if (stmts[i] == nullptr || stmts[i + 1] == nullptr) continue;
+      if (stmts[i]->Kind() != CStatementKind::kExpressionStatement ||
+          stmts[i + 1]->Kind() != CStatementKind::kExpressionStatement) {
+        continue;
+      }
+      const auto& es0 = static_cast<const ExpressionStatement&>(*stmts[i]);
+      const auto& es1 = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
+      if (es0.Expression().Kind() != CExpressionKind::kAssignmentExpression ||
+          es1.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+        continue;
+      }
+      const auto& a0 = static_cast<const AssignmentExpression&>(es0.Expression());
+      const auto& a1 = static_cast<const AssignmentExpression&>(es1.Expression());
+      if (a0.Op() != "=" || a0.Lhs().Kind() != CExpressionKind::kIdentifier ||
+          !IsEligibleStoreFlagConditionalTarget(a1.Lhs())) {
+        continue;
+      }
+      std::string tmp_var(static_cast<const IdentifierExpression&>(a0.Lhs()).Name());
+      std::unique_ptr<CExpression> normalized_cond;
+      const CExpression* cond_expr =
+          ExtractRelationalConditionFromStoreFlag(a0.Rhs(), &normalized_cond);
+      if (cond_expr == nullptr || !IsPureExpression(*cond_expr) ||
+          ExpressionUsesVariable(a1.Lhs(), tmp_var)) {
+        continue;
+      }
+      if (a1.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          (static_cast<const IdentifierExpression&>(a1.Lhs()).Name() == tmp_var ||
+           ExpressionUsesVariable(*cond_expr,
+                                  static_cast<const IdentifierExpression&>(a1.Lhs()).Name()))) {
+        continue;
+      }
+      std::string step_op;
+      if ((a1.Op() == "+=" || a1.Op() == "-=") && a1.Rhs().Kind() == CExpressionKind::kIdentifier &&
+          static_cast<const IdentifierExpression&>(a1.Rhs()).Name() == tmp_var) {
+        step_op = (a1.Op() == "+=") ? "+" : "-";
+      } else if (a1.Op() == "=" && a1.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& rhs_bin = static_cast<const BinaryExpression&>(a1.Rhs());
+        if (rhs_bin.Op() == "+" || rhs_bin.Op() == "-") {
+          if (rhs_bin.Lhs().ToString() == a1.Lhs().ToString() &&
+              rhs_bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(rhs_bin.Rhs()).Name() == tmp_var) {
+            step_op = rhs_bin.Op();
+          } else if (rhs_bin.Op() == "+" && rhs_bin.Rhs().ToString() == a1.Lhs().ToString() &&
+                     rhs_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                     static_cast<const IdentifierExpression&>(rhs_bin.Lhs()).Name() == tmp_var) {
+            step_op = "+";
+          }
+        }
+      }
+      if (step_op.empty()) continue;
+
+      bool dead_after = true;
+      for (size_t k = i + 2; k < stmts.size(); ++k) {
+        if (stmts[k] != nullptr && StatementReferencesVariable(*stmts[k], tmp_var)) {
+          dead_after = false;
+          break;
+        }
+      }
+      if (!dead_after) continue;
+      if (root_body_ != nullptr &&
+          CountIdentifierOccurrencesInStatement(*root_body_, tmp_var) > 2) {
+        continue;
+      }
+
+      std::unique_ptr<CExpression> final_cond =
+          normalized_cond != nullptr ? std::move(normalized_cond) : cond_expr->Clone();
+      auto then_block = std::make_unique<CompoundStatement>();
+      then_block->AddStatement(CStatement::Expression(CExpression::Assignment(
+          "=", a1.Lhs().Clone(),
+          CExpression::Binary(step_op, a1.Lhs().Clone(), CExpression::Integer(1)))));
+      stmts[i + 1] = CStatement::If(std::move(final_cond), std::move(then_block));
+      stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i));
+      --i;
+      MarkChanged();
+    }
+    AstMutator::MutateCompoundStatement(comp);
+  }
 
   void MutateExpressionStatement(std::unique_ptr<CStatement>* stmt,
                                  ExpressionStatement* expr_stmt) override {
@@ -2134,7 +2213,7 @@ class StoreFlagConditionalRecoveryMutator : public AstMutator {
     const CExpression& expr = expr_stmt->Expression();
     if (expr.Kind() != CExpressionKind::kAssignmentExpression) return;
     const auto& assign = static_cast<const AssignmentExpression&>(expr);
-    if (!IsEligibleStoreFlagConditionalTarget(assign.Lhs(), require_unpinned_local_)) {
+    if (!IsEligibleStoreFlagConditionalTarget(assign.Lhs())) {
       return;
     }
 
@@ -2178,7 +2257,7 @@ class StoreFlagConditionalRecoveryMutator : public AstMutator {
   }
 
  private:
-  bool require_unpinned_local_ = false;
+  const CompoundStatement* root_body_ = nullptr;
 };
 
 }  // namespace
@@ -2245,14 +2324,14 @@ bool ReciprocalAndUnsignedFloatSimplifierPass::Run(CompoundStatement* body,
 
 bool RecoverStoreFlagConditionals(CompoundStatement* comp) {
   if (comp == nullptr) return false;
-  StoreFlagConditionalRecoveryMutator mutator(/*require_unpinned_local=*/false);
+  StoreFlagConditionalRecoveryMutator mutator(comp);
   mutator.MutateCompoundStatement(comp);
   return mutator.Changed();
 }
 
 bool StoreFlagConditionalRecoveryPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
   if (body == nullptr) return false;
-  StoreFlagConditionalRecoveryMutator mutator(/*require_unpinned_local=*/true);
+  StoreFlagConditionalRecoveryMutator mutator(body);
   mutator.MutateCompoundStatement(body);
   return mutator.Changed();
 }
