@@ -520,6 +520,50 @@ int CountNonReturnVariableReadUsesInStatement(const CStatement& stmt, std::strin
   }
 }
 
+// Returns true if `var_name` is assigned a binary expression whose LHS and RHS are both binary
+// expressions (`var = (a op1 b) op2 (c op3 d)`). In GCC 2.7.2 `expr.c` (`validate_subtarget`),
+// pinning `var` to a hard register prevents GCC from using `var` as the `subtarget` for the LHS
+// subexpression `(a op1 b)`.
+bool IsAssignedCompoundBinaryBothSides(const CStatement& stmt, std::string_view var_name) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && IsAssignedCompoundBinaryBothSides(*child, var_name)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement: {
+      const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+      if (expr.Kind() != CExpressionKind::kAssignmentExpression) return false;
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+          static_cast<const IdentifierExpression&>(assign.Lhs()).Name() != var_name ||
+          assign.Rhs().Kind() != CExpressionKind::kBinaryExpression) {
+        return false;
+      }
+      const auto& bin = static_cast<const BinaryExpression&>(assign.Rhs());
+      return bin.Lhs().Kind() == CExpressionKind::kBinaryExpression &&
+             bin.Rhs().Kind() == CExpressionKind::kBinaryExpression;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return IsAssignedCompoundBinaryBothSides(ifs.ThenBranch(), var_name) ||
+             (ifs.ElseBranch() != nullptr &&
+              IsAssignedCompoundBinaryBothSides(*ifs.ElseBranch(), var_name));
+    }
+    case CStatementKind::kWhileStatement:
+      return IsAssignedCompoundBinaryBothSides(static_cast<const WhileStatement&>(stmt).Body(),
+                                               var_name);
+    case CStatementKind::kDoWhileStatement:
+      return IsAssignedCompoundBinaryBothSides(static_cast<const DoWhileStatement&>(stmt).Body(),
+                                               var_name);
+    case CStatementKind::kForStatement:
+      return IsAssignedCompoundBinaryBothSides(static_cast<const ForStatement&>(stmt).Body(),
+                                               var_name);
+    default:
+      return false;
+  }
+}
+
 // Returns true if a split argument scratch variable (`temp_a0`..`temp_a3`) is modified before a
 // subsequent read of the corresponding incoming parameter (`arg0`..`arg3`), meaning their live
 // ranges overlap on the same physical argument register (`$4`..`$7`).
@@ -1338,9 +1382,11 @@ absl::Status PrependSynthesizedLocalDeclarations(
   int callee_saved_gpr_count = 0;
   bool has_v0_local = false;
   bool has_v1_local = false;
+  bool has_temp_a0_local = false;
   for (const auto& v : local_vars_to_declare) {
     if (v == "v0") has_v0_local = true;
     if (v == "v1") has_v1_local = true;
+    if (v == "temp_a0") has_temp_a0_local = true;
     if (IsCalleeSavedGprVarName(v)) {
       callee_saved_gpr_count += double_vars.contains(v) ? 2 : 1;
     }
@@ -1367,11 +1413,20 @@ absl::Status PrependSynthesizedLocalDeclarations(
   const bool v0_reused_as_working_temp = (v0_assigns >= 2 && v0_non_return_reads >= 1);
   const bool is_float_return_leaf_with_v0_v1 = is_leaf_func && returns_fp && has_v1_local;
   const bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
+  const bool is_frameless_leaf_with_temp_a0 =
+      is_leaf_func && frame_analysis.frame_size == 0 && has_temp_a0_local &&
+      !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base;
+  const bool is_leaf_with_temp_a0_and_sp_buffer =
+      is_leaf_func && frame_analysis.frame_size > 0 && sp_buffer_size > 0 && has_temp_a0_local &&
+      !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base;
   const bool is_multi_reg_leaf_with_v0_v1 =
-      is_leaf_func && has_v0_local && has_v1_local &&
-      (is_leaf_with_s_regs || (!is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
-                               unpinned_gpr_locals_count >= kNumGprArgumentRegisters &&
-                               v0_assigns >= 2 && v0_non_return_reads >= 1));
+      is_leaf_func && has_v1_local &&
+      (is_leaf_with_s_regs ||
+       (has_v0_local && !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
+        unpinned_gpr_locals_count >= kNumGprArgumentRegisters && v0_assigns >= 2 &&
+        v0_non_return_reads >= 1) ||
+       (!has_v0_local && !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
+        !any_param_modified && unpinned_gpr_locals_count >= kNumGprArgumentRegisters));
 
   absl::flat_hash_set<std::string> float_gpr_var_names;
   for (Register r : AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg)) {
@@ -1513,19 +1568,25 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
     std::optional<std::string> caller_gpr_reg;
     const bool v0_safe_in_non_leaf = !is_leaf_func && v0_reused_as_working_temp;
-    if ((is_float_return_leaf_with_v0_v1 || is_multi_reg_leaf_with_v0_v1 || is_leaf_with_s_regs ||
-         v0_safe_in_non_leaf) &&
+    if ((is_float_return_leaf_with_v0_v1 ||
+         (is_multi_reg_leaf_with_v0_v1 && !is_leaf_with_temp_a0_and_sp_buffer) ||
+         is_leaf_with_s_regs || v0_safe_in_non_leaf) &&
         var_name == "v0") {
       caller_gpr_reg = "$2";
-    } else if ((is_float_return_leaf_with_v0_v1 || is_multi_reg_leaf_with_v0_v1 ||
-                is_leaf_with_s_regs || !is_leaf_func) &&
+    } else if ((is_float_return_leaf_with_v0_v1 || is_leaf_with_s_regs ||
+                ((is_multi_reg_leaf_with_v0_v1 || is_frameless_leaf_with_temp_a0 ||
+                  is_leaf_with_temp_a0_and_sp_buffer) &&
+                 !IsAssignedCompoundBinaryBothSides(**body, var_name)) ||
+                !is_leaf_func) &&
                var_name == "v1") {
       caller_gpr_reg = "$3";
     } else if ((!is_leaf_func || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
+                is_frameless_leaf_with_temp_a0 ||
                 (v0_non_return_reads >= 1 &&
                  unpinned_gpr_locals_count >= kNumGprArgumentRegisters &&
-                 !is_float_return_leaf_with_v0_v1)) &&
+                 !is_float_return_leaf_with_v0_v1 && !is_leaf_with_temp_a0_and_sp_buffer)) &&
                (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
+                is_frameless_leaf_with_temp_a0 ||
                 (!is_leaf_func &&
                  CountNonReturnVariableReadUsesInStatement(**body, var_name) == 0 &&
                  CountVariableReadUsesInStatement(**body, var_name) >= 1)) &&
@@ -1536,7 +1597,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
                var_name[6] <= '3' &&
                (!is_leaf_func || is_leaf_with_s_regs ||
-                !DoesScratchArgInterfereWithEntryParam(**body, var_name))) {
+                (!DoesScratchArgInterfereWithEntryParam(**body, var_name) &&
+                 !IsAssignedCompoundBinaryBothSides(**body, var_name)))) {
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&

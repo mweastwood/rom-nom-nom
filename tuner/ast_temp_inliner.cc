@@ -640,7 +640,7 @@ std::unique_ptr<CStatement> ReplaceIdentifierInStatement(const CStatement& state
                                                           replacement, replace_assignment_lhs)
                           : nullptr;
       return CStatement::VariableDeclaration(decl.Type(), decl.Name(), std::move(new_init),
-                                             decl.ArraySize());
+                                             decl.ArraySize(), decl.RegisterAnnotation());
     }
     default:
       return statement.Clone();
@@ -1336,7 +1336,8 @@ std::unique_ptr<CompoundStatement> PruneUnusedLocalDeclarations(const CompoundSt
             IsVariableDeadAfter(statements, i, declaration.Name(), /*is_top_level_block=*/true,
                                 &body)) {
           new_statements.push_back(CStatement::VariableDeclaration(
-              declaration.Type(), declaration.Name(), nullptr, declaration.ArraySize()));
+              declaration.Type(), declaration.Name(), nullptr, declaration.ArraySize(),
+              declaration.RegisterAnnotation()));
           continue;
         }
       }

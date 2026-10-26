@@ -87,17 +87,27 @@ cc_test(
 
 cc_test(
     name = "roundtrip_test",
+    size = "small",
     srcs = ["roundtrip_test.cc"],
     copts = ["-std=c++20"],
     data = [
         "testdata/custom_sample.c",
         "//toolchain:all_files",
     ],
+    shard_count = 8,
     deps = [
         ":jump_tables",
         "//core:disassembler",
+        "//core:elf_reader",
+        "//core:endian",
+        "//core:process",
+        "//core:register_tracker",
         "//core:relocations",
+        "//core:round_trip_runner",
+        "//core:round_trip_test_cases",
         "//core:symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
         "@googletest//:gtest_main",
     ],

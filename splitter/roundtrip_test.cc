@@ -1,149 +1,159 @@
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "core/disassembler.h"
-#include "core/relocations.h"
-#include "core/symbol_registry.h"
+#include "core/elf_reader.h"
+#include "core/endian.h"
+#include "core/process.h"
+#include "core/register_tracker.h"
+#include "core/round_trip_runner.h"
+#include "core/round_trip_test_cases.h"
 #include "gtest/gtest.h"
-#include "splitter/jump_tables.h"
 
 namespace rom_nom_nom {
 namespace {
-
-std::filesystem::path FindWorkspaceFile(std::string_view relative_path) {
-  // Check direct path from current working directory
-  if (std::filesystem::exists(relative_path)) {
-    return std::filesystem::absolute(relative_path);
-  }
-
-  // Check Bazel test runfiles environment
-  const char* test_srcdir = std::getenv("TEST_SRCDIR");
-  const char* test_workspace = std::getenv("TEST_WORKSPACE");
-  if (test_srcdir != nullptr) {
-    std::filesystem::path p(test_srcdir);
-    if (test_workspace != nullptr) {
-      p /= test_workspace;
-    } else {
-      p /= "_main";
-    }
-    p /= relative_path;
-    if (std::filesystem::exists(p)) {
-      return p;
-    }
-  }
-
-  // Fallback to relative path
-  return relative_path;
-}
-
-std::vector<uint8_t> ReadBinaryFile(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    return {};
-  }
-  std::streamsize size = file.tellg();
-  file.seekg(0, std::ios::beg);
-  std::vector<uint8_t> buffer(size);
-  if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-    return buffer;
-  }
-  return {};
-}
 
 void WriteTextFile(const std::filesystem::path& path, std::string_view text) {
   std::ofstream file(path, std::ios::out | std::ios::trunc);
   file.write(text.data(), text.size());
 }
 
-TEST(RoundtripIntegrationTest, CustomCCodeCompilesDisassemblesAndReassemblesBitExact) {
-  std::filesystem::path gcc_bin = FindWorkspaceFile("toolchain/gcc-2.7.2/gcc");
-  std::filesystem::path as_bin = FindWorkspaceFile("toolchain/binutils-2.6/as");
-  std::filesystem::path sample_c = FindWorkspaceFile("splitter/testdata/custom_sample.c");
+std::vector<uint32_t> BytesToBigEndianWords(const std::vector<uint8_t>& bytes) {
+  std::vector<uint32_t> words;
+  words.reserve(bytes.size() / 4);
+  for (size_t i = 0; i + 4 <= bytes.size(); i += 4) {
+    words.push_back(ReadBigEndian32(bytes.data() + i));
+  }
+  return words;
+}
 
-  ASSERT_TRUE(std::filesystem::exists(gcc_bin)) << "GCC binary not found: " << gcc_bin;
-  ASSERT_TRUE(std::filesystem::exists(as_bin)) << "AS binary not found: " << as_bin;
-  ASSERT_TRUE(std::filesystem::exists(sample_c)) << "Sample C file not found: " << sample_c;
+class SplitterRoundTripStage : public RoundTripStage {
+ public:
+  std::string_view Name() const override { return "splitter"; }
 
-  // Use Bazel test temp directory or system temp directory
-  const char* test_tmpdir = std::getenv("TEST_TMPDIR");
-  std::filesystem::path tmp_dir =
-      (test_tmpdir != nullptr) ? test_tmpdir : std::filesystem::temp_directory_path();
-  std::filesystem::path work_dir = tmp_dir / "roundtrip_test";
-  std::filesystem::create_directories(work_dir);
+  absl::StatusOr<RoundTripCaseOutcome> Execute(const PreparedRoundTripCase& prepared) override {
+    const ElfSection* orig_text_sec = prepared.orig_elf.FindSection(".text");
+    if (orig_text_sec == nullptr || orig_text_sec->data.empty()) {
+      return absl::InternalError("SplitterRoundTripStage: Missing or empty .text section.");
+    }
+    const std::vector<uint8_t>& orig_text = orig_text_sec->data;
 
-  std::filesystem::path orig_s = work_dir / "orig.s";
-  std::filesystem::path orig_o = work_dir / "orig.o";
-  std::filesystem::path orig_text_bin = work_dir / "orig_text.bin";
-  std::filesystem::path reasm_s = work_dir / "reasm.s";
-  std::filesystem::path reasm_o = work_dir / "reasm.o";
-  std::filesystem::path reasm_text_bin = work_dir / "reasm_text.bin";
+    DisassemblerOptions disasm_options;
+    disasm_options.emit_line_comments = false;
+    disasm_options.emit_function_framing = true;
+    Disassembler disassembler(nullptr, disasm_options);
 
-  // 1. Compile custom_sample.c with GCC 2.7.2
-  std::string gcc_cmd =
-      absl::StrFormat("%s -B%s/ -x c -S -O2 -mips2 -G0 %s -o %s", gcc_bin.string(),
-                      gcc_bin.parent_path().string(), sample_c.string(), orig_s.string());
-  int gcc_ret = std::system(gcc_cmd.c_str());
-  ASSERT_EQ(gcc_ret, 0) << "Failed command: " << gcc_cmd;
+    auto funcs_or = disassembler.DisassembleAllFunctions(orig_text, 0x00000000);
+    if (!funcs_or.ok()) {
+      return funcs_or.status();
+    }
+    if (funcs_or->empty()) {
+      return absl::InternalError("SplitterRoundTripStage: DisassembleAllFunctions returned empty.");
+    }
 
-  // 2. Assemble orig.s with KMC binutils-2.6 as
-  std::string as_cmd = absl::StrFormat("%s -mcpu=vr4300 -mips2 -EB -G0 -N %s -o %s",
-                                       as_bin.string(), orig_s.string(), orig_o.string());
-  int as_ret = std::system(as_cmd.c_str());
-  ASSERT_EQ(as_ret, 0) << "Failed command: " << as_cmd;
+    std::string combined_asm;
+    for (const auto& func : *funcs_or) {
+      combined_asm += func.emitted_assembly;
+      combined_asm += "\n";
+    }
 
-  // 3. Extract .text section payload from orig.o
-  std::string objcopy_cmd = absl::StrFormat("mips-linux-gnu-objcopy -O binary -j .text %s %s",
-                                            orig_o.string(), orig_text_bin.string());
-  int objcopy_ret = std::system(objcopy_cmd.c_str());
-  ASSERT_EQ(objcopy_ret, 0) << "Failed command: " << objcopy_cmd;
+    std::filesystem::path reasm_s = prepared.work_dir / "reasm.s";
+    std::filesystem::path reasm_o = prepared.work_dir / "reasm.o";
+    WriteTextFile(reasm_s, combined_asm);
 
-  std::vector<uint8_t> orig_text = ReadBinaryFile(orig_text_bin);
-  ASSERT_FALSE(orig_text.empty());
-  ASSERT_EQ(orig_text.size() % 4, 0u);
+    auto as_args = prepared.toolchain->BuildKmcAsArgs(prepared.test_case.options.c_flags,
+                                                      {prepared.work_dir}, {}, reasm_s, reasm_o);
+    auto as_res_or = RunProcess({
+        .program = prepared.toolchain->KmcAs().string(),
+        .args = std::move(as_args),
+        .working_directory = prepared.toolchain->RepoRoot(),
+    });
+    if (!as_res_or.ok()) {
+      return as_res_or.status();
+    }
+    if (!as_res_or->Ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "SplitterRoundTripStage: KMC AS reassembly failed for '%s':\n%s\n%s\nAssembly:\n%s",
+          prepared.test_case.function_name, as_res_or->stdout_output, as_res_or->stderr_output,
+          combined_asm));
+    }
 
-  // 4. Disassemble all functions from orig_text with Disassembler
-  DisassemblerOptions disasm_options;
-  disasm_options.emit_line_comments = false;
-  disasm_options.emit_function_framing = true;
-  Disassembler disassembler(nullptr, disasm_options);
+    auto reasm_elf_or = ElfReader::LoadFromFile(reasm_o);
+    if (!reasm_elf_or.ok()) {
+      return reasm_elf_or.status();
+    }
+    const ElfSection* reasm_text_sec = reasm_elf_or->FindSection(".text");
+    if (reasm_text_sec == nullptr) {
+      return absl::InternalError("SplitterRoundTripStage: Missing .text section in reasm.o.");
+    }
+    const std::vector<uint8_t>& reasm_text = reasm_text_sec->data;
 
-  auto funcs_or = disassembler.DisassembleAllFunctions(orig_text, 0x00000000);
-  ASSERT_TRUE(funcs_or.ok()) << funcs_or.status();
-  const auto& funcs = *funcs_or;
-  ASSERT_FALSE(funcs.empty());
+    std::vector<uint32_t> orig_words = BytesToBigEndianWords(orig_text);
+    std::vector<uint32_t> reasm_words = BytesToBigEndianWords(reasm_text);
 
-  std::string combined_asm;
-  for (const auto& func : funcs) {
-    combined_asm += func.emitted_assembly;
-    combined_asm += "\n";
+    RoundTripCaseOutcome outcome;
+    outcome.test_name = prepared.test_case.test_name;
+    outcome.function_name = prepared.test_case.function_name;
+    outcome.candidate_c = combined_asm;
+    outcome.structural_comparison =
+        CompareFunctionStructure(orig_words, 0x00000000, reasm_words, 0x00000000);
+    outcome.structurally_isomorphic = outcome.structural_comparison.IsStructurallyIsomorphic();
+    outcome.bit_exact = (orig_text == reasm_text);
+    outcome.passed = outcome.bit_exact;
+    if (!outcome.bit_exact) {
+      outcome.diagnostic = absl::StrFormat(
+          "Splitter disassembly/reassembly mismatch for '%s' (orig %zu bytes vs reasm %zu bytes)\n"
+          "Emitted assembly:\n%s",
+          prepared.test_case.function_name, orig_text.size(), reasm_text.size(), combined_asm);
+    }
+    return outcome;
+  }
+};
+
+class SplitterRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {
+ protected:
+  static void SetUpTestSuite() {
+    auto runner_or = RoundTripRunner::Create();
+    ASSERT_TRUE(runner_or.ok()) << runner_or.status();
+    runner = runner_or->release();
   }
 
-  WriteTextFile(reasm_s, combined_asm);
+  static void TearDownTestSuite() {
+    if (runner != nullptr) {
+      std::cout << runner->FormatSuiteSummaryReport("SPLITTER ROUND-TRIP SUITE REPORT");
+      delete runner;
+      runner = nullptr;
+    }
+  }
 
-  // 5. Reassemble the disassembled assembly
-  std::string reasm_cmd = absl::StrFormat("%s -mcpu=vr4300 -mips2 -EB -G0 -N %s -o %s",
-                                          as_bin.string(), reasm_s.string(), reasm_o.string());
-  int reasm_ret = std::system(reasm_cmd.c_str());
-  ASSERT_EQ(reasm_ret, 0) << "Failed reassembly: " << reasm_cmd << "\nAssembly:\n" << combined_asm;
+  static RoundTripRunner* runner;
+};
 
-  // 6. Extract .text section payload from reasm.o
-  std::string reasm_objcopy_cmd = absl::StrFormat("mips-linux-gnu-objcopy -O binary -j .text %s %s",
-                                                  reasm_o.string(), reasm_text_bin.string());
-  int reasm_objcopy_ret = std::system(reasm_objcopy_cmd.c_str());
-  ASSERT_EQ(reasm_objcopy_ret, 0) << "Failed command: " << reasm_objcopy_cmd;
+RoundTripRunner* SplitterRoundTripTest::runner = nullptr;
 
-  std::vector<uint8_t> reasm_text = ReadBinaryFile(reasm_text_bin);
-  ASSERT_FALSE(reasm_text.empty());
-
-  // 7. Verify byte-for-byte exact equality between original and reassembled binary!
-  EXPECT_EQ(reasm_text.size(), orig_text.size());
-  EXPECT_EQ(reasm_text, orig_text);
+TEST_P(SplitterRoundTripTest, DisassemblesAndReassemblesBitExact) {
+  ASSERT_NE(runner, nullptr);
+  SplitterRoundTripStage stage;
+  auto outcome_or = runner->RunCase(GetParam(), &stage);
+  ASSERT_TRUE(outcome_or.ok()) << outcome_or.status();
+  EXPECT_TRUE(outcome_or->bit_exact) << outcome_or->diagnostic;
 }
+
+INSTANTIATE_TEST_SUITE_P(SharedRoundTripSuite, SplitterRoundTripTest,
+                         ::testing::ValuesIn(GetSharedRoundTripTestCases()),
+                         [](const ::testing::TestParamInfo<RoundTripTestCase>& info) {
+                           return info.param.test_name;
+                         });
 
 }  // namespace
 }  // namespace rom_nom_nom

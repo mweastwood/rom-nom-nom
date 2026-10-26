@@ -621,6 +621,7 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
       continue;
     }
 
+    const Loop* target_loop = loop_info.GetLoopFor(succ_taken);
     std::optional<uint32_t> pred_block_id;
     for (uint32_t pred_id : taken_block->predecessors) {
       if (pred_id == block.id) {
@@ -630,8 +631,10 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
       if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
           pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
           SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
-          enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
-          !enclosing_loop->Contains(pred_id)) {
+          ((enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
+            !enclosing_loop->Contains(pred_id)) ||
+           (target_loop != nullptr && target_loop->header == succ_taken &&
+            !target_loop->Contains(block.id) && !target_loop->Contains(pred_id)))) {
         pred_block_id = pred_id;
         break;
       }
@@ -763,11 +766,6 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
     if (succ_taken == succ_fallthrough || succ_taken == block.id || succ_fallthrough == block.id) {
       continue;
     }
-    if (enclosing_loop != nullptr && enclosing_loop->header == block.id &&
-        (loop_info.GetLoopFor(succ_taken) != enclosing_loop ||
-         loop_info.GetLoopFor(succ_fallthrough) != enclosing_loop)) {
-      continue;
-    }
 
     if (!IsSinkableDelaySlotInstruction(block, delay_inst)) {
       continue;
@@ -779,6 +777,33 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
     bool dead_on_fallthrough =
         AllRegistersDeadAtBlockEntry(*cfg, succ_fallthrough, delay_ud.gpr_defs, returns_v0);
     if (dead_on_taken == dead_on_fallthrough) {
+      continue;
+    }
+
+    BasicBlock* ft_block = cfg->GetMutableBlock(succ_fallthrough);
+    bool loop_has_conditional_latch = false;
+    if (enclosing_loop != nullptr) {
+      for (uint32_t latch_id : enclosing_loop->latches) {
+        const BasicBlock* latch_b = cfg->GetBlock(latch_id);
+        if (latch_b != nullptr && latch_b->Terminator() != nullptr &&
+            latch_b->Terminator()->IsBranch() && !latch_b->Terminator()->IsUnconditionalBranch()) {
+          loop_has_conditional_latch = true;
+          break;
+        }
+      }
+    }
+    const bool feeds_ft_branch_in_do_while =
+        loop_has_conditional_latch && dead_on_taken && !dead_on_fallthrough &&
+        delay_ud.gpr_defs.size() == 1 && ft_block != nullptr &&
+        ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block.id &&
+        !ft_block->instructions.empty() && ft_block->instructions.front().IsBranch() &&
+        (ft_block->instructions.front().rs == delay_ud.gpr_defs[0] ||
+         ft_block->instructions.front().rt == delay_ud.gpr_defs[0]);
+
+    if (enclosing_loop != nullptr && enclosing_loop->header == block.id &&
+        (loop_info.GetLoopFor(succ_taken) != enclosing_loop ||
+         loop_info.GetLoopFor(succ_fallthrough) != enclosing_loop) &&
+        !feeds_ft_branch_in_do_while) {
       continue;
     }
 
@@ -800,7 +825,6 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
     bool blocks_folded_comparison = DelaySlotBlocksFoldedComparison(block);
 
     if (dead_on_taken && !dead_on_fallthrough) {
-      BasicBlock* ft_block = cfg->GetMutableBlock(succ_fallthrough);
       bool enables_short_circuit = false;
       if (ft_block != nullptr && ft_block->successors.size() == 2 &&
           (ft_block->successors[0] == succ_taken || ft_block->successors[1] == succ_taken)) {
@@ -813,11 +837,23 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
       if (ft_block != nullptr && succ_fallthrough != cfg->EntryBlockId() &&
           ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block.id &&
           loop_info.GetLoopFor(succ_fallthrough) == enclosing_loop &&
-          (blocks_folded_comparison ||
+          (blocks_folded_comparison || feeds_ft_branch_in_do_while ||
            (DelaySlotConflictsWithTerminator(term, delay_inst) &&
             (DelaySlotEnablesSuccessorFoldedComparison(*ft_block, delay_inst) ||
              enables_short_circuit)))) {
         ft_block->instructions.insert(ft_block->instructions.begin(), delay_inst);
+        block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
+        changed = true;
+      }
+    } else if (dead_on_fallthrough && !dead_on_taken) {
+      BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
+      if (taken_block != nullptr && succ_taken != cfg->EntryBlockId() &&
+          taken_block->predecessors.size() == 1 && taken_block->predecessors[0] == block.id &&
+          loop_info.GetLoopFor(succ_taken) == enclosing_loop &&
+          !taken_block->instructions.empty() && !taken_block->instructions.front().IsReturn() &&
+          (blocks_folded_comparison || (DelaySlotConflictsWithTerminator(term, delay_inst) &&
+                                        !taken_block->instructions.front().IsCall()))) {
+        taken_block->instructions.insert(taken_block->instructions.begin(), delay_inst);
         block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
         changed = true;
       }

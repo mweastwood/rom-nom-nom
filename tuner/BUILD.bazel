@@ -193,6 +193,41 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "round_trip_test",
+    size = "small",
+    srcs = ["round_trip_test.cc"],
+    copts = ["-std=c++20"],
+    data = [
+        "//toolchain:all_files",
+    ],
+    shard_count = 8,
+    deps = [
+        ":ast_mutator",
+        ":candidate_scorer",
+        ":flag_explorer",
+        "//core:c_ast",
+        "//core:compiler",
+        "//core:elf_reader",
+        "//core:mips",
+        "//core:register_tracker",
+        "//core:round_trip_runner",
+        "//core:round_trip_test_cases",
+        "//core:symbol_registry",
+        "//core:target_extractor",
+        "//lifter:c_emitter",
+        "//lifter:function_loader",
+        "//lifter:lifter_pipeline",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "tuner",
     srcs = ["main.cc"],

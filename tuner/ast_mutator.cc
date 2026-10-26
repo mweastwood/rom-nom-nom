@@ -1387,6 +1387,10 @@ std::vector<std::vector<AstMutationStep>> AstMutator::GenerateCanonicalPresets(
       make_step(AST_MUTATION_INLINE_SINGLE_USE_TEMP, 0, 1),
       make_step(AST_MUTATION_COALESCE_PARAM_COPY, 0, 1),
   });
+  // Preset 5: Coalesce parameter copies without bulk temporary inlining
+  presets.push_back({
+      make_step(AST_MUTATION_COALESCE_PARAM_COPY, 0, 1),
+  });
   (void)function;
   return presets;
 }

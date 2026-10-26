@@ -637,3 +637,34 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "round_trip_test_cases",
+    testonly = True,
+    srcs = ["round_trip_test_cases.cc"],
+    hdrs = ["round_trip_test_cases.h"],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
+    name = "round_trip_runner",
+    testonly = True,
+    srcs = ["round_trip_runner.cc"],
+    hdrs = ["round_trip_runner.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":compiler",
+        ":disassembler",
+        ":elf_reader",
+        ":register_tracker",
+        ":relocation_applier",
+        ":round_trip_test_cases",
+        ":symbol_registry",
+        ":toolchain",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)

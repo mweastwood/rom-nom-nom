@@ -203,6 +203,29 @@ std::unique_ptr<CExpression> SimplifyShiftAddExpression(const CExpression& expr)
           return CExpression::Cast(target_type, inner.Lhs().Clone());
         }
       }
+      // 6. Signed division by 2: ((X + ((u32)X >> 31)) >> 1) -> (X / 2)
+      if (is_int_val(bin.Rhs(), &s_right) && s_right == 1 &&
+          bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
+        if (inner.Op() == "+") {
+          auto is_unsigned_shr_31_of = [&](const CExpression& cand, const CExpression& x) {
+            if (cand.Kind() != CExpressionKind::kBinaryExpression) return false;
+            const auto& shr = static_cast<const BinaryExpression&>(cand);
+            int64_t sh = 0;
+            if (shr.Op() != ">>" || !is_int_val(shr.Rhs(), &sh) || sh != 31) return false;
+            if (shr.Lhs().Kind() != CExpressionKind::kCastExpression) return false;
+            const auto& cast = static_cast<const CastExpression&>(shr.Lhs());
+            return cast.TargetType().name == "u32" && cast.TargetType().pointer_depth == 0 &&
+                   exprs_match(cast.Operand(), x);
+          };
+          if (is_unsigned_shr_31_of(inner.Rhs(), inner.Lhs())) {
+            return CExpression::Binary("/", inner.Lhs().Clone(), CExpression::Integer(2));
+          }
+          if (is_unsigned_shr_31_of(inner.Lhs(), inner.Rhs())) {
+            return CExpression::Binary("/", inner.Rhs().Clone(), CExpression::Integer(2));
+          }
+        }
+      }
     }
   }
 

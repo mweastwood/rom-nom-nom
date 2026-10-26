@@ -947,7 +947,7 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
           new_init = apply_aliases_to_expr(vds.Initializer()->Clone());
         }
         return CStatement::VariableDeclaration(vds.Type(), vds.Name(), std::move(new_init),
-                                               vds.ArraySize());
+                                               vds.ArraySize(), vds.RegisterAnnotation());
       }
       case CStatementKind::kSwitchStatement: {
         const auto& ss = static_cast<const SwitchStatement&>(*s);
@@ -1024,8 +1024,16 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
   if (body == nullptr || parameters.empty()) return false;
   auto& stmts = body->MutableStatements();
   bool has_goto = StatementContainsGoto(*body);
+  absl::flat_hash_set<std::string> param_names;
+  for (const auto& p : parameters) {
+    param_names.insert(p.name);
+  }
   auto is_temp_t_var = [](std::string_view v) {
     return v.size() == 7 && absl::StartsWith(v, "temp_t") && v[6] >= '0' && v[6] <= '9';
+  };
+  auto is_non_param_arg_var = [&](std::string_view v) {
+    return v.size() == 4 && absl::StartsWith(v, "arg") && v[3] >= '0' && v[3] <= '3' &&
+           !param_names.contains(std::string(v));
   };
   bool any_homed_split = false;
   bool any_s_split_coalesced = false;
@@ -1080,8 +1088,9 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
               }
             }
           }
-          if (rhs == param.name && (IsCalleeSavedGprVarName(lhs) || is_temp_t_var(lhs) ||
-                                    (!homed_slot_name.empty() && lhs == homed_slot_name))) {
+          if (rhs == param.name &&
+              (IsCalleeSavedGprVarName(lhs) || is_temp_t_var(lhs) || is_non_param_arg_var(lhs) ||
+               (!homed_slot_name.empty() && lhs == homed_slot_name))) {
             prologue_copy_idx = i;
             prologue_copy_lhs = std::string(lhs);
             is_homed_copy = (!homed_slot_name.empty() && lhs == homed_slot_name);
@@ -1537,8 +1546,9 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
         StatementHasCall(*body);
     if (!entry_not_read || !any_redef_seen ||
         (!is_homed_copy && !is_narrow_prologue_copy && !saw_call_before_write &&
-         !is_temp_t_var(prologue_copy_lhs) && !has_goto && !copies_to_non_matching_s_with_calls &&
-         s_saved_params_count == 1 && parameters.size() == 1)) {
+         !is_temp_t_var(prologue_copy_lhs) && !is_non_param_arg_var(prologue_copy_lhs) &&
+         !has_goto && !copies_to_non_matching_s_with_calls && s_saved_params_count == 1 &&
+         parameters.size() == 1)) {
       continue;
     }
     std::string scratch_name = absl::StrCat("temp_a", param.name.substr(3));

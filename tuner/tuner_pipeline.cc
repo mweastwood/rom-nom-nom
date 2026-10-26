@@ -385,8 +385,9 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
         }
 
         bool improved_in_polish = false;
+        const FunctionDeclaration polish_base_ast = best_ast.Clone();
         for (const auto& step : polish_steps) {
-          FunctionDeclaration mutated = AstMutator::ApplyMutation(best_ast, step);
+          FunctionDeclaration mutated = AstMutator::ApplyMutation(polish_base_ast, step);
           std::string mutated_c = EmitSingleFunctionWithExterns(mutated, parent_tu, symbols,
                                                                 /*format_with_clang=*/false);
           std::vector<std::vector<std::string>> candidate_flags_to_try = {result.winning_c_flags};
@@ -406,7 +407,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
             if (candidate_score_or->IsBetterThan(result.best_score)) {
               result.best_score = *candidate_score_or;
               result.winning_c_flags = flags;
-              best_ast = std::move(mutated);
+              best_ast = mutated.Clone();
               result.applied_mutations.push_back(step);
               result.improved_over_baseline = true;
               improved_in_polish = true;

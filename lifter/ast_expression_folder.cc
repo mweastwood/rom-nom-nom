@@ -1729,6 +1729,121 @@ struct FolderContext {
                 }
                 bool block_has_any_call = block_has_later_call || block_has_earlier_call;
 
+                // Scheduled load-accumulate sequence:
+                //   var = load_0;
+                //   var_1 = load_1;
+                //   ...
+                //   var_m = load_m;
+                //   var = (base + var);
+                //   var = (var + var_1);
+                //   ...
+                //   var = (var + var_m);
+                // Collapse into `var = (((base + load_0) + load_1) + ... + load_m);`.
+                if (!block_has_any_call && IsPureExpr(assign.Rhs()) &&
+                    HasMemoryDeref(assign.Rhs()) && CountExprUses(assign.Rhs(), var) == 0) {
+                  std::vector<std::string> mid_vars;
+                  std::vector<const CExpression*> mid_loads;
+                  size_t cur = i + 1;
+                  while (cur < stmts.size() && mid_vars.size() < 4) {
+                    if (stmts[cur] == nullptr ||
+                        stmts[cur]->Kind() != CStatementKind::kExpressionStatement) {
+                      break;
+                    }
+                    const auto& mes = static_cast<const ExpressionStatement&>(*stmts[cur]);
+                    if (mes.Expression().Kind() != CExpressionKind::kAssignmentExpression) break;
+                    const auto& ma = static_cast<const AssignmentExpression&>(mes.Expression());
+                    if (ma.Op() != "=" || ma.Lhs().Kind() != CExpressionKind::kIdentifier) break;
+                    std::string mvar = static_cast<const IdentifierExpression&>(ma.Lhs()).Name();
+                    if (mvar == var || !IsScratchVar(mvar) || !IsPureExpr(ma.Rhs()) ||
+                        !HasMemoryDeref(ma.Rhs()) || CountExprUses(ma.Rhs(), var) > 0 ||
+                        CountExprUses(ma.Rhs(), mvar) > 0) {
+                      break;
+                    }
+                    bool dup = false;
+                    for (const auto& prev_v : mid_vars) {
+                      if (prev_v == mvar || CountExprUses(ma.Rhs(), prev_v) > 0) {
+                        dup = true;
+                        break;
+                      }
+                    }
+                    if (dup) break;
+                    mid_vars.push_back(std::move(mvar));
+                    mid_loads.push_back(&ma.Rhs());
+                    ++cur;
+                  }
+                  const size_t m = mid_vars.size();
+                  if (m >= 1 && i + 2 * m + 1 < stmts.size()) {
+                    bool match_chain = true;
+                    std::unique_ptr<CExpression> accum_expr;
+                    const size_t first_acc_idx = i + m + 1;
+                    if (stmts[first_acc_idx] != nullptr &&
+                        stmts[first_acc_idx]->Kind() == CStatementKind::kExpressionStatement) {
+                      const auto& aes =
+                          static_cast<const ExpressionStatement&>(*stmts[first_acc_idx]);
+                      if (aes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                        const auto& aa = static_cast<const AssignmentExpression&>(aes.Expression());
+                        if (aa.Op() == "=" && aa.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(aa.Lhs()).Name() == var &&
+                            aa.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
+                            CountExprUses(aa.Rhs(), var) == 1) {
+                          const auto& ab = static_cast<const BinaryExpression&>(aa.Rhs());
+                          if ((ab.Op() == "+" || ab.Op() == "-") &&
+                              ab.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                              static_cast<const IdentifierExpression&>(ab.Rhs()).Name() == var &&
+                              IsPureExpr(ab.Lhs()) && !HasMemoryDeref(ab.Lhs())) {
+                            accum_expr = CExpression::Binary(ab.Op(), ab.Lhs().Clone(),
+                                                             assign.Rhs().Clone());
+                          }
+                        }
+                      }
+                    }
+                    if (accum_expr == nullptr) {
+                      match_chain = false;
+                    }
+                    for (size_t k = 0; match_chain && k < m; ++k) {
+                      const size_t acc_idx = first_acc_idx + 1 + k;
+                      if (stmts[acc_idx] == nullptr ||
+                          stmts[acc_idx]->Kind() != CStatementKind::kExpressionStatement) {
+                        match_chain = false;
+                        break;
+                      }
+                      const auto& kes = static_cast<const ExpressionStatement&>(*stmts[acc_idx]);
+                      if (kes.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+                        match_chain = false;
+                        break;
+                      }
+                      const auto& ka = static_cast<const AssignmentExpression&>(kes.Expression());
+                      if (ka.Op() != "=" || ka.Lhs().Kind() != CExpressionKind::kIdentifier ||
+                          static_cast<const IdentifierExpression&>(ka.Lhs()).Name() != var ||
+                          ka.Rhs().Kind() != CExpressionKind::kBinaryExpression) {
+                        match_chain = false;
+                        break;
+                      }
+                      const auto& kb = static_cast<const BinaryExpression&>(ka.Rhs());
+                      if ((kb.Op() != "+" && kb.Op() != "-") ||
+                          kb.Lhs().Kind() != CExpressionKind::kIdentifier ||
+                          static_cast<const IdentifierExpression&>(kb.Lhs()).Name() != var ||
+                          kb.Rhs().Kind() != CExpressionKind::kIdentifier ||
+                          static_cast<const IdentifierExpression&>(kb.Rhs()).Name() !=
+                              mid_vars[k] ||
+                          !IsDeadAfterStmt(acc_idx, mid_vars[k], 1, stmts[i + 1 + k].get())) {
+                        match_chain = false;
+                        break;
+                      }
+                      accum_expr = CExpression::Binary(kb.Op(), std::move(accum_expr),
+                                                       mid_loads[k]->Clone());
+                    }
+                    if (match_chain && accum_expr != nullptr) {
+                      stmts[i] = CStatement::Expression(CExpression::Assignment(
+                          "=", CExpression::Identifier(var), std::move(accum_expr)));
+                      stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1),
+                                  stmts.begin() + static_cast<std::ptrdiff_t>(i + 2 * m + 2));
+                      changed = true;
+                      break;
+                    }
+                  }
+                }
+
                 // Case A: In-place redefinition (var = ...; var = ... var ...)
                 size_t max_case_a_lookahead =
                     (is_call_arg || block_has_any_call) ? 10 : (is_fp_scratch ? 2 : 1);
@@ -1749,6 +1864,41 @@ struct FolderContext {
                     bool can_fold_in_place = false;
                     if (IsPureExpr(assign.Rhs()) && !IsComparisonExpr(assign.Rhs())) {
                       can_fold_in_place = true;
+                    } else if (IsPureExpr(assign.Rhs()) && IsComparisonExpr(assign.Rhs()) &&
+                               j == i + 1 &&
+                               cand_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                      auto is_ident_lt_one = [](const CExpression& e) -> bool {
+                        if (e.Kind() != CExpressionKind::kBinaryExpression) return false;
+                        const auto& b = static_cast<const BinaryExpression&>(e);
+                        if (b.Op() != "<" || b.Rhs().Kind() != CExpressionKind::kIntegerLiteral ||
+                            static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value() != 1) {
+                          return false;
+                        }
+                        if (b.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                          return true;
+                        }
+                        if (b.Lhs().Kind() == CExpressionKind::kCastExpression) {
+                          const auto& c = static_cast<const CastExpression&>(b.Lhs());
+                          return c.TargetType().name == "u32" &&
+                                 c.TargetType().pointer_depth == 0 &&
+                                 c.Operand().Kind() == CExpressionKind::kIdentifier;
+                        }
+                        return false;
+                      };
+                      const auto& cand_bin =
+                          static_cast<const BinaryExpression&>(cand_assign.Rhs());
+                      if ((cand_bin.Op() == "|" || cand_bin.Op() == "&") &&
+                          is_ident_lt_one(assign.Rhs()) &&
+                          ((cand_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(cand_bin.Lhs()).Name() ==
+                                var &&
+                            is_ident_lt_one(cand_bin.Rhs())) ||
+                           (cand_bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(cand_bin.Rhs()).Name() ==
+                                var &&
+                            is_ident_lt_one(cand_bin.Lhs())))) {
+                        can_fold_in_place = true;
+                      }
                     } else if (IsCallOrWrappedCall(assign.Rhs()) && var != "f0" && var != "f0_d" &&
                                j == i + 1 && IsPureExpr(cand_assign.Rhs()) &&
                                !HasMemoryDeref(cand_assign.Rhs())) {
@@ -1759,6 +1909,19 @@ struct FolderContext {
                         cand_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression && i > 0 &&
                         CountUses(*stmts[i - 1], var) > 0) {
                       can_fold_in_place = false;
+                    }
+                    if (can_fold_in_place && absl::StartsWith(var, "temp_a") &&
+                        assign.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
+                        cand_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                      const auto& cb = static_cast<const BinaryExpression&>(cand_assign.Rhs());
+                      if ((cb.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                           static_cast<const IdentifierExpression&>(cb.Lhs()).Name() == var &&
+                           cb.Rhs().Kind() == CExpressionKind::kBinaryExpression) ||
+                          (cb.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                           static_cast<const IdentifierExpression&>(cb.Rhs()).Name() == var &&
+                           cb.Lhs().Kind() == CExpressionKind::kBinaryExpression)) {
+                        can_fold_in_place = false;
+                      }
                     }
                     if (can_fold_in_place && uses_in_rhs == 1 &&
                         !HasAddressOfVar(cand_assign.Rhs(), var) &&
@@ -2285,6 +2448,63 @@ struct FolderContext {
                             break;
                           }
                         }
+                        if (!block_has_any_call && (var == "v1" || var == "v0") &&
+                            assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                          const auto& rhs_b = static_cast<const BinaryExpression&>(assign.Rhs());
+                          const bool is_compound_rhs =
+                              rhs_b.Lhs().Kind() == CExpressionKind::kBinaryExpression ||
+                              rhs_b.Rhs().Kind() == CExpressionKind::kBinaryExpression;
+                          if (is_compound_rhs &&
+                              (j > i + 1 || ExtractAssignedLhsVar(cand_assign.Lhs()) == "v0" ||
+                               ExtractAssignedLhsVar(cand_assign.Lhs()) == "v1")) {
+                            bool used_after_compound_lhs = false;
+                            std::function<void(const CExpression&)> walk =
+                                [&](const CExpression& e) {
+                                  if (used_after_compound_lhs) return;
+                                  if (e.Kind() == CExpressionKind::kBinaryExpression) {
+                                    const auto& b = static_cast<const BinaryExpression&>(e);
+                                    if (b.Lhs().Kind() == CExpressionKind::kBinaryExpression &&
+                                        CountExprUses(b.Rhs(), var) > 0) {
+                                      used_after_compound_lhs = true;
+                                      return;
+                                    }
+                                    walk(b.Lhs());
+                                    walk(b.Rhs());
+                                  }
+                                };
+                            walk(cand_assign.Rhs());
+                            if (used_after_compound_lhs) {
+                              break;
+                            }
+                          }
+                        }
+                      }
+                      if (j > i + 1 && !is_call_arg && !block_has_any_call &&
+                          assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                        bool crosses_used_binary_def = false;
+                        for (size_t k = i + 1; k < j; ++k) {
+                          if (stmts[k] == nullptr ||
+                              stmts[k]->Kind() != CStatementKind::kExpressionStatement) {
+                            continue;
+                          }
+                          const auto& mid_e =
+                              static_cast<const ExpressionStatement&>(*stmts[k]).Expression();
+                          if (mid_e.Kind() != CExpressionKind::kAssignmentExpression) continue;
+                          const auto& mid_a = static_cast<const AssignmentExpression&>(mid_e);
+                          if (mid_a.Op() != "=" ||
+                              mid_a.Rhs().Kind() != CExpressionKind::kBinaryExpression) {
+                            continue;
+                          }
+                          std::string_view mid_lhs_sv = ExtractAssignedLhsVar(mid_a.Lhs());
+                          if (!mid_lhs_sv.empty() &&
+                              CountUses(*stmts[j], std::string(mid_lhs_sv)) > 0) {
+                            crosses_used_binary_def = true;
+                            break;
+                          }
+                        }
+                        if (crosses_used_binary_def) {
+                          break;
+                        }
                       }
                       if (IsDeadAfterStmt(j, var, 1, stmts[i].get())) {
                         auto new_expr =
@@ -2541,6 +2761,61 @@ struct FolderContext {
                                            else_live == VarLiveness::kKilledBeforeRead);
                     if (killed_by_both || IsDeadAfterStmt(j, var, 1, stmts[i].get())) {
                       auto new_cond = SubstituteIdentifier(if_stmt.Condition(), var, assign.Rhs());
+                      if (new_cond->Kind() == CExpressionKind::kBinaryExpression) {
+                        const auto& top_bin = static_cast<const BinaryExpression&>(*new_cond);
+                        if (top_bin.Op() == "||" || top_bin.Op() == "&&") {
+                          auto unwrap_bitwise_cmp_ne_zero =
+                              [&](const CExpression& sub) -> std::unique_ptr<CExpression> {
+                            if (sub.Kind() != CExpressionKind::kBinaryExpression) return nullptr;
+                            const auto& ne_bin = static_cast<const BinaryExpression&>(sub);
+                            if (ne_bin.Op() != "!=" ||
+                                ne_bin.Rhs().Kind() != CExpressionKind::kIntegerLiteral ||
+                                static_cast<const IntegerLiteralExpression&>(ne_bin.Rhs())
+                                        .Value() != 0 ||
+                                ne_bin.Lhs().Kind() != CExpressionKind::kBinaryExpression) {
+                              return nullptr;
+                            }
+                            const auto& bit_bin =
+                                static_cast<const BinaryExpression&>(ne_bin.Lhs());
+                            if (((top_bin.Op() == "||" && bit_bin.Op() == "|") ||
+                                 (top_bin.Op() == "&&" && bit_bin.Op() == "&")) &&
+                                IsComparisonExpr(bit_bin.Lhs()) &&
+                                IsComparisonExpr(bit_bin.Rhs())) {
+                              auto normalize_sltiu_eq_zero =
+                                  [](const CExpression& cmp) -> std::unique_ptr<CExpression> {
+                                if (cmp.Kind() == CExpressionKind::kBinaryExpression) {
+                                  const auto& b = static_cast<const BinaryExpression&>(cmp);
+                                  if (b.Op() == "<" &&
+                                      b.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                                      static_cast<const IntegerLiteralExpression&>(b.Rhs())
+                                              .Value() == 1 &&
+                                      b.Lhs().Kind() == CExpressionKind::kCastExpression) {
+                                    const auto& c = static_cast<const CastExpression&>(b.Lhs());
+                                    if (c.TargetType().name == "u32" &&
+                                        c.TargetType().pointer_depth == 0) {
+                                      return CExpression::Binary("==", c.Operand().Clone(),
+                                                                 CExpression::Integer(0));
+                                    }
+                                  }
+                                }
+                                return cmp.Clone();
+                              };
+                              return CExpression::Binary(top_bin.Op(),
+                                                         normalize_sltiu_eq_zero(bit_bin.Lhs()),
+                                                         normalize_sltiu_eq_zero(bit_bin.Rhs()));
+                            }
+                            return nullptr;
+                          };
+                          auto new_lhs = unwrap_bitwise_cmp_ne_zero(top_bin.Lhs());
+                          auto new_rhs = unwrap_bitwise_cmp_ne_zero(top_bin.Rhs());
+                          if (new_lhs != nullptr || new_rhs != nullptr) {
+                            new_cond = CExpression::Binary(
+                                top_bin.Op(),
+                                new_lhs != nullptr ? std::move(new_lhs) : top_bin.Lhs().Clone(),
+                                new_rhs != nullptr ? std::move(new_rhs) : top_bin.Rhs().Clone());
+                          }
+                        }
+                      }
                       if (CountExprUses(*new_cond, var) == 0) {
                         auto new_then = if_stmt.ThenBranch().Clone();
                         std::unique_ptr<CStatement> new_else = (if_stmt.ElseBranch() != nullptr)
@@ -2564,9 +2839,39 @@ struct FolderContext {
                         (ret_stmt.ReturnValue()->Kind() == CExpressionKind::kIdentifier &&
                          static_cast<const IdentifierExpression&>(*ret_stmt.ReturnValue()).Name() ==
                              var);
+                    auto is_compound_binary_expr = [](const CExpression& e) {
+                      if (e.Kind() != CExpressionKind::kBinaryExpression) return false;
+                      const auto& b = static_cast<const BinaryExpression&>(e);
+                      return b.Lhs().Kind() == CExpressionKind::kBinaryExpression ||
+                             b.Rhs().Kind() == CExpressionKind::kBinaryExpression;
+                    };
+                    auto used_on_rhs_after_compound_lhs = [&](const CExpression& root) {
+                      bool found = false;
+                      std::function<void(const CExpression&)> walk = [&](const CExpression& e) {
+                        if (found) return;
+                        if (e.Kind() == CExpressionKind::kBinaryExpression) {
+                          const auto& b = static_cast<const BinaryExpression&>(e);
+                          if (b.Lhs().Kind() == CExpressionKind::kBinaryExpression &&
+                              CountExprUses(b.Rhs(), var) > 0) {
+                            found = true;
+                            return;
+                          }
+                          walk(b.Lhs());
+                          walk(b.Rhs());
+                        } else if (e.Kind() == CExpressionKind::kUnaryExpression) {
+                          walk(static_cast<const UnaryExpression&>(e).Operand());
+                        } else if (e.Kind() == CExpressionKind::kCastExpression) {
+                          walk(static_cast<const CastExpression&>(e).Operand());
+                        }
+                      };
+                      walk(root);
+                      return found;
+                    };
                     bool can_fold_ret =
                         is_direct_id ||
                         (uses_in_ret == 1 && !IsComparisonExpr(assign.Rhs()) &&
+                         !(is_compound_binary_expr(assign.Rhs()) &&
+                           used_on_rhs_after_compound_lhs(*ret_stmt.ReturnValue())) &&
                          (IsPureExpr(assign.Rhs()) || (IsCallOrWrappedCall(assign.Rhs()) &&
                                                        IsPureExpr(*ret_stmt.ReturnValue()) &&
                                                        !HasMemoryDeref(*ret_stmt.ReturnValue()))) &&
