@@ -6381,5 +6381,32 @@ s32 LoopWithHeaderCounterStealingAndExitUse(s32* arr, s32 limit) {
 )");
 }
 
+TEST_F(RoundTripTest, CrossJumpedNestedBranchesWithSharedStoreTail) {
+  AssertRoundTripBitExact("CrossJumpedNestedBranchesWithSharedStoreTail", R"(
+typedef struct {
+    s32 mode;
+    s32 submode;
+    s32 timer;
+    s32 value;
+    s32 dirty;
+} ControllerState;
+
+s32 CrossJumpedNestedBranchesWithSharedStoreTail(ControllerState* st, s32 step) {
+    if (st->mode == 1) {
+        if (st->submode == 0) {
+            st->value += step;
+            st->dirty = 1;
+        } else {
+            st->timer += 1;
+        }
+    } else if (st->mode == 2) {
+        st->value -= step;
+        st->dirty = 1;
+    }
+    return st->value;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

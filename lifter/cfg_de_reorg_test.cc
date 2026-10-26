@@ -210,6 +210,43 @@ TEST(CfgDeReorgTest, ReconcilesSpeculativeLoopCounterCompensation) {
   EXPECT_TRUE(loop_exit->instructions.front().IsNop());
 }
 
+TEST(CfgDeReorgTest, DuplicatesCrossJumpedTailIntoJumpPredecessor) {
+  // Post-reload cross-jumping (`jump.c:find_cross_jump` lines 1921-2034):
+  // 0x80000000: beq   $a0, $zero, 0x80000018 (0x10800005 -> else arm at 0x80000018)
+  // 0x80000004: nop                          (0x00000000)
+  // 0x80000008: addiu $v0, $a1, 1            (0x24A20001) -- then arm
+  // 0x8000000C: j     0x8000001C             (0x08000007 -> shared tail B_tail at 0x8000001C)
+  // 0x80000010: nop                          (0x00000000)
+  // 0x80000014: nop                          (0x00000000)
+  // 0x80000018: addiu $v0, $a1, 2            (0x24A20002) -- else arm (falls through to B_tail)
+  // 0x8000001C: sw    $v0, 0($a2)            (0xAC820000) -- B_tail: shared store + jump to merge
+  // 0x80000020: j     0x8000002C             (0x0800000B -> B_merge at 0x8000002C)
+  // 0x80000024: nop                          (0x00000000)
+  // 0x80000028: nop                          (0x00000000)
+  // 0x8000002C: jr    $ra                    (0x03E00008) -- B_merge
+  // 0x80000030: nop                          (0x00000000)
+  std::vector<uint32_t> words = {
+      0x10800005, 0x00000000, 0x24A20001, 0x08000007, 0x00000000, 0x00000000, 0x24A20002,
+      0xAC820000, 0x0800000B, 0x00000000, 0x00000000, 0x03E00008, 0x00000000,
+  };
+  auto insts = DecodeSequence(words, 0x80000000);
+  ASSERT_TRUE(insts.ok());
+  auto cfg_or = ControlFlowGraph::Build(*insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const auto* then_blk = cfg.FindBlockByVram(0x80000008);
+  const auto* merge_blk = cfg.FindBlockByVram(0x8000002C);
+  ASSERT_NE(then_blk, nullptr);
+  ASSERT_NE(merge_blk, nullptr);
+  ASSERT_EQ(then_blk->successors.size(), 1u);
+  EXPECT_EQ(then_blk->successors[0], merge_blk->id);
+  ASSERT_GE(then_blk->instructions.size(), 4u);
+  EXPECT_EQ(then_blk->instructions[1].opcode, Opcode::kSw);
+}
+
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
   ASSERT_EQ(pipeline.PassCount(), 5u);

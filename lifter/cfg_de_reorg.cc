@@ -826,9 +826,116 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
   return changed;
 }
 
-bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* /*cfg*/, CfgAnalysisManager* /*analyses*/) {
-  // Architectural pass hook for post-reload cross-jump tail duplication (`jump.c:find_cross_jump`).
-  return false;
+bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) {
+  if (cfg == nullptr || cfg->Blocks().empty()) {
+    return false;
+  }
+  CfgAnalysisManager local_analyses(cfg);
+  if (analyses == nullptr) {
+    analyses = &local_analyses;
+  } else {
+    analyses->SetCfg(cfg);
+  }
+  const LoopInfo& loop_info = analyses->GetLoopInfo();
+  const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
+  absl::flat_hash_set<uint32_t> jump_table_target_vrams;
+  for (const auto& jt : cfg->JumpTables()) {
+    if (jt.default_target_vram != 0) {
+      jump_table_target_vrams.insert(jt.default_target_vram);
+    }
+    for (const auto& entry : jt.entries) {
+      jump_table_target_vrams.insert(entry.target_vram);
+    }
+  }
+
+  bool changed = false;
+  for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
+    BasicBlock& tail_blk = cfg->MutableBlocks()[b];
+    const Loop* tail_loop = loop_info.GetLoopFor(tail_blk.id);
+    if (tail_blk.id == cfg->EntryBlockId() || tail_blk.predecessors.size() < 2 ||
+        tail_blk.successors.size() != 1 || tail_blk.HasSwitch() ||
+        jump_table_target_vrams.contains(tail_blk.start_vram) ||
+        (tail_loop != nullptr && tail_loop->header == tail_blk.id)) {
+      continue;
+    }
+    const Instruction* tail_term = tail_blk.Terminator();
+    if (tail_term == nullptr || tail_term->opcode != Opcode::kJ ||
+        tail_term != &tail_blk.instructions[tail_blk.instructions.size() - 2] ||
+        !tail_blk.instructions.back().IsNop() ||
+        jump_table_bounds_vrams.contains(tail_term->vram)) {
+      continue;
+    }
+
+    const size_t body_count = tail_blk.instructions.size() - 2;
+    if (body_count == 0 || body_count > 6) {
+      continue;
+    }
+    bool valid_tail_body = true;
+    bool has_memory_or_call_effect = false;
+    for (size_t i = 0; i < body_count; ++i) {
+      const Instruction& inst = tail_blk.instructions[i];
+      if (inst.IsBranch() || inst.IsJump()) {
+        valid_tail_body = false;
+        break;
+      }
+      if (inst.IsCall() || inst.IsStore()) {
+        has_memory_or_call_effect = true;
+      }
+    }
+    if (!valid_tail_body || !has_memory_or_call_effect) {
+      continue;
+    }
+
+    const uint32_t merge_block_id = tail_blk.successors[0];
+    if (merge_block_id == tail_blk.id) {
+      continue;
+    }
+    if (loop_info.GetLoopFor(merge_block_id) != tail_loop) {
+      continue;
+    }
+
+    std::vector<uint32_t> jump_preds;
+    for (uint32_t pred_id : tail_blk.predecessors) {
+      if (pred_id == tail_blk.id || loop_info.GetLoopFor(pred_id) != tail_loop) {
+        continue;
+      }
+      const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+      if (pred_blk == nullptr || pred_blk->successors.size() != 1 ||
+          pred_blk->successors[0] != tail_blk.id || pred_blk->instructions.size() < 2) {
+        continue;
+      }
+      const Instruction* pred_term = pred_blk->Terminator();
+      if (pred_term != nullptr && pred_term->opcode == Opcode::kJ &&
+          pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
+          pred_blk->instructions.back().IsNop()) {
+        jump_preds.push_back(pred_id);
+      }
+    }
+
+    if (jump_preds.empty()) {
+      continue;
+    }
+
+    const uint32_t new_target_field = tail_term->target;
+    const std::vector<Instruction> tail_body_insts(
+        tail_blk.instructions.begin(),
+        tail_blk.instructions.begin() + static_cast<ptrdiff_t>(body_count));
+    for (uint32_t pred_id : jump_preds) {
+      BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
+      if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
+        continue;
+      }
+      auto insert_pos = pred_blk->instructions.end() - 2;
+      pred_blk->instructions.insert(insert_pos, tail_body_insts.begin(), tail_body_insts.end());
+      pred_blk->instructions[pred_blk->instructions.size() - 2].target = new_target_field;
+      RetargetBranchEdge(cfg, pred_id, tail_blk.id, merge_block_id);
+      changed = true;
+    }
+  }
+  if (changed) {
+    analyses->InvalidateAll();
+  }
+  return changed;
 }
 
 CfgPassPipeline CfgDeReorg::BuildDefaultPipeline() {
