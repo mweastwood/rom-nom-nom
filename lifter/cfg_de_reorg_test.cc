@@ -175,13 +175,49 @@ TEST(CfgDeReorgTest, SinksTerminatorConflictingDelaySlotIntoShortCircuitFallthro
   EXPECT_EQ(fallthrough->instructions[1].opcode, Opcode::kBeq);
 }
 
+TEST(CfgDeReorgTest, ReconcilesSpeculativeLoopCounterCompensation) {
+  // Speculative loop-counter compensation (`reorg.c:fill_slots_from_thread` lines 3527-3585):
+  // 0x80000000: bne   $a1, $zero, 0x80000008 (0x14A00001 -> B_head at 0x80000008)
+  // 0x80000004: addiu $v0, $zero, 0          (0x24020000)
+  // 0x80000008: addiu $v0, $v0, 1            (0x24420001) -- B_head
+  // 0x8000000C: lw    $v1, 0($a0)            (0x8C830000) -- B_body
+  // 0x80000010: bne   $v0, $a2, 0x8000000C   (0x1446FFFE -> B_body)
+  // 0x80000014: addiu $v0, $v0, 1            (0x24420001) -- stolen from B_head
+  // 0x80000018: addiu $v0, $v0, -1           (0x2442FFFF) -- compensating adjustment on exit
+  // 0x8000001C: jr    $ra                    (0x03E00008)
+  // 0x80000020: nop                          (0x00000000)
+  std::vector<uint32_t> loop_words = {
+      0x14A00001, 0x24020000, 0x24420001, 0x8C830000, 0x1446FFFE,
+      0x24420001, 0x2442FFFF, 0x03E00008, 0x00000000,
+  };
+  auto loop_insts = DecodeSequence(loop_words, 0x80000000);
+  ASSERT_TRUE(loop_insts.ok());
+  auto loop_cfg_or = ControlFlowGraph::Build(*loop_insts);
+  ASSERT_TRUE(loop_cfg_or.ok());
+  ControlFlowGraph loop_cfg = *loop_cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&loop_cfg);
+
+  const auto* loop_head = loop_cfg.GetBlock(1);
+  const auto* loop_latch = loop_cfg.GetBlock(2);
+  const auto* loop_exit = loop_cfg.GetBlock(3);
+  ASSERT_NE(loop_head, nullptr);
+  ASSERT_NE(loop_latch, nullptr);
+  ASSERT_NE(loop_exit, nullptr);
+  ASSERT_NE(loop_latch->Terminator(), nullptr);
+  EXPECT_TRUE(loop_latch->Terminator()->IsBranchLikely());
+  EXPECT_FALSE(loop_latch->instructions.back().IsNop());
+  EXPECT_TRUE(loop_exit->instructions.front().IsNop());
+}
+
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
-  ASSERT_EQ(pipeline.PassCount(), 4u);
+  ASSERT_EQ(pipeline.PassCount(), 5u);
   EXPECT_EQ(pipeline.Passes()[0]->Name(), "SimpleDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[1]->Name(), "RelaxDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[2]->Name(), "EagerThreadDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[3]->Name(), "CrossJumpTailDuplicatorPass");
+  EXPECT_EQ(pipeline.Passes()[1]->Name(), "TargetHeaderDelaySlotReconcilerPass");
+  EXPECT_EQ(pipeline.Passes()[2]->Name(), "RelaxDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[3]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[4]->Name(), "CrossJumpTailDuplicatorPass");
 }
 
 }  // namespace

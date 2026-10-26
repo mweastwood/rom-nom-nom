@@ -58,6 +58,29 @@ Opcode ToNonLikelyBranchOpcode(Opcode op) {
   }
 }
 
+Opcode ToLikelyBranchOpcode(Opcode op) {
+  switch (op) {
+    case Opcode::kBeq:
+      return Opcode::kBeql;
+    case Opcode::kBne:
+      return Opcode::kBnel;
+    case Opcode::kBlez:
+      return Opcode::kBlezl;
+    case Opcode::kBgtz:
+      return Opcode::kBgtzl;
+    case Opcode::kBltz:
+      return Opcode::kBltzl;
+    case Opcode::kBgez:
+      return Opcode::kBgezl;
+    case Opcode::kBc1t:
+      return Opcode::kBc1tl;
+    case Opcode::kBc1f:
+      return Opcode::kBc1fl;
+    default:
+      return op;
+  }
+}
+
 bool SameDelayInstructionEffect(const Instruction& a, const Instruction& b) {
   return !a.IsNop() && a.opcode == b.opcode && a.rs == b.rs && a.rt == b.rt && a.rd == b.rd &&
          a.immediate == b.immediate && a.fs == b.fs && a.ft == b.ft && a.fd == b.fd &&
@@ -78,12 +101,14 @@ void RetargetBranchEdge(ControlFlowGraph* cfg, uint32_t from_block_id, uint32_t 
     }
   }
   for (auto& edge : from_blk->outgoing_edges) {
-    if (edge.type == EdgeType::kBranch && edge.to_block_id == old_to_block_id) {
+    if ((edge.type == EdgeType::kBranch || edge.type == EdgeType::kJump) &&
+        edge.to_block_id == old_to_block_id) {
       edge.to_block_id = new_to_block_id;
     }
   }
   for (auto& edge : cfg->MutableEdges()) {
-    if (edge.from_block_id == from_block_id && edge.type == EdgeType::kBranch &&
+    if (edge.from_block_id == from_block_id &&
+        (edge.type == EdgeType::kBranch || edge.type == EdgeType::kJump) &&
         edge.to_block_id == old_to_block_id) {
       edge.to_block_id = new_to_block_id;
     }
@@ -95,6 +120,31 @@ void RetargetBranchEdge(ControlFlowGraph* cfg, uint32_t from_block_id, uint32_t 
       new_to_blk->predecessors.end()) {
     new_to_blk->predecessors.push_back(from_block_id);
   }
+}
+
+bool IsInverseAdjustmentInstruction(const Instruction& delay_inst, const Instruction& comp_inst) {
+  if (delay_inst.IsNop() || comp_inst.IsNop()) {
+    return false;
+  }
+  if ((delay_inst.opcode == Opcode::kAddiu || delay_inst.opcode == Opcode::kAddi ||
+       delay_inst.opcode == Opcode::kDaddiu || delay_inst.opcode == Opcode::kDaddi) &&
+      comp_inst.opcode == delay_inst.opcode && delay_inst.rs.has_value() &&
+      delay_inst.rt == delay_inst.rs && comp_inst.rs == delay_inst.rs &&
+      comp_inst.rt == delay_inst.rt && delay_inst.immediate != 0 &&
+      static_cast<int16_t>(comp_inst.immediate) == -static_cast<int16_t>(delay_inst.immediate)) {
+    return true;
+  }
+  auto is_add_sub_pair = [](Opcode a, Opcode b) {
+    return (a == Opcode::kAddu && b == Opcode::kSubu) ||
+           (a == Opcode::kSubu && b == Opcode::kAddu) || (a == Opcode::kAdd && b == Opcode::kSub) ||
+           (a == Opcode::kSub && b == Opcode::kAdd) ||
+           (a == Opcode::kDaddu && b == Opcode::kDsubu) ||
+           (a == Opcode::kDsubu && b == Opcode::kDaddu);
+  };
+  return is_add_sub_pair(delay_inst.opcode, comp_inst.opcode) && delay_inst.rd.has_value() &&
+         delay_inst.rs == delay_inst.rd && delay_inst.rt != delay_inst.rd &&
+         comp_inst.rd == delay_inst.rd && comp_inst.rs == delay_inst.rs &&
+         comp_inst.rt == delay_inst.rt;
 }
 
 bool IsFpuCompareOpcode(Opcode op) {
@@ -431,6 +481,94 @@ bool SimpleDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManag
   return changed;
 }
 
+bool TargetHeaderDelaySlotReconcilerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) {
+  if (cfg == nullptr || cfg->Blocks().empty()) {
+    return false;
+  }
+  CfgAnalysisManager local_analyses(cfg);
+  if (analyses == nullptr) {
+    analyses = &local_analyses;
+  } else {
+    analyses->SetCfg(cfg);
+  }
+  const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
+
+  bool changed = false;
+  for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
+    BasicBlock& block = cfg->MutableBlocks()[b];
+    if (block.instructions.size() < 2) {
+      continue;
+    }
+    const Instruction* term_ptr = block.Terminator();
+    if (term_ptr == nullptr || term_ptr != &block.instructions[block.instructions.size() - 2]) {
+      continue;
+    }
+    const Instruction term = *term_ptr;
+    const Instruction delay_inst = block.instructions.back();
+    if (delay_inst.IsNop() || jump_table_bounds_vrams.contains(term.vram)) {
+      continue;
+    }
+
+    // Speculative loop-counter compensation (`reorg.c:fill_slots_from_thread` lines 3527-3585):
+    // A non-likely conditional branch `B` targeting `B_body` has delay slot `D` (`r = r +/- C`)
+    // matching the 1-instruction fallthrough predecessor `B_head` of `B_body`, and the first
+    // instruction of `B`'s fallthrough block `B_ft` is the exact inverse adjustment (`r = r -/+
+    // C`).
+    if (term.IsBranch() && !term.IsBranchLikely() && !term.IsUnconditionalBranch() &&
+        block.successors.size() == 2) {
+      uint32_t succ_taken = 0;
+      uint32_t succ_fallthrough = 0;
+      for (const auto& edge : block.outgoing_edges) {
+        if (edge.type == EdgeType::kBranch) {
+          succ_taken = edge.to_block_id;
+        } else if (edge.type == EdgeType::kFallthrough) {
+          succ_fallthrough = edge.to_block_id;
+        }
+      }
+      if (succ_taken == 0 && succ_fallthrough == 0) {
+        succ_taken = block.successors[0];
+        succ_fallthrough = block.successors[1];
+      }
+      const BasicBlock* taken_blk = cfg->GetBlock(succ_taken);
+      BasicBlock* ft_blk = cfg->GetMutableBlock(succ_fallthrough);
+      if (taken_blk != nullptr && ft_blk != nullptr && succ_taken != succ_fallthrough &&
+          taken_blk->start_vram <= block.start_vram && ft_blk->predecessors.size() == 1 &&
+          ft_blk->predecessors[0] == block.id && !ft_blk->instructions.empty() &&
+          IsInverseAdjustmentInstruction(delay_inst, ft_blk->instructions.front())) {
+        std::optional<uint32_t> head_block_id;
+        for (uint32_t pred_id : taken_blk->predecessors) {
+          if (pred_id == block.id) continue;
+          const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+          if (pred_blk != nullptr && !pred_blk->instructions.empty() &&
+              pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
+              pred_blk->end_vram + 4 == taken_blk->start_vram &&
+              SameDelayInstructionEffect(delay_inst, pred_blk->instructions.back())) {
+            head_block_id = pred_id;
+            break;
+          }
+        }
+        if (head_block_id.has_value()) {
+          // Convert the speculative non-likely branch + fallthrough inverse compensation into an
+          // annulled branch-likely (`ToLikelyBranchOpcode`) and nop out the compensating
+          // instruction on fallthrough. This preserves the loop header topology for `do-while`
+          // loops (allowing `AstConverter::PreScanPeeledLoopRotations` to peel the header
+          // rotation cleanly) while allowing `RelaxDelaySlotUnschedulerPass` to retarget
+          // non-latch branches!
+          block.instructions[block.instructions.size() - 2].opcode =
+              ToLikelyBranchOpcode(term.opcode);
+          ft_blk->instructions.front() = MakeNopInstruction(ft_blk->instructions.front().vram);
+          changed = true;
+          continue;
+        }
+      }
+    }
+  }
+  if (changed) {
+    analyses->InvalidateAll();
+  }
+  return changed;
+}
+
 bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) {
   if (cfg == nullptr || cfg->Blocks().empty()) {
     return false;
@@ -696,6 +834,7 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* /*cfg*/, CfgAnalysisMana
 CfgPassPipeline CfgDeReorg::BuildDefaultPipeline() {
   CfgPassPipeline pipeline;
   pipeline.AddPass(std::make_unique<SimpleDelaySlotUnschedulerPass>());
+  pipeline.AddPass(std::make_unique<TargetHeaderDelaySlotReconcilerPass>());
   pipeline.AddPass(std::make_unique<RelaxDelaySlotUnschedulerPass>());
   pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
   pipeline.AddPass(std::make_unique<CrossJumpTailDuplicatorPass>());

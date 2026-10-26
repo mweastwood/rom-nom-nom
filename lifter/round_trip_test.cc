@@ -6363,5 +6363,23 @@ f32 ZeroFrameLeafBitcastFloatFromCallerHomedGprParams(
 )");
 }
 
+TEST_F(RoundTripTest, LoopWithHeaderCounterStealingAndExitUse) {
+  AssertRoundTripBitExact("LoopWithHeaderCounterStealingAndExitUse", R"(
+s32 LoopWithHeaderCounterStealingAndExitUse(s32* arr, s32 limit) {
+    s32 count = 0;
+    while (1) {
+        count++;
+        if (arr[count] == limit) {
+            break;
+        }
+        if (arr[count] < 0) {
+            return -1;
+        }
+    }
+    return count;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

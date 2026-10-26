@@ -28,6 +28,15 @@ class EagerThreadDelaySlotUnschedulerPass : public CfgPass {
   bool Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) override;
 };
 
+// Inverse of GCC 2.7.2 `reorg.c:fill_slots_from_thread` (`own_target = 0`) and
+// `fill_simple_delay_slots` target-header stealing (`target_label + 4` redirection) and
+// speculative loop-counter compensation (`reorg.c:3527-3585`).
+class TargetHeaderDelaySlotReconcilerPass : public CfgPass {
+ public:
+  std::string_view Name() const override { return "TargetHeaderDelaySlotReconcilerPass"; }
+  bool Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) override;
+};
+
 // Inverse of GCC 2.7.2 `reorg.c:relax_delay_slots`.
 // Reconnects branches whose delay slot stole the first instruction of a shared target (`target +
 // 4`) back to the original single-instruction header block.
