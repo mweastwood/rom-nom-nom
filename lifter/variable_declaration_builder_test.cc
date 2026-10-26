@@ -868,10 +868,11 @@ TEST(VariableDeclarationBuilderTest,
       0xC4940004,  // 0C: lwc1  $f20, 4($a0)
       0x4600A000,  // 10: add.s $f0, $f20, $f0
       0xE4800008,  // 14: swc1  $f0, 8($a0)
-      0x24020001,  // 18: addiu $v0, $zero, 1
-      0xC7B40008,  // 1C: lwc1  $f20, 8($sp)
-      0x03E00008,  // 20: jr    $ra
-      0x27BD0010,  // 24: addiu $sp, $sp, 16
+      0xE480000C,  // 18: swc1  $f0, 12($a0)
+      0x24020001,  // 1C: addiu $v0, $zero, 1
+      0xC7B40008,  // 20: lwc1  $f20, 8($sp)
+      0x03E00008,  // 24: jr    $ra
+      0x27BD0010,  // 28: addiu $sp, $sp, 16
   };
   auto fp_leaf_cfg = *ControlFlowGraph::Build(*DecodeSequence(fp_leaf_words, 0x80001000));
   DominatorTree fp_leaf_dom = DominatorTree::Compute(fp_leaf_cfg);

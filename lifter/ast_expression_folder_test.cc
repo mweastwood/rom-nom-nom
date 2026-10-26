@@ -1266,5 +1266,71 @@ TEST(AstExpressionFolderTest, MayAliasDisambiguatesStackGlobalsAndDistinctStruct
   EXPECT_TRUE(SingleUseExpressionFolderPass::MayAlias(*ptr_off_0, *ptr_off_2_u16));
 }
 
+TEST(AstExpressionFolderTest,
+     FoldsAcrossArbitraryIndependentStatementsAndDynamicChildBlockVariables) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // 1. Fold a load temporary across 6 independent intermediate assignments into a call:
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t0"),
+                              CExpression::Unary("*(s32*)", CExpression::Identifier("arg0")))));
+  for (int idx = 1; idx <= 6; ++idx) {
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("temp_s" + std::to_string(idx)),
+                                CExpression::Integer(idx * 10))));
+  }
+  {
+    std::vector<std::unique_ptr<CExpression>> call_args;
+    call_args.push_back(CExpression::Identifier("temp_t0"));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("ConsumeLoadedWord"), std::move(call_args))));
+  }
+
+  // 2. Fold an arbitrarily scheduled 5-load accumulate sequence without specialized peepholes:
+  for (int idx = 0; idx < 5; ++idx) {
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_t" + std::to_string(idx)),
+        CExpression::Unary("*(s32*)", CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                          CExpression::Integer((idx + 1) * 4))))));
+  }
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Binary("+", CExpression::Identifier("temp_t0"),
+                                                  CExpression::Identifier("temp_t1")))));
+  for (int idx = 2; idx < 5; ++idx) {
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("v0"),
+        CExpression::Binary("+", CExpression::Identifier("v0"),
+                            CExpression::Identifier("temp_t" + std::to_string(idx))))));
+  }
+
+  // 3. Fold a dynamically discovered split-web variable inside a child `if` block that is dead
+  // after:
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0_w99"),
+      CExpression::Binary("+", CExpression::Identifier("v0"), CExpression::Integer(7)))));
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s32*)", CExpression::Identifier("arg2")),
+                              CExpression::Identifier("temp_t0_w99"))));
+  body->AddStatement(CStatement::If(CExpression::Identifier("arg3"), std::move(then_branch)));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, HasSubstr("ConsumeLoadedWord(*(s32*)arg0);"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t0")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t1")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t2")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t3")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t4")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t0_w99")));
+  EXPECT_THAT(code,
+              HasSubstr("v0 = ((((*(s32*)(arg1 + 4) + *(s32*)(arg1 + 8)) + *(s32*)(arg1 + 12)) "
+                        "+ *(s32*)(arg1 + 16)) + *(s32*)(arg1 + 20));"));
+  EXPECT_THAT(code, HasSubstr("*(s32*)arg2 = (v0 + 7);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
