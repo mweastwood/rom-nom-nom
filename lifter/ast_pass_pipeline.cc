@@ -82,6 +82,7 @@ constexpr AstPass kParameterAndFloatCallCoalescingPasses[] = {
 constexpr AstPass kPostEarlyReturnPasses[] = {
     {.name = "SimplifyDecoupledDelaySlotEarlyReturns",
      .run = &RunSimplifyDecoupledDelaySlotEarlyReturns},
+    {.name = "InlineCrossJumpedCallTails", .run = &RunInlineCrossJumpedCallTails},
     {.name = "SinkCommonBranchTailArgAssignments", .run = &RunSinkCommonBranchTailArgAssignments},
     {.name = "SimplifyShiftAddMultiplication", .run = &RunSimplifyShiftAddMultiplication},
     {.name = "SimplifyReciprocalDivisionAndUnsignedFloatConversions",

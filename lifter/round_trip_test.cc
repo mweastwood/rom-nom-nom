@@ -6057,5 +6057,48 @@ s32 ConsolidatedPipelineCoalescesParamAndSinksSharedReturnTail(s32 base, s32 mod
 )");
 }
 
+TEST_F(RoundTripTest, SwitchWithMergedCasesAndCrossJumpedNestedIfCallTail) {
+  AssertRoundTripBitExact("SwitchWithMergedCasesAndCrossJumpedNestedIfCallTail", R"(
+extern u8 check_slot_active(u8 slot);
+extern void clear_slot_entry(u8 slot);
+extern void reset_all_slots(void);
+extern void dispatch_slot_event(s32 mode, s32 code);
+extern u8 g_active_mode;
+extern u8 g_active_slot;
+extern u16 g_slot_flags;
+
+void SwitchWithMergedCasesAndCrossJumpedNestedIfCallTail(void) {
+    switch (g_active_mode) {
+    case 0:
+        if (check_slot_active(g_active_slot) == 0) {
+            dispatch_slot_event(0, 10);
+        } else {
+            dispatch_slot_event(0, 429);
+        }
+        break;
+    case 1:
+        clear_slot_entry(g_active_slot);
+        g_slot_flags = 0;
+        reset_all_slots();
+        break;
+    case 2:
+        if (check_slot_active(g_active_slot) != 0) {
+            dispatch_slot_event(0, 429);
+        }
+        break;
+    case 3:
+        if (check_slot_active(g_active_slot) != 0) {
+            dispatch_slot_event(0, 429);
+        }
+        break;
+    default:
+        g_slot_flags = 0;
+        g_active_mode = 0;
+        break;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

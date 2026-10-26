@@ -914,59 +914,76 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
   };
 
   std::vector<LabelSite> candidates;
-  std::function<void(CompoundStatement*, bool)> collect_labels = [&](CompoundStatement* comp,
-                                                                     bool is_root) {
-    if (comp == nullptr) return;
-    auto& stmts = comp->MutableStatements();
-    for (size_t i = 0; i < stmts.size(); ++i) {
-      CStatement* s = stmts[i].get();
-      if (s == nullptr) continue;
-      if (!is_root && s->Kind() == CStatementKind::kLabelStatement) {
-        std::string lbl(static_cast<const LabelStatement&>(*s).Label());
-        size_t end_idx = stmts.size();
-        bool ends_with_break = false;
-        if (end_idx > i + 1 && stmts[end_idx - 1]->Kind() == CStatementKind::kBreakStatement) {
-          --end_idx;
-          ends_with_break = true;
-        }
-        size_t tail_count = end_idx - (i + 1);
-        if (tail_count >= 1 && tail_count <= 3) {
-          bool has_call = false;
-          bool all_valid = true;
-          std::vector<std::unique_ptr<CStatement>> tail;
-          for (size_t k = i + 1; k < end_idx; ++k) {
-            if (!is_simple_call_or_assign_stmt(*stmts[k], &has_call)) {
-              all_valid = false;
-              break;
+  std::function<void(CompoundStatement*, bool, bool)> collect_labels =
+      [&](CompoundStatement* comp, bool is_root, bool parent_ends_with_break) {
+        if (comp == nullptr) return;
+        auto& stmts = comp->MutableStatements();
+        for (size_t i = 0; i < stmts.size(); ++i) {
+          CStatement* s = stmts[i].get();
+          if (s == nullptr) continue;
+          if (!is_root && s->Kind() == CStatementKind::kLabelStatement) {
+            std::string lbl(static_cast<const LabelStatement&>(*s).Label());
+            size_t end_idx = stmts.size();
+            bool ends_with_break = parent_ends_with_break;
+            if (end_idx > i + 1 && stmts[end_idx - 1]->Kind() == CStatementKind::kBreakStatement) {
+              --end_idx;
+              ends_with_break = true;
             }
-            tail.push_back(stmts[k]->Clone());
+            size_t tail_count = end_idx - (i + 1);
+            if (tail_count >= 1 && tail_count <= 3) {
+              bool has_call = false;
+              bool all_valid = true;
+              std::vector<std::unique_ptr<CStatement>> tail;
+              for (size_t k = i + 1; k < end_idx; ++k) {
+                if (!is_simple_call_or_assign_stmt(*stmts[k], &has_call)) {
+                  all_valid = false;
+                  break;
+                }
+                tail.push_back(stmts[k]->Clone());
+              }
+              if (all_valid && has_call) {
+                candidates.push_back(LabelSite{.comp = comp,
+                                               .label_name = std::move(lbl),
+                                               .tail_stmts = std::move(tail),
+                                               .ends_with_break = ends_with_break});
+              }
+            }
+          } else if (s->Kind() == CStatementKind::kIfStatement) {
+            bool branch_ends_with_break =
+                (i + 1 == stmts.size() && (parent_ends_with_break || is_root)) ||
+                (i + 2 == stmts.size() &&
+                 (stmts[i + 1]->Kind() == CStatementKind::kBreakStatement ||
+                  stmts[i + 1]->Kind() == CStatementKind::kReturnStatement));
+            auto& ifs = static_cast<IfStatement&>(*s);
+            if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              collect_labels(static_cast<CompoundStatement*>(ifs.MutableThenBranch()), false,
+                             branch_ends_with_break);
+            }
+            if (ifs.MutableElseBranch() != nullptr &&
+                ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              collect_labels(static_cast<CompoundStatement*>(ifs.MutableElseBranch()), false,
+                             branch_ends_with_break);
+            }
+          } else if (s->Kind() == CStatementKind::kSwitchStatement) {
+            for (auto& sc : static_cast<SwitchStatement&>(*s).MutableCases()) {
+              if (sc.body != nullptr) {
+                bool sc_ends_with_break =
+                    !sc.body->Statements().empty() &&
+                    sc.body->Statements().back()->Kind() == CStatementKind::kBreakStatement;
+                collect_labels(sc.body.get(), false, sc_ends_with_break);
+              }
+            }
+          } else if (s->Kind() == CStatementKind::kCompoundStatement) {
+            bool sub_ends_with_break =
+                (i + 1 == stmts.size() && (parent_ends_with_break || is_root)) ||
+                (i + 2 == stmts.size() &&
+                 (stmts[i + 1]->Kind() == CStatementKind::kBreakStatement ||
+                  stmts[i + 1]->Kind() == CStatementKind::kReturnStatement));
+            collect_labels(static_cast<CompoundStatement*>(s), false, sub_ends_with_break);
           }
-          if (all_valid && has_call) {
-            candidates.push_back(LabelSite{.comp = comp,
-                                           .label_name = std::move(lbl),
-                                           .tail_stmts = std::move(tail),
-                                           .ends_with_break = ends_with_break});
-          }
         }
-      } else if (s->Kind() == CStatementKind::kIfStatement) {
-        auto& ifs = static_cast<IfStatement&>(*s);
-        if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
-          collect_labels(static_cast<CompoundStatement*>(ifs.MutableThenBranch()), false);
-        }
-        if (ifs.MutableElseBranch() != nullptr &&
-            ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
-          collect_labels(static_cast<CompoundStatement*>(ifs.MutableElseBranch()), false);
-        }
-      } else if (s->Kind() == CStatementKind::kSwitchStatement) {
-        for (auto& sc : static_cast<SwitchStatement&>(*s).MutableCases()) {
-          if (sc.body != nullptr) collect_labels(sc.body.get(), false);
-        }
-      } else if (s->Kind() == CStatementKind::kCompoundStatement) {
-        collect_labels(static_cast<CompoundStatement*>(s), false);
-      }
-    }
-  };
-  collect_labels(root_body, true);
+      };
+  collect_labels(root_body, true, true);
 
   for (const auto& site : candidates) {
     int total_gotos = 0;
@@ -1068,6 +1085,146 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body) {
       remove_label(root_body);
     }
   }
+
+  // Collapse alias switch cases (`case X: block_N: ...` and `case Y: goto block_N;`) into
+  // shared `case X: case Y:` labels and ensure case arms do not fall through into a backward goto.
+  std::function<void(CompoundStatement*)> merge_alias_switch_cases = [&](CompoundStatement* comp) {
+    if (comp == nullptr) return;
+    for (auto& stmt_ptr : comp->MutableStatements()) {
+      if (stmt_ptr == nullptr) continue;
+      ForEachSubCompoundStatement(stmt_ptr.get(), merge_alias_switch_cases);
+      if (stmt_ptr->Kind() != CStatementKind::kSwitchStatement) continue;
+      auto& sw = static_cast<SwitchStatement&>(*stmt_ptr);
+      auto& cases = sw.MutableCases();
+      for (size_t a = 0; a < cases.size(); ++a) {
+        if (cases[a].is_default || cases[a].body == nullptr) continue;
+        const auto& a_stmts = cases[a].body->Statements();
+        if (a_stmts.empty() || a_stmts[0]->Kind() != CStatementKind::kLabelStatement) continue;
+        std::string target_lbl(static_cast<const LabelStatement&>(*a_stmts[0]).Label());
+        for (size_t b = 0; b < cases.size();) {
+          if (b == a || cases[b].is_default || cases[b].body == nullptr) {
+            ++b;
+            continue;
+          }
+          const auto& b_stmts = cases[b].body->Statements();
+          bool is_pure_goto =
+              (b_stmts.size() == 1 && b_stmts[0]->Kind() == CStatementKind::kGotoStatement &&
+               static_cast<const GotoStatement&>(*b_stmts[0]).Label() == target_lbl) ||
+              (b_stmts.size() == 2 && b_stmts[0]->Kind() == CStatementKind::kGotoStatement &&
+               static_cast<const GotoStatement&>(*b_stmts[0]).Label() == target_lbl &&
+               b_stmts[1]->Kind() == CStatementKind::kBreakStatement);
+          if (!is_pure_goto) {
+            ++b;
+            continue;
+          }
+          if (b > 0 && b - 1 != a && cases[b - 1].body != nullptr &&
+              !cases[b - 1].body->Statements().empty()) {
+            CStatementKind prev_last = cases[b - 1].body->Statements().back()->Kind();
+            if (prev_last != CStatementKind::kBreakStatement &&
+                prev_last != CStatementKind::kReturnStatement &&
+                prev_last != CStatementKind::kGotoStatement &&
+                prev_last != CStatementKind::kContinueStatement) {
+              ++b;
+              continue;
+            }
+          }
+          if (b == a + 1 && !cases[a].body->Statements().empty()) {
+            CStatementKind a_last = cases[a].body->Statements().back()->Kind();
+            if (a_last != CStatementKind::kBreakStatement &&
+                a_last != CStatementKind::kReturnStatement &&
+                a_last != CStatementKind::kGotoStatement &&
+                a_last != CStatementKind::kContinueStatement) {
+              cases[a].body->AddStatement(CStatement::Break());
+            }
+          }
+          bool is_adjacent_case_value = false;
+          for (int64_t val_b : cases[b].case_values) {
+            for (int64_t val_a : cases[a].case_values) {
+              if (val_a - val_b == 1 || val_b - val_a == 1) {
+                is_adjacent_case_value = true;
+                break;
+              }
+            }
+            if (is_adjacent_case_value) break;
+          }
+          bool a_has_inner_labels = false;
+          for (size_t k = 1; k < cases[a].body->Statements().size(); ++k) {
+            if (StatementContainsLabel(*cases[a].body->Statements()[k])) {
+              a_has_inner_labels = true;
+              break;
+            }
+          }
+          if (is_adjacent_case_value && !a_has_inner_labels) {
+            auto cloned_body = std::make_unique<CompoundStatement>();
+            for (size_t k = 1; k < cases[a].body->Statements().size(); ++k) {
+              cloned_body->AddStatement(cases[a].body->Statements()[k]->Clone());
+            }
+            cases[b].body = std::move(cloned_body);
+            ++b;
+          } else if (!is_adjacent_case_value) {
+            for (int64_t val : cases[b].case_values) {
+              cases[a].case_values.push_back(val);
+            }
+            cases.erase(cases.begin() + b);
+            if (b < a) {
+              --a;
+            }
+          } else {
+            ++b;
+          }
+        }
+      }
+    }
+  };
+  merge_alias_switch_cases(root_body);
+
+  absl::flat_hash_set<std::string> remaining_gotos;
+  std::function<void(const CStatement&)> collect_remaining_gotos = [&](const CStatement& s) {
+    if (s.Kind() == CStatementKind::kGotoStatement) {
+      remaining_gotos.insert(std::string(static_cast<const GotoStatement&>(s).Label()));
+    } else if (s.Kind() == CStatementKind::kCompoundStatement) {
+      for (const auto& child : static_cast<const CompoundStatement&>(s).Statements()) {
+        if (child != nullptr) collect_remaining_gotos(*child);
+      }
+    } else if (s.Kind() == CStatementKind::kIfStatement) {
+      const auto& ifs = static_cast<const IfStatement&>(s);
+      collect_remaining_gotos(ifs.ThenBranch());
+      if (ifs.ElseBranch() != nullptr) collect_remaining_gotos(*ifs.ElseBranch());
+    } else if (s.Kind() == CStatementKind::kSwitchStatement) {
+      for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
+        if (sc.body != nullptr) collect_remaining_gotos(*sc.body);
+      }
+    } else if (s.Kind() == CStatementKind::kWhileStatement) {
+      collect_remaining_gotos(static_cast<const WhileStatement&>(s).Body());
+    } else if (s.Kind() == CStatementKind::kDoWhileStatement) {
+      collect_remaining_gotos(static_cast<const DoWhileStatement&>(s).Body());
+    } else if (s.Kind() == CStatementKind::kForStatement) {
+      collect_remaining_gotos(static_cast<const ForStatement&>(s).Body());
+    }
+  };
+  collect_remaining_gotos(*root_body);
+
+  std::function<void(CompoundStatement*)> prune_dead_case_labels = [&](CompoundStatement* comp) {
+    if (comp == nullptr) return;
+    auto& stmts = comp->MutableStatements();
+    for (size_t i = 0; i < stmts.size();) {
+      if (stmts[i] == nullptr) {
+        ++i;
+        continue;
+      }
+      if (stmts[i]->Kind() == CStatementKind::kLabelStatement) {
+        std::string lbl(static_cast<const LabelStatement&>(*stmts[i]).Label());
+        if (!remaining_gotos.contains(lbl)) {
+          stmts.erase(stmts.begin() + i);
+          continue;
+        }
+      } else {
+        ForEachSubCompoundStatement(stmts[i].get(), prune_dead_case_labels);
+      }
+      ++i;
+    }
+  };
+  prune_dead_case_labels(root_body);
 }
 
 void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,

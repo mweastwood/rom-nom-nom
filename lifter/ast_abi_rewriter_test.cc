@@ -631,5 +631,65 @@ TEST(AstAbiRewriterTest, SinkCommonBranchTailArgAssignmentsRewritesLoopExitAndCo
   EXPECT_THAT(emitted, Not(HasSubstr("block_exit:")));
 }
 
+TEST(AstAbiRewriterTest,
+     InlineCrossJumpedCallTailsMergesAliasSwitchCasesAndAppendsBreakOnNestedIfCallTail) {
+  CompoundStatement root;
+  std::vector<SwitchCase> cases;
+
+  SwitchCase case0;
+  case0.case_values = {0};
+  case0.body = std::make_unique<CompoundStatement>();
+  auto then0 = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> args_then0;
+  args_then0.push_back(CExpression::Integer(0));
+  args_then0.push_back(CExpression::Integer(0));
+  then0->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("func_8002F3F0"), std::move(args_then0))));
+  auto else0 = std::make_unique<CompoundStatement>();
+  else0->AddStatement(CStatement::Label("block_20"));
+  std::vector<std::unique_ptr<CExpression>> args_else0;
+  args_else0.push_back(CExpression::Integer(0));
+  args_else0.push_back(CExpression::Integer(429));
+  else0->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("func_8002F3F0"), std::move(args_else0))));
+  case0.body->AddStatement(
+      CStatement::If(CExpression::Identifier("c0"), std::move(then0), std::move(else0)));
+  case0.body->AddStatement(CStatement::Break());
+  cases.push_back(std::move(case0));
+
+  SwitchCase case2;
+  case2.case_values = {2};
+  case2.body = std::make_unique<CompoundStatement>();
+  case2.body->AddStatement(CStatement::Label("block_17"));
+  auto then2 = std::make_unique<CompoundStatement>();
+  then2->AddStatement(CStatement::Break());
+  case2.body->AddStatement(
+      CStatement::If(CExpression::Identifier("c2"), std::move(then2), nullptr));
+  case2.body->AddStatement(CStatement::Goto("block_20"));
+  cases.push_back(std::move(case2));
+
+  SwitchCase case3;
+  case3.case_values = {3};
+  case3.body = std::make_unique<CompoundStatement>();
+  case3.body->AddStatement(CStatement::Goto("block_17"));
+  case3.body->AddStatement(CStatement::Break());
+  cases.push_back(std::move(case3));
+
+  root.AddStatement(CStatement::Switch(CExpression::Identifier("sel"), std::move(cases)));
+  root.AddStatement(CStatement::Return());
+
+  InlineCrossJumpedCallTails(&root);
+
+  std::string emitted = root.ToString();
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_17")));
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_20")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_17:")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_20:")));
+  const auto& sw = static_cast<const SwitchStatement&>(*root.Statements()[0]);
+  ASSERT_EQ(sw.Cases().size(), 3u);
+  EXPECT_EQ(sw.Cases()[1].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
+  EXPECT_EQ(sw.Cases()[2].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
