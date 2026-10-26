@@ -6499,5 +6499,26 @@ s32 StoreFlagConditionalIncrementAndDecrementInLoop(s32* arr, s32 n, s32 target)
 )");
 }
 
+TEST_F(RoundTripTest, SparseSwitchBinaryDecisionTreeWithFiveCasesAndDefault) {
+  AssertRoundTripBitExact("SparseSwitchBinaryDecisionTreeWithFiveCasesAndDefault", R"(
+s32 SparseSwitchBinaryDecisionTreeWithFiveCasesAndDefault(s32 code, s32 base) {
+    switch (code) {
+        case 10:
+            return base + 1;
+        case 50:
+            return base + 5;
+        case 100:
+            return base + 10;
+        case 200:
+            return base + 20;
+        case 500:
+            return base + 50;
+        default:
+            return base - 1;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

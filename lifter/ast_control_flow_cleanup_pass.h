@@ -41,6 +41,10 @@ bool SynthesizeForLoopsInBlock(CompoundStatement* body);
 // order.
 bool SinkLoopInvariantAssignments(CompoundStatement* body);
 
+// Reconstructs sparse `switch (x)` statements from nested `IfStatement` binary-search decision
+// trees emitted by GCC 2.7.2 `stmt.c:emit_case_nodes` (`if (x == P) ... else if (x < P) ...`).
+bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body);
+
 // Concrete `AstPass` classes for post-conversion control-flow cleanup.
 class SwitchGotoCaseCollapserPass : public AstPass {
  public:
@@ -87,6 +91,12 @@ class ForLoopSynthesizerPass : public AstPass {
 class LoopInvariantSinkerPass : public AstPass {
  public:
   std::string_view Name() const override { return "LoopInvariantSinker"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class SparseSwitchDecisionTreePass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SparseSwitchDecisionTree"; }
   bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
 };
 

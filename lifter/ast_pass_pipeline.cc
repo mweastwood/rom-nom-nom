@@ -173,12 +173,14 @@ AstPassPipeline AstPassPipeline::BuildDefaultPipeline() {
   pipeline.AddPass(std::make_unique<UnassignedTrailingCallArgTrimmerPass>());
 
   // 6. Scratch-reused parameter splitting, diamond tail inlining, loop-invariant sinking,
-  // store-flag conditional recovery, and `-O0` frame pointer cleanup.
+  // store-flag conditional recovery, sparse switch decision tree reconstruction, and `-O0` frame
+  // pointer cleanup.
   pipeline.AddPass(std::make_unique<ScratchReusedParameterSplitAndFoldPass>());
   pipeline.AddPass(std::make_unique<CrossJumpedCallTailInlinerPass>(/*allow_diamond_tails=*/true));
   pipeline.AddPass(std::make_unique<CommonBranchTailSinkerPass>());
   pipeline.AddPass(std::make_unique<LoopInvariantSinkerPass>());
   pipeline.AddPass(std::make_unique<StoreFlagConditionalRecoveryPass>());
+  pipeline.AddPass(std::make_unique<SparseSwitchDecisionTreePass>());
   pipeline.AddPass(std::make_unique<FramePointerCleanupPass>());
 
   return pipeline;

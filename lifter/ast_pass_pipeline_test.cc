@@ -341,5 +341,73 @@ TEST(AstPassPipelineTest, StoreFlagConditionalRecoveryPassRewritesStoreFlagIncDe
   EXPECT_THAT(rendered, HasSubstr("if ((flag != 0)) {\n        *out = (*out - 1);\n    }"));
 }
 
+TEST(AstPassPipelineTest, SparseSwitchDecisionTreePassReconstructsBinarySearchSwitch) {
+  CompoundStatement body;
+  // Build an AST corresponding to `stmt.c:emit_case_nodes` for sparse switch cases
+  // `{10, 50, 100, 200, 500}` with default `*out = -1;`:
+  //   if (arg0 == 100) {
+  //     *out = 3;
+  //   } else if (arg0 < 100) {
+  //     if (arg0 == 10) {
+  //       *out = 1;
+  //     } else if (arg0 == 50) {
+  //       *out = 2;
+  //     } else {
+  //       *out = -1;
+  //     }
+  //   } else {
+  //     if (arg0 == 200) {
+  //       *out = 4;
+  //     } else if (arg0 == 500) {
+  //       *out = 5;
+  //     } else {
+  //       *out = -1;
+  //     }
+  //   }
+  auto make_out_assign = [](int64_t val) {
+    auto comp = std::make_unique<CompoundStatement>();
+    comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Unary("*", CExpression::Identifier("out")), CExpression::Integer(val))));
+    return comp;
+  };
+
+  auto left_50 = CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(50)),
+      make_out_assign(2), make_out_assign(-1));
+  auto left_10 = CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(10)),
+      make_out_assign(1), std::move(left_50));
+
+  auto right_500 = CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(500)),
+      make_out_assign(5), make_out_assign(-1));
+  auto right_200 = CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(200)),
+      make_out_assign(4), std::move(right_500));
+
+  auto range_split = CStatement::If(
+      CExpression::Binary("<", CExpression::Identifier("arg0"), CExpression::Integer(100)),
+      std::move(left_10), std::move(right_200));
+
+  body.AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(100)),
+      make_out_assign(3), std::move(range_split)));
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  SparseSwitchDecisionTreePass pass;
+  EXPECT_EQ(pass.Name(), "SparseSwitchDecisionTree");
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("switch (arg0)"));
+  EXPECT_THAT(rendered, HasSubstr("case 10:"));
+  EXPECT_THAT(rendered, HasSubstr("case 50:"));
+  EXPECT_THAT(rendered, HasSubstr("case 100:"));
+  EXPECT_THAT(rendered, HasSubstr("case 200:"));
+  EXPECT_THAT(rendered, HasSubstr("case 500:"));
+  EXPECT_THAT(rendered, HasSubstr("default:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

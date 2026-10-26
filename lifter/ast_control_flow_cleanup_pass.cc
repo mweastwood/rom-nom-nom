@@ -1913,4 +1913,497 @@ bool LoopInvariantSinkerPass::Run(CompoundStatement* body, const AstPassContext&
   return SinkLoopInvariantAssignments(body);
 }
 
+namespace {
+
+const CExpression* UnwrapSwitchControlExpression(const CExpression* expr) {
+  while (expr != nullptr) {
+    if (expr->Kind() == CExpressionKind::kCastExpression) {
+      const auto* cast = static_cast<const CastExpression*>(expr);
+      if (cast->TargetType().ToString() == "s32") {
+        expr = &cast->Operand();
+      } else {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+  return expr;
+}
+
+bool ExtractSignedConstantForSwitch(const CExpression& expr, int64_t* out_val) {
+  const CExpression* cur = &expr;
+  if (cur == nullptr) return false;
+  if (cur->Kind() == CExpressionKind::kCastExpression) {
+    const auto* cast = static_cast<const CastExpression*>(cur);
+    std::string t = cast->TargetType().ToString();
+    if (t == "s32" || t == "u32" || t == "s16" || t == "u16" || t == "s8" || t == "u8") {
+      return ExtractSignedConstantForSwitch(cast->Operand(), out_val);
+    }
+    return false;
+  }
+  if (cur->Kind() == CExpressionKind::kIntegerLiteral) {
+    *out_val = static_cast<int64_t>(
+        static_cast<int32_t>(static_cast<const IntegerLiteralExpression*>(cur)->Value()));
+    return true;
+  }
+  if (cur->Kind() == CExpressionKind::kUnaryExpression) {
+    const auto* un = static_cast<const UnaryExpression*>(cur);
+    int64_t inner = 0;
+    if (un->Op() == "-" && ExtractSignedConstantForSwitch(un->Operand(), &inner)) {
+      *out_val = -inner;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsTopLevelBreakStatement(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kBreakStatement:
+      return true;
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr && ContainsTopLevelBreakStatement(*s)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      if (ContainsTopLevelBreakStatement(ifs.ThenBranch())) return true;
+      if (ifs.ElseBranch() != nullptr && ContainsTopLevelBreakStatement(*ifs.ElseBranch())) {
+        return true;
+      }
+      return false;
+    }
+    case CStatementKind::kWhileStatement:
+    case CStatementKind::kDoWhileStatement:
+    case CStatementKind::kForStatement:
+    case CStatementKind::kSwitchStatement:
+      return false;
+    default:
+      return false;
+  }
+}
+
+bool StatementAlwaysTerminatesControlFlow(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kReturnStatement:
+    case CStatementKind::kBreakStatement:
+    case CStatementKind::kContinueStatement:
+    case CStatementKind::kGotoStatement:
+      return true;
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      if (comp.Statements().empty() || comp.Statements().back() == nullptr) return false;
+      return StatementAlwaysTerminatesControlFlow(*comp.Statements().back());
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      if (ifs.ElseBranch() == nullptr) return false;
+      return StatementAlwaysTerminatesControlFlow(ifs.ThenBranch()) &&
+             StatementAlwaysTerminatesControlFlow(*ifs.ElseBranch());
+    }
+    default:
+      return false;
+  }
+}
+
+std::unique_ptr<CompoundStatement> WrapSwitchCaseBodyWithBreak(const CStatement& stmt) {
+  auto body = std::make_unique<CompoundStatement>();
+  if (stmt.Kind() == CStatementKind::kCompoundStatement) {
+    const auto& comp = static_cast<const CompoundStatement&>(stmt);
+    for (const auto& s : comp.Statements()) {
+      if (s != nullptr) body->AddStatement(s->Clone());
+    }
+  } else {
+    body->AddStatement(stmt.Clone());
+  }
+  if (body->Statements().empty() ||
+      !StatementAlwaysTerminatesControlFlow(*body->Statements().back())) {
+    body->AddStatement(CStatement::Break());
+  }
+  return body;
+}
+
+struct SparseDecisionTreeState {
+  std::unique_ptr<CExpression> control_expr;
+  std::string control_expr_str;
+  std::map<int64_t, std::unique_ptr<CompoundStatement>> cases;
+  int range_pivot_count = 0;
+  bool has_empty_default = false;
+  std::unique_ptr<CompoundStatement> non_empty_default;
+
+  bool MatchOrSetControlExpr(const CExpression& candidate) {
+    const CExpression* unwrapped = UnwrapSwitchControlExpression(&candidate);
+    if (unwrapped == nullptr || !IsPureExpression(*unwrapped)) return false;
+    if (unwrapped->Kind() == CExpressionKind::kIntegerLiteral) return false;
+    std::string s = unwrapped->ToString();
+    if (control_expr == nullptr) {
+      control_expr = unwrapped->Clone();
+      control_expr_str = std::move(s);
+      return true;
+    }
+    return control_expr_str == s;
+  }
+
+  bool RecordDefaultLeaf(const CStatement* default_stmt) {
+    if (default_stmt == nullptr) {
+      has_empty_default = true;
+      return non_empty_default == nullptr;
+    }
+    if (default_stmt->Kind() == CStatementKind::kCompoundStatement &&
+        static_cast<const CompoundStatement*>(default_stmt)->IsEmpty()) {
+      has_empty_default = true;
+      return non_empty_default == nullptr;
+    }
+    if (ContainsTopLevelBreakStatement(*default_stmt)) return false;
+    auto wrapped = WrapSwitchCaseBodyWithBreak(*default_stmt);
+    if (has_empty_default) return false;
+    if (non_empty_default == nullptr) {
+      non_empty_default = std::move(wrapped);
+      return true;
+    }
+    return non_empty_default->ToString() == wrapped->ToString();
+  }
+
+  bool AddCase(int64_t val, const CStatement& case_stmt, std::optional<int64_t> low_bound,
+               std::optional<int64_t> high_bound) {
+    if (low_bound.has_value() && val < *low_bound) return false;
+    if (high_bound.has_value() && val > *high_bound) return false;
+    if (cases.count(val) > 0) return false;
+    if (ContainsTopLevelBreakStatement(case_stmt)) return false;
+    cases.emplace(val, WrapSwitchCaseBodyWithBreak(case_stmt));
+    return true;
+  }
+};
+
+std::string InvertComparisonOperator(std::string_view op) {
+  if (op == "==") return "!=";
+  if (op == "!=") return "==";
+  if (op == "<") return ">=";
+  if (op == "<=") return ">";
+  if (op == ">") return "<=";
+  if (op == ">=") return "<";
+  return "";
+}
+
+std::string FlipComparisonDirection(std::string_view op) {
+  if (op == "==" || op == "!=") return std::string(op);
+  if (op == "<") return ">";
+  if (op == "<=") return ">=";
+  if (op == ">") return "<";
+  if (op == ">=") return "<=";
+  return "";
+}
+
+bool ExtractNormalizedSwitchComparison(const CExpression& raw_cond,
+                                       const CExpression** out_lhs_expr, std::string* out_op,
+                                       int64_t* out_const_val) {
+  const CExpression* cur = &raw_cond;
+  bool negated = false;
+  while (cur != nullptr) {
+    if (cur->Kind() == CExpressionKind::kUnaryExpression) {
+      const auto* un = static_cast<const UnaryExpression*>(cur);
+      if (un->Op() == "!") {
+        negated = !negated;
+        cur = &un->Operand();
+        continue;
+      }
+    }
+    if (cur->Kind() == CExpressionKind::kBinaryExpression) {
+      const auto* bin = static_cast<const BinaryExpression*>(cur);
+      int64_t zero_check = -1;
+      if ((bin->Op() == "==" || bin->Op() == "!=") &&
+          ExtractSignedConstantForSwitch(bin->Rhs(), &zero_check) && zero_check == 0) {
+        const CExpression* inner = &bin->Lhs();
+        if (inner->Kind() == CExpressionKind::kBinaryExpression) {
+          const auto* inner_bin = static_cast<const BinaryExpression*>(inner);
+          if (!InvertComparisonOperator(inner_bin->Op()).empty()) {
+            if (bin->Op() == "==") negated = !negated;
+            cur = inner;
+            continue;
+          }
+        }
+      }
+    }
+    break;
+  }
+  if (cur == nullptr || cur->Kind() != CExpressionKind::kBinaryExpression) return false;
+  const auto* bin = static_cast<const BinaryExpression*>(cur);
+  std::string op = bin->Op();
+  if (InvertComparisonOperator(op).empty()) return false;
+  if (negated) {
+    op = InvertComparisonOperator(op);
+  }
+
+  int64_t cval = 0;
+  if (ExtractSignedConstantForSwitch(bin->Rhs(), &cval)) {
+    *out_lhs_expr = &bin->Lhs();
+    *out_op = op;
+    *out_const_val = cval;
+    return true;
+  }
+  if (ExtractSignedConstantForSwitch(bin->Lhs(), &cval)) {
+    *out_lhs_expr = &bin->Rhs();
+    *out_op = FlipComparisonDirection(op);
+    *out_const_val = cval;
+    return true;
+  }
+  return false;
+}
+
+bool ParseDecisionTreeNode(const CStatement* stmt, std::optional<int64_t> low_bound,
+                           std::optional<int64_t> high_bound, SparseDecisionTreeState* state) {
+  if (stmt == nullptr) {
+    return state->RecordDefaultLeaf(nullptr);
+  }
+
+  if (stmt->Kind() == CStatementKind::kCompoundStatement) {
+    const auto* comp = static_cast<const CompoundStatement*>(stmt);
+    if (comp->IsEmpty()) {
+      return state->RecordDefaultLeaf(nullptr);
+    }
+    if (comp->Statements().size() == 1 && comp->Statements()[0] != nullptr) {
+      return ParseDecisionTreeNode(comp->Statements()[0].get(), low_bound, high_bound, state);
+    }
+
+    // Handle sequential early-terminating `if (x == C) { return ...; }` statements followed by
+    // a remaining decision tree or default block.
+    size_t idx = 0;
+    bool matched_any_prefix = false;
+    while (idx < comp->Statements().size()) {
+      const CStatement* cur_s = comp->Statements()[idx].get();
+      if (cur_s == nullptr || cur_s->Kind() != CStatementKind::kIfStatement) break;
+      const auto* ifs = static_cast<const IfStatement*>(cur_s);
+      if (ifs->ElseBranch() != nullptr) break;
+      const CExpression* lhs = nullptr;
+      std::string op;
+      int64_t cval = 0;
+      if (!ExtractNormalizedSwitchComparison(ifs->Condition(), &lhs, &op, &cval) || op != "==" ||
+          !StatementAlwaysTerminatesControlFlow(ifs->ThenBranch()) ||
+          !state->MatchOrSetControlExpr(*lhs) ||
+          !state->AddCase(cval, ifs->ThenBranch(), low_bound, high_bound)) {
+        break;
+      }
+      if (low_bound.has_value() && cval == *low_bound) low_bound = cval + 1;
+      if (high_bound.has_value() && cval == *high_bound) high_bound = cval - 1;
+      matched_any_prefix = true;
+      ++idx;
+    }
+
+    if (matched_any_prefix) {
+      if (idx == comp->Statements().size()) {
+        return state->RecordDefaultLeaf(nullptr);
+      }
+      if (idx + 1 == comp->Statements().size()) {
+        return ParseDecisionTreeNode(comp->Statements()[idx].get(), low_bound, high_bound, state);
+      }
+      auto remaining_default = std::make_unique<CompoundStatement>();
+      for (size_t k = idx; k < comp->Statements().size(); ++k) {
+        if (comp->Statements()[k] != nullptr) {
+          remaining_default->AddStatement(comp->Statements()[k]->Clone());
+        }
+      }
+      return state->RecordDefaultLeaf(remaining_default.get());
+    }
+
+    // Check if this compound statement is a bounded single-value child (`low_bound == high_bound`).
+    if (low_bound.has_value() && high_bound.has_value() && *low_bound == *high_bound &&
+        state->cases.count(*low_bound) == 0) {
+      return state->AddCase(*low_bound, *comp, low_bound, high_bound);
+    }
+    return state->RecordDefaultLeaf(comp);
+  }
+
+  if (stmt->Kind() != CStatementKind::kIfStatement) {
+    if (low_bound.has_value() && high_bound.has_value() && *low_bound == *high_bound &&
+        state->cases.count(*low_bound) == 0) {
+      return state->AddCase(*low_bound, *stmt, low_bound, high_bound);
+    }
+    return state->RecordDefaultLeaf(stmt);
+  }
+
+  const auto* ifs = static_cast<const IfStatement*>(stmt);
+  const CExpression* lhs = nullptr;
+  std::string op;
+  int64_t cval = 0;
+  if (!ExtractNormalizedSwitchComparison(ifs->Condition(), &lhs, &op, &cval) ||
+      !state->MatchOrSetControlExpr(*lhs)) {
+    if (state->control_expr != nullptr) {
+      if (low_bound.has_value() && high_bound.has_value() && *low_bound == *high_bound &&
+          state->cases.count(*low_bound) == 0) {
+        return state->AddCase(*low_bound, *stmt, low_bound, high_bound);
+      }
+      return state->RecordDefaultLeaf(stmt);
+    }
+    return false;
+  }
+
+  if (op == "==" || op == "!=") {
+    const CStatement* case_branch = (op == "==") ? &ifs->ThenBranch() : ifs->ElseBranch();
+    const CStatement* other_branch = (op == "==") ? ifs->ElseBranch() : &ifs->ThenBranch();
+    if (case_branch == nullptr) return false;
+    if (!state->AddCase(cval, *case_branch, low_bound, high_bound)) return false;
+    if (low_bound.has_value() && cval == *low_bound) low_bound = cval + 1;
+    if (high_bound.has_value() && cval == *high_bound) high_bound = cval - 1;
+    if (other_branch == nullptr) {
+      return state->RecordDefaultLeaf(nullptr);
+    }
+    // Note: after `x == cval`, an `else` branch that is not itself an `IfStatement` testing `x` is
+    // a `default` branch, not an implicit bounded case.
+    const CStatement* unwrapped_other = other_branch;
+    if (unwrapped_other->Kind() == CStatementKind::kCompoundStatement) {
+      const auto* ocomp = static_cast<const CompoundStatement*>(unwrapped_other);
+      if (ocomp->Statements().size() == 1 && ocomp->Statements()[0] != nullptr) {
+        unwrapped_other = ocomp->Statements()[0].get();
+      }
+    }
+    if (unwrapped_other->Kind() != CStatementKind::kIfStatement &&
+        unwrapped_other->Kind() != CStatementKind::kCompoundStatement) {
+      return state->RecordDefaultLeaf(other_branch);
+    }
+    return ParseDecisionTreeNode(other_branch, low_bound, high_bound, state);
+  }
+
+  // Range split pivot (`<`, `<=`, `>`, `>=`).
+  int64_t split_val = (op == "<" || op == ">=") ? cval : (cval + 1);
+  const CStatement* less_stmt = (op == "<" || op == "<=") ? &ifs->ThenBranch() : ifs->ElseBranch();
+  const CStatement* ge_stmt = (op == "<" || op == "<=") ? ifs->ElseBranch() : &ifs->ThenBranch();
+
+  std::optional<int64_t> left_low = low_bound;
+  std::optional<int64_t> left_high =
+      high_bound.has_value() ? std::min(*high_bound, split_val - 1) : (split_val - 1);
+  while (left_high.has_value() && state->cases.count(*left_high) > 0) {
+    left_high = *left_high - 1;
+  }
+  while (left_low.has_value() && state->cases.count(*left_low) > 0) {
+    left_low = *left_low + 1;
+  }
+
+  std::optional<int64_t> right_low =
+      low_bound.has_value() ? std::max(*low_bound, split_val) : split_val;
+  std::optional<int64_t> right_high = high_bound;
+  while (right_low.has_value() && state->cases.count(*right_low) > 0) {
+    right_low = *right_low + 1;
+  }
+  while (right_high.has_value() && state->cases.count(*right_high) > 0) {
+    right_high = *right_high - 1;
+  }
+
+  if (left_low.has_value() && left_high.has_value() && *left_low > *left_high) return false;
+  if (right_low.has_value() && right_high.has_value() && *right_low > *right_high) return false;
+
+  ++state->range_pivot_count;
+  size_t cases_before_left = state->cases.size();
+  if (!ParseDecisionTreeNode(less_stmt, left_low, left_high, state)) return false;
+  size_t cases_after_left = state->cases.size();
+
+  if (!ParseDecisionTreeNode(ge_stmt, right_low, right_high, state)) return false;
+  size_t cases_after_right = state->cases.size();
+
+  // At least one side of the range split must contain a case constant, and if both branches are
+  // non-null, both should contribute at least one case constant.
+  if (cases_after_right == cases_before_left) return false;
+  if (less_stmt != nullptr && ge_stmt != nullptr &&
+      (cases_after_left == cases_before_left || cases_after_right == cases_after_left)) {
+    return false;
+  }
+  return true;
+}
+
+std::unique_ptr<CStatement> TryBuildSparseSwitchFromState(SparseDecisionTreeState* state) {
+  if (state == nullptr || state->control_expr == nullptr || state->range_pivot_count < 1 ||
+      state->cases.size() < 3) {
+    return nullptr;
+  }
+  if (state->has_empty_default && state->non_empty_default != nullptr) {
+    return nullptr;
+  }
+
+  // Verify the case set matches GCC 2.7.2 `stmt.c:4818` decision-tree criteria (`count < 5` or
+  // `span > 10 * count`) so recompiling the `switch` produces a decision tree rather than a jump
+  // table.
+  const size_t count = state->cases.size();
+  const int64_t min_val = state->cases.begin()->first;
+  const int64_t max_val = state->cases.rbegin()->first;
+  const uint64_t span = static_cast<uint64_t>(max_val) - static_cast<uint64_t>(min_val);
+  if (count >= 5 && span <= 10 * count) {
+    return nullptr;
+  }
+
+  std::vector<SwitchCase> switch_cases;
+  switch_cases.reserve(state->cases.size() + (state->non_empty_default != nullptr ? 1 : 0));
+  for (auto& [val, body] : state->cases) {
+    SwitchCase sc;
+    sc.case_values = {val};
+    sc.is_default = false;
+    sc.body = std::move(body);
+    switch_cases.push_back(std::move(sc));
+  }
+  if (state->non_empty_default != nullptr) {
+    SwitchCase def_sc;
+    def_sc.is_default = true;
+    def_sc.body = std::move(state->non_empty_default);
+    switch_cases.push_back(std::move(def_sc));
+  }
+  return CStatement::Switch(std::move(state->control_expr), std::move(switch_cases));
+}
+
+}  // namespace
+
+bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body) {
+  if (body == nullptr) return false;
+  bool any_changed = false;
+
+  auto& stmts = body->MutableStatements();
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    if (stmts[i] == nullptr) continue;
+    ForEachSubCompoundStatement(stmts[i].get(), [&](CompoundStatement* sub) {
+      if (ReconstructSparseSwitchDecisionTrees(sub)) {
+        any_changed = true;
+      }
+    });
+  }
+
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    if (stmts[i] == nullptr || stmts[i]->Kind() != CStatementKind::kIfStatement) continue;
+
+    // 1. Check if `stmts[i]` is an early-terminating `if (x == P) { ... }` (without `else`)
+    // immediately followed by a range-split `IfStatement` `stmts[i + 1]` on `x`.
+    const auto* ifs = static_cast<const IfStatement*>(stmts[i].get());
+    if (ifs->ElseBranch() == nullptr && StatementAlwaysTerminatesControlFlow(ifs->ThenBranch()) &&
+        i + 1 < stmts.size() && stmts[i + 1] != nullptr &&
+        stmts[i + 1]->Kind() == CStatementKind::kIfStatement) {
+      auto combined_if = CStatement::If(ifs->Condition().Clone(), ifs->ThenBranch().Clone(),
+                                        stmts[i + 1]->Clone());
+      SparseDecisionTreeState state;
+      if (ParseDecisionTreeNode(combined_if.get(), std::nullopt, std::nullopt, &state)) {
+        if (auto sw = TryBuildSparseSwitchFromState(&state)) {
+          stmts[i] = std::move(sw);
+          stmts.erase(stmts.begin() + static_cast<ptrdiff_t>(i + 1));
+          any_changed = true;
+          continue;
+        }
+      }
+    }
+
+    // 2. Check if `stmts[i]` is directly a sparse switch binary-search decision tree.
+    SparseDecisionTreeState state;
+    if (ParseDecisionTreeNode(stmts[i].get(), std::nullopt, std::nullopt, &state)) {
+      if (auto sw = TryBuildSparseSwitchFromState(&state)) {
+        stmts[i] = std::move(sw);
+        any_changed = true;
+      }
+    }
+  }
+
+  return any_changed;
+}
+
+bool SparseSwitchDecisionTreePass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
+  return ReconstructSparseSwitchDecisionTrees(body);
+}
+
 }  // namespace rom_nom_nom
