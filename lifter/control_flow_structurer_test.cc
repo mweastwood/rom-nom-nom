@@ -1116,5 +1116,37 @@ TEST(ControlFlowStructurerTest, InnerLoopEarlyExitToParentHeaderViaEmptyLatchFol
   EXPECT_THAT(s, Not(HasSubstr("goto block_0")));
 }
 
+TEST(ControlFlowStructurerTest, RegistersModularStructuringStrategiesAndRegionPassPipeline) {
+  ControlFlowStructurer structurer;
+  ASSERT_EQ(structurer.Strategies().size(), 4u);
+  EXPECT_EQ(structurer.Strategies()[0]->Name(), "LoopStructurer");
+  EXPECT_EQ(structurer.Strategies()[1]->Name(), "SwitchStructurer");
+  EXPECT_EQ(structurer.Strategies()[2]->Name(), "ShortCircuitStructurer");
+  EXPECT_EQ(structurer.Strategies()[3]->Name(), "ConditionalDiamondStructurer");
+
+  class CountingRegionPass : public RegionPass {
+   public:
+    explicit CountingRegionPass(int* runs) : runs_(runs) {}
+    std::string_view Name() const override { return "CountingRegionPass"; }
+    bool Run(StructuredRegion* /*root*/, const ControlFlowGraph& /*cfg*/) override {
+      ++(*runs_);
+      return true;
+    }
+
+   private:
+    int* runs_;
+  };
+
+  int runs = 0;
+  RegionPassPipeline pipeline;
+  pipeline.AddPass(std::make_unique<CountingRegionPass>(&runs));
+  ASSERT_EQ(pipeline.PassCount(), 1u);
+
+  auto root = StructuredRegion::CreateBlock(0);
+  ControlFlowGraph empty_cfg;
+  EXPECT_TRUE(pipeline.Run(root.get(), empty_cfg));
+  EXPECT_EQ(runs, 1);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
