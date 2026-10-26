@@ -17,6 +17,7 @@
 #include "absl/strings/str_cat.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
+#include "core/c_ast_visitor.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -2014,96 +2015,23 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlockImpl(
   }
 }
 
+class ShiftAddMultiplicationMutator : public AstMutator {
+ public:
+  void MutateVariableDeclarationStatement(std::unique_ptr<CStatement>* /*stmt*/,
+                                          VariableDeclarationStatement* /*decl_stmt*/) override {}
+
+  void MutateExpression(std::unique_ptr<CExpression>* expr) override {
+    if (expr == nullptr || *expr == nullptr) return;
+    *expr = SimplifyShiftAddExpression(**expr);
+  }
+};
+
 }  // namespace
 
 void SimplifyShiftAddMultiplication(CompoundStatement* comp) {
   if (comp == nullptr) return;
-
-  std::function<std::unique_ptr<CStatement>(std::unique_ptr<CStatement>)> rewrite_stmt =
-      [&](std::unique_ptr<CStatement> s) -> std::unique_ptr<CStatement> {
-    if (s == nullptr) return nullptr;
-    switch (s->Kind()) {
-      case CStatementKind::kCompoundStatement: {
-        auto* c = static_cast<CompoundStatement*>(s.get());
-        for (auto& child : c->MutableStatements()) {
-          child = rewrite_stmt(std::move(child));
-        }
-        return s;
-      }
-      case CStatementKind::kExpressionStatement: {
-        const auto& es = static_cast<const ExpressionStatement&>(*s);
-        return CStatement::Expression(SimplifyShiftAddExpression(es.Expression()));
-      }
-      case CStatementKind::kReturnStatement: {
-        const auto& ret = static_cast<const ReturnStatement&>(*s);
-        if (ret.ReturnValue() != nullptr) {
-          return CStatement::Return(SimplifyShiftAddExpression(*ret.ReturnValue()));
-        }
-        return CStatement::Return(nullptr);
-      }
-      case CStatementKind::kIfStatement: {
-        const auto& ifs = static_cast<const IfStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(ifs.Condition());
-        auto new_then = rewrite_stmt(ifs.ThenBranch().Clone());
-        std::unique_ptr<CStatement> new_else = nullptr;
-        if (ifs.ElseBranch() != nullptr) {
-          new_else = rewrite_stmt(ifs.ElseBranch()->Clone());
-        }
-        return CStatement::If(std::move(new_cond), std::move(new_then), std::move(new_else));
-      }
-      case CStatementKind::kWhileStatement: {
-        const auto& ws = static_cast<const WhileStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(ws.Condition());
-        auto new_body = rewrite_stmt(ws.Body().Clone());
-        return CStatement::While(std::move(new_cond), std::move(new_body));
-      }
-      case CStatementKind::kDoWhileStatement: {
-        const auto& dws = static_cast<const DoWhileStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(dws.Condition());
-        auto new_body = rewrite_stmt(dws.Body().Clone());
-        return CStatement::DoWhile(std::move(new_body), std::move(new_cond));
-      }
-      case CStatementKind::kForStatement: {
-        const auto& fs = static_cast<const ForStatement&>(*s);
-        std::unique_ptr<CStatement> new_init = nullptr;
-        if (fs.Init() != nullptr) {
-          new_init = rewrite_stmt(fs.Init()->Clone());
-        }
-        std::unique_ptr<CExpression> new_cond = nullptr;
-        if (fs.Condition() != nullptr) {
-          new_cond = SimplifyShiftAddExpression(*fs.Condition());
-        }
-        std::unique_ptr<CExpression> new_step = nullptr;
-        if (fs.Step() != nullptr) {
-          new_step = SimplifyShiftAddExpression(*fs.Step());
-        }
-        auto new_body = rewrite_stmt(fs.Body().Clone());
-        return CStatement::For(std::move(new_init), std::move(new_cond), std::move(new_step),
-                               std::move(new_body));
-      }
-      case CStatementKind::kSwitchStatement: {
-        const auto& ss = static_cast<const SwitchStatement&>(*s);
-        auto new_cond = SimplifyShiftAddExpression(ss.Condition());
-        std::vector<SwitchCase> new_cases;
-        for (const auto& c : ss.Cases()) {
-          SwitchCase sc = c.Clone();
-          if (c.body != nullptr) {
-            auto rewritten_body = rewrite_stmt(c.body->Clone());
-            sc.body = std::unique_ptr<CompoundStatement>(
-                static_cast<CompoundStatement*>(rewritten_body.release()));
-          }
-          new_cases.push_back(std::move(sc));
-        }
-        return CStatement::Switch(std::move(new_cond), std::move(new_cases));
-      }
-      default:
-        return s;
-    }
-  };
-
-  for (auto& s : comp->MutableStatements()) {
-    s = rewrite_stmt(std::move(s));
-  }
+  ShiftAddMultiplicationMutator mutator;
+  mutator.MutateCompoundStatement(comp);
 }
 
 void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp) {
@@ -2142,6 +2070,22 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversions(CompoundStatement* co
   SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(comp, /*parent_const_map=*/nullptr,
                                                             /*shared_consumed_magics=*/nullptr,
                                                             /*parent_sign_equiv_map=*/nullptr);
+}
+
+bool ShiftAddMultiplicationSimplifierPass::Run(CompoundStatement* body,
+                                               const AstPassContext& /*ctx*/) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  SimplifyShiftAddMultiplication(body);
+  return body->ToString() != before;
+}
+
+bool ReciprocalAndUnsignedFloatSimplifierPass::Run(CompoundStatement* body,
+                                                   const AstPassContext& /*ctx*/) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  SimplifyReciprocalDivisionAndUnsignedFloatConversions(body);
+  return body->ToString() != before;
 }
 
 }  // namespace rom_nom_nom

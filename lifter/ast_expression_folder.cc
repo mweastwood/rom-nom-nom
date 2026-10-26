@@ -3017,4 +3017,11 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
   ctx.Run();
 }
 
+bool SingleUseExpressionFolderPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  FoldSingleUseExpressions(body);
+  return body->ToString() != before;
+}
+
 }  // namespace rom_nom_nom

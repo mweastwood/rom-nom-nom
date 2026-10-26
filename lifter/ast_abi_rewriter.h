@@ -2,10 +2,12 @@
 #define LIFTER_AST_ABI_REWRITER_H_
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "core/c_ast.h"
+#include "lifter/ast_pass_pipeline.h"
 
 namespace rom_nom_nom {
 
@@ -36,6 +38,49 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,
 void TrimUnassignedTrailingCallArgRegisters(
     CompoundStatement* body, const std::vector<CParameter>& parameters,
     const absl::flat_hash_map<std::string, int>* function_parameter_counts);
+
+// Concrete `AstPass` wrappers for ABI and control-flow tail rewrites.
+class ReturnStatementSimplifierPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SimplifyReturnStatements"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class DecoupledDelaySlotEarlyReturnPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SimplifyDecoupledDelaySlotEarlyReturns"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class CommonBranchTailSinkerPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SinkCommonBranchTailArgAssignments"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class CrossJumpedCallTailInlinerPass : public AstPass {
+ public:
+  explicit CrossJumpedCallTailInlinerPass(bool allow_diamond_tails = false)
+      : allow_diamond_tails_(allow_diamond_tails) {}
+
+  std::string_view Name() const override { return "InlineCrossJumpedCallTails"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+
+ private:
+  bool allow_diamond_tails_ = false;
+};
+
+class FloatCallArgumentRewriterPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "RewriteFloatInGprAndStackCallArguments"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class UnassignedTrailingCallArgTrimmerPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "TrimUnassignedTrailingCallArgRegisters"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
 
 }  // namespace rom_nom_nom
 

@@ -2151,4 +2151,46 @@ void TrimUnassignedTrailingCallArgRegisters(
   rewrite_comp(body);
 }
 
+namespace {
+
+template <typename Fn>
+bool RunAndDetectChange(CompoundStatement* body, Fn&& fn) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  fn();
+  return body->ToString() != before;
+}
+
+}  // namespace
+
+bool ReturnStatementSimplifierPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  return RunAndDetectChange(
+      body, [&]() { SimplifyReturnStatements(body, ctx.returns_v0, ctx.returns_f0); });
+}
+
+bool DecoupledDelaySlotEarlyReturnPass::Run(CompoundStatement* body,
+                                            const AstPassContext& /*ctx*/) {
+  return RunAndDetectChange(body, [&]() { SimplifyDecoupledDelaySlotEarlyReturns(body); });
+}
+
+bool CommonBranchTailSinkerPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
+  return RunAndDetectChange(body, [&]() { SinkCommonBranchTailArgAssignments(body); });
+}
+
+bool CrossJumpedCallTailInlinerPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
+  return RunAndDetectChange(body,
+                            [&]() { InlineCrossJumpedCallTails(body, allow_diamond_tails_); });
+}
+
+bool FloatCallArgumentRewriterPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  return RunAndDetectChange(
+      body, [&]() { RewriteFloatInGprAndStackCallArguments(body, ctx.parameters); });
+}
+
+bool UnassignedTrailingCallArgTrimmerPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  return RunAndDetectChange(body, [&]() {
+    TrimUnassignedTrailingCallArgRegisters(body, ctx.parameters, ctx.function_parameter_counts);
+  });
+}
+
 }  // namespace rom_nom_nom

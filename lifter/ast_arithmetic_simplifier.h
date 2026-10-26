@@ -1,7 +1,10 @@
 #ifndef LIFTER_AST_ARITHMETIC_SIMPLIFIER_H_
 #define LIFTER_AST_ARITHMETIC_SIMPLIFIER_H_
 
+#include <string_view>
+
 #include "core/c_ast.h"
+#include "lifter/ast_pass_pipeline.h"
 
 namespace rom_nom_nom {
 
@@ -19,6 +22,21 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp);
 // conversion diamonds across `comp` and its nested blocks, and removes dead
 // reciprocal magic constant assignments.
 void SimplifyReciprocalDivisionAndUnsignedFloatConversions(CompoundStatement* comp);
+
+// Concrete `AstPass` wrappers for arithmetic strength-reduction inversions.
+class ShiftAddMultiplicationSimplifierPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SimplifyShiftAddMultiplication"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class ReciprocalAndUnsignedFloatSimplifierPass : public AstPass {
+ public:
+  std::string_view Name() const override {
+    return "SimplifyReciprocalDivisionAndUnsignedFloatConversions";
+  }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
 
 }  // namespace rom_nom_nom
 

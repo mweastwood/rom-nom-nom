@@ -2,9 +2,11 @@
 #define LIFTER_AST_PARAMETER_COALESCER_H_
 
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 #include "core/c_ast.h"
+#include "lifter/ast_pass_pipeline.h"
 
 namespace rom_nom_nom {
 
@@ -28,6 +30,24 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
                                           const std::vector<CParameter>& parameters,
                                           uint32_t frame_size = 0,
                                           std::vector<CParameter>* mutable_parameters = nullptr);
+
+class PrologueParameterCoalescerPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "CoalescePrologueParameterCopies"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class ReusedFloatGprParameterSplitterPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SplitReusedFloatGprParameters"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class ScratchReusedParameterSplitterPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "SplitScratchReusedParameterRegisters"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
 
 }  // namespace rom_nom_nom
 

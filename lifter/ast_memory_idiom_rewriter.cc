@@ -15,46 +15,24 @@
 #include "absl/strings/str_format.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
+#include "core/c_ast_visitor.h"
 
 namespace rom_nom_nom {
 namespace {
 
+class GotoStatementFinder : public AstVisitor {
+ public:
+  bool Found() const { return found_; }
+  void VisitGotoStatement(const GotoStatement& /*stmt*/) override { found_ = true; }
+
+ private:
+  bool found_ = false;
+};
+
 bool StatementContainsGoto(const CStatement& stmt) {
-  if (stmt.Kind() == CStatementKind::kGotoStatement) {
-    return true;
-  }
-  switch (stmt.Kind()) {
-    case CStatementKind::kIfStatement: {
-      const auto& ifs = static_cast<const IfStatement&>(stmt);
-      return StatementContainsGoto(ifs.ThenBranch()) ||
-             (ifs.ElseBranch() != nullptr && StatementContainsGoto(*ifs.ElseBranch()));
-    }
-    case CStatementKind::kWhileStatement:
-      return StatementContainsGoto(static_cast<const WhileStatement&>(stmt).Body());
-    case CStatementKind::kDoWhileStatement:
-      return StatementContainsGoto(static_cast<const DoWhileStatement&>(stmt).Body());
-    case CStatementKind::kForStatement: {
-      const auto& fs = static_cast<const ForStatement&>(stmt);
-      return (fs.Init() != nullptr && StatementContainsGoto(*fs.Init())) ||
-             StatementContainsGoto(fs.Body());
-    }
-    case CStatementKind::kCompoundStatement:
-      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-        if (child != nullptr && StatementContainsGoto(*child)) {
-          return true;
-        }
-      }
-      return false;
-    case CStatementKind::kSwitchStatement:
-      for (const auto& sc : static_cast<const SwitchStatement&>(stmt).Cases()) {
-        if (sc.body != nullptr && StatementContainsGoto(*sc.body)) {
-          return true;
-        }
-      }
-      return false;
-    default:
-      return false;
-  }
+  GotoStatementFinder finder;
+  finder.VisitStatement(stmt);
+  return finder.Found();
 }
 
 }  // namespace
@@ -955,6 +933,21 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
   auto rewritten = std::unique_ptr<CompoundStatement>(
       static_cast<CompoundStatement*>(rewrite_stmt(*body).release()));
   *body = std::move(*rewritten);
+}
+
+bool UnalignedBlockCopyCollapserPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  CollapseUnalignedBlockCopies(body);
+  return body->ToString() != before;
+}
+
+bool FramePointerStructOffsetRewriterPass::Run(CompoundStatement* body,
+                                               const AstPassContext& /*ctx*/) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  RewriteFramePointerStructOffsetAccesses(body);
+  return body->ToString() != before;
 }
 
 }  // namespace rom_nom_nom

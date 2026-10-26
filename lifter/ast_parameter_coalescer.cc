@@ -16,6 +16,7 @@
 #include "absl/strings/str_cat.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
+#include "core/c_ast_visitor.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -37,274 +38,82 @@ bool IsFloat64Type(const CType& type) {
   return type.pointer_depth == 0 && type.name == "f64";
 }
 
-bool ExpressionUsesAddressOfInPointerArithmetic(const CExpression& expr,
-                                                std::string_view target_var) {
-  switch (expr.Kind()) {
-    case CExpressionKind::kBinaryExpression: {
-      const auto& bin = static_cast<const BinaryExpression&>(expr);
-      if ((bin.Op() == "+" || bin.Op() == "-") &&
-          (ExpressionTakesAddressOf(bin.Lhs(), target_var) ||
-           ExpressionTakesAddressOf(bin.Rhs(), target_var))) {
-        return true;
-      }
-      return ExpressionUsesAddressOfInPointerArithmetic(bin.Lhs(), target_var) ||
-             ExpressionUsesAddressOfInPointerArithmetic(bin.Rhs(), target_var);
+class AddressOfInPointerArithmeticVisitor : public AstVisitor {
+ public:
+  explicit AddressOfInPointerArithmeticVisitor(std::string_view target_var)
+      : target_var_(target_var) {}
+
+  bool Found() const { return found_; }
+
+  void VisitBinaryExpression(const BinaryExpression& expr) override {
+    if ((expr.Op() == "+" || expr.Op() == "-") &&
+        (ExpressionTakesAddressOf(expr.Lhs(), target_var_) ||
+         ExpressionTakesAddressOf(expr.Rhs(), target_var_))) {
+      found_ = true;
+      return;
     }
-    case CExpressionKind::kUnaryExpression:
-      return ExpressionUsesAddressOfInPointerArithmetic(
-          static_cast<const UnaryExpression&>(expr).Operand(), target_var);
-    case CExpressionKind::kAssignmentExpression: {
-      const auto& a = static_cast<const AssignmentExpression&>(expr);
-      return ExpressionUsesAddressOfInPointerArithmetic(a.Lhs(), target_var) ||
-             ExpressionUsesAddressOfInPointerArithmetic(a.Rhs(), target_var);
-    }
-    case CExpressionKind::kCallExpression: {
-      const auto& call = static_cast<const CallExpression&>(expr);
-      if (ExpressionUsesAddressOfInPointerArithmetic(call.Callee(), target_var)) return true;
-      for (const auto& arg : call.Arguments()) {
-        if (arg != nullptr && ExpressionUsesAddressOfInPointerArithmetic(*arg, target_var)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    case CExpressionKind::kCastExpression:
-      return ExpressionUsesAddressOfInPointerArithmetic(
-          static_cast<const CastExpression&>(expr).Operand(), target_var);
-    case CExpressionKind::kMemberAccessExpression:
-      return ExpressionUsesAddressOfInPointerArithmetic(
-          static_cast<const MemberAccessExpression&>(expr).Object(), target_var);
-    case CExpressionKind::kArrayIndexExpression: {
-      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
-      return ExpressionUsesAddressOfInPointerArithmetic(arr.Array(), target_var) ||
-             ExpressionUsesAddressOfInPointerArithmetic(arr.Index(), target_var);
-    }
-    case CExpressionKind::kTernaryExpression: {
-      const auto& tern = static_cast<const TernaryExpression&>(expr);
-      return ExpressionUsesAddressOfInPointerArithmetic(tern.Condition(), target_var) ||
-             ExpressionUsesAddressOfInPointerArithmetic(tern.TrueExpression(), target_var) ||
-             ExpressionUsesAddressOfInPointerArithmetic(tern.FalseExpression(), target_var);
-    }
-    default:
-      return false;
+    AstVisitor::VisitBinaryExpression(expr);
   }
-}
+
+ private:
+  std::string_view target_var_;
+  bool found_ = false;
+};
 
 bool StatementUsesAddressOfInPointerArithmetic(const CStatement& stmt,
                                                std::string_view target_var) {
-  switch (stmt.Kind()) {
-    case CStatementKind::kCompoundStatement:
-      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-        if (child != nullptr && StatementUsesAddressOfInPointerArithmetic(*child, target_var)) {
-          return true;
-        }
-      }
-      return false;
-    case CStatementKind::kExpressionStatement:
-      return ExpressionUsesAddressOfInPointerArithmetic(
-          static_cast<const ExpressionStatement&>(stmt).Expression(), target_var);
-    case CStatementKind::kVariableDeclarationStatement: {
-      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
-      return vd.Initializer() != nullptr &&
-             ExpressionUsesAddressOfInPointerArithmetic(*vd.Initializer(), target_var);
-    }
-    case CStatementKind::kIfStatement: {
-      const auto& ifs = static_cast<const IfStatement&>(stmt);
-      return ExpressionUsesAddressOfInPointerArithmetic(ifs.Condition(), target_var) ||
-             StatementUsesAddressOfInPointerArithmetic(ifs.ThenBranch(), target_var) ||
-             (ifs.ElseBranch() != nullptr &&
-              StatementUsesAddressOfInPointerArithmetic(*ifs.ElseBranch(), target_var));
-    }
-    case CStatementKind::kWhileStatement: {
-      const auto& ws = static_cast<const WhileStatement&>(stmt);
-      return ExpressionUsesAddressOfInPointerArithmetic(ws.Condition(), target_var) ||
-             StatementUsesAddressOfInPointerArithmetic(ws.Body(), target_var);
-    }
-    case CStatementKind::kDoWhileStatement: {
-      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
-      return StatementUsesAddressOfInPointerArithmetic(dws.Body(), target_var) ||
-             ExpressionUsesAddressOfInPointerArithmetic(dws.Condition(), target_var);
-    }
-    case CStatementKind::kForStatement: {
-      const auto& fs = static_cast<const ForStatement&>(stmt);
-      return (fs.Init() != nullptr &&
-              StatementUsesAddressOfInPointerArithmetic(*fs.Init(), target_var)) ||
-             (fs.Condition() != nullptr &&
-              ExpressionUsesAddressOfInPointerArithmetic(*fs.Condition(), target_var)) ||
-             (fs.Step() != nullptr &&
-              ExpressionUsesAddressOfInPointerArithmetic(*fs.Step(), target_var)) ||
-             StatementUsesAddressOfInPointerArithmetic(fs.Body(), target_var);
-    }
-    case CStatementKind::kReturnStatement: {
-      const auto& rs = static_cast<const ReturnStatement&>(stmt);
-      return rs.ReturnValue() != nullptr &&
-             ExpressionUsesAddressOfInPointerArithmetic(*rs.ReturnValue(), target_var);
-    }
-    case CStatementKind::kSwitchStatement: {
-      const auto& ss = static_cast<const SwitchStatement&>(stmt);
-      if (ExpressionUsesAddressOfInPointerArithmetic(ss.Condition(), target_var)) return true;
-      for (const auto& sc : ss.Cases()) {
-        if (sc.body != nullptr && StatementUsesAddressOfInPointerArithmetic(*sc.body, target_var)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
+  AddressOfInPointerArithmeticVisitor visitor(target_var);
+  visitor.VisitStatement(stmt);
+  return visitor.Found();
 }
 
-bool ExpressionCallsThroughFunctionPointerVar(const CExpression& expr,
-                                              std::string_view target_var) {
-  switch (expr.Kind()) {
-    case CExpressionKind::kCallExpression: {
-      const auto& call = static_cast<const CallExpression&>(expr);
-      if (ExpressionUsesVariable(call.Callee(), target_var)) {
-        return true;
+class FunctionPointerCallVisitor : public AstVisitor {
+ public:
+  explicit FunctionPointerCallVisitor(std::string_view target_var) : target_var_(target_var) {}
+
+  bool Found() const { return found_; }
+
+  void VisitCallExpression(const CallExpression& call) override {
+    if (ExpressionUsesVariable(call.Callee(), target_var_)) {
+      found_ = true;
+      return;
+    }
+    if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
+      std::string_view id_name = static_cast<const IdentifierExpression&>(call.Callee()).Name();
+      std::string_view underlying;
+      if (ExtractFunctionPointerCastCalleeIdentifier(id_name, nullptr, &underlying) &&
+          underlying == target_var_) {
+        found_ = true;
+        return;
       }
-      if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
-        std::string_view id_name = static_cast<const IdentifierExpression&>(call.Callee()).Name();
-        std::string_view underlying;
-        if (ExtractFunctionPointerCastCalleeIdentifier(id_name, nullptr, &underlying) &&
-            underlying == target_var) {
-          return true;
-        }
-      }
-      for (const auto& arg : call.Arguments()) {
-        if (arg != nullptr && ExpressionCallsThroughFunctionPointerVar(*arg, target_var)) {
-          return true;
-        }
-      }
-      return false;
     }
-    case CExpressionKind::kUnaryExpression:
-      return ExpressionCallsThroughFunctionPointerVar(
-          static_cast<const UnaryExpression&>(expr).Operand(), target_var);
-    case CExpressionKind::kBinaryExpression: {
-      const auto& bin = static_cast<const BinaryExpression&>(expr);
-      return ExpressionCallsThroughFunctionPointerVar(bin.Lhs(), target_var) ||
-             ExpressionCallsThroughFunctionPointerVar(bin.Rhs(), target_var);
-    }
-    case CExpressionKind::kAssignmentExpression: {
-      const auto& a = static_cast<const AssignmentExpression&>(expr);
-      return ExpressionCallsThroughFunctionPointerVar(a.Lhs(), target_var) ||
-             ExpressionCallsThroughFunctionPointerVar(a.Rhs(), target_var);
-    }
-    case CExpressionKind::kCastExpression:
-      return ExpressionCallsThroughFunctionPointerVar(
-          static_cast<const CastExpression&>(expr).Operand(), target_var);
-    case CExpressionKind::kMemberAccessExpression:
-      return ExpressionCallsThroughFunctionPointerVar(
-          static_cast<const MemberAccessExpression&>(expr).Object(), target_var);
-    case CExpressionKind::kArrayIndexExpression: {
-      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
-      return ExpressionCallsThroughFunctionPointerVar(arr.Array(), target_var) ||
-             ExpressionCallsThroughFunctionPointerVar(arr.Index(), target_var);
-    }
-    case CExpressionKind::kTernaryExpression: {
-      const auto& tern = static_cast<const TernaryExpression&>(expr);
-      return ExpressionCallsThroughFunctionPointerVar(tern.Condition(), target_var) ||
-             ExpressionCallsThroughFunctionPointerVar(tern.TrueExpression(), target_var) ||
-             ExpressionCallsThroughFunctionPointerVar(tern.FalseExpression(), target_var);
-    }
-    default:
-      return false;
+    AstVisitor::VisitCallExpression(call);
   }
-}
+
+ private:
+  std::string_view target_var_;
+  bool found_ = false;
+};
 
 bool StatementCallsThroughFunctionPointerVar(const CStatement& stmt, std::string_view target_var) {
-  switch (stmt.Kind()) {
-    case CStatementKind::kCompoundStatement:
-      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-        if (child != nullptr && StatementCallsThroughFunctionPointerVar(*child, target_var)) {
-          return true;
-        }
-      }
-      return false;
-    case CStatementKind::kExpressionStatement:
-      return ExpressionCallsThroughFunctionPointerVar(
-          static_cast<const ExpressionStatement&>(stmt).Expression(), target_var);
-    case CStatementKind::kVariableDeclarationStatement: {
-      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
-      return vd.Initializer() != nullptr &&
-             ExpressionCallsThroughFunctionPointerVar(*vd.Initializer(), target_var);
-    }
-    case CStatementKind::kIfStatement: {
-      const auto& ifs = static_cast<const IfStatement&>(stmt);
-      return ExpressionCallsThroughFunctionPointerVar(ifs.Condition(), target_var) ||
-             StatementCallsThroughFunctionPointerVar(ifs.ThenBranch(), target_var) ||
-             (ifs.ElseBranch() != nullptr &&
-              StatementCallsThroughFunctionPointerVar(*ifs.ElseBranch(), target_var));
-    }
-    case CStatementKind::kWhileStatement: {
-      const auto& ws = static_cast<const WhileStatement&>(stmt);
-      return ExpressionCallsThroughFunctionPointerVar(ws.Condition(), target_var) ||
-             StatementCallsThroughFunctionPointerVar(ws.Body(), target_var);
-    }
-    case CStatementKind::kDoWhileStatement: {
-      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
-      return StatementCallsThroughFunctionPointerVar(dws.Body(), target_var) ||
-             ExpressionCallsThroughFunctionPointerVar(dws.Condition(), target_var);
-    }
-    case CStatementKind::kForStatement: {
-      const auto& fs = static_cast<const ForStatement&>(stmt);
-      return (fs.Init() != nullptr &&
-              StatementCallsThroughFunctionPointerVar(*fs.Init(), target_var)) ||
-             (fs.Condition() != nullptr &&
-              ExpressionCallsThroughFunctionPointerVar(*fs.Condition(), target_var)) ||
-             (fs.Step() != nullptr &&
-              ExpressionCallsThroughFunctionPointerVar(*fs.Step(), target_var)) ||
-             StatementCallsThroughFunctionPointerVar(fs.Body(), target_var);
-    }
-    case CStatementKind::kReturnStatement: {
-      const auto& rs = static_cast<const ReturnStatement&>(stmt);
-      return rs.ReturnValue() != nullptr &&
-             ExpressionCallsThroughFunctionPointerVar(*rs.ReturnValue(), target_var);
-    }
-    case CStatementKind::kSwitchStatement: {
-      const auto& ss = static_cast<const SwitchStatement&>(stmt);
-      if (ExpressionCallsThroughFunctionPointerVar(ss.Condition(), target_var)) return true;
-      for (const auto& sc : ss.Cases()) {
-        if (sc.body != nullptr && StatementCallsThroughFunctionPointerVar(*sc.body, target_var)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
+  FunctionPointerCallVisitor visitor(target_var);
+  visitor.VisitStatement(stmt);
+  return visitor.Found();
 }
 
+class GotoFinderVisitor : public AstVisitor {
+ public:
+  bool Found() const { return found_; }
+  void VisitGotoStatement(const GotoStatement& /*stmt*/) override { found_ = true; }
+
+ private:
+  bool found_ = false;
+};
+
 bool StatementContainsGoto(const CStatement& stmt) {
-  switch (stmt.Kind()) {
-    case CStatementKind::kGotoStatement:
-      return true;
-    case CStatementKind::kCompoundStatement:
-      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
-        if (child != nullptr && StatementContainsGoto(*child)) return true;
-      }
-      return false;
-    case CStatementKind::kIfStatement: {
-      const auto& ifs = static_cast<const IfStatement&>(stmt);
-      return StatementContainsGoto(ifs.ThenBranch()) ||
-             (ifs.ElseBranch() != nullptr && StatementContainsGoto(*ifs.ElseBranch()));
-    }
-    case CStatementKind::kWhileStatement:
-      return StatementContainsGoto(static_cast<const WhileStatement&>(stmt).Body());
-    case CStatementKind::kDoWhileStatement:
-      return StatementContainsGoto(static_cast<const DoWhileStatement&>(stmt).Body());
-    case CStatementKind::kForStatement:
-      return StatementContainsGoto(static_cast<const ForStatement&>(stmt).Body());
-    case CStatementKind::kSwitchStatement:
-      for (const auto& sc : static_cast<const SwitchStatement&>(stmt).Cases()) {
-        if (sc.body != nullptr && StatementContainsGoto(*sc.body)) return true;
-      }
-      return false;
-    default:
-      return false;
-  }
+  GotoFinderVisitor visitor;
+  visitor.VisitStatement(stmt);
+  return visitor.Found();
 }
 
 bool ExtractPrologueNarrowParamCopy(const CExpression& rhs_expr, std::string* param_name,
@@ -1781,6 +1590,28 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
     CoalescePrologueParameterCopies(body, parameters, frame_size, mutable_parameters);
   }
   return any_s_split_coalesced;
+}
+
+bool PrologueParameterCoalescerPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  CoalescePrologueParameterCopies(body, ctx.parameters, ctx.frame_size, ctx.mutable_parameters);
+  return body->ToString() != before;
+}
+
+bool ReusedFloatGprParameterSplitterPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  SplitReusedFloatGprParameters(body, ctx.parameters);
+  return body->ToString() != before;
+}
+
+bool ScratchReusedParameterSplitterPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  if (body == nullptr) return false;
+  std::string before = body->ToString();
+  SplitScratchReusedParameterRegisters(body, ctx.parameters, ctx.frame_size,
+                                       ctx.mutable_parameters);
+  return body->ToString() != before;
 }
 
 }  // namespace rom_nom_nom
