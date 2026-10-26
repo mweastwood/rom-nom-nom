@@ -409,5 +409,74 @@ TEST(AstPassPipelineTest, SparseSwitchDecisionTreePassReconstructsBinarySearchSw
   EXPECT_THAT(rendered, HasSubstr("default:"));
 }
 
+TEST(AstPassPipelineTest,
+     LoopInvariantSinkerHandlesNestedLoopsLongPreheadersAndGeneralizedGivRecovery) {
+  CompoundStatement body;
+
+  // 1. Nested loop with a 32-bit constant `temp_t3 = 0x00FF00FF` and condition constant
+  // `temp_t4 = 16` separated by 5 intermediate assignments before the inner loop:
+  auto outer_loop_body = std::make_unique<CompoundStatement>();
+  outer_loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t3"), CExpression::Integer(0x00FF00FF))));
+  outer_loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t4"), CExpression::Integer(16))));
+  for (int idx = 0; idx < 5; ++idx) {
+    outer_loop_body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("temp_s" + std::to_string(idx)),
+                                CExpression::Integer(idx + 1))));
+  }
+  auto inner_loop_body = std::make_unique<CompoundStatement>();
+  inner_loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s32*)", CExpression::Identifier("arg0")),
+                              CExpression::Binary("&", CExpression::Identifier("v1"),
+                                                  CExpression::Identifier("temp_t3")))));
+  inner_loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("+", CExpression::Identifier("v1"), CExpression::Integer(1)))));
+  outer_loop_body->AddStatement(CStatement::DoWhile(
+      std::move(inner_loop_body),
+      CExpression::Binary("<", CExpression::Identifier("v1"), CExpression::Identifier("temp_t4"))));
+  body.AddStatement(CStatement::DoWhile(
+      std::move(outer_loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("arg1"), CExpression::Integer(0))));
+
+  // 2. Guarded for-loop with GIV in `temp_t2` initialized to `arg0` and stepped by `+ 12`:
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s7"), CExpression::Integer(0))));
+  auto guard_then = std::make_unique<CompoundStatement>();
+  guard_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t2"), CExpression::Identifier("arg0"))));
+  auto giv_loop_body = std::make_unique<CompoundStatement>();
+  giv_loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*(s32*)", CExpression::Identifier("temp_t2")),
+      CExpression::Identifier("temp_s7"))));
+  giv_loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s7"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s7"), CExpression::Integer(1)))));
+  giv_loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t2"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t2"), CExpression::Integer(12)))));
+  guard_then->AddStatement(CStatement::DoWhile(
+      std::move(giv_loop_body),
+      CExpression::Binary("<", CExpression::Identifier("temp_s7"), CExpression::Identifier("n"))));
+  body.AddStatement(CStatement::If(
+      CExpression::Binary(">", CExpression::Identifier("n"), CExpression::Integer(0)),
+      std::move(guard_then)));
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  LoopInvariantSinkerPass pass;
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t3 =")));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t4 =")));
+  EXPECT_THAT(rendered, HasSubstr("(v1 & 16711935)"));
+  EXPECT_THAT(rendered, HasSubstr("while ((v1 < 16));"));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t2")));
+  EXPECT_THAT(rendered, HasSubstr("for (temp_s7 = 0; (temp_s7 < n); temp_s7++)"));
+  EXPECT_THAT(rendered, HasSubstr("*(s32*)(arg0 + (temp_s7 * 12)) = temp_s7;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

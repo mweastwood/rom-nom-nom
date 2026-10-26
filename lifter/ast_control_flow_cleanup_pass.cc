@@ -1534,6 +1534,7 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
   }
   const DoWhileStatement* do_while = nullptr;
   std::string preheader_giv_var;
+  const CExpression* preheader_giv_init = nullptr;
   if (then_body.Statements().size() == 1 && then_body.Statements()[0] != nullptr &&
       then_body.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement) {
     do_while = static_cast<const DoWhileStatement*>(then_body.Statements()[0].get());
@@ -1543,9 +1544,9 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
     std::string giv_lhs;
     const CExpression* giv_rhs = nullptr;
     if (!ExtractSimpleVarAssign(*then_body.Statements()[0], &giv_lhs, &giv_rhs) ||
-        giv_rhs == nullptr || giv_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
-        static_cast<const IntegerLiteralExpression&>(*giv_rhs).Value() != 0 ||
-        (giv_lhs != "v0" && giv_lhs != "v1" && giv_lhs != "at")) {
+        giv_rhs == nullptr || !IsPureExpression(*giv_rhs) ||
+        ExpressionUsesVariable(*giv_rhs, giv_lhs) ||
+        !(IsScratchGprOrArgVar(giv_lhs) || giv_lhs == "at" || giv_lhs == "temp_at")) {
       return false;
     }
     for (size_t after = current_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
@@ -1555,6 +1556,7 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
       }
     }
     preheader_giv_var = std::move(giv_lhs);
+    preheader_giv_init = giv_rhs;
     do_while = static_cast<const DoWhileStatement*>(then_body.Statements()[1].get());
   } else {
     return false;
@@ -1645,9 +1647,6 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
     int init_idx = -1;
     const CExpression* init_rhs = nullptr;
     for (int si = static_cast<int>(target_block->Statements().size()) - 1; si >= 0; --si) {
-      if (static_cast<size_t>(si + 4) < target_block->Statements().size()) {
-        break;
-      }
       const CExpression* rhs =
           MatchSimpleInitializerAssignment(*target_block->Statements()[si], loop_var);
       if (rhs != nullptr) {
@@ -1656,10 +1655,30 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
         break;
       }
     }
-    if (!preheader_giv_var.empty() &&
-        (init_rhs == nullptr || init_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
-         static_cast<const IntegerLiteralExpression&>(*init_rhs).Value() != 0)) {
-      continue;
+    if (!preheader_giv_var.empty()) {
+      if (init_rhs == nullptr || preheader_giv_init == nullptr ||
+          init_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
+          ExpressionUsesVariable(*preheader_giv_init, loop_var)) {
+        continue;
+      }
+      int64_t init_val = static_cast<const IntegerLiteralExpression&>(*init_rhs).Value();
+      if (init_val != 0 &&
+          (preheader_giv_init->Kind() != CExpressionKind::kIntegerLiteral ||
+           static_cast<const IntegerLiteralExpression&>(*preheader_giv_init).Value() !=
+               init_val * giv_stride)) {
+        continue;
+      }
+      std::vector<std::string> giv_init_vars;
+      absl::flat_hash_set<std::string> giv_init_seen;
+      CollectVariablesInExpression(*preheader_giv_init, &giv_init_vars, &giv_init_seen);
+      bool giv_init_modified = false;
+      for (const auto& gv : giv_init_vars) {
+        if (StatementModifiesVariable(loop_compound, gv)) {
+          giv_init_modified = true;
+          break;
+        }
+      }
+      if (giv_init_modified) continue;
     }
 
     bool guard_compatible =
@@ -1668,7 +1687,6 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
     if (!guard_compatible && init_idx >= 0 && init_rhs != nullptr) {
       std::unique_ptr<CExpression> normalized_guard = guard_cond.Clone();
       for (int si = static_cast<int>(target_block->Statements().size()) - 1; si >= 0; --si) {
-        if (static_cast<size_t>(si + 4) < target_block->Statements().size()) break;
         if (si == init_idx || target_block->Statements()[si] == nullptr) continue;
         std::string other_var;
         const CExpression* other_rhs = nullptr;
@@ -1727,8 +1745,17 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
       auto for_body = std::make_unique<CompoundStatement>();
       std::unique_ptr<CExpression> giv_replacement;
       if (!preheader_giv_var.empty() && giv_stride > 1) {
-        giv_replacement = CExpression::Binary("*", CExpression::Identifier(loop_var),
-                                              CExpression::Integer(giv_stride));
+        auto scaled_loop_var = CExpression::Binary("*", CExpression::Identifier(loop_var),
+                                                   CExpression::Integer(giv_stride));
+        if (preheader_giv_init != nullptr &&
+            (preheader_giv_init->Kind() != CExpressionKind::kIntegerLiteral ||
+             (static_cast<const IntegerLiteralExpression&>(*init_rhs).Value() == 0 &&
+              static_cast<const IntegerLiteralExpression&>(*preheader_giv_init).Value() != 0))) {
+          giv_replacement =
+              CExpression::Binary("+", preheader_giv_init->Clone(), std::move(scaled_loop_var));
+        } else {
+          giv_replacement = std::move(scaled_loop_var);
+        }
       }
       for (size_t i = 0; i < loop_compound.Statements().size(); ++i) {
         if (static_cast<int>(i) == inc_idx || static_cast<int>(i) == giv_inc_idx) continue;
@@ -1999,7 +2026,6 @@ bool SynthesizeForLoopsInBlock(CompoundStatement* body) {
           ifs.ElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
         absl::flat_hash_set<std::string> zero_vars;
         for (int si = static_cast<int>(rebuilt.Statements().size()) - 1; si >= 0; --si) {
-          if (static_cast<size_t>(si + 4) < rebuilt.Statements().size()) break;
           std::string z_lhs;
           const CExpression* z_rhs = nullptr;
           if (!ExtractSimpleVarAssign(*rebuilt.Statements()[si], &z_lhs, &z_rhs) ||
@@ -2043,17 +2069,13 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
   if (body == nullptr) return false;
   bool any_changed = false;
 
-  std::function<void(CompoundStatement*, bool)> process_block = [&](CompoundStatement* comp,
-                                                                    bool in_loop) {
+  std::function<void(CompoundStatement*)> process_block = [&](CompoundStatement* comp) {
     if (comp == nullptr) return;
     auto& stmts = comp->MutableStatements();
     for (size_t i = 0; i < stmts.size(); ++i) {
       if (stmts[i] == nullptr) continue;
-      bool child_in_loop = in_loop || stmts[i]->Kind() == CStatementKind::kDoWhileStatement ||
-                           stmts[i]->Kind() == CStatementKind::kWhileStatement ||
-                           stmts[i]->Kind() == CStatementKind::kForStatement;
-      ForEachSubCompoundStatement(
-          stmts[i].get(), [&](CompoundStatement* sub) { process_block(sub, child_in_loop); });
+      ForEachSubCompoundStatement(stmts[i].get(),
+                                  [&](CompoundStatement* sub) { process_block(sub); });
     }
 
     for (size_t i = 0; i < stmts.size(); ++i) {
@@ -2074,8 +2096,6 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
           any_changed = true;
         }
       }
-
-      if (in_loop) continue;
 
       // Extract direct loop (`do-while`, `while`, `for`) or single-loop guarded `if (guard) { loop
       // }`.
@@ -2102,9 +2122,8 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
       }
       if (loop_stmt == nullptr) continue;
 
-      // Scan up to 4 preceding pure assignments `reg = rhs;` before `stmts[i]`.
-      for (int scan = static_cast<int>(i) - 1; scan >= 0 && scan >= static_cast<int>(i) - 4;
-           --scan) {
+      // Scan preceding pure assignments `reg = rhs;` before `stmts[i]`.
+      for (int scan = static_cast<int>(i) - 1; scan >= 0; --scan) {
         if (stmts[scan] == nullptr) break;
         std::string reg;
         const CExpression* rhs = nullptr;
@@ -2160,8 +2179,8 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
           continue;
         }
 
-        // Case A: `reg = const;` where `reg` is read ONLY in the loop condition (and optional
-        // entry guard condition), and not inside the loop body.
+        // Case A: `reg = const;` where `reg` is read in the loop condition (or is a 32-bit `lui`
+        // constant read inside a call-free loop body).
         if (is_int_const) {
           CExpression* loop_cond_ptr = nullptr;
           const CStatement* loop_body_ptr = nullptr;
@@ -2201,6 +2220,18 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
             any_changed = true;
             continue;
           }
+          const int64_t int_val = static_cast<const IntegerLiteralExpression&>(*rhs).Value();
+          if (!StatementContainsCall(*stmts[i]) && (int_val < -32768 || int_val > 65535)) {
+            auto replacement = rhs->Clone();
+            SubstituteExpressionInStatementMutator mutator(reg, *replacement);
+            mutator.MutateStatement(&stmts[i]);
+            if (!StatementReferencesVariable(*stmts[i], reg)) {
+              stmts.erase(stmts.begin() + scan);
+              --i;
+              any_changed = true;
+              continue;
+            }
+          }
         }
 
         // Case B: `reg = &D_...;` where `reg` is a symbol-address invariant used inside a loop
@@ -2221,7 +2252,7 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
     }
   };
 
-  process_block(body, /*in_loop=*/false);
+  process_block(body);
   return any_changed;
 }
 
@@ -2259,6 +2290,7 @@ bool LoopInvariantSinkerPass::Run(CompoundStatement* body, const AstPassContext&
   bool changed = SynthesizeForLoopsInBlock(body);
   if (SinkLoopInvariantAssignments(body)) {
     changed = true;
+    SynthesizeForLoopsInBlock(body);
   }
   return changed;
 }
