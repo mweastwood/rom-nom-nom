@@ -41,6 +41,12 @@ class StackFrameLayout {
 
   int32_t TotalFrameSize() const { return analysis_.frame_size; }
   int32_t OutgoingArgsSize() const { return analysis_.outgoing_args_size; }
+  int32_t GpRegSize() const {
+    return static_cast<int32_t>(analysis_.prologue.saved_reg_offsets.size() * 4);
+  }
+  int32_t GpRegRounded() const { return (GpRegSize() + 7) & ~7; }
+  int32_t FpRegSize() const;
+  int32_t FpRegRounded() const { return (FpRegSize() + 7) & ~7; }
   int32_t LocalVarRegionStart() const { return analysis_.outgoing_args_size; }
   int32_t LocalVarRegionEnd() const {
     if (analysis_.prologue.min_saved_reg_offset != 0xFFFFFFFF &&
@@ -54,10 +60,16 @@ class StackFrameLayout {
     int32_t start = LocalVarRegionStart();
     return (end > start) ? (end - start) : 0;
   }
-  int32_t SpBufferSize() const { return analysis_.sp_buffer_size; }
-  int32_t CallerHomingStart() const {
-    return (analysis_.frame_size > 0) ? analysis_.frame_size : 16;
+  // Exact `var_size` component in GCC 2.7.2 `compute_frame_size`:
+  // `total_size = var_size + args_size + gp_reg_rounded + MIPS_STACK_ALIGN(fp_reg_size)`.
+  int32_t ExactVarSize() const {
+    if (analysis_.frame_size <= 0) return 0;
+    int32_t start = (analysis_.outgoing_args_size + 7) & ~7;
+    int32_t end = LocalVarRegionEnd() & ~7;
+    return (end > start) ? (end - start) : 0;
   }
+  int32_t SpBufferSize() const { return analysis_.sp_buffer_size; }
+  int32_t CallerHomingStart() const { return analysis_.frame_size; }
 
   bool HasFramePointer() const { return analysis_.has_frame_pointer; }
   bool HasCalls() const { return analysis_.has_calls; }

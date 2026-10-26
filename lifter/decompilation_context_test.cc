@@ -85,9 +85,14 @@ TEST(DecompilationContextTest, BuildsCfgAndClassifiesStackFrameLayoutRegions) {
   const StackFrameLayout& layout = context.FrameLayout();
   EXPECT_EQ(layout.TotalFrameSize(), 40);
   EXPECT_EQ(layout.OutgoingArgsSize(), 16);
+  EXPECT_EQ(layout.GpRegSize(), 8);
+  EXPECT_EQ(layout.GpRegRounded(), 8);
+  EXPECT_EQ(layout.FpRegSize(), 0);
+  EXPECT_EQ(layout.FpRegRounded(), 0);
   EXPECT_EQ(layout.LocalVarRegionStart(), 16);
   EXPECT_EQ(layout.LocalVarRegionEnd(), 32);
   EXPECT_EQ(layout.LocalVarSize(), 16);
+  EXPECT_EQ(layout.ExactVarSize(), 16);
   EXPECT_EQ(layout.CallerHomingStart(), 40);
   EXPECT_TRUE(layout.HasCalls());
 

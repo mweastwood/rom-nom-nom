@@ -1370,5 +1370,45 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(emitted, Not(HasSubstr("u8 sp[")));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     PreservesStackFrameGapWhenThreeOrMoreNonAddressTakenSpLocalsFitInRegisters) {
+  ControlFlowGraph cfg;
+
+  StackFrameAnalysis frame;
+  frame.frame_size = 56;
+  frame.has_calls = true;
+  frame.outgoing_args_size = 16;
+  frame.prologue.min_saved_reg_offset = 40;
+  frame.prologue.saved_reg_offsets[Register::kS0] = 40;
+  frame.prologue.saved_reg_offsets[Register::kS1] = 44;
+  frame.prologue.saved_reg_offsets[Register::kRa] = 48;
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_16"), CExpression::Integer(1))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_20"), CExpression::Integer(2))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_24"), CExpression::Integer(3))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_28"), CExpression::Integer(4))));
+  body->AddStatement(CStatement::Return(
+      CExpression::Binary("+",
+                          CExpression::Binary("+", CExpression::Identifier("var_sp_16"),
+                                              CExpression::Identifier("var_sp_20")),
+                          CExpression::Binary("+", CExpression::Identifier("var_sp_24"),
+                                              CExpression::Identifier("var_sp_28")))));
+
+  std::vector<CParameter> params;
+  AstConverterOptions opts;
+  opts.function_name = "TestFourScalarSpLocalsInGap";
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string emitted = body->ToString();
+  EXPECT_THAT(emitted, HasSubstr("u8 sp[24];"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

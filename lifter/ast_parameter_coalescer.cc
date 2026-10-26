@@ -452,8 +452,8 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
                lhs == "f30" || lhs == "f20_d" || lhs == "f22_d" || lhs == "f24_d" ||
                lhs == "f26_d" || lhs == "f28_d" || lhs == "f30_d");
           bool is_homed_param_slot = false;
-          if (frame_size > 0 && rhs.size() == 4 && absl::StartsWith(rhs, "arg") && rhs[3] >= '0' &&
-              rhs[3] <= '3') {
+          if ((frame_size > 0 || StatementTakesAddressOf(*comp, lhs)) && rhs.size() == 4 &&
+              absl::StartsWith(rhs, "arg") && rhs[3] >= '0' && rhs[3] <= '3') {
             uint32_t expected_off = frame_size + static_cast<uint32_t>(rhs[3] - '0') * 4;
             if (lhs == absl::StrCat("var_sp_", expected_off)) {
               is_homed_param_slot = true;

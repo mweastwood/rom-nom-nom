@@ -1205,6 +1205,7 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
     int last_def = -1;
     int last_call = -1;
     bool used_after_last_def = false;
+    bool used_non_compare_after_last_def = false;
     bool any_f0_use = false;
     bool has_return_in_seq = false;
     for (const auto& inst : instructions) {
@@ -1218,14 +1219,20 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
         last_call = static_cast<int>(i);
         last_def = -1;
         used_after_last_def = false;
+        used_non_compare_after_last_def = false;
         continue;
       }
       RegisterUseDef ud = GetInstructionUseDef(instructions[i]);
+      const bool is_cop1_compare =
+          instructions[i].opcode >= Opcode::kCFS && instructions[i].opcode <= Opcode::kCNgtD;
       for (FpRegister r : ud.fpr_uses) {
         if (r == FpRegister::kF0) {
           any_f0_use = true;
           if (last_def != -1) {
             used_after_last_def = true;
+            if (!is_cop1_compare) {
+              used_non_compare_after_last_def = true;
+            }
           }
           break;
         }
@@ -1234,6 +1241,7 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
         if (r == FpRegister::kF0) {
           last_def = static_cast<int>(i);
           used_after_last_def = false;
+          used_non_compare_after_last_def = false;
           break;
         }
       }
@@ -1241,11 +1249,12 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
           (instructions[i].opcode == Opcode::kSwc1 || instructions[i].opcode == Opcode::kSdc1) &&
           instructions[i].ft.has_value() && *instructions[i].ft != FpRegister::kF0) {
         used_after_last_def = true;
+        used_non_compare_after_last_def = true;
       }
     }
     if (last_def != -1) {
       if (used_after_last_def) {
-        return -1;
+        return used_non_compare_after_last_def ? -1 : 2;
       }
       return 1;
     }
@@ -1293,6 +1302,16 @@ bool DetermineReturnsF0(const ControlFlowGraph& cfg) {
           bool edge_avail = false;
           if (effect == 1) {
             edge_avail = true;
+          } else if (effect == 2) {
+            bool sibling_has_unconsumed_f0_def = false;
+            for (size_t other_p : predecessors[b]) {
+              if (other_p == p) continue;
+              if (eval_seq(cfg.Blocks()[other_p].instructions) == 1) {
+                sibling_has_unconsumed_f0_def = true;
+                break;
+              }
+            }
+            edge_avail = sibling_has_unconsumed_f0_def;
           } else if (effect == -1) {
             edge_avail = false;
           } else {

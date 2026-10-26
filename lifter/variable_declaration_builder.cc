@@ -1117,7 +1117,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
           if (target_local_size > for_loop_spill_bytes) {
             unreferenced_sp_gap_size = target_local_size - for_loop_spill_bytes;
           }
-        } else if (callee_saved_gprs < 8 && (addr_taken_sp_bytes > 0 || sp_locals_in_gap <= 2)) {
+        } else if (callee_saved_gprs < 8) {
           uint32_t gcc_local_bytes = ((addr_taken_sp_bytes + 7u) & ~7u) + for_loop_spill_bytes;
           if (StatementContainsMaskedSignBitFloatFix(**body)) {
             gcc_local_bytes += 8u;
@@ -1404,11 +1404,18 @@ absl::Status PrependSynthesizedLocalDeclarations(
   int pinned_caller_fp_count = 0;
   absl::flat_hash_set<std::string> pinned_fp_bases;
 
+  const bool f0_reused_as_working_temp =
+      (CountDirectAssignmentsInStatement(**body, "f0") >= 2 &&
+       CountNonReturnVariableReadUsesInStatement(**body, "f0") >= 1);
+
   auto can_pin_abi_fpr_base = [&](std::string_view base) -> bool {
     if (!IsAbiArgOrReturnFprBaseName(base)) {
       return false;
     }
     if (is_leaf_func) {
+      if (base == "f0" && returns_fp && f0_reused_as_working_temp) {
+        return true;
+      }
       return !returns_fp && (has_shared_fp_base || callee_saved_fp_count >= 1 ||
                              fp_base_counts.size() > kNumDedicatedCallerScratchFprs);
     }

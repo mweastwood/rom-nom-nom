@@ -18,6 +18,15 @@ StackFrameLayout StackFrameLayout::AnalyzeFromCfg(const ControlFlowGraph& cfg) {
   return StackFrameLayout(StackFrameAnalyzer::Analyze(cfg));
 }
 
+int32_t StackFrameLayout::FpRegSize() const {
+  absl::flat_hash_set<int> even_fpr_pairs;
+  for (const auto& [fpr, offset] : analysis_.prologue.saved_fpr_offsets) {
+    (void)offset;
+    even_fpr_pairs.insert(static_cast<int>(fpr) & ~1);
+  }
+  return static_cast<int32_t>(even_fpr_pairs.size() * 8);
+}
+
 bool StackFrameLayout::IsCalleeSavedSpillOffset(int32_t sp_offset) const {
   for (const auto& [reg, offset] : analysis_.prologue.saved_reg_offsets) {
     if (offset == sp_offset) return true;

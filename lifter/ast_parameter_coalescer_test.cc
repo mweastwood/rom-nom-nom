@@ -829,5 +829,41 @@ TEST(AstParameterCoalescerTest, SplitsParameterRegisterAfterNarrowPrologueCopyTo
   EXPECT_THAT(code, HasSubstr("return temp_a0;"));
 }
 
+TEST(AstParameterCoalescerTest, CoalescesAddressTakenCallerHomedParamSlotsInZeroFrameLeafFunction) {
+  CompoundStatement body;
+  // var_sp_8 = arg2;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_8"), CExpression::Identifier("arg2"))));
+  // var_sp_12 = arg3;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_12"), CExpression::Identifier("arg3"))));
+  // f0 = (*(f32 *)&var_sp_8 * *(f32 *)&var_sp_12);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f0"),
+      CExpression::Binary(
+          "*",
+          CExpression::Unary(
+              "*", CExpression::Cast(CType{.name = "f32", .pointer_depth = 1},
+                                     CExpression::Unary("&", CExpression::Identifier("var_sp_8")))),
+          CExpression::Unary("*", CExpression::Cast(CType{.name = "f32", .pointer_depth = 1},
+                                                    CExpression::Unary("&", CExpression::Identifier(
+                                                                                "var_sp_12"))))))));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("f0")));
+
+  std::vector<CParameter> params = {
+      {.type = CType::F32(), .name = "f12"},
+      {.type = CType::F32(), .name = "f14"},
+      {.type = CType::S32(), .name = "arg2"},
+      {.type = CType::S32(), .name = "arg3"},
+  };
+  CoalescePrologueParameterCopies(&body, params, /*frame_size=*/0);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_8")));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_12")));
+  EXPECT_THAT(code, HasSubstr("&arg2"));
+  EXPECT_THAT(code, HasSubstr("&arg3"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

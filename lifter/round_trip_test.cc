@@ -6347,5 +6347,21 @@ void ShortCircuitOrGuardWithConflictingFallthroughDelayLoad(ChannelSlot* slot, s
 )");
 }
 
+TEST_F(RoundTripTest, ZeroFrameLeafBitcastFloatFromCallerHomedGprParams) {
+  AssertRoundTripBitExact("ZeroFrameLeafBitcastFloatFromCallerHomedGprParams", R"(
+f32 ZeroFrameLeafBitcastFloatFromCallerHomedGprParams(
+    f32 x, f32 y, s32 a_bits, s32 b_bits, s32 c_bits, s32 d_bits) {
+    f32 b = *(f32*)&b_bits;
+    if (b != 0.0f) {
+        f32 a = *(f32*)&a_bits;
+        f32 c = *(f32*)&c_bits;
+        f32 d = *(f32*)&d_bits;
+        return (-(a * x) - (c * y) - d) / b;
+    }
+    return 0.0f;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
