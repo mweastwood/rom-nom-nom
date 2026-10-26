@@ -162,5 +162,64 @@ s32 Compute(s32 a, s32 b) {
   EXPECT_FALSE(orig_or->PassMatches(*diff_rtl_or, "Compute", RtlPassKind::kDbr));
 }
 
+TEST(GccRtlDumpInspectorTest, SplitScratchRegisterWebsAllocateInLregInsteadOfGreg) {
+  auto inspector_or = GccRtlDumpInspector::Create();
+  ASSERT_TRUE(inspector_or.ok()) << inspector_or.status();
+
+  // When a single variable `temp_t0` is used across both `if` and `else` blocks AND a call
+  // occurs in one branch, `flow.c` marks `temp_t0` global with `reg_n_calls_crossed > 0`,
+  // preventing `local-alloc.c` (`.lreg`) from allocating the non-call-crossing web.
+  auto merged_or = inspector_or->InspectC(R"(
+extern void helper(s32 a, s32 b);
+extern void sink(s32 a, s32 b);
+
+void Dispatch(s32 cond, s32 x, s32* out) {
+  s32 temp_t0;
+  if (cond != 0) {
+    temp_t0 = x + 4;
+    helper(1, temp_t0);
+    sink(2, temp_t0);
+  } else {
+    temp_t0 = x - 8;
+    out[0] = temp_t0;
+    out[1] = temp_t0;
+  }
+}
+)");
+  ASSERT_TRUE(merged_or.ok()) << merged_or.status();
+
+  // Splitting the `else`-branch basic-block-local web into `temp_t0_2` allows `local-alloc.c`
+  // (`block_alloc` in `.lreg`) to allocate `temp_t0_2` locally in `.lreg`.
+  auto split_or = inspector_or->InspectC(R"(
+extern void helper(s32 a, s32 b);
+extern void sink(s32 a, s32 b);
+
+void Dispatch(s32 cond, s32 x, s32* out) {
+  s32 temp_t0;
+  s32 temp_t0_2;
+  if (cond != 0) {
+    temp_t0 = x + 4;
+    helper(1, temp_t0);
+    sink(2, temp_t0);
+  } else {
+    temp_t0_2 = x - 8;
+    out[0] = temp_t0_2;
+    out[1] = temp_t0_2;
+  }
+}
+)");
+  ASSERT_TRUE(split_or.ok()) << split_or.status();
+
+  const auto* merged_lreg = merged_or->GetFunctionPass("Dispatch", RtlPassKind::kLreg);
+  const auto* split_lreg = split_or->GetFunctionPass("Dispatch", RtlPassKind::kLreg);
+  ASSERT_NE(merged_lreg, nullptr);
+  ASSERT_NE(split_lreg, nullptr);
+  // In the split version, `.lreg` allocates `temp_t0_2` to a caller-saved register, whereas in
+  // the merged version `temp_t0` is deferred to `.greg` and allocated to `$s0`.
+  EXPECT_NE(merged_or->AssemblyText().find("$16"), std::string::npos);
+  EXPECT_NE(split_lreg->header_text, merged_lreg->header_text);
+  EXPECT_FALSE(merged_or->PassMatches(*split_or, "Dispatch", RtlPassKind::kLreg));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

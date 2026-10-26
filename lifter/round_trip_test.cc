@@ -6426,5 +6426,31 @@ s32 SixArgCallWithDisjointStructFieldLoadsAndStore(s32 id, Vec4i* v) {
 )");
 }
 
+TEST_F(RoundTripTest, PostLoopScratchWebReusedForPointerInitAndGlobalStore) {
+  AssertRoundTripBitExact("PostLoopScratchWebReusedForPointerInitAndGlobalStore", R"(
+extern void InitHardwareSubsystem(s32 mode);
+extern s32 g_tail_link;
+extern s32 g_head_ptr;
+
+void PostLoopScratchWebReusedForPointerInitAndGlobalStore(u8* table_base, s32 base_val, s32 step_val) {
+    s32 i = 0;
+    u8* cur = table_base;
+    s32* tail;
+    s32 first_addr;
+    InitHardwareSubsystem(base_val);
+    do {
+        *(s32*)(cur + 0) = base_val + i;
+        *(s32*)(cur + 4) = step_val;
+        i++;
+        cur += 8;
+    } while ((u32)i < 8U);
+    tail = &g_tail_link;
+    first_addr = (s32)tail - 64;
+    *tail = first_addr;
+    g_head_ptr = first_addr;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -25,6 +25,7 @@
 #include "lifter/ast_converter.h"
 #include "lifter/ast_pass_pipeline.h"
 #include "lifter/stack_frame_analyzer.h"
+#include "lifter/variable_declaration_builder.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -853,6 +854,652 @@ bool ReturnAndGlobalTypePromotionPass::Run(CompoundStatement* body, const AstPas
   }
   *body = std::move(*temp_body);
   return body->ToString() != before;
+}
+
+namespace {
+
+bool IsCallerSavedScratchVarName(std::string_view name) {
+  if (name == "v0" || name == "v1") {
+    return true;
+  }
+  if (name.size() == 7 && absl::StartsWith(name, "temp_t") && name[6] >= '0' && name[6] <= '9') {
+    return true;
+  }
+  if (name.size() == 7 && absl::StartsWith(name, "temp_a") && name[6] >= '0' && name[6] <= '3') {
+    return true;
+  }
+  return false;
+}
+
+class ShortCircuitOrTernaryVisitor : public AstVisitor {
+ public:
+  void VisitBinaryExpression(const BinaryExpression& expr) override {
+    if (expr.Op() == "&&" || expr.Op() == "||") {
+      found_ = true;
+      Stop();
+      return;
+    }
+    AstVisitor::VisitBinaryExpression(expr);
+  }
+
+  void VisitTernaryExpression(const TernaryExpression& expr) override {
+    (void)expr;
+    found_ = true;
+    Stop();
+  }
+
+  void VisitCallExpression(const CallExpression& expr) override {
+    if (!IsInlineAsmIntrinsicCall(expr)) {
+      ++call_count_;
+    }
+    AstVisitor::VisitCallExpression(expr);
+  }
+
+  bool FoundShortCircuitOrTernary() const { return found_; }
+  int CallCount() const { return call_count_; }
+
+ private:
+  bool found_ = false;
+  int call_count_ = 0;
+};
+
+void InspectExpressionControlAndCalls(const CExpression& expr, bool* has_short_circuit_or_ternary,
+                                      int* call_count) {
+  ShortCircuitOrTernaryVisitor visitor;
+  visitor.VisitExpression(expr);
+  *has_short_circuit_or_ternary = visitor.FoundShortCircuitOrTernary();
+  *call_count = visitor.CallCount();
+}
+
+bool IsStandaloneCallUsingVarOnlyInArgs(const CExpression& expr, std::string_view var) {
+  const CExpression* cur = &expr;
+  if (cur->Kind() == CExpressionKind::kAssignmentExpression) {
+    const auto& assign = static_cast<const AssignmentExpression&>(*cur);
+    if (assign.Op() != "=" || ExpressionUsesVariable(assign.Lhs(), var) ||
+        ExpressionModifiesVariable(assign.Lhs(), var) ||
+        StatementHasCall(ExpressionStatement(assign.Lhs().Clone()))) {
+      return false;
+    }
+    cur = &assign.Rhs();
+  }
+  while (cur->Kind() == CExpressionKind::kCastExpression) {
+    cur = &static_cast<const CastExpression&>(*cur).Operand();
+  }
+  if (cur->Kind() != CExpressionKind::kCallExpression) {
+    return false;
+  }
+  const auto& call = static_cast<const CallExpression&>(*cur);
+  for (const auto& arg : call.Arguments()) {
+    if (arg != nullptr && ExpressionContainsCall(*arg, /*ignore_math_intrinsics=*/true)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ExprMentionsVar(const CExpression& expr, std::string_view var) {
+  return CountIdentifierOccurrencesInExpression(expr, var) > 0;
+}
+
+enum class VarPathOutcome {
+  kKilled,
+  kFallthrough,
+  kLiveRead,
+};
+
+VarPathOutcome CheckStmtVarOutcome(const CStatement& stmt, std::string_view var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCommentStatement:
+      return VarPathOutcome::kFallthrough;
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& vd = static_cast<const VariableDeclarationStatement&>(stmt);
+      if (vd.Initializer() != nullptr && (ExprMentionsVar(*vd.Initializer(), var) ||
+                                          ExpressionModifiesVariable(*vd.Initializer(), var))) {
+        return VarPathOutcome::kLiveRead;
+      }
+      return (vd.Name() == var) ? VarPathOutcome::kKilled : VarPathOutcome::kFallthrough;
+    }
+    case CStatementKind::kExpressionStatement: {
+      const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+      if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& assign = static_cast<const AssignmentExpression&>(expr);
+        if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(assign.Lhs()).Name() == var) {
+          if (ExprMentionsVar(assign.Rhs(), var) || ExpressionModifiesVariable(assign.Rhs(), var)) {
+            return VarPathOutcome::kLiveRead;
+          }
+          return VarPathOutcome::kKilled;
+        }
+      }
+      if (ExprMentionsVar(expr, var) || ExpressionModifiesVariable(expr, var)) {
+        return VarPathOutcome::kLiveRead;
+      }
+      return VarPathOutcome::kFallthrough;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      if (rs.ReturnValue() != nullptr && (ExprMentionsVar(*rs.ReturnValue(), var) ||
+                                          ExpressionModifiesVariable(*rs.ReturnValue(), var))) {
+        return VarPathOutcome::kLiveRead;
+      }
+      return VarPathOutcome::kKilled;
+    }
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      for (const auto& child : comp.Statements()) {
+        if (child == nullptr) continue;
+        VarPathOutcome out = CheckStmtVarOutcome(*child, var);
+        if (out != VarPathOutcome::kFallthrough) {
+          return out;
+        }
+      }
+      return VarPathOutcome::kFallthrough;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      if (ExprMentionsVar(ifs.Condition(), var) ||
+          ExpressionModifiesVariable(ifs.Condition(), var)) {
+        return VarPathOutcome::kLiveRead;
+      }
+      VarPathOutcome then_out = CheckStmtVarOutcome(ifs.ThenBranch(), var);
+      if (then_out == VarPathOutcome::kLiveRead) {
+        return VarPathOutcome::kLiveRead;
+      }
+      VarPathOutcome else_out = (ifs.ElseBranch() != nullptr)
+                                    ? CheckStmtVarOutcome(*ifs.ElseBranch(), var)
+                                    : VarPathOutcome::kFallthrough;
+      if (else_out == VarPathOutcome::kLiveRead) {
+        return VarPathOutcome::kLiveRead;
+      }
+      if (then_out == VarPathOutcome::kKilled && else_out == VarPathOutcome::kKilled) {
+        return VarPathOutcome::kKilled;
+      }
+      return VarPathOutcome::kFallthrough;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      if (ExprMentionsVar(ws.Condition(), var) || ExpressionModifiesVariable(ws.Condition(), var)) {
+        return VarPathOutcome::kLiveRead;
+      }
+      if (CheckStmtVarOutcome(ws.Body(), var) == VarPathOutcome::kLiveRead) {
+        return VarPathOutcome::kLiveRead;
+      }
+      return VarPathOutcome::kFallthrough;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      if (CheckStmtVarOutcome(dws.Body(), var) == VarPathOutcome::kLiveRead) {
+        return VarPathOutcome::kLiveRead;
+      }
+      if (ExprMentionsVar(dws.Condition(), var) ||
+          ExpressionModifiesVariable(dws.Condition(), var)) {
+        return VarPathOutcome::kLiveRead;
+      }
+      return VarPathOutcome::kFallthrough;
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      if (fs.Init() != nullptr &&
+          CheckStmtVarOutcome(*fs.Init(), var) == VarPathOutcome::kLiveRead) {
+        return VarPathOutcome::kLiveRead;
+      }
+      if (fs.Condition() != nullptr && (ExprMentionsVar(*fs.Condition(), var) ||
+                                        ExpressionModifiesVariable(*fs.Condition(), var))) {
+        return VarPathOutcome::kLiveRead;
+      }
+      if (CheckStmtVarOutcome(fs.Body(), var) == VarPathOutcome::kLiveRead) {
+        return VarPathOutcome::kLiveRead;
+      }
+      if (fs.Step() != nullptr &&
+          (ExprMentionsVar(*fs.Step(), var) || ExpressionModifiesVariable(*fs.Step(), var))) {
+        return VarPathOutcome::kLiveRead;
+      }
+      return VarPathOutcome::kFallthrough;
+    }
+    default:
+      return VarPathOutcome::kLiveRead;
+  }
+}
+
+bool IsVarMustKilledFrom(const CompoundStatement& comp, size_t start_stmt_idx, std::string_view var,
+                         bool dead_at_comp_exit) {
+  const auto& stmts = comp.Statements();
+  for (size_t m = start_stmt_idx; m < stmts.size(); ++m) {
+    if (stmts[m] == nullptr) continue;
+    VarPathOutcome out = CheckStmtVarOutcome(*stmts[m], var);
+    if (out == VarPathOutcome::kKilled) {
+      return true;
+    }
+    if (out == VarPathOutcome::kLiveRead) {
+      return false;
+    }
+  }
+  return dead_at_comp_exit;
+}
+
+struct ScratchDefUseWeb {
+  CompoundStatement* block = nullptr;
+  size_t start_idx = 0;
+  size_t end_idx = 0;
+  bool end_is_if_condition = false;
+  bool crosses_call = false;
+  int occurrence_count = 0;
+};
+
+int CountWebOccurrences(const ScratchDefUseWeb& web, std::string_view var) {
+  int total = 0;
+  const auto& stmts = web.block->Statements();
+  size_t stmt_end = web.end_is_if_condition ? web.end_idx : (web.end_idx + 1);
+  for (size_t k = web.start_idx; k < stmt_end; ++k) {
+    if (stmts[k] != nullptr) {
+      total += CountIdentifierOccurrencesInStatement(*stmts[k], var);
+    }
+  }
+  if (web.end_is_if_condition && stmts[web.end_idx] != nullptr &&
+      stmts[web.end_idx]->Kind() == CStatementKind::kIfStatement) {
+    const auto& ifs = static_cast<const IfStatement&>(*stmts[web.end_idx]);
+    total += CountIdentifierOccurrencesInExpression(ifs.Condition(), var);
+  }
+  return total;
+}
+
+void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view var,
+                                     bool dead_at_comp_exit,
+                                     std::vector<ScratchDefUseWeb>* out_webs) {
+  if (comp == nullptr) return;
+  auto& stmts = comp->MutableStatements();
+  const size_t n = stmts.size();
+
+  bool in_web = false;
+  size_t start_idx = 0;
+  size_t last_use_idx = 0;
+  bool has_read_use = false;
+  bool web_aborted = false;
+  bool seen_call_after_last_def = false;
+  bool web_crosses_call = false;
+
+  auto try_start_web = [&](size_t idx, const CExpression& expr) -> bool {
+    if (expr.Kind() != CExpressionKind::kAssignmentExpression) return false;
+    const auto& assign = static_cast<const AssignmentExpression&>(expr);
+    if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+        static_cast<const IdentifierExpression&>(assign.Lhs()).Name() != var) {
+      return false;
+    }
+    if (ExprMentionsVar(assign.Rhs(), var) || ExpressionModifiesVariable(assign.Rhs(), var)) {
+      return false;
+    }
+    bool has_sc = false;
+    int calls = 0;
+    InspectExpressionControlAndCalls(assign.Rhs(), &has_sc, &calls);
+    if (has_sc) {
+      return false;
+    }
+    in_web = true;
+    start_idx = idx;
+    last_use_idx = idx;
+    has_read_use = false;
+    web_aborted = false;
+    seen_call_after_last_def = false;
+    web_crosses_call = (calls > 1);
+    return true;
+  };
+
+  auto finalize_web_at_boundary = [&]() {
+    if (in_web && !web_aborted && has_read_use && last_use_idx > start_idx) {
+      if (IsVarMustKilledFrom(*comp, last_use_idx + 1, var, dead_at_comp_exit)) {
+        ScratchDefUseWeb web{
+            .block = comp,
+            .start_idx = start_idx,
+            .end_idx = last_use_idx,
+            .end_is_if_condition = false,
+            .crosses_call = web_crosses_call,
+        };
+        web.occurrence_count = CountWebOccurrences(web, var);
+        out_webs->push_back(web);
+      }
+    }
+    in_web = false;
+  };
+
+  for (size_t k = 0; k < n; ++k) {
+    if (stmts[k] == nullptr) continue;
+    CStatement& stmt = *stmts[k];
+    if (stmt.Kind() == CStatementKind::kCommentStatement) {
+      continue;
+    }
+    if (stmt.Kind() == CStatementKind::kVariableDeclarationStatement) {
+      continue;
+    }
+    if (stmt.Kind() == CStatementKind::kExpressionStatement) {
+      const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+      if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& assign = static_cast<const AssignmentExpression&>(expr);
+        if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(assign.Lhs()).Name() == var &&
+            !ExprMentionsVar(assign.Rhs(), var) && !ExpressionModifiesVariable(assign.Rhs(), var)) {
+          if (in_web && !web_aborted && has_read_use && last_use_idx > start_idx) {
+            ScratchDefUseWeb web{
+                .block = comp,
+                .start_idx = start_idx,
+                .end_idx = last_use_idx,
+                .end_is_if_condition = false,
+                .crosses_call = web_crosses_call,
+            };
+            web.occurrence_count = CountWebOccurrences(web, var);
+            out_webs->push_back(web);
+          }
+          in_web = false;
+          try_start_web(k, expr);
+          continue;
+        }
+      }
+
+      if (!in_web) {
+        continue;
+      }
+
+      bool has_sc = false;
+      int calls = 0;
+      InspectExpressionControlAndCalls(expr, &has_sc, &calls);
+      const bool uses_var = ExprMentionsVar(expr, var);
+      const bool mods_var = ExpressionModifiesVariable(expr, var);
+
+      if (uses_var || mods_var) {
+        if (has_sc) {
+          web_aborted = true;
+        } else {
+          if (seen_call_after_last_def) {
+            web_crosses_call = true;
+          }
+          if (calls > 0) {
+            if (calls > 1 || mods_var || !IsStandaloneCallUsingVarOnlyInArgs(expr, var)) {
+              web_crosses_call = true;
+            }
+            seen_call_after_last_def = true;
+          }
+        }
+        last_use_idx = k;
+        if (uses_var) {
+          has_read_use = true;
+        }
+      } else {
+        if (has_sc) {
+          finalize_web_at_boundary();
+        } else if (calls > 0) {
+          seen_call_after_last_def = true;
+        }
+      }
+      continue;
+    }
+
+    if (stmt.Kind() == CStatementKind::kReturnStatement) {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      if (in_web && rs.ReturnValue() != nullptr) {
+        const CExpression& ret_val = *rs.ReturnValue();
+        const bool uses_var = ExprMentionsVar(ret_val, var);
+        const bool mods_var = ExpressionModifiesVariable(ret_val, var);
+        if (uses_var || mods_var) {
+          bool has_sc = false;
+          int calls = 0;
+          InspectExpressionControlAndCalls(ret_val, &has_sc, &calls);
+          if (has_sc || mods_var) {
+            web_aborted = true;
+          } else {
+            if (seen_call_after_last_def || calls > 0) {
+              web_crosses_call = true;
+            }
+            last_use_idx = k;
+            has_read_use = true;
+          }
+        }
+      }
+      finalize_web_at_boundary();
+      continue;
+    }
+
+    if (stmt.Kind() == CStatementKind::kIfStatement) {
+      auto& ifs = static_cast<IfStatement&>(stmt);
+      const bool cond_uses_var = ExprMentionsVar(ifs.Condition(), var);
+      const bool cond_mods_var = ExpressionModifiesVariable(ifs.Condition(), var);
+      if (in_web && (cond_uses_var || cond_mods_var)) {
+        bool has_sc = false;
+        int calls = 0;
+        InspectExpressionControlAndCalls(ifs.Condition(), &has_sc, &calls);
+        if (!web_aborted && !has_sc && !cond_mods_var) {
+          VarPathOutcome then_out = CheckStmtVarOutcome(ifs.ThenBranch(), var);
+          VarPathOutcome else_out = (ifs.ElseBranch() != nullptr)
+                                        ? CheckStmtVarOutcome(*ifs.ElseBranch(), var)
+                                        : VarPathOutcome::kFallthrough;
+          const bool dead_after_if = IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
+          const bool then_dead = (then_out == VarPathOutcome::kKilled) ||
+                                 (then_out == VarPathOutcome::kFallthrough && dead_after_if);
+          const bool else_dead = (else_out == VarPathOutcome::kKilled) ||
+                                 (else_out == VarPathOutcome::kFallthrough && dead_after_if);
+          if (then_dead && else_dead) {
+            ScratchDefUseWeb web{
+                .block = comp,
+                .start_idx = start_idx,
+                .end_idx = k,
+                .end_is_if_condition = true,
+                .crosses_call = web_crosses_call || seen_call_after_last_def || (calls > 0),
+            };
+            web.occurrence_count = CountWebOccurrences(web, var);
+            out_webs->push_back(web);
+          }
+        }
+        in_web = false;
+      } else {
+        finalize_web_at_boundary();
+      }
+
+      const bool dead_after_if = IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
+      if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
+        CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(ifs.MutableThenBranch()),
+                                        var, dead_after_if, out_webs);
+      }
+      if (ifs.MutableElseBranch() != nullptr &&
+          ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+        CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(ifs.MutableElseBranch()),
+                                        var, dead_after_if, out_webs);
+      }
+      continue;
+    }
+
+    finalize_web_at_boundary();
+
+    if (stmt.Kind() == CStatementKind::kWhileStatement) {
+      auto& ws = static_cast<WhileStatement&>(stmt);
+      const bool dead_after_loop = (CheckStmtVarOutcome(ws, var) != VarPathOutcome::kLiveRead) &&
+                                   IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
+      if (ws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
+        CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(ws.MutableBody()), var,
+                                        dead_after_loop, out_webs);
+      }
+    } else if (stmt.Kind() == CStatementKind::kDoWhileStatement) {
+      auto& dws = static_cast<DoWhileStatement&>(stmt);
+      const bool dead_after_loop = (CheckStmtVarOutcome(dws, var) != VarPathOutcome::kLiveRead) &&
+                                   IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
+      if (dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
+        CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(dws.MutableBody()), var,
+                                        dead_after_loop, out_webs);
+      }
+    } else if (stmt.Kind() == CStatementKind::kForStatement) {
+      auto& fs = static_cast<ForStatement&>(stmt);
+      const bool dead_after_loop = (CheckStmtVarOutcome(fs, var) != VarPathOutcome::kLiveRead) &&
+                                   IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
+      if (fs.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
+        CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(fs.MutableBody()), var,
+                                        dead_after_loop, out_webs);
+      }
+    }
+  }
+
+  finalize_web_at_boundary();
+}
+
+class IdentifierRenameMutator : public AstMutator {
+ public:
+  IdentifierRenameMutator(std::string_view from, std::string_view to) : from_(from), to_(to) {}
+
+  void MutateIdentifierExpression(std::unique_ptr<CExpression>* expr,
+                                  IdentifierExpression* id_expr) override {
+    if (id_expr->Name() == from_) {
+      *expr = CExpression::Identifier(std::string(to_));
+      MarkChanged();
+      return;
+    }
+    std::string_view prefix;
+    std::string_view inner_id;
+    if (ExtractFunctionPointerCastCalleeIdentifier(id_expr->Name(), &prefix, &inner_id) &&
+        inner_id == from_) {
+      *expr = CExpression::Identifier(absl::StrCat(prefix, to_, ")"));
+      MarkChanged();
+    }
+  }
+
+ private:
+  std::string_view from_;
+  std::string_view to_;
+};
+
+void RenameWebVariable(const ScratchDefUseWeb& web, std::string_view from, std::string_view to) {
+  IdentifierRenameMutator mutator(from, to);
+  auto& stmts = web.block->MutableStatements();
+  size_t stmt_end = web.end_is_if_condition ? web.end_idx : (web.end_idx + 1);
+  for (size_t k = web.start_idx; k < stmt_end; ++k) {
+    if (stmts[k] != nullptr) {
+      mutator.MutateStatement(&stmts[k]);
+    }
+  }
+  if (web.end_is_if_condition && stmts[web.end_idx] != nullptr &&
+      stmts[web.end_idx]->Kind() == CStatementKind::kIfStatement) {
+    auto& ifs = static_cast<IfStatement&>(*stmts[web.end_idx]);
+    mutator.MutateExpression(&ifs.MutableCondition());
+  }
+}
+
+}  // namespace
+
+bool ScratchRegisterWebSplitterPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
+  if (body == nullptr) return false;
+
+  absl::flat_hash_set<std::string> existing_vars;
+  std::vector<std::string> all_used_vars;
+  for (const auto& param : ctx.parameters) {
+    existing_vars.insert(param.name);
+  }
+  CollectUsedVariables(*body, &all_used_vars, &existing_vars);
+  for (const auto& stmt : body->Statements()) {
+    if (stmt != nullptr && stmt->Kind() == CStatementKind::kVariableDeclarationStatement) {
+      existing_vars.insert(static_cast<const VariableDeclarationStatement&>(*stmt).Name());
+    }
+  }
+
+  std::vector<std::string> candidates = candidate_vars_;
+  if (candidates.empty()) {
+    for (const auto& v : all_used_vars) {
+      if (IsCallerSavedScratchVarName(v)) {
+        candidates.push_back(v);
+      }
+    }
+  }
+
+  bool any_changed = false;
+  for (const auto& var : candidates) {
+    if (!IsCallerSavedScratchVarName(var) || StatementTakesAddressOf(*body, var)) {
+      continue;
+    }
+
+    int decl_occurrences = 0;
+    for (const auto& stmt : body->Statements()) {
+      if (stmt != nullptr && stmt->Kind() == CStatementKind::kVariableDeclarationStatement &&
+          static_cast<const VariableDeclarationStatement&>(*stmt).Name() == var) {
+        decl_occurrences += CountIdentifierOccurrencesInStatement(*stmt, var);
+      }
+    }
+    const int total_occurrences =
+        CountIdentifierOccurrencesInStatement(*body, var) - decl_occurrences;
+    if (total_occurrences <= 1) {
+      continue;
+    }
+
+    std::vector<ScratchDefUseWeb> webs;
+    CollectBasicBlockWebsInCompound(body, var, /*dead_at_comp_exit=*/true, &webs);
+    if (webs.empty()) {
+      continue;
+    }
+
+    int sum_web_occurrences = 0;
+    size_t non_crossing_webs_count = 0;
+    int sum_non_crossing_occurrences = 0;
+    for (auto& w : webs) {
+      sum_web_occurrences += w.occurrence_count;
+      if (!w.crosses_call) {
+        ++non_crossing_webs_count;
+        sum_non_crossing_occurrences += w.occurrence_count;
+      }
+    }
+
+    int next_suffix = 2;
+    std::vector<std::string> created_vars;
+    if ((!only_split_compound_call_webs_ || var != "v0") &&
+        sum_non_crossing_occurrences == total_occurrences && non_crossing_webs_count >= 2) {
+      bool first = true;
+      for (size_t wi = 0; wi < webs.size(); ++wi) {
+        if (webs[wi].crosses_call) continue;
+        if (first) {
+          first = false;
+          continue;
+        }
+        std::string new_var;
+        do {
+          new_var = absl::StrFormat("%s_%d", var, next_suffix++);
+        } while (existing_vars.contains(new_var));
+        existing_vars.insert(new_var);
+        RenameWebVariable(webs[wi], var, new_var);
+        created_vars.push_back(new_var);
+        any_changed = true;
+      }
+    } else if (only_split_compound_call_webs_ && non_crossing_webs_count >= 1 &&
+               sum_non_crossing_occurrences < total_occurrences) {
+      for (size_t wi = 0; wi < webs.size(); ++wi) {
+        if (webs[wi].crosses_call) continue;
+        std::string new_var;
+        do {
+          new_var = absl::StrFormat("%s_%d", var, next_suffix++);
+        } while (existing_vars.contains(new_var));
+        existing_vars.insert(new_var);
+        RenameWebVariable(webs[wi], var, new_var);
+        created_vars.push_back(new_var);
+        any_changed = true;
+      }
+    }
+
+    if (!created_vars.empty()) {
+      // If `body` already has a `VariableDeclarationStatement` for `var` (e.g., in standalone
+      // tests), insert declarations for `created_vars` right after `var`.
+      auto& stmts = body->MutableStatements();
+      for (size_t si = 0; si < stmts.size(); ++si) {
+        if (stmts[si] != nullptr &&
+            stmts[si]->Kind() == CStatementKind::kVariableDeclarationStatement) {
+          const auto& vd = static_cast<const VariableDeclarationStatement&>(*stmts[si]);
+          if (vd.Name() == var) {
+            CType decl_type = vd.Type();
+            for (size_t ci = 0; ci < created_vars.size(); ++ci) {
+              stmts.insert(stmts.begin() + static_cast<std::ptrdiff_t>(si + 1 + ci),
+                           CStatement::VariableDeclaration(decl_type, created_vars[ci]));
+            }
+            break;
+          }
+        }
+      }
+      if (out_split_vars_ != nullptr) {
+        (*out_split_vars_)[var] = std::move(created_vars);
+      }
+    }
+  }
+
+  return any_changed;
 }
 
 }  // namespace rom_nom_nom

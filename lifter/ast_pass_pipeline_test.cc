@@ -209,5 +209,48 @@ TEST(AstPassPipelineTest, ReturnAndGlobalTypePromotionPassPromotesNarrowCondStep
   EXPECT_THAT(body.ToString(), HasSubstr("return ((temp_v1 & 255) == 3);"));
 }
 
+TEST(AstPassPipelineTest, ScratchRegisterWebSplitterPassSplitsDisjointBasicBlockWebs) {
+  CompoundStatement body;
+  body.AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t0"));
+
+  auto then_block = std::make_unique<CompoundStatement>();
+  then_block->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  then_block->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*", CExpression::Identifier("arg1")),
+                              CExpression::Identifier("temp_t0"))));
+
+  auto else_block = std::make_unique<CompoundStatement>();
+  else_block->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("-", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  else_block->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*", CExpression::Identifier("arg1")),
+                              CExpression::Identifier("temp_t0"))));
+
+  body.AddStatement(CStatement::If(
+      CExpression::Binary(">", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_block), std::move(else_block)));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"},
+                                    {.type = CType::Named("s32*"), .name = "arg1"}};
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+
+  absl::flat_hash_map<std::string, std::vector<std::string>> split_vars;
+  ScratchRegisterWebSplitterPass pass({"temp_t0"}, &split_vars);
+  EXPECT_EQ(pass.Name(), "ScratchRegisterWebSplitter");
+  EXPECT_TRUE(pass.Run(&body, ctx));
+  ASSERT_TRUE(split_vars.contains("temp_t0"));
+  ASSERT_EQ(split_vars["temp_t0"].size(), 1u);
+  EXPECT_EQ(split_vars["temp_t0"][0], "temp_t0_2");
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("s32 temp_t0_2;"));
+  EXPECT_THAT(rendered, HasSubstr("temp_t0 = (arg0 + 1);"));
+  EXPECT_THAT(rendered, HasSubstr("temp_t0_2 = (arg0 - 1);"));
+  EXPECT_THAT(rendered, HasSubstr("*arg1 = temp_t0_2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -56,6 +56,30 @@ class ReturnAndGlobalTypePromotionPass : public AstPass {
   absl::flat_hash_map<std::string, CType>* out_promoted_types_ = nullptr;
 };
 
+// Concrete `AstPass` that partitions independent, non-overlapping basic-block-local def-use webs
+// of unpinned caller-saved scratch registers (`v0`, `v1`, `temp_t0..temp_t9`, `temp_a0..temp_a3`)
+// into distinct local variables (`v0_2`, `temp_t0_2`, ...) so GCC 2.7.2 `local-alloc.c`
+// (`block_alloc`) sees `reg_basic_block >= 0 && reg_n_deaths == 1` and allocates them in `.lreg`.
+class ScratchRegisterWebSplitterPass : public AstPass {
+ public:
+  explicit ScratchRegisterWebSplitterPass(
+      std::vector<std::string> candidate_vars = {},
+      absl::flat_hash_map<std::string, std::vector<std::string>>* out_split_vars = nullptr,
+      bool only_split_compound_call_webs = false)
+      : candidate_vars_(std::move(candidate_vars)),
+        out_split_vars_(out_split_vars),
+        only_split_compound_call_webs_(only_split_compound_call_webs) {}
+
+  std::string_view Name() const override { return "ScratchRegisterWebSplitter"; }
+
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+
+ private:
+  std::vector<std::string> candidate_vars_;
+  absl::flat_hash_map<std::string, std::vector<std::string>>* out_split_vars_ = nullptr;
+  bool only_split_compound_call_webs_ = false;
+};
+
 }  // namespace rom_nom_nom
 
 #endif  // LIFTER_AST_TYPE_INFERENCE_PASS_H_

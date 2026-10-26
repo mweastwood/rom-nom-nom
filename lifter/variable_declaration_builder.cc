@@ -1566,13 +1566,78 @@ absl::Status PrependSynthesizedLocalDeclarations(
   absl::flat_hash_map<std::string, CType> narrow_cond_inc_var_types =
       InferAndPromoteNarrowCondSteppedVars(narrow_candidates, body);
 
+  absl::flat_hash_map<std::string, std::optional<std::string>> reg_annotations;
+  std::vector<std::string> unpinned_scratch_candidates;
+  for (const auto& var_name : local_vars_to_declare) {
+    if (var_name == "sp") {
+      continue;
+    }
+    if (is_fp_reg(var_name) || float_gpr_var_names.contains(var_name)) {
+      reg_annotations[var_name] = get_callee_saved_register_annotation(var_name);
+      continue;
+    }
+    if (float_local_var_names.contains(var_name) || absl::EndsWith(var_name, "_64") ||
+        (s64_local_var_names.contains(var_name) && !double_vars.contains(var_name))) {
+      continue;
+    }
+    if (double_vars.contains(var_name)) {
+      reg_annotations[var_name] = get_callee_saved_register_annotation(var_name);
+      continue;
+    }
+    bool is_callee_gpr = IsCalleeSavedGprVarName(var_name);
+    bool needs_init = vars_needing_init.contains(var_name);
+    std::optional<std::string> reg_annot = (!needs_init || is_callee_gpr)
+                                               ? get_callee_saved_register_annotation(var_name)
+                                               : std::nullopt;
+    reg_annotations[var_name] = reg_annot;
+    if (!is_leaf_func && !reg_annot.has_value() && !needs_init && !is_callee_gpr &&
+        !has_address_taken(var_name) &&
+        (var_name == "v0" || var_name == "v1" ||
+         (var_name.size() == 7 &&
+          (absl::StartsWith(var_name, "temp_t") || absl::StartsWith(var_name, "temp_a"))))) {
+      unpinned_scratch_candidates.push_back(var_name);
+    }
+  }
+
+  if (!unpinned_scratch_candidates.empty()) {
+    absl::flat_hash_map<std::string, std::vector<std::string>> split_vars_map;
+    AstPassContext split_ctx{
+        .parameters = parameters,
+        .frame_size = static_cast<uint32_t>(frame_analysis.frame_size),
+        .has_frame_pointer = frame_analysis.has_frame_pointer,
+        .returns_v0 = (return_type.ToString() != "void" && !returns_fp),
+        .returns_f0 = returns_fp,
+        .return_type = return_type,
+    };
+    ScratchRegisterWebSplitterPass splitter(unpinned_scratch_candidates, &split_vars_map,
+                                            /*only_split_compound_call_webs=*/true);
+    if (splitter.Run(body->get(), split_ctx) && !split_vars_map.empty()) {
+      std::vector<std::string> expanded_local_vars;
+      expanded_local_vars.reserve(local_vars_to_declare.size() + split_vars_map.size() * 2);
+      for (const auto& var_name : local_vars_to_declare) {
+        expanded_local_vars.push_back(var_name);
+        auto it = split_vars_map.find(var_name);
+        if (it != split_vars_map.end()) {
+          auto narrow_it = narrow_cond_inc_var_types.find(var_name);
+          for (const auto& new_var : it->second) {
+            expanded_local_vars.push_back(new_var);
+            if (narrow_it != narrow_cond_inc_var_types.end()) {
+              narrow_cond_inc_var_types[new_var] = narrow_it->second;
+            }
+          }
+        }
+      }
+      local_vars_to_declare = std::move(expanded_local_vars);
+    }
+  }
+
   auto new_body = std::make_unique<CompoundStatement>();
   for (const auto& var_name : local_vars_to_declare) {
     if (var_name == "sp") {
       new_body->AddStatement(
           CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, sp_buffer_size));
     } else if (is_fp_reg(var_name)) {
-      std::optional<std::string> reg_annot = get_callee_saved_register_annotation(var_name);
+      std::optional<std::string> reg_annot = reg_annotations[var_name];
       if (absl::EndsWith(var_name, "_d") || double_vars.contains(var_name)) {
         new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name, nullptr,
                                                                std::nullopt, std::move(reg_annot)));
@@ -1581,7 +1646,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
                                                                std::nullopt, std::move(reg_annot)));
       }
     } else if (float_gpr_var_names.contains(var_name)) {
-      std::optional<std::string> reg_annot = get_callee_saved_register_annotation(var_name);
+      std::optional<std::string> reg_annot = reg_annotations[var_name];
       new_body->AddStatement(CStatement::VariableDeclaration(CType::F32(), var_name, nullptr,
                                                              std::nullopt, std::move(reg_annot)));
     } else if (float_local_var_names.contains(var_name)) {
@@ -1590,15 +1655,13 @@ absl::Status PrependSynthesizedLocalDeclarations(
                (s64_local_var_names.contains(var_name) && !double_vars.contains(var_name))) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::Named("s64"), var_name));
     } else if (double_vars.contains(var_name)) {
-      std::optional<std::string> reg_annot = get_callee_saved_register_annotation(var_name);
+      std::optional<std::string> reg_annot = reg_annotations[var_name];
       new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name, nullptr,
                                                              std::nullopt, std::move(reg_annot)));
     } else {
       bool is_callee_gpr = IsCalleeSavedGprVarName(var_name);
       auto init_expr = vars_needing_init.contains(var_name) ? CExpression::Integer(0) : nullptr;
-      std::optional<std::string> reg_annot = (init_expr == nullptr || is_callee_gpr)
-                                                 ? get_callee_saved_register_annotation(var_name)
-                                                 : std::nullopt;
+      std::optional<std::string> reg_annot = reg_annotations[var_name];
       if (reg_annot.has_value() || is_callee_gpr) {
         init_expr = nullptr;
       }
