@@ -7164,6 +7164,27 @@ s32 GeneralizedStoreFlagConditionalOnCalleeSavedAndArgVars(s32 a, s32 b, s32 c) 
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedCrossJumpTailWithFilledDelaySlots",
+          .function_name = "GeneralizedCrossJumpTailWithFilledDelaySlots",
+          .original_c = R"(
+s32 GeneralizedCrossJumpTailWithFilledDelaySlots(s32 mode, s32 x, s32* out) {
+    if (mode == 0) {
+        out[0] = x + 1;
+        out[1] = x + 2;
+        out[2] = x + 3;
+        return 1;
+    }
+    if (mode < 0) {
+        return -1;
+    }
+    out[0] = x - 1;
+    out[1] = x + 2;
+    out[2] = x + 3;
+    return 1;
+}
+)",
+      },
   };
   return *k_cases;
 }

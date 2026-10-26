@@ -385,6 +385,71 @@ TEST(CfgDeReorgTest, DuplicatesPureRegisterCrossJumpedTailAndNonPostDominatingRe
   EXPECT_TRUE(early_jump_blk->Terminator()->IsReturn());
 }
 
+TEST(CfgDeReorgTest, DuplicatesCrossJumpedTailWithNonNopDelaySlotsAndSinksFprDelaySlot) {
+  // 1. Cross-jumped return tail where both `pred_blk`'s `j` and `tail_blk`'s `jr $ra` have
+  // non-nop delay slots filled by `reorg.c`:
+  // 0x80000000: beq   $a0, $zero, 0x80000010 (0x10800003 -> B_mid at 0x80000010)
+  // 0x80000004: nop                          (0x00000000)
+  // 0x80000008: j     0x80000024             (0x08000009 -> B_ret_tail at 0x80000024)
+  // 0x8000000C: addiu $v0, $zero, 10         (0x2402000A) -- non-nop delay slot of `j`!
+  // 0x80000010: beq   $a1, $zero, 0x80000020 (0x10A00003 -> B_fallthrough at 0x80000020)
+  // 0x80000014: nop                          (0x00000000)
+  // 0x80000018: jr    $ra                    (0x03E00008) -- separate return block
+  // 0x8000001C: addiu $v0, $zero, -1         (0x2402FFFF)
+  // 0x80000020: addiu $v0, $zero, 20         (0x24020014) -- B_fallthrough into B_ret_tail
+  // 0x80000024: jr    $ra                    (0x03E00008) -- B_ret_tail (body in delay slot!)
+  // 0x80000028: sw    $v0, 0($a2)            (0xAC820000) -- non-nop delay slot of `jr $ra`!
+  std::vector<uint32_t> cj_words = {
+      0x10800003, 0x00000000, 0x08000009, 0x2402000A, 0x10A00003, 0x00000000,
+      0x03E00008, 0x2402FFFF, 0x24020014, 0x03E00008, 0xAC820000,
+  };
+  auto cj_insts = DecodeSequence(cj_words, 0x80000000);
+  ASSERT_TRUE(cj_insts.ok());
+  auto cj_cfg_or = ControlFlowGraph::Build(*cj_insts);
+  ASSERT_TRUE(cj_cfg_or.ok());
+  ControlFlowGraph cj_cfg = *cj_cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cj_cfg);
+
+  const auto* pred_blk = cj_cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_TRUE(pred_blk->successors.empty());
+  ASSERT_EQ(pred_blk->instructions.size(), 3u);
+  EXPECT_EQ(pred_blk->instructions[0].opcode, Opcode::kAddiu);
+  EXPECT_TRUE(pred_blk->instructions[1].IsReturn());
+  EXPECT_EQ(pred_blk->instructions[2].opcode, Opcode::kSw);
+
+  // 2. FPR delay slot (`lwc1 $f4, 0($a0)`) dead on taken return path and feeding `c.lt.s` on
+  // fallthrough:
+  // 0x80000000: beq   $a1, $zero, 0x8000001C (0x10A00006 -> B_ret at 0x8000001C)
+  // 0x80000004: lwc1  $f4, 0($a0)            (0xC4840000) -- FPR delay slot!
+  // 0x80000008: c.lt.s $f4, $f12             (0x460C203C)
+  // 0x8000000C: bc1t  0x8000001C             (0x45010003)
+  // 0x80000010: nop                          (0x00000000)
+  // 0x80000014: swc1  $f4, 4($a0)            (0xE4840004)
+  // 0x80000018: nop                          (0x00000000)
+  // 0x8000001C: jr    $ra                    (0x03E00008)
+  // 0x80000020: nop                          (0x00000000)
+  std::vector<uint32_t> fpr_words = {
+      0x10A00006, 0xC4840000, 0x460C203C, 0x45010003, 0x00000000,
+      0xE4840004, 0x00000000, 0x03E00008, 0x00000000,
+  };
+  auto fpr_insts = DecodeSequence(fpr_words, 0x80000000);
+  ASSERT_TRUE(fpr_insts.ok());
+  auto fpr_cfg_or = ControlFlowGraph::Build(*fpr_insts);
+  ASSERT_TRUE(fpr_cfg_or.ok());
+  ControlFlowGraph fpr_cfg = *fpr_cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&fpr_cfg);
+
+  const auto* entry_blk = fpr_cfg.FindBlockByVram(0x80000000);
+  const auto* ft_blk = fpr_cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(entry_blk, nullptr);
+  ASSERT_NE(ft_blk, nullptr);
+  EXPECT_TRUE(entry_blk->instructions.back().IsNop());
+  EXPECT_EQ(ft_blk->instructions.front().opcode, Opcode::kLwc1);
+}
+
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
   ASSERT_EQ(pipeline.PassCount(), 5u);
