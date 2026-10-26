@@ -174,6 +174,7 @@ class UnaryExpression : public CExpression {
 
   const std::string& Op() const { return op_; }
   const CExpression& Operand() const { return *operand_; }
+  std::unique_ptr<CExpression>& MutableOperand() { return operand_; }
   bool IsPrefix() const { return is_prefix_; }
 
  private:
@@ -196,6 +197,8 @@ class BinaryExpression : public CExpression {
   const std::string& Op() const { return op_; }
   const CExpression& Lhs() const { return *lhs_; }
   const CExpression& Rhs() const { return *rhs_; }
+  std::unique_ptr<CExpression>& MutableLhs() { return lhs_; }
+  std::unique_ptr<CExpression>& MutableRhs() { return rhs_; }
 
  private:
   std::string op_;
@@ -217,6 +220,8 @@ class AssignmentExpression : public CExpression {
   const std::string& Op() const { return op_; }
   const CExpression& Lhs() const { return *lhs_; }
   const CExpression& Rhs() const { return *rhs_; }
+  std::unique_ptr<CExpression>& MutableLhs() { return lhs_; }
+  std::unique_ptr<CExpression>& MutableRhs() { return rhs_; }
 
  private:
   std::string op_;
@@ -237,6 +242,8 @@ class CallExpression : public CExpression {
 
   const CExpression& Callee() const { return *callee_; }
   const std::vector<std::unique_ptr<CExpression>>& Arguments() const { return arguments_; }
+  std::unique_ptr<CExpression>& MutableCallee() { return callee_; }
+  std::vector<std::unique_ptr<CExpression>>& MutableArguments() { return arguments_; }
 
  private:
   std::unique_ptr<CExpression> callee_;
@@ -255,6 +262,8 @@ class CastExpression : public CExpression {
 
   const CType& TargetType() const { return target_type_; }
   const CExpression& Operand() const { return *operand_; }
+  CType& MutableTargetType() { return target_type_; }
+  std::unique_ptr<CExpression>& MutableOperand() { return operand_; }
 
  private:
   CType target_type_;
@@ -275,6 +284,7 @@ class MemberAccessExpression : public CExpression {
   const CExpression& Object() const { return *object_; }
   const std::string& MemberName() const { return member_name_; }
   bool IsArrow() const { return is_arrow_; }
+  std::unique_ptr<CExpression>& MutableObject() { return object_; }
 
  private:
   std::unique_ptr<CExpression> object_;
@@ -294,6 +304,8 @@ class ArrayIndexExpression : public CExpression {
 
   const CExpression& Array() const { return *array_; }
   const CExpression& Index() const { return *index_; }
+  std::unique_ptr<CExpression>& MutableArray() { return array_; }
+  std::unique_ptr<CExpression>& MutableIndex() { return index_; }
 
  private:
   std::unique_ptr<CExpression> array_;
@@ -317,6 +329,9 @@ class TernaryExpression : public CExpression {
   const CExpression& Condition() const { return *condition_; }
   const CExpression& TrueExpression() const { return *true_expression_; }
   const CExpression& FalseExpression() const { return *false_expression_; }
+  std::unique_ptr<CExpression>& MutableCondition() { return condition_; }
+  std::unique_ptr<CExpression>& MutableTrueExpression() { return true_expression_; }
+  std::unique_ptr<CExpression>& MutableFalseExpression() { return false_expression_; }
 
  private:
   std::unique_ptr<CExpression> condition_;
@@ -425,6 +440,7 @@ class ExpressionStatement : public CStatement {
   std::unique_ptr<CStatement> Clone() const override;
 
   const CExpression& Expression() const { return *expression_; }
+  std::unique_ptr<CExpression>& MutableExpression() { return expression_; }
 
  private:
   std::unique_ptr<CExpression> expression_;
@@ -451,6 +467,7 @@ class VariableDeclarationStatement : public CStatement {
   const CType& Type() const { return type_; }
   const std::string& Name() const { return name_; }
   const CExpression* Initializer() const { return initializer_.get(); }
+  std::unique_ptr<CExpression>& MutableInitializer() { return initializer_; }
   std::optional<size_t> ArraySize() const { return array_size_; }
   const std::optional<std::string>& RegisterAnnotation() const { return register_annotation_; }
 
@@ -481,6 +498,9 @@ class IfStatement : public CStatement {
   const CStatement* ElseBranch() const { return else_branch_.get(); }
   CStatement* MutableThenBranch() { return then_branch_.get(); }
   CStatement* MutableElseBranch() { return else_branch_.get(); }
+  std::unique_ptr<CExpression>& MutableCondition() { return condition_; }
+  std::unique_ptr<CStatement>& MutableThenBranchPtr() { return then_branch_; }
+  std::unique_ptr<CStatement>& MutableElseBranchPtr() { return else_branch_; }
 
  private:
   std::unique_ptr<CExpression> condition_;
@@ -502,6 +522,8 @@ class WhileStatement : public CStatement {
   const CExpression& Condition() const { return *condition_; }
   const CStatement& Body() const { return *body_; }
   CStatement* MutableBody() { return body_.get(); }
+  std::unique_ptr<CExpression>& MutableCondition() { return condition_; }
+  std::unique_ptr<CStatement>& MutableBodyPtr() { return body_; }
 
  private:
   std::unique_ptr<CExpression> condition_;
@@ -522,6 +544,8 @@ class DoWhileStatement : public CStatement {
   const CStatement& Body() const { return *body_; }
   const CExpression& Condition() const { return *condition_; }
   CStatement* MutableBody() { return body_.get(); }
+  std::unique_ptr<CStatement>& MutableBodyPtr() { return body_; }
+  std::unique_ptr<CExpression>& MutableCondition() { return condition_; }
 
  private:
   std::unique_ptr<CStatement> body_;
@@ -548,6 +572,10 @@ class ForStatement : public CStatement {
   const CExpression* Step() const { return step_.get(); }
   const CStatement& Body() const { return *body_; }
   CStatement* MutableBody() { return body_.get(); }
+  std::unique_ptr<CStatement>& MutableInitPtr() { return init_; }
+  std::unique_ptr<CExpression>& MutableConditionPtr() { return condition_; }
+  std::unique_ptr<CExpression>& MutableStepPtr() { return step_; }
+  std::unique_ptr<CStatement>& MutableBodyPtr() { return body_; }
 
  private:
   std::unique_ptr<CStatement> init_;
@@ -568,6 +596,7 @@ class ReturnStatement : public CStatement {
   std::unique_ptr<CStatement> Clone() const override;
 
   const CExpression* ReturnValue() const { return return_value_.get(); }
+  std::unique_ptr<CExpression>& MutableReturnValue() { return return_value_; }
 
  private:
   std::unique_ptr<CExpression> return_value_;
@@ -658,6 +687,7 @@ class SwitchStatement : public CStatement {
   std::unique_ptr<CStatement> Clone() const override;
 
   const CExpression& Condition() const { return *condition_; }
+  std::unique_ptr<CExpression>& MutableCondition() { return condition_; }
   const std::vector<SwitchCase>& Cases() const { return cases_; }
   std::vector<SwitchCase>& MutableCases() { return cases_; }
 
@@ -702,8 +732,10 @@ class FunctionDeclaration {
         is_static_(is_static) {}
 
   const CType& ReturnType() const { return return_type_; }
+  CType& MutableReturnType() { return return_type_; }
   const std::string& Name() const { return name_; }
   const std::vector<CParameter>& Parameters() const { return parameters_; }
+  std::vector<CParameter>& MutableParameters() { return parameters_; }
   const CompoundStatement& Body() const { return *body_; }
   CompoundStatement* MutableBody() { return body_.get(); }
   bool IsStatic() const { return is_static_; }
