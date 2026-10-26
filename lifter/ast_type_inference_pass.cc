@@ -859,7 +859,7 @@ bool ReturnAndGlobalTypePromotionPass::Run(CompoundStatement* body, const AstPas
 namespace {
 
 bool IsCallerSavedScratchVarName(std::string_view name) {
-  if (name == "v0" || name == "v1") {
+  if (name == "v0" || name == "v1" || name == "temp_at") {
     return true;
   }
   if (name.size() == 7 && absl::StartsWith(name, "temp_t") && name[6] >= '0' && name[6] <= '9') {
@@ -1442,28 +1442,17 @@ bool ScratchRegisterWebSplitterPass::Run(CompoundStatement* body, const AstPassC
 
     int next_suffix = 2;
     std::vector<std::string> created_vars;
-    if ((!only_split_compound_call_webs_ || var != "v0") &&
-        sum_non_crossing_occurrences == total_occurrences && non_crossing_webs_count >= 2) {
-      bool first = true;
+    const bool has_occurrences_outside_non_crossing_webs =
+        (sum_non_crossing_occurrences < total_occurrences);
+    if ((has_occurrences_outside_non_crossing_webs && non_crossing_webs_count >= 1) ||
+        (!has_occurrences_outside_non_crossing_webs && non_crossing_webs_count >= 2)) {
+      bool keep_first_non_crossing = !has_occurrences_outside_non_crossing_webs;
       for (size_t wi = 0; wi < webs.size(); ++wi) {
         if (webs[wi].crosses_call) continue;
-        if (first) {
-          first = false;
+        if (keep_first_non_crossing) {
+          keep_first_non_crossing = false;
           continue;
         }
-        std::string new_var;
-        do {
-          new_var = absl::StrFormat("%s_%d", var, next_suffix++);
-        } while (existing_vars.contains(new_var));
-        existing_vars.insert(new_var);
-        RenameWebVariable(webs[wi], var, new_var);
-        created_vars.push_back(new_var);
-        any_changed = true;
-      }
-    } else if (only_split_compound_call_webs_ && non_crossing_webs_count >= 1 &&
-               sum_non_crossing_occurrences < total_occurrences) {
-      for (size_t wi = 0; wi < webs.size(); ++wi) {
-        if (webs[wi].crosses_call) continue;
         std::string new_var;
         do {
           new_var = absl::StrFormat("%s_%d", var, next_suffix++);

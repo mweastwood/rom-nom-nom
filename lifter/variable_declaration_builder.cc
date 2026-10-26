@@ -1343,13 +1343,10 @@ absl::Status PrependSynthesizedLocalDeclarations(
   };
 
   absl::flat_hash_map<std::string, int> fp_base_counts;
-  bool has_shared_fp_base = false;
   for (const auto& vn : local_vars_to_declare) {
     if (is_fp_reg(vn)) {
       std::string base = absl::EndsWith(vn, "_d") ? vn.substr(0, vn.size() - 2) : vn;
-      if (++fp_base_counts[base] > 1) {
-        has_shared_fp_base = true;
-      }
+      ++fp_base_counts[base];
     }
   }
 
@@ -1363,30 +1360,21 @@ absl::Status PrependSynthesizedLocalDeclarations(
 
   // MIPS O32 register file capacities and GCC 2.7.2 reload reserve margins:
   // - 16 even FPRs total ($f0..$f30); reserve 4 even FPRs for expression evaluation / conversions.
-  // - 7 dedicated caller-saved scratch FPRs ($f2, $f4, $f6, $f8, $f10, $f16, $f18) before ABI
-  //   argument/return FPRs ($f0, $f12, $f14) are needed as extra scratch registers in leaf code.
   // - 16 caller-saved GPRs total ($v0..$v1, $a0..$a3, $t0..$t9); reserve 2 GPRs for reloads.
   // - 18 allocatable GPRs total before hard-register pinning risks spilling fixed registers.
-  // - 4 GPR argument registers ($a0..$a3).
   constexpr int kTotalEvenFprs = 16;
   constexpr int kReservedScratchEvenFprs = 4;
   constexpr int kMaxPinnedEvenFprs = kTotalEvenFprs - kReservedScratchEvenFprs;
-  constexpr size_t kNumDedicatedCallerScratchFprs = 7;
   constexpr int kTotalCallerSavedGprs = 16;
   constexpr int kReservedScratchGprs = 2;
   constexpr int kMaxCallerGprPins = kTotalCallerSavedGprs - kReservedScratchGprs;
   constexpr size_t kMaxUnpinnedGprLocalsBeforeSpillRisk = 18;
-  constexpr size_t kNumGprArgumentRegisters = 4;
 
   size_t unpinned_gpr_locals_count = 0;
   int callee_saved_gpr_count = 0;
   bool has_v0_local = false;
-  bool has_v1_local = false;
-  bool has_temp_a0_local = false;
   for (const auto& v : local_vars_to_declare) {
     if (v == "v0") has_v0_local = true;
-    if (v == "v1") has_v1_local = true;
-    if (v == "temp_a0") has_temp_a0_local = true;
     if (IsCalleeSavedGprVarName(v)) {
       callee_saved_gpr_count += double_vars.contains(v) ? 2 : 1;
     }
@@ -1407,26 +1395,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
 
-  const int v0_assigns = has_v0_local ? CountDirectAssignmentsInStatement(**body, "v0") : 0;
-  const int v0_non_return_reads =
-      has_v0_local ? CountNonReturnVariableReadUsesInStatement(**body, "v0") : 0;
-  const bool v0_reused_as_working_temp = (v0_assigns >= 2 && v0_non_return_reads >= 1);
-  const bool is_float_return_leaf_with_v0_v1 = is_leaf_func && returns_fp && has_v1_local;
-  const bool is_leaf_with_s_regs = is_leaf_func && callee_saved_gpr_count >= 1;
-  const bool is_frameless_leaf_with_temp_a0 =
-      is_leaf_func && frame_analysis.frame_size == 0 && has_temp_a0_local &&
-      !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base;
-  const bool is_leaf_with_temp_a0_and_sp_buffer =
-      is_leaf_func && frame_analysis.frame_size > 0 && sp_buffer_size > 0 && has_temp_a0_local &&
-      !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base;
-  const bool is_multi_reg_leaf_with_v0_v1 =
-      is_leaf_func && has_v1_local &&
-      (is_leaf_with_s_regs ||
-       (has_v0_local && !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
-        unpinned_gpr_locals_count >= kNumGprArgumentRegisters && v0_assigns >= 2 &&
-        v0_non_return_reads >= 1) ||
-       (!has_v0_local && !is_float_return_leaf_with_v0_v1 && !has_shared_fp_base &&
-        !any_param_modified && unpinned_gpr_locals_count >= kNumGprArgumentRegisters));
+  const bool v0_reused_as_working_temp =
+      has_v0_local && CountDirectAssignmentsInStatement(**body, "v0") >= 2 &&
+      CountNonReturnVariableReadUsesInStatement(**body, "v0") >= 1;
 
   absl::flat_hash_set<std::string> float_gpr_var_names;
   for (Register r : AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg)) {
@@ -1459,20 +1430,12 @@ absl::Status PrependSynthesizedLocalDeclarations(
   int pinned_caller_fp_count = 0;
   absl::flat_hash_set<std::string> pinned_fp_bases;
 
-  const bool f0_reused_as_working_temp =
-      (CountDirectAssignmentsInStatement(**body, "f0") >= 2 &&
-       CountNonReturnVariableReadUsesInStatement(**body, "f0") >= 1);
+  const bool has_callee_saved_gprs = (callee_saved_gpr_count >= 1);
+  const bool has_callee_saved_fprs = (callee_saved_fp_count >= 1);
 
   auto can_pin_abi_fpr_base = [&](std::string_view base) -> bool {
-    if (!IsAbiArgOrReturnFprBaseName(base)) {
+    if (!IsAbiArgOrReturnFprBaseName(base) || (is_leaf_func && !has_callee_saved_fprs)) {
       return false;
-    }
-    if (is_leaf_func) {
-      if (base == "f0" && returns_fp && f0_reused_as_working_temp) {
-        return true;
-      }
-      return !returns_fp && (has_shared_fp_base || callee_saved_fp_count >= 1 ||
-                             fp_base_counts.size() > kNumDedicatedCallerScratchFprs);
     }
     return base == "f12" || base == "f14" || (base == "f0" && !returns_fp);
   };
@@ -1567,36 +1530,22 @@ absl::Status PrependSynthesizedLocalDeclarations(
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;
-    const bool v0_safe_in_non_leaf = !is_leaf_func && v0_reused_as_working_temp;
-    if ((is_float_return_leaf_with_v0_v1 ||
-         (is_multi_reg_leaf_with_v0_v1 && !is_leaf_with_temp_a0_and_sp_buffer) ||
-         is_leaf_with_s_regs || v0_safe_in_non_leaf) &&
-        var_name == "v0") {
+    if (var_name == "v0" &&
+        ((is_leaf_func && has_callee_saved_gprs) || (!is_leaf_func && v0_reused_as_working_temp))) {
       caller_gpr_reg = "$2";
-    } else if ((is_float_return_leaf_with_v0_v1 || is_leaf_with_s_regs ||
-                ((is_multi_reg_leaf_with_v0_v1 || is_frameless_leaf_with_temp_a0 ||
-                  is_leaf_with_temp_a0_and_sp_buffer) &&
-                 !IsAssignedCompoundBinaryBothSides(**body, var_name)) ||
-                !is_leaf_func) &&
-               var_name == "v1") {
+    } else if (var_name == "v1" && (!is_leaf_func || has_callee_saved_gprs)) {
       caller_gpr_reg = "$3";
-    } else if ((!is_leaf_func || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
-                is_frameless_leaf_with_temp_a0 ||
-                (v0_non_return_reads >= 1 &&
-                 unpinned_gpr_locals_count >= kNumGprArgumentRegisters &&
-                 !is_float_return_leaf_with_v0_v1 && !is_leaf_with_temp_a0_and_sp_buffer)) &&
-               (!any_param_modified || is_leaf_with_s_regs || is_multi_reg_leaf_with_v0_v1 ||
-                is_frameless_leaf_with_temp_a0 ||
+    } else if (var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
+               var_name[3] <= '3' && (!is_leaf_func || has_callee_saved_gprs) &&
+               (!any_param_modified || (is_leaf_func && has_callee_saved_gprs) ||
                 (!is_leaf_func &&
                  CountNonReturnVariableReadUsesInStatement(**body, var_name) == 0 &&
-                 CountVariableReadUsesInStatement(**body, var_name) >= 1)) &&
-               var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
-               var_name[3] <= '3') {
+                 CountVariableReadUsesInStatement(**body, var_name) >= 1))) {
       int reg_num = 4 + (var_name[3] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
                var_name[6] <= '3' &&
-               (!is_leaf_func || is_leaf_with_s_regs ||
+               (!is_leaf_func || has_callee_saved_gprs ||
                 (!DoesScratchArgInterfereWithEntryParam(**body, var_name) &&
                  !IsAssignedCompoundBinaryBothSides(**body, var_name)))) {
       int reg_num = 4 + (var_name[6] - '0');
@@ -1652,9 +1601,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
                                                ? get_callee_saved_register_annotation(var_name)
                                                : std::nullopt;
     reg_annotations[var_name] = reg_annot;
-    if (!is_leaf_func && !reg_annot.has_value() && !needs_init && !is_callee_gpr &&
-        !has_address_taken(var_name) &&
-        (var_name == "v0" || var_name == "v1" ||
+    if (!reg_annot.has_value() && !needs_init && !is_callee_gpr && !has_address_taken(var_name) &&
+        (var_name == "v0" || var_name == "v1" || var_name == "temp_at" ||
          (var_name.size() == 7 &&
           (absl::StartsWith(var_name, "temp_t") || absl::StartsWith(var_name, "temp_a"))))) {
       unpinned_scratch_candidates.push_back(var_name);
@@ -1671,8 +1619,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
         .returns_f0 = returns_fp,
         .return_type = return_type,
     };
-    ScratchRegisterWebSplitterPass splitter(unpinned_scratch_candidates, &split_vars_map,
-                                            /*only_split_compound_call_webs=*/true);
+    ScratchRegisterWebSplitterPass splitter(unpinned_scratch_candidates, &split_vars_map);
     if (splitter.Run(body->get(), split_ctx) && !split_vars_map.empty()) {
       std::vector<std::string> expanded_local_vars;
       expanded_local_vars.reserve(local_vars_to_declare.size() + split_vars_map.size() * 2);

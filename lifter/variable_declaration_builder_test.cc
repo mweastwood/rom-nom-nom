@@ -1411,5 +1411,55 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(emitted, HasSubstr("u8 sp[24];"));
 }
 
+TEST(VariableDeclarationBuilderTest, SplitsDisjointScratchWebsInLeafFunctionsAndTempAt) {
+  ControlFlowGraph cfg;
+
+  StackFrameAnalysis frame;
+  frame.frame_size = 0;
+  frame.has_calls = false;
+
+  auto body = std::make_unique<CompoundStatement>();
+  // First basic-block web of v0 and temp_at inside then-branch:
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_at"),
+      CExpression::Binary("*", CExpression::Identifier("v0"), CExpression::Integer(3)))));
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s32*)", CExpression::Identifier("arg1")),
+                              CExpression::Identifier("temp_at"))));
+
+  // Second disjoint basic-block web of v0 and temp_at inside else-branch:
+  auto else_branch = std::make_unique<CompoundStatement>();
+  else_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("-", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  else_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_at"),
+      CExpression::Binary("*", CExpression::Identifier("v0"), CExpression::Integer(5)))));
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s32*)", CExpression::Identifier("arg1")),
+                              CExpression::Identifier("temp_at"))));
+
+  body->AddStatement(CStatement::If(CExpression::Identifier("arg0"), std::move(then_branch),
+                                    std::move(else_branch)));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  std::vector<CParameter> params = {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}};
+  AstConverterOptions opts;
+  opts.function_name = "TestLeafScratchWebSplit";
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string emitted = body->ToString();
+  EXPECT_THAT(emitted, HasSubstr("s32 v0;"));
+  EXPECT_THAT(emitted, HasSubstr("s32 v0_2;"));
+  EXPECT_THAT(emitted, HasSubstr("s32 temp_at;"));
+  EXPECT_THAT(emitted, HasSubstr("s32 temp_at_2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
