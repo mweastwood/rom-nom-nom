@@ -1332,5 +1332,53 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, HasSubstr("*(s32*)arg2 = (v0 + 7);"));
 }
 
+TEST(AstExpressionFolderTest,
+     FoldsLoadAcrossDisjointStackAndGlobalStoresAndCommutedSymbolWordIndex) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // 1. Load from stack slot `*(s32*)&var_sp_16` folded across store to global `*(s32*)&g_state`:
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Unary("*(s32*)",
+                         CExpression::Unary("&", CExpression::Identifier("var_sp_16"))))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*(s32*)", CExpression::Unary("&", CExpression::Identifier("g_state"))),
+      CExpression::Integer(99))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s32*)", CExpression::Identifier("arg0")),
+                              CExpression::Identifier("temp_t0"))));
+
+  // 2. Commuted symbol word-index address `temp_t1 = &g_table; temp_t2 = temp_t1 + (arg1 * 4);`
+  // dereferenced twice:
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t1"),
+                              CExpression::Unary("&", CExpression::Identifier("g_table")))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t2"),
+      CExpression::Binary(
+          "+", CExpression::Identifier("temp_t1"),
+          CExpression::Binary("*", CExpression::Identifier("arg1"), CExpression::Integer(4))))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("temp_t2"))),
+      CExpression::Binary(
+          "+",
+          CExpression::Unary(
+              "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("temp_t2"))),
+          CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t0")));
+  EXPECT_THAT(code, HasSubstr("*(s32*)arg0 = *(s32*)&var_sp_16;"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t1")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("temp_t2")));
+  EXPECT_THAT(code, HasSubstr("*(s32*)(&g_table + arg1) = (*(s32*)(&g_table + arg1) + 1);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

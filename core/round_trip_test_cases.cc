@@ -7252,6 +7252,24 @@ s32 GeneralizedDualGivForLoopWithTwoStrides(Vec3i* dst, Rec5i* src, s32 count) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedDisjointOffsetLoadsAndStores",
+          .function_name = "GeneralizedDisjointOffsetLoadsAndStores",
+          .original_c = R"(
+typedef struct {
+    s16 a;
+    s16 b;
+    s32 c;
+    s32 d;
+} Packet;
+s32 GeneralizedDisjointOffsetLoadsAndStores(Packet* p, s32 delta) {
+    s32 old_c = p->c;
+    p->a = (s16)(p->b + 1);
+    p->d = old_c + delta;
+    return p->d;
+}
+)",
+      },
   };
   return *k_cases;
 }

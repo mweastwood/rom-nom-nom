@@ -462,11 +462,16 @@ struct FolderContext {
           }
         }
         if (direct_call != nullptr && StatementContainsCall(s, /*ignore_math_intrinsics=*/true)) {
-          if (var == "f2" || var == "f2_d" || var == "f4" || var == "f4_d" || var == "f6" ||
-              var == "f6_d" || var == "f8" || var == "f8_d" || var == "f10" || var == "f10_d" ||
-              var == "f16" || var == "f16_d" || var == "f18" || var == "f18_d" ||
-              ((var == "f0" || var == "f0_d") &&
-               es.Expression().Kind() == CExpressionKind::kAssignmentExpression)) {
+          auto is_caller_saved_fpr = [](std::string_view name, bool include_f0) -> bool {
+            if (name.size() < 2 || name[0] != 'f') return false;
+            std::string_view num_part =
+                absl::EndsWith(name, "_d") ? name.substr(1, name.size() - 3) : name.substr(1);
+            int reg_num = -1;
+            if (!absl::SimpleAtoi(num_part, &reg_num)) return false;
+            return (include_f0 ? reg_num >= 0 : reg_num >= 1) && reg_num <= 19;
+          };
+          if (is_caller_saved_fpr(
+                  var, es.Expression().Kind() == CExpressionKind::kAssignmentExpression)) {
             return VarLiveness::kKilledBeforeRead;
           }
         }
@@ -480,7 +485,7 @@ struct FolderContext {
       case CStatementKind::kContinueStatement:
         return VarLiveness::kReadBeforeWrite;
       case CStatementKind::kGotoStatement: {
-        if (goto_depth > 4 || root_body == nullptr) {
+        if (goto_depth > 16 || root_body == nullptr) {
           return VarLiveness::kReadBeforeWrite;
         }
         const auto& gs = static_cast<const GotoStatement&>(s);
@@ -603,7 +608,7 @@ struct FolderContext {
 
   VarLiveness AnalyzeFromLabel(std::string_view target_label, std::string_view var,
                                int goto_depth) {
-    if (goto_depth > 4 || root_body == nullptr) {
+    if (goto_depth > 16 || root_body == nullptr) {
       return VarLiveness::kReadBeforeWrite;
     }
     const CompoundStatement* found_comp = nullptr;
@@ -987,7 +992,8 @@ struct FolderContext {
     if (allow_ident_deref && e.Kind() == CExpressionKind::kIdentifier) {
       std::string_view id_name = static_cast<const IdentifierExpression&>(e).Name();
       if (IsStackParamOrLocalName(id_name) || absl::StartsWith(id_name, "D_") ||
-          absl::StartsWith(id_name, "g_") || absl::StartsWith(id_name, "RO_") ||
+          absl::StartsWith(id_name, "g_") || absl::StartsWith(id_name, "s_") ||
+          absl::StartsWith(id_name, "k_") || absl::StartsWith(id_name, "RO_") ||
           absl::StartsWith(id_name, "B_")) {
         *out_base = id_name;
         *out_offset = 0;
@@ -1100,6 +1106,11 @@ struct FolderContext {
     }
     if (base_a == base_b) {
       return (off_a + size_a <= off_b) || (off_b + size_b <= off_a);
+    }
+    const bool is_stack_a = IsStackParamOrLocalName(base_a) || base_a == "sp";
+    const bool is_stack_b = IsStackParamOrLocalName(base_b) || base_b == "sp";
+    if ((is_stack_a && addr_of_b && !is_stack_b) || (is_stack_b && addr_of_a && !is_stack_a)) {
+      return true;
     }
     if (addr_of_a && addr_of_b) {
       return true;
@@ -1400,8 +1411,8 @@ struct FolderContext {
                   var != "v0") {
                 uint32_t imm32 = static_cast<uint32_t>(
                     static_cast<const IntegerLiteralExpression&>(assign.Rhs()).Value());
-                if ((imm32 == 0x80000000u || imm32 == 0x4F000000u || imm32 == 0x41E00000u) &&
-                    (var == "temp_at" || HasLoopInStmt(*root_body)) &&
+                const bool is_upper_16_const = (imm32 >= 0x10000u && (imm32 & 0xFFFFu) == 0);
+                if (is_upper_16_const && (var == "temp_at" || HasLoopInStmt(*root_body)) &&
                     CountUses(*root_body, var) == 0 && !HasAddressOfVarInStmt(*root_body, var)) {
                   stmts.erase(stmts.begin() + i);
                   changed = true;
@@ -1440,7 +1451,7 @@ struct FolderContext {
               // it immediately so it does not artificially inflate use counts of `v0`/`v1`!
               if ((is_call_arg || is_stack_arg) && IsPureExpr(effective_rhs)) {
                 bool followed_by_call = false;
-                for (size_t k = i + 1; k < stmts.size() && k <= i + 40; ++k) {
+                for (size_t k = i + 1; k < stmts.size(); ++k) {
                   if (HasCallInStmt(*stmts[k])) {
                     followed_by_call = true;
                     break;
@@ -1628,10 +1639,12 @@ struct FolderContext {
                 auto extract_word_index = [](const CExpression& expr) -> const CExpression* {
                   if (expr.Kind() == CExpressionKind::kBinaryExpression) {
                     const auto& b = static_cast<const BinaryExpression&>(expr);
-                    if (b.Op() == "<<" && b.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
-                        static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value() == 2 &&
-                        b.Lhs().Kind() == CExpressionKind::kIdentifier) {
-                      return &b.Lhs();
+                    if (b.Rhs().Kind() == CExpressionKind::kIntegerLiteral && IsPureExpr(b.Lhs())) {
+                      int64_t rhs_val =
+                          static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value();
+                      if ((b.Op() == "<<" && rhs_val == 2) || (b.Op() == "*" && rhs_val == 4)) {
+                        return &b.Lhs();
+                      }
                     }
                   }
                   return nullptr;
@@ -1639,7 +1652,7 @@ struct FolderContext {
                 std::string dest_var;
                 const CExpression* word_idx = nullptr;
                 size_t use_stmt_idx = 0;
-                // Pattern 1: `v0 = &sym; dest = ((idx << 2) + v0); <use_stmt>`
+                // Pattern 1: `v0 = &sym; dest = ((idx << 2) + v0); <use_stmt>` (or commuted `+`)
                 if (i + 2 < stmts.size() &&
                     stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement) {
                   const auto& next_es = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
@@ -1650,11 +1663,18 @@ struct FolderContext {
                         next_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
                         next_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
                       const auto& bin = static_cast<const BinaryExpression&>(next_assign.Rhs());
-                      const CExpression* candidate_idx = extract_word_index(bin.Lhs());
-                      if (bin.Op() == "+" && candidate_idx != nullptr &&
-                          bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
-                          static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var &&
-                          CountExprUses(*candidate_idx, var) == 0 &&
+                      const CExpression* candidate_idx = nullptr;
+                      if (bin.Op() == "+") {
+                        if (bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var) {
+                          candidate_idx = extract_word_index(bin.Lhs());
+                        } else if (bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                                   static_cast<const IdentifierExpression&>(bin.Lhs()).Name() ==
+                                       var) {
+                          candidate_idx = extract_word_index(bin.Rhs());
+                        }
+                      }
+                      if (candidate_idx != nullptr && CountExprUses(*candidate_idx, var) == 0 &&
                           IsDeadAfterStmt(i + 1, var, 1, stmts[i].get())) {
                         dest_var = std::string(
                             static_cast<const IdentifierExpression&>(next_assign.Lhs()).Name());
@@ -1688,12 +1708,19 @@ struct FolderContext {
                           candidate_dest != var && CountExprUses(*candidate_idx, var) == 0 &&
                           add_assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
                         const auto& bin = static_cast<const BinaryExpression&>(add_assign.Rhs());
-                        if (bin.Op() == "+" && bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
-                            static_cast<const IdentifierExpression&>(bin.Lhs()).Name() ==
-                                candidate_dest &&
-                            bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
-                            static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var &&
-                            IsDeadAfterStmt(i + 2, var, 1, stmts[i].get())) {
+                        const bool match_dest_plus_var =
+                            bin.Op() == "+" &&
+                            ((bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                              static_cast<const IdentifierExpression&>(bin.Lhs()).Name() ==
+                                  candidate_dest &&
+                              bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                              static_cast<const IdentifierExpression&>(bin.Rhs()).Name() == var) ||
+                             (bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                              static_cast<const IdentifierExpression&>(bin.Lhs()).Name() == var &&
+                              bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                              static_cast<const IdentifierExpression&>(bin.Rhs()).Name() ==
+                                  candidate_dest));
+                        if (match_dest_plus_var && IsDeadAfterStmt(i + 2, var, 1, stmts[i].get())) {
                           dest_var = std::string(candidate_dest);
                           word_idx = candidate_idx;
                           use_stmt_idx = i + 3;
@@ -1799,7 +1826,7 @@ struct FolderContext {
                 bool is_fp_scratch = (var.size() >= 2 && var[0] == 'f' &&
                                       std::isdigit(static_cast<unsigned char>(var[1])));
                 bool block_has_later_call = false;
-                for (size_t k = i + 1; k < stmts.size() && k <= i + 48; ++k) {
+                for (size_t k = i + 1; k < stmts.size(); ++k) {
                   if (HasCallInStmt(*stmts[k])) {
                     block_has_later_call = true;
                     break;
@@ -2228,7 +2255,7 @@ struct FolderContext {
                               std::string arg_lhs_name(
                                   static_cast<const IdentifierExpression&>(ca.Lhs()).Name());
                               if (CountExprUses(assign.Rhs(), arg_lhs_name) == 0) {
-                                for (size_t k = j + 1; k < stmts.size() && k <= j + 16; ++k) {
+                                for (size_t k = j + 1; k < stmts.size(); ++k) {
                                   if (stmts[k]->Kind() != CStatementKind::kExpressionStatement) {
                                     break;
                                   }
@@ -2543,7 +2570,7 @@ struct FolderContext {
                     };
                     auto try_fold_into_branch_comp = [&](const CompoundStatement& branch_comp)
                         -> std::unique_ptr<CompoundStatement> {
-                      for (size_t k = 0; k < branch_comp.Statements().size() && k < 4; ++k) {
+                      for (size_t k = 0; k < branch_comp.Statements().size() && k < 16; ++k) {
                         const CStatement& bs = *branch_comp.Statements()[k];
                         int k_uses = CountUses(bs, var);
                         if (k_uses == 1) {

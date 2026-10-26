@@ -455,6 +455,11 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
   if (body == nullptr) return;
 
   auto is_v0_or_v1 = [](std::string_view name) { return name == "v0" || name == "v1"; };
+  auto is_scratch_gpr = [](std::string_view name) {
+    return name == "v0" || name == "v1" || name == "at" || name == "temp_at" ||
+           absl::StartsWith(name, "temp_t") ||
+           (name.size() == 2 && name[0] == 't' && name[1] >= '0' && name[1] <= '9');
+  };
 
   // Check if the function is a void function without any value-returning
   // `return expr;` or `goto`/`label` control flow.
@@ -609,9 +614,9 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
       });
     }
 
-    // 2. Fold post-increment byte pointer stores and loads (`stride == 1`):
-    //    `vX = ptr; ptr = (vX + 1); *(u8/s8*)vX = val;` -> `*(u8/s8*)ptr++ = val;`
-    //    `vX = ptr; ptr = (vX + 1); vY = *(u8/s8*)vX;` -> `vY = *(u8/s8*)ptr++;`
+    // 2. Fold post-increment pointer stores and loads (`stride == sizeof(*ptr)`):
+    //    `vX = ptr; ptr = (vX + stride); *(T*)vX = val;` -> `*(T*)ptr++ = val;`
+    //    `vX = ptr; ptr = (vX + stride); vY = *(T*)vX;` -> `vY = *(T*)ptr++;`
     for (size_t i = 0; i + 2 < stmts.size();) {
       if (stmts[i] != nullptr && stmts[i + 1] != nullptr && stmts[i + 2] != nullptr &&
           stmts[i]->Kind() == CStatementKind::kExpressionStatement &&
@@ -635,13 +640,13 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
             std::string ptr_var = static_cast<const IdentifierExpression&>(a0.Rhs()).Name();
             std::string a1_lhs = static_cast<const IdentifierExpression&>(a1.Lhs()).Name();
             const auto& b1 = static_cast<const BinaryExpression&>(a1.Rhs());
-            if (is_v0_or_v1(vx) && a1_lhs == ptr_var && b1.Op() == "+" &&
+            if (is_scratch_gpr(vx) && a1_lhs == ptr_var && b1.Op() == "+" &&
                 b1.Lhs().Kind() == CExpressionKind::kIdentifier &&
                 static_cast<const IdentifierExpression&>(b1.Lhs()).Name() == vx &&
                 b1.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
               int64_t stride = static_cast<const IntegerLiteralExpression&>(b1.Rhs()).Value();
               auto match_deref_of_vx = [&](const CExpression& expr, CType* out_ptr_type) -> bool {
-                if (stride != 1 || expr.Kind() != CExpressionKind::kUnaryExpression) return false;
+                if (stride <= 0 || expr.Kind() != CExpressionKind::kUnaryExpression) return false;
                 const auto& u = static_cast<const UnaryExpression&>(expr);
                 if (u.Op() != "*" || u.Operand().Kind() != CExpressionKind::kCastExpression) {
                   return false;
@@ -653,7 +658,7 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
                   return false;
                 }
                 std::optional<int64_t> elem_sz = TypeByteSize(cast.TargetType().name);
-                if (!elem_sz.has_value() || *elem_sz != 1) return false;
+                if (!elem_sz.has_value() || *elem_sz != stride) return false;
                 *out_ptr_type = cast.TargetType();
                 return true;
               };
