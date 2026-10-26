@@ -6100,5 +6100,53 @@ void SwitchWithMergedCasesAndCrossJumpedNestedIfCallTail(void) {
 )");
 }
 
+TEST_F(RoundTripTest, SwitchWithChainedSharedStoreTails) {
+  AssertRoundTripBitExact("SwitchWithChainedSharedStoreTails", R"(
+extern u8 g_season_char_0;
+extern u8 g_season_char_1;
+extern u8 g_season_char_2;
+extern u8 g_season_char_3;
+extern u8 g_season_char_4;
+extern u8 g_season_char_5;
+
+void SwitchWithChainedSharedStoreTails(s32 season) {
+    switch (season & 0xFF) {
+    case 1:
+        g_season_char_0 = 0xB3;
+        g_season_char_1 = 0xCA;
+        g_season_char_2 = 0xCC;
+        g_season_char_3 = 0xC3;
+        g_season_char_4 = 0xC8;
+        g_season_char_5 = 0xC1;
+        break;
+    case 2:
+        g_season_char_0 = 0xB3;
+        g_season_char_1 = 0xCF;
+        g_season_char_2 = 0xC7;
+        g_season_char_3 = 0xC7;
+        g_season_char_4 = 0xBF;
+        g_season_char_5 = 0xCC;
+        break;
+    case 3:
+        g_season_char_0 = 0xA1;
+        g_season_char_1 = 0xCA;
+        g_season_char_2 = 0xCE;
+        g_season_char_3 = 0xCF;
+        g_season_char_4 = 0xC7;
+        g_season_char_5 = 0xC8;
+        break;
+    case 4:
+        g_season_char_0 = 0xB7;
+        g_season_char_1 = 0xC3;
+        g_season_char_2 = 0xC8;
+        g_season_char_3 = 0xCE;
+        g_season_char_4 = 0xBF;
+        g_season_char_5 = 0xCC;
+        break;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

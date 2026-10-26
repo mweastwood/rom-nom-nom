@@ -691,5 +691,66 @@ TEST(AstAbiRewriterTest,
   EXPECT_EQ(sw.Cases()[2].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
 }
 
+TEST(AstAbiRewriterTest, InlineCrossJumpedCallTailsDuplicatesChainedSwitchCaseStoreTails) {
+  CompoundStatement root;
+  std::vector<SwitchCase> cases;
+
+  SwitchCase case1;
+  case1.case_values = {1};
+  case1.body = std::make_unique<CompoundStatement>();
+  case1.body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_season_name_char_0"), CExpression::Integer(179))));
+  case1.body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(193))));
+  case1.body->AddStatement(CStatement::Goto("block_12"));
+  cases.push_back(std::move(case1));
+
+  SwitchCase case2;
+  case2.case_values = {2};
+  case2.body = std::make_unique<CompoundStatement>();
+  case2.body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_season_name_char_0"), CExpression::Integer(179))));
+  case2.body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(199))));
+  case2.body->AddStatement(CStatement::Goto("block_11"));
+  cases.push_back(std::move(case2));
+
+  SwitchCase case4;
+  case4.case_values = {4};
+  case4.body = std::make_unique<CompoundStatement>();
+  case4.body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_season_name_char_0"), CExpression::Integer(183))));
+  case4.body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(206))));
+  case4.body->AddStatement(CStatement::Label("block_11"));
+  case4.body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_season_name_char_3"), CExpression::Identifier("v0"))));
+  case4.body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_season_name_char_4"), CExpression::Integer(191))));
+  case4.body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(204))));
+  case4.body->AddStatement(CStatement::Label("block_12"));
+  case4.body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_season_name_char_5"), CExpression::Identifier("v0"))));
+  case4.body->AddStatement(CStatement::Break());
+  cases.push_back(std::move(case4));
+
+  root.AddStatement(CStatement::Switch(CExpression::Identifier("arg0"), std::move(cases)));
+  root.AddStatement(CStatement::Return());
+
+  InlineCrossJumpedCallTails(&root);
+
+  std::string emitted = root.ToString();
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_11")));
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_12")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_11:")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_12:")));
+  const auto& sw = static_cast<const SwitchStatement&>(*root.Statements()[0]);
+  ASSERT_EQ(sw.Cases().size(), 3u);
+  EXPECT_EQ(sw.Cases()[0].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
+  EXPECT_EQ(sw.Cases()[1].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
+  EXPECT_EQ(sw.Cases()[2].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
