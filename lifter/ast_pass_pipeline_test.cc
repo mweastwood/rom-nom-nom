@@ -252,5 +252,66 @@ TEST(AstPassPipelineTest, ScratchRegisterWebSplitterPassSplitsDisjointBasicBlock
   EXPECT_THAT(rendered, HasSubstr("*arg1 = temp_t0_2;"));
 }
 
+TEST(AstPassPipelineTest, LoopInvariantSinkerSubstitutesConditionConstAndSymbolAddrAndFoldsLatch) {
+  CompoundStatement body;
+  // Pre-loop invariant constant `arg1 = -1` used only in the inner loop condition, and pre-loop
+  // symbol address `temp_t0 = &D_8016F500` used inside an outer do-while loop with a trailing
+  // latch comparison `v0 = ((u32)(arg1 & 255) < 24);` before a hoisted delay-slot `arg0 = 0;`.
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t0"),
+                              CExpression::Unary("&", CExpression::Identifier("D_8016F500")))));
+
+  auto outer_body = std::make_unique<CompoundStatement>();
+  outer_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg3"),
+      CExpression::Binary(
+          "+", CExpression::Binary("*", CExpression::Identifier("arg1"), CExpression::Integer(20)),
+          CExpression::Identifier("temp_t0")))));
+  outer_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S32().MakePointer(), CExpression::Identifier("arg3"))))));
+  outer_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"),
+      CExpression::Binary("+", CExpression::Identifier("arg1"), CExpression::Integer(1)))));
+  outer_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary(
+          "<",
+          CExpression::Cast(CType::U32(), CExpression::Binary("&", CExpression::Identifier("arg1"),
+                                                              CExpression::Integer(255))),
+          CExpression::Integer(24)))));
+  outer_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg0"), CExpression::Integer(0))));
+
+  body.AddStatement(CStatement::DoWhile(
+      std::move(outer_body),
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+
+  // Second loop testing `arg2 = -1` read only in loop condition.
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg2"), CExpression::Integer(-1))));
+  auto second_loop_body = std::make_unique<CompoundStatement>();
+  second_loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("-", CExpression::Identifier("v1"), CExpression::Integer(1)))));
+  body.AddStatement(CStatement::DoWhile(
+      std::move(second_loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Identifier("arg2"))));
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  LoopInvariantSinkerPass pass;
+  EXPECT_EQ(pass.Name(), "LoopInvariantSinker");
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t0 = &D_8016F500;")));
+  EXPECT_THAT(rendered, HasSubstr("(s32)&D_8016F500"));
+  EXPECT_THAT(rendered, HasSubstr("while (((u32)(arg1 & 255) < 24));"));
+  EXPECT_THAT(rendered, Not(HasSubstr("arg2 = 0xFFFFFFFFFFFFFFFF;")));
+  EXPECT_THAT(rendered, HasSubstr("while ((v1 != 0xFFFFFFFFFFFFFFFF));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

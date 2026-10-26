@@ -35,6 +35,12 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
 // `for` loops.
 bool SynthesizeForLoopsInBlock(CompoundStatement* body);
 
+// Sinks pre-loop loop-invariant constant and symbol-address assignments (`reg = const;`,
+// `reg = &sym;`) into the loop body or loop condition when `reg` is not modified in the loop and
+// is dead after the loop, so GCC 2.7.2 `loop.c:move_movables` hoists them in natural loop-scan
+// order.
+bool SinkLoopInvariantAssignments(CompoundStatement* body);
+
 // Concrete `AstPass` classes for post-conversion control-flow cleanup.
 class SwitchGotoCaseCollapserPass : public AstPass {
  public:
@@ -75,6 +81,12 @@ class GotoAndLabelCleanupPass : public AstPass {
 class ForLoopSynthesizerPass : public AstPass {
  public:
   std::string_view Name() const override { return "SynthesizeForLoops"; }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class LoopInvariantSinkerPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "LoopInvariantSinker"; }
   bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
 };
 

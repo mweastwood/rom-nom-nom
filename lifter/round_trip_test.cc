@@ -6452,5 +6452,30 @@ void PostLoopScratchWebReusedForPointerInitAndGlobalStore(u8* table_base, s32 ba
 )");
 }
 
+TEST_F(RoundTripTest, NestedLoopWithGlobalTableBaseAndSentinelComparison) {
+  AssertRoundTripBitExact("NestedLoopWithGlobalTableBaseAndSentinelComparison", R"(
+extern u8 D_8016F500[];
+extern u8 D_8018A728[];
+
+void NestedLoopWithGlobalTableBaseAndSentinelComparison(void) {
+    u8 row = 0;
+    u8 col = 0;
+    do {
+        s32 offset = col * 20;
+        u8* dst_base = D_8016F500 + offset;
+        u8* src_base = D_8018A728 + offset;
+        do {
+            u8* dst = dst_base + row;
+            u8* src = src_base + row;
+            row++;
+            *dst = *src;
+        } while (row < 20);
+        col++;
+        row = 0;
+    } while (col < 24);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
