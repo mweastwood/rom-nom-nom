@@ -51,6 +51,39 @@ cc_test(
 )
 
 cc_library(
+    name = "cfg_pass_pipeline",
+    srcs = [
+        "cfg_analysis_manager.cc",
+        "cfg_pass_pipeline.cc",
+    ],
+    hdrs = [
+        "cfg_analysis_manager.h",
+        "cfg_pass_pipeline.h",
+    ],
+    deps = [
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:register_tracker",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_test(
+    name = "cfg_pass_pipeline_test",
+    srcs = ["cfg_pass_pipeline_test.cc"],
+    deps = [
+        ":cfg_pass_pipeline",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "cfg_de_reorg",
     srcs = ["cfg_de_reorg.cc"],
     hdrs = ["cfg_de_reorg.h"],
@@ -605,6 +638,7 @@ cc_library(
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
     deps = [
+        ":cfg_pass_pipeline",
         ":control_flow_structurer",
         ":function_loader",
         ":stack_frame_analyzer",

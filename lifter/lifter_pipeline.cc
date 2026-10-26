@@ -147,15 +147,15 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
     return status;
   }
   CfgDeReorg::UnscheduleDelaySlots(context.MutableCfg());
+  context.InvalidateCfgAnalyses();
 
-  // 2. Compute Dominator Trees
-  DominatorTree dom_tree = DominatorTree::Compute(context.Cfg());
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(context.Cfg());
+  // 2. Compute Dominator Trees and Analyze Natural Loops via CfgAnalysisManager
+  auto& cfg_analyses = context.CfgAnalyses();
+  const DominatorTree& dom_tree = cfg_analyses.GetDominatorTree();
+  const DominatorTree& post_dom_tree = cfg_analyses.GetPostDominatorTree();
+  const LoopInfo& loop_info = cfg_analyses.GetLoopInfo();
 
-  // 3. Analyze Natural Loops
-  LoopInfo loop_info = LoopInfo::Analyze(context.Cfg(), dom_tree);
-
-  // 4. Structure Control Flow into Hierarchical Regions
+  // 3. Structure Control Flow into Hierarchical Regions
   context.SetRootRegion(
       ControlFlowStructurer::Structure(context.Cfg(), dom_tree, post_dom_tree, loop_info));
   if (!context.HasRootRegion()) {

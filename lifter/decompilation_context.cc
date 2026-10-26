@@ -46,6 +46,8 @@ absl::Status DecompilationContext::BuildCfg() {
     return cfg_or.status();
   }
   cfg_ = std::move(*cfg_or);
+  cfg_analyses_.SetCfg(&(*cfg_));
+  cfg_analyses_.InvalidateAll();
   frame_layout_.reset();
   return absl::OkStatus();
 }

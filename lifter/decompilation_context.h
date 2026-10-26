@@ -14,6 +14,7 @@
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
 #include "core/mips.h"
+#include "lifter/cfg_analysis_manager.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/function_loader.h"
 #include "lifter/stack_frame_analyzer.h"
@@ -120,10 +121,15 @@ class DecompilationContext {
   const ControlFlowGraph& Cfg() const { return *cfg_; }
   ControlFlowGraph* MutableCfg() { return cfg_.has_value() ? &(*cfg_) : nullptr; }
   const std::vector<JumpTable>& JumpTables() const { return jump_tables_; }
+  CfgAnalysisManager& CfgAnalyses() { return cfg_analyses_; }
 
   // Stage 2: Analyze or retrieve the GCC 2.7.2 stack frame layout (`mips.c:compute_frame_size`).
   const StackFrameLayout& FrameLayout();
   void InvalidateFrameLayout() { frame_layout_.reset(); }
+  void InvalidateCfgAnalyses() {
+    cfg_analyses_.InvalidateAll();
+    frame_layout_.reset();
+  }
 
   // Stage 3: Store and access the structured control-flow region hierarchy.
   bool HasRootRegion() const { return root_region_ != nullptr; }
@@ -150,6 +156,7 @@ class DecompilationContext {
   InterProceduralAbiContext abi_context_;
   std::vector<JumpTable> jump_tables_;
   std::optional<ControlFlowGraph> cfg_;
+  CfgAnalysisManager cfg_analyses_;
   std::optional<StackFrameLayout> frame_layout_;
   std::unique_ptr<StructuredRegion> root_region_;
   std::optional<FunctionDeclaration> ast_;
