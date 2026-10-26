@@ -25,6 +25,7 @@
 #include "lifter/c_emitter.h"
 #include "lifter/cfg_de_reorg.h"
 #include "lifter/control_flow_structurer.h"
+#include "lifter/decompilation_context.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/function_loader.h"
 #include "lifter/loop_analyzer.h"
@@ -133,63 +134,62 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
     const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts,
     const absl::flat_hash_set<std::string>* functions_returning_v0,
     const absl::flat_hash_set<std::string>* functions_returning_f0) const {
-  if (loaded_func.instructions.empty()) {
-    return absl::InvalidArgumentError("LifterPipeline: No instructions to decompile.");
-  }
+  InterProceduralAbiContext abi_context;
+  abi_context.function_parameter_counts = function_parameter_counts;
+  abi_context.function_fp_parameter_counts = function_fp_parameter_counts;
+  abi_context.functions_returning_v0 = functions_returning_v0;
+  abi_context.functions_returning_f0 = functions_returning_f0;
 
-  // 1. Detect Jump Tables and Build Control Flow Graph
-  std::vector<JumpTable> jump_tables;
-  if (loaded_func.memory_reader) {
-    jump_tables =
-        JumpTableDetector::DetectJumpTables(loaded_func.instructions, loaded_func.memory_reader);
+  DecompilationContext context(loaded_func, abi_context);
+
+  // 1. Detect Jump Tables, Build Control Flow Graph, and Unschedule Delay Slots
+  if (absl::Status status = context.BuildCfg(); !status.ok()) {
+    return status;
   }
-  auto cfg_or = ControlFlowGraph::Build(loaded_func.instructions, jump_tables);
-  if (!cfg_or.ok()) {
-    return cfg_or.status();
-  }
-  auto& cfg = *cfg_or;
-  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+  CfgDeReorg::UnscheduleDelaySlots(context.MutableCfg());
 
   // 2. Compute Dominator Trees
-  DominatorTree dom_tree = DominatorTree::Compute(cfg);
-  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(cfg);
+  DominatorTree dom_tree = DominatorTree::Compute(context.Cfg());
+  DominatorTree post_dom_tree = DominatorTree::ComputePostDominators(context.Cfg());
 
   // 3. Analyze Natural Loops
-  LoopInfo loop_info = LoopInfo::Analyze(cfg, dom_tree);
+  LoopInfo loop_info = LoopInfo::Analyze(context.Cfg(), dom_tree);
 
   // 4. Structure Control Flow into Hierarchical Regions
-  auto root_region = ControlFlowStructurer::Structure(cfg, dom_tree, post_dom_tree, loop_info);
-  if (!root_region) {
+  context.SetRootRegion(
+      ControlFlowStructurer::Structure(context.Cfg(), dom_tree, post_dom_tree, loop_info));
+  if (!context.HasRootRegion()) {
     return absl::InternalError("LifterPipeline: Failed to structure control flow graph.");
   }
 
   // 5. Convert Structured Regions and Lifted Instructions to C AST
   AstConverterOptions converter_opts;
-  converter_opts.function_name = loaded_func.name;
-  converter_opts.game_config = loaded_func.game_config;
-  converter_opts.function_parameter_counts = function_parameter_counts;
-  converter_opts.function_fp_parameter_counts = function_fp_parameter_counts;
-  converter_opts.functions_returning_v0 = functions_returning_v0;
-  converter_opts.functions_returning_f0 = functions_returning_f0;
+  converter_opts.function_name = context.FunctionName();
+  converter_opts.game_config = context.Config();
+  converter_opts.function_parameter_counts = context.AbiContext().function_parameter_counts;
+  converter_opts.function_fp_parameter_counts = context.AbiContext().function_fp_parameter_counts;
+  converter_opts.functions_returning_v0 = context.AbiContext().functions_returning_v0;
+  converter_opts.functions_returning_f0 = context.AbiContext().functions_returning_f0;
 
-  auto ast_or = AstConverter::Convert(cfg, *root_region, loaded_func.symbol_index, converter_opts);
+  auto ast_or =
+      AstConverter::Convert(context.Cfg(), context.RootRegion(), context.Symbols(), converter_opts);
   if (!ast_or.ok()) {
     return ast_or.status();
   }
-  FunctionDeclaration ast = std::move(*ast_or);
+  context.SetAst(std::move(*ast_or));
 
   // 6. Format and Emit C Code
   CEmitterOptions emitter_opts;
   emitter_opts.includes = options_.includes;
   emitter_opts.format_with_clang = options_.format_with_clang;
 
-  std::string c_code = CEmitter::EmitFunction(ast, emitter_opts);
+  std::string c_code = CEmitter::EmitFunction(context.Ast(), emitter_opts);
 
   LifterResult result;
-  result.function_name = loaded_func.name;
-  result.vram = loaded_func.vram;
-  result.instruction_count = loaded_func.instructions.size();
-  result.ast = std::make_unique<FunctionDeclaration>(std::move(ast));
+  result.function_name = context.FunctionName();
+  result.vram = context.Vram();
+  result.instruction_count = context.Function().instructions.size();
+  result.ast = context.TakeAst();
   result.c_code = std::move(c_code);
 
   return result;

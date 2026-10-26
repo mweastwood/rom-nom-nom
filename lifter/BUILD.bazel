@@ -601,6 +601,37 @@ cc_test(
 )
 
 cc_library(
+    name = "decompilation_context",
+    srcs = ["decompilation_context.cc"],
+    hdrs = ["decompilation_context.h"],
+    deps = [
+        ":control_flow_structurer",
+        ":function_loader",
+        ":stack_frame_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:jump_table",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_test(
+    name = "decompilation_context_test",
+    srcs = ["decompilation_context_test.cc"],
+    deps = [
+        ":decompilation_context",
+        ":function_loader",
+        "//core:c_ast",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "lifter_pipeline",
     srcs = [
         "lifter_pipeline.cc",
@@ -617,6 +648,7 @@ cc_library(
         ":c_emitter",
         ":cfg_de_reorg",
         ":control_flow_structurer",
+        ":decompilation_context",
         ":dominator_tree",
         ":function_loader",
         ":loop_analyzer",
