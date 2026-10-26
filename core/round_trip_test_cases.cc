@@ -7185,6 +7185,26 @@ s32 GeneralizedCrossJumpTailWithFilledDelaySlots(s32 mode, s32 x, s32* out) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedSparseSwitchWith32BitConstantsAndZeroPivot",
+          .function_name = "GeneralizedSparseSwitchWith32BitConstantsAndZeroPivot",
+          .original_c = R"(
+s32 GeneralizedSparseSwitchWith32BitConstantsAndZeroPivot(s32 cmd, s32 val) {
+    switch (cmd) {
+        case -200:
+            return val - 10;
+        case -50:
+            return val - 5;
+        case 100:
+            return val + 5;
+        case 0x12345:
+            return val + 100;
+        default:
+            return val;
+    }
+}
+)",
+      },
   };
   return *k_cases;
 }

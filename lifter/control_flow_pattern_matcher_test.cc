@@ -898,5 +898,51 @@ TEST(ControlFlowPatternMatcherTest, CollapsesShortCircuitOrWithBitmaskComparison
   EXPECT_THAT(s, Not(HasSubstr("GOTO")));
 }
 
+TEST(ControlFlowPatternMatcherTest,
+     DetectsDecisionTreeSwitchWith32BitLuiAddiuConstantsAndZeroPivotSplit) {
+  // Decision tree testing $a0 against 32-bit constants (0x12345, -100, 100) using a zero-pivot
+  // `bltz $a0` split.
+  std::vector<uint32_t> words = {
+      0x3C010001,  // 0x00: lui   $at, 0x0001
+      0x24212345,  // 0x04: addiu $at, $at, 0x2345
+      0x1081000D,  // 0x08: beq   $a0, $at, +13 -> 0x40 (case 0x12345)
+      0x00000000,  // 0x0C: nop
+      0x04800006,  // 0x10: bltz  $a0, +6 -> 0x2C (< 0 branch)
+      0x00000000,  // 0x14: nop
+      0x24010064,  // 0x18: addiu $at, $zero, 100
+      0x1081000B,  // 0x1C: beq   $a0, $at, +11 -> 0x4C (case 100)
+      0x00000000,  // 0x20: nop
+      0x08000019,  // 0x24: j     0x80000064 (default)
+      0x00000000,  // 0x28: nop
+      0x2401FF9C,  // 0x2C: addiu $at, $zero, -100
+      0x10810009,  // 0x30: beq   $a0, $at, +9 -> 0x58 (case -100)
+      0x00000000,  // 0x34: nop
+      0x08000019,  // 0x38: j     0x80000064 (default)
+      0x00000000,  // 0x3C: nop
+      0x24020001,  // 0x40: addiu $v0, $zero, 1
+      0x03E00008,  // 0x44: jr    $ra
+      0x00000000,  // 0x48: nop
+      0x24020002,  // 0x4C: addiu $v0, $zero, 2
+      0x03E00008,  // 0x50: jr    $ra
+      0x00000000,  // 0x54: nop
+      0x24020003,  // 0x58: addiu $v0, $zero, 3
+      0x03E00008,  // 0x5C: jr    $ra
+      0x00000000,  // 0x60: nop
+      0x24020000,  // 0x64: addiu $v0, $zero, 0
+      0x03E00008,  // 0x68: jr    $ra
+      0x00000000,  // 0x6C: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  EXPECT_EQ(sw->selector_reg, Register::kA0);
+  EXPECT_EQ(sw->target_to_cases.size(), 3u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

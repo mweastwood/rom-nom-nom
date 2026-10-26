@@ -2314,7 +2314,8 @@ const CExpression* UnwrapSwitchControlExpression(const CExpression* expr) {
   while (expr != nullptr) {
     if (expr->Kind() == CExpressionKind::kCastExpression) {
       const auto* cast = static_cast<const CastExpression*>(expr);
-      if (cast->TargetType().ToString() == "s32") {
+      std::string t = cast->TargetType().ToString();
+      if (t == "s32" || t == "u32") {
         expr = &cast->Operand();
       } else {
         break;
@@ -2472,6 +2473,18 @@ struct SparseDecisionTreeState {
     cases.emplace(val, WrapSwitchCaseBodyWithBreak(case_stmt));
     return true;
   }
+
+  bool AddCaseRange(int64_t low_val, int64_t high_val, const CStatement& case_stmt,
+                    std::optional<int64_t> low_bound, std::optional<int64_t> high_bound) {
+    if (low_val > high_val || high_val - low_val > 16) return false;
+    for (int64_t v = low_val; v <= high_val; ++v) {
+      if (cases.count(v) > 0) return false;
+    }
+    for (int64_t v = low_val; v <= high_val; ++v) {
+      if (!AddCase(v, case_stmt, low_bound, high_bound)) return false;
+    }
+    return true;
+  }
 };
 
 std::string InvertComparisonOperator(std::string_view op) {
@@ -2604,18 +2617,20 @@ bool ParseDecisionTreeNode(const CStatement* stmt, std::optional<int64_t> low_bo
       return state->RecordDefaultLeaf(remaining_default.get());
     }
 
-    // Check if this compound statement is a bounded single-value child (`low_bound == high_bound`).
-    if (low_bound.has_value() && high_bound.has_value() && *low_bound == *high_bound &&
-        state->cases.count(*low_bound) == 0) {
-      return state->AddCase(*low_bound, *comp, low_bound, high_bound);
+    // Check if this compound statement is a bounded value or contiguous range child.
+    if (low_bound.has_value() && high_bound.has_value() && *low_bound <= *high_bound &&
+        *high_bound - *low_bound <= 16 &&
+        state->AddCaseRange(*low_bound, *high_bound, *comp, low_bound, high_bound)) {
+      return true;
     }
     return state->RecordDefaultLeaf(comp);
   }
 
   if (stmt->Kind() != CStatementKind::kIfStatement) {
-    if (low_bound.has_value() && high_bound.has_value() && *low_bound == *high_bound &&
-        state->cases.count(*low_bound) == 0) {
-      return state->AddCase(*low_bound, *stmt, low_bound, high_bound);
+    if (low_bound.has_value() && high_bound.has_value() && *low_bound <= *high_bound &&
+        *high_bound - *low_bound <= 16 &&
+        state->AddCaseRange(*low_bound, *high_bound, *stmt, low_bound, high_bound)) {
+      return true;
     }
     return state->RecordDefaultLeaf(stmt);
   }
@@ -2627,9 +2642,10 @@ bool ParseDecisionTreeNode(const CStatement* stmt, std::optional<int64_t> low_bo
   if (!ExtractNormalizedSwitchComparison(ifs->Condition(), &lhs, &op, &cval) ||
       !state->MatchOrSetControlExpr(*lhs)) {
     if (state->control_expr != nullptr) {
-      if (low_bound.has_value() && high_bound.has_value() && *low_bound == *high_bound &&
-          state->cases.count(*low_bound) == 0) {
-        return state->AddCase(*low_bound, *stmt, low_bound, high_bound);
+      if (low_bound.has_value() && high_bound.has_value() && *low_bound <= *high_bound &&
+          *high_bound - *low_bound <= 16 &&
+          state->AddCaseRange(*low_bound, *high_bound, *stmt, low_bound, high_bound)) {
+        return true;
       }
       return state->RecordDefaultLeaf(stmt);
     }
@@ -2717,10 +2733,28 @@ std::unique_ptr<CStatement> TryBuildSparseSwitchFromState(SparseDecisionTreeStat
     return nullptr;
   }
 
-  // Verify the case set matches GCC 2.7.2 `stmt.c:4818` decision-tree criteria (`count < 5` or
-  // `span > 10 * count`) so recompiling the `switch` produces a decision tree rather than a jump
-  // table.
-  const size_t count = state->cases.size();
+  std::vector<SwitchCase> switch_cases;
+  switch_cases.reserve(state->cases.size() + (state->non_empty_default != nullptr ? 1 : 0));
+  std::string prev_body_str;
+  for (auto& [val, body] : state->cases) {
+    std::string cur_body_str = body->ToString();
+    if (!switch_cases.empty() && !switch_cases.back().case_values.empty() &&
+        switch_cases.back().case_values.back() + 1 == val && cur_body_str == prev_body_str) {
+      switch_cases.back().case_values.push_back(val);
+    } else {
+      SwitchCase sc;
+      sc.case_values = {val};
+      sc.is_default = false;
+      sc.body = std::move(body);
+      switch_cases.push_back(std::move(sc));
+      prev_body_str = std::move(cur_body_str);
+    }
+  }
+
+  // Verify the grouped case set matches GCC 2.7.2 `stmt.c:4818` decision-tree criteria (`count < 5`
+  // or `span > 10 * count`, evaluated after `group_case_nodes`) so recompiling the `switch`
+  // produces a decision tree rather than a jump table.
+  const size_t count = switch_cases.size();
   const int64_t min_val = state->cases.begin()->first;
   const int64_t max_val = state->cases.rbegin()->first;
   const uint64_t span = static_cast<uint64_t>(max_val) - static_cast<uint64_t>(min_val);
@@ -2728,15 +2762,6 @@ std::unique_ptr<CStatement> TryBuildSparseSwitchFromState(SparseDecisionTreeStat
     return nullptr;
   }
 
-  std::vector<SwitchCase> switch_cases;
-  switch_cases.reserve(state->cases.size() + (state->non_empty_default != nullptr ? 1 : 0));
-  for (auto& [val, body] : state->cases) {
-    SwitchCase sc;
-    sc.case_values = {val};
-    sc.is_default = false;
-    sc.body = std::move(body);
-    switch_cases.push_back(std::move(sc));
-  }
   if (state->non_empty_default != nullptr) {
     SwitchCase def_sc;
     def_sc.is_default = true;
