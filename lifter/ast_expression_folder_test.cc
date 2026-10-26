@@ -1245,5 +1245,26 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, ::testing::Not(HasSubstr("else")));
 }
 
+TEST(AstExpressionFolderTest, MayAliasDisambiguatesStackGlobalsAndDistinctStructOffsets) {
+  auto stack_var = CExpression::Identifier("var_sp_16");
+  auto global_deref =
+      CExpression::Unary("*(s32*)", CExpression::Unary("&", CExpression::Identifier("D_80100000")));
+  auto other_global_deref =
+      CExpression::Unary("*(s32*)", CExpression::Unary("&", CExpression::Identifier("D_80100004")));
+  auto ptr_off_0 = CExpression::Unary("*(s32*)", CExpression::Identifier("arg0"));
+  auto ptr_off_4 = CExpression::Unary(
+      "*(s32*)",
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(4)));
+  auto ptr_off_2_u16 = CExpression::Unary(
+      "*(u16*)",
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(2)));
+
+  EXPECT_FALSE(SingleUseExpressionFolderPass::MayAlias(*stack_var, *global_deref));
+  EXPECT_FALSE(SingleUseExpressionFolderPass::MayAlias(*global_deref, *other_global_deref));
+  EXPECT_FALSE(SingleUseExpressionFolderPass::MayAlias(*ptr_off_0, *ptr_off_4));
+  EXPECT_FALSE(SingleUseExpressionFolderPass::MayAlias(*ptr_off_0, *global_deref));
+  EXPECT_TRUE(SingleUseExpressionFolderPass::MayAlias(*ptr_off_0, *ptr_off_2_u16));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

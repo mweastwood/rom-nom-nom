@@ -980,23 +980,58 @@ struct FolderContext {
 
   static bool ExtractSimpleDerefRange(const CExpression& e, std::string_view* out_base,
                                       int64_t* out_offset, int64_t* out_size,
-                                      bool* out_is_addr_of = nullptr) {
+                                      bool* out_is_addr_of = nullptr,
+                                      bool allow_ident_deref = false) {
     if (out_is_addr_of != nullptr) *out_is_addr_of = false;
+    if (allow_ident_deref && e.Kind() == CExpressionKind::kIdentifier) {
+      std::string_view id_name = static_cast<const IdentifierExpression&>(e).Name();
+      if (IsStackParamOrLocalName(id_name) || absl::StartsWith(id_name, "D_") ||
+          absl::StartsWith(id_name, "g_") || absl::StartsWith(id_name, "RO_") ||
+          absl::StartsWith(id_name, "B_")) {
+        *out_base = id_name;
+        *out_offset = 0;
+        *out_size = absl::EndsWith(id_name, "_64") ? 8 : 4;
+        if (out_is_addr_of != nullptr) *out_is_addr_of = true;
+        return true;
+      }
+      return false;
+    }
     if (e.Kind() != CExpressionKind::kUnaryExpression) return false;
     const auto& un = static_cast<const UnaryExpression&>(e);
-    if (un.Op() != "*" || un.Operand().Kind() != CExpressionKind::kCastExpression) return false;
-    const auto& cast = static_cast<const CastExpression&>(un.Operand());
-    std::string ts = cast.TargetType().ToString();
     int64_t size = 4;
-    if (ts == "s8*" || ts == "u8*" || ts == "s8 *" || ts == "u8 *") {
+    const CExpression* addr_root = nullptr;
+    if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression) {
+      const auto& cast = static_cast<const CastExpression&>(un.Operand());
+      std::string ts = cast.TargetType().ToString();
+      if (ts == "s8*" || ts == "u8*" || ts == "s8 *" || ts == "u8 *") {
+        size = 1;
+      } else if (ts == "s16*" || ts == "u16*" || ts == "s16 *" || ts == "u16 *") {
+        size = 2;
+      } else if (ts == "s64*" || ts == "u64*" || ts == "f64*" || ts == "s64 *" || ts == "u64 *" ||
+                 ts == "f64 *") {
+        size = 8;
+      }
+      addr_root = &cast.Operand();
+    } else if (un.Op() == "*(s8*)" || un.Op() == "*(u8*)" || un.Op() == "*(s8 *)" ||
+               un.Op() == "*(u8 *)") {
       size = 1;
-    } else if (ts == "s16*" || ts == "u16*" || ts == "s16 *" || ts == "u16 *") {
+      addr_root = &un.Operand();
+    } else if (un.Op() == "*(s16*)" || un.Op() == "*(u16*)" || un.Op() == "*(s16 *)" ||
+               un.Op() == "*(u16 *)") {
       size = 2;
-    } else if (ts == "s64*" || ts == "u64*" || ts == "f64*" || ts == "s64 *" || ts == "u64 *" ||
-               ts == "f64 *") {
+      addr_root = &un.Operand();
+    } else if (un.Op() == "*(s32*)" || un.Op() == "*(u32*)" || un.Op() == "*(f32*)" ||
+               un.Op() == "*(s32 *)" || un.Op() == "*(u32 *)" || un.Op() == "*(f32 *)") {
+      size = 4;
+      addr_root = &un.Operand();
+    } else if (un.Op() == "*(s64*)" || un.Op() == "*(u64*)" || un.Op() == "*(f64*)" ||
+               un.Op() == "*(s64 *)" || un.Op() == "*(u64 *)" || un.Op() == "*(f64 *)") {
       size = 8;
+      addr_root = &un.Operand();
+    } else {
+      return false;
     }
-    const CExpression* addr_ptr = &cast.Operand();
+    const CExpression* addr_ptr = addr_root;
     while (addr_ptr->Kind() == CExpressionKind::kCastExpression) {
       addr_ptr = &static_cast<const CastExpression&>(*addr_ptr).Operand();
     }
@@ -1048,7 +1083,8 @@ struct FolderContext {
     return false;
   }
 
-  static bool AreProvablyDisjointDerefs(const CExpression& a, const CExpression& b) {
+  static bool AreProvablyDisjointDerefs(const CExpression& a, const CExpression& b,
+                                        bool allow_addr_of_vs_ptr = false) {
     std::string_view base_a;
     std::string_view base_b;
     int64_t off_a = 0;
@@ -1057,8 +1093,8 @@ struct FolderContext {
     int64_t size_b = 0;
     bool addr_of_a = false;
     bool addr_of_b = false;
-    if (!ExtractSimpleDerefRange(a, &base_a, &off_a, &size_a, &addr_of_a) ||
-        !ExtractSimpleDerefRange(b, &base_b, &off_b, &size_b, &addr_of_b)) {
+    if (!ExtractSimpleDerefRange(a, &base_a, &off_a, &size_a, &addr_of_a, allow_addr_of_vs_ptr) ||
+        !ExtractSimpleDerefRange(b, &base_b, &off_b, &size_b, &addr_of_b, allow_addr_of_vs_ptr)) {
       return false;
     }
     if (base_a == base_b) {
@@ -1067,39 +1103,50 @@ struct FolderContext {
     if (addr_of_a && addr_of_b) {
       return true;
     }
-    if ((addr_of_a != addr_of_b) && size_a != size_b) {
+    if ((addr_of_a != addr_of_b) && (size_a != size_b || allow_addr_of_vs_ptr)) {
       return true;
     }
     return false;
   }
 
-  static bool AreAllDerefsProvablyDisjoint(const CExpression& expr, const CExpression& store_lhs) {
+  static bool AreAllDerefsProvablyDisjoint(const CExpression& expr, const CExpression& store_lhs,
+                                           bool allow_addr_of_vs_ptr = false) {
     bool found_deref = false;
     bool all_disjoint = true;
     std::function<void(const CExpression&)> walk = [&](const CExpression& e) {
       if (!all_disjoint) return;
       if (e.Kind() == CExpressionKind::kUnaryExpression) {
         const auto& un = static_cast<const UnaryExpression&>(e);
-        if (un.Op() == "*") {
-          found_deref = true;
-          if (!AreProvablyDisjointDerefs(e, store_lhs)) {
-            all_disjoint = false;
-          }
-          return;
-        }
         if (un.Op() == "*(s32*)&" || un.Op() == "*(u32*)&" || un.Op() == "*(f32*)&" ||
-            un.Op() == "*(s32 *)&" || un.Op() == "*(u32 *)&" || un.Op() == "*(f32 *)&") {
+            un.Op() == "*(s32 *)&" || un.Op() == "*(u32 *)&" || un.Op() == "*(f32 *)&" ||
+            un.Op() == "*(s64*)&" || un.Op() == "*(u64*)&" || un.Op() == "*(f64*)&") {
           if (un.Operand().Kind() == CExpressionKind::kIdentifier) {
             std::string_view id_name =
                 static_cast<const IdentifierExpression&>(un.Operand()).Name();
-            if (!absl::StartsWith(id_name, "D_") && !absl::StartsWith(id_name, "g_") &&
-                !absl::StartsWith(id_name, "RO_") && !absl::StartsWith(id_name, "B_")) {
+            if (!IsStackParamOrLocalName(id_name) && !absl::StartsWith(id_name, "D_") &&
+                !absl::StartsWith(id_name, "g_") && !absl::StartsWith(id_name, "RO_") &&
+                !absl::StartsWith(id_name, "B_")) {
               return;
             }
-            all_disjoint = false;
+            if (!allow_addr_of_vs_ptr) {
+              all_disjoint = false;
+              return;
+            }
+            found_deref = true;
+            if (!AreProvablyDisjointDerefs(un.Operand(), store_lhs, allow_addr_of_vs_ptr)) {
+              all_disjoint = false;
+            }
             return;
           }
           walk(un.Operand());
+          return;
+        }
+        if (un.Op() == "*" || absl::StartsWith(un.Op(), "*(s") ||
+            absl::StartsWith(un.Op(), "*(u") || absl::StartsWith(un.Op(), "*(f")) {
+          found_deref = true;
+          if (!AreProvablyDisjointDerefs(e, store_lhs, allow_addr_of_vs_ptr)) {
+            all_disjoint = false;
+          }
           return;
         }
         walk(un.Operand());
@@ -1109,8 +1156,16 @@ struct FolderContext {
         walk(bin.Rhs());
       } else if (e.Kind() == CExpressionKind::kCastExpression) {
         walk(static_cast<const CastExpression&>(e).Operand());
-      } else if (e.Kind() == CExpressionKind::kIdentifier ||
-                 e.Kind() == CExpressionKind::kIntegerLiteral ||
+      } else if (e.Kind() == CExpressionKind::kIdentifier) {
+        std::string_view id_name = static_cast<const IdentifierExpression&>(e).Name();
+        if (allow_addr_of_vs_ptr && IsStackParamOrLocalName(id_name)) {
+          found_deref = true;
+          if (!AreProvablyDisjointDerefs(e, store_lhs, allow_addr_of_vs_ptr)) {
+            all_disjoint = false;
+          }
+        }
+        return;
+      } else if (e.Kind() == CExpressionKind::kIntegerLiteral ||
                  e.Kind() == CExpressionKind::kFloatLiteral) {
         return;
       } else {
@@ -1850,7 +1905,9 @@ struct FolderContext {
                         break;
                       }
                     } else if ((HasMemoryDeref(effective_rhs) &&
-                                !AreAllDerefsProvablyDisjoint(effective_rhs, mid_assign.Lhs())) ||
+                                !AreAllDerefsProvablyDisjoint(
+                                    effective_rhs, mid_assign.Lhs(),
+                                    /*allow_addr_of_vs_ptr=*/is_stack_arg)) ||
                                !IsPureExpr(mid_assign.Lhs())) {
                       break;
                     }
@@ -3015,6 +3072,15 @@ void FoldSingleUseExpressions(CompoundStatement* comp, const CompoundStatement* 
   if (root_body == nullptr) root_body = comp;
   FolderContext ctx{comp, root_body, dead_at_end_vars, is_switch_case_body, root_has_label_cached};
   ctx.Run();
+}
+
+bool SingleUseExpressionFolderPass::MayAlias(const CExpression& load_expr,
+                                             const CExpression& store_lhs) {
+  if (!FolderContext::HasMemoryDeref(load_expr)) {
+    return false;
+  }
+  return !FolderContext::AreAllDerefsProvablyDisjoint(load_expr, store_lhs,
+                                                      /*allow_addr_of_vs_ptr=*/true);
 }
 
 bool SingleUseExpressionFolderPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {

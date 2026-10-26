@@ -6408,5 +6408,23 @@ s32 CrossJumpedNestedBranchesWithSharedStoreTail(ControllerState* st, s32 step) 
 )");
 }
 
+TEST_F(RoundTripTest, SixArgCallWithDisjointStructFieldLoadsAndStore) {
+  AssertRoundTripBitExact("SixArgCallWithDisjointStructFieldLoadsAndStore", R"(
+typedef struct {
+    s32 x;
+    s32 y;
+    s32 z;
+    s32 w;
+} Vec4i;
+
+extern s32 SubmitSixArgs(s32 id, s32 a, s32 b, s32 c, s32 d, s32 e);
+
+s32 SixArgCallWithDisjointStructFieldLoadsAndStore(s32 id, Vec4i* v) {
+    v->x = id;
+    return SubmitSixArgs(id, 1, 2, 3, v->y, v->z);
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
