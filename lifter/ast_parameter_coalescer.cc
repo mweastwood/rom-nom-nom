@@ -116,6 +116,20 @@ bool StatementContainsGoto(const CStatement& stmt) {
   return visitor.Found();
 }
 
+bool IsArgParamIdentifier(std::string_view id, int* out_arg_idx = nullptr) {
+  if (id.size() < 4 || !absl::StartsWith(id, "arg")) {
+    return false;
+  }
+  int idx = -1;
+  if (!absl::SimpleAtoi(id.substr(3), &idx) || idx < 0) {
+    return false;
+  }
+  if (out_arg_idx != nullptr) {
+    *out_arg_idx = idx;
+  }
+  return true;
+}
+
 bool ExtractPrologueNarrowParamCopy(const CExpression& rhs_expr, std::string* param_name,
                                     CType* narrow_type) {
   if (rhs_expr.Kind() == CExpressionKind::kBinaryExpression) {
@@ -124,7 +138,7 @@ bool ExtractPrologueNarrowParamCopy(const CExpression& rhs_expr, std::string* pa
         bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
       std::string_view id = static_cast<const IdentifierExpression&>(bin.Lhs()).Name();
       int64_t mask = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
-      if (id.size() == 4 && absl::StartsWith(id, "arg") && id[3] >= '0' && id[3] <= '3') {
+      if (IsArgParamIdentifier(id)) {
         if (mask == 255) {
           *param_name = std::string(id);
           *narrow_type = CType::U8();
@@ -144,7 +158,7 @@ bool ExtractPrologueNarrowParamCopy(const CExpression& rhs_expr, std::string* pa
           lbin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
         std::string_view id = static_cast<const IdentifierExpression&>(lbin.Lhs()).Name();
         int64_t lshift = static_cast<const IntegerLiteralExpression&>(lbin.Rhs()).Value();
-        if (id.size() == 4 && absl::StartsWith(id, "arg") && id[3] >= '0' && id[3] <= '3') {
+        if (IsArgParamIdentifier(id)) {
           if (lshift == 24 && rshift == 24) {
             *param_name = std::string(id);
             *narrow_type = CType::S8();
@@ -164,7 +178,7 @@ bool ExtractPrologueNarrowParamCopy(const CExpression& rhs_expr, std::string* pa
         cast.TargetType().pointer_depth == 0) {
       std::string_view id = static_cast<const IdentifierExpression&>(cast.Operand()).Name();
       std::string_view tname = cast.TargetType().name;
-      if (id.size() == 4 && absl::StartsWith(id, "arg") && id[3] >= '0' && id[3] <= '3' &&
+      if (IsArgParamIdentifier(id) &&
           (tname == "u8" || tname == "s8" || tname == "u16" || tname == "s16")) {
         *param_name = std::string(id);
         *narrow_type = cast.TargetType();
@@ -622,7 +636,7 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
                 !StatementUsesAddressOfInPointerArithmetic(*comp, lhs)) {
               if (count_assignments(lhs) == 1) {
                 homed_param_coalesce_ok = true;
-              } else if (i < 6 && !lhs_addr_taken &&
+              } else if (is_in_call_free_prologue && !lhs_addr_taken &&
                          CountIdentifierOccurrencesInStatement(*comp, rhs) == 1) {
                 homed_param_coalesce_ok = true;
               }
@@ -766,15 +780,16 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
               bool s_order_ok = false;
               if (is_temp_s_lhs && !StatementReferencesVariable(*comp, "fp")) {
                 const int lhs_s_idx = lhs[6] - '0';
-                const int rhs_arg_idx = rhs[3] - '0';
-                s_order_ok = true;
-                for (int s_idx = 0; s_idx < lhs_s_idx; ++s_idx) {
+                int rhs_arg_idx = -1;
+                s_order_ok = IsArgParamIdentifier(rhs, &rhs_arg_idx);
+                for (int s_idx = 0; s_order_ok && s_idx < lhs_s_idx; ++s_idx) {
                   std::string candidate_s = absl::StrCat("temp_s", s_idx);
                   auto alias_it = coalesced_aliases.find(candidate_s);
                   if (alias_it != coalesced_aliases.end()) {
                     const std::string& aliased_param = alias_it->second;
-                    if (aliased_param.size() != 4 || !absl::StartsWith(aliased_param, "arg") ||
-                        (aliased_param[3] - '0') >= rhs_arg_idx) {
+                    int aliased_arg_idx = -1;
+                    if (!IsArgParamIdentifier(aliased_param, &aliased_arg_idx) ||
+                        aliased_arg_idx >= rhs_arg_idx) {
                       s_order_ok = false;
                       break;
                     }
@@ -819,7 +834,17 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
               }
             }
           }
-        } else if (i < 6 && a.Op() == "=" && a.Rhs().Kind() == CExpressionKind::kIdentifier) {
+        } else if (a.Op() == "=" && a.Rhs().Kind() == CExpressionKind::kIdentifier) {
+          bool in_call_free_prologue = true;
+          for (size_t pre = 0; pre < i; ++pre) {
+            if (comp->Statements()[pre] == nullptr) continue;
+            if (comp->Statements()[pre]->Kind() != CStatementKind::kExpressionStatement ||
+                StatementHasCall(*comp->Statements()[pre])) {
+              in_call_free_prologue = false;
+              break;
+            }
+          }
+          if (!in_call_free_prologue) continue;
           auto extract_f32_store_slot_var = [](const CExpression& lhs_expr) -> std::string_view {
             if (lhs_expr.Kind() != CExpressionKind::kUnaryExpression) return "";
             const auto& un = static_cast<const UnaryExpression&>(lhs_expr);

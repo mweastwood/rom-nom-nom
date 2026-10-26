@@ -7270,6 +7270,20 @@ s32 GeneralizedDisjointOffsetLoadsAndStores(Packet* p, s32 delta) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedNarrowU8ConditionalStepAndCall",
+          .function_name = "GeneralizedNarrowU8ConditionalStepAndCall",
+          .original_c = R"(
+extern s32 NotifyByteStep(s32 x);
+u8 GeneralizedNarrowU8ConditionalStepAndCall(u8 val, s32 cond, s32 extra) {
+    NotifyByteStep(extra);
+    if (cond != 0) {
+        val = (u8)(val + 1);
+    }
+    return val;
+}
+)",
+      },
   };
   return *k_cases;
 }

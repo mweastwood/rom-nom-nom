@@ -1373,15 +1373,15 @@ absl::flat_hash_map<uint32_t, CallReturnInfo> AbiAnalyzer::ComputeCallReturnInfo
 
       std::vector<WorkItem> queue;
       if (i + 2 < block.instructions.size()) {
-        queue.push_back({block.id, i + 2, true, true, true, 32});
+        queue.push_back({block.id, i + 2, true, true, true, 128});
       } else {
         for (uint32_t succ_id : block.successors) {
-          queue.push_back({succ_id, 0, true, true, true, 32});
+          queue.push_back({succ_id, 0, true, true, true, 128});
         }
         if (block.successors.empty()) {
           const auto* next_block = cfg.FindBlockByVram(call_inst.vram + 8);
           if (next_block != nullptr) {
-            queue.push_back({next_block->id, 0, true, true, true, 32});
+            queue.push_back({next_block->id, 0, true, true, true, 128});
           }
         }
       }
@@ -1437,9 +1437,9 @@ absl::flat_hash_map<uint32_t, CallReturnInfo> AbiAnalyzer::ComputeCallReturnInfo
             if (k + 1 < curr_block->instructions.size()) {
               const auto& delay_inst = curr_block->instructions[k + 1];
               RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-              RecordReturnRegisterUses(delay_inst, delay_ud, &item.v0_live, nullptr, &item.f0_live,
-                                       &info);
-              RecordReturnRegisterDefs(delay_ud, &item.v0_live, nullptr, &item.f0_live);
+              RecordReturnRegisterUses(delay_inst, delay_ud, &item.v0_live, &item.v1_live,
+                                       &item.f0_live, &info);
+              RecordReturnRegisterDefs(delay_ud, &item.v0_live, &item.v1_live, &item.f0_live);
             }
             if (item.v0_live && function_returns_v0 && !info.returns_f0) {
               info.returns_v0 = true;

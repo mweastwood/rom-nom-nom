@@ -76,26 +76,31 @@ class ConditionallySteppedVarsVisitor : public AstVisitor {
       : out_vars_(out_vars), out_do_while_post_stepped_(out_do_while_post_stepped) {}
 
   void VisitIfStatement(const IfStatement& ifs) override {
-    const CStatement* single_then = &ifs.ThenBranch();
-    if (single_then->Kind() == CStatementKind::kCompoundStatement) {
-      const auto& comp = static_cast<const CompoundStatement&>(*single_then);
-      single_then = (comp.Statements().size() == 1) ? comp.Statements()[0].get() : nullptr;
-    }
-    if (single_then != nullptr && single_then->Kind() == CStatementKind::kExpressionStatement) {
-      const auto& expr = static_cast<const ExpressionStatement&>(*single_then).Expression();
-      if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
-        const auto& assign = static_cast<const AssignmentExpression&>(expr);
-        if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
-            IsIdentifierStepByConst(assign.Rhs(), /*expected_var=*/"",
-                                    /*require_unit_step=*/true)) {
-          const std::string& lhs_name =
-              static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
-          if (ifs.ElseBranch() == nullptr ||
-              !StatementModifiesVariable(*ifs.ElseBranch(), lhs_name)) {
-            out_vars_->insert(lhs_name);
+    auto try_extract_cond_step = [&](const CStatement* branch, const CStatement* other_branch) {
+      const CStatement* single = branch;
+      if (single != nullptr && single->Kind() == CStatementKind::kCompoundStatement) {
+        const auto& comp = static_cast<const CompoundStatement&>(*single);
+        single = (comp.Statements().size() == 1) ? comp.Statements()[0].get() : nullptr;
+      }
+      if (single != nullptr && single->Kind() == CStatementKind::kExpressionStatement) {
+        const auto& expr = static_cast<const ExpressionStatement&>(*single).Expression();
+        if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& assign = static_cast<const AssignmentExpression&>(expr);
+          if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              IsIdentifierStepByConst(assign.Rhs(), /*expected_var=*/"",
+                                      /*require_unit_step=*/false)) {
+            const std::string& lhs_name =
+                static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+            if (other_branch == nullptr || !StatementModifiesVariable(*other_branch, lhs_name)) {
+              out_vars_->insert(lhs_name);
+            }
           }
         }
       }
+    };
+    try_extract_cond_step(&ifs.ThenBranch(), ifs.ElseBranch());
+    if (ifs.ElseBranch() != nullptr) {
+      try_extract_cond_step(ifs.ElseBranch(), &ifs.ThenBranch());
     }
     AstVisitor::VisitIfStatement(ifs);
   }
@@ -104,9 +109,9 @@ class ConditionallySteppedVarsVisitor : public AstVisitor {
     if (out_do_while_post_stepped_ != nullptr &&
         dws.Body().Kind() == CStatementKind::kCompoundStatement && StatementHasCall(dws.Body())) {
       const auto& comp = static_cast<const CompoundStatement&>(dws.Body());
-      if (comp.Statements().size() >= 2) {
-        const auto* prev_s = comp.Statements()[comp.Statements().size() - 2].get();
-        const auto* last_s = comp.Statements().back().get();
+      for (size_t idx = 1; idx < comp.Statements().size(); ++idx) {
+        const auto* prev_s = comp.Statements()[idx - 1].get();
+        const auto* last_s = comp.Statements()[idx].get();
         if (prev_s != nullptr && last_s != nullptr &&
             prev_s->Kind() == CStatementKind::kExpressionStatement &&
             last_s->Kind() == CStatementKind::kExpressionStatement) {
@@ -121,7 +126,7 @@ class ConditionallySteppedVarsVisitor : public AstVisitor {
                 last_a.Lhs().Kind() == CExpressionKind::kIdentifier) {
               const std::string& step_var =
                   static_cast<const IdentifierExpression&>(last_a.Lhs()).Name();
-              if (IsIdentifierStepByConst(last_a.Rhs(), step_var, /*require_unit_step=*/true) &&
+              if (IsIdentifierStepByConst(last_a.Rhs(), step_var, /*require_unit_step=*/false) &&
                   prev_a.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
                 const auto& mask_bin = static_cast<const BinaryExpression&>(prev_a.Rhs());
                 if (mask_bin.Op() == "&" && mask_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
@@ -423,19 +428,24 @@ std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
       auto rewritten_rhs = RewriteNarrowCondIncExpr(
           bin.Rhs(), narrow_types, do_while_post_stepped_vars, /*is_return_root=*/false);
       if (bin.Op() == "&" && rewritten_rhs->Kind() == CExpressionKind::kIntegerLiteral &&
-          static_cast<const IntegerLiteralExpression&>(*rewritten_rhs).Value() == 65535 &&
+          (static_cast<const IntegerLiteralExpression&>(*rewritten_rhs).Value() == 65535 ||
+           static_cast<const IntegerLiteralExpression&>(*rewritten_rhs).Value() == 255) &&
           rewritten_lhs->Kind() == CExpressionKind::kBinaryExpression) {
+        const int64_t mask_val =
+            static_cast<const IntegerLiteralExpression&>(*rewritten_rhs).Value();
+        const std::string_view expected_type_name = (mask_val == 255) ? "u8" : "u16";
+        const CType target_narrow_type = (mask_val == 255) ? CType::U8() : CType::U16();
         const auto& inner = static_cast<const BinaryExpression&>(*rewritten_lhs);
         if (inner.Op() == "+" || inner.Op() == "-") {
-          bool lhs_u16 = false;
-          bool rhs_u16 = false;
+          bool lhs_narrow = false;
+          bool rhs_narrow = false;
           bool lhs_narrow_post_step = false;
           bool rhs_narrow_post_step = false;
           if (inner.Lhs().Kind() == CExpressionKind::kIdentifier) {
             const std::string& lhs_id =
                 static_cast<const IdentifierExpression&>(inner.Lhs()).Name();
             auto it = narrow_types.find(lhs_id);
-            lhs_u16 = (it != narrow_types.end() && it->second.name == "u16");
+            lhs_narrow = (it != narrow_types.end() && it->second.name == expected_type_name);
             lhs_narrow_post_step =
                 (it != narrow_types.end() && do_while_post_stepped_vars.contains(lhs_id));
           }
@@ -443,19 +453,20 @@ std::unique_ptr<CExpression> RewriteNarrowCondIncExpr(
             const std::string& rhs_id =
                 static_cast<const IdentifierExpression&>(inner.Rhs()).Name();
             auto it = narrow_types.find(rhs_id);
-            rhs_u16 = (it != narrow_types.end() && it->second.name == "u16");
+            rhs_narrow = (it != narrow_types.end() && it->second.name == expected_type_name);
             rhs_narrow_post_step =
                 (it != narrow_types.end() && do_while_post_stepped_vars.contains(rhs_id));
           }
-          if (lhs_u16 || rhs_u16 || lhs_narrow_post_step || rhs_narrow_post_step) {
-            auto new_lhs = lhs_u16 ? inner.Lhs().Clone()
-                                   : CExpression::Cast(CType::U16(), inner.Lhs().Clone());
-            auto new_rhs = rhs_u16 ? inner.Rhs().Clone()
-                                   : CExpression::Cast(CType::U16(), inner.Rhs().Clone());
+          if (lhs_narrow || rhs_narrow || lhs_narrow_post_step || rhs_narrow_post_step) {
+            auto new_lhs = lhs_narrow ? inner.Lhs().Clone()
+                                      : CExpression::Cast(target_narrow_type, inner.Lhs().Clone());
+            auto new_rhs = rhs_narrow ? inner.Rhs().Clone()
+                                      : CExpression::Cast(target_narrow_type, inner.Rhs().Clone());
             return CExpression::Binary(
                 "&",
-                CExpression::Cast(CType::U16(), CExpression::Binary(inner.Op(), std::move(new_lhs),
-                                                                    std::move(new_rhs))),
+                CExpression::Cast(
+                    target_narrow_type,
+                    CExpression::Binary(inner.Op(), std::move(new_lhs), std::move(new_rhs))),
                 std::move(rewritten_rhs));
           }
         }

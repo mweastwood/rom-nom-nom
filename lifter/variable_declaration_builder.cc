@@ -1444,10 +1444,12 @@ absl::Status PrependSynthesizedLocalDeclarations(
   if (!is_leaf_func && frame_analysis.frame_size > 0 &&
       !(sp_buffer_size == 0 && has_s64_pointer_deref)) {
     const auto& body_stmts = (*body)->Statements();
-    for (size_t i = 0; i < body_stmts.size() && i < 8; ++i) {
+    for (size_t i = 0; i < body_stmts.size(); ++i) {
       if (body_stmts[i] == nullptr) continue;
-      if (StatementHasCall(*body_stmts[i])) break;
-      if (body_stmts[i]->Kind() != CStatementKind::kExpressionStatement) continue;
+      if (StatementHasCall(*body_stmts[i]) ||
+          body_stmts[i]->Kind() != CStatementKind::kExpressionStatement) {
+        break;
+      }
       const auto& es = static_cast<const ExpressionStatement&>(*body_stmts[i]);
       if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) continue;
       const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
@@ -1455,10 +1457,21 @@ absl::Status PrependSynthesizedLocalDeclarations(
           a.Rhs().Kind() == CExpressionKind::kIdentifier) {
         std::string_view lhs = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
         std::string_view rhs = static_cast<const IdentifierExpression&>(a.Rhs()).Name();
-        if (lhs == "temp_s0" && rhs.size() == 4 && absl::StartsWith(rhs, "arg") && rhs[3] >= '0' &&
-            rhs[3] <= '3' && CountDirectAssignmentsInStatement(**body, lhs) == 1 &&
+        if (lhs.size() == 7 && absl::StartsWith(lhs, "temp_s") && lhs[6] >= '0' && lhs[6] <= '7' &&
+            rhs.size() >= 4 && absl::StartsWith(rhs, "arg") &&
+            CountDirectAssignmentsInStatement(**body, lhs) == 1 &&
             !StatementModifiesVariable(**body, rhs) && !has_address_taken(rhs)) {
-          unpinned_s_vars.insert(std::string(lhs));
+          bool all_lower_s_unpinned = true;
+          int s_idx = lhs[6] - '0';
+          for (int k = 0; k < s_idx; ++k) {
+            if (!unpinned_s_vars.contains(absl::StrCat("temp_s", k))) {
+              all_lower_s_unpinned = false;
+              break;
+            }
+          }
+          if (all_lower_s_unpinned) {
+            unpinned_s_vars.insert(std::string(lhs));
+          }
         }
       }
     }

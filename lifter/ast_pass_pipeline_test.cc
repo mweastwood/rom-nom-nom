@@ -573,5 +573,33 @@ TEST(AstPassPipelineTest,
   EXPECT_THAT(rendered, Not(HasSubstr("temp_t2")));
 }
 
+TEST(AstPassPipelineTest, InferAndPromoteNarrowCondSteppedVarsHandlesU8MaskAndNonUnitElseStep) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // `temp_s0 = arg0;`
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+  // `if (arg1 != 0) {} else { temp_s0 = (temp_s0 + 2); }`
+  auto empty_then = std::make_unique<CompoundStatement>();
+  auto step_else = std::make_unique<CompoundStatement>();
+  step_else->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(2)))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg1"), CExpression::Integer(0)),
+      std::move(empty_then), std::move(step_else)));
+  // `return ((temp_s0 + arg2) & 255);`
+  body->AddStatement(CStatement::Return(CExpression::Binary(
+      "&",
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg2")),
+      CExpression::Integer(255))));
+
+  std::vector<std::string> candidates = {"temp_s0"};
+  auto narrow_types = InferAndPromoteNarrowCondSteppedVars(candidates, &body);
+  ASSERT_TRUE(narrow_types.contains("temp_s0"));
+  EXPECT_EQ(narrow_types.at("temp_s0").ToString(), "u8");
+  EXPECT_THAT(body->ToString(), HasSubstr("((u8)(temp_s0 + (u8)arg2) & 255)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
