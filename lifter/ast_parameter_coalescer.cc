@@ -679,11 +679,34 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
           bool is_single_assign_prologue_v_copy =
               is_in_call_free_prologue && (lhs == "v0" || lhs == "v1") &&
               param_names.contains(rhs) && following_branch_stmt != nullptr;
+          bool allow_gpr_float_param_s_coalesce = false;
+          if (is_in_call_free_prologue && is_s_reg && lhs != "fp" &&
+              float_param_names.contains(rhs) && !parameters.empty() &&
+              !IsFloat32Type(parameters[0].type) && !IsFloat64Type(parameters[0].type) &&
+              StatementReferencesVariable(*comp, "fp")) {
+            for (size_t k = 0; k < comp->Statements().size(); ++k) {
+              const CStatement* ks = comp->Statements()[k].get();
+              if (ks == nullptr) continue;
+              if (StatementHasCall(*ks)) break;
+              if (ks->Kind() == CStatementKind::kExpressionStatement) {
+                const auto& kes = static_cast<const ExpressionStatement&>(*ks);
+                if (kes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& ka = static_cast<const AssignmentExpression&>(kes.Expression());
+                  if (ka.Op() == "=" && ka.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      static_cast<const IdentifierExpression&>(ka.Lhs()).Name() == "fp" &&
+                      ExpressionUsesVariable(ka.Rhs(), "sp")) {
+                    allow_gpr_float_param_s_coalesce = true;
+                    break;
+                  }
+                }
+              }
+            }
+          }
           if (param_names.contains(rhs) &&
               (is_s_reg || is_f_reg || is_homed_param_slot || is_single_assign_prologue_v_copy) &&
               !(float_param_names.contains(rhs) &&
-                (is_s_reg || is_homed_param_slot || is_single_assign_prologue_v_copy ||
-                 is_callee_saved_f_reg))) {
+                ((is_s_reg && !allow_gpr_float_param_s_coalesce) || is_homed_param_slot ||
+                 is_single_assign_prologue_v_copy || is_callee_saved_f_reg))) {
             bool lhs_addr_taken = StatementTakesAddressOf(*comp, lhs);
             bool v_copy_ok = true;
             if (is_single_assign_prologue_v_copy) {

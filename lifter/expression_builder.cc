@@ -887,6 +887,68 @@ bool BlockLiftRunner::TryLiftMultiInstructionPatterns(size_t& i) {
         return true;
       }
     }
+    if (inst.opcode == Opcode::kLw && lo->type == FoldedPatternType::kGlobalLoad &&
+        inst.rt.has_value() &&
+        (*inst.rt == Register::kS0 || *inst.rt == Register::kS2 || *inst.rt == Register::kS4 ||
+         *inst.rt == Register::kS6) &&
+        i + 1 < loop_end) {
+      Register odd_gpr = static_cast<Register>(static_cast<int>(*inst.rt) + 1);
+      size_t second_lw_idx = 0;
+      if (const auto* lo1 = folder.GetFoldedLo(i + 1);
+          lo1 != nullptr && lo1->type == FoldedPatternType::kGlobalLoad &&
+          lo1->dest_reg == odd_gpr && lo1->address == lo->address + 4) {
+        second_lw_idx = i + 1;
+      } else if (i + 2 < loop_end && folder.IsFoldedHi(i + 1)) {
+        if (const auto* lo2 = folder.GetFoldedLo(i + 2);
+            lo2 != nullptr && lo2->type == FoldedPatternType::kGlobalLoad &&
+            lo2->dest_reg == odd_gpr && lo2->address == lo->address + 4) {
+          second_lw_idx = i + 2;
+        }
+      }
+      if (second_lw_idx > 0) {
+        bool paired_mtc1_follows = false;
+        for (size_t m = second_lw_idx + 1; m + 1 < loop_end; ++m) {
+          const Instruction& m0 = instructions_to_process[m];
+          size_t m1_idx = m + 1;
+          if (m1_idx + 1 < loop_end && instructions_to_process[m1_idx].IsNop()) {
+            ++m1_idx;
+          }
+          const Instruction& m1 = instructions_to_process[m1_idx];
+          if (m0.opcode == Opcode::kMtc1 && m1.opcode == Opcode::kMtc1 && m0.rt == odd_gpr &&
+              m1.rt == *inst.rt && m0.fs.has_value() && m1.fs.has_value() &&
+              (static_cast<int>(*m0.fs) % 2 == 0) &&
+              static_cast<int>(*m1.fs) == static_cast<int>(*m0.fs) + 1) {
+            paired_mtc1_follows = true;
+            break;
+          }
+          RegisterUseDef mud = GetInstructionUseDef(m0);
+          bool clobbered = false;
+          for (Register d : mud.gpr_defs) {
+            if (d == *inst.rt || d == odd_gpr) clobbered = true;
+          }
+          if (clobbered) break;
+        }
+        if (paired_mtc1_follows) {
+          if (second_lw_idx == i + 2) {
+            skipped_instruction_indices.insert(i + 1);
+          }
+          skipped_instruction_indices.insert(second_lw_idx);
+          LiftedStatement statement;
+          statement.kind = StatementKind::kAssignment;
+          statement.destination_variable = ExpressionBuilder::RegisterVarName(*inst.rt);
+          std::unique_ptr<LiftedExpression> addr_expr =
+              lo->symbol_name.empty()
+                  ? LiftedExpression::Integer(lo->address, true)
+                  : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo->symbol_name));
+          statement.expression = LiftedExpression::Load("f64", std::move(addr_expr));
+          statements.push_back(std::move(statement));
+          RecordGprDefs(inst);
+          tracker.Step(inst);
+          tracker.Invalidate(odd_gpr);
+          return true;
+        }
+      }
+    }
     RecordGprDefs(inst);
     ExpressionBuilder::LiftFoldedAccess(*lo, inst, tracker, statements);
     return true;
@@ -1842,6 +1904,63 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
             }
           }
         } else {
+          if (inst.opcode == Opcode::kLw &&
+              (*inst.rt == Register::kS0 || *inst.rt == Register::kS2 ||
+               *inst.rt == Register::kS4 || *inst.rt == Register::kS6) &&
+              i + 1 < loop_end) {
+            Register odd_gpr = static_cast<Register>(static_cast<int>(*inst.rt) + 1);
+            size_t second_lw_idx = 0;
+            bool has_intervening_lui = false;
+            const Instruction& next_inst = instructions_to_process[i + 1];
+            if (next_inst.opcode == Opcode::kLw && next_inst.rt == odd_gpr &&
+                next_inst.rs == *inst.rs &&
+                next_inst.immediate == static_cast<int16_t>(inst.immediate + 4)) {
+              second_lw_idx = i + 1;
+            } else if (*inst.rs == *inst.rt && tracker.IsConstant(*inst.rs) && i + 2 < loop_end &&
+                       next_inst.opcode == Opcode::kLui && next_inst.rt == odd_gpr &&
+                       (static_cast<uint32_t>(static_cast<uint16_t>(next_inst.immediate)) << 16) ==
+                           *tracker.GetConstant(*inst.rs)) {
+              const Instruction& lw2_inst = instructions_to_process[i + 2];
+              if (lw2_inst.opcode == Opcode::kLw && lw2_inst.rt == odd_gpr &&
+                  lw2_inst.rs == odd_gpr &&
+                  lw2_inst.immediate == static_cast<int16_t>(inst.immediate + 4)) {
+                second_lw_idx = i + 2;
+                has_intervening_lui = true;
+              }
+            }
+            if (second_lw_idx > 0) {
+              bool paired_mtc1_follows = false;
+              for (size_t m = second_lw_idx + 1; m + 1 < loop_end; ++m) {
+                const Instruction& m0 = instructions_to_process[m];
+                size_t m1_idx = m + 1;
+                if (m1_idx + 1 < loop_end && instructions_to_process[m1_idx].IsNop()) {
+                  ++m1_idx;
+                }
+                const Instruction& m1 = instructions_to_process[m1_idx];
+                if (m0.opcode == Opcode::kMtc1 && m1.opcode == Opcode::kMtc1 && m0.rt == odd_gpr &&
+                    m1.rt == *inst.rt && m0.fs.has_value() && m1.fs.has_value() &&
+                    (static_cast<int>(*m0.fs) % 2 == 0) &&
+                    static_cast<int>(*m1.fs) == static_cast<int>(*m0.fs) + 1) {
+                  paired_mtc1_follows = true;
+                  break;
+                }
+                RegisterUseDef mud = GetInstructionUseDef(m0);
+                bool clobbered = false;
+                for (Register d : mud.gpr_defs) {
+                  if (d == *inst.rt || d == odd_gpr) clobbered = true;
+                }
+                if (clobbered) break;
+              }
+              if (paired_mtc1_follows) {
+                load_type = "f64";
+                if (has_intervening_lui) {
+                  skipped_instruction_indices.insert(i + 1);
+                }
+                skipped_instruction_indices.insert(second_lw_idx);
+                tracker.Invalidate(odd_gpr);
+              }
+            }
+          }
           std::string effective_load_type = load_type;
           if (tracker.IsConstant(*inst.rs)) {
             uint32_t const_addr = *tracker.GetConstant(*inst.rs) + inst.immediate;

@@ -1481,7 +1481,8 @@ absl::flat_hash_map<uint32_t, CallReturnInfo> AbiAnalyzer::ComputeCallReturnInfo
 absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const ControlFlowGraph& cfg) {
   absl::flat_hash_set<std::string> double_vars;
   for (const auto& block : cfg.Blocks()) {
-    for (const auto& inst : block.instructions) {
+    for (size_t i = 0; i < block.instructions.size(); ++i) {
+      const auto& inst = block.instructions[i];
       if (IsDoubleComparisonOp(inst.opcode)) {
         if (inst.fs) double_vars.insert(FpRegisterVarName(*inst.fs, true));
         if (inst.ft) double_vars.insert(FpRegisterVarName(*inst.ft, true));
@@ -1528,6 +1529,21 @@ absl::flat_hash_set<std::string> AbiAnalyzer::IdentifyDoubleVariables(const Cont
           if (inst.fs.has_value() && (static_cast<int>(*inst.fs) % 2 == 1)) {
             FpRegister even_reg = static_cast<FpRegister>(static_cast<int>(*inst.fs) - 1);
             double_vars.insert(FpRegisterVarName(even_reg, true));
+            if (inst.opcode == Opcode::kMtc1 && inst.rt.has_value() &&
+                (*inst.rt == Register::kS0 || *inst.rt == Register::kS2 ||
+                 *inst.rt == Register::kS4 || *inst.rt == Register::kS6) &&
+                i > 0) {
+              size_t prev_idx = i - 1;
+              if (prev_idx > 0 && block.instructions[prev_idx].IsNop()) {
+                --prev_idx;
+              }
+              const auto& prev_inst = block.instructions[prev_idx];
+              Register odd_gpr = static_cast<Register>(static_cast<int>(*inst.rt) + 1);
+              if (prev_inst.opcode == Opcode::kMtc1 && prev_inst.fs == even_reg &&
+                  prev_inst.rt == odd_gpr) {
+                double_vars.insert(RegisterVarName(*inst.rt));
+              }
+            }
           }
           break;
         case Opcode::kDmfc1:

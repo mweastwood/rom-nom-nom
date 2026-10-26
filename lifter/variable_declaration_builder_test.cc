@@ -1315,5 +1315,60 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(emitted, Not(HasSubstr("asm(\"$6\")")));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     CountsPrologueSavedCalleeGprsAfterCoalescingAndPinsDoubleCalleeSavedGpr) {
+  ControlFlowGraph cfg;
+
+  StackFrameAnalysis frame;
+  frame.frame_size = 72;
+  frame.has_calls = true;
+  frame.outgoing_args_size = 16;
+  frame.prologue.min_saved_reg_offset = 32;
+  for (int i = 0; i <= 7; ++i) {
+    frame.prologue.saved_reg_offsets[static_cast<Register>(static_cast<int>(Register::kS0) + i)] =
+        32 + i * 4;
+  }
+  frame.prologue.saved_reg_offsets[Register::kFp] = 64;
+  frame.prologue.saved_reg_offsets[Register::kRa] = 68;
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_20"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_28"), CExpression::Identifier("arg1"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s4"), CExpression::Identifier("arg2"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s5"), CExpression::Identifier("arg3"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s6"), CExpression::Float(1.0, /*is_double=*/true))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("fp"), CExpression::Identifier("var_sp_20"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Call(CExpression::Identifier("func_80001000"),
+                                                std::vector<std::unique_ptr<CExpression>>{}))));
+  body->AddStatement(CStatement::Return(CExpression::Binary("+", CExpression::Identifier("fp"),
+                                                            CExpression::Identifier("var_sp_28"))));
+
+  std::vector<CParameter> params = {
+      {CType::S32(), "arg0"},
+      {CType::S32(), "arg1"},
+      {CType::S32(), "arg2"},
+      {CType::S32(), "arg3"},
+  };
+  absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 0}};
+  AstConverterOptions opts;
+  opts.function_name = "TestPrologueSavedCalleeGprs";
+  opts.function_parameter_counts = &param_counts;
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{"temp_s6"}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string emitted = body->ToString();
+  EXPECT_THAT(emitted, HasSubstr("register f64 temp_s6 asm(\"$22\");"));
+  EXPECT_THAT(emitted, Not(HasSubstr("u8 sp[")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

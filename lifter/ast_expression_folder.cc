@@ -1138,6 +1138,22 @@ struct FolderContext {
                   break;
                 }
               }
+              if ((var == "f12_d" || var == "f14_d") && !is_float_bitcast_lhs &&
+                  assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                  absl::StartsWith(static_cast<const IdentifierExpression&>(assign.Rhs()).Name(),
+                                   "temp_s") &&
+                  i + 1 < stmts.size() &&
+                  stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement &&
+                  !HasCallInStmt(*stmts[i + 1]) && CountUses(*stmts[i + 1], var) == 1 &&
+                  !HasAddressOfVarInStmt(*stmts[i + 1], var) &&
+                  IsDeadAfterStmt(i + 1, var, 1, stmts[i].get())) {
+                const auto& next_es = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
+                stmts[i + 1] = CStatement::Expression(
+                    SubstituteIdentifier(next_es.Expression(), var, assign.Rhs()));
+                stmts.erase(stmts.begin() + i);
+                changed = true;
+                break;
+              }
               auto is_float_literal_expr = [](const CExpression& e) -> bool {
                 if (e.Kind() == CExpressionKind::kFloatLiteral) return true;
                 if (e.Kind() == CExpressionKind::kIdentifier) {
@@ -1371,6 +1387,15 @@ struct FolderContext {
                           HasAddressOfVarInStmt(*stmts[k], even_name) ||
                           CountUses(*stmts[k], odd_name) > 0 ||
                           HasAddressOfVarInStmt(*stmts[k], odd_name)) {
+                        break;
+                      }
+                    }
+                  } else if (var.size() >= 2 && var[0] == 'f') {
+                    int f_reg = -1;
+                    if (absl::SimpleAtoi(var.substr(1), &f_reg) && f_reg >= 0) {
+                      std::string pair_d_name = absl::StrFormat("f%d_d", f_reg & ~1);
+                      if (CountUses(*stmts[k], pair_d_name) > 0 ||
+                          HasAddressOfVarInStmt(*stmts[k], pair_d_name)) {
                         break;
                       }
                     }
@@ -1646,8 +1671,8 @@ struct FolderContext {
                     bool can_fold_in_place = false;
                     if (IsPureExpr(assign.Rhs()) && !IsComparisonExpr(assign.Rhs())) {
                       can_fold_in_place = true;
-                    } else if (IsCallOrWrappedCall(assign.Rhs()) && j == i + 1 &&
-                               IsPureExpr(cand_assign.Rhs()) &&
+                    } else if (IsCallOrWrappedCall(assign.Rhs()) && var != "f0" && var != "f0_d" &&
+                               j == i + 1 && IsPureExpr(cand_assign.Rhs()) &&
                                !HasMemoryDeref(cand_assign.Rhs())) {
                       can_fold_in_place = true;
                     }

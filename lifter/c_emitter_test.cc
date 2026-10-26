@@ -694,5 +694,36 @@ TEST(CEmitterTest, PromotesMixedSignedAndUnsignedByteAndHalfwordGlobals) {
   EXPECT_THAT(emitted, ::testing::Not(HasSubstr("*(u16*)&D_80180004")));
 }
 
+TEST(CEmitterTest, DisambiguatesSameBlockDuplicateCalleeSavedSymbolLoadsWithAsmBarrier) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s2", nullptr, std::nullopt, "$18"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s2"),
+                              CExpression::Unary("&", CExpression::Identifier("D_00D49B80")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Unary("&", CExpression::Identifier("D_00D49B80")))));
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("temp_s2"));
+  args.push_back(CExpression::Identifier("temp_s1"));
+  body->AddStatement(CStatement::Return(
+      CExpression::Call(CExpression::Identifier("UseAssetRange"), std::move(args))));
+  tu.functions.emplace_back(CType::S32(), "TestDuplicateCalleeSavedSym", std::vector<CParameter>{},
+                            std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("extern s32 D_00D49B80;\n"));
+  EXPECT_THAT(emitted, HasSubstr("temp_s2 = &D_00D49B80;\n"));
+  EXPECT_THAT(emitted, HasSubstr("__asm__(\"\" : \"=r\"(temp_s2) : \"0\"(temp_s2));\n"));
+  EXPECT_THAT(emitted, HasSubstr("temp_s1 = &D_00D49B80;\n"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

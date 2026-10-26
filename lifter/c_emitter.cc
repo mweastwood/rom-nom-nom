@@ -653,6 +653,143 @@ std::unique_ptr<CStatement> NormalizeArraySymbolsInStmt(
   }
 }
 
+bool IsCalleeSavedGprVar(std::string_view v) {
+  return v == "fp" ||
+         (v.size() == 7 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7');
+}
+
+bool ExtractDirectSymbolAddressRhs(const CExpression& expr,
+                                   const std::set<std::string>& external_data_symbols,
+                                   std::string* out_sym, bool* out_has_s32_cast) {
+  if (expr.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& un = static_cast<const UnaryExpression&>(expr);
+    if (un.Op() == "&" && un.Operand().Kind() == CExpressionKind::kIdentifier) {
+      std::string name(static_cast<const IdentifierExpression&>(un.Operand()).Name());
+      if (external_data_symbols.count(name) > 0) {
+        *out_sym = std::move(name);
+        *out_has_s32_cast = false;
+        return true;
+      }
+    }
+  } else if (expr.Kind() == CExpressionKind::kCastExpression) {
+    const auto& ce = static_cast<const CastExpression&>(expr);
+    if (ce.TargetType().ToString() == "s32" &&
+        ce.Operand().Kind() == CExpressionKind::kUnaryExpression) {
+      const auto& un = static_cast<const UnaryExpression&>(ce.Operand());
+      if (un.Op() == "&" && un.Operand().Kind() == CExpressionKind::kIdentifier) {
+        std::string name(static_cast<const IdentifierExpression&>(un.Operand()).Name());
+        if (external_data_symbols.count(name) > 0) {
+          *out_sym = std::move(name);
+          *out_has_s32_cast = true;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+    const CStatement& stmt, const std::set<std::string>& external_data_symbols) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      std::vector<std::unique_ptr<CStatement>> stmts;
+      stmts.reserve(comp.Statements().size());
+      std::map<std::string, std::vector<std::string>> active_sym_vars;
+      for (const auto& s : comp.Statements()) {
+        if (s == nullptr) continue;
+        if (s->Kind() == CStatementKind::kExpressionStatement) {
+          const auto& es = static_cast<const ExpressionStatement&>(*s);
+          if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+            if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+              std::string lhs(static_cast<const IdentifierExpression&>(a.Lhs()).Name());
+              std::string rhs_sym;
+              bool has_s32_cast = false;
+              const bool is_sym_addr = ExtractDirectSymbolAddressRhs(a.Rhs(), external_data_symbols,
+                                                                     &rhs_sym, &has_s32_cast);
+              for (auto& [sym_key, var_list] : active_sym_vars) {
+                if (!is_sym_addr || sym_key != rhs_sym) {
+                  var_list.erase(std::remove(var_list.begin(), var_list.end(), lhs),
+                                 var_list.end());
+                }
+              }
+              if (IsCalleeSavedGprVar(lhs) && is_sym_addr) {
+                auto& var_list = active_sym_vars[rhs_sym];
+                var_list.erase(std::remove(var_list.begin(), var_list.end(), lhs), var_list.end());
+                if (!var_list.empty()) {
+                  const std::string& prev_var = var_list.back();
+                  stmts.push_back(CStatement::Expression(CExpression::Identifier(absl::StrFormat(
+                      "__asm__(\"\" : \"=r\"(%s) : \"0\"(%s))", prev_var, prev_var))));
+                }
+                var_list.push_back(lhs);
+              }
+            }
+          }
+          stmts.push_back(s->Clone());
+          continue;
+        }
+        if (s->Kind() != CStatementKind::kVariableDeclarationStatement) {
+          active_sym_vars.clear();
+        }
+        stmts.push_back(
+            DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(*s, external_data_symbols));
+      }
+      return std::make_unique<CompoundStatement>(std::move(stmts));
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(ifs.Condition().Clone(),
+                            DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+                                ifs.ThenBranch(), external_data_symbols),
+                            ifs.ElseBranch() != nullptr
+                                ? DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+                                      *ifs.ElseBranch(), external_data_symbols)
+                                : nullptr);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(
+          ws.Condition().Clone(),
+          DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(ws.Body(), external_data_symbols));
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(
+          DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(dws.Body(), external_data_symbols),
+          dws.Condition().Clone());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(
+          fs.Init() != nullptr ? fs.Init()->Clone() : nullptr,
+          fs.Condition() != nullptr ? fs.Condition()->Clone() : nullptr,
+          fs.Step() != nullptr ? fs.Step()->Clone() : nullptr,
+          DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(fs.Body(), external_data_symbols));
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      std::vector<SwitchCase> cases;
+      cases.reserve(ss.Cases().size());
+      for (const auto& c : ss.Cases()) {
+        SwitchCase sc;
+        sc.case_values = c.case_values;
+        sc.is_default = c.is_default;
+        if (c.body != nullptr) {
+          sc.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+              DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(*c.body, external_data_symbols)
+                  .release()));
+        }
+        cases.push_back(std::move(sc));
+      }
+      return CStatement::Switch(ss.Condition().Clone(), std::move(cases));
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
 }  // namespace
 
 std::string CTranslationUnit::ToString() const {
@@ -813,16 +950,19 @@ std::string CTranslationUnit::ToString() const {
 
   std::string combined_function_code;
   for (size_t i = 0; i < functions.size(); ++i) {
+    std::unique_ptr<CompoundStatement> disambiguated_body(
+        static_cast<CompoundStatement*>(DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+                                            functions[i].Body(), external_data_symbols)
+                                            .release()));
     std::unique_ptr<CompoundStatement> body_to_emit;
     if (functions.size() > 1 || !array_data_symbols.empty() || !promoted_scalar_globals.empty()) {
       body_to_emit = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
-          NormalizeArraySymbolsInStmt(functions[i].Body(), array_data_symbols,
+          NormalizeArraySymbolsInStmt(*disambiguated_body, array_data_symbols,
                                       per_func_symbols[i].local_variables, inferred_data_types,
                                       all_function_names, promoted_scalar_globals)
               .release()));
     } else {
-      body_to_emit = std::unique_ptr<CompoundStatement>(
-          static_cast<CompoundStatement*>(functions[i].Body().Clone().release()));
+      body_to_emit = std::move(disambiguated_body);
     }
     FunctionDeclaration norm_fn(functions[i].ReturnType(), functions[i].Name(),
                                 functions[i].Parameters(), std::move(body_to_emit),

@@ -658,6 +658,32 @@ void LiftCop1MemoryAndMoveInstruction(const Instruction& inst, size_t i, Cop1Lif
           }
         }
 
+        if ((fs_idx % 2 == 0) && i + 1 < loop_end &&
+            (*inst.rt == Register::kS1 || *inst.rt == Register::kS3 || *inst.rt == Register::kS5 ||
+             *inst.rt == Register::kS7)) {
+          size_t next_idx = i + 1;
+          if (next_idx + 1 < loop_end && instructions_to_process[next_idx].IsNop()) {
+            ++next_idx;
+          }
+          const Instruction& next_inst = instructions_to_process[next_idx];
+          Register even_gpr = static_cast<Register>(static_cast<int>(*inst.rt) - 1);
+          FpRegister odd_fpr = static_cast<FpRegister>(fs_idx + 1);
+          if (next_inst.opcode == Opcode::kMtc1 && next_inst.fs == odd_fpr &&
+              next_inst.rt == even_gpr) {
+            fpr_const_bits[fs_idx] = std::nullopt;
+            fpr_const_bits[fs_idx + 1] = std::nullopt;
+            LiftedStatement statement;
+            statement.kind = StatementKind::kAssignment;
+            statement.destination_variable =
+                ExpressionBuilder::FpRegisterVarName(*inst.fs, /*is_double=*/true);
+            statement.expression =
+                LiftedExpression::Variable(ExpressionBuilder::RegisterVarName(even_gpr));
+            statements.push_back(std::move(statement));
+            skipped_instruction_indices.insert(next_idx);
+            break;
+          }
+        }
+
         std::optional<uint32_t> const_bits = ExtractMtc1ConstantBits(*inst.rt, tracker);
         fpr_const_bits[fs_idx] = const_bits;
         const bool has_val_bits = const_bits.has_value();

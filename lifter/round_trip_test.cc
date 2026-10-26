@@ -6148,5 +6148,61 @@ void SwitchWithChainedSharedStoreTails(s32 season) {
 )");
 }
 
+TEST_F(RoundTripTest, CoalescedParameterWithFpCalleeSavedRegisterAcrossCalls) {
+  AssertRoundTripBitExact("CoalescedParameterWithFpCalleeSavedRegisterAcrossCalls", R"(
+extern s32 eval_pair(s32 a, s32 b);
+
+s32 CoalescedParameterWithFpCalleeSavedRegisterAcrossCalls(s32 x, s32 y, s32 z, s32 w) {
+    s32 a0 = x + y;
+    s32 a1 = y + z;
+    s32 a2 = z + w;
+    s32 a3 = w + x;
+    s32 a4 = x - y;
+    s32 a5 = y - z;
+    s32 r = eval_pair(a0, a1);
+    r += eval_pair(x, a2);
+    r += eval_pair(y, a3);
+    r += eval_pair(z, a4);
+    r += eval_pair(w, a5);
+    return r + x + y + z + w + a0 + a1 + a2 + a3 + a4 + a5;
+}
+)");
+}
+
+TEST_F(RoundTripTest, CalleeSavedDoubleInGprPairWithFpAcrossCalls) {
+  AssertRoundTripBitExact("CalleeSavedDoubleInGprPairWithFpAcrossCalls", R"(
+extern f32 fallback_sqrtf(f32 x, s32 tag);
+extern f64 g_unit_scale;
+
+f32 CalleeSavedDoubleInGprPairWithFpAcrossCalls(f32 x, f32 y, s32 n) {
+    register s32 temp_s0 asm("$16") = n + 1;
+    register s32 temp_s1 asm("$17") = n + 2;
+    register s32 temp_s2 asm("$18") = n + 3;
+    register s32 temp_s3 asm("$19") = n + 4;
+    register s32 temp_s4 asm("$20") = n + 5;
+    register s32 temp_s5 asm("$21") = n + 6;
+    register f64 temp_s6 asm("$22");
+    s32 v8 = n + 7;
+    register f32 f20 asm("$f20") = x + y;
+    register f32 f22 asm("$f22") = x - y;
+    register f32 f24 asm("$f24") = x * y;
+    register f32 f26 asm("$f26") = f20 + f24;
+    register f32 f28 asm("$f28") = f22 + f24;
+    register f32 f30 asm("$f30") = f26 - f28;
+    f32 r0 = fallback_sqrtf(f20, v8);
+    f32 inv0;
+    f32 r1;
+    f32 inv1;
+    temp_s6 = g_unit_scale;
+    inv0 = (f32)(temp_s6 / (f64)r0);
+    f20 = f20 * inv0 + f22 + f24 + f26 + f28 + f30;
+    r1 = fallback_sqrtf(f20, temp_s0 + temp_s1 + temp_s2 + temp_s3 + temp_s4 + temp_s5 + v8);
+    inv1 = (f32)(temp_s6 / (f64)r1);
+    v8 = v8 + temp_s0;
+    return f20 * inv1 + (f32)v8;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

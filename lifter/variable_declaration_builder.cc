@@ -1670,7 +1670,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
           break;
         }
         if (IsCalleeSavedGprVarName(v)) {
-          ++callee_saved_gprs;
+          callee_saved_gprs += double_vars.contains(v) ? 2 : 1;
         }
         const bool is_addr_taken = StatementTakesAddressOf(**body, v);
         if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
@@ -1690,6 +1690,15 @@ absl::Status PrependSynthesizedLocalDeclarations(
           any_non_sp_local_addr_taken = true;
         }
       }
+
+      int prologue_saved_callee_gprs = 0;
+      for (const auto& [reg, off] : frame_analysis.prologue.saved_reg_offsets) {
+        (void)off;
+        if ((reg >= Register::kS0 && reg <= Register::kS7) || reg == Register::kFp) {
+          ++prologue_saved_callee_gprs;
+        }
+      }
+      callee_saved_gprs = std::max(callee_saved_gprs, prologue_saved_callee_gprs);
 
       if (!has_sp_buffer && !any_non_sp_local_addr_taken &&
           !StatementContainsS64PointerDeref(**body)) {
@@ -1924,7 +1933,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
     if (v == "v0") has_v0_local = true;
     if (v == "v1") has_v1_local = true;
     if (IsCalleeSavedGprVarName(v)) {
-      ++callee_saved_gpr_count;
+      callee_saved_gpr_count += double_vars.contains(v) ? 2 : 1;
     }
     if (v != "sp" && v != "lo" && v != "hi" && v != "fcr31" && v != "temp_at" &&
         !absl::StartsWith(v, "var_sp_") && !is_fp_reg(v) && !absl::EndsWith(v, "_64") &&
@@ -2181,7 +2190,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
                (s64_local_var_names.contains(var_name) && !double_vars.contains(var_name))) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::Named("s64"), var_name));
     } else if (double_vars.contains(var_name)) {
-      new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name));
+      std::optional<std::string> reg_annot = get_callee_saved_register_annotation(var_name);
+      new_body->AddStatement(CStatement::VariableDeclaration(CType::F64(), var_name, nullptr,
+                                                             std::nullopt, std::move(reg_annot)));
     } else {
       bool is_callee_gpr = IsCalleeSavedGprVarName(var_name);
       auto init_expr = vars_needing_init.contains(var_name) ? CExpression::Integer(0) : nullptr;
