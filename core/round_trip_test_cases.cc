@@ -7225,6 +7225,33 @@ s32 GeneralizedShiftAddMulAndReusedScratchStoreFlag(s32 a, s32 b, s32 c, s32* ou
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedDualGivForLoopWithTwoStrides",
+          .function_name = "GeneralizedDualGivForLoopWithTwoStrides",
+          .original_c = R"(
+typedef struct {
+    s32 x;
+    s32 y;
+    s32 z;
+} Vec3i;
+typedef struct {
+    s32 a;
+    s32 b;
+    s32 c;
+    s32 d;
+    s32 e;
+} Rec5i;
+s32 GeneralizedDualGivForLoopWithTwoStrides(Vec3i* dst, Rec5i* src, s32 count) {
+    s32 i;
+    for (i = 0; i < count; i++) {
+        dst[i].x = src[i].a + src[i].e;
+        dst[i].y = src[i].b;
+        dst[i].z = src[i].c;
+    }
+    return dst[0].x + src[0].a;
+}
+)",
+      },
   };
   return *k_cases;
 }

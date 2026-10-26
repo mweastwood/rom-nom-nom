@@ -517,5 +517,61 @@ TEST(AstPassPipelineTest,
   EXPECT_THAT(rendered, Not(HasSubstr("temp_t0")));
 }
 
+TEST(AstPassPipelineTest,
+     ForLoopSynthesizerRecoversMultiplePreheaderGivsAndFoldsScratchLatchCondition) {
+  CompoundStatement body;
+
+  // Guarded loop with TWO simultaneous preheader GIVs (`temp_t1` stepping by 12, `temp_t2` stepping
+  // by 4) and a trailing `temp_t0 = (temp_s0 < arg2)` latch comparison before both GIV steps.
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"), CExpression::Integer(0))));
+  auto guard_then = std::make_unique<CompoundStatement>();
+  guard_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t1"), CExpression::Integer(0))));
+  guard_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t2"), CExpression::Integer(0))));
+
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*(s32*)", CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                        CExpression::Identifier("temp_t1"))),
+      CExpression::Unary("*(s32*)", CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                        CExpression::Identifier("temp_t2"))))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_t0"),
+                              CExpression::Binary("<", CExpression::Identifier("temp_s0"),
+                                                  CExpression::Identifier("arg2")))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t1"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t1"), CExpression::Integer(12)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t2"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t2"), CExpression::Integer(4)))));
+
+  guard_then->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("temp_t0"), CExpression::Integer(0))));
+  body.AddStatement(CStatement::If(
+      CExpression::Binary(">", CExpression::Identifier("arg2"), CExpression::Integer(0)),
+      std::move(guard_then)));
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  LoopInvariantSinkerPass pass;
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("for (temp_s0 = 0; (temp_s0 < arg2); temp_s0++)"));
+  EXPECT_THAT(rendered, HasSubstr("(temp_s0 * 12)"));
+  EXPECT_THAT(rendered, HasSubstr("(temp_s0 * 4)"));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t0")));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t1")));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_t2")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

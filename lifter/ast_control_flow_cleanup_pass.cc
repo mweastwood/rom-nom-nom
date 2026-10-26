@@ -144,9 +144,10 @@ class SubstituteExpressionInStatementMutator : public AstMutator {
   const CExpression& replacement_;
 };
 
-bool FoldDoWhileTrailingLatchComparison(DoWhileStatement* do_while,
-                                        bool v0_used_after_in_enclosing_block) {
-  if (do_while == nullptr || v0_used_after_in_enclosing_block) {
+bool FoldDoWhileTrailingLatchComparison(
+    DoWhileStatement* do_while, const std::vector<std::unique_ptr<CStatement>>& enclosing_stmts,
+    size_t loop_stmt_idx, const CompoundStatement* root_body = nullptr) {
+  if (do_while == nullptr) {
     return false;
   }
   const CExpression& cond = do_while->Condition();
@@ -164,7 +165,7 @@ bool FoldDoWhileTrailingLatchComparison(DoWhileStatement* do_while,
   std::string cond_var;
   if (is_unfolded_var_cond) {
     cond_var = std::string(static_cast<const IdentifierExpression&>(bin_cond.Lhs()).Name());
-    if (cond_var != "v0" && cond_var != "v1" && cond_var != "at") {
+    if (!(IsScratchGprOrArgVar(cond_var) || cond_var == "at" || cond_var == "temp_at")) {
       return false;
     }
   }
@@ -180,7 +181,7 @@ bool FoldDoWhileTrailingLatchComparison(DoWhileStatement* do_while,
 
   int assign_idx = -1;
   const CExpression* latch_rhs = nullptr;
-  for (int offset = 0; offset <= 1; ++offset) {
+  for (int offset = 0; offset <= 4; ++offset) {
     int cand_idx = static_cast<int>(body_stmts.size()) - 1 - offset;
     if (cand_idx < 0 || body_stmts[cand_idx] == nullptr) continue;
     std::string lhs;
@@ -194,29 +195,41 @@ bool FoldDoWhileTrailingLatchComparison(DoWhileStatement* do_while,
         continue;
       }
     } else {
-      if ((lhs != "v0" && lhs != "v1" && lhs != "at") || ExpressionUsesVariable(*rhs, lhs) ||
-          cond.ToString() != rhs->ToString()) {
+      if (!(IsScratchGprOrArgVar(lhs) || lhs == "at" || lhs == "temp_at") ||
+          ExpressionUsesVariable(*rhs, lhs) || cond.ToString() != rhs->ToString()) {
         continue;
       }
       cond_var = lhs;
     }
-    if (offset == 1) {
-      const CStatement& tail_stmt = *body_stmts.back();
+    bool trailing_ok = true;
+    for (int t = cand_idx + 1; t < static_cast<int>(body_stmts.size()); ++t) {
+      if (body_stmts[t] == nullptr) {
+        trailing_ok = false;
+        break;
+      }
       std::string tail_lhs;
       const CExpression* tail_rhs = nullptr;
-      if (!ExtractSimpleVarAssign(tail_stmt, &tail_lhs, &tail_rhs) || tail_lhs == cond_var ||
-          !IsPureExpression(*tail_rhs) || StatementReferencesVariable(tail_stmt, cond_var)) {
-        continue;
+      if (!ExtractSimpleVarAssign(*body_stmts[t], &tail_lhs, &tail_rhs) || tail_lhs == cond_var ||
+          !IsPureExpression(*tail_rhs) || StatementReferencesVariable(*body_stmts[t], cond_var) ||
+          ExpressionUsesVariable(*rhs, tail_lhs)) {
+        trailing_ok = false;
+        break;
       }
-      bool rhs_mentions_tail_lhs = ExpressionUsesVariable(*rhs, tail_lhs);
-      if (rhs_mentions_tail_lhs) continue;
     }
+    if (!trailing_ok) continue;
     assign_idx = cand_idx;
     latch_rhs = rhs;
     break;
   }
-  if (assign_idx < 0 || latch_rhs == nullptr) {
+  if (assign_idx < 0 || latch_rhs == nullptr || cond_var.empty()) {
     return false;
+  }
+
+  for (size_t after = loop_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
+    if (enclosing_stmts[after] != nullptr &&
+        StatementReferencesVariable(*enclosing_stmts[after], cond_var)) {
+      return false;
+    }
   }
 
   // Ensure `cond_var` is killed before any read on the next iteration of the loop body and that
@@ -233,7 +246,10 @@ bool FoldDoWhileTrailingLatchComparison(DoWhileStatement* do_while,
       return false;
     }
   }
-  if ((is_unfolded_var_cond && !killed_on_entry) || reads_before_kill) {
+  const bool only_used_in_latch =
+      (root_body != nullptr && CountVariableReadUsesInStatement(*root_body, cond_var) == 1 &&
+       !StatementTakesAddressOf(*root_body, cond_var));
+  if ((is_unfolded_var_cond && !killed_on_entry && !only_used_in_latch) || reads_before_kill) {
     return false;
   }
 
@@ -514,7 +530,7 @@ bool IsRedundantLatchComparisonAssignment(const CStatement& stmt, const CExpress
     return false;
   }
   std::string_view lhs_name = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
-  if (lhs_name != "v0" && lhs_name != "v1" && lhs_name != "at") {
+  if (!(IsScratchGprOrArgVar(lhs_name) || lhs_name == "at" || lhs_name == "temp_at")) {
     return false;
   }
   return ExpressionsStructurallyEqual(UnwrapScalarCast(assign.Rhs()), UnwrapScalarCast(loop_cond));
@@ -1185,6 +1201,36 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
                                           nullptr);
               }
             }
+          } else if (!then_stmts.empty() &&
+                     then_stmts.back()->Kind() == CStatementKind::kGotoStatement &&
+                     else_stmts.size() >= 2) {
+            std::string target_lbl(static_cast<const GotoStatement&>(*then_stmts.back()).Label());
+            size_t lbl_idx = else_stmts.size();
+            for (size_t k = else_stmts.size(); k > 0; --k) {
+              if (else_stmts[k - 1]->Kind() == CStatementKind::kLabelStatement &&
+                  static_cast<const LabelStatement&>(*else_stmts[k - 1]).Label() == target_lbl) {
+                lbl_idx = k - 1;
+                break;
+              }
+              if (!is_sinkable_tail_stmt(*else_stmts[k - 1])) {
+                break;
+              }
+            }
+            if (lbl_idx >= 1 && lbl_idx < else_stmts.size()) {
+              then_stmts.pop_back();
+              std::vector<std::unique_ptr<CStatement>> sunk_tail;
+              for (size_t k = lbl_idx; k < else_stmts.size(); ++k) {
+                sunk_tail.push_back(std::move(else_stmts[k]));
+              }
+              else_stmts.erase(else_stmts.begin() + lbl_idx, else_stmts.end());
+              for (size_t k = 0; k < sunk_tail.size(); ++k) {
+                stmts.insert(stmts.begin() + i + 1 + k, std::move(sunk_tail[k]));
+              }
+              if (then_stmts.empty() && !else_stmts.empty()) {
+                stmts[i] = CStatement::If(NegateCondition(ifs.Condition()),
+                                          ifs.MutableElseBranch()->Clone(), nullptr);
+              }
+            }
           }
         }
 
@@ -1525,29 +1571,40 @@ bool StatementContainsContinue(const CStatement& stmt) {
   }
 }
 
+struct PreheaderGivInfo {
+  std::string var;
+  const CExpression* init_expr = nullptr;
+  int inc_idx = -1;
+  int64_t stride = 0;
+};
+
 bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundStatement& then_body,
                                  const CompoundStatement& else_body,
                                  const std::vector<std::unique_ptr<CStatement>>& enclosing_stmts,
                                  size_t current_stmt_idx, CompoundStatement* target_block) {
-  if (target_block == nullptr || !else_body.Statements().empty()) {
+  if (target_block == nullptr || !else_body.Statements().empty() ||
+      then_body.Statements().empty() || then_body.Statements().back() == nullptr ||
+      then_body.Statements().back()->Kind() != CStatementKind::kDoWhileStatement) {
     return false;
   }
-  const DoWhileStatement* do_while = nullptr;
-  std::string preheader_giv_var;
-  const CExpression* preheader_giv_init = nullptr;
-  if (then_body.Statements().size() == 1 && then_body.Statements()[0] != nullptr &&
-      then_body.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement) {
-    do_while = static_cast<const DoWhileStatement*>(then_body.Statements()[0].get());
-  } else if (then_body.Statements().size() == 2 && then_body.Statements()[0] != nullptr &&
-             then_body.Statements()[1] != nullptr &&
-             then_body.Statements()[1]->Kind() == CStatementKind::kDoWhileStatement) {
+  const DoWhileStatement* do_while =
+      static_cast<const DoWhileStatement*>(then_body.Statements().back().get());
+  std::vector<PreheaderGivInfo> preheader_givs;
+  absl::flat_hash_set<std::string> preheader_giv_vars;
+  for (size_t gi = 0; gi + 1 < then_body.Statements().size(); ++gi) {
+    if (then_body.Statements()[gi] == nullptr) return false;
     std::string giv_lhs;
     const CExpression* giv_rhs = nullptr;
-    if (!ExtractSimpleVarAssign(*then_body.Statements()[0], &giv_lhs, &giv_rhs) ||
+    if (!ExtractSimpleVarAssign(*then_body.Statements()[gi], &giv_lhs, &giv_rhs) ||
         giv_rhs == nullptr || !IsPureExpression(*giv_rhs) ||
-        ExpressionUsesVariable(*giv_rhs, giv_lhs) ||
+        ExpressionUsesVariable(*giv_rhs, giv_lhs) || preheader_giv_vars.contains(giv_lhs) ||
         !(IsScratchGprOrArgVar(giv_lhs) || giv_lhs == "at" || giv_lhs == "temp_at")) {
       return false;
+    }
+    for (const auto& prev_giv : preheader_givs) {
+      if (ExpressionUsesVariable(*giv_rhs, prev_giv.var)) {
+        return false;
+      }
     }
     for (size_t after = current_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
       if (enclosing_stmts[after] != nullptr &&
@@ -1555,11 +1612,8 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
         return false;
       }
     }
-    preheader_giv_var = std::move(giv_lhs);
-    preheader_giv_init = giv_rhs;
-    do_while = static_cast<const DoWhileStatement*>(then_body.Statements()[1].get());
-  } else {
-    return false;
+    preheader_giv_vars.insert(giv_lhs);
+    preheader_givs.push_back(PreheaderGivInfo{.var = std::move(giv_lhs), .init_expr = giv_rhs});
   }
   const auto& loop_cond = do_while->Condition();
   if (loop_cond.Kind() != CExpressionKind::kBinaryExpression) {
@@ -1582,7 +1636,7 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
   for (const auto& candidate_cond : cond_candidates) {
     const BinaryExpression& bin_cond = *candidate_cond;
     std::string_view loop_var_view = ExtractForLoopConditionVar(bin_cond);
-    if (loop_var_view.empty() || loop_var_view == preheader_giv_var) continue;
+    if (loop_var_view.empty() || preheader_giv_vars.contains(std::string(loop_var_view))) continue;
     std::string loop_var(loop_var_view);
 
     int inc_idx = -1;
@@ -1597,8 +1651,7 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
       }
     }
 
-    int giv_inc_idx = -1;
-    int64_t giv_stride = 0;
+    std::vector<PreheaderGivInfo> givs = preheader_givs;
     bool step_placement_valid = (inc_idx >= 0);
     for (size_t i = 0; step_placement_valid && i < loop_compound.Statements().size(); ++i) {
       if (static_cast<int>(i) == inc_idx) continue;
@@ -1607,26 +1660,41 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
           IsRedundantLatchComparisonAssignment(s, bin_cond)) {
         continue;
       }
-      if (!preheader_giv_var.empty() && static_cast<int>(i) > inc_idx && giv_inc_idx < 0) {
+      if (!givs.empty() && static_cast<int>(i) > inc_idx) {
         std::string s_lhs;
         const CExpression* s_rhs = nullptr;
-        if (ExtractSimpleVarAssign(s, &s_lhs, &s_rhs) && s_lhs == preheader_giv_var &&
-            s_rhs != nullptr && s_rhs->Kind() == CExpressionKind::kBinaryExpression) {
+        bool matched_giv_step = false;
+        if (ExtractSimpleVarAssign(s, &s_lhs, &s_rhs) && s_rhs != nullptr &&
+            s_rhs->Kind() == CExpressionKind::kBinaryExpression) {
           const auto& b = static_cast<const BinaryExpression&>(*s_rhs);
           if (b.Op() == "+" && b.Lhs().Kind() == CExpressionKind::kIdentifier &&
-              static_cast<const IdentifierExpression&>(b.Lhs()).Name() == preheader_giv_var &&
+              static_cast<const IdentifierExpression&>(b.Lhs()).Name() == s_lhs &&
               b.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
               static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value() > 1) {
-            giv_inc_idx = static_cast<int>(i);
-            giv_stride = static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value();
-            continue;
+            for (auto& g : givs) {
+              if (g.var == s_lhs && g.inc_idx < 0) {
+                g.inc_idx = static_cast<int>(i);
+                g.stride = static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value();
+                matched_giv_step = true;
+                break;
+              }
+            }
           }
         }
+        if (matched_giv_step) continue;
       }
-      if (!preheader_giv_var.empty() &&
-          (StatementModifiesVariable(s, preheader_giv_var) || StatementContainsContinue(s))) {
-        step_placement_valid = false;
-        break;
+      if (!givs.empty()) {
+        if (StatementContainsContinue(s)) {
+          step_placement_valid = false;
+          break;
+        }
+        for (const auto& g : givs) {
+          if (StatementModifiesVariable(s, g.var)) {
+            step_placement_valid = false;
+            break;
+          }
+        }
+        if (!step_placement_valid) break;
       }
       if (StatementModifiesVariable(s, loop_var)) {
         step_placement_valid = false;
@@ -1638,10 +1706,17 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
         break;
       }
     }
-    if (!preheader_giv_var.empty() &&
-        (giv_inc_idx < 0 || !step_match.has_value() || step_match->direction != 1 ||
-         step_match->step_expr->ToString() != (loop_var + "++"))) {
-      step_placement_valid = false;
+    if (!givs.empty()) {
+      if (!step_match.has_value() || step_match->direction != 1 ||
+          step_match->step_expr->ToString() != (loop_var + "++")) {
+        step_placement_valid = false;
+      }
+      for (const auto& g : givs) {
+        if (g.inc_idx < 0 || g.stride <= 1) {
+          step_placement_valid = false;
+          break;
+        }
+      }
     }
 
     int init_idx = -1;
@@ -1655,30 +1730,35 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
         break;
       }
     }
-    if (!preheader_giv_var.empty()) {
-      if (init_rhs == nullptr || preheader_giv_init == nullptr ||
-          init_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
-          ExpressionUsesVariable(*preheader_giv_init, loop_var)) {
+    if (!givs.empty()) {
+      if (init_rhs == nullptr || init_rhs->Kind() != CExpressionKind::kIntegerLiteral) {
         continue;
       }
       int64_t init_val = static_cast<const IntegerLiteralExpression&>(*init_rhs).Value();
-      if (init_val != 0 &&
-          (preheader_giv_init->Kind() != CExpressionKind::kIntegerLiteral ||
-           static_cast<const IntegerLiteralExpression&>(*preheader_giv_init).Value() !=
-               init_val * giv_stride)) {
-        continue;
-      }
-      std::vector<std::string> giv_init_vars;
-      absl::flat_hash_set<std::string> giv_init_seen;
-      CollectVariablesInExpression(*preheader_giv_init, &giv_init_vars, &giv_init_seen);
-      bool giv_init_modified = false;
-      for (const auto& gv : giv_init_vars) {
-        if (StatementModifiesVariable(loop_compound, gv)) {
-          giv_init_modified = true;
+      bool giv_inits_ok = true;
+      for (const auto& g : givs) {
+        if (g.init_expr == nullptr || ExpressionUsesVariable(*g.init_expr, loop_var)) {
+          giv_inits_ok = false;
           break;
         }
+        if (init_val != 0 && g.init_expr->Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(*g.init_expr).Value() !=
+                init_val * g.stride) {
+          giv_inits_ok = false;
+          break;
+        }
+        std::vector<std::string> giv_init_vars;
+        absl::flat_hash_set<std::string> giv_init_seen;
+        CollectVariablesInExpression(*g.init_expr, &giv_init_vars, &giv_init_seen);
+        for (const auto& gv : giv_init_vars) {
+          if (StatementModifiesVariable(loop_compound, gv)) {
+            giv_inits_ok = false;
+            break;
+          }
+        }
+        if (!giv_inits_ok) break;
       }
-      if (giv_init_modified) continue;
+      if (!giv_inits_ok) continue;
     }
 
     bool guard_compatible =
@@ -1743,29 +1823,40 @@ bool TrySynthesizeGuardedForLoop(const CExpression& guard_cond, const CompoundSt
     if (step_placement_valid && init_placement_valid) {
       auto init_rhs_clone = init_rhs->Clone();
       auto for_body = std::make_unique<CompoundStatement>();
-      std::unique_ptr<CExpression> giv_replacement;
-      if (!preheader_giv_var.empty() && giv_stride > 1) {
-        auto scaled_loop_var = CExpression::Binary("*", CExpression::Identifier(loop_var),
-                                                   CExpression::Integer(giv_stride));
-        if (preheader_giv_init != nullptr &&
-            (preheader_giv_init->Kind() != CExpressionKind::kIntegerLiteral ||
-             (static_cast<const IntegerLiteralExpression&>(*init_rhs).Value() == 0 &&
-              static_cast<const IntegerLiteralExpression&>(*preheader_giv_init).Value() != 0))) {
-          giv_replacement =
-              CExpression::Binary("+", preheader_giv_init->Clone(), std::move(scaled_loop_var));
+      std::vector<std::pair<std::string, std::unique_ptr<CExpression>>> giv_replacements;
+      absl::flat_hash_set<int> giv_inc_indices;
+      for (const auto& g : givs) {
+        giv_inc_indices.insert(g.inc_idx);
+        const int64_t init_val = static_cast<const IntegerLiteralExpression&>(*init_rhs).Value();
+        std::unique_ptr<CExpression> iter_count =
+            (init_val != 0 && g.init_expr->Kind() != CExpressionKind::kIntegerLiteral)
+                ? CExpression::Binary("-", CExpression::Identifier(loop_var),
+                                      CExpression::Integer(init_val))
+                : CExpression::Identifier(loop_var);
+        auto scaled_loop_var =
+            CExpression::Binary("*", std::move(iter_count), CExpression::Integer(g.stride));
+        std::unique_ptr<CExpression> rep;
+        if (g.init_expr != nullptr &&
+            (g.init_expr->Kind() != CExpressionKind::kIntegerLiteral ||
+             (init_val == 0 &&
+              static_cast<const IntegerLiteralExpression&>(*g.init_expr).Value() != 0))) {
+          rep = CExpression::Binary("+", g.init_expr->Clone(), std::move(scaled_loop_var));
         } else {
-          giv_replacement = std::move(scaled_loop_var);
+          rep = std::move(scaled_loop_var);
         }
+        giv_replacements.emplace_back(g.var, std::move(rep));
       }
       for (size_t i = 0; i < loop_compound.Statements().size(); ++i) {
-        if (static_cast<int>(i) == inc_idx || static_cast<int>(i) == giv_inc_idx) continue;
+        if (static_cast<int>(i) == inc_idx || giv_inc_indices.contains(static_cast<int>(i))) {
+          continue;
+        }
         if (IsRedundantLatchComparisonAssignment(*loop_compound.Statements()[i], loop_cond) ||
             IsRedundantLatchComparisonAssignment(*loop_compound.Statements()[i], bin_cond)) {
           continue;
         }
         auto cloned_stmt = loop_compound.Statements()[i]->Clone();
-        if (giv_replacement != nullptr) {
-          SubstituteExpressionInStatementMutator mutator(preheader_giv_var, *giv_replacement);
+        for (const auto& [gvar, grep] : giv_replacements) {
+          SubstituteExpressionInStatementMutator mutator(gvar, *grep);
           mutator.MutateStatement(&cloned_stmt);
         }
         for_body->AddStatement(std::move(cloned_stmt));
@@ -1839,21 +1930,26 @@ bool TrySynthesizeBranchGuardedWhileLoop(
     return false;
   }
   const auto& then_body = static_cast<const CompoundStatement&>(ifs.ThenBranch());
-  const DoWhileStatement* do_while = nullptr;
-  std::string preheader_giv_var;
-  if (then_body.Statements().size() == 1 && then_body.Statements()[0] != nullptr &&
-      then_body.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement) {
-    do_while = static_cast<const DoWhileStatement*>(then_body.Statements()[0].get());
-  } else if (then_body.Statements().size() == 2 && then_body.Statements()[0] != nullptr &&
-             then_body.Statements()[1] != nullptr &&
-             then_body.Statements()[1]->Kind() == CStatementKind::kDoWhileStatement) {
+  if (then_body.Statements().empty() || then_body.Statements().back() == nullptr ||
+      then_body.Statements().back()->Kind() != CStatementKind::kDoWhileStatement) {
+    return false;
+  }
+  const DoWhileStatement* do_while =
+      static_cast<const DoWhileStatement*>(then_body.Statements().back().get());
+  std::vector<PreheaderGivInfo> givs;
+  absl::flat_hash_set<std::string> giv_vars;
+  for (size_t gi = 0; gi + 1 < then_body.Statements().size(); ++gi) {
+    if (then_body.Statements()[gi] == nullptr) return false;
     std::string giv_lhs;
     const CExpression* giv_rhs = nullptr;
-    if (!ExtractSimpleVarAssign(*then_body.Statements()[0], &giv_lhs, &giv_rhs) ||
-        giv_rhs == nullptr || giv_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
-        static_cast<const IntegerLiteralExpression&>(*giv_rhs).Value() != 0 ||
-        (giv_lhs != "v0" && giv_lhs != "v1" && giv_lhs != "at")) {
+    if (!ExtractSimpleVarAssign(*then_body.Statements()[gi], &giv_lhs, &giv_rhs) ||
+        giv_rhs == nullptr || !IsPureExpression(*giv_rhs) ||
+        ExpressionUsesVariable(*giv_rhs, giv_lhs) || giv_vars.contains(giv_lhs) ||
+        !(IsScratchGprOrArgVar(giv_lhs) || giv_lhs == "at" || giv_lhs == "temp_at")) {
       return false;
+    }
+    for (const auto& prev_giv : givs) {
+      if (ExpressionUsesVariable(*giv_rhs, prev_giv.var)) return false;
     }
     for (size_t after = if_idx + 1; after < b_stmts.size(); ++after) {
       if (b_stmts[after] != nullptr && StatementReferencesVariable(*b_stmts[after], giv_lhs)) {
@@ -1866,10 +1962,8 @@ bool TrySynthesizeBranchGuardedWhileLoop(
         return false;
       }
     }
-    preheader_giv_var = std::move(giv_lhs);
-    do_while = static_cast<const DoWhileStatement*>(then_body.Statements()[1].get());
-  } else {
-    return false;
+    giv_vars.insert(giv_lhs);
+    givs.push_back(PreheaderGivInfo{.var = std::move(giv_lhs), .init_expr = giv_rhs});
   }
 
   const auto& loop_cond = do_while->Condition();
@@ -1879,7 +1973,8 @@ bool TrySynthesizeBranchGuardedWhileLoop(
   }
   const auto& bin_cond = static_cast<const BinaryExpression&>(loop_cond);
   std::string_view loop_var_sv = ExtractForLoopConditionVar(bin_cond);
-  if (loop_var_sv.empty() || !parent_zero_vars.contains(std::string(loop_var_sv))) {
+  if (loop_var_sv.empty() || !parent_zero_vars.contains(std::string(loop_var_sv)) ||
+      giv_vars.contains(std::string(loop_var_sv))) {
     return false;
   }
   std::string loop_var(loop_var_sv);
@@ -1907,31 +2002,38 @@ bool TrySynthesizeBranchGuardedWhileLoop(
   }
   if (inc_idx < 0) return false;
 
-  int giv_inc_idx = -1;
-  int64_t giv_stride = 0;
   for (size_t i = 0; i < loop_compound.Statements().size(); ++i) {
     if (static_cast<int>(i) == inc_idx) continue;
     const CStatement& s = *loop_compound.Statements()[i];
     if (IsRedundantLatchComparisonAssignment(s, loop_cond)) continue;
-    if (!preheader_giv_var.empty() && static_cast<int>(i) > inc_idx && giv_inc_idx < 0) {
+    if (!givs.empty() && static_cast<int>(i) > inc_idx) {
       std::string s_lhs;
       const CExpression* s_rhs = nullptr;
-      if (ExtractSimpleVarAssign(s, &s_lhs, &s_rhs) && s_lhs == preheader_giv_var &&
-          s_rhs != nullptr && s_rhs->Kind() == CExpressionKind::kBinaryExpression) {
+      bool matched_giv_step = false;
+      if (ExtractSimpleVarAssign(s, &s_lhs, &s_rhs) && s_rhs != nullptr &&
+          s_rhs->Kind() == CExpressionKind::kBinaryExpression) {
         const auto& b = static_cast<const BinaryExpression&>(*s_rhs);
         if (b.Op() == "+" && b.Lhs().Kind() == CExpressionKind::kIdentifier &&
-            static_cast<const IdentifierExpression&>(b.Lhs()).Name() == preheader_giv_var &&
+            static_cast<const IdentifierExpression&>(b.Lhs()).Name() == s_lhs &&
             b.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
             static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value() > 1) {
-          giv_inc_idx = static_cast<int>(i);
-          giv_stride = static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value();
-          continue;
+          for (auto& g : givs) {
+            if (g.var == s_lhs && g.inc_idx < 0) {
+              g.inc_idx = static_cast<int>(i);
+              g.stride = static_cast<const IntegerLiteralExpression&>(b.Rhs()).Value();
+              matched_giv_step = true;
+              break;
+            }
+          }
         }
       }
+      if (matched_giv_step) continue;
     }
-    if (!preheader_giv_var.empty() &&
-        (StatementModifiesVariable(s, preheader_giv_var) || StatementContainsContinue(s))) {
-      return false;
+    if (!givs.empty()) {
+      if (StatementContainsContinue(s)) return false;
+      for (const auto& g : givs) {
+        if (StatementModifiesVariable(s, g.var)) return false;
+      }
     }
     if (StatementModifiesVariable(s, loop_var) ||
         (static_cast<int>(i) > inc_idx &&
@@ -1939,24 +2041,48 @@ bool TrySynthesizeBranchGuardedWhileLoop(
       return false;
     }
   }
-  if (!preheader_giv_var.empty() &&
-      (giv_inc_idx < 0 || !step_match.has_value() || step_match->direction != 1 ||
-       step_match->step_expr->ToString() != (loop_var + "++"))) {
-    return false;
+  if (!givs.empty()) {
+    if (!step_match.has_value() || step_match->direction != 1 ||
+        step_match->step_expr->ToString() != (loop_var + "++")) {
+      return false;
+    }
+    for (const auto& g : givs) {
+      if (g.inc_idx < 0 || g.stride <= 1 || g.init_expr == nullptr ||
+          ExpressionUsesVariable(*g.init_expr, loop_var)) {
+        return false;
+      }
+      std::vector<std::string> giv_init_vars;
+      absl::flat_hash_set<std::string> giv_init_seen;
+      CollectVariablesInExpression(*g.init_expr, &giv_init_vars, &giv_init_seen);
+      for (const auto& gv : giv_init_vars) {
+        if (StatementModifiesVariable(loop_compound, gv)) return false;
+      }
+    }
   }
 
   auto while_body = std::make_unique<CompoundStatement>();
-  std::unique_ptr<CExpression> giv_replacement;
-  if (!preheader_giv_var.empty() && giv_stride > 1) {
-    giv_replacement = CExpression::Binary("*", CExpression::Identifier(loop_var),
-                                          CExpression::Integer(giv_stride));
+  std::vector<std::pair<std::string, std::unique_ptr<CExpression>>> giv_replacements;
+  absl::flat_hash_set<int> giv_inc_indices;
+  for (const auto& g : givs) {
+    giv_inc_indices.insert(g.inc_idx);
+    auto scaled_loop_var =
+        CExpression::Binary("*", CExpression::Identifier(loop_var), CExpression::Integer(g.stride));
+    std::unique_ptr<CExpression> rep;
+    if (g.init_expr != nullptr &&
+        (g.init_expr->Kind() != CExpressionKind::kIntegerLiteral ||
+         static_cast<const IntegerLiteralExpression&>(*g.init_expr).Value() != 0)) {
+      rep = CExpression::Binary("+", g.init_expr->Clone(), std::move(scaled_loop_var));
+    } else {
+      rep = std::move(scaled_loop_var);
+    }
+    giv_replacements.emplace_back(g.var, std::move(rep));
   }
   for (size_t i = 0; i < loop_compound.Statements().size(); ++i) {
-    if (static_cast<int>(i) == giv_inc_idx) continue;
+    if (giv_inc_indices.contains(static_cast<int>(i))) continue;
     if (IsRedundantLatchComparisonAssignment(*loop_compound.Statements()[i], loop_cond)) continue;
     auto cloned_stmt = loop_compound.Statements()[i]->Clone();
-    if (giv_replacement != nullptr) {
-      SubstituteExpressionInStatementMutator mutator(preheader_giv_var, *giv_replacement);
+    for (const auto& [gvar, grep] : giv_replacements) {
+      SubstituteExpressionInStatementMutator mutator(gvar, *grep);
       mutator.MutateStatement(&cloned_stmt);
     }
     while_body->AddStatement(std::move(cloned_stmt));
@@ -2022,37 +2148,47 @@ bool SynthesizeForLoopsInBlock(CompoundStatement* body) {
         local_changed = true;
         continue;
       }
-      if (ifs.ElseBranch() != nullptr &&
-          ifs.ElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
-        absl::flat_hash_set<std::string> zero_vars;
-        for (int si = static_cast<int>(rebuilt.Statements().size()) - 1; si >= 0; --si) {
-          std::string z_lhs;
-          const CExpression* z_rhs = nullptr;
-          if (!ExtractSimpleVarAssign(*rebuilt.Statements()[si], &z_lhs, &z_rhs) ||
-              z_rhs == nullptr || z_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
-              static_cast<const IntegerLiteralExpression&>(*z_rhs).Value() != 0) {
-            continue;
-          }
-          bool modified_after = false;
-          for (size_t k = static_cast<size_t>(si + 1); k < rebuilt.Statements().size(); ++k) {
-            if (StatementModifiesVariable(*rebuilt.Statements()[k], z_lhs)) {
-              modified_after = true;
-              break;
-            }
-          }
-          if (!modified_after) {
-            zero_vars.insert(std::move(z_lhs));
+      absl::flat_hash_set<std::string> zero_vars;
+      for (int si = static_cast<int>(rebuilt.Statements().size()) - 1; si >= 0; --si) {
+        std::string z_lhs;
+        const CExpression* z_rhs = nullptr;
+        if (!ExtractSimpleVarAssign(*rebuilt.Statements()[si], &z_lhs, &z_rhs) ||
+            z_rhs == nullptr || z_rhs->Kind() != CExpressionKind::kIntegerLiteral ||
+            static_cast<const IntegerLiteralExpression&>(*z_rhs).Value() != 0) {
+          continue;
+        }
+        bool modified_after = false;
+        for (size_t k = static_cast<size_t>(si + 1); k < rebuilt.Statements().size(); ++k) {
+          if (StatementModifiesVariable(*rebuilt.Statements()[k], z_lhs)) {
+            modified_after = true;
+            break;
           }
         }
-        if (!zero_vars.empty()) {
-          auto cloned_if = stmt->Clone();
-          auto* mut_if = static_cast<IfStatement*>(cloned_if.get());
-          auto* mut_else = static_cast<CompoundStatement*>(mut_if->MutableElseBranch());
-          if (TrySynthesizeBranchGuardedWhileLoop(zero_vars, mut_else, stmts, idx)) {
-            rebuilt.AddStatement(std::move(cloned_if));
-            local_changed = true;
-            continue;
-          }
+        if (!modified_after) {
+          zero_vars.insert(std::move(z_lhs));
+        }
+      }
+      if (!zero_vars.empty()) {
+        auto cloned_if = stmt->Clone();
+        auto* mut_if = static_cast<IfStatement*>(cloned_if.get());
+        bool branch_changed = false;
+        if (mut_if->MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            TrySynthesizeBranchGuardedWhileLoop(
+                zero_vars, static_cast<CompoundStatement*>(mut_if->MutableThenBranch()), stmts,
+                idx)) {
+          branch_changed = true;
+        }
+        if (mut_if->MutableElseBranch() != nullptr &&
+            mut_if->MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            TrySynthesizeBranchGuardedWhileLoop(
+                zero_vars, static_cast<CompoundStatement*>(mut_if->MutableElseBranch()), stmts,
+                idx)) {
+          branch_changed = true;
+        }
+        if (branch_changed) {
+          rebuilt.AddStatement(std::move(cloned_if));
+          local_changed = true;
+          continue;
         }
       }
     }
@@ -2081,18 +2217,11 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
     for (size_t i = 0; i < stmts.size(); ++i) {
       if (stmts[i] == nullptr) continue;
 
-      // 1. Fold trailing `v0 = (cond); } while ((v0 != 0));` on outer/nested do-while loops when
-      // `v0` is not used after the loop and is killed before read on loop entry.
+      // 1. Fold trailing `reg = (cond); } while ((reg != 0));` on outer/nested do-while loops when
+      // `reg` is not used after the loop and is killed before read on loop entry.
       if (stmts[i]->Kind() == CStatementKind::kDoWhileStatement) {
         auto* dw = static_cast<DoWhileStatement*>(stmts[i].get());
-        bool v0_used_after = false;
-        for (size_t after = i + 1; after < stmts.size(); ++after) {
-          if (stmts[after] != nullptr && StatementReferencesVariable(*stmts[after], "v0")) {
-            v0_used_after = true;
-            break;
-          }
-        }
-        if (FoldDoWhileTrailingLatchComparison(dw, v0_used_after)) {
+        if (FoldDoWhileTrailingLatchComparison(dw, stmts, i, body)) {
           any_changed = true;
         }
       }
@@ -2139,7 +2268,8 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
         const bool is_sym_addr = ExtractSymbolAddressOperand(*rhs, &sym_addr);
         const bool is_giv_mult =
             (rhs->Kind() == CExpressionKind::kBinaryExpression &&
-             static_cast<const BinaryExpression&>(*rhs).Op() == "*" &&
+             (static_cast<const BinaryExpression&>(*rhs).Op() == "*" ||
+              static_cast<const BinaryExpression&>(*rhs).Op() == "<<") &&
              static_cast<const BinaryExpression&>(*rhs).Lhs().Kind() ==
                  CExpressionKind::kIdentifier &&
              static_cast<const BinaryExpression&>(*rhs).Rhs().Kind() ==
