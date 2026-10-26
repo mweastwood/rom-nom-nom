@@ -132,6 +132,7 @@ AstPassPipeline AstPassPipeline::BuildDefaultPipeline() {
   AstPassPipeline pipeline;
 
   // 1. Pre-canonicalization passes.
+  pipeline.AddPass(std::make_unique<ReturnStatementSimplifierPass>());
   pipeline.AddPass(std::make_unique<UnalignedBlockCopyCollapserPass>());
   pipeline.AddPass(std::make_unique<PrologueParameterCoalescerPass>());
   pipeline.AddPass(std::make_unique<CrossJumpedCallTailInlinerPass>(/*allow_diamond_tails=*/false));

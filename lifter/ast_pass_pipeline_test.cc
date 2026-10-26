@@ -11,8 +11,10 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "lifter/ast_arithmetic_simplifier.h"
+#include "lifter/ast_control_flow_cleanup_pass.h"
 #include "lifter/ast_expression_folder.h"
 #include "lifter/ast_parameter_coalescer.h"
+#include "lifter/ast_type_inference_pass.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -132,6 +134,79 @@ TEST(AstPassPipelineTest, RunConsolidatesBranchTailSinkingAfterParameterCoalesci
   std::string emitted = body.ToString();
   EXPECT_THAT(emitted, Not(HasSubstr("temp_s0")));
   EXPECT_THAT(emitted, HasSubstr("return (arg0 + 4);"));
+}
+
+TEST(AstPassPipelineTest, ForLoopSynthesizerPassUpgradesGuardedDoWhileLoop) {
+  CompoundStatement body;
+  // temp_v1 = 0;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_v1"), CExpression::Integer(0))));
+
+  // if (temp_v1 < arg0) { do { *(s32*)arg1 = temp_v1; temp_v1 = temp_v1 + 1; } while (temp_v1 <
+  // arg0); }
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S32().MakePointer(), CExpression::Identifier("arg1"))),
+      CExpression::Identifier("temp_v1"))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_v1"),
+      CExpression::Binary("+", CExpression::Identifier("temp_v1"), CExpression::Integer(1)))));
+
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::DoWhile(
+      std::move(loop_body), CExpression::Binary("<", CExpression::Identifier("temp_v1"),
+                                                CExpression::Identifier("arg0"))));
+
+  body.AddStatement(CStatement::If(
+      CExpression::Binary(">", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_branch)));
+
+  std::vector<CParameter> params = {
+      {.type = CType::S32(), .name = "arg0"},
+      {.type = CType::S32(), .name = "arg1"},
+  };
+  AstPassContext ctx{.parameters = params};
+
+  ForLoopSynthesizerPass pass;
+  EXPECT_EQ(pass.Name(), "SynthesizeForLoops");
+  EXPECT_TRUE(pass.Run(&body, ctx));
+  EXPECT_THAT(body.ToString(), HasSubstr("for (temp_v1 = 0; (temp_v1 < arg0); temp_v1++)"));
+}
+
+TEST(AstPassPipelineTest, ReturnAndGlobalTypePromotionPassPromotesNarrowCondSteppedVars) {
+  CompoundStatement body;
+  // if (arg0 != 0) { temp_v1 = temp_v1 + 1; }
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_v1"),
+      CExpression::Binary("+", CExpression::Identifier("temp_v1"), CExpression::Integer(1)))));
+  body.AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_branch)));
+
+  // return (u32)((temp_v1 & 255) ^ 3) < 1;
+  body.AddStatement(CStatement::Return(CExpression::Binary(
+      "<",
+      CExpression::Cast(
+          CType::U32(),
+          CExpression::Binary("^",
+                              CExpression::Binary("&", CExpression::Identifier("temp_v1"),
+                                                  CExpression::Integer(255)),
+                              CExpression::Integer(3))),
+      CExpression::Integer(1))));
+
+  std::vector<CParameter> params = {{.type = CType::S32(), .name = "arg0"}};
+  AstPassContext ctx{.parameters = params, .return_type = CType::S32()};
+
+  absl::flat_hash_map<std::string, CType> promoted_types;
+  ReturnAndGlobalTypePromotionPass pass({"temp_v1"}, &promoted_types);
+  EXPECT_EQ(pass.Name(), "ReturnAndGlobalTypePromotion");
+  EXPECT_TRUE(pass.Run(&body, ctx));
+  ASSERT_TRUE(promoted_types.contains("temp_v1"));
+  EXPECT_EQ(promoted_types["temp_v1"].name, "u8");
+  EXPECT_THAT(body.ToString(), HasSubstr("return ((temp_v1 & 255) == 3);"));
 }
 
 }  // namespace

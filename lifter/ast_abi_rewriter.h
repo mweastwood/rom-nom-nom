@@ -7,6 +7,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "core/c_ast.h"
+#include "lifter/ast_control_flow_cleanup_pass.h"
 #include "lifter/ast_pass_pipeline.h"
 
 namespace rom_nom_nom {
@@ -18,14 +19,6 @@ void SimplifyReturnStatements(CompoundStatement* comp, bool returns_v0, bool ret
 // Simplifies early returns whose delay slot was decoupled across an `if/else`
 // diamond back into `if (cond) return ...; return default_val;`.
 void SimplifyDecoupledDelaySlotEarlyReturns(CompoundStatement* comp);
-
-// Sinks identical trailing argument assignments (`arg0 = ...;`, `var_sp_N = ...;`)
-// out of `if/else` branches into the post-branch block.
-void SinkCommonBranchTailArgAssignments(CompoundStatement* comp);
-
-// Inlines small cross-jumped tail-call blocks reached via `goto` so each branch
-// emits a structured call + return/break.
-void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond_tails = false);
 
 // Rewrites calls that pass `f32`/`f64` values in GPRs or stack slots via
 // `*(s32*)&fX` / `*(s64*)&fX_d` into typed function-pointer casts with direct
@@ -39,7 +32,7 @@ void TrimUnassignedTrailingCallArgRegisters(
     CompoundStatement* body, const std::vector<CParameter>& parameters,
     const absl::flat_hash_map<std::string, int>* function_parameter_counts);
 
-// Concrete `AstPass` wrappers for ABI and control-flow tail rewrites.
+// Concrete `AstPass` wrappers for ABI and return-value rewrites.
 class ReturnStatementSimplifierPass : public AstPass {
  public:
   std::string_view Name() const override { return "SimplifyReturnStatements"; }
@@ -50,24 +43,6 @@ class DecoupledDelaySlotEarlyReturnPass : public AstPass {
  public:
   std::string_view Name() const override { return "SimplifyDecoupledDelaySlotEarlyReturns"; }
   bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
-};
-
-class CommonBranchTailSinkerPass : public AstPass {
- public:
-  std::string_view Name() const override { return "SinkCommonBranchTailArgAssignments"; }
-  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
-};
-
-class CrossJumpedCallTailInlinerPass : public AstPass {
- public:
-  explicit CrossJumpedCallTailInlinerPass(bool allow_diamond_tails = false)
-      : allow_diamond_tails_(allow_diamond_tails) {}
-
-  std::string_view Name() const override { return "InlineCrossJumpedCallTails"; }
-  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
-
- private:
-  bool allow_diamond_tails_ = false;
 };
 
 class FloatCallArgumentRewriterPass : public AstPass {
