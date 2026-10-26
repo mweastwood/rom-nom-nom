@@ -7205,6 +7205,26 @@ s32 GeneralizedSparseSwitchWith32BitConstantsAndZeroPivot(s32 cmd, s32 val) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedShiftAddMulAndReusedScratchStoreFlag",
+          .function_name = "GeneralizedShiftAddMulAndReusedScratchStoreFlag",
+          .original_c = R"(
+s32 GeneralizedShiftAddMulAndReusedScratchStoreFlag(s32 a, s32 b, s32 c, s32* out) {
+    s32 acc = (a * 6) + (b * 14);
+    if (a > 5) {
+        acc++;
+    }
+    if (b < 20) {
+        acc--;
+    }
+    if (c == 0) {
+        acc++;
+    }
+    out[0] = acc;
+    return acc;
+}
+)",
+      },
   };
   return *k_cases;
 }

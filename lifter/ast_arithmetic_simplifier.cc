@@ -96,65 +96,55 @@ std::unique_ptr<CExpression> SimplifyShiftAddExpression(const CExpression& expr)
       return a.ToString() == b.ToString();
     };
 
-    // 1. (X << S) + X, X + (X << S), (X * C) + X, or X + (X * C)
-    if (bin.Op() == "+") {
-      int64_t shift_val = 0;
-      if (bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
-        const auto& lhs_bin = static_cast<const BinaryExpression&>(bin.Lhs());
-        if (lhs_bin.Op() == "<<" && is_int_val(lhs_bin.Rhs(), &shift_val) && shift_val > 0 &&
-            shift_val < 31) {
-          if (exprs_match(lhs_bin.Lhs(), bin.Rhs())) {
-            int64_t mult = (1LL << shift_val) + 1;
-            return CExpression::Binary("*", lhs_bin.Lhs().Clone(), CExpression::Integer(mult));
-          }
-        }
-        int64_t c_val = 0;
-        if (lhs_bin.Op() == "*" && is_int_val(lhs_bin.Rhs(), &c_val) && c_val > 1) {
-          if (exprs_match(lhs_bin.Lhs(), bin.Rhs())) {
-            return CExpression::Binary("*", lhs_bin.Lhs().Clone(), CExpression::Integer(c_val + 1));
-          }
+    auto extract_linear_factor = [&](const CExpression& e, const CExpression** base_out,
+                                     int64_t* factor_out) -> bool {
+      if (e.Kind() != CExpressionKind::kBinaryExpression) return false;
+      const auto& b = static_cast<const BinaryExpression&>(e);
+      int64_t val = 0;
+      if (b.Op() == "<<" && is_int_val(b.Rhs(), &val) && val > 0 && val < 31) {
+        *base_out = &b.Lhs();
+        *factor_out = (1LL << val);
+        return true;
+      }
+      if (b.Op() == "*" && is_int_val(b.Rhs(), &val) && val > 1) {
+        *base_out = &b.Lhs();
+        *factor_out = val;
+        return true;
+      }
+      return false;
+    };
+
+    // 1. Generalized shift-add/subtract linear combination (`expmed.c:synth_mult`):
+    //    `A +/- B` where `A = X * F1` (or `X`) and `B = X * F2` (or `X`).
+    if (bin.Op() == "+" || bin.Op() == "-") {
+      const CExpression* lhs_base = nullptr;
+      const CExpression* rhs_base = nullptr;
+      int64_t lhs_factor = 0;
+      int64_t rhs_factor = 0;
+      const bool lhs_has_factor = extract_linear_factor(bin.Lhs(), &lhs_base, &lhs_factor);
+      const bool rhs_has_factor = extract_linear_factor(bin.Rhs(), &rhs_base, &rhs_factor);
+
+      if (lhs_has_factor && rhs_has_factor && exprs_match(*lhs_base, *rhs_base)) {
+        int64_t mult = (bin.Op() == "+") ? (lhs_factor + rhs_factor) : (lhs_factor - rhs_factor);
+        if (mult > 2 && (mult & (mult - 1)) != 0) {
+          return CExpression::Binary("*", lhs_base->Clone(), CExpression::Integer(mult));
         }
       }
-      if (bin.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
-        const auto& rhs_bin = static_cast<const BinaryExpression&>(bin.Rhs());
-        if (rhs_bin.Op() == "<<" && is_int_val(rhs_bin.Rhs(), &shift_val) && shift_val > 0 &&
-            shift_val < 31) {
-          if (exprs_match(rhs_bin.Lhs(), bin.Lhs())) {
-            int64_t mult = (1LL << shift_val) + 1;
-            return CExpression::Binary("*", bin.Lhs().Clone(), CExpression::Integer(mult));
-          }
+      if (lhs_has_factor && exprs_match(*lhs_base, bin.Rhs())) {
+        int64_t mult = (bin.Op() == "+") ? (lhs_factor + 1) : (lhs_factor - 1);
+        if (mult > 1) {
+          return CExpression::Binary("*", lhs_base->Clone(), CExpression::Integer(mult));
         }
-        int64_t c_val = 0;
-        if (rhs_bin.Op() == "*" && is_int_val(rhs_bin.Rhs(), &c_val) && c_val > 1) {
-          if (exprs_match(rhs_bin.Lhs(), bin.Lhs())) {
-            return CExpression::Binary("*", bin.Lhs().Clone(), CExpression::Integer(c_val + 1));
-          }
+      }
+      if (bin.Op() == "+" && rhs_has_factor && exprs_match(bin.Lhs(), *rhs_base)) {
+        int64_t mult = 1 + rhs_factor;
+        if (mult > 1) {
+          return CExpression::Binary("*", bin.Lhs().Clone(), CExpression::Integer(mult));
         }
       }
     }
 
-    // 2. (X << S) - X -> X * ((1 << S) - 1), or (X * C) - X -> X * (C - 1)
-    if (bin.Op() == "-") {
-      int64_t shift_val = 0;
-      if (bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
-        const auto& lhs_bin = static_cast<const BinaryExpression&>(bin.Lhs());
-        if (lhs_bin.Op() == "<<" && is_int_val(lhs_bin.Rhs(), &shift_val) && shift_val >= 2 &&
-            shift_val < 31) {
-          if (exprs_match(lhs_bin.Lhs(), bin.Rhs())) {
-            int64_t mult = (1LL << shift_val) - 1;
-            return CExpression::Binary("*", lhs_bin.Lhs().Clone(), CExpression::Integer(mult));
-          }
-        }
-        int64_t c_val = 0;
-        if (lhs_bin.Op() == "*" && is_int_val(lhs_bin.Rhs(), &c_val) && c_val > 2) {
-          if (exprs_match(lhs_bin.Lhs(), bin.Rhs())) {
-            return CExpression::Binary("*", lhs_bin.Lhs().Clone(), CExpression::Integer(c_val - 1));
-          }
-        }
-      }
-    }
-
-    // 3. (X * C) << S  ->  X * (C << S)
+    // 2. (X * C) << S  ->  X * (C << S)
     if (bin.Op() == "<<") {
       int64_t shift_val = 0;
       if (is_int_val(bin.Rhs(), &shift_val) && shift_val > 0 && shift_val < 31) {
@@ -169,29 +159,7 @@ std::unique_ptr<CExpression> SimplifyShiftAddExpression(const CExpression& expr)
       }
     }
 
-    // 4. Direct ((X << S) + X) << S2
-    if (bin.Op() == "<<") {
-      int64_t s2 = 0;
-      if (is_int_val(bin.Rhs(), &s2) && s2 > 0 && s2 < 31) {
-        if (bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
-          const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
-          if (inner.Op() == "+") {
-            int64_t s1 = 0;
-            if (inner.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
-              const auto& sll = static_cast<const BinaryExpression&>(inner.Lhs());
-              if (sll.Op() == "<<" && is_int_val(sll.Rhs(), &s1) && s1 > 0 && s1 < 31) {
-                if (exprs_match(sll.Lhs(), inner.Rhs())) {
-                  int64_t mult = ((1LL << s1) + 1) << s2;
-                  return CExpression::Binary("*", sll.Lhs().Clone(), CExpression::Integer(mult));
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 5. Sign-extension shift pair: ((X << 16) >> 16) -> (s16)(X), ((X << 24) >> 24) -> (s8)(X)
+    // 3. Sign-extension shift pair: ((X << 16) >> 16) -> (s16)(X), ((X << 24) >> 24) -> (s8)(X)
     if (bin.Op() == ">>") {
       int64_t s_right = 0;
       if (is_int_val(bin.Rhs(), &s_right) && (s_right == 16 || s_right == 24) &&
@@ -203,26 +171,67 @@ std::unique_ptr<CExpression> SimplifyShiftAddExpression(const CExpression& expr)
           return CExpression::Cast(target_type, inner.Lhs().Clone());
         }
       }
-      // 6. Signed division by 2: ((X + ((u32)X >> 31)) >> 1) -> (X / 2)
-      if (is_int_val(bin.Rhs(), &s_right) && s_right == 1 &&
+      // 4. Signed division by power of 2 (`expmed.c:expand_divmod`):
+      //    - k == 1: `((X + ((u32)X >> 31)) >> 1)` -> `(X / 2)`
+      //    - k >= 1: `((X + ((X >> 31) & ((1 << k) - 1))) >> k)` -> `(X / (1 << k))`
+      //    - k >= 1: `((X + ((u32)(X >> (k - 1)) >> (32 - k))) >> k)` -> `(X / (1 << k))`
+      if (is_int_val(bin.Rhs(), &s_right) && s_right >= 1 && s_right <= 30 &&
           bin.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
         const auto& inner = static_cast<const BinaryExpression&>(bin.Lhs());
         if (inner.Op() == "+") {
-          auto is_unsigned_shr_31_of = [&](const CExpression& cand, const CExpression& x) {
-            if (cand.Kind() != CExpressionKind::kBinaryExpression) return false;
-            const auto& shr = static_cast<const BinaryExpression&>(cand);
-            int64_t sh = 0;
-            if (shr.Op() != ">>" || !is_int_val(shr.Rhs(), &sh) || sh != 31) return false;
-            if (shr.Lhs().Kind() != CExpressionKind::kCastExpression) return false;
-            const auto& cast = static_cast<const CastExpression&>(shr.Lhs());
-            return cast.TargetType().name == "u32" && cast.TargetType().pointer_depth == 0 &&
-                   exprs_match(cast.Operand(), x);
+          const int64_t divisor = (1LL << s_right);
+          const int64_t mask = divisor - 1;
+          auto unwrap_s32_cast = [](const CExpression& e) -> const CExpression& {
+            if (e.Kind() == CExpressionKind::kCastExpression) {
+              const auto& c = static_cast<const CastExpression&>(e);
+              if (c.TargetType().name == "s32" && c.TargetType().pointer_depth == 0) {
+                return c.Operand();
+              }
+            }
+            return e;
           };
-          if (is_unsigned_shr_31_of(inner.Rhs(), inner.Lhs())) {
-            return CExpression::Binary("/", inner.Lhs().Clone(), CExpression::Integer(2));
+          auto is_pow2_sign_bias_of = [&](const CExpression& cand, const CExpression& x) {
+            const CExpression& ux = unwrap_s32_cast(x);
+            if (cand.Kind() != CExpressionKind::kBinaryExpression) return false;
+            const auto& b = static_cast<const BinaryExpression&>(cand);
+            int64_t rval = 0;
+            // Form A: `((u32)X >> 31)` (when s_right == 1) or `((u32)(X >> (k - 1)) >> (32 - k))`
+            if (b.Op() == ">>" && is_int_val(b.Rhs(), &rval) && rval == (32 - s_right) &&
+                b.Lhs().Kind() == CExpressionKind::kCastExpression) {
+              const auto& cast = static_cast<const CastExpression&>(b.Lhs());
+              if (cast.TargetType().name == "u32" && cast.TargetType().pointer_depth == 0) {
+                const CExpression& op = unwrap_s32_cast(cast.Operand());
+                if (s_right == 1 && exprs_match(op, ux)) {
+                  return true;
+                }
+                int64_t inner_sh = 0;
+                if (s_right > 1 && op.Kind() == CExpressionKind::kBinaryExpression) {
+                  const auto& inner_shr = static_cast<const BinaryExpression&>(op);
+                  if (inner_shr.Op() == ">>" && is_int_val(inner_shr.Rhs(), &inner_sh) &&
+                      (inner_sh == s_right - 1 || inner_sh == 31) &&
+                      exprs_match(unwrap_s32_cast(inner_shr.Lhs()), ux)) {
+                    return true;
+                  }
+                }
+              }
+            }
+            // Form B: `((X >> 31) & ((1 << k) - 1))`
+            if (b.Op() == "&" && is_int_val(b.Rhs(), &rval) && rval == mask &&
+                b.Lhs().Kind() == CExpressionKind::kBinaryExpression) {
+              const auto& shr = static_cast<const BinaryExpression&>(b.Lhs());
+              int64_t sh = 0;
+              if (shr.Op() == ">>" && is_int_val(shr.Rhs(), &sh) && sh == 31 &&
+                  exprs_match(unwrap_s32_cast(shr.Lhs()), ux)) {
+                return true;
+              }
+            }
+            return false;
+          };
+          if (is_pow2_sign_bias_of(inner.Rhs(), inner.Lhs())) {
+            return CExpression::Binary("/", inner.Lhs().Clone(), CExpression::Integer(divisor));
           }
-          if (is_unsigned_shr_31_of(inner.Lhs(), inner.Rhs())) {
-            return CExpression::Binary("/", inner.Rhs().Clone(), CExpression::Integer(2));
+          if (is_pow2_sign_bias_of(inner.Lhs(), inner.Rhs())) {
+            return CExpression::Binary("/", inner.Rhs().Clone(), CExpression::Integer(divisor));
           }
         }
       }
@@ -754,7 +763,7 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
       } else if (rhs_expr->Kind() == CExpressionKind::kBinaryExpression &&
                  static_cast<const BinaryExpression*>(rhs_expr)->Op() == ">>" &&
                  is_int_literal(static_cast<const BinaryExpression*>(rhs_expr)->Rhs(), &sh_val) &&
-                 (sh_val == 16 || sh_val == 24) &&
+                 (sh_val >= 1 && sh_val <= 31) &&
                  static_cast<const BinaryExpression*>(rhs_expr)->Lhs().Kind() ==
                      CExpressionKind::kIdentifier) {
         sign_equiv_map[lhs_var] = static_cast<const BinaryExpression*>(rhs_expr)->Lhs().ToString();
@@ -825,7 +834,7 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
         // `q_var = ((u32)hi_var >> s);` or `*(s32*)... = ((u32)hi_var >> s);`
         std::string x_str = x_expr->ToString();
         bool folded_u = false;
-        for (size_t j = i + 1; j < stmts.size() && j <= i + 12; ++j) {
+        for (size_t j = i + 1; j < stmts.size(); ++j) {
           if (stmts[j]->Kind() != CStatementKind::kExpressionStatement) continue;
           const auto& es_j = static_cast<const ExpressionStatement&>(*stmts[j]);
           if (es_j.Expression().Kind() != CExpressionKind::kAssignmentExpression) continue;
@@ -932,7 +941,7 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
         int64_t chain_s_val = prefix_s_val;
         std::vector<size_t> chain_stmts = {i};
         bool folded_s = false;
-        for (size_t j = i + 1; j < stmts.size() && j <= i + 12; ++j) {
+        for (size_t j = i + 1; j < stmts.size(); ++j) {
           if (stmts[j]->Kind() != CStatementKind::kExpressionStatement) continue;
           const auto& es_j = static_cast<const ExpressionStatement&>(*stmts[j]);
           if (es_j.Expression().Kind() != CExpressionKind::kAssignmentExpression) continue;
@@ -1364,7 +1373,7 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlockImpl(
     std::string x_str = x_expr->ToString();
 
     bool folded_mod1 = false;
-    for (size_t j = i + 1; j < stmts.size() && j <= i + 8; ++j) {
+    for (size_t j = i + 1; j < stmts.size(); ++j) {
       if (stmts[j]->Kind() == CStatementKind::kExpressionStatement) {
         const auto& es_j = static_cast<const ExpressionStatement&>(*stmts[j]);
         if (es_j.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
@@ -2181,15 +2190,36 @@ class StoreFlagConditionalRecoveryMutator : public AstMutator {
       if (step_op.empty()) continue;
 
       bool dead_after = true;
+      bool killed_in_block = false;
+      bool can_exit_before_kill = false;
       for (size_t k = i + 2; k < stmts.size(); ++k) {
-        if (stmts[k] != nullptr && StatementReferencesVariable(*stmts[k], tmp_var)) {
+        if (stmts[k] == nullptr) continue;
+        if (CountVariableReadUsesInStatement(*stmts[k], tmp_var) > 0) {
           dead_after = false;
           break;
         }
+        std::string klhs;
+        const CExpression* krhs = nullptr;
+        if (!can_exit_before_kill && ExtractSimpleRegVarAssignment(*stmts[k], &klhs, &krhs) &&
+            klhs == tmp_var) {
+          killed_in_block = true;
+          break;
+        }
+        if (!can_exit_before_kill && stmts[k]->Kind() == CStatementKind::kReturnStatement) {
+          killed_in_block = true;
+          break;
+        }
+        if (StatementReferencesVariable(*stmts[k], tmp_var)) {
+          dead_after = false;
+          break;
+        }
+        if (stmts[k]->Kind() != CStatementKind::kExpressionStatement) {
+          can_exit_before_kill = true;
+        }
       }
       if (!dead_after) continue;
-      if (root_body_ != nullptr &&
-          CountIdentifierOccurrencesInStatement(*root_body_, tmp_var) > 2) {
+      if (!killed_in_block && comp != root_body_ && root_body_ != nullptr &&
+          CountVariableReadUsesInStatement(*root_body_, tmp_var) > 1) {
         continue;
       }
 

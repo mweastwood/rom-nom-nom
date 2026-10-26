@@ -392,5 +392,40 @@ TEST(AstArithmeticSimplifierTest,
   EXPECT_THAT(code, Not(HasSubstr("0xCCCCCCCD")));
 }
 
+TEST(AstArithmeticSimplifierTest,
+     SimplifiesGeneralizedShiftAddLinearCombinationsAndSignedPowerOfTwoDivision) {
+  CompoundStatement block;
+  // 1. y = ((x << 2) + (x << 1)) -> y = (x * 6);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("y"),
+      CExpression::Binary(
+          "+", CExpression::Binary("<<", CExpression::Identifier("x"), CExpression::Integer(2)),
+          CExpression::Binary("<<", CExpression::Identifier("x"), CExpression::Integer(1))))));
+  // 2. z = ((x << 4) - (x << 1)) -> z = (x * 14);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("z"),
+      CExpression::Binary(
+          "-", CExpression::Binary("<<", CExpression::Identifier("x"), CExpression::Integer(4)),
+          CExpression::Binary("<<", CExpression::Identifier("x"), CExpression::Integer(1))))));
+  // 3. q = ((x + ((x >> 31) & 7)) >> 3) -> q = (x / 8);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("q"),
+      CExpression::Binary(
+          ">>",
+          CExpression::Binary(
+              "+", CExpression::Identifier("x"),
+              CExpression::Binary(
+                  "&",
+                  CExpression::Binary(">>", CExpression::Identifier("x"), CExpression::Integer(31)),
+                  CExpression::Integer(7))),
+          CExpression::Integer(3)))));
+
+  SimplifyShiftAddMultiplication(&block);
+  std::string code = block.ToString(0);
+  EXPECT_THAT(code, HasSubstr("y = (x * 6);"));
+  EXPECT_THAT(code, HasSubstr("z = (x * 14);"));
+  EXPECT_THAT(code, HasSubstr("q = (x / 8);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
