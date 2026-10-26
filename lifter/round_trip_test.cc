@@ -6204,5 +6204,36 @@ f32 CalleeSavedDoubleInGprPairWithFpAcrossCalls(f32 x, f32 y, s32 n) {
 )");
 }
 
+TEST_F(RoundTripTest, PinnedCalleeSavedParamAndNarrowCastsAcrossCallWithBareDeref) {
+  AssertRoundTripBitExact("PinnedCalleeSavedParamAndNarrowCastsAcrossCallWithBareDeref", R"(
+extern s32 prepare_slot_handle(s32 mode);
+extern void notify_slot_pair(s32 a, s32 b);
+
+s32 PinnedCalleeSavedParamAndNarrowCastsAcrossCallWithBareDeref(s32* node, s32 x, s32 y) {
+    s32 r = prepare_slot_handle(1);
+    node[1] = x;
+    y = y & 2;
+    *(s16*)(node + 2) = (s16)r;
+    node[0] = r;
+    if (y != 0) {
+        notify_slot_pair(x, r);
+    }
+    return prepare_slot_handle(0);
+}
+)");
+}
+
+TEST_F(RoundTripTest, FloatExpressionPassedInSecondGprArgAfterHelperCall) {
+  AssertRoundTripBitExact("FloatExpressionPassedInSecondGprArgAfterHelperCall", R"(
+extern void setup_channel(s32 ch);
+extern s32 apply_channel_gain(s32 ch, f32 gain, s32 mode);
+
+s32 FloatExpressionPassedInSecondGprArgAfterHelperCall(s32 ch, f32* gain_ptr, s32 mode) {
+    setup_channel(ch + 1);
+    return apply_channel_gain(ch, gain_ptr[0] * 0.5f, mode) + 1;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

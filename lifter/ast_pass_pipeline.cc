@@ -88,6 +88,9 @@ constexpr AstPass kPostEarlyReturnPasses[] = {
     {.name = "SimplifyReciprocalDivisionAndUnsignedFloatConversions",
      .run = &RunSimplifyReciprocalAndUnsignedFloat},
     {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
+    {.name = "RewriteFloatInGprAndStackCallArguments",
+     .run = &RunRewriteFloatInGprAndStackCallArguments},
+    {.name = "FoldSingleUseExpressions", .run = &RunFoldSingleUseExpressions},
     {.name = "TrimUnassignedTrailingCallArgRegisters",
      .run = &RunTrimUnassignedTrailingCallArgRegisters},
 };

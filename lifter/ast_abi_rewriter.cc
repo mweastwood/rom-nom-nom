@@ -1496,12 +1496,19 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,
     const bool arg0_is_float = is_float_arg0(*args[0]);
 
     std::vector<std::string> existing_param_types;
+    std::string existing_ret_type;
     if (absl::StartsWith(callee_name, "((")) {
       size_t params_open = callee_name.find("(*)(");
       size_t params_close = callee_name.rfind("))");
       if (params_open == std::string::npos || params_close == std::string::npos ||
           params_close <= params_open + 4) {
         return nullptr;
+      }
+      if (params_open > 2) {
+        existing_ret_type = callee_name.substr(2, params_open - 2);
+        while (!existing_ret_type.empty() && existing_ret_type.back() == ' ') {
+          existing_ret_type.pop_back();
+        }
       }
       std::string params_str =
           callee_name.substr(params_open + 4, params_close - (params_open + 4));
@@ -1688,7 +1695,11 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,
       if (k > 0) sig += ", ";
       sig += param_types[k];
     }
-    std::string cast_callee = absl::StrFormat("((%s (*)(%s))%s)", ret_type, sig, callee_name);
+    std::string_view final_ret_type = ret_type;
+    if (!existing_ret_type.empty() && ret_type == "s32") {
+      final_ret_type = existing_ret_type;
+    }
+    std::string cast_callee = absl::StrFormat("((%s (*)(%s))%s)", final_ret_type, sig, callee_name);
     return CExpression::Call(CExpression::Identifier(std::move(cast_callee)), std::move(new_args));
   };
 
@@ -1710,12 +1721,24 @@ void RewriteFloatInGprAndStackCallArguments(CompoundStatement* comp,
       case CExpressionKind::kAssignmentExpression: {
         const auto& a = static_cast<const AssignmentExpression&>(expr);
         std::string_view rhs_ret_type = "s32";
-        if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
-          std::string_view lhs_name = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
-          if (lhs_name == "f0") {
-            rhs_ret_type = "f32";
-          } else if (lhs_name == "f0_d") {
-            rhs_ret_type = "f64";
+        if (a.Op() == "=") {
+          if (a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+            std::string_view lhs_name = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
+            if (is_fp_var_name(lhs_name)) {
+              rhs_ret_type = absl::EndsWith(lhs_name, "_d") ? "f64" : "f32";
+            }
+          } else if (a.Lhs().Kind() == CExpressionKind::kUnaryExpression) {
+            const auto& u = static_cast<const UnaryExpression&>(a.Lhs());
+            if (u.Op() == "*(f32*)&" || u.Op() == "*(f32 *)&") {
+              rhs_ret_type = "f32";
+            } else if (u.Op() == "*(f64*)&" || u.Op() == "*(f64 *)&") {
+              rhs_ret_type = "f64";
+            } else if (u.Op() == "*" && u.Operand().Kind() == CExpressionKind::kCastExpression) {
+              const auto& ct = static_cast<const CastExpression&>(u.Operand()).TargetType();
+              if (ct.pointer_depth == 1 && (ct.name == "f32" || ct.name == "f64")) {
+                rhs_ret_type = ct.name == "f64" ? "f64" : "f32";
+              }
+            }
           }
         }
         return CExpression::Assignment(a.Op(), rewrite_expr(a.Lhs(), "s32"),

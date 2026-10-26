@@ -449,8 +449,27 @@ struct FolderContext {
                                                     : VarLiveness::kReadBeforeWrite;
           }
         }
-        return CountExprUses(es.Expression(), var) > 0 ? VarLiveness::kReadBeforeWrite
-                                                       : VarLiveness::kTransparent;
+        if (CountExprUses(es.Expression(), var) > 0) {
+          return VarLiveness::kReadBeforeWrite;
+        }
+        const CallExpression* direct_call = ExtractDirectOrMaskedCall(es.Expression());
+        if (direct_call == nullptr &&
+            es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+          if (a.Op() == "=") {
+            direct_call = ExtractDirectOrMaskedCall(a.Rhs());
+          }
+        }
+        if (direct_call != nullptr && StatementContainsCall(s, /*ignore_math_intrinsics=*/true)) {
+          if (var == "f2" || var == "f2_d" || var == "f4" || var == "f4_d" || var == "f6" ||
+              var == "f6_d" || var == "f8" || var == "f8_d" || var == "f10" || var == "f10_d" ||
+              var == "f16" || var == "f16_d" || var == "f18" || var == "f18_d" ||
+              ((var == "f0" || var == "f0_d") &&
+               es.Expression().Kind() == CExpressionKind::kAssignmentExpression)) {
+            return VarLiveness::kKilledBeforeRead;
+          }
+        }
+        return VarLiveness::kTransparent;
       }
       case CStatementKind::kReturnStatement:
         return CountUses(s, var) == 0 ? VarLiveness::kKilledBeforeRead
@@ -795,20 +814,22 @@ struct FolderContext {
         !HasAddressOfVarInStmt(*root_body, var)) {
       return true;
     }
+    const bool is_float_scratch =
+        var.size() >= 2 && var[0] == 'f' && std::isdigit(static_cast<unsigned char>(var[1]));
     if (expected_uses_in_next > 0 && def_stmt != nullptr && root_body != nullptr &&
         (!root_has_label || (!has_label_between_def_and_use && IsCallArgVar(var))) && var != "v0" &&
         var != "f0" && var != "f0_d" && !HasLoopInStmt(*stmts[next_idx]) &&
         CountUses(*root_body, var) == expected_uses_in_next &&
-        !HasAddressOfVarInStmt(*root_body, var)) {
+        (is_float_scratch || !HasAddressOfVarInStmt(*root_body, var))) {
       return true;
     }
     if (expected_uses_in_next > 0 && def_stmt != nullptr && root_body != nullptr &&
         !has_label_between_def_and_use && var != "v0" && var != "f0" && var != "f0_d" &&
         IsScratchVar(var) &&
-        ((var.size() >= 2 && var[0] == 'f' && std::isdigit(static_cast<unsigned char>(var[1]))) ||
-         stmts[next_idx]->Kind() == CStatementKind::kExpressionStatement ||
+        (is_float_scratch || stmts[next_idx]->Kind() == CStatementKind::kExpressionStatement ||
          stmts[next_idx]->Kind() == CStatementKind::kReturnStatement) &&
-        !HasLoopInStmt(*stmts[next_idx]) && !HasAddressOfVarInStmt(*root_body, var) &&
+        !HasLoopInStmt(*stmts[next_idx]) &&
+        (is_float_scratch || !HasAddressOfVarInStmt(*root_body, var)) &&
         IsLocallyDefinedBeforeEveryReadInRoot(*root_body, var, def_stmt, stmts[next_idx].get(),
                                               expected_uses_in_next)) {
       return true;
@@ -825,117 +846,119 @@ struct FolderContext {
                                                     const CStatement* ignored_def,
                                                     const CStatement* ignored_use,
                                                     int ignored_use_count) {
-    std::function<bool(const CStatement&)> check_stmt = [&](const CStatement& s) -> bool {
-      if (&s == ignored_def) return true;
+    std::function<bool(const CStatement&, bool*)> check_stmt = [&](const CStatement& s,
+                                                                   bool* locally_defined) -> bool {
+      if (&s == ignored_def) {
+        *locally_defined = false;
+        return true;
+      }
       if (&s == ignored_use) {
-        return CountUses(s, var) <= ignored_use_count;
+        int rem_uses = CountUses(s, var) - ignored_use_count;
+        if (rem_uses > 0 && !*locally_defined) return false;
+        *locally_defined = false;
+        if (s.Kind() == CStatementKind::kExpressionStatement) {
+          const auto& es = static_cast<const ExpressionStatement&>(s);
+          if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+            std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
+            const bool is_full_var_assign =
+                a.Lhs().Kind() == CExpressionKind::kIdentifier ||
+                (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
+            if (lhs_var == var && is_full_var_assign) {
+              *locally_defined = true;
+            }
+          }
+        }
+        return true;
       }
       switch (s.Kind()) {
         case CStatementKind::kCompoundStatement: {
           const auto& cs = static_cast<const CompoundStatement&>(s);
-          bool locally_defined = false;
           for (const auto& child : cs.Statements()) {
             if (child == nullptr) continue;
-            if (child.get() == ignored_def) {
-              locally_defined = false;
-              continue;
-            }
-            if (child.get() == ignored_use) {
-              int rem_uses = CountUses(*child, var) - ignored_use_count;
-              if (rem_uses > 0 && !locally_defined) return false;
-              locally_defined = false;
-              if (child->Kind() == CStatementKind::kExpressionStatement) {
-                const auto& es = static_cast<const ExpressionStatement&>(*child);
-                if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-                  const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
-                  std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
-                  const bool is_full_var_assign =
-                      a.Lhs().Kind() == CExpressionKind::kIdentifier ||
-                      (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
-                  if (lhs_var == var && is_full_var_assign) {
-                    locally_defined = true;
-                  }
-                }
-              }
-              continue;
-            }
-            if (child->Kind() == CStatementKind::kLabelStatement) {
-              locally_defined = false;
-              continue;
-            }
-            if (child->Kind() == CStatementKind::kExpressionStatement) {
-              const auto& es = static_cast<const ExpressionStatement&>(*child);
-              if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-                const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
-                std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
-                const bool is_full_var_assign =
-                    a.Lhs().Kind() == CExpressionKind::kIdentifier ||
-                    (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
-                if (lhs_var == var && is_full_var_assign) {
-                  if (!locally_defined && CountExprUses(a.Rhs(), var) > 0) {
-                    return false;
-                  }
-                  locally_defined = true;
-                  continue;
-                }
-              }
-              if (!locally_defined && CountUses(*child, var) > 0) {
-                return false;
-              }
-              continue;
-            }
-            if (child->Kind() == CStatementKind::kReturnStatement) {
-              if (!locally_defined && CountUses(*child, var) > 0) {
-                return false;
-              }
-              continue;
-            }
-            if (!check_stmt(*child)) {
+            if (!check_stmt(*child, locally_defined)) {
               return false;
-            }
-            if (CountUses(*child, var) > 0 || HasLabelInStmt(*child)) {
-              locally_defined = false;
             }
           }
           return true;
         }
+        case CStatementKind::kLabelStatement:
+          *locally_defined = false;
+          return true;
+        case CStatementKind::kExpressionStatement: {
+          const auto& es = static_cast<const ExpressionStatement&>(s);
+          if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+            std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
+            const bool is_full_var_assign =
+                a.Lhs().Kind() == CExpressionKind::kIdentifier ||
+                (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
+            if (lhs_var == var && is_full_var_assign) {
+              if (!*locally_defined && CountExprUses(a.Rhs(), var) > 0) {
+                return false;
+              }
+              *locally_defined = true;
+              return true;
+            }
+          }
+          return *locally_defined || CountUses(s, var) == 0;
+        }
+        case CStatementKind::kReturnStatement:
+          return *locally_defined || CountUses(s, var) == 0;
         case CStatementKind::kIfStatement: {
           const auto& ifs = static_cast<const IfStatement&>(s);
-          if (CountExprUses(ifs.Condition(), var) > 0) return false;
-          if (!check_stmt(ifs.ThenBranch())) return false;
-          if (ifs.ElseBranch() != nullptr && !check_stmt(*ifs.ElseBranch())) return false;
+          if (!*locally_defined && CountExprUses(ifs.Condition(), var) > 0) return false;
+          bool then_def = *locally_defined;
+          if (!check_stmt(ifs.ThenBranch(), &then_def)) return false;
+          bool else_def = *locally_defined;
+          if (ifs.ElseBranch() != nullptr && !check_stmt(*ifs.ElseBranch(), &else_def)) {
+            return false;
+          }
+          *locally_defined = then_def && else_def && !HasLabelInStmt(ifs);
           return true;
         }
         case CStatementKind::kSwitchStatement: {
           const auto& ss = static_cast<const SwitchStatement&>(s);
-          if (CountExprUses(ss.Condition(), var) > 0) return false;
+          if (!*locally_defined && CountExprUses(ss.Condition(), var) > 0) return false;
+          bool all_cases_def = !ss.Cases().empty();
+          bool has_default = false;
           for (const auto& sc : ss.Cases()) {
-            if (sc.body != nullptr && !check_stmt(*sc.body)) return false;
+            if (sc.is_default) has_default = true;
+            bool case_def = *locally_defined;
+            if (sc.body != nullptr && !check_stmt(*sc.body, &case_def)) return false;
+            if (!case_def) all_cases_def = false;
           }
+          *locally_defined = has_default && all_cases_def && !HasLabelInStmt(ss);
           return true;
         }
         case CStatementKind::kWhileStatement: {
           const auto& ws = static_cast<const WhileStatement&>(s);
+          *locally_defined = false;
           if (CountExprUses(ws.Condition(), var) > 0) return false;
-          return check_stmt(ws.Body());
+          return check_stmt(ws.Body(), locally_defined);
         }
         case CStatementKind::kDoWhileStatement: {
           const auto& dws = static_cast<const DoWhileStatement&>(s);
-          if (CountExprUses(dws.Condition(), var) > 0) return false;
-          return check_stmt(dws.Body());
+          *locally_defined = false;
+          if (!check_stmt(dws.Body(), locally_defined)) return false;
+          if (!*locally_defined && CountExprUses(dws.Condition(), var) > 0) return false;
+          *locally_defined = false;
+          return true;
         }
         case CStatementKind::kForStatement: {
           const auto& fs = static_cast<const ForStatement&>(s);
-          if (fs.Init() != nullptr && CountUses(*fs.Init(), var) > 0) return false;
+          if (fs.Init() != nullptr && !check_stmt(*fs.Init(), locally_defined)) return false;
+          *locally_defined = false;
           if (fs.Condition() != nullptr && CountExprUses(*fs.Condition(), var) > 0) return false;
           if (fs.Step() != nullptr && CountExprUses(*fs.Step(), var) > 0) return false;
-          return check_stmt(fs.Body());
+          return check_stmt(fs.Body(), locally_defined);
         }
         default:
-          return CountUses(s, var) == 0;
+          return *locally_defined || CountUses(s, var) == 0;
       }
     };
-    return check_stmt(root);
+    bool init_defined = IsCallArgVar(var);
+    return check_stmt(root, &init_defined);
   }
 
   static bool IsDuplicableArgRhs(const CExpression& rhs) {
@@ -1891,7 +1914,24 @@ struct FolderContext {
                     }
                     if (j > i + 1 && is_fp_scratch &&
                         assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
-                      break;
+                      bool is_next_arg_bitcast = false;
+                      if (j == i + 2 &&
+                          cand_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                        const auto& ca =
+                            static_cast<const AssignmentExpression&>(cand_es.Expression());
+                        if (ca.Op() == "=" && ca.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                            IsCallArgVar(
+                                static_cast<const IdentifierExpression&>(ca.Lhs()).Name()) &&
+                            ca.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
+                            (static_cast<const UnaryExpression&>(ca.Rhs()).Op() == "*(s32*)&" ||
+                             static_cast<const UnaryExpression&>(ca.Rhs()).Op() == "*(s32 *)&") &&
+                            CountExprUses(ca.Rhs(), var) == 1) {
+                          is_next_arg_bitcast = true;
+                        }
+                      }
+                      if (!is_next_arg_bitcast) {
+                        break;
+                      }
                     }
                     if (j > i + 1 && is_fp_scratch && var != "f0" && var != "f0_d" &&
                         HasMemoryDeref(assign.Rhs())) {

@@ -1117,5 +1117,40 @@ TEST(AstExpressionFolderTest, FoldsDisjointScratchRegisterWebsInForLoopAndLabele
   EXPECT_THAT(code, HasSubstr("return (arg0 + 12);"));
 }
 
+TEST(AstExpressionFolderTest, FoldsFloatScratchBitcastIntoCallArgAcrossSubsequentCall) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // f2 = (f20 * 0.5f);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f2"),
+      CExpression::Binary("*", CExpression::Identifier("f20"), CExpression::Float(0.5f, true)))));
+  // arg0 = temp_s0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"), CExpression::Identifier("temp_s0"))));
+  // arg1 = *(s32*)&f2;
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg1"),
+                              CExpression::Unary("*(s32*)&", CExpression::Identifier("f2")))));
+  // FirstCall(arg0, arg1);
+  {
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Identifier("arg0"));
+    args.push_back(CExpression::Identifier("arg1"));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("FirstCall"), std::move(args))));
+  }
+  // Subsequent reuse of caller-saved f2 after FirstCall:
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f2"),
+      CExpression::Binary("+", CExpression::Identifier("f20"), CExpression::Float(1.0f, true)))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("f2")));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, HasSubstr("FirstCall(temp_s0, *(s32*)&(f20 * 0.5f));"));
+  EXPECT_THAT(code, HasSubstr("return (f20 + 1.0f);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

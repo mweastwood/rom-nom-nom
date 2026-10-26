@@ -725,5 +725,43 @@ TEST(CEmitterTest, DisambiguatesSameBlockDuplicateCalleeSavedSymbolLoadsWithAsmB
   EXPECT_THAT(emitted, HasSubstr("temp_s1 = &D_00D49B80;\n"));
 }
 
+TEST(CEmitterTest, EmitsPostAssignmentCseBarrierForPinnedCalleeSavedCopyAcrossCall) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Cast(CType::S16(), CExpression::Identifier("arg1")))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("SyncNodeState"), std::move(call_args))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S16().MakePointer(), CExpression::Identifier("temp_s0"))),
+      CExpression::Identifier("temp_s1"))));
+  body->AddStatement(CStatement::Return());
+  tu.functions.emplace_back(
+      CType::Void(), "TestCalleeSavedCseBarrier",
+      std::vector<CParameter>{CParameter{CType::S32(), "arg0"}, CParameter{CType::S32(), "arg1"}},
+      std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted,
+              HasSubstr("temp_s0 = arg0;\n    __asm__(\"\" : \"=r\"(temp_s0) : \"0\"(temp_s0));"));
+  EXPECT_THAT(
+      emitted,
+      HasSubstr("temp_s1 = (s16)arg1;\n    __asm__(\"\" : \"=r\"(temp_s1) : \"0\"(temp_s1));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
