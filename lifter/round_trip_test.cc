@@ -6310,5 +6310,42 @@ void TargetStolenShortCircuitDiamondStoreTail(BoxState* box, s32 step) {
 )");
 }
 
+TEST_F(RoundTripTest, VariableShiftBitmaskCheckWithTableUpdate) {
+  AssertRoundTripBitExact("VariableShiftBitmaskCheckWithTableUpdate", R"(
+extern u8 g_bit_table[64];
+
+s32 VariableShiftBitmaskCheckWithTableUpdate(s32 idx) {
+    s32 res = 0;
+    if (idx < 256) {
+        s32 byte_idx = idx >> 3;
+        s32 mask = 1 << (idx & 7);
+        if (g_bit_table[byte_idx] & mask) {
+            res = 1;
+        }
+    }
+    return res;
+}
+)");
+}
+
+TEST_F(RoundTripTest, ShortCircuitOrGuardWithConflictingFallthroughDelayLoad) {
+  AssertRoundTripBitExact("ShortCircuitOrGuardWithConflictingFallthroughDelayLoad", R"(
+typedef struct {
+    u8 active;
+    u8 paused;
+    u16 count;
+    s32 value;
+} ChannelSlot;
+
+void ShortCircuitOrGuardWithConflictingFallthroughDelayLoad(ChannelSlot* slot, s32 delta) {
+    if (slot->active == 0 || slot->paused != 0) {
+        return;
+    }
+    slot->count += 1;
+    slot->value += delta;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

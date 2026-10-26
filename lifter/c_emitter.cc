@@ -930,6 +930,10 @@ bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, si
     }
     if (next_s->Kind() == CStatementKind::kExpressionStatement) {
       const auto& es = static_cast<const ExpressionStatement&>(*next_s);
+      if (es.Expression().Kind() == CExpressionKind::kCallExpression &&
+          static_cast<const CallExpression&>(es.Expression()).Arguments().empty()) {
+        return false;
+      }
       if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
         const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
         if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&

@@ -1197,5 +1197,53 @@ TEST(AstExpressionFolderTest, FoldsCallArgIntoBranchCallWhenBothBranchesKillArgA
   EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1 = arg0;\n        if (is_head)")));
 }
 
+TEST(AstExpressionFolderTest,
+     PreservesVariableShiftSingleBitMaskInIfConditionAndPrunesDeadSharedDelayElse) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // v1 = (1 << (arg0 & 7));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary(
+          "<<", CExpression::Integer(1),
+          CExpression::Binary("&", CExpression::Identifier("arg0"), CExpression::Integer(7))))));
+  // if ((mask & v1) == 0) {
+  //   temp_at = (base + offset);
+  //   *(u8*)temp_at = 1;
+  // } else {
+  //   temp_at = (base + offset);
+  // }
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_at"),
+                              CExpression::Binary("+", CExpression::Identifier("base"),
+                                                  CExpression::Identifier("offset")))));
+  then_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(u8*)", CExpression::Identifier("temp_at")),
+                              CExpression::Integer(1))));
+
+  auto else_branch = std::make_unique<CompoundStatement>();
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_at"),
+                              CExpression::Binary("+", CExpression::Identifier("base"),
+                                                  CExpression::Identifier("offset")))));
+
+  body->AddStatement(CStatement::If(
+      CExpression::Binary(
+          "==",
+          CExpression::Binary("&", CExpression::Identifier("mask"), CExpression::Identifier("v1")),
+          CExpression::Integer(0)),
+      std::move(then_branch), std::move(else_branch)));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, HasSubstr("v1 = (1 << (arg0 & 7));"));
+  EXPECT_THAT(code, HasSubstr("if (((mask & v1) == 0))"));
+  EXPECT_THAT(code, HasSubstr("*(u8*)(base + offset) = 1;"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("else")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

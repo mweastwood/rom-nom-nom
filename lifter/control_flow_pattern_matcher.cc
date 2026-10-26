@@ -995,8 +995,12 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       }
     }
     if (analyze_branch(branch, taken, ft, allow_likely_eq)) {
+      const bool had_unscheduled_delay =
+          branch_idx + 1 < static_cast<int>(blk->instructions.size()) &&
+          blk->instructions[branch_idx + 1].unscheduled_clobber_reg.has_value();
       if (ba.is_equality && (branch.opcode == Opcode::kBne || branch.opcode == Opcode::kBnel) &&
-          !ba.delay_slot_sets_split && ba.delay_instruction.has_value()) {
+          !ba.delay_slot_sets_split &&
+          (ba.delay_instruction.has_value() || (b_id != root_id && had_unscheduled_delay))) {
         // A branch-not-equal (bne/bnel) whose case_target is fallthrough and whose
         // continuation is a taken branch to the next else-if block is an if/else-if
         // chain (unless its delay slot sets up a range split for a switch tree).

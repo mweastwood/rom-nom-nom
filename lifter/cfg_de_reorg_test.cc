@@ -140,5 +140,40 @@ TEST(CfgDeReorgTest, NormalizesBranchLikelyTargetStolenDelaySlotOntoSinglePredec
   EXPECT_EQ(taken->instructions[1].opcode, Opcode::kBeq);
 }
 
+TEST(CfgDeReorgTest, SinksTerminatorConflictingDelaySlotIntoShortCircuitFallthroughBranch) {
+  // 0x80000000: lw    $v0, 0($a0)            (0x8C820000)
+  // 0x80000004: beq   $v0, $zero, 0x8000001C (0x10400005)
+  // 0x80000008: lw    $v0, 4($a0)            (0x8C820004)
+  // 0x8000000C: beq   $v0, $zero, 0x8000001C (0x10400003)
+  // 0x80000010: nop                          (0x00000000)
+  // 0x80000014: jr    $ra                    (0x03E00008)
+  // 0x80000018: addiu $v0, $zero, 1          (0x24020001)
+  // 0x8000001C: jr    $ra                    (0x03E00008)
+  // 0x80000020: addiu $v0, $zero, 0          (0x24020000)
+  std::vector<uint32_t> words = {
+      0x8C820000, 0x10400005, 0x8C820004, 0x10400003, 0x00000000,
+      0x03E00008, 0x24020001, 0x03E00008, 0x24020000,
+  };
+  auto insts_or = DecodeSequence(words, 0x80000000);
+  ASSERT_TRUE(insts_or.ok());
+  auto cfg_or = ControlFlowGraph::Build(*insts_or);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const auto* entry = cfg.GetBlock(0);
+  const auto* fallthrough = cfg.GetBlock(1);
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(fallthrough, nullptr);
+  EXPECT_TRUE(entry->instructions.back().IsNop());
+  EXPECT_EQ(entry->instructions.back().unscheduled_clobber_reg, Register::kV0);
+  ASSERT_GE(fallthrough->instructions.size(), 2u);
+  EXPECT_EQ(fallthrough->instructions[0].opcode, Opcode::kLw);
+  EXPECT_EQ(fallthrough->instructions[0].rt, Register::kV0);
+  EXPECT_EQ(fallthrough->instructions[0].immediate, 4);
+  EXPECT_EQ(fallthrough->instructions[1].opcode, Opcode::kBeq);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

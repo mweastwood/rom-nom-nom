@@ -2447,6 +2447,26 @@ struct FolderContext {
                       !IsUnconditionallyEvaluatedFirst(if_stmt.Condition(), var)) {
                     break;
                   }
+                  if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+                    const auto& rhs_bin = static_cast<const BinaryExpression&>(assign.Rhs());
+                    if (rhs_bin.Op() == "<<" &&
+                        rhs_bin.Lhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                        static_cast<const IntegerLiteralExpression&>(rhs_bin.Lhs()).Value() == 1 &&
+                        rhs_bin.Rhs().Kind() != CExpressionKind::kIntegerLiteral &&
+                        if_stmt.Condition().Kind() == CExpressionKind::kBinaryExpression) {
+                      const auto& cond_bin =
+                          static_cast<const BinaryExpression&>(if_stmt.Condition());
+                      if ((cond_bin.Op() == "==" || cond_bin.Op() == "!=") &&
+                          cond_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                          static_cast<const IntegerLiteralExpression&>(cond_bin.Rhs()).Value() ==
+                              0 &&
+                          cond_bin.Lhs().Kind() == CExpressionKind::kBinaryExpression &&
+                          static_cast<const BinaryExpression&>(cond_bin.Lhs()).Op() == "&" &&
+                          CountExprUses(cond_bin.Lhs(), var) > 0) {
+                        break;
+                      }
+                    }
+                  }
                   int uses_in_cond = CountExprUses(if_stmt.Condition(), var);
                   active_ignored_def_stmt = stmts[i].get();
                   active_ignored_use_stmt = stmts[j].get();
@@ -2605,14 +2625,58 @@ struct FolderContext {
         }
         if (stmts[i]->Kind() == CStatementKind::kIfStatement) {
           auto& ifs = static_cast<IfStatement&>(*stmts[i]);
+          std::string initial_shared_delay_str;
+          std::string initial_shared_delay_var;
+          if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+              ifs.MutableElseBranch() != nullptr &&
+              ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+            const auto& pre_then = static_cast<const CompoundStatement&>(ifs.ThenBranch());
+            const auto& pre_else = static_cast<const CompoundStatement&>(*ifs.ElseBranch());
+            if (pre_then.Statements().size() >= 2 && pre_else.Statements().size() == 1 &&
+                pre_else.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
+              std::string else_s0 = pre_else.Statements()[0]->ToString();
+              if (pre_then.Statements()[0]->ToString() == else_s0) {
+                const auto& else_es =
+                    static_cast<const ExpressionStatement&>(*pre_else.Statements()[0]);
+                if (else_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& else_a =
+                      static_cast<const AssignmentExpression&>(else_es.Expression());
+                  if (else_a.Op() == "=" && else_a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                      else_a.Rhs().Kind() != CExpressionKind::kIntegerLiteral &&
+                      IsPureExpr(else_a.Rhs())) {
+                    initial_shared_delay_str = std::move(else_s0);
+                    initial_shared_delay_var =
+                        std::string(static_cast<const IdentifierExpression&>(else_a.Lhs()).Name());
+                  }
+                }
+              }
+            }
+          }
           if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
             FoldSingleUseExpressions(static_cast<CompoundStatement*>(ifs.MutableThenBranch()),
                                      root_body, &child_dead_vars, false, root_has_label_cached);
           }
           if (ifs.MutableElseBranch() != nullptr) {
             if (ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
-              FoldSingleUseExpressions(static_cast<CompoundStatement*>(ifs.MutableElseBranch()),
-                                       root_body, &child_dead_vars, false, root_has_label_cached);
+              auto* else_comp = static_cast<CompoundStatement*>(ifs.MutableElseBranch());
+              FoldSingleUseExpressions(else_comp, root_body, &child_dead_vars, false,
+                                       root_has_label_cached);
+              bool drop_dead_else = else_comp->Statements().empty();
+              if (!drop_dead_else && !initial_shared_delay_var.empty() &&
+                  child_dead_vars.contains(initial_shared_delay_var) &&
+                  else_comp->Statements().size() == 1 &&
+                  else_comp->Statements()[0]->ToString() == initial_shared_delay_str &&
+                  ifs.ThenBranch().Kind() == CStatementKind::kCompoundStatement) {
+                const auto& post_then = static_cast<const CompoundStatement&>(ifs.ThenBranch());
+                if (post_then.Statements().empty() ||
+                    post_then.Statements()[0]->ToString() != initial_shared_delay_str) {
+                  drop_dead_else = true;
+                }
+              }
+              if (drop_dead_else) {
+                stmts[i] =
+                    CStatement::If(ifs.Condition().Clone(), ifs.ThenBranch().Clone(), nullptr);
+              }
             } else if (ifs.MutableElseBranch()->Kind() == CStatementKind::kIfStatement) {
               CompoundStatement wrapper;
               wrapper.AddStatement(ifs.MutableElseBranch()->Clone());

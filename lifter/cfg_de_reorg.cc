@@ -581,12 +581,22 @@ void CfgDeReorg::UnscheduleDelaySlots(ControlFlowGraph* cfg) {
 
     if (dead_on_taken && !dead_on_fallthrough) {
       BasicBlock* ft_block = cfg->GetMutableBlock(succ_fallthrough);
+      bool enables_short_circuit = false;
+      if (ft_block != nullptr && ft_block->successors.size() == 2 &&
+          (ft_block->successors[0] == succ_taken || ft_block->successors[1] == succ_taken)) {
+        const auto* ft_term = ft_block->Terminator();
+        const bool makes_const_zero_branch =
+            delay_ud.gpr_uses.empty() && ft_block->instructions.size() <= 2 && ft_term != nullptr &&
+            (ft_term->rs == Register::kZero || ft_term->rt == Register::kZero);
+        enables_short_circuit = !makes_const_zero_branch;
+      }
       if (ft_block != nullptr && succ_fallthrough != cfg->EntryBlockId() &&
           ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block.id &&
           loop_info.GetLoopFor(succ_fallthrough) == enclosing_loop &&
           (blocks_folded_comparison ||
            (DelaySlotConflictsWithTerminator(term, delay_inst) &&
-            DelaySlotEnablesSuccessorFoldedComparison(*ft_block, delay_inst)))) {
+            (DelaySlotEnablesSuccessorFoldedComparison(*ft_block, delay_inst) ||
+             enables_short_circuit)))) {
         ft_block->instructions.insert(ft_block->instructions.begin(), delay_inst);
         block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
       }
