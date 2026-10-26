@@ -2302,7 +2302,32 @@ struct FolderContext {
                   // fold `argX` into that branch's call statement.
                   if (j == i + 1 && is_call_arg && CountExprUses(if_stmt.Condition(), var) == 0 &&
                       IsPureExpr(assign.Rhs()) && !HasMemoryDeref(assign.Rhs()) &&
-                      !HasAddressOf(assign.Rhs()) && IsDeadAfterStmt(j, var, 1, stmts[i].get())) {
+                      !HasAddressOf(assign.Rhs())) {
+                    const bool dead_after_if = IsDeadAfterStmt(j, var, 1, stmts[i].get());
+                    auto branch_kills_var_even_after_labels = [&](const CStatement& b) -> bool {
+                      if (AnalyzeVarLiveness(b, var, is_switch_case_body, 0) !=
+                          VarLiveness::kKilledBeforeRead) {
+                        return false;
+                      }
+                      if (!HasLabelInStmt(b)) return true;
+                      if (b.Kind() != CStatementKind::kCompoundStatement) return false;
+                      const auto& cs = static_cast<const CompoundStatement&>(b);
+                      size_t last_label_idx = 0;
+                      for (size_t idx = 0; idx < cs.Statements().size(); ++idx) {
+                        if (cs.Statements()[idx]->Kind() == CStatementKind::kLabelStatement) {
+                          last_label_idx = idx;
+                        } else if (HasLabelInStmt(*cs.Statements()[idx])) {
+                          return false;
+                        }
+                      }
+                      for (size_t idx = last_label_idx + 1; idx < cs.Statements().size(); ++idx) {
+                        VarLiveness res =
+                            AnalyzeVarLiveness(*cs.Statements()[idx], var, is_switch_case_body, 0);
+                        if (res == VarLiveness::kReadBeforeWrite) return false;
+                        if (res == VarLiveness::kKilledBeforeRead) return true;
+                      }
+                      return false;
+                    };
                     auto try_fold_into_branch_comp = [&](const CompoundStatement& branch_comp)
                         -> std::unique_ptr<CompoundStatement> {
                       for (size_t k = 0; k < branch_comp.Statements().size() && k < 4; ++k) {
@@ -2375,14 +2400,20 @@ struct FolderContext {
                       const auto& then_comp =
                           static_cast<const CompoundStatement&>(if_stmt.ThenBranch());
                       if (auto new_then = try_fold_into_branch_comp(then_comp)) {
-                        std::unique_ptr<CStatement> new_else = (if_stmt.ElseBranch() != nullptr)
-                                                                   ? if_stmt.ElseBranch()->Clone()
-                                                                   : nullptr;
-                        stmts[j] = CStatement::If(if_stmt.Condition().Clone(), std::move(new_then),
-                                                  std::move(new_else));
-                        stmts.erase(stmts.begin() + i);
-                        changed = true;
-                        break;
+                        const bool killed_in_both =
+                            if_stmt.ElseBranch() != nullptr &&
+                            branch_kills_var_even_after_labels(*new_then) &&
+                            branch_kills_var_even_after_labels(*if_stmt.ElseBranch());
+                        if (dead_after_if || killed_in_both) {
+                          std::unique_ptr<CStatement> new_else = (if_stmt.ElseBranch() != nullptr)
+                                                                     ? if_stmt.ElseBranch()->Clone()
+                                                                     : nullptr;
+                          stmts[j] = CStatement::If(if_stmt.Condition().Clone(),
+                                                    std::move(new_then), std::move(new_else));
+                          stmts.erase(stmts.begin() + i);
+                          changed = true;
+                          break;
+                        }
                       }
                     } else if (then_uses == 0 && else_uses == 1 &&
                                if_stmt.ElseBranch() != nullptr &&
@@ -2392,12 +2423,17 @@ struct FolderContext {
                       const auto& else_comp =
                           static_cast<const CompoundStatement&>(*if_stmt.ElseBranch());
                       if (auto new_else = try_fold_into_branch_comp(else_comp)) {
-                        stmts[j] =
-                            CStatement::If(if_stmt.Condition().Clone(),
-                                           if_stmt.ThenBranch().Clone(), std::move(new_else));
-                        stmts.erase(stmts.begin() + i);
-                        changed = true;
-                        break;
+                        const bool killed_in_both =
+                            branch_kills_var_even_after_labels(if_stmt.ThenBranch()) &&
+                            branch_kills_var_even_after_labels(*new_else);
+                        if (dead_after_if || killed_in_both) {
+                          stmts[j] =
+                              CStatement::If(if_stmt.Condition().Clone(),
+                                             if_stmt.ThenBranch().Clone(), std::move(new_else));
+                          stmts.erase(stmts.begin() + i);
+                          changed = true;
+                          break;
+                        }
                       }
                     }
                   }

@@ -6235,5 +6235,80 @@ s32 FloatExpressionPassedInSecondGprArgAfterHelperCall(s32 ch, f32* gain_ptr, s3
 )");
 }
 
+TEST_F(RoundTripTest, CrossJumpedDiamondStoreTailInThreadStartBranches) {
+  AssertRoundTripBitExact("CrossJumpedDiamondStoreTailInThreadStartBranches", R"(
+typedef struct {
+    s32 next;
+    s32 prio;
+    s32 queue;
+    s32 pad;
+    u16 state;
+} ThreadNode;
+
+extern ThreadNode* g_run_queue;
+extern ThreadNode* g_active_thread;
+extern s32 disable_ints(void);
+extern void restore_ints(s32 mask);
+extern void enqueue_thread(s32 queue, ThreadNode* t);
+extern ThreadNode* pop_thread(s32 queue);
+extern void dispatch_thread(void);
+
+void CrossJumpedDiamondStoreTailInThreadStartBranches(ThreadNode* t) {
+    s32 mask = disable_ints();
+    switch (t->state) {
+    case 1:
+        t->state = 4;
+        enqueue_thread((s32)&g_run_queue, t);
+        break;
+    case 8:
+        if (t->queue == 0 || t->queue == (s32)&g_run_queue) {
+            t->state = 2;
+            enqueue_thread((s32)&g_run_queue, t);
+        } else {
+            t->state = 8;
+            enqueue_thread(t->queue, t);
+            enqueue_thread((s32)&g_run_queue, pop_thread(t->queue));
+        }
+        break;
+    default:
+        restore_ints(mask);
+        return;
+    }
+    if (g_active_thread == 0) {
+        dispatch_thread();
+    }
+    restore_ints(mask);
+}
+)");
+}
+
+TEST_F(RoundTripTest, TargetStolenShortCircuitDiamondStoreTail) {
+  AssertRoundTripBitExact("TargetStolenShortCircuitDiamondStoreTail", R"(
+typedef struct {
+    s32 mode;
+    s32 submode;
+    u16 state;
+    u16 flags;
+    s32 timer;
+} BoxState;
+
+void TargetStolenShortCircuitDiamondStoreTail(BoxState* box, s32 step) {
+    if (box->mode == 1) {
+        if (box->submode == 0 || box->timer <= 0) {
+            box->state = 2;
+            box->flags |= 4;
+            box->timer = 0;
+        } else {
+            box->timer -= step;
+        }
+    } else if (box->mode == 2) {
+        box->state = 4;
+        box->flags |= 4;
+        box->timer = 0;
+    }
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

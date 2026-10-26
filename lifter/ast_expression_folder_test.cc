@@ -1152,5 +1152,50 @@ TEST(AstExpressionFolderTest, FoldsFloatScratchBitcastIntoCallArgAcrossSubsequen
   EXPECT_THAT(code, HasSubstr("return (f20 + 1.0f);"));
 }
 
+TEST(AstExpressionFolderTest, FoldsCallArgIntoBranchCallWhenBothBranchesKillArgAfterLabel) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  auto outer_then = std::make_unique<CompoundStatement>();
+  outer_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"), CExpression::Identifier("arg0"))));
+
+  auto inner_then = std::make_unique<CompoundStatement>();
+  inner_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(2))));
+  inner_then->AddStatement(CStatement::Label("block_7"));
+  inner_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"), CExpression::Identifier("arg0"))));
+
+  auto inner_else = std::make_unique<CompoundStatement>();
+  {
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Identifier("v0"));
+    args.push_back(CExpression::Identifier("arg1"));
+    inner_else->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("EnqueueThread"), std::move(args))));
+  }
+  inner_else->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"), CExpression::Identifier("temp_s1"))));
+
+  outer_then->AddStatement(CStatement::If(CExpression::Identifier("is_head"), std::move(inner_then),
+                                          std::move(inner_else)));
+  body->AddStatement(
+      CStatement::If(CExpression::Identifier("has_queue"), std::move(outer_then), nullptr));
+  {
+    std::vector<std::unique_ptr<CExpression>> tail_args;
+    tail_args.push_back(CExpression::Identifier("temp_a0"));
+    tail_args.push_back(CExpression::Identifier("arg1"));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("EnqueueThread"), std::move(tail_args))));
+  }
+  body->AddStatement(CStatement::Return());
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, HasSubstr("EnqueueThread(v0, arg0);"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1 = arg0;\n        if (is_head)")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -145,6 +145,9 @@ void AstPassPipeline::Run(CompoundStatement* body, const AstPassContext& ctx) {
     TrimUnassignedTrailingCallArgRegisters(body, ctx.parameters, ctx.function_parameter_counts);
   }
 
+  InlineCrossJumpedCallTails(body, /*allow_diamond_tails=*/true);
+  SinkCommonBranchTailArgAssignments(body);
+
   if (ctx.has_frame_pointer) {
     RewriteFramePointerStructOffsetAccesses(body);
     if (ctx.return_type.ToString() == "void" && !ctx.has_goto_targets &&

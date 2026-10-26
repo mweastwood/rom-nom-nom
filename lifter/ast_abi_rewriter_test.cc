@@ -752,5 +752,72 @@ TEST(AstAbiRewriterTest, InlineCrossJumpedCallTailsDuplicatesChainedSwitchCaseSt
   EXPECT_EQ(sw.Cases()[2].body->Statements().back()->Kind(), CStatementKind::kBreakStatement);
 }
 
+TEST(AstAbiRewriterTest, InlineCrossJumpedCallTailsInlinesDiamondStoreTailsWhenAtScopeTail) {
+  CompoundStatement root;
+
+  auto outer_then = std::make_unique<CompoundStatement>();
+  auto inner_then = std::make_unique<CompoundStatement>();
+  inner_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(4))));
+  inner_then->AddStatement(CStatement::Goto("block_7"));
+  outer_then->AddStatement(
+      CStatement::If(CExpression::Identifier("cond_inner"), std::move(inner_then), nullptr));
+
+  auto outer_else = std::make_unique<CompoundStatement>();
+  outer_else->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(2))));
+  outer_else->AddStatement(CStatement::Label("block_7"));
+  outer_else->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S16().MakePointer(), CExpression::Identifier("arg0"))),
+      CExpression::Identifier("v0"))));
+  outer_else->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"), CExpression::Identifier("arg0"))));
+
+  root.AddStatement(CStatement::If(CExpression::Identifier("cond_outer"), std::move(outer_then),
+                                   std::move(outer_else)));
+  root.AddStatement(CStatement::Return());
+
+  InlineCrossJumpedCallTails(&root, /*allow_diamond_tails=*/true);
+
+  std::string emitted = root.ToString();
+  EXPECT_THAT(emitted, Not(HasSubstr("goto block_7")));
+  EXPECT_THAT(emitted, Not(HasSubstr("block_7:")));
+  EXPECT_THAT(emitted, HasSubstr("*(s16*)arg0 = v0;"));
+}
+
+TEST(AstAbiRewriterTest,
+     InlineCrossJumpedCallTailsPreservesDiamondLabelWhenInnerIfIsFollowedByStatement) {
+  CompoundStatement root;
+
+  auto outer_then = std::make_unique<CompoundStatement>();
+  auto inner_then = std::make_unique<CompoundStatement>();
+  inner_then->AddStatement(CStatement::Label("block_13"));
+  inner_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S16().MakePointer(), CExpression::Identifier("arg0"))),
+      CExpression::Integer(1))));
+  outer_then->AddStatement(
+      CStatement::If(CExpression::Identifier("cond_inner"), std::move(inner_then), nullptr));
+  // Statement after inner_then inside outer_then means block_13 is not at outer_then's tail:
+  outer_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(99))));
+
+  auto outer_else = std::make_unique<CompoundStatement>();
+  outer_else->AddStatement(CStatement::Goto("block_13"));
+
+  root.AddStatement(CStatement::If(CExpression::Identifier("cond_outer"), std::move(outer_then),
+                                   std::move(outer_else)));
+  root.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  InlineCrossJumpedCallTails(&root, /*allow_diamond_tails=*/true);
+
+  std::string emitted = root.ToString();
+  EXPECT_THAT(emitted, HasSubstr("goto block_13;"));
+  EXPECT_THAT(emitted, HasSubstr("block_13:"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

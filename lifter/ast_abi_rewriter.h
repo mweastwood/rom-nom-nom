@@ -23,7 +23,7 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp);
 
 // Inlines small cross-jumped tail-call blocks reached via `goto` so each branch
 // emits a structured call + return/break.
-void InlineCrossJumpedCallTails(CompoundStatement* root_body);
+void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond_tails = false);
 
 // Rewrites calls that pass `f32`/`f64` values in GPRs or stack slots via
 // `*(s32*)&fX` / `*(s64*)&fX_d` into typed function-pointer casts with direct
