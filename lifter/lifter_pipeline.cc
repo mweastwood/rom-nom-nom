@@ -146,8 +146,8 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
   if (absl::Status status = context.BuildCfg(); !status.ok()) {
     return status;
   }
-  CfgDeReorg::UnscheduleDelaySlots(context.MutableCfg());
-  context.InvalidateCfgAnalyses();
+  CfgDeReorg::UnscheduleDelaySlots(context.MutableCfg(), &context.CfgAnalyses());
+  context.InvalidateFrameLayout();
 
   // 2. Compute Dominator Trees and Analyze Natural Loops via CfgAnalysisManager
   auto& cfg_analyses = context.CfgAnalyses();

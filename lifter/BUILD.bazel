@@ -90,6 +90,7 @@ cc_library(
     deps = [
         ":abi_analyzer",
         ":branch_condition_builder",
+        ":cfg_pass_pipeline",
         ":dominator_tree",
         ":loop_analyzer",
         "//core:control_flow_graph",

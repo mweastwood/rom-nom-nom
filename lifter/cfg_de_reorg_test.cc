@@ -175,5 +175,14 @@ TEST(CfgDeReorgTest, SinksTerminatorConflictingDelaySlotIntoShortCircuitFallthro
   EXPECT_EQ(fallthrough->instructions[1].opcode, Opcode::kBeq);
 }
 
+TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
+  CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
+  ASSERT_EQ(pipeline.PassCount(), 4u);
+  EXPECT_EQ(pipeline.Passes()[0]->Name(), "SimpleDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[1]->Name(), "RelaxDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[2]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[3]->Name(), "CrossJumpTailDuplicatorPass");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
