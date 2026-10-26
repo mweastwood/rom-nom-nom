@@ -7064,6 +7064,106 @@ int BranchLikelyLoop(const int* arr, int count) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "GeneralizedDelaySlotStealAndAnnullingLoadShift",
+          .function_name = "GeneralizedDelaySlotStealAndAnnullingLoadShift",
+          .original_c = R"(
+s32 GeneralizedDelaySlotStealAndAnnullingLoadShift(s32* table, s32 idx, s32 flag, s32 fallback) {
+    if (flag == 0 || idx < 0) {
+        s32 shifted = fallback << 3;
+        return table[0] + shifted;
+    }
+    return table[idx];
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "GeneralizedCrossJumpMultiStatementSharedTail",
+          .function_name = "GeneralizedCrossJumpMultiStatementSharedTail",
+          .original_c = R"(
+s32 GeneralizedCrossJumpMultiStatementSharedTail(s32 mode, s32* state, s32 x, s32 y) {
+    if (mode > 0) {
+        state[0] = x + 10;
+        state[1] = y + 20;
+        state[2] = x ^ y;
+        return state[0] + state[1];
+    } else {
+        state[0] = x - 10;
+        state[1] = y + 20;
+        state[2] = x ^ y;
+        return state[0] + state[1];
+    }
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "GeneralizedLongDistanceScheduledLoadFoldAcrossStores",
+          .function_name = "GeneralizedLongDistanceScheduledLoadFoldAcrossStores",
+          .original_c = R"(
+void GeneralizedLongDistanceScheduledLoadFoldAcrossStores(s32* src, s32* dst) {
+    s32 a = src[0];
+    s32 b = src[1];
+    dst[2] = 10;
+    dst[3] = 20;
+    dst[4] = 30;
+    dst[5] = 40;
+    dst[6] = 50;
+    dst[0] = a + b;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "GeneralizedLeafScratchRegisterWebSplitAcrossBranches",
+          .function_name = "GeneralizedLeafScratchRegisterWebSplitAcrossBranches",
+          .original_c = R"(
+s32 GeneralizedLeafScratchRegisterWebSplitAcrossBranches(s32* p, s32 sel, s32 x, s32 y) {
+    if (sel != 0) {
+        s32 t = (x * 5) + y;
+        p[0] = t;
+        p[1] = t ^ x;
+    } else {
+        s32 u = (y * 9) - x;
+        p[2] = u;
+        p[3] = u + y;
+    }
+    return p[0] + p[2];
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "GeneralizedNestedLoopInvariantAndStrideTwelveGiv",
+          .function_name = "GeneralizedNestedLoopInvariantAndStrideTwelveGiv",
+          .original_c = R"(
+void GeneralizedNestedLoopInvariantAndStrideTwelveGiv(s32* grid, s32 cols) {
+    s32 r = 0;
+    do {
+        s32 c;
+        for (c = 0; c < cols; c++) {
+            s32 idx = (c * 3) + r;
+            grid[idx] = grid[idx] & 0x00FF00FF;
+        }
+        r += 24;
+    } while (r < 96);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "GeneralizedStoreFlagConditionalOnCalleeSavedAndArgVars",
+          .function_name = "GeneralizedStoreFlagConditionalOnCalleeSavedAndArgVars",
+          .original_c = R"(
+extern s32 StepHook(s32 val);
+s32 GeneralizedStoreFlagConditionalOnCalleeSavedAndArgVars(s32 a, s32 b, s32 c) {
+    s32 saved = StepHook(a);
+    if (b > 10) {
+        saved++;
+    }
+    if (c < 0) {
+        a--;
+    }
+    return saved + a;
+}
+)",
+      },
   };
   return *k_cases;
 }

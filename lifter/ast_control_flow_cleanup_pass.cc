@@ -2137,7 +2137,18 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
         const bool is_int_const = (rhs->Kind() == CExpressionKind::kIntegerLiteral);
         const CExpression* sym_addr = nullptr;
         const bool is_sym_addr = ExtractSymbolAddressOperand(*rhs, &sym_addr);
-        if (!is_int_const && !is_sym_addr) {
+        const bool is_giv_mult =
+            (rhs->Kind() == CExpressionKind::kBinaryExpression &&
+             static_cast<const BinaryExpression&>(*rhs).Op() == "*" &&
+             static_cast<const BinaryExpression&>(*rhs).Lhs().Kind() ==
+                 CExpressionKind::kIdentifier &&
+             static_cast<const BinaryExpression&>(*rhs).Rhs().Kind() ==
+                 CExpressionKind::kIntegerLiteral &&
+             !StatementModifiesVariable(*stmts[i],
+                                        static_cast<const IdentifierExpression&>(
+                                            static_cast<const BinaryExpression&>(*rhs).Lhs())
+                                            .Name()));
+        if (!is_int_const && !is_sym_addr && !is_giv_mult) {
           continue;
         }
 
@@ -2234,11 +2245,11 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
           }
         }
 
-        // Case B: `reg = &D_...;` where `reg` is a symbol-address invariant used inside a loop
-        // without calls, and substituting `(s32)&D_...` allows `loop.c:move_movables` to hoist
-        // the symbol address naturally.
-        if (is_sym_addr && sym_addr != nullptr && !StatementContainsCall(*stmts[i])) {
-          auto replacement = CExpression::Cast(CType::S32(), sym_addr->Clone());
+        // Case B: `reg = &D_...;` or `reg = outer_iv * stride;` used inside a call-free loop.
+        if (((is_sym_addr && sym_addr != nullptr) || (is_giv_mult && total_reads == 1)) &&
+            !StatementContainsCall(*stmts[i])) {
+          auto replacement =
+              is_sym_addr ? CExpression::Cast(CType::S32(), sym_addr->Clone()) : rhs->Clone();
           SubstituteExpressionInStatementMutator mutator(reg, *replacement);
           mutator.MutateStatement(&stmts[i]);
           if (!StatementReferencesVariable(*stmts[i], reg)) {
@@ -2290,7 +2301,9 @@ bool LoopInvariantSinkerPass::Run(CompoundStatement* body, const AstPassContext&
   bool changed = SynthesizeForLoopsInBlock(body);
   if (SinkLoopInvariantAssignments(body)) {
     changed = true;
-    SynthesizeForLoopsInBlock(body);
+    if (SynthesizeForLoopsInBlock(body)) {
+      SinkLoopInvariantAssignments(body);
+    }
   }
   return changed;
 }
