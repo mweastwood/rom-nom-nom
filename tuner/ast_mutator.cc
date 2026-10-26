@@ -385,6 +385,349 @@ bool MatchBreakIf(const CStatement& statement, const CExpression** out_exit_cond
   return false;
 }
 
+std::optional<std::string> GetSplitScratchWebBaseName(std::string_view name) {
+  size_t underscore = name.rfind('_');
+  if (underscore == std::string_view::npos || underscore == 0 || underscore + 1 >= name.size()) {
+    return std::nullopt;
+  }
+  for (size_t i = underscore + 1; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') return std::nullopt;
+  }
+  std::string_view base = name.substr(0, underscore);
+  if (base == "v0" || base == "v1" || base == "arg0" || base == "arg1" || base == "arg2" ||
+      base == "arg3" || base == "temp_t0" || base == "temp_t1" || base == "temp_t2" ||
+      base == "temp_t3" || base == "temp_t4" || base == "temp_t5" || base == "temp_t6" ||
+      base == "temp_t7" || base == "temp_t8" || base == "temp_t9" || base == "temp_at" ||
+      (base.size() >= 2 && base[0] == 'f' && base[1] >= '0' && base[1] <= '9')) {
+    return std::string(base);
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> InferDefaultRegisterAnnotation(std::string_view name) {
+  std::string base_str;
+  if (auto split_base = GetSplitScratchWebBaseName(name)) {
+    base_str = *split_base;
+    name = base_str;
+  }
+  if (name == "v0") return "$2";
+  if (name == "v1") return "$3";
+  if (name == "arg0") return "$4";
+  if (name == "arg1") return "$5";
+  if (name == "arg2") return "$6";
+  if (name == "arg3") return "$7";
+  if (name == "temp_t0") return "$8";
+  if (name == "temp_t1") return "$9";
+  if (name == "temp_t2") return "$10";
+  if (name == "temp_t3") return "$11";
+  if (name == "temp_t4") return "$12";
+  if (name == "temp_t5") return "$13";
+  if (name == "temp_t6") return "$14";
+  if (name == "temp_t7") return "$15";
+  if (name == "temp_s0") return "$16";
+  if (name == "temp_s1") return "$17";
+  if (name == "temp_s2") return "$18";
+  if (name == "temp_s3") return "$19";
+  if (name == "temp_s4") return "$20";
+  if (name == "temp_s5") return "$21";
+  if (name == "temp_s6") return "$22";
+  if (name == "temp_s7") return "$23";
+  if (name == "temp_t8") return "$24";
+  if (name == "temp_t9") return "$25";
+  if (name == "fp") return "$30";
+  if (name == "at" || name == "temp_at") return "$1";
+  if (name.size() >= 2 && name[0] == 'f' && name[1] >= '0' && name[1] <= '9') {
+    for (size_t i = 1; i < name.size(); ++i) {
+      if (name[i] < '0' || name[i] > '9') return std::nullopt;
+    }
+    return "$" + std::string(name);
+  }
+  return std::nullopt;
+}
+
+bool IsComparisonBinaryExpression(const CExpression& expr) {
+  if (expr.Kind() != CExpressionKind::kBinaryExpression) return false;
+  std::string_view op = static_cast<const BinaryExpression&>(expr).Op();
+  return op == "<" || op == "<=" || op == ">" || op == ">=" || op == "==" || op == "!=";
+}
+
+bool MatchIfStoreFlagStep(const CStatement& stmt, std::unique_ptr<CExpression>* out_lhs,
+                          std::string* out_op, std::unique_ptr<CExpression>* out_cond) {
+  if (stmt.Kind() != CStatementKind::kIfStatement) return false;
+  const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+  if (if_stmt.ElseBranch() != nullptr) return false;
+  if (!IsComparisonBinaryExpression(if_stmt.Condition())) return false;
+  const CStatement* inner = &if_stmt.ThenBranch();
+  if (inner->Kind() == CStatementKind::kCompoundStatement) {
+    const auto& comp = static_cast<const CompoundStatement&>(*inner);
+    if (comp.Statements().size() != 1) return false;
+    inner = comp.Statements()[0].get();
+  }
+  if (inner->Kind() != CStatementKind::kExpressionStatement) return false;
+  const auto& expr = static_cast<const ExpressionStatement&>(*inner).Expression();
+  if (expr.Kind() != CExpressionKind::kAssignmentExpression) return false;
+  const auto& assign = static_cast<const AssignmentExpression&>(expr);
+  if (!IsPureExpression(assign.Lhs())) return false;
+  if ((assign.Op() == "+=" || assign.Op() == "-=") &&
+      assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+      static_cast<const IntegerLiteralExpression&>(assign.Rhs()).Value() == 1) {
+    if (out_lhs != nullptr) *out_lhs = assign.Lhs().Clone();
+    if (out_op != nullptr) *out_op = assign.Op() == "+=" ? "+" : "-";
+    if (out_cond != nullptr) *out_cond = if_stmt.Condition().Clone();
+    return true;
+  }
+  if (assign.Op() == "=" && assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& bin = static_cast<const BinaryExpression&>(assign.Rhs());
+    if ((bin.Op() == "+" || bin.Op() == "-") && bin.Lhs().ToString() == assign.Lhs().ToString() &&
+        bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+        static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 1) {
+      if (out_lhs != nullptr) *out_lhs = assign.Lhs().Clone();
+      if (out_op != nullptr) *out_op = bin.Op();
+      if (out_cond != nullptr) *out_cond = if_stmt.Condition().Clone();
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MatchInlineStoreFlagStep(const CStatement& stmt, std::unique_ptr<CExpression>* out_lhs,
+                              std::string* out_op, std::unique_ptr<CExpression>* out_cond) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) return false;
+  const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+  if (expr.Kind() != CExpressionKind::kAssignmentExpression) return false;
+  const auto& assign = static_cast<const AssignmentExpression&>(expr);
+  if (!IsPureExpression(assign.Lhs())) return false;
+  if ((assign.Op() == "+=" || assign.Op() == "-=") && IsComparisonBinaryExpression(assign.Rhs())) {
+    if (out_lhs != nullptr) *out_lhs = assign.Lhs().Clone();
+    if (out_op != nullptr) *out_op = assign.Op() == "+=" ? "+" : "-";
+    if (out_cond != nullptr) *out_cond = assign.Rhs().Clone();
+    return true;
+  }
+  if (assign.Op() == "=" && assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& bin = static_cast<const BinaryExpression&>(assign.Rhs());
+    if ((bin.Op() == "+" || bin.Op() == "-") && bin.Lhs().ToString() == assign.Lhs().ToString() &&
+        IsComparisonBinaryExpression(bin.Rhs())) {
+      if (out_lhs != nullptr) *out_lhs = assign.Lhs().Clone();
+      if (out_op != nullptr) *out_op = bin.Op();
+      if (out_cond != nullptr) *out_cond = bin.Rhs().Clone();
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsNonTrivialSubexpression(const CExpression& expr) {
+  return expr.Kind() == CExpressionKind::kBinaryExpression ||
+         expr.Kind() == CExpressionKind::kUnaryExpression ||
+         expr.Kind() == CExpressionKind::kCastExpression ||
+         expr.Kind() == CExpressionKind::kCallExpression;
+}
+
+bool MatchGeneralSplittableStatement(const CStatement& stmt,
+                                     std::unique_ptr<CExpression>* out_subexpr,
+                                     const std::string& replacement_var,
+                                     std::unique_ptr<CStatement>* out_replaced_stmt) {
+  if (stmt.Kind() == CStatementKind::kExpressionStatement) {
+    const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+    if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& bin = static_cast<const BinaryExpression&>(assign.Rhs());
+        if (IsNonTrivialSubexpression(bin.Lhs())) {
+          if (out_subexpr != nullptr) *out_subexpr = bin.Lhs().Clone();
+          if (out_replaced_stmt != nullptr) {
+            *out_replaced_stmt = CStatement::Expression(CExpression::Assignment(
+                assign.Op(), assign.Lhs().Clone(),
+                CExpression::Binary(bin.Op(), CExpression::Identifier(replacement_var),
+                                    bin.Rhs().Clone())));
+          }
+          return true;
+        }
+        if (IsNonTrivialSubexpression(bin.Rhs())) {
+          if (out_subexpr != nullptr) *out_subexpr = bin.Rhs().Clone();
+          if (out_replaced_stmt != nullptr) {
+            *out_replaced_stmt = CStatement::Expression(CExpression::Assignment(
+                assign.Op(), assign.Lhs().Clone(),
+                CExpression::Binary(bin.Op(), bin.Lhs().Clone(),
+                                    CExpression::Identifier(replacement_var))));
+          }
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+std::unique_ptr<CExpression> ReplaceExactSubexpressionInExpression(const CExpression& expr,
+                                                                   const std::string& target_str,
+                                                                   const CExpression& replacement) {
+  if (expr.ToString() == target_str) {
+    return replacement.Clone();
+  }
+  switch (expr.Kind()) {
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      return CExpression::Unary(
+          un.Op(), ReplaceExactSubexpressionInExpression(un.Operand(), target_str, replacement),
+          un.IsPrefix());
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      return CExpression::Binary(
+          bin.Op(), ReplaceExactSubexpressionInExpression(bin.Lhs(), target_str, replacement),
+          ReplaceExactSubexpressionInExpression(bin.Rhs(), target_str, replacement));
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      return CExpression::Assignment(
+          assign.Op(), ReplaceExactSubexpressionInExpression(assign.Lhs(), target_str, replacement),
+          ReplaceExactSubexpressionInExpression(assign.Rhs(), target_str, replacement));
+    }
+    case CExpressionKind::kCastExpression: {
+      const auto& cast = static_cast<const CastExpression&>(expr);
+      return CExpression::Cast(cast.TargetType(), ReplaceExactSubexpressionInExpression(
+                                                      cast.Operand(), target_str, replacement));
+    }
+    default:
+      return expr.Clone();
+  }
+}
+
+std::unique_ptr<CStatement> ReplaceExactSubexpressionInStatement(const CStatement& stmt,
+                                                                 const std::string& target_str,
+                                                                 const CExpression& replacement) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      std::vector<std::unique_ptr<CStatement>> new_stmts;
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        new_stmts.push_back(ReplaceExactSubexpressionInStatement(*child, target_str, replacement));
+      }
+      return std::make_unique<CompoundStatement>(std::move(new_stmts));
+    }
+    case CStatementKind::kExpressionStatement:
+      return CStatement::Expression(ReplaceExactSubexpressionInExpression(
+          static_cast<const ExpressionStatement&>(stmt).Expression(), target_str, replacement));
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(
+          ReplaceExactSubexpressionInExpression(if_stmt.Condition(), target_str, replacement),
+          ReplaceExactSubexpressionInStatement(if_stmt.ThenBranch(), target_str, replacement),
+          if_stmt.ElseBranch()
+              ? ReplaceExactSubexpressionInStatement(*if_stmt.ElseBranch(), target_str, replacement)
+              : nullptr);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dw = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(
+          ReplaceExactSubexpressionInStatement(dw.Body(), target_str, replacement),
+          ReplaceExactSubexpressionInExpression(dw.Condition(), target_str, replacement));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& wh = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(
+          ReplaceExactSubexpressionInExpression(wh.Condition(), target_str, replacement),
+          ReplaceExactSubexpressionInStatement(wh.Body(), target_str, replacement));
+    }
+    case CStatementKind::kForStatement: {
+      const auto& f = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(
+          f.Init() ? ReplaceExactSubexpressionInStatement(*f.Init(), target_str, replacement)
+                   : nullptr,
+          f.Condition()
+              ? ReplaceExactSubexpressionInExpression(*f.Condition(), target_str, replacement)
+              : nullptr,
+          f.Step() ? ReplaceExactSubexpressionInExpression(*f.Step(), target_str, replacement)
+                   : nullptr,
+          ReplaceExactSubexpressionInStatement(f.Body(), target_str, replacement));
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
+bool FindHoistableInvariantInExpression(const CExpression& expr, bool in_condition,
+                                        std::unique_ptr<CExpression>* out_invariant) {
+  if (expr.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& un = static_cast<const UnaryExpression&>(expr);
+    if (un.IsPrefix() && un.Op() == "&" && un.Operand().Kind() == CExpressionKind::kIdentifier &&
+        IsGlobalIdentifierName(static_cast<const IdentifierExpression&>(un.Operand()).Name())) {
+      if (out_invariant != nullptr) *out_invariant = expr.Clone();
+      return true;
+    }
+    return FindHoistableInvariantInExpression(un.Operand(), in_condition, out_invariant);
+  }
+  if (expr.Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& bin = static_cast<const BinaryExpression&>(expr);
+    if (in_condition && IsComparisonBinaryExpression(expr)) {
+      if (bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        int64_t val = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        if (val != 0) {
+          if (out_invariant != nullptr) *out_invariant = bin.Rhs().Clone();
+          return true;
+        }
+      }
+    }
+    if (!in_condition && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+      int64_t val = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+      if (val < -32768 || val > 65535) {
+        if (out_invariant != nullptr) *out_invariant = bin.Rhs().Clone();
+        return true;
+      }
+    }
+    return FindHoistableInvariantInExpression(bin.Lhs(), in_condition, out_invariant) ||
+           FindHoistableInvariantInExpression(bin.Rhs(), in_condition, out_invariant);
+  }
+  if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+    const auto& assign = static_cast<const AssignmentExpression&>(expr);
+    return FindHoistableInvariantInExpression(assign.Lhs(), in_condition, out_invariant) ||
+           FindHoistableInvariantInExpression(assign.Rhs(), in_condition, out_invariant);
+  }
+  if (expr.Kind() == CExpressionKind::kCastExpression) {
+    return FindHoistableInvariantInExpression(static_cast<const CastExpression&>(expr).Operand(),
+                                              in_condition, out_invariant);
+  }
+  return false;
+}
+
+bool FindHoistableLoopInvariantInStatement(const CStatement& stmt,
+                                           std::unique_ptr<CExpression>* out_invariant) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dw = static_cast<const DoWhileStatement&>(stmt);
+      return FindHoistableInvariantInExpression(dw.Condition(), /*in_condition=*/true,
+                                                out_invariant) ||
+             FindHoistableLoopInvariantInStatement(dw.Body(), out_invariant);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& wh = static_cast<const WhileStatement&>(stmt);
+      return FindHoistableInvariantInExpression(wh.Condition(), /*in_condition=*/true,
+                                                out_invariant) ||
+             FindHoistableLoopInvariantInStatement(wh.Body(), out_invariant);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& f = static_cast<const ForStatement&>(stmt);
+      if (f.Condition() != nullptr && FindHoistableInvariantInExpression(
+                                          *f.Condition(), /*in_condition=*/true, out_invariant)) {
+        return true;
+      }
+      return FindHoistableLoopInvariantInStatement(f.Body(), out_invariant);
+    }
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (FindHoistableLoopInvariantInStatement(*child, out_invariant)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kExpressionStatement:
+      return FindHoistableInvariantInExpression(
+          static_cast<const ExpressionStatement&>(stmt).Expression(), /*in_condition=*/false,
+          out_invariant);
+    default:
+      return false;
+  }
+}
+
 struct MutationContext {
   const AstMutationStep* step_to_apply = nullptr;
   std::vector<AstMutationStep>* discovered = nullptr;
@@ -406,6 +749,9 @@ struct MutationContext {
   uint32_t propagate_register_copy_index = 0;
   uint32_t hoist_while_guard_index = 0;
   uint32_t reload_or_early_return_var_index = 0;
+  uint32_t toggle_register_annotation_index = 0;
+  uint32_t toggle_store_flag_index = 0;
+  uint32_t hoist_loop_invariant_index = 0;
 
   void Record(AstMutationKind kind, uint32_t site_index, uint32_t parameter = 0) {
     if (discovered == nullptr || discovered->size() >= max_mutations) return;
@@ -688,6 +1034,78 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
           new_statements.push_back(CStatement::Expression(CExpression::Assignment(
               "=", std::move(deref_target), TraverseExpression(*rhs, context))));
           continue;
+        }
+      }
+    } else if (MatchGeneralSplittableStatement(*statements[i], nullptr, "", nullptr)) {
+      std::vector<std::string> eligible_candidates;
+      for (const auto& cand_var : context->local_variables) {
+        if (CountIdentifierOccurrencesInStatement(*statements[i], cand_var) > 0) continue;
+        if (context->root_body != nullptr &&
+            IsVariableArrayInStatement(*context->root_body, cand_var)) {
+          continue;
+        }
+        if (IsVariableDeadAfter(statements, i, cand_var, is_top_level_block, context->root_body)) {
+          eligible_candidates.push_back(cand_var);
+        }
+      }
+      if (!eligible_candidates.empty()) {
+        uint32_t site = context->split_temporary_index++;
+        size_t num_candidates = std::min<size_t>(eligible_candidates.size(), 2);
+        for (size_t v = 0; v < num_candidates; ++v) {
+          context->Record(AST_MUTATION_SPLIT_SINGLE_USE_TEMP, site, static_cast<uint32_t>(v));
+        }
+        uint32_t parameter = 0;
+        if (context->ShouldApply(AST_MUTATION_SPLIT_SINGLE_USE_TEMP, site, &parameter)) {
+          size_t chosen_idx = parameter < eligible_candidates.size() ? parameter : 0;
+          const std::string& chosen_var = eligible_candidates[chosen_idx];
+          std::unique_ptr<CExpression> subexpr;
+          std::unique_ptr<CStatement> replaced_stmt;
+          if (MatchGeneralSplittableStatement(*statements[i], &subexpr, chosen_var,
+                                              &replaced_stmt) &&
+              subexpr != nullptr && replaced_stmt != nullptr) {
+            new_statements.push_back(CStatement::Expression(CExpression::Assignment(
+                "=", CExpression::Identifier(chosen_var), TraverseExpression(*subexpr, context))));
+            new_statements.push_back(TraverseStatement(*replaced_stmt, context));
+            continue;
+          }
+        }
+      }
+    }
+
+    // 5b. Check hoisting loop-invariant constant or address out of loop
+    // (`AST_MUTATION_HOIST_LOOP_INVARIANT`)
+    if (statements[i]->Kind() == CStatementKind::kDoWhileStatement ||
+        statements[i]->Kind() == CStatementKind::kWhileStatement ||
+        statements[i]->Kind() == CStatementKind::kForStatement) {
+      std::unique_ptr<CExpression> invariant_expr;
+      if (FindHoistableLoopInvariantInStatement(*statements[i], &invariant_expr) &&
+          invariant_expr != nullptr) {
+        std::vector<std::string> eligible_candidates;
+        for (const auto& cand_var : context->local_variables) {
+          if (CountIdentifierOccurrencesInStatement(*statements[i], cand_var) > 0) continue;
+          if (context->root_body != nullptr &&
+              IsVariableArrayInStatement(*context->root_body, cand_var)) {
+            continue;
+          }
+          if (IsVariableDeadAfter(statements, i, cand_var, is_top_level_block,
+                                  context->root_body)) {
+            eligible_candidates.push_back(cand_var);
+          }
+        }
+        if (!eligible_candidates.empty()) {
+          uint32_t site = context->hoist_loop_invariant_index++;
+          context->Record(AST_MUTATION_HOIST_LOOP_INVARIANT, site, 0);
+          uint32_t parameter = 0;
+          if (context->ShouldApply(AST_MUTATION_HOIST_LOOP_INVARIANT, site, &parameter)) {
+            size_t chosen_idx = parameter < eligible_candidates.size() ? parameter : 0;
+            const std::string& chosen_var = eligible_candidates[chosen_idx];
+            new_statements.push_back(CStatement::Expression(CExpression::Assignment(
+                "=", CExpression::Identifier(chosen_var), invariant_expr->Clone())));
+            auto replaced_loop = ReplaceExactSubexpressionInStatement(
+                *statements[i], invariant_expr->ToString(), *CExpression::Identifier(chosen_var));
+            new_statements.push_back(TraverseStatement(*replaced_loop, context));
+            continue;
+          }
         }
       }
     }
@@ -1025,6 +1443,22 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
       return TraverseCompound(static_cast<const CompoundStatement&>(statement), context,
                               is_top_level_block);
     case CStatementKind::kExpressionStatement: {
+      std::unique_ptr<CExpression> sf_lhs;
+      std::string sf_op;
+      std::unique_ptr<CExpression> sf_cond;
+      if (MatchInlineStoreFlagStep(statement, &sf_lhs, &sf_op, &sf_cond)) {
+        uint32_t site = context->toggle_store_flag_index++;
+        context->Record(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL, site, 0);
+        uint32_t parameter = 0;
+        if (context->ShouldApply(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL, site, &parameter)) {
+          auto then_block = std::make_unique<CompoundStatement>();
+          auto lhs_clone = sf_lhs->Clone();
+          then_block->AddStatement(CStatement::Expression(CExpression::Assignment(
+              "=", std::move(sf_lhs),
+              CExpression::Binary(sf_op, std::move(lhs_clone), CExpression::Integer(1)))));
+          return CStatement::If(std::move(sf_cond), std::move(then_block));
+        }
+      }
       const auto& expression_statement = static_cast<const ExpressionStatement&>(statement);
       return CStatement::Expression(TraverseExpression(expression_statement.Expression(), context));
     }
@@ -1034,11 +1468,54 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
           declaration.Initializer() != nullptr
               ? TraverseExpression(*declaration.Initializer(), context)
               : nullptr;
+      std::optional<std::string> reg_annotation = declaration.RegisterAnnotation();
+      if (!declaration.ArraySize().has_value()) {
+        auto default_reg = InferDefaultRegisterAnnotation(declaration.Name());
+        if (reg_annotation.has_value() || default_reg.has_value()) {
+          uint32_t site = context->toggle_register_annotation_index++;
+          context->Record(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION, site, 0);
+          if (reg_annotation.has_value()) {
+            context->Record(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION, site, 1);
+          }
+          uint32_t parameter = 0;
+          if (context->ShouldApply(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION, site, &parameter)) {
+            if (parameter == 0) {
+              if (reg_annotation.has_value()) {
+                reg_annotation = std::nullopt;
+              } else {
+                reg_annotation = default_reg;
+              }
+            } else if (parameter == 1 && reg_annotation.has_value()) {
+              if (*reg_annotation == "$2") {
+                reg_annotation = "$3";
+              } else if (*reg_annotation == "$3") {
+                reg_annotation = "$2";
+              } else {
+                reg_annotation = "$2";
+              }
+            }
+          }
+        }
+      }
       return CStatement::VariableDeclaration(declaration.Type(), declaration.Name(),
                                              std::move(initializer), declaration.ArraySize(),
-                                             declaration.RegisterAnnotation());
+                                             reg_annotation);
     }
     case CStatementKind::kIfStatement: {
+      std::unique_ptr<CExpression> sf_lhs;
+      std::string sf_op;
+      std::unique_ptr<CExpression> sf_cond;
+      if (MatchIfStoreFlagStep(statement, &sf_lhs, &sf_op, &sf_cond)) {
+        uint32_t site = context->toggle_store_flag_index++;
+        context->Record(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL, site, 0);
+        uint32_t parameter = 0;
+        if (context->ShouldApply(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL, site, &parameter)) {
+          auto lhs_clone = sf_lhs->Clone();
+          return CStatement::Expression(CExpression::Assignment(
+              "=", std::move(sf_lhs),
+              CExpression::Binary(sf_op, std::move(lhs_clone), std::move(sf_cond))));
+        }
+      }
       const auto& if_statement = static_cast<const IfStatement&>(statement);
       auto new_condition = TraverseExpression(if_statement.Condition(), context);
       auto new_then = TraverseStatement(if_statement.ThenBranch(), context);
@@ -1226,6 +1703,25 @@ enum class TrailingReturnKind {
   kOtherReturn,
 };
 
+struct SplitScratchWebCandidate {
+  std::string base_name;
+  std::string split_name;
+};
+
+std::vector<SplitScratchWebCandidate> CollectSplitScratchWebCandidates(
+    const ReferencedSymbols& referenced_symbols) {
+  std::vector<SplitScratchWebCandidate> candidates;
+  for (const auto& var_name : referenced_symbols.local_variables) {
+    if (auto base_name = GetSplitScratchWebBaseName(var_name)) {
+      if (referenced_symbols.local_variables.count(*base_name) > 0) {
+        candidates.push_back(
+            SplitScratchWebCandidate{.base_name = *base_name, .split_name = var_name});
+      }
+    }
+  }
+  return candidates;
+}
+
 }  // namespace
 
 std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclaration& function,
@@ -1334,6 +1830,15 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
   if (!volatile_globals.empty()) {
     context.Record(AST_MUTATION_VOLATILE_GLOBAL_ACCESS, 0, 1);
     context.Record(AST_MUTATION_VOLATILE_GLOBAL_ACCESS, 0, 3);
+  }
+
+  // Discover split scratch web merge candidates (`temp_t0_2` -> `temp_t0`)
+  auto split_webs = CollectSplitScratchWebCandidates(referenced_symbols);
+  for (size_t i = 0; i < split_webs.size(); ++i) {
+    context.Record(AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS, static_cast<uint32_t>(i), 0);
+  }
+  if (split_webs.size() > 1) {
+    context.Record(AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS, 0, 1);
   }
 
   return mutations;
@@ -1511,6 +2016,28 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
                                std::move(mutated_body), function.IsStatic());
   }
 
+  if (step.kind() == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS) {
+    auto candidates = CollectSplitScratchWebCandidates(referenced_symbols);
+    std::vector<SplitScratchWebCandidate> selected;
+    if (step.param() == 1) {
+      selected = candidates;
+    } else if (step.site_index() < candidates.size()) {
+      selected.push_back(candidates[step.site_index()]);
+    }
+    if (selected.empty()) return function.Clone();
+    std::unique_ptr<CStatement> current_stmt = function.Body().Clone();
+    for (const auto& cand : selected) {
+      current_stmt = ReplaceIdentifierInStatement(*current_stmt, cand.split_name,
+                                                  *CExpression::Identifier(cand.base_name),
+                                                  /*replace_assignment_lhs=*/true);
+    }
+    auto mutated_body =
+        std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(current_stmt.release()));
+    mutated_body = PruneUnusedLocalDeclarations(*mutated_body);
+    return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
+                               std::move(mutated_body), function.IsStatic());
+  }
+
   MutationContext context;
   context.step_to_apply = &step;
   context.local_variables = referenced_symbols.local_variables;
@@ -1586,6 +2113,18 @@ std::string AstMutator::DescribeStep(const AstMutationStep& step) {
       return absl::StrFormat("HoistWhileGuard(site=%u, param=%u)", step.site_index(), step.param());
     case AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR:
       return absl::StrFormat("ReloadOrEarlyReturnVar(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_TOGGLE_REGISTER_ANNOTATION:
+      return absl::StrFormat("ToggleRegisterAnnotation(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS:
+      return absl::StrFormat("MergeSplitScratchWebs(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL:
+      return absl::StrFormat("ToggleStoreFlagConditional(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_HOIST_LOOP_INVARIANT:
+      return absl::StrFormat("HoistLoopInvariant(site=%u, param=%u)", step.site_index(),
                              step.param());
     default:
       return "UnspecifiedMutation";

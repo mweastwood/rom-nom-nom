@@ -743,5 +743,109 @@ TEST(AstMutatorTest, ZeroReturnVariableSubstitutionExcludesVariablesReassignedIn
   }
 }
 
+TEST(AstMutatorTest, DualCompilerInverseMutationsPinMergeSplitStoreFlagAndHoistLoopInvariant) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v0", nullptr, std::nullopt, "$2"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t0_2"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_s0"));
+
+  // 1. Generalized subexpression split target: v0 = ((arg0 * 4) + arg1);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary(
+          "+", CExpression::Binary("*", CExpression::Identifier("arg0"), CExpression::Integer(4)),
+          CExpression::Identifier("arg1")))));
+
+  // 2. Store-flag conditional toggle target: if (arg0 < 0) { temp_s0 = (temp_s0 + 1); }
+  auto then_block = std::make_unique<CompoundStatement>();
+  then_block->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("<", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_block)));
+
+  // 3. Split web usage: temp_t0_2 = (temp_s0 + 1);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0_2"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+
+  // 4. Loop with hoistable invariant condition constant 16:
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("v0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("<", CExpression::Identifier("v0"), CExpression::Integer(16))));
+
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  FunctionDeclaration func(CType::S32(), "DualInverseFunc",
+                           {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}}, std::move(body));
+
+  // A. Toggle register annotation on `v0` (remove `$2` with param=0, swap to `$3` with param=1)
+  AstMutationStep unpin_step;
+  unpin_step.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  unpin_step.set_site_index(0);
+  unpin_step.set_param(0);
+  EXPECT_FALSE(
+      absl::StrContains(AstMutator::ApplyMutation(func, unpin_step).ToString(), "asm(\"$2\")"));
+
+  AstMutationStep swap_reg_step;
+  swap_reg_step.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  swap_reg_step.set_site_index(0);
+  swap_reg_step.set_param(1);
+  EXPECT_TRUE(
+      absl::StrContains(AstMutator::ApplyMutation(func, swap_reg_step).ToString(), "asm(\"$3\")"));
+
+  // B. Merge split scratch webs (`temp_t0_2` -> `temp_t0`)
+  AstMutationStep merge_step;
+  merge_step.set_kind(AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS);
+  merge_step.set_site_index(0);
+  merge_step.set_param(0);
+  std::string merged_code = AstMutator::ApplyMutation(func, merge_step).ToString();
+  EXPECT_FALSE(absl::StrContains(merged_code, "temp_t0_2")) << merged_code;
+  EXPECT_TRUE(absl::StrContains(merged_code, "temp_t0 = (temp_s0 + 1);")) << merged_code;
+
+  // C. Split general subexpression (`(arg0 * 4)` into dead variable `arg1` or `temp_t0`)
+  AstMutationStep split_step;
+  split_step.set_kind(AST_MUTATION_SPLIT_SINGLE_USE_TEMP);
+  split_step.set_site_index(0);
+  split_step.set_param(0);
+  std::string split_code = AstMutator::ApplyMutation(func, split_step).ToString();
+  EXPECT_TRUE(absl::StrContains(split_code, "temp_t0 = (arg0 * 4);")) << split_code;
+  EXPECT_TRUE(absl::StrContains(split_code, "v0 = (temp_t0 + arg1);")) << split_code;
+
+  // D. Toggle store-flag conditional (`if (arg0 < 0) { temp_s0 = (temp_s0 + 1); }` <->
+  // `temp_s0 = (temp_s0 + (arg0 < 0));`)
+  AstMutationStep sf_step;
+  sf_step.set_kind(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL);
+  sf_step.set_site_index(0);
+  sf_step.set_param(0);
+  FunctionDeclaration sf_mutated = AstMutator::ApplyMutation(func, sf_step);
+  EXPECT_TRUE(absl::StrContains(sf_mutated.ToString(), "temp_s0 = (temp_s0 + (arg0 < 0));"))
+      << sf_mutated.ToString();
+  FunctionDeclaration sf_restored = AstMutator::ApplyMutation(sf_mutated, sf_step);
+  EXPECT_TRUE(absl::StrContains(sf_restored.ToString(), "if ((arg0 < 0)) {"))
+      << sf_restored.ToString();
+
+  // E. Hoist loop-invariant constant `16` out of `do { ... } while (v0 < 16);`
+  AstMutationStep hoist_inv_step;
+  hoist_inv_step.set_kind(AST_MUTATION_HOIST_LOOP_INVARIANT);
+  hoist_inv_step.set_site_index(0);
+  hoist_inv_step.set_param(0);
+  std::string hoisted_code = AstMutator::ApplyMutation(func, hoist_inv_step).ToString();
+  EXPECT_TRUE(absl::StrContains(hoisted_code, "= 16;")) << hoisted_code;
+  EXPECT_FALSE(absl::StrContains(hoisted_code, "while ((v0 < 16));")) << hoisted_code;
+
+  EXPECT_EQ(AstMutator::DescribeStep(unpin_step), "ToggleRegisterAnnotation(site=0, param=0)");
+  EXPECT_EQ(AstMutator::DescribeStep(merge_step), "MergeSplitScratchWebs(site=0, param=0)");
+  EXPECT_EQ(AstMutator::DescribeStep(sf_step), "ToggleStoreFlagConditional(site=0, param=0)");
+  EXPECT_EQ(AstMutator::DescribeStep(hoist_inv_step), "HoistLoopInvariant(site=0, param=0)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
