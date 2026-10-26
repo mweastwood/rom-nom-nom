@@ -431,6 +431,90 @@ bool DelaySlotConflictsWithTerminator(const Instruction& term, const Instruction
          (IsFpuCompareOpcode(delay_inst.opcode) || delay_inst.opcode == Opcode::kCtc1);
 }
 
+bool DelaySlotHasPreBranchDependenceConflict(const BasicBlock& block, const Instruction& term,
+                                             const Instruction& delay_inst) {
+  return DelaySlotConflictsWithTerminator(term, delay_inst) ||
+         DelaySlotBlocksFoldedComparison(block);
+}
+
+bool DelaySlotFeedsSuccessorBranch(const BasicBlock& succ_block, const Instruction& delay_inst) {
+  if (DelaySlotEnablesSuccessorFoldedComparison(succ_block, delay_inst)) {
+    return true;
+  }
+  const Instruction* succ_term = succ_block.Terminator();
+  if (succ_term == nullptr || !succ_term->IsBranch() || succ_term->IsUnconditionalBranch()) {
+    return false;
+  }
+  RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+  if (delay_ud.gpr_defs.size() != 1) {
+    return false;
+  }
+  Register def_reg = delay_ud.gpr_defs[0];
+  for (const auto& inst : succ_block.instructions) {
+    if (&inst == succ_term) {
+      break;
+    }
+    RegisterUseDef ud = GetInstructionUseDef(inst);
+    for (Register d : ud.gpr_defs) {
+      if (d == def_reg) {
+        return false;
+      }
+    }
+  }
+  const bool succ_branch_reads_def = (succ_term->rs == def_reg || succ_term->rt == def_reg);
+  if (!succ_branch_reads_def) {
+    return false;
+  }
+  const bool makes_const_zero_branch =
+      delay_ud.gpr_uses.empty() && succ_block.instructions.size() <= 2 &&
+      (succ_term->rs == Register::kZero || succ_term->rt == Register::kZero);
+  return !makes_const_zero_branch;
+}
+
+bool DelaySlotCompletesSplitInstructionPair(const BasicBlock& block,
+                                            const Instruction& delay_inst) {
+  if (block.instructions.size() < 3) {
+    return false;
+  }
+  RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+  for (int i = static_cast<int>(block.instructions.size()) - 3; i >= 0; --i) {
+    const Instruction& prev_inst = block.instructions[i];
+    if (IsPartnerUnalignedPair(prev_inst, delay_inst)) {
+      return true;
+    }
+    if ((delay_inst.opcode == Opcode::kMflo || delay_inst.opcode == Opcode::kMfhi) &&
+        (prev_inst.opcode == Opcode::kMult || prev_inst.opcode == Opcode::kMultu ||
+         prev_inst.opcode == Opcode::kDmult || prev_inst.opcode == Opcode::kDmultu ||
+         prev_inst.opcode == Opcode::kDiv || prev_inst.opcode == Opcode::kDivu ||
+         prev_inst.opcode == Opcode::kDdiv || prev_inst.opcode == Opcode::kDdivu)) {
+      return true;
+    }
+    if ((delay_inst.opcode == Opcode::kMflo || delay_inst.opcode == Opcode::kMfhi) &&
+        IsMultiplyDivideOrHiLoOpcode(prev_inst.opcode)) {
+      break;
+    }
+    RegisterUseDef prev_ud = GetInstructionUseDef(prev_inst);
+    bool hazard = prev_inst.IsCall() || prev_inst.IsBranch() || prev_inst.IsJump();
+    for (Register d : prev_ud.gpr_defs) {
+      for (Register u : delay_ud.gpr_uses) {
+        if (d == u) hazard = true;
+      }
+      for (Register dd : delay_ud.gpr_defs) {
+        if (d == dd) hazard = true;
+      }
+    }
+    for (Register u : prev_ud.gpr_uses) {
+      for (Register dd : delay_ud.gpr_defs) {
+        if (u == dd) hazard = true;
+      }
+    }
+    if (hazard) {
+      break;
+    }
+  }
+  return false;
+}
+
 absl::flat_hash_set<uint32_t> CollectJumpTableBoundsVrams(const ControlFlowGraph& cfg) {
   absl::flat_hash_set<uint32_t> vrams;
   for (const auto& jt : cfg.JumpTables()) {
@@ -462,20 +546,13 @@ bool SimpleDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManag
     if (delay_inst.IsNop()) {
       continue;
     }
-    if (term.opcode == Opcode::kJ || (term.IsBranch() && !term.IsBranchLikely())) {
-      const Instruction& prev_inst = block.instructions[block.instructions.size() - 3];
-      bool is_split_unaligned = IsPartnerUnalignedPair(prev_inst, delay_inst);
-      bool is_split_mult =
-          (delay_inst.opcode == Opcode::kMflo || delay_inst.opcode == Opcode::kMfhi) &&
-          (prev_inst.opcode == Opcode::kMult || prev_inst.opcode == Opcode::kMultu ||
-           prev_inst.opcode == Opcode::kDmult || prev_inst.opcode == Opcode::kDmultu);
-      if ((is_split_unaligned || is_split_mult) &&
-          !DelaySlotConflictsWithTerminator(term, delay_inst)) {
-        block.instructions[block.instructions.size() - 2] = delay_inst;
-        block.instructions[block.instructions.size() - 1] = term;
-        block.instructions.push_back(MakeNopInstruction(delay_inst.vram));
-        changed = true;
-      }
+    if ((term.opcode == Opcode::kJ || (term.IsBranch() && !term.IsBranchLikely())) &&
+        !DelaySlotConflictsWithTerminator(term, delay_inst) &&
+        DelaySlotCompletesSplitInstructionPair(block, delay_inst)) {
+      block.instructions[block.instructions.size() - 2] = delay_inst;
+      block.instructions[block.instructions.size() - 1] = term;
+      block.instructions.push_back(MakeNopInstruction(delay_inst.vram));
+      changed = true;
     }
   }
   return changed;
@@ -641,9 +718,14 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
     }
     if (pred_block_id.has_value()) {
       RetargetBranchEdge(cfg, block.id, succ_taken, *pred_block_id);
+      block.instructions[block.instructions.size() - 2].opcode =
+          ToNonLikelyBranchOpcode(term.opcode);
       block.instructions.back() = MakeNopInstruction(delay_inst.vram);
       changed = true;
     }
+  }
+  if (changed) {
+    analyses->InvalidateAll();
   }
   return changed;
 }
@@ -679,6 +761,24 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
       continue;
     }
 
+    auto compute_unscheduled_clobber_reg = [&](const RegisterUseDef& delay_ud) {
+      std::optional<Register> clobber_reg;
+      if (delay_ud.gpr_defs.size() == 1) {
+        Register def_r = delay_ud.gpr_defs[0];
+        bool uses_def_r = false;
+        for (Register u : delay_ud.gpr_uses) {
+          if (u == def_r) {
+            uses_def_r = true;
+            break;
+          }
+        }
+        if (!uses_def_r) {
+          clobber_reg = def_r;
+        }
+      }
+      return clobber_reg;
+    };
+
     // 1. Branch-likely (`bnezl`/`beqzl`/`bc1tl`/`bc1fl`) target-stolen delay-slot
     // normalization onto single-predecessor taken blocks.
     if (term.IsBranchLikely() && block.successors.size() == 2 &&
@@ -709,25 +809,12 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
             (enclosing_loop == nullptr || enclosing_loop->header != block.id) &&
             IsSinkableDelaySlotInstruction(block, delay_inst) &&
             !taken_block->instructions.empty() && !taken_block->instructions.front().IsReturn() &&
-            (DelaySlotBlocksFoldedComparison(block) ||
-             DelaySlotEnablesSuccessorFoldedComparison(*taken_block, delay_inst) ||
-             (DelaySlotConflictsWithTerminator(term, delay_inst) &&
-              !taken_block->instructions.front().IsCall()))) {
+            (DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
+             DelaySlotFeedsSuccessorBranch(*taken_block, delay_inst)) &&
+            !(DelaySlotConflictsWithTerminator(term, delay_inst) &&
+              taken_block->instructions.front().IsCall())) {
           RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-          std::optional<Register> clobber_reg;
-          if (delay_ud.gpr_defs.size() == 1) {
-            Register def_r = delay_ud.gpr_defs[0];
-            bool uses_def_r = false;
-            for (Register u : delay_ud.gpr_uses) {
-              if (u == def_r) {
-                uses_def_r = true;
-                break;
-              }
-            }
-            if (!uses_def_r) {
-              clobber_reg = def_r;
-            }
-          }
+          std::optional<Register> clobber_reg = compute_unscheduled_clobber_reg(delay_ud);
           taken_block->instructions.insert(taken_block->instructions.begin(), delay_inst);
           block.instructions[block.instructions.size() - 2].opcode =
               ToNonLikelyBranchOpcode(term.opcode);
@@ -738,8 +825,7 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
       }
     }
 
-    // 2. Fallthrough Sinking (`fill_eager_delay_slots` inverse) for non-likely conditional
-    // branches.
+    // 2. Thread Sinking (`fill_slots_from_thread` inverse) for non-likely conditional branches.
     if (!term.IsBranch() || term.IsBranchLikely() || term.IsUnconditionalBranch() ||
         block.successors.size() != 2 || jump_table_bounds_vrams.contains(term.vram)) {
       continue;
@@ -781,83 +867,41 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
     }
 
     BasicBlock* ft_block = cfg->GetMutableBlock(succ_fallthrough);
-    bool loop_has_conditional_latch = false;
-    if (enclosing_loop != nullptr) {
-      for (uint32_t latch_id : enclosing_loop->latches) {
-        const BasicBlock* latch_b = cfg->GetBlock(latch_id);
-        if (latch_b != nullptr && latch_b->Terminator() != nullptr &&
-            latch_b->Terminator()->IsBranch() && !latch_b->Terminator()->IsUnconditionalBranch()) {
-          loop_has_conditional_latch = true;
-          break;
-        }
-      }
-    }
-    const bool feeds_ft_branch_in_do_while =
-        loop_has_conditional_latch && dead_on_taken && !dead_on_fallthrough &&
-        delay_ud.gpr_defs.size() == 1 && ft_block != nullptr &&
-        ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block.id &&
-        !ft_block->instructions.empty() && ft_block->instructions.front().IsBranch() &&
-        (ft_block->instructions.front().rs == delay_ud.gpr_defs[0] ||
-         ft_block->instructions.front().rt == delay_ud.gpr_defs[0]);
-
-    if (enclosing_loop != nullptr && enclosing_loop->header == block.id &&
-        (loop_info.GetLoopFor(succ_taken) != enclosing_loop ||
-         loop_info.GetLoopFor(succ_fallthrough) != enclosing_loop) &&
-        !feeds_ft_branch_in_do_while) {
+    BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
+    const uint32_t target_succ = dead_on_taken ? succ_fallthrough : succ_taken;
+    BasicBlock* target_blk = dead_on_taken ? ft_block : taken_block;
+    if (target_blk == nullptr || target_succ == cfg->EntryBlockId() ||
+        target_blk->predecessors.size() != 1 || target_blk->predecessors[0] != block.id ||
+        loop_info.GetLoopFor(target_succ) != enclosing_loop) {
       continue;
     }
 
-    std::optional<Register> clobber_reg;
-    if (delay_ud.gpr_defs.size() == 1) {
-      Register def_r = delay_ud.gpr_defs[0];
-      bool uses_def_r = false;
-      for (Register u : delay_ud.gpr_uses) {
-        if (u == def_r) {
-          uses_def_r = true;
-          break;
-        }
-      }
-      if (!uses_def_r) {
-        clobber_reg = def_r;
-      }
+    // Do not sink out of a loop header unless it directly feeds a fallthrough branch inside a
+    // do-while loop.
+    if (enclosing_loop != nullptr && enclosing_loop->header == block.id &&
+        (loop_info.GetLoopFor(succ_taken) != enclosing_loop ||
+         loop_info.GetLoopFor(succ_fallthrough) != enclosing_loop) &&
+        !(dead_on_taken && DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst))) {
+      continue;
     }
 
-    bool blocks_folded_comparison = DelaySlotBlocksFoldedComparison(block);
-
-    if (dead_on_taken && !dead_on_fallthrough) {
-      bool enables_short_circuit = false;
-      if (ft_block != nullptr && ft_block->successors.size() == 2 &&
-          (ft_block->successors[0] == succ_taken || ft_block->successors[1] == succ_taken)) {
-        const auto* ft_term = ft_block->Terminator();
-        const bool makes_const_zero_branch =
-            delay_ud.gpr_uses.empty() && ft_block->instructions.size() <= 2 && ft_term != nullptr &&
-            (ft_term->rs == Register::kZero || ft_term->rt == Register::kZero);
-        enables_short_circuit = !makes_const_zero_branch;
-      }
-      if (ft_block != nullptr && succ_fallthrough != cfg->EntryBlockId() &&
-          ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block.id &&
-          loop_info.GetLoopFor(succ_fallthrough) == enclosing_loop &&
-          (blocks_folded_comparison || feeds_ft_branch_in_do_while ||
-           (DelaySlotConflictsWithTerminator(term, delay_inst) &&
-            (DelaySlotEnablesSuccessorFoldedComparison(*ft_block, delay_inst) ||
-             enables_short_circuit)))) {
-        ft_block->instructions.insert(ft_block->instructions.begin(), delay_inst);
-        block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
-        changed = true;
-      }
-    } else if (dead_on_fallthrough && !dead_on_taken) {
-      BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
-      if (taken_block != nullptr && succ_taken != cfg->EntryBlockId() &&
-          taken_block->predecessors.size() == 1 && taken_block->predecessors[0] == block.id &&
-          loop_info.GetLoopFor(succ_taken) == enclosing_loop &&
-          !taken_block->instructions.empty() && !taken_block->instructions.front().IsReturn() &&
-          (blocks_folded_comparison || (DelaySlotConflictsWithTerminator(term, delay_inst) &&
-                                        !taken_block->instructions.front().IsCall()))) {
-        taken_block->instructions.insert(taken_block->instructions.begin(), delay_inst);
-        block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
-        changed = true;
-      }
+    if (!dead_on_taken &&
+        (target_blk->instructions.empty() || target_blk->instructions.front().IsReturn() ||
+         (DelaySlotConflictsWithTerminator(term, delay_inst) &&
+          target_blk->instructions.front().IsCall()))) {
+      continue;
     }
+
+    if (DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
+        DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst)) {
+      std::optional<Register> clobber_reg = compute_unscheduled_clobber_reg(delay_ud);
+      target_blk->instructions.insert(target_blk->instructions.begin(), delay_inst);
+      block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
+      changed = true;
+    }
+  }
+  if (changed) {
+    analyses->InvalidateAll();
   }
   return changed;
 }
