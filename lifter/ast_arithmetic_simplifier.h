@@ -23,6 +23,11 @@ void SimplifyModuloAndUnsignedFloatDiamondsInBlock(CompoundStatement* comp);
 // reciprocal magic constant assignments.
 void SimplifyReciprocalDivisionAndUnsignedFloatConversions(CompoundStatement* comp);
 
+// Rewrites `jump.c` `BRANCH_COST == 2` store-flag conditional increment/decrement idioms
+// (`x = x + (cond)` / `x = x - (cond)`) back into `if (cond) { x = (x + 1); }` /
+// `if (cond) { x = (x - 1); }` when `x` is a non-scratch variable or memory lvalue.
+bool RecoverStoreFlagConditionals(CompoundStatement* comp);
+
 // Concrete `AstPass` wrappers for arithmetic strength-reduction inversions.
 class ShiftAddMultiplicationSimplifierPass : public AstPass {
  public:
@@ -35,6 +40,12 @@ class ReciprocalAndUnsignedFloatSimplifierPass : public AstPass {
   std::string_view Name() const override {
     return "SimplifyReciprocalDivisionAndUnsignedFloatConversions";
   }
+  bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
+};
+
+class StoreFlagConditionalRecoveryPass : public AstPass {
+ public:
+  std::string_view Name() const override { return "StoreFlagConditionalRecovery"; }
   bool Run(CompoundStatement* body, const AstPassContext& ctx) override;
 };
 

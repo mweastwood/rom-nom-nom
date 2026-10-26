@@ -313,5 +313,33 @@ TEST(AstPassPipelineTest, LoopInvariantSinkerSubstitutesConditionConstAndSymbolA
   EXPECT_THAT(rendered, HasSubstr("while ((v1 != 0xFFFFFFFFFFFFFFFF));"));
 }
 
+TEST(AstPassPipelineTest, StoreFlagConditionalRecoveryPassRewritesStoreFlagIncDecToIf) {
+  CompoundStatement body;
+  // `count = (count + ((u32)(x ^ y) < 1));` -> `if ((x == y)) { count = (count + 1); }`
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("count"),
+      CExpression::Binary(
+          "+", CExpression::Identifier("count"),
+          CExpression::Binary(
+              "<",
+              CExpression::Cast(CType::U32(), CExpression::Binary("^", CExpression::Identifier("x"),
+                                                                  CExpression::Identifier("y"))),
+              CExpression::Integer(1))))));
+
+  // `*out = (*out - ((u32)0 < (u32)flag));` -> `if ((flag != 0)) { *out = (*out - 1); }`
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*", CExpression::Identifier("out")),
+      CExpression::Binary(
+          "-", CExpression::Unary("*", CExpression::Identifier("out")),
+          CExpression::Binary("<", CExpression::Cast(CType::U32(), CExpression::Integer(0)),
+                              CExpression::Cast(CType::U32(), CExpression::Identifier("flag")))))));
+
+  EXPECT_TRUE(RecoverStoreFlagConditionals(&body));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("if ((x == y)) {\n        count = (count + 1);\n    }"));
+  EXPECT_THAT(rendered, HasSubstr("if ((flag != 0)) {\n        *out = (*out - 1);\n    }"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

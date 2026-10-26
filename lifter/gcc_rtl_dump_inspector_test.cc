@@ -221,5 +221,48 @@ void Dispatch(s32 cond, s32 x, s32* out) {
   EXPECT_FALSE(merged_or->PassMatches(*split_or, "Dispatch", RtlPassKind::kLreg));
 }
 
+TEST(GccRtlDumpInspectorTest, StoreFlagConditionalIncrementMatchesJumpPassOutput) {
+  auto inspector_or = GccRtlDumpInspector::Create();
+  ASSERT_TRUE(inspector_or.ok()) << inspector_or.status();
+
+  // `jump.c` (`BRANCH_COST == 2`) converts `if (a == b) count++;` in `.jump` into
+  // `emit_store_flag` + `expand_binop(add_optab)`, whereas raw `count += (a == b);` expands the
+  // store-flag in `.rtl` (`expr.c`).
+  auto if_inc_or = inspector_or->InspectC(R"(
+s32 CountEqual(s32 a, s32 b, s32 count) {
+  if (a == b) {
+    count = count + 1;
+  }
+  return count;
+}
+)");
+  ASSERT_TRUE(if_inc_or.ok()) << if_inc_or.status();
+
+  const auto* rtl_dump = if_inc_or->GetFunctionPass("CountEqual", RtlPassKind::kRtl);
+  const auto* jump_dump = if_inc_or->GetFunctionPass("CountEqual", RtlPassKind::kJump);
+  ASSERT_NE(rtl_dump, nullptr);
+  ASSERT_NE(jump_dump, nullptr);
+  // In `.rtl`, `if (a == b)` has a conditional `jump_insn`; in `.jump`, `jump.c` replaces the
+  // conditional jump with a branchless `xor` + `ltu` + `plus` sequence (`kJumpInsn` eliminated).
+  bool has_cond_jump_in_rtl = false;
+  for (const auto& insn : rtl_dump->insns) {
+    if (insn.kind == RtlInsnKind::kJumpInsn &&
+        insn.raw_sexpr.find("if_then_else") != std::string::npos) {
+      has_cond_jump_in_rtl = true;
+      break;
+    }
+  }
+  bool has_cond_jump_in_jump = false;
+  for (const auto& insn : jump_dump->insns) {
+    if (insn.kind == RtlInsnKind::kJumpInsn &&
+        insn.raw_sexpr.find("if_then_else") != std::string::npos) {
+      has_cond_jump_in_jump = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(has_cond_jump_in_rtl);
+  EXPECT_FALSE(has_cond_jump_in_jump);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

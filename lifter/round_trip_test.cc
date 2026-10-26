@@ -6477,5 +6477,27 @@ void NestedLoopWithGlobalTableBaseAndSentinelComparison(void) {
 )");
 }
 
+TEST_F(RoundTripTest, StoreFlagConditionalIncrementAndDecrementInLoop) {
+  AssertRoundTripBitExact("StoreFlagConditionalIncrementAndDecrementInLoop", R"(
+s32 StoreFlagConditionalIncrementAndDecrementInLoop(s32* arr, s32 n, s32 target) {
+    s32 score = 0;
+    if (n > 0) {
+        do {
+            s32 val = *arr;
+            if (val == target) {
+                score++;
+            }
+            if (val < 0) {
+                score--;
+            }
+            arr++;
+            n--;
+        } while (n != 0);
+    }
+    return score;
+}
+)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
