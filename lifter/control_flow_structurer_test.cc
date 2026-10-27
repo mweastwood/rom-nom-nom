@@ -1148,5 +1148,39 @@ TEST(ControlFlowStructurerTest, RegistersModularStructuringStrategiesAndRegionPa
   EXPECT_EQ(runs, 1);
 }
 
+TEST(ControlFlowStructurerTest, UnsharesPureEpilogueReturnBlockAcrossAcyclicBranchAndLoopExits) {
+  // Models GCC 2.7.2 function.c shared return_label epilogue block reached from:
+  // 1) An acyclic pre-loop guard (block 0 -> block 5 return),
+  // 2) An intra-loop early return exit (block 1 -> block 2 -> block 5 return),
+  // 3) The normal loop follow exit (block 3 -> block 4 -> block 5 return).
+  // None of these should emit a goto to block 5.
+  std::vector<uint32_t> words = {
+      0x1080000A,  // 0x00 (block 0):               beqz  $a0, +10 (to 0x2C block 5)
+      0x2402FFFF,  // 0x04:                         addiu $v0, $zero, -1
+      0x00001821,  // 0x08 (block 1, fallthrough):  move  $v1, $zero
+      0x8C880000,  // 0x0C (block 2, loop header):  lw    $t0, 0($a0)
+      0x51050004,  // 0x10:                         beql  $t0, $a1, +4 (to 0x24 block 4)
+      0x00601021,  // 0x14:                         move  $v0, $v1
+      0x24630001,  // 0x18 (block 3, latch):        addiu $v1, $v1, 1
+      0x1466FFFB,  // 0x1C:                         bne   $v1, $a2, -5 (to 0x0C block 2)
+      0x24840004,  // 0x20:                         addiu $a0, $a0, 4
+      0x0800000B,  // 0x24 (block 4, exit):         j     0x8000002C (to 0x2C block 5)
+      0x00000000,  // 0x28:                         nop
+      0x03E00008,  // 0x2C (block 5, epilogue):     jr    $ra
+      0x00000000,  // 0x30:                         nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

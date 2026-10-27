@@ -96,6 +96,159 @@ namespace {
 
 using CreateBlock = StructuredRegion;
 
+bool IsPureEpilogueReturnBlock(const BasicBlock& block) {
+  if (!block.successors.empty()) return false;
+  const Instruction* term = block.Terminator();
+  if (term == nullptr || !term->IsReturn()) return false;
+  for (const auto& inst : block.instructions) {
+    if (inst.IsNop() || inst.IsReturn()) continue;
+    if (inst.opcode == Opcode::kAddiu && inst.rt == Register::kSp && inst.rs == Register::kSp &&
+        inst.immediate >= 0) {
+      continue;
+    }
+    if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kDaddu ||
+         inst.opcode == Opcode::kOr) &&
+        inst.rd == Register::kSp && inst.rs == Register::kFp && inst.rt == Register::kZero) {
+      continue;
+    }
+    if ((inst.opcode == Opcode::kLw || inst.opcode == Opcode::kLd || inst.opcode == Opcode::kLwc1 ||
+         inst.opcode == Opcode::kLdc1) &&
+        (inst.rs == Register::kSp || inst.rs == Register::kFp)) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool RegionEndsWithReturn(const StructuredRegion& r, const ControlFlowGraph& cfg) {
+  switch (r.type) {
+    case RegionType::kBlock: {
+      const auto* blk = cfg.GetBlock(r.block_id);
+      return blk != nullptr && blk->successors.empty() && blk->Terminator() != nullptr &&
+             blk->Terminator()->IsReturn();
+    }
+    case RegionType::kSequence:
+      for (auto it = r.children.rbegin(); it != r.children.rend(); ++it) {
+        if (*it != nullptr) {
+          return RegionEndsWithReturn(**it, cfg);
+        }
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+bool CheckNonReturningPostDominance(const ControlFlowGraph& cfg, const DominatorTree* dom_tree,
+                                    const LoopInfo* loop_info,
+                                    const absl::flat_hash_set<uint32_t>& visited, uint32_t entry,
+                                    uint32_t start, uint32_t candidate_join,
+                                    const Loop* current_loop, bool require_reaches_candidate) {
+  if (candidate_join == entry || visited.contains(candidate_join)) {
+    return false;
+  }
+  if (current_loop != nullptr && !current_loop->Contains(candidate_join)) {
+    return false;
+  }
+  const auto* cand_blk = cfg.GetBlock(candidate_join);
+  if (cand_blk == nullptr || IsPureEpilogueReturnBlock(*cand_blk)) {
+    return false;
+  }
+
+  absl::flat_hash_set<uint32_t> downstream;
+  std::vector<uint32_t> worklist = {candidate_join};
+  while (!worklist.empty()) {
+    uint32_t u = worklist.back();
+    worklist.pop_back();
+    const auto* u_blk = cfg.GetBlock(u);
+    if (u_blk == nullptr || IsPureEpilogueReturnBlock(*u_blk)) continue;
+    if (!downstream.insert(u).second) continue;
+    for (uint32_t v : u_blk->successors) {
+      if (dom_tree != nullptr && dom_tree->Dominates(v, u)) continue;
+      worklist.push_back(v);
+    }
+  }
+
+  absl::flat_hash_set<uint32_t> branch_blocks;
+  bool reaches_candidate = false;
+  bool reaches_return = false;
+  worklist.clear();
+  worklist.push_back(start);
+  while (!worklist.empty()) {
+    uint32_t u = worklist.back();
+    worklist.pop_back();
+    if (u == candidate_join) {
+      reaches_candidate = true;
+      continue;
+    }
+    const auto* u_blk = cfg.GetBlock(u);
+    if (u_blk == nullptr) return false;
+    if (IsPureEpilogueReturnBlock(*u_blk)) {
+      reaches_return = true;
+      continue;
+    }
+    if (u == entry || visited.contains(u) || downstream.contains(u)) {
+      return false;
+    }
+    if (current_loop != nullptr && !current_loop->Contains(u)) {
+      return false;
+    }
+    if (!branch_blocks.insert(u).second) continue;
+    if (u_blk->successors.empty()) {
+      const Instruction* term = u_blk->Terminator();
+      if (term == nullptr || !term->IsReturn()) return false;
+      reaches_return = true;
+      continue;
+    }
+    for (uint32_t v : u_blk->successors) {
+      worklist.push_back(v);
+    }
+  }
+
+  if (!reaches_return) return false;
+  if (require_reaches_candidate && !reaches_candidate) return false;
+
+  if (reaches_candidate) {
+    absl::flat_hash_set<uint32_t> can_reach_cand = {candidate_join};
+    bool added = true;
+    while (added) {
+      added = false;
+      for (uint32_t u : branch_blocks) {
+        if (can_reach_cand.contains(u)) continue;
+        const auto* u_blk = cfg.GetBlock(u);
+        if (u_blk == nullptr) continue;
+        for (uint32_t v : u_blk->successors) {
+          if (can_reach_cand.contains(v)) {
+            can_reach_cand.insert(u);
+            added = true;
+            break;
+          }
+        }
+      }
+    }
+    for (uint32_t u : branch_blocks) {
+      if (loop_info != nullptr && loop_info->GetLoopFor(u) != current_loop) {
+        continue;
+      }
+      const auto* u_blk = cfg.GetBlock(u);
+      if (u_blk == nullptr || u_blk->successors.size() != 2) continue;
+      uint32_t s0 = u_blk->successors[0];
+      uint32_t s1 = u_blk->successors[1];
+      bool r0 = can_reach_cand.contains(s0);
+      bool r1 = can_reach_cand.contains(s1);
+      if (r0 != r1) {
+        uint32_t reaching_succ = r0 ? s0 : s1;
+        if (reaching_succ != candidate_join) {
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
 }  // namespace
 
 std::string StructuredRegion::ToString(int indent) const {
@@ -830,6 +983,8 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         (lf_it != loop_follow_map_.end()) ? std::optional<uint32_t>(lf_it->second) : follow;
     auto is_successor_of_loop_follow = [&](uint32_t target_id) {
       if (!loop_follow_target.has_value()) return false;
+      const auto* target_blk = cfg_->GetBlock(target_id);
+      if (target_blk != nullptr && IsPureEpilogueReturnBlock(*target_blk)) return false;
       const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
       return lf_blk != nullptr && lf_blk->successors.size() == 1 &&
              lf_blk->successors[0] == target_id;
@@ -861,10 +1016,14 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
       } else {
         auto exit_body = StructureRegion(succ_taken, loop_follow_target, nullptr);
         if (exit_body) {
-          auto seq = StructuredRegion::CreateSequence();
-          seq->children.push_back(std::move(exit_body));
-          seq->children.push_back(StructuredRegion::CreateBreak(succ_taken));
-          if_break->children.push_back(std::move(seq));
+          if (RegionEndsWithReturn(*exit_body, *cfg_)) {
+            if_break->children.push_back(std::move(exit_body));
+          } else {
+            auto seq = StructuredRegion::CreateSequence();
+            seq->children.push_back(std::move(exit_body));
+            seq->children.push_back(StructuredRegion::CreateBreak(succ_taken));
+            if_break->children.push_back(std::move(seq));
+          }
         } else {
           if_break->children.push_back(StructuredRegion::CreateBreak(succ_taken));
         }
@@ -890,11 +1049,27 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         if_break->children.push_back(StructuredRegion::CreateGoto(succ_fallthrough));
       } else {
         auto exit_body = StructureRegion(succ_fallthrough, loop_follow_target, nullptr);
+        const auto* sf_blk = cfg_->GetBlock(succ_fallthrough);
+        if (block->instructions.size() >= 2 &&
+            !block->instructions[block->instructions.size() - 2].IsBranchLikely() &&
+            block->instructions.back().IsNop() && sf_blk != nullptr &&
+            sf_blk->successors.size() == 1) {
+          uint32_t ret_id = sf_blk->successors[0];
+          const auto* ret_blk = cfg_->GetBlock(ret_id);
+          if (ret_blk != nullptr && IsPureEpilogueReturnBlock(*ret_blk) &&
+              ret_blk->instructions.size() == 2) {
+            visited_.insert(ret_id);
+          }
+        }
         if (exit_body) {
-          auto seq = StructuredRegion::CreateSequence();
-          seq->children.push_back(std::move(exit_body));
-          seq->children.push_back(StructuredRegion::CreateBreak(succ_fallthrough));
-          if_break->children.push_back(std::move(seq));
+          if (RegionEndsWithReturn(*exit_body, *cfg_)) {
+            if_break->children.push_back(std::move(exit_body));
+          } else {
+            auto seq = StructuredRegion::CreateSequence();
+            seq->children.push_back(std::move(exit_body));
+            seq->children.push_back(StructuredRegion::CreateBreak(succ_fallthrough));
+            if_break->children.push_back(std::move(seq));
+          }
         } else {
           if_break->children.push_back(StructuredRegion::CreateBreak(succ_fallthrough));
         }
@@ -911,6 +1086,54 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
   }
 
   std::optional<uint32_t> join = ComputeConditionalJoinBlock(entry, follow, current_loop);
+  if (join != succ_fallthrough && join != succ_taken &&
+      !DetectFloatToUintDiamond(entry, succ_taken, succ_fallthrough, join).has_value()) {
+    bool join_is_epilogue_or_empty = !join.has_value();
+    if (join.has_value()) {
+      const auto* join_blk = cfg_->GetBlock(*join);
+      if (join_blk == nullptr || IsPureEpilogueReturnBlock(*join_blk)) {
+        join_is_epilogue_or_empty = true;
+      }
+    }
+    if (join_is_epilogue_or_empty) {
+      if (CheckNonReturningPostDominance(
+              *cfg_, dom_tree_, loop_info_, visited_, entry, succ_fallthrough, succ_taken,
+              current_loop,
+              /*require_reaches_candidate=*/!(follow.has_value() && succ_taken == *follow))) {
+        join = succ_taken;
+      } else if (
+          CheckNonReturningPostDominance(
+              *cfg_, dom_tree_, loop_info_, visited_, entry, succ_taken, succ_fallthrough,
+              current_loop,
+              /*require_reaches_candidate=*/!(follow.has_value() && succ_fallthrough == *follow))) {
+        join = succ_fallthrough;
+      } else {
+        auto try_find_diamond_join = [&](uint32_t s_direct,
+                                         uint32_t s_other) -> std::optional<uint32_t> {
+          if (visited_.contains(s_direct) || s_direct == entry) return std::nullopt;
+          const auto* direct_blk = cfg_->GetBlock(s_direct);
+          if (direct_blk == nullptr || direct_blk->predecessors.size() != 1 ||
+              direct_blk->successors.size() != 1 || IsPureEpilogueReturnBlock(*direct_blk)) {
+            return std::nullopt;
+          }
+          uint32_t cand = direct_blk->successors[0];
+          if (cand == s_other || cand == s_direct) return std::nullopt;
+          if (CheckNonReturningPostDominance(*cfg_, dom_tree_, loop_info_, visited_, entry, s_other,
+                                             cand, current_loop,
+                                             /*require_reaches_candidate=*/true)) {
+            return cand;
+          }
+          return std::nullopt;
+        };
+        if (auto cand = try_find_diamond_join(succ_fallthrough, succ_taken); cand.has_value()) {
+          join = cand;
+        } else if (auto cand = try_find_diamond_join(succ_taken, succ_fallthrough);
+                   cand.has_value()) {
+          join = cand;
+        }
+      }
+    }
+  }
 
   auto float_diamond = DetectFloatToUintDiamond(entry, succ_taken, succ_fallthrough, join);
   if (float_diamond.has_value()) {
@@ -1180,13 +1403,18 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
         return StructuredRegion::CreateGoto(entry);
       }
       if (loop_follow_target.has_value()) {
+        const auto* entry_blk = cfg_->GetBlock(entry);
         const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
-        if (lf_blk != nullptr && lf_blk->successors.size() == 1 && lf_blk->successors[0] == entry) {
+        if ((entry_blk == nullptr || !IsPureEpilogueReturnBlock(*entry_blk)) && lf_blk != nullptr &&
+            lf_blk->successors.size() == 1 && lf_blk->successors[0] == entry) {
           return StructuredRegion::CreateGoto(entry);
         }
       }
       auto exit_body = StructureRegion(entry, loop_follow_target, nullptr);
       if (exit_body) {
+        if (RegionEndsWithReturn(*exit_body, *cfg_)) {
+          return exit_body;
+        }
         auto seq = StructuredRegion::CreateSequence();
         seq->children.push_back(std::move(exit_body));
         seq->children.push_back(StructuredRegion::CreateBreak(entry));
@@ -1219,10 +1447,12 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
     }
   }
 
-  visited_.insert(entry);
   const auto* block = cfg_->GetBlock(entry);
   if (block == nullptr) {
     return nullptr;
+  }
+  if (!IsPureEpilogueReturnBlock(*block)) {
+    visited_.insert(entry);
   }
 
   // Strategy 1: Jump-table switch structuring
@@ -1265,7 +1495,8 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
       const auto* term = block->Terminator();
       if (term != nullptr && term->opcode == Opcode::kJ) {
         const auto* succ_blk = cfg_->GetBlock(succ);
-        if (succ_blk != nullptr && succ_blk->predecessors.size() > 1) {
+        if (succ_blk != nullptr && !IsPureEpilogueReturnBlock(*succ_blk) &&
+            succ_blk->predecessors.size() > 1) {
           bool has_unvisited_fallthrough_pred = false;
           for (uint32_t pred : succ_blk->predecessors) {
             if (pred != entry && !visited_.contains(pred)) {

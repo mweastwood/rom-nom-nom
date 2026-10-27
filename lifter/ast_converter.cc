@@ -1791,6 +1791,12 @@ class ConverterContext {
 
     auto lifted_stmts = ExpressionBuilder::LiftBlock(
         filtered_block, BuildLiftContext(initial_fpr, initial_tracker), should_omit);
+    if (!goto_targets_.contains(block_id) && !omit_last_instruction && block->successors.empty() &&
+        !lifted_stmts.empty() &&
+        std::all_of(lifted_stmts.begin(), lifted_stmts.end(),
+                    [](const LiftedStatement& s) { return s.kind == StatementKind::kReturn; })) {
+      emitted_blocks_.erase(block_id);
+    }
     for (auto& lifted_stmt : lifted_stmts) {
       if (lifted_stmt.kind == StatementKind::kReturn) {
         if (returns_v0_) {

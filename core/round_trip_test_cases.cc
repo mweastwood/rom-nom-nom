@@ -7342,6 +7342,32 @@ void ShortCircuitIfElseWithStructScaleAndFloatCompare(u8* actor, s32 mode, f32 c
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "SearchMaskBitOrLoopWithSharedEpilogueReturns",
+          .function_name = "SearchMaskBitOrLoopWithSharedEpilogueReturns",
+          .original_c = R"(
+extern u32 g_bit_masks[32];
+
+s32 SearchMaskBitOrLoopWithSharedEpilogueReturns(u32 mask, s32 mode) {
+    s32 idx;
+    if (mode != 0) {
+        if ((mask & 1) != 0) {
+            return 0;
+        }
+        if ((mask & 2) != 0) {
+            return 1;
+        }
+        return -1;
+    }
+    for (idx = 0; idx < 32; idx++) {
+        if ((mask & ~g_bit_masks[idx]) == 0) {
+            return idx;
+        }
+    }
+    return -1;
+}
+)",
+      },
   };
   return *k_cases;
 }
