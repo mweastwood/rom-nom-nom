@@ -34,6 +34,102 @@ bool IsScratchConditionRegister(Register reg) {
          reg == Register::kT9;
 }
 
+bool IsScratchConditionFpRegister(FpRegister freg) {
+  return freg < FpRegister::kF20 && (freg < FpRegister::kF12 || freg > FpRegister::kF15);
+}
+
+bool IsFpuCompareOpcode(Opcode op) {
+  return op == Opcode::kCEqS || op == Opcode::kCEqD || op == Opcode::kCSeqS ||
+         op == Opcode::kCSeqD || op == Opcode::kCUeqS || op == Opcode::kCUeqD ||
+         op == Opcode::kCNglS || op == Opcode::kCNglD || op == Opcode::kCUnS ||
+         op == Opcode::kCUnD || op == Opcode::kCLtS || op == Opcode::kCLtD ||
+         op == Opcode::kCOltS || op == Opcode::kCOltD || op == Opcode::kCUltS ||
+         op == Opcode::kCUltD || op == Opcode::kCNgeS || op == Opcode::kCNgeD ||
+         op == Opcode::kCLeS || op == Opcode::kCLeD || op == Opcode::kCOleS ||
+         op == Opcode::kCOleD || op == Opcode::kCUleS || op == Opcode::kCUleD ||
+         op == Opcode::kCNgtS || op == Opcode::kCNgtD || op == Opcode::kCNgleS ||
+         op == Opcode::kCNgleD;
+}
+
+bool IsFpRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
+                                  FpRegister freg) {
+  absl::flat_hash_set<uint32_t> visited;
+  std::vector<uint32_t> worklist = {start_block_id};
+  while (!worklist.empty()) {
+    uint32_t blk_id = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(blk_id).second) continue;
+    const auto* blk = cfg.GetBlock(blk_id);
+    if (blk == nullptr) return false;
+    bool killed = false;
+    for (size_t i = 0; i < blk->instructions.size(); ++i) {
+      const auto& inst = blk->instructions[i];
+      if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
+          i + 1 < blk->instructions.size()) {
+        const auto& delay_inst = blk->instructions[i + 1];
+        bool annuls_delay = inst.IsBranchLikely();
+        RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+        for (FpRegister u : inst_ud.fpr_uses) {
+          if (u == freg) return false;
+        }
+        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+        for (FpRegister u : delay_ud.fpr_uses) {
+          if (u == freg) return false;
+        }
+        if (!annuls_delay) {
+          for (FpRegister d : delay_ud.fpr_defs) {
+            if (d == freg) {
+              killed = true;
+              break;
+            }
+          }
+        }
+        if (killed) break;
+        if (inst.IsCall()) {
+          if (freg >= FpRegister::kF12 && freg <= FpRegister::kF15) {
+            return false;
+          }
+          if (freg < FpRegister::kF20) {
+            killed = true;
+            break;
+          }
+        } else if (inst.IsReturn()) {
+          if ((freg == FpRegister::kF0 || freg == FpRegister::kF1) && DetermineReturnsF0(cfg)) {
+            return false;
+          }
+          killed = true;
+          break;
+        }
+        ++i;
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      for (FpRegister u : ud.fpr_uses) {
+        if (u == freg) return false;
+      }
+      for (FpRegister d : ud.fpr_defs) {
+        if (d == freg) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed) break;
+    }
+    if (!killed) {
+      if (blk->successors.empty()) {
+        if ((freg == FpRegister::kF0 || freg == FpRegister::kF1) && DetermineReturnsF0(cfg)) {
+          return false;
+        }
+        continue;
+      }
+      for (uint32_t succ : blk->successors) {
+        worklist.push_back(succ);
+      }
+    }
+  }
+  return true;
+}
+
 bool IsRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
                                 Register reg) {
   if (reg == Register::kZero || reg == Register::kAt) return true;
@@ -151,6 +247,8 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
       !delay_inst.IsNop() || delay_inst.unscheduled_clobber_reg.has_value()) {
     return false;
   }
+  const bool is_fpu_branch =
+      (branch_inst.opcode == Opcode::kBc1t || branch_inst.opcode == Opcode::kBc1f);
   switch (branch_inst.opcode) {
     case Opcode::kBeq:
     case Opcode::kBne:
@@ -158,16 +256,36 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
     case Opcode::kBgtz:
     case Opcode::kBltz:
     case Opcode::kBgez:
+    case Opcode::kBc1t:
+    case Opcode::kBc1f:
       break;
     default:
       return false;
   }
 
+  std::optional<FoldedComparison> folded_comp;
+  if (is_fpu_branch) {
+    folded_comp = BranchConditionBuilder::FindFoldedComparison(b->instructions);
+    if (!folded_comp.has_value()) {
+      return false;
+    }
+  }
+
   absl::flat_hash_set<Register> defined_in_block;
+  absl::flat_hash_set<FpRegister> defined_fpr_in_block;
   for (int i = 0; i < branch_idx; ++i) {
     const auto& inst = b->instructions[i];
     if (inst.IsNop()) {
       if (inst.unscheduled_clobber_reg.has_value()) return false;
+      continue;
+    }
+    if (is_fpu_branch && folded_comp.has_value() &&
+        static_cast<size_t>(i) == folded_comp->instruction_index &&
+        IsFpuCompareOpcode(inst.opcode)) {
+      RegisterUseDef cmp_ud = GetInstructionUseDef(inst);
+      if (!cmp_ud.gpr_defs.empty() || !cmp_ud.fpr_defs.empty() || cmp_ud.fpr_uses.empty()) {
+        return false;
+      }
       continue;
     }
     bool is_allowed_load = false;
@@ -205,6 +323,32 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
       case Opcode::kLbu:
         is_allowed_load = true;
         break;
+      case Opcode::kLwc1:
+      case Opcode::kLdc1:
+        if (!is_fpu_branch) return false;
+        is_allowed_load = true;
+        break;
+      case Opcode::kMtc1:
+      case Opcode::kMovS:
+      case Opcode::kMovD:
+      case Opcode::kCvtSD:
+      case Opcode::kCvtDS:
+      case Opcode::kCvtSW:
+      case Opcode::kCvtDW:
+      case Opcode::kAddS:
+      case Opcode::kSubS:
+      case Opcode::kMulS:
+      case Opcode::kDivS:
+      case Opcode::kAbsS:
+      case Opcode::kNegS:
+      case Opcode::kAddD:
+      case Opcode::kSubD:
+      case Opcode::kMulD:
+      case Opcode::kDivD:
+      case Opcode::kAbsD:
+      case Opcode::kNegD:
+        if (!is_fpu_branch) return false;
+        break;
       default:
         return false;
     }
@@ -219,13 +363,48 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
       }
     }
     RegisterUseDef ud = GetInstructionUseDef(inst);
-    if (ud.gpr_defs.size() != 1 || !ud.fpr_defs.empty() || !ud.fpr_uses.empty()) {
-      return false;
-    }
     for (Register u : ud.gpr_uses) {
       if (u == Register::kAt && !defined_in_block.contains(Register::kAt)) {
         return false;
       }
+    }
+    if (is_fpu_branch && ud.gpr_defs.empty() && ud.fpr_defs.size() == 1) {
+      FpRegister def_freg = ud.fpr_defs[0];
+      if (!IsScratchConditionFpRegister(def_freg)) {
+        return false;
+      }
+      int read_uses = 0;
+      for (int j = i + 1; j <= branch_idx; ++j) {
+        const auto& next_inst = b->instructions[j];
+        RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
+        for (FpRegister u : next_ud.fpr_uses) {
+          if (u == def_freg) {
+            ++read_uses;
+          }
+        }
+        if (j < branch_idx) {
+          bool redefined = false;
+          for (FpRegister d : next_ud.fpr_defs) {
+            if (d == def_freg) {
+              redefined = true;
+              break;
+            }
+          }
+          if (redefined) break;
+        }
+      }
+      if (read_uses != 1) {
+        return false;
+      }
+      if (!IsFpRegisterDeadAtBlockEntry(cfg, b->successors[0], def_freg) ||
+          !IsFpRegisterDeadAtBlockEntry(cfg, b->successors[1], def_freg)) {
+        return false;
+      }
+      defined_fpr_in_block.insert(def_freg);
+      continue;
+    }
+    if (ud.gpr_defs.size() != 1 || !ud.fpr_defs.empty() || !ud.fpr_uses.empty()) {
+      return false;
     }
     Register def_reg = ud.gpr_defs[0];
     if (!IsScratchConditionRegister(def_reg)) {
@@ -266,6 +445,10 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
         !IsRegisterDeadAtBlockEntry(cfg, b->successors[1], def_reg)) {
       return false;
     }
+  }
+
+  if (is_fpu_branch && defined_in_block.empty() && defined_fpr_in_block.empty()) {
+    return false;
   }
 
   RegisterUseDef branch_ud = GetInstructionUseDef(branch_inst);
@@ -1984,9 +2167,40 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
         return false;
       }
       const auto* prev_b = cfg.GetBlock(prev_id);
-      if (prev_b == nullptr || prev_b->instructions.empty() ||
-          !prev_b->instructions.back().IsNop()) {
+      if (prev_b == nullptr || prev_b->instructions.empty()) {
         return false;
+      }
+      if (!prev_b->instructions.back().IsNop() && prev_id != entry) {
+        return false;
+      }
+      const auto* entry_b = cfg.GetBlock(entry);
+      if (entry_b != nullptr && !entry_b->instructions.empty() &&
+          !entry_b->instructions.back().IsNop()) {
+        const auto& entry_delay = entry_b->instructions.back();
+        if (entry_delay.IsCall() || entry_delay.IsStore() || entry_delay.IsBranch() ||
+            entry_delay.IsJump() || entry_delay.IsReturn()) {
+          return false;
+        }
+        RegisterUseDef delay_ud = GetInstructionUseDef(entry_delay);
+        const auto* cand_b = cfg.GetBlock(cand_id);
+        if (cand_b == nullptr) {
+          return false;
+        }
+        for (const auto& inst : cand_b->instructions) {
+          RegisterUseDef ud = GetInstructionUseDef(inst);
+          for (Register d : delay_ud.gpr_defs) {
+            if (std::find(ud.gpr_uses.begin(), ud.gpr_uses.end(), d) != ud.gpr_uses.end() ||
+                std::find(ud.gpr_defs.begin(), ud.gpr_defs.end(), d) != ud.gpr_defs.end()) {
+              return false;
+            }
+          }
+          for (FpRegister fd : delay_ud.fpr_defs) {
+            if (std::find(ud.fpr_uses.begin(), ud.fpr_uses.end(), fd) != ud.fpr_uses.end() ||
+                std::find(ud.fpr_defs.begin(), ud.fpr_defs.end(), fd) != ud.fpr_defs.end()) {
+              return false;
+            }
+          }
+        }
       }
       if (DetectDecisionTreeSwitch(cfg, nullptr, visited, cand_id).has_value()) {
         return false;

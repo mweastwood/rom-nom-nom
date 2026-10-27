@@ -654,5 +654,104 @@ TEST(CfgDeReorgTest,
   EXPECT_EQ(pred_blk->predecessors.size(), 2u);
 }
 
+TEST(CfgDeReorgTest,
+     RelaxDelaySlotUnschedulerUnschedulesAcrossShortCircuitChainWithoutPostDominance) {
+  // Models a 3-branch short-circuit condition where:
+  // - Block 0 (0x00): `beq $a0, $zero, 0x2C (taken_block)` stole `addiu $v0, $a3, 4` from `0x28`
+  //   (`pred_blk`) into its non-likely delay slot (`$v0` is dead on fallthrough 0x08).
+  // - Block 1 (0x08): `beq $a1, $zero, 0x20 (then_ret)` branches to an early return (so `0x28`
+  //   does NOT post-dominate `0x08`), or falls through to Block 2 (0x10).
+  // - Block 2 (0x10): `bne $a2, $zero, 0x28 (pred_blk)` branches to `0x28` (`pred_blk`) or falls
+  //   through to `0x20` (`then_ret`).
+  // Because `0x08 -> 0x10 -> 0x28` can reach `pred_blk` (`0x28`) and preserves `$a3`,
+  // `RelaxDelaySlotUnschedulerPass` should retarget Block 0 from `0x2C` to `0x28` and replace its
+  // delay slot with `nop`.
+  std::vector<uint32_t> words = {
+      0x1080000A,  // 0x00: beq   $a0, $zero, +10 -> 0x2C (taken_block)
+      0x24E20004,  // 0x04: addiu $v0, $a3, 4 (stolen from 0x28)
+      0x10A00005,  // 0x08: beq   $a1, $zero, +5 -> 0x20 (then_ret)
+      0x00000000,  // 0x0C: nop
+      0x14C00005,  // 0x10: bne   $a2, $zero, +5 -> 0x28 (pred_blk)
+      0x00000000,  // 0x14: nop
+      0x08000008,  // 0x18: j     0x80000020 (then_ret)
+      0x00000000,  // 0x1C: nop
+      0x03E00008,  // 0x20 (then_ret): jr $ra
+      0x24020001,  // 0x24: addiu $v0, $zero, 1
+      0x24E20004,  // 0x28 (pred_blk): addiu $v0, $a3, 4 (falls through to 0x2C)
+      0x8C420000,  // 0x2C (taken_block): lw $v0, 0($v0)
+      0x03E00008,  // 0x30: jr    $ra
+      0x00000000,  // 0x34: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b0 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* pred_blk = cfg.FindBlockByVram(0x80000028);
+  ASSERT_NE(b0, nullptr);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_TRUE(b0->instructions.back().IsNop());
+  EXPECT_NE(std::find(b0->successors.begin(), b0->successors.end(), pred_blk->id),
+            b0->successors.end());
+}
+
+TEST(CfgDeReorgTest,
+     EagerThreadDelaySlotUnschedulerSinksCommonDelaySlotIntoMultiPredecessorJoinBlock) {
+  // Models a join block `0x20` (`bne $v0, $zero, 0x2C`) where every incoming predecessor ends by
+  // executing `andi $v0, $s1, 0xFF`:
+  // - Block 0 (0x00): `bne $a0, $zero, 0x20` with delay slot `andi $v0, $s1, 0xFF` (dead on
+  //   fallthrough 0x08 because 0x08 overwrites `$v0`).
+  // - Block 1 (0x08): `addiu $v0, $a1, -1; bne $v0, $zero, 0x20` with delay slot
+  //   `andi $v0, $s1, 0xFF` (dead on fallthrough 0x14).
+  // - Block 2 (0x14): fallthrough body `sw $zero, 0($a2); addiu $s1, $zero, 1; andi $v0, $s1, 0xFF`
+  //   falling through into `0x20`.
+  std::vector<uint32_t> words = {
+      0x14800007,  // 0x00: bne   $a0, $zero, +7 -> 0x20
+      0x322200FF,  // 0x04: andi  $v0, $s1, 0xFF
+      0x24A2FFFF,  // 0x08: addiu $v0, $a1, -1
+      0x14400004,  // 0x0C: bne   $v0, $zero, +4 -> 0x20
+      0x322200FF,  // 0x10: andi  $v0, $s1, 0xFF
+      0xAC800000,  // 0x14: sw    $zero, 0($a0)
+      0x24110001,  // 0x18: addiu $s1, $zero, 1
+      0x322200FF,  // 0x1C: andi  $v0, $s1, 0xFF (falls through to 0x20)
+      0x14400002,  // 0x20: bne   $v0, $zero, +2 -> 0x2C
+      0x00000000,  // 0x24: nop
+      0xAC820004,  // 0x28: sw    $v0, 4($a0)
+      0x03E00008,  // 0x2C: jr    $ra
+      0x00000000,  // 0x30: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  EagerThreadDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b0 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* b1 = cfg.FindBlockByVram(0x80000008);
+  const BasicBlock* b2 = cfg.FindBlockByVram(0x80000014);
+  const BasicBlock* join_blk = cfg.FindBlockByVram(0x80000020);
+  ASSERT_NE(b0, nullptr);
+  ASSERT_NE(b1, nullptr);
+  ASSERT_NE(b2, nullptr);
+  ASSERT_NE(join_blk, nullptr);
+  EXPECT_TRUE(b0->instructions.back().IsNop());
+  EXPECT_TRUE(b1->instructions.back().IsNop());
+  EXPECT_TRUE(b2->instructions.back().IsNop());
+  ASSERT_FALSE(join_blk->instructions.empty());
+  EXPECT_EQ(join_blk->instructions.front().opcode, Opcode::kAndi);
+  EXPECT_EQ(join_blk->instructions.front().rt, Register::kV0);
+  EXPECT_EQ(join_blk->instructions.front().rs, Register::kS1);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

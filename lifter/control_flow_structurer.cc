@@ -1070,7 +1070,8 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         const auto* sf_blk = cfg_->GetBlock(succ_fallthrough);
         if (block->instructions.size() >= 2 &&
             !block->instructions[block->instructions.size() - 2].IsBranchLikely() &&
-            block->instructions.back().IsNop() && sf_blk != nullptr &&
+            block->instructions.back().IsNop() &&
+            !block->instructions.back().was_unscheduled_delay_slot && sf_blk != nullptr &&
             sf_blk->successors.size() == 1) {
           uint32_t ret_id = sf_blk->successors[0];
           const auto* ret_blk = cfg_->GetBlock(ret_id);

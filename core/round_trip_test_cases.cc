@@ -7462,6 +7462,38 @@ s32 DecisionTreeSwitchWithSharedCrossSplitCaseAndBoundedLeaf(s16* cmd) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "ShortCircuitFloatBoundsWithIndexedFallbackTable",
+          .function_name = "ShortCircuitFloatBoundsWithIndexedFallbackTable",
+          .original_c = R"(
+extern u16 g_cam_flags;
+extern f32 g_cam_min_x;
+extern f32 g_cam_min_y;
+extern f32 g_cam_clamp_x;
+extern f32 g_cam_inner_x;
+extern f32 g_cam_table[76];
+
+f32 ShortCircuitFloatBoundsWithIndexedFallbackTable(u16 mode, u16 idx, f32 val) {
+    f32 result = 0.0f;
+    if (mode == 0) {
+        if (g_cam_flags & 1) {
+            if (g_cam_min_x < val && g_cam_min_y < val) {
+                if (val < g_cam_clamp_x) {
+                    if (!(val < g_cam_inner_x)) {
+                        result = g_cam_clamp_x;
+                    }
+                } else {
+                    result = g_cam_clamp_x;
+                }
+            } else {
+                result = g_cam_table[idx * 19];
+            }
+        }
+    }
+    return result;
+}
+)",
+      },
   };
   return *k_cases;
 }
