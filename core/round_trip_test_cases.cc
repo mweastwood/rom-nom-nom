@@ -7368,6 +7368,31 @@ s32 SearchMaskBitOrLoopWithSharedEpilogueReturns(u32 mask, s32 mode) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "BranchesWithCrossJumpedStoreAndIfReturnTail",
+          .function_name = "BranchesWithCrossJumpedStoreAndIfReturnTail",
+          .original_c = R"(
+extern s32 g_lock_state;
+extern s32 ProcessPrimaryEntry(s32* entry, s32 tag, s32 mode);
+extern s32 ProcessFallbackEntry(s32* entry, s32 tag, s32 mode);
+
+s32 BranchesWithCrossJumpedStoreAndIfReturnTail(s32* table, s32 tag, s32 mode) {
+    s32 res;
+    if (mode != 0) {
+        if (*table == tag) {
+            res = ProcessPrimaryEntry(table, tag, mode);
+            g_lock_state = 0;
+            return res;
+        }
+        res = ProcessFallbackEntry(table, tag, mode);
+    } else {
+        res = ProcessFallbackEntry(table, tag, 0);
+    }
+    g_lock_state = 0;
+    return res;
+}
+)",
+      },
   };
   return *k_cases;
 }

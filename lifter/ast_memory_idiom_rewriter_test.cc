@@ -325,37 +325,37 @@ TEST(AstMemoryIdiomRewriterTest, CollapseUnalignedBlockCopiesHandlesHalfwordTail
   EXPECT_THAT(body22.ToString(), HasSubstr("*(UnalignedBlock22*)arg0 = *(UnalignedBlock22*)arg1;"));
 }
 
-TEST(AstMemoryIdiomRewriterTest, RewritesGeneralizedPostIncrementPointerAccessForHalfwordAndWord) {
+TEST(AstMemoryIdiomRewriterTest, RewritesPostIncrementBytePointerStoreAndLoadWithScratchGpr) {
   CompoundStatement body;
 
-  // 1. Halfword post-increment store `temp_t0 = ptr16; ptr16 = temp_t0 + 2; *(s16*)temp_t0 = arg0;`
+  // 1. Byte post-increment store `temp_t0 = ptr8; ptr8 = temp_t0 + 1; *(u8*)temp_t0 = arg0;`
   body.AddStatement(CStatement::Expression(CExpression::Assignment(
-      "=", CExpression::Identifier("temp_t0"), CExpression::Identifier("ptr16"))));
+      "=", CExpression::Identifier("temp_t0"), CExpression::Identifier("ptr8"))));
   body.AddStatement(CStatement::Expression(CExpression::Assignment(
-      "=", CExpression::Identifier("ptr16"),
-      CExpression::Binary("+", CExpression::Identifier("temp_t0"), CExpression::Integer(2)))));
+      "=", CExpression::Identifier("ptr8"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t0"), CExpression::Integer(1)))));
   body.AddStatement(CStatement::Expression(CExpression::Assignment(
       "=",
       CExpression::Unary(
-          "*", CExpression::Cast(CType{"s16", false, 1}, CExpression::Identifier("temp_t0"))),
+          "*", CExpression::Cast(CType{"u8", false, 1}, CExpression::Identifier("temp_t0"))),
       CExpression::Identifier("arg0"))));
 
-  // 2. Word post-increment load `temp_t1 = ptr32; ptr32 = temp_t1 + 4; v0 = *(s32*)temp_t1;`
+  // 2. Byte post-increment load `temp_t1 = ptr8_src; ptr8_src = temp_t1 + 1; v0 = *(s8*)temp_t1;`
   body.AddStatement(CStatement::Expression(CExpression::Assignment(
-      "=", CExpression::Identifier("temp_t1"), CExpression::Identifier("ptr32"))));
+      "=", CExpression::Identifier("temp_t1"), CExpression::Identifier("ptr8_src"))));
   body.AddStatement(CStatement::Expression(CExpression::Assignment(
-      "=", CExpression::Identifier("ptr32"),
-      CExpression::Binary("+", CExpression::Identifier("temp_t1"), CExpression::Integer(4)))));
+      "=", CExpression::Identifier("ptr8_src"),
+      CExpression::Binary("+", CExpression::Identifier("temp_t1"), CExpression::Integer(1)))));
   body.AddStatement(CStatement::Expression(CExpression::Assignment(
       "=", CExpression::Identifier("v0"),
       CExpression::Unary(
-          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("temp_t1"))))));
+          "*", CExpression::Cast(CType{"s8", false, 1}, CExpression::Identifier("temp_t1"))))));
   body.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
 
   RewriteFramePointerStructOffsetAccesses(&body);
   std::string rendered = body.ToString();
-  EXPECT_THAT(rendered, HasSubstr("*(s16*)ptr16++ = arg0;"));
-  EXPECT_THAT(rendered, HasSubstr("*(s32*)ptr32++"));
+  EXPECT_THAT(rendered, HasSubstr("*(u8*)ptr8++ = arg0;"));
+  EXPECT_THAT(rendered, HasSubstr("*(s8*)ptr8_src++"));
 }
 
 }  // namespace

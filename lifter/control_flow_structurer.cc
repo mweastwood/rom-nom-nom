@@ -111,9 +111,15 @@ bool IsPureEpilogueReturnBlock(const BasicBlock& block) {
         inst.rd == Register::kSp && inst.rs == Register::kFp && inst.rt == Register::kZero) {
       continue;
     }
-    if ((inst.opcode == Opcode::kLw || inst.opcode == Opcode::kLd || inst.opcode == Opcode::kLwc1 ||
-         inst.opcode == Opcode::kLdc1) &&
-        (inst.rs == Register::kSp || inst.rs == Register::kFp)) {
+    if ((inst.opcode == Opcode::kLw || inst.opcode == Opcode::kLd) &&
+        (inst.rs == Register::kSp || inst.rs == Register::kFp) && inst.rt.has_value() &&
+        (*inst.rt == Register::kRa || *inst.rt == Register::kFp ||
+         (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7))) {
+      continue;
+    }
+    if ((inst.opcode == Opcode::kLwc1 || inst.opcode == Opcode::kLdc1) &&
+        (inst.rs == Register::kSp || inst.rs == Register::kFp) && inst.ft.has_value() &&
+        *inst.ft >= FpRegister::kF20 && *inst.ft <= FpRegister::kF31) {
       continue;
     }
     return false;
@@ -1003,6 +1009,17 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
       }
       return true;
     };
+    auto is_ancestor_loop_follow = [&](uint32_t target_id) {
+      const auto* target_blk = cfg_->GetBlock(target_id);
+      if (target_blk != nullptr && IsPureEpilogueReturnBlock(*target_blk)) return false;
+      for (const Loop* anc = current_loop->parent; anc != nullptr; anc = anc->parent) {
+        auto anc_it = loop_follow_map_.find(anc);
+        if (anc_it != loop_follow_map_.end() && anc_it->second == target_id) {
+          return true;
+        }
+      }
+      return false;
+    };
     if (current_loop->IsExitBlock(succ_taken) && !current_loop->IsExitBlock(succ_fallthrough)) {
       auto if_break = StructuredRegion::CreateIfThen(entry, /*invert=*/false);
       if ((follow.has_value() && succ_taken == *follow) ||
@@ -1011,7 +1028,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         if_break->children.push_back(StructuredRegion::CreateBreak(succ_taken));
       } else if ((current_loop->parent != nullptr && visited_.contains(succ_taken) &&
                   succ_taken == current_loop->parent->header) ||
-                 is_successor_of_loop_follow(succ_taken)) {
+                 is_successor_of_loop_follow(succ_taken) || is_ancestor_loop_follow(succ_taken)) {
         if_break->children.push_back(StructuredRegion::CreateGoto(succ_taken));
       } else {
         auto exit_body = StructureRegion(succ_taken, loop_follow_target, nullptr);
@@ -1045,7 +1062,8 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         if_break->children.push_back(StructuredRegion::CreateBreak(succ_fallthrough));
       } else if ((current_loop->parent != nullptr && visited_.contains(succ_fallthrough) &&
                   succ_fallthrough == current_loop->parent->header) ||
-                 is_successor_of_loop_follow(succ_fallthrough)) {
+                 is_successor_of_loop_follow(succ_fallthrough) ||
+                 is_ancestor_loop_follow(succ_fallthrough)) {
         if_break->children.push_back(StructuredRegion::CreateGoto(succ_fallthrough));
       } else {
         auto exit_body = StructureRegion(succ_fallthrough, loop_follow_target, nullptr);
@@ -1402,12 +1420,20 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureRegion(
           entry == current_loop->parent->header) {
         return StructuredRegion::CreateGoto(entry);
       }
-      if (loop_follow_target.has_value()) {
-        const auto* entry_blk = cfg_->GetBlock(entry);
-        const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
-        if ((entry_blk == nullptr || !IsPureEpilogueReturnBlock(*entry_blk)) && lf_blk != nullptr &&
-            lf_blk->successors.size() == 1 && lf_blk->successors[0] == entry) {
-          return StructuredRegion::CreateGoto(entry);
+      const auto* entry_blk = cfg_->GetBlock(entry);
+      if (entry_blk == nullptr || !IsPureEpilogueReturnBlock(*entry_blk)) {
+        for (const Loop* anc = current_loop->parent; anc != nullptr; anc = anc->parent) {
+          auto anc_it = loop_follow_map_.find(anc);
+          if (anc_it != loop_follow_map_.end() && anc_it->second == entry) {
+            return StructuredRegion::CreateGoto(entry);
+          }
+        }
+        if (loop_follow_target.has_value()) {
+          const auto* lf_blk = cfg_->GetBlock(*loop_follow_target);
+          if (lf_blk != nullptr && lf_blk->successors.size() == 1 &&
+              lf_blk->successors[0] == entry) {
+            return StructuredRegion::CreateGoto(entry);
+          }
         }
       }
       auto exit_body = StructureRegion(entry, loop_follow_target, nullptr);

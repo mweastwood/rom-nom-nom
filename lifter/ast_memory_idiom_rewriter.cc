@@ -614,9 +614,12 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
       });
     }
 
-    // 2. Fold post-increment pointer stores and loads (`stride == sizeof(*ptr)`):
-    //    `vX = ptr; ptr = (vX + stride); *(T*)vX = val;` -> `*(T*)ptr++ = val;`
-    //    `vX = ptr; ptr = (vX + stride); vY = *(T*)vX;` -> `vY = *(T*)ptr++;`
+    // 2. Fold post-increment pointer stores and loads (`stride == 1`):
+    //    `vX = ptr; ptr = (vX + 1); *(T*)vX = val;` -> `*(T*)ptr++ = val;`
+    //    `vX = ptr; ptr = (vX + 1); vY = *(T*)vX;` -> `vY = *(T*)ptr++;`
+    //    Note: In the lifted C AST, `*(T*)ptr++` parses as `*((T*)(ptr++))`, where `ptr` is an
+    //    integer local (`s32`), so `ptr++` increments `ptr` by 1 byte, which is only equivalent
+    //    to `ptr = (vX + stride)` when `stride == 1` (`sizeof(*ptr) == 1`).
     for (size_t i = 0; i + 2 < stmts.size();) {
       if (stmts[i] != nullptr && stmts[i + 1] != nullptr && stmts[i + 2] != nullptr &&
           stmts[i]->Kind() == CStatementKind::kExpressionStatement &&
@@ -646,7 +649,7 @@ void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body) {
                 b1.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
               int64_t stride = static_cast<const IntegerLiteralExpression&>(b1.Rhs()).Value();
               auto match_deref_of_vx = [&](const CExpression& expr, CType* out_ptr_type) -> bool {
-                if (stride <= 0 || expr.Kind() != CExpressionKind::kUnaryExpression) return false;
+                if (stride != 1 || expr.Kind() != CExpressionKind::kUnaryExpression) return false;
                 const auto& u = static_cast<const UnaryExpression&>(expr);
                 if (u.Op() != "*" || u.Operand().Kind() != CExpressionKind::kCastExpression) {
                   return false;

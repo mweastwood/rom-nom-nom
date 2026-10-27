@@ -601,5 +601,40 @@ TEST(AstPassPipelineTest, InferAndPromoteNarrowCondSteppedVarsHandlesU8MaskAndNo
   EXPECT_THAT(body->ToString(), HasSubstr("((u8)(temp_s0 + (u8)arg2) & 255)"));
 }
 
+TEST(AstPassPipelineTest, CrossJumpedCallTailInlinerInlinesIntraLoopReturnTailAndIfDiamondTail) {
+  CompoundStatement body;
+
+  // 1) Intra-loop shared store+return tail `block_17: g_busy_flag = 0; return v0;` jumped to from
+  // after the loop.
+  auto loop_if_then = std::make_unique<CompoundStatement>();
+  loop_if_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("temp_t1"))));
+  loop_if_then->AddStatement(CStatement::Label("block_17"));
+  loop_if_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("g_busy_flag"), CExpression::Integer(0))));
+  loop_if_then->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("temp_t0"), CExpression::Integer(1)),
+      std::move(loop_if_then)));
+  body.AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0))));
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(7))));
+  body.AddStatement(CStatement::Goto("block_17"));
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::S32()};
+  CrossJumpedCallTailInlinerPass pass(/*allow_diamond_tails=*/true);
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, Not(HasSubstr("goto block_17")));
+  EXPECT_THAT(rendered, Not(HasSubstr("block_17:")));
+  EXPECT_THAT(rendered, HasSubstr("v0 = 7;\n    g_busy_flag = 0;\n    return v0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
