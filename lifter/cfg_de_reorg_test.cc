@@ -450,6 +450,42 @@ TEST(CfgDeReorgTest, DuplicatesCrossJumpedTailWithNonNopDelaySlotsAndSinksFprDel
   EXPECT_EQ(ft_blk->instructions.front().opcode, Opcode::kLwc1);
 }
 
+TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsIntraLoopAndAcyclicJoinBlocks) {
+  // 0x80000000: bne   $a0, $zero, 0x80000010 (0x14800003 -> B_else at 0x80000010)
+  // 0x80000004: nop                          (0x00000000)
+  // 0x80000008: j     0x80000024             (0x08000009 -> B_join at 0x80000024)
+  // 0x8000000C: sw    $a1, 0($a2)            (0xAC850000)
+  // 0x80000010: bnel  $a1, $zero, 0x80000028 (0x54A00005 -> B_after at 0x80000028, bypassing
+  // B_join) 0x80000014: addiu $a2, $a2, 4            (0x24C60004) -- stolen from B_join!
+  // 0x80000018: beq   $a3, $zero, 0x80000024 (0x10E00002 -> B_join at 0x80000024)
+  // 0x8000001C: nop                          (0x00000000)
+  // 0x80000020: sw    $zero, 0($a2)          (0xAC800000)
+  // 0x80000024: addiu $a2, $a2, 4            (0x24C60004) -- B_join (1-insn fallthrough into
+  // B_after) 0x80000028: jr    $ra                    (0x03E00008) -- B_after 0x8000002C: addu $v0,
+  // $a2, $zero        (0x00C01021)
+  std::vector<uint32_t> words = {
+      0x14800003, 0x00000000, 0x08000009, 0xAC850000, 0x54A00005, 0x24C60004,
+      0x10E00002, 0x00000000, 0xAC800000, 0x24C60004, 0x03E00008, 0x00C01021,
+  };
+  auto insts = DecodeSequence(words, 0x80000000);
+  ASSERT_TRUE(insts.ok());
+  auto cfg_or = ControlFlowGraph::Build(*insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const auto* else_blk = cfg.FindBlockByVram(0x80000010);
+  const auto* join_blk = cfg.FindBlockByVram(0x80000024);
+  ASSERT_NE(else_blk, nullptr);
+  ASSERT_NE(join_blk, nullptr);
+  ASSERT_NE(else_blk->Terminator(), nullptr);
+  EXPECT_EQ(else_blk->Terminator()->opcode, Opcode::kBne);
+  EXPECT_TRUE(else_blk->instructions.back().IsNop());
+  EXPECT_NE(std::find(else_blk->successors.begin(), else_blk->successors.end(), join_blk->id),
+            else_blk->successors.end());
+}
+
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
   ASSERT_EQ(pipeline.PassCount(), 5u);

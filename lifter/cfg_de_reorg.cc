@@ -809,9 +809,19 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
     analyses->SetCfg(cfg);
   }
   const LoopInfo& loop_info = analyses->GetLoopInfo();
+  const DominatorTree& post_dom_tree = analyses->GetPostDominatorTree();
   const bool returns_f0 = AbiAnalyzer::DetermineReturnsF0(*cfg);
   const bool returns_v0 = !returns_f0 && AbiAnalyzer::DetermineReturnsV0(*cfg);
   const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
+  absl::flat_hash_set<uint32_t> jump_table_target_vrams;
+  for (const auto& jt : cfg->JumpTables()) {
+    if (jt.default_target_vram != 0) {
+      jump_table_target_vrams.insert(jt.default_target_vram);
+    }
+    for (const auto& entry : jt.entries) {
+      jump_table_target_vrams.insert(entry.target_vram);
+    }
+  }
 
   bool changed = false;
   for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
@@ -825,12 +835,51 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
     }
     const Instruction term = *term_ptr;
     const Instruction delay_inst = block.instructions.back();
-    if (delay_inst.IsNop() || !term.IsBranch() || term.IsUnconditionalBranch() ||
-        block.successors.size() != 2 || jump_table_bounds_vrams.contains(term.vram)) {
+    if (delay_inst.IsNop() || jump_table_bounds_vrams.contains(term.vram)) {
       continue;
     }
     const Loop* enclosing_loop = loop_info.GetLoopFor(block.id);
     if (enclosing_loop != nullptr && enclosing_loop->IsLatch(block.id)) {
+      continue;
+    }
+
+    if (term.opcode == Opcode::kJ && block.successors.size() == 1 &&
+        IsSinkableDelaySlotInstruction(block, delay_inst)) {
+      const uint32_t succ_taken = block.successors[0];
+      BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
+      if (taken_block != nullptr && succ_taken != block.id &&
+          taken_block->predecessors.size() == 2 &&
+          (enclosing_loop == nullptr || succ_taken != enclosing_loop->header)) {
+        const Loop* target_loop = loop_info.GetLoopFor(succ_taken);
+        std::optional<uint32_t> pred_block_id;
+        for (uint32_t pred_id : taken_block->predecessors) {
+          if (pred_id == block.id) continue;
+          const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+          const Loop* pred_loop = loop_info.GetLoopFor(pred_id);
+          if (pred_blk != nullptr && pred_loop == enclosing_loop && target_loop == enclosing_loop &&
+              !jump_table_target_vrams.contains(pred_blk->start_vram) &&
+              pred_blk->predecessors.size() >= 2 && pred_blk->instructions.size() == 1 &&
+              pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
+              pred_blk->end_vram + 4 == taken_block->start_vram &&
+              SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front())) {
+            pred_block_id = pred_id;
+            break;
+          }
+        }
+        if (pred_block_id.has_value()) {
+          const BasicBlock* pred_blk = cfg->GetBlock(*pred_block_id);
+          RetargetBranchEdge(cfg, block.id, succ_taken, *pred_block_id);
+          block.instructions[block.instructions.size() - 2].target =
+              (pred_blk->start_vram >> 2) & 0x03FFFFFF;
+          block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+          changed = true;
+          continue;
+        }
+      }
+      continue;
+    }
+
+    if (!term.IsBranch() || term.IsUnconditionalBranch() || block.successors.size() != 2) {
       continue;
     }
 
@@ -869,13 +918,66 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
         continue;
       }
       const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+      const Loop* pred_loop = loop_info.GetLoopFor(pred_id);
+      auto uses_preserved_to_pred = [&]() {
+        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+        if (delay_ud.gpr_uses.empty() && delay_ud.fpr_uses.empty()) {
+          return true;
+        }
+        absl::flat_hash_set<uint32_t> visited_path = {pred_id};
+        std::vector<uint32_t> stack = {succ_fallthrough};
+        while (!stack.empty()) {
+          uint32_t cur_id = stack.back();
+          stack.pop_back();
+          if (!visited_path.insert(cur_id).second) continue;
+          const BasicBlock* cur_blk = cfg->GetBlock(cur_id);
+          if (cur_blk == nullptr) return false;
+          for (const auto& inst : cur_blk->instructions) {
+            if (inst.IsCall()) {
+              for (Register u : delay_ud.gpr_uses) {
+                if (u < Register::kS0 || u > Register::kFp) return false;
+              }
+              for (FpRegister fu : delay_ud.fpr_uses) {
+                if (fu < FpRegister::kF20) return false;
+              }
+            }
+            RegisterUseDef ud = GetInstructionUseDef(inst);
+            for (Register d : ud.gpr_defs) {
+              if (std::find(delay_ud.gpr_uses.begin(), delay_ud.gpr_uses.end(), d) !=
+                  delay_ud.gpr_uses.end()) {
+                return false;
+              }
+            }
+            for (FpRegister fd : ud.fpr_defs) {
+              if (std::find(delay_ud.fpr_uses.begin(), delay_ud.fpr_uses.end(), fd) !=
+                  delay_ud.fpr_uses.end()) {
+                return false;
+              }
+            }
+          }
+          for (uint32_t s : cur_blk->successors) {
+            if (s != pred_id) stack.push_back(s);
+          }
+        }
+        return true;
+      };
+      const bool same_loop_non_header =
+          pred_loop == enclosing_loop && target_loop == enclosing_loop &&
+          (enclosing_loop == nullptr || succ_taken != enclosing_loop->header) &&
+          pred_blk != nullptr && !jump_table_target_vrams.contains(pred_blk->start_vram) &&
+          pred_blk->end_vram + 4 == taken_block->start_vram &&
+          taken_block->predecessors.size() == 2 &&
+          post_dom_tree.Dominates(pred_id, succ_fallthrough) &&
+          IsSinkableDelaySlotInstruction(block, delay_inst) && uses_preserved_to_pred();
+      const bool cross_loop_valid =
+          (enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
+           !enclosing_loop->Contains(pred_id)) ||
+          (target_loop != nullptr && target_loop->header == succ_taken &&
+           !target_loop->Contains(block.id) && !target_loop->Contains(pred_id));
       if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
           pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
           SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
-          ((enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
-            !enclosing_loop->Contains(pred_id)) ||
-           (target_loop != nullptr && target_loop->header == succ_taken &&
-            !target_loop->Contains(block.id) && !target_loop->Contains(pred_id)))) {
+          (same_loop_non_header || cross_loop_valid)) {
         pred_block_id = pred_id;
         break;
       }

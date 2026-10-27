@@ -7284,6 +7284,40 @@ u8 GeneralizedNarrowU8ConditionalStepAndCall(u8 val, s32 cond, s32 extra) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "NormalizePathSlashesAndCaseWithIntraLoopTargetStolenJoin",
+          .function_name = "NormalizePathSlashesAndCaseWithIntraLoopTargetStolenJoin",
+          .original_c = R"(
+void NormalizePathSlashesAndCaseWithIntraLoopTargetStolenJoin(u8* buf, s32 len) {
+    s32 has_lower = 0;
+    if (len > 0) {
+        u8* p = buf;
+        u8* end = buf + len;
+        do {
+            if ((u32)(*p - 97) < 26) {
+                has_lower = 1;
+                break;
+            }
+            p++;
+        } while (p < end);
+    }
+    if (len > 0) {
+        u8* end = buf + len;
+        do {
+            u8 c = *buf;
+            if (c == 92) {
+                *buf = 47;
+            } else if (has_lower == 0) {
+                if ((u32)(c - 65) < 26) {
+                    *buf = (u8)(c + 32);
+                }
+            }
+            buf++;
+        } while (buf < end);
+    }
+}
+)",
+      },
   };
   return *k_cases;
 }
