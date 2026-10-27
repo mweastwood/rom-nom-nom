@@ -543,9 +543,9 @@ TEST_F(RomBuilderTest, SkipsUndefinedAutoScriptsWhenLiftedSymbolsPresent) {
   std::filesystem::path lifted_symbols =
       CreateFile(src_dir_ / "lifted_symbols.ld", "lifted_sym = 0x80010000;\n");
   std::filesystem::path undef_syms =
-      CreateFile(build_dir_ / "undefined_syms_auto.test_game.ld", "undef_sym = 0x80020000;\n");
+      CreateFile(build_dir_ / "undefined_syms_auto.txt", "undef_sym = 0x80020000;\n");
   std::filesystem::path undef_funcs =
-      CreateFile(build_dir_ / "undefined_funcs_auto.test_game.ld", "undef_func = 0x80030000;\n");
+      CreateFile(build_dir_ / "undefined_funcs_auto.txt", "undef_func = 0x80030000;\n");
 
   CreateFile(build_dir_ / "test_game.ld", R"(
 SECTIONS
@@ -775,6 +775,84 @@ SECTIONS
 
   EXPECT_THAT(boot_compiler_arguments, ::testing::Contains("-O2"));
   EXPECT_THAT(audio_compiler_arguments, ::testing::Contains("-O3"));
+}
+
+TEST_F(RomBuilderTest, DoesNotImplicitlyLoadConfigTuningCacheFileWhenUnset) {
+  CreateFile(src_dir_ / "c" / "test_game" / "boot.c", "void boot(void) {}");
+
+  CreateFile(build_dir_ / "test_game.ld", R"(
+SECTIONS
+{
+    .boot : { build/src/boot.o(.text*); }
+}
+)");
+
+  // Create config/test_game.tuning.textproto on disk, but do NOT set tuning_cache_file in
+  // GameConfig and do NOT create src_dir/tuned_c_flags.textproto.
+  CreateFile(test_dir_ / "config" / "test_game.tuning.textproto", R"pb(
+    game_name: "test_game"
+    module_c_flags {
+      key: "boot"
+      value { flags: "-O2" }
+    }
+  )pb");
+
+  std::filesystem::path config_path = CreateFile(test_dir_ / "config.textproto", R"pb(
+    game_name: "test_game"
+    basename: "test_game"
+    sha1: "0000000000000000000000000000000000000000"
+    c_flags {
+      key: "boot"
+      value { flags: "-O0" }
+    }
+    segments {
+      name: "code"
+      rom_start: 0x0
+      rom_end: 0x10
+      vram: 0x80000000
+      type: SEGMENT_CODE
+      subsegments { name: "boot" rom_start: 0x0 type: SUBSEGMENT_C }
+    }
+  )pb");
+
+  std::filesystem::path output_elf = test_dir_ / "out" / "test_game.elf";
+  std::filesystem::path output_rom = test_dir_ / "out" / "test_game.z64";
+
+  std::vector<std::string> boot_compiler_arguments;
+  auto mock_runner = [&](const ProcessOptions& process_options) -> absl::StatusOr<ProcessResult> {
+    for (const auto& argument : process_options.args) {
+      if (argument == (src_dir_ / "c" / "test_game" / "boot.c").string()) {
+        boot_compiler_arguments = process_options.args;
+      }
+    }
+    if (process_options.args.size() >= 4 && process_options.args[1] == "binary" &&
+        process_options.args[3] == output_rom.string()) {
+      std::filesystem::create_directories(output_rom.parent_path());
+      std::ofstream(output_rom, std::ios::binary).write("1234567890123456", 16);
+    }
+    ProcessResult process_result;
+    process_result.exit_code = 0;
+    return process_result;
+  };
+
+  Compiler compiler(toolchain_, mock_runner);
+  RomBuilderOptions builder_options{
+      .game_name = "test_game",
+      .config_path = config_path,
+      .src_dir = src_dir_,
+      .asm_dir = asm_dir_,
+      .build_dir = build_dir_,
+      .assets_dir = assets_dir_,
+      .out_elf = output_elf,
+      .out_rom = output_rom,
+  };
+
+  RomBuilder builder(toolchain_, builder_options, compiler);
+  auto result_or = builder.Build();
+  ASSERT_TRUE(result_or.ok()) << result_or.status();
+
+  EXPECT_THAT(boot_compiler_arguments, ::testing::Contains("-O0"));
+  EXPECT_THAT(boot_compiler_arguments, ::testing::Not(::testing::Contains("-O2")));
 }
 
 TEST_F(RomBuilderTest, BuildCompilesCModuleWithPerFunctionFlagsUsingAssemblySplicing) {

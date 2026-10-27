@@ -22,12 +22,25 @@ namespace rom_nom_nom {
 struct CandidateScore {
   bool raw_bit_exact = false;
   bool normalized_exact = false;
+  bool frame_size_matches = false;
+  bool saved_registers_match = false;
+  bool cfg_topology_matches = false;
+  size_t normalized_lcs_instructions = 0;
   size_t bit_exact_instructions = 0;
   size_t matching_instructions = 0;
   size_t differing_instructions = 0;
   size_t target_instruction_count = 0;
   size_t compiled_instruction_count = 0;
   std::vector<uint32_t> patched_words;
+
+  bool IsStructurallyIsomorphic() const {
+    return frame_size_matches && saved_registers_match && cfg_topology_matches;
+  }
+
+  int StructuralMatchCount() const {
+    return static_cast<int>(frame_size_matches) + static_cast<int>(saved_registers_match) +
+           static_cast<int>(cfg_topology_matches);
+  }
 
   size_t SizeDelta() const {
     return compiled_instruction_count > target_instruction_count

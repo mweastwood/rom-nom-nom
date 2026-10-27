@@ -130,6 +130,7 @@ cc_library(
     deps = [
         "//core:candidate_compiler",
         "//core:mips",
+        "//core:register_tracker",
         "//core:symbol_registry",
         "//core:target_extractor",
         "//differ:normalizer",

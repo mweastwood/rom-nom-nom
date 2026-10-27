@@ -12,6 +12,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/candidate_compiler.h"
+#include "core/register_tracker.h"
 #include "differ/normalizer.h"
 #include "differ/sequence_aligner.h"
 #include "fuzzer/differential_fuzzer.h"
@@ -24,6 +25,18 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
   }
   if (normalized_exact != other.normalized_exact) {
     return normalized_exact;
+  }
+  if (StructuralMatchCount() != other.StructuralMatchCount()) {
+    return StructuralMatchCount() > other.StructuralMatchCount();
+  }
+  if (cfg_topology_matches != other.cfg_topology_matches) {
+    return cfg_topology_matches;
+  }
+  if (saved_registers_match != other.saved_registers_match) {
+    return saved_registers_match;
+  }
+  if (frame_size_matches != other.frame_size_matches) {
+    return frame_size_matches;
   }
   const int64_t net_bit_exact =
       static_cast<int64_t>(bit_exact_instructions) * 2 - static_cast<int64_t>(SizeDelta());
@@ -168,6 +181,15 @@ CandidateScore CandidateScorer::ScoreInstructions(
   score.compiled_instruction_count = alignment.stats.compiled_instruction_count;
   score.normalized_exact = alignment.stats.IsBitExactMatch();
   score.patched_words.assign(patched_words.begin(), patched_words.end());
+
+  if (!target_words.empty() && !patched_words.empty()) {
+    FunctionStructuralComparison structural =
+        CompareFunctionStructure(target_words, target.vram, patched_words, target.vram);
+    score.frame_size_matches = structural.frame_size_matches;
+    score.saved_registers_match = structural.saved_registers_match;
+    score.cfg_topology_matches = structural.cfg_topology_matches;
+    score.normalized_lcs_instructions = structural.normalized_lcs_instructions;
+  }
 
   if (!target_words.empty() && patched_words.size() == target_words.size()) {
     bool all_equal = true;

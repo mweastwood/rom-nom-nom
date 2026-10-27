@@ -76,12 +76,6 @@ absl::StatusOr<LoadedConfigAndFlags> LoadGameConfigAndTuningFlags(
     if (cache_file.is_relative()) {
       cache_file = repo_root / cache_file;
     }
-  } else if (!loaded.config.basename().empty()) {
-    std::filesystem::path default_cache =
-        repo_root / "config" / absl::StrCat(loaded.config.basename(), ".tuning.textproto");
-    if (std::filesystem::exists(default_cache, ec)) {
-      cache_file = default_cache;
-    }
   }
   if (!cache_file.empty() && std::filesystem::exists(cache_file, ec)) {
     auto cache_or = LoadTuningCache(cache_file);

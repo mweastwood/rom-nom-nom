@@ -134,5 +134,35 @@ TEST(CandidateScorerTest, IsBetterThanPenalizesMassiveCodeSizeBloat) {
   EXPECT_FALSE(bloated_o0.IsBetterThan(compact_o2));
 }
 
+TEST(CandidateScorerTest, IsBetterThanPreservesStructuralIsomorphismOverAccidentalInstructionHits) {
+  CandidateScore isomorphic_baseline;
+  isomorphic_baseline.target_instruction_count = 30;
+  isomorphic_baseline.compiled_instruction_count = 30;
+  isomorphic_baseline.bit_exact_instructions = 20;
+  isomorphic_baseline.matching_instructions = 22;
+  isomorphic_baseline.frame_size_matches = true;
+  isomorphic_baseline.saved_registers_match = true;
+  isomorphic_baseline.cfg_topology_matches = true;
+  EXPECT_TRUE(isomorphic_baseline.IsStructurallyIsomorphic());
+
+  CandidateScore regressed_structure;
+  regressed_structure.target_instruction_count = 30;
+  regressed_structure.compiled_instruction_count = 30;
+  regressed_structure.bit_exact_instructions = 24;  // +4 accidental raw instruction matches
+  regressed_structure.matching_instructions = 25;
+  regressed_structure.frame_size_matches = false;  // Broke stack frame size!
+  regressed_structure.saved_registers_match = true;
+  regressed_structure.cfg_topology_matches = true;
+  EXPECT_FALSE(regressed_structure.IsStructurallyIsomorphic());
+
+  EXPECT_TRUE(isomorphic_baseline.IsBetterThan(regressed_structure));
+  EXPECT_FALSE(regressed_structure.IsBetterThan(isomorphic_baseline));
+
+  // Only a genuinely bit-exact candidate may supersede a structurally isomorphic baseline
+  CandidateScore bit_exact_candidate = regressed_structure;
+  bit_exact_candidate.raw_bit_exact = true;
+  EXPECT_TRUE(bit_exact_candidate.IsBetterThan(isomorphic_baseline));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
