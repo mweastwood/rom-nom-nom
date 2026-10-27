@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/types/span.h"
 #include "core/control_flow_graph.h"
@@ -16,6 +17,7 @@
 #include "lifter/branch_condition_builder.h"
 #include "lifter/cfg_analysis_manager.h"
 #include "lifter/cfg_pass_pipeline.h"
+#include "lifter/control_flow_pattern_matcher.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/loop_analyzer.h"
 
@@ -85,6 +87,37 @@ bool SameDelayInstructionEffect(const Instruction& a, const Instruction& b) {
   return !a.IsNop() && a.opcode == b.opcode && a.rs == b.rs && a.rt == b.rt && a.rd == b.rd &&
          a.immediate == b.immediate && a.fs == b.fs && a.ft == b.ft && a.fd == b.fd &&
          a.shift_amount == b.shift_amount;
+}
+
+bool IsPureEpilogueReturnBlock(const BasicBlock& block) {
+  if (!block.successors.empty()) return false;
+  const Instruction* term = block.Terminator();
+  if (term == nullptr || !term->IsReturn()) return false;
+  for (const auto& inst : block.instructions) {
+    if (inst.IsNop() || inst.IsReturn()) continue;
+    if (inst.opcode == Opcode::kAddiu && inst.rt == Register::kSp && inst.rs == Register::kSp &&
+        inst.immediate >= 0) {
+      continue;
+    }
+    if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kDaddu ||
+         inst.opcode == Opcode::kOr) &&
+        inst.rd == Register::kSp && inst.rs == Register::kFp && inst.rt == Register::kZero) {
+      continue;
+    }
+    if ((inst.opcode == Opcode::kLw || inst.opcode == Opcode::kLd) &&
+        (inst.rs == Register::kSp || inst.rs == Register::kFp) && inst.rt.has_value() &&
+        (*inst.rt == Register::kRa || *inst.rt == Register::kFp ||
+         (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7))) {
+      continue;
+    }
+    if ((inst.opcode == Opcode::kLwc1 || inst.opcode == Opcode::kLdc1) &&
+        (inst.rs == Register::kSp || inst.rs == Register::kFp) && inst.ft.has_value() &&
+        *inst.ft >= FpRegister::kF20 && *inst.ft <= FpRegister::kF31) {
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 void RetargetBranchEdge(ControlFlowGraph* cfg, uint32_t from_block_id, uint32_t old_to_block_id,
@@ -1203,20 +1236,66 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
   }
 
   bool any_changed = false;
-  for (int iter = 0; iter < 16; ++iter) {
+  for (int iter = 0; iter < 64; ++iter) {
     const LoopInfo& loop_info = analyses->GetLoopInfo();
     const DominatorTree& dom_tree = analyses->GetDominatorTree();
     const DominatorTree& post_dom_tree = analyses->GetPostDominatorTree();
     bool iter_changed = false;
 
-    for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
-      BasicBlock& tail_blk = cfg->MutableBlocks()[b];
-      const Loop* tail_loop = loop_info.GetLoopFor(tail_blk.id);
-      if (tail_blk.id == cfg->EntryBlockId() || tail_blk.predecessors.size() < 2 ||
+    absl::flat_hash_set<uint32_t> switch_decision_blocks;
+    absl::flat_hash_set<uint32_t> switch_join_blocks;
+    absl::flat_hash_set<uint32_t> short_circuit_blocks;
+    for (const auto& blk : cfg->Blocks()) {
+      if (blk.jump_table != nullptr) {
+        switch_decision_blocks.insert(blk.id);
+        for (uint32_t pred_id : blk.predecessors) {
+          const auto* pred_blk = cfg->GetBlock(pred_id);
+          if (pred_blk != nullptr && pred_blk->successors.size() == 2) {
+            switch_decision_blocks.insert(pred_id);
+          }
+        }
+      }
+      if (blk.successors.size() != 2) {
+        continue;
+      }
+      if (auto dt = DetectDecisionTreeSwitch(*cfg, &loop_info, {}, blk.id); dt.has_value()) {
+        switch_decision_blocks.insert(dt->decision_blocks.begin(), dt->decision_blocks.end());
+      }
+      uint32_t succ_taken = 0;
+      uint32_t succ_ft = 0;
+      for (const auto& edge : blk.outgoing_edges) {
+        if (edge.type == EdgeType::kBranch) {
+          succ_taken = edge.to_block_id;
+        } else if (edge.type == EdgeType::kFallthrough) {
+          succ_ft = edge.to_block_id;
+        }
+      }
+      if (succ_taken != 0 || succ_ft != 0) {
+        std::optional<uint32_t> join = post_dom_tree.ImmediateDominator(blk.id);
+        auto sc = TryCollapseShortCircuitChain(*cfg, {}, blk.id, succ_taken, succ_ft, join);
+        if (!sc.has_value() && !join.has_value()) {
+          sc = TryCollapseShortCircuitChain(*cfg, {}, blk.id, succ_taken, succ_ft, 0xFFFFFFFDu);
+        }
+        if (sc.has_value()) {
+          short_circuit_blocks.insert(blk.id);
+          short_circuit_blocks.insert(sc->additional_condition_blocks.begin(),
+                                      sc->additional_condition_blocks.end());
+        }
+      }
+    }
+
+    const size_t initial_block_count = cfg->Blocks().size();
+    for (size_t b = 0; b < initial_block_count; ++b) {
+      const BasicBlock& tail_blk = cfg->Blocks()[b];
+      const uint32_t tail_block_id = tail_blk.id;
+      const uint32_t tail_start_vram = tail_blk.start_vram;
+      const uint32_t tail_end_vram = tail_blk.end_vram;
+      const Loop* tail_loop = loop_info.GetLoopFor(tail_block_id);
+      if (tail_block_id == cfg->EntryBlockId() || tail_blk.predecessors.size() < 2 ||
           tail_blk.successors.size() > 1 || tail_blk.HasSwitch() ||
-          jump_table_target_vrams.contains(tail_blk.start_vram) ||
+          jump_table_target_vrams.contains(tail_start_vram) ||
           (tail_loop != nullptr &&
-           (tail_loop->header == tail_blk.id || tail_loop->IsLatch(tail_blk.id)))) {
+           (tail_loop->header == tail_block_id || tail_loop->IsLatch(tail_block_id)))) {
         continue;
       }
 
@@ -1226,9 +1305,11 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
           tail_term->opcode == Opcode::kJ && tail_blk.instructions.size() >= 2 &&
           tail_term == &tail_blk.instructions[tail_blk.instructions.size() - 2] &&
           !jump_table_bounds_vrams.contains(tail_term->vram);
-      const bool is_fallthrough_tail = tail_blk.successors.size() == 1 && tail_term == nullptr &&
-                                       tail_blk.outgoing_edges.size() == 1 &&
-                                       tail_blk.outgoing_edges[0].type == EdgeType::kFallthrough;
+      const bool is_fallthrough_tail =
+          tail_blk.successors.size() == 1 &&
+          (tail_term == nullptr || (!tail_term->IsBranch() && !tail_term->IsJump())) &&
+          tail_blk.outgoing_edges.size() == 1 &&
+          tail_blk.outgoing_edges[0].type == EdgeType::kFallthrough;
       const bool is_return_tail =
           tail_blk.successors.empty() && tail_term != nullptr && tail_term->IsReturn() &&
           tail_blk.instructions.size() >= 2 &&
@@ -1246,6 +1327,32 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
         continue;
       }
 
+      uint32_t merge_block_id = 0;
+      uint32_t new_target_field = 0;
+      const BasicBlock* merge_blk = nullptr;
+      if (!is_return_tail) {
+        merge_block_id = tail_blk.successors[0];
+        if (merge_block_id == tail_block_id) {
+          continue;
+        }
+        const Loop* merge_loop = loop_info.GetLoopFor(merge_block_id);
+        if (tail_loop != nullptr && merge_block_id == tail_loop->header) {
+          continue;
+        }
+        if (merge_loop != nullptr && merge_loop != tail_loop &&
+            (tail_loop == nullptr || !merge_loop->Contains(tail_block_id))) {
+          continue;
+        }
+        merge_blk = cfg->GetBlock(merge_block_id);
+        if (merge_blk == nullptr) {
+          continue;
+        }
+        new_target_field =
+            is_jump_tail ? tail_term->target : ((merge_blk->start_vram >> 2) & 0x03FFFFFF);
+      }
+
+      const bool merges_into_return =
+          is_return_tail || (merge_blk != nullptr && merge_blk->HasReturn());
       auto is_valid_body_inst = [&](const Instruction& inst) {
         if (inst.IsBranch() || inst.IsJump()) {
           return false;
@@ -1253,24 +1360,23 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
         if (has_non_nop_tail_delay && inst.IsCall()) {
           return false;
         }
-        if (is_return_tail) {
-          RegisterUseDef ud = GetInstructionUseDef(inst);
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register def_reg : ud.gpr_defs) {
+          if (def_reg == Register::kSp || def_reg == Register::kRa) {
+            return false;
+          }
+        }
+        if (merges_into_return && inst.IsLoad() &&
+            (inst.rs == Register::kSp || inst.rs == Register::kFp)) {
           for (Register def_reg : ud.gpr_defs) {
-            if (def_reg == Register::kSp || def_reg == Register::kRa) {
+            if ((def_reg >= Register::kS0 && def_reg <= Register::kS7) ||
+                def_reg == Register::kFp) {
               return false;
             }
           }
-          if (inst.IsLoad() && (inst.rs == Register::kSp || inst.rs == Register::kFp)) {
-            for (Register def_reg : ud.gpr_defs) {
-              if ((def_reg >= Register::kS0 && def_reg <= Register::kS7) ||
-                  def_reg == Register::kFp) {
-                return false;
-              }
-            }
-            for (FpRegister fdef : ud.fpr_defs) {
-              if (fdef >= FpRegister::kF20 && fdef <= FpRegister::kF31) {
-                return false;
-              }
+          for (FpRegister fdef : ud.fpr_defs) {
+            if (fdef >= FpRegister::kF20 && fdef <= FpRegister::kF31) {
+              return false;
             }
           }
         }
@@ -1294,35 +1400,12 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
         continue;
       }
 
-      uint32_t merge_block_id = 0;
-      uint32_t new_target_field = 0;
-      const BasicBlock* merge_blk = nullptr;
-      if (!is_return_tail) {
-        merge_block_id = tail_blk.successors[0];
-        if (merge_block_id == tail_blk.id) {
-          continue;
-        }
-        const Loop* merge_loop = loop_info.GetLoopFor(merge_block_id);
-        if (tail_loop != nullptr && merge_block_id == tail_loop->header) {
-          continue;
-        }
-        if (merge_loop != nullptr && merge_loop != tail_loop &&
-            (tail_loop == nullptr || !merge_loop->Contains(tail_blk.id))) {
-          continue;
-        }
-        merge_blk = cfg->GetBlock(merge_block_id);
-        if (merge_blk == nullptr) {
-          continue;
-        }
-        new_target_field =
-            is_jump_tail ? tail_term->target : ((merge_blk->start_vram >> 2) & 0x03FFFFFF);
-      }
-
-      std::optional<uint32_t> idom = dom_tree.ImmediateDominator(tail_blk.id);
+      std::optional<uint32_t> idom = dom_tree.ImmediateDominator(tail_block_id);
       if (!idom.has_value()) {
         continue;
       }
-      if (post_dom_tree.Dominates(tail_blk.id, *idom)) {
+      const bool tail_post_dominates_idom = post_dom_tree.Dominates(tail_block_id, *idom);
+      if (tail_post_dominates_idom) {
         const bool is_single_pred_jump_merge =
             is_jump_tail && merge_blk != nullptr && merge_blk->predecessors.size() == 1;
         if (!is_single_pred_jump_merge) {
@@ -1330,106 +1413,267 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
         }
       }
 
-      bool has_fallthrough_pred = false;
-      std::vector<uint32_t> jump_preds;
-      for (uint32_t pred_id : tail_blk.predecessors) {
-        const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
-        if (pred_blk == nullptr) continue;
-        for (const auto& edge : pred_blk->outgoing_edges) {
-          if (edge.to_block_id == tail_blk.id && edge.type == EdgeType::kFallthrough) {
-            has_fallthrough_pred = true;
-            break;
-          }
+      auto get_idom_subtree = [&](uint32_t block_id) -> std::optional<uint32_t> {
+        if (!dom_tree.Dominates(*idom, block_id)) {
+          return std::nullopt;
         }
-        if (pred_id == tail_blk.id || loop_info.GetLoopFor(pred_id) != tail_loop ||
-            pred_blk->successors.size() != 1 || pred_blk->successors[0] != tail_blk.id ||
-            pred_blk->instructions.size() < 2) {
+        if (block_id == *idom) {
+          return *idom;
+        }
+        uint32_t curr = block_id;
+        while (true) {
+          std::optional<uint32_t> parent = dom_tree.ImmediateDominator(curr);
+          if (!parent.has_value()) {
+            return std::nullopt;
+          }
+          if (*parent == *idom) {
+            return curr;
+          }
+          curr = *parent;
+        }
+      };
+
+      struct SubtreePredGroup {
+        uint32_t subtree_id = 0;
+        std::vector<uint32_t> jump_preds;
+        std::vector<uint32_t> branch_preds;
+      };
+      std::vector<uint32_t> subtree_order;
+      absl::flat_hash_map<uint32_t, SubtreePredGroup> subtree_groups;
+      absl::flat_hash_set<uint32_t> kept_subtrees;
+      absl::flat_hash_set<uint32_t> seen_preds;
+      bool has_fallthrough_pred = false;
+      bool has_kept_pred = false;
+
+      for (uint32_t pred_id : tail_blk.predecessors) {
+        if (!seen_preds.insert(pred_id).second) {
           continue;
         }
+        const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+        if (pred_blk == nullptr) {
+          continue;
+        }
+        std::optional<uint32_t> sub_opt = get_idom_subtree(pred_id);
+        bool pred_has_fallthrough = false;
+        bool pred_has_branch_to_tail = false;
+        uint32_t pred_ft_succ = 0;
+        for (const auto& edge : pred_blk->outgoing_edges) {
+          if (edge.to_block_id == tail_block_id && edge.type == EdgeType::kFallthrough) {
+            pred_has_fallthrough = true;
+          } else if (edge.to_block_id == tail_block_id && edge.type == EdgeType::kBranch) {
+            pred_has_branch_to_tail = true;
+          } else if (edge.type == EdgeType::kFallthrough) {
+            pred_ft_succ = edge.to_block_id;
+          }
+        }
+        if (pred_has_fallthrough) {
+          has_fallthrough_pred = true;
+          has_kept_pred = true;
+          if (sub_opt.has_value()) {
+            kept_subtrees.insert(*sub_opt);
+          }
+          continue;
+        }
+        if (!sub_opt.has_value() || pred_id == tail_block_id ||
+            loop_info.GetLoopFor(pred_id) != tail_loop || pred_blk->instructions.size() < 2) {
+          has_kept_pred = true;
+          if (sub_opt.has_value()) {
+            kept_subtrees.insert(*sub_opt);
+          }
+          continue;
+        }
+
         const Instruction* pred_term = pred_blk->Terminator();
         const Instruction& pred_delay = pred_blk->instructions.back();
         const bool valid_pred_delay =
             pred_delay.IsNop() || (!pred_delay.IsBranch() && !pred_delay.IsJump() &&
                                    !pred_delay.IsCall() && !pred_delay.IsReturn());
-        if (pred_term != nullptr && pred_term->opcode == Opcode::kJ &&
+        const bool is_valid_jump_pred =
+            pred_blk->successors.size() == 1 && pred_blk->successors[0] == tail_block_id &&
+            pred_term != nullptr && pred_term->opcode == Opcode::kJ &&
             pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
-            !jump_table_bounds_vrams.contains(pred_term->vram) && valid_pred_delay) {
-          jump_preds.push_back(pred_id);
+            !jump_table_bounds_vrams.contains(pred_term->vram) && valid_pred_delay;
+        const bool is_valid_branch_pred =
+            !tail_post_dominates_idom && *sub_opt != *idom && pred_blk->successors.size() == 2 &&
+            pred_has_branch_to_tail && pred_ft_succ != tail_block_id &&
+            loop_info.GetLoopFor(pred_ft_succ) == tail_loop && pred_term != nullptr &&
+            pred_term->IsBranch() && !pred_term->IsUnconditionalBranch() &&
+            pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
+            !jump_table_bounds_vrams.contains(pred_term->vram) && valid_pred_delay &&
+            !switch_decision_blocks.contains(pred_id) && !short_circuit_blocks.contains(pred_id);
+
+        if (is_valid_jump_pred) {
+          if (!subtree_groups.contains(*sub_opt)) {
+            subtree_order.push_back(*sub_opt);
+            subtree_groups[*sub_opt].subtree_id = *sub_opt;
+          }
+          subtree_groups[*sub_opt].jump_preds.push_back(pred_id);
+        } else if (is_valid_branch_pred) {
+          if (!subtree_groups.contains(*sub_opt)) {
+            subtree_order.push_back(*sub_opt);
+            subtree_groups[*sub_opt].subtree_id = *sub_opt;
+          }
+          subtree_groups[*sub_opt].branch_preds.push_back(pred_id);
+        } else {
+          has_kept_pred = true;
+          kept_subtrees.insert(*sub_opt);
         }
       }
 
-      if (jump_preds.empty() ||
-          ((is_fallthrough_tail || is_return_tail) && !has_fallthrough_pred)) {
+      if ((is_fallthrough_tail || is_return_tail) && !has_fallthrough_pred) {
         continue;
       }
-      if (jump_preds.size() == tail_blk.predecessors.size()) {
-        jump_preds.pop_back();
-        if (jump_preds.empty()) {
-          continue;
+
+      bool tail_has_store_or_call = false;
+      for (size_t i = 0; i < pre_term_count; ++i) {
+        if (tail_blk.instructions[i].IsStore() || tail_blk.instructions[i].IsCall()) {
+          tail_has_store_or_call = true;
+          break;
         }
       }
+      if (has_non_nop_tail_delay &&
+          (tail_blk.instructions.back().IsStore() || tail_blk.instructions.back().IsCall())) {
+        tail_has_store_or_call = true;
+      }
+      const bool is_post_switch_compute_tail =
+          is_fallthrough_tail && !tail_has_store_or_call && merge_blk != nullptr &&
+          IsPureEpilogueReturnBlock(*merge_blk) && switch_decision_blocks.contains(*idom);
 
-      if (is_return_tail) {
-        const std::vector<Instruction> tail_all_insts = tail_blk.instructions;
-        for (uint32_t pred_id : jump_preds) {
+      std::vector<uint32_t> cand_subtrees;
+      for (uint32_t sub_id : subtree_order) {
+        if (kept_subtrees.contains(sub_id)) {
+          has_kept_pred = true;
+          continue;
+        }
+        const auto& grp = subtree_groups[sub_id];
+        if (!grp.branch_preds.empty() && !has_fallthrough_pred) {
+          has_kept_pred = true;
+          continue;
+        }
+        if (is_post_switch_compute_tail && grp.branch_preds.empty()) {
+          has_kept_pred = true;
+          continue;
+        }
+        cand_subtrees.push_back(sub_id);
+      }
+
+      if (!has_kept_pred && !cand_subtrees.empty()) {
+        cand_subtrees.pop_back();
+      }
+      if (cand_subtrees.empty()) {
+        continue;
+      }
+
+      const std::vector<Instruction> tail_all_insts = tail_blk.instructions;
+      const std::vector<Instruction> tail_body_insts(
+          tail_all_insts.begin(), tail_all_insts.begin() + static_cast<ptrdiff_t>(pre_term_count));
+
+      for (uint32_t sub_id : cand_subtrees) {
+        const auto& grp = subtree_groups[sub_id];
+        if (grp.branch_preds.empty() && grp.jump_preds.size() == 1) {
+          uint32_t pred_id = grp.jump_preds[0];
           BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
           if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
             continue;
           }
-          const Instruction pred_delay = pred_blk->instructions.back();
-          pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
-                                       pred_blk->instructions.end());
-          if (!pred_delay.IsNop()) {
-            pred_blk->instructions.push_back(pred_delay);
+          if (is_return_tail) {
+            const Instruction pred_delay = pred_blk->instructions.back();
+            pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
+                                         pred_blk->instructions.end());
+            if (!pred_delay.IsNop()) {
+              pred_blk->instructions.push_back(pred_delay);
+            }
+            pred_blk->instructions.insert(pred_blk->instructions.end(), tail_all_insts.begin(),
+                                          tail_all_insts.end());
+            RemoveBranchEdge(cfg, pred_id, tail_block_id);
+            iter_changed = true;
+          } else if (is_jump_tail) {
+            std::vector<Instruction> patched_insts = tail_all_insts;
+            patched_insts[patched_insts.size() - 2].target = new_target_field;
+            const Instruction pred_delay = pred_blk->instructions.back();
+            pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
+                                         pred_blk->instructions.end());
+            if (!pred_delay.IsNop()) {
+              pred_blk->instructions.push_back(pred_delay);
+            }
+            pred_blk->instructions.insert(pred_blk->instructions.end(), patched_insts.begin(),
+                                          patched_insts.end());
+            RetargetBranchEdge(cfg, pred_id, tail_block_id, merge_block_id);
+            iter_changed = true;
+          } else {
+            Instruction pred_j = pred_blk->instructions[pred_blk->instructions.size() - 2];
+            const Instruction pred_delay = pred_blk->instructions.back();
+            pred_j.target = new_target_field;
+            pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
+                                         pred_blk->instructions.end());
+            if (!pred_delay.IsNop()) {
+              pred_blk->instructions.push_back(pred_delay);
+            }
+            pred_blk->instructions.insert(pred_blk->instructions.end(), tail_body_insts.begin(),
+                                          tail_body_insts.end());
+            pred_blk->instructions.push_back(pred_j);
+            pred_blk->instructions.push_back(MakeNopInstruction(pred_delay.vram));
+            RetargetBranchEdge(cfg, pred_id, tail_block_id, merge_block_id);
+            iter_changed = true;
           }
-          pred_blk->instructions.insert(pred_blk->instructions.end(), tail_all_insts.begin(),
-                                        tail_all_insts.end());
-          RemoveBranchEdge(cfg, pred_id, tail_blk.id);
+        } else {
+          const uint32_t clone_id = static_cast<uint32_t>(cfg->Blocks().size());
+          BasicBlock clone_blk;
+          clone_blk.id = clone_id;
+          clone_blk.start_vram = tail_start_vram;
+          clone_blk.end_vram = tail_end_vram;
+          if (is_return_tail) {
+            clone_blk.instructions = tail_all_insts;
+          } else if (is_jump_tail) {
+            clone_blk.instructions = tail_all_insts;
+            clone_blk.instructions[clone_blk.instructions.size() - 2].target = new_target_field;
+          } else {
+            clone_blk.instructions = tail_body_insts;
+            Instruction clone_j;
+            clone_j.vram = tail_end_vram;
+            clone_j.opcode = Opcode::kJ;
+            clone_j.target = new_target_field;
+            clone_j.raw_word = (2u << 26) | (new_target_field & 0x03FFFFFFu);
+            clone_blk.instructions.push_back(clone_j);
+            clone_blk.instructions.push_back(MakeNopInstruction(tail_end_vram));
+          }
+          if (!is_return_tail) {
+            CfgEdge out_edge;
+            out_edge.from_block_id = clone_id;
+            out_edge.to_block_id = merge_block_id;
+            out_edge.type = EdgeType::kJump;
+            clone_blk.outgoing_edges.push_back(out_edge);
+            clone_blk.successors.push_back(merge_block_id);
+            cfg->MutableEdges().push_back(out_edge);
+          }
+          cfg->MutableBlocks().push_back(std::move(clone_blk));
+          if (!is_return_tail) {
+            BasicBlock* mut_merge = cfg->GetMutableBlock(merge_block_id);
+            if (mut_merge != nullptr) {
+              mut_merge->predecessors.push_back(clone_id);
+            }
+          }
+          for (uint32_t pred_id : grp.jump_preds) {
+            BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
+            if (pred_blk != nullptr && pred_blk->instructions.size() >= 2) {
+              const Instruction pred_j = pred_blk->instructions[pred_blk->instructions.size() - 2];
+              const Instruction pred_delay = pred_blk->instructions.back();
+              if (!pred_delay.IsNop()) {
+                pred_blk->instructions[pred_blk->instructions.size() - 2] = pred_delay;
+                pred_blk->instructions[pred_blk->instructions.size() - 1] = pred_j;
+                pred_blk->instructions.push_back(MakeNopInstruction(pred_delay.vram));
+              }
+            }
+            RetargetBranchEdge(cfg, pred_id, tail_block_id, clone_id);
+          }
+          for (uint32_t pred_id : grp.branch_preds) {
+            RetargetBranchEdge(cfg, pred_id, tail_block_id, clone_id);
+          }
           iter_changed = true;
         }
-      } else if (is_jump_tail) {
-        std::vector<Instruction> tail_all_insts = tail_blk.instructions;
-        tail_all_insts[tail_all_insts.size() - 2].target = new_target_field;
-        for (uint32_t pred_id : jump_preds) {
-          BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
-          if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
-            continue;
-          }
-          const Instruction pred_delay = pred_blk->instructions.back();
-          pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
-                                       pred_blk->instructions.end());
-          if (!pred_delay.IsNop()) {
-            pred_blk->instructions.push_back(pred_delay);
-          }
-          pred_blk->instructions.insert(pred_blk->instructions.end(), tail_all_insts.begin(),
-                                        tail_all_insts.end());
-          RetargetBranchEdge(cfg, pred_id, tail_blk.id, merge_block_id);
-          iter_changed = true;
-        }
-      } else {
-        const std::vector<Instruction> tail_body_insts(
-            tail_blk.instructions.begin(),
-            tail_blk.instructions.begin() + static_cast<ptrdiff_t>(pre_term_count));
-        for (uint32_t pred_id : jump_preds) {
-          BasicBlock* pred_blk = cfg->GetMutableBlock(pred_id);
-          if (pred_blk == nullptr || pred_blk->instructions.size() < 2) {
-            continue;
-          }
-          Instruction pred_j = pred_blk->instructions[pred_blk->instructions.size() - 2];
-          const Instruction pred_delay = pred_blk->instructions.back();
-          pred_j.target = new_target_field;
-          pred_blk->instructions.erase(pred_blk->instructions.end() - 2,
-                                       pred_blk->instructions.end());
-          if (!pred_delay.IsNop()) {
-            pred_blk->instructions.push_back(pred_delay);
-          }
-          pred_blk->instructions.insert(pred_blk->instructions.end(), tail_body_insts.begin(),
-                                        tail_body_insts.end());
-          pred_blk->instructions.push_back(pred_j);
-          pred_blk->instructions.push_back(MakeNopInstruction(pred_delay.vram));
-          RetargetBranchEdge(cfg, pred_id, tail_blk.id, merge_block_id);
-          iter_changed = true;
-        }
+      }
+      if (iter_changed) {
+        break;
       }
     }
 
@@ -1449,6 +1693,7 @@ CfgPassPipeline CfgDeReorg::BuildDefaultPipeline() {
   pipeline.AddPass(std::make_unique<RelaxDelaySlotUnschedulerPass>());
   pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
   pipeline.AddPass(std::make_unique<CrossJumpTailDuplicatorPass>());
+  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
   return pipeline;
 }
 

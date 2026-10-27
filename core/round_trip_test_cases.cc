@@ -7393,6 +7393,35 @@ s32 BranchesWithCrossJumpedStoreAndIfReturnTail(s32* table, s32 tag, s32 mode) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "IfElseSubtreesWithCrossJumpedConditionalStoreTail",
+          .function_name = "IfElseSubtreesWithCrossJumpedConditionalStoreTail",
+          .original_c = R"(
+extern s32 CheckPrimarySlot(s32* slot, s32 mode);
+extern s32 CheckSecondarySlot(s32* slot);
+
+s32 IfElseSubtreesWithCrossJumpedConditionalStoreTail(s32* slot, s32 mode, s32 val) {
+    if (mode != 0) {
+        if (CheckPrimarySlot(slot, mode) == 0) {
+            return -1;
+        }
+        slot[1] = val;
+        slot[2] = 1;
+        slot[3] = 0;
+        return 0;
+    } else if (val > 0) {
+        if (CheckSecondarySlot(slot) == 0) {
+            return -2;
+        }
+        slot[1] = val;
+        slot[2] = 1;
+        slot[3] = 0;
+        return 0;
+    }
+    return 1;
+}
+)",
+      },
   };
   return *k_cases;
 }

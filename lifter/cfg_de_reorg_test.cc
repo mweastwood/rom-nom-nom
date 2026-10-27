@@ -488,12 +488,130 @@ TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsIntraLoopAndAcyclicJoinBl
 
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
-  ASSERT_EQ(pipeline.PassCount(), 5u);
+  ASSERT_EQ(pipeline.PassCount(), 6u);
   EXPECT_EQ(pipeline.Passes()[0]->Name(), "SimpleDelaySlotUnschedulerPass");
   EXPECT_EQ(pipeline.Passes()[1]->Name(), "TargetHeaderDelaySlotReconcilerPass");
   EXPECT_EQ(pipeline.Passes()[2]->Name(), "RelaxDelaySlotUnschedulerPass");
   EXPECT_EQ(pipeline.Passes()[3]->Name(), "EagerThreadDelaySlotUnschedulerPass");
   EXPECT_EQ(pipeline.Passes()[4]->Name(), "CrossJumpTailDuplicatorPass");
+  EXPECT_EQ(pipeline.Passes()[5]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+}
+
+TEST(CfgDeReorgTest, CrossJumpTailDuplicatorDuplicatesFallthroughTailIntoJumpPredecessors) {
+  // Entry (0x80000000) branches on $a0 == 0 to B_right (0x80000018).
+  // Left subtree:
+  //   0x80000008: beq $a1, $zero, 0x80000028 (B_ret, bypassing B_tail)
+  //   0x80000010: j   0x80000020 (B_tail) / sw $a2, 0($a3)
+  // Right subtree:
+  //   0x80000018: sw  $a1, 0($a3) (falls through into B_tail at 0x80000020)
+  // Shared fallthrough tail B_tail (0x80000020):
+  //   0x80000020: sw  $zero, 4($a3)
+  //   0x80000024: ori $v0, $zero, 1 (falls through into B_ret at 0x80000028)
+  // B_ret (0x80000028):
+  //   0x80000028: lw  $ra, 20($sp)
+  //   0x8000002C: jr  $ra
+  //   0x80000030: addiu $sp, $sp, 24
+  std::vector<uint32_t> words = {
+      0x10800005, 0x00000000,  // 0x80000000: beq $a0, $zero, 0x80000018 / nop
+      0x10A00007, 0x00000000,  // 0x80000008: beq $a1, $zero, 0x80000028 / nop
+      0x08000008, 0xAC660000,  // 0x80000010: j 0x80000020 / sw $a2, 0($a3)
+      0xAC650000, 0x00000000,  // 0x80000018: sw $a1, 0($a3) / nop (falls through to 0x80000020)
+      0xAC600004, 0x34020001,  // 0x80000020: sw $zero, 4($a3) / ori $v0, $zero, 1
+      0x8FBF0014, 0x03E00008,  // 0x80000028: lw $ra, 20($sp) / jr $ra
+      0x27BD0018,              // 0x80000030: addiu $sp, $sp, 24
+  };
+  auto insts = DecodeSequence(words, 0x80000000);
+  ASSERT_TRUE(insts.ok());
+  auto cfg_or = ControlFlowGraph::Build(*insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const auto* left_jump_blk = cfg.FindBlockByVram(0x80000010);
+  const auto* tail_blk = cfg.FindBlockByVram(0x80000020);
+  const auto* ret_blk = cfg.FindBlockByVram(0x80000028);
+  ASSERT_NE(left_jump_blk, nullptr);
+  ASSERT_NE(tail_blk, nullptr);
+  ASSERT_NE(ret_blk, nullptr);
+
+  // Left jump block should now jump directly to B_ret (0x80000028) and contain the duplicated
+  // fallthrough tail instructions (`sw $zero, 4($a3)` and `ori $v0, $zero, 1`).
+  ASSERT_EQ(left_jump_blk->successors.size(), 1u);
+  EXPECT_EQ(left_jump_blk->successors[0], ret_blk->id);
+  EXPECT_EQ(tail_blk->predecessors.size(), 1u);
+
+  bool has_duplicated_sw = false;
+  bool has_duplicated_ori = false;
+  for (const auto& inst : left_jump_blk->instructions) {
+    if (inst.opcode == Opcode::kSw && inst.rt == Register::kZero && inst.immediate == 4) {
+      has_duplicated_sw = true;
+    }
+    if (inst.opcode == Opcode::kOri && inst.rt == Register::kV0 && inst.immediate == 1) {
+      has_duplicated_ori = true;
+    }
+  }
+  EXPECT_TRUE(has_duplicated_sw);
+  EXPECT_TRUE(has_duplicated_ori);
+}
+
+TEST(CfgDeReorgTest,
+     CrossJumpTailDuplicatorClonesTailForConditionalBranchSubtreeAndUnschedulesDelaySlot) {
+  // Entry (0x80000000) branches on $a0 == 0 to B_right (0x80000018).
+  // Left subtree (0x80000008):
+  //   0x80000008: beql  $a1, $zero, 0x80000024 (targets B_tail+4, having stolen `addiu $a1, $a1,
+  //   1`) 0x8000000C: addiu $a1, $a1, 1 0x80000010: jr    $ra / addiu $v0, $zero, -1
+  // Right subtree (0x80000018):
+  //   0x80000018: bne   $a2, $zero, 0x80000020 (targets B_tail) / nop
+  //   (falls through into B_tail at 0x80000020)
+  // Shared return tail B_tail (0x80000020):
+  //   0x80000020: addiu $a1, $a1, 1
+  //   0x80000024: sw    $a1, 0($a3)
+  //   0x80000028: jr    $ra
+  //   0x8000002C: ori   $v0, $zero, 1
+  std::vector<uint32_t> words = {
+      0x10800005, 0x00000000,  // 0x80000000: beq   $a0, $zero, 0x80000018 / nop
+      0x50A00005, 0x24A50001,  // 0x80000008: beql  $a1, $zero, 0x80000024 / addiu $a1, $a1, 1
+      0x03E00008, 0x2402FFFF,  // 0x80000010: jr    $ra / addiu $v0, $zero, -1
+      0x14C00001, 0x00000000,  // 0x80000018: bne   $a2, $zero, 0x80000020 / nop
+      0x24A50001, 0xAC650000,  // 0x80000020: addiu $a1, $a1, 1 / sw $a1, 0($a3)
+      0x03E00008, 0x34020001,  // 0x80000028: jr    $ra / ori $v0, $zero, 1
+  };
+  auto insts = DecodeSequence(words, 0x80000000);
+  ASSERT_TRUE(insts.ok());
+  auto cfg_or = ControlFlowGraph::Build(*insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const auto* left_branch_blk = cfg.FindBlockByVram(0x80000008);
+  const auto* tail_blk = cfg.FindBlockByVram(0x80000024);
+  ASSERT_NE(left_branch_blk, nullptr);
+  ASSERT_NE(tail_blk, nullptr);
+
+  // Left conditional branch should have been retargeted to a newly cloned tail block, and the
+  // trailing EagerThreadDelaySlotUnschedulerPass should have demoted `beql` -> `beq` + `nop` and
+  // sunk `addiu $a1, $a1, 1` into the cloned block.
+  ASSERT_NE(left_branch_blk->Terminator(), nullptr);
+  EXPECT_EQ(left_branch_blk->Terminator()->opcode, Opcode::kBeq);
+  EXPECT_TRUE(left_branch_blk->instructions.back().IsNop());
+
+  int cloned_target_id = -1;
+  for (const auto& edge : left_branch_blk->outgoing_edges) {
+    if (edge.type == EdgeType::kBranch) {
+      cloned_target_id = static_cast<int>(edge.to_block_id);
+    }
+  }
+  ASSERT_GE(cloned_target_id, 0);
+  EXPECT_NE(static_cast<uint32_t>(cloned_target_id), tail_blk->id);
+
+  const BasicBlock& cloned_blk = cfg.Blocks()[cloned_target_id];
+  EXPECT_EQ(cloned_blk.predecessors.size(), 1u);
+  EXPECT_TRUE(cloned_blk.HasReturn());
+  ASSERT_FALSE(cloned_blk.instructions.empty());
+  EXPECT_EQ(cloned_blk.instructions.front().opcode, Opcode::kAddiu);
+  EXPECT_EQ(cloned_blk.instructions.front().rt, Register::kA1);
 }
 
 }  // namespace
