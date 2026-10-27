@@ -15,17 +15,27 @@ Automated bit-exactness search and compiler/AST tuning engine for lifted N64 C c
      compiler flags deterministically in $O(1)$ without spawning compiler
      subprocesses.
 
-3. **Monotonic Improvement**:
-   - Candidate variations are only accepted when they strictly improve
-     instruction alignment and bit-exactness score over the baseline.
+3. **Lexicographical Structural & Bit-Exact Monotonicity**:
+   - Candidate scoring (`CandidateScore::IsBetterThan`) follows a strict
+     hierarchy:
+     1. Bit-exact match (`raw_bit_exact` / `normalized_exact`).
+     2. Structural isomorphism (`frame_size_matches`, `saved_registers_match`,
+        `cfg_topology_matches`).
+     3. Net bit-exact and normalized instruction alignment penalized by size
+        delta.
+   - A non-bit-exact candidate must **never** be accepted if it regresses any
+     structural isomorphism dimension of the baseline lifted function.
 
 4. **Separation of Concerns (Lifter vs. Tuner)**:
-   - `tuner` owns compiler-specific codegen exploration (GCC 2.7.2 local
-     declaration ordering, subexpression extraction vs. inlining, commutative
-     operand swapping, condition polarity inversion, and per-function compiler
-     flags).
-   - `tuner` is designed to close the final bit-exactness gap on functions that
-     are already structurally isomorphic to the retail binary (matching stack
-     frame size, callee-saved register set, and basic-block/branch topology);
-     fundamental control-flow, stack-frame, or type-recovery gaps belong in
-     `lifter/`.
+   - While `lifter/` statically recovers observable control flow, types, and
+     live ranges (~90%+ of structural isomorphism), compilation under GCC 2.7.2
+     `-O2` is many-to-one on a ~7–10% tail where small AST variations flip
+     `reload` stack-spill slots ($\pm 8$ bytes), marginal `$s0`–`$s7`
+     allocations, or `jump` cross-jumping thresholds.
+   - `tuner/` owns both:
+     - **Bridging that non-injective structural tail** via compile-in-the-loop
+       AST mutations (temp inlining/splitting, declaration reordering, register
+       copy propagation), and
+     - **Closing the final bit-exactness gap** on structurally isomorphic
+       functions (operand commutation, statement swapping, condition inversion,
+       and assembler/codegen flags).
