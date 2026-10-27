@@ -234,12 +234,18 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
     defined_in_block.insert(def_reg);
 
     int read_uses = 0;
+    bool has_shift_use = false;
+    bool has_add_sub_use = false;
     for (int j = i + 1; j <= branch_idx; ++j) {
       const auto& next_inst = b->instructions[j];
       RegisterUseDef next_ud = GetInstructionUseDef(next_inst);
       for (Register u : next_ud.gpr_uses) {
         if (u == def_reg) {
           ++read_uses;
+          if (next_inst.opcode == Opcode::kSll) has_shift_use = true;
+          if (next_inst.opcode == Opcode::kAddu || next_inst.opcode == Opcode::kSubu) {
+            has_add_sub_use = true;
+          }
         }
       }
       if (j < branch_idx) {
@@ -253,7 +259,7 @@ bool IsPureConditionBlock(const ControlFlowGraph& cfg, uint32_t block_id) {
         if (redefined) break;
       }
     }
-    if (read_uses != 1) {
+    if (read_uses != 1 && !(read_uses == 2 && has_shift_use && has_add_sub_use)) {
       return false;
     }
     if (!IsRegisterDeadAtBlockEntry(cfg, b->successors[0], def_reg) ||
@@ -1806,148 +1812,160 @@ std::optional<FloatToUintInfo> DetectFloatToUintDiamond(const ControlFlowGraph& 
 std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
     const ControlFlowGraph& cfg, const absl::flat_hash_set<uint32_t>& visited, uint32_t entry,
     uint32_t succ_taken, uint32_t succ_fallthrough, std::optional<uint32_t> join) {
-  if (visited.contains(succ_fallthrough) || !HasNopBranchDelaySlot(cfg, entry)) {
+  if (!HasNopBranchDelaySlot(cfg, entry)) {
     return std::nullopt;
   }
 
-  const bool allow_extended_cond_block = join.has_value() && succ_taken != *join;
-  bool used_extended_cond_block = false;
-  auto can_collapse_cond_block = [&](uint32_t prev_id, uint32_t cand_id) -> bool {
-    if (IsTrivialPureConditionBlock(cfg, cand_id)) {
-      return true;
-    }
-    if (!allow_extended_cond_block || !IsPureConditionBlock(cfg, cand_id)) {
-      return false;
-    }
-    const auto* prev_b = cfg.GetBlock(prev_id);
-    if (prev_b == nullptr || prev_b->instructions.empty() || !prev_b->instructions.back().IsNop()) {
-      return false;
-    }
-    if (DetectDecisionTreeSwitch(cfg, nullptr, visited, cand_id).has_value()) {
-      return false;
-    }
-    if (GetComparedValueKey(cfg, prev_id, /*use_live_in_reg=*/false)
-            .Matches(GetComparedValueKey(cfg, cand_id, /*use_live_in_reg=*/true))) {
-      return false;
-    }
-    used_extended_cond_block = true;
-    return true;
-  };
-
-  const auto* b_fallthrough = cfg.GetBlock(succ_fallthrough);
-  if (b_fallthrough == nullptr || b_fallthrough->successors.size() != 2 ||
-      b_fallthrough->predecessors.size() != 1 || b_fallthrough->predecessors[0] != entry ||
-      !can_collapse_cond_block(entry, succ_fallthrough)) {
-    return std::nullopt;
-  }
-
-  uint32_t b_taken = 0;
-  uint32_t b_ft = 0;
-  for (const auto& edge : b_fallthrough->outgoing_edges) {
-    if (edge.type == EdgeType::kBranch) {
-      b_taken = edge.to_block_id;
-    } else {
-      b_ft = edge.to_block_id;
-    }
-  }
-  if (b_taken == 0 && b_ft == 0) {
-    b_taken = b_fallthrough->successors[0];
-    b_ft = b_fallthrough->successors[1];
-  }
-
-  if (b_taken != succ_taken && b_ft != succ_taken) {
-    return std::nullopt;
-  }
-
-  std::optional<Register> entry_cmp_reg = GetSingleComparedRegister(cfg, entry);
-  std::optional<Register> ft_cmp_reg = GetSingleComparedRegister(cfg, succ_fallthrough);
-  if (entry_cmp_reg.has_value() && ft_cmp_reg.has_value() && *entry_cmp_reg == *ft_cmp_reg) {
-    return std::nullopt;
-  }
-
-  std::vector<uint32_t> chain_blocks;
-  std::vector<bool> or_inverts;
-  std::vector<bool> and_inverts;
-  uint32_t curr_id = succ_fallthrough;
-  uint32_t curr_taken = b_taken;
-  uint32_t curr_ft = b_ft;
-  std::optional<uint32_t> final_after;
-  bool last_matches_taken = false;
-
-  while (true) {
-    bool matches_taken = (curr_taken == succ_taken);
-    bool matches_ft = (curr_ft == succ_taken);
-    if (!matches_taken && !matches_ft) {
-      break;
-    }
-
-    last_matches_taken = matches_taken;
-    uint32_t other = matches_taken ? curr_ft : curr_taken;
-    chain_blocks.push_back(curr_id);
-    or_inverts.push_back(matches_ft);
-    and_inverts.push_back(matches_taken);
-
-    const auto* next_b = cfg.GetBlock(other);
-    if (HasNopBranchDelaySlot(cfg, curr_id) && next_b != nullptr &&
-        next_b->successors.size() == 2 && next_b->predecessors.size() == 1 &&
-        !visited.contains(other) && can_collapse_cond_block(curr_id, other) &&
-        (next_b->successors[0] == succ_taken || next_b->successors[1] == succ_taken)) {
-      curr_id = other;
-      curr_taken = 0;
-      curr_ft = 0;
-      for (const auto& edge : next_b->outgoing_edges) {
-        if (edge.type == EdgeType::kBranch) {
-          curr_taken = edge.to_block_id;
-        } else {
-          curr_ft = edge.to_block_id;
-        }
-      }
-      if (curr_taken == 0 && curr_ft == 0) {
-        curr_taken = next_b->successors[0];
-        curr_ft = next_b->successors[1];
-      }
-    } else {
-      final_after = other;
-      break;
-    }
-  }
-
-  if (!chain_blocks.empty()) {
-    if (used_extended_cond_block &&
-        (!join.has_value() || !final_after.has_value() || *final_after != *join)) {
+  auto try_direction = [&](uint32_t shared_target, uint32_t first_cond_succ,
+                           bool step_on_taken) -> std::optional<ShortCircuitChainInfo> {
+    if (visited.contains(first_cond_succ)) {
       return std::nullopt;
     }
-    bool is_and_chain = false;
-    if (final_after.has_value()) {
-      if (join.has_value() && succ_taken == *join && *final_after != *join) {
-        is_and_chain = true;
-      } else if (join.has_value() && *final_after == *join && succ_taken != *join) {
-        is_and_chain = false;
+    const bool allow_extended_cond_block = join.has_value() && shared_target != *join;
+    bool used_extended_cond_block = false;
+    auto can_collapse_cond_block = [&](uint32_t prev_id, uint32_t cand_id) -> bool {
+      if (IsTrivialPureConditionBlock(cfg, cand_id)) {
+        return true;
+      }
+      if (!allow_extended_cond_block || !IsPureConditionBlock(cfg, cand_id)) {
+        return false;
+      }
+      const auto* prev_b = cfg.GetBlock(prev_id);
+      if (prev_b == nullptr || prev_b->instructions.empty() ||
+          !prev_b->instructions.back().IsNop()) {
+        return false;
+      }
+      if (DetectDecisionTreeSwitch(cfg, nullptr, visited, cand_id).has_value()) {
+        return false;
+      }
+      if (GetComparedValueKey(cfg, prev_id, /*use_live_in_reg=*/false)
+              .Matches(GetComparedValueKey(cfg, cand_id, /*use_live_in_reg=*/true))) {
+        return false;
+      }
+      used_extended_cond_block = true;
+      return true;
+    };
+
+    const auto* b_first = cfg.GetBlock(first_cond_succ);
+    if (b_first == nullptr || b_first->successors.size() != 2 ||
+        b_first->predecessors.size() != 1 || b_first->predecessors[0] != entry ||
+        !can_collapse_cond_block(entry, first_cond_succ)) {
+      return std::nullopt;
+    }
+
+    uint32_t b_taken = 0;
+    uint32_t b_ft = 0;
+    for (const auto& edge : b_first->outgoing_edges) {
+      if (edge.type == EdgeType::kBranch) {
+        b_taken = edge.to_block_id;
       } else {
-        is_and_chain = last_matches_taken;
+        b_ft = edge.to_block_id;
+      }
+    }
+    if (b_taken == 0 && b_ft == 0) {
+      b_taken = b_first->successors[0];
+      b_ft = b_first->successors[1];
+    }
+
+    if (b_taken != shared_target && b_ft != shared_target) {
+      return std::nullopt;
+    }
+
+    std::optional<Register> entry_cmp_reg = GetSingleComparedRegister(cfg, entry);
+    std::optional<Register> ft_cmp_reg = GetSingleComparedRegister(cfg, first_cond_succ);
+    if (entry_cmp_reg.has_value() && ft_cmp_reg.has_value() && *entry_cmp_reg == *ft_cmp_reg) {
+      return std::nullopt;
+    }
+
+    std::vector<uint32_t> chain_blocks;
+    std::vector<bool> or_inverts;
+    std::vector<bool> and_inverts;
+    uint32_t curr_id = first_cond_succ;
+    uint32_t curr_taken = b_taken;
+    uint32_t curr_ft = b_ft;
+    std::optional<uint32_t> final_after;
+    bool last_matches_taken = false;
+
+    while (true) {
+      bool matches_taken = (curr_taken == shared_target);
+      bool matches_ft = (curr_ft == shared_target);
+      if (!matches_taken && !matches_ft) {
+        break;
+      }
+
+      last_matches_taken = matches_taken;
+      uint32_t other = matches_taken ? curr_ft : curr_taken;
+      chain_blocks.push_back(curr_id);
+      or_inverts.push_back(matches_ft);
+      and_inverts.push_back(matches_taken);
+
+      const auto* next_b = cfg.GetBlock(other);
+      if (HasNopBranchDelaySlot(cfg, curr_id) && next_b != nullptr &&
+          next_b->successors.size() == 2 && next_b->predecessors.size() == 1 &&
+          !visited.contains(other) && can_collapse_cond_block(curr_id, other) &&
+          (next_b->successors[0] == shared_target || next_b->successors[1] == shared_target)) {
+        curr_id = other;
+        curr_taken = 0;
+        curr_ft = 0;
+        for (const auto& edge : next_b->outgoing_edges) {
+          if (edge.type == EdgeType::kBranch) {
+            curr_taken = edge.to_block_id;
+          } else {
+            curr_ft = edge.to_block_id;
+          }
+        }
+        if (curr_taken == 0 && curr_ft == 0) {
+          curr_taken = next_b->successors[0];
+          curr_ft = next_b->successors[1];
+        }
+      } else {
+        final_after = other;
+        break;
       }
     }
 
-    ShortCircuitChainInfo info;
-    if (is_and_chain) {
-      info.condition_op = "&&";
-      info.root_invert = true;
-      info.additional_condition_blocks = std::move(chain_blocks);
-      info.additional_invert_conditions = std::move(and_inverts);
-      info.then_target_block = *final_after;
-      info.else_target_block = succ_taken;
-    } else {
-      info.condition_op = "||";
-      info.root_invert = false;
-      info.additional_condition_blocks = std::move(chain_blocks);
-      info.additional_invert_conditions = std::move(or_inverts);
-      info.then_target_block = succ_taken;
-      info.else_target_block = final_after;
-    }
-    return info;
-  }
+    if (!chain_blocks.empty()) {
+      if (used_extended_cond_block && (!join.has_value() || !final_after.has_value())) {
+        return std::nullopt;
+      }
+      bool is_and_chain = false;
+      if (final_after.has_value()) {
+        if (join.has_value() && shared_target == *join && *final_after != *join) {
+          is_and_chain = true;
+        } else if (join.has_value() && *final_after == *join && shared_target != *join) {
+          is_and_chain = false;
+        } else {
+          is_and_chain = last_matches_taken;
+        }
+      }
 
-  return std::nullopt;
+      ShortCircuitChainInfo info;
+      if (is_and_chain) {
+        info.condition_op = "&&";
+        info.root_invert = !step_on_taken;
+        info.additional_condition_blocks = std::move(chain_blocks);
+        info.additional_invert_conditions = std::move(and_inverts);
+        info.then_target_block = *final_after;
+        info.else_target_block = shared_target;
+      } else {
+        info.condition_op = "||";
+        info.root_invert = step_on_taken;
+        info.additional_condition_blocks = std::move(chain_blocks);
+        info.additional_invert_conditions = std::move(or_inverts);
+        info.then_target_block = shared_target;
+        info.else_target_block = final_after;
+      }
+      return info;
+    }
+
+    return std::nullopt;
+  };
+
+  if (auto ft_chain = try_direction(succ_taken, succ_fallthrough, /*step_on_taken=*/false);
+      ft_chain.has_value()) {
+    return ft_chain;
+  }
+  return try_direction(succ_fallthrough, succ_taken, /*step_on_taken=*/true);
 }
 
 }  // namespace rom_nom_nom

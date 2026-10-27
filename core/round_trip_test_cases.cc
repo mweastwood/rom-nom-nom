@@ -7318,6 +7318,30 @@ void NormalizePathSlashesAndCaseWithIntraLoopTargetStolenJoin(u8* buf, s32 len) 
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "ShortCircuitIfElseWithStructScaleAndFloatCompare",
+          .function_name = "ShortCircuitIfElseWithStructScaleAndFloatCompare",
+          .original_c = R"(
+typedef struct {
+    s32 a;
+    s32 b;
+    u8 flags;
+    u8 pad[3];
+} SlotRec12;
+
+extern SlotRec12 g_slot_recs[];
+extern void HandleInactiveSlot(u8* actor, s32 mode);
+extern void HandleActiveSlot(u8* actor, s32 mode);
+
+void ShortCircuitIfElseWithStructScaleAndFloatCompare(u8* actor, s32 mode, f32 cur, f32 limit) {
+    if (cur < limit || (g_slot_recs[actor[70]].flags & 1) == 0) {
+        HandleInactiveSlot(actor, mode);
+    } else {
+        HandleActiveSlot(actor, mode);
+    }
+}
+)",
+      },
   };
   return *k_cases;
 }

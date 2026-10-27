@@ -601,19 +601,28 @@ bool DelaySlotFeedsSuccessorBranch(const BasicBlock& succ_block, const Instructi
   if (delay_ud.gpr_defs.size() != 1) {
     return false;
   }
-  Register def_reg = delay_ud.gpr_defs[0];
+  Register tracked_reg = delay_ud.gpr_defs[0];
   for (const auto& inst : succ_block.instructions) {
     if (&inst == succ_term) {
       break;
     }
+    if (inst.IsCall() || inst.IsStore()) {
+      return false;
+    }
     RegisterUseDef ud = GetInstructionUseDef(inst);
+    bool reads_tracked =
+        std::find(ud.gpr_uses.begin(), ud.gpr_uses.end(), tracked_reg) != ud.gpr_uses.end();
+    if (reads_tracked && ud.gpr_defs.size() == 1 && ud.fpr_defs.empty()) {
+      tracked_reg = ud.gpr_defs[0];
+      continue;
+    }
     for (Register d : ud.gpr_defs) {
-      if (d == def_reg) {
+      if (d == tracked_reg) {
         return false;
       }
     }
   }
-  const bool succ_branch_reads_def = (succ_term->rs == def_reg || succ_term->rt == def_reg);
+  const bool succ_branch_reads_def = (succ_term->rs == tracked_reg || succ_term->rt == tracked_reg);
   if (!succ_branch_reads_def) {
     return false;
   }

@@ -944,5 +944,60 @@ TEST(ControlFlowPatternMatcherTest,
   EXPECT_EQ(sw->target_to_cases.size(), 3u);
 }
 
+TEST(ControlFlowPatternMatcherTest, CollapsesShortCircuitIfElseWithShiftAddIndexedConditionBlock) {
+  // Block 0 (0x00):
+  //   beqz  $a1, 0x2C (then_body)
+  //   nop
+  // Block 1 (0x08 - extended condition block with * 3 shift-add and non-empty else):
+  //   lbu   $v0, 4($a0)
+  //   sll   $v1, $v0, 1
+  //   addu  $v0, $v1, $v0
+  //   addu  $v0, $a2, $v0
+  //   lbu   $v0, 0($v0)
+  //   andi  $v0, $v0, 1
+  //   bnez  $v0, 0x38 (else_body)
+  //   nop
+  // Block 2 (0x28 -> 0x28 then_body):
+  //   addiu $v0, $zero, 10
+  //   j     0x3C (join)
+  //   nop
+  // Block 3 (0x34 -> else_body):
+  //   addiu $v0, $zero, 20
+  // Block 4 (0x38 -> join):
+  //   jr    $ra
+  //   nop
+  std::vector<uint32_t> words = {
+      0x10A00008,  // 0x00: beqz  $a1, +8 -> 0x24 (then_body)
+      0x00000000,  // 0x04: nop
+      0x90820004,  // 0x08: lbu   $v0, 4($a0)
+      0x00021840,  // 0x0C: sll   $v1, $v0, 1
+      0x00621021,  // 0x10: addu  $v0, $v1, $v0
+      0x00C21021,  // 0x14: addu  $v0, $a2, $v0
+      0x90420000,  // 0x18: lbu   $v0, 0($v0)
+      0x30420001,  // 0x1C: andi  $v0, $v0, 1
+      0x14400004,  // 0x20: bnez  $v0, +4 -> 0x34 (else_body) -- Wait: (0x30 - 0x24)/4 = 3
+      0x00000000,  // 0x24: nop
+      0x2402000A,  // 0x28: addiu $v0, $zero, 10 (then_body)
+      0x0800000E,  // 0x2C: j     0x80000038 (join)
+      0x00000000,  // 0x30: nop
+      0x24020014,  // 0x34: addiu $v0, $zero, 20 (else_body)
+      0x03E00008,  // 0x38: jr    $ra (join)
+      0x00000000,  // 0x3C: nop
+  };
+  words[0] = 0x10A00009;  // 0x00: beqz $a1, +9 -> 0x28
+  words[8] = 0x14400004;  // 0x20: bnez $v0, +4 -> 0x34
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, HasSubstr("||"));
+  EXPECT_THAT(s, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
