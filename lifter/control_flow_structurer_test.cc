@@ -1182,5 +1182,42 @@ TEST(ControlFlowStructurerTest, UnsharesPureEpilogueReturnBlockAcrossAcyclicBran
   EXPECT_THAT(s, Not(HasSubstr("goto")));
 }
 
+TEST(ControlFlowStructurerTest,
+     RecoversDominatorTreeJoinWhenBothIfElseArmsAreMultiBlockAndOneHasEarlyReturn) {
+  // Block 0 (0x00, entry): bnez $a0, 0x18 (to Else arm Block 3)
+  // Block 1 (0x08, Then arm): bnez $a1, 0x28 (to Join Block 5), fallthrough Block 2 (early return)
+  // Block 2 (0x10, Early return): jr $ra; addiu $v0, $zero, -1
+  // Block 3 (0x18, Else arm): beqz $a2, 0x24 (to Block 5), fallthrough Block 4
+  // Block 4 (0x20, Else cont): addiu $v0, $a0, 30 (falls through to Join Block 5 at 0x24)
+  // Block 5 (0x24, Join): addiu $v0, $v0, 1; jr $ra; nop
+  // Neither arm of Block 0 is a 1-successor block (`try_find_diamond_join` does not apply), so
+  // `dom_tree_->ImmediateDominator(cand) == entry` recovers Block 5 as the join of Block 0.
+  std::vector<uint32_t> words = {
+      0x14800005,  // 0x00 (block 0): bnez  $a0, +5 (to 0x18)
+      0x00000000,  // 0x04:           nop
+      0x14A00006,  // 0x08 (block 1): bnez  $a1, +6 (to 0x24 join)
+      0x2482000A,  // 0x0C:           addiu $v0, $a0, 10
+      0x03E00008,  // 0x10 (block 2): jr    $ra
+      0x2402FFFF,  // 0x14:           addiu $v0, $zero, -1
+      0x10C00002,  // 0x18 (block 3): beqz  $a2, +2 (to 0x24 join)
+      0x24020014,  // 0x1C:           addiu $v0, $zero, 20
+      0x2482001E,  // 0x20 (block 4): addiu $v0, $a0, 30
+      0x24420001,  // 0x24 (block 5, join): addiu $v0, $v0, 1
+      0x03E00008,  // 0x28:           jr    $ra
+      0x00000000,  // 0x2C:           nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -1104,15 +1104,15 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
   }
 
   std::optional<uint32_t> join = ComputeConditionalJoinBlock(entry, follow, current_loop);
-  if (join != succ_fallthrough && join != succ_taken &&
-      !DetectFloatToUintDiamond(entry, succ_taken, succ_fallthrough, join).has_value()) {
-    bool join_is_epilogue_or_empty = !join.has_value();
-    if (join.has_value()) {
-      const auto* join_blk = cfg_->GetBlock(*join);
-      if (join_blk == nullptr || IsPureEpilogueReturnBlock(*join_blk)) {
-        join_is_epilogue_or_empty = true;
-      }
+  bool join_is_epilogue_or_empty = !join.has_value();
+  if (join.has_value()) {
+    const auto* join_blk = cfg_->GetBlock(*join);
+    if (join_blk == nullptr || IsPureEpilogueReturnBlock(*join_blk)) {
+      join_is_epilogue_or_empty = true;
     }
+  }
+  if ((join_is_epilogue_or_empty || (join != succ_fallthrough && join != succ_taken)) &&
+      !DetectFloatToUintDiamond(entry, succ_taken, succ_fallthrough, join).has_value()) {
     if (join_is_epilogue_or_empty) {
       if (CheckNonReturningPostDominance(
               *cfg_, dom_tree_, loop_info_, visited_, entry, succ_fallthrough, succ_taken,
@@ -1125,7 +1125,7 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
               current_loop,
               /*require_reaches_candidate=*/!(follow.has_value() && succ_fallthrough == *follow))) {
         join = succ_fallthrough;
-      } else {
+      } else if (join != succ_fallthrough && join != succ_taken) {
         auto try_find_diamond_join = [&](uint32_t s_direct,
                                          uint32_t s_other) -> std::optional<uint32_t> {
           if (visited_.contains(s_direct) || s_direct == entry) return std::nullopt;
@@ -1148,6 +1148,29 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         } else if (auto cand = try_find_diamond_join(succ_taken, succ_fallthrough);
                    cand.has_value()) {
           join = cand;
+        } else if (dom_tree_ != nullptr) {
+          for (const auto& blk : cfg_->Blocks()) {
+            const uint32_t cand = blk.id;
+            if (cand == entry || cand == succ_fallthrough || cand == succ_taken ||
+                visited_.contains(cand) || IsPureEpilogueReturnBlock(blk)) {
+              continue;
+            }
+            if (dom_tree_->ImmediateDominator(cand) != entry) {
+              continue;
+            }
+            auto arm_reaches_join = [&](uint32_t s_arm) {
+              if (post_dom_tree_ != nullptr && post_dom_tree_->Dominates(cand, s_arm)) {
+                return current_loop == nullptr || current_loop->Contains(cand);
+              }
+              return CheckNonReturningPostDominance(*cfg_, dom_tree_, loop_info_, visited_, entry,
+                                                    s_arm, cand, current_loop,
+                                                    /*require_reaches_candidate=*/true);
+            };
+            if (arm_reaches_join(succ_fallthrough) && arm_reaches_join(succ_taken)) {
+              join = cand;
+              break;
+            }
+          }
         }
       }
     }

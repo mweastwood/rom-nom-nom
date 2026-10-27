@@ -614,5 +614,45 @@ TEST(CfgDeReorgTest,
   EXPECT_EQ(cloned_blk.instructions.front().rt, Register::kA1);
 }
 
+TEST(CfgDeReorgTest,
+     RelaxDelaySlotUnschedulerRetargetsMultipleBranchesToOneInstructionPredecessor) {
+  // Models a decision tree where 0x04 (`blez $v1, 0x1C`) splits into two arms: the left arm at
+  // 0x0C (`beq $v1, $v0, 0x2C / addu $a1, $zero, $zero`) stole the 1-instruction initialization
+  // block at 0x28 (`addu $a1, $zero, $zero`), while the right arm at 0x1C (`beq $v1, $a2, 0x28 /
+  // nop`) branches directly to 0x28.
+  std::vector<uint32_t> words = {
+      0x24020002,  // 0x00: addiu $v0, $zero, 2
+      0x18600005,  // 0x04: blez  $v1, +5 -> 0x1C
+      0x00000000,  // 0x08: nop
+      0x10620007,  // 0x0C: beq   $v1, $v0, +7 -> 0x2C (taken_block)
+      0x00002821,  // 0x10: addu  $a1, $zero, $zero (stolen from 0x28)
+      0x03E00008,  // 0x14: jr    $ra
+      0x00001021,  // 0x18: addu  $v0, $zero, $zero
+      0x10600002,  // 0x1C: beq   $v1, $zero, +2 -> 0x28 (pred_blk)
+      0x00000000,  // 0x20: nop
+      0x03E00008,  // 0x24: jr    $ra
+      0x00002821,  // 0x28 (pred_blk): addu $a1, $zero, $zero (falls through to 0x2C)
+      0x00A41021,  // 0x2C (taken_block): addu $v0, $a1, $a0
+      0x03E00008,  // 0x30: jr    $ra
+      0x00000000,  // 0x34: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b_left = cfg.FindBlockByVram(0x8000000C);
+  const BasicBlock* pred_blk = cfg.FindBlockByVram(0x80000028);
+  ASSERT_NE(b_left, nullptr);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_TRUE(b_left->instructions.back().IsNop());
+  EXPECT_EQ(pred_blk->predecessors.size(), 2u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

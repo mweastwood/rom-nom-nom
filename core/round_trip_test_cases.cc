@@ -7422,6 +7422,46 @@ s32 IfElseSubtreesWithCrossJumpedConditionalStoreTail(s32* slot, s32 mode, s32 v
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "DecisionTreeSwitchWithSharedCrossSplitCaseAndBoundedLeaf",
+          .function_name = "DecisionTreeSwitchWithSharedCrossSplitCaseAndBoundedLeaf",
+          .original_c = R"(
+extern void StepNpcSlot(void);
+extern s32 InitNpcScript(s32 id, s32 arg1, s32 arg2);
+extern u8 g_npc_flags[40];
+
+s32 DecisionTreeSwitchWithSharedCrossSplitCaseAndBoundedLeaf(s16* cmd) {
+    s32 i;
+    switch (cmd[0]) {
+    case 1:
+        StepNpcSlot();
+        return 0;
+    case 12288:
+        InitNpcScript(cmd[2], 0, 1);
+        return 1;
+    case 12289:
+        g_npc_flags[cmd[4]] = 3;
+        InitNpcScript(cmd[2], 0, 1);
+        return 1;
+    case 2:
+    case 12290:
+        for (i = 0; i < 4; i++) {
+            g_npc_flags[i * 10] = 4;
+        }
+        InitNpcScript(cmd[2], 0, 1);
+        return 1;
+    case 12291:
+        for (i = 0; i < 4; i++) {
+            g_npc_flags[i * 10] &= 0x7F;
+        }
+        InitNpcScript(cmd[2], 0, 1);
+        return 1;
+    default:
+        return 0;
+    }
+}
+)",
+      },
   };
   return *k_cases;
 }

@@ -720,6 +720,10 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     int64_t delay_slot_split_val = 0;
     Register delay_slot_split_selector = Register::kZero;
     std::optional<Instruction> delay_instruction;
+
+    absl::flat_hash_map<Register, int64_t> out_consts;
+    absl::flat_hash_map<Register, int64_t> out_splits;
+    absl::flat_hash_map<Register, Register> out_split_sels;
   };
 
   auto analyze_block = [&](uint32_t b_id, const absl::flat_hash_map<Register, int64_t>& in_consts,
@@ -843,6 +847,10 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         }
       }
     }
+
+    ba.out_consts = consts;
+    ba.out_splits = splits;
+    ba.out_split_sels = split_sels;
 
     if (b_id != root_id && known_selector != Register::kZero) {
       for (int i = scan_start; i <= branch_idx; ++i) {
@@ -1072,7 +1080,107 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     return ba;
   };
 
-  BlockAnalysis root_ba = analyze_block(root_id, {}, {}, {}, Register::kZero);
+  absl::flat_hash_map<Register, int64_t> initial_consts;
+  initial_consts[Register::kZero] = 0;
+  {
+    std::vector<uint32_t> ancestors;
+    uint32_t curr = root_id;
+    absl::flat_hash_set<uint32_t> seen_anc = {root_id};
+    while (ancestors.size() < 8) {
+      const auto* c_blk = cfg.GetBlock(curr);
+      if (c_blk == nullptr || c_blk->predecessors.size() != 1) break;
+      uint32_t pred = c_blk->predecessors[0];
+      if (!seen_anc.insert(pred).second) break;
+      if (loop_info != nullptr && loop_info->GetLoopFor(pred) != loop_info->GetLoopFor(root_id)) {
+        break;
+      }
+      ancestors.push_back(pred);
+      curr = pred;
+    }
+    std::reverse(ancestors.begin(), ancestors.end());
+    auto apply_const_inst = [&](const Instruction& inst) {
+      if (inst.IsCall()) {
+        for (Register r :
+             {Register::kAt, Register::kV0, Register::kV1, Register::kA0, Register::kA1,
+              Register::kA2, Register::kA3, Register::kT0, Register::kT1, Register::kT2,
+              Register::kT3, Register::kT4, Register::kT5, Register::kT6, Register::kT7,
+              Register::kT8, Register::kT9, Register::kRa}) {
+          initial_consts.erase(r);
+        }
+        return;
+      }
+      if (inst.opcode == Opcode::kAddiu && inst.rs.has_value() && inst.rt.has_value() &&
+          initial_consts.contains(*inst.rs)) {
+        initial_consts[*inst.rt] = static_cast<int32_t>(
+            static_cast<uint32_t>(initial_consts[*inst.rs]) +
+            static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(inst.immediate))));
+      } else if (inst.opcode == Opcode::kOri && inst.rs.has_value() && inst.rt.has_value() &&
+                 initial_consts.contains(*inst.rs)) {
+        initial_consts[*inst.rt] =
+            static_cast<int32_t>(static_cast<uint32_t>(initial_consts[*inst.rs]) |
+                                 static_cast<uint16_t>(inst.immediate));
+      } else if (inst.opcode == Opcode::kLui && inst.rt.has_value()) {
+        initial_consts[*inst.rt] =
+            static_cast<int32_t>(static_cast<uint32_t>(inst.immediate & 0xFFFFu) << 16);
+      } else if (inst.opcode == Opcode::kAddu && inst.rs.has_value() && inst.rt.has_value() &&
+                 inst.rd.has_value() && initial_consts.contains(*inst.rs) &&
+                 initial_consts.contains(*inst.rt)) {
+        initial_consts[*inst.rd] =
+            static_cast<int32_t>(static_cast<uint32_t>(initial_consts[*inst.rs]) +
+                                 static_cast<uint32_t>(initial_consts[*inst.rt]));
+      } else {
+        RegisterUseDef ud = GetInstructionUseDef(inst);
+        for (Register def_reg : ud.gpr_defs) {
+          initial_consts.erase(def_reg);
+        }
+      }
+      initial_consts[Register::kZero] = 0;
+    };
+    for (size_t idx = 0; idx < ancestors.size(); ++idx) {
+      uint32_t anc_id = ancestors[idx];
+      uint32_t next_id = (idx + 1 < ancestors.size()) ? ancestors[idx + 1] : root_id;
+      const auto* anc_blk = cfg.GetBlock(anc_id);
+      if (anc_blk == nullptr) break;
+      int br_idx = -1;
+      for (int i = static_cast<int>(anc_blk->instructions.size()) - 1; i >= 0; --i) {
+        if (anc_blk->instructions[i].IsBranch() || anc_blk->instructions[i].IsJump()) {
+          br_idx = i;
+          break;
+        }
+      }
+      int limit = (br_idx >= 0) ? br_idx : static_cast<int>(anc_blk->instructions.size());
+      for (int i = 0; i < limit; ++i) {
+        apply_const_inst(anc_blk->instructions[i]);
+      }
+      if (br_idx >= 0) {
+        const auto& br = anc_blk->instructions[br_idx];
+        bool is_taken_edge = false;
+        for (const auto& edge : anc_blk->outgoing_edges) {
+          if (edge.to_block_id == next_id && edge.type == EdgeType::kBranch) {
+            is_taken_edge = true;
+            break;
+          }
+        }
+        if (is_taken_edge && (br.opcode == Opcode::kBeq || br.opcode == Opcode::kBeql) &&
+            br.rs.has_value() && br.rt.has_value()) {
+          if (initial_consts.contains(*br.rs) && !initial_consts.contains(*br.rt)) {
+            initial_consts[*br.rt] = initial_consts[*br.rs];
+          } else if (initial_consts.contains(*br.rt) && !initial_consts.contains(*br.rs)) {
+            initial_consts[*br.rs] = initial_consts[*br.rt];
+          }
+          initial_consts[Register::kZero] = 0;
+        }
+        if (br_idx + 1 < static_cast<int>(anc_blk->instructions.size())) {
+          bool delay_executes = !br.IsBranchLikely() || is_taken_edge;
+          if (delay_executes) {
+            apply_const_inst(anc_blk->instructions[br_idx + 1]);
+          }
+        }
+      }
+    }
+  }
+
+  BlockAnalysis root_ba = analyze_block(root_id, initial_consts, {}, {}, Register::kZero);
   if (!root_ba.valid || root_ba.selector_reg == Register::kZero) {
     return std::nullopt;
   }
@@ -1088,6 +1196,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
   };
 
   absl::flat_hash_map<uint32_t, absl::flat_hash_map<Register, int64_t>> block_consts;
+  block_consts[root_id] = std::move(initial_consts);
   absl::flat_hash_map<uint32_t, absl::flat_hash_map<Register, int64_t>> block_splits;
   absl::flat_hash_map<uint32_t, absl::flat_hash_map<Register, Register>> block_split_sels;
   absl::flat_hash_map<uint32_t, BlockInterval> block_intervals;
@@ -1113,6 +1222,14 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         } else if (blk->instructions.size() <= 2) {
           const auto* term = blk->Terminator();
           if (term != nullptr && term->opcode == Opcode::kJ) {
+            is_pure_jump = true;
+          }
+        } else if (blk->instructions.size() == 3 && blk->instructions.back().IsNop()) {
+          const auto* term = blk->Terminator();
+          const auto& first = blk->instructions.front();
+          if (term != nullptr && term->opcode == Opcode::kJ && !first.IsCall() &&
+              !first.IsStore() && !first.IsLoad() && !first.IsBranch() && !first.IsJump() &&
+              !first.IsReturn()) {
             is_pure_jump = true;
           }
         }
@@ -1148,23 +1265,45 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     }
 
     auto make_succ_consts = [&](const BlockAnalysis& cur_ba) {
-      absl::flat_hash_map<Register, int64_t> m = block_consts[b_id];
+      absl::flat_hash_map<Register, int64_t> m = cur_ba.out_consts;
       if (cur_ba.delay_slot_sets_const) {
         m[cur_ba.delay_slot_const_reg] = cur_ba.delay_slot_const_val;
+      } else if (cur_ba.delay_slot_sets_split) {
+        m.erase(cur_ba.delay_slot_split_reg);
+      } else if (cur_ba.delay_instruction.has_value()) {
+        for (Register def_reg : GetInstructionUseDef(*cur_ba.delay_instruction).gpr_defs) {
+          m.erase(def_reg);
+        }
       }
       return m;
     };
     auto make_succ_splits = [&](const BlockAnalysis& cur_ba) {
-      absl::flat_hash_map<Register, int64_t> m = block_splits[b_id];
+      absl::flat_hash_map<Register, int64_t> m = cur_ba.out_splits;
       if (cur_ba.delay_slot_sets_split) {
         m[cur_ba.delay_slot_split_reg] = cur_ba.delay_slot_split_val;
+      } else if (cur_ba.delay_slot_sets_const) {
+        m.erase(cur_ba.delay_slot_const_reg);
+      } else if (cur_ba.delay_instruction.has_value()) {
+        for (Register def_reg : GetInstructionUseDef(*cur_ba.delay_instruction).gpr_defs) {
+          m.erase(def_reg);
+        }
       }
       return m;
     };
     auto make_succ_split_sels = [&](const BlockAnalysis& cur_ba) {
-      absl::flat_hash_map<Register, Register> m = block_split_sels[b_id];
-      if (cur_ba.delay_slot_sets_split && cur_ba.delay_slot_split_selector != Register::kZero) {
-        m[cur_ba.delay_slot_split_reg] = cur_ba.delay_slot_split_selector;
+      absl::flat_hash_map<Register, Register> m = cur_ba.out_split_sels;
+      if (cur_ba.delay_slot_sets_split) {
+        if (cur_ba.delay_slot_split_selector != Register::kZero) {
+          m[cur_ba.delay_slot_split_reg] = cur_ba.delay_slot_split_selector;
+        } else {
+          m.erase(cur_ba.delay_slot_split_reg);
+        }
+      } else if (cur_ba.delay_slot_sets_const) {
+        m.erase(cur_ba.delay_slot_const_reg);
+      } else if (cur_ba.delay_instruction.has_value()) {
+        for (Register def_reg : GetInstructionUseDef(*cur_ba.delay_instruction).gpr_defs) {
+          m.erase(def_reg);
+        }
       }
       return m;
     };
@@ -1199,9 +1338,9 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       const auto* cur_term = (cur_blk != nullptr) ? cur_blk->Terminator() : nullptr;
       bool cont_annuls_delay_slot = (cur_term != nullptr && cur_term->opcode == Opcode::kBeql);
 
-      auto cont_consts = cont_annuls_delay_slot ? block_consts[b_id] : make_succ_consts(ba);
-      auto cont_splits = cont_annuls_delay_slot ? block_splits[b_id] : make_succ_splits(ba);
-      auto cont_sels = cont_annuls_delay_slot ? block_split_sels[b_id] : make_succ_split_sels(ba);
+      auto cont_consts = cont_annuls_delay_slot ? ba.out_consts : make_succ_consts(ba);
+      auto cont_splits = cont_annuls_delay_slot ? ba.out_splits : make_succ_splits(ba);
+      auto cont_sels = cont_annuls_delay_slot ? ba.out_split_sels : make_succ_split_sels(ba);
       BlockAnalysis cont_ba = analyze_block(cont, cont_consts, cont_splits, cont_sels, selector);
 
       if (cont_ba.valid && !visited.contains(cont) && !decision_blocks.contains(cont)) {
@@ -1297,9 +1436,16 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         uint32_t eff_cont = resolve_trampoline(cont);
         const auto* cont_blk = cfg.GetBlock(cont);
         bool continuation_has_valid_delay_slot = false;
-        if (eff_cont != cont && cont_blk != nullptr && cont_blk->instructions.size() >= 2 &&
-            !cont_blk->instructions.back().IsNop()) {
-          const auto& ds = cont_blk->instructions.back();
+        const Instruction* tramp_ds = nullptr;
+        if (eff_cont != cont && cont_blk != nullptr) {
+          if (cont_blk->instructions.size() >= 2 && !cont_blk->instructions.back().IsNop()) {
+            tramp_ds = &cont_blk->instructions.back();
+          } else if (cont_blk->instructions.size() == 3 && cont_blk->instructions.back().IsNop()) {
+            tramp_ds = &cont_blk->instructions.front();
+          }
+        }
+        if (tramp_ds != nullptr) {
+          const auto& ds = *tramp_ds;
           if (ds.opcode == Opcode::kAddiu && ds.rs == Register::kZero && ds.rt.has_value()) {
             default_const_reg = *ds.rt;
             default_const_val = static_cast<int16_t>(ds.immediate);
@@ -1385,12 +1531,19 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         }
       }
 
+      const auto* cur_blk = cfg.GetBlock(b_id);
+      const auto* cur_term = (cur_blk != nullptr) ? cur_blk->Terminator() : nullptr;
+      const bool split_ft_annuls_delay_slot = (cur_term != nullptr && cur_term->IsBranchLikely());
+
       auto succ_c = make_succ_consts(ba);
       auto succ_s = make_succ_splits(ba);
       auto succ_sels = make_succ_split_sels(ba);
+      auto ft_c = split_ft_annuls_delay_slot ? ba.out_consts : succ_c;
+      auto ft_s = split_ft_annuls_delay_slot ? ba.out_splits : succ_s;
+      auto ft_sels = split_ft_annuls_delay_slot ? ba.out_split_sels : succ_sels;
 
       BlockAnalysis ba_taken = analyze_block(ba.split_taken, succ_c, succ_s, succ_sels, selector);
-      BlockAnalysis ba_ft = analyze_block(ba.split_ft, succ_c, succ_s, succ_sels, selector);
+      BlockAnalysis ba_ft = analyze_block(ba.split_ft, ft_c, ft_s, ft_sels, selector);
 
       auto check_branch_loop_valid = [&](uint32_t target_id, BlockAnalysis* child_ba) {
         if (child_ba->valid && !visited.contains(target_id) &&
@@ -1469,10 +1622,10 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
                                            bool is_doubly_bounded) -> bool {
         if (implied_vals.empty()) return false;
         uint32_t eff_target = resolve_trampoline(leaf_target);
-        if (!is_doubly_bounded || implied_vals.size() == 1) {
+        if (!is_doubly_bounded) {
           if (!default_target.has_value()) {
             default_target = eff_target;
-          } else if (!is_doubly_bounded && *default_target != eff_target) {
+          } else if (*default_target != eff_target) {
             return false;
           }
         }
@@ -1489,14 +1642,14 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         if (ba.delay_slot_sets_const) {
           dc.const_reg = ba.delay_slot_const_reg;
           dc.const_val = ba.delay_slot_const_val;
-          if (!default_const_reg.has_value()) {
+          if (!is_doubly_bounded && !default_const_reg.has_value()) {
             default_const_reg = ba.delay_slot_const_reg;
             default_const_val = ba.delay_slot_const_val;
           }
         }
         if (ba.delay_instruction.has_value()) {
           dc.delay_instructions.push_back(*ba.delay_instruction);
-          if (default_delay_instructions.empty()) {
+          if (!is_doubly_bounded && default_delay_instructions.empty()) {
             default_delay_instructions.push_back(*ba.delay_instruction);
           }
         }
@@ -1525,9 +1678,9 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
 
       if (ft_is_decision) {
         decision_blocks.insert(ba.split_ft);
-        block_consts[ba.split_ft] = succ_c;
-        block_splits[ba.split_ft] = succ_s;
-        block_split_sels[ba.split_ft] = succ_sels;
+        block_consts[ba.split_ft] = ft_c;
+        block_splits[ba.split_ft] = ft_s;
+        block_split_sels[ba.split_ft] = ft_sels;
         block_intervals[ba.split_ft] = ft_interval;
         queue.push_back(ba.split_ft);
       } else if (taken_is_decision) {

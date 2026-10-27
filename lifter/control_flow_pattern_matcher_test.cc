@@ -999,5 +999,85 @@ TEST(ControlFlowPatternMatcherTest, CollapsesShortCircuitIfElseWithShiftAddIndex
   EXPECT_THAT(s, Not(HasSubstr("goto")));
 }
 
+TEST(ControlFlowPatternMatcherTest,
+     DetectsDecisionTreeSwitchWhenDelaySlotOverwritesSplitRegAndTrampolineIsUnscheduled) {
+  // Models GCC 2.7.2 decision-tree switch where:
+  // 1) Block 0 tests `beq $v1, $v0` (case 12288) and sets range split `slti $v0, $v1, 12289` in its
+  //    delay slot.
+  // 2) Block 1 tests `beqz $v0, right_tree` and overwrites `$v0` with `addiu $v0, $zero, 1` in its
+  //    delay slot (replacing the split in `$v0` with constant 1).
+  // 3) Block 2 tests `beq $v1, $v0` (case 1) and falls through to Block 3, a 3-instruction
+  //    unscheduled default jump trampoline (`addu $v0, $zero, $zero; j default; nop`).
+  // 4) Right tree (Block 4) tests `beq $v1, $v0` (case 12290) with `slti $v0, $v1, 12290` in its
+  //    delay slot, then Block 5 branches on `bnez $v0` to doubly-bounded implied `case 12289`
+  //    before Block 6 tests `case 12291` and jumps to `default`.
+  std::vector<uint32_t> words = {
+      0x24023000,  // 0x00 (block 0): addiu $v0, $zero, 12288
+      0x10620010,  // 0x04:           beq   $v1, $v0, +16 -> 0x48 (case 12288)
+      0x28623001,  // 0x08:           slti  $v0, $v1, 12289
+      0x10400005,  // 0x0C (block 1): beqz  $v0, +5 -> 0x24 (right tree)
+      0x24020001,  // 0x10:           addiu $v0, $zero, 1
+      0x1062000A,  // 0x14 (block 2): beq   $v1, $v0, +10 -> 0x40 (case 1)
+      0x00000000,  // 0x18:           nop
+      0x00001021,  // 0x1C (block 3): addu  $v0, $zero, $zero (3-inst default trampoline)
+      0x0800001A,  // 0x20:           j     0x80000068 (default)
+      0x00000000,  // 0x24:           nop
+      0x24023002,  // 0x28 (block 4): addiu $v0, $zero, 12290
+      0x1062000A,  // 0x2C:           beq   $v1, $v0, +10 -> 0x58 (case 12290)
+      0x28623002,  // 0x30:           slti  $v0, $v1, 12290
+      0x14400006,  // 0x34 (block 5): bnez  $v0, +6 -> 0x50 (implied case 12289)
+      0x24023003,  // 0x38:           addiu $v0, $zero, 12291
+      0x10620008,  // 0x3C (block 6): beq   $v1, $v0, +8 -> 0x60 (case 12291)
+      0x00000000,  // 0x40:           nop
+      0x0800001A,  // 0x44 (block 7): j     0x80000068 (default)
+      0x00001021,  // 0x48:           addu  $v0, $zero, $zero
+      0x2402000A,  // 0x4C (case 1):     addiu $v0, $zero, 10
+      0x03E00008,  // 0x50:              jr    $ra
+      0x00000000,  // 0x54:              nop
+      0x24020014,  // 0x58 (case 12288): addiu $v0, $zero, 20
+      0x03E00008,  // 0x5C:              jr    $ra
+      0x00000000,  // 0x60:              nop
+      0x2402001E,  // 0x64 (case 12289): addiu $v0, $zero, 30
+      0x03E00008,  // 0x68:              jr    $ra
+      0x00000000,  // 0x6C:              nop
+      0x24020028,  // 0x70 (case 12290): addiu $v0, $zero, 40
+      0x03E00008,  // 0x74:              jr    $ra
+      0x00000000,  // 0x78:              nop
+      0x24020032,  // 0x7C (case 12291): addiu $v0, $zero, 50
+      0x03E00008,  // 0x80:              jr    $ra
+      0x00000000,  // 0x84:              nop
+      0x03E00008,  // 0x88 (default):    jr    $ra
+      0x00000000,  // 0x8C:              nop
+  };
+  // Fix branch offsets for the case target addresses above:
+  // 0x04 -> 0x58: (0x58 - 0x08)/4 = 20 = 0x14
+  words[1] = 0x10620014;
+  // 0x0C -> 0x28: (0x28 - 0x10)/4 = 6
+  words[3] = 0x10400006;
+  // 0x14 -> 0x4C: (0x4C - 0x18)/4 = 13 = 0x0D
+  words[5] = 0x1062000D;
+  // 0x20 -> 0x88: 0x80000088 >> 2 = 0x02000022 -> j 0x08000022
+  words[8] = 0x08000022;
+  // 0x2C -> 0x70: (0x70 - 0x30)/4 = 16 = 0x10
+  words[11] = 0x10620010;
+  // 0x34 -> 0x64: (0x64 - 0x38)/4 = 11 = 0x0B
+  words[13] = 0x1440000B;
+  // 0x3C -> 0x7C: (0x7C - 0x40)/4 = 15 = 0x0F
+  words[15] = 0x1062000F;
+  // 0x44 -> 0x88: j 0x08000022
+  words[17] = 0x08000022;
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  EXPECT_EQ(sw->selector_reg, Register::kV1);
+  EXPECT_EQ(sw->target_to_cases.size(), 5u);
+  ASSERT_TRUE(sw->default_target_block.has_value());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

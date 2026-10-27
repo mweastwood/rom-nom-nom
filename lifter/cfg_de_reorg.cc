@@ -850,6 +850,7 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
   } else {
     analyses->SetCfg(cfg);
   }
+  const DominatorTree& dom_tree = analyses->GetDominatorTree();
   const LoopInfo& loop_info = analyses->GetLoopInfo();
   const DominatorTree& post_dom_tree = analyses->GetPostDominatorTree();
   const bool returns_f0 = AbiAnalyzer::DetermineReturnsF0(*cfg);
@@ -890,7 +891,7 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
       const uint32_t succ_taken = block.successors[0];
       BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
       if (taken_block != nullptr && succ_taken != block.id &&
-          taken_block->predecessors.size() == 2 &&
+          taken_block->predecessors.size() >= 2 &&
           (enclosing_loop == nullptr || succ_taken != enclosing_loop->header)) {
         const Loop* target_loop = loop_info.GetLoopFor(succ_taken);
         std::optional<uint32_t> pred_block_id;
@@ -943,12 +944,13 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
       continue;
     }
 
+    const bool has_pre_branch_conflict =
+        term.IsBranchLikely() || DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst);
     if (!term.IsBranchLikely()) {
       RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
       if (!IsSinkableDelaySlotInstruction(block, delay_inst) ||
           !AllDefinedRegistersDeadAtBlockEntry(*cfg, succ_fallthrough, delay_ud, returns_v0,
-                                               returns_f0) ||
-          !DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst)) {
+                                               returns_f0)) {
         continue;
       }
     }
@@ -1008,14 +1010,18 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
           (enclosing_loop == nullptr || succ_taken != enclosing_loop->header) &&
           pred_blk != nullptr && !jump_table_target_vrams.contains(pred_blk->start_vram) &&
           pred_blk->end_vram + 4 == taken_block->start_vram &&
-          taken_block->predecessors.size() == 2 &&
-          post_dom_tree.Dominates(pred_id, succ_fallthrough) &&
-          IsSinkableDelaySlotInstruction(block, delay_inst) && uses_preserved_to_pred();
+          taken_block->predecessors.size() >= 2 &&
+          IsSinkableDelaySlotInstruction(block, delay_inst) &&
+          ((has_pre_branch_conflict && post_dom_tree.Dominates(pred_id, succ_fallthrough) &&
+            uses_preserved_to_pred()) ||
+           (term.IsBranchLikely() && pred_blk->predecessors.size() >= 2) ||
+           (!dom_tree.Dominates(succ_fallthrough, pred_id) && !pred_blk->predecessors.empty()));
       const bool cross_loop_valid =
-          (enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
-           !enclosing_loop->Contains(pred_id)) ||
-          (target_loop != nullptr && target_loop->header == succ_taken &&
-           !target_loop->Contains(block.id) && !target_loop->Contains(pred_id));
+          has_pre_branch_conflict &&
+          ((enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
+            !enclosing_loop->Contains(pred_id)) ||
+           (target_loop != nullptr && target_loop->header == succ_taken &&
+            !target_loop->Contains(block.id) && !target_loop->Contains(pred_id)));
       if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
           pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
           SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
@@ -1493,11 +1499,25 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
             pred_term != nullptr && pred_term->opcode == Opcode::kJ &&
             pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
             !jump_table_bounds_vrams.contains(pred_term->vram) && valid_pred_delay;
+        const bool pred_ft_is_tail_pred =
+            std::find(tail_blk.predecessors.begin(), tail_blk.predecessors.end(), pred_ft_succ) !=
+            tail_blk.predecessors.end();
+        bool pred_ft_has_call_or_store = false;
+        if (const BasicBlock* pred_ft_blk = cfg->GetBlock(pred_ft_succ); pred_ft_blk != nullptr) {
+          for (const auto& inst : pred_ft_blk->instructions) {
+            if (inst.IsCall() || inst.IsStore()) {
+              pred_ft_has_call_or_store = true;
+              break;
+            }
+          }
+        }
+        const bool allow_idom_branch_pred =
+            !merges_into_return && !pred_ft_is_tail_pred && pred_ft_has_call_or_store;
         const bool is_valid_branch_pred =
-            !tail_post_dominates_idom && *sub_opt != *idom && pred_blk->successors.size() == 2 &&
-            pred_has_branch_to_tail && pred_ft_succ != tail_block_id &&
-            loop_info.GetLoopFor(pred_ft_succ) == tail_loop && pred_term != nullptr &&
-            pred_term->IsBranch() && !pred_term->IsUnconditionalBranch() &&
+            !tail_post_dominates_idom && (*sub_opt != *idom || allow_idom_branch_pred) &&
+            pred_blk->successors.size() == 2 && pred_has_branch_to_tail &&
+            pred_ft_succ != tail_block_id && loop_info.GetLoopFor(pred_ft_succ) == tail_loop &&
+            pred_term != nullptr && pred_term->IsBranch() && !pred_term->IsUnconditionalBranch() &&
             pred_term == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
             !jump_table_bounds_vrams.contains(pred_term->vram) && valid_pred_delay &&
             !switch_decision_blocks.contains(pred_id) && !short_circuit_blocks.contains(pred_id);
