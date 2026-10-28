@@ -753,5 +753,132 @@ TEST(CfgDeReorgTest,
   EXPECT_EQ(join_blk->instructions.front().rs, Register::kS1);
 }
 
+TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsChainedFallthroughBranchToSamePredecessor) {
+  // Models a 2-branch decision-tree arm where:
+  // - Block B1 (0x00): `beq $a0, $a1, 0x28` stole `addu $v0, $zero, $zero` from `pred_blk` (0x24).
+  //   `$v0` is live into fallthrough B2 (0x08) only because B2 also branches to `taken_block`
+  //   (0x28) where `$v0` is returned.
+  // - Block B2 (0x08): `beq $a0, $a2, 0x28 / nop` branches to `0x28` without reading/writing `$v0`,
+  //   and falls through to B3 (0x10) where `$v0` is dead.
+  std::vector<uint32_t> words = {
+      0x10850009,  // 0x00 (B1): beq   $a0, $a1, +9 -> 0x28 (taken_block)
+      0x00001021,  // 0x04:      addu  $v0, $zero, $zero (stolen from 0x24)
+      0x10860007,  // 0x08 (B2): beq   $a0, $a2, +7 -> 0x28 (taken_block)
+      0x00000000,  // 0x0C:      nop
+      0x10870004,  // 0x10 (B3): beq   $a0, $a3, +4 -> 0x24 (pred_blk)
+      0x00000000,  // 0x14:      nop
+      0x24020001,  // 0x18 (B4): addiu $v0, $zero, 1
+      0x0800000A,  // 0x1C:      j 0x80000028 (taken_block)
+      0x00000000,  // 0x20:      nop
+      0x00001021,  // 0x24 (pred_blk): addu $v0, $zero, $zero (falls through to 0x28)
+      0x8FBF0014,  // 0x28 (taken_block): lw $ra, 20($sp)
+      0x03E00008,  // 0x2C:      jr $ra
+      0x27BD0018,  // 0x30:      addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b1 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* b2 = cfg.FindBlockByVram(0x80000008);
+  const BasicBlock* pred_blk = cfg.FindBlockByVram(0x80000024);
+  ASSERT_NE(b1, nullptr);
+  ASSERT_NE(b2, nullptr);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_TRUE(b1->instructions.back().IsNop());
+  EXPECT_NE(std::find(b1->successors.begin(), b1->successors.end(), pred_blk->id),
+            b1->successors.end());
+  EXPECT_NE(std::find(b2->successors.begin(), b2->successors.end(), pred_blk->id),
+            b2->successors.end());
+}
+
+TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerUnmergesHammockDelaySlotIntoPostDominator) {
+  // Models GCC 2.7.2 `reorg.c:try_merge_delay_insns` on a nested `if (a && b)` before a loop latch:
+  // - Block 0 (0x00): `beq $v0, $zero, 0x18` with delay slot `addiu $a2, $a2, 1` (stolen from 0x18
+  //   and deleted from 0x18 by `try_merge_delay_insns` because `$a2` is not modified inside the
+  //   hammock).
+  // - Block 1 (0x08): `bne $a1, $zero, 0x18 / nop` (inner branch to 0x18 whose delay slot was left
+  //   unfilled because 0x18 originally started with `addiu $a2, $a2, 1`).
+  // - Block 2 (0x10): `sw $zero, 0($a0)` falling through to 0x18.
+  // - Block 3 (0x18): `slti $v0, $a2, 16; jr $ra / nop`.
+  std::vector<uint32_t> words = {
+      0x10400005,  // 0x00: beq   $v0, $zero, +5 -> 0x18
+      0x24C60001,  // 0x04: addiu $a2, $a2, 1
+      0x14A00003,  // 0x08: bne   $a1, $zero, +3 -> 0x18
+      0x00000000,  // 0x0C: nop
+      0xAC800000,  // 0x10: sw    $zero, 0($a0)
+      0x00000000,  // 0x14: nop (falls through to 0x18)
+      0x28C20010,  // 0x18: slti  $v0, $a2, 16
+      0x03E00008,  // 0x1C: jr    $ra
+      0x00000000,  // 0x20: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b0 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* join_blk = cfg.FindBlockByVram(0x80000018);
+  ASSERT_NE(b0, nullptr);
+  ASSERT_NE(join_blk, nullptr);
+  EXPECT_TRUE(b0->instructions.back().IsNop());
+  ASSERT_FALSE(join_blk->instructions.empty());
+  EXPECT_EQ(join_blk->instructions.front().opcode, Opcode::kAddiu);
+  EXPECT_EQ(join_blk->instructions.front().rt, Register::kA2);
+  EXPECT_EQ(join_blk->instructions.front().rs, Register::kA2);
+  EXPECT_EQ(join_blk->instructions.front().immediate, 1);
+}
+
+TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsFallthroughJumpTrampolineToPredecessor) {
+  // Models GCC 2.7.2 `reorg.c:fill_slots_from_thread` stealing `addu $v0, $s0, $zero` from
+  // `pred_blk` (0x20) across a 1-predecessor fallthrough `j 0x24 / nop` trampoline (0x08) into the
+  // delay slot of `beq $a1, $v0, 0x10` (0x00), where `$v0` is dead on the taken arm (0x10).
+  std::vector<uint32_t> words = {
+      0x24060001,  // 0x00: addiu $a2, $zero, 1
+      0x10A60003,  // 0x04: beq   $a1, $a2, +3 -> 0x14 (case_blk)
+      0x02002021,  // 0x08: addu  $a0, $s0, $zero (stolen from 0x24 via fallthrough 0x0C)
+      0x0800000A,  // 0x0C: j     0x80000028 (epilogue)
+      0x00000000,  // 0x10: nop
+      0x24040001,  // 0x14 (case_blk): addiu $a0, $zero, 1 (kills $a0)
+      0x10E00002,  // 0x18: beq   $a3, $zero, +2 -> 0x24 (pred_blk)
+      0x00000000,  // 0x1C: nop
+      0x26100001,  // 0x20: addiu $s0, $s0, 1 (falls through to 0x24)
+      0x02002021,  // 0x24 (pred_blk): addu $a0, $s0, $zero (falls through to 0x28)
+      0x00801021,  // 0x28 (epilogue): addu $v0, $a0, $zero
+      0x03E00008,  // 0x2C: jr    $ra
+      0x00000000,  // 0x30: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b0 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* ft_jump = cfg.FindBlockByVram(0x8000000C);
+  const BasicBlock* pred_blk = cfg.FindBlockByVram(0x80000024);
+  ASSERT_NE(b0, nullptr);
+  ASSERT_NE(ft_jump, nullptr);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_TRUE(b0->instructions.back().IsNop());
+  ASSERT_EQ(ft_jump->successors.size(), 1u);
+  EXPECT_EQ(ft_jump->successors[0], pred_blk->id);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

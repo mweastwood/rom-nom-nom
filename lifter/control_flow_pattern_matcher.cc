@@ -1542,6 +1542,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           (cont_ba.valid && !visited.contains(cont) && !decision_blocks.contains(cont));
 
       bool root_delay_emitted_before_switch = false;
+      bool root_delay_is_prologue_save = false;
       if (b_id == root_id && ba.delay_instruction.has_value()) {
         if (cur_term != nullptr && !cur_term->IsBranchLikely() && !ba.delay_slot_sets_split) {
           const auto& ds = *ba.delay_instruction;
@@ -1551,6 +1552,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
                 (*ds.rt >= Register::kS0 && *ds.rt <= Register::kS7))) ||
               (ds.opcode == Opcode::kAddiu && ds.rs == Register::kSp && ds.rt == Register::kSp &&
                static_cast<int16_t>(ds.immediate) < 0);
+          root_delay_is_prologue_save = is_prologue_save;
           RegisterUseDef ds_ud = GetInstructionUseDef(ds);
           bool defines_selector_or_at = false;
           for (Register def_reg : ds_ud.gpr_defs) {
@@ -1568,8 +1570,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
       DecisionCase dc;
       dc.case_values = {ba.case_val};
       dc.target_block = ct;
-      if (!root_delay_emitted_before_switch && !continuation_is_decision_block &&
-          ba.delay_slot_sets_const) {
+      if (!root_delay_emitted_before_switch && !root_delay_is_prologue_save &&
+          !continuation_is_decision_block && ba.delay_slot_sets_const) {
         const auto* target_block = cfg.GetBlock(ct);
         bool target_uses_constant_register = false;
         if (target_block != nullptr) {
@@ -1594,8 +1596,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           dc.const_val = ba.delay_slot_const_val;
         }
       }
-      if (!root_delay_emitted_before_switch && !ba.delay_slot_sets_split &&
-          ba.delay_instruction.has_value()) {
+      if (!root_delay_emitted_before_switch && !root_delay_is_prologue_save &&
+          !ba.delay_slot_sets_split && ba.delay_instruction.has_value()) {
         dc.delay_instructions.push_back(*ba.delay_instruction);
       }
       decision_cases.push_back(std::move(dc));
@@ -1822,7 +1824,31 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         DecisionCase dc;
         dc.case_values = implied_vals;
         dc.target_block = eff_target;
-        if (ba.delay_slot_sets_const) {
+        bool sibling_consumes_delay_const = false;
+        if (ba.delay_slot_sets_const && (taken_is_decision || ft_is_decision)) {
+          const uint32_t sibling_id = taken_is_decision ? ba.split_taken : ba.split_ft;
+          const auto* sib_blk = cfg.GetBlock(sibling_id);
+          if (sib_blk != nullptr) {
+            const size_t sib_end =
+                (sib_blk->instructions.size() >= 2 &&
+                 sib_blk->Terminator() == &sib_blk->instructions[sib_blk->instructions.size() - 2])
+                    ? (sib_blk->instructions.size() - 1)
+                    : sib_blk->instructions.size();
+            for (size_t i = 0; i < sib_end; ++i) {
+              RegisterUseDef sib_ud = GetInstructionUseDef(sib_blk->instructions[i]);
+              if (std::find(sib_ud.gpr_uses.begin(), sib_ud.gpr_uses.end(),
+                            ba.delay_slot_const_reg) != sib_ud.gpr_uses.end()) {
+                sibling_consumes_delay_const = true;
+                break;
+              }
+              if (std::find(sib_ud.gpr_defs.begin(), sib_ud.gpr_defs.end(),
+                            ba.delay_slot_const_reg) != sib_ud.gpr_defs.end()) {
+                break;
+              }
+            }
+          }
+        }
+        if (ba.delay_slot_sets_const && !sibling_consumes_delay_const) {
           dc.const_reg = ba.delay_slot_const_reg;
           dc.const_val = ba.delay_slot_const_val;
           if (!is_doubly_bounded && !default_const_reg.has_value()) {
@@ -1830,7 +1856,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             default_const_val = ba.delay_slot_const_val;
           }
         }
-        if (ba.delay_instruction.has_value()) {
+        if (ba.delay_instruction.has_value() && !ba.delay_slot_sets_split &&
+            (!ba.delay_slot_sets_const || !sibling_consumes_delay_const)) {
           dc.delay_instructions.push_back(*ba.delay_instruction);
           if (!is_doubly_bounded && default_delay_instructions.empty()) {
             default_delay_instructions.push_back(*ba.delay_instruction);
@@ -1893,6 +1920,29 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
   const size_t min_cases = (root_has_extra_instructions && decision_blocks.size() < 3) ? 3 : 2;
   if (total_cases < min_cases || target_to_cases.size() < min_cases) {
     return std::nullopt;
+  }
+  if (default_target.has_value()) {
+    size_t non_default_action_cases = 0;
+    for (const auto& dc : decision_cases) {
+      const bool same_target = (dc.target_block == *default_target);
+      const bool same_const = (dc.const_reg == default_const_reg &&
+                               (!dc.const_reg.has_value() || dc.const_val == default_const_val));
+      const bool same_delay =
+          (dc.delay_instructions.size() == default_delay_instructions.size() &&
+           (dc.delay_instructions.empty() ||
+            (dc.delay_instructions.front().opcode == default_delay_instructions.front().opcode &&
+             dc.delay_instructions.front().rd == default_delay_instructions.front().rd &&
+             dc.delay_instructions.front().rt == default_delay_instructions.front().rt &&
+             dc.delay_instructions.front().rs == default_delay_instructions.front().rs &&
+             dc.delay_instructions.front().immediate ==
+                 default_delay_instructions.front().immediate)));
+      if (!(same_target && same_const && same_delay)) {
+        ++non_default_action_cases;
+      }
+    }
+    if (non_default_action_cases < 2) {
+      return std::nullopt;
+    }
   }
   const auto* root_term = root_blk->Terminator();
   if (root_term != nullptr && root_term->IsBranchLikely() && root_ba.is_equality &&

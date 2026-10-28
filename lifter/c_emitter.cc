@@ -1067,6 +1067,258 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
   }
 }
 
+bool StmtContainsCall(const CStatement& stmt);
+
+bool ExprContainsCall(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kCallExpression:
+      return true;
+    case CExpressionKind::kUnaryExpression:
+      return ExprContainsCall(static_cast<const UnaryExpression&>(expr).Operand());
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      return ExprContainsCall(b.Lhs()) || ExprContainsCall(b.Rhs());
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      return ExprContainsCall(a.Lhs()) || ExprContainsCall(a.Rhs());
+    }
+    case CExpressionKind::kCastExpression:
+      return ExprContainsCall(static_cast<const CastExpression&>(expr).Operand());
+    case CExpressionKind::kMemberAccessExpression:
+      return ExprContainsCall(static_cast<const MemberAccessExpression&>(expr).Object());
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& a = static_cast<const ArrayIndexExpression&>(expr);
+      return ExprContainsCall(a.Array()) || ExprContainsCall(a.Index());
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      return ExprContainsCall(t.Condition()) || ExprContainsCall(t.TrueExpression()) ||
+             ExprContainsCall(t.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StmtContainsCall(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr && StmtContainsCall(*s)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement:
+      return ExprContainsCall(static_cast<const ExpressionStatement&>(stmt).Expression());
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return ExprContainsCall(ifs.Condition()) || StmtContainsCall(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StmtContainsCall(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return ExprContainsCall(ws.Condition()) || StmtContainsCall(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return StmtContainsCall(dws.Body()) || ExprContainsCall(dws.Condition());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StmtContainsCall(*fs.Init())) ||
+             (fs.Condition() != nullptr && ExprContainsCall(*fs.Condition())) ||
+             (fs.Step() != nullptr && ExprContainsCall(*fs.Step())) || StmtContainsCall(fs.Body());
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExprContainsCall(ss.Condition())) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StmtContainsCall(*c.body)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return rs.ReturnValue() != nullptr && ExprContainsCall(*rs.ReturnValue());
+    }
+    default:
+      return false;
+  }
+}
+
+void CollectExprIdentifiers(const CExpression& expr, std::set<std::string>* out_ids) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier:
+      out_ids->insert(static_cast<const IdentifierExpression&>(expr).Name());
+      break;
+    case CExpressionKind::kUnaryExpression:
+      CollectExprIdentifiers(static_cast<const UnaryExpression&>(expr).Operand(), out_ids);
+      break;
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      CollectExprIdentifiers(b.Lhs(), out_ids);
+      CollectExprIdentifiers(b.Rhs(), out_ids);
+      break;
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      CollectExprIdentifiers(a.Lhs(), out_ids);
+      CollectExprIdentifiers(a.Rhs(), out_ids);
+      break;
+    }
+    case CExpressionKind::kCastExpression:
+      CollectExprIdentifiers(static_cast<const CastExpression&>(expr).Operand(), out_ids);
+      break;
+    case CExpressionKind::kMemberAccessExpression:
+      CollectExprIdentifiers(static_cast<const MemberAccessExpression&>(expr).Object(), out_ids);
+      break;
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& a = static_cast<const ArrayIndexExpression&>(expr);
+      CollectExprIdentifiers(a.Array(), out_ids);
+      CollectExprIdentifiers(a.Index(), out_ids);
+      break;
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      CollectExprIdentifiers(t.Condition(), out_ids);
+      CollectExprIdentifiers(t.TrueExpression(), out_ids);
+      CollectExprIdentifiers(t.FalseExpression(), out_ids);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+bool StmtModifiesIdentifier(const CStatement& stmt, const std::string& name) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr && StmtModifiesIdentifier(*s, name)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement: {
+      const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+      if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+        std::set<std::string> lhs_ids;
+        CollectExprIdentifiers(static_cast<const AssignmentExpression&>(expr).Lhs(), &lhs_ids);
+        if (lhs_ids.count(name) > 0) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return StmtModifiesIdentifier(ifs.ThenBranch(), name) ||
+             (ifs.ElseBranch() != nullptr && StmtModifiesIdentifier(*ifs.ElseBranch(), name));
+    }
+    case CStatementKind::kWhileStatement:
+      return StmtModifiesIdentifier(static_cast<const WhileStatement&>(stmt).Body(), name);
+    case CStatementKind::kDoWhileStatement:
+      return StmtModifiesIdentifier(static_cast<const DoWhileStatement&>(stmt).Body(), name);
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StmtModifiesIdentifier(*fs.Init(), name)) ||
+             StmtModifiesIdentifier(fs.Body(), name);
+    }
+    case CStatementKind::kSwitchStatement:
+      for (const auto& c : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (c.body != nullptr && StmtModifiesIdentifier(*c.body, name)) return true;
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+void CollectSpinLoopVolatileSymbolsInStmt(const CStatement& stmt,
+                                          const std::set<std::string>& local_vars,
+                                          std::set<std::string>* volatile_symbols) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr) {
+          CollectSpinLoopVolatileSymbolsInStmt(*s, local_vars, volatile_symbols);
+        }
+      }
+      break;
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      CollectSpinLoopVolatileSymbolsInStmt(ifs.ThenBranch(), local_vars, volatile_symbols);
+      if (ifs.ElseBranch() != nullptr) {
+        CollectSpinLoopVolatileSymbolsInStmt(*ifs.ElseBranch(), local_vars, volatile_symbols);
+      }
+      break;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      if (!StmtContainsCall(ws)) {
+        std::set<std::string> cond_ids;
+        CollectExprIdentifiers(ws.Condition(), &cond_ids);
+        std::string sole_global;
+        bool has_local = false;
+        for (const auto& id : cond_ids) {
+          if (local_vars.count(id) > 0) {
+            has_local = true;
+            break;
+          }
+          if (sole_global.empty()) {
+            sole_global = id;
+          } else {
+            has_local = true;
+            break;
+          }
+        }
+        if (!has_local && !sole_global.empty() && !StmtModifiesIdentifier(ws.Body(), sole_global)) {
+          volatile_symbols->insert(sole_global);
+        }
+      }
+      CollectSpinLoopVolatileSymbolsInStmt(ws.Body(), local_vars, volatile_symbols);
+      break;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      if (!StmtContainsCall(dws) && dws.Body().Kind() == CStatementKind::kCompoundStatement) {
+        const auto& comp = static_cast<const CompoundStatement&>(dws.Body());
+        if (comp.Statements().size() == 1 && comp.Statements()[0] != nullptr &&
+            comp.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
+          const auto& expr =
+              static_cast<const ExpressionStatement&>(*comp.Statements()[0]).Expression();
+          if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& assign = static_cast<const AssignmentExpression&>(expr);
+            if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier) {
+              std::string lhs = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+              std::set<std::string> cond_ids;
+              CollectExprIdentifiers(dws.Condition(), &cond_ids);
+              if (local_vars.count(lhs) > 0 && cond_ids.size() == 1 && cond_ids.count(lhs) == 1) {
+                std::set<std::string> rhs_ids;
+                CollectExprIdentifiers(assign.Rhs(), &rhs_ids);
+                if (rhs_ids.size() == 1 && local_vars.count(*rhs_ids.begin()) == 0) {
+                  volatile_symbols->insert(*rhs_ids.begin());
+                }
+              }
+            }
+          }
+        }
+      }
+      CollectSpinLoopVolatileSymbolsInStmt(dws.Body(), local_vars, volatile_symbols);
+      break;
+    }
+    case CStatementKind::kForStatement:
+      CollectSpinLoopVolatileSymbolsInStmt(static_cast<const ForStatement&>(stmt).Body(),
+                                           local_vars, volatile_symbols);
+      break;
+    case CStatementKind::kSwitchStatement:
+      for (const auto& c : static_cast<const SwitchStatement&>(stmt).Cases()) {
+        if (c.body != nullptr) {
+          CollectSpinLoopVolatileSymbolsInStmt(*c.body, local_vars, volatile_symbols);
+        }
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 }  // namespace
 
 std::string CTranslationUnit::ToString() const {
@@ -1101,12 +1353,15 @@ std::string CTranslationUnit::ToString() const {
   std::map<std::string, std::map<std::string, std::pair<CType, int>>> cast_deref_uses;
   std::set<std::string> uncast_addr_arith_symbols;
   std::map<std::string, std::map<std::string, std::pair<CType, int>>> id_symbol_type_uses;
+  std::set<std::string> volatile_data_symbols;
 
   for (const auto& function : functions) {
     ReferencedSymbols symbols = CollectReferencedSymbols(function);
     CollectGlobalCastDerefsInStmt(function.Body(), symbols.local_variables, &total_id_uses,
                                   &cast_deref_uses, &uncast_addr_arith_symbols,
                                   &id_symbol_type_uses);
+    CollectSpinLoopVolatileSymbolsInStmt(function.Body(), symbols.local_variables,
+                                         &volatile_data_symbols);
     for (const auto& [name, ret_type] : symbols.inferred_function_return_types) {
       inferred_return_types[name] = ret_type;
     }
@@ -1290,8 +1545,10 @@ std::string CTranslationUnit::ToString() const {
         data_type = it->second;
       }
       std::string array_suffix = array_data_symbols.count(data_symbol) > 0 ? "[]" : "";
-      output +=
-          absl::StrFormat("extern %s %s%s;\n", data_type.ToString(), data_symbol, array_suffix);
+      const char* volatile_qual =
+          (volatile_data_symbols.count(data_symbol) > 0 && array_suffix.empty()) ? "volatile " : "";
+      output += absl::StrFormat("extern %s%s %s%s;\n", volatile_qual, data_type.ToString(),
+                                data_symbol, array_suffix);
     }
     output += "\n";
   }

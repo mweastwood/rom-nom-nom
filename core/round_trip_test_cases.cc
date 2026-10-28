@@ -7509,6 +7509,41 @@ s32 O0FramePointerByteFillAndWordPostIncrement(s32* dst, s32 val, s32 count) {
 )",
           .options = {.c_flags = {"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"}},
       },
+      RoundTripTestCase{
+          .test_name = "LoopWithNestedConditionAndMergedLatchIncrement",
+          .function_name = "LoopWithNestedConditionAndMergedLatchIncrement",
+          .original_c = R"(
+extern void ResetVoiceChannel(s32 idx);
+
+void LoopWithNestedConditionAndMergedLatchIncrement(s32* table, s32 target) {
+    s32 i = 0;
+    do {
+        if (table[0] != 0) {
+            if (table[1] == target) {
+                ResetVoiceChannel(i);
+                table[0] = 0;
+            }
+        }
+        table += 4;
+        i++;
+    } while (i < 16);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "SpinWaitOnGlobalReadyFlag",
+          .function_name = "SpinWaitOnGlobalReadyFlag",
+          .original_c = R"(
+extern volatile s32 g_ready_flag;
+extern void ProcessReadyState(s32 arg);
+
+void SpinWaitOnGlobalReadyFlag(s32 arg) {
+    ProcessReadyState(arg);
+    while (g_ready_flag != 0) {
+    }
+}
+)",
+      },
   };
   return *k_cases;
 }

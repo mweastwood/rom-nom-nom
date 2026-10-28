@@ -259,6 +259,107 @@ bool FoldDoWhileTrailingLatchComparison(
   return true;
 }
 
+bool FoldWhileTrueLeadingBreakCondition(
+    WhileStatement* ws, const std::vector<std::unique_ptr<CStatement>>& enclosing_stmts,
+    size_t loop_stmt_idx) {
+  if (ws == nullptr || ws->Condition().Kind() != CExpressionKind::kIntegerLiteral ||
+      static_cast<const IntegerLiteralExpression&>(ws->Condition()).Value() != 1 ||
+      ws->MutableBody() == nullptr ||
+      ws->MutableBody()->Kind() != CStatementKind::kCompoundStatement) {
+    return false;
+  }
+  auto* body_comp = static_cast<CompoundStatement*>(ws->MutableBody());
+  auto& body_stmts = body_comp->MutableStatements();
+  if (body_stmts.size() < 2) {
+    return false;
+  }
+
+  for (size_t if_idx = 1; if_idx <= 2 && if_idx < body_stmts.size(); ++if_idx) {
+    if (body_stmts[if_idx] == nullptr ||
+        body_stmts[if_idx]->Kind() != CStatementKind::kIfStatement) {
+      continue;
+    }
+    const auto& ifs = static_cast<const IfStatement&>(*body_stmts[if_idx]);
+    if (ifs.ElseBranch() != nullptr ||
+        ifs.ThenBranch().Kind() != CStatementKind::kCompoundStatement) {
+      continue;
+    }
+    const auto& then_comp = static_cast<const CompoundStatement&>(ifs.ThenBranch());
+    if (then_comp.Statements().size() != 1 || then_comp.Statements()[0] == nullptr ||
+        then_comp.Statements()[0]->Kind() != CStatementKind::kBreakStatement) {
+      continue;
+    }
+
+    std::vector<std::pair<std::string, const CExpression*>> assigns;
+    bool prefix_ok = true;
+    for (size_t k = 0; k < if_idx; ++k) {
+      std::string lhs;
+      const CExpression* rhs = nullptr;
+      if (body_stmts[k] == nullptr || !ExtractSimpleVarAssign(*body_stmts[k], &lhs, &rhs) ||
+          rhs == nullptr || !IsPureExpression(*rhs) ||
+          !(IsScratchGprOrArgVar(lhs) || lhs == "at" || lhs == "temp_at") ||
+          ExpressionUsesVariable(*rhs, lhs)) {
+        prefix_ok = false;
+        break;
+      }
+      assigns.emplace_back(std::move(lhs), rhs);
+    }
+    if (!prefix_ok) continue;
+
+    bool all_dead_after = true;
+    for (const auto& [lhs, _] : assigns) {
+      for (size_t after = loop_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
+        if (enclosing_stmts[after] != nullptr &&
+            StatementReferencesVariable(*enclosing_stmts[after], lhs)) {
+          all_dead_after = false;
+          break;
+        }
+      }
+      if (!all_dead_after) break;
+      bool reads_before_kill = false;
+      bool killed = false;
+      for (size_t rem = if_idx + 1; rem < body_stmts.size(); ++rem) {
+        if (body_stmts[rem] == nullptr) continue;
+        if (StatementDefinitelyKillsVarBeforeRead(*body_stmts[rem], lhs, &reads_before_kill)) {
+          killed = true;
+          break;
+        }
+        if (reads_before_kill) {
+          all_dead_after = false;
+          break;
+        }
+      }
+      if (!all_dead_after || (reads_before_kill && !killed)) {
+        all_dead_after = false;
+        break;
+      }
+    }
+    if (!all_dead_after) continue;
+
+    std::unique_ptr<CExpression> folded_break_cond = ifs.Condition().Clone();
+    for (int k = static_cast<int>(assigns.size()) - 1; k >= 0; --k) {
+      folded_break_cond =
+          SubstituteIdentifier(*folded_break_cond, assigns[k].first, *assigns[k].second);
+    }
+    if (!IsPureExpression(*folded_break_cond)) {
+      continue;
+    }
+    bool unused_refs = false;
+    for (const auto& [lhs, _] : assigns) {
+      if (ExpressionUsesVariable(*folded_break_cond, lhs)) {
+        unused_refs = true;
+        break;
+      }
+    }
+    if (unused_refs) continue;
+
+    ws->MutableCondition() = NegateCondition(*folded_break_cond);
+    body_stmts.erase(body_stmts.begin(), body_stmts.begin() + static_cast<ptrdiff_t>(if_idx + 1));
+    return true;
+  }
+  return false;
+}
+
 class GotoTargetCollectorVisitor : public AstVisitor {
  public:
   const absl::flat_hash_set<std::string>& Targets() const { return targets_; }
@@ -2265,6 +2366,11 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
         if (FoldDoWhileTrailingLatchComparison(dw, stmts, i, body)) {
           any_changed = true;
         }
+      } else if (stmts[i]->Kind() == CStatementKind::kWhileStatement) {
+        auto* ws = static_cast<WhileStatement*>(stmts[i].get());
+        if (FoldWhileTrueLeadingBreakCondition(ws, stmts, i)) {
+          any_changed = true;
+        }
       }
 
       // Extract direct loop (`do-while`, `while`, `for`) or single-loop guarded `if (guard) { loop
@@ -2933,7 +3039,7 @@ std::unique_ptr<CStatement> TryBuildSparseSwitchFromState(SparseDecisionTreeStat
   const int64_t min_val = state->cases.begin()->first;
   const int64_t max_val = state->cases.rbegin()->first;
   const uint64_t span = static_cast<uint64_t>(max_val) - static_cast<uint64_t>(min_val);
-  if (count >= 5 && span <= 10 * count) {
+  if (count < 2 || (count >= 5 && span <= 10 * count)) {
     return nullptr;
   }
 

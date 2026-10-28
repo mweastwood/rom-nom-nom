@@ -763,5 +763,23 @@ TEST(CEmitterTest, EmitsPostAssignmentCseBarrierForPinnedCalleeSavedCopyAcrossCa
       HasSubstr("temp_s1 = (s16)arg1;\n    __asm__(\"\" : \"=r\"(temp_s1) : \"0\"(temp_s1));"));
 }
 
+TEST(CEmitterTest, EmitsVolatileExternForScalarGlobalPolledInCallFreeSpinLoop) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  auto loop_body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::While(
+      CExpression::Binary("!=", CExpression::Identifier("D_80123450"), CExpression::Integer(0)),
+      std::move(loop_body)));
+  body->AddStatement(CStatement::Return());
+  tu.functions.emplace_back(CType::Void(), "TestSpinLoopGlobal", std::vector<CParameter>{},
+                            std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("extern volatile s32 D_80123450;\n"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
