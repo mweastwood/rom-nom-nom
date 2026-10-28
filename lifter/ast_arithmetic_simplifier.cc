@@ -887,12 +887,27 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                     }
                   }
                   bool can_place_at_i = !q_var.empty() && q_var == lhs_var;
+                  bool can_split_at_i_and_j = false;
                   if (x_clobbered_between && !can_place_at_i && !q_var.empty()) {
-                    bool q_or_lhs_used_between = false;
+                    bool q_used_or_modified_between = false;
+                    bool lhs_used_or_modified_between = false;
                     for (size_t p = i + 1; p < j; ++p) {
-                      if (count_var_uses_in_stmt(*stmts[p], q_var) > 0 ||
-                          count_var_uses_in_stmt(*stmts[p], lhs_var) > 0) {
-                        q_or_lhs_used_between = true;
+                      std::string plhs;
+                      const CExpression* prhs = nullptr;
+                      if (extract_simple_var_assign(*stmts[p], &plhs, &prhs)) {
+                        if (plhs == q_var) {
+                          q_used_or_modified_between = true;
+                        }
+                        if (plhs == lhs_var) {
+                          lhs_used_or_modified_between = true;
+                          break;
+                        }
+                      }
+                      if (count_var_uses_in_stmt(*stmts[p], q_var) > 0) {
+                        q_used_or_modified_between = true;
+                      }
+                      if (count_var_uses_in_stmt(*stmts[p], lhs_var) > 0) {
+                        lhs_used_or_modified_between = true;
                         break;
                       }
                     }
@@ -902,18 +917,32 @@ void SimplifyReciprocalDivisionAndUnsignedFloatConversionsImpl(
                         lhs_used_after_j = true;
                         break;
                       }
+                      std::string plhs;
+                      const CExpression* prhs = nullptr;
+                      if (extract_simple_var_assign(*stmts[p], &plhs, &prhs) && plhs == lhs_var) {
+                        break;
+                      }
                     }
-                    if (!q_or_lhs_used_between && !lhs_used_after_j) {
-                      can_place_at_i = true;
+                    if (!lhs_used_or_modified_between && !lhs_used_after_j) {
+                      if (!q_used_or_modified_between) {
+                        can_place_at_i = true;
+                      } else {
+                        can_split_at_i_and_j = true;
+                      }
                     }
                   }
-                  if (x_clobbered_between && !can_place_at_i) {
+                  if (x_clobbered_between && !can_place_at_i && !can_split_at_i_and_j) {
                     break;
                   }
                   if (x_clobbered_between && can_place_at_i) {
                     stmts[i] = CStatement::Expression(
                         CExpression::Assignment("=", assign_j.Lhs().Clone(), std::move(new_rhs)));
                     stmts.erase(stmts.begin() + j);
+                  } else if (x_clobbered_between && can_split_at_i_and_j) {
+                    stmts[i] = CStatement::Expression(CExpression::Assignment(
+                        "=", CExpression::Identifier(lhs_var), std::move(new_rhs)));
+                    stmts[j] = CStatement::Expression(CExpression::Assignment(
+                        "=", assign_j.Lhs().Clone(), CExpression::Identifier(lhs_var)));
                   } else {
                     stmts[j] = CStatement::Expression(
                         CExpression::Assignment("=", assign_j.Lhs().Clone(), std::move(new_rhs)));

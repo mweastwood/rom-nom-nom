@@ -785,11 +785,25 @@ bool StmtHasCseSplitProneRead(const CStatement& stmt, std::string_view var) {
   }
 }
 
+bool IsInPlaceConstAddSub(const CExpression& rhs, std::string_view lhs) {
+  if (rhs.Kind() != CExpressionKind::kBinaryExpression) {
+    return false;
+  }
+  const auto& b = static_cast<const BinaryExpression&>(rhs);
+  return (b.Op() == "+" || b.Op() == "-") && b.Lhs().Kind() == CExpressionKind::kIdentifier &&
+         static_cast<const IdentifierExpression&>(b.Lhs()).Name() == lhs &&
+         b.Rhs().Kind() == CExpressionKind::kIntegerLiteral;
+}
+
 bool IsCseConflictProneCalleeSavedRhs(const CExpression& rhs,
                                       const std::set<std::string>& external_data_symbols,
                                       const CompoundStatement& comp, size_t idx,
                                       std::string_view lhs) {
   if (ExprReadsVar(rhs, lhs)) {
+    if (IsInPlaceConstAddSub(rhs, lhs)) {
+      return CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs,
+                                                       /*require_split_prone=*/true);
+    }
     return false;
   }
   if (rhs.Kind() == CExpressionKind::kIntegerLiteral ||
@@ -877,6 +891,8 @@ bool ExprContainsNonIntrinsicCall(const CExpression& expr) {
         if (!IsCompilerIntrinsic(name)) {
           return true;
         }
+      } else {
+        return true;
       }
       for (const auto& arg : call.Arguments()) {
         if (arg != nullptr && ExprContainsNonIntrinsicCall(*arg)) return true;
@@ -1198,11 +1214,11 @@ bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, si
           next_s->Kind() == CStatementKind::kWhileStatement ||
           next_s->Kind() == CStatementKind::kDoWhileStatement ||
           next_s->Kind() == CStatementKind::kForStatement) {
-        if (StmtOverwritesVar(*next_s, var)) {
-          return false;
-        }
         if (StmtContainsCallFollowedByRead(*next_s, var, require_split_prone)) {
           return true;
+        }
+        if (StmtOverwritesVar(*next_s, var)) {
+          return false;
         }
         if (StmtContainsNonIntrinsicCall(*next_s)) {
           seen_call = true;
@@ -1239,6 +1255,86 @@ bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, si
     }
   }
   return false;
+}
+
+bool ExprContainsNarrowSignCastToFloatOfVar(const CExpression& expr, std::string_view var) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kCastExpression: {
+      const auto& ce = static_cast<const CastExpression&>(expr);
+      std::string outer_type = ce.TargetType().ToString();
+      if ((outer_type == "f32" || outer_type == "f64") &&
+          ce.Operand().Kind() == CExpressionKind::kCastExpression) {
+        const auto& inner_ce = static_cast<const CastExpression&>(ce.Operand());
+        std::string inner_type = inner_ce.TargetType().ToString();
+        if ((inner_type == "s8" || inner_type == "s16") &&
+            inner_ce.Operand().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(inner_ce.Operand()).Name() == var) {
+          return true;
+        }
+      }
+      return ExprContainsNarrowSignCastToFloatOfVar(ce.Operand(), var);
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      return ExprContainsNarrowSignCastToFloatOfVar(a.Lhs(), var) ||
+             ExprContainsNarrowSignCastToFloatOfVar(a.Rhs(), var);
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      return ExprContainsNarrowSignCastToFloatOfVar(b.Lhs(), var) ||
+             ExprContainsNarrowSignCastToFloatOfVar(b.Rhs(), var);
+    }
+    case CExpressionKind::kUnaryExpression:
+      return ExprContainsNarrowSignCastToFloatOfVar(
+          static_cast<const UnaryExpression&>(expr).Operand(), var);
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr && ExprContainsNarrowSignCastToFloatOfVar(*arg, var)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& ai = static_cast<const ArrayIndexExpression&>(expr);
+      return ExprContainsNarrowSignCastToFloatOfVar(ai.Array(), var) ||
+             ExprContainsNarrowSignCastToFloatOfVar(ai.Index(), var);
+    }
+    case CExpressionKind::kMemberAccessExpression:
+      return ExprContainsNarrowSignCastToFloatOfVar(
+          static_cast<const MemberAccessExpression&>(expr).Object(), var);
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      return ExprContainsNarrowSignCastToFloatOfVar(t.Condition(), var) ||
+             ExprContainsNarrowSignCastToFloatOfVar(t.TrueExpression(), var) ||
+             ExprContainsNarrowSignCastToFloatOfVar(t.FalseExpression(), var);
+    }
+    default:
+      return false;
+  }
+}
+
+bool GlobalLoadHasNarrowToFloatAndSecondReadInBlock(const CompoundStatement& comp, size_t start_idx,
+                                                    std::string_view var) {
+  bool seen_narrow_to_float = false;
+  int read_stmts = 0;
+  for (size_t i = start_idx + 1; i < comp.Statements().size(); ++i) {
+    const auto& next_s = comp.Statements()[i];
+    if (next_s == nullptr) continue;
+    if (next_s->Kind() != CStatementKind::kExpressionStatement) {
+      break;
+    }
+    const auto& es = static_cast<const ExpressionStatement&>(*next_s);
+    if (ExprReadsVar(es.Expression(), var)) {
+      ++read_stmts;
+      if (ExprContainsNarrowSignCastToFloatOfVar(es.Expression(), var)) {
+        seen_narrow_to_float = true;
+      }
+    }
+    if (StmtOverwritesVar(*next_s, var) || ExprContainsNonIntrinsicCall(es.Expression())) {
+      break;
+    }
+  }
+  return seen_narrow_to_float && read_stmts >= 2;
 }
 
 std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
@@ -1285,6 +1381,12 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                          CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs)) {
                 emit_post_barrier = true;
                 post_barrier_var = lhs;
+              } else if (a.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                         external_data_symbols.count(std::string(
+                             static_cast<const IdentifierExpression&>(a.Rhs()).Name())) > 0 &&
+                         GlobalLoadHasNarrowToFloatAndSecondReadInBlock(comp, idx, lhs)) {
+                emit_post_barrier = true;
+                post_barrier_var = lhs;
               }
             }
           }
@@ -1318,10 +1420,13 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                   if (ba.Op() == "=" && ba.Lhs().Kind() == CExpressionKind::kIdentifier) {
                     std::string blhs(static_cast<const IdentifierExpression&>(ba.Lhs()).Name());
                     if (IsPinnedCalleeSavedGprVar(blhs) &&
-                        IsCseConflictProneCalleeSavedRhs(ba.Rhs(), external_data_symbols, body_comp,
-                                                         b_idx, blhs) &&
-                        !CalleeSavedCopyCrossesCallWithReadInBlock(body_comp, b_idx, blhs) &&
-                        CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, blhs)) {
+                        ((IsCseConflictProneCalleeSavedRhs(ba.Rhs(), external_data_symbols,
+                                                           body_comp, b_idx, blhs) &&
+                          CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, blhs)) ||
+                         (IsInPlaceConstAddSub(ba.Rhs(), blhs) &&
+                          CalleeSavedCopyCrossesCallWithReadInBlock(
+                              comp, idx, blhs, /*require_split_prone=*/true))) &&
+                        !CalleeSavedCopyCrossesCallWithReadInBlock(body_comp, b_idx, blhs)) {
                       bool overwritten_later_in_loop = false;
                       for (size_t rem = b_idx + 1; rem < body_comp.Statements().size(); ++rem) {
                         if (body_comp.Statements()[rem] != nullptr &&
@@ -1658,6 +1763,300 @@ void CollectSpinLoopVolatileSymbolsInStmt(const CStatement& stmt,
   }
 }
 
+void CountAddressTakenExternalDataSymbolsInExpr(const CExpression& expr,
+                                                const std::set<std::string>& external_data_symbols,
+                                                std::map<std::string, int>* counts) {
+  std::string sym;
+  bool has_cast = false;
+  if (ExtractDirectSymbolAddressRhs(expr, external_data_symbols, &sym, &has_cast)) {
+    (*counts)[sym]++;
+    return;
+  }
+  switch (expr.Kind()) {
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      CountAddressTakenExternalDataSymbolsInExpr(a.Lhs(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInExpr(a.Rhs(), external_data_symbols, counts);
+      break;
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      CountAddressTakenExternalDataSymbolsInExpr(b.Lhs(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInExpr(b.Rhs(), external_data_symbols, counts);
+      break;
+    }
+    case CExpressionKind::kUnaryExpression:
+      CountAddressTakenExternalDataSymbolsInExpr(
+          static_cast<const UnaryExpression&>(expr).Operand(), external_data_symbols, counts);
+      break;
+    case CExpressionKind::kCastExpression:
+      CountAddressTakenExternalDataSymbolsInExpr(static_cast<const CastExpression&>(expr).Operand(),
+                                                 external_data_symbols, counts);
+      break;
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      CountAddressTakenExternalDataSymbolsInExpr(call.Callee(), external_data_symbols, counts);
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr) {
+          CountAddressTakenExternalDataSymbolsInExpr(*arg, external_data_symbols, counts);
+        }
+      }
+      break;
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& ai = static_cast<const ArrayIndexExpression&>(expr);
+      CountAddressTakenExternalDataSymbolsInExpr(ai.Array(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInExpr(ai.Index(), external_data_symbols, counts);
+      break;
+    }
+    case CExpressionKind::kMemberAccessExpression:
+      CountAddressTakenExternalDataSymbolsInExpr(
+          static_cast<const MemberAccessExpression&>(expr).Object(), external_data_symbols, counts);
+      break;
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      CountAddressTakenExternalDataSymbolsInExpr(t.Condition(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInExpr(t.TrueExpression(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInExpr(t.FalseExpression(), external_data_symbols,
+                                                 counts);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+void CountAddressTakenExternalDataSymbolsInStmt(const CStatement& stmt,
+                                                const std::set<std::string>& external_data_symbols,
+                                                std::map<std::string, int>* counts) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr) {
+          CountAddressTakenExternalDataSymbolsInStmt(*s, external_data_symbols, counts);
+        }
+      }
+      break;
+    case CStatementKind::kExpressionStatement:
+      CountAddressTakenExternalDataSymbolsInExpr(
+          static_cast<const ExpressionStatement&>(stmt).Expression(), external_data_symbols,
+          counts);
+      break;
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      CountAddressTakenExternalDataSymbolsInExpr(ifs.Condition(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInStmt(ifs.ThenBranch(), external_data_symbols, counts);
+      if (ifs.ElseBranch() != nullptr) {
+        CountAddressTakenExternalDataSymbolsInStmt(*ifs.ElseBranch(), external_data_symbols,
+                                                   counts);
+      }
+      break;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      CountAddressTakenExternalDataSymbolsInExpr(ws.Condition(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInStmt(ws.Body(), external_data_symbols, counts);
+      break;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      CountAddressTakenExternalDataSymbolsInStmt(dws.Body(), external_data_symbols, counts);
+      CountAddressTakenExternalDataSymbolsInExpr(dws.Condition(), external_data_symbols, counts);
+      break;
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      if (fs.Init() != nullptr) {
+        CountAddressTakenExternalDataSymbolsInStmt(*fs.Init(), external_data_symbols, counts);
+      }
+      if (fs.Condition() != nullptr) {
+        CountAddressTakenExternalDataSymbolsInExpr(*fs.Condition(), external_data_symbols, counts);
+      }
+      if (fs.Step() != nullptr) {
+        CountAddressTakenExternalDataSymbolsInExpr(*fs.Step(), external_data_symbols, counts);
+      }
+      CountAddressTakenExternalDataSymbolsInStmt(fs.Body(), external_data_symbols, counts);
+      break;
+    }
+    case CStatementKind::kSwitchStatement:
+      break;
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      if (rs.ReturnValue() != nullptr) {
+        CountAddressTakenExternalDataSymbolsInExpr(*rs.ReturnValue(), external_data_symbols,
+                                                   counts);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+bool IsO2FunctionBody(const CompoundStatement& body) {
+  bool has_register_decl = false;
+  bool has_sp_array = false;
+  bool has_other_unpinned_local = false;
+  for (const auto& s : body.Statements()) {
+    if (s == nullptr || s->Kind() != CStatementKind::kVariableDeclarationStatement) continue;
+    const auto& vd = static_cast<const VariableDeclarationStatement&>(*s);
+    if (vd.RegisterAnnotation().has_value() && !vd.RegisterAnnotation()->empty()) {
+      has_register_decl = true;
+    } else if (vd.Name() == "sp" && vd.ArraySize().has_value()) {
+      has_sp_array = true;
+    } else if (vd.Name() != "v0" && vd.Name() != "v1") {
+      has_other_unpinned_local = true;
+    } else if (StmtReadsVar(body, vd.Name())) {
+      has_other_unpinned_local = true;
+    }
+  }
+  return has_register_decl || (has_sp_array && !has_other_unpinned_local);
+}
+
+bool ExtractNormalizedSymbolArg(const CExpression& expr,
+                                const std::set<std::string>& dup_addr_symbols,
+                                std::string* out_sym) {
+  if (expr.Kind() == CExpressionKind::kIdentifier) {
+    std::string name(static_cast<const IdentifierExpression&>(expr).Name());
+    if (dup_addr_symbols.count(name) > 0) {
+      *out_sym = std::move(name);
+      return true;
+    }
+  } else if (expr.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& u = static_cast<const UnaryExpression&>(expr);
+    if (u.Op() == "&" && u.Operand().Kind() == CExpressionKind::kIdentifier) {
+      std::string name(static_cast<const IdentifierExpression&>(u.Operand()).Name());
+      if (dup_addr_symbols.count(name) > 0) {
+        *out_sym = std::move(name);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+std::unique_ptr<CExpression> RewriteCallForDuplicateSymbolArgs(
+    const CallExpression& call, const std::set<std::string>& dup_addr_symbols) {
+  if (call.Callee().Kind() == CExpressionKind::kIdentifier &&
+      IsCompilerIntrinsic(static_cast<const IdentifierExpression&>(call.Callee()).Name())) {
+    return call.Clone();
+  }
+  for (const auto& arg : call.Arguments()) {
+    if (arg != nullptr && ExprContainsNonIntrinsicCall(*arg)) {
+      return call.Clone();
+    }
+  }
+  bool changed = false;
+  std::vector<std::unique_ptr<CExpression>> new_args;
+  new_args.reserve(call.Arguments().size());
+  for (size_t k = 0; k < call.Arguments().size(); ++k) {
+    const auto& arg = call.Arguments()[k];
+    std::string sym;
+    if (arg != nullptr && ExtractNormalizedSymbolArg(*arg, dup_addr_symbols, &sym)) {
+      int reg_num = (k < 4) ? static_cast<int>(4 + k) : 2;
+      bool conflict = false;
+      std::string reg_var_a = (k < 4) ? absl::StrFormat("arg%d", k) : "v0";
+      std::string reg_var_b = (k < 4) ? absl::StrFormat("temp_a%d", k) : "v0";
+      if (ExprReadsVar(call.Callee(), reg_var_a) || ExprReadsVar(call.Callee(), reg_var_b)) {
+        conflict = true;
+      }
+      for (size_t m = 0; m < call.Arguments().size() && !conflict; ++m) {
+        if (m == k || call.Arguments()[m] == nullptr) continue;
+        if (ExprReadsVar(*call.Arguments()[m], reg_var_a) ||
+            ExprReadsVar(*call.Arguments()[m], reg_var_b)) {
+          conflict = true;
+        }
+      }
+      if (!conflict) {
+        new_args.push_back(CExpression::Identifier(absl::StrFormat(
+            "({ register s32 _p asm(\"$%d\") = (s32)%s; _p; })", reg_num, arg->ToString())));
+        changed = true;
+        continue;
+      }
+    }
+    new_args.push_back(arg != nullptr ? arg->Clone() : nullptr);
+  }
+  if (!changed) {
+    return call.Clone();
+  }
+  return CExpression::Call(call.Callee().Clone(), std::move(new_args));
+}
+
+std::unique_ptr<CStatement> PreventDuplicateCallArgSymbolCseInStmt(
+    const CStatement& stmt, const std::set<std::string>& dup_addr_symbols) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      std::vector<std::unique_ptr<CStatement>> stmts;
+      stmts.reserve(comp.Statements().size());
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr) {
+          stmts.push_back(PreventDuplicateCallArgSymbolCseInStmt(*s, dup_addr_symbols));
+        }
+      }
+      return std::make_unique<CompoundStatement>(std::move(stmts));
+    }
+    case CStatementKind::kExpressionStatement: {
+      const auto& es = static_cast<const ExpressionStatement&>(stmt);
+      if (es.Expression().Kind() == CExpressionKind::kCallExpression) {
+        return CStatement::Expression(RewriteCallForDuplicateSymbolArgs(
+            static_cast<const CallExpression&>(es.Expression()), dup_addr_symbols));
+      }
+      if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+        if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            a.Rhs().Kind() == CExpressionKind::kCallExpression) {
+          return CStatement::Expression(CExpression::Assignment(
+              "=", a.Lhs().Clone(),
+              RewriteCallForDuplicateSymbolArgs(static_cast<const CallExpression&>(a.Rhs()),
+                                                dup_addr_symbols)));
+        }
+      }
+      return stmt.Clone();
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      if (rs.ReturnValue() != nullptr &&
+          rs.ReturnValue()->Kind() == CExpressionKind::kCallExpression) {
+        return CStatement::Return(RewriteCallForDuplicateSymbolArgs(
+            static_cast<const CallExpression&>(*rs.ReturnValue()), dup_addr_symbols));
+      }
+      return stmt.Clone();
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(
+          ifs.Condition().Clone(),
+          PreventDuplicateCallArgSymbolCseInStmt(ifs.ThenBranch(), dup_addr_symbols),
+          ifs.ElseBranch() != nullptr
+              ? PreventDuplicateCallArgSymbolCseInStmt(*ifs.ElseBranch(), dup_addr_symbols)
+              : nullptr);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(ws.Condition().Clone(),
+                               PreventDuplicateCallArgSymbolCseInStmt(ws.Body(), dup_addr_symbols));
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(
+          PreventDuplicateCallArgSymbolCseInStmt(dws.Body(), dup_addr_symbols),
+          dws.Condition().Clone());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(fs.Init() != nullptr ? fs.Init()->Clone() : nullptr,
+                             fs.Condition() != nullptr ? fs.Condition()->Clone() : nullptr,
+                             fs.Step() != nullptr ? fs.Step()->Clone() : nullptr,
+                             PreventDuplicateCallArgSymbolCseInStmt(fs.Body(), dup_addr_symbols));
+    }
+    case CStatementKind::kSwitchStatement:
+      return stmt.Clone();
+    default:
+      return stmt.Clone();
+  }
+}
+
 }  // namespace
 
 std::string CTranslationUnit::ToString() const {
@@ -1826,7 +2225,19 @@ std::string CTranslationUnit::ToString() const {
 
   std::string combined_function_code;
   for (size_t i = 0; i < functions.size(); ++i) {
-    const bool has_calls = !per_func_symbols[i].external_functions.empty();
+    const bool has_calls = !per_func_symbols[i].external_functions.empty() ||
+                           StmtContainsNonIntrinsicCall(functions[i].Body());
+    std::set<std::string> dup_addr_symbols;
+    if (has_calls && IsO2FunctionBody(functions[i].Body())) {
+      std::map<std::string, int> addr_counts;
+      CountAddressTakenExternalDataSymbolsInStmt(functions[i].Body(), external_data_symbols,
+                                                 &addr_counts);
+      for (const auto& [sym, cnt] : addr_counts) {
+        if (cnt >= 2) {
+          dup_addr_symbols.insert(sym);
+        }
+      }
+    }
     std::unique_ptr<CompoundStatement> disambiguated_body(
         static_cast<CompoundStatement*>(DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                                             functions[i].Body(), external_data_symbols, has_calls)
@@ -1840,6 +2251,10 @@ std::string CTranslationUnit::ToString() const {
               .release()));
     } else {
       body_to_emit = std::move(disambiguated_body);
+    }
+    if (!dup_addr_symbols.empty()) {
+      body_to_emit = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+          PreventDuplicateCallArgSymbolCseInStmt(*body_to_emit, dup_addr_symbols).release()));
     }
     FunctionDeclaration norm_fn(functions[i].ReturnType(), functions[i].Name(),
                                 functions[i].Parameters(), std::move(body_to_emit),

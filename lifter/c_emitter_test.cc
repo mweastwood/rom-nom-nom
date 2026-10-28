@@ -815,5 +815,61 @@ TEST(CEmitterTest, EmitsCseBarrierForPinnedCalleeSavedCallReturnReadByZeroOffset
                                  "\"=r\"(temp_s0) : \"0\"(temp_s0));"));
 }
 
+TEST(CEmitterTest,
+     EmitsBarriersForInPlaceCalleeSavedAddNarrowFloatGlobalLoadAndDuplicateSymbolCallArgs) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s4", nullptr, std::nullopt, "$20"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s2", nullptr, std::nullopt, "$18"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v1", nullptr, std::nullopt, "$3"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::F32(), "f0", nullptr, std::nullopt, "$f0"));
+
+  // 1. In-place constant increment `temp_s4 = (temp_s4 + 8)` followed across a call by split-prone
+  //    copy `temp_s2 = temp_s4`.
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s4"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s4"), CExpression::Integer(8)))));
+  std::vector<std::unique_ptr<CExpression>> call1_args;
+  call1_args.push_back(CExpression::Unary("&", CExpression::Identifier("D_80237440")));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("Notify"), std::move(call1_args))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"), CExpression::Identifier("temp_s4"))));
+
+  // 2. Global load `v1 = D_8016FBEA` followed by `(f32)(s8)v1` and a second read `D_8016FBE8 = v1`.
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"), CExpression::Identifier("D_8016FBEA"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("f0"),
+      CExpression::Cast(CType::F32(),
+                        CExpression::Cast(CType::S8(), CExpression::Identifier("v1"))))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("D_8016FBE8"), CExpression::Identifier("v1"))));
+
+  // 3. Second call passing `&D_80237440` triggers caller-saved register statement expression.
+  std::vector<std::unique_ptr<CExpression>> call2_args;
+  call2_args.push_back(CExpression::Unary("&", CExpression::Identifier("D_80237440")));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("Notify"), std::move(call2_args))));
+  body->AddStatement(CStatement::Return());
+
+  tu.functions.emplace_back(CType::Void(), "TestInPlaceAddAndDupSymCallArg",
+                            std::vector<CParameter>{}, std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("temp_s4 = (temp_s4 + 8);\n    __asm__(\"\" : \"=r\"(temp_s4) : "
+                                 "\"0\"(temp_s4));"));
+  EXPECT_THAT(emitted, HasSubstr("v1 = D_8016FBEA;\n    __asm__(\"\" : \"=r\"(v1) : \"0\"(v1));"));
+  EXPECT_THAT(emitted,
+              HasSubstr("Notify(({ register s32 _p asm(\"$4\") = (s32)&D_80237440; _p; }));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

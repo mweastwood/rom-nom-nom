@@ -1581,5 +1581,84 @@ TEST(VariableDeclarationBuilderTest,
   }
 }
 
+TEST(VariableDeclarationBuilderTest,
+     AccountsForO0ConstDivModStackTempAndO2SpilledFprLocalsInSpBufferSize) {
+  ControlFlowGraph cfg;
+
+  // 1. -O0 frame-pointer function with 4 referenced stack locals (16 bytes) in a 24-byte local
+  //    region and a non-power-of-two constant division `/ 120`: GCC `-O0` `expand_divmod` allocates
+  //    a 4-byte compiler stack temp, so no bogus `var_sp_16` padding local is synthesized.
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 32;
+    frame.has_calls = false;
+    frame.has_frame_pointer = true;
+    frame.prologue.min_saved_reg_offset = 28;
+    frame.prologue.saved_reg_offsets[Register::kFp] = 28;
+
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_0"), CExpression::Identifier("arg0"))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_4"), CExpression::Identifier("arg1"))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_8"),
+        CExpression::Binary("/", CExpression::Identifier("var_sp_0"), CExpression::Integer(120)))));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("var_sp_12"),
+                                CExpression::Binary("+", CExpression::Identifier("var_sp_4"),
+                                                    CExpression::Identifier("var_sp_8")))));
+    body->AddStatement(CStatement::Return(CExpression::Identifier("var_sp_12")));
+
+    std::vector<CParameter> params = {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}};
+    AstConverterOptions opts;
+    opts.function_name = "TestO0ConstDivModTemp";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    EXPECT_THAT(emitted, HasSubstr("s32 var_sp_12;"));
+    EXPECT_THAT(emitted, Not(HasSubstr("var_sp_16")));
+  }
+
+  // 2. -O2 function with all 6 callee-saved FPR pairs ($f20..$f30) saved, `sp_buffer_size = 72`,
+  //    `max_sp_access = 64`, and an unpinned `temp_s0_f` float local: subtracts 8 bytes for the
+  //    spilled `temp_s0_f` slot so `u8 sp[64];` is emitted instead of `u8 sp[72];`.
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 152;
+    frame.has_calls = true;
+    frame.has_frame_pointer = false;
+    frame.sp_address_taken = true;
+    frame.sp_buffer_size = 72;
+    frame.max_sp_access = 60;
+    frame.prologue.saved_fpr_offsets[FpRegister::kF20] = 96;
+    frame.prologue.saved_fpr_offsets[FpRegister::kF22] = 104;
+    frame.prologue.saved_fpr_offsets[FpRegister::kF24] = 112;
+    frame.prologue.saved_fpr_offsets[FpRegister::kF26] = 120;
+    frame.prologue.saved_fpr_offsets[FpRegister::kF28] = 128;
+    frame.prologue.saved_fpr_offsets[FpRegister::kF30] = 136;
+
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_s0_f"), CExpression::Identifier("arg1"))));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("temp_s0"),
+                                CExpression::Cast(CType::S32(), CExpression::Identifier("sp")))));
+    body->AddStatement(CStatement::Return());
+
+    std::vector<CParameter> params = {{CType::S32(), "arg0"}, {CType::F32(), "arg1"}};
+    AstConverterOptions opts;
+    opts.function_name = "TestO2SpilledFprSpBuffer";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::Void(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    EXPECT_THAT(emitted, HasSubstr("u8 sp[64];"));
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -7647,6 +7647,29 @@ void InfiniteLoopWithCallSplitExitGuard(s32 target_owner) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "MultipleUnsignedConstantDivisionsAndCompare",
+          .function_name = "MultipleUnsignedConstantDivisionsAndCompare",
+          .original_c = R"(
+extern u32 g_div_a;
+extern u32 g_div_b;
+extern u32 g_div_c;
+
+s32 MultipleUnsignedConstantDivisionsAndCompare(void) {
+    u32 qa = ((g_div_a * 100u) / 99999u) & 255u;
+    u32 qb = ((g_div_b * 100u) / 9999u) & 255u;
+    u32 qc = ((g_div_c * 100u) / 9999u) & 255u;
+    s32 res = 0;
+    if ((qc >= qb) | (qa >= qb)) {
+        res = 1;
+        if (qa >= qc) {
+            res = 2;
+        }
+    }
+    return res;
+}
+)",
+      },
   };
   return *k_cases;
 }

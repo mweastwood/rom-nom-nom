@@ -171,6 +171,120 @@ bool StatementContainsS64PointerDeref(const CStatement& stmt) {
   }
 }
 
+bool ExpressionContainsNonPowerOfTwoConstDivMod(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      if ((bin.Op() == "/" || bin.Op() == "%") &&
+          bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        int64_t val = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        uint64_t abs_val = (val < 0) ? static_cast<uint64_t>(-val) : static_cast<uint64_t>(val);
+        if (abs_val > 1 && (abs_val & (abs_val - 1)) != 0) {
+          return true;
+        }
+      }
+      return ExpressionContainsNonPowerOfTwoConstDivMod(bin.Lhs()) ||
+             ExpressionContainsNonPowerOfTwoConstDivMod(bin.Rhs());
+    }
+    case CExpressionKind::kUnaryExpression:
+      return ExpressionContainsNonPowerOfTwoConstDivMod(
+          static_cast<const UnaryExpression&>(expr).Operand());
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      return ExpressionContainsNonPowerOfTwoConstDivMod(assign.Lhs()) ||
+             ExpressionContainsNonPowerOfTwoConstDivMod(assign.Rhs());
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      if (ExpressionContainsNonPowerOfTwoConstDivMod(call.Callee())) return true;
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr && ExpressionContainsNonPowerOfTwoConstDivMod(*arg)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionContainsNonPowerOfTwoConstDivMod(
+          static_cast<const CastExpression&>(expr).Operand());
+    case CExpressionKind::kMemberAccessExpression:
+      return ExpressionContainsNonPowerOfTwoConstDivMod(
+          static_cast<const MemberAccessExpression&>(expr).Object());
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      return ExpressionContainsNonPowerOfTwoConstDivMod(arr.Array()) ||
+             ExpressionContainsNonPowerOfTwoConstDivMod(arr.Index());
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return ExpressionContainsNonPowerOfTwoConstDivMod(tern.Condition()) ||
+             ExpressionContainsNonPowerOfTwoConstDivMod(tern.TrueExpression()) ||
+             ExpressionContainsNonPowerOfTwoConstDivMod(tern.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StatementContainsNonPowerOfTwoConstDivMod(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementContainsNonPowerOfTwoConstDivMod(*child)) return true;
+      }
+      return false;
+    case CStatementKind::kExpressionStatement:
+      return ExpressionContainsNonPowerOfTwoConstDivMod(
+          static_cast<const ExpressionStatement&>(stmt).Expression());
+    case CStatementKind::kReturnStatement: {
+      const auto& ret = static_cast<const ReturnStatement&>(stmt);
+      return ret.ReturnValue() != nullptr &&
+             ExpressionContainsNonPowerOfTwoConstDivMod(*ret.ReturnValue());
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      if (ExpressionContainsNonPowerOfTwoConstDivMod(ifs.Condition()) ||
+          StatementContainsNonPowerOfTwoConstDivMod(ifs.ThenBranch())) {
+        return true;
+      }
+      return ifs.ElseBranch() != nullptr &&
+             StatementContainsNonPowerOfTwoConstDivMod(*ifs.ElseBranch());
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return ExpressionContainsNonPowerOfTwoConstDivMod(ws.Condition()) ||
+             StatementContainsNonPowerOfTwoConstDivMod(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return StatementContainsNonPowerOfTwoConstDivMod(dws.Body()) ||
+             ExpressionContainsNonPowerOfTwoConstDivMod(dws.Condition());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      if (fs.Init() != nullptr && StatementContainsNonPowerOfTwoConstDivMod(*fs.Init())) {
+        return true;
+      }
+      if (fs.Condition() != nullptr &&
+          ExpressionContainsNonPowerOfTwoConstDivMod(*fs.Condition())) {
+        return true;
+      }
+      if (fs.Step() != nullptr && ExpressionContainsNonPowerOfTwoConstDivMod(*fs.Step())) {
+        return true;
+      }
+      return StatementContainsNonPowerOfTwoConstDivMod(fs.Body());
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExpressionContainsNonPowerOfTwoConstDivMod(ss.Condition())) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StatementContainsNonPowerOfTwoConstDivMod(*c.body)) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 bool ExpressionContainsMaskedSignBitFloatFix(const CExpression& expr) {
   switch (expr.Kind()) {
     case CExpressionKind::kBinaryExpression: {
@@ -1218,6 +1332,9 @@ absl::Status PrependSynthesizedLocalDeclarations(
           non_reg_local_bytes += var_bytes;
         }
       }
+      if (StatementContainsNonPowerOfTwoConstDivMod(**body)) {
+        non_reg_local_bytes += 4u;
+      }
       for (uint32_t off = local_frame_bottom;
            off < local_frame_top && non_reg_local_bytes + 4u <= target_local_size; off += 4u) {
         if (covered_sp_offsets.contains(static_cast<int32_t>(off))) {
@@ -1345,12 +1462,30 @@ absl::Status PrependSynthesizedLocalDeclarations(
   uint32_t sp_buffer_size =
       (unreferenced_sp_gap_size > 0) ? unreferenced_sp_gap_size : frame_analysis.sp_buffer_size;
   if (unreferenced_sp_gap_size == 0 && !frame_analysis.has_frame_pointer && sp_buffer_size > 0) {
-    const uint32_t for_loop_spill_bytes = 8u * CountForStatements(**body);
+    uint32_t spill_bytes = 8u * CountForStatements(**body);
+    int prologue_saved_callee_fpr_pairs = 0;
+    for (int f_num = 20; f_num <= 30; f_num += 2) {
+      FpRegister fp_even =
+          static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num - 20));
+      FpRegister fp_odd =
+          static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num + 1 - 20));
+      if (frame_analysis.prologue.saved_fpr_offsets.contains(fp_even) ||
+          frame_analysis.prologue.saved_fpr_offsets.contains(fp_odd)) {
+        ++prologue_saved_callee_fpr_pairs;
+      }
+    }
+    if (prologue_saved_callee_fpr_pairs >= 6) {
+      for (const auto& v : local_vars_to_declare) {
+        if (absl::EndsWith(v, "_f")) {
+          spill_bytes += 8u;
+        }
+      }
+    }
     const uint32_t min_accessed_bytes =
         (static_cast<uint32_t>(std::max<int32_t>(0, frame_analysis.max_sp_access)) + 7u) & ~7u;
-    if (for_loop_spill_bytes > 0 && sp_buffer_size > for_loop_spill_bytes &&
-        sp_buffer_size >= min_accessed_bytes + for_loop_spill_bytes) {
-      sp_buffer_size -= for_loop_spill_bytes;
+    if (spill_bytes > 0 && sp_buffer_size > spill_bytes &&
+        sp_buffer_size >= min_accessed_bytes + spill_bytes) {
+      sp_buffer_size -= spill_bytes;
     }
   }
 

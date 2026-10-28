@@ -427,5 +427,58 @@ TEST(AstArithmeticSimplifierTest,
   EXPECT_THAT(code, HasSubstr("q = (x / 8);"));
 }
 
+TEST(AstArithmeticSimplifierTest,
+     FoldsInterleavedUnsignedReciprocalDivisionsWhenQuotientRegisterHoldsInterveningMagic) {
+  CompoundStatement block;
+  // stmt 0: arg3 = (((u64)(u32)v0 * (u64)(u32)0xA7C61A3B) >> 32);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg3"),
+      CExpression::Binary(
+          ">>",
+          CExpression::Binary(
+              "*",
+              CExpression::Cast(CType{"u64"},
+                                CExpression::Cast(CType::U32(), CExpression::Identifier("v0"))),
+              CExpression::Cast(CType{"u64"}, CExpression::Cast(CType::U32(), CExpression::Integer(
+                                                                                  0xA7C61A3Bu)))),
+          CExpression::Integer(32)))));
+  // stmt 1: arg0 = 0x068DE3AF; (intervening magic constant loaded into quotient reg arg0)
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"), CExpression::Integer(0x068DE3AFu))));
+  // stmt 2: v0 = (D_801C3F88 * 100); (clobbers numerator v0 of stmt 0)
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("*", CExpression::Identifier("D_801C3F88"), CExpression::Integer(100)))));
+  // stmt 3: arg2 = (((u64)(u32)v0 * (u64)(u32)arg0) >> 32);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg2"),
+      CExpression::Binary(
+          ">>",
+          CExpression::Binary(
+              "*",
+              CExpression::Cast(CType{"u64"},
+                                CExpression::Cast(CType::U32(), CExpression::Identifier("v0"))),
+              CExpression::Cast(CType{"u64"},
+                                CExpression::Cast(CType::U32(), CExpression::Identifier("arg0")))),
+          CExpression::Integer(32)))));
+  // stmt 4: arg0 = ((u32)arg3 >> 16);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary(">>", CExpression::Cast(CType::U32(), CExpression::Identifier("arg3")),
+                          CExpression::Integer(16)))));
+  // stmt 5: v0 = ((u32)arg2 >> 8);
+  block.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary(">>", CExpression::Cast(CType::U32(), CExpression::Identifier("arg2")),
+                          CExpression::Integer(8)))));
+
+  SimplifyReciprocalDivisionAndUnsignedFloatConversions(&block);
+  std::string code = block.ToString(0);
+  EXPECT_THAT(code, HasSubstr("arg3 = ((u32)v0 / 99999U);"));
+  EXPECT_THAT(code, HasSubstr("arg0 = arg3;"));
+  EXPECT_THAT(code, HasSubstr("/ 9999U"));
+  EXPECT_THAT(code, Not(HasSubstr("0x68DE3AF")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
