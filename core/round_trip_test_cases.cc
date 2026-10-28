@@ -7544,6 +7544,28 @@ void SpinWaitOnGlobalReadyFlag(s32 arg) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "CalleeSavedCallResultDereferencedAtZeroOffsetAcrossConditionalCall",
+          .function_name = "CalleeSavedCallResultDereferencedAtZeroOffsetAcrossConditionalCall",
+          .original_c = R"(
+extern s32* AcquireSlotRecord(s32 id);
+extern void NotifySlotChange(s32 mode);
+
+s32 CalleeSavedCallResultDereferencedAtZeroOffsetAcrossConditionalCall(
+    s32 id, s32 mode, s32 val) {
+    s32* rec = AcquireSlotRecord(id + 1);
+    if (rec == 0) {
+        return 0;
+    }
+    if (mode != 0) {
+        NotifySlotChange(mode);
+    }
+    *rec = val;
+    rec[1] = id;
+    return 1;
+}
+)",
+      },
   };
   return *k_cases;
 }

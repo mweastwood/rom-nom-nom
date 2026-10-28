@@ -904,8 +904,8 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
         }
       }
     }
-    if ((mfc1_defs + stack_arg_load_defs + entry_arg_copy_defs) > 0 && other_defs == 0 &&
-        mtc1_uses > 0 && other_uses == 0) {
+    if ((mfc1_defs + stack_arg_load_defs + entry_arg_copy_defs + float_const_defs) > 0 &&
+        other_defs == 0 && mtc1_uses > 0 && other_uses == 0) {
       result.insert(r);
     }
   }
@@ -1079,10 +1079,14 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
   };
   absl::flat_hash_map<int32_t, OffsetStats> stats;
 
+  bool has_call = false;
   for (const auto& block : cfg.Blocks()) {
     absl::flat_hash_set<Register> defined_in_block;
     for (size_t j = 0; j < block.instructions.size(); ++j) {
       const auto& inst = block.instructions[j];
+      if (inst.IsCall()) {
+        has_call = true;
+      }
       const bool is_stack_base =
           (inst.rs == Register::kSp) || (has_frame_pointer && inst.rs == Register::kFp);
       const int32_t max_local_offset = has_frame_pointer ? static_cast<int32_t>(frame_size)
@@ -1119,8 +1123,10 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
   }
 
   for (const auto& [off, st] : stats) {
-    if (st.lwc1_reads > 0 && st.other_accesses == 0 && st.prologue_gpr_spills <= 1 &&
-        (st.swc1_writes > 0 || st.prologue_gpr_spills == 1)) {
+    if ((st.lwc1_reads > 0 && st.other_accesses == 0 && st.prologue_gpr_spills <= 1 &&
+         (st.swc1_writes > 0 || st.prologue_gpr_spills == 1)) ||
+        (!has_call && st.swc1_writes > 0 && st.lwc1_reads == 0 && st.other_accesses == 0 &&
+         st.prologue_gpr_spills == 0 && off >= 16)) {
       result.insert(off);
     }
   }

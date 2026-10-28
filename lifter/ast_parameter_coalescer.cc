@@ -824,7 +824,9 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
             }
             bool homed_param_coalesce_ok = false;
             if (is_homed_param_slot && !is_assigned(rhs) &&
-                !StatementUsesAddressOfInPointerArithmetic(*comp, lhs)) {
+                (!StatementUsesAddressOfInPointerArithmetic(*comp, lhs) ||
+                 (rhs == "arg0" && count_assignments(lhs) == 1 &&
+                  !StatementReferencesVariable(*comp, absl::StrCat("var_sp_", frame_size + 4))))) {
               if (count_assignments(lhs) == 1) {
                 homed_param_coalesce_ok = true;
               } else if (is_in_call_free_prologue && !lhs_addr_taken &&
@@ -1219,6 +1221,89 @@ void SplitReusedFloatGprParameters(CompoundStatement* comp,
       std::string temp_name = absl::StrCat("temp_a", p.name.substr(3));
       for (size_t k = *split_start_idx; k < stmts.size(); ++k) {
         stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), p.name, temp_name);
+      }
+    }
+  }
+
+  for (int s_idx = 0; s_idx <= 7; ++s_idx) {
+    std::string gpr_name = absl::StrCat("temp_s", s_idx);
+    if (!StatementTakesAddressOf(*comp, gpr_name)) continue;
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      if (stmts[i] == nullptr || stmts[i]->Kind() != CStatementKind::kExpressionStatement) {
+        continue;
+      }
+      const auto& es = static_cast<const ExpressionStatement&>(*stmts[i]);
+      if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) continue;
+      const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+      if (a.Op() != "=" || a.Lhs().Kind() != CExpressionKind::kIdentifier ||
+          static_cast<const IdentifierExpression&>(a.Lhs()).Name() != gpr_name ||
+          a.Rhs().Kind() != CExpressionKind::kUnaryExpression) {
+        continue;
+      }
+      const auto& rhs_un = static_cast<const UnaryExpression&>(a.Rhs());
+      if ((rhs_un.Op() != "*(s32*)&" && rhs_un.Op() != "*(s32 *)&") ||
+          rhs_un.Operand().Kind() != CExpressionKind::kIdentifier) {
+        continue;
+      }
+      std::string fpr_src(static_cast<const IdentifierExpression&>(rhs_un.Operand()).Name());
+      if (fpr_src.size() < 2 || fpr_src[0] != 'f' || !std::isdigit(fpr_src[1])) continue;
+      std::optional<size_t> redef_idx;
+      int bitcast_read_count = 0;
+      bool has_non_bitcast_use = false;
+      for (size_t j = i + 1; j < stmts.size(); ++j) {
+        if (stmts[j] == nullptr) continue;
+        if (stmts[j]->Kind() == CStatementKind::kExpressionStatement) {
+          const auto& jes = static_cast<const ExpressionStatement&>(*stmts[j]);
+          if (jes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& ja = static_cast<const AssignmentExpression&>(jes.Expression());
+            if (ja.Op() == "=" && ja.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                static_cast<const IdentifierExpression&>(ja.Lhs()).Name() == gpr_name &&
+                !ExpressionUsesVariable(ja.Rhs(), gpr_name)) {
+              redef_idx = j;
+              break;
+            }
+            if (ja.Op() == "=" && ja.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                ja.Rhs().Kind() == CExpressionKind::kUnaryExpression) {
+              const auto& ju = static_cast<const UnaryExpression&>(ja.Rhs());
+              if ((ju.Op() == "*(f32*)&" || ju.Op() == "*(f32 *)&") &&
+                  ju.Operand().Kind() == CExpressionKind::kIdentifier &&
+                  static_cast<const IdentifierExpression&>(ju.Operand()).Name() == gpr_name &&
+                  !ExpressionUsesVariable(ja.Lhs(), gpr_name)) {
+                ++bitcast_read_count;
+                continue;
+              }
+            }
+          }
+        }
+        if (StatementReferencesVariable(*stmts[j], gpr_name)) {
+          has_non_bitcast_use = true;
+          break;
+        }
+      }
+      if (redef_idx.has_value() && bitcast_read_count > 0 && !has_non_bitcast_use) {
+        std::string float_carrier_name = absl::StrCat(gpr_name, "_f");
+        stmts[i] = CStatement::Expression(CExpression::Assignment(
+            "=", CExpression::Identifier(float_carrier_name), CExpression::Identifier(fpr_src)));
+        for (size_t j = i + 1; j < *redef_idx; ++j) {
+          if (stmts[j] == nullptr || stmts[j]->Kind() != CStatementKind::kExpressionStatement) {
+            continue;
+          }
+          const auto& jes = static_cast<const ExpressionStatement&>(*stmts[j]);
+          if (jes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& ja = static_cast<const AssignmentExpression&>(jes.Expression());
+            if (ja.Op() == "=" && ja.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                ja.Rhs().Kind() == CExpressionKind::kUnaryExpression) {
+              const auto& ju = static_cast<const UnaryExpression&>(ja.Rhs());
+              if ((ju.Op() == "*(f32*)&" || ju.Op() == "*(f32 *)&") &&
+                  ju.Operand().Kind() == CExpressionKind::kIdentifier &&
+                  static_cast<const IdentifierExpression&>(ju.Operand()).Name() == gpr_name) {
+                stmts[j] = CStatement::Expression(CExpression::Assignment(
+                    "=", ja.Lhs().Clone(), CExpression::Identifier(float_carrier_name)));
+              }
+            }
+          }
+        }
+        break;
       }
     }
   }

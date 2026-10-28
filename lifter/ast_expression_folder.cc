@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -1418,6 +1419,39 @@ struct FolderContext {
                   changed = true;
                   break;
                 }
+                if ((imm32 & 0x7F800000u) != 0 && (imm32 & 0x7F800000u) != 0x7F800000u) {
+                  bool folded_float_const = false;
+                  for (size_t j = i + 1; j < stmts.size() && j <= i + 4; ++j) {
+                    if (stmts[j]->Kind() != CStatementKind::kExpressionStatement) break;
+                    const auto& jes = static_cast<const ExpressionStatement&>(*stmts[j]);
+                    if (jes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                      const auto& ja = static_cast<const AssignmentExpression&>(jes.Expression());
+                      if (ja.Op() == "=" && ja.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                          ja.Rhs().Kind() == CExpressionKind::kUnaryExpression) {
+                        const auto& ju = static_cast<const UnaryExpression&>(ja.Rhs());
+                        if ((ju.Op() == "*(f32*)&" || ju.Op() == "*(f32 *)&") &&
+                            ju.Operand().Kind() == CExpressionKind::kIdentifier &&
+                            static_cast<const IdentifierExpression&>(ju.Operand()).Name() == var &&
+                            IsDeadAfterStmt(j, var, 1, stmts[i].get())) {
+                          float f_val = 0.0f;
+                          std::memcpy(&f_val, &imm32, sizeof(f_val));
+                          stmts[j] = CStatement::Expression(CExpression::Assignment(
+                              "=", ja.Lhs().Clone(),
+                              CExpression::Float(f_val, /*is_single_precision=*/true)));
+                          stmts.erase(stmts.begin() + i);
+                          changed = true;
+                          folded_float_const = true;
+                          break;
+                        }
+                      }
+                    }
+                    if (CountUses(*stmts[j], var) > 0 || HasAddressOfVarInStmt(*stmts[j], var) ||
+                        HasCallInStmt(*stmts[j])) {
+                      break;
+                    }
+                  }
+                  if (folded_float_const) break;
+                }
               }
               if (!is_scratch && !is_stack_arg && !is_call_arg) continue;
 
@@ -1460,9 +1494,10 @@ struct FolderContext {
                 bool dead_at_end_arg =
                     is_call_arg && dead_at_end_vars != nullptr && dead_at_end_vars->contains(var);
                 if ((followed_by_call || dead_at_end_arg) &&
+                    (root_body == nullptr || !HasAddressOfVarInStmt(*root_body, var)) &&
                     (IsDeadAfterStmt(i, var, 0, stmts[i].get()) ||
-                     (dead_at_end_arg && root_body != nullptr && CountUses(*root_body, var) == 0 &&
-                      !HasAddressOfVarInStmt(*root_body, var)))) {
+                     (dead_at_end_arg && root_body != nullptr &&
+                      CountUses(*root_body, var) == 0))) {
                   stmts.erase(stmts.begin() + i);
                   changed = true;
                   break;

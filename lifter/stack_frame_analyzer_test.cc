@@ -419,5 +419,55 @@ TEST(StackFrameAnalyzerTest, CountsCalleeSavedFpStoredAsOutgoingStackArgument) {
   EXPECT_EQ(analysis.outgoing_args_size, 32);
 }
 
+TEST(StackFrameAnalyzerTest, UnalignedEndPointerAddiuInLocalFrameDoesNotOverinflateSpBufferSize) {
+  // 72-byte frame saving $ra at 64($sp) and $s0 at 56($sp), with 16-byte outgoing args.
+  // Local buffer is [16, 56) (40 bytes). Taking the address of the last byte via
+  // `addiu $v0, $sp, 55` must use 1-byte access width rather than 4-byte access width,
+  // keeping sp_buffer_size == 40.
+  std::vector<uint32_t> words = {
+      0x27BDFFB8,  // 00: addiu $sp, $sp, -72
+      0xAFBF0040,  // 04: sw    $ra, 64($sp)
+      0xAFB00038,  // 08: sw    $s0, 56($sp)
+      0x27A40010,  // 0C: addiu $a0, $sp, 16
+      0x0C000400,  // 10: jal   0x80001000
+      0x27A20037,  // 14: addiu $v0, $sp, 55
+      0x8FBF0040,  // 18: lw    $ra, 64($sp)
+      0x8FB00038,  // 1C: lw    $s0, 56($sp)
+      0x03E00008,  // 20: jr    $ra
+      0x27BD0048,  // 24: addiu $sp, $sp, 72
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 72);
+  EXPECT_TRUE(analysis.sp_address_taken);
+  EXPECT_EQ(analysis.sp_buffer_size, 40);
+}
+
+TEST(StackFrameAnalyzerTest, PrePrologueCallerFrameHomingStoreIsRecordedAtShiftedOffset) {
+  // Pre-prologue `sw $a0, 0($sp)` before `addiu $sp, $sp, -24` stores into the
+  // caller's argument home slot at post-prologue offset 24($sp).
+  std::vector<uint32_t> words = {
+      0xAFA40000,  // 00: sw    $a0, 0($sp)
+      0x27BDFFE8,  // 04: addiu $sp, $sp, -24
+      0xAFBF0014,  // 08: sw    $ra, 20($sp)
+      0x27A40019,  // 0C: addiu $a0, $sp, 25
+      0x0C000400,  // 10: jal   0x80001000
+      0x00000000,  // 14: nop
+      0x8FBF0014,  // 18: lw    $ra, 20($sp)
+      0x03E00008,  // 1C: jr    $ra
+      0x27BD0018,  // 20: addiu $sp, $sp, 24
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 24);
+  EXPECT_FALSE(analysis.sp_address_taken);
+  EXPECT_EQ(analysis.sp_buffer_size, 0);
+  EXPECT_TRUE(analysis.stack_store_offsets.contains(24));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

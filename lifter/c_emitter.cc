@@ -660,19 +660,153 @@ bool IsPinnedCalleeSavedGprVar(std::string_view v) {
 
 bool ExprContainsNonIntrinsicCall(const CExpression& expr);
 bool ExprReadsVar(const CExpression& expr, std::string_view var);
+bool StmtContainsNonIntrinsicCall(const CStatement& stmt);
+bool StmtReadsVar(const CStatement& stmt, std::string_view var);
+bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, size_t start_idx,
+                                               std::string_view var,
+                                               bool require_split_prone = false);
+
+bool ExprHasCseSplitProneRead(const CExpression& expr, std::string_view var) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kUnaryExpression: {
+      const auto& u = static_cast<const UnaryExpression&>(expr);
+      if (u.Op() == "*" || absl::StartsWith(u.Op(), "*(")) {
+        const CExpression* inner = &u.Operand();
+        while (inner->Kind() == CExpressionKind::kCastExpression) {
+          inner = &static_cast<const CastExpression*>(inner)->Operand();
+        }
+        if (inner->Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression*>(inner)->Name() == var) {
+          return true;
+        }
+      }
+      return ExprHasCseSplitProneRead(u.Operand(), var);
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& b = static_cast<const BinaryExpression&>(expr);
+      if (b.Op() == "*" && (ExprReadsVar(b.Lhs(), var) || ExprReadsVar(b.Rhs(), var))) {
+        return true;
+      }
+      return ExprHasCseSplitProneRead(b.Lhs(), var) || ExprHasCseSplitProneRead(b.Rhs(), var);
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& a = static_cast<const AssignmentExpression&>(expr);
+      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          static_cast<const IdentifierExpression&>(a.Lhs()).Name() != var) {
+        const CExpression* rhs = &a.Rhs();
+        while (rhs->Kind() == CExpressionKind::kCastExpression) {
+          rhs = &static_cast<const CastExpression*>(rhs)->Operand();
+        }
+        if (rhs->Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression*>(rhs)->Name() == var) {
+          return true;
+        }
+      }
+      if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+        return ExprHasCseSplitProneRead(a.Rhs(), var);
+      }
+      return ExprHasCseSplitProneRead(a.Lhs(), var) || ExprHasCseSplitProneRead(a.Rhs(), var);
+    }
+    case CExpressionKind::kCastExpression:
+      return ExprHasCseSplitProneRead(static_cast<const CastExpression&>(expr).Operand(), var);
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      for (const auto& arg : call.Arguments()) {
+        if (arg != nullptr && ExprHasCseSplitProneRead(*arg, var)) return true;
+      }
+      return false;
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& ai = static_cast<const ArrayIndexExpression&>(expr);
+      return ExprHasCseSplitProneRead(ai.Array(), var) || ExprHasCseSplitProneRead(ai.Index(), var);
+    }
+    case CExpressionKind::kMemberAccessExpression:
+      return ExprHasCseSplitProneRead(static_cast<const MemberAccessExpression&>(expr).Object(),
+                                      var);
+    case CExpressionKind::kTernaryExpression: {
+      const auto& t = static_cast<const TernaryExpression&>(expr);
+      return ExprHasCseSplitProneRead(t.Condition(), var) ||
+             ExprHasCseSplitProneRead(t.TrueExpression(), var) ||
+             ExprHasCseSplitProneRead(t.FalseExpression(), var);
+    }
+    default:
+      return false;
+  }
+}
+
+bool StmtHasCseSplitProneRead(const CStatement& stmt, std::string_view var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kExpressionStatement:
+      return ExprHasCseSplitProneRead(static_cast<const ExpressionStatement&>(stmt).Expression(),
+                                      var);
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr && StmtHasCseSplitProneRead(*s, var)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return ExprHasCseSplitProneRead(ifs.Condition(), var) ||
+             StmtHasCseSplitProneRead(ifs.ThenBranch(), var) ||
+             (ifs.ElseBranch() != nullptr && StmtHasCseSplitProneRead(*ifs.ElseBranch(), var));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return ExprHasCseSplitProneRead(ws.Condition(), var) ||
+             StmtHasCseSplitProneRead(ws.Body(), var);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return StmtHasCseSplitProneRead(dws.Body(), var) ||
+             ExprHasCseSplitProneRead(dws.Condition(), var);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StmtHasCseSplitProneRead(*fs.Init(), var)) ||
+             (fs.Condition() != nullptr && ExprHasCseSplitProneRead(*fs.Condition(), var)) ||
+             (fs.Step() != nullptr && ExprHasCseSplitProneRead(*fs.Step(), var)) ||
+             StmtHasCseSplitProneRead(fs.Body(), var);
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExprHasCseSplitProneRead(ss.Condition(), var)) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StmtHasCseSplitProneRead(*c.body, var)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return rs.ReturnValue() != nullptr && ExprHasCseSplitProneRead(*rs.ReturnValue(), var);
+    }
+    default:
+      return false;
+  }
+}
 
 bool IsCseConflictProneCalleeSavedRhs(const CExpression& rhs,
                                       const std::set<std::string>& external_data_symbols,
                                       const CompoundStatement& comp, size_t idx,
                                       std::string_view lhs) {
-  if (rhs.Kind() == CExpressionKind::kIntegerLiteral ||
-      rhs.Kind() == CExpressionKind::kFloatLiteral ||
-      rhs.Kind() == CExpressionKind::kCallExpression) {
+  if (ExprReadsVar(rhs, lhs)) {
     return false;
+  }
+  if (rhs.Kind() == CExpressionKind::kIntegerLiteral ||
+      rhs.Kind() == CExpressionKind::kFloatLiteral) {
+    return false;
+  }
+  if (rhs.Kind() == CExpressionKind::kCallExpression) {
+    return CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs,
+                                                     /*require_split_prone=*/true);
   }
   if (rhs.Kind() == CExpressionKind::kIdentifier) {
     std::string name(static_cast<const IdentifierExpression&>(rhs).Name());
-    return name != "v0" && name != "v1" && external_data_symbols.count(name) == 0;
+    if (name == "v0" || name == "v1") {
+      return CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs,
+                                                       /*require_split_prone=*/true);
+    }
+    return external_data_symbols.count(name) == 0;
   }
   if (rhs.Kind() == CExpressionKind::kUnaryExpression) {
     const auto& u = static_cast<const UnaryExpression&>(rhs);
@@ -879,8 +1013,166 @@ bool StmtReadsVar(const CStatement& stmt, std::string_view var) {
   }
 }
 
+bool StmtContainsNonIntrinsicCall(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kExpressionStatement:
+      return ExprContainsNonIntrinsicCall(
+          static_cast<const ExpressionStatement&>(stmt).Expression());
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr && StmtContainsNonIntrinsicCall(*s)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return ExprContainsNonIntrinsicCall(ifs.Condition()) ||
+             StmtContainsNonIntrinsicCall(ifs.ThenBranch()) ||
+             (ifs.ElseBranch() != nullptr && StmtContainsNonIntrinsicCall(*ifs.ElseBranch()));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return ExprContainsNonIntrinsicCall(ws.Condition()) ||
+             StmtContainsNonIntrinsicCall(ws.Body());
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return StmtContainsNonIntrinsicCall(dws.Body()) ||
+             ExprContainsNonIntrinsicCall(dws.Condition());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StmtContainsNonIntrinsicCall(*fs.Init())) ||
+             (fs.Condition() != nullptr && ExprContainsNonIntrinsicCall(*fs.Condition())) ||
+             (fs.Step() != nullptr && ExprContainsNonIntrinsicCall(*fs.Step())) ||
+             StmtContainsNonIntrinsicCall(fs.Body());
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExprContainsNonIntrinsicCall(ss.Condition())) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StmtContainsNonIntrinsicCall(*c.body)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      return rs.ReturnValue() != nullptr && ExprContainsNonIntrinsicCall(*rs.ReturnValue());
+    }
+    default:
+      return false;
+  }
+}
+
+bool StmtOverwritesVar(const CStatement& stmt, std::string_view var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kExpressionStatement: {
+      const auto& es = static_cast<const ExpressionStatement&>(stmt);
+      if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+        if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(a.Lhs()).Name() == var) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s != nullptr && StmtOverwritesVar(*s, var)) return true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return StmtOverwritesVar(ifs.ThenBranch(), var) ||
+             (ifs.ElseBranch() != nullptr && StmtOverwritesVar(*ifs.ElseBranch(), var));
+    }
+    case CStatementKind::kWhileStatement:
+      return StmtOverwritesVar(static_cast<const WhileStatement&>(stmt).Body(), var);
+    case CStatementKind::kDoWhileStatement:
+      return StmtOverwritesVar(static_cast<const DoWhileStatement&>(stmt).Body(), var);
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Init() != nullptr && StmtOverwritesVar(*fs.Init(), var)) ||
+             StmtOverwritesVar(fs.Body(), var);
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr && StmtOverwritesVar(*c.body, var)) return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+bool StmtContainsCallFollowedByRead(const CStatement& stmt, std::string_view var,
+                                    bool require_split_prone) {
+  const auto check_read = [&](const CStatement& s) {
+    return require_split_prone ? StmtHasCseSplitProneRead(s, var) : StmtReadsVar(s, var);
+  };
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      bool seen_call = false;
+      for (const auto& s : comp.Statements()) {
+        if (s == nullptr) continue;
+        if (seen_call && check_read(*s)) return true;
+        if (StmtContainsCallFollowedByRead(*s, var, require_split_prone)) return true;
+        if (StmtOverwritesVar(*s, var)) return false;
+        if (StmtContainsNonIntrinsicCall(*s)) seen_call = true;
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      if (ExprContainsNonIntrinsicCall(ifs.Condition())) {
+        if (check_read(ifs.ThenBranch()) ||
+            (ifs.ElseBranch() != nullptr && check_read(*ifs.ElseBranch()))) {
+          return true;
+        }
+      }
+      return StmtContainsCallFollowedByRead(ifs.ThenBranch(), var, require_split_prone) ||
+             (ifs.ElseBranch() != nullptr &&
+              StmtContainsCallFollowedByRead(*ifs.ElseBranch(), var, require_split_prone));
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      if (ExprContainsNonIntrinsicCall(ss.Condition())) {
+        for (const auto& c : ss.Cases()) {
+          if (c.body != nullptr && check_read(*c.body)) return true;
+        }
+      }
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr &&
+            StmtContainsCallFollowedByRead(*c.body, var, require_split_prone)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case CStatementKind::kWhileStatement:
+      return StmtContainsCallFollowedByRead(static_cast<const WhileStatement&>(stmt).Body(), var,
+                                            require_split_prone);
+    case CStatementKind::kDoWhileStatement:
+      return StmtContainsCallFollowedByRead(static_cast<const DoWhileStatement&>(stmt).Body(), var,
+                                            require_split_prone);
+    case CStatementKind::kForStatement:
+      return StmtContainsCallFollowedByRead(static_cast<const ForStatement&>(stmt).Body(), var,
+                                            require_split_prone);
+    default:
+      return false;
+  }
+}
+
 bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, size_t start_idx,
-                                               std::string_view var) {
+                                               std::string_view var, bool require_split_prone) {
+  const auto check_read = [&](const CStatement& s) {
+    return require_split_prone ? StmtHasCseSplitProneRead(s, var) : StmtReadsVar(s, var);
+  };
   bool seen_call = false;
   for (size_t k = start_idx + 1; k < comp.Statements().size(); ++k) {
     const auto& next_s = comp.Statements()[k];
@@ -896,36 +1188,30 @@ bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, si
           const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
           if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
               static_cast<const IdentifierExpression&>(a.Lhs()).Name() == var) {
-            if (!ExprReadsVar(a.Rhs(), var)) {
-              return false;
-            }
+            return false;
           }
         }
         continue;
       }
-      if (next_s->Kind() == CStatementKind::kIfStatement) {
-        const auto& ifs = static_cast<const IfStatement&>(*next_s);
-        if (ExprContainsNonIntrinsicCall(ifs.Condition())) {
-          seen_call = true;
-          if (StmtReadsVar(ifs.ThenBranch(), var) ||
-              (ifs.ElseBranch() != nullptr && StmtReadsVar(*ifs.ElseBranch(), var))) {
-            return true;
-          }
-          continue;
+      if (next_s->Kind() == CStatementKind::kIfStatement ||
+          next_s->Kind() == CStatementKind::kSwitchStatement ||
+          next_s->Kind() == CStatementKind::kWhileStatement ||
+          next_s->Kind() == CStatementKind::kDoWhileStatement ||
+          next_s->Kind() == CStatementKind::kForStatement) {
+        if (StmtOverwritesVar(*next_s, var)) {
+          return false;
         }
-      } else if (next_s->Kind() == CStatementKind::kSwitchStatement) {
-        const auto& ss = static_cast<const SwitchStatement&>(*next_s);
-        if (ExprContainsNonIntrinsicCall(ss.Condition())) {
-          seen_call = true;
-          for (const auto& c : ss.Cases()) {
-            if (c.body != nullptr && StmtReadsVar(*c.body, var)) return true;
-          }
-          continue;
+        if (StmtContainsCallFollowedByRead(*next_s, var, require_split_prone)) {
+          return true;
         }
+        if (StmtContainsNonIntrinsicCall(*next_s)) {
+          seen_call = true;
+        }
+        continue;
       }
       return false;
     }
-    if (StmtReadsVar(*next_s, var)) {
+    if (check_read(*next_s)) {
       return true;
     }
     if (next_s->Kind() == CStatementKind::kExpressionStatement) {
@@ -941,6 +1227,9 @@ bool CalleeSavedCopyCrossesCallWithReadInBlock(const CompoundStatement& comp, si
           return false;
         }
       }
+    }
+    if (StmtOverwritesVar(*next_s, var)) {
+      return false;
     }
     if (next_s->Kind() == CStatementKind::kReturnStatement ||
         next_s->Kind() == CStatementKind::kGotoStatement ||
@@ -1009,8 +1298,58 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
         if (s->Kind() != CStatementKind::kVariableDeclarationStatement) {
           active_sym_vars.clear();
         }
-        stmts.push_back(DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(*s, external_data_symbols,
-                                                                          has_calls));
+        auto rewritten =
+            DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(*s, external_data_symbols, has_calls);
+        if (has_calls && rewritten != nullptr &&
+            rewritten->Kind() == CStatementKind::kDoWhileStatement) {
+          const auto& dws = static_cast<const DoWhileStatement&>(*rewritten);
+          if (dws.Body().Kind() == CStatementKind::kCompoundStatement) {
+            const auto& body_comp = static_cast<const CompoundStatement&>(dws.Body());
+            std::vector<std::unique_ptr<CStatement>> new_body_stmts;
+            new_body_stmts.reserve(body_comp.Statements().size() + 1);
+            bool modified_loop = false;
+            for (size_t b_idx = 0; b_idx < body_comp.Statements().size(); ++b_idx) {
+              const auto& bs = body_comp.Statements()[b_idx];
+              new_body_stmts.push_back(bs != nullptr ? bs->Clone() : nullptr);
+              if (bs != nullptr && bs->Kind() == CStatementKind::kExpressionStatement) {
+                const auto& bes = static_cast<const ExpressionStatement&>(*bs);
+                if (bes.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                  const auto& ba = static_cast<const AssignmentExpression&>(bes.Expression());
+                  if (ba.Op() == "=" && ba.Lhs().Kind() == CExpressionKind::kIdentifier) {
+                    std::string blhs(static_cast<const IdentifierExpression&>(ba.Lhs()).Name());
+                    if (IsPinnedCalleeSavedGprVar(blhs) &&
+                        IsCseConflictProneCalleeSavedRhs(ba.Rhs(), external_data_symbols, body_comp,
+                                                         b_idx, blhs) &&
+                        !CalleeSavedCopyCrossesCallWithReadInBlock(body_comp, b_idx, blhs) &&
+                        CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, blhs)) {
+                      bool overwritten_later_in_loop = false;
+                      for (size_t rem = b_idx + 1; rem < body_comp.Statements().size(); ++rem) {
+                        if (body_comp.Statements()[rem] != nullptr &&
+                            (StmtContainsNonIntrinsicCall(*body_comp.Statements()[rem]) ||
+                             StmtOverwritesVar(*body_comp.Statements()[rem], blhs))) {
+                          overwritten_later_in_loop = true;
+                          break;
+                        }
+                      }
+                      if (!overwritten_later_in_loop) {
+                        new_body_stmts.push_back(
+                            CStatement::Expression(CExpression::Identifier(absl::StrFormat(
+                                "__asm__(\"\" : \"=r\"(%s) : \"0\"(%s))", blhs, blhs))));
+                        modified_loop = true;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            if (modified_loop) {
+              rewritten = CStatement::DoWhile(
+                  std::make_unique<CompoundStatement>(std::move(new_body_stmts)),
+                  dws.Condition().Clone());
+            }
+          }
+        }
+        stmts.push_back(std::move(rewritten));
       }
       return std::make_unique<CompoundStatement>(std::move(stmts));
     }

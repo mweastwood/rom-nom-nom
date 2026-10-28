@@ -781,5 +781,39 @@ TEST(CEmitterTest, EmitsVolatileExternForScalarGlobalPolledInCallFreeSpinLoop) {
   EXPECT_THAT(emitted, HasSubstr("extern volatile s32 D_80123450;\n"));
 }
 
+TEST(CEmitterTest, EmitsCseBarrierForPinnedCalleeSavedCallReturnReadByZeroOffsetDerefAfterIfCall) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Call(CExpression::Identifier("AcquireSlotRecord"), {}))));
+  auto then_body = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  then_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("NotifySlotChange"), std::move(call_args))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_body)));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S32().MakePointer(), CExpression::Identifier("temp_s0"))),
+      CExpression::Integer(1))));
+  body->AddStatement(CStatement::Return());
+  tu.functions.emplace_back(CType::Void(), "TestCallReturnZeroOffsetDerefCseBarrier",
+                            std::vector<CParameter>{CParameter{CType::S32(), "arg0"}},
+                            std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("temp_s0 = AcquireSlotRecord();\n    __asm__(\"\" : "
+                                 "\"=r\"(temp_s0) : \"0\"(temp_s0));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

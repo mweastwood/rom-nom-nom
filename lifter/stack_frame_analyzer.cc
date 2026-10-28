@@ -83,6 +83,7 @@ void StackFrameAnalyzer::ScanInstructionsAddressTaken(
         (inst.rs == Register::kSp || (analysis->has_frame_pointer && inst.rs == Register::kFp)) &&
         inst.rt.has_value() && *inst.rt != Register::kSp &&
         (!analysis->has_frame_pointer || *inst.rt != Register::kFp) && inst.immediate >= 0 &&
+        (analysis->frame_size == 0 || inst.immediate < analysis->frame_size) &&
         !IsCallerHomedScalarAddr(analysis->frame_size, inst.immediate,
                                  analysis->stack_store_offsets)) {
       analysis->sp_address_taken = true;
@@ -204,6 +205,20 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
   }
 
   const int32_t caller_frame_start = (analysis.frame_size > 0) ? analysis.frame_size : 16;
+  const BasicBlock* entry_block = cfg.GetBlock(cfg.EntryBlockId());
+  if (entry_block != nullptr && analysis.frame_size > 0) {
+    for (const auto& inst : entry_block->instructions) {
+      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+           inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+          inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
+        break;
+      }
+      if (inst.IsStore() && inst.rs == Register::kSp && inst.immediate >= 0 &&
+          inst.immediate < 16) {
+        analysis.stack_store_offsets.insert(inst.immediate + analysis.frame_size);
+      }
+    }
+  }
 
   for (const auto& block : cfg.Blocks()) {
     ScanInstructionsAddressTaken(block.instructions, &analysis, &addr_taken_offsets);
@@ -446,7 +461,8 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
                    inst.immediate > 0) {
           int32_t adj = static_cast<int32_t>(inst.immediate) - sp_base_offset;
           if (adj > 0) {
-            analysis.max_sp_access = std::max(analysis.max_sp_access, adj + 4);
+            int32_t addr_access_size = ((inst.immediate & 3) == 0) ? 4 : 1;
+            analysis.max_sp_access = std::max(analysis.max_sp_access, adj + addr_access_size);
           }
         }
       }
@@ -458,12 +474,15 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
     if (min_saved == 0xFFFFFFFF) {
       min_saved = static_cast<uint32_t>(analysis.frame_size);
     }
-    analysis.sp_buffer_size =
-        (min_saved > static_cast<uint32_t>(sp_base_offset))
-            ? static_cast<int32_t>(min_saved - static_cast<uint32_t>(sp_base_offset))
-            : analysis.frame_size;
-    if (analysis.max_sp_access > analysis.sp_buffer_size) {
-      analysis.sp_buffer_size = (analysis.max_sp_access + 15) & ~15;
+    if (min_saved <= static_cast<uint32_t>(sp_base_offset)) {
+      analysis.sp_buffer_size = 0;
+      analysis.sp_address_taken = false;
+    } else {
+      analysis.sp_buffer_size =
+          static_cast<int32_t>(min_saved - static_cast<uint32_t>(sp_base_offset));
+      if (analysis.max_sp_access > analysis.sp_buffer_size) {
+        analysis.sp_buffer_size = (analysis.max_sp_access + 15) & ~15;
+      }
     }
   }
 

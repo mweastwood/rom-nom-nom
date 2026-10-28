@@ -865,5 +865,34 @@ TEST(AstParameterCoalescerTest, CoalescesAddressTakenCallerHomedParamSlotsInZero
   EXPECT_THAT(code, HasSubstr("&arg3"));
 }
 
+TEST(AstParameterCoalescerTest, SplitsCalleeSavedGprFloatCarrierWebFromSubsequentIntegerReuse) {
+  CompoundStatement body;
+  // temp_s2 = *(s32*)&f12;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s2"),
+                              CExpression::Unary("*(s32*)&", CExpression::Identifier("f12")))));
+  // f0 = *(f32*)&temp_s2;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f0"),
+                              CExpression::Unary("*(f32*)&", CExpression::Identifier("temp_s2")))));
+  // temp_s2 = (arg0 + 4);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(4)))));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("temp_s2")));
+
+  std::vector<CParameter> params = {
+      {.type = CType::S32(), .name = "arg0"},
+      {.type = CType::F32(), .name = "f12"},
+  };
+  SplitReusedFloatGprParameters(&body, params);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, HasSubstr("temp_s2_f = f12;"));
+  EXPECT_THAT(code, HasSubstr("f0 = temp_s2_f;"));
+  EXPECT_THAT(code, HasSubstr("temp_s2 = (arg0 + 4);"));
+  EXPECT_THAT(code, HasSubstr("return temp_s2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -940,6 +940,109 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
   return true;
 }
 
+uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
+                                      const absl::flat_hash_set<std::string>& double_vars,
+                                      const CompoundStatement& body,
+                                      std::vector<std::string>* local_vars_to_declare) {
+  if (frame_analysis.has_frame_pointer || frame_analysis.sp_buffer_size != 0) {
+    return 0;
+  }
+  uint32_t local_frame_top = 0;
+  uint32_t local_frame_bottom = 0;
+  if (frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF) {
+    local_frame_top = frame_analysis.prologue.min_saved_reg_offset & ~7u;
+    local_frame_bottom = (static_cast<uint32_t>(frame_analysis.outgoing_args_size) + 7u) & ~7u;
+  } else if (!frame_analysis.has_calls && frame_analysis.frame_size > 0) {
+    local_frame_top = static_cast<uint32_t>(frame_analysis.frame_size) & ~7u;
+    local_frame_bottom = 0;
+  }
+  if (local_frame_top <= local_frame_bottom) {
+    return 0;
+  }
+
+  const uint32_t target_local_size = local_frame_top - local_frame_bottom;
+  bool has_sp_buffer = false;
+  bool any_non_sp_local_addr_taken = false;
+  size_t sp_locals_in_gap = 0;
+  uint32_t addr_taken_sp_bytes = 0;
+  int callee_saved_gprs = 0;
+
+  for (const auto& v : *local_vars_to_declare) {
+    if (v == "sp") {
+      has_sp_buffer = true;
+      break;
+    }
+    if (IsCalleeSavedGprVarName(v)) {
+      callee_saved_gprs += double_vars.contains(v) ? 2 : 1;
+    }
+    const bool is_addr_taken = StatementTakesAddressOf(body, v);
+    if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
+      int32_t off = 0;
+      if (absl::SimpleAtoi(v.substr(7), &off) && off >= static_cast<int32_t>(local_frame_bottom) &&
+          off < static_cast<int32_t>(local_frame_top)) {
+        ++sp_locals_in_gap;
+        if (is_addr_taken) {
+          addr_taken_sp_bytes += (absl::EndsWith(v, "_64") || double_vars.contains(v)) ? 8u : 4u;
+        }
+      } else if (is_addr_taken) {
+        any_non_sp_local_addr_taken = true;
+      }
+    } else if (is_addr_taken) {
+      any_non_sp_local_addr_taken = true;
+    }
+  }
+
+  int prologue_saved_callee_gprs = 0;
+  for (const auto& [reg, off] : frame_analysis.prologue.saved_reg_offsets) {
+    (void)off;
+    if ((reg >= Register::kS0 && reg <= Register::kS7) || reg == Register::kFp) {
+      ++prologue_saved_callee_gprs;
+    }
+  }
+  callee_saved_gprs = std::max(callee_saved_gprs, prologue_saved_callee_gprs);
+
+  int prologue_saved_callee_fpr_pairs = 0;
+  for (int f_num = 20; f_num <= 30; f_num += 2) {
+    FpRegister fp_even = static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num - 20));
+    FpRegister fp_odd =
+        static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num + 1 - 20));
+    if (frame_analysis.prologue.saved_fpr_offsets.contains(fp_even) ||
+        frame_analysis.prologue.saved_fpr_offsets.contains(fp_odd)) {
+      ++prologue_saved_callee_fpr_pairs;
+    }
+  }
+
+  if (has_sp_buffer || any_non_sp_local_addr_taken || StatementContainsS64PointerDeref(body)) {
+    return 0;
+  }
+  uint32_t unreferenced_sp_gap_size = 0;
+  const uint32_t for_loop_spill_bytes = 8u * CountForStatements(body);
+  if (sp_locals_in_gap == 0 || (frame_analysis.prologue.min_saved_reg_offset == 0xFFFFFFFF &&
+                                !frame_analysis.has_calls && addr_taken_sp_bytes == 0)) {
+    if (target_local_size > for_loop_spill_bytes) {
+      unreferenced_sp_gap_size = target_local_size - for_loop_spill_bytes;
+    }
+  } else if ((callee_saved_gprs >= 8 || prologue_saved_callee_fpr_pairs >= 6) &&
+             sp_locals_in_gap <= 2 && addr_taken_sp_bytes == 0) {
+    uint32_t max_spill_bytes = static_cast<uint32_t>(sp_locals_in_gap) * 8u + for_loop_spill_bytes;
+    if (target_local_size > max_spill_bytes) {
+      unreferenced_sp_gap_size = target_local_size - max_spill_bytes;
+    }
+  } else if (callee_saved_gprs < 8) {
+    uint32_t gcc_local_bytes = ((addr_taken_sp_bytes + 7u) & ~7u) + for_loop_spill_bytes;
+    if (StatementContainsMaskedSignBitFloatFix(body)) {
+      gcc_local_bytes += 8u;
+    }
+    if (target_local_size > gcc_local_bytes) {
+      unreferenced_sp_gap_size = target_local_size - gcc_local_bytes;
+    }
+  }
+  if (unreferenced_sp_gap_size > 0) {
+    local_vars_to_declare->push_back("sp");
+  }
+  return unreferenced_sp_gap_size;
+}
+
 absl::Status PrependSynthesizedLocalDeclarations(
     const ControlFlowGraph& cfg, const StackFrameAnalysis& frame_analysis,
     const absl::flat_hash_set<std::string>& double_vars, const std::vector<CParameter>& parameters,
@@ -1190,91 +1293,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
 
-  uint32_t unreferenced_sp_gap_size = 0;
-  if (!frame_analysis.has_frame_pointer && frame_analysis.sp_buffer_size == 0) {
-    uint32_t local_frame_top = 0;
-    uint32_t local_frame_bottom = 0;
-    if (frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF) {
-      local_frame_top = frame_analysis.prologue.min_saved_reg_offset & ~7u;
-      local_frame_bottom = (static_cast<uint32_t>(frame_analysis.outgoing_args_size) + 7u) & ~7u;
-    } else if (!frame_analysis.has_calls && frame_analysis.frame_size > 0) {
-      local_frame_top = static_cast<uint32_t>(frame_analysis.frame_size) & ~7u;
-      local_frame_bottom = 0;
-    }
-
-    if (local_frame_top > local_frame_bottom) {
-      const uint32_t target_local_size = local_frame_top - local_frame_bottom;
-      bool has_sp_buffer = false;
-      bool any_non_sp_local_addr_taken = false;
-      size_t sp_locals_in_gap = 0;
-      uint32_t addr_taken_sp_bytes = 0;
-      int callee_saved_gprs = 0;
-
-      for (const auto& v : local_vars_to_declare) {
-        if (v == "sp") {
-          has_sp_buffer = true;
-          break;
-        }
-        if (IsCalleeSavedGprVarName(v)) {
-          callee_saved_gprs += double_vars.contains(v) ? 2 : 1;
-        }
-        const bool is_addr_taken = StatementTakesAddressOf(**body, v);
-        if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
-          int32_t off = 0;
-          if (absl::SimpleAtoi(v.substr(7), &off) &&
-              off >= static_cast<int32_t>(local_frame_bottom) &&
-              off < static_cast<int32_t>(local_frame_top)) {
-            ++sp_locals_in_gap;
-            if (is_addr_taken) {
-              addr_taken_sp_bytes +=
-                  (absl::EndsWith(v, "_64") || double_vars.contains(v)) ? 8u : 4u;
-            }
-          } else if (is_addr_taken) {
-            any_non_sp_local_addr_taken = true;
-          }
-        } else if (is_addr_taken) {
-          any_non_sp_local_addr_taken = true;
-        }
-      }
-
-      int prologue_saved_callee_gprs = 0;
-      for (const auto& [reg, off] : frame_analysis.prologue.saved_reg_offsets) {
-        (void)off;
-        if ((reg >= Register::kS0 && reg <= Register::kS7) || reg == Register::kFp) {
-          ++prologue_saved_callee_gprs;
-        }
-      }
-      callee_saved_gprs = std::max(callee_saved_gprs, prologue_saved_callee_gprs);
-
-      if (!has_sp_buffer && !any_non_sp_local_addr_taken &&
-          !StatementContainsS64PointerDeref(**body)) {
-        const uint32_t for_loop_spill_bytes = 8u * CountForStatements(**body);
-        if (sp_locals_in_gap == 0 || (frame_analysis.prologue.min_saved_reg_offset == 0xFFFFFFFF &&
-                                      !frame_analysis.has_calls && addr_taken_sp_bytes == 0)) {
-          if (target_local_size > for_loop_spill_bytes) {
-            unreferenced_sp_gap_size = target_local_size - for_loop_spill_bytes;
-          }
-        } else if (callee_saved_gprs < 8) {
-          uint32_t gcc_local_bytes = ((addr_taken_sp_bytes + 7u) & ~7u) + for_loop_spill_bytes;
-          if (StatementContainsMaskedSignBitFloatFix(**body)) {
-            gcc_local_bytes += 8u;
-          }
-          if (target_local_size > gcc_local_bytes) {
-            unreferenced_sp_gap_size = target_local_size - gcc_local_bytes;
-          }
-        } else if (callee_saved_gprs >= 8 && sp_locals_in_gap <= 2 && addr_taken_sp_bytes == 0) {
-          uint32_t max_spill_bytes =
-              static_cast<uint32_t>(sp_locals_in_gap) * 8u + for_loop_spill_bytes;
-          if (target_local_size > max_spill_bytes) {
-            unreferenced_sp_gap_size = target_local_size - max_spill_bytes;
-          }
-        }
-        if (unreferenced_sp_gap_size > 0) {
-          local_vars_to_declare.push_back("sp");
-        }
-      }
-    }
-  }
+  const uint32_t unreferenced_sp_gap_size =
+      ComputeUnreferencedSpGapSize(frame_analysis, double_vars, **body, &local_vars_to_declare);
 
   if (local_vars_to_declare.empty()) {
     return absl::OkStatus();
@@ -1288,6 +1308,15 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
   uint32_t sp_buffer_size =
       (unreferenced_sp_gap_size > 0) ? unreferenced_sp_gap_size : frame_analysis.sp_buffer_size;
+  if (unreferenced_sp_gap_size == 0 && !frame_analysis.has_frame_pointer && sp_buffer_size > 0) {
+    const uint32_t for_loop_spill_bytes = 8u * CountForStatements(**body);
+    const uint32_t min_accessed_bytes =
+        (static_cast<uint32_t>(std::max<int32_t>(0, frame_analysis.max_sp_access)) + 7u) & ~7u;
+    if (for_loop_spill_bytes > 0 && sp_buffer_size > for_loop_spill_bytes &&
+        sp_buffer_size >= min_accessed_bytes + for_loop_spill_bytes) {
+      sp_buffer_size -= for_loop_spill_bytes;
+    }
+  }
 
   auto is_fp_reg = [](std::string_view name) -> bool {
     if (name.size() >= 2 && name[0] == 'f' && std::isdigit(name[1])) {
@@ -1495,6 +1524,12 @@ absl::Status PrependSynthesizedLocalDeclarations(
   absl::flat_hash_set<std::string> float_gpr_var_names;
   for (Register r : AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg)) {
     float_gpr_var_names.insert(ExpressionBuilder::RegisterVarName(r));
+  }
+  for (const auto& v : local_vars_to_declare) {
+    if (v.size() == 9 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7' &&
+        absl::EndsWith(v, "_f")) {
+      float_gpr_var_names.insert(v);
+    }
   }
   absl::flat_hash_set<std::string> float_local_var_names;
   for (int32_t off : AbiAnalyzer::DetectFloatLocalStackOffsets(cfg)) {

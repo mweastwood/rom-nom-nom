@@ -1032,6 +1032,33 @@ void BlockLiftRunner::LiftIntegerAluInstruction(const Instruction& inst) {
         statement.destination_variable = ExpressionBuilder::RegisterVarName(*inst.rt);
         if (inst.rs == Register::kZero) {
           statement.expression = LiftedExpression::Integer(inst.immediate);
+        } else if ((inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
+                   frame_size > 0 && inst.immediate >= static_cast<int32_t>(frame_size)) {
+          const int32_t stack_arg_base = static_cast<int32_t>(frame_size + 16);
+          if (inst.immediate >= stack_arg_base && ((inst.immediate - stack_arg_base) % 4) == 0 &&
+              !(inst.immediate == stack_arg_base &&
+                local_stack_stores.contains(static_cast<int32_t>(frame_size)))) {
+            int arg_idx = 4 + (inst.immediate - stack_arg_base) / 4;
+            statement.expression = LiftedExpression::Unary(
+                "(s32)&", LiftedExpression::Variable(absl::StrFormat("arg%d", arg_idx)));
+          } else {
+            int32_t aligned_off = inst.immediate & ~3;
+            int32_t rem = inst.immediate - aligned_off;
+            if (!local_stack_stores.contains(aligned_off) &&
+                aligned_off > static_cast<int32_t>(frame_size) &&
+                local_stack_stores.contains(static_cast<int32_t>(frame_size))) {
+              aligned_off = static_cast<int32_t>(frame_size);
+              rem = inst.immediate - aligned_off;
+            }
+            auto addr_expr = LiftedExpression::Unary(
+                "(s32)&", LiftedExpression::Variable(ExpressionBuilder::StackVarName(aligned_off)));
+            if (rem == 0) {
+              statement.expression = std::move(addr_expr);
+            } else {
+              statement.expression = LiftedExpression::Binary("+", std::move(addr_expr),
+                                                              LiftedExpression::Integer(rem));
+            }
+          }
         } else if ((sp_address_taken || IsCallerHomedScalarAddr(inst.immediate)) &&
                    (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
                    inst.immediate >= 0) {
@@ -1759,6 +1786,10 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
         statement.destination_variable = ExpressionBuilder::RegisterVarName(*inst.rt);
         if (is_stack_base) {
           int32_t offset = inst.immediate;
+          if (frame_size > 0 && sp_alloc_idx.has_value() && i < *sp_alloc_idx &&
+              *inst.rs == Register::kSp && offset >= 0 && offset < 16) {
+            offset += static_cast<int32_t>(frame_size);
+          }
           if (IsSpOffset(offset)) {
             statement.expression = LiftedExpression::Load(load_type, MakeSpAddr(offset));
           } else {
@@ -2040,6 +2071,10 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
         LiftedStatement statement;
         if (is_stack_base) {
           int32_t offset = inst.immediate;
+          if (frame_size > 0 && sp_alloc_idx.has_value() && i < *sp_alloc_idx &&
+              *inst.rs == Register::kSp && offset >= 0 && offset < 16) {
+            offset += static_cast<int32_t>(frame_size);
+          }
           if (IsSpOffset(offset)) {
             statement.kind = StatementKind::kStore;
             statement.store_type = store_type;
