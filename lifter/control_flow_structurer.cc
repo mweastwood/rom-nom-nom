@@ -1082,6 +1082,12 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
         }
         if (exit_body) {
           if (RegionEndsWithReturn(*exit_body, *cfg_)) {
+            if (follow.has_value() && succ_taken == *follow) {
+              auto if_else = StructuredRegion::CreateIfThenElse(entry, /*invert=*/false);
+              if_else->children.push_back(StructuredRegion::CreateSequence());
+              if_else->children.push_back(std::move(exit_body));
+              return if_else;
+            }
             if_break->children.push_back(std::move(exit_body));
           } else {
             auto seq = StructuredRegion::CreateSequence();

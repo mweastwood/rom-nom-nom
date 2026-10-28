@@ -1047,11 +1047,10 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
   const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
   absl::flat_hash_set<uint32_t> jump_table_target_vrams;
   for (const auto& jt : cfg->JumpTables()) {
-    if (jt.default_target_vram != 0) {
-      jump_table_target_vrams.insert(jt.default_target_vram);
-    }
     for (const auto& entry : jt.entries) {
-      jump_table_target_vrams.insert(entry.target_vram);
+      if (entry.target_vram != jt.default_target_vram) {
+        jump_table_target_vrams.insert(entry.target_vram);
+      }
     }
   }
 
@@ -1325,11 +1324,10 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
   const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
   absl::flat_hash_set<uint32_t> jump_table_target_vrams;
   for (const auto& jt : cfg->JumpTables()) {
-    if (jt.default_target_vram != 0) {
-      jump_table_target_vrams.insert(jt.default_target_vram);
-    }
     for (const auto& entry : jt.entries) {
-      jump_table_target_vrams.insert(entry.target_vram);
+      if (entry.target_vram != jt.default_target_vram) {
+        jump_table_target_vrams.insert(entry.target_vram);
+      }
     }
   }
 
@@ -1656,8 +1654,13 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         continue;
       }
 
+      const bool is_fallthrough_stolen_callee_saved_init =
+          dead_on_taken && !dead_on_fallthrough && delay_ud.gpr_defs.size() == 1 &&
+          delay_ud.gpr_defs[0] >= Register::kS0 && delay_ud.gpr_defs[0] <= Register::kS7;
+
       if (DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
-          DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst)) {
+          DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst) ||
+          is_fallthrough_stolen_callee_saved_init) {
         std::optional<Register> clobber_reg = compute_unscheduled_clobber_reg(delay_ud);
         target_blk->instructions.insert(target_blk->instructions.begin(), delay_inst);
         block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
@@ -1707,11 +1710,10 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
   const auto jump_table_bounds_vrams = CollectJumpTableBoundsVrams(*cfg);
   absl::flat_hash_set<uint32_t> jump_table_target_vrams;
   for (const auto& jt : cfg->JumpTables()) {
-    if (jt.default_target_vram != 0) {
-      jump_table_target_vrams.insert(jt.default_target_vram);
-    }
     for (const auto& entry : jt.entries) {
-      jump_table_target_vrams.insert(entry.target_vram);
+      if (entry.target_vram != jt.default_target_vram) {
+        jump_table_target_vrams.insert(entry.target_vram);
+      }
     }
   }
 

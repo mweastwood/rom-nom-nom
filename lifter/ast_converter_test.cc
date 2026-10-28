@@ -16,6 +16,7 @@
 #include "core/symbol_registry.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "lifter/ast_control_flow_cleanup_pass.h"
 #include "lifter/branch_condition_builder.h"
 #include "lifter/cfg_de_reorg.h"
 #include "lifter/control_flow_structurer.h"
@@ -1658,6 +1659,102 @@ TEST(AstConverterTest,
   EXPECT_THAT(code, HasSubstr("(((*(u16*)arg0 & 4) != 0) || ((*(u16*)(arg0 + 2) & 8) != 0))"));
   EXPECT_THAT(code, Not(HasSubstr("v0 =")));
   EXPECT_THAT(code, Not(HasSubstr("goto")));
+}
+
+TEST(AstConverterTest, HoistsEmptyThenBranchEarlyReturnAndFoldsWhileTrueBreakKilledAfterLoop) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+
+  auto empty_then = std::make_unique<CompoundStatement>();
+  auto else_comp = std::make_unique<CompoundStatement>();
+
+  auto while_body = std::make_unique<CompoundStatement>();
+  while_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Unary("*(s32*)", CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                        CExpression::Integer(16))))));
+  auto break_then = std::make_unique<CompoundStatement>();
+  break_then->AddStatement(CStatement::Break());
+  while_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("v0"), CExpression::Integer(0)),
+      std::move(break_then)));
+  while_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Unary("*(s32*)", CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                        CExpression::Integer(16))))));
+
+  else_comp->AddStatement(CStatement::While(CExpression::Integer(1), std::move(while_body)));
+  else_comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("arg0"))));
+
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(empty_then), std::move(else_comp)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  EXPECT_TRUE(SinkLoopInvariantAssignments(body.get()));
+  std::string code = body->ToString();
+  EXPECT_THAT(code, HasSubstr("if ((arg0 == 0)) {\n        return v0;\n    }"));
+  EXPECT_THAT(code, HasSubstr("while ((*(s32*)(arg0 + 16) != 0))"));
+  EXPECT_THAT(code, Not(HasSubstr("while (1)")));
+}
+
+TEST(AstConverterTest, ReplacesBreakWithReturnInGuardedDoWhileAndRewritesDoWhileEarlyReturnLatch) {
+  // Part 1: Guarded `do-while` followed by `return arg1;` replaces top-level `if (v0 == 0) break;`
+  // with `return arg1;`.
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    auto dw_body = std::make_unique<CompoundStatement>();
+    auto break_then = std::make_unique<CompoundStatement>();
+    break_then->AddStatement(CStatement::Break());
+    dw_body->AddStatement(CStatement::If(
+        CExpression::Binary("==", CExpression::Identifier("v0"), CExpression::Integer(0)),
+        std::move(break_then)));
+    dw_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg1"),
+        CExpression::Binary("+", CExpression::Identifier("arg1"), CExpression::Integer(1)))));
+
+    auto guard_then = std::make_unique<CompoundStatement>();
+    guard_then->AddStatement(CStatement::DoWhile(
+        std::move(dw_body),
+        CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Integer(0))));
+    body->AddStatement(CStatement::If(
+        CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Integer(0)),
+        std::move(guard_then)));
+    body->AddStatement(CStatement::Return(CExpression::Identifier("arg1")));
+
+    EXPECT_TRUE(SinkLoopInvariantAssignments(body.get()));
+    std::string code = body->ToString();
+    EXPECT_THAT(code, HasSubstr("if ((v0 == 0)) {\n                return arg1;\n            }"));
+    EXPECT_THAT(code, Not(HasSubstr("break;")));
+  }
+
+  // Part 2: `do { ... if (v1 == v0) {} else { return v1 - v0; } } while (v1 != 0); return 0;`
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    auto dw_body = std::make_unique<CompoundStatement>();
+    dw_body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("v1"),
+                                CExpression::Unary("*(u8*)", CExpression::Identifier("arg0")))));
+    auto empty_then = std::make_unique<CompoundStatement>();
+    auto ret_else = std::make_unique<CompoundStatement>();
+    ret_else->AddStatement(CStatement::Return(
+        CExpression::Binary("-", CExpression::Identifier("v1"), CExpression::Identifier("v0"))));
+    dw_body->AddStatement(CStatement::If(
+        CExpression::Binary("==", CExpression::Identifier("v1"), CExpression::Identifier("v0")),
+        std::move(empty_then), std::move(ret_else)));
+    body->AddStatement(CStatement::DoWhile(
+        std::move(dw_body),
+        CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Integer(0))));
+    body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+    EXPECT_TRUE(SinkLoopInvariantAssignments(body.get()));
+    std::string code = body->ToString();
+    EXPECT_THAT(code, HasSubstr("while (1)"));
+    EXPECT_THAT(code, HasSubstr("if ((v1 == v0))"));
+    EXPECT_THAT(code, HasSubstr("continue;"));
+  }
 }
 
 }  // namespace

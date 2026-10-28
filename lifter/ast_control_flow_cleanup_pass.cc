@@ -226,8 +226,16 @@ bool FoldDoWhileTrailingLatchComparison(
   }
 
   for (size_t after = loop_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
-    if (enclosing_stmts[after] != nullptr &&
-        StatementReferencesVariable(*enclosing_stmts[after], cond_var)) {
+    if (enclosing_stmts[after] == nullptr) continue;
+    bool post_reads_before_kill = false;
+    if (StatementDefinitelyKillsVarBeforeRead(*enclosing_stmts[after], cond_var,
+                                              &post_reads_before_kill)) {
+      if (post_reads_before_kill) {
+        return false;
+      }
+      break;
+    }
+    if (post_reads_before_kill || StatementReferencesVariable(*enclosing_stmts[after], cond_var)) {
       return false;
     }
   }
@@ -309,8 +317,16 @@ bool FoldWhileTrueLeadingBreakCondition(
     bool all_dead_after = true;
     for (const auto& [lhs, _] : assigns) {
       for (size_t after = loop_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
-        if (enclosing_stmts[after] != nullptr &&
-            StatementReferencesVariable(*enclosing_stmts[after], lhs)) {
+        if (enclosing_stmts[after] == nullptr) continue;
+        bool post_reads_before_kill = false;
+        if (StatementDefinitelyKillsVarBeforeRead(*enclosing_stmts[after], lhs,
+                                                  &post_reads_before_kill)) {
+          if (post_reads_before_kill) {
+            all_dead_after = false;
+          }
+          break;
+        }
+        if (post_reads_before_kill || StatementReferencesVariable(*enclosing_stmts[after], lhs)) {
           all_dead_after = false;
           break;
         }
@@ -2359,12 +2375,111 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
     for (size_t i = 0; i < stmts.size(); ++i) {
       if (stmts[i] == nullptr) continue;
 
+      // 0. If `stmts[i]` is `if (cond) {} else { <loop>; ... }` followed immediately by
+      // `return <ret>;` at `stmts[i + 1]`, rewrite the empty `then` branch into an early return
+      // `if (cond) { return <ret>; } <else_stmts>; return <ret>;`.
+      if (stmts[i]->Kind() == CStatementKind::kIfStatement && i + 1 < stmts.size() &&
+          stmts[i + 1] != nullptr && stmts[i + 1]->Kind() == CStatementKind::kReturnStatement) {
+        auto* ifs = static_cast<IfStatement*>(stmts[i].get());
+        const auto& ret_s = static_cast<const ReturnStatement&>(*stmts[i + 1]);
+        if (ifs->ElseBranch() != nullptr &&
+            ifs->ThenBranch().Kind() == CStatementKind::kCompoundStatement &&
+            static_cast<const CompoundStatement&>(ifs->ThenBranch()).Statements().empty() &&
+            ifs->ElseBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            (ret_s.ReturnValue() == nullptr || IsPureExpression(*ret_s.ReturnValue()))) {
+          auto* else_comp = static_cast<CompoundStatement*>(ifs->MutableElseBranch());
+          if (!else_comp->Statements().empty() && else_comp->Statements()[0] != nullptr) {
+            CStatementKind first_k = else_comp->Statements()[0]->Kind();
+            if (first_k == CStatementKind::kWhileStatement ||
+                first_k == CStatementKind::kDoWhileStatement ||
+                first_k == CStatementKind::kForStatement) {
+              auto early_ret_then = std::make_unique<CompoundStatement>();
+              early_ret_then->AddStatement(stmts[i + 1]->Clone());
+              auto new_if =
+                  CStatement::If(ifs->MutableCondition()->Clone(), std::move(early_ret_then));
+              std::vector<std::unique_ptr<CStatement>> hoisted;
+              for (auto& es : else_comp->MutableStatements()) {
+                hoisted.push_back(std::move(es));
+              }
+              stmts[i] = std::move(new_if);
+              stmts.insert(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1),
+                           std::make_move_iterator(hoisted.begin()),
+                           std::make_move_iterator(hoisted.end()));
+              any_changed = true;
+              continue;
+            }
+          }
+        }
+      }
+
       // 1. Fold trailing `reg = (cond); } while ((reg != 0));` on outer/nested do-while loops when
       // `reg` is not used after the loop and is killed before read on loop entry.
       if (stmts[i]->Kind() == CStatementKind::kDoWhileStatement) {
         auto* dw = static_cast<DoWhileStatement*>(stmts[i].get());
         if (FoldDoWhileTrailingLatchComparison(dw, stmts, i, body)) {
           any_changed = true;
+        }
+        // If `do { <prefix>; if (v1 != v0) { return ret_a; } } while (v1 != 0);` is followed by
+        // `return 0;`, rewrite to `while (1) { <prefix>; if (v1 == v0) { if (v1 != 0) { continue; }
+        // return 0; } return ret_a; }` so GCC `stmt.c` emits the comparison branch falling through
+        // to the latch branch before the exit return.
+        if (i + 1 < stmts.size() && stmts[i + 1] != nullptr &&
+            stmts[i + 1]->Kind() == CStatementKind::kReturnStatement &&
+            dw->Body().Kind() == CStatementKind::kCompoundStatement &&
+            dw->Condition().Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& post_ret = static_cast<const ReturnStatement&>(*stmts[i + 1]);
+          const auto& latch_bin = static_cast<const BinaryExpression&>(dw->Condition());
+          auto* dw_comp = static_cast<CompoundStatement*>(dw->MutableBody());
+          auto& dw_stmts = dw_comp->MutableStatements();
+          if (post_ret.ReturnValue() != nullptr &&
+              post_ret.ReturnValue()->Kind() == CExpressionKind::kIntegerLiteral &&
+              latch_bin.Op() == "!=" && latch_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              latch_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+              static_cast<const IntegerLiteralExpression&>(latch_bin.Rhs()).Value() == 0 &&
+              dw_stmts.size() >= 2 && dw_stmts.back() != nullptr &&
+              dw_stmts.back()->Kind() == CStatementKind::kIfStatement) {
+            const std::string& latch_var =
+                static_cast<const IdentifierExpression&>(latch_bin.Lhs()).Name();
+            auto* tail_if = static_cast<IfStatement*>(dw_stmts.back().get());
+            if (tail_if->ElseBranch() != nullptr &&
+                tail_if->Condition().Kind() == CExpressionKind::kBinaryExpression &&
+                tail_if->ThenBranch().Kind() == CStatementKind::kCompoundStatement &&
+                static_cast<const CompoundStatement&>(tail_if->ThenBranch()).Statements().empty() &&
+                tail_if->ElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+              const auto& cond_bin = static_cast<const BinaryExpression&>(tail_if->Condition());
+              const auto& else_c = static_cast<const CompoundStatement&>(*tail_if->ElseBranch());
+              bool prefix_clean = true;
+              for (size_t k = 0; k + 1 < dw_stmts.size(); ++k) {
+                if (dw_stmts[k] != nullptr &&
+                    dw_stmts[k]->Kind() != CStatementKind::kExpressionStatement) {
+                  prefix_clean = false;
+                  break;
+                }
+              }
+              if (prefix_clean && cond_bin.Op() == "==" &&
+                  cond_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                  static_cast<const IdentifierExpression&>(cond_bin.Lhs()).Name() == latch_var &&
+                  else_c.Statements().size() == 1 && else_c.Statements()[0] != nullptr &&
+                  else_c.Statements()[0]->Kind() == CStatementKind::kReturnStatement) {
+                auto inner_then = std::make_unique<CompoundStatement>();
+                inner_then->AddStatement(CStatement::Continue());
+                auto latch_if = CStatement::If(dw->Condition().Clone(), std::move(inner_then));
+                auto eq_then = std::make_unique<CompoundStatement>();
+                eq_then->AddStatement(std::move(latch_if));
+                eq_then->AddStatement(stmts[i + 1]->Clone());
+                auto eq_cond = tail_if->Condition().Clone();
+                auto early_ret = else_c.Statements()[0]->Clone();
+                dw_stmts.pop_back();
+                dw_stmts.push_back(CStatement::If(std::move(eq_cond), std::move(eq_then)));
+                dw_stmts.push_back(std::move(early_ret));
+                auto new_while = CStatement::While(CExpression::Integer(1), dw_comp->Clone());
+                stmts[i] = std::move(new_while);
+                stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                any_changed = true;
+                continue;
+              }
+            }
+          }
         }
       } else if (stmts[i]->Kind() == CStatementKind::kWhileStatement) {
         auto* ws = static_cast<WhileStatement*>(stmts[i].get());
@@ -2397,6 +2512,39 @@ bool SinkLoopInvariantAssignments(CompoundStatement* body) {
         }
       }
       if (loop_stmt == nullptr) continue;
+
+      // If `if (guard) { do { ... if (exit_cond) { break; } ... } while (guard); }` is followed
+      // immediately by `return <ret_var>;`, replace the top-level `break;` with `return <ret_var>;`
+      // so GCC does not duplicate the return into two epilogue blocks when rotating the loop.
+      if (guard_cond != nullptr && loop_stmt->Kind() == CStatementKind::kDoWhileStatement &&
+          i + 1 < stmts.size() && stmts[i + 1] != nullptr &&
+          stmts[i + 1]->Kind() == CStatementKind::kReturnStatement) {
+        auto* dw = static_cast<DoWhileStatement*>(loop_stmt);
+        const auto& ret_s = static_cast<const ReturnStatement&>(*stmts[i + 1]);
+        if (ExpressionsStructurallyEqual(*guard_cond, dw->Condition()) &&
+            dw->Body().Kind() == CStatementKind::kCompoundStatement &&
+            ret_s.ReturnValue() != nullptr &&
+            (ret_s.ReturnValue()->Kind() == CExpressionKind::kIdentifier ||
+             ret_s.ReturnValue()->Kind() == CExpressionKind::kIntegerLiteral)) {
+          auto* dw_comp = static_cast<CompoundStatement*>(dw->MutableBody());
+          auto& dw_stmts = dw_comp->MutableStatements();
+          for (size_t k = 0; k < dw_stmts.size(); ++k) {
+            if (dw_stmts[k] == nullptr || dw_stmts[k]->Kind() != CStatementKind::kIfStatement) {
+              continue;
+            }
+            auto* inner_if = static_cast<IfStatement*>(dw_stmts[k].get());
+            if (inner_if->ElseBranch() == nullptr &&
+                inner_if->ThenBranch().Kind() == CStatementKind::kCompoundStatement) {
+              auto* inner_then = static_cast<CompoundStatement*>(inner_if->MutableThenBranch());
+              if (inner_then->Statements().size() == 1 && inner_then->Statements()[0] != nullptr &&
+                  inner_then->Statements()[0]->Kind() == CStatementKind::kBreakStatement) {
+                inner_then->MutableStatements()[0] = stmts[i + 1]->Clone();
+                any_changed = true;
+              }
+            }
+          }
+        }
+      }
 
       // Scan preceding pure assignments `reg = rhs;` before `stmts[i]`.
       for (int scan = static_cast<int>(i) - 1; scan >= 0; --scan) {

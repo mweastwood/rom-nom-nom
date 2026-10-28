@@ -157,6 +157,49 @@ void CollectConditionallySteppedVars(
     absl::flat_hash_set<std::string>* out_do_while_post_stepped = nullptr) {
   ConditionallySteppedVarsVisitor visitor(out_vars, out_do_while_post_stepped);
   visitor.VisitStatement(stmt);
+  if (out_do_while_post_stepped != nullptr && stmt.Kind() == CStatementKind::kCompoundStatement &&
+      !StatementHasCall(stmt)) {
+    const auto& root = static_cast<const CompoundStatement&>(stmt);
+    if (root.Statements().size() >= 4 && root.Statements()[0] != nullptr &&
+        root.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
+      const auto& first_e =
+          static_cast<const ExpressionStatement&>(*root.Statements()[0]).Expression();
+      if (first_e.Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& assign = static_cast<const AssignmentExpression&>(first_e);
+        if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            assign.Rhs().Kind() == CExpressionKind::kIdentifier) {
+          const std::string& lhs_var =
+              static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+          const std::string& rhs_var =
+              static_cast<const IdentifierExpression&>(assign.Rhs()).Name();
+          if (lhs_var.size() == 7 && absl::StartsWith(lhs_var, "temp_t") && lhs_var[6] >= '0' &&
+              lhs_var[6] <= '9' && rhs_var.size() == 4 && absl::StartsWith(rhs_var, "arg") &&
+              rhs_var[3] >= '0' && rhs_var[3] <= '3') {
+            bool seen_if = false;
+            bool used_after_if = false;
+            bool modified_after_first = false;
+            for (size_t i = 1; i < root.Statements().size(); ++i) {
+              if (root.Statements()[i] == nullptr) continue;
+              if (StatementModifiesVariable(*root.Statements()[i], lhs_var)) {
+                modified_after_first = true;
+                break;
+              }
+              if (root.Statements()[i]->Kind() == CStatementKind::kIfStatement) {
+                seen_if = true;
+              } else if (seen_if &&
+                         CountVariableReadUsesInStatement(*root.Statements()[i], lhs_var) > 0) {
+                used_after_if = true;
+              }
+            }
+            if (!modified_after_first && used_after_if) {
+              out_vars->insert(lhs_var);
+              out_do_while_post_stepped->insert(lhs_var);
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 void CheckNarrowMaskedReadsInExpr(const CExpression& expr, std::string_view var_name,

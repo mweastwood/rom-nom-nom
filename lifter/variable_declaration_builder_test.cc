@@ -1505,5 +1505,81 @@ TEST(VariableDeclarationBuilderTest,
   EXPECT_THAT(emitted, Not(HasSubstr("asm(\"$2\")")));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     PromotesEntryParameterCopyUsedWithU16MasksAcrossIfAndPinsWorkingV0InLoopLeaf) {
+  ControlFlowGraph cfg;
+
+  StackFrameAnalysis frame;
+  frame.frame_size = 0;
+  frame.has_calls = false;
+
+  // 1. Entry copy `temp_t0 = arg0` where all reads are masked with `& 65535` across an `if` guard
+  //    is promoted to unpinned `u16 temp_t0;` with `& 65535` stripped.
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("temp_t0"), CExpression::Identifier("arg0"))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg2"),
+        CExpression::Binary("*",
+                            CExpression::Binary("&", CExpression::Identifier("temp_t0"),
+                                                CExpression::Integer(65535)),
+                            CExpression::Integer(112)))));
+    auto then_comp = std::make_unique<CompoundStatement>();
+    then_comp->AddStatement(CStatement::Return());
+    body->AddStatement(CStatement::If(CExpression::Identifier("arg2"), std::move(then_comp)));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("v1"),
+        CExpression::Binary("*",
+                            CExpression::Binary("&", CExpression::Identifier("temp_t0"),
+                                                CExpression::Integer(65535)),
+                            CExpression::Integer(112)))));
+    body->AddStatement(CStatement::Return());
+
+    std::vector<CParameter> params = {{CType::S32(), "arg0"}};
+    AstConverterOptions opts;
+    opts.function_name = "TestNarrowParamCopyPromotion";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::Void(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    EXPECT_THAT(emitted, HasSubstr("u16 temp_t0;"));
+    EXPECT_THAT(emitted, Not(HasSubstr("asm(\"$8\")")));
+    EXPECT_THAT(emitted, HasSubstr("arg2 = (temp_t0 * 112);"));
+    EXPECT_THAT(emitted, HasSubstr("v1 = (temp_t0 * 112);"));
+  }
+
+  // 2. Leaf function returning `arg0` where `v0` is a working loop-condition variable pins `v0` to
+  //    `"$2"`.
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("v0"),
+                                CExpression::Unary("*(u8*)", CExpression::Identifier("arg0")))));
+    auto dw_body = std::make_unique<CompoundStatement>();
+    dw_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg0"),
+        CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+    dw_body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("v0"),
+                                CExpression::Unary("*(u8*)", CExpression::Identifier("arg0")))));
+    body->AddStatement(CStatement::DoWhile(
+        std::move(dw_body),
+        CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+    body->AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
+
+    std::vector<CParameter> params = {{CType::S32(), "arg0"}};
+    AstConverterOptions opts;
+    opts.function_name = "TestLeafLoopV0Pin";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    EXPECT_THAT(emitted, HasSubstr("register s32 v0 asm(\"$2\");"));
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

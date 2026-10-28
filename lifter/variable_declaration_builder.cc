@@ -327,6 +327,42 @@ uint32_t CountForStatements(const CStatement& stmt) {
   }
 }
 
+bool StatementHasLoopConditionUsingVar(const CStatement& stmt, std::string_view var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement:
+      for (const auto& child : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (child != nullptr && StatementHasLoopConditionUsingVar(*child, var)) {
+          return true;
+        }
+      }
+      return false;
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return StatementHasLoopConditionUsingVar(ifs.ThenBranch(), var) ||
+             (ifs.ElseBranch() != nullptr &&
+              StatementHasLoopConditionUsingVar(*ifs.ElseBranch(), var));
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CountVariableReadUsesInExpression(ws.Condition(), var) > 0 ||
+             StatementHasLoopConditionUsingVar(ws.Body(), var);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CountVariableReadUsesInExpression(dws.Condition(), var) > 0 ||
+             StatementHasLoopConditionUsingVar(dws.Body(), var);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return (fs.Condition() != nullptr &&
+              CountVariableReadUsesInExpression(*fs.Condition(), var) > 0) ||
+             StatementHasLoopConditionUsingVar(fs.Body(), var);
+    }
+    default:
+      return false;
+  }
+}
+
 int CountDirectAssignmentsInExpression(const CExpression& expr, std::string_view target_var) {
   switch (expr.Kind()) {
     case CExpressionKind::kAssignmentExpression: {
@@ -1605,6 +1641,27 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
 
+  std::vector<std::string> narrow_candidates;
+  narrow_candidates.reserve(local_vars_to_declare.size());
+  for (const auto& var_name : local_vars_to_declare) {
+    if (var_name == "sp" || is_fp_reg(var_name) || float_gpr_var_names.contains(var_name) ||
+        float_local_var_names.contains(var_name) || absl::EndsWith(var_name, "_64") ||
+        s64_local_var_names.contains(var_name) || double_vars.contains(var_name) ||
+        has_address_taken(var_name)) {
+      continue;
+    }
+    narrow_candidates.push_back(var_name);
+  }
+  absl::flat_hash_map<std::string, CType> narrow_cond_inc_var_types =
+      InferAndPromoteNarrowCondSteppedVars(narrow_candidates, body);
+  bool has_narrow_temp_t = false;
+  for (const auto& [k, _] : narrow_cond_inc_var_types) {
+    if (k.size() == 7 && absl::StartsWith(k, "temp_t") && k[6] >= '0' && k[6] <= '9') {
+      has_narrow_temp_t = true;
+      break;
+    }
+  }
+
   auto get_callee_saved_register_annotation =
       [&](std::string_view var_name) -> std::optional<std::string> {
     if (has_address_taken(var_name)) {
@@ -1701,8 +1758,16 @@ absl::Status PrependSynthesizedLocalDeclarations(
       return std::nullopt;
     }
     std::optional<std::string> caller_gpr_reg;
+    const bool leaf_returns_non_v0_with_working_v0 =
+        is_leaf_func && !has_callee_saved_gprs && v0_reused_as_working_temp &&
+        return_type.ToString() != "void" && !returns_fp &&
+        CountNonReturnVariableReadUsesInStatement(**body, "v0") ==
+            CountVariableReadUsesInStatement(**body, "v0") &&
+        StatementHasLoopConditionUsingVar(**body, "v0") &&
+        !IsAssignedCompoundBinaryBothSides(**body, "v0");
     if (var_name == "v0" &&
-        ((is_leaf_func && has_callee_saved_gprs) || (!is_leaf_func && v0_reused_as_working_temp))) {
+        ((is_leaf_func && has_callee_saved_gprs) || (!is_leaf_func && v0_reused_as_working_temp) ||
+         leaf_returns_non_v0_with_working_v0)) {
       caller_gpr_reg = "$2";
     } else if (var_name == "v1" && (!is_leaf_func || has_callee_saved_gprs)) {
       caller_gpr_reg = "$3";
@@ -1716,13 +1781,14 @@ absl::Status PrependSynthesizedLocalDeclarations(
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_a") && var_name[6] >= '0' &&
                var_name[6] <= '3' &&
+               !(is_leaf_func && !has_callee_saved_gprs && has_narrow_temp_t) &&
                (!is_leaf_func || has_callee_saved_gprs ||
                 (!DoesScratchArgInterfereWithEntryParam(**body, var_name) &&
                  !IsAssignedCompoundBinaryBothSides(**body, var_name)))) {
       int reg_num = 4 + (var_name[6] - '0');
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
     } else if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_t") && var_name[6] >= '0' &&
-               var_name[6] <= '9') {
+               var_name[6] <= '9' && !narrow_cond_inc_var_types.contains(std::string(var_name))) {
       int t_idx = var_name[6] - '0';
       int reg_num = (t_idx <= 7) ? (8 + t_idx) : (24 + (t_idx - 8));
       caller_gpr_reg = absl::StrFormat("$%d", reg_num);
@@ -1733,20 +1799,6 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
     return std::nullopt;
   };
-
-  std::vector<std::string> narrow_candidates;
-  narrow_candidates.reserve(local_vars_to_declare.size());
-  for (const auto& var_name : local_vars_to_declare) {
-    if (var_name == "sp" || is_fp_reg(var_name) || float_gpr_var_names.contains(var_name) ||
-        float_local_var_names.contains(var_name) || absl::EndsWith(var_name, "_64") ||
-        s64_local_var_names.contains(var_name) || double_vars.contains(var_name) ||
-        has_address_taken(var_name)) {
-      continue;
-    }
-    narrow_candidates.push_back(var_name);
-  }
-  absl::flat_hash_map<std::string, CType> narrow_cond_inc_var_types =
-      InferAndPromoteNarrowCondSteppedVars(narrow_candidates, body);
 
   absl::flat_hash_map<std::string, std::optional<std::string>> reg_annotations;
   std::vector<std::string> unpinned_scratch_candidates;
@@ -1775,6 +1827,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
     reg_annotations[var_name] = reg_annot;
     if (!frame_analysis.has_frame_pointer && !reg_annot.has_value() && !needs_init &&
         !is_callee_gpr && !has_address_taken(var_name) &&
+        !(has_narrow_temp_t && narrow_cond_inc_var_types.contains(var_name)) &&
         (var_name == "v0" || var_name == "v1" || var_name == "temp_at" ||
          (var_name.size() == 7 &&
           (absl::StartsWith(var_name, "temp_t") || absl::StartsWith(var_name, "temp_a"))))) {

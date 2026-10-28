@@ -880,5 +880,77 @@ TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsFallthroughJumpTrampoline
   EXPECT_EQ(ft_jump->successors[0], pred_blk->id);
 }
 
+TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerAllowsRetargetingToJumpTableDefaultExitBlock) {
+  // Models a switch case block (0x00) where `beq $a1, $zero, 0x18` stole `lw $v0, 20($sp)` from the
+  // switch exit block `0x14` (`jt.default_target_vram`). Because `0x14` is the switch exit (not a
+  // distinct case body), `RelaxDelaySlotUnschedulerPass` must retarget the branch to `0x14`.
+  std::vector<uint32_t> words = {
+      0x10A00005,  // 0x00: beq   $a1, $zero, +5 -> 0x18 (taken_block)
+      0x8FA20014,  // 0x04: lw    $v0, 20($sp) (stolen from 0x14)
+      0xAC800000,  // 0x08: sw    $zero, 0($a0)
+      0x00000000,  // 0x0C: nop
+      0x24030001,  // 0x10: addiu $v1, $zero, 1 (falls through to 0x14)
+      0x8FA20014,  // 0x14 (pred_blk / default_target_vram): lw $v0, 20($sp)
+      0x03E00008,  // 0x18 (taken_block): jr $ra
+      0x27BD0018,  // 0x1C: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  JumpTable jt;
+  jt.table_vram = 0x80010000;
+  jt.default_target_vram = 0x80000014;
+  jt.entries.push_back(JumpTableEntry{.case_value = 0, .target_vram = 0x80000000});
+  jt.entries.push_back(JumpTableEntry{.case_value = 1, .target_vram = 0x80000014});
+  auto cfg_or = ControlFlowGraph::Build(insts, {jt});
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b0 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* pred_blk = cfg.FindBlockByVram(0x80000014);
+  ASSERT_NE(b0, nullptr);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_TRUE(b0->instructions.back().IsNop());
+  EXPECT_NE(std::find(b0->successors.begin(), b0->successors.end(), pred_blk->id),
+            b0->successors.end());
+}
+
+TEST(CfgDeReorgTest, EagerThreadDelaySlotUnschedulerSinksFallthroughStolenCalleeSavedMove) {
+  // Models a branch `bnez $a0, 0x14` whose delay slot `addu $s4, $t0, $zero` is dead on the taken
+  // path (0x14 restores `$s4` in the epilogue) and live on the fallthrough path (0x08).
+  std::vector<uint32_t> words = {
+      0x14800004,  // 0x00: bne   $a0, $zero, +4 -> 0x14 (epilogue)
+      0x0100A021,  // 0x04: addu  $s4, $t0, $zero (dead on taken, live on fallthrough)
+      0xAE940000,  // 0x08: sw    $s4, 0($s4)
+      0x08000005,  // 0x0C: j     0x80000014
+      0x00000000,  // 0x10: nop
+      0x8FB40010,  // 0x14: lw    $s4, 16($sp) (kills $s4 on taken path)
+      0x03E00008,  // 0x18: jr    $ra
+      0x27BD0018,  // 0x1C: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  EagerThreadDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* b0 = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* ft_blk = cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(b0, nullptr);
+  ASSERT_NE(ft_blk, nullptr);
+  EXPECT_TRUE(b0->instructions.back().IsNop());
+  ASSERT_FALSE(ft_blk->instructions.empty());
+  EXPECT_EQ(ft_blk->instructions.front().opcode, Opcode::kAddu);
+  EXPECT_EQ(ft_blk->instructions.front().rd, Register::kS4);
+  EXPECT_EQ(ft_blk->instructions.front().rs, Register::kT0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

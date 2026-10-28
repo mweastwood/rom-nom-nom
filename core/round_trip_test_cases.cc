@@ -7566,6 +7566,46 @@ s32 CalleeSavedCallResultDereferencedAtZeroOffsetAcrossConditionalCall(
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "StringCompareLoopEarlyReturnAndZeroTerminator",
+          .function_name = "StringCompareLoopEarlyReturnAndZeroTerminator",
+          .original_c = R"(
+s32 StringCompareLoopEarlyReturnAndZeroTerminator(const u8* s1, const u8* s2) {
+    u8 c1;
+    u8 c2;
+    do {
+        c1 = *s1++;
+        c2 = *s2++;
+        if (c1 != c2) {
+            return c1 - c2;
+        }
+    } while (c1 != 0);
+    return 0;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "DecimalDigitParseLoopWithPointerWriteback",
+          .function_name = "DecimalDigitParseLoopWithPointerWriteback",
+          .original_c = R"(
+s32 DecimalDigitParseLoopWithPointerWriteback(const u8** str_ptr) {
+    const u8* p = *str_ptr;
+    u8 ch = *p;
+    s32 acc = 0;
+    while (ch != 0) {
+        const u8* next = p + 1;
+        *str_ptr = next;
+        if ((u32)(ch - '0') >= 10u) {
+            break;
+        }
+        acc = acc * 10 + (ch - '0');
+        ch = *next;
+        p = next;
+    }
+    return acc;
+}
+)",
+      },
   };
   return *k_cases;
 }
