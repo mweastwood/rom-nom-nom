@@ -7606,6 +7606,47 @@ s32 DecimalDigitParseLoopWithPointerWriteback(const u8** str_ptr) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "DecisionTreeSwitchWithStoreCaseArms",
+          .function_name = "DecisionTreeSwitchWithStoreCaseArms",
+          .original_c = R"(
+void DecisionTreeSwitchWithStoreCaseArms(s32* dst, s32 mode, s32 val) {
+    switch (mode) {
+        case 1:
+            *dst = val;
+            break;
+        case 2:
+            *dst = val + 1;
+            break;
+        case 4:
+            *dst = 0;
+            break;
+        default:
+            break;
+    }
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "InfiniteLoopWithCallSplitExitGuard",
+          .function_name = "InfiniteLoopWithCallSplitExitGuard",
+          .original_c = R"(
+extern s32 QueryPrimaryOwner(void);
+extern s32 QueryFallbackOwner(void);
+extern void WaitForOwnerRelease(s32 mode);
+
+void InfiniteLoopWithCallSplitExitGuard(s32 target_owner) {
+    while (1) {
+        if (QueryPrimaryOwner() != target_owner) {
+            if (QueryFallbackOwner() != target_owner) {
+                break;
+            }
+        }
+        WaitForOwnerRelease(1);
+    }
+}
+)",
+      },
   };
   return *k_cases;
 }

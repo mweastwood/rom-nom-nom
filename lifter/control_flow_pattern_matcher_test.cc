@@ -1137,5 +1137,56 @@ TEST(ControlFlowPatternMatcherTest,
   EXPECT_THAT(s, Not(HasSubstr("GOTO")));
 }
 
+TEST(ControlFlowPatternMatcherTest, DetectsDecisionTreeSwitchWithBeqlAnnulledStoreDelaySlot) {
+  // Models `func_80101D20`:
+  // 0x00: addiu $v0, $zero, 4
+  // 0x04: beq   $a1, $v0, 0x30 (case 4)
+  // 0x08: slti  $v0, $a1, 5
+  // 0x0C: beqz  $v0, 0x38 (split >= 5)
+  // 0x10: addiu $v0, $zero, 1
+  // 0x14: beql  $a1, $v0, 0x48 (case 1 -> join, with annulled store in delay slot!)
+  // 0x18: sw    $a2, 0($a0)
+  // 0x1C: j     0x80000048 (default -> join)
+  // 0x20: nop
+  // 0x24: ...
+  std::vector<uint32_t> words = {
+      0x24020004,  // 0x00: addiu $v0, $zero, 4
+      0x10A20007,  // 0x04: beq   $a1, $v0, +7 -> 0x24 (case 4)
+      0x28A20005,  // 0x08: slti  $v0, $a1, 5
+      0x10400007,  // 0x0C: beqz  $v0, +7 -> 0x2C (split >= 5)
+      0x24020001,  // 0x10: addiu $v0, $zero, 1
+      0x50A20008,  // 0x14: beql  $a1, $v0, +8 -> 0x38 (case 1 -> join)
+      0xAC860000,  // 0x18: sw    $a2, 0($a0) (annulled store delay slot)
+      0x0800000E,  // 0x1C: j     0x80000038 (default -> join)
+      0x00000000,  // 0x20: nop
+      0x0800000E,  // 0x24: j     0x80000038 (case 4 -> join)
+      0xAC860004,  // 0x28: sw    $a2, 4($a0)
+      0x24020008,  // 0x2C: addiu $v0, $zero, 8
+      0x50A20001,  // 0x30: beql  $a1, $v0, +1 -> 0x38 (case 8 -> join)
+      0xAC860008,  // 0x34: sw    $a2, 8($a0)
+      0x03E00008,  // 0x38: jr    $ra (join)
+      0x00000000,  // 0x3C: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  EXPECT_EQ(sw->selector_reg, Register::kA1);
+
+  bool found_case_1_store = false;
+  for (const auto& dc : sw->cases) {
+    if (dc.case_values.size() == 1 && dc.case_values[0] == 1) {
+      ASSERT_EQ(dc.delay_instructions.size(), 1u);
+      EXPECT_EQ(dc.delay_instructions[0].opcode, Opcode::kSw);
+      found_case_1_store = true;
+    }
+  }
+  EXPECT_TRUE(found_case_1_store);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

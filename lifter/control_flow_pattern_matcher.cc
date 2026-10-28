@@ -929,23 +929,32 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
     if (branch_idx == -1) return ba;
 
     int scan_start = 0;
+    const bool is_beql = blk->instructions[branch_idx].opcode == Opcode::kBeql;
     if (b_id != root_id) {
       if (blk->instructions.size() > 12) {
         return ba;
       }
-      for (const auto& inst : blk->instructions) {
-        if (inst.IsCall() || inst.IsStore() || inst.IsLoad()) return ba;
+      for (size_t i = 0; i < blk->instructions.size(); ++i) {
+        const auto& inst = blk->instructions[i];
+        const bool is_beql_delay_slot = is_beql && i == static_cast<size_t>(branch_idx + 1);
+        if (inst.IsCall() || (!is_beql_delay_slot && (inst.IsStore() || inst.IsLoad()))) {
+          return ba;
+        }
       }
     } else {
       for (size_t i = static_cast<size_t>(branch_idx); i < blk->instructions.size(); ++i) {
         const auto& inst = blk->instructions[i];
+        const bool is_beql_delay_slot = is_beql && i == static_cast<size_t>(branch_idx + 1);
         bool is_prologue_sp_save =
             (inst.opcode == Opcode::kSw && inst.rs == Register::kSp && inst.rt.has_value() &&
              (*inst.rt == Register::kRa || *inst.rt == Register::kFp ||
               (*inst.rt >= Register::kS0 && *inst.rt <= Register::kS7))) ||
             (inst.opcode == Opcode::kAddiu && inst.rs == Register::kSp &&
              inst.rt == Register::kSp && static_cast<int16_t>(inst.immediate) < 0);
-        if (inst.IsCall() || (inst.IsStore() && !is_prologue_sp_save) || inst.IsLoad()) return ba;
+        if (inst.IsCall() ||
+            (!is_beql_delay_slot && ((inst.IsStore() && !is_prologue_sp_save) || inst.IsLoad()))) {
+          return ba;
+        }
       }
       scan_start = std::max(0, branch_idx - 12);
       for (int i = branch_idx - 1; i >= scan_start; --i) {

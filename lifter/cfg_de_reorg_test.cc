@@ -488,13 +488,14 @@ TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsIntraLoopAndAcyclicJoinBl
 
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
-  ASSERT_EQ(pipeline.PassCount(), 6u);
+  ASSERT_EQ(pipeline.PassCount(), 7u);
   EXPECT_EQ(pipeline.Passes()[0]->Name(), "SimpleDelaySlotUnschedulerPass");
   EXPECT_EQ(pipeline.Passes()[1]->Name(), "TargetHeaderDelaySlotReconcilerPass");
   EXPECT_EQ(pipeline.Passes()[2]->Name(), "RelaxDelaySlotUnschedulerPass");
   EXPECT_EQ(pipeline.Passes()[3]->Name(), "EagerThreadDelaySlotUnschedulerPass");
   EXPECT_EQ(pipeline.Passes()[4]->Name(), "CrossJumpTailDuplicatorPass");
-  EXPECT_EQ(pipeline.Passes()[5]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[5]->Name(), "SimpleDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[6]->Name(), "EagerThreadDelaySlotUnschedulerPass");
 }
 
 TEST(CfgDeReorgTest, CrossJumpTailDuplicatorDuplicatesFallthroughTailIntoJumpPredecessors) {
@@ -950,6 +951,41 @@ TEST(CfgDeReorgTest, EagerThreadDelaySlotUnschedulerSinksFallthroughStolenCallee
   EXPECT_EQ(ft_blk->instructions.front().opcode, Opcode::kAddu);
   EXPECT_EQ(ft_blk->instructions.front().rd, Register::kS4);
   EXPECT_EQ(ft_blk->instructions.front().rs, Register::kT0);
+}
+
+TEST(CfgDeReorgTest, CrossJumpTailDuplicatorInlinesConditionalBranchTailIntoJumpPredecessor) {
+  // Models a cross-jumped conditional branch tail (`0x18: bnez $a1, 0x24; nop`)
+  // reached via fallthrough from `0x10` (which can also branch directly to `0x24`) and via
+  // `j 0x18` from `0x08` (`func_80065AA0` pattern).
+  // `CrossJumpTailDuplicatorPass` should inline the conditional branch into `0x08`.
+  std::vector<uint32_t> words = {
+      0x10800003,  // 0x00: beqz  $a0, +3 -> 0x10
+      0x00000000,  // 0x04: nop
+      0x08000006,  // 0x08: j     0x80000018
+      0x24840001,  // 0x0C: addiu $a0, $a0, 1
+      0x10C00004,  // 0x10: beqz  $a2, +4 -> 0x24 (falls through to 0x18)
+      0x24840002,  // 0x14: addiu $a0, $a0, 2
+      0x14A00002,  // 0x18 (tail): bne $a1, $zero, +2 -> 0x24
+      0x00000000,  // 0x1C: nop
+      0x24020002,  // 0x20: addiu $v0, $zero, 2
+      0x03E00008,  // 0x24: jr    $ra
+      0x00000000,  // 0x28: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  CrossJumpTailDuplicatorPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* jmp_pred = cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(jmp_pred, nullptr);
+  EXPECT_EQ(jmp_pred->successors.size(), 2u);
+  ASSERT_GE(jmp_pred->instructions.size(), 3u);
+  EXPECT_EQ(jmp_pred->instructions[jmp_pred->instructions.size() - 2].opcode, Opcode::kBeq);
 }
 
 }  // namespace

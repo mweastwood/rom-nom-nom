@@ -1108,6 +1108,24 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
       }
       return if_break;
     }
+
+    if (follow.has_value() && current_loop->Contains(*follow) && !current_loop->IsLatch(*follow) &&
+        (succ_fallthrough == *follow || succ_taken == *follow)) {
+      const uint32_t s_other = (succ_fallthrough == *follow) ? succ_taken : succ_fallthrough;
+      const auto* other_blk = cfg_->GetBlock(s_other);
+      const bool is_post_dom_pre_latch =
+          current_loop->type == LoopType::kDoWhile && other_blk != nullptr &&
+          !visited_.contains(s_other) && current_loop->Contains(s_other) &&
+          !current_loop->IsLatch(s_other) && other_blk->successors.size() == 1 &&
+          !other_blk->HasBranch() && current_loop->IsLatch(other_blk->successors[0]) &&
+          post_dom_tree_ != nullptr && post_dom_tree_->Dominates(s_other, *follow);
+      if (is_post_dom_pre_latch) {
+        auto if_bypass =
+            StructuredRegion::CreateIfThen(entry, /*invert=*/(s_other == succ_fallthrough));
+        if_bypass->children.push_back(StructuredRegion::CreateGoto(s_other));
+        return if_bypass;
+      }
+    }
   }
 
   std::optional<uint32_t> join = ComputeConditionalJoinBlock(entry, follow, current_loop);
@@ -1116,6 +1134,52 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureConditionalBra
     const auto* join_blk = cfg_->GetBlock(*join);
     if (join_blk == nullptr || IsPureEpilogueReturnBlock(*join_blk)) {
       join_is_epilogue_or_empty = true;
+    }
+  }
+  if (current_loop != nullptr && current_loop->Contains(entry) &&
+      current_loop->Contains(succ_taken) && current_loop->Contains(succ_fallthrough)) {
+    auto is_loop_guard_to_join = [&](uint32_t s_guard, uint32_t s_join) {
+      if (visited_.contains(s_guard) || visited_.contains(s_join)) return false;
+      const auto* guard_blk = cfg_->GetBlock(s_guard);
+      for (int depth = 0; depth < 4 && guard_blk != nullptr &&
+                          guard_blk->predecessors.size() == 1 && guard_blk->successors.size() == 1;
+           ++depth) {
+        uint32_t next_id = guard_blk->successors[0];
+        if (next_id == s_join || visited_.contains(next_id) || !current_loop->Contains(next_id) ||
+            current_loop->IsLatch(next_id)) {
+          return false;
+        }
+        guard_blk = cfg_->GetBlock(next_id);
+      }
+      if (guard_blk == nullptr || guard_blk->predecessors.size() != 1 ||
+          guard_blk->successors.size() != 2) {
+        return false;
+      }
+      uint32_t s_other = 0;
+      if (guard_blk->successors[0] == s_join) {
+        s_other = guard_blk->successors[1];
+      } else if (guard_blk->successors[1] == s_join) {
+        s_other = guard_blk->successors[0];
+      } else {
+        return false;
+      }
+      if (current_loop->IsExitBlock(s_other)) {
+        return true;
+      }
+      const auto* other_blk = cfg_->GetBlock(s_other);
+      return current_loop->type == LoopType::kDoWhile && other_blk != nullptr &&
+             !visited_.contains(s_other) && current_loop->Contains(s_other) &&
+             !current_loop->IsLatch(s_other) && other_blk->successors.size() == 1 &&
+             !other_blk->HasBranch() && current_loop->IsLatch(other_blk->successors[0]) &&
+             s_join != other_blk->successors[0] && post_dom_tree_ != nullptr &&
+             post_dom_tree_->Dominates(s_other, s_join);
+    };
+    if (is_loop_guard_to_join(succ_fallthrough, succ_taken)) {
+      join = succ_taken;
+      join_is_epilogue_or_empty = false;
+    } else if (is_loop_guard_to_join(succ_taken, succ_fallthrough)) {
+      join = succ_fallthrough;
+      join_is_epilogue_or_empty = false;
     }
   }
   if ((join_is_epilogue_or_empty || (join != succ_fallthrough && join != succ_taken)) &&

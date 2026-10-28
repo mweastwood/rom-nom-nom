@@ -1400,7 +1400,49 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
           auto* else_comp = static_cast<CompoundStatement*>(ifs_after_b.MutableElseBranch());
           auto& then_stmts = then_comp->MutableStatements();
           auto& else_stmts = else_comp->MutableStatements();
-          bool sunk_any = true;
+          bool all_simple_reg_assigns = !then_stmts.empty() && !else_stmts.empty();
+          for (const auto& s : then_stmts) {
+            std::string dummy;
+            if (!is_simple_reg_assign(*s, &dummy)) {
+              all_simple_reg_assigns = false;
+              break;
+            }
+          }
+          if (all_simple_reg_assigns) {
+            for (const auto& s : else_stmts) {
+              std::string dummy;
+              if (!is_simple_reg_assign(*s, &dummy)) {
+                all_simple_reg_assigns = false;
+                break;
+              }
+            }
+          }
+          bool else_can_become_empty = true;
+          if (all_simple_reg_assigns) {
+            for (const auto& es : else_stmts) {
+              std::string e_lhs;
+              std::string e_rhs;
+              if (!extract_sinkable_assign(*es, &e_lhs, &e_rhs, nullptr)) {
+                else_can_become_empty = false;
+                break;
+              }
+              bool matched = false;
+              for (const auto& ts : then_stmts) {
+                std::string t_lhs;
+                std::string t_rhs;
+                if (extract_sinkable_assign(*ts, &t_lhs, &t_rhs, nullptr) && t_lhs == e_lhs &&
+                    t_rhs == e_rhs) {
+                  matched = true;
+                  break;
+                }
+              }
+              if (!matched) {
+                else_can_become_empty = false;
+                break;
+              }
+            }
+          }
+          bool sunk_any = !(all_simple_reg_assigns && !else_can_become_empty);
           while (sunk_any && !then_stmts.empty() && !else_stmts.empty()) {
             sunk_any = false;
             for (size_t ti = then_stmts.size(); ti > 0; --ti) {

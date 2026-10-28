@@ -1219,5 +1219,38 @@ TEST(ControlFlowStructurerTest,
   EXPECT_THAT(s, Not(HasSubstr("goto")));
 }
 
+TEST(ControlFlowStructurerTest, StructuresInfiniteLoopWithMultiBlockCallSplitExitGuardWithoutGoto) {
+  // Models `func_800FB800` (infinite loop where the header branch `beq $v0, $s0, join` skips a
+  // multi-block call-plus-branch exit guard `jal Check; nop; bne $v0, $s0, exit; move $s1, $zero`
+  // that falls through to the same `join` block inside the loop).
+  std::vector<uint32_t> words = {
+      0x0C000040,  // 0x00 (header): jal   0x80000100
+      0x00000000,  // 0x04:          nop
+      0x10440005,  // 0x08 (blk 1):  beq   $v0, $a0, +5 -> 0x20 (join)
+      0x00000000,  // 0x0C:          nop
+      0x0C000040,  // 0x10 (blk 2):  jal   0x80000100
+      0x00000000,  // 0x14:          nop
+      0x14440005,  // 0x18 (blk 3):  bne   $v0, $a0, +5 -> 0x30 (loop exit)
+      0x00002821,  // 0x1C:          addu  $a1, $zero, $zero
+      0x24A50001,  // 0x20 (join):   addiu $a1, $a1, 1
+      0x08000000,  // 0x24:          j     0x80000000 (back-edge to header)
+      0x00000000,  // 0x28:          nop
+      0x00000000,  // 0x2C:          nop
+      0x03E00008,  // 0x30 (exit):   jr    $ra
+      0x00A01021,  // 0x34:          addu  $v0, $a1, $zero
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  DominatorTree post_dt = DominatorTree::ComputePostDominators(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+
+  auto region = ControlFlowStructurer::Structure(cfg, dt, post_dt, loops);
+  ASSERT_THAT(region, NotNull());
+  std::string s = region->ToString();
+  EXPECT_THAT(s, Not(HasSubstr("goto")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
