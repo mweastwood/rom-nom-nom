@@ -1460,6 +1460,25 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
   if (cfg == nullptr || cfg->Blocks().empty()) {
     return false;
   }
+  // GCC 2.7.2 (`toplev.c:3025`) only runs `.jump2` cross-jumping when `optimize > 0`.
+  // Functions that establish a frame pointer (`$fp = $sp`) are compiled at `-O0` and never
+  // undergo `.jump2` cross-jumping.
+  for (const auto& blk : cfg->Blocks()) {
+    for (const auto& inst : blk.instructions) {
+      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
+           inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd) &&
+          inst.rd == Register::kFp &&
+          ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
+           (inst.rs == Register::kZero && inst.rt == Register::kSp))) {
+        return false;
+      }
+      if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+           inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+          inst.rt == Register::kFp && inst.rs == Register::kSp && inst.immediate == 0) {
+        return false;
+      }
+    }
+  }
   CfgAnalysisManager local_analyses(cfg);
   if (analyses == nullptr) {
     analyses = &local_analyses;

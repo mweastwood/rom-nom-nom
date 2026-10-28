@@ -205,6 +205,12 @@ std::string UnaryExpression::ToString() const {
   if (is_prefix_) {
     return absl::StrFormat("%s%s", op_, operand_->ToString());
   }
+  if (operand_->Kind() == CExpressionKind::kCastExpression ||
+      operand_->Kind() == CExpressionKind::kUnaryExpression ||
+      operand_->Kind() == CExpressionKind::kBinaryExpression ||
+      operand_->Kind() == CExpressionKind::kAssignmentExpression) {
+    return absl::StrFormat("(%s)%s", operand_->ToString(), op_);
+  }
   return absl::StrFormat("%s%s", operand_->ToString(), op_);
 }
 
@@ -454,7 +460,8 @@ std::string VariableDeclarationStatement::ToString(int indent_level) const {
   if (array_size_.has_value()) {
     absl::StrAppend(&result, "[", *array_size_, "]");
   }
-  if (register_annotation_.has_value() && !array_size_.has_value()) {
+  if (register_annotation_.has_value() && !register_annotation_->empty() &&
+      !array_size_.has_value()) {
     absl::StrAppend(&result, " asm(\"", *register_annotation_, "\")");
   }
   if (initializer_ != nullptr) {

@@ -1461,5 +1461,49 @@ TEST(VariableDeclarationBuilderTest, SplitsDisjointScratchWebsInLeafFunctionsAnd
   EXPECT_THAT(emitted, HasSubstr("s32 temp_at_2;"));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     SynthesizesUnreferencedFramePointerStackSlotsAndEmitsO0RegisterLocalsWithoutAsm) {
+  ControlFlowGraph cfg;
+
+  StackFrameAnalysis frame;
+  frame.frame_size = 24;
+  frame.has_calls = false;
+  frame.has_frame_pointer = true;
+  frame.prologue.min_saved_reg_offset = 16;
+  frame.prologue.saved_reg_offsets[Register::kFp] = 20;
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_12"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("var_sp_12"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  std::vector<CParameter> params = {{CType::S32(), "arg0"}};
+  AstConverterOptions opts;
+  opts.function_name = "TestO0FramePointerSlotsAndRegister";
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string emitted = body->ToString();
+  size_t pos_0 = emitted.find("s32 var_sp_0;");
+  size_t pos_4 = emitted.find("s32 var_sp_4;");
+  size_t pos_8 = emitted.find("s32 var_sp_8;");
+  size_t pos_12 = emitted.find("s32 var_sp_12;");
+  size_t pos_v0 = emitted.find("register s32 v0;");
+  ASSERT_NE(pos_0, std::string::npos);
+  ASSERT_NE(pos_4, std::string::npos);
+  ASSERT_NE(pos_8, std::string::npos);
+  ASSERT_NE(pos_12, std::string::npos);
+  ASSERT_NE(pos_v0, std::string::npos);
+  EXPECT_LT(pos_0, pos_4);
+  EXPECT_LT(pos_4, pos_8);
+  EXPECT_LT(pos_8, pos_12);
+  EXPECT_LT(pos_12, pos_v0);
+  EXPECT_THAT(emitted, Not(HasSubstr("asm(\"$2\")")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

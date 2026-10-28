@@ -8,6 +8,7 @@
 
 #include "absl/types/span.h"
 #include "core/c_ast.h"
+#include "core/c_ast_utils.h"
 #include "lifter/ast_abi_rewriter.h"
 #include "lifter/ast_arithmetic_simplifier.h"
 #include "lifter/ast_expression_folder.h"
@@ -44,8 +45,11 @@ class FramePointerCleanupPass : public AstPass {
   bool Run(CompoundStatement* body, const AstPassContext& ctx) override {
     if (body == nullptr || !ctx.has_frame_pointer) return false;
     std::string before = body->ToString();
-    RewriteFramePointerStructOffsetAccesses(body);
-    if (ctx.return_type.ToString() == "void" && !ctx.has_goto_targets &&
+    RewriteFramePointerStructOffsetAccesses(body, &ctx.parameters);
+    SimplifyShiftAddMultiplication(body);
+    SimplifyReciprocalDivisionAndUnsignedFloatConversions(body);
+    RewriteFramePointerStructOffsetAccesses(body, &ctx.parameters);
+    if (ctx.return_type.ToString() == "void" && !StatementContainsLabel(*body) &&
         !body->Statements().empty()) {
       const auto& last_stmt = *body->Statements().back();
       if (last_stmt.Kind() == CStatementKind::kReturnStatement &&

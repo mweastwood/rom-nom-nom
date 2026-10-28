@@ -2,6 +2,7 @@
 #define LIFTER_AST_MEMORY_IDIOM_REWRITER_H_
 
 #include <string_view>
+#include <vector>
 
 #include "core/c_ast.h"
 #include "lifter/ast_pass_pipeline.h"
@@ -18,7 +19,8 @@ void CollapseUnalignedBlockCopies(CompoundStatement* comp);
 // rewrites positive constant-offset pointer dereferences `*(TYPE*)(base + offset)` into
 // anonymous struct member accesses `((struct { u8 _p[offset]; TYPE _v; }*)base)->_v` so
 // GCC 2.7.2 at `-O0` emits single-instruction `offset(base)` loads and stores.
-void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body);
+void RewriteFramePointerStructOffsetAccesses(CompoundStatement* body,
+                                             const std::vector<CParameter>* parameters = nullptr);
 
 class UnalignedBlockCopyCollapserPass : public AstPass {
  public:

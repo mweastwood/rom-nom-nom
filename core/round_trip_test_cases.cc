@@ -7494,6 +7494,21 @@ f32 ShortCircuitFloatBoundsWithIndexedFallbackTable(u16 mode, u16 idx, f32 val) 
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "O0FramePointerByteFillAndWordPostIncrement",
+          .function_name = "O0FramePointerByteFillAndWordPostIncrement",
+          .original_c = R"(
+s32 O0FramePointerByteFillAndWordPostIncrement(s32* dst, s32 val, s32 count) {
+    s32 fill = (u8)val;
+    s32* p = dst;
+    while (count-- != 0) {
+        *p++ = fill;
+    }
+    return fill;
+}
+)",
+          .options = {.c_flags = {"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"}},
+      },
   };
   return *k_cases;
 }

@@ -260,6 +260,196 @@ bool IsMatchingNarrowPrologueStoreOfParam(const CStatement& stmt, std::string_vi
   return false;
 }
 
+std::string_view ExtractF32StoreSlotVar(const CExpression& expr) {
+  if (expr.Kind() != CExpressionKind::kUnaryExpression) return "";
+  const auto& un = static_cast<const UnaryExpression&>(expr);
+  if ((un.Op() == "*(f32*)&" || un.Op() == "*(f32 *)&") &&
+      un.Operand().Kind() == CExpressionKind::kIdentifier) {
+    return static_cast<const IdentifierExpression&>(un.Operand()).Name();
+  }
+  if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression) {
+    const auto& cast = static_cast<const CastExpression&>(un.Operand());
+    if (cast.TargetType().name == "f32" && cast.TargetType().pointer_depth == 1 &&
+        cast.Operand().Kind() == CExpressionKind::kUnaryExpression) {
+      const auto& addr_un = static_cast<const UnaryExpression&>(cast.Operand());
+      if (addr_un.Op() == "&" && addr_un.Operand().Kind() == CExpressionKind::kIdentifier) {
+        return static_cast<const IdentifierExpression&>(addr_un.Operand()).Name();
+      }
+    }
+  }
+  return "";
+}
+
+int CountF32SlotUsesInStatement(const CStatement& root, std::string_view slot_var) {
+  int count = 0;
+  std::function<void(const CExpression&)> visit_expr = [&](const CExpression& e) {
+    if (ExtractF32StoreSlotVar(e) == slot_var) {
+      ++count;
+      return;
+    }
+    switch (e.Kind()) {
+      case CExpressionKind::kUnaryExpression:
+        visit_expr(static_cast<const UnaryExpression&>(e).Operand());
+        break;
+      case CExpressionKind::kBinaryExpression: {
+        const auto& b = static_cast<const BinaryExpression&>(e);
+        visit_expr(b.Lhs());
+        visit_expr(b.Rhs());
+        break;
+      }
+      case CExpressionKind::kAssignmentExpression: {
+        const auto& as = static_cast<const AssignmentExpression&>(e);
+        visit_expr(as.Lhs());
+        visit_expr(as.Rhs());
+        break;
+      }
+      case CExpressionKind::kCallExpression: {
+        const auto& c = static_cast<const CallExpression&>(e);
+        visit_expr(c.Callee());
+        for (const auto& arg : c.Arguments()) {
+          if (arg != nullptr) visit_expr(*arg);
+        }
+        break;
+      }
+      case CExpressionKind::kCastExpression:
+        visit_expr(static_cast<const CastExpression&>(e).Operand());
+        break;
+      case CExpressionKind::kMemberAccessExpression:
+        visit_expr(static_cast<const MemberAccessExpression&>(e).Object());
+        break;
+      case CExpressionKind::kArrayIndexExpression: {
+        const auto& ar = static_cast<const ArrayIndexExpression&>(e);
+        visit_expr(ar.Array());
+        visit_expr(ar.Index());
+        break;
+      }
+      case CExpressionKind::kTernaryExpression: {
+        const auto& t = static_cast<const TernaryExpression&>(e);
+        visit_expr(t.Condition());
+        visit_expr(t.TrueExpression());
+        visit_expr(t.FalseExpression());
+        break;
+      }
+      default:
+        break;
+    }
+  };
+  std::function<void(const CStatement&)> visit_stmt = [&](const CStatement& st) {
+    switch (st.Kind()) {
+      case CStatementKind::kCompoundStatement:
+        for (const auto& ch : static_cast<const CompoundStatement&>(st).Statements()) {
+          if (ch != nullptr) visit_stmt(*ch);
+        }
+        break;
+      case CStatementKind::kExpressionStatement:
+        visit_expr(static_cast<const ExpressionStatement&>(st).Expression());
+        break;
+      case CStatementKind::kIfStatement: {
+        const auto& ifs = static_cast<const IfStatement&>(st);
+        visit_expr(ifs.Condition());
+        visit_stmt(ifs.ThenBranch());
+        if (ifs.ElseBranch() != nullptr) visit_stmt(*ifs.ElseBranch());
+        break;
+      }
+      case CStatementKind::kWhileStatement: {
+        const auto& ws = static_cast<const WhileStatement&>(st);
+        visit_expr(ws.Condition());
+        visit_stmt(ws.Body());
+        break;
+      }
+      case CStatementKind::kDoWhileStatement: {
+        const auto& dws = static_cast<const DoWhileStatement&>(st);
+        visit_stmt(dws.Body());
+        visit_expr(dws.Condition());
+        break;
+      }
+      case CStatementKind::kForStatement: {
+        const auto& fs = static_cast<const ForStatement&>(st);
+        if (fs.Init() != nullptr) visit_stmt(*fs.Init());
+        if (fs.Condition() != nullptr) visit_expr(*fs.Condition());
+        if (fs.Step() != nullptr) visit_expr(*fs.Step());
+        visit_stmt(fs.Body());
+        break;
+      }
+      case CStatementKind::kReturnStatement: {
+        const auto& rs = static_cast<const ReturnStatement&>(st);
+        if (rs.ReturnValue() != nullptr) visit_expr(*rs.ReturnValue());
+        break;
+      }
+      case CStatementKind::kSwitchStatement: {
+        const auto& ss = static_cast<const SwitchStatement&>(st);
+        visit_expr(ss.Condition());
+        for (const auto& c : ss.Cases()) {
+          if (c.body != nullptr) visit_stmt(*c.body);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  };
+  visit_stmt(root);
+  return count;
+}
+
+std::unique_ptr<CExpression> RewriteF32SlotAliasesInExpression(
+    const CExpression& e, const absl::flat_hash_map<std::string, std::string>& aliases) {
+  std::string_view sv = ExtractF32StoreSlotVar(e);
+  if (!sv.empty()) {
+    auto fit = aliases.find(std::string(sv));
+    if (fit != aliases.end()) {
+      return CExpression::Identifier(fit->second);
+    }
+  }
+  if (e.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& un = static_cast<const UnaryExpression&>(e);
+    return CExpression::Unary(un.Op(), RewriteF32SlotAliasesInExpression(un.Operand(), aliases),
+                              un.IsPrefix());
+  }
+  if (e.Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& b = static_cast<const BinaryExpression&>(e);
+    return CExpression::Binary(b.Op(), RewriteF32SlotAliasesInExpression(b.Lhs(), aliases),
+                               RewriteF32SlotAliasesInExpression(b.Rhs(), aliases));
+  }
+  if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+    const auto& as = static_cast<const AssignmentExpression&>(e);
+    return CExpression::Assignment(as.Op(), RewriteF32SlotAliasesInExpression(as.Lhs(), aliases),
+                                   RewriteF32SlotAliasesInExpression(as.Rhs(), aliases));
+  }
+  if (e.Kind() == CExpressionKind::kCallExpression) {
+    const auto& c = static_cast<const CallExpression&>(e);
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.reserve(c.Arguments().size());
+    for (const auto& arg : c.Arguments()) {
+      args.push_back(arg != nullptr ? RewriteF32SlotAliasesInExpression(*arg, aliases) : nullptr);
+    }
+    return CExpression::Call(RewriteF32SlotAliasesInExpression(c.Callee(), aliases),
+                             std::move(args));
+  }
+  if (e.Kind() == CExpressionKind::kCastExpression) {
+    const auto& c = static_cast<const CastExpression&>(e);
+    return CExpression::Cast(c.TargetType(),
+                             RewriteF32SlotAliasesInExpression(c.Operand(), aliases));
+  }
+  if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
+    const auto& m = static_cast<const MemberAccessExpression&>(e);
+    return CExpression::MemberAccess(RewriteF32SlotAliasesInExpression(m.Object(), aliases),
+                                     m.MemberName(), m.IsArrow());
+  }
+  if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
+    const auto& ar = static_cast<const ArrayIndexExpression&>(e);
+    return CExpression::ArrayIndex(RewriteF32SlotAliasesInExpression(ar.Array(), aliases),
+                                   RewriteF32SlotAliasesInExpression(ar.Index(), aliases));
+  }
+  if (e.Kind() == CExpressionKind::kTernaryExpression) {
+    const auto& t = static_cast<const TernaryExpression&>(e);
+    return CExpression::Ternary(RewriteF32SlotAliasesInExpression(t.Condition(), aliases),
+                                RewriteF32SlotAliasesInExpression(t.TrueExpression(), aliases),
+                                RewriteF32SlotAliasesInExpression(t.FalseExpression(), aliases));
+  }
+  return e.Clone();
+}
+
 }  // namespace
 
 void CoalescePrologueParameterCopies(CompoundStatement* comp,
@@ -367,6 +557,7 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
 
   absl::flat_hash_map<std::string, std::string> coalesced_aliases;
   absl::flat_hash_map<std::string, std::unique_ptr<CExpression>> coalesced_expr_aliases;
+  absl::flat_hash_map<std::string, std::string> coalesced_f32_slot_aliases;
   std::vector<size_t> stmts_to_erase;
 
   auto count_assignments = [&](std::string_view name) {
@@ -845,28 +1036,8 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
             }
           }
           if (!in_call_free_prologue) continue;
-          auto extract_f32_store_slot_var = [](const CExpression& lhs_expr) -> std::string_view {
-            if (lhs_expr.Kind() != CExpressionKind::kUnaryExpression) return "";
-            const auto& un = static_cast<const UnaryExpression&>(lhs_expr);
-            if ((un.Op() == "*(f32*)&" || un.Op() == "*(f32 *)&") &&
-                un.Operand().Kind() == CExpressionKind::kIdentifier) {
-              return static_cast<const IdentifierExpression&>(un.Operand()).Name();
-            }
-            if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression) {
-              const auto& cast = static_cast<const CastExpression&>(un.Operand());
-              if (cast.TargetType().name == "f32" && cast.TargetType().pointer_depth == 1 &&
-                  cast.Operand().Kind() == CExpressionKind::kUnaryExpression) {
-                const auto& addr_un = static_cast<const UnaryExpression&>(cast.Operand());
-                if (addr_un.Op() == "&" &&
-                    addr_un.Operand().Kind() == CExpressionKind::kIdentifier) {
-                  return static_cast<const IdentifierExpression&>(addr_un.Operand()).Name();
-                }
-              }
-            }
-            return "";
-          };
           std::string rhs = static_cast<const IdentifierExpression&>(a.Rhs()).Name();
-          std::string_view slot_var = extract_f32_store_slot_var(a.Lhs());
+          std::string_view slot_var = ExtractF32StoreSlotVar(a.Lhs());
           auto it = f32_param_homing_slots.find(rhs);
           if (!slot_var.empty() && it != f32_param_homing_slots.end() && it->second == slot_var &&
               !is_assigned(rhs) && count_assignments(slot_var) == 0) {
@@ -883,6 +1054,11 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
               coalesced_expr_aliases[std::string(slot_var)] =
                   CExpression::Unary("*(s32*)&", CExpression::Identifier(rhs));
               stmts_to_erase.push_back(i);
+            } else if (CountIdentifierOccurrencesInStatement(*comp, rhs) == 1 &&
+                       CountF32SlotUsesInStatement(*comp, slot_var) ==
+                           CountIdentifierOccurrencesInStatement(*comp, slot_var)) {
+              coalesced_f32_slot_aliases[std::string(slot_var)] = rhs;
+              stmts_to_erase.push_back(i);
             }
           }
         }
@@ -890,10 +1066,16 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
     }
   }
 
-  if (coalesced_aliases.empty() && coalesced_expr_aliases.empty()) return;
+  if (coalesced_aliases.empty() && coalesced_expr_aliases.empty() &&
+      coalesced_f32_slot_aliases.empty()) {
+    return;
+  }
 
   auto apply_aliases_to_expr =
       [&](std::unique_ptr<CExpression> expr) -> std::unique_ptr<CExpression> {
+    if (!coalesced_f32_slot_aliases.empty()) {
+      expr = RewriteF32SlotAliasesInExpression(*expr, coalesced_f32_slot_aliases);
+    }
     for (const auto& [from, to] : coalesced_aliases) {
       expr = SubstituteIdentifier(*expr, from, *CExpression::Identifier(to));
     }

@@ -1044,9 +1044,17 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
   };
 
   absl::flat_hash_set<int32_t> saved_offsets;
+  bool has_frame_pointer = false;
   const BasicBlock* entry_block = cfg.GetBlock(cfg.EntryBlockId());
   if (entry_block != nullptr) {
     for (const auto& inst : entry_block->instructions) {
+      if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kDaddu ||
+           inst.opcode == Opcode::kOr) &&
+          inst.rd == Register::kFp &&
+          ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
+           (inst.rt == Register::kSp && inst.rs == Register::kZero))) {
+        has_frame_pointer = true;
+      }
       if (inst.rs == Register::kSp && inst.immediate >= 0 &&
           inst.immediate < static_cast<int32_t>(frame_size)) {
         if ((inst.opcode == Opcode::kSw || inst.opcode == Opcode::kSd) && inst.rt.has_value()) {
@@ -1075,9 +1083,12 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
     absl::flat_hash_set<Register> defined_in_block;
     for (size_t j = 0; j < block.instructions.size(); ++j) {
       const auto& inst = block.instructions[j];
-      if (inst.rs == Register::kSp && inst.immediate >= 0 &&
-          inst.immediate < static_cast<int32_t>(frame_size + 16) && (inst.immediate % 4 == 0) &&
-          !saved_offsets.contains(inst.immediate)) {
+      const bool is_stack_base =
+          (inst.rs == Register::kSp) || (has_frame_pointer && inst.rs == Register::kFp);
+      const int32_t max_local_offset = has_frame_pointer ? static_cast<int32_t>(frame_size)
+                                                         : static_cast<int32_t>(frame_size + 16);
+      if (is_stack_base && inst.immediate >= 0 && inst.immediate < max_local_offset &&
+          (inst.immediate % 4 == 0) && !saved_offsets.contains(inst.immediate)) {
         int32_t off = inst.immediate;
         if (inst.opcode == Opcode::kLwc1 && inst.ft.has_value()) {
           if (is_fpr_converted_from_int(block.id, j, *inst.ft)) {
@@ -1096,7 +1107,7 @@ absl::flat_hash_set<int32_t> AbiAnalyzer::DetectFloatLocalStackOffsets(
         } else if (inst.IsLoad() || inst.IsStore() ||
                    ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
                      inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
-                    inst.rt != Register::kSp)) {
+                    inst.rt != Register::kSp && inst.rt != Register::kFp)) {
           stats[off].other_accesses++;
         }
       }

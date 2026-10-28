@@ -1019,6 +1019,81 @@ absl::Status PrependSynthesizedLocalDeclarations(
     local_vars_to_declare.push_back(var_name);
   }
 
+  if (frame_analysis.has_frame_pointer && frame_analysis.sp_buffer_size == 0 &&
+      frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF) {
+    const uint32_t local_frame_top = frame_analysis.prologue.min_saved_reg_offset & ~7u;
+    const uint32_t local_frame_bottom =
+        frame_analysis.has_calls
+            ? ((static_cast<uint32_t>(frame_analysis.outgoing_args_size) + 7u) & ~7u)
+            : 0u;
+    if (local_frame_top > local_frame_bottom) {
+      const uint32_t target_local_size = local_frame_top - local_frame_bottom;
+      const bool is_leaf = !StatementHasCall(**body);
+      absl::flat_hash_set<int32_t> covered_sp_offsets;
+      int32_t max_referenced_sp_end = 0;
+      uint32_t non_reg_local_bytes = 0;
+      for (const auto& v : local_vars_to_declare) {
+        if (v == "sp") continue;
+        const uint32_t var_bytes = ((!absl::StartsWith(v, "var_sp_") && absl::EndsWith(v, "_64")) ||
+                                    double_vars.contains(v))
+                                       ? 8u
+                                       : 4u;
+        if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
+          int32_t off = 0;
+          std::string_view sv = v;
+          if (absl::SimpleAtoi(sv.substr(7), &off) &&
+              off >= static_cast<int32_t>(local_frame_bottom) &&
+              off < static_cast<int32_t>(local_frame_top)) {
+            covered_sp_offsets.insert(off);
+            if (var_bytes == 8u) {
+              covered_sp_offsets.insert(off + 4);
+            }
+            max_referenced_sp_end =
+                std::max(max_referenced_sp_end, off + static_cast<int32_t>(var_bytes));
+          }
+          non_reg_local_bytes += var_bytes;
+          continue;
+        }
+        if (StatementTakesAddressOf(**body, v)) {
+          non_reg_local_bytes += var_bytes;
+          continue;
+        }
+        if (is_leaf) {
+          continue;
+        }
+        bool is_saved_callee_reg = false;
+        if (v.size() == 7 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7') {
+          Register s_reg = static_cast<Register>(static_cast<int>(Register::kS0) + (v[6] - '0'));
+          is_saved_callee_reg = frame_analysis.prologue.saved_reg_offsets.contains(s_reg);
+        } else {
+          std::string_view base =
+              absl::EndsWith(v, "_d") ? std::string_view{v}.substr(0, v.size() - 2) : v;
+          int fpr_num = 0;
+          if (IsCalleeSavedFprBaseName(base) && absl::SimpleAtoi(base.substr(1), &fpr_num)) {
+            FpRegister fp_reg =
+                static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (fpr_num - 20));
+            is_saved_callee_reg = frame_analysis.prologue.saved_fpr_offsets.contains(fp_reg);
+          }
+        }
+        if (!is_saved_callee_reg) {
+          non_reg_local_bytes += var_bytes;
+        }
+      }
+      for (uint32_t off = local_frame_bottom;
+           off < local_frame_top && non_reg_local_bytes + 4u <= target_local_size; off += 4u) {
+        if (covered_sp_offsets.contains(static_cast<int32_t>(off))) {
+          continue;
+        }
+        if (static_cast<int32_t>(off) < max_referenced_sp_end ||
+            ((non_reg_local_bytes + 7u) & ~7u) < target_local_size) {
+          local_vars_to_declare.push_back(absl::StrFormat("var_sp_%d", off));
+          covered_sp_offsets.insert(static_cast<int32_t>(off));
+          non_reg_local_bytes += 4u;
+        }
+      }
+    }
+  }
+
   {
     std::vector<size_t> sp_var_indices;
     std::vector<std::pair<int64_t, std::string>> sp_vars;
@@ -1032,7 +1107,25 @@ absl::Status PrependSynthesizedLocalDeclarations(
         }
       }
     }
-    if (sp_vars.size() >= 2) {
+    if (frame_analysis.has_frame_pointer && !sp_vars.empty()) {
+      std::sort(sp_vars.begin(), sp_vars.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+      std::vector<std::string> reordered;
+      reordered.reserve(local_vars_to_declare.size());
+      for (const auto& [off, name] : sp_vars) {
+        (void)off;
+        reordered.push_back(name);
+      }
+      for (const auto& name : local_vars_to_declare) {
+        int64_t off = 0;
+        std::string_view sv = name;
+        if (absl::StartsWith(sv, "var_sp_") && absl::SimpleAtoi(sv.substr(7), &off)) {
+          continue;
+        }
+        reordered.push_back(name);
+      }
+      local_vars_to_declare = std::move(reordered);
+    } else if (sp_vars.size() >= 2) {
       std::sort(sp_vars.begin(), sp_vars.end(),
                 [](const auto& a, const auto& b) { return a.first < b.first; });
       for (size_t i = 0; i < sp_var_indices.size(); ++i) {
@@ -1482,6 +1575,36 @@ absl::Status PrependSynthesizedLocalDeclarations(
     if (has_address_taken(var_name)) {
       return std::nullopt;
     }
+    if (frame_analysis.has_frame_pointer) {
+      if (absl::StartsWith(var_name, "var_sp_") || var_name == "sp") {
+        return std::nullopt;
+      }
+      if (is_leaf_func) {
+        return std::string("");
+      }
+      if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
+          var_name[6] <= '7') {
+        Register s_reg =
+            static_cast<Register>(static_cast<int>(Register::kS0) + (var_name[6] - '0'));
+        if (frame_analysis.prologue.saved_reg_offsets.contains(s_reg)) {
+          return std::string("");
+        }
+      }
+      if (is_fp_reg(var_name)) {
+        std::string_view base =
+            absl::EndsWith(var_name, "_d") ? var_name.substr(0, var_name.size() - 2) : var_name;
+        if (IsCalleeSavedFprBaseName(base) && !pinned_fp_bases.contains(std::string(base))) {
+          int fpr_num = 0;
+          if (absl::SimpleAtoi(base.substr(1), &fpr_num) &&
+              frame_analysis.prologue.saved_fpr_offsets.contains(
+                  static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (fpr_num - 20)))) {
+            pinned_fp_bases.insert(std::string(base));
+            return std::string("");
+          }
+        }
+      }
+      return std::nullopt;
+    }
     if ((var_name == "temp_k0" || var_name == "temp_k1") && !has_s64_pointer_deref) {
       return (var_name == "temp_k0") ? "$26" : "$27";
     }
@@ -1610,11 +1733,13 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
     bool is_callee_gpr = IsCalleeSavedGprVarName(var_name);
     bool needs_init = vars_needing_init.contains(var_name);
-    std::optional<std::string> reg_annot = (!needs_init || is_callee_gpr)
-                                               ? get_callee_saved_register_annotation(var_name)
-                                               : std::nullopt;
+    std::optional<std::string> reg_annot =
+        (!needs_init || is_callee_gpr || frame_analysis.has_frame_pointer)
+            ? get_callee_saved_register_annotation(var_name)
+            : std::nullopt;
     reg_annotations[var_name] = reg_annot;
-    if (!reg_annot.has_value() && !needs_init && !is_callee_gpr && !has_address_taken(var_name) &&
+    if (!frame_analysis.has_frame_pointer && !reg_annot.has_value() && !needs_init &&
+        !is_callee_gpr && !has_address_taken(var_name) &&
         (var_name == "v0" || var_name == "v1" || var_name == "temp_at" ||
          (var_name.size() == 7 &&
           (absl::StartsWith(var_name, "temp_t") || absl::StartsWith(var_name, "temp_a"))))) {

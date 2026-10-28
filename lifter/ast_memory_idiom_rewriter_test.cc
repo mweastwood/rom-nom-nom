@@ -358,5 +358,128 @@ TEST(AstMemoryIdiomRewriterTest, RewritesPostIncrementBytePointerStoreAndLoadWit
   EXPECT_THAT(rendered, HasSubstr("*(s8*)ptr8_src++"));
 }
 
+TEST(AstMemoryIdiomRewriterTest,
+     FoldsO0PointerWordPostIncrementLvaluePostIncrementAndDecrementLoop) {
+  CompoundStatement body;
+
+  // 1. Word pointer post-increment store `v1 = ptr32; ptr32 = v1 + 4; *(s32*)v1 = arg0;`
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"), CExpression::Identifier("ptr32"))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("ptr32"),
+      CExpression::Binary("+", CExpression::Identifier("v1"), CExpression::Integer(4)))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("v1"))),
+      CExpression::Identifier("arg0"))));
+
+  // 2. Lvalue post-increment `v0 = D_8017045C; D_8017045C = v0 + 1; *(s32*)arg1 = v0;`
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("D_8017045C"))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("D_8017045C"),
+      CExpression::Binary("+", CExpression::Identifier("v0"), CExpression::Integer(1)))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("arg1"))),
+      CExpression::Identifier("v0"))));
+
+  // 3. Pre-tested decrement-and-test loop `while (1) { v1 = arg2 - 1; arg2 = v1; if (v1 ==
+  // 0xFFFFFFFF) break; ... }`
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("-", CExpression::Identifier("arg2"), CExpression::Integer(1)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg2"), CExpression::Identifier("v1"))));
+  auto break_branch = std::make_unique<CompoundStatement>();
+  break_branch->AddStatement(CStatement::Break());
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("v1"), CExpression::Integer(0xFFFFFFFFLL)),
+      std::move(break_branch)));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary("*",
+                         CExpression::Cast(CType{"s8", false, 1}, CExpression::Identifier("arg0"))),
+      CExpression::Identifier("arg1"))));
+  body.AddStatement(CStatement::While(CExpression::Integer(1), std::move(loop_body)));
+
+  RewriteFramePointerStructOffsetAccesses(&body);
+  std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("*((s32*)ptr32)++ = arg0;"));
+  EXPECT_THAT(rendered, HasSubstr("*(s32*)arg1 = D_8017045C++;"));
+  EXPECT_THAT(rendered, HasSubstr("while ((arg2-- != 0))"));
+}
+
+TEST(AstMemoryIdiomRewriterTest,
+     FoldsO0TernaryChainedAssignmentShortCircuitDiamondAndBranchReturns) {
+  CompoundStatement body;
+
+  // 1. Ternary `if (arg0 != 0) { v0 = 10; } else { v0 = 20; } var_sp_0 = v0;`
+  auto tern_then = std::make_unique<CompoundStatement>();
+  tern_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(10))));
+  auto tern_else = std::make_unique<CompoundStatement>();
+  tern_else->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(20))));
+  body.AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(tern_then), std::move(tern_else)));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_0"), CExpression::Identifier("v0"))));
+
+  // 2. Constant chained assignment `v0 = 0; var_sp_4 = 0; var_sp_8 = 0;`
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_4"), CExpression::Integer(0))));
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("var_sp_8"), CExpression::Integer(0))));
+
+  // 3. Short-circuit goto diamond `if (var_sp_0 != 0x48000000) { v0 = var_sp_0; v1 = 0x8000000; if
+  // (v0 == v1) { block_6: D_801A8B58 = D_801A8B58 | 1; } } else { goto block_6; }`
+  auto inner_then = std::make_unique<CompoundStatement>();
+  inner_then->AddStatement(CStatement::Label("block_6"));
+  inner_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("D_801A8B58"),
+      CExpression::Binary("|", CExpression::Identifier("D_801A8B58"), CExpression::Integer(1)))));
+  auto outer_then = std::make_unique<CompoundStatement>();
+  outer_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("var_sp_0"))));
+  outer_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"), CExpression::Integer(0x8000000))));
+  outer_then->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("v0"), CExpression::Identifier("v1")),
+      std::move(inner_then)));
+  auto outer_else = std::make_unique<CompoundStatement>();
+  outer_else->AddStatement(CStatement::Goto("block_6"));
+  body.AddStatement(CStatement::If(CExpression::Binary("!=", CExpression::Identifier("var_sp_0"),
+                                                       CExpression::Integer(0x48000000)),
+                                   std::move(outer_then), std::move(outer_else)));
+
+  // 4. Branch-return pushing `if (var_sp_4 == 0) { v0 = 1; } else { v0 = 2; } return v0;`
+  auto ret_then = std::make_unique<CompoundStatement>();
+  ret_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(1))));
+  auto ret_else = std::make_unique<CompoundStatement>();
+  ret_else->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(2))));
+  body.AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("var_sp_4"), CExpression::Integer(0)),
+      std::move(ret_then), std::move(ret_else)));
+  body.AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  RewriteFramePointerStructOffsetAccesses(&body);
+  std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("var_sp_0 = ((arg0 != 0) ? 10 : 20);"));
+  EXPECT_THAT(rendered, HasSubstr("var_sp_8 = var_sp_4 = 0;"));
+  EXPECT_THAT(rendered, HasSubstr("if (((var_sp_0 == 1207959552) || (var_sp_0 == 134217728)))"));
+  EXPECT_THAT(rendered, ::testing::Not(HasSubstr("block_6")));
+  EXPECT_THAT(rendered, HasSubstr("return 1;"));
+  EXPECT_THAT(rendered, HasSubstr("return 2;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
