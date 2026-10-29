@@ -96,7 +96,7 @@ absl::StatusOr<ProcessResult> RunProcess(const ProcessOptions& options) {
     if (!options.working_directory.empty()) {
       if (chdir(options.working_directory.c_str()) != 0) {
         int err = errno;
-        (void)write(err_pipe[1], &err, sizeof(err));
+        [[maybe_unused]] ssize_t ignored = write(err_pipe[1], &err, sizeof(err));
         _exit(127);
       }
     }
@@ -107,7 +107,7 @@ absl::StatusOr<ProcessResult> RunProcess(const ProcessOptions& options) {
 
     if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
       int err = errno;
-      (void)write(err_pipe[1], &err, sizeof(err));
+      [[maybe_unused]] ssize_t ignored = write(err_pipe[1], &err, sizeof(err));
       _exit(127);
     }
 
@@ -124,7 +124,7 @@ absl::StatusOr<ProcessResult> RunProcess(const ProcessOptions& options) {
     execvp(options.program.c_str(), argv.data());
 
     int err = errno;
-    (void)write(err_pipe[1], &err, sizeof(err));
+    [[maybe_unused]] ssize_t ignored = write(err_pipe[1], &err, sizeof(err));
     _exit(127);
   }
 
