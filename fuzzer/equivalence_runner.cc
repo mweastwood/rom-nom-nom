@@ -42,8 +42,36 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   res.normalized_lcs_instructions = struct_comp.normalized_lcs_instructions;
   res.trimmed_target_instruction_count = struct_comp.target.instruction_count;
 
-  // Fast-Pass: If instructions match 100% byte-for-byte, trivially equivalent
-  if (target.target_words == target.candidate_words) {
+  // Fast-Pass: If instructions match 100% byte-for-byte (or up to relocated
+  // R_MIPS_26 j/jal targets under code shift), trivially equivalent.
+  bool exact_or_relocated_match = (target.target_words == target.candidate_words);
+  if (!exact_or_relocated_match && target.target_words.size() == target.candidate_words.size()) {
+    exact_or_relocated_match = true;
+    for (size_t i = 0; i < target.target_words.size(); ++i) {
+      uint32_t tw = target.target_words[i];
+      uint32_t cw = target.candidate_words[i];
+      if (tw == cw) {
+        continue;
+      }
+      uint32_t top = tw >> 26;
+      uint32_t cop = cw >> 26;
+      if ((top == 2 || top == 3) && top == cop) {
+        uint32_t t_pc = target.vram + static_cast<uint32_t>(i * 4);
+        uint32_t c_pc = cand_vram + static_cast<uint32_t>(i * 4);
+        uint32_t t_dest = ((t_pc + 4) & 0xF0000000u) | ((tw & 0x03FFFFFFu) << 2);
+        uint32_t c_dest = ((c_pc + 4) & 0xF0000000u) | ((cw & 0x03FFFFFFu) << 2);
+        bool internal_match = (c_dest - cand_vram) == (t_dest - target.vram);
+        bool mapped_match = options_.fuzzer_options.candidate_to_target_address &&
+                            options_.fuzzer_options.candidate_to_target_address(c_dest) == t_dest;
+        if (internal_match || mapped_match) {
+          continue;
+        }
+      }
+      exact_or_relocated_match = false;
+      break;
+    }
+  }
+  if (exact_or_relocated_match) {
     res.status = FunctionEquivalenceStatus::kExactBinaryMatch;
     res.fuzz_vectors_evaluated = 0;
     res.details = "100% bit-exact instruction match (fast-pass)";

@@ -422,11 +422,89 @@ n64_lifted_c_equivalence_test = rule(
     },
 )
 
+def _n64_game_config_validation_test_impl(ctx):
+    rom = ctx.file.rom
+    config = ctx.file.config
+    validator = ctx.executable._validator
+
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+
+    script_content = """#!/usr/bin/env bash
+set -euo pipefail
+
+ROM_FILE="{rom}"
+CONFIG_FILE="{config}"
+VALIDATOR_BIN="{validator}"
+
+resolve_path() {{
+    local path="$1"
+    if [[ -f "$path" ]]; then
+        echo "$path"
+    elif [[ -f "${{RUNFILES_DIR:-.default_runfiles}}/$path" ]]; then
+        echo "${{RUNFILES_DIR:-.default_runfiles}}/$path"
+    elif [[ -n "${{TEST_SRCDIR:-}}" && -f "$TEST_SRCDIR/$path" ]]; then
+        echo "$TEST_SRCDIR/$path"
+    elif [[ -n "${{TEST_SRCDIR:-}}" && -f "$TEST_SRCDIR/_main/$path" ]]; then
+        echo "$TEST_SRCDIR/_main/$path"
+    else
+        find . -name "$(basename "$path")" | head -n 1
+    fi
+}}
+
+ACTUAL_ROM=$(resolve_path "$ROM_FILE")
+ACTUAL_CONFIG=$(resolve_path "$CONFIG_FILE")
+ACTUAL_VALIDATOR=$(resolve_path "$VALIDATOR_BIN")
+
+"$ACTUAL_VALIDATOR" --config="$ACTUAL_CONFIG" --rom="$ACTUAL_ROM"
+""".format(
+        rom = rom.short_path,
+        config = config.short_path,
+        validator = validator.short_path,
+    )
+
+    ctx.actions.write(
+        output = script,
+        content = script_content,
+        is_executable = True,
+    )
+
+    runfiles = ctx.runfiles(files = [rom, config, validator]).merge(
+        ctx.attr._validator[DefaultInfo].default_runfiles,
+    )
+
+    return [
+        DefaultInfo(
+            executable = script,
+            runfiles = runfiles,
+        ),
+    ]
+
+n64_game_config_validation_test = rule(
+    implementation = _n64_game_config_validation_test_impl,
+    test = True,
+    attrs = {
+        "rom": attr.label(mandatory = True, allow_single_file = [".z64"]),
+        "config": attr.label(mandatory = True, allow_single_file = [".textproto"]),
+        "_validator": attr.label(
+            default = Label("//core:config_validator"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
 def n64_game(name, game, config, rom, srcs = []):
     """Macro to instantiate an N64 game with pure Bazel generated assembly pipeline."""
     split_name = name + "_split"
     assembly_rom_name = name + "_assembly_rom"
     assembly_test_name = name + "_assembly_rom_bitexact_test"
+    config_validation_test_name = name + "_config_validation_test"
+
+    n64_game_config_validation_test(
+        name = config_validation_test_name,
+        rom = rom,
+        config = config,
+    )
 
     splitter_split(
         name = split_name,

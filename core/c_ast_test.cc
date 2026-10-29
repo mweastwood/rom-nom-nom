@@ -561,6 +561,8 @@ TEST(CAstTest, IdentifierSymbolMetadataAndFuncPtrCastCollection) {
       CExpression::Integer(9))));
   body->AddStatement(CStatement::Expression(
       CExpression::Call(CExpression::Identifier("((void (*)())g_callback_ptr)"), {})));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("((s64 (*)())func_801075E0)"), {})));
 
   FunctionDeclaration func(CType::Void(), "UseTypedGlobals", {}, std::move(body));
   ReferencedSymbols refs = CollectReferencedSymbols(func);
@@ -568,6 +570,8 @@ TEST(CAstTest, IdentifierSymbolMetadataAndFuncPtrCastCollection) {
   EXPECT_TRUE(refs.external_data.count("g_short_val") > 0);
   EXPECT_TRUE(refs.external_data.count("g_arr_val") > 0);
   EXPECT_TRUE(refs.external_data.count("g_callback_ptr") > 0);
+  EXPECT_TRUE(refs.external_functions.count("func_801075E0") > 0);
+  EXPECT_EQ(refs.external_data.count("func_801075E0"), 0u);
   ASSERT_TRUE(refs.inferred_data_types.count("g_short_val") > 0);
   EXPECT_EQ(refs.inferred_data_types.at("g_short_val").ToString(), "s16");
   EXPECT_TRUE(refs.array_data_symbols.count("g_arr_val") > 0);

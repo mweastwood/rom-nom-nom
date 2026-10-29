@@ -227,7 +227,21 @@ segments {
   subsegments { rom_start: 0xDA450 type: SUBSEGMENT_C name: "libultra_gu_scale" }
   subsegments { rom_start: 0xDA530 type: SUBSEGMENT_ASM name: "libultra_sinf" }
   subsegments { rom_start: 0xDA6D0 type: SUBSEGMENT_C name: "libultra_gu_translate" }
-  subsegments { rom_start: 0xDA7A0 type: SUBSEGMENT_ASM name: "libultra" }
+  subsegments { rom_start: 0xDA7A0 type: SUBSEGMENT_HASM name: "libultra_hasm_da7a0" }
+  subsegments { rom_start: 0xDAA00 type: SUBSEGMENT_ASM name: "libultra" }
+  subsegments { rom_start: 0xDC000 type: SUBSEGMENT_HASM name: "libultra_hasm_dc000" }
+  subsegments { rom_start: 0xDC0A0 type: SUBSEGMENT_ASM name: "libultra_dc0a0" }
+  subsegments { rom_start: 0xE1380 type: SUBSEGMENT_HASM name: "libultra_hasm_e1380" }
+  subsegments { rom_start: 0xE2170 type: SUBSEGMENT_ASM name: "libultra_e2170" }
+  subsegments { rom_start: 0xE2570 type: SUBSEGMENT_HASM name: "libultra_hasm_e2570" }
+  subsegments { rom_start: 0xE2600 type: SUBSEGMENT_ASM name: "libultra_e2600" }
+  subsegments { rom_start: 0xE26B0 type: SUBSEGMENT_HASM name: "libultra_hasm_e26b0" }
+  subsegments { rom_start: 0xE28F0 type: SUBSEGMENT_ASM name: "libultra_e28f0" }
+  subsegments { rom_start: 0xE4C50 type: SUBSEGMENT_HASM name: "libultra_hasm_e4c50" }
+  subsegments { rom_start: 0xE4D60 type: SUBSEGMENT_ASM name: "libultra_e4d60" }
+  subsegments { rom_start: 0xE7990 type: SUBSEGMENT_HASM name: "libultra_hasm_e7990" }
+  subsegments { rom_start: 0xE79A0 type: SUBSEGMENT_ASM name: "libultra_e79a0" }
+  subsegments { rom_start: 0xEB850 type: SUBSEGMENT_HASM name: "libultra_hasm_eb850" }
   subsegments { rom_start: 0xEBE10 type: SUBSEGMENT_DATA name: "EBE10" }
   subsegments { type: SUBSEGMENT_BSS name: "FF5C0" vram: 0x801241C0 }
 }

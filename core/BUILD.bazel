@@ -1,5 +1,5 @@
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -665,6 +665,54 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "game_config_rom_validator",
+    srcs = ["game_config_rom_validator.cc"],
+    hdrs = ["game_config_rom_validator.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":disassembler",
+        ":game_config",
+        ":game_config_cc_proto",
+        ":mips",
+        ":rom",
+        ":symbol_registry",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "game_config_rom_validator_test",
+    srcs = ["game_config_rom_validator_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":endian",
+        ":game_config_cc_proto",
+        ":game_config_rom_validator",
+        ":rom",
+        ":sha1",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "config_validator",
+    srcs = ["config_validator_main.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":game_config",
+        ":game_config_rom_validator",
+        ":rom",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/flags:usage",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )

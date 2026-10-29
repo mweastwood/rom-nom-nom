@@ -864,9 +864,13 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
             std::string inner_name =
                 callee_name.substr(cast_end + 6, callee_name.size() - (cast_end + 6) - 1);
             if (IsValidCIdentifier(inner_name) && !IsKeywordOrBuiltin(inner_name) &&
-                symbols.local_variables.count(inner_name) == 0 &&
-                symbols.external_functions.count(inner_name) == 0) {
-              symbols.external_data.insert(inner_name);
+                symbols.local_variables.count(inner_name) == 0) {
+              if (absl::StartsWith(inner_name, "func_")) {
+                symbols.external_functions.insert(inner_name);
+                symbols.external_data.erase(inner_name);
+              } else if (symbols.external_functions.count(inner_name) == 0) {
+                symbols.external_data.insert(inner_name);
+              }
             }
           } else {
             size_t proto_end = callee_name.find("))");

@@ -280,6 +280,34 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::ScanFromElfAndR
         sf.raw_words.push_back(ReadBigEndian32(rom_bytes.data() + rom_off + w));
       }
     }
+
+    size_t last_nz = 0;
+    bool has_nz = false;
+    for (size_t i = sf.raw_words.size(); i > 0; --i) {
+      if (sf.raw_words[i - 1] != 0) {
+        last_nz = i - 1;
+        has_nz = true;
+        break;
+      }
+    }
+    if (has_nz) {
+      size_t min_words = last_nz + 2;
+      size_t aligned_words = (min_words + 3) & ~size_t{3};
+      if (aligned_words < sf.raw_words.size()) {
+        bool all_zeros = true;
+        for (size_t i = aligned_words; i < sf.raw_words.size(); ++i) {
+          if (sf.raw_words[i] != 0) {
+            all_zeros = false;
+            break;
+          }
+        }
+        if (all_zeros) {
+          sf.raw_words.resize(aligned_words);
+        }
+      }
+    }
+
+    sf.size = static_cast<uint32_t>(sf.raw_words.size() * 4);
     functions.push_back(std::move(sf));
   }
 
