@@ -601,5 +601,82 @@ TEST(TunerPipelineTest, CachedByNameFallbackSeedsPreviousCachedFlagsAndMutations
   EXPECT_EQ(res.applied_mutations[1].kind(), AST_MUTATION_PROPAGATE_REGISTER_COPY);
 }
 
+TEST(TunerPipelineTest, SearchFunctionCandidatesSkipsPolishWhenNotNearMissAndAvoidsFlagExplosion) {
+  // Build a function with several binary operations so DiscoverMutations returns multiple steps.
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "a"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "b"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("a"),
+      CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b")))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("b"),
+      CExpression::Binary("+", CExpression::Identifier("b"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Return(
+      CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b"))));
+
+  FunctionDeclaration func(CType::S32(), "TestFunc", {}, std::move(body));
+  auto emit_fn = [](const FunctionDeclaration& ast) { return ast.ToString(); };
+
+  // 1. Not a near miss (only 5 / 20 instructions match): Phase 2b should be skipped completely.
+  size_t non_near_miss_evals = 0;
+  FunctionSearchOptions non_near_miss_opts;
+  non_near_miss_opts.explore_flags = true;
+  non_near_miss_opts.explore_ast_mutations = true;
+  non_near_miss_opts.max_rounds = 1;
+  non_near_miss_opts.max_ast_candidates_per_round = 1;
+  non_near_miss_opts.max_polish_rounds = 2;
+  non_near_miss_opts.max_polish_candidates = 64;
+
+  auto non_near_miss_res = TunerPipeline::SearchFunctionCandidates(
+      func, {"-O2"}, non_near_miss_opts, emit_fn,
+      [&](std::string_view /*c_code*/, const std::vector<std::string>& /*flags*/) {
+        ++non_near_miss_evals;
+        CandidateScore score;
+        score.target_instruction_count = 20;
+        score.compiled_instruction_count = 25;
+        score.matching_instructions = 5;
+        score.bit_exact_instructions = 5;
+        score.frame_size_matches = true;
+        score.saved_registers_match = true;
+        score.cfg_topology_matches = false;
+        return score;
+      });
+  ASSERT_TRUE(non_near_miss_res.ok());
+  EXPECT_FALSE(non_near_miss_res->improved_over_baseline);
+
+  // 2. Near miss (19 / 20 instructions match): Phase 2b Stage 1 finds a bit-exact match on
+  // winning_c_flags without multiplying every polish mutation by all flag profiles.
+  size_t near_miss_evals = 0;
+  FunctionSearchOptions near_miss_opts = non_near_miss_opts;
+  auto near_miss_res = TunerPipeline::SearchFunctionCandidates(
+      func, {"-O2"}, near_miss_opts, emit_fn,
+      [&](std::string_view c_code, const std::vector<std::string>& /*flags*/) {
+        ++near_miss_evals;
+        CandidateScore score;
+        score.target_instruction_count = 20;
+        score.compiled_instruction_count = 20;
+        score.matching_instructions = 19;
+        score.bit_exact_instructions = 18;
+        score.frame_size_matches = true;
+        score.saved_registers_match = true;
+        score.cfg_topology_matches = true;
+        // A polish mutation ("b + a") achieves bit-exactness on winning_c_flags in Stage 2b-1.
+        if (absl::StrContains(c_code, "b + a")) {
+          score.matching_instructions = 20;
+          score.bit_exact_instructions = 20;
+          score.raw_bit_exact = true;
+          score.normalized_exact = true;
+        }
+        return score;
+      });
+  ASSERT_TRUE(near_miss_res.ok());
+  EXPECT_TRUE(near_miss_res->improved_over_baseline);
+  EXPECT_TRUE(near_miss_res->best_score.raw_bit_exact);
+  EXPECT_GT(near_miss_evals, non_near_miss_evals);
+  // Bounded linear evaluations (well under 30), never O(mutations * flag_profiles).
+  EXPECT_LT(near_miss_evals, 30u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

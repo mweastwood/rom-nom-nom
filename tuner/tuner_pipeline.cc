@@ -4,6 +4,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -51,7 +52,242 @@ std::string EmitSingleFunctionWithExterns(const FunctionDeclaration& func,
   return CEmitter::EmitTranslationUnit(single_tu, emitter_opts);
 }
 
+bool IsHighYieldPolishMutation(AstMutationKind kind) {
+  return kind == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
+         kind == AST_MUTATION_PROPAGATE_REGISTER_COPY || kind == AST_MUTATION_HOIST_WHILE_GUARD ||
+         kind == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR || kind == AST_MUTATION_INVERT_IF_ELSE ||
+         kind == AST_MUTATION_COMMUTE_BINARY_OP;
+}
+
+bool IsNearMissScore(const CandidateScore& score) {
+  const size_t target_insns = score.target_instruction_count;
+  const size_t matching_insns = score.matching_instructions;
+  const double match_ratio =
+      target_insns > 0 ? static_cast<double>(matching_insns) / target_insns : 0.0;
+  return (target_insns >= matching_insns && (target_insns - matching_insns <= 6)) ||
+         (match_ratio >= 0.85);
+}
+
 }  // namespace
+
+absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
+    const FunctionDeclaration& baseline_ast, const std::vector<std::string>& base_flags,
+    const FunctionSearchOptions& options,
+    const std::function<std::string(const FunctionDeclaration&)>& emit_c_fn,
+    const std::function<absl::StatusOr<CandidateScore>(
+        std::string_view c_code, const std::vector<std::string>& flags)>& score_fn) {
+  FunctionSearchResult result;
+  result.winning_c_flags = base_flags;
+  result.best_ast = std::make_unique<FunctionDeclaration>(baseline_ast.Clone());
+  result.best_c_code = emit_c_fn(baseline_ast);
+
+  absl::flat_hash_set<std::string> evaluated_candidates;
+  auto make_evaluation_key = [](const std::vector<std::string>& flags, std::string_view code) {
+    return absl::StrCat(absl::StrJoin(flags, " "), "\n", code);
+  };
+  evaluated_candidates.insert(make_evaluation_key(base_flags, result.best_c_code));
+
+  auto base_score_or = score_fn(result.best_c_code, base_flags);
+  if (!base_score_or.ok()) {
+    return base_score_or.status();
+  }
+  result.baseline_score = *base_score_or;
+  result.best_score = *base_score_or;
+
+  std::vector<std::vector<std::string>> flag_profiles = {base_flags};
+  if (options.explore_flags) {
+    flag_profiles = FlagExplorer::GenerateCandidateFlags(base_flags, options.flag_options);
+  }
+  if (!options.previous_cached_flags.empty() &&
+      std::find(flag_profiles.begin(), flag_profiles.end(), options.previous_cached_flags) ==
+          flag_profiles.end()) {
+    flag_profiles.push_back(options.previous_cached_flags);
+  }
+
+  // Phase 1a: Compiler Flag Sweep on Baseline AST first (immediately resolves functions that only
+  // need `-Wa,-O2` and ensures Phase 1b/Phase 2 run with the best flag profile).
+  if (!result.best_score.raw_bit_exact && (options.explore_flags || flag_profiles.size() > 1)) {
+    for (size_t i = 1; i < flag_profiles.size(); ++i) {
+      if (evaluated_candidates.insert(make_evaluation_key(flag_profiles[i], result.best_c_code))
+              .second) {
+        auto candidate_score_or = score_fn(result.best_c_code, flag_profiles[i]);
+        if (candidate_score_or.ok() && candidate_score_or->IsBetterThan(result.best_score)) {
+          result.best_score = *candidate_score_or;
+          result.winning_c_flags = flag_profiles[i];
+          result.improved_over_baseline = true;
+          if (result.best_score.raw_bit_exact) break;
+        }
+      }
+    }
+  }
+
+  // Phase 1b: Canonical AST Preset Sweep on winning_c_flags
+  bool improved_in_ast_search = false;
+  if (!result.best_score.raw_bit_exact && options.explore_ast_mutations) {
+    auto presets = AstMutator::GenerateCanonicalPresets(baseline_ast);
+    if (!options.previous_cached_mutations.empty()) {
+      presets.insert(presets.begin(), options.previous_cached_mutations);
+    }
+    for (const auto& preset_steps : presets) {
+      FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
+      std::string preset_c = emit_c_fn(preset_ast);
+      if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, preset_c))
+               .second) {
+        continue;
+      }
+      auto candidate_score_or = score_fn(preset_c, result.winning_c_flags);
+      if (!candidate_score_or.ok()) continue;
+      if (candidate_score_or->IsBetterThan(result.best_score)) {
+        result.best_score = *candidate_score_or;
+        *result.best_ast = std::move(preset_ast);
+        result.best_c_code = std::move(preset_c);
+        result.applied_mutations = preset_steps;
+        result.improved_over_baseline = true;
+        improved_in_ast_search = true;
+        if (result.best_score.raw_bit_exact) break;
+      }
+    }
+  }
+
+  // Phase 2: Greedy AST Mutation Search (steepest-ascent per round)
+  if (!result.best_score.raw_bit_exact && options.explore_ast_mutations) {
+    for (size_t round = 0; round < options.max_rounds && !result.best_score.raw_bit_exact;
+         ++round) {
+      const FunctionDeclaration round_base_ast = result.best_ast->Clone();
+      auto candidate_steps =
+          AstMutator::DiscoverMutations(round_base_ast, options.max_ast_candidates_per_round);
+      bool improved_in_round = false;
+      AstMutationStep round_best_step;
+      for (const auto& step : candidate_steps) {
+        FunctionDeclaration mutated = AstMutator::ApplyMutation(round_base_ast, step);
+        std::string mutated_c = emit_c_fn(mutated);
+        if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, mutated_c))
+                 .second) {
+          continue;
+        }
+        auto candidate_score_or = score_fn(mutated_c, result.winning_c_flags);
+        if (!candidate_score_or.ok()) continue;
+        if (candidate_score_or->IsBetterThan(result.best_score)) {
+          result.best_score = *candidate_score_or;
+          *result.best_ast = std::move(mutated);
+          result.best_c_code = std::move(mutated_c);
+          round_best_step = step;
+          result.improved_over_baseline = true;
+          improved_in_round = true;
+          improved_in_ast_search = true;
+          if (result.best_score.raw_bit_exact) break;
+        }
+      }
+      if (!improved_in_round) break;
+      result.applied_mutations.push_back(round_best_step);
+    }
+  }
+
+  // Phase 2b: Near-Miss Polish Pass
+  // When a function is not yet bit-exact after the main mutation rounds, if the best candidate is
+  // a near-miss (target_insns - matching_insns <= 6 or instruction_match_ratio >= 0.85), run an
+  // extra Polish Pass (up to `max_polish_rounds` micro-rounds) that tests high-yield near-miss
+  // mutations first on `winning_c_flags` without the O(mutations * flag_profiles) explosion.
+  if (!result.best_score.raw_bit_exact && options.explore_ast_mutations &&
+      IsNearMissScore(result.best_score)) {
+    for (size_t polish_round = 0;
+         polish_round < options.max_polish_rounds && !result.best_score.raw_bit_exact;
+         ++polish_round) {
+      const FunctionDeclaration polish_base_ast = result.best_ast->Clone();
+      auto all_steps =
+          AstMutator::DiscoverMutations(polish_base_ast, options.max_polish_candidates);
+      std::vector<AstMutationStep> polish_steps;
+      polish_steps.reserve(all_steps.size());
+      for (const auto& step : all_steps) {
+        if (IsHighYieldPolishMutation(step.kind())) {
+          polish_steps.push_back(step);
+        }
+      }
+      for (const auto& step : all_steps) {
+        if (!IsHighYieldPolishMutation(step.kind())) {
+          polish_steps.push_back(step);
+        }
+      }
+
+      bool improved_in_polish = false;
+      AstMutationStep polish_best_step;
+      // Stage 2b-1: Evaluate all polish mutations on `winning_c_flags` first (O(mutations)).
+      for (const auto& step : polish_steps) {
+        FunctionDeclaration mutated = AstMutator::ApplyMutation(polish_base_ast, step);
+        std::string mutated_c = emit_c_fn(mutated);
+        if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, mutated_c))
+                 .second) {
+          continue;
+        }
+        auto candidate_score_or = score_fn(mutated_c, result.winning_c_flags);
+        if (!candidate_score_or.ok()) continue;
+        if (candidate_score_or->IsBetterThan(result.best_score)) {
+          result.best_score = *candidate_score_or;
+          *result.best_ast = std::move(mutated);
+          result.best_c_code = std::move(mutated_c);
+          polish_best_step = step;
+          result.improved_over_baseline = true;
+          improved_in_polish = true;
+          improved_in_ast_search = true;
+          if (result.best_score.raw_bit_exact) break;
+        }
+      }
+      // Stage 2b-2: If still not bit-exact, co-evaluate bounded high-yield polish steps across
+      // remaining flag profiles.
+      if (!result.best_score.raw_bit_exact && (options.explore_flags || flag_profiles.size() > 1)) {
+        constexpr size_t kMaxCrossFlagPolishSteps = 32;
+        const size_t cross_flag_limit = std::min(polish_steps.size(), kMaxCrossFlagPolishSteps);
+        for (size_t idx = 0; idx < cross_flag_limit; ++idx) {
+          const auto& step = polish_steps[idx];
+          FunctionDeclaration mutated = AstMutator::ApplyMutation(polish_base_ast, step);
+          std::string mutated_c = emit_c_fn(mutated);
+          for (const auto& flags : flag_profiles) {
+            if (!evaluated_candidates.insert(make_evaluation_key(flags, mutated_c)).second) {
+              continue;
+            }
+            auto candidate_score_or = score_fn(mutated_c, flags);
+            if (!candidate_score_or.ok()) continue;
+            if (candidate_score_or->IsBetterThan(result.best_score)) {
+              result.best_score = *candidate_score_or;
+              result.winning_c_flags = flags;
+              *result.best_ast = mutated.Clone();
+              result.best_c_code = mutated_c;
+              polish_best_step = step;
+              result.improved_over_baseline = true;
+              improved_in_polish = true;
+              improved_in_ast_search = true;
+              if (result.best_score.raw_bit_exact) break;
+            }
+          }
+          if (result.best_score.raw_bit_exact) break;
+        }
+      }
+      if (!improved_in_polish) break;
+      result.applied_mutations.push_back(polish_best_step);
+    }
+  }
+
+  // Phase 3: Post-AST Compiler Flag Re-Sweep if Phase 1b, Phase 2, or Phase 2b mutated the AST
+  if (!result.best_score.raw_bit_exact && (options.explore_flags || flag_profiles.size() > 1) &&
+      improved_in_ast_search) {
+    for (const auto& flags : flag_profiles) {
+      if (flags == result.winning_c_flags) continue;
+      if (!evaluated_candidates.insert(make_evaluation_key(flags, result.best_c_code)).second) {
+        continue;
+      }
+      auto candidate_score_or = score_fn(result.best_c_code, flags);
+      if (!candidate_score_or.ok()) continue;
+      if (candidate_score_or->IsBetterThan(result.best_score)) {
+        result.best_score = *candidate_score_or;
+        result.winning_c_flags = flags;
+        result.improved_over_baseline = true;
+        if (result.best_score.raw_bit_exact) break;
+      }
+    }
+  }
+
+  return result;
+}
 
 TunerPipeline::TunerPipeline(TunerPipelineOptions options, std::unique_ptr<LifterPipeline> lifter,
                              TuningCacheStore cache_store)
@@ -230,19 +466,25 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   }
 
   CandidateScorer scorer(extractor, symbols);
-  std::string baseline_compilable_c =
-      EmitSingleFunctionWithExterns(baseline_ast, parent_tu, symbols, /*format_with_clang=*/false);
+  FunctionSearchOptions search_opts;
+  search_opts.explore_flags = options_.explore_flags;
+  search_opts.explore_ast_mutations = options_.explore_ast_mutations;
+  search_opts.flag_options = options_.flag_options;
+  search_opts.max_ast_candidates_per_round = options_.max_ast_candidates_per_round;
+  search_opts.max_rounds = options_.max_rounds;
+  search_opts.previous_cached_flags = std::move(previous_cached_flags);
+  search_opts.previous_cached_mutations = std::move(previous_cached_mutations);
 
-  absl::flat_hash_set<std::string> evaluated_candidates;
-  auto make_evaluation_key = [](const std::vector<std::string>& flags, std::string_view code) {
-    return absl::StrCat(absl::StrJoin(flags, " "), "\n", code);
-  };
-  evaluated_candidates.insert(make_evaluation_key(base_flags, baseline_compilable_c));
-
-  auto base_score_or =
-      scorer.CompileAndScore(target, baseline_compilable_c, base_flags, extra_include_dirs);
-  if (!base_score_or.ok()) {
-    std::filesystem::remove_all(temporary_include_dir, error_code);
+  auto search_res_or = SearchFunctionCandidates(
+      baseline_ast, base_flags, search_opts,
+      [&](const FunctionDeclaration& ast) {
+        return EmitSingleFunctionWithExterns(ast, parent_tu, symbols, /*format_with_clang=*/false);
+      },
+      [&](std::string_view c_code, const std::vector<std::string>& flags) {
+        return scorer.CompileAndScore(target, c_code, flags, extra_include_dirs);
+      });
+  std::filesystem::remove_all(temporary_include_dir, error_code);
+  if (!search_res_or.ok()) {
     result.tuned_ast = std::make_unique<FunctionDeclaration>(baseline_ast.Clone());
     if (emit_formatted_c) {
       result.tuned_c_code = EmitSingleFunctionWithExterns(*result.tuned_ast, parent_tu, symbols,
@@ -251,200 +493,12 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     return result;
   }
 
-  result.baseline_score = *base_score_or;
-  result.best_score = *base_score_or;
-  FunctionDeclaration best_ast = baseline_ast.Clone();
-
-  std::vector<std::vector<std::string>> flag_profiles = {base_flags};
-  if (options_.explore_flags) {
-    flag_profiles = FlagExplorer::GenerateCandidateFlags(base_flags, options_.flag_options);
-  }
-  if (!previous_cached_flags.empty() && std::find(flag_profiles.begin(), flag_profiles.end(),
-                                                  previous_cached_flags) == flag_profiles.end()) {
-    flag_profiles.push_back(previous_cached_flags);
-  }
-
-  // Phase 1a: Compiler Flag Sweep on Baseline AST first (immediately resolves functions that only
-  // need `-Wa,-O2` and ensures Phase 1b/Phase 2 run with the best flag profile).
-  if (!result.best_score.raw_bit_exact && (options_.explore_flags || flag_profiles.size() > 1)) {
-    for (size_t i = 1; i < flag_profiles.size(); ++i) {
-      if (evaluated_candidates.insert(make_evaluation_key(flag_profiles[i], baseline_compilable_c))
-              .second) {
-        auto candidate_score_or = scorer.CompileAndScore(target, baseline_compilable_c,
-                                                         flag_profiles[i], extra_include_dirs);
-        if (candidate_score_or.ok() && candidate_score_or->IsBetterThan(result.best_score)) {
-          result.best_score = *candidate_score_or;
-          result.winning_c_flags = flag_profiles[i];
-          result.improved_over_baseline = true;
-          if (result.best_score.raw_bit_exact) break;
-        }
-      }
-    }
-  }
-
-  // Phase 1b: Canonical AST Preset Sweep on winning_c_flags
-  bool improved_in_phase1b = false;
-  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
-    auto presets = AstMutator::GenerateCanonicalPresets(baseline_ast);
-    if (!previous_cached_mutations.empty()) {
-      presets.insert(presets.begin(), previous_cached_mutations);
-    }
-    for (const auto& preset_steps : presets) {
-      FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
-      std::string preset_c = EmitSingleFunctionWithExterns(preset_ast, parent_tu, symbols,
-                                                           /*format_with_clang=*/false);
-      if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, preset_c))
-               .second) {
-        continue;
-      }
-      auto candidate_score_or =
-          scorer.CompileAndScore(target, preset_c, result.winning_c_flags, extra_include_dirs);
-      if (!candidate_score_or.ok()) continue;
-      if (candidate_score_or->IsBetterThan(result.best_score)) {
-        result.best_score = *candidate_score_or;
-        best_ast = std::move(preset_ast);
-        result.applied_mutations = preset_steps;
-        result.improved_over_baseline = true;
-        improved_in_phase1b = true;
-        if (result.best_score.raw_bit_exact) break;
-      }
-    }
-  }
-
-  // Phase 2: Greedy AST Mutation Search
-  bool improved_in_phase2 = false;
-  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
-    for (size_t round = 0; round < options_.max_rounds && !result.best_score.raw_bit_exact;
-         ++round) {
-      auto candidate_steps =
-          AstMutator::DiscoverMutations(best_ast, options_.max_ast_candidates_per_round);
-      bool improved_in_round = false;
-      for (const auto& step : candidate_steps) {
-        FunctionDeclaration mutated = AstMutator::ApplyMutation(best_ast, step);
-        std::string mutated_c =
-            EmitSingleFunctionWithExterns(mutated, parent_tu, symbols, /*format_with_clang=*/false);
-        if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, mutated_c))
-                 .second) {
-          continue;
-        }
-        auto candidate_score_or =
-            scorer.CompileAndScore(target, mutated_c, result.winning_c_flags, extra_include_dirs);
-        if (!candidate_score_or.ok()) continue;
-        if (candidate_score_or->IsBetterThan(result.best_score)) {
-          result.best_score = *candidate_score_or;
-          best_ast = std::move(mutated);
-          result.applied_mutations.push_back(step);
-          result.improved_over_baseline = true;
-          improved_in_round = true;
-          improved_in_phase2 = true;
-          if (result.best_score.raw_bit_exact) break;
-        }
-      }
-      if (!improved_in_round) break;
-    }
-  }
-
-  // Phase 2b: Near-Miss Polish Pass
-  // When a function is not yet bit-exact after the main mutation rounds, if the best candidate is
-  // a near-miss (target_insns - matching_insns <= 6 or instruction_match_ratio >= 0.85), run an
-  // extra Polish Pass (up to 2 extra micro-rounds) that tests ALL swap adjacent statements sites
-  // and near-miss mutations without truncating at max_candidates=24, co-evaluating across flag
-  // profiles.
-  if (!result.best_score.raw_bit_exact && options_.explore_ast_mutations) {
-    size_t target_insns = result.best_score.target_instruction_count;
-    size_t matching_insns = result.best_score.matching_instructions;
-    double match_ratio =
-        target_insns > 0 ? static_cast<double>(matching_insns) / target_insns : 0.0;
-    bool is_near_miss = (target_insns >= matching_insns && (target_insns - matching_insns <= 6)) ||
-                        (match_ratio >= 0.85);
-    if (is_near_miss) {
-      constexpr size_t kMaxPolishRounds = 2;
-      for (size_t polish_round = 0;
-           polish_round < kMaxPolishRounds && !result.best_score.raw_bit_exact; ++polish_round) {
-        auto all_steps = AstMutator::DiscoverMutations(best_ast, /*max_mutations=*/512);
-        std::vector<AstMutationStep> polish_steps;
-        for (const auto& step : all_steps) {
-          if (step.kind() == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
-              step.kind() == AST_MUTATION_PROPAGATE_REGISTER_COPY ||
-              step.kind() == AST_MUTATION_HOIST_WHILE_GUARD ||
-              step.kind() == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR ||
-              step.kind() == AST_MUTATION_INVERT_IF_ELSE ||
-              step.kind() == AST_MUTATION_COMMUTE_BINARY_OP) {
-            polish_steps.push_back(step);
-          }
-        }
-        for (const auto& step : all_steps) {
-          if (step.kind() != AST_MUTATION_SWAP_ADJACENT_STATEMENTS &&
-              step.kind() != AST_MUTATION_PROPAGATE_REGISTER_COPY &&
-              step.kind() != AST_MUTATION_HOIST_WHILE_GUARD &&
-              step.kind() != AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR &&
-              step.kind() != AST_MUTATION_INVERT_IF_ELSE &&
-              step.kind() != AST_MUTATION_COMMUTE_BINARY_OP) {
-            polish_steps.push_back(step);
-          }
-        }
-
-        bool improved_in_polish = false;
-        const FunctionDeclaration polish_base_ast = best_ast.Clone();
-        for (const auto& step : polish_steps) {
-          FunctionDeclaration mutated = AstMutator::ApplyMutation(polish_base_ast, step);
-          std::string mutated_c = EmitSingleFunctionWithExterns(mutated, parent_tu, symbols,
-                                                                /*format_with_clang=*/false);
-          std::vector<std::vector<std::string>> candidate_flags_to_try = {result.winning_c_flags};
-          for (const auto& flags : flag_profiles) {
-            if (flags != result.winning_c_flags) {
-              candidate_flags_to_try.push_back(flags);
-            }
-          }
-
-          for (const auto& flags : candidate_flags_to_try) {
-            if (!evaluated_candidates.insert(make_evaluation_key(flags, mutated_c)).second) {
-              continue;
-            }
-            auto candidate_score_or =
-                scorer.CompileAndScore(target, mutated_c, flags, extra_include_dirs);
-            if (!candidate_score_or.ok()) continue;
-            if (candidate_score_or->IsBetterThan(result.best_score)) {
-              result.best_score = *candidate_score_or;
-              result.winning_c_flags = flags;
-              best_ast = mutated.Clone();
-              result.applied_mutations.push_back(step);
-              result.improved_over_baseline = true;
-              improved_in_polish = true;
-              improved_in_phase2 = true;
-              if (result.best_score.raw_bit_exact) break;
-            }
-          }
-          if (result.best_score.raw_bit_exact) break;
-        }
-        if (!improved_in_polish) break;
-      }
-    }
-  }
-
-  // Phase 3: Post-AST Compiler Flag Re-Sweep if Phase 1b or Phase 2 mutated the AST
-  if (!result.best_score.raw_bit_exact && options_.explore_flags &&
-      (improved_in_phase1b || improved_in_phase2)) {
-    std::string best_ast_c =
-        EmitSingleFunctionWithExterns(best_ast, parent_tu, symbols, /*format_with_clang=*/false);
-    for (const auto& flags : flag_profiles) {
-      if (flags == result.winning_c_flags) continue;
-      if (!evaluated_candidates.insert(make_evaluation_key(flags, best_ast_c)).second) {
-        continue;
-      }
-      auto candidate_score_or =
-          scorer.CompileAndScore(target, best_ast_c, flags, extra_include_dirs);
-      if (!candidate_score_or.ok()) continue;
-      if (candidate_score_or->IsBetterThan(result.best_score)) {
-        result.best_score = *candidate_score_or;
-        result.winning_c_flags = flags;
-        result.improved_over_baseline = true;
-        if (result.best_score.raw_bit_exact) break;
-      }
-    }
-  }
-
-  std::filesystem::remove_all(temporary_include_dir, error_code);
+  result.baseline_score = std::move(search_res_or->baseline_score);
+  result.best_score = std::move(search_res_or->best_score);
+  result.winning_c_flags = std::move(search_res_or->winning_c_flags);
+  result.applied_mutations = std::move(search_res_or->applied_mutations);
+  result.improved_over_baseline = search_res_or->improved_over_baseline;
+  FunctionDeclaration best_ast = std::move(*search_res_or->best_ast);
 
   // Verify behavioral equivalence once on the final winning candidate (if not raw bit-exact)
   if (result.improved_over_baseline && !result.best_score.raw_bit_exact &&

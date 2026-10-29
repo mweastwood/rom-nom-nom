@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,6 +49,28 @@ struct TunerPipelineOptions {
   size_t num_threads = 0;
 };
 
+struct FunctionSearchOptions {
+  bool explore_flags = true;
+  bool explore_ast_mutations = true;
+  FlagExplorerOptions flag_options;
+  size_t max_ast_candidates_per_round = 64;
+  size_t max_rounds = 4;
+  size_t max_polish_rounds = 2;
+  size_t max_polish_candidates = 512;
+  std::vector<std::string> previous_cached_flags;
+  std::vector<AstMutationStep> previous_cached_mutations;
+};
+
+struct FunctionSearchResult {
+  CandidateScore baseline_score;
+  CandidateScore best_score;
+  std::vector<std::string> winning_c_flags;
+  std::vector<AstMutationStep> applied_mutations;
+  std::unique_ptr<FunctionDeclaration> best_ast;
+  std::string best_c_code;
+  bool improved_over_baseline = false;
+};
+
 struct FunctionTuneResult {
   std::string function_name;
   std::string module_name;
@@ -84,6 +107,14 @@ class TunerPipeline {
 
   TunerPipeline(TunerPipelineOptions options, std::unique_ptr<LifterPipeline> lifter,
                 TuningCacheStore cache_store);
+
+  // Executes the multi-phase compiler flag and AST mutation search loop for a single function.
+  static absl::StatusOr<FunctionSearchResult> SearchFunctionCandidates(
+      const FunctionDeclaration& baseline_ast, const std::vector<std::string>& base_flags,
+      const FunctionSearchOptions& options,
+      const std::function<std::string(const FunctionDeclaration&)>& emit_c_fn,
+      const std::function<absl::StatusOr<CandidateScore>(
+          std::string_view c_code, const std::vector<std::string>& flags)>& score_fn);
 
   // Tunes a single function given by name or VRAM address.
   absl::StatusOr<FunctionTuneResult> TuneFunction(std::string_view func_name_or_addr,
