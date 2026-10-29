@@ -988,5 +988,44 @@ TEST(CfgDeReorgTest, CrossJumpTailDuplicatorInlinesConditionalBranchTailIntoJump
   EXPECT_EQ(jmp_pred->instructions[jmp_pred->instructions.size() - 2].opcode, Opcode::kBeq);
 }
 
+TEST(CfgDeReorgTest, EagerThreadDelaySlotUnschedulerPreservesPreLoopConstCalleeSavedInit) {
+  // Models a loop guard `blez $v1, 0x20` whose delay slot initializes a loop induction counter
+  // `addu $s0, $zero, $zero` before falling through into a single-successor loop preheader `0x08`
+  // (`func_800F8840` pattern). The constant zero init must remain before the guard so GCC fills the
+  // `blez` delay slot with `move $s0, $zero`.
+  std::vector<uint32_t> words = {
+      0x18600007,  // 0x00: blez  $v1, +7 -> 0x20 (post-loop epilogue)
+      0x00008021,  // 0x04: addu  $s0, $zero, $zero (constant zero init of loop counter $s0)
+      0x00408821,  // 0x08: addu  $s1, $v0, $zero (loop preheader falls through to 0x0C)
+      0x26100001,  // 0x0C: addiu $s0, $s0, 1 (loop header/latch)
+      0x0203102A,  // 0x10: slt   $v0, $s0, $v1
+      0x1440FFFD,  // 0x14: bne   $v0, $zero, -3 -> 0x0C
+      0x2631001C,  // 0x18: addiu $s1, $s1, 28
+      0x00000000,  // 0x1C: nop
+      0x8FB00010,  // 0x20: lw    $s0, 16($sp) (epilogue restores $s0)
+      0x8FB10014,  // 0x24: lw    $s1, 20($sp)
+      0x03E00008,  // 0x28: jr    $ra
+      0x27BD0018,  // 0x2C: addiu $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+
+  const BasicBlock* guard_blk = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* preheader_blk = cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(guard_blk, nullptr);
+  ASSERT_NE(preheader_blk, nullptr);
+  ASSERT_GE(guard_blk->instructions.size(), 2u);
+  EXPECT_EQ(guard_blk->instructions.back().opcode, Opcode::kAddu);
+  EXPECT_EQ(guard_blk->instructions.back().rd, Register::kS0);
+  EXPECT_EQ(guard_blk->instructions.back().rs, Register::kZero);
+  ASSERT_FALSE(preheader_blk->instructions.empty());
+  EXPECT_EQ(preheader_blk->instructions.front().rd, Register::kS1);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

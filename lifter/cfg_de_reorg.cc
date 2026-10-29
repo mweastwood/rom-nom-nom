@@ -1290,7 +1290,8 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
             taken_block->predecessors.size() >= 2 &&
             IsSinkableDelaySlotInstruction(block, delay_inst) &&
             (uses_preserved_to_pred() ||
-             (term.IsBranchLikely() && pred_blk->predecessors.size() >= 2) ||
+             (term.IsBranchLikely() && (pred_blk->predecessors.size() >= 2 ||
+                                        post_dom_tree.Dominates(pred_id, effective_fallthrough))) ||
              (!dom_tree.Dominates(effective_fallthrough, pred_id) &&
               !pred_blk->predecessors.empty()));
         const bool cross_loop_valid =
@@ -1677,9 +1678,14 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         continue;
       }
 
+      const bool is_preloop_const_callee_saved_init =
+          target_blk->successors.size() == 1 &&
+          loop_info.GetLoopFor(target_blk->successors[0]) != enclosing_loop &&
+          delay_ud.gpr_uses.empty();
       const bool is_fallthrough_stolen_callee_saved_init =
-          dead_on_taken && !dead_on_fallthrough && delay_ud.gpr_defs.size() == 1 &&
-          delay_ud.gpr_defs[0] >= Register::kS0 && delay_ud.gpr_defs[0] <= Register::kS7;
+          dead_on_taken && !dead_on_fallthrough && !is_preloop_const_callee_saved_init &&
+          delay_ud.gpr_defs.size() == 1 && delay_ud.gpr_defs[0] >= Register::kS0 &&
+          delay_ud.gpr_defs[0] <= Register::kS7;
 
       if (DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
           DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst) ||

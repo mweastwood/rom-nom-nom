@@ -1423,5 +1423,48 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, HasSubstr("HelperCall(arg0, *(s32*)&(f32)arg0);"));
 }
 
+TEST(AstExpressionFolderTest, FoldsInPlaceRelationalComparisonIntoAdjacentIfCondition) {
+  auto body = std::make_unique<CompoundStatement>();
+  // v1 = *(s32*)(temp_s0 + 4) - temp_s0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary(
+          "-",
+          CExpression::Unary(
+              "*", CExpression::Cast(CType{"s32", false, 1},
+                                     CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                         CExpression::Integer(4)))),
+          CExpression::Identifier("temp_s0")))));
+  // *(s32*)(temp_s0 + 24) = v1;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1},
+                                 CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                     CExpression::Integer(24)))),
+      CExpression::Identifier("v1"))));
+  // v1 = ((u32)v1 < 33);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("<", CExpression::Cast(CType::U32(), CExpression::Identifier("v1")),
+                          CExpression::Integer(33)))));
+  // if ((v1 == 0)) { HelperCall(temp_s0); }
+  auto then_comp = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("temp_s0"));
+  then_comp->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("HelperCall"), std::move(args))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("v1"), CExpression::Integer(0)),
+      std::move(then_comp)));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("v1 = ((u32)v1 < 33);")));
+  EXPECT_THAT(code, HasSubstr("if ((((u32)v1 < 33) == 0))"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

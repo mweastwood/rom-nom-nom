@@ -1757,5 +1757,36 @@ TEST(AstConverterTest, ReplacesBreakWithReturnInGuardedDoWhileAndRewritesDoWhile
   }
 }
 
+TEST(AstConverterTest, SinksSharedTrailingStoreOutOfIfElseWithSingleStatementElse) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto then_comp = std::make_unique<CompoundStatement>();
+  auto dw_body = std::make_unique<CompoundStatement>();
+  dw_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s8*)", CExpression::Identifier("v1")),
+                              CExpression::Identifier("v0"))));
+  dw_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("+", CExpression::Identifier("v1"), CExpression::Integer(1)))));
+  then_comp->AddStatement(CStatement::DoWhile(
+      std::move(dw_body),
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+  then_comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*(s8*)", CExpression::Identifier("v1")), CExpression::Integer(0))));
+
+  auto else_comp = std::make_unique<CompoundStatement>();
+  else_comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*(s8*)", CExpression::Identifier("v1")), CExpression::Integer(0))));
+
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0)),
+      std::move(then_comp), std::move(else_comp)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("arg0")));
+
+  SinkCommonBranchTailArgAssignments(body.get());
+  std::string code = body->ToString();
+  EXPECT_THAT(code, Not(HasSubstr("else")));
+  EXPECT_THAT(code, HasSubstr("} while ((v0 != 0));\n    }\n    *(s8*)v1 = 0;\n    return arg0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

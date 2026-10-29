@@ -1587,7 +1587,20 @@ struct FolderContext {
                   }
                 }
               }
-              if ((var == "temp_at" ||
+              const bool is_gpr_scratch_var =
+                  is_scratch && !(var.size() >= 2 && var[0] == 'f' &&
+                                  std::isdigit(static_cast<unsigned char>(var[1])));
+              const bool is_dead_folded_branch_cmp =
+                  is_gpr_scratch_var && !is_float_bitcast_lhs && i + 1 < stmts.size() &&
+                  stmts[i + 1] != nullptr &&
+                  (stmts[i + 1]->Kind() == CStatementKind::kIfStatement ||
+                   stmts[i + 1]->Kind() == CStatementKind::kWhileStatement ||
+                   stmts[i + 1]->Kind() == CStatementKind::kDoWhileStatement) &&
+                  (IsComparisonExpr(effective_rhs) ||
+                   (effective_rhs.Kind() == CExpressionKind::kBinaryExpression &&
+                    (static_cast<const BinaryExpression&>(effective_rhs).Op() == "&" ||
+                     static_cast<const BinaryExpression&>(effective_rhs).Op() == "^")));
+              if ((var == "temp_at" || is_dead_folded_branch_cmp ||
                    (var == "v0" && !is_float_bitcast_lhs &&
                     ((dead_at_end_vars != nullptr && dead_at_end_vars->contains(var)) ||
                      comp == root_body || killed_in_same_block) &&
@@ -2873,7 +2886,11 @@ struct FolderContext {
                           }
                         }
                       }
-                      if (CountExprUses(*new_cond, var) == 0) {
+                      const int expected_uses_after_sub =
+                          (j == i + 1 && IsComparisonExpr(assign.Rhs()))
+                              ? CountExprUses(assign.Rhs(), var)
+                              : 0;
+                      if (CountExprUses(*new_cond, var) == expected_uses_after_sub) {
                         auto new_then = if_stmt.ThenBranch().Clone();
                         std::unique_ptr<CStatement> new_else = (if_stmt.ElseBranch() != nullptr)
                                                                    ? if_stmt.ElseBranch()->Clone()

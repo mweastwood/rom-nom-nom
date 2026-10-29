@@ -1494,6 +1494,15 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
               if (sunk_any) break;
             }
           }
+          if (else_stmts.size() == 1 && then_stmts.size() >= 2 && else_stmts.back() != nullptr &&
+              then_stmts.back() != nullptr && is_sinkable_tail_stmt(*else_stmts.back()) &&
+              is_sinkable_tail_stmt(*then_stmts.back()) &&
+              else_stmts.back()->ToString() == then_stmts.back()->ToString()) {
+            auto sunk_stmt = std::move(then_stmts.back());
+            then_stmts.pop_back();
+            else_stmts.pop_back();
+            stmts.insert(stmts.begin() + i + 1, std::move(sunk_stmt));
+          }
           if (else_stmts.empty() && !then_stmts.empty()) {
             stmts[i] = CStatement::If(ifs_after_b.Condition().Clone(),
                                       ifs_after_b.MutableThenBranch()->Clone(), nullptr);
