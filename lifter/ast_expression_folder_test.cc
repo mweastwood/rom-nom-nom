@@ -1380,5 +1380,48 @@ TEST(AstExpressionFolderTest,
   EXPECT_THAT(code, HasSubstr("*(s32*)(&g_table + arg1) = (*(s32*)(&g_table + arg1) + 1);"));
 }
 
+TEST(AstExpressionFolderTest,
+     CollapsesDeadFloatBitcastRoundTripAndFoldsFloatArgBitcastAcrossStoreIntoCall) {
+  auto body = std::make_unique<CompoundStatement>();
+
+  // 1. Round-trip bitcast through dead float `*(s32*)&f4 = (arg0 + 1); v0 = *(s32*)&f4;`:
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*(s32*)&", CExpression::Identifier("f4")),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Unary("*(s32*)&", CExpression::Identifier("f4")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s32*)", CExpression::Identifier("arg2")),
+                              CExpression::Identifier("v0"))));
+
+  // 2. Float expression `f2 = (f32)arg0;` folded into `arg1 = *(s32*)&f2;` and across a byte
+  // store `*(s8*)arg2 = 3;` into `HelperCall(arg0, arg1)`:
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f2"),
+                              CExpression::Cast(CType::F32(), CExpression::Identifier("arg0")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg1"),
+                              CExpression::Unary("*(s32*)&", CExpression::Identifier("f2")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s8*)", CExpression::Identifier("arg2")),
+                              CExpression::Integer(3))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  call_args.push_back(CExpression::Identifier("arg1"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("HelperCall"), std::move(call_args))));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("f4")));
+  EXPECT_THAT(code, HasSubstr("*(s32*)arg2 = (arg0 + 1);"));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("f2 =")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1 =")));
+  EXPECT_THAT(code, HasSubstr("HelperCall(arg0, *(s32*)&(f32)arg0);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -1191,5 +1191,41 @@ TEST(AbiAnalyzerTest, DetermineReturnsF0DoubleVariousOpcodes) {
   EXPECT_TRUE(AbiAnalyzer::DetermineReturnsF0Double(*cfg_or));
 }
 
+TEST(AbiAnalyzerTest,
+     DetectFloatParametersInGeneralRegistersAcrossEntryCallBeforeLoopCounterRedef) {
+  // GuOrthoF / func_800920A0 pattern:
+  // Block 0 (entry, ends with jal):
+  //   00: mtc1  $a1, $f26
+  //   04: jal   0x80001000
+  //   08: addu  $s0, $a0, $zero
+  // Block 1 (call fallthrough, single predecessor, redefines $a1 before loop):
+  //   0C: addu  $a1, $zero, $zero
+  // Block 2 (loop body):
+  //   10: addiu $a1, $a1, 1
+  //   14: slti  $v0, $a1, 4
+  //   18: bnez  $v0, 0x80020010 (-3 instructions)
+  //   1C: nop
+  // Block 3 (return):
+  //   20: jr    $ra
+  //   24: nop
+  std::vector<uint32_t> words = {
+      0x4485D000,  // 00: mtc1  $a1, $f26
+      0x0C000400,  // 04: jal   0x80001000
+      0x00808021,  // 08: addu  $s0, $a0, $zero
+      0x00002821,  // 0C: addu  $a1, $zero, $zero
+      0x24A50001,  // 10: addiu $a1, $a1, 1
+      0x28A20004,  // 14: slti  $v0, $a1, 4
+      0x1440FFFD,  // 18: bnez  $v0, 0x80020010
+      0x00000000,  // 1C: nop
+      0x03E00008,  // 20: jr    $ra
+      0x00000000,  // 24: nop
+  };
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  auto float_gprs = AbiAnalyzer::DetectFloatParametersInGeneralRegisters(*cfg_or);
+  EXPECT_TRUE(float_gprs.contains(Register::kA1));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

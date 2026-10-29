@@ -918,20 +918,38 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
       continue;
     }
 
+    std::optional<uint32_t> entry_first_def_block_id;
     std::optional<size_t> entry_first_def_idx;
+    absl::flat_hash_set<uint32_t> blocks_before_entry_def;
     if (entry_block != nullptr && entry_block->predecessors.empty()) {
-      for (size_t j = 0; j < entry_block->instructions.size(); ++j) {
-        if (j > 0 && entry_block->instructions[j - 1].IsBranchLikely()) {
-          continue;
-        }
-        RegisterUseDef ud = GetInstructionUseDef(entry_block->instructions[j]);
-        for (Register d : ud.gpr_defs) {
-          if (d == reg) {
-            entry_first_def_idx = j;
-            break;
+      const BasicBlock* curr_block = entry_block;
+      absl::flat_hash_set<uint32_t> visited_chain;
+      while (curr_block != nullptr && visited_chain.insert(curr_block->id).second) {
+        for (size_t j = 0; j < curr_block->instructions.size(); ++j) {
+          if (j > 0 && curr_block->instructions[j - 1].IsBranchLikely()) {
+            continue;
           }
+          RegisterUseDef ud = GetInstructionUseDef(curr_block->instructions[j]);
+          for (Register d : ud.gpr_defs) {
+            if (d == reg) {
+              entry_first_def_block_id = curr_block->id;
+              entry_first_def_idx = j;
+              break;
+            }
+          }
+          if (entry_first_def_idx.has_value()) break;
         }
         if (entry_first_def_idx.has_value()) break;
+        blocks_before_entry_def.insert(curr_block->id);
+        const Instruction* term = curr_block->Terminator();
+        if (term != nullptr && term->IsCall() && curr_block->successors.size() == 1) {
+          const BasicBlock* next_block = cfg.GetBlock(curr_block->successors[0]);
+          if (next_block != nullptr && next_block->predecessors.size() == 1) {
+            curr_block = next_block;
+            continue;
+          }
+        }
+        break;
       }
     }
 
@@ -951,7 +969,9 @@ absl::flat_hash_set<Register> AbiAnalyzer::DetectFloatParametersInGeneralRegiste
 
         bool reads_incoming_param = false;
         if (entry_first_def_idx.has_value()) {
-          reads_incoming_param = (block.id == cfg.EntryBlockId() && j < *entry_first_def_idx);
+          reads_incoming_param =
+              blocks_before_entry_def.contains(block.id) ||
+              (block.id == *entry_first_def_block_id && j < *entry_first_def_idx);
         } else {
           reads_incoming_param = !defined_in_block;
         }

@@ -871,5 +871,60 @@ TEST(CEmitterTest,
               HasSubstr("Notify(({ register s32 _p asm(\"$4\") = (s32)&D_80237440; _p; }));"));
 }
 
+TEST(CEmitterTest, LowersFloatGprBitcastsToInlineAsmAndBarriersSymbolAddressAndGlobalAdd) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_t0", nullptr, std::nullopt, "$8"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v0", nullptr, std::nullopt, "$2"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::F32(), "f2", nullptr, std::nullopt, "$f2"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::F32(), "f26", nullptr, std::nullopt, "$f26"));
+
+  // 1. Float/GPR bitcasts lowered to mfc1 / mtc1 inline asm:
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Unary("*(s32*)&", CExpression::Identifier("f2")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("f26"),
+                              CExpression::Unary("*(f32*)&", CExpression::Identifier("temp_t0")))));
+
+  // 2. Symbol address `temp_s1 = &D_80189E54` and global-pointer add `temp_s0 = (D_800B180C + v0)`
+  // before a call and post-call reads/zero-offset deref:
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Unary("&", CExpression::Identifier("D_80189E54")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"),
+                              CExpression::Binary("+", CExpression::Identifier("D_800B180C"),
+                                                  CExpression::Identifier("v0")))));
+  body->AddStatement(
+      CStatement::Expression(CExpression::Call(CExpression::Identifier("HelperCall"), {})));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*(s32*)", CExpression::Identifier("temp_s0")),
+      CExpression::Identifier("temp_s1"))));
+  body->AddStatement(CStatement::Return());
+
+  tu.functions.emplace_back(CType::Void(), "TestFloatGprInlineAsmAndCseBarriers",
+                            std::vector<CParameter>{}, std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("__asm__(\"mfc1 %0, %1\" : \"=r\"(v0) : \"f\"(f2));"));
+  EXPECT_THAT(emitted, HasSubstr("__asm__(\"mtc1 %1, %0\" : \"=f\"(f26) : \"r\"(temp_t0));"));
+  EXPECT_THAT(emitted, HasSubstr("temp_s1 = &D_80189E54;\n    __asm__(\"\" : \"=r\"(temp_s1) : "
+                                 "\"0\"(temp_s1));"));
+  EXPECT_THAT(emitted, HasSubstr("temp_s0 = (D_800B180C + v0);\n    __asm__(\"\" : "
+                                 "\"=r\"(temp_s0) : \"0\"(temp_s0));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -17,6 +17,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/c_ast.h"
+#include "core/c_ast_utils.h"
 #include "core/process.h"
 #include "core/symbol_registry.h"
 
@@ -829,6 +830,10 @@ bool IsCseConflictProneCalleeSavedRhs(const CExpression& rhs,
     }
   }
   if (ExprReadsVar(rhs, "v0") || ExprReadsVar(rhs, "v1")) {
+    if (rhs.Kind() == CExpressionKind::kBinaryExpression) {
+      return CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs,
+                                                       /*require_split_prone=*/true);
+    }
     return false;
   }
   if (rhs.Kind() == CExpressionKind::kBinaryExpression) {
@@ -843,7 +848,8 @@ bool IsCseConflictProneCalleeSavedRhs(const CExpression& rhs,
         const auto& next_es = static_cast<const ExpressionStatement&>(*comp.Statements()[idx + 1]);
         if (ExprContainsNonIntrinsicCall(next_es.Expression()) &&
             ExprReadsVar(next_es.Expression(), lhs)) {
-          return false;
+          return CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs,
+                                                           /*require_split_prone=*/true);
         }
       }
     }
@@ -1337,6 +1343,31 @@ bool GlobalLoadHasNarrowToFloatAndSecondReadInBlock(const CompoundStatement& com
   return seen_narrow_to_float && read_stmts >= 2;
 }
 
+bool CalleeSavedReadBeforeFirstCallInBlock(const CompoundStatement& comp, size_t start_idx,
+                                           std::string_view var) {
+  for (size_t k = start_idx + 1; k < comp.Statements().size(); ++k) {
+    const auto& next_s = comp.Statements()[k];
+    if (next_s == nullptr || next_s->Kind() == CStatementKind::kVariableDeclarationStatement) {
+      continue;
+    }
+    if (next_s->Kind() == CStatementKind::kExpressionStatement) {
+      const auto& es = static_cast<const ExpressionStatement&>(*next_s);
+      if (ExprContainsNonIntrinsicCall(es.Expression())) {
+        return ExprReadsVar(es.Expression(), var);
+      }
+      if (ExprReadsVar(es.Expression(), var)) {
+        return true;
+      }
+      if (StmtOverwritesVar(*next_s, var)) {
+        return false;
+      }
+      continue;
+    }
+    return StmtReadsVar(*next_s, var);
+  }
+  return false;
+}
+
 std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
     const CStatement& stmt, const std::set<std::string>& external_data_symbols, bool has_calls) {
   switch (stmt.Kind()) {
@@ -1375,6 +1406,11 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                       "__asm__(\"\" : \"=r\"(%s) : \"0\"(%s))", prev_var, prev_var))));
                 }
                 var_list.push_back(lhs);
+                if (has_calls && !CalleeSavedReadBeforeFirstCallInBlock(comp, idx, lhs) &&
+                    CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs)) {
+                  emit_post_barrier = true;
+                  post_barrier_var = lhs;
+                }
               } else if (has_calls && IsPinnedCalleeSavedGprVar(lhs) && !is_sym_addr &&
                          IsCseConflictProneCalleeSavedRhs(a.Rhs(), external_data_symbols, comp, idx,
                                                           lhs) &&
@@ -2057,6 +2093,114 @@ std::unique_ptr<CStatement> PreventDuplicateCallArgSymbolCseInStmt(
   }
 }
 
+bool IsSinglePrecisionFprVarNameForBitcastAsm(std::string_view name) {
+  if (name.size() < 2 || name[0] != 'f' || !std::isdigit(static_cast<unsigned char>(name[1]))) {
+    return false;
+  }
+  for (size_t i = 1; i < name.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsEligibleGprForFloatBitcastAsm(std::string_view name) {
+  return name == "v0" || absl::StartsWith(name, "v0_w") || name == "v1" ||
+         absl::StartsWith(name, "v1_w") || name == "fp" || name == "temp_fp" || name == "temp_at" ||
+         absl::StartsWith(name, "temp_at_w") || absl::StartsWith(name, "temp_t") ||
+         absl::StartsWith(name, "temp_s") || absl::StartsWith(name, "temp_a") ||
+         (name.size() == 4 && absl::StartsWith(name, "arg") && name[3] >= '0' && name[3] <= '3');
+}
+
+std::unique_ptr<CStatement> LowerFloatGprBitcastsToInlineAsmInStmt(const CStatement& root_body,
+                                                                   const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      std::vector<std::unique_ptr<CStatement>> stmts;
+      stmts.reserve(comp.Statements().size());
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr) {
+          stmts.push_back(LowerFloatGprBitcastsToInlineAsmInStmt(root_body, *s));
+        }
+      }
+      return std::make_unique<CompoundStatement>(std::move(stmts));
+    }
+    case CStatementKind::kExpressionStatement: {
+      const auto& es = static_cast<const ExpressionStatement&>(stmt);
+      if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+        if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            a.Rhs().Kind() == CExpressionKind::kUnaryExpression) {
+          std::string_view lhs = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
+          const auto& u = static_cast<const UnaryExpression&>(a.Rhs());
+          if (u.Operand().Kind() == CExpressionKind::kIdentifier) {
+            std::string_view rhs = static_cast<const IdentifierExpression&>(u.Operand()).Name();
+            if ((u.Op() == "*(s32*)&" || u.Op() == "*(s32 *)&") &&
+                IsEligibleGprForFloatBitcastAsm(lhs) &&
+                IsSinglePrecisionFprVarNameForBitcastAsm(rhs) &&
+                !((rhs == "f12" || rhs == "f14") && !StatementModifiesVariable(root_body, rhs))) {
+              return CStatement::Expression(CExpression::Identifier(absl::StrFormat(
+                  "__asm__(\"mfc1 %%0, %%1\" : \"=r\"(%s) : \"f\"(%s))", lhs, rhs)));
+            }
+            if ((u.Op() == "*(f32*)&" || u.Op() == "*(f32 *)&") &&
+                IsSinglePrecisionFprVarNameForBitcastAsm(lhs) &&
+                IsEligibleGprForFloatBitcastAsm(rhs) && !absl::StartsWith(rhs, "arg")) {
+              return CStatement::Expression(CExpression::Identifier(absl::StrFormat(
+                  "__asm__(\"mtc1 %%1, %%0\" : \"=f\"(%s) : \"r\"(%s))", lhs, rhs)));
+            }
+          }
+        }
+      }
+      return stmt.Clone();
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(ifs.Condition().Clone(),
+                            LowerFloatGprBitcastsToInlineAsmInStmt(root_body, ifs.ThenBranch()),
+                            ifs.ElseBranch() != nullptr ? LowerFloatGprBitcastsToInlineAsmInStmt(
+                                                              root_body, *ifs.ElseBranch())
+                                                        : nullptr);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(ws.Condition().Clone(),
+                               LowerFloatGprBitcastsToInlineAsmInStmt(root_body, ws.Body()));
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(LowerFloatGprBitcastsToInlineAsmInStmt(root_body, dws.Body()),
+                                 dws.Condition().Clone());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(fs.Init() != nullptr ? fs.Init()->Clone() : nullptr,
+                             fs.Condition() != nullptr ? fs.Condition()->Clone() : nullptr,
+                             fs.Step() != nullptr ? fs.Step()->Clone() : nullptr,
+                             LowerFloatGprBitcastsToInlineAsmInStmt(root_body, fs.Body()));
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      std::vector<SwitchCase> cases;
+      cases.reserve(ss.Cases().size());
+      for (const auto& c : ss.Cases()) {
+        SwitchCase sc;
+        sc.case_values = c.case_values;
+        sc.is_default = c.is_default;
+        if (c.body != nullptr) {
+          sc.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+              LowerFloatGprBitcastsToInlineAsmInStmt(root_body, *c.body).release()));
+        }
+        cases.push_back(std::move(sc));
+      }
+      return CStatement::Switch(ss.Condition().Clone(), std::move(cases));
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
 }  // namespace
 
 std::string CTranslationUnit::ToString() const {
@@ -2255,6 +2399,10 @@ std::string CTranslationUnit::ToString() const {
     if (!dup_addr_symbols.empty()) {
       body_to_emit = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
           PreventDuplicateCallArgSymbolCseInStmt(*body_to_emit, dup_addr_symbols).release()));
+    }
+    if (IsO2FunctionBody(functions[i].Body())) {
+      body_to_emit = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+          LowerFloatGprBitcastsToInlineAsmInStmt(functions[i].Body(), *body_to_emit).release()));
     }
     FunctionDeclaration norm_fn(functions[i].ReturnType(), functions[i].Name(),
                                 functions[i].Parameters(), std::move(body_to_emit),

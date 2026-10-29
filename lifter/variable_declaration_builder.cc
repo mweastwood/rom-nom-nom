@@ -47,6 +47,122 @@ bool IsCalleeSavedGprVarName(std::string_view v) {
          (v.size() == 7 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7');
 }
 
+bool IsSinglePrecisionFprVarName(std::string_view name) {
+  if (name.size() < 2 || name[0] != 'f' || !std::isdigit(static_cast<unsigned char>(name[1]))) {
+    return false;
+  }
+  for (size_t i = 1; i < name.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsEligibleGprForFloatBitcastAsm(std::string_view name) {
+  return name == "v0" || absl::StartsWith(name, "v0_w") || name == "v1" ||
+         absl::StartsWith(name, "v1_w") || name == "fp" || name == "temp_fp" || name == "temp_at" ||
+         absl::StartsWith(name, "temp_at_w") || absl::StartsWith(name, "temp_t") ||
+         absl::StartsWith(name, "temp_s") || absl::StartsWith(name, "temp_a") ||
+         (name.size() == 4 && absl::StartsWith(name, "arg") && name[3] >= '0' && name[3] <= '3');
+}
+
+bool IsInlineAsmEligibleFloatGprBitcastStmt(const CStatement& root_body, const CStatement& stmt) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) return false;
+  const auto& es = static_cast<const ExpressionStatement&>(stmt);
+  if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) return false;
+  const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+  if (a.Op() != "=" || a.Lhs().Kind() != CExpressionKind::kIdentifier ||
+      a.Rhs().Kind() != CExpressionKind::kUnaryExpression) {
+    return false;
+  }
+  std::string_view lhs = static_cast<const IdentifierExpression&>(a.Lhs()).Name();
+  const auto& u = static_cast<const UnaryExpression&>(a.Rhs());
+  if (u.Operand().Kind() != CExpressionKind::kIdentifier) return false;
+  std::string_view rhs = static_cast<const IdentifierExpression&>(u.Operand()).Name();
+  if ((u.Op() == "*(s32*)&" || u.Op() == "*(s32 *)&") && IsEligibleGprForFloatBitcastAsm(lhs) &&
+      IsSinglePrecisionFprVarName(rhs)) {
+    return !((rhs == "f12" || rhs == "f14") && !StatementModifiesVariable(root_body, rhs));
+  }
+  return (u.Op() == "*(f32*)&" || u.Op() == "*(f32 *)&") && IsSinglePrecisionFprVarName(lhs) &&
+         IsEligibleGprForFloatBitcastAsm(rhs) && !absl::StartsWith(rhs, "arg");
+}
+
+bool StatementTakesNonInlineAsmAddressOfImpl(const CStatement& root_body, const CStatement& s,
+                                             std::string_view target_var) {
+  switch (s.Kind()) {
+    case CStatementKind::kExpressionStatement:
+      if (IsInlineAsmEligibleFloatGprBitcastStmt(root_body, s)) {
+        return false;
+      }
+      return StatementTakesAddressOf(s, target_var);
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(s);
+      for (const auto& child : comp.Statements()) {
+        if (child != nullptr &&
+            StatementTakesNonInlineAsmAddressOfImpl(root_body, *child, target_var)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(s);
+      if (ExpressionTakesAddressOf(ifs.Condition(), target_var) ||
+          StatementTakesNonInlineAsmAddressOfImpl(root_body, ifs.ThenBranch(), target_var)) {
+        return true;
+      }
+      return ifs.ElseBranch() != nullptr &&
+             StatementTakesNonInlineAsmAddressOfImpl(root_body, *ifs.ElseBranch(), target_var);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(s);
+      return ExpressionTakesAddressOf(ws.Condition(), target_var) ||
+             StatementTakesNonInlineAsmAddressOfImpl(root_body, ws.Body(), target_var);
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(s);
+      return StatementTakesNonInlineAsmAddressOfImpl(root_body, dws.Body(), target_var) ||
+             ExpressionTakesAddressOf(dws.Condition(), target_var);
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(s);
+      if (fs.Init() != nullptr &&
+          StatementTakesNonInlineAsmAddressOfImpl(root_body, *fs.Init(), target_var)) {
+        return true;
+      }
+      if (fs.Condition() != nullptr && ExpressionTakesAddressOf(*fs.Condition(), target_var)) {
+        return true;
+      }
+      if (fs.Step() != nullptr && ExpressionTakesAddressOf(*fs.Step(), target_var)) {
+        return true;
+      }
+      return StatementTakesNonInlineAsmAddressOfImpl(root_body, fs.Body(), target_var);
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(s);
+      if (ExpressionTakesAddressOf(ss.Condition(), target_var)) return true;
+      for (const auto& c : ss.Cases()) {
+        if (c.body != nullptr &&
+            StatementTakesNonInlineAsmAddressOfImpl(root_body, *c.body, target_var)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    default:
+      return StatementTakesAddressOf(s, target_var);
+  }
+}
+
+bool StatementTakesNonInlineAsmAddressOf(const CStatement& root_body, std::string_view target_var,
+                                         bool is_o2) {
+  if (!is_o2) {
+    return StatementTakesAddressOf(root_body, target_var);
+  }
+  return StatementTakesNonInlineAsmAddressOfImpl(root_body, root_body, target_var);
+}
+
 bool IsCalleeSavedFprBaseName(std::string_view base) {
   return base == "f20" || base == "f22" || base == "f24" || base == "f26" || base == "f28" ||
          base == "f30";
@@ -1125,7 +1241,7 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
     if (IsCalleeSavedGprVarName(v)) {
       callee_saved_gprs += double_vars.contains(v) ? 2 : 1;
     }
-    const bool is_addr_taken = StatementTakesAddressOf(body, v);
+    const bool is_addr_taken = StatementTakesNonInlineAsmAddressOf(body, v, /*is_o2=*/true);
     if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
       int32_t off = 0;
       if (absl::SimpleAtoi(v.substr(7), &off) && off >= static_cast<int32_t>(local_frame_bottom) &&
@@ -1632,7 +1748,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
 
   auto has_address_taken = [&](std::string_view target_var) -> bool {
-    return StatementTakesAddressOf(**body, target_var);
+    return StatementTakesNonInlineAsmAddressOf(**body, target_var,
+                                               !frame_analysis.has_frame_pointer);
   };
 
   absl::flat_hash_map<std::string, int> fp_base_counts;
