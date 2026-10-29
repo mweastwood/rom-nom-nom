@@ -1027,5 +1027,41 @@ TEST(CfgDeReorgTest, EagerThreadDelaySlotUnschedulerPreservesPreLoopConstCalleeS
   EXPECT_EQ(preheader_blk->instructions.front().rd, Register::kS1);
 }
 
+TEST(CfgDeReorgTest, SimpleDelaySlotUnschedulerUnschedulesPrologueSaveInEntryBranchDelaySlot) {
+  // Models GCC 2.7.2 `reorg.c:fill_simple_delay_slots` pulling `sw $ra, 16($sp)` into the delay
+  // slot of an entry-block `bc1t` branch (`ShortCircuitIfElseWithStructScaleAndFloatCompare`
+  // pattern). `SimpleDelaySlotUnschedulerPass` must unschedule `sw $ra, 16($sp)` before `bc1t`
+  // and replace the delay slot with a `nop`.
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 0x00: addiu  $sp, $sp, -24
+      0x44860000,  // 0x04: mtc1   $a2, $f0
+      0x44871000,  // 0x08: mtc1   $a3, $f2
+      0x4602003C,  // 0x0C: c.lt.s $f0, $f2
+      0x00000000,  // 0x10: nop
+      0x45010002,  // 0x14: bc1t   +2 -> 0x20
+      0xAFBF0010,  // 0x18: sw     $ra, 16($sp) (prologue save in entry branch delay slot)
+      0x00001021,  // 0x1C: addu   $v0, $zero, $zero
+      0x8FBF0010,  // 0x20: lw     $ra, 16($sp)
+      0x03E00008,  // 0x24: jr     $ra
+      0x27BD0018,  // 0x28: addiu  $sp, $sp, 24
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  SimpleDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, nullptr));
+
+  const BasicBlock* entry_blk = cfg.GetBlock(cfg.EntryBlockId());
+  ASSERT_NE(entry_blk, nullptr);
+  ASSERT_GE(entry_blk->instructions.size(), 3u);
+  EXPECT_EQ(entry_blk->instructions[entry_blk->instructions.size() - 3].opcode, Opcode::kSw);
+  EXPECT_EQ(entry_blk->instructions[entry_blk->instructions.size() - 3].rt, Register::kRa);
+  EXPECT_EQ(entry_blk->instructions[entry_blk->instructions.size() - 2].opcode, Opcode::kBc1t);
+  EXPECT_TRUE(entry_blk->instructions.back().IsNop());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

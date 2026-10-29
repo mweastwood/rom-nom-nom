@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1647,6 +1648,221 @@ bool AbiAnalyzer::IsFpParameterDouble(const ControlFlowGraph& cfg, FpRegister re
   next_block:;
   }
   return false;
+}
+
+bool AbiAnalyzer::IsRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
+                                             Register reg, std::optional<bool> returns_v0,
+                                             bool returns_v1) {
+  if (reg == Register::kZero) {
+    return true;
+  }
+  const auto is_live_at_return = [&]() {
+    if (reg == Register::kV0) {
+      if (!returns_v0.has_value()) {
+        returns_v0 = DetermineReturnsV0(cfg);
+      }
+      return *returns_v0;
+    }
+    if (reg == Register::kV1) {
+      return returns_v1;
+    }
+    return false;
+  };
+
+  absl::flat_hash_set<uint32_t> visited;
+  std::vector<uint32_t> worklist = {start_block_id};
+  while (!worklist.empty()) {
+    uint32_t blk_id = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(blk_id).second) {
+      continue;
+    }
+    const auto* blk = cfg.GetBlock(blk_id);
+    if (blk == nullptr) {
+      return false;
+    }
+    bool killed = false;
+    for (size_t i = 0; i < blk->instructions.size(); ++i) {
+      const auto& inst = blk->instructions[i];
+      if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
+          i + 1 < blk->instructions.size()) {
+        const auto& delay_inst = blk->instructions[i + 1];
+        bool annuls_delay = inst.IsBranchLikely();
+        RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+        for (Register u : inst_ud.gpr_uses) {
+          if (u == reg) {
+            return false;
+          }
+        }
+        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+        for (Register u : delay_ud.gpr_uses) {
+          if (u == reg) {
+            return false;
+          }
+        }
+        if (!annuls_delay) {
+          for (Register d : delay_ud.gpr_defs) {
+            if (d == reg) {
+              killed = true;
+              break;
+            }
+          }
+        }
+        if (killed) {
+          break;
+        }
+        if (inst.IsCall()) {
+          if (reg >= Register::kA0 && reg <= Register::kA3) {
+            return false;
+          }
+          if (reg == Register::kV0 || reg == Register::kV1 || reg == Register::kAt ||
+              (reg >= Register::kT0 && reg <= Register::kT7) || reg == Register::kT8 ||
+              reg == Register::kT9) {
+            killed = true;
+            break;
+          }
+        } else if (inst.IsReturn()) {
+          if (is_live_at_return()) {
+            return false;
+          }
+          killed = true;
+          break;
+        }
+        ++i;
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      for (Register u : ud.gpr_uses) {
+        if (u == reg) {
+          return false;
+        }
+      }
+      for (Register d : ud.gpr_defs) {
+        if (d == reg) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed) {
+        break;
+      }
+    }
+    if (!killed) {
+      if (blk->successors.empty()) {
+        if (is_live_at_return()) {
+          return false;
+        }
+        continue;
+      }
+      for (uint32_t succ : blk->successors) {
+        worklist.push_back(succ);
+      }
+    }
+  }
+  return true;
+}
+
+bool AbiAnalyzer::IsFpRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
+                                               FpRegister freg, std::optional<bool> returns_f0) {
+  const auto is_live_at_return = [&]() {
+    if (freg == FpRegister::kF0 || freg == FpRegister::kF1) {
+      if (!returns_f0.has_value()) {
+        returns_f0 = DetermineReturnsF0(cfg);
+      }
+      return *returns_f0;
+    }
+    return false;
+  };
+
+  absl::flat_hash_set<uint32_t> visited;
+  std::vector<uint32_t> worklist = {start_block_id};
+  while (!worklist.empty()) {
+    uint32_t blk_id = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(blk_id).second) {
+      continue;
+    }
+    const auto* blk = cfg.GetBlock(blk_id);
+    if (blk == nullptr) {
+      return false;
+    }
+    bool killed = false;
+    for (size_t i = 0; i < blk->instructions.size(); ++i) {
+      const auto& inst = blk->instructions[i];
+      if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
+          i + 1 < blk->instructions.size()) {
+        const auto& delay_inst = blk->instructions[i + 1];
+        bool annuls_delay = inst.IsBranchLikely();
+        RegisterUseDef inst_ud = GetInstructionUseDef(inst);
+        for (FpRegister u : inst_ud.fpr_uses) {
+          if (u == freg) {
+            return false;
+          }
+        }
+        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
+        for (FpRegister u : delay_ud.fpr_uses) {
+          if (u == freg) {
+            return false;
+          }
+        }
+        if (!annuls_delay) {
+          for (FpRegister d : delay_ud.fpr_defs) {
+            if (d == freg) {
+              killed = true;
+              break;
+            }
+          }
+        }
+        if (killed) {
+          break;
+        }
+        if (inst.IsCall()) {
+          if (freg >= FpRegister::kF12 && freg <= FpRegister::kF15) {
+            return false;
+          }
+          if (freg < FpRegister::kF20) {
+            killed = true;
+            break;
+          }
+        } else if (inst.IsReturn()) {
+          if (is_live_at_return()) {
+            return false;
+          }
+          killed = true;
+          break;
+        }
+        ++i;
+        continue;
+      }
+      RegisterUseDef ud = GetInstructionUseDef(inst);
+      for (FpRegister u : ud.fpr_uses) {
+        if (u == freg) {
+          return false;
+        }
+      }
+      for (FpRegister d : ud.fpr_defs) {
+        if (d == freg) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed) {
+        break;
+      }
+    }
+    if (!killed) {
+      if (blk->successors.empty()) {
+        if (is_live_at_return()) {
+          return false;
+        }
+        continue;
+      }
+      for (uint32_t succ : blk->successors) {
+        worklist.push_back(succ);
+      }
+    }
+  }
+  return true;
 }
 
 }  // namespace rom_nom_nom

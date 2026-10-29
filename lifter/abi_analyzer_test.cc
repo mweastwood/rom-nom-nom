@@ -1227,5 +1227,34 @@ TEST(AbiAnalyzerTest,
   EXPECT_TRUE(float_gprs.contains(Register::kA1));
 }
 
+TEST(AbiAnalyzerTest, IsRegisterAndFpRegisterDeadAtBlockEntryRespectsCallsReturnsAndDefs) {
+  std::vector<uint32_t> words = {
+      0x10800004,  // 0x00 (block 0): beqz  $a0, +4 -> 0x14 (block 2)
+      0x00000000,  // 0x04:           nop
+      0x24080001,  // 0x08 (block 1): addiu $t0, $zero, 1 (overwrites $t0 before any read)
+      0x00A81021,  // 0x0C:           addu  $v0, $a1, $t0 (reads $a1)
+      0x46006006,  // 0x10:           mov.s $f0, $f12     (reads $f12, defines $f0)
+      0x03E00008,  // 0x14 (block 2): jr    $ra
+      0x00000000,  // 0x18:           nop
+  };
+  auto insts = *DecodeSequence(words, 0x80020000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  const ControlFlowGraph& cfg = *cfg_or;
+  const BasicBlock* blk1 = cfg.FindBlockByVram(0x80020008);
+  const BasicBlock* blk2 = cfg.FindBlockByVram(0x80020014);
+  ASSERT_NE(blk1, nullptr);
+  ASSERT_NE(blk2, nullptr);
+
+  EXPECT_TRUE(AbiAnalyzer::IsRegisterDeadAtBlockEntry(cfg, blk1->id, Register::kT0));
+  EXPECT_FALSE(AbiAnalyzer::IsRegisterDeadAtBlockEntry(cfg, blk1->id, Register::kA1));
+  EXPECT_FALSE(
+      AbiAnalyzer::IsRegisterDeadAtBlockEntry(cfg, blk2->id, Register::kV0, /*returns_v0=*/true));
+  EXPECT_TRUE(
+      AbiAnalyzer::IsRegisterDeadAtBlockEntry(cfg, blk2->id, Register::kV0, /*returns_v0=*/false));
+  EXPECT_FALSE(AbiAnalyzer::IsFpRegisterDeadAtBlockEntry(cfg, blk1->id, FpRegister::kF12));
+  EXPECT_TRUE(AbiAnalyzer::IsFpRegisterDeadAtBlockEntry(cfg, blk1->id, FpRegister::kF4));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

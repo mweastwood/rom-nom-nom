@@ -360,197 +360,6 @@ bool IsSinkableDelaySlotInstruction(const BasicBlock& block, const Instruction& 
   return true;
 }
 
-bool IsFpRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
-                                  FpRegister freg, bool returns_f0) {
-  absl::flat_hash_set<uint32_t> visited;
-  std::vector<uint32_t> worklist = {start_block_id};
-  while (!worklist.empty()) {
-    uint32_t blk_id = worklist.back();
-    worklist.pop_back();
-    if (!visited.insert(blk_id).second) {
-      continue;
-    }
-    const auto* blk = cfg.GetBlock(blk_id);
-    if (blk == nullptr) {
-      return false;
-    }
-    bool killed = false;
-    for (size_t i = 0; i < blk->instructions.size(); ++i) {
-      const auto& inst = blk->instructions[i];
-      if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
-          i + 1 < blk->instructions.size()) {
-        const auto& delay_inst = blk->instructions[i + 1];
-        bool annuls_delay = inst.IsBranchLikely();
-        RegisterUseDef inst_ud = GetInstructionUseDef(inst);
-        for (FpRegister u : inst_ud.fpr_uses) {
-          if (u == freg) {
-            return false;
-          }
-        }
-        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-        for (FpRegister u : delay_ud.fpr_uses) {
-          if (u == freg) {
-            return false;
-          }
-        }
-        if (!annuls_delay) {
-          for (FpRegister d : delay_ud.fpr_defs) {
-            if (d == freg) {
-              killed = true;
-              break;
-            }
-          }
-        }
-        if (killed) {
-          break;
-        }
-        if (inst.IsCall()) {
-          if (freg >= FpRegister::kF12 && freg <= FpRegister::kF15) {
-            return false;
-          }
-          if (freg < FpRegister::kF20) {
-            killed = true;
-            break;
-          }
-        } else if (inst.IsReturn()) {
-          if ((freg == FpRegister::kF0 || freg == FpRegister::kF1) && returns_f0) {
-            return false;
-          }
-          killed = true;
-          break;
-        }
-        ++i;
-        continue;
-      }
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (FpRegister u : ud.fpr_uses) {
-        if (u == freg) {
-          return false;
-        }
-      }
-      for (FpRegister d : ud.fpr_defs) {
-        if (d == freg) {
-          killed = true;
-          break;
-        }
-      }
-      if (killed) {
-        break;
-      }
-    }
-    if (!killed) {
-      if (blk->successors.empty()) {
-        if ((freg == FpRegister::kF0 || freg == FpRegister::kF1) && returns_f0) {
-          return false;
-        }
-        continue;
-      }
-      for (uint32_t succ : blk->successors) {
-        worklist.push_back(succ);
-      }
-    }
-  }
-  return true;
-}
-
-bool IsRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id, Register reg,
-                                bool returns_v0) {
-  if (reg == Register::kZero) {
-    return true;
-  }
-  absl::flat_hash_set<uint32_t> visited;
-  std::vector<uint32_t> worklist = {start_block_id};
-  while (!worklist.empty()) {
-    uint32_t blk_id = worklist.back();
-    worklist.pop_back();
-    if (!visited.insert(blk_id).second) {
-      continue;
-    }
-    const auto* blk = cfg.GetBlock(blk_id);
-    if (blk == nullptr) {
-      return false;
-    }
-    bool killed = false;
-    for (size_t i = 0; i < blk->instructions.size(); ++i) {
-      const auto& inst = blk->instructions[i];
-      if ((inst.IsCall() || inst.IsReturn() || inst.IsBranch() || inst.IsJump()) &&
-          i + 1 < blk->instructions.size()) {
-        const auto& delay_inst = blk->instructions[i + 1];
-        bool annuls_delay = inst.IsBranchLikely();
-        RegisterUseDef inst_ud = GetInstructionUseDef(inst);
-        for (Register u : inst_ud.gpr_uses) {
-          if (u == reg) {
-            return false;
-          }
-        }
-        RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
-        for (Register u : delay_ud.gpr_uses) {
-          if (u == reg) {
-            return false;
-          }
-        }
-        if (!annuls_delay) {
-          for (Register d : delay_ud.gpr_defs) {
-            if (d == reg) {
-              killed = true;
-              break;
-            }
-          }
-        }
-        if (killed) {
-          break;
-        }
-        if (inst.IsCall()) {
-          if (reg >= Register::kA0 && reg <= Register::kA3) {
-            return false;
-          }
-          if (reg == Register::kV0 || reg == Register::kV1 || reg == Register::kAt ||
-              (reg >= Register::kT0 && reg <= Register::kT7) || reg == Register::kT8 ||
-              reg == Register::kT9) {
-            killed = true;
-            break;
-          }
-        } else if (inst.IsReturn()) {
-          if ((reg == Register::kV0 || reg == Register::kV1) && returns_v0) {
-            return false;
-          }
-          killed = true;
-          break;
-        }
-        ++i;
-        continue;
-      }
-      RegisterUseDef ud = GetInstructionUseDef(inst);
-      for (Register u : ud.gpr_uses) {
-        if (u == reg) {
-          return false;
-        }
-      }
-      for (Register d : ud.gpr_defs) {
-        if (d == reg) {
-          killed = true;
-          break;
-        }
-      }
-      if (killed) {
-        break;
-      }
-    }
-    if (!killed) {
-      if (blk->successors.empty()) {
-        if ((reg == Register::kV0 || reg == Register::kV1) && returns_v0) {
-          return false;
-        }
-        continue;
-      }
-      for (uint32_t succ : blk->successors) {
-        worklist.push_back(succ);
-      }
-    }
-  }
-  return true;
-}
-
 bool AllDefinedRegistersDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
                                          const RegisterUseDef& ud, bool returns_v0,
                                          bool returns_f0) {
@@ -558,12 +367,13 @@ bool AllDefinedRegistersDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t s
     return false;
   }
   for (Register r : ud.gpr_defs) {
-    if (!IsRegisterDeadAtBlockEntry(cfg, start_block_id, r, returns_v0)) {
+    if (!AbiAnalyzer::IsRegisterDeadAtBlockEntry(cfg, start_block_id, r, returns_v0,
+                                                 /*returns_v1=*/returns_v0)) {
       return false;
     }
   }
   for (FpRegister fr : ud.fpr_defs) {
-    if (!IsFpRegisterDeadAtBlockEntry(cfg, start_block_id, fr, returns_f0)) {
+    if (!AbiAnalyzer::IsFpRegisterDeadAtBlockEntry(cfg, start_block_id, fr, returns_f0)) {
       return false;
     }
   }
@@ -733,6 +543,21 @@ bool DelaySlotCompletesSplitInstructionPair(const BasicBlock& block,
   return false;
 }
 
+bool IsPrologueCalleeSaveStore(const Instruction& inst) {
+  if (!inst.rs.has_value() || *inst.rs != Register::kSp || inst.immediate < 0) {
+    return false;
+  }
+  if ((inst.opcode == Opcode::kSw || inst.opcode == Opcode::kSd) && inst.rt.has_value()) {
+    Register rt = *inst.rt;
+    return rt == Register::kRa || rt == Register::kFp ||
+           (rt >= Register::kS0 && rt <= Register::kS7);
+  }
+  if ((inst.opcode == Opcode::kSwc1 || inst.opcode == Opcode::kSdc1) && inst.ft.has_value()) {
+    return *inst.ft >= FpRegister::kF20;
+  }
+  return false;
+}
+
 absl::flat_hash_set<uint32_t> CollectJumpTableBoundsVrams(const ControlFlowGraph& cfg) {
   absl::flat_hash_set<uint32_t> vrams;
   for (const auto& jt : cfg.JumpTables()) {
@@ -766,7 +591,8 @@ bool SimpleDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManag
     }
     if ((term.opcode == Opcode::kJ || (term.IsBranch() && !term.IsBranchLikely())) &&
         !DelaySlotConflictsWithTerminator(term, delay_inst) &&
-        DelaySlotCompletesSplitInstructionPair(block, delay_inst)) {
+        (DelaySlotCompletesSplitInstructionPair(block, delay_inst) ||
+         (block.id == cfg->EntryBlockId() && IsPrologueCalleeSaveStore(delay_inst)))) {
       block.instructions[block.instructions.size() - 2] = delay_inst;
       block.instructions[block.instructions.size() - 1] = term;
       block.instructions.push_back(MakeNopInstruction(delay_inst.vram));

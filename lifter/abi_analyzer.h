@@ -2,6 +2,7 @@
 #define LIFTER_ABI_ANALYZER_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
@@ -31,6 +32,19 @@ class AbiAnalyzer {
 
   // Returns true if the given FPR is used before definition on any path from the CFG entry block.
   static bool IsFpRegisterLiveIn(const ControlFlowGraph& cfg, FpRegister reg);
+
+  // Returns true if `reg` is dead (overwritten or killed by calls/returns before any read) on all
+  // paths starting from the entry of `start_block_id`.
+  static bool IsRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
+                                         Register reg,
+                                         std::optional<bool> returns_v0 = std::nullopt,
+                                         bool returns_v1 = false);
+
+  // Returns true if `freg` is dead (overwritten or killed by calls/returns before any read) on all
+  // paths starting from the entry of `start_block_id`.
+  static bool IsFpRegisterDeadAtBlockEntry(const ControlFlowGraph& cfg, uint32_t start_block_id,
+                                           FpRegister freg,
+                                           std::optional<bool> returns_f0 = std::nullopt);
 
   // Analyzes register and stack usage across instructions to determine the number of integer/stack
   // parameters expected by a function (via use-before-definition).
