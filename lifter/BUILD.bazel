@@ -582,11 +582,24 @@ cc_test(
 )
 
 cc_library(
+    name = "ast_codegen_lowerer",
+    srcs = ["ast_codegen_lowerer.cc"],
+    hdrs = ["ast_codegen_lowerer.h"],
+    deps = [
+        "//core:c_ast",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
     name = "c_emitter",
     srcs = ["c_emitter.cc"],
     hdrs = ["c_emitter.h"],
     visibility = ["//tuner:__pkg__"],
     deps = [
+        ":ast_codegen_lowerer",
         "//core:c_ast",
         "//core:process",
         "//core:symbol_registry",
@@ -601,6 +614,7 @@ cc_test(
     name = "c_emitter_test",
     srcs = ["c_emitter_test.cc"],
     deps = [
+        ":ast_codegen_lowerer",
         ":c_emitter",
         "//core:c_ast",
         "//core:symbol_registry",

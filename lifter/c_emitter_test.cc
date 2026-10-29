@@ -926,5 +926,47 @@ TEST(CEmitterTest, LowersFloatGprBitcastsToInlineAsmAndBarriersSymbolAddressAndG
                                  "\"=r\"(temp_s0) : \"0\"(temp_s0));"));
 }
 
+TEST(CEmitterTest,
+     OmitsBarrierForCalleeSavedParamCopyImmediatelyBeforeIndependentCallWithoutSplitProneRead) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v0", nullptr, std::nullopt, "$2"));
+
+  // `temp_s0 = arg2;` immediately followed by `v0 = StepHook(arg0);` where neither `temp_s0` nor
+  // `arg2` is read by the call, and the post-call read of `temp_s0` is a branch condition (not a
+  // zero-offset dereference or register copy). Emitting a barrier here would block GCC 2.7.2's
+  // `reorg.c:fill_simple_delay_slots` from pulling `move $16, $6` into the `jal` delay slot.
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg2"))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Call(CExpression::Identifier("StepHook"), std::move(call_args)))));
+  auto then_body = std::make_unique<CompoundStatement>();
+  then_body->AddStatement(CStatement::Return(CExpression::Integer(1)));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("temp_s0"), CExpression::Integer(0)),
+      std::move(then_body)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  tu.functions.emplace_back(
+      CType::S32(), "TestDelaySlotEligibleCalleeSavedParamCopy",
+      std::vector<CParameter>{CParameter{CType::S32(), "arg0"}, CParameter{CType::S32(), "arg1"},
+                              CParameter{CType::S32(), "arg2"}},
+      std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("temp_s0 = arg2;\n    v0 = StepHook(arg0);"));
+  EXPECT_THAT(emitted,
+              ::testing::Not(HasSubstr("__asm__(\"\" : \"=r\"(temp_s0) : \"0\"(temp_s0))")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
