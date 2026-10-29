@@ -1,5 +1,6 @@
 #include "lifter/module_symbol_scanner.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -29,7 +30,7 @@ std::vector<std::string> ModuleSymbolScanner::DiscoverAllCodeModules(const GameC
       continue;
     }
     for (const auto& subseg : seg.subsegments()) {
-      if (subseg.type() == SUBSEGMENT_C || subseg.type() == SUBSEGMENT_ASM) {
+      if (subseg.type() == SUBSEGMENT_C) {
         modules.push_back(std::string(subseg.name()));
       }
     }
@@ -98,6 +99,21 @@ absl::StatusOr<std::vector<std::string>> ModuleSymbolScanner::DiscoverFunctionsI
   }
 
   if (!func_names.empty()) {
+    auto resolve_vram = [&](std::string_view name) -> uint32_t {
+      if (const auto* entry = symbols.FindByName(name); entry != nullptr) {
+        return entry->address();
+      }
+      uint32_t addr = 0;
+      if (name.size() == 13 && absl::StartsWith(name, "func_") &&
+          absl::SimpleHexAtoi(name.substr(5), &addr)) {
+        return addr;
+      }
+      return 0xFFFFFFFFu;
+    };
+    std::stable_sort(func_names.begin(), func_names.end(),
+                     [&](const std::string& a, const std::string& b) {
+                       return resolve_vram(a) < resolve_vram(b);
+                     });
     return func_names;
   }
 

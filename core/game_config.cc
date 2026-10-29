@@ -294,7 +294,6 @@ SectionVramClassification ClassifyVramAddress(const GameConfig& config, uint32_t
             return SectionVramClassification::kData;
           case SUBSEGMENT_C:
           case SUBSEGMENT_ASM:
-          case SUBSEGMENT_HASM:
             return SectionVramClassification::kCode;
           default:
             break;

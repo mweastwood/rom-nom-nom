@@ -75,7 +75,7 @@ TEST(GameConfigRomValidatorTest, AcceptsValidO2O0AndHasmSubsegments) {
                {0x27BDFFE8, 0xAFBF0010, 0x0C009714, 0x00000000, 0x8FBF0010, 0x03E00008, 0x27BD0018,
                 0x00000000});
 
-  // Subsegment 3 (0x1090..0x10A0): SUBSEGMENT_HASM function with mfc0 $v0, $12
+  // Subsegment 3 (0x1090..0x10A0): SUBSEGMENT_ASM function with mfc0 $v0, $12
   // mfc0  $v0, $12
   // jr    $ra
   // nop
@@ -94,17 +94,17 @@ TEST(GameConfigRomValidatorTest, AcceptsValidO2O0AndHasmSubsegments) {
 
   auto* sub1 = main_seg->add_subsegments();
   sub1->set_name("boot_o0");
-  sub1->set_type(SUBSEGMENT_ASM);
+  sub1->set_type(SUBSEGMENT_C);
   sub1->set_rom_start(0x1050);
 
   auto* sub2 = main_seg->add_subsegments();
   sub2->set_name("game_o2");
-  sub2->set_type(SUBSEGMENT_ASM);
+  sub2->set_type(SUBSEGMENT_C);
   sub2->set_rom_start(0x1070);
 
   auto* sub3 = main_seg->add_subsegments();
-  sub3->set_name("os_hasm");
-  sub3->set_type(SUBSEGMENT_HASM);
+  sub3->set_name("os_asm");
+  sub3->set_type(SUBSEGMENT_ASM);
   sub3->set_rom_start(0x1090);
 
   auto rom_or = Rom::FromBuffer(rom_bytes);
@@ -113,7 +113,7 @@ TEST(GameConfigRomValidatorTest, AcceptsValidO2O0AndHasmSubsegments) {
   EXPECT_TRUE(ValidateGameConfigAgainstRom(config, *rom_or).ok());
 }
 
-TEST(GameConfigRomValidatorTest, RejectsHandWrittenAssemblyInsideSubsegmentAsm) {
+TEST(GameConfigRomValidatorTest, RejectsHandWrittenAssemblyInsideSubsegmentC) {
   std::vector<uint8_t> rom_bytes(0x2000, 0);
   WriteBigEndian32(rom_bytes.data(), 0x80371240);
 
@@ -137,8 +137,8 @@ TEST(GameConfigRomValidatorTest, RejectsHandWrittenAssemblyInsideSubsegmentAsm) 
   main_seg->set_vram(0x80025C50);
 
   auto* sub = main_seg->add_subsegments();
-  sub->set_name("leaked_hasm");
-  sub->set_type(SUBSEGMENT_ASM);
+  sub->set_name("leaked_asm");
+  sub->set_type(SUBSEGMENT_C);
   sub->set_rom_start(0x1050);
 
   auto rom_or = Rom::FromBuffer(rom_bytes);
@@ -178,12 +178,12 @@ TEST(GameConfigRomValidatorTest, RejectsO0FramePointerInO2SubsegmentAndViceVersa
 
   auto* sub1 = main_seg->add_subsegments();
   sub1->set_name("wrong_o2");
-  sub1->set_type(SUBSEGMENT_ASM);
+  sub1->set_type(SUBSEGMENT_C);
   sub1->set_rom_start(0x1050);
 
   auto* sub2 = main_seg->add_subsegments();
   sub2->set_name("wrong_o0");
-  sub2->set_type(SUBSEGMENT_ASM);
+  sub2->set_type(SUBSEGMENT_C);
   sub2->set_rom_start(0x1070);
 
   auto rom_or = Rom::FromBuffer(rom_bytes);
@@ -197,7 +197,7 @@ TEST(GameConfigRomValidatorTest, RejectsO0FramePointerInO2SubsegmentAndViceVersa
                         "allocates a stack frame without establishing an -O0 frame pointer"));
 }
 
-TEST(GameConfigRomValidatorTest, RejectsUnalignedSubsegmentAndFakeHasm) {
+TEST(GameConfigRomValidatorTest, RejectsUnalignedSubsegmentAndFakeAsm) {
   std::vector<uint8_t> rom_bytes(0x2000, 0);
   WriteBigEndian32(rom_bytes.data(), 0x80371240);
 
@@ -213,8 +213,8 @@ TEST(GameConfigRomValidatorTest, RejectsUnalignedSubsegmentAndFakeHasm) {
   main_seg->set_vram(0x80025C50);
 
   auto* sub = main_seg->add_subsegments();
-  sub->set_name("unaligned_fake_hasm");
-  sub->set_type(SUBSEGMENT_HASM);
+  sub->set_name("unaligned_fake_asm");
+  sub->set_type(SUBSEGMENT_ASM);
   sub->set_rom_start(0x1054);
 
   auto rom_or = Rom::FromBuffer(rom_bytes);

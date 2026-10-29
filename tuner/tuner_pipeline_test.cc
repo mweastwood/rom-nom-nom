@@ -189,7 +189,7 @@ TEST(TunerPipelineTest, TuneModuleParallelExecutesMultipleFunctionsAcrossWorkerT
         rom_start: 0x1000
         rom_end: 0x1020
         vram: 0x80025C00
-        subsegments { name: "code" type: SUBSEGMENT_ASM rom_start: 0x1000 vram: 0x80025C00 }
+        subsegments { name: "code" type: SUBSEGMENT_C rom_start: 0x1000 vram: 0x80025C00 }
       }
       symbols { name: "FuncA" address: 0x80025C00 type: SYMBOL_FUNC size: 8 }
       symbols { name: "FuncB" address: 0x80025C08 type: SYMBOL_FUNC size: 8 }

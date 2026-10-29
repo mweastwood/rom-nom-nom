@@ -39,7 +39,7 @@ segments {
   rom_start: 0x1000
   rom_end: 0x1060
   vram: 0x80070C00
-  subsegments { rom_start: 0x1000 type: SUBSEGMENT_HASM name: "1000" }
+  subsegments { rom_start: 0x1000 type: SUBSEGMENT_ASM name: "1000" }
 }
 segments {
   name: "main"
@@ -48,28 +48,28 @@ segments {
   rom_end: 0x3F1B0
   vram: 0x80070C60
   bss_size: 0x3AE70
-  subsegments { rom_start: 0x1060 type: SUBSEGMENT_ASM name: "1060" }
-  subsegments { rom_start: 0xFC80 type: SUBSEGMENT_ASM name: "FC80" }
-  subsegments { rom_start: 0xFDC0 type: SUBSEGMENT_ASM name: "FDC0" }
-  subsegments { rom_start: 0x1BC20 type: SUBSEGMENT_HASM name: "hasm_1bc20" }
-  subsegments { rom_start: 0x1BCC0 type: SUBSEGMENT_ASM name: "1BCC0" }
-  subsegments { rom_start: 0x20410 type: SUBSEGMENT_HASM name: "hasm_20410" }
-  subsegments { rom_start: 0x205F0 type: SUBSEGMENT_ASM name: "205F0" }
-  subsegments { rom_start: 0x23350 type: SUBSEGMENT_HASM name: "hasm_23350" }
-  subsegments { rom_start: 0x23460 type: SUBSEGMENT_ASM name: "23460" }
-  subsegments { rom_start: 0x23780 type: SUBSEGMENT_HASM name: "hasm_23780" }
-  subsegments { rom_start: 0x23820 type: SUBSEGMENT_ASM name: "23820" }
-  subsegments { rom_start: 0x254E0 type: SUBSEGMENT_HASM name: "hasm_254e0" }
-  subsegments { rom_start: 0x255A0 type: SUBSEGMENT_ASM name: "255A0" }
-  subsegments { rom_start: 0x29160 type: SUBSEGMENT_HASM name: "hasm_29160" }
-  subsegments { rom_start: 0x29B60 type: SUBSEGMENT_ASM name: "29B60" }
-  subsegments { rom_start: 0x2AAD0 type: SUBSEGMENT_HASM name: "hasm_2aad0" }
-  subsegments { rom_start: 0x2AB40 type: SUBSEGMENT_ASM name: "2AB40" }
-  subsegments { rom_start: 0x2AEA0 type: SUBSEGMENT_HASM name: "hasm_2aea0" }
-  subsegments { rom_start: 0x2AF50 type: SUBSEGMENT_ASM name: "2AF50" }
-  subsegments { rom_start: 0x2DA80 type: SUBSEGMENT_HASM name: "hasm_2da80" }
-  subsegments { rom_start: 0x2DE50 type: SUBSEGMENT_ASM name: "2DE50" }
-  subsegments { rom_start: 0x2E450 type: SUBSEGMENT_HASM name: "hasm_2e450" }
+  subsegments { rom_start: 0x1060 type: SUBSEGMENT_C name: "1060" }
+  subsegments { rom_start: 0xFC80 type: SUBSEGMENT_C name: "FC80" }
+  subsegments { rom_start: 0xFDC0 type: SUBSEGMENT_C name: "FDC0" }
+  subsegments { rom_start: 0x1BC20 type: SUBSEGMENT_ASM name: "asm_1bc20" }
+  subsegments { rom_start: 0x1BCC0 type: SUBSEGMENT_C name: "1BCC0" }
+  subsegments { rom_start: 0x20410 type: SUBSEGMENT_ASM name: "asm_20410" }
+  subsegments { rom_start: 0x205F0 type: SUBSEGMENT_C name: "205F0" }
+  subsegments { rom_start: 0x23350 type: SUBSEGMENT_ASM name: "asm_23350" }
+  subsegments { rom_start: 0x23460 type: SUBSEGMENT_C name: "23460" }
+  subsegments { rom_start: 0x23780 type: SUBSEGMENT_ASM name: "asm_23780" }
+  subsegments { rom_start: 0x23820 type: SUBSEGMENT_C name: "23820" }
+  subsegments { rom_start: 0x254E0 type: SUBSEGMENT_ASM name: "asm_254e0" }
+  subsegments { rom_start: 0x255A0 type: SUBSEGMENT_C name: "255A0" }
+  subsegments { rom_start: 0x29160 type: SUBSEGMENT_ASM name: "asm_29160" }
+  subsegments { rom_start: 0x29B60 type: SUBSEGMENT_C name: "29B60" }
+  subsegments { rom_start: 0x2AAD0 type: SUBSEGMENT_ASM name: "asm_2aad0" }
+  subsegments { rom_start: 0x2AB40 type: SUBSEGMENT_C name: "2AB40" }
+  subsegments { rom_start: 0x2AEA0 type: SUBSEGMENT_ASM name: "asm_2aea0" }
+  subsegments { rom_start: 0x2AF50 type: SUBSEGMENT_C name: "2AF50" }
+  subsegments { rom_start: 0x2DA80 type: SUBSEGMENT_ASM name: "asm_2da80" }
+  subsegments { rom_start: 0x2DE50 type: SUBSEGMENT_C name: "2DE50" }
+  subsegments { rom_start: 0x2E450 type: SUBSEGMENT_ASM name: "asm_2e450" }
   subsegments { rom_start: 0x2E570 type: SUBSEGMENT_DATA name: "2E570" }
   subsegments { type: SUBSEGMENT_BSS name: "3F1B0" vram: 0x800AEDB0 }
 }

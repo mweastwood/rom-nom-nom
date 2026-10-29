@@ -17,7 +17,7 @@
 namespace rom_nom_nom {
 namespace {
 
-TEST(ModuleSymbolScannerTest, DiscoverAllCodeModulesFiltersToCodeSegmentCAndAsmSubsegments) {
+TEST(ModuleSymbolScannerTest, DiscoverAllCodeModulesFiltersToCodeSegmentCSubsegments) {
   std::string proto_cfg = R"(
 game_name: "test-game"
 sha1: "0123456789abcdef0123456789abcdef01234567"
@@ -44,7 +44,7 @@ segments {
   ASSERT_TRUE(cfg_or.ok()) << cfg_or.status();
 
   std::vector<std::string> modules = ModuleSymbolScanner::DiscoverAllCodeModules(*cfg_or);
-  EXPECT_THAT(modules, ::testing::ElementsAre("mod_c", "mod_asm"));
+  EXPECT_THAT(modules, ::testing::ElementsAre("mod_c"));
 }
 
 TEST(ModuleSymbolScannerTest, DiscoverFunctionsInModuleResolvesSymbolRangeAndSynthesizesFallback) {

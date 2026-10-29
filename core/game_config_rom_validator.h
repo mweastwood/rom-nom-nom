@@ -32,9 +32,9 @@ struct ConfigValidationReport {
 // Inspects `config` together with `rom` and returns a detailed validation report verifying:
 // 1. Structural config invariants (`ValidateGameConfig`) and ROM SHA-1 / segment bounds.
 // 2. 16-byte (`0x10`) section alignment of code/data/rodata subsegments in `SEGMENT_CODE`.
-// 3. Absence of hand-written assembly (`SUBSEGMENT_HASM`) instructions/idioms inside C-lifted
-//    subsegments (`SUBSEGMENT_ASM` / `SUBSEGMENT_C`), and presence of hand-written assembly
-//    signatures in `SUBSEGMENT_HASM` subsegments.
+// 3. Absence of hand-written assembly (`SUBSEGMENT_ASM`) instructions/idioms inside C-lifted
+//    subsegments (`SUBSEGMENT_C`), and presence of hand-written assembly signatures in
+//    `SUBSEGMENT_ASM` subsegments.
 // 4. Consistency between resolved compiler optimization flags (`-O0` vs `-O1`/`-O2`/`-O3`) and
 //    binary frame-pointer prologues (`sw $fp, N($sp)` + `move $fp, $sp`).
 ConfigValidationReport AnalyzeGameConfigAgainstRom(const GameConfig& config, const Rom& rom);

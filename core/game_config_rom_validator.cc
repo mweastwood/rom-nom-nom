@@ -289,7 +289,7 @@ ConfigValidationReport AnalyzeGameConfigAgainstRom(const GameConfig& config, con
         });
       }
 
-      if (sub.type != SUBSEGMENT_C && sub.type != SUBSEGMENT_ASM && sub.type != SUBSEGMENT_HASM) {
+      if (sub.type != SUBSEGMENT_C && sub.type != SUBSEGMENT_ASM) {
         continue;
       }
       ++report.code_subsegments_checked;
@@ -335,15 +335,15 @@ ConfigValidationReport AnalyzeGameConfigAgainstRom(const GameConfig& config, con
 
         if (sig.IsHandWrittenAssembly()) {
           ++hasm_func_count;
-          if (sub.type == SUBSEGMENT_C || sub.type == SUBSEGMENT_ASM) {
+          if (sub.type == SUBSEGMENT_C) {
             report.violations.push_back({
                 .segment_name = seg.name,
                 .subsegment_name = sub.name,
                 .rom_offset = func_rom_offset,
                 .vram = func.vram_start,
                 .message = absl::StrFormat(
-                    "Function '%s' (ROM 0x%X, VRAM 0x%08X) in C-lifted subsegment '%s' contains "
-                    "hand-written assembly signature(s): %s (should be SUBSEGMENT_HASM)",
+                    "Function '%s' (ROM 0x%X, VRAM 0x%08X) in C subsegment '%s' contains "
+                    "hand-written assembly signature(s): %s (should be SUBSEGMENT_ASM)",
                     func.name, func_rom_offset, func.vram_start, sub.name,
                     absl::StrJoin(sig.hasm_reasons, ", ")),
             });
@@ -351,7 +351,7 @@ ConfigValidationReport AnalyzeGameConfigAgainstRom(const GameConfig& config, con
           continue;
         }
 
-        if (sub.type == SUBSEGMENT_C || sub.type == SUBSEGMENT_ASM) {
+        if (sub.type == SUBSEGMENT_C) {
           if (sig.has_sp_allocation) {
             ++sp_alloc_func_count;
           }
@@ -387,21 +387,21 @@ ConfigValidationReport AnalyzeGameConfigAgainstRom(const GameConfig& config, con
         }
       }
 
-      if (sub.type == SUBSEGMENT_HASM && hasm_func_count == 0) {
+      if (sub.type == SUBSEGMENT_ASM && hasm_func_count == 0) {
         report.violations.push_back({
             .segment_name = seg.name,
             .subsegment_name = sub.name,
             .rom_offset = sub.rom_start,
             .vram = sub.vram_start,
             .message = absl::StrFormat(
-                "Subsegment '%s' [0x%X, 0x%X) is marked SUBSEGMENT_HASM, but none of its "
-                "functions contain hand-written assembly signatures",
+                "Subsegment '%s' [0x%X, 0x%X) is marked SUBSEGMENT_ASM, but none of its "
+                "functions contain hand-written assembly signatures (should be SUBSEGMENT_C)",
                 sub.name, sub.rom_start, sub.rom_end),
         });
       }
 
-      if ((sub.type == SUBSEGMENT_C || sub.type == SUBSEGMENT_ASM) && configured_o0 &&
-          sp_alloc_func_count == 0 && o0_fp_func_count == 0) {
+      if (sub.type == SUBSEGMENT_C && configured_o0 && sp_alloc_func_count == 0 &&
+          o0_fp_func_count == 0) {
         report.violations.push_back({
             .segment_name = seg.name,
             .subsegment_name = sub.name,

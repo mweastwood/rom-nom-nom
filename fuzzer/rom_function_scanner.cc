@@ -35,8 +35,7 @@ absl::StatusOr<std::vector<ScannedFunction>> RomFunctionScanner::Scan(
       }
       if (!seg.subsegments.empty()) {
         for (const auto& sub : seg.subsegments) {
-          if (sub.type != SUBSEGMENT_C && sub.type != SUBSEGMENT_ASM &&
-              sub.type != SUBSEGMENT_HASM) {
+          if (sub.type != SUBSEGMENT_C && sub.type != SUBSEGMENT_ASM) {
             continue;
           }
           if (sub.rom_start < sub.rom_end && sub.rom_end <= rom_bytes.size()) {

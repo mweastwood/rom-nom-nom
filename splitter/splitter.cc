@@ -311,7 +311,7 @@ absl::StatusOr<SplitterResult> RunSplitter(const SplitterOptions& options) {
           continue;
         }
 
-        if (sub.type != SUBSEGMENT_ASM && sub.type != SUBSEGMENT_HASM) {
+        if (sub.type != SUBSEGMENT_ASM) {
           // Skip other non-asm files
           continue;
         }

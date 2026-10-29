@@ -150,8 +150,7 @@ void RewriteCodeSegmentLinkerScript(const GameConfig& config, const std::filesys
         if (pos != std::string::npos) {
           rewritten_ld->insert(pos, align_expr);
         }
-      } else if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM ||
-                 sub.type() == SUBSEGMENT_HASM) {
+      } else if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) {
         std::string obj_path = (obj_dir / absl::StrCat(sub.name(), ".o")).string();
         std::string target_exact = obj_path + "(.text);";
         size_t pos = rewritten_ld->find(target_exact);

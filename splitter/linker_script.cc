@@ -52,7 +52,6 @@ std::string LinkerScriptGenerator::ResolveObjectPath(std::string_view game_name,
       case SUBSEGMENT_C:
         return absl::StrFormat("%s/src/c/%s/%s.o", prefix, game_name, sub_name);
       case SUBSEGMENT_ASM:
-      case SUBSEGMENT_HASM:
         return absl::StrFormat("%s/asm/%s/%s.o", prefix, game_name, sub_name);
       case SUBSEGMENT_DATA:
         if (sub_name.find('/') != std::string_view::npos ||
@@ -133,8 +132,7 @@ absl::StatusOr<std::string> LinkerScriptGenerator::GenerateMainScript(
       for (const auto& sub : segment.subsegments()) {
         std::string obj_path = ResolveObjectPath(game_name, segment, &sub);
 
-        if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM ||
-            sub.type() == SUBSEGMENT_HASM) {
+        if (sub.type() == SUBSEGMENT_C || sub.type() == SUBSEGMENT_ASM) {
           text_objs.push_back(obj_path);
           data_objs.push_back(obj_path);
           rodata_objs.push_back(obj_path);
