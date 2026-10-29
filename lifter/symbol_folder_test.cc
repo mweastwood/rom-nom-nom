@@ -607,5 +607,30 @@ TEST(SymbolFolderTest, SanitizesLeadingDotSectionSymbolsToSynthesizedDataName) {
   EXPECT_EQ(folder.AllFolded()[0].symbol_name, "D_80050000");
 }
 
+TEST(SymbolFolderTest, GlobalIndexedAccessPreservesBaseSymbolAndFieldOffset) {
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(R"pb(
+    entries { name: "g_slot_recs" address: 0x80040000 type: SYMBOL_DATA size: 192 }
+  )pb");
+  ASSERT_TRUE(sym_idx_or.ok());
+
+  // 0: lui  $v1, 0x8004
+  // 1: addu $v1, $v1, $v0
+  // 2: lbu  $v0, 8($v1)
+  std::vector<uint32_t> words = {
+      0x3C038004,  // 0: lui  $v1, 0x8004
+      0x00621821,  // 1: addu $v1, $v1, $v0
+      0x90620008,  // 2: lbu  $v0, 8($v1)
+  };
+  auto insts = *DecodeSequence(words);
+  SymbolFolder folder;
+  folder.Fold(insts, &(*sym_idx_or));
+
+  ASSERT_THAT(folder.AllFolded(), SizeIs(1));
+  EXPECT_EQ(folder.AllFolded()[0].type, FoldedPatternType::kGlobalIndexedLoad);
+  EXPECT_EQ(folder.AllFolded()[0].address, 0x80040008u);
+  EXPECT_EQ(folder.AllFolded()[0].symbol_name, "g_slot_recs");
+  EXPECT_EQ(folder.AllFolded()[0].symbol_offset, 8);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

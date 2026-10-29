@@ -849,6 +849,10 @@ bool BlockLiftRunner::TryLiftMultiInstructionPatterns(size_t& i) {
           auto indexed_addr = LiftedExpression::Binary(
               "+", LiftedExpression::Unary("(u8*)", std::move(base_addr_expr)),
               ExpressionBuilder::LiftRegisterOrConstant(lo->index_reg, tracker));
+          if (lo->symbol_offset != 0) {
+            indexed_addr = LiftedExpression::Binary("+", std::move(indexed_addr),
+                                                    LiftedExpression::Integer(lo->symbol_offset));
+          }
           pending_int_to_fp[ft_idx] = LiftedExpression::Load("s32", std::move(indexed_addr));
         }
         fpr_const_bits[ft_idx] = std::nullopt;
@@ -2613,6 +2617,10 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
     auto index_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.index_reg, tracker);
     auto indexed_addr =
         LiftedExpression::Binary("+", std::move(cast_u8_ptr), std::move(index_expr));
+    if (lo.symbol_offset != 0) {
+      indexed_addr = LiftedExpression::Binary("+", std::move(indexed_addr),
+                                              LiftedExpression::Integer(lo.symbol_offset));
+    }
     statement.kind = StatementKind::kAssignment;
     statement.expression = LiftedExpression::Load(lo.access_type, std::move(indexed_addr));
     statements.push_back(std::move(statement));
@@ -2633,6 +2641,10 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
     auto index_expr = ExpressionBuilder::LiftRegisterOrConstant(lo.index_reg, tracker);
     auto indexed_addr =
         LiftedExpression::Binary("+", std::move(cast_u8_ptr), std::move(index_expr));
+    if (lo.symbol_offset != 0) {
+      indexed_addr = LiftedExpression::Binary("+", std::move(indexed_addr),
+                                              LiftedExpression::Integer(lo.symbol_offset));
+    }
 
     statement.kind = StatementKind::kStore;
     statement.store_type = lo.access_type;

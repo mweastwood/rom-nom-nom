@@ -264,9 +264,20 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
           }
 
           if (symbol_index != nullptr) {
-            access.symbol_name = symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
-            if (!access.symbol_name.empty() && access.symbol_name[0] == '.') {
-              access.symbol_name = absl::StrFormat("D_%08X", target_address);
+            const SymbolRegistryEntry* exact = symbol_index->FindByAddress(target_address);
+            if (exact == nullptr && inst.immediate != 0) {
+              const SymbolRegistryEntry* base = symbol_index->FindByAddress(val.symbol_hi);
+              if (base != nullptr && !base->name().empty() && base->name()[0] != '.') {
+                access.symbol_name = base->name();
+                access.symbol_offset = static_cast<int32_t>(inst.immediate);
+              }
+            }
+            if (access.symbol_name.empty()) {
+              access.symbol_name =
+                  symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+              if (!access.symbol_name.empty() && access.symbol_name[0] == '.') {
+                access.symbol_name = absl::StrFormat("D_%08X", target_address);
+              }
             }
           }
           folded_.push_back(std::move(access));

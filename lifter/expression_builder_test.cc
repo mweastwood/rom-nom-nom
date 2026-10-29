@@ -1262,5 +1262,34 @@ TEST(ExpressionBuilderTest, WordAndSubwordStackReadsExtractedFrom64BitSdAndSdc1S
   EXPECT_EQ(sdc1_stmts[8].ToString(), "f2 = *(f32*)((u8*)&var_sp_16 + 4);\n");
 }
 
+TEST(ExpressionBuilderTest, GlobalIndexedAccessEmitsBaseSymbolIndexAndConstantFieldOffset) {
+  auto sym_idx_or = SymbolIndex::ParseFromTextproto(R"pb(
+    entries { name: "g_slot_recs" address: 0x80040000 type: SYMBOL_DATA size: 192 }
+  )pb");
+  ASSERT_TRUE(sym_idx_or.ok());
+
+  // 0: lui  $v1, 0x8004
+  // 1: addu $v1, $v1, $v0
+  // 2: lbu  $v0, 8($v1)
+  // 3: lui  $t0, 0x8004
+  // 4: addu $t0, $t0, $a0
+  // 5: sw   $a1, 12($t0)
+  std::vector<uint32_t> words = {
+      0x3C038004,  // 0: lui  $v1, 0x8004
+      0x00621821,  // 1: addu $v1, $v1, $v0
+      0x90620008,  // 2: lbu  $v0, 8($v1)
+      0x3C088004,  // 3: lui  $t0, 0x8004
+      0x01044021,  // 4: addu $t0, $t0, $a0
+      0xAD05000C,  // 5: sw   $a1, 12($t0)
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  FunctionLiftContext ctx;
+  ctx.symbol_index = &(*sym_idx_or);
+  auto stmts = ExpressionBuilder::LiftInstructions(insts, ctx);
+  ASSERT_EQ(stmts.size(), 2u);
+  EXPECT_EQ(stmts[0].ToString(), "v0 = *(u8*)((u8*)&g_slot_recs + v0 + 8);\n");
+  EXPECT_EQ(stmts[1].ToString(), "*(s32*)((u8*)&g_slot_recs + arg0 + 12) = arg1;\n");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
