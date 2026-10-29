@@ -1157,9 +1157,28 @@ int CountWebOccurrences(const ScratchDefUseWeb& web, std::string_view var) {
   return total;
 }
 
+bool ExpressionContainsAddressOf(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      if (un.IsPrefix() && un.Op() == "&") return true;
+      return ExpressionContainsAddressOf(un.Operand());
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      return ExpressionContainsAddressOf(bin.Lhs()) || ExpressionContainsAddressOf(bin.Rhs());
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionContainsAddressOf(static_cast<const CastExpression&>(expr).Operand());
+    default:
+      return false;
+  }
+}
+
 void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view var,
                                      bool dead_at_comp_exit,
-                                     std::vector<ScratchDefUseWeb>* out_webs) {
+                                     std::vector<ScratchDefUseWeb>* out_webs,
+                                     bool in_loop = false) {
   if (comp == nullptr) return;
   auto& stmts = comp->MutableStatements();
   const size_t n = stmts.size();
@@ -1177,6 +1196,9 @@ void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view v
     const auto& assign = static_cast<const AssignmentExpression&>(expr);
     if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
         static_cast<const IdentifierExpression&>(assign.Lhs()).Name() != var) {
+      return false;
+    }
+    if (in_loop && ExpressionContainsAddressOf(assign.Rhs())) {
       return false;
     }
     if (ExprMentionsVar(assign.Rhs(), var) || ExpressionModifiesVariable(assign.Rhs(), var)) {
@@ -1349,12 +1371,12 @@ void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view v
       const bool dead_after_if = IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
       if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
         CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(ifs.MutableThenBranch()),
-                                        var, dead_after_if, out_webs);
+                                        var, dead_after_if, out_webs, in_loop);
       }
       if (ifs.MutableElseBranch() != nullptr &&
           ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
         CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(ifs.MutableElseBranch()),
-                                        var, dead_after_if, out_webs);
+                                        var, dead_after_if, out_webs, in_loop);
       }
       continue;
     }
@@ -1367,7 +1389,7 @@ void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view v
                                    IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
       if (ws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
         CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(ws.MutableBody()), var,
-                                        dead_after_loop, out_webs);
+                                        dead_after_loop, out_webs, /*in_loop=*/true);
       }
     } else if (stmt.Kind() == CStatementKind::kDoWhileStatement) {
       auto& dws = static_cast<DoWhileStatement&>(stmt);
@@ -1375,7 +1397,7 @@ void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view v
                                    IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
       if (dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
         CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(dws.MutableBody()), var,
-                                        dead_after_loop, out_webs);
+                                        dead_after_loop, out_webs, /*in_loop=*/true);
       }
     } else if (stmt.Kind() == CStatementKind::kForStatement) {
       auto& fs = static_cast<ForStatement&>(stmt);
@@ -1383,7 +1405,7 @@ void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view v
                                    IsVarMustKilledFrom(*comp, k + 1, var, dead_at_comp_exit);
       if (fs.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
         CollectBasicBlockWebsInCompound(static_cast<CompoundStatement*>(fs.MutableBody()), var,
-                                        dead_after_loop, out_webs);
+                                        dead_after_loop, out_webs, /*in_loop=*/true);
       }
     }
   }

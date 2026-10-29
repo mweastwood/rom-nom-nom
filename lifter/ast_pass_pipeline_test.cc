@@ -636,5 +636,40 @@ TEST(AstPassPipelineTest, CrossJumpedCallTailInlinerInlinesIntraLoopReturnTailAn
   EXPECT_THAT(rendered, HasSubstr("v0 = 7;\n    g_busy_flag = 0;\n    return v0;"));
 }
 
+TEST(AstPassPipelineTest, ScratchRegisterWebSplitterPreservesMultipleLoopAddressOfDefinitions) {
+  CompoundStatement body;
+  auto loop_body = std::make_unique<CompoundStatement>();
+
+  // Repeated `v0 = &sym` definitions inside a loop body should not be split into separate
+  // single-def variables (`v0_2`, `v0_3`), preventing GCC `loop.c` from hoisting all of them into
+  // callee-saved registers.
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Unary("&", CExpression::Identifier("g_table_a")))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"),
+      CExpression::Binary("+", CExpression::Identifier("v1"), CExpression::Identifier("v0")))));
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Unary("&", CExpression::Identifier("g_table_b")))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t1"),
+      CExpression::Binary("+", CExpression::Identifier("v1"), CExpression::Identifier("v0")))));
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+
+  body.AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0))));
+  body.AddStatement(CStatement::Return());
+
+  std::vector<CParameter> params;
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  absl::flat_hash_map<std::string, std::vector<std::string>> split_vars;
+  ScratchRegisterWebSplitterPass pass({"v0"}, &split_vars);
+  EXPECT_FALSE(pass.Run(&body, ctx));
+  EXPECT_TRUE(split_vars.empty());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

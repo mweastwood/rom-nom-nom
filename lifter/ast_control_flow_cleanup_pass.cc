@@ -75,6 +75,63 @@ bool IsRelationalOrEqualityBinary(const CExpression& expr) {
   return op == "<" || op == "<=" || op == ">" || op == ">=" || op == "==" || op == "!=";
 }
 
+bool ExpressionReadsMemory(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIdentifier: {
+      std::string_view name = static_cast<const IdentifierExpression&>(expr).Name();
+      return absl::StartsWith(name, "D_") || absl::StartsWith(name, "g_") ||
+             absl::StartsWith(name, "s_");
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      if (un.IsPrefix() && un.Op() == "*") return true;
+      if (un.IsPrefix() && un.Op() == "&") return false;
+      return ExpressionReadsMemory(un.Operand());
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      return ExpressionReadsMemory(bin.Lhs()) || ExpressionReadsMemory(bin.Rhs());
+    }
+    case CExpressionKind::kCastExpression:
+      return ExpressionReadsMemory(static_cast<const CastExpression&>(expr).Operand());
+    case CExpressionKind::kArrayIndexExpression:
+    case CExpressionKind::kMemberAccessExpression:
+    case CExpressionKind::kCallExpression:
+      return true;
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      return ExpressionReadsMemory(tern.Condition()) ||
+             ExpressionReadsMemory(tern.TrueExpression()) ||
+             ExpressionReadsMemory(tern.FalseExpression());
+    }
+    default:
+      return false;
+  }
+}
+
+bool ExtractPureMemoryStore(const CStatement& stmt) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) {
+    return false;
+  }
+  const CExpression& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+  if (expr.Kind() != CExpressionKind::kAssignmentExpression) {
+    return false;
+  }
+  const auto& assign = static_cast<const AssignmentExpression&>(expr);
+  if (assign.Op() != "=" || !IsPureExpression(assign.Rhs())) {
+    return false;
+  }
+  if (assign.Lhs().Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& un = static_cast<const UnaryExpression&>(assign.Lhs());
+    return un.IsPrefix() && un.Op() == "*" && IsPureExpression(un.Operand());
+  }
+  if (assign.Lhs().Kind() == CExpressionKind::kArrayIndexExpression ||
+      assign.Lhs().Kind() == CExpressionKind::kMemberAccessExpression) {
+    return IsPureExpression(assign.Lhs());
+  }
+  return false;
+}
+
 bool StatementDefinitelyKillsVarBeforeRead(const CStatement& stmt, std::string_view var,
                                            bool* out_reads_var) {
   if (out_reads_var != nullptr && *out_reads_var) {
@@ -95,13 +152,80 @@ bool StatementDefinitelyKillsVarBeforeRead(const CStatement& stmt, std::string_v
     }
     return false;
   }
+  if (stmt.Kind() == CStatementKind::kReturnStatement) {
+    const auto& ret = static_cast<const ReturnStatement&>(stmt);
+    if (ret.ReturnValue() != nullptr && ExpressionUsesVariable(*ret.ReturnValue(), var)) {
+      if (out_reads_var != nullptr) {
+        *out_reads_var = true;
+      }
+      return false;
+    }
+    return true;
+  }
+  if (stmt.Kind() == CStatementKind::kBreakStatement) {
+    return false;
+  }
   if (stmt.Kind() == CStatementKind::kCompoundStatement) {
     for (const auto& sub : static_cast<const CompoundStatement&>(stmt).Statements()) {
       if (sub == nullptr) continue;
+      if (sub->Kind() == CStatementKind::kBreakStatement) {
+        return false;
+      }
       if (StatementDefinitelyKillsVarBeforeRead(*sub, var, out_reads_var)) {
         return true;
       }
       if (out_reads_var != nullptr && *out_reads_var) {
+        return false;
+      }
+    }
+    return false;
+  }
+  if (stmt.Kind() == CStatementKind::kIfStatement) {
+    const auto& ifs = static_cast<const IfStatement&>(stmt);
+    if (ExpressionUsesVariable(ifs.Condition(), var)) {
+      if (out_reads_var != nullptr) {
+        *out_reads_var = true;
+      }
+      return false;
+    }
+    if (StatementContainsLabel(ifs)) {
+      if (StatementReferencesVariable(ifs, var) && out_reads_var != nullptr) {
+        *out_reads_var = true;
+      }
+      return false;
+    }
+    bool then_reads = false;
+    bool then_kills = StatementDefinitelyKillsVarBeforeRead(ifs.ThenBranch(), var, &then_reads);
+    bool else_reads = false;
+    bool else_kills = ifs.ElseBranch() != nullptr &&
+                      StatementDefinitelyKillsVarBeforeRead(*ifs.ElseBranch(), var, &else_reads);
+    if ((then_reads || else_reads) && out_reads_var != nullptr) {
+      *out_reads_var = true;
+    }
+    return ifs.ElseBranch() != nullptr && !then_reads && !else_reads && then_kills && else_kills;
+  }
+  if (stmt.Kind() == CStatementKind::kSwitchStatement) {
+    const auto& sw = static_cast<const SwitchStatement&>(stmt);
+    if (ExpressionUsesVariable(sw.Condition(), var)) {
+      if (out_reads_var != nullptr) {
+        *out_reads_var = true;
+      }
+      return false;
+    }
+    if (StatementContainsLabel(sw)) {
+      if (StatementReferencesVariable(sw, var) && out_reads_var != nullptr) {
+        *out_reads_var = true;
+      }
+      return false;
+    }
+    for (const auto& sc : sw.Cases()) {
+      if (sc.body == nullptr) continue;
+      bool case_reads = false;
+      StatementDefinitelyKillsVarBeforeRead(*sc.body, var, &case_reads);
+      if (case_reads) {
+        if (out_reads_var != nullptr) {
+          *out_reads_var = true;
+        }
         return false;
       }
     }
@@ -209,9 +333,18 @@ bool FoldDoWhileTrailingLatchComparison(
       }
       std::string tail_lhs;
       const CExpression* tail_rhs = nullptr;
-      if (!ExtractSimpleVarAssign(*body_stmts[t], &tail_lhs, &tail_rhs) || tail_lhs == cond_var ||
-          !IsPureExpression(*tail_rhs) || StatementReferencesVariable(*body_stmts[t], cond_var) ||
-          ExpressionUsesVariable(*rhs, tail_lhs)) {
+      if (ExtractSimpleVarAssign(*body_stmts[t], &tail_lhs, &tail_rhs)) {
+        if (tail_lhs == cond_var || !IsPureExpression(*tail_rhs) ||
+            StatementReferencesVariable(*body_stmts[t], cond_var) ||
+            ExpressionUsesVariable(*rhs, tail_lhs)) {
+          trailing_ok = false;
+          break;
+        }
+      } else if (ExtractPureMemoryStore(*body_stmts[t]) &&
+                 !StatementReferencesVariable(*body_stmts[t], cond_var) &&
+                 !ExpressionReadsMemory(*rhs)) {
+        continue;
+      } else {
         trailing_ok = false;
         break;
       }
@@ -225,6 +358,9 @@ bool FoldDoWhileTrailingLatchComparison(
     return false;
   }
 
+  const bool is_label_free_root =
+      (root_body != nullptr && &enclosing_stmts == &root_body->Statements() &&
+       !StatementContainsLabel(*root_body));
   for (size_t after = loop_stmt_idx + 1; after < enclosing_stmts.size(); ++after) {
     if (enclosing_stmts[after] == nullptr) continue;
     bool post_reads_before_kill = false;
@@ -235,7 +371,8 @@ bool FoldDoWhileTrailingLatchComparison(
       }
       break;
     }
-    if (post_reads_before_kill || StatementReferencesVariable(*enclosing_stmts[after], cond_var)) {
+    if (post_reads_before_kill ||
+        (!is_label_free_root && StatementReferencesVariable(*enclosing_stmts[after], cond_var))) {
       return false;
     }
   }
@@ -977,20 +1114,20 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
               bool non_trivial_diamond_tail =
                   writes_memory ||
                   (!tail.empty() && tail[0]->Kind() == CStatementKind::kIfStatement);
-              bool valid_diamond_tail = allow_diamond_tails && !in_switch && !in_loop &&
-                                        all_tail_stmts_valid && !has_inner_label &&
+              bool valid_diamond_tail = allow_diamond_tails && (!in_switch || ends_with_break) &&
+                                        !in_loop && all_tail_stmts_valid && !has_inner_label &&
                                         !ends_with_return && non_trivial_diamond_tail &&
                                         tail.size() <= 5;
               if (!tail.empty() && (valid_call_tail || valid_return_tail || valid_switch_tail ||
                                     valid_diamond_tail)) {
-                candidates.push_back(LabelSite{
-                    .comp = comp,
-                    .goto_scope = scope_root,
-                    .label_name = std::move(lbl),
-                    .tail_stmts = std::move(tail),
-                    .ends_with_break = ends_with_break,
-                    .requires_tail_goto = !valid_call_tail && !valid_return_tail &&
-                                          !valid_switch_tail && !(in_switch && ends_with_break)});
+                candidates.push_back(LabelSite{.comp = comp,
+                                               .goto_scope = scope_root,
+                                               .label_name = std::move(lbl),
+                                               .tail_stmts = std::move(tail),
+                                               .ends_with_break = ends_with_break,
+                                               .requires_tail_goto = !valid_call_tail &&
+                                                                     !valid_return_tail &&
+                                                                     !valid_switch_tail});
               }
             } else if (s->Kind() == CStatementKind::kIfStatement) {
               bool stmt_at_tail = (i + 1 == stmts.size()) ||
@@ -1012,14 +1149,20 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
                                in_loop);
               }
             } else if (s->Kind() == CStatementKind::kSwitchStatement) {
+              bool stmt_at_tail = (i + 1 == stmts.size()) ||
+                                  (i + 2 == stmts.size() &&
+                                   (stmts[i + 1]->Kind() == CStatementKind::kBreakStatement ||
+                                    stmts[i + 1]->Kind() == CStatementKind::kReturnStatement));
+              const CStatement* switch_scope =
+                  (stmt_at_tail && parent_ends_with_break) ? scope_root : s;
               for (auto& sc : static_cast<SwitchStatement&>(*s).MutableCases()) {
                 if (sc.body != nullptr) {
                   bool sc_ends_with_break =
                       !sc.body->Statements().empty() &&
                       (sc.body->Statements().back()->Kind() == CStatementKind::kBreakStatement ||
                        sc.body->Statements().back()->Kind() == CStatementKind::kReturnStatement);
-                  collect_labels(sc.body.get(), sc.body.get(), false, sc_ends_with_break, true,
-                                 true, in_loop);
+                  collect_labels(sc.body.get(), switch_scope, false, sc_ends_with_break, true, true,
+                                 in_loop);
                 }
               }
             } else if (allow_diamond_tails && s->Kind() == CStatementKind::kWhileStatement) {
@@ -1111,13 +1254,18 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
                 static_cast<const GotoStatement&>(*last).Label() == site.label_name) {
               ++scope_tail_gotos;
             } else if (last->Kind() == CStatementKind::kIfStatement ||
-                       last->Kind() == CStatementKind::kCompoundStatement) {
+                       last->Kind() == CStatementKind::kCompoundStatement ||
+                       last->Kind() == CStatementKind::kSwitchStatement) {
               count_scope_tail_gotos(*last);
             }
           } else if (s.Kind() == CStatementKind::kIfStatement) {
             const auto& ifs = static_cast<const IfStatement&>(s);
             count_scope_tail_gotos(ifs.ThenBranch());
             if (ifs.ElseBranch() != nullptr) count_scope_tail_gotos(*ifs.ElseBranch());
+          } else if (s.Kind() == CStatementKind::kSwitchStatement) {
+            for (const auto& sc : static_cast<const SwitchStatement&>(s).Cases()) {
+              if (sc.body != nullptr) count_scope_tail_gotos(*sc.body);
+            }
           }
         };
         count_scope_tail_gotos(*site.goto_scope);
@@ -1320,14 +1468,85 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
           sink_in_comp(static_cast<CompoundStatement*>(ifs.MutableElseBranch()));
         }
 
-        // Rule B: If one branch ends with `goto block_N;` and the other branch ends with
-        // `block_N: <sinkable ExpressionStatements>`, sink `block_N: <tail>` after the
-        // IfStatement and remove the redundant `goto block_N;`.
+        // Rule B0: Fold multi-level short-circuit `goto` diamonds:
+        // `if (C1) { if (C2) { ... if (Cn) { block_N: <body> } } } else { goto block_N; }`
+        // -> `if ((!C1 || (C2 && ... && Cn))) { block_N: <body> }` (and symmetric `then` goto).
         if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
             ifs.MutableElseBranch() != nullptr &&
             ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
           auto* then_comp = static_cast<CompoundStatement*>(ifs.MutableThenBranch());
           auto* else_comp = static_cast<CompoundStatement*>(ifs.MutableElseBranch());
+          auto& then_stmts = then_comp->MutableStatements();
+          auto& else_stmts = else_comp->MutableStatements();
+          auto extract_nested_if_label_chain = [](CompoundStatement* branch_comp,
+                                                  std::string_view target_lbl,
+                                                  std::vector<const CExpression*>* out_conds,
+                                                  CompoundStatement** out_inner_comp) -> bool {
+            if (branch_comp == nullptr || branch_comp->Statements().size() != 1 ||
+                branch_comp->Statements()[0] == nullptr ||
+                branch_comp->Statements()[0]->Kind() != CStatementKind::kIfStatement) {
+              return false;
+            }
+            CompoundStatement* cur = branch_comp;
+            while (cur != nullptr && cur->Statements().size() == 1 &&
+                   cur->Statements()[0] != nullptr &&
+                   cur->Statements()[0]->Kind() == CStatementKind::kIfStatement) {
+              auto& nested_if = static_cast<IfStatement&>(*cur->MutableStatements()[0]);
+              if (nested_if.ElseBranch() != nullptr || nested_if.MutableThenBranch() == nullptr ||
+                  nested_if.MutableThenBranch()->Kind() != CStatementKind::kCompoundStatement) {
+                return false;
+              }
+              out_conds->push_back(&nested_if.Condition());
+              cur = static_cast<CompoundStatement*>(nested_if.MutableThenBranch());
+              if (cur->Statements().size() >= 2 && cur->Statements()[0] != nullptr &&
+                  cur->Statements()[0]->Kind() == CStatementKind::kLabelStatement &&
+                  static_cast<const LabelStatement&>(*cur->Statements()[0]).Label() == target_lbl) {
+                *out_inner_comp = cur;
+                return true;
+              }
+            }
+            return false;
+          };
+          if (else_stmts.size() == 1 && else_stmts[0] != nullptr &&
+              else_stmts[0]->Kind() == CStatementKind::kGotoStatement) {
+            std::string target_lbl(static_cast<const GotoStatement&>(*else_stmts[0]).Label());
+            std::vector<const CExpression*> nested_conds;
+            CompoundStatement* inner_comp = nullptr;
+            if (extract_nested_if_label_chain(then_comp, target_lbl, &nested_conds, &inner_comp)) {
+              std::unique_ptr<CExpression> rhs_and = nested_conds[0]->Clone();
+              for (size_t ci = 1; ci < nested_conds.size(); ++ci) {
+                rhs_and = CExpression::Binary("&&", std::move(rhs_and), nested_conds[ci]->Clone());
+              }
+              auto new_cond =
+                  CExpression::Binary("||", NegateCondition(ifs.Condition()), std::move(rhs_and));
+              stmts[i] = CStatement::If(std::move(new_cond), inner_comp->Clone(), nullptr);
+            }
+          } else if (then_stmts.size() == 1 && then_stmts[0] != nullptr &&
+                     then_stmts[0]->Kind() == CStatementKind::kGotoStatement) {
+            std::string target_lbl(static_cast<const GotoStatement&>(*then_stmts[0]).Label());
+            std::vector<const CExpression*> nested_conds;
+            CompoundStatement* inner_comp = nullptr;
+            if (extract_nested_if_label_chain(else_comp, target_lbl, &nested_conds, &inner_comp)) {
+              std::unique_ptr<CExpression> rhs_and = nested_conds[0]->Clone();
+              for (size_t ci = 1; ci < nested_conds.size(); ++ci) {
+                rhs_and = CExpression::Binary("&&", std::move(rhs_and), nested_conds[ci]->Clone());
+              }
+              auto new_cond =
+                  CExpression::Binary("||", ifs.Condition().Clone(), std::move(rhs_and));
+              stmts[i] = CStatement::If(std::move(new_cond), inner_comp->Clone(), nullptr);
+            }
+          }
+        }
+
+        // Rule B: If one branch ends with `goto block_N;` and the other branch ends with
+        // `block_N: <sinkable ExpressionStatements>`, sink `block_N: <tail>` after the
+        // IfStatement and remove the redundant `goto block_N;`.
+        auto& ifs_b = static_cast<IfStatement&>(*stmts[i]);
+        if (ifs_b.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+            ifs_b.MutableElseBranch() != nullptr &&
+            ifs_b.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+          auto* then_comp = static_cast<CompoundStatement*>(ifs_b.MutableThenBranch());
+          auto* else_comp = static_cast<CompoundStatement*>(ifs_b.MutableElseBranch());
           auto& then_stmts = then_comp->MutableStatements();
           auto& else_stmts = else_comp->MutableStatements();
           if (!else_stmts.empty() && else_stmts.back()->Kind() == CStatementKind::kGotoStatement &&
@@ -1355,8 +1574,8 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
                 stmts.insert(stmts.begin() + i + 1 + k, std::move(sunk_tail[k]));
               }
               if (else_stmts.empty() && !then_stmts.empty()) {
-                stmts[i] = CStatement::If(ifs.Condition().Clone(), ifs.MutableThenBranch()->Clone(),
-                                          nullptr);
+                stmts[i] = CStatement::If(ifs_b.Condition().Clone(),
+                                          ifs_b.MutableThenBranch()->Clone(), nullptr);
               }
             }
           } else if (!then_stmts.empty() &&
@@ -1385,8 +1604,8 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
                 stmts.insert(stmts.begin() + i + 1 + k, std::move(sunk_tail[k]));
               }
               if (then_stmts.empty() && !else_stmts.empty()) {
-                stmts[i] = CStatement::If(NegateCondition(ifs.Condition()),
-                                          ifs.MutableElseBranch()->Clone(), nullptr);
+                stmts[i] = CStatement::If(NegateCondition(ifs_b.Condition()),
+                                          ifs_b.MutableElseBranch()->Clone(), nullptr);
               }
             }
           }

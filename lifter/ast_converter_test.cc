@@ -1788,5 +1788,65 @@ TEST(AstConverterTest, SinksSharedTrailingStoreOutOfIfElseWithSingleStatementEls
   EXPECT_THAT(code, HasSubstr("} while ((v0 != 0));\n    }\n    *(s8*)v1 = 0;\n    return arg0;"));
 }
 
+TEST(AstConverterTest, FoldsMultiLevelShortCircuitGotoAndDoWhileLatchComparisonAcrossStore) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto dw_body = std::make_unique<CompoundStatement>();
+
+  // Kill `v0` at the start of the loop body (`v0 = (arg3 + v1);`) before the multi-level
+  // short-circuit goto:
+  // `if (arg0 != 0) { if (v0 != 255) { if (v0 != 254) { block_22: *(s8*)v1 = v0; } } } else { goto
+  // block_22; }`
+  dw_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("arg3"), CExpression::Identifier("v1")))));
+  auto inner_then = std::make_unique<CompoundStatement>();
+  inner_then->AddStatement(CStatement::Label("block_22"));
+  inner_then->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(s8*)", CExpression::Identifier("v1")),
+                              CExpression::Identifier("v0"))));
+  auto mid_then = std::make_unique<CompoundStatement>();
+  mid_then->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(254)),
+      std::move(inner_then)));
+  auto outer_then = std::make_unique<CompoundStatement>();
+  outer_then->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(255)),
+      std::move(mid_then)));
+  auto outer_else = std::make_unique<CompoundStatement>();
+  outer_else->AddStatement(CStatement::Goto("block_22"));
+
+  dw_body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(outer_then), std::move(outer_else)));
+
+  // Trailing latch comparison followed by a delay-slot pure memory store:
+  // `v0 = ((u32)(arg0 & 255) < 20); *(s8*)v1 = 0;`
+  dw_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary(
+          "<",
+          CExpression::Cast(CType::U32(), CExpression::Binary("&", CExpression::Identifier("arg0"),
+                                                              CExpression::Integer(255))),
+          CExpression::Integer(20)))));
+  dw_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::S8().MakePointer(), CExpression::Identifier("v1"))),
+      CExpression::Integer(0))));
+
+  body->AddStatement(CStatement::DoWhile(
+      std::move(dw_body),
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("arg1")));
+
+  SinkCommonBranchTailArgAssignments(body.get());
+  EXPECT_TRUE(SinkLoopInvariantAssignments(body.get()));
+
+  std::string code = body->ToString();
+  EXPECT_THAT(code, Not(HasSubstr("goto block_22")));
+  EXPECT_THAT(code, HasSubstr("((arg0 == 0) || ((v0 != 255) && (v0 != 254)))"));
+  EXPECT_THAT(code, HasSubstr("while (((u32)(arg0 & 255) < 20))"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
