@@ -609,6 +609,45 @@ bool StatementContainsAnyLoop(const CStatement& stmt) {
   }
 }
 
+bool ForStatementAllocatesGccLoopTestSpillSlot(const ForStatement& fs) {
+  if (fs.Init() == nullptr || fs.Init()->Kind() != CStatementKind::kExpressionStatement ||
+      fs.Condition() == nullptr || fs.Condition()->Kind() != CExpressionKind::kBinaryExpression) {
+    return false;
+  }
+  const auto& init_expr = static_cast<const ExpressionStatement&>(*fs.Init()).Expression();
+  if (init_expr.Kind() != CExpressionKind::kAssignmentExpression) {
+    return false;
+  }
+  const auto& assign = static_cast<const AssignmentExpression&>(init_expr);
+  if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+      assign.Rhs().Kind() != CExpressionKind::kIntegerLiteral ||
+      static_cast<const IntegerLiteralExpression&>(assign.Rhs()).Value() != 0) {
+    return false;
+  }
+  const std::string& loop_var = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+  const auto& cond = static_cast<const BinaryExpression&>(*fs.Condition());
+  if (cond.Op() != "<" && cond.Op() != ">=" && cond.Op() != ">" && cond.Op() != "<=") {
+    return false;
+  }
+  auto strip_casts = [](const CExpression* e) {
+    while (e != nullptr && e->Kind() == CExpressionKind::kCastExpression) {
+      e = &static_cast<const CastExpression&>(*e).Operand();
+    }
+    return e;
+  };
+  const CExpression* lhs = strip_casts(&cond.Lhs());
+  const CExpression* rhs = strip_casts(&cond.Rhs());
+  if (lhs != nullptr && lhs->Kind() == CExpressionKind::kIdentifier &&
+      static_cast<const IdentifierExpression&>(*lhs).Name() == loop_var) {
+    return rhs != nullptr && rhs->Kind() != CExpressionKind::kIntegerLiteral;
+  }
+  if (rhs != nullptr && rhs->Kind() == CExpressionKind::kIdentifier &&
+      static_cast<const IdentifierExpression&>(*rhs).Name() == loop_var) {
+    return lhs != nullptr && lhs->Kind() != CExpressionKind::kIntegerLiteral;
+  }
+  return false;
+}
+
 uint32_t CountForStatementsImpl(const CStatement& stmt, bool has_loop) {
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement: {
@@ -637,7 +676,8 @@ uint32_t CountForStatementsImpl(const CStatement& stmt, bool has_loop) {
       return CountForStatementsImpl(static_cast<const DoWhileStatement&>(stmt).Body(), has_loop);
     case CStatementKind::kForStatement: {
       const auto& fs = static_cast<const ForStatement&>(stmt);
-      return 1u + CountForStatementsImpl(fs.Body(), has_loop);
+      return (ForStatementAllocatesGccLoopTestSpillSlot(fs) ? 1u : 0u) +
+             CountForStatementsImpl(fs.Body(), has_loop);
     }
     case CStatementKind::kSwitchStatement: {
       uint32_t count = 0;
@@ -1306,6 +1346,71 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
   return true;
 }
 
+bool NonAddrTakenSpVarWillSpillInGcc(const CompoundStatement& body, std::string_view var_name) {
+  int calls_before_first_ref = 0;
+  bool seen_first_ref = false;
+  int def_count = 0;
+  bool single_const_def = false;
+  int call_read_stmts = 0;
+  int reg_copy_read_stmts = 0;
+  int total_read_uses = 0;
+
+  for (const auto& stmt_ptr : body.Statements()) {
+    if (stmt_ptr == nullptr) continue;
+    const CStatement& stmt = *stmt_ptr;
+    const bool refs = StatementReferencesVariable(stmt, var_name);
+    if (!seen_first_ref) {
+      if (refs) {
+        seen_first_ref = true;
+      } else if (StatementHasCall(stmt)) {
+        ++calls_before_first_ref;
+      }
+    }
+    if (!refs) continue;
+
+    if (StatementModifiesVariable(stmt, var_name)) {
+      ++def_count;
+      if (stmt.Kind() == CStatementKind::kExpressionStatement) {
+        const auto& es = static_cast<const ExpressionStatement&>(stmt);
+        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& assign = static_cast<const AssignmentExpression&>(es.Expression());
+          if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(assign.Lhs()).Name() == var_name &&
+              assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+            single_const_def = true;
+          }
+        }
+      }
+    }
+    const int reads = CountVariableReadUsesInStatement(stmt, var_name);
+    if (reads > 0) {
+      total_read_uses += reads;
+      if (StatementHasCall(stmt)) {
+        ++call_read_stmts;
+      } else if (stmt.Kind() == CStatementKind::kExpressionStatement) {
+        const auto& es = static_cast<const ExpressionStatement&>(stmt);
+        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+          const auto& assign = static_cast<const AssignmentExpression&>(es.Expression());
+          if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(assign.Rhs()).Name() == var_name) {
+            ++reg_copy_read_stmts;
+          }
+        }
+      }
+    }
+  }
+
+  if (calls_before_first_ref >= 4) {
+    return false;
+  }
+  if (def_count == 1 && single_const_def && total_read_uses == 2 && call_read_stmts == 1 &&
+      reg_copy_read_stmts == 1) {
+    return false;
+  }
+  return true;
+}
+
 uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
                                       const absl::flat_hash_set<std::string>& double_vars,
                                       const CompoundStatement& body,
@@ -1330,6 +1435,7 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
   bool has_sp_buffer = false;
   bool any_non_sp_local_addr_taken = false;
   size_t sp_locals_in_gap = 0;
+  absl::flat_hash_set<int32_t> non_addr_taken_sp_slots_in_gap;
   uint32_t addr_taken_sp_bytes = 0;
   int callee_saved_gprs = 0;
 
@@ -1352,6 +1458,9 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
                                   double_vars.contains(v))
                                      ? 8u
                                      : 4u;
+        } else if (NonAddrTakenSpVarWillSpillInGcc(body, v)) {
+          non_addr_taken_sp_slots_in_gap.insert((off - static_cast<int32_t>(local_frame_bottom)) /
+                                                8);
         }
       } else if (is_addr_taken) {
         any_non_sp_local_addr_taken = true;
@@ -1391,9 +1500,14 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
     if (target_local_size > for_loop_spill_bytes) {
       unreferenced_sp_gap_size = target_local_size - for_loop_spill_bytes;
     }
-  } else if ((callee_saved_gprs >= 8 || prologue_saved_callee_fpr_pairs >= 6) &&
-             sp_locals_in_gap <= 2 && addr_taken_sp_bytes == 0) {
-    uint32_t max_spill_bytes = static_cast<uint32_t>(sp_locals_in_gap) * 8u + for_loop_spill_bytes;
+  } else if (callee_saved_gprs >= 8 || prologue_saved_callee_fpr_pairs >= 6) {
+    uint32_t max_spill_bytes = ((addr_taken_sp_bytes + 7u) & ~7u) +
+                               static_cast<uint32_t>(non_addr_taken_sp_slots_in_gap.size()) * 8u +
+                               for_loop_spill_bytes;
+    if (addr_taken_sp_bytes > 8u && !non_addr_taken_sp_slots_in_gap.empty() &&
+        callee_saved_gprs >= 9) {
+      max_spill_bytes += 8u;
+    }
     if (target_local_size > max_spill_bytes) {
       unreferenced_sp_gap_size = target_local_size - max_spill_bytes;
     }
@@ -1651,6 +1765,69 @@ void PromoteFramePointerPostIncrementStackVars(
           static_cast<CompoundStatement*>(rewrite_stmt(**body).release()));
       (*narrow_cond_inc_var_types)[var_name] = ptr_type;
     }
+  }
+}
+
+bool HoistPostCallFpConstantInit(CStatement* stmt) {
+  if (stmt == nullptr) return false;
+  switch (stmt->Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      auto& stmts = static_cast<CompoundStatement*>(stmt)->MutableStatements();
+      bool hoisted = false;
+      for (size_t i = 0; i < stmts.size(); ++i) {
+        if (stmts[i] == nullptr) continue;
+        if (stmts[i]->Kind() == CStatementKind::kExpressionStatement &&
+            StatementHasCall(*stmts[i]) && CountVariableReadUsesInStatement(*stmts[i], "fp") == 0 &&
+            !StatementModifiesVariable(*stmts[i], "fp")) {
+          for (size_t j = i + 1; j < stmts.size() && j <= i + 3; ++j) {
+            if (stmts[j] == nullptr || stmts[j]->Kind() != CStatementKind::kExpressionStatement ||
+                StatementHasCall(*stmts[j])) {
+              break;
+            }
+            const auto& es = static_cast<const ExpressionStatement&>(*stmts[j]);
+            if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+              const auto& assign = static_cast<const AssignmentExpression&>(es.Expression());
+              if (assign.Op() == "=" && assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                  static_cast<const IdentifierExpression&>(assign.Lhs()).Name() == "fp" &&
+                  assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+                auto fp_stmt = std::move(stmts[j]);
+                for (size_t k = j; k > i; --k) {
+                  stmts[k] = std::move(stmts[k - 1]);
+                }
+                stmts[i] = std::move(fp_stmt);
+                i = j;
+                hoisted = true;
+                break;
+              }
+            }
+            if (CountVariableReadUsesInStatement(*stmts[j], "fp") > 0 ||
+                StatementModifiesVariable(*stmts[j], "fp")) {
+              break;
+            }
+          }
+        } else if (HoistPostCallFpConstantInit(stmts[i].get())) {
+          hoisted = true;
+        }
+      }
+      return hoisted;
+    }
+    case CStatementKind::kIfStatement: {
+      auto* ifs = static_cast<IfStatement*>(stmt);
+      bool hoisted = HoistPostCallFpConstantInit(ifs->MutableThenBranch());
+      if (ifs->MutableElseBranch() != nullptr &&
+          HoistPostCallFpConstantInit(ifs->MutableElseBranch())) {
+        hoisted = true;
+      }
+      return hoisted;
+    }
+    case CStatementKind::kWhileStatement:
+      return HoistPostCallFpConstantInit(static_cast<WhileStatement*>(stmt)->MutableBody());
+    case CStatementKind::kDoWhileStatement:
+      return HoistPostCallFpConstantInit(static_cast<DoWhileStatement*>(stmt)->MutableBody());
+    case CStatementKind::kForStatement:
+      return HoistPostCallFpConstantInit(static_cast<ForStatement*>(stmt)->MutableBody());
+    default:
+      return false;
   }
 }
 
@@ -1935,7 +2112,10 @@ absl::Status PrependSynthesizedLocalDeclarations(
         ++prologue_saved_callee_fpr_pairs;
       }
     }
-    if (prologue_saved_callee_fpr_pairs >= 6) {
+    if (prologue_saved_callee_fpr_pairs >= 6 &&
+        (sp_buffer_size > 64 ||
+         std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "f18") !=
+             local_vars_to_declare.end())) {
       for (const auto& v : local_vars_to_declare) {
         if (absl::EndsWith(v, "_f")) {
           spill_bytes += 8u;
@@ -2112,6 +2292,14 @@ absl::Status PrependSynthesizedLocalDeclarations(
   auto is_caller_saved_safe_across_calls = [&](std::string_view r) -> bool {
     return IsCallerSavedSafeAcrossCalls(**body, is_leaf_func, r);
   };
+
+  if (!frame_analysis.has_frame_pointer && !is_leaf_func &&
+      frame_analysis.prologue.saved_reg_offsets.contains(Register::kFp) &&
+      std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "fp") !=
+          local_vars_to_declare.end() &&
+      is_caller_saved_safe_across_calls("fp")) {
+    HoistPostCallFpConstantInit(body->get());
+  }
 
   // MIPS O32 register file capacities and GCC 2.7.2 reload reserve margins:
   // - 16 even FPRs total ($f0..$f30); reserve 4 even FPRs for expression evaluation / conversions.

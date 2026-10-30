@@ -1020,9 +1020,10 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
 
       const Loop* target_loop = loop_info.GetLoopFor(succ_taken);
       std::optional<uint32_t> pred_block_id;
+      std::optional<uint32_t> split_fallthrough_pred_id;
       for (uint32_t pred_id : taken_block->predecessors) {
-        if (pred_id == block.id || pred_id == succ_fallthrough ||
-            pred_id == effective_fallthrough) {
+        if (pred_id == block.id ||
+            (chained_ft_branch_block_id.has_value() && pred_id == *chained_ft_branch_block_id)) {
           continue;
         }
         const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
@@ -1126,11 +1127,25 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
               !enclosing_loop->Contains(pred_id)) ||
              (target_loop != nullptr && target_loop->header == succ_taken &&
               !target_loop->Contains(block.id) && !target_loop->Contains(pred_id)));
-        if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
+        if (pred_id != succ_fallthrough && pred_id != effective_fallthrough &&
+            pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
             pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
             SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
             (same_loop_non_header || cross_loop_valid)) {
           pred_block_id = pred_id;
+          break;
+        }
+        if (!chained_ft_branch_block_id.has_value() && pred_blk != nullptr &&
+            pred_blk->instructions.size() > 1 && !pred_blk->HasBranch() && !pred_blk->HasReturn() &&
+            pred_blk->outgoing_edges.size() == 1 &&
+            pred_blk->outgoing_edges[0].type == EdgeType::kFallthrough &&
+            pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
+            taken_block->predecessors.size() == 2u &&
+            SameDelayInstructionEffect(delay_inst, pred_blk->instructions.back()) &&
+            same_loop_non_header &&
+            (DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
+             DelaySlotFeedsSuccessorBranch(*taken_block, delay_inst))) {
+          split_fallthrough_pred_id = pred_id;
           break;
         }
       }
@@ -1143,6 +1158,19 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
             ToNonLikelyBranchOpcode(term.opcode);
         block.instructions.back() = MakeNopInstruction(delay_inst.vram);
         changed = true;
+      } else if (split_fallthrough_pred_id.has_value()) {
+        BasicBlock* mut_pred = cfg->GetMutableBlock(*split_fallthrough_pred_id);
+        if (mut_pred != nullptr && mut_pred->instructions.size() > 1) {
+          Instruction moved_inst = mut_pred->instructions.back();
+          mut_pred->instructions.pop_back();
+          mut_pred->end_vram = mut_pred->instructions.back().vram;
+          taken_block->instructions.insert(taken_block->instructions.begin(), moved_inst);
+          taken_block->start_vram = moved_inst.vram;
+          block.instructions[block.instructions.size() - 2].opcode =
+              ToNonLikelyBranchOpcode(term.opcode);
+          block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+          changed = true;
+        }
       } else if (!term.IsBranchLikely() &&
                  TryUnmergeHammockDelaySlot(cfg, dom_tree, post_dom_tree, loop_info, &block, term,
                                             delay_inst, succ_taken, succ_fallthrough)) {

@@ -787,5 +787,24 @@ TEST(RegisterTrackerTest, DetermineReturnsV0RejectsSharedEpilogueWithKnownVoidPr
   EXPECT_FALSE(DetermineReturnsV0(cfg, nullptr, &funcs_returning_v0));
 }
 
+TEST(RegisterTrackerTest, AnalyzeFunctionStructureSkipsDivTrapBranchesWhenScanningPrologueSaves) {
+  // Models `func_80082214`: prologue allocates stack frame, executes a `div` with assembler trap
+  // branches (`bnez ...; nop; break 7`), and saves `$ra` after the `div` trap sequence.
+  std::vector<uint32_t> words = {
+      0x27BDFFE8,  // 00: addiu $sp, $sp, -24
+      0x0085001A,  // 04: div   $zero, $a0, $a1
+      0x14A00002,  // 08: bnez  $a1, +2 -> 0x14
+      0x00000000,  // 0C: nop
+      0x0007000D,  // 10: break 7
+      0xAFBF0014,  // 14: sw    $ra, 20($sp)
+      0x8FBF0014,  // 18: lw    $ra, 20($sp)
+      0x03E00008,  // 1C: jr    $ra
+      0x27BD0018,  // 20: addiu $sp, $sp, 24
+  };
+  FunctionStructuralProfile profile = AnalyzeFunctionStructure(words, 0x80000000);
+  EXPECT_EQ(profile.frame_size, 24u);
+  EXPECT_NE(profile.saved_gpr_mask & (1u << static_cast<uint32_t>(Register::kRa)), 0u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

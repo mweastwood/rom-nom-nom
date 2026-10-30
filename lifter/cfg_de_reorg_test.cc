@@ -1063,5 +1063,39 @@ TEST(CfgDeReorgTest, SimpleDelaySlotUnschedulerUnschedulesPrologueSaveInEntryBra
   EXPECT_TRUE(entry_blk->instructions.back().IsNop());
 }
 
+TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerSplitsMultiInstFallthroughPredecessorToTakenBlock) {
+  // Models GCC 2.7.2 `reorg.c` stealing the first instruction (`addiu $v0, $a1, 1`) of a target
+  // block into a `bnezl` delay slot and advancing the branch target by +4 when the fallthrough
+  // predecessor into the target block has multiple instructions (`addu $a1, $a0, $a2; addiu $v0,
+  // $a1, 1`) and was therefore not split by `BasicBlockBuilder`.
+  std::vector<uint32_t> words = {
+      0x24820005,  // 0x00: addiu $v0, $a0, 5
+      0x54400003,  // 0x04: bnezl $v0, +3 -> 0x14
+      0x24A20001,  // 0x08: addiu $v0, $a1, 1 (stolen from target header; clobbers $v0)
+      0x00862821,  // 0x0C: addu  $a1, $a0, $a2 (fallthrough block, instruction 0)
+      0x24A20001,  // 0x10: addiu $v0, $a1, 1   (fallthrough block, instruction 1)
+      0x03E00008,  // 0x14: jr    $ra           (taken block)
+      0x00000000,  // 0x18: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  RelaxDelaySlotUnschedulerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, nullptr));
+
+  const BasicBlock* entry_blk = cfg.GetBlock(cfg.EntryBlockId());
+  const BasicBlock* taken_blk = cfg.GetBlock(2);
+  ASSERT_NE(entry_blk, nullptr);
+  ASSERT_NE(taken_blk, nullptr);
+  EXPECT_EQ(entry_blk->instructions[entry_blk->instructions.size() - 2].opcode, Opcode::kBne);
+  EXPECT_TRUE(entry_blk->instructions.back().IsNop());
+  EXPECT_EQ(taken_blk->start_vram, 0x80000010u);
+  EXPECT_EQ(taken_blk->instructions.front().opcode, Opcode::kAddiu);
+  EXPECT_EQ(taken_blk->instructions.front().rt, Register::kV0);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

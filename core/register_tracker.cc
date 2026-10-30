@@ -1653,6 +1653,18 @@ FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> wo
   size_t prologue_limit = instructions.size();
   for (size_t i = 0; i < instructions.size(); ++i) {
     const Instruction& inst = instructions[i];
+    if (inst.IsBranch()) {
+      bool is_div_trap_branch = false;
+      for (size_t j = i + 1; j <= std::min(instructions.size() - 1, i + 5); ++j) {
+        if (instructions[j].opcode == Opcode::kBreak) {
+          is_div_trap_branch = true;
+          break;
+        }
+      }
+      if (is_div_trap_branch) {
+        continue;
+      }
+    }
     if (inst.IsBranch() || inst.IsJump() || inst.IsCall() || inst.IsReturn()) {
       prologue_limit = std::min(instructions.size(), i + 2);
       break;

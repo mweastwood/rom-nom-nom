@@ -1693,5 +1693,91 @@ TEST(VariableDeclarationBuilderTest, DeclaresVarSp64AsS32AndPinsStandaloneTempS0
   EXPECT_THAT(emitted, HasSubstr("register f32 temp_s0_f asm(\"$16\");"));
 }
 
+TEST(VariableDeclarationBuilderTest,
+     CountsForLoopSpillOnlyForZeroInitRelationalLoopsAndHoistsPostCallFpConstant) {
+  ControlFlowGraph cfg;
+
+  // 1. A `for` loop whose initializer is NOT `0` (`for (arg3 = temp_t0 + 2; arg3 != -1; arg3--)`)
+  //    does not trigger GCC 2.7.2's `combine.c` orphaned `slt` pseudo-register spill, so 0 bytes
+  //    are subtracted from `sp_buffer_size` (`u8 sp[24];` is preserved).
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 40;
+    frame.has_calls = false;
+    frame.has_frame_pointer = false;
+    frame.sp_address_taken = true;
+    frame.sp_buffer_size = 24;
+    frame.max_sp_access = 16;
+
+    auto for_init = CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg3"),
+        CExpression::Binary("+", CExpression::Identifier("temp_t0"), CExpression::Integer(2))));
+    auto for_cond =
+        CExpression::Binary("!=", CExpression::Identifier("arg3"), CExpression::Integer(-1));
+    auto for_step = CExpression::Assignment(
+        "=", CExpression::Identifier("arg3"),
+        CExpression::Binary("-", CExpression::Identifier("arg3"), CExpression::Integer(1)));
+    auto for_body = std::make_unique<CompoundStatement>();
+    for_body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("v0"),
+                                CExpression::Cast(CType::S32(), CExpression::Identifier("sp")))));
+
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::For(std::move(for_init), std::move(for_cond),
+                                       std::move(for_step), std::move(for_body)));
+    body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+    std::vector<CParameter> params = {{CType::S32(), "arg0"}};
+    AstConverterOptions opts;
+    opts.function_name = "TestNonZeroInitForLoopSpBuffer";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    EXPECT_THAT(body->ToString(), HasSubstr("u8 sp[24];"));
+  }
+
+  // 2. When `$fp` (`$30`) is saved in the prologue as a callee-saved GPR (`!has_frame_pointer`)
+  //    and `sched2` sunk `fp = 1;` past `v0 = func_80001000(arg0);`,
+  //    `PrependSynthesizedLocalDeclarations` hoists `fp = 1;` before the call so `fp` is live
+  //    across the call.
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 88;
+    frame.has_calls = true;
+    frame.has_frame_pointer = false;
+    frame.prologue.min_saved_reg_offset = 48;
+    frame.prologue.saved_reg_offsets[Register::kFp] = 80;
+    frame.prologue.saved_reg_offsets[Register::kRa] = 84;
+
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("fp"), CExpression::Integer(0))));
+    std::vector<std::unique_ptr<CExpression>> call_args;
+    call_args.push_back(CExpression::Identifier("arg0"));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("v0"),
+        CExpression::Call(CExpression::Identifier("func_80001000"), std::move(call_args)))));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("fp"), CExpression::Integer(1))));
+    body->AddStatement(CStatement::Return(
+        CExpression::Binary("+", CExpression::Identifier("v0"), CExpression::Identifier("fp"))));
+
+    std::vector<CParameter> params = {{CType::S32(), "arg0"}};
+    AstConverterOptions opts;
+    opts.function_name = "TestHoistPostCallFpConstant";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    size_t pos_fp_one = emitted.find("fp = 1;");
+    size_t pos_call = emitted.find("v0 = func_80001000(arg0);");
+    ASSERT_NE(pos_fp_one, std::string::npos) << emitted;
+    ASSERT_NE(pos_call, std::string::npos) << emitted;
+    EXPECT_LT(pos_fp_one, pos_call) << emitted;
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
