@@ -797,6 +797,9 @@ bool IsCseConflictProneCalleeSavedRhs(const CExpression& rhs,
   }
   if (rhs.Kind() == CExpressionKind::kBinaryExpression) {
     const auto& b = static_cast<const BinaryExpression&>(rhs);
+    if (b.Op() == "*") {
+      return false;
+    }
     if (b.Op() == "+" || b.Op() == "-") {
       if (b.Lhs().Kind() == CExpressionKind::kIdentifier &&
           absl::StartsWith(static_cast<const IdentifierExpression&>(b.Lhs()).Name(), "arg")) {
@@ -1550,6 +1553,86 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
   }
 }
 
+std::unique_ptr<CStatement> PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(
+    const CStatement& stmt, const std::set<std::string>& write_only_vars) {
+  if (write_only_vars.empty()) return stmt.Clone();
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      std::vector<std::unique_ptr<CStatement>> stmts;
+      stmts.reserve(comp.Statements().size() + 2);
+      for (const auto& s : comp.Statements()) {
+        if (s == nullptr) {
+          stmts.push_back(nullptr);
+          continue;
+        }
+        stmts.push_back(PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(*s, write_only_vars));
+        if (s->Kind() == CStatementKind::kExpressionStatement) {
+          const auto& es = static_cast<const ExpressionStatement&>(*s);
+          if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+            const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+            if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier) {
+              std::string lhs(static_cast<const IdentifierExpression&>(a.Lhs()).Name());
+              if (write_only_vars.count(lhs) > 0) {
+                stmts.push_back(CStatement::Expression(
+                    CExpression::Identifier(absl::StrFormat("__asm__(\"\" : : \"r\"(%s))", lhs))));
+              }
+            }
+          }
+        }
+      }
+      return std::make_unique<CompoundStatement>(std::move(stmts));
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(
+          ifs.Condition().Clone(),
+          PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(ifs.ThenBranch(), write_only_vars),
+          ifs.ElseBranch() != nullptr
+              ? PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(*ifs.ElseBranch(), write_only_vars)
+              : nullptr);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& ws = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(
+          ws.Condition().Clone(),
+          PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(ws.Body(), write_only_vars));
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dws = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(
+          PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(dws.Body(), write_only_vars),
+          dws.Condition().Clone());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(
+          fs.Init() != nullptr ? fs.Init()->Clone() : nullptr,
+          fs.Condition() != nullptr ? fs.Condition()->Clone() : nullptr,
+          fs.Step() != nullptr ? fs.Step()->Clone() : nullptr,
+          PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(fs.Body(), write_only_vars));
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& ss = static_cast<const SwitchStatement&>(stmt);
+      std::vector<SwitchCase> cases;
+      cases.reserve(ss.Cases().size());
+      for (const auto& c : ss.Cases()) {
+        SwitchCase sc;
+        sc.case_values = c.case_values;
+        sc.is_default = c.is_default;
+        if (c.body != nullptr) {
+          sc.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+              PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(*c.body, write_only_vars).release()));
+        }
+        cases.push_back(std::move(sc));
+      }
+      return CStatement::Switch(ss.Condition().Clone(), std::move(cases));
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
 bool StmtContainsCall(const CStatement& stmt);
 
 bool ExprContainsCall(const CExpression& expr) {
@@ -2226,9 +2309,23 @@ bool AstCodegenLowerer::IsO2Function(const FunctionDeclaration& function) {
 std::unique_ptr<CompoundStatement> AstCodegenLowerer::DisambiguateCalleeSavedAndGlobalLoads(
     const CompoundStatement& body, const std::set<std::string>& external_data_symbols,
     bool has_calls) {
-  return std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
-      DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(body, external_data_symbols, has_calls)
-          .release()));
+  std::set<std::string> write_only_pinned_callee_vars;
+  for (const auto& s : body.Statements()) {
+    if (s == nullptr || s->Kind() != CStatementKind::kVariableDeclarationStatement) continue;
+    const auto& vd = static_cast<const VariableDeclarationStatement&>(*s);
+    if (IsPinnedCalleeSavedGprVar(vd.Name()) && vd.RegisterAnnotation().has_value() &&
+        !vd.RegisterAnnotation()->empty() && !StmtReadsVar(body, vd.Name())) {
+      write_only_pinned_callee_vars.insert(vd.Name());
+    }
+  }
+  auto disambiguated =
+      DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(body, external_data_symbols, has_calls);
+  if (!write_only_pinned_callee_vars.empty() && disambiguated != nullptr) {
+    disambiguated = PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(*disambiguated,
+                                                                   write_only_pinned_callee_vars);
+  }
+  return std::unique_ptr<CompoundStatement>(
+      static_cast<CompoundStatement*>(disambiguated.release()));
 }
 
 std::unique_ptr<CompoundStatement> AstCodegenLowerer::NormalizeGlobalAndArraySymbols(

@@ -1103,7 +1103,7 @@ void InlineCrossJumpedCallTails(CompoundStatement* root_body, bool allow_diamond
                 }
                 tail.push_back(stmts[k]->Clone());
               }
-              if (in_loop && has_call) continue;
+              if (in_loop && has_call && !is_switch_case_body) continue;
               bool ends_with_return =
                   !tail.empty() && tail.back()->Kind() == CStatementKind::kReturnStatement;
               bool valid_call_tail = all_tail_stmts_valid && !has_inner_label && has_call;
@@ -1662,6 +1662,14 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
               }
             }
           }
+          auto is_pure_mem_store = [](const CStatement& s) -> bool {
+            if (s.Kind() != CStatementKind::kExpressionStatement) return false;
+            const auto& es = static_cast<const ExpressionStatement&>(s);
+            if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) return false;
+            const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+            return a.Op() == "=" && a.Lhs().Kind() != CExpressionKind::kIdentifier &&
+                   IsPureExpression(a.Lhs()) && IsPureExpression(a.Rhs());
+          };
           bool sunk_any = !(all_simple_reg_assigns && !else_can_become_empty);
           while (sunk_any && !then_stmts.empty() && !else_stmts.empty()) {
             sunk_any = false;
@@ -1672,12 +1680,22 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
               if (!extract_sinkable_assign(*then_stmts[ti - 1], &t_lhs, &t_rhs, &t_rhs_expr)) {
                 continue;
               }
+              const bool allow_mem_store_commute =
+                  i + 1 < stmts.size() && stmts[i + 1] != nullptr &&
+                  StatementReferencesVariable(*stmts[i + 1], t_lhs);
               bool t_blocked = false;
               for (size_t tk = ti; tk < then_stmts.size(); ++tk) {
                 std::string after_lhs;
-                if (!is_simple_reg_assign(*then_stmts[tk], &after_lhs) || after_lhs == t_lhs ||
-                    StatementReferencesVariable(*then_stmts[tk], t_lhs) ||
-                    ExpressionUsesVariable(*t_rhs_expr, after_lhs)) {
+                if (is_simple_reg_assign(*then_stmts[tk], &after_lhs)) {
+                  if (after_lhs == t_lhs || StatementReferencesVariable(*then_stmts[tk], t_lhs) ||
+                      ExpressionUsesVariable(*t_rhs_expr, after_lhs)) {
+                    t_blocked = true;
+                    break;
+                  }
+                } else if (allow_mem_store_commute && is_pure_mem_store(*then_stmts[tk]) &&
+                           !StatementReferencesVariable(*then_stmts[tk], t_lhs)) {
+                  continue;
+                } else {
                   t_blocked = true;
                   break;
                 }
@@ -1695,9 +1713,16 @@ void SinkCommonBranchTailArgAssignments(CompoundStatement* comp) {
                 bool e_blocked = false;
                 for (size_t ek = ei; ek < else_stmts.size(); ++ek) {
                   std::string after_lhs;
-                  if (!is_simple_reg_assign(*else_stmts[ek], &after_lhs) || after_lhs == e_lhs ||
-                      StatementReferencesVariable(*else_stmts[ek], e_lhs) ||
-                      ExpressionUsesVariable(*e_rhs_expr, after_lhs)) {
+                  if (is_simple_reg_assign(*else_stmts[ek], &after_lhs)) {
+                    if (after_lhs == e_lhs || StatementReferencesVariable(*else_stmts[ek], e_lhs) ||
+                        ExpressionUsesVariable(*e_rhs_expr, after_lhs)) {
+                      e_blocked = true;
+                      break;
+                    }
+                  } else if (allow_mem_store_commute && is_pure_mem_store(*else_stmts[ek]) &&
+                             !StatementReferencesVariable(*else_stmts[ek], e_lhs)) {
+                    continue;
+                  } else {
                     e_blocked = true;
                     break;
                   }
@@ -3707,9 +3732,8 @@ std::unique_ptr<CStatement> TryBuildSparseSwitchFromState(SparseDecisionTreeStat
   return CStatement::Switch(std::move(state->control_expr), std::move(switch_cases));
 }
 
-}  // namespace
-
-bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body) {
+bool ReconstructSparseSwitchDecisionTreesImpl(CompoundStatement* body,
+                                              const CompoundStatement& root_body) {
   if (body == nullptr) return false;
   bool any_changed = false;
 
@@ -3717,14 +3741,56 @@ bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body) {
   for (size_t i = 0; i < stmts.size(); ++i) {
     if (stmts[i] == nullptr) continue;
     ForEachSubCompoundStatement(stmts[i].get(), [&](CompoundStatement* sub) {
-      if (ReconstructSparseSwitchDecisionTrees(sub)) {
+      if (ReconstructSparseSwitchDecisionTreesImpl(sub, root_body)) {
         any_changed = true;
       }
     });
   }
 
+  auto try_fold_single_use_callee_saved_selector = [&](size_t sw_idx) -> bool {
+    if (sw_idx == 0 || stmts[sw_idx - 1] == nullptr || stmts[sw_idx] == nullptr ||
+        stmts[sw_idx]->Kind() != CStatementKind::kSwitchStatement) {
+      return false;
+    }
+    auto& sw_stmt = static_cast<SwitchStatement&>(*stmts[sw_idx]);
+    if (sw_stmt.Condition().Kind() != CExpressionKind::kIdentifier) {
+      return false;
+    }
+    std::string_view cond_var =
+        static_cast<const IdentifierExpression&>(sw_stmt.Condition()).Name();
+    if (!absl::StartsWith(cond_var, "temp_s")) {
+      return false;
+    }
+    std::string lhs;
+    const CExpression* rhs = nullptr;
+    if (!ExtractSimpleVarAssign(*stmts[sw_idx - 1], &lhs, &rhs) || lhs != cond_var ||
+        rhs == nullptr || !IsPureExpression(*rhs) || ExpressionUsesVariable(*rhs, lhs)) {
+      return false;
+    }
+    if (CountIdentifierOccurrencesInStatement(root_body, lhs) != 2) {
+      return false;
+    }
+    sw_stmt.MutableCondition() = rhs->Clone();
+    stmts[sw_idx - 1] = std::move(stmts[sw_idx]);
+    stmts.erase(stmts.begin() + static_cast<ptrdiff_t>(sw_idx));
+    return true;
+  };
+
   for (size_t i = 0; i < stmts.size(); ++i) {
-    if (stmts[i] == nullptr || stmts[i]->Kind() != CStatementKind::kIfStatement) continue;
+    if (stmts[i] == nullptr) continue;
+    if (stmts[i]->Kind() == CStatementKind::kSwitchStatement) {
+      const auto& existing_sw = static_cast<const SwitchStatement&>(*stmts[i]);
+      size_t non_default_groups = 0;
+      for (const auto& sc : existing_sw.Cases()) {
+        if (!sc.is_default) ++non_default_groups;
+      }
+      if (non_default_groups < 5 && try_fold_single_use_callee_saved_selector(i)) {
+        --i;
+        any_changed = true;
+      }
+      continue;
+    }
+    if (stmts[i]->Kind() != CStatementKind::kIfStatement) continue;
 
     // 1. Check if `stmts[i]` is an early-terminating `if (x == P) { ... }` (without `else`)
     // immediately followed by a range-split `IfStatement` `stmts[i + 1]` on `x`.
@@ -3739,6 +3805,9 @@ bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body) {
         if (auto sw = TryBuildSparseSwitchFromState(&state)) {
           stmts[i] = std::move(sw);
           stmts.erase(stmts.begin() + static_cast<ptrdiff_t>(i + 1));
+          if (try_fold_single_use_callee_saved_selector(i)) {
+            --i;
+          }
           any_changed = true;
           continue;
         }
@@ -3750,11 +3819,25 @@ bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body) {
     if (ParseDecisionTreeNode(stmts[i].get(), std::nullopt, std::nullopt, &state)) {
       if (auto sw = TryBuildSparseSwitchFromState(&state)) {
         stmts[i] = std::move(sw);
+        if (try_fold_single_use_callee_saved_selector(i)) {
+          --i;
+        }
         any_changed = true;
       }
     }
   }
 
+  return any_changed;
+}
+
+}  // namespace
+
+bool ReconstructSparseSwitchDecisionTrees(CompoundStatement* body) {
+  if (body == nullptr) return false;
+  bool any_changed = ReconstructSparseSwitchDecisionTreesImpl(body, *body);
+  if (any_changed) {
+    InlineCrossJumpedCallTails(body, /*allow_diamond_tails=*/true);
+  }
   return any_changed;
 }
 

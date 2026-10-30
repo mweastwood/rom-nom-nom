@@ -916,6 +916,9 @@ bool IsCallerSavedScratchVarName(std::string_view name) {
   if (name == "v0" || name == "v1" || name == "temp_at") {
     return true;
   }
+  if (name.size() == 4 && absl::StartsWith(name, "arg") && name[3] >= '0' && name[3] <= '3') {
+    return true;
+  }
   if (name.size() == 7 && absl::StartsWith(name, "temp_t") && name[6] >= '0' && name[6] <= '9') {
     return true;
   }

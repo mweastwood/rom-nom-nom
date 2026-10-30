@@ -184,6 +184,10 @@ AstPassPipeline AstPassPipeline::BuildDefaultPipeline() {
   pipeline.AddPass(std::make_unique<ScratchReusedParameterSplitAndFoldPass>());
   pipeline.AddPass(std::make_unique<CrossJumpedCallTailInlinerPass>(/*allow_diamond_tails=*/true));
   pipeline.AddPass(std::make_unique<CommonBranchTailSinkerPass>());
+  pipeline.AddPass(std::make_unique<SingleUseExpressionFolderPass>());
+  pipeline.AddPass(std::make_unique<FloatCallArgumentRewriterPass>());
+  pipeline.AddPass(std::make_unique<SingleUseExpressionFolderPass>());
+  pipeline.AddPass(std::make_unique<UnassignedTrailingCallArgTrimmerPass>());
   pipeline.AddPass(std::make_unique<LoopInvariantSinkerPass>());
   pipeline.AddPass(std::make_unique<StoreFlagConditionalRecoveryPass>());
   pipeline.AddPass(std::make_unique<SparseSwitchDecisionTreePass>());

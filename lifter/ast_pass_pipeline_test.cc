@@ -671,5 +671,87 @@ TEST(AstPassPipelineTest, ScratchRegisterWebSplitterPreservesMultipleLoopAddress
   EXPECT_TRUE(split_vars.empty());
 }
 
+TEST(
+    AstPassPipelineTest,
+    SparseSwitchDecisionTreePassFoldsSingleUseCalleeSavedSelectorAndInlinesCrossJumpedCaseTailsInLoop) {
+  CompoundStatement body;
+  auto loop_body = std::make_unique<CompoundStatement>();
+
+  // `temp_s0 = (arg0 & 255);` used only as the selector of a sparse decision tree inside a loop,
+  // where `case 30:` jumps to `block_8:` inside `case 1:`.
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("&", CExpression::Identifier("arg0"), CExpression::Integer(255)))));
+
+  auto case10_then = std::make_unique<CompoundStatement>();
+  case10_then->AddStatement(
+      CStatement::Expression(CExpression::Call(CExpression::Identifier("StepOne"), {})));
+  case10_then->AddStatement(CStatement::Label("block_8"));
+  case10_then->AddStatement(
+      CStatement::Expression(CExpression::Call(CExpression::Identifier("SharedTail"), {})));
+
+  auto case1_then = std::make_unique<CompoundStatement>();
+  case1_then->AddStatement(
+      CStatement::Expression(CExpression::Call(CExpression::Identifier("StepZero"), {})));
+  auto less_10 = std::make_unique<CompoundStatement>();
+  less_10->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("temp_s0"), CExpression::Integer(1)),
+      std::move(case1_then)));
+
+  auto case30_then = std::make_unique<CompoundStatement>();
+  case30_then->AddStatement(CStatement::Goto("block_8"));
+  auto ge_10 = std::make_unique<CompoundStatement>();
+  ge_10->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("temp_s0"), CExpression::Integer(30)),
+      std::move(case30_then)));
+
+  auto pivot_else = std::make_unique<CompoundStatement>();
+  pivot_else->AddStatement(CStatement::If(
+      CExpression::Binary("<", CExpression::Identifier("temp_s0"), CExpression::Integer(10)),
+      std::move(less_10), std::move(ge_10)));
+
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("temp_s0"), CExpression::Integer(10)),
+      std::move(case10_then), std::move(pivot_else)));
+
+  body.AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("v0"), CExpression::Integer(0))));
+
+  std::vector<CParameter> params = {CParameter{CType::S32(), "arg0"}};
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  SparseSwitchDecisionTreePass pass;
+  EXPECT_TRUE(pass.Run(&body, ctx));
+
+  const std::string rendered = body.ToString();
+  EXPECT_THAT(rendered, HasSubstr("switch ((arg0 & 255))"));
+  EXPECT_THAT(rendered, Not(HasSubstr("temp_s0")));
+  EXPECT_THAT(rendered, Not(HasSubstr("goto block_8")));
+  EXPECT_THAT(rendered, Not(HasSubstr("block_8:")));
+}
+
+TEST(AstPassPipelineTest, ScratchRegisterWebSplitterSplitsUnpinnedNonParameterArgVariables) {
+  CompoundStatement body;
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg2"), CExpression::Integer(10))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Identifier("arg2")))));
+  body.AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg2"), CExpression::Integer(20))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Identifier("arg2")))));
+
+  std::vector<CParameter> params = {CParameter{CType::S32(), "arg0"}};
+  AstPassContext ctx{.parameters = params, .return_type = CType::Void()};
+  absl::flat_hash_map<std::string, std::vector<std::string>> split_vars;
+  ScratchRegisterWebSplitterPass pass({}, &split_vars);
+  EXPECT_TRUE(pass.Run(&body, ctx));
+  ASSERT_TRUE(split_vars.contains("arg2"));
+  EXPECT_FALSE(split_vars.contains("arg0"));
+  EXPECT_THAT(body.ToString(), HasSubstr("arg2_2 = 20;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

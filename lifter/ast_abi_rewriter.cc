@@ -926,15 +926,19 @@ void TrimUnassignedTrailingCallArgRegisters(
           auto& ifs = static_cast<IfStatement&>(*s);
           auto cond = rewrite_e(ifs.Condition(), "s32");
           auto before_if = defined_so_far;
+          bool before_prefix = in_entry_linear_prefix;
           if (ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(ifs.MutableThenBranch()));
           }
           auto after_then = defined_so_far;
+          bool after_then_prefix = in_entry_linear_prefix;
           defined_so_far = before_if;
+          in_entry_linear_prefix = before_prefix;
           if (ifs.MutableElseBranch() != nullptr &&
               ifs.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
             rewrite_comp(static_cast<CompoundStatement*>(ifs.MutableElseBranch()));
           }
+          in_entry_linear_prefix = after_then_prefix && in_entry_linear_prefix;
           for (const auto& v : after_then) {
             defined_so_far.insert(v);
           }

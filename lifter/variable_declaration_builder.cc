@@ -2626,6 +2626,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
         !is_callee_gpr && !has_address_taken(var_name) &&
         !(has_narrow_temp_t && narrow_cond_inc_var_types.contains(var_name)) &&
         (var_name == "v0" || var_name == "v1" || var_name == "temp_at" ||
+         (var_name.size() == 4 && absl::StartsWith(var_name, "arg") && var_name[3] >= '0' &&
+          var_name[3] <= '3') ||
          (var_name.size() == 7 &&
           (absl::StartsWith(var_name, "temp_t") || absl::StartsWith(var_name, "temp_a"))))) {
       unpinned_scratch_candidates.push_back(var_name);

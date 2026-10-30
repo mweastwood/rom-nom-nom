@@ -1028,5 +1028,49 @@ TEST(CEmitterTest, ExplicitO2FunctionOptimizationModePreservedWhenRegisterAnnota
   EXPECT_THAT(emitted, HasSubstr("__asm__(\"mfc1 %0, %1\" : \"=r\"(v0) : \"f\"(f2));"));
 }
 
+TEST(CEmitterTest,
+     OmitsCseBarrierOnCalleeSavedMultiplyAndPreservesWriteOnlyPinnedCalleeSavedStore) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s2", nullptr, std::nullopt, "$18"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v0", nullptr, std::nullopt, "$2"));
+
+  // `temp_s1 = (temp_s0 * 24);` should NOT get a CSE barrier even though `temp_s1` is dereferenced
+  // after a call.
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"),
+      CExpression::Binary("*", CExpression::Identifier("temp_s0"), CExpression::Integer(24)))));
+  // `temp_s2 = (temp_s0 + 1);` has 0 reads in the function body, so it should get an input-only
+  // `__asm__("" : : "r"(temp_s2));` barrier to prevent GCC `flow.c` from deleting the dead store.
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Call(CExpression::Identifier("StepCall"), {}))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Unary("*(s32*)", CExpression::Identifier("temp_s1")),
+      CExpression::Identifier("v0"))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  tu.functions.emplace_back(CType::S32(), "TestMultiplyNoBarrierAndWriteOnlyPinnedCalleeSaved",
+                            std::vector<CParameter>{}, std::move(body));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted,
+              ::testing::Not(HasSubstr("__asm__(\"\" : \"=r\"(temp_s1) : \"0\"(temp_s1))")));
+  EXPECT_THAT(emitted,
+              HasSubstr("temp_s2 = (temp_s0 + 1);\n    __asm__(\"\" : : \"r\"(temp_s2));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

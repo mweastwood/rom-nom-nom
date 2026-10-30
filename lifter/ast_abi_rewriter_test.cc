@@ -819,5 +819,75 @@ TEST(AstAbiRewriterTest,
   EXPECT_THAT(emitted, HasSubstr("block_13:"));
 }
 
+TEST(AstAbiRewriterTest,
+     TrimUnassignedTrailingCallArgRegistersPreservesEntryLinearPrefixAcrossIfBranches) {
+  CompoundStatement root;
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Label("block_13"));
+  then_branch->AddStatement(CStatement::Return());
+
+  auto else_branch = std::make_unique<CompoundStatement>();
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg1"), CExpression::Integer(1))));
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg2"), CExpression::Integer(2))));
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  call_args.push_back(CExpression::Identifier("arg1"));
+  call_args.push_back(CExpression::Identifier("arg2"));
+  call_args.push_back(CExpression::Identifier("arg3"));
+  else_branch->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("func_80093540"), std::move(call_args))));
+
+  root.AddStatement(CStatement::If(CExpression::Identifier("cond"), std::move(then_branch),
+                                   std::move(else_branch)));
+  root.AddStatement(CStatement::Return());
+
+  std::vector<CParameter> params = {CParameter{CType::S32(), "arg0"}};
+  TrimUnassignedTrailingCallArgRegisters(&root, params, nullptr);
+
+  std::string emitted = root.ToString();
+  EXPECT_THAT(emitted, HasSubstr("func_80093540(arg0, arg1, arg2);"));
+  EXPECT_THAT(emitted, Not(HasSubstr("arg3")));
+}
+
+TEST(AstAbiRewriterTest,
+     SinkCommonBranchTailArgAssignmentsCommutesRegisterAssignPastPureMemoryStores) {
+  CompoundStatement root;
+
+  auto then_branch = std::make_unique<CompoundStatement>();
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("&", CExpression::Identifier("temp_s2"), CExpression::Integer(255)))));
+  then_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U8().MakePointer(), CExpression::Identifier("temp_s0"))),
+      CExpression::Integer(10))));
+
+  auto else_branch = std::make_unique<CompoundStatement>();
+  else_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("&", CExpression::Identifier("temp_s2"), CExpression::Integer(255)))));
+  else_branch->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType::U8().MakePointer(), CExpression::Identifier("temp_s0"))),
+      CExpression::Integer(20))));
+
+  root.AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Call(CExpression::Identifier("RandomCheck"), {}),
+                          CExpression::Integer(0)),
+      std::move(then_branch), std::move(else_branch)));
+  root.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Binary("*", CExpression::Identifier("v0"), CExpression::Integer(36)))));
+
+  SinkCommonBranchTailArgAssignments(&root);
+
+  ASSERT_EQ(root.Statements().size(), 3u);
+  EXPECT_THAT(root.Statements()[1]->ToString(), HasSubstr("v0 = (temp_s2 & 255);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
