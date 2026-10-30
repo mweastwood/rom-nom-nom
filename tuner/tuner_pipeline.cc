@@ -146,6 +146,11 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
     if (result.winning_c_flags != base_flags) {
       preset_flag_profiles.push_back(base_flags);
     }
+    if (!options.previous_cached_flags.empty() &&
+        std::find(preset_flag_profiles.begin(), preset_flag_profiles.end(),
+                  options.previous_cached_flags) == preset_flag_profiles.end()) {
+      preset_flag_profiles.push_back(options.previous_cached_flags);
+    }
     for (const auto& preset_steps : presets) {
       FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
       std::string preset_c = emit_c_fn(preset_ast);

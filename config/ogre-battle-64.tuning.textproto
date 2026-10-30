@@ -1,100 +1,5 @@
 game_name: "ogre-battle-64"
 entries {
-  function_name: "func_8008424C"
-  module_name: ""
-  input_sha1: "653f5b82ca65332058ce83f37ee7caa1e0917a74"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 20
-  matching_instructions: 20
-  target_instructions: 28
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_8008BA50"
-  module_name: ""
-  input_sha1: "01af769b2e06a1822666c6d6a497b553aebaf3e2"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 106
-  matching_instructions: 106
-  target_instructions: 124
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_8009C670"
-  module_name: ""
-  input_sha1: "ff801f8c8ae7055dd12b984b1b4ac6e978bf3817"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
-    site_index: 0
-    param: 2
-  }
-  ast_mutations {
-    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_UNSIGNED_CAST
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 21
-  matching_instructions: 21
-  target_instructions: 56
-  is_bit_exact: false
-}
-entries {
   function_name: "func_80070C60"
   module_name: "1060"
   input_sha1: "e860e6c1a2b01ddefa03b78618fd96bc0e3472b8"
@@ -171,7 +76,7 @@ entries {
 entries {
   function_name: "func_80070F30"
   module_name: "1060"
-  input_sha1: "78d656b8aaa0cd27d44bcb665c9afba8a906985f"
+  input_sha1: "98591244d3889aa3b0d53321505b23a3f0f16872"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -209,7 +114,7 @@ entries {
 entries {
   function_name: "func_800710DC"
   module_name: "1060"
-  input_sha1: "f19943d1c374aec1894095b6937802321b34edfa"
+  input_sha1: "017e6c64fc2973b8118137c2733609c92348f1d0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -260,16 +165,41 @@ entries {
 entries {
   function_name: "func_800712C4"
   module_name: "1060"
-  input_sha1: "c1f185abdfd9e6231478d4906db62d0e603a39bb"
+  input_sha1: "9fbe13dc3d2561ec06aec72c38d73c0cefcc630b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 68
-  matching_instructions: 68
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 74
+  matching_instructions: 74
   target_instructions: 74
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_800713EC"
@@ -304,6 +234,11 @@ entries {
     site_index: 7
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
   bit_exact_instructions: 53
   matching_instructions: 53
   target_instructions: 58
@@ -313,7 +248,7 @@ entries {
   function_name: "func_800714D4"
   module_name: "1060"
   input_sha1: "82e20f292a5825c454a7ce3b6d687b8f2f6e3056"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -327,8 +262,18 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 64
-  matching_instructions: 64
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 21
+    param: 0
+  }
+  bit_exact_instructions: 67
+  matching_instructions: 67
   target_instructions: 88
   is_bit_exact: false
 }
@@ -361,14 +306,44 @@ entries {
 entries {
   function_name: "func_80071644"
   module_name: "1060"
-  input_sha1: "cd15d2b6ad3e38fa8316f422a8484e2a6eae5ca1"
+  input_sha1: "423a37f0e4e1ad4d7486c8246489f62252913388"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 154
-  matching_instructions: 154
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  bit_exact_instructions: 159
+  matching_instructions: 159
   target_instructions: 195
   is_bit_exact: false
 }
@@ -495,8 +470,13 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 137
-  matching_instructions: 137
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 138
+  matching_instructions: 138
   target_instructions: 156
   is_bit_exact: false
 }
@@ -579,13 +559,13 @@ entries {
 entries {
   function_name: "func_80072398"
   module_name: "1060"
-  input_sha1: "afdb53ff6562aa965b5af3097d76d8b24208bd86"
+  input_sha1: "223ffeabbac3f0182cf039e45ba685dee77f1b3d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 191
-  matching_instructions: 191
+  bit_exact_instructions: 189
+  matching_instructions: 189
   target_instructions: 222
   is_bit_exact: false
 }
@@ -693,8 +673,18 @@ entries {
     site_index: 13
     param: 0
   }
-  bit_exact_instructions: 332
-  matching_instructions: 332
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 19
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 18
+    param: 0
+  }
+  bit_exact_instructions: 341
+  matching_instructions: 341
   target_instructions: 448
   is_bit_exact: false
 }
@@ -722,15 +712,20 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 46
-  matching_instructions: 46
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 2
+  }
+  bit_exact_instructions: 48
+  matching_instructions: 48
   target_instructions: 58
   is_bit_exact: false
 }
 entries {
   function_name: "func_80073164"
   module_name: "1060"
-  input_sha1: "e3350084ccc9681a83c0a16d82bc720321aabf2c"
+  input_sha1: "f4f90f6f737108372c7f74035157a8140287b3d2"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -835,18 +830,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
-    param: 0
-  }
-  bit_exact_instructions: 175
-  matching_instructions: 175
+  bit_exact_instructions: 172
+  matching_instructions: 172
   target_instructions: 234
   is_bit_exact: false
 }
@@ -903,26 +888,37 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 121
-  matching_instructions: 121
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 13
+    param: 0
+  }
+  bit_exact_instructions: 123
+  matching_instructions: 123
   target_instructions: 174
   is_bit_exact: false
 }
 entries {
   function_name: "func_80073AE4"
   module_name: "1060"
-  input_sha1: "077100778a898e75f7c4e1373089e25e745a6cd0"
-  c_flags: "-O1"
+  input_sha1: "b5cb344d93b1d5618d57f00befe623f94f225892"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
+    kind: AST_MUTATION_VOLATILE_GLOBAL_ACCESS
+    site_index: 0
     param: 0
   }
-  bit_exact_instructions: 42
-  matching_instructions: 42
+  bit_exact_instructions: 54
+  matching_instructions: 54
   target_instructions: 59
   is_bit_exact: false
 }
@@ -1020,8 +1016,38 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 92
-  matching_instructions: 92
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 10
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 12
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 10
+    param: 0
+  }
+  bit_exact_instructions: 99
+  matching_instructions: 99
   target_instructions: 138
   is_bit_exact: false
 }
@@ -1097,7 +1123,7 @@ entries {
   c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
+    site_index: 1
     param: 0
   }
   bit_exact_instructions: 25
@@ -1195,8 +1221,18 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 40
-  matching_instructions: 40
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 4
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 5
+    param: 0
+  }
+  bit_exact_instructions: 42
+  matching_instructions: 42
   target_instructions: 50
   is_bit_exact: false
 }
@@ -1257,8 +1293,18 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 95
-  matching_instructions: 95
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 11
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 97
+  matching_instructions: 97
   target_instructions: 139
   is_bit_exact: false
 }
@@ -1347,8 +1393,13 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 62
-  matching_instructions: 62
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 40
+  matching_instructions: 40
   target_instructions: 69
   is_bit_exact: false
 }
@@ -1356,7 +1407,7 @@ entries {
   function_name: "func_80074AD4"
   module_name: "1060"
   input_sha1: "f34b3398bdf59c5be116ffc438d8019871ce54f3"
-  c_flags: "-O2"
+  c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -1365,8 +1416,18 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 51
-  matching_instructions: 51
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 61
+  matching_instructions: 61
   target_instructions: 71
   is_bit_exact: false
 }
@@ -1392,6 +1453,11 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 35
   matching_instructions: 35
   target_instructions: 38
@@ -1549,8 +1615,18 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 72
-  matching_instructions: 72
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 74
+  matching_instructions: 74
   target_instructions: 87
   is_bit_exact: false
 }
@@ -1718,7 +1794,7 @@ entries {
 entries {
   function_name: "func_80075BC0"
   module_name: "1060"
-  input_sha1: "681131e1af5efaf03774d2a0f494f6bf14a8dcc3"
+  input_sha1: "f322d2c217f69bbfd3b59c688ee65859027edfed"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -1733,8 +1809,18 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 308
-  matching_instructions: 308
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 331
+  matching_instructions: 331
   target_instructions: 356
   is_bit_exact: false
 }
@@ -1798,24 +1884,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fforce-addr"
-  ast_mutations {
-    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COMMUTE_BINARY_OP
-    site_index: 4
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 0
-  }
-  bit_exact_instructions: 79
-  matching_instructions: 79
+  bit_exact_instructions: 75
+  matching_instructions: 75
   target_instructions: 80
   is_bit_exact: false
 }
@@ -1827,23 +1897,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 6
-    param: 0
-  }
-  bit_exact_instructions: 61
-  matching_instructions: 61
+  bit_exact_instructions: 59
+  matching_instructions: 59
   target_instructions: 67
   is_bit_exact: false
 }
@@ -1855,13 +1910,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_HOIST_LOOP_INVARIANT
-    site_index: 1
-    param: 0
-  }
-  bit_exact_instructions: 41
-  matching_instructions: 41
+  bit_exact_instructions: 39
+  matching_instructions: 39
   target_instructions: 44
   is_bit_exact: false
 }
@@ -1873,11 +1923,6 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 3
-    param: 0
-  }
   bit_exact_instructions: 59
   matching_instructions: 59
   target_instructions: 62
@@ -1934,8 +1979,8 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 147
-  matching_instructions: 147
+  bit_exact_instructions: 148
+  matching_instructions: 148
   target_instructions: 184
   is_bit_exact: false
 }
@@ -1999,13 +2044,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_INVERT_IF_ELSE
-    site_index: 0
-    param: 0
-  }
-  bit_exact_instructions: 12
-  matching_instructions: 12
+  bit_exact_instructions: 11
+  matching_instructions: 11
   target_instructions: 21
   is_bit_exact: false
 }
@@ -2054,17 +2094,37 @@ entries {
   function_name: "func_8007705C"
   module_name: "1060"
   input_sha1: "e22b642f4f12c7cda91c82a8919b1841ac6f2efa"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
+    site_index: 0
     param: 0
   }
-  bit_exact_instructions: 52
-  matching_instructions: 52
+  bit_exact_instructions: 44
+  matching_instructions: 44
   target_instructions: 65
   is_bit_exact: false
 }
@@ -2097,15 +2157,15 @@ entries {
 entries {
   function_name: "func_80077288"
   module_name: "1060"
-  input_sha1: "68ac97be0f3860340d5fe1766c68d23750a57cdc"
-  c_flags: "-O2"
+  input_sha1: "ad5268aa14648c9392d76d00783f467a1dab6390"
+  c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
     site_index: 0
-    param: 0
+    param: 1
   }
   bit_exact_instructions: 34
   matching_instructions: 34
@@ -2233,8 +2293,38 @@ entries {
     site_index: 13
     param: 0
   }
-  bit_exact_instructions: 296
-  matching_instructions: 296
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 25
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 12
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 6
+    param: 0
+  }
+  bit_exact_instructions: 281
+  matching_instructions: 281
   target_instructions: 387
   is_bit_exact: false
 }
@@ -2262,8 +2352,28 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 182
-  matching_instructions: 182
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 49
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 43
+    param: 0
+  }
+  bit_exact_instructions: 187
+  matching_instructions: 187
   target_instructions: 226
   is_bit_exact: false
 }
@@ -2343,10 +2453,20 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 78
-  matching_instructions: 78
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 84
+  matching_instructions: 84
   target_instructions: 84
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_800782EC"
@@ -2378,11 +2498,11 @@ entries {
 entries {
   function_name: "func_8007834C"
   module_name: "1060"
-  input_sha1: "fea32a9f4194f75487f6c481848cbdef5fc38adc"
+  input_sha1: "debd766e97dd8292d104a274b97f330a36fc82c2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -2423,8 +2543,38 @@ entries {
     site_index: 9
     param: 0
   }
-  bit_exact_instructions: 139
-  matching_instructions: 139
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 18
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 18
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 158
+  matching_instructions: 158
   target_instructions: 195
   is_bit_exact: false
 }
@@ -2444,7 +2594,7 @@ entries {
 entries {
   function_name: "func_80078674"
   module_name: "1060"
-  input_sha1: "3bf5a2cd5f3aba07eef44d0f0908074f5b9081ce"
+  input_sha1: "24729766f09369c796966b17144e70883a440a14"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -2459,15 +2609,40 @@ entries {
     site_index: 13
     param: 0
   }
-  bit_exact_instructions: 135
-  matching_instructions: 135
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 1
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 4
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 173
+  matching_instructions: 173
   target_instructions: 190
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007896C"
   module_name: "1060"
-  input_sha1: "ed272f8c553de74befcda3e07494a65121f031f1"
+  input_sha1: "9186c810664ff3b982997d8eb846524b9078c43c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -2493,15 +2668,15 @@ entries {
     site_index: 7
     param: 0
   }
-  bit_exact_instructions: 121
-  matching_instructions: 121
+  bit_exact_instructions: 119
+  matching_instructions: 119
   target_instructions: 192
   is_bit_exact: false
 }
 entries {
   function_name: "func_80078C6C"
   module_name: "1060"
-  input_sha1: "38e01a1449252bed3aaa381534ebc19216aecc35"
+  input_sha1: "93d72ba59c91c287c764720849bfde45b42f45af"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -2527,8 +2702,18 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 164
-  matching_instructions: 164
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 8
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 10
+    param: 0
+  }
+  bit_exact_instructions: 154
+  matching_instructions: 154
   target_instructions: 239
   is_bit_exact: false
 }
@@ -2579,8 +2764,18 @@ entries {
     site_index: 13
     param: 0
   }
-  bit_exact_instructions: 88
-  matching_instructions: 88
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 38
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 41
+    param: 0
+  }
+  bit_exact_instructions: 90
+  matching_instructions: 90
   target_instructions: 135
   is_bit_exact: false
 }
@@ -2617,7 +2812,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -2668,8 +2863,18 @@ entries {
     site_index: 18
     param: 0
   }
-  bit_exact_instructions: 123
-  matching_instructions: 123
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 130
+  matching_instructions: 130
   target_instructions: 163
   is_bit_exact: false
 }
@@ -2677,13 +2882,18 @@ entries {
   function_name: "func_80079618"
   module_name: "1060"
   input_sha1: "e10b4c51ed6feaaea31f8969ca42d1945d4d85a2"
-  c_flags: "-O2"
+  c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 1
     param: 0
   }
   bit_exact_instructions: 97
@@ -2916,8 +3126,28 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 329
-  matching_instructions: 329
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 8
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 7
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 4
+    param: 0
+  }
+  bit_exact_instructions: 345
+  matching_instructions: 345
   target_instructions: 436
   is_bit_exact: false
 }
@@ -2978,8 +3208,23 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 165
-  matching_instructions: 165
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 7
+    param: 1
+  }
+  bit_exact_instructions: 167
+  matching_instructions: 167
   target_instructions: 201
   is_bit_exact: false
 }
@@ -3065,8 +3310,13 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 102
-  matching_instructions: 102
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 103
+  matching_instructions: 103
   target_instructions: 123
   is_bit_exact: false
 }
@@ -3119,14 +3369,33 @@ entries {
 entries {
   function_name: "func_8007AFE4"
   module_name: "1060"
-  input_sha1: "54908cf8a1b508f0c9cb272719f17062378a3642"
+  input_sha1: "d122bfcb4b2a198b203581bc074fa3badef39143"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 275
-  matching_instructions: 275
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 289
+  matching_instructions: 289
   target_instructions: 459
   is_bit_exact: false
 }
@@ -3191,8 +3460,13 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 96
-  matching_instructions: 96
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 5
+    param: 0
+  }
+  bit_exact_instructions: 98
+  matching_instructions: 98
   target_instructions: 131
   is_bit_exact: false
 }
@@ -3204,29 +3478,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-delayed-branch"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  bit_exact_instructions: 35
-  matching_instructions: 35
+  bit_exact_instructions: 32
+  matching_instructions: 32
   target_instructions: 44
   is_bit_exact: false
 }
@@ -3298,7 +3551,7 @@ entries {
 entries {
   function_name: "func_8007BF10"
   module_name: "1060"
-  input_sha1: "c76b38cbf0fb876b886cd33467c75b43345dac91"
+  input_sha1: "dfec96dac56698255710885dc8c674f9838792c5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -3324,8 +3577,28 @@ entries {
     site_index: 8
     param: 0
   }
-  bit_exact_instructions: 156
-  matching_instructions: 156
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 7
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 21
+    param: 0
+  }
+  bit_exact_instructions: 160
+  matching_instructions: 160
   target_instructions: 189
   is_bit_exact: false
 }
@@ -3337,7 +3610,6 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 0
@@ -3348,8 +3620,13 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 15
-  matching_instructions: 15
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 16
+  matching_instructions: 16
   target_instructions: 22
   is_bit_exact: false
 }
@@ -3382,8 +3659,13 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 56
-  matching_instructions: 56
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 53
+  matching_instructions: 53
   target_instructions: 71
   is_bit_exact: false
 }
@@ -3469,19 +3751,29 @@ entries {
 entries {
   function_name: "func_8007C74C"
   module_name: "1060"
-  input_sha1: "cbc728214f16134f7dbd0de1f9a36814dc4160a7"
+  input_sha1: "1387bda8a26edbb2661f0adefa8b40bd7d326f7f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-schedule-insns"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 185
-  matching_instructions: 185
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 10
+    param: 0
+  }
+  bit_exact_instructions: 138
+  matching_instructions: 138
   target_instructions: 219
   is_bit_exact: false
 }
@@ -3514,8 +3806,18 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 177
-  matching_instructions: 177
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 16
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 182
+  matching_instructions: 182
   target_instructions: 228
   is_bit_exact: false
 }
@@ -3533,8 +3835,18 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 201
-  matching_instructions: 201
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 14
+    param: 0
+  }
+  bit_exact_instructions: 203
+  matching_instructions: 203
   target_instructions: 238
   is_bit_exact: false
 }
@@ -3577,8 +3889,23 @@ entries {
     site_index: 26
     param: 0
   }
-  bit_exact_instructions: 201
-  matching_instructions: 201
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 202
+  matching_instructions: 202
   target_instructions: 229
   is_bit_exact: false
 }
@@ -3598,33 +3925,24 @@ entries {
 entries {
   function_name: "func_8007D5B8"
   module_name: "1060"
-  input_sha1: "a6fdf0ed7610447f7f928433f4ba08e16b0c62de"
-  c_flags: "-O1"
+  input_sha1: "ccc8aca6dd78b04d41b446e358245b304df828a8"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 12
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    site_index: 3
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 21
+    site_index: 20
     param: 0
   }
-  bit_exact_instructions: 112
-  matching_instructions: 112
+  bit_exact_instructions: 116
+  matching_instructions: 116
   target_instructions: 129
   is_bit_exact: false
 }
@@ -3636,7 +3954,6 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
     site_index: 3
@@ -3647,8 +3964,18 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 45
-  matching_instructions: 45
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 2
+  }
+  bit_exact_instructions: 46
+  matching_instructions: 46
   target_instructions: 59
   is_bit_exact: false
 }
@@ -3660,6 +3987,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 16
@@ -3680,8 +4008,18 @@ entries {
     site_index: 54
     param: 0
   }
-  bit_exact_instructions: 191
-  matching_instructions: 191
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 16
+    param: 0
+  }
+  bit_exact_instructions: 197
+  matching_instructions: 197
   target_instructions: 211
   is_bit_exact: false
 }
@@ -3693,7 +4031,6 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -3734,8 +4071,38 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 97
-  matching_instructions: 97
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 4
+    param: 0
+  }
+  bit_exact_instructions: 115
+  matching_instructions: 115
   target_instructions: 127
   is_bit_exact: false
 }
@@ -3786,6 +4153,16 @@ entries {
     site_index: 23
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 4
+    param: 0
+  }
   bit_exact_instructions: 170
   matching_instructions: 170
   target_instructions: 194
@@ -3805,8 +4182,18 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 196
-  matching_instructions: 196
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 38
+    param: 0
+  }
+  bit_exact_instructions: 201
+  matching_instructions: 201
   target_instructions: 232
   is_bit_exact: false
 }
@@ -3839,57 +4226,52 @@ entries {
 entries {
   function_name: "func_8007E800"
   module_name: "1060"
-  input_sha1: "9f94bc6f81b32e656473ab0e64a82fedec80e9ee"
+  input_sha1: "951a32fc0754af4cef366ae04efd328ebcdb292f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 2
+  }
+  ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
+    site_index: 6
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 14
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 8
-    param: 0
-  }
-  bit_exact_instructions: 56
-  matching_instructions: 56
+  bit_exact_instructions: 52
+  matching_instructions: 52
   target_instructions: 60
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007E8F0"
   module_name: "1060"
-  input_sha1: "734232ed144f7d2cb19acd4aaa8fc51bad68c6ae"
+  input_sha1: "0e5ca9f4a824dee2679e2818933bef945d57b21e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
     site_index: 10
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 6
     param: 0
   }
   ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 25
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 8
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 32
-    param: 0
-  }
-  bit_exact_instructions: 292
-  matching_instructions: 292
+  bit_exact_instructions: 291
+  matching_instructions: 291
   target_instructions: 335
   is_bit_exact: false
 }
@@ -3922,8 +4304,23 @@ entries {
     site_index: 26
     param: 0
   }
-  bit_exact_instructions: 192
-  matching_instructions: 192
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 193
+  matching_instructions: 193
   target_instructions: 221
   is_bit_exact: false
 }
@@ -4004,6 +4401,11 @@ entries {
     site_index: 5
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 1
+    param: 0
+  }
   bit_exact_instructions: 47
   matching_instructions: 47
   target_instructions: 56
@@ -4064,18 +4466,13 @@ entries {
 entries {
   function_name: "func_8007F47C"
   module_name: "1060"
-  input_sha1: "115d35734ff6101860cc33201c143e958f71b8d1"
+  input_sha1: "a8920ca8f8c95956cc0022a5f462a7b48a8a2153"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  bit_exact_instructions: 9
-  matching_instructions: 9
+  bit_exact_instructions: 6
+  matching_instructions: 6
   target_instructions: 13
   is_bit_exact: false
 }
@@ -4152,7 +4549,7 @@ entries {
 entries {
   function_name: "func_8007F648"
   module_name: "1060"
-  input_sha1: "1b809431a15e44e79389dd7e386af31af6f8f9f6"
+  input_sha1: "791138ddf66c02de05d3e03ec3053c13df01595d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -4182,8 +4579,23 @@ entries {
     site_index: 9
     param: 0
   }
-  bit_exact_instructions: 112
-  matching_instructions: 112
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 12
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 4
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 119
+  matching_instructions: 119
   target_instructions: 127
   is_bit_exact: false
 }
@@ -4199,19 +4611,6 @@ entries {
   matching_instructions: 15
   target_instructions: 15
   is_bit_exact: true
-}
-entries {
-  function_name: "func_80080020"
-  module_name: "1060"
-  input_sha1: "697870111b7e9fbc44ed7b01f71ce722cefe6c37"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 8
-  is_bit_exact: false
 }
 entries {
   function_name: "func_80080280"
@@ -4734,19 +5133,6 @@ entries {
   is_bit_exact: true
 }
 entries {
-  function_name: "func_80089A10"
-  module_name: "1060"
-  input_sha1: "c5011d906c225c9fc0363c28ac4af3658ec28765"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 7
-  matching_instructions: 7
-  target_instructions: 8
-  is_bit_exact: false
-}
-entries {
   function_name: "func_8008A730"
   module_name: "1060"
   input_sha1: "db9cd3205344a9336cf8e5b1e7bb339efb33661c"
@@ -4968,32 +5354,6 @@ entries {
   is_bit_exact: true
 }
 entries {
-  function_name: "func_80093540"
-  module_name: "1060"
-  input_sha1: "b543b42b8b4dc02710683f83d5173ece4d882dc6"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 1
-  matching_instructions: 1
-  target_instructions: 5
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80093554"
-  module_name: "1060"
-  input_sha1: "181783c24eaf3bf1bd7ff1b9063cd7dc3170486d"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 7
-  is_bit_exact: false
-}
-entries {
   function_name: "func_80093570"
   module_name: "1060"
   input_sha1: "d18d57c6e1effdff63cbfae234dcf6ebbb17990a"
@@ -5057,19 +5417,6 @@ entries {
   matching_instructions: 8
   target_instructions: 8
   is_bit_exact: true
-}
-entries {
-  function_name: "func_80094DE0"
-  module_name: "1060"
-  input_sha1: "378ca0f6f787dd42e8300650cab40f92c77ccc0e"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 13
-  matching_instructions: 13
-  target_instructions: 21
-  is_bit_exact: false
 }
 entries {
   function_name: "func_800950E0"
@@ -5350,19 +5697,6 @@ entries {
   is_bit_exact: true
 }
 entries {
-  function_name: "func_8009C5E0"
-  module_name: "1060"
-  input_sha1: "7f0e312a4a373c0d0eb747c13451001344747350"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 9
-  matching_instructions: 9
-  target_instructions: 16
-  is_bit_exact: false
-}
-entries {
   function_name: "func_8009C7C0"
   module_name: "1060"
   input_sha1: "328d9c874fe690c360327a5d84fde94dab763185"
@@ -5374,19 +5708,6 @@ entries {
   matching_instructions: 3
   target_instructions: 3
   is_bit_exact: true
-}
-entries {
-  function_name: "func_8009C970"
-  module_name: "1060"
-  input_sha1: "bf6586ca1a390bd9a7301b5832bc2e30dee4fdf5"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 12
-  is_bit_exact: false
 }
 entries {
   function_name: "func_8009D3A0"
@@ -5426,32 +5747,6 @@ entries {
   matching_instructions: 4
   target_instructions: 4
   is_bit_exact: true
-}
-entries {
-  function_name: "func_8009D3D0"
-  module_name: "1060"
-  input_sha1: "029dffe368a8539e2d5a0ee97bb16873e395b5e0"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_8009D3E0"
-  module_name: "1060"
-  input_sha1: "916808e5dedf3c28ccc3d3f0e9f67a9f0356de1e"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 4
-  is_bit_exact: false
 }
 entries {
   function_name: "func_8009D684"
@@ -5577,7 +5872,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
@@ -5604,9 +5899,22 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 89
-  matching_instructions: 89
+  bit_exact_instructions: 90
+  matching_instructions: 90
   target_instructions: 100
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8008BA50"
+  module_name: "1BCC0"
+  input_sha1: "01af769b2e06a1822666c6d6a497b553aebaf3e2"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 107
+  matching_instructions: 107
+  target_instructions: 124
   is_bit_exact: false
 }
 entries {
@@ -5616,7 +5924,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_INVERT_IF_ELSE
@@ -5633,8 +5941,13 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 36
-  matching_instructions: 36
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 37
+  matching_instructions: 37
   target_instructions: 40
   is_bit_exact: false
 }
@@ -5658,10 +5971,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 90
-  matching_instructions: 90
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 86
+  matching_instructions: 86
   target_instructions: 96
   is_bit_exact: false
 }
@@ -5789,13 +6101,13 @@ entries {
 entries {
   function_name: "func_8008C430"
   module_name: "1BCC0"
-  input_sha1: "9f63db46661b92dbfc592c1d9b9bfdc950132fb1"
+  input_sha1: "73552dc65566dd1b9908e1862d86d8acac8ae568"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 39
-  matching_instructions: 39
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 44
+  matching_instructions: 44
   target_instructions: 72
   is_bit_exact: false
 }
@@ -5825,56 +6137,20 @@ entries {
 entries {
   function_name: "func_8008C5F0"
   module_name: "1BCC0"
-  input_sha1: "9f70f63c8caa5db05495c0df5d444ee6cdd0c3bc"
+  input_sha1: "3d7579ec9937c424d92dc1ca161d970359ddc281"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 0
-    param: 0
-  }
-  bit_exact_instructions: 36
-  matching_instructions: 36
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 20
+  matching_instructions: 20
   target_instructions: 41
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008C694"
   module_name: "1BCC0"
-  input_sha1: "7c64b6e2701c1704304f85376740cafbea2aca7e"
+  input_sha1: "83c94cfa91200ed1b12d9f325fa84afd768b3dfd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -5899,8 +6175,38 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 233
-  matching_instructions: 233
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 11
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 11
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 14
+    param: 0
+  }
+  bit_exact_instructions: 232
+  matching_instructions: 232
   target_instructions: 294
   is_bit_exact: false
 }
@@ -5985,24 +6291,74 @@ entries {
 entries {
   function_name: "func_8008CE20"
   module_name: "1BCC0"
-  input_sha1: "27ee2603173d273536919bce2f7587cb3033c26e"
+  input_sha1: "1505e96bfef50680b852ec3c66d9e0a301ba6389"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 173
-  matching_instructions: 173
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 1
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 11
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 12
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 18
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 25
+    param: 0
+  }
+  bit_exact_instructions: 198
+  matching_instructions: 198
   target_instructions: 273
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008D264"
   module_name: "1BCC0"
-  input_sha1: "44d68e3e6251597ce93731e8056facd31e3791a6"
+  input_sha1: "7ea1ecde49567aec97bf77eef811d51dd0a7ee50"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -6019,37 +6375,68 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 176
-  matching_instructions: 176
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 9
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 12
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 12
+    param: 0
+  }
+  bit_exact_instructions: 188
+  matching_instructions: 188
   target_instructions: 231
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008D600"
   module_name: "1BCC0"
-  input_sha1: "bc9a9010bba2615f52d57d6a22698c083450b027"
+  input_sha1: "71df360730df1808958855a0555ee8f50ad327e6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 91
-  matching_instructions: 91
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 6
+    param: 0
+  }
+  bit_exact_instructions: 97
+  matching_instructions: 97
   target_instructions: 107
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008D7AC"
   module_name: "1BCC0"
-  input_sha1: "9b7ba42865f7875153821edccfffd341f0f9854d"
+  input_sha1: "d12e5bb2460735d58a1e99bbd23fa2decbfb766f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
@@ -6076,8 +6463,38 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 54
-  matching_instructions: 54
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 15
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 63
+  matching_instructions: 63
   target_instructions: 97
   is_bit_exact: false
 }
@@ -6088,10 +6505,20 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 34
-  matching_instructions: 34
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 37
+  matching_instructions: 37
   target_instructions: 55
   is_bit_exact: false
 }
@@ -6111,7 +6538,7 @@ entries {
 entries {
   function_name: "func_8008DA40"
   module_name: "1BCC0"
-  input_sha1: "821e941062e52e78727ac60c516aca4ac1ff122c"
+  input_sha1: "14cf65c344158c7dde0e50ff6c9313b6260c45df"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6136,8 +6563,38 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 246
-  matching_instructions: 246
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 6
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 13
+    param: 1
+  }
+  bit_exact_instructions: 284
+  matching_instructions: 284
   target_instructions: 320
   is_bit_exact: false
 }
@@ -6148,7 +6605,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 51
   matching_instructions: 51
   target_instructions: 53
@@ -6157,11 +6614,11 @@ entries {
 entries {
   function_name: "func_8008E014"
   module_name: "1BCC0"
-  input_sha1: "c4069e00bb97dcd55ec364c32b51a4a9e89299b0"
+  input_sha1: "8a98ecea3ff34ffb08326b979c12d94816afa186"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -6178,8 +6635,33 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 119
-  matching_instructions: 119
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 1
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 25
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 18
+    param: 0
+  }
+  bit_exact_instructions: 140
+  matching_instructions: 140
   target_instructions: 181
   is_bit_exact: false
 }
@@ -6217,50 +6699,15 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 2
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 10
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COMMUTE_BINARY_OP
-    site_index: 35
-    param: 0
-  }
-  bit_exact_instructions: 150
-  matching_instructions: 150
+  bit_exact_instructions: 101
+  matching_instructions: 101
   target_instructions: 160
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008E66C"
   module_name: "1BCC0"
-  input_sha1: "c09d0e345d500102113ed6a3119264b66ff97a58"
+  input_sha1: "563cbf03a933dc7578bba7d6b46d4e0578051a93"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6308,6 +6755,11 @@ entries {
     site_index: 2
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 2
+  }
   bit_exact_instructions: 54
   matching_instructions: 54
   target_instructions: 80
@@ -6333,7 +6785,8 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -6354,8 +6807,23 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 77
-  matching_instructions: 77
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 7
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 3
+    param: 0
+  }
+  bit_exact_instructions: 83
+  matching_instructions: 83
   target_instructions: 123
   is_bit_exact: false
 }
@@ -6400,8 +6868,23 @@ entries {
     site_index: 14
     param: 0
   }
-  bit_exact_instructions: 167
-  matching_instructions: 167
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 16
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 9
+    param: 0
+  }
+  bit_exact_instructions: 174
+  matching_instructions: 174
   target_instructions: 221
   is_bit_exact: false
 }
@@ -6470,37 +6953,32 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
     site_index: 4
-    param: 0
+    param: 2
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 12
+    param: 2
   }
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
-    param: 1
+    param: 0
   }
-  bit_exact_instructions: 122
-  matching_instructions: 122
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 10
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 11
+    param: 0
+  }
+  bit_exact_instructions: 117
+  matching_instructions: 117
   target_instructions: 134
   is_bit_exact: false
 }
@@ -6511,7 +6989,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
@@ -6558,8 +7036,8 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 86
-  matching_instructions: 86
+  bit_exact_instructions: 87
+  matching_instructions: 87
   target_instructions: 92
   is_bit_exact: false
 }
@@ -6571,6 +7049,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -6590,6 +7069,11 @@ entries {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
     param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
   }
   bit_exact_instructions: 80
   matching_instructions: 80
@@ -6604,8 +7088,13 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 30
-  matching_instructions: 30
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 5
+    param: 0
+  }
+  bit_exact_instructions: 31
+  matching_instructions: 31
   target_instructions: 39
   is_bit_exact: false
 }
@@ -6616,35 +7105,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COMMUTE_BINARY_OP
-    site_index: 1
-    param: 0
-  }
-  bit_exact_instructions: 28
-  matching_instructions: 28
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 19
+  matching_instructions: 19
   target_instructions: 37
   is_bit_exact: false
 }
@@ -6655,7 +7118,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
@@ -6677,8 +7140,18 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 21
-  matching_instructions: 21
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 26
+  matching_instructions: 26
   target_instructions: 42
   is_bit_exact: false
 }
@@ -6789,7 +7262,7 @@ entries {
 entries {
   function_name: "func_8008FBEC"
   module_name: "1BCC0"
-  input_sha1: "318aeeeaa222b45a2774fc6d12d9caea33cd8f30"
+  input_sha1: "8442b5cdbabbefa83e61de64f407d2a2dfe31644"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7000,9 +7473,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 35
-  matching_instructions: 35
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 36
+  matching_instructions: 36
   target_instructions: 47
   is_bit_exact: false
 }
@@ -7031,20 +7504,50 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    site_index: 1
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 8
+    site_index: 4
     param: 0
   }
-  bit_exact_instructions: 31
-  matching_instructions: 31
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 30
+  matching_instructions: 30
   target_instructions: 45
   is_bit_exact: false
 }
@@ -7055,9 +7558,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 44
-  matching_instructions: 44
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 45
+  matching_instructions: 45
   target_instructions: 48
   is_bit_exact: false
 }
@@ -7068,10 +7571,10 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-delayed-branch"
-  bit_exact_instructions: 18
-  matching_instructions: 18
+  bit_exact_instructions: 19
+  matching_instructions: 19
   target_instructions: 24
   is_bit_exact: false
 }
@@ -7083,52 +7586,32 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 1
-    param: 1
-  }
-  bit_exact_instructions: 61
-  matching_instructions: 61
+  bit_exact_instructions: 48
+  matching_instructions: 48
   target_instructions: 84
   is_bit_exact: false
 }
 entries {
   function_name: "func_80090940"
   module_name: "205F0"
-  input_sha1: "228085552cce3f8b0ba16afa5b42f9ed2f138289"
+  input_sha1: "2658406e0d067ce0259dbbc3d5b62c2df30a3752"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 120
-  matching_instructions: 120
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 143
+  matching_instructions: 143
   target_instructions: 224
   is_bit_exact: false
 }
 entries {
   function_name: "func_80090CC0"
   module_name: "205F0"
-  input_sha1: "57b0dc7c2d9cb8123e5c48e786939869904af2e8"
+  input_sha1: "ac9bc5a0a07e607d9bf3392eec2fd25f221675ba"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -7150,21 +7633,36 @@ entries {
     site_index: 19
     param: 0
   }
-  bit_exact_instructions: 159
-  matching_instructions: 159
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 21
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 44
+    param: 0
+  }
+  bit_exact_instructions: 168
+  matching_instructions: 168
   target_instructions: 228
   is_bit_exact: false
 }
 entries {
   function_name: "func_80091050"
   module_name: "205F0"
-  input_sha1: "673efb9972d43c0a425e6930d39a00bf93d265cd"
+  input_sha1: "f5bd20cd9c1e99f3a3117518ec8cb7f703fe8136"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 208
-  matching_instructions: 208
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 200
+  matching_instructions: 200
   target_instructions: 609
   is_bit_exact: false
 }
@@ -7194,13 +7692,13 @@ entries {
 entries {
   function_name: "func_80091AB0"
   module_name: "205F0"
-  input_sha1: "f73edf8851ab2a4d8ee348d9630680b848fcd8bb"
+  input_sha1: "1b103c2c8b39e31f6a2978f53c69eb27d5878765"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 223
-  matching_instructions: 223
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 217
+  matching_instructions: 217
   target_instructions: 350
   is_bit_exact: false
 }
@@ -7212,26 +7710,6 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
   bit_exact_instructions: 17
   matching_instructions: 17
   target_instructions: 30
@@ -7244,10 +7722,10 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 74
-  matching_instructions: 74
+  bit_exact_instructions: 75
+  matching_instructions: 75
   target_instructions: 76
   is_bit_exact: false
 }
@@ -7258,15 +7736,10 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 81
-  matching_instructions: 81
+  bit_exact_instructions: 82
+  matching_instructions: 82
   target_instructions: 84
   is_bit_exact: false
 }
@@ -7323,9 +7796,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 83
-  matching_instructions: 83
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 84
+  matching_instructions: 84
   target_instructions: 118
   is_bit_exact: false
 }
@@ -7336,7 +7809,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 108
   matching_instructions: 108
@@ -7373,15 +7846,30 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 16
     param: 0
   }
-  bit_exact_instructions: 71
-  matching_instructions: 71
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 11
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  bit_exact_instructions: 77
+  matching_instructions: 77
   target_instructions: 98
   is_bit_exact: false
 }
@@ -7392,9 +7880,25 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 79
-  matching_instructions: 79
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 12
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 15
+    param: 0
+  }
+  bit_exact_instructions: 100
+  matching_instructions: 100
   target_instructions: 102
   is_bit_exact: false
 }
@@ -7406,34 +7910,20 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 1
-    param: 0
-  }
-  bit_exact_instructions: 72
-  matching_instructions: 72
+  bit_exact_instructions: 66
+  matching_instructions: 66
   target_instructions: 104
   is_bit_exact: false
 }
 entries {
   function_name: "func_80093060"
   module_name: "23460"
-  input_sha1: "c673f8b36efc96aa67c0c67dedfb609eecf25a8a"
+  input_sha1: "955c8531f9375178418f2b66d82b638562517fd4"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
@@ -7444,8 +7934,13 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 22
-  matching_instructions: 22
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 39
+  matching_instructions: 39
   target_instructions: 200
   is_bit_exact: false
 }
@@ -7526,6 +8021,32 @@ entries {
   bit_exact_instructions: 18
   matching_instructions: 18
   target_instructions: 22
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80093540"
+  module_name: "23820"
+  input_sha1: "b543b42b8b4dc02710683f83d5173ece4d882dc6"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 1
+  matching_instructions: 1
+  target_instructions: 5
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80093554"
+  module_name: "23820"
+  input_sha1: "181783c24eaf3bf1bd7ff1b9063cd7dc3170486d"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 3
+  matching_instructions: 3
+  target_instructions: 7
   is_bit_exact: false
 }
 entries {
@@ -7624,11 +8145,46 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 41
-  matching_instructions: 41
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 44
+  matching_instructions: 44
   target_instructions: 44
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_800939F0"
@@ -7717,7 +8273,7 @@ entries {
   function_name: "func_80093E50"
   module_name: "23820"
   input_sha1: "0193a2d8f478a019ffedbfffec99ea249e19f968"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -7726,8 +8282,13 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 25
-  matching_instructions: 25
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 1
+  }
+  bit_exact_instructions: 26
+  matching_instructions: 26
   target_instructions: 36
   is_bit_exact: false
 }
@@ -7739,13 +8300,14 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_INVERT_IF_ELSE
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 43
-  matching_instructions: 43
+  bit_exact_instructions: 45
+  matching_instructions: 45
   target_instructions: 65
   is_bit_exact: false
 }
@@ -7770,7 +8332,7 @@ entries {
 entries {
   function_name: "func_800940EC"
   module_name: "23820"
-  input_sha1: "9938a5cbb3738b55a9563317062b89d74d533aa1"
+  input_sha1: "5f9898c2bde53870cb4856f80e564e4660369606"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7857,11 +8419,11 @@ entries {
 entries {
   function_name: "func_8009434C"
   module_name: "23820"
-  input_sha1: "f6afebbcbd02db1f5f4a355018c81ac9d2a91930"
+  input_sha1: "d030f92854ca4cbaf4cf00065bbd329efb7dca5b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 22
   matching_instructions: 22
   target_instructions: 22
@@ -7874,8 +8436,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fforce-addr"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -7897,12 +8458,17 @@ entries {
     param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
     param: 0
   }
-  bit_exact_instructions: 28
-  matching_instructions: 28
+  bit_exact_instructions: 44
+  matching_instructions: 44
   target_instructions: 52
   is_bit_exact: false
 }
@@ -7927,6 +8493,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -8047,29 +8614,13 @@ entries {
 entries {
   function_name: "func_80094860"
   module_name: "23820"
-  input_sha1: "170bda9a11dbea48d03a36813c9a1bd92ff40990"
+  input_sha1: "9f6bf605195adeee97d34050648efaa60dd8b036"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
-    site_index: 0
-    param: 0
-  }
-  bit_exact_instructions: 35
-  matching_instructions: 35
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 31
+  matching_instructions: 31
   target_instructions: 52
   is_bit_exact: false
 }
@@ -8162,8 +8713,9 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 46
-  matching_instructions: 46
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 47
+  matching_instructions: 47
   target_instructions: 48
   is_bit_exact: false
 }
@@ -8202,7 +8754,7 @@ entries {
   function_name: "func_80094C90"
   module_name: "23820"
   input_sha1: "e8add5f2a6459a6171f34b2bd2d8e2c6cfc3babe"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -8211,8 +8763,13 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 26
-  matching_instructions: 26
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 6
+    param: 0
+  }
+  bit_exact_instructions: 30
+  matching_instructions: 30
   target_instructions: 36
   is_bit_exact: false
 }
@@ -8223,21 +8780,23 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 25
-  matching_instructions: 25
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 30
+  matching_instructions: 30
   target_instructions: 40
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80094DE0"
+  module_name: "23820"
+  input_sha1: "378ca0f6f787dd42e8300650cab40f92c77ccc0e"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 13
+  matching_instructions: 13
+  target_instructions: 21
   is_bit_exact: false
 }
 entries {
@@ -8284,8 +8843,13 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 53
-  matching_instructions: 53
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 56
+  matching_instructions: 56
   target_instructions: 68
   is_bit_exact: false
 }
@@ -8322,7 +8886,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -8334,8 +8898,13 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 94
-  matching_instructions: 94
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 2
+  }
+  bit_exact_instructions: 95
+  matching_instructions: 95
   target_instructions: 104
   is_bit_exact: false
 }
@@ -8394,7 +8963,7 @@ entries {
 entries {
   function_name: "func_80095780"
   module_name: "255A0"
-  input_sha1: "551131dc28bb04be873fea55ac3f8c9f4fb3eec0"
+  input_sha1: "f108e099cb0a5f8021b9e578ee1b93a3d2596ad4"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -8407,7 +8976,7 @@ entries {
 entries {
   function_name: "func_800957D0"
   module_name: "255A0"
-  input_sha1: "4e85e2744aab53e1f82a777c6ed8bfefcf6a4901"
+  input_sha1: "2c14a651cc36fd427c6000325a2faa5484fa6ac8"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -8420,7 +8989,7 @@ entries {
 entries {
   function_name: "func_80095820"
   module_name: "255A0"
-  input_sha1: "b8121fffb5449a9c052a64e41da44508dd6ad9dc"
+  input_sha1: "f4987bfb4b412ebc87266a4bba0652e071e5b76e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -8445,8 +9014,33 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 131
-  matching_instructions: 131
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 2
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 13
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 176
+  matching_instructions: 176
   target_instructions: 196
   is_bit_exact: false
 }
@@ -8513,7 +9107,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -8535,19 +9129,24 @@ entries {
     param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 10
+    site_index: 5
     param: 0
   }
-  bit_exact_instructions: 67
-  matching_instructions: 67
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 9
+    param: 2
+  }
+  bit_exact_instructions: 73
+  matching_instructions: 73
   target_instructions: 73
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_80095FC0"
@@ -8572,8 +9171,8 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 102
-  matching_instructions: 102
+  bit_exact_instructions: 104
+  matching_instructions: 104
   target_instructions: 107
   is_bit_exact: false
 }
@@ -8581,22 +9180,12 @@ entries {
   function_name: "func_8009616C"
   module_name: "255A0"
   input_sha1: "c75bb47480cf2e89a5966e7e2eaa81ab4c66e076"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COMMUTE_BINARY_OP
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 16
-  matching_instructions: 16
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 9
+  matching_instructions: 9
   target_instructions: 29
   is_bit_exact: false
 }
@@ -8607,7 +9196,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 6
@@ -8618,8 +9207,18 @@ entries {
     site_index: 7
     param: 0
   }
-  bit_exact_instructions: 213
-  matching_instructions: 213
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 11
+    param: 0
+  }
+  bit_exact_instructions: 218
+  matching_instructions: 218
   target_instructions: 272
   is_bit_exact: false
 }
@@ -8659,6 +9258,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 5
@@ -8674,8 +9274,18 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 74
-  matching_instructions: 74
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 83
+  matching_instructions: 83
   target_instructions: 112
   is_bit_exact: false
 }
@@ -8728,18 +9338,34 @@ entries {
 entries {
   function_name: "func_80096B90"
   module_name: "255A0"
-  input_sha1: "61637a260252fc80fc7082b5452f85e5033b260c"
+  input_sha1: "cd7eb6100d2ffe5775f1ae61dd5720c90e3742fa"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 91
-  matching_instructions: 91
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 2
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 14
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 103
+  matching_instructions: 103
   target_instructions: 126
   is_bit_exact: false
 }
@@ -8799,9 +9425,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 23
-  matching_instructions: 23
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 24
+  matching_instructions: 24
   target_instructions: 37
   is_bit_exact: false
 }
@@ -8818,8 +9444,13 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 26
-  matching_instructions: 26
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 28
+  matching_instructions: 28
   target_instructions: 35
   is_bit_exact: false
 }
@@ -8872,8 +9503,13 @@ entries {
     site_index: 12
     param: 0
   }
-  bit_exact_instructions: 167
-  matching_instructions: 167
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 176
+  matching_instructions: 176
   target_instructions: 187
   is_bit_exact: false
 }
@@ -8898,13 +9534,23 @@ entries {
 entries {
   function_name: "func_80097608"
   module_name: "255A0"
-  input_sha1: "52f9730f918984bf7323c284445360f1e5781a28"
-  c_flags: "-O2"
+  input_sha1: "b75fa8071f68f1625576974c108d6a59289bb118"
+  c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 80
-  matching_instructions: 80
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 64
+  matching_instructions: 64
   target_instructions: 115
   is_bit_exact: false
 }
@@ -8916,8 +9562,18 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 38
-  matching_instructions: 38
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 41
+  matching_instructions: 41
   target_instructions: 46
   is_bit_exact: false
 }
@@ -8928,9 +9584,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 153
-  matching_instructions: 153
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 154
+  matching_instructions: 154
   target_instructions: 209
   is_bit_exact: false
 }
@@ -9091,7 +9747,7 @@ entries {
 entries {
   function_name: "func_80098500"
   module_name: "255A0"
-  input_sha1: "197491d6226bcf4ea2ab7866ff588937cfa2d474"
+  input_sha1: "a0a39839993cd12be6811f8dba374036f705c37f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -9110,9 +9766,9 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 6
+    param: 2
   }
   ast_mutations {
     kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
@@ -9121,7 +9777,7 @@ entries {
   }
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 9
+    site_index: 10
     param: 0
   }
   bit_exact_instructions: 93
@@ -9138,6 +9794,11 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 15
+    param: 0
+  }
   bit_exact_instructions: 17
   matching_instructions: 17
   target_instructions: 24
@@ -9152,6 +9813,11 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 14
+    param: 0
+  }
   bit_exact_instructions: 18
   matching_instructions: 18
   target_instructions: 24
@@ -9193,11 +9859,11 @@ entries {
 entries {
   function_name: "func_80098920"
   module_name: "255A0"
-  input_sha1: "3f0667446d66bba411d70df0e42d3fd128402020"
+  input_sha1: "3ad780034318be21ac5fe47ac75c56a528b8c4cf"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 13
   matching_instructions: 13
   target_instructions: 32
@@ -9213,8 +9879,13 @@ entries {
   c_flags: "-Wa,-g"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
     param: 0
   }
   bit_exact_instructions: 34
@@ -9230,8 +9901,13 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 22
-  matching_instructions: 22
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 1
+  }
+  bit_exact_instructions: 23
+  matching_instructions: 23
   target_instructions: 48
   is_bit_exact: false
 }
@@ -9242,7 +9918,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 16
   matching_instructions: 16
   target_instructions: 24
@@ -9255,7 +9931,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 17
   matching_instructions: 17
@@ -9269,9 +9945,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 18
-  matching_instructions: 18
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 17
+  matching_instructions: 17
   target_instructions: 56
   is_bit_exact: false
 }
@@ -9284,6 +9960,11 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 14
+    param: 0
+  }
   bit_exact_instructions: 18
   matching_instructions: 18
   target_instructions: 24
@@ -9322,9 +10003,19 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 28
-  matching_instructions: 28
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 1
+  }
+  bit_exact_instructions: 32
+  matching_instructions: 32
   target_instructions: 52
   is_bit_exact: false
 }
@@ -9386,7 +10077,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 7
   matching_instructions: 7
   target_instructions: 8
@@ -9399,22 +10090,63 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 266
-  matching_instructions: 266
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 10
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 2
+    param: 1
+  }
+  bit_exact_instructions: 274
+  matching_instructions: 274
   target_instructions: 352
   is_bit_exact: false
 }
 entries {
   function_name: "func_8009A160"
   module_name: "29B60"
-  input_sha1: "4ea6eac42a7d4d97d24045edbef01ddfbc09d083"
+  input_sha1: "ddbc2deb739752e275422c7301bbe7e5c784da91"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 215
-  matching_instructions: 215
+  c_flags: "-fno-schedule-insns"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 13
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 20
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 20
+    param: 0
+  }
+  bit_exact_instructions: 225
+  matching_instructions: 225
   target_instructions: 308
   is_bit_exact: false
 }
@@ -9429,6 +10161,11 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
     site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
     param: 0
   }
   bit_exact_instructions: 28
@@ -9469,10 +10206,20 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 27
-  matching_instructions: 27
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 1
+  }
+  bit_exact_instructions: 29
+  matching_instructions: 29
   target_instructions: 36
   is_bit_exact: false
 }
@@ -9514,7 +10261,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 26
   matching_instructions: 26
   target_instructions: 27
@@ -9527,7 +10274,7 @@ entries {
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 32
   matching_instructions: 32
   target_instructions: 33
@@ -9537,17 +10284,12 @@ entries {
   function_name: "func_8009A9C0"
   module_name: "2AB40"
   input_sha1: "ee98e399344e09aa974851a74074f468d3f209de"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_HOIST_LOOP_INVARIANT
-    site_index: 0
-    param: 0
-  }
-  bit_exact_instructions: 41
-  matching_instructions: 41
+  bit_exact_instructions: 42
+  matching_instructions: 42
   target_instructions: 56
   is_bit_exact: false
 }
@@ -9558,7 +10300,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 50
   matching_instructions: 50
   target_instructions: 68
@@ -9584,8 +10326,8 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-delayed-branch"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -9616,8 +10358,33 @@ entries {
     site_index: 7
     param: 0
   }
-  bit_exact_instructions: 55
-  matching_instructions: 55
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 13
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 9
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 1
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 73
+  matching_instructions: 73
   target_instructions: 86
   is_bit_exact: false
 }
@@ -9629,6 +10396,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 3
@@ -9649,8 +10417,23 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 69
-  matching_instructions: 69
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 4
+    param: 0
+  }
+  bit_exact_instructions: 73
+  matching_instructions: 73
   target_instructions: 90
   is_bit_exact: false
 }
@@ -9661,9 +10444,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 77
-  matching_instructions: 77
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 78
+  matching_instructions: 78
   target_instructions: 95
   is_bit_exact: false
 }
@@ -9674,9 +10457,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 25
-  matching_instructions: 25
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 26
+  matching_instructions: 26
   target_instructions: 41
   is_bit_exact: false
 }
@@ -9687,20 +10470,50 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    site_index: 1
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 8
+    site_index: 4
     param: 0
   }
-  bit_exact_instructions: 34
-  matching_instructions: 34
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 33
+  matching_instructions: 33
   target_instructions: 48
   is_bit_exact: false
 }
@@ -9712,28 +10525,29 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
     site_index: 1
     param: 0
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 2
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 7
     param: 0
   }
-  bit_exact_instructions: 100
-  matching_instructions: 100
+  bit_exact_instructions: 97
+  matching_instructions: 97
   target_instructions: 148
   is_bit_exact: false
 }
@@ -9760,8 +10574,18 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 227
-  matching_instructions: 227
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 239
+  matching_instructions: 239
   target_instructions: 275
   is_bit_exact: false
 }
@@ -9791,7 +10615,7 @@ entries {
 entries {
   function_name: "func_8009BDA4"
   module_name: "2AF50"
-  input_sha1: "d9121e5d7c9d8579db5947cec962e27ee3806c10"
+  input_sha1: "79e67b73649ccd0e85feb0fb2b22fd068f400c60"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -9816,8 +10640,23 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 301
-  matching_instructions: 301
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 25
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 70
+    param: 0
+  }
+  bit_exact_instructions: 315
+  matching_instructions: 315
   target_instructions: 363
   is_bit_exact: false
 }
@@ -9828,7 +10667,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 6
   matching_instructions: 6
   target_instructions: 8
@@ -9884,6 +10723,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
     site_index: 0
@@ -9904,8 +10744,18 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 29
-  matching_instructions: 29
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 30
+  matching_instructions: 30
   target_instructions: 79
   is_bit_exact: false
 }
@@ -9948,6 +10798,19 @@ entries {
   is_bit_exact: false
 }
 entries {
+  function_name: "func_8009C5E0"
+  module_name: "2AF50"
+  input_sha1: "7f0e312a4a373c0d0eb747c13451001344747350"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 9
+  matching_instructions: 9
+  target_instructions: 16
+  is_bit_exact: false
+}
+entries {
   function_name: "func_8009C620"
   module_name: "2AF50"
   input_sha1: "fc5b35a6395de23d108a1aa87a1a02eadcc8d1f9"
@@ -9962,13 +10825,92 @@ entries {
   is_bit_exact: false
 }
 entries {
+  function_name: "func_8009C670"
+  module_name: "2AF50"
+  input_sha1: "ff801f8c8ae7055dd12b984b1b4ac6e978bf3817"
+  c_flags: "-O1"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_UNSIGNED_CAST
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 4
+    param: 0
+  }
+  bit_exact_instructions: 19
+  matching_instructions: 19
+  target_instructions: 56
+  is_bit_exact: false
+}
+entries {
   function_name: "func_8009C750"
   module_name: "2AF50"
   input_sha1: "732d94237106d909d8500cdd612b98826cd2db59"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 4
   matching_instructions: 4
   target_instructions: 12
@@ -9994,7 +10936,7 @@ entries {
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 0
@@ -10017,7 +10959,7 @@ entries {
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
@@ -10057,9 +10999,33 @@ entries {
     site_index: 0
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 25
   matching_instructions: 25
   target_instructions: 56
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8009C970"
+  module_name: "2AF50"
+  input_sha1: "bf6586ca1a390bd9a7301b5832bc2e30dee4fdf5"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 4
+  matching_instructions: 4
+  target_instructions: 12
   is_bit_exact: false
 }
 entries {
@@ -10069,7 +11035,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 17
   matching_instructions: 17
   target_instructions: 84
@@ -10082,7 +11048,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 13
   matching_instructions: 13
   target_instructions: 72
@@ -10095,7 +11061,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 15
   matching_instructions: 15
   target_instructions: 56
@@ -10108,7 +11074,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 29
   matching_instructions: 29
   target_instructions: 76
@@ -10121,9 +11087,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 19
-  matching_instructions: 19
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 17
+  matching_instructions: 17
   target_instructions: 56
   is_bit_exact: false
 }
@@ -10147,22 +11113,22 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 9
-  matching_instructions: 9
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 7
+  matching_instructions: 7
   target_instructions: 12
   is_bit_exact: false
 }
 entries {
   function_name: "func_8009CFE0"
   module_name: "2AF50"
-  input_sha1: "7e6e93e39725dd115ac9248ad9857acc8a37ebae"
+  input_sha1: "85f0074a46022e988a948f36e99c8073800675a6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 30
-  matching_instructions: 30
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 29
+  matching_instructions: 29
   target_instructions: 168
   is_bit_exact: false
 }
@@ -10170,25 +11136,51 @@ entries {
   function_name: "func_8009D280"
   module_name: "2AF50"
   input_sha1: "00f88434338640bafeda9021dcf17030e42bba91"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 41
-  matching_instructions: 41
+  bit_exact_instructions: 32
+  matching_instructions: 32
   target_instructions: 72
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8009D3D0"
+  module_name: "2AF50"
+  input_sha1: "029dffe368a8539e2d5a0ee97bb16873e395b5e0"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 2
+  matching_instructions: 2
+  target_instructions: 4
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8009D3E0"
+  module_name: "2AF50"
+  input_sha1: "916808e5dedf3c28ccc3d3f0e9f67a9f0356de1e"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 2
+  matching_instructions: 2
+  target_instructions: 4
   is_bit_exact: false
 }
 entries {
   function_name: "func_8009D3F0"
   module_name: "2AF50"
-  input_sha1: "b4383470716905b6515966728aa2b744944b8cce"
+  input_sha1: "99e2c48066ee07cbd35437918f17aceb397dee40"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 31
-  matching_instructions: 31
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 40
+  matching_instructions: 40
   target_instructions: 165
   is_bit_exact: false
 }
@@ -10478,10 +11470,10 @@ entries {
   function_name: "func_8007F9C0"
   module_name: "FDC0"
   input_sha1: "3902241b80162bc0e45a5f4f7d09ddfaddc77065"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -10529,7 +11521,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 37
   matching_instructions: 37
   target_instructions: 54
@@ -10543,6 +11535,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   bit_exact_instructions: 18
   matching_instructions: 18
   target_instructions: 20
@@ -10555,7 +11548,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
@@ -10592,8 +11585,8 @@ entries {
     site_index: 4
     param: 1
   }
-  bit_exact_instructions: 53
-  matching_instructions: 53
+  bit_exact_instructions: 56
+  matching_instructions: 56
   target_instructions: 108
   is_bit_exact: false
 }
@@ -10618,33 +11611,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COMMUTE_BINARY_OP
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 40
-  matching_instructions: 40
+  bit_exact_instructions: 37
+  matching_instructions: 37
   target_instructions: 48
   is_bit_exact: false
 }
@@ -10678,9 +11646,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 17
-  matching_instructions: 17
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 19
+  matching_instructions: 19
   target_instructions: 28
   is_bit_exact: false
 }
@@ -10711,11 +11679,31 @@ entries {
 entries {
   function_name: "func_8007FF40"
   module_name: "FDC0"
-  input_sha1: "eae45e85ced6044d27ea5f79c1044fb109f8718b"
+  input_sha1: "48ff24060b908324261e6265edefb8b99543fcf3"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
   bit_exact_instructions: 12
   matching_instructions: 12
   target_instructions: 12
@@ -10745,6 +11733,24 @@ entries {
   bit_exact_instructions: 20
   matching_instructions: 20
   target_instructions: 20
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_80080020"
+  module_name: "FDC0"
+  input_sha1: "697870111b7e9fbc44ed7b01f71ce722cefe6c37"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 8
+  matching_instructions: 8
+  target_instructions: 8
   is_bit_exact: true
 }
 entries {
@@ -11027,7 +12033,7 @@ entries {
 entries {
   function_name: "func_800803B8"
   module_name: "FDC0"
-  input_sha1: "d9420a6c03b2ca8d136e156c47eb01aa285ce8f4"
+  input_sha1: "c98401a10a55f52eec77c67ffe12728e155b036a"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11042,8 +12048,18 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 189
-  matching_instructions: 189
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 187
+  matching_instructions: 187
   target_instructions: 236
   is_bit_exact: false
 }
@@ -11135,7 +12151,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 42
   matching_instructions: 42
@@ -11149,17 +12165,17 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 7
     param: 0
   }
-  bit_exact_instructions: 91
-  matching_instructions: 91
+  bit_exact_instructions: 92
+  matching_instructions: 92
   target_instructions: 92
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_80080BE0"
@@ -11168,8 +12184,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -11210,8 +12225,28 @@ entries {
     site_index: 9
     param: 0
   }
-  bit_exact_instructions: 49
-  matching_instructions: 49
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 7
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
+  bit_exact_instructions: 63
+  matching_instructions: 63
   target_instructions: 100
   is_bit_exact: false
 }
@@ -11339,14 +12374,34 @@ entries {
 entries {
   function_name: "func_800810F0"
   module_name: "FDC0"
-  input_sha1: "1e56ad76154eb186375d3833c835060618e54359"
-  c_flags: "-O1"
+  input_sha1: "aa0c79dec66ba1d3923e893d2ee96cc6a5b50fda"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 0
     param: 0
   }
   ast_mutations {
@@ -11354,8 +12409,13 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 78
-  matching_instructions: 78
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 75
+  matching_instructions: 75
   target_instructions: 83
   is_bit_exact: false
 }
@@ -11387,8 +12447,13 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 135
-  matching_instructions: 135
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 136
+  matching_instructions: 136
   target_instructions: 162
   is_bit_exact: false
 }
@@ -11408,7 +12473,7 @@ entries {
 entries {
   function_name: "func_80081520"
   module_name: "FDC0"
-  input_sha1: "685d1a36d287ebcce4adad0c3b31636647059723"
+  input_sha1: "418ed714bb1c72b4eb98508a0e2df211a4d24719"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11464,8 +12529,19 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 66
-  matching_instructions: 66
+  c_flags: "-fno-schedule-insns"
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 5
+    param: 2
+  }
+  bit_exact_instructions: 68
+  matching_instructions: 68
   target_instructions: 70
   is_bit_exact: false
 }
@@ -11476,7 +12552,7 @@ entries {
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -11578,7 +12654,7 @@ entries {
   c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
+    site_index: 4
     param: 0
   }
   ast_mutations {
@@ -11678,11 +12754,12 @@ entries {
 entries {
   function_name: "func_80081CA0"
   module_name: "FDC0"
-  input_sha1: "360610037ca21f825ce68ae0b59773a1fa06ac32"
-  c_flags: "-O1"
+  input_sha1: "38cabef5aa077e9d09cd868d315285504b8209bf"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-strength-reduce"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -11717,6 +12794,11 @@ entries {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
     param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
   }
   bit_exact_instructions: 35
   matching_instructions: 35
@@ -11794,8 +12876,13 @@ entries {
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_TRAILING_RETURN
+    site_index: 0
     param: 0
   }
   bit_exact_instructions: 14
@@ -11858,12 +12945,11 @@ entries {
 entries {
   function_name: "func_80081F7C"
   module_name: "FDC0"
-  input_sha1: "bf2dfd3c0d1c3eac5e35a84d06f7d34d4275be01"
+  input_sha1: "2c2b0f432c69d6c2b4b6981c1725ed793dbe44a3"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-strength-reduce"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 0
@@ -11873,6 +12959,21 @@ entries {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
     param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 4
+    param: 1
   }
   bit_exact_instructions: 33
   matching_instructions: 33
@@ -11896,12 +12997,27 @@ entries {
   function_name: "func_800820AC"
   module_name: "FDC0"
   input_sha1: "52048c6fe4b816f792be95f788a9377c186f0ff3"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 19
-  matching_instructions: 19
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 0
+  }
+  bit_exact_instructions: 11
+  matching_instructions: 11
   target_instructions: 30
   is_bit_exact: false
 }
@@ -11939,13 +13055,14 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 35
-  matching_instructions: 35
+  bit_exact_instructions: 36
+  matching_instructions: 36
   target_instructions: 38
   is_bit_exact: false
 }
@@ -11957,6 +13074,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
     site_index: 1
@@ -11970,7 +13088,7 @@ entries {
 entries {
   function_name: "func_8008259C"
   module_name: "FDC0"
-  input_sha1: "cf00a38b4568655d64e647e357ba9970c7b7e744"
+  input_sha1: "8d1fe44cb56a77e75eda11f85239bf1f711e82a8"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11995,8 +13113,28 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 258
-  matching_instructions: 258
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 7
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 9
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 4
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 40
+    param: 0
+  }
+  bit_exact_instructions: 254
+  matching_instructions: 254
   target_instructions: 339
   is_bit_exact: false
 }
@@ -12091,7 +13229,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 23
   matching_instructions: 23
   target_instructions: 28
@@ -12130,23 +13268,28 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 101
-  matching_instructions: 101
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 14
+    param: 0
+  }
+  bit_exact_instructions: 102
+  matching_instructions: 102
   target_instructions: 119
   is_bit_exact: false
 }
 entries {
   function_name: "func_80083010"
   module_name: "FDC0"
-  input_sha1: "f4855c148c776a827eb34cc0d6c90401a6a75a54"
+  input_sha1: "f018267bd1c53742181b7cd3e80db623676a3b0c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 6
-  matching_instructions: 6
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 7
+  matching_instructions: 7
   target_instructions: 7
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8008302C"
@@ -12195,11 +13338,11 @@ entries {
 entries {
   function_name: "func_800831A0"
   module_name: "FDC0"
-  input_sha1: "863d9200fd6a5087bf8ca7d97b2275ef7bfbc8bf"
+  input_sha1: "bf310e8ff47367899359da0d873035f671432f15"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 0
@@ -12210,23 +13353,14 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 26
-  matching_instructions: 26
-  target_instructions: 49
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80083264"
-  module_name: "FDC0"
-  input_sha1: "53f361146bf2c70f4a42d7790826c058453f1e2e"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 0
     param: 0
   }
   ast_mutations {
@@ -12234,8 +13368,32 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 54
-  matching_instructions: 54
+  bit_exact_instructions: 34
+  matching_instructions: 34
+  target_instructions: 49
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80083264"
+  module_name: "FDC0"
+  input_sha1: "b59242e68e4c5a30a1ea2a7d13e5a7b65e295728"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 57
+  matching_instructions: 57
   target_instructions: 69
   is_bit_exact: false
 }
@@ -12246,7 +13404,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -12268,8 +13426,23 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 56
-  matching_instructions: 56
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 3
+    param: 0
+  }
+  bit_exact_instructions: 66
+  matching_instructions: 66
   target_instructions: 101
   is_bit_exact: false
 }
@@ -12377,7 +13550,7 @@ entries {
   c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
+    site_index: 2
     param: 0
   }
   bit_exact_instructions: 111
@@ -12392,7 +13565,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 12
   matching_instructions: 12
   target_instructions: 14
@@ -12447,7 +13620,7 @@ entries {
 entries {
   function_name: "func_80083CCC"
   module_name: "FDC0"
-  input_sha1: "440c5b2dffdb9e4f1821925b398c1156882d1371"
+  input_sha1: "e9abba056cf649a3ae2cccfb6169dc5629d97d63"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12460,6 +13633,11 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 4
     param: 0
   }
   ast_mutations {
@@ -12549,18 +13727,13 @@ entries {
 entries {
   function_name: "func_80084008"
   module_name: "FDC0"
-  input_sha1: "044ce8be1474cddee269daf1ef0565cd2a942e63"
+  input_sha1: "b5bbd9524577e2e659cc92ddba1de1de0dbdda5b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 73
-  matching_instructions: 73
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 58
+  matching_instructions: 58
   target_instructions: 74
   is_bit_exact: false
 }
@@ -12598,35 +13771,28 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_8008424C"
+  module_name: "FDC0"
+  input_sha1: "653f5b82ca65332058ce83f37ee7caa1e0917a74"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 20
+  matching_instructions: 20
+  target_instructions: 28
+  is_bit_exact: false
+}
+entries {
   function_name: "func_800842BC"
   module_name: "FDC0"
   input_sha1: "5038072e55941d32d3382570ce18ec2b71317885"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  bit_exact_instructions: 28
-  matching_instructions: 28
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 23
+  matching_instructions: 23
   target_instructions: 29
   is_bit_exact: false
 }
@@ -12715,7 +13881,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 2
   matching_instructions: 2
   target_instructions: 27
@@ -12724,13 +13890,18 @@ entries {
 entries {
   function_name: "func_8008449C"
   module_name: "FDC0"
-  input_sha1: "3d181621a3551e4be177702a74e8b8f58326647e"
+  input_sha1: "e8ff759d5877013437d20653c0abd81e551a657d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 33
-  matching_instructions: 33
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 36
+  matching_instructions: 36
   target_instructions: 39
   is_bit_exact: false
 }
@@ -12789,18 +13960,14 @@ entries {
 entries {
   function_name: "func_80084614"
   module_name: "FDC0"
-  input_sha1: "c897dd8f8364bfd94274f60466210e47c112f6a0"
-  c_flags: "-O1"
+  input_sha1: "80a9f79a0e84f5763d7867e84ecd202a2f2967a0"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 26
-  matching_instructions: 26
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 21
+  matching_instructions: 21
   target_instructions: 28
   is_bit_exact: false
 }
@@ -12959,10 +14126,10 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 20
-  matching_instructions: 20
+  bit_exact_instructions: 21
+  matching_instructions: 21
   target_instructions: 28
   is_bit_exact: false
 }
@@ -13010,11 +14177,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 0
-  }
+  c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 17
   matching_instructions: 17
   target_instructions: 20
@@ -13036,11 +14199,12 @@ entries {
 entries {
   function_name: "func_80084DE0"
   module_name: "FDC0"
-  input_sha1: "ec21a9d42b29730cb2cb8b58da5d0a8744528e2e"
+  input_sha1: "d50f4aeb6d841bfb472bd72a5ac19d389621edab"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
@@ -13066,8 +14230,23 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 139
-  matching_instructions: 139
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 11
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 144
+  matching_instructions: 144
   target_instructions: 184
   is_bit_exact: false
 }
@@ -13161,11 +14340,21 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 24
-  matching_instructions: 24
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 27
+  matching_instructions: 27
   target_instructions: 27
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8008547C"
@@ -13175,13 +14364,19 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 74
-  matching_instructions: 74
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 84
+  matching_instructions: 84
   target_instructions: 105
   is_bit_exact: false
 }
@@ -13214,16 +14409,15 @@ entries {
 entries {
   function_name: "func_800856F0"
   module_name: "FDC0"
-  input_sha1: "89c85c355d0db887e2d0eecadf5771a953486389"
+  input_sha1: "1efdf54f347238b3f98cf5f7e202911a5b8e9be8"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 48
-  matching_instructions: 48
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 56
+  matching_instructions: 56
   target_instructions: 56
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_800857D0"
@@ -13408,7 +14602,7 @@ entries {
 entries {
   function_name: "func_80085DA0"
   module_name: "FDC0"
-  input_sha1: "708a802db62e2a5563542e699bb8dc1a638e09bb"
+  input_sha1: "ea9c73bb630341fe8147e383180d7f5de378979e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -13433,8 +14627,23 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 179
-  matching_instructions: 179
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 8
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 4
+    param: 0
+  }
+  bit_exact_instructions: 186
+  matching_instructions: 186
   target_instructions: 251
   is_bit_exact: false
 }
@@ -13454,11 +14663,12 @@ entries {
 entries {
   function_name: "func_800862C0"
   module_name: "FDC0"
-  input_sha1: "6f026aa0b0416221a6d5b2ba541fc072bd5fa830"
+  input_sha1: "698aedce2d8e3110f65c5b2f7a177254b00b6731"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 2
@@ -13479,8 +14689,23 @@ entries {
     site_index: 12
     param: 0
   }
-  bit_exact_instructions: 275
-  matching_instructions: 275
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 12
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 12
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 28
+    param: 0
+  }
+  bit_exact_instructions: 315
+  matching_instructions: 315
   target_instructions: 350
   is_bit_exact: false
 }
@@ -13500,19 +14725,29 @@ entries {
 entries {
   function_name: "func_800868DC"
   module_name: "FDC0"
-  input_sha1: "0f698e15ae95e98770a825373b441892c2a8b083"
+  input_sha1: "bc3051ff103f6afaae7bd7434514baa056cd9622"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-delayed-branch"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 1
     param: 0
   }
-  bit_exact_instructions: 103
-  matching_instructions: 103
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 14
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 12
+    param: 0
+  }
+  bit_exact_instructions: 119
+  matching_instructions: 119
   target_instructions: 136
   is_bit_exact: false
 }
@@ -13523,9 +14758,9 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 43
-  matching_instructions: 43
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 47
+  matching_instructions: 47
   target_instructions: 80
   is_bit_exact: false
 }
@@ -13565,66 +14800,32 @@ entries {
 entries {
   function_name: "func_80086C90"
   module_name: "FDC0"
-  input_sha1: "8e495823f5c1f74bb9dd9612a74a5dcc05c4d7ce"
+  input_sha1: "3d2bed05ef04edeea63c20151546d27567b5ba81"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 10
-    param: 0
-  }
-  bit_exact_instructions: 197
-  matching_instructions: 197
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 186
+  matching_instructions: 186
   target_instructions: 274
   is_bit_exact: false
 }
 entries {
   function_name: "func_800870D8"
   module_name: "FDC0"
-  input_sha1: "b14c2359394eaa14be523b20b9fbbc249a76c888"
+  input_sha1: "7e3d36bcd5dbc032a045ba145e1ee06a1c2d99fd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 83
-  matching_instructions: 83
+  c_flags: "-fno-schedule-insns"
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 5
+    param: 0
+  }
+  bit_exact_instructions: 85
+  matching_instructions: 85
   target_instructions: 99
   is_bit_exact: false
 }
@@ -13643,7 +14844,7 @@ entries {
   }
   ast_mutations {
     kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 4
+    site_index: 6
     param: 0
   }
   ast_mutations {
@@ -13704,7 +14905,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -13726,8 +14927,28 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 157
-  matching_instructions: 157
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 18
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 10
+    param: 0
+  }
+  bit_exact_instructions: 163
+  matching_instructions: 163
   target_instructions: 196
   is_bit_exact: false
 }
@@ -13798,8 +15019,18 @@ entries {
     site_index: 11
     param: 0
   }
-  bit_exact_instructions: 109
-  matching_instructions: 109
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 15
+    param: 0
+  }
+  bit_exact_instructions: 112
+  matching_instructions: 112
   target_instructions: 132
   is_bit_exact: false
 }
@@ -13811,6 +15042,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -13831,8 +15063,18 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 57
-  matching_instructions: 57
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 9
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 6
+    param: 0
+  }
+  bit_exact_instructions: 68
+  matching_instructions: 68
   target_instructions: 74
   is_bit_exact: false
 }
@@ -13843,7 +15085,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -13865,8 +15107,18 @@ entries {
     site_index: 9
     param: 0
   }
-  bit_exact_instructions: 66
-  matching_instructions: 66
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 9
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 68
+  matching_instructions: 68
   target_instructions: 70
   is_bit_exact: false
 }
@@ -13993,11 +15245,6 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
-    site_index: 1
-    param: 0
-  }
   bit_exact_instructions: 34
   matching_instructions: 34
   target_instructions: 50
@@ -14011,6 +15258,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -14051,8 +15299,13 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 32
-  matching_instructions: 32
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 34
+  matching_instructions: 34
   target_instructions: 40
   is_bit_exact: false
 }
@@ -14069,8 +15322,13 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 36
-  matching_instructions: 36
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 38
+  matching_instructions: 38
   target_instructions: 40
   is_bit_exact: false
 }
@@ -14082,6 +15340,41 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
   bit_exact_instructions: 34
   matching_instructions: 34
   target_instructions: 36
@@ -14374,7 +15667,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 13
   matching_instructions: 13
@@ -14389,11 +15682,7 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 0
-  }
+  c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 17
   matching_instructions: 17
   target_instructions: 20
@@ -14406,7 +15695,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
     site_index: 0
@@ -14430,6 +15719,11 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
     site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
     param: 0
   }
   bit_exact_instructions: 29
@@ -14482,10 +15776,15 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fforce-addr"
-  bit_exact_instructions: 35
-  matching_instructions: 35
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 37
+  matching_instructions: 37
   target_instructions: 83
   is_bit_exact: false
 }
@@ -14571,12 +15870,13 @@ entries {
   function_name: "func_800893C0"
   module_name: "FDC0"
   input_sha1: "97043e15cc1ae1b33c39ec2d084cf7c8219e0d72"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 51
-  matching_instructions: 51
+  c_flags: "-fno-schedule-insns"
+  bit_exact_instructions: 53
+  matching_instructions: 53
   target_instructions: 55
   is_bit_exact: false
 }
@@ -14611,8 +15911,8 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 51
-  matching_instructions: 51
+  bit_exact_instructions: 54
+  matching_instructions: 54
   target_instructions: 72
   is_bit_exact: false
 }
@@ -14623,43 +15923,69 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
     site_index: 8
     param: 0
   }
-  bit_exact_instructions: 88
-  matching_instructions: 88
+  bit_exact_instructions: 90
+  matching_instructions: 90
   target_instructions: 105
   is_bit_exact: false
 }
 entries {
   function_name: "func_80089804"
   module_name: "FDC0"
-  input_sha1: "59944f02b9cb4ec2845c8d80bb3ef2b3ab5c3385"
+  input_sha1: "aaf77f535393df243106ba8f8bb8b67d25c0d5d6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
   ast_mutations {
     kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
     site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 9
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 12
+    site_index: 6
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 5
+    site_index: 13
     param: 0
   }
-  bit_exact_instructions: 88
-  matching_instructions: 88
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 9
+    param: 0
+  }
+  bit_exact_instructions: 91
+  matching_instructions: 91
   target_instructions: 99
   is_bit_exact: false
 }
@@ -14687,6 +16013,19 @@ entries {
   bit_exact_instructions: 16
   matching_instructions: 16
   target_instructions: 16
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_80089A10"
+  module_name: "FDC0"
+  input_sha1: "c5011d906c225c9fc0363c28ac4af3658ec28765"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 8
+  matching_instructions: 8
+  target_instructions: 8
   is_bit_exact: true
 }
 entries {
@@ -15237,7 +16576,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 7
@@ -15253,21 +16592,31 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 55
-  matching_instructions: 55
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 83
+  matching_instructions: 83
   target_instructions: 83
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8008AA5C"
   module_name: "FDC0"
   input_sha1: "5c268392ef2cc50dd72ae7fb8de6632db474c196"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 70
-  matching_instructions: 70
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 69
+  matching_instructions: 69
   target_instructions: 93
   is_bit_exact: false
 }
@@ -15278,11 +16627,46 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 21
-  matching_instructions: 21
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 24
+  matching_instructions: 24
   target_instructions: 24
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8008AC30"
@@ -15470,7 +16854,7 @@ entries {
   function_name: "func_8008B250"
   module_name: "FDC0"
   input_sha1: "9b43cb24151055b16c8124c09eacfb973fddea84"
-  c_flags: "-O1"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -15491,7 +16875,7 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
@@ -15508,8 +16892,13 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 28
-  matching_instructions: 28
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 30
+  matching_instructions: 30
   target_instructions: 104
   is_bit_exact: false
 }
@@ -15520,7 +16909,8 @@ entries {
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
+  c_flags: "-fno-delayed-branch"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 12
@@ -15541,8 +16931,18 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 26
-  matching_instructions: 26
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 9
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 28
+  matching_instructions: 28
   target_instructions: 104
   is_bit_exact: false
 }
@@ -15557,6 +16957,11 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 7
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 5
     param: 0
   }
   ast_mutations {
@@ -15603,6 +17008,7 @@ module_c_flags {
     flags: "-mips2"
     flags: "-mcpu=r4000"
     flags: "-Wa,-g"
+    flags: "-fno-delayed-branch"
   }
 }
 module_c_flags {
