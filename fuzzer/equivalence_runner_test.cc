@@ -380,5 +380,134 @@ TEST(EquivalenceRunnerTest, StopOnFirstDivergenceMultiThreaded) {
   EXPECT_EQ(summary.divergent_functions, 1u);
 }
 
+TEST(EquivalenceRunnerTest, FastPassTrimsTrailingSectionAlignmentNops) {
+  EquivalenceRunner runner;
+
+  // Case 1: `jr $ra` + non-nop delay slot (`addiu $v0, $a0, 1`) + 2 trailing alignment NOPs
+  FunctionEquivalenceTarget target1;
+  target1.name = "SectionAlignedFuncWithNonNopDelay";
+  target1.vram = 0x80001000;
+  target1.target_words = {
+      0x03E00008,  // jr $ra
+      0x24820001,  // addiu $v0, $a0, 1
+      0x00000000,  // section-alignment padding nop
+      0x00000000,  // section-alignment padding nop
+  };
+  target1.candidate_words = {
+      0x03E00008,  // jr $ra
+      0x24820001,  // addiu $v0, $a0, 1
+  };
+
+  FunctionEquivalenceResult res1 = runner.EvaluateFunction(target1);
+  EXPECT_EQ(res1.status, FunctionEquivalenceStatus::kExactBinaryMatch);
+  EXPECT_EQ(res1.fuzz_vectors_evaluated, 0u);
+
+  // Case 2: `addiu $v0, $a0, 1; jr $ra; nop` (delay slot nop) + 1 trailing alignment NOP
+  FunctionEquivalenceTarget target2;
+  target2.name = "SectionAlignedFuncWithNopDelay";
+  target2.vram = 0x80001010;
+  target2.target_words = {
+      0x24820001,  // addiu $v0, $a0, 1
+      0x03E00008,  // jr $ra
+      0x00000000,  // delay-slot nop
+      0x00000000,  // section-alignment padding nop
+  };
+  target2.candidate_words = {
+      0x24820001,  // addiu $v0, $a0, 1
+      0x03E00008,  // jr $ra
+      0x00000000,  // delay-slot nop
+  };
+
+  FunctionEquivalenceResult res2 = runner.EvaluateFunction(target2);
+  EXPECT_EQ(res2.status, FunctionEquivalenceStatus::kExactBinaryMatch);
+  EXPECT_EQ(res2.fuzz_vectors_evaluated, 0u);
+}
+
+TEST(EquivalenceRunnerTest, FastPassMatchesRelocatedRodataFloatLiteralAndRejectsDivergentLiteral) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "RelocatedFloatLiteralFunc";
+  target.vram = 0x80001000;
+  // Target loads float literal 1.0f (0x3F800000) from retail .rodata at 0x8011EF80:
+  //   lui $at, 0x8012
+  //   lwc1 $f0, -0x1080($at)  (0x80120000 - 0x1080 = 0x8011EF80)
+  //   jr $ra
+  //   nop
+  target.target_words = {0x3C018012, 0xC420EF80, 0x03E00008, 0x00000000};
+
+  // Candidate loads float literal 1.0f (0x3F800000) from relocated private .rodata at 0x80600020:
+  //   lui $at, 0x8060
+  //   lwc1 $f0, 0x0020($at)
+  //   jr $ra
+  //   nop
+  target.candidate_words = {0x3C018060, 0xC4200020, 0x03E00008, 0x00000000};
+
+  MemoryPayload t_rodata;
+  t_rodata.address = 0x8011EF80;
+  t_rodata.data = {0x3F, 0x80, 0x00, 0x00};
+  target.target_initial_memory.push_back(t_rodata);
+
+  MemoryPayload c_rodata;
+  c_rodata.address = 0x80600020;
+  c_rodata.data = {0x3F, 0x80, 0x00, 0x00};
+  target.candidate_initial_memory.push_back(c_rodata);
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kExactBinaryMatch);
+  EXPECT_EQ(res.fuzz_vectors_evaluated, 0u);
+
+  // If the candidate's .rodata constant differs (e.g., 2.0f = 0x40000000), fast-pass must NOT
+  // accept it and differential fuzzing must catch the divergence.
+  target.candidate_initial_memory[0].data = {0x40, 0x00, 0x00, 0x00};
+  FunctionEquivalenceResult div_res = runner.EvaluateFunction(target);
+  EXPECT_EQ(div_res.status, FunctionEquivalenceStatus::kDivergent);
+}
+
+TEST(EquivalenceRunnerTest, FastPassMatchesRelocatedSwitchJumpTable) {
+  EquivalenceRunner runner;
+
+  FunctionEquivalenceTarget target;
+  target.name = "RelocatedSwitchJumpTableFunc";
+  target.vram = 0x80076150;
+  target.candidate_vram = 0x80076200;
+
+  // Both functions implement a 2-way jump table dispatch:
+  //   0: sll $t0, $a0, 2          (0x00044080)
+  //   1: lui $at, hi(jtbl)        (target: 0x800B, cand: 0x8060)
+  //   2: addu $at, $at, $t0       (0x00280821)
+  //   3: lw $t0, lo(jtbl)($at)    (target: -0x20D0 -> 0x800ADF30, cand: 0x0040 -> 0x80600040)
+  //   4: jr $t0                   (0x01000008)
+  //   5: nop                      (0x00000000)
+  //   6: jr $ra                   (0x03E00008)  [case 0 @ +0x18]
+  //   7: addiu $v0, $zero, 10     (0x2402000A)
+  //   8: jr $ra                   (0x03E00008)  [case 1 @ +0x20]
+  //   9: addiu $v0, $zero, 20     (0x24020014)
+  target.target_words = {
+      0x00044080, 0x3C01800B, 0x00280821, 0x8C28DF30, 0x01000008,
+      0x00000000, 0x03E00008, 0x2402000A, 0x03E00008, 0x24020014,
+  };
+  target.candidate_words = {
+      0x00044080, 0x3C018060, 0x00280821, 0x8C280040, 0x01000008,
+      0x00000000, 0x03E00008, 0x2402000A, 0x03E00008, 0x24020014,
+  };
+
+  // Target jump table at 0x800ADF30: [0x80076168 (+0x18), 0x80076170 (+0x20)]
+  MemoryPayload t_jtbl;
+  t_jtbl.address = 0x800ADF30;
+  t_jtbl.data = {0x80, 0x07, 0x61, 0x68, 0x80, 0x07, 0x61, 0x70};
+  target.target_initial_memory.push_back(t_jtbl);
+
+  // Candidate jump table at 0x80600040: [0x80076218 (+0x18), 0x80076220 (+0x20)]
+  MemoryPayload c_jtbl;
+  c_jtbl.address = 0x80600040;
+  c_jtbl.data = {0x80, 0x07, 0x62, 0x18, 0x80, 0x07, 0x62, 0x20};
+  target.candidate_initial_memory.push_back(c_jtbl);
+
+  FunctionEquivalenceResult res = runner.EvaluateFunction(target);
+  EXPECT_EQ(res.status, FunctionEquivalenceStatus::kExactBinaryMatch);
+  EXPECT_EQ(res.fuzz_vectors_evaluated, 0u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::fuzzer

@@ -678,5 +678,108 @@ TEST(TunerPipelineTest, SearchFunctionCandidatesSkipsPolishWhenNotNearMissAndAvo
   EXPECT_LT(near_miss_evals, 30u);
 }
 
+TEST(TunerPipelineTest, TuneFunctionAndTuneModuleShareConsistentModuleSymbolContext) {
+  std::filesystem::path temp_dir =
+      std::filesystem::temp_directory_path() / "tuner_pipeline_module_sym_ctx_test";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir / "asm" / "test-game");
+
+  std::filesystem::path config_path = temp_dir / "test-game.textproto";
+  {
+    std::ofstream out(config_path);
+    out << R"pb(
+      game_name: "test-game"
+      sha1: "0123456789abcdef0123456789abcdef01234567"
+      basename: "test-game"
+      c_flags {
+        key: "default"
+        value { flags: "-O2" }
+      }
+      segments {
+        name: "main"
+        type: SEGMENT_CODE
+        rom_start: 0x1000
+        rom_end: 0x1028
+        vram: 0x80025C00
+        subsegments { name: "code" type: SUBSEGMENT_C rom_start: 0x1000 vram: 0x80025C00 }
+      }
+      symbols { name: "ReadHalfGlobal" address: 0x80025C00 type: SYMBOL_FUNC size: 16 }
+      symbols { name: "WriteWordGlobal" address: 0x80025C10 type: SYMBOL_FUNC size: 16 }
+      symbols { name: "D_80100000" address: 0x80100000 type: SYMBOL_DATA size: 4 }
+    )pb";
+  }
+
+  // Func 1 (`ReadHalfGlobal` @ 0x80025C00):
+  //   lui $at, 0x8010       (0x3C018010)
+  //   lh $v0, 0($at)        (0x84220000)
+  //   jr $ra                (0x03E00008)
+  //   nop                   (0x00000000)
+  // Func 2 (`WriteWordGlobal` @ 0x80025C10):
+  //   lui $at, 0x8010       (0x3C018010)
+  //   sw $a0, 0($at)        (0xAC240000)
+  //   jr $ra                (0x03E00008)
+  //   nop                   (0x00000000)
+  {
+    std::ofstream out(temp_dir / "asm" / "test-game" / "code.s");
+    out << ".section .text, \"ax\"\n"
+           "glabel ReadHalfGlobal\n"
+           "/* 001000 80025C00 3C018010 */ lui $at, %hi(D_80100000)\n"
+           "/* 001004 80025C04 84220000 */ lh $v0, %lo(D_80100000)($at)\n"
+           "/* 001008 80025C08 03E00008 */ jr $ra\n"
+           "/* 00100C 80025C0C 00000000 */ nop\n"
+           "glabel WriteWordGlobal\n"
+           "/* 001010 80025C10 3C018010 */ lui $at, %hi(D_80100000)\n"
+           "/* 001014 80025C14 AC240000 */ sw $a0, %lo(D_80100000)($at)\n"
+           "/* 001018 80025C18 03E00008 */ jr $ra\n"
+           "/* 00101C 80025C1C 00000000 */ nop\n";
+  }
+
+  std::filesystem::path rom_path = temp_dir / "test-game.z64";
+  {
+    std::vector<uint8_t> rom(0x1028, 0);
+    WriteBigEndian32(rom.data(), 0x80371240);
+    WriteBigEndian32(rom.data() + 0x1000, 0x3C018010);
+    WriteBigEndian32(rom.data() + 0x1004, 0x84220000);
+    WriteBigEndian32(rom.data() + 0x1008, 0x03E00008);
+    WriteBigEndian32(rom.data() + 0x100C, 0x00000000);
+    WriteBigEndian32(rom.data() + 0x1010, 0x3C018010);
+    WriteBigEndian32(rom.data() + 0x1014, 0xAC240000);
+    WriteBigEndian32(rom.data() + 0x1018, 0x03E00008);
+    WriteBigEndian32(rom.data() + 0x101C, 0x00000000);
+    std::ofstream out(rom_path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(rom.data()), rom.size());
+  }
+
+  TunerPipelineOptions opts;
+  opts.repo_root = temp_dir;
+  opts.game_name = "test-game";
+  opts.config_path = config_path;
+  opts.rom_path = rom_path;
+  opts.search_on_miss = false;
+  opts.format_with_clang = false;
+
+  auto tuner_or = TunerPipeline::Create(opts);
+  ASSERT_TRUE(tuner_or.ok()) << tuner_or.status();
+  auto& tuner = *tuner_or;
+
+  // TuneFunction on ReadHalfGlobal with module_name="code" must see WriteWordGlobal's s32 use of
+  // D_80100000 and emit `extern s32 D_80100000;` + `*(s16*)&D_80100000`, matching TuneModule.
+  auto single_res_or = tuner->TuneFunction("ReadHalfGlobal", "code");
+  ASSERT_TRUE(single_res_or.ok()) << single_res_or.status();
+  EXPECT_TRUE(absl::StrContains(single_res_or->tuned_c_code, "extern s32 D_80100000;"))
+      << single_res_or->tuned_c_code;
+  EXPECT_TRUE(absl::StrContains(single_res_or->tuned_c_code, "*(s16*)&D_80100000"))
+      << single_res_or->tuned_c_code;
+
+  auto mod_res_or = tuner->TuneModule("code");
+  ASSERT_TRUE(mod_res_or.ok()) << mod_res_or.status();
+  EXPECT_TRUE(absl::StrContains(mod_res_or->tuned_c_code, "extern s32 D_80100000;"))
+      << mod_res_or->tuned_c_code;
+  EXPECT_TRUE(absl::StrContains(mod_res_or->tuned_c_code, "*(s16*)&D_80100000"))
+      << mod_res_or->tuned_c_code;
+
+  std::filesystem::remove_all(temp_dir);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

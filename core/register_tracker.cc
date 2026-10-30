@@ -1614,14 +1614,8 @@ size_t ComputeCanonicalSequenceLcs(absl::Span<const uint32_t> target_ops,
 
 }  // namespace
 
-FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> words,
-                                                   uint32_t base_vram) {
-  FunctionStructuralProfile profile;
-  if (words.empty()) {
-    return profile;
-  }
-
-  // Trim trailing section-alignment NOPs beyond the function's final instruction + delay slot.
+absl::Span<const uint32_t> TrimTrailingSectionAlignmentNops(absl::Span<const uint32_t> words,
+                                                            uint32_t base_vram) {
   size_t trimmed_len = words.size();
   while (trimmed_len > 2 && words[trimmed_len - 1] == 0 && words[trimmed_len - 2] == 0) {
     --trimmed_len;
@@ -1634,8 +1628,17 @@ FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> wo
       --trimmed_len;
     }
   }
+  return words.first(trimmed_len);
+}
 
-  absl::Span<const uint32_t> active_words = words.first(trimmed_len);
+FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> words,
+                                                   uint32_t base_vram) {
+  FunctionStructuralProfile profile;
+  if (words.empty()) {
+    return profile;
+  }
+
+  absl::Span<const uint32_t> active_words = TrimTrailingSectionAlignmentNops(words, base_vram);
   auto insts_or = DecodeSequence(active_words, base_vram);
   if (!insts_or.ok() || insts_or->empty()) {
     return profile;

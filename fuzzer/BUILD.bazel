@@ -61,6 +61,7 @@ cc_library(
     deps = [
         ":differential_fuzzer",
         "//core:control_flow_graph",
+        "//core:endian",
         "//core:mips",
         "//core:register_tracker",
         "@abseil-cpp//absl/strings",

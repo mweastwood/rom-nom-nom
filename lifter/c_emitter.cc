@@ -81,8 +81,8 @@ std::string CTranslationUnit::ToString() const {
     output += "\n";
   }
 
-  LoweredTranslationUnit lowered =
-      AstCodegenLowerer::LowerTranslationUnit(functions, symbol_index, header_provided_functions);
+  LoweredTranslationUnit lowered = AstCodegenLowerer::LowerTranslationUnit(
+      functions, symbol_index, header_provided_functions, parent_module_context.get());
 
   std::string combined_function_code;
   for (const auto& norm_fn : lowered.functions) {

@@ -747,7 +747,8 @@ FunctionDeclaration FunctionDeclaration::Clone() const {
     cloned_body = std::unique_ptr<CompoundStatement>(
         static_cast<CompoundStatement*>(body_->Clone().release()));
   }
-  return FunctionDeclaration(return_type_, name_, parameters_, std::move(cloned_body), is_static_);
+  return FunctionDeclaration(return_type_, name_, parameters_, std::move(cloned_body), is_static_,
+                             optimization_mode_);
 }
 
 namespace {

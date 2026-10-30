@@ -968,5 +968,65 @@ TEST(CEmitterTest,
               ::testing::Not(HasSubstr("__asm__(\"\" : \"=r\"(temp_s0) : \"0\"(temp_s0))")));
 }
 
+TEST(CEmitterTest, SingleFunctionTuWithParentModuleContextPreservesModuleGlobalPromotionRules) {
+  // Build a 2-function module where `D_80123450` is accessed via `*(s16*)&D_80123450` in FuncA,
+  // but as a 32-bit `s32` in FuncB (`D_80123450 = arg0`).
+  // In a standalone 1-function TU without parent context, `D_80123450` would be promoted to `s16`
+  // (`extern s16 D_80123450;` and `return D_80123450;`).
+  // In the 2-function module, `half_uses (1) < total_uses (2)`, so `D_80123450` remains `s32` and
+  // FuncA keeps `*(s16*)&D_80123450`.
+  auto body_a = std::make_unique<CompoundStatement>();
+  body_a->AddStatement(
+      CStatement::Return(CExpression::Unary("*(s16*)&", CExpression::Identifier("D_80123450"))));
+  FunctionDeclaration func_a(CType::S32(), "FuncA", {}, std::move(body_a));
+
+  auto body_b = std::make_unique<CompoundStatement>();
+  body_b->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("D_80123450"), CExpression::Identifier("arg0"))));
+  body_b->AddStatement(CStatement::Return());
+  FunctionDeclaration func_b(CType::Void(), "FuncB", {CParameter{CType::S32(), "arg0"}},
+                             std::move(body_b));
+
+  std::vector<FunctionDeclaration> module_funcs;
+  module_funcs.push_back(func_a.Clone());
+  module_funcs.push_back(func_b.Clone());
+
+  auto module_ctx = std::make_shared<const ModuleSymbolContext>(
+      AstCodegenLowerer::AnalyzeModuleSymbols(module_funcs, /*symbol_index=*/nullptr, {}));
+
+  CTranslationUnit single_tu_with_ctx;
+  single_tu_with_ctx.includes = {"types.h"};
+  single_tu_with_ctx.parent_module_context = module_ctx;
+  single_tu_with_ctx.functions.push_back(func_a.Clone());
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(single_tu_with_ctx, options);
+  EXPECT_THAT(emitted, HasSubstr("extern s32 D_80123450;\n"));
+  EXPECT_THAT(emitted, HasSubstr("return *(s16*)&D_80123450;"));
+}
+
+TEST(CEmitterTest, ExplicitO2FunctionOptimizationModePreservedWhenRegisterAnnotationsRemoved) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  // Unpinned locals (simulating after TOGGLE_REGISTER_ANNOTATION removed `register` annotations)
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::F32(), "f2"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("v0"),
+                              CExpression::Unary("*(s32*)&", CExpression::Identifier("f2")))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  tu.functions.emplace_back(CType::S32(), "TestExplicitO2Bitcast", std::vector<CParameter>{},
+                            std::move(body), /*is_static=*/false,
+                            FunctionOptimizationMode::kO2Standard);
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, HasSubstr("__asm__(\"mfc1 %0, %1\" : \"=r\"(v0) : \"f\"(f2));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

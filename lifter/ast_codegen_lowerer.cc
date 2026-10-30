@@ -2211,6 +2211,18 @@ bool AstCodegenLowerer::IsO2FunctionBody(const CompoundStatement& body) {
   return has_register_decl || (has_sp_array && !has_other_unpinned_local);
 }
 
+bool AstCodegenLowerer::IsO2Function(const FunctionDeclaration& function) {
+  switch (function.OptimizationMode()) {
+    case FunctionOptimizationMode::kO2Standard:
+      return true;
+    case FunctionOptimizationMode::kO0FramePointer:
+      return false;
+    case FunctionOptimizationMode::kAuto:
+      return IsO2FunctionBody(function.Body());
+  }
+  return IsO2FunctionBody(function.Body());
+}
+
 std::unique_ptr<CompoundStatement> AstCodegenLowerer::DisambiguateCalleeSavedAndGlobalLoads(
     const CompoundStatement& body, const std::set<std::string>& external_data_symbols,
     bool has_calls) {
@@ -2242,17 +2254,13 @@ std::unique_ptr<CompoundStatement> AstCodegenLowerer::LowerFloatGprBitcastsToInl
       LowerFloatGprBitcastsToInlineAsmInStmt(original_body, current_body).release()));
 }
 
-LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
+ModuleSymbolContext AstCodegenLowerer::AnalyzeModuleSymbols(
     const std::vector<FunctionDeclaration>& functions, const SymbolIndex* symbol_index,
     const std::set<std::string>& header_provided_functions) {
-  LoweredTranslationUnit result;
-  std::set<std::string> defined_function_names;
+  ModuleSymbolContext ctx;
   for (const auto& function : functions) {
-    defined_function_names.insert(function.Name());
+    ctx.defined_function_names.insert(function.Name());
   }
-
-  std::vector<ReferencedSymbols> per_func_symbols;
-  per_func_symbols.reserve(functions.size());
 
   std::map<std::string, int> total_id_uses;
   std::map<std::string, std::map<std::string, std::pair<CType, int>>> cast_deref_uses;
@@ -2265,19 +2273,19 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
                                   &cast_deref_uses, &uncast_addr_arith_symbols,
                                   &id_symbol_type_uses);
     CollectSpinLoopVolatileSymbolsInStmt(function.Body(), symbols.local_variables,
-                                         &result.volatile_data_symbols);
+                                         &ctx.volatile_data_symbols);
     for (const auto& [name, ret_type] : symbols.inferred_function_return_types) {
-      result.inferred_return_types[name] = ret_type;
+      ctx.inferred_return_types[name] = ret_type;
     }
     for (const auto& [name, data_type] : symbols.inferred_data_types) {
-      result.inferred_data_types[name] = data_type;
+      ctx.inferred_data_types[name] = data_type;
     }
     for (const auto& arr_name : symbols.array_data_symbols) {
-      result.array_data_symbols.insert(arr_name);
+      ctx.array_data_symbols.insert(arr_name);
     }
 
     for (const auto& func_name : symbols.external_functions) {
-      if (defined_function_names.count(func_name) > 0) {
+      if (ctx.defined_function_names.count(func_name) > 0) {
         continue;
       }
       if (IsCompilerIntrinsic(func_name)) {
@@ -2289,15 +2297,15 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
       if (symbol_index != nullptr) {
         const auto* entry = symbol_index->FindByName(func_name);
         if (entry != nullptr && entry->type() == SYMBOL_DATA) {
-          result.external_data_symbols.insert(func_name);
+          ctx.external_data_symbols.insert(func_name);
           continue;
         }
       }
-      result.external_function_names.insert(func_name);
+      ctx.external_function_names.insert(func_name);
     }
 
     for (const auto& data_name : symbols.external_data) {
-      if (defined_function_names.count(data_name) > 0) {
+      if (ctx.defined_function_names.count(data_name) > 0) {
         continue;
       }
       if (IsCompilerIntrinsic(data_name)) {
@@ -2309,23 +2317,21 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
       if (symbol_index != nullptr) {
         const auto* entry = symbol_index->FindByName(data_name);
         if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
-          result.external_function_names.insert(data_name);
+          ctx.external_function_names.insert(data_name);
           continue;
         }
       }
-      result.external_data_symbols.insert(data_name);
+      ctx.external_data_symbols.insert(data_name);
     }
-    per_func_symbols.push_back(std::move(symbols));
   }
 
-  for (const auto& func_name : result.external_function_names) {
-    result.external_data_symbols.erase(func_name);
-    result.array_data_symbols.erase(func_name);
+  for (const auto& func_name : ctx.external_function_names) {
+    ctx.external_data_symbols.erase(func_name);
+    ctx.array_data_symbols.erase(func_name);
   }
 
-  std::map<std::string, CType> promoted_scalar_globals;
-  for (const auto& data_symbol : result.external_data_symbols) {
-    if (result.array_data_symbols.count(data_symbol) > 0 ||
+  for (const auto& data_symbol : ctx.external_data_symbols) {
+    if (ctx.array_data_symbols.count(data_symbol) > 0 ||
         uncast_addr_arith_symbols.count(data_symbol) > 0) {
       continue;
     }
@@ -2357,8 +2363,8 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
         (byte_uses == total_uses ||
          (byte_uses >= 4 && byte_uses + s32_uses == total_uses && byte_uses >= s32_uses * 4))) {
       CType prom_type = (s8_uses >= u8_uses && s8_uses > 0) ? CType::S8() : CType::U8();
-      promoted_scalar_globals[data_symbol] = prom_type;
-      result.inferred_data_types[data_symbol] = prom_type;
+      ctx.promoted_scalar_globals[data_symbol] = prom_type;
+      ctx.inferred_data_types[data_symbol] = prom_type;
       continue;
     }
     int s16_uses = combined_types.count("s16") ? combined_types["s16"].second : 0;
@@ -2368,8 +2374,8 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
         (half_uses == total_uses ||
          (half_uses >= 4 && half_uses + s32_uses == total_uses && half_uses >= s32_uses * 4))) {
       CType prom_type = (s16_uses >= u16_uses && s16_uses > 0) ? CType::S16() : CType::U16();
-      promoted_scalar_globals[data_symbol] = prom_type;
-      result.inferred_data_types[data_symbol] = prom_type;
+      ctx.promoted_scalar_globals[data_symbol] = prom_type;
+      ctx.inferred_data_types[data_symbol] = prom_type;
       continue;
     }
     int s32_zero_stores =
@@ -2379,25 +2385,218 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
       int allowed_zero_stores = (std::string_view(t_str) == "f32") ? s32_zero_stores : 0;
       if (t_uses > 0 && t_uses + allowed_zero_stores == total_uses) {
         CType prom_type = combined_types[t_str].first;
+        ctx.promoted_scalar_globals[data_symbol] = prom_type;
+        ctx.inferred_data_types[data_symbol] = prom_type;
+        break;
+      }
+    }
+  }
+
+  return ctx;
+}
+
+LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
+    const std::vector<FunctionDeclaration>& functions, const SymbolIndex* symbol_index,
+    const std::set<std::string>& header_provided_functions,
+    const ModuleSymbolContext* parent_module_context) {
+  LoweredTranslationUnit result;
+  std::set<std::string> defined_function_names;
+  for (const auto& function : functions) {
+    defined_function_names.insert(function.Name());
+  }
+
+  std::vector<ReferencedSymbols> per_func_symbols;
+  per_func_symbols.reserve(functions.size());
+
+  std::map<std::string, int> total_id_uses;
+  std::map<std::string, std::map<std::string, std::pair<CType, int>>> cast_deref_uses;
+  std::set<std::string> uncast_addr_arith_symbols;
+  std::map<std::string, std::map<std::string, std::pair<CType, int>>> id_symbol_type_uses;
+
+  for (const auto& function : functions) {
+    ReferencedSymbols symbols = CollectReferencedSymbols(function);
+    if (parent_module_context == nullptr) {
+      CollectGlobalCastDerefsInStmt(function.Body(), symbols.local_variables, &total_id_uses,
+                                    &cast_deref_uses, &uncast_addr_arith_symbols,
+                                    &id_symbol_type_uses);
+    }
+    CollectSpinLoopVolatileSymbolsInStmt(function.Body(), symbols.local_variables,
+                                         &result.volatile_data_symbols);
+    for (const auto& [name, ret_type] : symbols.inferred_function_return_types) {
+      result.inferred_return_types[name] = ret_type;
+    }
+    for (const auto& [name, data_type] : symbols.inferred_data_types) {
+      result.inferred_data_types[name] = data_type;
+    }
+    for (const auto& arr_name : symbols.array_data_symbols) {
+      result.array_data_symbols.insert(arr_name);
+    }
+
+    for (const auto& func_name : symbols.external_functions) {
+      if (defined_function_names.count(func_name) > 0) {
+        continue;
+      }
+      if (IsCompilerIntrinsic(func_name)) {
+        continue;
+      }
+      if (header_provided_functions.count(func_name) > 0) {
+        continue;
+      }
+      if (parent_module_context != nullptr &&
+          parent_module_context->external_data_symbols.count(func_name) > 0) {
+        result.external_data_symbols.insert(func_name);
+        continue;
+      }
+      if (symbol_index != nullptr) {
+        const auto* entry = symbol_index->FindByName(func_name);
+        if (entry != nullptr && entry->type() == SYMBOL_DATA) {
+          result.external_data_symbols.insert(func_name);
+          continue;
+        }
+      }
+      result.external_function_names.insert(func_name);
+    }
+
+    for (const auto& data_name : symbols.external_data) {
+      if (defined_function_names.count(data_name) > 0) {
+        continue;
+      }
+      if (IsCompilerIntrinsic(data_name)) {
+        continue;
+      }
+      if (header_provided_functions.count(data_name) > 0) {
+        continue;
+      }
+      if (parent_module_context != nullptr &&
+          (parent_module_context->defined_function_names.count(data_name) > 0 ||
+           parent_module_context->external_function_names.count(data_name) > 0)) {
+        result.external_function_names.insert(data_name);
+        continue;
+      }
+      if (symbol_index != nullptr) {
+        const auto* entry = symbol_index->FindByName(data_name);
+        if (entry != nullptr && entry->type() == SYMBOL_FUNC) {
+          result.external_function_names.insert(data_name);
+          continue;
+        }
+      }
+      result.external_data_symbols.insert(data_name);
+    }
+    per_func_symbols.push_back(std::move(symbols));
+  }
+
+  for (const auto& func_name : result.external_function_names) {
+    result.external_data_symbols.erase(func_name);
+    result.array_data_symbols.erase(func_name);
+  }
+
+  std::map<std::string, CType> promoted_scalar_globals;
+  if (parent_module_context != nullptr) {
+    // Inherit module-wide symbol classifications, inferred return/data types, array symbols,
+    // volatile symbols, and promoted scalar globals from the parent module.
+    for (const auto& [name, ret_type] : parent_module_context->inferred_return_types) {
+      result.inferred_return_types[name] = ret_type;
+    }
+    for (const auto& [name, data_type] : parent_module_context->inferred_data_types) {
+      result.inferred_data_types[name] = data_type;
+    }
+    for (const auto& arr_name : parent_module_context->array_data_symbols) {
+      result.array_data_symbols.insert(arr_name);
+    }
+    for (const auto& vol_name : parent_module_context->volatile_data_symbols) {
+      result.volatile_data_symbols.insert(vol_name);
+    }
+    promoted_scalar_globals = parent_module_context->promoted_scalar_globals;
+    for (const auto& [sym, prom_type] : promoted_scalar_globals) {
+      result.inferred_data_types[sym] = prom_type;
+    }
+  } else {
+    for (const auto& data_symbol : result.external_data_symbols) {
+      if (result.array_data_symbols.count(data_symbol) > 0 ||
+          uncast_addr_arith_symbols.count(data_symbol) > 0) {
+        continue;
+      }
+      auto cast_it = cast_deref_uses.find(data_symbol);
+      auto total_it = total_id_uses.find(data_symbol);
+      if (cast_it == cast_deref_uses.end() || cast_it->second.empty() ||
+          total_it == total_id_uses.end() || total_it->second <= 0) {
+        continue;
+      }
+      int total_uses = total_it->second;
+      std::map<std::string, std::pair<CType, int>> combined_types;
+      if (auto id_it = id_symbol_type_uses.find(data_symbol); id_it != id_symbol_type_uses.end()) {
+        for (const auto& [t_str, tc] : id_it->second) {
+          auto& entry = combined_types[t_str];
+          entry.first = tc.first;
+          entry.second += tc.second;
+        }
+      }
+      for (const auto& [t_str, tc] : cast_it->second) {
+        auto& entry = combined_types[t_str];
+        entry.first = tc.first;
+        entry.second += tc.second;
+      }
+      int s32_uses = combined_types.count("s32") ? combined_types["s32"].second : 0;
+      int s8_uses = combined_types.count("s8") ? combined_types["s8"].second : 0;
+      int u8_uses = combined_types.count("u8") ? combined_types["u8"].second : 0;
+      int byte_uses = s8_uses + u8_uses;
+      if (byte_uses > 0 &&
+          (byte_uses == total_uses ||
+           (byte_uses >= 4 && byte_uses + s32_uses == total_uses && byte_uses >= s32_uses * 4))) {
+        CType prom_type = (s8_uses >= u8_uses && s8_uses > 0) ? CType::S8() : CType::U8();
         promoted_scalar_globals[data_symbol] = prom_type;
         result.inferred_data_types[data_symbol] = prom_type;
-        break;
+        continue;
+      }
+      int s16_uses = combined_types.count("s16") ? combined_types["s16"].second : 0;
+      int u16_uses = combined_types.count("u16") ? combined_types["u16"].second : 0;
+      int half_uses = s16_uses + u16_uses;
+      if (half_uses > 0 &&
+          (half_uses == total_uses ||
+           (half_uses >= 4 && half_uses + s32_uses == total_uses && half_uses >= s32_uses * 4))) {
+        CType prom_type = (s16_uses >= u16_uses && s16_uses > 0) ? CType::S16() : CType::U16();
+        promoted_scalar_globals[data_symbol] = prom_type;
+        result.inferred_data_types[data_symbol] = prom_type;
+        continue;
+      }
+      int s32_zero_stores =
+          combined_types.count("s32_zero_store") ? combined_types["s32_zero_store"].second : 0;
+      for (const char* t_str : {"f32", "f64"}) {
+        int t_uses = combined_types.count(t_str) ? combined_types[t_str].second : 0;
+        int allowed_zero_stores = (std::string_view(t_str) == "f32") ? s32_zero_stores : 0;
+        if (t_uses > 0 && t_uses + allowed_zero_stores == total_uses) {
+          CType prom_type = combined_types[t_str].first;
+          promoted_scalar_globals[data_symbol] = prom_type;
+          result.inferred_data_types[data_symbol] = prom_type;
+          break;
+        }
       }
     }
   }
 
   std::set<std::string> all_function_names = result.external_function_names;
   all_function_names.insert(defined_function_names.begin(), defined_function_names.end());
+  if (parent_module_context != nullptr) {
+    all_function_names.insert(parent_module_context->defined_function_names.begin(),
+                              parent_module_context->defined_function_names.end());
+    all_function_names.insert(parent_module_context->external_function_names.begin(),
+                              parent_module_context->external_function_names.end());
+  }
+
+  const std::set<std::string>& effective_external_data_symbols =
+      parent_module_context != nullptr ? parent_module_context->external_data_symbols
+                                       : result.external_data_symbols;
 
   result.functions.reserve(functions.size());
   for (size_t i = 0; i < functions.size(); ++i) {
     const bool has_calls = !per_func_symbols[i].external_functions.empty() ||
                            StmtContainsNonIntrinsicCall(functions[i].Body());
+    const bool is_o2_func = IsO2Function(functions[i]);
     std::set<std::string> dup_addr_symbols;
-    if (has_calls && IsO2FunctionBody(functions[i].Body())) {
+    if (has_calls && is_o2_func) {
       std::map<std::string, int> addr_counts;
-      CountAddressTakenExternalDataSymbolsInStmt(functions[i].Body(), result.external_data_symbols,
-                                                 &addr_counts);
+      CountAddressTakenExternalDataSymbolsInStmt(functions[i].Body(),
+                                                 effective_external_data_symbols, &addr_counts);
       for (const auto& [sym, cnt] : addr_counts) {
         if (cnt >= 2) {
           dup_addr_symbols.insert(sym);
@@ -2405,10 +2604,10 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
       }
     }
     std::unique_ptr<CompoundStatement> disambiguated_body = DisambiguateCalleeSavedAndGlobalLoads(
-        functions[i].Body(), result.external_data_symbols, has_calls);
+        functions[i].Body(), effective_external_data_symbols, has_calls);
     std::unique_ptr<CompoundStatement> body_to_emit;
-    if (functions.size() > 1 || !result.array_data_symbols.empty() ||
-        !promoted_scalar_globals.empty()) {
+    if (functions.size() > 1 || parent_module_context != nullptr ||
+        !result.array_data_symbols.empty() || !promoted_scalar_globals.empty()) {
       body_to_emit = NormalizeGlobalAndArraySymbols(
           *disambiguated_body, result.array_data_symbols, per_func_symbols[i].local_variables,
           result.inferred_data_types, all_function_names, promoted_scalar_globals);
@@ -2418,12 +2617,12 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
     if (!dup_addr_symbols.empty()) {
       body_to_emit = PreventDuplicateCallArgSymbolCse(*body_to_emit, dup_addr_symbols);
     }
-    if (IsO2FunctionBody(functions[i].Body())) {
+    if (is_o2_func) {
       body_to_emit = LowerFloatGprBitcastsToInlineAsm(functions[i].Body(), *body_to_emit);
     }
     result.functions.emplace_back(functions[i].ReturnType(), functions[i].Name(),
                                   functions[i].Parameters(), std::move(body_to_emit),
-                                  functions[i].IsStatic());
+                                  functions[i].IsStatic(), functions[i].OptimizationMode());
   }
 
   return result;

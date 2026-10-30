@@ -720,16 +720,25 @@ struct CParameter {
   std::string ToString() const;
 };
 
+// Classification of compilation / optimization mode for a lifted C function.
+enum class FunctionOptimizationMode {
+  kAuto,
+  kO0FramePointer,
+  kO2Standard,
+};
+
 // Represents a full C function definition.
 class FunctionDeclaration {
  public:
   FunctionDeclaration(CType return_type, std::string name, std::vector<CParameter> parameters,
-                      std::unique_ptr<CompoundStatement> body, bool is_static = false)
+                      std::unique_ptr<CompoundStatement> body, bool is_static = false,
+                      FunctionOptimizationMode optimization_mode = FunctionOptimizationMode::kAuto)
       : return_type_(std::move(return_type)),
         name_(std::move(name)),
         parameters_(std::move(parameters)),
         body_(std::move(body)),
-        is_static_(is_static) {}
+        is_static_(is_static),
+        optimization_mode_(optimization_mode) {}
 
   const CType& ReturnType() const { return return_type_; }
   CType& MutableReturnType() { return return_type_; }
@@ -739,6 +748,8 @@ class FunctionDeclaration {
   const CompoundStatement& Body() const { return *body_; }
   CompoundStatement* MutableBody() { return body_.get(); }
   bool IsStatic() const { return is_static_; }
+  FunctionOptimizationMode OptimizationMode() const { return optimization_mode_; }
+  void SetOptimizationMode(FunctionOptimizationMode mode) { optimization_mode_ = mode; }
 
   std::string Prototype() const;
   std::string ToString() const;
@@ -750,6 +761,7 @@ class FunctionDeclaration {
   std::vector<CParameter> parameters_;
   std::unique_ptr<CompoundStatement> body_;
   bool is_static_;
+  FunctionOptimizationMode optimization_mode_ = FunctionOptimizationMode::kAuto;
 };
 
 // Holds symbols referenced across an AST function scope.

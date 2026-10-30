@@ -155,6 +155,11 @@ struct FunctionStructuralComparison {
   }
 };
 
+// Trims trailing section-alignment NOPs (0x00000000) beyond a function's final instruction + delay
+// slot while preserving any branch/jump/call/return delay-slot NOP.
+absl::Span<const uint32_t> TrimTrailingSectionAlignmentNops(absl::Span<const uint32_t> words,
+                                                            uint32_t base_vram = 0x80000000);
+
 // Extracts the structural profile of a function from its raw 32-bit instruction words.
 FunctionStructuralProfile AnalyzeFunctionStructure(absl::Span<const uint32_t> words,
                                                    uint32_t base_vram = 0x80000000);

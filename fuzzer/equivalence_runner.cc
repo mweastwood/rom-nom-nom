@@ -1,9 +1,11 @@
 #include "fuzzer/equivalence_runner.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -13,11 +15,276 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/control_flow_graph.h"
+#include "core/endian.h"
 #include "core/mips.h"
 #include "core/register_tracker.h"
 #include "fuzzer/differential_fuzzer.h"
 
 namespace rom_nom_nom::fuzzer {
+
+namespace {
+
+std::optional<uint64_t> ReadPayloadValue(absl::Span<const MemoryPayload> payloads, uint32_t addr,
+                                         size_t size) {
+  // Iterate in reverse so later overlays (e.g. PlacedFunction jump-table overlays) take precedence.
+  for (auto it = payloads.rbegin(); it != payloads.rend(); ++it) {
+    const MemoryPayload& p = *it;
+    if (addr >= p.address && addr + size <= p.address + p.data.size()) {
+      size_t offset = addr - p.address;
+      if (size == 1) return p.data[offset];
+      if (size == 2) return ReadBigEndian16(p.data.data() + offset);
+      if (size == 4) return ReadBigEndian32(p.data.data() + offset);
+      if (size == 8) return ReadBigEndian64(p.data.data() + offset);
+    }
+  }
+  return std::nullopt;
+}
+
+bool IsMatchingFastPassStream(absl::Span<const uint32_t> target_words, uint32_t target_vram,
+                              absl::Span<const uint32_t> cand_words, uint32_t cand_vram,
+                              absl::Span<const MemoryPayload> target_memory,
+                              absl::Span<const MemoryPayload> cand_memory,
+                              const DifferentialFuzzer::Options& fuzzer_opts) {
+  absl::Span<const uint32_t> trimmed_target =
+      TrimTrailingSectionAlignmentNops(target_words, target_vram);
+  absl::Span<const uint32_t> trimmed_cand = TrimTrailingSectionAlignmentNops(cand_words, cand_vram);
+  if (trimmed_target.size() != trimmed_cand.size()) {
+    return false;
+  }
+  if (trimmed_target == trimmed_cand) {
+    return true;
+  }
+
+  struct HiRegState {
+    bool valid = false;
+    bool indexed = false;
+    bool mismatched_hi = false;
+    uint32_t t_hi = 0;
+    uint32_t c_hi = 0;
+    size_t consumed_count = 0;
+  };
+  std::array<HiRegState, 32> hi_regs{};
+  bool has_mismatched_hi = false;
+  size_t matched_mismatched_hi_consumers = 0;
+  size_t total_mismatched_hi = 0;
+
+  const uint32_t t_func_end = target_vram + static_cast<uint32_t>(trimmed_target.size() * 4);
+  const uint32_t c_func_end = cand_vram + static_cast<uint32_t>(trimmed_cand.size() * 4);
+
+  auto check_scalar_or_mapped_rodata = [&](uint32_t t_addr, uint32_t c_addr, size_t load_size,
+                                           bool indexed) -> bool {
+    if (t_addr == c_addr) return true;
+    if (fuzzer_opts.candidate_to_target_address &&
+        fuzzer_opts.candidate_to_target_address(c_addr) == t_addr) {
+      return true;
+    }
+    if (!indexed && load_size > 0) {
+      auto t_val = ReadPayloadValue(target_memory, t_addr, load_size);
+      auto c_val = ReadPayloadValue(cand_memory, c_addr, load_size);
+      if (t_val.has_value() && c_val.has_value() && *t_val == *c_val) {
+        return true;
+      }
+    }
+    if (indexed && load_size == 4) {
+      // Relocated switch jump-table load (`addu $at, $at, $idx; lw $reg, lo($at)`):
+      // Verify that every consecutive in-function jump-table target offset matches between
+      // target_memory and cand_memory (requiring at least 2 valid entries).
+      size_t matched_entries = 0;
+      for (size_t k = 0; k < 256; ++k) {
+        uint32_t offset_bytes = static_cast<uint32_t>(k * 4);
+        auto t_entry = ReadPayloadValue(target_memory, t_addr + offset_bytes, 4);
+        auto c_entry = ReadPayloadValue(cand_memory, c_addr + offset_bytes, 4);
+        if (!t_entry.has_value() || !c_entry.has_value()) break;
+        uint32_t t_target = static_cast<uint32_t>(*t_entry);
+        uint32_t c_target = static_cast<uint32_t>(*c_entry);
+        bool t_in_func = (t_target >= target_vram && t_target < t_func_end && (t_target & 3u) == 0);
+        bool c_in_func = (c_target >= cand_vram && c_target < c_func_end && (c_target & 3u) == 0);
+        if (!t_in_func && !c_in_func) {
+          break;
+        }
+        if (t_in_func != c_in_func || (t_target - target_vram) != (c_target - cand_vram)) {
+          return false;
+        }
+        ++matched_entries;
+      }
+      if (matched_entries >= 2) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (size_t i = 0; i < trimmed_target.size(); ++i) {
+    uint32_t tw = trimmed_target[i];
+    uint32_t cw = trimmed_cand[i];
+    uint32_t top = tw >> 26;
+    uint32_t cop = cw >> 26;
+
+    if (tw == cw) {
+      // Update tracked LUI high-16 register state for identical instructions
+      if (top == 0x0F) {
+        uint32_t rt = (tw >> 16) & 0x1F;
+        if (rt != 0) {
+          hi_regs[rt] = HiRegState{.valid = true,
+                                   .indexed = false,
+                                   .mismatched_hi = false,
+                                   .t_hi = tw & 0xFFFFu,
+                                   .c_hi = cw & 0xFFFFu,
+                                   .consumed_count = 0};
+        }
+      } else if (top == 0x00 && (tw & 0x3Fu) == 0x21) {
+        // addu rd, rs, rt
+        uint32_t rs = (tw >> 21) & 0x1F;
+        uint32_t rt = (tw >> 16) & 0x1F;
+        uint32_t rd = (tw >> 11) & 0x1F;
+        if (rd != 0) {
+          if (hi_regs[rs].valid && !hi_regs[rt].valid) {
+            bool was_mismatched = hi_regs[rs].mismatched_hi;
+            HiRegState next = hi_regs[rs];
+            next.indexed = true;
+            if (rd != rs && was_mismatched) {
+              ++total_mismatched_hi;
+            }
+            hi_regs[rd] = next;
+          } else if (hi_regs[rt].valid && !hi_regs[rs].valid) {
+            bool was_mismatched = hi_regs[rt].mismatched_hi;
+            HiRegState next = hi_regs[rt];
+            next.indexed = true;
+            if (rd != rt && was_mismatched) {
+              ++total_mismatched_hi;
+            }
+            hi_regs[rd] = next;
+          } else {
+            hi_regs[rd] = HiRegState{};
+          }
+        }
+      } else {
+        auto inst_or = DecodeInstruction(tw, target_vram + static_cast<uint32_t>(i * 4));
+        if (inst_or.ok()) {
+          RegisterUseDef ud = GetInstructionUseDef(*inst_or);
+          for (Register d : ud.gpr_defs) {
+            uint32_t d_idx = static_cast<uint32_t>(d);
+            if (d_idx < 32 && d_idx != 0) {
+              if (hi_regs[d_idx].valid && hi_regs[d_idx].mismatched_hi &&
+                  hi_regs[d_idx].consumed_count == 0) {
+                return false;
+              }
+              hi_regs[d_idx] = HiRegState{};
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    // 1. Relocated R_MIPS_26 (j / jal)
+    if ((top == 2 || top == 3) && top == cop) {
+      uint32_t t_pc = target_vram + static_cast<uint32_t>(i * 4);
+      uint32_t c_pc = cand_vram + static_cast<uint32_t>(i * 4);
+      uint32_t t_dest = ((t_pc + 4) & 0xF0000000u) | ((tw & 0x03FFFFFFu) << 2);
+      uint32_t c_dest = ((c_pc + 4) & 0xF0000000u) | ((cw & 0x03FFFFFFu) << 2);
+      bool internal_match = (c_dest - cand_vram) == (t_dest - target_vram);
+      bool mapped_match = fuzzer_opts.candidate_to_target_address &&
+                          fuzzer_opts.candidate_to_target_address(c_dest) == t_dest;
+      if (internal_match || mapped_match) {
+        continue;
+      }
+      return false;
+    }
+
+    // 2. Relocated R_MIPS_HI16 / R_MIPS_LO16 with identical opcode and register fields
+    if ((tw & 0xFFFF0000u) == (cw & 0xFFFF0000u)) {
+      if (top == 0x0F) {
+        // LUI rt, imm
+        uint32_t rt = (tw >> 16) & 0x1F;
+        if (rt == 0) return false;
+        if (hi_regs[rt].valid && hi_regs[rt].mismatched_hi && hi_regs[rt].consumed_count == 0) {
+          return false;
+        }
+        hi_regs[rt] = HiRegState{.valid = true,
+                                 .indexed = false,
+                                 .mismatched_hi = true,
+                                 .t_hi = tw & 0xFFFFu,
+                                 .c_hi = cw & 0xFFFFu,
+                                 .consumed_count = 0};
+        has_mismatched_hi = true;
+        ++total_mismatched_hi;
+        continue;
+      }
+
+      uint32_t rs = (tw >> 21) & 0x1F;
+      uint32_t rt = (tw >> 16) & 0x1F;
+      size_t load_size = 0;
+      bool is_lo16_op = false;
+      bool clobbers_rt_gpr = false;
+      switch (top) {
+        case 0x09:  // addiu
+          is_lo16_op = true;
+          load_size = 0;
+          clobbers_rt_gpr = true;
+          break;
+        case 0x20:  // lb
+        case 0x24:  // lbu
+          is_lo16_op = true;
+          load_size = 1;
+          clobbers_rt_gpr = true;
+          break;
+        case 0x21:  // lh
+        case 0x25:  // lhu
+          is_lo16_op = true;
+          load_size = 2;
+          clobbers_rt_gpr = true;
+          break;
+        case 0x23:  // lw
+        case 0x27:  // lwu
+          is_lo16_op = true;
+          load_size = 4;
+          clobbers_rt_gpr = true;
+          break;
+        case 0x31:  // lwc1
+          is_lo16_op = true;
+          load_size = 4;
+          clobbers_rt_gpr = false;
+          break;
+        case 0x35:  // ldc1
+        case 0x37:  // ld
+          is_lo16_op = true;
+          load_size = 8;
+          clobbers_rt_gpr = (top == 0x37);
+          break;
+        default:
+          break;
+      }
+
+      if (is_lo16_op && hi_regs[rs].valid) {
+        int32_t t_lo = static_cast<int16_t>(tw & 0xFFFFu);
+        int32_t c_lo = static_cast<int16_t>(cw & 0xFFFFu);
+        uint32_t t_addr = (hi_regs[rs].t_hi << 16) + static_cast<uint32_t>(t_lo);
+        uint32_t c_addr = (hi_regs[rs].c_hi << 16) + static_cast<uint32_t>(c_lo);
+        if (check_scalar_or_mapped_rodata(t_addr, c_addr, load_size, hi_regs[rs].indexed)) {
+          if (hi_regs[rs].mismatched_hi && hi_regs[rs].consumed_count == 0) {
+            ++matched_mismatched_hi_consumers;
+          }
+          ++hi_regs[rs].consumed_count;
+          if (clobbers_rt_gpr && rt != 0) {
+            if (rt != rs && hi_regs[rt].valid && hi_regs[rt].mismatched_hi &&
+                hi_regs[rt].consumed_count == 0) {
+              return false;
+            }
+            hi_regs[rt] = HiRegState{};
+          }
+          continue;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  return !has_mismatched_hi || matched_mismatched_hi_consumers >= total_mismatched_hi;
+}
+
+}  // namespace
 
 FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
     const FunctionEquivalenceTarget& target, DifferentialFuzzer* fuzzer) {
@@ -42,36 +309,18 @@ FunctionEquivalenceResult EquivalenceRunner::EvaluateFunction(
   res.normalized_lcs_instructions = struct_comp.normalized_lcs_instructions;
   res.trimmed_target_instruction_count = struct_comp.target.instruction_count;
 
-  // Fast-Pass: If instructions match 100% byte-for-byte (or up to relocated
-  // R_MIPS_26 j/jal targets under code shift), trivially equivalent.
-  bool exact_or_relocated_match = (target.target_words == target.candidate_words);
-  if (!exact_or_relocated_match && target.target_words.size() == target.candidate_words.size()) {
-    exact_or_relocated_match = true;
-    for (size_t i = 0; i < target.target_words.size(); ++i) {
-      uint32_t tw = target.target_words[i];
-      uint32_t cw = target.candidate_words[i];
-      if (tw == cw) {
-        continue;
-      }
-      uint32_t top = tw >> 26;
-      uint32_t cop = cw >> 26;
-      if ((top == 2 || top == 3) && top == cop) {
-        uint32_t t_pc = target.vram + static_cast<uint32_t>(i * 4);
-        uint32_t c_pc = cand_vram + static_cast<uint32_t>(i * 4);
-        uint32_t t_dest = ((t_pc + 4) & 0xF0000000u) | ((tw & 0x03FFFFFFu) << 2);
-        uint32_t c_dest = ((c_pc + 4) & 0xF0000000u) | ((cw & 0x03FFFFFFu) << 2);
-        bool internal_match = (c_dest - cand_vram) == (t_dest - target.vram);
-        bool mapped_match = options_.fuzzer_options.candidate_to_target_address &&
-                            options_.fuzzer_options.candidate_to_target_address(c_dest) == t_dest;
-        if (internal_match || mapped_match) {
-          continue;
-        }
-      }
-      exact_or_relocated_match = false;
-      break;
-    }
-  }
-  if (exact_or_relocated_match) {
+  const auto& target_memory = !target.target_initial_memory.empty()
+                                  ? target.target_initial_memory
+                                  : options_.fuzzer_options.target_initial_memory;
+  const auto& cand_memory = !target.candidate_initial_memory.empty()
+                                ? target.candidate_initial_memory
+                                : options_.fuzzer_options.candidate_initial_memory;
+
+  // Fast-Pass: If trimmed instructions match 100% byte-for-byte (or up to relocated
+  // R_MIPS_26 j/jal targets and verified .rodata literal/jump-table HI16/LO16 pairs),
+  // trivially equivalent.
+  if (IsMatchingFastPassStream(target.target_words, target.vram, target.candidate_words, cand_vram,
+                               target_memory, cand_memory, options_.fuzzer_options)) {
     res.status = FunctionEquivalenceStatus::kExactBinaryMatch;
     res.fuzz_vectors_evaluated = 0;
     res.details = "100% bit-exact instruction match (fast-pass)";

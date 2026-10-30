@@ -298,6 +298,12 @@ absl::StatusOr<CTranslationUnit> LifterPipeline::BuildTranslationUnitForLoadedFu
     tu.functions.push_back(std::move(*res_or->ast));
   }
 
+  if (tu.functions.size() > 1) {
+    tu.parent_module_context =
+        std::make_shared<const ModuleSymbolContext>(AstCodegenLowerer::AnalyzeModuleSymbols(
+            tu.functions, tu.symbol_index, tu.header_provided_functions));
+  }
+
   return tu;
 }
 

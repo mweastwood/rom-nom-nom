@@ -40,6 +40,12 @@ std::string EmitSingleFunctionWithExterns(const FunctionDeclaration& func,
     single_tu.includes = parent_tu->includes;
     single_tu.symbol_index = parent_tu->symbol_index;
     single_tu.header_provided_functions = parent_tu->header_provided_functions;
+    single_tu.parent_module_context = parent_tu->parent_module_context;
+    if (single_tu.parent_module_context == nullptr && parent_tu->functions.size() > 1) {
+      single_tu.parent_module_context =
+          std::make_shared<const ModuleSymbolContext>(AstCodegenLowerer::AnalyzeModuleSymbols(
+              parent_tu->functions, parent_tu->symbol_index, parent_tu->header_provided_functions));
+    }
   } else {
     single_tu.includes = {"types.h"};
     single_tu.symbol_index = symbols;
@@ -347,6 +353,27 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneFunction(std::string_view 
     return target_or.status();
   }
 
+  if (!module_name.empty()) {
+    auto module_funcs_or = lifter_->GetFunctionsInModule(module_name);
+    if (module_funcs_or.ok() && module_funcs_or->size() > 1) {
+      auto mod_tu_or = lifter_->BuildTranslationUnit(*module_funcs_or);
+      if (mod_tu_or.ok()) {
+        for (const auto& fn : mod_tu_or->functions) {
+          if (fn.Name() == target_or->name) {
+            auto res_or = TuneLoadedFunctionAst(*target_or, fn, &(*mod_tu_or), module_name);
+            if (!res_or.ok()) {
+              return res_or.status();
+            }
+            if (!options_.cache_out_path.empty()) {
+              (void)cache_store_.SaveToFile(options_.cache_out_path, options_.game_name);
+            }
+            return res_or;
+          }
+        }
+      }
+    }
+  }
+
   auto tu_or = lifter_->BuildTranslationUnit({target_or->name});
   if (!tu_or.ok() || tu_or->functions.empty()) {
     return !tu_or.ok() ? tu_or.status()
@@ -569,6 +596,10 @@ absl::StatusOr<ModuleTuneResult> TunerPipeline::TuneModule(std::string_view modu
       translation_unit_or->header_provided_functions.insert(std::string(intrinsic_name));
     }
   }
+  translation_unit_or->parent_module_context =
+      std::make_shared<const ModuleSymbolContext>(AstCodegenLowerer::AnalyzeModuleSymbols(
+          translation_unit_or->functions, translation_unit_or->symbol_index,
+          translation_unit_or->header_provided_functions));
 
   std::vector<std::string> default_config_flags;
   if (config != nullptr) {
@@ -710,6 +741,7 @@ absl::StatusOr<ModuleTuneResult> TunerPipeline::TuneModule(std::string_view modu
     }
   }
 
+  translation_unit_or->parent_module_context.reset();
   CEmitterOptions emitter_options;
   emitter_options.includes = translation_unit_or->includes;
   emitter_options.format_with_clang = options_.format_with_clang;

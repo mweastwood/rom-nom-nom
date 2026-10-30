@@ -2,6 +2,7 @@
 #define LIFTER_C_EMITTER_H_
 
 #include <functional>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 
 #include "core/c_ast.h"
 #include "core/symbol_registry.h"
+#include "lifter/ast_codegen_lowerer.h"
 
 namespace rom_nom_nom {
 
@@ -34,6 +36,7 @@ struct CTranslationUnit {
   std::vector<FunctionDeclaration> functions;
   const SymbolIndex* symbol_index = nullptr;
   std::set<std::string> header_provided_functions;
+  std::shared_ptr<const ModuleSymbolContext> parent_module_context;
 
   std::string ToString() const;
 };
