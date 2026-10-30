@@ -154,6 +154,7 @@ absl::StatusOr<CompiledCandidateFunction> CandidateCompiler::CompileFunction(
       .opt_flags = flags,
       .include_dirs = includes,
       .macro_inc = macro_inc,
+      .timeout = absl::Seconds(5),
   });
   if (!compile_status.ok()) {
     return absl::InternalError(absl::StrCat("Compilation failed for ",

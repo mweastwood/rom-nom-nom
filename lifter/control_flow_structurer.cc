@@ -883,6 +883,18 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureShortCircuitCo
 
   auto sc_chain =
       TryCollapseShortCircuitChain(*cfg_, visited_, entry, succ_taken, succ_fallthrough, join);
+  if (!sc_chain.has_value() && !join.has_value()) {
+    auto cand_sc = TryCollapseShortCircuitChain(*cfg_, visited_, entry, succ_taken,
+                                                succ_fallthrough, 0xFFFFFFFDu);
+    if (cand_sc.has_value() && cand_sc->else_target_block.has_value()) {
+      const auto* then_blk = cfg_->GetBlock(cand_sc->then_target_block);
+      const auto* else_blk = cfg_->GetBlock(*cand_sc->else_target_block);
+      if (then_blk != nullptr && else_blk != nullptr && !IsPureEpilogueReturnBlock(*then_blk) &&
+          !IsPureEpilogueReturnBlock(*else_blk)) {
+        sc_chain = std::move(cand_sc);
+      }
+    }
+  }
   if (!sc_chain.has_value()) return nullptr;
 
   for (uint32_t b_id : sc_chain->additional_condition_blocks) {

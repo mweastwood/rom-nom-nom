@@ -72,14 +72,23 @@ void SymbolFolder::Fold(absl::Span<const Instruction> instructions, const Symbol
             if (registered_entry != nullptr && !registered_entry->name().empty() &&
                 registered_entry->name()[0] != '.') {
               access.symbol_name = std::string(registered_entry->name());
-            } else if (game_config != nullptr &&
-                       ClassifyVramAddress(*game_config, target_address) ==
-                           SectionVramClassification::kCode) {
-              access.symbol_name =
-                  symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_FUNC);
-            } else {
-              access.symbol_name =
-                  symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+            } else if (inst.immediate != 0) {
+              const auto* base_entry = symbol_index->FindByAddress(hi_val);
+              if (base_entry != nullptr && !base_entry->name().empty() &&
+                  base_entry->name()[0] != '.' && !absl::StartsWith(base_entry->name(), "D_")) {
+                access.symbol_name = std::string(base_entry->name());
+                access.symbol_offset = static_cast<int32_t>(inst.immediate);
+              }
+            }
+            if (access.symbol_name.empty()) {
+              if (game_config != nullptr && ClassifyVramAddress(*game_config, target_address) ==
+                                                SectionVramClassification::kCode) {
+                access.symbol_name =
+                    symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_FUNC);
+              } else {
+                access.symbol_name =
+                    symbol_index->LookupOrSynthesizeName(target_address, SYMBOL_DATA);
+              }
             }
           }
           folded_.push_back(std::move(access));

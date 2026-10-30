@@ -15,6 +15,7 @@
 #include "core/register_tracker.h"
 #include "differ/normalizer.h"
 #include "differ/sequence_aligner.h"
+#include "fuzzer/candidate_symbol_map.h"
 #include "fuzzer/differential_fuzzer.h"
 
 namespace rom_nom_nom {
@@ -70,7 +71,12 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
 CandidateScorer::CandidateScorer(const TargetExtractor* extractor, const SymbolIndex* symbols)
     : extractor_(extractor),
       symbols_(symbols != nullptr ? symbols
-                                  : (extractor != nullptr ? extractor->Symbols() : nullptr)) {}
+                                  : (extractor != nullptr ? extractor->Symbols() : nullptr)) {
+  if (extractor_ != nullptr) {
+    target_payloads_ =
+        fuzzer::ExtractTargetDataPayloads(extractor_->RomBytes(), extractor_->Config());
+  }
+}
 
 namespace {
 
@@ -258,13 +264,16 @@ bool CandidateScorer::VerifyEquivalence(const TargetFunction& target,
   if (candidate_words == absl::MakeConstSpan(target.raw_words)) {
     return true;
   }
-  fuzzer::DifferentialFuzzer differential_fuzzer;
+  fuzzer::DifferentialFuzzer::Options fuzzer_options;
+  fuzzer_options.target_initial_memory = target_payloads_;
+  fuzzer::DifferentialFuzzer differential_fuzzer(fuzzer_options);
   auto cases = fuzzer::DifferentialFuzzer::GenerateBoundaryCases();
-  auto pointer_cases = fuzzer::DifferentialFuzzer::GeneratePointerCases(
-      num_vectors, /*buffer_vram=*/0x80500000, /*buffer_size=*/256, /*seed=*/42);
-  cases.insert(cases.end(), pointer_cases.begin(), pointer_cases.end());
   auto random_cases = fuzzer::DifferentialFuzzer::GenerateRandomCases(num_vectors, /*seed=*/42);
   cases.insert(cases.end(), random_cases.begin(), random_cases.end());
+  size_t pointer_vectors = num_vectors >= 20 ? 20 : num_vectors;
+  auto pointer_cases = fuzzer::DifferentialFuzzer::GeneratePointerCases(
+      pointer_vectors, /*buffer_vram=*/0x80500000, /*buffer_size=*/256, /*seed=*/42);
+  cases.insert(cases.end(), pointer_cases.begin(), pointer_cases.end());
 
   std::vector<uint32_t> candidate_vector(candidate_words.begin(), candidate_words.end());
   for (const auto& test_case : cases) {

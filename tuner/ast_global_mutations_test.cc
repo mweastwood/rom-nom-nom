@@ -289,5 +289,32 @@ TEST(AstGlobalMutationsTest, VolatileGlobalAccessOgreBattleFunc800737A0) {
   EXPECT_TRUE(absl::StrContains(output, "D_800E9BA0 = v1;"));
 }
 
+TEST(AstGlobalMutationsTest, GlobalArrayAddressingPreservesUnscaledIntegerAddition) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "arg2"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg2"),
+      CExpression::Unary("&", CExpression::Identifier("D_800ABC60"), /*is_prefix=*/true))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Unary("*",
+                         CExpression::Cast(CType::S32().MakePointer(),
+                                           CExpression::Binary("+", CExpression::Identifier("v0"),
+                                                               CExpression::Identifier("arg2"))),
+                         /*is_prefix=*/true))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  FunctionDeclaration func(CType::S32(), "func_8009C670_style", {}, std::move(body));
+  AstMutationStep step;
+  step.set_kind(AST_MUTATION_GLOBAL_ARRAY_ACCESS);
+  step.set_site_index(0);
+  step.set_param(0);
+
+  FunctionDeclaration mutated = AstMutator::ApplyMutation(func, step);
+  std::string output = mutated.ToString();
+  EXPECT_TRUE(absl::StrContains(output, "(s32)&D_800ABC60[0]")) << output;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

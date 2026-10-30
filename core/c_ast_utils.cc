@@ -772,4 +772,297 @@ void ForEachSubCompoundStatement(CStatement* stmt,
   }
 }
 
+namespace {
+
+bool IsStackParamOrLocalNameHelper(std::string_view id_name) {
+  if (absl::StartsWith(id_name, "var_sp_")) return true;
+  if (id_name.size() >= 4 && absl::StartsWith(id_name, "arg") && id_name != "arg0" &&
+      id_name != "arg1" && id_name != "arg2" && id_name != "arg3") {
+    return true;
+  }
+  return false;
+}
+
+bool HasMemoryDerefHelper(const CExpression& expr) {
+  bool found = false;
+  std::function<void(const CExpression&)> check = [&](const CExpression& e) {
+    if (found) return;
+    if (e.Kind() == CExpressionKind::kIdentifier) {
+      std::string_view id_name = static_cast<const IdentifierExpression&>(e).Name();
+      if (IsStackParamOrLocalNameHelper(id_name)) {
+        found = true;
+      }
+      return;
+    }
+    if (e.Kind() == CExpressionKind::kUnaryExpression) {
+      const auto& un = static_cast<const UnaryExpression&>(e);
+      if (un.Op().find('*') != std::string::npos) {
+        if (un.Op() == "*(s32*)&" || un.Op() == "*(u32*)&" || un.Op() == "*(f32*)&" ||
+            un.Op() == "*(s32 *)&" || un.Op() == "*(u32 *)&" || un.Op() == "*(f32 *)&") {
+          if (un.Operand().Kind() == CExpressionKind::kIdentifier) {
+            std::string_view id_name =
+                static_cast<const IdentifierExpression&>(un.Operand()).Name();
+            if (!IsStackParamOrLocalNameHelper(id_name) && !absl::StartsWith(id_name, "D_") &&
+                !absl::StartsWith(id_name, "g_") && !absl::StartsWith(id_name, "RO_") &&
+                !absl::StartsWith(id_name, "B_")) {
+              return;
+            }
+          } else {
+            check(un.Operand());
+            return;
+          }
+        }
+        found = true;
+        return;
+      }
+      check(un.Operand());
+    } else if (e.Kind() == CExpressionKind::kArrayIndexExpression) {
+      found = true;
+      return;
+    } else if (e.Kind() == CExpressionKind::kMemberAccessExpression) {
+      if (static_cast<const MemberAccessExpression&>(e).IsArrow()) {
+        found = true;
+        return;
+      }
+      check(static_cast<const MemberAccessExpression&>(e).Object());
+    } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+      check(static_cast<const BinaryExpression&>(e).Lhs());
+      check(static_cast<const BinaryExpression&>(e).Rhs());
+    } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+      check(static_cast<const AssignmentExpression&>(e).Lhs());
+      check(static_cast<const AssignmentExpression&>(e).Rhs());
+    } else if (e.Kind() == CExpressionKind::kCastExpression) {
+      check(static_cast<const CastExpression&>(e).Operand());
+    } else if (e.Kind() == CExpressionKind::kTernaryExpression) {
+      check(static_cast<const TernaryExpression&>(e).Condition());
+      check(static_cast<const TernaryExpression&>(e).TrueExpression());
+      check(static_cast<const TernaryExpression&>(e).FalseExpression());
+    } else if (e.Kind() == CExpressionKind::kCallExpression) {
+      check(static_cast<const CallExpression&>(e).Callee());
+      for (const auto& arg : static_cast<const CallExpression&>(e).Arguments()) {
+        check(*arg);
+      }
+    }
+  };
+  check(expr);
+  return found;
+}
+
+bool ExtractSimpleDerefRangeHelper(const CExpression& e, std::string_view* out_base,
+                                   int64_t* out_offset, int64_t* out_size,
+                                   bool* out_is_addr_of = nullptr, bool allow_ident_deref = false) {
+  if (out_is_addr_of != nullptr) *out_is_addr_of = false;
+  if (allow_ident_deref && e.Kind() == CExpressionKind::kIdentifier) {
+    std::string_view id_name = static_cast<const IdentifierExpression&>(e).Name();
+    if (IsStackParamOrLocalNameHelper(id_name) || absl::StartsWith(id_name, "D_") ||
+        absl::StartsWith(id_name, "g_") || absl::StartsWith(id_name, "s_") ||
+        absl::StartsWith(id_name, "k_") || absl::StartsWith(id_name, "RO_") ||
+        absl::StartsWith(id_name, "B_")) {
+      *out_base = id_name;
+      *out_offset = 0;
+      *out_size = absl::EndsWith(id_name, "_64") ? 8 : 4;
+      if (out_is_addr_of != nullptr) *out_is_addr_of = true;
+      return true;
+    }
+    return false;
+  }
+  if (e.Kind() != CExpressionKind::kUnaryExpression) return false;
+  const auto& un = static_cast<const UnaryExpression&>(e);
+  int64_t size = 4;
+  const CExpression* addr_root = nullptr;
+  if (un.Op() == "*" && un.Operand().Kind() == CExpressionKind::kCastExpression) {
+    const auto& cast = static_cast<const CastExpression&>(un.Operand());
+    std::string ts = cast.TargetType().ToString();
+    if (ts == "s8*" || ts == "u8*" || ts == "s8 *" || ts == "u8 *") {
+      size = 1;
+    } else if (ts == "s16*" || ts == "u16*" || ts == "s16 *" || ts == "u16 *") {
+      size = 2;
+    } else if (ts == "s64*" || ts == "u64*" || ts == "f64*" || ts == "s64 *" || ts == "u64 *" ||
+               ts == "f64 *") {
+      size = 8;
+    }
+    addr_root = &cast.Operand();
+  } else if (un.Op() == "*(s8*)" || un.Op() == "*(u8*)" || un.Op() == "*(s8 *)" ||
+             un.Op() == "*(u8 *)") {
+    size = 1;
+    addr_root = &un.Operand();
+  } else if (un.Op() == "*(s16*)" || un.Op() == "*(u16*)" || un.Op() == "*(s16 *)" ||
+             un.Op() == "*(u16 *)") {
+    size = 2;
+    addr_root = &un.Operand();
+  } else if (un.Op() == "*(s32*)" || un.Op() == "*(u32*)" || un.Op() == "*(f32*)" ||
+             un.Op() == "*(s32 *)" || un.Op() == "*(u32 *)" || un.Op() == "*(f32 *)") {
+    size = 4;
+    addr_root = &un.Operand();
+  } else if (un.Op() == "*(s64*)" || un.Op() == "*(u64*)" || un.Op() == "*(f64*)" ||
+             un.Op() == "*(s64 *)" || un.Op() == "*(u64 *)" || un.Op() == "*(f64 *)") {
+    size = 8;
+    addr_root = &un.Operand();
+  } else {
+    return false;
+  }
+  const CExpression* addr_ptr = addr_root;
+  while (addr_ptr->Kind() == CExpressionKind::kCastExpression) {
+    addr_ptr = &static_cast<const CastExpression&>(*addr_ptr).Operand();
+  }
+  const CExpression& addr = *addr_ptr;
+  if (addr.Kind() == CExpressionKind::kIdentifier) {
+    *out_base = static_cast<const IdentifierExpression&>(addr).Name();
+    *out_offset = 0;
+    *out_size = size;
+    return true;
+  }
+  if (addr.Kind() == CExpressionKind::kUnaryExpression) {
+    const auto& addr_un = static_cast<const UnaryExpression&>(addr);
+    if (addr_un.Op() == "&" && addr_un.Operand().Kind() == CExpressionKind::kIdentifier) {
+      *out_base = static_cast<const IdentifierExpression&>(addr_un.Operand()).Name();
+      *out_offset = 0;
+      *out_size = size;
+      if (out_is_addr_of != nullptr) *out_is_addr_of = true;
+      return true;
+    }
+  }
+  if (addr.Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& bin = static_cast<const BinaryExpression&>(addr);
+    if ((bin.Op() == "+" || bin.Op() == "-") &&
+        bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+      int64_t off = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+      const CExpression* lhs_ptr = &bin.Lhs();
+      while (lhs_ptr->Kind() == CExpressionKind::kCastExpression) {
+        lhs_ptr = &static_cast<const CastExpression&>(*lhs_ptr).Operand();
+      }
+      const CExpression& lhs = *lhs_ptr;
+      if (lhs.Kind() == CExpressionKind::kIdentifier) {
+        *out_base = static_cast<const IdentifierExpression&>(lhs).Name();
+        *out_offset = (bin.Op() == "-") ? -off : off;
+        *out_size = size;
+        return true;
+      }
+      if (lhs.Kind() == CExpressionKind::kUnaryExpression) {
+        const auto& lhs_un = static_cast<const UnaryExpression&>(lhs);
+        if (lhs_un.Op() == "&" && lhs_un.Operand().Kind() == CExpressionKind::kIdentifier) {
+          *out_base = static_cast<const IdentifierExpression&>(lhs_un.Operand()).Name();
+          *out_offset = (bin.Op() == "-") ? -off : off;
+          *out_size = size;
+          if (out_is_addr_of != nullptr) *out_is_addr_of = true;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool AreProvablyDisjointDerefsHelper(const CExpression& a, const CExpression& b,
+                                     bool allow_addr_of_vs_ptr = false) {
+  std::string_view base_a;
+  std::string_view base_b;
+  int64_t off_a = 0;
+  int64_t off_b = 0;
+  int64_t size_a = 0;
+  int64_t size_b = 0;
+  bool addr_of_a = false;
+  bool addr_of_b = false;
+  if (!ExtractSimpleDerefRangeHelper(a, &base_a, &off_a, &size_a, &addr_of_a,
+                                     allow_addr_of_vs_ptr) ||
+      !ExtractSimpleDerefRangeHelper(b, &base_b, &off_b, &size_b, &addr_of_b,
+                                     allow_addr_of_vs_ptr)) {
+    return false;
+  }
+  if (base_a == base_b) {
+    return (off_a + size_a <= off_b) || (off_b + size_b <= off_a);
+  }
+  const bool is_stack_a = IsStackParamOrLocalNameHelper(base_a) || base_a == "sp";
+  const bool is_stack_b = IsStackParamOrLocalNameHelper(base_b) || base_b == "sp";
+  if ((is_stack_a && addr_of_b && !is_stack_b) || (is_stack_b && addr_of_a && !is_stack_a)) {
+    return true;
+  }
+  if (addr_of_a && addr_of_b) {
+    return true;
+  }
+  if ((addr_of_a != addr_of_b) && (size_a != size_b || allow_addr_of_vs_ptr)) {
+    return true;
+  }
+  return false;
+}
+
+bool AreAllDerefsProvablyDisjointHelper(const CExpression& expr, const CExpression& store_lhs,
+                                        bool allow_addr_of_vs_ptr = false) {
+  bool found_deref = false;
+  bool all_disjoint = true;
+  std::function<void(const CExpression&)> walk = [&](const CExpression& e) {
+    if (!all_disjoint) return;
+    if (e.Kind() == CExpressionKind::kUnaryExpression) {
+      const auto& un = static_cast<const UnaryExpression&>(e);
+      if (un.Op() == "*(s32*)&" || un.Op() == "*(u32*)&" || un.Op() == "*(f32*)&" ||
+          un.Op() == "*(s32 *)&" || un.Op() == "*(u32 *)&" || un.Op() == "*(f32 *)&" ||
+          un.Op() == "*(s64*)&" || un.Op() == "*(u64*)&" || un.Op() == "*(f64*)&") {
+        if (un.Operand().Kind() == CExpressionKind::kIdentifier) {
+          std::string_view id_name = static_cast<const IdentifierExpression&>(un.Operand()).Name();
+          if (!IsStackParamOrLocalNameHelper(id_name) && !absl::StartsWith(id_name, "D_") &&
+              !absl::StartsWith(id_name, "g_") && !absl::StartsWith(id_name, "RO_") &&
+              !absl::StartsWith(id_name, "B_")) {
+            return;
+          }
+          if (!allow_addr_of_vs_ptr) {
+            all_disjoint = false;
+            return;
+          }
+          found_deref = true;
+          if (!AreProvablyDisjointDerefsHelper(un.Operand(), store_lhs, allow_addr_of_vs_ptr)) {
+            all_disjoint = false;
+          }
+          return;
+        }
+        walk(un.Operand());
+        return;
+      }
+      if (un.Op() == "*" || absl::StartsWith(un.Op(), "*(s") || absl::StartsWith(un.Op(), "*(u") ||
+          absl::StartsWith(un.Op(), "*(f")) {
+        found_deref = true;
+        if (!AreProvablyDisjointDerefsHelper(e, store_lhs, allow_addr_of_vs_ptr)) {
+          all_disjoint = false;
+        }
+        return;
+      }
+      walk(un.Operand());
+    } else if (e.Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& bin = static_cast<const BinaryExpression&>(e);
+      walk(bin.Lhs());
+      walk(bin.Rhs());
+    } else if (e.Kind() == CExpressionKind::kAssignmentExpression) {
+      const auto& assign = static_cast<const AssignmentExpression&>(e);
+      walk(assign.Lhs());
+      walk(assign.Rhs());
+    } else if (e.Kind() == CExpressionKind::kCastExpression) {
+      walk(static_cast<const CastExpression&>(e).Operand());
+    } else if (e.Kind() == CExpressionKind::kIdentifier) {
+      std::string_view id_name = static_cast<const IdentifierExpression&>(e).Name();
+      if (allow_addr_of_vs_ptr && IsStackParamOrLocalNameHelper(id_name)) {
+        found_deref = true;
+        if (!AreProvablyDisjointDerefsHelper(e, store_lhs, allow_addr_of_vs_ptr)) {
+          all_disjoint = false;
+        }
+      }
+      return;
+    } else if (e.Kind() == CExpressionKind::kIntegerLiteral ||
+               e.Kind() == CExpressionKind::kFloatLiteral) {
+      return;
+    } else {
+      all_disjoint = false;
+    }
+  };
+  walk(expr);
+  return found_deref && all_disjoint;
+}
+
+}  // namespace
+
+bool MayAliasMemoryExpressions(const CExpression& load_expr, const CExpression& store_lhs) {
+  if (!HasMemoryDerefHelper(load_expr)) {
+    return false;
+  }
+  return !AreAllDerefsProvablyDisjointHelper(load_expr, store_lhs, /*allow_addr_of_vs_ptr=*/true);
+}
+
 }  // namespace rom_nom_nom

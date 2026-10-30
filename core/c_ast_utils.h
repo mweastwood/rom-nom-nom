@@ -100,6 +100,13 @@ std::unique_ptr<CStatement> SubstituteIdentifierInStatement(std::unique_ptr<CSta
 void ForEachSubCompoundStatement(CStatement* stmt,
                                  const std::function<void(CompoundStatement*)>& visitor);
 
+// Returns true if `load_expr` and `store_lhs` may alias according to GCC 2.7.2 `sched.c`
+// (`true_dependence` / `anti_dependence`): stack variables (`var_sp_*`, `sp`) never alias global
+// symbols (`D_*`, `g_*`, `RO_*`, `B_*`), distinct global symbols never alias, and distinct
+// non-overlapping constant byte ranges `*(T*)((u8*)base + C1)` vs `*(U*)((u8*)base + C2)` from
+// the same base pointer never alias.
+bool MayAliasMemoryExpressions(const CExpression& load_expr, const CExpression& store_lhs);
+
 }  // namespace rom_nom_nom
 
 #endif  // ROM_NOM_NOM_CORE_C_AST_UTILS_H_

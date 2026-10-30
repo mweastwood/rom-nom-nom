@@ -139,8 +139,8 @@ class TunerRoundTripStage : public RoundTripStage {
         cand_insts = std::move(*decoded_cand_or);
       }
       CandidateScore score = scorer.ScoreInstructions(target, cand_insts, patched_cand_words);
+      score.raw_bit_exact = bit_exact;
       if (bit_exact) {
-        score.raw_bit_exact = true;
         score.normalized_exact = true;
       }
       compiled_elf_functions[make_key(flags, c_code)] = std::move(elf_func);

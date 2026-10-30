@@ -1090,8 +1090,45 @@ bool StmtOverwritesVar(const CStatement& stmt, std::string_view var) {
   }
 }
 
+bool StmtStartsWithOverwriteOfVar(const CStatement& stmt, std::string_view var) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kExpressionStatement: {
+      const auto& es = static_cast<const ExpressionStatement&>(stmt);
+      if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+        if (a.Op() == "=" && a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(a.Lhs()).Name() == var &&
+            !ExprReadsVar(a.Rhs(), var)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case CStatementKind::kCompoundStatement: {
+      for (const auto& s : static_cast<const CompoundStatement&>(stmt).Statements()) {
+        if (s == nullptr) continue;
+        return StmtStartsWithOverwriteOfVar(*s, var);
+      }
+      return false;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& ifs = static_cast<const IfStatement&>(stmt);
+      if (ExprReadsVar(ifs.Condition(), var) || ExprContainsNonIntrinsicCall(ifs.Condition())) {
+        return false;
+      }
+      return StmtStartsWithOverwriteOfVar(ifs.ThenBranch(), var) &&
+             (ifs.ElseBranch() == nullptr || StmtStartsWithOverwriteOfVar(*ifs.ElseBranch(), var));
+    }
+    default:
+      return false;
+  }
+}
+
 bool StmtContainsCallFollowedByRead(const CStatement& stmt, std::string_view var,
                                     bool require_split_prone) {
+  if (StmtStartsWithOverwriteOfVar(stmt, var)) {
+    return false;
+  }
   const auto check_read = [&](const CStatement& s) {
     return require_split_prone ? StmtHasCseSplitProneRead(s, var) : StmtReadsVar(s, var);
   };
@@ -1136,14 +1173,21 @@ bool StmtContainsCallFollowedByRead(const CStatement& stmt, std::string_view var
       return false;
     }
     case CStatementKind::kWhileStatement:
+      if (StmtOverwritesVar(static_cast<const WhileStatement&>(stmt).Body(), var)) return false;
       return StmtContainsCallFollowedByRead(static_cast<const WhileStatement&>(stmt).Body(), var,
                                             require_split_prone);
     case CStatementKind::kDoWhileStatement:
+      if (StmtOverwritesVar(static_cast<const DoWhileStatement&>(stmt).Body(), var)) return false;
       return StmtContainsCallFollowedByRead(static_cast<const DoWhileStatement&>(stmt).Body(), var,
                                             require_split_prone);
-    case CStatementKind::kForStatement:
-      return StmtContainsCallFollowedByRead(static_cast<const ForStatement&>(stmt).Body(), var,
-                                            require_split_prone);
+    case CStatementKind::kForStatement: {
+      const auto& fs = static_cast<const ForStatement&>(stmt);
+      if ((fs.Init() != nullptr && StmtOverwritesVar(*fs.Init(), var)) ||
+          StmtOverwritesVar(fs.Body(), var)) {
+        return false;
+      }
+      return StmtContainsCallFollowedByRead(fs.Body(), var, require_split_prone);
+    }
     default:
       return false;
   }

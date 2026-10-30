@@ -135,6 +135,7 @@ cc_library(
         "//core:target_extractor",
         "//differ:normalizer",
         "//differ:sequence_aligner",
+        "//fuzzer:candidate_symbol_map",
         "//fuzzer:differential_fuzzer",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

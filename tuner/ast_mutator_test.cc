@@ -295,7 +295,7 @@ TEST(AstMutatorTest, ToggleTrailingReturnDiscoveryAndApplication) {
   EXPECT_FALSE(zero_found_p1);
   EXPECT_TRUE(zero_found_p2);
 
-  // 4. Discover from function with trailing `return v0;`
+  // 4. Discover from void function with trailing `return v0;` (only param 0 `return;` is sound)
   auto mutations_from_v0 = AstMutator::DiscoverMutations(mut2);
   bool v0_found_p0 = false;
   bool v0_found_p1 = false;
@@ -308,7 +308,7 @@ TEST(AstMutatorTest, ToggleTrailingReturnDiscoveryAndApplication) {
     }
   }
   EXPECT_TRUE(v0_found_p0);
-  EXPECT_TRUE(v0_found_p1);
+  EXPECT_FALSE(v0_found_p1);
   EXPECT_FALSE(v0_found_p2);
 }
 
@@ -845,6 +845,82 @@ TEST(AstMutatorTest, DualCompilerInverseMutationsPinMergeSplitStoreFlagAndHoistL
   EXPECT_EQ(AstMutator::DescribeStep(merge_step), "MergeSplitScratchWebs(site=0, param=0)");
   EXPECT_EQ(AstMutator::DescribeStep(sf_step), "ToggleStoreFlagConditional(site=0, param=0)");
   EXPECT_EQ(AstMutator::DescribeStep(hoist_inv_step), "HoistLoopInvariant(site=0, param=0)");
+}
+
+TEST(AstMutatorTest, ToggleRegisterAnnotationNeverCreatesDuplicateHardRegisterBindings) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v0", nullptr, std::nullopt, "$2"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "v1", nullptr, std::nullopt, "$3"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_t0", nullptr, std::nullopt, "$8"));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  FunctionDeclaration func(CType::S32(), "NoDuplicateRegBindings", {}, std::move(body));
+
+  // Neither v0 ($2 -> $3), v1 ($3 -> $2), nor temp_t0 ($8 -> $2) should be allowed to swap to an
+  // already-bound hard register ($2 or $3).
+  auto discovered = AstMutator::DiscoverMutations(func, /*max_mutations=*/64);
+  for (const auto& step : discovered) {
+    if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION) {
+      EXPECT_NE(step.param(), 1u) << "Unexpected swap to already-bound register: "
+                                  << AstMutator::DescribeStep(step);
+    }
+  }
+
+  for (uint32_t site = 0; site < 3; ++site) {
+    AstMutationStep colliding_swap;
+    colliding_swap.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+    colliding_swap.set_site_index(site);
+    colliding_swap.set_param(1);
+    EXPECT_EQ(AstMutator::ApplyMutation(func, colliding_swap).ToString(), func.ToString());
+  }
+}
+
+TEST(AstMutatorTest, SplitScratchWebsAndAddressOfCastsAndNonVoidReturnInvariants) {
+  auto body = std::make_unique<CompoundStatement>();
+  // Split scratch web `v0_2` must not be auto-pinned to `$2`.
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0_2"));
+  // `(s32)&D_8016FFEC` must never have its `(s32)` cast stripped (`param = 0`), though flipping
+  // `(s32)` <-> `(u32)` (`param = 1`) is allowed.
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0_2"),
+      CExpression::Binary(
+          "+", CExpression::Identifier("arg0"),
+          CExpression::Cast(CType::S32(),
+                            CExpression::Unary("&", CExpression::Identifier("D_8016FFEC"),
+                                               /*is_prefix=*/true))))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0_2")));
+
+  FunctionDeclaration func(CType::S32(), "TestInvariants", {{CType::S32(), "arg0"}},
+                           std::move(body));
+
+  auto discovered = AstMutator::DiscoverMutations(func, /*max_mutations=*/64);
+  for (const auto& step : discovered) {
+    EXPECT_NE(step.kind(), AST_MUTATION_TOGGLE_REGISTER_ANNOTATION)
+        << "v0_2 should not have an inferred register annotation";
+    EXPECT_NE(step.kind(), AST_MUTATION_TOGGLE_TRAILING_RETURN)
+        << "Non-void function must not toggle trailing return";
+    if (step.kind() == AST_MUTATION_TOGGLE_UNSIGNED_CAST) {
+      EXPECT_EQ(step.param(), 1u) << "Address-of cast must not offer param=0 (strip cast)";
+    }
+  }
+
+  // Applying param=0 on `(s32)&D_8016FFEC` must be a safe no-op.
+  AstMutationStep strip_cast;
+  strip_cast.set_kind(AST_MUTATION_TOGGLE_UNSIGNED_CAST);
+  strip_cast.set_site_index(0);
+  strip_cast.set_param(0);
+  EXPECT_EQ(AstMutator::ApplyMutation(func, strip_cast).ToString(), func.ToString());
+
+  // Applying param=1 on `(s32)&D_8016FFEC` flips it to `(u32)&D_8016FFEC`.
+  AstMutationStep flip_cast;
+  flip_cast.set_kind(AST_MUTATION_TOGGLE_UNSIGNED_CAST);
+  flip_cast.set_site_index(0);
+  flip_cast.set_param(1);
+  EXPECT_TRUE(
+      absl::StrContains(AstMutator::ApplyMutation(func, flip_cast).ToString(), "(u32)&D_8016FFEC"));
 }
 
 }  // namespace

@@ -112,6 +112,7 @@ cc_library(
     name = "candidate_symbol_map",
     srcs = ["candidate_symbol_map.cc"],
     hdrs = ["candidate_symbol_map.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":differential_fuzzer",
         "//core:endian",

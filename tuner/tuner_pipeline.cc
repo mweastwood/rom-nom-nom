@@ -56,7 +56,11 @@ bool IsHighYieldPolishMutation(AstMutationKind kind) {
   return kind == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
          kind == AST_MUTATION_PROPAGATE_REGISTER_COPY || kind == AST_MUTATION_HOIST_WHILE_GUARD ||
          kind == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR || kind == AST_MUTATION_INVERT_IF_ELSE ||
-         kind == AST_MUTATION_COMMUTE_BINARY_OP;
+         kind == AST_MUTATION_COMMUTE_BINARY_OP ||
+         kind == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION ||
+         kind == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS ||
+         kind == AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL ||
+         kind == AST_MUTATION_HOIST_LOOP_INVARIANT;
 }
 
 bool IsNearMissScore(const CandidateScore& score) {
@@ -235,8 +239,8 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
       // Stage 2b-2: If still not bit-exact, co-evaluate bounded high-yield polish steps across
       // remaining flag profiles.
       if (!result.best_score.raw_bit_exact && (options.explore_flags || flag_profiles.size() > 1)) {
-        constexpr size_t kMaxCrossFlagPolishSteps = 32;
-        const size_t cross_flag_limit = std::min(polish_steps.size(), kMaxCrossFlagPolishSteps);
+        const size_t cross_flag_limit =
+            std::min(polish_steps.size(), options.max_cross_flag_polish_steps);
         for (size_t idx = 0; idx < cross_flag_limit; ++idx) {
           const auto& step = polish_steps[idx];
           FunctionDeclaration mutated = AstMutator::ApplyMutation(polish_base_ast, step);

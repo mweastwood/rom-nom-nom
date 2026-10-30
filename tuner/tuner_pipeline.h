@@ -53,10 +53,11 @@ struct FunctionSearchOptions {
   bool explore_flags = true;
   bool explore_ast_mutations = true;
   FlagExplorerOptions flag_options;
-  size_t max_ast_candidates_per_round = 64;
+  size_t max_ast_candidates_per_round = 128;
   size_t max_rounds = 4;
   size_t max_polish_rounds = 2;
   size_t max_polish_candidates = 512;
+  size_t max_cross_flag_polish_steps = 96;
   std::vector<std::string> previous_cached_flags;
   std::vector<AstMutationStep> previous_cached_mutations;
 };

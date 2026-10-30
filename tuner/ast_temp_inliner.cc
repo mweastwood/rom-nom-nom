@@ -1142,11 +1142,28 @@ bool AnalyzeInlineSingleUseTemporaryAt(const std::vector<std::unique_ptr<CStatem
   } else if (use_statement.Kind() == CStatementKind::kReturnStatement) {
     const auto& return_statement = static_cast<const ReturnStatement&>(use_statement);
     if (return_statement.ReturnValue() != nullptr) {
+      if (rhs.Kind() == CExpressionKind::kBinaryExpression &&
+          return_statement.ReturnValue()->Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& ret_bin = static_cast<const BinaryExpression&>(*return_statement.ReturnValue());
+        auto is_float_cast = [](const CExpression& e) {
+          if (e.Kind() != CExpressionKind::kCastExpression) return false;
+          const auto& ce = static_cast<const CastExpression&>(e);
+          return (ce.TargetType().name == "f32" || ce.TargetType().name == "f64") &&
+                 ce.TargetType().pointer_depth == 0;
+        };
+        if (is_float_cast(ret_bin.Lhs()) && is_float_cast(ret_bin.Rhs())) {
+          return false;
+        }
+      }
       use_count =
           CountIdentifierOccurrencesInExpression(*return_statement.ReturnValue(), variable_name);
     }
     use_kills_variable = true;
   } else if (use_statement.Kind() == CStatementKind::kIfStatement) {
+    if (rhs_identifiers.count(variable_name) > 0 && index > 0 &&
+        CountIdentifierOccurrencesInStatement(*statements[index - 1], variable_name) > 0) {
+      return false;
+    }
     const auto& if_statement = static_cast<const IfStatement&>(use_statement);
     if (CountIdentifierOccurrencesInStatement(if_statement.ThenBranch(), variable_name) == 0 &&
         (if_statement.ElseBranch() == nullptr ||
@@ -1262,7 +1279,11 @@ bool CanSwapAdjacentStatements(const std::vector<std::unique_ptr<CStatement>>& s
   bool second_indirect = false;
   ExtractLhsTargetIdentifier(second_assignment.Lhs(), &second_written, &second_indirect);
 
-  if (first_indirect && second_indirect) return false;
+  if (first_indirect && second_indirect) {
+    if (MayAliasMemoryExpressions(first_assignment.Lhs(), second_assignment.Lhs())) {
+      return false;
+    }
+  }
   if (!first_written.empty() && !second_written.empty() && first_written == second_written) {
     return false;
   }
@@ -1274,8 +1295,16 @@ bool CanSwapAdjacentStatements(const std::vector<std::unique_ptr<CStatement>>& s
       CountIdentifierOccurrencesInExpression(first_expression, second_written) > 0) {
     return false;
   }
-  if (first_indirect && ExpressionReadsIndirectMemory(second_expression)) return false;
-  if (second_indirect && ExpressionReadsIndirectMemory(first_expression)) return false;
+  if (first_indirect && ExpressionReadsIndirectMemory(second_expression)) {
+    if (MayAliasMemoryExpressions(second_expression, first_assignment.Lhs())) {
+      return false;
+    }
+  }
+  if (second_indirect && ExpressionReadsIndirectMemory(first_expression)) {
+    if (MayAliasMemoryExpressions(first_expression, second_assignment.Lhs())) {
+      return false;
+    }
+  }
 
   return true;
 }

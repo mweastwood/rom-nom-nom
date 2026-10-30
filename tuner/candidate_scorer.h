@@ -82,11 +82,12 @@ class CandidateScorer {
   // Verifies behavioral equivalence between `target.raw_words` and `candidate_words` using the
   // differential fuzzer.
   bool VerifyEquivalence(const TargetFunction& target, absl::Span<const uint32_t> candidate_words,
-                         size_t num_vectors = 32) const;
+                         size_t num_vectors = 100) const;
 
  private:
   const TargetExtractor* extractor_ = nullptr;
   const SymbolIndex* symbols_ = nullptr;
+  std::vector<fuzzer::MemoryPayload> target_payloads_;
 };
 
 }  // namespace rom_nom_nom

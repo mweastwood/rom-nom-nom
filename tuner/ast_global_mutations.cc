@@ -453,10 +453,22 @@ std::unique_ptr<CExpression> RewriteGlobalArrayInExpression(
     }
     case CExpressionKind::kBinaryExpression: {
       const auto& binary = static_cast<const BinaryExpression&>(expression);
-      return CExpression::Binary(
-          binary.Op(),
-          RewriteGlobalArrayInExpression(binary.Lhs(), array_globals, address_temporary_to_symbol),
-          RewriteGlobalArrayInExpression(binary.Rhs(), array_globals, address_temporary_to_symbol));
+      auto new_lhs =
+          RewriteGlobalArrayInExpression(binary.Lhs(), array_globals, address_temporary_to_symbol);
+      auto new_rhs =
+          RewriteGlobalArrayInExpression(binary.Rhs(), array_globals, address_temporary_to_symbol);
+      if (binary.Op() == "+" || binary.Op() == "-") {
+        std::string unused_symbol;
+        if (ExtractGlobalArrayBaseSymbol(binary.Lhs(), array_globals, address_temporary_to_symbol,
+                                         &unused_symbol)) {
+          new_lhs = CExpression::Cast(CType::S32(), std::move(new_lhs));
+        }
+        if (ExtractGlobalArrayBaseSymbol(binary.Rhs(), array_globals, address_temporary_to_symbol,
+                                         &unused_symbol)) {
+          new_rhs = CExpression::Cast(CType::S32(), std::move(new_rhs));
+        }
+      }
+      return CExpression::Binary(binary.Op(), std::move(new_lhs), std::move(new_rhs));
     }
     case CExpressionKind::kAssignmentExpression: {
       const auto& assignment = static_cast<const AssignmentExpression&>(expression);

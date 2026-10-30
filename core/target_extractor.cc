@@ -286,6 +286,11 @@ absl::StatusOr<CompiledCandidateFunction> TargetExtractor::CompileCandidateFunct
                                   target_rodata_vram);
 }
 
+absl::Span<const uint8_t> TargetExtractor::RomBytes() const {
+  EnsureRomLoadedAndPrescanned();
+  return RomData();
+}
+
 absl::Span<const uint8_t> TargetExtractor::RomData() const {
   if (cached_rom_.has_value()) {
     return cached_rom_->Data();

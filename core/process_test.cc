@@ -116,8 +116,8 @@ TEST(ProcessTest, FailsOnNonExistentProgram) {
 
 TEST(ProcessTest, TimesOutWhenExceeded) {
   ProcessOptions options;
-  options.program = "sleep";
-  options.args = {"5"};
+  options.program = "sh";
+  options.args = {"-c", "sleep 5"};
   options.timeout = absl::Milliseconds(100);
 
   auto result_or = RunProcess(options);

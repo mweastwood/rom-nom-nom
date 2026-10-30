@@ -88,7 +88,8 @@ absl::StatusOr<ProcessResult> RunProcess(const ProcessOptions& options) {
   }
 
   if (pid == 0) {
-    // Child process
+    // Child process: place into its own process group so timeout kills grandchildren (e.g. cc1).
+    (void)setpgid(0, 0);
     close(stdout_pipe[0]);
     close(stderr_pipe[0]);
     close(err_pipe[0]);
@@ -165,6 +166,7 @@ absl::StatusOr<ProcessResult> RunProcess(const ProcessOptions& options) {
     if (options.timeout > absl::ZeroDuration()) {
       absl::Duration elapsed = absl::Now() - start_time;
       if (elapsed >= options.timeout) {
+        kill(-pid, SIGKILL);
         kill(pid, SIGKILL);
         waitpid(pid, nullptr, 0);
         close(stdout_pipe[0]);

@@ -2548,10 +2548,20 @@ void ExpressionBuilder::LiftFoldedAccess(const FoldedSymbolAccess& lo, const Ins
   if (lo.type == FoldedPatternType::kAddressLoad) {
     statement.kind = StatementKind::kAssignment;
     statement.destination_variable = ExpressionBuilder::RegisterVarName(lo.dest_reg);
-    statement.expression =
-        lo.symbol_name.empty()
-            ? LiftedExpression::Integer(lo.address, true)
-            : LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name));
+    if (lo.symbol_name.empty()) {
+      statement.expression = LiftedExpression::Integer(lo.address, true);
+    } else if (lo.symbol_offset != 0) {
+      statement.expression = LiftedExpression::Unary(
+          "(s32)", LiftedExpression::Binary(
+                       "+",
+                       LiftedExpression::Unary(
+                           "(u8*)", LiftedExpression::Unary(
+                                        "&", LiftedExpression::GlobalRef(lo.symbol_name))),
+                       LiftedExpression::Integer(lo.symbol_offset)));
+    } else {
+      statement.expression =
+          LiftedExpression::Unary("&", LiftedExpression::GlobalRef(lo.symbol_name));
+    }
     statements.push_back(std::move(statement));
   } else if (lo.type == FoldedPatternType::kConstantLiteral) {
     statement.kind = StatementKind::kAssignment;
