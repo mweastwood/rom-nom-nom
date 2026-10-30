@@ -1,7 +1,9 @@
 #include "tuner/ast_mutator.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -777,6 +779,114 @@ void CollectActiveRegisterAnnotationsInStatement(const CStatement& stmt,
   }
 }
 
+bool IsFloatingPointRegisterAnnotation(std::string_view reg) {
+  return reg.size() >= 3 && reg[0] == '$' && reg[1] == 'f';
+}
+
+bool IsCallerSavedScratchRegisterAnnotation(std::string_view reg) {
+  return reg == "$1" || reg == "$2" || reg == "$3" || reg == "$8" || reg == "$9" || reg == "$10" ||
+         reg == "$11" || reg == "$12" || reg == "$13" || reg == "$14" || reg == "$15" ||
+         reg == "$24" || reg == "$25" || reg == "$f0" || reg == "$f1" || reg == "$f2" ||
+         reg == "$f3" || reg == "$f4" || reg == "$f5" || reg == "$f6" || reg == "$f7" ||
+         reg == "$f8" || reg == "$f9" || reg == "$f10" || reg == "$f11" || reg == "$f12" ||
+         reg == "$f13" || reg == "$f14" || reg == "$f15" || reg == "$f16" || reg == "$f17" ||
+         reg == "$f18" || reg == "$f19";
+}
+
+std::unique_ptr<CStatement> StripRegisterAnnotationsInStatement(const CStatement& stmt,
+                                                                bool scratch_only) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      std::vector<std::unique_ptr<CStatement>> new_stmts;
+      const auto& children = static_cast<const CompoundStatement&>(stmt).Statements();
+      new_stmts.reserve(children.size());
+      for (const auto& child : children) {
+        new_stmts.push_back(StripRegisterAnnotationsInStatement(*child, scratch_only));
+      }
+      return std::make_unique<CompoundStatement>(std::move(new_stmts));
+    }
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& decl = static_cast<const VariableDeclarationStatement&>(stmt);
+      std::optional<std::string> reg_ann = decl.RegisterAnnotation();
+      if (reg_ann.has_value() && *reg_ann != "$30" &&
+          (!scratch_only || IsCallerSavedScratchRegisterAnnotation(*reg_ann))) {
+        reg_ann = std::nullopt;
+      }
+      return CStatement::VariableDeclaration(
+          decl.Type(), decl.Name(), decl.Initializer() ? decl.Initializer()->Clone() : nullptr,
+          decl.ArraySize(), reg_ann);
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+      return CStatement::If(if_stmt.Condition().Clone(),
+                            StripRegisterAnnotationsInStatement(if_stmt.ThenBranch(), scratch_only),
+                            if_stmt.ElseBranch() ? StripRegisterAnnotationsInStatement(
+                                                       *if_stmt.ElseBranch(), scratch_only)
+                                                 : nullptr);
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& wh = static_cast<const WhileStatement&>(stmt);
+      return CStatement::While(wh.Condition().Clone(),
+                               StripRegisterAnnotationsInStatement(wh.Body(), scratch_only));
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& dw = static_cast<const DoWhileStatement&>(stmt);
+      return CStatement::DoWhile(StripRegisterAnnotationsInStatement(dw.Body(), scratch_only),
+                                 dw.Condition().Clone());
+    }
+    case CStatementKind::kForStatement: {
+      const auto& f = static_cast<const ForStatement&>(stmt);
+      return CStatement::For(
+          f.Init() ? StripRegisterAnnotationsInStatement(*f.Init(), scratch_only) : nullptr,
+          f.Condition() ? f.Condition()->Clone() : nullptr, f.Step() ? f.Step()->Clone() : nullptr,
+          StripRegisterAnnotationsInStatement(f.Body(), scratch_only));
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& sw = static_cast<const SwitchStatement&>(stmt);
+      std::vector<SwitchCase> new_cases;
+      new_cases.reserve(sw.Cases().size());
+      for (const auto& sc : sw.Cases()) {
+        SwitchCase next_case;
+        next_case.case_values = sc.case_values;
+        next_case.is_default = sc.is_default;
+        if (sc.body != nullptr) {
+          next_case.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+              StripRegisterAnnotationsInStatement(*sc.body, scratch_only).release()));
+        }
+        new_cases.push_back(std::move(next_case));
+      }
+      return CStatement::Switch(sw.Condition().Clone(), std::move(new_cases));
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
+int MutationTruncationPriorityTier(const AstMutationStep& step) {
+  switch (step.kind()) {
+    case AST_MUTATION_REORDER_LOCAL_DECLS:
+    case AST_MUTATION_COALESCE_PARAM_COPY:
+    case AST_MUTATION_DIRECT_TYPED_GLOBAL:
+    case AST_MUTATION_GLOBAL_ARRAY_ACCESS:
+    case AST_MUTATION_VOLATILE_GLOBAL_ACCESS:
+    case AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS:
+    case AST_MUTATION_TOGGLE_TRAILING_RETURN:
+      return 0;
+    case AST_MUTATION_INLINE_SINGLE_USE_TEMP:
+    case AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN:
+    case AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX:
+      return (step.param() == 1 || step.param() == 3) ? 0 : 1;
+    case AST_MUTATION_TOGGLE_REGISTER_ANNOTATION:
+      return step.param() >= 2 ? 0 : 1;
+    case AST_MUTATION_COMMUTE_BINARY_OP:
+    case AST_MUTATION_TOGGLE_UNSIGNED_CAST:
+    case AST_MUTATION_TOGGLE_COMPOUND_ASSIGNMENT:
+      return 2;
+    default:
+      return 1;
+  }
+}
+
 struct MutationContext {
   const AstMutationStep* step_to_apply = nullptr;
   std::vector<AstMutationStep>* discovered = nullptr;
@@ -971,12 +1081,62 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
                                                                  declaration2.Name()) == 0);
       if (independent) {
         uint32_t site = context->reorder_declaration_index++;
-        context->Record(AST_MUTATION_REORDER_LOCAL_DECLS, site);
-        if (context->ShouldApply(AST_MUTATION_REORDER_LOCAL_DECLS, site)) {
-          new_statements.push_back(TraverseStatement(*statements[i + 1], context));
-          new_statements.push_back(TraverseStatement(*statements[i], context));
-          ++i;
-          continue;
+        context->Record(AST_MUTATION_REORDER_LOCAL_DECLS, site, 0);
+        const bool can_swap_explicit_registers =
+            !declaration1.ArraySize().has_value() && !declaration2.ArraySize().has_value() &&
+            declaration1.RegisterAnnotation().has_value() &&
+            declaration2.RegisterAnnotation().has_value() &&
+            *declaration1.RegisterAnnotation() != *declaration2.RegisterAnnotation() &&
+            *declaration1.RegisterAnnotation() != "$30" &&
+            *declaration2.RegisterAnnotation() != "$30" &&
+            IsFloatingPointRegisterAnnotation(*declaration1.RegisterAnnotation()) ==
+                IsFloatingPointRegisterAnnotation(*declaration2.RegisterAnnotation());
+        if (can_swap_explicit_registers) {
+          context->Record(AST_MUTATION_REORDER_LOCAL_DECLS, site, 1);
+          context->Record(AST_MUTATION_REORDER_LOCAL_DECLS, site, 2);
+        }
+        uint32_t parameter = 0;
+        if (context->ShouldApply(AST_MUTATION_REORDER_LOCAL_DECLS, site, &parameter)) {
+          if (parameter == 1 && can_swap_explicit_registers) {
+            auto init1 = declaration1.Initializer() != nullptr
+                             ? TraverseExpression(*declaration1.Initializer(), context)
+                             : nullptr;
+            auto init2 = declaration2.Initializer() != nullptr
+                             ? TraverseExpression(*declaration2.Initializer(), context)
+                             : nullptr;
+            new_statements.push_back(CStatement::VariableDeclaration(
+                declaration1.Type(), declaration1.Name(), std::move(init1),
+                declaration1.ArraySize(), declaration2.RegisterAnnotation()));
+            new_statements.push_back(CStatement::VariableDeclaration(
+                declaration2.Type(), declaration2.Name(), std::move(init2),
+                declaration2.ArraySize(), declaration1.RegisterAnnotation()));
+            ++i;
+            continue;
+          }
+          if (parameter == 2 && can_swap_explicit_registers) {
+            context->active_register_annotations.erase(*declaration1.RegisterAnnotation());
+            context->active_register_annotations.erase(*declaration2.RegisterAnnotation());
+            auto init1 = declaration1.Initializer() != nullptr
+                             ? TraverseExpression(*declaration1.Initializer(), context)
+                             : nullptr;
+            auto init2 = declaration2.Initializer() != nullptr
+                             ? TraverseExpression(*declaration2.Initializer(), context)
+                             : nullptr;
+            new_statements.push_back(CStatement::VariableDeclaration(
+                declaration2.Type(), declaration2.Name(), std::move(init2),
+                declaration2.ArraySize(), std::nullopt));
+            new_statements.push_back(CStatement::VariableDeclaration(
+                declaration1.Type(), declaration1.Name(), std::move(init1),
+                declaration1.ArraySize(), std::nullopt));
+            ++i;
+            continue;
+          }
+          if (parameter == 0) {
+            new_statements.push_back(TraverseStatement(*statements[i + 1], context));
+            new_statements.push_back(TraverseStatement(*statements[i], context));
+            ++i;
+            continue;
+          }
         }
       }
     }
@@ -1983,11 +2143,14 @@ std::vector<SplitScratchWebCandidate> CollectSplitScratchWebCandidates(
 std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclaration& function,
                                                            size_t max_mutations) {
   std::vector<AstMutationStep> mutations;
+  if (max_mutations == 0) {
+    return mutations;
+  }
   ReferencedSymbols referenced_symbols = CollectReferencedSymbols(function);
 
   MutationContext context;
   context.discovered = &mutations;
-  context.max_mutations = max_mutations;
+  context.max_mutations = std::numeric_limits<size_t>::max();
   context.local_variables = referenced_symbols.local_variables;
   CollectActiveRegisterAnnotationsInStatement(function.Body(),
                                               &context.active_register_annotations);
@@ -2005,6 +2168,10 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
   }
   if (context.pointer_offset_index > 1) {
     context.Record(AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX, 0, 1);
+  }
+  if (context.active_register_annotations.size() > 1) {
+    context.Record(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION, 0, 2);
+    context.Record(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION, 0, 3);
   }
 
   // Discover direct typed global candidates (`*(T *)&D_...` -> `extern T D_...;`)
@@ -2100,6 +2267,14 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
     context.Record(AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS, 0, 1);
   }
 
+  if (mutations.size() > max_mutations) {
+    std::stable_sort(mutations.begin(), mutations.end(),
+                     [](const AstMutationStep& a, const AstMutationStep& b) {
+                       return MutationTruncationPriorityTier(a) < MutationTruncationPriorityTier(b);
+                     });
+    mutations.resize(max_mutations);
+  }
+
   return mutations;
 }
 
@@ -2167,7 +2342,24 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
       (step.param() == 1 || step.param() == 3)) {
     auto body = ApplyBulkInlineTemporaries(function.Body(), /*prefer_hoist=*/step.param() == 3);
     return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                               std::move(body), function.IsStatic());
+                               std::move(body), function.IsStatic(), function.OptimizationMode());
+  }
+
+  if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION &&
+      (step.param() == 2 || step.param() == 3)) {
+    FunctionOptimizationMode opt_mode = function.OptimizationMode();
+    if (opt_mode == FunctionOptimizationMode::kAuto) {
+      std::set<std::string> active_regs;
+      CollectActiveRegisterAnnotationsInStatement(function.Body(), &active_regs);
+      if (!active_regs.empty()) {
+        opt_mode = FunctionOptimizationMode::kO2Standard;
+      }
+    }
+    auto mutated_body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+        StripRegisterAnnotationsInStatement(function.Body(), /*scratch_only=*/step.param() == 2)
+            .release()));
+    return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
+                               std::move(mutated_body), function.IsStatic(), opt_mode);
   }
 
   if (step.kind() == AST_MUTATION_DIRECT_TYPED_GLOBAL) {
@@ -2185,7 +2377,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
     auto mutated_body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
         RewriteDirectTypedGlobalInStatement(function.Body(), target_map).release()));
     return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                               std::move(mutated_body), function.IsStatic());
+                               std::move(mutated_body), function.IsStatic(),
+                               function.OptimizationMode());
   }
 
   if (step.kind() == AST_MUTATION_GLOBAL_ARRAY_ACCESS) {
@@ -2204,7 +2397,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
         RewriteGlobalArrayInStatement(function.Body(), target_set, address_temporaries).release()));
     mutated_body = PruneUnusedLocalDeclarations(*mutated_body);
     return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                               std::move(mutated_body), function.IsStatic());
+                               std::move(mutated_body), function.IsStatic(),
+                               function.OptimizationMode());
   }
 
   if (step.kind() == AST_MUTATION_COALESCE_PARAM_COPY) {
@@ -2214,8 +2408,9 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
         auto candidates = CollectParameterCopyCandidates(current);
         if (candidates.empty()) break;
         auto body = ApplyCoalesceParameterCopy(current, candidates[0]);
-        current = FunctionDeclaration(current.ReturnType(), current.Name(), current.Parameters(),
-                                      std::move(body), current.IsStatic());
+        current =
+            FunctionDeclaration(current.ReturnType(), current.Name(), current.Parameters(),
+                                std::move(body), current.IsStatic(), current.OptimizationMode());
       }
       return current;
     }
@@ -2223,7 +2418,7 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
     if (step.site_index() >= candidates.size()) return current;
     auto body = ApplyCoalesceParameterCopy(current, candidates[step.site_index()]);
     return FunctionDeclaration(current.ReturnType(), current.Name(), current.Parameters(),
-                               std::move(body), current.IsStatic());
+                               std::move(body), current.IsStatic(), current.OptimizationMode());
   }
 
   if (step.kind() == AST_MUTATION_TOGGLE_TRAILING_RETURN) {
@@ -2265,7 +2460,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
     }
     auto mutated_body = std::make_unique<CompoundStatement>(std::move(new_stmts));
     return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                               std::move(mutated_body), function.IsStatic());
+                               std::move(mutated_body), function.IsStatic(),
+                               function.OptimizationMode());
   }
 
   if (step.kind() == AST_MUTATION_VOLATILE_GLOBAL_ACCESS) {
@@ -2283,7 +2479,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
                                                use_inline_cast)
             .release()));
     return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                               std::move(mutated_body), function.IsStatic());
+                               std::move(mutated_body), function.IsStatic(),
+                               function.OptimizationMode());
   }
 
   if (step.kind() == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS) {
@@ -2305,7 +2502,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
         std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(current_stmt.release()));
     mutated_body = PruneUnusedLocalDeclarations(*mutated_body);
     return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                               std::move(mutated_body), function.IsStatic());
+                               std::move(mutated_body), function.IsStatic(),
+                               function.OptimizationMode());
   }
 
   MutationContext context;
@@ -2322,7 +2520,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
     mutated_body = PruneUnusedLocalDeclarations(*mutated_body);
   }
   return FunctionDeclaration(function.ReturnType(), function.Name(), function.Parameters(),
-                             std::move(mutated_body), function.IsStatic());
+                             std::move(mutated_body), function.IsStatic(),
+                             function.OptimizationMode());
 }
 
 FunctionDeclaration AstMutator::ApplyMutations(const FunctionDeclaration& function,
@@ -2341,7 +2540,11 @@ std::string AstMutator::DescribeStep(const AstMutationStep& step) {
     case AST_MUTATION_INVERT_IF_ELSE:
       return absl::StrFormat("InvertIfElse(site=%u)", step.site_index());
     case AST_MUTATION_REORDER_LOCAL_DECLS:
-      return absl::StrFormat("ReorderLocalDecls(site=%u)", step.site_index());
+      if (step.param() == 0) {
+        return absl::StrFormat("ReorderLocalDecls(site=%u)", step.site_index());
+      }
+      return absl::StrFormat("ReorderLocalDecls(site=%u, param=%u)", step.site_index(),
+                             step.param());
     case AST_MUTATION_TOGGLE_COMPOUND_ASSIGNMENT:
       return absl::StrFormat("ToggleCompoundAssign(site=%u)", step.site_index());
     case AST_MUTATION_WHILE_TO_FOR_LOOP:

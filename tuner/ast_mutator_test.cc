@@ -923,5 +923,132 @@ TEST(AstMutatorTest, SplitScratchWebsAndAddressOfCastsAndNonVoidReturnInvariants
       absl::StrContains(AstMutator::ApplyMutation(func, flip_cast).ToString(), "(u32)&D_8016FFEC"));
 }
 
+TEST(AstMutatorTest, DiscoverMutationsNeverStarvesHighPriorityFunctionMutationsUnderCap) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t0"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "temp_t0_2"));
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+
+  // Parameter copy: temp_s0 = arg0;
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+
+  // 40 commutable / castable statements (80+ fine-grained expression mutations)
+  for (int i = 0; i < 40; ++i) {
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("v0"),
+        CExpression::Binary("+",
+                            CExpression::Cast(CType::S32(), CExpression::Identifier("temp_s0")),
+                            CExpression::Identifier("arg1")))));
+  }
+
+  // Split scratch web usage + global access at the very bottom of the function
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0_2"),
+      CExpression::Binary("+", CExpression::Identifier("D_80100000"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_t0_2")));
+
+  FunctionDeclaration func(CType::S32(), "LargeFunc",
+                           {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}}, std::move(body),
+                           /*is_static=*/false, FunctionOptimizationMode::kO2Standard);
+
+  auto capped = AstMutator::DiscoverMutations(func, /*max_mutations=*/24);
+  EXPECT_EQ(capped.size(), 24u);
+
+  bool has_coalesce_param = false;
+  bool has_global_array = false;
+  bool has_merge_webs = false;
+  bool has_bulk_unpin = false;
+  bool has_swap_reg_decls = false;
+  for (const auto& step : capped) {
+    if (step.kind() == AST_MUTATION_COALESCE_PARAM_COPY) has_coalesce_param = true;
+    if (step.kind() == AST_MUTATION_GLOBAL_ARRAY_ACCESS) has_global_array = true;
+    if (step.kind() == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS) has_merge_webs = true;
+    if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION && step.param() >= 2) {
+      has_bulk_unpin = true;
+    }
+    if (step.kind() == AST_MUTATION_REORDER_LOCAL_DECLS && step.param() == 1) {
+      has_swap_reg_decls = true;
+    }
+  }
+  EXPECT_TRUE(has_coalesce_param);
+  EXPECT_TRUE(has_global_array);
+  EXPECT_TRUE(has_merge_webs);
+  EXPECT_TRUE(has_bulk_unpin);
+  EXPECT_TRUE(has_swap_reg_decls);
+}
+
+TEST(AstMutatorTest, ReorderLocalDeclsSwapsRegisterAnnotationsAndPreservesOptimizationMode) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_t0", nullptr, std::nullopt, "$8"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "fp", nullptr, std::nullopt, "$30"));
+  body->AddStatement(CStatement::Return(CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                            CExpression::Identifier("temp_s1"))));
+
+  FunctionDeclaration func(CType::S32(), "RegColorFunc", {}, std::move(body),
+                           /*is_static=*/false, FunctionOptimizationMode::kO2Standard);
+
+  // 1. REORDER_LOCAL_DECLS(site=0, param=1) swaps asm("$16") and asm("$17") between temp_s0 and
+  // temp_s1.
+  AstMutationStep swap_regs;
+  swap_regs.set_kind(AST_MUTATION_REORDER_LOCAL_DECLS);
+  swap_regs.set_site_index(0);
+  swap_regs.set_param(1);
+  FunctionDeclaration swapped = AstMutator::ApplyMutation(func, swap_regs);
+  EXPECT_EQ(swapped.OptimizationMode(), FunctionOptimizationMode::kO2Standard);
+  EXPECT_TRUE(absl::StrContains(swapped.ToString(), "register s32 temp_s0 asm(\"$17\");"))
+      << swapped.ToString();
+  EXPECT_TRUE(absl::StrContains(swapped.ToString(), "register s32 temp_s1 asm(\"$16\");"))
+      << swapped.ToString();
+
+  // 2. REORDER_LOCAL_DECLS(site=0, param=2) unpins both temp_s0 and temp_s1 and swaps their
+  // declaration order.
+  AstMutationStep unpin_and_reorder;
+  unpin_and_reorder.set_kind(AST_MUTATION_REORDER_LOCAL_DECLS);
+  unpin_and_reorder.set_site_index(0);
+  unpin_and_reorder.set_param(2);
+  FunctionDeclaration reordered = AstMutator::ApplyMutation(func, unpin_and_reorder);
+  EXPECT_EQ(reordered.OptimizationMode(), FunctionOptimizationMode::kO2Standard);
+  std::string reordered_code = reordered.ToString();
+  EXPECT_FALSE(absl::StrContains(reordered_code, "asm(\"$16\")")) << reordered_code;
+  EXPECT_FALSE(absl::StrContains(reordered_code, "asm(\"$17\")")) << reordered_code;
+  EXPECT_LT(reordered_code.find("s32 temp_s1;"), reordered_code.find("s32 temp_s0;"))
+      << reordered_code;
+
+  // 3. TOGGLE_REGISTER_ANNOTATION(site=0, param=2) unpins caller-saved scratch registers ($8)
+  // while preserving callee-saved ($16, $17) and frame-pointer ($30).
+  AstMutationStep unpin_scratch;
+  unpin_scratch.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  unpin_scratch.set_site_index(0);
+  unpin_scratch.set_param(2);
+  FunctionDeclaration scratch_unpinned = AstMutator::ApplyMutation(func, unpin_scratch);
+  EXPECT_EQ(scratch_unpinned.OptimizationMode(), FunctionOptimizationMode::kO2Standard);
+  EXPECT_FALSE(absl::StrContains(scratch_unpinned.ToString(), "asm(\"$8\")"));
+  EXPECT_TRUE(absl::StrContains(scratch_unpinned.ToString(), "asm(\"$16\")"));
+  EXPECT_TRUE(absl::StrContains(scratch_unpinned.ToString(), "asm(\"$30\")"));
+
+  // 4. TOGGLE_REGISTER_ANNOTATION(site=0, param=3) unpins all non-$30 registers.
+  AstMutationStep unpin_all;
+  unpin_all.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  unpin_all.set_site_index(0);
+  unpin_all.set_param(3);
+  FunctionDeclaration all_unpinned = AstMutator::ApplyMutation(func, unpin_all);
+  EXPECT_EQ(all_unpinned.OptimizationMode(), FunctionOptimizationMode::kO2Standard);
+  EXPECT_FALSE(absl::StrContains(all_unpinned.ToString(), "asm(\"$8\")"));
+  EXPECT_FALSE(absl::StrContains(all_unpinned.ToString(), "asm(\"$16\")"));
+  EXPECT_FALSE(absl::StrContains(all_unpinned.ToString(), "asm(\"$17\")"));
+  EXPECT_TRUE(absl::StrContains(all_unpinned.ToString(), "asm(\"$30\")"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

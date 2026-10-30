@@ -781,5 +781,62 @@ TEST(TunerPipelineTest, TuneFunctionAndTuneModuleShareConsistentModuleSymbolCont
   std::filesystem::remove_all(temp_dir);
 }
 
+TEST(TunerPipelineTest, Phase1bEvaluatesCanonicalPresetsOnBaseFlagsWhenPhase1aSwitchedFlags) {
+  // Function with a single-use temporary `v0 = arg0 + 1; return v0 * 2;`
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::S32(), "v0"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::Return(
+      CExpression::Binary("*", CExpression::Identifier("v0"), CExpression::Integer(2))));
+
+  FunctionDeclaration func(CType::S32(), "InlineUnderO2Func", {{CType::S32(), "arg0"}},
+                           std::move(body));
+  auto emit_fn = [](const FunctionDeclaration& ast) { return ast.ToString(); };
+
+  FunctionSearchOptions opts;
+  opts.explore_flags = true;
+  opts.explore_ast_mutations = true;
+  opts.max_rounds = 1;
+
+  auto res_or = TunerPipeline::SearchFunctionCandidates(
+      func, {"-O2"}, opts, emit_fn,
+      [](std::string_view c_code, const std::vector<std::string>& flags) {
+        const bool is_inlined = !absl::StrContains(c_code, "v0 =");
+        const bool has_o1 = std::find(flags.begin(), flags.end(), "-O1") != flags.end();
+        const bool has_o2 = std::find(flags.begin(), flags.end(), "-O2") != flags.end();
+
+        CandidateScore score;
+        score.target_instruction_count = 10;
+        score.compiled_instruction_count = 10;
+        score.frame_size_matches = true;
+        score.saved_registers_match = true;
+        score.cfg_topology_matches = true;
+
+        if (!is_inlined && has_o1) {
+          // Un-inlined baseline scores slightly higher on -O1 than -O2 in Phase 1a.
+          score.bit_exact_instructions = 7;
+          score.matching_instructions = 7;
+          score.normalized_lcs_instructions = 8;
+        } else if (is_inlined && has_o2) {
+          // Canonical inlined preset achieves 100% bit-exactness only on base_flags (-O2)!
+          score.bit_exact_instructions = 10;
+          score.matching_instructions = 10;
+          score.normalized_lcs_instructions = 10;
+          score.raw_bit_exact = true;
+          score.normalized_exact = true;
+        } else {
+          score.bit_exact_instructions = 5;
+          score.matching_instructions = 5;
+          score.normalized_lcs_instructions = 6;
+        }
+        return score;
+      });
+  ASSERT_TRUE(res_or.ok()) << res_or.status();
+  EXPECT_TRUE(res_or->best_score.raw_bit_exact);
+  EXPECT_EQ(res_or->winning_c_flags, std::vector<std::string>({"-O2"}));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

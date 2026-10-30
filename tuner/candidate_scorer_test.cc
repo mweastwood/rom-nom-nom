@@ -164,5 +164,29 @@ TEST(CandidateScorerTest, IsBetterThanPreservesStructuralIsomorphismOverAccident
   EXPECT_TRUE(bit_exact_candidate.IsBetterThan(isomorphic_baseline));
 }
 
+TEST(CandidateScorerTest, IsBetterThanIncorporatesNormalizedLcsInstructions) {
+  CandidateScore baseline;
+  baseline.target_instruction_count = 24;
+  baseline.compiled_instruction_count = 24;
+  baseline.bit_exact_instructions = 14;
+  baseline.matching_instructions = 16;
+  baseline.normalized_lcs_instructions = 18;
+  baseline.frame_size_matches = true;
+  baseline.saved_registers_match = true;
+  baseline.cfg_topology_matches = true;
+  EXPECT_FALSE(baseline.IsOpcodeSequenceExact());
+
+  // Candidate A has the same structural isomorphism and bit_exact_instructions, slightly fewer
+  // positional `matching_instructions` due to a shifted register move, but 100% opcode sequence
+  // alignment (`normalized_lcs_instructions == 24`).
+  CandidateScore lcs_aligned = baseline;
+  lcs_aligned.matching_instructions = 15;
+  lcs_aligned.normalized_lcs_instructions = 24;
+  EXPECT_TRUE(lcs_aligned.IsOpcodeSequenceExact());
+
+  EXPECT_TRUE(lcs_aligned.IsBetterThan(baseline));
+  EXPECT_FALSE(baseline.IsBetterThan(lcs_aligned));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

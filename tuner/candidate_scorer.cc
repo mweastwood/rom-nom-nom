@@ -49,6 +49,9 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
   if (bit_exact_instructions != other.bit_exact_instructions) {
     return bit_exact_instructions > other.bit_exact_instructions;
   }
+  if (IsOpcodeSequenceExact() != other.IsOpcodeSequenceExact()) {
+    return IsOpcodeSequenceExact();
+  }
   const int64_t net_matching =
       static_cast<int64_t>(matching_instructions) * 2 - static_cast<int64_t>(SizeDelta());
   const int64_t other_net_matching = static_cast<int64_t>(other.matching_instructions) * 2 -
@@ -58,6 +61,16 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
   }
   if (matching_instructions != other.matching_instructions) {
     return matching_instructions > other.matching_instructions;
+  }
+  const int64_t net_lcs =
+      static_cast<int64_t>(normalized_lcs_instructions) * 2 - static_cast<int64_t>(SizeDelta());
+  const int64_t other_net_lcs = static_cast<int64_t>(other.normalized_lcs_instructions) * 2 -
+                                static_cast<int64_t>(other.SizeDelta());
+  if (net_lcs != other_net_lcs) {
+    return net_lcs > other_net_lcs;
+  }
+  if (normalized_lcs_instructions != other.normalized_lcs_instructions) {
+    return normalized_lcs_instructions > other.normalized_lcs_instructions;
   }
   if (SizeDelta() != other.SizeDelta()) {
     return SizeDelta() < other.SizeDelta();

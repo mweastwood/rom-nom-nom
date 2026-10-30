@@ -7670,6 +7670,23 @@ s32 MultipleUnsignedConstantDivisionsAndCompare(void) {
 }
 )",
       },
+      RoundTripTestCase{
+          .test_name = "TwoCalleeSavedLocalsDeclaredInReverseAppearanceOrder",
+          .function_name = "TwoCalleeSavedLocalsDeclaredInReverseAppearanceOrder",
+          .original_c = R"(
+extern s32 StepFirst(s32 x);
+extern s32 StepSecond(s32 y);
+extern s32 CombineSteps(s32 a, s32 b);
+
+s32 TwoCalleeSavedLocalsDeclaredInReverseAppearanceOrder(s32 x, s32 y) {
+    s32 second_saved;
+    s32 first_saved;
+    first_saved = StepFirst(x);
+    second_saved = StepSecond(y);
+    return CombineSteps(first_saved, second_saved);
+}
+)",
+      },
   };
   return *k_cases;
 }

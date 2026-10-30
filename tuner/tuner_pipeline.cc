@@ -64,17 +64,20 @@ bool IsHighYieldPolishMutation(AstMutationKind kind) {
          kind == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR || kind == AST_MUTATION_INVERT_IF_ELSE ||
          kind == AST_MUTATION_COMMUTE_BINARY_OP ||
          kind == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION ||
+         kind == AST_MUTATION_REORDER_LOCAL_DECLS ||
          kind == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS ||
+         kind == AST_MUTATION_SPLIT_SINGLE_USE_TEMP ||
          kind == AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL ||
          kind == AST_MUTATION_HOIST_LOOP_INVARIANT;
 }
 
 bool IsNearMissScore(const CandidateScore& score) {
   const size_t target_insns = score.target_instruction_count;
-  const size_t matching_insns = score.matching_instructions;
+  const size_t best_aligned_insns =
+      std::max(score.matching_instructions, score.normalized_lcs_instructions);
   const double match_ratio =
-      target_insns > 0 ? static_cast<double>(matching_insns) / target_insns : 0.0;
-  return (target_insns >= matching_insns && (target_insns - matching_insns <= 6)) ||
+      target_insns > 0 ? static_cast<double>(best_aligned_insns) / target_insns : 0.0;
+  return (target_insns >= best_aligned_insns && (target_insns - best_aligned_insns <= 6)) ||
          (match_ratio >= 0.85);
 }
 
@@ -131,31 +134,39 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
     }
   }
 
-  // Phase 1b: Canonical AST Preset Sweep on winning_c_flags
+  // Phase 1b: Canonical AST Preset Sweep on winning_c_flags (and base_flags if Phase 1a switched
+  // away from base_flags on the un-inlined baseline AST).
   bool improved_in_ast_search = false;
   if (!result.best_score.raw_bit_exact && options.explore_ast_mutations) {
     auto presets = AstMutator::GenerateCanonicalPresets(baseline_ast);
     if (!options.previous_cached_mutations.empty()) {
       presets.insert(presets.begin(), options.previous_cached_mutations);
     }
+    std::vector<std::vector<std::string>> preset_flag_profiles = {result.winning_c_flags};
+    if (result.winning_c_flags != base_flags) {
+      preset_flag_profiles.push_back(base_flags);
+    }
     for (const auto& preset_steps : presets) {
       FunctionDeclaration preset_ast = AstMutator::ApplyMutations(baseline_ast, preset_steps);
       std::string preset_c = emit_c_fn(preset_ast);
-      if (!evaluated_candidates.insert(make_evaluation_key(result.winning_c_flags, preset_c))
-               .second) {
-        continue;
+      for (const auto& flags : preset_flag_profiles) {
+        if (!evaluated_candidates.insert(make_evaluation_key(flags, preset_c)).second) {
+          continue;
+        }
+        auto candidate_score_or = score_fn(preset_c, flags);
+        if (!candidate_score_or.ok()) continue;
+        if (candidate_score_or->IsBetterThan(result.best_score)) {
+          result.best_score = *candidate_score_or;
+          result.winning_c_flags = flags;
+          *result.best_ast = preset_ast.Clone();
+          result.best_c_code = preset_c;
+          result.applied_mutations = preset_steps;
+          result.improved_over_baseline = true;
+          improved_in_ast_search = true;
+          if (result.best_score.raw_bit_exact) break;
+        }
       }
-      auto candidate_score_or = score_fn(preset_c, result.winning_c_flags);
-      if (!candidate_score_or.ok()) continue;
-      if (candidate_score_or->IsBetterThan(result.best_score)) {
-        result.best_score = *candidate_score_or;
-        *result.best_ast = std::move(preset_ast);
-        result.best_c_code = std::move(preset_c);
-        result.applied_mutations = preset_steps;
-        result.improved_over_baseline = true;
-        improved_in_ast_search = true;
-        if (result.best_score.raw_bit_exact) break;
-      }
+      if (result.best_score.raw_bit_exact) break;
     }
   }
 

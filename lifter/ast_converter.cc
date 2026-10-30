@@ -2060,7 +2060,7 @@ absl::StatusOr<FunctionDeclaration> AstConverter::Convert(const ControlFlowGraph
 
   FunctionOptimizationMode opt_mode = ctx.FrameAnalysis().has_frame_pointer
                                           ? FunctionOptimizationMode::kO0FramePointer
-                                          : FunctionOptimizationMode::kO2Standard;
+                                          : FunctionOptimizationMode::kAuto;
   return FunctionDeclaration(return_type, options.function_name, std::move(parameters),
                              std::move(body), options.is_static, opt_mode);
 }

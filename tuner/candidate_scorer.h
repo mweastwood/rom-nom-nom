@@ -37,6 +37,11 @@ struct CandidateScore {
     return frame_size_matches && saved_registers_match && cfg_topology_matches;
   }
 
+  bool IsOpcodeSequenceExact() const {
+    return target_instruction_count > 0 && compiled_instruction_count == target_instruction_count &&
+           normalized_lcs_instructions == target_instruction_count;
+  }
+
   int StructuralMatchCount() const {
     return static_cast<int>(frame_size_matches) + static_cast<int>(saved_registers_match) +
            static_cast<int>(cfg_topology_matches);
