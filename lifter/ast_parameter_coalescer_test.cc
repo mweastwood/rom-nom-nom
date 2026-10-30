@@ -894,5 +894,59 @@ TEST(AstParameterCoalescerTest, SplitsCalleeSavedGprFloatCarrierWebFromSubsequen
   EXPECT_THAT(code, HasSubstr("return temp_s2;"));
 }
 
+TEST(AstParameterCoalescerTest, CoalescesPartialWebPrologueParameterCopyBeforeCallSetup) {
+  CompoundStatement body;
+  // temp_s2 = arg0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"), CExpression::Identifier("arg0"))));
+  // temp_s0 = arg1;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg1"))));
+  // var_sp_16 = *(s32*)(temp_s0 + 180);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_16"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1},
+                                 CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                     CExpression::Integer(180)))))));
+  // arg1 = *(s32*)(temp_s0 + 168);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1},
+                                 CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                     CExpression::Integer(168)))))));
+  // temp_s0 = (temp_s2 + 448);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s2"), CExpression::Integer(448)))));
+  // GuLookAt(temp_s0, arg1, var_sp_16);
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("temp_s0"));
+  args.push_back(CExpression::Identifier("arg1"));
+  args.push_back(CExpression::Identifier("var_sp_16"));
+  body.AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("GuLookAt"), std::move(args))));
+  // *(s32*)temp_s0 = 1;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=",
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"s32", false, 1}, CExpression::Identifier("temp_s0"))),
+      CExpression::Integer(1))));
+  body.AddStatement(CStatement::Return());
+
+  std::vector<CParameter> params = {
+      {.type = CType::S32(), .name = "arg0"},
+      {.type = CType::S32(), .name = "arg1"},
+  };
+  EXPECT_TRUE(SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/64));
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("temp_s0 = arg1;")));
+  EXPECT_THAT(code, HasSubstr("var_sp_16 = *(s32*)(arg1 + 180);"));
+  EXPECT_THAT(code, HasSubstr("temp_a1 = *(s32*)(arg1 + 168);"));
+  EXPECT_THAT(code, HasSubstr("temp_s0 = (temp_s2 + 448);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

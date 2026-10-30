@@ -469,5 +469,37 @@ TEST(StackFrameAnalyzerTest, PrePrologueCallerFrameHomingStoreIsRecordedAtShifte
   EXPECT_TRUE(analysis.stack_store_offsets.contains(24));
 }
 
+TEST(StackFrameAnalyzerTest, DiscoversOutgoingStackArgStoresAcrossMultiplePredecessorBranchBlocks) {
+  // Multi-block outgoing call setup (as in float-to-uint conversion diamonds):
+  // Block 0 (0x00..0x10): stores arg4 at 16($sp), branches on $t0 to 0x1C
+  // Block 1 (0x14..0x18): fallthrough
+  // Block 2 (0x1C..0x24): stores arg5 at 20($sp), branches on $t1 to 0x30
+  // Block 3 (0x28..0x2C): fallthrough
+  // Block 4 (0x30..0x38): jal 0x80001000 with delay-slot store arg6 at 24($sp)
+  std::vector<uint32_t> words = {
+      0x27BDFFC0,  // 00: addiu $sp, $sp, -64
+      0xAFBF003C,  // 04: sw    $ra, 60($sp)
+      0x27A40020,  // 08: addiu $a0, $sp, 32
+      0x11000002,  // 0C: beqz  $t0, +2 -> 0x18
+      0xAFA50010,  // 10: sw    $a1, 16($sp)
+      0x24A50001,  // 14: addiu $a1, $a1, 1
+      0x11200002,  // 18: beqz  $t1, +2 -> 0x24
+      0xAFA60014,  // 1C: sw    $a2, 20($sp)
+      0x24C60001,  // 20: addiu $a2, $a2, 1
+      0x0C000400,  // 24: jal   0x80001000
+      0xAFA70018,  // 28: sw    $a3, 24($sp)
+      0x8FBF003C,  // 2C: lw    $ra, 60($sp)
+      0x03E00008,  // 30: jr    $ra
+      0x27BD0040,  // 34: addiu $sp, $sp, 64
+  };
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 64);
+  EXPECT_EQ(analysis.outgoing_args_size, 32);
+  EXPECT_EQ(analysis.sp_buffer_size, 28);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

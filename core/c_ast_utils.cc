@@ -860,7 +860,7 @@ bool ExtractSimpleDerefRangeHelper(const CExpression& e, std::string_view* out_b
         absl::StartsWith(id_name, "B_")) {
       *out_base = id_name;
       *out_offset = 0;
-      *out_size = absl::EndsWith(id_name, "_64") ? 8 : 4;
+      *out_size = (!absl::StartsWith(id_name, "var_sp_") && absl::EndsWith(id_name, "_64")) ? 8 : 4;
       if (out_is_addr_of != nullptr) *out_is_addr_of = true;
       return true;
     }

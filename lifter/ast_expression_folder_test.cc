@@ -1466,5 +1466,35 @@ TEST(AstExpressionFolderTest, FoldsInPlaceRelationalComparisonIntoAdjacentIfCond
   EXPECT_THAT(code, HasSubstr("if ((((u32)v1 < 33) == 0))"));
 }
 
+TEST(AstExpressionFolderTest, FoldsSelfReferencingArgAssignmentIntoOutgoingStackCallArgument) {
+  auto body = std::make_unique<CompoundStatement>();
+  // arg1 = (u32)*(f32*)(arg1 + 16);
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg1"),
+      CExpression::Cast(
+          CType::U32(),
+          CExpression::Unary(
+              "*", CExpression::Cast(CType{"f32", false, 1},
+                                     CExpression::Binary("+", CExpression::Identifier("arg1"),
+                                                         CExpression::Integer(16))))))));
+  // DrawSprite(arg0, 0, 0, 0, (arg1 & 255));
+  std::vector<std::unique_ptr<CExpression>> args;
+  args.push_back(CExpression::Identifier("arg0"));
+  args.push_back(CExpression::Integer(0));
+  args.push_back(CExpression::Integer(0));
+  args.push_back(CExpression::Integer(0));
+  args.push_back(
+      CExpression::Binary("&", CExpression::Identifier("arg1"), CExpression::Integer(255)));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("DrawSprite"), std::move(args))));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg1 =")));
+  EXPECT_THAT(code, HasSubstr("DrawSprite(arg0, 0, 0, 0, ((u32)*(f32*)(arg1 + 16) & 255));"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

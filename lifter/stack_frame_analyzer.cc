@@ -369,6 +369,7 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
 
         if (!saw_prior_call) {
           bool all_preds_end_with_call = !block.predecessors.empty();
+          std::vector<uint32_t> worklist;
           for (uint32_t pred_id : block.predecessors) {
             const auto* pred = cfg.GetBlock(pred_id);
             if (pred == nullptr) continue;
@@ -377,14 +378,34 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
               continue;
             }
             all_preds_end_with_call = false;
-            for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
-              if (pred->instructions[k].IsCall()) break;
-              check_candidate(pred->instructions[k]);
-              check_arg_def(pred->instructions[k]);
-            }
+            worklist.push_back(pred_id);
           }
           if (all_preds_end_with_call) {
             saw_prior_call = true;
+          } else {
+            absl::flat_hash_set<uint32_t> visited_preds = {block.id};
+            for (size_t w_idx = 0; w_idx < worklist.size() && visited_preds.size() < 16; ++w_idx) {
+              uint32_t pred_id = worklist[w_idx];
+              if (!visited_preds.insert(pred_id).second) continue;
+              const auto* pred = cfg.GetBlock(pred_id);
+              if (pred == nullptr) continue;
+              bool hit_call_in_pred = false;
+              for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
+                if (pred->instructions[k].IsCall()) {
+                  hit_call_in_pred = true;
+                  break;
+                }
+                check_candidate(pred->instructions[k]);
+                check_arg_def(pred->instructions[k]);
+              }
+              if (!hit_call_in_pred) {
+                for (uint32_t pp_id : pred->predecessors) {
+                  if (!visited_preds.contains(pp_id)) {
+                    worklist.push_back(pp_id);
+                  }
+                }
+              }
+            }
           }
         }
 

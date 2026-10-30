@@ -414,13 +414,29 @@ int InferCallArgumentCount(size_t i, absl::Span<const Instruction> instructions_
     if (!has_prior_call_in_block && cfg != nullptr) {
       const BasicBlock* curr_block = cfg->GetBlock(current_block_id);
       if (curr_block != nullptr) {
-        for (uint32_t pred_id : curr_block->predecessors) {
+        std::vector<uint32_t> worklist(curr_block->predecessors.begin(),
+                                       curr_block->predecessors.end());
+        absl::flat_hash_set<uint32_t> visited_preds = {current_block_id};
+        for (size_t w_idx = 0; w_idx < worklist.size() && visited_preds.size() < 16; ++w_idx) {
+          uint32_t pred_id = worklist[w_idx];
+          if (!visited_preds.insert(pred_id).second) continue;
           const BasicBlock* pred = cfg->GetBlock(pred_id);
           if (pred == nullptr) continue;
+          bool hit_call_in_pred = false;
           for (int k = static_cast<int>(pred->instructions.size()) - 1; k >= 0; --k) {
-            if (pred->instructions[k].IsCall()) break;
+            if (pred->instructions[k].IsCall()) {
+              hit_call_in_pred = true;
+              break;
+            }
             if (is_stack_arg_store(pred->instructions[k])) {
               record_stack_arg_store(pred->instructions[k]);
+            }
+          }
+          if (!hit_call_in_pred) {
+            for (uint32_t pp_id : pred->predecessors) {
+              if (!visited_preds.contains(pp_id)) {
+                worklist.push_back(pp_id);
+              }
             }
           }
         }

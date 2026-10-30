@@ -450,6 +450,78 @@ std::unique_ptr<CExpression> RewriteF32SlotAliasesInExpression(
   return e.Clone();
 }
 
+bool TryCoalescePartialWebPrologueParameterCopy(CompoundStatement* body, size_t prologue_copy_idx,
+                                                std::string_view lhs, std::string_view rhs) {
+  if (body == nullptr || !IsCalleeSavedGprVarName(lhs) || lhs == "fp" ||
+      StatementTakesAddressOf(*body, lhs) || StatementContainsLabel(*body) ||
+      StatementContainsGoto(*body) || StatementCallsThroughFunctionPointerVar(*body, lhs)) {
+    return false;
+  }
+  if (StatementModifiesVariable(*body, rhs) ||
+      CountIdentifierOccurrencesInStatement(*body, rhs) != 1) {
+    return false;
+  }
+  auto& stmts = body->MutableStatements();
+  if (prologue_copy_idx >= stmts.size()) return false;
+
+  std::optional<size_t> redef_idx;
+  for (size_t k = prologue_copy_idx + 1; k < stmts.size(); ++k) {
+    if (stmts[k] == nullptr || !StatementModifiesVariable(*stmts[k], lhs)) {
+      continue;
+    }
+    if (redef_idx.has_value() || stmts[k]->Kind() != CStatementKind::kExpressionStatement) {
+      return false;
+    }
+    const auto& es = static_cast<const ExpressionStatement&>(*stmts[k]);
+    if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+      return false;
+    }
+    const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+    if (a.Op() != "=" || a.Lhs().Kind() != CExpressionKind::kIdentifier ||
+        static_cast<const IdentifierExpression&>(a.Lhs()).Name() != lhs ||
+        ExpressionUsesVariable(a.Rhs(), lhs)) {
+      return false;
+    }
+    redef_idx = k;
+  }
+  if (!redef_idx.has_value() || *redef_idx + 1 >= stmts.size() ||
+      stmts[*redef_idx + 1] == nullptr) {
+    return false;
+  }
+  const CStatement& call_stmt = *stmts[*redef_idx + 1];
+  if (!StatementHasCall(call_stmt) || !StatementReferencesVariable(call_stmt, lhs)) {
+    return false;
+  }
+  bool has_blocked_stack_arg_setup = false;
+  for (size_t k = prologue_copy_idx + 1; k < *redef_idx; ++k) {
+    if (stmts[k] == nullptr || stmts[k]->Kind() != CStatementKind::kExpressionStatement) {
+      continue;
+    }
+    const auto& es = static_cast<const ExpressionStatement&>(*stmts[k]);
+    if (es.Expression().Kind() != CExpressionKind::kAssignmentExpression) {
+      continue;
+    }
+    const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+    if (a.Op() != "=") continue;
+    std::string_view slot_var = ExtractAssignedLhsVar(a.Lhs());
+    if (absl::StartsWith(slot_var, "var_sp_") && ExpressionUsesVariable(a.Rhs(), lhs) &&
+        StatementReferencesVariable(call_stmt, slot_var)) {
+      has_blocked_stack_arg_setup = true;
+      break;
+    }
+  }
+  if (!has_blocked_stack_arg_setup) {
+    return false;
+  }
+  for (size_t k = prologue_copy_idx + 1; k < *redef_idx; ++k) {
+    if (stmts[k] != nullptr) {
+      stmts[k] = SubstituteIdentifierInStatement(std::move(stmts[k]), lhs, rhs);
+    }
+  }
+  stmts.erase(stmts.begin() + prologue_copy_idx);
+  return true;
+}
+
 }  // namespace
 
 void CoalescePrologueParameterCopies(CompoundStatement* comp,
@@ -1329,6 +1401,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
   };
   bool any_homed_split = false;
   bool any_s_split_coalesced = false;
+  bool any_partial_web_s_coalesced = false;
   size_t s_saved_params_count = 0;
   size_t matching_s_splits = 0;
   for (const auto& param : parameters) {
@@ -1850,6 +1923,12 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
     if (is_homed_copy) {
       any_homed_split = true;
     } else if (IsCalleeSavedGprVarName(prologue_copy_lhs)) {
+      if (!is_narrow_prologue_copy &&
+          TryCoalescePartialWebPrologueParameterCopy(body, *prologue_copy_idx, prologue_copy_lhs,
+                                                     param.name)) {
+        any_partial_web_s_coalesced = true;
+        continue;
+      }
       if (is_narrow_prologue_copy) {
         any_s_split_coalesced = true;
       }
@@ -1891,7 +1970,7 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
   if (any_homed_split || any_s_split_coalesced) {
     CoalescePrologueParameterCopies(body, parameters, frame_size, mutable_parameters);
   }
-  return any_s_split_coalesced;
+  return any_s_split_coalesced || any_partial_web_s_coalesced;
 }
 
 bool PrologueParameterCoalescerPass::Run(CompoundStatement* body, const AstPassContext& ctx) {

@@ -1348,7 +1348,10 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
           off < static_cast<int32_t>(local_frame_top)) {
         ++sp_locals_in_gap;
         if (is_addr_taken) {
-          addr_taken_sp_bytes += (absl::EndsWith(v, "_64") || double_vars.contains(v)) ? 8u : 4u;
+          addr_taken_sp_bytes += ((!absl::StartsWith(v, "var_sp_") && absl::EndsWith(v, "_64")) ||
+                                  double_vars.contains(v))
+                                     ? 8u
+                                     : 4u;
         }
       } else if (is_addr_taken) {
         any_non_sp_local_addr_taken = true;
@@ -2239,7 +2242,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
   narrow_candidates.reserve(local_vars_to_declare.size());
   for (const auto& var_name : local_vars_to_declare) {
     if (var_name == "sp" || is_fp_reg(var_name) || float_gpr_var_names.contains(var_name) ||
-        float_local_var_names.contains(var_name) || absl::EndsWith(var_name, "_64") ||
+        float_local_var_names.contains(var_name) ||
+        (!absl::StartsWith(var_name, "var_sp_") && absl::EndsWith(var_name, "_64")) ||
         s64_local_var_names.contains(var_name) || double_vars.contains(var_name) ||
         has_address_taken(var_name)) {
       continue;
@@ -2297,11 +2301,18 @@ absl::Status PrependSynthesizedLocalDeclarations(
     if ((var_name == "temp_k0" || var_name == "temp_k1") && !has_s64_pointer_deref) {
       return (var_name == "temp_k0") ? "$26" : "$27";
     }
-    if (var_name.size() == 7 && absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' &&
-        var_name[6] <= '7') {
+    if ((var_name.size() == 7 || (var_name.size() == 9 && absl::EndsWith(var_name, "_f"))) &&
+        absl::StartsWith(var_name, "temp_s") && var_name[6] >= '0' && var_name[6] <= '7') {
+      if (var_name.size() == 9) {
+        std::string gpr_counterpart(var_name.substr(0, 7));
+        if (std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(),
+                      gpr_counterpart) != local_vars_to_declare.end()) {
+          return std::nullopt;
+        }
+      }
       Register s_reg = static_cast<Register>(static_cast<int>(Register::kS0) + (var_name[6] - '0'));
       if (frame_analysis.frame_size == 0 || (sp_buffer_size == 0 && has_s64_pointer_deref) ||
-          unpinned_s_vars.contains(std::string(var_name)) ||
+          unpinned_s_vars.contains(std::string(var_name.substr(0, 7))) ||
           (!frame_analysis.prologue.saved_reg_offsets.empty() &&
            !frame_analysis.prologue.saved_reg_offsets.contains(s_reg))) {
         return std::nullopt;
@@ -2407,7 +2418,8 @@ absl::Status PrependSynthesizedLocalDeclarations(
       reg_annotations[var_name] = get_callee_saved_register_annotation(var_name);
       continue;
     }
-    if (float_local_var_names.contains(var_name) || absl::EndsWith(var_name, "_64") ||
+    if (float_local_var_names.contains(var_name) ||
+        (!absl::StartsWith(var_name, "var_sp_") && absl::EndsWith(var_name, "_64")) ||
         (s64_local_var_names.contains(var_name) && !double_vars.contains(var_name))) {
       continue;
     }
@@ -2483,7 +2495,7 @@ absl::Status PrependSynthesizedLocalDeclarations(
                                                              std::nullopt, std::move(reg_annot)));
     } else if (float_local_var_names.contains(var_name)) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::F32(), var_name));
-    } else if (absl::EndsWith(var_name, "_64") ||
+    } else if ((!absl::StartsWith(var_name, "var_sp_") && absl::EndsWith(var_name, "_64")) ||
                (s64_local_var_names.contains(var_name) && !double_vars.contains(var_name))) {
       new_body->AddStatement(CStatement::VariableDeclaration(CType::Named("s64"), var_name));
     } else if (double_vars.contains(var_name)) {

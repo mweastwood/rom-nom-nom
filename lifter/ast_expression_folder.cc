@@ -874,7 +874,8 @@ struct FolderContext {
             std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
             const bool is_full_var_assign =
                 a.Lhs().Kind() == CExpressionKind::kIdentifier ||
-                (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
+                (!absl::EndsWith(var, "_d") &&
+                 !(absl::EndsWith(var, "_64") && !absl::StartsWith(var, "var_sp_")));
             if (lhs_var == var && is_full_var_assign) {
               *locally_defined = true;
             }
@@ -903,7 +904,8 @@ struct FolderContext {
             std::string_view lhs_var = (a.Op() == "=") ? ExtractAssignedLhsVar(a.Lhs()) : "";
             const bool is_full_var_assign =
                 a.Lhs().Kind() == CExpressionKind::kIdentifier ||
-                (!absl::EndsWith(var, "_d") && !absl::EndsWith(var, "_64"));
+                (!absl::EndsWith(var, "_d") &&
+                 !(absl::EndsWith(var, "_64") && !absl::StartsWith(var, "var_sp_")));
             if (lhs_var == var && is_full_var_assign) {
               if (!*locally_defined && CountExprUses(a.Rhs(), var) > 0) {
                 return false;
@@ -1002,7 +1004,8 @@ struct FolderContext {
           absl::StartsWith(id_name, "B_")) {
         *out_base = id_name;
         *out_offset = 0;
-        *out_size = absl::EndsWith(id_name, "_64") ? 8 : 4;
+        *out_size =
+            (!absl::StartsWith(id_name, "var_sp_") && absl::EndsWith(id_name, "_64")) ? 8 : 4;
         if (out_is_addr_of != nullptr) *out_is_addr_of = true;
         return true;
       }
@@ -2221,7 +2224,9 @@ struct FolderContext {
                 }
                 if (changed) break;
 
-                if (CountExprUses(effective_rhs, var) == 0) {
+                const int rhs_self_uses = CountExprUses(effective_rhs, var);
+                const bool self_ref_rhs = (rhs_self_uses > 0);
+                if (!self_ref_rhs || (is_call_arg && !is_float_bitcast_lhs)) {
                   if (is_stack_arg || is_call_arg) {
                     if (!IsPureExpr(effective_rhs)) continue;
                     std::vector<size_t> intermediate_use_stmts;
@@ -2251,12 +2256,26 @@ struct FolderContext {
                       if (target_call != nullptr) {
                         int uses_in_call = CountExprUses(*target_call, var);
                         int uses_in_stmt = CountUses(*stmts[j], var);
+                        bool self_ref_only_in_stack_arg = !self_ref_rhs;
+                        if (self_ref_rhs && target_call->Arguments().size() > 4) {
+                          self_ref_only_in_stack_arg = true;
+                          for (size_t arg_k = 0;
+                               arg_k < 4 && arg_k < target_call->Arguments().size(); ++arg_k) {
+                            if (target_call->Arguments()[arg_k] != nullptr &&
+                                CountExprUses(*target_call->Arguments()[arg_k], var) > 0) {
+                              self_ref_only_in_stack_arg = false;
+                              break;
+                            }
+                          }
+                        }
                         bool can_fold_arg_uses =
-                            (uses_in_call == 1 && uses_in_stmt == 1 &&
-                             (intermediate_use_stmts.empty() ||
-                              (is_call_arg && IsDuplicableArgRhs(effective_rhs)))) ||
-                            (is_call_arg && uses_in_call > 1 && uses_in_stmt == uses_in_call &&
-                             IsDuplicableArgRhs(effective_rhs));
+                            self_ref_only_in_stack_arg &&
+                            ((uses_in_call == 1 && uses_in_stmt == 1 &&
+                              (intermediate_use_stmts.empty() ||
+                               (!self_ref_rhs && is_call_arg &&
+                                IsDuplicableArgRhs(effective_rhs)))) ||
+                             (!self_ref_rhs && is_call_arg && uses_in_call > 1 &&
+                              uses_in_stmt == uses_in_call && IsDuplicableArgRhs(effective_rhs)));
                         if (can_fold_arg_uses &&
                             (!HasAddressOfVar(*target_call, var) ||
                              is_c_var_identifier(effective_rhs)) &&
@@ -2281,11 +2300,13 @@ struct FolderContext {
                               stmts[mid_idx] = CStatement::Expression(
                                   SubstituteIdentifier(mid_es.Expression(), var, effective_rhs));
                             }
+                            const int expected_remaining_var_uses =
+                                self_ref_rhs ? (uses_in_call * rhs_self_uses) : 0;
                             if (stmts[j]->Kind() == CStatementKind::kReturnStatement) {
                               const auto& ret_s = static_cast<const ReturnStatement&>(*stmts[j]);
                               auto new_ret =
                                   SubstituteIdentifier(*ret_s.ReturnValue(), var, effective_rhs);
-                              if (CountExprUses(*new_ret, var) == 0) {
+                              if (CountExprUses(*new_ret, var) == expected_remaining_var_uses) {
                                 stmts[j] = CStatement::Return(std::move(new_ret));
                                 stmts.erase(stmts.begin() + i);
                                 changed = true;
@@ -2295,7 +2316,7 @@ struct FolderContext {
                                   static_cast<const ExpressionStatement&>(*stmts[j]);
                               auto new_expr =
                                   SubstituteIdentifier(cand_es.Expression(), var, effective_rhs);
-                              if (CountExprUses(*new_expr, var) == 0) {
+                              if (CountExprUses(*new_expr, var) == expected_remaining_var_uses) {
                                 stmts[j] = CStatement::Expression(std::move(new_expr));
                                 stmts.erase(stmts.begin() + i);
                                 changed = true;
@@ -2325,7 +2346,7 @@ struct FolderContext {
                                  "*(s32*)&" ||
                              static_cast<const UnaryExpression&>(effective_rhs).Op() ==
                                  "*(s32 *)&");
-                        if (!is_call_arg || !IsDuplicableArgRhs(effective_rhs) ||
+                        if (self_ref_rhs || !is_call_arg || !IsDuplicableArgRhs(effective_rhs) ||
                             is_s32_bitcast_rhs || HasAddressOf(effective_rhs) ||
                             HasAddressOfVar(cand_es.Expression(), var)) {
                           break;
@@ -2347,7 +2368,7 @@ struct FolderContext {
                       }
                     }
                     if (changed) break;
-                    if (is_stack_arg) continue;
+                    if (self_ref_rhs || is_stack_arg) continue;
                     if (!block_has_any_call) continue;
                   }
 

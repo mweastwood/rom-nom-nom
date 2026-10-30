@@ -1660,5 +1660,38 @@ TEST(VariableDeclarationBuilderTest,
   }
 }
 
+TEST(VariableDeclarationBuilderTest, DeclaresVarSp64AsS32AndPinsStandaloneTempS0FToHardwareGpr) {
+  ControlFlowGraph cfg;
+  StackFrameAnalysis frame;
+  frame.frame_size = 88;
+  frame.has_calls = true;
+  frame.has_frame_pointer = false;
+  frame.prologue.min_saved_reg_offset = 72;
+  frame.prologue.saved_reg_offsets[Register::kS0] = 72;
+  frame.prologue.saved_reg_offsets[Register::kRa] = 76;
+
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0_f"), CExpression::Identifier("arg1"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_64"), CExpression::Integer(0x1004008))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Unary("*(f32*)", CExpression::Identifier("arg0")),
+                              CExpression::Identifier("temp_s0_f"))));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("var_sp_64")));
+
+  std::vector<CParameter> params = {{CType::S32(), "arg0"}, {CType::F32(), "arg1"}};
+  AstConverterOptions opts;
+  opts.function_name = "TestVarSp64AndTempS0F";
+
+  ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                  CType::S32(), nullptr, opts, &body)
+                  .ok());
+  std::string emitted = body->ToString();
+  EXPECT_THAT(emitted, HasSubstr("s32 var_sp_64;"));
+  EXPECT_THAT(emitted, Not(HasSubstr("s64 var_sp_64;")));
+  EXPECT_THAT(emitted, HasSubstr("register f32 temp_s0_f asm(\"$16\");"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

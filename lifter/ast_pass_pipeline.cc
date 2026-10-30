@@ -30,6 +30,8 @@ class ScratchReusedParameterSplitAndFoldPass : public AstPass {
     if (SplitScratchReusedParameterRegisters(body, ctx.parameters, ctx.frame_size,
                                              ctx.mutable_parameters)) {
       FoldSingleUseExpressions(body);
+      RewriteFloatInGprAndStackCallArguments(body, ctx.parameters);
+      FoldSingleUseExpressions(body);
       TrimUnassignedTrailingCallArgRegisters(body, ctx.parameters, ctx.function_parameter_counts);
     }
     return body->ToString() != before;
