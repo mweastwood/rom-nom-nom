@@ -14,10 +14,34 @@ namespace rom_nom_nom {
 namespace {
 
 // Needleman-Wunsch alignment reward and penalty weights.
-constexpr int kExactMatchReward = 4;
-constexpr int kSimilarMatchReward = 2;
-constexpr int kDifferentPenalty = -2;
-constexpr int kGapPenalty = -2;
+constexpr int kGapPenalty = -20;
+
+// Resolves the synchronized anchor row index in `rows` corresponding to an intra-function
+// byte offset `target_offset` on either the target side (`is_target = true`) or the compiled
+// side (`is_target = false`). If the instruction at `target_offset` sits on a gap row
+// (`kTargetOnly` or `kCompiledOnly`), advances forward to the next synchronized row
+// (`kMatch` or `kDifference`) so that labels immediately preceding a deleted/inserted
+// instruction resolve to the same synchronized block boundary.
+std::optional<size_t> ResolveSynchronizedTargetRow(const std::vector<AlignedDiffRow>& rows,
+                                                   uint32_t target_offset, bool is_target) {
+  std::optional<size_t> exact_row;
+  for (size_t idx = 0; idx < rows.size(); ++idx) {
+    const auto& side = is_target ? rows[idx].target : rows[idx].compiled;
+    if (side.has_value() && side->func_offset == target_offset) {
+      exact_row = idx;
+      break;
+    }
+  }
+  if (!exact_row.has_value()) {
+    return std::nullopt;
+  }
+  for (size_t idx = *exact_row; idx < rows.size(); ++idx) {
+    if (rows[idx].kind == DiffRowKind::kMatch || rows[idx].kind == DiffRowKind::kDifference) {
+      return idx;
+    }
+  }
+  return rows.size();
+}
 
 }  // namespace
 
@@ -45,16 +69,10 @@ AlignmentResult SequenceAligner::Align(absl::Span<const NormalizedInstruction> t
     at(0, j) = at(0, j - 1) + kGapPenalty;
   }
 
-  // Populate DP matrix using Needleman-Wunsch recurrence.
+  // Populate DP matrix using Needleman-Wunsch recurrence with operand-graded similarity.
   for (size_t i = 1; i <= n; ++i) {
     for (size_t j = 1; j <= m; ++j) {
-      MatchQuality quality = normalizer_->Compare(target[i - 1], compiled[j - 1]);
-      int match_score = kDifferentPenalty;
-      if (quality == MatchQuality::kBitExact || quality == MatchQuality::kNormalizedExact) {
-        match_score = kExactMatchReward;
-      } else if (quality == MatchQuality::kSimilarOpcode) {
-        match_score = kSimilarMatchReward;
-      }
+      int match_score = normalizer_->SimilarityScore(target[i - 1], compiled[j - 1]);
 
       int score_diag = at(i - 1, j - 1) + match_score;
       int score_up = at(i - 1, j) + kGapPenalty;
@@ -72,12 +90,7 @@ AlignmentResult SequenceAligner::Align(absl::Span<const NormalizedInstruction> t
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0) {
       MatchQuality quality = normalizer_->Compare(target[i - 1], compiled[j - 1]);
-      int match_score = kDifferentPenalty;
-      if (quality == MatchQuality::kBitExact || quality == MatchQuality::kNormalizedExact) {
-        match_score = kExactMatchReward;
-      } else if (quality == MatchQuality::kSimilarOpcode) {
-        match_score = kSimilarMatchReward;
-      }
+      int match_score = normalizer_->SimilarityScore(target[i - 1], compiled[j - 1]);
 
       // Check if diagonal transition was taken.
       if (at(i, j) == at(i - 1, j - 1) + match_score) {
@@ -123,6 +136,44 @@ AlignmentResult SequenceAligner::Align(absl::Span<const NormalizedInstruction> t
 
   // Reverse backtracked rows into sequential forward order.
   std::reverse(rows.begin(), rows.end());
+
+  // Post-alignment pass: upgrade intra-function branch and jump instructions from
+  // kSimilarOpcode (kDifference) to kNormalizedExact (kMatch) when their opcode and
+  // register operands are identical and their intra-function branch targets resolve
+  // to the exact same synchronized destination row in `rows`.
+  for (auto& row : rows) {
+    if (row.kind != DiffRowKind::kDifference || row.quality != MatchQuality::kSimilarOpcode ||
+        !row.target.has_value() || !row.compiled.has_value()) {
+      continue;
+    }
+    const NormalizedInstruction& t_norm = *row.target;
+    const NormalizedInstruction& c_norm = *row.compiled;
+    if (!t_norm.intra_function_target_offset.has_value() ||
+        !c_norm.intra_function_target_offset.has_value()) {
+      continue;
+    }
+    const Instruction& t_inst = t_norm.original;
+    const Instruction& c_inst = c_norm.original;
+    bool same_branch_opcode_and_regs = false;
+    if (t_inst.IsBranch() && c_inst.IsBranch()) {
+      // Upper 16 bits encode opcode, rs, and rt (or regimm/cop1 condition code).
+      same_branch_opcode_and_regs =
+          (t_inst.raw_word & 0xFFFF0000u) == (c_inst.raw_word & 0xFFFF0000u);
+    } else if (t_inst.opcode == Opcode::kJ && c_inst.opcode == Opcode::kJ) {
+      same_branch_opcode_and_regs = true;
+    }
+    if (!same_branch_opcode_and_regs) {
+      continue;
+    }
+    auto t_dest_row = ResolveSynchronizedTargetRow(rows, *t_norm.intra_function_target_offset,
+                                                   /*is_target=*/true);
+    auto c_dest_row = ResolveSynchronizedTargetRow(rows, *c_norm.intra_function_target_offset,
+                                                   /*is_target=*/false);
+    if (t_dest_row.has_value() && c_dest_row.has_value() && *t_dest_row == *c_dest_row) {
+      row.kind = DiffRowKind::kMatch;
+      row.quality = MatchQuality::kNormalizedExact;
+    }
+  }
 
   // Aggregate summary metrics and stats.
   AlignmentStats stats;

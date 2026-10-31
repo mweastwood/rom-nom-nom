@@ -97,6 +97,10 @@ void TuningCacheStore::Upsert(FunctionTuningEntry entry) {
   entries_[std::move(key)] = std::move(entry);
 }
 
+bool TuningCacheStore::Remove(std::string_view function_name) {
+  return entries_.erase(function_name) > 0;
+}
+
 void TuningCacheStore::SetModuleCFlags(std::string_view module_name,
                                        const std::vector<std::string>& flags) {
   module_c_flags_[std::string(module_name)] = flags;

@@ -89,4 +89,79 @@ MatchQuality Normalizer::Compare(const NormalizedInstruction& target,
   return MatchQuality::kDifferent;
 }
 
+int Normalizer::SimilarityScore(const NormalizedInstruction& target,
+                                const NormalizedInstruction& compiled) const {
+  MatchQuality quality = Compare(target, compiled);
+  if (quality == MatchQuality::kBitExact) {
+    return 42;
+  }
+  if (quality == MatchQuality::kNormalizedExact) {
+    return 40;
+  }
+  if (quality == MatchQuality::kDifferent) {
+    return -20;
+  }
+
+  // MatchQuality::kSimilarOpcode: base score +12, up to +38 with operand matches.
+  // Keep strictly < 40 (kNormalizedExact) and > -20 (kGapPenalty).
+  int score = 12;
+  const Instruction& t = target.original;
+  const Instruction& c = compiled.original;
+
+  if (t.IsBranch() && c.IsBranch()) {
+    if (t.rs.has_value() && t.rs == c.rs) score += 8;
+    if (t.rt.has_value() && t.rt == c.rt) score += 6;
+    const bool t_backward = t.immediate < 0;
+    const bool c_backward = c.immediate < 0;
+    if (t_backward == c_backward) {
+      score += 6;
+    } else {
+      score -= 8;
+    }
+    if (target.intra_function_target_offset.has_value() &&
+        compiled.intra_function_target_offset.has_value()) {
+      int32_t t_rel = static_cast<int32_t>(*target.intra_function_target_offset) -
+                      static_cast<int32_t>(target.func_offset);
+      int32_t c_rel = static_cast<int32_t>(*compiled.intra_function_target_offset) -
+                      static_cast<int32_t>(compiled.func_offset);
+      int32_t diff_words = ((t_rel > c_rel) ? (t_rel - c_rel) : (c_rel - t_rel)) >> 2;
+      if (diff_words <= 2) {
+        score += 6;
+      } else if (diff_words <= 6) {
+        score += 3;
+      }
+    }
+    return score;
+  }
+
+  if (t.opcode == Opcode::kJ || t.opcode == Opcode::kJal) {
+    if (target.intra_function_target_offset.has_value() &&
+        compiled.intra_function_target_offset.has_value()) {
+      int32_t t_dest = static_cast<int32_t>(*target.intra_function_target_offset);
+      int32_t c_dest = static_cast<int32_t>(*compiled.intra_function_target_offset);
+      int32_t diff_words = ((t_dest > c_dest) ? (t_dest - c_dest) : (c_dest - t_dest)) >> 2;
+      if (diff_words <= 2) {
+        score += 14;
+      } else if (diff_words <= 6) {
+        score += 8;
+      }
+    }
+    return score;
+  }
+
+  if (t.rd.has_value() && t.rd == c.rd) score += 8;
+  if (t.rs.has_value() && t.rs == c.rs) score += 8;
+  if (t.rt.has_value() && t.rt == c.rt) score += 6;
+  if (t.fd.has_value() && t.fd == c.fd) score += 8;
+  if (t.fs.has_value() && t.fs == c.fs) score += 8;
+  if (t.ft.has_value() && t.ft == c.ft) score += 6;
+  if (!t.rd.has_value() && !t.fd.has_value() && t.immediate == c.immediate) {
+    score += 8;
+  }
+  if (t.shift_amount != 0 && t.shift_amount == c.shift_amount) {
+    score += 4;
+  }
+  return score;
+}
+
 }  // namespace rom_nom_nom

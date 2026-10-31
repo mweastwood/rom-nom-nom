@@ -551,7 +551,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
       }
     }
 
-    if (cached_by_name != nullptr) {
+    if (cached_by_name != nullptr && options_.search_on_miss && extractor != nullptr) {
       previous_cached_mutations.assign(cached_by_name->ast_mutations().begin(),
                                        cached_by_name->ast_mutations().end());
       previous_cached_flags.assign(cached_by_name->c_flags().begin(),
@@ -561,6 +561,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
 
   // 2. Cache miss: if live search is disabled, return baseline in O(1)
   if (!options_.search_on_miss || extractor == nullptr) {
+    result.winning_c_flags.clear();
     result.tuned_ast = std::make_unique<FunctionDeclaration>(baseline_ast.Clone());
     if (emit_formatted_c) {
       result.tuned_c_code = EmitSingleFunctionWithExterns(*result.tuned_ast, parent_tu, symbols,
@@ -786,7 +787,8 @@ absl::StatusOr<ModuleTuneResult> TunerPipeline::TuneModule(std::string_view modu
     if (is_bit_exact) {
       module_result.bit_exact_functions++;
     }
-    if (!function_result.winning_c_flags.empty()) {
+    if ((function_result.from_cache || options_.search_on_miss) &&
+        !function_result.winning_c_flags.empty()) {
       std::string key = absl::StrJoin(function_result.winning_c_flags, "\t");
       flag_votes[key]++;
       if (is_bit_exact) {
@@ -831,7 +833,6 @@ absl::StatusOr<ModuleTuneResult> TunerPipeline::TuneModule(std::string_view modu
     }
   }
 
-  translation_unit_or->parent_module_context.reset();
   CEmitterOptions emitter_options;
   emitter_options.includes = translation_unit_or->includes;
   emitter_options.format_with_clang = options_.format_with_clang;

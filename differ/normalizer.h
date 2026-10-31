@@ -104,6 +104,13 @@ class Normalizer {
   MatchQuality Compare(const NormalizedInstruction& target,
                        const NormalizedInstruction& compiled) const;
 
+  // Computes a fine-grained alignment similarity score for Needleman-Wunsch sequence
+  // alignment. Rewards matching opcodes, register operands, immediates, and branch
+  // directions so that sequences of same-opcode instructions (e.g. sw/lw/addu/bne)
+  // align corresponding operations rather than shifting arbitrarily.
+  int SimilarityScore(const NormalizedInstruction& target,
+                      const NormalizedInstruction& compiled) const;
+
  private:
   NormalizedInstruction NormalizeInstructionInternal(const Instruction& instr, uint32_t base_vram,
                                                      uint32_t func_size) const;

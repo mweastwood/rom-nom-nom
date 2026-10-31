@@ -250,6 +250,21 @@ TEST(CandidateScorerTest, ScoreInstructionsPopulatesDiffDiagnosticForTransposedR
   std::vector<Instruction> swapped_insts = *std::move(swapped_insts_or);
   CandidateScore swapped_score = scorer.ScoreInstructions(target, swapped_insts, swapped_words);
   EXPECT_TRUE(swapped_score.diff_diagnostic.has_adjacent_insn_swap);
+
+  // Unrelated instructions of the same opcode sharing zero operands or immediates should NOT
+  // pollute `transposed_register_pairs`.
+  std::vector<uint32_t> unrelated_words = {
+      0x254B0010,  // addiu $t3, $t2, 16 (shares no reg or imm with addiu $t0, $a0, 1)
+      0x24A90002,  // addiu $t1, $a1, 2
+      0x01091021,  // addu  $v0, $t0, $t1
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  auto unrelated_insts_or = DecodeSequence(unrelated_words, target.vram);
+  ASSERT_TRUE(unrelated_insts_or.ok());
+  CandidateScore unrelated_score =
+      scorer.ScoreInstructions(target, *unrelated_insts_or, unrelated_words);
+  EXPECT_TRUE(unrelated_score.diff_diagnostic.transposed_register_pairs.empty());
 }
 
 }  // namespace

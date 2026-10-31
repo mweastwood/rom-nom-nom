@@ -216,18 +216,33 @@ void PopulateDiffDiagnostic(const AlignmentResult& alignment,
       const Instruction& t_inst = row.target->original;
       const Instruction& c_inst = row.compiled->original;
       if (t_inst.opcode == c_inst.opcode) {
-        RecordTransposedGprPair(c_inst.rd, t_inst.rd, &seen_reg_pairs,
-                                &out_diag->transposed_register_pairs);
-        RecordTransposedGprPair(c_inst.rs, t_inst.rs, &seen_reg_pairs,
-                                &out_diag->transposed_register_pairs);
-        RecordTransposedGprPair(c_inst.rt, t_inst.rt, &seen_reg_pairs,
-                                &out_diag->transposed_register_pairs);
-        RecordTransposedFprPair(c_inst.fd, t_inst.fd, &seen_reg_pairs,
-                                &out_diag->transposed_register_pairs);
-        RecordTransposedFprPair(c_inst.fs, t_inst.fs, &seen_reg_pairs,
-                                &out_diag->transposed_register_pairs);
-        RecordTransposedFprPair(c_inst.ft, t_inst.ft, &seen_reg_pairs,
-                                &out_diag->transposed_register_pairs);
+        bool is_i_type = !t_inst.rd.has_value() && !t_inst.fd.has_value() && !t_inst.IsJump();
+        int reg_operand_count = (t_inst.rd.has_value() ? 1 : 0) + (t_inst.rs.has_value() ? 1 : 0) +
+                                (t_inst.rt.has_value() ? 1 : 0) + (t_inst.fd.has_value() ? 1 : 0) +
+                                (t_inst.fs.has_value() ? 1 : 0) + (t_inst.ft.has_value() ? 1 : 0);
+        bool shares_context =
+            reg_operand_count <= 1 || (t_inst.rd.has_value() && t_inst.rd == c_inst.rd) ||
+            (t_inst.rs.has_value() && t_inst.rs == c_inst.rs) ||
+            (t_inst.rt.has_value() && t_inst.rt == c_inst.rt) ||
+            (t_inst.fd.has_value() && t_inst.fd == c_inst.fd) ||
+            (t_inst.fs.has_value() && t_inst.fs == c_inst.fs) ||
+            (t_inst.ft.has_value() && t_inst.ft == c_inst.ft) ||
+            (is_i_type && !t_inst.IsBranch() && t_inst.immediate == c_inst.immediate) ||
+            (t_inst.shift_amount != 0 && t_inst.shift_amount == c_inst.shift_amount);
+        if (shares_context) {
+          RecordTransposedGprPair(c_inst.rd, t_inst.rd, &seen_reg_pairs,
+                                  &out_diag->transposed_register_pairs);
+          RecordTransposedGprPair(c_inst.rs, t_inst.rs, &seen_reg_pairs,
+                                  &out_diag->transposed_register_pairs);
+          RecordTransposedGprPair(c_inst.rt, t_inst.rt, &seen_reg_pairs,
+                                  &out_diag->transposed_register_pairs);
+          RecordTransposedFprPair(c_inst.fd, t_inst.fd, &seen_reg_pairs,
+                                  &out_diag->transposed_register_pairs);
+          RecordTransposedFprPair(c_inst.fs, t_inst.fs, &seen_reg_pairs,
+                                  &out_diag->transposed_register_pairs);
+          RecordTransposedFprPair(c_inst.ft, t_inst.ft, &seen_reg_pairs,
+                                  &out_diag->transposed_register_pairs);
+        }
       } else if ((c_inst.IsNop() && !t_inst.IsNop()) || (!c_inst.IsNop() && t_inst.IsNop())) {
         if (i > 0 && alignment.rows[i - 1].target.has_value() &&
             alignment.rows[i - 1].target->original.HasDelaySlot()) {

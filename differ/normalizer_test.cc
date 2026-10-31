@@ -136,5 +136,41 @@ TEST(NormalizerTest, HandlesBranchesOutsideFunctionBoundary) {
   EXPECT_FALSE(target_norm.intra_function_target_offset.has_value());
 }
 
+TEST(NormalizerTest, SimilarityScoreRanksOperandAndBranchMatches) {
+  FunctionDiffContext ctx;
+  ctx.target_vram = 0x800266C0;
+  ctx.target_size = 0x80;
+  ctx.compiled_vram = 0x0;
+  ctx.compiled_size = 0x80;
+  Normalizer normalizer(ctx);
+
+  // Target: sw $s0, 24($sp) -> opcode 0x2B, rs=29, rt=16, imm=24
+  uint32_t sw_s0_24 = (0x2B << 26) | (29 << 21) | (16 << 16) | 24;
+  // Compiled A: sw $s1, 24($sp) -> shares rs=29 and imm=24
+  uint32_t sw_s1_24 = (0x2B << 26) | (29 << 21) | (17 << 16) | 24;
+  // Compiled B: sw $a0, 8($t0) -> shares neither rs, rt, nor imm
+  uint32_t sw_a0_8 = (0x2B << 26) | (8 << 21) | (4 << 16) | 8;
+
+  auto t_sw = normalizer.NormalizeTarget(*DecodeInstruction(sw_s0_24, 0x800266C0));
+  auto c_sw_close = normalizer.NormalizeCompiled(*DecodeInstruction(sw_s1_24, 0x0));
+  auto c_sw_far = normalizer.NormalizeCompiled(*DecodeInstruction(sw_a0_8, 0x0));
+
+  EXPECT_GT(normalizer.SimilarityScore(t_sw, c_sw_close),
+            normalizer.SimilarityScore(t_sw, c_sw_far));
+
+  // Target forward branch: beq $v0, $zero, +4
+  uint32_t beq_fwd_4 = (0x04 << 26) | (2 << 21) | (0 << 16) | 4;
+  // Compiled forward branch: beq $v0, $zero, +5 (same regs & direction, +1 word displacement)
+  uint32_t beq_fwd_5 = (0x04 << 26) | (2 << 21) | (0 << 16) | 5;
+  // Compiled backward branch: beq $a0, $a1, -4 (different regs & opposite direction)
+  uint32_t beq_bwd = (0x04 << 26) | (4 << 21) | (5 << 16) | 0xFFFC;
+
+  auto t_br = normalizer.NormalizeTarget(*DecodeInstruction(beq_fwd_4, 0x800266E0));
+  auto c_br_fwd = normalizer.NormalizeCompiled(*DecodeInstruction(beq_fwd_5, 0x20));
+  auto c_br_bwd = normalizer.NormalizeCompiled(*DecodeInstruction(beq_bwd, 0x20));
+
+  EXPECT_GT(normalizer.SimilarityScore(t_br, c_br_fwd), normalizer.SimilarityScore(t_br, c_br_bwd));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

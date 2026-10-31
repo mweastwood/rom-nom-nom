@@ -1072,5 +1072,91 @@ TEST(CEmitterTest,
               HasSubstr("temp_s2 = (temp_s0 + 1);\n    __asm__(\"\" : : \"r\"(temp_s2));"));
 }
 
+TEST(CEmitterTest, SuppressesCseBarrierWhenVariableAddedToSuppressedCseBarrierVars) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"),
+                              CExpression::Unary("&", CExpression::Identifier("D_80100000")))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Unary("&", CExpression::Identifier("D_80100000")))));
+  body->AddStatement(
+      CStatement::Expression(CExpression::Call(CExpression::Identifier("StepCall"), {})));
+  body->AddStatement(CStatement::Return(CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                            CExpression::Identifier("temp_s1"))));
+
+  FunctionDeclaration fn(CType::S32(), "TestSuppressedTempS0NoCseBarrier",
+                         std::vector<CParameter>{}, std::move(body));
+  fn.MutableSuppressedCseBarrierVars().insert("temp_s0");
+  tu.functions.push_back(std::move(fn));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  EXPECT_THAT(emitted, ::testing::Not(HasSubstr("__asm__(\"\" : \"=r\"(temp_s0)")));
+  EXPECT_THAT(emitted, HasSubstr("__asm__(\"\" : \"=r\"(temp_s1)"));
+}
+
+TEST(CEmitterTest, IsolatesSharedGlobalSymbolsAcrossSiblingFunctionsWhileAllowingPrivateMutations) {
+  // Build baseline module with two functions sharing `D_80100000` as scalar `s32` and the second
+  // function also referencing a private global `D_80200000`.
+  auto fn1_body = std::make_unique<CompoundStatement>();
+  fn1_body->AddStatement(CStatement::Return(CExpression::Identifier("D_80100000")));
+  FunctionDeclaration fn1(CType::S32(), "SiblingReader", {}, std::move(fn1_body));
+
+  auto fn2_body = std::make_unique<CompoundStatement>();
+  fn2_body->AddStatement(CStatement::Return(CExpression::Binary(
+      "+", CExpression::Identifier("D_80100000"), CExpression::Identifier("D_80200000"))));
+  FunctionDeclaration fn2(CType::S32(), "MutatedFunc", {}, std::move(fn2_body));
+
+  std::vector<FunctionDeclaration> baseline_funcs;
+  baseline_funcs.push_back(fn1.Clone());
+  baseline_funcs.push_back(fn2.Clone());
+  auto parent_ctx = std::make_shared<const ModuleSymbolContext>(
+      AstCodegenLowerer::AnalyzeModuleSymbols(baseline_funcs, nullptr, {}));
+  EXPECT_TRUE(parent_ctx->shared_external_data_symbols.count("D_80100000") > 0);
+  EXPECT_EQ(parent_ctx->shared_external_data_symbols.count("D_80200000"), 0u);
+
+  // Mutate `MutatedFunc` so `D_80100000` is accessed as an array (`D_80100000[1]`) and `D_80200000`
+  // is accessed as a volatile array (`D_80200000[0]` with `volatile s32`).
+  auto mutated_fn2_body = std::make_unique<CompoundStatement>();
+  auto shared_arr_id =
+      std::make_unique<IdentifierExpression>("D_80100000", CType::S32(), /*is_array_symbol=*/true);
+  auto priv_vol_id = std::make_unique<IdentifierExpression>(
+      "D_80200000", CType::Named("volatile s32"), /*is_array_symbol=*/true);
+  mutated_fn2_body->AddStatement(CStatement::Return(CExpression::Binary(
+      "+", CExpression::ArrayIndex(std::move(shared_arr_id), CExpression::Integer(1)),
+      CExpression::ArrayIndex(std::move(priv_vol_id), CExpression::Integer(0)))));
+  FunctionDeclaration mutated_fn2(CType::S32(), "MutatedFunc", {}, std::move(mutated_fn2_body));
+
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+  tu.parent_module_context = parent_ctx;
+  tu.functions.push_back(fn1.Clone());
+  tu.functions.push_back(std::move(mutated_fn2));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+
+  // Shared global `D_80100000` must remain scalar `extern s32 D_80100000;` (preserving -G 8),
+  // untouched `SiblingReader` must still read scalar `D_80100000`, and `MutatedFunc`'s array index
+  // on `D_80100000[1]` must lower to `((s32*)&D_80100000)[1]`.
+  EXPECT_THAT(emitted, HasSubstr("extern s32 D_80100000;\n"));
+  EXPECT_THAT(emitted, ::testing::Not(HasSubstr("extern s32 D_80100000[];")));
+  EXPECT_THAT(emitted, HasSubstr("return D_80100000;"));
+  EXPECT_THAT(emitted, HasSubstr("((s32*)&D_80100000)[1]"));
+  // Function-private `D_80200000` is allowed to become `extern volatile s32 D_80200000[];` without
+  // duplicate `volatile volatile`.
+  EXPECT_THAT(emitted, HasSubstr("extern volatile s32 D_80200000[];\n"));
+  EXPECT_THAT(emitted, ::testing::Not(HasSubstr("volatile volatile")));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -244,5 +244,97 @@ TEST(SequenceAlignerTest, BitExactInstructionsDistinguishedFromNormalizedMatches
   EXPECT_EQ(result.stats.bit_exact_instructions, 2u);
 }
 
+TEST(SequenceAlignerTest, AlignsSameOpcodeSequenceByOperandSimilarity) {
+  FunctionDiffContext ctx;
+  ctx.target_vram = 0x80025C00;
+  ctx.target_size = 0x20;
+  ctx.compiled_vram = 0x0;
+  ctx.compiled_size = 0x20;
+
+  Normalizer normalizer(ctx);
+  SequenceAligner aligner(&normalizer);
+
+  // Target stores $ra at 28($sp) and $s0 at 24($sp).
+  // Compiled has an extra store of $s1 at 20($sp) before $s0 at 24($sp), and $s0 is in $s2 (18)
+  // at 24($sp). Operand-graded similarity should align the 24($sp) store with 24($sp) rather than
+  // with the 20($sp) store.
+  uint32_t sw_ra_28 = (0x2B << 26) | (29 << 21) | (31 << 16) | 28;
+  uint32_t sw_s0_24 = (0x2B << 26) | (29 << 21) | (16 << 16) | 24;
+  uint32_t sw_s1_20 = (0x2B << 26) | (29 << 21) | (17 << 16) | 20;
+  uint32_t sw_s2_24 = (0x2B << 26) | (29 << 21) | (18 << 16) | 24;
+
+  std::vector<NormalizedInstruction> target = {
+      MakeNorm(sw_ra_28, 0x80025C00, normalizer, /*is_target=*/true),
+      MakeNorm(sw_s0_24, 0x80025C04, normalizer, /*is_target=*/true),
+  };
+  std::vector<NormalizedInstruction> compiled = {
+      MakeNorm(sw_ra_28, 0x0, normalizer, /*is_target=*/false),
+      MakeNorm(sw_s1_20, 0x4, normalizer, /*is_target=*/false),
+      MakeNorm(sw_s2_24, 0x8, normalizer, /*is_target=*/false),
+  };
+
+  auto result = aligner.Align(target, compiled);
+  ASSERT_THAT(result.rows, SizeIs(3));
+  EXPECT_EQ(result.rows[0].kind, DiffRowKind::kMatch);
+  EXPECT_EQ(result.rows[1].kind, DiffRowKind::kCompiledOnly);
+  EXPECT_EQ(result.rows[2].kind, DiffRowKind::kDifference);
+  ASSERT_TRUE(result.rows[2].target.has_value());
+  ASSERT_TRUE(result.rows[2].compiled.has_value());
+  EXPECT_EQ(result.rows[2].target->original.immediate, 24);
+  EXPECT_EQ(result.rows[2].compiled->original.immediate, 24);
+}
+
+TEST(SequenceAlignerTest, ResolvesIntraFunctionBranchTargetAcrossBodyInsertion) {
+  FunctionDiffContext ctx;
+  ctx.target_vram = 0x80025C00;
+  ctx.target_size = 0x14;
+  ctx.compiled_vram = 0x0;
+  ctx.compiled_size = 0x18;
+
+  Normalizer normalizer(ctx);
+  SequenceAligner aligner(&normalizer);
+
+  // Target:
+  // 0x00: beq $a0, $zero, +2 (targets 0x0C: jr $ra)
+  // 0x04: nop
+  // 0x08: addiu $v0, $zero, 1
+  // 0x0C: jr $ra
+  // 0x10: nop
+  //
+  // Compiled (1 extra instruction inside branch body, shifting branch displacement to +3):
+  // 0x00: beq $a0, $zero, +3 (targets 0x10: jr $ra)
+  // 0x04: nop
+  // 0x08: move $t0, $a0       (extra instruction)
+  // 0x0C: addiu $v0, $zero, 1
+  // 0x10: jr $ra
+  // 0x14: nop
+  std::vector<NormalizedInstruction> target = {
+      MakeNorm(0x10800002, 0x80025C00, normalizer, /*is_target=*/true),
+      MakeNorm(0x00000000, 0x80025C04, normalizer, /*is_target=*/true),
+      MakeNorm(0x24020001, 0x80025C08, normalizer, /*is_target=*/true),
+      MakeNorm(0x03E00008, 0x80025C0C, normalizer, /*is_target=*/true),
+      MakeNorm(0x00000000, 0x80025C10, normalizer, /*is_target=*/true),
+  };
+  std::vector<NormalizedInstruction> compiled = {
+      MakeNorm(0x10800003, 0x00, normalizer, /*is_target=*/false),
+      MakeNorm(0x00000000, 0x04, normalizer, /*is_target=*/false),
+      MakeNorm(0x00804021, 0x08, normalizer, /*is_target=*/false),
+      MakeNorm(0x24020001, 0x0C, normalizer, /*is_target=*/false),
+      MakeNorm(0x03E00008, 0x10, normalizer, /*is_target=*/false),
+      MakeNorm(0x00000000, 0x14, normalizer, /*is_target=*/false),
+  };
+
+  auto result = aligner.Align(target, compiled);
+  ASSERT_THAT(result.rows, SizeIs(6));
+  // Row 0 (beq $a0, $zero) targets the exact same synchronized destination row (jr $ra)
+  // and should be upgraded to kNormalizedExact (kMatch).
+  EXPECT_EQ(result.rows[0].kind, DiffRowKind::kMatch);
+  EXPECT_EQ(result.rows[0].quality, MatchQuality::kNormalizedExact);
+  EXPECT_EQ(result.stats.matching_instructions, 5u);
+  EXPECT_EQ(result.stats.bit_exact_instructions, 4u);
+  EXPECT_EQ(result.stats.compiled_only_instructions, 1u);
+  EXPECT_FALSE(result.stats.IsBitExactMatch());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

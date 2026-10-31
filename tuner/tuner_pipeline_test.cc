@@ -921,5 +921,18 @@ TEST(TunerPipelineTest, TwoStepPlateauLookaheadFindsCoupledMutations) {
                                  "__asm__(\"\" : \"=r\"(temp_s0)"));
 }
 
+TEST(TunerPipelineTest, EvictsStaleCacheEntryWhenSearchOnMissIsDisabled) {
+  TuningCacheStore store;
+  FunctionTuningEntry stale;
+  stale.set_function_name("StaleFunc");
+  stale.set_module_name("code");
+  stale.set_input_sha1("deadbeef");
+  stale.add_c_flags("-O1");
+  store.Upsert(stale);
+  EXPECT_TRUE(store.ContainsFunction("StaleFunc"));
+  EXPECT_TRUE(store.Remove("StaleFunc"));
+  EXPECT_FALSE(store.ContainsFunction("StaleFunc"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

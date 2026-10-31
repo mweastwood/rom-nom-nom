@@ -304,7 +304,11 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
           auto type_it = module_data_types.find(id.Name());
           if (type_it != module_data_types.end() || is_func) {
             CType accessed_type = id.SymbolType().value_or(CType::S32());
-            if (is_func || type_it->second.ToString() != accessed_type.ToString()) {
+            bool same_or_volatile_match =
+                !is_func &&
+                (type_it->second.ToString() == accessed_type.ToString() ||
+                 type_it->second.ToString() == absl::StrCat("volatile ", accessed_type.ToString()));
+            if (!same_or_volatile_match) {
               if (!is_func && array_symbols.count(id.Name()) == 0 &&
                   ((type_it->second.ToString() == "s8" && accessed_type.ToString() == "u8") ||
                    (type_it->second.ToString() == "s16" && accessed_type.ToString() == "u16"))) {
@@ -358,20 +362,43 @@ std::unique_ptr<CExpression> NormalizeArraySymbolsInExpr(
                                       external_function_names, promoted_scalar_globals);
       if (a.Array().Kind() == CExpressionKind::kIdentifier) {
         const auto& arr_id = static_cast<const IdentifierExpression&>(a.Array());
-        if (local_vars.count(arr_id.Name()) == 0 && arr_id.SymbolType().has_value()) {
+        if (local_vars.count(arr_id.Name()) == 0) {
           bool is_func = external_function_names.count(arr_id.Name()) > 0;
           auto type_it = module_data_types.find(arr_id.Name());
-          bool type_conflict =
-              is_func || (type_it != module_data_types.end() &&
-                          type_it->second.ToString() != arr_id.SymbolType()->ToString());
-          if (type_conflict) {
-            std::unique_ptr<CExpression> addr =
-                (!is_func && array_symbols.count(arr_id.Name()) > 0)
-                    ? CExpression::Identifier(arr_id.Name())
-                    : CExpression::Unary("&", CExpression::Identifier(arr_id.Name()));
+          CType elem_type = arr_id.SymbolType().value_or(CType::S32());
+          if (array_symbols.count(arr_id.Name()) == 0) {
+            CType mod_type = (type_it != module_data_types.end()) ? type_it->second : CType::S32();
+            bool same_or_volatile_match =
+                !is_func &&
+                (mod_type.ToString() == elem_type.ToString() ||
+                 mod_type.ToString() == absl::StrCat("volatile ", elem_type.ToString()) ||
+                 absl::StrCat("volatile ", mod_type.ToString()) == elem_type.ToString());
+            if (same_or_volatile_match && new_idx->Kind() == CExpressionKind::kIntegerLiteral &&
+                static_cast<const IntegerLiteralExpression&>(*new_idx).Value() == 0) {
+              return std::make_unique<IdentifierExpression>(arr_id.Name(), mod_type);
+            }
             return CExpression::ArrayIndex(
-                CExpression::Cast(arr_id.SymbolType()->MakePointer(), std::move(addr)),
+                CExpression::Cast(elem_type.MakePointer(),
+                                  CExpression::Unary("&", CExpression::Identifier(arr_id.Name()))),
                 std::move(new_idx));
+          }
+          if (arr_id.SymbolType().has_value()) {
+            bool type_conflict =
+                is_func || (type_it != module_data_types.end() &&
+                            type_it->second.ToString() != arr_id.SymbolType()->ToString() &&
+                            type_it->second.ToString() !=
+                                absl::StrCat("volatile ", arr_id.SymbolType()->ToString()) &&
+                            absl::StrCat("volatile ", type_it->second.ToString()) !=
+                                arr_id.SymbolType()->ToString());
+            if (type_conflict) {
+              std::unique_ptr<CExpression> addr =
+                  (!is_func && array_symbols.count(arr_id.Name()) > 0)
+                      ? CExpression::Identifier(arr_id.Name())
+                      : CExpression::Unary("&", CExpression::Identifier(arr_id.Name()));
+              return CExpression::ArrayIndex(
+                  CExpression::Cast(arr_id.SymbolType()->MakePointer(), std::move(addr)),
+                  std::move(new_idx));
+            }
           }
         }
         return CExpression::ArrayIndex(a.Array().Clone(), std::move(new_idx));
@@ -2379,9 +2406,11 @@ ModuleSymbolContext AstCodegenLowerer::AnalyzeModuleSymbols(
   std::map<std::string, std::map<std::string, std::pair<CType, int>>> cast_deref_uses;
   std::set<std::string> uncast_addr_arith_symbols;
   std::map<std::string, std::map<std::string, std::pair<CType, int>>> id_symbol_type_uses;
+  std::map<std::string, int> func_ref_counts;
 
   for (const auto& function : functions) {
     ReferencedSymbols symbols = CollectReferencedSymbols(function);
+    std::set<std::string> func_data_refs;
     CollectGlobalCastDerefsInStmt(function.Body(), symbols.local_variables, &total_id_uses,
                                   &cast_deref_uses, &uncast_addr_arith_symbols,
                                   &id_symbol_type_uses);
@@ -2411,6 +2440,7 @@ ModuleSymbolContext AstCodegenLowerer::AnalyzeModuleSymbols(
         const auto* entry = symbol_index->FindByName(func_name);
         if (entry != nullptr && entry->type() == SYMBOL_DATA) {
           ctx.external_data_symbols.insert(func_name);
+          func_data_refs.insert(func_name);
           continue;
         }
       }
@@ -2435,6 +2465,10 @@ ModuleSymbolContext AstCodegenLowerer::AnalyzeModuleSymbols(
         }
       }
       ctx.external_data_symbols.insert(data_name);
+      func_data_refs.insert(data_name);
+    }
+    for (const auto& sym : func_data_refs) {
+      func_ref_counts[sym] += 1;
     }
   }
 
@@ -2444,6 +2478,9 @@ ModuleSymbolContext AstCodegenLowerer::AnalyzeModuleSymbols(
   }
 
   for (const auto& data_symbol : ctx.external_data_symbols) {
+    if (func_ref_counts[data_symbol] >= 2) {
+      ctx.shared_external_data_symbols.insert(data_symbol);
+    }
     if (ctx.array_data_symbols.count(data_symbol) > 0 ||
         uncast_addr_arith_symbols.count(data_symbol) > 0) {
       continue;
@@ -2539,9 +2576,17 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
       result.inferred_return_types[name] = ret_type;
     }
     for (const auto& [name, data_type] : symbols.inferred_data_types) {
+      if (parent_module_context != nullptr &&
+          parent_module_context->shared_external_data_symbols.count(name) > 0) {
+        continue;
+      }
       result.inferred_data_types[name] = data_type;
     }
     for (const auto& arr_name : symbols.array_data_symbols) {
+      if (parent_module_context != nullptr &&
+          parent_module_context->shared_external_data_symbols.count(arr_name) > 0) {
+        continue;
+      }
       result.array_data_symbols.insert(arr_name);
     }
 
@@ -2607,11 +2652,18 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
   if (parent_module_context != nullptr) {
     // Inherit module-wide symbol classifications, inferred return/data types, array symbols,
     // volatile symbols, and promoted scalar globals from the parent module.
+    // For shared symbols (referenced by >= 2 functions in the module), parent_module_context
+    // is authoritative so single-function tuner mutations cannot alter shared extern
+    // declarations or rewrite sibling functions. Function-private symbols retain any
+    // function-local type/array/volatile mutations.
     for (const auto& [name, ret_type] : parent_module_context->inferred_return_types) {
       result.inferred_return_types[name] = ret_type;
     }
     for (const auto& [name, data_type] : parent_module_context->inferred_data_types) {
-      result.inferred_data_types[name] = data_type;
+      if (parent_module_context->shared_external_data_symbols.count(name) > 0 ||
+          result.inferred_data_types.find(name) == result.inferred_data_types.end()) {
+        result.inferred_data_types[name] = data_type;
+      }
     }
     for (const auto& arr_name : parent_module_context->array_data_symbols) {
       result.array_data_symbols.insert(arr_name);
@@ -2619,8 +2671,17 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
     for (const auto& vol_name : parent_module_context->volatile_data_symbols) {
       result.volatile_data_symbols.insert(vol_name);
     }
-    promoted_scalar_globals = parent_module_context->promoted_scalar_globals;
-    for (const auto& [sym, prom_type] : promoted_scalar_globals) {
+    for (const auto& [sym, prom_type] : parent_module_context->promoted_scalar_globals) {
+      bool is_shared = parent_module_context->shared_external_data_symbols.count(sym) > 0;
+      if (!is_shared && result.array_data_symbols.count(sym) > 0) {
+        continue;
+      }
+      auto it = result.inferred_data_types.find(sym);
+      if (!is_shared && it != result.inferred_data_types.end() &&
+          it->second.ToString() != prom_type.ToString() && it->second.ToString() != "s32") {
+        continue;
+      }
+      promoted_scalar_globals[sym] = prom_type;
       result.inferred_data_types[sym] = prom_type;
     }
   } else {

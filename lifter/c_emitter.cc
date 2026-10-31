@@ -127,7 +127,8 @@ std::string CTranslationUnit::ToString() const {
       }
       std::string array_suffix = lowered.array_data_symbols.count(data_symbol) > 0 ? "[]" : "";
       const char* volatile_qual =
-          (lowered.volatile_data_symbols.count(data_symbol) > 0 && array_suffix.empty())
+          (lowered.volatile_data_symbols.count(data_symbol) > 0 && array_suffix.empty() &&
+           !absl::StartsWith(data_type.ToString(), "volatile "))
               ? "volatile "
               : "";
       output += absl::StrFormat("extern %s%s %s%s;\n", volatile_qual, data_type.ToString(),

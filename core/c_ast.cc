@@ -845,7 +845,12 @@ void VisitExpression(const CExpression& expr, ReferencedSymbols& symbols,
           symbols.local_variables.count(name) == 0 && symbols.external_functions.count(name) == 0) {
         symbols.external_data.insert(name);
         if (id.SymbolType().has_value()) {
-          symbols.inferred_data_types[name] = *id.SymbolType();
+          auto existing_it = symbols.inferred_data_types.find(name);
+          std::string new_type_str = id.SymbolType()->ToString();
+          if (existing_it == symbols.inferred_data_types.end() ||
+              existing_it->second.ToString() != absl::StrCat("volatile ", new_type_str)) {
+            symbols.inferred_data_types[name] = *id.SymbolType();
+          }
         }
         if (id.IsArraySymbol()) {
           symbols.array_data_symbols.insert(name);

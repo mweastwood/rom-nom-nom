@@ -2695,7 +2695,17 @@ std::vector<std::vector<AstMutationStep>> AstMutator::GenerateCanonicalPresets(
       make_step(AST_MUTATION_INLINE_SINGLE_USE_TEMP, 0, 1),
       make_step(AST_MUTATION_COALESCE_PARAM_COPY, 0, 1),
   });
-  // Preset 5: Coalesce parameter copies without bulk temporary inlining
+  // Preset 5: Local pointer-offset-to-array-index after bulk inline (hoist) without global array
+  // promotion
+  presets.push_back({
+      make_step(AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN, 0, 1),
+      make_step(AST_MUTATION_DIRECT_TYPED_GLOBAL, 0, 1),
+      make_step(AST_MUTATION_INLINE_SINGLE_USE_TEMP, 0, 3),
+      make_step(AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX, 0, 1),
+      make_step(AST_MUTATION_INLINE_SINGLE_USE_TEMP, 0, 3),
+      make_step(AST_MUTATION_COALESCE_PARAM_COPY, 0, 1),
+  });
+  // Preset 6: Coalesce parameter copies without bulk temporary inlining
   presets.push_back({
       make_step(AST_MUTATION_COALESCE_PARAM_COPY, 0, 1),
   });

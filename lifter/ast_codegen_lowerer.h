@@ -20,6 +20,7 @@ struct ModuleSymbolContext {
   std::set<std::string> defined_function_names;
   std::set<std::string> external_function_names;
   std::set<std::string> external_data_symbols;
+  std::set<std::string> shared_external_data_symbols;
   std::map<std::string, CType> inferred_return_types;
   std::map<std::string, CType> inferred_data_types;
   std::set<std::string> array_data_symbols;

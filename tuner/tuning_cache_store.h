@@ -43,6 +43,9 @@ class TuningCacheStore {
   // Inserts or replaces a per-function tuning entry.
   void Upsert(FunctionTuningEntry entry);
 
+  // Removes a per-function tuning entry if present. Returns true if an entry was removed.
+  bool Remove(std::string_view function_name);
+
   // Sets or updates module-level compiler flags.
   void SetModuleCFlags(std::string_view module_name, const std::vector<std::string>& flags);
   std::vector<std::string> GetModuleCFlags(std::string_view module_name) const;
