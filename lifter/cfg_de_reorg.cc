@@ -1030,19 +1030,19 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
         const Loop* pred_loop = loop_info.GetLoopFor(pred_id);
         auto uses_preserved_to_pred = [&]() {
           absl::flat_hash_set<uint32_t> can_reach_pred = {pred_id};
-          bool added_reach = true;
-          while (added_reach) {
-            added_reach = false;
-            for (const auto& candidate : cfg->Blocks()) {
-              if (candidate.id == block.id || can_reach_pred.contains(candidate.id)) {
+          std::vector<uint32_t> rev_stack = {pred_id};
+          while (!rev_stack.empty()) {
+            uint32_t succ = rev_stack.back();
+            rev_stack.pop_back();
+            const BasicBlock* succ_blk = cfg->GetBlock(succ);
+            if (succ_blk == nullptr) continue;
+            for (uint32_t cand_id : succ_blk->predecessors) {
+              if (cand_id == block.id || can_reach_pred.contains(cand_id)) {
                 continue;
               }
-              for (uint32_t succ : candidate.successors) {
-                if (!dom_tree.Dominates(succ, candidate.id) && can_reach_pred.contains(succ)) {
-                  can_reach_pred.insert(candidate.id);
-                  added_reach = true;
-                  break;
-                }
+              if (!dom_tree.Dominates(succ, cand_id)) {
+                can_reach_pred.insert(cand_id);
+                rev_stack.push_back(cand_id);
               }
             }
           }
@@ -1109,18 +1109,20 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
           }
           return true;
         };
-        const bool same_loop_non_header =
-            pred_loop == enclosing_loop && target_loop == enclosing_loop &&
-            (enclosing_loop == nullptr || succ_taken != enclosing_loop->header) &&
-            pred_blk != nullptr && !jump_table_target_vrams.contains(pred_blk->start_vram) &&
-            pred_blk->end_vram + 4 == taken_block->start_vram &&
-            taken_block->predecessors.size() >= 2 &&
-            IsSinkableDelaySlotInstruction(block, delay_inst) &&
-            (uses_preserved_to_pred() ||
-             (term.IsBranchLikely() && (pred_blk->predecessors.size() >= 2 ||
-                                        post_dom_tree.Dominates(pred_id, effective_fallthrough))) ||
-             (!dom_tree.Dominates(effective_fallthrough, pred_id) &&
-              !pred_blk->predecessors.empty()));
+        auto same_loop_non_header = [&]() {
+          return pred_loop == enclosing_loop && target_loop == enclosing_loop &&
+                 (enclosing_loop == nullptr || succ_taken != enclosing_loop->header) &&
+                 pred_blk != nullptr && !jump_table_target_vrams.contains(pred_blk->start_vram) &&
+                 pred_blk->end_vram + 4 == taken_block->start_vram &&
+                 taken_block->predecessors.size() >= 2 &&
+                 IsSinkableDelaySlotInstruction(block, delay_inst) &&
+                 ((term.IsBranchLikely() &&
+                   (pred_blk->predecessors.size() >= 2 ||
+                    post_dom_tree.Dominates(pred_id, effective_fallthrough))) ||
+                  (!dom_tree.Dominates(effective_fallthrough, pred_id) &&
+                   !pred_blk->predecessors.empty()) ||
+                  uses_preserved_to_pred());
+        };
         const bool cross_loop_valid =
             has_pre_branch_conflict &&
             ((enclosing_loop != nullptr && enclosing_loop->Contains(block.id) &&
@@ -1131,7 +1133,7 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
             pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
             pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
             SameDelayInstructionEffect(delay_inst, pred_blk->instructions.front()) &&
-            (same_loop_non_header || cross_loop_valid)) {
+            (same_loop_non_header() || cross_loop_valid)) {
           pred_block_id = pred_id;
           break;
         }
@@ -1142,7 +1144,7 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
             pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
             taken_block->predecessors.size() == 2u &&
             SameDelayInstructionEffect(delay_inst, pred_blk->instructions.back()) &&
-            same_loop_non_header &&
+            same_loop_non_header() &&
             (DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
              DelaySlotFeedsSuccessorBranch(*taken_block, delay_inst))) {
           split_fallthrough_pred_id = pred_id;

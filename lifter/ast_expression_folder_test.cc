@@ -1496,5 +1496,35 @@ TEST(AstExpressionFolderTest, FoldsSelfReferencingArgAssignmentIntoOutgoingStack
   EXPECT_THAT(code, HasSubstr("DrawSprite(arg0, 0, 0, 0, ((u32)*(f32*)(arg1 + 16) & 255));"));
 }
 
+TEST(AstExpressionFolderTest, EliminatesUnusedPreCallScratchStoreInsideLoopWithGoto) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto loop_body = std::make_unique<CompoundStatement>();
+  // arg3 = 0; (zero read uses anywhere in function body)
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("arg3"), CExpression::Integer(0))));
+  // HelperCall(arg0);
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("arg0"));
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Call(CExpression::Identifier("HelperCall"), std::move(call_args))));
+  // if ((arg0 == 0)) { goto exit_loop; }
+  auto then_comp = std::make_unique<CompoundStatement>();
+  then_comp->AddStatement(CStatement::Goto("exit_loop"));
+  loop_body->AddStatement(CStatement::If(
+      CExpression::Binary("==", CExpression::Identifier("arg0"), CExpression::Integer(0)),
+      std::move(then_comp)));
+  body->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("arg0"), CExpression::Integer(1))));
+  body->AddStatement(CStatement::Label("exit_loop"));
+  body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("arg3 = 0;")));
+  EXPECT_THAT(code, HasSubstr("HelperCall(arg0);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

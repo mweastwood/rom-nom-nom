@@ -67,13 +67,13 @@ entries {
 entries {
   function_name: "func_800D879C"
   module_name: "B3940"
-  input_sha1: "e82d1198d596bf4b602c723edd216bfd6b116f13"
+  input_sha1: "76141c7c9c5cba3f343a6d5e85a2a5e06ff5683a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 91
-  matching_instructions: 91
+  bit_exact_instructions: 115
+  matching_instructions: 115
   target_instructions: 120
   is_bit_exact: false
 }
@@ -589,7 +589,7 @@ entries {
 entries {
   function_name: "func_800DBBB0"
   module_name: "B4A00"
-  input_sha1: "25f97232ff570a957d85387a1e4e7813cf4f78fc"
+  input_sha1: "43615f76f52ce128cc53d15ffe162b7f8b22dd9b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -637,7 +637,7 @@ entries {
 entries {
   function_name: "func_800DBC9C"
   module_name: "B4A00"
-  input_sha1: "06d6ac81dac34c6bd782a454ef27c44fb4630f5c"
+  input_sha1: "ca67c4e9d301501e333b0eace4ea46c721085b5b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -695,7 +695,7 @@ entries {
 entries {
   function_name: "func_800DBD88"
   module_name: "B4A00"
-  input_sha1: "404ec3f456f9ad8da98d7b24b1c242e37891d0b3"
+  input_sha1: "71629f2ccf959348e1a93d32794b76511531842e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -736,14 +736,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 55
-  matching_instructions: 55
+  matching_instructions: 59
   target_instructions: 65
   is_bit_exact: false
 }
 entries {
   function_name: "func_800DBE8C"
   module_name: "B4A00"
-  input_sha1: "42e9c38d3427ed71248cbdf789a53655876d987c"
+  input_sha1: "7182b770524a9936d311b4468defea08a8d8b750"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -784,7 +784,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 55
-  matching_instructions: 55
+  matching_instructions: 59
   target_instructions: 65
   is_bit_exact: false
 }
@@ -1455,20 +1455,20 @@ entries {
 entries {
   function_name: "func_800E4424"
   module_name: "B97C0"
-  input_sha1: "ef109a7d746716cbdd6b4b000f5ae9f9dea21bf0"
+  input_sha1: "5bca65eef3c0fc8d5e625b9de68fc1b5a6bfafcc"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 689
-  matching_instructions: 689
+  bit_exact_instructions: 690
+  matching_instructions: 692
   target_instructions: 1009
   is_bit_exact: false
 }
 entries {
   function_name: "func_800E53E8"
   module_name: "B97C0"
-  input_sha1: "c8c43bc582e03b15eda4ff4f35ef93f5fb79dd15"
+  input_sha1: "fe5ef0f53444ed6eac021000d0f7167b2031e326"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -1478,8 +1478,8 @@ entries {
     site_index: 16
     param: 0
   }
-  bit_exact_instructions: 995
-  matching_instructions: 995
+  bit_exact_instructions: 946
+  matching_instructions: 947
   target_instructions: 1198
   is_bit_exact: false
 }
@@ -1572,13 +1572,13 @@ entries {
 entries {
   function_name: "func_800E80AC"
   module_name: "B97C0"
-  input_sha1: "41bd9b1c397767308aac91c9bfa0355011194a64"
+  input_sha1: "a7bf0c0ac656883db9aa982fa5ba2769ad25adcb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 759
-  matching_instructions: 759
+  bit_exact_instructions: 793
+  matching_instructions: 794
   target_instructions: 919
   is_bit_exact: false
 }
@@ -1611,13 +1611,13 @@ entries {
 entries {
   function_name: "func_800E9B2C"
   module_name: "B97C0"
-  input_sha1: "2cc49e423ad96e58d5015ff5222db3f94d2b782e"
+  input_sha1: "f3ed444a6d1c75ece92fec761cf1260267293a0a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 389
-  matching_instructions: 389
+  bit_exact_instructions: 395
+  matching_instructions: 395
   target_instructions: 478
   is_bit_exact: false
 }
@@ -1656,18 +1656,13 @@ entries {
 entries {
   function_name: "func_800EA3AC"
   module_name: "B97C0"
-  input_sha1: "b9c4780a437351a5b42bf0b048fffc17c126710e"
+  input_sha1: "104fc4d76c9403fe8c6b40731a081b2b0f4e8cae"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 5
-    param: 0
-  }
-  bit_exact_instructions: 436
-  matching_instructions: 436
+  bit_exact_instructions: 391
+  matching_instructions: 391
   target_instructions: 444
   is_bit_exact: false
 }
@@ -1844,27 +1839,12 @@ entries {
 entries {
   function_name: "func_800ED160"
   module_name: "B97C0"
-  input_sha1: "d049e191d3f6c56c50604acb3f636d5ccaf84dc6"
+  input_sha1: "d656f9f418cbdfbda0a382062ff07f53e6a74b1d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COMMUTE_BINARY_OP
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
   bit_exact_instructions: 449
   matching_instructions: 449
   target_instructions: 464
@@ -1929,53 +1909,13 @@ entries {
 entries {
   function_name: "func_800EE678"
   module_name: "B97C0"
-  input_sha1: "f01a95d4d2735914400aa9d8a0fd4e0990521cfe"
+  input_sha1: "413c07fb39b5f5bdbffe934794219a9bed3a9b4e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 16
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 17
-    param: 0
-  }
-  bit_exact_instructions: 768
-  matching_instructions: 768
+  bit_exact_instructions: 846
+  matching_instructions: 846
   target_instructions: 960
   is_bit_exact: false
 }
@@ -2135,48 +2075,13 @@ entries {
 entries {
   function_name: "func_800EFE84"
   module_name: "B97C0"
-  input_sha1: "42c6060401ded32893edde38e8640742088df864"
-  c_flags: "-O1"
+  input_sha1: "e3515dfe4b9f28f8b9c7fa888871b2e9f5d0fbf4"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 73
-  matching_instructions: 73
+  bit_exact_instructions: 60
+  matching_instructions: 61
   target_instructions: 86
   is_bit_exact: false
 }
@@ -2283,7 +2188,7 @@ entries {
 entries {
   function_name: "func_800F06D8"
   module_name: "B97C0"
-  input_sha1: "36f266daf6f7febbde58cfd0b2cc5075b8dc9783"
+  input_sha1: "85b83ce49ac079010ca71bff665ce0452d5cd6af"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -2303,8 +2208,8 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 528
-  matching_instructions: 528
+  bit_exact_instructions: 524
+  matching_instructions: 524
   target_instructions: 555
   is_bit_exact: false
 }
@@ -2764,7 +2669,7 @@ entries {
 entries {
   function_name: "func_800F2E44"
   module_name: "CDBC0"
-  input_sha1: "275d95865a5a5d1acd05fc025b02509bc5e9d3d6"
+  input_sha1: "9c14d05e40f8098cf45dc130d0db27ce85955c28"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -2804,28 +2709,8 @@ entries {
     site_index: 0
     param: 1
   }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 10
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 12
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 14
-    param: 0
-  }
-  bit_exact_instructions: 170
-  matching_instructions: 170
+  bit_exact_instructions: 159
+  matching_instructions: 165
   target_instructions: 247
   is_bit_exact: false
 }
@@ -3352,11 +3237,11 @@ entries {
 entries {
   function_name: "func_800F4640"
   module_name: "CE620"
-  input_sha1: "4c8b3a3a819005476bb4e31e4c05b46cfd0a7519"
+  input_sha1: "65e23495bf0945bd32d7c325b7a4a9012e5833d3"
   c_flags: "-O0"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  bit_exact_instructions: 82
+  bit_exact_instructions: 79
   matching_instructions: 82
   target_instructions: 96
   is_bit_exact: false
@@ -3690,7 +3575,7 @@ entries {
 entries {
   function_name: "func_800F5C00"
   module_name: "CE620"
-  input_sha1: "7c14627f1284e8a06aa5f0957c76aed874fa9704"
+  input_sha1: "2dcbb9459928e670dfe1317f6759231de608efaa"
   c_flags: "-O0"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -3699,15 +3584,15 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 190
-  matching_instructions: 190
+  bit_exact_instructions: 176
+  matching_instructions: 186
   target_instructions: 212
   is_bit_exact: false
 }
 entries {
   function_name: "func_800F5F50"
   module_name: "CE620"
-  input_sha1: "700132a4f61f26c06ba1bd4ce41b07dda0479a9e"
+  input_sha1: "60530e617eaa0cb72dcc6168c678eb74e3b17bd9"
   c_flags: "-O0"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -3752,7 +3637,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 299
-  matching_instructions: 299
+  matching_instructions: 315
   target_instructions: 381
   is_bit_exact: false
 }
@@ -3913,7 +3798,7 @@ entries {
 entries {
   function_name: "func_800F70F4"
   module_name: "CE620"
-  input_sha1: "219377e8059d8bc47f86c7c7be1a4d844263b128"
+  input_sha1: "95b98aad20f3f82a7be270e56f2acf4696709e02"
   c_flags: "-O0"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -3924,14 +3809,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 70
-  matching_instructions: 70
+  matching_instructions: 76
   target_instructions: 90
   is_bit_exact: false
 }
 entries {
   function_name: "func_800F725C"
   module_name: "CE620"
-  input_sha1: "5e9aa248aab80898b8c775130f6d1023e656a49b"
+  input_sha1: "95a8ac6f610cfba0708bede7819be0f78e522985"
   c_flags: "-O0"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -3957,7 +3842,7 @@ entries {
     param: 1
   }
   bit_exact_instructions: 101
-  matching_instructions: 101
+  matching_instructions: 107
   target_instructions: 121
   is_bit_exact: false
 }
@@ -4025,32 +3910,47 @@ entries {
 entries {
   function_name: "func_800F7B1C"
   module_name: "CE620"
-  input_sha1: "67894cf02629c9ea18cef99bb470690d7555c857"
+  input_sha1: "198b13cbb0f09578621bf9720e9753e8ac97702e"
   c_flags: "-O0"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
     param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
     site_index: 0
     param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
-    param: 0
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
   }
   ast_mutations {
-    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
-    site_index: 1
-    param: 0
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 2
   }
-  bit_exact_instructions: 48
-  matching_instructions: 48
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 125
+  matching_instructions: 126
   target_instructions: 144
   is_bit_exact: false
 }
@@ -4657,7 +4557,7 @@ entries {
 entries {
   function_name: "func_800F8E40"
   module_name: "D41A0"
-  input_sha1: "15dc23ca0c171234597bd105e5fd64b28e4bdf7a"
+  input_sha1: "cb619247f729a2c7821928ab46bdfc810c07b761"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -4682,8 +4582,8 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 179
-  matching_instructions: 179
+  bit_exact_instructions: 178
+  matching_instructions: 188
   target_instructions: 251
   is_bit_exact: false
 }
@@ -4703,34 +4603,13 @@ entries {
 entries {
   function_name: "func_800F9360"
   module_name: "D41A0"
-  input_sha1: "b11e31ea39942a81e77e8937555ce1b1271f9fa6"
+  input_sha1: "e645cde302e6a7bd347cf2cb3e8d74676cc8c67a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 12
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 293
-  matching_instructions: 293
+  bit_exact_instructions: 299
+  matching_instructions: 300
   target_instructions: 350
   is_bit_exact: false
 }
@@ -4750,27 +4629,26 @@ entries {
 entries {
   function_name: "func_800F997C"
   module_name: "D41A0"
-  input_sha1: "4146db88808732797df0c9d48173a389cdd0a180"
+  input_sha1: "9394f52f9fc4c3c1f1fad7cf9cb88dac86737818"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-delayed-branch"
-  bit_exact_instructions: 112
-  matching_instructions: 112
+  bit_exact_instructions: 107
+  matching_instructions: 107
   target_instructions: 136
   is_bit_exact: false
 }
 entries {
   function_name: "func_800F9B9C"
   module_name: "D41A0"
-  input_sha1: "903047a18b65db6b8696c4e46a1973c62f92774f"
+  input_sha1: "fea2f39bbde0ae5d8ff4ad0777eb636c144db261"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   bit_exact_instructions: 44
-  matching_instructions: 44
+  matching_instructions: 47
   target_instructions: 80
   is_bit_exact: false
 }
@@ -4810,7 +4688,7 @@ entries {
 entries {
   function_name: "func_800F9D30"
   module_name: "D5130"
-  input_sha1: "f903248d0b9c41927601c04a0a9c26f3511ef8da"
+  input_sha1: "d7adecb4513255127e55eea2598a0f9fe35020e7"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -4855,21 +4733,21 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 197
-  matching_instructions: 197
+  bit_exact_instructions: 190
+  matching_instructions: 193
   target_instructions: 274
   is_bit_exact: false
 }
 entries {
   function_name: "func_800FA178"
   module_name: "D5130"
-  input_sha1: "2165891b6e700124c62f3cf9bc4a2dd2e81471ff"
+  input_sha1: "e68107a203ca8cc81c56f19f997ab6d8ff0a8342"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 83
-  matching_instructions: 83
+  bit_exact_instructions: 82
+  matching_instructions: 86
   target_instructions: 99
   is_bit_exact: false
 }
@@ -5253,7 +5131,7 @@ entries {
 entries {
   function_name: "func_800FB36C"
   module_name: "D6540"
-  input_sha1: "576976a0af7b305a11953e303c6bff8bd6a329fe"
+  input_sha1: "929164ac55b02ec20acc8876f74fcac7d6e188be"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -5265,7 +5143,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 33
-  matching_instructions: 33
+  matching_instructions: 34
   target_instructions: 47
   is_bit_exact: false
 }
@@ -5398,7 +5276,7 @@ entries {
 entries {
   function_name: "func_800FB968"
   module_name: "D6D10"
-  input_sha1: "931acd9cf22674439ad3727f034ad88962b158b9"
+  input_sha1: "a8d65e2c75063471ea035ecd86a4c57cfee4e020"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -5449,12 +5327,11 @@ entries {
 entries {
   function_name: "func_800FBD24"
   module_name: "D6D10"
-  input_sha1: "176975668d3e0485d1e6777ad7aeea0f13b164ac"
+  input_sha1: "34ce57954db04ac65a61c3508121070254b91679"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -5471,17 +5348,22 @@ entries {
     param: 3
   }
   ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
     site_index: 0
     param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
-    site_index: 4
-    param: 0
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
   }
-  bit_exact_instructions: 69
-  matching_instructions: 69
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 67
+  matching_instructions: 67
   target_instructions: 75
   is_bit_exact: false
 }
@@ -6202,7 +6084,7 @@ entries {
 entries {
   function_name: "func_800FD7E8"
   module_name: "D89B0"
-  input_sha1: "112eb6022d9213583d2cb4d47b62aefff345ab7c"
+  input_sha1: "f8bb6f1f48807397b7193d58c80581735133f9b4"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6453,23 +6335,13 @@ entries {
 entries {
   function_name: "func_8002B8E0"
   module_name: "actor"
-  input_sha1: "0fb1bb7d509ee4b118bf22e8e1c822ecdd1203aa"
+  input_sha1: "6c768e536bc9ab9a21336e4f9d50449b6c8025ba"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 107
-  matching_instructions: 107
+  bit_exact_instructions: 106
+  matching_instructions: 110
   target_instructions: 126
   is_bit_exact: false
 }
@@ -6647,7 +6519,7 @@ entries {
 entries {
   function_name: "func_8002C1C0"
   module_name: "actor"
-  input_sha1: "3cb90bc3d3494ac4dcc4114242b7e553a6b3f770"
+  input_sha1: "d64d76cd8f61f6eec2798923f1c32de8d9731772"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6668,15 +6540,25 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 195
-  matching_instructions: 195
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 4
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 199
+  matching_instructions: 201
   target_instructions: 219
   is_bit_exact: false
 }
 entries {
   function_name: "func_8002C52C"
   module_name: "actor"
-  input_sha1: "1ff5fb19c5ca12545c25670451d0dff3352adef6"
+  input_sha1: "a4697f64d571a3d578d8be315ff18daf07dba12e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6697,8 +6579,13 @@ entries {
     site_index: 3
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 78
-  matching_instructions: 78
+  matching_instructions: 80
   target_instructions: 85
   is_bit_exact: false
 }
@@ -6767,7 +6654,7 @@ entries {
 entries {
   function_name: "func_8002C85C"
   module_name: "actor"
-  input_sha1: "8d734a1952f2bb1917549d448a6b167bd543be15"
+  input_sha1: "e8f3564661ac3c2924a0fbebc1cff1ba62df4d47"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6780,7 +6667,7 @@ entries {
 entries {
   function_name: "func_8002C914"
   module_name: "actor"
-  input_sha1: "21c2cf794f2913fab7c372461b860ad20ad22833"
+  input_sha1: "6bbd941ab64c495d5e6b5773d447bdc181aecfec"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6793,11 +6680,11 @@ entries {
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 8
+    site_index: 9
     param: 0
   }
   bit_exact_instructions: 85
-  matching_instructions: 85
+  matching_instructions: 87
   target_instructions: 101
   is_bit_exact: false
 }
@@ -6953,7 +6840,7 @@ entries {
 entries {
   function_name: "func_8002CD4C"
   module_name: "actor"
-  input_sha1: "d3f9ac9624af3d493311cece4422448c724df138"
+  input_sha1: "3ae1cfcfb08789545cffcf4bf31609850bcf1237"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -6969,7 +6856,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 16
-  matching_instructions: 16
+  matching_instructions: 18
   target_instructions: 26
   is_bit_exact: false
 }
@@ -6989,7 +6876,7 @@ entries {
 entries {
   function_name: "func_8002CDE8"
   module_name: "actor"
-  input_sha1: "0295450fb8377bde9629f00fc85198548c4d9c3c"
+  input_sha1: "e94024b61ceebfa1bc28d85c99199260ee5a057d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7000,15 +6887,25 @@ entries {
     site_index: 12
     param: 0
   }
-  bit_exact_instructions: 288
-  matching_instructions: 288
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 10
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 318
+  matching_instructions: 329
   target_instructions: 379
   is_bit_exact: false
 }
 entries {
   function_name: "func_8002D3D4"
   module_name: "actor"
-  input_sha1: "26bdc60bc6108d3ad1b2c0afb5c75b9f4fcb12ea"
+  input_sha1: "84d6e94329a6f8f13014c5f18d1aee7417b8e0eb"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7043,15 +6940,25 @@ entries {
     site_index: 8
     param: 0
   }
-  bit_exact_instructions: 494
-  matching_instructions: 494
+  ast_mutations {
+    kind: AST_MUTATION_HOIST_WHILE_GUARD
+    site_index: 1
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 482
+  matching_instructions: 490
   target_instructions: 551
   is_bit_exact: false
 }
 entries {
   function_name: "func_8009BF90"
   module_name: "asset"
-  input_sha1: "f83b193bb4ea4c671abbd4296093e44dbb8e12bc"
+  input_sha1: "33fd0fdef1e40cb2f8966283e733ebbaa7186468"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7064,7 +6971,7 @@ entries {
 entries {
   function_name: "func_8009C054"
   module_name: "asset"
-  input_sha1: "1cd20ac29794fadd251f2343f486e6074d51cfd9"
+  input_sha1: "fe2c14df16527f159d898131afe771815ac32070"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7077,7 +6984,7 @@ entries {
 entries {
   function_name: "func_8009C324"
   module_name: "asset"
-  input_sha1: "ec3d5397ece75ba43f846c273d7e08489875be86"
+  input_sha1: "c5a0bda074c167ff41e68bd3ad3fb7c3237bebd7"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7102,15 +7009,15 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 4483
-  matching_instructions: 4483
+  bit_exact_instructions: 4480
+  matching_instructions: 4529
   target_instructions: 5136
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A1364"
   module_name: "asset"
-  input_sha1: "0626546f8fa5345179311b1afa4a5e0efaf5d877"
+  input_sha1: "e00839fc56114b93d1a2d2a651bb13254083f240"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7126,61 +7033,106 @@ entries {
     param: 0
   }
   bit_exact_instructions: 202
-  matching_instructions: 202
+  matching_instructions: 208
   target_instructions: 220
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A16D4"
   module_name: "asset"
-  input_sha1: "e6936e4e932a907ad89fc5cbc87567e0d5056a27"
-  c_flags: "-O1"
+  input_sha1: "272a887f1d9e4f86feaa08e2381e198f8bb045df"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
-    param: 0
+    param: 1
   }
-  bit_exact_instructions: 322
-  matching_instructions: 322
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 319
+  matching_instructions: 319
   target_instructions: 332
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A1C04"
   module_name: "asset"
-  input_sha1: "d12e7045e85c916e95ea4f6a1dace06e9f2d20df"
-  c_flags: "-O1"
+  input_sha1: "fe57b975c9c949dee39f382322df679519333d76"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
-    param: 0
+    param: 1
   }
-  bit_exact_instructions: 384
-  matching_instructions: 384
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 381
+  matching_instructions: 381
   target_instructions: 403
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A2250"
   module_name: "asset"
-  input_sha1: "fa99b422052b4f9baf40f50c721c0197db5e2c75"
-  c_flags: "-O1"
+  input_sha1: "1e2dc5bd2e8d0b113c75becaa9a810ccc1ec1044"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
   }
-  bit_exact_instructions: 180
-  matching_instructions: 180
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 174
+  matching_instructions: 174
   target_instructions: 188
   is_bit_exact: false
 }
@@ -7206,7 +7158,7 @@ entries {
 entries {
   function_name: "func_800A2690"
   module_name: "asset"
-  input_sha1: "2179ad611c27692d266e61ef64863b9802dc9ce1"
+  input_sha1: "04ca0a9da28d8925d151d505d1ea80c6e868534e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7239,7 +7191,7 @@ entries {
 entries {
   function_name: "func_800A289C"
   module_name: "asset"
-  input_sha1: "a3d1a9952f7bb6db85882a4c9d4ac5b0ac0ff933"
+  input_sha1: "34ccb2a9765d9b50ed826758fbab667edf170441"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7257,7 +7209,7 @@ entries {
 entries {
   function_name: "func_800A2924"
   module_name: "asset"
-  input_sha1: "505dc0112640f1ba64a5d59b06135c193c62d377"
+  input_sha1: "62efd94ee6c1fef6db954e4aadb8c2a91bc8f1b5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7316,13 +7268,13 @@ entries {
 entries {
   function_name: "func_800A3F04"
   module_name: "asset"
-  input_sha1: "1130ef9e2785f05446d76397106a02900f709db9"
+  input_sha1: "8fad908b1d29f946c075689e9a4409e3527e451c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 495
-  matching_instructions: 495
+  matching_instructions: 501
   target_instructions: 523
   is_bit_exact: false
 }
@@ -7342,13 +7294,13 @@ entries {
 entries {
   function_name: "func_800A4878"
   module_name: "asset"
-  input_sha1: "5e4d25affcd96030f091de2e03f8fdaba137240d"
-  c_flags: "-O1"
+  input_sha1: "60c68f6fe90b5f3da9437a463aadab9d4af50477"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 201
-  matching_instructions: 201
+  bit_exact_instructions: 194
+  matching_instructions: 194
   target_instructions: 211
   is_bit_exact: false
 }
@@ -7368,7 +7320,7 @@ entries {
 entries {
   function_name: "func_800A4CFC"
   module_name: "asset"
-  input_sha1: "bcc3b0b7ce9de99d710e7a5884d7c067117fa795"
+  input_sha1: "a49fa989e3b1490431ddbbed0edb1c30172ed92d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7386,8 +7338,8 @@ entries {
 entries {
   function_name: "func_800A4E50"
   module_name: "asset"
-  input_sha1: "1d95a185ed33475b4716c041c353199b16c92829"
-  c_flags: "-O1"
+  input_sha1: "cf27f9b62c9bd30d614d1ac366aca8c0cb7fe301"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
@@ -7399,25 +7351,40 @@ entries {
 entries {
   function_name: "func_800A5314"
   module_name: "asset"
-  input_sha1: "911b3f3e67a847c049c05cc17b772edd4869d1f7"
-  c_flags: "-O1"
+  input_sha1: "ee6ef004b31ea16b5b1181b3ebc3f23769e435dd"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
-    param: 0
+    param: 1
   }
-  bit_exact_instructions: 589
-  matching_instructions: 589
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 585
+  matching_instructions: 600
   target_instructions: 666
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A5D7C"
   module_name: "asset"
-  input_sha1: "ebd78ff7d9c52c918bbe9e02ab7f951bb4758430"
+  input_sha1: "e1d8fe710fb357926676108040a4f88795157931"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7443,7 +7410,7 @@ entries {
 entries {
   function_name: "func_800A5F48"
   module_name: "asset"
-  input_sha1: "f9789a05124d4ad070d179d41316f1804a3b9303"
+  input_sha1: "0859f4b1438dedb8b281e4de3dfa3116b8cb10d9"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7546,7 +7513,7 @@ entries {
 entries {
   function_name: "func_800A68C0"
   module_name: "asset"
-  input_sha1: "c982193a9cdf782c37671064be39c9a62eb07dc6"
+  input_sha1: "b76c0d84a60edd72fff1dc7d231bbe440addb5aa"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7650,7 +7617,7 @@ entries {
 entries {
   function_name: "func_800A7148"
   module_name: "asset"
-  input_sha1: "73d977098e2bf41376d59a30abe59a076bdfbd8f"
+  input_sha1: "d22318cd0a184a56def50dc793658e1cbc8e70bc"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7683,25 +7650,40 @@ entries {
 entries {
   function_name: "func_800A7798"
   module_name: "asset"
-  input_sha1: "ded0a6269540361762f6491081ba1273fa602e7d"
-  c_flags: "-O1"
+  input_sha1: "316554e8eb963192f7a78e249908b79a59b39116"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
-    param: 0
+    param: 1
   }
-  bit_exact_instructions: 199
-  matching_instructions: 199
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 197
+  matching_instructions: 197
   target_instructions: 212
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A7AE8"
   module_name: "asset"
-  input_sha1: "a47aa6d73f14341dc80ad2834862429b96cca375"
+  input_sha1: "5378f1a9b3d94b2c6532f70dc87ecaada1ae71a7"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7738,14 +7720,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 148
-  matching_instructions: 148
+  matching_instructions: 153
   target_instructions: 197
   is_bit_exact: false
 }
 entries {
   function_name: "func_800A7DFC"
   module_name: "asset"
-  input_sha1: "6be81843d261cb8762ad26489b0da1f2af92799e"
+  input_sha1: "ebc39be85ef2d168613d55ac0983de1d40ff2999"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7771,8 +7753,8 @@ entries {
     site_index: 8
     param: 0
   }
-  bit_exact_instructions: 419
-  matching_instructions: 419
+  bit_exact_instructions: 417
+  matching_instructions: 472
   target_instructions: 626
   is_bit_exact: false
 }
@@ -7792,35 +7774,20 @@ entries {
 entries {
   function_name: "func_800A8F74"
   module_name: "asset"
-  input_sha1: "f05393b2f125618e949da7357992878916247f8c"
+  input_sha1: "37680a7e8cd58660a4d4163ee0f2125a8c25b347"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INVERT_IF_ELSE
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 2564
-  matching_instructions: 2564
+  bit_exact_instructions: 2428
+  matching_instructions: 2543
   target_instructions: 3242
   is_bit_exact: false
 }
 entries {
   function_name: "func_800AC21C"
   module_name: "asset"
-  input_sha1: "4da85a8aa3908f2dd52c0fd5f4341c0c8e6250b2"
+  input_sha1: "5f902b7d763ae5ce6c2480fe7fb1e482dd945c3a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -7841,8 +7808,8 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 284
-  matching_instructions: 284
+  bit_exact_instructions: 285
+  matching_instructions: 320
   target_instructions: 385
   is_bit_exact: false
 }
@@ -7901,34 +7868,33 @@ entries {
 entries {
   function_name: "func_800AC9CC"
   module_name: "asset"
-  input_sha1: "f2cbb536edd859b32ee42c1811ce706426bf2e9d"
+  input_sha1: "3774cd8b4a360cc57fac7815c1c8ce2a955a1a22"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
-    param: 0
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
   }
   ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 2
-    param: 0
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
   }
-  bit_exact_instructions: 41
-  matching_instructions: 41
+  bit_exact_instructions: 44
+  matching_instructions: 44
   target_instructions: 57
   is_bit_exact: false
 }
@@ -8416,13 +8382,13 @@ entries {
 entries {
   function_name: "func_8003BC50"
   module_name: "camera"
-  input_sha1: "e80d432e3d9911fe4cfa8193f2177133084ffd9f"
+  input_sha1: "7a299c095036c9440692fdf70ad6e6244cb1c6aa"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 63
-  matching_instructions: 63
+  bit_exact_instructions: 37
+  matching_instructions: 37
   target_instructions: 68
   is_bit_exact: false
 }
@@ -8556,7 +8522,7 @@ entries {
 entries {
   function_name: "func_8003C084"
   module_name: "camera"
-  input_sha1: "d418b1facfe86bf7320468dc241f2b77617f6272"
+  input_sha1: "6c83da0bfa6fef24db52ce91b09c46a33e11c841"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -8571,8 +8537,13 @@ entries {
     site_index: 9
     param: 0
   }
-  bit_exact_instructions: 55
-  matching_instructions: 55
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
+  }
+  bit_exact_instructions: 56
+  matching_instructions: 56
   target_instructions: 72
   is_bit_exact: false
 }
@@ -8784,12 +8755,11 @@ entries {
 entries {
   function_name: "func_8003C8D4"
   module_name: "camera"
-  input_sha1: "73a51b120790aa8d5cbb61db7200f78a5780b452"
+  input_sha1: "eb8068b41d4cd42d6959e30bd98374dd663ff4e4"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -8810,8 +8780,18 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 115
-  matching_instructions: 115
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 117
+  matching_instructions: 118
   target_instructions: 154
   is_bit_exact: false
 }
@@ -9051,7 +9031,7 @@ entries {
 entries {
   function_name: "RenderDrawEntries"
   module_name: "display"
-  input_sha1: "d76772b79ca74c207022563d3c51c430544c3eeb"
+  input_sha1: "78852520d0b72b69a5586eec4d4eb417b123e49b"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -9081,8 +9061,18 @@ entries {
     site_index: 22
     param: 0
   }
-  bit_exact_instructions: 330
-  matching_instructions: 330
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 52
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 53
+    param: 0
+  }
+  bit_exact_instructions: 335
+  matching_instructions: 340
   target_instructions: 476
   is_bit_exact: false
 }
@@ -10181,13 +10171,13 @@ entries {
 entries {
   function_name: "func_800616CC"
   module_name: "event"
-  input_sha1: "9faa76dedb0dd37442c5584b3a1f2873ef30d241"
+  input_sha1: "e3b9c68f9554530aa3199a40b9575e02ff172bf1"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 32
-  matching_instructions: 32
+  bit_exact_instructions: 35
+  matching_instructions: 38
   target_instructions: 101
   is_bit_exact: false
 }
@@ -10259,16 +10249,11 @@ entries {
 entries {
   function_name: "func_800623E4"
   module_name: "event"
-  input_sha1: "e784888970015f6ee053a151298881d9a9e71369"
+  input_sha1: "6f75567d482be5769292c07d1fda64a5947d15eb"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
   bit_exact_instructions: 43
   matching_instructions: 43
   target_instructions: 82
@@ -10277,7 +10262,7 @@ entries {
 entries {
   function_name: "func_8006252C"
   module_name: "event"
-  input_sha1: "9b1ce7d2d4d68ed920504efce970733ef599aa32"
+  input_sha1: "b7b5ffcce70cf7a29af090605fc0a4fda0a2b8fe"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -10514,7 +10499,7 @@ entries {
 entries {
   function_name: "func_80064114"
   module_name: "event"
-  input_sha1: "0f9b622baec8d85b54683240c25e29bbe43763ee"
+  input_sha1: "ff75c7c0213f0681691b5c6e0eca7493bd257a17"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -10534,38 +10519,48 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 175
-  matching_instructions: 175
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 8
+    param: 0
+  }
+  bit_exact_instructions: 182
+  matching_instructions: 200
   target_instructions: 231
   is_bit_exact: false
 }
 entries {
   function_name: "func_800644B0"
   module_name: "event"
-  input_sha1: "9aee27af50d0e75c26d57058b866967d1bdceb0c"
+  input_sha1: "822944ce1fe3a5a54d017dfef73f6ea6571e3949"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
     site_index: 0
-    param: 0
+    param: 2
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
+    site_index: 8
     param: 0
   }
-  bit_exact_instructions: 161
-  matching_instructions: 161
+  bit_exact_instructions: 164
+  matching_instructions: 182
   target_instructions: 217
   is_bit_exact: false
 }
 entries {
   function_name: "func_80064814"
   module_name: "event"
-  input_sha1: "37bdadd23b9468a640fe5e78e4b12a34e9d16e18"
+  input_sha1: "0fca43a52f7c20b357bbbf1418368c7da6f79179"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -10575,41 +10570,41 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 229
-  matching_instructions: 229
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 5
+    param: 0
+  }
+  bit_exact_instructions: 250
+  matching_instructions: 264
   target_instructions: 311
   is_bit_exact: false
 }
 entries {
   function_name: "func_80064CF0"
   module_name: "event"
-  input_sha1: "0b285494c1bd6a204e4174590ee0b34e90c4c778"
+  input_sha1: "9acfa4a3d980c81bf396d4db916b5852cc297737"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
     site_index: 0
-    param: 0
+    param: 2
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
+    site_index: 8
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 173
-  matching_instructions: 173
+  bit_exact_instructions: 170
+  matching_instructions: 188
   target_instructions: 225
   is_bit_exact: false
 }
@@ -11439,7 +11434,7 @@ entries {
 entries {
   function_name: "func_80075374"
   module_name: "farm"
-  input_sha1: "b331a981079fd006ad6381124b36f720b4fdc204"
+  input_sha1: "65616dd9b2dbe70e58ea8a5a194ec1bda59ba7d5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11454,8 +11449,8 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 279
-  matching_instructions: 279
+  bit_exact_instructions: 278
+  matching_instructions: 288
   target_instructions: 337
   is_bit_exact: false
 }
@@ -11582,18 +11577,13 @@ entries {
 entries {
   function_name: "func_80075EBC"
   module_name: "farm"
-  input_sha1: "cd86be2ea1172e5a0d88415318b860a66faf8d6e"
+  input_sha1: "2477426c493ce95aa66c1d5649c986c1af5e6846"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 5
-    param: 0
-  }
-  bit_exact_instructions: 108
-  matching_instructions: 108
+  bit_exact_instructions: 103
+  matching_instructions: 103
   target_instructions: 113
   is_bit_exact: false
 }
@@ -11613,49 +11603,44 @@ entries {
 entries {
   function_name: "func_80076108"
   module_name: "farm"
-  input_sha1: "3e5f25d4f3c5d31001ce964e460774cd0ae1da13"
+  input_sha1: "34de638722d61d36556dd29ec3c1511bf17bd7c8"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 102
-  matching_instructions: 102
+  bit_exact_instructions: 97
+  matching_instructions: 97
   target_instructions: 107
   is_bit_exact: false
 }
 entries {
   function_name: "func_800762B4"
   module_name: "farm"
-  input_sha1: "1ae42aa37afad134dcc6e16cc3348227422d3a41"
+  input_sha1: "d9ea3af79136cc6d23462f4e1ab5ce5fc84eeddb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 347
-  matching_instructions: 347
+  bit_exact_instructions: 344
+  matching_instructions: 357
   target_instructions: 420
   is_bit_exact: false
 }
 entries {
   function_name: "func_80076944"
   module_name: "farm"
-  input_sha1: "66e5759819ffe72e52315516ce7fe8baae502894"
-  c_flags: "-O1"
+  input_sha1: "3a019eb4e70253b53cc325547f66ee3608a586e3"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
+  c_flags: "-Wa,-g"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 119
-  matching_instructions: 119
+  bit_exact_instructions: 115
+  matching_instructions: 121
   target_instructions: 132
   is_bit_exact: false
 }
@@ -11701,7 +11686,7 @@ entries {
 entries {
   function_name: "func_80076F10"
   module_name: "farm"
-  input_sha1: "5935604ee6baefe23f11a67ee45d8a2d1b68724f"
+  input_sha1: "60145b9b1e1b9c4ec4f152a10c3f11627997dae5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11731,15 +11716,15 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 798
-  matching_instructions: 798
+  bit_exact_instructions: 706
+  matching_instructions: 735
   target_instructions: 897
   is_bit_exact: false
 }
 entries {
   function_name: "func_80077D14"
   module_name: "farm"
-  input_sha1: "78ca0748a28a87dfc09814292658e4dcdca1280e"
+  input_sha1: "02e102ba240d857eaee904650d440e07e9c55fdb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11764,15 +11749,15 @@ entries {
     site_index: 37
     param: 0
   }
-  bit_exact_instructions: 844
-  matching_instructions: 844
+  bit_exact_instructions: 719
+  matching_instructions: 747
   target_instructions: 951
   is_bit_exact: false
 }
 entries {
   function_name: "func_80078BF0"
   module_name: "farm"
-  input_sha1: "d8a240192e55b9cc02358a06e5ef8d7f684a75ef"
+  input_sha1: "8d3e4c85bb72c312b32f29fe48df91f88e19bfa1"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11787,15 +11772,15 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 781
-  matching_instructions: 781
+  bit_exact_instructions: 688
+  matching_instructions: 717
   target_instructions: 929
   is_bit_exact: false
 }
 entries {
   function_name: "func_80079A74"
   module_name: "farm"
-  input_sha1: "ca56c036f219883a99bc7ce20b8bfd647a3afb15"
+  input_sha1: "de6879c3b4b95ba48bd1bb031da13a84c81ddd53"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11815,15 +11800,15 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 761
-  matching_instructions: 761
+  bit_exact_instructions: 683
+  matching_instructions: 727
   target_instructions: 975
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007A9B0"
   module_name: "farm"
-  input_sha1: "0cb0b3579ad27aa2e267924e1e35b7b061c4297b"
+  input_sha1: "c88d4522989db2b13ba650fbe002799852752c43"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11848,15 +11833,15 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 834
-  matching_instructions: 834
+  bit_exact_instructions: 724
+  matching_instructions: 757
   target_instructions: 926
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007B828"
   module_name: "farm"
-  input_sha1: "959e785c60b8289e6771f42d776a128761d588d7"
+  input_sha1: "5ca2a699f3f43da2fdfad9a10790fba93e45bd5c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11871,116 +11856,81 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 306
-  matching_instructions: 306
+  bit_exact_instructions: 294
+  matching_instructions: 297
   target_instructions: 330
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007BD50"
   module_name: "farm"
-  input_sha1: "4add11153bd33c85584361fc77f3f9b1849fde7f"
+  input_sha1: "0a7d49c2d217464b7fcb32b606e26a35b8f44cf3"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 13
-    param: 0
-  }
-  bit_exact_instructions: 171
-  matching_instructions: 171
+  bit_exact_instructions: 159
+  matching_instructions: 162
   target_instructions: 206
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007C088"
   module_name: "farm"
-  input_sha1: "b7693d66dbd265446194c49d7c51cefa2e361e23"
+  input_sha1: "bf51a52f77011380c4c57e88a246754a3ef8a098"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 195
-  matching_instructions: 195
+  bit_exact_instructions: 175
+  matching_instructions: 181
   target_instructions: 211
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007C3D4"
   module_name: "farm"
-  input_sha1: "88d3835296bd8da4e0dbb4236fdecf3f11239741"
+  input_sha1: "5289607567a086ff32c8c709d4aeb9bb8883fed0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INVERT_IF_ELSE
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 213
-  matching_instructions: 213
+  bit_exact_instructions: 190
+  matching_instructions: 202
   target_instructions: 252
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007C7C4"
   module_name: "farm"
-  input_sha1: "7ca7b67e42521e7d109beb49cec2b766d09f758d"
+  input_sha1: "f12bf35ec149c1f5d42db155a06f31f562d43587"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fforce-addr"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 20
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 12
-    param: 0
-  }
-  bit_exact_instructions: 349
-  matching_instructions: 349
+  bit_exact_instructions: 351
+  matching_instructions: 377
   target_instructions: 444
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007CEB4"
   module_name: "farm"
-  input_sha1: "a00e5d56d0039654abaacddc862afa5da8ebb820"
+  input_sha1: "3ae0f33d956a30dbd33ee56e28f4fa4c66cf9449"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 6
-    param: 0
-  }
-  bit_exact_instructions: 318
-  matching_instructions: 318
+  bit_exact_instructions: 246
+  matching_instructions: 262
   target_instructions: 324
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007D3C4"
   module_name: "farm"
-  input_sha1: "8d06c53d3a717c42c062b07344974f1f8e489b71"
+  input_sha1: "78648efa1bb92e26bb027eb5913156fc79ba3df0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -11991,85 +11941,80 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 167
-  matching_instructions: 167
+  bit_exact_instructions: 162
+  matching_instructions: 175
   target_instructions: 199
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007D6E0"
   module_name: "farm"
-  input_sha1: "a0a6f0a47c77c6f89bc154490342c1ef7ddf3eaa"
+  input_sha1: "97f21487e00f5570749a52b9c0a6a9813a574ce3"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 180
-  matching_instructions: 180
+  bit_exact_instructions: 124
+  matching_instructions: 135
   target_instructions: 197
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007D9F4"
   module_name: "farm"
-  input_sha1: "fb30fb5d9059d437ad6f55ece9f5fda5b50dee2d"
-  c_flags: "-O1"
+  input_sha1: "63010209b402df70cd04521b875c07f37178f1e7"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 9
-    param: 0
-  }
-  bit_exact_instructions: 69
-  matching_instructions: 69
+  bit_exact_instructions: 58
+  matching_instructions: 59
   target_instructions: 81
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007DB38"
   module_name: "farm"
-  input_sha1: "c1b39f87f2b5bd70494ab6b5581676b933d33c33"
+  input_sha1: "1aaefb6216b7bfb48e8b6ecbb0300a18a3fb3649"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 164
-  matching_instructions: 164
+  bit_exact_instructions: 146
+  matching_instructions: 152
   target_instructions: 174
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007DDF0"
   module_name: "farm"
-  input_sha1: "826669aac406379ded4285deb7cad401b1811127"
+  input_sha1: "bdb16498b7942dfc3bcdc1f890c0f0f496584bd7"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 69
-  matching_instructions: 69
+  bit_exact_instructions: 62
+  matching_instructions: 62
   target_instructions: 73
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007DF14"
   module_name: "farm"
-  input_sha1: "1c980d844afc8a90965b651bacdd60cdf70d0aba"
-  c_flags: "-O1"
+  input_sha1: "f4af30193b1859504126b53afc781ad7ab14d6ba"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 74
-  matching_instructions: 74
+  bit_exact_instructions: 66
+  matching_instructions: 69
   target_instructions: 90
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007E07C"
   module_name: "farm"
-  input_sha1: "71848e200fd0ab1c94b86a92e0f23026817ca84e"
+  input_sha1: "f656bdfd4a093331e9048caa7bedfdda4c4db231"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12094,7 +12039,7 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 95
+  bit_exact_instructions: 93
   matching_instructions: 95
   target_instructions: 154
   is_bit_exact: false
@@ -12102,25 +12047,40 @@ entries {
 entries {
   function_name: "func_8007E2E4"
   module_name: "farm"
-  input_sha1: "66a87c7ff9b6b33389f69f38e79a51ce8844d539"
-  c_flags: "-O1"
+  input_sha1: "cdbdd54da46d455832b0f4c69084d235359e744e"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
   }
-  bit_exact_instructions: 77
-  matching_instructions: 77
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 79
+  matching_instructions: 79
   target_instructions: 87
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007E440"
   module_name: "farm"
-  input_sha1: "44e88fdb182b4e5405df086273fb6bbf753ddb8f"
+  input_sha1: "f369103235718fbf759e9709bc56eba4d6dcf675"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12142,14 +12102,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 83
-  matching_instructions: 83
+  matching_instructions: 91
   target_instructions: 112
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007E600"
   module_name: "farm"
-  input_sha1: "1a6a11dc3707c61aced922ce5d12a00bda299bee"
+  input_sha1: "25b8aa3edf232a097162d9c662ad88aa6d265c0d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12169,65 +12129,54 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 344
-  matching_instructions: 344
+  bit_exact_instructions: 313
+  matching_instructions: 336
   target_instructions: 441
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007ECE4"
   module_name: "farm"
-  input_sha1: "772f86d30a55619d26a1ee26138399c062c3a422"
-  c_flags: "-O1"
+  input_sha1: "b9432f7780730cda56b22ee4620eb38ce2c17b15"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 19
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 296
-  matching_instructions: 296
+  bit_exact_instructions: 271
+  matching_instructions: 286
   target_instructions: 421
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007F378"
   module_name: "farm"
-  input_sha1: "4650fd61d94f606bcd9b6587b21b273ee6ba7d12"
+  input_sha1: "5454b5eb1c442ee9935a43418edaffcc862f378f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 86
-  matching_instructions: 86
+  bit_exact_instructions: 75
+  matching_instructions: 79
   target_instructions: 90
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007F4E0"
   module_name: "farm"
-  input_sha1: "e9e47bf3f4aebaa19abfb047b99bd9f43c6a951a"
+  input_sha1: "9c31b633482ce4b82b7dd38906905457f3765802"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 151
-  matching_instructions: 151
+  bit_exact_instructions: 146
+  matching_instructions: 158
   target_instructions: 207
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007F81C"
   module_name: "farm"
-  input_sha1: "8e6c4ca069943d5efdc40bae038d7f68dc732579"
+  input_sha1: "9febed1ae3ab0a085ee13577868f43d0ab1ce84f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12242,20 +12191,19 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 126
-  matching_instructions: 126
+  bit_exact_instructions: 108
+  matching_instructions: 114
   target_instructions: 138
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007FA44"
   module_name: "farm"
-  input_sha1: "e4c4c3097768a2e364be9ed66cf725801f5dd23c"
+  input_sha1: "0614474ac8611fbf2acdef6cd952d16646a41eda"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
@@ -12276,15 +12224,15 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 104
-  matching_instructions: 104
+  bit_exact_instructions: 100
+  matching_instructions: 100
   target_instructions: 114
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007FC0C"
   module_name: "farm"
-  input_sha1: "5e70c4a4133551b53f63b4825e1407b7c27853fb"
+  input_sha1: "f89613558021c062bd952b341fe1bc302f5cc0bf"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12302,12 +12250,17 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
     site_index: 0
-    param: 1
+    param: 3
   }
   ast_mutations {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
     param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
   }
   bit_exact_instructions: 51
   matching_instructions: 51
@@ -12317,7 +12270,7 @@ entries {
 entries {
   function_name: "func_8007FCD8"
   module_name: "farm"
-  input_sha1: "04993d37a4f3b6c63e9bd8ff93a4c13a067db448"
+  input_sha1: "56f79b5b549ef62d0fe00caf90b7b29e15ca58b1"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12343,29 +12296,28 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 71
-  matching_instructions: 71
+  bit_exact_instructions: 70
+  matching_instructions: 72
   target_instructions: 90
   is_bit_exact: false
 }
 entries {
   function_name: "func_8007FE40"
   module_name: "farm"
-  input_sha1: "1e84f29fb6fda524e1831f05697d6e2dde455f21"
+  input_sha1: "c183903e6aa9abe482163d0740cc136db87b5503"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
-  bit_exact_instructions: 49
-  matching_instructions: 49
+  bit_exact_instructions: 46
+  matching_instructions: 46
   target_instructions: 49
-  is_bit_exact: true
+  is_bit_exact: false
 }
 entries {
   function_name: "func_8007FF04"
   module_name: "farm"
-  input_sha1: "d3298dfe34937989538b059500f1eb7e444e10e6"
+  input_sha1: "a9e736338d5be9469cb0fb00ceeedf3353abfa3b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12400,54 +12352,54 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 105
-  matching_instructions: 105
+  bit_exact_instructions: 102
+  matching_instructions: 102
   target_instructions: 115
   is_bit_exact: false
 }
 entries {
   function_name: "func_800800D0"
   module_name: "farm"
-  input_sha1: "775a6eaab4811e5443ce1b8400d981521ba1e0ce"
+  input_sha1: "bc16ee173d6d8a6d7ca4e046d68c28df9cf93e8c"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 156
-  matching_instructions: 156
+  bit_exact_instructions: 130
+  matching_instructions: 138
   target_instructions: 165
   is_bit_exact: false
 }
 entries {
   function_name: "func_80080364"
   module_name: "farm"
-  input_sha1: "a7b7607adf1e6fe60507b9633c422428b52a9d48"
+  input_sha1: "e2a3b1e95cc48a0ae462e52e450a0a0a36f81e13"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 175
-  matching_instructions: 175
+  bit_exact_instructions: 157
+  matching_instructions: 157
   target_instructions: 179
   is_bit_exact: false
 }
 entries {
   function_name: "func_80080630"
   module_name: "farm"
-  input_sha1: "924ae7a500df49c2a2ad23311879efd01e0e7245"
+  input_sha1: "b207c99593d6d499bfd9be8eac8a4384fc26e153"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 110
-  matching_instructions: 110
+  bit_exact_instructions: 96
+  matching_instructions: 103
   target_instructions: 114
   is_bit_exact: false
 }
 entries {
   function_name: "func_800807F8"
   module_name: "farm"
-  input_sha1: "120ede359574831d0eff639894c38e9b9bfb3cb3"
+  input_sha1: "ebc2335273b6eed5617b96950bc1ba80bc690da2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12480,7 +12432,7 @@ entries {
 entries {
   function_name: "func_800808B0"
   module_name: "farm"
-  input_sha1: "05c13e6fda11d10a21f9046360bea57963a14270"
+  input_sha1: "70be9c9cf350df8219434daec0a39617662b9bb2"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12500,15 +12452,15 @@ entries {
     site_index: 14
     param: 0
   }
-  bit_exact_instructions: 41
-  matching_instructions: 41
+  bit_exact_instructions: 39
+  matching_instructions: 39
   target_instructions: 42
   is_bit_exact: false
 }
 entries {
   function_name: "func_80080958"
   module_name: "farm"
-  input_sha1: "f90efa9ac8a7376d32ca47ca7a2b2eaaa22c9cc6"
+  input_sha1: "4a67784b0143c7b997688c14f26a9efedd56cffd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12541,7 +12493,7 @@ entries {
 entries {
   function_name: "func_80080A10"
   module_name: "farm"
-  input_sha1: "ee1bb48d774d59792d6a2a04f26cbb8a720eb6d4"
+  input_sha1: "ae74f8621d2ea661f4cd74ab255a7ecb56e3b74a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12557,157 +12509,28 @@ entries {
     site_index: 13
     param: 0
   }
-  bit_exact_instructions: 76
-  matching_instructions: 76
+  bit_exact_instructions: 75
+  matching_instructions: 80
   target_instructions: 87
   is_bit_exact: false
 }
 entries {
   function_name: "func_80080B6C"
   module_name: "farm"
-  input_sha1: "46e4eab54b43f439075b6720c7ac61e19c74d92d"
-  c_flags: "-O1"
+  input_sha1: "04c56e8c57cea4c7fb0f93ec6ad0d39581800ff8"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 70
-  matching_instructions: 70
+  bit_exact_instructions: 65
+  matching_instructions: 67
   target_instructions: 76
   is_bit_exact: false
 }
 entries {
   function_name: "func_80080C9C"
   module_name: "farm"
-  input_sha1: "105925c9de1eff6ab90e234720f20c4dc55b7840"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 66
-  matching_instructions: 66
-  target_instructions: 68
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80080DAC"
-  module_name: "farm"
-  input_sha1: "db2aa306e2bb86feae9e2890a001a4568aea7a91"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 66
-  matching_instructions: 66
-  target_instructions: 68
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80080EBC"
-  module_name: "farm"
-  input_sha1: "3a04f8e1ff3f9a2636c45d95b746292635298567"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 89
-  matching_instructions: 89
-  target_instructions: 93
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80081030"
-  module_name: "farm"
-  input_sha1: "4eee67c80ce4d62dabb1a2a352ca6d52a99232d5"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 2
-  }
-  bit_exact_instructions: 96
-  matching_instructions: 96
-  target_instructions: 126
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80081228"
-  module_name: "farm"
-  input_sha1: "8be30851dbbdb34971de17f288e80ad04d39ec5e"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 2
-  }
-  bit_exact_instructions: 96
-  matching_instructions: 96
-  target_instructions: 126
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80081420"
-  module_name: "farm"
-  input_sha1: "7f0b1ffe6e84d13537d338d52f5ff98e527062d0"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 2
-  }
-  bit_exact_instructions: 96
-  matching_instructions: 96
-  target_instructions: 126
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80081618"
-  module_name: "farm"
-  input_sha1: "760cb3cb259694fe87a3267674bde41d14c06fe1"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 2
-  }
-  bit_exact_instructions: 96
-  matching_instructions: 96
-  target_instructions: 126
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80081810"
-  module_name: "farm"
-  input_sha1: "179fb92d28f1aade4739b5ec953a16e033b41a5d"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 2
-    param: 2
-  }
-  bit_exact_instructions: 96
-  matching_instructions: 96
-  target_instructions: 126
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80081A08"
-  module_name: "farm"
-  input_sha1: "9110f79f922b4720c1ee7646c6ce4026b13429b5"
+  input_sha1: "2fbd1a3260c3618f26ffc5056392791bafd4e915"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12725,12 +12548,186 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
     site_index: 0
-    param: 1
+    param: 3
   }
   ast_mutations {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
     param: 1
+  }
+  bit_exact_instructions: 64
+  matching_instructions: 64
+  target_instructions: 68
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80080DAC"
+  module_name: "farm"
+  input_sha1: "ebda68fc5f7a36d523eadd3db2cebe8ab1e8e1a8"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 64
+  matching_instructions: 64
+  target_instructions: 68
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80080EBC"
+  module_name: "farm"
+  input_sha1: "26736434846f8b0be3b2fa6201383dd9cde6136d"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 83
+  matching_instructions: 83
+  target_instructions: 93
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80081030"
+  module_name: "farm"
+  input_sha1: "d19225b2ecad999f211e0f02e703c38099a28f75"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 2
+    param: 2
+  }
+  bit_exact_instructions: 91
+  matching_instructions: 93
+  target_instructions: 126
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80081228"
+  module_name: "farm"
+  input_sha1: "338266fc689350ad205e07e0139a170776d8dff6"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 2
+    param: 2
+  }
+  bit_exact_instructions: 91
+  matching_instructions: 93
+  target_instructions: 126
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80081420"
+  module_name: "farm"
+  input_sha1: "827bf9d945632feeadb644313bc3f8eb1cf9fdce"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 2
+    param: 2
+  }
+  bit_exact_instructions: 91
+  matching_instructions: 93
+  target_instructions: 126
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80081618"
+  module_name: "farm"
+  input_sha1: "c230487d0555b4fc5773a4efe6a6219c0a63e873"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 2
+    param: 2
+  }
+  bit_exact_instructions: 91
+  matching_instructions: 93
+  target_instructions: 126
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80081810"
+  module_name: "farm"
+  input_sha1: "26402892fff344fd7b9281ba68c9ace4c3e07dff"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 2
+    param: 2
+  }
+  bit_exact_instructions: 91
+  matching_instructions: 93
+  target_instructions: 126
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80081A08"
+  module_name: "farm"
+  input_sha1: "23c8f0884e87c23c318ddf58a267551cd3e856ed"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 8
+    param: 0
   }
   bit_exact_instructions: 62
   matching_instructions: 62
@@ -12776,28 +12773,33 @@ entries {
 entries {
   function_name: "func_80081E5C"
   module_name: "farm"
-  input_sha1: "d2e92f2a073c8ffbf23c47a5b59cea7a15f6cb0b"
-  c_flags: "-O1"
+  input_sha1: "504192bbf1ba1ec61e98ad71b86dea31cd9a1447"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
     site_index: 0
-    param: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
   }
   bit_exact_instructions: 169
-  matching_instructions: 169
+  matching_instructions: 179
   target_instructions: 194
   is_bit_exact: false
 }
@@ -12878,7 +12880,7 @@ entries {
 entries {
   function_name: "func_8008277C"
   module_name: "farm"
-  input_sha1: "a0574bd13b758a75cbcb24a8951e3c2df04ce0ff"
+  input_sha1: "d403a4579cfc30bdef55fb05be115d6cbfc18f62"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -12919,7 +12921,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 140
-  matching_instructions: 140
+  matching_instructions: 144
   target_instructions: 164
   is_bit_exact: false
 }
@@ -13268,7 +13270,7 @@ entries {
 entries {
   function_name: "func_800844F4"
   module_name: "farm"
-  input_sha1: "a2a36f6caca9d04a9d620c8eec0bfc0aaa530994"
+  input_sha1: "6b10655155259652b589ce81e9409e6d7c4cc4f5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -13301,7 +13303,7 @@ entries {
 entries {
   function_name: "func_80084770"
   module_name: "farm"
-  input_sha1: "73d680e9382ee86188075322a9798ca5a4a5ea25"
+  input_sha1: "42f734075584d90e34dc279e4f6116af54e63536"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -13583,7 +13585,7 @@ entries {
 entries {
   function_name: "func_80085F70"
   module_name: "festival"
-  input_sha1: "a47347c22d9101a8a1aab099a6ca9bd307a4aa65"
+  input_sha1: "481c959495dadd73a4fa84675a475a09063bce05"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -13593,10 +13595,10 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 141
-  matching_instructions: 141
+  bit_exact_instructions: 137
+  matching_instructions: 137
   target_instructions: 141
-  is_bit_exact: true
+  is_bit_exact: false
 }
 entries {
   function_name: "func_800861A4"
@@ -13775,31 +13777,11 @@ entries {
 entries {
   function_name: "func_800876D0"
   module_name: "festival"
-  input_sha1: "0b24cdad5396197f283381ca49a1ab3d9f3d7fec"
+  input_sha1: "1888218192aa8e38b76de42119f1e0dc848c859a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
   bit_exact_instructions: 45
   matching_instructions: 45
   target_instructions: 51
@@ -13965,7 +13947,7 @@ entries {
 entries {
   function_name: "func_8008841C"
   module_name: "festival"
-  input_sha1: "461bc411e4f8edd4db953f51b6d4704eb177e7d1"
+  input_sha1: "cfdbbafc0f8621bf2d3c601234e29b40b6c5c64d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -14173,23 +14155,13 @@ entries {
 entries {
   function_name: "func_8008A650"
   module_name: "festival"
-  input_sha1: "717886d6961c63339693b77465b5484ca92c165f"
+  input_sha1: "b436ca4bd5fe3706bffbe1ae9b3aad1e76ad70c0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 3
-    param: 0
-  }
-  bit_exact_instructions: 183
-  matching_instructions: 183
+  bit_exact_instructions: 168
+  matching_instructions: 187
   target_instructions: 230
   is_bit_exact: false
 }
@@ -14243,7 +14215,7 @@ entries {
 entries {
   function_name: "func_8008B1B8"
   module_name: "festival"
-  input_sha1: "809e83da9aa36fedc02163907a01f053d21ec10e"
+  input_sha1: "5dbc0e957b36e503bf112f538cd07e523cb8f095"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -14260,6 +14232,11 @@ entries {
   }
   ast_mutations {
     kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 0
     param: 0
   }
@@ -14338,7 +14315,7 @@ entries {
 entries {
   function_name: "func_8008B9AC"
   module_name: "festival"
-  input_sha1: "0abc2dcfde0a6e6702858bfb173641946449a1f5"
+  input_sha1: "e1d3c917764bf71378560bde5000a210d429e9c6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -14402,13 +14379,13 @@ entries {
 entries {
   function_name: "func_8008C358"
   module_name: "festival"
-  input_sha1: "f3160b87a796dd3fb4b6a87c6dc343952f8ccfa9"
+  input_sha1: "c46ae0ad73778db4f13ac1819dab49d22ed9bba0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 692
-  matching_instructions: 692
+  bit_exact_instructions: 696
+  matching_instructions: 719
   target_instructions: 783
   is_bit_exact: false
 }
@@ -14453,13 +14430,13 @@ entries {
 entries {
   function_name: "func_8008D1C0"
   module_name: "festival"
-  input_sha1: "28ad02269a1569a013bdf87e0c300ac2fda40ff4"
+  input_sha1: "332e48d13c52d26b3fba86229d7e1f1eec0e9ef2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 238
-  matching_instructions: 238
+  bit_exact_instructions: 237
+  matching_instructions: 243
   target_instructions: 292
   is_bit_exact: false
 }
@@ -14484,18 +14461,18 @@ entries {
 entries {
   function_name: "func_8008D70C"
   module_name: "festival"
-  input_sha1: "60ad408d34fc3c20c0bbe2f847102b07fa4e79a7"
-  c_flags: "-O1"
+  input_sha1: "4f011cb9ae7e1cf838303540b80fabb32d6b9736"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
+  c_flags: "-Wa,-g"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 171
-  matching_instructions: 171
+  bit_exact_instructions: 169
+  matching_instructions: 177
   target_instructions: 189
   is_bit_exact: false
 }
@@ -14573,91 +14550,91 @@ entries {
 entries {
   function_name: "func_8008DF9C"
   module_name: "festival"
-  input_sha1: "d0f9432ca796c59b72504f3bd9daafe87d988667"
+  input_sha1: "197f421ea4949aef9d0aadd21a4c01b9a88c6e5b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 533
-  matching_instructions: 533
+  matching_instructions: 546
   target_instructions: 636
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008E98C"
   module_name: "festival"
-  input_sha1: "02f1acb072014d027f34c0bdec5f2997c3e95951"
+  input_sha1: "b04a8904f86352931ca1eb17fd6ff39f78a8efab"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 533
-  matching_instructions: 533
+  matching_instructions: 546
   target_instructions: 636
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008F37C"
   module_name: "festival"
-  input_sha1: "8f4f55d5dbadbc5fa704a7cc2f506a6d04ba80b5"
+  input_sha1: "ee5f560bd8ff001b22f556037f97267c9d6b2ad5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 469
-  matching_instructions: 469
+  matching_instructions: 480
   target_instructions: 571
   is_bit_exact: false
 }
 entries {
   function_name: "func_8008FC68"
   module_name: "festival"
-  input_sha1: "b999d004838d5613bd1eba89b121118e4b03c6ec"
+  input_sha1: "9a8e74915aa94293753ee924116900416204f636"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 452
-  matching_instructions: 452
+  bit_exact_instructions: 451
+  matching_instructions: 463
   target_instructions: 543
   is_bit_exact: false
 }
 entries {
   function_name: "func_800904E4"
   module_name: "festival"
-  input_sha1: "34b7be3c199fa90a84e5df3dc832b122c1098310"
+  input_sha1: "a4b6aa47dd4229e7c6c208c98f9796006db3ff80"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 475
-  matching_instructions: 475
+  bit_exact_instructions: 477
+  matching_instructions: 488
   target_instructions: 581
   is_bit_exact: false
 }
 entries {
   function_name: "func_80090DF8"
   module_name: "festival"
-  input_sha1: "43ef15d1f8e2514b92747ae5e01f111350fcebea"
+  input_sha1: "a765fe91d3a308419d6c14c0a7a67045efb24938"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 475
-  matching_instructions: 475
+  bit_exact_instructions: 477
+  matching_instructions: 488
   target_instructions: 581
   is_bit_exact: false
 }
 entries {
   function_name: "func_8009170C"
   module_name: "festival"
-  input_sha1: "c26037beeeb1d438d2823c56c392dbe6ae3f86bd"
+  input_sha1: "9216c3d503dbea9772b8a13bc13ea81946268b4a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 503
-  matching_instructions: 503
+  bit_exact_instructions: 505
+  matching_instructions: 517
   target_instructions: 610
   is_bit_exact: false
 }
@@ -14757,26 +14734,26 @@ entries {
 entries {
   function_name: "func_80093CE0"
   module_name: "festival"
-  input_sha1: "b4f1f4a89c3162ac64552a24e689cb5ed6da19fe"
+  input_sha1: "47bfeb02238618681624ca8987aff1741129946b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 332
-  matching_instructions: 332
+  matching_instructions: 344
   target_instructions: 359
   is_bit_exact: false
 }
 entries {
   function_name: "func_8009427C"
   module_name: "festival"
-  input_sha1: "32f367b1933b54240879dccd99d7f54f3345d746"
+  input_sha1: "87100e020ae40c111cb111da37b77537184e53f1"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 291
-  matching_instructions: 291
+  matching_instructions: 303
   target_instructions: 316
   is_bit_exact: false
 }
@@ -14836,46 +14813,46 @@ entries {
 entries {
   function_name: "func_80094A5C"
   module_name: "festival"
-  input_sha1: "4e93bab952179d1557627dbb6bc56701f098532a"
+  input_sha1: "dca7017aeba39f7c68ab9153d9d9653311ca5dcb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 738
-  matching_instructions: 738
+  bit_exact_instructions: 745
+  matching_instructions: 755
   target_instructions: 932
   is_bit_exact: false
 }
 entries {
   function_name: "func_800958EC"
   module_name: "festival"
-  input_sha1: "21435749a2748464d0dd3ece3e0ae1af487f97e9"
+  input_sha1: "230b6f639353bd618718c5c6a7f74496e4b3dc3f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 488
-  matching_instructions: 488
+  bit_exact_instructions: 489
+  matching_instructions: 493
   target_instructions: 606
   is_bit_exact: false
 }
 entries {
   function_name: "func_80096264"
   module_name: "festival"
-  input_sha1: "af5ab27d35152798fec51e3d1c430318dab28470"
+  input_sha1: "a31e308166644da545d5f44fc4526e89977aa9ad"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 266
-  matching_instructions: 266
+  matching_instructions: 272
   target_instructions: 351
   is_bit_exact: false
 }
 entries {
   function_name: "func_800967E0"
   module_name: "festival"
-  input_sha1: "a9883e2cb55acf74ac1b642c2ff5bd9a697f8232"
+  input_sha1: "1ce7d7bf986f6546b00dd148b6d01c4caae8c0a8"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -14928,149 +14905,124 @@ entries {
 entries {
   function_name: "func_80096978"
   module_name: "festival"
-  input_sha1: "ce2defa9fe791dbb57538fe4c966022d74c1c534"
+  input_sha1: "062490e485b00d46e422d02e74455e4773aca001"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 231
-  matching_instructions: 231
+  bit_exact_instructions: 233
+  matching_instructions: 237
   target_instructions: 289
   is_bit_exact: false
 }
 entries {
   function_name: "func_80096DFC"
   module_name: "festival"
-  input_sha1: "2f0e98aa4c629fa4940e6407008df9e77e480b12"
+  input_sha1: "2bdb36dfc924dd4c056d192428a26a77b08d8b8c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 323
-  matching_instructions: 323
+  bit_exact_instructions: 320
+  matching_instructions: 329
   target_instructions: 383
   is_bit_exact: false
 }
 entries {
   function_name: "func_800973F8"
   module_name: "festival"
-  input_sha1: "afeb75a219c2df80e3823cffb79fa30176cb9fe7"
+  input_sha1: "620e74906a62475be12308142c5c97d851d04573"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 213
-  matching_instructions: 213
+  bit_exact_instructions: 214
+  matching_instructions: 220
   target_instructions: 259
   is_bit_exact: false
 }
 entries {
   function_name: "func_80097804"
   module_name: "festival"
-  input_sha1: "e4d02c73cb9b5acb8c49f3a0001b26c1fd1b3f02"
+  input_sha1: "e5e920bfbb9637babdd6fe7ee57af15d858dd273"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 254
-  matching_instructions: 254
+  bit_exact_instructions: 253
+  matching_instructions: 260
   target_instructions: 299
   is_bit_exact: false
 }
 entries {
   function_name: "func_80097CB0"
   module_name: "festival"
-  input_sha1: "1b3312b32f285df11f163b8b54207c481e44c744"
+  input_sha1: "8ab2214a470a12dfdd5f38ce2621f70389a3de08"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 253
-  matching_instructions: 253
+  bit_exact_instructions: 256
+  matching_instructions: 262
   target_instructions: 310
   is_bit_exact: false
 }
 entries {
   function_name: "func_80098188"
   module_name: "festival"
-  input_sha1: "0a92a1fada1551eecb07e3fa990ab504c353da16"
+  input_sha1: "1dd83f6837ed4facfd773f87a85c65aea31b7132"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 301
-  matching_instructions: 301
+  bit_exact_instructions: 300
+  matching_instructions: 307
   target_instructions: 366
   is_bit_exact: false
 }
 entries {
   function_name: "func_80098740"
   module_name: "festival"
-  input_sha1: "23de397d6515821482c2a5f1fdd78a3d9330495a"
-  c_flags: "-O1"
+  input_sha1: "59f731aeca6940ec2f2b23a865a277c71e6b3997"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 225
-  matching_instructions: 225
+  bit_exact_instructions: 237
+  matching_instructions: 237
   target_instructions: 255
   is_bit_exact: false
 }
 entries {
   function_name: "func_80098B3C"
   module_name: "festival"
-  input_sha1: "a9f3d64cb56be87354c94382c36bb8fab57c27cd"
-  c_flags: "-O1"
+  input_sha1: "a1800297eba0a0dd99f8c6dcc1e00a149701dcdf"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 233
-  matching_instructions: 233
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 232
+  matching_instructions: 232
   target_instructions: 250
   is_bit_exact: false
 }
 entries {
   function_name: "func_80098F24"
   module_name: "festival"
-  input_sha1: "e125faea8866e7d1a1fa0f9045ab75733fba192b"
+  input_sha1: "95e6845c0b29c8a8bdd1b776c1b84e6c8760692d"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 18
-    param: 0
-  }
-  bit_exact_instructions: 154
-  matching_instructions: 154
+  bit_exact_instructions: 134
+  matching_instructions: 142
   target_instructions: 167
   is_bit_exact: false
 }
 entries {
   function_name: "func_800991C0"
   module_name: "festival"
-  input_sha1: "02b59c6f273e3517e8b47b938bb03bbc7c6e326b"
+  input_sha1: "e392ada020cb2dce3d1a76216be55285cd990f9c"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -15125,8 +15077,8 @@ entries {
     site_index: 17
     param: 0
   }
-  bit_exact_instructions: 142
-  matching_instructions: 142
+  bit_exact_instructions: 133
+  matching_instructions: 137
   target_instructions: 153
   is_bit_exact: false
 }
@@ -15199,7 +15151,7 @@ entries {
 entries {
   function_name: "func_800995F8"
   module_name: "festival"
-  input_sha1: "dd57d0a765fbd199aee6af03e372ed6bdeaa5f4b"
+  input_sha1: "15af9d2dec6839803d52810194d5fea3e3bfb6b6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -15209,8 +15161,8 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 128
-  matching_instructions: 128
+  bit_exact_instructions: 116
+  matching_instructions: 116
   target_instructions: 131
   is_bit_exact: false
 }
@@ -15341,7 +15293,7 @@ entries {
 entries {
   function_name: "func_80099C94"
   module_name: "festival"
-  input_sha1: "d9547ed8e4d74e0a7d1c824fa0e2ae031ea0364c"
+  input_sha1: "10ff7ad23e6e3179b6a54735eab4fcc070d9cb1a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -15357,8 +15309,8 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 80
-  matching_instructions: 80
+  bit_exact_instructions: 73
+  matching_instructions: 77
   target_instructions: 85
   is_bit_exact: false
 }
@@ -15524,7 +15476,7 @@ entries {
 entries {
   function_name: "func_8009A2D0"
   module_name: "festival"
-  input_sha1: "e9374e7e88dc8946a47b106c7c38d0a9c2ac5503"
+  input_sha1: "32271d4f39391df85bb674291b11a0f219e5a057"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -15613,43 +15565,13 @@ entries {
 entries {
   function_name: "func_8009A53C"
   module_name: "festival"
-  input_sha1: "3e9a8f426547ba5565c47fb20a6bc54b2b3474d1"
+  input_sha1: "d40ac9b2d6f24283b43cba7795b4454460d117cb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 9
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
-  }
-  bit_exact_instructions: 165
-  matching_instructions: 165
+  bit_exact_instructions: 140
+  matching_instructions: 146
   target_instructions: 181
   is_bit_exact: false
 }
@@ -15690,7 +15612,7 @@ entries {
 entries {
   function_name: "func_8009A97C"
   module_name: "festival"
-  input_sha1: "bf8688ce35f261cf126418a9bdd432c2ce47811b"
+  input_sha1: "fc463a495f4c86c60b5883bc681daa40e1e0980b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -15705,8 +15627,8 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 72
-  matching_instructions: 72
+  bit_exact_instructions: 69
+  matching_instructions: 74
   target_instructions: 83
   is_bit_exact: false
 }
@@ -15834,12 +15756,11 @@ entries {
 entries {
   function_name: "func_8009AFB4"
   module_name: "festival"
-  input_sha1: "c9360a2dd3e5805d167ec3ca216872a1f094d6d7"
+  input_sha1: "9b935207104212d786ceadde3a2602239b892176"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   bit_exact_instructions: 44
   matching_instructions: 44
   target_instructions: 45
@@ -15848,7 +15769,7 @@ entries {
 entries {
   function_name: "func_8009B068"
   module_name: "festival"
-  input_sha1: "70f242ca2a6104818d6fca18aaedf74b483dc47e"
+  input_sha1: "f1e053a9345d62b8862ee728e5c16bac4dadf11d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -16364,19 +16285,14 @@ entries {
 entries {
   function_name: "func_80026AE4"
   module_name: "graphic_1"
-  input_sha1: "1199c53fc850718443b2a4051c19f0e13b8ec8cb"
+  input_sha1: "48965fb79f8786f6fe09d93418c9632c1969d792"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-schedule-insns"
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 4
-    param: 0
-  }
-  bit_exact_instructions: 49
-  matching_instructions: 49
+  bit_exact_instructions: 42
+  matching_instructions: 43
   target_instructions: 63
   is_bit_exact: false
 }
@@ -16412,7 +16328,7 @@ entries {
 entries {
   function_name: "func_80026CEC"
   module_name: "graphic_1"
-  input_sha1: "12748e1791bb5a9f17d3bdf6a9249db4e5d63c54"
+  input_sha1: "aa0e9daf40a5f48292306b222d78c1ff53bf33fd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -16438,7 +16354,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 61
-  matching_instructions: 61
+  matching_instructions: 62
   target_instructions: 99
   is_bit_exact: false
 }
@@ -16605,7 +16521,7 @@ entries {
 entries {
   function_name: "GraphicClearDisplay"
   module_name: "graphic_3"
-  input_sha1: "3c4f0d6595ed1d8f73a15947d0bd883693b04e5a"
+  input_sha1: "f2917451a8e2a00509a1c44f521b3135cc17f14b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -16630,8 +16546,13 @@ entries {
     site_index: 7
     param: 0
   }
-  bit_exact_instructions: 76
-  matching_instructions: 76
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 14
+    param: 2
+  }
+  bit_exact_instructions: 74
+  matching_instructions: 74
   target_instructions: 81
   is_bit_exact: false
 }
@@ -16652,13 +16573,13 @@ entries {
 entries {
   function_name: "GraphicGetDirectionAngle"
   module_name: "graphic_3"
-  input_sha1: "db7585bcf7ef3b301301249a1218ba9c36f2db0a"
+  input_sha1: "3244b04b7236245a192ad32732e87399ed7e2583"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 5
-  matching_instructions: 5
+  bit_exact_instructions: 6
+  matching_instructions: 6
   target_instructions: 26
   is_bit_exact: false
 }
@@ -16781,28 +16702,23 @@ entries {
 entries {
   function_name: "GraphicSetupCamera"
   module_name: "graphic_3"
-  input_sha1: "6ebf80fb67180a3406d2dfda275f161549730e42"
+  input_sha1: "80557ef39bf589e66759376d4999a47164c1e4d3"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
+    site_index: 5
     param: 0
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 7
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 0
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 2
-    param: 0
-  }
-  bit_exact_instructions: 74
-  matching_instructions: 74
+  bit_exact_instructions: 88
+  matching_instructions: 88
   target_instructions: 103
   is_bit_exact: false
 }
@@ -17087,7 +17003,7 @@ entries {
 entries {
   function_name: "func_800661FC"
   module_name: "item"
-  input_sha1: "78244a1287a1f0070b6a3d032df3b4126277fcfd"
+  input_sha1: "3def9f6ec50482b5fe19d238ae9b276a146ee01e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17113,43 +17029,13 @@ entries {
 entries {
   function_name: "func_800664C8"
   module_name: "item"
-  input_sha1: "e13d27a370f709ef53073020c5dd3eeb6c660d42"
+  input_sha1: "18d8e87ec221e7f429119aac59aa3d02e3847594"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 8
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 9
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 4
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 17
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
-    site_index: 1
-    param: 1
-  }
-  bit_exact_instructions: 628
-  matching_instructions: 628
+  bit_exact_instructions: 600
+  matching_instructions: 625
   target_instructions: 692
   is_bit_exact: false
 }
@@ -17255,40 +17141,20 @@ entries {
 entries {
   function_name: "func_80067950"
   module_name: "item"
-  input_sha1: "7dd468e7b714b00887020c168230c6b88826eaf6"
+  input_sha1: "deade5dff4ae9dcc11966145f1f5037d7c5454a8"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 31
-  matching_instructions: 31
+  bit_exact_instructions: 39
+  matching_instructions: 39
   target_instructions: 39
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_800679EC"
@@ -17306,7 +17172,7 @@ entries {
 entries {
   function_name: "func_80067A24"
   module_name: "item"
-  input_sha1: "2808a527e7f2e8d037279f929a38cb272c00928c"
+  input_sha1: "b9ddf4929333d47fbbb2864efee826d9b3acd04a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17343,7 +17209,7 @@ entries {
 entries {
   function_name: "func_80067BC4"
   module_name: "item"
-  input_sha1: "9885974610fe579fe3ae4da6a92b0ef02bb4536f"
+  input_sha1: "4e4fae1e2ef6a05193dbb02d0796e90155c85035"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17394,8 +17260,13 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 161
-  matching_instructions: 161
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 3
+    param: 0
+  }
+  bit_exact_instructions: 155
+  matching_instructions: 155
   target_instructions: 166
   is_bit_exact: false
 }
@@ -17435,7 +17306,7 @@ entries {
 entries {
   function_name: "func_80067EE0"
   module_name: "item"
-  input_sha1: "deb8ed8d05d380d91d310400bd977318fe385898"
+  input_sha1: "ad45eb7ebecd7afb192569f4df386ed6b37f585e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17558,7 +17429,7 @@ entries {
 entries {
   function_name: "func_80068340"
   module_name: "item"
-  input_sha1: "ad08f7c63ed9b5b6d87264e31ef79ac364fa065c"
+  input_sha1: "86069083a2df689127a11e5f40a4e00411ea85bf"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17573,8 +17444,13 @@ entries {
     site_index: 4
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 3
+    param: 2
+  }
   bit_exact_instructions: 45
-  matching_instructions: 45
+  matching_instructions: 46
   target_instructions: 52
   is_bit_exact: false
 }
@@ -17594,26 +17470,26 @@ entries {
 entries {
   function_name: "func_80068558"
   module_name: "item"
-  input_sha1: "d3283c36efb42817be6ab81f807980f5ecfbc3fe"
+  input_sha1: "0731f8a746132a16f3e4199a5a089f29cb563ec2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 107
-  matching_instructions: 107
+  matching_instructions: 110
   target_instructions: 120
   is_bit_exact: false
 }
 entries {
   function_name: "func_80068738"
   module_name: "item"
-  input_sha1: "60033a58a49a666ab797734f327cd8801d1eb338"
+  input_sha1: "76e463d97be1f0035b795e6d03189ecf5d925ee9"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 107
-  matching_instructions: 107
+  matching_instructions: 110
   target_instructions: 120
   is_bit_exact: false
 }
@@ -17633,7 +17509,7 @@ entries {
 entries {
   function_name: "func_80068920"
   module_name: "item"
-  input_sha1: "403346f57ca03b1acbf60ef694e0a5279543e03b"
+  input_sha1: "2b00ebd1b5db840db7bda6c74af09bf4082e7350"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17646,7 +17522,7 @@ entries {
 entries {
   function_name: "func_80068990"
   module_name: "item"
-  input_sha1: "b598d1ea0b0c8ba69ebcd909d70e7d4af688d74a"
+  input_sha1: "a4d5b7f0e1fb820b02c9dab8fcec22b095902a13"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17710,7 +17586,7 @@ entries {
 entries {
   function_name: "func_80068A98"
   module_name: "item"
-  input_sha1: "dbf38b18b91205e8db3f82aac3fd49eab0041888"
+  input_sha1: "6fa7e268e7e6703eef4c26a0162af39b43aa7431"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17720,21 +17596,41 @@ entries {
     site_index: 3
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 11
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 110
-  matching_instructions: 110
+  matching_instructions: 113
   target_instructions: 125
   is_bit_exact: false
 }
 entries {
   function_name: "func_80068C8C"
   module_name: "item"
-  input_sha1: "6619df454e7fab39b79d2b0d088f2dabda513dad"
+  input_sha1: "c79c51a2aa43158830ba65b471e6260199d667cf"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 1
+    param: 0
+  }
   bit_exact_instructions: 78
-  matching_instructions: 78
+  matching_instructions: 81
   target_instructions: 92
   is_bit_exact: false
 }
@@ -17769,7 +17665,7 @@ entries {
 entries {
   function_name: "func_80068FB0"
   module_name: "item"
-  input_sha1: "4eb84e1ef3c9beed30817e7e85c7643413ce7fa7"
+  input_sha1: "6c8b75a9ab05317f1ab3050f672c7a5309a32b36"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -17794,34 +17690,44 @@ entries {
     site_index: 5
     param: 2
   }
-  bit_exact_instructions: 177
-  matching_instructions: 177
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 3
+    param: 0
+  }
+  bit_exact_instructions: 176
+  matching_instructions: 185
   target_instructions: 205
   is_bit_exact: false
 }
 entries {
   function_name: "func_800692E4"
   module_name: "item"
-  input_sha1: "94d11c3a2ed1b1e584d09d8c8d687ec2202c6578"
+  input_sha1: "1a87dba5210f87aee8791e5d945ed7772c128ba2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 262
-  matching_instructions: 262
+  bit_exact_instructions: 259
+  matching_instructions: 268
   target_instructions: 339
   is_bit_exact: false
 }
 entries {
   function_name: "func_80069830"
   module_name: "item"
-  input_sha1: "af2be347bc3595837df2e14ba92cd8adc30b91e0"
+  input_sha1: "60dcf8b86f3375b9cee7f5eab4696e483a568ae9"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 220
-  matching_instructions: 220
+  bit_exact_instructions: 221
+  matching_instructions: 229
   target_instructions: 267
   is_bit_exact: false
 }
@@ -17990,13 +17896,13 @@ entries {
 entries {
   function_name: "func_80069E74"
   module_name: "item"
-  input_sha1: "d832b1150f9b6000fda39933eb7c78ad3dd7d354"
+  input_sha1: "8ed4eb79c6be2ec917197ae188e3509fc62dff3f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 243
-  matching_instructions: 243
+  bit_exact_instructions: 242
+  matching_instructions: 251
   target_instructions: 283
   is_bit_exact: false
 }
@@ -18081,11 +17987,31 @@ entries {
 entries {
   function_name: "func_8006A9A8"
   module_name: "item"
-  input_sha1: "f8f29a4b57da8e0d7df6e32b21f27ed204371fbb"
+  input_sha1: "f721b9cb5db2d1c889064592502d0d65ad11ec57"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
   bit_exact_instructions: 61
   matching_instructions: 61
   target_instructions: 61
@@ -18429,7 +18355,7 @@ entries {
 entries {
   function_name: "func_8006BAAC"
   module_name: "item"
-  input_sha1: "39ce974c3f1d147559a0ff6985bcd763ff4b1c89"
+  input_sha1: "a930a2291c654131ad93613a8d053c2d8be85e52"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -18455,16 +18381,11 @@ entries {
 entries {
   function_name: "func_8006BC84"
   module_name: "item"
-  input_sha1: "86283d7781437cc3567f40d194b8666d7fcaf88d"
+  input_sha1: "105f58361dc3072f28fcfcf24af426e590c8a61e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 0
-  }
   bit_exact_instructions: 298
   matching_instructions: 298
   target_instructions: 298
@@ -19267,7 +19188,7 @@ entries {
 entries {
   function_name: "func_80046650"
   module_name: "layer"
-  input_sha1: "8663223963504b6609361dd97887de3751718dc7"
+  input_sha1: "f3f58f8fd6798ae71c96eca80c3f11be5b88349a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -19282,8 +19203,18 @@ entries {
     site_index: 7
     param: 0
   }
-  bit_exact_instructions: 82
-  matching_instructions: 82
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 5
+    param: 5
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 7
+    param: 0
+  }
+  bit_exact_instructions: 87
+  matching_instructions: 89
   target_instructions: 106
   is_bit_exact: false
 }
@@ -19585,7 +19516,7 @@ entries {
 entries {
   function_name: "func_80047640"
   module_name: "layer"
-  input_sha1: "8e14ccdc5e564aed8d648a329244b83f6f6f66d0"
+  input_sha1: "cd6b8d7d01f863a7542cc2893091686c780c6843"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -19610,8 +19541,18 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 369
-  matching_instructions: 369
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 1
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 35
+    param: 0
+  }
+  bit_exact_instructions: 317
+  matching_instructions: 329
   target_instructions: 509
   is_bit_exact: false
 }
@@ -20007,7 +19948,7 @@ entries {
 entries {
   function_name: "func_800488CC"
   module_name: "layer"
-  input_sha1: "73f0d225d3e93af10f92e8cca43a0f0debe5c0ed"
+  input_sha1: "d77a31f99f9a610ad11e1a8d406ea0272a8ec792"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -20022,8 +19963,8 @@ entries {
     site_index: 0
     param: 1
   }
-  bit_exact_instructions: 104
-  matching_instructions: 104
+  bit_exact_instructions: 106
+  matching_instructions: 107
   target_instructions: 143
   is_bit_exact: false
 }
@@ -20365,19 +20306,28 @@ entries {
 entries {
   function_name: "func_80049350"
   module_name: "layer"
-  input_sha1: "8b44ec406b79c488d33fbef9296b761a0ac9091e"
+  input_sha1: "6e709e9d811b5669c766c741803563aa09870e79"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 134
-  matching_instructions: 134
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 12
+    param: 1
+  }
+  bit_exact_instructions: 137
+  matching_instructions: 138
   target_instructions: 168
   is_bit_exact: false
 }
@@ -20436,19 +20386,44 @@ entries {
 entries {
   function_name: "func_80049708"
   module_name: "layer"
-  input_sha1: "2ef1835fa7c59f02662c9cd13e4a6d4b0bdad1ae"
+  input_sha1: "205d53f02c41e44239e1f5dd60bc40f7f8bbe9b5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 0
     param: 0
   }
-  bit_exact_instructions: 62
-  matching_instructions: 62
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 2
+    param: 0
+  }
+  bit_exact_instructions: 47
+  matching_instructions: 47
   target_instructions: 72
   is_bit_exact: false
 }
@@ -20594,19 +20569,28 @@ entries {
 entries {
   function_name: "func_80049AC4"
   module_name: "layer"
-  input_sha1: "77c5390b05507eb4b40ad5daf0f21510293cc172"
+  input_sha1: "cdd28f11e2d1ca8c9671378c0e754f9125e375fd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 134
-  matching_instructions: 134
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 12
+    param: 1
+  }
+  bit_exact_instructions: 137
+  matching_instructions: 138
   target_instructions: 168
   is_bit_exact: false
 }
@@ -20738,7 +20722,7 @@ entries {
 entries {
   function_name: "func_8004A140"
   module_name: "layer"
-  input_sha1: "45923ba0197926bb3ff15672053e3280a90ad8f3"
+  input_sha1: "21d01d4059827e2d633ab16679316be421891b4b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -21078,7 +21062,7 @@ entries {
 entries {
   function_name: "func_8004B0E8"
   module_name: "layer"
-  input_sha1: "71315835ae4b78caefe10d6739684cad4c0fdc7c"
+  input_sha1: "fc3860c8734ff7dd173ac8be2701221766dedbd2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -21088,10 +21072,10 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 126
-  matching_instructions: 126
+  bit_exact_instructions: 133
+  matching_instructions: 133
   target_instructions: 133
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8004B2FC"
@@ -22014,7 +21998,7 @@ entries {
 entries {
   function_name: "func_8004CF68"
   module_name: "layer"
-  input_sha1: "021abdbf522764cad14821dcc3c683180ca3b882"
+  input_sha1: "f7cfd602970fab41345eaf59c36bde03193d55b1"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -22034,8 +22018,18 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 172
-  matching_instructions: 172
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 15
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 14
+    param: 0
+  }
+  bit_exact_instructions: 184
+  matching_instructions: 193
   target_instructions: 253
   is_bit_exact: false
 }
@@ -22344,13 +22338,13 @@ entries {
 entries {
   function_name: "OsCreateThread"
   module_name: "libultra"
-  input_sha1: "7cafb69116b0451a6f62e635c8fb13fb9b20d038"
+  input_sha1: "8abedc1ff4c8a4381c12a50d9e36142e082c0dd8"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 38
-  matching_instructions: 38
+  bit_exact_instructions: 30
+  matching_instructions: 30
   target_instructions: 52
   is_bit_exact: false
 }
@@ -22390,7 +22384,7 @@ entries {
 entries {
   function_name: "OsStartThread"
   module_name: "libultra"
-  input_sha1: "8750cd76a90d73e27eb902f7ffd70be7de4e6c69"
+  input_sha1: "4d34bc90575595ea5da278f1d97171cb6e9b8561"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -22408,32 +22402,32 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
     site_index: 0
+    param: 3
+  }
+  ast_mutations {
+    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
+    site_index: 0
+    param: 2
+  }
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
     param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 3
   }
   ast_mutations {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
     param: 1
   }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INVERT_IF_ELSE
-    site_index: 1
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
-    param: 0
-  }
-  bit_exact_instructions: 72
-  matching_instructions: 72
+  bit_exact_instructions: 57
+  matching_instructions: 59
   target_instructions: 72
-  is_bit_exact: true
+  is_bit_exact: false
 }
 entries {
   function_name: "OsVirtualToPhysical"
@@ -22878,7 +22872,7 @@ entries {
 entries {
   function_name: "func_80100340"
   module_name: "libultra"
-  input_sha1: "f7ac0ab5f2d6e5f07d6cc075d1ddae26f733357b"
+  input_sha1: "aa12f0677d74e0c36507947ae41af62564052738"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -22891,7 +22885,7 @@ entries {
 entries {
   function_name: "func_80100390"
   module_name: "libultra"
-  input_sha1: "277fe84242150a7deade78dc20007e16c4a9f932"
+  input_sha1: "aca66002088b9de0ae121bbd8dc4d163de06f36f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -23040,7 +23034,7 @@ entries {
 entries {
   function_name: "func_801008E0"
   module_name: "libultra"
-  input_sha1: "5444f25e37b1e75f36c588eb9fa63d1dd799ddd6"
+  input_sha1: "a27aab748ba68f1dd38fc1a32c00969b0c3d5798"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -23469,19 +23463,6 @@ entries {
   is_bit_exact: true
 }
 entries {
-  function_name: "func_8010F88C"
-  module_name: "libultra"
-  input_sha1: "cced18af491112d8730f7ffa2f36985343e86647"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 1
-  matching_instructions: 1
-  target_instructions: 9
-  is_bit_exact: false
-}
-entries {
   function_name: "func_8010FA28"
   module_name: "libultra"
   input_sha1: "721b52de176e6b287aa1ed4bcfc830ac7ebe2244"
@@ -23627,7 +23608,7 @@ entries {
 entries {
   function_name: "func_80100CA0"
   module_name: "libultra_dc0a0"
-  input_sha1: "c28960bc50e641c042ac5346fa9a6f0636c06196"
+  input_sha1: "2104bbe61278246ad4cde99103eca48cca4a1f93"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -23653,8 +23634,8 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 111
-  matching_instructions: 111
+  bit_exact_instructions: 113
+  matching_instructions: 116
   target_instructions: 142
   is_bit_exact: false
 }
@@ -23705,11 +23686,11 @@ entries {
 entries {
   function_name: "func_80100FF0"
   module_name: "libultra_dc0a0"
-  input_sha1: "42d9bea6a8fa8c64d2f67a0835e5ccc0c3a2dcb3"
+  input_sha1: "1b79128681cddbfdd180b76841d40598eaf6152f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
+  c_flags: "-Wa,-O2"
   bit_exact_instructions: 20
   matching_instructions: 20
   target_instructions: 41
@@ -23718,7 +23699,7 @@ entries {
 entries {
   function_name: "func_80101094"
   module_name: "libultra_dc0a0"
-  input_sha1: "cf4f9a5a0257f4b1b581eebbf23f166a899b9f66"
+  input_sha1: "5734f29d17b3bc3a8490ce77ce4915b0c366beb7"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -23743,8 +23724,8 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 233
-  matching_instructions: 233
+  bit_exact_instructions: 229
+  matching_instructions: 239
   target_instructions: 294
   is_bit_exact: false
 }
@@ -23829,7 +23810,7 @@ entries {
 entries {
   function_name: "func_80101820"
   module_name: "libultra_dc0a0"
-  input_sha1: "5ef461c69cb8d874af6a0fb11662c7f64d041d1e"
+  input_sha1: "2ff2b7b0cade5b438d93a89dce5481f4d842df0c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -23854,8 +23835,8 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 246
-  matching_instructions: 246
+  bit_exact_instructions: 260
+  matching_instructions: 272
   target_instructions: 320
   is_bit_exact: false
 }
@@ -23875,12 +23856,11 @@ entries {
 entries {
   function_name: "func_80101DF4"
   module_name: "libultra_dc0a0"
-  input_sha1: "e1ea74504198373d6ae2c6aedc2e0416a7cfb408"
+  input_sha1: "29dfa02b268973fe135a01263ff9ea014eb52103"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-delayed-branch"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 1
@@ -23896,8 +23876,8 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 119
-  matching_instructions: 119
+  bit_exact_instructions: 111
+  matching_instructions: 112
   target_instructions: 181
   is_bit_exact: false
 }
@@ -23930,20 +23910,20 @@ entries {
 entries {
   function_name: "func_801021CC"
   module_name: "libultra_dc0a0"
-  input_sha1: "898d099e554c52110b95c665aa53dfffce4ac8ee"
+  input_sha1: "769c0a501625f72cac32fa7b02af5c412908c642"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 95
-  matching_instructions: 95
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 96
+  matching_instructions: 101
   target_instructions: 160
   is_bit_exact: false
 }
 entries {
   function_name: "func_8010244C"
   module_name: "libultra_dc0a0"
-  input_sha1: "41d5a1ba521796d54daf8c32cb5f34c6c3186b5b"
+  input_sha1: "ea7eecc373008df84bb579389058f64967451d8a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -24271,7 +24251,7 @@ entries {
 entries {
   function_name: "func_8010340C"
   module_name: "libultra_dc0a0"
-  input_sha1: "ae4129b8eb246d63d6ba4f5e6e957e9e122a536c"
+  input_sha1: "34693f801b3f052ce068d15aaa8db954a6543bfd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -24397,13 +24377,13 @@ entries {
 entries {
   function_name: "func_80103780"
   module_name: "libultra_dc0a0"
-  input_sha1: "7f87def5347f3ae1ed8452e66ecb77bea1a013f2"
+  input_sha1: "54977fb11fcc0163081b1ace3e4eea4f99ef0d06"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 39
-  matching_instructions: 39
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 44
+  matching_instructions: 46
   target_instructions: 72
   is_bit_exact: false
 }
@@ -24529,8 +24509,8 @@ entries {
 entries {
   function_name: "func_80103F90"
   module_name: "libultra_dc0a0"
-  input_sha1: "b25e17c4e0a50d1890e38445c1b22badac331d8a"
-  c_flags: "-O1"
+  input_sha1: "29e9f38d210a73f0e25879ef99b09f7df39b9d96"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -24564,8 +24544,8 @@ entries {
     site_index: 10
     param: 0
   }
-  bit_exact_instructions: 107
-  matching_instructions: 107
+  bit_exact_instructions: 115
+  matching_instructions: 121
   target_instructions: 195
   is_bit_exact: false
 }
@@ -24666,7 +24646,7 @@ entries {
 entries {
   function_name: "func_801045E0"
   module_name: "libultra_dc0a0"
-  input_sha1: "46339bbb24a729824fc1faa550760cbad62ba00f"
+  input_sha1: "44362c19962131ea049fd3a57deab541c0b97be0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -24687,7 +24667,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 92
-  matching_instructions: 92
+  matching_instructions: 95
   target_instructions: 100
   is_bit_exact: false
 }
@@ -24717,8 +24697,8 @@ entries {
 entries {
   function_name: "func_80104880"
   module_name: "libultra_dc0a0"
-  input_sha1: "524a50483ee4bcc5b4dd6adbacf8db6d1abdf3cf"
-  c_flags: "-O1"
+  input_sha1: "08552e5d377a5cb181f2159ce9be6c746b15d36b"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
@@ -24732,8 +24712,8 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 86
-  matching_instructions: 86
+  bit_exact_instructions: 91
+  matching_instructions: 97
   target_instructions: 126
   is_bit_exact: false
 }
@@ -24832,28 +24812,33 @@ entries {
 entries {
   function_name: "func_801050F0"
   module_name: "libultra_dc0a0"
-  input_sha1: "5e9fbe0cfb8d449bc62bf19c9b88039a6480ce04"
+  input_sha1: "66dc4832467cf24af2579c853ca9995f286f0ab0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 9
-    param: 0
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 9
-    param: 0
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
   }
-  bit_exact_instructions: 67
-  matching_instructions: 67
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 61
+  matching_instructions: 65
   target_instructions: 104
   is_bit_exact: false
 }
@@ -24988,13 +24973,13 @@ entries {
 entries {
   function_name: "func_80105960"
   module_name: "libultra_dc0a0"
-  input_sha1: "b5d9c7439e591759ea9d75e00ecb4028d32cf2fd"
+  input_sha1: "f929ae354f209d8d6361aafe7869ccb81ce7e6aa"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   bit_exact_instructions: 82
-  matching_instructions: 82
+  matching_instructions: 84
   target_instructions: 104
   is_bit_exact: false
 }
@@ -25014,7 +24999,7 @@ entries {
 entries {
   function_name: "func_80105C70"
   module_name: "libultra_dc0a0"
-  input_sha1: "b1ea3bcc85dade92cba5d0e2030362b6122d4cbd"
+  input_sha1: "238c8c2c997ec106653c7eca17e958f3caa0a51e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -25039,8 +25024,8 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 131
-  matching_instructions: 131
+  bit_exact_instructions: 130
+  matching_instructions: 130
   target_instructions: 196
   is_bit_exact: false
 }
@@ -25362,20 +25347,40 @@ entries {
 entries {
   function_name: "func_80108220"
   module_name: "libultra_e28f0"
-  input_sha1: "73370de57fb04a7c6c694c225774709483590f04"
+  input_sha1: "d27a393e39f5a275ce553245fb53c0ab33ee4f05"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 173
-  matching_instructions: 173
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COALESCE_PARAM_COPY
+    site_index: 0
+    param: 1
+  }
+  bit_exact_instructions: 179
+  matching_instructions: 188
   target_instructions: 273
   is_bit_exact: false
 }
 entries {
   function_name: "func_80108664"
   module_name: "libultra_e28f0"
-  input_sha1: "1aaab740f520b87c36eaa1d52a7fb0db82c804c8"
+  input_sha1: "39d6d92937c05c431e52b2b34625a563f532de0b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -25404,7 +25409,7 @@ entries {
 entries {
   function_name: "func_80108A00"
   module_name: "libultra_e28f0"
-  input_sha1: "ebbdb45cf0428394e3310f93f2e6e6ee0569b244"
+  input_sha1: "7696fe5cad321feeff9091ba0f277d9c661a95cb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -25414,20 +25419,19 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 91
-  matching_instructions: 91
+  bit_exact_instructions: 83
+  matching_instructions: 93
   target_instructions: 107
   is_bit_exact: false
 }
 entries {
   function_name: "func_80108BAC"
   module_name: "libultra_e28f0"
-  input_sha1: "c9e8355f2986904770c3f26b7f0b676f95548688"
+  input_sha1: "c3c66ddb245eb1f17cb5450715f5e58b3ec01ef2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
+  c_flags: "-Wa,-O2"
   ast_mutations {
     kind: AST_MUTATION_COALESCE_PARAM_COPY
     site_index: 0
@@ -25453,8 +25457,8 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 54
-  matching_instructions: 54
+  bit_exact_instructions: 47
+  matching_instructions: 48
   target_instructions: 97
   is_bit_exact: false
 }
@@ -25863,41 +25867,26 @@ entries {
 entries {
   function_name: "func_80109960"
   module_name: "libultra_e4d60"
-  input_sha1: "7d23e804d814a3e5bd0b0643bbda9e34225e57b2"
+  input_sha1: "b736c52350fb29edcc8681d4fee32c0014eb49a6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 6
-    param: 0
-  }
-  bit_exact_instructions: 261
-  matching_instructions: 261
+  bit_exact_instructions: 282
+  matching_instructions: 313
   target_instructions: 348
   is_bit_exact: false
 }
 entries {
   function_name: "func_80109ED0"
   module_name: "libultra_e4d60"
-  input_sha1: "9967722e00eb54201d7be00402ff66b503fb7150"
+  input_sha1: "8b1f376dd2b1b527a1ba56eca2f6614529336f3d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 4
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
-    param: 0
-  }
-  bit_exact_instructions: 214
-  matching_instructions: 214
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 215
+  matching_instructions: 237
   target_instructions: 304
   is_bit_exact: false
 }
@@ -25963,13 +25952,13 @@ entries {
 entries {
   function_name: "func_8010A858"
   module_name: "libultra_e4d60"
-  input_sha1: "f870c9ccf00bd45be59f743c671d5d4a92929c11"
+  input_sha1: "9e5c63efded4357540e3460597f7ad2b2a9f9a91"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 80
-  matching_instructions: 80
+  bit_exact_instructions: 85
+  matching_instructions: 88
   target_instructions: 115
   is_bit_exact: false
 }
@@ -26002,7 +25991,7 @@ entries {
 entries {
   function_name: "func_8010AE20"
   module_name: "libultra_e4d60"
-  input_sha1: "27eb1539351465f972322c77fb5fc6a8bb39e222"
+  input_sha1: "4347c5e3cd5ffe5a518256636d88952785cddded"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -26033,14 +26022,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 117
-  matching_instructions: 117
+  matching_instructions: 118
   target_instructions: 128
   is_bit_exact: false
 }
 entries {
   function_name: "func_8010B020"
   module_name: "libultra_e4d60"
-  input_sha1: "04cbdaa3eccb10868b6ed148054f92fb61c91eb5"
+  input_sha1: "30e59a1f8a23ba42114467c2a1a100a4fd8b20cf"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -26188,13 +26177,13 @@ entries {
 entries {
   function_name: "func_8010BBC0"
   module_name: "libultra_e4d60"
-  input_sha1: "69201b34bd03470e12fdb89fd907ce6c67d32ba4"
+  input_sha1: "59bdca32686ca60b6ae406f051356aa6b916a62e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 189
-  matching_instructions: 189
+  bit_exact_instructions: 168
+  matching_instructions: 179
   target_instructions: 280
   is_bit_exact: false
 }
@@ -26829,13 +26818,13 @@ entries {
 entries {
   function_name: "func_8010D81C"
   module_name: "libultra_e79a0"
-  input_sha1: "55dfdda29b4f20f392cc16aaba95ded5edbfe86f"
+  input_sha1: "80363f15b19a5c312e1fc714ac3893cd791d1df0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
   bit_exact_instructions: 80
-  matching_instructions: 80
+  matching_instructions: 82
   target_instructions: 91
   is_bit_exact: false
 }
@@ -27115,14 +27104,14 @@ entries {
 entries {
   function_name: "func_8010E870"
   module_name: "libultra_e79a0"
-  input_sha1: "3dce88c5df8bd7bfb4110709763aead8acd03961"
+  input_sha1: "df7ad71daff78025e667fc3fdc35c208c6dab855"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-delayed-branch"
   bit_exact_instructions: 48
-  matching_instructions: 48
+  matching_instructions: 54
   target_instructions: 100
   is_bit_exact: false
 }
@@ -27155,7 +27144,7 @@ entries {
 entries {
   function_name: "func_8010EA90"
   module_name: "libultra_e79a0"
-  input_sha1: "ddb478a672e44ecdf8cb39634c48e4ec22b49dcb"
+  input_sha1: "15a894e023ca6102c409c802ac2dce19d2ddda99"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -27210,8 +27199,8 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 94
-  matching_instructions: 94
+  bit_exact_instructions: 72
+  matching_instructions: 77
   target_instructions: 148
   is_bit_exact: false
 }
@@ -27269,7 +27258,7 @@ entries {
 entries {
   function_name: "func_8010F1B8"
   module_name: "libultra_e79a0"
-  input_sha1: "f196851d35812a3ab3c62fe0e40c5b89aa143ca9"
+  input_sha1: "150ca35f54ad823a1c0d13e383b7f75b8bcb203c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -27294,8 +27283,8 @@ entries {
     site_index: 4
     param: 0
   }
-  bit_exact_instructions: 299
-  matching_instructions: 299
+  bit_exact_instructions: 300
+  matching_instructions: 306
   target_instructions: 362
   is_bit_exact: false
 }
@@ -27351,7 +27340,7 @@ entries {
 entries {
   function_name: "func_8010F834"
   module_name: "libultra_e79a0"
-  input_sha1: "2adb0a3944f6eaac14f39b8cbff34b3754a580ff"
+  input_sha1: "d604c5e295d8d91c2af81d7c1c3edd130b35425e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -27403,6 +27392,19 @@ entries {
   bit_exact_instructions: 0
   matching_instructions: 0
   target_instructions: 5
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_8010F88C"
+  module_name: "libultra_e79a0"
+  input_sha1: "ec1ee4514fe588a4cb9128e6f9ec018f723e1352"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 1
+  matching_instructions: 1
+  target_instructions: 9
   is_bit_exact: false
 }
 entries {
@@ -27567,13 +27569,13 @@ entries {
 entries {
   function_name: "func_80110048"
   module_name: "libultra_e79a0"
-  input_sha1: "e2db774616af7bf0113ace1b72403960277de15b"
-  c_flags: "-O1"
+  input_sha1: "735ed25b719816a799ddedbaabcef95ee96a2d76"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  bit_exact_instructions: 120
-  matching_instructions: 120
+  bit_exact_instructions: 112
+  matching_instructions: 118
   target_instructions: 130
   is_bit_exact: false
 }
@@ -27694,7 +27696,7 @@ entries {
 entries {
   function_name: "GuMtxIdent"
   module_name: "libultra_gu_mtx"
-  input_sha1: "161422335a0abf7fdc26e2345e5b49a4e851d45d"
+  input_sha1: "7ab2a93553c0a1942bf38a7f9ab519452482d0fc"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -27709,8 +27711,8 @@ entries {
     site_index: 1
     param: 0
   }
-  bit_exact_instructions: 59
-  matching_instructions: 59
+  bit_exact_instructions: 46
+  matching_instructions: 46
   target_instructions: 60
   is_bit_exact: false
 }
@@ -27771,7 +27773,7 @@ entries {
 entries {
   function_name: "GuPerspective"
   module_name: "libultra_gu_rotate"
-  input_sha1: "c3194def26c2b1a8eb716151207f261269802f41"
+  input_sha1: "5b0f5c57d02e229b0418acbc30ec45bd8dc040cd"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -27851,7 +27853,7 @@ entries {
 entries {
   function_name: "func_800FED30"
   module_name: "libultra_gu_rotate"
-  input_sha1: "bb98ce805ac4cc0c22d37bfed8f0808015b8e35f"
+  input_sha1: "2df6d85b99ba7f96791b9366a67326c609593d21"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -27872,8 +27874,8 @@ entries {
     site_index: 14
     param: 0
   }
-  bit_exact_instructions: 77
-  matching_instructions: 77
+  bit_exact_instructions: 57
+  matching_instructions: 57
   target_instructions: 98
   is_bit_exact: false
 }
@@ -28481,7 +28483,7 @@ entries {
 entries {
   function_name: "func_80034738"
   module_name: "map"
-  input_sha1: "9bfddb29cb5a4e71cb3a707d19c186b3e172e997"
+  input_sha1: "5a1fed3c6b0a39e7e3e4c1ba4ace231e42d789ba"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -28508,20 +28510,20 @@ entries {
     param: 0
   }
   bit_exact_instructions: 185
-  matching_instructions: 185
+  matching_instructions: 187
   target_instructions: 205
   is_bit_exact: false
 }
 entries {
   function_name: "func_80034A6C"
   module_name: "map"
-  input_sha1: "c5570ade085f9a9c2dc4e0475df6508864755ebe"
+  input_sha1: "b42509275ea72b5d5995e67828734fb580f31e26"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 97
-  matching_instructions: 97
+  bit_exact_instructions: 84
+  matching_instructions: 84
   target_instructions: 117
   is_bit_exact: false
 }
@@ -28703,7 +28705,7 @@ entries {
 entries {
   function_name: "func_8003544C"
   module_name: "map"
-  input_sha1: "3e3a9cbb526aa9a2cf713e0b057b72caeddfd00e"
+  input_sha1: "517da6da72f9dc99434388e9bbf26bc52654cd71"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -28738,8 +28740,8 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 294
-  matching_instructions: 294
+  bit_exact_instructions: 291
+  matching_instructions: 291
   target_instructions: 306
   is_bit_exact: false
 }
@@ -28848,13 +28850,13 @@ entries {
 entries {
   function_name: "func_80035EE0"
   module_name: "map"
-  input_sha1: "287e89762c8fab1cc3eb9dbb57abf1fe3f5690e9"
+  input_sha1: "2e67fdafa88c8c7137888463ee356c7a8f61c909"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 46
-  matching_instructions: 46
+  bit_exact_instructions: 60
+  matching_instructions: 60
   target_instructions: 119
   is_bit_exact: false
 }
@@ -28962,7 +28964,7 @@ entries {
 entries {
   function_name: "func_800366F4"
   module_name: "map"
-  input_sha1: "7979a21db66079da0be133aa6e86339912181fc5"
+  input_sha1: "2ed43af0399dd55fcd232d9919d375ce6b9cd0ca"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -28972,23 +28974,8 @@ entries {
     site_index: 0
     param: 1
   }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 12
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
-    site_index: 11
-    param: 0
-  }
   bit_exact_instructions: 74
-  matching_instructions: 74
+  matching_instructions: 77
   target_instructions: 99
   is_bit_exact: false
 }
@@ -29265,11 +29252,16 @@ entries {
 entries {
   function_name: "func_80037400"
   module_name: "map"
-  input_sha1: "a48655d7c60f99260cce20fd2cea250cb8d7bb0a"
+  input_sha1: "96a34ce3035cd77e9f158e0542befcfee43c8c2e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 46
   matching_instructions: 46
   target_instructions: 48
@@ -29278,11 +29270,16 @@ entries {
 entries {
   function_name: "func_800374C0"
   module_name: "map"
-  input_sha1: "9c2548ac96296369e836ddcc8ce145724da04c70"
+  input_sha1: "c7bb3f41d79d9e05221722456b4a6430724898ae"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
+  ast_mutations {
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 0
+    param: 1
+  }
   bit_exact_instructions: 79
   matching_instructions: 79
   target_instructions: 85
@@ -29364,58 +29361,23 @@ entries {
 entries {
   function_name: "func_80037BC4"
   module_name: "map"
-  input_sha1: "9b978b54c8c17eb34b74b3441ef5bac8ed50b4d6"
+  input_sha1: "57ffe92ea6f18376ffe9ac59399f81110ceb415a"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
-    site_index: 0
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 2
     param: 2
   }
   ast_mutations {
-    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 1
+    site_index: 4
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 1
-    param: 1
-  }
-  bit_exact_instructions: 108
-  matching_instructions: 108
+  bit_exact_instructions: 119
+  matching_instructions: 119
   target_instructions: 139
   is_bit_exact: false
 }
@@ -29831,41 +29793,31 @@ entries {
 entries {
   function_name: "func_80038BC4"
   module_name: "map"
-  input_sha1: "bc64b8992bb5e3490f0b7de90c03ad71e572784a"
+  input_sha1: "7538c2894aaa3aad1790c60d4ca71f8382b089a2"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 24
+    kind: AST_MUTATION_HOIST_LOOP_INVARIANT
+    site_index: 0
     param: 0
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 17
+    site_index: 15
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 9
-    param: 0
-  }
-  bit_exact_instructions: 322
-  matching_instructions: 322
+  bit_exact_instructions: 348
+  matching_instructions: 369
   target_instructions: 519
   is_bit_exact: false
 }
 entries {
   function_name: "func_800393E0"
   module_name: "map"
-  input_sha1: "a83402fdb2e2c170a5c26c38b1de6bdd9d32545a"
+  input_sha1: "8dc227c41cdb0c49803bdecdcbce67fb9f3412d5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -29900,22 +29852,32 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 322
-  matching_instructions: 322
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 6
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 9
+    param: 2
+  }
+  bit_exact_instructions: 315
+  matching_instructions: 324
   target_instructions: 364
   is_bit_exact: false
 }
 entries {
   function_name: "func_80039990"
   module_name: "map"
-  input_sha1: "22b093869420ff134e711b912537337b434f57ec"
+  input_sha1: "9fb8d07f4b8b2b555ecbb2419d669be5cc6e90d6"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 10
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 6
     param: 0
   }
   ast_mutations {
@@ -29923,23 +29885,8 @@ entries {
     site_index: 0
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 9
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 11
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 8
-    param: 0
-  }
-  bit_exact_instructions: 269
-  matching_instructions: 269
+  bit_exact_instructions: 244
+  matching_instructions: 251
   target_instructions: 292
   is_bit_exact: false
 }
@@ -30019,20 +29966,20 @@ entries {
 entries {
   function_name: "func_8003ACA8"
   module_name: "map"
-  input_sha1: "58e48cdff26524f51ec457919f7a4c6e16374ba1"
+  input_sha1: "58c1dc0ca5bf0faaa54dbb2b437c3e311f88b3df"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 63
-  matching_instructions: 63
+  bit_exact_instructions: 130
+  matching_instructions: 134
   target_instructions: 172
   is_bit_exact: false
 }
 entries {
   function_name: "func_8003AF58"
   module_name: "map"
-  input_sha1: "8455e2bbc9ae1b3f3385755f034f88a5579509ce"
+  input_sha1: "af46f539ef6b8c487b362fdbf399f7a00feb09d8"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -30066,6 +30013,16 @@ entries {
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 2
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 4
+  }
+  ast_mutations {
+    kind: AST_MUTATION_INVERT_IF_ELSE
+    site_index: 0
     param: 0
   }
   bit_exact_instructions: 100
@@ -30129,7 +30086,7 @@ entries {
 entries {
   function_name: "func_8003B1BC"
   module_name: "map"
-  input_sha1: "c7240214d036c73e0fd55d77bb53452bdf54bb1c"
+  input_sha1: "406a4b9e3081289b7b2146db33c54ec15a146eed"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -30145,8 +30102,8 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 216
-  matching_instructions: 216
+  bit_exact_instructions: 231
+  matching_instructions: 238
   target_instructions: 429
   is_bit_exact: false
 }
@@ -30231,19 +30188,24 @@ entries {
 entries {
   function_name: "InterpolateUpdate"
   module_name: "math"
-  input_sha1: "406da63d19f08534d8dba225f94d575567b90d2c"
+  input_sha1: "34a72951f3068137a2fd0df5254182bfea515300"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fno-schedule-insns"
   ast_mutations {
-    kind: AST_MUTATION_PROPAGATE_REGISTER_COPY
+    kind: AST_MUTATION_SWAP_ADJACENT_STATEMENTS
+    site_index: 6
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 37
-  matching_instructions: 37
+  bit_exact_instructions: 39
+  matching_instructions: 39
   target_instructions: 43
   is_bit_exact: false
 }
@@ -30657,7 +30619,7 @@ entries {
 entries {
   function_name: "func_8003E77C"
   module_name: "message"
-  input_sha1: "88b98c289827610aed153328ae1958b8c4437300"
+  input_sha1: "aa0e7ac5d531edb051d02c8c5c3fe85d9d60a824"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -30670,11 +30632,11 @@ entries {
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 8
+    site_index: 9
     param: 0
   }
   bit_exact_instructions: 85
-  matching_instructions: 85
+  matching_instructions: 87
   target_instructions: 101
   is_bit_exact: false
 }
@@ -30709,7 +30671,7 @@ entries {
 entries {
   function_name: "func_8003EA1C"
   module_name: "message"
-  input_sha1: "18718d96e4613da37844f59ccf650862c5e6a2d1"
+  input_sha1: "75aad007d2faa8806e09f4dfab2cc07b33a26297"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -30745,14 +30707,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 252
-  matching_instructions: 252
+  matching_instructions: 254
   target_instructions: 280
   is_bit_exact: false
 }
 entries {
   function_name: "func_8003EE7C"
   module_name: "message"
-  input_sha1: "8ca09d165491fa3623fb2337abd830f2c1d435c1"
+  input_sha1: "fcc53b99fd2a55b93af02b9d815372e3a84f7bcb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -30778,8 +30740,13 @@ entries {
     site_index: 9
     param: 0
   }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 0
+    param: 0
+  }
   bit_exact_instructions: 75
-  matching_instructions: 75
+  matching_instructions: 77
   target_instructions: 87
   is_bit_exact: false
 }
@@ -30799,7 +30766,7 @@ entries {
 entries {
   function_name: "func_8003F024"
   module_name: "message"
-  input_sha1: "e7fd784e2a91143f3a00900969644a91d775bb44"
+  input_sha1: "a665644b05fab18925a39df2a4ca36a2d5720506"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -31187,13 +31154,13 @@ entries {
 entries {
   function_name: "func_8003FBD8"
   module_name: "message"
-  input_sha1: "1c474d0b5b6c2e25e8107d5ba2fc50b6caf59bb2"
+  input_sha1: "dd3e5dbb19fddcc237d385c617990421cbd7199d"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 59
-  matching_instructions: 59
+  bit_exact_instructions: 51
+  matching_instructions: 54
   target_instructions: 103
   is_bit_exact: false
 }
@@ -31436,7 +31403,7 @@ entries {
 entries {
   function_name: "func_80040C38"
   module_name: "message"
-  input_sha1: "cafb01113ff7ed3d30faf45ff80f65943e5f1832"
+  input_sha1: "bf88a1a278b3aadd1110bc4b0d36b170f5141ceb"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -31457,15 +31424,25 @@ entries {
     site_index: 8
     param: 0
   }
-  bit_exact_instructions: 604
-  matching_instructions: 604
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 46
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
+    site_index: 30
+    param: 0
+  }
+  bit_exact_instructions: 646
+  matching_instructions: 673
   target_instructions: 774
   is_bit_exact: false
 }
 entries {
   function_name: "func_80041850"
   module_name: "message"
-  input_sha1: "986263dc413833aea9e391a5ab51ed87ded0043e"
+  input_sha1: "8910de1d6c07187a56df80e33aaafe588242619f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -31481,14 +31458,14 @@ entries {
     param: 0
   }
   bit_exact_instructions: 69
-  matching_instructions: 69
+  matching_instructions: 71
   target_instructions: 93
   is_bit_exact: false
 }
 entries {
   function_name: "func_800419C4"
   module_name: "message"
-  input_sha1: "035ad12b95e447bb5c3552d9ea2f02375e957b88"
+  input_sha1: "bf54e9a10a2761514705d7fb80e97c513c61c71c"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -31505,7 +31482,7 @@ entries {
     param: 0
   }
   bit_exact_instructions: 71
-  matching_instructions: 71
+  matching_instructions: 73
   target_instructions: 89
   is_bit_exact: false
 }
@@ -31548,26 +31525,26 @@ entries {
 entries {
   function_name: "func_80041CD8"
   module_name: "message"
-  input_sha1: "356234979547614a707237cf9b23e2af83bfb4e9"
+  input_sha1: "ca7587bf7f9a1297a3b8bf0f723d86344b026733"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 128
-  matching_instructions: 128
+  bit_exact_instructions: 131
+  matching_instructions: 133
   target_instructions: 207
   is_bit_exact: false
 }
 entries {
   function_name: "func_80042014"
   module_name: "message"
-  input_sha1: "c7f6ee2f8270c05101570574c17e089e64addd3a"
+  input_sha1: "ac0e036c45b6889972a31a06b8036f3a7245c825"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 135
-  matching_instructions: 135
+  bit_exact_instructions: 153
+  matching_instructions: 158
   target_instructions: 247
   is_bit_exact: false
 }
@@ -31820,28 +31797,23 @@ entries {
 entries {
   function_name: "func_80044684"
   module_name: "message"
-  input_sha1: "3151175b9df0f5261c6ee96c9b76820a202598ca"
+  input_sha1: "63beaa66128fbf99edc0c8c14a299e7bc9faec17"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    kind: AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS
+    site_index: 0
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
     site_index: 2
-    param: 0
+    param: 2
   }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
-  }
-  bit_exact_instructions: 192
-  matching_instructions: 192
+  bit_exact_instructions: 191
+  matching_instructions: 191
   target_instructions: 208
   is_bit_exact: false
 }
@@ -31924,13 +31896,13 @@ entries {
 entries {
   function_name: "func_80045260"
   module_name: "message"
-  input_sha1: "0eaca20f534f0c48238e25635cb916866a54ee3d"
+  input_sha1: "41e4dd6e3cacb5f1ff6193b33d68e77ffaa883a7"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 279
-  matching_instructions: 279
+  bit_exact_instructions: 308
+  matching_instructions: 321
   target_instructions: 660
   is_bit_exact: false
 }
@@ -32890,7 +32862,7 @@ entries {
 entries {
   function_name: "func_800BB590"
   module_name: "npc"
-  input_sha1: "dae0ee37dded30341abe8e7677ee47add8bad120"
+  input_sha1: "1324ee589ebe3915869dda77baa3952fed53676e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -32910,8 +32882,8 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 242
-  matching_instructions: 242
+  bit_exact_instructions: 243
+  matching_instructions: 248
   target_instructions: 344
   is_bit_exact: false
 }
@@ -33002,13 +32974,13 @@ entries {
 entries {
   function_name: "func_800BBEC0"
   module_name: "npc"
-  input_sha1: "1c540df22395fc555a5c6b0ea7ebe5763f6771aa"
+  input_sha1: "a0e58525751631f50aa40d75074b861679b18944"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 418
-  matching_instructions: 418
+  matching_instructions: 457
   target_instructions: 528
   is_bit_exact: false
 }
@@ -33246,13 +33218,13 @@ entries {
 entries {
   function_name: "func_800BDB24"
   module_name: "npc"
-  input_sha1: "e43b32992a709d5dcf6a683e4cb69ab25fd9ce76"
+  input_sha1: "b60a10d8a96c3d0858b78ca678553b9bc4a97813"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   bit_exact_instructions: 424
-  matching_instructions: 424
+  matching_instructions: 461
   target_instructions: 549
   is_bit_exact: false
 }
@@ -33503,7 +33475,7 @@ entries {
 entries {
   function_name: "func_800BF990"
   module_name: "npc"
-  input_sha1: "accee97746ffcbaaac583b17ed3ffadaf28258b5"
+  input_sha1: "1886237c29287542082aa95047fe5902d070d053"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -33538,8 +33510,8 @@ entries {
     site_index: 1
     param: 1
   }
-  bit_exact_instructions: 469
-  matching_instructions: 469
+  bit_exact_instructions: 466
+  matching_instructions: 510
   target_instructions: 554
   is_bit_exact: false
 }
@@ -33679,13 +33651,13 @@ entries {
 entries {
   function_name: "func_800C1124"
   module_name: "npc"
-  input_sha1: "0fe4be93b31e2c4fbf91575d016c8b31f62359aa"
+  input_sha1: "f34374d7e40157f16c2ca0fa1bc8f5c22b397926"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 328
-  matching_instructions: 328
+  bit_exact_instructions: 321
+  matching_instructions: 339
   target_instructions: 379
   is_bit_exact: false
 }
@@ -34060,13 +34032,13 @@ entries {
 entries {
   function_name: "func_800C3D20"
   module_name: "npc"
-  input_sha1: "b5196cea0e57da9739ee6922941f33291bb0e1a9"
+  input_sha1: "a57870790916cb221f8f0757e36b3de75072336e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 664
-  matching_instructions: 664
+  bit_exact_instructions: 655
+  matching_instructions: 672
   target_instructions: 853
   is_bit_exact: false
 }
@@ -34270,13 +34242,13 @@ entries {
 entries {
   function_name: "func_800C7058"
   module_name: "npc"
-  input_sha1: "5474258468c35caf7692b58b6c3e7d3eb811934b"
+  input_sha1: "6da736efee55c57a016f2f18864fb7b7c7215d39"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 347
-  matching_instructions: 347
+  bit_exact_instructions: 343
+  matching_instructions: 362
   target_instructions: 472
   is_bit_exact: false
 }
@@ -34651,34 +34623,14 @@ entries {
 entries {
   function_name: "func_800C8B04"
   module_name: "npc"
-  input_sha1: "d24de4985d4497863a86196ccc7a45112d245fd5"
+  input_sha1: "ced2f27f558639ccb603e9fed3e5077a3b66677f"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
   c_flags: "-fforce-addr"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 12
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 13
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_REORDER_LOCAL_DECLS
-    site_index: 14
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
-  }
-  bit_exact_instructions: 1105
-  matching_instructions: 1105
+  bit_exact_instructions: 1087
+  matching_instructions: 1088
   target_instructions: 1339
   is_bit_exact: false
 }
@@ -34729,39 +34681,39 @@ entries {
 entries {
   function_name: "func_800CA808"
   module_name: "npc"
-  input_sha1: "5c00f337d2b20a2fbe5416e04d0f650588a359f9"
+  input_sha1: "28b2af9d8ba8cbe8c331d3e9022ecead090e9e15"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 451
-  matching_instructions: 451
+  bit_exact_instructions: 453
+  matching_instructions: 469
   target_instructions: 559
   is_bit_exact: false
 }
 entries {
   function_name: "func_800CB0C4"
   module_name: "npc"
-  input_sha1: "74702cc204289e0eacd4cb5988dc9c1fc2281b5e"
+  input_sha1: "efed47507b2939077936dcc4df1189bf07adfd22"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 388
-  matching_instructions: 388
+  bit_exact_instructions: 420
+  matching_instructions: 425
   target_instructions: 523
   is_bit_exact: false
 }
 entries {
   function_name: "func_800CB8F0"
   module_name: "npc"
-  input_sha1: "4dc251848e944f6a963fe887bd19d056ea3a286d"
+  input_sha1: "7ff4a3c8e243a02f9473dfa77f224950a834d89e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 391
-  matching_instructions: 391
+  bit_exact_instructions: 420
+  matching_instructions: 425
   target_instructions: 523
   is_bit_exact: false
 }
@@ -34818,58 +34770,13 @@ entries {
 entries {
   function_name: "func_800CC6F0"
   module_name: "npc"
-  input_sha1: "852d27c68853f9ab56f294b50db9f914e5b79540"
+  input_sha1: "6e850ffb7924ea634bb522b88368920de865a39e"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_GLOBAL_ARRAY_ACCESS
-    site_index: 0
-    param: 2
-  }
-  ast_mutations {
-    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_REORDER_LOCAL_DECLS
-    site_index: 7
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_REORDER_LOCAL_DECLS
-    site_index: 10
-    param: 0
-  }
-  bit_exact_instructions: 426
-  matching_instructions: 426
+  bit_exact_instructions: 388
+  matching_instructions: 388
   target_instructions: 566
   is_bit_exact: false
 }
@@ -35023,7 +34930,7 @@ entries {
 entries {
   function_name: "func_800CE714"
   module_name: "npc"
-  input_sha1: "b1720394ed95b63905f5cfb3c5aaf9154a5c942a"
+  input_sha1: "cc823da90a9b5f1d9fbd657b4ce309eab4765c96"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35165,7 +35072,7 @@ entries {
 entries {
   function_name: "func_800CF34C"
   module_name: "npc"
-  input_sha1: "e6a141b30fed1d67b2b5358ecdc35b33c17e922b"
+  input_sha1: "9da2a93b96fe58473d4dbf0e28f6bf63889710f5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35305,7 +35212,7 @@ entries {
 entries {
   function_name: "func_800CFDC4"
   module_name: "npc"
-  input_sha1: "f0b08ca153b0136764b85b4bfc0e327c21633dcd"
+  input_sha1: "9432d3a67c27c49bbb5ac205b6dd3ac695ce7dd7"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35318,7 +35225,7 @@ entries {
 entries {
   function_name: "func_800CFF1C"
   module_name: "npc"
-  input_sha1: "c412eaf9d901ed7243c67d2e78d28649ab84b861"
+  input_sha1: "8b8a1df1c96c155985fec228e6df03c4f90d23ad"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35331,7 +35238,7 @@ entries {
 entries {
   function_name: "func_800D0074"
   module_name: "npc"
-  input_sha1: "8d7b95034839adf83c1e7e57541481ea8c77f72b"
+  input_sha1: "6ca9c4209ee18cad47aed4a76cbe19e3735dcd5b"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35357,7 +35264,7 @@ entries {
     param: 1
   }
   bit_exact_instructions: 31
-  matching_instructions: 31
+  matching_instructions: 33
   target_instructions: 39
   is_bit_exact: false
 }
@@ -35418,7 +35325,7 @@ entries {
 entries {
   function_name: "func_800D093C"
   module_name: "npc"
-  input_sha1: "eb7737fa168dc6ff95b73074e99d6e78473bbbc0"
+  input_sha1: "af967531c713cf1b1f0608a1c1ae1f1a7688307d"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35458,64 +35365,34 @@ entries {
     site_index: 15
     param: 0
   }
-  bit_exact_instructions: 269
-  matching_instructions: 269
+  bit_exact_instructions: 261
+  matching_instructions: 275
   target_instructions: 294
   is_bit_exact: false
 }
 entries {
   function_name: "func_800D0DD4"
   module_name: "npc"
-  input_sha1: "24a06e67c33a4629545816f6f027105ec0b0bd1a"
+  input_sha1: "b04720f876ba4c56a3819059e5dbaaf3a6439e68"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 6
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
-    param: 0
-  }
-  bit_exact_instructions: 979
-  matching_instructions: 979
+  bit_exact_instructions: 976
+  matching_instructions: 984
   target_instructions: 1015
   is_bit_exact: false
 }
 entries {
   function_name: "func_800D1DB0"
   module_name: "npc"
-  input_sha1: "eba417c697b97e94fdf01601b59d84cd906263be"
+  input_sha1: "1fa7e6cf131b94c09cd052df96c9f45bf60b6ff0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  ast_mutations {
-    kind: AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_DIRECT_TYPED_GLOBAL
-    site_index: 0
-    param: 1
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
-    site_index: 0
-    param: 3
-  }
-  ast_mutations {
-    kind: AST_MUTATION_COALESCE_PARAM_COPY
-    site_index: 0
-    param: 1
-  }
-  bit_exact_instructions: 954
-  matching_instructions: 954
+  bit_exact_instructions: 988
+  matching_instructions: 1034
   target_instructions: 1191
   is_bit_exact: false
 }
@@ -35602,7 +35479,7 @@ entries {
 entries {
   function_name: "func_800D373C"
   module_name: "npc"
-  input_sha1: "9ba0ff45707a67efb0f4e27959a2c522e49a4451"
+  input_sha1: "34547efed801fb1087c4d188aa519292f0ab0190"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35620,7 +35497,7 @@ entries {
 entries {
   function_name: "func_800D3958"
   module_name: "npc"
-  input_sha1: "28342fffb2cee87de48c8db18dc3d407c26535e1"
+  input_sha1: "fe66f30150e6aff3d40aecdcf16ba56dcb089168"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35638,7 +35515,7 @@ entries {
 entries {
   function_name: "func_800D3B74"
   module_name: "npc"
-  input_sha1: "a572a9e2890582148283bd22039fd3695f4b41d2"
+  input_sha1: "0a99c144e3daf8c6d891f66350b78318b9a5ccbc"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35656,7 +35533,7 @@ entries {
 entries {
   function_name: "func_800D3D90"
   module_name: "npc"
-  input_sha1: "379c3442086962f7e50ab0d47ad425417b131775"
+  input_sha1: "b5b68d74fd1e36fb518cea96ae6046aac8a87e33"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35674,7 +35551,7 @@ entries {
 entries {
   function_name: "func_800D3FAC"
   module_name: "npc"
-  input_sha1: "a8e5c0408cae9baaa3b2f569153e60493e45faa0"
+  input_sha1: "67ed409f2082e61a923157fa1c04bfd638c1d6d9"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -35692,7 +35569,7 @@ entries {
 entries {
   function_name: "func_800D41C8"
   module_name: "npc"
-  input_sha1: "7fc7a68707ba367e250602c28b0aed5aa2d545e3"
+  input_sha1: "595f002abef4d9349c58941fcbd63afed1d88727"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -36299,7 +36176,7 @@ entries {
 entries {
   function_name: "func_800D5CC0"
   module_name: "npc"
-  input_sha1: "2f0c4c9c22f83b93bc369e142ce388b06f364c11"
+  input_sha1: "bbf583d48d25a003221ca7c4f75a8b743082ca51"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -36320,8 +36197,8 @@ entries {
     site_index: 0
     param: 0
   }
-  bit_exact_instructions: 562
-  matching_instructions: 562
+  bit_exact_instructions: 552
+  matching_instructions: 576
   target_instructions: 713
   is_bit_exact: false
 }
@@ -36418,13 +36295,13 @@ entries {
 entries {
   function_name: "func_800D7010"
   module_name: "npc"
-  input_sha1: "a223b3ee316f2b5575b820d86f7d8926f8bd6c6d"
+  input_sha1: "2fd105a2356b24a85eef0e715d947cd93b00dbd4"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 610
-  matching_instructions: 610
+  bit_exact_instructions: 608
+  matching_instructions: 639
   target_instructions: 772
   is_bit_exact: false
 }
@@ -36549,7 +36426,7 @@ entries {
 entries {
   function_name: "func_8002E284"
   module_name: "player"
-  input_sha1: "78115183274863bc6e88ed8e9db5618c16918150"
+  input_sha1: "a41de0cf32c853d0c83f4c8636c32f499194a9d6"
   c_flags: "-O1"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -36579,8 +36456,8 @@ entries {
     site_index: 5
     param: 0
   }
-  bit_exact_instructions: 424
-  matching_instructions: 424
+  bit_exact_instructions: 425
+  matching_instructions: 437
   target_instructions: 613
   is_bit_exact: false
 }
@@ -37536,18 +37413,28 @@ entries {
 entries {
   function_name: "func_800305CC"
   module_name: "player"
-  input_sha1: "231e4948adf17f0682cd54d62f44e9d16f950587"
+  input_sha1: "3329e58c43eabf09fbfd8154167b05697d0669f5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
+  c_flags: "-Wa,-g"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 108
-  matching_instructions: 108
+  ast_mutations {
+    kind: AST_MUTATION_INLINE_SINGLE_USE_TEMP
+    site_index: 5
+    param: 0
+  }
+  ast_mutations {
+    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
+    site_index: 1
+    param: 0
+  }
+  bit_exact_instructions: 124
+  matching_instructions: 129
   target_instructions: 197
   is_bit_exact: false
 }
@@ -38039,7 +37926,7 @@ entries {
 entries {
   function_name: "func_80032330"
   module_name: "player"
-  input_sha1: "e33ced73850443ed6b1832d2158b599dc05698d8"
+  input_sha1: "8e01c2dc71c82f0c5b91344cc1bce48795cd7ebf"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -38051,27 +37938,17 @@ entries {
     param: 1
   }
   ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 3
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 5
-    param: 0
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 4
+    param: 2
   }
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 9
     param: 0
   }
-  ast_mutations {
-    kind: AST_MUTATION_SPLIT_SINGLE_USE_TEMP
-    site_index: 3
-    param: 1
-  }
-  bit_exact_instructions: 207
-  matching_instructions: 207
+  bit_exact_instructions: 195
+  matching_instructions: 195
   target_instructions: 228
   is_bit_exact: false
 }
@@ -38112,12 +37989,11 @@ entries {
 entries {
   function_name: "func_80033058"
   module_name: "player"
-  input_sha1: "e366a634dc9cff8fc50e83c2d2a887550900060b"
+  input_sha1: "7d2c8ea4e01c5749e6df9be993aba95295c1f907"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  c_flags: "-fno-schedule-insns"
   ast_mutations {
     kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
     site_index: 2
@@ -38138,8 +38014,18 @@ entries {
     site_index: 3
     param: 0
   }
-  bit_exact_instructions: 394
-  matching_instructions: 394
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 10
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
+    site_index: 9
+    param: 0
+  }
+  bit_exact_instructions: 385
+  matching_instructions: 401
   target_instructions: 478
   is_bit_exact: false
 }
@@ -38242,7 +38128,7 @@ entries {
 entries {
   function_name: "func_8006F938"
   module_name: "scene"
-  input_sha1: "c9fcad7411bf008f1399916cc4f1e82ddd766159"
+  input_sha1: "750d66e09218f182a040ba17b08c0d57e0ce1ae9"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -38262,8 +38148,8 @@ entries {
     site_index: 6
     param: 0
   }
-  bit_exact_instructions: 3089
-  matching_instructions: 3089
+  bit_exact_instructions: 3024
+  matching_instructions: 3064
   target_instructions: 3651
   is_bit_exact: false
 }
@@ -39525,7 +39411,7 @@ entries {
 entries {
   function_name: "func_8002A228"
   module_name: "sprite"
-  input_sha1: "f2b64948d7aabcfc7f37b812c91ec73881c0a2e0"
+  input_sha1: "8b12e8fbdf20a595c0264f82dd6361b5d64f7961"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -39618,7 +39504,7 @@ entries {
 entries {
   function_name: "func_8002A66C"
   module_name: "sprite"
-  input_sha1: "9da484ba889193dffe51bf336e8f10d147de8f53"
+  input_sha1: "37584a0a459dc4e372f7945f3e01d7932dfea6fe"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -39643,8 +39529,18 @@ entries {
     site_index: 2
     param: 0
   }
-  bit_exact_instructions: 259
-  matching_instructions: 259
+  ast_mutations {
+    kind: AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX
+    site_index: 0
+    param: 1
+  }
+  ast_mutations {
+    kind: AST_MUTATION_COMMUTE_BINARY_OP
+    site_index: 16
+    param: 0
+  }
+  bit_exact_instructions: 263
+  matching_instructions: 270
   target_instructions: 398
   is_bit_exact: false
 }
@@ -39717,7 +39613,7 @@ entries {
 entries {
   function_name: "TimeAdvance"
   module_name: "time"
-  input_sha1: "7e784dcc3bd51552c7b628ec5a6e00845951f565"
+  input_sha1: "bf6f5844ff49a787bb6f8ee33d11f5748c67a2b5"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
@@ -39804,7 +39700,7 @@ entries {
 entries {
   function_name: "TimeSleep"
   module_name: "time"
-  input_sha1: "253938cfaa4cc55d3ff9e40782edb25c83d7a88c"
+  input_sha1: "e7474ffe6a0c3f58b7c58deaa11f6855e2805cb0"
   c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"

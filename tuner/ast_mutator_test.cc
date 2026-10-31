@@ -1110,11 +1110,12 @@ TEST(AstMutatorTest, NonAdjacentRegisterPairSwapsDirectRePinAndCseBarrierSuppres
   EXPECT_TRUE(all_suppressed.SuppressAllCseBarriers());
 
   // 4. Diff-guided mutation discovery promotes exact transposed register pair ($8, $9) to the
-  // front of discovered mutations.
+  // front of discovered mutations, while rejecting cross-save-class pairs like ($16, $5).
   DiffDiagnostic diag;
   diag.transposed_register_pairs.push_back({"$8", "$9"});
+  diag.transposed_register_pairs.push_back({"$16", "$5"});
   diag.has_unfilled_delay_slot = true;
-  auto guided = AstMutator::DiscoverMutations(func, /*max_mutations=*/8, &diag);
+  auto guided = AstMutator::DiscoverMutations(func, /*max_mutations=*/16, &diag);
   ASSERT_FALSE(guided.empty());
   bool found_repin_t1 = false;
   bool found_cse_suppress = false;
@@ -1126,6 +1127,11 @@ TEST(AstMutatorTest, NonAdjacentRegisterPairSwapsDirectRePinAndCseBarrierSuppres
     if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION &&
         (step.param() == 4 || step.param() == 5)) {
       found_cse_suppress = true;
+    }
+    // Site 1 (temp_s0, $16) must never be re-pinned to a caller-saved or argument register.
+    if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION && step.site_index() == 1) {
+      EXPECT_NE(step.param(), 105u);
+      EXPECT_NE(step.param(), 108u);
     }
   }
   EXPECT_TRUE(found_repin_t1);

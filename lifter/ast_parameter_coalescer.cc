@@ -895,13 +895,17 @@ void CoalescePrologueParameterCopies(CompoundStatement* comp,
               v_copy_ok = stmt_uses_in_call_arg(branch_s) && !stmt_returns_lhs(*comp);
             }
             bool homed_param_coalesce_ok = false;
+            int rhs_arg_idx = -1;
             if (is_homed_param_slot && !is_assigned(rhs) &&
                 (!StatementUsesAddressOfInPointerArithmetic(*comp, lhs) ||
-                 (rhs == "arg0" && count_assignments(lhs) == 1 &&
-                  !StatementReferencesVariable(*comp, absl::StrCat("var_sp_", frame_size + 4))))) {
+                 (IsArgParamIdentifier(rhs, &rhs_arg_idx) && count_assignments(lhs) == 1 &&
+                  !StatementReferencesVariable(
+                      *comp,
+                      absl::StrCat("var_sp_",
+                                   frame_size + static_cast<uint32_t>(rhs_arg_idx + 1) * 4))))) {
               if (count_assignments(lhs) == 1) {
                 homed_param_coalesce_ok = true;
-              } else if (is_in_call_free_prologue && !lhs_addr_taken &&
+              } else if (is_in_call_free_prologue &&
                          CountIdentifierOccurrencesInStatement(*comp, rhs) == 1) {
                 homed_param_coalesce_ok = true;
               }
@@ -1843,28 +1847,26 @@ bool SplitScratchReusedParameterRegisters(CompoundStatement* body,
       }
     };
     size_t subst_start_idx = *prologue_copy_idx + 1;
-    if (!is_homed_copy) {
-      for (size_t pre_idx = *prologue_copy_idx + 1; pre_idx < stmts.size() && pre_idx < 8;
-           ++pre_idx) {
-        if (stmts[pre_idx] == nullptr ||
-            stmts[pre_idx]->Kind() != CStatementKind::kExpressionStatement) {
+    for (size_t pre_idx = *prologue_copy_idx + 1; pre_idx < stmts.size() && pre_idx < 8;
+         ++pre_idx) {
+      if (stmts[pre_idx] == nullptr ||
+          stmts[pre_idx]->Kind() != CStatementKind::kExpressionStatement) {
+        break;
+      }
+      const auto& es = static_cast<const ExpressionStatement&>(*stmts[pre_idx]);
+      if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
+        if (a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(a.Lhs()).Name() == param.name) {
           break;
         }
-        const auto& es = static_cast<const ExpressionStatement&>(*stmts[pre_idx]);
-        if (es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-          const auto& a = static_cast<const AssignmentExpression&>(es.Expression());
-          if (a.Lhs().Kind() == CExpressionKind::kIdentifier &&
-              static_cast<const IdentifierExpression&>(a.Lhs()).Name() == param.name) {
-            break;
-          }
-        }
-        if (StatementReferencesVariable(*stmts[pre_idx], param.name)) {
-          subst_start_idx = pre_idx + 1;
-        }
-        if (StatementHasCall(*stmts[pre_idx])) {
-          saw_call_before_write = true;
-          break;
-        }
+      }
+      if (StatementReferencesVariable(*stmts[pre_idx], param.name)) {
+        subst_start_idx = pre_idx + 1;
+      }
+      if (StatementHasCall(*stmts[pre_idx])) {
+        saw_call_before_write = true;
+        break;
       }
     }
     bool entry_not_read = true;

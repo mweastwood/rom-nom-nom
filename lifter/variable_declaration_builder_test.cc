@@ -1779,5 +1779,123 @@ TEST(VariableDeclarationBuilderTest,
   }
 }
 
+TEST(VariableDeclarationBuilderTest,
+     ModelsCalleeGprLiveIntervalsForSpLocalsAfterFourCallsAndPromotes16BitAddrTakenSpVars) {
+  ControlFlowGraph cfg;
+
+  // 1. Even after 4+ calls, a `var_sp_*` variable whose live span overlaps all 9 callee-saved
+  //    GPRs ($s0..$s7 and $fp) spills to an 8-byte stack slot, reducing the unreferenced `sp` gap.
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 72;
+    frame.has_calls = true;
+    frame.outgoing_args_size = 16;
+    frame.prologue.min_saved_reg_offset = 32;
+    for (int i = 0; i <= 7; ++i) {
+      frame.prologue.saved_reg_offsets[static_cast<Register>(static_cast<int>(Register::kS0) + i)] =
+          32 + i * 4;
+    }
+    frame.prologue.saved_reg_offsets[Register::kFp] = 64;
+    frame.prologue.saved_reg_offsets[Register::kRa] = 68;
+
+    auto body = std::make_unique<CompoundStatement>();
+    for (int c = 0; c < 5; ++c) {
+      body->AddStatement(CStatement::Expression(CExpression::Call(
+          CExpression::Identifier("func_80001000"), std::vector<std::unique_ptr<CExpression>>{})));
+    }
+    for (int s = 0; s < 8; ++s) {
+      body->AddStatement(CStatement::Expression(CExpression::Assignment(
+          "=", CExpression::Identifier(absl::StrCat("temp_s", s)), CExpression::Integer(s))));
+    }
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("fp"), CExpression::Integer(8))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_20"), CExpression::Integer(99))));
+    body->AddStatement(CStatement::Expression(CExpression::Call(
+        CExpression::Identifier("func_80001000"), std::vector<std::unique_ptr<CExpression>>{})));
+    body->AddStatement(CStatement::Return(CExpression::Binary(
+        "+", CExpression::Identifier("fp"), CExpression::Identifier("var_sp_20"))));
+
+    std::vector<CParameter> params;
+    absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 0}};
+    AstConverterOptions opts;
+    opts.function_name = "TestSpillAfterFiveCalls";
+    opts.function_parameter_counts = &param_counts;
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    EXPECT_THAT(body->ToString(), HasSubstr("u8 sp[8];"));
+  }
+
+  // 2. Address-taken `var_sp_*` variables spaced by 2 bytes (e.g., `var_sp_58, var_sp_60,
+  //    var_sp_62`) are declared as `s16` and counted as 2 bytes each in stack-frame math.
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 64;
+    frame.has_calls = true;
+    frame.outgoing_args_size = 16;
+    frame.prologue.min_saved_reg_offset = 40;
+    frame.prologue.saved_reg_offsets[Register::kS0] = 40;
+    frame.prologue.saved_reg_offsets[Register::kRa] = 44;
+
+    auto body = std::make_unique<CompoundStatement>();
+    std::vector<std::unique_ptr<CExpression>> args;
+    args.push_back(CExpression::Unary("&", CExpression::Identifier("var_sp_58")));
+    args.push_back(CExpression::Unary("&", CExpression::Identifier("var_sp_60")));
+    args.push_back(CExpression::Unary("&", CExpression::Identifier("var_sp_62")));
+    body->AddStatement(CStatement::Expression(
+        CExpression::Call(CExpression::Identifier("func_80001000"), std::move(args))));
+    body->AddStatement(CStatement::Return(CExpression::Identifier("var_sp_60")));
+
+    std::vector<CParameter> params;
+    absl::flat_hash_map<std::string, int> param_counts = {{"func_80001000", 3}};
+    AstConverterOptions opts;
+    opts.function_name = "Test16BitAddrTakenSpVars";
+    opts.function_parameter_counts = &param_counts;
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    EXPECT_THAT(emitted, HasSubstr("s16 var_sp_58;"));
+    EXPECT_THAT(emitted, HasSubstr("s16 var_sp_60;"));
+    EXPECT_THAT(emitted, HasSubstr("s16 var_sp_62;"));
+  }
+
+  // 3. When all 9 callee-saved GPRs ($s0..$s7 and $fp) are saved in the prologue and `sp` buffer
+  //    has unaccessed top spill slack, 8 bytes are subtracted from `sp_buffer_size` for `fp`.
+  {
+    StackFrameAnalysis frame;
+    frame.frame_size = 168;
+    frame.has_calls = true;
+    frame.sp_address_taken = true;
+    frame.sp_buffer_size = 96;
+    frame.max_sp_access = 84;
+    frame.prologue.min_saved_reg_offset = 112;
+    for (int i = 0; i <= 7; ++i) {
+      frame.prologue.saved_reg_offsets[static_cast<Register>(static_cast<int>(Register::kS0) + i)] =
+          112 + i * 4;
+    }
+    frame.prologue.saved_reg_offsets[Register::kFp] = 144;
+    frame.prologue.saved_reg_offsets[Register::kRa] = 148;
+
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(
+        CExpression::Assignment("=", CExpression::Identifier("fp"),
+                                CExpression::Cast(CType::S32(), CExpression::Identifier("sp")))));
+    body->AddStatement(CStatement::Return(CExpression::Identifier("fp")));
+
+    std::vector<CParameter> params;
+    AstConverterOptions opts;
+    opts.function_name = "TestAllNineCalleeGprsSpBufferSpill";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(cfg, frame, /*double_vars=*/{}, params,
+                                                    CType::S32(), nullptr, opts, &body)
+                    .ok());
+    EXPECT_THAT(body->ToString(), HasSubstr("u8 sp[88];"));
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

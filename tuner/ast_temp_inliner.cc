@@ -10,11 +10,74 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
+#include "core/c_ast_visitor.h"
 #include "tuner/ast_global_mutations.h"
 
 namespace rom_nom_nom {
+
+struct ScopedRootBodySummary::Impl {
+  const CompoundStatement* root_body = nullptr;
+  bool has_goto_or_label = false;
+  absl::flat_hash_set<std::string> local_variables;
+  absl::flat_hash_map<std::string, int> non_decl_counts;
+  std::vector<absl::flat_hash_set<std::string>> top_stmt_identifiers;
+  std::vector<bool> top_stmt_has_jump_or_label;
+};
+
+namespace {
+
+thread_local const ScopedRootBodySummary::Impl* g_active_root_summary = nullptr;
+
+class StatementIdentifierSummaryVisitor : public AstVisitor {
+ public:
+  StatementIdentifierSummaryVisitor(absl::flat_hash_map<std::string, int>* non_decl_counts,
+                                    absl::flat_hash_set<std::string>* stmt_identifiers)
+      : non_decl_counts_(non_decl_counts), stmt_identifiers_(stmt_identifiers) {}
+
+  void VisitVariableDeclarationStatement(const VariableDeclarationStatement& stmt) override {
+    stmt_identifiers_->insert(stmt.Name());
+    if (count_decl_names_) {
+      (*non_decl_counts_)[stmt.Name()]++;
+    }
+    if (stmt.Initializer() != nullptr) {
+      VisitExpression(*stmt.Initializer());
+    }
+  }
+
+  void VisitStatement(const CStatement& stmt) override {
+    const bool prev = count_decl_names_;
+    if (stmt.Kind() != CStatementKind::kCompoundStatement &&
+        stmt.Kind() != CStatementKind::kVariableDeclarationStatement) {
+      count_decl_names_ = true;
+    }
+    AstVisitor::VisitStatement(stmt);
+    count_decl_names_ = prev;
+  }
+
+  void VisitIdentifierExpression(const IdentifierExpression& expr) override {
+    const std::string& id = expr.Name();
+    stmt_identifiers_->insert(id);
+    (*non_decl_counts_)[id]++;
+    std::string_view prefix;
+    std::string_view inner;
+    if (ExtractFunctionPointerCastCalleeIdentifier(id, &prefix, &inner)) {
+      std::string inner_str(inner);
+      stmt_identifiers_->insert(inner_str);
+      (*non_decl_counts_)[inner_str]++;
+    }
+  }
+
+ private:
+  absl::flat_hash_map<std::string, int>* non_decl_counts_;
+  absl::flat_hash_set<std::string>* stmt_identifiers_;
+  bool count_decl_names_ = false;
+};
+
+}  // namespace
 
 bool ExpressionReadsIndirectMemory(const CExpression& expression) {
   std::string symbol;
@@ -126,6 +189,9 @@ bool StatementContainsJumpOrLabel(const CStatement& statement) {
 }
 
 bool StatementContainsGotoOrLabel(const CStatement& statement) {
+  if (g_active_root_summary != nullptr && g_active_root_summary->root_body == &statement) {
+    return g_active_root_summary->has_goto_or_label;
+  }
   switch (statement.Kind()) {
     case CStatementKind::kGotoStatement:
     case CStatementKind::kLabelStatement:
@@ -163,6 +229,10 @@ bool StatementContainsGotoOrLabel(const CStatement& statement) {
 }
 
 int CountNonDeclarationOccurrencesInStatement(const CStatement& statement, std::string_view name) {
+  if (g_active_root_summary != nullptr && g_active_root_summary->root_body == &statement) {
+    auto it = g_active_root_summary->non_decl_counts.find(name);
+    return it != g_active_root_summary->non_decl_counts.end() ? it->second : 0;
+  }
   if (statement.Kind() == CStatementKind::kVariableDeclarationStatement) {
     const auto& declaration = static_cast<const VariableDeclarationStatement&>(statement);
     return declaration.Initializer() != nullptr
@@ -178,6 +248,35 @@ int CountNonDeclarationOccurrencesInStatement(const CStatement& statement, std::
     return total;
   }
   return CountIdentifierOccurrencesInStatement(statement, name);
+}
+
+ScopedRootBodySummary::ScopedRootBodySummary(const CompoundStatement* root_body)
+    : prev_(g_active_root_summary) {
+  if (root_body == nullptr) return;
+  if (prev_ != nullptr && prev_->root_body == root_body) return;
+  impl_ = std::make_unique<Impl>();
+  impl_->root_body = root_body;
+  impl_->has_goto_or_label = StatementContainsGotoOrLabel(*root_body);
+  const auto& stmts = root_body->Statements();
+  impl_->top_stmt_identifiers.resize(stmts.size());
+  impl_->top_stmt_has_jump_or_label.resize(stmts.size(), false);
+  for (size_t k = 0; k < stmts.size(); ++k) {
+    if (stmts[k]->Kind() == CStatementKind::kVariableDeclarationStatement) {
+      impl_->local_variables.insert(
+          static_cast<const VariableDeclarationStatement&>(*stmts[k]).Name());
+    }
+    StatementIdentifierSummaryVisitor visitor(&impl_->non_decl_counts,
+                                              &impl_->top_stmt_identifiers[k]);
+    visitor.VisitStatement(*stmts[k]);
+    impl_->top_stmt_has_jump_or_label[k] = StatementContainsJumpOrLabel(*stmts[k]);
+  }
+  g_active_root_summary = impl_.get();
+}
+
+ScopedRootBodySummary::~ScopedRootBodySummary() {
+  if (impl_ != nullptr) {
+    g_active_root_summary = prev_;
+  }
 }
 
 bool IsUnconditionalOverwriteOfVariable(const CStatement& statement,
@@ -290,19 +389,27 @@ bool IsVariableDeadAfter(const std::vector<std::unique_ptr<CStatement>>& stateme
                          size_t after_index, std::string_view variable_name,
                          bool is_top_level_block, const CompoundStatement* root_body,
                          int max_dead_occurrences) {
+  const bool use_root_summary =
+      g_active_root_summary != nullptr &&
+      &statements == &g_active_root_summary->root_body->Statements() &&
+      g_active_root_summary->top_stmt_identifiers.size() == statements.size();
   for (size_t k = after_index + 1; k < statements.size(); ++k) {
     bool always_overwrites = false;
-    if (DoesStatementReadVariableBeforeOverwrite(*statements[k], variable_name,
-                                                 &always_overwrites)) {
-      return false;
-    }
-    if (always_overwrites) {
-      return true;
+    if (!use_root_summary ||
+        g_active_root_summary->top_stmt_identifiers[k].contains(variable_name)) {
+      if (DoesStatementReadVariableBeforeOverwrite(*statements[k], variable_name,
+                                                   &always_overwrites)) {
+        return false;
+      }
+      if (always_overwrites) {
+        return true;
+      }
     }
     if (statements[k]->Kind() == CStatementKind::kReturnStatement) {
       return true;
     }
-    if (StatementContainsJumpOrLabel(*statements[k])) {
+    if (use_root_summary ? g_active_root_summary->top_stmt_has_jump_or_label[k]
+                         : StatementContainsJumpOrLabel(*statements[k])) {
       return false;
     }
   }
@@ -1070,10 +1177,16 @@ bool AnalyzeInlineSingleUseTemporaryAt(const std::vector<std::unique_ptr<CStatem
   const bool rhs_reads_indirect_memory = ExpressionReadsIndirectMemory(rhs);
 
   // Find the first subsequent statement `use_index` that references `variable_name`.
+  const bool use_root_summary =
+      g_active_root_summary != nullptr &&
+      &statements == &g_active_root_summary->root_body->Statements() &&
+      g_active_root_summary->top_stmt_identifiers.size() == statements.size();
   std::optional<size_t> found_use_index;
   bool can_sink = true;
   for (size_t m = index + 1; m < statements.size(); ++m) {
-    if (CountIdentifierOccurrencesInStatement(*statements[m], variable_name) > 0) {
+    if (use_root_summary
+            ? g_active_root_summary->top_stmt_identifiers[m].contains(variable_name)
+            : (CountIdentifierOccurrencesInStatement(*statements[m], variable_name) > 0)) {
       found_use_index = m;
       break;
     }
@@ -1344,7 +1457,11 @@ bool IsDeadAssignmentAt(const std::vector<std::unique_ptr<CStatement>>& statemen
 
 std::unique_ptr<CompoundStatement> PruneUnusedLocalDeclarations(const CompoundStatement& body,
                                                                 bool preserve_trailing_return) {
+  ScopedRootBodySummary summary_guard(&body);
   const auto& statements = body.Statements();
+  const bool use_root_summary =
+      g_active_root_summary != nullptr && g_active_root_summary->root_body == &body &&
+      g_active_root_summary->top_stmt_identifiers.size() == statements.size();
   std::vector<std::unique_ptr<CStatement>> new_statements;
   new_statements.reserve(statements.size());
 
@@ -1356,7 +1473,14 @@ std::unique_ptr<CompoundStatement> PruneUnusedLocalDeclarations(const CompoundSt
         int uses = 0;
         for (size_t j = 0; j < statements.size(); ++j) {
           if (j == i) continue;
-          uses += CountIdentifierOccurrencesInStatement(*statements[j], declaration.Name());
+          if (use_root_summary) {
+            if (g_active_root_summary->top_stmt_identifiers[j].contains(declaration.Name())) {
+              ++uses;
+              break;
+            }
+          } else {
+            uses += CountIdentifierOccurrencesInStatement(*statements[j], declaration.Name());
+          }
         }
         if (uses == 0) {
           continue;
@@ -1383,6 +1507,7 @@ std::unique_ptr<CompoundStatement> PruneUnusedLocalDeclarations(const CompoundSt
 
 std::vector<ParameterCopyCandidate> CollectParameterCopyCandidates(
     const FunctionDeclaration& function) {
+  ScopedRootBodySummary summary_guard(&function.Body());
   std::set<std::string> parameter_names;
   for (const auto& parameter : function.Parameters()) {
     parameter_names.insert(parameter.name);
@@ -1443,6 +1568,15 @@ std::unique_ptr<CompoundStatement> ApplyCoalesceParameterCopy(
   while (changed) {
     changed = false;
     for (size_t i = coalesce_start_index; i < work.size(); ++i) {
+      if (work[i]->Kind() != CStatementKind::kExpressionStatement) continue;
+      const auto& expr = static_cast<const ExpressionStatement&>(*work[i]).Expression();
+      if (expr.Kind() != CExpressionKind::kAssignmentExpression) continue;
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier ||
+          static_cast<const IdentifierExpression&>(assign.Lhs()).Name() !=
+              candidate.parameter_name) {
+        continue;
+      }
       InlineCandidateInfo info;
       if (AnalyzeInlineSingleUseTemporaryAt(work, i, /*is_top_level_block=*/true, &info) &&
           info.variable_name == candidate.parameter_name && info.can_sink_to_use) {
@@ -1696,7 +1830,12 @@ std::unique_ptr<CompoundStatement> InlineOneTemporaryInCompound(const CompoundSt
                                                                 bool prefer_hoist,
                                                                 bool is_top_level,
                                                                 bool* inlined_any) {
+  ScopedRootBodySummary summary_guard(&root_body);
   const auto& statements = compound.Statements();
+  const bool use_root_summary =
+      g_active_root_summary != nullptr &&
+      &statements == &g_active_root_summary->root_body->Statements() &&
+      g_active_root_summary->top_stmt_identifiers.size() == statements.size();
   for (size_t i = 0; i < statements.size(); ++i) {
     // 0. Eliminate dead pure assignments:
     //    - overwritten in the same block before any read, jump, label, or loop, OR
@@ -1718,25 +1857,33 @@ std::unique_ptr<CompoundStatement> InlineOneTemporaryInCompound(const CompoundSt
               break;
             }
             bool always_overwrites = false;
-            if (DoesStatementReadVariableBeforeOverwrite(*statements[k], variable_name,
-                                                         &always_overwrites)) {
-              break;
+            if (!use_root_summary ||
+                g_active_root_summary->top_stmt_identifiers[k].contains(variable_name)) {
+              if (DoesStatementReadVariableBeforeOverwrite(*statements[k], variable_name,
+                                                           &always_overwrites)) {
+                break;
+              }
             }
             if (always_overwrites || statements[k]->Kind() == CStatementKind::kReturnStatement) {
               dead_in_block = true;
               break;
             }
-            if (StatementContainsJumpOrLabel(*statements[k])) {
+            if (use_root_summary ? g_active_root_summary->top_stmt_has_jump_or_label[k]
+                                 : StatementContainsJumpOrLabel(*statements[k])) {
               break;
             }
           }
           bool is_local_variable = false;
-          for (const auto& root_statement : root_body.Statements()) {
-            if (root_statement->Kind() == CStatementKind::kVariableDeclarationStatement &&
-                static_cast<const VariableDeclarationStatement&>(*root_statement).Name() ==
-                    variable_name) {
-              is_local_variable = true;
-              break;
+          if (g_active_root_summary != nullptr && g_active_root_summary->root_body == &root_body) {
+            is_local_variable = g_active_root_summary->local_variables.contains(variable_name);
+          } else {
+            for (const auto& root_statement : root_body.Statements()) {
+              if (root_statement->Kind() == CStatementKind::kVariableDeclarationStatement &&
+                  static_cast<const VariableDeclarationStatement&>(*root_statement).Name() ==
+                      variable_name) {
+                is_local_variable = true;
+                break;
+              }
             }
           }
           const bool never_read_in_function =

@@ -438,9 +438,16 @@ struct FolderContext {
   bool root_has_label = false;
   const CStatement* active_ignored_def_stmt = nullptr;
   const CStatement* active_ignored_use_stmt = nullptr;
+  bool in_is_dead_after_stmt = false;
+  absl::flat_hash_map<std::string, VarLiveness> completed_label_liveness;
+  absl::flat_hash_set<std::string> in_progress_labels;
 
   VarLiveness AnalyzeVarLiveness(const CStatement& s, std::string_view var, bool in_switch_case_top,
                                  int goto_depth) {
+    if (goto_depth == 0 && !in_is_dead_after_stmt) {
+      completed_label_liveness.clear();
+      in_progress_labels.clear();
+    }
     if (&s == active_ignored_def_stmt || &s == active_ignored_use_stmt) {
       return VarLiveness::kTransparent;
     }
@@ -613,9 +620,14 @@ struct FolderContext {
 
   VarLiveness AnalyzeFromLabel(std::string_view target_label, std::string_view var,
                                int goto_depth) {
-    if (goto_depth > 16 || root_body == nullptr) {
+    auto memo_it = completed_label_liveness.find(target_label);
+    if (memo_it != completed_label_liveness.end()) {
+      return memo_it->second;
+    }
+    if (goto_depth > 16 || root_body == nullptr || in_progress_labels.contains(target_label)) {
       return VarLiveness::kReadBeforeWrite;
     }
+    in_progress_labels.insert(std::string(target_label));
     const CompoundStatement* found_comp = nullptr;
     size_t found_idx = 0;
     std::function<void(const CStatement&)> find_label = [&](const CStatement& s) {
@@ -653,17 +665,22 @@ struct FolderContext {
     };
     find_label(*root_body);
     if (found_comp == nullptr) {
+      in_progress_labels.erase(target_label);
+      completed_label_liveness[std::string(target_label)] = VarLiveness::kReadBeforeWrite;
       return VarLiveness::kReadBeforeWrite;
     }
+    VarLiveness final_res =
+        (found_comp == root_body) ? VarLiveness::kKilledBeforeRead : VarLiveness::kReadBeforeWrite;
     for (size_t m = found_idx; m < found_comp->Statements().size(); ++m) {
       VarLiveness res = AnalyzeVarLiveness(*found_comp->Statements()[m], var, false, goto_depth);
-      if (res == VarLiveness::kReadBeforeWrite) return VarLiveness::kReadBeforeWrite;
-      if (res == VarLiveness::kKilledBeforeRead) return VarLiveness::kKilledBeforeRead;
+      if (res == VarLiveness::kReadBeforeWrite || res == VarLiveness::kKilledBeforeRead) {
+        final_res = res;
+        break;
+      }
     }
-    if (found_comp == root_body) {
-      return VarLiveness::kKilledBeforeRead;
-    }
-    return VarLiveness::kReadBeforeWrite;
+    in_progress_labels.erase(target_label);
+    completed_label_liveness[std::string(target_label)] = final_res;
+    return final_res;
   }
 
   static bool IsComparisonExpr(const CExpression& e) {
@@ -798,6 +815,9 @@ struct FolderContext {
 
     active_ignored_def_stmt = def_stmt;
     active_ignored_use_stmt = (expected_uses_in_next > 0) ? stmts[next_idx].get() : nullptr;
+    in_is_dead_after_stmt = true;
+    completed_label_liveness.clear();
+    in_progress_labels.clear();
     for (size_t k = next_idx + 1; k < stmts.size(); ++k) {
       const auto& s = *stmts[k];
       if (s.Kind() == CStatementKind::kBreakStatement && is_switch_case_body) {
@@ -805,16 +825,21 @@ struct FolderContext {
       }
       VarLiveness res = AnalyzeVarLiveness(s, var, is_switch_case_body, 0);
       if (res == VarLiveness::kKilledBeforeRead) {
+        in_is_dead_after_stmt = false;
         active_ignored_def_stmt = nullptr;
         active_ignored_use_stmt = nullptr;
         return true;
       }
       if (res == VarLiveness::kReadBeforeWrite) {
+        in_is_dead_after_stmt = false;
         active_ignored_def_stmt = nullptr;
         active_ignored_use_stmt = nullptr;
-        return false;
+        return expected_uses_in_next == 0 && root_body != nullptr && var != "v0" && var != "f0" &&
+               var != "f0_d" && CountUses(s, var) == 0 && CountUses(*root_body, var) == 0 &&
+               !HasAddressOfVarInStmt(*root_body, var);
       }
     }
+    in_is_dead_after_stmt = false;
     active_ignored_def_stmt = nullptr;
     active_ignored_use_stmt = nullptr;
     if (comp == root_body || (dead_at_end_vars != nullptr && dead_at_end_vars->contains(var))) {

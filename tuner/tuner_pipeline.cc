@@ -77,8 +77,9 @@ bool IsNearMissScore(const CandidateScore& score) {
       std::max(score.matching_instructions, score.normalized_lcs_instructions);
   const double match_ratio =
       target_insns > 0 ? static_cast<double>(best_aligned_insns) / target_insns : 0.0;
-  return (target_insns >= best_aligned_insns && (target_insns - best_aligned_insns <= 6)) ||
-         (match_ratio >= 0.85);
+  const size_t diff_insns =
+      target_insns > best_aligned_insns ? (target_insns - best_aligned_insns) : 0;
+  return diff_insns <= 6 || (match_ratio >= 0.85 && diff_insns <= 32);
 }
 
 }  // namespace
@@ -191,7 +192,10 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
       }
       return true;
     };
-    for (size_t round = 0; round < options.max_rounds && !result.best_score.raw_bit_exact;
+    const bool is_very_large_function = result.baseline_score.target_instruction_count > 500;
+    const size_t effective_max_rounds =
+        is_very_large_function ? std::min<size_t>(options.max_rounds, 1) : options.max_rounds;
+    for (size_t round = 0; round < effective_max_rounds && !result.best_score.raw_bit_exact;
          ++round) {
       const FunctionDeclaration round_base_ast = result.best_ast->Clone();
       auto candidate_steps = AstMutator::DiscoverMutations(
@@ -223,7 +227,7 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
           improved_in_round = true;
           improved_in_ast_search = true;
           if (result.best_score.raw_bit_exact) break;
-        } else if (!improved_in_round &&
+        } else if (!improved_in_round && !is_very_large_function &&
                    preserves_structural_invariants(*candidate_score_or, result.best_score)) {
           if (runners_up.size() < kMaxPlateauRunnersUp) {
             runners_up.push_back(RunnerUpCandidate{std::move(mutated), *candidate_score_or, step});
@@ -241,7 +245,7 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
           }
         }
       }
-      if (!improved_in_round && !runners_up.empty() && round + 1 < options.max_rounds) {
+      if (!improved_in_round && !runners_up.empty() && round + 1 < effective_max_rounds) {
         const size_t lookahead_limit = std::min<size_t>(16, options.max_ast_candidates_per_round);
         AstMutationStep chosen_runner_step;
         AstMutationStep lookahead_best_step;
@@ -288,7 +292,7 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
   // a near-miss (target_insns - matching_insns <= 6 or instruction_match_ratio >= 0.85), run an
   // extra Polish Pass (up to `max_polish_rounds` micro-rounds) that tests high-yield near-miss
   // mutations first on `winning_c_flags` without the O(mutations * flag_profiles) explosion.
-  if (!result.best_score.raw_bit_exact && options.explore_ast_mutations &&
+  if (!result.best_score.raw_bit_exact && options.explore_ast_mutations && options.max_rounds > 0 &&
       IsNearMissScore(result.best_score)) {
     for (size_t polish_round = 0;
          polish_round < options.max_polish_rounds && !result.best_score.raw_bit_exact;
@@ -443,14 +447,24 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneFunction(std::string_view 
     return target_or.status();
   }
 
-  if (!module_name.empty()) {
-    auto module_funcs_or = lifter_->GetFunctionsInModule(module_name);
+  std::string resolved_module_name(module_name);
+  if (resolved_module_name.empty()) {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    const auto* cached_by_name = cache_store_.Lookup(target_or->name, "");
+    if (cached_by_name != nullptr && !cached_by_name->module_name().empty()) {
+      resolved_module_name = cached_by_name->module_name();
+    }
+  }
+
+  if (!resolved_module_name.empty()) {
+    auto module_funcs_or = lifter_->GetFunctionsInModule(resolved_module_name);
     if (module_funcs_or.ok() && module_funcs_or->size() > 1) {
       auto mod_tu_or = lifter_->BuildTranslationUnit(*module_funcs_or);
       if (mod_tu_or.ok()) {
         for (const auto& fn : mod_tu_or->functions) {
           if (fn.Name() == target_or->name) {
-            auto res_or = TuneLoadedFunctionAst(*target_or, fn, &(*mod_tu_or), module_name);
+            auto res_or =
+                TuneLoadedFunctionAst(*target_or, fn, &(*mod_tu_or), resolved_module_name);
             if (!res_or.ok()) {
               return res_or.status();
             }
@@ -470,7 +484,8 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneFunction(std::string_view 
                        : absl::InternalError("TunerPipeline: Empty translation unit.");
   }
 
-  auto res_or = TuneLoadedFunctionAst(*target_or, tu_or->functions[0], &(*tu_or), module_name);
+  auto res_or =
+      TuneLoadedFunctionAst(*target_or, tu_or->functions[0], &(*tu_or), resolved_module_name);
   if (!res_or.ok()) {
     return res_or.status();
   }
@@ -523,6 +538,15 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     const auto* cached_exact = cache_store_.Lookup(target.name, input_sha1);
     const auto* cached_by_name =
         cached_exact != nullptr ? cached_exact : cache_store_.Lookup(target.name, "");
+    if (result.module_name.empty() && cached_by_name != nullptr &&
+        !cached_by_name->module_name().empty()) {
+      result.module_name = cached_by_name->module_name();
+      auto module_flags = cache_store_.GetModuleCFlags(result.module_name);
+      if (!module_flags.empty()) {
+        base_flags = std::move(module_flags);
+        result.winning_c_flags = base_flags;
+      }
+    }
 
     if (cached_exact != nullptr) {
       if (!options_.only_non_bit_exact || cached_exact->is_bit_exact()) {
@@ -637,7 +661,7 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   // Record in TuningCacheStore
   FunctionTuningEntry entry;
   entry.set_function_name(target.name);
-  entry.set_module_name(std::string(module_name));
+  entry.set_module_name(result.module_name);
   entry.set_input_sha1(input_sha1);
   for (const auto& flag : result.winning_c_flags) {
     entry.add_c_flags(flag);

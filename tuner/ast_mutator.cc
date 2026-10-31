@@ -793,6 +793,26 @@ bool IsCallerSavedScratchRegisterAnnotation(std::string_view reg) {
          reg == "$f18" || reg == "$f19";
 }
 
+bool IsCalleeSavedRegisterAnnotation(std::string_view reg) {
+  return reg == "$16" || reg == "$17" || reg == "$18" || reg == "$19" || reg == "$20" ||
+         reg == "$21" || reg == "$22" || reg == "$23" || reg == "$f20" || reg == "$f21" ||
+         reg == "$f22" || reg == "$f23" || reg == "$f24" || reg == "$f25" || reg == "$f26" ||
+         reg == "$f27" || reg == "$f28" || reg == "$f29" || reg == "$f30" || reg == "$f31";
+}
+
+bool AreCompatibleRegisterSaveClasses(std::string_view r1, std::string_view r2) {
+  if (IsFloatingPointRegisterAnnotation(r1) != IsFloatingPointRegisterAnnotation(r2)) {
+    return false;
+  }
+  if (IsCallerSavedScratchRegisterAnnotation(r1) && IsCallerSavedScratchRegisterAnnotation(r2)) {
+    return true;
+  }
+  if (IsCalleeSavedRegisterAnnotation(r1) && IsCalleeSavedRegisterAnnotation(r2)) {
+    return true;
+  }
+  return false;
+}
+
 std::unique_ptr<CStatement> StripRegisterAnnotationsInStatement(const CStatement& stmt,
                                                                 bool scratch_only) {
   switch (stmt.Kind()) {
@@ -1044,6 +1064,7 @@ std::optional<uint32_t> EncodeHardwareRegisterParam(std::string_view reg) {
       if (reg[i] < '0' || reg[i] > '9') return std::nullopt;
       fp_num = fp_num * 10 + static_cast<uint32_t>(reg[i] - '0');
     }
+    if (fp_num >= 12 && fp_num <= 15) return std::nullopt;
     if (fp_num <= 31) return 200 + fp_num;
     return std::nullopt;
   }
@@ -1053,6 +1074,7 @@ std::optional<uint32_t> EncodeHardwareRegisterParam(std::string_view reg) {
       if (reg[i] < '0' || reg[i] > '9') return std::nullopt;
       gpr_num = gpr_num * 10 + static_cast<uint32_t>(reg[i] - '0');
     }
+    if (gpr_num >= 4 && gpr_num <= 7) return std::nullopt;
     if (gpr_num >= 2 && gpr_num <= 25) return 100 + gpr_num;
   }
   return std::nullopt;
@@ -1060,10 +1082,14 @@ std::optional<uint32_t> EncodeHardwareRegisterParam(std::string_view reg) {
 
 std::optional<std::string> DecodeHardwareRegisterParam(uint32_t param) {
   if (param >= 200 && param <= 231) {
-    return absl::StrFormat("$f%u", param - 200);
+    uint32_t fp_num = param - 200;
+    if (fp_num >= 12 && fp_num <= 15) return std::nullopt;
+    return absl::StrFormat("$f%u", fp_num);
   }
   if (param >= 102 && param <= 125) {
-    return absl::StrFormat("$%u", param - 100);
+    uint32_t gpr_num = param - 100;
+    if (gpr_num >= 4 && gpr_num <= 7) return std::nullopt;
+    return absl::StrFormat("$%u", gpr_num);
   }
   return std::nullopt;
 }
@@ -1175,6 +1201,7 @@ struct MutationContext {
   std::vector<AstMutationStep>* discovered = nullptr;
   size_t max_mutations = 64;
   std::set<std::string> local_variables;
+  std::set<std::string> array_variables;
   std::set<std::string> active_register_annotations;
   const CompoundStatement* root_body = nullptr;
 
@@ -1195,6 +1222,13 @@ struct MutationContext {
   uint32_t toggle_register_annotation_index = 0;
   uint32_t toggle_store_flag_index = 0;
   uint32_t hoist_loop_invariant_index = 0;
+
+  bool NeedsCheck(AstMutationKind kind) const {
+    if (step_to_apply != nullptr) {
+      return step_to_apply->kind() == kind;
+    }
+    return discovered != nullptr && discovered->size() < max_mutations;
+  }
 
   void Record(AstMutationKind kind, uint32_t site_index, uint32_t parameter = 0) {
     if (discovered == nullptr || discovered->size() >= max_mutations) return;
@@ -1226,7 +1260,8 @@ std::unique_ptr<CExpression> TraverseExpression(const CExpression& expression,
   CType pointer_type;
   const CExpression* base_expression = nullptr;
   int64_t element_index = 0;
-  if (MatchPointerOffsetDereference(expression, &pointer_type, &base_expression, &element_index)) {
+  if (context->NeedsCheck(AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX) &&
+      MatchPointerOffsetDereference(expression, &pointer_type, &base_expression, &element_index)) {
     auto new_base = TraverseExpression(*base_expression, context);
     uint32_t site = context->pointer_offset_index++;
     context->Record(AST_MUTATION_POINTER_OFFSET_TO_ARRAY_INDEX, site, 0);
@@ -1257,7 +1292,7 @@ std::unique_ptr<CExpression> TraverseExpression(const CExpression& expression,
       const auto& binary = static_cast<const BinaryExpression&>(expression);
       auto new_lhs = TraverseExpression(binary.Lhs(), context);
       auto new_rhs = TraverseExpression(binary.Rhs(), context);
-      if (IsCommutableBinary(binary)) {
+      if (context->NeedsCheck(AST_MUTATION_COMMUTE_BINARY_OP) && IsCommutableBinary(binary)) {
         uint32_t site = context->commute_index++;
         context->Record(AST_MUTATION_COMMUTE_BINARY_OP, site);
         if (context->ShouldApply(AST_MUTATION_COMMUTE_BINARY_OP, site)) {
@@ -1272,7 +1307,8 @@ std::unique_ptr<CExpression> TraverseExpression(const CExpression& expression,
       auto new_lhs = TraverseExpression(assignment.Lhs(), context);
       auto new_rhs = TraverseExpression(assignment.Rhs(), context);
       AssignmentExpression current(assignment.Op(), std::move(new_lhs), std::move(new_rhs));
-      if (IsToggableCompoundAssignment(current)) {
+      if (context->NeedsCheck(AST_MUTATION_TOGGLE_COMPOUND_ASSIGNMENT) &&
+          IsToggableCompoundAssignment(current)) {
         uint32_t site = context->compound_assignment_index++;
         context->Record(AST_MUTATION_TOGGLE_COMPOUND_ASSIGNMENT, site);
         if (context->ShouldApply(AST_MUTATION_TOGGLE_COMPOUND_ASSIGNMENT, site)) {
@@ -1294,7 +1330,7 @@ std::unique_ptr<CExpression> TraverseExpression(const CExpression& expression,
     case CExpressionKind::kCastExpression: {
       const auto& cast = static_cast<const CastExpression&>(expression);
       auto new_operand = TraverseExpression(cast.Operand(), context);
-      if (IsToggableIntegerCast(cast)) {
+      if (context->NeedsCheck(AST_MUTATION_TOGGLE_UNSIGNED_CAST) && IsToggableIntegerCast(cast)) {
         const bool is_address_of_operand =
             cast.Operand().Kind() == CExpressionKind::kUnaryExpression &&
             static_cast<const UnaryExpression&>(cast.Operand()).IsPrefix() &&
@@ -1344,13 +1380,27 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
 std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& compound,
                                                     MutationContext* context,
                                                     bool is_top_level_block = false) {
+  std::optional<ScopedRootBodySummary> root_summary;
+  if (is_top_level_block && context->root_body != nullptr) {
+    root_summary.emplace(context->root_body);
+    if (context->array_variables.empty()) {
+      for (const auto& stmt : context->root_body->Statements()) {
+        if (stmt->Kind() == CStatementKind::kVariableDeclarationStatement) {
+          const auto& decl = static_cast<const VariableDeclarationStatement&>(*stmt);
+          if (decl.ArraySize().has_value()) {
+            context->array_variables.insert(decl.Name());
+          }
+        }
+      }
+    }
+  }
   const auto& statements = compound.Statements();
   std::vector<std::unique_ptr<CStatement>> new_statements;
   new_statements.reserve(statements.size());
 
   for (size_t i = 0; i < statements.size(); ++i) {
     // 1. Check adjacent VariableDeclarationStatements for reordering
-    if (i + 1 < statements.size() &&
+    if (context->NeedsCheck(AST_MUTATION_REORDER_LOCAL_DECLS) && i + 1 < statements.size() &&
         statements[i]->Kind() == CStatementKind::kVariableDeclarationStatement &&
         statements[i + 1]->Kind() == CStatementKind::kVariableDeclarationStatement) {
       const auto& declaration1 = static_cast<const VariableDeclarationStatement&>(*statements[i]);
@@ -1426,7 +1476,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 2. Check dead assignment / dead call return elimination
     bool is_dead_call = false;
-    if (IsDeadAssignmentAt(statements, i, is_top_level_block, context->local_variables,
+    if (context->NeedsCheck(AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN) &&
+        IsDeadAssignmentAt(statements, i, is_top_level_block, context->local_variables,
                            &is_dead_call, context->root_body)) {
       uint32_t site = context->dead_assignment_index++;
       context->Record(AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN, site, 0);
@@ -1450,7 +1501,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
     // 3. Check single-use temporary inlining across `statements[i]` and
     // `statements[inline_info.use_index]`
     InlineCandidateInfo inline_info;
-    if (AnalyzeInlineSingleUseTemporaryAt(statements, i, is_top_level_block, &inline_info,
+    if (context->NeedsCheck(AST_MUTATION_INLINE_SINGLE_USE_TEMP) &&
+        AnalyzeInlineSingleUseTemporaryAt(statements, i, is_top_level_block, &inline_info,
                                           context->root_body)) {
       uint32_t site = context->inline_temporary_index++;
       if (inline_info.can_sink_to_use) {
@@ -1482,7 +1534,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
     }
 
     // 4. Check swapping adjacent independent statements
-    if (CanSwapAdjacentStatements(statements, i)) {
+    if (context->NeedsCheck(AST_MUTATION_SWAP_ADJACENT_STATEMENTS) &&
+        CanSwapAdjacentStatements(statements, i)) {
       uint32_t site = context->swap_statement_index++;
       context->Record(AST_MUTATION_SWAP_ADJACENT_STATEMENTS, site);
       if (context->ShouldApply(AST_MUTATION_SWAP_ADJACENT_STATEMENTS, site)) {
@@ -1498,17 +1551,16 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
     CType cast_type;
     bool has_cast = false;
     const CExpression* rhs = nullptr;
-    if (MatchDirectPointerStore(*statements[i], &ptr_expr, &cast_type, &has_cast, &rhs)) {
+    if (context->NeedsCheck(AST_MUTATION_SPLIT_SINGLE_USE_TEMP) &&
+        MatchDirectPointerStore(*statements[i], &ptr_expr, &cast_type, &has_cast, &rhs)) {
       std::vector<std::string> eligible_candidates;
       for (const auto& cand_var : context->local_variables) {
+        if (context->array_variables.count(cand_var) > 0) continue;
         if (CountIdentifierOccurrencesInExpression(*ptr_expr, cand_var) > 0) continue;
         if (CountIdentifierOccurrencesInExpression(*rhs, cand_var) > 0) continue;
-        if (context->root_body != nullptr &&
-            IsVariableArrayInStatement(*context->root_body, cand_var)) {
-          continue;
-        }
         if (IsVariableDeadAfter(statements, i, cand_var, is_top_level_block, context->root_body)) {
           eligible_candidates.push_back(cand_var);
+          if (eligible_candidates.size() >= 2) break;
         }
       }
       if (!eligible_candidates.empty()) {
@@ -1538,16 +1590,15 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
         }
       }
     }
-    if (MatchGeneralSplittableStatement(*statements[i], nullptr, "", nullptr)) {
+    if (context->NeedsCheck(AST_MUTATION_SPLIT_SINGLE_USE_TEMP) &&
+        MatchGeneralSplittableStatement(*statements[i], nullptr, "", nullptr)) {
       std::vector<std::string> eligible_candidates;
       for (const auto& cand_var : context->local_variables) {
+        if (context->array_variables.count(cand_var) > 0) continue;
         if (CountIdentifierOccurrencesInStatement(*statements[i], cand_var) > 0) continue;
-        if (context->root_body != nullptr &&
-            IsVariableArrayInStatement(*context->root_body, cand_var)) {
-          continue;
-        }
         if (IsVariableDeadAfter(statements, i, cand_var, is_top_level_block, context->root_body)) {
           eligible_candidates.push_back(cand_var);
+          if (eligible_candidates.size() >= 2) break;
         }
       }
       bool synthesized_split_var = false;
@@ -1631,22 +1682,21 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 5b. Check hoisting loop-invariant constant or address out of loop
     // (`AST_MUTATION_HOIST_LOOP_INVARIANT`)
-    if (statements[i]->Kind() == CStatementKind::kDoWhileStatement ||
-        statements[i]->Kind() == CStatementKind::kWhileStatement ||
-        statements[i]->Kind() == CStatementKind::kForStatement) {
+    if (context->NeedsCheck(AST_MUTATION_HOIST_LOOP_INVARIANT) &&
+        (statements[i]->Kind() == CStatementKind::kDoWhileStatement ||
+         statements[i]->Kind() == CStatementKind::kWhileStatement ||
+         statements[i]->Kind() == CStatementKind::kForStatement)) {
       std::unique_ptr<CExpression> invariant_expr;
       if (FindHoistableLoopInvariantInStatement(*statements[i], &invariant_expr) &&
           invariant_expr != nullptr) {
         std::vector<std::string> eligible_candidates;
         for (const auto& cand_var : context->local_variables) {
+          if (context->array_variables.count(cand_var) > 0) continue;
           if (CountIdentifierOccurrencesInStatement(*statements[i], cand_var) > 0) continue;
-          if (context->root_body != nullptr &&
-              IsVariableArrayInStatement(*context->root_body, cand_var)) {
-            continue;
-          }
           if (IsVariableDeadAfter(statements, i, cand_var, is_top_level_block,
                                   context->root_body)) {
             eligible_candidates.push_back(cand_var);
+            break;
           }
         }
         bool synthesized_hoist_var = false;
@@ -1731,7 +1781,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 5c. Check hoisting a leading `temp_sX = rhs;` assignment out of `if (cond) { temp_sX = rhs;
     // ... }`
-    if (statements[i]->Kind() == CStatementKind::kIfStatement) {
+    if (context->NeedsCheck(AST_MUTATION_HOIST_WHILE_GUARD) &&
+        statements[i]->Kind() == CStatementKind::kIfStatement) {
       const auto& if_stmt = static_cast<const IfStatement&>(*statements[i]);
       if (if_stmt.ElseBranch() == nullptr &&
           if_stmt.ThenBranch().Kind() == CStatementKind::kCompoundStatement) {
@@ -1788,7 +1839,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 6. Check register copy propagation (`AST_MUTATION_PROPAGATE_REGISTER_COPY`)
     std::string copy_dst, copy_src;
-    if (MatchRegisterCopy(*statements[i], &copy_dst, &copy_src) &&
+    if (context->NeedsCheck(AST_MUTATION_PROPAGATE_REGISTER_COPY) &&
+        MatchRegisterCopy(*statements[i], &copy_dst, &copy_src) &&
         !IsGlobalIdentifierName(copy_dst) && !IsGlobalIdentifierName(copy_src)) {
       std::vector<size_t> read_indices;
       for (size_t j = i + 1; j < statements.size(); ++j) {
@@ -1837,7 +1889,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 7. Check dead local variable initialization elimination
     // (`AST_MUTATION_PROPAGATE_REGISTER_COPY`)
-    if (statements[i]->Kind() == CStatementKind::kVariableDeclarationStatement) {
+    if (context->NeedsCheck(AST_MUTATION_PROPAGATE_REGISTER_COPY) &&
+        statements[i]->Kind() == CStatementKind::kVariableDeclarationStatement) {
       const auto& decl = static_cast<const VariableDeclarationStatement&>(*statements[i]);
       if (decl.Initializer() != nullptr && !decl.ArraySize().has_value() &&
           IsPureExpression(*decl.Initializer())) {
@@ -1889,7 +1942,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
     std::string mask_var;
     CType mask_cast_type;
     int64_t mask_val = 0;
-    if (MatchSelfMask(*statements[i], &mask_var, &mask_cast_type, &mask_val) &&
+    if (context->NeedsCheck(AST_MUTATION_PROPAGATE_REGISTER_COPY) &&
+        MatchSelfMask(*statements[i], &mask_var, &mask_cast_type, &mask_val) &&
         !IsGlobalIdentifierName(mask_var)) {
       size_t first_read_idx = statements.size();
       bool modified_in_between = false;
@@ -1971,7 +2025,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
     CType store_cast_type;
     bool store_has_cast = false;
     const CExpression* store_rhs = nullptr;
-    if (MatchDirectPointerStore(*statements[i], &store_ptr, &store_cast_type, &store_has_cast,
+    if (context->NeedsCheck(AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR) &&
+        MatchDirectPointerStore(*statements[i], &store_ptr, &store_cast_type, &store_has_cast,
                                 &store_rhs)) {
       std::string stored_var = store_rhs->Kind() == CExpressionKind::kIdentifier
                                    ? static_cast<const IdentifierExpression&>(*store_rhs).Name()
@@ -2077,7 +2132,8 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
 
     // 10. Check replacing `v0 = 0` with `v0 = <zero_var>`
     // (`AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR`)
-    if (statements[i]->Kind() == CStatementKind::kExpressionStatement) {
+    if (context->NeedsCheck(AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR) &&
+        statements[i]->Kind() == CStatementKind::kExpressionStatement) {
       const auto& expr = static_cast<const ExpressionStatement&>(*statements[i]).Expression();
       if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
         const auto& assign = static_cast<const AssignmentExpression&>(expr);
@@ -2127,7 +2183,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
       std::unique_ptr<CExpression> sf_lhs;
       std::string sf_op;
       std::unique_ptr<CExpression> sf_cond;
-      if (MatchInlineStoreFlagStep(statement, &sf_lhs, &sf_op, &sf_cond)) {
+      if (context->NeedsCheck(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL) &&
+          MatchInlineStoreFlagStep(statement, &sf_lhs, &sf_op, &sf_cond)) {
         uint32_t site = context->toggle_store_flag_index++;
         context->Record(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL, site, 0);
         uint32_t parameter = 0;
@@ -2150,7 +2207,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
               ? TraverseExpression(*declaration.Initializer(), context)
               : nullptr;
       std::optional<std::string> reg_annotation = declaration.RegisterAnnotation();
-      if (!declaration.ArraySize().has_value()) {
+      if (context->NeedsCheck(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION) &&
+          !declaration.ArraySize().has_value()) {
         auto default_reg = InferDefaultRegisterAnnotation(declaration.Name());
         if (reg_annotation.has_value() || default_reg.has_value()) {
           uint32_t site = context->toggle_register_annotation_index++;
@@ -2197,7 +2255,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
       std::unique_ptr<CExpression> sf_lhs;
       std::string sf_op;
       std::unique_ptr<CExpression> sf_cond;
-      if (MatchIfStoreFlagStep(statement, &sf_lhs, &sf_op, &sf_cond)) {
+      if (context->NeedsCheck(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL) &&
+          MatchIfStoreFlagStep(statement, &sf_lhs, &sf_op, &sf_cond)) {
         uint32_t site = context->toggle_store_flag_index++;
         context->Record(AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL, site, 0);
         uint32_t parameter = 0;
@@ -2218,7 +2277,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
 
       // Check if `if (cond) { do { body; } while (cond2); }` can collapse back to `while (cond) {
       // body; }`
-      if (if_statement.ElseBranch() == nullptr) {
+      if (context->NeedsCheck(AST_MUTATION_HOIST_WHILE_GUARD) &&
+          if_statement.ElseBranch() == nullptr) {
         const CStatement* candidate_loop = &if_statement.ThenBranch();
         if (candidate_loop->Kind() == CStatementKind::kCompoundStatement) {
           const auto& comp = static_cast<const CompoundStatement&>(*candidate_loop);
@@ -2239,7 +2299,7 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
         }
       }
 
-      if (new_else != nullptr) {
+      if (context->NeedsCheck(AST_MUTATION_INVERT_IF_ELSE) && new_else != nullptr) {
         uint32_t site = context->invert_if_index++;
         context->Record(AST_MUTATION_INVERT_IF_ELSE, site);
         if (context->ShouldApply(AST_MUTATION_INVERT_IF_ELSE, site)) {
@@ -2260,7 +2320,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
         is_while_true = true;
       }
 
-      if (is_while_true && while_statement.Body().Kind() == CStatementKind::kCompoundStatement) {
+      if (context->NeedsCheck(AST_MUTATION_HOIST_WHILE_GUARD) && is_while_true &&
+          while_statement.Body().Kind() == CStatementKind::kCompoundStatement) {
         const auto& body_compound = static_cast<const CompoundStatement&>(while_statement.Body());
         const auto& body_stmts = body_compound.Statements();
         const CExpression* exit_cond = nullptr;
@@ -2290,7 +2351,7 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
             }
           }
         }
-      } else if (!is_while_true) {
+      } else if (context->NeedsCheck(AST_MUTATION_HOIST_WHILE_GUARD) && !is_while_true) {
         uint32_t site = context->hoist_while_guard_index++;
         context->Record(AST_MUTATION_HOIST_WHILE_GUARD, site, 0);
         context->Record(AST_MUTATION_HOIST_WHILE_GUARD, site, 1);
@@ -2307,10 +2368,12 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
         }
       }
 
-      uint32_t site = context->while_for_index++;
-      context->Record(AST_MUTATION_WHILE_TO_FOR_LOOP, site);
-      if (context->ShouldApply(AST_MUTATION_WHILE_TO_FOR_LOOP, site)) {
-        return CStatement::For(nullptr, std::move(new_condition), nullptr, std::move(new_body));
+      if (context->NeedsCheck(AST_MUTATION_WHILE_TO_FOR_LOOP)) {
+        uint32_t site = context->while_for_index++;
+        context->Record(AST_MUTATION_WHILE_TO_FOR_LOOP, site);
+        if (context->ShouldApply(AST_MUTATION_WHILE_TO_FOR_LOOP, site)) {
+          return CStatement::For(nullptr, std::move(new_condition), nullptr, std::move(new_body));
+        }
       }
       return CStatement::While(std::move(new_condition), std::move(new_body));
     }
@@ -2318,12 +2381,14 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
       const auto& do_while_statement = static_cast<const DoWhileStatement&>(statement);
       auto new_body = TraverseStatement(do_while_statement.Body(), context);
       auto new_condition = TraverseExpression(do_while_statement.Condition(), context);
-      uint32_t site = context->hoist_while_guard_index++;
-      context->Record(AST_MUTATION_HOIST_WHILE_GUARD, site, 0);
-      uint32_t parameter = 0;
-      if (context->ShouldApply(AST_MUTATION_HOIST_WHILE_GUARD, site, &parameter) &&
-          parameter == 0) {
-        return CStatement::While(std::move(new_condition), std::move(new_body));
+      if (context->NeedsCheck(AST_MUTATION_HOIST_WHILE_GUARD)) {
+        uint32_t site = context->hoist_while_guard_index++;
+        context->Record(AST_MUTATION_HOIST_WHILE_GUARD, site, 0);
+        uint32_t parameter = 0;
+        if (context->ShouldApply(AST_MUTATION_HOIST_WHILE_GUARD, site, &parameter) &&
+            parameter == 0) {
+          return CStatement::While(std::move(new_condition), std::move(new_body));
+        }
       }
       return CStatement::DoWhile(std::move(new_body), std::move(new_condition));
     }
@@ -2340,7 +2405,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
           for_statement.Step() != nullptr ? TraverseExpression(*for_statement.Step(), context)
                                           : nullptr;
       auto new_body = TraverseStatement(for_statement.Body(), context);
-      if (new_init == nullptr && new_step == nullptr && new_condition != nullptr) {
+      if (context->NeedsCheck(AST_MUTATION_WHILE_TO_FOR_LOOP) && new_init == nullptr &&
+          new_step == nullptr && new_condition != nullptr) {
         uint32_t site = context->while_for_index++;
         context->Record(AST_MUTATION_WHILE_TO_FOR_LOOP, site);
         if (context->ShouldApply(AST_MUTATION_WHILE_TO_FOR_LOOP, site)) {
@@ -2353,7 +2419,8 @@ std::unique_ptr<CStatement> TraverseStatement(const CStatement& statement, Mutat
     case CStatementKind::kReturnStatement: {
       const auto& return_statement = static_cast<const ReturnStatement&>(statement);
       if (return_statement.ReturnValue() == nullptr) return CStatement::Return();
-      if (return_statement.ReturnValue()->Kind() == CExpressionKind::kIntegerLiteral &&
+      if (context->NeedsCheck(AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR) &&
+          return_statement.ReturnValue()->Kind() == CExpressionKind::kIntegerLiteral &&
           static_cast<const IntegerLiteralExpression&>(*return_statement.ReturnValue()).Value() ==
               0) {
         auto zero_vars =
@@ -2507,7 +2574,8 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
           }
         }
       }
-      if ((d1_scratch && d2_scratch) || (d1_callee && d2_callee) || diff_matched_pair) {
+      if (AreCompatibleRegisterSaveClasses(*d1.reg_annotation, *d2.reg_annotation) &&
+          ((d1_scratch && d2_scratch) || (d1_callee && d2_callee) || diff_matched_pair)) {
         record_unique_reg_toggle(static_cast<uint32_t>(i), static_cast<uint32_t>(10 + j));
       }
     }
@@ -2524,8 +2592,7 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
         } else if (*decl.reg_annotation == reg_b) {
           peer_reg = reg_a;
         }
-        if (!peer_reg.empty() && IsFloatingPointRegisterAnnotation(*decl.reg_annotation) ==
-                                     IsFloatingPointRegisterAnnotation(peer_reg)) {
+        if (!peer_reg.empty() && AreCompatibleRegisterSaveClasses(*decl.reg_annotation, peer_reg)) {
           if (auto encoded = EncodeHardwareRegisterParam(peer_reg)) {
             record_unique_reg_toggle(decl.site_index, *encoded);
           }
@@ -2761,8 +2828,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
       if (site_i < decls.size() && site_j < decls.size() && site_i != site_j &&
           decls[site_i].reg_annotation.has_value() && decls[site_j].reg_annotation.has_value() &&
           *decls[site_i].reg_annotation != "$30" && *decls[site_j].reg_annotation != "$30" &&
-          IsFloatingPointRegisterAnnotation(*decls[site_i].reg_annotation) ==
-              IsFloatingPointRegisterAnnotation(*decls[site_j].reg_annotation)) {
+          AreCompatibleRegisterSaveClasses(*decls[site_i].reg_annotation,
+                                           *decls[site_j].reg_annotation)) {
         std::map<uint32_t, std::optional<std::string>> new_annotations;
         new_annotations[site_i] = decls[site_j].reg_annotation;
         new_annotations[site_j] = decls[site_i].reg_annotation;
@@ -2780,7 +2847,9 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
       CollectToggleableVarDeclsInStatement(function.Body(), &decls);
       uint32_t site_i = step.site_index();
       auto target_reg = DecodeHardwareRegisterParam(step.param());
-      if (site_i < decls.size() && target_reg.has_value() && *target_reg != "$30") {
+      if (site_i < decls.size() && target_reg.has_value() && *target_reg != "$30" &&
+          decls[site_i].reg_annotation.has_value() &&
+          AreCompatibleRegisterSaveClasses(*decls[site_i].reg_annotation, *target_reg)) {
         std::map<uint32_t, std::optional<std::string>> new_annotations;
         std::optional<std::string> prev_reg = decls[site_i].reg_annotation;
         new_annotations[site_i] = *target_reg;

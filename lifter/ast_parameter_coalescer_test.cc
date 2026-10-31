@@ -948,5 +948,47 @@ TEST(AstParameterCoalescerTest, CoalescesPartialWebPrologueParameterCopyBeforeCa
   EXPECT_THAT(code, HasSubstr("temp_s0 = (temp_s2 + 448);"));
 }
 
+TEST(AstParameterCoalescerTest,
+     CoalescesMutatedAndAddressTakenCallerHomedParameterSlotsAndSplitsPostPrologueReuse) {
+  CompoundStatement body;
+  // var_sp_32 = arg0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_32"), CExpression::Identifier("arg0"))));
+  // var_sp_36 = arg1;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_36"), CExpression::Identifier("arg1"))));
+  // temp_a1 = arg0;
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_a1"), CExpression::Identifier("arg0"))));
+  // arg0 = HelperCall((s32)&var_sp_36);
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Cast(
+      CType::S32(), CExpression::Unary("&", CExpression::Identifier("var_sp_36"))));
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Call(CExpression::Identifier("HelperCall"), std::move(call_args)))));
+  // var_sp_36 = (var_sp_36 + 4);
+  body.AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("var_sp_36"),
+      CExpression::Binary("+", CExpression::Identifier("var_sp_36"), CExpression::Integer(4)))));
+  // return (arg0 + var_sp_36);
+  body.AddStatement(CStatement::Return(CExpression::Binary("+", CExpression::Identifier("arg0"),
+                                                           CExpression::Identifier("var_sp_36"))));
+
+  std::vector<CParameter> params = {
+      {.type = CType::S32(), .name = "arg0"},
+      {.type = CType::S32(), .name = "arg1"},
+  };
+  SplitScratchReusedParameterRegisters(&body, params, /*frame_size=*/32);
+
+  std::string code = body.ToString();
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_32")));
+  EXPECT_THAT(code, Not(HasSubstr("var_sp_36")));
+  EXPECT_THAT(code, HasSubstr("temp_a1 = arg0;"));
+  EXPECT_THAT(code, HasSubstr("temp_a0 = HelperCall((s32)&arg1);"));
+  EXPECT_THAT(code, HasSubstr("arg1 = (arg1 + 4);"));
+  EXPECT_THAT(code, HasSubstr("return (temp_a0 + arg1);"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

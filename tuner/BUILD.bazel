@@ -55,6 +55,8 @@ cc_library(
     deps = [
         ":ast_global_mutations",
         "//core:c_ast",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
 

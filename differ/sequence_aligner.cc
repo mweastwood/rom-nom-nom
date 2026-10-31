@@ -58,20 +58,28 @@ AlignmentResult SequenceAligner::Align(absl::Span<const NormalizedInstruction> t
   }
 
   // Flat 2D dynamic programming grid of dimensions (n + 1) x (m + 1).
-  std::vector<int> dp((n + 1) * (m + 1), 0);
+  constexpr int kUnreachableScore = -1000000000;
+  const bool use_band = (n * m > 250000);
+  const size_t band_half_width = (n > m ? (n - m) : (m - n)) + 256;
+  std::vector<int> dp((n + 1) * (m + 1), use_band ? kUnreachableScore : 0);
   auto at = [&](size_t i, size_t j) -> int& { return dp[i * (m + 1) + j]; };
+  at(0, 0) = 0;
 
   // Base cases: costs for aligning against leading gaps.
-  for (size_t i = 1; i <= n; ++i) {
+  const size_t max_init_i = use_band ? std::min(n, band_half_width) : n;
+  for (size_t i = 1; i <= max_init_i; ++i) {
     at(i, 0) = at(i - 1, 0) + kGapPenalty;
   }
-  for (size_t j = 1; j <= m; ++j) {
+  const size_t max_init_j = use_band ? std::min(m, band_half_width) : m;
+  for (size_t j = 1; j <= max_init_j; ++j) {
     at(0, j) = at(0, j - 1) + kGapPenalty;
   }
 
   // Populate DP matrix using Needleman-Wunsch recurrence with operand-graded similarity.
   for (size_t i = 1; i <= n; ++i) {
-    for (size_t j = 1; j <= m; ++j) {
+    const size_t j_min = (use_band && i > band_half_width) ? (i - band_half_width) : 1;
+    const size_t j_max = use_band ? std::min(m, i + band_half_width) : m;
+    for (size_t j = j_min; j <= j_max; ++j) {
       int match_score = normalizer_->SimilarityScore(target[i - 1], compiled[j - 1]);
 
       int score_diag = at(i - 1, j - 1) + match_score;

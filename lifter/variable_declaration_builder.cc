@@ -1346,9 +1346,7 @@ bool IsCallerSavedSafeAcrossCalls(const CompoundStatement& body, bool is_leaf_fu
   return true;
 }
 
-bool NonAddrTakenSpVarWillSpillInGcc(const CompoundStatement& body, std::string_view var_name) {
-  int calls_before_first_ref = 0;
-  bool seen_first_ref = false;
+bool IsSingleConstRegCopySpVar(const CompoundStatement& body, std::string_view var_name) {
   int def_count = 0;
   bool single_const_def = false;
   int call_read_stmts = 0;
@@ -1358,15 +1356,7 @@ bool NonAddrTakenSpVarWillSpillInGcc(const CompoundStatement& body, std::string_
   for (const auto& stmt_ptr : body.Statements()) {
     if (stmt_ptr == nullptr) continue;
     const CStatement& stmt = *stmt_ptr;
-    const bool refs = StatementReferencesVariable(stmt, var_name);
-    if (!seen_first_ref) {
-      if (refs) {
-        seen_first_ref = true;
-      } else if (StatementHasCall(stmt)) {
-        ++calls_before_first_ref;
-      }
-    }
-    if (!refs) continue;
+    if (!StatementReferencesVariable(stmt, var_name)) continue;
 
     if (StatementModifiesVariable(stmt, var_name)) {
       ++def_count;
@@ -1401,18 +1391,56 @@ bool NonAddrTakenSpVarWillSpillInGcc(const CompoundStatement& body, std::string_
     }
   }
 
-  if (calls_before_first_ref >= 4) {
+  return def_count == 1 && single_const_def && total_read_uses == 2 && call_read_stmts == 1 &&
+         reg_copy_read_stmts == 1;
+}
+
+bool FirstRefIsAfterCall(const CompoundStatement& body, std::string_view var_name) {
+  for (const auto& stmt_ptr : body.Statements()) {
+    if (stmt_ptr == nullptr) continue;
+    if (StatementReferencesVariable(*stmt_ptr, var_name)) {
+      return false;
+    }
+    if (StatementHasCall(*stmt_ptr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool GetTopLevelVarStmtSpan(const CompoundStatement& body, std::string_view var_name,
+                            size_t* first_idx, size_t* last_idx) {
+  bool found = false;
+  const auto& stmts = body.Statements();
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    if (stmts[i] == nullptr) continue;
+    if (StatementReferencesVariable(*stmts[i], var_name)) {
+      if (!found) {
+        *first_idx = i;
+        found = true;
+      }
+      *last_idx = i;
+    }
+  }
+  return found;
+}
+
+bool SpansOverlap(size_t a_first, size_t a_last, size_t b_first, size_t b_last) {
+  return a_first <= b_last && b_first <= a_last;
+}
+
+bool IsAddressTaken16BitSpVar(int32_t off,
+                              const absl::flat_hash_set<int32_t>& addr_taken_sp_offsets) {
+  if ((off & 1) != 0 || !addr_taken_sp_offsets.contains(off)) {
     return false;
   }
-  if (def_count == 1 && single_const_def && total_read_uses == 2 && call_read_stmts == 1 &&
-      reg_copy_read_stmts == 1) {
-    return false;
-  }
-  return true;
+  return (off & 3) == 2 || addr_taken_sp_offsets.contains(off - 2) ||
+         addr_taken_sp_offsets.contains(off + 2);
 }
 
 uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
                                       const absl::flat_hash_set<std::string>& double_vars,
+                                      const absl::flat_hash_set<std::string>& float_local_var_names,
                                       const CompoundStatement& body,
                                       std::vector<std::string>* local_vars_to_declare) {
   if (frame_analysis.has_frame_pointer || frame_analysis.sp_buffer_size != 0) {
@@ -1429,6 +1457,71 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
   }
   if (local_frame_top <= local_frame_bottom) {
     return 0;
+  }
+
+  int prologue_saved_callee_gprs = 0;
+  for (const auto& [reg, off] : frame_analysis.prologue.saved_reg_offsets) {
+    (void)off;
+    if ((reg >= Register::kS0 && reg <= Register::kS7) || reg == Register::kFp) {
+      ++prologue_saved_callee_gprs;
+    }
+  }
+
+  int prologue_saved_callee_fpr_pairs = 0;
+  for (int f_num = 20; f_num <= 30; f_num += 2) {
+    FpRegister fp_even = static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num - 20));
+    FpRegister fp_odd =
+        static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num + 1 - 20));
+    if (frame_analysis.prologue.saved_fpr_offsets.contains(fp_even) ||
+        frame_analysis.prologue.saved_fpr_offsets.contains(fp_odd)) {
+      ++prologue_saved_callee_fpr_pairs;
+    }
+  }
+
+  absl::flat_hash_set<int32_t> addr_taken_sp_offsets;
+  for (const auto& v : *local_vars_to_declare) {
+    if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_")) {
+      int32_t off = 0;
+      if (absl::SimpleAtoi(v.substr(7), &off) &&
+          StatementTakesNonInlineAsmAddressOf(body, v, /*is_o2=*/true)) {
+        addr_taken_sp_offsets.insert(off);
+      }
+    }
+  }
+
+  // Track top-level statement live intervals for the 9 callee-saved GPRs ($s0..$s7 and $fp).
+  std::vector<std::vector<std::pair<size_t, size_t>>> callee_gpr_spans(9);
+  const size_t last_body_stmt_idx = body.Statements().empty() ? 0 : (body.Statements().size() - 1);
+  for (int s_idx = 0; s_idx < 8; ++s_idx) {
+    std::string s_name = absl::StrCat("temp_s", s_idx);
+    Register s_reg = static_cast<Register>(static_cast<int>(Register::kS0) + s_idx);
+    size_t first_idx = 0;
+    size_t last_idx = 0;
+    if (GetTopLevelVarStmtSpan(body, s_name, &first_idx, &last_idx)) {
+      if (first_idx == last_idx) {
+        last_idx = last_body_stmt_idx;
+      }
+      callee_gpr_spans[s_idx].emplace_back(first_idx, last_idx);
+      if (double_vars.contains(s_name) && s_idx + 1 < 8) {
+        callee_gpr_spans[s_idx + 1].emplace_back(first_idx, last_idx);
+      }
+    } else if (frame_analysis.prologue.saved_reg_offsets.contains(s_reg) &&
+               !body.Statements().empty()) {
+      callee_gpr_spans[s_idx].emplace_back(0, last_body_stmt_idx);
+    }
+  }
+  {
+    size_t first_idx = 0;
+    size_t last_idx = 0;
+    if (GetTopLevelVarStmtSpan(body, "fp", &first_idx, &last_idx)) {
+      if (first_idx == last_idx) {
+        last_idx = last_body_stmt_idx;
+      }
+      callee_gpr_spans[8].emplace_back(first_idx, last_idx);
+    } else if (frame_analysis.prologue.saved_reg_offsets.contains(Register::kFp) &&
+               !body.Statements().empty()) {
+      callee_gpr_spans[8].emplace_back(0, last_body_stmt_idx);
+    }
   }
 
   const uint32_t target_local_size = local_frame_top - local_frame_bottom;
@@ -1454,13 +1547,47 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
           off < static_cast<int32_t>(local_frame_top)) {
         ++sp_locals_in_gap;
         if (is_addr_taken) {
-          addr_taken_sp_bytes += ((!absl::StartsWith(v, "var_sp_") && absl::EndsWith(v, "_64")) ||
-                                  double_vars.contains(v))
-                                     ? 8u
-                                     : 4u;
-        } else if (NonAddrTakenSpVarWillSpillInGcc(body, v)) {
-          non_addr_taken_sp_slots_in_gap.insert((off - static_cast<int32_t>(local_frame_bottom)) /
-                                                8);
+          if (IsAddressTaken16BitSpVar(off, addr_taken_sp_offsets)) {
+            addr_taken_sp_bytes += 2u;
+          } else {
+            addr_taken_sp_bytes += ((!absl::StartsWith(v, "var_sp_") && absl::EndsWith(v, "_64")) ||
+                                    double_vars.contains(v))
+                                       ? 8u
+                                       : 4u;
+          }
+        } else if (float_local_var_names.contains(v) || double_vars.contains(v)) {
+          if (prologue_saved_callee_fpr_pairs >= 6 &&
+              !(FirstRefIsAfterCall(body, v) &&
+                IsCallerSavedSafeAcrossCalls(body, /*is_leaf_func=*/false, v))) {
+            non_addr_taken_sp_slots_in_gap.insert((off - static_cast<int32_t>(local_frame_bottom)) /
+                                                  8);
+          }
+        } else if (!(FirstRefIsAfterCall(body, v) &&
+                     IsCallerSavedSafeAcrossCalls(body, /*is_leaf_func=*/false, v)) &&
+                   !IsSingleConstRegCopySpVar(body, v)) {
+          size_t first_idx = 0;
+          size_t last_idx = 0;
+          bool allocated_to_free_callee_gpr = false;
+          if (GetTopLevelVarStmtSpan(body, v, &first_idx, &last_idx)) {
+            for (int r = 0; r < 9; ++r) {
+              bool conflicts = false;
+              for (const auto& [r_first, r_last] : callee_gpr_spans[r]) {
+                if (SpansOverlap(first_idx, last_idx, r_first, r_last)) {
+                  conflicts = true;
+                  break;
+                }
+              }
+              if (!conflicts) {
+                callee_gpr_spans[r].emplace_back(first_idx, last_idx);
+                allocated_to_free_callee_gpr = true;
+                break;
+              }
+            }
+          }
+          if (!allocated_to_free_callee_gpr) {
+            non_addr_taken_sp_slots_in_gap.insert((off - static_cast<int32_t>(local_frame_bottom)) /
+                                                  8);
+          }
         }
       } else if (is_addr_taken) {
         any_non_sp_local_addr_taken = true;
@@ -1470,25 +1597,7 @@ uint32_t ComputeUnreferencedSpGapSize(const StackFrameAnalysis& frame_analysis,
     }
   }
 
-  int prologue_saved_callee_gprs = 0;
-  for (const auto& [reg, off] : frame_analysis.prologue.saved_reg_offsets) {
-    (void)off;
-    if ((reg >= Register::kS0 && reg <= Register::kS7) || reg == Register::kFp) {
-      ++prologue_saved_callee_gprs;
-    }
-  }
   callee_saved_gprs = std::max(callee_saved_gprs, prologue_saved_callee_gprs);
-
-  int prologue_saved_callee_fpr_pairs = 0;
-  for (int f_num = 20; f_num <= 30; f_num += 2) {
-    FpRegister fp_even = static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num - 20));
-    FpRegister fp_odd =
-        static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (f_num + 1 - 20));
-    if (frame_analysis.prologue.saved_fpr_offsets.contains(fp_even) ||
-        frame_analysis.prologue.saved_fpr_offsets.contains(fp_odd)) {
-      ++prologue_saved_callee_fpr_pairs;
-    }
-  }
 
   if (has_sp_buffer || any_non_sp_local_addr_taken || StatementContainsS64PointerDeref(body)) {
     return 0;
@@ -1831,6 +1940,103 @@ bool HoistPostCallFpConstantInit(CStatement* stmt) {
   }
 }
 
+void SortLocalVariableDeclarations(const StackFrameAnalysis& frame_analysis,
+                                   std::vector<std::string>* local_vars_to_declare) {
+  std::vector<size_t> sp_var_indices;
+  std::vector<std::pair<int64_t, std::string>> sp_vars;
+  for (size_t i = 0; i < local_vars_to_declare->size(); ++i) {
+    if (absl::StartsWith((*local_vars_to_declare)[i], "var_sp_")) {
+      int64_t off = 0;
+      std::string_view sv = (*local_vars_to_declare)[i];
+      if (absl::SimpleAtoi(sv.substr(7), &off)) {
+        sp_var_indices.push_back(i);
+        sp_vars.emplace_back(off, (*local_vars_to_declare)[i]);
+      }
+    }
+  }
+  if (frame_analysis.has_frame_pointer && !sp_vars.empty()) {
+    std::sort(sp_vars.begin(), sp_vars.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::string> reordered;
+    reordered.reserve(local_vars_to_declare->size());
+    for (const auto& [off, name] : sp_vars) {
+      (void)off;
+      reordered.push_back(name);
+    }
+    for (const auto& name : *local_vars_to_declare) {
+      int64_t off = 0;
+      std::string_view sv = name;
+      if (absl::StartsWith(sv, "var_sp_") && absl::SimpleAtoi(sv.substr(7), &off)) {
+        continue;
+      }
+      reordered.push_back(name);
+    }
+    *local_vars_to_declare = std::move(reordered);
+  } else if (sp_vars.size() >= 2) {
+    std::sort(sp_vars.begin(), sp_vars.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < sp_var_indices.size(); ++i) {
+      (*local_vars_to_declare)[sp_var_indices[i]] = sp_vars[i].second;
+    }
+  }
+
+  std::vector<size_t> callee_gpr_indices;
+  std::vector<std::pair<std::pair<int, int32_t>, std::string>> callee_gpr_vars;
+  for (size_t i = 0; i < local_vars_to_declare->size(); ++i) {
+    const std::string& v = (*local_vars_to_declare)[i];
+    if (!IsCalleeSavedGprVarName(v)) {
+      continue;
+    }
+    Register reg = (v == "fp")
+                       ? Register::kFp
+                       : static_cast<Register>(static_cast<int>(Register::kS0) + (v[6] - '0'));
+    int32_t reg_order = (v == "fp") ? 30 : (16 + (v[6] - '0'));
+    auto it = frame_analysis.prologue.saved_reg_offsets.find(reg);
+    std::pair<int, int32_t> sort_key = (it != frame_analysis.prologue.saved_reg_offsets.end())
+                                           ? std::make_pair(0, it->second)
+                                           : std::make_pair(1, reg_order);
+    callee_gpr_indices.push_back(i);
+    callee_gpr_vars.emplace_back(sort_key, v);
+  }
+  if (callee_gpr_vars.size() >= 2) {
+    std::stable_sort(callee_gpr_vars.begin(), callee_gpr_vars.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < callee_gpr_indices.size(); ++i) {
+      (*local_vars_to_declare)[callee_gpr_indices[i]] = callee_gpr_vars[i].second;
+    }
+  }
+
+  std::vector<size_t> callee_fpr_indices;
+  std::vector<std::pair<std::pair<int, int32_t>, std::string>> callee_fpr_vars;
+  for (size_t i = 0; i < local_vars_to_declare->size(); ++i) {
+    const std::string& v = (*local_vars_to_declare)[i];
+    std::string_view sv = v;
+    std::string_view base = absl::EndsWith(sv, "_d") ? sv.substr(0, sv.size() - 2) : sv;
+    if (!IsCalleeSavedFprBaseName(base)) {
+      continue;
+    }
+    int fpr_num = 0;
+    if (!absl::SimpleAtoi(base.substr(1), &fpr_num)) {
+      continue;
+    }
+    FpRegister fp_reg =
+        static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (fpr_num - 20));
+    auto it = frame_analysis.prologue.saved_fpr_offsets.find(fp_reg);
+    std::pair<int, int32_t> sort_key = (it != frame_analysis.prologue.saved_fpr_offsets.end())
+                                           ? std::make_pair(0, it->second)
+                                           : std::make_pair(1, fpr_num);
+    callee_fpr_indices.push_back(i);
+    callee_fpr_vars.emplace_back(sort_key, v);
+  }
+  if (callee_fpr_vars.size() >= 2) {
+    std::stable_sort(callee_fpr_vars.begin(), callee_fpr_vars.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < callee_fpr_indices.size(); ++i) {
+      (*local_vars_to_declare)[callee_fpr_indices[i]] = callee_fpr_vars[i].second;
+    }
+  }
+}
+
 absl::Status PrependSynthesizedLocalDeclarations(
     const ControlFlowGraph& cfg, const StackFrameAnalysis& frame_analysis,
     const absl::flat_hash_set<std::string>& double_vars, const std::vector<CParameter>& parameters,
@@ -1988,104 +2194,25 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
 
-  {
-    std::vector<size_t> sp_var_indices;
-    std::vector<std::pair<int64_t, std::string>> sp_vars;
-    for (size_t i = 0; i < local_vars_to_declare.size(); ++i) {
-      if (absl::StartsWith(local_vars_to_declare[i], "var_sp_")) {
-        int64_t off = 0;
-        std::string_view sv = local_vars_to_declare[i];
-        if (absl::SimpleAtoi(sv.substr(7), &off)) {
-          sp_var_indices.push_back(i);
-          sp_vars.emplace_back(off, local_vars_to_declare[i]);
-        }
-      }
-    }
-    if (frame_analysis.has_frame_pointer && !sp_vars.empty()) {
-      std::sort(sp_vars.begin(), sp_vars.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
-      std::vector<std::string> reordered;
-      reordered.reserve(local_vars_to_declare.size());
-      for (const auto& [off, name] : sp_vars) {
-        (void)off;
-        reordered.push_back(name);
-      }
-      for (const auto& name : local_vars_to_declare) {
-        int64_t off = 0;
-        std::string_view sv = name;
-        if (absl::StartsWith(sv, "var_sp_") && absl::SimpleAtoi(sv.substr(7), &off)) {
-          continue;
-        }
-        reordered.push_back(name);
-      }
-      local_vars_to_declare = std::move(reordered);
-    } else if (sp_vars.size() >= 2) {
-      std::sort(sp_vars.begin(), sp_vars.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
-      for (size_t i = 0; i < sp_var_indices.size(); ++i) {
-        local_vars_to_declare[sp_var_indices[i]] = sp_vars[i].second;
-      }
-    }
+  SortLocalVariableDeclarations(frame_analysis, &local_vars_to_declare);
 
-    std::vector<size_t> callee_gpr_indices;
-    std::vector<std::pair<std::pair<int, int32_t>, std::string>> callee_gpr_vars;
-    for (size_t i = 0; i < local_vars_to_declare.size(); ++i) {
-      const std::string& v = local_vars_to_declare[i];
-      if (!IsCalleeSavedGprVarName(v)) {
-        continue;
-      }
-      Register reg = (v == "fp")
-                         ? Register::kFp
-                         : static_cast<Register>(static_cast<int>(Register::kS0) + (v[6] - '0'));
-      int32_t reg_order = (v == "fp") ? 30 : (16 + (v[6] - '0'));
-      auto it = frame_analysis.prologue.saved_reg_offsets.find(reg);
-      std::pair<int, int32_t> sort_key = (it != frame_analysis.prologue.saved_reg_offsets.end())
-                                             ? std::make_pair(0, it->second)
-                                             : std::make_pair(1, reg_order);
-      callee_gpr_indices.push_back(i);
-      callee_gpr_vars.emplace_back(sort_key, v);
-    }
-    if (callee_gpr_vars.size() >= 2) {
-      std::stable_sort(callee_gpr_vars.begin(), callee_gpr_vars.end(),
-                       [](const auto& a, const auto& b) { return a.first < b.first; });
-      for (size_t i = 0; i < callee_gpr_indices.size(); ++i) {
-        local_vars_to_declare[callee_gpr_indices[i]] = callee_gpr_vars[i].second;
-      }
-    }
-
-    std::vector<size_t> callee_fpr_indices;
-    std::vector<std::pair<std::pair<int, int32_t>, std::string>> callee_fpr_vars;
-    for (size_t i = 0; i < local_vars_to_declare.size(); ++i) {
-      const std::string& v = local_vars_to_declare[i];
-      std::string_view sv = v;
-      std::string_view base = absl::EndsWith(sv, "_d") ? sv.substr(0, sv.size() - 2) : sv;
-      if (!IsCalleeSavedFprBaseName(base)) {
-        continue;
-      }
-      int fpr_num = 0;
-      if (!absl::SimpleAtoi(base.substr(1), &fpr_num)) {
-        continue;
-      }
-      FpRegister fp_reg =
-          static_cast<FpRegister>(static_cast<int>(FpRegister::kF20) + (fpr_num - 20));
-      auto it = frame_analysis.prologue.saved_fpr_offsets.find(fp_reg);
-      std::pair<int, int32_t> sort_key = (it != frame_analysis.prologue.saved_fpr_offsets.end())
-                                             ? std::make_pair(0, it->second)
-                                             : std::make_pair(1, fpr_num);
-      callee_fpr_indices.push_back(i);
-      callee_fpr_vars.emplace_back(sort_key, v);
-    }
-    if (callee_fpr_vars.size() >= 2) {
-      std::stable_sort(callee_fpr_vars.begin(), callee_fpr_vars.end(),
-                       [](const auto& a, const auto& b) { return a.first < b.first; });
-      for (size_t i = 0; i < callee_fpr_indices.size(); ++i) {
-        local_vars_to_declare[callee_fpr_indices[i]] = callee_fpr_vars[i].second;
-      }
+  absl::flat_hash_set<std::string> float_gpr_var_names;
+  for (Register r : AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg)) {
+    float_gpr_var_names.insert(ExpressionBuilder::RegisterVarName(r));
+  }
+  for (const auto& v : local_vars_to_declare) {
+    if (v.size() == 9 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7' &&
+        absl::EndsWith(v, "_f")) {
+      float_gpr_var_names.insert(v);
     }
   }
+  absl::flat_hash_set<std::string> float_local_var_names;
+  for (int32_t off : AbiAnalyzer::DetectFloatLocalStackOffsets(cfg)) {
+    float_local_var_names.insert(ExpressionBuilder::StackVarName(off));
+  }
 
-  const uint32_t unreferenced_sp_gap_size =
-      ComputeUnreferencedSpGapSize(frame_analysis, double_vars, **body, &local_vars_to_declare);
+  const uint32_t unreferenced_sp_gap_size = ComputeUnreferencedSpGapSize(
+      frame_analysis, double_vars, float_local_var_names, **body, &local_vars_to_declare);
 
   if (local_vars_to_declare.empty()) {
     return absl::OkStatus();
@@ -2101,6 +2228,16 @@ absl::Status PrependSynthesizedLocalDeclarations(
       (unreferenced_sp_gap_size > 0) ? unreferenced_sp_gap_size : frame_analysis.sp_buffer_size;
   if (unreferenced_sp_gap_size == 0 && !frame_analysis.has_frame_pointer && sp_buffer_size > 0) {
     uint32_t spill_bytes = 8u * CountForStatements(**body);
+    int prologue_saved_callee_gprs = 0;
+    for (const auto& [reg, off] : frame_analysis.prologue.saved_reg_offsets) {
+      (void)off;
+      if ((reg >= Register::kS0 && reg <= Register::kS7) || reg == Register::kFp) {
+        ++prologue_saved_callee_gprs;
+      }
+    }
+    if (prologue_saved_callee_gprs >= 9) {
+      spill_bytes += 8u;
+    }
     int prologue_saved_callee_fpr_pairs = 0;
     for (int f_num = 20; f_num <= 30; f_num += 2) {
       FpRegister fp_even =
@@ -2112,15 +2249,20 @@ absl::Status PrependSynthesizedLocalDeclarations(
         ++prologue_saved_callee_fpr_pairs;
       }
     }
-    if (prologue_saved_callee_fpr_pairs >= 6 &&
-        (sp_buffer_size > 64 ||
-         std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(), "f18") !=
-             local_vars_to_declare.end())) {
+    const bool has_f18_local = std::find(local_vars_to_declare.begin(), local_vars_to_declare.end(),
+                                         "f18") != local_vars_to_declare.end();
+    if (prologue_saved_callee_fpr_pairs >= 6 && (sp_buffer_size > 64 || has_f18_local)) {
+      uint32_t fpr_spill_bytes = 0;
       for (const auto& v : local_vars_to_declare) {
         if (absl::EndsWith(v, "_f")) {
-          spill_bytes += 8u;
+          fpr_spill_bytes += 8u;
         }
       }
+      if (fpr_spill_bytes == 0 && sp_buffer_size > 64 && has_f18_local &&
+          !float_gpr_var_names.empty()) {
+        fpr_spill_bytes = 8u;
+      }
+      spill_bytes += fpr_spill_bytes;
     }
     const uint32_t min_accessed_bytes =
         (static_cast<uint32_t>(std::max<int32_t>(0, frame_analysis.max_sp_access)) + 7u) & ~7u;
@@ -2342,20 +2484,6 @@ absl::Status PrependSynthesizedLocalDeclarations(
       has_v0_local && CountDirectAssignmentsInStatement(**body, "v0") >= 2 &&
       CountNonReturnVariableReadUsesInStatement(**body, "v0") >= 1;
 
-  absl::flat_hash_set<std::string> float_gpr_var_names;
-  for (Register r : AbiAnalyzer::DetectFloatParametersInGeneralRegisters(cfg)) {
-    float_gpr_var_names.insert(ExpressionBuilder::RegisterVarName(r));
-  }
-  for (const auto& v : local_vars_to_declare) {
-    if (v.size() == 9 && absl::StartsWith(v, "temp_s") && v[6] >= '0' && v[6] <= '7' &&
-        absl::EndsWith(v, "_f")) {
-      float_gpr_var_names.insert(v);
-    }
-  }
-  absl::flat_hash_set<std::string> float_local_var_names;
-  for (int32_t off : AbiAnalyzer::DetectFloatLocalStackOffsets(cfg)) {
-    float_local_var_names.insert(ExpressionBuilder::StackVarName(off));
-  }
   absl::flat_hash_set<std::string> s64_local_var_names;
   for (const auto& block : cfg.Blocks()) {
     for (const auto& inst : block.instructions) {
@@ -2426,6 +2554,17 @@ absl::Status PrependSynthesizedLocalDeclarations(
     }
   }
 
+  absl::flat_hash_set<int32_t> addr_taken_sp_offsets;
+  for (const auto& var_name : local_vars_to_declare) {
+    if (absl::StartsWith(var_name, "var_sp_") && !absl::StartsWith(var_name, "var_sp_neg_")) {
+      int32_t off = 0;
+      if (absl::SimpleAtoi(std::string_view{var_name}.substr(7), &off) &&
+          has_address_taken(var_name)) {
+        addr_taken_sp_offsets.insert(off);
+      }
+    }
+  }
+
   std::vector<std::string> narrow_candidates;
   narrow_candidates.reserve(local_vars_to_declare.size());
   for (const auto& var_name : local_vars_to_declare) {
@@ -2440,6 +2579,17 @@ absl::Status PrependSynthesizedLocalDeclarations(
   }
   absl::flat_hash_map<std::string, CType> narrow_cond_inc_var_types =
       InferAndPromoteNarrowCondSteppedVars(narrow_candidates, body);
+  if (!frame_analysis.has_frame_pointer) {
+    for (const auto& var_name : local_vars_to_declare) {
+      if (absl::StartsWith(var_name, "var_sp_") && !absl::StartsWith(var_name, "var_sp_neg_")) {
+        int32_t off = 0;
+        if (absl::SimpleAtoi(std::string_view{var_name}.substr(7), &off) &&
+            IsAddressTaken16BitSpVar(off, addr_taken_sp_offsets)) {
+          narrow_cond_inc_var_types[var_name] = CType::S16();
+        }
+      }
+    }
+  }
   if (frame_analysis.has_frame_pointer) {
     PromoteFramePointerPostIncrementStackVars(narrow_candidates, body, &narrow_cond_inc_var_types);
   }

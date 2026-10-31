@@ -12,6 +12,23 @@
 
 namespace rom_nom_nom {
 
+// RAII guard that precomputes and caches O(1) root-body identifier occurrence and jump summaries
+// for the current thread during a top-level AST pass over `root_body`.
+class ScopedRootBodySummary {
+ public:
+  struct Impl;
+
+  explicit ScopedRootBodySummary(const CompoundStatement* root_body);
+  ~ScopedRootBodySummary();
+
+  ScopedRootBodySummary(const ScopedRootBodySummary&) = delete;
+  ScopedRootBodySummary& operator=(const ScopedRootBodySummary&) = delete;
+
+ private:
+  std::unique_ptr<Impl> impl_;
+  const Impl* prev_ = nullptr;
+};
+
 // Returns true if `statement` reads `variable_name` before unconditionally overwriting it.
 bool DoesStatementReadVariableBeforeOverwrite(const CStatement& statement,
                                               std::string_view variable_name,
