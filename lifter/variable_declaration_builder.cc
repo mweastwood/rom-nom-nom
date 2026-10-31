@@ -20,6 +20,7 @@
 #include "absl/strings/str_format.h"
 #include "core/c_ast.h"
 #include "core/c_ast_utils.h"
+#include "core/c_ast_visitor.h"
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
 #include "core/register_tracker.h"
@@ -2116,6 +2117,81 @@ absl::Status PrependSynthesizedLocalDeclarations(
     local_vars_to_declare.push_back(var_name);
   }
 
+  if (frame_analysis.frame_size == 0 && !frame_analysis.has_frame_pointer &&
+      !frame_analysis.has_calls) {
+    absl::flat_hash_map<std::string, int32_t> write_only_home_sp_vars;
+    for (const auto& v : local_vars_to_declare) {
+      int32_t off = -1;
+      if (absl::StartsWith(v, "var_sp_") && !absl::StartsWith(v, "var_sp_neg_") &&
+          absl::SimpleAtoi(v.substr(7), &off) && (off == 0 || off == 4 || off == 8 || off == 12) &&
+          !double_vars.contains(v) && CountVariableReadUsesInStatement(**body, v) == 0 &&
+          !StatementTakesAddressOf(**body, v)) {
+        write_only_home_sp_vars.emplace(v, off);
+      }
+    }
+    if (!write_only_home_sp_vars.empty()) {
+      class ZeroFrameHomeStoreMutator : public AstMutator {
+       public:
+        explicit ZeroFrameHomeStoreMutator(const absl::flat_hash_map<std::string, int32_t>& vars)
+            : vars_(vars) {}
+
+        void MutateAssignmentExpression(std::unique_ptr<CExpression>* expr,
+                                        AssignmentExpression* assign_expr) override {
+          AstMutator::MutateAssignmentExpression(expr, assign_expr);
+          if (assign_expr->Op() != "=" ||
+              assign_expr->Lhs().Kind() != CExpressionKind::kIdentifier) {
+            return;
+          }
+          const std::string& lhs_name =
+              static_cast<const IdentifierExpression&>(assign_expr->Lhs()).Name();
+          auto it = vars_.find(lhs_name);
+          if (it == vars_.end()) {
+            return;
+          }
+          int32_t off = it->second;
+          std::unique_ptr<CExpression> addr_expr =
+              (off == 0) ? CExpression::Identifier("sp")
+                         : CExpression::Binary(
+                               "+", CExpression::Cast(CType::S32(), CExpression::Identifier("sp")),
+                               CExpression::Integer(off));
+          auto store_lhs = CExpression::Unary(
+              "*", CExpression::Cast(CType{"s32", false, 1}, std::move(addr_expr)),
+              /*is_prefix=*/true);
+          *expr = CExpression::Assignment("=", std::move(store_lhs), assign_expr->Rhs().Clone());
+          MarkChanged();
+        }
+
+       private:
+        const absl::flat_hash_map<std::string, int32_t>& vars_;
+      };
+
+      ZeroFrameHomeStoreMutator mutator(write_only_home_sp_vars);
+      std::unique_ptr<CStatement> body_stmt = std::move(*body);
+      mutator.MutateStatement(&body_stmt);
+      if (mutator.Changed()) {
+        body->reset(static_cast<CompoundStatement*>(body_stmt.release()));
+        std::vector<std::string> filtered_vars;
+        bool has_sp = false;
+        for (const auto& v : local_vars_to_declare) {
+          if (v == "sp") {
+            has_sp = true;
+          }
+          if (write_only_home_sp_vars.contains(v) &&
+              CountIdentifierOccurrencesInStatement(**body, v) == 0) {
+            continue;
+          }
+          filtered_vars.push_back(v);
+        }
+        if (!has_sp) {
+          filtered_vars.insert(filtered_vars.begin(), "sp");
+        }
+        local_vars_to_declare = std::move(filtered_vars);
+      } else {
+        body->reset(static_cast<CompoundStatement*>(body_stmt.release()));
+      }
+    }
+  }
+
   if (frame_analysis.has_frame_pointer && frame_analysis.sp_buffer_size == 0 &&
       frame_analysis.prologue.min_saved_reg_offset != 0xFFFFFFFF) {
     const uint32_t local_frame_top = frame_analysis.prologue.min_saved_reg_offset & ~7u;
@@ -2818,8 +2894,13 @@ absl::Status PrependSynthesizedLocalDeclarations(
   auto new_body = std::make_unique<CompoundStatement>();
   for (const auto& var_name : local_vars_to_declare) {
     if (var_name == "sp") {
-      new_body->AddStatement(
-          CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, sp_buffer_size));
+      if (frame_analysis.frame_size == 0) {
+        new_body->AddStatement(
+            CStatement::VariableDeclaration(CType::S32(), "sp", nullptr, std::nullopt, "$29"));
+      } else {
+        new_body->AddStatement(
+            CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, sp_buffer_size));
+      }
     } else if (is_fp_reg(var_name)) {
       std::optional<std::string> reg_annot = reg_annotations[var_name];
       if (absl::EndsWith(var_name, "_d") || double_vars.contains(var_name)) {

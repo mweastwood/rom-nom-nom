@@ -40,13 +40,14 @@ void PopulateFunctionAbiMetadata(absl::Span<const Instruction> instructions,
                                  absl::flat_hash_map<std::string, int>* fp_parameter_counts,
                                  absl::flat_hash_set<std::string>* callers_use_v0,
                                  absl::flat_hash_set<std::string>* callers_use_f0) {
-  (*parameter_counts)[func_name] = AbiAnalyzer::DetermineParameterCount(instructions);
-  (*fp_parameter_counts)[func_name] = AbiAnalyzer::DetermineFpParameterCount(instructions);
   auto cfg_or = ControlFlowGraph::Build(instructions);
-  if (cfg_or.ok()) {
-    if (AbiAnalyzer::DetermineReturnsF0(*cfg_or)) {
+  const ControlFlowGraph* cfg_ptr = cfg_or.ok() ? &*cfg_or : nullptr;
+  (*parameter_counts)[func_name] = AbiAnalyzer::DetermineParameterCount(instructions, cfg_ptr);
+  (*fp_parameter_counts)[func_name] = AbiAnalyzer::DetermineFpParameterCount(instructions, cfg_ptr);
+  if (cfg_ptr != nullptr) {
+    if (AbiAnalyzer::DetermineReturnsF0(*cfg_ptr)) {
       callers_use_f0->insert(func_name);
-    } else if (AbiAnalyzer::DetermineReturnsV0(*cfg_or, symbol_index, callers_use_v0)) {
+    } else if (AbiAnalyzer::DetermineReturnsV0(*cfg_ptr, symbol_index, callers_use_v0)) {
       callers_use_v0->insert(func_name);
     }
   }

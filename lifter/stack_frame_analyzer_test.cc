@@ -501,5 +501,26 @@ TEST(StackFrameAnalyzerTest, DiscoversOutgoingStackArgStoresAcrossMultiplePredec
   EXPECT_EQ(analysis.sp_buffer_size, 28);
 }
 
+TEST(StackFrameAnalyzerTest, MarksSpAddressTakenWhenSubwordStoresShareFourByteWordInO2Frame) {
+  // Leaf function (`func_8002CD4C` pattern) allocating 16-byte stack frame without `$fp` and
+  // storing `sh` at `0($sp)`, `sb` at `2($sp)`, and `sb` at `3($sp)` within the same 4-byte word:
+  std::vector<uint32_t> words = {
+      0x27BDFFF0,  // 00: addiu $sp, $sp, -16
+      0xA7A60000,  // 04: sh    $a2, 0($sp)
+      0x97A20000,  // 08: lhu   $v0, 0($sp)
+      0xA3A30002,  // 0C: sb    $v1, 2($sp)
+      0xA3A60003,  // 10: sb    $a2, 3($sp)
+      0x03E00008,  // 14: jr    $ra
+      0x27BD0010,  // 18: addiu $sp, $sp, 16
+  };
+  auto insts = *DecodeSequence(words, 0x8002CD4C);
+  auto cfg = *ControlFlowGraph::Build(insts);
+  StackFrameAnalysis analysis = StackFrameAnalyzer::Analyze(cfg);
+
+  EXPECT_EQ(analysis.frame_size, 16);
+  EXPECT_TRUE(analysis.sp_address_taken);
+  EXPECT_EQ(analysis.sp_buffer_size, 16);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

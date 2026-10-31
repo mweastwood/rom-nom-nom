@@ -1526,5 +1526,40 @@ TEST(AstExpressionFolderTest, EliminatesUnusedPreCallScratchStoreInsideLoopWithG
   EXPECT_THAT(code, HasSubstr("HelperCall(arg0);"));
 }
 
+TEST(AstExpressionFolderTest,
+     CollapsesStealedDelaySlotReturnCopyAcrossIfGuardedDoWhileAndElseBranch) {
+  auto body = std::make_unique<CompoundStatement>();
+  auto then_comp = std::make_unique<CompoundStatement>();
+  then_comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("arg0"))));
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("arg0"),
+      CExpression::Binary("+", CExpression::Identifier("arg0"), CExpression::Integer(1)))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v1"),
+      CExpression::Unary(
+          "*", CExpression::Cast(CType{"u8", false, 1}, CExpression::Identifier("arg0"))))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("arg0"))));
+  then_comp->AddStatement(CStatement::DoWhile(
+      std::move(loop_body),
+      CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Identifier("arg1"))));
+  auto else_comp = std::make_unique<CompoundStatement>();
+  else_comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("v0"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::If(
+      CExpression::Binary("!=", CExpression::Identifier("v1"), CExpression::Identifier("arg1")),
+      std::move(then_comp), std::move(else_comp)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+
+  FoldSingleUseExpressions(body.get());
+  std::string code = body->ToString();
+
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("v0 = arg0;")));
+  EXPECT_THAT(code, ::testing::Not(HasSubstr("else")));
+  EXPECT_THAT(code, HasSubstr("return arg0;"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

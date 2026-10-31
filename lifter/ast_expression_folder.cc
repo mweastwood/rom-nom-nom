@@ -1743,28 +1743,47 @@ struct FolderContext {
                 }
               }
 
-              // Fold `argX = <pure_expr>; *(T*)<addr> = argX;` when `argX` is used as a dead
-              // scratch register for a memory store right before return.
+              // Fold `argX = <pure_expr>; ...; *(T*)<addr> = argX; return;` when `argX` is used as
+              // a dead scratch register for a memory store right before return.
               if (is_call_arg && !is_float_bitcast_lhs && IsPureExpr(assign.Rhs()) &&
-                  i + 2 < stmts.size() &&
-                  stmts[i + 1]->Kind() == CStatementKind::kExpressionStatement &&
-                  stmts[i + 2]->Kind() == CStatementKind::kReturnStatement) {
-                const auto& next_es = static_cast<const ExpressionStatement&>(*stmts[i + 1]);
-                if (next_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
-                  const auto& next_assign =
-                      static_cast<const AssignmentExpression&>(next_es.Expression());
-                  if (next_assign.Op() == "=" &&
-                      next_assign.Lhs().Kind() != CExpressionKind::kIdentifier &&
-                      CountExprUses(next_assign.Lhs(), var) == 0 &&
-                      next_assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
-                      static_cast<const IdentifierExpression&>(next_assign.Rhs()).Name() == var &&
-                      IsDeadAfterStmt(i + 1, var, 1, stmts[i].get())) {
-                    stmts[i + 1] = CStatement::Expression(CExpression::Assignment(
-                        "=", next_assign.Lhs().Clone(), assign.Rhs().Clone()));
-                    stmts.erase(stmts.begin() + i);
-                    changed = true;
-                    break;
+                  i + 2 < stmts.size()) {
+                bool folded_arg_store = false;
+                for (size_t store_idx = i + 1; store_idx + 1 < stmts.size() && store_idx <= i + 4;
+                     ++store_idx) {
+                  if (store_idx > i + 1) {
+                    if (root_body == nullptr || CountUses(*root_body, var) != 2 ||
+                        CountUses(*stmts[store_idx - 1], var) > 0 ||
+                        !CanMoveExpressionAcrossStatement(assign.Rhs(), var, *stmts[store_idx - 1],
+                                                          /*allow_disjoint_store=*/true)) {
+                      break;
+                    }
                   }
+                  if (stmts[store_idx]->Kind() == CStatementKind::kExpressionStatement &&
+                      stmts[store_idx + 1]->Kind() == CStatementKind::kReturnStatement) {
+                    const auto& next_es =
+                        static_cast<const ExpressionStatement&>(*stmts[store_idx]);
+                    if (next_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                      const auto& next_assign =
+                          static_cast<const AssignmentExpression&>(next_es.Expression());
+                      if (next_assign.Op() == "=" &&
+                          next_assign.Lhs().Kind() != CExpressionKind::kIdentifier &&
+                          CountExprUses(next_assign.Lhs(), var) == 0 &&
+                          next_assign.Rhs().Kind() == CExpressionKind::kIdentifier &&
+                          static_cast<const IdentifierExpression&>(next_assign.Rhs()).Name() ==
+                              var &&
+                          IsDeadAfterStmt(store_idx, var, 1, stmts[i].get())) {
+                        stmts[store_idx] = CStatement::Expression(CExpression::Assignment(
+                            "=", next_assign.Lhs().Clone(), assign.Rhs().Clone()));
+                        stmts.erase(stmts.begin() + i);
+                        changed = true;
+                        folded_arg_store = true;
+                        break;
+                      }
+                    }
+                  }
+                }
+                if (folded_arg_store) {
+                  break;
                 }
               }
 
@@ -2855,7 +2874,8 @@ struct FolderContext {
                             }
                             std::string_view mid_lhs_sv = ExtractAssignedLhsVar(mid_a.Lhs());
                             if (!mid_lhs_sv.empty() &&
-                                CountUses(*stmts[j], std::string(mid_lhs_sv)) > 0) {
+                                (CountUses(*stmts[j], std::string(mid_lhs_sv)) > 0 ||
+                                 CountExprUses(cand_es.Expression(), "sp") > 0)) {
                               crosses_used_binary_def = true;
                               break;
                             }
@@ -3448,6 +3468,56 @@ struct FolderContext {
               if (wrapper.Statements().size() == 1) {
                 stmts[i] = CStatement::If(ifs.Condition().Clone(), ifs.ThenBranch().Clone(),
                                           std::move(wrapper.MutableStatements()[0]));
+              }
+            }
+          }
+          // Collapse `if (c) { do { ...; v0 = X; } while (lc); } else { v0 = X; } return v0;`
+          // (produced by `reorg.c` `fill_slots_from_thread` stealing `move $v0, X` from the
+          // epilogue into both the `if`-bypass branch delay slot and the `do-while` back-edge
+          // delay slot) into `if (c) { do { ... } while (lc); } return X;` when `v0` is not read
+          // inside the loop.
+          if (i + 1 < stmts.size() && stmts[i + 1]->Kind() == CStatementKind::kReturnStatement) {
+            const auto& ret_s = static_cast<const ReturnStatement&>(*stmts[i + 1]);
+            if (ret_s.ReturnValue() != nullptr &&
+                ret_s.ReturnValue()->Kind() == CExpressionKind::kIdentifier &&
+                static_cast<const IdentifierExpression&>(*ret_s.ReturnValue()).Name() == "v0") {
+              auto& ifs_ret = static_cast<IfStatement&>(*stmts[i]);
+              if (ifs_ret.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+                  ifs_ret.MutableElseBranch() != nullptr &&
+                  ifs_ret.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
+                auto& then_c = static_cast<CompoundStatement&>(*ifs_ret.MutableThenBranch());
+                auto& else_c = static_cast<CompoundStatement&>(*ifs_ret.MutableElseBranch());
+                if (then_c.Statements().size() == 1 &&
+                    then_c.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement &&
+                    else_c.Statements().size() == 1 &&
+                    else_c.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
+                  auto& dws = static_cast<DoWhileStatement&>(*then_c.MutableStatements()[0]);
+                  const auto& else_es =
+                      static_cast<const ExpressionStatement&>(*else_c.Statements()[0]);
+                  if (dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement &&
+                      else_es.Expression().Kind() == CExpressionKind::kAssignmentExpression) {
+                    auto& dw_comp = static_cast<CompoundStatement&>(*dws.MutableBody());
+                    const auto& else_a =
+                        static_cast<const AssignmentExpression&>(else_es.Expression());
+                    if (else_a.Op() == "=" && else_a.Lhs().Kind() == CExpressionKind::kIdentifier &&
+                        static_cast<const IdentifierExpression&>(else_a.Lhs()).Name() == "v0" &&
+                        IsPureExpr(else_a.Rhs()) && !HasMemoryDeref(else_a.Rhs()) &&
+                        CountExprUses(else_a.Rhs(), "v0") == 0 &&
+                        dw_comp.Statements().size() >= 2 &&
+                        dw_comp.Statements().back()->ToString() ==
+                            else_c.Statements()[0]->ToString() &&
+                        CountExprUses(dws.Condition(), "v0") == 0 &&
+                        CountUses(dw_comp, "v0") == 0) {
+                      auto ret_rhs = else_a.Rhs().Clone();
+                      dw_comp.MutableStatements().pop_back();
+                      stmts[i] = CStatement::If(ifs_ret.Condition().Clone(),
+                                                ifs_ret.MutableThenBranch()->Clone(), nullptr);
+                      stmts[i + 1] = CStatement::Return(std::move(ret_rhs));
+                      changed = true;
+                      break;
+                    }
+                  }
+                }
               }
             }
           }

@@ -48,11 +48,13 @@ class AbiAnalyzer {
 
   // Analyzes register and stack usage across instructions to determine the number of integer/stack
   // parameters expected by a function (via use-before-definition).
-  static int DetermineParameterCount(absl::Span<const Instruction> instructions);
+  static int DetermineParameterCount(absl::Span<const Instruction> instructions,
+                                     const ControlFlowGraph* prebuilt_cfg = nullptr);
 
   // Analyzes register usage across instructions to determine the number of float parameters ($f12,
   // $f14) expected by a function (via use-before-definition).
-  static int DetermineFpParameterCount(absl::Span<const Instruction> instructions);
+  static int DetermineFpParameterCount(absl::Span<const Instruction> instructions,
+                                       const ControlFlowGraph* prebuilt_cfg = nullptr);
 
   // Computes return types and FP argument widths of calls across basic blocks in a CFG.
   static absl::flat_hash_map<uint32_t, CallReturnInfo> ComputeCallReturnInfo(

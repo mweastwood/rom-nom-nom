@@ -47,6 +47,16 @@ bool IsPureExpression(const CExpression& expression) {
         Stop();
         return;
       }
+      if (expr.IsPrefix() && expr.Op() == "*" &&
+          expr.Operand().Kind() == CExpressionKind::kCastExpression) {
+        const auto& cast = static_cast<const CastExpression&>(expr.Operand());
+        if (absl::StartsWith(cast.TargetType().name, "volatile ") &&
+            CountIdentifierOccurrencesInExpression(cast.Operand(), "sp") > 0) {
+          is_pure = false;
+          Stop();
+          return;
+        }
+      }
       AstVisitor::VisitUnaryExpression(expr);
     }
 

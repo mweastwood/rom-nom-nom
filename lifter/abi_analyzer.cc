@@ -385,7 +385,8 @@ bool AbiAnalyzer::IsFpRegisterLiveIn(const ControlFlowGraph& cfg, FpRegister reg
   return IsLiveInOnCfg(cfg, id_to_index, uses_before_def, defines);
 }
 
-int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructions) {
+int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructions,
+                                         const ControlFlowGraph* prebuilt_cfg) {
   absl::flat_hash_set<Register> defined_registers;
   absl::flat_hash_set<Register> used_before_definition;
 
@@ -399,6 +400,7 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
     }
   }
 
+  int min_stack_arg = 100;
   int max_stack_arg = -1;
   absl::flat_hash_set<int32_t> stored_stack_offsets;
 
@@ -436,6 +438,7 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
                 (instruction.opcode == Opcode::kLdc1 || instruction.opcode == Opcode::kLd)
                     ? arg_idx + 1
                     : arg_idx;
+            min_stack_arg = std::min(min_stack_arg, arg_idx);
             max_stack_arg = std::max(max_stack_arg, last_arg_idx);
           }
         }
@@ -477,9 +480,16 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
   }
 
   int count = 0;
-  auto cfg = ControlFlowGraph::Build(instructions);
+  std::optional<absl::StatusOr<ControlFlowGraph>> owned_cfg;
+  const ControlFlowGraph* cfg_ptr = prebuilt_cfg;
+  if (cfg_ptr == nullptr) {
+    owned_cfg = ControlFlowGraph::Build(instructions);
+    if (owned_cfg->ok()) {
+      cfg_ptr = &**owned_cfg;
+    }
+  }
   auto check_reg = [&](Register reg) {
-    if (cfg.ok() && IsRegisterLiveIn(*cfg, reg)) return true;
+    if (cfg_ptr != nullptr && IsRegisterLiveIn(*cfg_ptr, reg)) return true;
     return used_before_definition.contains(reg);
   };
 
@@ -493,19 +503,28 @@ int AbiAnalyzer::DetermineParameterCount(absl::Span<const Instruction> instructi
     count = 1;
   }
 
-  bool has_fp_register_params = cfg.ok() && (IsFpRegisterLiveIn(*cfg, FpRegister::kF12) ||
-                                             IsFpRegisterLiveIn(*cfg, FpRegister::kF14));
-  if (max_stack_arg >= 4 && (count > 0 || has_fp_register_params)) {
+  bool has_fp_register_params =
+      cfg_ptr != nullptr && (IsFpRegisterLiveIn(*cfg_ptr, FpRegister::kF12) ||
+                             IsFpRegisterLiveIn(*cfg_ptr, FpRegister::kF14));
+  if (max_stack_arg >= 4 && (count > 0 || has_fp_register_params || min_stack_arg <= 5)) {
     count = std::max(count, max_stack_arg + 1);
   }
   return count;
 }
 
-int AbiAnalyzer::DetermineFpParameterCount(absl::Span<const Instruction> instructions) {
-  auto cfg = ControlFlowGraph::Build(instructions);
-  if (cfg.ok()) {
-    if (IsFpRegisterLiveIn(*cfg, FpRegister::kF12)) {
-      if (IsFpRegisterLiveIn(*cfg, FpRegister::kF14)) {
+int AbiAnalyzer::DetermineFpParameterCount(absl::Span<const Instruction> instructions,
+                                           const ControlFlowGraph* prebuilt_cfg) {
+  std::optional<absl::StatusOr<ControlFlowGraph>> owned_cfg;
+  const ControlFlowGraph* cfg_ptr = prebuilt_cfg;
+  if (cfg_ptr == nullptr) {
+    owned_cfg = ControlFlowGraph::Build(instructions);
+    if (owned_cfg->ok()) {
+      cfg_ptr = &**owned_cfg;
+    }
+  }
+  if (cfg_ptr != nullptr) {
+    if (IsFpRegisterLiveIn(*cfg_ptr, FpRegister::kF12)) {
+      if (IsFpRegisterLiveIn(*cfg_ptr, FpRegister::kF14)) {
         return 2;
       }
       return 1;

@@ -265,6 +265,17 @@ StackFrameAnalysis StackFrameAnalyzer::Analyze(const ControlFlowGraph& cfg) {
     }
   }
 
+  if (!analysis.has_frame_pointer && analysis.frame_size > 0) {
+    absl::flat_hash_set<int32_t> store_words;
+    for (const auto& [offset, store_size] : stack_store_sizes) {
+      (void)store_size;
+      if (!store_words.insert(offset & ~3).second) {
+        analysis.sp_address_taken = true;
+        break;
+      }
+    }
+  }
+
   absl::flat_hash_map<int32_t, int> stack_load_sizes;
   for (const auto& [offset, load_size] : stack_loads) {
     auto store_it = stack_store_sizes.find(offset);

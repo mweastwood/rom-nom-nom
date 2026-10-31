@@ -1895,6 +1895,50 @@ TEST(VariableDeclarationBuilderTest,
                     .ok());
     EXPECT_THAT(body->ToString(), HasSubstr("u8 sp[88];"));
   }
+
+  // 4. Write-only `var_sp_0..var_sp_12` in a zero-frame leaf function (`frame_size == 0`) are
+  //    rewritten to explicit stores through `register s32 sp asm("$29");` so GCC `-O2` preserves
+  //    the caller home-area stores without allocating a stack frame.
+  {
+    std::vector<uint32_t> home_words = {
+        0xAFA40000,  // 00: sw $a0, 0($sp)
+        0xAFA50004,  // 04: sw $a1, 4($sp)
+        0xAFA60008,  // 08: sw $a2, 8($sp)
+        0x03E00008,  // 0C: jr $ra
+        0xAFA7000C,  // 10: sw $a3, 12($sp)
+    };
+    auto home_cfg = *ControlFlowGraph::Build(*DecodeSequence(home_words, 0x80093540));
+    StackFrameAnalysis home_frame = StackFrameAnalyzer::Analyze(home_cfg);
+
+    auto body = std::make_unique<CompoundStatement>();
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_0"), CExpression::Identifier("arg0"))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_4"), CExpression::Identifier("arg1"))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_8"), CExpression::Identifier("arg2"))));
+    body->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("var_sp_12"), CExpression::Identifier("arg3"))));
+    body->AddStatement(CStatement::Return(nullptr));
+
+    std::vector<CParameter> params = {
+        {.type = CType::S32(), .name = "arg0"},
+        {.type = CType::S32(), .name = "arg1"},
+        {.type = CType::S32(), .name = "arg2"},
+        {.type = CType::S32(), .name = "arg3"},
+    };
+    AstConverterOptions opts;
+    opts.function_name = "ZeroFrameHomeStores";
+
+    ASSERT_TRUE(PrependSynthesizedLocalDeclarations(home_cfg, home_frame, /*double_vars=*/{},
+                                                    params, CType::Void(), nullptr, opts, &body)
+                    .ok());
+    std::string emitted = body->ToString();
+    EXPECT_THAT(emitted, HasSubstr("register s32 sp asm(\"$29\");"));
+    EXPECT_THAT(emitted, HasSubstr("*(s32*)sp = arg0;"));
+    EXPECT_THAT(emitted, HasSubstr("*(s32*)((s32)sp + 4) = arg1;"));
+    EXPECT_THAT(emitted, Not(HasSubstr("var_sp_")));
+  }
 }
 
 }  // namespace

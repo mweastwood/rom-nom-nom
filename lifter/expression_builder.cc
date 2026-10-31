@@ -1795,7 +1795,23 @@ void BlockLiftRunner::LiftMemoryInstruction(const Instruction& inst, size_t i) {
             offset += static_cast<int32_t>(frame_size);
           }
           if (IsSpOffset(offset)) {
-            statement.expression = LiftedExpression::Load(load_type, MakeSpAddr(offset));
+            std::string sp_load_type = load_type;
+            if (!has_frame_pointer) {
+              for (size_t prev = i; prev > 0; --prev) {
+                const Instruction& prev_inst = instructions_to_process[prev - 1];
+                if (prev_inst.opcode == Opcode::kJal || prev_inst.opcode == Opcode::kJalr) {
+                  break;
+                }
+                if ((prev_inst.opcode == Opcode::kSw || prev_inst.opcode == Opcode::kSh ||
+                     prev_inst.opcode == Opcode::kSb || prev_inst.opcode == Opcode::kSd) &&
+                    prev_inst.rs.has_value() && *prev_inst.rs == Register::kSp &&
+                    prev_inst.immediate == offset) {
+                  sp_load_type = absl::StrCat("volatile ", load_type);
+                  break;
+                }
+              }
+            }
+            statement.expression = LiftedExpression::Load(sp_load_type, MakeSpAddr(offset));
           } else {
             uint32_t base_offset = frame_size + 16;
             int arg_idx = -1;

@@ -740,7 +740,7 @@ std::vector<CParameter> FunctionSignatureInference::BuildFunctionParameters(
                             block.instructions.end());
   }
   if (parameter_count < 0 && !all_instructions.empty()) {
-    parameter_count = AbiAnalyzer::DetermineParameterCount(all_instructions);
+    parameter_count = AbiAnalyzer::DetermineParameterCount(all_instructions, &cfg);
   }
 
   int fp_param_count = 0;
@@ -751,7 +751,7 @@ std::vector<CParameter> FunctionSignatureInference::BuildFunctionParameters(
     }
   }
   if (fp_param_count == 0 && !all_instructions.empty()) {
-    fp_param_count = AbiAnalyzer::DetermineFpParameterCount(all_instructions);
+    fp_param_count = AbiAnalyzer::DetermineFpParameterCount(all_instructions, &cfg);
   }
 
   int total_param_count = std::max(parameter_count, fp_param_count);
@@ -854,6 +854,91 @@ absl::flat_hash_map<std::string, CType> InferAndPromoteNarrowCondSteppedVars(
   if (body == nullptr || *body == nullptr || candidate_vars.empty()) {
     return narrow_cond_inc_var_types;
   }
+
+  // Promote narrow loop-loaded variables (`v1 = *(u8 *)arg0; arg1 = (arg1 & 255);
+  // if (((v1 & 255) != arg1)) { do { ...; v1 = *(u8 *)arg0; } while ((v1 != arg1)); }`) to `u8`
+  // (or `u16`) and fold `arg1 = (arg1 & 255);` into `(u8)arg1` in the loop guard and latch.
+  auto& top_stmts = (*body)->MutableStatements();
+  if (top_stmts.size() >= 3 && top_stmts[0] != nullptr && top_stmts[1] != nullptr &&
+      top_stmts[2] != nullptr && top_stmts[0]->Kind() == CStatementKind::kExpressionStatement &&
+      top_stmts[1]->Kind() == CStatementKind::kExpressionStatement &&
+      top_stmts[2]->Kind() == CStatementKind::kIfStatement) {
+    const auto& e0 = static_cast<const ExpressionStatement&>(*top_stmts[0]).Expression();
+    const auto& e1 = static_cast<const ExpressionStatement&>(*top_stmts[1]).Expression();
+    auto& ifs = static_cast<IfStatement&>(*top_stmts[2]);
+    if (e0.Kind() == CExpressionKind::kAssignmentExpression &&
+        e1.Kind() == CExpressionKind::kAssignmentExpression && ifs.ElseBranch() == nullptr &&
+        ifs.MutableThenBranch()->Kind() == CStatementKind::kCompoundStatement &&
+        ifs.Condition().Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& a0 = static_cast<const AssignmentExpression&>(e0);
+      const auto& a1 = static_cast<const AssignmentExpression&>(e1);
+      auto& then_comp = static_cast<CompoundStatement&>(*ifs.MutableThenBranch());
+      const auto& guard_bin = static_cast<const BinaryExpression&>(ifs.Condition());
+      if (a0.Op() == "=" && a0.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          a0.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
+          static_cast<const UnaryExpression&>(a0.Rhs()).IsPrefix() &&
+          static_cast<const UnaryExpression&>(a0.Rhs()).Op() == "*" &&
+          static_cast<const UnaryExpression&>(a0.Rhs()).Operand().Kind() ==
+              CExpressionKind::kCastExpression &&
+          a1.Op() == "=" && a1.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          a1.Rhs().Kind() == CExpressionKind::kBinaryExpression &&
+          then_comp.Statements().size() == 1 &&
+          then_comp.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement &&
+          guard_bin.Op() == "!=" && guard_bin.Lhs().Kind() == CExpressionKind::kBinaryExpression &&
+          guard_bin.Rhs().Kind() == CExpressionKind::kIdentifier) {
+        const std::string load_var = static_cast<const IdentifierExpression&>(a0.Lhs()).Name();
+        const std::string mask_var = static_cast<const IdentifierExpression&>(a1.Lhs()).Name();
+        const auto& load_cast = static_cast<const CastExpression&>(
+            static_cast<const UnaryExpression&>(a0.Rhs()).Operand());
+        const auto& mask_bin = static_cast<const BinaryExpression&>(a1.Rhs());
+        const auto& guard_lhs_bin = static_cast<const BinaryExpression&>(guard_bin.Lhs());
+        auto& dws = static_cast<DoWhileStatement&>(*then_comp.MutableStatements()[0]);
+        const bool is_u8_load =
+            load_cast.TargetType().pointer_depth == 1 && load_cast.TargetType().name == "u8";
+        const bool is_u16_load =
+            load_cast.TargetType().pointer_depth == 1 && load_cast.TargetType().name == "u16";
+        const int64_t expected_mask = is_u8_load ? 255 : (is_u16_load ? 65535 : 0);
+        if (expected_mask > 0 &&
+            std::find(candidate_vars.begin(), candidate_vars.end(), load_var) !=
+                candidate_vars.end() &&
+            !StatementTakesAddressOf(**body, load_var) && mask_bin.Op() == "&" &&
+            mask_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(mask_bin.Lhs()).Name() == mask_var &&
+            mask_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(mask_bin.Rhs()).Value() == expected_mask &&
+            guard_lhs_bin.Op() == "&" &&
+            guard_lhs_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            static_cast<const IdentifierExpression&>(guard_lhs_bin.Lhs()).Name() == load_var &&
+            guard_lhs_bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(guard_lhs_bin.Rhs()).Value() ==
+                expected_mask &&
+            static_cast<const IdentifierExpression&>(guard_bin.Rhs()).Name() == mask_var &&
+            dws.Condition().Kind() == CExpressionKind::kBinaryExpression &&
+            dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement) {
+          const auto& latch_bin = static_cast<const BinaryExpression&>(dws.Condition());
+          auto& dw_comp = static_cast<CompoundStatement&>(*dws.MutableBody());
+          if (latch_bin.Op() == "!=" && latch_bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(latch_bin.Lhs()).Name() == load_var &&
+              latch_bin.Rhs().Kind() == CExpressionKind::kIdentifier &&
+              static_cast<const IdentifierExpression&>(latch_bin.Rhs()).Name() == mask_var &&
+              !dw_comp.Statements().empty() &&
+              dw_comp.Statements().back()->ToString() == top_stmts[0]->ToString() &&
+              CountIdentifierOccurrencesInStatement(**body, mask_var) == 4) {
+            CType narrow_type = is_u8_load ? CType::U8() : CType::U16();
+            narrow_cond_inc_var_types.emplace(load_var, narrow_type);
+            dws.MutableCondition() = CExpression::Binary(
+                "!=", CExpression::Identifier(load_var),
+                CExpression::Cast(narrow_type, CExpression::Identifier(mask_var)));
+            ifs.MutableCondition() = CExpression::Binary(
+                "!=", CExpression::Identifier(load_var),
+                CExpression::Cast(narrow_type, CExpression::Identifier(mask_var)));
+            top_stmts.erase(top_stmts.begin() + 1);
+          }
+        }
+      }
+    }
+  }
+
   absl::flat_hash_set<std::string> cond_stepped_vars;
   absl::flat_hash_set<std::string> do_while_post_stepped_vars;
   CollectConditionallySteppedVars(**body, &cond_stepped_vars, &do_while_post_stepped_vars);
@@ -1178,11 +1263,30 @@ bool ExpressionContainsAddressOf(const CExpression& expr) {
   }
 }
 
+bool StatementContainsVolatileCast(const CStatement& stmt) {
+  class VolatileCastFinder : public AstVisitor {
+   public:
+    bool found = false;
+    void VisitCastExpression(const CastExpression& expr) override {
+      if (absl::StartsWith(expr.TargetType().name, "volatile ")) {
+        found = true;
+        Stop();
+        return;
+      }
+      AstVisitor::VisitCastExpression(expr);
+    }
+  };
+  VolatileCastFinder finder;
+  finder.VisitStatement(stmt);
+  return finder.found;
+}
+
 void CollectBasicBlockWebsInCompound(CompoundStatement* comp, std::string_view var,
                                      bool dead_at_comp_exit,
                                      std::vector<ScratchDefUseWeb>* out_webs,
                                      bool in_loop = false) {
   if (comp == nullptr) return;
+  if (in_loop && StatementContainsVolatileCast(*comp)) return;
   auto& stmts = comp->MutableStatements();
   const size_t n = stmts.size();
 

@@ -1256,5 +1256,32 @@ TEST(AbiAnalyzerTest, IsRegisterAndFpRegisterDeadAtBlockEntryRespectsCallsReturn
   EXPECT_TRUE(AbiAnalyzer::IsFpRegisterDeadAtBlockEntry(cfg, blk1->id, FpRegister::kF4));
 }
 
+TEST(AbiAnalyzerTest, DetermineParameterCountDetectsStackParamInForwardingWrapper) {
+  // Forwarding wrapper (`func_800F275C`) that passes $a0..$a3 untouched to a callee while
+  // copying stack parameter 4 (`48($sp)` with 32-byte frame) to outgoing `16($sp)`:
+  //   00: addiu $sp, $sp, -32
+  //   04: lw    $v0, 48($sp)
+  //   08: sw    $ra, 24($sp)
+  //   0C: jal   0x800F4F18
+  //   10:  sw    $v0, 16($sp)
+  //   14: lw    $ra, 24($sp)
+  //   18: jr    $ra
+  //   1C:  addiu $sp, $sp, 32
+  std::vector<uint32_t> words = {
+      0x27BDFFE0,  // 00: addiu $sp, $sp, -32
+      0x8FA20030,  // 04: lw    $v0, 48($sp)
+      0xAFBF0018,  // 08: sw    $ra, 24($sp)
+      0x0C03D3C6,  // 0C: jal   0x800F4F18
+      0xAFA20010,  // 10: sw    $v0, 16($sp)
+      0x8FBF0018,  // 14: lw    $ra, 24($sp)
+      0x03E00008,  // 18: jr    $ra
+      0x27BD0020,  // 1C: addiu $sp, $sp, 32
+  };
+  auto insts = *DecodeSequence(words, 0x800F275C);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  EXPECT_EQ(AbiAnalyzer::DetermineParameterCount(insts, &*cfg_or), 5);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
