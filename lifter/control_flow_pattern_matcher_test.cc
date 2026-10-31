@@ -1188,5 +1188,60 @@ TEST(ControlFlowPatternMatcherTest, DetectsDecisionTreeSwitchWithBeqlAnnulledSto
   EXPECT_TRUE(found_case_1_store);
 }
 
+TEST(ControlFlowPatternMatcherTest,
+     DetectsDecisionTreeSwitchWithDoublyBoundedLeafRangeAndOutOfBoundsDefault) {
+  // Models GCC 2.7.2 `stmt.c:5796 / 5849` (`func_800610DC` pattern):
+  // - Root block 0 (0x00): `slti $v0, $a0, 96; bnez $v0, 0x1C` (`< 96`), with delay slot
+  //   `slti $v0, $a0, 112` (`ba.delay_slot_sets_split` for the right child `[96, 111]`).
+  // - Block 1 (0x0C, right child `>= 96`): `beqz $v0, 0x30` (out-of-bounds default `>= 112`);
+  //   fallthrough is doubly-bounded leaf `[96, 111]` at 0x14 (`j 0x30; addiu $v0, $zero, 1`).
+  // - Block 3 (0x1C, left child `< 96`): `slti $v0, $a0, 88; bnez $v0, 0x30` (out-of-bounds
+  //   default `< 88`); fallthrough is doubly-bounded leaf `[88, 95]` at 0x28
+  //   (`addiu $v0, $zero, 2; nop`).
+  std::vector<uint32_t> words = {
+      0x28820060,  // 0x00: slti  $v0, $a0, 96
+      0x14400006,  // 0x04: bnez  $v0, +6 -> 0x20 (taken: < 96)
+      0x28820070,  // 0x08: slti  $v0, $a0, 112 (delay slot split for >= 96 subtree)
+      0x10400009,  // 0x0C: beqz  $v0, +9 -> 0x34 (taken: >= 112 -> default)
+      0x00000000,  // 0x10: nop
+      0xACA00000,  // 0x14: sw    $zero, 0($a1) (leaf [96, 111])
+      0x0800000D,  // 0x18: j     0x80000034
+      0x00000000,  // 0x1C: nop
+      0x28820058,  // 0x20: slti  $v0, $a0, 88
+      0x14400003,  // 0x24: bnez  $v0, +3 -> 0x34 (taken: < 88 -> default)
+      0x00000000,  // 0x28: nop
+      0xACA00004,  // 0x2C: sw    $zero, 4($a1) (leaf [88, 95])
+      0x00000000,  // 0x30: nop
+      0x03E00008,  // 0x34: jr    $ra (join / default)
+      0x00000000,  // 0x38: nop
+  };
+
+  auto cfg = *ControlFlowGraph::Build(*DecodeSequence(words, 0x80000000));
+  DominatorTree dt = DominatorTree::Compute(cfg);
+  LoopInfo loops = LoopInfo::Analyze(cfg, dt);
+  absl::flat_hash_set<uint32_t> visited;
+
+  auto sw = DetectDecisionTreeSwitch(cfg, &loops, visited, cfg.EntryBlockId());
+  ASSERT_TRUE(sw.has_value());
+  EXPECT_EQ(sw->selector_reg, Register::kA0);
+  EXPECT_EQ(sw->target_to_cases.size(), 2u);
+  ASSERT_TRUE(sw->default_target_block.has_value());
+
+  bool found_88_95 = false;
+  bool found_96_111 = false;
+  for (const auto& dc : sw->cases) {
+    if (!dc.case_values.empty() && dc.case_values.front() == 88 && dc.case_values.back() == 95) {
+      EXPECT_EQ(dc.case_values.size(), 8u);
+      found_88_95 = true;
+    } else if (!dc.case_values.empty() && dc.case_values.front() == 96 &&
+               dc.case_values.back() == 111) {
+      EXPECT_EQ(dc.case_values.size(), 16u);
+      found_96_111 = true;
+    }
+  }
+  EXPECT_TRUE(found_88_95);
+  EXPECT_TRUE(found_96_111);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

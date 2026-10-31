@@ -1643,7 +1643,12 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
           }
           return vals;
         }
-        if (cur_interval.last_pivot.has_value()) {
+        // In `stmt.c:5644`, when `node->left != 0 && node->right != 0` on single-valued pivot `P`,
+        // GCC emits `GT P` (`ba.split_val == P + 1`). If `node->left` (or `node->right`) is an
+        // empty `case: break;` targeting `default_label`, `jump.c` collapses that subtree into a
+        // direct jump to `default_label`. By contrast, `stmt.c:5675` (`node->left == 0`) emits
+        // `LT P` (`ba.split_val == P`).
+        if (cur_interval.last_pivot.has_value() && ba.split_val == *cur_interval.last_pivot + 1) {
           if (is_lt_branch && iv.high.has_value() && *iv.high == *cur_interval.last_pivot - 1 &&
               (!iv.low.has_value() || *iv.low <= *iv.high) && !seen_case_vals.contains(*iv.high)) {
             return {*iv.high};
@@ -1656,28 +1661,36 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         return {};
       };
 
-      auto record_implied_leaf_cases = [&](uint32_t leaf_target,
-                                           const std::vector<int64_t>& implied_vals,
-                                           bool is_doubly_bounded) -> bool {
-        if (implied_vals.empty()) return false;
-        uint32_t eff_target = resolve_trampoline(leaf_target);
-        if (!is_doubly_bounded) {
-          if (!default_target.has_value()) {
-            default_target = eff_target;
-          } else if (*default_target != eff_target) {
-            return false;
+      auto is_valid_single_bounded_default_split =
+          [&](const BlockInterval& iv, bool is_lt_branch, bool sibling_is_doubly_bounded_leaf,
+              bool sibling_is_decision, const BlockAnalysis& sibling_ba) -> bool {
+        if (cur_interval.last_pivot.has_value()) {
+          if (is_lt_branch && iv.high.has_value() && *iv.high == *cur_interval.last_pivot - 1 &&
+              (!iv.low.has_value() || *iv.low <= *iv.high) && !seen_case_vals.contains(*iv.high)) {
+            return true;
+          }
+          if (!is_lt_branch && iv.low.has_value() && *iv.low == *cur_interval.last_pivot + 1 &&
+              (!iv.high.has_value() || *iv.low <= *iv.high) && !seen_case_vals.contains(*iv.low)) {
+            return true;
           }
         }
-        if (!target_to_cases.contains(eff_target)) {
-          target_order.push_back(eff_target);
+        if (b_id != root_id && sibling_is_doubly_bounded_leaf) {
+          return true;
         }
-        for (int64_t v : implied_vals) {
-          seen_case_vals.insert(v);
-          target_to_cases[eff_target].push_back(v);
+        if (sibling_is_decision && sibling_ba.is_range_split) {
+          if (is_lt_branch && sibling_ba.split_val > ba.split_val &&
+              sibling_ba.split_val - ba.split_val <= 17) {
+            return true;
+          }
+          if (!is_lt_branch && ba.split_val > sibling_ba.split_val &&
+              ba.split_val - sibling_ba.split_val <= 17) {
+            return true;
+          }
         }
-        DecisionCase dc;
-        dc.case_values = implied_vals;
-        dc.target_block = eff_target;
+        return false;
+      };
+
+      auto compute_sibling_consumes_delay_const = [&]() -> bool {
         bool sibling_consumes_delay_const = false;
         if (ba.delay_slot_sets_const && (taken_is_decision || ft_is_decision)) {
           const uint32_t sibling_id = taken_is_decision ? ba.split_taken : ba.split_ft;
@@ -1702,7 +1715,34 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             }
           }
         }
-        if (ba.delay_slot_sets_const && !sibling_consumes_delay_const) {
+        return sibling_consumes_delay_const;
+      };
+
+      auto record_implied_leaf_cases =
+          [&](uint32_t leaf_target, const std::vector<int64_t>& implied_vals,
+              bool is_doubly_bounded, bool branch_annuls_delay_slot) -> bool {
+        if (implied_vals.empty()) return false;
+        uint32_t eff_target = resolve_trampoline(leaf_target);
+        if (!is_doubly_bounded) {
+          if (!default_target.has_value()) {
+            default_target = eff_target;
+          } else if (*default_target != eff_target) {
+            return false;
+          }
+        }
+        if (!target_to_cases.contains(eff_target)) {
+          target_order.push_back(eff_target);
+        }
+        for (int64_t v : implied_vals) {
+          seen_case_vals.insert(v);
+          target_to_cases[eff_target].push_back(v);
+        }
+        DecisionCase dc;
+        dc.case_values = implied_vals;
+        dc.target_block = eff_target;
+        const bool sibling_consumes_delay_const = compute_sibling_consumes_delay_const();
+        if (!branch_annuls_delay_slot && ba.delay_slot_sets_const &&
+            !sibling_consumes_delay_const) {
           dc.const_reg = ba.delay_slot_const_reg;
           dc.const_val = ba.delay_slot_const_val;
           if (!is_doubly_bounded && !default_const_reg.has_value()) {
@@ -1710,7 +1750,8 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
             default_const_val = ba.delay_slot_const_val;
           }
         }
-        if (ba.delay_instruction.has_value() && !ba.delay_slot_sets_split &&
+        if (!branch_annuls_delay_slot && ba.delay_instruction.has_value() &&
+            !ba.delay_slot_sets_split &&
             (!ba.delay_slot_sets_const || !sibling_consumes_delay_const)) {
           dc.delay_instructions.push_back(*ba.delay_instruction);
           if (!is_doubly_bounded && default_delay_instructions.empty()) {
@@ -1721,6 +1762,38 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         return true;
       };
 
+      auto record_single_bounded_default_leaf = [&](uint32_t leaf_target,
+                                                    bool branch_annuls_delay_slot) -> bool {
+        uint32_t eff_target = resolve_trampoline(leaf_target);
+        if (!default_target.has_value()) {
+          default_target = eff_target;
+        } else if (*default_target != eff_target) {
+          return false;
+        }
+        const bool sibling_consumes_delay_const = compute_sibling_consumes_delay_const();
+        if (!branch_annuls_delay_slot && ba.delay_slot_sets_const &&
+            !sibling_consumes_delay_const && !default_const_reg.has_value()) {
+          default_const_reg = ba.delay_slot_const_reg;
+          default_const_val = ba.delay_slot_const_val;
+        }
+        if (!branch_annuls_delay_slot && ba.delay_instruction.has_value() &&
+            !ba.delay_slot_sets_split &&
+            (!ba.delay_slot_sets_const || !sibling_consumes_delay_const) &&
+            default_delay_instructions.empty()) {
+          default_delay_instructions.push_back(*ba.delay_instruction);
+        }
+        return true;
+      };
+
+      const bool taken_doubly_bounded =
+          taken_interval.low.has_value() && taken_interval.high.has_value();
+      const bool ft_doubly_bounded = ft_interval.low.has_value() && ft_interval.high.has_value();
+      if (!taken_is_decision && !ft_is_decision) {
+        if (b_id == root_id || (!taken_doubly_bounded && !ft_doubly_bounded)) {
+          return std::nullopt;
+        }
+      }
+
       if (taken_is_decision) {
         decision_blocks.insert(ba.split_taken);
         block_consts[ba.split_taken] = succ_c;
@@ -1728,16 +1801,23 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         block_split_sels[ba.split_taken] = succ_sels;
         block_intervals[ba.split_taken] = taken_interval;
         queue.push_back(ba.split_taken);
-      } else if (ft_is_decision) {
-        std::vector<int64_t> implied = derive_implied_leaf_cases(taken_interval, ba.taken_is_lt);
-        const bool doubly_bounded =
-            taken_interval.low.has_value() && taken_interval.high.has_value();
-        if (implied.empty() ||
-            !record_implied_leaf_cases(ba.split_taken, implied, doubly_bounded)) {
+      } else {
+        std::vector<int64_t> implied =
+            (taken_doubly_bounded || ft_is_decision)
+                ? derive_implied_leaf_cases(taken_interval, ba.taken_is_lt)
+                : std::vector<int64_t>{};
+        if (!implied.empty()) {
+          if (!record_implied_leaf_cases(ba.split_taken, implied, taken_doubly_bounded, false)) {
+            return std::nullopt;
+          }
+        } else if (is_valid_single_bounded_default_split(taken_interval, ba.taken_is_lt,
+                                                         !ft_is_decision && ft_doubly_bounded,
+                                                         ft_is_decision, ba_ft) &&
+                   record_single_bounded_default_leaf(ba.split_taken, false)) {
+          // Out-of-bounds default branch (`stmt.c:5678, 5718, 5796, 5818, 5841, 5849`).
+        } else {
           return std::nullopt;
         }
-      } else {
-        return std::nullopt;
       }
 
       if (ft_is_decision) {
@@ -1747,14 +1827,23 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         block_split_sels[ba.split_ft] = ft_sels;
         block_intervals[ba.split_ft] = ft_interval;
         queue.push_back(ba.split_ft);
-      } else if (taken_is_decision) {
-        std::vector<int64_t> implied = derive_implied_leaf_cases(ft_interval, !ba.taken_is_lt);
-        const bool doubly_bounded = ft_interval.low.has_value() && ft_interval.high.has_value();
-        if (implied.empty() || !record_implied_leaf_cases(ba.split_ft, implied, doubly_bounded)) {
+      } else {
+        std::vector<int64_t> implied = (ft_doubly_bounded || taken_is_decision)
+                                           ? derive_implied_leaf_cases(ft_interval, !ba.taken_is_lt)
+                                           : std::vector<int64_t>{};
+        if (!implied.empty()) {
+          if (!record_implied_leaf_cases(ba.split_ft, implied, ft_doubly_bounded,
+                                         split_ft_annuls_delay_slot)) {
+            return std::nullopt;
+          }
+        } else if (is_valid_single_bounded_default_split(ft_interval, !ba.taken_is_lt,
+                                                         !taken_is_decision && taken_doubly_bounded,
+                                                         taken_is_decision, ba_taken) &&
+                   record_single_bounded_default_leaf(ba.split_ft, split_ft_annuls_delay_slot)) {
+          // Out-of-bounds default branch (`stmt.c:5678, 5718, 5796, 5818, 5841, 5849`).
+        } else {
           return std::nullopt;
         }
-      } else {
-        return std::nullopt;
       }
     }
   }

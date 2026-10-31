@@ -1097,5 +1097,43 @@ TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerSplitsMultiInstFallthroughPredeces
   EXPECT_EQ(taken_blk->instructions.front().rt, Register::kV0);
 }
 
+TEST(CfgDeReorgTest,
+     TargetHeaderDelaySlotReconcilerRetargetsUnfilledBranchWhenRedundantInsnPrecedesBranch) {
+  // Models GCC 2.7.2 `reorg.c:fill_slots_from_thread` lines 3466-3490:
+  // When `redundant_insn` finds that the first instruction of a branch/jump target (`0x18: addiu
+  // $a2, $zero, 1`) is redundant with an instruction prior to the jump in the `then` block (`0x08:
+  // addiu $a2, $zero, 1`), `reorg.c` advances the jump target from `0x18` (`pred_blk`) to `0x1C`
+  // (`taken_blk`) and leaves the jump delay slot (`0x10`) as `nop`.
+  // `TargetHeaderDelaySlotReconcilerPass` must retarget the `then` block's jump back to `0x18`.
+  std::vector<uint32_t> words = {
+      0x10800005,  // 0x00: beq   $a0, $zero, +5 -> 0x18 (pred_blk)
+      0x00000000,  // 0x04: nop
+      0x24060001,  // 0x08 (then_blk): addiu $a2, $zero, 1
+      0x08000007,  // 0x0C: j     0x8000001C (taken_blk, skipped 0x18)
+      0x00000000,  // 0x10: nop
+      0x00000000,  // 0x14: nop
+      0x24060001,  // 0x18 (pred_blk): addiu $a2, $zero, 1 (1-inst fallthrough pred of 0x1C)
+      0xACA60004,  // 0x1C (taken_blk): sw    $a2, 4($a1)
+      0x03E00008,  // 0x20: jr    $ra
+      0x00000000,  // 0x24: nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgAnalysisManager analyses(&cfg);
+  TargetHeaderDelaySlotReconcilerPass pass;
+  EXPECT_TRUE(pass.Run(&cfg, &analyses));
+
+  const BasicBlock* then_blk = cfg.FindBlockByVram(0x80000008);
+  const BasicBlock* pred_blk = cfg.FindBlockByVram(0x80000018);
+  ASSERT_NE(then_blk, nullptr);
+  ASSERT_NE(pred_blk, nullptr);
+  EXPECT_NE(std::find(then_blk->successors.begin(), then_blk->successors.end(), pred_blk->id),
+            then_blk->successors.end());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

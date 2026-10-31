@@ -543,6 +543,67 @@ bool DelaySlotCompletesSplitInstructionPair(const BasicBlock& block,
   return false;
 }
 
+bool IsRedundantTargetHeaderInstruction(const BasicBlock& block, const Instruction& term,
+                                        const Instruction& trial) {
+  if (block.instructions.size() < 3 || trial.IsLoad() ||
+      !IsSinkableDelaySlotInstruction(block, trial) ||
+      DelaySlotHasPreBranchDependenceConflict(block, term, trial)) {
+    return false;
+  }
+  RegisterUseDef trial_ud = GetInstructionUseDef(trial);
+  for (Register d : trial_ud.gpr_defs) {
+    if (std::find(trial_ud.gpr_uses.begin(), trial_ud.gpr_uses.end(), d) !=
+        trial_ud.gpr_uses.end()) {
+      return false;
+    }
+  }
+  for (FpRegister fd : trial_ud.fpr_defs) {
+    if (std::find(trial_ud.fpr_uses.begin(), trial_ud.fpr_uses.end(), fd) !=
+        trial_ud.fpr_uses.end()) {
+      return false;
+    }
+  }
+  for (int i = static_cast<int>(block.instructions.size()) - 3; i >= 0; --i) {
+    const Instruction& inst = block.instructions[i];
+    if (SameDelayInstructionEffect(inst, trial)) {
+      return true;
+    }
+    if (inst.IsCall() || inst.IsBranch() || inst.IsJump()) {
+      return false;
+    }
+    RegisterUseDef ud = GetInstructionUseDef(inst);
+    for (Register d : ud.gpr_defs) {
+      if (std::find(trial_ud.gpr_defs.begin(), trial_ud.gpr_defs.end(), d) !=
+              trial_ud.gpr_defs.end() ||
+          std::find(trial_ud.gpr_uses.begin(), trial_ud.gpr_uses.end(), d) !=
+              trial_ud.gpr_uses.end()) {
+        return false;
+      }
+    }
+    for (Register u : ud.gpr_uses) {
+      if (std::find(trial_ud.gpr_defs.begin(), trial_ud.gpr_defs.end(), u) !=
+          trial_ud.gpr_defs.end()) {
+        return false;
+      }
+    }
+    for (FpRegister fd : ud.fpr_defs) {
+      if (std::find(trial_ud.fpr_defs.begin(), trial_ud.fpr_defs.end(), fd) !=
+              trial_ud.fpr_defs.end() ||
+          std::find(trial_ud.fpr_uses.begin(), trial_ud.fpr_uses.end(), fd) !=
+              trial_ud.fpr_uses.end()) {
+        return false;
+      }
+    }
+    for (FpRegister fu : ud.fpr_uses) {
+      if (std::find(trial_ud.fpr_defs.begin(), trial_ud.fpr_defs.end(), fu) !=
+          trial_ud.fpr_defs.end()) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
 bool IsPrologueCalleeSaveStore(const Instruction& inst) {
   if (!inst.rs.has_value() || *inst.rs != Register::kSp || inst.immediate < 0) {
     return false;
@@ -626,7 +687,71 @@ bool TargetHeaderDelaySlotReconcilerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
     }
     const Instruction term = *term_ptr;
     const Instruction delay_inst = block.instructions.back();
-    if (delay_inst.IsNop() || jump_table_bounds_vrams.contains(term.vram)) {
+    if (jump_table_bounds_vrams.contains(term.vram)) {
+      continue;
+    }
+    if (delay_inst.IsNop()) {
+      if (!delay_inst.was_unscheduled_delay_slot && block.instructions.size() >= 3 &&
+          ((term.opcode == Opcode::kJ && block.successors.size() == 1) ||
+           (term.IsBranch() && !term.IsBranchLikely() && !term.IsUnconditionalBranch() &&
+            block.successors.size() == 2))) {
+        const DominatorTree& dom_tree = analyses->GetDominatorTree();
+        const LoopInfo& loop_info = analyses->GetLoopInfo();
+        const Loop* enclosing_loop = loop_info.GetLoopFor(block.id);
+        if (enclosing_loop == nullptr || !enclosing_loop->IsLatch(block.id)) {
+          uint32_t succ_taken = 0;
+          uint32_t succ_fallthrough = 0;
+          if (term.opcode == Opcode::kJ) {
+            succ_taken = block.successors[0];
+          } else {
+            for (const auto& edge : block.outgoing_edges) {
+              if (edge.type == EdgeType::kBranch) {
+                succ_taken = edge.to_block_id;
+              } else if (edge.type == EdgeType::kFallthrough) {
+                succ_fallthrough = edge.to_block_id;
+              }
+            }
+            if (succ_taken == 0 && succ_fallthrough == 0) {
+              succ_taken = block.successors[0];
+              succ_fallthrough = block.successors[1];
+            }
+          }
+          const BasicBlock* taken_blk = cfg->GetBlock(succ_taken);
+          if (taken_blk != nullptr && succ_taken != block.id &&
+              (term.opcode == Opcode::kJ || succ_taken != succ_fallthrough) &&
+              taken_blk->predecessors.size() >= 2 &&
+              loop_info.GetLoopFor(succ_taken) == enclosing_loop &&
+              (enclosing_loop == nullptr || succ_taken != enclosing_loop->header)) {
+            std::optional<uint32_t> pred_block_id;
+            for (uint32_t pred_id : taken_blk->predecessors) {
+              if (pred_id == block.id ||
+                  (term.opcode != Opcode::kJ && pred_id == succ_fallthrough)) {
+                continue;
+              }
+              const BasicBlock* pred_blk = cfg->GetBlock(pred_id);
+              if (pred_blk != nullptr && pred_blk->instructions.size() == 1 &&
+                  pred_blk->successors.size() == 1 && pred_blk->successors[0] == succ_taken &&
+                  pred_blk->end_vram + 4 == taken_blk->start_vram &&
+                  loop_info.GetLoopFor(pred_id) == enclosing_loop &&
+                  !dom_tree.Dominates(pred_id, block.id) &&
+                  !dom_tree.Dominates(block.id, pred_id) &&
+                  IsRedundantTargetHeaderInstruction(block, term, pred_blk->instructions.front())) {
+                pred_block_id = pred_id;
+                break;
+              }
+            }
+            if (pred_block_id.has_value()) {
+              const BasicBlock* pred_blk = cfg->GetBlock(*pred_block_id);
+              RetargetBranchEdge(cfg, block.id, succ_taken, *pred_block_id);
+              if (term.opcode == Opcode::kJ) {
+                block.instructions[block.instructions.size() - 2].target =
+                    (pred_blk->start_vram >> 2) & 0x03FFFFFF;
+              }
+              changed = true;
+            }
+          }
+        }
+      }
       continue;
     }
 

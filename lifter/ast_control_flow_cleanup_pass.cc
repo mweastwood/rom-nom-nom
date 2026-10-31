@@ -3712,14 +3712,18 @@ std::unique_ptr<CStatement> TryBuildSparseSwitchFromState(SparseDecisionTreeStat
     }
   }
 
-  // Verify the grouped case set matches GCC 2.7.2 `stmt.c:4818` decision-tree criteria (`count < 5`
-  // or `span > 10 * count`, evaluated after `group_case_nodes`) so recompiling the `switch`
+  // Verify the grouped case set matches GCC 2.7.2 `stmt.c:4784, 4818` decision-tree criteria
+  // (`count < 5` or `span > 10 * count`, evaluated after `group_case_nodes`, where each range
+  // `low != high` counts as 2 and each single value counts as 1) so recompiling the `switch`
   // produces a decision tree rather than a jump table.
-  const size_t count = switch_cases.size();
+  size_t count = 0;
+  for (const auto& sc : switch_cases) {
+    count += (sc.case_values.size() > 1) ? 2 : 1;
+  }
   const int64_t min_val = state->cases.begin()->first;
   const int64_t max_val = state->cases.rbegin()->first;
   const uint64_t span = static_cast<uint64_t>(max_val) - static_cast<uint64_t>(min_val);
-  if (count < 2 || (count >= 5 && span <= 10 * count)) {
+  if (switch_cases.size() < 2 || (count >= 5 && span <= 10 * count)) {
     return nullptr;
   }
 

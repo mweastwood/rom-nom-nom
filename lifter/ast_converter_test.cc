@@ -1848,5 +1848,75 @@ TEST(AstConverterTest, FoldsMultiLevelShortCircuitGotoAndDoWhileLatchComparisonA
   EXPECT_THAT(code, HasSubstr("while (((u32)(arg0 & 255) < 20))"));
 }
 
+TEST(AstConverterTest,
+     ReconstructSparseSwitchPreservesSingleRangeIfAndCountsRangeGroupsPerStmtC4784) {
+  // 1. A single contiguous range `if (v1 < 144) { if (v1 >= 133) { arg2 = arg2 + 1; } }` has only
+  // 1 grouped `SwitchCase` (`switch_cases.size() == 1`) and must NOT be converted into a 1-group
+  // `switch (v1)`.
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    auto inner_then = std::make_unique<CompoundStatement>();
+    inner_then->AddStatement(CStatement::Expression(CExpression::Assignment(
+        "=", CExpression::Identifier("arg2"),
+        CExpression::Binary("+", CExpression::Identifier("arg2"), CExpression::Integer(1)))));
+    auto outer_then = std::make_unique<CompoundStatement>();
+    outer_then->AddStatement(CStatement::If(
+        CExpression::Binary(">=", CExpression::Identifier("v1"), CExpression::Integer(133)),
+        std::move(inner_then)));
+    body->AddStatement(CStatement::If(
+        CExpression::Binary("<", CExpression::Identifier("v1"), CExpression::Integer(144)),
+        std::move(outer_then)));
+
+    EXPECT_FALSE(ReconstructSparseSwitchDecisionTrees(body.get()));
+    EXPECT_THAT(body->ToString(), Not(HasSubstr("switch")));
+  }
+
+  // 2. When 4 grouped cases contain two multi-value ranges (so `switch_cases.size() == 4`, while
+  // `stmt.c:4784` `count == 6 >= 5`) and `span <= 10 * count`, `stmt.c:4818` would emit a jump
+  // table rather than a decision tree, so `ReconstructSparseSwitchDecisionTrees` must reject it.
+  {
+    auto body = std::make_unique<CompoundStatement>();
+    auto make_assign = [](int val) {
+      auto comp = std::make_unique<CompoundStatement>();
+      comp->AddStatement(CStatement::Expression(CExpression::Assignment(
+          "=", CExpression::Identifier("arg2"), CExpression::Integer(val))));
+      return comp;
+    };
+    // Cases: [0..1] -> 10, [3..4] -> 20, [6] -> 30, [8] -> 40 (`span = 8 <= 60`, `count = 2+2+1+1 =
+    // 6 >= 5`, even though `switch_cases.size() == 4 < 5`).
+    auto c8 = CStatement::If(
+        CExpression::Binary("==", CExpression::Identifier("v1"), CExpression::Integer(8)),
+        make_assign(40));
+    auto c6_else = std::make_unique<CompoundStatement>();
+    c6_else->AddStatement(std::move(c8));
+    auto c6 = CStatement::If(
+        CExpression::Binary("==", CExpression::Identifier("v1"), CExpression::Integer(6)),
+        make_assign(30), std::move(c6_else));
+
+    auto c01_inner = std::make_unique<CompoundStatement>();
+    c01_inner->AddStatement(CStatement::If(
+        CExpression::Binary(">=", CExpression::Identifier("v1"), CExpression::Integer(0)),
+        make_assign(10)));
+    auto c01 = CStatement::If(
+        CExpression::Binary("<", CExpression::Identifier("v1"), CExpression::Integer(2)),
+        std::move(c01_inner));
+
+    auto c34_else = std::make_unique<CompoundStatement>();
+    c34_else->AddStatement(std::move(c6));
+    auto c34_inner = std::make_unique<CompoundStatement>();
+    c34_inner->AddStatement(CStatement::If(
+        CExpression::Binary("<", CExpression::Identifier("v1"), CExpression::Integer(5)),
+        make_assign(20), std::move(c34_else)));
+    auto c01_else = std::make_unique<CompoundStatement>();
+    c01_else->AddStatement(std::move(c01));
+    body->AddStatement(CStatement::If(
+        CExpression::Binary(">=", CExpression::Identifier("v1"), CExpression::Integer(3)),
+        std::move(c34_inner), std::move(c01_else)));
+
+    EXPECT_FALSE(ReconstructSparseSwitchDecisionTrees(body.get()));
+    EXPECT_THAT(body->ToString(), Not(HasSubstr("switch")));
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
