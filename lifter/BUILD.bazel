@@ -829,6 +829,41 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "gcc_stage_inversion_test",
+    size = "medium",
+    srcs = ["gcc_stage_inversion_test.cc"],
+    copts = ["-std=c++20"],
+    data = [
+        "//toolchain:all_files",
+    ],
+    deps = [
+        ":c_emitter",
+        ":cfg_de_reorg",
+        ":cfg_pass_pipeline",
+        ":decompilation_context",
+        ":function_loader",
+        ":gcc_rtl_dump_inspector",
+        ":lifter_pipeline",
+        "//core:c_ast",
+        "//core:compiler",
+        "//core:control_flow_graph",
+        "//core:elf_reader",
+        "//core:mips",
+        "//core:relocation_applier",
+        "//core:round_trip_runner",
+        "//core:round_trip_test_cases",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "lifter",
     srcs = ["main.cc"],
