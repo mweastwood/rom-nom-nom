@@ -186,6 +186,16 @@ TEST(CandidateScorerTest, IsBetterThanIncorporatesNormalizedLcsInstructions) {
 
   EXPECT_TRUE(lcs_aligned.IsBetterThan(baseline));
   EXPECT_FALSE(baseline.IsBetterThan(lcs_aligned));
+
+  // Even if a non-opcode-exact candidate has +1 accidental raw `bit_exact_instructions` (e.g.
+  // because an extra instruction shifted a later `nop` or register), 100% opcode sequence
+  // exactness (`IsOpcodeSequenceExact()`) takes priority.
+  CandidateScore accidental_raw_hit = baseline;
+  accidental_raw_hit.bit_exact_instructions = 15;
+  accidental_raw_hit.normalized_lcs_instructions = 22;
+  EXPECT_FALSE(accidental_raw_hit.IsOpcodeSequenceExact());
+  EXPECT_TRUE(lcs_aligned.IsBetterThan(accidental_raw_hit));
+  EXPECT_FALSE(accidental_raw_hit.IsBetterThan(lcs_aligned));
 }
 
 TEST(CandidateScorerTest, ScoreInstructionsPopulatesDiffDiagnosticForTransposedRegistersAndSwaps) {

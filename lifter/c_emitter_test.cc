@@ -1158,5 +1158,36 @@ TEST(CEmitterTest, IsolatesSharedGlobalSymbolsAcrossSiblingFunctionsWhileAllowin
   EXPECT_THAT(emitted, ::testing::Not(HasSubstr("volatile volatile")));
 }
 
+TEST(CEmitterTest, LowersSignedLessThanZeroReturnToZeroTempAndUsesF14ForCeilfFloorfIntrinsics) {
+  CTranslationUnit tu;
+  tu.includes = {"types.h"};
+
+  auto body1 = std::make_unique<CompoundStatement>();
+  auto mmio_ptr = CExpression::Cast(CType::Named("volatile s32").MakePointer(),
+                                    CExpression::Integer(0xA450000C, /*is_hex=*/true));
+  auto mmio_deref = CExpression::Unary("*", std::move(mmio_ptr));
+  body1->AddStatement(
+      CStatement::Return(CExpression::Binary("<", std::move(mmio_deref), CExpression::Integer(0))));
+  tu.functions.emplace_back(CType::S32(), "SpGetStatusSignBit", std::vector<CParameter>{},
+                            std::move(body1));
+
+  auto body2 = std::make_unique<CompoundStatement>();
+  std::vector<std::unique_ptr<CExpression>> ceil_args;
+  ceil_args.push_back(CExpression::Identifier("arg0"));
+  body2->AddStatement(CStatement::Return(
+      CExpression::Call(CExpression::Identifier("ceilf"), std::move(ceil_args))));
+  tu.functions.emplace_back(CType::F32(), "CallCeilf",
+                            std::vector<CParameter>{{CType::F32(), "arg0"}}, std::move(body2));
+
+  CEmitterOptions options;
+  options.format_with_clang = false;
+  std::string emitted = CEmitter::EmitTranslationUnit(tu, options);
+  std::string types_header = CEmitter::EmitTypesHeader();
+
+  EXPECT_THAT(emitted, HasSubstr("return ({ s32 _z = 0; (*(volatile s32*)0xA450000C < _z); });"));
+  EXPECT_THAT(types_header, HasSubstr("ceil.w.s $f14, %1\n\tcvt.s.w %0, $f14"));
+  EXPECT_THAT(types_header, HasSubstr("floor.w.s $f14, %1\n\tcvt.s.w %0, $f14"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -1,5 +1,7 @@
 #include "tuner/tuner_pipeline.h"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
@@ -68,7 +70,10 @@ bool IsHighYieldPolishMutation(AstMutationKind kind) {
          kind == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS ||
          kind == AST_MUTATION_SPLIT_SINGLE_USE_TEMP ||
          kind == AST_MUTATION_TOGGLE_STORE_FLAG_CONDITIONAL ||
-         kind == AST_MUTATION_HOIST_LOOP_INVARIANT;
+         kind == AST_MUTATION_HOIST_LOOP_INVARIANT || kind == AST_MUTATION_ADJUST_SP_BUFFER_SIZE ||
+         kind == AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES ||
+         kind == AST_MUTATION_EXTRACT_RHS_BINARY_TEMP ||
+         kind == AST_MUTATION_INLINE_LOOP_PREHEADER_CONST;
 }
 
 bool IsNearMissScore(const CandidateScore& score) {
@@ -194,7 +199,7 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
     };
     const bool is_very_large_function = result.baseline_score.target_instruction_count > 500;
     const size_t effective_max_rounds =
-        is_very_large_function ? std::min<size_t>(options.max_rounds, 1) : options.max_rounds;
+        is_very_large_function ? std::min<size_t>(options.max_rounds, 4) : options.max_rounds;
     for (size_t round = 0; round < effective_max_rounds && !result.best_score.raw_bit_exact;
          ++round) {
       const FunctionDeclaration round_base_ast = result.best_ast->Clone();
@@ -208,7 +213,7 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
         AstMutationStep step;
       };
       std::vector<RunnerUpCandidate> runners_up;
-      constexpr size_t kMaxPlateauRunnersUp = 3;
+      const size_t max_plateau_runners_up = is_very_large_function ? 2 : 3;
       for (const auto& step : candidate_steps) {
         FunctionDeclaration mutated = AstMutator::ApplyMutation(round_base_ast, step);
         std::string mutated_c = emit_c_fn(mutated);
@@ -227,9 +232,9 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
           improved_in_round = true;
           improved_in_ast_search = true;
           if (result.best_score.raw_bit_exact) break;
-        } else if (!improved_in_round && !is_very_large_function &&
+        } else if (!improved_in_round &&
                    preserves_structural_invariants(*candidate_score_or, result.best_score)) {
-          if (runners_up.size() < kMaxPlateauRunnersUp) {
+          if (runners_up.size() < max_plateau_runners_up) {
             runners_up.push_back(RunnerUpCandidate{std::move(mutated), *candidate_score_or, step});
           } else {
             size_t worst_idx = 0;
@@ -242,6 +247,30 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
               runners_up[worst_idx] =
                   RunnerUpCandidate{std::move(mutated), *candidate_score_or, step};
             }
+          }
+        }
+      }
+      // If Phase 1a switched away from `base_flags` on the un-mutated AST (e.g. picking `-fno-cse`
+      // or `-fomit-frame-pointer` for a spurious improvement) and no single-step mutation improved
+      // under `winning_c_flags`, also evaluate the top runner-up AST candidates under `base_flags`.
+      if (!improved_in_round && !runners_up.empty() && result.winning_c_flags != base_flags) {
+        for (const auto& runner : runners_up) {
+          std::string runner_c = emit_c_fn(runner.ast);
+          if (!evaluated_candidates.insert(make_evaluation_key(base_flags, runner_c)).second) {
+            continue;
+          }
+          auto base_flag_score_or = score_fn(runner_c, base_flags);
+          if (!base_flag_score_or.ok()) continue;
+          if (base_flag_score_or->IsBetterThan(result.best_score)) {
+            result.best_score = *base_flag_score_or;
+            result.winning_c_flags = base_flags;
+            *result.best_ast = runner.ast.Clone();
+            result.best_c_code = std::move(runner_c);
+            round_best_step = runner.step;
+            result.improved_over_baseline = true;
+            improved_in_round = true;
+            improved_in_ast_search = true;
+            if (result.best_score.raw_bit_exact) break;
           }
         }
       }
@@ -549,6 +578,12 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
     }
 
     if (cached_exact != nullptr) {
+      if (!module_name.empty() && cached_exact->module_name() != module_name) {
+        FunctionTuningEntry updated_entry = *cached_exact;
+        updated_entry.set_module_name(std::string(module_name));
+        cache_store_.Upsert(updated_entry);
+        cached_exact = cache_store_.Lookup(target.name, input_sha1);
+      }
       if (!options_.only_non_bit_exact || cached_exact->is_bit_exact()) {
         result.from_cache = true;
         if (!cached_exact->c_flags().empty()) {
@@ -597,10 +632,13 @@ absl::StatusOr<FunctionTuneResult> TunerPipeline::TuneLoadedFunctionAst(
   // Prepare temporary include directory containing types.h so standalone function compiles cleanly
   static std::atomic<uint64_t> include_counter{0};
   uint64_t include_id = include_counter.fetch_add(1, std::memory_order_relaxed);
-  std::filesystem::path temporary_include_dir =
-      std::filesystem::temp_directory_path() /
-      absl::StrCat("tuner_inc_", target.name, "_", include_id);
   std::error_code error_code;
+  std::filesystem::path base_temp_dir("/dev/shm");
+  if (!std::filesystem::is_directory(base_temp_dir, error_code)) {
+    base_temp_dir = std::filesystem::temp_directory_path(error_code);
+  }
+  std::filesystem::path temporary_include_dir =
+      base_temp_dir / absl::StrCat("tuner_inc_", getpid(), "_", target.name, "_", include_id);
   std::filesystem::create_directories(temporary_include_dir, error_code);
   {
     std::ofstream types_out(temporary_include_dir / "types.h");
@@ -902,6 +940,27 @@ absl::StatusOr<std::vector<std::filesystem::path>> TunerPipeline::TuneAllModules
       return baseline_files_or.status();
     }
     emitted_files = std::move(*baseline_files_or);
+  }
+
+  // Synchronize `module_name` and prune stale non-`SUBSEGMENT_C` entries when `lifter_` is active.
+  if (lifter_ != nullptr) {
+    auto all_modules_or = lifter_->GetAllModules();
+    if (all_modules_or.ok() && !all_modules_or->empty()) {
+      absl::flat_hash_set<std::string> valid_functions;
+      absl::flat_hash_map<std::string, std::string> function_to_module;
+      for (const auto& mod_name : *all_modules_or) {
+        auto fn_names_or = lifter_->GetFunctionsInModule(mod_name);
+        if (!fn_names_or.ok()) continue;
+        for (const auto& fn_name : *fn_names_or) {
+          valid_functions.insert(fn_name);
+          function_to_module[fn_name] = mod_name;
+        }
+      }
+      if (!valid_functions.empty()) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        cache_store_.PruneToValidFunctions(valid_functions, function_to_module);
+      }
+    }
   }
 
   // Determine which modules need AST tuning

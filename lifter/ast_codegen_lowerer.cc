@@ -2310,6 +2310,48 @@ std::unique_ptr<CStatement> LowerFloatGprBitcastsToInlineAsmInStmt(const CStatem
   }
 }
 
+std::unique_ptr<CStatement> LowerSignedLessThanZeroStoreFlagInStmt(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      std::vector<std::unique_ptr<CStatement>> stmts;
+      stmts.reserve(comp.Statements().size());
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr) {
+          stmts.push_back(LowerSignedLessThanZeroStoreFlagInStmt(*s));
+        }
+      }
+      return std::make_unique<CompoundStatement>(std::move(stmts));
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& rs = static_cast<const ReturnStatement&>(stmt);
+      if (rs.ReturnValue() != nullptr &&
+          rs.ReturnValue()->Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& bin = static_cast<const BinaryExpression&>(*rs.ReturnValue());
+        if (bin.Op() == "<" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 0) {
+          return CStatement::Return(CExpression::Identifier(
+              absl::StrFormat("({ s32 _z = 0; (%s < _z); })", bin.Lhs().ToString())));
+        }
+      }
+      return stmt.Clone();
+    }
+    default:
+      return stmt.Clone();
+  }
+}
+
+bool HasFramePointerSpStackVars(const CompoundStatement& body) {
+  for (const auto& s : body.Statements()) {
+    if (s == nullptr || s->Kind() != CStatementKind::kVariableDeclarationStatement) continue;
+    const auto& vd = static_cast<const VariableDeclarationStatement&>(*s);
+    if (absl::StartsWith(vd.Name(), "var_sp_")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 bool AstCodegenLowerer::IsCompilerIntrinsic(std::string_view name) {
@@ -2794,6 +2836,11 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
     }
     if (is_o2_func) {
       body_to_emit = LowerFloatGprBitcastsToInlineAsm(functions[i].Body(), *body_to_emit);
+    }
+    if (functions[i].OptimizationMode() != FunctionOptimizationMode::kO0FramePointer &&
+        !HasFramePointerSpStackVars(functions[i].Body())) {
+      body_to_emit = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+          LowerSignedLessThanZeroStoreFlagInStmt(*body_to_emit).release()));
     }
     FunctionDeclaration lowered_fn(functions[i].ReturnType(), functions[i].Name(),
                                    functions[i].Parameters(), std::move(body_to_emit),

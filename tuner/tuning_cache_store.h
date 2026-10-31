@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -45,6 +46,14 @@ class TuningCacheStore {
 
   // Removes a per-function tuning entry if present. Returns true if an entry was removed.
   bool Remove(std::string_view function_name);
+
+  // Removes cached function entries that are not in `valid_functions` (e.g. functions belonging
+  // to non-`SUBSEGMENT_C` assembly subsegments), and synchronizes `module_name` for remaining
+  // entries when `function_to_module` provides a non-empty module mapping. Returns the number
+  // of removed stale entries.
+  size_t PruneToValidFunctions(
+      const absl::flat_hash_set<std::string>& valid_functions,
+      const absl::flat_hash_map<std::string, std::string>& function_to_module = {});
 
   // Sets or updates module-level compiler flags.
   void SetModuleCFlags(std::string_view module_name, const std::vector<std::string>& flags);

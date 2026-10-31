@@ -61,5 +61,30 @@ TEST(TuningCacheStoreTest, LookupVerifiesSha1AndRoundTripsToFile) {
   std::filesystem::remove(temp_path);
 }
 
+TEST(TuningCacheStoreTest, PruneToValidFunctionsRemovesNonSubsegmentCEntriesAndSyncsModuleNames) {
+  TuningCacheStore store;
+
+  FunctionTuningEntry valid_entry;
+  valid_entry.set_function_name("ValidCFunc");
+  valid_entry.set_module_name("old_module_name");
+  valid_entry.set_input_sha1("sha1_valid");
+  store.Upsert(valid_entry);
+
+  FunctionTuningEntry stale_asm_entry;
+  stale_asm_entry.set_function_name("AsmSplitFunc");
+  stale_asm_entry.set_module_name("asm_module");
+  stale_asm_entry.set_input_sha1("sha1_asm");
+  store.Upsert(stale_asm_entry);
+
+  absl::flat_hash_set<std::string> valid_functions = {"ValidCFunc"};
+  absl::flat_hash_map<std::string, std::string> fn_to_mod = {{"ValidCFunc", "new_module_name"}};
+  EXPECT_EQ(store.PruneToValidFunctions(valid_functions, fn_to_mod), 1u);
+
+  EXPECT_EQ(store.Lookup("AsmSplitFunc", ""), nullptr);
+  const auto* kept = store.Lookup("ValidCFunc", "sha1_valid");
+  ASSERT_NE(kept, nullptr);
+  EXPECT_EQ(kept->module_name(), "new_module_name");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

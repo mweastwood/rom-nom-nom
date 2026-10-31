@@ -1138,5 +1138,163 @@ TEST(AstMutatorTest, NonAdjacentRegisterPairSwapsDirectRePinAndCseBarrierSuppres
   EXPECT_TRUE(found_cse_suppress);
 }
 
+TEST(AstMutatorTest, AdjustSpBufferSizeAndPermutePrologueParamSaves) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, 32, std::nullopt));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s2", nullptr, std::nullopt, "$18"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("arg0"))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Identifier("__asm__(\"\" : \"=r\"(temp_s0) : \"0\"(temp_s0))")));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"), CExpression::Identifier("arg1"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s2"), CExpression::Identifier("arg2"))));
+  body->AddStatement(CStatement::Return(
+      CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                          CExpression::Binary("+", CExpression::Identifier("temp_s1"),
+                                              CExpression::Identifier("temp_s2")))));
+
+  FunctionDeclaration func(CType::S32(), "SpAndPrologueFunc",
+                           {{CType::S32(), "arg0"}, {CType::S32(), "arg1"}, {CType::S32(), "arg2"}},
+                           std::move(body));
+
+  // 1. Adjust `u8 sp[32]` -> `u8 sp[24]` (`param = 0`), `u8 sp[40]` (`param = 2`), and remove
+  // unreferenced `sp` (`param = 4`).
+  AstMutationStep shrink_sp;
+  shrink_sp.set_kind(AST_MUTATION_ADJUST_SP_BUFFER_SIZE);
+  shrink_sp.set_site_index(0);
+  shrink_sp.set_param(0);
+  FunctionDeclaration shrunk = AstMutator::ApplyMutation(func, shrink_sp);
+  EXPECT_TRUE(absl::StrContains(shrunk.ToString(), "u8 sp[24];")) << shrunk.ToString();
+
+  AstMutationStep remove_sp;
+  remove_sp.set_kind(AST_MUTATION_ADJUST_SP_BUFFER_SIZE);
+  remove_sp.set_site_index(0);
+  remove_sp.set_param(4);
+  FunctionDeclaration removed = AstMutator::ApplyMutation(func, remove_sp);
+  EXPECT_FALSE(absl::StrContains(removed.ToString(), "u8 sp[")) << removed.ToString();
+
+  // Re-insert `u8 sp[8]` (`param = 5`) into a function without `sp`.
+  AstMutationStep insert_sp;
+  insert_sp.set_kind(AST_MUTATION_ADJUST_SP_BUFFER_SIZE);
+  insert_sp.set_site_index(0);
+  insert_sp.set_param(5);
+  FunctionDeclaration inserted = AstMutator::ApplyMutation(removed, insert_sp);
+  EXPECT_TRUE(absl::StrContains(inserted.ToString(), "u8 sp[8];")) << inserted.ToString();
+
+  // 2. Permute prologue parameter saves: swap unit 0 (`temp_s0 = arg0` + barrier) and unit 1
+  // (`temp_s1 = arg1`), and reverse all 3 units (`param = 100`).
+  AstMutationStep swap_saves;
+  swap_saves.set_kind(AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES);
+  swap_saves.set_site_index(0);
+  swap_saves.set_param(1);
+  FunctionDeclaration swapped = AstMutator::ApplyMutation(func, swap_saves);
+  std::string swapped_str = swapped.ToString();
+  EXPECT_LT(swapped_str.find("temp_s1 = arg1;"), swapped_str.find("temp_s0 = arg0;"))
+      << swapped_str;
+
+  AstMutationStep reverse_saves;
+  reverse_saves.set_kind(AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES);
+  reverse_saves.set_site_index(0);
+  reverse_saves.set_param(100);
+  FunctionDeclaration reversed = AstMutator::ApplyMutation(func, reverse_saves);
+  std::string rev_str = reversed.ToString();
+  EXPECT_LT(rev_str.find("temp_s2 = arg2;"), rev_str.find("temp_s1 = arg1;")) << rev_str;
+  EXPECT_LT(rev_str.find("temp_s1 = arg1;"), rev_str.find("temp_s0 = arg0;")) << rev_str;
+}
+
+TEST(AstMutatorTest, ExtractRhsBinaryTempInlineLoopPreheaderConstAndMultiRegisterCompositeSwaps) {
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s2", nullptr, std::nullopt, "$18"));
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s3", nullptr, std::nullopt, "$19"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"),
+      CExpression::Binary(
+          "-", CExpression::Identifier("D_80180000"),
+          CExpression::Binary("*", CExpression::Identifier("arg0"), CExpression::Integer(4))))));
+  body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s2"), CExpression::Integer(24))));
+  auto loop_body = std::make_unique<CompoundStatement>();
+  loop_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"),
+                              CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                                  CExpression::Identifier("temp_s2")))));
+  loop_body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s1"),
+      CExpression::Binary("+", CExpression::Identifier("temp_s1"), CExpression::Integer(1)))));
+  body->AddStatement(CStatement::While(
+      CExpression::Binary("<", CExpression::Identifier("temp_s1"), CExpression::Integer(10)),
+      std::move(loop_body)));
+  body->AddStatement(CStatement::Return(CExpression::Identifier("temp_s0")));
+
+  FunctionDeclaration func(CType::S32(), "RhsLoopAndMultiSwap", {{CType::S32(), "arg0"}},
+                           std::move(body));
+
+  // 1. Discover and apply `AST_MUTATION_EXTRACT_RHS_BINARY_TEMP` and
+  // `AST_MUTATION_INLINE_LOOP_PREHEADER_CONST`.
+  auto steps = AstMutator::DiscoverMutations(func, /*max_mutations=*/64);
+  bool found_extract_rhs = false;
+  bool found_inline_preheader = false;
+  for (const auto& step : steps) {
+    if (step.kind() == AST_MUTATION_EXTRACT_RHS_BINARY_TEMP) {
+      found_extract_rhs = true;
+      FunctionDeclaration extracted = AstMutator::ApplyMutation(func, step);
+      std::string code = extracted.ToString();
+      EXPECT_TRUE(absl::StrContains(code, "= (arg0 * 4);")) << code;
+      EXPECT_TRUE(absl::StrContains(code, "temp_s0 = (D_80180000 - ")) << code;
+    } else if (step.kind() == AST_MUTATION_INLINE_LOOP_PREHEADER_CONST) {
+      found_inline_preheader = true;
+      FunctionDeclaration inlined = AstMutator::ApplyMutation(func, step);
+      std::string code = inlined.ToString();
+      EXPECT_TRUE(absl::StrContains(code, "temp_s0 = (temp_s0 + 24);")) << code;
+      EXPECT_FALSE(absl::StrContains(code, "temp_s2 = 24;")) << code;
+    }
+  }
+  EXPECT_TRUE(found_extract_rhs);
+  EXPECT_TRUE(found_inline_preheader);
+
+  // 2. Multi-register composite swaps: disjoint 2-pair swap (`param = 20000 + 2*100 + 3`) and
+  // 3-cycle rotation (`param = 30000 + 1*100 + 2`).
+  AstMutationStep two_pair_swap;
+  two_pair_swap.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  two_pair_swap.set_site_index(0 * 100 + 1);
+  two_pair_swap.set_param(20000 + 2 * 100 + 3);
+  FunctionDeclaration swapped_pairs = AstMutator::ApplyMutation(func, two_pair_swap);
+  std::string swapped_code = swapped_pairs.ToString();
+  EXPECT_TRUE(absl::StrContains(swapped_code, "register s32 temp_s0 asm(\"$17\");"))
+      << swapped_code;
+  EXPECT_TRUE(absl::StrContains(swapped_code, "register s32 temp_s1 asm(\"$16\");"))
+      << swapped_code;
+  EXPECT_TRUE(absl::StrContains(swapped_code, "register s32 temp_s2 asm(\"$19\");"))
+      << swapped_code;
+  EXPECT_TRUE(absl::StrContains(swapped_code, "register s32 temp_s3 asm(\"$18\");"))
+      << swapped_code;
+
+  AstMutationStep cycle_rot;
+  cycle_rot.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  cycle_rot.set_site_index(0);
+  cycle_rot.set_param(30000 + 1 * 100 + 2);
+  FunctionDeclaration rotated = AstMutator::ApplyMutation(func, cycle_rot);
+  std::string rotated_code = rotated.ToString();
+  EXPECT_TRUE(absl::StrContains(rotated_code, "register s32 temp_s0 asm(\"$17\");"))
+      << rotated_code;
+  EXPECT_TRUE(absl::StrContains(rotated_code, "register s32 temp_s1 asm(\"$18\");"))
+      << rotated_code;
+  EXPECT_TRUE(absl::StrContains(rotated_code, "register s32 temp_s2 asm(\"$16\");"))
+      << rotated_code;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

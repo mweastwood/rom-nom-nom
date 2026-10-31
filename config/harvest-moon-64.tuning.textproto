@@ -1,23 +1,5 @@
 game_name: "harvest-moon-64"
 entries {
-  function_name: "func_80107430"
-  module_name: ""
-  input_sha1: "43bac20c0be608c85b27511b8daa5d01ba6dd507"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801107C0"
-  module_name: ""
-  input_sha1: "27fbb5a27650c66e5dfbe07c22fe78905e32f23e"
-  bit_exact_instructions: 5
-  matching_instructions: 5
-  target_instructions: 8
-  is_bit_exact: false
-}
-entries {
   function_name: "func_800D8540"
   module_name: "B3940"
   input_sha1: "1ad8808a6d28951c46a56cb44bd4132c9f29be52"
@@ -8921,19 +8903,6 @@ entries {
   matching_instructions: 2
   target_instructions: 2
   is_bit_exact: true
-}
-entries {
-  function_name: "func_8004DF10"
-  module_name: "controller"
-  input_sha1: "fad258269e37e91a621f172ab2bd44fa3fb4c680"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 35
-  matching_instructions: 35
-  target_instructions: 39
-  is_bit_exact: false
 }
 entries {
   function_name: "func_8004DFAC"
@@ -22444,58 +22413,6 @@ entries {
   is_bit_exact: false
 }
 entries {
-  function_name: "func_800FF3A0"
-  module_name: "libultra"
-  input_sha1: "4e01187372153fc420b8b353abf4c63742fc3cdb"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 5
-  matching_instructions: 5
-  target_instructions: 68
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_800FF4B0"
-  module_name: "libultra"
-  input_sha1: "1164323767e0d3dd49302e256a96c57f63100e41"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 40
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_800FF550"
-  module_name: "libultra"
-  input_sha1: "523cd86fe30c3d4e313cf861e16f5425ec34bb24"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 6
-  matching_instructions: 6
-  target_instructions: 32
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_800FF5D0"
-  module_name: "libultra"
-  input_sha1: "f6e86178ee1392f4de14c2ad372ae60d5facde02"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 12
-  is_bit_exact: false
-}
-entries {
   function_name: "func_800FF600"
   module_name: "libultra"
   input_sha1: "8bebb90eb4ad6eaf2be1931905c1ff9e6484f737"
@@ -23052,544 +22969,6 @@ entries {
   bit_exact_instructions: 22
   matching_instructions: 22
   target_instructions: 200
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80100C00"
-  module_name: "libultra"
-  input_sha1: "c62266f9ca4d860579d7c891ee3f92cfbf97c0f8"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 16
-  matching_instructions: 16
-  target_instructions: 40
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801035E8"
-  module_name: "libultra"
-  input_sha1: "9ab5881203fbabff79ef43a8a7e4128b357cfa7c"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 6
-  matching_instructions: 6
-  target_instructions: 6
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_80105F80"
-  module_name: "libultra"
-  input_sha1: "45f104d376a8c0670cecf431978d26a7bd8f60e5"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 18
-  matching_instructions: 18
-  target_instructions: 645
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80106994"
-  module_name: "libultra"
-  input_sha1: "666b77e2b2b31487ddd012b5fcc1d143fbc2d790"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 12
-  matching_instructions: 12
-  target_instructions: 60
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80106A84"
-  module_name: "libultra"
-  input_sha1: "8fde482d3e72dff0c6339f9c7da31cf4910b407c"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 7
-  matching_instructions: 7
-  target_instructions: 66
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80106B8C"
-  module_name: "libultra"
-  input_sha1: "02fe34137405593147074399f4c34df26d5c47b5"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 18
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80106BD4"
-  module_name: "libultra"
-  input_sha1: "399317b7602effb1624678719c9cb27defedf600"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80106BE4"
-  module_name: "libultra"
-  input_sha1: "f5998a8388d0e273476b1e33f8f2962d21b83df1"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 6
-  matching_instructions: 6
-  target_instructions: 99
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80107170"
-  module_name: "libultra"
-  input_sha1: "c8d5e3f05f8cf419d8b913a7963e46b18a4884cf"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 1
-  matching_instructions: 1
-  target_instructions: 28
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801071E0"
-  module_name: "libultra"
-  input_sha1: "51e0a1fa655543672911222fea25678015b7f58a"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 8
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801072B0"
-  module_name: "libultra"
-  input_sha1: "6ada887b33de62b594148f0fc83c68ac28964aca"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801072C0"
-  module_name: "libultra"
-  input_sha1: "c79a83d57553b79833fcee1729623c283e4e78d9"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801072D0"
-  module_name: "libultra"
-  input_sha1: "91691f15dc07dd6721a85457a0ebf512816ff8c1"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801072E0"
-  module_name: "libultra"
-  input_sha1: "81e10d155bd72724876154e1b259f70867daf234"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 6
-  matching_instructions: 6
-  target_instructions: 32
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80107360"
-  module_name: "libultra"
-  input_sha1: "ea871d5c70078dcbc3e74c79f8effc06a4c571e6"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 48
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80107420"
-  module_name: "libultra"
-  input_sha1: "917a33d249fbb84c6a80b79c9834aa188c04ce32"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80107440"
-  module_name: "libultra"
-  input_sha1: "a92dd40fdf0ec90f971399264c514b380cea94f0"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 5
-  matching_instructions: 5
-  target_instructions: 20
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80107490"
-  module_name: "libultra"
-  input_sha1: "0e24530f2a4135207b531453298eb6e1d4ec8c91"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 24
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801075C0"
-  module_name: "libultra"
-  input_sha1: "3738908e53b2887864f19739b42acd89848b40d4"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 8
-  matching_instructions: 8
-  target_instructions: 8
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_80107B10"
-  module_name: "libultra"
-  input_sha1: "ecd39f6b8dfdbd3e13cd8a893c2049975212aad2"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 13
-  matching_instructions: 13
-  target_instructions: 21
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80108E40"
-  module_name: "libultra"
-  input_sha1: "1eaf6efb289ef267a6ecc2db2fdd2f63b493cb70"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-g"
-  bit_exact_instructions: 8
-  matching_instructions: 8
-  target_instructions: 8
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_80109370"
-  module_name: "libultra"
-  input_sha1: "442543caa6056129c613260f13d2d20a858e79b5"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 4
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_80109490"
-  module_name: "libultra"
-  input_sha1: "83995bd25b1110a1e162d3f3b15f7c601248c969"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 4
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_80109850"
-  module_name: "libultra"
-  input_sha1: "0757d155be12b3a81dc2fb46c51dd443b1d4b1ad"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 18
-  matching_instructions: 18
-  target_instructions: 68
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_8010A390"
-  module_name: "libultra"
-  input_sha1: "55c7b9d99663d93a9f5d9f57648239a8c94e2d6a"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_REORDER_LOCAL_DECLS
-    site_index: 0
-    param: 0
-  }
-  bit_exact_instructions: 13
-  matching_instructions: 13
-  target_instructions: 13
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_8010C590"
-  module_name: "libultra"
-  input_sha1: "c86f2a60f32aee2bd6efd68d6f1a83b99ae31e78"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_8010CA00"
-  module_name: "libultra"
-  input_sha1: "569d88fb38d2bf13559a257a65fec7e10c9df920"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 4
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_8010CEDC"
-  module_name: "libultra"
-  input_sha1: "4d776414a924f4e60711b2570a05b022d1b1ada8"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 2
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_8010D28C"
-  module_name: "libultra"
-  input_sha1: "c1b2efaa0071c32f27550c9f88ab422f8be39a90"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 17
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_8010EA5C"
-  module_name: "libultra"
-  input_sha1: "75ae2b3f246bfa4f8893257a322efe7299f3e716"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 13
-  matching_instructions: 13
-  target_instructions: 13
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_8010F800"
-  module_name: "libultra"
-  input_sha1: "c0884ab4d8a25e12d5fccbdda9e01f4c43aea8c9"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 4
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_8010FA28"
-  module_name: "libultra"
-  input_sha1: "721b52de176e6b287aa1ed4bcfc830ac7ebe2244"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 2
-  is_bit_exact: true
-}
-entries {
-  function_name: "func_80110444"
-  module_name: "libultra"
-  input_sha1: "f6e4a971601ddce73dde48f0b1ff074d7815a052"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 4
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80110454"
-  module_name: "libultra"
-  input_sha1: "6c8c23ca579ac44fa7ced51c40e8afa84e28fca4"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 5
-  matching_instructions: 5
-  target_instructions: 13
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80110488"
-  module_name: "libultra"
-  input_sha1: "7682916a021c44a355aba083357106f89ee5f280"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 7
-  matching_instructions: 7
-  target_instructions: 63
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80110584"
-  module_name: "libultra"
-  input_sha1: "a0710d6a645a3a3ebad7db615f7f3dd139019396"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 21
-  matching_instructions: 21
-  target_instructions: 51
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80110650"
-  module_name: "libultra"
-  input_sha1: "6bfcb56d650fe02b0cf517a89fbd6b41dd6d332c"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 6
-  matching_instructions: 6
-  target_instructions: 44
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80110700"
-  module_name: "libultra"
-  input_sha1: "37e20cedc6c6446a19355da4bf924d0f543b7000"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 4
-  matching_instructions: 4
-  target_instructions: 48
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801107E0"
-  module_name: "libultra"
-  input_sha1: "aff2075520e60d6a664d42c99fa8f3457300e3e7"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 3
-  matching_instructions: 3
-  target_instructions: 16
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_80110820"
-  module_name: "libultra"
-  input_sha1: "0ca60106216a37a8d305f48ac6657deb85e7e262"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 2
-  matching_instructions: 2
-  target_instructions: 113
-  is_bit_exact: false
-}
-entries {
-  function_name: "func_801109E4"
-  module_name: "libultra"
-  input_sha1: "dd2d5cc8a59dbc2584909275576b048d1425b5b3"
-  c_flags: "-O2"
-  c_flags: "-mips2"
-  c_flags: "-mcpu=r4000"
-  c_flags: "-Wa,-O2"
-  bit_exact_instructions: 1
-  matching_instructions: 1
-  target_instructions: 10
   is_bit_exact: false
 }
 entries {
@@ -24302,6 +23681,19 @@ entries {
   bit_exact_instructions: 11
   matching_instructions: 11
   target_instructions: 11
+  is_bit_exact: true
+}
+entries {
+  function_name: "func_801035E8"
+  module_name: "libultra_dc0a0"
+  input_sha1: "9ab5881203fbabff79ef43a8a7e4128b357cfa7c"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 6
+  matching_instructions: 6
+  target_instructions: 6
   is_bit_exact: true
 }
 entries {
@@ -25127,6 +24519,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_801075C0"
+  module_name: "libultra_e28f0"
+  input_sha1: "3738908e53b2887864f19739b42acd89848b40d4"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 8
+  matching_instructions: 8
+  target_instructions: 8
+  is_bit_exact: true
+}
+entries {
   function_name: "func_801075E0"
   module_name: "libultra_e28f0"
   input_sha1: "930e00ff496cf71fedbb075b58d90194196d7382"
@@ -25224,6 +24629,19 @@ entries {
   bit_exact_instructions: 29
   matching_instructions: 29
   target_instructions: 40
+  is_bit_exact: false
+}
+entries {
+  function_name: "func_80107B10"
+  module_name: "libultra_e28f0"
+  input_sha1: "ecd39f6b8dfdbd3e13cd8a893c2049975212aad2"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 13
+  matching_instructions: 13
+  target_instructions: 21
   is_bit_exact: false
 }
 entries {
@@ -25490,6 +24908,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_80108E40"
+  module_name: "libultra_e28f0"
+  input_sha1: "1eaf6efb289ef267a6ecc2db2fdd2f63b493cb70"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-g"
+  bit_exact_instructions: 8
+  matching_instructions: 8
+  target_instructions: 8
+  is_bit_exact: true
+}
+entries {
   function_name: "func_80108E60"
   module_name: "libultra_e28f0"
   input_sha1: "e068d7e34dbfb5dca62e362b7618685f65e21681"
@@ -25622,10 +25053,10 @@ entries {
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-g"
-  bit_exact_instructions: 7
-  matching_instructions: 7
+  bit_exact_instructions: 8
+  matching_instructions: 8
   target_instructions: 8
-  is_bit_exact: false
+  is_bit_exact: true
 }
 entries {
   function_name: "func_80109340"
@@ -25654,6 +25085,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_80109370"
+  module_name: "libultra_e28f0"
+  input_sha1: "442543caa6056129c613260f13d2d20a858e79b5"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 4
+  matching_instructions: 4
+  target_instructions: 4
+  is_bit_exact: true
+}
+entries {
   function_name: "func_80109380"
   module_name: "libultra_e28f0"
   input_sha1: "425f8d51bb9cea954733308243f0947f291bfd80"
@@ -25665,6 +25109,19 @@ entries {
   matching_instructions: 50
   target_instructions: 68
   is_bit_exact: false
+}
+entries {
+  function_name: "func_80109490"
+  module_name: "libultra_e28f0"
+  input_sha1: "83995bd25b1110a1e162d3f3b15f7c601248c969"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 4
+  matching_instructions: 4
+  target_instructions: 4
+  is_bit_exact: true
 }
 entries {
   function_name: "func_801094A0"
@@ -25889,6 +25346,24 @@ entries {
   matching_instructions: 237
   target_instructions: 304
   is_bit_exact: false
+}
+entries {
+  function_name: "func_8010A390"
+  module_name: "libultra_e4d60"
+  input_sha1: "55c7b9d99663d93a9f5d9f57648239a8c94e2d6a"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  ast_mutations {
+    kind: AST_MUTATION_REORDER_LOCAL_DECLS
+    site_index: 0
+    param: 0
+  }
+  bit_exact_instructions: 13
+  matching_instructions: 13
+  target_instructions: 13
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8010A3C4"
@@ -26470,6 +25945,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_8010CA00"
+  module_name: "libultra_e79a0"
+  input_sha1: "569d88fb38d2bf13559a257a65fec7e10c9df920"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 4
+  matching_instructions: 4
+  target_instructions: 4
+  is_bit_exact: true
+}
+entries {
   function_name: "func_8010CA10"
   module_name: "libultra_e79a0"
   input_sha1: "a7234209c3599c8fd909523d20772b0dc57c26b6"
@@ -26603,6 +26091,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_8010CEDC"
+  module_name: "libultra_e79a0"
+  input_sha1: "4d776414a924f4e60711b2570a05b022d1b1ada8"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 2
+  matching_instructions: 2
+  target_instructions: 2
+  is_bit_exact: true
+}
+entries {
   function_name: "func_8010CEE4"
   module_name: "libultra_e79a0"
   input_sha1: "656446e23c19e03cb8c910c686567672befa68b5"
@@ -26678,31 +26179,16 @@ entries {
   is_bit_exact: false
 }
 entries {
-  function_name: "func_8010D2D0"
+  function_name: "func_8010D28C"
   module_name: "libultra_e79a0"
-  input_sha1: "36e83f41941901e093fff570cfaed5f97e05e726"
-  c_flags: "-O1"
+  input_sha1: "c1b2efaa0071c32f27550c9f88ab422f8be39a90"
+  c_flags: "-O2"
   c_flags: "-mips2"
   c_flags: "-mcpu=r4000"
   c_flags: "-Wa,-O2"
-  ast_mutations {
-    kind: AST_MUTATION_TOGGLE_REGISTER_ANNOTATION
-    site_index: 2
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR
-    site_index: 0
-    param: 0
-  }
-  ast_mutations {
-    kind: AST_MUTATION_INVERT_IF_ELSE
-    site_index: 1
-    param: 0
-  }
-  bit_exact_instructions: 48
-  matching_instructions: 48
-  target_instructions: 54
+  bit_exact_instructions: 3
+  matching_instructions: 3
+  target_instructions: 17
   is_bit_exact: false
 }
 entries {
@@ -27142,6 +26628,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_8010EA5C"
+  module_name: "libultra_e79a0"
+  input_sha1: "75ae2b3f246bfa4f8893257a322efe7299f3e716"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 13
+  matching_instructions: 13
+  target_instructions: 13
+  is_bit_exact: true
+}
+entries {
   function_name: "func_8010EA90"
   module_name: "libultra_e79a0"
   input_sha1: "15a894e023ca6102c409c802ac2dce19d2ddda99"
@@ -27320,6 +26819,19 @@ entries {
   is_bit_exact: true
 }
 entries {
+  function_name: "func_8010F800"
+  module_name: "libultra_e79a0"
+  input_sha1: "c0884ab4d8a25e12d5fccbdda9e01f4c43aea8c9"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 4
+  matching_instructions: 4
+  target_instructions: 4
+  is_bit_exact: true
+}
+entries {
   function_name: "func_8010F810"
   module_name: "libultra_e79a0"
   input_sha1: "d2b3e6ef99e5ccd2fd0edc887c992fe213640d43"
@@ -27469,6 +26981,19 @@ entries {
   matching_instructions: 60
   target_instructions: 94
   is_bit_exact: false
+}
+entries {
+  function_name: "func_8010FA28"
+  module_name: "libultra_e79a0"
+  input_sha1: "721b52de176e6b287aa1ed4bcfc830ac7ebe2244"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 2
+  matching_instructions: 2
+  target_instructions: 2
+  is_bit_exact: true
 }
 entries {
   function_name: "func_8010FA30"
@@ -27653,6 +27178,19 @@ entries {
   matching_instructions: 13
   target_instructions: 13
   is_bit_exact: true
+}
+entries {
+  function_name: "func_80110444"
+  module_name: "libultra_e79a0"
+  input_sha1: "f6e4a971601ddce73dde48f0b1ff074d7815a052"
+  c_flags: "-O2"
+  c_flags: "-mips2"
+  c_flags: "-mcpu=r4000"
+  c_flags: "-Wa,-O2"
+  bit_exact_instructions: 3
+  matching_instructions: 3
+  target_instructions: 4
+  is_bit_exact: false
 }
 entries {
   function_name: "GuLookAt"

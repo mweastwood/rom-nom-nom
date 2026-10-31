@@ -1,9 +1,12 @@
 #include "tuner/candidate_scorer.h"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -42,6 +45,9 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
   if (frame_size_matches != other.frame_size_matches) {
     return frame_size_matches;
   }
+  if (IsOpcodeSequenceExact() != other.IsOpcodeSequenceExact()) {
+    return IsOpcodeSequenceExact();
+  }
   const int64_t net_bit_exact =
       static_cast<int64_t>(bit_exact_instructions) * 2 - static_cast<int64_t>(SizeDelta());
   const int64_t other_net_bit_exact = static_cast<int64_t>(other.bit_exact_instructions) * 2 -
@@ -51,9 +57,6 @@ bool CandidateScore::IsBetterThan(const CandidateScore& other) const {
   }
   if (bit_exact_instructions != other.bit_exact_instructions) {
     return bit_exact_instructions > other.bit_exact_instructions;
-  }
-  if (IsOpcodeSequenceExact() != other.IsOpcodeSequenceExact()) {
-    return IsOpcodeSequenceExact();
   }
   const int64_t net_matching =
       static_cast<int64_t>(matching_instructions) * 2 - static_cast<int64_t>(SizeDelta());
@@ -146,7 +149,7 @@ bool IsAllocatableGpr(Register reg) {
 
 void RecordTransposedGprPair(const std::optional<Register>& compiled_reg,
                              const std::optional<Register>& target_reg,
-                             std::set<std::pair<std::string, std::string>>* seen_pairs,
+                             std::map<std::pair<std::string, std::string>, int>* pair_counts,
                              std::vector<std::pair<std::string, std::string>>* out_pairs) {
   if (!compiled_reg.has_value() || !target_reg.has_value() || *compiled_reg == *target_reg) {
     return;
@@ -157,14 +160,14 @@ void RecordTransposedGprPair(const std::optional<Register>& compiled_reg,
   std::pair<std::string, std::string> p(
       absl::StrFormat("$%u", static_cast<unsigned>(*compiled_reg)),
       absl::StrFormat("$%u", static_cast<unsigned>(*target_reg)));
-  if (seen_pairs->insert(p).second) {
+  if ((*pair_counts)[p]++ == 0) {
     out_pairs->push_back(std::move(p));
   }
 }
 
 void RecordTransposedFprPair(const std::optional<FpRegister>& compiled_reg,
                              const std::optional<FpRegister>& target_reg,
-                             std::set<std::pair<std::string, std::string>>* seen_pairs,
+                             std::map<std::pair<std::string, std::string>, int>* pair_counts,
                              std::vector<std::pair<std::string, std::string>>* out_pairs) {
   if (!compiled_reg.has_value() || !target_reg.has_value() || *compiled_reg == *target_reg) {
     return;
@@ -172,7 +175,7 @@ void RecordTransposedFprPair(const std::optional<FpRegister>& compiled_reg,
   std::pair<std::string, std::string> p(
       absl::StrFormat("$f%u", static_cast<unsigned>(*compiled_reg)),
       absl::StrFormat("$f%u", static_cast<unsigned>(*target_reg)));
-  if (seen_pairs->insert(p).second) {
+  if ((*pair_counts)[p]++ == 0) {
     out_pairs->push_back(std::move(p));
   }
 }
@@ -187,7 +190,7 @@ void PopulateDiffDiagnostic(const AlignmentResult& alignment,
   const double compiled_bytes =
       std::max<double>(4.0, static_cast<double>(compiled_instructions.size() * 4));
 
-  std::set<std::pair<std::string, std::string>> seen_reg_pairs;
+  std::map<std::pair<std::string, std::string>, int> reg_pair_counts;
   for (size_t i = 0; i < alignment.rows.size(); ++i) {
     const auto& row = alignment.rows[i];
     if (row.kind == DiffRowKind::kMatch) {
@@ -230,17 +233,17 @@ void PopulateDiffDiagnostic(const AlignmentResult& alignment,
             (is_i_type && !t_inst.IsBranch() && t_inst.immediate == c_inst.immediate) ||
             (t_inst.shift_amount != 0 && t_inst.shift_amount == c_inst.shift_amount);
         if (shares_context) {
-          RecordTransposedGprPair(c_inst.rd, t_inst.rd, &seen_reg_pairs,
+          RecordTransposedGprPair(c_inst.rd, t_inst.rd, &reg_pair_counts,
                                   &out_diag->transposed_register_pairs);
-          RecordTransposedGprPair(c_inst.rs, t_inst.rs, &seen_reg_pairs,
+          RecordTransposedGprPair(c_inst.rs, t_inst.rs, &reg_pair_counts,
                                   &out_diag->transposed_register_pairs);
-          RecordTransposedGprPair(c_inst.rt, t_inst.rt, &seen_reg_pairs,
+          RecordTransposedGprPair(c_inst.rt, t_inst.rt, &reg_pair_counts,
                                   &out_diag->transposed_register_pairs);
-          RecordTransposedFprPair(c_inst.fd, t_inst.fd, &seen_reg_pairs,
+          RecordTransposedFprPair(c_inst.fd, t_inst.fd, &reg_pair_counts,
                                   &out_diag->transposed_register_pairs);
-          RecordTransposedFprPair(c_inst.fs, t_inst.fs, &seen_reg_pairs,
+          RecordTransposedFprPair(c_inst.fs, t_inst.fs, &reg_pair_counts,
                                   &out_diag->transposed_register_pairs);
-          RecordTransposedFprPair(c_inst.ft, t_inst.ft, &seen_reg_pairs,
+          RecordTransposedFprPair(c_inst.ft, t_inst.ft, &reg_pair_counts,
                                   &out_diag->transposed_register_pairs);
         }
       } else if ((c_inst.IsNop() && !t_inst.IsNop()) || (!c_inst.IsNop() && t_inst.IsNop())) {
@@ -281,6 +284,9 @@ void PopulateDiffDiagnostic(const AlignmentResult& alignment,
       out_diag->has_unfilled_delay_slot = true;
     }
   }
+  std::stable_sort(
+      out_diag->transposed_register_pairs.begin(), out_diag->transposed_register_pairs.end(),
+      [&](const auto& a, const auto& b) { return reg_pair_counts[a] > reg_pair_counts[b]; });
 }
 
 }  // namespace
@@ -397,9 +403,12 @@ absl::StatusOr<CandidateScore> CandidateScorer::CompileAndScore(
 
   static std::atomic<uint64_t> temporary_counter{0};
   uint64_t identifier = temporary_counter.fetch_add(1, std::memory_order_relaxed);
-  std::filesystem::path temporary_directory =
-      std::filesystem::temp_directory_path() / absl::StrCat("tuner_candidate_", identifier);
   std::error_code error_code;
+  std::filesystem::path base_temp_dir = std::filesystem::exists("/dev/shm", error_code)
+                                            ? std::filesystem::path("/dev/shm")
+                                            : std::filesystem::temp_directory_path(error_code);
+  std::filesystem::path temporary_directory =
+      base_temp_dir / absl::StrCat("tuner_candidate_", getpid(), "_", identifier);
   std::filesystem::create_directories(temporary_directory, error_code);
   std::filesystem::path source_file = temporary_directory / absl::StrCat(target.name, ".c");
 

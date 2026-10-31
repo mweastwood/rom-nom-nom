@@ -559,6 +559,54 @@ bool MatchGeneralSplittableStatement(const CStatement& stmt,
   return false;
 }
 
+bool MatchExtractableRhsBinaryStatement(const CStatement& stmt,
+                                        std::unique_ptr<CExpression>* out_rhs_subexpr,
+                                        const std::string& replacement_var,
+                                        std::unique_ptr<CStatement>* out_replaced_stmt) {
+  if (stmt.Kind() == CStatementKind::kExpressionStatement) {
+    const auto& expr = static_cast<const ExpressionStatement&>(stmt).Expression();
+    if (expr.Kind() == CExpressionKind::kAssignmentExpression) {
+      const auto& assign = static_cast<const AssignmentExpression&>(expr);
+      if (assign.Rhs().Kind() == CExpressionKind::kBinaryExpression) {
+        const auto& bin = static_cast<const BinaryExpression&>(assign.Rhs());
+        const bool rhs_extractable = IsNonTrivialSubexpression(bin.Rhs()) ||
+                                     ExpressionReadsOrWritesMemoryOrGlobals(bin.Rhs());
+        if (rhs_extractable && !StatementContainsCall(stmt) &&
+            (IsNonTrivialSubexpression(bin.Lhs()) ||
+             ExpressionReadsOrWritesMemoryOrGlobals(bin.Lhs()))) {
+          if (out_rhs_subexpr != nullptr) *out_rhs_subexpr = bin.Rhs().Clone();
+          if (out_replaced_stmt != nullptr) {
+            *out_replaced_stmt = CStatement::Expression(CExpression::Assignment(
+                assign.Op(), assign.Lhs().Clone(),
+                CExpression::Binary(bin.Op(), bin.Lhs().Clone(),
+                                    CExpression::Identifier(replacement_var))));
+          }
+          return true;
+        }
+      }
+    }
+  } else if (stmt.Kind() == CStatementKind::kReturnStatement) {
+    const auto& ret = static_cast<const ReturnStatement&>(stmt);
+    if (ret.ReturnValue() != nullptr &&
+        ret.ReturnValue()->Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& bin = static_cast<const BinaryExpression&>(*ret.ReturnValue());
+      const bool rhs_extractable =
+          IsNonTrivialSubexpression(bin.Rhs()) || ExpressionReadsOrWritesMemoryOrGlobals(bin.Rhs());
+      if (rhs_extractable && !StatementContainsCall(stmt) &&
+          (IsNonTrivialSubexpression(bin.Lhs()) ||
+           ExpressionReadsOrWritesMemoryOrGlobals(bin.Lhs()))) {
+        if (out_rhs_subexpr != nullptr) *out_rhs_subexpr = bin.Rhs().Clone();
+        if (out_replaced_stmt != nullptr) {
+          *out_replaced_stmt = CStatement::Return(CExpression::Binary(
+              bin.Op(), bin.Lhs().Clone(), CExpression::Identifier(replacement_var)));
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::unique_ptr<CExpression> ReplaceExactSubexpressionInExpression(const CExpression& expr,
                                                                    const std::string& target_str,
                                                                    const CExpression& replacement) {
@@ -891,6 +939,10 @@ int MutationTruncationPriorityTier(const AstMutationStep& step) {
     case AST_MUTATION_VOLATILE_GLOBAL_ACCESS:
     case AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS:
     case AST_MUTATION_TOGGLE_TRAILING_RETURN:
+    case AST_MUTATION_ADJUST_SP_BUFFER_SIZE:
+    case AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES:
+    case AST_MUTATION_EXTRACT_RHS_BINARY_TEMP:
+    case AST_MUTATION_INLINE_LOOP_PREHEADER_CONST:
       return 0;
     case AST_MUTATION_INLINE_SINGLE_USE_TEMP:
     case AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN:
@@ -1130,6 +1182,9 @@ int DiffGuidedPriorityBonus(const AstMutationStep& step,
   };
 
   if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION) {
+    if (step.param() >= 20000 && step.param() < 40000) {
+      return -4;
+    }
     if (step.param() >= 10 && step.param() < 100) {
       uint32_t i = step.site_index();
       uint32_t j = step.param() - 10;
@@ -1175,9 +1230,12 @@ int DiffGuidedPriorityBonus(const AstMutationStep& step,
 
   if (diff_diagnostic->has_adjacent_insn_swap || diff_diagnostic->has_unfilled_delay_slot) {
     if (step.kind() == AST_MUTATION_SWAP_ADJACENT_STATEMENTS ||
+        step.kind() == AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES ||
+        step.kind() == AST_MUTATION_EXTRACT_RHS_BINARY_TEMP ||
         step.kind() == AST_MUTATION_SPLIT_SINGLE_USE_TEMP ||
         step.kind() == AST_MUTATION_HOIST_WHILE_GUARD ||
         step.kind() == AST_MUTATION_HOIST_LOOP_INVARIANT ||
+        step.kind() == AST_MUTATION_INLINE_LOOP_PREHEADER_CONST ||
         step.kind() == AST_MUTATION_INVERT_IF_ELSE) {
       return -2;
     }
@@ -1186,6 +1244,8 @@ int DiffGuidedPriorityBonus(const AstMutationStep& step,
   if (diff_diagnostic->has_extra_or_missing_move) {
     if (step.kind() == AST_MUTATION_PROPAGATE_REGISTER_COPY ||
         step.kind() == AST_MUTATION_COALESCE_PARAM_COPY ||
+        step.kind() == AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES ||
+        step.kind() == AST_MUTATION_INLINE_LOOP_PREHEADER_CONST ||
         step.kind() == AST_MUTATION_INLINE_SINGLE_USE_TEMP ||
         step.kind() == AST_MUTATION_MERGE_SPLIT_SCRATCH_WEBS ||
         step.kind() == AST_MUTATION_RELOAD_OR_EARLY_RETURN_VAR) {
@@ -1222,6 +1282,8 @@ struct MutationContext {
   uint32_t toggle_register_annotation_index = 0;
   uint32_t toggle_store_flag_index = 0;
   uint32_t hoist_loop_invariant_index = 0;
+  uint32_t extract_rhs_binary_temp_index = 0;
+  uint32_t inline_loop_preheader_const_index = 0;
 
   bool NeedsCheck(AstMutationKind kind) const {
     if (step_to_apply != nullptr) {
@@ -1675,6 +1737,115 @@ std::unique_ptr<CompoundStatement> TraverseCompound(const CompoundStatement& com
             }
             new_statements.push_back(TraverseStatement(*replaced_stmt, context));
             continue;
+          }
+        }
+      }
+    }
+
+    // 5a-rhs. Check extracting RHS of binary expression into a scratch temporary
+    // (`AST_MUTATION_EXTRACT_RHS_BINARY_TEMP`) so GCC evaluates RHS before LHS.
+    if (context->NeedsCheck(AST_MUTATION_EXTRACT_RHS_BINARY_TEMP) &&
+        MatchExtractableRhsBinaryStatement(*statements[i], nullptr, "", nullptr)) {
+      std::vector<std::string> eligible_candidates;
+      for (const auto& cand_var : context->local_variables) {
+        if (context->array_variables.count(cand_var) > 0) continue;
+        if (CountIdentifierOccurrencesInStatement(*statements[i], cand_var) > 0) continue;
+        if (IsVariableDeadAfter(statements, i, cand_var, is_top_level_block, context->root_body)) {
+          eligible_candidates.push_back(cand_var);
+          if (eligible_candidates.size() >= 2) break;
+        }
+      }
+      bool synthesized_rhs_var = false;
+      if (eligible_candidates.empty() && is_top_level_block) {
+        std::string synth_var =
+            CountIdentifierOccurrencesInStatement(*statements[i], "v0") == 0 ? "v0" : "v1";
+        if (CountIdentifierOccurrencesInStatement(*statements[i], synth_var) == 0 &&
+            context->local_variables.count(synth_var) == 0) {
+          eligible_candidates.push_back(synth_var);
+          synthesized_rhs_var = true;
+        }
+      }
+      if (!eligible_candidates.empty()) {
+        uint32_t site = context->extract_rhs_binary_temp_index++;
+        size_t num_candidates = std::min<size_t>(eligible_candidates.size(), 2);
+        for (size_t v = 0; v < num_candidates; ++v) {
+          context->Record(AST_MUTATION_EXTRACT_RHS_BINARY_TEMP, site, static_cast<uint32_t>(v));
+        }
+        uint32_t parameter = 0;
+        if (context->ShouldApply(AST_MUTATION_EXTRACT_RHS_BINARY_TEMP, site, &parameter)) {
+          size_t chosen_idx = (parameter < eligible_candidates.size()) ? parameter : 0;
+          const std::string& chosen_var = eligible_candidates[chosen_idx];
+          std::unique_ptr<CExpression> rhs_subexpr;
+          std::unique_ptr<CStatement> replaced_stmt;
+          if (MatchExtractableRhsBinaryStatement(*statements[i], &rhs_subexpr, chosen_var,
+                                                 &replaced_stmt) &&
+              rhs_subexpr != nullptr && replaced_stmt != nullptr) {
+            if (synthesized_rhs_var) {
+              size_t decl_pos = 0;
+              while (decl_pos < new_statements.size() &&
+                     new_statements[decl_pos]->Kind() ==
+                         CStatementKind::kVariableDeclarationStatement) {
+                ++decl_pos;
+              }
+              auto default_reg = InferDefaultRegisterAnnotation(chosen_var);
+              std::optional<std::string> reg_ann = std::nullopt;
+              if (default_reg.has_value() &&
+                  context->active_register_annotations.count(*default_reg) == 0) {
+                reg_ann = default_reg;
+                context->active_register_annotations.insert(*default_reg);
+              }
+              new_statements.insert(new_statements.begin() + static_cast<std::ptrdiff_t>(decl_pos),
+                                    CStatement::VariableDeclaration(
+                                        CType::S32(), chosen_var, nullptr, std::nullopt, reg_ann));
+              context->local_variables.insert(chosen_var);
+            }
+            new_statements.push_back(CStatement::Expression(
+                CExpression::Assignment("=", CExpression::Identifier(chosen_var),
+                                        TraverseExpression(*rhs_subexpr, context))));
+            new_statements.push_back(TraverseStatement(*replaced_stmt, context));
+            continue;
+          }
+        }
+      }
+    }
+
+    // 5a-loop. Check inlining a loop-preheader constant or symbol-address assignment into the
+    // immediately following loop (`AST_MUTATION_INLINE_LOOP_PREHEADER_CONST`).
+    if (context->NeedsCheck(AST_MUTATION_INLINE_LOOP_PREHEADER_CONST) &&
+        i + 1 < statements.size() &&
+        statements[i]->Kind() == CStatementKind::kExpressionStatement &&
+        (statements[i + 1]->Kind() == CStatementKind::kDoWhileStatement ||
+         statements[i + 1]->Kind() == CStatementKind::kWhileStatement ||
+         statements[i + 1]->Kind() == CStatementKind::kForStatement)) {
+      const auto& pre_expr = static_cast<const ExpressionStatement&>(*statements[i]).Expression();
+      if (pre_expr.Kind() == CExpressionKind::kAssignmentExpression) {
+        const auto& pre_assign = static_cast<const AssignmentExpression&>(pre_expr);
+        const bool is_const_or_sym_addr =
+            pre_assign.Rhs().Kind() == CExpressionKind::kIntegerLiteral ||
+            (pre_assign.Rhs().Kind() == CExpressionKind::kUnaryExpression &&
+             static_cast<const UnaryExpression&>(pre_assign.Rhs()).IsPrefix() &&
+             static_cast<const UnaryExpression&>(pre_assign.Rhs()).Op() == "&" &&
+             static_cast<const UnaryExpression&>(pre_assign.Rhs()).Operand().Kind() ==
+                 CExpressionKind::kIdentifier);
+        if (pre_assign.Op() == "=" && pre_assign.Lhs().Kind() == CExpressionKind::kIdentifier &&
+            is_const_or_sym_addr) {
+          const std::string& pre_var =
+              static_cast<const IdentifierExpression&>(pre_assign.Lhs()).Name();
+          if (!IsGlobalIdentifierName(pre_var) &&
+              CountIdentifierOccurrencesInStatement(*statements[i + 1], pre_var) > 0 &&
+              !IsIdentifierAssignedInStatement(*statements[i + 1], pre_var) &&
+              IsVariableDeadAfter(statements, i + 1, pre_var, is_top_level_block,
+                                  context->root_body)) {
+            uint32_t site = context->inline_loop_preheader_const_index++;
+            context->Record(AST_MUTATION_INLINE_LOOP_PREHEADER_CONST, site, 0);
+            uint32_t parameter = 0;
+            if (context->ShouldApply(AST_MUTATION_INLINE_LOOP_PREHEADER_CONST, site, &parameter)) {
+              auto replaced_loop =
+                  ReplaceIdentifierInStatement(*statements[i + 1], pre_var, pre_assign.Rhs());
+              new_statements.push_back(TraverseStatement(*replaced_loop, context));
+              ++i;
+              continue;
+            }
           }
         }
       }
@@ -2488,6 +2659,178 @@ std::vector<SplitScratchWebCandidate> CollectSplitScratchWebCandidates(
   return candidates;
 }
 
+struct PrologueParamSaveUnit {
+  size_t start_stmt_index = 0;
+  size_t stmt_count = 1;
+  std::string dst_var;
+  std::string src_arg;
+};
+
+bool IsInlineAsmBarrierForVar(const CStatement& stmt, std::string_view var_name) {
+  if (stmt.Kind() != CStatementKind::kExpressionStatement) return false;
+  std::string expr_str = static_cast<const ExpressionStatement&>(stmt).Expression().ToString();
+  return absl::StartsWith(expr_str, "__asm__(") &&
+         absl::StrContains(expr_str, absl::StrFormat("(%s)", var_name));
+}
+
+std::vector<PrologueParamSaveUnit> CollectPrologueParamSaveUnits(const CompoundStatement& body) {
+  std::vector<PrologueParamSaveUnit> units;
+  const auto& stmts = body.Statements();
+  size_t idx = 0;
+  while (idx < stmts.size() && stmts[idx] != nullptr &&
+         stmts[idx]->Kind() == CStatementKind::kVariableDeclarationStatement) {
+    ++idx;
+  }
+  while (idx < stmts.size() && units.size() < 6) {
+    if (stmts[idx] == nullptr || stmts[idx]->Kind() != CStatementKind::kExpressionStatement) {
+      break;
+    }
+    const auto& expr = static_cast<const ExpressionStatement&>(*stmts[idx]).Expression();
+    if (expr.Kind() != CExpressionKind::kAssignmentExpression) break;
+    const auto& assign = static_cast<const AssignmentExpression&>(expr);
+    if (assign.Op() != "=" || assign.Lhs().Kind() != CExpressionKind::kIdentifier) break;
+    const std::string& dst = static_cast<const IdentifierExpression&>(assign.Lhs()).Name();
+    if (!absl::StartsWith(dst, "temp_s") && !absl::StartsWith(dst, "f2")) break;
+    const CExpression* rhs = &assign.Rhs();
+    while (rhs->Kind() == CExpressionKind::kCastExpression) {
+      rhs = &static_cast<const CastExpression&>(*rhs).Operand();
+    }
+    if (rhs->Kind() != CExpressionKind::kIdentifier) break;
+    const std::string& src = static_cast<const IdentifierExpression&>(*rhs).Name();
+    if (!absl::StartsWith(src, "arg") && src != "f12" && src != "f14") break;
+    size_t count = 1;
+    if (idx + 1 < stmts.size() && stmts[idx + 1] != nullptr &&
+        IsInlineAsmBarrierForVar(*stmts[idx + 1], dst)) {
+      count = 2;
+    }
+    units.push_back(PrologueParamSaveUnit{
+        .start_stmt_index = idx,
+        .stmt_count = count,
+        .dst_var = dst,
+        .src_arg = src,
+    });
+    idx += count;
+  }
+  return units;
+}
+
+std::unique_ptr<CompoundStatement> ApplyPermutePrologueParamSaves(const CompoundStatement& body,
+                                                                  uint32_t site_index,
+                                                                  uint32_t param) {
+  auto units = CollectPrologueParamSaveUnits(body);
+  if (units.size() < 2) {
+    return std::unique_ptr<CompoundStatement>(
+        static_cast<CompoundStatement*>(body.Clone().release()));
+  }
+  std::vector<size_t> order(units.size());
+  for (size_t i = 0; i < units.size(); ++i) order[i] = i;
+  if (param == 100) {
+    std::reverse(order.begin(), order.end());
+  } else if (site_index < units.size() && param < units.size() && site_index != param) {
+    std::swap(order[site_index], order[param]);
+  } else {
+    return std::unique_ptr<CompoundStatement>(
+        static_cast<CompoundStatement*>(body.Clone().release()));
+  }
+
+  const auto& stmts = body.Statements();
+  std::vector<std::unique_ptr<CStatement>> new_stmts;
+  new_stmts.reserve(stmts.size());
+  size_t prefix_end = units.front().start_stmt_index;
+  size_t suffix_start = units.back().start_stmt_index + units.back().stmt_count;
+  for (size_t i = 0; i < prefix_end; ++i) {
+    new_stmts.push_back(stmts[i]->Clone());
+  }
+  for (size_t u_idx : order) {
+    const auto& u = units[u_idx];
+    for (size_t k = 0; k < u.stmt_count; ++k) {
+      new_stmts.push_back(stmts[u.start_stmt_index + k]->Clone());
+    }
+  }
+  for (size_t i = suffix_start; i < stmts.size(); ++i) {
+    new_stmts.push_back(stmts[i]->Clone());
+  }
+  return std::make_unique<CompoundStatement>(std::move(new_stmts));
+}
+
+bool FindTopLevelSpArrayDecl(const CompoundStatement& body, size_t* out_stmt_idx,
+                             int64_t* out_byte_size) {
+  const auto& stmts = body.Statements();
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    if (stmts[i] == nullptr || stmts[i]->Kind() != CStatementKind::kVariableDeclarationStatement) {
+      continue;
+    }
+    const auto& decl = static_cast<const VariableDeclarationStatement&>(*stmts[i]);
+    if (decl.Name() == "sp" && decl.ArraySize().has_value()) {
+      int64_t elem_size = TypeByteSize(decl.Type().name).value_or(1);
+      if (out_stmt_idx != nullptr) *out_stmt_idx = i;
+      if (out_byte_size != nullptr) *out_byte_size = (*decl.ArraySize()) * elem_size;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::unique_ptr<CompoundStatement> ApplyAdjustSpBufferSize(const CompoundStatement& body,
+                                                           uint32_t param) {
+  const auto& stmts = body.Statements();
+  size_t sp_idx = 0;
+  int64_t current_bytes = 0;
+  bool has_sp = FindTopLevelSpArrayDecl(body, &sp_idx, &current_bytes);
+  std::vector<std::unique_ptr<CStatement>> new_stmts;
+  new_stmts.reserve(stmts.size() + 1);
+
+  if (!has_sp) {
+    if ((param == 5 || param == 6) && CountIdentifierOccurrencesInStatement(body, "sp") == 0) {
+      int64_t new_bytes = (param == 5) ? 8 : 16;
+      new_stmts.push_back(
+          CStatement::VariableDeclaration(CType::U8(), "sp", nullptr, new_bytes, std::nullopt));
+    }
+    for (const auto& s : stmts) {
+      new_stmts.push_back(s->Clone());
+    }
+    return std::make_unique<CompoundStatement>(std::move(new_stmts));
+  }
+
+  int64_t delta = 0;
+  if (param == 0) {
+    delta = -8;
+  } else if (param == 1) {
+    delta = 8;
+  } else if (param == 2) {
+    delta = -16;
+  } else if (param == 3) {
+    delta = 16;
+  }
+  int64_t target_bytes = current_bytes + delta;
+
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    if (i == sp_idx) {
+      if (param == 4) {
+        if (CountIdentifierOccurrencesInStatement(body, "sp") <= 1) {
+          continue;
+        }
+        new_stmts.push_back(stmts[i]->Clone());
+        continue;
+      }
+      if (delta != 0 && target_bytes > 0 && target_bytes <= 4096) {
+        const auto& decl = static_cast<const VariableDeclarationStatement&>(*stmts[i]);
+        int64_t elem_size = TypeByteSize(decl.Type().name).value_or(1);
+        if (elem_size > 0 && target_bytes % elem_size == 0) {
+          new_stmts.push_back(CStatement::VariableDeclaration(
+              decl.Type(), "sp", nullptr, target_bytes / elem_size, decl.RegisterAnnotation()));
+        } else {
+          new_stmts.push_back(CStatement::VariableDeclaration(CType::U8(), "sp", nullptr,
+                                                              target_bytes, std::nullopt));
+        }
+        continue;
+      }
+    }
+    new_stmts.push_back(stmts[i]->Clone());
+  }
+  return std::make_unique<CompoundStatement>(std::move(new_stmts));
+}
+
 }  // namespace
 
 std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclaration& function,
@@ -2551,12 +2894,15 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
     }
   };
 
+  size_t unguided_pair_swaps_emitted = 0;
+  std::vector<std::pair<size_t, size_t>> diff_matched_decl_pairs;
   for (size_t i = 0; i < max_swap_decl_index; ++i) {
     const auto& d1 = toggleable_decls[i];
     if (!d1.reg_annotation.has_value() || *d1.reg_annotation == "$30") continue;
     const bool d1_fp = IsFloatingPointRegisterAnnotation(*d1.reg_annotation);
     const bool d1_scratch = IsCallerSavedScratchRegisterAnnotation(*d1.reg_annotation);
     const bool d1_callee = absl::StartsWith(d1.name, "temp_s");
+    bool emitted_adjacent_same_class_for_i = false;
     for (size_t j = i + 1; j < max_swap_decl_index; ++j) {
       const auto& d2 = toggleable_decls[j];
       if (!d2.reg_annotation.has_value() || *d2.reg_annotation == "$30") continue;
@@ -2574,14 +2920,80 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
           }
         }
       }
-      if (AreCompatibleRegisterSaveClasses(*d1.reg_annotation, *d2.reg_annotation) &&
-          ((d1_scratch && d2_scratch) || (d1_callee && d2_callee) || diff_matched_pair)) {
+      if (!AreCompatibleRegisterSaveClasses(*d1.reg_annotation, *d2.reg_annotation)) continue;
+      if (diff_matched_pair) {
         record_unique_reg_toggle(static_cast<uint32_t>(i), static_cast<uint32_t>(10 + j));
+        diff_matched_decl_pairs.emplace_back(i, j);
+      } else if ((d1_scratch && d2_scratch) || (d1_callee && d2_callee)) {
+        // Without a diff match, only emit the nearest compatible peer per declaration (and cap
+        // total unguided pair swaps at 8) so $O(N^2)$ pair swaps never starve the mutation budget.
+        if (!emitted_adjacent_same_class_for_i && unguided_pair_swaps_emitted < 8) {
+          record_unique_reg_toggle(static_cast<uint32_t>(i), static_cast<uint32_t>(10 + j));
+          emitted_adjacent_same_class_for_i = true;
+          ++unguided_pair_swaps_emitted;
+        }
       }
     }
   }
 
   if (diff_diagnostic != nullptr) {
+    // Emit composite multi-register permutations (disjoint 2-pair swaps and 3-cycle rotations)
+    // so coupled register swaps escape single-step score valleys.
+    size_t composite_swaps_emitted = 0;
+    for (size_t p1 = 0; p1 < diff_matched_decl_pairs.size() && composite_swaps_emitted < 4; ++p1) {
+      auto [i1, j1] = diff_matched_decl_pairs[p1];
+      for (size_t p2 = p1 + 1; p2 < diff_matched_decl_pairs.size() && composite_swaps_emitted < 4;
+           ++p2) {
+        auto [i2, j2] = diff_matched_decl_pairs[p2];
+        if (i1 != i2 && i1 != j2 && j1 != i2 && j1 != j2 && i1 < 90 && j1 < 90 && i2 < 90 &&
+            j2 < 90) {
+          record_unique_reg_toggle(static_cast<uint32_t>(i1 * 100 + j1),
+                                   static_cast<uint32_t>(20000 + i2 * 100 + j2));
+          ++composite_swaps_emitted;
+        }
+      }
+    }
+    size_t cycle_rotations_emitted = 0;
+    for (size_t p1 = 0; p1 < diff_matched_decl_pairs.size() && cycle_rotations_emitted < 4; ++p1) {
+      auto [a1, b1] = diff_matched_decl_pairs[p1];
+      for (size_t p2 = p1 + 1; p2 < diff_matched_decl_pairs.size() && cycle_rotations_emitted < 4;
+           ++p2) {
+        auto [a2, b2] = diff_matched_decl_pairs[p2];
+        size_t i1 = 0, i2 = 0, i3 = 0;
+        bool shared = false;
+        if (a1 == a2 && b1 != b2) {
+          i1 = a1;
+          i2 = b1;
+          i3 = b2;
+          shared = true;
+        } else if (a1 == b2 && b1 != a2) {
+          i1 = a1;
+          i2 = b1;
+          i3 = a2;
+          shared = true;
+        } else if (b1 == a2 && a1 != b2) {
+          i1 = b1;
+          i2 = a1;
+          i3 = b2;
+          shared = true;
+        } else if (b1 == b2 && a1 != a2) {
+          i1 = b1;
+          i2 = a1;
+          i3 = a2;
+          shared = true;
+        }
+        if (shared && i1 < 90 && i2 < 90 && i3 < 90 &&
+            AreCompatibleRegisterSaveClasses(*toggleable_decls[i2].reg_annotation,
+                                             *toggleable_decls[i3].reg_annotation)) {
+          record_unique_reg_toggle(static_cast<uint32_t>(i1),
+                                   static_cast<uint32_t>(30000 + i2 * 100 + i3));
+          record_unique_reg_toggle(static_cast<uint32_t>(i1),
+                                   static_cast<uint32_t>(30000 + i3 * 100 + i2));
+          cycle_rotations_emitted += 2;
+        }
+      }
+    }
+
     for (const auto& [reg_a, reg_b] : diff_diagnostic->transposed_register_pairs) {
       for (size_t i = 0; i < toggleable_decls.size(); ++i) {
         const auto& decl = toggleable_decls[i];
@@ -2599,6 +3011,40 @@ std::vector<AstMutationStep> AstMutator::DiscoverMutations(const FunctionDeclara
         }
       }
     }
+  }
+
+  // Discover stack-frame (`u8 sp[...]`) padding and alignment adjustments
+  size_t sp_stmt_idx = 0;
+  int64_t sp_current_bytes = 0;
+  if (FindTopLevelSpArrayDecl(function.Body(), &sp_stmt_idx, &sp_current_bytes)) {
+    if (sp_current_bytes > 8) {
+      context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 0);
+    }
+    if (sp_current_bytes > 16) {
+      context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 1);
+    }
+    context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 2);
+    context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 3);
+    if (CountIdentifierOccurrencesInStatement(function.Body(), "sp") <= 1) {
+      context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 4);
+    }
+  } else if (diff_diagnostic != nullptr && !diff_diagnostic->mismatch_relative_positions.empty() &&
+             CountIdentifierOccurrencesInStatement(function.Body(), "sp") == 0 &&
+             referenced_symbols.local_variables.count("sp") == 0) {
+    context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 5);
+    context.Record(AST_MUTATION_ADJUST_SP_BUFFER_SIZE, 0, 6);
+  }
+
+  // Discover prologue callee-saved parameter-copy permutations
+  auto prologue_save_units = CollectPrologueParamSaveUnits(function.Body());
+  for (size_t p = 0; p < prologue_save_units.size(); ++p) {
+    for (size_t q = p + 1; q < prologue_save_units.size(); ++q) {
+      context.Record(AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES, static_cast<uint32_t>(p),
+                     static_cast<uint32_t>(q));
+    }
+  }
+  if (prologue_save_units.size() >= 3) {
+    context.Record(AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES, 0, 100);
   }
 
   // Discover direct typed global candidates (`*(T *)&D_...` -> `extern T D_...;`)
@@ -2867,6 +3313,70 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
       }
       return function.Clone();
     }
+    if (step.param() >= 20000 && step.param() < 30000) {
+      std::vector<ToggleableVarDeclInfo> decls;
+      CollectToggleableVarDeclsInStatement(function.Body(), &decls);
+      uint32_t i1 = step.site_index() / 100;
+      uint32_t j1 = step.site_index() % 100;
+      uint32_t p2 = step.param() - 20000;
+      uint32_t i2 = p2 / 100;
+      uint32_t j2 = p2 % 100;
+      if (i1 < decls.size() && j1 < decls.size() && i2 < decls.size() && j2 < decls.size() &&
+          i1 != j1 && i2 != j2 && i1 != i2 && i1 != j2 && j1 != i2 && j1 != j2 &&
+          decls[i1].reg_annotation.has_value() && decls[j1].reg_annotation.has_value() &&
+          decls[i2].reg_annotation.has_value() && decls[j2].reg_annotation.has_value() &&
+          AreCompatibleRegisterSaveClasses(*decls[i1].reg_annotation, *decls[j1].reg_annotation) &&
+          AreCompatibleRegisterSaveClasses(*decls[i2].reg_annotation, *decls[j2].reg_annotation)) {
+        std::map<uint32_t, std::optional<std::string>> new_annotations;
+        new_annotations[i1] = decls[j1].reg_annotation;
+        new_annotations[j1] = decls[i1].reg_annotation;
+        new_annotations[i2] = decls[j2].reg_annotation;
+        new_annotations[j2] = decls[i2].reg_annotation;
+        uint32_t next_site = 0;
+        auto mutated_body = std::unique_ptr<CompoundStatement>(
+            static_cast<CompoundStatement*>(RewriteToggleableVarDeclAnnotationsInStatement(
+                                                function.Body(), &next_site, new_annotations)
+                                                .release()));
+        return BuildMutatedFunctionDeclaration(function, std::move(mutated_body));
+      }
+      return function.Clone();
+    }
+    if (step.param() >= 30000 && step.param() < 40000) {
+      std::vector<ToggleableVarDeclInfo> decls;
+      CollectToggleableVarDeclsInStatement(function.Body(), &decls);
+      uint32_t i1 = step.site_index();
+      uint32_t p3 = step.param() - 30000;
+      uint32_t i2 = p3 / 100;
+      uint32_t i3 = p3 % 100;
+      if (i1 < decls.size() && i2 < decls.size() && i3 < decls.size() && i1 != i2 && i1 != i3 &&
+          i2 != i3 && decls[i1].reg_annotation.has_value() &&
+          decls[i2].reg_annotation.has_value() && decls[i3].reg_annotation.has_value() &&
+          AreCompatibleRegisterSaveClasses(*decls[i1].reg_annotation, *decls[i2].reg_annotation) &&
+          AreCompatibleRegisterSaveClasses(*decls[i2].reg_annotation, *decls[i3].reg_annotation)) {
+        std::map<uint32_t, std::optional<std::string>> new_annotations;
+        new_annotations[i1] = decls[i2].reg_annotation;
+        new_annotations[i2] = decls[i3].reg_annotation;
+        new_annotations[i3] = decls[i1].reg_annotation;
+        uint32_t next_site = 0;
+        auto mutated_body = std::unique_ptr<CompoundStatement>(
+            static_cast<CompoundStatement*>(RewriteToggleableVarDeclAnnotationsInStatement(
+                                                function.Body(), &next_site, new_annotations)
+                                                .release()));
+        return BuildMutatedFunctionDeclaration(function, std::move(mutated_body));
+      }
+      return function.Clone();
+    }
+  }
+
+  if (step.kind() == AST_MUTATION_ADJUST_SP_BUFFER_SIZE) {
+    auto mutated_body = ApplyAdjustSpBufferSize(function.Body(), step.param());
+    return BuildMutatedFunctionDeclaration(function, std::move(mutated_body));
+  }
+
+  if (step.kind() == AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES) {
+    auto mutated_body =
+        ApplyPermutePrologueParamSaves(function.Body(), step.site_index(), step.param());
+    return BuildMutatedFunctionDeclaration(function, std::move(mutated_body));
   }
 
   if (step.kind() == AST_MUTATION_DIRECT_TYPED_GLOBAL) {
@@ -3010,7 +3520,8 @@ FunctionDeclaration AstMutator::ApplyMutation(const FunctionDeclaration& functio
   if (step.kind() == AST_MUTATION_INLINE_SINGLE_USE_TEMP ||
       step.kind() == AST_MUTATION_ELIMINATE_DEAD_CALL_RETURN ||
       step.kind() == AST_MUTATION_PROPAGATE_REGISTER_COPY ||
-      step.kind() == AST_MUTATION_HOIST_WHILE_GUARD) {
+      step.kind() == AST_MUTATION_HOIST_WHILE_GUARD ||
+      step.kind() == AST_MUTATION_INLINE_LOOP_PREHEADER_CONST) {
     mutated_body = PruneUnusedLocalDeclarations(*mutated_body);
   }
   return BuildMutatedFunctionDeclaration(function, std::move(mutated_body));
@@ -3092,6 +3603,18 @@ std::string AstMutator::DescribeStep(const AstMutationStep& step) {
                              step.param());
     case AST_MUTATION_HOIST_LOOP_INVARIANT:
       return absl::StrFormat("HoistLoopInvariant(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_ADJUST_SP_BUFFER_SIZE:
+      return absl::StrFormat("AdjustSpBufferSize(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_PERMUTE_PROLOGUE_PARAM_SAVES:
+      return absl::StrFormat("PermutePrologueParamSaves(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_EXTRACT_RHS_BINARY_TEMP:
+      return absl::StrFormat("ExtractRhsBinaryTemp(site=%u, param=%u)", step.site_index(),
+                             step.param());
+    case AST_MUTATION_INLINE_LOOP_PREHEADER_CONST:
+      return absl::StrFormat("InlineLoopPreheaderConst(site=%u, param=%u)", step.site_index(),
                              step.param());
     default:
       return "UnspecifiedMutation";

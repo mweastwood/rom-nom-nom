@@ -57,6 +57,11 @@ def get_compile_args(file_path: Path):
         REPO_ROOT / "bazel-rom-nom-nom" / "external" / "abseil-cpp+",
     ]
     symlink = REPO_ROOT / "bazel-rom-nom-nom"
+    if not symlink.is_symlink():
+        for cand in REPO_ROOT.glob("bazel-*"):
+            if cand.name not in {"bazel-bin", "bazel-out", "bazel-testlogs"} and cand.is_symlink():
+                symlink = cand
+                break
     if symlink.is_symlink():
         output_base = symlink.resolve().parent.parent
         for p in (output_base / "external").glob("*googletest*/googletest/include"):

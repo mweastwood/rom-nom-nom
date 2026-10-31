@@ -101,6 +101,25 @@ bool TuningCacheStore::Remove(std::string_view function_name) {
   return entries_.erase(function_name) > 0;
 }
 
+size_t TuningCacheStore::PruneToValidFunctions(
+    const absl::flat_hash_set<std::string>& valid_functions,
+    const absl::flat_hash_map<std::string, std::string>& function_to_module) {
+  size_t removed = 0;
+  for (auto it = entries_.begin(); it != entries_.end();) {
+    if (!valid_functions.contains(it->first)) {
+      entries_.erase(it++);
+      ++removed;
+      continue;
+    }
+    if (auto mod_it = function_to_module.find(it->first);
+        mod_it != function_to_module.end() && !mod_it->second.empty()) {
+      it->second.set_module_name(mod_it->second);
+    }
+    ++it;
+  }
+  return removed;
+}
+
 void TuningCacheStore::SetModuleCFlags(std::string_view module_name,
                                        const std::vector<std::string>& flags) {
   module_c_flags_[std::string(module_name)] = flags;
