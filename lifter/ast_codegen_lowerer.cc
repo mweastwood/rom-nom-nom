@@ -1375,7 +1375,14 @@ bool CalleeSavedReadBeforeFirstCallInBlock(const CompoundStatement& comp, size_t
 }
 
 std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-    const CStatement& stmt, const std::set<std::string>& external_data_symbols, bool has_calls) {
+    const CStatement& stmt, const std::set<std::string>& external_data_symbols, bool has_calls,
+    bool suppress_all_cse_barriers = false,
+    const std::set<std::string>& suppressed_barrier_vars = {}) {
+  auto is_active_callee_barrier_var = [&](std::string_view v) {
+    if (suppress_all_cse_barriers) return false;
+    if (!IsPinnedCalleeSavedGprVar(v)) return false;
+    return suppressed_barrier_vars.count(std::string(v)) == 0;
+  };
   switch (stmt.Kind()) {
     case CStatementKind::kCompoundStatement: {
       const auto& comp = static_cast<const CompoundStatement&>(stmt);
@@ -1403,7 +1410,7 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                                  var_list.end());
                 }
               }
-              if (IsPinnedCalleeSavedGprVar(lhs) && is_sym_addr) {
+              if (is_active_callee_barrier_var(lhs) && is_sym_addr) {
                 auto& var_list = active_sym_vars[rhs_sym];
                 var_list.erase(std::remove(var_list.begin(), var_list.end(), lhs), var_list.end());
                 if (!var_list.empty()) {
@@ -1417,13 +1424,14 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                   emit_post_barrier = true;
                   post_barrier_var = lhs;
                 }
-              } else if (has_calls && IsPinnedCalleeSavedGprVar(lhs) && !is_sym_addr &&
+              } else if (has_calls && is_active_callee_barrier_var(lhs) && !is_sym_addr &&
                          IsCseConflictProneCalleeSavedRhs(a.Rhs(), external_data_symbols, comp, idx,
                                                           lhs) &&
                          CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, lhs)) {
                 emit_post_barrier = true;
                 post_barrier_var = lhs;
-              } else if (a.Rhs().Kind() == CExpressionKind::kIdentifier &&
+              } else if (!suppress_all_cse_barriers && suppressed_barrier_vars.count(lhs) == 0 &&
+                         a.Rhs().Kind() == CExpressionKind::kIdentifier &&
                          external_data_symbols.count(std::string(
                              static_cast<const IdentifierExpression&>(a.Rhs()).Name())) > 0 &&
                          GlobalLoadHasNarrowToFloatAndSecondReadInBlock(comp, idx, lhs)) {
@@ -1442,8 +1450,9 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
         if (s->Kind() != CStatementKind::kVariableDeclarationStatement) {
           active_sym_vars.clear();
         }
-        auto rewritten =
-            DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(*s, external_data_symbols, has_calls);
+        auto rewritten = DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+            *s, external_data_symbols, has_calls, suppress_all_cse_barriers,
+            suppressed_barrier_vars);
         if (has_calls && rewritten != nullptr &&
             rewritten->Kind() == CStatementKind::kDoWhileStatement) {
           const auto& dws = static_cast<const DoWhileStatement&>(*rewritten);
@@ -1461,7 +1470,7 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                   const auto& ba = static_cast<const AssignmentExpression&>(bes.Expression());
                   if (ba.Op() == "=" && ba.Lhs().Kind() == CExpressionKind::kIdentifier) {
                     std::string blhs(static_cast<const IdentifierExpression&>(ba.Lhs()).Name());
-                    if (IsPinnedCalleeSavedGprVar(blhs) &&
+                    if (is_active_callee_barrier_var(blhs) &&
                         ((IsCseConflictProneCalleeSavedRhs(ba.Rhs(), external_data_symbols,
                                                            body_comp, b_idx, blhs) &&
                           CalleeSavedCopyCrossesCallWithReadInBlock(comp, idx, blhs)) ||
@@ -1502,24 +1511,28 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
     }
     case CStatementKind::kIfStatement: {
       const auto& ifs = static_cast<const IfStatement&>(stmt);
-      return CStatement::If(ifs.Condition().Clone(),
-                            DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-                                ifs.ThenBranch(), external_data_symbols, has_calls),
-                            ifs.ElseBranch() != nullptr
-                                ? DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-                                      *ifs.ElseBranch(), external_data_symbols, has_calls)
-                                : nullptr);
+      return CStatement::If(
+          ifs.Condition().Clone(),
+          DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(ifs.ThenBranch(), external_data_symbols,
+                                                            has_calls, suppress_all_cse_barriers,
+                                                            suppressed_barrier_vars),
+          ifs.ElseBranch() != nullptr ? DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+                                            *ifs.ElseBranch(), external_data_symbols, has_calls,
+                                            suppress_all_cse_barriers, suppressed_barrier_vars)
+                                      : nullptr);
     }
     case CStatementKind::kWhileStatement: {
       const auto& ws = static_cast<const WhileStatement&>(stmt);
       return CStatement::While(ws.Condition().Clone(),
                                DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-                                   ws.Body(), external_data_symbols, has_calls));
+                                   ws.Body(), external_data_symbols, has_calls,
+                                   suppress_all_cse_barriers, suppressed_barrier_vars));
     }
     case CStatementKind::kDoWhileStatement: {
       const auto& dws = static_cast<const DoWhileStatement&>(stmt);
       return CStatement::DoWhile(DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-                                     dws.Body(), external_data_symbols, has_calls),
+                                     dws.Body(), external_data_symbols, has_calls,
+                                     suppress_all_cse_barriers, suppressed_barrier_vars),
                                  dws.Condition().Clone());
     }
     case CStatementKind::kForStatement: {
@@ -1528,7 +1541,8 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
                              fs.Condition() != nullptr ? fs.Condition()->Clone() : nullptr,
                              fs.Step() != nullptr ? fs.Step()->Clone() : nullptr,
                              DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-                                 fs.Body(), external_data_symbols, has_calls));
+                                 fs.Body(), external_data_symbols, has_calls,
+                                 suppress_all_cse_barriers, suppressed_barrier_vars));
     }
     case CStatementKind::kSwitchStatement: {
       const auto& ss = static_cast<const SwitchStatement&>(stmt);
@@ -1539,10 +1553,11 @@ std::unique_ptr<CStatement> DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
         sc.case_values = c.case_values;
         sc.is_default = c.is_default;
         if (c.body != nullptr) {
-          sc.body = std::unique_ptr<CompoundStatement>(
-              static_cast<CompoundStatement*>(DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
-                                                  *c.body, external_data_symbols, has_calls)
-                                                  .release()));
+          sc.body = std::unique_ptr<CompoundStatement>(static_cast<CompoundStatement*>(
+              DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+                  *c.body, external_data_symbols, has_calls, suppress_all_cse_barriers,
+                  suppressed_barrier_vars)
+                  .release()));
         }
         cases.push_back(std::move(sc));
       }
@@ -2308,7 +2323,8 @@ bool AstCodegenLowerer::IsO2Function(const FunctionDeclaration& function) {
 
 std::unique_ptr<CompoundStatement> AstCodegenLowerer::DisambiguateCalleeSavedAndGlobalLoads(
     const CompoundStatement& body, const std::set<std::string>& external_data_symbols,
-    bool has_calls) {
+    bool has_calls, bool suppress_all_cse_barriers,
+    const std::set<std::string>& suppressed_barrier_vars) {
   std::set<std::string> write_only_pinned_callee_vars;
   for (const auto& s : body.Statements()) {
     if (s == nullptr || s->Kind() != CStatementKind::kVariableDeclarationStatement) continue;
@@ -2318,8 +2334,8 @@ std::unique_ptr<CompoundStatement> AstCodegenLowerer::DisambiguateCalleeSavedAnd
       write_only_pinned_callee_vars.insert(vd.Name());
     }
   }
-  auto disambiguated =
-      DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(body, external_data_symbols, has_calls);
+  auto disambiguated = DisambiguateDuplicateCalleeSavedSymbolLoadsInStmt(
+      body, external_data_symbols, has_calls, suppress_all_cse_barriers, suppressed_barrier_vars);
   if (!write_only_pinned_callee_vars.empty() && disambiguated != nullptr) {
     disambiguated = PreserveWriteOnlyPinnedCalleeSavedStoresInStmt(*disambiguated,
                                                                    write_only_pinned_callee_vars);
@@ -2701,7 +2717,8 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
       }
     }
     std::unique_ptr<CompoundStatement> disambiguated_body = DisambiguateCalleeSavedAndGlobalLoads(
-        functions[i].Body(), effective_external_data_symbols, has_calls);
+        functions[i].Body(), effective_external_data_symbols, has_calls,
+        functions[i].SuppressAllCseBarriers(), functions[i].SuppressedCseBarrierVars());
     std::unique_ptr<CompoundStatement> body_to_emit;
     if (functions.size() > 1 || parent_module_context != nullptr ||
         !result.array_data_symbols.empty() || !promoted_scalar_globals.empty()) {
@@ -2711,15 +2728,18 @@ LoweredTranslationUnit AstCodegenLowerer::LowerTranslationUnit(
     } else {
       body_to_emit = std::move(disambiguated_body);
     }
-    if (!dup_addr_symbols.empty()) {
+    if (!dup_addr_symbols.empty() && !functions[i].SuppressAllCseBarriers()) {
       body_to_emit = PreventDuplicateCallArgSymbolCse(*body_to_emit, dup_addr_symbols);
     }
     if (is_o2_func) {
       body_to_emit = LowerFloatGprBitcastsToInlineAsm(functions[i].Body(), *body_to_emit);
     }
-    result.functions.emplace_back(functions[i].ReturnType(), functions[i].Name(),
-                                  functions[i].Parameters(), std::move(body_to_emit),
-                                  functions[i].IsStatic(), functions[i].OptimizationMode());
+    FunctionDeclaration lowered_fn(functions[i].ReturnType(), functions[i].Name(),
+                                   functions[i].Parameters(), std::move(body_to_emit),
+                                   functions[i].IsStatic(), functions[i].OptimizationMode());
+    lowered_fn.SetSuppressAllCseBarriers(functions[i].SuppressAllCseBarriers());
+    lowered_fn.MutableSuppressedCseBarrierVars() = functions[i].SuppressedCseBarrierVars();
+    result.functions.push_back(std::move(lowered_fn));
   }
 
   return result;

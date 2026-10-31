@@ -838,5 +838,88 @@ TEST(TunerPipelineTest, Phase1bEvaluatesCanonicalPresetsOnBaseFlagsWhenPhase1aSw
   EXPECT_EQ(res_or->winning_c_flags, std::vector<std::string>({"-O2"}));
 }
 
+TEST(TunerPipelineTest, TwoStepPlateauLookaheadFindsCoupledMutations) {
+  // Function where neither commuting `(a + b)` nor commuting `(c + d)` improves the score alone
+  // (a plateau), but applying BOTH together achieves 100% bit-exactness.
+  auto body = std::make_unique<CompoundStatement>();
+  body->AddStatement(CStatement::Return(CExpression::Binary(
+      "*", CExpression::Binary("+", CExpression::Identifier("a"), CExpression::Identifier("b")),
+      CExpression::Binary("+", CExpression::Identifier("c"), CExpression::Identifier("d")))));
+
+  FunctionDeclaration func(
+      CType::S32(), "PlateauFunc",
+      {{CType::S32(), "a"}, {CType::S32(), "b"}, {CType::S32(), "c"}, {CType::S32(), "d"}},
+      std::move(body));
+  auto emit_fn = [](const FunctionDeclaration& ast) { return ast.ToString(); };
+
+  FunctionSearchOptions opts;
+  opts.explore_flags = false;
+  opts.explore_ast_mutations = true;
+  opts.max_rounds = 2;
+  opts.max_ast_candidates_per_round = 16;
+  opts.max_polish_rounds = 0;
+
+  auto res_or = TunerPipeline::SearchFunctionCandidates(
+      func, {"-O2"}, opts, emit_fn,
+      [](std::string_view c_code, const std::vector<std::string>& /*flags*/) {
+        CandidateScore score;
+        score.target_instruction_count = 12;
+        score.compiled_instruction_count = 12;
+        score.frame_size_matches = true;
+        score.saved_registers_match = true;
+        score.cfg_topology_matches = true;
+        score.bit_exact_instructions = 8;
+        score.matching_instructions = 8;
+        score.normalized_lcs_instructions = 10;
+
+        const bool commuted_ab = absl::StrContains(c_code, "(b + a)");
+        const bool commuted_cd = absl::StrContains(c_code, "(d + c)");
+        if (commuted_ab && commuted_cd) {
+          score.bit_exact_instructions = 12;
+          score.matching_instructions = 12;
+          score.normalized_lcs_instructions = 12;
+          score.raw_bit_exact = true;
+          score.normalized_exact = true;
+        }
+        return score;
+      });
+  ASSERT_TRUE(res_or.ok()) << res_or.status();
+  EXPECT_TRUE(res_or->best_score.raw_bit_exact);
+  EXPECT_EQ(res_or->applied_mutations.size(), 2u);
+
+  // Verify CEmitter::EmitTranslationUnit() honors CSE barrier suppression from AstMutator.
+  auto cse_body = std::make_unique<CompoundStatement>();
+  cse_body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  cse_body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s1", nullptr, std::nullopt, "$17"));
+  cse_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s0"),
+                              CExpression::Unary("&", CExpression::Identifier("D_80100000")))));
+  cse_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("temp_s1"),
+                              CExpression::Unary("&", CExpression::Identifier("D_80100000")))));
+  cse_body->AddStatement(CStatement::Return(CExpression::Binary(
+      "+", CExpression::Identifier("temp_s0"), CExpression::Identifier("temp_s1"))));
+  FunctionDeclaration cse_fn(CType::S32(), "CseFn", {}, std::move(cse_body),
+                             /*is_static=*/false, FunctionOptimizationMode::kO2Standard);
+  CEmitterOptions emitter_opts;
+  emitter_opts.format_with_clang = false;
+  CTranslationUnit tu_before;
+  tu_before.functions.push_back(cse_fn.Clone());
+  EXPECT_TRUE(absl::StrContains(CEmitter::EmitTranslationUnit(tu_before, emitter_opts),
+                                "__asm__(\"\" : \"=r\"(temp_s0)"));
+
+  AstMutationStep suppress_cse;
+  suppress_cse.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  suppress_cse.set_site_index(0);
+  suppress_cse.set_param(4);
+  FunctionDeclaration cse_suppressed = AstMutator::ApplyMutation(cse_fn, suppress_cse);
+  CTranslationUnit tu_after;
+  tu_after.functions.push_back(cse_suppressed.Clone());
+  EXPECT_FALSE(absl::StrContains(CEmitter::EmitTranslationUnit(tu_after, emitter_opts),
+                                 "__asm__(\"\" : \"=r\"(temp_s0)"));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

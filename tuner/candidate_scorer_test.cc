@@ -188,5 +188,69 @@ TEST(CandidateScorerTest, IsBetterThanIncorporatesNormalizedLcsInstructions) {
   EXPECT_FALSE(baseline.IsBetterThan(lcs_aligned));
 }
 
+TEST(CandidateScorerTest, ScoreInstructionsPopulatesDiffDiagnosticForTransposedRegistersAndSwaps) {
+  // Target:
+  //   0: addiu $t0, $a0, 1   (0x24880001)
+  //   1: addiu $t1, $a1, 2   (0x24A90002)
+  //   2: jr    $ra           (0x03E00008)
+  //   3: addu  $v0, $t0, $t1 (0x01091021)
+  std::vector<uint32_t> target_words = {
+      0x24880001,
+      0x24A90002,
+      0x03E00008,
+      0x01091021,
+  };
+  TargetFunction target;
+  target.name = "TransposedAndDelay";
+  target.vram = 0x80025C00;
+  target.raw_words = target_words;
+  auto target_insts_or = DecodeSequence(target_words, target.vram);
+  ASSERT_TRUE(target_insts_or.ok());
+  target.instructions = *std::move(target_insts_or);
+
+  CandidateScorer scorer;
+
+  // Compiled candidate with:
+  //   - transposed $t0 ($8) and $t1 ($9) on instructions 0 & 1, and
+  //   - unfilled delay slot (`nop` after `jr $ra`).
+  std::vector<uint32_t> compiled_words = {
+      0x24890001,  // addiu $t1, $a0, 1
+      0x24A80002,  // addiu $t0, $a1, 2
+      0x01281021,  // addu  $v0, $t1, $t0
+      0x03E00008,  // jr    $ra
+      0x00000000,  // nop
+  };
+  auto compiled_insts_or = DecodeSequence(compiled_words, target.vram);
+  ASSERT_TRUE(compiled_insts_or.ok());
+  std::vector<Instruction> compiled_insts = *std::move(compiled_insts_or);
+
+  CandidateScore score = scorer.ScoreInstructions(target, compiled_insts, compiled_words);
+  EXPECT_FALSE(score.raw_bit_exact);
+  EXPECT_FALSE(score.diff_diagnostic.mismatch_relative_positions.empty());
+  EXPECT_TRUE(score.diff_diagnostic.has_unfilled_delay_slot);
+
+  bool found_t0_t1_pair = false;
+  for (const auto& [r1, r2] : score.diff_diagnostic.transposed_register_pairs) {
+    if ((r1 == "$8" && r2 == "$9") || (r1 == "$9" && r2 == "$8")) {
+      found_t0_t1_pair = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_t0_t1_pair);
+
+  // Adjacent instruction swap detection:
+  std::vector<uint32_t> swapped_words = {
+      0x24A90002,  // addiu $t1, $a1, 2
+      0x24880001,  // addiu $t0, $a0, 1
+      0x03E00008,  // jr    $ra
+      0x01091021,  // addu  $v0, $t0, $t1
+  };
+  auto swapped_insts_or = DecodeSequence(swapped_words, target.vram);
+  ASSERT_TRUE(swapped_insts_or.ok());
+  std::vector<Instruction> swapped_insts = *std::move(swapped_insts_or);
+  CandidateScore swapped_score = scorer.ScoreInstructions(target, swapped_insts, swapped_words);
+  EXPECT_TRUE(swapped_score.diff_diagnostic.has_adjacent_insn_swap);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

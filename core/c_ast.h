@@ -750,6 +750,12 @@ class FunctionDeclaration {
   bool IsStatic() const { return is_static_; }
   FunctionOptimizationMode OptimizationMode() const { return optimization_mode_; }
   void SetOptimizationMode(FunctionOptimizationMode mode) { optimization_mode_ = mode; }
+  bool SuppressAllCseBarriers() const { return suppress_all_cse_barriers_; }
+  void SetSuppressAllCseBarriers(bool suppress) { suppress_all_cse_barriers_ = suppress; }
+  const std::set<std::string>& SuppressedCseBarrierVars() const {
+    return suppressed_cse_barrier_vars_;
+  }
+  std::set<std::string>& MutableSuppressedCseBarrierVars() { return suppressed_cse_barrier_vars_; }
 
   std::string Prototype() const;
   std::string ToString() const;
@@ -762,6 +768,8 @@ class FunctionDeclaration {
   std::unique_ptr<CompoundStatement> body_;
   bool is_static_;
   FunctionOptimizationMode optimization_mode_ = FunctionOptimizationMode::kAuto;
+  bool suppress_all_cse_barriers_ = false;
+  std::set<std::string> suppressed_cse_barrier_vars_;
 };
 
 // Holds symbols referenced across an AST function scope.

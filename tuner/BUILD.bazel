@@ -128,6 +128,7 @@ cc_library(
     srcs = ["candidate_scorer.cc"],
     hdrs = ["candidate_scorer.h"],
     deps = [
+        ":ast_mutator",
         "//core:candidate_compiler",
         "//core:mips",
         "//core:register_tracker",
@@ -140,6 +141,7 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
     ],
 )

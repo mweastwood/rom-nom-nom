@@ -1,8 +1,10 @@
 #include "tuner/candidate_scorer.h"
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -11,6 +13,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "core/candidate_compiler.h"
 #include "core/register_tracker.h"
 #include "differ/normalizer.h"
@@ -126,6 +129,145 @@ size_t CountTrailingSectionPaddingNops(uint32_t start_vram,
   return 0;
 }
 
+bool IsRegisterMoveInstruction(const Instruction& inst) {
+  if ((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kOr ||
+       inst.opcode == Opcode::kDaddu) &&
+      inst.rd.has_value() && inst.rs.has_value() && inst.rt.has_value() &&
+      (*inst.rt == Register::kZero || *inst.rs == Register::kZero) && *inst.rd != Register::kZero) {
+    return true;
+  }
+  return inst.opcode == Opcode::kMovS || inst.opcode == Opcode::kMovD;
+}
+
+bool IsAllocatableGpr(Register reg) {
+  uint8_t idx = static_cast<uint8_t>(reg);
+  return idx >= 2 && idx <= 25;
+}
+
+void RecordTransposedGprPair(const std::optional<Register>& compiled_reg,
+                             const std::optional<Register>& target_reg,
+                             std::set<std::pair<std::string, std::string>>* seen_pairs,
+                             std::vector<std::pair<std::string, std::string>>* out_pairs) {
+  if (!compiled_reg.has_value() || !target_reg.has_value() || *compiled_reg == *target_reg) {
+    return;
+  }
+  if (!IsAllocatableGpr(*compiled_reg) || !IsAllocatableGpr(*target_reg)) {
+    return;
+  }
+  std::pair<std::string, std::string> p(
+      absl::StrFormat("$%u", static_cast<unsigned>(*compiled_reg)),
+      absl::StrFormat("$%u", static_cast<unsigned>(*target_reg)));
+  if (seen_pairs->insert(p).second) {
+    out_pairs->push_back(std::move(p));
+  }
+}
+
+void RecordTransposedFprPair(const std::optional<FpRegister>& compiled_reg,
+                             const std::optional<FpRegister>& target_reg,
+                             std::set<std::pair<std::string, std::string>>* seen_pairs,
+                             std::vector<std::pair<std::string, std::string>>* out_pairs) {
+  if (!compiled_reg.has_value() || !target_reg.has_value() || *compiled_reg == *target_reg) {
+    return;
+  }
+  std::pair<std::string, std::string> p(
+      absl::StrFormat("$f%u", static_cast<unsigned>(*compiled_reg)),
+      absl::StrFormat("$f%u", static_cast<unsigned>(*target_reg)));
+  if (seen_pairs->insert(p).second) {
+    out_pairs->push_back(std::move(p));
+  }
+}
+
+void PopulateDiffDiagnostic(const AlignmentResult& alignment,
+                            absl::Span<const Instruction> target_instructions,
+                            absl::Span<const Instruction> compiled_instructions,
+                            DiffDiagnostic* out_diag) {
+  if (out_diag == nullptr || alignment.rows.empty()) return;
+  const double target_bytes =
+      std::max<double>(4.0, static_cast<double>(target_instructions.size() * 4));
+  const double compiled_bytes =
+      std::max<double>(4.0, static_cast<double>(compiled_instructions.size() * 4));
+
+  std::set<std::pair<std::string, std::string>> seen_reg_pairs;
+  for (size_t i = 0; i < alignment.rows.size(); ++i) {
+    const auto& row = alignment.rows[i];
+    if (row.kind == DiffRowKind::kMatch) {
+      continue;
+    }
+    double rel_pos = 0.5;
+    if (row.target.has_value()) {
+      rel_pos = std::clamp(static_cast<double>(row.target->func_offset) / target_bytes, 0.0, 1.0);
+    } else if (row.compiled.has_value()) {
+      rel_pos =
+          std::clamp(static_cast<double>(row.compiled->func_offset) / compiled_bytes, 0.0, 1.0);
+    }
+    if (out_diag->mismatch_relative_positions.empty() ||
+        std::abs(out_diag->mismatch_relative_positions.back() - rel_pos) >= 0.05) {
+      out_diag->mismatch_relative_positions.push_back(rel_pos);
+    }
+
+    if ((row.kind == DiffRowKind::kTargetOnly && row.target.has_value() &&
+         IsRegisterMoveInstruction(row.target->original)) ||
+        (row.kind == DiffRowKind::kCompiledOnly && row.compiled.has_value() &&
+         IsRegisterMoveInstruction(row.compiled->original))) {
+      out_diag->has_extra_or_missing_move = true;
+    }
+
+    if (row.target.has_value() && row.compiled.has_value()) {
+      const Instruction& t_inst = row.target->original;
+      const Instruction& c_inst = row.compiled->original;
+      if (t_inst.opcode == c_inst.opcode) {
+        RecordTransposedGprPair(c_inst.rd, t_inst.rd, &seen_reg_pairs,
+                                &out_diag->transposed_register_pairs);
+        RecordTransposedGprPair(c_inst.rs, t_inst.rs, &seen_reg_pairs,
+                                &out_diag->transposed_register_pairs);
+        RecordTransposedGprPair(c_inst.rt, t_inst.rt, &seen_reg_pairs,
+                                &out_diag->transposed_register_pairs);
+        RecordTransposedFprPair(c_inst.fd, t_inst.fd, &seen_reg_pairs,
+                                &out_diag->transposed_register_pairs);
+        RecordTransposedFprPair(c_inst.fs, t_inst.fs, &seen_reg_pairs,
+                                &out_diag->transposed_register_pairs);
+        RecordTransposedFprPair(c_inst.ft, t_inst.ft, &seen_reg_pairs,
+                                &out_diag->transposed_register_pairs);
+      } else if ((c_inst.IsNop() && !t_inst.IsNop()) || (!c_inst.IsNop() && t_inst.IsNop())) {
+        if (i > 0 && alignment.rows[i - 1].target.has_value() &&
+            alignment.rows[i - 1].target->original.HasDelaySlot()) {
+          out_diag->has_unfilled_delay_slot = true;
+        }
+      }
+      if (i + 1 < alignment.rows.size() && alignment.rows[i + 1].target.has_value() &&
+          alignment.rows[i + 1].compiled.has_value()) {
+        const Instruction& t_next = alignment.rows[i + 1].target->original;
+        const Instruction& c_next = alignment.rows[i + 1].compiled->original;
+        if ((t_inst.raw_word != c_inst.raw_word && t_inst.raw_word == c_next.raw_word &&
+             t_next.raw_word == c_inst.raw_word) ||
+            (t_inst.opcode != c_inst.opcode && t_inst.opcode == c_next.opcode &&
+             t_next.opcode == c_inst.opcode)) {
+          out_diag->has_adjacent_insn_swap = true;
+        }
+      }
+    }
+    if (i + 2 < alignment.rows.size() && alignment.rows[i + 1].kind == DiffRowKind::kMatch &&
+        ((alignment.rows[i].kind == DiffRowKind::kTargetOnly &&
+          alignment.rows[i + 2].kind == DiffRowKind::kCompiledOnly &&
+          alignment.rows[i].target.has_value() && alignment.rows[i + 2].compiled.has_value() &&
+          alignment.rows[i].target->original.opcode ==
+              alignment.rows[i + 2].compiled->original.opcode) ||
+         (alignment.rows[i].kind == DiffRowKind::kCompiledOnly &&
+          alignment.rows[i + 2].kind == DiffRowKind::kTargetOnly &&
+          alignment.rows[i].compiled.has_value() && alignment.rows[i + 2].target.has_value() &&
+          alignment.rows[i].compiled->original.opcode ==
+              alignment.rows[i + 2].target->original.opcode))) {
+      out_diag->has_adjacent_insn_swap = true;
+    }
+    if ((row.kind == DiffRowKind::kCompiledOnly && row.compiled.has_value() &&
+         row.compiled->original.IsNop()) ||
+        (row.kind == DiffRowKind::kTargetOnly && row.target.has_value() &&
+         row.target->original.IsNop())) {
+      out_diag->has_unfilled_delay_slot = true;
+    }
+  }
+}
+
 }  // namespace
 
 CandidateScore CandidateScorer::ScoreInstructions(
@@ -200,6 +342,10 @@ CandidateScore CandidateScorer::ScoreInstructions(
   score.compiled_instruction_count = alignment.stats.compiled_instruction_count;
   score.normalized_exact = alignment.stats.IsBitExactMatch();
   score.patched_words.assign(patched_words.begin(), patched_words.end());
+  if (!score.normalized_exact) {
+    PopulateDiffDiagnostic(alignment, target_instructions, compiled_instructions,
+                           &score.diff_diagnostic);
+  }
 
   if (!target_words.empty() && !patched_words.empty()) {
     FunctionStructuralComparison structural =

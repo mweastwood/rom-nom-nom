@@ -175,15 +175,36 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
     }
   }
 
-  // Phase 2: Greedy AST Mutation Search (steepest-ascent per round)
+  // Phase 2: Greedy AST Mutation Search (steepest-ascent per round with 2-step plateau lookahead)
   if (!result.best_score.raw_bit_exact && options.explore_ast_mutations) {
+    auto preserves_structural_invariants = [](const CandidateScore& cand,
+                                              const CandidateScore& ref) {
+      if (cand.IsStructurallyIsomorphic() != ref.IsStructurallyIsomorphic()) {
+        return cand.IsStructurallyIsomorphic();
+      }
+      if (cand.StructuralMatchCount() != ref.StructuralMatchCount()) {
+        return cand.StructuralMatchCount() > ref.StructuralMatchCount();
+      }
+      if (cand.frame_size_matches != ref.frame_size_matches) return cand.frame_size_matches;
+      if (cand.saved_registers_match != ref.saved_registers_match) {
+        return cand.saved_registers_match;
+      }
+      return true;
+    };
     for (size_t round = 0; round < options.max_rounds && !result.best_score.raw_bit_exact;
          ++round) {
       const FunctionDeclaration round_base_ast = result.best_ast->Clone();
-      auto candidate_steps =
-          AstMutator::DiscoverMutations(round_base_ast, options.max_ast_candidates_per_round);
+      auto candidate_steps = AstMutator::DiscoverMutations(
+          round_base_ast, options.max_ast_candidates_per_round, &result.best_score.diff_diagnostic);
       bool improved_in_round = false;
       AstMutationStep round_best_step;
+      struct RunnerUpCandidate {
+        FunctionDeclaration ast;
+        CandidateScore score;
+        AstMutationStep step;
+      };
+      std::vector<RunnerUpCandidate> runners_up;
+      constexpr size_t kMaxPlateauRunnersUp = 3;
       for (const auto& step : candidate_steps) {
         FunctionDeclaration mutated = AstMutator::ApplyMutation(round_base_ast, step);
         std::string mutated_c = emit_c_fn(mutated);
@@ -202,6 +223,59 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
           improved_in_round = true;
           improved_in_ast_search = true;
           if (result.best_score.raw_bit_exact) break;
+        } else if (!improved_in_round &&
+                   preserves_structural_invariants(*candidate_score_or, result.best_score)) {
+          if (runners_up.size() < kMaxPlateauRunnersUp) {
+            runners_up.push_back(RunnerUpCandidate{std::move(mutated), *candidate_score_or, step});
+          } else {
+            size_t worst_idx = 0;
+            for (size_t r = 1; r < runners_up.size(); ++r) {
+              if (runners_up[worst_idx].score.IsBetterThan(runners_up[r].score)) {
+                worst_idx = r;
+              }
+            }
+            if (candidate_score_or->IsBetterThan(runners_up[worst_idx].score)) {
+              runners_up[worst_idx] =
+                  RunnerUpCandidate{std::move(mutated), *candidate_score_or, step};
+            }
+          }
+        }
+      }
+      if (!improved_in_round && !runners_up.empty() && round + 1 < options.max_rounds) {
+        const size_t lookahead_limit = std::min<size_t>(16, options.max_ast_candidates_per_round);
+        AstMutationStep chosen_runner_step;
+        AstMutationStep lookahead_best_step;
+        for (const auto& runner : runners_up) {
+          auto lookahead_steps = AstMutator::DiscoverMutations(runner.ast, lookahead_limit,
+                                                               &runner.score.diff_diagnostic);
+          for (const auto& step2 : lookahead_steps) {
+            FunctionDeclaration mutated2 = AstMutator::ApplyMutation(runner.ast, step2);
+            std::string mutated2_c = emit_c_fn(mutated2);
+            if (!evaluated_candidates
+                     .insert(make_evaluation_key(result.winning_c_flags, mutated2_c))
+                     .second) {
+              continue;
+            }
+            auto score2_or = score_fn(mutated2_c, result.winning_c_flags);
+            if (!score2_or.ok()) continue;
+            if (score2_or->IsBetterThan(result.best_score)) {
+              result.best_score = *score2_or;
+              *result.best_ast = std::move(mutated2);
+              result.best_c_code = std::move(mutated2_c);
+              chosen_runner_step = runner.step;
+              lookahead_best_step = step2;
+              result.improved_over_baseline = true;
+              improved_in_round = true;
+              improved_in_ast_search = true;
+              if (result.best_score.raw_bit_exact) break;
+            }
+          }
+          if (result.best_score.raw_bit_exact) break;
+        }
+        if (improved_in_round) {
+          result.applied_mutations.push_back(chosen_runner_step);
+          result.applied_mutations.push_back(lookahead_best_step);
+          continue;
         }
       }
       if (!improved_in_round) break;
@@ -220,8 +294,8 @@ absl::StatusOr<FunctionSearchResult> TunerPipeline::SearchFunctionCandidates(
          polish_round < options.max_polish_rounds && !result.best_score.raw_bit_exact;
          ++polish_round) {
       const FunctionDeclaration polish_base_ast = result.best_ast->Clone();
-      auto all_steps =
-          AstMutator::DiscoverMutations(polish_base_ast, options.max_polish_candidates);
+      auto all_steps = AstMutator::DiscoverMutations(polish_base_ast, options.max_polish_candidates,
+                                                     &result.best_score.diff_diagnostic);
       std::vector<AstMutationStep> polish_steps;
       polish_steps.reserve(all_steps.size());
       for (const auto& step : all_steps) {

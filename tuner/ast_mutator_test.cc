@@ -1050,5 +1050,87 @@ TEST(AstMutatorTest, ReorderLocalDeclsSwapsRegisterAnnotationsAndPreservesOptimi
   EXPECT_TRUE(absl::StrContains(all_unpinned.ToString(), "asm(\"$30\")"));
 }
 
+TEST(AstMutatorTest, NonAdjacentRegisterPairSwapsDirectRePinAndCseBarrierSuppression) {
+  auto body = std::make_unique<CompoundStatement>();
+  // site 0: temp_t0 ($8)
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_t0", nullptr, std::nullopt, "$8"));
+  // site 1: temp_s0 ($16) - sits between temp_t0 and temp_t2!
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_s0", nullptr, std::nullopt, "$16"));
+  // site 2: temp_t2 ($10)
+  body->AddStatement(
+      CStatement::VariableDeclaration(CType::S32(), "temp_t2", nullptr, std::nullopt, "$10"));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_s0"), CExpression::Identifier("D_80100000"))));
+  body->AddStatement(CStatement::Expression(CExpression::Assignment(
+      "=", CExpression::Identifier("temp_t0"), CExpression::Identifier("D_80100000"))));
+  body->AddStatement(CStatement::Return(
+      CExpression::Binary("+", CExpression::Identifier("temp_t0"),
+                          CExpression::Binary("+", CExpression::Identifier("temp_s0"),
+                                              CExpression::Identifier("temp_t2")))));
+
+  FunctionDeclaration func(CType::S32(), "NonAdjFunc", {}, std::move(body),
+                           /*is_static=*/false, FunctionOptimizationMode::kAuto);
+
+  // 1. Non-adjacent pair swap between site 0 (temp_t0, $8) and site 2 (temp_t2, $10) via param=12.
+  AstMutationStep swap_non_adj;
+  swap_non_adj.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  swap_non_adj.set_site_index(0);
+  swap_non_adj.set_param(12);  // 10 + 2
+  FunctionDeclaration swapped = AstMutator::ApplyMutation(func, swap_non_adj);
+  EXPECT_EQ(swapped.OptimizationMode(), FunctionOptimizationMode::kO2Standard);
+  EXPECT_TRUE(absl::StrContains(swapped.ToString(), "register s32 temp_t0 asm(\"$10\");"))
+      << swapped.ToString();
+  EXPECT_TRUE(absl::StrContains(swapped.ToString(), "register s32 temp_t2 asm(\"$8\");"))
+      << swapped.ToString();
+
+  // 2. Direct hardware-register re-pinning of site 0 (temp_t0) to $9 (`param = 109`).
+  AstMutationStep repin_to_t1;
+  repin_to_t1.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  repin_to_t1.set_site_index(0);
+  repin_to_t1.set_param(109);
+  FunctionDeclaration repinned = AstMutator::ApplyMutation(func, repin_to_t1);
+  EXPECT_TRUE(absl::StrContains(repinned.ToString(), "register s32 temp_t0 asm(\"$9\");"))
+      << repinned.ToString();
+
+  // 3. CSE barrier suppression (`param = 4` for whole function, `param = 5` for site 1 `temp_s0`).
+  AstMutationStep suppress_var;
+  suppress_var.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  suppress_var.set_site_index(1);
+  suppress_var.set_param(5);
+  FunctionDeclaration var_suppressed = AstMutator::ApplyMutation(func, suppress_var);
+  EXPECT_EQ(var_suppressed.SuppressedCseBarrierVars().count("temp_s0"), 1u);
+
+  AstMutationStep suppress_all;
+  suppress_all.set_kind(AST_MUTATION_TOGGLE_REGISTER_ANNOTATION);
+  suppress_all.set_site_index(0);
+  suppress_all.set_param(4);
+  FunctionDeclaration all_suppressed = AstMutator::ApplyMutation(func, suppress_all);
+  EXPECT_TRUE(all_suppressed.SuppressAllCseBarriers());
+
+  // 4. Diff-guided mutation discovery promotes exact transposed register pair ($8, $9) to the
+  // front of discovered mutations.
+  DiffDiagnostic diag;
+  diag.transposed_register_pairs.push_back({"$8", "$9"});
+  diag.has_unfilled_delay_slot = true;
+  auto guided = AstMutator::DiscoverMutations(func, /*max_mutations=*/8, &diag);
+  ASSERT_FALSE(guided.empty());
+  bool found_repin_t1 = false;
+  bool found_cse_suppress = false;
+  for (const auto& step : guided) {
+    if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION && step.site_index() == 0 &&
+        step.param() == 109) {
+      found_repin_t1 = true;
+    }
+    if (step.kind() == AST_MUTATION_TOGGLE_REGISTER_ANNOTATION &&
+        (step.param() == 4 || step.param() == 5)) {
+      found_cse_suppress = true;
+    }
+  }
+  EXPECT_TRUE(found_repin_t1);
+  EXPECT_TRUE(found_cse_suppress);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

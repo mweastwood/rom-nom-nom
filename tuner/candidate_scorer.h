@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -16,6 +17,7 @@
 #include "core/target_extractor.h"
 #include "differ/sequence_aligner.h"
 #include "fuzzer/differential_fuzzer.h"
+#include "tuner/ast_mutator.h"
 
 namespace rom_nom_nom {
 
@@ -32,6 +34,7 @@ struct CandidateScore {
   size_t target_instruction_count = 0;
   size_t compiled_instruction_count = 0;
   std::vector<uint32_t> patched_words;
+  DiffDiagnostic diff_diagnostic;
 
   bool IsStructurallyIsomorphic() const {
     return frame_size_matches && saved_registers_match && cfg_topology_matches;

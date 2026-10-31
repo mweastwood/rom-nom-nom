@@ -59,7 +59,8 @@ class AstCodegenLowerer {
   // slot filling.
   static std::unique_ptr<CompoundStatement> DisambiguateCalleeSavedAndGlobalLoads(
       const CompoundStatement& body, const std::set<std::string>& external_data_symbols,
-      bool has_calls);
+      bool has_calls, bool suppress_all_cse_barriers = false,
+      const std::set<std::string>& suppressed_barrier_vars = {});
 
   // Normalizes global array symbol references, resolves cross-function global type conflicts, and
   // rewrites promoted scalar cast-dereference globals into direct typed symbol accesses.
