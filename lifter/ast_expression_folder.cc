@@ -3487,11 +3487,20 @@ struct FolderContext {
                   ifs_ret.MutableElseBranch()->Kind() == CStatementKind::kCompoundStatement) {
                 auto& then_c = static_cast<CompoundStatement&>(*ifs_ret.MutableThenBranch());
                 auto& else_c = static_cast<CompoundStatement&>(*ifs_ret.MutableElseBranch());
-                if (then_c.Statements().size() == 1 &&
-                    then_c.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement &&
+                const size_t dw_idx_in_then =
+                    (then_c.Statements().size() == 2 &&
+                     then_c.Statements()[1]->Kind() == CStatementKind::kDoWhileStatement &&
+                     else_c.Statements().size() == 1 &&
+                     then_c.Statements()[0]->ToString() == else_c.Statements()[0]->ToString())
+                        ? 1
+                        : 0;
+                if (((then_c.Statements().size() == 1 &&
+                      then_c.Statements()[0]->Kind() == CStatementKind::kDoWhileStatement) ||
+                     dw_idx_in_then == 1) &&
                     else_c.Statements().size() == 1 &&
                     else_c.Statements()[0]->Kind() == CStatementKind::kExpressionStatement) {
-                  auto& dws = static_cast<DoWhileStatement&>(*then_c.MutableStatements()[0]);
+                  auto& dws =
+                      static_cast<DoWhileStatement&>(*then_c.MutableStatements()[dw_idx_in_then]);
                   const auto& else_es =
                       static_cast<const ExpressionStatement&>(*else_c.Statements()[0]);
                   if (dws.MutableBody()->Kind() == CStatementKind::kCompoundStatement &&
@@ -3510,6 +3519,9 @@ struct FolderContext {
                         CountUses(dw_comp, "v0") == 0) {
                       auto ret_rhs = else_a.Rhs().Clone();
                       dw_comp.MutableStatements().pop_back();
+                      if (dw_idx_in_then == 1) {
+                        then_c.MutableStatements().erase(then_c.MutableStatements().begin());
+                      }
                       stmts[i] = CStatement::If(ifs_ret.Condition().Clone(),
                                                 ifs_ret.MutableThenBranch()->Clone(), nullptr);
                       stmts[i + 1] = CStatement::Return(std::move(ret_rhs));

@@ -490,13 +490,14 @@ TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsIntraLoopAndAcyclicJoinBl
 
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
-  ASSERT_EQ(pipeline.PassCount(), 6u);
-  EXPECT_EQ(pipeline.Passes()[0]->Name(), "TargetHeaderDelaySlotReconcilerPass");
-  EXPECT_EQ(pipeline.Passes()[1]->Name(), "RelaxDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[2]->Name(), "EagerThreadDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[3]->Name(), "CrossJumpTailDuplicatorPass");
-  EXPECT_EQ(pipeline.Passes()[4]->Name(), "SimpleDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[5]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  ASSERT_EQ(pipeline.PassCount(), 7u);
+  EXPECT_EQ(pipeline.Passes()[0]->Name(), "SimpleDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[1]->Name(), "TargetHeaderDelaySlotReconcilerPass");
+  EXPECT_EQ(pipeline.Passes()[2]->Name(), "RelaxDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[3]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[4]->Name(), "CrossJumpTailDuplicatorPass");
+  EXPECT_EQ(pipeline.Passes()[5]->Name(), "SimpleDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[6]->Name(), "EagerThreadDelaySlotUnschedulerPass");
 }
 
 TEST(CfgDeReorgTest, CrossJumpTailDuplicatorDuplicatesFallthroughTailIntoJumpPredecessors) {

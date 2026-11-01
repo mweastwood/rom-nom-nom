@@ -1366,7 +1366,41 @@ bool TargetHeaderDelaySlotReconcilerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           BasicBlock* mut_taken = cfg->GetMutableBlock(succ_taken);
           if (mut_head != nullptr && mut_taken != nullptr) {
             if (mut_head->instructions.size() == 1) {
-              RetargetBranchEdge(cfg, block.id, succ_taken, *head_block_id);
+              if (mut_taken->predecessors.size() == 2) {
+                Instruction moved_inst = mut_head->instructions.front();
+                mut_taken->instructions.insert(mut_taken->instructions.begin(), moved_inst);
+                mut_taken->start_vram = moved_inst.vram;
+                std::vector<uint32_t> head_preds = mut_head->predecessors;
+                for (uint32_t hp_id : head_preds) {
+                  BasicBlock* hp_blk = cfg->GetMutableBlock(hp_id);
+                  if (hp_blk == nullptr) continue;
+                  for (uint32_t& s : hp_blk->successors) {
+                    if (s == *head_block_id) s = succ_taken;
+                  }
+                  for (auto& edge : hp_blk->outgoing_edges) {
+                    if (edge.to_block_id == *head_block_id) edge.to_block_id = succ_taken;
+                  }
+                  if (std::find(mut_taken->predecessors.begin(), mut_taken->predecessors.end(),
+                                hp_id) == mut_taken->predecessors.end()) {
+                    mut_taken->predecessors.push_back(hp_id);
+                  }
+                }
+                for (auto& edge : cfg->MutableEdges()) {
+                  if (edge.to_block_id == *head_block_id) {
+                    edge.to_block_id = succ_taken;
+                  }
+                }
+                mut_taken->predecessors.erase(
+                    std::remove(mut_taken->predecessors.begin(), mut_taken->predecessors.end(),
+                                *head_block_id),
+                    mut_taken->predecessors.end());
+                mut_head->predecessors.clear();
+                mut_head->successors.clear();
+                mut_head->outgoing_edges.clear();
+                cfg->RebuildVramIndex();
+              } else {
+                RetargetBranchEdge(cfg, block.id, succ_taken, *head_block_id);
+              }
             } else {
               Instruction moved_inst = mut_head->instructions.back();
               mut_head->instructions.pop_back();
@@ -1864,7 +1898,13 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
                    !pred_blk->predecessors.empty()) ||
                   uses_preserved_to_pred());
         };
+        const bool is_inner_loop_header_exit_to_after_latch_follow =
+            enclosing_loop != nullptr && enclosing_loop->header == block.id &&
+            block.instructions.size() == 2 && !term.IsBranchLikely() && pred_blk != nullptr &&
+            std::any_of(pred_blk->predecessors.begin(), pred_blk->predecessors.end(),
+                        [&](uint32_t lp) { return enclosing_loop->IsLatch(lp); });
         const bool cross_loop_valid =
+            !is_inner_loop_header_exit_to_after_latch_follow &&
             (has_pre_branch_conflict ||
              (pred_blk != nullptr && pred_blk->instructions.size() == 1)) &&
             pred_blk != nullptr && !jump_table_target_vrams.contains(pred_blk->start_vram) &&
@@ -2824,6 +2864,18 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           const bool enters_loop = (ft_loop != nullptr && !ft_loop->Contains(block.id)) ||
                                    (next_ft_loop != nullptr && !next_ft_loop->Contains(block.id));
           if (enters_loop) {
+            if (target_blk->predecessors.size() == 1 && target_blk->predecessors[0] == block.id &&
+                ((delay_inst.opcode == Opcode::kAddu && delay_inst.rs == Register::kZero &&
+                  delay_inst.rt == Register::kZero) ||
+                 (delay_inst.opcode == Opcode::kAddiu && delay_inst.rs == Register::kZero &&
+                  delay_inst.immediate == 0)) &&
+                delay_inst.rd.has_value() && *delay_inst.rd >= Register::kS0 &&
+                *delay_inst.rd <= Register::kS7) {
+              block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+              block.instructions.insert(block.instructions.begin(), delay_inst);
+              changed = true;
+              continue;
+            }
             all_pre_branch_ineligible = false;
           }
         }
@@ -3644,8 +3696,17 @@ bool CrossJumpTailDuplicatorPass::Run(ControlFlowGraph* cfg, CfgAnalysisManager*
             if (!pred_delay.IsNop()) {
               pred_blk->instructions.push_back(pred_delay);
             }
-            pred_blk->instructions.insert(pred_blk->instructions.end(), tail_all_insts.begin(),
-                                          tail_all_insts.end());
+            if (has_non_nop_tail_delay && tail_all_insts.size() >= 2 &&
+                tail_all_insts[tail_all_insts.size() - 2].IsReturn()) {
+              pred_blk->instructions.insert(pred_blk->instructions.end(), tail_body_insts.begin(),
+                                            tail_body_insts.end());
+              pred_blk->instructions.push_back(tail_all_insts.back());
+              pred_blk->instructions.push_back(tail_all_insts[tail_all_insts.size() - 2]);
+              pred_blk->instructions.push_back(MakeNopInstruction(tail_all_insts.back().vram));
+            } else {
+              pred_blk->instructions.insert(pred_blk->instructions.end(), tail_all_insts.begin(),
+                                            tail_all_insts.end());
+            }
             RemoveBranchEdge(cfg, pred_id, tail_block_id);
             iter_changed = true;
           } else if (is_jump_tail) {
