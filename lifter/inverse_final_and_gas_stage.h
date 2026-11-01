@@ -28,6 +28,12 @@ class InverseFinalAndGasLifter {
   static RtlControlFlowGraph LiftToRtlCfg(const ControlFlowGraph& input_cfg,
                                           const StackFrameAnalysis* frame_analysis = nullptr);
 
+  // Lifts a Stage 2 machine `ControlFlowGraph` into a canonical `.sched2` `RtlControlFlowGraph` by
+  // inverting GCC 2.7.2 Stage 11 (`jump.c:jump_optimize` cross-jumping, post-reload jump diamond
+  // simplifications, and `delete_noop_moves`).
+  static RtlControlFlowGraph LiftToSched2RtlCfg(const ControlFlowGraph& input_cfg,
+                                                const StackFrameAnalysis* frame_analysis = nullptr);
+
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);
 

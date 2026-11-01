@@ -53,6 +53,28 @@ Instruction MakeJrRa(uint32_t vram) {
   return inst;
 }
 
+Instruction MakeAddu(Register rd, Register rs, Register rt, uint32_t vram) {
+  Instruction inst;
+  inst.raw_word = 0x00000021u;
+  inst.opcode = Opcode::kAddu;
+  inst.rd = rd;
+  inst.rs = rs;
+  inst.rt = rt;
+  inst.vram = vram;
+  return inst;
+}
+
+Instruction MakeLw(Register rt, int16_t offset, Register base, uint32_t vram) {
+  Instruction inst;
+  inst.raw_word = 0x8C000000u;
+  inst.opcode = Opcode::kLw;
+  inst.rt = rt;
+  inst.rs = base;
+  inst.immediate = offset;
+  inst.vram = vram;
+  return inst;
+}
+
 Instruction MakeNop(uint32_t vram) {
   Instruction inst;
   inst.opcode = Opcode::kSll;
@@ -213,6 +235,52 @@ TEST(DecompilationContextTest, InverseCompilerPipelineExecutesAllStagesInOrderAn
   EXPECT_EQ(stage0_rtl_insns, 1u);
   ASSERT_TRUE(context.HasAst());
   EXPECT_EQ(context.Ast().Name(), "add_imm");
+}
+
+TEST(DecompilationContextTest, Stage2RecoversSched2CallerArgMoveBeforeFirstCall) {
+  LoadedFunction func;
+  func.name = "caller_arg_move_fn";
+  func.vram = 0x80010300;
+  // Function saves $a0 in $s0, calls helper($a0), then uses $s0 after the call.
+  // In `.jump2`, `jump.c:delete_noop_moves` deletes `(set (reg:SI 4 a0) (reg:SI 16 s0))` before
+  // the call because `$a0` still holds the incoming argument value; Stage 2 (`.sched2`) restores
+  // that move instruction.
+  func.instructions = {
+      MakeAddiu(Register::kSp, Register::kSp, -24, 0x80010300),
+      MakeSw(Register::kRa, 20, Register::kSp, 0x80010304),
+      MakeSw(Register::kS0, 16, Register::kSp, 0x80010308),
+      MakeJal(0x80020000, 0x8001030C),
+      MakeAddu(Register::kS0, Register::kA0, Register::kZero, 0x80010310),
+      MakeAddu(Register::kV0, Register::kV0, Register::kS0, 0x80010314),
+      MakeLw(Register::kRa, 20, Register::kSp, 0x80010318),
+      MakeLw(Register::kS0, 16, Register::kSp, 0x8001031C),
+      MakeJrRa(0x80010320),
+      MakeAddiu(Register::kSp, Register::kSp, 24, 0x80010324),
+  };
+
+  DecompilationContext context(func);
+  InverseCompilerPipeline pipeline = InverseCompilerPipeline::BuildDefaultPipeline();
+
+  RtlControlFlowGraph stage1_rtl;
+  RtlControlFlowGraph stage2_rtl;
+  ASSERT_TRUE(pipeline
+                  .Run(&context,
+                       [&](const InverseStageDescriptor& desc, const DecompilationContext& ctx) {
+                         if (desc.id == InverseStageId::kStage01DbrDelaySlot) {
+                           stage1_rtl = ctx.RtlCfg();
+                         } else if (desc.id == InverseStageId::kStage02Jump2CrossJump) {
+                           stage2_rtl = ctx.RtlCfg();
+                         }
+                       })
+                  .ok());
+
+  ASSERT_EQ(stage1_rtl.rpo_blocks.size(), 1u);
+  ASSERT_EQ(stage2_rtl.rpo_blocks.size(), 1u);
+  // Stage 1 (.jump2) has 6 RTL insns: sp-alloc, sw ra, sw s0, s0=a0, jal, v0=v0+s0.
+  // Stage 2 (.sched2) restores a0=s0 before the call, yielding 7 RTL insns.
+  EXPECT_EQ(stage1_rtl.rpo_blocks[0].instructions.size(), 6u);
+  ASSERT_EQ(stage2_rtl.rpo_blocks[0].instructions.size(), 7u);
+  EXPECT_EQ(stage2_rtl.rpo_blocks[0].instructions[4], "addu  $a0, $s0, $zero");
 }
 
 }  // namespace

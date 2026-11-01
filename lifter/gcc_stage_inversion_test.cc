@@ -127,18 +127,6 @@ std::string FormatActiveInstructionForStage1Compare(const Instruction& inst) {
       inst.ft.has_value() ? static_cast<int>(*inst.ft) : -1);
 }
 
-size_t CountActiveInstructionsInCfg(const ControlFlowGraph& cfg) {
-  size_t count = 0;
-  for (const auto& blk : cfg.Blocks()) {
-    for (const auto& inst : blk.instructions) {
-      if (!inst.IsNop()) {
-        ++count;
-      }
-    }
-  }
-  return count;
-}
-
 size_t CountBranchesInCfg(const ControlFlowGraph& cfg) {
   size_t branches = 0;
   for (const auto& blk : cfg.Blocks()) {
@@ -604,6 +592,20 @@ class GccStageInversionSuiteAccumulator {
         }
       }
     }
+    if (direct_rtl_exact_match[1] < direct_rtl_present_count[1]) {
+      absl::StrAppend(
+          &out,
+          "--------------------------------------------------------------------------------\n"
+          "STAGE 2 DIRECT CFG -> .sched2 RTL MISMATCHES (ALL):\n");
+      for (const auto& r : results_) {
+        const auto& dc = r.direct_rtl_stage_comparisons[1];
+        if (dc.pass_present && !dc.MatchesExactly()) {
+          absl::StrAppendFormat(&out, "  %-48s | blks=%zu/%zu insns=%zu/%zu | %s\n", r.test_name,
+                                dc.actual_block_count, dc.expected_block_count,
+                                dc.actual_insn_count, dc.expected_insn_count, dc.mismatch_detail);
+        }
+      }
+    }
     absl::StrAppend(
         &out, "================================================================================\n");
     return out;
@@ -812,23 +814,22 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
             }
           }
         }
-        res.direct_cfg_stage2.cfg_before_tail_dup_blocks = stage1_unscheduled_cfg.Blocks().size();
-        res.direct_cfg_stage2.cfg_before_tail_dup_active_insns =
-            CountActiveInstructionsInCfg(stage1_unscheduled_cfg);
+        res.direct_cfg_stage2.cfg_before_tail_dup_blocks = ctx.RtlCfg().BlockCount();
+        res.direct_cfg_stage2.cfg_before_tail_dup_active_insns = ctx.RtlCfg().TotalInsnCount();
       } else if (stage.id == InverseStageId::kStage02Jump2CrossJump) {
-        CfgAnalysisManager stage2_analyses(&stage1_unscheduled_cfg);
-        CrossJumpTailDuplicatorPass tail_dup_pass;
-        tail_dup_pass.Run(&stage1_unscheduled_cfg, &stage2_analyses);
-        res.direct_cfg_stage2.cfg_after_tail_dup_blocks = stage1_unscheduled_cfg.Blocks().size();
-        res.direct_cfg_stage2.cfg_after_tail_dup_active_insns =
-            CountActiveInstructionsInCfg(stage1_unscheduled_cfg);
+        res.direct_cfg_stage2.cfg_after_tail_dup_blocks = ctx.RtlCfg().BlockCount();
+        res.direct_cfg_stage2.cfg_after_tail_dup_active_insns = ctx.RtlCfg().TotalInsnCount();
         const RtlFunctionDump* orig_sched2 =
             orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kSched2);
         const RtlFunctionDump* orig_jump2 =
             orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kJump2);
         if (orig_sched2 != nullptr && orig_jump2 != nullptr) {
-          res.direct_cfg_stage2.sched2_active_insns = orig_sched2->ActiveInsnCount();
-          res.direct_cfg_stage2.jump2_active_insns = orig_jump2->ActiveInsnCount();
+          const RtlControlFlowGraph exp_sched2 =
+              GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(*orig_sched2);
+          const RtlControlFlowGraph exp_jump2 =
+              GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(*orig_jump2);
+          res.direct_cfg_stage2.sched2_active_insns = exp_sched2.TotalInsnCount();
+          res.direct_cfg_stage2.jump2_active_insns = exp_jump2.TotalInsnCount();
           res.direct_cfg_stage2.gcc_jump2_modified_rtl = DidGccStageTransformRtl(
               orig_dump, test_case.function_name, RtlPassKind::kSched2, RtlPassKind::kJump2);
           const ptrdiff_t gcc_merged_insns =
@@ -955,6 +956,15 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
       << ": remaining_branch_likely=" << res.direct_cfg_stage1.remaining_branch_likely
       << ", remaining_non_nop_delay_slots=" << res.direct_cfg_stage1.remaining_non_nop_delay_slots
       << ", detail=" << res.direct_cfg_stage1.mismatch_detail;
+  for (size_t s : {size_t{0}, size_t{1}, size_t{2}}) {
+    const RtlCfgPassComparison& rtl_cmp =
+        (s == 0) ? res.direct_rtl_stage0_comparison : res.direct_rtl_stage_comparisons[s - 1];
+    if (rtl_cmp.pass_present) {
+      EXPECT_TRUE(rtl_cmp.MatchesExactly())
+          << "Direct CFG -> RTL Stage " << s << " failed exact match for " << test_case.test_name
+          << ": " << rtl_cmp.mismatch_detail;
+    }
+  }
   const auto& descriptors = InverseCompilerPipeline::AllStageDescriptors();
   for (size_t i = 0; i < 12; ++i) {
     const auto& desc = descriptors[i + 1];

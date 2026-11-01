@@ -106,8 +106,8 @@ absl::Status InverseJump2CrossJumpStage::Run(DecompilationContext* context) {
   ControlFlowGraph stage2_cfg = context->Cfg();
   CfgAnalysisManager stage2_analyses(&stage2_cfg);
   CfgDeReorg::UnscheduleDelaySlotsOnly(&stage2_cfg, &stage2_analyses);
-  context->SetRtlCfg(
-      InverseFinalAndGasLifter::LiftToRtlCfg(stage2_cfg, &context->FrameLayout().RawAnalysis()));
+  context->SetRtlCfg(InverseFinalAndGasLifter::LiftToSched2RtlCfg(
+      stage2_cfg, &context->FrameLayout().RawAnalysis()));
   return absl::OkStatus();
 }
 
