@@ -669,6 +669,33 @@ cc_library(
 )
 
 cc_library(
+    name = "rtl_cfg_builder",
+    srcs = ["rtl_cfg_builder.cc"],
+    hdrs = ["rtl_cfg_builder.h"],
+    deps = [
+        ":rtl_cfg",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "rtl_def_use_analysis",
+    srcs = ["rtl_def_use_analysis.cc"],
+    hdrs = ["rtl_def_use_analysis.h"],
+    deps = [
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
     name = "inverse_final_and_gas_stage",
     srcs = ["inverse_final_and_gas_stage.cc"],
     hdrs = ["inverse_final_and_gas_stage.h"],
@@ -679,11 +706,68 @@ cc_library(
         "//core:control_flow_graph",
         "//core:division_pattern",
         "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "inverse_jump2_cross_jump_stage",
+    srcs = ["inverse_jump2_cross_jump_stage.cc"],
+    hdrs = ["inverse_jump2_cross_jump_stage.h"],
+    deps = [
+        ":inverse_final_and_gas_stage",
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        ":stack_frame_analyzer",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_library(
+    name = "inverse_sched2_post_reload_stage",
+    srcs = ["inverse_sched2_post_reload_stage.cc"],
+    hdrs = ["inverse_sched2_post_reload_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        ":rtl_def_use_analysis",
+        ":stack_frame_analyzer",
+        "//core:mips",
         "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "inverse_greg_reload_stage",
+    srcs = ["inverse_greg_reload_stage.cc"],
+    hdrs = ["inverse_greg_reload_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        ":rtl_def_use_analysis",
+        ":stack_frame_analyzer",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_library(
+    name = "inverse_sched1_pre_alloc_stage",
+    srcs = ["inverse_sched1_pre_alloc_stage.cc"],
+    hdrs = ["inverse_sched1_pre_alloc_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        ":rtl_def_use_analysis",
+        "//core:mips",
     ],
 )
 
@@ -720,6 +804,10 @@ cc_library(
         ":decompilation_context",
         ":dominator_tree",
         ":inverse_final_and_gas_stage",
+        ":inverse_greg_reload_stage",
+        ":inverse_jump2_cross_jump_stage",
+        ":inverse_sched1_pre_alloc_stage",
+        ":inverse_sched2_post_reload_stage",
         ":loop_analyzer",
         ":rtl_cfg",
         "@abseil-cpp//absl/status",

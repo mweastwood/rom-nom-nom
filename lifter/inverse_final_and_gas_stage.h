@@ -2,11 +2,9 @@
 #define LIFTER_INVERSE_FINAL_AND_GAS_STAGE_H_
 
 #include <string>
-#include <string_view>
 
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
-#include "core/symbol_registry.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/stack_frame_analyzer.h"
 
@@ -29,31 +27,6 @@ class InverseFinalAndGasLifter {
   // Lifts a machine `ControlFlowGraph` into a canonical `RtlControlFlowGraph`.
   static RtlControlFlowGraph LiftToRtlCfg(const ControlFlowGraph& input_cfg,
                                           const StackFrameAnalysis* frame_analysis = nullptr);
-
-  // Lifts a Stage 2 machine `ControlFlowGraph` into a canonical `.sched2` `RtlControlFlowGraph` by
-  // inverting GCC 2.7.2 Stage 11 (`jump.c:jump_optimize` cross-jumping, post-reload jump diamond
-  // simplifications, and `delete_noop_moves`).
-  static RtlControlFlowGraph LiftToSched2RtlCfg(const ControlFlowGraph& input_cfg,
-                                                const StackFrameAnalysis* frame_analysis = nullptr);
-
-  // Inverts GCC 2.7.2 Stage 10 (`function.c:thread_prologue_and_epilogue_insns` and
-  // `sched.c:schedule_insns` post-reload scheduling) to transform a `.sched2` `RtlControlFlowGraph`
-  // into a canonical `.greg` `RtlControlFlowGraph`.
-  static void InvertSched2ToGregRtlCfg(RtlControlFlowGraph* cfg,
-                                       const StackFrameAnalysis* frame_analysis = nullptr,
-                                       const SymbolIndex* symbols = nullptr,
-                                       std::string_view function_name = "");
-
-  // Inverts GCC 2.7.2 Stage 9 (`global.c:global_alloc` and `reload1.c:reload` /
-  // `emit_reload_insns`) to transform a `.greg` `RtlControlFlowGraph` into a canonical `.lreg`
-  // `RtlControlFlowGraph`.
-  static void InvertGregToLregRtlCfg(RtlControlFlowGraph* cfg,
-                                     const StackFrameAnalysis* frame_analysis = nullptr);
-
-  // Inverts GCC 2.7.2 Stage 7 (`sched.c:schedule_insns` pre-allocation instruction splitting via
-  // `try_split` -> `insn-emit.c:gen_split_156`) to transform a `.sched` `RtlControlFlowGraph`
-  // into a canonical `.combine` `RtlControlFlowGraph`.
-  static void InvertSchedToCombineRtlCfg(RtlControlFlowGraph* cfg);
 
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);

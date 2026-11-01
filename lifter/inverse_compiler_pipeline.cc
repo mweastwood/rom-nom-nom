@@ -13,6 +13,10 @@
 #include "lifter/decompilation_context.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/inverse_final_and_gas_stage.h"
+#include "lifter/inverse_greg_reload_stage.h"
+#include "lifter/inverse_jump2_cross_jump_stage.h"
+#include "lifter/inverse_sched1_pre_alloc_stage.h"
+#include "lifter/inverse_sched2_post_reload_stage.h"
 #include "lifter/loop_analyzer.h"
 #include "lifter/rtl_cfg.h"
 
@@ -106,7 +110,7 @@ absl::Status InverseJump2CrossJumpStage::Run(DecompilationContext* context) {
   ControlFlowGraph stage2_cfg = context->Cfg();
   CfgAnalysisManager stage2_analyses(&stage2_cfg);
   CfgDeReorg::UnscheduleDelaySlotsOnly(&stage2_cfg, &stage2_analyses);
-  context->SetRtlCfg(InverseFinalAndGasLifter::LiftToSched2RtlCfg(
+  context->SetRtlCfg(InverseJump2CrossJumpLifter::LiftToSched2RtlCfg(
       stage2_cfg, &context->FrameLayout().RawAnalysis()));
   return absl::OkStatus();
 }
@@ -115,9 +119,9 @@ absl::Status InverseSched2PostReloadStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseSched2PostReloadStage: RtlCfg not initialized.");
   }
-  InverseFinalAndGasLifter::InvertSched2ToGregRtlCfg(context->MutableRtlCfg(),
-                                                     &context->FrameLayout().RawAnalysis(),
-                                                     context->Symbols(), context->FunctionName());
+  InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
+      context->MutableRtlCfg(), &context->FrameLayout().RawAnalysis(), context->Symbols(),
+      context->FunctionName());
   return absl::OkStatus();
 }
 
@@ -125,8 +129,8 @@ absl::Status InverseGregReloadStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseGregReloadStage: RtlCfg not initialized.");
   }
-  InverseFinalAndGasLifter::InvertGregToLregRtlCfg(context->MutableRtlCfg(),
-                                                   &context->FrameLayout().RawAnalysis());
+  InverseGregReloadLifter::InvertGregToLregRtlCfg(context->MutableRtlCfg(),
+                                                  &context->FrameLayout().RawAnalysis());
   return absl::OkStatus();
 }
 
@@ -141,7 +145,7 @@ absl::Status InverseSched1PreAllocStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseSched1PreAllocStage: RtlCfg not initialized.");
   }
-  InverseFinalAndGasLifter::InvertSchedToCombineRtlCfg(context->MutableRtlCfg());
+  InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 
