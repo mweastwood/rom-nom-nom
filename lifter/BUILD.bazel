@@ -657,6 +657,35 @@ cc_test(
 )
 
 cc_library(
+    name = "rtl_cfg",
+    srcs = ["rtl_cfg.cc"],
+    hdrs = ["rtl_cfg.h"],
+    visibility = ["//tuner:__pkg__"],
+    deps = [
+        "//core:mips",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "inverse_final_and_gas_stage",
+    srcs = ["inverse_final_and_gas_stage.cc"],
+    hdrs = ["inverse_final_and_gas_stage.h"],
+    visibility = ["//tuner:__pkg__"],
+    deps = [
+        ":rtl_cfg",
+        ":stack_frame_analyzer",
+        "//core:control_flow_graph",
+        "//core:division_pattern",
+        "//core:mips",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
     name = "decompilation_context",
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
@@ -664,6 +693,8 @@ cc_library(
         ":cfg_pass_pipeline",
         ":control_flow_structurer",
         ":function_loader",
+        ":inverse_final_and_gas_stage",
+        ":rtl_cfg",
         ":stack_frame_analyzer",
         "//core:c_ast",
         "//core:control_flow_graph",
@@ -675,12 +706,33 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "inverse_compiler_pipeline",
+    srcs = ["inverse_compiler_pipeline.cc"],
+    hdrs = ["inverse_compiler_pipeline.h"],
+    visibility = ["//tuner:__pkg__"],
+    deps = [
+        ":ast_converter",
+        ":cfg_de_reorg",
+        ":control_flow_structurer",
+        ":decompilation_context",
+        ":dominator_tree",
+        ":inverse_final_and_gas_stage",
+        ":loop_analyzer",
+        ":rtl_cfg",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
 cc_test(
     name = "decompilation_context_test",
     srcs = ["decompilation_context_test.cc"],
     deps = [
         ":decompilation_context",
         ":function_loader",
+        ":inverse_compiler_pipeline",
+        ":rtl_cfg",
         "//core:c_ast",
         "//core:mips",
         "@googletest//:gtest",
@@ -708,6 +760,7 @@ cc_library(
         ":decompilation_context",
         ":dominator_tree",
         ":function_loader",
+        ":inverse_compiler_pipeline",
         ":loop_analyzer",
         "//core:c_ast",
         "//core:control_flow_graph",
@@ -762,6 +815,8 @@ cc_library(
     visibility = ["//tuner:__pkg__"],
     deps = [
         ":c_emitter",
+        ":inverse_final_and_gas_stage",
+        ":rtl_cfg",
         "//core:compiler",
         "//core:control_flow_graph",
         "//core:mips",
@@ -851,6 +906,7 @@ cc_test(
         ":decompilation_context",
         ":function_loader",
         ":gcc_rtl_dump_inspector",
+        ":inverse_compiler_pipeline",
         ":lifter_pipeline",
         "//core:c_ast",
         "//core:compiler",

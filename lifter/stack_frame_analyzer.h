@@ -16,6 +16,7 @@ namespace rom_nom_nom {
 struct PrologueAnalysis {
   absl::flat_hash_map<Register, int32_t> saved_reg_offsets;
   absl::flat_hash_map<FpRegister, int32_t> saved_fpr_offsets;
+  absl::flat_hash_set<uint32_t> prologue_instruction_vrams;
   uint32_t min_saved_reg_offset = 0xFFFFFFFF;
 };
 

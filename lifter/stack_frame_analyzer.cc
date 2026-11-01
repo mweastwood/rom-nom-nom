@@ -121,6 +121,23 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
   absl::flat_hash_set<FpRegister> defined_fprs;
 
   auto check_saved_inst = [&](const Instruction& inst) {
+    if ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+         inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+        inst.rt == Register::kSp && inst.rs == Register::kSp && inst.immediate < 0) {
+      result.prologue_instruction_vrams.insert(inst.vram);
+    }
+    if (has_frame_pointer) {
+      if (((inst.opcode == Opcode::kAddu || inst.opcode == Opcode::kAdd ||
+            inst.opcode == Opcode::kDaddu || inst.opcode == Opcode::kDadd) &&
+           inst.rd == Register::kFp &&
+           ((inst.rs == Register::kSp && inst.rt == Register::kZero) ||
+            (inst.rs == Register::kZero && inst.rt == Register::kSp))) ||
+          ((inst.opcode == Opcode::kAddiu || inst.opcode == Opcode::kAddi ||
+            inst.opcode == Opcode::kDaddiu || inst.opcode == Opcode::kDaddi) &&
+           inst.rt == Register::kFp && inst.rs == Register::kSp && inst.immediate == 0)) {
+        result.prologue_instruction_vrams.insert(inst.vram);
+      }
+    }
     if ((inst.opcode == Opcode::kSw || inst.opcode == Opcode::kSd) &&
         (inst.rs == Register::kSp || (has_frame_pointer && inst.rs == Register::kFp)) &&
         inst.rt.has_value() && inst.immediate >= 0) {
@@ -130,6 +147,7 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
            !defined_gprs.contains(r))) {
         auto [it, inserted] = result.saved_reg_offsets.try_emplace(r, inst.immediate);
         if (inserted) {
+          result.prologue_instruction_vrams.insert(inst.vram);
           result.min_saved_reg_offset =
               std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
         }
@@ -143,6 +161,7 @@ PrologueAnalysis StackFrameAnalyzer::AnalyzePrologue(const ControlFlowGraph& cfg
       if (fr >= FpRegister::kF20 && fr <= FpRegister::kF31 && !defined_fprs.contains(fr)) {
         auto [it, inserted] = result.saved_fpr_offsets.try_emplace(fr, inst.immediate);
         if (inserted) {
+          result.prologue_instruction_vrams.insert(inst.vram);
           result.min_saved_reg_offset =
               std::min(result.min_saved_reg_offset, static_cast<uint32_t>(inst.immediate));
         }

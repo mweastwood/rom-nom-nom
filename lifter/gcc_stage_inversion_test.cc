@@ -42,46 +42,11 @@
 #include "lifter/decompilation_context.h"
 #include "lifter/function_loader.h"
 #include "lifter/gcc_rtl_dump_inspector.h"
+#include "lifter/inverse_compiler_pipeline.h"
 #include "lifter/lifter_pipeline.h"
 
 namespace rom_nom_nom {
 namespace {
-
-struct PhaseDescriptor {
-  int inverse_phase_number;  // 1..12 (decompiler execution order)
-  int gcc_stage_number;      // 12..1 (GCC forward execution order)
-  RtlPassKind gcc_input_pass;
-  RtlPassKind gcc_output_pass;
-  std::string_view inverse_phase_name;
-  std::string_view gcc_stage_name;
-};
-
-constexpr std::array<PhaseDescriptor, 12> kTwelvePhases = {{
-    {1, 12, RtlPassKind::kJump2, RtlPassKind::kDbr, "InversePhase1_DelaySlotUnschedule",
-     "GCCStage12_DbrReorg (.jump2 -> .dbr)"},
-    {2, 11, RtlPassKind::kSched2, RtlPassKind::kJump2, "InversePhase2_CrossJumpTailDuplicate",
-     "GCCStage11_Jump2CrossJump (.sched2 -> .jump2)"},
-    {3, 10, RtlPassKind::kGreg, RtlPassKind::kSched2, "InversePhase3_PostReloadDeSchedule",
-     "GCCStage10_Sched2 (.greg -> .sched2)"},
-    {4, 9, RtlPassKind::kLreg, RtlPassKind::kGreg, "InversePhase4_GlobalRegAndReloadRecovery",
-     "GCCStage9_GregReload (.lreg -> .greg)"},
-    {5, 8, RtlPassKind::kSched, RtlPassKind::kLreg, "InversePhase5_LocalRegWebRecovery",
-     "GCCStage8_LregLocalAlloc (.sched -> .lreg)"},
-    {6, 7, RtlPassKind::kCombine, RtlPassKind::kSched, "InversePhase6_PreAllocDeSchedule",
-     "GCCStage7_Sched1 (.combine -> .sched)"},
-    {7, 6, RtlPassKind::kFlow, RtlPassKind::kCombine, "InversePhase7_InstructionDeCombine",
-     "GCCStage6_Combine (.flow -> .combine)"},
-    {8, 5, RtlPassKind::kCse2, RtlPassKind::kFlow, "InversePhase8_DataflowLifeRecovery",
-     "GCCStage5_Flow (.cse2 -> .flow)"},
-    {9, 4, RtlPassKind::kLoop, RtlPassKind::kCse2, "InversePhase9_PostLoopCseRecovery",
-     "GCCStage4_Cse2 (.loop -> .cse2)"},
-    {10, 3, RtlPassKind::kCse, RtlPassKind::kLoop, "InversePhase10_LoopStrengthUnReduce",
-     "GCCStage3_LoopOpt (.cse -> .loop)"},
-    {11, 2, RtlPassKind::kJump, RtlPassKind::kCse, "InversePhase11_BasicBlockCseRecovery",
-     "GCCStage2_Cse1 (.jump -> .cse)"},
-    {12, 1, RtlPassKind::kRtl, RtlPassKind::kJump, "InversePhase12_CfgStructureAndRtlRecovery",
-     "GCCStage1_Jump1AndRtl (.rtl -> .jump)"},
-}};
 
 struct CfgStage1Comparison {
   bool zero_branch_likely = false;
@@ -124,29 +89,21 @@ struct CaseInversionResult {
   bool final_dbr_rtl_matches = false;
   CfgStage1Comparison direct_cfg_stage1;
   CfgStage2Comparison direct_cfg_stage2;
-  // Direct CFG -> RTL comparison for Stage 0 (`final.c` + `gas` inversion: initial binary CFG vs
-  // `.dbr` RTL dump) before any CFG pass runs.
+  // Direct RtlCfg -> RTL comparison for Stage 0 (`InverseFinalAndGasStage`: initial binary CFG
+  // lifted to `.dbr` RtlCfg vs `.dbr` RTL dump).
   RtlCfgPassComparison direct_rtl_stage0_comparison{};
-  // Direct CFG -> RTL comparison per phase: compares the lifter's CFG after Inverse Phase `k`
-  // directly against the target GCC RTL dump `kTwelvePhases[k - 1].gcc_input_pass` via
-  // `GccRtlDumpInspector::CompareCfgToRtlDump`.
+  // Direct RtlCfg -> RTL comparison per stage (`Stages 1..12` vs `.jump2` .. `.rtl`).
   std::array<RtlCfgPassComparison, 12> direct_rtl_stage_comparisons{};
   // Exact Right-inverse check per phase: `f_k(g_k(y_k)) == y_k` (exact S-expression match on
-  // `gcc_output_pass`).
+  // `source_gcc_pass`).
   std::array<bool, 12> phase_right_inverse_matches{};
   // Exact Left-inverse check per phase: `g_k(f_k(x_{k-1})) == x_{k-1}` (exact S-expression match on
-  // `gcc_input_pass`).
+  // `target_gcc_pass`).
   std::array<bool, 12> phase_left_inverse_matches{};
   std::array<bool, 12> gcc_stage_transformed_rtl{};
   std::optional<RtlPassKind> first_divergent_pass;
   std::string error_or_diag;
 };
-
-// Runs only the Inverse Phase 1 delay-slot unscheduling passes (excluding Inverse Phase 2's
-// `CrossJumpTailDuplicatorPass`).
-void RunInversePhase1DelaySlotUnschedulerOnly(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) {
-  CfgDeReorg::UnscheduleDelaySlotsOnly(cfg, analyses);
-}
 
 std::string FormatActiveInstructionForStage1Compare(const Instruction& inst) {
   if (inst.IsBranch() || inst.opcode == Opcode::kJ) {
@@ -542,15 +499,16 @@ class GccStageInversionSuiteAccumulator {
         stage2_gcc_modified_count,
         pct(stage2_delta_matched_when_modified, stage2_gcc_modified_count));
 
+    const auto rtl_stages = InverseCompilerPipeline::RtlStageDescriptors();
     for (size_t i = 0; i < 12; ++i) {
-      const auto& p = kTwelvePhases[i];
+      const auto& p = rtl_stages[i + 1];
       absl::StrAppendFormat(
           &out,
           "  [Inv %2d <- GCC %2d] %-48s | Right: %3zu/%3zu (%6.2f%%) | Active: %3zu/%3zu (%6.2f%%) "
           "| Left: %3zu/%3zu (%6.2f%%)\n",
-          p.inverse_phase_number, p.gcc_stage_number, p.gcc_stage_name, phase_right_matches[i],
-          total, pct(phase_right_matches[i], total), phase_right_matches_when_transformed[i],
-          phase_gcc_transformed_count[i],
+          p.inverse_stage_index, p.gcc_stage_number, p.gcc_stage_description,
+          phase_right_matches[i], total, pct(phase_right_matches[i], total),
+          phase_right_matches_when_transformed[i], phase_gcc_transformed_count[i],
           pct(phase_right_matches_when_transformed[i], phase_gcc_transformed_count[i]),
           phase_left_matches[i], total, pct(phase_left_matches[i], total));
     }
@@ -563,8 +521,8 @@ class GccStageInversionSuiteAccumulator {
         &out,
         "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
         "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
-        0, GccRtlDumpInspector::PassExtension(RtlPassKind::kDbr), "InversePhase0_FinalAndGasLift",
-        direct_rtl_stage0_blocks_match, direct_rtl_stage0_present,
+        0, GccRtlDumpInspector::PassExtension(*rtl_stages[0].target_gcc_pass),
+        rtl_stages[0].stage_name, direct_rtl_stage0_blocks_match, direct_rtl_stage0_present,
         pct(direct_rtl_stage0_blocks_match, direct_rtl_stage0_present),
         direct_rtl_stage0_edges_match, direct_rtl_stage0_present,
         pct(direct_rtl_stage0_edges_match, direct_rtl_stage0_present),
@@ -573,18 +531,17 @@ class GccStageInversionSuiteAccumulator {
         direct_rtl_stage0_exact_match, direct_rtl_stage0_present,
         pct(direct_rtl_stage0_exact_match, direct_rtl_stage0_present));
     for (size_t i = 0; i < 12; ++i) {
-      const auto& p = kTwelvePhases[i];
+      const auto& p = rtl_stages[i + 1];
       const size_t den = direct_rtl_present_count[i];
       absl::StrAppendFormat(
           &out,
           "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
           "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
-          p.inverse_phase_number, GccRtlDumpInspector::PassExtension(p.gcc_input_pass),
-          p.inverse_phase_name, direct_rtl_blocks_match[i], den,
-          pct(direct_rtl_blocks_match[i], den), direct_rtl_edges_match[i], den,
-          pct(direct_rtl_edges_match[i], den), direct_rtl_insns_match[i], den,
-          pct(direct_rtl_insns_match[i], den), direct_rtl_exact_match[i], den,
-          pct(direct_rtl_exact_match[i], den));
+          p.inverse_stage_index, GccRtlDumpInspector::PassExtension(*p.target_gcc_pass),
+          p.stage_name, direct_rtl_blocks_match[i], den, pct(direct_rtl_blocks_match[i], den),
+          direct_rtl_edges_match[i], den, pct(direct_rtl_edges_match[i], den),
+          direct_rtl_insns_match[i], den, pct(direct_rtl_insns_match[i], den),
+          direct_rtl_exact_match[i], den, pct(direct_rtl_exact_match[i], den));
     }
 
     absl::StrAppend(
@@ -773,133 +730,125 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     }
     const GccCompilationDump& orig_dump = *orig_dump_or;
 
-    // 3. Evaluate Direct CFG Stage 1 (`CfgDeReorg` Delay-Slot Unscheduler vs `-fno-delayed-branch`)
-    // and Direct CFG Stage 2 (`CrossJumpTailDuplicatorPass` vs `.sched2` -> `.jump2`).
+    // 3. Execute the production 14-stage `InverseCompilerPipeline` with per-stage snapshot hooks.
     DecompilationContext dbr_ctx(*loaded_dbr_or);
-    if (dbr_ctx.BuildCfg().ok()) {
-      // Record Direct CFG -> RTL comparison for Stage 0 (`final.c` + `gas` inversion: initial
-      // binary CFG vs `.dbr` RTL dump) before Inverse Phase 1 runs.
-      res.direct_rtl_stage0_comparison = GccRtlDumpInspector::CompareCfgToRtlDump(
-          dbr_ctx.Cfg(), orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kDbr));
-
-      RunInversePhase1DelaySlotUnschedulerOnly(dbr_ctx.MutableCfg(), &dbr_ctx.CfgAnalyses());
-
-      if (no_dbr_status.ok()) {
-        auto no_dbr_elf_or = ElfReader::LoadFromFile(orig_no_dbr_o);
-        if (no_dbr_elf_or.ok()) {
-          auto no_dbr_fn_or = no_dbr_elf_or->ExtractFunction(test_case.function_name);
-          if (no_dbr_fn_or.ok()) {
-            std::vector<uint32_t> no_dbr_words =
-                RoundTripRunner::ApplyCandidateRelocations(prepared, *no_dbr_fn_or);
-            std::function<std::optional<uint32_t>(uint32_t)> no_dbr_rodata_reader =
-                prepared.rodata_memory_reader;
-            const ElfSection* rodata_sec = no_dbr_elf_or->FindSection(".rodata");
-            if (rodata_sec == nullptr) {
-              rodata_sec = no_dbr_elf_or->FindSection(".rdata");
-            }
-            uint32_t rodata_vram = 0;
-            if (auto it = prepared.sym_to_vram.find(".rodata"); it != prepared.sym_to_vram.end()) {
-              rodata_vram = it->second;
-            } else if (auto it_r = prepared.sym_to_vram.find(".rdata");
-                       it_r != prepared.sym_to_vram.end()) {
-              rodata_vram = it_r->second;
-            }
-            if (rodata_sec != nullptr && rodata_vram != 0) {
-              std::vector<uint8_t> rodata_bytes = rodata_sec->data;
-              const uint32_t text_offset = no_dbr_fn_or->section_offset;
-              const uint32_t text_size = static_cast<uint32_t>(no_dbr_fn_or->raw_words.size() * 4);
-              const uint32_t base_vram = test_case.options.base_vram;
-              no_dbr_rodata_reader = [rodata_vram, rodata_bytes = std::move(rodata_bytes),
-                                      text_offset, text_size,
-                                      base_vram](uint32_t vram) -> std::optional<uint32_t> {
-                if (vram >= rodata_vram && vram + 4 <= rodata_vram + rodata_bytes.size()) {
-                  const uint32_t offset = vram - rodata_vram;
-                  const uint32_t word = (static_cast<uint32_t>(rodata_bytes[offset]) << 24) |
-                                        (static_cast<uint32_t>(rodata_bytes[offset + 1]) << 16) |
-                                        (static_cast<uint32_t>(rodata_bytes[offset + 2]) << 8) |
-                                        static_cast<uint32_t>(rodata_bytes[offset + 3]);
-                  if (word >= 0x80000000) {
+    ControlFlowGraph stage1_unscheduled_cfg;
+    InverseCompilerPipeline pipeline = InverseCompilerPipeline::BuildDefaultPipeline();
+    absl::Status pipeline_status = pipeline.Run(&dbr_ctx, [&](const InverseStageDescriptor& stage,
+                                                              const DecompilationContext& ctx) {
+      if (stage.id == InverseStageId::kStage00FinalAndGas) {
+        stage1_unscheduled_cfg = ctx.Cfg();
+        CfgAnalysisManager stage1_analyses(&stage1_unscheduled_cfg);
+        CfgDeReorg::UnscheduleDelaySlotsOnly(&stage1_unscheduled_cfg, &stage1_analyses);
+      }
+      if (stage.target_gcc_pass.has_value() && ctx.HasRtlCfg()) {
+        const RtlCfgPassComparison cmp = GccRtlDumpInspector::CompareRtlCfgToDump(
+            ctx.RtlCfg(),
+            orig_dump.GetFunctionPass(test_case.function_name, *stage.target_gcc_pass));
+        if (stage.inverse_stage_index == 0) {
+          res.direct_rtl_stage0_comparison = cmp;
+        } else if (stage.inverse_stage_index >= 1 && stage.inverse_stage_index <= 12) {
+          res.direct_rtl_stage_comparisons[stage.inverse_stage_index - 1] = cmp;
+        }
+      }
+      if (stage.id == InverseStageId::kStage01DbrDelaySlot) {
+        if (no_dbr_status.ok()) {
+          auto no_dbr_elf_or = ElfReader::LoadFromFile(orig_no_dbr_o);
+          if (no_dbr_elf_or.ok()) {
+            auto no_dbr_fn_or = no_dbr_elf_or->ExtractFunction(test_case.function_name);
+            if (no_dbr_fn_or.ok()) {
+              std::vector<uint32_t> no_dbr_words =
+                  RoundTripRunner::ApplyCandidateRelocations(prepared, *no_dbr_fn_or);
+              std::function<std::optional<uint32_t>(uint32_t)> no_dbr_rodata_reader =
+                  prepared.rodata_memory_reader;
+              const ElfSection* rodata_sec = no_dbr_elf_or->FindSection(".rodata");
+              if (rodata_sec == nullptr) {
+                rodata_sec = no_dbr_elf_or->FindSection(".rdata");
+              }
+              uint32_t rodata_vram = 0;
+              if (auto it = prepared.sym_to_vram.find(".rodata");
+                  it != prepared.sym_to_vram.end()) {
+                rodata_vram = it->second;
+              } else if (auto it_r = prepared.sym_to_vram.find(".rdata");
+                         it_r != prepared.sym_to_vram.end()) {
+                rodata_vram = it_r->second;
+              }
+              if (rodata_sec != nullptr && rodata_vram != 0) {
+                std::vector<uint8_t> rodata_bytes = rodata_sec->data;
+                const uint32_t text_offset = no_dbr_fn_or->section_offset;
+                const uint32_t text_size =
+                    static_cast<uint32_t>(no_dbr_fn_or->raw_words.size() * 4);
+                const uint32_t base_vram = test_case.options.base_vram;
+                no_dbr_rodata_reader = [rodata_vram, rodata_bytes = std::move(rodata_bytes),
+                                        text_offset, text_size,
+                                        base_vram](uint32_t vram) -> std::optional<uint32_t> {
+                  if (vram >= rodata_vram && vram + 4 <= rodata_vram + rodata_bytes.size()) {
+                    const uint32_t offset = vram - rodata_vram;
+                    const uint32_t word = (static_cast<uint32_t>(rodata_bytes[offset]) << 24) |
+                                          (static_cast<uint32_t>(rodata_bytes[offset + 1]) << 16) |
+                                          (static_cast<uint32_t>(rodata_bytes[offset + 2]) << 8) |
+                                          static_cast<uint32_t>(rodata_bytes[offset + 3]);
+                    if (word >= 0x80000000) {
+                      return word;
+                    }
+                    if (word >= text_offset && word < text_offset + text_size && (word & 3) == 0) {
+                      return base_vram + (word - text_offset);
+                    }
                     return word;
                   }
-                  if (word >= text_offset && word < text_offset + text_size && (word & 3) == 0) {
-                    return base_vram + (word - text_offset);
-                  }
-                  return word;
+                  return std::nullopt;
+                };
+              }
+              auto loaded_no_dbr_or = FunctionLoader::FromWords(
+                  test_case.function_name, no_dbr_words, test_case.options.base_vram,
+                  prepared.symbol_index.get(), /*game_config=*/nullptr, no_dbr_rodata_reader);
+              if (loaded_no_dbr_or.ok()) {
+                DecompilationContext no_dbr_ctx(*loaded_no_dbr_or);
+                if (no_dbr_ctx.BuildCfg().ok()) {
+                  res.direct_cfg_stage1 =
+                      EvaluateDirectCfgStage1(stage1_unscheduled_cfg, no_dbr_ctx.Cfg());
                 }
-                return std::nullopt;
-              };
-            }
-            auto loaded_no_dbr_or =
-                FunctionLoader::FromWords(test_case.function_name, no_dbr_words,
-                                          test_case.options.base_vram, prepared.symbol_index.get(),
-                                          /*game_config=*/nullptr, no_dbr_rodata_reader);
-            if (loaded_no_dbr_or.ok()) {
-              DecompilationContext no_dbr_ctx(*loaded_no_dbr_or);
-              if (no_dbr_ctx.BuildCfg().ok()) {
-                res.direct_cfg_stage1 = EvaluateDirectCfgStage1(dbr_ctx.Cfg(), no_dbr_ctx.Cfg());
               }
             }
           }
         }
+        res.direct_cfg_stage2.cfg_before_tail_dup_blocks = stage1_unscheduled_cfg.Blocks().size();
+        res.direct_cfg_stage2.cfg_before_tail_dup_active_insns =
+            CountActiveInstructionsInCfg(stage1_unscheduled_cfg);
+      } else if (stage.id == InverseStageId::kStage02Jump2CrossJump) {
+        CfgAnalysisManager stage2_analyses(&stage1_unscheduled_cfg);
+        CrossJumpTailDuplicatorPass tail_dup_pass;
+        tail_dup_pass.Run(&stage1_unscheduled_cfg, &stage2_analyses);
+        res.direct_cfg_stage2.cfg_after_tail_dup_blocks = stage1_unscheduled_cfg.Blocks().size();
+        res.direct_cfg_stage2.cfg_after_tail_dup_active_insns =
+            CountActiveInstructionsInCfg(stage1_unscheduled_cfg);
+        const RtlFunctionDump* orig_sched2 =
+            orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kSched2);
+        const RtlFunctionDump* orig_jump2 =
+            orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kJump2);
+        if (orig_sched2 != nullptr && orig_jump2 != nullptr) {
+          res.direct_cfg_stage2.sched2_active_insns = orig_sched2->ActiveInsnCount();
+          res.direct_cfg_stage2.jump2_active_insns = orig_jump2->ActiveInsnCount();
+          res.direct_cfg_stage2.gcc_jump2_modified_rtl = DidGccStageTransformRtl(
+              orig_dump, test_case.function_name, RtlPassKind::kSched2, RtlPassKind::kJump2);
+          const ptrdiff_t gcc_merged_insns =
+              static_cast<ptrdiff_t>(res.direct_cfg_stage2.sched2_active_insns) -
+              static_cast<ptrdiff_t>(res.direct_cfg_stage2.jump2_active_insns);
+          const ptrdiff_t cfg_restored_insns =
+              static_cast<ptrdiff_t>(res.direct_cfg_stage2.cfg_after_tail_dup_active_insns) -
+              static_cast<ptrdiff_t>(res.direct_cfg_stage2.cfg_before_tail_dup_active_insns);
+          res.direct_cfg_stage2.active_insn_delta_matches =
+              (gcc_merged_insns == cfg_restored_insns);
+        } else {
+          res.direct_cfg_stage2.active_insn_delta_matches =
+              (res.direct_cfg_stage2.cfg_after_tail_dup_active_insns ==
+               res.direct_cfg_stage2.cfg_before_tail_dup_active_insns);
+        }
       }
+    });
 
-      res.direct_cfg_stage2.cfg_before_tail_dup_blocks = dbr_ctx.Cfg().Blocks().size();
-      res.direct_cfg_stage2.cfg_before_tail_dup_active_insns =
-          CountActiveInstructionsInCfg(dbr_ctx.Cfg());
-
-      // Record Direct CFG -> RTL comparison after Inverse Phase 1 (against `.jump2`).
-      res.direct_rtl_stage_comparisons[0] = GccRtlDumpInspector::CompareCfgToRtlDump(
-          dbr_ctx.Cfg(),
-          orig_dump.GetFunctionPass(test_case.function_name, kTwelvePhases[0].gcc_input_pass));
-
-      CrossJumpTailDuplicatorPass tail_dup_pass;
-      tail_dup_pass.Run(dbr_ctx.MutableCfg(), &dbr_ctx.CfgAnalyses());
-
-      // Record Direct CFG -> RTL comparison after Inverse Phase 2 (against `.sched2`) and
-      // subsequent phases (`kGreg` .. `kRtl`) against the current post-Stage-2 CFG state.
-      for (size_t i = 1; i < 12; ++i) {
-        res.direct_rtl_stage_comparisons[i] = GccRtlDumpInspector::CompareCfgToRtlDump(
-            dbr_ctx.Cfg(),
-            orig_dump.GetFunctionPass(test_case.function_name, kTwelvePhases[i].gcc_input_pass));
-      }
-
-      res.direct_cfg_stage2.cfg_after_tail_dup_blocks = dbr_ctx.Cfg().Blocks().size();
-      res.direct_cfg_stage2.cfg_after_tail_dup_active_insns =
-          CountActiveInstructionsInCfg(dbr_ctx.Cfg());
-
-      const RtlFunctionDump* orig_sched2 =
-          orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kSched2);
-      const RtlFunctionDump* orig_jump2 =
-          orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kJump2);
-      if (orig_sched2 != nullptr && orig_jump2 != nullptr) {
-        res.direct_cfg_stage2.sched2_active_insns = orig_sched2->ActiveInsnCount();
-        res.direct_cfg_stage2.jump2_active_insns = orig_jump2->ActiveInsnCount();
-        res.direct_cfg_stage2.gcc_jump2_modified_rtl = DidGccStageTransformRtl(
-            orig_dump, test_case.function_name, RtlPassKind::kSched2, RtlPassKind::kJump2);
-        const ptrdiff_t gcc_merged_insns =
-            static_cast<ptrdiff_t>(res.direct_cfg_stage2.sched2_active_insns) -
-            static_cast<ptrdiff_t>(res.direct_cfg_stage2.jump2_active_insns);
-        const ptrdiff_t cfg_restored_insns =
-            static_cast<ptrdiff_t>(res.direct_cfg_stage2.cfg_after_tail_dup_active_insns) -
-            static_cast<ptrdiff_t>(res.direct_cfg_stage2.cfg_before_tail_dup_active_insns);
-        res.direct_cfg_stage2.active_insn_delta_matches = (gcc_merged_insns == cfg_restored_insns);
-      } else {
-        // `-O0` skips `.sched2` and `.jump2`.
-        res.direct_cfg_stage2.active_insn_delta_matches =
-            (res.direct_cfg_stage2.cfg_after_tail_dup_active_insns ==
-             res.direct_cfg_stage2.cfg_before_tail_dup_active_insns);
-      }
-    }
-
-    // 4. Run full `LifterPipeline` and compile lifted C with `-da` to inspect all 12 phases.
-    LifterPipelineOptions lifter_opts;
-    lifter_opts.includes = {"types.h"};
-    lifter_opts.format_with_clang = false;
-    LifterPipeline lifter(lifter_opts);
-
-    auto decompile_or = lifter.DecompileFunction(*loaded_dbr_or);
-    if (!decompile_or.ok()) {
-      res.error_or_diag = std::string(decompile_or.status().message());
+    if (!pipeline_status.ok() || !dbr_ctx.HasAst()) {
+      res.error_or_diag = std::string(pipeline_status.message());
       cleanup();
       return res;
     }
@@ -907,7 +856,7 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     CTranslationUnit tu;
     tu.includes = {"types.h"};
     tu.symbol_index = prepared.symbol_index.get();
-    tu.functions.push_back(std::move(*decompile_or->ast));
+    tu.functions.push_back(std::move(*dbr_ctx.TakeAst()));
 
     CEmitterOptions emitter_opts;
     emitter_opts.includes = {"types.h"};
@@ -967,14 +916,15 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       }
     }
 
+    const auto rtl_stages = InverseCompilerPipeline::RtlStageDescriptors();
     for (size_t i = 0; i < 12; ++i) {
-      const auto& p = kTwelvePhases[i];
+      const auto& p = rtl_stages[i + 1];
       res.phase_right_inverse_matches[i] =
-          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, p.gcc_output_pass);
+          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.source_gcc_pass);
       res.phase_left_inverse_matches[i] =
-          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, p.gcc_input_pass);
+          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.target_gcc_pass);
       res.gcc_stage_transformed_rtl[i] = DidGccStageTransformRtl(
-          orig_dump, test_case.function_name, p.gcc_input_pass, p.gcc_output_pass);
+          orig_dump, test_case.function_name, *p.target_gcc_pass, *p.source_gcc_pass);
     }
 
     cleanup();
@@ -1005,11 +955,12 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
       << ": remaining_branch_likely=" << res.direct_cfg_stage1.remaining_branch_likely
       << ", remaining_non_nop_delay_slots=" << res.direct_cfg_stage1.remaining_non_nop_delay_slots
       << ", detail=" << res.direct_cfg_stage1.mismatch_detail;
+  const auto& descriptors = InverseCompilerPipeline::AllStageDescriptors();
   for (size_t i = 0; i < 12; ++i) {
+    const auto& desc = descriptors[i + 1];
     EXPECT_TRUE(res.phase_right_inverse_matches[i])
-        << "Exact Right-Inverse Phase " << kTwelvePhases[i].inverse_phase_number << " ("
-        << kTwelvePhases[i].gcc_stage_name << ") output RTL f_k(g_k(y_k)) == y_k ("
-        << GccRtlDumpInspector::PassExtension(kTwelvePhases[i].gcc_output_pass) << ") mismatch for "
+        << "Exact Right-Inverse Stage " << desc.inverse_stage_index << " (" << desc.stage_name
+        << " / " << desc.gcc_stage_description << ") output RTL f_k(g_k(y_k)) == y_k mismatch for "
         << test_case.test_name;
   }
 }

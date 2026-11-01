@@ -28,6 +28,7 @@
 #include "lifter/decompilation_context.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/function_loader.h"
+#include "lifter/inverse_compiler_pipeline.h"
 #include "lifter/loop_analyzer.h"
 #include "lifter/module_symbol_scanner.h"
 
@@ -143,43 +144,14 @@ absl::StatusOr<LifterResult> LifterPipeline::DecompileFunction(
 
   DecompilationContext context(loaded_func, abi_context);
 
-  // 1. Detect Jump Tables, Build Control Flow Graph, and Unschedule Delay Slots
-  if (absl::Status status = context.BuildCfg(); !status.ok()) {
+  // Execute the 14 ordered stages of the inverse GCC 2.7.2 decompilation pipeline
+  // (`Stage 0: InverseFinalAndGasStage` -> ... -> `Stage 13: InverseRtlToCAstStage`).
+  InverseCompilerPipeline pipeline = InverseCompilerPipeline::BuildDefaultPipeline();
+  if (absl::Status status = pipeline.Run(&context); !status.ok()) {
     return status;
   }
-  CfgDeReorg::UnscheduleDelaySlots(context.MutableCfg(), &context.CfgAnalyses());
-  context.InvalidateFrameLayout();
 
-  // 2. Compute Dominator Trees and Analyze Natural Loops via CfgAnalysisManager
-  auto& cfg_analyses = context.CfgAnalyses();
-  const DominatorTree& dom_tree = cfg_analyses.GetDominatorTree();
-  const DominatorTree& post_dom_tree = cfg_analyses.GetPostDominatorTree();
-  const LoopInfo& loop_info = cfg_analyses.GetLoopInfo();
-
-  // 3. Structure Control Flow into Hierarchical Regions
-  context.SetRootRegion(
-      ControlFlowStructurer::Structure(context.Cfg(), dom_tree, post_dom_tree, loop_info));
-  if (!context.HasRootRegion()) {
-    return absl::InternalError("LifterPipeline: Failed to structure control flow graph.");
-  }
-
-  // 5. Convert Structured Regions and Lifted Instructions to C AST
-  AstConverterOptions converter_opts;
-  converter_opts.function_name = context.FunctionName();
-  converter_opts.game_config = context.Config();
-  converter_opts.function_parameter_counts = context.AbiContext().function_parameter_counts;
-  converter_opts.function_fp_parameter_counts = context.AbiContext().function_fp_parameter_counts;
-  converter_opts.functions_returning_v0 = context.AbiContext().functions_returning_v0;
-  converter_opts.functions_returning_f0 = context.AbiContext().functions_returning_f0;
-
-  auto ast_or =
-      AstConverter::Convert(context.Cfg(), context.RootRegion(), context.Symbols(), converter_opts);
-  if (!ast_or.ok()) {
-    return ast_or.status();
-  }
-  context.SetAst(std::move(*ast_or));
-
-  // 6. Format and Emit C Code
+  // Format and Emit C Code
   CEmitterOptions emitter_opts;
   emitter_opts.includes = options_.includes;
   emitter_opts.format_with_clang = options_.format_with_clang;

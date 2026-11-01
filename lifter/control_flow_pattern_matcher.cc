@@ -1106,7 +1106,7 @@ std::optional<DecisionTreeSwitchInfo> DetectDecisionTreeSwitch(
         // continuation is a taken branch to the next else-if block is an if/else-if
         // chain (unless its delay slot sets up a range split for a switch tree).
         const auto* cont_blk = cfg.GetBlock(ba.cont_target);
-        if (cont_blk != nullptr && cont_blk->start_vram > blk->end_vram) {
+        if (cont_blk != nullptr && cont_blk->start_vram >= blk->end_vram) {
           ba = BlockAnalysis{};
           return ba;
         }
@@ -2233,7 +2233,9 @@ std::optional<ShortCircuitChainInfo> TryCollapseShortCircuitChain(
 
     std::optional<Register> entry_cmp_reg = GetSingleComparedRegister(cfg, entry);
     std::optional<Register> ft_cmp_reg = GetSingleComparedRegister(cfg, first_cond_succ);
-    if (entry_cmp_reg.has_value() && ft_cmp_reg.has_value() && *entry_cmp_reg == *ft_cmp_reg) {
+    if ((entry_cmp_reg.has_value() && ft_cmp_reg.has_value() && *entry_cmp_reg == *ft_cmp_reg) ||
+        GetComparedValueKey(cfg, entry, /*use_live_in_reg=*/false)
+            .Matches(GetComparedValueKey(cfg, first_cond_succ, /*use_live_in_reg=*/true))) {
       return std::nullopt;
     }
 

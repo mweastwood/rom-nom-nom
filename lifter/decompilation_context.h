@@ -17,6 +17,7 @@
 #include "lifter/cfg_analysis_manager.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/function_loader.h"
+#include "lifter/rtl_cfg.h"
 #include "lifter/stack_frame_analyzer.h"
 
 namespace rom_nom_nom {
@@ -135,12 +136,20 @@ class DecompilationContext {
   const std::vector<JumpTable>& JumpTables() const { return jump_tables_; }
   CfgAnalysisManager& CfgAnalyses() { return cfg_analyses_; }
 
+  // Stage 0: Lift the machine ControlFlowGraph into the canonical RtlControlFlowGraph (`.dbr`).
+  void LiftCfgToRtl();
+  bool HasRtlCfg() const { return rtl_cfg_.has_value(); }
+  const RtlControlFlowGraph& RtlCfg() const { return *rtl_cfg_; }
+  RtlControlFlowGraph* MutableRtlCfg() { return rtl_cfg_.has_value() ? &(*rtl_cfg_) : nullptr; }
+  void SetRtlCfg(RtlControlFlowGraph rtl_cfg) { rtl_cfg_ = std::move(rtl_cfg); }
+
   // Stage 2: Analyze or retrieve the GCC 2.7.2 stack frame layout (`mips.c:compute_frame_size`).
   const StackFrameLayout& FrameLayout();
   void InvalidateFrameLayout() { frame_layout_.reset(); }
   void InvalidateCfgAnalyses() {
     cfg_analyses_.InvalidateAll();
     frame_layout_.reset();
+    rtl_cfg_.reset();
   }
 
   // Stage 3: Store and access the structured control-flow region hierarchy.
@@ -168,6 +177,7 @@ class DecompilationContext {
   InterProceduralAbiContext abi_context_;
   std::vector<JumpTable> jump_tables_;
   std::optional<ControlFlowGraph> cfg_;
+  std::optional<RtlControlFlowGraph> rtl_cfg_;
   CfgAnalysisManager cfg_analyses_;
   std::optional<StackFrameLayout> frame_layout_;
   std::unique_ptr<StructuredRegion> root_region_;

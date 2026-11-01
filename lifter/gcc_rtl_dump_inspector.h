@@ -16,26 +16,9 @@
 #include "core/mips.h"
 #include "core/process.h"
 #include "core/toolchain.h"
+#include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
-
-// Identifies each RTL dump pass emitted by KMC GCC 2.7.2 (`toplev.c:rest_of_compilation`)
-// when invoked with `-da`, ordered chronologically along the forward compilation pipeline.
-enum class RtlPassKind {
-  kRtl,      // .rtl     - Initial RTL generation (stmt.c / expr.c)
-  kJump,     // .jump    - First jump optimization pass (jump.c)
-  kCse,      // .cse     - First common subexpression elimination pass (cse.c)
-  kLoop,     // .loop    - Loop optimization pass (loop.c)
-  kCse2,     // .cse2    - Second CSE pass (cse.c)
-  kFlow,     // .flow    - Dataflow and life analysis pass (flow.c)
-  kCombine,  // .combine - Instruction combination pass (combine.c)
-  kSched,    // .sched   - Pre-allocation instruction scheduling pass (sched.c)
-  kLreg,     // .lreg    - Local register allocation pass (local-alloc.c)
-  kGreg,     // .greg    - Global register allocation & reload pass (global.c / reload1.c)
-  kSched2,   // .sched2  - Post-reload instruction scheduling pass (sched.c)
-  kJump2,    // .jump2   - Post-reload jump optimization pass (jump.c)
-  kDbr,      // .dbr     - Delayed-branch scheduling pass (reorg.c)
-};
 
 // Classifies a top-level RTL chain entry in a GCC 2.7.2 RTL dump.
 enum class RtlInsnKind {
@@ -79,36 +62,6 @@ struct RtlFunctionDump {
 
   // Returns true if the function contains at least one `NOTE_INSN_LOOP_BEG` note.
   bool HasLoopNotes() const;
-};
-
-// Represents a canonical basic block extracted from either a GCC 2.7.2 `RtlFunctionDump`
-// (for any pass `.rtl` .. `.dbr`) or lifted from a `ControlFlowGraph`.
-struct RtlCfgBlock {
-  std::vector<std::string> instructions;
-  std::vector<size_t> successors;
-};
-
-// Represents the Reverse-Post-Order (RPO) canonical RTL basic-block graph of a function.
-struct RtlCanonicalCfg {
-  std::vector<RtlCfgBlock> rpo_blocks;
-};
-
-// Result of comparing a `ControlFlowGraph` (or `RtlCanonicalCfg`) against a target GCC 2.7.2
-// `RtlFunctionDump` pass.
-struct RtlCfgPassComparison {
-  bool pass_present = false;
-  bool block_count_matches = false;
-  bool successors_match = false;
-  bool instructions_match = false;
-  size_t actual_block_count = 0;
-  size_t expected_block_count = 0;
-  size_t actual_insn_count = 0;
-  size_t expected_insn_count = 0;
-  std::string mismatch_detail;
-
-  bool MatchesExactly() const {
-    return pass_present && block_count_matches && successors_match && instructions_match;
-  }
 };
 
 // Represents the parsed contents of a single GCC 2.7.2 RTL pass dump file (e.g. `<file>.c.dbr`).
@@ -196,10 +149,15 @@ class GccRtlDumpInspector {
 
   // Builds the canonical RPO basic-block graph from a GCC 2.7.2 `RtlFunctionDump` (works uniformly
   // across all 13 passes `.rtl` .. `.dbr`).
-  static RtlCanonicalCfg BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump);
+  static RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump);
 
-  // Lifts a `ControlFlowGraph` into the same canonical RPO RTL basic-block representation.
-  static RtlCanonicalCfg LiftControlFlowGraphToCanonicalRtl(const ControlFlowGraph& cfg);
+  // Lifts a `ControlFlowGraph` into the same canonical RPO RTL basic-block representation
+  // via `InverseFinalAndGasStage::LiftToRtlCfg`.
+  static RtlControlFlowGraph LiftControlFlowGraphToCanonicalRtl(const ControlFlowGraph& cfg);
+
+  // Uniformly compares an `RtlControlFlowGraph` against any GCC 2.7.2 `RtlFunctionDump` pass.
+  static RtlCfgPassComparison CompareRtlCfgToDump(const RtlControlFlowGraph& rtl_cfg,
+                                                  const RtlFunctionDump* dump);
 
   // Uniformly compares a `ControlFlowGraph` against any GCC 2.7.2 `RtlFunctionDump` pass.
   static RtlCfgPassComparison CompareCfgToRtlDump(const ControlFlowGraph& cfg,

@@ -27,14 +27,26 @@ class SimpleDelaySlotUnschedulerPass : public CfgPass {
   bool unschedule_all_remaining_ = false;
 };
 
+enum class EagerThreadUnscheduleMode {
+  kPreCrossJump,
+  kPostCrossJump,
+  kStage1Full,
+};
+
 // Inverse of GCC 2.7.2 `reorg.c:fill_eager_delay_slots` (`fill_slots_from_thread`).
 // Reconstructs target-stolen branch-likely (`bnezl`/`beqzl`/`bc1tl`/`bc1fl`) delay slots and
 // fallthrough-stolen non-likely branch delay slots onto their destination blocks when the defined
 // registers are dead along the opposite edge.
 class EagerThreadDelaySlotUnschedulerPass : public CfgPass {
  public:
+  explicit EagerThreadDelaySlotUnschedulerPass(
+      EagerThreadUnscheduleMode mode = EagerThreadUnscheduleMode::kPreCrossJump)
+      : mode_(mode) {}
   std::string_view Name() const override { return "EagerThreadDelaySlotUnschedulerPass"; }
   bool Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) override;
+
+ private:
+  EagerThreadUnscheduleMode mode_ = EagerThreadUnscheduleMode::kPreCrossJump;
 };
 
 // Inverse of GCC 2.7.2 `reorg.c:fill_slots_from_thread` (`own_target = 0`) and

@@ -2582,6 +2582,10 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
 
   auto compute_unscheduled_clobber_reg = ComputeUnscheduledClobberReg;
   auto find_thread_sunk_insertion_index = FindThreadSunkInsertionIndex;
+  const bool unschedule_shared_branch_delay_slots =
+      (mode_ == EagerThreadUnscheduleMode::kStage1Full);
+  const bool allow_ineligible_pre_branch_sinking =
+      (mode_ != EagerThreadUnscheduleMode::kPostCrossJump);
 
   bool any_changed = false;
   for (int iter = 0; iter < 4; ++iter) {
@@ -2594,7 +2598,8 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
                                            returns_f0)) {
       changed = true;
     }
-    if (TryRestoreSharedSwitchDefaultBlocks(cfg, jump_table_target_vrams)) {
+    if (unschedule_shared_branch_delay_slots &&
+        TryRestoreSharedSwitchDefaultBlocks(cfg, jump_table_target_vrams)) {
       changed = true;
     }
 
@@ -2669,7 +2674,8 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
       // branch delay slot and deleted from `succ_taken`, `delay_inst` is live along `succ_taken`'s
       // fallthrough path (`tk_ft`) as well as `succ_fallthrough`, but dead on `succ_taken`'s taken
       // branch (`tk_taken`).
-      if (!dead_on_taken && !dead_on_fallthrough && block.instructions.size() == 2) {
+      if (unschedule_shared_branch_delay_slots && !dead_on_taken && !dead_on_fallthrough &&
+          block.instructions.size() == 2) {
         BasicBlock* tk_blk = cfg->GetMutableBlock(succ_taken);
         BasicBlock* ft_blk = cfg->GetMutableBlock(succ_fallthrough);
         if (tk_blk != nullptr && ft_blk != nullptr && tk_blk->predecessors.size() == 1 &&
@@ -2790,8 +2796,9 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           }
         }
       }
-      bool all_pre_branch_ineligible =
-          !is_fixuns_trunc_branch && !is_pre_branch_default_init_diamond;
+      bool all_pre_branch_ineligible = allow_ineligible_pre_branch_sinking &&
+                                       !is_fixuns_trunc_branch &&
+                                       !is_pre_branch_default_init_diamond;
       if (all_pre_branch_ineligible) {
         for (size_t i = 0; i < term_idx; ++i) {
           if (!WasIneligibleForTerminatorDelaySlot(block, i, term_idx, term)) {
@@ -2840,8 +2847,9 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           changed = true;
           continue;
         }
-      } else if (dead_on_taken && !dead_on_fallthrough && ft_block != nullptr &&
-                 ft_block->predecessors.size() >= 2 && has_thread_steal_conflict) {
+      } else if (unschedule_shared_branch_delay_slots && dead_on_taken && !dead_on_fallthrough &&
+                 ft_block != nullptr && ft_block->predecessors.size() >= 2 &&
+                 has_thread_steal_conflict) {
         const uint32_t block_id = block.id;
         std::optional<Register> clobber_reg = compute_unscheduled_clobber_reg(delay_ud);
         struct PeerTakenBranchInfo {
@@ -2920,9 +2928,9 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           changed = true;
           continue;
         }
-      } else if (!dead_on_taken && dead_on_fallthrough && ft_block != nullptr &&
-                 taken_block != nullptr && taken_block->predecessors.size() >= 2 &&
-                 has_thread_steal_conflict) {
+      } else if (unschedule_shared_branch_delay_slots && !dead_on_taken && dead_on_fallthrough &&
+                 ft_block != nullptr && taken_block != nullptr &&
+                 taken_block->predecessors.size() >= 2 && has_thread_steal_conflict) {
         const uint32_t block_id = block.id;
         const uint32_t taken_start_vram = taken_block->start_vram;
         const Loop* block_loop = loop_info.GetLoopFor(block_id);
@@ -3743,7 +3751,8 @@ CfgPassPipeline CfgDeReorg::BuildStage1Pipeline() {
   CfgPassPipeline pipeline;
   pipeline.AddPass(std::make_unique<TargetHeaderDelaySlotReconcilerPass>());
   pipeline.AddPass(std::make_unique<RelaxDelaySlotUnschedulerPass>());
-  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
+  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>(
+      EagerThreadUnscheduleMode::kStage1Full));
   pipeline.AddPass(
       std::make_unique<SimpleDelaySlotUnschedulerPass>(/*unschedule_all_remaining=*/true));
   return pipeline;
@@ -3751,13 +3760,15 @@ CfgPassPipeline CfgDeReorg::BuildStage1Pipeline() {
 
 CfgPassPipeline CfgDeReorg::BuildDefaultPipeline() {
   CfgPassPipeline pipeline;
+  pipeline.AddPass(std::make_unique<SimpleDelaySlotUnschedulerPass>());
   pipeline.AddPass(std::make_unique<TargetHeaderDelaySlotReconcilerPass>());
   pipeline.AddPass(std::make_unique<RelaxDelaySlotUnschedulerPass>());
-  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
+  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>(
+      EagerThreadUnscheduleMode::kPreCrossJump));
   pipeline.AddPass(std::make_unique<CrossJumpTailDuplicatorPass>());
-  pipeline.AddPass(
-      std::make_unique<SimpleDelaySlotUnschedulerPass>(/*unschedule_all_remaining=*/true));
-  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
+  pipeline.AddPass(std::make_unique<SimpleDelaySlotUnschedulerPass>());
+  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>(
+      EagerThreadUnscheduleMode::kPostCrossJump));
   return pipeline;
 }
 

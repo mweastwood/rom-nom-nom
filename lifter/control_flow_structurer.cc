@@ -641,16 +641,19 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureJumpTableSwitc
   const JumpTable* switch_jt = nullptr;
   uint32_t switch_dispatch_block_id = entry;
   bool has_bounds_block = false;
+  std::optional<uint32_t> bounds_branch_target_id;
 
   if (block->jump_table != nullptr) {
     switch_jt = block->jump_table;
     switch_dispatch_block_id = entry;
   } else if (block->successors.size() == 2) {
     uint32_t succ_fallthrough = 0;
+    uint32_t succ_taken = 0;
     for (const auto& edge : block->outgoing_edges) {
       if (edge.type == EdgeType::kFallthrough) {
         succ_fallthrough = edge.to_block_id;
-        break;
+      } else if (edge.type == EdgeType::kBranch) {
+        succ_taken = edge.to_block_id;
       }
     }
     const auto* fallthrough_blk = cfg_->GetBlock(succ_fallthrough);
@@ -658,6 +661,9 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureJumpTableSwitc
       switch_jt = fallthrough_blk->jump_table;
       switch_dispatch_block_id = succ_fallthrough;
       has_bounds_block = true;
+      if (succ_taken != 0) {
+        bounds_branch_target_id = succ_taken;
+      }
     }
   }
 
@@ -681,7 +687,9 @@ std::unique_ptr<StructuredRegion> ControlFlowStructurer::StructureJumpTableSwitc
     }
   }
 
-  const auto* def_blk = cfg_->FindBlockByVram(switch_jt->default_target_vram);
+  const auto* def_blk = bounds_branch_target_id.has_value()
+                            ? cfg_->GetBlock(*bounds_branch_target_id)
+                            : cfg_->FindBlockByVram(switch_jt->default_target_vram);
   uint32_t def_blk_id = (def_blk != nullptr) ? def_blk->id : 0;
   bool has_explicit_default = false;
   if (def_blk != nullptr) {
