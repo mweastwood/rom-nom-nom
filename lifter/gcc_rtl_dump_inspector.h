@@ -12,6 +12,8 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/compiler.h"
+#include "core/control_flow_graph.h"
+#include "core/mips.h"
 #include "core/process.h"
 #include "core/toolchain.h"
 
@@ -77,6 +79,36 @@ struct RtlFunctionDump {
 
   // Returns true if the function contains at least one `NOTE_INSN_LOOP_BEG` note.
   bool HasLoopNotes() const;
+};
+
+// Represents a canonical basic block extracted from either a GCC 2.7.2 `RtlFunctionDump`
+// (for any pass `.rtl` .. `.dbr`) or lifted from a `ControlFlowGraph`.
+struct RtlCfgBlock {
+  std::vector<std::string> instructions;
+  std::vector<size_t> successors;
+};
+
+// Represents the Reverse-Post-Order (RPO) canonical RTL basic-block graph of a function.
+struct RtlCanonicalCfg {
+  std::vector<RtlCfgBlock> rpo_blocks;
+};
+
+// Result of comparing a `ControlFlowGraph` (or `RtlCanonicalCfg`) against a target GCC 2.7.2
+// `RtlFunctionDump` pass.
+struct RtlCfgPassComparison {
+  bool pass_present = false;
+  bool block_count_matches = false;
+  bool successors_match = false;
+  bool instructions_match = false;
+  size_t actual_block_count = 0;
+  size_t expected_block_count = 0;
+  size_t actual_insn_count = 0;
+  size_t expected_insn_count = 0;
+  std::string mismatch_detail;
+
+  bool MatchesExactly() const {
+    return pass_present && block_count_matches && successors_match && instructions_match;
+  }
 };
 
 // Represents the parsed contents of a single GCC 2.7.2 RTL pass dump file (e.g. `<file>.c.dbr`).
@@ -161,6 +193,17 @@ class GccRtlDumpInspector {
   // all generated RTL pass dumps.
   absl::StatusOr<GccCompilationDump> InspectC(std::string_view c_code,
                                               const GccRtlInspectOptions& options = {}) const;
+
+  // Builds the canonical RPO basic-block graph from a GCC 2.7.2 `RtlFunctionDump` (works uniformly
+  // across all 13 passes `.rtl` .. `.dbr`).
+  static RtlCanonicalCfg BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump);
+
+  // Lifts a `ControlFlowGraph` into the same canonical RPO RTL basic-block representation.
+  static RtlCanonicalCfg LiftControlFlowGraphToCanonicalRtl(const ControlFlowGraph& cfg);
+
+  // Uniformly compares a `ControlFlowGraph` against any GCC 2.7.2 `RtlFunctionDump` pass.
+  static RtlCfgPassComparison CompareCfgToRtlDump(const ControlFlowGraph& cfg,
+                                                  const RtlFunctionDump* dump);
 
  private:
   Toolchain toolchain_;

@@ -1,8 +1,14 @@
 #include "lifter/gcc_rtl_dump_inspector.h"
 
+#include <cstdlib>
+#include <filesystem>
 #include <string_view>
 
+#include "core/round_trip_runner.h"
 #include "gtest/gtest.h"
+#include "lifter/cfg_de_reorg.h"
+#include "lifter/decompilation_context.h"
+#include "lifter/function_loader.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -262,6 +268,76 @@ s32 CountEqual(s32 a, s32 b, s32 count) {
   }
   EXPECT_TRUE(has_cond_jump_in_rtl);
   EXPECT_FALSE(has_cond_jump_in_jump);
+}
+
+TEST(GccRtlDumpInspectorTest, ComparesLiftedCfgDirectlyAgainstDbrAndJump2RtlDumps) {
+  auto inspector_or = GccRtlDumpInspector::Create();
+  ASSERT_TRUE(inspector_or.ok()) << inspector_or.status();
+  auto runner_or = RoundTripRunner::Create();
+  ASSERT_TRUE(runner_or.ok()) << runner_or.status();
+
+  constexpr std::string_view kSource = R"(
+extern s32 step_fn(s32 x);
+
+s32 AccumulateSteps(s32 n, s32 limit) {
+  s32 acc = 0;
+  s32 i;
+  for (i = 0; i < n; i++) {
+    acc += step_fn(i);
+    if (acc > limit) {
+      return limit;
+    }
+  }
+  return acc;
+}
+)";
+
+  auto dump_or = inspector_or->InspectC(kSource);
+  ASSERT_TRUE(dump_or.ok()) << dump_or.status();
+
+  RoundTripTestCase tc;
+  tc.test_name = "AccumulateSteps";
+  tc.function_name = "AccumulateSteps";
+  tc.original_c = std::string(kSource);
+
+  const char* test_tmpdir = std::getenv("TEST_TMPDIR");
+  std::filesystem::path work_dir = (test_tmpdir != nullptr ? std::filesystem::path(test_tmpdir)
+                                                           : std::filesystem::path("/tmp")) /
+                                   "accumulate_steps_rtl_cmp";
+  std::filesystem::create_directories(work_dir);
+  auto prepared_or = (*runner_or)->PrepareCase(tc, work_dir);
+  ASSERT_TRUE(prepared_or.ok()) << prepared_or.status();
+
+  auto loaded_or = FunctionLoader::FromWords(
+      tc.function_name, prepared_or->patched_orig_words, tc.options.base_vram,
+      prepared_or->symbol_index.get(), /*game_config=*/nullptr, prepared_or->rodata_memory_reader);
+  ASSERT_TRUE(loaded_or.ok()) << loaded_or.status();
+
+  DecompilationContext ctx(*loaded_or);
+  ASSERT_TRUE(ctx.BuildCfg().ok());
+
+  const RtlFunctionDump* dbr_dump = dump_or->GetFunctionPass("AccumulateSteps", RtlPassKind::kDbr);
+  const RtlFunctionDump* jump2_dump =
+      dump_or->GetFunctionPass("AccumulateSteps", RtlPassKind::kJump2);
+  ASSERT_NE(dbr_dump, nullptr);
+  ASSERT_NE(jump2_dump, nullptr);
+
+  // Stage 0: Raw binary CFG lifted to canonical RTL matches `.dbr` directly.
+  const RtlCfgPassComparison stage0_cmp =
+      GccRtlDumpInspector::CompareCfgToRtlDump(ctx.Cfg(), dbr_dump);
+  EXPECT_TRUE(stage0_cmp.MatchesExactly()) << stage0_cmp.mismatch_detail;
+
+  // Before running Stage 1 (`CfgDeReorg::UnscheduleDelaySlotsOnly`), the raw CFG does not match
+  // `.jump2` because delay-slot-hoisted instructions have not been returned to their predecessors.
+  const RtlCfgPassComparison pre_stage1_cmp =
+      GccRtlDumpInspector::CompareCfgToRtlDump(ctx.Cfg(), jump2_dump);
+  EXPECT_FALSE(pre_stage1_cmp.MatchesExactly());
+
+  // Stage 1: After `CfgDeReorg::UnscheduleDelaySlotsOnly`, the CFG matches `.jump2` directly.
+  CfgDeReorg::UnscheduleDelaySlotsOnly(ctx.MutableCfg(), &ctx.CfgAnalyses());
+  const RtlCfgPassComparison stage1_cmp =
+      GccRtlDumpInspector::CompareCfgToRtlDump(ctx.Cfg(), jump2_dump);
+  EXPECT_TRUE(stage1_cmp.MatchesExactly()) << stage1_cmp.mismatch_detail;
 }
 
 }  // namespace

@@ -124,6 +124,13 @@ struct CaseInversionResult {
   bool final_dbr_rtl_matches = false;
   CfgStage1Comparison direct_cfg_stage1;
   CfgStage2Comparison direct_cfg_stage2;
+  // Direct CFG -> RTL comparison for Stage 0 (`final.c` + `gas` inversion: initial binary CFG vs
+  // `.dbr` RTL dump) before any CFG pass runs.
+  RtlCfgPassComparison direct_rtl_stage0_comparison{};
+  // Direct CFG -> RTL comparison per phase: compares the lifter's CFG after Inverse Phase `k`
+  // directly against the target GCC RTL dump `kTwelvePhases[k - 1].gcc_input_pass` via
+  // `GccRtlDumpInspector::CompareCfgToRtlDump`.
+  std::array<RtlCfgPassComparison, 12> direct_rtl_stage_comparisons{};
   // Exact Right-inverse check per phase: `f_k(g_k(y_k)) == y_k` (exact S-expression match on
   // `gcc_output_pass`).
   std::array<bool, 12> phase_right_inverse_matches{};
@@ -406,6 +413,17 @@ class GccStageInversionSuiteAccumulator {
     size_t stage2_delta_matched_when_modified = 0;
     size_t stage2_delta_matched_overall = 0;
 
+    size_t direct_rtl_stage0_present = 0;
+    size_t direct_rtl_stage0_blocks_match = 0;
+    size_t direct_rtl_stage0_edges_match = 0;
+    size_t direct_rtl_stage0_insns_match = 0;
+    size_t direct_rtl_stage0_exact_match = 0;
+
+    std::array<size_t, 12> direct_rtl_present_count{};
+    std::array<size_t, 12> direct_rtl_blocks_match{};
+    std::array<size_t, 12> direct_rtl_edges_match{};
+    std::array<size_t, 12> direct_rtl_insns_match{};
+    std::array<size_t, 12> direct_rtl_exact_match{};
     std::array<size_t, 12> phase_right_matches{};
     std::array<size_t, 12> phase_right_matches_when_transformed{};
     std::array<size_t, 12> phase_left_matches{};
@@ -437,7 +455,22 @@ class GccStageInversionSuiteAccumulator {
 
       bool all_12_right = r.decompiled_and_compiled_ok;
       bool all_12_left = r.decompiled_and_compiled_ok;
+      if (r.direct_rtl_stage0_comparison.pass_present) {
+        ++direct_rtl_stage0_present;
+        if (r.direct_rtl_stage0_comparison.block_count_matches) ++direct_rtl_stage0_blocks_match;
+        if (r.direct_rtl_stage0_comparison.successors_match) ++direct_rtl_stage0_edges_match;
+        if (r.direct_rtl_stage0_comparison.instructions_match) ++direct_rtl_stage0_insns_match;
+        if (r.direct_rtl_stage0_comparison.MatchesExactly()) ++direct_rtl_stage0_exact_match;
+      }
       for (size_t i = 0; i < 12; ++i) {
+        const auto& dc = r.direct_rtl_stage_comparisons[i];
+        if (dc.pass_present) {
+          ++direct_rtl_present_count[i];
+          if (dc.block_count_matches) ++direct_rtl_blocks_match[i];
+          if (dc.successors_match) ++direct_rtl_edges_match[i];
+          if (dc.instructions_match) ++direct_rtl_insns_match[i];
+          if (dc.MatchesExactly()) ++direct_rtl_exact_match[i];
+        }
         if (r.phase_right_inverse_matches[i]) {
           ++phase_right_matches[i];
         } else {
@@ -525,6 +558,38 @@ class GccStageInversionSuiteAccumulator {
     absl::StrAppend(
         &out,
         "--------------------------------------------------------------------------------\n"
+        "DIRECT CFG -> RTL PASS VERIFICATION ACROSS ALL 13 INVERSE STAGES (0..12):\n");
+    absl::StrAppendFormat(
+        &out,
+        "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
+        "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
+        0, GccRtlDumpInspector::PassExtension(RtlPassKind::kDbr), "InversePhase0_FinalAndGasLift",
+        direct_rtl_stage0_blocks_match, direct_rtl_stage0_present,
+        pct(direct_rtl_stage0_blocks_match, direct_rtl_stage0_present),
+        direct_rtl_stage0_edges_match, direct_rtl_stage0_present,
+        pct(direct_rtl_stage0_edges_match, direct_rtl_stage0_present),
+        direct_rtl_stage0_insns_match, direct_rtl_stage0_present,
+        pct(direct_rtl_stage0_insns_match, direct_rtl_stage0_present),
+        direct_rtl_stage0_exact_match, direct_rtl_stage0_present,
+        pct(direct_rtl_stage0_exact_match, direct_rtl_stage0_present));
+    for (size_t i = 0; i < 12; ++i) {
+      const auto& p = kTwelvePhases[i];
+      const size_t den = direct_rtl_present_count[i];
+      absl::StrAppendFormat(
+          &out,
+          "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
+          "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
+          p.inverse_phase_number, GccRtlDumpInspector::PassExtension(p.gcc_input_pass),
+          p.inverse_phase_name, direct_rtl_blocks_match[i], den,
+          pct(direct_rtl_blocks_match[i], den), direct_rtl_edges_match[i], den,
+          pct(direct_rtl_edges_match[i], den), direct_rtl_insns_match[i], den,
+          pct(direct_rtl_insns_match[i], den), direct_rtl_exact_match[i], den,
+          pct(direct_rtl_exact_match[i], den));
+    }
+
+    absl::StrAppend(
+        &out,
+        "--------------------------------------------------------------------------------\n"
         "FIRST DIVERGENT GCC PASS DISTRIBUTION (Chronological Forward Order):\n");
     for (RtlPassKind pass : GccRtlDumpInspector::AllPasses()) {
       size_t c = first_divergent_counts[pass];
@@ -547,6 +612,38 @@ class GccStageInversionSuiteAccumulator {
               r.direct_cfg_stage1.unscheduled_block_count,
               r.direct_cfg_stage1.expected_no_dbr_block_count, r.direct_cfg_stage1.successors_match,
               r.direct_cfg_stage1.active_instructions_match, r.direct_cfg_stage1.mismatch_detail);
+        }
+      }
+    }
+    if (direct_rtl_stage0_exact_match < direct_rtl_stage0_present) {
+      absl::StrAppend(
+          &out,
+          "--------------------------------------------------------------------------------\n"
+          "STAGE 0 DIRECT CFG -> .dbr RTL MISMATCHES (FIRST 20):\n");
+      size_t shown = 0;
+      for (const auto& r : results_) {
+        const auto& dc = r.direct_rtl_stage0_comparison;
+        if (dc.pass_present && !dc.MatchesExactly()) {
+          absl::StrAppendFormat(&out, "  %-48s | blks=%zu/%zu insns=%zu/%zu | %s\n", r.test_name,
+                                dc.actual_block_count, dc.expected_block_count,
+                                dc.actual_insn_count, dc.expected_insn_count, dc.mismatch_detail);
+          if (++shown >= 20) break;
+        }
+      }
+    }
+    if (direct_rtl_exact_match[0] < direct_rtl_present_count[0]) {
+      absl::StrAppend(
+          &out,
+          "--------------------------------------------------------------------------------\n"
+          "STAGE 1 DIRECT CFG -> .jump2 RTL MISMATCHES (FIRST 20):\n");
+      size_t shown = 0;
+      for (const auto& r : results_) {
+        const auto& dc = r.direct_rtl_stage_comparisons[0];
+        if (dc.pass_present && !dc.MatchesExactly()) {
+          absl::StrAppendFormat(&out, "  %-48s | blks=%zu/%zu insns=%zu/%zu | %s\n", r.test_name,
+                                dc.actual_block_count, dc.expected_block_count,
+                                dc.actual_insn_count, dc.expected_insn_count, dc.mismatch_detail);
+          if (++shown >= 20) break;
         }
       }
     }
@@ -680,6 +777,11 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     // and Direct CFG Stage 2 (`CrossJumpTailDuplicatorPass` vs `.sched2` -> `.jump2`).
     DecompilationContext dbr_ctx(*loaded_dbr_or);
     if (dbr_ctx.BuildCfg().ok()) {
+      // Record Direct CFG -> RTL comparison for Stage 0 (`final.c` + `gas` inversion: initial
+      // binary CFG vs `.dbr` RTL dump) before Inverse Phase 1 runs.
+      res.direct_rtl_stage0_comparison = GccRtlDumpInspector::CompareCfgToRtlDump(
+          dbr_ctx.Cfg(), orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kDbr));
+
       RunInversePhase1DelaySlotUnschedulerOnly(dbr_ctx.MutableCfg(), &dbr_ctx.CfgAnalyses());
 
       if (no_dbr_status.ok()) {
@@ -745,8 +847,21 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       res.direct_cfg_stage2.cfg_before_tail_dup_active_insns =
           CountActiveInstructionsInCfg(dbr_ctx.Cfg());
 
+      // Record Direct CFG -> RTL comparison after Inverse Phase 1 (against `.jump2`).
+      res.direct_rtl_stage_comparisons[0] = GccRtlDumpInspector::CompareCfgToRtlDump(
+          dbr_ctx.Cfg(),
+          orig_dump.GetFunctionPass(test_case.function_name, kTwelvePhases[0].gcc_input_pass));
+
       CrossJumpTailDuplicatorPass tail_dup_pass;
       tail_dup_pass.Run(dbr_ctx.MutableCfg(), &dbr_ctx.CfgAnalyses());
+
+      // Record Direct CFG -> RTL comparison after Inverse Phase 2 (against `.sched2`) and
+      // subsequent phases (`kGreg` .. `kRtl`) against the current post-Stage-2 CFG state.
+      for (size_t i = 1; i < 12; ++i) {
+        res.direct_rtl_stage_comparisons[i] = GccRtlDumpInspector::CompareCfgToRtlDump(
+            dbr_ctx.Cfg(),
+            orig_dump.GetFunctionPass(test_case.function_name, kTwelvePhases[i].gcc_input_pass));
+      }
 
       res.direct_cfg_stage2.cfg_after_tail_dup_blocks = dbr_ctx.Cfg().Blocks().size();
       res.direct_cfg_stage2.cfg_after_tail_dup_active_insns =
