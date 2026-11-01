@@ -681,6 +681,18 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "rtl_cfg_builder_test",
+    srcs = ["rtl_cfg_builder_test.cc"],
+    deps = [
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "rtl_def_use_analysis",
     srcs = ["rtl_def_use_analysis.cc"],
@@ -692,6 +704,20 @@ cc_library(
         "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "rtl_def_use_analysis_test",
+    srcs = ["rtl_def_use_analysis_test.cc"],
+    deps = [
+        ":rtl_cfg",
+        ":rtl_cfg_builder",
+        ":rtl_def_use_analysis",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -712,6 +738,20 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "inverse_final_and_gas_stage_test",
+    srcs = ["inverse_final_and_gas_stage_test.cc"],
+    deps = [
+        ":decompilation_context",
+        ":function_loader",
+        ":inverse_final_and_gas_stage",
+        ":rtl_cfg",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "inverse_jump2_cross_jump_stage",
     srcs = ["inverse_jump2_cross_jump_stage.cc"],
@@ -725,6 +765,22 @@ cc_library(
         "//core:mips",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_test(
+    name = "inverse_jump2_cross_jump_stage_test",
+    srcs = ["inverse_jump2_cross_jump_stage_test.cc"],
+    deps = [
+        ":cfg_de_reorg",
+        ":decompilation_context",
+        ":function_loader",
+        ":inverse_final_and_gas_stage",
+        ":inverse_jump2_cross_jump_stage",
+        ":rtl_cfg",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -745,6 +801,22 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "inverse_sched2_post_reload_stage_test",
+    srcs = ["inverse_sched2_post_reload_stage_test.cc"],
+    deps = [
+        ":cfg_de_reorg",
+        ":decompilation_context",
+        ":function_loader",
+        ":inverse_jump2_cross_jump_stage",
+        ":inverse_sched2_post_reload_stage",
+        ":rtl_cfg",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "inverse_greg_reload_stage",
     srcs = ["inverse_greg_reload_stage.cc"],
@@ -759,6 +831,22 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "inverse_greg_reload_stage_test",
+    srcs = ["inverse_greg_reload_stage_test.cc"],
+    deps = [
+        ":cfg_de_reorg",
+        ":decompilation_context",
+        ":function_loader",
+        ":inverse_final_and_gas_stage",
+        ":inverse_greg_reload_stage",
+        ":rtl_cfg",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "inverse_sched1_pre_alloc_stage",
     srcs = ["inverse_sched1_pre_alloc_stage.cc"],
@@ -768,6 +856,22 @@ cc_library(
         ":rtl_cfg_builder",
         ":rtl_def_use_analysis",
         "//core:mips",
+    ],
+)
+
+cc_test(
+    name = "inverse_sched1_pre_alloc_stage_test",
+    srcs = ["inverse_sched1_pre_alloc_stage_test.cc"],
+    deps = [
+        ":cfg_de_reorg",
+        ":decompilation_context",
+        ":function_loader",
+        ":inverse_final_and_gas_stage",
+        ":inverse_sched1_pre_alloc_stage",
+        ":rtl_cfg",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
