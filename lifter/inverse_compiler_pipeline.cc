@@ -125,6 +125,8 @@ absl::Status InverseGregReloadStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseGregReloadStage: RtlCfg not initialized.");
   }
+  InverseFinalAndGasLifter::InvertGregToLregRtlCfg(context->MutableRtlCfg(),
+                                                   &context->FrameLayout().RawAnalysis());
   return absl::OkStatus();
 }
 

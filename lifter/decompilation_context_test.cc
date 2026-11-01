@@ -333,5 +333,75 @@ TEST(DecompilationContextTest, Stage3StripsPrologueAndRestoresGregSelfMoves) {
   EXPECT_EQ(stage3_rtl.rpo_blocks[0].instructions[1], "addu  $a1, $a1, $zero");
 }
 
+TEST(DecompilationContextTest, Stage4FoldsReloadInstructionsIntoLregRtlCfg) {
+  auto make_mtc1 = [](Register rt, FpRegister fs, uint32_t vram) {
+    Instruction inst;
+    inst.raw_word = 0x44800000u;
+    inst.opcode = Opcode::kMtc1;
+    inst.rt = rt;
+    inst.fs = fs;
+    inst.vram = vram;
+    return inst;
+  };
+  auto make_mul_s = [](FpRegister fd, FpRegister fs, FpRegister ft, uint32_t vram) {
+    Instruction inst;
+    inst.raw_word = 0x46000002u;
+    inst.opcode = Opcode::kMulS;
+    inst.fd = fd;
+    inst.fs = fs;
+    inst.ft = ft;
+    inst.vram = vram;
+    return inst;
+  };
+  auto make_add_s = [](FpRegister fd, FpRegister fs, FpRegister ft, uint32_t vram) {
+    Instruction inst;
+    inst.raw_word = 0x46000000u;
+    inst.opcode = Opcode::kAddS;
+    inst.fd = fd;
+    inst.fs = fs;
+    inst.ft = ft;
+    inst.vram = vram;
+    return inst;
+  };
+
+  LoadedFunction func;
+  func.name = "stage4_lreg_reload_fold_fn";
+  func.vram = 0x80010500;
+  // Mirrors `ScaleAndOffsetFloat(s32 unused, f32 x, f32 scale, f32 offset)`:
+  // In `.lreg`, `(reg:SF 5 a1)`, `(reg:SF 6 a2)`, `(reg:SF 7 a3)` appear directly inside `mul.s`
+  // and `add.s` (2 RTL instructions). In `.greg`, `reload1.c:emit_reload_insns` inserts 3
+  // `RELOAD_FOR_INPUT` `mtc1` instructions into `$f2`/`$f4` (5 RTL instructions).
+  func.instructions = {
+      make_mtc1(Register::kA1, FpRegister::kF2, 0x80010500),
+      make_mtc1(Register::kA2, FpRegister::kF4, 0x80010504),
+      make_mul_s(FpRegister::kF0, FpRegister::kF2, FpRegister::kF4, 0x80010508),
+      make_mtc1(Register::kA3, FpRegister::kF2, 0x8001050C),
+      make_add_s(FpRegister::kF0, FpRegister::kF0, FpRegister::kF2, 0x80010510),
+      MakeJrRa(0x80010514),
+      MakeNop(0x80010518),
+  };
+
+  DecompilationContext context(func);
+  InverseCompilerPipeline pipeline = InverseCompilerPipeline::BuildDefaultPipeline();
+
+  RtlControlFlowGraph stage3_rtl;
+  RtlControlFlowGraph stage4_rtl;
+  ASSERT_TRUE(pipeline
+                  .Run(&context,
+                       [&](const InverseStageDescriptor& desc, const DecompilationContext& ctx) {
+                         if (desc.id == InverseStageId::kStage03Sched2PostReload) {
+                           stage3_rtl = ctx.RtlCfg();
+                         } else if (desc.id == InverseStageId::kStage04GregReload) {
+                           stage4_rtl = ctx.RtlCfg();
+                         }
+                       })
+                  .ok());
+
+  ASSERT_EQ(stage3_rtl.rpo_blocks.size(), 1u);
+  ASSERT_EQ(stage4_rtl.rpo_blocks.size(), 1u);
+  EXPECT_EQ(stage3_rtl.rpo_blocks[0].instructions.size(), 5u);
+  ASSERT_EQ(stage4_rtl.rpo_blocks[0].instructions.size(), 2u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

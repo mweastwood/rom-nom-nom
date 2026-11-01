@@ -44,6 +44,12 @@ class InverseFinalAndGasLifter {
                                        const SymbolIndex* symbols = nullptr,
                                        std::string_view function_name = "");
 
+  // Inverts GCC 2.7.2 Stage 9 (`global.c:global_alloc` and `reload1.c:reload` /
+  // `emit_reload_insns`) to transform a `.greg` `RtlControlFlowGraph` into a canonical `.lreg`
+  // `RtlControlFlowGraph`.
+  static void InvertGregToLregRtlCfg(RtlControlFlowGraph* cfg,
+                                     const StackFrameAnalysis* frame_analysis = nullptr);
+
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);
 

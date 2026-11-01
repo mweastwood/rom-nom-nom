@@ -956,7 +956,7 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
       << ": remaining_branch_likely=" << res.direct_cfg_stage1.remaining_branch_likely
       << ", remaining_non_nop_delay_slots=" << res.direct_cfg_stage1.remaining_non_nop_delay_slots
       << ", detail=" << res.direct_cfg_stage1.mismatch_detail;
-  for (size_t s : {size_t{0}, size_t{1}, size_t{2}, size_t{3}}) {
+  for (size_t s : {size_t{0}, size_t{1}, size_t{2}, size_t{3}, size_t{4}}) {
     const RtlCfgPassComparison& rtl_cmp =
         (s == 0) ? res.direct_rtl_stage0_comparison : res.direct_rtl_stage_comparisons[s - 1];
     if (rtl_cmp.pass_present) {
