@@ -12,6 +12,7 @@
 #include "lifter/control_flow_structurer.h"
 #include "lifter/decompilation_context.h"
 #include "lifter/dominator_tree.h"
+#include "lifter/inverse_combine_stage.h"
 #include "lifter/inverse_final_and_gas_stage.h"
 #include "lifter/inverse_greg_reload_stage.h"
 #include "lifter/inverse_jump2_cross_jump_stage.h"
@@ -153,6 +154,7 @@ absl::Status InverseCombineStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseCombineStage: RtlCfg not initialized.");
   }
+  InverseCombineLifter::InvertCombineToFlowRtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 

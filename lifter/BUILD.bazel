@@ -876,6 +876,30 @@ cc_test(
 )
 
 cc_library(
+    name = "inverse_combine_stage",
+    srcs = ["inverse_combine_stage.cc"],
+    hdrs = ["inverse_combine_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "inverse_combine_stage_test",
+    srcs = ["inverse_combine_stage_test.cc"],
+    deps = [
+        ":inverse_combine_stage",
+        ":rtl_cfg",
+        "//core:mips",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "decompilation_context",
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
@@ -907,6 +931,7 @@ cc_library(
         ":control_flow_structurer",
         ":decompilation_context",
         ":dominator_tree",
+        ":inverse_combine_stage",
         ":inverse_final_and_gas_stage",
         ":inverse_greg_reload_stage",
         ":inverse_jump2_cross_jump_stage",
