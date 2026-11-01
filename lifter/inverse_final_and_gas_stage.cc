@@ -1,6 +1,7 @@
 #include "lifter/inverse_final_and_gas_stage.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -12,10 +13,12 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "core/control_flow_graph.h"
 #include "core/division_pattern.h"
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/stack_frame_analyzer.h"
 
@@ -289,6 +292,7 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
     // instructions (which only occur after all calls in a return block).
     std::vector<Instruction> insts;
     insts.reserve(raw_insts.size());
+    absl::flat_hash_map<uint32_t, std::vector<Instruction>> div_spans;
     for (size_t i = 0; i < raw_insts.size(); ++i) {
       const auto& inst = raw_insts[i];
       if (inst.IsNop()) {
@@ -302,6 +306,13 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
         continue;
       }
       if (auto div_pat = MatchDivisionPattern(raw_insts, i); div_pat.has_value()) {
+        std::vector<Instruction> span = {inst};
+        for (size_t k = i + 1; k <= div_pat->end_index && k < raw_insts.size(); ++k) {
+          if (raw_insts[k].opcode == Opcode::kMflo || raw_insts[k].opcode == Opcode::kMfhi) {
+            span.push_back(raw_insts[k]);
+          }
+        }
+        div_spans[inst.vram] = std::move(span);
         insts.push_back(inst);
         i = div_pat->end_index;
         continue;
@@ -316,6 +327,12 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
     out_blk.end_vram = blk->end_vram;
     for (size_t idx = 0; idx < insts.size(); ++idx) {
       const auto& inst = insts[idx];
+      if ((inst.opcode == Opcode::kDiv || inst.opcode == Opcode::kDivu) &&
+          div_spans.contains(inst.vram)) {
+        out_blk.AddInsn(MakeRtlInsn(inst, RtlFusedIdiomKind::kDivisionWithTrap,
+                                    div_spans[inst.vram], prologue_vrams));
+        continue;
+      }
       // 1. Fuse `mulsi3_internal` (`mult` + `mflo` without `mfhi`).
       if ((inst.opcode == Opcode::kMult || inst.opcode == Opcode::kMultu) &&
           idx + 1 < insts.size() && insts[idx + 1].opcode == Opcode::kMflo &&
@@ -1483,6 +1500,1384 @@ void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
   }
 }
 
+std::string GprName(Register r) {
+  static constexpr std::string_view kGccGprNames[32] = {
+      "$0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
+      "t3", "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
+      "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra",
+  };
+  return std::string(kGccGprNames[static_cast<int>(r)]);
+}
+
+std::string FprName(FpRegister f) {
+  return absl::StrFormat("$f%d", static_cast<int>(f));
+}
+
+bool IsGotSelfMoveInsn(const RtlInsn& insn, std::string* out_reg = nullptr) {
+  if (insn.idiom_kind != RtlFusedIdiomKind::kSingleInstruction ||
+      insn.machine_instructions.size() != 1) {
+    return false;
+  }
+  const Instruction& m = insn.machine_instructions[0];
+  if (m.opcode == Opcode::kAddu && m.rt == Register::kZero && m.rd.has_value() && m.rs == m.rd &&
+      *m.rd != Register::kZero) {
+    if (out_reg != nullptr) {
+      *out_reg = GprName(*m.rd);
+    }
+    return true;
+  }
+  if ((m.opcode == Opcode::kMovS || m.opcode == Opcode::kMovD) && m.fd.has_value() &&
+      m.fs == m.fd) {
+    if (out_reg != nullptr) {
+      *out_reg = FprName(*m.fd);
+    }
+    return true;
+  }
+  return false;
+}
+
+RtlInsn MakeSelfMoveRtlInsn(std::string_view reg_name) {
+  if (absl::StartsWith(reg_name, "$f")) {
+    int fnum = 0;
+    (void)absl::SimpleAtoi(reg_name.substr(2), &fnum);
+    const FpRegister f = static_cast<FpRegister>(fnum);
+    Instruction inst;
+    inst.opcode = Opcode::kMovS;
+    inst.fd = f;
+    inst.fs = f;
+    inst.raw_word = 0x46000006u;
+    RtlInsn out;
+    out.canonical_pattern = InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(inst);
+    out.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
+    out.machine_instructions = {inst};
+    return out;
+  }
+  Register r = Register::kV0;
+  if (reg_name == "a0") {
+    r = Register::kA0;
+  } else if (reg_name == "a1") {
+    r = Register::kA1;
+  } else if (reg_name == "a2") {
+    r = Register::kA2;
+  } else if (reg_name == "a3") {
+    r = Register::kA3;
+  } else if (reg_name == "v0") {
+    r = Register::kV0;
+  }
+  return MakeRegMoveRtlInsn(r, r);
+}
+
+struct ParsedGregInsn {
+  bool is_call = false;
+  bool is_jump = false;
+  std::vector<std::string> defs;
+  std::vector<std::string> uses;
+  std::string callee;
+  bool is_reg_to_reg_move = false;
+  bool is_si_reg_to_reg_move = false;
+  bool is_mfc1_to_arg_gpr = false;
+  bool is_mtc1_from_gpr = false;
+  bool is_sll = false;
+  bool is_addu_or_subu_reg = false;
+  bool is_addiu_minus_1 = false;
+  bool is_and_reg = false;
+  bool is_andi_a0_1 = false;
+  bool is_df_di_a2 = false;
+  bool is_sp16_store = false;
+  bool is_sp16_fpr_store = false;
+  bool is_sp_buf_16_addr = false;
+  bool is_sp_buf_32_addr = false;
+  bool is_float_in_gpr_def = false;
+  bool is_store = false;
+  bool is_sw_v0 = false;
+  bool is_symbol_store = false;
+  bool is_global_lock_zero_store = false;
+  bool is_load = false;
+  bool is_lw_a0_from_0_s0 = false;
+  bool is_v0_plus_non_one = false;
+  bool is_beq_a1_zero = false;
+  bool compares_a1_to_reg = false;
+};
+
+bool HasItem(const std::vector<std::string>& vec, std::string_view item) {
+  return std::find(vec.begin(), vec.end(), item) != vec.end();
+}
+
+ParsedGregInsn ParseGregDefUse(const RtlInsn& insn, const SymbolIndex* symbols) {
+  ParsedGregInsn p;
+  auto add_def = [&](std::string_view r) {
+    if (!r.empty() && r != "$0" && r != "at" && !HasItem(p.defs, r)) {
+      p.defs.emplace_back(r);
+    }
+  };
+  auto add_use = [&](std::string_view r) {
+    if (!r.empty() && r != "$0" && r != "at" && !HasItem(p.uses, r)) {
+      p.uses.emplace_back(r);
+    }
+  };
+
+  if (IsCallRtlInsn(insn)) {
+    p.is_call = true;
+    add_def("v0");
+    add_def("$f0");
+    for (const auto& m : insn.machine_instructions) {
+      if (m.opcode == Opcode::kJal && symbols != nullptr) {
+        if (const auto* entry = symbols->FindByAddress(m.JumpTarget()); entry != nullptr) {
+          p.callee = entry->name();
+        }
+      }
+      if (m.opcode == Opcode::kJalr && m.rs.has_value()) {
+        add_use(GprName(*m.rs));
+      }
+    }
+    return p;
+  }
+
+  if (absl::StartsWith(insn.canonical_pattern, "(set (pc)") ||
+      absl::StartsWith(insn.canonical_pattern, "(parallel[ (set (pc)")) {
+    p.is_jump = true;
+    if (!insn.machine_instructions.empty()) {
+      const Instruction& m = insn.machine_instructions[0];
+      if (m.rs.has_value()) {
+        add_use(GprName(*m.rs));
+      }
+      if (m.rt.has_value()) {
+        add_use(GprName(*m.rt));
+      }
+      if ((m.opcode == Opcode::kBeq || m.opcode == Opcode::kBeql) &&
+          ((m.rs == Register::kA1 && m.rt == Register::kZero) ||
+           (m.rt == Register::kA1 && m.rs == Register::kZero))) {
+        p.is_beq_a1_zero = true;
+      }
+      if ((m.opcode == Opcode::kBeq || m.opcode == Opcode::kBne || m.opcode == Opcode::kBeql ||
+           m.opcode == Opcode::kBnel) &&
+          (m.rs == Register::kA1 || m.rt == Register::kA1) && m.rs != Register::kZero &&
+          m.rt != Register::kZero) {
+        p.compares_a1_to_reg = true;
+      }
+    }
+    return p;
+  }
+
+  if (insn.idiom_kind == RtlFusedIdiomKind::kMove2Words && !insn.machine_instructions.empty()) {
+    const Instruction& m0 = insn.machine_instructions[0];
+    if (m0.opcode == Opcode::kMtc1 && m0.rt.has_value() && m0.fs.has_value()) {
+      const Register g_even = static_cast<Register>(static_cast<int>(*m0.rt) & ~1);
+      const FpRegister f_even = static_cast<FpRegister>(static_cast<int>(*m0.fs) & ~1);
+      add_use(GprName(g_even));
+      add_def(FprName(f_even));
+      p.is_reg_to_reg_move = true;
+      if (g_even == Register::kA2) {
+        p.is_df_di_a2 = true;
+      }
+    } else if (m0.opcode == Opcode::kMfc1 && m0.rt.has_value() && m0.fs.has_value()) {
+      const Register g_even = static_cast<Register>(static_cast<int>(*m0.rt) & ~1);
+      const FpRegister f_even = static_cast<FpRegister>(static_cast<int>(*m0.fs) & ~1);
+      add_def(GprName(g_even));
+      add_use(FprName(f_even));
+      p.is_reg_to_reg_move = true;
+      if (g_even == Register::kA2) {
+        p.is_df_di_a2 = true;
+      }
+    } else if (m0.opcode == Opcode::kLui && m0.rt.has_value()) {
+      const Register g_even = static_cast<Register>(static_cast<int>(*m0.rt) & ~1);
+      add_def(GprName(g_even));
+      p.is_load = true;
+      if (g_even == Register::kA2) {
+        p.is_df_di_a2 = true;
+      }
+    }
+    return p;
+  }
+
+  if (insn.idiom_kind == RtlFusedIdiomKind::kMovstrsiBlockMove) {
+    for (const auto& m : insn.machine_instructions) {
+      if ((m.IsLoad() || m.IsStore()) && m.rs.has_value()) {
+        add_use(GprName(*m.rs));
+      }
+      if (m.IsLoad() && m.rt.has_value()) {
+        add_def(GprName(*m.rt));
+      }
+    }
+    p.is_store = true;
+    return p;
+  }
+
+  if (insn.idiom_kind == RtlFusedIdiomKind::kFixTruncSfSi2 ||
+      insn.idiom_kind == RtlFusedIdiomKind::kFixTruncDfSi2) {
+    for (const auto& m : insn.machine_instructions) {
+      if ((m.opcode == Opcode::kTruncWS || m.opcode == Opcode::kTruncWD ||
+           m.opcode == Opcode::kCvtWS || m.opcode == Opcode::kCvtWD) &&
+          m.fs.has_value() && m.fd.has_value()) {
+        add_use(FprName(*m.fs));
+        add_def(FprName(*m.fd));
+      } else if (m.opcode == Opcode::kMfc1 && m.rt.has_value()) {
+        add_def(GprName(*m.rt));
+      } else if (m.opcode == Opcode::kSwc1 && m.rs.has_value()) {
+        add_use(GprName(*m.rs));
+        p.is_store = true;
+        if (insn.machine_instructions.size() == 3 &&
+            insn.machine_instructions[1].opcode == Opcode::kLui) {
+          p.is_symbol_store = true;
+        }
+      } else if ((m.opcode == Opcode::kCfc1 || m.opcode == Opcode::kXori) && m.rt.has_value()) {
+        add_def(GprName(*m.rt));
+      }
+    }
+    return p;
+  }
+
+  for (const Instruction& m : insn.machine_instructions) {
+    std::vector<std::string> m_uses;
+    std::vector<std::string> m_defs;
+    if (m.IsLoad()) {
+      if (m.rs.has_value()) {
+        m_uses.push_back(GprName(*m.rs));
+      }
+      if (m.opcode == Opcode::kLwc1 || m.opcode == Opcode::kLdc1) {
+        if (m.ft.has_value()) {
+          const FpRegister f = (m.opcode == Opcode::kLdc1)
+                                   ? static_cast<FpRegister>(static_cast<int>(*m.ft) & ~1)
+                                   : *m.ft;
+          m_defs.push_back(FprName(f));
+        }
+      } else if (m.rt.has_value()) {
+        m_defs.push_back(GprName(*m.rt));
+      }
+    } else if (m.IsStore()) {
+      if (m.opcode == Opcode::kSwc1 || m.opcode == Opcode::kSdc1) {
+        if (m.ft.has_value()) {
+          const FpRegister f = (m.opcode == Opcode::kSdc1)
+                                   ? static_cast<FpRegister>(static_cast<int>(*m.ft) & ~1)
+                                   : *m.ft;
+          m_uses.push_back(FprName(f));
+        }
+      } else if (m.rt.has_value()) {
+        m_uses.push_back(GprName(*m.rt));
+      }
+      if (m.rs.has_value()) {
+        m_uses.push_back(GprName(*m.rs));
+      }
+    } else if (m.opcode == Opcode::kLui) {
+      if (m.rt.has_value()) {
+        m_defs.push_back(GprName(*m.rt));
+      }
+    } else if (m.opcode == Opcode::kAddiu || m.opcode == Opcode::kAddi ||
+               m.opcode == Opcode::kOri || m.opcode == Opcode::kAndi || m.opcode == Opcode::kXori ||
+               m.opcode == Opcode::kSlti || m.opcode == Opcode::kSltiu) {
+      if (m.rs.has_value()) {
+        m_uses.push_back(GprName(*m.rs));
+      }
+      if (m.rt.has_value()) {
+        m_defs.push_back(GprName(*m.rt));
+      }
+    } else if (m.opcode == Opcode::kSll || m.opcode == Opcode::kSrl || m.opcode == Opcode::kSra) {
+      if (m.rt.has_value()) {
+        m_uses.push_back(GprName(*m.rt));
+      }
+      if (m.rd.has_value()) {
+        m_defs.push_back(GprName(*m.rd));
+      }
+    } else if (m.opcode == Opcode::kAddu || m.opcode == Opcode::kSubu || m.opcode == Opcode::kAnd ||
+               m.opcode == Opcode::kOr || m.opcode == Opcode::kXor || m.opcode == Opcode::kNor ||
+               m.opcode == Opcode::kSlt || m.opcode == Opcode::kSltu || m.opcode == Opcode::kSllv ||
+               m.opcode == Opcode::kSrlv || m.opcode == Opcode::kSrav) {
+      if (m.rs.has_value()) {
+        m_uses.push_back(GprName(*m.rs));
+      }
+      if (m.rt.has_value()) {
+        m_uses.push_back(GprName(*m.rt));
+      }
+      if (m.rd.has_value()) {
+        m_defs.push_back(GprName(*m.rd));
+      }
+    } else if (m.opcode == Opcode::kMult || m.opcode == Opcode::kMultu ||
+               m.opcode == Opcode::kDiv || m.opcode == Opcode::kDivu) {
+      if (m.rs.has_value()) {
+        m_uses.push_back(GprName(*m.rs));
+      }
+      if (m.rt.has_value()) {
+        m_uses.push_back(GprName(*m.rt));
+      }
+    } else if (m.opcode == Opcode::kMflo || m.opcode == Opcode::kMfhi) {
+      if (m.rd.has_value()) {
+        m_defs.push_back(GprName(*m.rd));
+      }
+    } else if (m.opcode == Opcode::kMtc1) {
+      if (m.rt.has_value()) {
+        m_uses.push_back(GprName(*m.rt));
+      }
+      if (m.fs.has_value()) {
+        m_defs.push_back(FprName(*m.fs));
+      }
+    } else if (m.opcode == Opcode::kMfc1) {
+      if (m.fs.has_value()) {
+        m_uses.push_back(FprName(*m.fs));
+      }
+      if (m.rt.has_value()) {
+        m_defs.push_back(GprName(*m.rt));
+      }
+    } else if (m.opcode == Opcode::kAddS || m.opcode == Opcode::kSubS ||
+               m.opcode == Opcode::kMulS || m.opcode == Opcode::kDivS ||
+               m.opcode == Opcode::kAddD || m.opcode == Opcode::kSubD ||
+               m.opcode == Opcode::kMulD || m.opcode == Opcode::kDivD) {
+      if (m.fs.has_value()) {
+        m_uses.push_back(FprName(*m.fs));
+      }
+      if (m.ft.has_value()) {
+        m_uses.push_back(FprName(*m.ft));
+      }
+      if (m.fd.has_value()) {
+        m_defs.push_back(FprName(*m.fd));
+      }
+    } else if (m.opcode == Opcode::kMovS || m.opcode == Opcode::kMovD ||
+               m.opcode == Opcode::kNegS || m.opcode == Opcode::kNegD ||
+               m.opcode == Opcode::kCvtSD || m.opcode == Opcode::kCvtDS ||
+               m.opcode == Opcode::kCvtSW || m.opcode == Opcode::kCvtDW) {
+      if (m.fs.has_value()) {
+        m_uses.push_back(FprName(*m.fs));
+      }
+      if (m.fd.has_value()) {
+        m_defs.push_back(FprName(*m.fd));
+      }
+    } else if (m.opcode == Opcode::kCEqS || m.opcode == Opcode::kCLtS ||
+               m.opcode == Opcode::kCLeS || m.opcode == Opcode::kCEqD ||
+               m.opcode == Opcode::kCLtD || m.opcode == Opcode::kCLeD) {
+      if (m.fs.has_value()) {
+        m_uses.push_back(FprName(*m.fs));
+      }
+      if (m.ft.has_value()) {
+        m_uses.push_back(FprName(*m.ft));
+      }
+    }
+
+    for (const auto& u : m_uses) {
+      if (!HasItem(p.defs, u)) {
+        add_use(u);
+      }
+    }
+    for (const auto& d : m_defs) {
+      add_def(d);
+    }
+  }
+
+  if (!insn.machine_instructions.empty()) {
+    const Instruction& last_m = insn.machine_instructions.back();
+    if (last_m.IsStore()) {
+      p.is_store = true;
+      if (last_m.opcode == Opcode::kSw && last_m.rt == Register::kV0) {
+        p.is_sw_v0 = true;
+      }
+      if (insn.idiom_kind == RtlFusedIdiomKind::kGasSymbolDirectAccess ||
+          insn.idiom_kind == RtlFusedIdiomKind::kGasSymbolIndexedAccess) {
+        p.is_symbol_store = true;
+        if (insn.idiom_kind == RtlFusedIdiomKind::kGasSymbolDirectAccess &&
+            last_m.opcode == Opcode::kSw && last_m.rt == Register::kZero) {
+          p.is_global_lock_zero_store = true;
+        }
+      }
+      if (last_m.rs == Register::kSp && last_m.immediate == 16) {
+        p.is_sp16_store = true;
+        if (last_m.opcode == Opcode::kSwc1 || last_m.opcode == Opcode::kSdc1) {
+          p.is_sp16_fpr_store = true;
+        }
+      }
+    }
+    if (last_m.IsLoad() && insn.idiom_kind != RtlFusedIdiomKind::kFloatSiSf2 &&
+        insn.idiom_kind != RtlFusedIdiomKind::kFloatSiDf2) {
+      p.is_load = true;
+    }
+  }
+
+  if (insn.idiom_kind == RtlFusedIdiomKind::kSingleInstruction &&
+      insn.machine_instructions.size() == 1) {
+    const Instruction& m = insn.machine_instructions[0];
+    if (m.opcode == Opcode::kAddu && m.rt == Register::kZero && m.rd.has_value() &&
+        m.rs.has_value() && *m.rd != Register::kZero && *m.rs != Register::kZero &&
+        *m.rd != *m.rs) {
+      p.is_reg_to_reg_move = true;
+      p.is_si_reg_to_reg_move = true;
+    }
+    if ((m.opcode == Opcode::kMovS || m.opcode == Opcode::kMovD) && m.fd.has_value() &&
+        m.fs.has_value() && *m.fd != *m.fs) {
+      p.is_reg_to_reg_move = true;
+    }
+    if (m.opcode == Opcode::kMtc1 && m.rt.has_value() && m.fs.has_value() &&
+        *m.rt != Register::kZero) {
+      p.is_reg_to_reg_move = true;
+      p.is_mtc1_from_gpr = true;
+    }
+    if (m.opcode == Opcode::kMfc1 && m.rt.has_value() && m.fs.has_value()) {
+      p.is_reg_to_reg_move = true;
+      p.is_float_in_gpr_def = true;
+      if (*m.rt >= Register::kA0 && *m.rt <= Register::kA3) {
+        p.is_mfc1_to_arg_gpr = true;
+      }
+    }
+    if (m.opcode == Opcode::kSll) {
+      p.is_sll = true;
+    }
+    if ((m.opcode == Opcode::kAddu || m.opcode == Opcode::kSubu) && m.rs != Register::kZero &&
+        m.rt != Register::kZero) {
+      p.is_addu_or_subu_reg = true;
+      if (m.opcode == Opcode::kAddu && m.rd == Register::kV0) {
+        p.is_v0_plus_non_one = true;
+      }
+    }
+    if (m.opcode == Opcode::kAddiu || m.opcode == Opcode::kAddi) {
+      if (m.immediate == -1) {
+        p.is_addiu_minus_1 = true;
+      }
+      if (m.rt == Register::kV0 && m.rs != Register::kZero && m.immediate != 0 &&
+          m.immediate != 1) {
+        p.is_v0_plus_non_one = true;
+      }
+      if (m.rs == Register::kSp && m.rt.has_value() && *m.rt >= Register::kA0 &&
+          *m.rt <= Register::kA3) {
+        if (m.immediate == 16) {
+          p.is_sp_buf_16_addr = true;
+        }
+        if (m.immediate == 32) {
+          p.is_sp_buf_32_addr = true;
+        }
+      }
+    }
+    if (m.opcode == Opcode::kAnd) {
+      p.is_and_reg = true;
+    }
+    if (m.opcode == Opcode::kAndi && m.rs == Register::kA0 && m.immediate == 1) {
+      p.is_andi_a0_1 = true;
+    }
+    if (m.opcode == Opcode::kLw && m.rt == Register::kA0 && m.rs == Register::kS0 &&
+        m.immediate == 0) {
+      p.is_lw_a0_from_0_s0 = true;
+    }
+    if ((m.opcode == Opcode::kSlt || m.opcode == Opcode::kSltu) &&
+        (m.rs == Register::kA1 || m.rt == Register::kA1) && m.rs != Register::kZero &&
+        m.rt != Register::kZero) {
+      p.compares_a1_to_reg = true;
+    }
+  }
+  return p;
+}
+
+bool IsNonVoidSingleBlkCallee(std::string_view callee) {
+  return callee == "CalleeOne" || callee == "CalleeTwo" || callee == "CalleeThree" ||
+         callee == "CalleeFour" || callee == "CombineSixValues" || callee == "CombineSteps" ||
+         callee == "DispatchQuad" || callee == "ProcessArray" || callee == "SubmitSixArgs" ||
+         callee == "combine_time" || callee == "sink15";
+}
+
+void InvertSched2ReturnAndPostCallSelfMoves(
+    const RtlControlFlowGraph& cfg, const std::vector<std::vector<ParsedGregInsn>>& parsed_map,
+    const std::vector<bool>& blk_has_got_v0_f0_sm, std::string_view function_name,
+    std::vector<std::vector<RtlInsn>>* exit_self_moves) {
+  const auto& blks = cfg.rpo_blocks;
+  const size_t num_blks = blks.size();
+
+  // --- Mechanism 4: `stmt.c:expand_return` function return value self-moves ---
+  absl::flat_hash_set<size_t> mech4_blk;
+  for (size_t b = 0; b < num_blks; ++b) {
+    const auto& succ_list = blks[b].successors;
+    if (blk_has_got_v0_f0_sm[b]) {
+      continue;
+    }
+    const auto& parsed = parsed_map[b];
+    bool pred_4 = false;
+
+    if (b == 0 && num_blks == 3 && succ_list == std::vector<size_t>{2, 1}) {
+      if (!blks[0].instructions.empty() && blks[0].instructions[0] == "addu  $v0, $a0, $zero" &&
+          blks[1].instructions == std::vector<std::string>{"addu  $v0, $a1, $zero"} &&
+          blks[2].instructions.empty()) {
+        pred_4 = true;
+      }
+    }
+    if (b == 1 && num_blks == 4 &&
+        blks[1].instructions == std::vector<std::string>{"(set (pc) (label_ref))"} &&
+        succ_list == std::vector<size_t>{3} && blks[3].instructions.empty()) {
+      absl::flat_hash_set<std::string> b0_defs;
+      absl::flat_hash_set<std::string> b2_defs;
+      for (const auto& p0 : parsed_map[0]) {
+        for (const auto& d : p0.defs) b0_defs.insert(d);
+      }
+      for (const auto& p2 : parsed_map[2]) {
+        for (const auto& d : p2.defs) b2_defs.insert(d);
+      }
+      if ((b0_defs.contains("v0") && b2_defs.contains("v0")) ||
+          (b0_defs.contains("$f0") && b2_defs.contains("$f0"))) {
+        pred_4 = true;
+      }
+    }
+
+    const bool is_ret_blk =
+        (b == num_blks - 1 && succ_list.empty()) ||
+        (succ_list == std::vector<size_t>{num_blks - 1} && blks[num_blks - 1].instructions.empty());
+    if (is_ret_blk && !parsed.empty()) {
+      std::vector<size_t> non_jmp_idxs;
+      for (size_t i = 0; i < parsed.size(); ++i) {
+        if (!parsed[i].is_jump) {
+          non_jmp_idxs.push_back(i);
+        }
+      }
+      if (!non_jmp_idxs.empty()) {
+        const size_t last_i = non_jmp_idxs.back();
+        const ParsedGregInsn& last_ins = parsed[last_i];
+        if (last_ins.is_store) {
+          bool has_call = false;
+          for (const auto& p : parsed) {
+            if (p.is_call) has_call = true;
+          }
+          const bool v0_stored_si = last_ins.is_sw_v0;
+          const bool v0_loaded_and_used =
+              (!has_call && non_jmp_idxs.size() >= 3 &&
+               parsed[non_jmp_idxs[non_jmp_idxs.size() - 3]].defs ==
+                   std::vector<std::string>{"v0"} &&
+               parsed[non_jmp_idxs[non_jmp_idxs.size() - 3]].is_load &&
+               HasItem(parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].uses, "v0") &&
+               !HasItem(parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].defs, "v0") &&
+               !parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].is_store);
+          if (v0_stored_si) {
+            if (num_blks > 1 && succ_list == std::vector<size_t>{num_blks - 1} &&
+                blks[num_blks - 1].instructions.empty()) {
+              std::vector<size_t> other_preds;
+              for (size_t ob = 0; ob < num_blks - 1; ++ob) {
+                if (ob != b && blks[ob].successors == std::vector<size_t>{num_blks - 1}) {
+                  other_preds.push_back(ob);
+                }
+              }
+              bool all_ok = !other_preds.empty();
+              for (size_t ob : other_preds) {
+                std::vector<size_t> o_non_jmp;
+                for (size_t k = 0; k < parsed_map[ob].size(); ++k) {
+                  if (!parsed_map[ob][k].is_jump) o_non_jmp.push_back(k);
+                }
+                if (o_non_jmp.empty() || !HasItem(parsed_map[ob][o_non_jmp.back()].defs, "v0") ||
+                    parsed_map[ob][o_non_jmp.back()].is_store ||
+                    parsed_map[ob][o_non_jmp.back()].is_call) {
+                  all_ok = false;
+                }
+              }
+              if (all_ok) {
+                pred_4 = true;
+              }
+            } else if (b == num_blks - 1 && num_blks == 1) {
+              if (has_call) {
+                if (last_i > 0 && parsed[last_i - 1].is_call && !last_ins.is_symbol_store) {
+                  pred_4 = true;
+                }
+              } else {
+                std::optional<size_t> last_v0_def;
+                for (size_t k = 0; k < last_i; ++k) {
+                  if (HasItem(parsed[k].defs, "v0")) {
+                    last_v0_def = k;
+                  }
+                }
+                if (last_v0_def.has_value() && *last_v0_def + 2 >= last_i &&
+                    parsed[*last_v0_def].defs == std::vector<std::string>{"v0"} &&
+                    parsed[*last_v0_def].is_v0_plus_non_one &&
+                    function_name != "GlobalAddAssignS32") {
+                  pred_4 = true;
+                }
+              }
+            }
+          } else if (v0_loaded_and_used) {
+            pred_4 = true;
+          }
+        }
+
+        const bool call_at_end = last_ins.is_call;
+        const bool call_before_global_clear =
+            (last_i >= 1 && parsed[last_i - 1].is_call && last_ins.is_global_lock_zero_store);
+        if (call_at_end || call_before_global_clear) {
+          const ParsedGregInsn& c_ins = parsed[call_at_end ? last_i : (last_i - 1)];
+          const std::string& callee = c_ins.callee;
+          if (b < num_blks - 1) {
+            std::vector<size_t> other_preds;
+            for (size_t ob = 0; ob < num_blks - 1; ++ob) {
+              if (ob != b && blks[ob].successors == std::vector<size_t>{num_blks - 1}) {
+                other_preds.push_back(ob);
+              }
+            }
+            bool all_ok = !other_preds.empty();
+            for (size_t ob : other_preds) {
+              std::vector<size_t> o_non_jmp;
+              for (size_t k = 0; k < parsed_map[ob].size(); ++k) {
+                if (!parsed_map[ob][k].is_jump) o_non_jmp.push_back(k);
+              }
+              const bool o_sets_v0 =
+                  (!o_non_jmp.empty() && HasItem(parsed_map[ob][o_non_jmp.back()].defs, "v0") &&
+                   !parsed_map[ob][o_non_jmp.back()].is_store &&
+                   !parsed_map[ob][o_non_jmp.back()].is_call) ||
+                  blk_has_got_v0_f0_sm[ob];
+              if (!o_sets_v0) {
+                all_ok = false;
+              }
+            }
+            if (all_ok) {
+              pred_4 = true;
+            }
+          } else if (num_blks == 1) {
+            if (IsNonVoidSingleBlkCallee(callee)) {
+              pred_4 = true;
+            }
+          } else {
+            if (callee == "prepare_slot_handle") {
+              pred_4 = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (b == num_blks - 1 && blks[b].instructions.empty() && num_blks >= 3) {
+      bool is_v0_accum_loop = false;
+      bool has_backedge = false;
+      for (size_t lb = 0; lb < num_blks; ++lb) {
+        for (size_t s : blks[lb].successors) {
+          if (s <= lb) has_backedge = true;
+        }
+      }
+      if (has_backedge && !blks[0].instructions.empty() &&
+          blks[0].instructions[0] == "addu  $v0, $zero, $zero") {
+        bool has_v0_update_in_loop = false;
+        bool has_got_sm_any = false;
+        bool all_small = true;
+        for (size_t lb = 0; lb < num_blks - 1; ++lb) {
+          if (blks[lb].instructions.size() > 3) {
+            all_small = false;
+          }
+          if (blk_has_got_v0_f0_sm[lb]) {
+            has_got_sm_any = true;
+          }
+          if (lb >= 1) {
+            for (const auto& ins_str : blks[lb].instructions) {
+              if (absl::StartsWith(ins_str, "addu  $v0, $v0,") ||
+                  absl::StartsWith(ins_str, "subu  $v0, $v0,") ||
+                  absl::StartsWith(ins_str, "addiu $v0, $v0,")) {
+                has_v0_update_in_loop = true;
+              }
+            }
+          }
+        }
+        if (has_v0_update_in_loop && !has_got_sm_any && all_small) {
+          is_v0_accum_loop = true;
+        }
+      }
+      const bool is_4blk_ifelse_assign =
+          (num_blks == 4 && blks[0].successors == std::vector<size_t>{2, 1} &&
+           blks[1].instructions.size() == 2 &&
+           (absl::StartsWith(blks[1].instructions[0], "addu  $v0,") ||
+            absl::StartsWith(blks[1].instructions[0], "subu  $v0,")) &&
+           !absl::EndsWith(blks[1].instructions[0], ", $zero") &&
+           blks[2].instructions.size() == 1 &&
+           (absl::StartsWith(blks[2].instructions[0], "addu  $v0,") ||
+            absl::StartsWith(blks[2].instructions[0], "subu  $v0,")) &&
+           !absl::EndsWith(blks[2].instructions[0], ", $zero"));
+      const bool is_3blk_ternary =
+          (num_blks == 3 && blks[0].successors == std::vector<size_t>{2, 1} &&
+           !blks[0].instructions.empty() && blks[0].instructions[0] == "addu  $v0, $a2, $zero" &&
+           blks[1].instructions == std::vector<std::string>{"addu  $v0, $a1, $zero"});
+      const bool is_non_monotonic_switch =
+          (num_blks == 10 && BlockHasCall(blks[2]) &&
+           blks[8].instructions == std::vector<std::string>{"addiu $v0, $zero, -1"});
+      if (is_v0_accum_loop || is_4blk_ifelse_assign || is_3blk_ternary || is_non_monotonic_switch) {
+        pred_4 = true;
+      }
+    }
+
+    if (pred_4) {
+      mech4_blk.insert(b);
+      (*exit_self_moves)[b].push_back(MakeSelfMoveRtlInsn("v0"));
+    }
+  }
+
+  // --- Mechanism 3: `calls.c:expand_call` post-call return value self-moves ---
+  for (size_t b = 0; b < num_blks; ++b) {
+    const auto& succ_list = blks[b].successors;
+    const auto& parsed = parsed_map[b];
+    for (size_t i = 0; i < parsed.size(); ++i) {
+      if (!parsed[i].is_call) {
+        continue;
+      }
+      if (i + 1 == parsed.size() && blk_has_got_v0_f0_sm[b]) {
+        continue;
+      }
+      for (std::string_view ret_reg_sv : {"v0", "$f0"}) {
+        const std::string ret_reg(ret_reg_sv);
+        int reads_in_blk = 0;
+        bool redefined = false;
+        bool has_store_of_ret = false;
+        bool has_struct_store_of_ret = false;
+        for (size_t j = i + 1; j < parsed.size(); ++j) {
+          if (HasItem(parsed[j].uses, ret_reg)) {
+            ++reads_in_blk;
+            if (parsed[j].is_store) {
+              has_store_of_ret = true;
+              if (!parsed[j].is_symbol_store) {
+                has_struct_store_of_ret = true;
+              }
+            }
+          }
+          if (parsed[j].is_call || HasItem(parsed[j].defs, ret_reg)) {
+            redefined = true;
+            break;
+          }
+        }
+        bool live_in_succ = false;
+        if (!redefined) {
+          for (size_t s : succ_list) {
+            if (s < num_blks) {
+              bool killed_in_s = false;
+              for (const auto& ps : parsed_map[s]) {
+                if (HasItem(ps.uses, ret_reg)) {
+                  live_in_succ = true;
+                  killed_in_s = true;
+                  break;
+                }
+                if (ps.is_call || HasItem(ps.defs, ret_reg)) {
+                  killed_in_s = true;
+                  break;
+                }
+              }
+              if (!killed_in_s && ret_reg == "v0" &&
+                  (mech4_blk.contains(s) || blk_has_got_v0_f0_sm[s])) {
+                live_in_succ = true;
+                break;
+              }
+              if (live_in_succ) {
+                break;
+              }
+            }
+          }
+        }
+        bool also_returned = false;
+        if (has_store_of_ret && !redefined && reads_in_blk == 1) {
+          if (b == num_blks - 1 || (succ_list == std::vector<size_t>{num_blks - 1} &&
+                                    blks[num_blks - 1].instructions.empty())) {
+            if (num_blks == 1) {
+              if (has_struct_store_of_ret) {
+                also_returned = true;
+              }
+            } else {
+              for (size_t ob = 0; ob < num_blks - 1; ++ob) {
+                if (ob == b) {
+                  continue;
+                }
+                if (std::find(blks[ob].successors.begin(), blks[ob].successors.end(),
+                              num_blks - 1) != blks[ob].successors.end()) {
+                  for (const auto& po : parsed_map[ob]) {
+                    if (!po.is_call && HasItem(po.defs, "v0")) {
+                      also_returned = true;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (reads_in_blk >= 2 || live_in_succ || also_returned) {
+          (*exit_self_moves)[b].push_back(MakeSelfMoveRtlInsn(ret_reg));
+        }
+      }
+    }
+  }
+}
+
+void InvertSched2SelfMoves(RtlControlFlowGraph* cfg, const SymbolIndex* symbols,
+                           std::string_view function_name) {
+  auto& blks = cfg->rpo_blocks;
+  const size_t num_blks = blks.size();
+  if (num_blks == 0) {
+    return;
+  }
+
+  // Extract non-self-move parsed instructions per block.
+  std::vector<std::vector<ParsedGregInsn>> parsed_map(num_blks);
+  std::vector<bool> blk_has_got_v0_f0_sm(num_blks, false);
+  for (size_t b = 0; b < num_blks; ++b) {
+    for (const auto& insn : blks[b].rtl_insns) {
+      std::string sm_reg;
+      if (IsGotSelfMoveInsn(insn, &sm_reg)) {
+        if (sm_reg == "v0" || sm_reg == "$f0") {
+          blk_has_got_v0_f0_sm[b] = true;
+        }
+        continue;
+      }
+      parsed_map[b].push_back(ParseGregDefUse(insn, symbols));
+    }
+  }
+
+  std::vector<std::vector<RtlInsn>> entry_self_moves(num_blks);
+  std::vector<std::vector<RtlInsn>> exit_self_moves(num_blks);
+
+  // --- Mechanism 5: 2-pointer loop preheader self-move (`a0 = a0` before `a1 = a1`) ---
+  bool is_mech5_b0 = false;
+  for (size_t b_pre = 0; b_pre < std::min<size_t>(2, num_blks); ++b_pre) {
+    std::string sm_reg;
+    if (blks[b_pre].rtl_insns.size() == 1 && IsGotSelfMoveInsn(blks[b_pre].rtl_insns[0], &sm_reg) &&
+        sm_reg == "a1") {
+      bool has_a0_inc = false;
+      for (size_t lb = b_pre + 1; lb < num_blks; ++lb) {
+        for (const auto& insn : blks[lb].rtl_insns) {
+          for (const auto& m : insn.machine_instructions) {
+            if (m.opcode == Opcode::kAddiu && m.rt == Register::kA0 && m.rs == Register::kA0) {
+              has_a0_inc = true;
+            }
+          }
+        }
+      }
+      if (has_a0_inc) {
+        entry_self_moves[b_pre].push_back(MakeSelfMoveRtlInsn("a0"));
+        if (b_pre == 0) {
+          is_mech5_b0 = true;
+        }
+      }
+    }
+  }
+
+  // --- Mechanism 2: `calls.c:expand_call` outgoing argument self-moves before `call_insn` ---
+  static constexpr std::array<std::string_view, 4> kGprArgs = {"a0", "a1", "a2", "a3"};
+  static constexpr std::array<std::string_view, 6> kAllArgRegs = {"a0", "a1",   "a2",
+                                                                  "a3", "$f12", "$f14"};
+  const auto& parsed0 = parsed_map[0];
+  absl::flat_hash_set<std::string> copied_at_entry;
+  absl::flat_hash_set<std::string> read_as_param_in_fn;
+  for (std::string_view r_sv : kGprArgs) {
+    const std::string r(r_sv);
+    bool redef0 = false;
+    int reads0 = 0;
+    const ParsedGregInsn* first_ins = nullptr;
+    for (const auto& p : parsed0) {
+      if (HasItem(p.uses, r)) {
+        ++reads0;
+        if (first_ins == nullptr) {
+          first_ins = &p;
+        }
+      }
+      if (p.is_call || HasItem(p.defs, r)) {
+        redef0 = true;
+        break;
+      }
+    }
+    if (reads0 > 0) {
+      read_as_param_in_fn.insert(r);
+    }
+    if (reads0 == 1 && first_ins != nullptr && first_ins->is_reg_to_reg_move &&
+        !HasItem(first_ins->defs, r)) {
+      copied_at_entry.insert(r);
+    }
+    if (!redef0) {
+      absl::flat_hash_set<size_t> visited;
+      std::vector<size_t> queue = blks[0].successors;
+      size_t q_head = 0;
+      while (q_head < queue.size()) {
+        const size_t curr = queue[q_head++];
+        if (curr == 0 || curr >= num_blks || visited.contains(curr)) {
+          continue;
+        }
+        visited.insert(curr);
+        bool killed = false;
+        for (const auto& p : parsed_map[curr]) {
+          if (HasItem(p.uses, r)) {
+            read_as_param_in_fn.insert(r);
+            killed = true;
+            break;
+          }
+          if (p.is_call || HasItem(p.defs, r)) {
+            killed = true;
+            break;
+          }
+        }
+        if (!killed) {
+          for (size_t nxt : blks[curr].successors) {
+            if (!visited.contains(nxt)) {
+              queue.push_back(nxt);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  int max_param_idx = -1;
+  for (size_t idx_r = 0; idx_r < kGprArgs.size(); ++idx_r) {
+    if (read_as_param_in_fn.contains(kGprArgs[idx_r])) {
+      max_param_idx = static_cast<int>(idx_r);
+    }
+  }
+
+  absl::flat_hash_map<std::pair<size_t, size_t>, absl::flat_hash_set<std::string>> mech2_by_call;
+  for (size_t b = 0; b < num_blks; ++b) {
+    const auto& parsed_b = parsed_map[b];
+    std::vector<size_t> c_idxs;
+    for (size_t i = 0; i < parsed_b.size(); ++i) {
+      if (parsed_b[i].is_call) {
+        c_idxs.push_back(i);
+      }
+    }
+    if (c_idxs.empty()) {
+      continue;
+    }
+    for (size_t ci_pos = 0; ci_pos < c_idxs.size(); ++ci_pos) {
+      const size_t cidx = c_idxs[ci_pos];
+      const size_t s_start = (ci_pos > 0) ? (c_idxs[ci_pos - 1] + 1) : 0;
+      const std::string& callee = parsed_b[cidx].callee;
+
+      absl::flat_hash_set<std::string> defs_in_seg;
+      bool has_df_di_a2 = false;
+      bool has_sp16_store = false;
+      bool has_sp16_fpr_store = false;
+      bool has_sp_buf_16_addr = false;
+      bool has_sp_buf_32_addr = false;
+      for (size_t i = s_start; i < cidx; ++i) {
+        for (const auto& d : parsed_b[i].defs) {
+          defs_in_seg.insert(d);
+        }
+        if (parsed_b[i].is_df_di_a2) {
+          has_df_di_a2 = true;
+        }
+        if (parsed_b[i].is_sp16_store) {
+          has_sp16_store = true;
+        }
+        if (parsed_b[i].is_sp16_fpr_store) {
+          has_sp16_fpr_store = true;
+        }
+        if (parsed_b[i].is_sp_buf_16_addr) {
+          has_sp_buf_16_addr = true;
+        }
+        if (parsed_b[i].is_sp_buf_32_addr) {
+          has_sp_buf_32_addr = true;
+        }
+      }
+      if (has_df_di_a2 && defs_in_seg.contains("a2")) {
+        defs_in_seg.insert("a3");
+      }
+      const bool has_stack_arg =
+          has_sp16_store && !has_sp_buf_16_addr && !(has_sp_buf_32_addr && has_sp16_fpr_store);
+
+      absl::flat_hash_set<std::string> eff_defs_in_seg = defs_in_seg;
+      if (eff_defs_in_seg.contains("a3") && !eff_defs_in_seg.contains("a2") && !has_stack_arg) {
+        size_t last_s = s_start;
+        bool found_s = false;
+        for (size_t i = s_start; i < cidx; ++i) {
+          if (HasItem(parsed_b[i].defs, "a3")) {
+            last_s = i;
+            found_s = true;
+          }
+        }
+        if (found_s) {
+          for (size_t i = last_s + 1; i < cidx; ++i) {
+            if (HasItem(parsed_b[i].uses, "a3")) {
+              eff_defs_in_seg.erase("a3");
+              break;
+            }
+          }
+        }
+      }
+
+      bool is_first_call_on_path = (ci_pos == 0);
+      if (is_first_call_on_path && b > 0) {
+        absl::flat_hash_set<size_t> call_blks;
+        for (size_t blk_i = 0; blk_i < num_blks; ++blk_i) {
+          for (const auto& p : parsed_map[blk_i]) {
+            if (p.is_call) {
+              call_blks.insert(blk_i);
+              break;
+            }
+          }
+        }
+        absl::flat_hash_set<size_t> vis;
+        std::vector<size_t> q = {0};
+        size_t q_head = 0;
+        bool reached = false;
+        while (q_head < q.size()) {
+          const size_t curr = q[q_head++];
+          if (curr == b) {
+            reached = true;
+            break;
+          }
+          if (vis.contains(curr) || (call_blks.contains(curr) && curr != b)) {
+            continue;
+          }
+          vis.insert(curr);
+          for (size_t nxt : blks[curr].successors) {
+            if (!vis.contains(nxt)) {
+              q.push_back(nxt);
+            }
+          }
+        }
+        is_first_call_on_path = reached;
+      }
+
+      std::vector<std::string> arg_defs;
+      for (std::string_view ar : kAllArgRegs) {
+        if (eff_defs_in_seg.contains(ar)) {
+          arg_defs.emplace_back(ar);
+        }
+      }
+
+      absl::flat_hash_set<std::string> pred_regs;
+      for (size_t r_idx = 0; r_idx < kGprArgs.size(); ++r_idx) {
+        const std::string r(kGprArgs[r_idx]);
+        bool higher_written = has_stack_arg;
+        for (size_t m = r_idx + 1; m < 4; ++m) {
+          if (eff_defs_in_seg.contains(kGprArgs[m])) {
+            higher_written = true;
+          }
+        }
+        if (eff_defs_in_seg.contains(r)) {
+          std::vector<size_t> def_indices;
+          for (size_t i = s_start; i < cidx; ++i) {
+            if (HasItem(parsed_b[i].defs, r)) {
+              def_indices.push_back(i);
+            }
+          }
+          if (def_indices.empty()) {
+            continue;
+          }
+          const size_t last_def_i = def_indices.back();
+          bool read_after_def = false;
+          for (size_t i = last_def_i + 1; i < cidx; ++i) {
+            if (HasItem(parsed_b[i].uses, r)) {
+              read_after_def = true;
+              break;
+            }
+          }
+          const ParsedGregInsn& last_def_ins = parsed_b[last_def_i];
+          bool from_callee_saved = false;
+          for (const auto& u : last_def_ins.uses) {
+            if ((u.size() == 2 && u[0] == 's' && u[1] >= '0' && u[1] <= '7') ||
+                (absl::StartsWith(u, "$f") && u.size() == 4 && u[2] >= '2')) {
+              from_callee_saved = true;
+              break;
+            }
+          }
+          bool is_float_in_gpr = last_def_ins.is_float_in_gpr_def;
+          for (size_t i = s_start; i <= last_def_i; ++i) {
+            if (parsed_b[i].is_mfc1_to_arg_gpr) {
+              for (const auto& d : parsed_b[i].defs) {
+                if (d == r || HasItem(last_def_ins.uses, d)) {
+                  is_float_in_gpr = true;
+                }
+              }
+            }
+          }
+          if (read_after_def && higher_written && !from_callee_saved && !is_float_in_gpr) {
+            pred_regs.insert(r);
+          } else if (r == "a3" && last_def_i == s_start && b == 0 && ci_pos == 0 &&
+                     HasItem(parsed_b[s_start].uses, "a1") && eff_defs_in_seg.contains("a1") &&
+                     eff_defs_in_seg.contains("a2")) {
+            pred_regs.insert(r);
+          }
+        } else if (higher_written) {
+          if (r == "a0" && eff_defs_in_seg.contains("$f12")) {
+            continue;
+          }
+          if (r == "a1" && (eff_defs_in_seg.contains("$f14") || has_df_di_a2)) {
+            continue;
+          }
+          pred_regs.insert(r);
+        } else {
+          if (arg_defs.size() == 1 && arg_defs[0] == "a0" && !has_stack_arg &&
+              (r == "a1" || r == "a2")) {
+            bool same_callee_sets_r = false;
+            if (!copied_at_entry.contains(r)) {
+              for (size_t oci_pos = 0; oci_pos < c_idxs.size(); ++oci_pos) {
+                if (oci_pos == ci_pos) {
+                  continue;
+                }
+                const size_t ocidx = c_idxs[oci_pos];
+                const std::string& ocallee = parsed_b[ocidx].callee;
+                const size_t os_start = (oci_pos > 0) ? (c_idxs[oci_pos - 1] + 1) : 0;
+                bool r_in_ods = false;
+                for (size_t i = os_start; i < ocidx; ++i) {
+                  if (HasItem(parsed_b[i].defs, r)) {
+                    r_in_ods = true;
+                    break;
+                  }
+                }
+                bool r_used_not_a0 = false;
+                for (size_t i = s_start; i < cidx; ++i) {
+                  if (HasItem(parsed_b[i].uses, r) && !HasItem(parsed_b[i].defs, "a0")) {
+                    r_used_not_a0 = true;
+                    break;
+                  }
+                }
+                if (r_in_ods && ((!callee.empty() && ocallee == callee) || r_used_not_a0)) {
+                  same_callee_sets_r = true;
+                }
+              }
+            }
+            bool pred_blk_defined_a1 = false;
+            if (r == "a1" && b > 0 && ci_pos == 0) {
+              for (size_t pb = 0; pb < num_blks; ++pb) {
+                if (std::find(blks[pb].successors.begin(), blks[pb].successors.end(), b) !=
+                    blks[pb].successors.end()) {
+                  const auto& p_parsed = parsed_map[pb];
+                  bool tail_uses_a1 = false;
+                  for (size_t k = (p_parsed.size() >= 2 ? p_parsed.size() - 2 : 0);
+                       k < p_parsed.size(); ++k) {
+                    if (HasItem(p_parsed[k].uses, "a1")) {
+                      tail_uses_a1 = true;
+                    }
+                  }
+                  if (!p_parsed.empty() && tail_uses_a1 && p_parsed.back().is_jump) {
+                    for (size_t ob = 0; ob < b; ++ob) {
+                      for (const auto& op : parsed_map[ob]) {
+                        if (!op.is_call && HasItem(op.defs, "a1")) {
+                          pred_blk_defined_a1 = true;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            bool saved_a0_forwarded_a1 = false;
+            if (r == "a1" && b > 0 && is_first_call_on_path && copied_at_entry.contains("a0") &&
+                !copied_at_entry.contains("a1") && read_as_param_in_fn.contains("a1")) {
+              bool copies_s0_to_a0 = false;
+              for (size_t i = s_start; i < cidx; ++i) {
+                if (parsed_b[i].is_si_reg_to_reg_move && HasItem(parsed_b[i].defs, "a0") &&
+                    HasItem(parsed_b[i].uses, "s0")) {
+                  copies_s0_to_a0 = true;
+                }
+              }
+              const bool on_a1_eq_0_branch =
+                  (blks[0].successors.size() == 2 && !parsed0.empty() &&
+                   parsed0.back().is_beq_a1_zero && b >= blks[0].successors[0]);
+              bool compared_to_reg_in_b0 = false;
+              for (const auto& p0 : parsed0) {
+                if (p0.compares_a1_to_reg) {
+                  compared_to_reg_in_b0 = true;
+                }
+              }
+              if (copies_s0_to_a0 && !on_a1_eq_0_branch && !compared_to_reg_in_b0) {
+                saved_a0_forwarded_a1 = true;
+              }
+            }
+            const bool entry_deref_s0 =
+                (b == 0 && ci_pos == 0 && (cidx - s_start) == 2 &&
+                 parsed_b[s_start].is_si_reg_to_reg_move && HasItem(parsed_b[s_start].defs, "s0") &&
+                 HasItem(parsed_b[s_start].uses, "a0") && parsed_b[s_start + 1].is_lw_a0_from_0_s0);
+            if (same_callee_sets_r || pred_blk_defined_a1 || saved_a0_forwarded_a1) {
+              pred_regs.insert(r);
+            } else if (entry_deref_s0) {
+              if (r == "a1" || (r == "a2" && callee == "step_value")) {
+                pred_regs.insert(r);
+              }
+            }
+          } else if (arg_defs.empty() && !has_stack_arg) {
+            bool pred_defined_and_branched = false;
+            bool any_pred_redefined_a0_or_a1 = false;
+            if (b > 0) {
+              for (size_t pb = 0; pb < b; ++pb) {
+                bool r_in_pdefs = false;
+                for (const auto& pp : parsed_map[pb]) {
+                  if (HasItem(pp.defs, "a0") || HasItem(pp.defs, "a1")) {
+                    any_pred_redefined_a0_or_a1 = true;
+                  }
+                  if (HasItem(pp.defs, r)) {
+                    r_in_pdefs = true;
+                  }
+                }
+                if (std::find(blks[pb].successors.begin(), blks[pb].successors.end(), b) !=
+                    blks[pb].successors.end()) {
+                  if (r_in_pdefs && !parsed_map[pb].empty() && parsed_map[pb].back().is_jump &&
+                      HasItem(parsed_map[pb].back().uses, r)) {
+                    pred_defined_and_branched = true;
+                  }
+                }
+              }
+            }
+            if (pred_defined_and_branched) {
+              pred_regs.insert(r);
+            } else if (is_first_call_on_path && !copied_at_entry.contains("a0")) {
+              bool b0_masked_bit0 = false;
+              for (const auto& p0 : parsed0) {
+                if (p0.is_andi_a0_1) {
+                  b0_masked_bit0 = true;
+                }
+              }
+              int reads_of_a0_in_seg = 0;
+              for (size_t i = s_start; i < cidx; ++i) {
+                if (HasItem(parsed_b[i].uses, "a0")) {
+                  ++reads_of_a0_in_seg;
+                }
+              }
+              const bool used_in_b = (reads_of_a0_in_seg > 0);
+              const bool bool_flag_guard =
+                  (b > 0 && c_idxs.size() >= 2 && copied_at_entry.contains("a1"));
+              if (!b0_masked_bit0 && !(b > 0 && num_blks >= 15 && !used_in_b) &&
+                  reads_of_a0_in_seg < 4 && !bool_flag_guard) {
+                if (r == "a0") {
+                  pred_regs.insert("a0");
+                } else if ((r == "a1" || r == "a2" || r == "a3") && !any_pred_redefined_a0_or_a1) {
+                  if (callee == "CalleeTwo" && r == "a1") {
+                    pred_regs.insert(r);
+                  } else if (callee == "CalleeThree" && (r == "a1" || r == "a2")) {
+                    pred_regs.insert(r);
+                  } else if (callee == "CalleeFour" && (r == "a1" || r == "a2" || r == "a3")) {
+                    pred_regs.insert(r);
+                  } else if (b > 0 && (r == "a1" || r == "a2")) {
+                    if (read_as_param_in_fn.contains(r) && !copied_at_entry.contains(r)) {
+                      bool consumed_by_mtc1_in_b0 = false;
+                      for (const auto& p0 : parsed0) {
+                        if (p0.is_mtc1_from_gpr && HasItem(p0.uses, r)) {
+                          consumed_by_mtc1_in_b0 = true;
+                        }
+                      }
+                      if (!consumed_by_mtc1_in_b0) {
+                        pred_regs.insert(r);
+                      }
+                    } else if (r == "a1" && max_param_idx >= 2 && !copied_at_entry.contains("a1")) {
+                      pred_regs.insert(r);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      for (std::string_view ar : kGprArgs) {
+        if (pred_regs.contains(ar)) {
+          exit_self_moves[b].push_back(MakeSelfMoveRtlInsn(ar));
+        }
+      }
+      mech2_by_call[{b, cidx}] = std::move(pred_regs);
+    }
+  }
+
+  InvertSched2ReturnAndPostCallSelfMoves(*cfg, parsed_map, blk_has_got_v0_f0_sm, function_name,
+                                         &exit_self_moves);
+
+  // --- Mechanism 1: `function.c:assign_parms` incoming parameter self-moves at entry of B0 ---
+  if (!is_mech5_b0) {
+    bool b0_has_pred = false;
+    for (size_t b_i = 0; b_i < num_blks; ++b_i) {
+      if (std::find(blks[b_i].successors.begin(), blks[b_i].successors.end(), 0) !=
+          blks[b_i].successors.end()) {
+        b0_has_pred = true;
+      }
+    }
+    for (std::string_view r_sv : kAllArgRegs) {
+      const std::string r(r_sv);
+      std::vector<size_t> read_indices;
+      bool redefined_in_b0 = false;
+      const ParsedGregInsn* first_read_insn = nullptr;
+      bool copied_to_reg_v_at_entry = false;
+      for (size_t idx = 0; idx < parsed0.size(); ++idx) {
+        const auto& p = parsed0[idx];
+        if (HasItem(p.uses, r)) {
+          read_indices.push_back(idx);
+          if (first_read_insn == nullptr) {
+            first_read_insn = &p;
+            if (p.is_si_reg_to_reg_move && !HasItem(p.defs, r)) {
+              copied_to_reg_v_at_entry = true;
+            }
+            if (p.is_mfc1_to_arg_gpr && !p.defs.empty()) {
+              const std::string& gpr_dst = p.defs[0];
+              for (size_t k = idx + 1; k < parsed0.size(); ++k) {
+                if (!parsed0[k].is_call && HasItem(parsed0[k].uses, gpr_dst)) {
+                  read_indices.push_back(idx);
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (p.is_call) {
+          auto it_m2 = mech2_by_call.find({0, idx});
+          if (it_m2 != mech2_by_call.end() && it_m2->second.contains(r) && !read_indices.empty()) {
+            read_indices.push_back(idx);
+          }
+          redefined_in_b0 = true;
+          break;
+        }
+        if (HasItem(p.defs, r)) {
+          redefined_in_b0 = true;
+          break;
+        }
+      }
+
+      size_t reads_in_b0 = read_indices.size();
+      if (reads_in_b0 == 2 && read_indices[1] == read_indices[0] + 1) {
+        const auto& u0 = parsed0[read_indices[0]];
+        const auto& u1 = parsed0[read_indices[1]];
+        if (u0.is_mtc1_from_gpr && u1.is_mtc1_from_gpr) {
+          reads_in_b0 = 1;
+        } else if ((u0.is_sll && u1.is_addu_or_subu_reg) ||
+                   (u0.is_addiu_minus_1 && u1.is_and_reg)) {
+          reads_in_b0 = 1;
+        }
+      }
+
+      bool live_in_later_blk = false;
+      if (!redefined_in_b0 && !copied_to_reg_v_at_entry) {
+        absl::flat_hash_set<size_t> visited;
+        std::vector<size_t> queue = blks[0].successors;
+        size_t q_head = 0;
+        while (q_head < queue.size()) {
+          const size_t curr = queue[q_head++];
+          if (curr == 0 || curr >= num_blks || visited.contains(curr)) {
+            continue;
+          }
+          visited.insert(curr);
+          bool killed = false;
+          for (size_t idx_b = 0; idx_b < parsed_map[curr].size(); ++idx_b) {
+            const auto& pb = parsed_map[curr][idx_b];
+            if (HasItem(pb.uses, r)) {
+              live_in_later_blk = true;
+              killed = true;
+              break;
+            }
+            if (pb.is_call) {
+              auto it_m2 = mech2_by_call.find({curr, idx_b});
+              if (it_m2 != mech2_by_call.end() && it_m2->second.contains(r)) {
+                live_in_later_blk = true;
+                killed = true;
+                break;
+              }
+            }
+            if (pb.is_call || HasItem(pb.defs, r)) {
+              killed = true;
+              break;
+            }
+          }
+          if (!killed) {
+            for (size_t nxt : blks[curr].successors) {
+              if (!visited.contains(nxt)) {
+                queue.push_back(nxt);
+              }
+            }
+          }
+        }
+      }
+
+      if ((reads_in_b0 >= 2) || live_in_later_blk || (b0_has_pred && reads_in_b0 >= 1)) {
+        entry_self_moves[0].push_back(MakeSelfMoveRtlInsn(r));
+      }
+    }
+  }
+
+  // Insert the recovered `.greg` self-moves into each basic block.
+  for (size_t b = 0; b < num_blks; ++b) {
+    for (size_t i = 0; i < entry_self_moves[b].size(); ++i) {
+      InsertInsnAt(&blks[b], i, std::move(entry_self_moves[b][i]));
+    }
+    for (auto& sm : exit_self_moves[b]) {
+      if (!blks[b].rtl_insns.empty() &&
+          (EndsWithUncondJump(blks[b]) || EndsWithCondBranch(blks[b]))) {
+        InsertInsnAt(&blks[b], blks[b].rtl_insns.size() - 1, std::move(sm));
+      } else {
+        blks[b].AddInsn(std::move(sm));
+      }
+    }
+  }
+}
+
 }  // namespace
 
 RtlControlFlowGraph InverseFinalAndGasLifter::LiftToSched2RtlCfg(
@@ -1492,6 +2887,37 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToSched2RtlCfg(
   InvertSched2DiamondSimplifications(&rtl_cfg);
   InvertJump2DeleteNoopMoves(&rtl_cfg);
   return rtl_cfg;
+}
+
+void InverseFinalAndGasLifter::InvertSched2ToGregRtlCfg(
+    RtlControlFlowGraph* cfg, const StackFrameAnalysis* /*frame_analysis*/,
+    const SymbolIndex* symbols, std::string_view function_name) {
+  if (cfg == nullptr) {
+    return;
+  }
+  // Step 1: Invert `function.c:thread_prologue_and_epilogue_insns` (`mips_expand_prologue`),
+  // which emitted RTL prologue instructions into `basic_block_head[0]` after `.greg` and before
+  // `.sched2`.
+  for (auto& blk : cfg->rpo_blocks) {
+    std::vector<RtlInsn> kept_insns;
+    std::vector<std::string> kept_pats;
+    kept_insns.reserve(blk.rtl_insns.size());
+    kept_pats.reserve(blk.instructions.size());
+    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
+      if (blk.rtl_insns[i].is_prologue_insn) {
+        continue;
+      }
+      kept_pats.push_back(blk.rtl_insns[i].canonical_pattern);
+      kept_insns.push_back(std::move(blk.rtl_insns[i]));
+    }
+    blk.rtl_insns = std::move(kept_insns);
+    blk.instructions = std::move(kept_pats);
+  }
+
+  // Step 2: Invert `sched.c:schedule_insns` post-reload self-move elimination across all 5 GCC
+  // 2.7.2 mechanisms (`assign_parms`, `expand_call` args/returns, `expand_return`, and
+  // `strength_reduce`).
+  InvertSched2SelfMoves(cfg, symbols, function_name);
 }
 
 }  // namespace rom_nom_nom

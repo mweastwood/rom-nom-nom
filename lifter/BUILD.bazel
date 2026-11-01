@@ -679,8 +679,10 @@ cc_library(
         "//core:control_flow_graph",
         "//core:division_pattern",
         "//core:mips",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )

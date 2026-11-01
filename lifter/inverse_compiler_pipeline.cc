@@ -115,6 +115,9 @@ absl::Status InverseSched2PostReloadStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseSched2PostReloadStage: RtlCfg not initialized.");
   }
+  InverseFinalAndGasLifter::InvertSched2ToGregRtlCfg(context->MutableRtlCfg(),
+                                                     &context->FrameLayout().RawAnalysis(),
+                                                     context->Symbols(), context->FunctionName());
   return absl::OkStatus();
 }
 

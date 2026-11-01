@@ -283,5 +283,55 @@ TEST(DecompilationContextTest, Stage2RecoversSched2CallerArgMoveBeforeFirstCall)
   EXPECT_EQ(stage2_rtl.rpo_blocks[0].instructions[4], "addu  $a0, $s0, $zero");
 }
 
+TEST(DecompilationContextTest, Stage3StripsPrologueAndRestoresGregSelfMoves) {
+  LoadedFunction func;
+  func.name = "stage3_greg_recovery_fn";
+  func.vram = 0x80010400;
+  // Non-leaf function reading $a1 twice before the call (in `addu $s0, $a0, $a1` and
+  // `addu $a0, $a0, $a1`). Between `.greg` and `.sched2`, `thread_prologue_and_epilogue_insns`
+  // inserts 3 prologue instructions (`addiu $sp, -24`, `sw $ra`, `sw $s0`) and `schedule_insns`
+  // deletes the incoming-parameter self-moves (`a0 = a0`, `a1 = a1`). Stage 3 (`.greg`) strips the
+  // 3 prologue instructions and restores both `.greg` self-moves.
+  func.instructions = {
+      MakeAddiu(Register::kSp, Register::kSp, -24, 0x80010400),
+      MakeSw(Register::kRa, 20, Register::kSp, 0x80010404),
+      MakeSw(Register::kS0, 16, Register::kSp, 0x80010408),
+      MakeAddu(Register::kS0, Register::kA0, Register::kA1, 0x8001040C),
+      MakeJal(0x80020000, 0x80010410),
+      MakeAddu(Register::kA0, Register::kA0, Register::kA1, 0x80010414),
+      MakeAddu(Register::kV0, Register::kV0, Register::kS0, 0x80010418),
+      MakeLw(Register::kRa, 20, Register::kSp, 0x8001041C),
+      MakeLw(Register::kS0, 16, Register::kSp, 0x80010420),
+      MakeJrRa(0x80010424),
+      MakeAddiu(Register::kSp, Register::kSp, 24, 0x80010428),
+  };
+
+  DecompilationContext context(func);
+  InverseCompilerPipeline pipeline = InverseCompilerPipeline::BuildDefaultPipeline();
+
+  RtlControlFlowGraph stage2_rtl;
+  RtlControlFlowGraph stage3_rtl;
+  ASSERT_TRUE(pipeline
+                  .Run(&context,
+                       [&](const InverseStageDescriptor& desc, const DecompilationContext& ctx) {
+                         if (desc.id == InverseStageId::kStage02Jump2CrossJump) {
+                           stage2_rtl = ctx.RtlCfg();
+                         } else if (desc.id == InverseStageId::kStage03Sched2PostReload) {
+                           stage3_rtl = ctx.RtlCfg();
+                         }
+                       })
+                  .ok());
+
+  ASSERT_EQ(stage2_rtl.rpo_blocks.size(), 1u);
+  ASSERT_EQ(stage3_rtl.rpo_blocks.size(), 1u);
+  // Stage 2 (.sched2) has 7 RTL insns (3 prologue + 4 body).
+  // Stage 3 (.greg) strips the 3 prologue insns and restores 2 parameter self-moves (`a0`, `a1`),
+  // yielding 6 RTL insns.
+  EXPECT_EQ(stage2_rtl.rpo_blocks[0].instructions.size(), 7u);
+  ASSERT_EQ(stage3_rtl.rpo_blocks[0].instructions.size(), 6u);
+  EXPECT_EQ(stage3_rtl.rpo_blocks[0].instructions[0], "addu  $a0, $a0, $zero");
+  EXPECT_EQ(stage3_rtl.rpo_blocks[0].instructions[1], "addu  $a1, $a1, $zero");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
