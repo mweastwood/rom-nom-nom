@@ -392,6 +392,23 @@ absl::StatusOr<ControlFlowGraph> ControlFlowGraph::Build(absl::Span<const Instru
                                       return !reachable.contains(edge.from_block_id);
                                     }),
                      cfg.edges_.end());
+
+    // Remove trailing unreachable all-nop blocks produced by 16-byte ELF section alignment padding.
+    while (cfg.blocks_.size() > 1 && !reachable.contains(cfg.blocks_.back().id)) {
+      const auto& back_blk = cfg.blocks_.back();
+      bool all_nops = !back_blk.instructions.empty();
+      for (const auto& inst : back_blk.instructions) {
+        if (!inst.IsNop()) {
+          all_nops = false;
+          break;
+        }
+      }
+      if (!all_nops) {
+        break;
+      }
+      cfg.vram_to_block_index_.erase(back_blk.start_vram);
+      cfg.blocks_.pop_back();
+    }
   }
 
   return cfg;
@@ -413,16 +430,192 @@ BasicBlock* ControlFlowGraph::GetMutableBlock(uint32_t id) {
 
 const BasicBlock* ControlFlowGraph::FindBlockByVram(uint32_t vram) const {
   auto it = vram_to_block_index_.find(vram);
-  if (it != vram_to_block_index_.end()) {
+  if (it != vram_to_block_index_.end() && it->second < blocks_.size() &&
+      blocks_[it->second].start_vram == vram) {
     return &blocks_[it->second];
   }
   // Range check if VRAM is within a block
   for (const auto& b : blocks_) {
-    if (vram >= b.start_vram && vram <= b.end_vram) {
+    if (!b.instructions.empty() && vram >= b.start_vram && vram <= b.end_vram) {
       return &b;
     }
   }
   return nullptr;
+}
+
+void ControlFlowGraph::RebuildVramIndex() {
+  vram_to_block_index_.clear();
+  for (size_t i = 0; i < blocks_.size(); ++i) {
+    if (!blocks_[i].instructions.empty()) {
+      vram_to_block_index_[blocks_[i].start_vram] = i;
+    }
+  }
+}
+
+bool ControlFlowGraph::CoalesceContiguousBlocks() {
+  if (blocks_.size() < 2) {
+    return false;
+  }
+
+  absl::flat_hash_set<uint32_t> jt_vrams;
+  for (const auto& jt : jump_tables_) {
+    if (jt.default_target_vram != 0) {
+      jt_vrams.insert(jt.default_target_vram);
+    }
+    for (const auto& entry : jt.entries) {
+      jt_vrams.insert(entry.target_vram);
+    }
+  }
+
+  bool any_merged = false;
+  bool merged_in_pass = true;
+  while (merged_in_pass) {
+    merged_in_pass = false;
+    std::vector<uint32_t> rpo = ReversePostOrder();
+    absl::flat_hash_set<uint32_t> reachable(rpo.begin(), rpo.end());
+
+    for (uint32_t a_id : rpo) {
+      BasicBlock* blk_a = GetMutableBlock(a_id);
+      if (blk_a == nullptr || blk_a->instructions.empty() || blk_a->successors.size() != 1 ||
+          blk_a->outgoing_edges.size() != 1 ||
+          blk_a->outgoing_edges[0].type != EdgeType::kFallthrough || blk_a->HasBranch() ||
+          blk_a->HasReturn() || blk_a->HasSwitch()) {
+        continue;
+      }
+      const Instruction* a_term = blk_a->Terminator();
+      if (a_term != nullptr && (a_term->IsBranch() || a_term->IsJump() || a_term->IsCall())) {
+        continue;
+      }
+      const uint32_t b_id = blk_a->successors[0];
+      if (b_id == a_id || b_id == entry_block_id_ || !reachable.contains(b_id)) {
+        continue;
+      }
+      BasicBlock* blk_b = GetMutableBlock(b_id);
+      if (blk_b == nullptr || blk_b->instructions.empty() || blk_b->predecessors.size() != 1 ||
+          blk_b->predecessors[0] != a_id || jt_vrams.contains(blk_b->start_vram)) {
+        continue;
+      }
+
+      blk_a->instructions.insert(blk_a->instructions.end(), blk_b->instructions.begin(),
+                                 blk_b->instructions.end());
+      blk_a->end_vram = blk_b->end_vram;
+      if (blk_b->jump_table != nullptr) {
+        blk_a->jump_table = blk_b->jump_table;
+      }
+      blk_a->successors = blk_b->successors;
+      blk_a->outgoing_edges = blk_b->outgoing_edges;
+      for (auto& edge : blk_a->outgoing_edges) {
+        edge.from_block_id = a_id;
+      }
+      for (uint32_t succ_id : blk_a->successors) {
+        BasicBlock* succ_blk = GetMutableBlock(succ_id);
+        if (succ_blk != nullptr) {
+          for (uint32_t& pred : succ_blk->predecessors) {
+            if (pred == b_id) {
+              pred = a_id;
+            }
+          }
+        }
+      }
+
+      blk_b->instructions.clear();
+      blk_b->predecessors.clear();
+      blk_b->successors.clear();
+      blk_b->outgoing_edges.clear();
+
+      merged_in_pass = true;
+      any_merged = true;
+      break;
+    }
+  }
+
+  if (any_merged) {
+    CompactReachableBlocks();
+  }
+  return any_merged;
+}
+
+void ControlFlowGraph::CompactReachableBlocks() {
+  if (blocks_.empty()) {
+    return;
+  }
+
+  std::vector<uint32_t> rpo = ReversePostOrder();
+  absl::flat_hash_set<uint32_t> reachable(rpo.begin(), rpo.end());
+
+  std::vector<uint32_t> kept_old_ids;
+  kept_old_ids.reserve(reachable.size());
+  for (size_t i = 0; i < blocks_.size(); ++i) {
+    uint32_t old_id = static_cast<uint32_t>(i);
+    if (reachable.contains(old_id) && !blocks_[i].instructions.empty()) {
+      kept_old_ids.push_back(old_id);
+    }
+  }
+  std::sort(kept_old_ids.begin(), kept_old_ids.end(), [&](uint32_t lhs, uint32_t rhs) {
+    if (lhs == entry_block_id_) return true;
+    if (rhs == entry_block_id_) return false;
+    if (blocks_[lhs].start_vram != blocks_[rhs].start_vram) {
+      return blocks_[lhs].start_vram < blocks_[rhs].start_vram;
+    }
+    return lhs < rhs;
+  });
+
+  absl::flat_hash_map<uint32_t, uint32_t> old_to_new;
+  old_to_new.reserve(kept_old_ids.size());
+  for (size_t new_idx = 0; new_idx < kept_old_ids.size(); ++new_idx) {
+    old_to_new[kept_old_ids[new_idx]] = static_cast<uint32_t>(new_idx);
+  }
+
+  std::vector<BasicBlock> new_blocks;
+  new_blocks.reserve(kept_old_ids.size());
+  edges_.clear();
+
+  for (size_t new_idx = 0; new_idx < kept_old_ids.size(); ++new_idx) {
+    BasicBlock blk = std::move(blocks_[kept_old_ids[new_idx]]);
+    blk.id = static_cast<uint32_t>(new_idx);
+
+    std::vector<uint32_t> new_preds;
+    new_preds.reserve(blk.predecessors.size());
+    for (uint32_t old_p : blk.predecessors) {
+      auto it = old_to_new.find(old_p);
+      if (it != old_to_new.end()) {
+        if (std::find(new_preds.begin(), new_preds.end(), it->second) == new_preds.end()) {
+          new_preds.push_back(it->second);
+        }
+      }
+    }
+    blk.predecessors = std::move(new_preds);
+
+    std::vector<uint32_t> new_succs;
+    new_succs.reserve(blk.successors.size());
+    for (uint32_t old_s : blk.successors) {
+      auto it = old_to_new.find(old_s);
+      if (it != old_to_new.end()) {
+        new_succs.push_back(it->second);
+      }
+    }
+    blk.successors = std::move(new_succs);
+
+    std::vector<CfgEdge> new_out;
+    new_out.reserve(blk.outgoing_edges.size());
+    for (const auto& edge : blk.outgoing_edges) {
+      auto it_to = old_to_new.find(edge.to_block_id);
+      if (it_to != old_to_new.end()) {
+        CfgEdge updated = edge;
+        updated.from_block_id = blk.id;
+        updated.to_block_id = it_to->second;
+        new_out.push_back(updated);
+        edges_.push_back(updated);
+      }
+    }
+    blk.outgoing_edges = std::move(new_out);
+
+    new_blocks.push_back(std::move(blk));
+  }
+
+  entry_block_id_ = 0;
+  blocks_ = std::move(new_blocks);
+  RebuildVramIndex();
 }
 
 std::vector<uint32_t> ControlFlowGraph::PostOrder() const {

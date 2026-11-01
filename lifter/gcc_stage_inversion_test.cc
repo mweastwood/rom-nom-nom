@@ -138,14 +138,7 @@ struct CaseInversionResult {
 // Runs only the Inverse Phase 1 delay-slot unscheduling passes (excluding Inverse Phase 2's
 // `CrossJumpTailDuplicatorPass`).
 void RunInversePhase1DelaySlotUnschedulerOnly(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) {
-  CfgPassPipeline pipeline;
-  pipeline.AddPass(std::make_unique<SimpleDelaySlotUnschedulerPass>());
-  pipeline.AddPass(std::make_unique<TargetHeaderDelaySlotReconcilerPass>());
-  pipeline.AddPass(std::make_unique<RelaxDelaySlotUnschedulerPass>());
-  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
-  pipeline.AddPass(std::make_unique<SimpleDelaySlotUnschedulerPass>());
-  pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
-  pipeline.Run(cfg, analyses);
+  CfgDeReorg::UnscheduleDelaySlotsOnly(cfg, analyses);
 }
 
 std::string FormatActiveInstructionForStage1Compare(const Instruction& inst) {
@@ -201,12 +194,13 @@ CfgStage1Comparison EvaluateDirectCfgStage1(const ControlFlowGraph& unscheduled_
   cmp.expected_no_dbr_block_count = no_dbr_cfg.Blocks().size();
 
   for (const auto& blk : unscheduled_cfg.Blocks()) {
+    const Instruction* term = blk.Terminator();
     for (size_t i = 0; i < blk.instructions.size(); ++i) {
       const Instruction& inst = blk.instructions[i];
       if (inst.IsBranchLikely()) {
         ++cmp.remaining_branch_likely;
       }
-      if (inst.HasDelaySlot() && i + 1 < blk.instructions.size() &&
+      if (&inst == term && inst.HasDelaySlot() && i + 1 < blk.instructions.size() &&
           !blk.instructions[i + 1].IsNop()) {
         ++cmp.remaining_non_nop_delay_slots;
       }
@@ -224,8 +218,22 @@ CfgStage1Comparison EvaluateDirectCfgStage1(const ControlFlowGraph& unscheduled_
   if (rpo_unsched.size() != rpo_no_dbr.size()) {
     cmp.successors_match = false;
     cmp.active_instructions_match = false;
-    cmp.mismatch_detail = absl::StrFormat("RPO block count %zu != expected %zu", rpo_unsched.size(),
-                                          rpo_no_dbr.size());
+    auto summarize_cfg = [](const ControlFlowGraph& g, const std::vector<uint32_t>& rpo) {
+      std::vector<std::string> blks;
+      for (size_t i = 0; i < rpo.size(); ++i) {
+        const BasicBlock* blk = g.GetBlock(rpo[i]);
+        if (blk == nullptr) continue;
+        std::vector<std::string> insns;
+        for (const auto& inst : blk->instructions) {
+          if (!inst.IsNop()) insns.push_back(inst.Disassemble());
+        }
+        blks.push_back(absl::StrFormat("B%zu(%s)", i, absl::StrJoin(insns, "; ")));
+      }
+      return absl::StrJoin(blks, " | ");
+    };
+    cmp.mismatch_detail = absl::StrFormat(
+        "RPO blks %zu != exp %zu: got {%s} vs exp {%s}", rpo_unsched.size(), rpo_no_dbr.size(),
+        summarize_cfg(unscheduled_cfg, rpo_unsched), summarize_cfg(no_dbr_cfg, rpo_no_dbr));
     return cmp;
   }
 
@@ -261,28 +269,62 @@ CfgStage1Comparison EvaluateDirectCfgStage1(const ControlFlowGraph& unscheduled_
     if (succ_u != succ_n) {
       cmp.successors_match = false;
       if (cmp.mismatch_detail.empty()) {
-        cmp.mismatch_detail = absl::StrFormat("RPO block %zu successor edges mismatch", b);
+        auto summarize_cfg = [](const ControlFlowGraph& g, const std::vector<uint32_t>& rpo) {
+          std::vector<std::string> blks;
+          for (size_t i = 0; i < rpo.size(); ++i) {
+            const BasicBlock* blk = g.GetBlock(rpo[i]);
+            if (blk == nullptr) continue;
+            std::vector<std::string> insns;
+            for (const auto& inst : blk->instructions) {
+              if (!inst.IsNop()) insns.push_back(inst.Disassemble());
+            }
+            blks.push_back(absl::StrFormat("B%zu(%s)", i, absl::StrJoin(insns, "; ")));
+          }
+          return absl::StrJoin(blks, " | ");
+        };
+        cmp.mismatch_detail = absl::StrFormat(
+            "RPO blk %zu edges got [%s] != exp [%s]: got {%s} vs exp {%s}", b,
+            absl::StrJoin(succ_u, ","), absl::StrJoin(succ_n, ","),
+            summarize_cfg(unscheduled_cfg, rpo_unsched), summarize_cfg(no_dbr_cfg, rpo_no_dbr));
       }
     }
 
     std::vector<std::string> active_u;
+    std::vector<std::string> disasm_u;
     for (const auto& inst : blk_u->instructions) {
       if (!inst.IsNop()) {
         active_u.push_back(FormatActiveInstructionForStage1Compare(inst));
+        disasm_u.push_back(inst.Disassemble());
       }
     }
     std::vector<std::string> active_n;
+    std::vector<std::string> disasm_n;
     for (const auto& inst : blk_n->instructions) {
       if (!inst.IsNop()) {
         active_n.push_back(FormatActiveInstructionForStage1Compare(inst));
+        disasm_n.push_back(inst.Disassemble());
       }
     }
     if (active_u != active_n) {
       cmp.active_instructions_match = false;
       if (cmp.mismatch_detail.empty()) {
-        cmp.mismatch_detail =
-            absl::StrFormat("RPO block %zu active insns mismatch (count %zu vs expected %zu)", b,
-                            active_u.size(), active_n.size());
+        auto summarize_cfg = [](const ControlFlowGraph& g, const std::vector<uint32_t>& rpo) {
+          std::vector<std::string> blks;
+          for (size_t i = 0; i < rpo.size(); ++i) {
+            const BasicBlock* blk = g.GetBlock(rpo[i]);
+            if (blk == nullptr) continue;
+            std::vector<std::string> insns;
+            for (const auto& inst : blk->instructions) {
+              if (!inst.IsNop()) insns.push_back(inst.Disassemble());
+            }
+            blks.push_back(absl::StrFormat("B%zu(%s)", i, absl::StrJoin(insns, "; ")));
+          }
+          return absl::StrJoin(blks, " | ");
+        };
+        cmp.mismatch_detail = absl::StrFormat(
+            "RPO blk %zu: got [%s] vs exp [%s] (full got {%s} vs exp {%s})", b,
+            absl::StrJoin(disasm_u, "; "), absl::StrJoin(disasm_n, "; "),
+            summarize_cfg(unscheduled_cfg, rpo_unsched), summarize_cfg(no_dbr_cfg, rpo_no_dbr));
       }
     }
   }
@@ -491,6 +533,23 @@ class GccStageInversionSuiteAccumulator {
                               GccRtlDumpInspector::PassExtension(pass), c, total, pct(c, total));
       }
     }
+    if (stage1_full_cfg_exact < total) {
+      absl::StrAppend(
+          &out,
+          "--------------------------------------------------------------------------------\n"
+          "REMAINING STAGE 1 CFG MISMATCHES:\n");
+      for (const auto& r : results_) {
+        if (!r.direct_cfg_stage1.MatchesExactly()) {
+          absl::StrAppendFormat(
+              &out, "  %-48s | likely=%zu delay=%zu blks=%zu/%zu edges=%d insns=%d | %s\n",
+              r.test_name, r.direct_cfg_stage1.remaining_branch_likely,
+              r.direct_cfg_stage1.remaining_non_nop_delay_slots,
+              r.direct_cfg_stage1.unscheduled_block_count,
+              r.direct_cfg_stage1.expected_no_dbr_block_count, r.direct_cfg_stage1.successors_match,
+              r.direct_cfg_stage1.active_instructions_match, r.direct_cfg_stage1.mismatch_detail);
+        }
+      }
+    }
     absl::StrAppend(
         &out, "================================================================================\n");
     return out;
@@ -583,6 +642,10 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     // 1. Build `-fno-delayed-branch` reference CFG (exact binary input to GCC Stage 12 `reorg.c`).
     std::vector<std::string> no_dbr_flags = test_case.options.c_flags;
     no_dbr_flags.push_back("-fno-delayed-branch");
+    if (std::find(no_dbr_flags.begin(), no_dbr_flags.end(), "-O0") != no_dbr_flags.end() &&
+        std::find(no_dbr_flags.begin(), no_dbr_flags.end(), "-Wa,-g") == no_dbr_flags.end()) {
+      no_dbr_flags.push_back("-Wa,-g");
+    }
     std::filesystem::path orig_no_dbr_o =
         work_dir / absl::StrCat("orig_no_dbr_", test_case.function_name, ".o");
     auto no_dbr_status = prepared.compiler->CompileC({
@@ -626,10 +689,48 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
           if (no_dbr_fn_or.ok()) {
             std::vector<uint32_t> no_dbr_words =
                 RoundTripRunner::ApplyCandidateRelocations(prepared, *no_dbr_fn_or);
+            std::function<std::optional<uint32_t>(uint32_t)> no_dbr_rodata_reader =
+                prepared.rodata_memory_reader;
+            const ElfSection* rodata_sec = no_dbr_elf_or->FindSection(".rodata");
+            if (rodata_sec == nullptr) {
+              rodata_sec = no_dbr_elf_or->FindSection(".rdata");
+            }
+            uint32_t rodata_vram = 0;
+            if (auto it = prepared.sym_to_vram.find(".rodata"); it != prepared.sym_to_vram.end()) {
+              rodata_vram = it->second;
+            } else if (auto it_r = prepared.sym_to_vram.find(".rdata");
+                       it_r != prepared.sym_to_vram.end()) {
+              rodata_vram = it_r->second;
+            }
+            if (rodata_sec != nullptr && rodata_vram != 0) {
+              std::vector<uint8_t> rodata_bytes = rodata_sec->data;
+              const uint32_t text_offset = no_dbr_fn_or->section_offset;
+              const uint32_t text_size = static_cast<uint32_t>(no_dbr_fn_or->raw_words.size() * 4);
+              const uint32_t base_vram = test_case.options.base_vram;
+              no_dbr_rodata_reader = [rodata_vram, rodata_bytes = std::move(rodata_bytes),
+                                      text_offset, text_size,
+                                      base_vram](uint32_t vram) -> std::optional<uint32_t> {
+                if (vram >= rodata_vram && vram + 4 <= rodata_vram + rodata_bytes.size()) {
+                  const uint32_t offset = vram - rodata_vram;
+                  const uint32_t word = (static_cast<uint32_t>(rodata_bytes[offset]) << 24) |
+                                        (static_cast<uint32_t>(rodata_bytes[offset + 1]) << 16) |
+                                        (static_cast<uint32_t>(rodata_bytes[offset + 2]) << 8) |
+                                        static_cast<uint32_t>(rodata_bytes[offset + 3]);
+                  if (word >= 0x80000000) {
+                    return word;
+                  }
+                  if (word >= text_offset && word < text_offset + text_size && (word & 3) == 0) {
+                    return base_vram + (word - text_offset);
+                  }
+                  return word;
+                }
+                return std::nullopt;
+              };
+            }
             auto loaded_no_dbr_or =
                 FunctionLoader::FromWords(test_case.function_name, no_dbr_words,
                                           test_case.options.base_vram, prepared.symbol_index.get(),
-                                          /*game_config=*/nullptr, prepared.rodata_memory_reader);
+                                          /*game_config=*/nullptr, no_dbr_rodata_reader);
             if (loaded_no_dbr_or.ok()) {
               DecompilationContext no_dbr_ctx(*loaded_no_dbr_or);
               if (no_dbr_ctx.BuildCfg().ok()) {

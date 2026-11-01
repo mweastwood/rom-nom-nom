@@ -1060,6 +1060,9 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
 
     // Branch on FPU Condition: bc1f, bc1t, bc1fl, bc1tl
     if (rs_val == 0x08) {
+      inst.ft = std::nullopt;
+      inst.fs = std::nullopt;
+      inst.fd = std::nullopt;
       switch (rt_val) {
         case 0x00:
           inst.opcode = Opcode::kBc1f;
@@ -1129,9 +1132,13 @@ absl::StatusOr<Instruction> DecodeInstruction(uint32_t word, uint32_t vram) {
   switch (major_op) {
     case 0x02:
       inst.opcode = Opcode::kJ;
+      inst.rs = std::nullopt;
+      inst.rt = std::nullopt;
       break;
     case 0x03:
       inst.opcode = Opcode::kJal;
+      inst.rs = std::nullopt;
+      inst.rt = std::nullopt;
       break;
     case 0x04:
       inst.opcode = Opcode::kBeq;

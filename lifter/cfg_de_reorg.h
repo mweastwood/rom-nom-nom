@@ -10,12 +10,21 @@
 namespace rom_nom_nom {
 
 // Inverse of GCC 2.7.2 `reorg.c:fill_simple_delay_slots`.
-// Hoists same-block multi-instruction pairs (unaligned memory accesses `lwl`/`lwr`, `swl`/`swr` or
-// multiply `mult` + `mflo`/`mfhi`) that were split across a branch or jump delay slot.
+// When `unschedule_all_remaining` is false, hoists same-block multi-instruction pairs (unaligned
+// memory accesses `lwl`/`lwr`, `swl`/`swr` or multiply `mult` + `mflo`/`mfhi`) and prologue
+// callee-save stores that were split across a branch or jump delay slot.
+// When `unschedule_all_remaining` is true (run after cross-block thread/relax passes), unschedules
+// all remaining same-block delay slots on calls (`jal`/`jalr`), returns (`jr`), jumps (`j`), and
+// conditional branches, then coalesces and compacts the CFG.
 class SimpleDelaySlotUnschedulerPass : public CfgPass {
  public:
+  explicit SimpleDelaySlotUnschedulerPass(bool unschedule_all_remaining = false)
+      : unschedule_all_remaining_(unschedule_all_remaining) {}
   std::string_view Name() const override { return "SimpleDelaySlotUnschedulerPass"; }
   bool Run(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) override;
+
+ private:
+  bool unschedule_all_remaining_ = false;
 };
 
 // Inverse of GCC 2.7.2 `reorg.c:fill_eager_delay_slots` (`fill_slots_from_thread`).
@@ -58,7 +67,10 @@ class CrossJumpTailDuplicatorPass : public CfgPass {
 // analysis, and region structuring.
 class CfgDeReorg {
  public:
+  static CfgPassPipeline BuildStage1Pipeline();
   static CfgPassPipeline BuildDefaultPipeline();
+  static void UnscheduleDelaySlotsOnly(ControlFlowGraph* cfg,
+                                       CfgAnalysisManager* analyses = nullptr);
   static void UnscheduleDelaySlots(ControlFlowGraph* cfg, CfgAnalysisManager* analyses = nullptr);
 };
 

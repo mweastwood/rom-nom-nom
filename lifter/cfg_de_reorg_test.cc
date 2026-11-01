@@ -198,16 +198,17 @@ TEST(CfgDeReorgTest, ReconcilesSpeculativeLoopCounterCompensation) {
 
   CfgDeReorg::UnscheduleDelaySlots(&loop_cfg);
 
-  const auto* loop_head = loop_cfg.GetBlock(1);
-  const auto* loop_latch = loop_cfg.GetBlock(2);
-  const auto* loop_exit = loop_cfg.GetBlock(3);
-  ASSERT_NE(loop_head, nullptr);
-  ASSERT_NE(loop_latch, nullptr);
+  const auto* loop_blk = loop_cfg.FindBlockByVram(0x80000008);
+  const auto* loop_exit = loop_cfg.FindBlockByVram(0x8000001C);
+  ASSERT_NE(loop_blk, nullptr);
   ASSERT_NE(loop_exit, nullptr);
-  ASSERT_NE(loop_latch->Terminator(), nullptr);
-  EXPECT_TRUE(loop_latch->Terminator()->IsBranchLikely());
-  EXPECT_FALSE(loop_latch->instructions.back().IsNop());
-  EXPECT_TRUE(loop_exit->instructions.front().IsNop());
+  ASSERT_NE(loop_blk->Terminator(), nullptr);
+  EXPECT_EQ(loop_blk->instructions.front().opcode, Opcode::kAddiu);
+  EXPECT_EQ(loop_blk->Terminator()->opcode, Opcode::kBne);
+  EXPECT_TRUE(loop_blk->instructions.back().IsNop());
+  EXPECT_NE(std::find(loop_blk->successors.begin(), loop_blk->successors.end(), loop_blk->id),
+            loop_blk->successors.end());
+  EXPECT_NE(loop_exit->instructions.front().opcode, Opcode::kAddiu);
 }
 
 TEST(CfgDeReorgTest, DuplicatesCrossJumpedTailIntoJumpPredecessor) {
@@ -414,10 +415,11 @@ TEST(CfgDeReorgTest, DuplicatesCrossJumpedTailWithNonNopDelaySlotsAndSinksFprDel
   const auto* pred_blk = cj_cfg.FindBlockByVram(0x80000008);
   ASSERT_NE(pred_blk, nullptr);
   EXPECT_TRUE(pred_blk->successors.empty());
-  ASSERT_EQ(pred_blk->instructions.size(), 3u);
+  ASSERT_EQ(pred_blk->instructions.size(), 4u);
   EXPECT_EQ(pred_blk->instructions[0].opcode, Opcode::kAddiu);
-  EXPECT_TRUE(pred_blk->instructions[1].IsReturn());
-  EXPECT_EQ(pred_blk->instructions[2].opcode, Opcode::kSw);
+  EXPECT_EQ(pred_blk->instructions[1].opcode, Opcode::kSw);
+  EXPECT_TRUE(pred_blk->instructions[2].IsReturn());
+  EXPECT_TRUE(pred_blk->instructions[3].IsNop());
 
   // 2. FPR delay slot (`lwc1 $f4, 0($a0)`) dead on taken return path and feeding `c.lt.s` on
   // fallthrough:
@@ -488,14 +490,13 @@ TEST(CfgDeReorgTest, RelaxDelaySlotUnschedulerRetargetsIntraLoopAndAcyclicJoinBl
 
 TEST(CfgDeReorgTest, DefaultPipelineContainsExpectedModularPasses) {
   CfgPassPipeline pipeline = CfgDeReorg::BuildDefaultPipeline();
-  ASSERT_EQ(pipeline.PassCount(), 7u);
-  EXPECT_EQ(pipeline.Passes()[0]->Name(), "SimpleDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[1]->Name(), "TargetHeaderDelaySlotReconcilerPass");
-  EXPECT_EQ(pipeline.Passes()[2]->Name(), "RelaxDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[3]->Name(), "EagerThreadDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[4]->Name(), "CrossJumpTailDuplicatorPass");
-  EXPECT_EQ(pipeline.Passes()[5]->Name(), "SimpleDelaySlotUnschedulerPass");
-  EXPECT_EQ(pipeline.Passes()[6]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  ASSERT_EQ(pipeline.PassCount(), 6u);
+  EXPECT_EQ(pipeline.Passes()[0]->Name(), "TargetHeaderDelaySlotReconcilerPass");
+  EXPECT_EQ(pipeline.Passes()[1]->Name(), "RelaxDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[2]->Name(), "EagerThreadDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[3]->Name(), "CrossJumpTailDuplicatorPass");
+  EXPECT_EQ(pipeline.Passes()[4]->Name(), "SimpleDelaySlotUnschedulerPass");
+  EXPECT_EQ(pipeline.Passes()[5]->Name(), "EagerThreadDelaySlotUnschedulerPass");
 }
 
 TEST(CfgDeReorgTest, CrossJumpTailDuplicatorDuplicatesFallthroughTailIntoJumpPredecessors) {
@@ -584,7 +585,12 @@ TEST(CfgDeReorgTest,
   ASSERT_TRUE(cfg_or.ok());
   ControlFlowGraph cfg = *cfg_or;
 
-  CfgDeReorg::UnscheduleDelaySlots(&cfg);
+  CfgAnalysisManager analyses(&cfg);
+  CrossJumpTailDuplicatorPass cj_pass;
+  EagerThreadDelaySlotUnschedulerPass eager_pass;
+  EXPECT_TRUE(cj_pass.Run(&cfg, &analyses));
+  analyses.InvalidateAll();
+  EXPECT_TRUE(eager_pass.Run(&cfg, &analyses));
 
   const auto* left_branch_blk = cfg.FindBlockByVram(0x80000008);
   const auto* tail_blk = cfg.FindBlockByVram(0x80000024);
@@ -747,7 +753,8 @@ TEST(CfgDeReorgTest,
   ASSERT_NE(join_blk, nullptr);
   EXPECT_TRUE(b0->instructions.back().IsNop());
   EXPECT_TRUE(b1->instructions.back().IsNop());
-  EXPECT_TRUE(b2->instructions.back().IsNop());
+  EXPECT_EQ(b2->instructions.size(), 2u);
+  EXPECT_EQ(b2->instructions.back().opcode, Opcode::kAddiu);
   ASSERT_FALSE(join_blk->instructions.empty());
   EXPECT_EQ(join_blk->instructions.front().opcode, Opcode::kAndi);
   EXPECT_EQ(join_blk->instructions.front().rt, Register::kV0);
@@ -1019,10 +1026,11 @@ TEST(CfgDeReorgTest, EagerThreadDelaySlotUnschedulerPreservesPreLoopConstCalleeS
   const BasicBlock* preheader_blk = cfg.FindBlockByVram(0x80000008);
   ASSERT_NE(guard_blk, nullptr);
   ASSERT_NE(preheader_blk, nullptr);
-  ASSERT_GE(guard_blk->instructions.size(), 2u);
-  EXPECT_EQ(guard_blk->instructions.back().opcode, Opcode::kAddu);
-  EXPECT_EQ(guard_blk->instructions.back().rd, Register::kS0);
-  EXPECT_EQ(guard_blk->instructions.back().rs, Register::kZero);
+  ASSERT_GE(guard_blk->instructions.size(), 3u);
+  EXPECT_EQ(guard_blk->instructions.front().opcode, Opcode::kAddu);
+  EXPECT_EQ(guard_blk->instructions.front().rd, Register::kS0);
+  EXPECT_EQ(guard_blk->instructions.front().rs, Register::kZero);
+  EXPECT_TRUE(guard_blk->instructions.back().IsNop());
   ASSERT_FALSE(preheader_blk->instructions.empty());
   EXPECT_EQ(preheader_blk->instructions.front().rd, Register::kS1);
 }
@@ -1133,6 +1141,50 @@ TEST(CfgDeReorgTest,
   ASSERT_NE(pred_blk, nullptr);
   EXPECT_NE(std::find(then_blk->successors.begin(), then_blk->successors.end(), pred_blk->id),
             then_blk->successors.end());
+}
+
+TEST(CfgDeReorgTest,
+     EagerThreadDelaySlotUnschedulerSinksDiamondEntryDelaySlotIntoBothArmsWhenTakenBranchExits) {
+  // Models GCC 2.7.2 `reorg.c:fill_slots_from_thread` (`reorg.c:3348-3360`) + `relax_delay_slots`
+  // (`reorg.c:3666-3711`) on a diamond where both arms begin with `addiu $v0, $zero, 1`, the
+  // taken arm begins with an early-exit branch `bltz $a0, L_neg` whose taken path overwrites `$v0`
+  // (`addiu $v0, $zero, -1`), and `bltz` stole `addiu $v1, $a1, -1` from its fallthrough arm.
+  std::vector<uint32_t> words = {
+      0x14800003,  // 0x00 (B0): bne   $a0, $zero, +3 -> 0x10 (B2)
+      0x24020001,  // 0x04:      addiu $v0, $zero, 1
+      0x08000006,  // 0x08 (B1): j     0x80000018 (B4)
+      0x24A30001,  // 0x0C:      addiu $v1, $a1, 1
+      0x04800007,  // 0x10 (B2): bltz  $a0, +7 -> 0x30 (B5)
+      0x24A3FFFF,  // 0x14:      addiu $v1, $a1, -1
+      0xACC30000,  // 0x18 (B4): sw    $v1, 0($a2)
+      0x24A30002,  // 0x1C:      addiu $v1, $a1, 2
+      0xACC30004,  // 0x20:      sw    $v1, 4($a2)
+      0x24A30003,  // 0x24:      addiu $v1, $a1, 3
+      0x0800000D,  // 0x28:      j     0x80000034 (B6)
+      0xACC30008,  // 0x2C:      sw    $v1, 8($a2)
+      0x2402FFFF,  // 0x30 (B5): addiu $v0, $zero, -1
+      0x03E00008,  // 0x34 (B6): jr    $ra
+      0x00000000,  // 0x38:      nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlotsOnly(&cfg);
+
+  const BasicBlock* entry_blk = cfg.GetBlock(cfg.EntryBlockId());
+  const BasicBlock* arm1_blk = cfg.FindBlockByVram(0x80000008);
+  ASSERT_NE(entry_blk, nullptr);
+  ASSERT_NE(arm1_blk, nullptr);
+  EXPECT_EQ(entry_blk->instructions.front().opcode, Opcode::kBne);
+  EXPECT_TRUE(entry_blk->instructions.back().IsNop());
+  ASSERT_GE(arm1_blk->instructions.size(), 2u);
+  EXPECT_EQ(arm1_blk->instructions[0].opcode, Opcode::kAddiu);
+  EXPECT_EQ(arm1_blk->instructions[0].rt, Register::kV0);
+  EXPECT_EQ(arm1_blk->instructions[1].opcode, Opcode::kAddiu);
+  EXPECT_EQ(arm1_blk->instructions[1].rt, Register::kV1);
 }
 
 }  // namespace

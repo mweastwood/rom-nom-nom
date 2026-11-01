@@ -83,6 +83,16 @@ class ControlFlowGraph {
   // Generates a Graphviz DOT representation for debugging and visualization.
   std::string ToDot() const;
 
+  // Rebuilds the `start_vram -> block_index` lookup table after block mutations.
+  void RebuildVramIndex();
+
+  // Coalesces contiguous single-entry/single-exit fallthrough basic blocks (`A -> B`) where `A`
+  // does not end with a branch/jump/return/switch and `B` is not a jump-table target.
+  bool CoalesceContiguousBlocks();
+
+  // Removes blocks unreachable from `entry_block_id_` and renumbers remaining blocks sequentially.
+  void CompactReachableBlocks();
+
  private:
   uint32_t entry_block_id_ = 0;
   std::vector<BasicBlock> blocks_;
