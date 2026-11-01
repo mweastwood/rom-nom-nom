@@ -45,6 +45,7 @@ enum class RtlFusedIdiomKind {
   kGasSymbolIndexedAccess,
   kGasSymbolDirectAccess,
   kDivisionWithTrap,
+  kSplitLargeIntHiLo,
 };
 
 // Represents a single atomic RTL instruction in the lifter's RTL Control Flow Graph.

@@ -141,6 +141,7 @@ absl::Status InverseSched1PreAllocStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseSched1PreAllocStage: RtlCfg not initialized.");
   }
+  InverseFinalAndGasLifter::InvertSchedToCombineRtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 

@@ -403,5 +403,67 @@ TEST(DecompilationContextTest, Stage4FoldsReloadInstructionsIntoLregRtlCfg) {
   ASSERT_EQ(stage4_rtl.rpo_blocks[0].instructions.size(), 2u);
 }
 
+TEST(DecompilationContextTest, Stage6FoldsSplitLargeIntPairsIntoCombineRtlCfg) {
+  auto make_lui = [](Register rt, uint16_t imm16, uint32_t vram) {
+    Instruction inst;
+    inst.raw_word = 0x3c000000u | (static_cast<uint32_t>(rt) << 16) | imm16;
+    inst.opcode = Opcode::kLui;
+    inst.rt = rt;
+    inst.immediate = static_cast<int16_t>(imm16);
+    inst.vram = vram;
+    return inst;
+  };
+  auto make_ori = [](Register rt, Register rs, uint16_t imm16, uint32_t vram) {
+    Instruction inst;
+    inst.raw_word =
+        0x34000000u | (static_cast<uint32_t>(rs) << 21) | (static_cast<uint32_t>(rt) << 16) | imm16;
+    inst.opcode = Opcode::kOri;
+    inst.rt = rt;
+    inst.rs = rs;
+    inst.immediate = static_cast<int16_t>(imm16);
+    inst.vram = vram;
+    return inst;
+  };
+
+  LoadedFunction func;
+  func.name = "stage6_combine_split_large_int_fn";
+  func.vram = 0x80010600;
+  // Mirrors `ArithmeticLargeImmediate(s32 a)` (`a + 0x12345678`):
+  // In `.combine`, `(set (reg:SI 81) (const_int 305419896))` is a single RTL instruction.
+  // In `.sched`, `sched.c:schedule_insns` calls `try_split` -> `gen_split_156` to split `large_int`
+  // into `lui $v0, 0x1234` and `ori $v0, $v0, 0x5678`.
+  func.instructions = {
+      make_lui(Register::kV0, 0x1234u, 0x80010600),
+      make_ori(Register::kV0, Register::kV0, 0x5678u, 0x80010604),
+      MakeAddu(Register::kV0, Register::kA0, Register::kV0, 0x80010608),
+      MakeJrRa(0x8001060C),
+      MakeNop(0x80010610),
+  };
+
+  DecompilationContext context(func);
+  InverseCompilerPipeline pipeline = InverseCompilerPipeline::BuildDefaultPipeline();
+
+  RtlControlFlowGraph stage5_rtl;
+  RtlControlFlowGraph stage6_rtl;
+  ASSERT_TRUE(pipeline
+                  .Run(&context,
+                       [&](const InverseStageDescriptor& desc, const DecompilationContext& ctx) {
+                         if (desc.id == InverseStageId::kStage05LregLocalAlloc) {
+                           stage5_rtl = ctx.RtlCfg();
+                         } else if (desc.id == InverseStageId::kStage06Sched1PreAlloc) {
+                           stage6_rtl = ctx.RtlCfg();
+                         }
+                       })
+                  .ok());
+
+  ASSERT_EQ(stage5_rtl.rpo_blocks.size(), 1u);
+  ASSERT_EQ(stage6_rtl.rpo_blocks.size(), 1u);
+  EXPECT_EQ(stage5_rtl.rpo_blocks[0].rtl_insns.size(), 3u);
+  ASSERT_EQ(stage6_rtl.rpo_blocks[0].rtl_insns.size(), 2u);
+  EXPECT_EQ(stage6_rtl.rpo_blocks[0].rtl_insns[0].idiom_kind,
+            RtlFusedIdiomKind::kSplitLargeIntHiLo);
+  EXPECT_EQ(stage6_rtl.rpo_blocks[0].rtl_insns[0].machine_instructions.size(), 2u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

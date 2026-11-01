@@ -50,6 +50,11 @@ class InverseFinalAndGasLifter {
   static void InvertGregToLregRtlCfg(RtlControlFlowGraph* cfg,
                                      const StackFrameAnalysis* frame_analysis = nullptr);
 
+  // Inverts GCC 2.7.2 Stage 7 (`sched.c:schedule_insns` pre-allocation instruction splitting via
+  // `try_split` -> `insn-emit.c:gen_split_156`) to transform a `.sched` `RtlControlFlowGraph`
+  // into a canonical `.combine` `RtlControlFlowGraph`.
+  static void InvertSchedToCombineRtlCfg(RtlControlFlowGraph* cfg);
+
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);
 
