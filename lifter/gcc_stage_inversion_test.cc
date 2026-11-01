@@ -88,6 +88,7 @@ struct CfgStage1Comparison {
   bool zero_non_nop_delay_slots = false;
   bool block_count_matches = false;
   bool branch_count_matches = false;
+  bool successors_match = false;
   bool active_instructions_match = false;
   size_t remaining_branch_likely = 0;
   size_t remaining_non_nop_delay_slots = 0;
@@ -99,7 +100,7 @@ struct CfgStage1Comparison {
 
   bool MatchesExactly() const {
     return zero_branch_likely && zero_non_nop_delay_slots && block_count_matches &&
-           branch_count_matches && active_instructions_match;
+           branch_count_matches && successors_match && active_instructions_match;
   }
 };
 
@@ -123,12 +124,11 @@ struct CaseInversionResult {
   bool final_dbr_rtl_matches = false;
   CfgStage1Comparison direct_cfg_stage1;
   CfgStage2Comparison direct_cfg_stage2;
-  // Right-inverse check per phase: `f_k(g_k(y_k)) == y_k` (checks `gcc_output_pass` after
-  // canonicalizing front-end-only `/v` `REG_USERVAR_P` and `/s` `MEM_IN_STRUCT_P` flags; for
-  // Inverse Phase 1, also requires `CfgDeReorg` to produce a valid pre-`reorg.c` input in `X_11`
-  // with 0 `BranchLikely` and 0 non-`nop` delay slots).
+  // Exact Right-inverse check per phase: `f_k(g_k(y_k)) == y_k` (exact S-expression match on
+  // `gcc_output_pass`).
   std::array<bool, 12> phase_right_inverse_matches{};
-  // Left-inverse check per phase: `g_k(f_k(x_{k-1})) == x_{k-1}` (checks `gcc_input_pass`).
+  // Exact Left-inverse check per phase: `g_k(f_k(x_{k-1})) == x_{k-1}` (exact S-expression match on
+  // `gcc_input_pass`).
   std::array<bool, 12> phase_left_inverse_matches{};
   std::array<bool, 12> gcc_stage_transformed_rtl{};
   std::optional<RtlPassKind> first_divergent_pass;
@@ -148,10 +148,9 @@ void RunInversePhase1DelaySlotUnschedulerOnly(ControlFlowGraph* cfg, CfgAnalysis
   pipeline.Run(cfg, analyses);
 }
 
-std::string NormalizeActiveInstructionForStage1Compare(const Instruction& inst) {
+std::string FormatActiveInstructionForStage1Compare(const Instruction& inst) {
   if (inst.IsBranch() || inst.opcode == Opcode::kJ) {
-    // Normalize PC-relative / absolute branch target addresses across `-O2` vs
-    // `-O2 -fno-delayed-branch` since `nop` insertion shifts raw label addresses.
+    // Target basic block edges are verified exactly via `successors_match` on RPO block indices.
     return absl::StrFormat("op=%d_rs=%d_rt=%d_rd=%d_fd=%d_fs=%d_ft=%d",
                            static_cast<int>(inst.opcode),
                            inst.rs.has_value() ? static_cast<int>(*inst.rs) : -1,
@@ -223,41 +222,96 @@ CfgStage1Comparison EvaluateDirectCfgStage1(const ControlFlowGraph& unscheduled_
   std::vector<uint32_t> rpo_unsched = unscheduled_cfg.ReversePostOrder();
   std::vector<uint32_t> rpo_no_dbr = no_dbr_cfg.ReversePostOrder();
   if (rpo_unsched.size() != rpo_no_dbr.size()) {
+    cmp.successors_match = false;
     cmp.active_instructions_match = false;
     cmp.mismatch_detail = absl::StrFormat("RPO block count %zu != expected %zu", rpo_unsched.size(),
                                           rpo_no_dbr.size());
     return cmp;
   }
 
+  absl::flat_hash_map<uint32_t, size_t> unsched_id_to_rpo;
+  absl::flat_hash_map<uint32_t, size_t> no_dbr_id_to_rpo;
+  for (size_t b = 0; b < rpo_unsched.size(); ++b) {
+    unsched_id_to_rpo[rpo_unsched[b]] = b;
+    no_dbr_id_to_rpo[rpo_no_dbr[b]] = b;
+  }
+
+  cmp.successors_match = true;
   cmp.active_instructions_match = true;
   for (size_t b = 0; b < rpo_unsched.size(); ++b) {
     const BasicBlock* blk_u = unscheduled_cfg.GetBlock(rpo_unsched[b]);
     const BasicBlock* blk_n = no_dbr_cfg.GetBlock(rpo_no_dbr[b]);
     if (blk_u == nullptr || blk_n == nullptr) {
+      cmp.successors_match = false;
       cmp.active_instructions_match = false;
       break;
     }
+    std::vector<size_t> succ_u;
+    succ_u.reserve(blk_u->successors.size());
+    for (uint32_t s : blk_u->successors) {
+      auto it = unsched_id_to_rpo.find(s);
+      succ_u.push_back(it != unsched_id_to_rpo.end() ? it->second : static_cast<size_t>(-1));
+    }
+    std::vector<size_t> succ_n;
+    succ_n.reserve(blk_n->successors.size());
+    for (uint32_t s : blk_n->successors) {
+      auto it = no_dbr_id_to_rpo.find(s);
+      succ_n.push_back(it != no_dbr_id_to_rpo.end() ? it->second : static_cast<size_t>(-1));
+    }
+    if (succ_u != succ_n) {
+      cmp.successors_match = false;
+      if (cmp.mismatch_detail.empty()) {
+        cmp.mismatch_detail = absl::StrFormat("RPO block %zu successor edges mismatch", b);
+      }
+    }
+
     std::vector<std::string> active_u;
     for (const auto& inst : blk_u->instructions) {
       if (!inst.IsNop()) {
-        active_u.push_back(NormalizeActiveInstructionForStage1Compare(inst));
+        active_u.push_back(FormatActiveInstructionForStage1Compare(inst));
       }
     }
     std::vector<std::string> active_n;
     for (const auto& inst : blk_n->instructions) {
       if (!inst.IsNop()) {
-        active_n.push_back(NormalizeActiveInstructionForStage1Compare(inst));
+        active_n.push_back(FormatActiveInstructionForStage1Compare(inst));
       }
     }
     if (active_u != active_n) {
       cmp.active_instructions_match = false;
-      cmp.mismatch_detail = absl::StrFormat("RPO block %zu active insn count %zu != expected %zu",
-                                            b, active_u.size(), active_n.size());
-      break;
+      if (cmp.mismatch_detail.empty()) {
+        cmp.mismatch_detail =
+            absl::StrFormat("RPO block %zu active insns mismatch (count %zu vs expected %zu)", b,
+                            active_u.size(), active_n.size());
+      }
     }
   }
 
   return cmp;
+}
+
+// Compares two RTL function dumps for exact S-expression equality across all RTL entries without
+// any lossy heuristic normalization.
+bool ExactPassMatches(const GccCompilationDump& orig_dump, const GccCompilationDump& cand_dump,
+                      std::string_view func_name, RtlPassKind pass) {
+  const RtlFunctionDump* lhs_fn = orig_dump.GetFunctionPass(func_name, pass);
+  const RtlFunctionDump* rhs_fn = cand_dump.GetFunctionPass(func_name, pass);
+  if (lhs_fn == nullptr && rhs_fn == nullptr) {
+    return true;
+  }
+  if (lhs_fn == nullptr || rhs_fn == nullptr) {
+    return false;
+  }
+  if (lhs_fn->insns.size() != rhs_fn->insns.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs_fn->insns.size(); ++i) {
+    if (absl::StripAsciiWhitespace(lhs_fn->insns[i].raw_sexpr) !=
+        absl::StripAsciiWhitespace(rhs_fn->insns[i].raw_sexpr)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool DidGccStageTransformRtl(const GccCompilationDump& dump, std::string_view func_name,
@@ -268,189 +322,7 @@ bool DidGccStageTransformRtl(const GccCompilationDump& dump, std::string_view fu
     return false;
   }
   GccCompilationDump in_as_out("", {{output_pass, RtlPassDump(output_pass, "", "", {*in_fn})}});
-  return !dump.PassMatches(in_as_out, func_name, output_pass);
-}
-
-// Normalizes an active RTL instruction S-expression for Right-Inverse comparison (`f_k(g_k(y_k)) ==
-// y_k`) by canonicalizing UIDs, `label_ref` numbers, virtual pseudo-registers (>= 72), and
-// front-end-only C declaration flags (`/v` `REG_USERVAR_P`, `/f` pointer/function-value, `/i`
-// integrated on `reg`, and `/s` `MEM_IN_STRUCT_P` on `mem`, while preserving `/v` `MEM_VOLATILE_P`
-// on `mem` and `/s` `INSN_ANNULLED_BRANCH_P` on `insn`).
-std::string NormalizeInsnSexprForRightInverse(std::string_view sexpr) {
-  std::string out;
-  out.reserve(sexpr.size());
-
-  size_t i = 0;
-  while (i < sexpr.size()) {
-    if (absl::ascii_isspace(sexpr[i])) {
-      if (!out.empty() && out.back() != ' ') {
-        out.push_back(' ');
-      }
-      while (i < sexpr.size() && absl::ascii_isspace(sexpr[i])) {
-        ++i;
-      }
-      continue;
-    }
-
-    if (sexpr[i] == '(') {
-      std::string_view rest = sexpr.substr(i + 1);
-      auto starts_with_tag = [&](std::string_view prefix) {
-        if (!absl::StartsWith(rest, prefix)) {
-          return false;
-        }
-        size_t after = prefix.size();
-        return after < rest.size() &&
-               (rest[after] == ' ' || rest[after] == '/' || rest[after] == ':');
-      };
-
-      if (starts_with_tag("insn") || starts_with_tag("jump_insn") || starts_with_tag("call_insn")) {
-        out.push_back('(');
-        ++i;
-        std::string tag_buf;
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i])) {
-          tag_buf.push_back(sexpr[i++]);
-        }
-        // Preserve `/s` (annulled branch delay slot) on insns, strip `/i` / `/v`.
-        size_t slash_pos = tag_buf.find('/');
-        if (slash_pos != std::string::npos) {
-          bool has_s = absl::StrContains(tag_buf.substr(slash_pos + 1), 's');
-          tag_buf.resize(slash_pos);
-          if (has_s) {
-            tag_buf.append("/s");
-          }
-        }
-        out.append(tag_buf);
-        for (int k = 0; k < 3; ++k) {
-          size_t save = i;
-          while (i < sexpr.size() && absl::ascii_isspace(sexpr[i])) {
-            ++i;
-          }
-          size_t num_start = i;
-          if (i < sexpr.size() && sexpr[i] == '-') {
-            ++i;
-          }
-          while (i < sexpr.size() && absl::ascii_isdigit(sexpr[i])) {
-            ++i;
-          }
-          if (i == num_start || (i == num_start + 1 && sexpr[num_start] == '-')) {
-            i = save;
-            break;
-          }
-        }
-        continue;
-      }
-
-      if (absl::StartsWith(rest, "label_ref ")) {
-        out.append("(label_ref)");
-        i += 1 + std::string_view("label_ref ").size();
-        while (i < sexpr.size() && sexpr[i] != ')') {
-          ++i;
-        }
-        if (i < sexpr.size() && sexpr[i] == ')') {
-          ++i;
-        }
-        continue;
-      }
-
-      if (absl::StartsWith(rest, "insn_list")) {
-        out.push_back('(');
-        ++i;
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != ')') {
-          out.push_back(sexpr[i++]);
-        }
-        while (i < sexpr.size() && absl::ascii_isspace(sexpr[i])) {
-          ++i;
-        }
-        while (i < sexpr.size() && absl::ascii_isdigit(sexpr[i])) {
-          ++i;
-        }
-        continue;
-      }
-
-      if (starts_with_tag("mem")) {
-        out.append("(mem");
-        i += 1 + std::string_view("mem").size();
-        bool is_volatile = false;
-        while (i < sexpr.size() && sexpr[i] != ':' && !absl::ascii_isspace(sexpr[i]) &&
-               sexpr[i] != ')') {
-          if (sexpr[i] == 'v') {
-            is_volatile = true;
-          }
-          ++i;
-        }
-        if (is_volatile) {
-          out.append("/v");
-        }
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != ')') {
-          out.push_back(sexpr[i++]);
-        }
-        continue;
-      }
-
-      if (starts_with_tag("reg")) {
-        out.append("(reg");
-        i += 1 + std::string_view("reg").size();
-        // Strip `/v`, `/i`, `/f` flags before `:MODE`.
-        while (i < sexpr.size() && sexpr[i] != ':' && !absl::ascii_isspace(sexpr[i]) &&
-               sexpr[i] != ')') {
-          ++i;
-        }
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != ')') {
-          out.push_back(sexpr[i++]);
-        }
-        while (i < sexpr.size() && absl::ascii_isspace(sexpr[i])) {
-          ++i;
-        }
-        size_t num_start = i;
-        while (i < sexpr.size() && absl::ascii_isdigit(sexpr[i])) {
-          ++i;
-        }
-        if (i > num_start) {
-          int reg_num = -1;
-          std::string_view num_str = sexpr.substr(num_start, i - num_start);
-          if (absl::SimpleAtoi(num_str, &reg_num) && reg_num >= 72) {
-            out.append(" pseudo");
-          } else {
-            out.push_back(' ');
-            out.append(num_str);
-          }
-        }
-        continue;
-      }
-    }
-
-    out.push_back(sexpr[i++]);
-  }
-
-  return out;
-}
-
-bool RightInversePassMatches(const GccCompilationDump& orig_dump,
-                             const GccCompilationDump& cand_dump, std::string_view func_name,
-                             RtlPassKind output_pass) {
-  const RtlFunctionDump* lhs_fn = orig_dump.GetFunctionPass(func_name, output_pass);
-  const RtlFunctionDump* rhs_fn = cand_dump.GetFunctionPass(func_name, output_pass);
-  if (lhs_fn == nullptr && rhs_fn == nullptr) {
-    return true;
-  }
-  if (lhs_fn == nullptr || rhs_fn == nullptr) {
-    return false;
-  }
-  std::vector<std::string> lhs_active;
-  for (const auto& insn : lhs_fn->insns) {
-    if (insn.kind == RtlInsnKind::kInsn || insn.kind == RtlInsnKind::kJumpInsn ||
-        insn.kind == RtlInsnKind::kCallInsn) {
-      lhs_active.push_back(NormalizeInsnSexprForRightInverse(insn.raw_sexpr));
-    }
-  }
-  std::vector<std::string> rhs_active;
-  for (const auto& insn : rhs_fn->insns) {
-    if (insn.kind == RtlInsnKind::kInsn || insn.kind == RtlInsnKind::kJumpInsn ||
-        insn.kind == RtlInsnKind::kCallInsn) {
-      rhs_active.push_back(NormalizeInsnSexprForRightInverse(insn.raw_sexpr));
-    }
-  }
-  return lhs_active == rhs_active;
+  return !ExactPassMatches(dump, in_as_out, func_name, output_pass);
 }
 
 class GccStageInversionSuiteAccumulator {
@@ -484,6 +356,7 @@ class GccStageInversionSuiteAccumulator {
     size_t stage1_zero_delay = 0;
     size_t stage1_valid_pre_reorg_domain = 0;
     size_t stage1_blocks_match = 0;
+    size_t stage1_edges_match = 0;
     size_t stage1_active_insns_match = 0;
     size_t stage1_full_cfg_exact = 0;
 
@@ -508,6 +381,7 @@ class GccStageInversionSuiteAccumulator {
       if (r.direct_cfg_stage1.zero_non_nop_delay_slots) ++stage1_zero_delay;
       if (r.direct_cfg_stage1.ValidPreReorgDomain()) ++stage1_valid_pre_reorg_domain;
       if (r.direct_cfg_stage1.block_count_matches) ++stage1_blocks_match;
+      if (r.direct_cfg_stage1.successors_match) ++stage1_edges_match;
       if (r.direct_cfg_stage1.active_instructions_match) ++stage1_active_insns_match;
       if (r.direct_cfg_stage1.MatchesExactly()) ++stage1_full_cfg_exact;
 
@@ -564,19 +438,20 @@ class GccStageInversionSuiteAccumulator {
         "All 12 Phases Right-Inverse RTL Match  : %zu / %zu (%.2f%%)\n"
         "All 12 Phases Left-Inverse RTL Match   : %zu / %zu (%.2f%%)\n"
         "--------------------------------------------------------------------------------\n"
-        "DIRECT CFG STAGE 1 (CfgDeReorg Pre-reorg.c Domain & Right-Inverse Check):\n"
+        "DIRECT CFG STAGE 1 (CfgDeReorg Exact Match vs -fno-delayed-branch):\n"
         "  Zero BranchLikely Remaining          : %zu / %zu (%.2f%%)\n"
         "  Zero Non-Nop Delay Slots             : %zu / %zu (%.2f%%)\n"
         "  Valid Pre-reorg.c Domain (Both Above): %zu / %zu (%.2f%%)\n"
         "  Matches -fno-delayed-branch Blocks   : %zu / %zu (%.2f%%)\n"
+        "  Matches -fno-delayed-branch Edges    : %zu / %zu (%.2f%%)\n"
         "  Matches -fno-delayed-branch Insns    : %zu / %zu (%.2f%%)\n"
-        "  Full Left-Inverse (-fno-delayed-br)  : %zu / %zu (%.2f%%)\n"
+        "  Exact Stage 1 CFG Match (All Above)  : %zu / %zu (%.2f%%)\n"
         "--------------------------------------------------------------------------------\n"
         "DIRECT CFG STAGE 2 (CrossJumpTailDuplicator vs .sched2 -> .jump2 Insn Delta):\n"
         "  Overall Active Insn Delta Match      : %zu / %zu (%.2f%%)\n"
         "  Cases Modified by GCC .jump2         : %zu / %zu (%.2f%%)\n"
         "--------------------------------------------------------------------------------\n"
-        "RIGHT-INVERSE f_k(g_k(y_k)) == y_k BY PHASE (vs Left-Inverse g_k(f_k(x)) == x):\n",
+        "EXACT RIGHT-INVERSE f_k(g_k(y_k)) == y_k BY PHASE (vs Exact Left-Inverse):\n",
         total, compiled_ok, total, pct(compiled_ok, total), isomorphic, total,
         pct(isomorphic, total), bit_exact, total, pct(bit_exact, total), dbr_rtl_right_inv, total,
         pct(dbr_rtl_right_inv, total), all_12_right_inverse_exact, total,
@@ -584,8 +459,9 @@ class GccStageInversionSuiteAccumulator {
         pct(all_12_left_inverse_exact, total), stage1_zero_likely, total,
         pct(stage1_zero_likely, total), stage1_zero_delay, total, pct(stage1_zero_delay, total),
         stage1_valid_pre_reorg_domain, total, pct(stage1_valid_pre_reorg_domain, total),
-        stage1_blocks_match, total, pct(stage1_blocks_match, total), stage1_active_insns_match,
-        total, pct(stage1_active_insns_match, total), stage1_full_cfg_exact, total,
+        stage1_blocks_match, total, pct(stage1_blocks_match, total), stage1_edges_match, total,
+        pct(stage1_edges_match, total), stage1_active_insns_match, total,
+        pct(stage1_active_insns_match, total), stage1_full_cfg_exact, total,
         pct(stage1_full_cfg_exact, total), stage2_delta_matched_overall, total,
         pct(stage2_delta_matched_overall, total), stage2_delta_matched_when_modified,
         stage2_gcc_modified_count,
@@ -595,7 +471,7 @@ class GccStageInversionSuiteAccumulator {
       const auto& p = kTwelvePhases[i];
       absl::StrAppendFormat(
           &out,
-          "  [Inv %2d <- GCC %2d] %-36s | Right: %3zu/%3zu (%6.2f%%) | Active: %3zu/%3zu (%6.2f%%) "
+          "  [Inv %2d <- GCC %2d] %-48s | Right: %3zu/%3zu (%6.2f%%) | Active: %3zu/%3zu (%6.2f%%) "
           "| Left: %3zu/%3zu (%6.2f%%)\n",
           p.inverse_phase_number, p.gcc_stage_number, p.gcc_stage_name, phase_right_matches[i],
           total, pct(phase_right_matches[i], total), phase_right_matches_when_transformed[i],
@@ -866,10 +742,10 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     }
 
     res.final_dbr_rtl_matches =
-        orig_dump.PassMatches(cand_dump, test_case.function_name, RtlPassKind::kDbr);
+        ExactPassMatches(orig_dump, cand_dump, test_case.function_name, RtlPassKind::kDbr);
     res.first_divergent_pass = std::nullopt;
     for (RtlPassKind pass : GccRtlDumpInspector::AllPasses()) {
-      if (!RightInversePassMatches(orig_dump, cand_dump, test_case.function_name, pass)) {
+      if (!ExactPassMatches(orig_dump, cand_dump, test_case.function_name, pass)) {
         res.first_divergent_pass = pass;
         break;
       }
@@ -878,23 +754,11 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     for (size_t i = 0; i < 12; ++i) {
       const auto& p = kTwelvePhases[i];
       res.phase_right_inverse_matches[i] =
-          RightInversePassMatches(orig_dump, cand_dump, test_case.function_name, p.gcc_output_pass);
+          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, p.gcc_output_pass);
       res.phase_left_inverse_matches[i] =
-          orig_dump.PassMatches(cand_dump, test_case.function_name, p.gcc_input_pass);
-    }
-    for (size_t i = 0; i < 12; ++i) {
-      const auto& p = kTwelvePhases[i];
-      res.gcc_stage_transformed_rtl[i] = !RightInversePassMatches(
-          orig_dump,
-          GccCompilationDump(
-              "", {{p.gcc_output_pass,
-                    RtlPassDump(p.gcc_output_pass, "", "",
-                                orig_dump.GetFunctionPass(test_case.function_name,
-                                                          p.gcc_input_pass) != nullptr
-                                    ? std::vector<RtlFunctionDump>{*orig_dump.GetFunctionPass(
-                                          test_case.function_name, p.gcc_input_pass)}
-                                    : std::vector<RtlFunctionDump>{})}}),
-          test_case.function_name, p.gcc_output_pass);
+          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, p.gcc_input_pass);
+      res.gcc_stage_transformed_rtl[i] = DidGccStageTransformRtl(
+          orig_dump, test_case.function_name, p.gcc_input_pass, p.gcc_output_pass);
     }
 
     cleanup();
@@ -920,14 +784,14 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
   GccStageInversionSuiteAccumulator::Instance().Record(res);
 
   ASSERT_TRUE(res.decompiled_and_compiled_ok) << res.error_or_diag;
-  EXPECT_TRUE(res.direct_cfg_stage1.ValidPreReorgDomain())
-      << "Direct CFG Stage 1 (`CfgDeReorg`) failed to map into pre-`reorg.c` domain X_11 for "
-      << test_case.test_name
+  EXPECT_TRUE(res.direct_cfg_stage1.MatchesExactly())
+      << "Direct CFG Stage 1 (`CfgDeReorg`) failed exact match for " << test_case.test_name
       << ": remaining_branch_likely=" << res.direct_cfg_stage1.remaining_branch_likely
-      << ", remaining_non_nop_delay_slots=" << res.direct_cfg_stage1.remaining_non_nop_delay_slots;
+      << ", remaining_non_nop_delay_slots=" << res.direct_cfg_stage1.remaining_non_nop_delay_slots
+      << ", detail=" << res.direct_cfg_stage1.mismatch_detail;
   for (size_t i = 0; i < 12; ++i) {
     EXPECT_TRUE(res.phase_right_inverse_matches[i])
-        << "Right-Inverse Phase " << kTwelvePhases[i].inverse_phase_number << " ("
+        << "Exact Right-Inverse Phase " << kTwelvePhases[i].inverse_phase_number << " ("
         << kTwelvePhases[i].gcc_stage_name << ") output RTL f_k(g_k(y_k)) == y_k ("
         << GccRtlDumpInspector::PassExtension(kTwelvePhases[i].gcc_output_pass) << ") mismatch for "
         << test_case.test_name;
