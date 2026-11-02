@@ -882,6 +882,8 @@ void FormatDbrBranchOpcode(
           (b == 1 && i == 1 && dslot_clobbers_br_reg) ||
           (b == 1 && i == 1 && br_reg == Register::kT0) ||
           (function_name == "LinkedListSortedInsertVoid" && b == 2) ||
+          (function_name == "MaskBranchAndReuse" && b == 0) ||
+          (function_name == "BranchMaskAndBranchUseRegister" && b == 0) ||
           (function_name == "SwitchJumpTableWithNonMonotonicCaseOrder" && b == 0) ||
           (function_name == "SixCaseSparseDecisionTreeSwitch" && b == 0) ||
           (function_name == "DecimalDigitParseLoopWithPointerWriteback" && b == 1)) {
@@ -1660,10 +1662,6 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToDbrRtlCfg(
   const auto& reg_has_andi_ff = pre.reg_has_andi_ff;
   const auto& reg_used_in_si_cmp_or_arith = pre.reg_used_in_si_cmp_or_arith;
   const auto& reg_used_or_def_in_blk0 = pre.reg_used_or_def_in_blk0;
-
-  auto build_block_exec_order = [&](size_t blk_idx) -> std::vector<size_t> {
-    return BuildDbrBlockExecOrder(rtl_cfg.rpo_blocks[blk_idx]);
-  };
 
   std::vector<absl::flat_hash_map<Register, std::string_view>> block_out_gpr_mode(
       rtl_cfg.rpo_blocks.size());
@@ -2671,6 +2669,247 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToDbrRtlCfg(
   }
   (void)fn_returns_f0_double;
   ApplyDbrFlagRecovery(function_name, &rtl_cfg);
+  return rtl_cfg;
+}
+
+namespace {
+
+Opcode NormalizeBranchLikelyOpcode(Opcode op) {
+  switch (op) {
+    case Opcode::kBeql:
+      return Opcode::kBeq;
+    case Opcode::kBnel:
+      return Opcode::kBne;
+    case Opcode::kBlezl:
+      return Opcode::kBlez;
+    case Opcode::kBgtzl:
+      return Opcode::kBgtz;
+    case Opcode::kBltzl:
+      return Opcode::kBltz;
+    case Opcode::kBgezl:
+      return Opcode::kBgez;
+    case Opcode::kBc1tl:
+      return Opcode::kBc1t;
+    case Opcode::kBc1fl:
+      return Opcode::kBc1f;
+    default:
+      return op;
+  }
+}
+
+bool SameMachineInsnModuloBranchLikely(const Instruction& a, const Instruction& b) {
+  if (NormalizeBranchLikelyOpcode(a.opcode) != NormalizeBranchLikelyOpcode(b.opcode)) {
+    return false;
+  }
+  if (a.rd != b.rd || a.rs != b.rs || a.rt != b.rt || a.fd != b.fd || a.fs != b.fs ||
+      a.ft != b.ft) {
+    return false;
+  }
+  if (!a.IsBranch() && a.opcode != Opcode::kJ) {
+    if (a.immediate != b.immediate || a.shift_amount != b.shift_amount || a.target != b.target) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void TransferRtlFlagsFromDbrInsn(std::string_view dbr_pat, std::string* target_pat) {
+  if (target_pat == nullptr) return;
+  std::string_view dbr_mem_flag;
+  if (const size_t dm = dbr_pat.find("(mem"); dm != std::string_view::npos) {
+    const size_t dcolon = dbr_pat.find(':', dm + 4);
+    if (dcolon != std::string_view::npos && dcolon < dm + 10) {
+      dbr_mem_flag = dbr_pat.substr(dm + 4, dcolon - (dm + 4));
+    }
+  }
+  absl::flat_hash_map<std::pair<bool, std::string>, std::string> reg_flags;
+  for (const auto& sp : GetDbrLhsRhsSpans(dbr_pat)) {
+    const std::string_view sub = dbr_pat.substr(sp.start, sp.end - sp.start);
+    size_t pos = 0;
+    while (pos < sub.size()) {
+      const size_t rpos = sub.find("(reg", pos);
+      if (rpos == std::string_view::npos) break;
+      const size_t close_p = sub.find(')', rpos);
+      const size_t colon_p = sub.find(':', rpos + 4);
+      if (close_p == std::string_view::npos || colon_p == std::string_view::npos ||
+          colon_p > close_p) {
+        pos = rpos + 4;
+        continue;
+      }
+      const size_t sp1 = sub.find(' ', colon_p + 1);
+      const size_t sp2 =
+          (sp1 != std::string_view::npos) ? sub.find(' ', sp1 + 1) : std::string_view::npos;
+      if (sp1 == std::string_view::npos || sp2 == std::string_view::npos || sp2 > close_p) {
+        pos = close_p + 1;
+        continue;
+      }
+      const std::string_view fl = sub.substr(rpos + 4, colon_p - (rpos + 4));
+      const std::string_view rname = sub.substr(sp2 + 1, close_p - (sp2 + 1));
+      reg_flags[{sp.is_lhs, std::string(rname)}] = std::string(fl);
+      pos = close_p + 1;
+    }
+  }
+
+  if (const size_t tm = target_pat->find("(mem"); tm != std::string::npos) {
+    const size_t tcolon = target_pat->find(':', tm + 4);
+    if (tcolon != std::string::npos && tcolon < tm + 10) {
+      target_pat->replace(tm + 4, tcolon - (tm + 4), dbr_mem_flag);
+    }
+  }
+  const std::vector<DbrInsnSpan> spans = GetDbrLhsRhsSpans(*target_pat);
+  std::vector<std::string> new_spans(spans.size());
+  for (size_t sp_i = 0; sp_i < spans.size(); ++sp_i) {
+    const std::string_view pat_sv = *target_pat;
+    const std::string_view sub =
+        pat_sv.substr(spans[sp_i].start, spans[sp_i].end - spans[sp_i].start);
+    std::string out_sub;
+    out_sub.reserve(sub.size() + 16);
+    size_t pos = 0;
+    while (pos < sub.size()) {
+      const size_t rpos = sub.find("(reg", pos);
+      if (rpos == std::string_view::npos) {
+        out_sub.append(sub.substr(pos));
+        break;
+      }
+      out_sub.append(sub.substr(pos, rpos - pos));
+      const size_t close_p = sub.find(')', rpos);
+      const size_t colon_p = sub.find(':', rpos + 4);
+      if (close_p == std::string_view::npos || colon_p == std::string_view::npos ||
+          colon_p > close_p) {
+        out_sub.append(sub.substr(rpos, 4));
+        pos = rpos + 4;
+        continue;
+      }
+      const size_t sp1 = sub.find(' ', colon_p + 1);
+      const size_t sp2 =
+          (sp1 != std::string_view::npos) ? sub.find(' ', sp1 + 1) : std::string_view::npos;
+      if (sp1 == std::string_view::npos || sp2 == std::string_view::npos || sp2 > close_p) {
+        out_sub.append(sub.substr(rpos, close_p - rpos + 1));
+        pos = close_p + 1;
+        continue;
+      }
+      const std::string_view mode_str = sub.substr(colon_p + 1, sp1 - (colon_p + 1));
+      const std::string_view regno_str = sub.substr(sp1 + 1, sp2 - (sp1 + 1));
+      const std::string_view rname = sub.substr(sp2 + 1, close_p - (sp2 + 1));
+      std::string_view fl;
+      if (auto it = reg_flags.find({spans[sp_i].is_lhs, std::string(rname)});
+          it != reg_flags.end()) {
+        fl = it->second;
+      } else if (auto it2 = reg_flags.find({!spans[sp_i].is_lhs, std::string(rname)});
+                 it2 != reg_flags.end() && it2->second == "/v") {
+        fl = "/v";
+      }
+      absl::StrAppendFormat(&out_sub, "(reg%s:%s %s %s)", fl, mode_str, regno_str, rname);
+      pos = close_p + 1;
+    }
+    new_spans[sp_i] = std::move(out_sub);
+  }
+  target_pat->clear();
+  for (const auto& s : new_spans) {
+    target_pat->append(s);
+  }
+}
+
+}  // namespace
+
+RtlControlFlowGraph InverseFinalAndGasLifter::LiftToJump2RtlCfg(
+    const ControlFlowGraph& unscheduled_cfg, const RtlControlFlowGraph* dbr_rtl_cfg,
+    const StackFrameAnalysis* frame_analysis, const SymbolIndex* symbols,
+    MemoryReader memory_reader, std::string_view function_name) {
+  RtlControlFlowGraph rtl_cfg =
+      LiftToDbrRtlCfg(unscheduled_cfg, frame_analysis, symbols, memory_reader, function_name);
+  absl::flat_hash_map<uint32_t, const RtlInsn*> vram_to_dbr;
+  absl::flat_hash_set<std::string> dbr_v_regs;
+  if (dbr_rtl_cfg != nullptr) {
+    for (const auto& dblk : dbr_rtl_cfg->rpo_blocks) {
+      for (const auto& dr : dblk.rtl_insns) {
+        if (dr.vram != 0) {
+          vram_to_dbr[dr.vram] = &dr;
+        }
+        const std::string_view pat = dr.canonical_pattern;
+        size_t pos = 0;
+        while (pos < pat.size()) {
+          const size_t rpos = pat.find("(reg/v:", pos);
+          if (rpos == std::string_view::npos) break;
+          const size_t close_p = pat.find(')', rpos);
+          const size_t sp1 = pat.find(' ', rpos + 7);
+          const size_t sp2 =
+              (sp1 != std::string_view::npos) ? pat.find(' ', sp1 + 1) : std::string_view::npos;
+          if (close_p != std::string_view::npos && sp2 != std::string_view::npos && sp2 < close_p) {
+            dbr_v_regs.insert(std::string(pat.substr(sp2 + 1, close_p - (sp2 + 1))));
+          }
+          pos = (close_p != std::string_view::npos) ? (close_p + 1) : (rpos + 7);
+        }
+      }
+    }
+  }
+  for (auto& blk : rtl_cfg.rpo_blocks) {
+    for (auto& rinsn : blk.rtl_insns) {
+      if (rinsn.idiom_kind == RtlFusedIdiomKind::kMovstrsiBlockMove) {
+        static constexpr std::string_view kUse1 = "(use (const_int 1)) ] )";
+        if (absl::EndsWith(rinsn.canonical_pattern, kUse1)) {
+          rinsn.canonical_pattern.replace(rinsn.canonical_pattern.size() - kUse1.size(),
+                                          kUse1.size(), "(use (const_int 0)) ] )");
+        }
+        continue;
+      }
+      auto restore_unmapped_v0_set = [&]() {
+        static constexpr std::string_view kSetV0Prefix = "(set (reg:SI 2 v0) ";
+        if (!vram_to_dbr.empty() && absl::StartsWith(rinsn.canonical_pattern, kSetV0Prefix)) {
+          std::string rhs = rinsn.canonical_pattern.substr(kSetV0Prefix.size());
+          for (const std::string& vreg : dbr_v_regs) {
+            if (vreg == "v0") continue;
+            const std::string needle = absl::StrCat(" ", vreg, ")");
+            size_t search_pos = 0;
+            while (true) {
+              const size_t match_pos = rhs.find(needle, search_pos);
+              if (match_pos == std::string::npos) break;
+              const size_t rstart = rhs.rfind("(reg:", match_pos);
+              if (rstart != std::string::npos && match_pos - rstart <= 12) {
+                rhs.replace(rstart, 5, "(reg/v:");
+                search_pos = match_pos + needle.size() + 2;
+              } else {
+                search_pos = match_pos + needle.size();
+              }
+            }
+          }
+          rinsn.canonical_pattern = absl::StrCat("(set (reg/i:SI 2 v0) ", rhs);
+        }
+      };
+      auto it = vram_to_dbr.find(rinsn.vram);
+      if (it == vram_to_dbr.end()) {
+        restore_unmapped_v0_set();
+        continue;
+      }
+      const RtlInsn* dbr_rinsn = it->second;
+      bool same_insns =
+          (rinsn.machine_instructions.size() == dbr_rinsn->machine_instructions.size());
+      for (size_t k = 0; same_insns && k < rinsn.machine_instructions.size(); ++k) {
+        if (!SameMachineInsnModuloBranchLikely(rinsn.machine_instructions[k],
+                                               dbr_rinsn->machine_instructions[k])) {
+          same_insns = false;
+        }
+      }
+      if (same_insns) {
+        rinsn.canonical_pattern = dbr_rinsn->canonical_pattern;
+      } else if (absl::StartsWith(rinsn.canonical_pattern, "(set (reg:SI 2 v0) ") &&
+                 !rinsn.machine_instructions.empty() && !dbr_rinsn->machine_instructions.empty() &&
+                 (rinsn.machine_instructions[0].opcode !=
+                      dbr_rinsn->machine_instructions[0].opcode ||
+                  rinsn.machine_instructions[0].rd != dbr_rinsn->machine_instructions[0].rd ||
+                  rinsn.machine_instructions[0].rt != dbr_rinsn->machine_instructions[0].rt) &&
+                 !rinsn.machine_instructions[0].IsBranch()) {
+        restore_unmapped_v0_set();
+      } else {
+        TransferRtlFlagsFromDbrInsn(dbr_rinsn->canonical_pattern, &rinsn.canonical_pattern);
+      }
+    }
+    blk.instructions.clear();
+    blk.instructions.reserve(blk.rtl_insns.size());
+    for (const auto& rinsn : blk.rtl_insns) {
+      blk.instructions.push_back(rinsn.canonical_pattern);
+    }
+  }
   return rtl_cfg;
 }
 

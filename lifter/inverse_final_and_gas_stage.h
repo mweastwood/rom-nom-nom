@@ -39,6 +39,16 @@ class InverseFinalAndGasLifter {
                                              MemoryReader memory_reader = nullptr,
                                              std::string_view function_name = "");
 
+  // Lifts an unscheduled `.11.jump2` machine `ControlFlowGraph` into a `.11.jump2`
+  // `RtlControlFlowGraph`, using the Stage 0 `.12.dbr` `RtlControlFlowGraph` (`dbr_rtl_cfg`) to
+  // preserve exact RTL patterns and flags across `reorg.c` delay-slot motion.
+  static RtlControlFlowGraph LiftToJump2RtlCfg(const ControlFlowGraph& unscheduled_cfg,
+                                               const RtlControlFlowGraph* dbr_rtl_cfg = nullptr,
+                                               const StackFrameAnalysis* frame_analysis = nullptr,
+                                               const SymbolIndex* symbols = nullptr,
+                                               MemoryReader memory_reader = nullptr,
+                                               std::string_view function_name = "");
+
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);
 

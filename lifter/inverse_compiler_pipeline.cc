@@ -97,8 +97,10 @@ absl::Status InverseDbrDelaySlotStage::Run(DecompilationContext* context) {
   pre_cross_jump_pipeline.AddPass(std::make_unique<EagerThreadDelaySlotUnschedulerPass>());
   pre_cross_jump_pipeline.Run(context->MutableCfg(), &context->CfgAnalyses());
   context->InvalidateFrameLayout();
-  context->SetRtlCfg(
-      InverseFinalAndGasLifter::LiftToRtlCfg(stage1_cfg, &context->FrameLayout().RawAnalysis()));
+  const RtlControlFlowGraph dbr_rtl_cfg = context->RtlCfg();
+  context->SetRtlCfg(InverseFinalAndGasLifter::LiftToJump2RtlCfg(
+      stage1_cfg, &dbr_rtl_cfg, &context->FrameLayout().RawAnalysis(), context->Symbols(),
+      context->Function().memory_reader, context->FunctionName()));
   return absl::OkStatus();
 }
 

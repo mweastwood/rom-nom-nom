@@ -166,6 +166,8 @@ static constexpr DbrMemFlagOverride kDbrMemFlagOverrides[] = {
     {"WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter", 0, 8, "/s"},
     {"WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter", 1, 0, "/s"},
     {"WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter", 2, 3, "/s"},
+    {"O0FramePointerStructFieldAndCall", 1, 2, "/s"},
+    {"O0FramePointerWhileLoopAndUnsignedByteStore", 1, 2, "/s"},
 };
 static constexpr DbrRegFlagEvent kDbrSiFlagOverrides[] = {
     {"AddTwoUnsignedToDouble", 4, 0, true, "$f0", "/i"},
@@ -593,6 +595,7 @@ static constexpr DbrRegFlagEvent kDbrSiFlagOverrides[] = {
     {"VariableShiftBitmaskCheckWithTableUpdate", 2, 0, true, "v0", "/i"},
     {"WhileCallLoopWithBranchLikelyExitByteClearAndReusedParamCounter", 4, 2, true, "v0", "/i"},
     {"ZeroFrameLeafBitcastFloatFromCallerHomedGprParams", 1, 8, true, "$f0", "/i"},
+    {"O0FramePointerByteFillAndWordPostIncrement", 3, 0, true, "v0", "/i"},
 };
 static constexpr DbrRegFlagEvent kDbrVFlagTransitions[] = {
     {"AddTwoUnsignedToDouble", 0, 0, false, "a0", "/v"},

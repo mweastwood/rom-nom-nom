@@ -174,5 +174,54 @@ TEST(InverseFinalAndGasStageTest, LiftsDbrRtlCfgWithNarrowSubregModesAndRegister
             "(set (reg:SI 2 v0) (zero_extend:SI (subreg:HI (reg:SI 2 v0) 0)))");
 }
 
+TEST(InverseFinalAndGasStageTest, LiftToJump2RtlCfgPreservesDbrFlagsAndRestoresReturnV0Flag) {
+  Instruction addu_s0;
+  addu_s0.raw_word = 0x00808021u;
+  addu_s0.opcode = Opcode::kAddu;
+  addu_s0.rd = Register::kS0;
+  addu_s0.rs = Register::kA0;
+  addu_s0.rt = Register::kZero;
+  addu_s0.vram = 0x80010300;
+
+  Instruction addu_v0;
+  addu_v0.raw_word = 0x02001021u;
+  addu_v0.opcode = Opcode::kAddu;
+  addu_v0.rd = Register::kV0;
+  addu_v0.rs = Register::kS0;
+  addu_v0.rt = Register::kZero;
+  addu_v0.vram = 0x80010308;
+
+  LoadedFunction unscheduled_func;
+  unscheduled_func.name = "jump2_flag_transfer_test";
+  unscheduled_func.vram = 0x80010300;
+  unscheduled_func.instructions = {
+      addu_s0,
+      addu_v0,
+      MakeJrRa(0x80010304),
+      MakeNop(0x8001030C),
+  };
+
+  DecompilationContext context(unscheduled_func);
+  ASSERT_TRUE(context.BuildCfg().ok());
+
+  RtlControlFlowGraph dbr_rtl_cfg;
+  RtlBasicBlock dbr_blk;
+  RtlInsn dbr_s0_insn;
+  dbr_s0_insn.vram = 0x80010300;
+  dbr_s0_insn.machine_instructions = {addu_s0};
+  dbr_s0_insn.canonical_pattern = "(set (reg/v:SI 16 s0) (reg:SI 4 a0))";
+  dbr_blk.rtl_insns.push_back(dbr_s0_insn);
+  dbr_blk.instructions.push_back(dbr_s0_insn.canonical_pattern);
+  dbr_rtl_cfg.rpo_blocks.push_back(dbr_blk);
+
+  const RtlControlFlowGraph jump2_cfg = InverseFinalAndGasLifter::LiftToJump2RtlCfg(
+      context.Cfg(), &dbr_rtl_cfg, &context.FrameLayout().RawAnalysis(), nullptr, nullptr,
+      unscheduled_func.name);
+  ASSERT_EQ(jump2_cfg.rpo_blocks.size(), 1u);
+  ASSERT_EQ(jump2_cfg.rpo_blocks[0].instructions.size(), 2u);
+  EXPECT_EQ(jump2_cfg.rpo_blocks[0].instructions[0], "(set (reg/v:SI 16 s0) (reg:SI 4 a0))");
+  EXPECT_EQ(jump2_cfg.rpo_blocks[0].instructions[1], "(set (reg/i:SI 2 v0) (reg/v:SI 16 s0))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom
