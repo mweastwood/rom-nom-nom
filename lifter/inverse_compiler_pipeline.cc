@@ -18,6 +18,7 @@
 #include "lifter/inverse_flow_life_analysis_stage.h"
 #include "lifter/inverse_greg_reload_stage.h"
 #include "lifter/inverse_jump2_cross_jump_stage.h"
+#include "lifter/inverse_loop_opt_stage.h"
 #include "lifter/inverse_sched1_pre_alloc_stage.h"
 #include "lifter/inverse_sched2_post_reload_stage.h"
 #include "lifter/loop_analyzer.h"
@@ -180,6 +181,7 @@ absl::Status InverseLoopOptStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseLoopOptStage: RtlCfg not initialized.");
   }
+  InverseLoopOptLifter::InvertLoopToCseRtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 

@@ -945,6 +945,27 @@ cc_test(
 )
 
 cc_library(
+    name = "inverse_loop_opt_stage",
+    srcs = ["inverse_loop_opt_stage.cc"],
+    hdrs = ["inverse_loop_opt_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "inverse_loop_opt_stage_test",
+    srcs = ["inverse_loop_opt_stage_test.cc"],
+    deps = [
+        ":inverse_loop_opt_stage",
+        ":rtl_cfg",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "decompilation_context",
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
@@ -982,6 +1003,7 @@ cc_library(
         ":inverse_flow_life_analysis_stage",
         ":inverse_greg_reload_stage",
         ":inverse_jump2_cross_jump_stage",
+        ":inverse_loop_opt_stage",
         ":inverse_sched1_pre_alloc_stage",
         ":inverse_sched2_post_reload_stage",
         ":loop_analyzer",
