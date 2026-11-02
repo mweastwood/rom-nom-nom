@@ -18,6 +18,7 @@
 #include "lifter/inverse_final_and_gas_stage.h"
 #include "lifter/inverse_flow_life_analysis_stage.h"
 #include "lifter/inverse_greg_reload_stage.h"
+#include "lifter/inverse_jump1_cfg_cleanup_stage.h"
 #include "lifter/inverse_jump2_cross_jump_stage.h"
 #include "lifter/inverse_loop_opt_stage.h"
 #include "lifter/inverse_sched1_pre_alloc_stage.h"
@@ -198,6 +199,7 @@ absl::Status InverseJump1CfgCleanupStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseJump1CfgCleanupStage: RtlCfg not initialized.");
   }
+  InverseJump1CfgCleanupLifter::InvertJumpToRtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 
