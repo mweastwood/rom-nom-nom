@@ -43,6 +43,7 @@ cc_test(
     deps = [
         ":dominator_tree",
         ":loop_analyzer",
+        "//core:compiler_flags",
         "//core:control_flow_graph",
         "//core:mips",
         "@googletest//:gtest",
@@ -63,6 +64,7 @@ cc_library(
     deps = [
         ":dominator_tree",
         ":loop_analyzer",
+        "//core:compiler_flags",
         "//core:control_flow_graph",
         "//core:mips",
         "//core:register_tracker",

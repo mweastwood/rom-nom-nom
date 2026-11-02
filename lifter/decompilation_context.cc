@@ -42,7 +42,9 @@ DecompilationContext::DecompilationContext(const LoadedFunction& loaded_function
                                            InterProceduralAbiContext abi_context)
     : loaded_function_(loaded_function),
       abi_context_(abi_context),
-      compiler_flags_(loaded_function.compiler_flags) {}
+      compiler_flags_(loaded_function.compiler_flags) {
+  cfg_analyses_.SetFlags(compiler_flags_);
+}
 
 absl::Status DecompilationContext::BuildCfg() {
   if (loaded_function_.instructions.empty()) {
@@ -59,6 +61,7 @@ absl::Status DecompilationContext::BuildCfg() {
   }
   cfg_ = std::move(*cfg_or);
   cfg_analyses_.SetCfg(&(*cfg_));
+  cfg_analyses_.SetFlags(compiler_flags_);
   cfg_analyses_.InvalidateAll();
   frame_layout_.reset();
   rtl_cfg_.reset();

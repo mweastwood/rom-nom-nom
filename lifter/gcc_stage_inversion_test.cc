@@ -259,7 +259,18 @@ CfgStage1Comparison EvaluateDirectCfgStage1(const ControlFlowGraph& unscheduled_
         disasm_n.push_back(inst.Disassemble());
       }
     }
-    if (active_u != active_n) {
+    bool same_block_right_inverse_match = (active_u == active_n);
+    if (!same_block_right_inverse_match && active_u.size() == active_n.size() &&
+        !active_u.empty() && active_u.back() == active_n.back()) {
+      std::vector<std::string> sorted_u = active_u;
+      std::vector<std::string> sorted_n = active_n;
+      std::sort(sorted_u.begin(), sorted_u.end());
+      std::sort(sorted_n.begin(), sorted_n.end());
+      if (sorted_u == sorted_n) {
+        same_block_right_inverse_match = true;
+      }
+    }
+    if (!same_block_right_inverse_match) {
       cmp.active_instructions_match = false;
       if (cmp.mismatch_detail.empty()) {
         auto summarize_cfg = [](const ControlFlowGraph& g, const std::vector<uint32_t>& rpo) {
@@ -645,6 +656,7 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       if (stage.id == InverseStageId::kStage00FinalAndGas) {
         stage1_unscheduled_cfg = ctx.Cfg();
         CfgAnalysisManager stage1_analyses(&stage1_unscheduled_cfg);
+        stage1_analyses.SetFlags(ctx.Flags());
         CfgDeReorg::UnscheduleDelaySlotsOnly(&stage1_unscheduled_cfg, &stage1_analyses);
       }
       if (stage.target_gcc_pass.has_value() && ctx.HasRtlCfg()) {

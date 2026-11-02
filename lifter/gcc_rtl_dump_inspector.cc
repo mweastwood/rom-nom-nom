@@ -830,11 +830,27 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
       }
     }
     const std::string pat = ExtractTopLevelPatternFromInsnSexpr(entry.raw_sexpr);
-    // Ignore non-machine `(use ...)` and `(clobber ...)` pseudo-insns and jump-table `addr_vec`
-    // data.
-    if (entry.kind == RtlInsnKind::kInsn &&
-        (absl::StartsWith(pat, "(use ") || absl::StartsWith(pat, "(clobber "))) {
-      continue;
+    // Ignore non-machine `(use ...)`, `(clobber ...)`, `(const_int 0)` (`gen_nop()`) pseudo-insns,
+    // noop register self-moves `(set (reg:M R) (reg:M R))` skipped by `final.c`, and jump-table
+    // `addr_vec` data.
+    if (entry.kind == RtlInsnKind::kInsn) {
+      if (absl::StartsWith(pat, "(use ") || absl::StartsWith(pat, "(clobber ") ||
+          pat == "(const_int 0)") {
+        continue;
+      }
+      const std::string canon_pat = CanonicalizeRtlPattern(pat);
+      if (absl::StartsWith(canon_pat, "(set (reg:") && absl::EndsWith(canon_pat, ")")) {
+        const std::string_view sv = canon_pat;
+        const size_t close_lhs = sv.find(')', 5);
+        if (close_lhs != std::string_view::npos && close_lhs + 2 < sv.size() - 1 &&
+            sv[close_lhs + 1] == ' ') {
+          const std::string_view lhs = sv.substr(5, close_lhs - 5 + 1);
+          const std::string_view rhs = sv.substr(close_lhs + 2, sv.size() - 1 - (close_lhs + 2));
+          if (lhs == rhs) {
+            continue;
+          }
+        }
+      }
     }
     if (entry.kind == RtlInsnKind::kJumpInsn &&
         (absl::StartsWith(pat, "(addr_vec:") || absl::StartsWith(pat, "(addr_diff_vec:"))) {

@@ -1009,8 +1009,8 @@ bool IsRootOfMultiStepChainBeforeTerminator(const BasicBlock& block, size_t cand
 }
 
 size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term_idx,
-                                            const Instruction& term,
-                                            const Instruction& delay_inst) {
+                                            const Instruction& term, const Instruction& delay_inst,
+                                            bool runs_sched2 = true) {
   size_t insert_idx = term_idx;
   if (term.IsReturn()) {
     if (!IsEpilogueRestoreOrSpDeallocInstruction(delay_inst)) {
@@ -1025,6 +1025,19 @@ size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term
       }
     }
     return insert_idx;
+  }
+  if (term.IsBranch() && delay_inst.IsLoad()) {
+    return term_idx;
+  }
+
+  if (!runs_sched2 && IsPrologueCalleeSaveStore(delay_inst) && !block.instructions.empty() &&
+      block.instructions[0].opcode == Opcode::kAddiu && block.instructions[0].rt == Register::kSp &&
+      block.instructions[0].rs == Register::kSp && block.instructions[0].immediate < 0) {
+    size_t sp_idx = 1;
+    while (sp_idx < term_idx && IsPrologueCalleeSaveStore(block.instructions[sp_idx])) {
+      ++sp_idx;
+    }
+    return sp_idx;
   }
 
   const RegisterUseDef delay_ud = GetInstructionUseDef(delay_inst);
@@ -1067,6 +1080,12 @@ size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term
     if (InstructionsHaveHazard(prev, delay_inst)) {
       break;
     }
+    if (!runs_sched2 && !IsPrologueCalleeSaveStore(delay_inst) &&
+        (IsPrologueCalleeSaveStore(prev) ||
+         (prev.opcode == Opcode::kAddiu && prev.rt == Register::kSp && prev.rs == Register::kSp &&
+          prev.immediate < 0))) {
+      break;
+    }
     if (delay_is_ra_save &&
         (IsPrologueCalleeSaveStore(prev) || prev.IsLoad() ||
          (prev.opcode == Opcode::kAddu && prev.rt == Register::kZero && prev.rs.has_value() &&
@@ -1080,9 +1099,24 @@ size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term
         delay_inst.rt == Register::kZero) {
       break;
     }
-    if (term.IsCall() && (prev.opcode == Opcode::kMfc1 || prev.opcode == Opcode::kDmfc1 ||
+    const bool is_o1_call_arg0_or_stack_arg =
+        !runs_sched2 && term.IsCall() &&
+        (delay_inst.rt == Register::kA0 || delay_inst.rd == Register::kA0 ||
+         (delay_inst.IsStore() && delay_inst.rs == Register::kSp && delay_inst.immediate >= 16));
+    const bool is_o1_prev_mfc1_to_a1_a3 =
+        !runs_sched2 && term.IsCall() &&
+        (prev.opcode == Opcode::kMfc1 || prev.opcode == Opcode::kDmfc1) && prev.rt.has_value() &&
+        *prev.rt >= Register::kA1 && *prev.rt <= Register::kA3 &&
+        delay_inst.opcode == Opcode::kSwc1 && delay_inst.rs == Register::kSp &&
+        delay_inst.immediate >= 16;
+    if (is_o1_prev_mfc1_to_a1_a3) {
+      --insert_idx;
+      continue;
+    }
+    if (term.IsCall() && (((prev.opcode == Opcode::kMfc1 || prev.opcode == Opcode::kDmfc1) &&
+                           !is_o1_call_arg0_or_stack_arg) ||
                           (delay_is_const_init && prev.IsStore() && prev.rs != Register::kSp) ||
-                          (stop_at_fp_save_before_call &&
+                          (stop_at_fp_save_before_call && !is_o1_call_arg0_or_stack_arg &&
                            (prev.opcode == Opcode::kMtc1 || prev.opcode == Opcode::kDmtc1 ||
                             prev.opcode == Opcode::kSdc1)) ||
                           (cand_idx == 1 && prev.opcode == Opcode::kSw &&
@@ -1094,10 +1128,10 @@ size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term
         IsFpuCompareOpcode(prev.opcode)) {
       break;
     }
-    if (prev.IsLoad() && DelaySlotConflictsWithTerminator(term, prev)) {
+    if (runs_sched2 && prev.IsLoad() && DelaySlotConflictsWithTerminator(term, prev)) {
       break;
     }
-    if (!term.IsCall() && !prev.IsLoad() && !IsFpuCompareOpcode(prev.opcode) &&
+    if (runs_sched2 && !term.IsCall() && !prev.IsLoad() && !IsFpuCompareOpcode(prev.opcode) &&
         !(term.IsBranch() && (term.rs == Register::kAt || term.rt == Register::kAt)) &&
         ConsumesEarlierLoadOrFpOpInBlock(block, cand_idx, delay_inst)) {
       break;
@@ -1121,18 +1155,56 @@ size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term
       break;
     }
   }
+  // Never split a 2-instruction `floatsisf2` / `floatsidf2` macro pair (`mtc1/lwc1` +
+  // `cvt.s.w/cvt.d.w`).
+  if (insert_idx > 0 && insert_idx < term_idx &&
+      (block.instructions[insert_idx].opcode == Opcode::kCvtSW ||
+       block.instructions[insert_idx].opcode == Opcode::kCvtDW) &&
+      (block.instructions[insert_idx - 1].opcode == Opcode::kMtc1 ||
+       block.instructions[insert_idx - 1].opcode == Opcode::kLwc1)) {
+    --insert_idx;
+  }
   return insert_idx;
 }
 
-bool UnscheduleAllSameBlockDelaySlotsInBlock(BasicBlock* block) {
+bool UnscheduleAllSameBlockDelaySlotsInBlock(ControlFlowGraph* cfg, BasicBlock* block,
+                                             bool runs_sched2 = true) {
   bool changed = false;
   // 1. Unschedule internal `jal` / `jalr` call delay slots.
   for (size_t i = 0; i + 1 < block->instructions.size(); ++i) {
     if (block->instructions[i].IsCall() && !block->instructions[i + 1].IsNop()) {
       const Instruction call_inst = block->instructions[i];
       const Instruction delay_inst = block->instructions[i + 1];
+      if (!runs_sched2 && delay_inst.opcode == Opcode::kAddiu && delay_inst.rt == delay_inst.rs &&
+          delay_inst.rt.has_value() && *delay_inst.rt >= Register::kS0 &&
+          *delay_inst.rt <= Register::kS7) {
+        if (i + 2 < block->instructions.size() && block->instructions[i + 2].IsStore() &&
+            block->instructions[i + 2].rt == Register::kV0 &&
+            !InstructionsHaveHazard(block->instructions[i + 2], delay_inst)) {
+          block->instructions[i + 1] = MakeNopInstruction(delay_inst.vram);
+          block->instructions.insert(block->instructions.begin() + static_cast<ptrdiff_t>(i + 3),
+                                     delay_inst);
+          ++i;
+          changed = true;
+          continue;
+        }
+        if (cfg != nullptr && i + 2 == block->instructions.size() &&
+            block->successors.size() == 1) {
+          BasicBlock* succ_blk = cfg->GetMutableBlock(block->successors[0]);
+          if (succ_blk != nullptr && succ_blk->predecessors.size() == 1 &&
+              succ_blk->predecessors[0] == block->id && !succ_blk->instructions.empty() &&
+              succ_blk->instructions[0].IsStore() &&
+              succ_blk->instructions[0].rt == Register::kV0 &&
+              !InstructionsHaveHazard(succ_blk->instructions[0], delay_inst)) {
+            block->instructions[i + 1] = MakeNopInstruction(delay_inst.vram);
+            succ_blk->instructions.insert(succ_blk->instructions.begin() + 1, delay_inst);
+            changed = true;
+            continue;
+          }
+        }
+      }
       const size_t insert_idx =
-          FindSameBlockDelaySlotInsertionIndex(*block, i, call_inst, delay_inst);
+          FindSameBlockDelaySlotInsertionIndex(*block, i, call_inst, delay_inst, runs_sched2);
       block->instructions[i + 1] = MakeNopInstruction(delay_inst.vram);
       block->instructions.insert(block->instructions.begin() + static_cast<ptrdiff_t>(insert_idx),
                                  delay_inst);
@@ -1165,7 +1237,7 @@ bool UnscheduleAllSameBlockDelaySlotsInBlock(BasicBlock* block) {
         }
       }
       const size_t insert_idx =
-          FindSameBlockDelaySlotInsertionIndex(*block, term_idx, term, delay_inst);
+          FindSameBlockDelaySlotInsertionIndex(*block, term_idx, term, delay_inst, runs_sched2);
       block->instructions.back() = MakeNopInstruction(delay_inst.vram);
       block->instructions.insert(block->instructions.begin() + static_cast<ptrdiff_t>(insert_idx),
                                  delay_inst);
@@ -1181,10 +1253,11 @@ bool SimpleDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManag
   if (cfg == nullptr || cfg->Blocks().empty()) {
     return false;
   }
+  const bool runs_sched2 = (analyses == nullptr || analyses->Flags().RunsSched2());
   bool changed = false;
   if (unschedule_all_remaining_) {
     for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
-      if (UnscheduleAllSameBlockDelaySlotsInBlock(&cfg->MutableBlocks()[b])) {
+      if (UnscheduleAllSameBlockDelaySlotsInBlock(cfg, &cfg->MutableBlocks()[b], runs_sched2)) {
         changed = true;
       }
     }
@@ -1199,9 +1272,11 @@ bool SimpleDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManag
     return changed;
   }
 
+  const bool gas_reorders =
+      (analyses != nullptr && analyses->Flags().GasOptimizesAndReordersInsns());
   for (size_t b = 0; b < cfg->Blocks().size(); ++b) {
     BasicBlock& block = cfg->MutableBlocks()[b];
-    if (block.instructions.size() < 3) {
+    if (block.instructions.size() < 2) {
       continue;
     }
     const Instruction* term_ptr = block.Terminator();
@@ -1213,13 +1288,20 @@ bool SimpleDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManag
     if (delay_inst.IsNop()) {
       continue;
     }
+    const bool is_gas_branch_load =
+        term.IsBranch() && !term.IsBranchLikely() && delay_inst.IsLoad() &&
+        (gas_reorders || (block.id == cfg->EntryBlockId() && delay_inst.rs == Register::kSp));
     if ((term.opcode == Opcode::kJ || (term.IsBranch() && !term.IsBranchLikely())) &&
         !DelaySlotConflictsWithTerminator(term, delay_inst) &&
-        (DelaySlotCompletesSplitInstructionPair(block, delay_inst) ||
-         (block.id == cfg->EntryBlockId() && IsPrologueCalleeSaveStore(delay_inst)))) {
-      block.instructions[block.instructions.size() - 2] = delay_inst;
-      block.instructions[block.instructions.size() - 1] = term;
-      block.instructions.push_back(MakeNopInstruction(delay_inst.vram));
+        (is_gas_branch_load ||
+         (block.instructions.size() >= 3 &&
+          (DelaySlotCompletesSplitInstructionPair(block, delay_inst) ||
+           (block.id == cfg->EntryBlockId() && IsPrologueCalleeSaveStore(delay_inst)))))) {
+      const size_t term_idx = block.instructions.size() - 2;
+      const size_t insert_idx = term_idx;
+      block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+      block.instructions.insert(block.instructions.begin() + static_cast<ptrdiff_t>(insert_idx),
+                                delay_inst);
       changed = true;
     }
   }
@@ -1314,6 +1396,68 @@ bool TargetHeaderDelaySlotReconcilerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
                     (pred_blk->start_vram >> 2) & 0x03FFFFFF;
               }
               changed = true;
+            }
+          } else if (taken_blk != nullptr && succ_taken != block.id && term.opcode != Opcode::kJ &&
+                     succ_taken != succ_fallthrough && !analyses->Flags().RunsCse2()) {
+            const Instruction& pre_term = block.instructions[block.instructions.size() - 3];
+            BasicBlock* mut_taken = cfg->GetMutableBlock(succ_taken);
+            if (mut_taken != nullptr && !mut_taken->instructions.empty()) {
+              // 1. Chain of mask-and-branch blocks (`B2 -> B4 -> B6`) where
+              // `reorg.c:redundant_insn` deleted `pre_term` from `B4`, leaving `pre_term` in `B2`
+              // and `B6`.
+              if (mut_taken->instructions.size() == 2 &&
+                  mut_taken->Terminator() == &mut_taken->instructions[0] &&
+                  mut_taken->instructions[0].IsBranch() &&
+                  !mut_taken->instructions[0].IsUnconditionalBranch() &&
+                  mut_taken->instructions[1].IsNop() &&
+                  !SameDelayInstructionEffect(pre_term, mut_taken->instructions[0])) {
+                uint32_t taken2_id = 0;
+                for (const auto& edge : mut_taken->outgoing_edges) {
+                  if (edge.type == EdgeType::kBranch) {
+                    taken2_id = edge.to_block_id;
+                    break;
+                  }
+                }
+                const BasicBlock* taken2_blk = cfg->GetBlock(taken2_id);
+                if (taken2_blk != nullptr && !taken2_blk->instructions.empty() &&
+                    SameDelayInstructionEffect(pre_term, taken2_blk->instructions.front())) {
+                  Instruction restored = pre_term;
+                  restored.vram = mut_taken->start_vram;
+                  mut_taken->instructions.insert(mut_taken->instructions.begin(), restored);
+                  changed = true;
+                }
+              }
+              // 2. Load-and-branch `lw R, off(base); bgtz/blez/bltz/bgez R, B_ft; nop` where `B_ft`
+              // modifies `R` (`subu/addu/addiu R, R, ...`) and stores `sw R, off(base)`, and
+              // `reorg.c` deleted the redundant `lw R, off(base)` at the start of `B_ft`.
+              BasicBlock* mut_ft = cfg->GetMutableBlock(succ_fallthrough);
+              for (BasicBlock* cand_succ : {mut_taken, mut_ft}) {
+                if (cand_succ != nullptr && cand_succ->predecessors.size() == 1 &&
+                    cand_succ->predecessors[0] == block.id && pre_term.opcode == Opcode::kLw &&
+                    pre_term.rt.has_value() && pre_term.rs.has_value() && term.rs == pre_term.rt &&
+                    cand_succ->instructions.size() >= 2 &&
+                    cand_succ->instructions[0].opcode != Opcode::kLw) {
+                  const Instruction& t0 = cand_succ->instructions[0];
+                  const Instruction& t1 = (cand_succ->instructions[1].opcode == Opcode::kJ &&
+                                           cand_succ->instructions.size() >= 3)
+                                              ? cand_succ->instructions[2]
+                                              : cand_succ->instructions[1];
+                  const Register r = *pre_term.rt;
+                  const bool t0_updates_r =
+                      ((t0.opcode == Opcode::kSubu || t0.opcode == Opcode::kAddu) && t0.rd == r &&
+                       (t0.rs == r || t0.rt == r)) ||
+                      (t0.opcode == Opcode::kAddiu && t0.rt == r && t0.rs == r);
+                  const bool t1_stores_r_back = t1.opcode == Opcode::kSw && t1.rt == r &&
+                                                t1.rs == pre_term.rs &&
+                                                t1.immediate == pre_term.immediate;
+                  if (t0_updates_r && t1_stores_r_back) {
+                    Instruction restored = pre_term;
+                    restored.vram = cand_succ->start_vram;
+                    cand_succ->instructions.insert(cand_succ->instructions.begin(), restored);
+                    changed = true;
+                  }
+                }
+              }
             }
           }
         }
@@ -1924,10 +2068,11 @@ bool RelaxDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysisManage
         // `reorg.c:3918-3936`: if `trial` at `target_label` was an unconditional jump with one
         // instruction in its delay slot redundant with `block`'s delay slot, `relax_delay_slots`
         // threaded `block` across `trial` to `succ_taken`.
-        if (term.IsBranchLikely() && pred_id != succ_fallthrough &&
-            pred_id != effective_fallthrough && pred_blk != nullptr &&
-            !jump_table_target_vrams.contains(pred_blk->start_vram) &&
-            pred_blk->instructions.size() == 2 &&
+        if ((term.IsBranchLikely() || (!analyses->Flags().RunsSched2() &&
+                                       DelaySlotConflictsWithTerminator(term, delay_inst))) &&
+            pred_id != succ_fallthrough && pred_id != effective_fallthrough &&
+            pred_blk != nullptr && !jump_table_target_vrams.contains(pred_blk->start_vram) &&
+            !dom_tree.Dominates(pred_id, block.id) && pred_blk->instructions.size() == 2 &&
             pred_blk->Terminator() == &pred_blk->instructions[0] &&
             pred_blk->instructions[0].opcode == Opcode::kJ && pred_blk->successors.size() == 1 &&
             pred_blk->successors[0] == succ_taken &&
@@ -2463,7 +2608,21 @@ bool TryUnscheduleBranchLikelyDelaySlot(ControlFlowGraph* cfg, BasicBlock* block
     }
   }
   BasicBlock* taken_block = cfg->GetMutableBlock(succ_taken);
-  const BasicBlock* ft_block = cfg->GetBlock(succ_fallthrough);
+  BasicBlock* ft_block = cfg->GetMutableBlock(succ_fallthrough);
+  if (ft_block != nullptr && !delay_inst.IsStore() && succ_taken != succ_fallthrough &&
+      ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block->id &&
+      ft_block->instructions.size() == 2 && ft_block->Terminator() == &ft_block->instructions[0] &&
+      ft_block->instructions[0].opcode == Opcode::kJ && ft_block->instructions[1].IsNop() &&
+      ft_block->successors.size() == 1 && ft_block->successors[0] == succ_taken) {
+    const Opcode non_likely_op = ToNonLikelyBranchOpcode(term.opcode);
+    const auto inverted_op = InvertNonLikelyBranchOpcode(non_likely_op);
+    if (inverted_op.has_value()) {
+      ft_block->instructions.insert(ft_block->instructions.begin(), delay_inst);
+      block->instructions[block->instructions.size() - 2].opcode = *inverted_op;
+      block->instructions.back() = MakeNopInstruction(delay_inst.vram);
+      return true;
+    }
+  }
   const bool ft_identical = ft_block != nullptr && !ft_block->instructions.empty() &&
                             SameDelayInstructionEffect(delay_inst, ft_block->instructions.front());
   if (taken_block != nullptr && !ft_identical && succ_taken != succ_fallthrough) {
@@ -2482,6 +2641,7 @@ bool TryUnscheduleBranchLikelyDelaySlot(ControlFlowGraph* cfg, BasicBlock* block
     const uint32_t block_id = block->id;
     const uint32_t taken_start_vram = taken_block->start_vram;
     bool has_synthetic_ft_pred = false;
+    bool has_later_store_likely_branch_to_taken = false;
     std::optional<uint32_t> call_ft_pred_id;
     std::optional<uint32_t> non_call_ft_pred_id;
     std::vector<uint32_t> peer_likely_branch_ids;
@@ -2496,13 +2656,17 @@ bool TryUnscheduleBranchLikelyDelaySlot(ControlFlowGraph* cfg, BasicBlock* block
         }
         if (pred_blk->instructions.size() >= 2 &&
             pred_blk->Terminator() == &pred_blk->instructions[pred_blk->instructions.size() - 2] &&
-            pred_blk->instructions[pred_blk->instructions.size() - 2].IsBranchLikely() &&
-            SameDelayInstructionEffect(delay_inst, pred_blk->instructions.back())) {
-          for (const auto& edge : pred_blk->outgoing_edges) {
-            if (edge.type == EdgeType::kBranch && edge.to_block_id == succ_taken) {
-              peer_likely_branch_ids.push_back(pred_id);
-              break;
+            pred_blk->instructions[pred_blk->instructions.size() - 2].IsBranchLikely()) {
+          if (SameDelayInstructionEffect(delay_inst, pred_blk->instructions.back())) {
+            for (const auto& edge : pred_blk->outgoing_edges) {
+              if (edge.type == EdgeType::kBranch && edge.to_block_id == succ_taken) {
+                peer_likely_branch_ids.push_back(pred_id);
+                break;
+              }
             }
+          } else if (delay_inst.IsStore() && pred_blk->instructions.back().IsStore() &&
+                     pred_blk->start_vram > block->start_vram) {
+            has_later_store_likely_branch_to_taken = true;
           }
         }
         if (pred_blk->end_vram != 0 &&
@@ -2522,11 +2686,11 @@ bool TryUnscheduleBranchLikelyDelaySlot(ControlFlowGraph* cfg, BasicBlock* block
         }
       }
     }
-    if (has_synthetic_ft_pred ||
+    if (has_synthetic_ft_pred || has_later_store_likely_branch_to_taken ||
         (!peer_likely_branch_ids.empty() && non_call_ft_pred_id.has_value())) {
       const uint32_t jump_blk_id = CreateJumpBlockWithInstruction(cfg, delay_inst, succ_taken);
       std::vector<uint32_t> all_likely_ids = {block_id};
-      if (!has_synthetic_ft_pred) {
+      if (!has_synthetic_ft_pred && !has_later_store_likely_branch_to_taken) {
         all_likely_ids.insert(all_likely_ids.end(), peer_likely_branch_ids.begin(),
                               peer_likely_branch_ids.end());
       }
@@ -2545,6 +2709,40 @@ bool TryUnscheduleBranchLikelyDelaySlot(ControlFlowGraph* cfg, BasicBlock* block
     }
     if (non_call_ft_pred_id.has_value()) {
       BasicBlock* pred_blk = cfg->GetMutableBlock(*non_call_ft_pred_id);
+      if (pred_blk != nullptr && *non_call_ft_pred_id == succ_fallthrough &&
+          (term.opcode == Opcode::kBc1tl || term.opcode == Opcode::kBc1fl) &&
+          delay_inst.opcode == Opcode::kAddiu && delay_inst.rs == Register::kZero &&
+          delay_inst.immediate == 1 && delay_inst.rt.has_value() &&
+          (pred_blk->instructions.size() == 2 ||
+           (pred_blk->instructions.size() == 3 && pred_blk->instructions[2].IsNop())) &&
+          pred_blk->instructions[0].opcode == Opcode::kAddu &&
+          pred_blk->instructions[0].rd == delay_inst.rt &&
+          pred_blk->instructions[0].rs == Register::kZero &&
+          pred_blk->instructions[0].rt == Register::kZero &&
+          std::any_of(block->instructions.begin(),
+                      block->instructions.begin() +
+                          static_cast<std::ptrdiff_t>(block->instructions.size() - 2),
+                      [&](const Instruction& pre_inst) {
+                        return SameDelayInstructionEffect(pre_inst, pred_blk->instructions[1]);
+                      })) {
+        taken_block->instructions.insert(taken_block->instructions.begin(),
+                                         pred_blk->instructions.begin() + 1,
+                                         pred_blk->instructions.end());
+        taken_block->start_vram = taken_block->instructions.front().vram;
+        pred_blk->instructions.erase(pred_blk->instructions.begin() + 1,
+                                     pred_blk->instructions.end());
+        pred_blk->end_vram = pred_blk->instructions.back().vram;
+        const size_t t_idx = block->instructions.size() - 2;
+        const Opcode non_likely_op = ToNonLikelyBranchOpcode(term.opcode);
+        block->instructions[t_idx].opcode = non_likely_op;
+        block->instructions.back() = MakeNopInstruction(delay_inst.vram);
+        const size_t ins_pos = FindSameBlockDelaySlotInsertionIndex(
+            *block, t_idx, block->instructions[t_idx], delay_inst, false);
+        block->instructions.insert(
+            block->instructions.begin() + static_cast<std::ptrdiff_t>(ins_pos), delay_inst);
+        cfg->RebuildVramIndex();
+        return true;
+      }
       if (pred_blk != nullptr) {
         const uint32_t target_field = (taken_start_vram >> 2) & 0x03FFFFFFu;
         Instruction j_inst;
@@ -2655,6 +2853,114 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
       const Instruction term = *term_ptr;
       const Instruction delay_inst = block.instructions.back();
       if (delay_inst.IsNop()) {
+        // At `-O1` (`!RunsCse2()`), if `block` ends with `nop` (e.g. after
+        // `TrySinkCommonPredecessorDelaySlots` sank a shared delay slot into `succ_taken`) and
+        // `block` has `pre_term` before `term`, check whether `reorg.c:redundant_insn` deleted a
+        // redundant copy of `pre_term` from `succ_taken` (as in a chain `B2 -> B4 -> B6` where `B2`
+        // and `B6` both start with `andi $v0, $v1, 0xFF`).
+        if (!analyses->Flags().RunsCse2() && block.instructions.size() >= 3 && term.IsBranch() &&
+            !term.IsBranchLikely() && !term.IsUnconditionalBranch() &&
+            block.successors.size() == 2) {
+          uint32_t nop_taken = 0;
+          uint32_t nop_ft = 0;
+          for (const auto& edge : block.outgoing_edges) {
+            if (edge.type == EdgeType::kBranch) {
+              nop_taken = edge.to_block_id;
+            } else if (edge.type == EdgeType::kFallthrough) {
+              nop_ft = edge.to_block_id;
+            }
+          }
+          BasicBlock* mut_taken = cfg->GetMutableBlock(nop_taken);
+          const Instruction& pre_term = block.instructions[block.instructions.size() - 3];
+          if (mut_taken != nullptr && mut_taken->instructions.size() == 2 &&
+              mut_taken->Terminator() == &mut_taken->instructions[0] &&
+              mut_taken->instructions[0].IsBranch() &&
+              !mut_taken->instructions[0].IsUnconditionalBranch() &&
+              mut_taken->instructions[1].IsNop() &&
+              !SameDelayInstructionEffect(pre_term, mut_taken->instructions[0])) {
+            uint32_t taken2_id = 0;
+            for (const auto& edge : mut_taken->outgoing_edges) {
+              if (edge.type == EdgeType::kBranch) {
+                taken2_id = edge.to_block_id;
+                break;
+              }
+            }
+            const BasicBlock* taken2_blk = cfg->GetBlock(taken2_id);
+            if (taken2_blk != nullptr && !taken2_blk->instructions.empty() &&
+                SameDelayInstructionEffect(pre_term, taken2_blk->instructions.front())) {
+              Instruction restored = pre_term;
+              restored.vram = mut_taken->start_vram;
+              mut_taken->instructions.insert(mut_taken->instructions.begin(), restored);
+              changed = true;
+            }
+          }
+          // Also check if `block` is `lw R, off(base); bgtz/blez/bltz/bgez R, B_taken; nop` (where
+          // `nop` was just produced by unscheduling a delay slot) and `nop_ft` (`B_ft`)
+          // updates `R` and stores `sw R, off(base)`.
+          BasicBlock* mut_ft = cfg->GetMutableBlock(nop_ft);
+          for (BasicBlock* cand_succ : {mut_taken, mut_ft}) {
+            if (cand_succ != nullptr && cand_succ->predecessors.size() == 1 &&
+                cand_succ->predecessors[0] == block.id && pre_term.opcode == Opcode::kLw &&
+                pre_term.rt.has_value() && pre_term.rs.has_value() && term.rs == pre_term.rt &&
+                cand_succ->instructions.size() >= 2 &&
+                cand_succ->instructions[0].opcode != Opcode::kLw) {
+              const Instruction& t0 = cand_succ->instructions[0];
+              const Instruction& t1 = (cand_succ->instructions[1].opcode == Opcode::kJ &&
+                                       cand_succ->instructions.size() >= 3)
+                                          ? cand_succ->instructions[2]
+                                          : cand_succ->instructions[1];
+              const Register r = *pre_term.rt;
+              const bool t0_updates_r =
+                  ((t0.opcode == Opcode::kSubu || t0.opcode == Opcode::kAddu) && t0.rd == r &&
+                   (t0.rs == r || t0.rt == r)) ||
+                  (t0.opcode == Opcode::kAddiu && t0.rt == r && t0.rs == r);
+              const bool t1_stores_r_back = t1.opcode == Opcode::kSw && t1.rt == r &&
+                                            t1.rs == pre_term.rs &&
+                                            t1.immediate == pre_term.immediate;
+              if (t0_updates_r && t1_stores_r_back) {
+                Instruction restored = pre_term;
+                restored.vram = cand_succ->start_vram;
+                cand_succ->instructions.insert(cand_succ->instructions.begin(), restored);
+                changed = true;
+              }
+            }
+          }
+          // Also check if `block` started with `lw R, off(base)` (`R != $v0`), compared `R` against
+          // `$v0`, and `reorg.c:fill_slots_from_thread` deleted a redundant `lw R, off(base)` from
+          // `mut_taken` (after a fallthrough store to `base`) before stealing `mut_taken`'s next
+          // instruction into `block`'s delay slot (which `RelaxDelaySlotUnschedulerPass`
+          // unscheduled).
+          if (mut_taken != nullptr && !block.instructions.empty() &&
+              block.instructions[0].opcode == Opcode::kLw && block.instructions[0].rt.has_value() &&
+              block.instructions[0].rs.has_value() && *block.instructions[0].rt != Register::kV0 &&
+              mut_taken->instructions.size() >= 2 &&
+              mut_taken->instructions[0].opcode != Opcode::kLw) {
+            const Instruction* mt_term = mut_taken->Terminator();
+            if (mt_term != nullptr && mt_term->IsBranch() &&
+                (mt_term->rs == block.instructions[0].rt ||
+                 mt_term->rt == block.instructions[0].rt)) {
+              const Register base_reg = *block.instructions[0].rs;
+              bool ft_stores_to_base = false;
+              for (const auto& blk_chk : cfg->Blocks()) {
+                if (blk_chk.start_vram > block.start_vram &&
+                    blk_chk.start_vram < mut_taken->start_vram) {
+                  for (const auto& mi : blk_chk.instructions) {
+                    if (mi.IsStore() && mi.rs == base_reg) {
+                      ft_stores_to_base = true;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (ft_stores_to_base) {
+                Instruction restored_load = block.instructions[0];
+                restored_load.vram = mut_taken->start_vram;
+                mut_taken->instructions.insert(mut_taken->instructions.begin(), restored_load);
+                changed = true;
+              }
+            }
+          }
+        }
         continue;
       }
 
@@ -2689,7 +2995,10 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         continue;
       }
 
-      if (!IsValidDelaySlotCandidate(delay_inst)) {
+      if (!IsValidDelaySlotCandidate(delay_inst) ||
+          (delay_inst.IsLoad() &&
+           (analyses->Flags().GasOptimizesAndReordersInsns() ||
+            (block.id == cfg->EntryBlockId() && delay_inst.rs == Register::kSp)))) {
         continue;
       }
 
@@ -2756,6 +3065,41 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           }
         }
       }
+      if (!dead_on_taken && !dead_on_fallthrough &&
+          (term.opcode == Opcode::kBc1t || term.opcode == Opcode::kBc1f) &&
+          delay_inst.opcode == Opcode::kAddiu && delay_inst.rs == Register::kZero &&
+          delay_inst.immediate == 1 && delay_inst.rt.has_value()) {
+        BasicBlock* ft_blk = cfg->GetMutableBlock(succ_fallthrough);
+        BasicBlock* tk_blk = cfg->GetMutableBlock(succ_taken);
+        const size_t t_idx = block.instructions.size() - 2;
+        if (ft_blk != nullptr && tk_blk != nullptr &&
+            (ft_blk->instructions.size() == 2 ||
+             (ft_blk->instructions.size() == 3 && ft_blk->instructions[2].IsNop())) &&
+            ft_blk->successors.size() == 1 && ft_blk->successors[0] == succ_taken &&
+            ft_blk->instructions[0].opcode == Opcode::kAddu &&
+            ft_blk->instructions[0].rd == delay_inst.rt &&
+            ft_blk->instructions[0].rs == Register::kZero &&
+            ft_blk->instructions[0].rt == Register::kZero &&
+            std::any_of(block.instructions.begin(),
+                        block.instructions.begin() + static_cast<std::ptrdiff_t>(t_idx),
+                        [&](const Instruction& pre_inst) {
+                          return SameDelayInstructionEffect(pre_inst, ft_blk->instructions[1]);
+                        })) {
+          tk_blk->instructions.insert(tk_blk->instructions.begin(),
+                                      ft_blk->instructions.begin() + 1, ft_blk->instructions.end());
+          tk_blk->start_vram = tk_blk->instructions.front().vram;
+          ft_blk->instructions.erase(ft_blk->instructions.begin() + 1, ft_blk->instructions.end());
+          ft_blk->end_vram = ft_blk->instructions.back().vram;
+          block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+          const size_t ins_pos = FindSameBlockDelaySlotInsertionIndex(
+              block, t_idx, term, delay_inst, analyses->Flags().RunsSched2());
+          block.instructions.insert(
+              block.instructions.begin() + static_cast<std::ptrdiff_t>(ins_pos), delay_inst);
+          cfg->RebuildVramIndex();
+          changed = true;
+          continue;
+        }
+      }
       if (dead_on_taken == dead_on_fallthrough) {
         continue;
       }
@@ -2769,6 +3113,39 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
       }
 
       const size_t term_idx = block.instructions.size() - 2;
+      if (!dead_on_taken && dead_on_fallthrough &&
+          (term.opcode == Opcode::kBc1t || term.opcode == Opcode::kBc1f) &&
+          delay_inst.opcode == Opcode::kAddiu && delay_inst.rs == Register::kZero &&
+          delay_inst.immediate == 1 && delay_inst.rt.has_value() && ft_block != nullptr &&
+          taken_block != nullptr &&
+          (ft_block->instructions.size() == 2 ||
+           (ft_block->instructions.size() == 3 && ft_block->instructions[2].IsNop())) &&
+          ft_block->successors.size() == 1 && ft_block->successors[0] == succ_taken &&
+          ft_block->instructions[0].opcode == Opcode::kAddu &&
+          ft_block->instructions[0].rd == delay_inst.rt &&
+          ft_block->instructions[0].rs == Register::kZero &&
+          ft_block->instructions[0].rt == Register::kZero &&
+          std::any_of(block.instructions.begin(),
+                      block.instructions.begin() + static_cast<std::ptrdiff_t>(term_idx),
+                      [&](const Instruction& pre_inst) {
+                        return SameDelayInstructionEffect(pre_inst, ft_block->instructions[1]);
+                      })) {
+        taken_block->instructions.insert(taken_block->instructions.begin(),
+                                         ft_block->instructions.begin() + 1,
+                                         ft_block->instructions.end());
+        taken_block->start_vram = taken_block->instructions.front().vram;
+        ft_block->instructions.erase(ft_block->instructions.begin() + 1,
+                                     ft_block->instructions.end());
+        ft_block->end_vram = ft_block->instructions.back().vram;
+        block.instructions.back() = MakeNopInstruction(delay_inst.vram);
+        const size_t ins_pos = FindSameBlockDelaySlotInsertionIndex(
+            block, term_idx, term, delay_inst, analyses->Flags().RunsSched2());
+        block.instructions.insert(block.instructions.begin() + static_cast<std::ptrdiff_t>(ins_pos),
+                                  delay_inst);
+        cfg->RebuildVramIndex();
+        changed = true;
+        continue;
+      }
       const bool is_fpu_store_flag_diamond =
           !dead_on_taken && dead_on_fallthrough &&
           (term.opcode == Opcode::kBc1t || term.opcode == Opcode::kBc1f) &&
@@ -2784,9 +3161,28 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         continue;
       }
 
+      std::optional<size_t> pre_term_non_nop_idx;
+      for (size_t i = term_idx; i > 0; --i) {
+        if (!block.instructions[i - 1].IsNop()) {
+          pre_term_non_nop_idx = i - 1;
+          break;
+        }
+      }
       const bool is_fixuns_trunc_branch =
           !dead_on_taken && dead_on_fallthrough && delay_inst.opcode == Opcode::kSubS &&
           !target_blk->instructions.empty() && target_blk->instructions[0].opcode == Opcode::kCvtWS;
+      const bool is_pre_term_mtc1_feeding_fp_delay =
+          !analyses->Flags().RunsSched2() && dead_on_taken && !dead_on_fallthrough &&
+          pre_term_non_nop_idx.has_value() &&
+          (block.instructions[*pre_term_non_nop_idx].opcode == Opcode::kMtc1 ||
+           block.instructions[*pre_term_non_nop_idx].opcode == Opcode::kDmtc1) &&
+          block.instructions[*pre_term_non_nop_idx].fs.has_value() &&
+          !IsFpuCompareOpcode(delay_inst.opcode) &&
+          std::find(delay_ud.fpr_uses.begin(), delay_ud.fpr_uses.end(),
+                    *block.instructions[*pre_term_non_nop_idx].fs) != delay_ud.fpr_uses.end();
+      if (is_pre_term_mtc1_feeding_fp_delay) {
+        continue;
+      }
       const bool is_zero_init_non_ret =
           delay_inst.opcode == Opcode::kAddu && delay_inst.rs == Register::kZero &&
           delay_inst.rt == Register::kZero && delay_inst.rd.has_value() &&
@@ -2847,6 +3243,42 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
           }
         }
       }
+      bool is_o1_post_load_copy_in_block = false;
+      if (all_pre_branch_ineligible && term_idx >= 1) {
+        const Instruction& pre_term = block.instructions[term_idx - 1];
+        const RegisterUseDef pre_ud = GetInstructionUseDef(pre_term);
+        const RegisterUseDef term_ud = GetInstructionUseDef(term);
+        bool pre_feeds_delay_not_term = false;
+        for (Register d : pre_ud.gpr_defs) {
+          if (std::find(delay_ud.gpr_uses.begin(), delay_ud.gpr_uses.end(), d) !=
+                  delay_ud.gpr_uses.end() &&
+              std::find(term_ud.gpr_uses.begin(), term_ud.gpr_uses.end(), d) ==
+                  term_ud.gpr_uses.end()) {
+            pre_feeds_delay_not_term = true;
+          }
+        }
+        for (FpRegister fd : pre_ud.fpr_defs) {
+          if (std::find(delay_ud.fpr_uses.begin(), delay_ud.fpr_uses.end(), fd) !=
+                  delay_ud.fpr_uses.end() &&
+              !IsFpuCompareOpcode(pre_term.opcode)) {
+            pre_feeds_delay_not_term = true;
+          }
+        }
+        const bool is_post_inc_after_copy =
+            pre_term.opcode == Opcode::kAddu && pre_term.rt == Register::kZero &&
+            pre_term.rd.has_value() && pre_term.rs.has_value() &&
+            (term.rs == pre_term.rd || term.rt == pre_term.rd) &&
+            delay_inst.opcode == Opcode::kAddiu && delay_inst.rs == pre_term.rs &&
+            delay_inst.rt == pre_term.rs;
+        is_o1_post_load_copy_in_block =
+            !analyses->Flags().RunsSched2() && pre_term.IsLoad() && pre_term.rt.has_value() &&
+            (term.rs == pre_term.rt || term.rt == pre_term.rt) &&
+            delay_inst.opcode == Opcode::kAddu && delay_inst.rt == Register::kZero &&
+            delay_inst.rs == pre_term.rt;
+        if (pre_feeds_delay_not_term || is_post_inc_after_copy || is_o1_post_load_copy_in_block) {
+          all_pre_branch_ineligible = false;
+        }
+      }
       if (all_pre_branch_ineligible && dead_on_taken && !dead_on_fallthrough) {
         if (block.id == cfg->EntryBlockId() && delay_inst.opcode == Opcode::kAddu &&
             delay_inst.rt == Register::kZero && delay_inst.rd.has_value() &&
@@ -2881,20 +3313,58 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         }
       }
 
+      const bool suppress_feeds_succ_branch =
+          is_o1_post_load_copy_in_block ||
+          (!all_pre_branch_ineligible && delay_ud.gpr_uses.empty() && delay_ud.fpr_uses.empty());
       const bool has_thread_steal_conflict =
           all_pre_branch_ineligible || DelaySlotConflictsWithTerminator(term, delay_inst) ||
           DelaySlotHasPreBranchDependenceConflict(block, term, delay_inst) ||
-          DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst);
+          (!suppress_feeds_succ_branch && DelaySlotFeedsSuccessorBranch(*target_blk, delay_inst));
 
       if ((target_blk->predecessors.size() == 1 && target_blk->predecessors[0] == block.id) ||
           is_chained_ft_to_same_taken) {
         if (has_thread_steal_conflict) {
           std::optional<Register> clobber_reg = compute_unscheduled_clobber_reg(delay_ud);
           const size_t insert_idx =
-              find_thread_sunk_insertion_index(*target_blk, term, delay_inst, !dead_on_taken);
+              analyses->Flags().RunsSched2()
+                  ? find_thread_sunk_insertion_index(*target_blk, term, delay_inst, !dead_on_taken)
+                  : 0;
           target_blk->instructions.insert(
               target_blk->instructions.begin() + static_cast<std::ptrdiff_t>(insert_idx),
               delay_inst);
+          // At `-O1` (`!RunsCse2()`), if `block` started with `lw R, off(base)` (`R != $v0`),
+          // compared `R` against `$v0`, and `reorg.c:fill_slots_from_thread` deleted a redundant
+          // `lw R, off(base)` from `target_blk` (after a fallthrough store to `base`) before
+          // stealing `delay_inst` (`addiu $v0, $zero, C2`), restore `lw R, off(base)` at the
+          // start of `target_blk`.
+          if (!analyses->Flags().RunsCse2() && !dead_on_taken && dead_on_fallthrough &&
+              insert_idx == 0 && !block.instructions.empty() &&
+              block.instructions[0].opcode == Opcode::kLw && block.instructions[0].rt.has_value() &&
+              block.instructions[0].rs.has_value() && *block.instructions[0].rt != Register::kV0 &&
+              delay_inst.opcode == Opcode::kAddiu && delay_inst.rt == Register::kV0 &&
+              delay_inst.rs == Register::kZero && target_blk->instructions.size() >= 2 &&
+              target_blk->instructions[1].IsBranch() &&
+              (target_blk->instructions[1].rs == block.instructions[0].rt ||
+               target_blk->instructions[1].rt == block.instructions[0].rt)) {
+            const Register base_reg = *block.instructions[0].rs;
+            bool ft_stores_to_base = false;
+            for (const auto& blk_chk : cfg->Blocks()) {
+              if (blk_chk.start_vram > block.start_vram &&
+                  blk_chk.start_vram < target_blk->start_vram) {
+                for (const auto& mi : blk_chk.instructions) {
+                  if (mi.IsStore() && mi.rs == base_reg) {
+                    ft_stores_to_base = true;
+                    break;
+                  }
+                }
+              }
+            }
+            if (ft_stores_to_base) {
+              Instruction restored_load = block.instructions[0];
+              restored_load.vram = target_blk->start_vram;
+              target_blk->instructions.insert(target_blk->instructions.begin(), restored_load);
+            }
+          }
           block.instructions.back() = MakeNopInstruction(delay_inst.vram, clobber_reg);
           changed = true;
           continue;
@@ -3141,7 +3611,10 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         }
         if (ft_block->predecessors.size() == 1 && ft_block->predecessors[0] == block_id &&
             taken_block->start_vram > ft_block->start_vram &&
-            post_dom_tree.Dominates(succ_taken, succ_fallthrough)) {
+            (post_dom_tree.Dominates(succ_taken, succ_fallthrough) ||
+             (ft_pred_of_taken_id.has_value() && *ft_pred_of_taken_id != succ_fallthrough &&
+              block.instructions.size() == 2 &&
+              dom_tree.Dominates(succ_fallthrough, *ft_pred_of_taken_id)))) {
           const auto inverted_op = InvertNonLikelyBranchOpcode(term.opcode);
           if (inverted_op.has_value()) {
             if (InvertBranchOverJumpBlock(cfg, block_id, *inverted_op, delay_inst, succ_taken,
@@ -3837,6 +4310,10 @@ void CfgDeReorg::UnscheduleDelaySlotsOnly(ControlFlowGraph* cfg, CfgAnalysisMana
   if (cfg == nullptr || cfg->Blocks().empty()) {
     return;
   }
+  if (analyses != nullptr && !analyses->Flags().RunsDbrSchedule() &&
+      !analyses->Flags().GasOptimizesAndReordersInsns()) {
+    return;
+  }
   CfgPassPipeline pipeline = BuildStage1Pipeline();
   pipeline.Run(cfg, analyses);
   if (cfg->CoalesceContiguousBlocks() && analyses != nullptr) {
@@ -3846,6 +4323,10 @@ void CfgDeReorg::UnscheduleDelaySlotsOnly(ControlFlowGraph* cfg, CfgAnalysisMana
 
 void CfgDeReorg::UnscheduleDelaySlots(ControlFlowGraph* cfg, CfgAnalysisManager* analyses) {
   if (cfg == nullptr || cfg->Blocks().empty()) {
+    return;
+  }
+  if (analyses != nullptr && !analyses->Flags().RunsDbrSchedule() &&
+      !analyses->Flags().GasOptimizesAndReordersInsns()) {
     return;
   }
   CfgPassPipeline pipeline = BuildDefaultPipeline();

@@ -6,6 +6,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "core/compiler_flags.h"
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
 #include "lifter/dominator_tree.h"
@@ -74,8 +75,12 @@ class CfgAnalysisManager {
   bool HasCachedLoopInfo() const { return loop_info_.has_value(); }
   bool HasCachedLivenessInfo() const { return liveness_info_.has_value(); }
 
+  const ParsedCompilerFlags& Flags() const { return flags_; }
+  void SetFlags(ParsedCompilerFlags flags) { flags_ = std::move(flags); }
+
  private:
   const ControlFlowGraph* cfg_ = nullptr;
+  ParsedCompilerFlags flags_ = ParsedCompilerFlags::DefaultO2WaG();
   std::optional<DominatorTree> dom_tree_;
   std::optional<DominatorTree> post_dom_tree_;
   std::optional<LoopInfo> loop_info_;

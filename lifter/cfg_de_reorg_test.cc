@@ -1188,5 +1188,121 @@ TEST(CfgDeReorgTest,
   EXPECT_EQ(arm1_blk->instructions[1].rt, Register::kV1);
 }
 
+TEST(CfgDeReorgTest, EagerThreadDelaySlotUnschedulerRestoresDecisionTreeSwitchStoreCaseArms) {
+  // Models GCC 2.7.2 `reorg.c` on a 3-case decision-tree switch where two leaf case nodes use
+  // `beql` with a store in the delay slot targeting the return block (`0x40`), each followed by a
+  // default jump `j 0x40; nop`, while the third case arm (`0x38`) falls through to `0x40`.
+  std::vector<uint32_t> words = {
+      0x24020002,  // 0x00 (B0): addiu $v0, $zero, 2
+      0x10A2000B,  // 0x04:      beq   $a1, $v0, +11 -> 0x38 (B6)
+      0x00000000,  // 0x08:      nop
+      0x28A20003,  // 0x0C (B1): slti  $v0, $a1, 3
+      0x10400005,  // 0x10:      beq   $v0, $zero, +5 -> 0x28 (B4)
+      0x00000000,  // 0x14:      nop
+      0x24020001,  // 0x18 (B2): addiu $v0, $zero, 1
+      0x50A20008,  // 0x1C:      beql  $a1, $v0, +8 -> 0x40 (B7)
+      0xAC860000,  // 0x20:      sw    $a2, 0($a0)
+      0x08000010,  // 0x24 (B3): j     0x80000040 (B7)
+      0x00000000,  // 0x28:      nop
+      0x24020004,  // 0x2C (B4): addiu $v0, $zero, 4
+      0x50A20003,  // 0x30:      beql  $a1, $v0, +3 -> 0x40 (B7)
+      0xAC800000,  // 0x34:      sw    $zero, 0($a0)
+      0x08000010,  // 0x38 (B5): j     0x80000040 (B7)
+      0x00000000,  // 0x3C:      nop
+      0x24C20001,  // 0x40 (B6): addiu $v0, $a2, 1
+      0xAC820000,  // 0x44:      sw    $v0, 0($a0)
+      0x03E00008,  // 0x48 (B7): jr    $ra
+      0x00000000,  // 0x4C:      nop
+  };
+  // Fix branch offsets for 0x00..0x4C layout:
+  words[1] = 0x10A2000E;   // 0x04 -> 0x40 (B6)
+  words[4] = 0x10400006;   // 0x10 -> 0x2C (B4)
+  words[7] = 0x50A2000A;   // 0x1C -> 0x48 (B7)
+  words[9] = 0x08000012;   // 0x24 -> 0x48 (B7)
+  words[12] = 0x50A20005;  // 0x30 -> 0x48 (B7)
+  words[14] = 0x08000012;  // 0x38 -> 0x48 (B7)
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+
+  CfgDeReorg::UnscheduleDelaySlotsOnly(&cfg);
+
+  EXPECT_EQ(cfg.ReversePostOrder().size(), 10u);
+  const BasicBlock* case1_node = cfg.FindBlockByVram(0x80000018);
+  const BasicBlock* case4_node = cfg.FindBlockByVram(0x8000002C);
+  ASSERT_NE(case1_node, nullptr);
+  ASSERT_NE(case4_node, nullptr);
+  EXPECT_EQ(case1_node->instructions[1].opcode, Opcode::kBeq);
+  EXPECT_EQ(case4_node->instructions[1].opcode, Opcode::kBeq);
+}
+
+TEST(CfgDeReorgTest, SimpleDelaySlotUnschedulerSinksO1CallDelaySlotIncrementAfterReturnValueStore) {
+  // Models `-O1` (`!RunsSched2()`) where `reorg.c:fill_slots_from_thread` stole `addiu $s2, $s2, 1`
+  // from after `jal` + `sw $v0, 12($s0)` into `jal`'s delay slot.
+  std::vector<uint32_t> words = {
+      0x8E040004,  // 0x00 (B0): lw    $a0, 4($s0)
+      0x0C004000,  // 0x04:      jal   0x80010000
+      0x26520001,  // 0x08:      addiu $s2, $s2, 1
+      0xAE02000C,  // 0x0C (B1): sw    $v0, 12($s0)
+      0x03E00008,  // 0x10:      jr    $ra
+      0x00000000,  // 0x14:      nop
+  };
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+  CfgAnalysisManager analyses(&cfg);
+  analyses.SetFlags(ParsedCompilerFlags::Parse("-O1 -Wa,-G0"));
+
+  CfgDeReorg::UnscheduleDelaySlotsOnly(&cfg, &analyses);
+
+  const BasicBlock* call_blk = cfg.FindBlockByVram(0x80000000);
+  const BasicBlock* post_call_blk = cfg.FindBlockByVram(0x8000000C);
+  ASSERT_NE(call_blk, nullptr);
+  ASSERT_NE(post_call_blk, nullptr);
+  EXPECT_TRUE(call_blk->instructions.back().IsNop());
+  ASSERT_GE(post_call_blk->instructions.size(), 2u);
+  EXPECT_EQ(post_call_blk->instructions[0].opcode, Opcode::kSw);
+  EXPECT_EQ(post_call_blk->instructions[1].opcode, Opcode::kAddiu);
+  EXPECT_EQ(post_call_blk->instructions[1].rt, Register::kS2);
+}
+
+TEST(CfgDeReorgTest, UnschedulesGasStackParameterLoadInBranchDelaySlotIntoSameBlock) {
+  // Models `-O2 -Wa,-O2` (`GasOptimizesAndReordersInsns()`) where KMC GAS schedules the preceding
+  // stack parameter load `lw $t0, 16($sp)` into the unfilled delay slot of the entry loop-guard
+  // branch `blez $a2, exit`.
+  std::vector<uint32_t> words = {
+      0x18C00004,  // 0x00 (B0): blez  $a2, +4 -> 0x14 (B2)
+      0x8FA80010,  // 0x04:      lw    $t0, 16($sp)
+      0xAC880000,  // 0x08 (B1): sw    $t0, 0($a0)
+      0x24C6FFFF,  // 0x0C:      addiu $a2, $a2, -1
+      0x1CC0FFFD,  // 0x10:      bgtz  $a2, -3 -> 0x08 (B1)
+      0x24840004,  // 0x14:      addiu $a0, $a0, 4
+      0x03E00008,  // 0x18 (B2): jr    $ra
+      0x00000000,  // 0x1C:      nop
+  };
+  words[0] = 0x18C00005;  // 0x00 -> 0x18 (B2)
+
+  auto insts = *DecodeSequence(words, 0x80000000);
+  auto cfg_or = ControlFlowGraph::Build(insts);
+  ASSERT_TRUE(cfg_or.ok());
+  ControlFlowGraph cfg = *cfg_or;
+  CfgAnalysisManager analyses(&cfg);
+  analyses.SetFlags(ParsedCompilerFlags::Parse("-O2 -mips2 -mcpu=r4000 -Wa,-O2"));
+
+  CfgDeReorg::UnscheduleDelaySlotsOnly(&cfg, &analyses);
+
+  const BasicBlock* entry_blk = cfg.FindBlockByVram(0x80000000);
+  ASSERT_NE(entry_blk, nullptr);
+  ASSERT_EQ(entry_blk->instructions.size(), 3u);
+  EXPECT_EQ(entry_blk->instructions[0].opcode, Opcode::kLw);
+  EXPECT_EQ(entry_blk->instructions[0].rt, Register::kT0);
+  EXPECT_EQ(entry_blk->instructions[1].opcode, Opcode::kBlez);
+  EXPECT_TRUE(entry_blk->instructions[2].IsNop());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

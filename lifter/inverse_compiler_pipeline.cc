@@ -84,10 +84,14 @@ absl::Status InverseDbrDelaySlotStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasCfg()) {
     return absl::FailedPreconditionError("InverseDbrDelaySlotStage: CFG not initialized.");
   }
+  if (!context->Flags().RunsDbrSchedule() && !context->Flags().GasOptimizesAndReordersInsns()) {
+    return absl::OkStatus();
+  }
   // Produce the canonical `.jump2` RtlCfg with all delay slots unscheduled (`BuildStage1Pipeline`)
   // and contiguous fallthrough blocks coalesced.
   ControlFlowGraph stage1_cfg = context->Cfg();
   CfgAnalysisManager stage1_analyses(&stage1_cfg);
+  stage1_analyses.SetFlags(context->Flags());
   CfgDeReorg::UnscheduleDelaySlotsOnly(&stage1_cfg, &stage1_analyses);
 
   CfgPassPipeline pre_cross_jump_pipeline;
@@ -118,6 +122,7 @@ absl::Status InverseJump2CrossJumpStage::Run(DecompilationContext* context) {
 
   ControlFlowGraph stage2_cfg = context->Cfg();
   CfgAnalysisManager stage2_analyses(&stage2_cfg);
+  stage2_analyses.SetFlags(context->Flags());
   CfgDeReorg::UnscheduleDelaySlotsOnly(&stage2_cfg, &stage2_analyses);
   context->SetRtlCfg(InverseJump2CrossJumpLifter::LiftToSched2RtlCfg(
       stage2_cfg, &context->FrameLayout().RawAnalysis()));

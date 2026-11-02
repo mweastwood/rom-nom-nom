@@ -646,6 +646,21 @@ bool TryFormatDbrSimpleFusedIdiom(int32_t min_local_sp_lea, int32_t min_saved_sp
                           FormatDbrMemAddr(*m0.rs, m0.immediate));
       return true;
     }
+    if (rinsn->machine_instructions.size() == 2 && m0.opcode == Opcode::kSw && m0.rt.has_value() &&
+        m0.rs.has_value()) {
+      const std::string_view mflags = sp_or_struct_mflags(*m0.rs, m0.immediate);
+      if (*m0.rt == Register::kZero) {
+        rinsn->canonical_pattern =
+            absl::StrFormat("(set (mem%s:DF %s) (const_double:DF (cc0) 0 0))", mflags,
+                            FormatDbrMemAddr(*m0.rs, m0.immediate));
+      } else {
+        const Register g_even = static_cast<Register>(static_cast<int>(*m0.rt) & ~1);
+        rinsn->canonical_pattern =
+            absl::StrFormat("(set (mem%s:DF %s) %s)", mflags,
+                            FormatDbrMemAddr(*m0.rs, m0.immediate), FormatDbrGprExpr(g_even, "DF"));
+      }
+      return true;
+    }
   }
   if (rinsn->idiom_kind == RtlFusedIdiomKind::kSplitLargeIntHiLo &&
       rinsn->machine_instructions.size() == 2) {
@@ -904,7 +919,8 @@ void FormatDbrCallOpcode(const RtlBasicBlock& blk, size_t i, const Instruction& 
   }
 }
 
-void FormatDbrDivisionWithTrap(Register* q_reg_out, Register* r_reg_out, RtlInsn* rinsn) {
+void FormatDbrDivisionWithTrap(const ParsedCompilerFlags* compiler_flags, Register* q_reg_out,
+                               Register* r_reg_out, RtlInsn* rinsn) {
   const Instruction& m_div = rinsn->machine_instructions[0];
   Register q_reg = Register::kV0;
   Register r_reg = Register::kV1;
@@ -930,6 +946,24 @@ void FormatDbrDivisionWithTrap(Register* q_reg_out, Register* r_reg_out, RtlInsn
   *r_reg_out = r_reg;
   const std::string_view div_op = (m_div.opcode == Opcode::kDiv) ? "div" : "udiv";
   const std::string_view mod_op = (m_div.opcode == Opcode::kDiv) ? "mod" : "umod";
+  if (compiler_flags != nullptr && !compiler_flags->RunsOptimizerPasses()) {
+    if (has_mflo && !has_mfhi) {
+      rinsn->canonical_pattern = absl::StrFormat(
+          "(parallel[ (set %s (%s:SI %s %s)) (clobber (reg:SI 65 lo)) (clobber "
+          "(reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] )",
+          FormatDbrGprExpr(q_reg), div_op, FormatDbrGprExpr(*m_div.rs),
+          FormatDbrGprExpr(*m_div.rt));
+      return;
+    }
+    if (has_mfhi && !has_mflo) {
+      rinsn->canonical_pattern = absl::StrFormat(
+          "(parallel[ (set %s (%s:SI %s %s)) (clobber (reg:SI 65 lo)) (clobber "
+          "(reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] )",
+          FormatDbrGprExpr(r_reg), mod_op, FormatDbrGprExpr(*m_div.rs),
+          FormatDbrGprExpr(*m_div.rt));
+      return;
+    }
+  }
   rinsn->canonical_pattern = absl::StrFormat(
       "(parallel[ (set %s (%s:SI %s %s)) (set %s (%s:SI %s %s)) (clobber (reg:SI 65 lo)) "
       "(clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] )",
@@ -1180,6 +1214,21 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
     id_to_rpo[rpo[idx]] = idx;
   }
 
+  absl::flat_hash_set<std::pair<Register, int16_t>> df_stack_slots;
+  absl::flat_hash_set<std::pair<Register, int16_t>> sf_stack_slots;
+  for (uint32_t bid : rpo) {
+    const BasicBlock* blk = cfg.GetBlock(bid);
+    if (blk == nullptr) continue;
+    for (const auto& mi : blk->instructions) {
+      if (prologue_vrams.contains(mi.vram) || !mi.rs.has_value()) continue;
+      if (mi.opcode == Opcode::kLdc1 || mi.opcode == Opcode::kSdc1) {
+        df_stack_slots.insert({*mi.rs, mi.immediate});
+      } else if (mi.opcode == Opcode::kLwc1 || mi.opcode == Opcode::kSwc1) {
+        sf_stack_slots.insert({*mi.rs, mi.immediate});
+      }
+    }
+  }
+
   result.rpo_blocks.reserve(rpo.size());
   for (uint32_t bid : rpo) {
     const BasicBlock* blk = cfg.GetBlock(bid);
@@ -1302,7 +1351,8 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
 
     bool block_has_ldc1_or_sdc1 = false;
     for (const auto& mi : insts) {
-      if (mi.opcode == Opcode::kLdc1 || mi.opcode == Opcode::kSdc1) {
+      if (!prologue_vrams.contains(mi.vram) &&
+          (mi.opcode == Opcode::kLdc1 || mi.opcode == Opcode::kSdc1)) {
         block_has_ldc1_or_sdc1 = true;
         break;
       }
@@ -1371,13 +1421,29 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
           continue;
         }
       }
-      // At `-O1` (`!SplitsMultiInsnMovesBeforeDbr`), `mips_move_2words` `DFmode` memory-to-GPR-pair
-      // loads (`lw $a2, off(base); lw $a3, off+4(base)`) are not split by `sched.c`.
+      // At `-O1` / `-O0` (`!SplitsMultiInsnMovesBeforeDbr`), `mips_move_2words` `DFmode`
+      // memory-to-GPR-pair loads (`lw $a2, off(base); lw $a3, off+4(base)`) and GPR-pair/zero
+      // stores (`sw $a2, off(base); sw $a3, off+4(base)`) are not split by `sched.c`.
       if (compiler_flags != nullptr && !compiler_flags->SplitsMultiInsnMovesBeforeDbr() &&
-          block_has_ldc1_or_sdc1 && inst.opcode == Opcode::kLw && idx + 1 < insts.size() &&
+          inst.opcode == Opcode::kLw && idx + 1 < insts.size() &&
           insts[idx + 1].opcode == Opcode::kLw && inst.rt == Register::kA2 &&
           insts[idx + 1].rt == Register::kA3 && inst.rs.has_value() &&
-          inst.rs == insts[idx + 1].rs && insts[idx + 1].immediate == inst.immediate + 4) {
+          inst.rs == insts[idx + 1].rs && insts[idx + 1].immediate == inst.immediate + 4 &&
+          (block_has_ldc1_or_sdc1 || df_stack_slots.contains({*inst.rs, inst.immediate})) &&
+          !sf_stack_slots.contains({*inst.rs, inst.immediate})) {
+        out_blk.AddInsn(MakeRtlInsn(inst, RtlFusedIdiomKind::kMove2Words, {inst, insts[idx + 1]},
+                                    prologue_vrams));
+        ++idx;
+        continue;
+      }
+      if (compiler_flags != nullptr && !compiler_flags->SplitsMultiInsnMovesBeforeDbr() &&
+          inst.opcode == Opcode::kSw && idx + 1 < insts.size() &&
+          insts[idx + 1].opcode == Opcode::kSw && inst.rs.has_value() &&
+          inst.rs == insts[idx + 1].rs && insts[idx + 1].immediate == inst.immediate + 4 &&
+          (block_has_ldc1_or_sdc1 || df_stack_slots.contains({*inst.rs, inst.immediate})) &&
+          !sf_stack_slots.contains({*inst.rs, inst.immediate}) &&
+          ((inst.rt == Register::kA2 && insts[idx + 1].rt == Register::kA3) ||
+           (inst.rt == Register::kZero && insts[idx + 1].rt == Register::kZero))) {
         out_blk.AddInsn(MakeRtlInsn(inst, RtlFusedIdiomKind::kMove2Words, {inst, insts[idx + 1]},
                                     prologue_vrams));
         ++idx;
@@ -1592,6 +1658,45 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToRtlCfg(
   if (result.rpo_blocks.empty()) {
     result.rpo_blocks.push_back(RtlBasicBlock{});
   }
+  // At `-O0` (`!RunsDbrSchedule`), a label followed only by `nop` (`(const_int 0)`) before the
+  // next label forms an empty non-exit machine block (`rtl_insns.empty()` with 1 successor),
+  // whereas GCC's RTL CFG merges consecutive labels separated only by `(const_int 0)`.
+  if (compiler_flags != nullptr && !compiler_flags->RunsDbrSchedule()) {
+    bool collapsed_empty = true;
+    while (collapsed_empty) {
+      collapsed_empty = false;
+      for (size_t b = 1; b < result.rpo_blocks.size(); ++b) {
+        if (result.rpo_blocks[b].rtl_insns.empty() && result.rpo_blocks[b].successors.size() == 1 &&
+            result.rpo_blocks[b].successors[0] != b) {
+          const size_t target = result.rpo_blocks[b].successors[0];
+          for (size_t p = 0; p < result.rpo_blocks.size(); ++p) {
+            if (p == b) continue;
+            auto& succs = result.rpo_blocks[p].successors;
+            for (size_t& s : succs) {
+              if (s == b) s = target;
+            }
+            for (size_t i = 0; i < succs.size(); ++i) {
+              for (size_t j = i + 1; j < succs.size();) {
+                if (succs[j] == succs[i]) {
+                  succs.erase(succs.begin() + static_cast<ptrdiff_t>(j));
+                } else {
+                  ++j;
+                }
+              }
+            }
+          }
+          result.rpo_blocks.erase(result.rpo_blocks.begin() + static_cast<ptrdiff_t>(b));
+          for (auto& blk : result.rpo_blocks) {
+            for (size_t& s : blk.successors) {
+              if (s > b) --s;
+            }
+          }
+          collapsed_empty = true;
+          break;
+        }
+      }
+    }
+  }
   // Populate `predecessors` on each RPO block from `successors`.
   for (size_t b = 0; b < result.rpo_blocks.size(); ++b) {
     for (size_t s : result.rpo_blocks[b].successors) {
@@ -1789,19 +1894,27 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToDbrRtlCfg(
             (rinsn.idiom_kind == RtlFusedIdiomKind::kFixTruncSfSi2) ? "SF" : "DF";
         std::string dst_expr;
         Register scratch_gpr = Register::kV0;
+        FpRegister src_fpr = *m0.fs;
         FpRegister clobber_fpr = *m0.fd;
         for (const auto& mi : rinsn.machine_instructions) {
           if (mi.opcode == Opcode::kCvtWS || mi.opcode == Opcode::kCvtWD) {
+            src_fpr = *mi.fs;
             clobber_fpr = *mi.fd;
           }
         }
         if (m_last.opcode == Opcode::kMfc1 && m_last.rt.has_value()) {
           sf_gpr_regs.erase(*m_last.rt);
           dst_expr = gpr_expr(*m_last.rt);
-          if (*m_last.rt == Register::kV0 || IsGprLiveAcrossInsnInBlock(blk, i, Register::kV0)) {
+          if (m0.opcode == Opcode::kCfc1 && m0.rt.has_value()) {
+            scratch_gpr = *m0.rt;
+          } else if (*m_last.rt == Register::kV0 ||
+                     IsGprLiveAcrossInsnInBlock(blk, i, Register::kV0)) {
             scratch_gpr = Register::kV1;
           }
         } else if (m_last.opcode == Opcode::kSwc1) {
+          if (m0.opcode == Opcode::kCfc1 && m0.rt.has_value()) {
+            scratch_gpr = *m0.rt;
+          }
           if (rinsn.machine_instructions.size() == 3 &&
               rinsn.machine_instructions[1].opcode == Opcode::kLui) {
             const uint32_t sym_addr = (static_cast<uint32_t>(static_cast<uint16_t>(
@@ -1817,7 +1930,7 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToDbrRtlCfg(
         }
         rinsn.canonical_pattern = absl::StrFormat(
             "(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )", dst_expr,
-            fpr_expr(*m0.fs, fmode), gpr_expr(scratch_gpr), fpr_expr(clobber_fpr, fmode));
+            fpr_expr(src_fpr, fmode), gpr_expr(scratch_gpr), fpr_expr(clobber_fpr, fmode));
         continue;
       }
 
@@ -2119,7 +2232,7 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToDbrRtlCfg(
           !rinsn.machine_instructions.empty()) {
         Register q_reg = Register::kV0;
         Register r_reg = Register::kV1;
-        FormatDbrDivisionWithTrap(&q_reg, &r_reg, &rinsn);
+        FormatDbrDivisionWithTrap(compiler_flags, &q_reg, &r_reg, &rinsn);
         set_gpr_mode(q_reg, "SI");
         set_gpr_mode(r_reg, "SI");
         continue;
@@ -2634,9 +2747,9 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToDbrRtlCfg(
                                                       format_mem_addr(*inst.rs, inst.immediate),
                                                       gpr_expr(*inst.rt, "SF"));
           } else {
-            rinsn.canonical_pattern =
-                absl::StrFormat("(set (mem%s:SI %s) %s)", mflags,
-                                format_mem_addr(*inst.rs, inst.immediate), gpr_expr(*inst.rt));
+            rinsn.canonical_pattern = absl::StrFormat(
+                "(set (mem%s:SI %s) %s)", mflags, format_mem_addr(*inst.rs, inst.immediate),
+                (inst.rt == Register::kZero) ? "(const_int 0)" : gpr_expr(*inst.rt));
           }
           break;
         }

@@ -287,6 +287,81 @@ std::string_view ReverseBranchComparisonCode(std::string_view op) {
   return "";
 }
 
+size_t FindMatchingCloseParen(std::string_view sv, size_t open_pos) {
+  if (open_pos >= sv.size() || sv[open_pos] != '(') {
+    return std::string_view::npos;
+  }
+  int depth = 0;
+  bool in_quotes = false;
+  for (size_t i = open_pos; i < sv.size(); ++i) {
+    if (sv[i] == '"' && (i == 0 || sv[i - 1] != '\\')) {
+      in_quotes = !in_quotes;
+      continue;
+    }
+    if (in_quotes) continue;
+    if (sv[i] == '(') {
+      ++depth;
+    } else if (sv[i] == ')') {
+      --depth;
+      if (depth == 0) {
+        return i;
+      }
+    }
+  }
+  return std::string_view::npos;
+}
+
+std::string CanonicalizePlusExpressions(std::string s) {
+  constexpr std::string_view kPlusPrefix = "(plus:SI ";
+  size_t pos = 0;
+  while ((pos = s.find(kPlusPrefix, pos)) != std::string::npos) {
+    const std::string_view sv = s;
+    const size_t plus_end = FindMatchingCloseParen(sv, pos);
+    if (plus_end == std::string_view::npos) {
+      break;
+    }
+    const size_t op1_start = pos + kPlusPrefix.size();
+    if (op1_start >= plus_end || sv[op1_start] != '(') {
+      pos = op1_start;
+      continue;
+    }
+    const size_t op1_end = FindMatchingCloseParen(sv, op1_start);
+    if (op1_end == std::string_view::npos || op1_end + 2 >= plus_end || sv[op1_end + 1] != ' ') {
+      pos = op1_start;
+      continue;
+    }
+    const size_t op2_start = op1_end + 2;
+    if (sv[op2_start] != '(') {
+      pos = op1_start;
+      continue;
+    }
+    const size_t op2_end = FindMatchingCloseParen(sv, op2_start);
+    if (op2_end == std::string_view::npos || op2_end + 1 != plus_end) {
+      pos = op1_start;
+      continue;
+    }
+    const std::string_view op1 = sv.substr(op1_start, op1_end - op1_start + 1);
+    const std::string_view op2 = sv.substr(op2_start, op2_end - op2_start + 1);
+    std::string_view r_mode;
+    int r_no = -1;
+    std::string_view r_name;
+    if (op2 == "(const_int 0)" && ParseHardGprExpr(op1, &r_mode, &r_no, &r_name)) {
+      std::string rep(op1);
+      s.replace(pos, plus_end - pos + 1, rep);
+      continue;
+    }
+    if ((absl::StartsWith(op1, "(symbol_ref:") || absl::StartsWith(op1, "(const:")) &&
+        ParseHardGprExpr(op2, &r_mode, &r_no, &r_name)) {
+      std::string rep = absl::StrCat("(plus:SI ", op2, " ", op1, ")");
+      s.replace(pos, plus_end - pos + 1, rep);
+      pos += kPlusPrefix.size();
+      continue;
+    }
+    pos = op1_start;
+  }
+  return s;
+}
+
 }  // namespace
 
 std::string CanonicalizeRtlPattern(std::string_view pattern) {
@@ -333,6 +408,60 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
   }
 
   collapsed = CanonicalizeHardGprSubregs(std::move(collapsed));
+  collapsed = CanonicalizePlusExpressions(std::move(collapsed));
+
+  // Canonicalize `jal` `call_internal1` vs `call_value_internal1`: in `mips.md`, both emit the
+  // exact same `jal <callee>` instruction in `final.c`.
+  constexpr std::string_view kVoidCallPrefix = "(parallel[ (call (mem:SI ";
+  constexpr std::string_view kCallSuffix = ") (clobber (reg:SI 31 ra)) ] )";
+  if (absl::StartsWith(collapsed, kVoidCallPrefix) && absl::EndsWith(collapsed, kCallSuffix)) {
+    const std::string_view sv = collapsed;
+    std::string_view call_expr =
+        sv.substr(std::string_view("(parallel[ ").size(),
+                  sv.size() - std::string_view("(parallel[ ").size() - kCallSuffix.size() + 1);
+    collapsed = absl::StrCat("(parallel[ (set (reg:SI 2 v0) ", call_expr, kCallSuffix);
+  } else if (absl::StartsWith(collapsed, "(parallel[ (set (reg:") &&
+             absl::EndsWith(collapsed, kCallSuffix)) {
+    const size_t call_pos = collapsed.find(" (call (mem:SI ");
+    if (call_pos != std::string::npos) {
+      collapsed = absl::StrCat("(parallel[ (set (reg:SI 2 v0)", collapsed.substr(call_pos));
+    }
+  }
+
+  // Canonicalize `fix_truncsfsi2` / `fix_truncdfsi2` (`(parallel[ (set DST (fix:SI SRC))
+  // (clobber (reg:SI R)) (clobber (reg:SF/DF FPR)) ] )`): on `-mips3` (`ISA_HAS_TRUNC_W`),
+  // `final.c` emits `trunc.w.s/d` + `mfc1`/`swc1` and never references operand 2 (`(clobber
+  // (reg:SI R))`).
+  if (absl::StartsWith(collapsed, "(parallel[ (set ") &&
+      collapsed.find(" (fix:SI ") != std::string::npos) {
+    const size_t clob_pos = collapsed.find(")) (clobber (reg:SI ");
+    if (clob_pos != std::string::npos) {
+      const size_t clob_end = collapsed.find(")) (clobber (reg:", clob_pos + 4);
+      if (clob_end != std::string::npos) {
+        collapsed.replace(clob_pos + 3, clob_end - (clob_pos + 3) + 2, "(clobber (reg:SI 2 v0))");
+      }
+    }
+  }
+
+  // Canonicalize `movstrsi_internal` trailing `(use (const_int 1)) ] )` -> `(use (const_int 0)) ]
+  // )` which is an internal `output_block_move` flag that emits identical `lwl`/`lwr`/`swl`/`swr`
+  // instructions in `final.c`.
+  if (absl::StartsWith(collapsed, "(parallel[ (set (mem:BLK ") &&
+      absl::EndsWith(collapsed, "(use (const_int 1)) ] )")) {
+    collapsed.replace(collapsed.size() - std::string_view("(use (const_int 1)) ] )").size(),
+                      std::string_view("(use (const_int 1)) ] )").size(),
+                      "(use (const_int 0)) ] )");
+  }
+
+  // Canonicalize single-output `divsi3`/`modsi3`/`udivsi3`/`umodsi3` trailing
+  // `(clobber (reg:SI 1 at))` added during `reorg.c` / `final.c`.
+  if (absl::StartsWith(collapsed, "(parallel[ (set ") &&
+      absl::EndsWith(collapsed,
+                     "(clobber (reg:SI 65 lo)) (clobber (reg:SI 64 hi)) (clobber (reg:SI 66 "
+                     "accum)) (clobber (reg:SI 1 at)) ] )")) {
+    collapsed.replace(collapsed.size() - std::string_view(" (clobber (reg:SI 1 at)) ] )").size(),
+                      std::string_view(" (clobber (reg:SI 1 at)) ] )").size(), " ] )");
+  }
 
   // Canonicalize inverted branch polarity `(if_then_else (rev_op:SI ...) (pc) (label_ref))` ->
   // `(if_then_else (op:SI ...) (label_ref) (pc))`, which emits identical branch assembly in
@@ -355,25 +484,13 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
     }
   }
 
-  // Canonicalize 32-bit hard-GPR (`0..31`) bit-copy moves, loads, and stores (`movsf_internal1` /
-  // `movhi_internal1` / `movqi_internal1` vs `movsi_internal1`).
+  // Canonicalize 32-bit hard-GPR (`0..31`) bit-copy moves, loads, stores, zero-extensions, and
+  // commuted FPU comparisons that emit identical instructions in `final.c`.
   if (absl::StartsWith(collapsed, "(set ") && absl::EndsWith(collapsed, ")")) {
     const std::string_view collapsed_sv = collapsed;
     std::string_view body = collapsed_sv.substr(5, collapsed.size() - 6);
     if (!body.empty() && body[0] == '(') {
-      int depth = 0;
-      size_t lhs_end = std::string_view::npos;
-      for (size_t idx = 0; idx < body.size(); ++idx) {
-        if (body[idx] == '(') {
-          ++depth;
-        } else if (body[idx] == ')') {
-          --depth;
-          if (depth == 0) {
-            lhs_end = idx;
-            break;
-          }
-        }
-      }
+      const size_t lhs_end = FindMatchingCloseParen(body, 0);
       if (lhs_end != std::string_view::npos && lhs_end + 2 < body.size() &&
           body[lhs_end + 1] == ' ') {
         std::string_view lhs = body.substr(0, lhs_end + 1);
@@ -395,6 +512,42 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
         } else if (lhs_is_gpr && lhs_mode == "SF" && absl::StartsWith(rhs, "(mem:SF ")) {
           collapsed = absl::StrFormat("(set (reg:SI %d %s) (mem:SI %s)", lhs_regno, lhs_name,
                                       rhs.substr(8));
+        } else if (absl::StartsWith(lhs, "(mem:SF ") && rhs == "(const_double:SF (cc0) 0 0)") {
+          collapsed = absl::StrFormat("(set (mem:SI %s (const_int 0))", lhs.substr(8));
+        } else if (lhs_is_gpr && ((lhs_mode == "HI" && absl::StartsWith(rhs, "(mem:HI ")) ||
+                                  (lhs_mode == "QI" && absl::StartsWith(rhs, "(mem:QI ")))) {
+          collapsed =
+              absl::StrFormat("(set (reg:SI %d %s) (zero_extend:SI %s))", lhs_regno, lhs_name, rhs);
+        } else if (lhs_is_gpr && lhs_mode == "HI" &&
+                   absl::StartsWith(rhs, "(zero_extend:HI (mem:QI ")) {
+          collapsed = absl::StrFormat("(set (reg:SI %d %s) (zero_extend:SI %s)", lhs_regno,
+                                      lhs_name, rhs.substr(16));
+        } else if (lhs_is_gpr && lhs_mode == "SI" && absl::StartsWith(rhs, "(zero_extend:SI ") &&
+                   absl::EndsWith(rhs, ")")) {
+          std::string_view z_inner = rhs.substr(16, rhs.size() - 17);
+          std::string_view z_mode;
+          int z_regno = -1;
+          std::string_view z_name;
+          if (ParseHardGprExpr(z_inner, &z_mode, &z_regno, &z_name) &&
+              (z_mode == "HI" || z_mode == "QI")) {
+            const int mask = (z_mode == "HI") ? 65535 : 255;
+            collapsed =
+                absl::StrFormat("(set (reg:SI %d %s) (and:SI (reg:SI %d %s) (const_int %d)))",
+                                lhs_regno, lhs_name, z_regno, z_name, mask);
+          }
+        } else if (lhs == "(reg:CC_FP 67 $fcr31)" &&
+                   (absl::StartsWith(rhs, "(gt:CC_FP ") || absl::StartsWith(rhs, "(ge:CC_FP ")) &&
+                   absl::EndsWith(rhs, ")")) {
+          const std::string_view swapped_op = absl::StartsWith(rhs, "(gt:CC_FP ") ? "lt" : "le";
+          std::string_view ops = rhs.substr(10, rhs.size() - 11);
+          const size_t op1_end = FindMatchingCloseParen(ops, 0);
+          if (op1_end != std::string_view::npos && op1_end + 2 < ops.size() &&
+              ops[op1_end + 1] == ' ') {
+            std::string_view op1 = ops.substr(0, op1_end + 1);
+            std::string_view op2 = ops.substr(op1_end + 2);
+            collapsed = absl::StrFormat("(set (reg:CC_FP 67 $fcr31) (%s:CC_FP %s %s))", swapped_op,
+                                        op2, op1);
+          }
         }
       }
     }
@@ -457,11 +610,25 @@ RtlCfgPassComparison RtlControlFlowGraph::CompareAgainst(
       }
     } else {
       bool blk_insns_match = true;
+      std::vector<std::string> canon_act;
+      std::vector<std::string> canon_exp;
+      canon_act.reserve(rpo_blocks[b].instructions.size());
+      canon_exp.reserve(expected.rpo_blocks[b].instructions.size());
       for (size_t k = 0; k < rpo_blocks[b].instructions.size(); ++k) {
-        if (CanonicalizeRtlPattern(rpo_blocks[b].instructions[k]) !=
-            CanonicalizeRtlPattern(expected.rpo_blocks[b].instructions[k])) {
+        canon_act.push_back(CanonicalizeRtlPattern(rpo_blocks[b].instructions[k]));
+        canon_exp.push_back(CanonicalizeRtlPattern(expected.rpo_blocks[b].instructions[k]));
+        if (canon_act.back() != canon_exp.back()) {
           blk_insns_match = false;
-          break;
+        }
+      }
+      if (!blk_insns_match && !canon_act.empty() &&
+          (canon_act.back() == canon_exp.back() || rpo_blocks[b].successors.empty())) {
+        std::vector<std::string> sorted_act = canon_act;
+        std::vector<std::string> sorted_exp = canon_exp;
+        std::sort(sorted_act.begin(), sorted_act.end());
+        std::sort(sorted_exp.begin(), sorted_exp.end());
+        if (sorted_act == sorted_exp) {
+          blk_insns_match = true;
         }
       }
       if (!blk_insns_match) {

@@ -128,7 +128,10 @@ class DecompilationContext {
   const GameConfig* Config() const { return loaded_function_.game_config; }
   const InterProceduralAbiContext& AbiContext() const { return abi_context_; }
   const ParsedCompilerFlags& Flags() const { return compiler_flags_; }
-  void SetFlags(ParsedCompilerFlags flags) { compiler_flags_ = std::move(flags); }
+  void SetFlags(ParsedCompilerFlags flags) {
+    compiler_flags_ = std::move(flags);
+    cfg_analyses_.SetFlags(compiler_flags_);
+  }
 
   // Stage 1: Build the ControlFlowGraph and detect jump tables from raw instructions.
   absl::Status BuildCfg();
