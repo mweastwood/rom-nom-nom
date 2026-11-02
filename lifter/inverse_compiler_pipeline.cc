@@ -13,6 +13,7 @@
 #include "lifter/decompilation_context.h"
 #include "lifter/dominator_tree.h"
 #include "lifter/inverse_combine_stage.h"
+#include "lifter/inverse_cse1_basic_block_stage.h"
 #include "lifter/inverse_cse2_post_loop_stage.h"
 #include "lifter/inverse_final_and_gas_stage.h"
 #include "lifter/inverse_flow_life_analysis_stage.h"
@@ -189,6 +190,7 @@ absl::Status InverseCse1BasicBlockStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseCse1BasicBlockStage: RtlCfg not initialized.");
   }
+  InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 
