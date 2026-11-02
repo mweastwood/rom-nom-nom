@@ -2,9 +2,12 @@
 #define LIFTER_INVERSE_FINAL_AND_GAS_STAGE_H_
 
 #include <string>
+#include <string_view>
 
 #include "core/control_flow_graph.h"
+#include "core/jump_table.h"
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/stack_frame_analyzer.h"
 
@@ -27,6 +30,14 @@ class InverseFinalAndGasLifter {
   // Lifts a machine `ControlFlowGraph` into a canonical `RtlControlFlowGraph`.
   static RtlControlFlowGraph LiftToRtlCfg(const ControlFlowGraph& input_cfg,
                                           const StackFrameAnalysis* frame_analysis = nullptr);
+
+  // Lifts a machine `ControlFlowGraph` into a `.12.dbr` `RtlControlFlowGraph` with full GCC 2.7.2
+  // RTL S-expression patterns (`final.c` + `config/mips/mips.md`).
+  static RtlControlFlowGraph LiftToDbrRtlCfg(const ControlFlowGraph& input_cfg,
+                                             const StackFrameAnalysis* frame_analysis = nullptr,
+                                             const SymbolIndex* symbols = nullptr,
+                                             MemoryReader memory_reader = nullptr,
+                                             std::string_view function_name = "");
 
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);

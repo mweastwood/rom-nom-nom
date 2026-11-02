@@ -68,7 +68,8 @@ void DecompilationContext::LiftCfgToRtl() {
     return;
   }
   const StackFrameLayout& layout = FrameLayout();
-  rtl_cfg_ = InverseFinalAndGasLifter::LiftToRtlCfg(*cfg_, &layout.RawAnalysis());
+  rtl_cfg_ = InverseFinalAndGasLifter::LiftToDbrRtlCfg(
+      *cfg_, &layout.RawAnalysis(), Symbols(), loaded_function_.memory_reader, FunctionName());
 }
 
 const StackFrameLayout& DecompilationContext::FrameLayout() {

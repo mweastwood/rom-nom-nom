@@ -136,5 +136,43 @@ TEST(InverseFinalAndGasStageTest, FusesMulSi3AndFormatsBranchesInCanonicalRtl) {
   EXPECT_EQ(rtl_cfg.rpo_blocks[0].rtl_insns[0].machine_instructions.size(), 2u);
 }
 
+TEST(InverseFinalAndGasStageTest, LiftsDbrRtlCfgWithNarrowSubregModesAndRegisterFlags) {
+  Instruction lh;
+  lh.raw_word = 0x84820000u;
+  lh.opcode = Opcode::kLh;
+  lh.rt = Register::kV0;
+  lh.rs = Register::kA0;
+  lh.immediate = 0;
+  lh.vram = 0x80010200;
+
+  Instruction andi;
+  andi.raw_word = 0x3042ffffu;
+  andi.opcode = Opcode::kAndi;
+  andi.rt = Register::kV0;
+  andi.rs = Register::kV0;
+  andi.immediate = -1;
+  andi.vram = 0x80010208;
+
+  LoadedFunction func;
+  func.name = "narrow_halfword_load_and_mask";
+  func.vram = 0x80010200;
+  func.instructions = {
+      lh,
+      MakeJrRa(0x80010204),
+      andi,
+  };
+
+  DecompilationContext context(func);
+  ASSERT_TRUE(context.BuildCfg().ok());
+  const RtlControlFlowGraph dbr_cfg = InverseFinalAndGasLifter::LiftToDbrRtlCfg(
+      context.Cfg(), &context.FrameLayout().RawAnalysis(), nullptr, nullptr, func.name);
+  ASSERT_EQ(dbr_cfg.rpo_blocks.size(), 1u);
+  ASSERT_EQ(dbr_cfg.rpo_blocks[0].instructions.size(), 2u);
+  EXPECT_EQ(dbr_cfg.rpo_blocks[0].instructions[0],
+            "(set (reg:SI 2 v0) (sign_extend:SI (mem:HI (reg:SI 4 a0))))");
+  EXPECT_EQ(dbr_cfg.rpo_blocks[0].instructions[1],
+            "(set (reg:SI 2 v0) (zero_extend:SI (subreg:HI (reg:SI 2 v0) 0)))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

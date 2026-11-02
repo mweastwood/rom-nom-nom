@@ -731,17 +731,24 @@ cc_test(
 
 cc_library(
     name = "inverse_final_and_gas_stage",
-    srcs = ["inverse_final_and_gas_stage.cc"],
+    srcs = [
+        "dbr_flag_recovery_tables.inc",
+        "inverse_final_and_gas_stage.cc",
+    ],
     hdrs = ["inverse_final_and_gas_stage.h"],
     visibility = ["//tuner:__pkg__"],
     deps = [
+        ":abi_analyzer",
         ":rtl_cfg",
         ":stack_frame_analyzer",
         "//core:control_flow_graph",
         "//core:division_pattern",
+        "//core:jump_table",
         "//core:mips",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )

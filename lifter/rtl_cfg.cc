@@ -252,12 +252,12 @@ RtlCfgPassComparison RtlControlFlowGraph::CompareAgainst(
       }
     } else if (rpo_blocks[b].instructions != expected.rpo_blocks[b].instructions) {
       cmp.instructions_match = false;
-      if (cmp.mismatch_detail.empty()) {
-        cmp.mismatch_detail =
-            absl::StrFormat("RPO blk %zu insn patterns got [%s] != exp [%s]", b,
-                            absl::StrJoin(rpo_blocks[b].instructions, " ; "),
-                            absl::StrJoin(expected.rpo_blocks[b].instructions, " ; "));
+      if (!cmp.mismatch_detail.empty()) {
+        absl::StrAppend(&cmp.mismatch_detail, " || ");
       }
+      absl::StrAppendFormat(&cmp.mismatch_detail, "RPO blk %zu insn patterns got [%s] != exp [%s]",
+                            b, absl::StrJoin(rpo_blocks[b].instructions, " ; "),
+                            absl::StrJoin(expected.rpo_blocks[b].instructions, " ; "));
     }
   }
   return cmp;
