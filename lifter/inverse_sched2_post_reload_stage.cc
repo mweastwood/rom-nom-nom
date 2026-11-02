@@ -944,9 +944,8 @@ void InvertSched2SelfMoves(RtlControlFlowGraph* cfg, const SymbolIndex* symbols,
 
 }  // namespace
 
-void InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
-    RtlControlFlowGraph* cfg, const StackFrameAnalysis* /*frame_analysis*/,
-    const SymbolIndex* symbols, std::string_view function_name) {
+void InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
+    RtlControlFlowGraph* cfg, const SymbolIndex* symbols, std::string_view function_name) {
   if (cfg == nullptr) {
     return;
   }
@@ -962,9 +961,6 @@ void InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
     }
     return false;
   }();
-  // Step 1: Invert `function.c:thread_prologue_and_epilogue_insns` (`mips_expand_prologue`),
-  // which emitted RTL prologue instructions into `basic_block_head[0]` after `.greg` and before
-  // `.sched2`.
   for (auto& blk : cfg->rpo_blocks) {
     std::vector<RtlInsn> kept_insns;
     std::vector<std::string> kept_pats;
@@ -995,11 +991,34 @@ void InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
   if (had_rtl_sexpr) {
     InverseJump2CrossJumpLifter::RestorePreSched2NoopSelfMoves(cfg);
   }
-
-  // Step 2: Invert `sched.c:schedule_insns` post-reload self-move elimination across all 5 GCC
-  // 2.7.2 mechanisms (`assign_parms`, `expand_call` args/returns, `expand_return`, and
-  // `strength_reduce`).
   InvertSched2SelfMoves(cfg, symbols, function_name);
+}
+
+void InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
+    RtlControlFlowGraph* cfg, const StackFrameAnalysis* /*frame_analysis*/,
+    const SymbolIndex* /*symbols*/, std::string_view /*function_name*/,
+    const ParsedCompilerFlags* /*flags*/) {
+  if (cfg == nullptr) {
+    return;
+  }
+  // Invert `function.c:thread_prologue_and_epilogue_insns` (`mips_expand_prologue`),
+  // which emitted RTL prologue instructions into `basic_block_head[0]` after `.greg` and before
+  // `.sched2`.
+  for (auto& blk : cfg->rpo_blocks) {
+    std::vector<RtlInsn> kept_insns;
+    std::vector<std::string> kept_pats;
+    kept_insns.reserve(blk.rtl_insns.size());
+    kept_pats.reserve(blk.instructions.size());
+    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
+      if (blk.rtl_insns[i].is_prologue_insn) {
+        continue;
+      }
+      kept_pats.push_back(blk.rtl_insns[i].canonical_pattern);
+      kept_insns.push_back(std::move(blk.rtl_insns[i]));
+    }
+    blk.rtl_insns = std::move(kept_insns);
+    blk.instructions = std::move(kept_pats);
+  }
 }
 
 }  // namespace rom_nom_nom

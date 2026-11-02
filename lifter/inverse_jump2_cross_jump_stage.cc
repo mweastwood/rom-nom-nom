@@ -56,11 +56,13 @@ void InvertCondBranchPattern(RtlBasicBlock* blk) {
 }
 
 // Step 1: Invert GCC 2.7.2 `jump.c:jump_optimize` cross-jumping on `RtlControlFlowGraph`.
-void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
+void InvertJump2CrossJumping(RtlControlFlowGraph* cfg, const ParsedCompilerFlags* compiler_flags) {
   auto& blks = cfg->rpo_blocks;
   if (blks.size() < 3) {
     return;
   }
+  const bool is_o1 = (compiler_flags != nullptr && compiler_flags->RunsOptimizerPasses() &&
+                      !compiler_flags->RunsSched2());
 
   // 1a. Multi-level switch with nested if-call tail
   // (`SwitchWithMergedCasesAndCrossJumpedNestedIfCallTail`) and conditional branch threaded into
@@ -337,7 +339,9 @@ void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
       blks[1].successors == std::vector<size_t>{3} &&
       blks[2].successors == std::vector<size_t>{3} && blks[3].successors.empty() &&
       EndsWithUncondJump(blks[1]) && blks[1].instructions.size() >= 2 &&
-      !EndsWithUncondJump(blks[2]) && blks[3].instructions.size() >= 5) {
+      !EndsWithUncondJump(blks[2]) &&
+      (blks[3].instructions.size() >= 5 ||
+       (is_o1 && BlockHasCall(blks[3]) && blks[3].instructions.size() >= 2))) {
     InsertBlockInsnsBeforeJump(&blks[1], blks[3]);
     AppendBlockInsns(&blks[2], blks[3]);
     blks[3].rtl_insns.clear();
@@ -373,6 +377,73 @@ void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
     blks[0].successors = {1, b2_copy_idx};
     RecomputeRtlCfgRpo(cfg);
     return;
+  }
+
+  // 1l. `-O1` cross-jumps (`!RunsSched2()`):
+  if (is_o1) {
+    // Pre-loop jump into loop condition block (`ByteFillAndWordPostIncrementWhileLoop` &
+    // `LinkedListSortedInsertVoid`).
+    if (blks.size() == 4 && blks[0].successors == std::vector<size_t>{1} &&
+        EndsWithUncondJump(blks[0]) && blks[1].successors == std::vector<size_t>{3, 2} &&
+        EndsWithCondBranch(blks[1]) && blks[2].successors.empty() &&
+        blks[3].successors == std::vector<size_t>{1} && !EndsWithUncondJump(blks[3]) &&
+        !EndsWithCondBranch(blks[3])) {
+      PopBackInsn(&blks[0]);
+      AppendBlockInsns(&blks[0], blks[1]);
+      InvertCondBranchPattern(&blks[0]);
+      blks[0].successors = {2, 3};
+      AppendBlockInsns(&blks[3], blks[1]);
+      blks[3].successors = {3, 2};
+      RecomputeRtlCfgRpo(cfg);
+      return;
+    }
+
+    // Loop header condition block fallen into by 1-instruction latch (`ControlFlowLoops`).
+    for (size_t b_cond = 1; b_cond < blks.size(); ++b_cond) {
+      if (blks[b_cond].predecessors.size() == 2 && EndsWithCondBranch(blks[b_cond]) &&
+          blks[b_cond].successors.size() == 2 && blks[b_cond].instructions.size() == 2) {
+        const size_t p0 = blks[b_cond].predecessors[0];
+        const size_t p1 = blks[b_cond].predecessors[1];
+        const size_t b_latch = (p0 > b_cond) ? p0 : p1;
+        const size_t b_pre = (p0 > b_cond) ? p1 : p0;
+        if (b_pre < b_cond && b_latch > b_cond &&
+            blks[b_latch].successors == std::vector<size_t>{b_cond} &&
+            !EndsWithUncondJump(blks[b_latch]) && !EndsWithCondBranch(blks[b_latch]) &&
+            blks[b_latch].instructions.size() == 1) {
+          AppendBlockInsns(&blks[b_latch], blks[b_cond]);
+          blks[b_latch].successors = blks[b_cond].successors;
+          InvertCondBranchPattern(&blks[b_cond]);
+          std::swap(blks[b_cond].successors[0], blks[b_cond].successors[1]);
+          RecomputeRtlCfgRpo(cfg);
+          return;
+        }
+      }
+    }
+
+    // Shared jump-terminated tail block before exit block
+    // (`GeneralizedCrossJumpTailWithFilledDelaySlots`).
+    const size_t exit_idx = blks.size() - 1;
+    if (blks[exit_idx].instructions.empty()) {
+      for (size_t b_tail = 1; b_tail < exit_idx; ++b_tail) {
+        if (blks[b_tail].predecessors.size() == 2 &&
+            blks[b_tail].successors == std::vector<size_t>{exit_idx} &&
+            EndsWithUncondJump(blks[b_tail])) {
+          const size_t p0 = blks[b_tail].predecessors[0];
+          const size_t p1 = blks[b_tail].predecessors[1];
+          if (blks[p0].successors == std::vector<size_t>{b_tail} && EndsWithUncondJump(blks[p0]) &&
+              blks[p1].successors == std::vector<size_t>{b_tail} && !EndsWithUncondJump(blks[p1]) &&
+              !EndsWithCondBranch(blks[p1])) {
+            PopBackInsn(&blks[p0]);
+            AppendBlockInsns(&blks[p0], blks[b_tail]);
+            blks[p0].successors = {exit_idx};
+            AppendBlockInsns(&blks[p1], blks[b_tail]);
+            blks[p1].successors = {exit_idx};
+            RecomputeRtlCfgRpo(cfg);
+            return;
+          }
+        }
+      }
+    }
   }
 }
 
@@ -457,10 +528,48 @@ void InvertSched2DiamondSimplifications(RtlControlFlowGraph* cfg) {
 }
 
 // Step 3: Invert GCC 2.7.2 `jump.c:delete_noop_moves` on `RtlControlFlowGraph`.
-void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
+void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg,
+                                const ParsedCompilerFlags* compiler_flags) {
   auto& blks = cfg->rpo_blocks;
   if (blks.empty()) {
     return;
+  }
+  const bool is_o1 = (compiler_flags != nullptr && compiler_flags->RunsOptimizerPasses() &&
+                      !compiler_flags->RunsSched2());
+
+  // At `-O1` (`CallerPassingSixArgumentsOnStack`), when `a0`/`a1` are copied to `a2`/`a3` at block
+  // entry, used for stack argument stores without modifying `a0`/`a1`, and then `a2`/`a3` are
+  // incremented in place (`a2 = a2 + 1; a3 = a3 + 2`) before a call, `jump2:delete_noop_moves`
+  // deleted the redundant `a0 = a2` and `a1 = a3` moves right before `a2 = a2 + 1`.
+  if (is_o1 && blks.size() == 1 && blks[0].rtl_insns.size() >= 6 && BlockHasCall(blks[0])) {
+    size_t first_idx = 0;
+    while (first_idx < blks[0].rtl_insns.size() && blks[0].rtl_insns[first_idx].is_prologue_insn) {
+      ++first_idx;
+    }
+    if (first_idx + 1 < blks[0].rtl_insns.size() &&
+        !blks[0].rtl_insns[first_idx].machine_instructions.empty() &&
+        !blks[0].rtl_insns[first_idx + 1].machine_instructions.empty()) {
+      const Instruction& m0 = blks[0].rtl_insns[first_idx].machine_instructions[0];
+      const Instruction& m1 = blks[0].rtl_insns[first_idx + 1].machine_instructions[0];
+      if (m0.opcode == Opcode::kAddu && m0.rd == Register::kA2 && m0.rs == Register::kA0 &&
+          m0.rt == Register::kZero && m1.opcode == Opcode::kAddu && m1.rd == Register::kA3 &&
+          m1.rs == Register::kA1 && m1.rt == Register::kZero) {
+        for (size_t k = first_idx + 2; k + 2 < blks[0].rtl_insns.size(); ++k) {
+          if (blks[0].rtl_insns[k].machine_instructions.empty() ||
+              blks[0].rtl_insns[k + 1].machine_instructions.empty()) {
+            continue;
+          }
+          const Instruction& mk0 = blks[0].rtl_insns[k].machine_instructions[0];
+          const Instruction& mk1 = blks[0].rtl_insns[k + 1].machine_instructions[0];
+          if (mk0.opcode == Opcode::kAddiu && mk0.rt == Register::kA2 && mk0.rs == Register::kA2 &&
+              mk1.opcode == Opcode::kAddiu && mk1.rt == Register::kA3 && mk1.rs == Register::kA3) {
+            InsertInsnAt(&blks[0], k, MakeRegMoveRtlInsn(Register::kA1, Register::kA3));
+            InsertInsnAt(&blks[0], k, MakeRegMoveRtlInsn(Register::kA0, Register::kA2));
+            return;
+          }
+        }
+      }
+    }
   }
 
   // 3a. Restore deleted caller-argument or zero move (`a0 = sY`, `a1 = sY`, or `a1 = 0`) before
@@ -483,11 +592,15 @@ void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
               it_a0 != saved_arg_to_sreg.end()) {
             const Register s_reg = it_a0->second;
             bool is_zero_arg_init_call = false;
-            if (idx + 2 < blk.rtl_insns.size() && EndsWithCondBranch(blk) &&
-                !blk.rtl_insns[idx + 1].machine_instructions.empty()) {
-              const Instruction& post_call = blk.rtl_insns[idx + 1].machine_instructions[0];
-              if (post_call.IsLoad() && post_call.rs == s_reg) {
-                is_zero_arg_init_call = true;
+            if (EndsWithCondBranch(blk)) {
+              for (size_t k = idx + 1; k + 1 < blk.rtl_insns.size(); ++k) {
+                if (!blk.rtl_insns[k].machine_instructions.empty()) {
+                  const Instruction& post_call = blk.rtl_insns[k].machine_instructions[0];
+                  if (post_call.IsLoad() && post_call.rs == s_reg) {
+                    is_zero_arg_init_call = true;
+                    break;
+                  }
+                }
               }
             }
             if (!cur_block_sets_f12 && !is_zero_arg_init_call) {
@@ -533,6 +646,11 @@ void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
                 InsertInsnAt(&blk, insert_pos, MakeRegMoveRtlInsn(Register::kA1, s_reg));
               }
             }
+          } else if (is_o1 && saved_arg_to_sreg.contains(Register::kA2) &&
+                     saved_arg_to_sreg[Register::kA2] == Register::kZero &&
+                     cur_block_gpr_defs.contains(Register::kA0) &&
+                     cur_block_gpr_defs.contains(Register::kA1)) {
+            InsertInsnAt(&blk, idx, MakeRegMoveRtlInsn(Register::kA2, Register::kZero));
           }
           break;
         }
@@ -546,9 +664,14 @@ void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
               cur_block_gpr_defs.insert(*inst.rd);
               continue;
             }
-            if (*inst.rd == Register::kA1 && *inst.rs == Register::kZero) {
+            if (b == 0 && *inst.rd == Register::kA1 && *inst.rs == Register::kZero) {
               saved_arg_to_sreg[Register::kA1] = Register::kZero;
               cur_block_gpr_defs.insert(Register::kA1);
+              continue;
+            }
+            if (is_o1 && b == 0 && *inst.rd == Register::kA2 && *inst.rs == Register::kZero) {
+              saved_arg_to_sreg[Register::kA2] = Register::kZero;
+              cur_block_gpr_defs.insert(Register::kA2);
               continue;
             }
           }
@@ -828,9 +951,9 @@ RtlControlFlowGraph InverseJump2CrossJumpLifter::LiftToSched2RtlCfg(
                            input_cfg, jump2_rtl_cfg, frame_analysis, symbols, memory_reader,
                            function_name, compiler_flags)
                      : InverseFinalAndGasLifter::LiftToRtlCfg(input_cfg, frame_analysis);
-  InvertJump2CrossJumping(&rtl_cfg);
+  InvertJump2CrossJumping(&rtl_cfg, compiler_flags);
   InvertSched2DiamondSimplifications(&rtl_cfg);
-  InvertJump2DeleteNoopMoves(&rtl_cfg);
+  InvertJump2DeleteNoopMoves(&rtl_cfg, compiler_flags);
   if (!emit_rtl_sexpr) {
     InvertPreSched2NoopSelfMovesImpl(&rtl_cfg);
     return rtl_cfg;

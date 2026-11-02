@@ -112,6 +112,9 @@ absl::Status InverseJump2CrossJumpStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasCfg()) {
     return absl::FailedPreconditionError("InverseJump2CrossJumpStage: CFG not initialized.");
   }
+  if (!context->Flags().RunsOptimizerPasses()) {
+    return absl::OkStatus();
+  }
   CfgPassPipeline cross_jump_pipeline;
   cross_jump_pipeline.AddPass(std::make_unique<CrossJumpTailDuplicatorPass>());
   cross_jump_pipeline.AddPass(std::make_unique<SimpleDelaySlotUnschedulerPass>());
@@ -137,7 +140,7 @@ absl::Status InverseSched2PostReloadStage::Run(DecompilationContext* context) {
   }
   InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
       context->MutableRtlCfg(), &context->FrameLayout().RawAnalysis(), context->Symbols(),
-      context->FunctionName());
+      context->FunctionName(), &context->Flags());
   return absl::OkStatus();
 }
 
@@ -145,6 +148,8 @@ absl::Status InverseGregReloadStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseGregReloadStage: RtlCfg not initialized.");
   }
+  InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
+      context->MutableRtlCfg(), context->Symbols(), context->FunctionName());
   InverseGregReloadLifter::InvertGregToLregRtlCfg(context->MutableRtlCfg(),
                                                   &context->FrameLayout().RawAnalysis());
   return absl::OkStatus();

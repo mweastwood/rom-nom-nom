@@ -3,6 +3,7 @@
 
 #include <string_view>
 
+#include "core/compiler_flags.h"
 #include "core/symbol_registry.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/stack_frame_analyzer.h"
@@ -19,7 +20,14 @@ class InverseSched2PostReloadLifter {
   static void InvertSched2ToGregRtlCfg(RtlControlFlowGraph* cfg,
                                        const StackFrameAnalysis* frame_analysis = nullptr,
                                        const SymbolIndex* symbols = nullptr,
-                                       std::string_view function_name = "");
+                                       std::string_view function_name = "",
+                                       const ParsedCompilerFlags* flags = nullptr);
+
+  // Restores `.greg` noop register self-moves and formats `RtlInsn` patterns as canonical MIPS
+  // assembly strings for downstream pre-reload stages (`Stages 4..12`).
+  static void RestoreGregSelfMovesAndFormatAsMipsRtl(RtlControlFlowGraph* cfg,
+                                                     const SymbolIndex* symbols = nullptr,
+                                                     std::string_view function_name = "");
 };
 
 }  // namespace rom_nom_nom

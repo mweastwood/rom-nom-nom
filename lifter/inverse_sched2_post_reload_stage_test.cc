@@ -111,6 +111,10 @@ TEST(InverseSched2PostReloadStageTest, StripsPrologueAndRestoresGregSelfMoves) {
   ASSERT_EQ(stage2_rtl.rpo_blocks.size(), 1u);
   ASSERT_EQ(stage3_rtl.rpo_blocks.size(), 1u);
   EXPECT_EQ(stage2_rtl.rpo_blocks[0].instructions.size(), 7u);
+  ASSERT_EQ(stage3_rtl.rpo_blocks[0].instructions.size(), 4u);
+
+  InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
+      &stage3_rtl, context.Symbols(), context.FunctionName());
   ASSERT_EQ(stage3_rtl.rpo_blocks[0].instructions.size(), 6u);
   EXPECT_EQ(stage3_rtl.rpo_blocks[0].instructions[0], "addu  $a0, $a0, $zero");
   EXPECT_EQ(stage3_rtl.rpo_blocks[0].instructions[1], "addu  $a1, $a1, $zero");

@@ -1149,7 +1149,8 @@ size_t FindSameBlockDelaySlotInsertionIndex(const BasicBlock& block, size_t term
         continue;
       }
     }
-    if (WasIneligibleForTerminatorDelaySlot(block, cand_idx, term_idx, term)) {
+    if (WasIneligibleForTerminatorDelaySlot(block, cand_idx, term_idx, term) ||
+        (!runs_sched2 && term.opcode == Opcode::kJ && prev.IsLoad())) {
       --insert_idx;
     } else {
       break;
@@ -3244,6 +3245,14 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
         }
       }
       bool is_o1_post_load_copy_in_block = false;
+      if (term_idx >= 1) {
+        const Instruction& pre_term = block.instructions[term_idx - 1];
+        is_o1_post_load_copy_in_block =
+            !analyses->Flags().RunsSched2() && pre_term.IsLoad() && pre_term.rt.has_value() &&
+            (term.rs == pre_term.rt || term.rt == pre_term.rt) &&
+            delay_inst.opcode == Opcode::kAddu && delay_inst.rt == Register::kZero &&
+            delay_inst.rs == pre_term.rt;
+      }
       if (all_pre_branch_ineligible && term_idx >= 1) {
         const Instruction& pre_term = block.instructions[term_idx - 1];
         const RegisterUseDef pre_ud = GetInstructionUseDef(pre_term);
@@ -3270,11 +3279,6 @@ bool EagerThreadDelaySlotUnschedulerPass::Run(ControlFlowGraph* cfg, CfgAnalysis
             (term.rs == pre_term.rd || term.rt == pre_term.rd) &&
             delay_inst.opcode == Opcode::kAddiu && delay_inst.rs == pre_term.rs &&
             delay_inst.rt == pre_term.rs;
-        is_o1_post_load_copy_in_block =
-            !analyses->Flags().RunsSched2() && pre_term.IsLoad() && pre_term.rt.has_value() &&
-            (term.rs == pre_term.rt || term.rt == pre_term.rt) &&
-            delay_inst.opcode == Opcode::kAddu && delay_inst.rt == Register::kZero &&
-            delay_inst.rs == pre_term.rt;
         if (pre_feeds_delay_not_term || is_post_inc_after_copy || is_o1_post_load_copy_in_block) {
           all_pre_branch_ineligible = false;
         }
