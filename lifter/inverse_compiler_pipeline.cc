@@ -21,6 +21,7 @@
 #include "lifter/inverse_jump1_cfg_cleanup_stage.h"
 #include "lifter/inverse_jump2_cross_jump_stage.h"
 #include "lifter/inverse_loop_opt_stage.h"
+#include "lifter/inverse_rtl_to_c_ast_stage.h"
 #include "lifter/inverse_sched1_pre_alloc_stage.h"
 #include "lifter/inverse_sched2_post_reload_stage.h"
 #include "lifter/loop_analyzer.h"
@@ -204,35 +205,7 @@ absl::Status InverseJump1CfgCleanupStage::Run(DecompilationContext* context) {
 }
 
 absl::Status InverseRtlToCAstStage::Run(DecompilationContext* context) {
-  if (context == nullptr || !context->HasCfg()) {
-    return absl::FailedPreconditionError("InverseRtlToCAstStage: CFG not initialized.");
-  }
-  auto& cfg_analyses = context->CfgAnalyses();
-  const DominatorTree& dom_tree = cfg_analyses.GetDominatorTree();
-  const DominatorTree& post_dom_tree = cfg_analyses.GetPostDominatorTree();
-  const LoopInfo& loop_info = cfg_analyses.GetLoopInfo();
-
-  context->SetRootRegion(
-      ControlFlowStructurer::Structure(context->Cfg(), dom_tree, post_dom_tree, loop_info));
-  if (!context->HasRootRegion()) {
-    return absl::InternalError("InverseRtlToCAstStage: Failed to structure control flow graph.");
-  }
-
-  AstConverterOptions converter_opts;
-  converter_opts.function_name = context->FunctionName();
-  converter_opts.game_config = context->Config();
-  converter_opts.function_parameter_counts = context->AbiContext().function_parameter_counts;
-  converter_opts.function_fp_parameter_counts = context->AbiContext().function_fp_parameter_counts;
-  converter_opts.functions_returning_v0 = context->AbiContext().functions_returning_v0;
-  converter_opts.functions_returning_f0 = context->AbiContext().functions_returning_f0;
-
-  auto ast_or = AstConverter::Convert(context->Cfg(), context->RootRegion(), context->Symbols(),
-                                      converter_opts);
-  if (!ast_or.ok()) {
-    return ast_or.status();
-  }
-  context->SetAst(std::move(*ast_or));
-  return absl::OkStatus();
+  return InverseRtlToCAstLifter::LiftRtlToCAst(context);
 }
 
 void InverseCompilerPipeline::AddStage(std::unique_ptr<InverseCompilerStage> stage) {

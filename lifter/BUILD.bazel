@@ -1010,6 +1010,45 @@ cc_test(
 )
 
 cc_library(
+    name = "inverse_rtl_to_c_ast_stage",
+    srcs = ["inverse_rtl_to_c_ast_stage.cc"],
+    hdrs = ["inverse_rtl_to_c_ast_stage.h"],
+    deps = [
+        ":abi_analyzer",
+        ":ast_converter",
+        ":cfg_pass_pipeline",
+        ":control_flow_structurer",
+        ":decompilation_context",
+        ":dominator_tree",
+        ":loop_analyzer",
+        "//core:c_ast",
+        "//core:control_flow_graph",
+        "//core:mips",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "inverse_rtl_to_c_ast_stage_test",
+    srcs = ["inverse_rtl_to_c_ast_stage_test.cc"],
+    deps = [
+        ":c_emitter",
+        ":decompilation_context",
+        ":function_loader",
+        ":inverse_compiler_pipeline",
+        ":inverse_rtl_to_c_ast_stage",
+        "//core:symbol_registry",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "decompilation_context",
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
@@ -1050,6 +1089,7 @@ cc_library(
         ":inverse_jump1_cfg_cleanup_stage",
         ":inverse_jump2_cross_jump_stage",
         ":inverse_loop_opt_stage",
+        ":inverse_rtl_to_c_ast_stage",
         ":inverse_sched1_pre_alloc_stage",
         ":inverse_sched2_post_reload_stage",
         ":loop_analyzer",

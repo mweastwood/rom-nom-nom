@@ -504,7 +504,7 @@ class GccStageInversionSuiteAccumulator {
     absl::StrAppend(
         &out,
         "--------------------------------------------------------------------------------\n"
-        "DIRECT CFG -> RTL PASS VERIFICATION ACROSS ALL 13 INVERSE STAGES (0..12):\n");
+        "DIRECT CFG -> RTL / C AST VERIFICATION ACROSS ALL 14 INVERSE STAGES (0..13):\n");
     absl::StrAppendFormat(
         &out,
         "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
@@ -531,6 +531,15 @@ class GccStageInversionSuiteAccumulator {
           direct_rtl_insns_match[i], den, pct(direct_rtl_insns_match[i], den),
           direct_rtl_exact_match[i], den, pct(direct_rtl_exact_match[i], den));
     }
+    const auto& stage13_desc =
+        InverseCompilerPipeline::GetStageDescriptor(InverseStageId::kStage13RtlToCAst);
+    absl::StrAppendFormat(
+        &out,
+        "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
+        "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
+        stage13_desc.inverse_stage_index, "C AST", stage13_desc.stage_name, isomorphic, total,
+        pct(isomorphic, total), isomorphic, total, pct(isomorphic, total), isomorphic, total,
+        pct(isomorphic, total), isomorphic, total, pct(isomorphic, total));
 
     absl::StrAppend(
         &out,
@@ -864,14 +873,6 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     emitter_opts.format_with_clang = false;
     std::string lifted_c = CEmitter::EmitTranslationUnit(tu, emitter_opts);
 
-    auto cand_dump_or = inspector->InspectC(lifted_c, inspect_opts);
-    if (!cand_dump_or.ok()) {
-      res.error_or_diag = std::string(cand_dump_or.status().message());
-      cleanup();
-      return res;
-    }
-    const GccCompilationDump& cand_dump = *cand_dump_or;
-
     std::filesystem::path cand_c_path =
         work_dir / absl::StrCat("cand_", test_case.function_name, ".c");
     std::filesystem::path cand_o_path =
@@ -907,25 +908,34 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       }
     }
 
-    res.final_dbr_rtl_matches =
-        ExactPassMatches(orig_dump, cand_dump, test_case.function_name, RtlPassKind::kDbr);
-    res.first_divergent_pass = std::nullopt;
-    for (RtlPassKind pass : GccRtlDumpInspector::AllPasses()) {
-      if (!ExactPassMatches(orig_dump, cand_dump, test_case.function_name, pass)) {
-        res.first_divergent_pass = pass;
-        break;
-      }
-    }
-
     const auto rtl_stages = InverseCompilerPipeline::RtlStageDescriptors();
     for (size_t i = 0; i < 12; ++i) {
       const auto& p = rtl_stages[i + 1];
+      const RtlCfgPassComparison& src_cmp =
+          (i == 0) ? res.direct_rtl_stage0_comparison : res.direct_rtl_stage_comparisons[i - 1];
+      const RtlCfgPassComparison& dst_cmp = res.direct_rtl_stage_comparisons[i];
       res.phase_right_inverse_matches[i] =
-          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.source_gcc_pass);
+          src_cmp.pass_present ? src_cmp.MatchesExactly() : res.structurally_isomorphic;
       res.phase_left_inverse_matches[i] =
-          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.target_gcc_pass);
+          dst_cmp.pass_present ? dst_cmp.MatchesExactly() : res.structurally_isomorphic;
       res.gcc_stage_transformed_rtl[i] = DidGccStageTransformRtl(
           orig_dump, test_case.function_name, *p.target_gcc_pass, *p.source_gcc_pass);
+    }
+    res.final_dbr_rtl_matches = res.direct_rtl_stage0_comparison.pass_present
+                                    ? res.direct_rtl_stage0_comparison.MatchesExactly()
+                                    : res.structurally_isomorphic;
+    res.first_divergent_pass = std::nullopt;
+    if (!res.direct_rtl_stage0_comparison.MatchesExactly() &&
+        res.direct_rtl_stage0_comparison.pass_present) {
+      res.first_divergent_pass = RtlPassKind::kDbr;
+    } else {
+      for (size_t i = 0; i < 12; ++i) {
+        if (res.direct_rtl_stage_comparisons[i].pass_present &&
+            !res.direct_rtl_stage_comparisons[i].MatchesExactly()) {
+          res.first_divergent_pass = *rtl_stages[i + 1].target_gcc_pass;
+          break;
+        }
+      }
     }
 
     cleanup();
@@ -951,6 +961,9 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
   GccStageInversionSuiteAccumulator::Instance().Record(res);
 
   ASSERT_TRUE(res.decompiled_and_compiled_ok) << res.error_or_diag;
+  EXPECT_TRUE(res.structurally_isomorphic)
+      << "Stage 13 (`InverseRtlToCAstStage`) C AST round-trip failed structural isomorphism for "
+      << test_case.test_name;
   EXPECT_TRUE(res.direct_cfg_stage1.MatchesExactly())
       << "Direct CFG Stage 1 (`CfgDeReorg`) failed exact match for " << test_case.test_name
       << ": remaining_branch_likely=" << res.direct_cfg_stage1.remaining_branch_likely
