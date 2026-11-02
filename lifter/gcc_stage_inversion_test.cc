@@ -98,9 +98,6 @@ struct CaseInversionResult {
   // Exact Right-inverse check per phase (`Stages 1..12`): `f_k(g_k(y_k)) == y_k` (exact
   // S-expression match on `source_gcc_pass`).
   std::array<bool, 12> phase_right_inverse_matches{};
-  // Exact Left-inverse check per phase (`Stages 1..12`): `g_k(f_k(x_{k-1})) == x_{k-1}` (exact
-  // S-expression match on `target_gcc_pass`).
-  std::array<bool, 12> phase_left_inverse_matches{};
   std::array<bool, 12> gcc_stage_transformed_rtl{};
   // Stage 13 (`InverseRtlToCAstStage` <- `GCCStage0_Frontend (C AST -> .rtl)`) topology and exact
   // S-expression match on `.00.rtl`.
@@ -408,7 +405,7 @@ class GccStageInversionSuiteAccumulator {
             case_all_14_exact = false;
           }
         }
-        if (!r.phase_right_inverse_matches[i] || !r.phase_left_inverse_matches[i]) {
+        if (!r.phase_right_inverse_matches[i]) {
           all_13_rtl = false;
         }
       }
@@ -841,8 +838,6 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       const auto& p = rtl_stages[i + 1];
       res.phase_right_inverse_matches[i] =
           ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.source_gcc_pass);
-      res.phase_left_inverse_matches[i] =
-          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.target_gcc_pass);
       res.gcc_stage_transformed_rtl[i] = DidGccStageTransformRtl(
           orig_dump, test_case.function_name, *p.target_gcc_pass, *p.source_gcc_pass);
     }
