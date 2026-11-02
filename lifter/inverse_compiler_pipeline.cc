@@ -14,6 +14,7 @@
 #include "lifter/dominator_tree.h"
 #include "lifter/inverse_combine_stage.h"
 #include "lifter/inverse_final_and_gas_stage.h"
+#include "lifter/inverse_flow_life_analysis_stage.h"
 #include "lifter/inverse_greg_reload_stage.h"
 #include "lifter/inverse_jump2_cross_jump_stage.h"
 #include "lifter/inverse_sched1_pre_alloc_stage.h"
@@ -162,6 +163,7 @@ absl::Status InverseFlowLifeAnalysisStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseFlowLifeAnalysisStage: RtlCfg not initialized.");
   }
+  InverseFlowLifeAnalysisLifter::InvertFlowToCse2RtlCfg(context->MutableRtlCfg());
   return absl::OkStatus();
 }
 

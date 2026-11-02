@@ -900,6 +900,28 @@ cc_test(
 )
 
 cc_library(
+    name = "inverse_flow_life_analysis_stage",
+    srcs = ["inverse_flow_life_analysis_stage.cc"],
+    hdrs = ["inverse_flow_life_analysis_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "inverse_flow_life_analysis_stage_test",
+    srcs = ["inverse_flow_life_analysis_stage_test.cc"],
+    deps = [
+        ":inverse_flow_life_analysis_stage",
+        ":rtl_cfg",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "decompilation_context",
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
@@ -933,6 +955,7 @@ cc_library(
         ":dominator_tree",
         ":inverse_combine_stage",
         ":inverse_final_and_gas_stage",
+        ":inverse_flow_life_analysis_stage",
         ":inverse_greg_reload_stage",
         ":inverse_jump2_cross_jump_stage",
         ":inverse_sched1_pre_alloc_stage",
