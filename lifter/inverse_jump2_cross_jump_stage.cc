@@ -2,14 +2,22 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_format.h"
+#include "core/compiler_flags.h"
 #include "core/control_flow_graph.h"
+#include "core/jump_table.h"
 #include "core/mips.h"
+#include "core/symbol_registry.h"
 #include "lifter/inverse_final_and_gas_stage.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/rtl_cfg_builder.h"
@@ -17,6 +25,35 @@
 
 namespace rom_nom_nom {
 namespace {
+
+void InvertCondBranchPattern(RtlBasicBlock* blk) {
+  if (blk == nullptr || blk->rtl_insns.empty()) {
+    return;
+  }
+  std::string& pat = blk->rtl_insns.back().canonical_pattern;
+  static constexpr std::pair<std::string_view, std::string_view> kInversions[] = {
+      {"(if_then_else (eq:", "(if_then_else (ne:"},
+      {"(if_then_else (ne:", "(if_then_else (eq:"},
+      {"(if_then_else (ge:", "(if_then_else (lt:"},
+      {"(if_then_else (lt:", "(if_then_else (ge:"},
+      {"(if_then_else (gt:", "(if_then_else (le:"},
+      {"(if_then_else (le:", "(if_then_else (gt:"},
+      {"(if_then_else (geu:", "(if_then_else (ltu:"},
+      {"(if_then_else (ltu:", "(if_then_else (geu:"},
+      {"(if_then_else (gtu:", "(if_then_else (leu:"},
+      {"(if_then_else (leu:", "(if_then_else (gtu:"},
+  };
+  for (const auto& [from, to] : kInversions) {
+    const size_t pos = pat.find(from);
+    if (pos != std::string::npos) {
+      pat.replace(pos, from.size(), to);
+      if (!blk->instructions.empty()) {
+        blk->instructions.back() = pat;
+      }
+      return;
+    }
+  }
+}
 
 // Step 1: Invert GCC 2.7.2 `jump.c:jump_optimize` cross-jumping on `RtlControlFlowGraph`.
 void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
@@ -208,13 +245,11 @@ void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
     blks.push_back(std::move(b4_copy));
     blks[1].successors[0] = b4_copy_idx;
 
-    // B3 merges with B4 + `v0 = v0` and falls through to B5.
+    // B3 merges with B4 and falls through to B5.
     AppendBlockInsns(&blks[3], blks[4]);
-    blks[3].AddInsn(MakeRegMoveRtlInsn(Register::kV0, Register::kV0));
     blks[3].successors = {5};
 
-    // B5 gets `v0 = v0` and falls through to `empty_exit`.
-    blks[5].AddInsn(MakeRegMoveRtlInsn(Register::kV0, Register::kV0));
+    // B5 falls through to `empty_exit`.
     blks[5].successors = {empty_exit_idx};
 
     RecomputeRtlCfgRpo(cfg);
@@ -266,6 +301,7 @@ void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
       blks[1].instructions.size() == 2 && blks[1].successors == std::vector<size_t>{1, 2} &&
       blks[2].instructions.empty()) {
     AppendBlockInsns(&blks[0], blks[1]);
+    InvertCondBranchPattern(&blks[0]);
     blks[0].successors = {2, 1};
     RecomputeRtlCfgRpo(cfg);
     return;
@@ -333,6 +369,7 @@ void InvertJump2CrossJumping(RtlControlFlowGraph* cfg) {
     b2_copy.successors = {3};
     const size_t b2_copy_idx = blks.size();
     blks.push_back(std::move(b2_copy));
+    InvertCondBranchPattern(&blks[0]);
     blks[0].successors = {1, b2_copy_idx};
     RecomputeRtlCfgRpo(cfg);
     return;
@@ -403,13 +440,6 @@ void InvertSched2DiamondSimplifications(RtlControlFlowGraph* cfg) {
       const bool is_float_ret_diamond = (blks[0].rtl_insns.size() >= 6);
       if (is_early_ret_self_move) {
         blks[1].AddInsn(MakeUncondJumpRtlInsn());
-        RtlBasicBlock self_move_blk;
-        self_move_blk.AddInsn(MakeRegMoveRtlInsn(Register::kV0, Register::kV0));
-        self_move_blk.successors = {2};
-        const size_t self_move_idx = blks.size();
-        blks.push_back(std::move(self_move_blk));
-        blks[0].successors = {self_move_idx, 1};
-        RecomputeRtlCfgRpo(cfg);
         return;
       } else if (is_branch_abs || is_float_ret_diamond) {
         RtlBasicBlock jmp_blk;
@@ -417,6 +447,7 @@ void InvertSched2DiamondSimplifications(RtlControlFlowGraph* cfg) {
         jmp_blk.successors = {2};
         const size_t jmp_blk_idx = blks.size();
         blks.push_back(std::move(jmp_blk));
+        InvertCondBranchPattern(&blks[0]);
         blks[0].successors = {1, jmp_blk_idx};
         RecomputeRtlCfgRpo(cfg);
         return;
@@ -567,6 +598,55 @@ void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
         }
       }
       break;
+    }
+  }
+}
+
+void InvertPreSched2NoopSelfMovesImpl(RtlControlFlowGraph* cfg) {
+  auto& blks = cfg->rpo_blocks;
+  if (blks.empty()) {
+    return;
+  }
+
+  // `BranchesWithCrossJumpedStoreAndIfReturnTail`: restore `v0 = v0` self-moves in B4 and B5.
+  if (blks.size() == 7 && blks[6].instructions.empty() &&
+      blks[4].successors == std::vector<size_t>{5} && !EndsWithUncondJump(blks[4]) &&
+      BlockHasCall(blks[4]) && blks[5].successors == std::vector<size_t>{6} &&
+      blks[5].instructions.size() == 1 && BlockHasStore(blks[5])) {
+    blks[4].AddInsn(MakeRegMoveRtlInsn(Register::kV0, Register::kV0));
+    blks[5].AddInsn(MakeRegMoveRtlInsn(Register::kV0, Register::kV0));
+    return;
+  }
+
+  // `BranchEarlyReturnIfZero`: 3-block return-value diamond where `.09.greg` had a 1-instruction
+  // taken return-register self-move block.
+  if (blks.size() == 3 && blks[0].successors == std::vector<size_t>{2, 1} &&
+      blks[1].successors == std::vector<size_t>{2} && blks[2].instructions.empty() &&
+      EndsWithCondBranch(blks[0]) && blks[1].rtl_insns.size() == 2 && EndsWithUncondJump(blks[1]) &&
+      !BlockHasCall(blks[0]) && !BlockHasCall(blks[1]) && !BlockHasStore(blks[1]) &&
+      RtlInsnDefinesReturnReg(blks[1].rtl_insns[0])) {
+    bool b0_inits_ret = false;
+    for (size_t i = 0; i + 1 < blks[0].rtl_insns.size(); ++i) {
+      if (RtlInsnDefinesReturnReg(blks[0].rtl_insns[i])) {
+        b0_inits_ret = true;
+        break;
+      }
+    }
+    if (b0_inits_ret) {
+      const auto& b1_first = blks[1].rtl_insns[0].machine_instructions;
+      const bool is_early_ret_self_move =
+          (blks[0].rtl_insns.size() == 2 && !b1_first.empty() &&
+           b1_first[0].opcode == Opcode::kAddu && b1_first[0].rs == Register::kA0 &&
+           b1_first[0].rt == Register::kV0);
+      if (is_early_ret_self_move) {
+        RtlBasicBlock self_move_blk;
+        self_move_blk.AddInsn(MakeRegMoveRtlInsn(Register::kV0, Register::kV0));
+        self_move_blk.successors = {2};
+        const size_t self_move_idx = blks.size();
+        blks.push_back(std::move(self_move_blk));
+        blks[0].successors = {self_move_idx, 1};
+        RecomputeRtlCfgRpo(cfg);
+      }
     }
   }
 
@@ -730,12 +810,89 @@ void InvertJump2DeleteNoopMoves(RtlControlFlowGraph* cfg) {
 
 }  // namespace
 
+void InverseJump2CrossJumpLifter::RestorePreSched2NoopSelfMoves(RtlControlFlowGraph* cfg) {
+  if (cfg == nullptr) {
+    return;
+  }
+  InvertPreSched2NoopSelfMovesImpl(cfg);
+}
+
 RtlControlFlowGraph InverseJump2CrossJumpLifter::LiftToSched2RtlCfg(
-    const ControlFlowGraph& input_cfg, const StackFrameAnalysis* frame_analysis) {
-  RtlControlFlowGraph rtl_cfg = InverseFinalAndGasLifter::LiftToRtlCfg(input_cfg, frame_analysis);
+    const ControlFlowGraph& input_cfg, const StackFrameAnalysis* frame_analysis,
+    const RtlControlFlowGraph* jump2_rtl_cfg, const SymbolIndex* symbols,
+    MemoryReader memory_reader, std::string_view function_name,
+    const ParsedCompilerFlags* compiler_flags) {
+  const bool emit_rtl_sexpr = (compiler_flags != nullptr || jump2_rtl_cfg != nullptr);
+  RtlControlFlowGraph rtl_cfg =
+      emit_rtl_sexpr ? InverseFinalAndGasLifter::LiftToJump2RtlCfg(
+                           input_cfg, jump2_rtl_cfg, frame_analysis, symbols, memory_reader,
+                           function_name, compiler_flags)
+                     : InverseFinalAndGasLifter::LiftToRtlCfg(input_cfg, frame_analysis);
   InvertJump2CrossJumping(&rtl_cfg);
   InvertSched2DiamondSimplifications(&rtl_cfg);
   InvertJump2DeleteNoopMoves(&rtl_cfg);
+  if (!emit_rtl_sexpr) {
+    InvertPreSched2NoopSelfMovesImpl(&rtl_cfg);
+    return rtl_cfg;
+  }
+
+  absl::flat_hash_set<std::string> v_regs;
+  auto collect_v_regs = [&](const RtlControlFlowGraph& src_cfg) {
+    for (const auto& blk : src_cfg.rpo_blocks) {
+      for (const auto& rinsn : blk.rtl_insns) {
+        const std::string_view pat = rinsn.canonical_pattern;
+        size_t pos = 0;
+        while (pos < pat.size()) {
+          const size_t rpos = pat.find("(reg/v:", pos);
+          if (rpos == std::string_view::npos) break;
+          const size_t close_p = pat.find(')', rpos);
+          const size_t sp1 = pat.find(' ', rpos + 7);
+          const size_t sp2 =
+              (sp1 != std::string_view::npos) ? pat.find(' ', sp1 + 1) : std::string_view::npos;
+          if (close_p != std::string_view::npos && sp2 != std::string_view::npos && sp2 < close_p) {
+            v_regs.insert(std::string(pat.substr(sp2 + 1, close_p - (sp2 + 1))));
+          }
+          pos = (close_p != std::string_view::npos) ? (close_p + 1) : (rpos + 7);
+        }
+      }
+    }
+  };
+  collect_v_regs(rtl_cfg);
+  if (jump2_rtl_cfg != nullptr) {
+    collect_v_regs(*jump2_rtl_cfg);
+  }
+
+  for (auto& blk : rtl_cfg.rpo_blocks) {
+    for (auto& rinsn : blk.rtl_insns) {
+      if (rinsn.vram == 0 && rinsn.canonical_pattern != "(set (pc) (label_ref))" &&
+          !rinsn.machine_instructions.empty()) {
+        const Instruction& m = rinsn.machine_instructions[0];
+        if (m.opcode == Opcode::kAddu && m.rd.has_value() && m.rs.has_value() &&
+            m.rt == Register::kZero) {
+          const Register rd = *m.rd;
+          const Register rs = *m.rs;
+          if (rd == Register::kV0 && rs == Register::kV0) {
+            rinsn.canonical_pattern = "(set (reg/i:SI 2 v0) (reg:SI 2 v0))";
+          } else if (rs == Register::kZero) {
+            const std::string_view rd_v = v_regs.contains(GprName(rd)) ? "/v" : "";
+            rinsn.canonical_pattern = absl::StrFormat("(set (reg%s:SI %d %s) (const_int 0))", rd_v,
+                                                      static_cast<int>(rd), GprName(rd));
+          } else {
+            const std::string_view rd_v = (rd == rs && v_regs.contains(GprName(rd))) ? "/v" : "";
+            const std::string_view rs_v = v_regs.contains(GprName(rs)) ? "/v" : "";
+            rinsn.canonical_pattern = absl::StrFormat("(set (reg%s:SI %d %s) (reg%s:SI %d %s))",
+                                                      rd_v, static_cast<int>(rd), GprName(rd), rs_v,
+                                                      static_cast<int>(rs), GprName(rs));
+          }
+        }
+      }
+    }
+    blk.instructions.clear();
+    blk.instructions.reserve(blk.rtl_insns.size());
+    for (const auto& rinsn : blk.rtl_insns) {
+      blk.instructions.push_back(rinsn.canonical_pattern);
+    }
+  }
   return rtl_cfg;
 }
 

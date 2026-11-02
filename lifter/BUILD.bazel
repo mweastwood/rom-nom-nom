@@ -779,10 +779,15 @@ cc_library(
         ":rtl_cfg",
         ":rtl_cfg_builder",
         ":stack_frame_analyzer",
+        "//core:compiler_flags",
         "//core:control_flow_graph",
+        "//core:jump_table",
         "//core:mips",
+        "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 
@@ -807,6 +812,8 @@ cc_library(
     srcs = ["inverse_sched2_post_reload_stage.cc"],
     hdrs = ["inverse_sched2_post_reload_stage.h"],
     deps = [
+        ":inverse_final_and_gas_stage",
+        ":inverse_jump2_cross_jump_stage",
         ":rtl_cfg",
         ":rtl_cfg_builder",
         ":rtl_def_use_analysis",

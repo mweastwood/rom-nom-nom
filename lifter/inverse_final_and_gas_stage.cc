@@ -2959,7 +2959,7 @@ RtlControlFlowGraph InverseFinalAndGasLifter::LiftToJump2RtlCfg(
   if (dbr_rtl_cfg != nullptr) {
     for (const auto& dblk : dbr_rtl_cfg->rpo_blocks) {
       for (const auto& dr : dblk.rtl_insns) {
-        if (dr.vram != 0) {
+        if (dr.vram != 0 && dr.canonical_pattern != "(set (pc) (label_ref))") {
           vram_to_dbr[dr.vram] = &dr;
         }
         const std::string_view pat = dr.canonical_pattern;

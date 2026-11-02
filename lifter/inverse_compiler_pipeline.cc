@@ -124,8 +124,10 @@ absl::Status InverseJump2CrossJumpStage::Run(DecompilationContext* context) {
   CfgAnalysisManager stage2_analyses(&stage2_cfg);
   stage2_analyses.SetFlags(context->Flags());
   CfgDeReorg::UnscheduleDelaySlotsOnly(&stage2_cfg, &stage2_analyses);
+  const RtlControlFlowGraph jump2_rtl_cfg = context->RtlCfg();
   context->SetRtlCfg(InverseJump2CrossJumpLifter::LiftToSched2RtlCfg(
-      stage2_cfg, &context->FrameLayout().RawAnalysis()));
+      stage2_cfg, &context->FrameLayout().RawAnalysis(), &jump2_rtl_cfg, context->Symbols(),
+      context->Function().memory_reader, context->FunctionName(), &context->Flags()));
   return absl::OkStatus();
 }
 

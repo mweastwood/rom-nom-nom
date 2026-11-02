@@ -14,6 +14,8 @@
 #include "absl/strings/match.h"
 #include "core/mips.h"
 #include "core/symbol_registry.h"
+#include "lifter/inverse_final_and_gas_stage.h"
+#include "lifter/inverse_jump2_cross_jump_stage.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/rtl_cfg_builder.h"
 #include "lifter/rtl_def_use_analysis.h"
@@ -948,6 +950,18 @@ void InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
   if (cfg == nullptr) {
     return;
   }
+  const bool had_rtl_sexpr = [&]() {
+    for (const auto& blk : cfg->rpo_blocks) {
+      for (const auto& rinsn : blk.rtl_insns) {
+        if (absl::StartsWith(rinsn.canonical_pattern, "(") &&
+            !absl::StartsWith(rinsn.canonical_pattern, "(set (pc)") &&
+            !absl::StartsWith(rinsn.canonical_pattern, "(parallel[ (set (pc)")) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }();
   // Step 1: Invert `function.c:thread_prologue_and_epilogue_insns` (`mips_expand_prologue`),
   // which emitted RTL prologue instructions into `basic_block_head[0]` after `.greg` and before
   // `.sched2`.
@@ -960,11 +974,26 @@ void InverseSched2PostReloadLifter::InvertSched2ToGregRtlCfg(
       if (blk.rtl_insns[i].is_prologue_insn) {
         continue;
       }
+      if (!blk.rtl_insns[i].machine_instructions.empty() &&
+          absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(") &&
+          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(set (pc)") &&
+          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(parallel[ (set (pc)")) {
+        const Instruction& rep_inst =
+            (blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiSf2 ||
+             blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiDf2)
+                ? blk.rtl_insns[i].machine_instructions.back()
+                : blk.rtl_insns[i].machine_instructions.front();
+        blk.rtl_insns[i].canonical_pattern =
+            InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(rep_inst);
+      }
       kept_pats.push_back(blk.rtl_insns[i].canonical_pattern);
       kept_insns.push_back(std::move(blk.rtl_insns[i]));
     }
     blk.rtl_insns = std::move(kept_insns);
     blk.instructions = std::move(kept_pats);
+  }
+  if (had_rtl_sexpr) {
+    InverseJump2CrossJumpLifter::RestorePreSched2NoopSelfMoves(cfg);
   }
 
   // Step 2: Invert `sched.c:schedule_insns` post-reload self-move elimination across all 5 GCC

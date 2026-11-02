@@ -110,6 +110,17 @@ TEST(InverseJump2CrossJumpStageTest, RecoversSched2CallerArgMoveBeforeFirstCall)
   EXPECT_EQ(stage1_rtl.rpo_blocks[0].instructions.size(), 6u);
   ASSERT_EQ(stage2_rtl.rpo_blocks[0].instructions.size(), 7u);
   EXPECT_EQ(stage2_rtl.rpo_blocks[0].instructions[4], "addu  $a0, $s0, $zero");
+
+  const ParsedCompilerFlags flags = ParsedCompilerFlags::Parse("-O2 -Wa,-g");
+  RtlControlFlowGraph dbr_rtl = InverseFinalAndGasLifter::LiftToDbrRtlCfg(
+      context.Cfg(), &context.FrameLayout().RawAnalysis(), nullptr, nullptr, func.name, &flags);
+  RtlControlFlowGraph jump2_rtl = InverseFinalAndGasLifter::LiftToJump2RtlCfg(
+      cfg, &dbr_rtl, &context.FrameLayout().RawAnalysis(), nullptr, nullptr, func.name, &flags);
+  RtlControlFlowGraph sched2_sexpr_rtl = InverseJump2CrossJumpLifter::LiftToSched2RtlCfg(
+      cfg, &context.FrameLayout().RawAnalysis(), &jump2_rtl, nullptr, nullptr, func.name, &flags);
+  ASSERT_EQ(sched2_sexpr_rtl.rpo_blocks.size(), 1u);
+  ASSERT_EQ(sched2_sexpr_rtl.rpo_blocks[0].instructions.size(), 7u);
+  EXPECT_EQ(sched2_sexpr_rtl.rpo_blocks[0].instructions[4], "(set (reg:SI 4 a0) (reg:SI 16 s0))");
 }
 
 }  // namespace
