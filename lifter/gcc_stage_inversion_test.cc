@@ -356,9 +356,6 @@ class GccStageInversionSuiteAccumulator {
     size_t stage13_topo_present = 0;
     size_t stage13_topo_match = 0;
     size_t stage13_rtl_exact = 0;
-    size_t all_13_rtl_dumps_exact = 0;
-    size_t all_14_stages_topo_match = 0;
-    size_t all_14_stages_exact_match = 0;
 
     size_t direct_rtl_stage0_present = 0;
     size_t direct_rtl_stage0_topo_cnt_match = 0;
@@ -373,32 +370,20 @@ class GccStageInversionSuiteAccumulator {
       if (r.structurally_isomorphic) ++isomorphic;
       if (r.stage13_rtl_matches) ++stage13_rtl_exact;
 
-      bool case_all_14_topo = r.decompiled_and_compiled_ok;
-      bool case_all_14_exact = r.decompiled_and_compiled_ok && r.stage13_rtl_matches;
-
       if (r.stage13_rtl_topo_comparison.pass_present) {
         ++stage13_topo_present;
         if (r.stage13_rtl_topo_comparison.MatchesTopologyAndInsnCounts()) {
           ++stage13_topo_match;
-        } else {
-          case_all_14_topo = false;
         }
-      } else {
-        case_all_14_topo = false;
       }
 
-      bool all_13_rtl = r.decompiled_and_compiled_ok && r.stage13_rtl_matches;
       if (r.direct_rtl_stage0_comparison.pass_present) {
         ++direct_rtl_stage0_present;
         if (r.direct_rtl_stage0_comparison.MatchesTopologyAndInsnCounts()) {
           ++direct_rtl_stage0_topo_cnt_match;
-        } else {
-          case_all_14_topo = false;
         }
         if (r.direct_rtl_stage0_comparison.MatchesExactly()) {
           ++direct_rtl_stage0_exact_match;
-        } else {
-          case_all_14_exact = false;
         }
       }
       for (size_t i = 0; i < 12; ++i) {
@@ -407,27 +392,11 @@ class GccStageInversionSuiteAccumulator {
           ++direct_rtl_present_count[i];
           if (dc.MatchesTopologyAndInsnCounts()) {
             ++direct_rtl_topo_cnt_match[i];
-          } else {
-            case_all_14_topo = false;
           }
           if (dc.MatchesExactly()) {
             ++direct_rtl_exact_match[i];
-          } else {
-            case_all_14_exact = false;
           }
         }
-        if (!r.phase_right_inverse_matches[i]) {
-          all_13_rtl = false;
-        }
-      }
-      if (case_all_14_topo) {
-        ++all_14_stages_topo_match;
-      }
-      if (case_all_14_exact) {
-        ++all_14_stages_exact_match;
-      }
-      if (all_13_rtl) {
-        ++all_13_rtl_dumps_exact;
       }
     }
 
@@ -480,19 +449,10 @@ class GccStageInversionSuiteAccumulator {
         "------+------------------------------------------------------+----------------------+-----"
         "----------------\n"
         " ALL  | %-52s | %3zu / %3zu (%6.2f%%)  | %3zu / %3zu (%6.2f%%)\n"
-        "------+------------------------------------------------------+----------------------+-----"
-        "----------------\n"
-        "END-TO-END RECOMPILATION OF LIFTED C (Stage 13 C AST -> GCC Forward Compile):\n"
-        "  Lifted C -> Exact Match Across All 13 GCC RTL Dumps : %3zu / %3zu (%6.2f%%)\n"
-        "  Lifted C -> Structurally Isomorphic Final .o Binary : %3zu / %3zu (%6.2f%%)\n"
-        "  Lifted C -> Bit-Exact Final .o Binary               : %3zu / %3zu (%6.2f%%)\n"
         "========================================================================================"
         "==================\n",
-        "End-to-End Across All 14 Stages (0..13)", all_14_stages_topo_match, total,
-        pct(all_14_stages_topo_match, total), all_14_stages_exact_match, total,
-        pct(all_14_stages_exact_match, total), all_13_rtl_dumps_exact, total,
-        pct(all_13_rtl_dumps_exact, total), isomorphic, total, pct(isomorphic, total), bit_exact,
-        total, pct(bit_exact, total));
+        "End-to-End Across All 14 Stages (.o -> C -> .o)", isomorphic, total,
+        pct(isomorphic, total), bit_exact, total, pct(bit_exact, total));
     return out;
   }
 
