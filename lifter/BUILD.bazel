@@ -922,6 +922,29 @@ cc_test(
 )
 
 cc_library(
+    name = "inverse_cse2_post_loop_stage",
+    srcs = ["inverse_cse2_post_loop_stage.cc"],
+    hdrs = ["inverse_cse2_post_loop_stage.h"],
+    deps = [
+        ":rtl_cfg",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "inverse_cse2_post_loop_stage_test",
+    srcs = ["inverse_cse2_post_loop_stage_test.cc"],
+    deps = [
+        ":inverse_cse2_post_loop_stage",
+        ":rtl_cfg",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "decompilation_context",
     srcs = ["decompilation_context.cc"],
     hdrs = ["decompilation_context.h"],
@@ -954,6 +977,7 @@ cc_library(
         ":decompilation_context",
         ":dominator_tree",
         ":inverse_combine_stage",
+        ":inverse_cse2_post_loop_stage",
         ":inverse_final_and_gas_stage",
         ":inverse_flow_life_analysis_stage",
         ":inverse_greg_reload_stage",
