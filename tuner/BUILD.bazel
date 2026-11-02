@@ -202,13 +202,13 @@ cc_test(
 
 cc_test(
     name = "round_trip_test",
-    size = "small",
+    size = "medium",
     srcs = ["round_trip_test.cc"],
     copts = ["-std=c++20"],
     data = [
         "//toolchain:all_files",
     ],
-    shard_count = 8,
+    shard_count = 16,
     deps = [
         ":ast_mutator",
         ":candidate_scorer",

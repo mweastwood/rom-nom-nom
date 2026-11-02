@@ -1,10 +1,37 @@
 #include "core/round_trip_test_cases.h"
 
+#include <string>
 #include <vector>
 
 namespace rom_nom_nom {
 
-const std::vector<RoundTripTestCase>& GetSharedRoundTripTestCases() {
+const std::vector<RoundTripCompilerFlagProfile>& GetRoundTripCompilerFlagProfiles() {
+  static const auto* const k_profiles = new std::vector<RoundTripCompilerFlagProfile>{
+      RoundTripCompilerFlagProfile{
+          .suffix = "O0_WaG",
+          .c_flags = {"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+      },
+      RoundTripCompilerFlagProfile{
+          .suffix = "O1_WaG",
+          .c_flags = {"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+      },
+      RoundTripCompilerFlagProfile{
+          .suffix = "O2_WaG",
+          .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+      },
+      RoundTripCompilerFlagProfile{
+          .suffix = "O2_WaO2",
+          .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+      },
+      RoundTripCompilerFlagProfile{
+          .suffix = "O3_WaG",
+          .c_flags = {"-O3", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+      },
+  };
+  return *k_profiles;
+}
+
+const std::vector<RoundTripTestCase>& GetBaseRoundTripTestCases() {
   static const auto* const k_cases = new std::vector<RoundTripTestCase>{
       RoundTripTestCase{
           .test_name = "ArithmeticAddTwo",
@@ -5588,8 +5615,8 @@ void DuplicateRomSegmentSymbolsAcrossMultipleCallsAvoidCse(void) {
 )",
       },
       RoundTripTestCase{
-          .test_name = "O0FramePointerStructFieldAndCall",
-          .function_name = "O0FramePointerStructFieldAndCall",
+          .test_name = "StructFieldAddAndConditionalNotifyCall",
+          .function_name = "StructFieldAddAndConditionalNotifyCall",
           .original_c = R"(
 typedef struct {
     s32 id;
@@ -5599,20 +5626,17 @@ typedef struct {
 
 void notify_node(s32 id, s32 val);
 
-void O0FramePointerStructFieldAndCall(NodeState* node, s32 delta) {
+void StructFieldAddAndConditionalNotifyCall(NodeState* node, s32 delta) {
     node->count = node->count + delta;
     if (node->flags != 0) {
         notify_node(node->id, node->count);
     }
 }
 )",
-          .options = {
-              .c_flags = {"-O0", "-mips2", "-mcpu=r4000"},
-          },
       },
       RoundTripTestCase{
-          .test_name = "O0FramePointerWhileLoopAndUnsignedByteStore",
-          .function_name = "O0FramePointerWhileLoopAndUnsignedByteStore",
+          .test_name = "WhileLoopZeroFillAndStructUnsignedByteStores",
+          .function_name = "WhileLoopZeroFillAndStructUnsignedByteStores",
           .original_c = R"(
 typedef struct {
     s32 count;
@@ -5621,7 +5645,7 @@ typedef struct {
     u16 mask;
 } ChannelState;
 
-void O0FramePointerWhileLoopAndUnsignedByteStore(ChannelState* ch, u8* buf) {
+void WhileLoopZeroFillAndStructUnsignedByteStores(ChannelState* ch, u8* buf) {
     s32 i = 0;
     while (i < ch->count) {
         *buf++ = 0;
@@ -5632,9 +5656,6 @@ void O0FramePointerWhileLoopAndUnsignedByteStore(ChannelState* ch, u8* buf) {
     ch->limit = 127;
 }
 )",
-          .options = {
-              .c_flags = {"-O0", "-mips2", "-mcpu=r4000"},
-          },
       },
       RoundTripTestCase{
           .test_name = "NonLeafFloatScratchStoreBeforeHelperCall",
@@ -7495,10 +7516,10 @@ f32 ShortCircuitFloatBoundsWithIndexedFallbackTable(u16 mode, u16 idx, f32 val) 
 )",
       },
       RoundTripTestCase{
-          .test_name = "O0FramePointerByteFillAndWordPostIncrement",
-          .function_name = "O0FramePointerByteFillAndWordPostIncrement",
+          .test_name = "ByteFillAndWordPostIncrementWhileLoop",
+          .function_name = "ByteFillAndWordPostIncrementWhileLoop",
           .original_c = R"(
-s32 O0FramePointerByteFillAndWordPostIncrement(s32* dst, s32 val, s32 count) {
+s32 ByteFillAndWordPostIncrementWhileLoop(s32* dst, s32 val, s32 count) {
     s32 fill = (u8)val;
     s32* p = dst;
     while (count-- != 0) {
@@ -7507,7 +7528,6 @@ s32 O0FramePointerByteFillAndWordPostIncrement(s32* dst, s32 val, s32 count) {
     return fill;
 }
 )",
-          .options = {.c_flags = {"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"}},
       },
       RoundTripTestCase{
           .test_name = "LoopWithNestedConditionAndMergedLatchIncrement",
@@ -7689,6 +7709,25 @@ s32 TwoCalleeSavedLocalsDeclaredInReverseAppearanceOrder(s32 x, s32 y) {
       },
   };
   return *k_cases;
+}
+
+const std::vector<RoundTripTestCase>& GetSharedRoundTripTestCases() {
+  static const auto* const k_expanded_cases = []() {
+    const auto& base_cases = GetBaseRoundTripTestCases();
+    const auto& profiles = GetRoundTripCompilerFlagProfiles();
+    auto* expanded = new std::vector<RoundTripTestCase>();
+    expanded->reserve(base_cases.size() * profiles.size());
+    for (const auto& base_case : base_cases) {
+      for (const auto& profile : profiles) {
+        RoundTripTestCase tc = base_case;
+        tc.test_name = base_case.test_name + "_" + profile.suffix;
+        tc.options.c_flags = profile.c_flags;
+        expanded->push_back(std::move(tc));
+      }
+    }
+    return expanded;
+  }();
+  return *k_expanded_cases;
 }
 
 }  // namespace rom_nom_nom

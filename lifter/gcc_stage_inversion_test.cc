@@ -504,11 +504,38 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     inspector = new GccRtlDumpInspector(std::move(*inspector_or));
 
     const auto& cases = GetSharedRoundTripTestCases();
-    std::vector<CaseInversionResult> precomputed(cases.size());
+    absl::flat_hash_set<std::string> active_test_names;
+    if (const auto* unit_test = ::testing::UnitTest::GetInstance(); unit_test != nullptr) {
+      for (int s = 0; s < unit_test->total_test_suite_count(); ++s) {
+        const auto* suite = unit_test->GetTestSuite(s);
+        if (suite == nullptr) continue;
+        for (int t = 0; t < suite->total_test_count(); ++t) {
+          const auto* info = suite->GetTestInfo(t);
+          if (info != nullptr && info->should_run()) {
+            std::string_view full_name = info->name();
+            const size_t slash = full_name.rfind('/');
+            if (slash != std::string_view::npos) {
+              active_test_names.emplace(full_name.substr(slash + 1));
+            } else {
+              active_test_names.emplace(full_name);
+            }
+          }
+        }
+      }
+    }
+    std::vector<size_t> active_indices;
+    active_indices.reserve(cases.size());
+    for (size_t i = 0; i < cases.size(); ++i) {
+      if (active_test_names.empty() || active_test_names.contains(cases[i].test_name)) {
+        active_indices.push_back(i);
+      }
+    }
+
+    std::vector<CaseInversionResult> precomputed(active_indices.size());
     std::atomic<size_t> next_idx{0};
     unsigned int hw_threads = std::thread::hardware_concurrency();
     const size_t num_workers =
-        std::max<size_t>(1, std::min<size_t>(hw_threads == 0 ? 8 : hw_threads, 16));
+        std::max<size_t>(1, std::min<size_t>(hw_threads == 0 ? 8 : hw_threads, 32));
 
     std::vector<std::thread> workers;
     workers.reserve(num_workers);
@@ -516,10 +543,10 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       workers.emplace_back([&]() {
         while (true) {
           size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
-          if (idx >= cases.size()) {
+          if (idx >= active_indices.size()) {
             break;
           }
-          precomputed[idx] = EvaluateTestCase(cases[idx]);
+          precomputed[idx] = EvaluateTestCase(cases[active_indices[idx]]);
         }
       });
     }
@@ -528,7 +555,7 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     }
 
     precomputed_results = new absl::flat_hash_map<std::string, CaseInversionResult>();
-    precomputed_results->reserve(cases.size());
+    precomputed_results->reserve(precomputed.size());
     for (auto& r : precomputed) {
       (*precomputed_results)[r.test_name] = std::move(r);
     }
@@ -572,12 +599,14 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
     const PreparedRoundTripCase& prepared = *prepared_or;
 
     // 1. Build `-fno-delayed-branch` reference CFG (exact binary input to GCC Stage 12 `reorg.c`).
-    std::vector<std::string> no_dbr_flags = test_case.options.c_flags;
-    no_dbr_flags.push_back("-fno-delayed-branch");
-    if (std::find(no_dbr_flags.begin(), no_dbr_flags.end(), "-O0") != no_dbr_flags.end() &&
-        std::find(no_dbr_flags.begin(), no_dbr_flags.end(), "-Wa,-g") == no_dbr_flags.end()) {
-      no_dbr_flags.push_back("-Wa,-g");
+    std::vector<std::string> no_dbr_flags;
+    for (const auto& flag : test_case.options.c_flags) {
+      if (!absl::StartsWith(flag, "-Wa,")) {
+        no_dbr_flags.push_back(flag);
+      }
     }
+    no_dbr_flags.push_back("-fno-delayed-branch");
+    no_dbr_flags.push_back("-Wa,-g");
     std::filesystem::path orig_no_dbr_o =
         work_dir / absl::StrCat("orig_no_dbr_", test_case.function_name, ".o");
     auto no_dbr_status = prepared.compiler->CompileC({
