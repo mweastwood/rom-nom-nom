@@ -40,7 +40,9 @@ bool StackFrameLayout::IsCalleeSavedSpillOffset(int32_t sp_offset) const {
 
 DecompilationContext::DecompilationContext(const LoadedFunction& loaded_function,
                                            InterProceduralAbiContext abi_context)
-    : loaded_function_(loaded_function), abi_context_(abi_context) {}
+    : loaded_function_(loaded_function),
+      abi_context_(abi_context),
+      compiler_flags_(loaded_function.compiler_flags) {}
 
 absl::Status DecompilationContext::BuildCfg() {
   if (loaded_function_.instructions.empty()) {
@@ -68,8 +70,9 @@ void DecompilationContext::LiftCfgToRtl() {
     return;
   }
   const StackFrameLayout& layout = FrameLayout();
-  rtl_cfg_ = InverseFinalAndGasLifter::LiftToDbrRtlCfg(
-      *cfg_, &layout.RawAnalysis(), Symbols(), loaded_function_.memory_reader, FunctionName());
+  rtl_cfg_ = InverseFinalAndGasLifter::LiftToDbrRtlCfg(*cfg_, &layout.RawAnalysis(), Symbols(),
+                                                       loaded_function_.memory_reader,
+                                                       FunctionName(), &compiler_flags_);
 }
 
 const StackFrameLayout& DecompilationContext::FrameLayout() {

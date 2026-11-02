@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 
+#include "core/compiler_flags.h"
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
 #include "core/mips.h"
@@ -29,7 +30,8 @@ class InverseFinalAndGasLifter {
  public:
   // Lifts a machine `ControlFlowGraph` into a canonical `RtlControlFlowGraph`.
   static RtlControlFlowGraph LiftToRtlCfg(const ControlFlowGraph& input_cfg,
-                                          const StackFrameAnalysis* frame_analysis = nullptr);
+                                          const StackFrameAnalysis* frame_analysis = nullptr,
+                                          const ParsedCompilerFlags* compiler_flags = nullptr);
 
   // Lifts a machine `ControlFlowGraph` into a `.12.dbr` `RtlControlFlowGraph` with full GCC 2.7.2
   // RTL S-expression patterns (`final.c` + `config/mips/mips.md`).
@@ -37,7 +39,8 @@ class InverseFinalAndGasLifter {
                                              const StackFrameAnalysis* frame_analysis = nullptr,
                                              const SymbolIndex* symbols = nullptr,
                                              MemoryReader memory_reader = nullptr,
-                                             std::string_view function_name = "");
+                                             std::string_view function_name = "",
+                                             const ParsedCompilerFlags* compiler_flags = nullptr);
 
   // Lifts an unscheduled `.11.jump2` machine `ControlFlowGraph` into a `.11.jump2`
   // `RtlControlFlowGraph`, using the Stage 0 `.12.dbr` `RtlControlFlowGraph` (`dbr_rtl_cfg`) to
@@ -47,7 +50,8 @@ class InverseFinalAndGasLifter {
                                                const StackFrameAnalysis* frame_analysis = nullptr,
                                                const SymbolIndex* symbols = nullptr,
                                                MemoryReader memory_reader = nullptr,
-                                               std::string_view function_name = "");
+                                               std::string_view function_name = "",
+                                               const ParsedCompilerFlags* compiler_flags = nullptr);
 
   // Formats a single MIPS instruction into its canonical GCC 2.7.2 RTL pattern string.
   static std::string FormatMipsInstAsCanonicalRtl(const Instruction& inst);

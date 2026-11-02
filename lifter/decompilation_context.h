@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "core/c_ast.h"
+#include "core/compiler_flags.h"
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
 #include "core/mips.h"
@@ -126,6 +127,8 @@ class DecompilationContext {
   const SymbolIndex* Symbols() const { return loaded_function_.symbol_index; }
   const GameConfig* Config() const { return loaded_function_.game_config; }
   const InterProceduralAbiContext& AbiContext() const { return abi_context_; }
+  const ParsedCompilerFlags& Flags() const { return compiler_flags_; }
+  void SetFlags(ParsedCompilerFlags flags) { compiler_flags_ = std::move(flags); }
 
   // Stage 1: Build the ControlFlowGraph and detect jump tables from raw instructions.
   absl::Status BuildCfg();
@@ -175,6 +178,7 @@ class DecompilationContext {
  private:
   const LoadedFunction& loaded_function_;
   InterProceduralAbiContext abi_context_;
+  ParsedCompilerFlags compiler_flags_;
   std::vector<JumpTable> jump_tables_;
   std::optional<ControlFlowGraph> cfg_;
   std::optional<RtlControlFlowGraph> rtl_cfg_;

@@ -638,6 +638,7 @@ cc_library(
     hdrs = ["function_loader.h"],
     visibility = ["//tuner:__pkg__"],
     deps = [
+        "//core:compiler_flags",
         "//core:game_config",
         "//core:jump_table",
         "//core:mips",
@@ -732,7 +733,6 @@ cc_test(
 cc_library(
     name = "inverse_final_and_gas_stage",
     srcs = [
-        "dbr_flag_recovery_tables.inc",
         "inverse_final_and_gas_stage.cc",
     ],
     hdrs = ["inverse_final_and_gas_stage.h"],
@@ -741,6 +741,7 @@ cc_library(
         ":abi_analyzer",
         ":rtl_cfg",
         ":stack_frame_analyzer",
+        "//core:compiler_flags",
         "//core:control_flow_graph",
         "//core:division_pattern",
         "//core:jump_table",
@@ -1083,6 +1084,7 @@ cc_library(
         ":rtl_cfg",
         ":stack_frame_analyzer",
         "//core:c_ast",
+        "//core:compiler_flags",
         "//core:control_flow_graph",
         "//core:jump_table",
         "//core:mips",
@@ -1307,6 +1309,7 @@ cc_test(
         ":lifter_pipeline",
         "//core:c_ast",
         "//core:compiler",
+        "//core:compiler_flags",
         "//core:control_flow_graph",
         "//core:elf_reader",
         "//core:mips",

@@ -223,5 +223,57 @@ TEST(InverseFinalAndGasStageTest, LiftToJump2RtlCfgPreservesDbrFlagsAndRestoresR
   EXPECT_EQ(jump2_cfg.rpo_blocks[0].instructions[1], "(set (reg/i:SI 2 v0) (reg/v:SI 16 s0))");
 }
 
+TEST(InverseFinalAndGasStageTest, CustomizesLiftingBehaviorByParsedCompilerFlags) {
+  // Build `lui $v0, 0x1234; jr $ra; ori $v0, $v0, 0x5678`:
+  // - At `-O1` (`!SplitsMultiInsnMovesBeforeDbr()`), `lui + ori` fuses into a single 32-bit
+  //   `const_int` `(set (reg:SI 2 v0) (const_int 305419896))`.
+  // - At `-O2` (`SplitsMultiInsnMovesBeforeDbr()`), `sched.c` split `LARGE_INT` before `.dbr`, so
+  //   `lui` and `ori` remain two separate RTL insns.
+  Instruction lui_v0;
+  lui_v0.raw_word = 0x3c021234u;
+  lui_v0.opcode = Opcode::kLui;
+  lui_v0.rt = Register::kV0;
+  lui_v0.immediate = 0x1234;
+  lui_v0.vram = 0x80010400;
+
+  Instruction ori_v0;
+  ori_v0.raw_word = 0x34425678u;
+  ori_v0.opcode = Opcode::kOri;
+  ori_v0.rt = Register::kV0;
+  ori_v0.rs = Register::kV0;
+  ori_v0.immediate = 0x5678;
+  ori_v0.vram = 0x80010408;
+
+  LoadedFunction func;
+  func.name = "flag_custom_large_int";
+  func.vram = 0x80010400;
+  func.instructions = {
+      lui_v0,
+      MakeJrRa(0x80010404),
+      ori_v0,
+  };
+
+  DecompilationContext context(func);
+  ASSERT_TRUE(context.BuildCfg().ok());
+
+  const ParsedCompilerFlags o1_flags =
+      ParsedCompilerFlags::Parse({"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"});
+  const RtlControlFlowGraph o1_dbr = InverseFinalAndGasLifter::LiftToDbrRtlCfg(
+      context.Cfg(), &context.FrameLayout().RawAnalysis(), nullptr, nullptr, func.name, &o1_flags);
+  ASSERT_EQ(o1_dbr.rpo_blocks.size(), 1u);
+  ASSERT_EQ(o1_dbr.rpo_blocks[0].instructions.size(), 1u);
+  EXPECT_EQ(o1_dbr.rpo_blocks[0].instructions[0], "(set (reg:SI 2 v0) (const_int 305419896))");
+
+  const ParsedCompilerFlags o2_flags =
+      ParsedCompilerFlags::Parse({"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"});
+  const RtlControlFlowGraph o2_dbr = InverseFinalAndGasLifter::LiftToDbrRtlCfg(
+      context.Cfg(), &context.FrameLayout().RawAnalysis(), nullptr, nullptr, func.name, &o2_flags);
+  ASSERT_EQ(o2_dbr.rpo_blocks.size(), 1u);
+  ASSERT_EQ(o2_dbr.rpo_blocks[0].instructions.size(), 2u);
+  EXPECT_EQ(o2_dbr.rpo_blocks[0].instructions[0], "(set (reg:SI 2 v0) (const_int 305397760))");
+  EXPECT_EQ(o2_dbr.rpo_blocks[0].instructions[1],
+            "(set (reg:SI 2 v0) (ior:SI (reg:SI 2 v0) (const_int 22136)))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

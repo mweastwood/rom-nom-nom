@@ -9,6 +9,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/compiler_flags.h"
 #include "core/jump_table.h"
 #include "core/mips.h"
 #include "core/symbol_registry.h"
@@ -33,6 +34,7 @@ struct LoadedFunction {
   const SymbolIndex* symbol_index = nullptr;
   const GameConfig* game_config = nullptr;
   MemoryReader memory_reader;
+  ParsedCompilerFlags compiler_flags = ParsedCompilerFlags::DefaultO2WaG();
 };
 
 // Loads target functions from ROM binaries, disassembly, or in-memory sequences.

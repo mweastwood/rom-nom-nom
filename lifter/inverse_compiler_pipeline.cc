@@ -100,7 +100,7 @@ absl::Status InverseDbrDelaySlotStage::Run(DecompilationContext* context) {
   const RtlControlFlowGraph dbr_rtl_cfg = context->RtlCfg();
   context->SetRtlCfg(InverseFinalAndGasLifter::LiftToJump2RtlCfg(
       stage1_cfg, &dbr_rtl_cfg, &context->FrameLayout().RawAnalysis(), context->Symbols(),
-      context->Function().memory_reader, context->FunctionName()));
+      context->Function().memory_reader, context->FunctionName(), &context->Flags()));
   return absl::OkStatus();
 }
 

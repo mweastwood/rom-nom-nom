@@ -28,6 +28,7 @@
 #include "absl/strings/str_format.h"
 #include "core/c_ast.h"
 #include "core/compiler.h"
+#include "core/compiler_flags.h"
 #include "core/control_flow_graph.h"
 #include "core/elf_reader.h"
 #include "core/mips.h"
@@ -624,6 +625,7 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       cleanup();
       return res;
     }
+    loaded_dbr_or->compiler_flags = ParsedCompilerFlags::Parse(test_case.options.c_flags);
 
     // 2. Inspect all 13 GCC RTL dumps on original C (`orig_dump`).
     GccRtlInspectOptions inspect_opts;
