@@ -820,6 +820,7 @@ void InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(RtlControlFlowGraph* cfg
   if (cfg == nullptr || cfg->rpo_blocks.empty()) {
     return;
   }
+  const std::vector<RtlBasicBlock> prev_blocks = cfg->rpo_blocks;
 
   // 1. Reverse `jump.c:thread_jumps` (`0x080fbbf7`).
   UnthreadJumpsPass(cfg);
@@ -840,6 +841,7 @@ void InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(RtlControlFlowGraph* cfg
   for (size_t b = 0; b < nblks; ++b) {
     InsertCanonicalInsnsBeforeTerminator(&cfg->rpo_blocks[b], deltas[b]);
   }
+  cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
 }
 
 }  // namespace rom_nom_nom

@@ -12,6 +12,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "core/c_ast.h"
+#include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
 
@@ -26,6 +27,7 @@ struct AstPassContext {
   bool has_goto_targets = false;
   const absl::flat_hash_map<std::string, int>* function_parameter_counts = nullptr;
   std::vector<CParameter>* mutable_parameters = nullptr;
+  const RtlControlFlowGraph* rtl_cfg = nullptr;
 };
 
 // Polymorphic base class for post-structuring C AST transformation passes.

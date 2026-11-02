@@ -45,14 +45,19 @@ class FramePointerCleanupPass : public AstPass {
   std::string_view Name() const override { return "FramePointerCleanup"; }
 
   bool Run(CompoundStatement* body, const AstPassContext& ctx) override {
-    if (body == nullptr || !ctx.has_frame_pointer) return false;
+    if (body == nullptr) return false;
     std::string before = body->ToString();
-    RewriteFramePointerStructOffsetAccesses(body, &ctx.parameters);
-    SimplifyShiftAddMultiplication(body);
-    SimplifyReciprocalDivisionAndUnsignedFloatConversions(body);
-    RewriteFramePointerStructOffsetAccesses(body, &ctx.parameters);
-    if (ctx.return_type.ToString() == "void" && !StatementContainsLabel(*body) &&
-        !body->Statements().empty()) {
+    if (ctx.has_frame_pointer) {
+      RewriteFramePointerStructOffsetAccesses(body, &ctx.parameters);
+      SimplifyShiftAddMultiplication(body);
+      SimplifyReciprocalDivisionAndUnsignedFloatConversions(body);
+      RewriteFramePointerStructOffsetAccesses(body, &ctx.parameters);
+    }
+    const bool allow_strip_trailing_void_return =
+        ctx.has_frame_pointer ||
+        (ctx.rtl_cfg == nullptr || !ctx.rtl_cfg->has_explicit_trailing_void_return);
+    if (allow_strip_trailing_void_return && ctx.return_type.ToString() == "void" &&
+        !StatementContainsLabel(*body) && !body->Statements().empty()) {
       const auto& last_stmt = *body->Statements().back();
       if (last_stmt.Kind() == CStatementKind::kReturnStatement &&
           static_cast<const ReturnStatement&>(last_stmt).ReturnValue() == nullptr) {

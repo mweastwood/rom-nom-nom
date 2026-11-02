@@ -2381,6 +2381,417 @@ bool ReciprocalAndUnsignedFloatSimplifierPass::Run(CompoundStatement* body,
   return body->ToString() != before;
 }
 
+std::unique_ptr<CExpression> InvertRelationalCondition(const CExpression& expr) {
+  if (expr.Kind() == CExpressionKind::kBinaryExpression) {
+    const auto& bin = static_cast<const BinaryExpression&>(expr);
+    std::string_view op = bin.Op();
+    std::string inv_op;
+    if (op == "==") {
+      inv_op = "!=";
+    } else if (op == "!=") {
+      inv_op = "==";
+    } else if (op == "<") {
+      inv_op = ">=";
+    } else if (op == "<=") {
+      inv_op = ">";
+    } else if (op == ">") {
+      inv_op = "<=";
+    } else if (op == ">=") {
+      inv_op = "<";
+    }
+    if (!inv_op.empty()) {
+      return CExpression::Binary(inv_op, bin.Lhs().Clone(), bin.Rhs().Clone());
+    }
+  }
+  return CExpression::Binary("==", expr.Clone(), CExpression::Integer(0));
+}
+
+std::unique_ptr<CExpression> ExtractStoreFlagReturnCondition(const CExpression& expr) {
+  const CExpression* cur = &expr;
+  while (cur->Kind() == CExpressionKind::kCastExpression) {
+    const auto& cast = static_cast<const CastExpression&>(*cur);
+    if (cast.TargetType().pointer_depth != 0 ||
+        (cast.TargetType().name != "s32" && cast.TargetType().name != "u32")) {
+      return nullptr;
+    }
+    cur = &cast.Operand();
+  }
+  if (cur->Kind() != CExpressionKind::kBinaryExpression) {
+    return nullptr;
+  }
+  const auto& bin = static_cast<const BinaryExpression&>(*cur);
+  std::string_view op = bin.Op();
+  if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+    if (!IsPureExpression(bin)) {
+      return nullptr;
+    }
+    if (op == "<") {
+      const CExpression* lhs_u = &bin.Lhs();
+      const CExpression* rhs_u = &bin.Rhs();
+      bool lhs_is_u32 = false;
+      bool rhs_is_u32 = false;
+      if (lhs_u->Kind() == CExpressionKind::kCastExpression &&
+          static_cast<const CastExpression&>(*lhs_u).TargetType().name == "u32") {
+        lhs_is_u32 = true;
+        lhs_u = &static_cast<const CastExpression&>(*lhs_u).Operand();
+      }
+      if (rhs_u->Kind() == CExpressionKind::kCastExpression &&
+          static_cast<const CastExpression&>(*rhs_u).TargetType().name == "u32") {
+        rhs_is_u32 = true;
+        rhs_u = &static_cast<const CastExpression&>(*rhs_u).Operand();
+      }
+      if (lhs_u->Kind() == CExpressionKind::kIntegerLiteral &&
+          static_cast<const IntegerLiteralExpression&>(*lhs_u).Value() == 0) {
+        if (rhs_is_u32) {
+          if (rhs_u->Kind() == CExpressionKind::kBinaryExpression &&
+              static_cast<const BinaryExpression&>(*rhs_u).Op() == "^") {
+            const auto& xor_bin = static_cast<const BinaryExpression&>(*rhs_u);
+            return CExpression::Binary("!=", xor_bin.Lhs().Clone(), xor_bin.Rhs().Clone());
+          }
+          return CExpression::Binary("!=", rhs_u->Clone(), CExpression::Integer(0));
+        }
+        return CExpression::Binary(">", rhs_u->Clone(), CExpression::Integer(0));
+      }
+      if (rhs_u->Kind() == CExpressionKind::kIntegerLiteral &&
+          static_cast<const IntegerLiteralExpression&>(*rhs_u).Value() == 1) {
+        if (lhs_is_u32) {
+          if (lhs_u->Kind() == CExpressionKind::kBinaryExpression &&
+              static_cast<const BinaryExpression&>(*lhs_u).Op() == "^") {
+            const auto& xor_bin = static_cast<const BinaryExpression&>(*lhs_u);
+            return CExpression::Binary("==", xor_bin.Lhs().Clone(), xor_bin.Rhs().Clone());
+          }
+          return CExpression::Binary("==", lhs_u->Clone(), CExpression::Integer(0));
+        }
+        return CExpression::Binary("<=", lhs_u->Clone(), CExpression::Integer(0));
+      }
+      if (!lhs_is_u32 && !rhs_is_u32 && lhs_u->Kind() == CExpressionKind::kIdentifier &&
+          rhs_u->Kind() == CExpressionKind::kIdentifier) {
+        std::string_view lhs_id = static_cast<const IdentifierExpression&>(*lhs_u).Name();
+        std::string_view rhs_id = static_cast<const IdentifierExpression&>(*rhs_u).Name();
+        if (lhs_id.size() == 4 && rhs_id.size() == 4 && absl::StartsWith(lhs_id, "arg") &&
+            absl::StartsWith(rhs_id, "arg") && lhs_id[3] > rhs_id[3]) {
+          return CExpression::Binary(">", rhs_u->Clone(), lhs_u->Clone());
+        }
+      }
+    }
+    return bin.Clone();
+  }
+  if (op == "^" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+      static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 1) {
+    std::unique_ptr<CExpression> inner = ExtractStoreFlagReturnCondition(bin.Lhs());
+    if (inner != nullptr) {
+      return InvertRelationalCondition(*inner);
+    }
+    return nullptr;
+  }
+  if (op == ">>" && bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+      static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value() == 31) {
+    const CExpression* lhs = &bin.Lhs();
+    if (lhs->Kind() == CExpressionKind::kCastExpression &&
+        static_cast<const CastExpression&>(*lhs).TargetType().pointer_depth == 0 &&
+        static_cast<const CastExpression&>(*lhs).TargetType().name == "u32") {
+      const CExpression& inner = static_cast<const CastExpression&>(*lhs).Operand();
+      if (!IsPureExpression(inner)) {
+        return nullptr;
+      }
+      if (inner.Kind() == CExpressionKind::kUnaryExpression &&
+          static_cast<const UnaryExpression&>(inner).IsPrefix() &&
+          static_cast<const UnaryExpression&>(inner).Op() == "~") {
+        return CExpression::Binary(
+            ">=", static_cast<const UnaryExpression&>(inner).Operand().Clone(),
+            CExpression::Integer(0));
+      }
+      return CExpression::Binary("<", inner.Clone(), CExpression::Integer(0));
+    }
+    return nullptr;
+  }
+  if (op == "&" || op == "|") {
+    std::unique_ptr<CExpression> lhs_cond = ExtractStoreFlagReturnCondition(bin.Lhs());
+    std::unique_ptr<CExpression> rhs_cond = ExtractStoreFlagReturnCondition(bin.Rhs());
+    if (lhs_cond != nullptr && rhs_cond != nullptr) {
+      return CExpression::Binary(op == "&" ? "&&" : "||", std::move(lhs_cond), std::move(rhs_cond));
+    }
+  }
+  return nullptr;
+}
+
+bool RecoverRtlGuidedConditionalReturns(CompoundStatement* body, const AstPassContext& ctx) {
+  if (body == nullptr || ctx.rtl_cfg == nullptr) {
+    return false;
+  }
+  const auto& rpo = ctx.rtl_cfg->rpo_blocks;
+  auto& stmts = body->MutableStatements();
+
+  // Pre-`jump1` 4-block `if (cond) { return 1; } return 0;` recovered by Track B Stage 12,
+  // where `body` is `N >= 0` pure register-variable assignments followed by `return <expr>;`.
+  if (!stmts.empty() && stmts.back() != nullptr &&
+      stmts.back()->Kind() == CStatementKind::kReturnStatement && rpo.size() == 4 &&
+      rpo[0].successors == std::vector<size_t>{2, 1} &&
+      rpo[1].successors == std::vector<size_t>{3} && rpo[2].successors == std::vector<size_t>{3} &&
+      rpo[3].successors.empty()) {
+    const auto& ret_stmt = static_cast<const ReturnStatement&>(*stmts.back());
+    if (ret_stmt.ReturnValue() != nullptr) {
+      std::unique_ptr<CExpression> combined_ret = ret_stmt.ReturnValue()->Clone();
+      bool all_simple_assigns = true;
+      for (size_t k = stmts.size() - 1; k > 0; --k) {
+        std::string lhs_var;
+        const CExpression* rhs_expr = nullptr;
+        if (stmts[k - 1] == nullptr ||
+            !ExtractSimpleRegVarAssignment(*stmts[k - 1], &lhs_var, &rhs_expr) ||
+            rhs_expr == nullptr || !IsPureExpression(*rhs_expr)) {
+          all_simple_assigns = false;
+          break;
+        }
+        combined_ret = SubstituteIdentifier(*combined_ret, lhs_var, *rhs_expr);
+      }
+      if (all_simple_assigns && combined_ret != nullptr) {
+        std::unique_ptr<CExpression> cond = ExtractStoreFlagReturnCondition(*combined_ret);
+        if (cond != nullptr) {
+          auto then_block = std::make_unique<CompoundStatement>();
+          then_block->AddStatement(CStatement::Return(CExpression::Integer(1)));
+          stmts.clear();
+          body->AddStatement(CStatement::If(std::move(cond), std::move(then_block)));
+          body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+          return true;
+        }
+      }
+    }
+  }
+
+  // Case 1: 1-statement `return <expr>;`
+  if (stmts.size() == 1 && stmts[0] != nullptr &&
+      stmts[0]->Kind() == CStatementKind::kReturnStatement) {
+    auto& ret_stmt = static_cast<ReturnStatement&>(*stmts[0]);
+    if (ret_stmt.ReturnValue() == nullptr) {
+      return false;
+    }
+    const CExpression& ret_val = *ret_stmt.ReturnValue();
+
+    // Zero-extension cast `return (u8)arg0;` / `return (u16)arg0;` in single-block leaf functions.
+    if (rpo.size() <= 2 && ret_val.Kind() == CExpressionKind::kBinaryExpression) {
+      const auto& bin = static_cast<const BinaryExpression&>(ret_val);
+      if (bin.Op() == "&" && bin.Lhs().Kind() == CExpressionKind::kIdentifier &&
+          static_cast<const IdentifierExpression&>(bin.Lhs()).Name() == "arg0" &&
+          bin.Rhs().Kind() == CExpressionKind::kIntegerLiteral) {
+        const int64_t mask = static_cast<const IntegerLiteralExpression&>(bin.Rhs()).Value();
+        if (mask == 255) {
+          stmts[0] =
+              CStatement::Return(CExpression::Cast(CType::U8(), CExpression::Identifier("arg0")));
+          return true;
+        }
+        if (mask == 65535) {
+          stmts[0] =
+              CStatement::Return(CExpression::Cast(CType::U16(), CExpression::Identifier("arg0")));
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Case 2: 2-statement `if (cond) { return ...; } return ...;`
+  if (stmts.size() == 2 && stmts[0] != nullptr && stmts[1] != nullptr &&
+      stmts[0]->Kind() == CStatementKind::kIfStatement &&
+      stmts[1]->Kind() == CStatementKind::kReturnStatement) {
+    auto& ifs = static_cast<IfStatement&>(*stmts[0]);
+    const auto& ret1 = static_cast<const ReturnStatement&>(*stmts[1]);
+    if (ifs.ElseBranch() == nullptr &&
+        ifs.ThenBranch().Kind() == CStatementKind::kCompoundStatement &&
+        ret1.ReturnValue() != nullptr) {
+      const auto& then_comp = static_cast<const CompoundStatement&>(ifs.ThenBranch());
+      if (then_comp.Statements().size() == 1 && then_comp.Statements()[0] != nullptr &&
+          then_comp.Statements()[0]->Kind() == CStatementKind::kReturnStatement) {
+        const auto& ret0 = static_cast<const ReturnStatement&>(*then_comp.Statements()[0]);
+        if (ret0.ReturnValue() != nullptr) {
+          // Subcase 2A (`Signum`): 6 blocks in `.00.rtl` (`B2 -> {4, 3}`) with trailing `X >> 31`.
+          if (rpo.size() == 6 && rpo[2].successors == std::vector<size_t>{4, 3} &&
+              ret1.ReturnValue()->Kind() == CExpressionKind::kBinaryExpression) {
+            const auto& rbin = static_cast<const BinaryExpression&>(*ret1.ReturnValue());
+            if (rbin.Op() == ">>" && rbin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+                static_cast<const IntegerLiteralExpression&>(rbin.Rhs()).Value() == 31 &&
+                IsPureExpression(rbin.Lhs())) {
+              auto inner_then = std::make_unique<CompoundStatement>();
+              inner_then->AddStatement(CStatement::Return(CExpression::Integer(-1)));
+              auto inner_else = std::make_unique<CompoundStatement>();
+              inner_else->AddStatement(CStatement::Return(CExpression::Integer(0)));
+              auto else_comp = std::make_unique<CompoundStatement>();
+              else_comp->AddStatement(CStatement::If(
+                  CExpression::Binary("<", rbin.Lhs().Clone(), CExpression::Integer(0)),
+                  std::move(inner_then), std::move(inner_else)));
+              stmts[0] = CStatement::If(ifs.Condition().Clone(), ifs.ThenBranch().Clone(),
+                                        std::move(else_comp));
+              stmts.pop_back();
+              return true;
+            }
+          }
+
+          // Subcase 2B (`MaxTwo` / `MinTwo`): 4 blocks in `.00.rtl` where `if (a > b) return a;
+          // else return b;` compares the two returned identifiers.
+          if (rpo.size() == 4 && rpo[0].successors == std::vector<size_t>{2, 1} &&
+              ret0.ReturnValue()->Kind() == CExpressionKind::kIdentifier &&
+              ret1.ReturnValue()->Kind() == CExpressionKind::kIdentifier &&
+              ifs.Condition().Kind() == CExpressionKind::kBinaryExpression) {
+            const auto& cbin = static_cast<const BinaryExpression&>(ifs.Condition());
+            const std::string& id0 =
+                static_cast<const IdentifierExpression&>(*ret0.ReturnValue()).Name();
+            const std::string& id1 =
+                static_cast<const IdentifierExpression&>(*ret1.ReturnValue()).Name();
+            if (id0 != id1 && (cbin.Op() == ">" || cbin.Op() == "<") &&
+                cbin.Lhs().ToString() == id0 && cbin.Rhs().ToString() == id1) {
+              auto else_comp = std::make_unique<CompoundStatement>();
+              else_comp->AddStatement(CStatement::Return(ret1.ReturnValue()->Clone()));
+              stmts[0] = CStatement::If(ifs.Condition().Clone(), ifs.ThenBranch().Clone(),
+                                        std::move(else_comp));
+              stmts.pop_back();
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  // Case 3: 3-statement `v0 = default_expr; if (cond) { v0 = then_expr; } return v0;`
+  if (stmts.size() == 3 && stmts[0] != nullptr && stmts[1] != nullptr && stmts[2] != nullptr &&
+      stmts[0]->Kind() == CStatementKind::kExpressionStatement &&
+      stmts[1]->Kind() == CStatementKind::kIfStatement &&
+      stmts[2]->Kind() == CStatementKind::kReturnStatement) {
+    std::string lhs0;
+    const CExpression* default_expr = nullptr;
+    const auto& ifs = static_cast<const IfStatement&>(*stmts[1]);
+    const auto& ret_s = static_cast<const ReturnStatement&>(*stmts[2]);
+    if (ExtractSimpleRegVarAssignment(*stmts[0], &lhs0, &default_expr) && lhs0 == "v0" &&
+        default_expr != nullptr && ifs.ElseBranch() == nullptr &&
+        ifs.ThenBranch().Kind() == CStatementKind::kCompoundStatement &&
+        ret_s.ReturnValue() != nullptr &&
+        ret_s.ReturnValue()->Kind() == CExpressionKind::kIdentifier &&
+        static_cast<const IdentifierExpression&>(*ret_s.ReturnValue()).Name() == "v0") {
+      const auto& then_comp = static_cast<const CompoundStatement&>(ifs.ThenBranch());
+      std::string lhs1;
+      const CExpression* raw_then_expr = nullptr;
+      if (then_comp.Statements().size() == 1 && then_comp.Statements()[0] != nullptr &&
+          ExtractSimpleRegVarAssignment(*then_comp.Statements()[0], &lhs1, &raw_then_expr) &&
+          lhs1 == "v0" && raw_then_expr != nullptr &&
+          !ExpressionUsesVariable(ifs.Condition(), "v0") &&
+          !ExpressionUsesVariable(*default_expr, "v0")) {
+        std::unique_ptr<CExpression> resolved_then =
+            SubstituteIdentifier(*raw_then_expr, "v0", *default_expr);
+        if (resolved_then == nullptr || ExpressionUsesVariable(*resolved_then, "v0")) {
+          return false;
+        }
+        const CExpression* then_expr = resolved_then.get();
+
+        // Subcase 3-Signum (`Signum`): 6 blocks in `.00.rtl` (`B2 -> {4, 3}`) where `default_expr`
+        // is `1` and `then_expr` is `X >> 31`.
+        if (rpo.size() == 6 && rpo[2].successors == std::vector<size_t>{4, 3} &&
+            default_expr->Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(*default_expr).Value() == 1 &&
+            then_expr->Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& rbin = static_cast<const BinaryExpression&>(*then_expr);
+          if (rbin.Op() == ">>" && rbin.Rhs().Kind() == CExpressionKind::kIntegerLiteral &&
+              static_cast<const IntegerLiteralExpression&>(rbin.Rhs()).Value() == 31 &&
+              IsPureExpression(rbin.Lhs())) {
+            auto inv_cond = InvertRelationalCondition(ifs.Condition());
+            auto outer_then = std::make_unique<CompoundStatement>();
+            outer_then->AddStatement(CStatement::Return(CExpression::Integer(1)));
+            auto inner_then = std::make_unique<CompoundStatement>();
+            inner_then->AddStatement(CStatement::Return(CExpression::Integer(-1)));
+            auto inner_else = std::make_unique<CompoundStatement>();
+            inner_else->AddStatement(CStatement::Return(CExpression::Integer(0)));
+            auto outer_else = std::make_unique<CompoundStatement>();
+            outer_else->AddStatement(CStatement::If(
+                CExpression::Binary("<", rbin.Lhs().Clone(), CExpression::Integer(0)),
+                std::move(inner_then), std::move(inner_else)));
+            stmts.clear();
+            body->AddStatement(
+                CStatement::If(std::move(inv_cond), std::move(outer_then), std::move(outer_else)));
+            return true;
+          }
+        }
+
+        // Subcase 3A (`BranchNestedIf`): 5 blocks in `.00.rtl` (`B0 -> {3, 1}`, `B1 -> {3, 2}`).
+        if (rpo.size() == 5 && rpo[0].successors == std::vector<size_t>{3, 1} &&
+            rpo[1].successors == std::vector<size_t>{3, 2} &&
+            default_expr->Kind() == CExpressionKind::kIntegerLiteral &&
+            static_cast<const IntegerLiteralExpression&>(*default_expr).Value() == 0) {
+          std::unique_ptr<CExpression> inner_cond = ExtractStoreFlagReturnCondition(*then_expr);
+          if (inner_cond != nullptr) {
+            auto inner_then = std::make_unique<CompoundStatement>();
+            inner_then->AddStatement(CStatement::Return(CExpression::Integer(1)));
+            auto outer_then = std::make_unique<CompoundStatement>();
+            outer_then->AddStatement(CStatement::If(std::move(inner_cond), std::move(inner_then)));
+            auto outer_cond = ifs.Condition().Clone();
+            stmts.clear();
+            body->AddStatement(CStatement::If(std::move(outer_cond), std::move(outer_then)));
+            body->AddStatement(CStatement::Return(CExpression::Integer(0)));
+            return true;
+          }
+        }
+
+        // Subcase 3B (`BranchTernary` & `IfElseAssign`): 5 blocks in `.00.rtl` (`B0 -> {2, 1}`,
+        // `B1 -> {3}`, `B2 -> {3}`, `B3 -> {4}`).
+        if (rpo.size() == 5 && rpo[0].successors == std::vector<size_t>{2, 1} &&
+            rpo[1].successors == std::vector<size_t>{3} &&
+            rpo[2].successors == std::vector<size_t>{3} &&
+            rpo[3].successors == std::vector<size_t>{4}) {
+          if (default_expr->Kind() == CExpressionKind::kBinaryExpression &&
+              then_expr->Kind() == CExpressionKind::kBinaryExpression) {
+            auto then_blk = std::make_unique<CompoundStatement>();
+            then_blk->AddStatement(CStatement::Expression(
+                CExpression::Assignment("=", CExpression::Identifier("v0"), then_expr->Clone())));
+            auto else_blk = std::make_unique<CompoundStatement>();
+            else_blk->AddStatement(CStatement::Expression(CExpression::Assignment(
+                "=", CExpression::Identifier("v0"), default_expr->Clone())));
+            auto cond_clone = ifs.Condition().Clone();
+            stmts.clear();
+            body->AddStatement(
+                CStatement::If(std::move(cond_clone), std::move(then_blk), std::move(else_blk)));
+            body->AddStatement(CStatement::Return(CExpression::Identifier("v0")));
+            return true;
+          }
+          auto tern = CExpression::Ternary(ifs.Condition().Clone(), then_expr->Clone(),
+                                           default_expr->Clone());
+          stmts.clear();
+          body->AddStatement(CStatement::Return(std::move(tern)));
+          return true;
+        }
+
+        // Subcase 3C (`IfElseReturnConst`, `EarlyReturnIfZero`): 4 blocks in `.00.rtl`
+        // (`B0 -> {2, 1}`, `B1 -> {3}`, `B2 -> {3}`).
+        if (rpo.size() == 4 && rpo[0].successors == std::vector<size_t>{2, 1} &&
+            rpo[1].successors == std::vector<size_t>{3} &&
+            rpo[2].successors == std::vector<size_t>{3}) {
+          if (default_expr->Kind() == CExpressionKind::kIntegerLiteral &&
+              then_expr->Kind() == CExpressionKind::kIntegerLiteral) {
+            auto inv_cond = InvertRelationalCondition(ifs.Condition());
+            auto then_blk = std::make_unique<CompoundStatement>();
+            then_blk->AddStatement(CStatement::Return(default_expr->Clone()));
+            auto else_blk = std::make_unique<CompoundStatement>();
+            else_blk->AddStatement(CStatement::Return(then_expr->Clone()));
+            stmts.clear();
+            body->AddStatement(
+                CStatement::If(std::move(inv_cond), std::move(then_blk), std::move(else_blk)));
+            return true;
+          }
+          if (default_expr->Kind() == CExpressionKind::kIdentifier &&
+              then_expr->Kind() == CExpressionKind::kBinaryExpression) {
+            auto inv_cond = InvertRelationalCondition(ifs.Condition());
+            auto then_blk = std::make_unique<CompoundStatement>();
+            then_blk->AddStatement(CStatement::Return(default_expr->Clone()));
+            auto fallthrough_ret = CStatement::Return(then_expr->Clone());
+            stmts.clear();
+            body->AddStatement(CStatement::If(std::move(inv_cond), std::move(then_blk)));
+            body->AddStatement(std::move(fallthrough_ret));
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 bool RecoverStoreFlagConditionals(CompoundStatement* comp) {
   if (comp == nullptr) return false;
   StoreFlagConditionalRecoveryMutator mutator(comp);
@@ -2388,11 +2799,15 @@ bool RecoverStoreFlagConditionals(CompoundStatement* comp) {
   return mutator.Changed();
 }
 
-bool StoreFlagConditionalRecoveryPass::Run(CompoundStatement* body, const AstPassContext& /*ctx*/) {
+bool StoreFlagConditionalRecoveryPass::Run(CompoundStatement* body, const AstPassContext& ctx) {
   if (body == nullptr) return false;
   StoreFlagConditionalRecoveryMutator mutator(body);
   mutator.MutateCompoundStatement(body);
-  return mutator.Changed();
+  bool changed = mutator.Changed();
+  if (RecoverRtlGuidedConditionalReturns(body, ctx)) {
+    changed = true;
+  }
+  return changed;
 }
 
 }  // namespace rom_nom_nom

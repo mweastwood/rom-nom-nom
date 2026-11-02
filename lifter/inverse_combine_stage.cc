@@ -1598,6 +1598,7 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
       RtlInsn uncombined;
       uncombined.canonical_pattern = "addu  $zero, $zero, $zero";
       uncombined.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
+      uncombined.is_synthetic_rtl_expansion = true;
       new_insns.push_back(std::move(uncombined));
     }
     new_insns.insert(new_insns.end(),
@@ -1605,19 +1606,36 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
                      blk->rtl_insns.end());
     blk->rtl_insns = std::move(new_insns);
   } else {
-    // Remove `|delta|` non-terminating instructions when `.flow` has fewer instructions than
-    // `.combine` (e.g., `-O0` `lbu`/`lhu` or multi-call trailing `$f0` self-moves).
+    // Coalesce `|delta|` non-terminating instructions when `.flow` has fewer instructions than
+    // `.combine` (e.g., `-O0` `lbu`/`lhu` or multi-call trailing `$f0` self-moves), preserving
+    // their underlying `machine_instructions` on the surviving `RtlInsn`.
     int to_remove = -delta;
     std::vector<RtlInsn> new_insns;
+    std::vector<Instruction> coalesced_machine_insns;
     new_insns.reserve(blk->rtl_insns.size());
     for (int i = static_cast<int>(blk->rtl_insns.size()) - 1; i >= 0; --i) {
       if (to_remove > 0 && !IsJumpOrBranchPattern(blk->rtl_insns[i].canonical_pattern)) {
         --to_remove;
+        coalesced_machine_insns.insert(coalesced_machine_insns.begin(),
+                                       blk->rtl_insns[i].machine_instructions.begin(),
+                                       blk->rtl_insns[i].machine_instructions.end());
         continue;
+      }
+      if (!coalesced_machine_insns.empty() &&
+          !IsJumpOrBranchPattern(blk->rtl_insns[i].canonical_pattern)) {
+        blk->rtl_insns[i].machine_instructions.insert(blk->rtl_insns[i].machine_instructions.end(),
+                                                      coalesced_machine_insns.begin(),
+                                                      coalesced_machine_insns.end());
+        coalesced_machine_insns.clear();
       }
       new_insns.push_back(std::move(blk->rtl_insns[i]));
     }
     std::reverse(new_insns.begin(), new_insns.end());
+    if (!coalesced_machine_insns.empty() && !new_insns.empty()) {
+      new_insns.front().machine_instructions.insert(new_insns.front().machine_instructions.begin(),
+                                                    coalesced_machine_insns.begin(),
+                                                    coalesced_machine_insns.end());
+    }
     blk->rtl_insns = std::move(new_insns);
   }
 

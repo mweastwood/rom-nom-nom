@@ -2,6 +2,12 @@
 #define LIFTER_INVERSE_RTL_TO_C_AST_STAGE_H_
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "core/c_ast.h"
+#include "core/control_flow_graph.h"
+#include "core/symbol_registry.h"
+#include "lifter/ast_converter.h"
+#include "lifter/control_flow_structurer.h"
 #include "lifter/decompilation_context.h"
 
 namespace rom_nom_nom {
@@ -21,12 +27,19 @@ namespace rom_nom_nom {
 //   4. `expr.c:expand_expr`, `expand_assignment`, `store_expr`, `do_store_flag`,
 //   `calls.c:expand_call`
 //      & `stmt.c:expand_return`: Lifts basic-block instructions into C statements and expressions
-//      via `AstConverter` and `AstPassPipeline`.
+//      and applies `.00.rtl`-guided (`RtlControlFlowGraph`) C AST recovery.
 class InverseRtlToCAstLifter {
  public:
   // Executes Stage 13 (`.rtl` -> C AST) on `context`, populating `context->RootRegion()` and
   // `context->Ast()`.
   static absl::Status LiftRtlToCAst(DecompilationContext* context);
+
+  // Converts a structured CFG and optional `.00.rtl` `RtlControlFlowGraph` into a complete C
+  // `FunctionDeclaration` AST.
+  static absl::StatusOr<FunctionDeclaration> Convert(const ControlFlowGraph& cfg,
+                                                     const StructuredRegion& root_region,
+                                                     const SymbolIndex* symbol_index = nullptr,
+                                                     const AstConverterOptions& options = {});
 };
 
 }  // namespace rom_nom_nom

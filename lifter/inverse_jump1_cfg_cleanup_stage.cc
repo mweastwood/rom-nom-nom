@@ -412,12 +412,7 @@ void UnrotateLoopAt(std::vector<RtlBasicBlock>* blks_ptr, size_t p_idx, size_t h
   }
 }
 
-}  // namespace
-
-void InverseJump1CfgCleanupLifter::InvertJumpToRtlCfg(RtlControlFlowGraph* cfg) {
-  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
-    return;
-  }
+void InvertJumpToRtlCfgImpl(RtlControlFlowGraph* cfg) {
   if (RunPreLoopPasses(cfg)) {
     return;
   }
@@ -1142,6 +1137,24 @@ void InverseJump1CfgCleanupLifter::InvertJumpToRtlCfg(RtlControlFlowGraph* cfg) 
       blks.push_back(MakeBlock(static_cast<uint32_t>(new_id), {}, 0));
     }
   }
+}
+
+}  // namespace
+
+void InverseJump1CfgCleanupLifter::InvertJumpToRtlCfg(RtlControlFlowGraph* cfg) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  const std::vector<RtlBasicBlock> prev_blocks = cfg->rpo_blocks;
+  InvertJumpToRtlCfgImpl(cfg);
+  cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
+
+  const auto& blks = cfg->rpo_blocks;
+  cfg->has_explicit_trailing_void_return =
+      blks.size() >= 2 && blks.back().instructions.empty() && blks.back().successors.empty() &&
+      !blks[blks.size() - 2].instructions.empty() &&
+      blks[blks.size() - 2].instructions.back() == kJumpTerminator &&
+      blks[blks.size() - 2].successors == std::vector<size_t>{blks.size() - 1};
 }
 
 }  // namespace rom_nom_nom

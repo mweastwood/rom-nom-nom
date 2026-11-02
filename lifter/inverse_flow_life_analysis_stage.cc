@@ -527,6 +527,7 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
     RtlInsn restored;
     restored.canonical_pattern = std::string(kPaddingNoopPattern);
     restored.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
+    restored.is_synthetic_rtl_expansion = true;
     new_insns.push_back(std::move(restored));
   }
   new_insns.insert(new_insns.end(),

@@ -14,6 +14,7 @@
 #include "core/symbol_registry.h"
 #include "lifter/control_flow_structurer.h"
 #include "lifter/expression_builder.h"
+#include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
 
@@ -30,6 +31,7 @@ struct AstConverterOptions {
   const absl::flat_hash_map<std::string, int>* function_fp_parameter_counts = nullptr;
   const absl::flat_hash_set<std::string>* functions_returning_v0 = nullptr;
   const absl::flat_hash_set<std::string>* functions_returning_f0 = nullptr;
+  const RtlControlFlowGraph* rtl_cfg = nullptr;
 };
 
 // Converts structured control flow regions and lifted basic blocks into a C FunctionDeclaration

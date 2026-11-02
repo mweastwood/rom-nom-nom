@@ -13,25 +13,6 @@ namespace {
 
 constexpr absl::string_view kZeroMovePlaceholder = "addu  $zero, $zero, $zero";
 
-void SyncRtlInsnsFromInstructions(RtlBasicBlock* blk) {
-  std::vector<RtlInsn> updated;
-  updated.reserve(blk->instructions.size());
-  for (const auto& pat : blk->instructions) {
-    RtlInsn insn;
-    insn.canonical_pattern = pat;
-    insn.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
-    updated.push_back(std::move(insn));
-  }
-  blk->rtl_insns = std::move(updated);
-}
-
-void SyncAllBlocks(RtlControlFlowGraph* cfg) {
-  for (size_t i = 0; i < cfg->rpo_blocks.size(); ++i) {
-    cfg->rpo_blocks[i].id = static_cast<uint32_t>(i);
-    SyncRtlInsnsFromInstructions(&cfg->rpo_blocks[i]);
-  }
-}
-
 // Contracts a single-successor preheader basic block `pre_idx` (`successors == {pre_idx + 1}`)
 // out of `cfg->rpo_blocks`, updating all basic block successor indices accordingly.
 void ContractPreheaderBlock(RtlControlFlowGraph* cfg, size_t pre_idx) {
@@ -455,29 +436,30 @@ void InverseLoopOptLifter::InvertLoopToCseRtlCfg(RtlControlFlowGraph* cfg) {
   if (cfg == nullptr || cfg->rpo_blocks.empty()) {
     return;
   }
+  const std::vector<RtlBasicBlock> prev_blocks = cfg->rpo_blocks;
 
   if (TryInvertFindAndVerifyLoopsExitRelocation(cfg)) {
-    SyncAllBlocks(cfg);
+    cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
     return;
   }
   if (TryInvertDecisionTreeDualLoop(cfg)) {
-    SyncAllBlocks(cfg);
+    cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
     return;
   }
   if (TryInvertEntryBlockPreheaderMovables(cfg)) {
-    SyncAllBlocks(cfg);
+    cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
     return;
   }
   if (TryInvertNarrowPostDecrementLoop(cfg)) {
-    SyncAllBlocks(cfg);
+    cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
     return;
   }
   if (TryUnHoistPreheaderMovableConstants(cfg)) {
-    SyncAllBlocks(cfg);
+    cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
     return;
   }
   TryContractGivPreheaderBlock(cfg);
-  SyncAllBlocks(cfg);
+  cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
 }
 
 }  // namespace rom_nom_nom

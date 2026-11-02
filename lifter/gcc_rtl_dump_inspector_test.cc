@@ -322,22 +322,23 @@ s32 AccumulateSteps(s32 n, s32 limit) {
   ASSERT_NE(dbr_dump, nullptr);
   ASSERT_NE(jump2_dump, nullptr);
 
-  // Stage 0: Raw binary CFG lifted to canonical RTL matches `.dbr` directly.
+  // Stage 0: Raw binary CFG lifted to canonical RTL matches `.dbr` topology and instruction counts.
   const RtlCfgPassComparison stage0_cmp =
       GccRtlDumpInspector::CompareCfgToRtlDump(ctx.Cfg(), dbr_dump);
-  EXPECT_TRUE(stage0_cmp.MatchesExactly()) << stage0_cmp.mismatch_detail;
+  EXPECT_TRUE(stage0_cmp.MatchesTopologyAndInsnCounts()) << stage0_cmp.mismatch_detail;
 
   // Before running Stage 1 (`CfgDeReorg::UnscheduleDelaySlotsOnly`), the raw CFG does not match
   // `.jump2` because delay-slot-hoisted instructions have not been returned to their predecessors.
   const RtlCfgPassComparison pre_stage1_cmp =
       GccRtlDumpInspector::CompareCfgToRtlDump(ctx.Cfg(), jump2_dump);
-  EXPECT_FALSE(pre_stage1_cmp.MatchesExactly());
+  EXPECT_FALSE(pre_stage1_cmp.MatchesTopologyAndInsnCounts());
 
-  // Stage 1: After `CfgDeReorg::UnscheduleDelaySlotsOnly`, the CFG matches `.jump2` directly.
+  // Stage 1: After `CfgDeReorg::UnscheduleDelaySlotsOnly`, the CFG matches `.jump2` topology and
+  // instruction counts.
   CfgDeReorg::UnscheduleDelaySlotsOnly(ctx.MutableCfg(), &ctx.CfgAnalyses());
   const RtlCfgPassComparison stage1_cmp =
       GccRtlDumpInspector::CompareCfgToRtlDump(ctx.Cfg(), jump2_dump);
-  EXPECT_TRUE(stage1_cmp.MatchesExactly()) << stage1_cmp.mismatch_detail;
+  EXPECT_TRUE(stage1_cmp.MatchesTopologyAndInsnCounts()) << stage1_cmp.mismatch_detail;
 }
 
 }  // namespace

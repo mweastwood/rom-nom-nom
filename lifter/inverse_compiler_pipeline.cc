@@ -145,6 +145,46 @@ absl::Status InverseLregLocalAllocStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseLregLocalAllocStage: RtlCfg not initialized.");
   }
+  RtlControlFlowGraph* cfg = context->MutableRtlCfg();
+  // Invert `local-alloc.c:local_alloc` (`.07.sched` -> `.08.lreg`): classify register webs into
+  // single-basic-block local allocations (`reg_basic_block[r] >= 0`) vs. multi-block global
+  // allocations (`reg_basic_block[r] == REG_BLOCK_GLOBAL`).
+  std::array<int, 64> first_block;
+  first_block.fill(-1);
+  std::array<bool, 64> is_multi_block{};
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    for (const RtlInsn& rinsn : cfg->rpo_blocks[b].rtl_insns) {
+      for (const Instruction& mi : rinsn.machine_instructions) {
+        for (const std::optional<Register>& reg_opt : {mi.rs, mi.rt, mi.rd}) {
+          if (!reg_opt.has_value()) {
+            continue;
+          }
+          const size_t r = static_cast<size_t>(*reg_opt);
+          if (r == 0 || r >= first_block.size()) {
+            continue;
+          }
+          if (first_block[r] == -1) {
+            first_block[r] = static_cast<int>(b);
+          } else if (first_block[r] != static_cast<int>(b)) {
+            is_multi_block[r] = true;
+          }
+        }
+      }
+    }
+  }
+  size_t local_count = 0;
+  size_t global_count = 0;
+  for (size_t r = 1; r < first_block.size(); ++r) {
+    if (first_block[r] != -1) {
+      if (is_multi_block[r]) {
+        ++global_count;
+      } else {
+        ++local_count;
+      }
+    }
+  }
+  cfg->local_alloc_pseudo_reg_count = local_count;
+  cfg->global_alloc_pseudo_reg_count = global_count;
   return absl::OkStatus();
 }
 

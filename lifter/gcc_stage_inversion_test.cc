@@ -94,13 +94,17 @@ struct CaseInversionResult {
   RtlCfgPassComparison direct_rtl_stage0_comparison{};
   // Direct RtlCfg -> RTL comparison per stage (`Stages 1..12` vs `.jump2` .. `.rtl`).
   std::array<RtlCfgPassComparison, 12> direct_rtl_stage_comparisons{};
-  // Exact Right-inverse check per phase: `f_k(g_k(y_k)) == y_k` (exact S-expression match on
-  // `source_gcc_pass`).
+  // Exact Right-inverse check per phase (`Stages 1..12`): `f_k(g_k(y_k)) == y_k` (exact
+  // S-expression match on `source_gcc_pass`).
   std::array<bool, 12> phase_right_inverse_matches{};
-  // Exact Left-inverse check per phase: `g_k(f_k(x_{k-1})) == x_{k-1}` (exact S-expression match on
-  // `target_gcc_pass`).
+  // Exact Left-inverse check per phase (`Stages 1..12`): `g_k(f_k(x_{k-1})) == x_{k-1}` (exact
+  // S-expression match on `target_gcc_pass`).
   std::array<bool, 12> phase_left_inverse_matches{};
   std::array<bool, 12> gcc_stage_transformed_rtl{};
+  // Stage 13 (`InverseRtlToCAstStage` <- `GCCStage0_Frontend (C AST -> .rtl)`) topology and exact
+  // S-expression match on `.00.rtl`.
+  RtlCfgPassComparison stage13_rtl_topo_comparison{};
+  bool stage13_rtl_matches = false;
   std::optional<RtlPassKind> first_divergent_pass;
   std::string error_or_diag;
 };
@@ -338,105 +342,83 @@ class GccStageInversionSuiteAccumulator {
       return "";
     }
 
-    size_t compiled_ok = 0;
     size_t bit_exact = 0;
     size_t isomorphic = 0;
-    size_t dbr_rtl_right_inv = 0;
-    size_t dbr_rtl_left_inv = 0;
-    size_t all_12_right_inverse_exact = 0;
-    size_t all_12_left_inverse_exact = 0;
-
-    size_t stage1_zero_likely = 0;
-    size_t stage1_zero_delay = 0;
-    size_t stage1_valid_pre_reorg_domain = 0;
-    size_t stage1_blocks_match = 0;
-    size_t stage1_edges_match = 0;
-    size_t stage1_active_insns_match = 0;
-    size_t stage1_full_cfg_exact = 0;
-
-    size_t stage2_gcc_modified_count = 0;
-    size_t stage2_delta_matched_when_modified = 0;
-    size_t stage2_delta_matched_overall = 0;
+    size_t stage13_topo_present = 0;
+    size_t stage13_topo_match = 0;
+    size_t stage13_rtl_exact = 0;
+    size_t all_13_rtl_dumps_exact = 0;
+    size_t all_14_stages_topo_match = 0;
+    size_t all_14_stages_exact_match = 0;
 
     size_t direct_rtl_stage0_present = 0;
-    size_t direct_rtl_stage0_blocks_match = 0;
-    size_t direct_rtl_stage0_edges_match = 0;
-    size_t direct_rtl_stage0_insns_match = 0;
+    size_t direct_rtl_stage0_topo_cnt_match = 0;
     size_t direct_rtl_stage0_exact_match = 0;
 
     std::array<size_t, 12> direct_rtl_present_count{};
-    std::array<size_t, 12> direct_rtl_blocks_match{};
-    std::array<size_t, 12> direct_rtl_edges_match{};
-    std::array<size_t, 12> direct_rtl_insns_match{};
+    std::array<size_t, 12> direct_rtl_topo_cnt_match{};
     std::array<size_t, 12> direct_rtl_exact_match{};
-    std::array<size_t, 12> phase_right_matches{};
-    std::array<size_t, 12> phase_right_matches_when_transformed{};
-    std::array<size_t, 12> phase_left_matches{};
-    std::array<size_t, 12> phase_gcc_transformed_count{};
-    absl::flat_hash_map<RtlPassKind, size_t> first_divergent_counts;
 
     for (const auto& r : results_) {
-      if (r.decompiled_and_compiled_ok) ++compiled_ok;
       if (r.bit_exact) ++bit_exact;
       if (r.structurally_isomorphic) ++isomorphic;
-      if (r.final_dbr_rtl_matches) ++dbr_rtl_left_inv;
-      if (r.phase_right_inverse_matches[0]) ++dbr_rtl_right_inv;
+      if (r.stage13_rtl_matches) ++stage13_rtl_exact;
 
-      if (r.direct_cfg_stage1.zero_branch_likely) ++stage1_zero_likely;
-      if (r.direct_cfg_stage1.zero_non_nop_delay_slots) ++stage1_zero_delay;
-      if (r.direct_cfg_stage1.ValidPreReorgDomain()) ++stage1_valid_pre_reorg_domain;
-      if (r.direct_cfg_stage1.block_count_matches) ++stage1_blocks_match;
-      if (r.direct_cfg_stage1.successors_match) ++stage1_edges_match;
-      if (r.direct_cfg_stage1.active_instructions_match) ++stage1_active_insns_match;
-      if (r.direct_cfg_stage1.MatchesExactly()) ++stage1_full_cfg_exact;
+      bool case_all_14_topo = r.decompiled_and_compiled_ok;
+      bool case_all_14_exact = r.decompiled_and_compiled_ok && r.stage13_rtl_matches;
 
-      if (r.direct_cfg_stage2.active_insn_delta_matches) ++stage2_delta_matched_overall;
-      if (r.direct_cfg_stage2.gcc_jump2_modified_rtl) {
-        ++stage2_gcc_modified_count;
-        if (r.direct_cfg_stage2.active_insn_delta_matches) {
-          ++stage2_delta_matched_when_modified;
+      if (r.stage13_rtl_topo_comparison.pass_present) {
+        ++stage13_topo_present;
+        if (r.stage13_rtl_topo_comparison.MatchesTopologyAndInsnCounts()) {
+          ++stage13_topo_match;
+        } else {
+          case_all_14_topo = false;
         }
+      } else {
+        case_all_14_topo = false;
       }
 
-      bool all_12_right = r.decompiled_and_compiled_ok;
-      bool all_12_left = r.decompiled_and_compiled_ok;
+      bool all_13_rtl = r.decompiled_and_compiled_ok && r.stage13_rtl_matches;
       if (r.direct_rtl_stage0_comparison.pass_present) {
         ++direct_rtl_stage0_present;
-        if (r.direct_rtl_stage0_comparison.block_count_matches) ++direct_rtl_stage0_blocks_match;
-        if (r.direct_rtl_stage0_comparison.successors_match) ++direct_rtl_stage0_edges_match;
-        if (r.direct_rtl_stage0_comparison.instructions_match) ++direct_rtl_stage0_insns_match;
-        if (r.direct_rtl_stage0_comparison.MatchesExactly()) ++direct_rtl_stage0_exact_match;
+        if (r.direct_rtl_stage0_comparison.MatchesTopologyAndInsnCounts()) {
+          ++direct_rtl_stage0_topo_cnt_match;
+        } else {
+          case_all_14_topo = false;
+        }
+        if (r.direct_rtl_stage0_comparison.MatchesExactly()) {
+          ++direct_rtl_stage0_exact_match;
+        } else {
+          case_all_14_exact = false;
+        }
       }
       for (size_t i = 0; i < 12; ++i) {
         const auto& dc = r.direct_rtl_stage_comparisons[i];
         if (dc.pass_present) {
           ++direct_rtl_present_count[i];
-          if (dc.block_count_matches) ++direct_rtl_blocks_match[i];
-          if (dc.successors_match) ++direct_rtl_edges_match[i];
-          if (dc.instructions_match) ++direct_rtl_insns_match[i];
-          if (dc.MatchesExactly()) ++direct_rtl_exact_match[i];
-        }
-        if (r.phase_right_inverse_matches[i]) {
-          ++phase_right_matches[i];
-        } else {
-          all_12_right = false;
-        }
-        if (r.phase_left_inverse_matches[i]) {
-          ++phase_left_matches[i];
-        } else {
-          all_12_left = false;
-        }
-        if (r.gcc_stage_transformed_rtl[i]) {
-          ++phase_gcc_transformed_count[i];
-          if (r.phase_right_inverse_matches[i]) {
-            ++phase_right_matches_when_transformed[i];
+          if (dc.MatchesTopologyAndInsnCounts()) {
+            ++direct_rtl_topo_cnt_match[i];
+          } else {
+            case_all_14_topo = false;
+          }
+          if (dc.MatchesExactly()) {
+            ++direct_rtl_exact_match[i];
+          } else {
+            case_all_14_exact = false;
           }
         }
+        if (!r.phase_right_inverse_matches[i] || !r.phase_left_inverse_matches[i]) {
+          all_13_rtl = false;
+        }
       }
-      if (all_12_right) ++all_12_right_inverse_exact;
-      if (all_12_left) ++all_12_left_inverse_exact;
-      if (r.first_divergent_pass.has_value()) {
-        ++first_divergent_counts[*r.first_divergent_pass];
+      if (case_all_14_topo) {
+        ++all_14_stages_topo_match;
+      }
+      if (case_all_14_exact) {
+        ++all_14_stages_exact_match;
+      }
+      if (all_13_rtl) {
+        ++all_13_rtl_dumps_exact;
       }
     }
 
@@ -444,170 +426,64 @@ class GccStageInversionSuiteAccumulator {
       return den == 0 ? 100.0 : (100.0 * static_cast<double>(num) / static_cast<double>(den));
     };
 
+    const auto all_stages = InverseCompilerPipeline::AllStageDescriptors();
     std::string out;
     absl::StrAppendFormat(
         &out,
-        "\n================================================================================\n"
-        "              12-PHASE GCC RIGHT-INVERSE SUITE SUMMARY REPORT                   \n"
-        "================================================================================\n"
-        "Total Round-Trip Cases Evaluated       : %zu\n"
-        "Decompiled & Recompiled Cleanly        : %zu / %zu (%.2f%%)\n"
-        "Structurally Isomorphic Binary         : %zu / %zu (%.2f%%)\n"
-        "Bit-Exact Final Binary (.o)            : %zu / %zu (%.2f%%)\n"
-        "Stage 12 .dbr Right-Inverse RTL Match  : %zu / %zu (%.2f%%)\n"
-        "All 12 Phases Right-Inverse RTL Match  : %zu / %zu (%.2f%%)\n"
-        "All 12 Phases Left-Inverse RTL Match   : %zu / %zu (%.2f%%)\n"
-        "--------------------------------------------------------------------------------\n"
-        "DIRECT CFG STAGE 1 (CfgDeReorg Exact Match vs -fno-delayed-branch):\n"
-        "  Zero BranchLikely Remaining          : %zu / %zu (%.2f%%)\n"
-        "  Zero Non-Nop Delay Slots             : %zu / %zu (%.2f%%)\n"
-        "  Valid Pre-reorg.c Domain (Both Above): %zu / %zu (%.2f%%)\n"
-        "  Matches -fno-delayed-branch Blocks   : %zu / %zu (%.2f%%)\n"
-        "  Matches -fno-delayed-branch Edges    : %zu / %zu (%.2f%%)\n"
-        "  Matches -fno-delayed-branch Insns    : %zu / %zu (%.2f%%)\n"
-        "  Exact Stage 1 CFG Match (All Above)  : %zu / %zu (%.2f%%)\n"
-        "--------------------------------------------------------------------------------\n"
-        "DIRECT CFG STAGE 2 (CrossJumpTailDuplicator vs .sched2 -> .jump2 Insn Delta):\n"
-        "  Overall Active Insn Delta Match      : %zu / %zu (%.2f%%)\n"
-        "  Cases Modified by GCC .jump2         : %zu / %zu (%.2f%%)\n"
-        "--------------------------------------------------------------------------------\n"
-        "EXACT RIGHT-INVERSE f_k(g_k(y_k)) == y_k BY PHASE (vs Exact Left-Inverse):\n",
-        total, compiled_ok, total, pct(compiled_ok, total), isomorphic, total,
-        pct(isomorphic, total), bit_exact, total, pct(bit_exact, total), dbr_rtl_right_inv, total,
-        pct(dbr_rtl_right_inv, total), all_12_right_inverse_exact, total,
-        pct(all_12_right_inverse_exact, total), all_12_left_inverse_exact, total,
-        pct(all_12_left_inverse_exact, total), stage1_zero_likely, total,
-        pct(stage1_zero_likely, total), stage1_zero_delay, total, pct(stage1_zero_delay, total),
-        stage1_valid_pre_reorg_domain, total, pct(stage1_valid_pre_reorg_domain, total),
-        stage1_blocks_match, total, pct(stage1_blocks_match, total), stage1_edges_match, total,
-        pct(stage1_edges_match, total), stage1_active_insns_match, total,
-        pct(stage1_active_insns_match, total), stage1_full_cfg_exact, total,
-        pct(stage1_full_cfg_exact, total), stage2_delta_matched_overall, total,
-        pct(stage2_delta_matched_overall, total), stage2_delta_matched_when_modified,
-        stage2_gcc_modified_count,
-        pct(stage2_delta_matched_when_modified, stage2_gcc_modified_count));
+        "\n========================================================================================"
+        "==================\n"
+        "                       14-STAGE INVERSE COMPILER PIPELINE REPORT (%zu CASES)\n"
+        "========================================================================================"
+        "==================\n"
+        "Stage | Inverse Stage Name & Target                          | Topology Match       | "
+        "Exact Insn/RTL Match\n"
+        "------+------------------------------------------------------+----------------------+-----"
+        "----------------\n",
+        total);
 
-    const auto rtl_stages = InverseCompilerPipeline::RtlStageDescriptors();
+    auto format_stage_row = [&](int stage_idx, std::string_view name, std::string_view transition,
+                                size_t topo_num, size_t topo_den, size_t exact_num,
+                                size_t exact_den) {
+      std::string label = absl::StrFormat("%-30s (%s)", name, transition);
+      absl::StrAppendFormat(&out,
+                            "  %2d  | %-52s | %3zu / %3zu (%6.2f%%)  | %3zu / %3zu (%6.2f%%)\n",
+                            stage_idx, label, topo_num, topo_den, pct(topo_num, topo_den),
+                            exact_num, exact_den, pct(exact_num, exact_den));
+    };
+
+    format_stage_row(0, all_stages[0].stage_name, ".o -> .dbr", direct_rtl_stage0_topo_cnt_match,
+                     direct_rtl_stage0_present, direct_rtl_stage0_exact_match,
+                     direct_rtl_stage0_present);
     for (size_t i = 0; i < 12; ++i) {
-      const auto& p = rtl_stages[i + 1];
-      absl::StrAppendFormat(
-          &out,
-          "  [Inv %2d <- GCC %2d] %-48s | Right: %3zu/%3zu (%6.2f%%) | Active: %3zu/%3zu (%6.2f%%) "
-          "| Left: %3zu/%3zu (%6.2f%%)\n",
-          p.inverse_stage_index, p.gcc_stage_number, p.gcc_stage_description,
-          phase_right_matches[i], total, pct(phase_right_matches[i], total),
-          phase_right_matches_when_transformed[i], phase_gcc_transformed_count[i],
-          pct(phase_right_matches_when_transformed[i], phase_gcc_transformed_count[i]),
-          phase_left_matches[i], total, pct(phase_left_matches[i], total));
+      const auto& p = all_stages[i + 1];
+      std::string trans =
+          absl::StrFormat("%s -> %s", GccRtlDumpInspector::PassExtension(*p.source_gcc_pass),
+                          GccRtlDumpInspector::PassExtension(*p.target_gcc_pass));
+      format_stage_row(p.inverse_stage_index, p.stage_name, trans, direct_rtl_topo_cnt_match[i],
+                       direct_rtl_present_count[i], direct_rtl_exact_match[i],
+                       direct_rtl_present_count[i]);
     }
+    format_stage_row(13, all_stages[13].stage_name, ".rtl -> C AST", stage13_topo_match,
+                     stage13_topo_present, stage13_rtl_exact, total);
 
-    absl::StrAppend(
-        &out,
-        "--------------------------------------------------------------------------------\n"
-        "DIRECT CFG -> RTL PASS VERIFICATION ACROSS ALL 13 INVERSE STAGES (0..12):\n");
     absl::StrAppendFormat(
         &out,
-        "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
-        "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
-        0, GccRtlDumpInspector::PassExtension(*rtl_stages[0].target_gcc_pass),
-        rtl_stages[0].stage_name, direct_rtl_stage0_blocks_match, direct_rtl_stage0_present,
-        pct(direct_rtl_stage0_blocks_match, direct_rtl_stage0_present),
-        direct_rtl_stage0_edges_match, direct_rtl_stage0_present,
-        pct(direct_rtl_stage0_edges_match, direct_rtl_stage0_present),
-        direct_rtl_stage0_insns_match, direct_rtl_stage0_present,
-        pct(direct_rtl_stage0_insns_match, direct_rtl_stage0_present),
-        direct_rtl_stage0_exact_match, direct_rtl_stage0_present,
-        pct(direct_rtl_stage0_exact_match, direct_rtl_stage0_present));
-    for (size_t i = 0; i < 12; ++i) {
-      const auto& p = rtl_stages[i + 1];
-      const size_t den = direct_rtl_present_count[i];
-      absl::StrAppendFormat(
-          &out,
-          "  [Inv %2d -> %-8s] %-42s | Blks: %3zu/%3zu (%6.2f%%) | Edges: %3zu/%3zu (%6.2f%%) "
-          "| Insns: %3zu/%3zu (%6.2f%%) | Exact: %3zu/%3zu (%6.2f%%)\n",
-          p.inverse_stage_index, GccRtlDumpInspector::PassExtension(*p.target_gcc_pass),
-          p.stage_name, direct_rtl_blocks_match[i], den, pct(direct_rtl_blocks_match[i], den),
-          direct_rtl_edges_match[i], den, pct(direct_rtl_edges_match[i], den),
-          direct_rtl_insns_match[i], den, pct(direct_rtl_insns_match[i], den),
-          direct_rtl_exact_match[i], den, pct(direct_rtl_exact_match[i], den));
-    }
-
-    absl::StrAppend(
-        &out,
-        "--------------------------------------------------------------------------------\n"
-        "FIRST DIVERGENT GCC PASS DISTRIBUTION (Chronological Forward Order):\n");
-    for (RtlPassKind pass : GccRtlDumpInspector::AllPasses()) {
-      size_t c = first_divergent_counts[pass];
-      if (c > 0) {
-        absl::StrAppendFormat(&out, "  %-10s : %3zu / %3zu (%.2f%%)\n",
-                              GccRtlDumpInspector::PassExtension(pass), c, total, pct(c, total));
-      }
-    }
-    if (stage1_full_cfg_exact < total) {
-      absl::StrAppend(
-          &out,
-          "--------------------------------------------------------------------------------\n"
-          "REMAINING STAGE 1 CFG MISMATCHES:\n");
-      for (const auto& r : results_) {
-        if (!r.direct_cfg_stage1.MatchesExactly()) {
-          absl::StrAppendFormat(
-              &out, "  %-48s | likely=%zu delay=%zu blks=%zu/%zu edges=%d insns=%d | %s\n",
-              r.test_name, r.direct_cfg_stage1.remaining_branch_likely,
-              r.direct_cfg_stage1.remaining_non_nop_delay_slots,
-              r.direct_cfg_stage1.unscheduled_block_count,
-              r.direct_cfg_stage1.expected_no_dbr_block_count, r.direct_cfg_stage1.successors_match,
-              r.direct_cfg_stage1.active_instructions_match, r.direct_cfg_stage1.mismatch_detail);
-        }
-      }
-    }
-    if (direct_rtl_stage0_exact_match < direct_rtl_stage0_present) {
-      absl::StrAppend(
-          &out,
-          "--------------------------------------------------------------------------------\n"
-          "STAGE 0 DIRECT CFG -> .dbr RTL MISMATCHES (FIRST 20):\n");
-      size_t shown = 0;
-      for (const auto& r : results_) {
-        const auto& dc = r.direct_rtl_stage0_comparison;
-        if (dc.pass_present && !dc.MatchesExactly()) {
-          absl::StrAppendFormat(&out, "  %-48s | blks=%zu/%zu insns=%zu/%zu | %s\n", r.test_name,
-                                dc.actual_block_count, dc.expected_block_count,
-                                dc.actual_insn_count, dc.expected_insn_count, dc.mismatch_detail);
-          if (++shown >= 20) break;
-        }
-      }
-    }
-    if (direct_rtl_exact_match[0] < direct_rtl_present_count[0]) {
-      absl::StrAppend(
-          &out,
-          "--------------------------------------------------------------------------------\n"
-          "STAGE 1 DIRECT CFG -> .jump2 RTL MISMATCHES (FIRST 20):\n");
-      size_t shown = 0;
-      for (const auto& r : results_) {
-        const auto& dc = r.direct_rtl_stage_comparisons[0];
-        if (dc.pass_present && !dc.MatchesExactly()) {
-          absl::StrAppendFormat(&out, "  %-48s | blks=%zu/%zu insns=%zu/%zu | %s\n", r.test_name,
-                                dc.actual_block_count, dc.expected_block_count,
-                                dc.actual_insn_count, dc.expected_insn_count, dc.mismatch_detail);
-          if (++shown >= 20) break;
-        }
-      }
-    }
-    if (direct_rtl_exact_match[1] < direct_rtl_present_count[1]) {
-      absl::StrAppend(
-          &out,
-          "--------------------------------------------------------------------------------\n"
-          "STAGE 2 DIRECT CFG -> .sched2 RTL MISMATCHES (ALL):\n");
-      for (const auto& r : results_) {
-        const auto& dc = r.direct_rtl_stage_comparisons[1];
-        if (dc.pass_present && !dc.MatchesExactly()) {
-          absl::StrAppendFormat(&out, "  %-48s | blks=%zu/%zu insns=%zu/%zu | %s\n", r.test_name,
-                                dc.actual_block_count, dc.expected_block_count,
-                                dc.actual_insn_count, dc.expected_insn_count, dc.mismatch_detail);
-        }
-      }
-    }
-    absl::StrAppend(
-        &out, "================================================================================\n");
+        "------+------------------------------------------------------+----------------------+-----"
+        "----------------\n"
+        " ALL  | %-52s | %3zu / %3zu (%6.2f%%)  | %3zu / %3zu (%6.2f%%)\n"
+        "------+------------------------------------------------------+----------------------+-----"
+        "----------------\n"
+        "END-TO-END RECOMPILATION OF LIFTED C (Stage 13 C AST -> GCC Forward Compile):\n"
+        "  Lifted C -> Exact Match Across All 13 GCC RTL Dumps : %3zu / %3zu (%6.2f%%)\n"
+        "  Lifted C -> Structurally Isomorphic Final .o Binary : %3zu / %3zu (%6.2f%%)\n"
+        "  Lifted C -> Bit-Exact Final .o Binary               : %3zu / %3zu (%6.2f%%)\n"
+        "========================================================================================"
+        "==================\n",
+        "End-to-End Across All 14 Stages (0..13)", all_14_stages_topo_match, total,
+        pct(all_14_stages_topo_match, total), all_14_stages_exact_match, total,
+        pct(all_14_stages_exact_match, total), all_13_rtl_dumps_exact, total,
+        pct(all_13_rtl_dumps_exact, total), isomorphic, total, pct(isomorphic, total), bit_exact,
+        total, pct(bit_exact, total));
     return out;
   }
 
@@ -909,6 +785,18 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
 
     res.final_dbr_rtl_matches =
         ExactPassMatches(orig_dump, cand_dump, test_case.function_name, RtlPassKind::kDbr);
+    const RtlFunctionDump* orig_rtl_fn =
+        orig_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kRtl);
+    const RtlFunctionDump* cand_rtl_fn =
+        cand_dump.GetFunctionPass(test_case.function_name, RtlPassKind::kRtl);
+    if (cand_rtl_fn != nullptr) {
+      const RtlControlFlowGraph cand_rtl_cfg =
+          GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(*cand_rtl_fn);
+      res.stage13_rtl_topo_comparison =
+          GccRtlDumpInspector::CompareRtlCfgToDump(cand_rtl_cfg, orig_rtl_fn);
+    }
+    res.stage13_rtl_matches =
+        ExactPassMatches(orig_dump, cand_dump, test_case.function_name, RtlPassKind::kRtl);
     res.first_divergent_pass = std::nullopt;
     for (RtlPassKind pass : GccRtlDumpInspector::AllPasses()) {
       if (!ExactPassMatches(orig_dump, cand_dump, test_case.function_name, pass)) {
@@ -942,7 +830,7 @@ GccRtlDumpInspector* GccStageInversionTest::inspector = nullptr;
 absl::flat_hash_map<std::string, CaseInversionResult>* GccStageInversionTest::precomputed_results =
     nullptr;
 
-TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
+TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllFourteenStages) {
   const RoundTripTestCase& test_case = GetParam();
   CaseInversionResult res =
       (precomputed_results != nullptr && precomputed_results->contains(test_case.test_name))
@@ -961,12 +849,19 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
     const RtlCfgPassComparison& rtl_cmp =
         (s == 0) ? res.direct_rtl_stage0_comparison : res.direct_rtl_stage_comparisons[s - 1];
     if (rtl_cmp.pass_present) {
+      EXPECT_TRUE(rtl_cmp.MatchesTopologyAndInsnCounts())
+          << "Direct RtlCfg -> RTL Stage " << s << " failed topology + instruction count match for "
+          << test_case.test_name << ": " << rtl_cmp.mismatch_detail;
       EXPECT_TRUE(rtl_cmp.MatchesExactly())
-          << "Direct CFG -> RTL Stage " << s << " failed exact match for " << test_case.test_name
-          << ": " << rtl_cmp.mismatch_detail;
+          << "Direct RtlCfg -> RTL Stage " << s << " failed exact RTL pattern match for "
+          << test_case.test_name << ": " << rtl_cmp.mismatch_detail;
     }
   }
   const auto& descriptors = InverseCompilerPipeline::AllStageDescriptors();
+  EXPECT_TRUE(res.bit_exact) << "Exact Right-Inverse Stage 0 (" << descriptors[0].stage_name
+                             << " / " << descriptors[0].gcc_stage_description
+                             << ") output .o binary f_0(g_0(y_0)) == y_0 mismatch for "
+                             << test_case.test_name;
   for (size_t i = 0; i < 12; ++i) {
     const auto& desc = descriptors[i + 1];
     EXPECT_TRUE(res.phase_right_inverse_matches[i])
@@ -974,9 +869,13 @@ TEST_P(GccStageInversionTest, SatisfiesRightInverseAcrossAllTwelvePhases) {
         << " / " << desc.gcc_stage_description << ") output RTL f_k(g_k(y_k)) == y_k mismatch for "
         << test_case.test_name;
   }
+  EXPECT_TRUE(res.stage13_rtl_matches)
+      << "Exact Right-Inverse Stage 13 (" << descriptors[13].stage_name << " / "
+      << descriptors[13].gcc_stage_description
+      << ") output .00.rtl f_13(g_13(y_13)) == y_13 mismatch for " << test_case.test_name;
 }
 
-INSTANTIATE_TEST_SUITE_P(SharedRoundTripTwelvePhaseSuite, GccStageInversionTest,
+INSTANTIATE_TEST_SUITE_P(SharedRoundTripFourteenStageSuite, GccStageInversionTest,
                          ::testing::ValuesIn(GetSharedRoundTripTestCases()),
                          [](const ::testing::TestParamInfo<RoundTripTestCase>& info) {
                            return info.param.test_name;

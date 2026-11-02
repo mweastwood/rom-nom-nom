@@ -56,6 +56,7 @@ struct RtlInsn {
   RtlFusedIdiomKind idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
   uint32_t vram = 0;
   bool is_prologue_insn = false;
+  bool is_synthetic_rtl_expansion = false;
   std::vector<Instruction> machine_instructions;
 };
 
@@ -77,9 +78,14 @@ struct RtlBasicBlock {
   void AddPatternOnly(std::string pattern) {
     RtlInsn insn;
     insn.canonical_pattern = pattern;
+    insn.is_synthetic_rtl_expansion = true;
     rtl_insns.push_back(std::move(insn));
     instructions.push_back(std::move(pattern));
   }
+
+  // Synchronizes `rtl_insns` with `instructions` while preserving existing `machine_instructions`
+  // payloads and `RtlInsn` metadata.
+  void SyncRtlInsnsFromInstructions();
 };
 
 // Result of comparing an actual `RtlControlFlowGraph` against an expected GCC 2.7.2 RTL pass dump.
@@ -87,6 +93,7 @@ struct RtlCfgPassComparison {
   bool pass_present = false;
   bool block_count_matches = false;
   bool successors_match = false;
+  bool insn_counts_match = false;
   bool instructions_match = false;
   size_t actual_block_count = 0;
   size_t expected_block_count = 0;
@@ -94,8 +101,16 @@ struct RtlCfgPassComparison {
   size_t expected_insn_count = 0;
   std::string mismatch_detail;
 
+  // Returns true if basic block count, RPO successor edges, and per-block instruction counts match.
+  bool MatchesTopologyAndInsnCounts() const {
+    return pass_present && block_count_matches && successors_match && insn_counts_match;
+  }
+
+  // Returns true if topology, instruction counts, and every instruction pattern string match
+  // verbatim.
   bool MatchesExactly() const {
-    return pass_present && block_count_matches && successors_match && instructions_match;
+    return pass_present && block_count_matches && successors_match && insn_counts_match &&
+           instructions_match;
   }
 };
 
@@ -103,6 +118,12 @@ struct RtlCfgPassComparison {
 // `InverseFinalAndGasStage` (Stage 0) and transformed by downstream inverse compiler stages.
 struct RtlControlFlowGraph {
   std::vector<RtlBasicBlock> rpo_blocks;
+
+  // Semantic recovery metadata populated across Track B (`Stages 0..12`) and consumed by Stage 13
+  // (`InverseRtlToCAstStage`).
+  bool has_explicit_trailing_void_return = false;
+  size_t local_alloc_pseudo_reg_count = 0;
+  size_t global_alloc_pseudo_reg_count = 0;
 
   size_t BlockCount() const { return rpo_blocks.size(); }
 
@@ -113,6 +134,22 @@ struct RtlControlFlowGraph {
     }
     return total;
   }
+
+  // Returns the total number of preserved `Instruction` objects across all `RtlInsn`s in
+  // `rpo_blocks`.
+  size_t TotalMachineInsnCount() const {
+    size_t total = 0;
+    for (const auto& blk : rpo_blocks) {
+      for (const auto& rinsn : blk.rtl_insns) {
+        total += rinsn.machine_instructions.size();
+      }
+    }
+    return total;
+  }
+
+  // Synchronizes `rtl_insns` with `instructions` across all `rpo_blocks` and preserves all real
+  // `machine_instructions` from `prev_blocks` even when blocks were split or reconstructed.
+  void SyncAllBlocksPreservingMachineInsns(const std::vector<RtlBasicBlock>& prev_blocks = {});
 
   // Compares `this` against `expected` for RPO block count, successor edges, and instruction count.
   RtlCfgPassComparison CompareAgainst(const RtlControlFlowGraph& expected) const;
