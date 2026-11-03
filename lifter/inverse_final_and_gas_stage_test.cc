@@ -275,26 +275,28 @@ TEST(InverseFinalAndGasStageTest, CustomizesLiftingBehaviorByParsedCompilerFlags
             "(set (reg:SI 2 v0) (ior:SI (reg:SI 2 v0) (const_int 22136)))");
 }
 
-TEST(InverseFinalAndGasStageTest, CanonicalizeRtlPatternNormalizesFinalPassRightInverseKernel) {
-  // 1. Non-code-generating metadata flags (`/v`, `/s`, `/i`, `/u`, `/f`) are stripped.
-  EXPECT_EQ(CanonicalizeRtlPattern("(set (reg/i:SI 2 v0) (mem/s:SI (reg/v:SI 4 a0)))"),
-            CanonicalizeRtlPattern("(set (reg:SI 2 v0) (mem:SI (reg:SI 4 a0)))"));
-
-  // 2. Hard-GPR low-part subregs (`final.c:alter_subreg`) are canonicalized.
+TEST(InverseFinalAndGasStageTest, CanonicalizeRtlPatternPreservesExactRtlSemantics) {
+  // Whitespace is collapsed and `(label_ref <uid>)` is canonicalized to `(label_ref)`.
   EXPECT_EQ(
+      CanonicalizeRtlPattern(
+          "(set (pc)\n  (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0))\n    (label_ref 14)\n  "
+          "  (pc)))"),
+      "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (label_ref) (pc)))");
+
+  // Exact RTL flags (`/v`, `/s`, `/i`), subregs, branch polarity, and machine modes are preserved
+  // verbatim without lossy normalization.
+  EXPECT_NE(CanonicalizeRtlPattern("(set (reg/i:SI 2 v0) (mem/s:SI (reg/v:SI 4 a0)))"),
+            CanonicalizeRtlPattern("(set (reg:SI 2 v0) (mem:SI (reg:SI 4 a0)))"));
+  EXPECT_NE(
       CanonicalizeRtlPattern(
           "(set (subreg:SI (reg:HI 2 v0) 0) (plus:SI (subreg:SI (reg:HI 2 v0) 0) (const_int -5)))"),
       CanonicalizeRtlPattern("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -5)))"));
-
-  // 3. Inverted branch polarity in `mips.md` is canonicalized.
-  EXPECT_EQ(
+  EXPECT_NE(
       CanonicalizeRtlPattern(
           "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (pc) (label_ref 14)))"),
       CanonicalizeRtlPattern(
           "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))"));
-
-  // 4. Hard-GPR bit-copy loads/stores/moves (`:SF` vs `:SI`) are canonicalized.
-  EXPECT_EQ(CanonicalizeRtlPattern("(set (mem/s:SF (reg/v:SI 4 a0)) (reg/v:SF 5 a1))"),
+  EXPECT_NE(CanonicalizeRtlPattern("(set (mem/s:SF (reg/v:SI 4 a0)) (reg/v:SF 5 a1))"),
             CanonicalizeRtlPattern("(set (mem:SI (reg:SI 4 a0)) (reg:SI 5 a1))"));
 }
 

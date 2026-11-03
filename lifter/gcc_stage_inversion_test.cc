@@ -98,6 +98,9 @@ struct CaseInversionResult {
   // Exact Right-inverse check per phase (`Stages 1..12`): `f_k(g_k(y_k)) == y_k` (exact
   // S-expression match on `source_gcc_pass`).
   std::array<bool, 12> phase_right_inverse_matches{};
+  // Exact Left-inverse check per phase (`Stages 1..12`): `g_k(f_k(x_{k-1})) == x_{k-1}` (exact
+  // S-expression match on `target_gcc_pass`).
+  std::array<bool, 12> phase_left_inverse_matches{};
   std::array<bool, 12> gcc_stage_transformed_rtl{};
   // Stage 13 (`InverseRtlToCAstStage` <- `GCCStage0_Frontend (C AST -> .rtl)`) topology and exact
   // S-expression match on `.00.rtl`.
@@ -259,18 +262,7 @@ CfgStage1Comparison EvaluateDirectCfgStage1(const ControlFlowGraph& unscheduled_
         disasm_n.push_back(inst.Disassemble());
       }
     }
-    bool same_block_right_inverse_match = (active_u == active_n);
-    if (!same_block_right_inverse_match && active_u.size() == active_n.size() &&
-        !active_u.empty() && active_u.back() == active_n.back()) {
-      std::vector<std::string> sorted_u = active_u;
-      std::vector<std::string> sorted_n = active_n;
-      std::sort(sorted_u.begin(), sorted_u.end());
-      std::sort(sorted_n.begin(), sorted_n.end());
-      if (sorted_u == sorted_n) {
-        same_block_right_inverse_match = true;
-      }
-    }
-    if (!same_block_right_inverse_match) {
+    if (active_u != active_n) {
       cmp.active_instructions_match = false;
       if (cmp.mismatch_detail.empty()) {
         auto summarize_cfg = [](const ControlFlowGraph& g, const std::vector<uint32_t>& rpo) {
@@ -356,6 +348,9 @@ class GccStageInversionSuiteAccumulator {
     size_t stage13_topo_present = 0;
     size_t stage13_topo_match = 0;
     size_t stage13_rtl_exact = 0;
+    size_t all_13_rtl_dumps_exact = 0;
+    size_t all_14_stages_topo_match = 0;
+    size_t all_14_stages_exact_match = 0;
 
     size_t direct_rtl_stage0_present = 0;
     size_t direct_rtl_stage0_topo_cnt_match = 0;
@@ -370,20 +365,32 @@ class GccStageInversionSuiteAccumulator {
       if (r.structurally_isomorphic) ++isomorphic;
       if (r.stage13_rtl_matches) ++stage13_rtl_exact;
 
+      bool case_all_14_topo = r.decompiled_and_compiled_ok;
+      bool case_all_14_exact = r.decompiled_and_compiled_ok && r.stage13_rtl_matches;
+
       if (r.stage13_rtl_topo_comparison.pass_present) {
         ++stage13_topo_present;
         if (r.stage13_rtl_topo_comparison.MatchesTopologyAndInsnCounts()) {
           ++stage13_topo_match;
+        } else {
+          case_all_14_topo = false;
         }
+      } else {
+        case_all_14_topo = false;
       }
 
+      bool all_13_rtl = r.decompiled_and_compiled_ok && r.stage13_rtl_matches;
       if (r.direct_rtl_stage0_comparison.pass_present) {
         ++direct_rtl_stage0_present;
         if (r.direct_rtl_stage0_comparison.MatchesTopologyAndInsnCounts()) {
           ++direct_rtl_stage0_topo_cnt_match;
+        } else {
+          case_all_14_topo = false;
         }
         if (r.direct_rtl_stage0_comparison.MatchesExactly()) {
           ++direct_rtl_stage0_exact_match;
+        } else {
+          case_all_14_exact = false;
         }
       }
       for (size_t i = 0; i < 12; ++i) {
@@ -392,11 +399,27 @@ class GccStageInversionSuiteAccumulator {
           ++direct_rtl_present_count[i];
           if (dc.MatchesTopologyAndInsnCounts()) {
             ++direct_rtl_topo_cnt_match[i];
+          } else {
+            case_all_14_topo = false;
           }
           if (dc.MatchesExactly()) {
             ++direct_rtl_exact_match[i];
+          } else {
+            case_all_14_exact = false;
           }
         }
+        if (!r.phase_right_inverse_matches[i] || !r.phase_left_inverse_matches[i]) {
+          all_13_rtl = false;
+        }
+      }
+      if (case_all_14_topo) {
+        ++all_14_stages_topo_match;
+      }
+      if (case_all_14_exact) {
+        ++all_14_stages_exact_match;
+      }
+      if (all_13_rtl) {
+        ++all_13_rtl_dumps_exact;
       }
     }
 
@@ -449,10 +472,19 @@ class GccStageInversionSuiteAccumulator {
         "------+------------------------------------------------------+----------------------+-----"
         "----------------\n"
         " ALL  | %-52s | %3zu / %3zu (%6.2f%%)  | %3zu / %3zu (%6.2f%%)\n"
+        "------+------------------------------------------------------+----------------------+-----"
+        "----------------\n"
+        "END-TO-END RECOMPILATION OF LIFTED C (Stage 13 C AST -> GCC Forward Compile):\n"
+        "  Lifted C -> Exact Match Across All 13 GCC RTL Dumps : %3zu / %3zu (%6.2f%%)\n"
+        "  Lifted C -> Structurally Isomorphic Final .o Binary : %3zu / %3zu (%6.2f%%)\n"
+        "  Lifted C -> Bit-Exact Final .o Binary               : %3zu / %3zu (%6.2f%%)\n"
         "========================================================================================"
         "==================\n",
-        "End-to-End Across All 14 Stages (.o -> C -> .o)", isomorphic, total,
-        pct(isomorphic, total), bit_exact, total, pct(bit_exact, total));
+        "End-to-End Across All 14 Stages (0..13)", all_14_stages_topo_match, total,
+        pct(all_14_stages_topo_match, total), all_14_stages_exact_match, total,
+        pct(all_14_stages_exact_match, total), all_13_rtl_dumps_exact, total,
+        pct(all_13_rtl_dumps_exact, total), isomorphic, total, pct(isomorphic, total), bit_exact,
+        total, pct(bit_exact, total));
     return out;
   }
 
@@ -810,6 +842,8 @@ class GccStageInversionTest : public ::testing::TestWithParam<RoundTripTestCase>
       const auto& p = rtl_stages[i + 1];
       res.phase_right_inverse_matches[i] =
           ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.source_gcc_pass);
+      res.phase_left_inverse_matches[i] =
+          ExactPassMatches(orig_dump, cand_dump, test_case.function_name, *p.target_gcc_pass);
       res.gcc_stage_transformed_rtl[i] = DidGccStageTransformRtl(
           orig_dump, test_case.function_name, *p.target_gcc_pass, *p.source_gcc_pass);
     }

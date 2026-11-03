@@ -833,32 +833,11 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
       }
     }
     const std::string pat = ExtractTopLevelPatternFromInsnSexpr(entry.raw_sexpr);
-    // Ignore non-machine `(use ...)`, `(clobber ...)`, `(const_int 0)` (`gen_nop()`) pseudo-insns,
-    // noop register self-moves `(set (reg:M R) (reg:M R))` skipped by `final.c`, and jump-table
-    // `addr_vec` data.
-    if (entry.kind == RtlInsnKind::kInsn) {
-      if (absl::StartsWith(pat, "(use ") || absl::StartsWith(pat, "(clobber ") ||
-          pat == "(const_int 0)") {
-        continue;
-      }
-      const bool is_post_reload_pass =
-          (dump.pass == RtlPassKind::kGreg || dump.pass == RtlPassKind::kSched2 ||
-           dump.pass == RtlPassKind::kJump2 || dump.pass == RtlPassKind::kDbr);
-      if (is_post_reload_pass) {
-        const std::string canon_pat = CanonicalizeRtlPattern(pat);
-        if (absl::StartsWith(canon_pat, "(set (reg:") && absl::EndsWith(canon_pat, ")")) {
-          const std::string_view sv = canon_pat;
-          const size_t close_lhs = sv.find(')', 5);
-          if (close_lhs != std::string_view::npos && close_lhs + 2 < sv.size() - 1 &&
-              sv[close_lhs + 1] == ' ') {
-            const std::string_view lhs = sv.substr(5, close_lhs - 5 + 1);
-            const std::string_view rhs = sv.substr(close_lhs + 2, sv.size() - 1 - (close_lhs + 2));
-            if (lhs == rhs) {
-              continue;
-            }
-          }
-        }
-      }
+    // Ignore non-machine `(use ...)` and `(clobber ...)` pseudo-insns and jump-table `addr_vec`
+    // data.
+    if (entry.kind == RtlInsnKind::kInsn &&
+        (absl::StartsWith(pat, "(use ") || absl::StartsWith(pat, "(clobber "))) {
+      continue;
     }
     if (entry.kind == RtlInsnKind::kJumpInsn &&
         (absl::StartsWith(pat, "(addr_vec:") || absl::StartsWith(pat, "(addr_diff_vec:"))) {
@@ -913,16 +892,7 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
            items[i].kind != RtlInsnKind::kBarrier) {
       const auto& it = items[i];
       if (it.kind == RtlInsnKind::kInsn || it.kind == RtlInsnKind::kCallInsn) {
-        const std::string canon_pat = CanonicalizeRtlPattern(it.pattern);
-        // In `.dbr`, `reorg.c` may call `try_split` on `movstrsi_internal` (`(use (const_int 0))` =
-        // `BLOCK_MOVE_NORMAL`) to fill `jr $ra`'s delay slot, splitting it into
-        // `movstrsi_internal2`
-        // (`(use (const_int 1))` = `BLOCK_MOVE_NOT_LAST`) + `movstrsi_internal3` (`(use (const_int
-        // 2))` = `BLOCK_MOVE_LAST`). Skip the split `BLOCK_MOVE_LAST` companion so every
-        // `movstrsi_internal` block move is 1 canonical RTL instruction across all stages.
-        if (!absl::EndsWith(canon_pat, "(use (const_int 2)) ] )")) {
-          blk.instructions.push_back(canon_pat);
-        }
+        blk.instructions.push_back(CanonicalizeRtlPattern(it.pattern));
         ++i;
       } else if (it.kind == RtlInsnKind::kJumpInsn) {
         blk.ends_with_jump = true;
