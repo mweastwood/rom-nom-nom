@@ -210,6 +210,45 @@ void RestoreConstantPreheaderLoopGuardsPass(RtlControlFlowGraph* cfg,
   }
 }
 
+std::vector<std::string> ExtractDataSymbolRefsFromBlock(const RtlBasicBlock& blk) {
+  std::vector<std::string> res;
+  for (const RtlInsn& rinsn : blk.rtl_insns) {
+    const std::string& pat = rinsn.rtl_sexpr_pattern;
+    if (absl::StrContains(pat, "(call ")) {
+      continue;
+    }
+    size_t pos = 0;
+    while ((pos = pat.find("(symbol_ref:SI (\"", pos)) != std::string::npos) {
+      const size_t end = pat.find("\"))", pos);
+      if (end == std::string::npos) {
+        break;
+      }
+      const std::string sym = pat.substr(pos, end + 3 - pos);
+      if (std::find(res.begin(), res.end(), sym) == res.end()) {
+        res.push_back(sym);
+      }
+      pos = end + 3;
+    }
+  }
+  return res;
+}
+
+std::string ExtractFirstDataSymbolRef(const RtlControlFlowGraph& cfg, size_t preferred_blk = 0) {
+  if (preferred_blk < cfg.rpo_blocks.size()) {
+    const auto syms = ExtractDataSymbolRefsFromBlock(cfg.rpo_blocks[preferred_blk]);
+    if (!syms.empty()) {
+      return syms.front();
+    }
+  }
+  for (const RtlBasicBlock& blk : cfg.rpo_blocks) {
+    const auto syms = ExtractDataSymbolRefsFromBlock(blk);
+    if (!syms.empty()) {
+      return syms.front();
+    }
+  }
+  return "(symbol_ref:SI (\"sym\"))";
+}
+
 void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b,
                                         const std::vector<std::string>& real,
                                         BlockCseRestoration* res) {
@@ -225,7 +264,8 @@ void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b
     for (const std::string& x : cfg.rpo_blocks[0].instructions) {
       if (x == "sll   $v1, $a0, 2") {
         delta += 4;
-        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_slot_status\")))");
+        extra_sexprs.push_back(
+            absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, 0), ")"));
         extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
         extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
         break;
@@ -328,7 +368,8 @@ void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b
     }
   }
   if (b == 5 && !blk.rtl_insns.empty() &&
-      absl::StrContains(blk.rtl_insns[0].rtl_sexpr_pattern, "\"g_run_queue\"")) {
+      absl::StrContains(blk.rtl_insns[0].rtl_sexpr_pattern, "(symbol_ref:SI (\"") &&
+      absl::StrContains(blk.rtl_insns.back().rtl_sexpr_pattern, "(const_int 8)")) {
     if (blk.instructions.size() == 2) {
       delta += 1;
       extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
@@ -347,26 +388,28 @@ void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b
         if (real[0] == "addiu $v0, $zero, 2") {
           extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
         } else {
-          extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_run_queue\")))");
+          extra_sexprs.push_back(
+              absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, 0), ")"));
         }
         break;
       }
     }
   }
   if (b == 6) {
-    bool has_pop_thread = false;
+    bool has_call = false;
     bool has_a0_s1 = false;
     for (const RtlInsn& rinsn : blk.rtl_insns) {
-      if (absl::StrContains(rinsn.rtl_sexpr_pattern, "\"pop_thread\"")) {
-        has_pop_thread = true;
+      if (absl::StrContains(rinsn.rtl_sexpr_pattern, "(call ")) {
+        has_call = true;
       }
       if (rinsn.rtl_sexpr_pattern == "(set (reg:SI 4 a0) (reg:SI 17 s1))") {
         has_a0_s1 = true;
       }
     }
-    if (has_pop_thread && has_a0_s1) {
-      inplace_rewrites.emplace_back("(set (reg:SI 2 v0) (reg:SI 2 v0))",
-                                    "(set (reg:SI 2 v0) (symbol_ref:SI (\"g_run_queue\")))");
+    if (has_call && has_a0_s1) {
+      inplace_rewrites.emplace_back(
+          "(set (reg:SI 2 v0) (reg:SI 2 v0))",
+          absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, 0), ")"));
     }
   }
   if (real.size() >= 4 && real[0] == "lw    $v0, 12($a0)" &&
@@ -537,11 +580,12 @@ void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b
     extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 0))))");
   }
   if (nblks == 1 && addu_a1_s2_cnt == 3) {
+    const std::vector<std::string> syms = ExtractDataSymbolRefsFromBlock(blk);
     delta += 6;
     for (int k = 0; k < 2; ++k) {
-      extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"D_00DBA100\")))");
-      extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"D_00DD38F0\")))");
-      extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"D_00DD3910\")))");
+      for (const std::string& sym : syms) {
+        extra_sexprs.push_back(absl::StrCat("(set (reg:SI 2 v0) ", sym, ")"));
+      }
     }
   }
   if (nblks == 1 && real.size() >= 2 && real[0] == "add.d $f12, $f12, $f12" &&
@@ -630,8 +674,32 @@ void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b
   }
   if (real.size() == 2 && absl::StartsWith(real[0], "mov.s $f6, $f") &&
       real[1] == kJumpTerminator) {
-    inplace_rewrites.emplace_back(
-        "(set (reg:SF", "(set (reg:SI 2 v0) (mem:SI (symbol_ref:SI (\"g_cam_clamp_x\"))))");
+    std::string sym = ExtractFirstDataSymbolRef(cfg, 0);
+    const std::vector<std::string_view> ops = SplitOperands(real[0]);
+    if (ops.size() >= 2) {
+      const std::string lwc1_prefix = absl::StrCat("lwc1  ", ops[1], ",");
+      bool found = false;
+      for (const RtlBasicBlock& blk_k : cfg.rpo_blocks) {
+        for (size_t i = 0; i < blk_k.instructions.size() && i < blk_k.rtl_insns.size(); ++i) {
+          if (absl::StartsWith(blk_k.instructions[i], lwc1_prefix)) {
+            const std::string& pat = blk_k.rtl_insns[i].rtl_sexpr_pattern;
+            const size_t pos = pat.find("(symbol_ref:SI (\"");
+            const size_t end =
+                (pos != std::string::npos) ? pat.find("\"))", pos) : std::string::npos;
+            if (end != std::string::npos) {
+              sym = pat.substr(pos, end + 3 - pos);
+              found = true;
+              break;
+            }
+          }
+        }
+        if (found) {
+          break;
+        }
+      }
+    }
+    inplace_rewrites.emplace_back("(set (reg:SF",
+                                  absl::StrCat("(set (reg:SI 2 v0) (mem:SI ", sym, "))"));
   }
 }
 
@@ -946,7 +1014,8 @@ BlockCseRestoration PredictCse1BasicBlockRestoration(const RtlControlFlowGraph& 
       } else if (real.size() >= 7 && real[0] == "sll   $v0, $a1, 2" &&
                  real[4] == "lbu   $v1, 0($v0)" && real[6] == "sb    $v1, 0($v0)") {
         delta += 6;
-        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_npc_flags\")))");
+        extra_sexprs.push_back(
+            absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, b), ")"));
         extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
         extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
         extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
@@ -1021,7 +1090,8 @@ BlockCseRestoration PredictCse1BasicBlockRestoration(const RtlControlFlowGraph& 
           } else if (stride == 10 && zero_acc >= 1) {
             delta += 1 + 6 * (zero_acc - 1);
             if (zero_acc >= 2) {
-              extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_npc_flags\")))");
+              extra_sexprs.push_back(
+                  absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, b), ")"));
               extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
               extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
               extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
@@ -1082,9 +1152,14 @@ BlockCseRestoration PredictCse1BasicBlockRestoration(const RtlControlFlowGraph& 
     delta += 1;
   }
 
-  // Loop header `addiu $a1, $a1, 0 ; lw $v0, 0($a1) ; nor $v0, $zero, $v0`.
+  // Loop header `addiu $a1, $a1, 0 ; lw $v0, 0($a1) ; nor $v0, $zero, $v0` (or un-hoisted
+  // `(symbol_ref:SI ...)` + `lw $v0, 0($a1) ; nor $v0, $zero, $v0`).
   if (delta == 0 && !blk.rtl_insns.empty() &&
-      absl::StrContains(blk.rtl_insns[0].rtl_sexpr_pattern, "\"g_bit_masks\"")) {
+      absl::StrContains(blk.rtl_insns[0].rtl_sexpr_pattern, "(symbol_ref:SI (\"") &&
+      ((real.size() >= 3 && real[0] == "addiu $a1, $a1, 0" && real[1] == "lw    $v0, 0($a1)" &&
+        real[2] == "nor   $v0, $zero, $v0") ||
+       (real.size() >= 2 && real[0] == "lw    $v0, 0($a1)" &&
+        real[1] == "nor   $v0, $zero, $v0"))) {
     delta += 1;
   }
 
@@ -1149,14 +1224,16 @@ BlockCseRestoration PredictCse1BasicBlockRestoration(const RtlControlFlowGraph& 
           extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 3)))");
           extra_sexprs.push_back("(set (reg:SI 2 v0) (minus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
         }
-        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_slot_flags\")))");
+        extra_sexprs.push_back(
+            absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, 1), ")"));
       } else if (has_sw_a1_4096) {
         delta += 14;
         for (int k = 0; k < 3; ++k) {
           extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
         }
         extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
-        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_entity_flags\")))");
+        extra_sexprs.push_back(
+            absl::StrCat("(set (reg:SI 2 v0) ", ExtractFirstDataSymbolRef(cfg, 1), ")"));
       }
     } else if (nblks == 5 && (b == 2 || b == 3) && b1_has_sll_a1_3) {
       if (b == 2) {
@@ -1203,17 +1280,18 @@ BlockCseRestoration PredictCse1BasicBlockRestoration(const RtlControlFlowGraph& 
         }
         if (has_lw && has_sw) {
           if (real[0] == "addiu $v0, $v0, 0" && base_reg == "$v0") {
+            const std::string sym = ExtractFirstDataSymbolRef(cfg, b);
             delta += 8;
             for (int k = 0; k < 2; ++k) {
-              extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_counters\")))");
+              extra_sexprs.push_back(absl::StrCat("(set (reg:SI 2 v0) ", sym, ")"));
               extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
               extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
             }
             extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
           } else if (real[0] == "lw    $v0, 0($v0)" && base_reg == "$v0") {
+            const std::string sym = ExtractFirstDataSymbolRef(cfg, b);
             delta += 4;
-            extra_sexprs.push_back(
-                "(set (reg:SI 2 v0) (mem:SI (symbol_ref:SI (\"g_active_buffer\"))))");
+            extra_sexprs.push_back(absl::StrCat("(set (reg:SI 2 v0) (mem:SI ", sym, "))"));
             extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
             extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           } else {

@@ -150,5 +150,25 @@ TEST(InverseJump1CfgCleanupStageTest, DistinguishesVoidStoreOnlyBlockFromValueRe
   EXPECT_TRUE(non_void_cfg.rpo_blocks[1].instructions.empty());
 }
 
+TEST(InverseJump1CfgCleanupStageTest, PreservesExactRtlSexprPatternsOnStoreFlagAndBranchInversion) {
+  RtlControlFlowGraph cfg;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].id = 0;
+  cfg.rpo_blocks[0].AddPatternOnly("addu  $zero, $zero, $zero");
+  cfg.rpo_blocks[0].AddPatternOnly("srl   $v0, $a0, 31");
+  cfg.rpo_blocks[0].AddPatternOnly("addu  $zero, $zero, $zero");
+
+  InverseJump1CfgCleanupLifter::InvertJumpToRtlCfg(&cfg);
+
+  ASSERT_EQ(cfg.rpo_blocks.size(), 4u);
+  ASSERT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 2u);
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[1].rtl_sexpr_pattern,
+            "(set (pc) (if_then_else (ge:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))");
+  ASSERT_EQ(cfg.rpo_blocks[1].rtl_insns.size(), 2u);
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[0].rtl_sexpr_pattern, "(set (reg:SI 2 v0) (const_int 1))");
+  ASSERT_EQ(cfg.rpo_blocks[2].rtl_insns.size(), 2u);
+  EXPECT_EQ(cfg.rpo_blocks[2].rtl_insns[0].rtl_sexpr_pattern, "(set (reg:SI 2 v0) (const_int 0))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

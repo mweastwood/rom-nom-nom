@@ -524,6 +524,16 @@ absl::Status InverseJump1CfgCleanupStage::Run(DecompilationContext* context) {
     }
   }
   InverseJump1CfgCleanupLifter::InvertJumpToRtlCfg(cfg);
+  for (auto& blk : cfg->rpo_blocks) {
+    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
+      if (!blk.rtl_insns[i].rtl_sexpr_pattern.empty()) {
+        blk.rtl_insns[i].canonical_pattern = blk.rtl_insns[i].rtl_sexpr_pattern;
+      }
+      if (i < blk.instructions.size()) {
+        blk.instructions[i] = blk.rtl_insns[i].canonical_pattern;
+      }
+    }
+  }
   return absl::OkStatus();
 }
 

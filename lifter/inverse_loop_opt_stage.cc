@@ -191,11 +191,17 @@ bool TryInvertDecisionTreeDualLoop(RtlControlFlowGraph* cfg) {
 
   // Loop 2 (`B11..B13`): remove hoisted symbol_ref + 3 GIV inits from B11 (`5 -> 1`),
   // net `-2` GIV insns from B12 (`13 -> 11`), and `-1` `final_biv_value` insn from B13 (`10 -> 9`).
+  std::string hoisted_sym_set = "(set (reg:SI 2 v0) (reg:SI 2 v0))";
+  for (const RtlInsn& r : b11.rtl_insns) {
+    if (absl::StrContains(r.rtl_sexpr_pattern, "(symbol_ref:SI ")) {
+      hoisted_sym_set = r.rtl_sexpr_pattern;
+      break;
+    }
+  }
   b11.instructions.resize(1);
   RemoveInsnsBeforeTerminator(&b12, 2);
   b12.SyncRtlInsnsFromInstructions();
-  ReplaceSexprBySuffix(&b12, "(const_int 10)))",
-                       "(set (reg:SI 6 a2) (symbol_ref:SI (\"g_npc_flags\")))", 1);
+  ReplaceSexprBySuffix(&b12, "(const_int 10)))", hoisted_sym_set, 1);
   ReplaceSexprBySuffix(&b12, "(const_int 10)))",
                        "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))", 1);
   ReplaceSexprBySuffix(&b12, "(const_int 5)))",
@@ -211,8 +217,7 @@ bool TryInvertDecisionTreeDualLoop(RtlControlFlowGraph* cfg) {
   }
   RemoveInsnsBeforeTerminator(&b16, 1);
   b16.SyncRtlInsnsFromInstructions();
-  ReplaceSexprBySuffix(&b16, "(const_int -10)))",
-                       "(set (reg:SI 6 a2) (symbol_ref:SI (\"g_npc_flags\")))", 1);
+  ReplaceSexprBySuffix(&b16, "(const_int -10)))", hoisted_sym_set, 1);
   ReplaceSexprBySuffix(&b16, "(const_int -10)))",
                        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))", 1);
   ReplaceSexprBySuffix(&b16, "(const_int -1)))", "(set (reg:QI 3 v1) (const_int 4))", 1);

@@ -597,10 +597,13 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
     s.replace(pos, (reg_end + 4) - pos, absl::StrCat("(reg:", outer_mode, reg_rest));
   }
 
-  // 2. Canonicalize stack frame addresses (`sp`, `$fp`, `$0`).
+  // 2. Canonicalize stack frame addresses (`sp`, `$fp`, `$0`, and pre-instantiation virtual
+  // incoming-args/stack-vars/outgoing-args registers `68..71` in `.00.rtl`).
   for (std::string_view base_prefix :
        {"(plus:SI (reg:SI 29 sp) (const_int ", "(plus:SI (reg:SI 30 $fp) (const_int ",
-        "(plus:SI (reg:SI 0 $0) (const_int "}) {
+        "(plus:SI (reg:SI 0 $0) (const_int ", "(plus:SI (reg:SI 68) (const_int ",
+        "(plus:SI (reg:SI 69) (const_int ", "(plus:SI (reg:SI 70) (const_int ",
+        "(plus:SI (reg:SI 71) (const_int "}) {
     size_t pos = 0;
     while ((pos = s.find(base_prefix, pos)) != std::string::npos) {
       const size_t close_pos = s.find("))", pos + base_prefix.size());
@@ -611,7 +614,8 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
       pos += std::string_view("(STACK_ADDR)").size();
     }
   }
-  for (std::string_view base_reg : {"(reg:SI 29 sp)", "(reg:SI 30 $fp)", "(reg:SI 0 $0)"}) {
+  for (std::string_view base_reg : {"(reg:SI 29 sp)", "(reg:SI 30 $fp)", "(reg:SI 0 $0)",
+                                    "(reg:SI 68)", "(reg:SI 70)", "(reg:SI 71)"}) {
     size_t pos = 0;
     while ((pos = s.find(base_reg, pos)) != std::string::npos) {
       if (pos >= 8 && s.substr(pos - 8, 5) == "(mem:") {
@@ -620,6 +624,14 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
       } else {
         pos += base_reg.size();
       }
+    }
+  }
+  {
+    constexpr std::string_view kVirtStackVars = "(reg:SI 69)";
+    size_t pos = 0;
+    while ((pos = s.find(kVirtStackVars, pos)) != std::string::npos) {
+      s.replace(pos, kVirtStackVars.size(), "(STACK_ADDR)");
+      pos += std::string_view("(STACK_ADDR)").size();
     }
   }
 
