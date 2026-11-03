@@ -161,25 +161,7 @@ absl::Status InverseLregLocalAllocStage::Run(DecompilationContext* context) {
     return absl::FailedPreconditionError("InverseLregLocalAllocStage: RtlCfg not initialized.");
   }
   RtlControlFlowGraph* cfg = context->MutableRtlCfg();
-  for (auto& blk : cfg->rpo_blocks) {
-    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
-      if (!blk.rtl_insns[i].machine_instructions.empty() &&
-          absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(") &&
-          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(set (pc)") &&
-          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(parallel[ (set (pc)")) {
-        const Instruction& rep_inst =
-            (blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiSf2 ||
-             blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiDf2)
-                ? blk.rtl_insns[i].machine_instructions.back()
-                : blk.rtl_insns[i].machine_instructions.front();
-        blk.rtl_insns[i].canonical_pattern =
-            InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(rep_inst);
-      }
-      if (i < blk.instructions.size()) {
-        blk.instructions[i] = blk.rtl_insns[i].canonical_pattern;
-      }
-    }
-  }
+  cfg->pass = RtlPassKind::kSched;
   // Invert `local-alloc.c:local_alloc` (`.07.sched` -> `.08.lreg`): classify register webs into
   // single-basic-block local allocations (`reg_basic_block[r] >= 0`) vs. multi-block global
   // allocations (`reg_basic_block[r] == REG_BLOCK_GLOBAL`).
@@ -226,7 +208,27 @@ absl::Status InverseSched1PreAllocStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseSched1PreAllocStage: RtlCfg not initialized.");
   }
-  InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(context->MutableRtlCfg());
+  RtlControlFlowGraph* cfg = context->MutableRtlCfg();
+  for (auto& blk : cfg->rpo_blocks) {
+    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
+      if (!blk.rtl_insns[i].machine_instructions.empty() &&
+          absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(") &&
+          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(set (pc)") &&
+          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(parallel[ (set (pc)")) {
+        const Instruction& rep_inst =
+            (blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiSf2 ||
+             blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiDf2)
+                ? blk.rtl_insns[i].machine_instructions.back()
+                : blk.rtl_insns[i].machine_instructions.front();
+        blk.rtl_insns[i].canonical_pattern =
+            InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(rep_inst);
+      }
+      if (i < blk.instructions.size()) {
+        blk.instructions[i] = blk.rtl_insns[i].canonical_pattern;
+      }
+    }
+  }
+  InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(cfg);
   return absl::OkStatus();
 }
 

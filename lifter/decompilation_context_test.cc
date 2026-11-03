@@ -158,6 +158,8 @@ TEST(DecompilationContextTest, InverseCompilerPipelineExecutesAllStagesInOrderAn
 
   std::vector<InverseStageId> executed_stages;
   size_t stage0_rtl_insns = 0;
+  std::string stage5_first_insn;
+  RtlPassKind stage5_pass = RtlPassKind::kDbr;
   ASSERT_TRUE(pipeline
                   .Run(&context,
                        [&](const InverseStageDescriptor& desc, const DecompilationContext& ctx) {
@@ -166,6 +168,12 @@ TEST(DecompilationContextTest, InverseCompilerPipelineExecutesAllStagesInOrderAn
                            ASSERT_TRUE(ctx.HasRtlCfg());
                            ASSERT_EQ(ctx.RtlCfg().rpo_blocks.size(), 1u);
                            stage0_rtl_insns = ctx.RtlCfg().rpo_blocks[0].rtl_insns.size();
+                         } else if (desc.id == InverseStageId::kStage05LregLocalAlloc) {
+                           ASSERT_TRUE(ctx.HasRtlCfg());
+                           stage5_pass = ctx.RtlCfg().pass;
+                           ASSERT_EQ(ctx.RtlCfg().rpo_blocks.size(), 1u);
+                           ASSERT_FALSE(ctx.RtlCfg().rpo_blocks[0].instructions.empty());
+                           stage5_first_insn = ctx.RtlCfg().rpo_blocks[0].instructions[0];
                          }
                        })
                   .ok());
@@ -176,6 +184,8 @@ TEST(DecompilationContextTest, InverseCompilerPipelineExecutesAllStagesInOrderAn
   EXPECT_EQ(executed_stages[2], InverseStageId::kStage02Jump2CrossJump);
   EXPECT_EQ(executed_stages.back(), InverseStageId::kStage13RtlToCAst);
   EXPECT_EQ(stage0_rtl_insns, 1u);
+  EXPECT_EQ(stage5_pass, RtlPassKind::kSched);
+  EXPECT_EQ(stage5_first_insn, "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 7)))");
   ASSERT_TRUE(context.HasAst());
   EXPECT_EQ(context.Ast().Name(), "add_imm");
 }
