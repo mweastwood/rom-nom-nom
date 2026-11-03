@@ -28,6 +28,8 @@ TEST(InverseLoopOptStageTest, ContractsSingleBlockLoopGivPreheaderAndRemovesExtr
   cfg.rpo_blocks[2].successors = {2, 3};
   cfg.rpo_blocks[2].AddPatternOnly("lw    $v0, 0($a0)");
   cfg.rpo_blocks[2].AddPatternOnly("addiu $a0, $a0, 4");
+  cfg.rpo_blocks[2].rtl_insns.back().rtl_sexpr_pattern =
+      "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 4)))";
   cfg.rpo_blocks[2].AddPatternOnly("addiu $a2, $a2, 1");
   cfg.rpo_blocks[2].AddPatternOnly("addu  $v1, $v1, $v0");
   cfg.rpo_blocks[2].AddPatternOnly("slt   $v0, $a2, $a1");
@@ -41,10 +43,13 @@ TEST(InverseLoopOptStageTest, ContractsSingleBlockLoopGivPreheaderAndRemovesExtr
 
   InverseLoopOptLifter::InvertLoopToCseRtlCfg(&cfg);
 
+  EXPECT_EQ(cfg.pass, RtlPassKind::kCse);
   ASSERT_EQ(cfg.rpo_blocks.size(), 3u);
   EXPECT_EQ(cfg.rpo_blocks[0].successors, (std::vector<size_t>{2, 1}));
   EXPECT_EQ(cfg.rpo_blocks[1].successors, (std::vector<size_t>{1, 2}));
   EXPECT_EQ(cfg.rpo_blocks[1].instructions.size(), 7u);
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[1].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
   EXPECT_EQ(cfg.rpo_blocks[2].successors, std::vector<size_t>{});
 }
 
@@ -58,6 +63,7 @@ TEST(InverseLoopOptStageTest, UnHoistsMovableConstantsFromPreheaderAndContractsW
   // Preheader B1 created by `move_movables` (`0x08114795`) with hoisted constant `5`:
   cfg.rpo_blocks[1].successors = {2};
   cfg.rpo_blocks[1].AddPatternOnly("addiu $t0, $zero, 5");
+  cfg.rpo_blocks[1].rtl_insns.back().rtl_sexpr_pattern = "(set (reg:SI 8 t0) (const_int 5))";
 
   cfg.rpo_blocks[2].successors = {4, 3};
   cfg.rpo_blocks[2].AddPatternOnly("lhu   $v1, 0($a0)");
@@ -87,6 +93,8 @@ TEST(InverseLoopOptStageTest, UnHoistsMovableConstantsFromPreheaderAndContractsW
   EXPECT_EQ(cfg.rpo_blocks[0].successors, (std::vector<size_t>{4, 1}));
   EXPECT_EQ(cfg.rpo_blocks[1].instructions.size(), 5u);
   EXPECT_EQ(cfg.rpo_blocks[1].instructions.front(), "addiu $t0, $zero, 5");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns.front().rtl_sexpr_pattern,
+            "(set (reg:SI 8 t0) (const_int 5))");
 }
 
 TEST(InverseLoopOptStageTest, UnHoistsMovablesFromEntryBlockB0IntoSwitchAndTablejumpBlocks) {
