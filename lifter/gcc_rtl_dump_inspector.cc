@@ -173,11 +173,12 @@ RtlInsnEntry ParseSexprEntry(std::string raw_sexpr) {
   return entry;
 }
 
-// Normalizes an active RTL instruction S-expression for structural comparison across compilations
-// by canonicalizing instruction UIDs, label_ref numbers, and virtual pseudo-register numbers
-// (>= 72 in MIPS GCC 2.7.2) while preserving RTL opcodes, machine modes, constants, and hard
-// register assignments.
-std::string NormalizeInsnSexprForComparison(std::string_view sexpr) {
+// Normalizes an active RTL instruction S-expression for comparison across compilations by
+// canonicalizing instruction UIDs and mapping `label_ref` UIDs to sequential function label IDs
+// (`L0`, `L1`, ...) while preserving all RTL opcodes, flags (`/v`, `/s`, `/i`), machine modes,
+// constants, and exact hard and pseudo-register numbers.
+std::string NormalizeInsnSexprForComparison(
+    std::string_view sexpr, const absl::flat_hash_map<int, std::string>& label_uid_to_canon) {
   std::string out;
   out.reserve(sexpr.size());
 
@@ -208,14 +209,10 @@ std::string NormalizeInsnSexprForComparison(std::string_view sexpr) {
           starts_with_insn_tag("call_insn")) {
         out.push_back('(');
         ++i;
-        // Copy base tag (`insn`, `jump_insn`, `call_insn`) and `/s` flag if present, stripping
-        // scheduler `:QI` / `:HI` mode annotations so pre-sched and post-sched dumps compare equal.
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != ':' &&
-               sexpr[i] != '/') {
+        // Preserve full tag including `/s`, `/v`, `/i` flags and `:QI`/`:HI` modes.
+        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != '(' &&
+               sexpr[i] != ')') {
           out.push_back(sexpr[i++]);
-        }
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i])) {
-          ++i;
         }
         // Skip up to 3 integer tokens (uid, prev_uid, next_uid).
         for (int k = 0; k < 3; ++k) {
@@ -238,14 +235,27 @@ std::string NormalizeInsnSexprForComparison(std::string_view sexpr) {
         continue;
       }
 
-      if (absl::StartsWith(rest, "label_ref ")) {
-        out.append("(label_ref)");
-        i += 1 + std::string_view("label_ref ").size();
-        while (i < sexpr.size() && sexpr[i] != ')') {
+      if (absl::StartsWith(rest, "label_ref")) {
+        out.push_back('(');
+        ++i;
+        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != ')') {
+          out.push_back(sexpr[i++]);
+        }
+        while (i < sexpr.size() && absl::ascii_isspace(sexpr[i])) {
           ++i;
         }
-        if (i < sexpr.size() && sexpr[i] == ')') {
+        size_t num_start = i;
+        while (i < sexpr.size() && absl::ascii_isdigit(sexpr[i])) {
           ++i;
+        }
+        int label_uid = -1;
+        if (i > num_start && absl::SimpleAtoi(sexpr.substr(num_start, i - num_start), &label_uid)) {
+          auto it = label_uid_to_canon.find(label_uid);
+          if (it != label_uid_to_canon.end()) {
+            absl::StrAppend(&out, " ", it->second);
+          } else {
+            absl::StrAppend(&out, " ", label_uid);
+          }
         }
         continue;
       }
@@ -264,39 +274,25 @@ std::string NormalizeInsnSexprForComparison(std::string_view sexpr) {
         }
         continue;
       }
-
-      if (absl::StartsWith(rest, "reg")) {
-        // Check if this is `(reg...:MODE <num>)` where <num> >= 72 (virtual pseudo-register).
-        out.push_back('(');
-        ++i;
-        while (i < sexpr.size() && !absl::ascii_isspace(sexpr[i]) && sexpr[i] != ')') {
-          out.push_back(sexpr[i++]);
-        }
-        while (i < sexpr.size() && absl::ascii_isspace(sexpr[i])) {
-          ++i;
-        }
-        size_t num_start = i;
-        while (i < sexpr.size() && absl::ascii_isdigit(sexpr[i])) {
-          ++i;
-        }
-        if (i > num_start) {
-          int reg_num = -1;
-          std::string_view num_str = sexpr.substr(num_start, i - num_start);
-          if (absl::SimpleAtoi(num_str, &reg_num) && reg_num >= 72) {
-            out.append(" pseudo");
-          } else {
-            out.push_back(' ');
-            out.append(num_str);
-          }
-        }
-        continue;
-      }
     }
 
     out.push_back(sexpr[i++]);
   }
 
   return out;
+}
+
+absl::flat_hash_map<int, std::string> BuildSequentialLabelMap(const RtlFunctionDump& dump) {
+  absl::flat_hash_map<int, std::string> label_map;
+  size_t next_idx = 0;
+  for (const auto& entry : dump.insns) {
+    if (entry.kind == RtlInsnKind::kCodeLabel && entry.uid >= 0) {
+      if (!label_map.contains(entry.uid)) {
+        label_map.emplace(entry.uid, absl::StrCat("L", next_idx++));
+      }
+    }
+  }
+  return label_map;
 }
 
 }  // namespace
@@ -386,22 +382,28 @@ bool GccCompilationDump::PassMatches(const GccCompilationDump& other, std::strin
     return false;
   }
 
-  std::vector<std::string> lhs_active;
-  for (const auto& insn : lhs_fn->insns) {
-    if (insn.kind == RtlInsnKind::kInsn || insn.kind == RtlInsnKind::kJumpInsn ||
-        insn.kind == RtlInsnKind::kCallInsn) {
-      lhs_active.push_back(NormalizeInsnSexprForComparison(insn.raw_sexpr));
+  auto build_stream = [](const RtlFunctionDump& fn) {
+    const absl::flat_hash_map<int, std::string> label_map = BuildSequentialLabelMap(fn);
+    std::vector<std::string> stream;
+    for (const auto& insn : fn.insns) {
+      if (insn.kind == RtlInsnKind::kInsn || insn.kind == RtlInsnKind::kJumpInsn ||
+          insn.kind == RtlInsnKind::kCallInsn) {
+        stream.push_back(NormalizeInsnSexprForComparison(insn.raw_sexpr, label_map));
+      } else if (insn.kind == RtlInsnKind::kCodeLabel) {
+        auto it = label_map.find(insn.uid);
+        stream.push_back(
+            absl::StrCat("(code_label ", it != label_map.end() ? it->second : "L?", ")"));
+      } else if (insn.kind == RtlInsnKind::kBarrier) {
+        stream.push_back("(barrier)");
+      } else if (insn.kind == RtlInsnKind::kNote &&
+                 absl::StartsWith(insn.note_kind, "NOTE_INSN_LOOP_")) {
+        stream.push_back(absl::StrCat("(note ", insn.note_kind, ")"));
+      }
     }
-  }
-  std::vector<std::string> rhs_active;
-  for (const auto& insn : rhs_fn->insns) {
-    if (insn.kind == RtlInsnKind::kInsn || insn.kind == RtlInsnKind::kJumpInsn ||
-        insn.kind == RtlInsnKind::kCallInsn) {
-      rhs_active.push_back(NormalizeInsnSexprForComparison(insn.raw_sexpr));
-    }
-  }
+    return stream;
+  };
 
-  return lhs_active == rhs_active;
+  return build_stream(*lhs_fn) == build_stream(*rhs_fn);
 }
 
 std::optional<RtlPassKind> GccCompilationDump::FindFirstDivergentPass(
@@ -702,6 +704,97 @@ std::string ExtractTopLevelPatternFromInsnSexpr(std::string_view sexpr) {
   return std::string(s.substr(start));
 }
 
+// Extracts the trailing `REG_NOTES` S-expression (e.g. `(expr_list:REG_DEAD ...)`) from an
+// `(insn UID PREV NEXT PATTERN CODE {name} LOG_LINKS REG_NOTES)` S-expression, returning empty
+// string if `REG_NOTES` is `(nil)` or absent.
+std::string ExtractRegNotesFromInsnSexpr(std::string_view sexpr) {
+  std::string_view s = absl::StripAsciiWhitespace(sexpr);
+  if (s.empty() || s.back() != ')') {
+    return "";
+  }
+  // Remove outer closing ')'.
+  s = absl::StripAsciiWhitespace(s.substr(0, s.size() - 1));
+  if (s.empty() || s.back() != ')') {
+    return "";
+  }
+  // Scan backwards for the matching '(' of the last S-expression (`REG_NOTES`).
+  int depth = 0;
+  bool in_quotes = false;
+  for (size_t idx = s.size(); idx > 0; --idx) {
+    char c = s[idx - 1];
+    if (c == '"' && (idx < 2 || s[idx - 2] != '\\')) {
+      in_quotes = !in_quotes;
+      continue;
+    }
+    if (in_quotes) {
+      continue;
+    }
+    if (c == ')') {
+      ++depth;
+    } else if (c == '(') {
+      --depth;
+      if (depth == 0) {
+        std::string_view notes = s.substr(idx - 1);
+        if (notes == "(nil)") {
+          return "";
+        }
+        if (absl::StartsWith(notes, "(expr_list:") || absl::StartsWith(notes, "(insn_list:")) {
+          return std::string(notes);
+        }
+        return "";
+      }
+    }
+  }
+  return "";
+}
+
+std::string CanonicalizeLabelRefsInPattern(std::string_view pattern,
+                                           const absl::flat_hash_map<int, std::string>& label_map) {
+  std::string out;
+  out.reserve(pattern.size());
+  size_t i = 0;
+  while (i < pattern.size()) {
+    if (pattern[i] == '(' && absl::StartsWith(pattern.substr(i + 1), "label_ref")) {
+      out.push_back('(');
+      ++i;
+      while (i < pattern.size() && !absl::ascii_isspace(pattern[i]) && pattern[i] != ')') {
+        out.push_back(pattern[i++]);
+      }
+      while (i < pattern.size() && absl::ascii_isspace(pattern[i])) {
+        ++i;
+      }
+      size_t num_start = i;
+      while (i < pattern.size() && absl::ascii_isdigit(pattern[i])) {
+        ++i;
+      }
+      int label_uid = -1;
+      if (i > num_start && absl::SimpleAtoi(pattern.substr(num_start, i - num_start), &label_uid)) {
+        auto it = label_map.find(label_uid);
+        if (it != label_map.end()) {
+          absl::StrAppend(&out, " ", it->second);
+        } else {
+          absl::StrAppend(&out, " ", label_uid);
+        }
+      }
+      continue;
+    }
+    out.push_back(pattern[i++]);
+  }
+  return out;
+}
+
+std::string ExtractPatternAndNotesFromInsnSexpr(
+    std::string_view sexpr, const absl::flat_hash_map<int, std::string>& label_map) {
+  std::string pat =
+      CanonicalizeLabelRefsInPattern(ExtractTopLevelPatternFromInsnSexpr(sexpr), label_map);
+  std::string notes =
+      CanonicalizeLabelRefsInPattern(ExtractRegNotesFromInsnSexpr(sexpr), label_map);
+  if (!notes.empty()) {
+    absl::StrAppend(&pat, " ", notes);
+  }
+  return CanonicalizeRtlPattern(pat);
+}
+
 std::vector<int> ExtractLabelRefsFromPattern(std::string_view pattern) {
   std::vector<int> refs;
   size_t pos = 0;
@@ -730,7 +823,7 @@ std::vector<int> ExtractLabelRefsFromPattern(std::string_view pattern) {
   return refs;
 }
 
-std::vector<RtlInsnEntry> ExpandSequenceSexpr(const RtlInsnEntry& seq_entry) {
+std::vector<RtlInsnEntry> ParseSequenceInnerEntries(const RtlInsnEntry& seq_entry) {
   std::vector<RtlInsnEntry> inner_entries;
   const std::string pat = ExtractTopLevelPatternFromInsnSexpr(seq_entry.raw_sexpr);
   size_t bracket_pos = pat.find('[');
@@ -776,14 +869,19 @@ std::vector<RtlInsnEntry> ExpandSequenceSexpr(const RtlInsnEntry& seq_entry) {
     }
     inner_entries.push_back(ParseSexprEntry(pat.substr(start, i - start)));
   }
-  // If the sequence bundles a `jump_insn` with its delay-slot `insn`, place the delay-slot `insn`
-  // immediately before the `jump_insn` so that both remain in the same basic block before
-  // `jump_insn` terminates the block.
-  if (inner_entries.size() == 2 && inner_entries[0].kind == RtlInsnKind::kJumpInsn &&
-      inner_entries[1].kind == RtlInsnKind::kInsn) {
-    std::swap(inner_entries[0], inner_entries[1]);
-  }
   return inner_entries;
+}
+
+std::string ExtractInsnTagWithFlags(std::string_view sexpr) {
+  std::string_view s = absl::StripAsciiWhitespace(sexpr);
+  if (s.empty() || s.front() != '(') {
+    return "insn";
+  }
+  size_t pos = 1;
+  while (pos < s.size() && !absl::ascii_isspace(s[pos]) && s[pos] != '(' && s[pos] != ')') {
+    ++pos;
+  }
+  return std::string(s.substr(1, pos - 1));
 }
 
 }  // namespace
@@ -792,61 +890,83 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
   RtlCanonicalCfg result;
   result.pass = dump.pass;
 
-  // Flatten top-level entries (expanding `(sequence [...])` if present in `.dbr`).
-  std::vector<RtlInsnEntry> flat_entries;
-  flat_entries.reserve(dump.insns.size());
-  for (const auto& entry : dump.insns) {
-    if (entry.is_sequence) {
-      for (auto& sub : ExpandSequenceSexpr(entry)) {
-        flat_entries.push_back(std::move(sub));
-      }
-    } else {
-      flat_entries.push_back(entry);
-    }
-  }
+  const absl::flat_hash_map<int, std::string> label_map = BuildSequentialLabelMap(dump);
 
   struct FlatRtlItem {
     RtlInsnKind kind = RtlInsnKind::kOther;
     int uid = -1;
+    std::string raw_pattern_for_targets;
     std::string pattern;
   };
   std::vector<FlatRtlItem> items;
-  for (size_t idx = 0; idx < flat_entries.size(); ++idx) {
-    const auto& entry = flat_entries[idx];
-    if (entry.kind == RtlInsnKind::kNote || entry.kind == RtlInsnKind::kOther) {
+  for (size_t idx = 0; idx < dump.insns.size(); ++idx) {
+    const auto& entry = dump.insns[idx];
+    if (entry.kind == RtlInsnKind::kOther) {
+      continue;
+    }
+    if (entry.kind == RtlInsnKind::kNote) {
+      if (absl::StartsWith(entry.note_kind, "NOTE_INSN_LOOP_")) {
+        items.push_back(FlatRtlItem{
+            .kind = RtlInsnKind::kNote,
+            .uid = entry.uid,
+            .raw_pattern_for_targets = "",
+            .pattern = absl::StrCat("(note ", entry.note_kind, ")"),
+        });
+      }
       continue;
     }
     // Skip jump-table label + `addr_vec` / `addr_diff_vec` + trailing barrier so jump-table data
     // does not create a spurious basic block in the RTL CFG.
-    if (entry.kind == RtlInsnKind::kCodeLabel && idx + 1 < flat_entries.size() &&
-        flat_entries[idx + 1].kind == RtlInsnKind::kJumpInsn) {
+    if (entry.kind == RtlInsnKind::kCodeLabel && idx + 1 < dump.insns.size() &&
+        dump.insns[idx + 1].kind == RtlInsnKind::kJumpInsn) {
       const std::string next_pat =
-          ExtractTopLevelPatternFromInsnSexpr(flat_entries[idx + 1].raw_sexpr);
+          ExtractTopLevelPatternFromInsnSexpr(dump.insns[idx + 1].raw_sexpr);
       if (absl::StartsWith(next_pat, "(addr_vec:") ||
           absl::StartsWith(next_pat, "(addr_diff_vec:")) {
         ++idx;
-        while (idx + 1 < flat_entries.size() &&
-               flat_entries[idx + 1].kind == RtlInsnKind::kBarrier) {
+        while (idx + 1 < dump.insns.size() && dump.insns[idx + 1].kind == RtlInsnKind::kBarrier) {
           ++idx;
         }
         continue;
       }
     }
-    const std::string pat = ExtractTopLevelPatternFromInsnSexpr(entry.raw_sexpr);
-    // Ignore non-machine `(use ...)` and `(clobber ...)` pseudo-insns and jump-table `addr_vec`
-    // data.
-    if (entry.kind == RtlInsnKind::kInsn &&
-        (absl::StartsWith(pat, "(use ") || absl::StartsWith(pat, "(clobber "))) {
+    if (entry.is_sequence) {
+      std::vector<RtlInsnEntry> inner_entries = ParseSequenceInnerEntries(entry);
+      std::vector<std::string> formatted_inner;
+      formatted_inner.reserve(inner_entries.size());
+      RtlInsnKind effective_kind = entry.kind;
+      std::string jump_raw_pat;
+      for (const auto& sub : inner_entries) {
+        const std::string tag = ExtractInsnTagWithFlags(sub.raw_sexpr);
+        const std::string sub_pat = ExtractPatternAndNotesFromInsnSexpr(sub.raw_sexpr, label_map);
+        formatted_inner.push_back(absl::StrCat("(", tag, " ", sub_pat, ")"));
+        if (sub.kind == RtlInsnKind::kJumpInsn) {
+          effective_kind = RtlInsnKind::kJumpInsn;
+          jump_raw_pat = ExtractTopLevelPatternFromInsnSexpr(sub.raw_sexpr);
+        }
+      }
+      items.push_back(FlatRtlItem{
+          .kind = effective_kind,
+          .uid = entry.uid,
+          .raw_pattern_for_targets = jump_raw_pat,
+          .pattern = absl::StrCat("(sequence [", absl::StrJoin(formatted_inner, " "), "])"),
+      });
       continue;
     }
+
+    const std::string raw_pat = ExtractTopLevelPatternFromInsnSexpr(entry.raw_sexpr);
     if (entry.kind == RtlInsnKind::kJumpInsn &&
-        (absl::StartsWith(pat, "(addr_vec:") || absl::StartsWith(pat, "(addr_diff_vec:"))) {
+        (absl::StartsWith(raw_pat, "(addr_vec:") || absl::StartsWith(raw_pat, "(addr_diff_vec:"))) {
       continue;
     }
     items.push_back(FlatRtlItem{
         .kind = entry.kind,
         .uid = entry.uid,
-        .pattern = pat,
+        .raw_pattern_for_targets = raw_pat,
+        .pattern = (entry.kind == RtlInsnKind::kInsn || entry.kind == RtlInsnKind::kJumpInsn ||
+                    entry.kind == RtlInsnKind::kCallInsn)
+                       ? ExtractPatternAndNotesFromInsnSexpr(entry.raw_sexpr, label_map)
+                       : raw_pat,
     });
   }
 
@@ -855,9 +975,8 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
     return result;
   }
 
-  // Partition into basic blocks using `flow.c:find_basic_blocks` rules:
-  // A new block begins at `kCodeLabel` or at the first executable instruction after `kJumpInsn` /
-  // `kBarrier`.
+  // Partition into basic blocks in exact linear RTL dump order:
+  // A new block begins at `kCodeLabel` or at the first entry after `kJumpInsn` / `kBarrier`.
   struct RawRtlBlock {
     std::vector<int> label_uids;
     std::vector<std::string> instructions;
@@ -891,49 +1010,50 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
     while (i < items.size() && items[i].kind != RtlInsnKind::kCodeLabel &&
            items[i].kind != RtlInsnKind::kBarrier) {
       const auto& it = items[i];
-      if (it.kind == RtlInsnKind::kInsn || it.kind == RtlInsnKind::kCallInsn) {
+      if (it.kind == RtlInsnKind::kInsn || it.kind == RtlInsnKind::kCallInsn ||
+          it.kind == RtlInsnKind::kNote) {
         blk.instructions.push_back(CanonicalizeRtlPattern(it.pattern));
         ++i;
       } else if (it.kind == RtlInsnKind::kJumpInsn) {
         blk.ends_with_jump = true;
-        if (absl::StrContains(it.pattern, "(return)")) {
+        const std::string canon_pat = CanonicalizeRtlPattern(it.pattern);
+        blk.instructions.push_back(canon_pat);
+        const std::string raw_jump_pat = CanonicalizeRtlPattern(it.raw_pattern_for_targets);
+        if (absl::StrContains(raw_jump_pat, "(return)")) {
           blk.ends_with_return = true;
-        } else {
-          const std::string canon_pat = CanonicalizeRtlPattern(it.pattern);
-          blk.instructions.push_back(canon_pat);
-          if (absl::StartsWith(canon_pat, "(set (pc) (label_ref")) {
-            blk.ends_with_uncond_jump = true;
-            blk.jump_target_labels = ExtractLabelRefsFromPattern(it.pattern);
-          } else if (absl::StartsWith(canon_pat, "(parallel[ (set (pc) (reg:")) {
-            // Tablejump `(parallel [(set (pc) (reg:SI ...)) (use (label_ref L_table))])`:
-            // extract targets from the associated `addr_vec` following `L_table`.
-            blk.ends_with_uncond_jump = true;
-            std::vector<int> table_refs = ExtractLabelRefsFromPattern(it.pattern);
-            if (!table_refs.empty()) {
-              const int table_uid = table_refs[0];
-              bool found_table_label = false;
-              for (const auto& e : dump.insns) {
-                if (e.kind == RtlInsnKind::kCodeLabel && e.uid == table_uid) {
-                  found_table_label = true;
-                  continue;
-                }
-                if (found_table_label && e.kind == RtlInsnKind::kJumpInsn) {
-                  std::string p = ExtractTopLevelPatternFromInsnSexpr(e.raw_sexpr);
-                  if (absl::StartsWith(p, "(addr_vec:") || absl::StartsWith(p, "(addr_diff_vec:")) {
-                    for (int t_uid : ExtractLabelRefsFromPattern(p)) {
-                      if (std::find(blk.jump_target_labels.begin(), blk.jump_target_labels.end(),
-                                    t_uid) == blk.jump_target_labels.end()) {
-                        blk.jump_target_labels.push_back(t_uid);
-                      }
+        } else if (absl::StartsWith(raw_jump_pat, "(set (pc) (label_ref")) {
+          blk.ends_with_uncond_jump = true;
+          blk.jump_target_labels = ExtractLabelRefsFromPattern(it.raw_pattern_for_targets);
+        } else if (absl::StartsWith(raw_jump_pat, "(parallel[ (set (pc) (reg:") ||
+                   absl::StartsWith(raw_jump_pat, "(parallel [(set (pc) (reg:")) {
+          // Tablejump `(parallel [(set (pc) (reg:SI ...)) (use (label_ref L_table))])`:
+          // extract targets from the associated `addr_vec` following `L_table`.
+          blk.ends_with_uncond_jump = true;
+          std::vector<int> table_refs = ExtractLabelRefsFromPattern(it.raw_pattern_for_targets);
+          if (!table_refs.empty()) {
+            const int table_uid = table_refs[0];
+            bool found_table_label = false;
+            for (const auto& e : dump.insns) {
+              if (e.kind == RtlInsnKind::kCodeLabel && e.uid == table_uid) {
+                found_table_label = true;
+                continue;
+              }
+              if (found_table_label && e.kind == RtlInsnKind::kJumpInsn) {
+                std::string p = ExtractTopLevelPatternFromInsnSexpr(e.raw_sexpr);
+                if (absl::StartsWith(p, "(addr_vec:") || absl::StartsWith(p, "(addr_diff_vec:")) {
+                  for (int t_uid : ExtractLabelRefsFromPattern(p)) {
+                    if (std::find(blk.jump_target_labels.begin(), blk.jump_target_labels.end(),
+                                  t_uid) == blk.jump_target_labels.end()) {
+                      blk.jump_target_labels.push_back(t_uid);
                     }
                   }
-                  break;
                 }
+                break;
               }
             }
-          } else {
-            blk.jump_target_labels = ExtractLabelRefsFromPattern(it.pattern);
           }
+        } else {
+          blk.jump_target_labels = ExtractLabelRefsFromPattern(it.raw_pattern_for_targets);
         }
         ++i;
         break;
@@ -952,84 +1072,17 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
     raw_blocks.push_back(std::move(blk));
   }
 
-  // Coalesce contiguous blocks where `b` is only reached via fallthrough from a non-jumping block
-  // `b - 1` and none of `b`'s labels are referenced by any jump or tablejump (e.g. unreferenced
-  // trailing `return_label` at `-O0`).
-  absl::flat_hash_set<int> referenced_labels;
-  for (const auto& blk : raw_blocks) {
-    for (int t_uid : blk.jump_target_labels) {
-      referenced_labels.insert(t_uid);
-    }
-  }
-  std::vector<RawRtlBlock> coalesced_blocks;
-  coalesced_blocks.reserve(raw_blocks.size());
-  for (auto& blk : raw_blocks) {
-    bool has_ref_label = false;
-    for (int l_uid : blk.label_uids) {
-      if (referenced_labels.contains(l_uid)) {
-        has_ref_label = true;
-        break;
-      }
-    }
-    if (!coalesced_blocks.empty() && !has_ref_label) {
-      auto& prev = coalesced_blocks.back();
-      if (!prev.ends_with_jump && !prev.ends_with_return && !prev.followed_by_barrier) {
-        prev.instructions.insert(prev.instructions.end(), blk.instructions.begin(),
-                                 blk.instructions.end());
-        prev.jump_target_labels = std::move(blk.jump_target_labels);
-        prev.ends_with_jump = blk.ends_with_jump;
-        prev.ends_with_uncond_jump = blk.ends_with_uncond_jump;
-        prev.ends_with_return = blk.ends_with_return;
-        prev.followed_by_barrier = blk.followed_by_barrier;
-        continue;
-      }
-    }
-    coalesced_blocks.push_back(std::move(blk));
-  }
-  raw_blocks = std::move(coalesced_blocks);
   for (size_t b = 0; b < raw_blocks.size(); ++b) {
     for (int l_uid : raw_blocks[b].label_uids) {
       label_to_block[l_uid] = b;
     }
   }
 
-  // If the last block in the RTL stream ends with a conditional branch (e.g., a `do-while` loop
-  // latch at the end of a function in pre-`.jump2` passes or non-leaf functions where
-  // `function_epilogue` is emitted after the last RTL insn), append the fallthrough exit block.
-  if (!raw_blocks.empty()) {
-    const auto& last = raw_blocks.back();
-    const bool last_is_cond_jump =
-        last.ends_with_jump && !last.ends_with_uncond_jump && !last.ends_with_return;
-    if (last_is_cond_jump) {
-      RawRtlBlock exit_blk;
-      exit_blk.ends_with_return = true;
-      raw_blocks.push_back(std::move(exit_blk));
-    }
-  }
-
-  // Merge empty label-only blocks at the end or falling through into the next block.
-  for (size_t b = raw_blocks.size(); b > 0; --b) {
-    const size_t idx = b - 1;
-    if (raw_blocks[idx].instructions.empty() && !raw_blocks[idx].followed_by_barrier &&
-        idx + 1 < raw_blocks.size()) {
-      for (int l_uid : raw_blocks[idx].label_uids) {
-        label_to_block[l_uid] = idx + 1;
-      }
-      for (auto& kv : label_to_block) {
-        if (kv.second == idx) {
-          kv.second = idx + 1;
-        }
-      }
-    }
-  }
-
-  // Build successor edges on `raw_blocks`.
+  // Build successor edges on `raw_blocks` in exact linear order (no block coalescing, no empty
+  // block merging, and no RPO filtering/reordering).
   std::vector<std::vector<size_t>> raw_succs(raw_blocks.size());
   for (size_t b = 0; b < raw_blocks.size(); ++b) {
     const auto& blk = raw_blocks[b];
-    if (blk.instructions.empty() && b + 1 < raw_blocks.size()) {
-      continue;
-    }
     if (blk.ends_with_return) {
       continue;
     }
@@ -1042,47 +1095,18 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
     const bool has_fallthrough =
         !blk.followed_by_barrier && !blk.ends_with_uncond_jump && !blk.ends_with_return;
     if (has_fallthrough && b + 1 < raw_blocks.size()) {
-      size_t ft = b + 1;
-      while (ft + 1 < raw_blocks.size() && raw_blocks[ft].instructions.empty() &&
-             !raw_blocks[ft].followed_by_barrier) {
-        ++ft;
-      }
-      raw_succs[b].push_back(ft);
+      raw_succs[b].push_back(b + 1);
     }
   }
 
-  // Compute Reverse Post-Order (RPO) from entry block 0.
-  std::vector<bool> visited(raw_blocks.size(), false);
-  std::vector<size_t> post_order;
-  auto dfs = [&](auto& self, size_t u) -> void {
-    visited[u] = true;
-    for (size_t v : raw_succs[u]) {
-      if (v < raw_blocks.size() && !visited[v]) {
-        self(self, v);
-      }
-    }
-    post_order.push_back(u);
-  };
-  if (!raw_blocks.empty()) {
-    dfs(dfs, 0);
-  }
-  std::vector<size_t> rpo(post_order.rbegin(), post_order.rend());
-  absl::flat_hash_map<size_t, size_t> raw_to_rpo;
-  for (size_t idx = 0; idx < rpo.size(); ++idx) {
-    raw_to_rpo[rpo[idx]] = idx;
-  }
-
-  result.rpo_blocks.reserve(rpo.size());
-  for (size_t raw_idx : rpo) {
+  result.rpo_blocks.reserve(raw_blocks.size());
+  for (size_t b = 0; b < raw_blocks.size(); ++b) {
     RtlBasicBlock out_blk;
-    for (const auto& pat : raw_blocks[raw_idx].instructions) {
+    out_blk.id = static_cast<uint32_t>(b);
+    for (const auto& pat : raw_blocks[b].instructions) {
       out_blk.AddPatternOnly(pat);
     }
-    for (size_t s : raw_succs[raw_idx]) {
-      if (auto it = raw_to_rpo.find(s); it != raw_to_rpo.end()) {
-        out_blk.successors.push_back(it->second);
-      }
-    }
+    out_blk.successors = std::move(raw_succs[b]);
     result.rpo_blocks.push_back(std::move(out_blk));
   }
   for (size_t b = 0; b < result.rpo_blocks.size(); ++b) {

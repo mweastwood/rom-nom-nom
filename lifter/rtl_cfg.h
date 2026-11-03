@@ -160,7 +160,7 @@ struct RtlControlFlowGraph {
 using RtlCfgBlock = RtlBasicBlock;
 using RtlCanonicalCfg = RtlControlFlowGraph;
 
-// Collapses whitespace and canonicalizes `(label_ref ...)` targets in a raw RTL pattern string.
+// Collapses whitespace in a raw RTL pattern string while preserving all tokens verbatim.
 std::string CanonicalizeRtlPattern(std::string_view pattern);
 
 }  // namespace rom_nom_nom

@@ -276,12 +276,17 @@ TEST(InverseFinalAndGasStageTest, CustomizesLiftingBehaviorByParsedCompilerFlags
 }
 
 TEST(InverseFinalAndGasStageTest, CanonicalizeRtlPatternPreservesExactRtlSemantics) {
-  // Whitespace is collapsed and `(label_ref <uid>)` is canonicalized to `(label_ref)`.
+  // Whitespace is collapsed while `(label_ref ...)` targets and all tokens are preserved verbatim.
   EXPECT_EQ(
       CanonicalizeRtlPattern(
-          "(set (pc)\n  (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0))\n    (label_ref 14)\n  "
+          "(set (pc)\n  (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0))\n    (label_ref L0)\n  "
           "  (pc)))"),
-      "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (label_ref) (pc)))");
+      "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (label_ref L0) (pc)))");
+  EXPECT_NE(
+      CanonicalizeRtlPattern(
+          "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (label_ref L0) (pc)))"),
+      CanonicalizeRtlPattern(
+          "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (label_ref L1) (pc)))"));
 
   // Exact RTL flags (`/v`, `/s`, `/i`), subregs, branch polarity, and machine modes are preserved
   // verbatim without lossy normalization.
@@ -293,9 +298,9 @@ TEST(InverseFinalAndGasStageTest, CanonicalizeRtlPatternPreservesExactRtlSemanti
       CanonicalizeRtlPattern("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -5)))"));
   EXPECT_NE(
       CanonicalizeRtlPattern(
-          "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (pc) (label_ref 14)))"),
+          "(set (pc) (if_then_else (eq:SI (reg/v:SI 2 v0) (const_int 0)) (pc) (label_ref L0)))"),
       CanonicalizeRtlPattern(
-          "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))"));
+          "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (const_int 0)) (label_ref L0) (pc)))"));
   EXPECT_NE(CanonicalizeRtlPattern("(set (mem/s:SF (reg/v:SI 4 a0)) (reg/v:SF 5 a1))"),
             CanonicalizeRtlPattern("(set (mem:SI (reg:SI 4 a0)) (reg:SI 5 a1))"));
 }

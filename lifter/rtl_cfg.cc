@@ -180,20 +180,6 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
       }
       continue;
     }
-    if (pattern[i] == '(') {
-      std::string_view rest = pattern.substr(i + 1);
-      if (absl::StartsWith(rest, "label_ref")) {
-        collapsed.append("(label_ref)");
-        i += 1 + std::string_view("label_ref").size();
-        while (i < pattern.size() && pattern[i] != ')') {
-          ++i;
-        }
-        if (i < pattern.size() && pattern[i] == ')') {
-          ++i;
-        }
-        continue;
-      }
-    }
     collapsed.push_back(pattern[i++]);
   }
   return collapsed;

@@ -71,6 +71,16 @@ TEST(GccRtlDumpInspectorTest, ParsesRawDbrDumpWithSequencesAndNotes) {
   EXPECT_EQ(seq_entry.next_uid, 22);
   EXPECT_TRUE(seq_entry.is_sequence);
   EXPECT_TRUE(seq_entry.in_annulled_branch_delay);
+
+  RtlControlFlowGraph dbr_cfg = GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(*fn);
+  ASSERT_EQ(dbr_cfg.rpo_blocks.size(), 2u);
+  ASSERT_EQ(dbr_cfg.rpo_blocks[0].instructions.size(), 1u);
+  EXPECT_EQ(dbr_cfg.rpo_blocks[0].instructions[0],
+            "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg/v:SI 4 a0) (const_int 0)) "
+            "(label_ref L0) (pc)))) (insn/s (set (reg/i:SI 2 v0) (plus:SI (reg/v:SI 4 a0) "
+            "(reg/v:SI 5 a1))))])");
+  ASSERT_EQ(dbr_cfg.rpo_blocks[1].instructions.size(), 1u);
+  EXPECT_EQ(dbr_cfg.rpo_blocks[1].instructions[0], "(return)");
 }
 
 TEST(GccRtlDumpInspectorTest, CompilesAndInspectsAllRtlPassesWithKmcGcc272) {
