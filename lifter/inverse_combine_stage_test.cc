@@ -119,5 +119,73 @@ TEST(InverseCombineStageTest, UncombinesCallArgAndReturnRegisterMoves) {
   EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns.size(), 6u);
 }
 
+TEST(InverseCombineStageTest, ExpandsSignedHalfwordLoadAndLoopPreheaderBlezRtlPatterns) {
+  RtlControlFlowGraph cfg;
+  cfg.rpo_blocks.resize(2);
+  cfg.rpo_blocks[0].successors = {1};
+  cfg.rpo_blocks[1].predecessors = {0};
+
+  // B0: `addu $a1, $zero, $zero` + `blez $a0` (`(le:SI (reg:SI 4 a0) (const_int 0))`)
+  RtlInsn zero_init;
+  zero_init.canonical_pattern = "addu  $a1, $zero, $zero";
+  zero_init.rtl_sexpr_pattern = "(set (reg:SI 5 a1) (const_int 0))";
+  cfg.rpo_blocks[0].AddInsn(zero_init);
+
+  RtlInsn blez_branch;
+  blez_branch.canonical_pattern =
+      "(set (pc) (if_then_else (le:SI (reg:SI 4 a0) (const_int 0)) (label_ref) (pc)))";
+  blez_branch.rtl_sexpr_pattern = blez_branch.canonical_pattern;
+  cfg.rpo_blocks[0].AddInsn(blez_branch);
+
+  // B1: `lh $v0, 0($a2)` (`(set (reg:SI 2 v0) (sign_extend:SI (mem:HI (reg:SI 6 a2))))`)
+  // and `slt $v1, $a0, $a1` (which tells `B0BlezIsCombinedLt` that `blez $a0` came from `slt +
+  // beq`)
+  RtlInsn lh_insn;
+  lh_insn.canonical_pattern = "lh    $v0, 0($a2)";
+  lh_insn.rtl_sexpr_pattern = "(set (reg:SI 2 v0) (sign_extend:SI (mem:HI (reg:SI 6 a2))))";
+  cfg.rpo_blocks[1].AddInsn(lh_insn);
+
+  RtlInsn slt_insn;
+  slt_insn.canonical_pattern = "slt   $v1, $a0, $a1";
+  slt_insn.rtl_sexpr_pattern = "(set (reg:SI 3 v1) (lt:SI (reg:SI 4 a0) (reg:SI 5 a1)))";
+  cfg.rpo_blocks[1].AddInsn(slt_insn);
+
+  InverseCombineLifter::InvertCombineToFlowRtlCfg(&cfg);
+
+  // In B0, `(le:SI ... (const_int 0))` should expand to `(lt:SI ...)` + `(eq:SI ... (const_int
+  // 0))`.
+  bool found_lt_in_b0 = false;
+  for (const auto& insn : cfg.rpo_blocks[0].rtl_insns) {
+    if (insn.rtl_sexpr_pattern.find("(lt:SI ") != std::string::npos) {
+      found_lt_in_b0 = true;
+    }
+  }
+  EXPECT_TRUE(found_lt_in_b0);
+  EXPECT_NE(cfg.rpo_blocks[0].rtl_insns.back().rtl_sexpr_pattern.find("(eq:SI "),
+            std::string::npos);
+
+  // In B1, `lh` should expand to `(zero_extend:SI (mem:HI ...))` + `(ashift:SI ... 16)` +
+  // `(ashiftrt:SI ... 16)`.
+  bool found_zext = false;
+  bool found_ashift16 = false;
+  bool found_ashiftrt16 = false;
+  for (const auto& insn : cfg.rpo_blocks[1].rtl_insns) {
+    if (insn.rtl_sexpr_pattern.find("(zero_extend:SI (mem:HI") != std::string::npos) {
+      found_zext = true;
+    }
+    if (insn.rtl_sexpr_pattern.find("(ashift:SI (reg:SI 2 v0) (const_int 16))") !=
+        std::string::npos) {
+      found_ashift16 = true;
+    }
+    if (insn.rtl_sexpr_pattern.find("(ashiftrt:SI (reg:SI 2 v0) (const_int 16))") !=
+        std::string::npos) {
+      found_ashiftrt16 = true;
+    }
+  }
+  EXPECT_TRUE(found_zext);
+  EXPECT_TRUE(found_ashift16);
+  EXPECT_TRUE(found_ashiftrt16);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

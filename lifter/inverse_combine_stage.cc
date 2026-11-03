@@ -404,7 +404,8 @@ bool IsArgReg(std::string_view reg) {
 
 // Predicts the `.combine` -> `.flow` instruction count delta for block `b` using the non-entry
 // `combine.c` inversion rules (1..13).
-int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
+int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b,
+                      const ParsedCompilerFlags* flags = nullptr) {
   const BlockView& blk = s6_blks[b];
   const auto& succs = blk.succs;
   const auto& insns = blk.insns;
@@ -413,6 +414,7 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
   const auto& exit_insns = s6_blks[exit_bid].insns;
   const bool reaches_exit_directly =
       (b == exit_bid) || (succs.size() == 1 && succs[0] == exit_bid && exit_insns.empty());
+  const bool expensive_opt = (flags == nullptr || flags->flag_expensive_optimizations);
 
   absl::flat_hash_set<std::string> exit_narrow_regs;
   for (const InsnView& ein : s6_blks.back().insns) {
@@ -452,7 +454,8 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
       for (size_t j = i + 1; j < insns.size(); ++j) {
         if (IsMoveInsn(insns[j].kind, insns[j].pat)) {
           const ParsedOp jop = ParseOp(insns[j].pat);
-          if (jop.ops.size() >= 2 && jop.ops[0] == "$v0" && jop.ops[1] == dst) {
+          if (jop.ops.size() >= 2 && (jop.ops[0] == "$v0" || dst == "$v0") && jop.ops[0] != dst &&
+              jop.ops[1] == dst) {
             has_hi_copy = true;
             break;
           }
@@ -463,6 +466,7 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
       // 2. Unsigned subword load `lbu` / `lhu`:
       const std::string dst = op.ops.empty() ? "" : op.ops[0];
       bool is_narrow_only = false;
+      bool has_bitfield_andi_or_srl = false;
       for (size_t j = i + 1; j < insns.size(); ++j) {
         const ParsedOp jop = ParseOp(insns[j].pat);
         if ((jop.mnem == "sb" || jop.mnem == "sh") && !jop.ops.empty() && jop.ops[0] == dst) {
@@ -477,6 +481,9 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
           }
         }
         if (used_in_rhs) {
+          if (jop.mnem == "andi" || jop.mnem == "srl") {
+            has_bitfield_andi_or_srl = true;
+          }
           if (jop.mnem == "sll" && jop.ops.size() == 3 &&
               (jop.ops[2] == "16" || jop.ops[2] == "24")) {
             is_narrow_only = true;
@@ -534,7 +541,11 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
           }
         }
       }
-      if (!is_narrow_only) {
+      if (!insns.empty() && (absl::StrContains(insns.back().pat, "(subreg:SI (reg:QI ") ||
+                             absl::StrContains(insns.back().pat, "(subreg:SI (reg:HI "))) {
+        has_bitfield_andi_or_srl = true;
+      }
+      if (!is_narrow_only && (expensive_opt || has_bitfield_andi_or_srl)) {
         delta += 1;
       }
     }
@@ -580,8 +591,11 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
         op.ops[2] != "0x0") {
       const std::string& dst = op.ops[0];
       bool same_blk_narrow_mask = false;
-      for (const InsnView& jinsn : insns) {
-        const ParsedOp jop = ParseOp(jinsn.pat);
+      for (size_t j = 0; j < insns.size(); ++j) {
+        if (j < i && op.ops[0] != op.ops[1]) {
+          continue;
+        }
+        const ParsedOp jop = ParseOp(insns[j].pat);
         if (jop.mnem == "andi" && jop.ops.size() == 3 && jop.ops[1] == dst &&
             (jop.ops[2] == "0xFF" || jop.ops[2] == "0xFFFF") && jop.ops[0] != dst) {
           same_blk_narrow_mask = true;
@@ -621,6 +635,17 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
         if (mask_val.has_value() && *mask_val > 0 && *mask_val < 255) {
           delta += 1;
         }
+      }
+    }
+
+    // 8b. At `-O1`, `andi $v0, $r1, 0xFF` followed by `subu $v0, $v0, $r2` where `$r2`'s
+    // `andi $r2, $r2, 0xFF` was folded into an earlier block's `lbu`:
+    if (!expensive_opt && op.mnem == "andi" && op.ops.size() == 3 && op.ops[0] == "$v0" &&
+        op.ops[2] == "0xFF" && i + 1 < insns.size()) {
+      const ParsedOp nop = ParseOp(insns[i + 1].pat);
+      if (nop.mnem == "subu" && nop.ops.size() == 3 && nop.ops[0] == "$v0" && nop.ops[1] == "$v0" &&
+          nop.ops[2] != "$v0") {
+        delta += 1;
       }
     }
 
@@ -690,7 +715,10 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
             continue;
           }
           if (kkind == 10 || kkind == 12) {
-            delta += 1;
+            if (expensive_opt || kop.mnem == "lb" || kop.mnem == "lh" || kop.mnem == "lbu" ||
+                kop.mnem == "lhu") {
+              delta += 1;
+            }
           } else if (kop.mnem == "lb" || kop.mnem == "lh" || kop.mnem == "lbu" ||
                      kop.mnem == "lhu") {
             delta += 1;
@@ -702,7 +730,7 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
                 (kop.ops[1] == "$sp" || kop.ops[1] == "$fp")) {
               // Stack-slot address materialization into `$aX`
             } else if (kop.mnem == "andi" && kop.ops.size() == 3 && kop.ops[1] != dreg &&
-                       (kop.ops[2] == "0xFF" || kop.ops[2] == "0xFFFF")) {
+                       (kop.ops[2] == "0xFF" || (expensive_opt && kop.ops[2] == "0xFFFF"))) {
               // Narrow zero-extension directly into `$aX`
             } else if (kop.mnem == "lw" || kop.mnem == "ld" || kop.mnem == "lwc1" ||
                        kop.mnem == "ldc1" || kop.mnem == "mfc1" || kop.mnem == "mtc1") {
@@ -711,7 +739,9 @@ int PredictBlockDelta(const std::vector<BlockView>& s6_blks, size_t b) {
               delta += 1;
             }
           }
-        } else if (dreg == "$f4" && kop.mnem == "add.s" && !seen_args.contains("$a3")) {
+        } else if ((dreg == "$f4" ||
+                    (dreg == "$f0" && k > 0 && ParseOp(insns[k - 1].pat).mnem == "mfc1")) &&
+                   kop.mnem == "add.s" && !seen_args.contains("$a3")) {
           seen_args.insert("$a3");
           delta += 1;
         }
@@ -989,7 +1019,8 @@ bool IsNarrowEntryParam(std::string_view reg, const std::vector<BlockView>& s6_b
       }
     }
     for (const BlockView& blk : s6_blks) {
-      for (const InsnView& insn : blk.insns) {
+      for (size_t i = 0; i < blk.insns.size(); ++i) {
+        const InsnView& insn = blk.insns[i];
         auto [is_sm, sm_reg] = IsSelfMove(insn.kind, insn.pat);
         if (is_sm && sm_reg == reg) {
           continue;
@@ -999,8 +1030,16 @@ bool IsNarrowEntryParam(std::string_view reg, const std::vector<BlockView>& s6_b
             (op.ops[2] == "0xFFFF" || op.ops[2] == "65535")) {
           return true;
         }
+        if (IsMoveInsn(insn.kind, insn.pat) && op.ops.size() >= 2 && op.ops[1] == reg &&
+            i + 1 < blk.insns.size()) {
+          const ParsedOp nop = ParseOp(blk.insns[i + 1].pat);
+          if (nop.mnem == "andi" && nop.ops.size() == 3 && nop.ops[1] == op.ops[0] &&
+              (nop.ops[2] == "0xFFFF" || nop.ops[2] == "65535")) {
+            return true;
+          }
+        }
         if (GetDefRegFull(insn.kind, insn.pat, insn.m_insts) == reg) {
-          break;
+          return false;
         }
       }
     }
@@ -1066,10 +1105,11 @@ bool B0BlezIsCombinedLt(const std::vector<BlockView>& s6_blks) {
   return true;
 }
 
-int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
+int PredictB0FullDelta(const std::vector<BlockView>& s6_blks,
+                       const ParsedCompilerFlags* flags = nullptr) {
   const auto& succs = s6_blks[0].succs;
   const auto& insns = s6_blks[0].insns;
-  int base_delta = PredictBlockDelta(s6_blks, 0);
+  int base_delta = PredictBlockDelta(s6_blks, 0, flags);
 
   for (size_t i = 0; i < insns.size(); ++i) {
     if (absl::StrContains(insns[i].pat, "(le:SI ") &&
@@ -1161,9 +1201,16 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
   }
 
   // Stage 4 Category 1C (`mul.s $f2, ...` or `2:cvt.s.w $f2, $f2` from `$v1` before `jal`):
+  bool seen_call_in_b0 = false;
   for (size_t i = 0; i < insns.size(); ++i) {
     const ParsedOp op = ParseOp(insns[i].pat);
-    if (op.mnem == "mul.s" && !op.ops.empty() && op.ops[0] == "$f2") {
+    if (op.mnem == "jal" || op.mnem == "jalr") {
+      seen_call_in_b0 = true;
+      continue;
+    }
+    if (op.mnem == "mul.s" && !op.ops.empty() &&
+        (op.ops[0] == "$f2" || (op.ops[0] == "$f0" && seen_call_in_b0))) {
+      const std::string& mul_dst = op.ops[0];
       std::optional<size_t> next_call;
       for (size_t j = i + 1; j < insns.size(); ++j) {
         const ParsedOp jop = ParseOp(insns[j].pat);
@@ -1179,14 +1226,14 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
           const ParsedOp jop = ParseOp(insns[j].pat);
           if (jop.mnem == "mfc1") {
             for (const std::string& o : jop.ops) {
-              if (o == "$f2") {
+              if (o == mul_dst) {
                 has_mfc1 = true;
               }
             }
           } else if (insns[j].kind == 0 && jop.mnem != "mul.s") {
             const size_t start_idx = absl::StartsWith(jop.mnem, "c.") ? 0 : 1;
             for (size_t u = start_idx; u < jop.ops.size(); ++u) {
-              if (jop.ops[u] == "$f2") {
+              if (jop.ops[u] == mul_dst) {
                 used_before_call = true;
               }
             }
@@ -1334,24 +1381,27 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
   }
 
   // Rule 2 in B0 when `lbu`/`lhu` feeds `addu/subu $v0` followed by `sll $v0, $v0, 16`:
-  for (size_t i = 0; i < insns.size(); ++i) {
-    const ParsedOp op = ParseOp(insns[i].pat);
-    if ((op.mnem == "lbu" || op.mnem == "lhu") && !op.ops.empty()) {
-      const std::string& dst = op.ops[0];
-      if (dst != "$v0") {
-        for (size_t j = i + 1; j < insns.size(); ++j) {
-          const ParsedOp jop = ParseOp(insns[j].pat);
-          if ((jop.mnem == "addu" || jop.mnem == "subu") && jop.ops.size() == 3 &&
-              jop.ops[0] == "$v0" && (jop.ops[1] == dst || jop.ops[2] == dst)) {
-            for (size_t k = j + 1; k < insns.size(); ++k) {
-              const ParsedOp kop = ParseOp(insns[k].pat);
-              if (kop.mnem == "sll" && kop.ops.size() == 3 && kop.ops[0] == "$v0" &&
-                  kop.ops[1] == "$v0" && kop.ops[2] == "16") {
-                base_delta -= 1;
-                break;
+  const bool expensive_opt = (flags == nullptr) || flags->flag_expensive_optimizations;
+  if (expensive_opt) {
+    for (size_t i = 0; i < insns.size(); ++i) {
+      const ParsedOp op = ParseOp(insns[i].pat);
+      if ((op.mnem == "lbu" || op.mnem == "lhu") && !op.ops.empty()) {
+        const std::string& dst = op.ops[0];
+        if (dst != "$v0") {
+          for (size_t j = i + 1; j < insns.size(); ++j) {
+            const ParsedOp jop = ParseOp(insns[j].pat);
+            if ((jop.mnem == "addu" || jop.mnem == "subu") && jop.ops.size() == 3 &&
+                jop.ops[0] == "$v0" && (jop.ops[1] == dst || jop.ops[2] == dst)) {
+              for (size_t k = j + 1; k < insns.size(); ++k) {
+                const ParsedOp kop = ParseOp(insns[k].pat);
+                if (kop.mnem == "sll" && kop.ops.size() == 3 && kop.ops[0] == "$v0" &&
+                    kop.ops[1] == "$v0" && kop.ops[2] == "16") {
+                  base_delta -= 1;
+                  break;
+                }
               }
+              break;
             }
-            break;
           }
         }
       }
@@ -1389,8 +1439,14 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
   }
 
   // Count GPR-passed float parameters (`$a1..$a3`) whose `mtc1 $aY, $fX` was stripped by Stage 4:
-  absl::flat_hash_set<std::string> defined_fprs = {"$f12", "$f14"};
+  const bool starts_with_a0 =
+      !insns.empty() && (IsSelfMove(insns[0].kind, insns[0].pat).second == "$a0" ||
+                         IsUsedInInsn("$a0", insns[0].kind, insns[0].pat, insns[0].m_insts));
+  absl::flat_hash_set<std::string> defined_fprs =
+      starts_with_a0 ? absl::flat_hash_set<std::string>{}
+                     : absl::flat_hash_set<std::string>{"$f12", "$f14"};
   absl::flat_hash_set<std::string> used_stripped_fprs;
+  int fpr_param_delta = 0;
   for (size_t i = 0; i < insns.size(); ++i) {
     const int kind = insns[i].kind;
     const std::string& pat = insns[i].pat;
@@ -1407,7 +1463,7 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
       for (size_t u = start_idx; u < op.ops.size(); ++u) {
         const std::string& uo = op.ops[u];
         if ((uo == "$f0" || uo == "$f2" || uo == "$f4" || uo == "$f6" || uo == "$f8" ||
-             uo == "$f10") &&
+             uo == "$f10" || (starts_with_a0 && uo == "$f12")) &&
             !defined_fprs.contains(uo)) {
           undef_in_insn.insert(uo);
         }
@@ -1422,13 +1478,15 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
         }
       }
       if (undef_low == 2) {
-        base_delta += 2;
+        fpr_param_delta += 2;
       } else if (!undef_in_insn.empty() || !reused_in_insn.empty()) {
-        base_delta += 1;
+        fpr_param_delta += 1;
       }
       for (const std::string& uo : undef_in_insn) {
         defined_fprs.insert(uo);
-        used_stripped_fprs.insert(uo);
+        if (uo != "$f12") {
+          used_stripped_fprs.insert(uo);
+        }
       }
     }
     const std::string dreg = GetDefRegFull(kind, pat, m_insts);
@@ -1441,6 +1499,7 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
       }
     }
   }
+  base_delta += std::min(3, fpr_param_delta);
 
   const std::vector<std::string> live_args = ComputeLiveInEntryArgs(s6_blks);
   std::optional<size_t> first_call_idx;
@@ -1512,7 +1571,8 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
               has_float_imm_before = true;
             }
           }
-          const bool preceded_by_zero_init = has_zero_init_before && !has_float_imm_before;
+          const bool preceded_by_zero_init = has_zero_init_before && !has_float_imm_before &&
+                                             !(reg == "$a1" && absl::StartsWith(dreg, "$s"));
           const bool is_reg_copy =
               (IsMoveInsn(k, p) && !preceded_by_zero_init && op.ops.size() >= 2 &&
                op.ops[1] == reg && op.ops[0] != reg &&
@@ -1520,7 +1580,7 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
               (op.mnem == "mtc1" && op.ops.size() == 2 &&
                (op.ops[0] == reg || (k == 6 && reg == "$a2"))) ||
               (op.mnem == "sw" && op.ops.size() == 2 && op.ops[0] == reg &&
-               (absl::StrContains(op.ops[1], "($fp)") || (idx <= 1 && op.ops[1] == "20($sp)")));
+               (absl::StrContains(op.ops[1], "($fp)") || (reg == "$a3" && op.ops[1] == "20($sp)")));
           if (is_reg_copy) {
             if (first_call_idx.has_value() && IsArgReg(dreg)) {
               bool has_post_sm = false;
@@ -1531,7 +1591,14 @@ int PredictB0FullDelta(const std::vector<BlockView>& s6_blks) {
                   break;
                 }
               }
-              if (has_post_sm) {
+              bool dreg_redefined_before_call = false;
+              for (size_t m = idx + 1; m < *first_call_idx; ++m) {
+                if (GetDefRegFull(insns[m].kind, insns[m].pat, insns[m].m_insts) == dreg) {
+                  dreg_redefined_before_call = true;
+                  break;
+                }
+              }
+              if (has_post_sm || dreg_redefined_before_call) {
                 has_other_move = true;
               }
             } else {
@@ -1596,7 +1663,8 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
                      blk->rtl_insns.begin() + static_cast<std::ptrdiff_t>(insert_pos));
     for (int d = 0; d < delta; ++d) {
       RtlInsn uncombined;
-      uncombined.canonical_pattern = "addu  $zero, $zero, $zero";
+      uncombined.canonical_pattern = "(set (reg:SI 2 v0) (reg:SI 2 v0))";
+      uncombined.rtl_sexpr_pattern = "(set (reg:SI 2 v0) (reg:SI 2 v0))";
       uncombined.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
       uncombined.is_synthetic_rtl_expansion = true;
       new_insns.push_back(std::move(uncombined));
@@ -1646,10 +1714,385 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
   }
 }
 
+void ExpandCombinedBlockRtlPatterns(RtlBasicBlock* blk, bool is_block_zero,
+                                    bool b0_blez_is_combined_lt, bool expensive_opt) {
+  if (blk == nullptr || blk->rtl_insns.empty()) {
+    return;
+  }
+  int synth_moves = 0;
+  std::vector<RtlInsn> core_insns;
+  core_insns.reserve(blk->rtl_insns.size());
+  for (RtlInsn& rinsn : blk->rtl_insns) {
+    if (rinsn.is_synthetic_rtl_expansion &&
+        rinsn.canonical_pattern == "(set (reg:SI 2 v0) (reg:SI 2 v0))") {
+      ++synth_moves;
+    } else {
+      if (rinsn.rtl_sexpr_pattern.empty() && !rinsn.canonical_pattern.empty() &&
+          !absl::StartsWith(rinsn.canonical_pattern, "(")) {
+        rinsn.rtl_sexpr_pattern = "(set (reg:SI 2 v0) (reg:SI 2 v0))";
+      }
+      core_insns.push_back(std::move(rinsn));
+    }
+  }
+
+  auto make_synth = [](std::string sexpr) {
+    RtlInsn insn;
+    insn.canonical_pattern = sexpr;
+    insn.rtl_sexpr_pattern = std::move(sexpr);
+    insn.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
+    insn.is_synthetic_rtl_expansion = true;
+    return insn;
+  };
+
+  std::vector<RtlInsn> expanded;
+  expanded.reserve(core_insns.size() + static_cast<size_t>(std::max(0, synth_moves)));
+  for (size_t i = 0; i < core_insns.size(); ++i) {
+    RtlInsn& rinsn = core_insns[i];
+    const std::string& sexpr = rinsn.rtl_sexpr_pattern;
+    const ParsedOp op = ParseOp(rinsn.canonical_pattern);
+
+    // 1. Signed subword load `lb` / `lh`:
+    // `(set (reg:SI R) (sign_extend:SI (mem:HI/QI ...)))` ->
+    // `zero_extend:SI` + `ashift:SI 16/24` + `ashiftrt:SI 16/24`.
+    if (!(rinsn.idiom_kind == RtlFusedIdiomKind::kGasSymbolIndexedAccess && op.mnem == "lh") &&
+        (op.mnem == "lb" || op.mnem == "lh") && absl::StrContains(sexpr, "(sign_extend:SI (mem") &&
+        absl::EndsWith(sexpr, "))")) {
+      const size_t se_pos = sexpr.find("(sign_extend:SI ");
+      if (se_pos != std::string::npos) {
+        if (synth_moves >= 2) {
+          std::string zext = sexpr;
+          zext.replace(se_pos, 16, "(zero_extend:SI ");
+          rinsn.rtl_sexpr_pattern = std::move(zext);
+          const int sh = (op.mnem == "lh") ? 16 : 24;
+          expanded.push_back(std::move(rinsn));
+          expanded.push_back(make_synth(
+              absl::StrFormat("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int %d)))", sh)));
+          expanded.push_back(make_synth(absl::StrFormat(
+              "(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int %d)))", sh)));
+          synth_moves -= 2;
+          continue;
+        } else if (synth_moves == 1) {
+          size_t move_idx = core_insns.size();
+          for (size_t j = i + 1; j < core_insns.size(); ++j) {
+            if (IsMoveInsn(static_cast<int>(core_insns[j].idiom_kind),
+                           core_insns[j].canonical_pattern)) {
+              move_idx = j;
+              break;
+            }
+          }
+          if (move_idx < core_insns.size()) {
+            std::string zext = sexpr;
+            zext.replace(se_pos, 16, "(zero_extend:SI ");
+            rinsn.rtl_sexpr_pattern = std::move(zext);
+            const int sh = (op.mnem == "lh") ? 16 : 24;
+            expanded.push_back(std::move(rinsn));
+            core_insns[move_idx].canonical_pattern = absl::StrFormat("sll   $v0, $v0, %d", sh);
+            core_insns[move_idx].rtl_sexpr_pattern =
+                absl::StrFormat("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int %d)))", sh);
+            expanded.push_back(make_synth(absl::StrFormat(
+                "(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int %d)))", sh)));
+            synth_moves -= 1;
+            continue;
+          }
+        }
+      }
+    }
+
+    // 2. Indexed symbol or label access (`kGasSymbolIndexedAccess`, `kind == 11`) for
+    // word/halfword:
+    if (synth_moves >= 2 && rinsn.idiom_kind == RtlFusedIdiomKind::kGasSymbolIndexedAccess &&
+        op.mnem != "lb" && op.mnem != "lbu" && op.mnem != "sb") {
+      const size_t plus_pos = sexpr.find("(plus:SI ");
+      if (plus_pos != std::string::npos) {
+        size_t sym_pos = sexpr.find("(symbol_ref:SI ", plus_pos);
+        if (sym_pos == std::string::npos) {
+          sym_pos = sexpr.find("(label_ref", plus_pos);
+        }
+        if (sym_pos != std::string::npos) {
+          size_t depth = 0;
+          size_t sym_end = sym_pos;
+          for (; sym_end < sexpr.size(); ++sym_end) {
+            if (sexpr[sym_end] == '(') {
+              ++depth;
+            } else if (sexpr[sym_end] == ')') {
+              --depth;
+              if (depth == 0) {
+                break;
+              }
+            }
+          }
+          size_t plus_depth = 0;
+          size_t plus_end = plus_pos;
+          for (; plus_end < sexpr.size(); ++plus_end) {
+            if (sexpr[plus_end] == '(') {
+              ++plus_depth;
+            } else if (sexpr[plus_end] == ')') {
+              --plus_depth;
+              if (plus_depth == 0) {
+                break;
+              }
+            }
+          }
+          if (sym_end < sexpr.size() && plus_end < sexpr.size()) {
+            const std::string sym_expr = sexpr.substr(sym_pos, sym_end - sym_pos + 1);
+            std::string mem_access = sexpr;
+            mem_access.replace(plus_pos, plus_end - plus_pos + 1, "(reg:SI 2 v0)");
+            if (op.mnem == "lhu" && absl::StartsWith(mem_access, "(set ") &&
+                !absl::StrContains(mem_access, "(zero_extend:SI ") &&
+                absl::StrContains(mem_access, " (mem:HI ")) {
+              const size_t mem_pos = mem_access.find(" (mem:HI ");
+              mem_access.replace(
+                  mem_pos + 1, mem_access.size() - (mem_pos + 2),
+                  absl::StrCat("(zero_extend:SI ",
+                               mem_access.substr(mem_pos + 1, mem_access.size() - (mem_pos + 2)),
+                               ")"));
+            }
+            if (op.mnem == "lh" && synth_moves >= 4 &&
+                absl::StrContains(mem_access, "(sign_extend:SI (mem")) {
+              const size_t se_pos = mem_access.find("(sign_extend:SI ");
+              mem_access.replace(se_pos, 16, "(zero_extend:SI ");
+              if (!expanded.empty() &&
+                  absl::StrContains(expanded.back().rtl_sexpr_pattern, "(ashift:SI ")) {
+                expanded.insert(expanded.end() - 1,
+                                make_synth(absl::StrCat("(set (reg:SI 2 v0) ", sym_expr, ")")));
+              } else {
+                expanded.push_back(make_synth(absl::StrCat("(set (reg:SI 2 v0) ", sym_expr, ")")));
+              }
+              expanded.push_back(
+                  make_synth("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))"));
+              rinsn.rtl_sexpr_pattern = std::move(mem_access);
+              expanded.push_back(std::move(rinsn));
+              expanded.push_back(
+                  make_synth("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 16)))"));
+              expanded.push_back(
+                  make_synth("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 16)))"));
+              synth_moves -= 4;
+              continue;
+            }
+            expanded.push_back(make_synth(absl::StrCat("(set (reg:SI 2 v0) ", sym_expr, ")")));
+            expanded.push_back(
+                make_synth("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))"));
+            rinsn.rtl_sexpr_pattern = std::move(mem_access);
+            expanded.push_back(std::move(rinsn));
+            synth_moves -= 2;
+            continue;
+          }
+        }
+      }
+    }
+
+    // 3. `kGasAddressHiLo` (`kind == 10`) with small positive offset `< 256`:
+    if (synth_moves >= 1 && rinsn.idiom_kind == RtlFusedIdiomKind::kGasAddressHiLo &&
+        op.mnem == "addiu" && op.ops.size() == 3) {
+      const std::optional<int64_t> off = ParseIntLiteral(op.ops[2]);
+      const size_t sym_pos = sexpr.find("(symbol_ref:SI ");
+      if (off.has_value() && *off > 0 && *off < 256 && sym_pos != std::string::npos) {
+        const size_t sym_end = sexpr.find("))", sym_pos);
+        if (sym_end != std::string::npos) {
+          const std::string sym_expr = sexpr.substr(sym_pos, sym_end - sym_pos + 2);
+          expanded.push_back(make_synth(absl::StrCat("(set (reg:SI 2 v0) ", sym_expr, ")")));
+          rinsn.rtl_sexpr_pattern =
+              absl::StrFormat("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int %d)))", *off);
+          expanded.push_back(std::move(rinsn));
+          synth_moves -= 1;
+          continue;
+        }
+      }
+    }
+
+    // 4. `kFloatSiSf2` / `kFloatSiDf2` (`kind in (2, 3)`) with `lwc1`:
+    if (synth_moves >= 1 && is_block_zero && expensive_opt &&
+        (rinsn.idiom_kind == RtlFusedIdiomKind::kFloatSiSf2 ||
+         rinsn.idiom_kind == RtlFusedIdiomKind::kFloatSiDf2)) {
+      const size_t flt_pos = sexpr.find("(float:");
+      const size_t mem_pos = sexpr.find("(mem", flt_pos != std::string::npos ? flt_pos : 0);
+      if (flt_pos != std::string::npos && mem_pos != std::string::npos &&
+          absl::EndsWith(sexpr, "))")) {
+        const std::string mode = (rinsn.idiom_kind == RtlFusedIdiomKind::kFloatSiDf2) ? "DF" : "SF";
+        const std::string mem_expr = sexpr.substr(mem_pos, sexpr.size() - mem_pos - 2);
+        expanded.push_back(make_synth(absl::StrCat("(set (reg:SI 2 v0) ", mem_expr, ")")));
+        rinsn.rtl_sexpr_pattern =
+            absl::StrFormat("(set (reg:SI 2 v0) (float:%s (reg:SI 2 v0)))", mode);
+        expanded.push_back(std::move(rinsn));
+        synth_moves -= 1;
+        continue;
+      }
+    }
+
+    // 5. `kFixTruncSfSi2` / `kFixTruncDfSi2` (`kind in (4, 5)`) storing directly to memory:
+    if (synth_moves >= 1 &&
+        (rinsn.idiom_kind == RtlFusedIdiomKind::kFixTruncSfSi2 ||
+         rinsn.idiom_kind == RtlFusedIdiomKind::kFixTruncDfSi2) &&
+        absl::StartsWith(sexpr, "(parallel[ (set (mem")) {
+      const size_t fix_pos = sexpr.find(" (fix:SI ");
+      if (fix_pos != std::string::npos) {
+        const std::string mem_lhs = sexpr.substr(16, fix_pos - 16);
+        std::string fix_reg = sexpr;
+        fix_reg.replace(16, fix_pos - 16, "(reg:SI 2 v0)");
+        rinsn.rtl_sexpr_pattern = std::move(fix_reg);
+        expanded.push_back(std::move(rinsn));
+        expanded.push_back(make_synth(absl::StrCat("(set ", mem_lhs, " (reg:SI 2 v0))")));
+        synth_moves -= 1;
+        continue;
+      }
+    }
+
+    // 6. Store-flag `slt $v0, $zero, $r` (`gt:SI ... 0` -> `lt:SI ... 1` + `xor:SI ... 1`):
+    if (synth_moves >= 1 && absl::StartsWith(sexpr, "(set (reg:SI 2 v0) (gt:SI ") &&
+        absl::EndsWith(sexpr, " (const_int 0)))")) {
+      rinsn.rtl_sexpr_pattern = "(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (const_int 1)))";
+      expanded.push_back(std::move(rinsn));
+      expanded.push_back(make_synth("(set (reg:SI 2 v0) (xor:SI (reg:SI 2 v0) (const_int 1)))"));
+      synth_moves -= 1;
+      continue;
+    }
+
+    // 7. Signed division by 2 sign-bit shift (`srl $r, $src, 31; addu`):
+    if (synth_moves >= 1 && op.mnem == "srl" && op.ops.size() == 3 && op.ops[2] == "31" &&
+        i + 1 < core_insns.size() &&
+        absl::StartsWith(core_insns[i + 1].canonical_pattern, "addu ")) {
+      expanded.push_back(
+          make_synth("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 31)))"));
+      expanded.push_back(std::move(rinsn));
+      synth_moves -= 1;
+      continue;
+    }
+
+    // 8. Boolean `and`/`or` of two comparisons at end of 1-block function:
+    if (synth_moves >= 1 && is_block_zero && expanded.size() >= 2 &&
+        (absl::StrContains(sexpr, " (and:SI ") || absl::StrContains(sexpr, " (ior:SI ")) &&
+        (absl::StrContains(expanded.back().rtl_sexpr_pattern, "(ne:SI ") ||
+         absl::StrContains(expanded.back().rtl_sexpr_pattern, "(gtu:SI ") ||
+         absl::StrContains(expanded.back().rtl_sexpr_pattern, "(eq:SI ") ||
+         absl::StrContains(expanded.back().rtl_sexpr_pattern, "(lt:SI ") ||
+         absl::StrContains(expanded.back().rtl_sexpr_pattern, "(ltu:SI ") ||
+         (absl::StrContains(expanded.back().rtl_sexpr_pattern, "(xor:SI ") &&
+          absl::StrContains(expanded.back().rtl_sexpr_pattern, "(const_int 1)")))) {
+      expanded.push_back(std::move(rinsn));
+      expanded.push_back(make_synth("(set (reg:SI 2 v0) (ne:SI (reg:SI 2 v0) (const_int 0)))"));
+      synth_moves -= 1;
+      continue;
+    }
+
+    // 9. Loop preheader `blez` (`(le:SI (reg:SI X) (const_int 0))` -> `lt` + `eq 0`):
+    if (synth_moves >= 1 && absl::StrContains(sexpr, "(le:SI ") &&
+        absl::StrContains(sexpr, "(const_int 0)")) {
+      bool should_expand_blez = false;
+      bool has_one_counter = false;
+      if (is_block_zero) {
+        should_expand_blez = b0_blez_is_combined_lt;
+        for (const auto& prev : expanded) {
+          if (absl::EndsWith(prev.rtl_sexpr_pattern, " (const_int 1))")) {
+            has_one_counter = true;
+            break;
+          }
+        }
+      } else {
+        for (const auto& prev : expanded) {
+          if (IsConstImmMove(static_cast<int>(prev.idiom_kind), prev.canonical_pattern) &&
+              absl::EndsWith(prev.canonical_pattern, ", $zero, $zero")) {
+            should_expand_blez = true;
+            break;
+          }
+        }
+      }
+      if (should_expand_blez) {
+        if (has_one_counter) {
+          expanded.push_back(make_synth("(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (const_int 1)))"));
+          rinsn.rtl_sexpr_pattern =
+              "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))";
+        } else {
+          expanded.push_back(make_synth("(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (reg:SI 2 v0)))"));
+          rinsn.rtl_sexpr_pattern =
+              "(set (pc) (if_then_else (eq:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))";
+        }
+        expanded.push_back(std::move(rinsn));
+        synth_moves -= 1;
+        continue;
+      }
+    }
+
+    expanded.push_back(std::move(rinsn));
+  }
+
+  for (int d = 0; d < synth_moves; ++d) {
+    size_t insert_pos = expanded.size();
+    if (!expanded.empty() && IsJumpOrBranchPattern(expanded.back().rtl_sexpr_pattern)) {
+      insert_pos = expanded.size() - 1;
+    }
+    if (d == 0 && is_block_zero) {
+      int sll_shift = 0;
+      for (size_t s = 0; s + 5 < expanded.size(); ++s) {
+        if (absl::StrContains(expanded[s].rtl_sexpr_pattern, "(ashift:SI ") &&
+            (absl::StrContains(expanded[s + 1].rtl_sexpr_pattern, "(plus:SI ") ||
+             absl::StrContains(expanded[s + 1].rtl_sexpr_pattern, "(minus:SI ")) &&
+            absl::StrContains(expanded[s + 2].rtl_sexpr_pattern, "(ashift:SI ") &&
+            (absl::StrContains(expanded[s + 3].rtl_sexpr_pattern, "(plus:SI ") ||
+             absl::StrContains(expanded[s + 3].rtl_sexpr_pattern, "(minus:SI ")) &&
+            (absl::StrContains(expanded[s + 4].rtl_sexpr_pattern, "(plus:SI ") ||
+             absl::StrContains(expanded[s + 4].rtl_sexpr_pattern, "(minus:SI ")) &&
+            absl::StrContains(expanded[s + 5].rtl_sexpr_pattern, "(ashift:SI ")) {
+          const size_t ci = expanded[s + 5].rtl_sexpr_pattern.find("(const_int ");
+          if (ci != std::string::npos) {
+            int val = 0;
+            if (absl::SimpleAtoi(expanded[s + 5].rtl_sexpr_pattern.substr(
+                                     ci + 11, expanded[s + 5].rtl_sexpr_pattern.size() - ci - 14),
+                                 &val)) {
+              sll_shift = val;
+              break;
+            }
+          }
+        }
+      }
+      if (sll_shift > 0) {
+        expanded.insert(
+            expanded.begin() + static_cast<std::ptrdiff_t>(insert_pos),
+            make_synth(absl::StrFormat(
+                "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int %d)))", sll_shift)));
+        continue;
+      }
+    }
+    if (!is_block_zero && !expanded.empty() &&
+        absl::StrContains(expanded.back().rtl_sexpr_pattern, "(le:SI ") &&
+        absl::StrContains(expanded.back().rtl_sexpr_pattern, "(const_int 0)")) {
+      bool has_zero_init = false;
+      for (size_t j = 0; j + 1 < expanded.size(); ++j) {
+        if (IsConstImmMove(static_cast<int>(expanded[j].idiom_kind),
+                           expanded[j].canonical_pattern) &&
+            absl::EndsWith(expanded[j].canonical_pattern, ", $zero, $zero")) {
+          has_zero_init = true;
+          break;
+        }
+      }
+      if (has_zero_init) {
+        expanded.back().rtl_sexpr_pattern =
+            "(set (pc) (if_then_else (eq:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))";
+        expanded.insert(expanded.begin() + static_cast<std::ptrdiff_t>(insert_pos),
+                        make_synth("(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (reg:SI 2 v0)))"));
+        continue;
+      }
+    }
+    expanded.insert(expanded.begin() + static_cast<std::ptrdiff_t>(insert_pos),
+                    make_synth("(set (reg:SI 2 v0) (reg:SI 2 v0))"));
+  }
+
+  blk->rtl_insns = std::move(expanded);
+  blk->instructions.clear();
+  blk->instructions.reserve(blk->rtl_insns.size());
+  for (const RtlInsn& insn : blk->rtl_insns) {
+    blk->instructions.push_back(insn.canonical_pattern);
+  }
+}
+
 }  // namespace
 
-void InverseCombineLifter::InvertCombineToFlowRtlCfg(RtlControlFlowGraph* cfg) {
+void InverseCombineLifter::InvertCombineToFlowRtlCfg(RtlControlFlowGraph* cfg,
+                                                     const ParsedCompilerFlags* flags) {
   if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  cfg->pass = RtlPassKind::kFlow;
+  if (flags != nullptr && !flags->RunsOptimizerPasses()) {
     return;
   }
 
@@ -1675,13 +2118,16 @@ void InverseCombineLifter::InvertCombineToFlowRtlCfg(RtlControlFlowGraph* cfg) {
   }
 
   std::vector<int> deltas(s6_blks.size(), 0);
-  deltas[0] = PredictB0FullDelta(s6_blks);
+  deltas[0] = PredictB0FullDelta(s6_blks, flags);
   for (size_t b = 1; b < s6_blks.size(); ++b) {
-    deltas[b] = PredictBlockDelta(s6_blks, b);
+    deltas[b] = PredictBlockDelta(s6_blks, b, flags);
   }
 
+  const bool b0_blez_lt = B0BlezIsCombinedLt(s6_blks);
+  const bool expensive_opt = (flags == nullptr) || flags->flag_expensive_optimizations;
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
     ApplyBlockDelta(&cfg->rpo_blocks[b], deltas[b]);
+    ExpandCombinedBlockRtlPatterns(&cfg->rpo_blocks[b], b == 0, b0_blez_lt, expensive_opt);
   }
 }
 

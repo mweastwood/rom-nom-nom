@@ -1102,13 +1102,25 @@ void InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
           absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(") &&
           !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(set (pc)") &&
           !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(parallel[ (set (pc)")) {
-        const Instruction& rep_inst =
-            (blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiSf2 ||
-             blk.rtl_insns[i].idiom_kind == RtlFusedIdiomKind::kFloatSiDf2)
-                ? blk.rtl_insns[i].machine_instructions.back()
-                : blk.rtl_insns[i].machine_instructions.front();
+        const auto& m_insts = blk.rtl_insns[i].machine_instructions;
+        const RtlFusedIdiomKind kind = blk.rtl_insns[i].idiom_kind;
+        const Instruction* rep_inst = &m_insts.front();
+        if (kind == RtlFusedIdiomKind::kFloatSiSf2 || kind == RtlFusedIdiomKind::kFloatSiDf2 ||
+            kind == RtlFusedIdiomKind::kGasFloatImmediate ||
+            kind == RtlFusedIdiomKind::kGasMagicMultiplier ||
+            kind == RtlFusedIdiomKind::kGasAddressHiLo ||
+            kind == RtlFusedIdiomKind::kGasSymbolIndexedAccess ||
+            kind == RtlFusedIdiomKind::kGasSymbolDirectAccess) {
+          rep_inst = &m_insts.back();
+        } else if (kind == RtlFusedIdiomKind::kMove2Words && m_insts.size() == 4) {
+          rep_inst = &m_insts[1];
+        } else if ((kind == RtlFusedIdiomKind::kFixTruncSfSi2 ||
+                    kind == RtlFusedIdiomKind::kFixTruncDfSi2) &&
+                   m_insts.size() == 7) {
+          rep_inst = &m_insts[4];
+        }
         blk.rtl_insns[i].canonical_pattern =
-            InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(rep_inst);
+            InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(*rep_inst);
       }
       kept_pats.push_back(blk.rtl_insns[i].canonical_pattern);
       kept_insns.push_back(std::move(blk.rtl_insns[i]));

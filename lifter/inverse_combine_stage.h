@@ -1,6 +1,7 @@
 #ifndef LIFTER_INVERSE_COMBINE_STAGE_H_
 #define LIFTER_INVERSE_COMBINE_STAGE_H_
 
+#include "core/compiler_flags.h"
 #include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
@@ -22,7 +23,8 @@ namespace rom_nom_nom {
 //      final defining instruction of a return-computing block.
 class InverseCombineLifter {
  public:
-  static void InvertCombineToFlowRtlCfg(RtlControlFlowGraph* cfg);
+  static void InvertCombineToFlowRtlCfg(RtlControlFlowGraph* cfg,
+                                        const ParsedCompilerFlags* flags = nullptr);
 };
 
 }  // namespace rom_nom_nom

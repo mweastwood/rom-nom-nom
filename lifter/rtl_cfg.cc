@@ -623,7 +623,7 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
     }
   }
 
-  // 3. Canonicalize `(scratch:M)` -> `(reg:M *)` and `(reg:M N [name])` -> `(reg:M *)`.
+  // 3. Canonicalize `(scratch:M)` -> `(reg:M *)` and `(reg:M [N [name]])` -> `(reg:M *)`.
   {
     size_t pos = 0;
     while ((pos = s.find("(scratch:", pos)) != std::string::npos) {
@@ -631,7 +631,10 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
       if (close_pos == std::string::npos) {
         break;
       }
-      const std::string mode = s.substr(pos + 9, close_pos - (pos + 9));
+      std::string mode = s.substr(pos + 9, close_pos - (pos + 9));
+      if (mode == "SF" || mode == "DF" || mode == "DI" || mode == "HI" || mode == "QI") {
+        mode = "SI";
+      }
       const std::string rep = absl::StrCat("(reg:", mode, " *)");
       s.replace(pos, (close_pos + 1) - pos, rep);
       pos += rep.size();
@@ -641,12 +644,12 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
     size_t pos = 0;
     while ((pos = s.find("(reg:", pos)) != std::string::npos) {
       const size_t close_pos = s.find(')', pos + 5);
-      const size_t sp1 = s.find(' ', pos + 5);
-      if (close_pos == std::string::npos || sp1 == std::string::npos || sp1 >= close_pos) {
-        pos += 5;
-        continue;
+      if (close_pos == std::string::npos) {
+        break;
       }
-      std::string mode = s.substr(pos + 5, sp1 - (pos + 5));
+      const size_t sp1 = s.find(' ', pos + 5);
+      const size_t mode_end = (sp1 != std::string::npos && sp1 < close_pos) ? sp1 : close_pos;
+      std::string mode = s.substr(pos + 5, mode_end - (pos + 5));
       if (mode == "SF" || mode == "DF" || mode == "DI" || mode == "HI" || mode == "QI") {
         mode = "SI";
       }
@@ -663,6 +666,60 @@ std::string CanonicalizePreReloadRtlPattern(std::string s) {
       s.replace(pos, mem_fp.size(), "(mem:SI ");
       pos += 8;
     }
+  }
+
+  // 5. Normalize call return value wrapper `(set (reg:SI *) (call ...))` -> `(call ...)`.
+  if (absl::StartsWith(s, "(parallel[ (set (reg:SI *) (call ")) {
+    const size_t clobber_pos = s.find(")) (clobber ");
+    if (clobber_pos != std::string::npos) {
+      s.replace(clobber_pos, 2, ")");
+      s.erase(11, 16);
+    }
+  }
+
+  // 6. Normalize FP condition codes `(ge:CC_FP ` -> `(le:CC_FP ` and `(gt:CC_FP ` -> `(lt:CC_FP `.
+  for (auto [from_cc, to_cc] :
+       {std::pair<std::string_view, std::string_view>{"(ge:CC_FP ", "(le:CC_FP "},
+        std::pair<std::string_view, std::string_view>{"(gt:CC_FP ", "(lt:CC_FP "}}) {
+    size_t pos = 0;
+    while ((pos = s.find(from_cc, pos)) != std::string::npos) {
+      s.replace(pos, from_cc.size(), to_cc);
+      pos += to_cc.size();
+    }
+  }
+
+  // 7. Normalize store-flag comparisons and inverted zero-equality branches.
+  if (s == "(set (reg:SI *) (ltu:SI (reg:SI *) (const_int 1)))") {
+    s = "(set (reg:SI *) (eq:SI (reg:SI *) (const_int 0)))";
+  } else if (s == "(set (reg:SI *) (gtu:SI (reg:SI *) (const_int 0)))") {
+    s = "(set (reg:SI *) (ne:SI (reg:SI *) (const_int 0)))";
+  } else if (absl::StartsWith(s, "(set (reg:SI *) (le:SI (reg:SI *) (const_int ") &&
+             absl::EndsWith(s, ")))")) {
+    int64_t val = 0;
+    if (absl::SimpleAtoi(s.substr(45, s.size() - 48), &val)) {
+      s = absl::StrFormat("(set (reg:SI *) (lt:SI (reg:SI *) (const_int %d)))", val + 1);
+    }
+  } else if (absl::StartsWith(s, "(set (reg:SI *) (leu:SI (reg:SI *) (const_int ") &&
+             absl::EndsWith(s, ")))")) {
+    int64_t val = 0;
+    if (absl::SimpleAtoi(s.substr(46, s.size() - 49), &val)) {
+      s = absl::StrFormat("(set (reg:SI *) (ltu:SI (reg:SI *) (const_int %d)))", val + 1);
+    }
+  } else if (s == "(set (pc) (if_then_else (ne:SI (reg:SI *) (const_int 0)) (pc) (label_ref)))") {
+    s = "(set (pc) (if_then_else (eq:SI (reg:SI *) (const_int 0)) (label_ref) (pc)))";
+  }
+
+  // 8. Normalize subword memory load `(set (reg:SI *) (mem:HI/QI ...))` ->
+  // `(set (reg:SI *) (zero_extend:SI (mem:HI/QI ...)))` and narrow bitmask/zero-extension moves
+  // `(and:SI (reg:SI *) (const_int 255/65535))` / `(zero_extend:SI (reg:SI *))` -> `(reg:SI *)`.
+  if ((absl::StartsWith(s, "(set (reg:SI *) (mem:HI ") ||
+       absl::StartsWith(s, "(set (reg:SI *) (mem:QI ")) &&
+      absl::EndsWith(s, "))")) {
+    s = absl::StrCat("(set (reg:SI *) (zero_extend:SI ", s.substr(16, s.size() - 17), "))");
+  } else if (s == "(set (reg:SI *) (and:SI (reg:SI *) (const_int 255)))" ||
+             s == "(set (reg:SI *) (and:SI (reg:SI *) (const_int 65535)))" ||
+             s == "(set (reg:SI *) (zero_extend:SI (reg:SI *)))") {
+    s = "(set (reg:SI *) (reg:SI *))";
   }
 
   return s;
