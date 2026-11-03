@@ -45,6 +45,7 @@ struct RtlInsnEntry {
 
 // Represents the parsed RTL dump for a single function within a pass dump file.
 struct RtlFunctionDump {
+  RtlPassKind pass = RtlPassKind::kDbr;
   std::string function_name;
   std::string header_text;
   std::vector<RtlInsnEntry> insns;

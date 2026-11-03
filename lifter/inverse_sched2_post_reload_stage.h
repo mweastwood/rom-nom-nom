@@ -27,7 +27,8 @@ class InverseSched2PostReloadLifter {
   // assembly strings for downstream pre-reload stages (`Stages 4..12`).
   static void RestoreGregSelfMovesAndFormatAsMipsRtl(RtlControlFlowGraph* cfg,
                                                      const SymbolIndex* symbols = nullptr,
-                                                     std::string_view function_name = "");
+                                                     std::string_view function_name = "",
+                                                     const ParsedCompilerFlags* flags = nullptr);
 };
 
 }  // namespace rom_nom_nom

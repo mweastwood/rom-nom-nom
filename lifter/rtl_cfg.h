@@ -53,6 +53,7 @@ enum class RtlFusedIdiomKind {
 // (including symbol relocations, register operands, and immediate values).
 struct RtlInsn {
   std::string canonical_pattern;
+  std::string rtl_sexpr_pattern;
   RtlFusedIdiomKind idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
   uint32_t vram = 0;
   bool is_prologue_insn = false;
@@ -117,6 +118,7 @@ struct RtlCfgPassComparison {
 // First-class Reverse-Post-Order (RPO) RTL Control Flow Graph representation produced by
 // `InverseFinalAndGasStage` (Stage 0) and transformed by downstream inverse compiler stages.
 struct RtlControlFlowGraph {
+  RtlPassKind pass = RtlPassKind::kDbr;
   std::vector<RtlBasicBlock> rpo_blocks;
 
   // Semantic recovery metadata populated across Track B (`Stages 0..12`) and consumed by Stage 13

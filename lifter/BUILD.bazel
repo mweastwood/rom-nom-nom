@@ -851,6 +851,7 @@ cc_library(
         ":rtl_cfg_builder",
         ":rtl_def_use_analysis",
         ":stack_frame_analyzer",
+        "//core:compiler_flags",
         "//core:mips",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],

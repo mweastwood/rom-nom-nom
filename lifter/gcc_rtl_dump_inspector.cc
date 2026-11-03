@@ -508,6 +508,7 @@ RtlPassDump GccRtlDumpInspector::ParsePassDump(RtlPassKind pass, std::string_vie
     if (absl::StartsWith(line, kFuncMarker)) {
       std::string_view fn_name = absl::StripAsciiWhitespace(line.substr(kFuncMarker.size()));
       functions.push_back(RtlFunctionDump{
+          .pass = pass,
           .function_name = std::string(fn_name),
           .header_text = {},
           .insns = {},
@@ -519,6 +520,7 @@ RtlPassDump GccRtlDumpInspector::ParsePassDump(RtlPassKind pass, std::string_vie
     if (!line.empty() && line.front() == '(') {
       if (current_fn == nullptr) {
         functions.push_back(RtlFunctionDump{
+            .pass = pass,
             .function_name = "<anonymous>",
             .header_text = {},
             .insns = {},
@@ -788,6 +790,7 @@ std::vector<RtlInsnEntry> ExpandSequenceSexpr(const RtlInsnEntry& seq_entry) {
 
 RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
   RtlCanonicalCfg result;
+  result.pass = dump.pass;
 
   // Flatten top-level entries (expanding `(sequence [...])` if present in `.dbr`).
   std::vector<RtlInsnEntry> flat_entries;
@@ -838,16 +841,21 @@ RtlCanonicalCfg GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump(const RtlFunct
           pat == "(const_int 0)") {
         continue;
       }
-      const std::string canon_pat = CanonicalizeRtlPattern(pat);
-      if (absl::StartsWith(canon_pat, "(set (reg:") && absl::EndsWith(canon_pat, ")")) {
-        const std::string_view sv = canon_pat;
-        const size_t close_lhs = sv.find(')', 5);
-        if (close_lhs != std::string_view::npos && close_lhs + 2 < sv.size() - 1 &&
-            sv[close_lhs + 1] == ' ') {
-          const std::string_view lhs = sv.substr(5, close_lhs - 5 + 1);
-          const std::string_view rhs = sv.substr(close_lhs + 2, sv.size() - 1 - (close_lhs + 2));
-          if (lhs == rhs) {
-            continue;
+      const bool is_post_reload_pass =
+          (dump.pass == RtlPassKind::kGreg || dump.pass == RtlPassKind::kSched2 ||
+           dump.pass == RtlPassKind::kJump2 || dump.pass == RtlPassKind::kDbr);
+      if (is_post_reload_pass) {
+        const std::string canon_pat = CanonicalizeRtlPattern(pat);
+        if (absl::StartsWith(canon_pat, "(set (reg:") && absl::EndsWith(canon_pat, ")")) {
+          const std::string_view sv = canon_pat;
+          const size_t close_lhs = sv.find(')', 5);
+          if (close_lhs != std::string_view::npos && close_lhs + 2 < sv.size() - 1 &&
+              sv[close_lhs + 1] == ' ') {
+            const std::string_view lhs = sv.substr(5, close_lhs - 5 + 1);
+            const std::string_view rhs = sv.substr(close_lhs + 2, sv.size() - 1 - (close_lhs + 2));
+            if (lhs == rhs) {
+              continue;
+            }
           }
         }
       }

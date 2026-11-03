@@ -102,6 +102,14 @@ RtlInsnDefUse AnalyzeRtlInsnDefUse(const RtlInsn& insn, const SymbolIndex* symbo
       if (g_even == Register::kA2) {
         p.is_df_di_a2 = true;
       }
+    } else if (m0.opcode == Opcode::kLw && m0.rt.has_value() && m0.rs.has_value()) {
+      const Register g_even = static_cast<Register>(static_cast<int>(*m0.rt) & ~1);
+      add_use(GprName(*m0.rs));
+      add_def(GprName(g_even));
+      p.is_load = true;
+      if (g_even == Register::kA2) {
+        p.is_df_di_a2 = true;
+      }
     }
     return p;
   }

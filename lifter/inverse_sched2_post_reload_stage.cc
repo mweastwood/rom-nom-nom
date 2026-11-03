@@ -96,7 +96,8 @@ void InvertSched2ReturnAndPostCallSelfMoves(
                parsed[non_jmp_idxs[non_jmp_idxs.size() - 3]].defs ==
                    std::vector<std::string>{"v0"} &&
                parsed[non_jmp_idxs[non_jmp_idxs.size() - 3]].is_load &&
-               HasRegItem(parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].uses, "v0") &&
+               !parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].uses.empty() &&
+               parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].uses.front() == "v0" &&
                !HasRegItem(parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].defs, "v0") &&
                !parsed[non_jmp_idxs[non_jmp_idxs.size() - 2]].is_store);
           if (v0_stored_si) {
@@ -628,8 +629,10 @@ void InvertSched2SelfMoves(RtlControlFlowGraph* cfg, const SymbolIndex* symbols,
           if (read_after_def && higher_written && !from_callee_saved && !is_float_in_gpr) {
             pred_regs.insert(r);
           } else if (r == "a3" && last_def_i == s_start && b == 0 && ci_pos == 0 &&
-                     HasRegItem(parsed_b[s_start].uses, "a1") && eff_defs_in_seg.contains("a1") &&
-                     eff_defs_in_seg.contains("a2")) {
+                     (HasRegItem(parsed_b[s_start].uses, "a1") ||
+                      (read_after_def && HasRegItem(parsed_b[s_start].uses, "a0") &&
+                       eff_defs_in_seg.contains("a0"))) &&
+                     eff_defs_in_seg.contains("a1") && eff_defs_in_seg.contains("a2")) {
             pred_regs.insert(r);
           }
         } else if (higher_written) {
@@ -678,9 +681,10 @@ void InvertSched2SelfMoves(RtlControlFlowGraph* cfg, const SymbolIndex* symbols,
                     blks[pb].successors.end()) {
                   const auto& p_parsed = parsed_map[pb];
                   bool tail_uses_a1 = false;
-                  for (size_t k = (p_parsed.size() >= 2 ? p_parsed.size() - 2 : 0);
+                  for (size_t k = (p_parsed.size() >= 3 ? p_parsed.size() - 3 : 0);
                        k < p_parsed.size(); ++k) {
-                    if (HasRegItem(p_parsed[k].uses, "a1")) {
+                    if (HasRegItem(p_parsed[k].uses, "a1") &&
+                        (k + 2 >= p_parsed.size() || p_parsed[k].is_store)) {
                       tail_uses_a1 = true;
                     }
                   }
@@ -942,10 +946,131 @@ void InvertSched2SelfMoves(RtlControlFlowGraph* cfg, const SymbolIndex* symbols,
   }
 }
 
+void InvertO0PreReloadSelfMoves(RtlControlFlowGraph* cfg, const SymbolIndex* symbols) {
+  auto& blks = cfg->rpo_blocks;
+  const size_t num_blks = blks.size();
+  if (num_blks == 0) {
+    return;
+  }
+
+  for (size_t b = 0; b < num_blks; ++b) {
+    std::vector<RtlInsnDefUse> parsed;
+    parsed.reserve(blks[b].rtl_insns.size());
+    for (const auto& insn : blks[b].rtl_insns) {
+      parsed.push_back(AnalyzeRtlInsnDefUse(insn, symbols));
+    }
+
+    std::vector<RtlInsn> new_insns;
+    new_insns.reserve(blks[b].rtl_insns.size() + 8);
+
+    // Rule O0-3: `casesi` switch tablejump index copy `(set (reg:SI P2) (reg:SI P1))` at block
+    // entry when both pseudos are allocated to `$v0`.
+    if (!blks[b].instructions.empty() &&
+        absl::StartsWith(blks[b].instructions.back(), "(parallel[ (set (pc) (reg:SI ") &&
+        absl::StartsWith(blks[b].instructions.front(), "sll   $v1, $v0, 2")) {
+      new_insns.push_back(MakeSelfMoveRtlInsn("v0"));
+    }
+
+    // Rule O0-2: Diamond join block `(set (reg:SI 2 v0) (reg:SI P))` before return label.
+    if (b == 3 && num_blks == 5 &&
+        blks[b].instructions == std::vector<std::string>{"(set (pc) (label_ref))"} &&
+        blks[b].successors == std::vector<size_t>{num_blks - 1} &&
+        blks[num_blks - 1].instructions.empty() && blks[b].predecessors.size() == 2) {
+      new_insns.push_back(MakeSelfMoveRtlInsn("v0"));
+    }
+
+    size_t seg_start = 0;
+    for (size_t i = 0; i < blks[b].rtl_insns.size(); ++i) {
+      const RtlInsn& insn = blks[b].rtl_insns[i];
+      // Rule O0-4: `expr.c:emit_block_move` `copy_to_mode_reg` address moves before `movstrsi`.
+      if (insn.idiom_kind == RtlFusedIdiomKind::kMovstrsiBlockMove) {
+        new_insns.push_back(MakeSelfMoveRtlInsn("v0"));
+        new_insns.push_back(MakeSelfMoveRtlInsn("v1"));
+      }
+
+      // Rule O0-5: Pre-evaluated 3rd/4th call arguments in `$a2`/`$a3` when earlier call
+      // arguments were pre-evaluated into `$v0` and `$v1` and moved into `$a0`/`$a1`/`$a2` right
+      // before `call_insn`.
+      if (parsed[i].is_call && i >= seg_start + 2 && parsed[i - 2].is_si_reg_to_reg_move &&
+          parsed[i - 2].uses == std::vector<std::string>{"v0"} &&
+          parsed[i - 1].is_si_reg_to_reg_move &&
+          parsed[i - 1].uses == std::vector<std::string>{"v1"}) {
+        auto is_unread_pre_eval_arg = [&](std::string_view arg_reg) {
+          std::optional<size_t> last_def;
+          for (size_t k = seg_start; k < i - 2; ++k) {
+            if (HasRegItem(parsed[k].defs, arg_reg) && !parsed[k].is_load) {
+              last_def = k;
+            }
+          }
+          if (!last_def.has_value()) {
+            return false;
+          }
+          for (size_t k = *last_def + 1; k < i; ++k) {
+            if (HasRegItem(parsed[k].uses, arg_reg)) {
+              return false;
+            }
+          }
+          return true;
+        };
+        const bool a2_pre_eval = is_unread_pre_eval_arg("a2");
+        const bool a3_pre_eval = is_unread_pre_eval_arg("a3");
+        if (a2_pre_eval || (a3_pre_eval && parsed[i - 2].defs == std::vector<std::string>{"a0"} &&
+                            parsed[i - 1].defs == std::vector<std::string>{"a1"})) {
+          new_insns.push_back(MakeSelfMoveRtlInsn("a2"));
+        }
+        if (a3_pre_eval) {
+          new_insns.push_back(MakeSelfMoveRtlInsn("a3"));
+        }
+      }
+
+      new_insns.push_back(insn);
+
+      // Rule O0-1: `calls.c:expand_call` post-call return value copy `(set (reg:M P) (reg:M
+      // v0/$f0))` when `stupid_life_analysis` (`stupid.c`) allocates `P` to `$v0` or `$f0`.
+      if (parsed[i].is_call) {
+        seg_start = i + 1;
+        for (std::string_view ret_reg_sv : {"v0", "$f0"}) {
+          const std::string ret_reg(ret_reg_sv);
+          bool used_after = false;
+          for (size_t j = i + 1; j < parsed.size(); ++j) {
+            if (HasRegItem(parsed[j].uses, ret_reg)) {
+              used_after = true;
+              break;
+            }
+            if (parsed[j].is_call || HasRegItem(parsed[j].defs, ret_reg)) {
+              break;
+            }
+          }
+          if (!used_after) {
+            continue;
+          }
+          if (ret_reg == "v0" && i + 2 < parsed.size() && parsed[i + 1].is_si_reg_to_reg_move &&
+              parsed[i + 1].defs == std::vector<std::string>{"v1"} &&
+              parsed[i + 1].uses == std::vector<std::string>{"v0"} &&
+              parsed[i + 2].is_si_reg_to_reg_move &&
+              parsed[i + 2].defs == std::vector<std::string>{"v0"} &&
+              parsed[i + 2].uses == std::vector<std::string>{"v1"}) {
+            continue;
+          }
+          new_insns.push_back(MakeSelfMoveRtlInsn(ret_reg));
+        }
+      }
+    }
+
+    blks[b].rtl_insns = std::move(new_insns);
+    blks[b].instructions.clear();
+    blks[b].instructions.reserve(blks[b].rtl_insns.size());
+    for (const auto& rinsn : blks[b].rtl_insns) {
+      blks[b].instructions.push_back(rinsn.canonical_pattern);
+    }
+  }
+}
+
 }  // namespace
 
 void InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
-    RtlControlFlowGraph* cfg, const SymbolIndex* symbols, std::string_view function_name) {
+    RtlControlFlowGraph* cfg, const SymbolIndex* symbols, std::string_view function_name,
+    const ParsedCompilerFlags* flags) {
   if (cfg == nullptr) {
     return;
   }
@@ -970,6 +1095,9 @@ void InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
       if (blk.rtl_insns[i].is_prologue_insn) {
         continue;
       }
+      if (absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(")) {
+        blk.rtl_insns[i].rtl_sexpr_pattern = blk.rtl_insns[i].canonical_pattern;
+      }
       if (!blk.rtl_insns[i].machine_instructions.empty() &&
           absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(") &&
           !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(set (pc)") &&
@@ -987,6 +1115,10 @@ void InverseSched2PostReloadLifter::RestoreGregSelfMovesAndFormatAsMipsRtl(
     }
     blk.rtl_insns = std::move(kept_insns);
     blk.instructions = std::move(kept_pats);
+  }
+  if (flags != nullptr && !flags->RunsOptimizerPasses()) {
+    InvertO0PreReloadSelfMoves(cfg, symbols);
+    return;
   }
   if (had_rtl_sexpr) {
     InverseJump2CrossJumpLifter::RestorePreSched2NoopSelfMoves(cfg);

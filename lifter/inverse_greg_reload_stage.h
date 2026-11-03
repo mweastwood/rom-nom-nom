@@ -1,6 +1,7 @@
 #ifndef LIFTER_INVERSE_GREG_RELOAD_STAGE_H_
 #define LIFTER_INVERSE_GREG_RELOAD_STAGE_H_
 
+#include "core/compiler_flags.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/stack_frame_analyzer.h"
 
@@ -13,7 +14,8 @@ namespace rom_nom_nom {
 class InverseGregReloadLifter {
  public:
   static void InvertGregToLregRtlCfg(RtlControlFlowGraph* cfg,
-                                     const StackFrameAnalysis* frame_analysis = nullptr);
+                                     const StackFrameAnalysis* frame_analysis = nullptr,
+                                     const ParsedCompilerFlags* flags = nullptr);
 };
 
 }  // namespace rom_nom_nom

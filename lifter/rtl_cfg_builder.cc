@@ -82,6 +82,8 @@ RtlInsn MakeSelfMoveRtlInsn(std::string_view reg_name) {
     r = Register::kA3;
   } else if (reg_name == "v0") {
     r = Register::kV0;
+  } else if (reg_name == "v1") {
+    r = Register::kV1;
   }
   return MakeRegMoveRtlInsn(r, r);
 }

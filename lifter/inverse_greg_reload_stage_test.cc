@@ -107,19 +107,30 @@ TEST(InverseGregReloadStageTest, StripsHighpartMultiplyMfhiReloads) {
   cfg.rpo_blocks.resize(1);
   RtlInsn r_mult;
   r_mult.canonical_pattern = mult.Disassemble();
+  r_mult.rtl_sexpr_pattern =
+      "(parallel[ (set (reg:SI 64 hi) (truncate:SI (lshiftrt:DI (mult:DI (sign_extend:DI (reg:SI 4 "
+      "a0)) (sign_extend:DI (reg:SI 2 v0))) (const_int 32)))) (clobber (reg:SI 65 lo)) (clobber "
+      "(reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] )";
   r_mult.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
   r_mult.machine_instructions = {mult};
   cfg.rpo_blocks[0].AddInsn(r_mult);
 
   RtlInsn r_mfhi;
   r_mfhi.canonical_pattern = mfhi.Disassemble();
+  r_mfhi.rtl_sexpr_pattern = "(set (reg:SI 2 v0) (reg:SI 64 hi))";
   r_mfhi.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
   r_mfhi.machine_instructions = {mfhi};
   cfg.rpo_blocks[0].AddInsn(r_mfhi);
 
-  InverseGregReloadLifter::InvertGregToLregRtlCfg(&cfg);
+  const ParsedCompilerFlags flags = ParsedCompilerFlags::Parse("-O2");
+  InverseGregReloadLifter::InvertGregToLregRtlCfg(&cfg, nullptr, &flags);
   ASSERT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 1u);
   EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[0].machine_instructions[0].opcode, Opcode::kMult);
+  EXPECT_EQ(
+      cfg.rpo_blocks[0].instructions[0],
+      "(parallel[ (set (reg:SI 2 v0) (truncate:SI (lshiftrt:DI (mult:DI (sign_extend:DI (reg:SI 4 "
+      "a0)) (sign_extend:DI (reg:SI 2 v0))) (const_int 32)))) (clobber (reg:SI 65 lo)) (clobber "
+      "(scratch:SI)) (clobber (reg:SI 66 accum)) ] )");
 }
 
 }  // namespace

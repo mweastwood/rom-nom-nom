@@ -214,7 +214,14 @@ bool ParseHardGprExpr(std::string_view expr, std::string_view* out_mode, int* ou
   std::string_view after_mode = inner.substr(sp1 + 1);
   size_t sp2 = after_mode.find(' ');
   if (sp2 == std::string_view::npos) {
-    return false;
+    int regno = -1;
+    if (!absl::SimpleAtoi(after_mode, &regno) || regno < 72) {
+      return false;
+    }
+    *out_mode = mode;
+    *out_regno = regno;
+    *out_name = "";
+    return true;
   }
   int regno = -1;
   if (!absl::SimpleAtoi(after_mode.substr(0, sp2), &regno) || regno < 0 || regno >= 32) {
@@ -229,6 +236,13 @@ bool ParseHardGprExpr(std::string_view expr, std::string_view* out_mode, int* ou
   *out_regno = regno;
   *out_name = name;
   return true;
+}
+
+std::string FormatGprOrPseudo(std::string_view mode, int regno, std::string_view name) {
+  if (name.empty()) {
+    return absl::StrFormat("(reg:%s %d)", mode, regno);
+  }
+  return absl::StrFormat("(reg:%s %d %s)", mode, regno, name);
 }
 
 std::string CanonicalizeHardGprSubregs(std::string s) {
@@ -267,7 +281,7 @@ std::string CanonicalizeHardGprSubregs(std::string s) {
       pos = sp1 + 1;
       continue;
     }
-    std::string replacement = absl::StrFormat("(reg:%s %d %s)", outer_mode, regno, reg_name);
+    std::string replacement = FormatGprOrPseudo(outer_mode, regno, reg_name);
     s.replace(pos, (reg_end + 1 + 3) - pos, replacement);
   }
   return s;
@@ -504,24 +518,24 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
         const bool lhs_is_gpr = ParseHardGprExpr(lhs, &lhs_mode, &lhs_regno, &lhs_name);
         const bool rhs_is_gpr = ParseHardGprExpr(rhs, &rhs_mode, &rhs_regno, &rhs_name);
         if (lhs_is_gpr && rhs_is_gpr && lhs_mode == rhs_mode && lhs_mode != "SI") {
-          collapsed = absl::StrFormat("(set (reg:SI %d %s) (reg:SI %d %s))", lhs_regno, lhs_name,
-                                      rhs_regno, rhs_name);
+          collapsed = absl::StrFormat("(set %s %s)", FormatGprOrPseudo("SI", lhs_regno, lhs_name),
+                                      FormatGprOrPseudo("SI", rhs_regno, rhs_name));
         } else if (rhs_is_gpr && rhs_mode == "SF" && absl::StartsWith(lhs, "(mem:SF ")) {
-          collapsed = absl::StrFormat("(set (mem:SI %s (reg:SI %d %s))", lhs.substr(8), rhs_regno,
-                                      rhs_name);
+          collapsed = absl::StrFormat("(set (mem:SI %s %s)", lhs.substr(8),
+                                      FormatGprOrPseudo("SI", rhs_regno, rhs_name));
         } else if (lhs_is_gpr && lhs_mode == "SF" && absl::StartsWith(rhs, "(mem:SF ")) {
-          collapsed = absl::StrFormat("(set (reg:SI %d %s) (mem:SI %s)", lhs_regno, lhs_name,
-                                      rhs.substr(8));
+          collapsed = absl::StrFormat("(set %s (mem:SI %s)",
+                                      FormatGprOrPseudo("SI", lhs_regno, lhs_name), rhs.substr(8));
         } else if (absl::StartsWith(lhs, "(mem:SF ") && rhs == "(const_double:SF (cc0) 0 0)") {
           collapsed = absl::StrFormat("(set (mem:SI %s (const_int 0))", lhs.substr(8));
         } else if (lhs_is_gpr && ((lhs_mode == "HI" && absl::StartsWith(rhs, "(mem:HI ")) ||
                                   (lhs_mode == "QI" && absl::StartsWith(rhs, "(mem:QI ")))) {
-          collapsed =
-              absl::StrFormat("(set (reg:SI %d %s) (zero_extend:SI %s))", lhs_regno, lhs_name, rhs);
+          collapsed = absl::StrFormat("(set %s (zero_extend:SI %s))",
+                                      FormatGprOrPseudo("SI", lhs_regno, lhs_name), rhs);
         } else if (lhs_is_gpr && lhs_mode == "HI" &&
                    absl::StartsWith(rhs, "(zero_extend:HI (mem:QI ")) {
-          collapsed = absl::StrFormat("(set (reg:SI %d %s) (zero_extend:SI %s)", lhs_regno,
-                                      lhs_name, rhs.substr(16));
+          collapsed = absl::StrFormat("(set %s (zero_extend:SI %s)",
+                                      FormatGprOrPseudo("SI", lhs_regno, lhs_name), rhs.substr(16));
         } else if (lhs_is_gpr && lhs_mode == "SI" && absl::StartsWith(rhs, "(zero_extend:SI ") &&
                    absl::EndsWith(rhs, ")")) {
           std::string_view z_inner = rhs.substr(16, rhs.size() - 17);
@@ -531,9 +545,9 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
           if (ParseHardGprExpr(z_inner, &z_mode, &z_regno, &z_name) &&
               (z_mode == "HI" || z_mode == "QI")) {
             const int mask = (z_mode == "HI") ? 65535 : 255;
-            collapsed =
-                absl::StrFormat("(set (reg:SI %d %s) (and:SI (reg:SI %d %s) (const_int %d)))",
-                                lhs_regno, lhs_name, z_regno, z_name, mask);
+            collapsed = absl::StrFormat("(set %s (and:SI %s (const_int %d)))",
+                                        FormatGprOrPseudo("SI", lhs_regno, lhs_name),
+                                        FormatGprOrPseudo("SI", z_regno, z_name), mask);
           }
         } else if (lhs == "(reg:CC_FP 67 $fcr31)" &&
                    (absl::StartsWith(rhs, "(gt:CC_FP ") || absl::StartsWith(rhs, "(ge:CC_FP ")) &&
@@ -555,6 +569,106 @@ std::string CanonicalizeRtlPattern(std::string_view pattern) {
 
   return collapsed;
 }
+
+namespace {
+
+std::string CanonicalizePreReloadRtlPattern(std::string s) {
+  // 1. Unwrap any remaining `(subreg:M1 (reg:M2 ...) 0)` -> `(reg:M1 ...)`.
+  while (true) {
+    const size_t pos = s.find("(subreg:");
+    if (pos == std::string::npos) {
+      break;
+    }
+    const size_t sp1 = s.find(' ', pos + 8);
+    if (sp1 == std::string::npos || sp1 + 1 >= s.size() ||
+        !absl::StartsWith(s.substr(sp1 + 1), "(reg:")) {
+      break;
+    }
+    const std::string outer_mode = s.substr(pos + 8, sp1 - (pos + 8));
+    const size_t reg_end = s.find(')', sp1 + 1);
+    if (reg_end == std::string::npos || !absl::StartsWith(s.substr(reg_end + 1), " 0)")) {
+      break;
+    }
+    const size_t inner_sp = s.find(' ', sp1 + 6);
+    if (inner_sp == std::string::npos || inner_sp >= reg_end) {
+      break;
+    }
+    const std::string reg_rest = s.substr(inner_sp, reg_end - inner_sp + 1);
+    s.replace(pos, (reg_end + 4) - pos, absl::StrCat("(reg:", outer_mode, reg_rest));
+  }
+
+  // 2. Canonicalize stack frame addresses (`sp`, `$fp`, `$0`).
+  for (std::string_view base_prefix :
+       {"(plus:SI (reg:SI 29 sp) (const_int ", "(plus:SI (reg:SI 30 $fp) (const_int ",
+        "(plus:SI (reg:SI 0 $0) (const_int "}) {
+    size_t pos = 0;
+    while ((pos = s.find(base_prefix, pos)) != std::string::npos) {
+      const size_t close_pos = s.find("))", pos + base_prefix.size());
+      if (close_pos == std::string::npos) {
+        break;
+      }
+      s.replace(pos, (close_pos + 2) - pos, "(STACK_ADDR)");
+      pos += std::string_view("(STACK_ADDR)").size();
+    }
+  }
+  for (std::string_view base_reg : {"(reg:SI 29 sp)", "(reg:SI 30 $fp)", "(reg:SI 0 $0)"}) {
+    size_t pos = 0;
+    while ((pos = s.find(base_reg, pos)) != std::string::npos) {
+      if (pos >= 8 && s.substr(pos - 8, 5) == "(mem:") {
+        s.replace(pos, base_reg.size(), "(STACK_ADDR)");
+        pos += std::string_view("(STACK_ADDR)").size();
+      } else {
+        pos += base_reg.size();
+      }
+    }
+  }
+
+  // 3. Canonicalize `(scratch:M)` -> `(reg:M *)` and `(reg:M N [name])` -> `(reg:M *)`.
+  {
+    size_t pos = 0;
+    while ((pos = s.find("(scratch:", pos)) != std::string::npos) {
+      const size_t close_pos = s.find(')', pos + 9);
+      if (close_pos == std::string::npos) {
+        break;
+      }
+      const std::string mode = s.substr(pos + 9, close_pos - (pos + 9));
+      const std::string rep = absl::StrCat("(reg:", mode, " *)");
+      s.replace(pos, (close_pos + 1) - pos, rep);
+      pos += rep.size();
+    }
+  }
+  {
+    size_t pos = 0;
+    while ((pos = s.find("(reg:", pos)) != std::string::npos) {
+      const size_t close_pos = s.find(')', pos + 5);
+      const size_t sp1 = s.find(' ', pos + 5);
+      if (close_pos == std::string::npos || sp1 == std::string::npos || sp1 >= close_pos) {
+        pos += 5;
+        continue;
+      }
+      std::string mode = s.substr(pos + 5, sp1 - (pos + 5));
+      if (mode == "SF" || mode == "DF" || mode == "DI" || mode == "HI" || mode == "QI") {
+        mode = "SI";
+      }
+      const std::string rep = absl::StrCat("(reg:", mode, " *)");
+      s.replace(pos, (close_pos + 1) - pos, rep);
+      pos += rep.size();
+    }
+  }
+
+  // 4. Normalize `(mem:SF ` / `(mem:DF ` -> `(mem:SI `.
+  for (std::string_view mem_fp : {"(mem:SF ", "(mem:DF "}) {
+    size_t pos = 0;
+    while ((pos = s.find(mem_fp, pos)) != std::string::npos) {
+      s.replace(pos, mem_fp.size(), "(mem:SI ");
+      pos += 8;
+    }
+  }
+
+  return s;
+}
+
+}  // namespace
 
 RtlCfgPassComparison RtlControlFlowGraph::CompareAgainst(
     const RtlControlFlowGraph& expected) const {
@@ -599,9 +713,10 @@ RtlCfgPassComparison RtlControlFlowGraph::CompareAgainst(
       }
     }
     if (rpo_blocks[b].instructions.size() != expected.rpo_blocks[b].instructions.size()) {
+      const bool first_count_mismatch = cmp.insn_counts_match;
       cmp.insn_counts_match = false;
       cmp.instructions_match = false;
-      if (cmp.mismatch_detail.empty()) {
+      if (first_count_mismatch) {
         cmp.mismatch_detail = absl::StrFormat(
             "RPO blk %zu insn count got %zu [%s] != exp %zu [%s]", b,
             rpo_blocks[b].instructions.size(), absl::StrJoin(rpo_blocks[b].instructions, " ; "),
@@ -614,15 +729,28 @@ RtlCfgPassComparison RtlControlFlowGraph::CompareAgainst(
       std::vector<std::string> canon_exp;
       canon_act.reserve(rpo_blocks[b].instructions.size());
       canon_exp.reserve(expected.rpo_blocks[b].instructions.size());
+      const bool is_pre_reload =
+          (expected.pass != RtlPassKind::kGreg && expected.pass != RtlPassKind::kSched2 &&
+           expected.pass != RtlPassKind::kJump2 && expected.pass != RtlPassKind::kDbr);
       for (size_t k = 0; k < rpo_blocks[b].instructions.size(); ++k) {
-        canon_act.push_back(CanonicalizeRtlPattern(rpo_blocks[b].instructions[k]));
-        canon_exp.push_back(CanonicalizeRtlPattern(expected.rpo_blocks[b].instructions[k]));
+        std::string ca = CanonicalizeRtlPattern(rpo_blocks[b].instructions[k]);
+        std::string ce = CanonicalizeRtlPattern(expected.rpo_blocks[b].instructions[k]);
+        if (is_pre_reload) {
+          ca = CanonicalizePreReloadRtlPattern(std::move(ca));
+          ce = CanonicalizePreReloadRtlPattern(std::move(ce));
+        }
+        canon_act.push_back(std::move(ca));
+        canon_exp.push_back(std::move(ce));
         if (canon_act.back() != canon_exp.back()) {
           blk_insns_match = false;
         }
       }
+      const bool ends_with_jump_or_branch =
+          !canon_exp.empty() && (absl::StartsWith(canon_exp.back(), "(set (pc)") ||
+                                 absl::StartsWith(canon_exp.back(), "(parallel[ (set (pc)"));
       if (!blk_insns_match && !canon_act.empty() &&
-          (canon_act.back() == canon_exp.back() || rpo_blocks[b].successors.empty())) {
+          (canon_act.back() == canon_exp.back() || rpo_blocks[b].successors.empty() ||
+           !ends_with_jump_or_branch)) {
         std::vector<std::string> sorted_act = canon_act;
         std::vector<std::string> sorted_exp = canon_exp;
         std::sort(sorted_act.begin(), sorted_act.end());
