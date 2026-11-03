@@ -1,6 +1,7 @@
 #ifndef LIFTER_INVERSE_FLOW_LIFE_ANALYSIS_STAGE_H_
 #define LIFTER_INVERSE_FLOW_LIFE_ANALYSIS_STAGE_H_
 
+#include "core/compiler_flags.h"
 #include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
@@ -25,7 +26,8 @@ namespace rom_nom_nom {
 //      `switch` dispatch before reaching the common join block.
 class InverseFlowLifeAnalysisLifter {
  public:
-  static void InvertFlowToCse2RtlCfg(RtlControlFlowGraph* cfg);
+  static void InvertFlowToCse2RtlCfg(RtlControlFlowGraph* cfg,
+                                     const ParsedCompilerFlags* flags = nullptr);
 };
 
 }  // namespace rom_nom_nom

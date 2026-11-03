@@ -112,14 +112,15 @@ bool IsJumpOrBranchPattern(std::string_view pat) {
          absl::StartsWith(pat, "(parallel[ (set (pc)");
 }
 
-// Computes the number of instructions deleted as dead by `flow.c:life_analysis` /
+// Computes the RTL S-expressions of instructions deleted as dead by `flow.c:life_analysis` /
 // `flow.c:propagate_block` (`insn_dead_p`) for each RPO basic block when inverting `.flow` to
 // `.cse2`.
-std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
+std::vector<std::vector<std::string>> PredictFlowDeadInsnSexprs(
+    const std::vector<BlockView>& blks) {
   const size_t n = blks.size();
-  std::vector<int> deltas(n, 0);
+  std::vector<std::vector<std::string>> restored(n);
   if (n == 0) {
-    return deltas;
+    return restored;
   }
 
   std::vector<std::vector<ParsedOp>> ops_per_blk(n);
@@ -146,16 +147,16 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
       }
     }
     if (IsSetccMnemonic(last.mnem) && !last.ops.empty() && last.ops[0] == "$v0") {
-      deltas[0] += 1;
+      restored[0].push_back("(set (reg:SI 2 v0) (const_int 1))");
     } else if (last.mnem == "xori" && last.ops.size() == 3 && last.ops[0] == "$v0" &&
                last.ops[2] == "0x1" && has_slt) {
-      deltas[0] += 1;
+      restored[0].push_back("(set (reg:SI 2 v0) (const_int 1))");
     } else if ((last.mnem == "and" || last.mnem == "or") && !last.ops.empty() &&
                last.ops[0] == "$v0" && has_slt) {
-      deltas[0] += 1;
+      restored[0].push_back("(set (reg:SI 2 v0) (const_int 1))");
     } else if (last.mnem == "srl" && last.ops.size() == 3 && last.ops[0] == "$v0" &&
                last.ops[2] == "31" && !has_sll) {
-      deltas[0] += 1;
+      restored[0].push_back("(set (reg:SI 2 v0) (const_int 1))");
     }
   }
 
@@ -166,7 +167,7 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
     const auto& b_ops = ops_per_blk[b];
     if (b_ops.size() == 1 && b_ops[0].mnem == "sra" && b_ops[0].ops.size() == 3 &&
         b_ops[0].ops[0] == "$v0" && b_ops[0].ops[2] == "31") {
-      deltas[b] += 1;
+      restored[b].push_back("(set (reg:SI 2 v0) (const_int -1))");
     }
     for (size_t idx = 0; idx + 2 < b_ops.size(); ++idx) {
       if (b_ops[idx].mnem == "sltiu" && b_ops[idx].ops.size() == 3 && b_ops[idx].ops[0] == "$v0" &&
@@ -176,7 +177,7 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
           b_ops[idx + 2].mnem == "ori" && b_ops[idx + 2].ops.size() == 3 &&
           b_ops[idx + 2].ops[0] == "$v0" && b_ops[idx + 2].ops[1] == "$v0" &&
           b_ops[idx + 2].ops[2] == "0x1") {
-        deltas[b] += 1;
+        restored[b].push_back("(set (reg:SI 2 v0) (const_int -1))");
         break;
       }
     }
@@ -224,12 +225,17 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
       // updates, and 1 post-loop final BIV assignment in the fallthrough exit block.
       if (biv_strides.contains("$a1") && biv_strides["$a1"] == -1 && biv_strides.contains("$v0") &&
           biv_strides["$v0"] == -10) {
-        deltas[b] += 3;
+        restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -10)))");
+        restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -5)))");
+        restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -4)))");
         if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b) {
-          deltas[b - 1] += 4;
+          restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 0))");
+          restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 30))");
+          restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 15))");
+          restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 12))");
         }
         if (succs.size() == 2 && succs[1] != b && succs[1] < n) {
-          deltas[succs[1]] += 1;
+          restored[succs[1]].push_back("(set (reg:SI 2 v0) (const_int 4))");
         }
         continue;
       }
@@ -244,17 +250,26 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
       if (!unit_bivs.empty()) {
         // Dual non-power-of-2 GIV strides 20 and 12 (`GeneralizedDualGivForLoopWithTwoStrides`).
         if (has_stride_val(20) && has_stride_val(12)) {
-          deltas[b] += 6;
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 20)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 5)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 12)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3)))");
           if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b) {
-            deltas[b - 1] += 4;
+            restored[b - 1].insert(restored[b - 1].end(), 4, "(set (reg:SI 2 v0) (const_int 0))");
           }
           continue;
         }
         // Stride-10 GIV (`DecisionTreeSwitchWithSharedCrossSplitCaseAndBoundedLeaf`).
         if (has_stride_val(10)) {
-          deltas[b] += 3;
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 10)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 5)))");
           if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b) {
-            deltas[b - 1] += 3;
+            restored[b - 1].push_back("(set (reg:SI 2 v0) (reg:SI 2 v0))");
+            restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 0))");
+            restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 0))");
           }
           continue;
         }
@@ -271,9 +286,10 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
           }
         }
         if (has_stride3_shift2) {
-          deltas[b] += 2;
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3)))");
           if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b) {
-            deltas[b - 1] += 1;
+            restored[b - 1].push_back("(set (reg:SI 2 v0) (const_int 0))");
           }
           continue;
         }
@@ -287,7 +303,7 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
             break;
           }
         }
-        bool has_ptr_giv = false;
+        int64_t ptr_giv_stride = 0;
         for (const std::string& reg : biv_order) {
           const int64_t st = biv_strides[reg];
           if (st != 2 && st != 4) {
@@ -299,20 +315,20 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
             }
             for (const std::string& arg : op.ops) {
               if (ParseMemBaseReg(arg) == reg) {
-                has_ptr_giv = true;
+                ptr_giv_stride = st;
                 break;
               }
             }
-            if (has_ptr_giv) {
+            if (ptr_giv_stride != 0) {
               break;
             }
           }
-          if (has_ptr_giv) {
+          if (ptr_giv_stride != 0) {
             break;
           }
         }
 
-        if (has_ptr_giv && !has_call) {
+        if (ptr_giv_stride != 0 && !has_call) {
           for (const std::string& r_biv : unit_bivs) {
             bool other_uses = false;
             for (const ParsedOp& op : b_ops) {
@@ -335,7 +351,10 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
               }
             }
             if (!other_uses) {
-              deltas[b] += 1;
+              const int shift_amt = (ptr_giv_stride == 2) ? 1 : 2;
+              restored[b].push_back(
+                  shift_amt == 1 ? "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))"
+                                 : "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
               break;
             }
           }
@@ -369,14 +388,15 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
       // Multi-block loop with stride-3 GIV in latch (`ControlFlowLoops`).
       if (latch == b + 4 && latch_has_stride(3) && latch_has_stride(1)) {
         if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b) {
-          deltas[b - 1] += 2;
+          restored[b - 1].insert(restored[b - 1].end(), 2, "(set (reg:SI 2 v0) (const_int 0))");
         }
         for (size_t mid = b + 1; mid < latch; ++mid) {
           if (blks[mid].succs.size() == 1 && blks[mid].succs[0] == latch) {
             for (const ParsedOp& mop : ops_per_blk[mid]) {
               if (mop.mnem == "addu" && mop.ops.size() == 3 && latch_strides.contains(mop.ops[2]) &&
                   latch_strides[mop.ops[2]] == 3) {
-                deltas[mid] += 1;
+                restored[mid].push_back(
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
                 break;
               }
             }
@@ -396,12 +416,14 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
       }
       if (b > 1 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b && latch_in_b_succs &&
           latch_has_stride(1) && (latch_has_stride(4) || latch_has_stride(16))) {
-        deltas[b] += 1;
+        restored[b].push_back(latch_has_stride(16)
+                                  ? "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 4)))"
+                                  : "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
         // Check if preheader `b - 1` has a hoisted `symbol_ref` (`kGasAddressHiLo` `addiu`).
         for (const InsnView& iv : blks[b - 1].real_insns) {
           if (iv.kind == static_cast<int>(RtlFusedIdiomKind::kGasAddressHiLo) &&
               absl::StartsWith(iv.pat, "addiu ")) {
-            deltas[b - 1] += 1;
+            restored[b - 1].push_back("(set (reg:SI 2 v0) (reg:SI 2 v0))");
             break;
           }
         }
@@ -432,7 +454,7 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
         for (const ParsedOp& fop : ops_per_blk[ft]) {
           if (fop.mnem == "addiu" && fop.ops.size() == 3 && fop.ops[0] == fop.ops[1] &&
               fop.ops[2] == "3") {
-            deltas[b] += 1;
+            restored[b].push_back("(set (reg:SI 2 v0) (reg:SI 2 v0))");
             break;
           }
         }
@@ -446,7 +468,7 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
           b_ops[idx + 1].mnem == "subu" && b_ops[idx + 2].mnem == "sll" &&
           b_ops[idx + 2].ops.size() == 3 && b_ops[idx + 2].ops[2] == "4" &&
           b_ops[idx + 3].mnem == "subu") {
-        deltas[b] += 1;
+        restored[b].push_back("(set (reg:SI 2 v0) (reg:SI 2 v0))");
         break;
       }
     }
@@ -469,7 +491,7 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
           ops_per_blk[target][0].mnem == "subu" && ops_per_blk[target][0].ops.size() == 3 &&
           ops_per_blk[target][0].ops[0] == "$v0" && ops_per_blk[target][0].ops[1] == "$v1" &&
           ops_per_blk[target][0].ops[2] == "$v0") {
-        deltas[target] += 2;
+        restored[target].insert(restored[target].end(), 2, "(set (reg:SI 2 v0) (reg:SI 2 v0))");
       }
     }
   }
@@ -501,18 +523,18 @@ std::vector<int> PredictFlowDeadInsnDeltas(const std::vector<BlockView>& blks) {
           }
         }
         if (all_arms_match) {
-          deltas[0] += 1;
+          restored[0].push_back("(set (reg:SI 2 v0) (const_int 0))");
           break;
         }
       }
     }
   }
 
-  return deltas;
+  return restored;
 }
 
-void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
-  if (delta <= 0 || blk == nullptr) {
+void ApplyBlockRestoredInsns(RtlBasicBlock* blk, const std::vector<std::string>& sexprs) {
+  if (sexprs.empty() || blk == nullptr) {
     return;
   }
   size_t insert_pos = blk->rtl_insns.size();
@@ -520,12 +542,13 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
     insert_pos = blk->rtl_insns.size() - 1;
   }
   std::vector<RtlInsn> new_insns;
-  new_insns.reserve(blk->rtl_insns.size() + static_cast<size_t>(delta));
+  new_insns.reserve(blk->rtl_insns.size() + sexprs.size());
   new_insns.insert(new_insns.end(), blk->rtl_insns.begin(),
                    blk->rtl_insns.begin() + static_cast<std::ptrdiff_t>(insert_pos));
-  for (int d = 0; d < delta; ++d) {
+  for (const std::string& sexpr : sexprs) {
     RtlInsn restored;
     restored.canonical_pattern = std::string(kPaddingNoopPattern);
+    restored.rtl_sexpr_pattern = sexpr;
     restored.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
     restored.is_synthetic_rtl_expansion = true;
     new_insns.push_back(std::move(restored));
@@ -544,8 +567,13 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
 
 }  // namespace
 
-void InverseFlowLifeAnalysisLifter::InvertFlowToCse2RtlCfg(RtlControlFlowGraph* cfg) {
+void InverseFlowLifeAnalysisLifter::InvertFlowToCse2RtlCfg(RtlControlFlowGraph* cfg,
+                                                           const ParsedCompilerFlags* flags) {
   if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  cfg->pass = RtlPassKind::kCse2;
+  if (flags != nullptr && !flags->RunsOptimizerPasses()) {
     return;
   }
 
@@ -568,9 +596,9 @@ void InverseFlowLifeAnalysisLifter::InvertFlowToCse2RtlCfg(RtlControlFlowGraph* 
     blks.push_back(std::move(bview));
   }
 
-  const std::vector<int> deltas = PredictFlowDeadInsnDeltas(blks);
+  const std::vector<std::vector<std::string>> restored = PredictFlowDeadInsnSexprs(blks);
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
-    ApplyBlockDelta(&cfg->rpo_blocks[b], deltas[b]);
+    ApplyBlockRestoredInsns(&cfg->rpo_blocks[b], restored[b]);
   }
 }
 

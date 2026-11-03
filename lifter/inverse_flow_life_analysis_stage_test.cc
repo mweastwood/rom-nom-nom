@@ -114,6 +114,24 @@ TEST(InverseFlowLifeAnalysisStageTest, RestoresReversedDbraLoopDeadGivAndFinalBi
   EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 7u);  // 3 + 4
   EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns.size(), 7u);  // 4 + 3
   EXPECT_EQ(cfg.rpo_blocks[2].rtl_insns.size(), 2u);  // 1 + 1
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[3].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -10)))");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[4].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -5)))");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[5].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -4)))");
+  EXPECT_EQ(cfg.rpo_blocks[2].rtl_insns[1].rtl_sexpr_pattern, "(set (reg:SI 2 v0) (const_int 4))");
+}
+
+TEST(InverseFlowLifeAnalysisStageTest, SkipsDeadCodeRestorationWhenOptimizerDisabledAtO0) {
+  RtlControlFlowGraph cfg;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].AddPatternOnly("slt   $v0, $a0, $a1");
+
+  const ParsedCompilerFlags o0_flags = ParsedCompilerFlags::Parse("-O0");
+  InverseFlowLifeAnalysisLifter::InvertFlowToCse2RtlCfg(&cfg, &o0_flags);
+  EXPECT_EQ(cfg.pass, RtlPassKind::kCse2);
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 1u);
 }
 
 TEST(InverseFlowLifeAnalysisStageTest, RestoresCseForwardedZeroExtensionCopiesInEarlyReturnBlock) {
