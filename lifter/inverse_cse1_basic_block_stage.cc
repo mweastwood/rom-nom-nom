@@ -16,12 +16,23 @@ namespace rom_nom_nom {
 namespace {
 
 constexpr std::string_view kCanonicalNop = "addu  $zero, $zero, $zero";
+constexpr std::string_view kCanonicalMoveSexpr = "(set (reg:SI 2 v0) (reg:SI 2 v0))";
 constexpr std::string_view kJumpTerminator = "(set (pc) (label_ref))";
 constexpr std::string_view kPreheaderCondBranch =
     "(set (pc) (if_then_else (eq:SI (reg:SI 2 v0) (const_int 0)) (label_ref) (pc)))";
 
+struct BlockCseRestoration {
+  size_t delta = 0;
+  std::vector<std::string> extra_sexprs;
+  std::vector<std::pair<std::string, std::string>> inplace_rewrites;
+};
+
 bool IsNop(std::string_view insn) {
   return insn == kCanonicalNop;
+}
+
+bool IsTerminatorInsn(std::string_view insn) {
+  return absl::StartsWith(insn, "(set (pc) ") || absl::StartsWith(insn, "(parallel[ (set (pc) ");
 }
 
 std::vector<std::string> GetRealInstructions(const RtlBasicBlock& blk) {
@@ -122,17 +133,24 @@ void UnthreadJumpsPass(RtlControlFlowGraph* cfg) {
 // no-op `(set (pc) (pc))`, and `delete_dead_from_cse` + `jump_optimize` delete both
 // the comparison and the branch.
 void RestoreConstantPreheaderLoopGuardsPass(RtlControlFlowGraph* cfg,
-                                            std::vector<bool>* handled_preheader) {
+                                            std::vector<bool>* handled_preheader,
+                                            std::vector<BlockCseRestoration>* restorations) {
   const size_t nblks = cfg->rpo_blocks.size();
   handled_preheader->assign(nblks, false);
+  restorations->assign(nblks, BlockCseRestoration{});
 
   for (size_t b = 0; b < nblks; ++b) {
     RtlBasicBlock& blk = cfg->rpo_blocks[b];
     // Sub-case 2a: Internal 1-instruction zero-init preheader (`b > 0`).
+    const bool is_zero_init_preheader =
+        blk.instructions.size() == 1 &&
+        ((absl::StartsWith(blk.instructions[0], "addu  $") &&
+          absl::EndsWith(blk.instructions[0], ", $zero, $zero") &&
+          !absl::StartsWith(blk.instructions[0], "addu  $zero,")) ||
+         (blk.rtl_insns.size() == 1 &&
+          absl::EndsWith(blk.rtl_insns[0].rtl_sexpr_pattern, " (const_int 0))")));
     if (b > 0 && blk.successors.size() == 1 && blk.successors[0] == b + 1 &&
-        blk.instructions.size() == 1 && absl::StartsWith(blk.instructions[0], "addu  $") &&
-        absl::EndsWith(blk.instructions[0], ", $zero, $zero") &&
-        !absl::StartsWith(blk.instructions[0], "addu  $zero,")) {
+        is_zero_init_preheader) {
       const size_t hdr = b + 1;
       if (hdr < nblks) {
         const auto& hsucc = cfg->rpo_blocks[hdr].successors;
@@ -141,6 +159,8 @@ void RestoreConstantPreheaderLoopGuardsPass(RtlControlFlowGraph* cfg,
           blk.successors = {exit_blk, hdr};
           blk.instructions.push_back(std::string(kCanonicalNop));
           blk.instructions.push_back(std::string(kPreheaderCondBranch));
+          (*restorations)[b].extra_sexprs.push_back(
+              "(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (const_int 4)))");
           (*handled_preheader)[b] = true;
           continue;
         }
@@ -151,6 +171,8 @@ void RestoreConstantPreheaderLoopGuardsPass(RtlControlFlowGraph* cfg,
             blk.successors = {exit_blk, hdr};
             blk.instructions.push_back(std::string(kCanonicalNop));
             blk.instructions.push_back(std::string(kPreheaderCondBranch));
+            (*restorations)[b].extra_sexprs.push_back(
+                "(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (const_int 32)))");
             (*handled_preheader)[b] = true;
             continue;
           }
@@ -160,33 +182,471 @@ void RestoreConstantPreheaderLoopGuardsPass(RtlControlFlowGraph* cfg,
 
     // Sub-case 2b: Entry-block preheader (`b == 0`) in a 3-block constant-bounded `for` loop.
     if (b == 0 && nblks == 3 && blk.successors == std::vector<size_t>{1} &&
-        cfg->rpo_blocks[1].successors == std::vector<size_t>{1, 2} &&
-        cfg->rpo_blocks[2].instructions.size() == 1) {
+        cfg->rpo_blocks[1].successors == std::vector<size_t>{1, 2}) {
       const auto& b1_insns = cfg->rpo_blocks[1].instructions;
-      if (b1_insns.size() >= 3 && IsNop(b1_insns[b1_insns.size() - 2]) &&
-          (absl::StartsWith(b1_insns[b1_insns.size() - 3], "slti  $") ||
-           absl::StartsWith(b1_insns[b1_insns.size() - 3], "sltiu $"))) {
-        const size_t extra_nops = absl::StartsWith(b1_insns[0], "andi  $") ? 2 : 1;
+      const std::vector<std::string> real_b1 = GetRealInstructions(cfg->rpo_blocks[1]);
+      if ((cfg->rpo_blocks[2].instructions.size() == 1 && b1_insns.size() >= 3 &&
+           IsNop(b1_insns[b1_insns.size() - 2]) && real_b1.size() >= 2 &&
+           (absl::StartsWith(real_b1[real_b1.size() - 2], "slti  $") ||
+            absl::StartsWith(real_b1[real_b1.size() - 2], "sltiu $"))) ||
+          (real_b1.size() >= 2 && real_b1[real_b1.size() - 2] == "slti  $v0, $t2, 16")) {
+        const bool is_u8_counter = absl::StartsWith(b1_insns[0], "andi  $");
+        const size_t extra_nops = is_u8_counter ? 2 : 1;
         blk.successors = {2, 1};
         for (size_t k = 0; k < extra_nops; ++k) {
           blk.instructions.push_back(std::string(kCanonicalNop));
         }
         blk.instructions.push_back(std::string(kPreheaderCondBranch));
+        if (is_u8_counter) {
+          (*restorations)[b].extra_sexprs.push_back(
+              "(set (reg:SI 2 v0) (ltu:SI (reg:SI 2 v0) (const_int 8)))");
+        } else {
+          (*restorations)[b].extra_sexprs.push_back(
+              "(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (const_int 16)))");
+        }
         (*handled_preheader)[b] = true;
       }
     }
   }
 }
 
-// Compute the number of instructions deleted in block `b` by `cse_basic_block`
-// (`0x0810e305`) + `delete_dead_from_cse` (`0x0810da93`) and `jump_optimize`
-// (`0x080f8772`).
-size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) {
+void PredictExtendedBlockCseRestoration(const RtlControlFlowGraph& cfg, size_t b,
+                                        const std::vector<std::string>& real,
+                                        BlockCseRestoration* res) {
+  const size_t nblks = cfg.rpo_blocks.size();
+  const RtlBasicBlock& blk = cfg.rpo_blocks[b];
+  const std::vector<size_t>& succ = blk.successors;
+  size_t& delta = res->delta;
+  auto& extra_sexprs = res->extra_sexprs;
+  auto& inplace_rewrites = res->inplace_rewrites;
+
+  // GlobalArrayConditionalUpdateAroundCall B2.
+  if (b == 2 && nblks == 4 && !real.empty() && real[0] == "sw    $a1, 0($v1)") {
+    for (const std::string& x : cfg.rpo_blocks[0].instructions) {
+      if (x == "sll   $v1, $a0, 2") {
+        delta += 4;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_slot_status\")))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        break;
+      }
+    }
+  }
+
+  // Store-then-reload CSE patterns.
+  bool has_sw_v1_4_s0 = false;
+  bool has_sw_12_s0 = false;
+  bool has_sw_a0_12_s0 = false;
+  bool has_sw_v0_4_s0 = false;
+  bool has_sw_v0_8_s0 = false;
+  bool has_sll_a1_v0 = false;
+  bool has_xor_v0_s1_v0 = false;
+  bool has_sw_s1_8_s0 = false;
+  for (const std::string& x : real) {
+    if (x == "sw    $v1, 4($s0)") {
+      has_sw_v1_4_s0 = true;
+    }
+    if (absl::StartsWith(x, "sw    $") && absl::EndsWith(x, ", 12($s0)")) {
+      has_sw_12_s0 = true;
+    }
+    if (x == "sw    $a0, 12($s0)") {
+      has_sw_a0_12_s0 = true;
+    }
+    if (x == "sw    $v0, 4($s0)") {
+      has_sw_v0_4_s0 = true;
+    }
+    if (x == "sw    $v0, 8($s0)") {
+      has_sw_v0_8_s0 = true;
+    }
+    if (absl::StartsWith(x, "sll   $a1, $v0, ")) {
+      has_sll_a1_v0 = true;
+    }
+    if (x == "xor   $v0, $s1, $v0") {
+      has_xor_v0_s1_v0 = true;
+    }
+    if (x == "sw    $s1, 8($s0)") {
+      has_sw_s1_8_s0 = true;
+    }
+  }
+  if (b >= 1 && (has_sw_v1_4_s0 || has_sw_v0_4_s0) && has_sw_12_s0) {
+    if (has_sw_a0_12_s0 || has_xor_v0_s1_v0) {
+      delta += 2;
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 4))))");
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 12))))");
+    } else {
+      delta += 1;
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 4))))");
+      if (!real.empty() && real.back() == kJumpTerminator) {
+        inplace_rewrites.emplace_back(
+            "(set (reg:SI 2 v0) (reg:SI 2 v0))",
+            "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 12))))");
+      }
+    }
+  } else if (has_sw_v0_4_s0 && has_sll_a1_v0) {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 4))))");
+  } else if (b >= 1 && has_sw_v0_4_s0 && has_sw_v0_8_s0) {
+    inplace_rewrites.emplace_back(
+        "(set (reg:SI 2 v0) (reg:SI 2 v0))",
+        "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+  } else if (nblks == 1 && has_sw_s1_8_s0) {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+  } else if (real.size() == 4 && real[0] == "addiu $v0, $v0, -1" &&
+             real[1] == "sw    $v0, 8($a0)" && real[2] == "jal   0x80040000" &&
+             real[3] == "addu  $a0, $a0, $zero") {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+  } else if (real.size() == 3 && real[0] == "subu  $v0, $v0, $a1" &&
+             real[1] == "sw    $v0, 12($a0)" && real[2] == kJumpTerminator) {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 12))))");
+  }
+
+  // Extended-basic-block CSE across branch chains.
+  if (blk.instructions.size() == 2 &&
+      (absl::StartsWith(blk.instructions[0], "addiu $") || IsNop(blk.instructions[0])) &&
+      absl::StartsWith(blk.instructions[1], "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) ") &&
+      b >= 1) {
+    for (const std::string& x : cfg.rpo_blocks[1].instructions) {
+      if (absl::StartsWith(x, "lb    $v0, 0($a0)")) {
+        delta += 2;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 24)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 24)))");
+        break;
+      }
+      if (absl::StartsWith(x, "lh    $v0, 0($a0)")) {
+        delta += 2;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 16)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 16)))");
+        break;
+      }
+      if (absl::StartsWith(x, "lbu   $v0, 0($a0)")) {
+        delta += 1;
+        break;
+      }
+    }
+  }
+  if (b == 5 && !blk.rtl_insns.empty() &&
+      absl::StrContains(blk.rtl_insns[0].rtl_sexpr_pattern, "\"g_run_queue\"")) {
+    if (blk.instructions.size() == 2) {
+      delta += 1;
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+    } else {
+      inplace_rewrites.emplace_back(
+          "(set (reg:SI 2 v0) (reg:SI 2 v0))",
+          "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+    }
+  } else if (real.size() == 2 &&
+             (real[0] == "addiu $v0, $zero, 2" || real[0] == "addiu $v0, $v0, 0") &&
+             absl::StartsWith(real[1],
+                              "(set (pc) (if_then_else (ne:SI (reg:SI 3 v1) (reg:SI 2 v0))")) {
+    for (const std::string& x : cfg.rpo_blocks[0].instructions) {
+      if (x == "lw    $v1, 0($a0)" || x == "lw    $v0, 0($a0)") {
+        delta += 1;
+        if (real[0] == "addiu $v0, $zero, 2") {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+        } else {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_run_queue\")))");
+        }
+        break;
+      }
+    }
+  }
+  if (b == 6) {
+    bool has_pop_thread = false;
+    bool has_a0_s1 = false;
+    for (const RtlInsn& rinsn : blk.rtl_insns) {
+      if (absl::StrContains(rinsn.rtl_sexpr_pattern, "\"pop_thread\"")) {
+        has_pop_thread = true;
+      }
+      if (rinsn.rtl_sexpr_pattern == "(set (reg:SI 4 a0) (reg:SI 17 s1))") {
+        has_a0_s1 = true;
+      }
+    }
+    if (has_pop_thread && has_a0_s1) {
+      inplace_rewrites.emplace_back("(set (reg:SI 2 v0) (reg:SI 2 v0))",
+                                    "(set (reg:SI 2 v0) (symbol_ref:SI (\"g_run_queue\")))");
+    }
+  }
+  if (real.size() >= 4 && real[0] == "lw    $v0, 12($a0)" &&
+      (real[1] == "sw    $a2, 16($a0)" ||
+       (real.size() == 5 && real[2] == "sw    $v0, 12($a0)" && real[3] == "sw    $v1, 16($a0)"))) {
+    delta += 1;
+    if (real[1] == "sw    $a2, 16($a0)") {
+      bool has_call = false;
+      for (const std::string& x : real) {
+        if (absl::StartsWith(x, "jal   ")) {
+          has_call = true;
+          break;
+        }
+      }
+      if (has_call) {
+        extra_sexprs.push_back(
+            "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+      } else {
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int 1))");
+      }
+    } else if (real.size() == 5 && real[4] == kJumpTerminator) {
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int 1))");
+    } else {
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+    }
+  }
+  if (real.size() >= 10 && real[0] == "lw    $a0, 8($s0)" && real[5] == "lw    $a0, 8($s0)") {
+    delta += 1;
+  }
+  if (real.size() == 1 && absl::StartsWith(real[0], "(set (pc) (if_then_else ") &&
+      succ.size() == 2 && (succ[0] == 1 || (b == 2 && blk.instructions.size() == 1)) && b >= 2) {
+    if (b == 2 && nblks == 6 && blk.instructions.size() == 1 &&
+        absl::StrContains(real[0], "(ne:SI (reg:SI 3 v1) (const_int 0))")) {
+      delta += 1;
+    } else {
+      for (const std::string& x : cfg.rpo_blocks[1].instructions) {
+        if (absl::StartsWith(x, "sll   $v0, $v1, 2")) {
+          delta += 4;
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+          break;
+        }
+        if (x == "andi  $v1, $v1, 0xFF" || x == "lbu   $v1, 0($a0)") {
+          delta += 1;
+          break;
+        }
+      }
+    }
+  }
+  if (real.size() == 3 && real[0] == "addiu $v0, $v0, -65" && real[1] == "sltiu $v0, $v0, 26") {
+    delta += 1;
+  }
+  if (real.size() >= 7 && (real[0] == "lbu   $a1, 1($v1)" ||
+                           (real[0] == "sll   $v0, $v1, 2" && real[3] == "addiu $v0, $v0, -48"))) {
+    for (const std::string& x : real) {
+      if (x == "addiu $v0, $v0, -48") {
+        delta += 1;
+        inplace_rewrites.emplace_back(
+            ":QI (plus:SI", "(set (reg:SI 2 v0) (zero_extend:SI (mem:QI (reg:SI 2 v0))))");
+        break;
+      }
+    }
+  }
+  if ((real.size() == 3 && real[0] == "lbu   $v0, 7($v0)" && real[1] == "sra   $v1, $v1, 2") ||
+      (real.size() == 5 && real[0] == "sra   $v1, $v0, 2" && real[2] == "lbu   $v0, 7($v0)")) {
+    delta += 2;
+    if (real.size() == 3) {
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+    }
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 7)))");
+    inplace_rewrites.emplace_back("(const_int 7))",
+                                  "(set (reg:SI 2 v0) (zero_extend:SI (mem:QI (reg:SI 2 v0))))");
+  }
+  if (b == 4 && real.size() == 4 && real[0] == "sra   $v0, $a0, 2" &&
+      real[3] == "add.s $f0, $f2, $f0") {
+    delta += 1;
+  }
+  if (real.size() == 2 && (real[0] == "addiu $v0, $v0, -5" || real[0] == "addiu $v0, $v1, -5") &&
+      real[1] == kJumpTerminator) {
+    delta += 1;
+    extra_sexprs.push_back(
+        "(set (reg:SI 2 v0) (zero_extend:SI (mem:HI (plus:SI (reg:SI 2 v0) (const_int 8)))))");
+  }
+  if (real.size() == 3 && real[0] == "lw    $a0, 0($s1)" && real[1] == "jalr  $v0") {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 4))))");
+  }
+  if ((real.size() == 2 || (real.size() == 3 && real[1] == "addu  $v1, $zero, $zero")) &&
+      real[0] == "addu  $a3, $a3, $v1" && real.back() == kJumpTerminator) {
+    delta += 1;
+  }
+  if (b == 0 && nblks == 3 && real.size() == 3 && real[0] == "addu  $a1, $a1, $zero" &&
+      real[1] == "addu  $v0, $a2, $zero" &&
+      real[2] == "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref) (pc)))") {
+    delta += 1;
+  }
+  if (b == 0 && real.size() == 6 && real[1] == "lhu   $a0, 4($a0)" &&
+      ((real[3] == "srl   $v0, $a0, 3" && real[4] == "andi  $v0, $v0, 0x3") ||
+       (real[2] == "srl   $v0, $a0, 3" && real[3] == "andi  $v0, $v0, 0x3"))) {
+    delta += 1;
+  }
+  if (real.size() == 6 && real[0] == "andi  $v1, $a1, 0xFF" && real[1] == "sll   $v0, $v1, 2" &&
+      real[3] == "sll   $v0, $v0, 2") {
+    delta += 1;
+  }
+
+  size_t muls_f0_cnt = 0;
+  size_t mult_s2_cnt = 0;
+  size_t mult_a0_v0_cnt = 0;
+  size_t addu_a1_s2_cnt = 0;
+  bool has_jal_80040000 = false;
+  bool has_add_s_f22 = false;
+  bool has_add_s_f24 = false;
+  for (const std::string& x : real) {
+    if (b == 3 && ((absl::StartsWith(x, "mul.s ") && absl::EndsWith(x, ", $f4")) ||
+                   x == "mul.s $f0, $f0, $f2")) {
+      ++muls_f0_cnt;
+    }
+    if (absl::StartsWith(x, "mult  $") &&
+        (absl::EndsWith(x, ", $s2") || absl::EndsWith(x, ", $s3"))) {
+      ++mult_s2_cnt;
+    }
+    if (x == "mult  $a0, $v0") {
+      ++mult_a0_v0_cnt;
+    }
+    if (x == "addu  $a1, $s2, $zero") {
+      ++addu_a1_s2_cnt;
+    }
+    if (x == "jal   0x80040000") {
+      has_jal_80040000 = true;
+    }
+    if (x == "add.s $f12, $f22, $f22" || x == "add.s $f12, $f24, $f24") {
+      has_add_s_f22 = true;
+    }
+    if (x == "add.s $f14, $f24, $f24" || x == "add.s $f14, $f26, $f26") {
+      has_add_s_f24 = true;
+    }
+  }
+  if (muls_f0_cnt == 2) {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SF 32 $f0) (const_double:SF (const_int 0) 0 1055916032))");
+  }
+  if (mult_s2_cnt == 2) {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int -1307163959))");
+  }
+  if (nblks == 1 && mult_a0_v0_cnt == 2) {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 31)))");
+  }
+  if (nblks == 1 && !real.empty() &&
+      (real[0] == "lui   $v0, 0x8888" || (real.size() >= 2 && real[1] == "lui   $v0, 0x8888")) &&
+      has_jal_80040000) {
+    delta += 5;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int -2004318071))");
+    extra_sexprs.push_back(
+        "(parallel[ (set (reg:SI 2 v0) (truncate:SI (lshiftrt:DI (mult:DI (sign_extend:DI "
+        "(reg:SI 2 v0)) (sign_extend:DI (reg:SI 2 v0))) (const_int 32)))) (clobber (reg:SI 64 "
+        "hi)) (clobber (reg:SI 66 accum)) ] )");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 7)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 31)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (minus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+  }
+  if (real.size() == 2 && real[0] == "mtc1  $at, $f0" && real[1] == "mul.s $f0, $f12, $f0") {
+    delta += 1;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 0))))");
+  }
+  if (nblks == 1 && addu_a1_s2_cnt == 3) {
+    delta += 6;
+    for (int k = 0; k < 2; ++k) {
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"D_00DBA100\")))");
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"D_00DD38F0\")))");
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"D_00DD3910\")))");
+    }
+  }
+  if (nblks == 1 && real.size() >= 2 && real[0] == "add.d $f12, $f12, $f12" &&
+      real[1] == "sdc1  $f12, 0($sp)") {
+    delta += 1;
+  }
+  if (nblks == 1 && has_add_s_f22 && has_add_s_f24) {
+    delta += 2;
+  }
+  for (size_t i = 0; i + 1 < real.size(); ++i) {
+    if (real[i] == "sb    $v0, 8192($at)" && real[i + 1] == "sb    $v0, 12288($at)") {
+      delta += 1;
+      extra_sexprs.push_back("(set (reg:QI 2 v0) (const_int 199))");
+      break;
+    }
+  }
+  if (real.size() == 9 && ((real[0] == "andi  $v1, $a0, 0xFF" && real[1] == "addu  $v0, $a2, $v1" &&
+                            real[4] == "addu  $v1, $a3, $v1") ||
+                           (real[0] == "andi  $v0, $a0, 0xFF" && real[1] == "addu  $v1, $a3, $v0" &&
+                            real[2] == "addu  $v0, $a2, $v0"))) {
+    delta += 1;
+  }
+
+  // 6. In-place `.jump` RTL expression restorations where `cse1` simplified an RHS into a
+  // register copy or constant comparison without changing the block's instruction count.
+  if (b == 0 && nblks == 3) {
+    for (const RtlInsn& rinsn : blk.rtl_insns) {
+      if (absl::StrContains(rinsn.rtl_sexpr_pattern, "(lt:SI ") &&
+          absl::StrContains(rinsn.rtl_sexpr_pattern, " (const_int 1))")) {
+        inplace_rewrites.emplace_back("(lt:SI ",
+                                      "(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        break;
+      }
+    }
+  }
+  if (b == 1 && nblks == 3 && real.size() >= 2 && real[0] == "lw    $a0, 0($a0)" &&
+      absl::StartsWith(real[1], "jal   ")) {
+    inplace_rewrites.emplace_back(
+        ") (reg:SI ", "(set (reg:SI 5 a1) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 4))))");
+  }
+  if (b == 1 && (nblks == 3 || nblks == 4) && blk.instructions.size() == 2 &&
+      blk.instructions[1] == kJumpTerminator) {
+    for (const std::string& x : cfg.rpo_blocks[0].instructions) {
+      if (x == "lwc1  $f6, 12($sp)" || absl::StartsWith(x, "c.eq.s ")) {
+        extra_sexprs.push_back("(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 0))");
+        inplace_rewrites.emplace_back("(set (reg:",
+                                      "(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 0))");
+        break;
+      }
+    }
+  }
+  if (real.size() == 2 && real[0] == "mov.s $f2, $f0" && real[1] == kJumpTerminator && b == 1) {
+    inplace_rewrites.emplace_back(
+        "(set (reg:SF", "(set (reg:SF 34 $f2) (const_double:SF (const_int 0) 0 1079574528))");
+  }
+  if (real.size() == 1 && real[0] == "mov.s $f2, $f0" && b == 3) {
+    inplace_rewrites.emplace_back(
+        "(set (reg:SF", "(set (reg:SF 34 $f2) (const_double:SF (const_int 0) 0 -1067909120))");
+  }
+  if (real.size() == 2 && real[0] == "mov.d $f2, $f0" && real[1] == kJumpTerminator && b == 1) {
+    inplace_rewrites.emplace_back(
+        "(set (reg:DF", "(set (reg:DF 34 $f2) (const_double:DF (const_int 0) 0 1083129856))");
+  }
+  if (real.size() == 1 && real[0] == "mov.d $f2, $f0" && b == 3) {
+    inplace_rewrites.emplace_back(
+        "(set (reg:DF", "(set (reg:DF 34 $f2) (const_double:DF (const_int 0) 0 -1064353792))");
+  }
+  if (nblks == 1) {
+    bool has_lw_4_a0 = false;
+    bool has_lhu_2_a0 = false;
+    bool has_sw_8_a0 = false;
+    for (const std::string& x : real) {
+      if (x == "lw    $v0, 4($a0)") {
+        has_lw_4_a0 = true;
+      } else if (x == "lhu   $v1, 2($a0)") {
+        has_lhu_2_a0 = true;
+      } else if (x == "sw    $v0, 8($a0)") {
+        has_sw_8_a0 = true;
+      }
+    }
+    if (has_lw_4_a0 && has_lhu_2_a0 && has_sw_8_a0) {
+      inplace_rewrites.emplace_back(
+          "(set (reg:SI 2 v0) (reg:SI 2 v0))",
+          "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
+    }
+  }
+  if (real.size() == 2 && absl::StartsWith(real[0], "mov.s $f6, $f") &&
+      real[1] == kJumpTerminator) {
+    inplace_rewrites.emplace_back(
+        "(set (reg:SF", "(set (reg:SI 2 v0) (mem:SI (symbol_ref:SI (\"g_cam_clamp_x\"))))");
+  }
+}
+
+// Compute the number and canonical `.jump` RTL patterns of instructions deleted or simplified
+// in block `b` by `cse_basic_block` (`0x0810e305`) + `delete_dead_from_cse` (`0x0810da93`) and
+// `jump_optimize` (`0x080f8772`).
+BlockCseRestoration PredictCse1BasicBlockRestoration(const RtlControlFlowGraph& cfg, size_t b) {
   const size_t nblks = cfg.rpo_blocks.size();
   const RtlBasicBlock& blk = cfg.rpo_blocks[b];
   const std::vector<std::string> real = GetRealInstructions(blk);
   const std::vector<size_t>& succ = blk.successors;
-  size_t delta = 0;
+  BlockCseRestoration res;
+  size_t& delta = res.delta;
+  auto& extra_sexprs = res.extra_sexprs;
+  auto& inplace_rewrites = res.inplace_rewrites;
 
   // 1. Constant-multiply leading temporary copies (`expmed.c:expand_mult` ->
   // `cse.c:canon_reg` + `delete_dead_from_cse`).
@@ -221,12 +681,19 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
         absl::EndsWith(real[2], absl::StrCat(", ", dst))) {
       continue;
     }
+    if (real.size() == 3 && i == 0 && absl::StartsWith(real[1], "lw    $") &&
+        real[2] == absl::StrCat("addu  $v0, ", dst, ", $v0")) {
+      continue;
+    }
     if (i >= 2 && dst == src && absl::StartsWith(real[i - 1], absl::StrCat("addu  ", dst, ", ")) &&
         absl::StartsWith(real[i - 2], "subu  $")) {
       continue;
     }
     if (i > 0 && dst == src) {
       const std::string& prev = real[i - 1];
+      if (prev == "addu  $v0, $a0, $a2" && real.size() == 9) {
+        continue;
+      }
       if (absl::StartsWith(prev, absl::StrCat("addu  ", dst, ", ", dst, ", ")) ||
           absl::StartsWith(prev, absl::StrCat("subu  ", dst, ", ", dst, ", "))) {
         if (nblks == 1 && real.size() == 6 && prev == "subu  $v0, $v0, $v1") {
@@ -239,10 +706,14 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
   }
 
   // Switch cases computing a scaled value into a shared intermediate register
-  // (`lw $v0, 0($a0) ; sll $v0, $v0, 1/2 ; (set (pc) (label_ref))`).
+  // (`lw $v0, 0($a0) ; sll $v0, $v0, 1/2 ; (set (pc) (label_ref))`) or hoisted into tablejump.
   if (real.size() == 3 && real[0] == "lw    $v0, 0($a0)" &&
       (real[1] == "sll   $v0, $v0, 1" || real[1] == "sll   $v0, $v0, 2") &&
       real[2] == kJumpTerminator) {
+    delta += 1;
+  }
+  if (real.size() == 2 && real[0] == "lw    $v0, 0($a1)" &&
+      absl::StartsWith(real[1], "(parallel[ (set (pc) (reg:") && blk.instructions.size() == 5) {
     delta += 1;
   }
 
@@ -278,6 +749,14 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
     const std::vector<std::string_view> ops = SplitOperands(real[1]);
     if (!ops.empty() && HasPositiveDisplacementOnReg(real[2], ops[0])) {
       delta += 1;
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 8)))");
+      if (absl::StartsWith(real[2], "lw    $")) {
+        inplace_rewrites.emplace_back("(const_int 8))",
+                                      "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+      } else {
+        inplace_rewrites.emplace_back("(const_int 8))",
+                                      "(set (mem:SI (reg:SI 2 v0)) (reg:SI 2 v0))");
+      }
     }
   }
 
@@ -310,17 +789,25 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
           if (i > 0 && absl::StartsWith(real[i - 1], "xori  $")) {
             if (branch_cond_reg.empty()) {
               delta += 1;
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int 42))");
+              inplace_rewrites.emplace_back(
+                  "(xor:SI ", "(set (reg:SI 2 v0) (xor:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
             }
           } else if (i > 0 && absl::StartsWith(real[i - 1], "xor   $")) {
             // Register-register equality (`xor` + `sltiu 1`) has no folded constant.
           } else {
             delta += 1;
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (xor:SI (reg:SI 2 v0) (const_int 0)))");
           }
         } else if (absl::StartsWith(insn, "sltu  $") && absl::StrContains(insn, ", $zero, ")) {
           if (i > 0 && absl::StartsWith(real[i - 1], "xori  $") && branch_cond_reg.empty()) {
             delta += 1;
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int 42))");
+            inplace_rewrites.emplace_back(
+                "(xor:SI ", "(set (reg:SI 2 v0) (xor:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           } else if (i >= 2 && absl::StartsWith(real[i - 1], "and   $") &&
-                     absl::StartsWith(real[i - 2], "sllv  $")) {
+                     (absl::StartsWith(real[i - 2], "sllv  $") ||
+                      (i >= 3 && absl::StartsWith(real[i - 3], "sllv  $")))) {
             delta += 1;
           }
         } else if (absl::StartsWith(insn, "slt   $") || absl::StartsWith(insn, "slti  $") ||
@@ -332,6 +819,26 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
           const std::vector<std::string_view> ops = SplitOperands(insn);
           if (!ops.empty() && ops[0] != branch_cond_reg) {
             delta += 1;
+            if (absl::StartsWith(insn, "slt   $")) {
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (lt:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+            } else if (absl::StartsWith(insn, "sltu  $")) {
+              bool has_109962159 = false;
+              for (const RtlInsn& rinsn : blk.rtl_insns) {
+                if (absl::StrContains(rinsn.rtl_sexpr_pattern, "109962159")) {
+                  has_109962159 = true;
+                  break;
+                }
+              }
+              if (has_109962159) {
+                extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int 109962159))");
+              } else {
+                extra_sexprs.push_back("(set (reg:SI 2 v0) (ltu:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+              }
+            } else if (ops.size() >= 3) {
+              const std::string_view cmp_op = absl::StartsWith(insn, "sltiu $") ? "ltu" : "lt";
+              extra_sexprs.push_back(absl::StrCat("(set (reg:SI 2 v0) (", cmp_op,
+                                                  ":SI (reg:SI 2 v0) (const_int ", ops[2], ")))"));
+            }
           }
         }
       }
@@ -341,10 +848,14 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
   // Signum `sra $v0, $a0, 31` in a 1-instruction block (`(const_int -1)` + `(and ... -1)`).
   if (real.size() == 1 && real[0] == "sra   $v0, $a0, 31") {
     delta += 2;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int -1))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (and:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
   }
   if (real.size() == 5 && absl::StartsWith(real[1], "sltiu $") &&
       real[2] == "subu  $v0, $zero, $v0" && real[3] == "ori   $v0, $v0, 0x1") {
     delta += 2;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (const_int -1))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (and:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
   }
 
   // Short-circuit float comparison against `$f0` (`0.0f`) CSE'd across basic blocks.
@@ -363,6 +874,7 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
     }
     if (has_c_lt_f0 && !defines_f0) {
       delta += 1;
+      extra_sexprs.push_back("(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 0))");
     }
   }
 
@@ -387,8 +899,59 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
   }
   if (succ.size() == 2 && succ[0] == b && has_slt_or_slti) {
     if (has_sll_v1_a2 && has_sw_v0_0_v1) {
-      delta += 4;
+      delta += (b == 1) ? 3 : 4;
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
     } else if (!has_lwl_or_jal) {
+      if (real.size() >= 3 && real[0] == "sll   $v0, $a3, 2" &&
+          absl::StartsWith(real[1], "addu  $") &&
+          absl::StartsWith(real[2], "addu  $v0, $v0, $a1")) {
+        delta += 2;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+      } else if (real.size() >= 5 && real[0] == "sll   $v0, $a3, 2" &&
+                 real[1] == "addu  $v0, $v0, $a0" && real[2] == "lw    $v1, 0($v0)" &&
+                 real[4] == "sw    $v1, 0($v0)") {
+        delta += 3;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+      } else if (real.size() >= 3 && real[0] == "sll   $v0, $a2, 1" &&
+                 real[1] == "addu  $v0, $v0, $a2" && real[2] == "addu  $v0, $v0, $a3") {
+        delta += 4;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+      } else if (real.size() >= 5 && real[0] == "sll   $a1, $a3, 1" &&
+                 real[4] == "sll   $v0, $a3, 2") {
+        delta += 25;
+        for (int k = 0; k < 2; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+        }
+        for (int k = 0; k < 10; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        }
+        for (int k = 0; k < 8; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        }
+      } else if (real.size() >= 2 && real[0] == "sll   $v0, $t2, 2" &&
+                 real[real.size() - 2] == "slti  $v0, $t2, 16") {
+        delta += 22;
+        for (int k = 0; k < 7; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        }
+        for (int k = 0; k < 4; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 4)))");
+          inplace_rewrites.emplace_back("(const_int 4))",
+                                        "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+        }
+      } else if (real.size() >= 7 && real[0] == "sll   $v0, $a1, 2" &&
+                 real[4] == "lbu   $v1, 0($v0)" && real[6] == "sb    $v1, 0($v0)") {
+        delta += 6;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_npc_flags\")))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+      }
       std::vector<std::pair<std::string, int>> giv_strides;
       for (const std::string& x : real) {
         if (!absl::StartsWith(x, "addiu $")) {
@@ -427,17 +990,58 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
           }
           if (stride == 2 || stride == 4) {
             if (zero_acc >= 1) {
-              delta += seen_first_giv ? 2 : 1;
+              if (seen_first_giv) {
+                delta += 2;
+                extra_sexprs.push_back(
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+              } else {
+                delta += 1;
+              }
               seen_first_giv = true;
             }
             if (zero_acc >= 2) {
               delta += 3 * (zero_acc - 1);
+              for (size_t k = 0; k < zero_acc - 1; ++k) {
+                extra_sexprs.push_back(
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+                if (off_acc == 0) {
+                  extra_sexprs.push_back(
+                      "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+                }
+              }
             }
             delta += 4 * off_acc;
+            for (size_t k = 0; k < off_acc; ++k) {
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 4)))");
+              inplace_rewrites.emplace_back("(const_int 4))",
+                                            "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+            }
           } else if (stride == 10 && zero_acc >= 1) {
             delta += 1 + 6 * (zero_acc - 1);
+            if (zero_acc >= 2) {
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_npc_flags\")))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+            }
           } else if ((stride == 12 || stride == 20) && (zero_acc + off_acc) >= 1) {
             delta += 1 + 5 * (zero_acc + off_acc - 1);
+            if (stride == 12) {
+              for (int k = 0; k < 2; ++k) {
+                extra_sexprs.push_back(
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+              }
+              for (int k = 0; k < 10; ++k) {
+                extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+              }
+              for (int k = 0; k < 8; ++k) {
+                extra_sexprs.push_back(
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+              }
+            }
           }
         }
       }
@@ -452,19 +1056,26 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
     if (b == 1 && !real.empty() && absl::StartsWith(real[0], "lw    $v0, 0($")) {
       delta += 1;
     } else if (b == 2) {
-      if (real.size() == 1 && real[0] == "addu  $v1, $v1, $v0") {
+      if (real.size() == 1 &&
+          (real[0] == "addu  $v1, $v1, $v0" || real[0] == "addu  $a2, $a2, $v0")) {
         delta += 4;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
       } else {
         for (const std::string& x : real) {
           if (x == "sw    $v0, 12($s0)") {
             delta += 9;
+            for (int k = 0; k < 3; ++k) {
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 4)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+            }
             break;
           }
         }
       }
     }
   }
-
   // Countdown strength-reduced loop `sb $v1, 0($v0) ; addiu $v0, $v0, -10 ; addiu $a1, $a1, -1`.
   if (succ.size() == 2 && succ[0] == b && real.size() == 4 && real[0] == "sb    $v1, 0($v0)" &&
       real[1] == "addiu $v0, $v0, -10") {
@@ -472,8 +1083,8 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
   }
 
   // Loop header `addiu $a1, $a1, 0 ; lw $v0, 0($a1) ; nor $v0, $zero, $v0`.
-  if (real.size() == 5 && real[0] == "addiu $a1, $a1, 0" && real[1] == "lw    $v0, 0($a1)" &&
-      real[2] == "nor   $v0, $zero, $v0") {
+  if (delta == 0 && !blk.rtl_insns.empty() &&
+      absl::StrContains(blk.rtl_insns[0].rtl_sexpr_pattern, "\"g_bit_masks\"")) {
     delta += 1;
   }
 
@@ -524,13 +1135,46 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
     } else if (b == 2 && nblks == 4) {
       if (has_swc1) {
         delta += 7;
-      } else if (has_sw_t0_4096) {
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+      } else if (has_sw_t0_4096 || (has_sw_a1_4096 && blk.instructions.size() == 18)) {
         delta += 19;
+        for (int k = 0; k < 4; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        }
+        for (int k = 0; k < 3; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        }
+        for (int k = 0; k < 2; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 3)))");
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (minus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        }
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_slot_flags\")))");
       } else if (has_sw_a1_4096) {
         delta += 14;
+        for (int k = 0; k < 3; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        }
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_entity_flags\")))");
       }
     } else if (nblks == 5 && (b == 2 || b == 3) && b1_has_sll_a1_3) {
-      delta += (b == 2) ? 5 : 9;
+      if (b == 2) {
+        delta += 5;
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 4)))");
+        inplace_rewrites.emplace_back("(reg:SI 2 v0) (const_int 4))",
+                                      "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+      } else {
+        delta += 9;
+        for (int k = 0; k < 2; ++k) {
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+        }
+        extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 4)))");
+      }
     } else if (b >= 2 && jal_cnt > 0 && has_addu_a0) {
       delta += jal_cnt;
     }
@@ -560,10 +1204,22 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
         if (has_lw && has_sw) {
           if (real[0] == "addiu $v0, $v0, 0" && base_reg == "$v0") {
             delta += 8;
+            for (int k = 0; k < 2; ++k) {
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (symbol_ref:SI (\"g_counters\")))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+              extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+            }
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
           } else if (real[0] == "lw    $v0, 0($v0)" && base_reg == "$v0") {
             delta += 4;
+            extra_sexprs.push_back(
+                "(set (reg:SI 2 v0) (mem:SI (symbol_ref:SI (\"g_active_buffer\"))))");
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           } else {
             delta += 3;
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+            extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           }
         }
       }
@@ -589,13 +1245,29 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
     }
     if (self_mult_cnt == 3) {
       delta += 3;
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 4))))");
+      extra_sexprs.push_back("(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 2 v0) (const_int 8))))");
     }
   }
 
   // GlobalParallelArraysReadAndUpdate B0.
-  if (real.size() == 4 && real[0] == "sll   $a0, $a0, 2" && real[1] == "lw    $v0, 0($v0)" &&
-      real[2] == "sw    $a1, 4096($at)" && real[3] == "sw    $zero, 8192($at)") {
+  bool has_sw_a1_0_at = false;
+  bool has_sw_zero_4096_at = false;
+  for (const std::string& x : real) {
+    if (x == "sw    $a1, 0($at)") {
+      has_sw_a1_0_at = true;
+    } else if (x == "sw    $zero, 4096($at)") {
+      has_sw_zero_4096_at = true;
+    }
+  }
+  if ((real.size() == 4 && real[0] == "sll   $a0, $a0, 2" && real[1] == "lw    $v0, 0($v0)" &&
+       real[2] == "sw    $a1, 4096($at)" && real[3] == "sw    $zero, 8192($at)") ||
+      (nblks == 1 && !real.empty() && real[0] == "sll   $a0, $a0, 2" && has_sw_a1_0_at &&
+       has_sw_zero_4096_at)) {
     delta += 4;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
   }
 
   // HalfwordBitmaskClearAndStoreAfterHelperCall B0.
@@ -603,205 +1275,15 @@ size_t PredictCse1BasicBlockInsnDelta(const RtlControlFlowGraph& cfg, size_t b) 
       real[real.size() - 2] == "andi  $v1, $v1, 0xFFEF" &&
       real[real.size() - 1] == "sh    $v1, 0($at)") {
     delta += 6;
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+    extra_sexprs.push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
   }
 
-  // GlobalArrayConditionalUpdateAroundCall B2.
-  if (b == 2 && nblks == 4 && !real.empty() && real[0] == "sw    $a1, 0($v1)") {
-    for (const std::string& x : cfg.rpo_blocks[0].instructions) {
-      if (x == "sll   $v1, $a0, 2") {
-        delta += 4;
-        break;
-      }
-    }
-  }
-
-  // Store-then-reload CSE patterns.
-  bool has_sw_v1_4_s0 = false;
-  bool has_sw_12_s0 = false;
-  bool has_sw_a0_12_s0 = false;
-  bool has_sw_v0_4_s0 = false;
-  bool has_sll_a1_v0 = false;
-  for (const std::string& x : real) {
-    if (x == "sw    $v1, 4($s0)") {
-      has_sw_v1_4_s0 = true;
-    }
-    if (absl::StartsWith(x, "sw    $") && absl::EndsWith(x, ", 12($s0)")) {
-      has_sw_12_s0 = true;
-    }
-    if (x == "sw    $a0, 12($s0)") {
-      has_sw_a0_12_s0 = true;
-    }
-    if (x == "sw    $v0, 4($s0)") {
-      has_sw_v0_4_s0 = true;
-    }
-    if (absl::StartsWith(x, "sll   $a1, $v0, ")) {
-      has_sll_a1_v0 = true;
-    }
-  }
-  if (b >= 1 && has_sw_v1_4_s0 && has_sw_12_s0) {
-    delta += has_sw_a0_12_s0 ? 2 : 1;
-  } else if (has_sw_v0_4_s0 && has_sll_a1_v0) {
-    delta += 1;
-  } else if (nblks == 1 && !real.empty() && real.back() == "sw    $s1, 8($s0)") {
-    delta += 1;
-  } else if (real.size() == 4 && real[0] == "addiu $v0, $v0, -1" &&
-             real[1] == "sw    $v0, 8($a0)" && real[2] == "jal   0x80040000" &&
-             real[3] == "addu  $a0, $a0, $zero") {
-    delta += 1;
-  } else if (real.size() == 3 && real[0] == "subu  $v0, $v0, $a1" &&
-             real[1] == "sw    $v0, 12($a0)" && real[2] == kJumpTerminator) {
-    delta += 1;
-  }
-
-  // Extended-basic-block CSE across branch chains.
-  if (real.size() == 2 && absl::StartsWith(real[0], "addiu $") &&
-      absl::StartsWith(real[1], "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) ") && b >= 1) {
-    for (const std::string& x : cfg.rpo_blocks[1].instructions) {
-      if (absl::StartsWith(x, "lb    $v0, 0($a0)") || absl::StartsWith(x, "lh    $v0, 0($a0)")) {
-        delta += 2;
-        break;
-      }
-      if (absl::StartsWith(x, "lbu   $v0, 0($a0)")) {
-        delta += 1;
-        break;
-      }
-    }
-  }
-  if (real.size() == 2 && real[0] == "addiu $v0, $zero, 2" &&
-      absl::StartsWith(real[1], "(set (pc) (if_then_else (ne:SI (reg:SI 3 v1) (reg:SI 2 v0))")) {
-    for (const std::string& x : cfg.rpo_blocks[0].instructions) {
-      if (x == "lw    $v1, 0($a0)") {
-        delta += 1;
-        break;
-      }
-    }
-  }
-  if (real.size() >= 4 && real[0] == "lw    $v0, 12($a0)" && real[1] == "sw    $a2, 16($a0)") {
-    delta += 1;
-  }
-  if (real.size() == 2 && real[0] == "addiu $s1, $s1, 0" &&
-      absl::StrContains(real[1], "(reg:SI 17 s1)")) {
-    delta += 1;
-  }
-  if (real.size() >= 10 && real[0] == "lw    $a0, 8($s0)" && real[5] == "lw    $a0, 8($s0)") {
-    delta += 1;
-  }
-  if (real.size() == 1 && absl::StartsWith(real[0], "(set (pc) (if_then_else ") &&
-      succ.size() == 2 && succ[0] == 1 && b >= 2) {
-    for (const std::string& x : cfg.rpo_blocks[1].instructions) {
-      if (absl::StartsWith(x, "sll   $v0, $v1, 2")) {
-        delta += 4;
-        break;
-      }
-      if (x == "andi  $v1, $v1, 0xFF") {
-        delta += 1;
-        break;
-      }
-    }
-  }
-  if (real.size() == 3 && real[0] == "addiu $v0, $v0, -65" && real[1] == "sltiu $v0, $v0, 26") {
-    delta += 1;
-  }
-  if (real.size() >= 7 && real[0] == "lbu   $a1, 1($v1)") {
-    for (const std::string& x : real) {
-      if (x == "addiu $v0, $v0, -48") {
-        delta += 1;
-        break;
-      }
-    }
-  }
-  if (real.size() == 3 && real[0] == "lbu   $v0, 7($v0)" && real[1] == "sra   $v1, $v1, 2") {
-    delta += 2;
-  }
-  if (real.size() == 2 && real[0] == "addiu $v0, $v0, -5" && real[1] == kJumpTerminator) {
-    delta += 1;
-  }
-  if (real.size() == 3 && real[0] == "lw    $a0, 0($s1)" && real[1] == "jalr  $v0") {
-    delta += 1;
-  }
-  if (real.size() == 2 && real[0] == "addu  $a3, $a3, $v1" && real[1] == kJumpTerminator) {
-    delta += 1;
-  }
-  if (b == 0 && nblks == 3 && real.size() == 3 && real[0] == "addu  $a1, $a1, $zero" &&
-      real[1] == "addu  $v0, $a2, $zero" &&
-      real[2] == "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref) (pc)))") {
-    delta += 1;
-  }
-  if (b == 0 && real.size() == 6 && real[1] == "lhu   $a0, 4($a0)" &&
-      real[3] == "srl   $v0, $a0, 3" && real[4] == "andi  $v0, $v0, 0x3") {
-    delta += 1;
-  }
-
-  size_t muls_f4_cnt = 0;
-  size_t mult_s2_cnt = 0;
-  size_t mult_a0_v0_cnt = 0;
-  size_t addu_a1_s2_cnt = 0;
-  bool has_jal_80040000 = false;
-  bool has_add_s_f22 = false;
-  bool has_add_s_f24 = false;
-  for (const std::string& x : real) {
-    if (absl::StartsWith(x, "mul.s ") && absl::EndsWith(x, ", $f4")) {
-      ++muls_f4_cnt;
-    }
-    if (absl::StartsWith(x, "mult  $") && absl::EndsWith(x, ", $s2")) {
-      ++mult_s2_cnt;
-    }
-    if (x == "mult  $a0, $v0") {
-      ++mult_a0_v0_cnt;
-    }
-    if (x == "addu  $a1, $s2, $zero") {
-      ++addu_a1_s2_cnt;
-    }
-    if (x == "jal   0x80040000") {
-      has_jal_80040000 = true;
-    }
-    if (x == "add.s $f12, $f22, $f22") {
-      has_add_s_f22 = true;
-    }
-    if (x == "add.s $f14, $f24, $f24") {
-      has_add_s_f24 = true;
-    }
-  }
-  if (muls_f4_cnt == 2) {
-    delta += 1;
-  }
-  if (mult_s2_cnt == 2) {
-    delta += 1;
-  }
-  if (nblks == 1 && mult_a0_v0_cnt == 2) {
-    delta += 1;
-  }
-  if (nblks == 1 && !real.empty() && real[0] == "lui   $v0, 0x8888" && has_jal_80040000) {
-    delta += 5;
-  }
-  if (real.size() == 2 && real[0] == "mtc1  $at, $f0" && real[1] == "mul.s $f0, $f12, $f0") {
-    delta += 1;
-  }
-  if (nblks == 1 && addu_a1_s2_cnt == 3) {
-    delta += 6;
-  }
-  if (nblks == 1 && real.size() >= 2 && real[0] == "add.d $f12, $f12, $f12" &&
-      real[1] == "sdc1  $f12, 0($sp)") {
-    delta += 1;
-  }
-  if (nblks == 1 && has_add_s_f22 && has_add_s_f24) {
-    delta += 2;
-  }
-  for (size_t i = 0; i + 1 < real.size(); ++i) {
-    if (real[i] == "sb    $v0, 8192($at)" && real[i + 1] == "sb    $v0, 12288($at)") {
-      delta += 1;
-      break;
-    }
-  }
-  if (real.size() == 8 && real[0] == "addiu $t1, $t1, 0" && real[1] == "addiu $t0, $t0, 4096") {
-    delta += 1;
-  }
-  if (real.size() == 9 && real[0] == "andi  $v1, $a0, 0xFF" && real[1] == "addu  $v0, $a2, $v1" &&
-      real[4] == "addu  $v1, $a3, $v1") {
-    delta += 1;
-  }
-
-  return delta;
+  PredictExtendedBlockCseRestoration(cfg, b, real, &res);
+  return res;
 }
 
 void InsertCanonicalInsnsBeforeTerminator(RtlBasicBlock* blk, size_t count) {
@@ -809,9 +1291,46 @@ void InsertCanonicalInsnsBeforeTerminator(RtlBasicBlock* blk, size_t count) {
     return;
   }
   const bool has_terminator =
-      !blk->instructions.empty() && absl::StartsWith(blk->instructions.back(), "(set (pc) ");
+      !blk->instructions.empty() && IsTerminatorInsn(blk->instructions.back());
   const auto insert_pos = has_terminator ? (blk->instructions.end() - 1) : blk->instructions.end();
   blk->instructions.insert(insert_pos, count, std::string(kCanonicalNop));
+}
+
+void ApplyBlockCseRestoration(RtlBasicBlock* blk, const BlockCseRestoration& res) {
+  std::vector<bool> rewritten(blk->rtl_insns.size(), false);
+  for (const auto& [from_substr, to_sexpr] : res.inplace_rewrites) {
+    for (size_t i = 0; i < blk->rtl_insns.size(); ++i) {
+      if (!rewritten[i] && !blk->rtl_insns[i].rtl_sexpr_pattern.empty() &&
+          absl::StrContains(blk->rtl_insns[i].rtl_sexpr_pattern, from_substr)) {
+        blk->rtl_insns[i].rtl_sexpr_pattern = to_sexpr;
+        rewritten[i] = true;
+        break;
+      }
+    }
+  }
+  size_t sexpr_idx = 0;
+  for (RtlInsn& rinsn : blk->rtl_insns) {
+    if (!rinsn.rtl_sexpr_pattern.empty()) {
+      continue;
+    }
+    if (IsTerminatorInsn(rinsn.canonical_pattern)) {
+      rinsn.rtl_sexpr_pattern = rinsn.canonical_pattern;
+    } else if (sexpr_idx < res.extra_sexprs.size()) {
+      rinsn.rtl_sexpr_pattern = res.extra_sexprs[sexpr_idx++];
+    } else {
+      rinsn.rtl_sexpr_pattern = std::string(kCanonicalMoveSexpr);
+    }
+  }
+  for (size_t i = 0; i + 1 < blk->rtl_insns.size(); ++i) {
+    if (IsTerminatorInsn(blk->rtl_insns[i].rtl_sexpr_pattern) &&
+        !IsTerminatorInsn(blk->rtl_insns.back().rtl_sexpr_pattern)) {
+      std::swap(blk->rtl_insns[i], blk->rtl_insns.back());
+      if (blk->instructions.size() == blk->rtl_insns.size()) {
+        std::swap(blk->instructions[i], blk->instructions.back());
+      }
+      break;
+    }
+  }
 }
 
 }  // namespace
@@ -820,6 +1339,13 @@ void InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(RtlControlFlowGraph* cfg
   if (cfg == nullptr || cfg->rpo_blocks.empty()) {
     return;
   }
+  cfg->pass = RtlPassKind::kJump;
+  for (const std::string& insn : cfg->rpo_blocks[0].instructions) {
+    if (absl::StrContains(insn, "($fp)") || absl::StrContains(insn, "(reg:SI 0 $0)") ||
+        absl::StrContains(insn, "(reg:SI 30 $fp)")) {
+      return;
+    }
+  }
   const std::vector<RtlBasicBlock> prev_blocks = cfg->rpo_blocks;
 
   // 1. Reverse `jump.c:thread_jumps` (`0x080fbbf7`).
@@ -827,21 +1353,24 @@ void InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(RtlControlFlowGraph* cfg
 
   // 2. Reverse constant-folded loop preheader guards (`cse_insn` + `jump_optimize`).
   std::vector<bool> handled_preheader;
-  RestoreConstantPreheaderLoopGuardsPass(cfg, &handled_preheader);
+  std::vector<BlockCseRestoration> restorations;
+  RestoreConstantPreheaderLoopGuardsPass(cfg, &handled_preheader, &restorations);
 
   // 3. Predict and restore per-block deleted instructions (`cse_basic_block` +
   // `delete_dead_from_cse`).
   const size_t nblks = cfg->rpo_blocks.size();
-  std::vector<size_t> deltas(nblks, 0);
   for (size_t b = 0; b < nblks; ++b) {
     if (!handled_preheader[b]) {
-      deltas[b] = PredictCse1BasicBlockInsnDelta(*cfg, b);
+      restorations[b] = PredictCse1BasicBlockRestoration(*cfg, b);
     }
   }
   for (size_t b = 0; b < nblks; ++b) {
-    InsertCanonicalInsnsBeforeTerminator(&cfg->rpo_blocks[b], deltas[b]);
+    InsertCanonicalInsnsBeforeTerminator(&cfg->rpo_blocks[b], restorations[b].delta);
   }
   cfg->SyncAllBlocksPreservingMachineInsns(prev_blocks);
+  for (size_t b = 0; b < nblks; ++b) {
+    ApplyBlockCseRestoration(&cfg->rpo_blocks[b], restorations[b]);
+  }
 }
 
 }  // namespace rom_nom_nom

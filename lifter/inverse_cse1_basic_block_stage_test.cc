@@ -107,6 +107,63 @@ TEST(InverseCse1BasicBlockStageTest, RestoresStoreFlagFoldedXorAndDeadComparison
 
   // `sltiu $v0, $a0, 1` had `(xor R 0)` folded in `.cse` -> +1 instruction in `.jump`.
   EXPECT_EQ(cfg.rpo_blocks[0].instructions.size(), 3u);
+  ASSERT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 3u);
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[0].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (xor:SI (reg:SI 2 v0) (const_int 0)))");
+}
+
+TEST(InverseCse1BasicBlockStageTest, RestoresIndexedArrayAccessWithPositiveDisplacementToJumpRtl) {
+  RtlControlFlowGraph cfg;
+  cfg.rpo_blocks.resize(1);
+  RtlBasicBlock& blk = cfg.rpo_blocks[0];
+  blk.instructions = {
+      "sll   $a1, $a1, 2",
+      "addu  $a1, $a1, $a0",
+      "lw    $v0, 8($a1)",
+  };
+  blk.rtl_insns.resize(3);
+  blk.rtl_insns[0].canonical_pattern = blk.instructions[0];
+  blk.rtl_insns[0].rtl_sexpr_pattern =
+      "(set (reg:SI 5 a1) (ashift:SI (reg:SI 5 a1) (const_int 2)))";
+  blk.rtl_insns[1].canonical_pattern = blk.instructions[1];
+  blk.rtl_insns[1].rtl_sexpr_pattern = "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (reg:SI 4 a0)))";
+  blk.rtl_insns[2].canonical_pattern = blk.instructions[2];
+  blk.rtl_insns[2].rtl_sexpr_pattern =
+      "(set (reg:SI 2 v0) (mem/s:SI (plus:SI (reg:SI 5 a1) (const_int 8))))";
+
+  InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(&cfg);
+
+  ASSERT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 5u);
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[2].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[3].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 8)))");
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[4].rtl_sexpr_pattern, "(set (reg:SI 2 v0) (reg:SI 2 v0))");
+}
+
+TEST(InverseCse1BasicBlockStageTest, KeepsTablejumpTerminatorAtEndOfBlockWhenInsertingInsns) {
+  RtlControlFlowGraph cfg;
+  cfg.rpo_blocks.resize(1);
+  RtlBasicBlock& blk = cfg.rpo_blocks[0];
+  blk.instructions = {
+      "sll   $v0, $a0, 2",
+      "lw    $v0, 0($v0)",
+      "(parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref)) ] )",
+  };
+  blk.rtl_insns.resize(3);
+  blk.rtl_insns[0].canonical_pattern = blk.instructions[0];
+  blk.rtl_insns[0].rtl_sexpr_pattern =
+      "(set (reg:SI 2 v0) (ashift:SI (reg:SI 4 a0) (const_int 2)))";
+  blk.rtl_insns[1].canonical_pattern = blk.instructions[1];
+  blk.rtl_insns[1].rtl_sexpr_pattern = "(set (reg:SI 2 v0) (mem/u:SI (reg:SI 2 v0)))";
+  blk.rtl_insns[2].canonical_pattern = blk.instructions[2];
+  blk.rtl_insns[2].rtl_sexpr_pattern = blk.instructions[2];
+
+  InverseCse1BasicBlockLifter::InvertCseToJumpRtlCfg(&cfg);
+
+  ASSERT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 4u);
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns.back().rtl_sexpr_pattern,
+            "(parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref)) ] )");
 }
 
 }  // namespace
