@@ -1,10 +1,13 @@
 #include "lifter/inverse_sched1_pre_alloc_stage.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/strings/match.h"
+#include "absl/strings/str_format.h"
 #include "core/mips.h"
 #include "lifter/rtl_cfg.h"
 #include "lifter/rtl_cfg_builder.h"
@@ -13,7 +16,11 @@
 namespace rom_nom_nom {
 
 void InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(RtlControlFlowGraph* cfg) {
-  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+  if (cfg == nullptr) {
+    return;
+  }
+  cfg->pass = RtlPassKind::kCombine;
+  if (cfg->rpo_blocks.empty()) {
     return;
   }
 
@@ -69,6 +76,18 @@ void InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(RtlControlFlowGraph
               lo_inst.immediate != 0) {
             blk.rtl_insns[i].idiom_kind = RtlFusedIdiomKind::kSplitLargeIntHiLo;
             blk.rtl_insns[i].machine_instructions.push_back(lo_inst);
+            const uint32_t hi_bits = static_cast<uint32_t>(static_cast<uint16_t>(hi_inst.immediate))
+                                     << 16;
+            const uint32_t lo_bits =
+                static_cast<uint32_t>(static_cast<uint16_t>(lo_inst.immediate));
+            const int32_t combined_imm = static_cast<int32_t>(hi_bits | lo_bits);
+            const std::string fused_sexpr =
+                absl::StrFormat("(set (reg:SI %d %s) (const_int %d))", static_cast<int>(reg),
+                                reg_name, combined_imm);
+            blk.rtl_insns[i].rtl_sexpr_pattern = fused_sexpr;
+            if (absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(")) {
+              blk.rtl_insns[i].canonical_pattern = fused_sexpr;
+            }
             keep[j] = false;
             modified = true;
             break;

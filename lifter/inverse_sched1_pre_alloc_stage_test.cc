@@ -89,10 +89,13 @@ TEST(InverseSched1PreAllocStageTest, FoldsSplitLargeIntPairsIntoCombineRtlCfg) {
   EXPECT_EQ(rtl_cfg.rpo_blocks[0].rtl_insns.size(), 3u);
 
   InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(&rtl_cfg);
+  EXPECT_EQ(rtl_cfg.pass, RtlPassKind::kCombine);
   ASSERT_EQ(rtl_cfg.rpo_blocks.size(), 1u);
   ASSERT_EQ(rtl_cfg.rpo_blocks[0].rtl_insns.size(), 2u);
   EXPECT_EQ(rtl_cfg.rpo_blocks[0].rtl_insns[0].idiom_kind, RtlFusedIdiomKind::kSplitLargeIntHiLo);
   EXPECT_EQ(rtl_cfg.rpo_blocks[0].rtl_insns[0].machine_instructions.size(), 2u);
+  EXPECT_EQ(rtl_cfg.rpo_blocks[0].rtl_insns[0].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (const_int 305419896))");
 }
 
 TEST(InverseSched1PreAllocStageTest, DoesNotFoldAcrossInterveningReadOfHighHalf) {

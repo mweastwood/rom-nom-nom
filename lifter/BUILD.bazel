@@ -882,6 +882,8 @@ cc_library(
         ":rtl_cfg_builder",
         ":rtl_def_use_analysis",
         "//core:mips",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 

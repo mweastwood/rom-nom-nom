@@ -208,6 +208,14 @@ absl::Status InverseSched1PreAllocStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseSched1PreAllocStage: RtlCfg not initialized.");
   }
+  InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(context->MutableRtlCfg());
+  return absl::OkStatus();
+}
+
+absl::Status InverseCombineStage::Run(DecompilationContext* context) {
+  if (context == nullptr || !context->HasRtlCfg()) {
+    return absl::FailedPreconditionError("InverseCombineStage: RtlCfg not initialized.");
+  }
   RtlControlFlowGraph* cfg = context->MutableRtlCfg();
   for (auto& blk : cfg->rpo_blocks) {
     for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
@@ -228,15 +236,7 @@ absl::Status InverseSched1PreAllocStage::Run(DecompilationContext* context) {
       }
     }
   }
-  InverseSched1PreAllocLifter::InvertSchedToCombineRtlCfg(cfg);
-  return absl::OkStatus();
-}
-
-absl::Status InverseCombineStage::Run(DecompilationContext* context) {
-  if (context == nullptr || !context->HasRtlCfg()) {
-    return absl::FailedPreconditionError("InverseCombineStage: RtlCfg not initialized.");
-  }
-  InverseCombineLifter::InvertCombineToFlowRtlCfg(context->MutableRtlCfg());
+  InverseCombineLifter::InvertCombineToFlowRtlCfg(cfg);
   return absl::OkStatus();
 }
 
