@@ -1,6 +1,7 @@
 #ifndef LIFTER_INVERSE_CSE2_POST_LOOP_STAGE_H_
 #define LIFTER_INVERSE_CSE2_POST_LOOP_STAGE_H_
 
+#include "core/compiler_flags.h"
 #include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
@@ -22,7 +23,8 @@ namespace rom_nom_nom {
 // instructions per basic block.
 class InverseCse2PostLoopLifter {
  public:
-  static void InvertCse2ToLoopRtlCfg(RtlControlFlowGraph* cfg);
+  static void InvertCse2ToLoopRtlCfg(RtlControlFlowGraph* cfg,
+                                     const ParsedCompilerFlags* flags = nullptr);
 };
 
 }  // namespace rom_nom_nom

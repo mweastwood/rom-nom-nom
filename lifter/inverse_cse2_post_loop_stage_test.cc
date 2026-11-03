@@ -131,6 +131,15 @@ TEST(InverseCse2PostLoopStageTest, RestoresReversedDbraLoopPreheaderAndBodyDeadG
   InverseCse2PostLoopLifter::InvertCse2ToLoopRtlCfg(&cfg);
   EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns.size(), 4u);  // 3 + 1
   EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns.size(), 8u);  // 4 + 4
+  EXPECT_EQ(cfg.rpo_blocks[0].rtl_insns[3].rtl_sexpr_pattern, "(set (reg:SI 2 v0) (reg:SI 2 v0))");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[3].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[4].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[5].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+  EXPECT_EQ(cfg.rpo_blocks[1].rtl_insns[6].rtl_sexpr_pattern,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
 }
 
 TEST(InverseCse2PostLoopStageTest, LeavesLoopWithoutPointerGivUnchanged) {

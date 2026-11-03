@@ -360,7 +360,17 @@ absl::Status InverseCse2PostLoopStage::Run(DecompilationContext* context) {
       }
     }
   }
-  InverseCse2PostLoopLifter::InvertCse2ToLoopRtlCfg(cfg);
+  InverseCse2PostLoopLifter::InvertCse2ToLoopRtlCfg(cfg, &context->Flags());
+  for (auto& blk : cfg->rpo_blocks) {
+    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
+      if (!blk.rtl_insns[i].rtl_sexpr_pattern.empty()) {
+        blk.rtl_insns[i].canonical_pattern = blk.rtl_insns[i].rtl_sexpr_pattern;
+      }
+      if (i < blk.instructions.size()) {
+        blk.instructions[i] = blk.rtl_insns[i].canonical_pattern;
+      }
+    }
+  }
   return absl::OkStatus();
 }
 
@@ -368,7 +378,42 @@ absl::Status InverseLoopOptStage::Run(DecompilationContext* context) {
   if (context == nullptr || !context->HasRtlCfg()) {
     return absl::FailedPreconditionError("InverseLoopOptStage: RtlCfg not initialized.");
   }
-  InverseLoopOptLifter::InvertLoopToCseRtlCfg(context->MutableRtlCfg());
+  RtlControlFlowGraph* cfg = context->MutableRtlCfg();
+  for (auto& blk : cfg->rpo_blocks) {
+    for (size_t i = 0; i < blk.rtl_insns.size(); ++i) {
+      if (!blk.rtl_insns[i].machine_instructions.empty() &&
+          absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(") &&
+          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(set (pc)") &&
+          !absl::StartsWith(blk.rtl_insns[i].canonical_pattern, "(parallel[ (set (pc)")) {
+        const auto& m_insts = blk.rtl_insns[i].machine_instructions;
+        const RtlFusedIdiomKind kind = blk.rtl_insns[i].idiom_kind;
+        const Instruction* rep_inst = &m_insts.front();
+        if (kind == RtlFusedIdiomKind::kFloatSiSf2 || kind == RtlFusedIdiomKind::kFloatSiDf2 ||
+            kind == RtlFusedIdiomKind::kGasFloatImmediate ||
+            kind == RtlFusedIdiomKind::kGasMagicMultiplier ||
+            kind == RtlFusedIdiomKind::kGasAddressHiLo ||
+            kind == RtlFusedIdiomKind::kGasSymbolIndexedAccess ||
+            kind == RtlFusedIdiomKind::kGasSymbolDirectAccess) {
+          rep_inst = &m_insts.back();
+        } else if (kind == RtlFusedIdiomKind::kMove2Words && m_insts.size() == 4) {
+          rep_inst = &m_insts[1];
+        } else if ((kind == RtlFusedIdiomKind::kFixTruncSfSi2 ||
+                    kind == RtlFusedIdiomKind::kFixTruncDfSi2) &&
+                   m_insts.size() == 7) {
+          rep_inst = &m_insts[4];
+        }
+        blk.rtl_insns[i].canonical_pattern =
+            InverseFinalAndGasLifter::FormatMipsInstAsCanonicalRtl(*rep_inst);
+      } else if (blk.rtl_insns[i].is_synthetic_rtl_expansion &&
+                 blk.rtl_insns[i].machine_instructions.empty()) {
+        blk.rtl_insns[i].canonical_pattern = "addu  $zero, $zero, $zero";
+      }
+      if (i < blk.instructions.size()) {
+        blk.instructions[i] = blk.rtl_insns[i].canonical_pattern;
+      }
+    }
+  }
+  InverseLoopOptLifter::InvertLoopToCseRtlCfg(cfg);
   return absl::OkStatus();
 }
 

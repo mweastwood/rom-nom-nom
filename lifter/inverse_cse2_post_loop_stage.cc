@@ -113,14 +113,15 @@ bool IsJumpOrBranchPattern(std::string_view pat) {
          absl::StartsWith(pat, "(parallel[ (set (pc)");
 }
 
-// Predicts the number of single-def unused GIV address/multiply instructions per RPO basic block
+// Predicts the single-def unused GIV address/multiply RTL S-expressions per RPO basic block
 // that `jump_optimize(..., after_regscan=1)` (`0x080f6817`) and `cse_main(..., after_loop=1)`
 // eliminated when transforming `.loop` into `.cse2`.
-std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>& blks) {
+std::vector<std::vector<std::string>> PredictCse2PostLoopDeadInsnSexprs(
+    const std::vector<BlockView>& blks, std::vector<size_t>* stride3_preheaders) {
   const size_t n = blks.size();
-  std::vector<int> deltas(n, 0);
+  std::vector<std::vector<std::string>> restored(n);
   if (n == 0) {
-    return deltas;
+    return restored;
   }
 
   std::vector<std::vector<ParsedOp>> ops_per_blk(n);
@@ -173,9 +174,12 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
       // R_base`).
       if (biv_strides.contains("$a1") && biv_strides["$a1"] == -1 && biv_strides.contains("$v0") &&
           biv_strides["$v0"] == -10) {
-        deltas[b] += 4;
+        restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+        restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+        restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+        restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
         if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b) {
-          deltas[b - 1] += 1;
+          restored[b - 1].push_back("(set (reg:SI 2 v0) (reg:SI 2 v0))");
         }
         continue;
       }
@@ -192,7 +196,12 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
         // (`GeneralizedDualGivForLoopWithTwoStrides`: 3 dead single-def GIV insns per compound
         // pointer GIV = +6).
         if (has_stride_val(20) && has_stride_val(12)) {
-          deltas[b] += 6;
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           continue;
         }
         // Subcategory E2: Stride-10 compound pointer GIV
@@ -200,9 +209,11 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
         // insns in the loop body = +3, plus 1 single-def post-loop final BIV assignment
         // `(set (reg:SI 127) (const_int 4))` at the start of the fallthrough exit block).
         if (has_stride_val(10)) {
-          deltas[b] += 3;
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))");
+          restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           if (succs.size() == 2 && succs[1] != b && succs[1] < n) {
-            deltas[succs[1]] += 1;
+            restored[succs[1]].push_back("(set (reg:SI 2 v0) (const_int 4))");
           }
           continue;
         }
@@ -220,7 +231,8 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
           }
         }
         if (has_stride3_shift2) {
-          deltas[b] += 2;
+          restored[b].insert(restored[b].end(), 2,
+                             "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
           continue;
         }
 
@@ -279,7 +291,8 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
               }
             }
             if (!other_uses) {
-              deltas[b] += static_cast<int>(ptr_giv_regs.size());
+              restored[b].insert(restored[b].end(), ptr_giv_regs.size(),
+                                 "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
               break;
             }
           }
@@ -311,14 +324,21 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
       };
 
       // Subcategory D: Multi-block loop with stride-3 GIV in latch (`ControlFlowLoops`):
-      // restores `(set R_mul3 (plus:SI R_shift1 R_biv))` in the inner block `mid`.
+      // restores `(set R_mul3 (plus:SI R_shift1 R_biv))` in the inner block `mid`, and un-folds
+      // the 3 preheader GIV initializations (`reg 95 = reg 75; reg 96 = reg 95 << 1; reg 94 =
+      // reg 96 + reg 75`) that `cse2` constant-propagated to `0`.
       if (latch == b + 4 && latch_has_stride(3) && latch_has_stride(1)) {
+        if (b > 0 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b &&
+            stride3_preheaders != nullptr) {
+          stride3_preheaders->push_back(b - 1);
+        }
         for (size_t mid = b + 1; mid < latch; ++mid) {
           if (blks[mid].succs.size() == 1 && blks[mid].succs[0] == latch) {
             for (const ParsedOp& mop : ops_per_blk[mid]) {
               if (mop.mnem == "addu" && mop.ops.size() == 3 && latch_strides.contains(mop.ops[2]) &&
                   latch_strides[mop.ops[2]] == 3) {
-                deltas[mid] += 1;
+                restored[mid].push_back(
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
                 break;
               }
             }
@@ -339,16 +359,16 @@ std::vector<int> PredictCse2PostLoopDeadInsnDeltas(const std::vector<BlockView>&
       }
       if (b > 1 && blks[b - 1].succs.size() == 1 && blks[b - 1].succs[0] == b && latch_in_b_succs &&
           latch_has_stride(1) && (latch_has_stride(4) || latch_has_stride(16))) {
-        deltas[b] += 1;
+        restored[b].push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))");
       }
     }
   }
 
-  return deltas;
+  return restored;
 }
 
-void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
-  if (delta <= 0 || blk == nullptr) {
+void ApplyBlockRestoredInsns(RtlBasicBlock* blk, const std::vector<std::string>& sexprs) {
+  if (sexprs.empty() || blk == nullptr) {
     return;
   }
   size_t insert_pos = blk->rtl_insns.size();
@@ -356,12 +376,13 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
     insert_pos = blk->rtl_insns.size() - 1;
   }
   std::vector<RtlInsn> new_insns;
-  new_insns.reserve(blk->rtl_insns.size() + static_cast<size_t>(delta));
+  new_insns.reserve(blk->rtl_insns.size() + sexprs.size());
   new_insns.insert(new_insns.end(), blk->rtl_insns.begin(),
                    blk->rtl_insns.begin() + static_cast<std::ptrdiff_t>(insert_pos));
-  for (int d = 0; d < delta; ++d) {
+  for (const std::string& sexpr : sexprs) {
     RtlInsn restored;
     restored.canonical_pattern = std::string(kPaddingNoopPattern);
+    restored.rtl_sexpr_pattern = sexpr;
     restored.idiom_kind = RtlFusedIdiomKind::kSingleInstruction;
     restored.is_synthetic_rtl_expansion = true;
     new_insns.push_back(std::move(restored));
@@ -380,8 +401,13 @@ void ApplyBlockDelta(RtlBasicBlock* blk, int delta) {
 
 }  // namespace
 
-void InverseCse2PostLoopLifter::InvertCse2ToLoopRtlCfg(RtlControlFlowGraph* cfg) {
+void InverseCse2PostLoopLifter::InvertCse2ToLoopRtlCfg(RtlControlFlowGraph* cfg,
+                                                       const ParsedCompilerFlags* flags) {
   if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  cfg->pass = RtlPassKind::kLoop;
+  if (flags != nullptr && !flags->RunsOptimizerPasses()) {
     return;
   }
 
@@ -404,9 +430,20 @@ void InverseCse2PostLoopLifter::InvertCse2ToLoopRtlCfg(RtlControlFlowGraph* cfg)
     blks.push_back(std::move(bview));
   }
 
-  const std::vector<int> deltas = PredictCse2PostLoopDeadInsnDeltas(blks);
+  std::vector<size_t> stride3_preheaders;
+  const std::vector<std::vector<std::string>> restored =
+      PredictCse2PostLoopDeadInsnSexprs(blks, &stride3_preheaders);
+  for (size_t ph : stride3_preheaders) {
+    if (ph < cfg->rpo_blocks.size() && cfg->rpo_blocks[ph].rtl_insns.size() == 3) {
+      cfg->rpo_blocks[ph].rtl_insns[0].rtl_sexpr_pattern = "(set (reg:SI 2 v0) (reg:SI 2 v0))";
+      cfg->rpo_blocks[ph].rtl_insns[1].rtl_sexpr_pattern =
+          "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))";
+      cfg->rpo_blocks[ph].rtl_insns[2].rtl_sexpr_pattern =
+          "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 2 v0)))";
+    }
+  }
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
-    ApplyBlockDelta(&cfg->rpo_blocks[b], deltas[b]);
+    ApplyBlockRestoredInsns(&cfg->rpo_blocks[b], restored[b]);
   }
 }
 
