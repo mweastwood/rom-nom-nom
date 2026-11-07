@@ -75,6 +75,7 @@ extern int flag_schedule_insns;
 extern int flag_schedule_insns_after_reload;
 extern int flag_delayed_branch;
 extern int flag_omit_frame_pointer;
+extern int frame_pointer_needed;
 extern int cse_not_expected;
 extern const char* mips_cpu_string;
 extern const char* mips_isa_string;
@@ -91,18 +92,37 @@ struct GccLangIndepOption {
 extern GccLangIndepOption f_options[52];
 
 extern rtx_def* pc_rtx;
+extern rtx_def* stack_pointer_rtx;
+extern rtx_def* frame_pointer_rtx;
+extern rtx_def* arg_pointer_rtx;
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
 int get_frame_size();
 int compute_frame_size(int size);
 extern char regs_ever_live[];
+extern char call_used_regs[];
+extern char global_regs[];
+extern int reg_class_size[];
 extern rtx_def* current_function_epilogue_delay_list;
 rtx_def* delete_insn(rtx_def* insn);
 void init_alias_analysis();
+void init_recog();
 void init_recog_no_volatile();
 int recog(rtx_def* x0, rtx_def* insn, int* pnum_clobbers);
 void allocate_for_life_analysis();
+void regclass_init();
 void regclass(rtx_def* f, int nregs);
+int reg_preferred_class(int regno);
+int reg_alternate_class(int regno);
+int simplejump_p(rtx_def* insn);
+rtx_def* next_label(rtx_def* insn);
+rtx_def* single_set(rtx_def* insn);
+int rtx_equal_p(rtx_def* x, rtx_def* y);
+rtx_def* find_reg_note(rtx_def* insn, int kind, rtx_def* datum);
+int volatile_refs_p(rtx_def* x);
+void note_stores(rtx_def* x, void (*fun)(rtx_def*, rtx_def*));
+rtx_def* try_split(rtx_def* pat, rtx_def* trial, int last);
+void reposition_prologue_and_epilogue_notes(rtx_def* f);
 int gcc_obstack_begin(GccObstack* h, int size, int alignment, void* (*chunkfun)(long),
                       void (*freefun)(void*)) __asm__("_obstack_begin");
 void _obstack_newchunk(GccObstack* h, int length);
@@ -118,6 +138,8 @@ void final_end_function(rtx_def* first, FILE* file, int optimize);
 rtx_def* final_scan_insn(rtx_def* insn, FILE* file, int optimize, int prescan, int nopeepholes);
 void function_prologue(FILE* file, int size);
 void function_epilogue(FILE* file, int size);
+extern char* line_note_exists;
+extern rtx_def* last_ignored_compare;
 
 // Stage 0: Binutils 2.6 GAS.
 struct GasMipsOpcode {
@@ -144,6 +166,11 @@ struct GasExpressionS {
 
 extern GasFrag* frag_now;
 extern int mips_noreorder;
+extern int mips_optimize;
+extern int mips_debug;
+extern int mips_isa;
+extern int file_mips_isa;
+extern int mips_cpu;
 extern int prev_insn_valid;
 extern char* insn_error;
 extern GasExpressionS imm_expr;
@@ -196,12 +223,19 @@ void find_cross_jump(rtx_def* e1, rtx_def* e2, int minimum, rtx_def** f1, rtx_de
 void do_cross_jump(rtx_def* insn, rtx_def* newjpos, rtx_def* newlpos);
 int redirect_jump(rtx_def* jump, rtx_def* nlabel);
 int invert_jump(rtx_def* jump, rtx_def* nlabel);
+rtx_def* prev_real_insn(rtx_def* insn);
+rtx_def* next_real_insn(rtx_def* insn);
+rtx_def* condjump_label(rtx_def* insn);
 
 // Stage 3 & Stage 6: Sched (`sched.c`).
 void schedule_insns(FILE* dump_file);
 int schedule_block(int b, FILE* file);
+void update_flow_info(rtx_def* notes, rtx_def* first, rtx_def* last, rtx_def* orig_insn);
 
 extern rtx_def* sched_before_next_call;
+extern rtx_def* unused_insn_list;
+extern rtx_def* unused_expr_list;
+extern rtx_def* note_list;
 extern int* insn_luid;
 extern int* insn_priority;
 extern int* insn_tick;
@@ -265,6 +299,9 @@ rtx_def* try_combine(rtx_def* i3, rtx_def* i2, rtx_def* i1);
 rtx_def* subst(rtx_def* x, rtx_def* from, rtx_def* to, int in_dest, int unique_copy);
 rtx_def* simplify_rtx(rtx_def* x, int op0_mode, int last, int in_dest);
 void init_reg_last_arrays();
+void setup_incoming_promotions();
+void set_nonzero_bits_and_sign_copies(rtx_def* x, rtx_def* set);
+void record_dead_and_set_regs(rtx_def* insn);
 
 struct GccUndo {
   int is_int;
@@ -302,26 +339,54 @@ extern char* reg_last_set_sign_bit_copies;
 extern int* combine_uid_cuid;
 extern int max_uid_cuid;
 extern int nonzero_bits_mode;
+extern int nonzero_sign_valid;
 extern int label_tick;
 extern rtx_def* subst_prev_insn;
 extern int subst_low_cuid;
+extern rtx_def* subst_insn;
+extern int this_basic_block;
+extern int last_call_cuid;
+extern int mem_last_set;
 
-// Stage 8: Flow (`flow.c`).
+// Stage 8: Flow (`flow.c`, `stupid.c`).
 void flow_analysis(rtx_def* f, int nregs, FILE* file);
 void find_basic_blocks(rtx_def* f, rtx_def* nonlocal_label_list);
 void life_analysis(rtx_def* f, int nregs);
 void propagate_block(int* old, rtx_def* first, rtx_def* last, int final, int* significant,
                      int bnum);
+void stupid_life_analysis(rtx_def* f, int nregs, FILE* file);
 extern char* basic_block_drops_in;
 extern int* uid_block_number;
 extern char* uid_volatile;
 extern int max_uid_for_flow;
 extern short* basic_block_loop_depth;
+extern rtx_def** reg_next_use;
+extern uint32_t* regs_live_at_setjmp;
+extern uint64_t elim_reg_set[2];
 
 // Stage 9 & Stage 11: CSE (`cse.c`).
+struct CseBranchPathEntry {
+  rtx_def* branch;
+  int status;
+};
+
+struct CseBasicBlockData {
+  int low_cuid;
+  int high_cuid;
+  int nsets;
+  rtx_def* last;
+  int path_size;
+  CseBranchPathEntry path[10];
+};
+
 int cse_main(rtx_def* f, int nregs, int after_loop, FILE* file);
+void cse_end_of_basic_block(rtx_def* insn, CseBasicBlockData* data, int follow_jumps,
+                            int after_loop, int skip_blocks);
 rtx_def* cse_basic_block(rtx_def* from, rtx_def* to, void* next_branch, int around_loop);
 rtx_def* fold_rtx(rtx_def* x, rtx_def* insn);
+extern char fixed_regs[];
+extern int flag_pic;
+extern uint32_t regs_invalidated_by_call[4];
 void new_basic_block();
 
 extern int cse_max_uid;
@@ -344,6 +409,9 @@ extern int* reg_next_eqv;
 extern int* reg_prev_eqv;
 extern int cse_basic_block_start;
 extern int cse_basic_block_end;
+extern int cse_jumps_altered;
+extern int recorded_label_ref;
+extern int constant_pool_entries_cost;
 extern int max_elements_made;
 extern int n_elements_made;
 extern int* all_minus_one;
@@ -355,6 +423,8 @@ extern rtx_def* memory_extend_rtx;
 // Stage 10: Loop (`loop.c`).
 void loop_optimize(rtx_def* f, FILE* dumpfile, int unroll_p);
 void scan_loop(rtx_def* loop_start, rtx_def* end, int nregs);
+void move_movables(void* movables, int threshold, int insn_count, rtx_def* loop_start, rtx_def* end,
+                   int nregs);
 void strength_reduce(rtx_def* scan_start, rtx_def* end, rtx_def* loop_top, int insn_count,
                      rtx_def* loop_start, rtx_def* loop_end);
 void count_loop_regs_set(rtx_def* from, rtx_def* to, char* may_not_move, rtx_def** single_usage,
@@ -383,6 +453,7 @@ extern int loop_has_volatile;
 extern rtx_def* loop_continue;
 extern int loops_enclosed;
 extern GccObstack temp_obstack;
+extern FILE* loop_dump_stream;
 
 // Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`).
 void expand_function_end(char* filename, int line, int end_bindings);
@@ -520,6 +591,27 @@ void StripFlowGeneratedNotes(Rtx first) {
   }
 }
 
+void DeduplicateRegEquivNotes(Rtx first) {
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
+      continue;
+    }
+    bool seen_equiv = false;
+    Rtx* link = &insn->fld[6].rtx;
+    while (*link != nullptr) {
+      Rtx cur = *link;
+      if (cur->mode == kRegEquiv) {
+        if (seen_equiv) {
+          *link = cur->fld[1].rtx;
+          continue;
+        }
+        seen_equiv = true;
+      }
+      link = &cur->fld[1].rtx;
+    }
+  }
+}
+
 }  // namespace
 
 FunctionHooks::FunctionHooks(GccContext* ctx) : ctx_(ctx) {}
@@ -534,12 +626,16 @@ std::string FunctionHooks::RunFinal(Rtx first) {
     return "";
   }
   reload_completed = 1;
+  frame_pointer_needed = (flag_omit_frame_pointer == 0) ? 1 : 0;
   bool has_sequence = false;
+  int max_line = 0;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
         insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence) {
       has_sequence = true;
-      break;
+    }
+    if (insn->code == kNote && insn->fld[4].rtint > max_line) {
+      max_line = insn->fld[4].rtint;
     }
   }
   if (!has_sequence) {
@@ -549,33 +645,64 @@ std::string FunctionHooks::RunFinal(Rtx first) {
   shorten_branches(head);
   compute_frame_size(get_frame_size());
 
-  char* buf = nullptr;
-  size_t len = 0;
-  FILE* mem_fp = open_memstream(&buf, &len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = mem_fp;
-  final_start_function(head, mem_fp, optimize);
-  final(head, mem_fp, optimize, 0);
-  final_end_function(head, mem_fp, optimize);
-  asm_out_file = saved_asm;
-  std::fclose(mem_fp);
+  last_ignored_compare = nullptr;
+  line_note_exists = AllocZeroed<char>(max_line + 16);
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code == kNote && insn->fld[4].rtint > 0) {
+      line_note_exists[insn->fld[4].rtint] = 1;
+    }
+  }
+  init_recog();
 
-  std::string out(buf != nullptr ? buf : "", len);
-  std::free(buf);
+  char* start_buf = nullptr;
+  size_t start_len = 0;
+  FILE* start_fp = open_memstream(&start_buf, &start_len);
+  FILE* saved_asm = asm_out_file;
+  asm_out_file = start_fp;
+  final_start_function(head, start_fp, optimize);
+  asm_out_file = saved_asm;
+  std::fclose(start_fp);
+  std::string out(start_buf != nullptr ? start_buf : "", start_len);
+  std::free(start_buf);
+
+  for (Rtx insn = head->fld[2].rtx; insn != nullptr;) {
+    out.append(RunFinalScanInsn(insn, /*prescan=*/0, &insn));
+  }
+
+  char* end_buf = nullptr;
+  size_t end_len = 0;
+  FILE* end_fp = open_memstream(&end_buf, &end_len);
+  asm_out_file = end_fp;
+  final_end_function(head, end_fp, optimize);
+  asm_out_file = saved_asm;
+  std::fclose(end_fp);
+  if (end_buf != nullptr && end_len > 0) {
+    out.append(end_buf, end_len);
+  }
+  std::free(end_buf);
   return out;
 }
 
-std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan) {
+std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_insn_out) {
   if (insn == nullptr) {
+    if (next_insn_out != nullptr) {
+      *next_insn_out = nullptr;
+    }
     return "";
   }
   reload_completed = 1;
+  if (line_note_exists == nullptr) {
+    line_note_exists = AllocZeroed<char>(1024);
+  }
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
   FILE* saved_asm = asm_out_file;
   asm_out_file = mem_fp;
-  final_scan_insn(insn, mem_fp, optimize, prescan, 0);
+  Rtx next = final_scan_insn(insn, mem_fp, optimize, prescan, 0);
+  if (next_insn_out != nullptr) {
+    *next_insn_out = next;
+  }
   asm_out_file = saved_asm;
   std::fclose(mem_fp);
 
@@ -1140,12 +1267,6 @@ void FunctionHooks::PrepareSchedState(Rtx first) {
 
   sched_reg_n_calls_crossed = AllocZeroed<int>(max_regno + 16);
   sched_reg_live_length = AllocZeroed<int>(max_regno + 16);
-  if (reg_n_calls_crossed != nullptr) {
-    std::memcpy(sched_reg_n_calls_crossed, reg_n_calls_crossed, max_regno * sizeof(int));
-  }
-  if (reg_live_length != nullptr) {
-    std::memcpy(sched_reg_live_length, reg_live_length, max_regno * sizeof(int));
-  }
   bb_dead_regs = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_size + 4));
   bb_live_regs = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_size + 4));
 }
@@ -1168,9 +1289,10 @@ SavedFlowState CaptureExistingFlowState(Rtx first) {
       basic_block_live_at_start == nullptr) {
     return state;
   }
+  const int nregs = std::max(max_regno, max_reg_num());
   bool has_reg_dead = false;
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
-    if (insn->code == kInsn || insn->code == kJumpInsn) {
+    if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
       for (Rtx link = insn->fld[6].rtx; link != nullptr; link = link->fld[1].rtx) {
         if (static_cast<int>(link->mode) == kRegDead) {
           has_reg_dead = true;
@@ -1178,16 +1300,22 @@ SavedFlowState CaptureExistingFlowState(Rtx first) {
       }
     }
   }
-  if (!has_reg_dead) {
+  bool has_live_lengths = false;
+  for (int r = kFirstPseudoRegister; r < nregs; ++r) {
+    if (reg_live_length[r] != 0) {
+      has_live_lengths = true;
+      break;
+    }
+  }
+  if (!has_reg_dead && !has_live_lengths) {
     return SavedFlowState{};
   }
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
-    if (insn->code == kInsn || insn->code == kJumpInsn) {
+    if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
       state.insn_reg_notes.emplace_back(insn, insn->fld[6].rtx);
       insn->fld[6].rtx = nullptr;
     }
   }
-  const int nregs = std::max(max_regno, max_reg_num());
   if (nregs > 0) {
     if (reg_n_refs != nullptr) {
       state.saved_n_refs.assign(reg_n_refs, reg_n_refs + nregs);
@@ -1309,9 +1437,160 @@ void FunctionHooks::RunScheduleBlock(int bb_index, Rtx first) {
   if (head == nullptr) {
     return;
   }
-  PrepareSchedState(head);
+  if (!in_sched_pass_) {
+    PrepareSchedState(head);
+  }
   if (bb_index >= 0 && bb_index < n_basic_blocks) {
     schedule_block(bb_index, nullptr);
+  }
+}
+
+void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
+  Rtx head = first != nullptr ? first : ctx_->GetInsns();
+  if (head == nullptr) {
+    return;
+  }
+  const int saved_reload_completed = reload_completed;
+  if (saved_reload_completed == 0 || basic_block_live_at_start == nullptr) {
+    const int saved_nregs = std::max(max_regno, max_reg_num());
+    std::vector<int> saved_n_refs;
+    std::vector<int> saved_live_length;
+    if (saved_reload_completed == 0 && saved_nregs > 0) {
+      if (reg_n_refs != nullptr) {
+        saved_n_refs.assign(reg_n_refs, reg_n_refs + saved_nregs);
+      }
+      if (reg_live_length != nullptr) {
+        saved_live_length.assign(reg_live_length, reg_live_length + saved_nregs);
+      }
+    }
+    StripFlowGeneratedNotes(head);
+    restore_reg_data(head);
+    max_regno = max_reg_num();
+    reg_scan(head, max_regno, 0);
+    flow_analysis(head, max_regno, nullptr);
+    if (!saved_n_refs.empty() && reg_n_refs != nullptr) {
+      const int limit = std::min<int>(saved_n_refs.size(), max_regno);
+      for (int r = 0; r < limit; ++r) {
+        if (saved_n_refs[r] > 0) {
+          if (reg_n_refs[r] > 0) {
+            reg_n_refs[r] = saved_n_refs[r];
+          } else if (r < static_cast<int>(saved_live_length.size()) && saved_live_length[r] != 0 &&
+                     reg_live_length != nullptr && reg_live_length[r] == 0) {
+            reg_n_refs[r] = saved_n_refs[r];
+            reg_live_length[r] = saved_live_length[r];
+          }
+        }
+      }
+    }
+  } else {
+    restore_reg_data(head);
+    max_regno = max_reg_num();
+    reg_scan(head, max_regno, 0);
+    RunFindBasicBlocks(head, nullptr);
+    RefreshJumpLabelsAndNuses(head);
+  }
+  init_alias_analysis();
+  reload_completed = saved_reload_completed;
+  if (n_basic_blocks <= 0) {
+    return;
+  }
+
+  const int max_uid = (get_max_uid() + 1) * 4;
+  sched_before_next_call = make_insn_raw(nullptr);
+  if (reload_completed == 0 || flag_schedule_insns == 0) {
+    unused_insn_list = nullptr;
+    unused_expr_list = nullptr;
+  }
+  insn_luid = AllocZeroed<int>(max_uid + 1);
+  insn_priority = AllocZeroed<int>(max_uid + 1);
+  insn_tick = AllocZeroed<int>(max_uid + 1);
+  insn_costs = AllocZeroed<short>(max_uid + 1);
+  insn_units = AllocZeroed<short>(max_uid + 1);
+  insn_blockage = AllocZeroed<unsigned int>(max_uid + 1);
+  insn_ref_count = AllocZeroed<int>(max_uid + 1);
+
+  if (reload_completed != 0) {
+    sched_reg_n_calls_crossed = nullptr;
+    sched_reg_live_length = nullptr;
+    bb_dead_regs = nullptr;
+    bb_live_regs = nullptr;
+  } else {
+    sched_reg_n_calls_crossed = AllocZeroed<int>(max_regno + 16);
+    sched_reg_live_length = AllocZeroed<int>(max_regno + 16);
+    bb_dead_regs = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_size + 4));
+    bb_live_regs = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_size + 4));
+  }
+
+  if (basic_block_end[n_basic_blocks - 1] != nullptr &&
+      basic_block_end[n_basic_blocks - 1]->fld[2].rtx == nullptr) {
+    emit_note(nullptr, kNoteInsnDeleted);
+  }
+
+  in_sched_pass_ = true;
+  for (int b = 0; b < n_basic_blocks; ++b) {
+    note_list = nullptr;
+    for (Rtx insn = basic_block_head[b]; insn != nullptr;) {
+      Rtx prev = insn->fld[1].rtx;
+      Rtx next = insn->fld[2].rtx;
+      if (insn->code == kInsn) {
+        Rtx set = single_set(insn);
+        if (set != nullptr && rtx_equal_p(set->fld[1].rtx, set->fld[0].rtx) != 0) {
+          if (insn == basic_block_end[b]) {
+            break;
+          }
+          if (reload_completed != 0) {
+            insn->code = kNote;
+            insn->fld[4].rtint = kNoteInsnDeleted;
+            insn->fld[3].rtx = nullptr;
+          }
+          insn = next;
+          continue;
+        }
+        if (reload_completed == 0) {
+          Rtx notes = insn->fld[6].rtx;
+          Rtx last = try_split(insn->fld[3].rtx, insn, 1);
+          if (last != insn) {
+            Rtx first_new = prev->fld[2].rtx;
+            update_flow_info(notes, first_new, last, insn);
+            insn->code = kNote;
+            insn->fld[3].rtx = nullptr;
+            insn->fld[4].rtint = kNoteInsnDeleted;
+            if (basic_block_head[b] == insn) {
+              basic_block_head[b] = first_new;
+            }
+            if (basic_block_end[b] == insn) {
+              basic_block_end[b] = last;
+              break;
+            }
+            insn = last->fld[2].rtx;
+            continue;
+          }
+        }
+      }
+      if (insn == basic_block_end[b]) {
+        break;
+      }
+      insn = next;
+    }
+    RunScheduleBlock(b, head);
+  }
+  in_sched_pass_ = false;
+
+  if (reload_completed != 0) {
+    reposition_prologue_and_epilogue_notes(get_insns());
+  } else {
+    for (int i = 0; i < max_regno; ++i) {
+      if (sched_reg_live_length[i] != 0) {
+        if (reg_live_length[i] >= 0) {
+          reg_live_length[i] = sched_reg_live_length[i];
+        }
+        if (sched_reg_n_calls_crossed[i] != 0) {
+          reg_n_calls_crossed[i] = sched_reg_n_calls_crossed[i];
+        } else if (reg_n_calls_crossed[i] != 0 && reg_basic_block[i] != -2) {
+          reg_n_calls_crossed[i] = 0;
+        }
+      }
+    }
   }
 }
 
@@ -1325,7 +1604,7 @@ void FunctionHooks::PrepareLocalAllocState(Rtx first) {
   RestoreExistingFlowState(saved_flow);
   regclass(first, max_regno);
 
-  const int max_qty_val = std::max(32, (max_regno - kFirstPseudoRegister) + max_scratch + 16);
+  const int max_qty_val = std::max(32, (max_regno - kFirstPseudoRegister) * 2 + max_scratch + 16);
   scratch_list_length = max_qty_val;
   scratch_index = 0;
   scratch_list = AllocZeroed<Rtx>(max_qty_val);
@@ -1353,14 +1632,15 @@ void FunctionHooks::PrepareLocalAllocState(Rtx first) {
   reg_renumber = AllocZeroed<short>(max_regno + 16);
   for (int i = 0; i < max_regno; ++i) {
     if (i >= kFirstPseudoRegister && reg_basic_block != nullptr && reg_n_deaths != nullptr &&
-        reg_basic_block[i] >= 0 && reg_n_deaths[i] == 1) {
+        reg_basic_block[i] >= 0 && reg_n_deaths[i] == 1 &&
+        (reg_alternate_class(i) == 0 || reg_class_size[reg_preferred_class(i)] != 1)) {
       lra_reg_qty[i] = -2;
     } else {
       lra_reg_qty[i] = -1;
     }
     reg_renumber[i] = -1;
   }
-  lra_next_qty = 0;
+  lra_next_qty = max_qty_val;
 }
 
 void FunctionHooks::RunLocalAlloc(Rtx first) {
@@ -1384,8 +1664,31 @@ void FunctionHooks::RunBlockAlloc(int bb_index, Rtx first) {
   if (head == nullptr) {
     return;
   }
-  PrepareLocalAllocState(head);
+  if (!in_local_alloc_pass_) {
+    PrepareLocalAllocState(head);
+  }
   if (bb_index >= 0 && bb_index < n_basic_blocks) {
+    for (int i = 0; i < lra_next_qty; ++i) {
+      lra_qty_first_reg[i] = -1;
+      qty_scratch_rtx[i] = nullptr;
+      qty_size[i] = 0;
+      static_cast<int*>(lra_qty_mode)[i] = 0;
+      static_cast<int*>(qty_min_class)[i] = 0;
+      static_cast<int*>(qty_alternate_class)[i] = 0;
+      qty_birth[i] = -1;
+      qty_death[i] = -1;
+      qty_n_calls_crossed[i] = 0;
+      qty_n_refs[i] = 0;
+      qty_changes_size[i] = 0;
+      qty_phys_reg[i] = -1;
+      qty_phys_num_sugg[i] = 0;
+      qty_phys_num_copy_sugg[i] = 0;
+    }
+    if (lra_next_qty > 0) {
+      std::memset(qty_phys_sugg, 0, lra_next_qty * 2 * sizeof(uint64_t));
+      std::memset(qty_phys_copy_sugg, 0, lra_next_qty * 2 * sizeof(uint64_t));
+    }
+    lra_next_qty = 0;
     block_alloc(bb_index);
   }
 }
@@ -1397,6 +1700,7 @@ void FunctionHooks::RunUpdateEquivRegs(Rtx first) {
   }
   PrepareLocalAllocState(head);
   update_equiv_regs();
+  DeduplicateRegEquivNotes(head);
 }
 
 int FunctionHooks::RunGlobalAlloc(Rtx first) {
@@ -1404,7 +1708,18 @@ int FunctionHooks::RunGlobalAlloc(Rtx first) {
   if (head == nullptr) {
     return 0;
   }
-  RunLocalAlloc(head);
+  const int saved_max_regno = std::max(max_regno, max_reg_num());
+  std::vector<short> saved_renumber;
+  if (reg_renumber != nullptr && saved_max_regno > 0) {
+    saved_renumber.assign(reg_renumber, reg_renumber + saved_max_regno);
+  }
+  PrepareLocalAllocState(head);
+  if (!saved_renumber.empty() && reg_renumber != nullptr) {
+    const int limit = std::min<int>(saved_renumber.size(), max_regno + 16);
+    for (int i = 0; i < limit; ++i) {
+      reg_renumber[i] = saved_renumber[i];
+    }
+  }
   return global_alloc(nullptr);
 }
 
@@ -1424,7 +1739,19 @@ int FunctionHooks::RunReload(Rtx first, int global) {
   std::memcpy(saved_regs_ever_live, regs_ever_live, sizeof(saved_regs_ever_live));
 
   reload_completed = 0;
-  PrepareLocalAllocState(head);
+  if (obey_regdecls != 0) {
+    StripFlowGeneratedNotes(head);
+    restore_reg_data(head);
+    max_regno = max_reg_num();
+    reg_scan(head, max_regno, 0);
+    regclass_init();
+    regclass(head, max_regno);
+    stupid_life_analysis(head, max_regno, nullptr);
+    scratch_list_length = 0;
+    scratch_list = nullptr;
+  } else {
+    PrepareLocalAllocState(head);
+  }
 
   if (!saved_renumber.empty() && reg_renumber != nullptr) {
     const int limit = std::min<int>(saved_renumber.size(), max_regno + 16);
@@ -1554,10 +1881,138 @@ void FunctionHooks::RunCombineInstructions(Rtx first, int nregs) {
 
 Rtx FunctionHooks::RunTryCombine(Rtx i3, Rtx i2, Rtx i1) {
   Rtx head = ctx_->GetInsns();
-  if (head != nullptr) {
+  if (!in_combine_pass_ && head != nullptr) {
     PrepareCombineState(head);
   }
   return try_combine(i3, i2, i1);
+}
+
+void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
+  Rtx head = first != nullptr ? first : ctx_->GetInsns();
+  if (head == nullptr) {
+    return;
+  }
+  restore_reg_data(head);
+  const int num_regs = nregs > 0 ? nregs : max_reg_num();
+  max_regno = num_regs;
+  reg_scan(head, num_regs, 0);
+
+  bool has_existing_log_links = false;
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+        insn->fld[5].rtx != nullptr) {
+      has_existing_log_links = true;
+      break;
+    }
+  }
+  if (!has_existing_log_links) {
+    StripFlowGeneratedNotes(head);
+    flow_analysis(head, num_regs, nullptr);
+  }
+
+  const int alloc_regs = std::max(num_regs, max_reg_num()) + 16;
+  combine_max_regno = num_regs;
+  undobuf.num_undo = 0;
+  undobuf.other_insn = nullptr;
+  previous_num_undos = 0;
+
+  reg_nonzero_bits = AllocZeroed<uint64_t>(alloc_regs);
+  reg_sign_bit_copies = AllocZeroed<char>(alloc_regs);
+  reg_last_death = AllocZeroed<Rtx>(alloc_regs);
+  reg_last_set = AllocZeroed<Rtx>(alloc_regs);
+  reg_last_set_value = AllocZeroed<Rtx>(alloc_regs);
+  reg_last_set_table_tick = AllocZeroed<int>(alloc_regs);
+  reg_last_set_label = AllocZeroed<int>(alloc_regs);
+  reg_last_set_invalid = AllocZeroed<char>(alloc_regs);
+  reg_last_set_mode = AllocZeroed<int>(alloc_regs);
+  reg_last_set_nonzero_bits = AllocZeroed<uint64_t>(alloc_regs);
+  reg_last_set_sign_bit_copies = AllocZeroed<char>(alloc_regs);
+  init_reg_last_arrays();
+  init_recog_no_volatile();
+
+  int max_uid = 0;
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->fld[0].rtint > max_uid) {
+      max_uid = insn->fld[0].rtint;
+    }
+  }
+  max_uid += 64;
+  max_uid_cuid = max_uid;
+  combine_uid_cuid = AllocZeroed<int>(max_uid + 1);
+  int cuid = 0;
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    combine_uid_cuid[insn->fld[0].rtint] = ++cuid;
+  }
+
+  nonzero_bits_mode = kSiMode;
+  label_tick = 1;
+  last_call_cuid = 0;
+  mem_last_set = 0;
+  subst_prev_insn = nullptr;
+
+  in_combine_pass_ = true;
+
+  // Pre-pass scan to populate `reg_nonzero_bits` and `reg_sign_bit_copies`
+  // (`combine.c:552-590`).
+  nonzero_sign_valid = 0;
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code == kInsn || insn->code == kCallInsn || insn->code == kJumpInsn) {
+      subst_low_cuid = combine_uid_cuid[insn->fld[0].rtint];
+      subst_insn = insn;
+      record_dead_and_set_regs(insn);
+      if (insn->code == kCallInsn) {
+        last_call_cuid = combine_uid_cuid[insn->fld[0].rtint];
+        mem_last_set = combine_uid_cuid[insn->fld[0].rtint];
+      }
+    } else if (insn->code == kCodeLabel) {
+      ++label_tick;
+    }
+  }
+
+  nonzero_sign_valid = 1;
+  label_tick = 1;
+  last_call_cuid = 0;
+  mem_last_set = 0;
+  init_reg_last_arrays();
+
+  for (Rtx insn = head, next = nullptr; insn != nullptr; insn = next ? next : insn->fld[2].rtx) {
+    next = nullptr;
+    if (insn->code == kCodeLabel) {
+      ++label_tick;
+    } else if (insn->code == kInsn || insn->code == kCallInsn || insn->code == kJumpInsn) {
+      for (Rtx links = insn->fld[5].rtx; links != nullptr; links = links->fld[1].rtx) {
+        next = RunTryCombine(insn, links->fld[0].rtx, nullptr);
+        if (next != nullptr) {
+          goto retry;
+        }
+        for (Rtx nextlinks = links->fld[1].rtx; nextlinks != nullptr;
+             nextlinks = nextlinks->fld[1].rtx) {
+          next = RunTryCombine(insn, links->fld[0].rtx, nextlinks->fld[0].rtx);
+          if (next != nullptr) {
+            goto retry;
+          }
+        }
+      }
+
+      for (Rtx links = insn->fld[5].rtx; links != nullptr; links = links->fld[1].rtx) {
+        Rtx link_insn = links->fld[0].rtx;
+        if (link_insn != nullptr && link_insn->code != kNote) {
+          for (Rtx nextlinks = link_insn->fld[5].rtx; nextlinks != nullptr;
+               nextlinks = nextlinks->fld[1].rtx) {
+            next = RunTryCombine(insn, link_insn, nextlinks->fld[0].rtx);
+            if (next != nullptr) {
+              goto retry;
+            }
+          }
+        }
+      }
+
+      record_dead_and_set_regs(insn);
+    retry:;
+    }
+  }
+
+  in_combine_pass_ = false;
 }
 
 Rtx FunctionHooks::RunSubst(Rtx x, Rtx from, Rtx to, int in_dest, int unique_copy) {
@@ -1598,6 +2053,11 @@ void FunctionHooks::RunFindBasicBlocks(Rtx first, Rtx nonlocal_label_list) {
   if (head == nullptr) {
     return;
   }
+  // `flow_analysis` initializes `elim_reg_set` from `eliminables` (`$fp` = 30
+  // and `$arg` = 66 on MIPS) so `mark_used_regs` does not prematurely mark `$fp`
+  // in `regs_ever_live` before reload decides whether a frame pointer is needed.
+  elim_reg_set[0] = (1ULL << 30);
+  elim_reg_set[1] = (1ULL << (66 - 64));
   int prev_code = kJumpInsn;
   int block_count = 0;
   int max_uid = get_max_uid();
@@ -1656,6 +2116,254 @@ void FunctionHooks::RunPropagateBlock(Rtx old_live, Rtx first_insn, Rtx last_ins
                   reinterpret_cast<int*>(significant), bnum);
 }
 
+namespace {
+
+void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
+  std::memset(regs_ever_live, 0, kFirstPseudoRegister);
+  const int alloc_regs = std::max(nregs, 67) + 16;
+  max_regno = nregs;
+  reg_n_refs = AllocZeroed<int>(alloc_regs);
+  reg_n_sets = AllocZeroed<short>(alloc_regs);
+  reg_n_deaths = AllocZeroed<short>(alloc_regs);
+  reg_n_calls_crossed = AllocZeroed<int>(alloc_regs);
+  reg_live_length = AllocZeroed<int>(alloc_regs);
+  reg_changes_size = AllocZeroed<char>(alloc_regs);
+  reg_basic_block = AllocZeroed<int>(alloc_regs);
+  reg_next_use = AllocZeroed<Rtx>(alloc_regs);
+  for (int i = 0; i < alloc_regs; ++i) {
+    reg_basic_block[i] = -1;
+  }
+
+  regset_size = (nregs + 31) / 32;
+  if (regset_size < 1) {
+    regset_size = 1;
+  }
+  regset_bytes = regset_size * static_cast<int>(sizeof(int));
+
+  const int n_blocks = n_basic_blocks;
+  const int alloc_blocks = std::max(1, n_blocks) + 4;
+  basic_block_live_at_start = AllocZeroed<Rtx>(alloc_blocks);
+  std::vector<int*> bb_new_live(alloc_blocks, nullptr);
+  std::vector<int*> bb_significant(alloc_blocks, nullptr);
+  for (int b = 0; b < alloc_blocks; ++b) {
+    basic_block_live_at_start[b] = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_size + 2));
+    bb_new_live[b] = AllocZeroed<int>(regset_size + 2);
+    bb_significant[b] = AllocZeroed<int>(regset_size + 2);
+  }
+  regs_live_at_setjmp = AllocZeroed<uint32_t>(regset_size + 2);
+
+  // Mark stack pointer live at end of function (`flow.c:1039-1052`).
+  if (n_blocks > 0) {
+    reinterpret_cast<int*>(basic_block_live_at_start[n_blocks - 1])[29 / 32] |= (1u << (29 % 32));
+    bb_new_live[n_blocks - 1][29 / 32] |= (1u << (29 % 32));
+  }
+
+  // Initial backward scan (`flow.c:1058-1071`).
+  for (int i = n_blocks - 1; i >= 0; --i) {
+    std::memcpy(bb_new_live[i], basic_block_live_at_start[i], regset_bytes);
+    hooks->RunPropagateBlock(reinterpret_cast<Rtx>(bb_new_live[i]), basic_block_head[i],
+                             basic_block_end[i], /*final_pass=*/0,
+                             reinterpret_cast<Rtx>(bb_significant[i]), i);
+    std::memcpy(basic_block_live_at_start[i], bb_new_live[i], regset_bytes);
+  }
+
+  // Iterative dataflow relaxation across control-flow edges (`flow.c:1076-1208`).
+  std::vector<char> must_rescan(alloc_blocks, 1);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (int i = n_blocks - 1; i >= 0; --i) {
+      if (!must_rescan[i]) {
+        continue;
+      }
+      must_rescan[i] = 0;
+      std::memset(bb_new_live[i], 0, regset_bytes);
+      if (i == n_blocks - 1) {
+        bb_new_live[i][29 / 32] |= (1u << (29 % 32));
+      }
+      if (i + 1 < n_blocks && basic_block_drops_in[i + 1] != 0) {
+        int* src = reinterpret_cast<int*>(basic_block_live_at_start[i + 1]);
+        for (int j = 0; j < regset_size; ++j) {
+          bb_new_live[i][j] |= src[j];
+        }
+      }
+      Rtx jump = basic_block_end[i];
+      if (jump != nullptr && jump->code == kJumpInsn) {
+        for (Rtx insn = jump->fld[2].rtx;
+             insn != nullptr && (insn->code == kBarrier || insn->code == kNote);
+             insn = insn->fld[2].rtx) {
+          if (insn->code == kNote && insn->fld[4].rtint > 0 && insn->fld[2].rtx != nullptr &&
+              insn->fld[2].rtx->code == kJumpInsn &&
+              (insn->fld[2].rtx->fld[3].rtx->code == kAddrVec ||
+               insn->fld[2].rtx->fld[3].rtx->code == kAddrDiffVec)) {
+            Rtx body = insn->fld[2].rtx->fld[3].rtx;
+            const int elt_idx = (body->code == kAddrDiffVec) ? 1 : 0;
+            const int len = body->fld[elt_idx].rtvec->num_elem;
+            for (int k = 0; k < len; ++k) {
+              Rtx targ = body->fld[elt_idx].rtvec->elem[k].rtx->fld[0].rtx;
+              if (targ != nullptr && targ->fld[0].rtint <= max_uid_for_flow) {
+                const int b = uid_block_number[targ->fld[0].rtint];
+                if (b >= 0 && b < n_blocks) {
+                  int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
+                  for (int j = 0; j < regset_size; ++j) {
+                    bb_new_live[i][j] |= src[j];
+                  }
+                }
+              }
+            }
+          }
+        }
+        Rtx label = jump->fld[7].rtx;
+        if (label != nullptr && label->fld[0].rtint <= max_uid_for_flow) {
+          const int b = uid_block_number[label->fld[0].rtint];
+          if (b >= 0 && b < n_blocks) {
+            int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
+            for (int j = 0; j < regset_size; ++j) {
+              bb_new_live[i][j] |= src[j];
+            }
+          }
+        }
+      }
+
+      bool consider = false;
+      bool first_pass_check = false;
+      int* cur_live = reinterpret_cast<int*>(basic_block_live_at_start[i]);
+      for (int j = 0; j < regset_size; ++j) {
+        if (bb_new_live[i][j] & ~cur_live[j]) {
+          first_pass_check = true;
+          if ((bb_new_live[i][j] & ~cur_live[j]) & bb_significant[i][j]) {
+            consider = true;
+            break;
+          }
+        }
+      }
+      if (!first_pass_check) {
+        continue;
+      }
+      if (!consider) {
+        for (int j = 0; j < regset_size; ++j) {
+          cur_live[j] |= bb_new_live[i][j];
+        }
+        if (basic_block_drops_in[i] != 0 && i > 0) {
+          must_rescan[i - 1] = 1;
+          changed = true;
+        }
+        if (basic_block_head[i]->code == kCodeLabel) {
+          for (Rtx ref = basic_block_head[i]->fld[4].rtx; ref != nullptr; ref = ref->fld[5].rtx) {
+            if (ref->fld[0].rtint <= max_uid_for_flow) {
+              const int b = uid_block_number[ref->fld[0].rtint];
+              if (b >= 0 && b < n_blocks) {
+                must_rescan[b] = 1;
+                changed = true;
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      std::vector<int> old_live(cur_live, cur_live + regset_size);
+      hooks->RunPropagateBlock(reinterpret_cast<Rtx>(bb_new_live[i]), basic_block_head[i],
+                               basic_block_end[i], /*final_pass=*/0, nullptr, i);
+      bool prop_changed = false;
+      for (int j = 0; j < regset_size; ++j) {
+        cur_live[j] |= bb_new_live[i][j];
+        if (cur_live[j] != old_live[j]) {
+          prop_changed = true;
+        }
+      }
+      if (prop_changed) {
+        if (basic_block_drops_in[i] != 0 && i > 0) {
+          must_rescan[i - 1] = 1;
+          changed = true;
+        }
+        if (basic_block_head[i]->code == kCodeLabel) {
+          for (Rtx ref = basic_block_head[i]->fld[4].rtx; ref != nullptr; ref = ref->fld[5].rtx) {
+            if (ref->fld[0].rtint <= max_uid_for_flow) {
+              const int b = uid_block_number[ref->fld[0].rtint];
+              if (b >= 0 && b < n_blocks) {
+                must_rescan[b] = 1;
+                changed = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Final pass (`final_pass = 1`) to attach `REG_DEAD` / `REG_UNUSED` notes,
+  // build `LOG_LINKS`, and delete dead instructions (`flow.c:1224-1262`).
+  for (int i = 0; i < n_blocks; ++i) {
+    std::memset(bb_new_live[i], 0, regset_bytes);
+    if (i == n_blocks - 1) {
+      bb_new_live[i][29 / 32] |= (1u << (29 % 32));
+    }
+    if (i + 1 < n_blocks && basic_block_drops_in[i + 1] != 0) {
+      int* src = reinterpret_cast<int*>(basic_block_live_at_start[i + 1]);
+      for (int j = 0; j < regset_size; ++j) {
+        bb_new_live[i][j] |= src[j];
+      }
+    }
+    Rtx jump = basic_block_end[i];
+    if (jump != nullptr && jump->code == kJumpInsn) {
+      for (Rtx insn = jump->fld[2].rtx;
+           insn != nullptr && (insn->code == kBarrier || insn->code == kNote);
+           insn = insn->fld[2].rtx) {
+        if (insn->code == kNote && insn->fld[4].rtint > 0 && insn->fld[2].rtx != nullptr &&
+            insn->fld[2].rtx->code == kJumpInsn &&
+            (insn->fld[2].rtx->fld[3].rtx->code == kAddrVec ||
+             insn->fld[2].rtx->fld[3].rtx->code == kAddrDiffVec)) {
+          Rtx body = insn->fld[2].rtx->fld[3].rtx;
+          const int elt_idx = (body->code == kAddrDiffVec) ? 1 : 0;
+          const int len = body->fld[elt_idx].rtvec->num_elem;
+          for (int k = 0; k < len; ++k) {
+            Rtx targ = body->fld[elt_idx].rtvec->elem[k].rtx->fld[0].rtx;
+            if (targ != nullptr && targ->fld[0].rtint <= max_uid_for_flow) {
+              const int b = uid_block_number[targ->fld[0].rtint];
+              if (b >= 0 && b < n_blocks) {
+                int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
+                for (int j = 0; j < regset_size; ++j) {
+                  bb_new_live[i][j] |= src[j];
+                }
+              }
+            }
+          }
+        }
+      }
+      Rtx label = jump->fld[7].rtx;
+      if (label != nullptr && label->fld[0].rtint <= max_uid_for_flow) {
+        const int b = uid_block_number[label->fld[0].rtint];
+        if (b >= 0 && b < n_blocks) {
+          int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
+          for (int j = 0; j < regset_size; ++j) {
+            bb_new_live[i][j] |= src[j];
+          }
+        }
+      }
+    }
+
+    hooks->RunPropagateBlock(reinterpret_cast<Rtx>(bb_new_live[i]), basic_block_head[i],
+                             basic_block_end[i], /*final_pass=*/1, nullptr, i);
+    std::memset(reg_next_use, 0, nregs * sizeof(Rtx));
+  }
+
+  for (Rtx insn = f; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
+      Rtx pat = insn->fld[3].rtx;
+      if (pat != nullptr && pat->code == kUse && pat->fld[0].rtx != nullptr &&
+          pat->fld[0].rtx->code == kReg) {
+        const int regno = pat->fld[0].rtx->fld[0].rtint;
+        if (regno >= 0 && regno < nregs && reg_n_deaths[regno] == 0 && reg_n_refs[regno] > 0) {
+          reg_live_length[regno] = -1;
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Stage 9 & Stage 11: CSE (`cse.c`)
 // -----------------------------------------------------------------------------
@@ -1680,7 +2388,7 @@ Rtx FunctionHooks::RunCseBasicBlock(Rtx from, Rtx to, void* next_branch, int aro
     Rtx branch = nullptr;
     int status = 0;
   } empty_branch_path{};
-  if (head != nullptr) {
+  if (next_branch == nullptr && head != nullptr) {
     restore_reg_data(head);
     max_reg = std::max(256, max_reg_num() + 16);
     reg_scan(head, max_reg, 1);
@@ -1723,6 +2431,109 @@ Rtx FunctionHooks::RunCseBasicBlock(Rtx from, Rtx to, void* next_branch, int aro
 }
 
 namespace {
+
+int ExecuteCsePassGranular(FunctionHooks* hooks, GccContext* ctx, Rtx f, int nregs,
+                           int after_loop) {
+  CseBasicBlockData val{};
+  Rtx insn = f;
+  int i = 0;
+
+  cse_jumps_altered = 0;
+  recorded_label_ref = 0;
+  constant_pool_entries_cost = 0;
+  val.path_size = 0;
+  init_recog();
+
+  max_reg = nregs;
+  all_minus_one = AllocZeroed<int>(nregs);
+  consec_ints = AllocZeroed<int>(nregs);
+  for (i = 0; i < nregs; ++i) {
+    all_minus_one[i] = -1;
+    consec_ints[i] = i;
+  }
+
+  reg_qty = AllocZeroed<int>(nregs);
+  reg_in_table = AllocZeroed<int>(nregs);
+  reg_tick = AllocZeroed<int>(nregs);
+  reg_next_eqv = AllocZeroed<int>(nregs);
+  reg_prev_eqv = AllocZeroed<int>(nregs);
+
+  memory_extend_rtx = ctx->ParseRtx("(zero_extend (nil))");
+  std::memset(cse_table, 0, sizeof(cse_table));
+  free_element_chain = nullptr;
+  n_elements_made = 0;
+
+  cse_max_uid = get_max_uid();
+  cse_uid_cuid = AllocZeroed<int>(cse_max_uid + 64);
+
+  i = 0;
+  for (Rtx p = f; p != nullptr; p = p->fld[2].rtx) {
+    if (p->code != kNote || p->fld[4].rtint < 0) {
+      ++i;
+    }
+    cse_uid_cuid[p->fld[0].rtint] = i;
+  }
+
+  regs_invalidated_by_call[0] = 0;
+  regs_invalidated_by_call[1] = 0;
+  regs_invalidated_by_call[2] = 0;
+  for (int r = 0; r < 68; ++r) {
+    bool inv = false;
+    if (call_used_regs[r] != 0) {
+      if (r != 29 && r != 30) {
+        if (r == 0) {
+          inv = (fixed_regs[0] == 0);
+        } else if (r == 28) {
+          inv = (flag_pic == 0);
+        } else {
+          inv = true;
+        }
+      }
+    }
+    if (!inv && global_regs[r] != 0) {
+      inv = true;
+    }
+    if (inv) {
+      regs_invalidated_by_call[r >> 5] |= (1u << (r & 31));
+    }
+  }
+
+  // Loop over basic blocks using `cse_end_of_basic_block` and `RunCseBasicBlock`
+  // (`cse_main` `e20b..e372`).
+  while (insn != nullptr) {
+    cse_end_of_basic_block(insn, &val, flag_cse_follow_jumps, after_loop, flag_cse_skip_blocks);
+
+    if (val.nsets == 0 || insn->volatil != 0) {
+      insn->volatil = 0;
+      if (val.last == nullptr) {
+        break;
+      }
+      insn = val.last->fld[2].rtx;
+      val.path_size = 0;
+      continue;
+    }
+
+    cse_basic_block_start = val.low_cuid;
+    cse_basic_block_end = val.high_cuid;
+    max_qty = std::max(500, val.nsets * 2) + max_reg;
+
+    if (val.path_size > 0) {
+      hooks->RunCseBasicBlock(insn, val.last, val.path, 0);
+      continue;
+    }
+
+    const int old_cse_jumps_altered = cse_jumps_altered;
+    cse_jumps_altered = 0;
+    Rtx temp = hooks->RunCseBasicBlock(insn, val.last, val.path, !after_loop);
+    if (cse_jumps_altered != 0 && (flag_cse_follow_jumps != 0 || flag_cse_skip_blocks != 0)) {
+      temp = insn;
+    }
+    cse_jumps_altered |= old_cse_jumps_altered;
+    insn = temp;
+  }
+
+  return cse_jumps_altered != 0 || recorded_label_ref != 0;
+}
 
 void UndoCombineChanges() {
   while (undobuf.num_undo > 0) {
@@ -1796,9 +2607,11 @@ Rtx FunctionHooks::RunFoldRtx(Rtx x, Rtx insn) {
 // -----------------------------------------------------------------------------
 
 void FunctionHooks::PrepareLoopState(Rtx first) {
+  RefreshJumpLabelsAndNuses(first);
   restore_reg_data(first);
   init_recog_no_volatile();
   init_alias_analysis();
+  loop_dump_stream = nullptr;
 
   max_reg_before_loop = max_reg_num();
   moved_once = AllocZeroed<char>(max_reg_before_loop + 64);
@@ -1867,7 +2680,9 @@ void FunctionHooks::RunScanLoop(Rtx loop_start, Rtx end, int nregs) {
   if (head == nullptr) {
     return;
   }
-  PrepareLoopState(head);
+  if (!in_loop_pass_) {
+    PrepareLoopState(head);
+  }
   if ((loop_start == nullptr || end == nullptr) && max_loop_num > 0) {
     if (loop_start == nullptr) {
       loop_start = loop_number_loop_starts[0];
@@ -1879,7 +2694,10 @@ void FunctionHooks::RunScanLoop(Rtx loop_start, Rtx end, int nregs) {
   if (loop_start == nullptr || end == nullptr) {
     return;
   }
+  const int saved_strength_reduce = flag_strength_reduce;
+  flag_strength_reduce = 0;
   scan_loop(loop_start, end, nregs > 0 ? nregs : max_reg_num());
+  flag_strength_reduce = saved_strength_reduce;
 }
 
 void FunctionHooks::RunStrengthReduce(Rtx scan_start, Rtx end, Rtx loop_top, int insn_count,
@@ -1888,7 +2706,9 @@ void FunctionHooks::RunStrengthReduce(Rtx scan_start, Rtx end, Rtx loop_top, int
   if (head == nullptr) {
     return;
   }
-  PrepareLoopState(head);
+  if (!in_loop_pass_) {
+    PrepareLoopState(head);
+  }
   if ((loop_start == nullptr || loop_end == nullptr) && max_loop_num > 0) {
     if (loop_start == nullptr) {
       loop_start = loop_number_loop_starts[0];
@@ -1904,30 +2724,50 @@ void FunctionHooks::RunStrengthReduce(Rtx scan_start, Rtx end, Rtx loop_top, int
     end = loop_end;
   }
   if (scan_start == nullptr) {
-    for (Rtx p = loop_start->fld[2].rtx; p != end && p != nullptr; p = p->fld[2].rtx) {
-      if (p->code == kCodeLabel || p->code == kInsn || p->code == kJumpInsn ||
-          p->code == kCallInsn) {
-        scan_start = p;
-        break;
+    Rtx p = loop_start->fld[2].rtx;
+    while (p != end && p != nullptr && p->code != kCodeLabel && rtx_class[p->code] != 'i' &&
+           (p->code != kNote ||
+            (p->fld[4].rtint != kNoteInsnLoopBeg && p->fld[4].rtint != kNoteInsnLoopEnd))) {
+      p = p->fld[2].rtx;
+    }
+    scan_start = p;
+    prescan_loop(loop_start, end);
+    if (p != nullptr && p->code == kJumpInsn) {
+      if (simplejump_p(p) != 0 && p->fld[7].rtx != nullptr &&
+          p->fld[7].rtx->fld[0].rtint < max_uid_for_loop &&
+          uid_luid[p->fld[7].rtx->fld[0].rtint] >= uid_luid[loop_start->fld[0].rtint] &&
+          uid_luid[p->fld[7].rtx->fld[0].rtint] < uid_luid[end->fld[0].rtint]) {
+        loop_top = next_label(scan_start);
+        scan_start = p->fld[7].rtx;
       }
     }
+    if (scan_start == nullptr || scan_start == end ||
+        scan_start->fld[0].rtint >= max_uid_for_loop || scan_start->code != kCodeLabel) {
+      return;
+    }
+  } else {
+    if (scan_start == end) {
+      return;
+    }
+    prescan_loop(loop_start, end);
   }
-  if (scan_start == nullptr) {
-    return;
-  }
-  prescan_loop(loop_start, end);
   const int nregs = max_reg_num() + 16;
   n_times_set = AllocZeroed<short>(nregs);
   n_times_used = AllocZeroed<short>(nregs);
   may_not_optimize = AllocZeroed<char>(nregs);
+  Rtx* single_usage = nullptr;
+  if (loop_has_call != 0) {
+    single_usage = AllocZeroed<Rtx>(nregs);
+  }
   int computed_count = 0;
-  count_loop_regs_set(loop_top != nullptr ? loop_top : loop_start, end, may_not_optimize, nullptr,
-                      &computed_count, nregs);
+  count_loop_regs_set(loop_top != nullptr ? loop_top : loop_start, end, may_not_optimize,
+                      single_usage, &computed_count, nregs);
   for (int i = 0; i < kFirstPseudoRegister && i < nregs; ++i) {
     may_not_optimize[i] = 1;
     n_times_set[i] = 1;
   }
   std::memcpy(n_times_used, n_times_set, nregs * sizeof(short));
+  move_movables(nullptr, 0, 0, loop_start, end, nregs);
   strength_reduce(scan_start, end, loop_top, insn_count > 0 ? insn_count : computed_count,
                   loop_start, loop_end);
 }
@@ -1950,15 +2790,14 @@ int GetTreeTypeMode(void* type_node) {
 
 RtlControlFlowGraph FunctionHooks::RunInstantiateVirtualRegs(GccContext& ctx,
                                                              const RtlControlFlowGraph& pre_cfg) {
-  FunctionDeclaration dummy_decl(CType::Void(), "harness_func", {},
-                                 std::make_unique<CompoundStatement>());
-  ctx.BeginFunctionFromAst(dummy_decl, /*run_expand_function_start=*/false,
-                           /*declare_body_locals=*/false);
   RtlControlFlowGraph rtl_cfg = pre_cfg;
   rtl_cfg.pass = RtlPassKind::kRtl;
-  Rtx first = ctx.MaterializeFromCfg(rtl_cfg, /*reset_function=*/false);
-  virtuals_instantiated = 0;
-  instantiate_virtual_regs(current_function_decl, first);
+  Rtx first = ctx.MaterializeFromCfg(rtl_cfg, /*reset_function=*/true);
+  if (first != nullptr) {
+    unshare_all_rtl(first);
+    virtuals_instantiated = 0;
+    instantiate_virtual_regs(current_function_decl, first);
+  }
   return ctx.DematerializeToCfg(first, pre_cfg.pass);
 }
 
@@ -2241,6 +3080,7 @@ RtlControlFlowGraph FunctionHooks::RunExpandFunctionStart(const FunctionDeclarat
 namespace {
 
 constexpr SubfunctionId kAllSubfunctionIds[] = {
+    SubfunctionId::kInstantiateVirtualRegs,
     SubfunctionId::kJumpRedirect,
     SubfunctionId::kJump1Optimize,
     SubfunctionId::kFoldRtx,
@@ -2286,24 +3126,64 @@ void SetGccFOption(std::string_view opt_name, int enabled) {
   }
 }
 
+void ApplyOptimizeLevelFlags(int optimize_level) {
+  if (optimize_level <= 0) {
+    optimize = 0;
+    obey_regdecls = 1;
+    flag_defer_pop = 0;
+    flag_thread_jumps = 0;
+    flag_omit_frame_pointer = 0;
+    flag_cse_follow_jumps = 0;
+    flag_cse_skip_blocks = 0;
+    flag_force_mem = 0;
+    flag_caller_saves = 0;
+    flag_expensive_optimizations = 0;
+    flag_strength_reduce = 0;
+    flag_schedule_insns = 0;
+    flag_schedule_insns_after_reload = 0;
+    flag_delayed_branch = 0;
+    flag_inline_functions = 0;
+    SetGccFOption("rerun-cse-after-loop", 0);
+  } else if (optimize_level == 1) {
+    optimize = 1;
+    obey_regdecls = 0;
+    flag_defer_pop = 1;
+    flag_thread_jumps = 1;
+    flag_omit_frame_pointer = 1;
+    flag_cse_follow_jumps = 0;
+    flag_cse_skip_blocks = 0;
+    flag_force_mem = 0;
+    flag_caller_saves = 0;
+    flag_expensive_optimizations = 0;
+    flag_strength_reduce = 0;
+    flag_schedule_insns = 0;
+    flag_schedule_insns_after_reload = 0;
+    flag_delayed_branch = 1;
+    flag_inline_functions = 0;
+    SetGccFOption("rerun-cse-after-loop", 0);
+  } else {
+    optimize = optimize_level;
+    obey_regdecls = 0;
+    flag_defer_pop = 1;
+    flag_thread_jumps = 1;
+    flag_omit_frame_pointer = 1;
+    flag_cse_follow_jumps = 1;
+    flag_cse_skip_blocks = 1;
+    flag_force_mem = 1;
+    flag_caller_saves = 1;
+    flag_expensive_optimizations = 1;
+    flag_strength_reduce = 1;
+    flag_schedule_insns = 1;
+    flag_schedule_insns_after_reload = 1;
+    flag_delayed_branch = 1;
+    flag_inline_functions = (optimize_level >= 3) ? 1 : 0;
+    SetGccFOption("rerun-cse-after-loop", 1);
+  }
+}
+
 void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize_level) {
-  optimize = 2;
-  obey_regdecls = 0;
   flag_signed_char = 1;
-  flag_defer_pop = 1;
-  flag_thread_jumps = 1;
-  flag_omit_frame_pointer = 1;
-  flag_cse_follow_jumps = 1;
-  flag_cse_skip_blocks = 1;
-  flag_force_mem = 1;
-  flag_caller_saves = 1;
-  flag_expensive_optimizations = 1;
-  flag_strength_reduce = 1;
-  flag_schedule_insns = 1;
-  flag_schedule_insns_after_reload = 1;
-  flag_delayed_branch = 1;
-  flag_inline_functions = 0;
-  SetGccFOption("rerun-cse-after-loop", 1);
+  ApplyOptimizeLevelFlags(2);
 
   target_flags = 0;
   mips_cpu_string = nullptr;
@@ -2314,56 +3194,13 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
 
   for (std::string_view flag : c_flags) {
     if (flag == "-O0") {
-      optimize = 0;
-      obey_regdecls = 1;
-      flag_defer_pop = 0;
-      flag_thread_jumps = 0;
-      flag_omit_frame_pointer = 0;
-      flag_cse_follow_jumps = 0;
-      flag_cse_skip_blocks = 0;
-      flag_force_mem = 0;
-      flag_caller_saves = 0;
-      flag_expensive_optimizations = 0;
-      flag_strength_reduce = 0;
-      flag_schedule_insns = 0;
-      flag_schedule_insns_after_reload = 0;
-      flag_delayed_branch = 0;
-      flag_inline_functions = 0;
-      SetGccFOption("rerun-cse-after-loop", 0);
+      ApplyOptimizeLevelFlags(0);
     } else if (flag == "-O" || flag == "-O1") {
-      optimize = 1;
-      obey_regdecls = 0;
-      flag_defer_pop = 1;
-      flag_thread_jumps = 1;
-      flag_omit_frame_pointer = 1;
-      flag_cse_follow_jumps = 0;
-      flag_cse_skip_blocks = 0;
-      flag_force_mem = 0;
-      flag_caller_saves = 0;
-      flag_expensive_optimizations = 0;
-      flag_strength_reduce = 0;
-      flag_schedule_insns = 0;
-      flag_schedule_insns_after_reload = 0;
-      flag_delayed_branch = 1;
-      flag_inline_functions = 0;
-      SetGccFOption("rerun-cse-after-loop", 0);
-    } else if (flag == "-O2" || flag == "-O3") {
-      optimize = (flag == "-O3") ? 3 : 2;
-      obey_regdecls = 0;
-      flag_defer_pop = 1;
-      flag_thread_jumps = 1;
-      flag_omit_frame_pointer = 1;
-      flag_cse_follow_jumps = 1;
-      flag_cse_skip_blocks = 1;
-      flag_force_mem = 1;
-      flag_caller_saves = 1;
-      flag_expensive_optimizations = 1;
-      flag_strength_reduce = 1;
-      flag_schedule_insns = 1;
-      flag_schedule_insns_after_reload = 1;
-      flag_delayed_branch = 1;
-      flag_inline_functions = (flag == "-O3") ? 1 : 0;
-      SetGccFOption("rerun-cse-after-loop", 1);
+      ApplyOptimizeLevelFlags(1);
+    } else if (flag == "-O2") {
+      ApplyOptimizeLevelFlags(2);
+    } else if (flag == "-O3") {
+      ApplyOptimizeLevelFlags(3);
     } else if (flag == "-funsigned-char") {
       flag_signed_char = 0;
     } else if (flag == "-fsigned-char") {
@@ -2386,6 +3223,29 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
     }
   }
   override_options();
+
+  // Configure in-process Binutils 2.6 GAS globals (`tc-mips.c:md_parse_option`)
+  // to match `Toolchain::BuildKmcAsArgs`:
+  // - Default `mips_optimize` is 1 at `-O0` and 2 at `-O1`/`-O2`/`-O3`.
+  // - `-Wa,-g` / `-Wa,-g2` sets `mips_debug = 2` and `mips_optimize = 0`.
+  // - `-Wa,-O0` sets `mips_optimize = 1`; `-Wa,-O` / `-Wa,-O1` / `-Wa,-O2` /
+  //   `-Wa,-O3` sets `mips_optimize = 2`.
+  mips_debug = 0;
+  mips_optimize = (optimize == 0) ? 1 : 2;
+  for (std::string_view flag : c_flags) {
+    if (absl::StartsWith(flag, "-Wa,")) {
+      for (std::string_view wa_opt : absl::StrSplit(flag.substr(4), ',')) {
+        if (wa_opt == "-g" || wa_opt == "-g2") {
+          mips_debug = 2;
+          mips_optimize = 0;
+        } else if (wa_opt == "-O0") {
+          mips_optimize = 1;
+        } else if (absl::StartsWith(wa_opt, "-O")) {
+          mips_optimize = 2;
+        }
+      }
+    }
+  }
 
   if (out_optimize_level != nullptr) {
     *out_optimize_level = optimize;
@@ -2758,6 +3618,8 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
 
 std::string_view SubfunctionIdName(SubfunctionId id) {
   switch (id) {
+    case SubfunctionId::kInstantiateVirtualRegs:
+      return "instantiate_virtual_regs";
     case SubfunctionId::kJumpRedirect:
       return "redirect_jump";
     case SubfunctionId::kJump1Optimize:
@@ -2860,9 +3722,15 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
   snap.pre_state = pre_state;
   snap.pre_asm_lines.assign(pre_asm_lines.begin(), pre_asm_lines.end());
 
-  optimize = optimize_level;
+  ApplyOptimizeLevelFlags(optimize_level);
 
   switch (subfunction_id) {
+    case SubfunctionId::kInstantiateVirtualRegs: {
+      snap.post_state = RunInstantiateVirtualRegs(*ctx_, pre_state);
+      snap.post_state.pass = RtlPassKind::kRtl;
+      break;
+    }
+
     case SubfunctionId::kJumpRedirect: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr) {
@@ -2903,7 +3771,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kFoldRtx: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr) {
+      if (head != nullptr && optimize_level > 0) {
         PrepareCseFoldState(ctx_, head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
           if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
@@ -2933,7 +3801,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           restore_reg_data(head);
           reg_scan(head, max_reg_num(), 1);
         }
-        const int tem = cse_main(head, max_reg_num(), /*after_loop=*/0, nullptr);
+        const int tem = ExecuteCsePassGranular(this, ctx_, head, max_reg_num(), /*after_loop=*/0);
         head = ctx_->GetInsns();
         delete_dead_from_cse(head, max_reg_num());
         if (tem != 0 || optimize_level > 1) {
@@ -2949,8 +3817,16 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kScanLoop: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr && optimize_level > 0) {
-        restore_reg_data(head);
-        reg_scan(head, max_reg_num(), 1);
+        PrepareLoopState(head);
+        in_loop_pass_ = true;
+        for (int i = max_loop_num - 1; i >= 0; --i) {
+          if (loop_invalid[i] == 0 && loop_number_loop_ends[i] != nullptr) {
+            RunScanLoop(loop_number_loop_starts[i], loop_number_loop_ends[i], max_reg_num());
+          }
+        }
+        in_loop_pass_ = false;
+        restore_reg_data(ctx_->GetInsns());
+        reg_scan(ctx_->GetInsns(), max_reg_num(), 1);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kLoop);
       break;
@@ -2958,8 +3834,18 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kStrengthReduce: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr && optimize_level > 0) {
-        RunLoopOptimize(head, /*unroll_p=*/0);
+      if (head != nullptr && optimize_level > 0 && flag_strength_reduce != 0) {
+        PrepareLoopState(head);
+        in_loop_pass_ = true;
+        for (int i = max_loop_num - 1; i >= 0; --i) {
+          if (loop_invalid[i] == 0 && loop_number_loop_ends[i] != nullptr) {
+            RunStrengthReduce(nullptr, loop_number_loop_ends[i], nullptr, 0,
+                              loop_number_loop_starts[i], loop_number_loop_ends[i]);
+          }
+        }
+        in_loop_pass_ = false;
+        restore_reg_data(ctx_->GetInsns());
+        reg_scan(ctx_->GetInsns(), max_reg_num(), 1);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kLoop);
       break;
@@ -2986,7 +3872,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           RefreshJumpLabelsAndNuses(head);
           restore_reg_data(head);
           reg_scan(head, max_reg_num(), 0);
-          const int tem = cse_main(head, max_reg_num(), /*after_loop=*/1, nullptr);
+          const int tem = ExecuteCsePassGranular(this, ctx_, head, max_reg_num(), /*after_loop=*/1);
           if (tem != 0) {
             head = ctx_->GetInsns();
             RefreshJumpLabelsAndNuses(head);
@@ -3008,7 +3894,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kFindBasicBlocks: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr) {
+      if (head != nullptr && optimize_level > 0) {
         RunFindBasicBlocks(head, nullptr);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kFlow);
@@ -3018,7 +3904,23 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kPropagateBlock: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr) {
-        RunFlowAnalysis(head, 0);
+        if (optimize_level > 0) {
+          StripFlowGeneratedNotes(head);
+          restore_reg_data(head);
+          const int num_regs = max_reg_num();
+          max_regno = num_regs;
+          reg_scan(head, num_regs, 0);
+          RunFindBasicBlocks(head, nullptr);
+          ExecuteLifeAnalysisGranular(this, head, num_regs);
+        } else {
+          StripFlowGeneratedNotes(head);
+          restore_reg_data(head);
+          max_regno = max_reg_num();
+          reg_scan(head, max_regno, 0);
+          regclass_init();
+          regclass(head, max_regno);
+          stupid_life_analysis(head, max_regno, nullptr);
+        }
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kFlow);
       break;
@@ -3026,7 +3928,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kSimplifyRtx: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr) {
+      if (head != nullptr && optimize_level > 0) {
         PrepareCombineState(head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
           if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
@@ -3074,7 +3976,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kSubst: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr) {
+      if (head != nullptr && optimize_level > 0) {
         PrepareCombineState(head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
           if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
@@ -3116,7 +4018,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kTryCombine: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr && optimize_level > 0) {
-        RunCombineInstructions(head, 0);
+        ExecuteCombinePassGranular(head, 0);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCombine);
       break;
@@ -3126,7 +4028,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr && optimize_level > 0 && flag_schedule_insns != 0) {
         reload_completed = 0;
-        RunScheduleInsns(head);
+        ExecuteSchedPassGranular(head);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kSched);
       break;
@@ -3134,8 +4036,8 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kUpdateEquivRegs: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr) {
-        PrepareLocalAllocState(head);
+      if (head != nullptr && optimize_level > 0) {
+        RunUpdateEquivRegs(head);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kLreg);
       break;
@@ -3144,7 +4046,22 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kBlockAlloc: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr) {
-        RunLocalAlloc(head);
+        if (optimize_level > 0) {
+          PrepareLocalAllocState(head);
+          in_local_alloc_pass_ = true;
+          for (int b = 0; b < n_basic_blocks; ++b) {
+            RunBlockAlloc(b, head);
+          }
+          in_local_alloc_pass_ = false;
+        } else {
+          StripFlowGeneratedNotes(head);
+          restore_reg_data(head);
+          max_regno = max_reg_num();
+          reg_scan(head, max_regno, 0);
+          regclass_init();
+          regclass(head, max_regno);
+          stupid_life_analysis(head, max_regno, nullptr);
+        }
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kLreg);
       break;
@@ -3155,7 +4072,17 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       snap.post_state = pre_state;
       snap.post_state.pass = RtlPassKind::kGreg;
       if (head != nullptr) {
-        RunGlobalAlloc(head);
+        if (optimize_level > 0) {
+          RunGlobalAlloc(head);
+        } else {
+          StripFlowGeneratedNotes(head);
+          restore_reg_data(head);
+          max_regno = max_reg_num();
+          reg_scan(head, max_regno, 0);
+          regclass_init();
+          regclass(head, max_regno);
+          stupid_life_analysis(head, max_regno, nullptr);
+        }
         const int nregs = std::max(max_reg_num(), max_regno);
         snap.post_state.sideband.max_regno = std::max(snap.post_state.sideband.max_regno, nregs);
         if (reg_renumber != nullptr) {
@@ -3173,7 +4100,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kReload: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr) {
-        RunReload(head, /*global=*/1);
+        RunReload(head, /*global=*/optimize_level > 0 ? 1 : 0);
         for (const auto& [regno, hard_reg] : pre_state.sideband.reg_renumber) {
           if (regno >= kFirstPseudoRegister && hard_reg >= 0 && regno < max_regno &&
               reg_renumber != nullptr && reg_renumber[regno] >= 0 && regno_reg_rtx != nullptr &&
@@ -3213,13 +4140,14 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           }
         }
         if (!has_prologue_sp_adjust) {
+          frame_pointer_needed = (flag_omit_frame_pointer == 0) ? 1 : 0;
           RunFindBasicBlocks(head, nullptr);
           RefreshJumpLabelsAndNuses(head);
           thread_prologue_and_epilogue_insns(head);
           head = ctx_->GetInsns();
         }
         if (optimize_level > 0 && flag_schedule_insns_after_reload != 0) {
-          RunScheduleInsns(head);
+          ExecuteSchedPassGranular(head);
         }
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kSched2);
@@ -3357,13 +4285,7 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
   InferStackFrameSidebandFromRtlCfg(&initial_cfg);
   trace.pass_snapshots[RtlPassKind::kRtl] = initial_cfg;
 
-  Rtx head = ctx_->MaterializeFromCfg(initial_cfg);
-  if (head != nullptr) {
-    unshare_all_rtl(head);
-    instantiate_virtual_regs(current_function_decl, head);
-  }
-  RtlControlFlowGraph current_cfg = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kRtl);
-
+  RtlControlFlowGraph current_cfg = initial_cfg;
   std::vector<std::string> current_asm_lines;
 
   for (SubfunctionId sub_id : AllSubfunctionIds()) {
@@ -3435,6 +4357,9 @@ FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(
     absl::Span<const std::string> c_flags, std::string_view test_name) {
   int optimize_level = 2;
   ApplyCompilerFlags(c_flags, &optimize_level);
+  if (!function_name.empty()) {
+    ctx_->BeginFunction(function_name);
+  }
 
   InProcessCc1CompilationResult cc1_res =
       RunInProcessCc1Compilation(c_source, function_name, /*stop_after_initial_rtl=*/true);

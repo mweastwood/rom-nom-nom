@@ -24,7 +24,8 @@ namespace rom_nom_nom::gcc_harness {
 namespace {
 
 void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks* hooks,
-                                             const FunctionCompilationTrace& trace) {
+                                             const FunctionCompilationTrace& trace,
+                                             int optimize_level = 2) {
   // 1. All 13 RTL pass snapshots (`.00.rtl` through `.12.dbr`) must be present
   // and structurally valid.
   for (RtlPassKind pass : AllRtlPasses()) {
@@ -43,10 +44,12 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
                                << trace.function_name;
   }
 
-  // Flow snapshot must carry populated liveness sideband arrays.
+  // Flow snapshot must carry populated liveness sideband arrays when `optimize > 0`.
   const RtlControlFlowGraph& flow_cfg = trace.pass_snapshots.at(RtlPassKind::kFlow);
-  EXPECT_FALSE(flow_cfg.sideband.reg_n_sets.empty());
-  EXPECT_FALSE(flow_cfg.sideband.basic_block_live_at_start.empty());
+  if (optimize_level > 0) {
+    EXPECT_FALSE(flow_cfg.sideband.reg_n_sets.empty());
+    EXPECT_FALSE(flow_cfg.sideband.basic_block_live_at_start.empty());
+  }
 
   // Post-reload `.09.greg` through `.12.dbr` must have no remaining pseudo
   // registers (`>= 67`) in executable instructions.
@@ -58,11 +61,13 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
     }
   }
 
-  // 2. All 26 subfunction boundary snapshots must be present and replayable:
+  // 2. All 30 subfunction boundary snapshots (covering all 27 unique Stage 0..12
+  // + `instantiate_virtual_regs` subfunctions) must be present and replayable:
   // materializing `pre_state` into `GccContext` and running the corresponding
   // forward hook must reproduce `post_state`, `post_asm_lines`, and
   // `post_machine_words` identically.
   const auto all_ids = AllSubfunctionIds();
+  ASSERT_EQ(all_ids.size(), 30u);
   ASSERT_EQ(trace.subfunction_snapshots.size(), all_ids.size());
 
   for (size_t i = 0; i < trace.subfunction_snapshots.size(); ++i) {
@@ -70,7 +75,7 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
     EXPECT_EQ(snap.subfunction_id, all_ids[i]);
 
     const SubfunctionBoundarySnapshot replayed = hooks->ExecuteSubfunctionBoundary(
-        snap.subfunction_id, snap.pre_state, snap.pre_asm_lines, /*optimize_level=*/2);
+        snap.subfunction_id, snap.pre_state, snap.pre_asm_lines, optimize_level);
 
     const RtlCfgPassComparison cmp = replayed.post_state.CompareAgainst(snap.post_state);
     EXPECT_TRUE(cmp.MatchesExactly())
@@ -95,9 +100,11 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
           << "Expected pseudo-registers to remain in kGlobalAlloc post_state for kReload/kAlterReg "
              "in "
           << trace.function_name;
-      EXPECT_FALSE(snap.post_state.sideband.reg_renumber.empty())
-          << "Expected non-empty sideband.reg_renumber after kGlobalAlloc in "
-          << trace.function_name;
+      if (optimize_level > 0) {
+        EXPECT_FALSE(snap.post_state.sideband.reg_renumber.empty())
+            << "Expected non-empty sideband.reg_renumber after kGlobalAlloc in "
+            << trace.function_name;
+      }
     }
     if (snap.subfunction_id == SubfunctionId::kAlterReg &&
         MaxPseudoRegInCfg(snap.pre_state) >= 67) {
@@ -280,6 +287,36 @@ TEST(CompilationTraceTest, SubfunctionBoundariesExerciseFoldSimplifySubstReloadA
       SubfunctionId::kAlterReg, reload_snap.post_state, {}, /*optimize_level=*/2);
   EXPECT_GE(MaxPseudoRegInCfg(alter_snap.pre_state), 72);
   EXPECT_LT(MaxPseudoRegInCfg(alter_snap.post_state), 67);
+
+  // 5. `kUpdateEquivRegs` -> `kBlockAlloc` -> `kGlobalAlloc` preserves `reg_live_length`
+  // without redundant `update_equiv_regs()` doubling and preserves `kBlockAlloc` `reg_renumber`.
+  ctx.BeginFunction("equiv_block_global_boundary_fn");
+  RtlControlFlowGraph equiv_pre;
+  equiv_pre.pass = RtlPassKind::kSched;
+  equiv_pre.rpo_blocks.resize(1);
+  equiv_pre.rpo_blocks[0].id = 0;
+  equiv_pre.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 72) (const_int 42)) (expr_list:REG_EQUAL (const_int 42) (nil))");
+  equiv_pre.rpo_blocks[0].AddPatternOnly("(set (reg:SI 73) (plus:SI (reg:SI 4 a0) (reg:SI 72)))");
+  equiv_pre.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 73) (reg:SI 72)))");
+  equiv_pre.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+
+  const SubfunctionBoundarySnapshot equiv_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kUpdateEquivRegs, equiv_pre, {}, /*optimize_level=*/2);
+  ASSERT_TRUE(equiv_snap.post_state.sideband.reg_live_length.contains(72));
+  const int equiv_live_len = equiv_snap.post_state.sideband.reg_live_length.at(72);
+
+  const SubfunctionBoundarySnapshot block_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, equiv_snap.post_state, {}, /*optimize_level=*/2);
+  ASSERT_TRUE(block_snap.post_state.sideband.reg_live_length.contains(72));
+  EXPECT_EQ(block_snap.post_state.sideband.reg_live_length.at(72), equiv_live_len);
+  ASSERT_TRUE(block_snap.post_state.sideband.reg_renumber.contains(72));
+  const int block_hard_reg = block_snap.post_state.sideband.reg_renumber.at(72);
+
+  const SubfunctionBoundarySnapshot global_after_block_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kGlobalAlloc, block_snap.post_state, {}, /*optimize_level=*/2);
+  ASSERT_TRUE(global_after_block_snap.post_state.sideband.reg_renumber.contains(72));
+  EXPECT_EQ(global_after_block_snap.post_state.sideband.reg_renumber.at(72), block_hard_reg);
 }
 
 void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_view c_source,
@@ -326,6 +363,7 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
   ASSERT_TRUE(as_res.ok()) << as_res.status();
   ASSERT_TRUE(as_res->Ok()) << as_res->stderr_output;
 
+  size_t emitted_pass_dumps = 0;
   for (RtlPassKind pass : AllRtlPasses()) {
     const std::filesystem::path dump_path =
         temp_dir / absl::StrCat("input.c", RtlPassExtension(pass));
@@ -335,13 +373,18 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
     ss << dump_in.rdbuf();
     RtlPassDump pass_dump = ParseRtlPassDump(pass, ss.str());
     const RtlFunctionDump* fn_dump = pass_dump.FindFunction(fn_name);
-    ASSERT_NE(fn_dump, nullptr) << "Function " << fn_name << " not found in " << dump_path;
+    if (fn_dump == nullptr) {
+      // At `-O0` and `-O1`, `cc1` leaves dump files empty for skipped passes.
+      continue;
+    }
+    ++emitted_pass_dumps;
     const RtlControlFlowGraph real_cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
     const RtlCfgPassComparison cmp = trace.pass_snapshots.at(pass).CompareAgainst(real_cfg);
     EXPECT_TRUE(cmp.MatchesExactly())
         << "Pass " << RtlPassExtension(pass) << " mismatch against real cc1 in " << fn_name << ": "
         << cmp.mismatch_detail;
   }
+  EXPECT_GE(emitted_pass_dumps, 4u);
 
   const auto elf_or = ElfReader::LoadFromFile(obj_file);
   ASSERT_TRUE(elf_or.ok()) << elf_or.status();
@@ -352,6 +395,22 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
       << trace.final_asm_text;
 
   std::filesystem::remove_all(temp_dir, ec);
+}
+
+int OptimizeLevelFromFlags(absl::Span<const std::string> c_flags) {
+  int opt = 2;
+  for (std::string_view flag : c_flags) {
+    if (flag == "-O0") {
+      opt = 0;
+    } else if (flag == "-O" || flag == "-O1") {
+      opt = 1;
+    } else if (flag == "-O2") {
+      opt = 2;
+    } else if (flag == "-O3") {
+      opt = 3;
+    }
+  }
+  return opt;
 }
 
 TEST(CompilationTraceTest, TraceForwardCompilationCategories) {
@@ -449,6 +508,24 @@ TEST(CompilationTraceTest, TraceForwardCompilationCategories) {
         hooks.TraceForwardCompilation(tc.c_src, tc.fn_name, {"-O2"}, tc.name);
     VerifyTraceCompletenessAndReplayability(&ctx, &hooks, trace);
     VerifyTraceMatchesActualToolchain(*toolchain_or, tc.c_src, tc.fn_name, {"-O2"}, trace);
+    if (std::string_view(tc.fn_name) == "sum_scaled_array") {
+      bool found_scan_loop = false;
+      bool found_strength_reduce = false;
+      for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+        if (snap.subfunction_id == SubfunctionId::kScanLoop) {
+          found_scan_loop = true;
+          EXPECT_FALSE(snap.pre_state.CompareAgainst(snap.post_state).MatchesExactly())
+              << "Expected kScanLoop to hoist loop-invariant scale*4 in sum_scaled_array";
+        } else if (snap.subfunction_id == SubfunctionId::kStrengthReduce) {
+          found_strength_reduce = true;
+          EXPECT_FALSE(snap.pre_state.CompareAgainst(snap.post_state).MatchesExactly())
+              << "Expected kStrengthReduce to perform induction-variable strength reduction in "
+                 "sum_scaled_array";
+        }
+      }
+      EXPECT_TRUE(found_scan_loop);
+      EXPECT_TRUE(found_strength_reduce);
+    }
   }
 }
 
@@ -517,6 +594,62 @@ typedef struct { u8 b[16]; } UnalignedBlock16;
     absl::StrAppend(&full_source, tc.original_c);
     VerifyTraceMatchesActualToolchain(*toolchain_or, full_source, tc.function_name,
                                       tc.options.c_flags, trace);
+  }
+}
+
+TEST(CompilationTraceTest, SweepAllFiveCompilerFlagProfilesMatchesActualToolchain) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  const auto toolchain_or = Toolchain::Discover(ToolchainOptions{.mode = ToolchainMode::kOriginal});
+  ASSERT_TRUE(toolchain_or.ok()) << toolchain_or.status();
+
+  static constexpr std::string_view kBaseTypesPreamble = R"(
+typedef signed char s8;
+typedef unsigned char u8;
+typedef signed short s16;
+typedef unsigned short u16;
+typedef signed int s32;
+typedef unsigned int u32;
+typedef signed long long s64;
+typedef unsigned long long u64;
+typedef float f32;
+typedef double f64;
+typedef struct { u8 b[4]; } UnalignedWord;
+typedef struct { u8 b[6]; } UnalignedBlock6;
+typedef struct { u8 b[8]; } UnalignedBlock8;
+typedef struct { u8 b[12]; } UnalignedBlock12;
+typedef struct { u8 b[16]; } UnalignedBlock16;
+)";
+
+  const auto profiles = GetRoundTripCompilerFlagProfiles();
+  ASSERT_EQ(profiles.size(), 5u);
+
+  const std::vector<RoundTripTestCase> base_cases = GetBaseRoundTripTestCases();
+  ASSERT_GE(base_cases.size(), 10u);
+  const size_t indices_to_test[] = {0, 1, 2, 4, 6};
+
+  for (const auto& profile : profiles) {
+    SCOPED_TRACE(profile.suffix);
+    const int opt_level = OptimizeLevelFromFlags(profile.c_flags);
+    for (size_t idx : indices_to_test) {
+      const RoundTripTestCase& base_tc = base_cases[idx];
+      RoundTripTestCase tc = base_tc;
+      tc.test_name = absl::StrCat(base_tc.test_name, "_", profile.suffix);
+      tc.options.c_flags = profile.c_flags;
+      SCOPED_TRACE(tc.test_name);
+
+      const FunctionCompilationTrace trace = hooks.TraceForwardCompilation(tc);
+      VerifyTraceCompletenessAndReplayability(&ctx, &hooks, trace, opt_level);
+
+      std::string full_source = absl::StrCat(kBaseTypesPreamble, "\n");
+      if (!tc.options.extra_types_header.empty()) {
+        absl::StrAppend(&full_source, tc.options.extra_types_header, "\n");
+      }
+      absl::StrAppend(&full_source, tc.original_c);
+      VerifyTraceMatchesActualToolchain(*toolchain_or, full_source, tc.function_name,
+                                        tc.options.c_flags, trace);
+    }
   }
 }
 

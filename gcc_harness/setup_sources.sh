@@ -411,6 +411,21 @@ choose_multiplier
 print_rtx
 do_store_flag
 virtuals_instantiated
+cse_end_of_basic_block
+recorded_label_ref
+constant_pool_entries_cost
+loop_dump_stream
+reg_next_use
+regs_live_at_setjmp
+nonzero_sign_valid
+subst_insn
+record_dead_and_set_regs
+unused_insn_list
+unused_expr_list
+update_flow_info
+line_note_exists
+last_ignored_compare
+elim_reg_set
 EOF
 
 for obj in "${GCC_OBJS[@]}"; do
@@ -470,6 +485,12 @@ mips_noreorder
 prev_insn_valid
 mips_no_prev_insn
 mips_emit_delays
+mips_optimize
+mips_debug
+mips_isa
+file_mips_isa
+mips_cpu
+mips_trap
 EOF
 
 cat << 'EOF' > "${GAS_STAGE_DIR}/gas_redefine.txt"

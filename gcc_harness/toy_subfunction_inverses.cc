@@ -1620,12 +1620,15 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertInstantiateVirtualRegs(
       auto parsed = ParsePatternAndNotes(pat);
       if (parsed.ok()) {
         parsed->RewriteRegs([](RtlExpr& reg) {
-          if (reg.RegNo() == 30) {
-            // `frame_pointer_rtx` (`$fp`) <- `virtual_stack_vars_rtx` (`68`).
+          if (reg.RegNo() == 0) {
+            // `arg_pointer_rtx` (`$0`) <- `virtual_incoming_args_rtx` (`68`).
             reg.SetRegNo(68);
+          } else if (reg.RegNo() == 30) {
+            // `frame_pointer_rtx` (`$fp`) <- `virtual_stack_vars_rtx` (`69`).
+            reg.SetRegNo(69);
           } else if (reg.RegNo() == 29) {
-            // `stack_pointer_rtx` (`$sp`) <- `virtual_outgoing_args_rtx` (`70`).
-            reg.SetRegNo(70);
+            // `stack_pointer_rtx` (`$sp`) <- `virtual_outgoing_args_rtx` (`71`).
+            reg.SetRegNo(71);
           }
         });
         pat = parsed->ToSexprString();

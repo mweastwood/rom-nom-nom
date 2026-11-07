@@ -168,6 +168,9 @@ extern int current_function_outgoing_args_size;
 extern int virtuals_instantiated;
 extern int immediate_size_expand;
 extern rtx_def* return_label;
+extern rtx_def* stack_pointer_rtx;
+extern rtx_def* frame_pointer_rtx;
+extern rtx_def* arg_pointer_rtx;
 extern rtx_def* virtual_incoming_args_rtx;
 extern rtx_def* virtual_stack_vars_rtx;
 extern rtx_def* virtual_stack_dynamic_rtx;
@@ -331,14 +334,29 @@ int TypePrecisionOf(const void* type_node) {
 }
 
 void ResetVirtualRegisterFlags() {
-  for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
-                   virtual_outgoing_args_rtx}) {
-    if (vreg != nullptr) {
-      vreg->mode = kSiMode;
-      vreg->volatil = 0;
-      vreg->integrated = 0;
-      vreg->unchanging = 0;
-      vreg->in_struct = 0;
+  struct SavedSpecialReg {
+    Rtx* ptr;
+    int initial_regno;
+  };
+  static SavedSpecialReg special_regs[] = {
+      {&stack_pointer_rtx, -1},         {&frame_pointer_rtx, -1},
+      {&arg_pointer_rtx, -1},           {&virtual_incoming_args_rtx, -1},
+      {&virtual_stack_vars_rtx, -1},    {&virtual_stack_dynamic_rtx, -1},
+      {&virtual_outgoing_args_rtx, -1},
+  };
+  for (auto& sr : special_regs) {
+    Rtx reg = *sr.ptr;
+    if (reg != nullptr) {
+      if (sr.initial_regno < 0) {
+        sr.initial_regno = reg->fld[0].rtint;
+      }
+      reg->code = kReg;
+      reg->fld[0].rtint = sr.initial_regno;
+      reg->mode = kSiMode;
+      reg->volatil = 0;
+      reg->integrated = 0;
+      reg->unchanging = 0;
+      reg->in_struct = 0;
     }
   }
 }
@@ -1429,6 +1447,9 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
         return canon;
       }
     } else if (!flag_v && !flag_i && !flag_u && !flag_s) {
+      if (arg_pointer_rtx != nullptr && regno == arg_pointer_rtx->fld[0].rtint && mode == kSiMode) {
+        return arg_pointer_rtx;
+      }
       return gen_rtx(kReg, mode, regno);
     }
   } else if (rtx_code == kConstInt) {
@@ -1664,11 +1685,14 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     }
     emit_note(nullptr, kNoteInsnFunctionBeg);
   }
+  ResetVirtualRegisterFlags();
   if (regno_reg_rtx != nullptr) {
-    regno_reg_rtx[67] = virtual_incoming_args_rtx;
-    regno_reg_rtx[68] = virtual_stack_vars_rtx;
-    regno_reg_rtx[69] = virtual_stack_dynamic_rtx;
-    regno_reg_rtx[70] = virtual_outgoing_args_rtx;
+    for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
+                     virtual_outgoing_args_rtx}) {
+      if (vreg != nullptr && vreg->fld[0].rtint >= 0) {
+        regno_reg_rtx[vreg->fld[0].rtint] = vreg;
+      }
+    }
   }
 
   const size_t num_blocks = cfg.rpo_blocks.size();
@@ -1917,10 +1941,12 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   if (!has_sequence) {
     restore_reg_data(first);
     if (regno_reg_rtx != nullptr) {
-      regno_reg_rtx[67] = virtual_incoming_args_rtx;
-      regno_reg_rtx[68] = virtual_stack_vars_rtx;
-      regno_reg_rtx[69] = virtual_stack_dynamic_rtx;
-      regno_reg_rtx[70] = virtual_outgoing_args_rtx;
+      for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
+                       virtual_outgoing_args_rtx}) {
+        if (vreg != nullptr && vreg->fld[0].rtint >= 0) {
+          regno_reg_rtx[vreg->fld[0].rtint] = vreg;
+        }
+      }
     }
     reg_scan(first, max_reg_num(), 0);
   } else {
@@ -1937,6 +1963,8 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
         reg_renumber[regno] = static_cast<short>(hard_reg);
       }
     }
+  } else {
+    reg_renumber = nullptr;
   }
 
   if (!cfg.sideband.reg_n_sets.empty() && reg_n_sets != nullptr) {

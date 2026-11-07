@@ -14,10 +14,14 @@
 
 namespace rom_nom_nom::gcc_harness {
 
-// Identifies each of the 26 subfunctions across KMC GCC 2.7.2 (`cc1`) and GNU
+// Identifies each of the 27 subfunctions (30 boundary transitions including
+// multi-pass CSE/Sched/Jump instances) across KMC GCC 2.7.2 (`cc1`) and GNU
 // Binutils 2.6 (`as`) whose exact boundary (`pre_state` -> `post_state`) is
 // captured during forward compilation tracing.
 enum class SubfunctionId {
+  // Stage 13 (`function.c:instantiate_virtual_regs`, `.00.rtl` virtual-reg instantiation):
+  kInstantiateVirtualRegs,
+
   // Stage 12 (`jump1`, `.00.rtl` -> `.01.jump`):
   kJumpRedirect,
   kJump1Optimize,
@@ -77,8 +81,8 @@ enum class SubfunctionId {
 // Returns a human-readable name for `id`.
 std::string_view SubfunctionIdName(SubfunctionId id);
 
-// Returns the ordered sequence of all 26 `SubfunctionId`s in forward
-// compilation order (`kJumpRedirect` through `kGasAppendInsn`).
+// Returns the ordered sequence of all 30 `SubfunctionId`s in forward
+// compilation order (`kInstantiateVirtualRegs` through `kGasAppendInsn`).
 absl::Span<const SubfunctionId> AllSubfunctionIds();
 
 // Captures the exact input (`pre_state`) and output (`post_state`) of a single
@@ -130,7 +134,7 @@ class FunctionHooks {
   // Stage 0: Final Assembly Emission (`final.c`, `mips.c`) & GAS (`tc-mips.c`)
   // ---------------------------------------------------------------------------
   std::string RunFinal(Rtx first = nullptr);
-  std::string RunFinalScanInsn(Rtx insn, int prescan = 0);
+  std::string RunFinalScanInsn(Rtx insn, int prescan = 0, Rtx* next_insn_out = nullptr);
   void RunShortenBranches(Rtx first = nullptr);
   std::string RunFunctionPrologue(int frame_size = 0, uint32_t saved_gpr_mask = 0);
   std::string RunFunctionEpilogue(int frame_size = 0, uint32_t saved_gpr_mask = 0);
@@ -349,8 +353,14 @@ class FunctionHooks {
   void PrepareLocalAllocState(Rtx first);
   void PrepareCombineState(Rtx first);
   void PrepareLoopState(Rtx first);
+  void ExecuteSchedPassGranular(Rtx first);
+  void ExecuteCombinePassGranular(Rtx first, int nregs);
 
   GccContext* ctx_;
+  bool in_sched_pass_ = false;
+  bool in_local_alloc_pass_ = false;
+  bool in_combine_pass_ = false;
+  bool in_loop_pass_ = false;
 };
 
 }  // namespace rom_nom_nom::gcc_harness

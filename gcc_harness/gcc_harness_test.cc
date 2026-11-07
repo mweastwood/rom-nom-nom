@@ -1005,7 +1005,7 @@ TEST(FunctionHooksTest, Stage13TreeToRtlExpansionHooksExecuteInProcess) {
   pre_virt_cfg.pass = RtlPassKind::kRtl;
   pre_virt_cfg.rpo_blocks.resize(1);
   pre_virt_cfg.rpo_blocks[0].AddPatternOnly(
-      "(set (mem:SI (plus:SI (reg:SI 68) (const_int 8))) (reg:SI 71))");
+      "(set (mem:SI (plus:SI (reg:SI 69) (const_int 8))) (reg:SI 72))");
   RtlControlFlowGraph post_virt_cfg = hooks.RunInstantiateVirtualRegs(pre_virt_cfg);
   ASSERT_EQ(post_virt_cfg.rpo_blocks.size(), 1u);
   ASSERT_EQ(post_virt_cfg.rpo_blocks[0].instructions.size(), 1u);
@@ -1029,9 +1029,9 @@ TEST(RightInverseVerifierTest, Stage13AllThirteenExpansionSubfunctionsRightInver
   pre_virt_cfg.pass = RtlPassKind::kRtl;
   pre_virt_cfg.rpo_blocks.resize(1);
   pre_virt_cfg.rpo_blocks[0].AddPatternOnly(
-      "(set (mem:SI (plus:SI (reg:SI 68) (const_int 8))) (reg:SI 71))");
+      "(set (mem:SI (plus:SI (reg:SI 69) (const_int 8))) (reg:SI 72))");
   pre_virt_cfg.rpo_blocks[0].AddPatternOnly(
-      "(set (mem:SI (plus:SI (reg:SI 70) (const_int 16))) (reg:SI 72))");
+      "(set (mem:SI (plus:SI (reg:SI 71) (const_int 16))) (reg:SI 73))");
   RtlControlFlowGraph post_virt_cfg = hooks.RunInstantiateVirtualRegs(pre_virt_cfg);
   RightInverseResult virt_res = verifier.VerifyInstantiateVirtualRegsRightInverse(post_virt_cfg);
   EXPECT_TRUE(virt_res.matches) << virt_res.diff_detail;
