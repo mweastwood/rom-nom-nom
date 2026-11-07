@@ -2,6 +2,7 @@
 """Run clang-tidy on C/C++ files to verify Google style and naming conventions."""
 
 import argparse
+import concurrent.futures
 import os
 from pathlib import Path
 import re
@@ -40,6 +41,49 @@ def find_files():
                 p = Path(root) / f
                 if p.suffix in EXTENSIONS:
                     files.append(p)
+    return sorted(files)
+
+
+def find_git_affected_files():
+    """Find git-modified, staged, untracked, or last-commit C/C++ files under SEARCH_DIRS."""
+    git_cmds = [
+        ["git", "diff", "--name-only", "HEAD"],
+        ["git", "diff", "--name-only", "--cached"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ]
+    rel_paths = set()
+    for cmd in git_cmds:
+        res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    rel_paths.add(line)
+
+    if not rel_paths:
+        res = subprocess.run(
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    rel_paths.add(line)
+
+    search_dirs_set = set(SEARCH_DIRS)
+    files = []
+    for rel_str in rel_paths:
+        rel_p = Path(rel_str)
+        if not rel_p.parts or rel_p.parts[0] not in search_dirs_set:
+            continue
+        if rel_p.suffix not in EXTENSIONS:
+            continue
+        full_p = REPO_ROOT / rel_p
+        if full_p.is_file():
+            files.append(full_p)
     return sorted(files)
 
 
@@ -212,6 +256,7 @@ def check_naming_integrity(files):
 
 def main():
     parser = argparse.ArgumentParser(description="Run clang-tidy to verify Google style conventions.")
+    parser.add_argument("-a", "--all", action="store_true", help="Run clang-tidy on all C/C++ files in the repository.")
     parser.add_argument("--fix", action="store_true", help="Automatically apply clang-tidy fixes.")
     parser.add_argument("--check", action="store_true", help="Fail if any warning/error is detected.")
     parser.add_argument("files", nargs="*", type=Path, help="Specific files to check (optional).")
@@ -228,8 +273,10 @@ def main():
             (REPO_ROOT / f).resolve() if not f.is_absolute() else f.resolve()
             for f in args.files
         ]
-    else:
+    elif args.all:
         target_files = find_files()
+    else:
+        target_files = find_git_affected_files()
     if not target_files:
         print("No C/C++ files to check.")
         return 0
@@ -243,7 +290,8 @@ def main():
             print(f"[FAIL] {err}", file=sys.stderr)
 
     print(f"=== Running clang-tidy on {len(target_files)} files ===")
-    for f in target_files:
+
+    def run_tidy(f: Path):
         extra_args = get_compile_args(f)
         cmd = [clang_tidy]
         if args.fix:
@@ -260,18 +308,23 @@ def main():
             rel_display = f.name
 
         res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
-        if res.returncode != 0 or "error:" in res.stderr or "error:" in res.stdout:
-            has_errors = True
-            print(f"\n[FAIL] {rel_display}:")
-            if res.stdout.strip():
-                print(res.stdout.strip())
-            if res.stderr.strip():
-                print(res.stderr.strip(), file=sys.stderr)
-        elif res.stdout.strip():
-            if args.check:
+        return rel_display, res
+
+    max_workers = 1 if args.fix else None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for rel_display, res in executor.map(run_tidy, target_files):
+            if res.returncode != 0 or "error:" in res.stderr or "error:" in res.stdout:
                 has_errors = True
-                print(f"\n[WARN] {rel_display}:")
-                print(res.stdout.strip())
+                print(f"\n[FAIL] {rel_display}:")
+                if res.stdout.strip():
+                    print(res.stdout.strip())
+                if res.stderr.strip():
+                    print(res.stderr.strip(), file=sys.stderr)
+            elif res.stdout.strip():
+                if args.check:
+                    has_errors = True
+                    print(f"\n[WARN] {rel_display}:")
+                    print(res.stdout.strip())
 
     if has_errors:
         print("\n[ERROR] clang-tidy found style/naming violations.", file=sys.stderr)

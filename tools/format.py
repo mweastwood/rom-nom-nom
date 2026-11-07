@@ -23,6 +23,7 @@ SEARCH_DIRS = [
     "lifter",
     "fuzzer",
     "tuner",
+    "gcc_harness",
 ]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".proto"}
 
