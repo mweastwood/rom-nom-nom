@@ -1,0 +1,94 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(
+    default_testonly = True,
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "rtl_cfg",
+    testonly = True,
+    srcs = ["rtl_cfg.cc"],
+    hdrs = ["rtl_cfg.h"],
+    deps = [
+        "//core:mips",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "gcc_context",
+    testonly = True,
+    srcs = ["gcc_context.cc"],
+    hdrs = ["gcc_context.h"],
+    deps = [
+        ":rtl_cfg",
+        "//toolchain:gas26_harness_lib",
+        "//toolchain:gcc272_harness_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "function_hooks",
+    testonly = True,
+    srcs = ["function_hooks.cc"],
+    hdrs = ["function_hooks.h"],
+    deps = [
+        ":gcc_context",
+        ":rtl_cfg",
+        "//toolchain:gas26_harness_lib",
+        "//toolchain:gcc272_harness_lib",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "subfunction_inverses",
+    testonly = True,
+    srcs = ["subfunction_inverses.cc"],
+    hdrs = ["subfunction_inverses.h"],
+    deps = [
+        ":rtl_cfg",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "right_inverse_verifier",
+    testonly = True,
+    srcs = ["right_inverse_verifier.cc"],
+    hdrs = ["right_inverse_verifier.h"],
+    deps = [
+        ":function_hooks",
+        ":gcc_context",
+        ":rtl_cfg",
+        ":subfunction_inverses",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "gcc_harness_test",
+    size = "medium",
+    testonly = True,
+    srcs = ["gcc_harness_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":function_hooks",
+        ":gcc_context",
+        ":right_inverse_verifier",
+        ":rtl_cfg",
+        ":subfunction_inverses",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

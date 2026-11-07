@@ -24,6 +24,7 @@ SEARCH_DIRS = [
     "lifter",
     "fuzzer",
     "tuner",
+    "gcc_harness",
 ]
 EXTENSIONS = {".c", ".h", ".cc", ".cpp"}
 
@@ -99,6 +100,7 @@ def get_compile_args(file_path: Path):
             or "lifter" in str(file_path)
             or "fuzzer" in str(file_path)
             or "tuner" in str(file_path)
+            or "gcc_harness" in str(file_path)
         )
 
     if is_cpp:
