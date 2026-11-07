@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "core/c_ast.h"
 #include "core/rtl_cfg.h"
 
 // NOLINTBEGIN(readability-identifier-naming)
@@ -221,6 +222,49 @@ class GccContext {
   // `FUNCTION_DECL` state so a new function can be materialized and passes run.
   void BeginFunction(std::string_view func_name = "harness_func");
 
+  // Materializes a C `FunctionDeclaration` (`//core:c_ast`) into GCC's live
+  // `current_function_decl` (`FUNCTION_DECL`, `PARM_DECL` chain, `RESULT_DECL`,
+  // and `BLOCK`), calls `init_function_start`, and optionally executes
+  // `expand_function_start` (`assign_parms`) and pre-declares top-level
+  // `VariableDeclarationStatement`s in `func_decl.Body()`.
+  void* BeginFunctionFromAst(const FunctionDeclaration& func_decl,
+                             bool run_expand_function_start = true,
+                             bool declare_body_locals = true);
+
+  // Materializes a `CType` (`//core:c_ast`) into a GCC `tree` type node
+  // (`integer_type_node`, `unsigned_type_node`, `short_integer_type_node`,
+  // `signed_char_type_node`, `float_type_node`, `double_type_node`, pointer
+  // types, etc.).
+  void* BuildCTypeTree(const CType& c_type);
+
+  // Materializes a `CExpression` (`//core:c_ast`) into a GCC `tree` expression
+  // node using the active function's parameter/local declaration table.
+  void* BuildCExprTree(const CExpression& expr);
+
+  // Materializes a `VariableDeclarationStatement` (`//core:c_ast`) into a GCC
+  // `VAR_DECL` `tree` node and registers it in the active function's symbol map.
+  void* BuildVarDeclTree(const VariableDeclarationStatement& var_decl);
+
+  // Declares or updates an external `FUNCTION_DECL` with `return_type` in the
+  // active function's symbol map so `BuildCExprTree` builds typed `CALL_EXPR`s.
+  void* DeclareExternalFunction(std::string_view name, const CType& return_type);
+
+  // Expands a `CStatement` (`//core:c_ast`) into the active RTL instruction
+  // chain using GCC 2.7.2's `stmt.c` / `expr.c` expansion routines.
+  void ExpandCStatement(const CStatement& stmt);
+
+  // Starts an isolated RTL sequence (`start_sequence` + sentinel deleted note)
+  // so an individual Stage 13 `expand_*` hook emits only its own instructions.
+  void StartIsolatedExpandSequence();
+
+  // Ends an isolated RTL sequence started by `StartIsolatedExpandSequence()`.
+  void EndIsolatedExpandSequence();
+
+  // Synchronizes GCC's `return_label` with any un-emitted target label created
+  // during `MaterializeFromCfg(body_cfg, /*reset_function=*/false)` before
+  // `expand_function_end` is invoked.
+  void SyncReturnLabelFromMaterializedCfg();
+
   // Parses a single RTL S-expression (supporting `/v`, `/i`, `/s`, `/u` flags,
   // `:REG_*` note modes, `(label_ref L<k>)`, and pseudo-register canonicalization)
   // into a live GCC `rtx_def*`.
@@ -244,7 +288,9 @@ class GccContext {
   // doubly-linked `rtx` instruction chain (`get_insns()`), preserving all `/v`, `/i`, `/s`, `/u`
   // flags, `SEQUENCE` delay-slot wrappers, `REG_NOTES`, `NOTE_INSN_LOOP_*` notes,
   // `CODE_LABEL` targets, and `BARRIER`s. Returns `get_insns()`.
-  Rtx MaterializeFromCfg(const RtlControlFlowGraph& cfg);
+  // When `reset_function` is false, preserves the active `current_function_decl`
+  // and `return_label` initialized by `BeginFunctionFromAst`.
+  Rtx MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_function = true);
 
   // Converts an in-memory GCC `rtx` instruction chain back into a canonical
   // `RtlControlFlowGraph` via `print_rtl` + `BuildCanonicalCfgFromFlatRtlItems`
@@ -277,6 +323,8 @@ class GccContext {
 
   std::string current_func_name_;
   absl::flat_hash_map<std::string, Rtx> label_map_;
+  absl::flat_hash_map<std::string, void*> decl_map_;
+  absl::flat_hash_map<std::string, void*> c_label_decl_map_;
 };
 
 }  // namespace rom_nom_nom::gcc_harness

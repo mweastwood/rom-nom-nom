@@ -409,6 +409,8 @@ temp_obstack
 synth_mult
 choose_multiplier
 print_rtx
+do_store_flag
+virtuals_instantiated
 EOF
 
 for obj in "${GCC_OBJS[@]}"; do

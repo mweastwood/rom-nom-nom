@@ -587,4 +587,173 @@ RightInverseResult RightInverseVerifier::VerifyJump1StageRightInverse(
       RtlPassKind::kJump);
 }
 
+// -----------------------------------------------------------------------------
+// Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+// -----------------------------------------------------------------------------
+
+namespace {
+
+RightInverseResult BuildCfgRightInverseResult(const RtlControlFlowGraph& expected_x,
+                                              const RtlControlFlowGraph& actual_fx) {
+  RightInverseResult result;
+  result.expected_summary = expected_x.FormatSummary();
+  result.actual_summary = actual_fx.FormatSummary();
+  result.cfg_comparison = actual_fx.CompareAgainst(expected_x);
+  result.matches = result.cfg_comparison.MatchesExactly();
+  result.diff_detail = result.cfg_comparison.mismatch_detail;
+  return result;
+}
+
+RightInverseResult BuildFailedStage13Result(const RtlControlFlowGraph& expected_x,
+                                            const absl::Status& status) {
+  RightInverseResult result;
+  result.expected_summary = expected_x.FormatSummary();
+  result.matches = false;
+  result.diff_detail = std::string(status.message());
+  return result;
+}
+
+}  // namespace
+
+RightInverseResult RightInverseVerifier::VerifyInstantiateVirtualRegsRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  const RtlControlFlowGraph pre_y = inverses_->InvertInstantiateVirtualRegs(post_cfg_x);
+  const RtlControlFlowGraph actual_fx = hooks_->RunInstantiateVirtualRegs(*ctx_, pre_y);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandFunctionEndRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandFunctionEnd(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandFunctionEnd(*ctx_, lifted_y->body_cfg, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandReturnRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandReturn(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandReturn(*ctx_, lifted_y->ret_stmt, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandExprRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandExpr(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx = hooks_->RunExpandExpr(
+      *ctx_, *lifted_y->expr, lifted_y->func_decl, lifted_y->target_pseudo_regno);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandAssignmentRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandAssignment(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandAssignment(*ctx_, *lifted_y->lhs, *lifted_y->rhs, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyDoStoreFlagRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertDoStoreFlag(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunDoStoreFlag(*ctx_, *lifted_y->comparison_expr, lifted_y->func_decl,
+                             lifted_y->target_pseudo_regno, lifted_y->only_cheap);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyDoJumpRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertDoJump(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunDoJump(*ctx_, *lifted_y->cond_expr, lifted_y->func_decl, lifted_y->jump_if_true,
+                        lifted_y->jump_if_false);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandCallRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandCall(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx = hooks_->RunExpandCall(
+      *ctx_, lifted_y->call_expr, lifted_y->caller_decl, lifted_y->return_type,
+      lifted_y->target_pseudo_regno, lifted_y->ignore_result);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandCondRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandCond(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandCond(*ctx_, lifted_y->if_stmt, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandLoopRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandLoop(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandLoop(*ctx_, *lifted_y->loop_stmt, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandCaseRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandCase(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandCase(*ctx_, lifted_y->switch_stmt, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandDeclRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandDecl(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx =
+      hooks_->RunExpandDecl(*ctx_, lifted_y->var_decl, lifted_y->func_decl);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifyExpandFunctionStartRightInverse(
+    const RtlControlFlowGraph& post_cfg_x) const {
+  auto lifted_y = inverses_->InvertExpandFunctionStart(post_cfg_x);
+  if (!lifted_y.ok()) {
+    return BuildFailedStage13Result(post_cfg_x, lifted_y.status());
+  }
+  const RtlControlFlowGraph actual_fx = hooks_->RunExpandFunctionStart(*ctx_, *lifted_y);
+  return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
 }  // namespace rom_nom_nom::gcc_harness

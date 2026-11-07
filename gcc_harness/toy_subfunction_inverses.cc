@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -1271,6 +1273,935 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertJump1Optimize(
   ret_blk.id = ret_lbl_b;
   out.rpo_blocks.push_back(std::move(ret_blk));
   return out;
+}
+
+// -----------------------------------------------------------------------------
+// Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+// -----------------------------------------------------------------------------
+
+namespace {
+
+using CExprPtr = std::unique_ptr<CExpression>;
+
+constexpr int kFirstUserPseudo = 72;
+
+std::string ParamNameForRegno(int regno) {
+  return absl::StrCat("p", regno - kFirstUserPseudo);
+}
+
+void ScanExprForStage13Regs(const RtlExpr& expr, int* max_v_pseudo, int* min_temp_pseudo,
+                            absl::flat_hash_set<int>* deref_v_pseudos,
+                            absl::flat_hash_map<int, RtlMachineMode>* v_pseudo_modes,
+                            bool inside_mem = false) {
+  if (expr.IsReg()) {
+    int regno = expr.RegNo();
+    if (regno >= kFirstUserPseudo) {
+      if (expr.flags.volatil) {
+        *max_v_pseudo = std::max(*max_v_pseudo, regno);
+        if (expr.mode != RtlMachineMode::kNone) {
+          (*v_pseudo_modes)[regno] = expr.mode;
+        }
+        if (inside_mem) {
+          deref_v_pseudos->insert(regno);
+        }
+      } else {
+        *min_temp_pseudo = std::min(*min_temp_pseudo, regno);
+      }
+    }
+    return;
+  }
+  const bool next_inside_mem = inside_mem || expr.op == RtlOp::kMem;
+  for (const RtlExpr& child : expr.children) {
+    ScanExprForStage13Regs(child, max_v_pseudo, min_temp_pseudo, deref_v_pseudos, v_pseudo_modes,
+                           next_inside_mem);
+  }
+}
+
+FunctionDeclaration InferIsolatedStage13FuncDecl(const RtlControlFlowGraph& x,
+                                                 CType return_type = CType::S32(),
+                                                 int explicit_num_params = -1) {
+  int max_v_pseudo = 0;
+  int min_temp_pseudo = 1000000;
+  absl::flat_hash_set<int> deref_v_pseudos;
+  absl::flat_hash_map<int, RtlMachineMode> v_pseudo_modes;
+  for (const auto& blk : x.rpo_blocks) {
+    for (const std::string& pat_str : blk.instructions) {
+      auto parsed = ParsePatternAndNotes(pat_str);
+      if (parsed.ok()) {
+        ScanExprForStage13Regs(parsed->pattern, &max_v_pseudo, &min_temp_pseudo, &deref_v_pseudos,
+                               &v_pseudo_modes);
+      }
+    }
+  }
+  int num_params = 0;
+  if (explicit_num_params >= 0) {
+    num_params = explicit_num_params;
+  } else {
+    if (max_v_pseudo >= kFirstUserPseudo) {
+      num_params = max_v_pseudo - kFirstUserPseudo + 1;
+    }
+    if (min_temp_pseudo < 1000000 && min_temp_pseudo >= kFirstUserPseudo) {
+      num_params = std::max(num_params, min_temp_pseudo - kFirstUserPseudo);
+    }
+  }
+
+  std::vector<CParameter> params;
+  params.reserve(num_params);
+  for (int i = 0; i < num_params; ++i) {
+    const int regno = kFirstUserPseudo + i;
+    CType param_type = CType::S32();
+    if (deref_v_pseudos.contains(regno)) {
+      param_type = CType::S32().MakePointer();
+    } else if (auto it = v_pseudo_modes.find(regno); it != v_pseudo_modes.end()) {
+      if (it->second == RtlMachineMode::kSF) {
+        param_type = CType::F32();
+      } else if (it->second == RtlMachineMode::kDF) {
+        param_type = CType::F64();
+      } else if (it->second == RtlMachineMode::kDI) {
+        param_type = CType::Named("s64");
+      }
+    }
+    params.push_back(CParameter{
+        .type = std::move(param_type),
+        .name = ParamNameForRegno(regno),
+    });
+  }
+  return FunctionDeclaration(std::move(return_type), "harness_func", std::move(params),
+                             std::make_unique<CompoundStatement>());
+}
+
+std::string NegateComparisonOp(std::string_view op) {
+  if (op == "==") return "!=";
+  if (op == "!=") return "==";
+  if (op == "<") return ">=";
+  if (op == ">=") return "<";
+  if (op == "<=") return ">";
+  if (op == ">") return "<=";
+  return std::string(op);
+}
+
+CExprPtr RtlExprToCExpr(const RtlExpr& expr, const absl::flat_hash_map<int, CExprPtr>& reg_env) {
+  if (expr.IsConstInt()) {
+    return CExpression::Integer(expr.IntVal());
+  }
+  if (expr.IsReg()) {
+    const int regno = expr.RegNo();
+    if (auto it = reg_env.find(regno); it != reg_env.end() && it->second != nullptr) {
+      return it->second->Clone();
+    }
+    if (regno >= kFirstUserPseudo) {
+      return CExpression::Identifier(ParamNameForRegno(regno));
+    }
+    return CExpression::Integer(0);
+  }
+  if (expr.op == RtlOp::kSubreg && !expr.children.empty()) {
+    return RtlExprToCExpr(expr.children[0], reg_env);
+  }
+  if (expr.op == RtlOp::kMem && !expr.children.empty()) {
+    return CExpression::Unary("*", RtlExprToCExpr(expr.children[0], reg_env));
+  }
+  if (expr.op == RtlOp::kNeg && !expr.children.empty()) {
+    return CExpression::Unary("-", RtlExprToCExpr(expr.children[0], reg_env));
+  }
+  if (expr.op == RtlOp::kNot && !expr.children.empty()) {
+    return CExpression::Unary("~", RtlExprToCExpr(expr.children[0], reg_env));
+  }
+  if (expr.children.size() == 2) {
+    CExprPtr lhs = RtlExprToCExpr(expr.children[0], reg_env);
+    CExprPtr rhs = RtlExprToCExpr(expr.children[1], reg_env);
+    if (expr.op == RtlOp::kPlus) {
+      if (expr.children[1].IsConstInt() && expr.children[1].IntVal() < 0) {
+        return CExpression::Binary("-", std::move(lhs),
+                                   CExpression::Integer(-expr.children[1].IntVal()));
+      }
+      return CExpression::Binary("+", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kMinus) {
+      return CExpression::Binary("-", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kMult) {
+      return CExpression::Binary("*", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kDiv || expr.op == RtlOp::kUdiv) {
+      return CExpression::Binary("/", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kMod || expr.op == RtlOp::kUmod) {
+      return CExpression::Binary("%", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kAnd) {
+      return CExpression::Binary("&", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kIor) {
+      return CExpression::Binary("|", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kXor) {
+      if (expr.children[1].IsConstInt() && expr.children[1].IntVal() == 1 &&
+          expr.children[0].IsReg()) {
+        // Logical negation of a comparison temp `(xor (lt a b) 1)` -> `a >= b`.
+        if (auto it = reg_env.find(expr.children[0].RegNo());
+            it != reg_env.end() && it->second != nullptr &&
+            it->second->Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& bin = static_cast<const BinaryExpression&>(*it->second);
+          std::string neg_op = NegateComparisonOp(bin.Op());
+          if (neg_op != bin.Op()) {
+            return CExpression::Binary(neg_op, bin.Lhs().Clone(), bin.Rhs().Clone());
+          }
+        }
+      }
+      return CExpression::Binary("^", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kAshift) {
+      return CExpression::Binary("<<", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kAshiftrt || expr.op == RtlOp::kLshiftrt) {
+      return CExpression::Binary(">>", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kLt) {
+      return CExpression::Binary("<", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kLtu) {
+      if (expr.children[1].IsConstInt() && expr.children[1].IntVal() == 1 &&
+          expr.children[0].IsReg()) {
+        if (auto it = reg_env.find(expr.children[0].RegNo());
+            it != reg_env.end() && it->second != nullptr &&
+            it->second->Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& bin = static_cast<const BinaryExpression&>(*it->second);
+          if (bin.Op() == "^") {
+            return CExpression::Binary("==", bin.Lhs().Clone(), bin.Rhs().Clone());
+          }
+        }
+        return CExpression::Binary("==", std::move(lhs), CExpression::Integer(0));
+      }
+      return CExpression::Binary("<", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kLe) {
+      return CExpression::Binary("<=", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kLeu) {
+      if (expr.children[1].IsConstInt() && expr.children[1].IntVal() == 0 &&
+          expr.children[0].IsReg()) {
+        if (auto it = reg_env.find(expr.children[0].RegNo());
+            it != reg_env.end() && it->second != nullptr &&
+            it->second->Kind() == CExpressionKind::kBinaryExpression) {
+          const auto& bin = static_cast<const BinaryExpression&>(*it->second);
+          if (bin.Op() == "^") {
+            return CExpression::Binary("==", bin.Lhs().Clone(), bin.Rhs().Clone());
+          }
+        }
+        return CExpression::Binary("==", std::move(lhs), CExpression::Integer(0));
+      }
+      return CExpression::Binary("<=", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kGt) {
+      return CExpression::Binary(">", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kGtu) {
+      if (expr.children[1].IsConstInt() && expr.children[1].IntVal() == 0) {
+        return CExpression::Binary("!=", std::move(lhs), CExpression::Integer(0));
+      }
+      return CExpression::Binary(">", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kGe || expr.op == RtlOp::kGeu) {
+      return CExpression::Binary(">=", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kEq) {
+      return CExpression::Binary("==", std::move(lhs), std::move(rhs));
+    }
+    if (expr.op == RtlOp::kNe) {
+      return CExpression::Binary("!=", std::move(lhs), std::move(rhs));
+    }
+  }
+  return CExpression::Integer(0);
+}
+
+const RtlExpr* UnwrapSingleSet(const RtlExpr& pat) {
+  if (pat.IsSet()) {
+    return &pat;
+  }
+  if (pat.IsParallel() && !pat.children.empty() && pat.children[0].IsSet()) {
+    return &pat.children[0];
+  }
+  return nullptr;
+}
+
+// Decodes a basic block's `do_jump` instructions into the C condition expression
+// that branches to `if_false_label` when false (or when `invert_for_false_jump`
+// is false, branches when true).
+CExprPtr DecodeBlockJumpCondition(const RtlBasicBlock& blk, bool invert_for_false_jump = true) {
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  for (const std::string& pat_str : blk.instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    if (dst.IsReg()) {
+      reg_env[dst.RegNo()] = RtlExprToCExpr(src, reg_env);
+      continue;
+    }
+    if (dst.op == RtlOp::kPc && src.op == RtlOp::kIfThenElse && src.children.size() >= 2) {
+      const RtlExpr& cmp = src.children[0];
+      if (cmp.children.size() == 2) {
+        // Check if `cmp` is `(eq (reg tmp) (const_int 0))` or `(ne (reg tmp) (const_int 0))`
+        // where `tmp` holds a relational comparison like `(lt a b)`.
+        if ((cmp.op == RtlOp::kEq || cmp.op == RtlOp::kNe) && cmp.children[0].IsReg() &&
+            cmp.children[1].IsConstInt() && cmp.children[1].IntVal() == 0) {
+          if (auto it = reg_env.find(cmp.children[0].RegNo());
+              it != reg_env.end() && it->second != nullptr &&
+              it->second->Kind() == CExpressionKind::kBinaryExpression) {
+            const auto& bin = static_cast<const BinaryExpression&>(*it->second);
+            bool negate = (cmp.op == RtlOp::kEq) != invert_for_false_jump;
+            std::string op = negate ? NegateComparisonOp(bin.Op()) : bin.Op();
+            return CExpression::Binary(op, bin.Lhs().Clone(), bin.Rhs().Clone());
+          }
+        }
+        CExprPtr c_cmp = RtlExprToCExpr(cmp, reg_env);
+        if (c_cmp != nullptr && c_cmp->Kind() == CExpressionKind::kBinaryExpression &&
+            invert_for_false_jump) {
+          const auto& bin = static_cast<const BinaryExpression&>(*c_cmp);
+          return CExpression::Binary(NegateComparisonOp(bin.Op()), bin.Lhs().Clone(),
+                                     bin.Rhs().Clone());
+        }
+        return c_cmp;
+      }
+    }
+  }
+  return CExpression::Integer(1);
+}
+
+std::vector<std::unique_ptr<CStatement>> DecodeBlockAssignmentStatements(const RtlBasicBlock& blk) {
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  std::vector<std::unique_ptr<CStatement>> stmts;
+  for (const std::string& pat_str : blk.instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    if (dst.op == RtlOp::kPc) {
+      continue;
+    }
+    CExprPtr rhs = RtlExprToCExpr(src, reg_env);
+    if (dst.IsReg()) {
+      const int regno = dst.RegNo();
+      reg_env[regno] = rhs->Clone();
+      if (dst.flags.volatil && regno >= kFirstUserPseudo) {
+        CExprPtr assign = CExpression::Assignment(
+            "=", CExpression::Identifier(ParamNameForRegno(regno)), std::move(rhs));
+        stmts.push_back(CStatement::Expression(std::move(assign)));
+      }
+    } else if (dst.IsMem()) {
+      CExprPtr lhs = CExpression::Unary("*", RtlExprToCExpr(dst.MemAddr(), reg_env));
+      CExprPtr assign = CExpression::Assignment("=", std::move(lhs), std::move(rhs));
+      stmts.push_back(CStatement::Expression(std::move(assign)));
+    }
+  }
+  return stmts;
+}
+
+}  // namespace
+
+RtlControlFlowGraph ToySubfunctionInverses::InvertInstantiateVirtualRegs(
+    const RtlControlFlowGraph& x) const {
+  RtlControlFlowGraph out = x;
+  out.pass = RtlPassKind::kRtl;
+  for (auto& blk : out.rpo_blocks) {
+    for (std::string& pat : blk.instructions) {
+      auto parsed = ParsePatternAndNotes(pat);
+      if (parsed.ok()) {
+        parsed->RewriteRegs([](RtlExpr& reg) {
+          if (reg.RegNo() == 30) {
+            // `frame_pointer_rtx` (`$fp`) <- `virtual_stack_vars_rtx` (`68`).
+            reg.SetRegNo(68);
+          } else if (reg.RegNo() == 29) {
+            // `stack_pointer_rtx` (`$sp`) <- `virtual_outgoing_args_rtx` (`70`).
+            reg.SetRegNo(70);
+          }
+        });
+        pat = parsed->ToSexprString();
+      }
+    }
+    blk.SyncRtlInsnsFromInstructions();
+  }
+  return out;
+}
+
+absl::StatusOr<ExpandFunctionEndInput> ToySubfunctionInverses::InvertExpandFunctionEnd(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty()) {
+    return absl::InvalidArgumentError("InvertExpandFunctionEnd: empty CFG");
+  }
+  ExpandFunctionEndInput input;
+  input.body_cfg = x;
+  input.body_cfg.pass = RtlPassKind::kRtl;
+  CType ret_type = CType::Void();
+  for (const auto& blk : x.rpo_blocks) {
+    for (const std::string& pat : blk.instructions) {
+      if (absl::StrContains(pat, "(use (reg/i:SI 2")) {
+        ret_type = CType::S32();
+      } else if (absl::StrContains(pat, "(use (reg/i:SF 32")) {
+        ret_type = CType::F32();
+      } else if (absl::StrContains(pat, "(use (reg/i:DI 2")) {
+        ret_type = CType::Named("s64");
+      }
+    }
+  }
+  input.func_decl = InferIsolatedStage13FuncDecl(x, ret_type);
+
+  // Strip the trailing `return_label` + `(use (reg/i:...))` block emitted by
+  // `expand_function_end`, or strip trailing `(use (reg/i:...))` in a single-block
+  // function.
+  if (input.body_cfg.rpo_blocks.size() >= 2) {
+    const auto& last_blk = input.body_cfg.rpo_blocks.back();
+    if (last_blk.instructions.empty() ||
+        (last_blk.instructions.size() == 1 &&
+         absl::StartsWith(last_blk.instructions[0], "(use (reg/i:"))) {
+      const size_t removed_id = input.body_cfg.rpo_blocks.size() - 1;
+      input.body_cfg.rpo_blocks.pop_back();
+      for (auto& blk : input.body_cfg.rpo_blocks) {
+        blk.successors.erase(std::remove(blk.successors.begin(), blk.successors.end(), removed_id),
+                             blk.successors.end());
+      }
+      return input;
+    }
+  }
+  auto& last_blk = input.body_cfg.rpo_blocks.back();
+  if (!last_blk.instructions.empty() &&
+      absl::StartsWith(last_blk.instructions.back(), "(use (reg/i:")) {
+    last_blk.instructions.pop_back();
+    last_blk.SyncRtlInsnsFromInstructions();
+  }
+  return input;
+}
+
+absl::StatusOr<ExpandReturnInput> ToySubfunctionInverses::InvertExpandReturn(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertExpandReturn: empty CFG");
+  }
+  ExpandReturnInput input;
+  const auto& blk = x.rpo_blocks[0];
+  bool has_ret_reg = false;
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  CExprPtr ret_expr = nullptr;
+
+  for (const std::string& pat_str : blk.instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    if (dst.IsReg()) {
+      CExprPtr rhs = RtlExprToCExpr(src, reg_env);
+      if (dst.RegNo() == 2 && dst.flags.integrated) {
+        has_ret_reg = true;
+        ret_expr = std::move(rhs);
+      } else {
+        reg_env[dst.RegNo()] = std::move(rhs);
+      }
+    }
+  }
+
+  input.func_decl = InferIsolatedStage13FuncDecl(x, has_ret_reg ? CType::S32() : CType::Void());
+  input.ret_stmt = ReturnStatement(has_ret_reg ? std::move(ret_expr) : nullptr);
+  return input;
+}
+
+absl::StatusOr<ExpandExprInput> ToySubfunctionInverses::InvertExpandExpr(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertExpandExpr: empty CFG");
+  }
+  ExpandExprInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::S32());
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  CExprPtr last_expr = nullptr;
+  int first_dst_regno = 0;
+  int last_dst_regno = 0;
+
+  for (const std::string& pat_str : x.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    CExprPtr rhs = RtlExprToCExpr(src, reg_env);
+    last_expr = rhs->Clone();
+    if (dst.IsReg()) {
+      if (first_dst_regno == 0) {
+        first_dst_regno = dst.RegNo();
+      }
+      last_dst_regno = dst.RegNo();
+      reg_env[dst.RegNo()] = std::move(rhs);
+    }
+  }
+  if (last_expr == nullptr) {
+    return absl::InvalidArgumentError("InvertExpandExpr: could not decode expression");
+  }
+  input.expr = std::move(last_expr);
+  const int expected_first_temp =
+      kFirstUserPseudo + static_cast<int>(input.func_decl.Parameters().size());
+  if (first_dst_regno == last_dst_regno && last_dst_regno > expected_first_temp) {
+    input.target_pseudo_regno = last_dst_regno;
+  } else {
+    input.target_pseudo_regno = 0;
+  }
+  return input;
+}
+
+absl::StatusOr<ExpandAssignmentInput> ToySubfunctionInverses::InvertExpandAssignment(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertExpandAssignment: empty CFG");
+  }
+  ExpandAssignmentInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::Void());
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  CExprPtr lhs_expr = nullptr;
+  CExprPtr rhs_expr = nullptr;
+
+  for (const std::string& pat_str : x.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    CExprPtr rhs = RtlExprToCExpr(src, reg_env);
+    if (dst.IsReg()) {
+      reg_env[dst.RegNo()] = rhs->Clone();
+      if (dst.flags.volatil && dst.RegNo() >= kFirstUserPseudo) {
+        lhs_expr = CExpression::Identifier(ParamNameForRegno(dst.RegNo()));
+        rhs_expr = std::move(rhs);
+      }
+    } else if (dst.IsMem()) {
+      lhs_expr = CExpression::Unary("*", RtlExprToCExpr(dst.MemAddr(), reg_env));
+      rhs_expr = std::move(rhs);
+    }
+  }
+  if (lhs_expr == nullptr || rhs_expr == nullptr) {
+    return absl::InvalidArgumentError("InvertExpandAssignment: could not decode assignment");
+  }
+  input.lhs = std::move(lhs_expr);
+  input.rhs = std::move(rhs_expr);
+  return input;
+}
+
+absl::StatusOr<DoStoreFlagInput> ToySubfunctionInverses::InvertDoStoreFlag(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertDoStoreFlag: empty CFG");
+  }
+  DoStoreFlagInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::S32());
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  CExprPtr last_expr = nullptr;
+
+  for (const std::string& pat_str : x.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    CExprPtr rhs = RtlExprToCExpr(src, reg_env);
+    last_expr = rhs->Clone();
+    if (dst.IsReg()) {
+      reg_env[dst.RegNo()] = std::move(rhs);
+    }
+  }
+  if (last_expr == nullptr) {
+    return absl::InvalidArgumentError("InvertDoStoreFlag: could not decode comparison");
+  }
+  input.comparison_expr = std::move(last_expr);
+  input.target_pseudo_regno = 0;
+  input.only_cheap = 0;
+  return input;
+}
+
+absl::StatusOr<DoJumpInput> ToySubfunctionInverses::InvertDoJump(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertDoJump: empty CFG");
+  }
+  DoJumpInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::Void());
+  input.jump_if_true = false;
+  input.jump_if_false = true;
+
+  if (x.rpo_blocks.size() == 1) {
+    input.cond_expr = DecodeBlockJumpCondition(x.rpo_blocks[0], /*invert_for_false_jump=*/true);
+    return input;
+  }
+
+  // Short-circuit `&&` or `||` across blocks 0 and 1:
+  // For `||` (`TRUTH_ORIF_EXPR`), GCC 2.7.2 sets `if_true_label = drop_through_label`,
+  // emitting two positive branches (`invert = false`) in blocks 0 and 1 followed by
+  // an unconditional jump to `if_false_label` in block 2 (`rpo_blocks.size() >= 3`).
+  // For `&&` (`TRUTH_ANDIF_EXPR`), blocks 0 and 1 both jump to `if_false_label` when
+  // false (`rpo_blocks.size() == 2`).
+  const bool is_logical_or = (x.rpo_blocks.size() >= 3);
+  if (is_logical_or) {
+    CExprPtr lhs = DecodeBlockJumpCondition(x.rpo_blocks[0], /*invert_for_false_jump=*/false);
+    CExprPtr rhs = DecodeBlockJumpCondition(x.rpo_blocks[1], /*invert_for_false_jump=*/false);
+    input.cond_expr = CExpression::Binary("||", std::move(lhs), std::move(rhs));
+  } else {
+    CExprPtr lhs = DecodeBlockJumpCondition(x.rpo_blocks[0], /*invert_for_false_jump=*/true);
+    CExprPtr rhs = DecodeBlockJumpCondition(x.rpo_blocks[1], /*invert_for_false_jump=*/true);
+    input.cond_expr = CExpression::Binary("&&", std::move(lhs), std::move(rhs));
+  }
+  return input;
+}
+
+absl::StatusOr<ExpandCallInput> ToySubfunctionInverses::InvertExpandCall(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertExpandCall: empty CFG");
+  }
+  ExpandCallInput input;
+  input.caller_decl = InferIsolatedStage13FuncDecl(x, CType::S32());
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  std::vector<std::pair<int, CExprPtr>> arg_regs;
+  std::string callee_name;
+  bool call_sets_v0 = false;
+  int copy_from_v0_regno = 0;
+
+  for (const std::string& pat_str : x.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr& pat = parsed->pattern;
+    if (pat.IsParallel() && !pat.children.empty()) {
+      const RtlExpr& first_elem = pat.children[0];
+      const RtlExpr* call_node = nullptr;
+      if (first_elem.IsSet() && first_elem.SetSrc().op == RtlOp::kCall) {
+        call_sets_v0 = true;
+        call_node = &first_elem.SetSrc();
+      } else if (first_elem.op == RtlOp::kCall) {
+        call_sets_v0 = false;
+        call_node = &first_elem;
+      }
+      if (call_node != nullptr && !call_node->children.empty() && call_node->children[0].IsMem() &&
+          call_node->children[0].MemAddr().IsSymbolRef()) {
+        callee_name = std::string(call_node->children[0].MemAddr().SymbolName());
+        if (callee_name.size() >= 2 && callee_name.front() == '"' && callee_name.back() == '"') {
+          callee_name = callee_name.substr(1, callee_name.size() - 2);
+        }
+        if (!callee_name.empty() && callee_name.front() == '@') {
+          callee_name.erase(0, 1);
+        }
+      }
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(pat);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    if (dst.IsReg()) {
+      const int regno = dst.RegNo();
+      if (src.IsReg() && src.RegNo() == 2 && regno >= kFirstUserPseudo) {
+        copy_from_v0_regno = regno;
+      } else if (regno >= 4 && regno <= 7) {
+        arg_regs.emplace_back(regno, RtlExprToCExpr(src, reg_env));
+      } else {
+        reg_env[regno] = RtlExprToCExpr(src, reg_env);
+      }
+    }
+  }
+  if (callee_name.empty()) {
+    return absl::InvalidArgumentError("InvertExpandCall: no symbol_ref call found");
+  }
+  std::sort(arg_regs.begin(), arg_regs.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<CExprPtr> call_args;
+  call_args.reserve(arg_regs.size());
+  for (auto& [_, arg_expr] : arg_regs) {
+    call_args.push_back(std::move(arg_expr));
+  }
+  input.call_expr = CallExpression(CExpression::Identifier(callee_name), std::move(call_args));
+  input.return_type = call_sets_v0 ? CType::S32() : CType::Void();
+  input.target_pseudo_regno = copy_from_v0_regno;
+  input.ignore_result = !call_sets_v0;
+  return input;
+}
+
+absl::StatusOr<ExpandCondInput> ToySubfunctionInverses::InvertExpandCond(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.size() < 2) {
+    return absl::InvalidArgumentError("InvertExpandCond: expected at least 2 basic blocks");
+  }
+  ExpandCondInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::Void());
+  CExprPtr cond = DecodeBlockJumpCondition(x.rpo_blocks[0], /*invert_for_false_jump=*/true);
+  auto then_block =
+      std::make_unique<CompoundStatement>(DecodeBlockAssignmentStatements(x.rpo_blocks[1]));
+  std::unique_ptr<CStatement> else_branch = nullptr;
+  if (x.rpo_blocks.size() >= 3) {
+    auto else_stmts = DecodeBlockAssignmentStatements(x.rpo_blocks[2]);
+    if (!else_stmts.empty()) {
+      else_branch = std::make_unique<CompoundStatement>(std::move(else_stmts));
+    }
+  }
+  input.if_stmt = IfStatement(std::move(cond), std::move(then_block), std::move(else_branch));
+  return input;
+}
+
+absl::StatusOr<ExpandLoopInput> ToySubfunctionInverses::InvertExpandLoop(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty()) {
+    return absl::InvalidArgumentError("InvertExpandLoop: empty CFG");
+  }
+  ExpandLoopInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::Void());
+
+  CExprPtr cond = nullptr;
+  std::vector<std::unique_ptr<CStatement>> body_stmts;
+  for (const auto& blk : x.rpo_blocks) {
+    bool has_cond_jump = false;
+    for (const std::string& pat : blk.instructions) {
+      if (absl::StrContains(pat, "(if_then_else")) {
+        has_cond_jump = true;
+        break;
+      }
+    }
+    if (has_cond_jump && cond == nullptr) {
+      bool jumps_to_exit = true;
+      if (!blk.successors.empty()) {
+        for (size_t succ : blk.successors) {
+          if (succ < blk.id) {
+            jumps_to_exit = false;
+            break;
+          }
+        }
+      }
+      cond = DecodeBlockJumpCondition(blk, /*invert_for_false_jump=*/jumps_to_exit);
+    }
+    auto blk_stmts = DecodeBlockAssignmentStatements(blk);
+    for (auto& s : blk_stmts) {
+      body_stmts.push_back(std::move(s));
+    }
+  }
+  if (cond == nullptr) {
+    cond = CExpression::Integer(1);
+  }
+  input.loop_stmt = CStatement::While(std::move(cond),
+                                      std::make_unique<CompoundStatement>(std::move(body_stmts)));
+  return input;
+}
+
+absl::StatusOr<ExpandCaseInput> ToySubfunctionInverses::InvertExpandCase(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty()) {
+    return absl::InvalidArgumentError("InvertExpandCase: empty CFG");
+  }
+  ExpandCaseInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::Void());
+
+  CExprPtr ctrl_expr = nullptr;
+  std::vector<std::pair<int64_t, size_t>> case_targets;
+  absl::flat_hash_set<size_t> dispatch_blocks;
+  absl::flat_hash_set<size_t> case_target_set;
+
+  for (size_t b = 0; b < x.rpo_blocks.size(); ++b) {
+    const auto& blk = x.rpo_blocks[b];
+    if (blk.instructions.empty()) {
+      continue;
+    }
+    absl::flat_hash_map<int, CExprPtr> reg_env;
+    for (size_t i = 0; i + 1 < blk.instructions.size(); ++i) {
+      auto pre_parsed = ParsePatternAndNotes(blk.instructions[i]);
+      if (!pre_parsed.ok()) {
+        continue;
+      }
+      const RtlExpr* pre_set = UnwrapSingleSet(pre_parsed->pattern);
+      if (pre_set != nullptr && pre_set->SetDest().IsReg()) {
+        reg_env[pre_set->SetDest().RegNo()] = RtlExprToCExpr(pre_set->SetSrc(), reg_env);
+      }
+    }
+    auto parsed = ParsePatternAndNotes(blk.instructions.back());
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr != nullptr && set_expr->SetDest().op == RtlOp::kPc &&
+        set_expr->SetSrc().op == RtlOp::kIfThenElse && !set_expr->SetSrc().children.empty()) {
+      const RtlExpr& cmp = set_expr->SetSrc().children[0];
+      if (cmp.op == RtlOp::kEq && cmp.children.size() == 2 && !blk.successors.empty()) {
+        CExprPtr rhs_val = RtlExprToCExpr(cmp.children[1], reg_env);
+        if (rhs_val != nullptr && rhs_val->Kind() == CExpressionKind::kIntegerLiteral) {
+          const int64_t case_val = static_cast<const IntegerLiteralExpression&>(*rhs_val).Value();
+          if (ctrl_expr == nullptr) {
+            ctrl_expr = RtlExprToCExpr(cmp.children[0], reg_env);
+          }
+          size_t target_b = blk.successors[0];
+          if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {
+            target_b = blk.successors[1];
+          }
+          dispatch_blocks.insert(b);
+          case_target_set.insert(target_b);
+          case_targets.emplace_back(case_val, target_b);
+        }
+      }
+    }
+  }
+  if (ctrl_expr == nullptr) {
+    ctrl_expr = CExpression::Identifier(ParamNameForRegno(kFirstUserPseudo));
+  }
+
+  std::vector<SwitchCase> cases;
+  for (const auto& [val, target_b] : case_targets) {
+    if (target_b >= x.rpo_blocks.size()) {
+      continue;
+    }
+    SwitchCase sc;
+    sc.case_values = {val};
+    sc.is_default = false;
+    auto stmts = DecodeBlockAssignmentStatements(x.rpo_blocks[target_b]);
+    stmts.push_back(CStatement::Break());
+    sc.body = std::make_unique<CompoundStatement>(std::move(stmts));
+    cases.push_back(std::move(sc));
+  }
+
+  if (!dispatch_blocks.empty()) {
+    size_t max_dispatch_b = *std::max_element(dispatch_blocks.begin(), dispatch_blocks.end());
+    size_t default_b = max_dispatch_b + 1;
+    if (default_b < x.rpo_blocks.size() && x.rpo_blocks[default_b].instructions.size() == 1 &&
+        !x.rpo_blocks[default_b].successors.empty() &&
+        absl::StartsWith(x.rpo_blocks[default_b].instructions[0], "(set (pc) (label_ref")) {
+      default_b = x.rpo_blocks[default_b].successors[0];
+    }
+    if (default_b < x.rpo_blocks.size() && !case_target_set.contains(default_b)) {
+      auto def_stmts = DecodeBlockAssignmentStatements(x.rpo_blocks[default_b]);
+      if (!def_stmts.empty()) {
+        SwitchCase def_case;
+        def_case.is_default = true;
+        def_stmts.push_back(CStatement::Break());
+        def_case.body = std::make_unique<CompoundStatement>(std::move(def_stmts));
+        cases.push_back(std::move(def_case));
+      }
+    }
+  }
+  input.switch_stmt = SwitchStatement(std::move(ctrl_expr), std::move(cases));
+  return input;
+}
+
+absl::StatusOr<ExpandDeclInput> ToySubfunctionInverses::InvertExpandDecl(
+    const RtlControlFlowGraph& x) const {
+  if (x.rpo_blocks.empty() || x.rpo_blocks[0].instructions.empty()) {
+    return absl::InvalidArgumentError("InvertExpandDecl: empty CFG");
+  }
+  absl::flat_hash_map<int, CExprPtr> reg_env;
+  int decl_regno = 0;
+  CExprPtr init_expr = nullptr;
+
+  for (const std::string& pat_str : x.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    const RtlExpr& src = set_expr->SetSrc();
+    CExprPtr rhs = RtlExprToCExpr(src, reg_env);
+    if (dst.IsReg()) {
+      reg_env[dst.RegNo()] = rhs->Clone();
+      if (dst.flags.volatil && dst.RegNo() >= kFirstUserPseudo) {
+        decl_regno = dst.RegNo();
+        init_expr = std::move(rhs);
+      }
+    }
+  }
+  if (decl_regno < kFirstUserPseudo || init_expr == nullptr) {
+    return absl::InvalidArgumentError("InvertExpandDecl: could not decode local decl");
+  }
+  const int num_params = decl_regno - kFirstUserPseudo;
+  ExpandDeclInput input;
+  input.func_decl = InferIsolatedStage13FuncDecl(x, CType::Void(), num_params);
+  input.var_decl = VariableDeclarationStatement(CType::S32(), "local_var", std::move(init_expr));
+  return input;
+}
+
+absl::StatusOr<FunctionDeclaration> ToySubfunctionInverses::InvertExpandFunctionStart(
+    const RtlControlFlowGraph& x) const {
+  std::vector<CParameter> params;
+  if (x.rpo_blocks.empty()) {
+    return FunctionDeclaration(CType::S32(), "harness_func", std::move(params),
+                               std::make_unique<CompoundStatement>());
+  }
+
+  const auto& blk = x.rpo_blocks[0];
+  std::vector<std::pair<int, CType>> reg_params;
+  for (size_t i = 0; i < blk.instructions.size(); ++i) {
+    auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+    if (!parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* set_expr = UnwrapSingleSet(parsed->pattern);
+    if (set_expr == nullptr) {
+      continue;
+    }
+    const RtlExpr& dst = set_expr->SetDest();
+    if (!dst.IsReg() || !dst.flags.volatil || dst.RegNo() < kFirstUserPseudo) {
+      continue;
+    }
+    CType param_type = CType::S32();
+    if (dst.mode == RtlMachineMode::kHI) {
+      param_type = CType::S16();
+    } else if (dst.mode == RtlMachineMode::kQI) {
+      param_type = CType::U8();
+    } else if (dst.mode == RtlMachineMode::kSF) {
+      param_type = CType::F32();
+    } else if (dst.mode == RtlMachineMode::kDF) {
+      param_type = CType::F64();
+    } else if (dst.mode == RtlMachineMode::kDI) {
+      param_type = CType::Named("s64");
+    }
+    reg_params.emplace_back(dst.RegNo(), std::move(param_type));
+  }
+  std::sort(reg_params.begin(), reg_params.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (auto& [_, param_type] : reg_params) {
+    params.push_back(CParameter{
+        .type = std::move(param_type),
+        .name = absl::StrCat("p", params.size()),
+    });
+  }
+  return FunctionDeclaration(CType::S32(), "harness_func", std::move(params),
+                             std::make_unique<CompoundStatement>());
 }
 
 }  // namespace rom_nom_nom::gcc_harness

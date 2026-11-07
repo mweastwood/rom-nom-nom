@@ -47,12 +47,84 @@ void init_recog();
 void init_alias_analysis();
 void init_final(char* filename);
 void init_function_start(void* subr, char* filename, int line);
+void expand_function_start(void* subr, int parms_have_cleanups);
+void expand_function_end(char* filename, int line, int end_bindings);
 void instantiate_virtual_regs(void* fndecl, rtx_def* insns);
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
 int compute_frame_size(int size);
+void set_last_insn(rtx_def* insn);
+void start_sequence();
+void end_sequence();
+void push_temp_slots();
+void pop_temp_slots();
+void free_temp_slots();
+void emit_queue();
+void emit_nop();
+rtx_def* emit_move_insn(rtx_def* x, rtx_def* y);
 void* make_node(int code);
 void* get_identifier(const char* text);
+void* build_decl(int code, void* name, void* type);
+void layout_decl(void* decl, unsigned int known_align);
+void layout_type(void* type);
+void* build_pointer_type(void* to_type);
+void* c_build_type_variant(void* type, int constp, int volatilep);
+void* build_array_type(void* elt_type, void* index_type);
+void* build_index_type(void* maxval);
+void* build_function_type(void* value_type, void* arg_types);
+void* tree_cons(void* purpose, void* value, void* chain);
+void* nreverse(void* t);
+void* chainon(void* op1, void* op2);
+void* build_int_2_wide(int low, int hi);
+void* build_real(void* type, double d);
+void* build_string(int len, const char* str);
+void* build(int code, void* tt, ...);
+void* build1(int code, void* type, void* node);
+void* fold(void* expr);
+void* convert(void* type, void* expr);
+void* convert_and_check(void* type, void* expr);
+void* default_conversion(void* exp);
+void* truthvalue_conversion(void* expr);
+void* check_case_value(void* value);
+void* build_binary_op(int code, void* orig_op0, void* orig_op1, int convert_p);
+void* build_unary_op(int code, void* xarg, int noconvert);
+void* build_modify_expr(void* lhs, int modifycode, void* rhs);
+void* build_indirect_ref(void* ptr, const char* errorstring);
+void* build_array_ref(void* array, void* index);
+void* build_c_cast(void* type, void* expr);
+void* build_conditional_expr(void* ifexp, void* op1, void* op2);
+void* build_compound_expr(void* list);
+void* build_function_call(void* function, void* params);
+void make_decl_rtl(void* decl, char* asmspec, int top_level);
+void expand_decl(void* decl);
+void expand_decl_init(void* decl);
+void c_expand_return(void* retval);
+void expand_return(void* retval);
+void expand_null_return();
+void c_expand_expr_stmt(void* expr);
+rtx_def* expand_expr(void* exp, rtx_def* target, int tmode, int modifier);
+rtx_def* expand_assignment(void* to, void* from, int want_value, int suggest_reg);
+rtx_def* store_expr(void* exp, rtx_def* target, int want_value);
+rtx_def* do_store_flag(void* exp, rtx_def* target, int mode, int only_cheap);
+void do_jump(void* exp, rtx_def* if_false_label, rtx_def* if_true_label);
+rtx_def* expand_call(void* exp, rtx_def* target, int ignore);
+void expand_start_cond(void* cond, int exitflag);
+void expand_start_else();
+void expand_end_cond();
+void* expand_start_loop(int exit_flag);
+void* expand_start_loop_continue_elsewhere(int exit_flag);
+void expand_loop_continue_here();
+int expand_exit_loop_if_false(void* whichloop, void* cond);
+int expand_continue_loop(void* whichloop);
+int expand_exit_loop(void* whichloop);
+int expand_exit_something();
+void expand_end_loop();
+void expand_start_bindings(int exit_flag);
+void c_expand_start_case(void* exp);
+int pushcase(void* value, void* (*converter)(void*, void*), void* label, void** duplicate);
+void expand_end_case(void* orig_index);
+void expand_label(void* body);
+void expand_goto(void* body);
 void* _obstack_newchunk(GccObstack* ob, int length);
 
 struct GccLangIndepOption {
@@ -93,6 +165,31 @@ extern int regset_size;
 extern int regset_bytes;
 extern int frame_offset;
 extern int current_function_outgoing_args_size;
+extern int virtuals_instantiated;
+extern int immediate_size_expand;
+extern rtx_def* return_label;
+extern rtx_def* virtual_incoming_args_rtx;
+extern rtx_def* virtual_stack_vars_rtx;
+extern rtx_def* virtual_stack_dynamic_rtx;
+extern rtx_def* virtual_outgoing_args_rtx;
+extern void* void_type_node;
+extern void* integer_type_node;
+extern void* unsigned_type_node;
+extern void* short_integer_type_node;
+extern void* short_unsigned_type_node;
+extern void* signed_char_type_node;
+extern void* unsigned_char_type_node;
+extern void* char_type_node;
+extern void* long_integer_type_node;
+extern void* long_unsigned_type_node;
+extern void* long_long_integer_type_node;
+extern void* long_long_unsigned_type_node;
+extern void* float_type_node;
+extern void* double_type_node;
+extern void* ptr_type_node;
+extern void* integer_zero_node;
+extern void* integer_one_node;
+extern void* error_mark_node;
 
 // GAS 2.6 initialization symbols.
 void hex_init();
@@ -120,10 +217,131 @@ namespace rom_nom_nom::gcc_harness {
 namespace {
 
 constexpr int kFirstPseudoRegister = 67;
-constexpr int kFunctionDeclCode = 29;
-constexpr int kResultDeclCode = 35;
 constexpr int kBlockCode = 5;
 constexpr int kVoidTypeCode = 6;
+constexpr int kIntegerTypeCode = 7;
+constexpr int kEnumeralTypeCode = 10;
+constexpr int kFunctionDeclCode = 29;
+constexpr int kLabelDeclCode = 30;
+constexpr int kVarDeclCode = 33;
+constexpr int kParmDeclCode = 34;
+constexpr int kResultDeclCode = 35;
+constexpr int kModifyExprCode = 45;
+constexpr int kPlusExprCode = 56;
+constexpr int kMinusExprCode = 57;
+constexpr int kMultExprCode = 58;
+constexpr int kTruncDivExprCode = 59;
+constexpr int kTruncModExprCode = 63;
+constexpr int kNegateExprCode = 75;
+constexpr int kLshiftExprCode = 80;
+constexpr int kRshiftExprCode = 81;
+constexpr int kBitIorExprCode = 84;
+constexpr int kBitXorExprCode = 85;
+constexpr int kBitAndExprCode = 86;
+constexpr int kBitNotExprCode = 88;
+constexpr int kTruthAndifExprCode = 89;
+constexpr int kTruthOrifExprCode = 90;
+constexpr int kTruthNotExprCode = 94;
+constexpr int kLtExprCode = 95;
+constexpr int kLeExprCode = 96;
+constexpr int kGtExprCode = 97;
+constexpr int kGeExprCode = 98;
+constexpr int kEqExprCode = 99;
+constexpr int kNeExprCode = 100;
+constexpr int kNopExprCode = 106;
+constexpr int kAddrExprCode = 110;
+constexpr int kPredecrementExprCode = 117;
+constexpr int kPreincrementExprCode = 118;
+constexpr int kPostdecrementExprCode = 119;
+constexpr int kPostincrementExprCode = 120;
+
+int TreeCodeOf(const void* node) {
+  if (node == nullptr) {
+    return 0;
+  }
+  return static_cast<int>(*reinterpret_cast<const uint8_t*>(static_cast<const char*>(node) + 16));
+}
+
+void* TreeTypeOf(const void* node) {
+  if (node == nullptr) {
+    return nullptr;
+  }
+  return *reinterpret_cast<void* const*>(static_cast<const char*>(node) + 8);
+}
+
+void SetTreeType(void* node, void* type) {
+  *reinterpret_cast<void**>(static_cast<char*>(node) + 8) = type;
+}
+
+void SetTreeChain(void* node, void* chain) {
+  *reinterpret_cast<void**>(static_cast<char*>(node) + 0) = chain;
+}
+
+void SetTreeAddressable(void* node, bool val) {
+  auto* flags = reinterpret_cast<uint32_t*>(static_cast<char*>(node) + 16);
+  if (val) {
+    *flags |= (1u << 11);
+  } else {
+    *flags &= ~(1u << 11);
+  }
+}
+
+void SetTreeSideEffects(void* node, bool val) {
+  auto* flags = reinterpret_cast<uint32_t*>(static_cast<char*>(node) + 16);
+  if (val) {
+    *flags |= (1u << 8);
+  } else {
+    *flags &= ~(1u << 8);
+  }
+}
+
+void SetTreePublic(void* node, bool val) {
+  auto* flags = reinterpret_cast<uint32_t*>(static_cast<char*>(node) + 16);
+  if (val) {
+    *flags |= (1u << 19);
+  } else {
+    *flags &= ~(1u << 19);
+  }
+}
+
+void SetDeclExternal(void* decl, bool val) {
+  auto* flags = reinterpret_cast<uint32_t*>(static_cast<char*>(decl) + 52);
+  if (val) {
+    *flags |= (1u << 8);
+  } else {
+    *flags &= ~(1u << 8);
+  }
+}
+
+void SetDeclRegister(void* decl, bool val) {
+  auto* flags = reinterpret_cast<uint32_t*>(static_cast<char*>(decl) + 52);
+  if (val) {
+    *flags |= (1u << 10);
+  } else {
+    *flags &= ~(1u << 10);
+  }
+}
+
+int TypePrecisionOf(const void* type_node) {
+  if (type_node == nullptr) {
+    return 0;
+  }
+  return static_cast<int>(
+      *reinterpret_cast<const uint8_t*>(static_cast<const char*>(type_node) + 52));
+}
+
+void ResetVirtualRegisterFlags() {
+  for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
+                   virtual_outgoing_args_rtx}) {
+    if (vreg != nullptr) {
+      vreg->mode = kSiMode;
+      vreg->volatil = 0;
+      vreg->integrated = 0;
+      vreg->unchanging = 0;
+      vreg->in_struct = 0;
+    }
+  }
+}
 
 template <typename T>
 T* AllocSidebandArray(size_t count) {
@@ -272,14 +490,18 @@ GccContext::~GccContext() = default;
 void GccContext::BeginFunction(std::string_view func_name) {
   current_func_name_ = std::string(func_name);
   label_map_.clear();
+  decl_map_.clear();
+  c_label_decl_map_.clear();
+  ResetVirtualRegisterFlags();
 
   void* fn_decl = make_node(kFunctionDeclCode);
   void* id_node = get_identifier(current_func_name_.c_str());
   void* res_decl = make_node(kResultDeclCode);
   void* blk_node = make_node(kBlockCode);
-  void* void_type = make_node(kVoidTypeCode);
+  void* void_type = void_type_node != nullptr ? void_type_node : make_node(kVoidTypeCode);
+  void* fn_type = build_function_type(void_type, nullptr);
 
-  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 8) = void_type;
+  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 8) = fn_type;
   *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 56) = id_node;
   *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 80) = res_decl;
   *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 88) = blk_node;
@@ -301,6 +523,7 @@ void GccContext::BeginFunction(std::string_view func_name) {
   regset_size = 0;
   regset_bytes = 0;
   reload_completed = 0;
+  immediate_size_expand = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
   init_function_start(fn_decl, const_cast<char*>("harness.c"), 1);
@@ -308,6 +531,587 @@ void GccContext::BeginFunction(std::string_view func_name) {
   rtx_equal_function_value_matters = 1;
   emit_note(nullptr, kNoteInsnFunctionBeg);
   compute_frame_size(0);
+}
+
+void* GccContext::BuildCTypeTree(const CType& c_type) {
+  std::string_view base = absl::StripAsciiWhitespace(c_type.name);
+  void* t = integer_type_node;
+  if (base == "void") {
+    t = void_type_node;
+  } else if (base == "s8" || base == "signed char" || base == "char" || base == "int8_t") {
+    t = signed_char_type_node;
+  } else if (base == "u8" || base == "unsigned char" || base == "uint8_t") {
+    t = unsigned_char_type_node;
+  } else if (base == "s16" || base == "short" || base == "short int" || base == "signed short" ||
+             base == "int16_t") {
+    t = short_integer_type_node;
+  } else if (base == "u16" || base == "unsigned short" || base == "short unsigned int" ||
+             base == "uint16_t") {
+    t = short_unsigned_type_node;
+  } else if (base == "s32" || base == "int" || base == "signed int" || base == "int32_t") {
+    t = integer_type_node;
+  } else if (base == "u32" || base == "unsigned int" || base == "unsigned" || base == "uint32_t") {
+    t = unsigned_type_node;
+  } else if (base == "long" || base == "long int" || base == "signed long") {
+    t = long_integer_type_node;
+  } else if (base == "unsigned long" || base == "long unsigned int") {
+    t = long_unsigned_type_node;
+  } else if (base == "s64" || base == "long long" || base == "long long int" || base == "int64_t") {
+    t = long_long_integer_type_node;
+  } else if (base == "u64" || base == "unsigned long long" || base == "long long unsigned int" ||
+             base == "uint64_t") {
+    t = long_long_unsigned_type_node;
+  } else if (base == "f32" || base == "float") {
+    t = float_type_node;
+  } else if (base == "f64" || base == "double") {
+    t = double_type_node;
+  }
+  if (c_type.is_const) {
+    t = c_build_type_variant(t, 1, 0);
+  }
+  for (int i = 0; i < c_type.pointer_depth; ++i) {
+    t = build_pointer_type(t);
+  }
+  return t;
+}
+
+void* GccContext::DeclareExternalFunction(std::string_view name, const CType& return_type) {
+  std::string key(name);
+  void* ret_type = BuildCTypeTree(return_type);
+  void* fn_type = build_function_type(ret_type, nullptr);
+  void* id_node = get_identifier(key.c_str());
+  void* fn_decl = build_decl(kFunctionDeclCode, id_node, fn_type);
+  SetDeclExternal(fn_decl, true);
+  SetTreePublic(fn_decl, true);
+  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 104) = id_node;
+  Rtx fn_mem = gen_rtx(kMem, kSiMode, gen_rtx(kSymbolRef, kSiMode, CopyStringToRtlObstack(key)));
+  *reinterpret_cast<Rtx*>(static_cast<char*>(fn_decl) + 128) = fn_mem;
+  decl_map_[key] = fn_decl;
+  return fn_decl;
+}
+
+void* GccContext::BuildVarDeclTree(const VariableDeclarationStatement& var_decl) {
+  void* var_type = BuildCTypeTree(var_decl.Type());
+  if (var_decl.ArraySize().has_value() && *var_decl.ArraySize() > 0) {
+    void* max_idx = build_int_2_wide(static_cast<int>(*var_decl.ArraySize() - 1), 0);
+    void* idx_type = build_index_type(max_idx);
+    var_type = build_array_type(var_type, idx_type);
+    layout_type(var_type);
+  }
+  void* id_node = get_identifier(var_decl.Name().c_str());
+  void* decl = build_decl(kVarDeclCode, id_node, var_type);
+  *reinterpret_cast<void**>(static_cast<char*>(decl) + 64) = current_function_decl;
+  if (var_decl.RegisterAnnotation().has_value()) {
+    SetDeclRegister(decl, true);
+  }
+  layout_decl(decl, 0);
+  if (var_decl.Initializer() != nullptr) {
+    void* init_tree = BuildCExprTree(*var_decl.Initializer());
+    if (init_tree != nullptr && TreeTypeOf(init_tree) != var_type) {
+      init_tree = convert(var_type, init_tree);
+    }
+    *reinterpret_cast<void**>(static_cast<char*>(decl) + 88) = init_tree;
+  }
+  decl_map_[var_decl.Name()] = decl;
+  return decl;
+}
+
+void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
+                                       bool run_expand_function_start, bool declare_body_locals) {
+  current_func_name_ = func_decl.Name().empty() ? "harness_func" : func_decl.Name();
+  label_map_.clear();
+  decl_map_.clear();
+  c_label_decl_map_.clear();
+  ResetVirtualRegisterFlags();
+
+  void* ret_type = BuildCTypeTree(func_decl.ReturnType());
+  void* arg_types = tree_cons(nullptr, void_type_node, nullptr);
+  for (auto it = func_decl.Parameters().rbegin(); it != func_decl.Parameters().rend(); ++it) {
+    arg_types = tree_cons(nullptr, BuildCTypeTree(it->type), arg_types);
+  }
+  void* fn_type = build_function_type(ret_type, arg_types);
+  void* id_node = get_identifier(current_func_name_.c_str());
+  void* fn_decl = build_decl(kFunctionDeclCode, id_node, fn_type);
+  SetTreePublic(fn_decl, !func_decl.IsStatic());
+
+  void* res_decl = build_decl(kResultDeclCode, nullptr, ret_type);
+  *reinterpret_cast<void**>(static_cast<char*>(res_decl) + 64) = fn_decl;
+  layout_decl(res_decl, 0);
+
+  void* blk_node = make_node(kBlockCode);
+  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 80) = res_decl;
+  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 88) = blk_node;
+  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 104) = id_node;
+
+  Rtx fn_mem = gen_rtx(kMem, kSiMode,
+                       gen_rtx(kSymbolRef, kSiMode, CopyStringToRtlObstack(current_func_name_)));
+  *reinterpret_cast<Rtx*>(static_cast<char*>(fn_decl) + 128) = fn_mem;
+
+  void* parm_head = nullptr;
+  void* parm_tail = nullptr;
+  for (size_t i = 0; i < func_decl.Parameters().size(); ++i) {
+    const CParameter& p = func_decl.Parameters()[i];
+    std::string p_name = p.name.empty() ? absl::StrCat("arg", i) : p.name;
+    void* p_type = BuildCTypeTree(p.type);
+    void* p_id = get_identifier(p_name.c_str());
+    void* parm = build_decl(kParmDeclCode, p_id, p_type);
+    *reinterpret_cast<void**>(static_cast<char*>(parm) + 64) = fn_decl;
+    layout_decl(parm, 0);
+
+    // Set `DECL_ARG_TYPE(parm)` (`decl.initial` at offset 88), promoting subword
+    // integer types (`PROMOTE_PROTOTYPES`) to `integer_type_node` as in `c-decl.c`.
+    void* arg_type = p_type;
+    const int p_code = TreeCodeOf(p_type);
+    if ((p_code == kIntegerTypeCode || p_code == kEnumeralTypeCode) &&
+        TypePrecisionOf(p_type) < TypePrecisionOf(integer_type_node)) {
+      arg_type = integer_type_node;
+    }
+    *reinterpret_cast<void**>(static_cast<char*>(parm) + 88) = arg_type;
+
+    if (parm_head == nullptr) {
+      parm_head = parm;
+    } else {
+      SetTreeChain(parm_tail, parm);
+    }
+    parm_tail = parm;
+    decl_map_[p_name] = parm;
+  }
+  *reinterpret_cast<void**>(static_cast<char*>(fn_decl) + 72) = parm_head;
+  decl_map_[current_func_name_] = fn_decl;
+
+  current_function_decl = fn_decl;
+  reg_renumber = nullptr;
+  reg_n_refs = nullptr;
+  reg_n_deaths = nullptr;
+  reg_live_length = nullptr;
+  reg_n_calls_crossed = nullptr;
+  basic_block_live_at_start = nullptr;
+  n_basic_blocks = 0;
+  regset_size = 0;
+  regset_bytes = 0;
+  reload_completed = 0;
+  immediate_size_expand = 0;
+  std::memset(regs_ever_live, 0, kFirstPseudoRegister);
+  current_function_epilogue_delay_list = nullptr;
+
+  init_function_start(fn_decl, const_cast<char*>("gcc_harness.c"), 1);
+  if (run_expand_function_start) {
+    expand_function_start(fn_decl, 0);
+  } else {
+    emit_note(nullptr, kNoteInsnFunctionBeg);
+  }
+  expand_start_bindings(0);
+
+  if (declare_body_locals && &func_decl.Body() != nullptr) {
+    for (const auto& stmt : func_decl.Body().Statements()) {
+      if (stmt != nullptr && stmt->Kind() == CStatementKind::kVariableDeclarationStatement) {
+        const auto& vdecl = static_cast<const VariableDeclarationStatement&>(*stmt);
+        void* d = BuildVarDeclTree(vdecl);
+        expand_decl(d);
+      }
+    }
+  }
+  return fn_decl;
+}
+
+void* GccContext::BuildCExprTree(const CExpression& expr) {
+  switch (expr.Kind()) {
+    case CExpressionKind::kIntegerLiteral: {
+      const auto& lit = static_cast<const IntegerLiteralExpression&>(expr);
+      const uint64_t uval = static_cast<uint64_t>(lit.Value());
+      const int low = static_cast<int>(static_cast<uint32_t>(uval & 0xFFFFFFFFULL));
+      const int high = static_cast<int>(static_cast<uint32_t>(uval >> 32));
+      void* cst = build_int_2_wide(low, high);
+      SetTreeType(cst, lit.IsUnsigned() ? unsigned_type_node : integer_type_node);
+      return cst;
+    }
+    case CExpressionKind::kFloatLiteral: {
+      const auto& flit = static_cast<const FloatLiteralExpression&>(expr);
+      void* ftype = flit.IsFloat() ? float_type_node : double_type_node;
+      return build_real(ftype, flit.Value());
+    }
+    case CExpressionKind::kStringLiteral: {
+      const auto& slit = static_cast<const StringLiteralExpression&>(expr);
+      void* s = build_string(static_cast<int>(slit.Value().size()) + 1, slit.Value().c_str());
+      void* idx_t = build_index_type(build_int_2_wide(static_cast<int>(slit.Value().size()), 0));
+      SetTreeType(s, build_array_type(char_type_node, idx_t));
+      return default_conversion(s);
+    }
+    case CExpressionKind::kIdentifier: {
+      const auto& id = static_cast<const IdentifierExpression&>(expr);
+      auto it = decl_map_.find(id.Name());
+      if (it != decl_map_.end()) {
+        return it->second;
+      }
+      void* sym_type =
+          id.SymbolType().has_value() ? BuildCTypeTree(*id.SymbolType()) : integer_type_node;
+      if (id.IsArraySymbol()) {
+        void* idx_t = build_index_type(build_int_2_wide(255, 0));
+        sym_type = build_array_type(sym_type, idx_t);
+        layout_type(sym_type);
+      }
+      void* id_node = get_identifier(id.Name().c_str());
+      void* ext_decl = build_decl(kVarDeclCode, id_node, sym_type);
+      SetDeclExternal(ext_decl, true);
+      SetTreePublic(ext_decl, true);
+      *reinterpret_cast<void**>(static_cast<char*>(ext_decl) + 104) = id_node;
+      layout_decl(ext_decl, 0);
+      make_decl_rtl(ext_decl, nullptr, 1);
+      decl_map_[id.Name()] = ext_decl;
+      return ext_decl;
+    }
+    case CExpressionKind::kUnaryExpression: {
+      const auto& un = static_cast<const UnaryExpression&>(expr);
+      void* op = BuildCExprTree(un.Operand());
+      const std::string& op_str = un.Op();
+      if (op_str == "-") {
+        return fold(build_unary_op(kNegateExprCode, op, 0));
+      }
+      if (op_str == "~") {
+        return fold(build_unary_op(kBitNotExprCode, op, 0));
+      }
+      if (op_str == "!") {
+        return fold(build_unary_op(kTruthNotExprCode, op, 0));
+      }
+      if (op_str == "*") {
+        return build_indirect_ref(op, "unary *");
+      }
+      if (op_str == "&") {
+        SetTreeAddressable(op, true);
+        return build1(kAddrExprCode, build_pointer_type(TreeTypeOf(op)), op);
+      }
+      if (op_str == "++") {
+        return build_unary_op(un.IsPrefix() ? kPreincrementExprCode : kPostincrementExprCode, op,
+                              0);
+      }
+      if (op_str == "--") {
+        return build_unary_op(un.IsPrefix() ? kPredecrementExprCode : kPostdecrementExprCode, op,
+                              0);
+      }
+      return op;
+    }
+    case CExpressionKind::kBinaryExpression: {
+      const auto& bin = static_cast<const BinaryExpression&>(expr);
+      void* lhs = BuildCExprTree(bin.Lhs());
+      void* rhs = BuildCExprTree(bin.Rhs());
+      const std::string& op = bin.Op();
+      int code = kPlusExprCode;
+      if (op == "+") {
+        code = kPlusExprCode;
+      } else if (op == "-") {
+        code = kMinusExprCode;
+      } else if (op == "*") {
+        code = kMultExprCode;
+      } else if (op == "/") {
+        code = kTruncDivExprCode;
+      } else if (op == "%") {
+        code = kTruncModExprCode;
+      } else if (op == "<<") {
+        code = kLshiftExprCode;
+      } else if (op == ">>") {
+        code = kRshiftExprCode;
+      } else if (op == "&") {
+        code = kBitAndExprCode;
+      } else if (op == "|") {
+        code = kBitIorExprCode;
+      } else if (op == "^") {
+        code = kBitXorExprCode;
+      } else if (op == "&&") {
+        code = kTruthAndifExprCode;
+      } else if (op == "||") {
+        code = kTruthOrifExprCode;
+      } else if (op == "==") {
+        code = kEqExprCode;
+      } else if (op == "!=") {
+        code = kNeExprCode;
+      } else if (op == "<") {
+        code = kLtExprCode;
+      } else if (op == "<=") {
+        code = kLeExprCode;
+      } else if (op == ">") {
+        code = kGtExprCode;
+      } else if (op == ">=") {
+        code = kGeExprCode;
+      } else if (op == ",") {
+        return build_compound_expr(tree_cons(nullptr, lhs, tree_cons(nullptr, rhs, nullptr)));
+      }
+      return fold(build_binary_op(code, lhs, rhs, 1));
+    }
+    case CExpressionKind::kAssignmentExpression: {
+      const auto& asgn = static_cast<const AssignmentExpression&>(expr);
+      void* lhs = BuildCExprTree(asgn.Lhs());
+      void* rhs = BuildCExprTree(asgn.Rhs());
+      const std::string& op = asgn.Op();
+      int modcode = kNopExprCode;
+      if (op == "+=") {
+        modcode = kPlusExprCode;
+      } else if (op == "-=") {
+        modcode = kMinusExprCode;
+      } else if (op == "*=") {
+        modcode = kMultExprCode;
+      } else if (op == "/=") {
+        modcode = kTruncDivExprCode;
+      } else if (op == "%=") {
+        modcode = kTruncModExprCode;
+      } else if (op == "<<=") {
+        modcode = kLshiftExprCode;
+      } else if (op == ">>=") {
+        modcode = kRshiftExprCode;
+      } else if (op == "&=") {
+        modcode = kBitAndExprCode;
+      } else if (op == "|=") {
+        modcode = kBitIorExprCode;
+      } else if (op == "^=") {
+        modcode = kBitXorExprCode;
+      }
+      void* res = build_modify_expr(lhs, modcode, rhs);
+      SetTreeSideEffects(res, true);
+      return res;
+    }
+    case CExpressionKind::kCallExpression: {
+      const auto& call = static_cast<const CallExpression&>(expr);
+      void* fn_tree = nullptr;
+      if (call.Callee().Kind() == CExpressionKind::kIdentifier) {
+        const auto& callee_id = static_cast<const IdentifierExpression&>(call.Callee());
+        auto it = decl_map_.find(callee_id.Name());
+        if (it != decl_map_.end() && TreeCodeOf(it->second) == kFunctionDeclCode) {
+          fn_tree = it->second;
+        } else {
+          CType ret_t = callee_id.SymbolType().value_or(CType::S32());
+          fn_tree = DeclareExternalFunction(callee_id.Name(), ret_t);
+        }
+      } else {
+        fn_tree = BuildCExprTree(call.Callee());
+      }
+      void* arg_list = nullptr;
+      for (const auto& arg : call.Arguments()) {
+        void* a_tree = default_conversion(BuildCExprTree(*arg));
+        arg_list = tree_cons(nullptr, a_tree, arg_list);
+      }
+      arg_list = nreverse(arg_list);
+      return build_function_call(fn_tree, arg_list);
+    }
+    case CExpressionKind::kCastExpression: {
+      const auto& cast = static_cast<const CastExpression&>(expr);
+      void* target_t = BuildCTypeTree(cast.TargetType());
+      void* op = BuildCExprTree(cast.Operand());
+      return build_c_cast(target_t, op);
+    }
+    case CExpressionKind::kArrayIndexExpression: {
+      const auto& arr = static_cast<const ArrayIndexExpression&>(expr);
+      void* base = BuildCExprTree(arr.Array());
+      void* idx = BuildCExprTree(arr.Index());
+      return build_array_ref(base, idx);
+    }
+    case CExpressionKind::kTernaryExpression: {
+      const auto& tern = static_cast<const TernaryExpression&>(expr);
+      void* cond = BuildCExprTree(tern.Condition());
+      void* t_val = BuildCExprTree(tern.TrueExpression());
+      void* f_val = BuildCExprTree(tern.FalseExpression());
+      return build_conditional_expr(cond, t_val, f_val);
+    }
+    case CExpressionKind::kMemberAccessExpression: {
+      const auto& mem = static_cast<const MemberAccessExpression&>(expr);
+      return BuildCExprTree(mem.Object());
+    }
+  }
+  return integer_zero_node;
+}
+
+void GccContext::ExpandCStatement(const CStatement& stmt) {
+  switch (stmt.Kind()) {
+    case CStatementKind::kCompoundStatement: {
+      const auto& comp = static_cast<const CompoundStatement&>(stmt);
+      for (const auto& s : comp.Statements()) {
+        if (s != nullptr) {
+          ExpandCStatement(*s);
+        }
+      }
+      break;
+    }
+    case CStatementKind::kExpressionStatement: {
+      const auto& expr_stmt = static_cast<const ExpressionStatement&>(stmt);
+      void* expr_tree = BuildCExprTree(expr_stmt.Expression());
+      if (expr_tree != nullptr) {
+        c_expand_expr_stmt(expr_tree);
+      }
+      break;
+    }
+    case CStatementKind::kVariableDeclarationStatement: {
+      const auto& var_decl = static_cast<const VariableDeclarationStatement&>(stmt);
+      void* decl = nullptr;
+      auto it = decl_map_.find(var_decl.Name());
+      if (it != decl_map_.end() && TreeCodeOf(it->second) == kVarDeclCode) {
+        decl = it->second;
+      } else {
+        decl = BuildVarDeclTree(var_decl);
+        expand_decl(decl);
+      }
+      if (var_decl.Initializer() != nullptr) {
+        void* init_tree = BuildCExprTree(*var_decl.Initializer());
+        void* var_type = TreeTypeOf(decl);
+        if (init_tree != nullptr && var_type != nullptr && TreeTypeOf(init_tree) != var_type) {
+          init_tree = convert(var_type, init_tree);
+        }
+        *reinterpret_cast<void**>(static_cast<char*>(decl) + 88) = init_tree;
+        expand_decl_init(decl);
+      }
+      break;
+    }
+    case CStatementKind::kIfStatement: {
+      const auto& if_stmt = static_cast<const IfStatement&>(stmt);
+      void* cond = truthvalue_conversion(BuildCExprTree(if_stmt.Condition()));
+      expand_start_cond(cond, 0);
+      ExpandCStatement(if_stmt.ThenBranch());
+      if (if_stmt.ElseBranch() != nullptr) {
+        expand_start_else();
+        ExpandCStatement(*if_stmt.ElseBranch());
+      }
+      expand_end_cond();
+      break;
+    }
+    case CStatementKind::kWhileStatement: {
+      const auto& while_stmt = static_cast<const WhileStatement&>(stmt);
+      emit_nop();
+      expand_start_loop(1);
+      void* cond = truthvalue_conversion(BuildCExprTree(while_stmt.Condition()));
+      expand_exit_loop_if_false(nullptr, cond);
+      ExpandCStatement(while_stmt.Body());
+      expand_end_loop();
+      break;
+    }
+    case CStatementKind::kDoWhileStatement: {
+      const auto& do_stmt = static_cast<const DoWhileStatement&>(stmt);
+      emit_nop();
+      expand_start_loop_continue_elsewhere(1);
+      ExpandCStatement(do_stmt.Body());
+      expand_loop_continue_here();
+      void* cond = truthvalue_conversion(BuildCExprTree(do_stmt.Condition()));
+      expand_exit_loop_if_false(nullptr, cond);
+      expand_end_loop();
+      break;
+    }
+    case CStatementKind::kForStatement: {
+      const auto& for_stmt = static_cast<const ForStatement&>(stmt);
+      emit_nop();
+      if (for_stmt.Init() != nullptr) {
+        ExpandCStatement(*for_stmt.Init());
+      }
+      expand_start_loop_continue_elsewhere(1);
+      if (for_stmt.Condition() != nullptr) {
+        void* cond = truthvalue_conversion(BuildCExprTree(*for_stmt.Condition()));
+        expand_exit_loop_if_false(nullptr, cond);
+      }
+      ExpandCStatement(for_stmt.Body());
+      expand_loop_continue_here();
+      if (for_stmt.Step() != nullptr) {
+        c_expand_expr_stmt(BuildCExprTree(*for_stmt.Step()));
+      }
+      expand_end_loop();
+      break;
+    }
+    case CStatementKind::kReturnStatement: {
+      const auto& ret_stmt = static_cast<const ReturnStatement&>(stmt);
+      if (ret_stmt.ReturnValue() == nullptr) {
+        c_expand_return(nullptr);
+      } else {
+        c_expand_return(BuildCExprTree(*ret_stmt.ReturnValue()));
+      }
+      break;
+    }
+    case CStatementKind::kBreakStatement: {
+      expand_exit_something();
+      break;
+    }
+    case CStatementKind::kContinueStatement: {
+      expand_continue_loop(nullptr);
+      break;
+    }
+    case CStatementKind::kGotoStatement: {
+      const auto& goto_stmt = static_cast<const GotoStatement&>(stmt);
+      void*& lbl_decl = c_label_decl_map_[goto_stmt.Label()];
+      if (lbl_decl == nullptr) {
+        lbl_decl =
+            build_decl(kLabelDeclCode, get_identifier(goto_stmt.Label().c_str()), void_type_node);
+      }
+      expand_goto(lbl_decl);
+      break;
+    }
+    case CStatementKind::kLabelStatement: {
+      const auto& lbl_stmt = static_cast<const LabelStatement&>(stmt);
+      void*& lbl_decl = c_label_decl_map_[lbl_stmt.Label()];
+      if (lbl_decl == nullptr) {
+        lbl_decl =
+            build_decl(kLabelDeclCode, get_identifier(lbl_stmt.Label().c_str()), void_type_node);
+      }
+      expand_label(lbl_decl);
+      break;
+    }
+    case CStatementKind::kSwitchStatement: {
+      const auto& sw_stmt = static_cast<const SwitchStatement&>(stmt);
+      void* idx_expr = BuildCExprTree(sw_stmt.Condition());
+      c_expand_start_case(idx_expr);
+      for (const SwitchCase& sc : sw_stmt.Cases()) {
+        for (int64_t val : sc.case_values) {
+          void* raw_cst = build_int_2_wide(static_cast<int>(val), static_cast<int>(val >> 32));
+          SetTreeType(raw_cst, integer_type_node);
+          void* val_tree = check_case_value(raw_cst);
+          void* label_decl = build_decl(kLabelDeclCode, nullptr, nullptr);
+          void* duplicate = nullptr;
+          pushcase(val_tree, convert_and_check, label_decl, &duplicate);
+        }
+        if (sc.is_default) {
+          void* label_decl = build_decl(kLabelDeclCode, nullptr, nullptr);
+          void* duplicate = nullptr;
+          pushcase(nullptr, nullptr, label_decl, &duplicate);
+        }
+        if (sc.body != nullptr) {
+          ExpandCStatement(*sc.body);
+        }
+      }
+      expand_end_case(idx_expr);
+      break;
+    }
+    case CStatementKind::kCaseStatement: {
+      const auto& cs = static_cast<const CaseStatement&>(stmt);
+      void* label_decl = build_decl(kLabelDeclCode, nullptr, nullptr);
+      void* duplicate = nullptr;
+      if (cs.IsDefault()) {
+        pushcase(nullptr, nullptr, label_decl, &duplicate);
+      } else {
+        void* raw_cst =
+            build_int_2_wide(static_cast<int>(cs.Value()), static_cast<int>(cs.Value() >> 32));
+        SetTreeType(raw_cst, integer_type_node);
+        void* val_tree = check_case_value(raw_cst);
+        pushcase(val_tree, convert_and_check, label_decl, &duplicate);
+      }
+      break;
+    }
+    case CStatementKind::kCommentStatement:
+      break;
+  }
+}
+
+void GccContext::StartIsolatedExpandSequence() {
+  start_sequence();
+  emit_note(nullptr, kNoteInsnDeleted);
+}
+
+void GccContext::EndIsolatedExpandSequence() {
+  end_sequence();
+}
+
+void GccContext::SyncReturnLabelFromMaterializedCfg() {
+  for (const auto& [key, lbl] : label_map_) {
+    if (!absl::StartsWith(key, "__blk_") && lbl != nullptr && lbl->fld[1].rtx == nullptr &&
+        lbl->fld[2].rtx == nullptr) {
+      return_label = lbl;
+      return;
+    }
+  }
+  if (return_label == nullptr) {
+    return_label = gen_label_rtx();
+  }
 }
 
 void GccContext::EnsurePseudoRegsUpTo(int min_max_regno, int default_mode) {
@@ -848,8 +1652,24 @@ Rtx GccContext::EmitPattern(std::string_view pattern_rtl) {
   return BuildInsnFromContainerOrPattern(pattern_rtl, /*emit_to_chain=*/true);
 }
 
-Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
-  BeginFunction(current_func_name_);
+Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_function) {
+  if (reset_function) {
+    BeginFunction(current_func_name_);
+  } else {
+    label_map_.clear();
+    Rtx head_note = get_insns();
+    if (head_note != nullptr) {
+      head_note->fld[2].rtx = nullptr;
+      set_last_insn(head_note);
+    }
+    emit_note(nullptr, kNoteInsnFunctionBeg);
+  }
+  if (regno_reg_rtx != nullptr) {
+    regno_reg_rtx[67] = virtual_incoming_args_rtx;
+    regno_reg_rtx[68] = virtual_stack_vars_rtx;
+    regno_reg_rtx[69] = virtual_stack_dynamic_rtx;
+    regno_reg_rtx[70] = virtual_outgoing_args_rtx;
+  }
 
   const size_t num_blocks = cfg.rpo_blocks.size();
   std::vector<Rtx> block_labels(num_blocks, nullptr);
@@ -892,7 +1712,13 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
   // Also collect any `(label_ref <tok>)` tokens appearing in non-final instructions
   // or `REG_NOTES`.
   for (size_t b = 0; b < num_blocks; ++b) {
-    for (const auto& pat : cfg.rpo_blocks[b].instructions) {
+    const auto& blk = cfg.rpo_blocks[b];
+    for (size_t insn_idx = 0; insn_idx < blk.instructions.size(); ++insn_idx) {
+      const auto& pat = blk.instructions[insn_idx];
+      if (insn_idx + 1 == blk.instructions.size() && blk.successors.empty() &&
+          IsJumpPatternText(pat)) {
+        continue;
+      }
       for (const std::string& tok : ExtractLabelRefTokens(pat)) {
         if (!token_to_block.contains(tok)) {
           size_t idx = 0;
@@ -1090,6 +1916,12 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
 
   if (!has_sequence) {
     restore_reg_data(first);
+    if (regno_reg_rtx != nullptr) {
+      regno_reg_rtx[67] = virtual_incoming_args_rtx;
+      regno_reg_rtx[68] = virtual_stack_vars_rtx;
+      regno_reg_rtx[69] = virtual_stack_dynamic_rtx;
+      regno_reg_rtx[70] = virtual_outgoing_args_rtx;
+    }
     reg_scan(first, max_reg_num(), 0);
   } else {
     reg_scan(nullptr, max_reg_num(), 0);
@@ -1254,13 +2086,30 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   }
 
   // First pass: assign sequential canonical label names (`L0`, `L1`, ...) to
-  // all `CODE_LABEL` nodes in linear chain order.
+  // all `CODE_LABEL` nodes in linear chain order, followed by any un-emitted
+  // label UIDs referenced by `(label_ref <uid>)` (e.g. `return_label` or
+  // `if_false_label` during isolated Stage 13 sub-hook expansion).
   absl::flat_hash_map<int, std::string> label_map;
   size_t next_lbl_idx = 0;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     if (insn->code == kCodeLabel && insn->fld[0].rtint >= 0) {
       if (!label_map.contains(insn->fld[0].rtint)) {
         label_map.emplace(insn->fld[0].rtint, absl::StrCat("L", next_lbl_idx++));
+      }
+    }
+  }
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
+      continue;
+    }
+    Rtx pat = insn->fld[3].rtx;
+    if (pat == nullptr) {
+      continue;
+    }
+    for (const std::string& tok : ExtractLabelRefTokens(FormatRtx(pat))) {
+      int uid_val = 0;
+      if (absl::SimpleAtoi(tok, &uid_val) && uid_val >= 0 && !label_map.contains(uid_val)) {
+        label_map.emplace(uid_val, absl::StrCat("L", next_lbl_idx++));
       }
     }
   }

@@ -384,6 +384,17 @@ extern rtx_def* loop_continue;
 extern int loops_enclosed;
 extern GccObstack temp_obstack;
 
+// Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`).
+void expand_function_end(char* filename, int line, int end_bindings);
+rtx_def* expand_expr(void* exp, rtx_def* target, int tmode, int modifier);
+rtx_def* expand_assignment(void* to, void* from, int want_value, int suggest_reg);
+rtx_def* do_store_flag(void* exp, rtx_def* target, int mode, int only_cheap);
+void do_jump(void* exp, rtx_def* if_false_label, rtx_def* if_true_label);
+rtx_def* expand_call(void* exp, rtx_def* target, int ignore);
+rtx_def* emit_move_insn(rtx_def* x, rtx_def* y);
+void* convert(void* type, void* expr);
+extern int virtuals_instantiated;
+
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
 
@@ -1919,6 +1930,307 @@ void FunctionHooks::RunStrengthReduce(Rtx scan_start, Rtx end, Rtx loop_top, int
   std::memcpy(n_times_used, n_times_set, nregs * sizeof(short));
   strength_reduce(scan_start, end, loop_top, insn_count > 0 ? insn_count : computed_count,
                   loop_start, loop_end);
+}
+
+// -----------------------------------------------------------------------------
+// Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+// -----------------------------------------------------------------------------
+
+namespace {
+
+void* GetTreeType(void* t) {
+  return t != nullptr ? static_cast<void**>(t)[1] : nullptr;
+}
+
+int GetTreeTypeMode(void* type_node) {
+  return type_node != nullptr ? static_cast<const unsigned char*>(type_node)[53] : kSiMode;
+}
+
+}  // namespace
+
+RtlControlFlowGraph FunctionHooks::RunInstantiateVirtualRegs(GccContext& ctx,
+                                                             const RtlControlFlowGraph& pre_cfg) {
+  FunctionDeclaration dummy_decl(CType::Void(), "harness_func", {},
+                                 std::make_unique<CompoundStatement>());
+  ctx.BeginFunctionFromAst(dummy_decl, /*run_expand_function_start=*/false,
+                           /*declare_body_locals=*/false);
+  RtlControlFlowGraph rtl_cfg = pre_cfg;
+  rtl_cfg.pass = RtlPassKind::kRtl;
+  Rtx first = ctx.MaterializeFromCfg(rtl_cfg, /*reset_function=*/false);
+  virtuals_instantiated = 0;
+  instantiate_virtual_regs(current_function_decl, first);
+  return ctx.DematerializeToCfg(first, pre_cfg.pass);
+}
+
+RtlControlFlowGraph FunctionHooks::RunInstantiateVirtualRegs(const RtlControlFlowGraph& pre_cfg) {
+  return RunInstantiateVirtualRegs(*ctx_, pre_cfg);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandFunctionEnd(GccContext& ctx,
+                                                        const RtlControlFlowGraph& body_cfg,
+                                                        const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  RtlControlFlowGraph rtl_body = body_cfg;
+  rtl_body.pass = RtlPassKind::kRtl;
+  ctx.MaterializeFromCfg(rtl_body, /*reset_function=*/false);
+  ctx.SyncReturnLabelFromMaterializedCfg();
+  expand_function_end(const_cast<char*>("harness.c"), 1, 0);
+  return ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandFunctionEnd(const RtlControlFlowGraph& body_cfg,
+                                                        const FunctionDeclaration& func_decl) {
+  return RunExpandFunctionEnd(*ctx_, body_cfg, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandFunctionEnd(GccContext& ctx,
+                                                        const RtlControlFlowGraph& body_cfg) {
+  FunctionDeclaration default_decl(CType::S32(), "harness_func", {},
+                                   std::make_unique<CompoundStatement>());
+  return RunExpandFunctionEnd(ctx, body_cfg, default_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandFunctionEnd(const RtlControlFlowGraph& body_cfg) {
+  return RunExpandFunctionEnd(*ctx_, body_cfg);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandReturn(GccContext& ctx, const ReturnStatement& ret_stmt,
+                                                   const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  ctx.StartIsolatedExpandSequence();
+  ctx.ExpandCStatement(ret_stmt);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandReturn(const ReturnStatement& ret_stmt,
+                                                   const FunctionDeclaration& func_decl) {
+  return RunExpandReturn(*ctx_, ret_stmt, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandExpr(GccContext& ctx, const CExpression& expr,
+                                                 const FunctionDeclaration& func_decl,
+                                                 int target_pseudo_regno) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  void* expr_tree = ctx.BuildCExprTree(expr);
+  ctx.StartIsolatedExpandSequence();
+  void* expr_type = GetTreeType(expr_tree);
+  int tmode = GetTreeTypeMode(expr_type);
+  if (tmode == kVoidMode) {
+    tmode = kSiMode;
+  }
+  Rtx target = nullptr;
+  if (target_pseudo_regno >= kFirstPseudoRegister) {
+    ctx.EnsurePseudoRegsUpTo(target_pseudo_regno);
+    target = gen_rtx(kReg, tmode, target_pseudo_regno);
+  }
+  Rtx result = expand_expr(expr_tree, target, tmode, 0);
+  if (target != nullptr && result != nullptr && result != target) {
+    emit_move_insn(target, result);
+  } else if (target == nullptr && result != nullptr && get_insns()->fld[2].rtx == nullptr) {
+    Rtx dst = gen_reg_rtx(result->mode != kVoidMode ? result->mode : tmode);
+    emit_move_insn(dst, result);
+  }
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandExpr(const CExpression& expr,
+                                                 const FunctionDeclaration& func_decl,
+                                                 int target_pseudo_regno) {
+  return RunExpandExpr(*ctx_, expr, func_decl, target_pseudo_regno);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandAssignment(GccContext& ctx, const CExpression& lhs,
+                                                       const CExpression& rhs,
+                                                       const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  void* to_tree = ctx.BuildCExprTree(lhs);
+  void* from_tree = ctx.BuildCExprTree(rhs);
+  if (to_tree != nullptr && from_tree != nullptr && GetTreeType(to_tree) != nullptr) {
+    from_tree = convert(GetTreeType(to_tree), from_tree);
+  }
+  ctx.StartIsolatedExpandSequence();
+  expand_assignment(to_tree, from_tree, /*want_value=*/0, /*suggest_reg=*/0);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandAssignment(const CExpression& lhs,
+                                                       const CExpression& rhs,
+                                                       const FunctionDeclaration& func_decl) {
+  return RunExpandAssignment(*ctx_, lhs, rhs, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunDoStoreFlag(GccContext& ctx,
+                                                  const CExpression& comparison_expr,
+                                                  const FunctionDeclaration& func_decl,
+                                                  int target_pseudo_regno, int only_cheap) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  void* cmp_tree = ctx.BuildCExprTree(comparison_expr);
+  ctx.StartIsolatedExpandSequence();
+  Rtx target = nullptr;
+  if (target_pseudo_regno >= kFirstPseudoRegister) {
+    ctx.EnsurePseudoRegsUpTo(target_pseudo_regno);
+    target = gen_rtx(kReg, kSiMode, target_pseudo_regno);
+  } else {
+    target = gen_reg_rtx(kSiMode);
+  }
+  Rtx res = do_store_flag(cmp_tree, target, kSiMode, only_cheap);
+  if (res != nullptr && res != target) {
+    emit_move_insn(target, res);
+  }
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunDoStoreFlag(const CExpression& comparison_expr,
+                                                  const FunctionDeclaration& func_decl,
+                                                  int target_pseudo_regno, int only_cheap) {
+  return RunDoStoreFlag(*ctx_, comparison_expr, func_decl, target_pseudo_regno, only_cheap);
+}
+
+RtlControlFlowGraph FunctionHooks::RunDoJump(GccContext& ctx, const CExpression& cond_expr,
+                                             const FunctionDeclaration& func_decl,
+                                             bool jump_if_true, bool jump_if_false) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  void* cond_tree = ctx.BuildCExprTree(cond_expr);
+  ctx.StartIsolatedExpandSequence();
+  Rtx false_lbl = jump_if_false ? gen_label_rtx() : nullptr;
+  Rtx true_lbl = jump_if_true ? gen_label_rtx() : nullptr;
+  do_jump(cond_tree, false_lbl, true_lbl);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunDoJump(const CExpression& cond_expr,
+                                             const FunctionDeclaration& func_decl,
+                                             bool jump_if_true, bool jump_if_false) {
+  return RunDoJump(*ctx_, cond_expr, func_decl, jump_if_true, jump_if_false);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandCall(GccContext& ctx, const CallExpression& call_expr,
+                                                 const FunctionDeclaration& caller_decl,
+                                                 const CType& return_type, int target_pseudo_regno,
+                                                 bool ignore_result) {
+  ctx.BeginFunctionFromAst(caller_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  if (call_expr.Callee().Kind() == CExpressionKind::kIdentifier) {
+    const auto& callee_id = static_cast<const IdentifierExpression&>(call_expr.Callee());
+    ctx.DeclareExternalFunction(callee_id.Name(), return_type);
+  }
+  void* call_tree = ctx.BuildCExprTree(call_expr);
+  ctx.StartIsolatedExpandSequence();
+  Rtx target = nullptr;
+  const bool is_void_ret = (return_type.name == "void" && return_type.pointer_depth == 0);
+  if (!ignore_result && !is_void_ret && target_pseudo_regno >= kFirstPseudoRegister) {
+    ctx.EnsurePseudoRegsUpTo(target_pseudo_regno);
+    int rmode = GetTreeTypeMode(ctx.BuildCTypeTree(return_type));
+    target = gen_rtx(kReg, rmode != kVoidMode ? rmode : kSiMode, target_pseudo_regno);
+  }
+  Rtx res = expand_call(call_tree, target, ignore_result ? 1 : 0);
+  if (target != nullptr && res != nullptr && res != target) {
+    emit_move_insn(target, res);
+  }
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandCall(const CallExpression& call_expr,
+                                                 const FunctionDeclaration& caller_decl,
+                                                 const CType& return_type, int target_pseudo_regno,
+                                                 bool ignore_result) {
+  return RunExpandCall(*ctx_, call_expr, caller_decl, return_type, target_pseudo_regno,
+                       ignore_result);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandCond(GccContext& ctx, const IfStatement& if_stmt,
+                                                 const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  ctx.StartIsolatedExpandSequence();
+  ctx.ExpandCStatement(if_stmt);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandCond(const IfStatement& if_stmt,
+                                                 const FunctionDeclaration& func_decl) {
+  return RunExpandCond(*ctx_, if_stmt, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandLoop(GccContext& ctx, const CStatement& loop_stmt,
+                                                 const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  ctx.StartIsolatedExpandSequence();
+  ctx.ExpandCStatement(loop_stmt);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandLoop(const CStatement& loop_stmt,
+                                                 const FunctionDeclaration& func_decl) {
+  return RunExpandLoop(*ctx_, loop_stmt, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandCase(GccContext& ctx,
+                                                 const SwitchStatement& switch_stmt,
+                                                 const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  ctx.StartIsolatedExpandSequence();
+  ctx.ExpandCStatement(switch_stmt);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandCase(const SwitchStatement& switch_stmt,
+                                                 const FunctionDeclaration& func_decl) {
+  return RunExpandCase(*ctx_, switch_stmt, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandDecl(GccContext& ctx,
+                                                 const VariableDeclarationStatement& var_decl,
+                                                 const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/true);
+  ctx.StartIsolatedExpandSequence();
+  ctx.ExpandCStatement(var_decl);
+  RtlControlFlowGraph out = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+  ctx.EndIsolatedExpandSequence();
+  return out;
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandDecl(const VariableDeclarationStatement& var_decl,
+                                                 const FunctionDeclaration& func_decl) {
+  return RunExpandDecl(*ctx_, var_decl, func_decl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandFunctionStart(GccContext& ctx,
+                                                          const FunctionDeclaration& func_decl) {
+  ctx.BeginFunctionFromAst(func_decl, /*run_expand_function_start=*/true,
+                           /*declare_body_locals=*/false);
+  return ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kRtl);
+}
+
+RtlControlFlowGraph FunctionHooks::RunExpandFunctionStart(const FunctionDeclaration& func_decl) {
+  return RunExpandFunctionStart(*ctx_, func_decl);
 }
 
 // -----------------------------------------------------------------------------

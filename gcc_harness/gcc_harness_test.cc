@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "absl/strings/match.h"
+#include "core/c_ast.h"
 #include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
@@ -887,6 +888,316 @@ TEST(RightInverseVerifierTest, Stage12JumpRedirectAndJump1OptimizeRightInverse) 
   EXPECT_EQ(custom_verifier.InverseProvider(), &custom_provider);
   RightInverseResult custom_res = custom_verifier.VerifyJump1StageRightInverse(expected_jump);
   EXPECT_TRUE(custom_res.matches) << custom_res.diff_detail;
+}
+
+TEST(FunctionHooksTest, Stage13TreeToRtlExpansionHooksExecuteInProcess) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  FunctionDeclaration two_arg_fn(CType::S32(), "harness_func",
+                                 {
+                                     CParameter{CType::S32(), "p0"},
+                                     CParameter{CType::S32(), "p1"},
+                                 },
+                                 std::make_unique<CompoundStatement>());
+
+  // 13. `RunExpandFunctionStart`:
+  RtlControlFlowGraph start_cfg = hooks.RunExpandFunctionStart(two_arg_fn);
+  ASSERT_EQ(start_cfg.rpo_blocks.size(), 1u);
+  EXPECT_EQ(start_cfg.rpo_blocks[0].instructions.size(), 2u);
+
+  // 12. `RunExpandDecl`:
+  VariableDeclarationStatement local_decl(
+      CType::S32(), "local_var",
+      CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Integer(5)));
+  RtlControlFlowGraph decl_cfg = hooks.RunExpandDecl(local_decl, two_arg_fn);
+  ASSERT_FALSE(decl_cfg.rpo_blocks.empty());
+  EXPECT_FALSE(decl_cfg.rpo_blocks[0].instructions.empty());
+
+  // 4. `RunExpandExpr`:
+  std::unique_ptr<CExpression> add_expr =
+      CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Identifier("p1"));
+  RtlControlFlowGraph expr_cfg = hooks.RunExpandExpr(*add_expr, two_arg_fn);
+  ASSERT_EQ(expr_cfg.rpo_blocks.size(), 1u);
+  ASSERT_EQ(expr_cfg.rpo_blocks[0].instructions.size(), 1u);
+
+  // 5. `RunExpandAssignment`:
+  RtlControlFlowGraph assign_cfg =
+      hooks.RunExpandAssignment(*CExpression::Identifier("p0"), *add_expr, two_arg_fn);
+  ASSERT_EQ(assign_cfg.rpo_blocks.size(), 1u);
+  ASSERT_FALSE(assign_cfg.rpo_blocks[0].instructions.empty());
+
+  // 6. `RunDoStoreFlag`:
+  std::unique_ptr<CExpression> lt_expr =
+      CExpression::Binary("<", CExpression::Identifier("p0"), CExpression::Identifier("p1"));
+  RtlControlFlowGraph sflag_cfg = hooks.RunDoStoreFlag(*lt_expr, two_arg_fn);
+  ASSERT_EQ(sflag_cfg.rpo_blocks.size(), 1u);
+  EXPECT_GE(sflag_cfg.rpo_blocks[0].instructions.size(), 1u);
+
+  // 7. `RunDoJump`:
+  RtlControlFlowGraph jump_cfg = hooks.RunDoJump(*lt_expr, two_arg_fn);
+  ASSERT_EQ(jump_cfg.rpo_blocks.size(), 1u);
+  ASSERT_FALSE(jump_cfg.rpo_blocks[0].instructions.empty());
+
+  // 8. `RunExpandCall`:
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("p0"));
+  call_args.push_back(CExpression::Identifier("p1"));
+  CallExpression call_expr(CExpression::Identifier("callee_fn"), std::move(call_args));
+  RtlControlFlowGraph call_cfg =
+      hooks.RunExpandCall(call_expr, two_arg_fn, CType::S32(), /*target_pseudo_regno=*/74,
+                          /*ignore_result=*/false);
+  ASSERT_EQ(call_cfg.rpo_blocks.size(), 1u);
+  EXPECT_GE(call_cfg.rpo_blocks[0].instructions.size(), 3u);
+
+  // 9. `RunExpandCond`:
+  IfStatement if_stmt(
+      CExpression::Binary("<", CExpression::Identifier("p0"), CExpression::Identifier("p1")),
+      CStatement::Expression(
+          CExpression::Assignment("=", CExpression::Identifier("p0"), CExpression::Integer(1))),
+      CStatement::Expression(
+          CExpression::Assignment("=", CExpression::Identifier("p0"), CExpression::Integer(2))));
+  RtlControlFlowGraph cond_cfg = hooks.RunExpandCond(if_stmt, two_arg_fn);
+  EXPECT_GE(cond_cfg.rpo_blocks.size(), 3u);
+
+  // 10. `RunExpandLoop`:
+  std::unique_ptr<CStatement> while_stmt = CStatement::While(
+      CExpression::Binary("<", CExpression::Identifier("p0"), CExpression::Identifier("p1")),
+      CStatement::Expression(CExpression::Assignment(
+          "=", CExpression::Identifier("p0"),
+          CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Integer(1)))));
+  RtlControlFlowGraph loop_cfg = hooks.RunExpandLoop(*while_stmt, two_arg_fn);
+  EXPECT_GE(loop_cfg.rpo_blocks.size(), 2u);
+
+  // 11. `RunExpandCase`:
+  std::vector<SwitchCase> switch_cases;
+  auto case1_body = std::make_unique<CompoundStatement>();
+  case1_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("p1"), CExpression::Integer(10))));
+  case1_body->AddStatement(CStatement::Break());
+  switch_cases.push_back(
+      SwitchCase{.case_values = {1}, .is_default = false, .body = std::move(case1_body)});
+
+  auto case2_body = std::make_unique<CompoundStatement>();
+  case2_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("p1"), CExpression::Integer(20))));
+  case2_body->AddStatement(CStatement::Break());
+  switch_cases.push_back(
+      SwitchCase{.case_values = {2}, .is_default = false, .body = std::move(case2_body)});
+
+  SwitchStatement switch_stmt(CExpression::Identifier("p0"), std::move(switch_cases));
+  RtlControlFlowGraph case_cfg = hooks.RunExpandCase(switch_stmt, two_arg_fn);
+  EXPECT_GE(case_cfg.rpo_blocks.size(), 4u);
+
+  // 3. `RunExpandReturn`:
+  ReturnStatement ret_stmt(
+      CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Identifier("p1")));
+  RtlControlFlowGraph ret_cfg = hooks.RunExpandReturn(ret_stmt, two_arg_fn);
+  ASSERT_EQ(ret_cfg.rpo_blocks.size(), 1u);
+  EXPECT_GE(ret_cfg.rpo_blocks[0].instructions.size(), 3u);
+
+  // 2. `RunExpandFunctionEnd`:
+  RtlControlFlowGraph fn_end_cfg = hooks.RunExpandFunctionEnd(ret_cfg, two_arg_fn);
+  EXPECT_EQ(fn_end_cfg.rpo_blocks.size(), 2u);
+
+  // 1. `RunInstantiateVirtualRegs`:
+  RtlControlFlowGraph pre_virt_cfg;
+  pre_virt_cfg.pass = RtlPassKind::kRtl;
+  pre_virt_cfg.rpo_blocks.resize(1);
+  pre_virt_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 68) (const_int 8))) (reg:SI 71))");
+  RtlControlFlowGraph post_virt_cfg = hooks.RunInstantiateVirtualRegs(pre_virt_cfg);
+  ASSERT_EQ(post_virt_cfg.rpo_blocks.size(), 1u);
+  ASSERT_EQ(post_virt_cfg.rpo_blocks[0].instructions.size(), 1u);
+  EXPECT_TRUE(absl::StrContains(post_virt_cfg.rpo_blocks[0].instructions[0], "(reg:SI 30"));
+}
+
+TEST(RightInverseVerifierTest, Stage13AllThirteenExpansionSubfunctionsRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  RightInverseVerifier verifier(&ctx, &hooks);
+
+  FunctionDeclaration two_arg_fn(CType::S32(), "harness_func",
+                                 {
+                                     CParameter{CType::S32(), "p0"},
+                                     CParameter{CType::S32(), "p1"},
+                                 },
+                                 std::make_unique<CompoundStatement>());
+
+  // 27. `instantiate_virtual_regs` right-inverse:
+  RtlControlFlowGraph pre_virt_cfg;
+  pre_virt_cfg.pass = RtlPassKind::kRtl;
+  pre_virt_cfg.rpo_blocks.resize(1);
+  pre_virt_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 68) (const_int 8))) (reg:SI 71))");
+  pre_virt_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 70) (const_int 16))) (reg:SI 72))");
+  RtlControlFlowGraph post_virt_cfg = hooks.RunInstantiateVirtualRegs(pre_virt_cfg);
+  RightInverseResult virt_res = verifier.VerifyInstantiateVirtualRegsRightInverse(post_virt_cfg);
+  EXPECT_TRUE(virt_res.matches) << virt_res.diff_detail;
+
+  // 28. `expand_function_end` right-inverse:
+  ReturnStatement ret_stmt(
+      CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Identifier("p1")));
+  RtlControlFlowGraph ret_cfg = hooks.RunExpandReturn(ret_stmt, two_arg_fn);
+  RtlControlFlowGraph post_fn_end_cfg = hooks.RunExpandFunctionEnd(ret_cfg, two_arg_fn);
+  RightInverseResult fn_end_res = verifier.VerifyExpandFunctionEndRightInverse(post_fn_end_cfg);
+  EXPECT_TRUE(fn_end_res.matches) << fn_end_res.diff_detail;
+
+  // 29. `expand_return` right-inverse (both value return and void return):
+  RightInverseResult ret_res = verifier.VerifyExpandReturnRightInverse(ret_cfg);
+  EXPECT_TRUE(ret_res.matches) << ret_res.diff_detail;
+
+  FunctionDeclaration void_fn(CType::Void(), "harness_func", {},
+                              std::make_unique<CompoundStatement>());
+  RtlControlFlowGraph void_ret_cfg = hooks.RunExpandReturn(ReturnStatement(), void_fn);
+  RightInverseResult void_ret_res = verifier.VerifyExpandReturnRightInverse(void_ret_cfg);
+  EXPECT_TRUE(void_ret_res.matches) << void_ret_res.diff_detail;
+
+  // 30. `expand_expr` right-inverse:
+  std::unique_ptr<CExpression> compound_expr = CExpression::Binary(
+      "-", CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Identifier("p1")),
+      CExpression::Integer(7));
+  RtlControlFlowGraph post_expr_cfg = hooks.RunExpandExpr(*compound_expr, two_arg_fn);
+  RightInverseResult expr_res = verifier.VerifyExpandExprRightInverse(post_expr_cfg);
+  EXPECT_TRUE(expr_res.matches) << expr_res.diff_detail;
+
+  // 31. `expand_assignment` right-inverse (scalar and pointer dereference):
+  RtlControlFlowGraph post_assign_cfg =
+      hooks.RunExpandAssignment(*CExpression::Identifier("p0"), *compound_expr, two_arg_fn);
+  RightInverseResult assign_res = verifier.VerifyExpandAssignmentRightInverse(post_assign_cfg);
+  EXPECT_TRUE(assign_res.matches) << assign_res.diff_detail;
+
+  FunctionDeclaration ptr_fn(CType::Void(), "harness_func",
+                             {
+                                 CParameter{CType::S32().MakePointer(), "p0"},
+                                 CParameter{CType::S32(), "p1"},
+                             },
+                             std::make_unique<CompoundStatement>());
+  RtlControlFlowGraph post_ptr_assign_cfg =
+      hooks.RunExpandAssignment(*CExpression::Unary("*", CExpression::Identifier("p0")),
+                                *CExpression::Identifier("p1"), ptr_fn);
+  RightInverseResult ptr_assign_res =
+      verifier.VerifyExpandAssignmentRightInverse(post_ptr_assign_cfg);
+  EXPECT_TRUE(ptr_assign_res.matches) << ptr_assign_res.diff_detail;
+
+  // 32. `do_store_flag` right-inverse (`<`, `>=`, `==`):
+  std::unique_ptr<CExpression> lt_expr =
+      CExpression::Binary("<", CExpression::Identifier("p0"), CExpression::Identifier("p1"));
+  RtlControlFlowGraph post_sflag_lt = hooks.RunDoStoreFlag(*lt_expr, two_arg_fn);
+  RightInverseResult sflag_lt_res = verifier.VerifyDoStoreFlagRightInverse(post_sflag_lt);
+  EXPECT_TRUE(sflag_lt_res.matches) << sflag_lt_res.diff_detail;
+
+  std::unique_ptr<CExpression> ge_expr =
+      CExpression::Binary(">=", CExpression::Identifier("p0"), CExpression::Identifier("p1"));
+  RtlControlFlowGraph post_sflag_ge = hooks.RunDoStoreFlag(*ge_expr, two_arg_fn);
+  RightInverseResult sflag_ge_res = verifier.VerifyDoStoreFlagRightInverse(post_sflag_ge);
+  EXPECT_TRUE(sflag_ge_res.matches) << sflag_ge_res.diff_detail;
+
+  std::unique_ptr<CExpression> eq_expr =
+      CExpression::Binary("==", CExpression::Identifier("p0"), CExpression::Identifier("p1"));
+  RtlControlFlowGraph post_sflag_eq = hooks.RunDoStoreFlag(*eq_expr, two_arg_fn);
+  RightInverseResult sflag_eq_res = verifier.VerifyDoStoreFlagRightInverse(post_sflag_eq);
+  EXPECT_TRUE(sflag_eq_res.matches) << sflag_eq_res.diff_detail;
+
+  // 33. `do_jump` right-inverse (relational and short-circuit `&&` / `||`):
+  RtlControlFlowGraph post_jump_lt = hooks.RunDoJump(*lt_expr, two_arg_fn);
+  RightInverseResult jump_lt_res = verifier.VerifyDoJumpRightInverse(post_jump_lt);
+  EXPECT_TRUE(jump_lt_res.matches) << jump_lt_res.diff_detail;
+
+  std::unique_ptr<CExpression> and_cond = CExpression::Binary(
+      "&&", CExpression::Binary(">", CExpression::Identifier("p0"), CExpression::Integer(0)),
+      CExpression::Binary(">", CExpression::Identifier("p1"), CExpression::Integer(0)));
+  RtlControlFlowGraph post_jump_and = hooks.RunDoJump(*and_cond, two_arg_fn);
+  RightInverseResult jump_and_res = verifier.VerifyDoJumpRightInverse(post_jump_and);
+  EXPECT_TRUE(jump_and_res.matches) << jump_and_res.diff_detail;
+
+  std::unique_ptr<CExpression> or_cond = CExpression::Binary(
+      "||", CExpression::Binary(">", CExpression::Identifier("p0"), CExpression::Integer(0)),
+      CExpression::Binary(">", CExpression::Identifier("p1"), CExpression::Integer(0)));
+  RtlControlFlowGraph post_jump_or = hooks.RunDoJump(*or_cond, two_arg_fn);
+  RightInverseResult jump_or_res = verifier.VerifyDoJumpRightInverse(post_jump_or);
+  EXPECT_TRUE(jump_or_res.matches) << jump_or_res.diff_detail;
+
+  // 34. `expand_call` right-inverse:
+  std::vector<std::unique_ptr<CExpression>> call_args;
+  call_args.push_back(CExpression::Identifier("p0"));
+  call_args.push_back(CExpression::Identifier("p1"));
+  CallExpression call_expr(CExpression::Identifier("helper_fn"), std::move(call_args));
+  RtlControlFlowGraph post_call_cfg =
+      hooks.RunExpandCall(call_expr, two_arg_fn, CType::S32(), /*target_pseudo_regno=*/74,
+                          /*ignore_result=*/false);
+  RightInverseResult call_res = verifier.VerifyExpandCallRightInverse(post_call_cfg);
+  EXPECT_TRUE(call_res.matches) << call_res.diff_detail;
+
+  // 35. `expand_cond` right-inverse (`if-then` and `if-then-else`):
+  IfStatement if_else_stmt(
+      CExpression::Binary("<", CExpression::Identifier("p0"), CExpression::Identifier("p1")),
+      CStatement::Expression(
+          CExpression::Assignment("=", CExpression::Identifier("p0"), CExpression::Integer(10))),
+      CStatement::Expression(
+          CExpression::Assignment("=", CExpression::Identifier("p0"), CExpression::Integer(20))));
+  RtlControlFlowGraph post_cond_cfg = hooks.RunExpandCond(if_else_stmt, two_arg_fn);
+  RightInverseResult cond_res = verifier.VerifyExpandCondRightInverse(post_cond_cfg);
+  EXPECT_TRUE(cond_res.matches) << cond_res.diff_detail;
+
+  // 36. `expand_loop` right-inverse:
+  std::unique_ptr<CStatement> while_stmt = CStatement::While(
+      CExpression::Binary("<", CExpression::Identifier("p0"), CExpression::Identifier("p1")),
+      CStatement::Expression(CExpression::Assignment(
+          "=", CExpression::Identifier("p0"),
+          CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Integer(1)))));
+  RtlControlFlowGraph post_loop_cfg = hooks.RunExpandLoop(*while_stmt, two_arg_fn);
+  RightInverseResult loop_res = verifier.VerifyExpandLoopRightInverse(post_loop_cfg);
+  EXPECT_TRUE(loop_res.matches) << loop_res.diff_detail;
+
+  // 37. `expand_case` right-inverse:
+  std::vector<SwitchCase> switch_cases;
+  auto case1_body = std::make_unique<CompoundStatement>();
+  case1_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("p1"), CExpression::Integer(100))));
+  case1_body->AddStatement(CStatement::Break());
+  switch_cases.push_back(
+      SwitchCase{.case_values = {1}, .is_default = false, .body = std::move(case1_body)});
+
+  auto case2_body = std::make_unique<CompoundStatement>();
+  case2_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("p1"), CExpression::Integer(200))));
+  case2_body->AddStatement(CStatement::Break());
+  switch_cases.push_back(
+      SwitchCase{.case_values = {2}, .is_default = false, .body = std::move(case2_body)});
+
+  auto default_body = std::make_unique<CompoundStatement>();
+  default_body->AddStatement(CStatement::Expression(
+      CExpression::Assignment("=", CExpression::Identifier("p1"), CExpression::Integer(300))));
+  default_body->AddStatement(CStatement::Break());
+  switch_cases.push_back(
+      SwitchCase{.case_values = {}, .is_default = true, .body = std::move(default_body)});
+
+  SwitchStatement switch_stmt(CExpression::Identifier("p0"), std::move(switch_cases));
+  RtlControlFlowGraph post_case_cfg = hooks.RunExpandCase(switch_stmt, two_arg_fn);
+  RightInverseResult case_res = verifier.VerifyExpandCaseRightInverse(post_case_cfg);
+  EXPECT_TRUE(case_res.matches) << case_res.diff_detail;
+
+  // 38. `expand_decl` right-inverse:
+  VariableDeclarationStatement local_decl(
+      CType::S32(), "local_var",
+      CExpression::Binary("+", CExpression::Identifier("p0"), CExpression::Identifier("p1")));
+  RtlControlFlowGraph post_decl_cfg = hooks.RunExpandDecl(local_decl, two_arg_fn);
+  RightInverseResult decl_res = verifier.VerifyExpandDeclRightInverse(post_decl_cfg);
+  EXPECT_TRUE(decl_res.matches) << decl_res.diff_detail;
+
+  // 39. `expand_function_start` + `assign_parms` right-inverse (including promoted narrow args):
+  FunctionDeclaration mixed_parm_fn(CType::S32(), "harness_func",
+                                    {
+                                        CParameter{CType::S32(), "p0"},
+                                        CParameter{CType::S16(), "p1"},
+                                        CParameter{CType::U8(), "p2"},
+                                    },
+                                    std::make_unique<CompoundStatement>());
+  RtlControlFlowGraph post_start_cfg = hooks.RunExpandFunctionStart(mixed_parm_fn);
+  RightInverseResult start_res = verifier.VerifyExpandFunctionStartRightInverse(post_start_cfg);
+  EXPECT_TRUE(start_res.matches) << start_res.diff_detail;
 }
 
 }  // namespace

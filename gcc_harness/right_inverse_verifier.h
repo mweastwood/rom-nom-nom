@@ -198,6 +198,56 @@ class RightInverseVerifier {
   // 26. `jump.c:jump_optimize` (`cross_jump=0, noop_moves=0`) right-inverse.
   RightInverseResult VerifyJump1StageRightInverse(const RtlControlFlowGraph& jump_cfg_x) const;
 
+  // ---------------------------------------------------------------------------
+  // Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+  // ---------------------------------------------------------------------------
+
+  // 27. `function.c:instantiate_virtual_regs` right-inverse.
+  RightInverseResult VerifyInstantiateVirtualRegsRightInverse(
+      const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 28. `function.c:expand_function_end` right-inverse.
+  RightInverseResult VerifyExpandFunctionEndRightInverse(
+      const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 29. `stmt.c:expand_return` right-inverse.
+  RightInverseResult VerifyExpandReturnRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 30. `expr.c:expand_expr` right-inverse.
+  RightInverseResult VerifyExpandExprRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 31. `expr.c:expand_assignment` right-inverse.
+  RightInverseResult VerifyExpandAssignmentRightInverse(
+      const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 32. `expr.c:do_store_flag` right-inverse.
+  RightInverseResult VerifyDoStoreFlagRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 33. `expr.c:do_jump` right-inverse.
+  RightInverseResult VerifyDoJumpRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 34. `calls.c:expand_call` right-inverse.
+  RightInverseResult VerifyExpandCallRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 35. `stmt.c:expand_start_cond` / `expand_start_else` / `expand_end_cond`
+  // right-inverse.
+  RightInverseResult VerifyExpandCondRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 36. `stmt.c:expand_start_loop` / `expand_exit_loop_if_false` /
+  // `expand_end_loop` right-inverse.
+  RightInverseResult VerifyExpandLoopRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 37. `stmt.c:expand_start_case` / `pushcase` / `expand_end_case`
+  // right-inverse.
+  RightInverseResult VerifyExpandCaseRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 38. `stmt.c:expand_decl` right-inverse.
+  RightInverseResult VerifyExpandDeclRightInverse(const RtlControlFlowGraph& post_cfg_x) const;
+
+  // 39. `function.c:expand_function_start` + `assign_parms` right-inverse.
+  RightInverseResult VerifyExpandFunctionStartRightInverse(
+      const RtlControlFlowGraph& post_cfg_x) const;
+
  private:
   GccContext* ctx_;
   FunctionHooks* hooks_;

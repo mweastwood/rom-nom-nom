@@ -230,6 +230,82 @@ class FunctionHooks {
                          int insn_count = 0, Rtx loop_start = nullptr, Rtx loop_end = nullptr);
 
   // ---------------------------------------------------------------------------
+  // Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+  // ---------------------------------------------------------------------------
+  RtlControlFlowGraph RunInstantiateVirtualRegs(GccContext& ctx,
+                                                const RtlControlFlowGraph& pre_cfg);
+  RtlControlFlowGraph RunInstantiateVirtualRegs(const RtlControlFlowGraph& pre_cfg);
+
+  RtlControlFlowGraph RunExpandFunctionEnd(GccContext& ctx, const RtlControlFlowGraph& body_cfg,
+                                           const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandFunctionEnd(const RtlControlFlowGraph& body_cfg,
+                                           const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandFunctionEnd(GccContext& ctx, const RtlControlFlowGraph& body_cfg);
+  RtlControlFlowGraph RunExpandFunctionEnd(const RtlControlFlowGraph& body_cfg);
+
+  RtlControlFlowGraph RunExpandReturn(GccContext& ctx, const ReturnStatement& ret_stmt,
+                                      const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandReturn(const ReturnStatement& ret_stmt,
+                                      const FunctionDeclaration& func_decl);
+
+  RtlControlFlowGraph RunExpandExpr(GccContext& ctx, const CExpression& expr,
+                                    const FunctionDeclaration& func_decl,
+                                    int target_pseudo_regno = 0);
+  RtlControlFlowGraph RunExpandExpr(const CExpression& expr, const FunctionDeclaration& func_decl,
+                                    int target_pseudo_regno = 0);
+
+  RtlControlFlowGraph RunExpandAssignment(GccContext& ctx, const CExpression& lhs,
+                                          const CExpression& rhs,
+                                          const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandAssignment(const CExpression& lhs, const CExpression& rhs,
+                                          const FunctionDeclaration& func_decl);
+
+  RtlControlFlowGraph RunDoStoreFlag(GccContext& ctx, const CExpression& comparison_expr,
+                                     const FunctionDeclaration& func_decl,
+                                     int target_pseudo_regno = 0, int only_cheap = 0);
+  RtlControlFlowGraph RunDoStoreFlag(const CExpression& comparison_expr,
+                                     const FunctionDeclaration& func_decl,
+                                     int target_pseudo_regno = 0, int only_cheap = 0);
+
+  RtlControlFlowGraph RunDoJump(GccContext& ctx, const CExpression& cond_expr,
+                                const FunctionDeclaration& func_decl, bool jump_if_true = false,
+                                bool jump_if_false = true);
+  RtlControlFlowGraph RunDoJump(const CExpression& cond_expr, const FunctionDeclaration& func_decl,
+                                bool jump_if_true = false, bool jump_if_false = true);
+
+  RtlControlFlowGraph RunExpandCall(GccContext& ctx, const CallExpression& call_expr,
+                                    const FunctionDeclaration& caller_decl,
+                                    const CType& return_type = CType::S32(),
+                                    int target_pseudo_regno = 0, bool ignore_result = false);
+  RtlControlFlowGraph RunExpandCall(const CallExpression& call_expr,
+                                    const FunctionDeclaration& caller_decl,
+                                    const CType& return_type = CType::S32(),
+                                    int target_pseudo_regno = 0, bool ignore_result = false);
+
+  RtlControlFlowGraph RunExpandCond(GccContext& ctx, const IfStatement& if_stmt,
+                                    const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandCond(const IfStatement& if_stmt,
+                                    const FunctionDeclaration& func_decl);
+
+  RtlControlFlowGraph RunExpandLoop(GccContext& ctx, const CStatement& loop_stmt,
+                                    const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandLoop(const CStatement& loop_stmt,
+                                    const FunctionDeclaration& func_decl);
+
+  RtlControlFlowGraph RunExpandCase(GccContext& ctx, const SwitchStatement& switch_stmt,
+                                    const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandCase(const SwitchStatement& switch_stmt,
+                                    const FunctionDeclaration& func_decl);
+
+  RtlControlFlowGraph RunExpandDecl(GccContext& ctx, const VariableDeclarationStatement& var_decl,
+                                    const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandDecl(const VariableDeclarationStatement& var_decl,
+                                    const FunctionDeclaration& func_decl);
+
+  RtlControlFlowGraph RunExpandFunctionStart(GccContext& ctx, const FunctionDeclaration& func_decl);
+  RtlControlFlowGraph RunExpandFunctionStart(const FunctionDeclaration& func_decl);
+
+  // ---------------------------------------------------------------------------
   // In-Process Forward Compilation Tracer (`TraceRtlPipeline` &
   // `TraceForwardCompilation`)
   // ---------------------------------------------------------------------------

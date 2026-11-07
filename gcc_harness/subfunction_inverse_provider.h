@@ -2,11 +2,15 @@
 #define GCC_HARNESS_SUBFUNCTION_INVERSE_PROVIDER_H_
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/c_ast.h"
 #include "core/rtl_cfg.h"
 
 namespace rom_nom_nom::gcc_harness {
@@ -24,6 +28,98 @@ struct SubstInverseSpec {
   std::string target_expr;
   std::string from_reg;
   std::string to_expr;
+};
+
+// Input bundle recovered by `InvertExpandFunctionEnd` for
+// `function.c:expand_function_end`.
+struct ExpandFunctionEndInput {
+  RtlControlFlowGraph body_cfg;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+};
+
+// Input bundle recovered by `InvertExpandReturn` for `stmt.c:expand_return`.
+struct ExpandReturnInput {
+  ReturnStatement ret_stmt;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+};
+
+// Input bundle recovered by `InvertExpandExpr` for `expr.c:expand_expr`.
+struct ExpandExprInput {
+  std::unique_ptr<CExpression> expr;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+  int target_pseudo_regno = 0;
+};
+
+// Input bundle recovered by `InvertExpandAssignment` for
+// `expr.c:expand_assignment`.
+struct ExpandAssignmentInput {
+  std::unique_ptr<CExpression> lhs;
+  std::unique_ptr<CExpression> rhs;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+};
+
+// Input bundle recovered by `InvertDoStoreFlag` for `expr.c:do_store_flag`.
+struct DoStoreFlagInput {
+  std::unique_ptr<CExpression> comparison_expr;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+  int target_pseudo_regno = 0;
+  int only_cheap = 0;
+};
+
+// Input bundle recovered by `InvertDoJump` for `expr.c:do_jump`.
+struct DoJumpInput {
+  std::unique_ptr<CExpression> cond_expr;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+  bool jump_if_true = false;
+  bool jump_if_false = true;
+};
+
+// Input bundle recovered by `InvertExpandCall` for `calls.c:expand_call`.
+struct ExpandCallInput {
+  CallExpression call_expr = CallExpression(CExpression::Identifier("callee"), {});
+  FunctionDeclaration caller_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+  CType return_type = CType::S32();
+  int target_pseudo_regno = 0;
+  bool ignore_result = false;
+};
+
+// Input bundle recovered by `InvertExpandCond` for
+// `stmt.c:expand_start_cond` / `expand_start_else` / `expand_end_cond`.
+struct ExpandCondInput {
+  IfStatement if_stmt = IfStatement(CExpression::Integer(1), std::make_unique<CompoundStatement>());
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+};
+
+// Input bundle recovered by `InvertExpandLoop` for
+// `stmt.c:expand_start_loop` / `expand_exit_loop_if_false` / `expand_end_loop`.
+struct ExpandLoopInput {
+  std::unique_ptr<CStatement> loop_stmt;
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+};
+
+// Input bundle recovered by `InvertExpandCase` for
+// `stmt.c:expand_start_case` / `pushcase` / `expand_end_case`.
+struct ExpandCaseInput {
+  SwitchStatement switch_stmt = SwitchStatement(CExpression::Integer(0), {});
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
+};
+
+// Input bundle recovered by `InvertExpandDecl` for `stmt.c:expand_decl`.
+struct ExpandDeclInput {
+  VariableDeclarationStatement var_decl =
+      VariableDeclarationStatement(CType::S32(), "local_var", nullptr);
+  FunctionDeclaration func_decl =
+      FunctionDeclaration(CType::S32(), "harness_func", {}, std::make_unique<CompoundStatement>());
 };
 
 // Abstract interface providing 1-to-1 mathematical right-inverses $g_i$ for
@@ -174,6 +270,82 @@ class SubfunctionInverseProvider {
 
   // 26. Inverse of `jump.c:jump_optimize` (`cross_jump=0, noop_moves=0`).
   virtual RtlControlFlowGraph InvertJump1Optimize(const RtlControlFlowGraph& x) const = 0;
+
+  // ---------------------------------------------------------------------------
+  // Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+  // ---------------------------------------------------------------------------
+
+  // 27. Inverse of `function.c:instantiate_virtual_regs`.
+  virtual RtlControlFlowGraph InvertInstantiateVirtualRegs(const RtlControlFlowGraph& x) const {
+    return x;
+  }
+
+  // 28. Inverse of `function.c:expand_function_end`.
+  virtual absl::StatusOr<ExpandFunctionEndInput> InvertExpandFunctionEnd(
+      const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandFunctionEnd not implemented");
+  }
+
+  // 29. Inverse of `stmt.c:expand_return`.
+  virtual absl::StatusOr<ExpandReturnInput> InvertExpandReturn(
+      const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandReturn not implemented");
+  }
+
+  // 30. Inverse of `expr.c:expand_expr`.
+  virtual absl::StatusOr<ExpandExprInput> InvertExpandExpr(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandExpr not implemented");
+  }
+
+  // 31. Inverse of `expr.c:expand_assignment`.
+  virtual absl::StatusOr<ExpandAssignmentInput> InvertExpandAssignment(
+      const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandAssignment not implemented");
+  }
+
+  // 32. Inverse of `expr.c:do_store_flag`.
+  virtual absl::StatusOr<DoStoreFlagInput> InvertDoStoreFlag(
+      const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertDoStoreFlag not implemented");
+  }
+
+  // 33. Inverse of `expr.c:do_jump`.
+  virtual absl::StatusOr<DoJumpInput> InvertDoJump(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertDoJump not implemented");
+  }
+
+  // 34. Inverse of `calls.c:expand_call`.
+  virtual absl::StatusOr<ExpandCallInput> InvertExpandCall(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandCall not implemented");
+  }
+
+  // 35. Inverse of `stmt.c:expand_start_cond` / `expand_start_else` /
+  // `expand_end_cond`.
+  virtual absl::StatusOr<ExpandCondInput> InvertExpandCond(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandCond not implemented");
+  }
+
+  // 36. Inverse of `stmt.c:expand_start_loop` / `expand_exit_loop_if_false` /
+  // `expand_end_loop`.
+  virtual absl::StatusOr<ExpandLoopInput> InvertExpandLoop(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandLoop not implemented");
+  }
+
+  // 37. Inverse of `stmt.c:expand_start_case` / `pushcase` / `expand_end_case`.
+  virtual absl::StatusOr<ExpandCaseInput> InvertExpandCase(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandCase not implemented");
+  }
+
+  // 38. Inverse of `stmt.c:expand_decl`.
+  virtual absl::StatusOr<ExpandDeclInput> InvertExpandDecl(const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandDecl not implemented");
+  }
+
+  // 39. Inverse of `function.c:expand_function_start` + `assign_parms`.
+  virtual absl::StatusOr<FunctionDeclaration> InvertExpandFunctionStart(
+      const RtlControlFlowGraph& /*x*/) const {
+    return absl::UnimplementedError("InvertExpandFunctionStart not implemented");
+  }
 };
 
 }  // namespace rom_nom_nom::gcc_harness

@@ -106,6 +106,27 @@ class ToySubfunctionInverses : public SubfunctionInverseProvider {
 
   RtlControlFlowGraph InvertJumpRedirect(const RtlControlFlowGraph& x) const override;
   RtlControlFlowGraph InvertJump1Optimize(const RtlControlFlowGraph& x) const override;
+
+  // ---------------------------------------------------------------------------
+  // Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
+  // ---------------------------------------------------------------------------
+
+  RtlControlFlowGraph InvertInstantiateVirtualRegs(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandFunctionEndInput> InvertExpandFunctionEnd(
+      const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandReturnInput> InvertExpandReturn(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandExprInput> InvertExpandExpr(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandAssignmentInput> InvertExpandAssignment(
+      const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<DoStoreFlagInput> InvertDoStoreFlag(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<DoJumpInput> InvertDoJump(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandCallInput> InvertExpandCall(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandCondInput> InvertExpandCond(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandLoopInput> InvertExpandLoop(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandCaseInput> InvertExpandCase(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<ExpandDeclInput> InvertExpandDecl(const RtlControlFlowGraph& x) const override;
+  absl::StatusOr<FunctionDeclaration> InvertExpandFunctionStart(
+      const RtlControlFlowGraph& x) const override;
 };
 
 }  // namespace rom_nom_nom::gcc_harness
