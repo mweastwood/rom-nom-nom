@@ -28,10 +28,14 @@ cc_library(
     hdrs = ["function_hooks.h"],
     deps = [
         ":gcc_context",
+        "//core:round_trip_test_cases",
         "//core:rtl_cfg",
+        "//core:rtl_sexpr_utils",
         "//toolchain:gas26_harness_lib",
         "//toolchain:gcc272_harness_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -91,6 +95,27 @@ cc_test(
         ":subfunction_inverse_provider",
         ":toy_subfunction_inverses",
         "//core:rtl_cfg",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "compilation_trace_test",
+    size = "medium",
+    testonly = True,
+    srcs = ["compilation_trace_test.cc"],
+    data = ["//toolchain:all_files"],
+    linkstatic = True,
+    deps = [
+        ":function_hooks",
+        ":gcc_context",
+        "//core:compiler",
+        "//core:elf_reader",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:toolchain",
         "@abseil-cpp//absl/strings",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

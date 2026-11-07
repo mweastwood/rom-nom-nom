@@ -87,7 +87,8 @@ PYEOF
 
 # Ensure bare `(return)` RTX created by `jump.c:redirect_exp` and
 # `reorg.c:make_return_insns` is recognized by `insn-recog.c` on MIPS alongside
-# `return_internal`.
+# `return_internal`, while keeping `(define_expand "return" ...)` intact so
+# `gen_return()` emits `(parallel [(return) (use (reg:SI 31))])`.
 python3 - "${GCC_SRC}/config/mips/mips.md" << 'PYEOF'
 import sys
 
@@ -95,18 +96,27 @@ path = sys.argv[1]
 with open(path, "r", encoding="latin-1") as f:
   text = f.read()
 
-old_expand = """(define_expand "return"
+orig_expand = """(define_expand "return"
   [(parallel [(return)
 \t      (use (reg:SI 31))])]
   "simple_epilogue_p ()"
   "")"""
 
-new_expand = """(define_expand "return"
+broken_expand = """(define_expand "return"
   [(return)]
   "simple_epilogue_p ()"
-  "")
+  "")"""
 
-(define_insn "return_internal_bare"
+return_internal = """(define_insn "return_internal"
+  [(parallel [(return)
+              (use (match_operand:SI 0 "register_operand" "d"))])]
+  ""
+  "%*j\\\\t%0"
+  [(set_attr "type"\t"jump")
+   (set_attr "mode"\t"none")
+   (set_attr "length"\t"1")])"""
+
+return_internal_bare = """(define_insn "return_internal_bare"
   [(return)]
   "reload_completed"
   "%*j\\\\t$31"
@@ -114,18 +124,18 @@ new_expand = """(define_expand "return"
    (set_attr "mode"\t"none")
    (set_attr "length"\t"1")])"""
 
-if "return_internal_bare" not in text and old_expand in text:
-  text = text.replace(old_expand, new_expand, 1)
-  with open(path, "w", encoding="latin-1") as f:
-    f.write(text)
-elif '(define_insn "return_internal_bare"\n  [(return)]\n  ""' in text:
-  text = text.replace(
-      '(define_insn "return_internal_bare"\n  [(return)]\n  ""',
-      '(define_insn "return_internal_bare"\n  [(return)]\n  "reload_completed"',
-      1,
+updated = text
+if broken_expand in updated:
+  updated = updated.replace(broken_expand, orig_expand, 1)
+
+if "return_internal_bare" not in updated and return_internal in updated:
+  updated = updated.replace(
+      return_internal, return_internal + "\n\n" + return_internal_bare, 1
   )
+
+if updated != text:
   with open(path, "w", encoding="latin-1") as f:
-    f.write(text)
+    f.write(updated)
 PYEOF
 
 

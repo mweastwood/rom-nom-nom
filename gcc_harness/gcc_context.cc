@@ -27,6 +27,7 @@ extern "C" {
 // GCC 2.7.2 initialization and pass setup routines.
 void init_reg_sets();
 void init_reg_sets_1();
+void set_target_switch(char* name);
 void override_options();
 void init_obstacks();
 void init_tree_codes();
@@ -46,6 +47,7 @@ void init_recog();
 void init_alias_analysis();
 void init_final(char* filename);
 void init_function_start(void* subr, char* filename, int line);
+void instantiate_virtual_regs(void* fndecl, rtx_def* insns);
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
 int compute_frame_size(int size);
@@ -53,18 +55,35 @@ void* make_node(int code);
 void* get_identifier(const char* text);
 void* _obstack_newchunk(GccObstack* ob, int length);
 
+struct GccLangIndepOption {
+  const char* string;
+  int* variable;
+  int on_value;
+};
+extern GccLangIndepOption f_options[39];
+extern int flag_signed_char;
+extern int obey_regdecls;
+extern int flag_defer_pop;
+extern int flag_thread_jumps;
+extern int flag_omit_frame_pointer;
+extern int flag_cse_follow_jumps;
+extern int flag_cse_skip_blocks;
+extern int flag_force_mem;
 extern int flag_caller_saves;
 extern int flag_expensive_optimizations;
 extern int flag_strength_reduce;
 extern int flag_schedule_insns;
 extern int flag_schedule_insns_after_reload;
 extern int flag_delayed_branch;
+extern int g_switch_set;
+extern int g_switch_value;
 extern int rtx_equal_function_value_matters;
 extern char regs_ever_live[];
 extern rtx_def* current_function_epilogue_delay_list;
 extern rtx_def* pc_rtx;
 extern rtx_def* cc0_rtx;
 extern char* (*decl_printable_name)(void*, char**);
+extern int* reg_n_refs;
 extern short* reg_n_sets;
 extern short* reg_n_deaths;
 extern int* reg_live_length;
@@ -72,10 +91,13 @@ extern int* reg_n_calls_crossed;
 extern rtx_def** basic_block_live_at_start;
 extern int regset_size;
 extern int regset_bytes;
+extern int frame_offset;
+extern int current_function_outgoing_args_size;
 
 // GAS 2.6 initialization symbols.
 void hex_init();
 void bfd_init();
+int md_parse_option(int c, char* arg);
 void mips_init_after_args();
 void output_file_create(char* name);
 void subsegs_begin();
@@ -158,16 +180,43 @@ void GccContext::EnsureGlobalInit() {
   static std::once_flag init_once;
   std::call_once(init_once, []() {
     optimize = 2;
-    target_flags = 16;  // MASK_GAS (KMC default)
+    obey_regdecls = 0;
+    flag_signed_char = 1;
+    flag_defer_pop = 1;
+    flag_thread_jumps = 1;
+    flag_omit_frame_pointer = 1;
+    flag_cse_follow_jumps = 1;
+    flag_cse_skip_blocks = 1;
+    flag_force_mem = 1;
     flag_caller_saves = 1;
     flag_expensive_optimizations = 1;
     flag_strength_reduce = 1;
     flag_schedule_insns = 1;
     flag_schedule_insns_after_reload = 1;
     flag_delayed_branch = 1;
+    for (const auto& opt : f_options) {
+      if (opt.string != nullptr && std::strcmp(opt.string, "rerun-cse-after-loop") == 0 &&
+          opt.variable != nullptr) {
+        *opt.variable = 1;
+      }
+    }
+    target_flags = 0;
+    set_target_switch(const_cast<char*>(""));
+    g_switch_set = 1;
+    g_switch_value = 0;
     rtx_equal_function_value_matters = 1;
-    decl_printable_name =
-        +[](void* /*decl*/, char** /*kind*/) -> char* { return const_cast<char*>("harness_func"); };
+    decl_printable_name = +[](void* decl, char** /*kind*/) -> char* {
+      if (decl != nullptr) {
+        void* id = *reinterpret_cast<void**>(static_cast<char*>(decl) + 56);
+        if (id != nullptr) {
+          char* name = *reinterpret_cast<char**>(static_cast<char*>(id) + 32);
+          if (name != nullptr) {
+            return name;
+          }
+        }
+      }
+      return const_cast<char*>("harness_func");
+    };
 
     asm_out_file = std::fopen("/dev/null", "w");
 
@@ -190,8 +239,12 @@ void GccContext::EnsureGlobalInit() {
     init_recog();
     init_final(const_cast<char*>("harness.c"));
 
-    // Initialize Binutils 2.6 GAS for in-process MIPS assembly.
+    // Initialize Binutils 2.6 GAS for in-process MIPS assembly (`-mips3 -mcpu=vr4300 -EB -G 0`).
     target_big_endian = 1;
+    md_parse_option(173, nullptr);
+    md_parse_option(175, const_cast<char*>("vr4300"));
+    md_parse_option(181, nullptr);
+    md_parse_option('G', const_cast<char*>("0"));
     mips_init_after_args();
     hex_init();
     bfd_init();
@@ -239,6 +292,7 @@ void GccContext::BeginFunction(std::string_view func_name) {
 
   current_function_decl = fn_decl;
   reg_renumber = nullptr;
+  reg_n_refs = nullptr;
   reg_n_deaths = nullptr;
   reg_live_length = nullptr;
   reg_n_calls_crossed = nullptr;
@@ -942,9 +996,73 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
       break;
     }
   }
+
+  // Reconstruct `CALL_INSN_FUNCTION_USAGE` (`call_insn->fld[7].rtx`) for every
+  // `CALL_INSN` from argument-register setup instructions (`$4..$7`, `$f12..$f15`)
+  // preceding the call in the same basic block and any existing `REG_DEAD` notes
+  // on the call instruction. Note that `print_rtl` never prints `fld[7]` on a
+  // `CALL_INSN`, so reconstructing it here ensures `flow_analysis` knows which
+  // argument registers are consumed by the call.
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code != kCallInsn) {
+      continue;
+    }
+    absl::flat_hash_map<int, Rtx> arg_regs;
+    auto is_arg_regno = [](int regno) {
+      return (regno >= 4 && regno <= 7) || (regno >= 44 && regno <= 47);
+    };
+    for (Rtx prev = insn->fld[1].rtx; prev != nullptr; prev = prev->fld[1].rtx) {
+      if (prev->code == kCallInsn || prev->code == kJumpInsn || prev->code == kCodeLabel ||
+          prev->code == kBarrier) {
+        break;
+      }
+      if (prev->code == kInsn && prev->fld[3].rtx != nullptr && prev->fld[3].rtx->code == kSet) {
+        Rtx dst = prev->fld[3].rtx->fld[0].rtx;
+        if (dst != nullptr && dst->code == kReg && is_arg_regno(dst->fld[0].rtint) &&
+            !arg_regs.contains(dst->fld[0].rtint)) {
+          arg_regs.emplace(dst->fld[0].rtint, gen_rtx(kReg, dst->mode, dst->fld[0].rtint));
+        }
+      }
+    }
+    for (Rtx note = insn->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
+      if (note->mode == kRegDead && note->fld[0].rtx != nullptr && note->fld[0].rtx->code == kReg) {
+        Rtx reg = note->fld[0].rtx;
+        if (is_arg_regno(reg->fld[0].rtint) && !arg_regs.contains(reg->fld[0].rtint)) {
+          arg_regs.emplace(reg->fld[0].rtint, gen_rtx(kReg, reg->mode, reg->fld[0].rtint));
+        }
+      }
+    }
+    std::vector<int> sorted_arg_regnos;
+    sorted_arg_regnos.reserve(arg_regs.size());
+    for (const auto& [regno, _] : arg_regs) {
+      sorted_arg_regnos.push_back(regno);
+    }
+    std::sort(sorted_arg_regnos.begin(), sorted_arg_regnos.end());
+    Rtx fusage = insn->fld[7].rtx;
+    for (int regno : sorted_arg_regnos) {
+      Rtx use_rtx = gen_rtx(kUse, kVoidMode, arg_regs.at(regno));
+      fusage = gen_rtx(kExprList, kVoidMode, use_rtx, fusage);
+    }
+    const bool is_post_flow_pass =
+        (cfg.pass != RtlPassKind::kRtl && cfg.pass != RtlPassKind::kJump &&
+         cfg.pass != RtlPassKind::kCse && cfg.pass != RtlPassKind::kLoop &&
+         cfg.pass != RtlPassKind::kCse2);
+    if ((is_post_flow_pass || !cfg.sideband.basic_block_live_at_start.empty()) &&
+        insn->fld[6].rtx == nullptr) {
+      Rtx notes = nullptr;
+      for (int regno : sorted_arg_regnos) {
+        notes = gen_rtx(kExprList, kRegDead, arg_regs.at(regno), notes);
+      }
+      insn->fld[6].rtx = notes;
+    }
+    insn->fld[7].rtx = fusage;
+  }
   // Synchronize `cfg.sideband` into GCC 2.7.2 global side-band arrays.
   int target_max_regno = std::max(max_reg_num(), cfg.sideband.max_regno);
   for (const auto& [regno, _] : cfg.sideband.reg_renumber) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_refs) {
     target_max_regno = std::max(target_max_regno, regno + 1);
   }
   for (const auto& [regno, _] : cfg.sideband.reg_n_sets) {
@@ -997,11 +1115,17 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
     }
   }
 
-  if (!cfg.sideband.reg_n_deaths.empty() || !cfg.sideband.reg_live_length.empty() ||
-      !cfg.sideband.reg_n_calls_crossed.empty()) {
+  if (!cfg.sideband.reg_n_refs.empty() || !cfg.sideband.reg_n_deaths.empty() ||
+      !cfg.sideband.reg_live_length.empty() || !cfg.sideband.reg_n_calls_crossed.empty()) {
+    reg_n_refs = AllocSidebandArray<int>(alloc_regs);
     reg_n_deaths = AllocSidebandArray<short>(alloc_regs);
     reg_live_length = AllocSidebandArray<int>(alloc_regs);
     reg_n_calls_crossed = AllocSidebandArray<int>(alloc_regs);
+    for (const auto& [regno, val] : cfg.sideband.reg_n_refs) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_n_refs[regno] = val;
+      }
+    }
     for (const auto& [regno, val] : cfg.sideband.reg_n_deaths) {
       if (regno >= 0 && regno < alloc_regs) {
         reg_n_deaths[regno] = static_cast<short>(val);
@@ -1055,9 +1179,62 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
       regs_ever_live[fpr] = 1;
     }
   }
-  if (cfg.sideband.frame_size_bytes > 0) {
-    compute_frame_size(cfg.sideband.frame_size_bytes);
+  for (const auto& [_, hard_reg] : cfg.sideband.reg_renumber) {
+    if (hard_reg >= 0 && hard_reg < kFirstPseudoRegister) {
+      regs_ever_live[hard_reg] = 1;
+    }
   }
+  auto mark_set_hard_regs = [](Rtx pat) {
+    if (pat == nullptr) {
+      return;
+    }
+    auto mark_one = [](Rtx x) {
+      if (x == nullptr || (x->code != kSet && x->code != kClobber)) {
+        return;
+      }
+      Rtx dst = x->fld[0].rtx;
+      if (dst != nullptr && dst->code == kSubreg) {
+        dst = dst->fld[0].rtx;
+      }
+      if (dst != nullptr && dst->code == kReg && dst->fld[0].rtint >= 0 &&
+          dst->fld[0].rtint < kFirstPseudoRegister) {
+        regs_ever_live[dst->fld[0].rtint] = 1;
+      }
+    };
+    if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
+      Rtvec vec = pat->fld[0].rtvec;
+      for (int i = 0; i < vec->num_elem; ++i) {
+        mark_one(vec->elem[i].rtx);
+      }
+    } else {
+      mark_one(pat);
+    }
+  };
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
+      Rtx pat = insn->fld[3].rtx;
+      if (pat != nullptr && pat->code == kSequence && pat->fld[0].rtvec != nullptr) {
+        Rtvec seq = pat->fld[0].rtvec;
+        for (int i = 0; i < seq->num_elem; ++i) {
+          if (seq->elem[i].rtx != nullptr) {
+            mark_set_hard_regs(seq->elem[i].rtx->fld[3].rtx);
+          }
+        }
+      } else {
+        mark_set_hard_regs(pat);
+      }
+    }
+  }
+  if (cfg.pass != RtlPassKind::kRtl && current_function_decl != nullptr) {
+    instantiate_virtual_regs(current_function_decl, nullptr);
+  }
+  if (cfg.pass == RtlPassKind::kGreg || cfg.pass == RtlPassKind::kSched2 ||
+      cfg.pass == RtlPassKind::kJump2 || cfg.pass == RtlPassKind::kDbr) {
+    reload_completed = 1;
+  }
+  frame_offset = cfg.sideband.frame_size_bytes;
+  current_function_outgoing_args_size = cfg.sideband.outgoing_args_size;
+  compute_frame_size(cfg.sideband.frame_size_bytes);
   if (cfg.sideband.epilogue_delay_pattern.has_value() &&
       !cfg.sideband.epilogue_delay_pattern->empty()) {
     Rtx delay_insn = BuildInsnFromContainerOrPattern(*cfg.sideband.epilogue_delay_pattern,
@@ -1174,7 +1351,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
         }
         const std::string tag = format_insn_tag(sub);
         std::string sub_pat = CanonicalizeLabelRefsInPattern(FormatRtx(sub->fld[3].rtx), label_map);
-        if (sub->fld[6].rtx != nullptr) {
+        if (sub->code != kCallInsn && sub->fld[6].rtx != nullptr) {
           absl::StrAppend(&sub_pat, " ",
                           CanonicalizeLabelRefsInPattern(FormatRtx(sub->fld[6].rtx), label_map));
         }
@@ -1196,7 +1373,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
 
     std::string raw_pat = FormatRtx(pat);
     std::string canon_pat = CanonicalizeLabelRefsInPattern(raw_pat, label_map);
-    if (insn->fld[6].rtx != nullptr) {
+    if (code != kCallInsn && insn->fld[6].rtx != nullptr) {
       absl::StrAppend(&canon_pat, " ",
                       CanonicalizeLabelRefsInPattern(FormatRtx(insn->fld[6].rtx), label_map));
     }
@@ -1218,6 +1395,13 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     for (int r = kFirstPseudoRegister; r < nregs; ++r) {
       if (reg_renumber[r] >= 0) {
         cfg.sideband.reg_renumber[r] = reg_renumber[r];
+      }
+    }
+  }
+  if (reg_n_refs != nullptr) {
+    for (int r = 0; r < nregs; ++r) {
+      if (reg_n_refs[r] != 0) {
+        cfg.sideband.reg_n_refs[r] = reg_n_refs[r];
       }
     }
   }
@@ -1266,6 +1450,18 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
           mask &= (mask - 1);
         }
       }
+    }
+  }
+  cfg.sideband.frame_size_bytes = frame_offset;
+  cfg.sideband.outgoing_args_size = current_function_outgoing_args_size;
+  for (int r = 0; r < 32; ++r) {
+    if (regs_ever_live[r] != 0) {
+      cfg.sideband.saved_gpr_regnos.push_back(r);
+    }
+  }
+  for (int r = 32; r < 64; ++r) {
+    if (regs_ever_live[r] != 0) {
+      cfg.sideband.saved_fpr_regnos.push_back(r);
     }
   }
   if (current_function_epilogue_delay_list != nullptr &&

@@ -6,10 +6,114 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
+#include "core/round_trip_test_cases.h"
+#include "core/rtl_cfg.h"
 #include "gcc_harness/gcc_context.h"
 
 namespace rom_nom_nom::gcc_harness {
+
+// Identifies each of the 26 subfunctions across KMC GCC 2.7.2 (`cc1`) and GNU
+// Binutils 2.6 (`as`) whose exact boundary (`pre_state` -> `post_state`) is
+// captured during forward compilation tracing.
+enum class SubfunctionId {
+  // Stage 12 (`jump1`, `.00.rtl` -> `.01.jump`):
+  kJumpRedirect,
+  kJump1Optimize,
+
+  // Stage 11 (`cse1`, `.01.jump` -> `.02.cse`):
+  kFoldRtx,
+  kCseBasicBlockCse1,
+
+  // Stage 10 (`loop`, `.02.cse` -> `.03.loop`):
+  kScanLoop,
+  kStrengthReduce,
+
+  // Stage 9 (`cse2`, `.03.loop` -> `.04.cse2`):
+  kCseBasicBlockCse2,
+
+  // Stage 8 (`flow`, `.04.cse2` -> `.05.flow`):
+  kFindBasicBlocks,
+  kPropagateBlock,
+
+  // Stage 7 (`combine`, `.05.flow` -> `.06.combine`):
+  kSimplifyRtx,
+  kSubst,
+  kTryCombine,
+
+  // Stage 6 (`sched1`, `.06.combine` -> `.07.sched`):
+  kScheduleBlockSched1,
+
+  // Stage 5 (`local_alloc`, `.07.sched` -> `.08.lreg`):
+  kUpdateEquivRegs,
+  kBlockAlloc,
+
+  // Stage 4 (`global_alloc` + `reload`, `.08.lreg` -> `.09.greg`):
+  kGlobalAlloc,
+  kReload,
+  kAlterReg,
+
+  // Stage 3 (`sched2`, `.09.greg` -> `.10.sched2`):
+  kScheduleBlockSched2,
+
+  // Stage 2 (`jump2`, `.10.sched2` -> `.11.jump2`):
+  kDoCrossJump,
+
+  // Stage 1 (`dbr_schedule`, `.11.jump2` -> `.12.dbr`):
+  kFillSimpleDelaySlots,
+  kFillEagerDelaySlots,
+  kRelaxDelaySlots,
+  kMakeReturnInsns,
+
+  // Stage 0 (`final` + `GAS`, `.12.dbr` -> `.s` -> `.o`):
+  kFunctionPrologueEpilogue,
+  kFinalScanInsn,
+  kGasMipsIp,
+  kGasMacro,
+  kGasAppendInsn,
+};
+
+// Returns a human-readable name for `id`.
+std::string_view SubfunctionIdName(SubfunctionId id);
+
+// Returns the ordered sequence of all 26 `SubfunctionId`s in forward
+// compilation order (`kJumpRedirect` through `kGasAppendInsn`).
+absl::Span<const SubfunctionId> AllSubfunctionIds();
+
+// Captures the exact input (`pre_state`) and output (`post_state`) of a single
+// GCC 2.7.2 / Binutils 2.6 GAS subfunction boundary during in-process forward
+// compilation.
+struct SubfunctionBoundarySnapshot {
+  SubfunctionId subfunction_id = SubfunctionId::kJump1Optimize;
+  RtlControlFlowGraph pre_state;
+  RtlControlFlowGraph post_state;
+
+  // Populated for Stage 0 (`final` / `GAS`) boundaries:
+  std::vector<std::string> pre_asm_lines;
+  std::vector<std::string> post_asm_lines;
+  std::vector<uint32_t> post_machine_words;
+};
+
+// Complete in-process forward compilation trace for a single C function from
+// `.00.rtl` through `.12.dbr`, `.s`, and 32-bit big-endian MIPS machine words.
+struct FunctionCompilationTrace {
+  std::string test_name;
+  std::string function_name;
+
+  // Pass-level canonical CFGs (`.00.rtl` through `.12.dbr`), each carrying its
+  // populated `RtlSidebandState`.
+  absl::flat_hash_map<RtlPassKind, RtlControlFlowGraph> pass_snapshots;
+
+  // Ordered sequence of subfunction boundary snapshots (`pre_state` and
+  // `post_state`) recorded across the pipeline.
+  std::vector<SubfunctionBoundarySnapshot> subfunction_snapshots;
+
+  // Stage 0 (`final` + `GAS`) outputs:
+  std::string final_asm_text;
+  std::vector<std::string> final_insn_asm_lines;
+  std::vector<uint32_t> final_machine_words;
+};
 
 struct CrossJumpSearchResult {
   Rtx e1 = nullptr;
@@ -124,6 +228,44 @@ class FunctionHooks {
   void RunScanLoop(Rtx loop_start = nullptr, Rtx end = nullptr, int nregs = 0);
   void RunStrengthReduce(Rtx scan_start = nullptr, Rtx end = nullptr, Rtx loop_top = nullptr,
                          int insn_count = 0, Rtx loop_start = nullptr, Rtx loop_end = nullptr);
+
+  // ---------------------------------------------------------------------------
+  // In-Process Forward Compilation Tracer (`TraceRtlPipeline` &
+  // `TraceForwardCompilation`)
+  // ---------------------------------------------------------------------------
+
+  // Compiles `c_source` for `function_name` in-process using the KMC GCC 2.7.2
+  // C frontend (`yyparse`) and returns the initial `.00.rtl` canonical CFG.
+  RtlControlFlowGraph CompileCSourceToInitialRtlCfg(std::string_view c_source,
+                                                    std::string_view function_name,
+                                                    absl::Span<const std::string> c_flags = {
+                                                        "-O2"});
+
+  // Materializes `pre_state` into `ctx_`, executes the forward hook for
+  // `subfunction_id`, and returns the resulting `SubfunctionBoundarySnapshot`
+  // (`pre_state`, `post_state`, and Stage 0 assembly / machine words).
+  SubfunctionBoundarySnapshot ExecuteSubfunctionBoundary(
+      SubfunctionId subfunction_id, const RtlControlFlowGraph& pre_state,
+      absl::Span<const std::string> pre_asm_lines = {}, int optimize_level = 2);
+
+  // Steps 100% in-process from `rtl_00_cfg` (`.00.rtl`) through every GCC 2.7.2
+  // RTL pass (`.01.jump` .. `.12.dbr`), `final`, and Binutils 2.6 GAS,
+  // capturing all 13 `pass_snapshots` and all 26 `SubfunctionBoundarySnapshot`s.
+  FunctionCompilationTrace TraceRtlPipeline(const RtlControlFlowGraph& rtl_00_cfg,
+                                            int optimize_level = 2,
+                                            std::string_view function_name = "harness_func",
+                                            std::string_view test_name = "");
+
+  // Compiles `c_source` for `function_name` 100% in-process and traces its
+  // forward execution across all 13 RTL passes, 26 subfunctions, `final`, and
+  // GAS.
+  FunctionCompilationTrace TraceForwardCompilation(std::string_view c_source,
+                                                   std::string_view function_name,
+                                                   absl::Span<const std::string> c_flags = {"-O2"},
+                                                   std::string_view test_name = "");
+
+  // Convenience overload tracing a `RoundTripTestCase` in-process.
+  FunctionCompilationTrace TraceForwardCompilation(const RoundTripTestCase& test_case);
 
  private:
   void PrepareReorgState(Rtx first);
