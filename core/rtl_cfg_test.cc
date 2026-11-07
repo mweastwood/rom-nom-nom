@@ -150,5 +150,61 @@ TEST(RtlCfgTest, RecomputeRtlCfgRpoReordersBlocksAndPrunesUnreachable) {
   EXPECT_EQ(cfg.rpo_blocks[3].predecessors, (std::vector<size_t>{1, 2}));
 }
 
+TEST(RtlCfgTest, RtlInsnStructuredExprHelpersRoundTripAndMutate) {
+  RtlInsn insn;
+  insn.canonical_pattern =
+      "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 10))) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))";
+
+  auto expr_or = insn.ParseExpr();
+  ASSERT_TRUE(expr_or.ok()) << expr_or.status().message();
+  EXPECT_TRUE(expr_or->IsSet());
+  EXPECT_EQ(expr_or->SetDest().RegNo(), 2);
+
+  auto both_or = insn.ParseExprAndNotes();
+  ASSERT_TRUE(both_or.ok()) << both_or.status().message();
+  ASSERT_EQ(both_or->reg_notes.size(), 1u);
+  EXPECT_EQ(both_or->reg_notes[0].kind, RtlMachineMode::kRegDead);
+
+  both_or->ReplaceRegNo(2, 72);
+  insn.SetFromExprAndNotes(*both_or);
+  EXPECT_EQ(insn.canonical_pattern,
+            "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 10))) "
+            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+}
+
+TEST(RtlCfgTest, RtlSidebandStateStoresRegisterAndLoopMetadata) {
+  RtlControlFlowGraph cfg;
+  cfg.sideband.max_regno = 75;
+  cfg.sideband.reg_renumber[72] = 2;
+  cfg.sideband.reg_n_sets[72] = 1;
+  cfg.sideband.reg_n_deaths[72] = 1;
+  cfg.sideband.reg_live_length[72] = 3;
+  cfg.sideband.reg_n_calls_crossed[72] = 0;
+  cfg.sideband.basic_block_live_at_start[0].insert(4);
+  cfg.sideband.frame_size_bytes = 24;
+  cfg.sideband.is_leaf_function = true;
+  cfg.sideband.saved_gpr_regnos = {16, 31};
+  cfg.sideband.epilogue_delay_pattern = "(set (reg:SI 2 v0) (const_int 0))";
+  cfg.sideband.spill_slots.push_back(RtlSpillSlotInfo{
+      .frame_offset = 16,
+      .byte_size = 4,
+      .recovered_pseudo_regno = 74,
+      .mode = RtlMachineMode::kSI,
+  });
+  cfg.sideband.loops.push_back(RtlLoopInfo{
+      .header_label_id = 0,
+      .latch_block_id = 1,
+      .preheader_block_id = 0,
+      .body_block_ids = {1},
+      .hoisted_invariant_regnos = {73},
+  });
+
+  RtlControlFlowGraph copy = cfg;
+  EXPECT_EQ(copy.sideband, cfg.sideband);
+  copy.sideband.reg_renumber[72] = 3;
+  EXPECT_NE(copy.sideband, cfg.sideband);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

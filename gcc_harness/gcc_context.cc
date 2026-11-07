@@ -65,6 +65,13 @@ extern rtx_def* current_function_epilogue_delay_list;
 extern rtx_def* pc_rtx;
 extern rtx_def* cc0_rtx;
 extern char* (*decl_printable_name)(void*, char**);
+extern short* reg_n_sets;
+extern short* reg_n_deaths;
+extern int* reg_live_length;
+extern int* reg_n_calls_crossed;
+extern rtx_def** basic_block_live_at_start;
+extern int regset_size;
+extern int regset_bytes;
 
 // GAS 2.6 initialization symbols.
 void hex_init();
@@ -95,6 +102,15 @@ constexpr int kFunctionDeclCode = 29;
 constexpr int kResultDeclCode = 35;
 constexpr int kBlockCode = 5;
 constexpr int kVoidTypeCode = 6;
+
+template <typename T>
+T* AllocSidebandArray(size_t count) {
+  static std::vector<void*> sideband_arena;
+  const size_t bytes = std::max<size_t>(1, count) * sizeof(T);
+  void* ptr = std::calloc(1, bytes);
+  sideband_arena.push_back(ptr);
+  return static_cast<T*>(ptr);
+}
 
 char* CopyStringToRtlObstack(std::string_view str) {
   GccObstack* ob = rtl_obstack;
@@ -223,10 +239,18 @@ void GccContext::BeginFunction(std::string_view func_name) {
 
   current_function_decl = fn_decl;
   reg_renumber = nullptr;
+  reg_n_deaths = nullptr;
+  reg_live_length = nullptr;
+  reg_n_calls_crossed = nullptr;
+  basic_block_live_at_start = nullptr;
+  n_basic_blocks = 0;
+  regset_size = 0;
+  regset_bytes = 0;
   reload_completed = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
   init_function_start(fn_decl, const_cast<char*>("harness.c"), 1);
+  reg_scan(nullptr, max_reg_num(), 0);
   rtx_equal_function_value_matters = 1;
   emit_note(nullptr, kNoteInsnFunctionBeg);
   compute_frame_size(0);
@@ -236,6 +260,34 @@ void GccContext::EnsurePseudoRegsUpTo(int min_max_regno, int default_mode) {
   while (max_reg_num() <= min_max_regno) {
     gen_reg_rtx(default_mode);
   }
+}
+
+int GccContext::MaxRegNum() const {
+  return max_reg_num();
+}
+
+void GccContext::SetRegRenumber(int regno, int hard_reg) {
+  if (regno < 0) {
+    return;
+  }
+  if (regno >= kFirstPseudoRegister) {
+    EnsurePseudoRegsUpTo(regno);
+  }
+  const int cap = std::max(max_reg_num(), regno + 1) + 16;
+  if (reg_renumber == nullptr) {
+    reg_renumber = AllocSidebandArray<short>(cap);
+    for (int i = 0; i < cap; ++i) {
+      reg_renumber[i] = -1;
+    }
+  }
+  reg_renumber[regno] = static_cast<short>(hard_reg);
+}
+
+int GccContext::GetRegRenumber(int regno) const {
+  if (reg_renumber == nullptr || regno < 0 || regno >= max_reg_num()) {
+    return -1;
+  }
+  return reg_renumber[regno];
 }
 
 Rtx GccContext::GetOrCreateLabel(std::string_view label_token) {
@@ -890,10 +942,131 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
       break;
     }
   }
+  // Synchronize `cfg.sideband` into GCC 2.7.2 global side-band arrays.
+  int target_max_regno = std::max(max_reg_num(), cfg.sideband.max_regno);
+  for (const auto& [regno, _] : cfg.sideband.reg_renumber) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_sets) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_deaths) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_live_length) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_calls_crossed) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
+  for (const auto& [_, live_set] : cfg.sideband.basic_block_live_at_start) {
+    for (int regno : live_set) {
+      target_max_regno = std::max(target_max_regno, regno + 1);
+    }
+  }
+  if (target_max_regno > kFirstPseudoRegister) {
+    EnsurePseudoRegsUpTo(target_max_regno - 1);
+  }
+  max_regno = max_reg_num();
+  const int alloc_regs = std::max(max_regno, target_max_regno) + 16;
+
   if (!has_sequence) {
     restore_reg_data(first);
     reg_scan(first, max_reg_num(), 0);
+  } else {
+    reg_scan(nullptr, max_reg_num(), 0);
   }
+
+  if (!cfg.sideband.reg_renumber.empty()) {
+    reg_renumber = AllocSidebandArray<short>(alloc_regs);
+    for (int i = 0; i < alloc_regs; ++i) {
+      reg_renumber[i] = -1;
+    }
+    for (const auto& [regno, hard_reg] : cfg.sideband.reg_renumber) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_renumber[regno] = static_cast<short>(hard_reg);
+      }
+    }
+  }
+
+  if (!cfg.sideband.reg_n_sets.empty() && reg_n_sets != nullptr) {
+    for (const auto& [regno, val] : cfg.sideband.reg_n_sets) {
+      if (regno >= 0 && regno < max_regno) {
+        reg_n_sets[regno] = static_cast<short>(val);
+      }
+    }
+  }
+
+  if (!cfg.sideband.reg_n_deaths.empty() || !cfg.sideband.reg_live_length.empty() ||
+      !cfg.sideband.reg_n_calls_crossed.empty()) {
+    reg_n_deaths = AllocSidebandArray<short>(alloc_regs);
+    reg_live_length = AllocSidebandArray<int>(alloc_regs);
+    reg_n_calls_crossed = AllocSidebandArray<int>(alloc_regs);
+    for (const auto& [regno, val] : cfg.sideband.reg_n_deaths) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_n_deaths[regno] = static_cast<short>(val);
+      }
+    }
+    for (const auto& [regno, val] : cfg.sideband.reg_live_length) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_live_length[regno] = val;
+      }
+    }
+    for (const auto& [regno, val] : cfg.sideband.reg_n_calls_crossed) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_n_calls_crossed[regno] = val;
+      }
+    }
+  }
+
+  if (!cfg.sideband.basic_block_live_at_start.empty()) {
+    int max_bb = static_cast<int>(num_blocks);
+    for (const auto& [bb_idx, _] : cfg.sideband.basic_block_live_at_start) {
+      max_bb = std::max(max_bb, bb_idx + 1);
+    }
+    n_basic_blocks = max_bb;
+    regset_size = (alloc_regs / 32) + 2;
+    regset_bytes = regset_size * static_cast<int>(sizeof(uint32_t));
+    basic_block_live_at_start = AllocSidebandArray<Rtx>(max_bb + 4);
+    for (int b = 0; b < max_bb + 4; ++b) {
+      basic_block_live_at_start[b] =
+          reinterpret_cast<Rtx>(AllocSidebandArray<uint32_t>(regset_size));
+    }
+    for (const auto& [bb_idx, live_set] : cfg.sideband.basic_block_live_at_start) {
+      if (bb_idx < 0 || bb_idx >= max_bb) {
+        continue;
+      }
+      auto* words = reinterpret_cast<uint32_t*>(basic_block_live_at_start[bb_idx]);
+      for (int regno : live_set) {
+        if (regno >= 0 && (regno / 32) < regset_size) {
+          words[regno / 32] |= (1u << (regno % 32));
+        }
+      }
+    }
+  }
+
+  for (int gpr : cfg.sideband.saved_gpr_regnos) {
+    if (gpr >= 0 && gpr < kFirstPseudoRegister) {
+      regs_ever_live[gpr] = 1;
+    }
+  }
+  for (int fpr : cfg.sideband.saved_fpr_regnos) {
+    if (fpr >= 0 && fpr < kFirstPseudoRegister) {
+      regs_ever_live[fpr] = 1;
+    }
+  }
+  if (cfg.sideband.frame_size_bytes > 0) {
+    compute_frame_size(cfg.sideband.frame_size_bytes);
+  }
+  if (cfg.sideband.epilogue_delay_pattern.has_value() &&
+      !cfg.sideband.epilogue_delay_pattern->empty()) {
+    Rtx delay_insn = BuildInsnFromContainerOrPattern(*cfg.sideband.epilogue_delay_pattern,
+                                                     /*emit_to_chain=*/false);
+    if (delay_insn != nullptr) {
+      current_function_epilogue_delay_list = gen_rtx(kInsnList, kVoidMode, delay_insn, nullptr);
+    }
+  }
+
   return first;
 }
 
@@ -1035,7 +1208,80 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     });
   }
 
-  return BuildCanonicalCfgFromFlatRtlItems(pass, items);
+  RtlControlFlowGraph cfg = BuildCanonicalCfgFromFlatRtlItems(pass, items);
+
+  // Dematerialize GCC 2.7.2 global side-band arrays into `cfg.sideband`.
+  const int nregs = std::max(max_reg_num(), max_regno);
+  cfg.sideband.max_regno = nregs;
+
+  if (reg_renumber != nullptr) {
+    for (int r = kFirstPseudoRegister; r < nregs; ++r) {
+      if (reg_renumber[r] >= 0) {
+        cfg.sideband.reg_renumber[r] = reg_renumber[r];
+      }
+    }
+  }
+  if (reg_n_sets != nullptr) {
+    for (int r = 0; r < nregs; ++r) {
+      if (reg_n_sets[r] != 0) {
+        cfg.sideband.reg_n_sets[r] = reg_n_sets[r];
+      }
+    }
+  }
+  if (reg_n_deaths != nullptr) {
+    for (int r = 0; r < nregs; ++r) {
+      if (reg_n_deaths[r] != 0) {
+        cfg.sideband.reg_n_deaths[r] = reg_n_deaths[r];
+      }
+    }
+  }
+  if (reg_live_length != nullptr) {
+    for (int r = 0; r < nregs; ++r) {
+      if (reg_live_length[r] > 0) {
+        cfg.sideband.reg_live_length[r] = reg_live_length[r];
+      }
+    }
+  }
+  if (reg_n_calls_crossed != nullptr) {
+    for (int r = 0; r < nregs; ++r) {
+      if (reg_n_calls_crossed[r] > 0) {
+        cfg.sideband.reg_n_calls_crossed[r] = reg_n_calls_crossed[r];
+      }
+    }
+  }
+  if (basic_block_live_at_start != nullptr && n_basic_blocks > 0 && regset_size > 0) {
+    for (int b = 0; b < n_basic_blocks; ++b) {
+      if (basic_block_live_at_start[b] == nullptr) {
+        continue;
+      }
+      const auto* words = reinterpret_cast<const uint32_t*>(basic_block_live_at_start[b]);
+      for (int w = 0; w < regset_size; ++w) {
+        uint32_t mask = words[w];
+        while (mask != 0) {
+          const int bit = __builtin_ctz(mask);
+          const int regno = w * 32 + bit;
+          if (regno < nregs) {
+            cfg.sideband.basic_block_live_at_start[b].insert(regno);
+          }
+          mask &= (mask - 1);
+        }
+      }
+    }
+  }
+  if (current_function_epilogue_delay_list != nullptr &&
+      current_function_epilogue_delay_list->fld[0].rtx != nullptr) {
+    Rtx delay_insn = current_function_epilogue_delay_list->fld[0].rtx;
+    Rtx delay_pat = (delay_insn->code == kInsn || delay_insn->code == kJumpInsn ||
+                     delay_insn->code == kCallInsn)
+                        ? delay_insn->fld[3].rtx
+                        : delay_insn;
+    if (delay_pat != nullptr) {
+      cfg.sideband.epilogue_delay_pattern =
+          CanonicalizeRtlPattern(CanonicalizeLabelRefsInPattern(FormatRtx(delay_pat), label_map));
+    }
+  }
+
+  return cfg;
 }
 
 Rtx GccContext::GetInsns() const {

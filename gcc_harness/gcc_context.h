@@ -258,6 +258,14 @@ class GccContext {
   // Ensures pseudo-registers up to `min_max_regno` are allocated in `regno_reg_rtx`.
   void EnsurePseudoRegsUpTo(int min_max_regno, int default_mode = kSiMode);
 
+  // Returns the current `max_reg_num()` in GCC's RTL register table.
+  int MaxRegNum() const;
+
+  // Sets or queries `reg_renumber[regno]` in GCC's global register allocation
+  // table, allocating the `reg_renumber` array on demand if needed.
+  void SetRegRenumber(int regno, int hard_reg);
+  int GetRegRenumber(int regno) const;
+
   // Resolves or creates a `CODE_LABEL` `rtx` for a symbolic label name (`"L0"`, etc.).
   Rtx GetOrCreateLabel(std::string_view label_token);
 

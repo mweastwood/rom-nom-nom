@@ -3,13 +3,18 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
+#include "core/rtl_expr.h"
 
 namespace rom_nom_nom {
 
@@ -67,6 +72,18 @@ struct RtlInsn {
   bool is_prologue_insn = false;
   bool is_synthetic_rtl_expansion = false;
   std::vector<Instruction> machine_instructions;
+
+  // Parses the core instruction pattern (stripping any trailing `REG_NOTES`)
+  // into a structured `RtlExpr`.
+  absl::StatusOr<RtlExpr> ParseExpr() const;
+
+  // Parses both the core instruction pattern and any trailing `REG_NOTES`.
+  absl::StatusOr<RtlPatternAndNotes> ParseExprAndNotes() const;
+
+  // Updates `canonical_pattern` from a structured `RtlExpr` and optional
+  // `REG_NOTES` list.
+  void SetFromExpr(const RtlExpr& expr, absl::Span<const RtlRegNote> notes = {});
+  void SetFromExprAndNotes(const RtlPatternAndNotes& expr_and_notes);
 };
 
 // Represents a basic block in Reverse-Post-Order (RPO) in the `RtlControlFlowGraph`.
@@ -123,11 +140,94 @@ struct RtlCfgPassComparison {
   }
 };
 
+// Per-loop sideband metadata reconstructed by InverseScanLoop.
+struct RtlLoopInfo {
+  int header_label_id = -1;
+  int latch_block_id = -1;
+  int preheader_block_id = -1;
+  std::vector<int> body_block_ids;
+  std::vector<int> hoisted_invariant_regnos;
+
+  bool operator==(const RtlLoopInfo& other) const {
+    return header_label_id == other.header_label_id && latch_block_id == other.latch_block_id &&
+           preheader_block_id == other.preheader_block_id &&
+           body_block_ids == other.body_block_ids &&
+           hoisted_invariant_regnos == other.hoisted_invariant_regnos;
+  }
+  bool operator!=(const RtlLoopInfo& other) const { return !(*this == other); }
+};
+
+// Spill slot descriptor recovered by InverseReload.
+struct RtlSpillSlotInfo {
+  int frame_offset = 0;
+  int byte_size = 4;
+  int recovered_pseudo_regno = -1;
+  RtlMachineMode mode = RtlMachineMode::kSI;
+
+  bool operator==(const RtlSpillSlotInfo& other) const {
+    return frame_offset == other.frame_offset && byte_size == other.byte_size &&
+           recovered_pseudo_regno == other.recovered_pseudo_regno && mode == other.mode;
+  }
+  bool operator!=(const RtlSpillSlotInfo& other) const { return !(*this == other); }
+};
+
+// Explicit representation of the GCC 2.7.2 global side-band arrays that
+// accompany an RTL instruction stream between optimization stages.
+struct RtlSidebandState {
+  // Next available pseudo-register number (`max_regno` in GCC).
+  int max_regno = 67;
+
+  // Pseudo-register -> hard-register assignment map (`reg_renumber` in GCC).
+  // Unallocated pseudos map to -1 or are absent.
+  absl::flat_hash_map<int, int> reg_renumber;
+
+  // Per-register flow analysis statistics (`reg_n_sets`, `reg_n_deaths`,
+  // `reg_live_length`, `reg_n_calls_crossed` in GCC).
+  absl::flat_hash_map<int, int> reg_n_sets;
+  absl::flat_hash_map<int, int> reg_n_deaths;
+  absl::flat_hash_map<int, int> reg_live_length;
+  absl::flat_hash_map<int, int> reg_n_calls_crossed;
+
+  // Per-basic-block live-in register sets (`basic_block_live_at_start`).
+  // Keyed by basic block index (`0 .. rpo_blocks.size() - 1`).
+  absl::flat_hash_map<int, absl::flat_hash_set<int>> basic_block_live_at_start;
+
+  // Stack frame and prologue/epilogue metadata (`frame_offset`, leaf status,
+  // saved general/FP registers, epilogue delay list).
+  int frame_size_bytes = 0;
+  bool is_leaf_function = false;
+  std::vector<int> saved_gpr_regnos;
+  std::vector<int> saved_fpr_regnos;
+  std::optional<std::string> epilogue_delay_pattern;
+
+  // Spill slots recovered by InverseReload.
+  std::vector<RtlSpillSlotInfo> spill_slots;
+
+  // Natural loop metadata recovered by InverseScanLoop.
+  std::vector<RtlLoopInfo> loops;
+
+  bool operator==(const RtlSidebandState& other) const {
+    return max_regno == other.max_regno && reg_renumber == other.reg_renumber &&
+           reg_n_sets == other.reg_n_sets && reg_n_deaths == other.reg_n_deaths &&
+           reg_live_length == other.reg_live_length &&
+           reg_n_calls_crossed == other.reg_n_calls_crossed &&
+           basic_block_live_at_start == other.basic_block_live_at_start &&
+           frame_size_bytes == other.frame_size_bytes &&
+           is_leaf_function == other.is_leaf_function &&
+           saved_gpr_regnos == other.saved_gpr_regnos &&
+           saved_fpr_regnos == other.saved_fpr_regnos &&
+           epilogue_delay_pattern == other.epilogue_delay_pattern &&
+           spill_slots == other.spill_slots && loops == other.loops;
+  }
+  bool operator!=(const RtlSidebandState& other) const { return !(*this == other); }
+};
+
 // First-class Reverse-Post-Order (RPO) RTL Control Flow Graph representation shared across `core/`,
 // `lifter/`, and `gcc_harness/`.
 struct RtlControlFlowGraph {
   RtlPassKind pass = RtlPassKind::kDbr;
   std::vector<RtlBasicBlock> rpo_blocks;
+  RtlSidebandState sideband;
 
   // Semantic recovery metadata populated across Track B (`Stages 0..12`) and consumed by Stage 13
   // (`InverseRtlToCAstStage`).

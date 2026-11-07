@@ -59,6 +59,26 @@ std::string_view RtlPassExtension(RtlPassKind pass) {
   return "";
 }
 
+absl::StatusOr<RtlExpr> RtlInsn::ParseExpr() const {
+  auto parsed = ParsePatternAndNotes(canonical_pattern);
+  if (!parsed.ok()) {
+    return parsed.status();
+  }
+  return std::move(parsed->pattern);
+}
+
+absl::StatusOr<RtlPatternAndNotes> RtlInsn::ParseExprAndNotes() const {
+  return ParsePatternAndNotes(canonical_pattern);
+}
+
+void RtlInsn::SetFromExpr(const RtlExpr& expr, absl::Span<const RtlRegNote> notes) {
+  canonical_pattern = FormatPatternAndNotes(expr, notes);
+}
+
+void RtlInsn::SetFromExprAndNotes(const RtlPatternAndNotes& expr_and_notes) {
+  canonical_pattern = expr_and_notes.ToSexprString();
+}
+
 void RtlBasicBlock::SyncRtlInsnsFromInstructions() {
   std::vector<RtlInsn> old_insns = std::move(rtl_insns);
   std::vector<bool> used(old_insns.size(), false);

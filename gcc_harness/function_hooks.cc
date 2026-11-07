@@ -407,6 +407,28 @@ void PushInsnToObstack(GccObstack* ob, Rtx insn) {
   ob->next_free += sizeof(Rtx);
 }
 
+// Strips pre-existing flow-generated `LOG_LINKS` (`fld[5]`) and `REG_DEAD` /
+// `REG_UNUSED` notes from `REG_NOTES` (`fld[6]`) before running `flow_analysis`
+// or `life_analysis`, preventing duplicate `REG_DEAD` notes from being
+// prepended when an already-analyzed CFG is re-analyzed.
+void StripFlowGeneratedNotes(Rtx first) {
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
+      continue;
+    }
+    insn->fld[5].rtx = nullptr;
+    Rtx* link = &insn->fld[6].rtx;
+    while (*link != nullptr) {
+      Rtx cur = *link;
+      if (cur->mode == kRegDead || cur->mode == kRegUnused) {
+        *link = cur->fld[1].rtx;
+      } else {
+        link = &cur->fld[1].rtx;
+      }
+    }
+  }
+}
+
 }  // namespace
 
 FunctionHooks::FunctionHooks(GccContext* ctx) : ctx_(ctx) {}
@@ -963,6 +985,7 @@ int FunctionHooks::RunInvertJump(Rtx jump, Rtx nlabel) {
 // -----------------------------------------------------------------------------
 
 void FunctionHooks::PrepareSchedState(Rtx first) {
+  StripFlowGeneratedNotes(first);
   restore_reg_data(first);
   max_regno = max_reg_num();
   reg_scan(first, max_regno, 0);
@@ -1003,6 +1026,7 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
   if (head == nullptr) {
     return;
   }
+  StripFlowGeneratedNotes(head);
   restore_reg_data(head);
   max_regno = max_reg_num();
   reg_scan(head, max_regno, 0);
@@ -1026,6 +1050,7 @@ void FunctionHooks::RunScheduleBlock(int bb_index, Rtx first) {
 // -----------------------------------------------------------------------------
 
 void FunctionHooks::PrepareLocalAllocState(Rtx first) {
+  StripFlowGeneratedNotes(first);
   restore_reg_data(first);
   max_regno = max_reg_num();
   reg_scan(first, max_regno, 1);
@@ -1075,6 +1100,7 @@ void FunctionHooks::RunLocalAlloc(Rtx first) {
   if (head == nullptr) {
     return;
   }
+  StripFlowGeneratedNotes(head);
   restore_reg_data(head);
   max_regno = max_reg_num();
   reg_scan(head, max_regno, 1);
@@ -1262,6 +1288,7 @@ void FunctionHooks::RunFlowAnalysis(Rtx first, int nregs) {
   if (head == nullptr) {
     return;
   }
+  StripFlowGeneratedNotes(head);
   restore_reg_data(head);
   const int num_regs = nregs > 0 ? nregs : max_reg_num();
   max_regno = num_regs;
@@ -1317,6 +1344,7 @@ void FunctionHooks::RunLifeAnalysis(Rtx first, int nregs) {
   if (head == nullptr) {
     return;
   }
+  StripFlowGeneratedNotes(head);
   restore_reg_data(head);
   const int num_regs = nregs > 0 ? nregs : max_reg_num();
   max_regno = num_regs;

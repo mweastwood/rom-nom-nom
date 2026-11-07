@@ -108,6 +108,51 @@ TEST(GccContextTest, MaterializeAndDematerializeMultiBlockCfgWithSequencesNotesA
   EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
 }
 
+TEST(GccContextTest, MaterializeAndDematerializeSyncsRtlSidebandState) {
+  GccContext ctx;
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kLreg;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].id = 0;
+  cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1)))");
+  cfg.rpo_blocks[0].AddPatternOnly("(return)");
+
+  cfg.sideband.max_regno = 76;
+  cfg.sideband.reg_renumber[72] = 2;
+  cfg.sideband.reg_renumber[74] = 16;
+  cfg.sideband.reg_n_sets[72] = 1;
+  cfg.sideband.reg_n_deaths[72] = 1;
+  cfg.sideband.reg_live_length[72] = 4;
+  cfg.sideband.reg_n_calls_crossed[74] = 2;
+  cfg.sideband.basic_block_live_at_start[0].insert(4);
+  cfg.sideband.basic_block_live_at_start[0].insert(72);
+  cfg.sideband.epilogue_delay_pattern = "(set (reg:SI 2 v0) (const_int 9))";
+
+  Rtx head = ctx.MaterializeFromCfg(cfg);
+  ASSERT_NE(head, nullptr);
+  EXPECT_GE(ctx.MaxRegNum(), 76);
+  EXPECT_EQ(ctx.GetRegRenumber(72), 2);
+  EXPECT_EQ(ctx.GetRegRenumber(74), 16);
+  EXPECT_EQ(ctx.GetRegRenumber(73), -1);
+
+  ctx.SetRegRenumber(75, 3);
+  EXPECT_EQ(ctx.GetRegRenumber(75), 3);
+
+  RtlControlFlowGraph demat = ctx.DematerializeToCfg(head, RtlPassKind::kLreg);
+  EXPECT_GE(demat.sideband.max_regno, 76);
+  EXPECT_EQ(demat.sideband.reg_renumber[72], 2);
+  EXPECT_EQ(demat.sideband.reg_renumber[74], 16);
+  EXPECT_EQ(demat.sideband.reg_renumber[75], 3);
+  EXPECT_EQ(demat.sideband.reg_n_sets[72], 1);
+  EXPECT_EQ(demat.sideband.reg_n_deaths[72], 1);
+  EXPECT_EQ(demat.sideband.reg_live_length[72], 4);
+  EXPECT_EQ(demat.sideband.reg_n_calls_crossed[74], 2);
+  EXPECT_TRUE(demat.sideband.basic_block_live_at_start[0].contains(4));
+  EXPECT_TRUE(demat.sideband.basic_block_live_at_start[0].contains(72));
+  ASSERT_TRUE(demat.sideband.epilogue_delay_pattern.has_value());
+  EXPECT_EQ(*demat.sideband.epilogue_delay_pattern, "(set (reg:SI 2 v0) (const_int 9))");
+}
+
 TEST(FunctionHooksTest, Stage0FinalAndGasHooksEmitAndAssembleMachineWords) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);

@@ -313,7 +313,6 @@ RightInverseResult RightInverseVerifier::VerifyAlterRegRightInverse(
         return inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
       },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
-        hooks->RunLocalAlloc();
         hooks->RunAlterReg(/*regno=*/72, /*from_reg=*/-1);
       },
       allocated_cfg_x.pass);

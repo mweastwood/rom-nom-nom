@@ -765,15 +765,18 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertScheduleBlock(
 RtlControlFlowGraph ToySubfunctionInverses::InvertAlterReg(const RtlControlFlowGraph& x,
                                                            int pseudo_regno) const {
   RtlControlFlowGraph out = x;
-  const std::string pseudo_str = absl::StrFormat("(reg:SI %d)", pseudo_regno);
-  const std::string hard_v0 = "(reg:SI 2 v0)";
+  out.sideband.max_regno = std::max(out.sideband.max_regno, pseudo_regno + 1);
+  out.sideband.reg_renumber[pseudo_regno] = 2;
   for (auto& blk : out.rpo_blocks) {
     for (std::string& pat : blk.instructions) {
-      pat = StripTrailingRegNotesFromPattern(pat);
-      size_t pos = 0;
-      while ((pos = pat.find(hard_v0, pos)) != std::string::npos) {
-        pat.replace(pos, hard_v0.size(), pseudo_str);
-        pos += pseudo_str.size();
+      auto parsed = ParsePatternAndNotes(pat);
+      if (parsed.ok()) {
+        parsed->RewriteRegs([pseudo_regno](RtlExpr& reg) {
+          if (reg.RegNo() == 2 && !reg.flags.integrated) {
+            reg.SetRegNo(pseudo_regno);
+          }
+        });
+        pat = parsed->ToSexprString();
       }
     }
     blk.SyncRtlInsnsFromInstructions();
