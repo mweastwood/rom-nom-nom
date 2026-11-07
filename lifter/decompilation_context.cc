@@ -8,7 +8,6 @@
 #include "absl/status/status.h"
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
-#include "lifter/inverse_final_and_gas_stage.h"
 #include "lifter/stack_frame_analyzer.h"
 
 namespace rom_nom_nom {
@@ -66,16 +65,6 @@ absl::Status DecompilationContext::BuildCfg() {
   frame_layout_.reset();
   rtl_cfg_.reset();
   return absl::OkStatus();
-}
-
-void DecompilationContext::LiftCfgToRtl() {
-  if (!cfg_.has_value()) {
-    return;
-  }
-  const StackFrameLayout& layout = FrameLayout();
-  rtl_cfg_ = InverseFinalAndGasLifter::LiftToDbrRtlCfg(*cfg_, &layout.RawAnalysis(), Symbols(),
-                                                       loaded_function_.memory_reader,
-                                                       FunctionName(), &compiler_flags_);
 }
 
 const StackFrameLayout& DecompilationContext::FrameLayout() {

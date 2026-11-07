@@ -142,8 +142,7 @@ class DecompilationContext {
   const std::vector<JumpTable>& JumpTables() const { return jump_tables_; }
   CfgAnalysisManager& CfgAnalyses() { return cfg_analyses_; }
 
-  // Stage 0: Lift the machine ControlFlowGraph into the canonical RtlControlFlowGraph (`.dbr`).
-  void LiftCfgToRtl();
+  // Accessors for the optional RtlControlFlowGraph representation.
   bool HasRtlCfg() const { return rtl_cfg_.has_value(); }
   const RtlControlFlowGraph& RtlCfg() const { return *rtl_cfg_; }
   RtlControlFlowGraph* MutableRtlCfg() { return rtl_cfg_.has_value() ? &(*rtl_cfg_) : nullptr; }

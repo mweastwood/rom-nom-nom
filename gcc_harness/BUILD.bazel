@@ -36,11 +36,22 @@ cc_library(
 )
 
 cc_library(
-    name = "subfunction_inverses",
+    name = "subfunction_inverse_provider",
     testonly = True,
-    srcs = ["subfunction_inverses.cc"],
-    hdrs = ["subfunction_inverses.h"],
+    hdrs = ["subfunction_inverse_provider.h"],
     deps = [
+        "//core:rtl_cfg",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "toy_subfunction_inverses",
+    testonly = True,
+    srcs = ["toy_subfunction_inverses.cc"],
+    hdrs = ["toy_subfunction_inverses.h"],
+    deps = [
+        ":subfunction_inverse_provider",
         "//core:mips",
         "//core:rtl_cfg",
         "//core:rtl_sexpr_utils",
@@ -58,7 +69,8 @@ cc_library(
     deps = [
         ":function_hooks",
         ":gcc_context",
-        ":subfunction_inverses",
+        ":subfunction_inverse_provider",
+        ":toy_subfunction_inverses",
         "//core:rtl_cfg",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
@@ -76,7 +88,8 @@ cc_test(
         ":function_hooks",
         ":gcc_context",
         ":right_inverse_verifier",
-        ":subfunction_inverses",
+        ":subfunction_inverse_provider",
+        ":toy_subfunction_inverses",
         "//core:rtl_cfg",
         "@abseil-cpp//absl/strings",
         "@googletest//:gtest",

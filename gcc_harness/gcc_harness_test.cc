@@ -7,7 +7,8 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
-#include "gcc_harness/subfunction_inverses.h"
+#include "gcc_harness/subfunction_inverse_provider.h"
+#include "gcc_harness/toy_subfunction_inverses.h"
 #include "gtest/gtest.h"
 
 namespace rom_nom_nom::gcc_harness {
@@ -834,6 +835,13 @@ TEST(RightInverseVerifierTest, Stage12JumpRedirectAndJump1OptimizeRightInverse) 
 
   RightInverseResult jump1_res = verifier.VerifyJump1StageRightInverse(expected_jump);
   EXPECT_TRUE(jump1_res.matches) << jump1_res.diff_detail;
+
+  // Verify explicit `SubfunctionInverseProvider` injection into `RightInverseVerifier`:
+  const ToySubfunctionInverses custom_provider;
+  RightInverseVerifier custom_verifier(&ctx, &hooks, &custom_provider);
+  EXPECT_EQ(custom_verifier.InverseProvider(), &custom_provider);
+  RightInverseResult custom_res = custom_verifier.VerifyJump1StageRightInverse(expected_jump);
+  EXPECT_TRUE(custom_res.matches) << custom_res.diff_detail;
 }
 
 }  // namespace

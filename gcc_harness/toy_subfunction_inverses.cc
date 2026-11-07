@@ -1,4 +1,4 @@
-#include "gcc_harness/subfunction_inverses.h"
+#include "gcc_harness/toy_subfunction_inverses.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -136,7 +136,7 @@ std::string InvertWordToRtlSexpr(uint32_t w, bool is_return_value = false) {
 // Stage 0: GAS (`tc-mips.c`) & Final (`final.c`, `mips.c`)
 // -----------------------------------------------------------------------------
 
-std::string SubfunctionInverses::InvertGasMipsIp(uint32_t word_x) {
+std::string ToySubfunctionInverses::InvertGasMipsIp(uint32_t word_x) const {
   if (word_x == 0x00000000u) {
     return "nop";
   }
@@ -243,7 +243,7 @@ std::string SubfunctionInverses::InvertGasMipsIp(uint32_t word_x) {
   return "nop";
 }
 
-std::string SubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> macro_words_x) {
+std::string ToySubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> macro_words_x) const {
   if (macro_words_x.size() == 2) {
     const uint32_t w0 = macro_words_x[0];
     const uint32_t w1 = macro_words_x[1];
@@ -292,8 +292,8 @@ std::string SubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> macro
   return "nop";
 }
 
-std::vector<std::string> SubfunctionInverses::InvertGasAppendInsn(
-    absl::Span<const uint32_t> words_x) {
+std::vector<std::string> ToySubfunctionInverses::InvertGasAppendInsn(
+    absl::Span<const uint32_t> words_x) const {
   std::vector<std::string> lines;
   size_t i = 0;
   while (i < words_x.size()) {
@@ -319,7 +319,7 @@ std::vector<std::string> SubfunctionInverses::InvertGasAppendInsn(
   return lines;
 }
 
-std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x) {
+std::string ToySubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x) const {
   std::string_view line = absl::StripAsciiWhitespace(asm_line_x);
   const size_t comment_pos = line.find('#');
   if (comment_pos != std::string_view::npos) {
@@ -416,8 +416,8 @@ std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x
   return "(const_int 0)";
 }
 
-PrologueEpilogueFrameSpec SubfunctionInverses::InvertFunctionPrologueEpilogue(
-    std::string_view asm_text_x) {
+PrologueEpilogueFrameSpec ToySubfunctionInverses::InvertFunctionPrologueEpilogue(
+    std::string_view asm_text_x) const {
   PrologueEpilogueFrameSpec spec;
   for (std::string_view raw_line : absl::StrSplit(asm_text_x, '\n')) {
     std::string_view line = absl::StripAsciiWhitespace(raw_line);
@@ -441,8 +441,8 @@ PrologueEpilogueFrameSpec SubfunctionInverses::InvertFunctionPrologueEpilogue(
   return spec;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertFinalAndGasFunction(
-    absl::Span<const uint32_t> machine_words_x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertFinalAndGasFunction(
+    absl::Span<const uint32_t> machine_words_x) const {
   RtlControlFlowGraph cfg;
   cfg.pass = RtlPassKind::kDbr;
   cfg.rpo_blocks.resize(1);
@@ -495,7 +495,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertFinalAndGasFunction(
 // Stage 1: Delayed-Branch Scheduling (`reorg.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertMakeReturnInsns(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertMakeReturnInsns(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   const size_t end_block_id = out.rpo_blocks.size();
   const std::string end_label = absl::StrFormat("L%zu", end_block_id);
@@ -532,7 +533,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertMakeReturnInsns(const RtlControlF
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertRelaxDelaySlots(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertRelaxDelaySlots(
+    const RtlControlFlowGraph& x) const {
   for (size_t b = 0; b < x.rpo_blocks.size(); ++b) {
     const auto& blk = x.rpo_blocks[b];
     if (blk.instructions.empty() || blk.successors.size() < 2) {
@@ -598,7 +600,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertRelaxDelaySlots(const RtlControlF
   return x;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertFillEagerDelaySlots(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertFillEagerDelaySlots(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
     auto& blk = out.rpo_blocks[b];
@@ -633,7 +636,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertFillEagerDelaySlots(const RtlCont
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertFillSimpleDelaySlots(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertFillSimpleDelaySlots(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
     std::vector<std::string> expanded;
@@ -655,7 +659,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertFillSimpleDelaySlots(const RtlCon
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertDbrSchedule(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertDbrSchedule(const RtlControlFlowGraph& x) const {
   return InvertFillSimpleDelaySlots(
       InvertFillEagerDelaySlots(InvertRelaxDelaySlots(InvertMakeReturnInsns(x))));
 }
@@ -664,7 +668,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertDbrSchedule(const RtlControlFlowG
 // Stage 2: Post-Reload Cross-Jumping (`jump.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertDoCrossJump(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertDoCrossJump(const RtlControlFlowGraph& x) const {
   // Locate a join block `join_b` with >= 2 incoming edges where at least one
   // predecessor `pred_jump_b` ends with an unconditional jump `(set (pc) (label_ref ...))`.
   for (size_t join_b = 0; join_b < x.rpo_blocks.size(); ++join_b) {
@@ -736,7 +740,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertDoCrossJump(const RtlControlFlowG
 // Stage 3 & Stage 6: Instruction Scheduling (`sched.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertScheduleBlock(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertScheduleBlock(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
     for (size_t i = 0; i + 2 < blk.instructions.size(); ++i) {
@@ -757,8 +762,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertScheduleBlock(const RtlControlFlo
 // Stage 4 & Stage 5: Register Allocation & Reload (`reload1.c`, `local-alloc.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertAlterReg(const RtlControlFlowGraph& x,
-                                                        int pseudo_regno) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertAlterReg(const RtlControlFlowGraph& x,
+                                                           int pseudo_regno) const {
   RtlControlFlowGraph out = x;
   const std::string pseudo_str = absl::StrFormat("(reg:SI %d)", pseudo_regno);
   const std::string hard_v0 = "(reg:SI 2 v0)";
@@ -776,7 +781,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertAlterReg(const RtlControlFlowGrap
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertBlockAlloc(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertBlockAlloc(const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
     for (std::string& pat : blk.instructions) {
@@ -806,7 +811,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertBlockAlloc(const RtlControlFlowGr
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertUpdateEquivRegs(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertUpdateEquivRegs(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
     for (size_t i = 0; i + 1 < blk.instructions.size(); ++i) {
@@ -854,7 +860,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertUpdateEquivRegs(const RtlControlF
 // Stage 7: Instruction Combination (`combine.c`)
 // -----------------------------------------------------------------------------
 
-std::string SubfunctionInverses::InvertSimplifyRtx(std::string_view simplified_rtx_x) {
+std::string ToySubfunctionInverses::InvertSimplifyRtx(std::string_view simplified_rtx_x) const {
   std::string_view s = absl::StripAsciiWhitespace(simplified_rtx_x);
   if (absl::StartsWith(s, "(ge:SI ") && absl::EndsWith(s, " (const_int 1))")) {
     std::string_view inner = s.substr(
@@ -871,7 +877,7 @@ std::string SubfunctionInverses::InvertSimplifyRtx(std::string_view simplified_r
   return absl::StrFormat("(plus:SI %s (const_int 0))", s);
 }
 
-SubstInverseSpec SubfunctionInverses::InvertSubst(std::string_view subst_rtx_x) {
+SubstInverseSpec ToySubfunctionInverses::InvertSubst(std::string_view subst_rtx_x) const {
   std::string_view s = absl::StripAsciiWhitespace(subst_rtx_x);
   if (s == "(set (reg:SI 2 v0) (gt:SI (reg:SI 4 a0) (const_int 0)))" ||
       s == "(set (reg:SI 2 v0) (ge:SI (reg:SI 4 a0) (const_int 1)))") {
@@ -908,7 +914,7 @@ SubstInverseSpec SubfunctionInverses::InvertSubst(std::string_view subst_rtx_x) 
   };
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertTryCombine(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertTryCombine(const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
     std::vector<std::string> expanded;
@@ -957,7 +963,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertTryCombine(const RtlControlFlowGr
 // Stage 8: Flow & Life Analysis (`flow.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertFindBasicBlocks(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertFindBasicBlocks(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   if (out.rpo_blocks.empty()) {
     return out;
@@ -972,7 +979,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertFindBasicBlocks(const RtlControlF
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertPropagateBlock(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertPropagateBlock(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   if (out.rpo_blocks.empty()) {
     return out;
@@ -1003,7 +1011,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertPropagateBlock(const RtlControlFl
 // Stage 9 & Stage 11: Common Subexpression Elimination (`cse.c`)
 // -----------------------------------------------------------------------------
 
-std::string SubfunctionInverses::InvertFoldRtx(std::string_view folded_rtx_x) {
+std::string ToySubfunctionInverses::InvertFoldRtx(std::string_view folded_rtx_x) const {
   std::string_view s = absl::StripAsciiWhitespace(folded_rtx_x);
   if (absl::StartsWith(s, "(const_int ") && s.back() == ')') {
     std::string_view num_str =
@@ -1018,7 +1026,8 @@ std::string SubfunctionInverses::InvertFoldRtx(std::string_view folded_rtx_x) {
   return absl::StrFormat("(plus:SI %s (const_int 0))", s);
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertCseBasicBlock(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertCseBasicBlock(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
     for (size_t i = 0; i + 1 < blk.instructions.size(); ++i) {
@@ -1059,7 +1068,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertCseBasicBlock(const RtlControlFlo
 // Stage 10: Loop Optimization (`loop.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertScanLoop(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertScanLoop(const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   if (out.rpo_blocks.size() < 2) {
     return out;
@@ -1079,7 +1088,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertScanLoop(const RtlControlFlowGrap
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertStrengthReduce(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertStrengthReduce(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   if (out.rpo_blocks.size() < 2) {
     return out;
@@ -1226,7 +1236,7 @@ RtlControlFlowGraph SubfunctionInverses::InvertStrengthReduce(const RtlControlFl
 // Stage 12: Initial Jump Optimization (`jump.c`)
 // -----------------------------------------------------------------------------
 
-RtlControlFlowGraph SubfunctionInverses::InvertJumpRedirect(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertJumpRedirect(const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   if (out.rpo_blocks.size() < 2 || out.rpo_blocks[0].successors.empty()) {
     return out;
@@ -1243,7 +1253,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertJumpRedirect(const RtlControlFlow
   return out;
 }
 
-RtlControlFlowGraph SubfunctionInverses::InvertJump1Optimize(const RtlControlFlowGraph& x) {
+RtlControlFlowGraph ToySubfunctionInverses::InvertJump1Optimize(
+    const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   if (out.rpo_blocks.empty()) {
     return out;

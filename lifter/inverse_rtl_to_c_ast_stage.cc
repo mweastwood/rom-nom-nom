@@ -2144,9 +2144,6 @@ absl::Status InverseRtlToCAstLifter::LiftRtlToCAst(DecompilationContext* context
   if (context == nullptr || !context->HasCfg()) {
     return absl::FailedPreconditionError("InverseRtlToCAstStage: CFG not initialized.");
   }
-  if (!context->HasRtlCfg()) {
-    context->LiftCfgToRtl();
-  }
 
   // 1. Invert `stmt.c` (`expand_start_cond`, `expand_start_loop`, `expand_start_case`) and
   // `expr.c:do_jump` into a hierarchical `StructuredRegion` tree.
@@ -2164,8 +2161,7 @@ absl::Status InverseRtlToCAstLifter::LiftRtlToCAst(DecompilationContext* context
   // 2. Invert `function.c` (`expand_function_start`, `assign_parms`, `expand_function_end`),
   // `stmt.c` (`expand_decl`, `expand_return`), `expr.c` (`expand_expr`, `expand_assignment`,
   // `store_expr`, `do_store_flag`), and `calls.c` (`expand_call`) into a complete
-  // `FunctionDeclaration` C AST guided by the Track B `RtlControlFlowGraph` recovered across
-  // Stages 0..12.
+  // `FunctionDeclaration` C AST.
   const InterProceduralAbiContext& abi_ctx = context->AbiContext();
   AstConverterOptions converter_opts;
   converter_opts.function_name = context->FunctionName();
@@ -2174,7 +2170,7 @@ absl::Status InverseRtlToCAstLifter::LiftRtlToCAst(DecompilationContext* context
   converter_opts.function_fp_parameter_counts = abi_ctx.function_fp_parameter_counts;
   converter_opts.functions_returning_v0 = abi_ctx.functions_returning_v0;
   converter_opts.functions_returning_f0 = abi_ctx.functions_returning_f0;
-  converter_opts.rtl_cfg = &context->RtlCfg();
+  converter_opts.rtl_cfg = context->HasRtlCfg() ? &context->RtlCfg() : nullptr;
 
   auto ast_or = Convert(context->Cfg(), context->RootRegion(), context->Symbols(), converter_opts);
   if (!ast_or.ok()) {

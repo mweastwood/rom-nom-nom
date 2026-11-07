@@ -11,6 +11,7 @@
 #include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
+#include "gcc_harness/subfunction_inverse_provider.h"
 
 namespace rom_nom_nom::gcc_harness {
 
@@ -28,15 +29,18 @@ struct RightInverseResult {
 
 // Verifies the right-inverse property f_i(g_i(x)) = x across all 26 individual
 // KMC GCC 2.7.2 (`cc1`) and Binutils 2.6 (`as`) C functions exposed in
-// `FunctionHooks`, using the 1-to-1 reference inverses in
-// `SubfunctionInverses` with zero post-pass normalization or secret instruction
-// injection.
+// `FunctionHooks`, using a pluggable `SubfunctionInverseProvider` (defaulting
+// to `ToySubfunctionInverses` for `gcc_harness` self-tests) with zero post-pass
+// normalization or secret instruction injection.
 class RightInverseVerifier {
  public:
   using InverseCfgFn = std::function<RtlControlFlowGraph(const RtlControlFlowGraph&)>;
   using ForwardHookFn = std::function<void(GccContext*, FunctionHooks*)>;
 
-  RightInverseVerifier(GccContext* ctx, FunctionHooks* hooks);
+  RightInverseVerifier(GccContext* ctx, FunctionHooks* hooks,
+                       const SubfunctionInverseProvider* inverses = nullptr);
+
+  const SubfunctionInverseProvider* InverseProvider() const { return inverses_; }
 
   // Generic RTL CFG right-inverse verifier:
   //   1. Computes y = inverse_g(target_x)
@@ -197,6 +201,7 @@ class RightInverseVerifier {
  private:
   GccContext* ctx_;
   FunctionHooks* hooks_;
+  const SubfunctionInverseProvider* inverses_;
 };
 
 }  // namespace rom_nom_nom::gcc_harness

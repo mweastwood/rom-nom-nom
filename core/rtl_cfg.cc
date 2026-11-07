@@ -19,9 +19,9 @@ namespace rom_nom_nom {
 
 absl::Span<const RtlPassKind> AllRtlPasses() {
   static constexpr std::array<RtlPassKind, 13> kPasses = {
-      RtlPassKind::kRtl,   RtlPassKind::kJump,   RtlPassKind::kCse,     RtlPassKind::kLoop,
-      RtlPassKind::kCse2,  RtlPassKind::kFlow,   RtlPassKind::kCombine, RtlPassKind::kSched,
-      RtlPassKind::kLreg,  RtlPassKind::kGreg,   RtlPassKind::kSched2,  RtlPassKind::kJump2,
+      RtlPassKind::kRtl,  RtlPassKind::kJump, RtlPassKind::kCse,     RtlPassKind::kLoop,
+      RtlPassKind::kCse2, RtlPassKind::kFlow, RtlPassKind::kCombine, RtlPassKind::kSched,
+      RtlPassKind::kLreg, RtlPassKind::kGreg, RtlPassKind::kSched2,  RtlPassKind::kJump2,
       RtlPassKind::kDbr,
   };
   return kPasses;

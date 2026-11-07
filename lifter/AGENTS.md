@@ -51,12 +51,12 @@ reverse chronological order:
    - Every transformation rule must be general over arbitrary registers, modes,
      expressions, and CFG topologies, directly mirroring the general algebraic
      or dataflow rule in GCC 2.7.2.
-8. **Uncompromised Exact RTL Verification**:
+8. **Uncompromised Exact RTL & Right-Inverse Verification**:
    - Never weaken `RtlControlFlowGraph::CompareAgainst`, `CanonicalizeRtlPattern`,
-     or `GccRtlDumpInspector::BuildCanonicalCfgFromRtlDump` to make tests pass.
+     or in-process `gcc_harness` right-inverse verification ($f_i(g_i(x)) = x$) to
+     make tests pass.
    - Specifically, never wildcard pseudo/hard registers or stack addresses,
      never sort instructions within basic blocks, never strip RTL flags (`/v`,
      `/s`, `/i`, `/u`, `/f`), `REG_NOTES`, `NOTE_INSN_LOOP_*` notes,
      `(sequence [...])` bundles, `(use ...)`/`(clobber ...)`/`(return)` insns,
-     or `(label_ref L<k>)` targets, and never coalesce or reorder basic blocks
-     in the dump inspector.
+     or `(label_ref L<k>)` targets, and never coalesce or reorder basic blocks.
