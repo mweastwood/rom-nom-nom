@@ -19,6 +19,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "core/rtl_sexpr_utils.h"
 
 // NOLINTBEGIN(readability-identifier-naming)
 extern "C" {
@@ -95,26 +96,6 @@ constexpr int kResultDeclCode = 35;
 constexpr int kBlockCode = 5;
 constexpr int kVoidTypeCode = 6;
 
-void SkipSpaces(std::string_view text, size_t* pos) {
-  while (*pos < text.size() && absl::ascii_isspace(text[*pos])) {
-    ++(*pos);
-  }
-}
-
-std::string_view ReadToken(std::string_view text, size_t* pos) {
-  SkipSpaces(text, pos);
-  const size_t start = *pos;
-  while (*pos < text.size()) {
-    char c = text[*pos];
-    if (absl::ascii_isspace(c) || c == '(' || c == ')' || c == '[' || c == ']' || c == ':' ||
-        c == '/' || c == '"') {
-      break;
-    }
-    ++(*pos);
-  }
-  return text.substr(start, *pos - start);
-}
-
 char* CopyStringToRtlObstack(std::string_view str) {
   GccObstack* ob = rtl_obstack;
   const int len = static_cast<int>(str.size()) + 1;
@@ -127,102 +108,6 @@ char* CopyStringToRtlObstack(std::string_view str) {
   ob->next_free += len;
   ob->object_base = ob->next_free;
   return result;
-}
-
-bool IsJumpPatternText(std::string_view pat) {
-  std::string_view s = absl::StripAsciiWhitespace(pat);
-  return absl::StartsWith(s, "(return)") || absl::StartsWith(s, "(set (pc)") ||
-         absl::StartsWith(s, "(parallel [(set (pc)") ||
-         absl::StartsWith(s, "(parallel[ (set (pc)") ||
-         absl::StartsWith(s, "(parallel [(return)") || absl::StartsWith(s, "(parallel[ (return)");
-}
-
-bool IsUnconditionalJumpOrReturnPatternText(std::string_view pat) {
-  std::string_view s = absl::StripAsciiWhitespace(pat);
-  if (absl::StartsWith(s, "(return)") || absl::StartsWith(s, "(parallel [(return)") ||
-      absl::StartsWith(s, "(parallel[ (return)")) {
-    return true;
-  }
-  if (absl::StartsWith(s, "(set (pc) (label_ref") ||
-      absl::StartsWith(s, "(parallel [(set (pc) (reg:") ||
-      absl::StartsWith(s, "(parallel[ (set (pc) (reg:")) {
-    return true;
-  }
-  return false;
-}
-
-bool IsCallPatternText(std::string_view pat) {
-  std::string_view s = absl::StripAsciiWhitespace(pat);
-  return absl::StartsWith(s, "(call ") ||
-         (absl::StartsWith(s, "(set ") && absl::StrContains(s, " (call ")) ||
-         absl::StartsWith(s, "(parallel [(call ") || absl::StartsWith(s, "(parallel[ (call ") ||
-         (absl::StartsWith(s, "(parallel") && absl::StrContains(s, "(call (mem"));
-}
-
-// Splits `(<main_pattern>) (<reg_notes>)` if a trailing `(expr_list:...` or
-// `(insn_list:...` S-expression is appended to `pattern_rtl`.
-std::pair<std::string_view, std::string_view> SplitPatternAndTrailingRegNotes(
-    std::string_view text) {
-  std::string_view s = absl::StripAsciiWhitespace(text);
-  if (s.empty() || s.front() != '(') {
-    return {s, {}};
-  }
-  int depth = 0;
-  bool in_quotes = false;
-  for (size_t i = 0; i < s.size(); ++i) {
-    char c = s[i];
-    if (in_quotes) {
-      if (c == '\\' && i + 1 < s.size()) {
-        ++i;
-      } else if (c == '"') {
-        in_quotes = false;
-      }
-      continue;
-    }
-    if (c == '"') {
-      in_quotes = true;
-    } else if (c == '(') {
-      ++depth;
-    } else if (c == ')') {
-      --depth;
-      if (depth == 0) {
-        std::string_view first = s.substr(0, i + 1);
-        std::string_view rest = absl::StripAsciiWhitespace(s.substr(i + 1));
-        if (absl::StartsWith(rest, "(expr_list") || absl::StartsWith(rest, "(insn_list")) {
-          return {first, rest};
-        }
-        return {s, {}};
-      }
-    }
-  }
-  return {s, {}};
-}
-
-std::vector<std::string> ExtractLabelRefTokens(std::string_view text) {
-  std::vector<std::string> tokens;
-  size_t pos = 0;
-  while (pos < text.size()) {
-    size_t idx = text.find("(label_ref", pos);
-    if (idx == std::string_view::npos) {
-      break;
-    }
-    size_t p = idx + std::string_view("(label_ref").size();
-    while (p < text.size() && !absl::ascii_isspace(text[p]) && text[p] != ')') {
-      ++p;
-    }
-    while (p < text.size() && absl::ascii_isspace(text[p])) {
-      ++p;
-    }
-    size_t tok_start = p;
-    while (p < text.size() && !absl::ascii_isspace(text[p]) && text[p] != ')' && text[p] != '(') {
-      ++p;
-    }
-    if (p > tok_start) {
-      tokens.emplace_back(text.substr(tok_start, p - tok_start));
-    }
-    pos = p;
-  }
-  return tokens;
 }
 
 Rtx FindCodeLabelInRtx(Rtx x) {
@@ -370,13 +255,13 @@ Rtx GccContext::ParseRtx(std::string_view rtl_text) {
 }
 
 Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
-  SkipSpaces(text, pos);
+  SkipRtlWhitespace(text, pos);
   if (*pos >= text.size() || text[*pos] != '(') {
     return nullptr;
   }
   ++(*pos);  // Consume '('.
 
-  std::string_view code_name = ReadToken(text, pos);
+  std::string_view code_name = ReadRtlToken(text, pos);
   if (code_name == "nil" || code_name == "NIL") {
     while (*pos < text.size() && text[*pos] != ')') {
       ++(*pos);
@@ -419,7 +304,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
   int mode = kVoidMode;
   if (*pos < text.size() && text[*pos] == ':') {
     ++(*pos);
-    std::string_view mode_tok = ReadToken(text, pos);
+    std::string_view mode_tok = ReadRtlToken(text, pos);
     bool found_mode = false;
     for (int m = 0; m < kNumMachineModes; ++m) {
       if (mode_name[m] != nullptr && mode_tok == mode_name[m]) {
@@ -455,7 +340,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
   }
 
   for (int i = 0; i < len; ++i) {
-    SkipSpaces(text, pos);
+    SkipRtlWhitespace(text, pos);
     if (*pos >= text.size() || text[*pos] == ')') {
       break;
     }
@@ -469,7 +354,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
       if (text[*pos] == '(') {
         rt->fld[i].rtx = ParseRtxImpl(text, pos);
       } else {
-        std::string_view tok = ReadToken(text, pos);
+        std::string_view tok = ReadRtlToken(text, pos);
         if (rtx_code == kLabelRef || (rtx_code == kReg && i == 0) ||
             (rtx_code == kExprList && mode == kRegLabel && i == 0)) {
           rt->fld[i].rtx = GetOrCreateLabel(tok);
@@ -489,7 +374,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
         ++(*pos);
         std::vector<Rtx> elems;
         while (true) {
-          SkipSpaces(text, pos);
+          SkipRtlWhitespace(text, pos);
           if (*pos >= text.size() || text[*pos] == ']') {
             if (*pos < text.size() && text[*pos] == ']') {
               ++(*pos);
@@ -520,7 +405,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
       if (text[*pos] == '(') {
         saw_paren = true;
         ++(*pos);
-        SkipSpaces(text, pos);
+        SkipRtlWhitespace(text, pos);
       }
       if (*pos < text.size() && text[*pos] == '"') {
         ++(*pos);
@@ -536,11 +421,11 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
         }
         rt->fld[i].rtstr = CopyStringToRtlObstack(buf);
       } else {
-        std::string_view tok = ReadToken(text, pos);
+        std::string_view tok = ReadRtlToken(text, pos);
         rt->fld[i].rtstr = CopyStringToRtlObstack(tok);
       }
       if (saw_paren) {
-        SkipSpaces(text, pos);
+        SkipRtlWhitespace(text, pos);
         if (*pos < text.size() && text[*pos] == ')') {
           ++(*pos);
         }
@@ -553,9 +438,9 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
         if (*pos < text.size() && text[*pos] == '}') {
           ++(*pos);
         }
-        SkipSpaces(text, pos);
+        SkipRtlWhitespace(text, pos);
       }
-      std::string_view tok = ReadToken(text, pos);
+      std::string_view tok = ReadRtlToken(text, pos);
       int val = 0;
       if (absl::StartsWith(tok, "NOTE_INSN_")) {
         for (int n = 1; n <= 13; ++n) {
@@ -569,7 +454,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
       }
       rt->fld[i].rtint = val;
       if (f == 'n') {
-        SkipSpaces(text, pos);
+        SkipRtlWhitespace(text, pos);
         if (*pos < text.size() && text[*pos] == '[') {
           while (*pos < text.size() && text[*pos] != ']') {
             ++(*pos);
@@ -703,7 +588,7 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
   // Case 3: `(code_label ...)`
   if (absl::StartsWith(s, "(code_label")) {
     size_t pos = std::string_view("(code_label").size();
-    std::string_view tok = ReadToken(s, &pos);
+    std::string_view tok = ReadRtlToken(s, &pos);
     Rtx lbl = GetOrCreateLabel(tok);
     return emit_to_chain ? emit_label(lbl) : lbl;
   }
@@ -714,44 +599,9 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
     if (bracket == std::string_view::npos) {
       return nullptr;
     }
-    size_t pos = bracket + 1;
     std::vector<Rtx> sub_insns;
-    while (pos < s.size()) {
-      SkipSpaces(s, &pos);
-      if (pos >= s.size() || s[pos] == ']') {
-        break;
-      }
-      if (s[pos] != '(') {
-        ++pos;
-        continue;
-      }
-      size_t start = pos;
-      int depth = 0;
-      bool in_quotes = false;
-      for (; pos < s.size(); ++pos) {
-        char c = s[pos];
-        if (in_quotes) {
-          if (c == '\\' && pos + 1 < s.size()) {
-            ++pos;
-          } else if (c == '"') {
-            in_quotes = false;
-          }
-          continue;
-        }
-        if (c == '"') {
-          in_quotes = true;
-        } else if (c == '(') {
-          ++depth;
-        } else if (c == ')') {
-          --depth;
-          if (depth == 0) {
-            ++pos;
-            break;
-          }
-        }
-      }
-      Rtx sub = BuildInsnFromContainerOrPattern(s.substr(start, pos - start),
-                                                /*emit_to_chain=*/false);
+    for (std::string_view elem : ExtractBracketedSexprElements(s, bracket)) {
+      Rtx sub = BuildInsnFromContainerOrPattern(elem, /*emit_to_chain=*/false);
       if (sub != nullptr) {
         sub_insns.push_back(sub);
       }
@@ -781,7 +631,7 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
 
   if (s.front() == '(') {
     size_t pos = 1;
-    std::string_view tag = ReadToken(s, &pos);
+    std::string_view tag = ReadRtlToken(s, &pos);
     if (tag == "insn" || tag == "jump_insn" || tag == "call_insn") {
       is_container = true;
       if (tag == "jump_insn") container_code = kJumpInsn;
@@ -798,18 +648,18 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
       }
       if (pos < s.size() && s[pos] == ':') {
         ++pos;
-        ReadToken(s, &pos);
+        ReadRtlToken(s, &pos);
       }
       // Skip optional numeric UID tokens (`uid prev next`) if present.
       for (int k = 0; k < 3; ++k) {
-        SkipSpaces(s, &pos);
+        SkipRtlWhitespace(s, &pos);
         if (pos < s.size() && (absl::ascii_isdigit(s[pos]) || s[pos] == '-')) {
-          ReadToken(s, &pos);
+          ReadRtlToken(s, &pos);
         } else {
           break;
         }
       }
-      SkipSpaces(s, &pos);
+      SkipRtlWhitespace(s, &pos);
       if (pos < s.size() && s.back() == ')') {
         body_and_notes = absl::StripAsciiWhitespace(s.substr(pos, s.size() - pos - 1));
       }
@@ -1048,13 +898,9 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg) {
 }
 
 RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind pass) const {
-  RtlControlFlowGraph result;
-  result.pass = pass;
-
   Rtx head = first_insn != nullptr ? first_insn : get_insns();
   if (head == nullptr) {
-    result.rpo_blocks.push_back(RtlBasicBlock{});
-    return result;
+    return BuildCanonicalCfgFromFlatRtlItems(pass, {});
   }
 
   // First pass: assign sequential canonical label names (`L0`, `L1`, ...) to
@@ -1069,68 +915,6 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     }
   }
 
-  auto canonicalize_label_refs = [&](std::string_view pat) -> std::string {
-    std::string out;
-    out.reserve(pat.size());
-    size_t i = 0;
-    while (i < pat.size()) {
-      if (pat[i] == '(' && absl::StartsWith(pat.substr(i + 1), "label_ref")) {
-        out.push_back('(');
-        ++i;
-        while (i < pat.size() && !absl::ascii_isspace(pat[i]) && pat[i] != ')') {
-          out.push_back(pat[i++]);
-        }
-        while (i < pat.size() && absl::ascii_isspace(pat[i])) {
-          ++i;
-        }
-        size_t num_start = i;
-        while (i < pat.size() && absl::ascii_isdigit(pat[i])) {
-          ++i;
-        }
-        int label_uid = -1;
-        if (i > num_start && absl::SimpleAtoi(pat.substr(num_start, i - num_start), &label_uid)) {
-          auto it = label_map.find(label_uid);
-          if (it != label_map.end()) {
-            absl::StrAppend(&out, " ", it->second);
-          } else {
-            absl::StrAppend(&out, " ", label_uid);
-          }
-        }
-        continue;
-      }
-      out.push_back(pat[i++]);
-    }
-    return out;
-  };
-
-  auto extract_label_refs = [](std::string_view pat) -> std::vector<int> {
-    std::vector<int> refs;
-    size_t pos = 0;
-    while (pos < pat.size()) {
-      size_t idx = pat.find("(label_ref", pos);
-      if (idx == std::string_view::npos) {
-        break;
-      }
-      size_t p = idx + std::string_view("(label_ref").size();
-      while (p < pat.size() && !absl::ascii_isspace(pat[p]) && pat[p] != ')') {
-        ++p;
-      }
-      while (p < pat.size() && absl::ascii_isspace(pat[p])) {
-        ++p;
-      }
-      size_t num_start = p;
-      while (p < pat.size() && absl::ascii_isdigit(pat[p])) {
-        ++p;
-      }
-      int label_uid = -1;
-      if (p > num_start && absl::SimpleAtoi(pat.substr(num_start, p - num_start), &label_uid)) {
-        refs.push_back(label_uid);
-      }
-      pos = p;
-    }
-    return refs;
-  };
-
   auto format_insn_tag = [](Rtx sub) -> std::string {
     std::string tag =
         (sub->code == kJumpInsn) ? "jump_insn" : ((sub->code == kCallInsn) ? "call_insn" : "insn");
@@ -1141,39 +925,51 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     return tag;
   };
 
-  struct FlatItem {
-    int code = 0;
-    int uid = -1;
-    std::string raw_pattern_for_targets;
-    std::string pattern;
+  auto code_to_kind = [](int code) -> RtlInsnKind {
+    switch (code) {
+      case kInsn:
+        return RtlInsnKind::kInsn;
+      case kJumpInsn:
+        return RtlInsnKind::kJumpInsn;
+      case kCallInsn:
+        return RtlInsnKind::kCallInsn;
+      case kCodeLabel:
+        return RtlInsnKind::kCodeLabel;
+      case kBarrier:
+        return RtlInsnKind::kBarrier;
+      case kNote:
+        return RtlInsnKind::kNote;
+      default:
+        return RtlInsnKind::kOther;
+    }
   };
-  std::vector<FlatItem> items;
 
+  std::vector<FlatRtlItem> items;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     const int code = insn->code;
     if (code == kNote) {
       const int note_kind = insn->fld[4].rtint;
       if (note_kind == kNoteInsnLoopBeg) {
-        items.push_back(FlatItem{
-            .code = kNote,
+        items.push_back(FlatRtlItem{
+            .kind = RtlInsnKind::kNote,
             .uid = insn->fld[0].rtint,
             .pattern = "(note NOTE_INSN_LOOP_BEG)",
         });
       } else if (note_kind == kNoteInsnLoopCont) {
-        items.push_back(FlatItem{
-            .code = kNote,
+        items.push_back(FlatRtlItem{
+            .kind = RtlInsnKind::kNote,
             .uid = insn->fld[0].rtint,
             .pattern = "(note NOTE_INSN_LOOP_CONT)",
         });
       } else if (note_kind == kNoteInsnLoopEnd) {
-        items.push_back(FlatItem{
-            .code = kNote,
+        items.push_back(FlatRtlItem{
+            .kind = RtlInsnKind::kNote,
             .uid = insn->fld[0].rtint,
             .pattern = "(note NOTE_INSN_LOOP_END)",
         });
       } else if (note_kind == kNoteInsnLoopVtop) {
-        items.push_back(FlatItem{
-            .code = kNote,
+        items.push_back(FlatRtlItem{
+            .kind = RtlInsnKind::kNote,
             .uid = insn->fld[0].rtint,
             .pattern = "(note NOTE_INSN_LOOP_VTOP)",
         });
@@ -1181,8 +977,8 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
       continue;
     }
     if (code == kCodeLabel || code == kBarrier) {
-      items.push_back(FlatItem{
-          .code = code,
+      items.push_back(FlatRtlItem{
+          .kind = code_to_kind(code),
           .uid = insn->fld[0].rtint,
       });
       continue;
@@ -1196,7 +992,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
       Rtvec vec = pat->fld[0].rtvec;
       std::vector<std::string> formatted_inner;
       formatted_inner.reserve(vec->num_elem);
-      int effective_code = code;
+      RtlInsnKind effective_kind = code_to_kind(code);
       std::string jump_raw_pat;
       for (int j = 0; j < vec->num_elem; ++j) {
         Rtx sub = vec->elem[j].rtx;
@@ -1204,19 +1000,20 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
           continue;
         }
         const std::string tag = format_insn_tag(sub);
-        std::string sub_pat = canonicalize_label_refs(FormatRtx(sub->fld[3].rtx));
+        std::string sub_pat = CanonicalizeLabelRefsInPattern(FormatRtx(sub->fld[3].rtx), label_map);
         if (sub->fld[6].rtx != nullptr) {
-          absl::StrAppend(&sub_pat, " ", canonicalize_label_refs(FormatRtx(sub->fld[6].rtx)));
+          absl::StrAppend(&sub_pat, " ",
+                          CanonicalizeLabelRefsInPattern(FormatRtx(sub->fld[6].rtx), label_map));
         }
         formatted_inner.push_back(
             absl::StrCat("(", tag, " ", CanonicalizeRtlPattern(sub_pat), ")"));
         if (sub->code == kJumpInsn) {
-          effective_code = kJumpInsn;
+          effective_kind = RtlInsnKind::kJumpInsn;
           jump_raw_pat = FormatRtx(sub->fld[3].rtx);
         }
       }
-      items.push_back(FlatItem{
-          .code = effective_code,
+      items.push_back(FlatRtlItem{
+          .kind = effective_kind,
           .uid = insn->fld[0].rtint,
           .raw_pattern_for_targets = jump_raw_pat,
           .pattern = absl::StrCat("(sequence [", absl::StrJoin(formatted_inner, " "), "])"),
@@ -1225,129 +1022,20 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     }
 
     std::string raw_pat = FormatRtx(pat);
-    std::string canon_pat = canonicalize_label_refs(raw_pat);
+    std::string canon_pat = CanonicalizeLabelRefsInPattern(raw_pat, label_map);
     if (insn->fld[6].rtx != nullptr) {
-      absl::StrAppend(&canon_pat, " ", canonicalize_label_refs(FormatRtx(insn->fld[6].rtx)));
+      absl::StrAppend(&canon_pat, " ",
+                      CanonicalizeLabelRefsInPattern(FormatRtx(insn->fld[6].rtx), label_map));
     }
-    items.push_back(FlatItem{
-        .code = code,
+    items.push_back(FlatRtlItem{
+        .kind = code_to_kind(code),
         .uid = insn->fld[0].rtint,
         .raw_pattern_for_targets = raw_pat,
         .pattern = CanonicalizeRtlPattern(canon_pat),
     });
   }
 
-  if (items.empty()) {
-    result.rpo_blocks.push_back(RtlBasicBlock{});
-    return result;
-  }
-
-  struct RawBlock {
-    std::vector<int> label_uids;
-    std::vector<std::string> instructions;
-    std::vector<int> jump_target_labels;
-    bool ends_with_jump = false;
-    bool ends_with_uncond_jump = false;
-    bool ends_with_return = false;
-    bool followed_by_barrier = false;
-  };
-
-  std::vector<RawBlock> raw_blocks;
-  absl::flat_hash_map<int, size_t> label_to_block;
-
-  size_t i = 0;
-  while (i < items.size()) {
-    while (i < items.size() && items[i].code == kBarrier) {
-      if (!raw_blocks.empty()) {
-        raw_blocks.back().followed_by_barrier = true;
-      }
-      ++i;
-    }
-    if (i >= items.size()) {
-      break;
-    }
-
-    RawBlock blk;
-    while (i < items.size() && items[i].code == kCodeLabel) {
-      blk.label_uids.push_back(items[i].uid);
-      ++i;
-    }
-    while (i < items.size() && items[i].code != kCodeLabel && items[i].code != kBarrier) {
-      const auto& it = items[i];
-      if (it.code == kInsn || it.code == kCallInsn || it.code == kNote) {
-        blk.instructions.push_back(CanonicalizeRtlPattern(it.pattern));
-        ++i;
-      } else if (it.code == kJumpInsn) {
-        blk.ends_with_jump = true;
-        blk.instructions.push_back(CanonicalizeRtlPattern(it.pattern));
-        const std::string raw_jump_pat = CanonicalizeRtlPattern(it.raw_pattern_for_targets);
-        if (absl::StrContains(raw_jump_pat, "(return)")) {
-          blk.ends_with_return = true;
-        } else if (absl::StartsWith(raw_jump_pat, "(set (pc) (label_ref")) {
-          blk.ends_with_uncond_jump = true;
-          blk.jump_target_labels = extract_label_refs(it.raw_pattern_for_targets);
-        } else {
-          blk.jump_target_labels = extract_label_refs(it.raw_pattern_for_targets);
-        }
-        ++i;
-        break;
-      } else {
-        ++i;
-      }
-    }
-    while (i < items.size() && items[i].code == kBarrier) {
-      blk.followed_by_barrier = true;
-      ++i;
-    }
-    if (blk.instructions.empty() && blk.label_uids.empty() && !blk.ends_with_return) {
-      continue;
-    }
-    raw_blocks.push_back(std::move(blk));
-  }
-
-  for (size_t b = 0; b < raw_blocks.size(); ++b) {
-    for (int l_uid : raw_blocks[b].label_uids) {
-      label_to_block[l_uid] = b;
-    }
-  }
-
-  std::vector<std::vector<size_t>> raw_succs(raw_blocks.size());
-  for (size_t b = 0; b < raw_blocks.size(); ++b) {
-    const auto& blk = raw_blocks[b];
-    if (blk.ends_with_return) {
-      continue;
-    }
-    for (int target_lbl : blk.jump_target_labels) {
-      auto it = label_to_block.find(target_lbl);
-      if (it != label_to_block.end()) {
-        raw_succs[b].push_back(it->second);
-      }
-    }
-    const bool has_fallthrough =
-        !blk.followed_by_barrier && !blk.ends_with_uncond_jump && !blk.ends_with_return;
-    if (has_fallthrough && b + 1 < raw_blocks.size()) {
-      raw_succs[b].push_back(b + 1);
-    }
-  }
-
-  result.rpo_blocks.reserve(raw_blocks.size());
-  for (size_t b = 0; b < raw_blocks.size(); ++b) {
-    RtlBasicBlock out_blk;
-    out_blk.id = static_cast<uint32_t>(b);
-    for (const auto& pat : raw_blocks[b].instructions) {
-      out_blk.AddPatternOnly(pat);
-    }
-    out_blk.successors = std::move(raw_succs[b]);
-    result.rpo_blocks.push_back(std::move(out_blk));
-  }
-  for (size_t b = 0; b < result.rpo_blocks.size(); ++b) {
-    for (size_t s : result.rpo_blocks[b].successors) {
-      if (s < result.rpo_blocks.size()) {
-        result.rpo_blocks[s].predecessors.push_back(b);
-      }
-    }
-  }
-  return result;
+  return BuildCanonicalCfgFromFlatRtlItems(pass, items);
 }
 
 Rtx GccContext::GetInsns() const {

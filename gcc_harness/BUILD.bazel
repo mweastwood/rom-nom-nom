@@ -6,24 +6,13 @@ package(
 )
 
 cc_library(
-    name = "rtl_cfg",
-    testonly = True,
-    srcs = ["rtl_cfg.cc"],
-    hdrs = ["rtl_cfg.h"],
-    deps = [
-        "//core:mips",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
-    ],
-)
-
-cc_library(
     name = "gcc_context",
     testonly = True,
     srcs = ["gcc_context.cc"],
     hdrs = ["gcc_context.h"],
     deps = [
-        ":rtl_cfg",
+        "//core:rtl_cfg",
+        "//core:rtl_sexpr_utils",
         "//toolchain:gas26_harness_lib",
         "//toolchain:gcc272_harness_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -39,7 +28,7 @@ cc_library(
     hdrs = ["function_hooks.h"],
     deps = [
         ":gcc_context",
-        ":rtl_cfg",
+        "//core:rtl_cfg",
         "//toolchain:gas26_harness_lib",
         "//toolchain:gcc272_harness_lib",
         "@abseil-cpp//absl/strings",
@@ -52,7 +41,9 @@ cc_library(
     srcs = ["subfunction_inverses.cc"],
     hdrs = ["subfunction_inverses.h"],
     deps = [
-        ":rtl_cfg",
+        "//core:mips",
+        "//core:rtl_cfg",
+        "//core:rtl_sexpr_utils",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -67,8 +58,8 @@ cc_library(
     deps = [
         ":function_hooks",
         ":gcc_context",
-        ":rtl_cfg",
         ":subfunction_inverses",
+        "//core:rtl_cfg",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -85,8 +76,8 @@ cc_test(
         ":function_hooks",
         ":gcc_context",
         ":right_inverse_verifier",
-        ":rtl_cfg",
         ":subfunction_inverses",
+        "//core:rtl_cfg",
         "@abseil-cpp//absl/strings",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

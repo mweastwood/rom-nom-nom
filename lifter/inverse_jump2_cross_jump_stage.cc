@@ -17,6 +17,7 @@
 #include "core/control_flow_graph.h"
 #include "core/jump_table.h"
 #include "core/mips.h"
+#include "core/rtl_sexpr_utils.h"
 #include "core/symbol_registry.h"
 #include "lifter/inverse_final_and_gas_stage.h"
 #include "lifter/rtl_cfg.h"
@@ -31,27 +32,9 @@ void InvertCondBranchPattern(RtlBasicBlock* blk) {
     return;
   }
   std::string& pat = blk->rtl_insns.back().canonical_pattern;
-  static constexpr std::pair<std::string_view, std::string_view> kInversions[] = {
-      {"(if_then_else (eq:", "(if_then_else (ne:"},
-      {"(if_then_else (ne:", "(if_then_else (eq:"},
-      {"(if_then_else (ge:", "(if_then_else (lt:"},
-      {"(if_then_else (lt:", "(if_then_else (ge:"},
-      {"(if_then_else (gt:", "(if_then_else (le:"},
-      {"(if_then_else (le:", "(if_then_else (gt:"},
-      {"(if_then_else (geu:", "(if_then_else (ltu:"},
-      {"(if_then_else (ltu:", "(if_then_else (geu:"},
-      {"(if_then_else (gtu:", "(if_then_else (leu:"},
-      {"(if_then_else (leu:", "(if_then_else (gtu:"},
-  };
-  for (const auto& [from, to] : kInversions) {
-    const size_t pos = pat.find(from);
-    if (pos != std::string::npos) {
-      pat.replace(pos, from.size(), to);
-      if (!blk->instructions.empty()) {
-        blk->instructions.back() = pat;
-      }
-      return;
-    }
+  pat = InvertBranchConditionInRtlPattern(pat);
+  if (!blk->instructions.empty()) {
+    blk->instructions.back() = pat;
   }
 }
 

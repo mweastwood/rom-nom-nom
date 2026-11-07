@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`gcc_harness/` provides a `testonly = True` in-process execution and verification harness for all 26 individual KMC GCC 2.7.2 (`cc1`) and GNU Binutils 2.6 (`as`) C functions $f_i$, together with a lossless bidirectional bridge between `lifter::RtlControlFlowGraph` and GCC's in-memory `rtx` instruction chain and a standalone reference suite of 26 1-to-1 mathematical right-inverse functions $g_i$ in `SubfunctionInverses`.
+`gcc_harness/` provides a `testonly = True` in-process execution and verification harness for all 26 individual KMC GCC 2.7.2 (`cc1`) and GNU Binutils 2.6 (`as`) C functions $f_i$, together with a lossless bidirectional bridge between `RtlControlFlowGraph` (`//core:rtl_cfg`) and GCC's in-memory `rtx` instruction chain and a standalone reference suite of 26 1-to-1 mathematical right-inverse functions $g_i$ in `SubfunctionInverses`.
 
 ## Core Invariants
 
@@ -19,7 +19,7 @@
 3. **GPL & Clean-Room Isolation**:
    - GPL source code (`toolchain/gcc-2.7.2-src/` and `toolchain/binutils-2.6-src/`) and static archives (`toolchain/libgcc272_harness.a` and `toolchain/libgas26_harness.a`) are gitignored and built locally via `gcc_harness/setup_sources.sh` (`tools/setup_gcc_harness.sh`).
    - Every target in `gcc_harness/BUILD.bazel` is marked `testonly = True`.
-   - Production targets in `lifter/` must **never** depend on `gcc_harness/`, and `gcc_harness/` has **zero** dependencies on `//lifter:*` targets (defining its own standalone `RtlControlFlowGraph` IR in `gcc_harness/rtl_cfg.{h,cc}`).
+   - Production targets in `lifter/` must **never** depend on `gcc_harness/`, and `gcc_harness/` has **zero** dependencies on `//lifter:*` targets (sharing the unified `RtlControlFlowGraph` IR and RTL S-expression utilities in `//core:rtl_cfg` and `//core:rtl_sexpr_utils`).
 
 4. **Zero Stubs or Fake Fallbacks**:
    - `GccContext` initializes the complete GCC 2.7.2 backend state (obstacks, RTL tables, register sets, optabs, recognizer, loop tables, alias analysis, and a synthetic `FUNCTION_DECL` with `RESULT_DECL` and `BLOCK`) and Binutils 2.6 GAS state (`bfd_init`, `output_file_create("/dev/null")`, `subsegs_begin`, `frag_init`, `md_begin`, `target_big_endian = 1`).

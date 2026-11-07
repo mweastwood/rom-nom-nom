@@ -15,76 +15,11 @@
 #include "core/control_flow_graph.h"
 #include "core/mips.h"
 #include "core/process.h"
+#include "core/rtl_sexpr_utils.h"
 #include "core/toolchain.h"
 #include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
-
-// Classifies a top-level RTL chain entry in a GCC 2.7.2 RTL dump.
-enum class RtlInsnKind {
-  kInsn,
-  kJumpInsn,
-  kCallInsn,
-  kCodeLabel,
-  kBarrier,
-  kNote,
-  kOther,
-};
-
-// Represents a single parsed top-level RTL S-expression entry within a function dump.
-struct RtlInsnEntry {
-  RtlInsnKind kind = RtlInsnKind::kOther;
-  int uid = -1;
-  int prev_uid = -1;
-  int next_uid = -1;
-  bool is_sequence = false;
-  bool in_annulled_branch_delay = false;
-  std::string note_kind;
-  std::string raw_sexpr;
-};
-
-// Represents the parsed RTL dump for a single function within a pass dump file.
-struct RtlFunctionDump {
-  RtlPassKind pass = RtlPassKind::kDbr;
-  std::string function_name;
-  std::string header_text;
-  std::vector<RtlInsnEntry> insns;
-
-  // Returns the number of active executable RTL instructions (`kInsn`, `kJumpInsn`, `kCallInsn`),
-  // excluding `kNote`, `kCodeLabel`, and `kBarrier` entries.
-  size_t ActiveInsnCount() const;
-
-  // Returns the number of `(sequence [...])` delay-slot bundles (produced by `reorg.c` in `.dbr`).
-  size_t SequenceCount() const;
-
-  // Returns all `kNote` entries whose `note_kind` matches `target_note_kind`
-  // (e.g., `"NOTE_INSN_LOOP_BEG"`, `"NOTE_INSN_LOOP_CONT"`, `"NOTE_INSN_PROLOGUE_END"`).
-  std::vector<const RtlInsnEntry*> FindNotes(std::string_view target_note_kind) const;
-
-  // Returns true if the function contains at least one `NOTE_INSN_LOOP_BEG` note.
-  bool HasLoopNotes() const;
-};
-
-// Represents the parsed contents of a single GCC 2.7.2 RTL pass dump file (e.g. `<file>.c.dbr`).
-class RtlPassDump {
- public:
-  RtlPassDump() = default;
-  RtlPassDump(RtlPassKind pass, std::string raw_text, std::string preamble_text,
-              std::vector<RtlFunctionDump> functions);
-
-  RtlPassKind Pass() const { return pass_; }
-  const std::string& RawText() const { return raw_text_; }
-  const std::string& PreambleText() const { return preamble_text_; }
-  const std::vector<RtlFunctionDump>& Functions() const { return functions_; }
-
-  const RtlFunctionDump* FindFunction(std::string_view func_name) const;
-
- private:
-  RtlPassKind pass_ = RtlPassKind::kRtl;
-  std::string raw_text_;
-  std::string preamble_text_;
-  std::vector<RtlFunctionDump> functions_;
-};
 
 // Options for compiling and inspecting a C snippet with KMC GCC 2.7.2 `-da`.
 struct GccRtlInspectOptions {

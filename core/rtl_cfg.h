@@ -1,5 +1,5 @@
-#ifndef GCC_HARNESS_RTL_CFG_H_
-#define GCC_HARNESS_RTL_CFG_H_
+#ifndef CORE_RTL_CFG_H_
+#define CORE_RTL_CFG_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "core/mips.h"
 
 namespace rom_nom_nom {
@@ -30,6 +31,12 @@ enum class RtlPassKind {
   kDbr,      // .dbr     - Delayed-branch scheduling pass (reorg.c)
 };
 
+// Returns the ordered list of all RTL passes in GCC 2.7.2's compilation pipeline.
+absl::Span<const RtlPassKind> AllRtlPasses();
+
+// Returns the file extension (including leading dot, e.g. `".rtl"`, `".dbr"`) for `pass`.
+std::string_view RtlPassExtension(RtlPassKind pass);
+
 // Identifies which GCC 2.7.2 `mips.md` pattern or `gas` macro expansion produced an `RtlInsn`.
 enum class RtlFusedIdiomKind {
   kSingleInstruction,
@@ -50,6 +57,8 @@ enum class RtlFusedIdiomKind {
 };
 
 // Represents a single atomic RTL instruction in the RTL Control Flow Graph.
+// Preserves both the canonical GCC 2.7.2 RTL pattern and the underlying machine instruction span
+// (including symbol relocations, register operands, and immediate values).
 struct RtlInsn {
   std::string canonical_pattern;
   std::string rtl_sexpr_pattern;
@@ -83,6 +92,8 @@ struct RtlBasicBlock {
     instructions.push_back(std::move(pattern));
   }
 
+  // Synchronizes `rtl_insns` with `instructions` while preserving existing `machine_instructions`
+  // payloads and `RtlInsn` metadata.
   void SyncRtlInsnsFromInstructions();
 };
 
@@ -99,21 +110,27 @@ struct RtlCfgPassComparison {
   size_t expected_insn_count = 0;
   std::string mismatch_detail;
 
+  // Returns true if basic block count, RPO successor edges, and per-block instruction counts match.
   bool MatchesTopologyAndInsnCounts() const {
     return pass_present && block_count_matches && successors_match && insn_counts_match;
   }
 
+  // Returns true if topology, instruction counts, and every instruction pattern string match
+  // verbatim.
   bool MatchesExactly() const {
     return pass_present && block_count_matches && successors_match && insn_counts_match &&
            instructions_match;
   }
 };
 
-// Reverse-Post-Order (RPO) RTL Control Flow Graph representation.
+// First-class Reverse-Post-Order (RPO) RTL Control Flow Graph representation shared across `core/`,
+// `lifter/`, and `gcc_harness/`.
 struct RtlControlFlowGraph {
   RtlPassKind pass = RtlPassKind::kDbr;
   std::vector<RtlBasicBlock> rpo_blocks;
 
+  // Semantic recovery metadata populated across Track B (`Stages 0..12`) and consumed by Stage 13
+  // (`InverseRtlToCAstStage`).
   bool has_explicit_trailing_void_return = false;
   size_t local_alloc_pseudo_reg_count = 0;
   size_t global_alloc_pseudo_reg_count = 0;
@@ -128,6 +145,8 @@ struct RtlControlFlowGraph {
     return total;
   }
 
+  // Returns the total number of preserved `Instruction` objects across all `RtlInsn`s in
+  // `rpo_blocks`.
   size_t TotalMachineInsnCount() const {
     size_t total = 0;
     for (const auto& blk : rpo_blocks) {
@@ -138,16 +157,28 @@ struct RtlControlFlowGraph {
     return total;
   }
 
+  // Synchronizes `rtl_insns` with `instructions` across all `rpo_blocks` and preserves all real
+  // `machine_instructions` from `prev_blocks` even when blocks were split or reconstructed.
   void SyncAllBlocksPreservingMachineInsns(const std::vector<RtlBasicBlock>& prev_blocks = {});
 
+  // Compares `this` against `expected` for RPO block count, successor edges, and instruction count.
   RtlCfgPassComparison CompareAgainst(const RtlControlFlowGraph& expected) const;
+
+  // Formats a human-readable multi-line summary of all RPO basic blocks, successor edges, and
+  // instruction patterns (`"B0 (-> [1]): pat1 ; pat2\n..."`).
+  std::string FormatSummary() const;
 };
 
 using RtlCfgBlock = RtlBasicBlock;
 using RtlCanonicalCfg = RtlControlFlowGraph;
 
+// Collapses whitespace in a raw RTL pattern string while preserving all tokens verbatim.
 std::string CanonicalizeRtlPattern(std::string_view pattern);
+
+// Recomputes Reverse Post-Order (RPO) from entry block 0, prunes unreachable blocks, and updates
+// `id`, `successors`, and `predecessors` across `cfg->rpo_blocks`.
+void RecomputeRtlCfgRpo(RtlControlFlowGraph* cfg);
 
 }  // namespace rom_nom_nom
 
-#endif  // GCC_HARNESS_RTL_CFG_H_
+#endif  // CORE_RTL_CFG_H_

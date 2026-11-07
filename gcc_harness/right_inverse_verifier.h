@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "absl/types/span.h"
+#include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
-#include "gcc_harness/rtl_cfg.h"
 
 namespace rom_nom_nom::gcc_harness {
 

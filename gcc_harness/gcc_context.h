@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "gcc_harness/rtl_cfg.h"
+#include "core/rtl_cfg.h"
 
 // NOLINTBEGIN(readability-identifier-naming)
 extern "C" {
@@ -240,14 +240,15 @@ class GccContext {
   // `(barrier)`, and bare patterns `(set ...)`.
   Rtx EmitPattern(std::string_view pattern_rtl);
 
-  // Materializes a `lifter::RtlControlFlowGraph` into GCC's in-memory doubly-linked
-  // `rtx` instruction chain (`get_insns()`), preserving all `/v`, `/i`, `/s`, `/u`
+  // Materializes an `RtlControlFlowGraph` (`//core:rtl_cfg`) into GCC's in-memory
+  // doubly-linked `rtx` instruction chain (`get_insns()`), preserving all `/v`, `/i`, `/s`, `/u`
   // flags, `SEQUENCE` delay-slot wrappers, `REG_NOTES`, `NOTE_INSN_LOOP_*` notes,
   // `CODE_LABEL` targets, and `BARRIER`s. Returns `get_insns()`.
   Rtx MaterializeFromCfg(const RtlControlFlowGraph& cfg);
 
   // Converts an in-memory GCC `rtx` instruction chain back into a canonical
-  // `RtlControlFlowGraph` via `print_rtl` + `GccRtlDumpInspector`.
+  // `RtlControlFlowGraph` via `print_rtl` + `BuildCanonicalCfgFromFlatRtlItems`
+  // (`//core:rtl_sexpr_utils`).
   RtlControlFlowGraph DematerializeToCfg(Rtx first_insn = nullptr,
                                          RtlPassKind pass = RtlPassKind::kDbr) const;
 

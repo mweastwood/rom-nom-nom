@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "absl/types/span.h"
-#include "gcc_harness/rtl_cfg.h"
+#include "core/rtl_cfg.h"
 
 namespace rom_nom_nom::gcc_harness {
 

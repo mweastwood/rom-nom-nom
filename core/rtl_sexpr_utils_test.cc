@@ -1,0 +1,149 @@
+#include "core/rtl_sexpr_utils.h"
+
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "core/rtl_cfg.h"
+#include "gtest/gtest.h"
+
+namespace rom_nom_nom {
+namespace {
+
+TEST(RtlSexprUtilsTest, LexingAndBalancedParenHelpersHandleQuotesAndBrackets) {
+  std::string_view text =
+      "  (insn/s:SI 12 11 13 (symbol_ref:SI (\"foo(bar)\")) [ (use (reg:SI 4)) (clobber (reg:SI "
+      "1)) ])";
+  size_t pos = 0;
+  EXPECT_EQ(ReadRtlToken(text, &pos), "");
+  ASSERT_LT(pos, text.size());
+  EXPECT_EQ(text[pos], '(');
+
+  const size_t close_pos = FindMatchingCloseParen(text, pos);
+  EXPECT_EQ(close_pos, text.size() - 1);
+
+  ++pos;
+  EXPECT_EQ(ReadRtlToken(text, &pos), "insn");
+  EXPECT_EQ(ExtractInsnTagWithFlags(text), "insn/s:SI");
+
+  const size_t bracket_pos = text.find('[');
+  ASSERT_NE(bracket_pos, std::string_view::npos);
+  const std::vector<std::string_view> elems = ExtractBracketedSexprElements(text, bracket_pos);
+  ASSERT_EQ(elems.size(), 2u);
+  EXPECT_EQ(elems[0], "(use (reg:SI 4))");
+  EXPECT_EQ(elems[1], "(clobber (reg:SI 1))");
+}
+
+TEST(RtlSexprUtilsTest, PatternAndRegNoteExtractionAndSplitting) {
+  constexpr std::string_view kInsnSexpr =
+      "(insn 14 13 15 (set (reg:SI 2 v0)\n"
+      "        (plus:SI (reg:SI 72)\n"
+      "            (const_int 1))) 12 {addsi3_internal} (insn_list 13 (nil))\n"
+      "    (expr_list:REG_DEAD (reg:SI 72)\n"
+      "        (nil)))";
+
+  EXPECT_EQ(CanonicalizeRtlPattern(ExtractTopLevelPatternFromInsnSexpr(kInsnSexpr)),
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 72) (const_int 1)))");
+  EXPECT_EQ(CanonicalizeRtlPattern(ExtractRegNotesFromInsnSexpr(kInsnSexpr)),
+            "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+
+  const absl::flat_hash_map<int, std::string> empty_labels;
+  const std::string combined = ExtractPatternAndNotesFromInsnSexpr(kInsnSexpr, empty_labels);
+  EXPECT_EQ(combined,
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 72) (const_int 1))) "
+            "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+
+  const auto [main_pat, notes_pat] = SplitPatternAndTrailingRegNotes(combined);
+  EXPECT_EQ(main_pat, "(set (reg:SI 2 v0) (plus:SI (reg:SI 72) (const_int 1)))");
+  EXPECT_EQ(notes_pat, "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  EXPECT_EQ(StripTrailingRegNotesFromPattern(combined),
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 72) (const_int 1)))");
+}
+
+TEST(RtlSexprUtilsTest, SequenceExtractionAndBranchInversion) {
+  constexpr std::string_view kSeqPat =
+      "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+      "(label_ref L1) (pc)))) (insn/s (set (reg:SI 2 v0) (const_int 7)))])";
+
+  std::string jump_pat;
+  std::string delay_tag;
+  std::string delay_pat;
+  ASSERT_TRUE(ExtractOuterSequenceParts(kSeqPat, &jump_pat, &delay_tag, &delay_pat));
+  EXPECT_EQ(jump_pat,
+            "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L1) (pc)))");
+  EXPECT_EQ(delay_tag, "insn/s");
+  EXPECT_EQ(delay_pat, "(set (reg:SI 2 v0) (const_int 7))");
+
+  EXPECT_EQ(InvertBranchConditionInRtlPattern(jump_pat),
+            "(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 0)) (label_ref L1) (pc)))");
+  EXPECT_TRUE(IsJumpPatternText(jump_pat));
+  EXPECT_FALSE(IsUnconditionalJumpOrReturnPatternText(jump_pat));
+  EXPECT_TRUE(IsUnconditionalJumpOrReturnPatternText("(set (pc) (label_ref L1))"));
+  EXPECT_TRUE(IsUnconditionalJumpOrReturnPatternText("(return)"));
+  EXPECT_TRUE(
+      IsCallPatternText("(parallel [(call (mem:SI (symbol_ref:SI (\"f\"))) (const_int 0)) "
+                        "(clobber (reg:SI 31 ra))])"));
+}
+
+TEST(RtlSexprUtilsTest, ParseRtlPassDumpAndBuildCanonicalCfgWithTableJumpAndLoopNotes) {
+  constexpr std::string_view kRawDump = R"(
+;; Function test_fn
+
+(note 1 0 2 "" NOTE_INSN_FUNCTION_BEG)
+
+(note 2 1 3 "" NOTE_INSN_LOOP_BEG)
+
+(code_label 10 2 11 2 "" [num_refs: 1])
+
+(insn 11 10 12 (set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1))) -1 (nil) (nil))
+
+(jump_insn 12 11 13 (set (pc) (if_then_else (ne:SI (reg:SI 72) (const_int 10)) (label_ref 10) (pc))) -1 (nil) (nil))
+
+(jump_insn 13 12 14 (return) -1 (nil) (nil))
+
+(barrier 14 13 0)
+)";
+
+  const RtlPassDump pass_dump = ParseRtlPassDump(RtlPassKind::kLoop, kRawDump);
+  EXPECT_EQ(pass_dump.Pass(), RtlPassKind::kLoop);
+  const RtlFunctionDump* fn_dump = pass_dump.FindFunction("test_fn");
+  ASSERT_NE(fn_dump, nullptr);
+  EXPECT_TRUE(fn_dump->HasLoopNotes());
+  EXPECT_EQ(fn_dump->ActiveInsnCount(), 3u);
+
+  const RtlControlFlowGraph cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
+  EXPECT_EQ(cfg.pass, RtlPassKind::kLoop);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 3u);
+  EXPECT_EQ(cfg.rpo_blocks[0].instructions, std::vector<std::string>{"(note NOTE_INSN_LOOP_BEG)"});
+  EXPECT_EQ(cfg.rpo_blocks[0].successors, std::vector<size_t>{1});
+  EXPECT_EQ(cfg.rpo_blocks[1].successors, (std::vector<size_t>{1, 2}));
+  EXPECT_EQ(cfg.rpo_blocks[2].instructions, std::vector<std::string>{"(return)"});
+  EXPECT_TRUE(cfg.rpo_blocks[2].successors.empty());
+  EXPECT_EQ(MaxPseudoRegInCfg(cfg), 72);
+}
+
+TEST(RtlSexprUtilsTest, MipsRegisterFormattingAndParsing) {
+  EXPECT_EQ(MipsGprRtlName(0), "$0");
+  EXPECT_EQ(MipsGprRtlName(2), "v0");
+  EXPECT_EQ(MipsGprRtlName(29), "sp");
+  EXPECT_EQ(MipsGprRtlName(31), "ra");
+  EXPECT_EQ(MipsGprRtlName(72), "");
+
+  EXPECT_EQ(FormatHardRegRtl(2), "(reg:SI 2 v0)");
+  EXPECT_EQ(FormatHardRegRtl(2, /*integrated=*/true), "(reg/i:SI 2 v0)");
+  EXPECT_EQ(FormatHardRegRtl(72), "(reg:SI 72)");
+
+  EXPECT_EQ(ParseMipsAsmRegNumber("$0"), 0);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$zero"), 0);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$v0"), 2);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$4"), 4);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$sp"), 29);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$fp"), 30);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$s8"), 30);
+  EXPECT_EQ(ParseMipsAsmRegNumber("$ra"), 31);
+  EXPECT_EQ(ParseMipsAsmRegNumber("invalid"), -1);
+}
+
+}  // namespace
+}  // namespace rom_nom_nom

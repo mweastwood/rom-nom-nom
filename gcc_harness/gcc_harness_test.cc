@@ -3,10 +3,10 @@
 #include <vector>
 
 #include "absl/strings/match.h"
+#include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
-#include "gcc_harness/rtl_cfg.h"
 #include "gcc_harness/subfunction_inverses.h"
 #include "gtest/gtest.h"
 

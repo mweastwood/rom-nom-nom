@@ -16,45 +16,11 @@
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "core/mips.h"
-#include "gcc_harness/rtl_cfg.h"
+#include "core/rtl_cfg.h"
+#include "core/rtl_sexpr_utils.h"
 
 namespace rom_nom_nom::gcc_harness {
 namespace {
-
-constexpr std::string_view kMipsRtlRegNames[32] = {
-    "$0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
-    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra",
-};
-
-std::string FormatHardRegRtl(uint32_t regno, bool integrated = false) {
-  if (regno < 32) {
-    return absl::StrFormat("(%s:SI %u %s)", integrated ? "reg/i" : "reg", regno,
-                           kMipsRtlRegNames[regno]);
-  }
-  return absl::StrFormat("(%s:SI %u)", integrated ? "reg/i" : "reg", regno);
-}
-
-int ParseAsmRegNumber(std::string_view tok) {
-  std::string_view s = absl::StripAsciiWhitespace(tok);
-  if (s.empty() || s.front() != '$') {
-    return -1;
-  }
-  s.remove_prefix(1);
-  if (s == "sp") return 29;
-  if (s == "fp") return 30;
-  if (s == "ra") return 31;
-  if (s == "zero") return 0;
-  int regno = -1;
-  if (absl::SimpleAtoi(s, &regno)) {
-    return regno;
-  }
-  for (int i = 0; i < 32; ++i) {
-    if (s == kMipsRtlRegNames[i]) {
-      return i;
-    }
-  }
-  return -1;
-}
 
 bool IsBranchOrJumpWord(uint32_t w) {
   const uint32_t op = (w >> 26) & 0x3fu;
@@ -162,115 +128,6 @@ std::string InvertWordToRtlSexpr(uint32_t w, bool is_return_value = false) {
                            simm, FormatHardRegRtl(rt));
   }
   return "(const_int 0)";
-}
-
-std::string StripTrailingRegNotesFromPattern(std::string_view pat) {
-  std::string_view s = absl::StripAsciiWhitespace(pat);
-  while (true) {
-    const size_t expr_pos = s.rfind(" (expr_list:");
-    const size_t insn_pos = s.rfind(" (insn_list:");
-    size_t cut_pos = std::string_view::npos;
-    if (expr_pos != std::string_view::npos && insn_pos != std::string_view::npos) {
-      cut_pos = std::max(expr_pos, insn_pos);
-    } else if (expr_pos != std::string_view::npos) {
-      cut_pos = expr_pos;
-    } else if (insn_pos != std::string_view::npos) {
-      cut_pos = insn_pos;
-    }
-    if (cut_pos == std::string_view::npos) {
-      break;
-    }
-    s = absl::StripAsciiWhitespace(s.substr(0, cut_pos));
-  }
-  return std::string(s);
-}
-
-bool ExtractOuterSequenceParts(std::string_view seq_pat, std::string* out_jump_pat,
-                               std::string* out_delay_tag, std::string* out_delay_pat) {
-  std::string_view s = absl::StripAsciiWhitespace(seq_pat);
-  if (!absl::StartsWith(s, "(sequence [")) {
-    return false;
-  }
-  const size_t first_open = s.find('(', std::string_view("(sequence [").size());
-  if (first_open == std::string_view::npos) {
-    return false;
-  }
-  int depth = 0;
-  size_t first_close = first_open;
-  for (; first_close < s.size(); ++first_close) {
-    if (s[first_close] == '(') {
-      ++depth;
-    } else if (s[first_close] == ')') {
-      --depth;
-      if (depth == 0) {
-        break;
-      }
-    }
-  }
-  if (first_close >= s.size()) {
-    return false;
-  }
-  std::string_view elem0 = s.substr(first_open, first_close - first_open + 1);
-  const size_t second_open = s.find('(', first_close + 1);
-  if (second_open == std::string_view::npos) {
-    return false;
-  }
-  depth = 0;
-  size_t second_close = second_open;
-  for (; second_close < s.size(); ++second_close) {
-    if (s[second_close] == '(') {
-      ++depth;
-    } else if (s[second_close] == ')') {
-      --depth;
-      if (depth == 0) {
-        break;
-      }
-    }
-  }
-  if (second_close >= s.size()) {
-    return false;
-  }
-  std::string_view elem1 = s.substr(second_open, second_close - second_open + 1);
-
-  auto unwrap_container = [](std::string_view container, std::string* tag_out) -> std::string {
-    std::string_view c = absl::StripAsciiWhitespace(container);
-    if (c.size() < 2 || c.front() != '(' || c.back() != ')') {
-      return std::string(c);
-    }
-    size_t p = 1;
-    while (p < c.size() && !absl::ascii_isspace(c[p]) && c[p] != '(') {
-      ++p;
-    }
-    if (tag_out != nullptr) {
-      *tag_out = std::string(c.substr(1, p - 1));
-    }
-    while (p < c.size() && c[p] != '(') {
-      ++p;
-    }
-    if (p >= c.size()) {
-      return "";
-    }
-    return std::string(absl::StripAsciiWhitespace(c.substr(p, c.size() - p - 1)));
-  };
-
-  std::string jump_tag;
-  *out_jump_pat = unwrap_container(elem0, &jump_tag);
-  *out_delay_pat = unwrap_container(elem1, out_delay_tag);
-  return !out_jump_pat->empty() && !out_delay_pat->empty();
-}
-
-std::string InvertRtlConditionCode(std::string_view cmp_code) {
-  if (cmp_code == "eq") return "ne";
-  if (cmp_code == "ne") return "eq";
-  if (cmp_code == "lt") return "ge";
-  if (cmp_code == "ge") return "lt";
-  if (cmp_code == "le") return "gt";
-  if (cmp_code == "gt") return "le";
-  if (cmp_code == "ltu") return "geu";
-  if (cmp_code == "geu") return "ltu";
-  if (cmp_code == "leu") return "gtu";
-  if (cmp_code == "gtu") return "leu";
-  return std::string(cmp_code);
 }
 
 }  // namespace
@@ -481,9 +338,9 @@ std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x
   std::vector<std::string_view> args = absl::StrSplit(args_str, ',');
 
   if ((mnemonic == "addu" || mnemonic == "addiu") && args.size() == 3) {
-    const int rd = ParseAsmRegNumber(args[0]);
-    const int rs = ParseAsmRegNumber(args[1]);
-    const int rt = ParseAsmRegNumber(args[2]);
+    const int rd = ParseMipsAsmRegNumber(args[0]);
+    const int rs = ParseMipsAsmRegNumber(args[1]);
+    const int rt = ParseMipsAsmRegNumber(args[2]);
     if (rd >= 0 && rs >= 0 && rt >= 0) {
       return absl::StrFormat("(set %s (plus:SI %s %s))", FormatHardRegRtl(rd), FormatHardRegRtl(rs),
                              FormatHardRegRtl(rt));
@@ -494,16 +351,16 @@ std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x
                              FormatHardRegRtl(rs), imm);
     }
   } else if (mnemonic == "subu" && args.size() == 3) {
-    const int rd = ParseAsmRegNumber(args[0]);
-    const int rs = ParseAsmRegNumber(args[1]);
-    const int rt = ParseAsmRegNumber(args[2]);
+    const int rd = ParseMipsAsmRegNumber(args[0]);
+    const int rs = ParseMipsAsmRegNumber(args[1]);
+    const int rt = ParseMipsAsmRegNumber(args[2]);
     if (rd >= 0 && rs >= 0 && rt >= 0) {
       return absl::StrFormat("(set %s (minus:SI %s %s))", FormatHardRegRtl(rd),
                              FormatHardRegRtl(rs), FormatHardRegRtl(rt));
     }
   } else if ((mnemonic == "sll" || mnemonic == "sra" || mnemonic == "srl") && args.size() == 3) {
-    const int rd = ParseAsmRegNumber(args[0]);
-    const int rt = ParseAsmRegNumber(args[1]);
+    const int rd = ParseMipsAsmRegNumber(args[0]);
+    const int rt = ParseMipsAsmRegNumber(args[1]);
     int sa = 0;
     if (rd >= 0 && rt >= 0 && absl::SimpleAtoi(absl::StripAsciiWhitespace(args[2]), &sa)) {
       const std::string_view rtl_op =
@@ -512,7 +369,7 @@ std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x
                              FormatHardRegRtl(rt), sa);
     }
   } else if (mnemonic == "li" && args.size() == 2) {
-    const int rd = ParseAsmRegNumber(args[0]);
+    const int rd = ParseMipsAsmRegNumber(args[0]);
     std::string_view imm_tok = absl::StripAsciiWhitespace(args[1]);
     int64_t val = 0;
     if (absl::StartsWith(imm_tok, "0x") || absl::StartsWith(imm_tok, "0X")) {
@@ -528,13 +385,13 @@ std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x
                              static_cast<int32_t>(val));
     }
   } else if (mnemonic == "move" && args.size() == 2) {
-    const int rd = ParseAsmRegNumber(args[0]);
-    const int rs = ParseAsmRegNumber(args[1]);
+    const int rd = ParseMipsAsmRegNumber(args[0]);
+    const int rs = ParseMipsAsmRegNumber(args[1]);
     if (rd >= 0 && rs >= 0) {
       return absl::StrFormat("(set %s %s)", FormatHardRegRtl(rd), FormatHardRegRtl(rs));
     }
   } else if ((mnemonic == "lw" || mnemonic == "sw") && args.size() == 2) {
-    const int rt = ParseAsmRegNumber(args[0]);
+    const int rt = ParseMipsAsmRegNumber(args[0]);
     std::string_view mem_arg = absl::StripAsciiWhitespace(args[1]);
     const size_t lparen = mem_arg.find('(');
     const size_t rparen = mem_arg.find(')');
@@ -544,7 +401,7 @@ std::string SubfunctionInverses::InvertFinalScanInsn(std::string_view asm_line_x
       if (lparen > 0) {
         (void)absl::SimpleAtoi(mem_arg.substr(0, lparen), &offset);
       }
-      const int base = ParseAsmRegNumber(mem_arg.substr(lparen + 1, rparen - lparen - 1));
+      const int base = ParseMipsAsmRegNumber(mem_arg.substr(lparen + 1, rparen - lparen - 1));
       if (base >= 0) {
         const std::string addr = offset == 0 ? FormatHardRegRtl(base)
                                              : absl::StrFormat("(plus:SI %s (const_int %d))",
@@ -682,20 +539,8 @@ RtlControlFlowGraph SubfunctionInverses::InvertRelaxDelaySlots(const RtlControlF
       continue;
     }
     const std::string& last_pat = blk.instructions.back();
-    const size_t ite_pos = last_pat.find("(if_then_else (");
-    if (ite_pos == std::string::npos) {
-      continue;
-    }
-    const size_t cmp_start = ite_pos + std::string_view("(if_then_else (").size();
-    size_t cmp_end = cmp_start;
-    while (cmp_end < last_pat.size() && !absl::ascii_isspace(last_pat[cmp_end]) &&
-           last_pat[cmp_end] != ':') {
-      ++cmp_end;
-    }
-    const std::string_view last_pat_view = last_pat;
-    const std::string_view cmp_code = last_pat_view.substr(cmp_start, cmp_end - cmp_start);
-    const std::string inv_cmp = InvertRtlConditionCode(cmp_code);
-    if (inv_cmp == cmp_code) {
+    const std::string inverted_branch = InvertBranchConditionInRtlPattern(last_pat);
+    if (inverted_branch == last_pat) {
       continue;
     }
 
@@ -727,8 +572,6 @@ RtlControlFlowGraph SubfunctionInverses::InvertRelaxDelaySlots(const RtlControlF
 
     // Invert the branch condition in block `b` so it jumps over the trampoline
     // (`b + 1`) to `b + 2` (`shift_idx(fallthrough_b)`).
-    std::string inverted_branch = last_pat;
-    inverted_branch.replace(cmp_start, cmp_end - cmp_start, inv_cmp);
     out.rpo_blocks[b].instructions.back() = inverted_branch;
     out.rpo_blocks[b].SyncRtlInsnsFromInstructions();
     out.rpo_blocks[b].successors = {b + 2, b + 1};

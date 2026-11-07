@@ -14,24 +14,11 @@
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
-#include "gcc_harness/rtl_cfg.h"
+#include "core/rtl_cfg.h"
 #include "gcc_harness/subfunction_inverses.h"
 
 namespace rom_nom_nom::gcc_harness {
 namespace {
-
-std::string FormatCfgSummary(const RtlControlFlowGraph& cfg) {
-  std::string out;
-  for (size_t b = 0; b < cfg.rpo_blocks.size(); ++b) {
-    if (b > 0) {
-      absl::StrAppend(&out, "\n");
-    }
-    absl::StrAppendFormat(&out, "B%zu (-> [%s]): %s", b,
-                          absl::StrJoin(cfg.rpo_blocks[b].successors, ","),
-                          absl::StrJoin(cfg.rpo_blocks[b].instructions, " ; "));
-  }
-  return out;
-}
 
 std::string FormatWordsSummary(absl::Span<const uint32_t> words) {
   std::vector<std::string> hex_words;
@@ -63,7 +50,7 @@ RightInverseResult RightInverseVerifier::VerifyRtlPassRightInverse(
     const RtlControlFlowGraph& target_x, InverseCfgFn inverse_g, ForwardHookFn forward_f,
     RtlPassKind target_pass) const {
   RightInverseResult result;
-  result.expected_summary = FormatCfgSummary(target_x);
+  result.expected_summary = target_x.FormatSummary();
 
   const RtlControlFlowGraph lifted_y = inverse_g(target_x);
   ctx_->MaterializeFromCfg(lifted_y);
@@ -71,7 +58,7 @@ RightInverseResult RightInverseVerifier::VerifyRtlPassRightInverse(
 
   const RtlControlFlowGraph actual_fx = ctx_->DematerializeToCfg(ctx_->GetInsns(), target_pass);
 
-  result.actual_summary = FormatCfgSummary(actual_fx);
+  result.actual_summary = actual_fx.FormatSummary();
   result.cfg_comparison = actual_fx.CompareAgainst(target_x);
   result.matches = result.cfg_comparison.MatchesExactly();
   result.diff_detail = result.cfg_comparison.mismatch_detail;

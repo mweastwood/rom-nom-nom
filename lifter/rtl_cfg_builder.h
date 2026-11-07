@@ -49,9 +49,6 @@ void PopBackInsn(RtlBasicBlock* blk);
 void AppendBlockInsns(RtlBasicBlock* dst, const RtlBasicBlock& src);
 void InsertBlockInsnsBeforeJump(RtlBasicBlock* dst, const RtlBasicBlock& src);
 
-// Recomputes Reverse Post-Order (RPO) from entry block 0 and updates `successors` / `predecessors`.
-void RecomputeRtlCfgRpo(RtlControlFlowGraph* cfg);
-
 }  // namespace rom_nom_nom
 
 #endif  // LIFTER_RTL_CFG_BUILDER_H_

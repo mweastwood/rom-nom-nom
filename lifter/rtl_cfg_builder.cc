@@ -8,22 +8,17 @@
 #include <utility>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "core/mips.h"
+#include "core/rtl_sexpr_utils.h"
 #include "lifter/rtl_cfg.h"
 
 namespace rom_nom_nom {
 
 std::string GprName(Register r) {
-  static constexpr std::string_view kGccGprNames[32] = {
-      "$0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
-      "t3", "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
-      "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra",
-  };
-  return std::string(kGccGprNames[static_cast<int>(r)]);
+  return std::string(MipsGprRtlName(static_cast<uint32_t>(r)));
 }
 
 std::string FprName(FpRegister f) {
@@ -229,55 +224,6 @@ void InsertBlockInsnsBeforeJump(RtlBasicBlock* dst, const RtlBasicBlock& src) {
   } else {
     AppendBlockInsns(dst, src);
   }
-}
-
-void RecomputeRtlCfgRpo(RtlControlFlowGraph* cfg) {
-  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
-    return;
-  }
-  const size_t n = cfg->rpo_blocks.size();
-  std::vector<bool> visited(n, false);
-  std::vector<size_t> post_order;
-  post_order.reserve(n);
-  auto dfs = [&](auto& self, size_t u) -> void {
-    visited[u] = true;
-    for (size_t v : cfg->rpo_blocks[u].successors) {
-      if (v < n && !visited[v]) {
-        self(self, v);
-      }
-    }
-    post_order.push_back(u);
-  };
-  dfs(dfs, 0);
-  std::vector<size_t> rpo(post_order.rbegin(), post_order.rend());
-  absl::flat_hash_map<size_t, size_t> old_to_new;
-  for (size_t idx = 0; idx < rpo.size(); ++idx) {
-    old_to_new[rpo[idx]] = idx;
-  }
-  std::vector<RtlBasicBlock> new_blocks;
-  new_blocks.reserve(rpo.size());
-  for (size_t idx = 0; idx < rpo.size(); ++idx) {
-    RtlBasicBlock blk = std::move(cfg->rpo_blocks[rpo[idx]]);
-    blk.id = static_cast<uint32_t>(idx);
-    std::vector<size_t> new_succs;
-    new_succs.reserve(blk.successors.size());
-    for (size_t s : blk.successors) {
-      if (auto it = old_to_new.find(s); it != old_to_new.end()) {
-        new_succs.push_back(it->second);
-      }
-    }
-    blk.successors = std::move(new_succs);
-    blk.predecessors.clear();
-    new_blocks.push_back(std::move(blk));
-  }
-  for (size_t b = 0; b < new_blocks.size(); ++b) {
-    for (size_t s : new_blocks[b].successors) {
-      if (s < new_blocks.size()) {
-        new_blocks[s].predecessors.push_back(b);
-      }
-    }
-  }
-  cfg->rpo_blocks = std::move(new_blocks);
 }
 
 }  // namespace rom_nom_nom

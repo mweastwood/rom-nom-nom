@@ -669,13 +669,10 @@ cc_test(
 
 cc_library(
     name = "rtl_cfg",
-    srcs = ["rtl_cfg.cc"],
     hdrs = ["rtl_cfg.h"],
     visibility = ["//tuner:__pkg__"],
     deps = [
-        "//core:mips",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
+        "//core:rtl_cfg",
     ],
 )
 
@@ -686,7 +683,7 @@ cc_library(
     deps = [
         ":rtl_cfg",
         "//core:mips",
-        "@abseil-cpp//absl/container:flat_hash_map",
+        "//core:rtl_sexpr_utils",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
     ],
@@ -783,6 +780,7 @@ cc_library(
         "//core:control_flow_graph",
         "//core:jump_table",
         "//core:mips",
+        "//core:rtl_sexpr_utils",
         "//core:symbol_registry",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -1025,6 +1023,7 @@ cc_library(
     hdrs = ["inverse_jump1_cfg_cleanup_stage.h"],
     deps = [
         ":rtl_cfg",
+        "//core:rtl_sexpr_utils",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -1235,6 +1234,7 @@ cc_library(
         "//core:control_flow_graph",
         "//core:mips",
         "//core:process",
+        "//core:rtl_sexpr_utils",
         "//core:toolchain",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",

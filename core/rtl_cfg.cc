@@ -1,5 +1,6 @@
-#include "lifter/rtl_cfg.h"
+#include "core/rtl_cfg.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -12,8 +13,51 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/types/span.h"
 
 namespace rom_nom_nom {
+
+absl::Span<const RtlPassKind> AllRtlPasses() {
+  static constexpr std::array<RtlPassKind, 13> kPasses = {
+      RtlPassKind::kRtl,   RtlPassKind::kJump,   RtlPassKind::kCse,     RtlPassKind::kLoop,
+      RtlPassKind::kCse2,  RtlPassKind::kFlow,   RtlPassKind::kCombine, RtlPassKind::kSched,
+      RtlPassKind::kLreg,  RtlPassKind::kGreg,   RtlPassKind::kSched2,  RtlPassKind::kJump2,
+      RtlPassKind::kDbr,
+  };
+  return kPasses;
+}
+
+std::string_view RtlPassExtension(RtlPassKind pass) {
+  switch (pass) {
+    case RtlPassKind::kRtl:
+      return ".rtl";
+    case RtlPassKind::kJump:
+      return ".jump";
+    case RtlPassKind::kCse:
+      return ".cse";
+    case RtlPassKind::kLoop:
+      return ".loop";
+    case RtlPassKind::kCse2:
+      return ".cse2";
+    case RtlPassKind::kFlow:
+      return ".flow";
+    case RtlPassKind::kCombine:
+      return ".combine";
+    case RtlPassKind::kSched:
+      return ".sched";
+    case RtlPassKind::kLreg:
+      return ".lreg";
+    case RtlPassKind::kGreg:
+      return ".greg";
+    case RtlPassKind::kSched2:
+      return ".sched2";
+    case RtlPassKind::kJump2:
+      return ".jump2";
+    case RtlPassKind::kDbr:
+      return ".dbr";
+  }
+  return "";
+}
 
 void RtlBasicBlock::SyncRtlInsnsFromInstructions() {
   std::vector<RtlInsn> old_insns = std::move(rtl_insns);
@@ -260,6 +304,68 @@ RtlCfgPassComparison RtlControlFlowGraph::CompareAgainst(
     }
   }
   return cmp;
+}
+
+std::string RtlControlFlowGraph::FormatSummary() const {
+  std::string out;
+  for (size_t b = 0; b < rpo_blocks.size(); ++b) {
+    if (b > 0) {
+      absl::StrAppend(&out, "\n");
+    }
+    absl::StrAppendFormat(&out, "B%zu (-> [%s]): %s", b,
+                          absl::StrJoin(rpo_blocks[b].successors, ","),
+                          absl::StrJoin(rpo_blocks[b].instructions, " ; "));
+  }
+  return out;
+}
+
+void RecomputeRtlCfgRpo(RtlControlFlowGraph* cfg) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  const size_t n = cfg->rpo_blocks.size();
+  std::vector<bool> visited(n, false);
+  std::vector<size_t> post_order;
+  post_order.reserve(n);
+  auto dfs = [&](auto& self, size_t u) -> void {
+    visited[u] = true;
+    for (size_t v : cfg->rpo_blocks[u].successors) {
+      if (v < n && !visited[v]) {
+        self(self, v);
+      }
+    }
+    post_order.push_back(u);
+  };
+  dfs(dfs, 0);
+  std::vector<size_t> rpo(post_order.rbegin(), post_order.rend());
+  std::vector<size_t> old_to_new(n, n);
+  for (size_t idx = 0; idx < rpo.size(); ++idx) {
+    old_to_new[rpo[idx]] = idx;
+  }
+  std::vector<RtlBasicBlock> new_blocks;
+  new_blocks.reserve(rpo.size());
+  for (size_t idx = 0; idx < rpo.size(); ++idx) {
+    RtlBasicBlock blk = std::move(cfg->rpo_blocks[rpo[idx]]);
+    blk.id = static_cast<uint32_t>(idx);
+    std::vector<size_t> new_succs;
+    new_succs.reserve(blk.successors.size());
+    for (size_t s : blk.successors) {
+      if (s < n && old_to_new[s] < rpo.size()) {
+        new_succs.push_back(old_to_new[s]);
+      }
+    }
+    blk.successors = std::move(new_succs);
+    blk.predecessors.clear();
+    new_blocks.push_back(std::move(blk));
+  }
+  for (size_t b = 0; b < new_blocks.size(); ++b) {
+    for (size_t s : new_blocks[b].successors) {
+      if (s < new_blocks.size()) {
+        new_blocks[s].predecessors.push_back(b);
+      }
+    }
+  }
+  cfg->rpo_blocks = std::move(new_blocks);
 }
 
 }  // namespace rom_nom_nom

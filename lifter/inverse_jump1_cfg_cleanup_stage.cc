@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -11,6 +10,8 @@
 
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "core/rtl_cfg.h"
+#include "core/rtl_sexpr_utils.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -145,41 +146,7 @@ RtlBasicBlock MakeBlockWithSexprs(uint32_t id, std::vector<size_t> succ,
 }
 
 std::string ReverseBranchConditionSexpr(std::string s) {
-  constexpr std::string_view kPrefix = "(set (pc) (if_then_else (";
-  const size_t pos = s.find(kPrefix);
-  if (pos == std::string::npos) {
-    return s;
-  }
-  const size_t op_start = pos + kPrefix.size();
-  const size_t colon = s.find(':', op_start);
-  if (colon == std::string::npos) {
-    return s;
-  }
-  const std::string_view op(s.data() + op_start, colon - op_start);
-  std::string_view rev_op = op;
-  if (op == "eq") {
-    rev_op = "ne";
-  } else if (op == "ne") {
-    rev_op = "eq";
-  } else if (op == "lt") {
-    rev_op = "ge";
-  } else if (op == "ge") {
-    rev_op = "lt";
-  } else if (op == "gt") {
-    rev_op = "le";
-  } else if (op == "le") {
-    rev_op = "gt";
-  } else if (op == "ltu") {
-    rev_op = "geu";
-  } else if (op == "geu") {
-    rev_op = "ltu";
-  } else if (op == "gtu") {
-    rev_op = "leu";
-  } else if (op == "leu") {
-    rev_op = "gtu";
-  }
-  s.replace(op_start, colon - op_start, rev_op);
-  return s;
+  return InvertBranchConditionInRtlPattern(s);
 }
 
 void InvertBlockTrailingCondBranch(RtlBasicBlock* blk) {
@@ -436,47 +403,6 @@ RtlBasicBlock MakeBlock(uint32_t id, std::vector<size_t> succ, size_t num_insns,
     blk.AddPatternOnly(kCanonicalNop);
   }
   return blk;
-}
-
-void RecomputeRpo(RtlControlFlowGraph* cfg) {
-  const size_t n = cfg->rpo_blocks.size();
-  if (n == 0) {
-    return;
-  }
-  std::vector<bool> visited(n, false);
-  std::vector<size_t> post_order;
-  post_order.reserve(n);
-  std::function<void(size_t)> dfs = [&](size_t u) {
-    visited[u] = true;
-    for (size_t v : cfg->rpo_blocks[u].successors) {
-      if (v < n && !visited[v]) {
-        dfs(v);
-      }
-    }
-    post_order.push_back(u);
-  };
-  dfs(0);
-  std::vector<size_t> rpo(post_order.rbegin(), post_order.rend());
-  std::vector<size_t> old_to_new(n, n);
-  for (size_t new_idx = 0; new_idx < rpo.size(); ++new_idx) {
-    old_to_new[rpo[new_idx]] = new_idx;
-  }
-  std::vector<RtlBasicBlock> new_blocks;
-  new_blocks.reserve(rpo.size());
-  for (size_t new_idx = 0; new_idx < rpo.size(); ++new_idx) {
-    RtlBasicBlock blk = std::move(cfg->rpo_blocks[rpo[new_idx]]);
-    blk.id = static_cast<uint32_t>(new_idx);
-    std::vector<size_t> mapped_succs;
-    mapped_succs.reserve(blk.successors.size());
-    for (size_t s : blk.successors) {
-      if (s < n && old_to_new[s] < rpo.size()) {
-        mapped_succs.push_back(old_to_new[s]);
-      }
-    }
-    blk.successors = std::move(mapped_succs);
-    new_blocks.push_back(std::move(blk));
-  }
-  cfg->rpo_blocks = std::move(new_blocks);
 }
 
 // Pass 0: Restore dead computations (`jump.c:delete_computation` with `after_regscan = 1`)
@@ -1607,7 +1533,7 @@ void InvertJumpToRtlCfgImpl(RtlControlFlowGraph* cfg) {
     for (const LoopTuple& lt : backedges) {
       UnrotateLoopAt(&blks, lt.p_idx, lt.h_idx, lt.l_idx, lt.e_idx);
     }
-    RecomputeRpo(cfg);
+    RecomputeRtlCfgRpo(cfg);
 
     for (size_t i = 0; i < blks.size(); ++i) {
       if (blks[i].successors.empty() && !blks[i].instructions.empty() &&
@@ -1616,7 +1542,7 @@ void InvertJumpToRtlCfgImpl(RtlControlFlowGraph* cfg) {
         blks[i].AddPatternOnly(kJumpTerminator);
         blks[i].successors = {new_id};
         blks.push_back(MakeBlock(static_cast<uint32_t>(new_id), {}, 0));
-        RecomputeRpo(cfg);
+        RecomputeRtlCfgRpo(cfg);
         break;
       }
     }
@@ -1744,7 +1670,7 @@ void InvertJumpToRtlCfgImpl(RtlControlFlowGraph* cfg) {
         blks[k - 1].successors = {k, id_tramp};
         InvertBlockTrailingCondBranch(&blks[k - 1]);
         blks.push_back(MakeBlock(static_cast<uint32_t>(id_tramp), {k + 1}, 1, true, false));
-        RecomputeRpo(cfg);
+        RecomputeRtlCfgRpo(cfg);
         return;
       }
     }
