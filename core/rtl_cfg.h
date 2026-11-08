@@ -18,6 +18,18 @@
 
 namespace rom_nom_nom {
 
+// Frame parameters recovered by `InvertFunctionPrologueEpilogue` for
+// `mips.c:function_prologue` and `mips.c:function_epilogue`.
+struct PrologueEpilogueFrameSpec {
+  int var_size = 0;
+  uint32_t saved_gpr_mask = 0;
+
+  bool operator==(const PrologueEpilogueFrameSpec& other) const {
+    return var_size == other.var_size && saved_gpr_mask == other.saved_gpr_mask;
+  }
+  bool operator!=(const PrologueEpilogueFrameSpec& other) const { return !(*this == other); }
+};
+
 // Identifies each RTL dump pass emitted by KMC GCC 2.7.2 (`toplev.c:rest_of_compilation`)
 // when invoked with `-da`, ordered chronologically along the forward compilation pipeline.
 enum class RtlPassKind {

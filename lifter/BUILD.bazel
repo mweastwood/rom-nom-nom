@@ -99,6 +99,36 @@ cc_test(
 )
 
 cc_library(
+    name = "invert_function_prologue_epilogue",
+    srcs = ["invert_function_prologue_epilogue.cc"],
+    hdrs = ["invert_function_prologue_epilogue.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core:rtl_cfg",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "invert_function_prologue_epilogue_test",
+    size = "medium",
+    srcs = ["invert_function_prologue_epilogue_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":invert_function_prologue_epilogue",
+        "//core:round_trip_test_cases",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "dominator_tree",
     srcs = ["dominator_tree.cc"],
     hdrs = ["dominator_tree.h"],

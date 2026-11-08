@@ -15,12 +15,7 @@
 
 namespace rom_nom_nom::gcc_harness {
 
-// Frame parameters recovered by `InvertFunctionPrologueEpilogue` for
-// `mips.c:function_prologue` and `mips.c:function_epilogue`.
-struct PrologueEpilogueFrameSpec {
-  int var_size = 0;
-  uint32_t saved_gpr_mask = 0;
-};
+using PrologueEpilogueFrameSpec = ::rom_nom_nom::PrologueEpilogueFrameSpec;
 
 // Pre-substitution arguments `(target_expr, from_reg, to_expr)` recovered by
 // `InvertSubst` for `combine.c:subst`.

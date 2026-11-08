@@ -42,11 +42,30 @@ std::string FormatWordsSummary(absl::Span<const uint32_t> words) {
 std::string ExtractInstructionLines(std::string_view asm_text) {
   std::vector<std::string> lines;
   for (std::string_view raw : absl::StrSplit(asm_text, '\n')) {
+    const size_t hash_pos = raw.find('#');
+    if (hash_pos != std::string_view::npos) {
+      raw = raw.substr(0, hash_pos);
+    }
     std::string_view line = absl::StripAsciiWhitespace(raw);
-    if (line.empty() || line.front() == '#' || line.front() == '.') {
+    if (line.empty() || line.front() == '.') {
+      continue;
+    }
+    if (line.back() == ':' && line.find_first_of(" \t,()") == std::string_view::npos) {
       continue;
     }
     lines.emplace_back(line);
+  }
+  return absl::StrJoin(lines, "\n");
+}
+
+std::string StripFileDirectives(std::string_view asm_text) {
+  std::vector<std::string> lines;
+  for (std::string_view raw : absl::StrSplit(asm_text, '\n')) {
+    std::string_view trimmed = absl::StripAsciiWhitespace(raw);
+    if (absl::StartsWith(trimmed, ".file")) {
+      continue;
+    }
+    lines.emplace_back(raw);
   }
   return absl::StrJoin(lines, "\n");
 }
@@ -182,12 +201,25 @@ RightInverseResult RightInverseVerifier::VerifyFunctionPrologueEpilogueRightInve
     result.diff_detail = "InvertFunctionPrologueEpilogue returned invalid var_size < 0";
     return result;
   }
+  std::string fn_name = "harness_func";
+  for (std::string_view raw : absl::StrSplit(asm_text_x, '\n')) {
+    std::string_view line = absl::StripAsciiWhitespace(raw);
+    if (absl::StartsWith(line, ".ent") && line.size() > 4 &&
+        absl::ascii_isspace(static_cast<unsigned char>(line[4]))) {
+      std::string_view sym = absl::StripAsciiWhitespace(line.substr(4));
+      if (!sym.empty()) {
+        fn_name = std::string(sym);
+        break;
+      }
+    }
+  }
+  ctx_->BeginFunction(fn_name);
   const std::string emitted =
       hooks_->RunFunctionPrologueEpilogue(spec.var_size, spec.saved_gpr_mask);
 
   if (absl::StrContains(asm_text_x, ".frame")) {
-    result.expected_summary = std::string(asm_text_x);
-    result.actual_summary = emitted;
+    result.expected_summary = StripFileDirectives(asm_text_x);
+    result.actual_summary = StripFileDirectives(emitted);
   } else {
     result.expected_summary = ExtractInstructionLines(asm_text_x);
     result.actual_summary = ExtractInstructionLines(emitted);
