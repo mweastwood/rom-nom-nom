@@ -140,144 +140,194 @@ class SubfunctionInverseProvider {
 
   // 1. Inverse of `tc-mips.c:mips_ip`: decodes a 32-bit big-endian MIPS
   // instruction word `word_x` into its canonical GAS assembly line `y`.
-  virtual std::string InvertGasMipsIp(uint32_t word_x) const = 0;
+  virtual std::string InvertGasMipsIp(uint32_t /*word_x*/) const { return {}; }
 
   // 2. Inverse of `tc-mips.c:macro`: collapses a multi-word GAS macro expansion
   // `macro_words_x` (e.g. `lui` + `ori` / `addiu`) back into its single macro
   // assembly line `y` (e.g. `li $2,0x80012345`).
-  virtual std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) const = 0;
+  virtual std::string InvertGasMacro(absl::Span<const uint32_t> /*macro_words_x*/) const {
+    return {};
+  }
 
   // 3. Inverse of `tc-mips.c:append_insn` (in `.set reorder` mode): recovers
   // the pre-`append_insn` sequence of assembly lines `y` from the emitted
   // machine words `words_x`.
   virtual std::vector<std::string> InvertGasAppendInsn(
-      absl::Span<const uint32_t> words_x) const = 0;
+      absl::Span<const uint32_t> /*words_x*/) const {
+    return {};
+  }
 
   // 4. Inverse of `final.c:final_scan_insn`: lifts a single MIPS assembly
   // instruction emitted by `final_scan_insn` back into its RTL pattern `y`.
-  virtual std::string InvertFinalScanInsn(std::string_view asm_line_x) const = 0;
+  virtual std::string InvertFinalScanInsn(std::string_view /*asm_line_x*/) const { return {}; }
 
   // 5. Inverse of `mips.c:function_prologue` + `mips.c:function_epilogue`:
   // recovers `(var_size, saved_gpr_mask)` from emitted prologue/epilogue
   // assembly text `asm_text_x`.
   virtual PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(
-      std::string_view asm_text_x) const = 0;
+      std::string_view /*asm_text_x*/) const {
+    return PrologueEpilogueFrameSpec{.var_size = -1, .saved_gpr_mask = 0};
+  }
 
   // Whole-stage inverse for `final` + `md_assemble`: lifts a sequence of
   // 32-bit machine words `machine_words_x` into its `.dbr` `RtlControlFlowGraph`.
   virtual RtlControlFlowGraph InvertFinalAndGasFunction(
-      absl::Span<const uint32_t> machine_words_x) const = 0;
+      absl::Span<const uint32_t> /*machine_words_x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 1: Delayed-Branch Scheduling (`reorg.c`)
   // ---------------------------------------------------------------------------
 
   // 6. Inverse of `reorg.c:make_return_insns` + `find_end_label`.
-  virtual RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 7. Inverse of `reorg.c:relax_delay_slots`.
-  virtual RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 8. Inverse of `reorg.c:fill_eager_delay_slots` + `fill_slots_from_thread`.
-  virtual RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 9. Inverse of `reorg.c:fill_simple_delay_slots`.
-  virtual RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 10. Inverse of `reorg.c:dbr_schedule`.
-  virtual RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 2: Post-Reload Cross-Jumping (`jump.c`)
   // ---------------------------------------------------------------------------
 
   // 11. Inverse of `jump.c:do_cross_jump` + `find_cross_jump`.
-  virtual RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 3 & Stage 6: Instruction Scheduling (`sched.c`)
   // ---------------------------------------------------------------------------
 
   // 12. Inverse of `sched.c:schedule_block` / `schedule_insns`.
-  virtual RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 4 & Stage 5: Register Allocation & Reload (`reload1.c`, `local-alloc.c`, `global.c`)
   // ---------------------------------------------------------------------------
 
-  // 13. Inverse of `reload1.c:alter_reg` (and `global.c:global_alloc` / `reload`).
-  virtual RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x,
-                                             int pseudo_regno) const = 0;
+  // 13a. Inverse of `reload1.c:alter_reg`.
+  virtual RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& /*x*/,
+                                             int /*pseudo_regno*/) const {
+    return {};
+  }
   RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x) const {
     return InvertAlterReg(x, 72);
   }
 
+  // 13b. Inverse of `reload1.c:reload`.
+  virtual RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& /*x*/) const { return {}; }
+
+  // 13c. Inverse of `global.c:global_alloc`.
+  virtual RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
+
   // 14. Inverse of `local-alloc.c:block_alloc`.
-  virtual RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 15. Inverse of `local-alloc.c:update_equiv_regs`.
-  virtual RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 7: Instruction Combination (`combine.c`)
   // ---------------------------------------------------------------------------
 
   // 16. Inverse of `combine.c:simplify_rtx`.
-  virtual std::string InvertSimplifyRtx(std::string_view simplified_rtx_x) const = 0;
+  virtual std::string InvertSimplifyRtx(std::string_view /*simplified_rtx_x*/) const { return {}; }
 
   // 17. Inverse of `combine.c:subst`.
-  virtual SubstInverseSpec InvertSubst(std::string_view subst_rtx_x) const = 0;
+  virtual SubstInverseSpec InvertSubst(std::string_view /*subst_rtx_x*/) const { return {}; }
 
   // 18. Inverse of `combine.c:try_combine` / `combine_instructions`.
-  virtual RtlControlFlowGraph InvertTryCombine(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertTryCombine(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 8: Flow & Life Analysis (`flow.c`)
   // ---------------------------------------------------------------------------
 
   // 19. Inverse of `flow.c:find_basic_blocks`.
-  virtual RtlControlFlowGraph InvertFindBasicBlocks(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertFindBasicBlocks(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 20. Inverse of `flow.c:propagate_block` / `life_analysis` / `flow_analysis`.
-  virtual RtlControlFlowGraph InvertPropagateBlock(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertPropagateBlock(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 9 & Stage 11: Common Subexpression Elimination (`cse.c`)
   // ---------------------------------------------------------------------------
 
   // 21. Inverse of `cse.c:fold_rtx`.
-  virtual std::string InvertFoldRtx(std::string_view folded_rtx_x) const = 0;
+  virtual std::string InvertFoldRtx(std::string_view /*folded_rtx_x*/) const { return {}; }
 
   // 22. Inverse of `cse.c:cse_basic_block` / `cse_main`.
-  virtual RtlControlFlowGraph InvertCseBasicBlock(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertCseBasicBlock(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 10: Loop Optimization (`loop.c`)
   // ---------------------------------------------------------------------------
 
   // 23. Inverse of `loop.c:scan_loop`.
-  virtual RtlControlFlowGraph InvertScanLoop(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertScanLoop(const RtlControlFlowGraph& /*x*/) const { return {}; }
 
   // 24. Inverse of `loop.c:strength_reduce`.
-  virtual RtlControlFlowGraph InvertStrengthReduce(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertStrengthReduce(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 12: Initial Jump Optimization (`jump.c`)
   // ---------------------------------------------------------------------------
 
   // 25. Inverse of `jump.c:redirect_jump` / `invert_jump`.
-  virtual RtlControlFlowGraph InvertJumpRedirect(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertJumpRedirect(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // 26. Inverse of `jump.c:jump_optimize` (`cross_jump=0, noop_moves=0`).
-  virtual RtlControlFlowGraph InvertJump1Optimize(const RtlControlFlowGraph& x) const = 0;
+  virtual RtlControlFlowGraph InvertJump1Optimize(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 13: Tree -> RTL Expansion (`function.c`, `stmt.c`, `expr.c`, `calls.c`)
   // ---------------------------------------------------------------------------
 
   // 27. Inverse of `function.c:instantiate_virtual_regs`.
-  virtual RtlControlFlowGraph InvertInstantiateVirtualRegs(const RtlControlFlowGraph& x) const {
-    return x;
+  virtual RtlControlFlowGraph InvertInstantiateVirtualRegs(const RtlControlFlowGraph& /*x*/) const {
+    return {};
   }
 
   // 28. Inverse of `function.c:expand_function_end`.

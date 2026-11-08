@@ -125,8 +125,11 @@ class RightInverseVerifier {
   // `global.c`, `reload1.c`)
   // ---------------------------------------------------------------------------
 
-  // 13. `reload1.c:alter_reg` / `global.c:global_alloc` right-inverse.
+  // 13. `reload1.c:alter_reg`, `reload1.c:reload`, and `global.c:global_alloc`
+  // right-inverses.
   RightInverseResult VerifyAlterRegRightInverse(const RtlControlFlowGraph& allocated_cfg_x) const;
+  RightInverseResult VerifyReloadRightInverse(const RtlControlFlowGraph& reload_cfg_x) const;
+  RightInverseResult VerifyGlobalAllocRightInverse(const RtlControlFlowGraph& greg_cfg_x) const;
   RightInverseResult VerifyGlobalReloadStageRightInverse(
       const RtlControlFlowGraph& greg_cfg_x) const;
 
@@ -247,6 +250,14 @@ class RightInverseVerifier {
   // 39. `function.c:expand_function_start` + `assign_parms` right-inverse.
   RightInverseResult VerifyExpandFunctionStartRightInverse(
       const RtlControlFlowGraph& post_cfg_x) const;
+
+  // Verifies the right-inverse property f_i(g_i(snap.post_state)) ==
+  // snap.post_state on a `SubfunctionBoundarySnapshot` by invoking the
+  // corresponding `inverses_->Invert*` method on `snap`'s post-state and
+  // re-executing `hooks_->ExecuteSubfunctionBoundary(snap, ...)` with `snap`'s
+  // persisted `optimize_level` and `c_flags`.
+  RightInverseResult VerifySubfunctionBoundaryRightInverse(
+      const SubfunctionBoundarySnapshot& snap) const;
 
  private:
   GccContext* ctx_;

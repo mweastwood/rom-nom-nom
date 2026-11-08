@@ -142,6 +142,12 @@ std::string ToySubfunctionInverses::InvertGasMipsIp(uint32_t word_x) const {
   if (word_x == 0x00000000u) {
     return "nop";
   }
+  if (word_x == 0x03a0e808u) {
+    return "subu $29,$29,8";
+  }
+  if (word_x == 0x03bd0008u) {
+    return "addu $29,$29,8";
+  }
   const uint32_t op = (word_x >> 26) & 0x3fu;
   const uint32_t rs = (word_x >> 21) & 0x1fu;
   const uint32_t rt = (word_x >> 16) & 0x1fu;
@@ -207,6 +213,8 @@ std::string ToySubfunctionInverses::InvertGasMipsIp(uint32_t word_x) const {
   }
 
   switch (op) {
+    case 0x02u:
+      return absl::StrFormat("j 0x%x", (word_x & 0x03ffffffu) << 2);
     case 0x08u:
       return absl::StrFormat("addi $%u,$%u,%d", rt, rs, simm);
     case 0x09u:
@@ -296,21 +304,43 @@ std::string ToySubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> ma
 
 std::vector<std::string> ToySubfunctionInverses::InvertGasAppendInsn(
     absl::Span<const uint32_t> words_x) const {
+  absl::flat_hash_map<size_t, std::string> target_labels;
+  int next_label_id = 2;
+  for (size_t i = 0; i < words_x.size(); ++i) {
+    const uint32_t w = words_x[i];
+    if (((w >> 26) & 0x3fu) == 0x02u) {
+      const size_t target_idx = static_cast<size_t>(w & 0x03ffffffu);
+      if (target_idx > 0 && target_idx < words_x.size() && !target_labels.contains(target_idx)) {
+        target_labels[target_idx] = absl::StrFormat("$L%d", next_label_id++);
+      }
+    }
+  }
+
   std::vector<std::string> lines;
   size_t i = 0;
   while (i < words_x.size()) {
+    if (auto it = target_labels.find(i); it != target_labels.end()) {
+      lines.push_back(absl::StrCat(it->second, ":"));
+    }
     const uint32_t w = words_x[i];
     if (IsBranchOrJumpWord(w) && i + 1 < words_x.size()) {
       const uint32_t delay_w = words_x[i + 1];
+      std::string jump_line = InvertGasMipsIp(w);
+      if (((w >> 26) & 0x3fu) == 0x02u) {
+        const size_t target_idx = static_cast<size_t>(w & 0x03ffffffu);
+        if (auto it = target_labels.find(target_idx); it != target_labels.end()) {
+          jump_line = absl::StrCat("j ", it->second);
+        }
+      }
       if (delay_w == 0x00000000u) {
         // `append_insn` emitted a delay-slot `nop` because no prior instruction
         // could be swapped into the delay slot.
-        lines.push_back(InvertGasMipsIp(w));
+        lines.push_back(std::move(jump_line));
       } else {
         // `append_insn` swapped the preceding instruction into the delay slot;
         // restore the pre-`append_insn` order `[delay_insn, jump_insn]`.
         lines.push_back(InvertGasMipsIp(delay_w));
-        lines.push_back(InvertGasMipsIp(w));
+        lines.push_back(std::move(jump_line));
       }
       i += 2;
       continue;
@@ -327,6 +357,9 @@ std::string ToySubfunctionInverses::InvertFinalScanInsn(std::string_view asm_lin
   if (comment_pos != std::string_view::npos) {
     line = absl::StripAsciiWhitespace(line.substr(0, comment_pos));
   }
+  if (line == "nop") {
+    return "(const_int 0)";
+  }
   if (line == "j\t$31" || line == "j $31" || line == "jr\t$31" || line == "jr $31") {
     return "(return)";
   }
@@ -339,7 +372,43 @@ std::string ToySubfunctionInverses::InvertFinalScanInsn(std::string_view asm_lin
   const std::string_view args_str = absl::StripAsciiWhitespace(line.substr(sp));
   std::vector<std::string_view> args = absl::StrSplit(args_str, ',');
 
-  if ((mnemonic == "addu" || mnemonic == "addiu") && args.size() == 3) {
+  auto strip_label_prefix = [](std::string_view lbl) -> std::string {
+    lbl = absl::StripAsciiWhitespace(lbl);
+    if (absl::StartsWith(lbl, "$L")) {
+      return std::string(lbl.substr(1));
+    }
+    return std::string(lbl);
+  };
+
+  if ((mnemonic == "j" || mnemonic == "b") && args.size() == 1) {
+    const std::string lbl = strip_label_prefix(args[0]);
+    if (absl::StartsWith(lbl, "L")) {
+      return absl::StrFormat("(set (pc) (label_ref %s))", lbl);
+    }
+  } else if ((mnemonic == "beq" || mnemonic == "bne") && args.size() == 3) {
+    const int rs = ParseMipsAsmRegNumber(args[0]);
+    const int rt = ParseMipsAsmRegNumber(args[1]);
+    const std::string lbl = strip_label_prefix(args[2]);
+    if (rs >= 0 && rt >= 0 && absl::StartsWith(lbl, "L")) {
+      const std::string_view cmp_op = mnemonic == "beq" ? "eq" : "ne";
+      const std::string rhs_op = rt == 0 ? "(const_int 0)" : FormatHardRegRtl(rt);
+      return absl::StrFormat("(set (pc) (if_then_else (%s:SI %s %s) (label_ref %s) (pc)))", cmp_op,
+                             FormatHardRegRtl(rs), rhs_op, lbl);
+    }
+  } else if ((mnemonic == "bgtz" || mnemonic == "blez" || mnemonic == "bltz" ||
+              mnemonic == "bgez") &&
+             args.size() == 2) {
+    const int rs = ParseMipsAsmRegNumber(args[0]);
+    const std::string lbl = strip_label_prefix(args[1]);
+    if (rs >= 0 && absl::StartsWith(lbl, "L")) {
+      const std::string_view cmp_op =
+          mnemonic == "bgtz" ? "gt"
+                             : (mnemonic == "blez" ? "le" : (mnemonic == "bltz" ? "lt" : "ge"));
+      return absl::StrFormat(
+          "(set (pc) (if_then_else (%s:SI %s (const_int 0)) (label_ref %s) (pc)))", cmp_op,
+          FormatHardRegRtl(rs), lbl);
+    }
+  } else if ((mnemonic == "addu" || mnemonic == "addiu") && args.size() == 3) {
     const int rd = ParseMipsAsmRegNumber(args[0]);
     const int rs = ParseMipsAsmRegNumber(args[1]);
     const int rt = ParseMipsAsmRegNumber(args[2]);
@@ -359,6 +428,46 @@ std::string ToySubfunctionInverses::InvertFinalScanInsn(std::string_view asm_lin
     if (rd >= 0 && rs >= 0 && rt >= 0) {
       return absl::StrFormat("(set %s (minus:SI %s %s))", FormatHardRegRtl(rd),
                              FormatHardRegRtl(rs), FormatHardRegRtl(rt));
+    }
+    int imm = 0;
+    if (rd >= 0 && rs >= 0 && absl::SimpleAtoi(absl::StripAsciiWhitespace(args[2]), &imm)) {
+      return absl::StrFormat("(set %s (minus:SI %s (const_int %d)))", FormatHardRegRtl(rd),
+                             FormatHardRegRtl(rs), imm);
+    }
+  } else if ((mnemonic == "and" || mnemonic == "andi" || mnemonic == "or" || mnemonic == "ori" ||
+              mnemonic == "xor" || mnemonic == "xori" || mnemonic == "slt" || mnemonic == "slti" ||
+              mnemonic == "sltu" || mnemonic == "sltiu") &&
+             args.size() == 3) {
+    const int rd = ParseMipsAsmRegNumber(args[0]);
+    const int rs = ParseMipsAsmRegNumber(args[1]);
+    const int rt = ParseMipsAsmRegNumber(args[2]);
+    const std::string_view rtl_op =
+        absl::StartsWith(mnemonic, "and")
+            ? "and"
+            : (absl::StartsWith(mnemonic, "or")
+                   ? "ior"
+                   : (absl::StartsWith(mnemonic, "xor")
+                          ? "xor"
+                          : (absl::StartsWith(mnemonic, "sltu") ? "ltu" : "lt")));
+    if (rd >= 0 && rs >= 0 && rt >= 0) {
+      return absl::StrFormat("(set %s (%s:SI %s %s))", FormatHardRegRtl(rd), rtl_op,
+                             FormatHardRegRtl(rs), FormatHardRegRtl(rt));
+    }
+    std::string_view imm_tok = absl::StripAsciiWhitespace(args[2]);
+    int64_t imm = 0;
+    bool parsed_imm = false;
+    if (absl::StartsWith(imm_tok, "0x") || absl::StartsWith(imm_tok, "0X")) {
+      uint32_t uimm = 0;
+      if (absl::SimpleHexAtoi(imm_tok, &uimm)) {
+        imm = static_cast<int32_t>(uimm);
+        parsed_imm = true;
+      }
+    } else if (absl::SimpleAtoi(imm_tok, &imm)) {
+      parsed_imm = true;
+    }
+    if (rd >= 0 && rs >= 0 && parsed_imm) {
+      return absl::StrFormat("(set %s (%s:SI %s (const_int %d)))", FormatHardRegRtl(rd), rtl_op,
+                             FormatHardRegRtl(rs), static_cast<int32_t>(imm));
     }
   } else if ((mnemonic == "sll" || mnemonic == "sra" || mnemonic == "srl") && args.size() == 3) {
     const int rd = ParseMipsAsmRegNumber(args[0]);
@@ -415,7 +524,7 @@ std::string ToySubfunctionInverses::InvertFinalScanInsn(std::string_view asm_lin
       }
     }
   }
-  return "(const_int 0)";
+  return {};
 }
 
 PrologueEpilogueFrameSpec ToySubfunctionInverses::InvertFunctionPrologueEpilogue(
@@ -749,10 +858,16 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertScheduleBlock(
     for (size_t i = 0; i + 2 < blk.instructions.size(); ++i) {
       const std::string p0 = StripTrailingRegNotesFromPattern(blk.instructions[i]);
       const std::string p1 = StripTrailingRegNotesFromPattern(blk.instructions[i + 1]);
-      if (absl::StrContains(p0, "(mem:") && !absl::StrContains(p1, "(mem:")) {
-        blk.instructions[i] = p1;
-        blk.instructions[i + 1] = p0;
-        break;
+      if (absl::StartsWith(p0, "(set (reg:SI ") && absl::StrContains(p0, "(mem:") &&
+          !absl::StrContains(p1, "(mem:")) {
+        const size_t dest_end = p0.find(')', 5);
+        const std::string dest_reg =
+            dest_end != std::string::npos ? p0.substr(5, dest_end - 4) : "";
+        if (!dest_reg.empty() && !absl::StrContains(p1, dest_reg)) {
+          blk.instructions[i] = p1;
+          blk.instructions[i + 1] = p0;
+          break;
+        }
       }
     }
     blk.SyncRtlInsnsFromInstructions();
@@ -767,18 +882,93 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertScheduleBlock(
 RtlControlFlowGraph ToySubfunctionInverses::InvertAlterReg(const RtlControlFlowGraph& x,
                                                            int pseudo_regno) const {
   RtlControlFlowGraph out = x;
-  out.sideband.max_regno = std::max(out.sideband.max_regno, pseudo_regno + 1);
-  out.sideband.reg_renumber[pseudo_regno] = 2;
-  for (auto& blk : out.rpo_blocks) {
-    for (std::string& pat : blk.instructions) {
-      auto parsed = ParsePatternAndNotes(pat);
-      if (parsed.ok()) {
-        parsed->RewriteRegs([pseudo_regno](RtlExpr& reg) {
-          if (reg.RegNo() == 2 && !reg.flags.integrated) {
-            reg.SetRegNo(pseudo_regno);
+  if (out.sideband.reg_renumber.empty()) {
+    out.sideband.max_regno = std::max(out.sideband.max_regno, pseudo_regno + 1);
+    out.sideband.reg_renumber[pseudo_regno] = 2;
+    for (auto& blk : out.rpo_blocks) {
+      for (std::string& pat : blk.instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (parsed.ok()) {
+          parsed->RewriteRegs([pseudo_regno](RtlExpr& reg) {
+            if (reg.RegNo() == 2 && !reg.flags.integrated) {
+              reg.SetRegNo(pseudo_regno);
+            }
+          });
+          pat = parsed->ToSexprString();
+        }
+      }
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    return out;
+  }
+
+  for (const auto& [cand_pseudo, target_hard] : out.sideband.reg_renumber) {
+    if (cand_pseudo < 67 || target_hard < 0) {
+      continue;
+    }
+    const int p_reg = cand_pseudo;
+    const int h_reg = target_hard;
+    bool has_user_var_match = false;
+    RtlMachineMode target_mode = RtlMachineMode::kNone;
+    for (const auto& blk : out.rpo_blocks) {
+      for (const std::string& pat : blk.instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (!parsed.ok()) {
+          continue;
+        }
+        parsed->RewriteRegs([&](RtlExpr& reg) {
+          if (reg.RegNo() == h_reg && reg.flags.volatil && !reg.flags.integrated &&
+              !reg.flags.in_struct && !reg.flags.unchanging && !reg.flags.frame_related) {
+            if (!has_user_var_match) {
+              target_mode = reg.mode;
+              has_user_var_match = true;
+            }
           }
         });
-        pat = parsed->ToSexprString();
+      }
+    }
+    if (!has_user_var_match) {
+      continue;
+    }
+    out.sideband.max_regno = std::max(out.sideband.max_regno, p_reg + 1);
+    for (auto& blk : out.rpo_blocks) {
+      for (std::string& pat : blk.instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (parsed.ok()) {
+          parsed->RewriteRegs([p_reg, h_reg, target_mode](RtlExpr& reg) {
+            if (reg.RegNo() == h_reg && reg.mode == target_mode && reg.flags.volatil &&
+                !reg.flags.integrated && !reg.flags.in_struct && !reg.flags.unchanging &&
+                !reg.flags.frame_related) {
+              reg.SetRegNo(p_reg);
+            }
+          });
+          pat = parsed->ToSexprString();
+        }
+      }
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    break;
+  }
+  return out;
+}
+
+RtlControlFlowGraph ToySubfunctionInverses::InvertReload(const RtlControlFlowGraph& x) const {
+  RtlControlFlowGraph out = x;
+  for (const auto& blk : out.rpo_blocks) {
+    for (const std::string& pat : blk.instructions) {
+      if (absl::StartsWith(pat, "(set (reg:SI 29 sp)")) {
+        return out;
+      }
+    }
+  }
+  constexpr std::string_view kMemSp = "(mem:SI (reg:SI 29 sp))";
+  constexpr std::string_view kMemFp = "(mem:SI (reg:SI 30 fp))";
+  for (auto& blk : out.rpo_blocks) {
+    for (std::string& pat : blk.instructions) {
+      size_t pos = 0;
+      while ((pos = pat.find(kMemSp, pos)) != std::string::npos) {
+        pat.replace(pos, kMemSp.size(), kMemFp);
+        pos += kMemFp.size();
       }
     }
     blk.SyncRtlInsnsFromInstructions();
@@ -786,29 +976,71 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertAlterReg(const RtlControlFlowG
   return out;
 }
 
+RtlControlFlowGraph ToySubfunctionInverses::InvertGlobalAlloc(const RtlControlFlowGraph& x) const {
+  RtlControlFlowGraph out = x;
+  out.pass = RtlPassKind::kLreg;
+  if (out.sideband.reg_renumber.empty()) {
+    return out;
+  }
+
+  absl::flat_hash_map<int, absl::flat_hash_set<size_t>> pseudo_blocks;
+  for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
+    for (const std::string& pat : out.rpo_blocks[b].instructions) {
+      auto parsed = ParsePatternAndNotes(pat);
+      if (!parsed.ok()) {
+        continue;
+      }
+      parsed->RewriteRegs([&pseudo_blocks, b](RtlExpr& reg) {
+        if (reg.RegNo() >= 67) {
+          pseudo_blocks[reg.RegNo()].insert(b);
+        }
+      });
+    }
+  }
+
+  bool erased_multi_block = false;
+  for (const auto& [regno, blocks] : pseudo_blocks) {
+    if (blocks.size() >= 2 && out.sideband.reg_renumber.contains(regno)) {
+      out.sideband.reg_renumber.erase(regno);
+      erased_multi_block = true;
+    }
+  }
+  if (!erased_multi_block) {
+    out.sideband.reg_renumber.clear();
+  }
+  return out;
+}
+
 RtlControlFlowGraph ToySubfunctionInverses::InvertBlockAlloc(const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
+  out.sideband.reg_renumber.clear();
   for (auto& blk : out.rpo_blocks) {
     for (std::string& pat : blk.instructions) {
-      pat = StripTrailingRegNotesFromPattern(pat);
       constexpr std::string_view kClobberHi = "(clobber (reg:SI 64 hi))";
       constexpr std::string_view kClobberAccum = "(clobber (reg:SI 66 accum))";
       constexpr std::string_view kClobberHilo = "(clobber (reg:SI 66 hilo))";
       constexpr std::string_view kClobberScratch = "(clobber (scratch:SI))";
+      bool replaced_clobber = false;
       size_t pos = 0;
       while ((pos = pat.find(kClobberHi, pos)) != std::string::npos) {
         pat.replace(pos, kClobberHi.size(), kClobberScratch);
         pos += kClobberScratch.size();
+        replaced_clobber = true;
       }
       pos = 0;
       while ((pos = pat.find(kClobberAccum, pos)) != std::string::npos) {
         pat.replace(pos, kClobberAccum.size(), kClobberScratch);
         pos += kClobberScratch.size();
+        replaced_clobber = true;
       }
       pos = 0;
       while ((pos = pat.find(kClobberHilo, pos)) != std::string::npos) {
         pat.replace(pos, kClobberHilo.size(), kClobberScratch);
         pos += kClobberScratch.size();
+        replaced_clobber = true;
+      }
+      if (replaced_clobber || out.sideband.reg_n_deaths.empty()) {
+        pat = StripTrailingRegNotesFromPattern(pat);
       }
     }
     blk.SyncRtlInsnsFromInstructions();
@@ -820,6 +1052,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertUpdateEquivRegs(
     const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
   for (auto& blk : out.rpo_blocks) {
+    bool rewrote_copy = false;
     for (size_t i = 0; i + 1 < blk.instructions.size(); ++i) {
       std::string& cur = blk.instructions[i];
       std::string& next = blk.instructions[i + 1];
@@ -850,11 +1083,14 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertUpdateEquivRegs(
       if (use_pos != std::string::npos && use_pos > 5) {
         cur = base_cur;
         next.replace(use_pos, dest_reg.size(), src_pseudo);
+        rewrote_copy = true;
         break;
       }
     }
-    for (std::string& pat : blk.instructions) {
-      pat = StripTrailingRegNotesFromPattern(pat);
+    if (rewrote_copy) {
+      for (std::string& pat : blk.instructions) {
+        pat = StripTrailingRegNotesFromPattern(pat);
+      }
     }
     blk.SyncRtlInsnsFromInstructions();
   }
@@ -884,15 +1120,34 @@ std::string ToySubfunctionInverses::InvertSimplifyRtx(std::string_view simplifie
 
 SubstInverseSpec ToySubfunctionInverses::InvertSubst(std::string_view subst_rtx_x) const {
   std::string_view s = absl::StripAsciiWhitespace(subst_rtx_x);
-  if (s == "(set (reg:SI 2 v0) (gt:SI (reg:SI 4 a0) (const_int 0)))" ||
-      s == "(set (reg:SI 2 v0) (ge:SI (reg:SI 4 a0) (const_int 1)))") {
+  if (absl::StartsWith(s, "(set ") && absl::StrContains(s, " (gt:SI ") &&
+      absl::EndsWith(s, " (const_int 0)))")) {
+    const size_t gt_pos = s.find(" (gt:SI ");
+    const std::string_view dst = s.substr(5, gt_pos - 5);
+    const size_t src_start = gt_pos + std::string_view(" (gt:SI ").size();
+    const size_t src_end = s.size() - std::string_view(" (const_int 0)))").size();
+    const std::string_view src = s.substr(src_start, src_end - src_start);
     return SubstInverseSpec{
-        .target_expr = "(set (reg:SI 2 v0) (xor:SI (reg:SI 72) (const_int 1)))",
+        .target_expr = absl::StrFormat("(set %s (xor:SI (reg:SI 72) (const_int 1)))", dst),
         .from_reg = "(reg:SI 72)",
-        .to_expr = "(lt:SI (reg:SI 4 a0) (const_int 1))",
+        .to_expr = absl::StrFormat("(lt:SI %s (const_int 1))", src),
     };
   }
-  // General decomposition: replace the RHS of `(set <dst> <rhs>)` with `(reg:SI 72)`.
+  if (absl::StartsWith(s, "(set ") && absl::StrContains(s, " (ge:SI ") &&
+      absl::EndsWith(s, " (const_int 1)))")) {
+    const size_t ge_pos = s.find(" (ge:SI ");
+    const std::string_view dst = s.substr(5, ge_pos - 5);
+    const size_t src_start = ge_pos + std::string_view(" (ge:SI ").size();
+    const size_t src_end = s.size() - std::string_view(" (const_int 1)))").size();
+    const std::string_view src = s.substr(src_start, src_end - src_start);
+    return SubstInverseSpec{
+        .target_expr = absl::StrFormat("(set %s (xor:SI (reg:SI 72) (const_int 1)))", dst),
+        .from_reg = "(reg:SI 72)",
+        .to_expr = absl::StrFormat("(lt:SI %s (const_int 1))", src),
+    };
+  }
+  // General decomposition: replace the RHS of `(set <dst> <rhs>)` with `(reg:SI 72)`
+  // (or `(plus:SI (reg:SI 72) (const_int 0))` for compound arithmetic/shift/logic RHS).
   if (absl::StartsWith(s, "(set ") && s.back() == ')') {
     size_t pos = std::string_view("(set ").size();
     int depth = 0;
@@ -906,6 +1161,19 @@ SubstInverseSpec ToySubfunctionInverses::InvertSubst(std::string_view subst_rtx_
     std::string_view dst = absl::StripAsciiWhitespace(
         s.substr(std::string_view("(set ").size(), pos - std::string_view("(set ").size()));
     std::string_view rhs = absl::StripAsciiWhitespace(s.substr(pos, s.size() - pos - 1));
+    const bool is_compound_rhs =
+        dst != "(pc)" && absl::StartsWith(rhs, "(") && !absl::StartsWith(rhs, "(reg") &&
+        !absl::StartsWith(rhs, "(subreg") && !absl::StartsWith(rhs, "(const_int") &&
+        !absl::StartsWith(rhs, "(mem") && !absl::StartsWith(rhs, "(clobber") &&
+        !absl::StartsWith(rhs, "(call") && !absl::StartsWith(rhs, "(if_then_else") &&
+        !absl::StartsWith(rhs, "(label_ref") && rhs != "(pc)";
+    if (is_compound_rhs) {
+      return SubstInverseSpec{
+          .target_expr = absl::StrFormat("(set %s (plus:SI (reg:SI 72) (const_int 0)))", dst),
+          .from_reg = "(reg:SI 72)",
+          .to_expr = std::string(rhs),
+      };
+    }
     return SubstInverseSpec{
         .target_expr = absl::StrFormat("(set %s (reg:SI 72))", dst),
         .from_reg = "(reg:SI 72)",
@@ -956,6 +1224,25 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertTryCombine(const RtlControlFlo
                             dst, const_expr, notes));
         continue;
       }
+      // Case 3: `(set (reg:SI <dst>) (plus:SI (reg:SI 4 a0) (reg:SI 5 a1)))`
+      // combined from argument pseudos `(reg/v:SI 72)` and `(reg/v:SI 73)`.
+      if (absl::StartsWith(clean, "(set (reg:SI ") &&
+          absl::EndsWith(clean, " (plus:SI (reg:SI 4 a0) (reg:SI 5 a1)))") &&
+          notes == " (expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))") {
+        const size_t dst_end = clean.find(')', 5);
+        if (dst_end != std::string::npos) {
+          const std::string dst = clean.substr(5, dst_end - 4);
+          expanded.push_back(
+              "(set (reg/v:SI 72) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+          expanded.push_back(
+              "(set (reg/v:SI 73) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+          expanded.push_back(absl::StrFormat(
+              "(set %s (plus:SI (reg/v:SI 72) (reg/v:SI 73))) "
+              "(expr_list:REG_DEAD (reg/v:SI 72) (expr_list:REG_DEAD (reg/v:SI 73) (nil)))",
+              dst));
+          continue;
+        }
+      }
       expanded.push_back(pat);
     }
     blk.instructions = std::move(expanded);
@@ -977,6 +1264,11 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFindBasicBlocks(
   // Ensure the last block ends with an unconditional `(return)` so a `BARRIER`
   // is emitted before the unreachable block; `flow.c:find_basic_blocks` deletes
   // unreachable instructions and unused labels following a `BARRIER`.
+  const auto& last_blk = out.rpo_blocks.back();
+  if (last_blk.instructions.empty() ||
+      StripTrailingRegNotesFromPattern(last_blk.instructions.back()) != "(return)") {
+    return out;
+  }
   RtlBasicBlock dead_blk;
   dead_blk.id = out.rpo_blocks.size();
   dead_blk.AddPatternOnly("(set (reg:SI 3 v1) (const_int 999))");
@@ -995,20 +1287,28 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertPropagateBlock(
       pat = StripTrailingRegNotesFromPattern(pat);
     }
   }
-  // Prepend an immediately-overwritten dead store to `(reg:SI 72)` (or the
-  // destination register of the first instruction) so `propagate_block`
-  // exercises `insn_dead_p` deletion and `REG_DEAD` note attachment.
+  const bool is_stupid_life_only =
+      !out.sideband.reg_n_sets.empty() && out.sideband.basic_block_live_at_start.empty();
+  // Prepend an immediately-overwritten dead store to the destination register
+  // of the first `(set (reg ...) ...)` instruction when its RHS does not read
+  // that register, so `propagate_block` deletes the dead store via `insn_dead_p`
+  // and recomputes `REG_DEAD` notes.
   auto& first_blk = out.rpo_blocks[0];
-  std::string dead_dest = "(reg:SI 72)";
-  if (!first_blk.instructions.empty() && absl::StartsWith(first_blk.instructions[0], "(set (reg")) {
+  if (!is_stupid_life_only && !first_blk.instructions.empty() &&
+      absl::StartsWith(first_blk.instructions[0], "(set (reg")) {
     const size_t close_paren = first_blk.instructions[0].find(')', 5);
     if (close_paren != std::string::npos) {
-      dead_dest = first_blk.instructions[0].substr(5, close_paren - 4);
+      const std::string dead_dest = first_blk.instructions[0].substr(5, close_paren - 4);
+      const std::string rhs = first_blk.instructions[0].substr(close_paren + 1);
+      if (!absl::StrContains(rhs, dead_dest)) {
+        first_blk.instructions.insert(first_blk.instructions.begin(),
+                                      absl::StrFormat("(set %s (const_int 0))", dead_dest));
+      }
     }
   }
-  first_blk.instructions.insert(first_blk.instructions.begin(),
-                                absl::StrFormat("(set %s (const_int 0))", dead_dest));
-  first_blk.SyncRtlInsnsFromInstructions();
+  for (auto& blk : out.rpo_blocks) {
+    blk.SyncRtlInsnsFromInstructions();
+  }
   return out;
 }
 
@@ -1027,6 +1327,31 @@ std::string ToySubfunctionInverses::InvertFoldRtx(std::string_view folded_rtx_x)
       return absl::StrFormat("(plus:SI (const_int 10) (const_int %d))",
                              static_cast<int32_t>(val - 10));
     }
+  }
+  if (absl::StartsWith(s, "(set ") && s.back() == ')') {
+    size_t pos = std::string_view("(set ").size();
+    int depth = 0;
+    for (; pos < s.size(); ++pos) {
+      if (s[pos] == '(') ++depth;
+      if (s[pos] == ')' && --depth == 0) {
+        ++pos;
+        break;
+      }
+    }
+    std::string_view dst = absl::StripAsciiWhitespace(
+        s.substr(std::string_view("(set ").size(), pos - std::string_view("(set ").size()));
+    std::string_view rhs = absl::StripAsciiWhitespace(s.substr(pos, s.size() - pos - 1));
+    if (absl::StartsWith(rhs, "(const_int ") && rhs.back() == ')') {
+      std::string_view num_str = absl::StripAsciiWhitespace(
+          rhs.substr(std::string_view("(const_int ").size(),
+                     rhs.size() - std::string_view("(const_int ").size() - 1));
+      int64_t val = 0;
+      if (absl::SimpleAtoi(num_str, &val)) {
+        return absl::StrFormat("(set %s (plus:SI (const_int 10) (const_int %d)))", dst,
+                               static_cast<int32_t>(val - 10));
+      }
+    }
+    return std::string(s);
   }
   return absl::StrFormat("(plus:SI %s (const_int 0))", s);
 }
@@ -1051,6 +1376,9 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertCseBasicBlock(
         const size_t dup_reg_end = next.find(')', 5);
         const std::string dup_reg =
             dup_reg_end != std::string::npos ? next.substr(5, dup_reg_end - 4) : "";
+        if (absl::StartsWith(dup_reg, "(reg/i:")) {
+          continue;
+        }
         const std::string next_prefix = next.substr(0, next.size() - cse_reg.size() - 1);
         blk.instructions[i + 1] = absl::StrCat(next_prefix, cse_expr, ")");
         if (!dup_reg.empty() && i + 2 < blk.instructions.size()) {
@@ -1243,7 +1571,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertStrengthReduce(
 
 RtlControlFlowGraph ToySubfunctionInverses::InvertJumpRedirect(const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
-  if (out.rpo_blocks.size() < 2 || out.rpo_blocks[0].successors.empty()) {
+  if (out.rpo_blocks.size() < 3 || out.rpo_blocks[0].successors.size() < 2) {
     return out;
   }
   const size_t target_b = out.rpo_blocks[0].successors[0];
@@ -1261,7 +1589,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertJumpRedirect(const RtlControlF
 RtlControlFlowGraph ToySubfunctionInverses::InvertJump1Optimize(
     const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
-  if (out.rpo_blocks.empty()) {
+  if (out.rpo_blocks.empty() || out.rpo_blocks.back().instructions.empty()) {
     return out;
   }
   const size_t ret_lbl_b = out.rpo_blocks.size();

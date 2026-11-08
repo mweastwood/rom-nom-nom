@@ -637,6 +637,38 @@ TEST(RightInverseVerifierTest, Stage4And5AlterRegBlockAllocAndUpdateEquivRegsRig
   RightInverseResult greg_res = verifier.VerifyGlobalReloadStageRightInverse(greg_cfg);
   EXPECT_TRUE(greg_res.matches) << greg_res.diff_detail;
 
+  // `global.c:global_alloc` boundary right-inverse (`VerifyGlobalAllocRightInverse`):
+  RtlControlFlowGraph global_alloc_pre;
+  global_alloc_pre.pass = RtlPassKind::kLreg;
+  global_alloc_pre.rpo_blocks.resize(1);
+  global_alloc_pre.rpo_blocks[0].id = 0;
+  global_alloc_pre.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 7)))");
+  global_alloc_pre.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (ashift:SI (reg:SI 72) (const_int 2)))");
+  global_alloc_pre.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  const SubfunctionBoundarySnapshot global_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kGlobalAlloc, global_alloc_pre);
+  ASSERT_TRUE(global_snap.post_state.sideband.reg_renumber.contains(72));
+  RightInverseResult global_alloc_res =
+      verifier.VerifyGlobalAllocRightInverse(global_snap.post_state);
+  EXPECT_TRUE(global_alloc_res.matches) << global_alloc_res.diff_detail;
+
+  // `reload1.c:reload` boundary right-inverse (`VerifyReloadRightInverse`):
+  RtlControlFlowGraph reload_pre;
+  reload_pre.pass = RtlPassKind::kGreg;
+  reload_pre.rpo_blocks.resize(1);
+  reload_pre.rpo_blocks[0].id = 0;
+  reload_pre.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (mem:SI (reg:SI 30 fp)))");
+  reload_pre.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  const SubfunctionBoundarySnapshot reload_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kReload, reload_pre);
+  ASSERT_EQ(reload_snap.post_state.BlockCount(), 1u);
+  EXPECT_EQ(reload_snap.post_state.rpo_blocks[0].instructions[0],
+            "(set (reg/i:SI 2 v0) (mem:SI (reg:SI 29 sp)))");
+  RightInverseResult reload_res = verifier.VerifyReloadRightInverse(reload_snap.post_state);
+  EXPECT_TRUE(reload_res.matches) << reload_res.diff_detail;
+
   // 14. `local-alloc.c:block_alloc` right-inverse (scratch clobber allocation):
   RtlControlFlowGraph block_alloc_cfg;
   block_alloc_cfg.pass = RtlPassKind::kLreg;
@@ -1198,6 +1230,75 @@ TEST(RightInverseVerifierTest, Stage13AllThirteenExpansionSubfunctionsRightInver
   RtlControlFlowGraph post_start_cfg = hooks.RunExpandFunctionStart(mixed_parm_fn);
   RightInverseResult start_res = verifier.VerifyExpandFunctionStartRightInverse(post_start_cfg);
   EXPECT_TRUE(start_res.matches) << start_res.diff_detail;
+}
+
+TEST(RightInverseVerifierTest, SingleMethodSubfunctionInverseProviderSubclassAndBoundaryVerifier) {
+  // Verify that a `SubfunctionInverseProvider` subclass can override only a
+  // single `Invert*` method under test without stubbing the other 40 methods,
+  // and that all unoverridden methods return non-identity sentinels that fail
+  // verification rather than vacuously passing.
+  class SingleMethodProvider final : public SubfunctionInverseProvider {
+   public:
+    std::string InvertGasMipsIp(uint32_t word_x) const override {
+      if (word_x == 0x00851021u) {
+        return "addu $2,$4,$5";
+      }
+      if (word_x == 0x03e00008u) {
+        return "jr $31";
+      }
+      return "nop";
+    }
+  };
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  SingleMethodProvider single_provider;
+  RightInverseVerifier single_verifier(&ctx, &hooks, &single_provider);
+
+  RightInverseResult mips_ip_res = single_verifier.VerifyGasMipsIpRightInverse(0x00851021u);
+  EXPECT_TRUE(mips_ip_res.matches) << mips_ip_res.diff_detail;
+
+  // Default Stage 13 methods return `absl::UnimplementedError`.
+  RtlControlFlowGraph dummy_cfg;
+  EXPECT_FALSE(single_provider.InvertExpandReturn(dummy_cfg).ok());
+
+  // Verify `VerifySubfunctionBoundaryRightInverse` across all 30 subfunction
+  // boundary snapshots of a forward-traced function for both `full_verifier`
+  // and `single_verifier` (at both `-O2` and `-O0`).
+  RightInverseVerifier full_verifier(&ctx, &hooks);
+  const FunctionCompilationTrace trace =
+      hooks.TraceForwardCompilation("int add_two(int a, int b) { return a + b; }\n", "add_two",
+                                    {"-O2"}, "boundary_right_inverse_add_two");
+  ASSERT_EQ(trace.subfunction_snapshots.size(), AllSubfunctionIds().size());
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    SCOPED_TRACE(SubfunctionIdName(snap.subfunction_id));
+    RightInverseResult res = full_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << SubfunctionIdName(snap.subfunction_id) << ": " << res.diff_detail;
+
+    RightInverseResult single_res = single_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+    if (snap.subfunction_id == SubfunctionId::kGasMipsIp) {
+      EXPECT_TRUE(single_res.matches)
+          << SubfunctionIdName(snap.subfunction_id) << ": " << single_res.diff_detail;
+    } else {
+      EXPECT_FALSE(single_res.matches)
+          << "Expected unoverridden " << SubfunctionIdName(snap.subfunction_id)
+          << " on SingleMethodProvider to fail verification (-O2)";
+    }
+  }
+
+  const FunctionCompilationTrace trace_o0 =
+      hooks.TraceForwardCompilation("int add_two(int a, int b) { return a + b; }\n", "add_two",
+                                    {"-O0"}, "boundary_right_inverse_add_two_O0");
+  ASSERT_EQ(trace_o0.subfunction_snapshots.size(), AllSubfunctionIds().size());
+  for (const SubfunctionBoundarySnapshot& snap : trace_o0.subfunction_snapshots) {
+    SCOPED_TRACE(SubfunctionIdName(snap.subfunction_id));
+    if (snap.subfunction_id != SubfunctionId::kGasMipsIp) {
+      RightInverseResult single_res = single_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_FALSE(single_res.matches)
+          << "Expected unoverridden " << SubfunctionIdName(snap.subfunction_id)
+          << " on SingleMethodProvider to fail verification (-O0)";
+    }
+  }
 }
 
 }  // namespace

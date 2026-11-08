@@ -5,8 +5,11 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
@@ -15,6 +18,7 @@
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_sexpr_utils.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gcc_harness/toy_subfunction_inverses.h"
 
@@ -62,6 +66,11 @@ RightInverseResult RightInverseVerifier::VerifyRtlPassRightInverse(
   result.expected_summary = target_x.FormatSummary();
 
   const RtlControlFlowGraph lifted_y = inverse_g(target_x);
+  if (!target_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
+    return result;
+  }
   ctx_->MaterializeFromCfg(lifted_y);
   forward_f(ctx_, hooks_);
 
@@ -152,6 +161,12 @@ RightInverseResult RightInverseVerifier::VerifyFunctionPrologueEpilogueRightInve
     std::string_view asm_text_x) const {
   RightInverseResult result;
   const PrologueEpilogueFrameSpec spec = inverses_->InvertFunctionPrologueEpilogue(asm_text_x);
+  if (spec.var_size < 0) {
+    result.expected_summary = std::string(asm_text_x);
+    result.matches = false;
+    result.diff_detail = "InvertFunctionPrologueEpilogue returned invalid var_size < 0";
+    return result;
+  }
   const std::string emitted =
       hooks_->RunFunctionPrologueEpilogue(spec.var_size, spec.saved_gpr_mask);
 
@@ -316,6 +331,51 @@ RightInverseResult RightInverseVerifier::VerifyAlterRegRightInverse(
         hooks->RunAlterReg(/*regno=*/72, /*from_reg=*/-1);
       },
       allocated_cfg_x.pass);
+}
+
+RightInverseResult RightInverseVerifier::VerifyReloadRightInverse(
+    const RtlControlFlowGraph& reload_cfg_x) const {
+  RightInverseResult result;
+  result.expected_summary = reload_cfg_x.FormatSummary();
+
+  const RtlControlFlowGraph lifted_y = inverses_->InvertReload(reload_cfg_x);
+  if (!reload_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
+    return result;
+  }
+  const SubfunctionBoundarySnapshot replayed =
+      hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kReload, lifted_y);
+  result.actual_summary = replayed.post_state.FormatSummary();
+  result.cfg_comparison = replayed.post_state.CompareAgainst(reload_cfg_x);
+  result.matches = result.cfg_comparison.MatchesExactly();
+  result.diff_detail = result.cfg_comparison.mismatch_detail;
+  return result;
+}
+
+RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
+    const RtlControlFlowGraph& greg_cfg_x) const {
+  RightInverseResult result;
+  result.expected_summary = greg_cfg_x.FormatSummary();
+
+  const RtlControlFlowGraph lifted_y = inverses_->InvertGlobalAlloc(greg_cfg_x);
+  if (!greg_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
+    return result;
+  }
+  const SubfunctionBoundarySnapshot replayed =
+      hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kGlobalAlloc, lifted_y);
+  result.actual_summary = replayed.post_state.FormatSummary();
+  result.cfg_comparison = replayed.post_state.CompareAgainst(greg_cfg_x);
+  const bool reg_renumber_matches =
+      (replayed.post_state.sideband.reg_renumber == greg_cfg_x.sideband.reg_renumber);
+  result.matches = result.cfg_comparison.MatchesExactly() && reg_renumber_matches;
+  result.diff_detail = result.cfg_comparison.mismatch_detail;
+  if (result.cfg_comparison.MatchesExactly() && !reg_renumber_matches) {
+    result.diff_detail = "sideband.reg_renumber mismatch after kGlobalAlloc";
+  }
+  return result;
 }
 
 RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
@@ -618,6 +678,13 @@ RightInverseResult BuildFailedStage13Result(const RtlControlFlowGraph& expected_
 RightInverseResult RightInverseVerifier::VerifyInstantiateVirtualRegsRightInverse(
     const RtlControlFlowGraph& post_cfg_x) const {
   const RtlControlFlowGraph pre_y = inverses_->InvertInstantiateVirtualRegs(post_cfg_x);
+  if (!post_cfg_x.rpo_blocks.empty() && pre_y.rpo_blocks.empty()) {
+    RightInverseResult result;
+    result.expected_summary = post_cfg_x.FormatSummary();
+    result.matches = false;
+    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
+    return result;
+  }
   const RtlControlFlowGraph actual_fx = hooks_->RunInstantiateVirtualRegs(*ctx_, pre_y);
   return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
 }
@@ -754,6 +821,521 @@ RightInverseResult RightInverseVerifier::VerifyExpandFunctionStartRightInverse(
   }
   const RtlControlFlowGraph actual_fx = hooks_->RunExpandFunctionStart(*ctx_, *lifted_y);
   return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
+}
+
+RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
+    const SubfunctionBoundarySnapshot& snap) const {
+  switch (snap.subfunction_id) {
+    case SubfunctionId::kFunctionPrologueEpilogue: {
+      RightInverseResult result;
+      result.expected_summary = absl::StrJoin(snap.post_asm_lines, "\n");
+      const PrologueEpilogueFrameSpec spec =
+          inverses_->InvertFunctionPrologueEpilogue(result.expected_summary);
+      if (spec.var_size < 0) {
+        result.matches = false;
+        result.diff_detail = "InvertFunctionPrologueEpilogue returned invalid var_size < 0";
+        return result;
+      }
+      RtlControlFlowGraph cand_pre = snap.post_state;
+      cand_pre.sideband.frame_size_bytes = spec.var_size;
+      cand_pre.sideband.saved_gpr_regnos.clear();
+      for (int r = 0; r < 32; ++r) {
+        if ((spec.saved_gpr_mask >> r) & 1u) {
+          cand_pre.sideband.saved_gpr_regnos.push_back(r);
+        }
+      }
+      const SubfunctionBoundarySnapshot replayed =
+          hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);
+      result.actual_summary = absl::StrJoin(replayed.post_asm_lines, "\n");
+      result.matches = (replayed.post_asm_lines == snap.post_asm_lines);
+      if (!result.matches) {
+        result.diff_detail =
+            absl::StrFormat("kFunctionPrologueEpilogue asm lines got:\n%s\n!= expected:\n%s",
+                            result.actual_summary, result.expected_summary);
+      }
+      return result;
+    }
+
+    case SubfunctionId::kFinalScanInsn: {
+      RightInverseResult result;
+      result.expected_summary = absl::StrJoin(snap.post_asm_lines, "\n");
+      RtlControlFlowGraph cand_pre;
+      cand_pre.pass = snap.post_state.pass;
+      cand_pre.sideband = snap.post_state.sideband;
+
+      std::vector<RtlBasicBlock> blocks;
+      absl::flat_hash_map<std::string, size_t> label_to_block;
+      absl::flat_hash_set<size_t> labeled_block_ids;
+      RtlBasicBlock cur_blk;
+      cur_blk.id = 0;
+
+      for (size_t i = 0; i < snap.post_asm_lines.size(); ++i) {
+        const std::string& line = snap.post_asm_lines[i];
+        if (line == ".set reorder") {
+          continue;
+        }
+        if (line == ".set noreorder") {
+          if (i + 3 >= snap.post_asm_lines.size() || snap.post_asm_lines[i + 3] != ".set reorder") {
+            result.matches = false;
+            result.diff_detail = "Malformed .set noreorder block in kFinalScanInsn";
+            return result;
+          }
+          const std::string pat0 = inverses_->InvertFinalScanInsn(snap.post_asm_lines[i + 1]);
+          const std::string pat1 = inverses_->InvertFinalScanInsn(snap.post_asm_lines[i + 2]);
+          if (pat0.empty() || pat1.empty()) {
+            result.matches = false;
+            result.diff_detail = "InvertFinalScanInsn returned empty pattern in .set noreorder";
+            return result;
+          }
+          cur_blk.AddPatternOnly(
+              absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
+          i += 3;
+          continue;
+        }
+        if (absl::EndsWith(line, ":")) {
+          std::string_view lbl(line.data(), line.size() - 1);
+          if (absl::StartsWith(lbl, "$L")) {
+            lbl.remove_prefix(1);
+          }
+          if (!cur_blk.instructions.empty() || labeled_block_ids.contains(cur_blk.id)) {
+            blocks.push_back(std::move(cur_blk));
+            cur_blk = RtlBasicBlock{};
+            cur_blk.id = blocks.size();
+          }
+          label_to_block[std::string(lbl)] = cur_blk.id;
+          labeled_block_ids.insert(cur_blk.id);
+          continue;
+        }
+        const std::string pat = inverses_->InvertFinalScanInsn(line);
+        if (pat.empty()) {
+          result.matches = false;
+          result.diff_detail =
+              absl::StrFormat("InvertFinalScanInsn returned empty pattern for '%s'", line);
+          return result;
+        }
+        cur_blk.AddPatternOnly(pat);
+        if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ")) &&
+            i + 1 < snap.post_asm_lines.size() &&
+            !absl::EndsWith(snap.post_asm_lines[i + 1], ":")) {
+          blocks.push_back(std::move(cur_blk));
+          cur_blk = RtlBasicBlock{};
+          cur_blk.id = blocks.size();
+        }
+      }
+      if (!cur_blk.instructions.empty() || labeled_block_ids.contains(cur_blk.id) ||
+          blocks.empty()) {
+        blocks.push_back(std::move(cur_blk));
+      }
+      if (blocks.size() >= 2 && labeled_block_ids.contains(blocks.back().id) &&
+          blocks.back().instructions.size() == 4 &&
+          blocks.back().instructions[0] == "(set (reg:SI 29 sp) (reg:SI 30 fp))" &&
+          blocks.back().instructions.back() == "(return)") {
+        blocks.back().instructions.clear();
+        blocks.back().SyncRtlInsnsFromInstructions();
+      }
+
+      for (size_t b = 0; b < blocks.size(); ++b) {
+        if (blocks[b].instructions.empty()) {
+          if (b + 1 < blocks.size()) {
+            blocks[b].successors = {b + 1};
+          }
+          continue;
+        }
+        const std::string& last_pat = blocks[b].instructions.back();
+        if (last_pat == "(return)" ||
+            absl::StartsWith(last_pat, "(sequence [(jump_insn (return))")) {
+          blocks[b].successors.clear();
+          continue;
+        }
+        const size_t lref_pos = last_pat.find("(label_ref ");
+        if (lref_pos != std::string::npos) {
+          const size_t tok_start = lref_pos + std::string_view("(label_ref ").size();
+          const size_t tok_end = last_pat.find(')', tok_start);
+          if (tok_end != std::string::npos) {
+            const std::string lbl_tok(
+                absl::StripAsciiWhitespace(last_pat.substr(tok_start, tok_end - tok_start)));
+            auto it = label_to_block.find(lbl_tok);
+            if (it != label_to_block.end()) {
+              if (absl::StrContains(last_pat, "(if_then_else ")) {
+                if (b + 1 < blocks.size()) {
+                  blocks[b].successors = {b + 1, it->second};
+                } else {
+                  blocks[b].successors = {it->second};
+                }
+              } else {
+                blocks[b].successors = {it->second};
+              }
+              continue;
+            }
+          }
+        }
+        if (b + 1 < blocks.size()) {
+          blocks[b].successors = {b + 1};
+        }
+      }
+      cand_pre.rpo_blocks = std::move(blocks);
+
+      const SubfunctionBoundarySnapshot replayed =
+          hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);
+      result.actual_summary = absl::StrJoin(replayed.post_asm_lines, "\n");
+      result.matches = (replayed.post_asm_lines == snap.post_asm_lines);
+      if (!result.matches) {
+        result.diff_detail = absl::StrFormat("kFinalScanInsn asm lines got:\n%s\n!= expected:\n%s",
+                                             result.actual_summary, result.expected_summary);
+      }
+      return result;
+    }
+
+    case SubfunctionId::kGasMipsIp: {
+      RightInverseResult result;
+      result.expected_words = snap.post_machine_words;
+      result.expected_summary = FormatWordsSummary(snap.post_machine_words);
+      std::vector<std::string> cand_asm_lines;
+      cand_asm_lines.reserve(snap.post_machine_words.size());
+      for (uint32_t w : snap.post_machine_words) {
+        cand_asm_lines.push_back(inverses_->InvertGasMipsIp(w));
+      }
+      const SubfunctionBoundarySnapshot replayed =
+          hooks_->ExecuteSubfunctionBoundary(snap, snap.post_state, cand_asm_lines);
+      result.actual_words = replayed.post_machine_words;
+      result.actual_summary = FormatWordsSummary(replayed.post_machine_words);
+      result.matches = (replayed.post_machine_words == snap.post_machine_words);
+      if (!result.matches) {
+        result.diff_detail = absl::StrFormat("kGasMipsIp words got [%s] != expected [%s]",
+                                             result.actual_summary, result.expected_summary);
+      }
+      return result;
+    }
+
+    case SubfunctionId::kGasMacro: {
+      RightInverseResult result;
+      result.expected_words = snap.post_machine_words;
+      result.expected_summary = FormatWordsSummary(snap.post_machine_words);
+      std::vector<std::string> cand_asm_lines;
+      size_t i = 0;
+      while (i < snap.post_machine_words.size()) {
+        if (i + 1 < snap.post_machine_words.size()) {
+          const uint32_t w0 = snap.post_machine_words[i];
+          const uint32_t w1 = snap.post_machine_words[i + 1];
+          const uint32_t op0 = (w0 >> 26) & 0x3fu;
+          const uint32_t rt0 = (w0 >> 16) & 0x1fu;
+          const uint32_t op1 = (w1 >> 26) & 0x3fu;
+          const uint32_t rs1 = (w1 >> 21) & 0x1fu;
+          const uint32_t rt1 = (w1 >> 16) & 0x1fu;
+          if (op0 == 0x0fu && (op1 == 0x0du || op1 == 0x09u) && rs1 == rt0 && rt1 == rt0) {
+            const uint32_t pair[2] = {w0, w1};
+            cand_asm_lines.push_back(inverses_->InvertGasMacro(pair));
+            i += 2;
+            continue;
+          }
+        }
+        const uint32_t single[1] = {snap.post_machine_words[i]};
+        cand_asm_lines.push_back(inverses_->InvertGasMacro(single));
+        ++i;
+      }
+      const SubfunctionBoundarySnapshot replayed =
+          hooks_->ExecuteSubfunctionBoundary(snap, snap.post_state, cand_asm_lines);
+      result.actual_words = replayed.post_machine_words;
+      result.actual_summary = FormatWordsSummary(replayed.post_machine_words);
+      result.matches = (replayed.post_machine_words == snap.post_machine_words);
+      if (!result.matches) {
+        result.diff_detail = absl::StrFormat("kGasMacro words got [%s] != expected [%s]",
+                                             result.actual_summary, result.expected_summary);
+      }
+      return result;
+    }
+
+    case SubfunctionId::kGasAppendInsn: {
+      RightInverseResult result;
+      result.expected_words = snap.post_machine_words;
+      result.expected_summary = FormatWordsSummary(snap.post_machine_words);
+
+      size_t unpadded_len = snap.post_machine_words.size();
+      for (size_t i = 0; i + 1 < snap.post_machine_words.size(); ++i) {
+        if (snap.post_machine_words[i] == 0x03e00008u) {
+          bool all_trailing_nops = true;
+          for (size_t j = i + 2; j < snap.post_machine_words.size(); ++j) {
+            if (snap.post_machine_words[j] != 0x00000000u) {
+              all_trailing_nops = false;
+              break;
+            }
+          }
+          if (all_trailing_nops) {
+            unpadded_len = i + 2;
+            break;
+          }
+        }
+      }
+
+      const absl::Span<const uint32_t> unpadded_words =
+          absl::MakeConstSpan(snap.post_machine_words).subspan(0, unpadded_len);
+      std::vector<std::string> cand_asm_lines = inverses_->InvertGasAppendInsn(unpadded_words);
+      bool has_wa_g = false;
+      for (const std::string& flag : snap.c_flags) {
+        if (absl::StrContains(flag, "-Wa,-g")) {
+          has_wa_g = true;
+          break;
+        }
+      }
+      if (has_wa_g && unpadded_words.size() >= 2 &&
+          unpadded_words[unpadded_words.size() - 2] == 0x03e00008u &&
+          unpadded_words[unpadded_words.size() - 1] != 0x00000000u && cand_asm_lines.size() >= 2) {
+        std::string jump_line = std::move(cand_asm_lines.back());
+        cand_asm_lines.pop_back();
+        std::string delay_line = std::move(cand_asm_lines.back());
+        cand_asm_lines.pop_back();
+        cand_asm_lines.push_back(".set\tnoreorder");
+        cand_asm_lines.push_back(std::move(jump_line));
+        cand_asm_lines.push_back(std::move(delay_line));
+        cand_asm_lines.push_back(".set\treorder");
+      }
+      cand_asm_lines.insert(cand_asm_lines.begin(), ".set\treorder");
+
+      const SubfunctionBoundarySnapshot replayed =
+          hooks_->ExecuteSubfunctionBoundary(snap, snap.post_state, cand_asm_lines);
+      result.actual_words = replayed.post_machine_words;
+      result.actual_summary = FormatWordsSummary(replayed.post_machine_words);
+      result.matches = (replayed.post_machine_words == snap.post_machine_words);
+      if (!result.matches) {
+        result.diff_detail = absl::StrFormat("kGasAppendInsn words got [%s] != expected [%s]",
+                                             result.actual_summary, result.expected_summary);
+      }
+      return result;
+    }
+
+    default:
+      break;
+  }
+
+  RtlControlFlowGraph cand_pre = snap.post_state;
+  switch (snap.subfunction_id) {
+    case SubfunctionId::kInstantiateVirtualRegs:
+      cand_pre = inverses_->InvertInstantiateVirtualRegs(snap.post_state);
+      break;
+    case SubfunctionId::kJumpRedirect:
+      cand_pre = inverses_->InvertJumpRedirect(snap.post_state);
+      break;
+    case SubfunctionId::kJump1Optimize:
+      cand_pre = inverses_->InvertJump1Optimize(snap.post_state);
+      break;
+    case SubfunctionId::kFoldRtx: {
+      bool called_fold = false;
+      for (auto& blk : cand_pre.rpo_blocks) {
+        for (std::string& pat : blk.instructions) {
+          const std::string clean = StripTrailingRegNotesFromPattern(pat);
+          if (!absl::StartsWith(clean, "(set ")) {
+            continue;
+          }
+          called_fold = true;
+          const std::string notes = pat.size() > clean.size() ? pat.substr(clean.size()) : "";
+          const std::string unfolded = inverses_->InvertFoldRtx(clean);
+          if (!absl::StartsWith(unfolded, "(set ")) {
+            RightInverseResult result;
+            result.expected_summary = snap.post_state.FormatSummary();
+            result.matches = false;
+            result.diff_detail = absl::StrFormat(
+                "InvertFoldRtx returned invalid pattern '%s' for '%s'", unfolded, clean);
+            return result;
+          }
+          if (snap.optimize_level > 0) {
+            pat = absl::StrCat(unfolded, notes);
+          }
+        }
+        blk.SyncRtlInsnsFromInstructions();
+      }
+      if (!called_fold) {
+        RightInverseResult result;
+        result.expected_summary = snap.post_state.FormatSummary();
+        result.matches = false;
+        result.diff_detail = "No (set ...) instruction found for kFoldRtx";
+        return result;
+      }
+      break;
+    }
+    case SubfunctionId::kCseBasicBlockCse1:
+    case SubfunctionId::kCseBasicBlockCse2:
+      cand_pre = inverses_->InvertCseBasicBlock(snap.post_state);
+      break;
+    case SubfunctionId::kScanLoop:
+      cand_pre = inverses_->InvertScanLoop(snap.post_state);
+      break;
+    case SubfunctionId::kStrengthReduce:
+      cand_pre = inverses_->InvertStrengthReduce(snap.post_state);
+      break;
+    case SubfunctionId::kFindBasicBlocks:
+      cand_pre = inverses_->InvertFindBasicBlocks(snap.post_state);
+      break;
+    case SubfunctionId::kPropagateBlock:
+      cand_pre = inverses_->InvertPropagateBlock(snap.post_state);
+      break;
+    case SubfunctionId::kSimplifyRtx: {
+      bool called_simplify = false;
+      for (auto& blk : cand_pre.rpo_blocks) {
+        for (std::string& pat : blk.instructions) {
+          const std::string clean = StripTrailingRegNotesFromPattern(pat);
+          const std::string notes = pat.size() > clean.size() ? pat.substr(clean.size()) : "";
+          if (absl::StartsWith(clean, "(set ") && clean.back() == ')') {
+            size_t pos = std::string_view("(set ").size();
+            int depth = 0;
+            for (; pos < clean.size(); ++pos) {
+              if (clean[pos] == '(') ++depth;
+              if (clean[pos] == ')' && --depth == 0) {
+                ++pos;
+                break;
+              }
+            }
+            const std::string_view clean_view(clean);
+            std::string_view dst = absl::StripAsciiWhitespace(clean_view.substr(5, pos - 5));
+            std::string_view rhs =
+                absl::StripAsciiWhitespace(clean_view.substr(pos, clean.size() - pos - 1));
+            const bool is_compound_rhs =
+                dst != "(pc)" && absl::StartsWith(rhs, "(") && !absl::StartsWith(rhs, "(reg") &&
+                !absl::StartsWith(rhs, "(subreg") && !absl::StartsWith(rhs, "(const_int") &&
+                !absl::StartsWith(rhs, "(mem") && !absl::StartsWith(rhs, "(clobber") &&
+                !absl::StartsWith(rhs, "(call") && !absl::StartsWith(rhs, "(if_then_else") &&
+                !absl::StartsWith(rhs, "(label_ref") && rhs != "(pc)";
+            if (is_compound_rhs) {
+              called_simplify = true;
+              const std::string unsimp = inverses_->InvertSimplifyRtx(rhs);
+              if (unsimp.empty()) {
+                RightInverseResult result;
+                result.expected_summary = snap.post_state.FormatSummary();
+                result.matches = false;
+                result.diff_detail =
+                    absl::StrFormat("InvertSimplifyRtx returned empty pattern for '%s'", rhs);
+                return result;
+              }
+              if (snap.optimize_level > 0) {
+                pat = absl::StrFormat("(set %s %s)%s", dst, unsimp, notes);
+              }
+            }
+          }
+        }
+        blk.SyncRtlInsnsFromInstructions();
+      }
+      if (!called_simplify) {
+        const std::string probe = inverses_->InvertSimplifyRtx("(reg:SI 2 v0)");
+        if (probe.empty()) {
+          RightInverseResult result;
+          result.expected_summary = snap.post_state.FormatSummary();
+          result.matches = false;
+          result.diff_detail = "InvertSimplifyRtx returned empty pattern";
+          return result;
+        }
+      }
+      break;
+    }
+    case SubfunctionId::kSubst: {
+      bool called_subst = false;
+      for (auto& blk : cand_pre.rpo_blocks) {
+        for (std::string& pat : blk.instructions) {
+          const std::string clean = StripTrailingRegNotesFromPattern(pat);
+          if (!absl::StartsWith(clean, "(set ") || clean.back() != ')') {
+            continue;
+          }
+          called_subst = true;
+          const std::string notes = pat.size() > clean.size() ? pat.substr(clean.size()) : "";
+          const SubstInverseSpec spec = inverses_->InvertSubst(clean);
+          if (spec.target_expr.empty() || spec.from_reg.empty() || spec.to_expr.empty()) {
+            RightInverseResult result;
+            result.expected_summary = snap.post_state.FormatSummary();
+            result.matches = false;
+            result.diff_detail = absl::StrFormat("InvertSubst returned empty spec for '%s'", clean);
+            return result;
+          }
+          size_t pos = std::string_view("(set ").size();
+          int depth = 0;
+          for (; pos < clean.size(); ++pos) {
+            if (clean[pos] == '(') ++depth;
+            if (clean[pos] == ')' && --depth == 0) {
+              ++pos;
+              break;
+            }
+          }
+          std::string combined = spec.target_expr;
+          const size_t from_pos = combined.find(spec.from_reg, pos);
+          if (from_pos == std::string::npos) {
+            RightInverseResult result;
+            result.expected_summary = snap.post_state.FormatSummary();
+            result.matches = false;
+            result.diff_detail =
+                absl::StrFormat("InvertSubst target_expr '%s' missing from_reg '%s' in RHS",
+                                spec.target_expr, spec.from_reg);
+            return result;
+          }
+          if (snap.optimize_level > 0) {
+            combined.replace(from_pos, spec.from_reg.size(), spec.to_expr);
+            pat = absl::StrCat(combined, notes);
+          }
+        }
+        blk.SyncRtlInsnsFromInstructions();
+      }
+      if (!called_subst) {
+        RightInverseResult result;
+        result.expected_summary = snap.post_state.FormatSummary();
+        result.matches = false;
+        result.diff_detail = "No (set ...) instruction found for kSubst";
+        return result;
+      }
+      break;
+    }
+    case SubfunctionId::kTryCombine:
+      cand_pre = inverses_->InvertTryCombine(snap.post_state);
+      break;
+    case SubfunctionId::kScheduleBlockSched1:
+    case SubfunctionId::kScheduleBlockSched2:
+      cand_pre = inverses_->InvertScheduleBlock(snap.post_state);
+      break;
+    case SubfunctionId::kUpdateEquivRegs:
+      cand_pre = inverses_->InvertUpdateEquivRegs(snap.post_state);
+      break;
+    case SubfunctionId::kBlockAlloc:
+      cand_pre = inverses_->InvertBlockAlloc(snap.post_state);
+      break;
+    case SubfunctionId::kGlobalAlloc:
+      cand_pre = inverses_->InvertGlobalAlloc(snap.post_state);
+      break;
+    case SubfunctionId::kReload:
+      cand_pre = inverses_->InvertReload(snap.post_state);
+      break;
+    case SubfunctionId::kAlterReg:
+      cand_pre = inverses_->InvertAlterReg(snap.post_state);
+      break;
+    case SubfunctionId::kDoCrossJump:
+      cand_pre = inverses_->InvertDoCrossJump(snap.post_state);
+      break;
+    case SubfunctionId::kFillSimpleDelaySlots:
+      cand_pre = inverses_->InvertFillSimpleDelaySlots(snap.post_state);
+      break;
+    case SubfunctionId::kFillEagerDelaySlots:
+      cand_pre = inverses_->InvertFillEagerDelaySlots(snap.post_state);
+      break;
+    case SubfunctionId::kRelaxDelaySlots:
+      cand_pre = inverses_->InvertRelaxDelaySlots(snap.post_state);
+      break;
+    case SubfunctionId::kMakeReturnInsns:
+      cand_pre = inverses_->InvertMakeReturnInsns(snap.post_state);
+      break;
+    default:
+      break;
+  }
+
+  if (!snap.post_state.rpo_blocks.empty() && cand_pre.rpo_blocks.empty()) {
+    RightInverseResult result;
+    result.expected_summary = snap.post_state.FormatSummary();
+    result.matches = false;
+    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
+    return result;
+  }
+
+  const SubfunctionBoundarySnapshot replayed = hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);
+  RightInverseResult result = BuildCfgRightInverseResult(snap.post_state, replayed.post_state);
+  if (result.matches && snap.subfunction_id == SubfunctionId::kGlobalAlloc &&
+      replayed.post_state.sideband.reg_renumber != snap.post_state.sideband.reg_renumber) {
+    result.matches = false;
+    result.diff_detail = "sideband.reg_renumber mismatch after kGlobalAlloc";
+  }
+  return result;
 }
 
 }  // namespace rom_nom_nom::gcc_harness

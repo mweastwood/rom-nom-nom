@@ -68,6 +68,8 @@ class ToySubfunctionInverses : public SubfunctionInverseProvider {
 
   RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x, int pseudo_regno) const override;
   using SubfunctionInverseProvider::InvertAlterReg;
+  RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& x) const override;
+  RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& x) const override;
   RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x) const override;
   RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& x) const override;
 

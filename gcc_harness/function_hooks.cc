@@ -3183,7 +3183,7 @@ void ApplyOptimizeLevelFlags(int optimize_level) {
 
 void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize_level) {
   flag_signed_char = 1;
-  ApplyOptimizeLevelFlags(2);
+  ApplyOptimizeLevelFlags(out_optimize_level != nullptr ? *out_optimize_level : 2);
 
   target_flags = 0;
   mips_cpu_string = nullptr;
@@ -3716,13 +3716,21 @@ RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(
 
 SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     SubfunctionId subfunction_id, const RtlControlFlowGraph& pre_state,
-    absl::Span<const std::string> pre_asm_lines, int optimize_level) {
+    absl::Span<const std::string> pre_asm_lines, int optimize_level,
+    absl::Span<const std::string> c_flags) {
   SubfunctionBoundarySnapshot snap;
   snap.subfunction_id = subfunction_id;
+  snap.optimize_level = optimize_level;
+  snap.c_flags.assign(c_flags.begin(), c_flags.end());
   snap.pre_state = pre_state;
   snap.pre_asm_lines.assign(pre_asm_lines.begin(), pre_asm_lines.end());
 
-  ApplyOptimizeLevelFlags(optimize_level);
+  if (!c_flags.empty()) {
+    ApplyCompilerFlags(c_flags, &optimize_level);
+    snap.optimize_level = optimize_level;
+  } else {
+    ApplyOptimizeLevelFlags(optimize_level);
+  }
 
   switch (subfunction_id) {
     case SubfunctionId::kInstantiateVirtualRegs: {
@@ -4211,7 +4219,12 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       const std::string asm_text =
           RunFunctionPrologueEpilogue(pre_state.sideband.frame_size_bytes, saved_mask);
       snap.post_state = pre_state;
-      snap.post_asm_lines = ExtractInstructionOnlyAsmLines(asm_text);
+      for (std::string_view raw_line : absl::StrSplit(asm_text, '\n')) {
+        std::string_view line = absl::StripAsciiWhitespace(raw_line);
+        if (!line.empty() && !absl::StartsWith(line, ".file")) {
+          snap.post_asm_lines.emplace_back(line);
+        }
+      }
       break;
     }
 
@@ -4268,13 +4281,32 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
   return snap;
 }
 
+SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
+    const SubfunctionBoundarySnapshot& snap_template,
+    const RtlControlFlowGraph& candidate_pre_state,
+    absl::Span<const std::string> candidate_pre_asm_lines) {
+  const absl::Span<const std::string> asm_lines =
+      !candidate_pre_asm_lines.empty() ? candidate_pre_asm_lines
+                                       : absl::MakeConstSpan(snap_template.pre_asm_lines);
+  return ExecuteSubfunctionBoundary(snap_template.subfunction_id, candidate_pre_state, asm_lines,
+                                    snap_template.optimize_level, snap_template.c_flags);
+}
+
 FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGraph& rtl_00_cfg,
                                                          int optimize_level,
                                                          std::string_view function_name,
-                                                         std::string_view test_name) {
+                                                         std::string_view test_name,
+                                                         absl::Span<const std::string> c_flags) {
   FunctionCompilationTrace trace;
   trace.test_name = std::string(test_name);
   trace.function_name = std::string(function_name);
+  trace.optimize_level = optimize_level;
+  trace.c_flags.assign(c_flags.begin(), c_flags.end());
+
+  if (!c_flags.empty()) {
+    ApplyCompilerFlags(c_flags, &optimize_level);
+    trace.optimize_level = optimize_level;
+  }
 
   if (!function_name.empty()) {
     ctx_->BeginFunction(function_name);
@@ -4290,7 +4322,7 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
 
   for (SubfunctionId sub_id : AllSubfunctionIds()) {
     SubfunctionBoundarySnapshot snap =
-        ExecuteSubfunctionBoundary(sub_id, current_cfg, current_asm_lines, optimize_level);
+        ExecuteSubfunctionBoundary(sub_id, current_cfg, current_asm_lines, optimize_level, c_flags);
     current_cfg = snap.post_state;
     if (sub_id != SubfunctionId::kFunctionPrologueEpilogue && !snap.post_asm_lines.empty()) {
       current_asm_lines = snap.post_asm_lines;
@@ -4369,7 +4401,7 @@ FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(
   rtl_00_cfg.sideband.frame_size_bytes = cc1_res.frame_size_bytes;
   rtl_00_cfg.sideband.outgoing_args_size = cc1_res.outgoing_args_size;
   InferStackFrameSidebandFromRtlCfg(&rtl_00_cfg);
-  return TraceRtlPipeline(rtl_00_cfg, optimize_level, function_name, test_name);
+  return TraceRtlPipeline(rtl_00_cfg, optimize_level, function_name, test_name, c_flags);
 }
 
 FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(

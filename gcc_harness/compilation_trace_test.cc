@@ -18,6 +18,7 @@
 #include "core/toolchain.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
+#include "gcc_harness/right_inverse_verifier.h"
 #include "gtest/gtest.h"
 
 namespace rom_nom_nom::gcc_harness {
@@ -69,13 +70,16 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
   const auto all_ids = AllSubfunctionIds();
   ASSERT_EQ(all_ids.size(), 30u);
   ASSERT_EQ(trace.subfunction_snapshots.size(), all_ids.size());
+  EXPECT_EQ(trace.optimize_level, optimize_level);
 
   for (size_t i = 0; i < trace.subfunction_snapshots.size(); ++i) {
     const SubfunctionBoundarySnapshot& snap = trace.subfunction_snapshots[i];
     EXPECT_EQ(snap.subfunction_id, all_ids[i]);
+    EXPECT_EQ(snap.optimize_level, trace.optimize_level);
+    EXPECT_EQ(snap.c_flags, trace.c_flags);
 
-    const SubfunctionBoundarySnapshot replayed = hooks->ExecuteSubfunctionBoundary(
-        snap.subfunction_id, snap.pre_state, snap.pre_asm_lines, optimize_level);
+    const SubfunctionBoundarySnapshot replayed =
+        hooks->ExecuteSubfunctionBoundary(snap, snap.pre_state, snap.pre_asm_lines);
 
     const RtlCfgPassComparison cmp = replayed.post_state.CompareAgainst(snap.post_state);
     EXPECT_TRUE(cmp.MatchesExactly())
@@ -649,6 +653,31 @@ typedef struct { u8 b[16]; } UnalignedBlock16;
       absl::StrAppend(&full_source, tc.original_c);
       VerifyTraceMatchesActualToolchain(*toolchain_or, full_source, tc.function_name,
                                         tc.options.c_flags, trace);
+    }
+  }
+}
+
+TEST(CompilationTraceTest, SubfunctionBoundaryRightInverseAndPersistedCFlagsAcrossProfiles) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  RightInverseVerifier verifier(&ctx, &hooks);
+
+  constexpr std::string_view kSource = "int add_shift(int a, int b) { return (a + b) << 2; }\n";
+  const auto profiles = GetRoundTripCompilerFlagProfiles();
+  ASSERT_EQ(profiles.size(), 5u);
+
+  for (const auto& profile : profiles) {
+    SCOPED_TRACE(profile.suffix);
+    const FunctionCompilationTrace trace =
+        hooks.TraceForwardCompilation(kSource, "add_shift", profile.c_flags, profile.suffix);
+    EXPECT_EQ(trace.c_flags, profile.c_flags);
+    ASSERT_EQ(trace.subfunction_snapshots.size(), AllSubfunctionIds().size());
+    for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+      SCOPED_TRACE(SubfunctionIdName(snap.subfunction_id));
+      EXPECT_EQ(snap.c_flags, profile.c_flags);
+      const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(res.matches) << SubfunctionIdName(snap.subfunction_id) << " (" << profile.suffix
+                               << "): " << res.diff_detail;
     }
   }
 }
