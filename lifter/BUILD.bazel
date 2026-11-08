@@ -3,6 +3,34 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 package(default_visibility = ["//visibility:private"])
 
 cc_library(
+    name = "invert_gas_mips_ip",
+    srcs = ["invert_gas_mips_ip.cc"],
+    hdrs = ["invert_gas_mips_ip.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "invert_gas_mips_ip_test",
+    size = "medium",
+    srcs = ["invert_gas_mips_ip_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":invert_gas_mips_ip",
+        "//core:round_trip_test_cases",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "dominator_tree",
     srcs = ["dominator_tree.cc"],
     hdrs = ["dominator_tree.h"],

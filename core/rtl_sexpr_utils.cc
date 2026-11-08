@@ -459,6 +459,33 @@ std::string NormalizeInsnSexprForComparison(
         continue;
       }
 
+      if (i > 0 &&
+          (absl::StartsWith(rest, "code_label ") || absl::StartsWith(rest, "code_label\t"))) {
+        const size_t close_pos = FindMatchingCloseParen(sexpr, i);
+        size_t p = i + 1 + std::string_view("code_label").size();
+        while (p < sexpr.size() && absl::ascii_isspace(sexpr[p])) {
+          ++p;
+        }
+        const size_t tok_start = p;
+        while (p < sexpr.size() && !absl::ascii_isspace(sexpr[p]) && sexpr[p] != ')') {
+          ++p;
+        }
+        const std::string_view tok = sexpr.substr(tok_start, p - tok_start);
+        int label_uid = -1;
+        if (!tok.empty() && absl::SimpleAtoi(tok, &label_uid)) {
+          auto it = label_uid_to_canon.find(label_uid);
+          if (it != label_uid_to_canon.end()) {
+            absl::StrAppend(&out, "(code_label ", it->second, ")");
+          } else {
+            absl::StrAppend(&out, "(code_label ", label_uid, ")");
+          }
+        } else {
+          absl::StrAppend(&out, "(code_label ", tok, ")");
+        }
+        i = (close_pos != std::string_view::npos) ? close_pos + 1 : p;
+        continue;
+      }
+
       if (absl::StartsWith(rest, "insn_list")) {
         out.push_back('(');
         ++i;
@@ -634,6 +661,32 @@ std::string CanonicalizeLabelRefsInPattern(std::string_view pattern,
       }
       continue;
     }
+    if (pattern[i] == '(' && (absl::StartsWith(pattern.substr(i + 1), "code_label ") ||
+                              absl::StartsWith(pattern.substr(i + 1), "code_label\t"))) {
+      const size_t close_pos = FindMatchingCloseParen(pattern, i);
+      size_t p = i + 1 + std::string_view("code_label").size();
+      while (p < pattern.size() && absl::ascii_isspace(pattern[p])) {
+        ++p;
+      }
+      const size_t tok_start = p;
+      while (p < pattern.size() && !absl::ascii_isspace(pattern[p]) && pattern[p] != ')') {
+        ++p;
+      }
+      const std::string_view tok = pattern.substr(tok_start, p - tok_start);
+      int label_uid = -1;
+      if (!tok.empty() && absl::SimpleAtoi(tok, &label_uid)) {
+        auto it = label_map.find(label_uid);
+        if (it != label_map.end()) {
+          absl::StrAppend(&out, "(code_label ", it->second, ")");
+        } else {
+          absl::StrAppend(&out, "(code_label ", label_uid, ")");
+        }
+      } else {
+        absl::StrAppend(&out, "(code_label ", tok, ")");
+      }
+      i = (close_pos != std::string_view::npos) ? close_pos + 1 : p;
+      continue;
+    }
     out.push_back(pattern[i++]);
   }
   return out;
@@ -683,11 +736,21 @@ std::vector<std::string> ExtractLabelRefTokens(std::string_view text) {
   std::vector<std::string> tokens;
   size_t pos = 0;
   while (pos < text.size()) {
-    const size_t idx = text.find("(label_ref", pos);
-    if (idx == std::string_view::npos) {
+    const size_t idx_lref = text.find("(label_ref", pos);
+    const size_t idx_clbl = text.find("(code_label", pos);
+    size_t idx = std::string_view::npos;
+    std::string_view prefix;
+    if (idx_lref != std::string_view::npos &&
+        (idx_clbl == std::string_view::npos || idx_lref <= idx_clbl)) {
+      idx = idx_lref;
+      prefix = "(label_ref";
+    } else if (idx_clbl != std::string_view::npos) {
+      idx = idx_clbl;
+      prefix = "(code_label";
+    } else {
       break;
     }
-    size_t p = idx + std::string_view("(label_ref").size();
+    size_t p = idx + prefix.size();
     while (p < text.size() && !absl::ascii_isspace(text[p]) && text[p] != ')') {
       ++p;
     }
@@ -776,6 +839,7 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
     std::vector<int> label_uids;
     std::vector<std::string> instructions;
     std::vector<int> jump_target_labels;
+    std::vector<int> addr_vec_target_labels;
     bool ends_with_jump = false;
     bool ends_with_uncond_jump = false;
     bool ends_with_return = false;
@@ -836,6 +900,7 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
                 const std::string p = ExtractTopLevelPatternFromInsnSexpr(e.raw_sexpr);
                 if (absl::StartsWith(p, "(addr_vec:") || absl::StartsWith(p, "(addr_diff_vec:")) {
                   for (int t_uid : ExtractLabelRefsFromPattern(p)) {
+                    blk.addr_vec_target_labels.push_back(t_uid);
                     if (std::find(blk.jump_target_labels.begin(), blk.jump_target_labels.end(),
                                   t_uid) == blk.jump_target_labels.end()) {
                       blk.jump_target_labels.push_back(t_uid);
@@ -899,6 +964,12 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
     out_blk.id = static_cast<uint32_t>(b);
     for (const auto& pat : raw_blocks[b].instructions) {
       out_blk.AddPatternOnly(pat);
+    }
+    for (int target_lbl : raw_blocks[b].addr_vec_target_labels) {
+      auto it = label_to_block.find(target_lbl);
+      if (it != label_to_block.end()) {
+        out_blk.addr_vec_targets.push_back(it->second);
+      }
     }
     out_blk.successors = std::move(raw_succs[b]);
     result.rpo_blocks.push_back(std::move(out_blk));

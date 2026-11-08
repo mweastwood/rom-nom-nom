@@ -375,6 +375,14 @@ void RecomputeRtlCfgRpo(RtlControlFlowGraph* cfg) {
       }
     }
     blk.successors = std::move(new_succs);
+    std::vector<size_t> new_addr_vec_targets;
+    new_addr_vec_targets.reserve(blk.addr_vec_targets.size());
+    for (size_t s : blk.addr_vec_targets) {
+      if (s < n && old_to_new[s] < rpo.size()) {
+        new_addr_vec_targets.push_back(old_to_new[s]);
+      }
+    }
+    blk.addr_vec_targets = std::move(new_addr_vec_targets);
     blk.predecessors.clear();
     new_blocks.push_back(std::move(blk));
   }

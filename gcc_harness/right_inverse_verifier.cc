@@ -93,6 +93,11 @@ RightInverseResult RightInverseVerifier::VerifyGasMipsIpRightInverse(uint32_t wo
   result.expected_summary = FormatWordsSummary(result.expected_words);
 
   const std::string asm_y = inverses_->InvertGasMipsIp(word_x);
+  if (asm_y.empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertGasMipsIp returned empty string";
+    return result;
+  }
   const uint32_t actual_word = hooks_->RunGasMipsIp(asm_y);
   result.actual_words = {actual_word};
   result.actual_summary = FormatWordsSummary(result.actual_words);
@@ -993,7 +998,13 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       std::vector<std::string> cand_asm_lines;
       cand_asm_lines.reserve(snap.post_machine_words.size());
       for (uint32_t w : snap.post_machine_words) {
-        cand_asm_lines.push_back(inverses_->InvertGasMipsIp(w));
+        std::string asm_y = inverses_->InvertGasMipsIp(w);
+        if (asm_y.empty()) {
+          result.matches = false;
+          result.diff_detail = "InvertGasMipsIp returned empty string";
+          return result;
+        }
+        cand_asm_lines.push_back(std::move(asm_y));
       }
       const SubfunctionBoundarySnapshot replayed =
           hooks_->ExecuteSubfunctionBoundary(snap, snap.post_state, cand_asm_lines);

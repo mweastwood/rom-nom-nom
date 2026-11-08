@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -46,6 +47,8 @@ void init_caller_save();
 void init_recog();
 void init_alias_analysis();
 void init_final(char* filename);
+void clear_const_double_mem();
+void temporary_allocation();
 void init_function_start(void* subr, char* filename, int line);
 void expand_function_start(void* subr, int parms_have_cleanups);
 void expand_function_end(char* filename, int line, int end_bindings);
@@ -154,6 +157,8 @@ extern char regs_ever_live[];
 extern rtx_def* current_function_epilogue_delay_list;
 extern rtx_def* pc_rtx;
 extern rtx_def* cc0_rtx;
+constexpr int kMaxMachineMode = 32;
+extern rtx_def* const_tiny_rtx[3][kMaxMachineMode];
 extern char* (*decl_printable_name)(void*, char**);
 extern int* reg_n_refs;
 extern short* reg_n_sets;
@@ -463,6 +468,19 @@ void GccContext::EnsureGlobalInit() {
     init_lex();
     init_rtl();
     init_emit_once(0);
+    // On LP64, `init_emit_once` populates `const_tiny_rtx` via
+    // `bcopy(&u, &CONST_DOUBLE_LOW(tem), 8)` which writes `u.i[0]` and `u.i[1]`
+    // into the two 32-bit halves of 8-byte `fld[2]`, leaving `fld[3].rtint`
+    // (`CONST_DOUBLE_HIGH`) uninitialized for `print_rtl`. Copy the high word
+    // into `fld[3].rtint` so `print_rtl` is deterministic.
+    for (int i = 0; i < 3; ++i) {
+      for (int m = 0; m < kMaxMachineMode; ++m) {
+        Rtx tiny = const_tiny_rtx[i][m];
+        if (tiny != nullptr && tiny->code == kConstDouble) {
+          tiny->fld[3].rtint = (&tiny->fld[2].rtint)[1];
+        }
+      }
+    }
     init_regs();
     init_decl_processing();
     init_optabs();
@@ -511,6 +529,8 @@ void GccContext::BeginFunction(std::string_view func_name) {
   decl_map_.clear();
   c_label_decl_map_.clear();
   ResetVirtualRegisterFlags();
+  clear_const_double_mem();
+  temporary_allocation();
 
   void* fn_decl = make_node(kFunctionDeclCode);
   void* id_node = get_identifier(current_func_name_.c_str());
@@ -544,6 +564,7 @@ void GccContext::BeginFunction(std::string_view func_name) {
   immediate_size_expand = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
+  clear_const_double_mem();
   init_function_start(fn_decl, const_cast<char*>("harness.c"), 1);
   reg_scan(nullptr, max_reg_num(), 0);
   rtx_equal_function_value_matters = 1;
@@ -641,6 +662,8 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   decl_map_.clear();
   c_label_decl_map_.clear();
   ResetVirtualRegisterFlags();
+  clear_const_double_mem();
+  temporary_allocation();
 
   void* ret_type = BuildCTypeTree(func_decl.ReturnType());
   void* arg_types = tree_cons(nullptr, void_type_node, nullptr);
@@ -712,6 +735,7 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
 
+  clear_const_double_mem();
   init_function_start(fn_decl, const_cast<char*>("gcc_harness.c"), 1);
   if (run_expand_function_start) {
     expand_function_start(fn_decl, 0);
@@ -1251,11 +1275,49 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     }
   }
 
+  if (rtx_code == kCodeLabel) {
+    std::string_view label_tok = ReadRtlToken(text, pos);
+    int extra_depth = 0;
+    bool in_quotes = false;
+    while (*pos < text.size()) {
+      char c = text[*pos];
+      if (in_quotes) {
+        if (c == '\\' && *pos + 1 < text.size()) {
+          ++(*pos);
+        } else if (c == '"') {
+          in_quotes = false;
+        }
+        ++(*pos);
+        continue;
+      }
+      if (c == '"') {
+        in_quotes = true;
+        ++(*pos);
+      } else if (c == '(') {
+        ++extra_depth;
+        ++(*pos);
+      } else if (c == ')') {
+        if (extra_depth == 0) {
+          ++(*pos);
+          break;
+        }
+        --extra_depth;
+        ++(*pos);
+      } else {
+        ++(*pos);
+      }
+    }
+    return GetOrCreateLabel(label_tok.empty() ? "__anon_lbl" : label_tok);
+  }
+
   Rtx rt = rtx_alloc(rtx_code);
   rt->mode = mode;
   rt->volatil = flag_v ? 1 : 0;
   rt->integrated = flag_i ? 1 : 0;
-  rt->unchanging = flag_u ? 1 : 0;
+  // On `SYMBOL_REF`, `rt->unchanging` is `CONSTANT_POOL_ADDRESS_P`, which causes
+  // `varasm.c:find_pool_constant` to abort unless the `char*` pointer was
+  // allocated by `force_const_mem()` in the active `const_rtx_sym_hash_table`.
+  rt->unchanging = (flag_u && rtx_code != kSymbolRef) ? 1 : 0;
   rt->in_struct = flag_s ? 1 : 0;
 
   const int len = rtx_length[rtx_code];
@@ -1428,8 +1490,11 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     }
   }
 
-  if (rtx_code == kLabelRef && rt->fld[0].rtx == nullptr) {
-    rt->fld[0].rtx = GetOrCreateLabel("__anon_lbl");
+  if (rtx_code == kLabelRef) {
+    if (rt->fld[0].rtx == nullptr) {
+      rt->fld[0].rtx = GetOrCreateLabel("__anon_lbl");
+    }
+    rt->fld[0].rtx->fld[5].rtint += 1;
   }
 
   // Canonicalize `(reg:M regno)` while preserving `/v`, `/i`, `/u`, `/s` flags.
@@ -1454,6 +1519,17 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     }
   } else if (rtx_code == kConstInt) {
     return gen_rtx(kConstInt, kVoidMode, rt->fld[0].rtint);
+  } else if (rtx_code == kConstDouble) {
+    (&rt->fld[2].rtint)[1] = rt->fld[3].rtint;
+    if (mode >= 0 && mode < kMaxMachineMode) {
+      for (int tiny_idx = 0; tiny_idx < 3; ++tiny_idx) {
+        Rtx tiny = const_tiny_rtx[tiny_idx][mode];
+        if (tiny != nullptr && tiny->code == kConstDouble &&
+            tiny->fld[2].rtint == rt->fld[2].rtint && tiny->fld[3].rtint == rt->fld[3].rtint) {
+          return tiny;
+        }
+      }
+    }
   } else if (rtx_code == kPc && pc_rtx != nullptr) {
     return pc_rtx;
   } else if (rtx_code == kCc0 && cc0_rtx != nullptr) {
@@ -1698,6 +1774,20 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   const size_t num_blocks = cfg.rpo_blocks.size();
   std::vector<Rtx> block_labels(num_blocks, nullptr);
   std::vector<bool> block_needs_label(num_blocks, false);
+  std::vector<std::string> block_tablejump_tokens(num_blocks);
+  absl::flat_hash_set<std::string> tablejump_label_tokens;
+
+  auto is_tablejump_pattern_text = [](std::string_view pat) {
+    return absl::StrContains(pat, "(set (pc) (reg:") && absl::StrContains(pat, "(use (label_ref");
+  };
+  auto extract_tablejump_label_token = [](std::string_view pat) -> std::string {
+    const size_t use_pos = pat.find("(use (label_ref");
+    if (use_pos == std::string_view::npos) {
+      return "";
+    }
+    const std::vector<std::string> refs = ExtractLabelRefTokens(pat.substr(use_pos));
+    return refs.empty() ? "" : refs[0];
+  };
 
   // First pass: map `(label_ref <tok>)` tokens in jump instructions to their
   // target basic blocks and determine which blocks require a `CODE_LABEL`.
@@ -1709,19 +1799,33 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     bool ends_with_uncond = false;
     if (!blk.instructions.empty()) {
       std::string_view last_pat = blk.instructions.back();
-      ends_with_uncond = IsUnconditionalJumpOrReturnPatternText(last_pat);
-      std::vector<std::string> refs = ExtractLabelRefTokens(last_pat);
-      if ((!refs.empty() || absl::StrContains(last_pat, "(label_ref)")) &&
-          !blk.successors.empty()) {
-        size_t target_b = blk.successors[0];
-        if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {
-          target_b = blk.successors[1];
+      ends_with_uncond =
+          IsUnconditionalJumpOrReturnPatternText(last_pat) || is_tablejump_pattern_text(last_pat);
+      if (is_tablejump_pattern_text(last_pat)) {
+        std::string tbl_tok = extract_tablejump_label_token(last_pat);
+        if (!tbl_tok.empty()) {
+          block_tablejump_tokens[b] = tbl_tok;
+          tablejump_label_tokens.insert(tbl_tok);
         }
-        if (target_b < num_blocks) {
-          block_needs_label[target_b] = true;
-          if (!refs.empty() && !token_to_block.contains(refs[0])) {
-            token_to_block.emplace(refs[0], target_b);
-            ordered_tokens.push_back(refs[0]);
+        for (size_t succ : blk.addr_vec_targets) {
+          if (succ < num_blocks) {
+            block_needs_label[succ] = true;
+          }
+        }
+      } else {
+        std::vector<std::string> refs = ExtractLabelRefTokens(last_pat);
+        if ((!refs.empty() || absl::StrContains(last_pat, "(label_ref)")) &&
+            !blk.successors.empty()) {
+          size_t target_b = blk.successors[0];
+          if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {
+            target_b = blk.successors[1];
+          }
+          if (target_b < num_blocks) {
+            block_needs_label[target_b] = true;
+            if (!refs.empty() && !token_to_block.contains(refs[0])) {
+              token_to_block.emplace(refs[0], target_b);
+              ordered_tokens.push_back(refs[0]);
+            }
           }
         }
       }
@@ -1744,6 +1848,9 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
         continue;
       }
       for (const std::string& tok : ExtractLabelRefTokens(pat)) {
+        if (tablejump_label_tokens.contains(tok)) {
+          continue;
+        }
         if (!token_to_block.contains(tok)) {
           size_t idx = 0;
           std::string_view num_part = tok;
@@ -1766,6 +1873,9 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       block_labels[b] = gen_label_rtx();
       label_map_[absl::StrFormat("__blk_%zu", b)] = block_labels[b];
     }
+    if (!block_tablejump_tokens[b].empty() && !label_map_.contains(block_tablejump_tokens[b])) {
+      label_map_[block_tablejump_tokens[b]] = gen_label_rtx();
+    }
   }
   for (const auto& [tok, target_b] : token_to_block) {
     if (target_b < num_blocks && block_labels[target_b] != nullptr) {
@@ -1783,7 +1893,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     for (size_t insn_idx = 0; insn_idx < blk.instructions.size(); ++insn_idx) {
       const std::string& pat_str = blk.instructions[insn_idx];
       std::string resolved_pat = pat_str;
-      if (insn_idx + 1 == blk.instructions.size() &&
+      if (insn_idx + 1 == blk.instructions.size() && !is_tablejump_pattern_text(resolved_pat) &&
           absl::StrContains(resolved_pat, "(label_ref") && !blk.successors.empty()) {
         size_t target_b = blk.successors[0];
         if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {
@@ -1796,6 +1906,13 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
           if (close == std::string::npos) {
             break;
           }
+          const std::string_view resolved_view = resolved_pat;
+          const std::vector<std::string> sub_refs =
+              ExtractLabelRefTokens(resolved_view.substr(pos, close - pos + 1));
+          if (!sub_refs.empty() && tablejump_label_tokens.contains(sub_refs[0])) {
+            pos = close + 1;
+            continue;
+          }
           resolved_pat.replace(pos, close - pos + 1, named_ref);
           pos += named_ref.size();
         }
@@ -1805,7 +1922,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
         continue;
       }
       if (insn->code == kJumpInsn) {
-        if (IsUnconditionalJumpOrReturnPatternText(pat_str)) {
+        if (IsUnconditionalJumpOrReturnPatternText(pat_str) || is_tablejump_pattern_text(pat_str)) {
           emitted_uncond_jump_or_return = true;
         }
       } else if (insn->code == kInsn && insn->fld[3].rtx != nullptr &&
@@ -1814,7 +1931,8 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
         if (vec != nullptr && vec->num_elem > 0 && vec->elem[0].rtx != nullptr &&
             vec->elem[0].rtx->code == kJumpInsn) {
           std::string first_fmt = FormatRtx(vec->elem[0].rtx->fld[3].rtx);
-          if (IsUnconditionalJumpOrReturnPatternText(first_fmt)) {
+          if (IsUnconditionalJumpOrReturnPatternText(first_fmt) ||
+              is_tablejump_pattern_text(first_fmt)) {
             emitted_uncond_jump_or_return = true;
           }
         }
@@ -1835,15 +1953,68 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     if (emitted_uncond_jump_or_return) {
       emit_barrier();
     }
+    if (!block_tablejump_tokens[b].empty()) {
+      Rtx tbl_lbl = GetOrCreateLabel(block_tablejump_tokens[b]);
+      emit_label(tbl_lbl);
+      const std::vector<size_t>& targets =
+          !blk.addr_vec_targets.empty() ? blk.addr_vec_targets : blk.successors;
+      Rtvec vec = rtvec_alloc(static_cast<int>(targets.size()));
+      for (size_t j = 0; j < targets.size(); ++j) {
+        Rtx case_lbl = (targets[j] < num_blocks && block_labels[targets[j]] != nullptr)
+                           ? block_labels[targets[j]]
+                           : tbl_lbl;
+        vec->elem[j].rtx = gen_rtx(kLabelRef, kSiMode, case_lbl);
+        case_lbl->fld[5].rtint += 1;
+      }
+      emit_jump_insn(gen_rtx(kAddrVec, kSiMode, vec));
+      emit_barrier();
+    }
   }
 
   Rtx first = get_insns();
+  Rtx last_in_chain = nullptr;
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    last_in_chain = insn;
+  }
+  if (last_in_chain != nullptr &&
+      (last_in_chain->code == kInsn || last_in_chain->code == kJumpInsn ||
+       last_in_chain->code == kCallInsn) &&
+      last_in_chain->fld[3].rtx != nullptr && last_in_chain->fld[3].rtx->code == kSequence) {
+    // Ensure a `SEQUENCE` wrapper at the end of the chain has a non-null `NEXT_INSN`
+    // so `reorg.c:delete_from_delay_slot` (`PREV_INSN (NEXT_INSN (trial))`) never
+    // dereferences `nullptr`.
+    emit_note(nullptr, kNoteInsnDeleted);
+  }
   bool has_sequence = false;
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
         insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence) {
       has_sequence = true;
-      break;
+      Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+      if (vec != nullptr && vec->num_elem > 0) {
+        vec->elem[0].rtx->fld[1].rtx = insn->fld[1].rtx;
+        vec->elem[vec->num_elem - 1].rtx->fld[2].rtx = insn->fld[2].rtx;
+        if (insn->fld[1].rtx != nullptr &&
+            (insn->fld[1].rtx->code == kInsn || insn->fld[1].rtx->code == kJumpInsn ||
+             insn->fld[1].rtx->code == kCallInsn) &&
+            insn->fld[1].rtx->fld[3].rtx != nullptr &&
+            insn->fld[1].rtx->fld[3].rtx->code == kSequence) {
+          Rtvec prev_vec = insn->fld[1].rtx->fld[3].rtx->fld[0].rtvec;
+          if (prev_vec != nullptr && prev_vec->num_elem > 0) {
+            prev_vec->elem[prev_vec->num_elem - 1].rtx->fld[2].rtx = insn;
+          }
+        }
+        if (insn->fld[2].rtx != nullptr &&
+            (insn->fld[2].rtx->code == kInsn || insn->fld[2].rtx->code == kJumpInsn ||
+             insn->fld[2].rtx->code == kCallInsn) &&
+            insn->fld[2].rtx->fld[3].rtx != nullptr &&
+            insn->fld[2].rtx->fld[3].rtx->code == kSequence) {
+          Rtvec next_vec = insn->fld[2].rtx->fld[3].rtx->fld[0].rtvec;
+          if (next_vec != nullptr && next_vec->num_elem > 0) {
+            next_vec->elem[0].rtx->fld[1].rtx = insn;
+          }
+        }
+      }
     }
   }
 
@@ -2140,6 +2311,14 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
         label_map.emplace(uid_val, absl::StrCat("L", next_lbl_idx++));
       }
     }
+    if (insn->fld[6].rtx != nullptr) {
+      for (const std::string& tok : ExtractLabelRefTokens(FormatRtx(insn->fld[6].rtx))) {
+        int uid_val = 0;
+        if (absl::SimpleAtoi(tok, &uid_val) && uid_val >= 0 && !label_map.contains(uid_val)) {
+          label_map.emplace(uid_val, absl::StrCat("L", next_lbl_idx++));
+        }
+      }
+    }
   }
 
   auto format_insn_tag = [](Rtx sub) -> std::string {
@@ -2172,6 +2351,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   };
 
   std::vector<FlatRtlItem> items;
+  std::vector<RtlInsnEntry> raw_tablejump_entries;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     const int code = insn->code;
     if (code == kNote) {
@@ -2203,6 +2383,27 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
       }
       continue;
     }
+    if (code == kCodeLabel && insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kJumpInsn) {
+      Rtx next_insn = insn->fld[2].rtx;
+      Rtx next_pat = next_insn->fld[3].rtx;
+      if (next_pat != nullptr && (next_pat->code == kAddrVec || next_pat->code == kAddrDiffVec)) {
+        raw_tablejump_entries.push_back(RtlInsnEntry{
+            .kind = RtlInsnKind::kCodeLabel,
+            .uid = insn->fld[0].rtint,
+        });
+        raw_tablejump_entries.push_back(RtlInsnEntry{
+            .kind = RtlInsnKind::kJumpInsn,
+            .uid = next_insn->fld[0].rtint,
+            .raw_sexpr = absl::StrCat("(jump_insn ", next_insn->fld[0].rtint, " 0 0 ",
+                                      FormatRtx(next_pat), ")"),
+        });
+        insn = next_insn;
+        while (insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kBarrier) {
+          insn = insn->fld[2].rtx;
+        }
+        continue;
+      }
+    }
     if (code == kCodeLabel || code == kBarrier) {
       items.push_back(FlatRtlItem{
           .kind = code_to_kind(code),
@@ -2215,6 +2416,10 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     }
 
     Rtx pat = insn->fld[3].rtx;
+    if (code == kJumpInsn && pat != nullptr &&
+        (pat->code == kAddrVec || pat->code == kAddrDiffVec)) {
+      continue;
+    }
     if (pat != nullptr && pat->code == kSequence && pat->fld[0].rtvec != nullptr) {
       Rtvec vec = pat->fld[0].rtvec;
       std::vector<std::string> formatted_inner;
@@ -2262,7 +2467,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     });
   }
 
-  RtlControlFlowGraph cfg = BuildCanonicalCfgFromFlatRtlItems(pass, items);
+  RtlControlFlowGraph cfg = BuildCanonicalCfgFromFlatRtlItems(pass, items, raw_tablejump_entries);
 
   // Dematerialize GCC 2.7.2 global side-band arrays into `cfg.sideband`.
   const int nregs = std::max(max_reg_num(), max_regno);

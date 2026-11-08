@@ -108,6 +108,7 @@ rtx_def* delete_insn(rtx_def* insn);
 void init_alias_analysis();
 void init_recog();
 void init_recog_no_volatile();
+void clear_const_double_mem();
 int recog(rtx_def* x0, rtx_def* insn, int* pnum_clobbers);
 void allocate_for_life_analysis();
 void regclass_init();
@@ -465,6 +466,24 @@ rtx_def* expand_call(void* exp, rtx_def* target, int ignore);
 rtx_def* emit_move_insn(rtx_def* x, rtx_def* y);
 void* convert(void* type, void* expr);
 extern int virtuals_instantiated;
+extern rtx_def** jump_chain;
+extern int max_jump_chain;
+
+struct GccOptabHandler {
+  int insn_code;
+  rtx_def* libfunc;
+};
+struct GccOptab {
+  int code;
+  GccOptabHandler handlers[28];
+};
+extern GccOptab* sdiv_optab;
+extern GccOptab* sdivmod_optab;
+extern GccOptab* udiv_optab;
+extern GccOptab* udivmod_optab;
+extern GccOptab* smod_optab;
+extern GccOptab* umod_optab;
+void init_all_optabs();
 
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
@@ -488,6 +507,28 @@ uint32_t ReadBigEndian32(const char* p) {
   const auto* u = reinterpret_cast<const unsigned char*>(p);
   return (static_cast<uint32_t>(u[0]) << 24) | (static_cast<uint32_t>(u[1]) << 16) |
          (static_cast<uint32_t>(u[2]) << 8) | static_cast<uint32_t>(u[3]);
+}
+
+void PopulateInsnCodesWithVolatileOk(Rtx first) {
+  init_recog();
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
+      continue;
+    }
+    if (insn->fld[4].rtint >= 0) {
+      continue;
+    }
+    Rtx pat = insn->fld[3].rtx;
+    if (pat == nullptr || pat->code == kSequence || pat->code == kUse || pat->code == kClobber ||
+        pat->code == kAddrVec || pat->code == kAddrDiffVec) {
+      continue;
+    }
+    int clobbers = 0;
+    const int code = recog(pat, insn, &clobbers);
+    if (code >= 0) {
+      insn->fld[4].rtint = code;
+    }
+  }
 }
 
 bool IsBranchMnemonic(std::string_view mnemonic) {
@@ -803,6 +844,20 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
   frag_wane(frag_now);
   frag_new(0);
   frag_grow(8192);
+  GasFrag* const first_frag = frag_now;
+  auto count_emitted_words = [first_frag]() -> size_t {
+    size_t total = 0;
+    for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
+      const long nbytes = (f == frag_now) ? frag_now_fix() : f->fr_fix;
+      if (nbytes >= 4) {
+        total += static_cast<size_t>(nbytes / 4);
+      }
+      if (f == frag_now) {
+        break;
+      }
+    }
+    return total;
+  };
   const bool has_directives =
       absl::StrContains(asm_text, ".set") || absl::StrContains(asm_text, ".ent");
   mips_noreorder = has_directives ? 0 : 1;
@@ -831,7 +886,7 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
         break;
       }
       mips_emit_delays();
-      label_word_index[std::string(before)] = static_cast<size_t>(frag_now_fix() / 4);
+      label_word_index[std::string(before)] = count_emitted_words();
       mips_define_label(dummy_sym);
       line = absl::StripAsciiWhitespace(line.substr(colon_pos + 1));
     }
@@ -877,11 +932,11 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
       }
     }
 
-    const size_t pre_words = static_cast<size_t>(frag_now_fix() / 4);
+    const size_t pre_words = count_emitted_words();
     std::string mutable_line(line);
     std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
     md_assemble(mutable_line.data());
-    const size_t post_words = static_cast<size_t>(frag_now_fix() / 4);
+    const size_t post_words = count_emitted_words();
 
     if (!target_lbl.empty() && post_words > pre_words) {
       size_t br_word = pre_words;
@@ -899,10 +954,13 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
   }
 
   mips_emit_delays();
-  const int nbytes = frag_now_fix();
-  if (frag_now != nullptr && nbytes >= 4) {
-    for (int off = 0; off + 4 <= nbytes; off += 4) {
-      words.push_back(ReadBigEndian32(frag_now->fr_literal + off));
+  for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
+    const long nbytes = (f == frag_now) ? frag_now_fix() : f->fr_fix;
+    for (long off = 0; off + 4 <= nbytes; off += 4) {
+      words.push_back(ReadBigEndian32(f->fr_literal + off));
+    }
+    if (f == frag_now) {
+      break;
     }
   }
 
@@ -927,30 +985,49 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
 }
 
 uint32_t FunctionHooks::RunGasMipsIp(std::string_view insn_asm_line) {
-  imm_expr.X_op = 0;
+  constexpr int kGasOpAbsent = 1;
+  imm_expr.X_op = kGasOpAbsent;
   imm_expr.X_add_number = 0;
-  offset_expr.X_op = 0;
+  offset_expr.X_op = kGasOpAbsent;
   offset_expr.X_add_number = 0;
+  insn_error = nullptr;
   std::string mutable_line(absl::StripAsciiWhitespace(insn_asm_line));
+  if (mutable_line.empty()) {
+    return 0xffffffffu;
+  }
   std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
   GasMipsClInsn insn{};
   mips_ip(mutable_line.data(), &insn);
+  if (insn_error != nullptr || insn.insn_mo == nullptr) {
+    return 0xffffffffu;
+  }
+  if (insn.insn_mo->pinfo == 0xffffffffUL) {
+    if (insn.insn_mo->args != nullptr && std::strcmp(insn.insn_mo->args, "a") == 0) {
+      uint32_t word = static_cast<uint32_t>(insn.insn_mo[1].match);
+      if (offset_expr.X_op != kGasOpAbsent) {
+        word |= (static_cast<uint32_t>(offset_expr.X_add_number) >> 2) & 0x03ffffffu;
+      }
+      return word;
+    }
+    return 0xffffffffu;
+  }
   uint32_t word = static_cast<uint32_t>(insn.insn_opcode);
-  if (imm_expr.X_op != 0) {
+  if (imm_expr.X_op != kGasOpAbsent) {
     word |= static_cast<uint32_t>(imm_expr.X_add_number) & 0xffffu;
-  } else if (offset_expr.X_op != 0) {
+  } else if (offset_expr.X_op != kGasOpAbsent) {
     word |= static_cast<uint32_t>(offset_expr.X_add_number) & 0xffffu;
   }
   return word;
 }
 
 std::vector<uint32_t> FunctionHooks::RunGasMacro(std::string_view macro_asm_line) {
+  constexpr int kGasOpAbsent = 1;
   frag_wane(frag_now);
   frag_new(0);
   mips_noreorder = 1;
   prev_insn_valid = 0;
-  imm_expr.X_op = 0;
-  offset_expr.X_op = 0;
+  imm_expr.X_op = kGasOpAbsent;
+  offset_expr.X_op = kGasOpAbsent;
 
   std::string mutable_line(absl::StripAsciiWhitespace(macro_asm_line));
   std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
@@ -971,20 +1048,21 @@ std::vector<uint32_t> FunctionHooks::RunGasMacro(std::string_view macro_asm_line
 }
 
 uint32_t FunctionHooks::RunGasAppendInsn(std::string_view insn_asm_line) {
+  constexpr int kGasOpAbsent = 1;
   frag_wane(frag_now);
   frag_new(0);
   mips_noreorder = 1;
   prev_insn_valid = 0;
-  imm_expr.X_op = 0;
-  offset_expr.X_op = 0;
+  imm_expr.X_op = kGasOpAbsent;
+  offset_expr.X_op = kGasOpAbsent;
 
   std::string mutable_line(absl::StripAsciiWhitespace(insn_asm_line));
   std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
   GasMipsClInsn insn{};
   mips_ip(mutable_line.data(), &insn);
-  if (imm_expr.X_op != 0) {
+  if (imm_expr.X_op != kGasOpAbsent) {
     append_insn(nullptr, &insn, &imm_expr, imm_reloc);
-  } else if (offset_expr.X_op != 0) {
+  } else if (offset_expr.X_op != kGasOpAbsent) {
     append_insn(nullptr, &insn, &offset_expr, offset_reloc);
   } else {
     append_insn(nullptr, &insn, nullptr, kBfdRelocUnused);
@@ -1036,7 +1114,7 @@ std::vector<uint32_t> FunctionHooks::RunGasAppendInsnReorder(
 
 void FunctionHooks::PrepareReorgState(Rtx first) {
   reload_completed = 1;
-  init_recog_no_volatile();
+  init_recog();
   RefreshJumpLabelsAndNuses(first);
   // Preserve `CODE_LABEL`s (`LABEL_PRESERVE_P(insn)` == `insn->in_struct`)
   // during `find_basic_blocks` so labels that are only targeted from inside
@@ -1068,6 +1146,7 @@ void FunctionHooks::PrepareReorgState(Rtx first) {
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
         insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code != kSequence &&
         insn->fld[3].rtx->code != kUse && insn->fld[3].rtx->code != kClobber &&
+        insn->fld[3].rtx->code != kAddrVec && insn->fld[3].rtx->code != kAddrDiffVec &&
         num_delay_slots(insn) > 0) {
       PushInsnToObstack(&unfilled_slots_obstack, insn);
     }
@@ -1197,6 +1276,11 @@ void FunctionHooks::RunJumpOptimize(int cross_jump, int noop_moves, int after_re
     }
   }
   jump_optimize(head, cross_jump, noop_moves, after_regscan);
+  // `jump.c:jump_optimize` returns early when `!optimize` without clearing the
+  // stack-allocated `jump_chain` (`alloca`), which would leave a dangling pointer
+  // for subsequent `delete_insn` calls.
+  jump_chain = nullptr;
+  max_jump_chain = 0;
   if (temp_renumber) {
     reg_renumber = nullptr;
   }
@@ -1241,6 +1325,7 @@ int FunctionHooks::RunInvertJump(Rtx jump, Rtx nlabel) {
 // -----------------------------------------------------------------------------
 
 void FunctionHooks::PrepareSchedState(Rtx first) {
+  PopulateInsnCodesWithVolatileOk(first);
   StripFlowGeneratedNotes(first);
   restore_reg_data(first);
   max_regno = max_reg_num();
@@ -1424,6 +1509,7 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
     }
   }
   init_alias_analysis();
+  PopulateInsnCodesWithVolatileOk(head);
   reload_completed = saved_reload_completed;
   if (n_basic_blocks > 0 && basic_block_end[n_basic_blocks - 1] != nullptr &&
       basic_block_end[n_basic_blocks - 1]->fld[2].rtx == nullptr) {
@@ -1490,6 +1576,7 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
     RefreshJumpLabelsAndNuses(head);
   }
   init_alias_analysis();
+  PopulateInsnCodesWithVolatileOk(head);
   reload_completed = saved_reload_completed;
   if (n_basic_blocks <= 0) {
     return;
@@ -1835,6 +1922,7 @@ void FunctionHooks::PrepareCombineState(Rtx first) {
   reg_last_set_nonzero_bits = AllocZeroed<uint64_t>(nregs);
   reg_last_set_sign_bit_copies = AllocZeroed<char>(nregs);
   init_reg_last_arrays();
+  PopulateInsnCodesWithVolatileOk(first);
   init_recog_no_volatile();
 
   const int max_uid = get_max_uid() + 64;
@@ -1928,6 +2016,7 @@ void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
   reg_last_set_nonzero_bits = AllocZeroed<uint64_t>(alloc_regs);
   reg_last_set_sign_bit_copies = AllocZeroed<char>(alloc_regs);
   init_reg_last_arrays();
+  PopulateInsnCodesWithVolatileOk(head);
   init_recog_no_volatile();
 
   int max_uid = 0;
@@ -2189,28 +2278,35 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
       }
       Rtx jump = basic_block_end[i];
       if (jump != nullptr && jump->code == kJumpInsn) {
-        for (Rtx insn = jump->fld[2].rtx;
-             insn != nullptr && (insn->code == kBarrier || insn->code == kNote);
-             insn = insn->fld[2].rtx) {
-          if (insn->code == kNote && insn->fld[4].rtint > 0 && insn->fld[2].rtx != nullptr &&
-              insn->fld[2].rtx->code == kJumpInsn &&
-              (insn->fld[2].rtx->fld[3].rtx->code == kAddrVec ||
-               insn->fld[2].rtx->fld[3].rtx->code == kAddrDiffVec)) {
-            Rtx body = insn->fld[2].rtx->fld[3].rtx;
-            const int elt_idx = (body->code == kAddrDiffVec) ? 1 : 0;
-            const int len = body->fld[elt_idx].rtvec->num_elem;
-            for (int k = 0; k < len; ++k) {
-              Rtx targ = body->fld[elt_idx].rtvec->elem[k].rtx->fld[0].rtx;
-              if (targ != nullptr && targ->fld[0].rtint <= max_uid_for_flow) {
-                const int b = uid_block_number[targ->fld[0].rtint];
-                if (b >= 0 && b < n_blocks) {
-                  int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
-                  for (int j = 0; j < regset_size; ++j) {
-                    bb_new_live[i][j] |= src[j];
-                  }
+        auto add_addr_vec_targets = [&](Rtx body) {
+          const int elt_idx = (body->code == kAddrDiffVec) ? 1 : 0;
+          const int len = body->fld[elt_idx].rtvec->num_elem;
+          for (int k = 0; k < len; ++k) {
+            Rtx targ = body->fld[elt_idx].rtvec->elem[k].rtx->fld[0].rtx;
+            if (targ != nullptr && targ->fld[0].rtint <= max_uid_for_flow) {
+              const int b = uid_block_number[targ->fld[0].rtint];
+              if (b >= 0 && b < n_blocks) {
+                int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
+                for (int j = 0; j < regset_size; ++j) {
+                  bb_new_live[i][j] |= src[j];
                 }
               }
             }
+          }
+        };
+        if (jump->fld[3].rtx != nullptr &&
+            (jump->fld[3].rtx->code == kAddrVec || jump->fld[3].rtx->code == kAddrDiffVec)) {
+          add_addr_vec_targets(jump->fld[3].rtx);
+        }
+        for (Rtx insn = jump->fld[2].rtx;
+             insn != nullptr &&
+             (insn->code == kBarrier || insn->code == kNote || insn->code == kCodeLabel);
+             insn = insn->fld[2].rtx) {
+          if ((insn->code == kCodeLabel || (insn->code == kNote && insn->fld[4].rtint > 0)) &&
+              insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kJumpInsn &&
+              (insn->fld[2].rtx->fld[3].rtx->code == kAddrVec ||
+               insn->fld[2].rtx->fld[3].rtx->code == kAddrDiffVec)) {
+            add_addr_vec_targets(insn->fld[2].rtx->fld[3].rtx);
           }
         }
         Rtx label = jump->fld[7].rtx;
@@ -2249,9 +2345,11 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
           changed = true;
         }
         if (basic_block_head[i]->code == kCodeLabel) {
-          for (Rtx ref = basic_block_head[i]->fld[4].rtx; ref != nullptr; ref = ref->fld[5].rtx) {
-            if (ref->fld[0].rtint <= max_uid_for_flow) {
-              const int b = uid_block_number[ref->fld[0].rtint];
+          for (Rtx ref = basic_block_head[i]->fld[5].rtx;
+               ref != nullptr && ref != basic_block_head[i]; ref = ref->fld[1].rtx) {
+            Rtx containing = ref->fld[2].rtx;
+            if (containing != nullptr && containing->fld[0].rtint <= max_uid_for_flow) {
+              const int b = uid_block_number[containing->fld[0].rtint];
               if (b >= 0 && b < n_blocks) {
                 must_rescan[b] = 1;
                 changed = true;
@@ -2278,9 +2376,11 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
           changed = true;
         }
         if (basic_block_head[i]->code == kCodeLabel) {
-          for (Rtx ref = basic_block_head[i]->fld[4].rtx; ref != nullptr; ref = ref->fld[5].rtx) {
-            if (ref->fld[0].rtint <= max_uid_for_flow) {
-              const int b = uid_block_number[ref->fld[0].rtint];
+          for (Rtx ref = basic_block_head[i]->fld[5].rtx;
+               ref != nullptr && ref != basic_block_head[i]; ref = ref->fld[1].rtx) {
+            Rtx containing = ref->fld[2].rtx;
+            if (containing != nullptr && containing->fld[0].rtint <= max_uid_for_flow) {
+              const int b = uid_block_number[containing->fld[0].rtint];
               if (b >= 0 && b < n_blocks) {
                 must_rescan[b] = 1;
                 changed = true;
@@ -2307,28 +2407,35 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
     }
     Rtx jump = basic_block_end[i];
     if (jump != nullptr && jump->code == kJumpInsn) {
-      for (Rtx insn = jump->fld[2].rtx;
-           insn != nullptr && (insn->code == kBarrier || insn->code == kNote);
-           insn = insn->fld[2].rtx) {
-        if (insn->code == kNote && insn->fld[4].rtint > 0 && insn->fld[2].rtx != nullptr &&
-            insn->fld[2].rtx->code == kJumpInsn &&
-            (insn->fld[2].rtx->fld[3].rtx->code == kAddrVec ||
-             insn->fld[2].rtx->fld[3].rtx->code == kAddrDiffVec)) {
-          Rtx body = insn->fld[2].rtx->fld[3].rtx;
-          const int elt_idx = (body->code == kAddrDiffVec) ? 1 : 0;
-          const int len = body->fld[elt_idx].rtvec->num_elem;
-          for (int k = 0; k < len; ++k) {
-            Rtx targ = body->fld[elt_idx].rtvec->elem[k].rtx->fld[0].rtx;
-            if (targ != nullptr && targ->fld[0].rtint <= max_uid_for_flow) {
-              const int b = uid_block_number[targ->fld[0].rtint];
-              if (b >= 0 && b < n_blocks) {
-                int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
-                for (int j = 0; j < regset_size; ++j) {
-                  bb_new_live[i][j] |= src[j];
-                }
+      auto add_addr_vec_targets = [&](Rtx body) {
+        const int elt_idx = (body->code == kAddrDiffVec) ? 1 : 0;
+        const int len = body->fld[elt_idx].rtvec->num_elem;
+        for (int k = 0; k < len; ++k) {
+          Rtx targ = body->fld[elt_idx].rtvec->elem[k].rtx->fld[0].rtx;
+          if (targ != nullptr && targ->fld[0].rtint <= max_uid_for_flow) {
+            const int b = uid_block_number[targ->fld[0].rtint];
+            if (b >= 0 && b < n_blocks) {
+              int* src = reinterpret_cast<int*>(basic_block_live_at_start[b]);
+              for (int j = 0; j < regset_size; ++j) {
+                bb_new_live[i][j] |= src[j];
               }
             }
           }
+        }
+      };
+      if (jump->fld[3].rtx != nullptr &&
+          (jump->fld[3].rtx->code == kAddrVec || jump->fld[3].rtx->code == kAddrDiffVec)) {
+        add_addr_vec_targets(jump->fld[3].rtx);
+      }
+      for (Rtx insn = jump->fld[2].rtx;
+           insn != nullptr &&
+           (insn->code == kBarrier || insn->code == kNote || insn->code == kCodeLabel);
+           insn = insn->fld[2].rtx) {
+        if ((insn->code == kCodeLabel || (insn->code == kNote && insn->fld[4].rtint > 0)) &&
+            insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kJumpInsn &&
+            (insn->fld[2].rtx->fld[3].rtx->code == kAddrVec ||
+             insn->fld[2].rtx->fld[3].rtx->code == kAddrDiffVec)) {
+          add_addr_vec_targets(insn->fld[2].rtx->fld[3].rtx);
         }
       }
       Rtx label = jump->fld[7].rtx;
@@ -2392,7 +2499,7 @@ Rtx FunctionHooks::RunCseBasicBlock(Rtx from, Rtx to, void* next_branch, int aro
     restore_reg_data(head);
     max_reg = std::max(256, max_reg_num() + 16);
     reg_scan(head, max_reg, 1);
-    init_recog_no_volatile();
+    init_recog();
     init_alias_analysis();
 
     all_minus_one = AllocZeroed<int>(max_reg);
@@ -2503,8 +2610,8 @@ int ExecuteCsePassGranular(FunctionHooks* hooks, GccContext* ctx, Rtx f, int nre
   while (insn != nullptr) {
     cse_end_of_basic_block(insn, &val, flag_cse_follow_jumps, after_loop, flag_cse_skip_blocks);
 
-    if (val.nsets == 0 || insn->volatil != 0) {
-      insn->volatil = 0;
+    if (val.nsets == 0 || insn->mode == kQiMode) {
+      insn->mode = kVoidMode;
       if (val.last == nullptr) {
         break;
       }
@@ -2532,6 +2639,7 @@ int ExecuteCsePassGranular(FunctionHooks* hooks, GccContext* ctx, Rtx f, int nre
     insn = temp;
   }
 
+  qty_const = nullptr;
   return cse_jumps_altered != 0 || recorded_label_ref != 0;
 }
 
@@ -2556,7 +2664,7 @@ void PrepareCseFoldState(GccContext* ctx, Rtx head) {
   if (head != nullptr) {
     reg_scan(head, max_reg, 1);
   }
-  init_recog_no_volatile();
+  init_recog();
   init_alias_analysis();
 
   max_qty = max_reg + 500;
@@ -2609,6 +2717,7 @@ Rtx FunctionHooks::RunFoldRtx(Rtx x, Rtx insn) {
 void FunctionHooks::PrepareLoopState(Rtx first) {
   RefreshJumpLabelsAndNuses(first);
   restore_reg_data(first);
+  PopulateInsnCodesWithVolatileOk(first);
   init_recog_no_volatile();
   init_alias_analysis();
   loop_dump_stream = nullptr;
@@ -2627,9 +2736,15 @@ void FunctionHooks::PrepareLoopState(Rtx first) {
   max_uid_for_loop = get_max_uid() + 1 + loop_cap * 32 + 64;
   uid_luid = AllocZeroed<int>(max_uid_for_loop + 1);
   uid_loop_num = AllocZeroed<int>(max_uid_for_loop + 1);
+  for (int i = 0; i <= max_uid_for_loop; ++i) {
+    uid_loop_num[i] = -1;
+  }
   loop_number_loop_starts = AllocZeroed<Rtx>(loop_cap);
   loop_number_loop_ends = AllocZeroed<Rtx>(loop_cap);
   loop_outer_loop = AllocZeroed<int>(loop_cap);
+  for (int i = 0; i < loop_cap; ++i) {
+    loop_outer_loop[i] = -1;
+  }
   loop_invalid = AllocZeroed<char>(loop_cap);
   loop_has_call = 0;
   loop_has_volatile = 0;
@@ -2637,6 +2752,9 @@ void FunctionHooks::PrepareLoopState(Rtx first) {
   loops_enclosed = 1;
   loop_number_exit_labels = AllocZeroed<Rtx>(loop_cap);
   loop_number_exit_count = AllocZeroed<int>(loop_cap);
+  if (max_loop_num == 0) {
+    return;
+  }
 
   gcc_obstack_begin(&temp_obstack, 0, 0, reinterpret_cast<void* (*)(long)>(xmalloc), std::free);
   find_and_verify_loops(first);
@@ -3179,6 +3297,15 @@ void ApplyOptimizeLevelFlags(int optimize_level) {
     flag_inline_functions = (optimize_level >= 3) ? 1 : 0;
     SetGccFOption("rerun-cse-after-loop", 1);
   }
+  constexpr int kCodeForNothing = 338;
+  for (GccOptab* tab :
+       {sdiv_optab, sdivmod_optab, udiv_optab, udivmod_optab, smod_optab, umod_optab}) {
+    if (tab != nullptr) {
+      tab->handlers[kSiMode].insn_code = kCodeForNothing;
+      tab->handlers[kDiMode].insn_code = kCodeForNothing;
+    }
+  }
+  init_all_optabs();
 }
 
 void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize_level) {
@@ -3420,6 +3547,26 @@ bool IsLabelOrDirectiveAsmLine(std::string_view line) {
   return trimmed.back() == ':' && trimmed.find_first_of(" \t,()") == std::string_view::npos;
 }
 
+bool IsGasMacroOnlyAsmLine(std::string_view insn_asm_line) {
+  constexpr int kGasOpAbsent = 1;
+  imm_expr.X_op = kGasOpAbsent;
+  imm_expr.X_add_number = 0;
+  offset_expr.X_op = kGasOpAbsent;
+  offset_expr.X_add_number = 0;
+  insn_error = nullptr;
+  std::string mutable_line(absl::StripAsciiWhitespace(insn_asm_line));
+  if (mutable_line.empty()) {
+    return false;
+  }
+  std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
+  GasMipsClInsn insn{};
+  mips_ip(mutable_line.data(), &insn);
+  if (insn_error != nullptr || insn.insn_mo == nullptr || insn.insn_mo->pinfo != 0xffffffffUL) {
+    return false;
+  }
+  return !(insn.insn_mo->args != nullptr && std::strcmp(insn.insn_mo->args, "a") == 0);
+}
+
 struct InProcessCc1CompilationResult {
   absl::flat_hash_map<RtlPassKind, RtlControlFlowGraph> pass_cfgs;
   std::string fn_asm_text;
@@ -3472,6 +3619,7 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   std::string source_buf(c_source);
   source_buf.push_back('\n');
 
+  clear_const_double_mem();
   permanent_allocation(1);
   current_function_decl = nullptr;
   reload_completed = 0;
@@ -3525,6 +3673,8 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   rtl_dump_and_exit = stop_after_initial_rtl ? 1 : 0;
 
   yyparse();
+  jump_chain = nullptr;
+  max_jump_chain = 0;
 
   res.frame_size_bytes = frame_offset;
   res.outgoing_args_size = current_function_outgoing_args_size;
@@ -3783,7 +3933,8 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
         PrepareCseFoldState(ctx_, head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
           if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
-              insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code != kSequence) {
+              insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code != kSequence &&
+              insn->fld[3].rtx->code != kAddrVec && insn->fld[3].rtx->code != kAddrDiffVec) {
             int clobbers = 0;
             if (recog(insn->fld[3].rtx, insn, &clobbers) < 0) {
               insn->fld[3].rtx = fold_rtx(insn->fld[3].rtx, insn);
@@ -3992,7 +4143,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           }
           Rtx pat = insn->fld[3].rtx;
           if (pat == nullptr || pat->code == kSequence || pat->code == kUse ||
-              pat->code == kClobber) {
+              pat->code == kClobber || pat->code == kAddrVec || pat->code == kAddrDiffVec) {
             continue;
           }
           int old_clobbers = 0;
@@ -4240,7 +4391,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       snap.post_state = pre_state;
       snap.post_asm_lines = snap.pre_asm_lines;
       for (const std::string& line : snap.pre_asm_lines) {
-        if (IsLabelOrDirectiveAsmLine(line)) {
+        if (IsLabelOrDirectiveAsmLine(line) || IsGasMacroOnlyAsmLine(line)) {
           continue;
         }
         snap.post_machine_words.push_back(RunGasMipsIp(line));
@@ -4381,6 +4532,7 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
     trace.subfunction_snapshots.push_back(std::move(snap));
   }
 
+  clear_const_double_mem();
   return trace;
 }
 

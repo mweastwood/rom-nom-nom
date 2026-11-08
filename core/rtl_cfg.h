@@ -95,6 +95,7 @@ struct RtlBasicBlock {
   std::vector<std::string> instructions;
   std::vector<size_t> successors;
   std::vector<size_t> predecessors;
+  std::vector<size_t> addr_vec_targets;
 
   void AddInsn(RtlInsn insn) {
     instructions.push_back(insn.canonical_pattern);

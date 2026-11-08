@@ -215,6 +215,8 @@ std::string ToySubfunctionInverses::InvertGasMipsIp(uint32_t word_x) const {
   switch (op) {
     case 0x02u:
       return absl::StrFormat("j 0x%x", (word_x & 0x03ffffffu) << 2);
+    case 0x03u:
+      return absl::StrFormat("jal 0x%x", (word_x & 0x03ffffffu) << 2);
     case 0x08u:
       return absl::StrFormat("addi $%u,$%u,%d", rt, rs, simm);
     case 0x09u:

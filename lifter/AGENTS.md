@@ -11,7 +11,12 @@ reverse chronological order:
 ## Invariants
 
 1. **Allowed Dependencies**:
-   - Only allowed to depend on header files in `core/` and `lifter/`.
+   - Production library files in `lifter/` are only allowed to depend on header
+     files in `core/` and `lifter/` (plus standard library and Abseil).
+   - Unit test files in `lifter/` (`lifter/*_test.cc`) may additionally depend
+     on `gcc_harness/` (`testonly = True`) to verify the right-inverse law
+     $f_i(g_i(x)) = x$ against real in-process KMC GCC 2.7.2 and Binutils 2.6
+     GAS passes.
 2. **Clean-Room & GCC 2.7.2 Grounding**:
    - All stage inversions must be derived from original GCC 2.7.2 source logic
      (`final.c`, `reorg.c`, `jump.c`, `sched.c`, `global.c`, `reload1.c`,
