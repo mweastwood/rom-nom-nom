@@ -8,41 +8,44 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "lifter/invert_gas_mips_ip.h"
 
-namespace rom_nom_nom {
+namespace rom_nom_nom::lifter {
 namespace {
 
 // Instruction property flags from Binutils 2.6 `include/opcode/mips.h`
 // (`lines 150-245`).
 constexpr uint32_t kInsnWriteGprD = 0x00000001u;
 constexpr uint32_t kInsnWriteGprT = 0x00000002u;
-constexpr uint32_t kInsnWriteGpr31 = 0x00000004u;
-constexpr uint32_t kInsnWriteFprD = 0x00000008u;
-constexpr uint32_t kInsnWriteFprS = 0x00000010u;
-constexpr uint32_t kInsnWriteFprT = 0x00000020u;
-constexpr uint32_t kInsnReadGprS = 0x00000040u;
-constexpr uint32_t kInsnReadGprT = 0x00000080u;
-constexpr uint32_t kInsnReadFprS = 0x00000100u;
-constexpr uint32_t kInsnReadFprT = 0x00000200u;
-constexpr uint32_t kInsnWriteCondCode = 0x00000400u;
-constexpr uint32_t kInsnReadCondCode = 0x00000800u;
-constexpr uint32_t kInsnTrap = 0x00001000u;
-constexpr uint32_t kInsnStoreMemory = 0x00002000u;
-constexpr uint32_t kInsnLoadMemoryDelay = 0x00004000u;
-constexpr uint32_t kInsnLoadCoprocDelay = 0x00008000u;
-constexpr uint32_t kInsnCoprocMoveDelay = 0x00010000u;
-constexpr uint32_t kInsnCoprocMemoryDelay = 0x00020000u;
-constexpr uint32_t kInsnReadHi = 0x00040000u;
-constexpr uint32_t kInsnReadLo = 0x00080000u;
-constexpr uint32_t kInsnWriteHi = 0x00100000u;
-constexpr uint32_t kInsnWriteLo = 0x00200000u;
-constexpr uint32_t kInsnUncondBranchDelay = 0x00400000u;
-constexpr uint32_t kInsnCondBranchDelay = 0x00800000u;
-constexpr uint32_t kInsnCondBranchLikely = 0x01000000u;
+constexpr uint32_t kInsnWriteFprD = 0x00000004u;
+constexpr uint32_t kInsnWriteFprS = 0x00000008u;
+constexpr uint32_t kInsnWriteFprT = 0x00000010u;
+constexpr uint32_t kInsnReadGprS = 0x00000020u;
+constexpr uint32_t kInsnReadGprT = 0x00000040u;
+constexpr uint32_t kInsnReadFprS = 0x00000080u;
+constexpr uint32_t kInsnReadFprT = 0x00000100u;
+constexpr uint32_t kInsnReadFprR = 0x00000200u;
+constexpr uint32_t kInsnReadCondCode = 0x00000400u;
+constexpr uint32_t kInsnWriteCondCode = 0x00000800u;
+constexpr uint32_t kInsnReadLo = 0x00001000u;
+constexpr uint32_t kInsnReadHi = 0x00002000u;
+constexpr uint32_t kInsnWriteLo = 0x00004000u;
+constexpr uint32_t kInsnWriteHi = 0x00008000u;
+constexpr uint32_t kInsnCop = 0x00010000u;
+constexpr uint32_t kInsnUncondBranchDelay = 0x00020000u;
+constexpr uint32_t kInsnCondBranchDelay = 0x00040000u;
+constexpr uint32_t kInsnCondBranchLikely = 0x00080000u;
+constexpr uint32_t kInsnLoadCoprocDelay = 0x00100000u;
+constexpr uint32_t kInsnCoprocMoveDelay = 0x00200000u;
+constexpr uint32_t kInsnCoprocMemoryDelay = 0x00400000u;
+constexpr uint32_t kInsnLoadMemoryDelay = 0x00800000u;
+constexpr uint32_t kInsnWriteGpr31 = 0x01000000u;
+constexpr uint32_t kInsnStoreMemory = 0x02000000u;
+constexpr uint32_t kInsnTrap = 0x04000000u;
 
 // Instructions whose `pinfo` causes `append_insn` / `mips_emit_delays` in
 // `.set reorder` mode (`mips_isa = 3`, `interlocks = 0`) to insert automatic
@@ -50,224 +53,6 @@ constexpr uint32_t kInsnCondBranchLikely = 0x01000000u;
 // noreorder`, or end of assembly (`tc-mips.c:1310-1425, 1768-1816`).
 constexpr uint32_t kReorderHazardPinfoMask =
     kInsnLoadCoprocDelay | kInsnCoprocMoveDelay | kInsnWriteCondCode | kInsnReadLo | kInsnReadHi;
-
-uint32_t GetInsnPinfo(uint32_t w) {
-  if (w == 0x00000000u) {
-    return 0u;
-  }
-  const uint32_t op = (w >> 26) & 0x3fu;
-  const uint32_t rs = (w >> 21) & 0x1fu;
-  const uint32_t rt = (w >> 16) & 0x1fu;
-  const uint32_t funct = w & 0x3fu;
-
-  switch (op) {
-    case 0x00u:
-      switch (funct) {
-        case 0x00u:
-        case 0x02u:
-        case 0x03u:
-        case 0x38u:
-        case 0x3au:
-        case 0x3bu:
-        case 0x3cu:
-        case 0x3eu:
-        case 0x3fu:
-          return kInsnWriteGprD | kInsnReadGprT;
-        case 0x04u:
-        case 0x06u:
-        case 0x07u:
-        case 0x14u:
-        case 0x16u:
-        case 0x17u:
-        case 0x20u:
-        case 0x21u:
-        case 0x22u:
-        case 0x23u:
-        case 0x24u:
-        case 0x25u:
-        case 0x26u:
-        case 0x27u:
-        case 0x2au:
-        case 0x2bu:
-        case 0x2cu:
-        case 0x2du:
-        case 0x2eu:
-        case 0x2fu:
-          return kInsnWriteGprD | kInsnReadGprS | kInsnReadGprT;
-        case 0x08u:
-          return kInsnUncondBranchDelay | kInsnReadGprS;
-        case 0x09u:
-          return kInsnUncondBranchDelay | kInsnReadGprS | kInsnWriteGprD;
-        case 0x0cu:
-        case 0x0du:
-        case 0x0fu:
-          return kInsnTrap;
-        case 0x10u:
-          return kInsnWriteGprD | kInsnReadHi;
-        case 0x11u:
-          return kInsnReadGprS | kInsnWriteHi;
-        case 0x12u:
-          return kInsnWriteGprD | kInsnReadLo;
-        case 0x13u:
-          return kInsnReadGprS | kInsnWriteLo;
-        case 0x18u:
-        case 0x19u:
-        case 0x1au:
-        case 0x1bu:
-        case 0x1cu:
-        case 0x1du:
-        case 0x1eu:
-        case 0x1fu:
-          return kInsnReadGprS | kInsnReadGprT | kInsnWriteHi | kInsnWriteLo;
-        case 0x30u:
-        case 0x31u:
-        case 0x32u:
-        case 0x33u:
-        case 0x34u:
-        case 0x36u:
-          return kInsnReadGprS | kInsnReadGprT | kInsnTrap;
-        default:
-          return 0u;
-      }
-    case 0x01u:
-      switch (rt) {
-        case 0x00u:
-        case 0x01u:
-          return kInsnCondBranchDelay | kInsnReadGprS;
-        case 0x02u:
-        case 0x03u:
-          return kInsnCondBranchLikely | kInsnReadGprS;
-        case 0x08u:
-        case 0x09u:
-        case 0x0au:
-        case 0x0bu:
-        case 0x0cu:
-        case 0x0eu:
-          return kInsnReadGprS | kInsnTrap;
-        case 0x10u:
-        case 0x11u:
-          return kInsnCondBranchDelay | kInsnReadGprS | kInsnWriteGpr31;
-        case 0x12u:
-        case 0x13u:
-          return kInsnCondBranchLikely | kInsnReadGprS | kInsnWriteGpr31;
-        default:
-          return 0u;
-      }
-    case 0x02u:
-      return kInsnUncondBranchDelay;
-    case 0x03u:
-      return kInsnUncondBranchDelay | kInsnWriteGpr31;
-    case 0x04u:
-    case 0x05u:
-      return kInsnCondBranchDelay | kInsnReadGprS | kInsnReadGprT;
-    case 0x06u:
-    case 0x07u:
-      return kInsnCondBranchDelay | kInsnReadGprS;
-    case 0x08u:
-    case 0x09u:
-    case 0x0au:
-    case 0x0bu:
-    case 0x0cu:
-    case 0x0du:
-    case 0x0eu:
-    case 0x18u:
-    case 0x19u:
-    case 0x1au:
-    case 0x1bu:
-    case 0x37u:
-      return kInsnWriteGprT | kInsnReadGprS;
-    case 0x0fu:
-      return kInsnWriteGprT;
-    case 0x10u:
-      switch (rs) {
-        case 0x00u:
-        case 0x01u:
-        case 0x02u:
-          return kInsnLoadCoprocDelay | kInsnWriteGprT;
-        case 0x04u:
-        case 0x05u:
-        case 0x06u:
-          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnWriteCondCode;
-        case 0x08u:
-          return (rt < 0x02u) ? (kInsnCondBranchDelay | kInsnReadCondCode)
-                              : (kInsnCondBranchLikely | kInsnReadCondCode);
-        default:
-          return 0u;
-      }
-    case 0x11u:
-      switch (rs) {
-        case 0x00u:
-        case 0x01u:
-        case 0x02u:
-          return kInsnLoadCoprocDelay | kInsnWriteGprT | kInsnReadFprS;
-        case 0x04u:
-        case 0x05u:
-          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnWriteFprS;
-        case 0x06u:
-          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnWriteCondCode;
-        case 0x08u:
-          return (rt < 0x02u) ? (kInsnCondBranchDelay | kInsnReadCondCode)
-                              : (kInsnCondBranchLikely | kInsnReadCondCode);
-        case 0x10u:
-        case 0x11u:
-        case 0x14u:
-        case 0x15u:
-          if (funct >= 0x30u && funct <= 0x3fu) {
-            return kInsnReadFprS | kInsnReadFprT | kInsnWriteCondCode;
-          }
-          if (funct <= 0x03u) {
-            return kInsnWriteFprD | kInsnReadFprS | kInsnReadFprT;
-          }
-          return kInsnWriteFprD | kInsnReadFprS;
-        default:
-          return 0u;
-      }
-    case 0x14u:
-    case 0x15u:
-      return kInsnCondBranchLikely | kInsnReadGprS | kInsnReadGprT;
-    case 0x16u:
-    case 0x17u:
-      return kInsnCondBranchLikely | kInsnReadGprS;
-    case 0x20u:
-    case 0x21u:
-    case 0x22u:
-    case 0x23u:
-    case 0x24u:
-    case 0x25u:
-    case 0x26u:
-    case 0x27u:
-    case 0x30u:
-    case 0x34u:
-      return kInsnLoadMemoryDelay | kInsnReadGprS | kInsnWriteGprT;
-    case 0x28u:
-    case 0x29u:
-    case 0x2au:
-    case 0x2bu:
-    case 0x2cu:
-    case 0x2du:
-    case 0x2eu:
-    case 0x3fu:
-      return kInsnStoreMemory | kInsnReadGprS | kInsnReadGprT;
-    case 0x2fu:
-      return kInsnReadGprS;
-    case 0x31u:
-    case 0x35u:
-      return kInsnCoprocMemoryDelay | kInsnReadGprS | kInsnWriteFprT;
-    case 0x38u:
-    case 0x3cu:
-      return kInsnStoreMemory | kInsnReadGprS | kInsnReadGprT | kInsnWriteGprT;
-    case 0x39u:
-    case 0x3du:
-      return kInsnStoreMemory | kInsnReadGprS | kInsnReadFprT;
-    default:
-      return 0u;
-  }
-}
-
-bool IsBranchOrJumpWord(uint32_t w) {
-  const uint32_t pinfo = GetInsnPinfo(w);
-  return (pinfo & (kInsnUncondBranchDelay | kInsnCondBranchDelay | kInsnCondBranchLikely)) != 0u;
-}
 
 bool IsPcRelativeBranchWord(uint32_t w) {
   const uint32_t op = (w >> 26) & 0x3fu;
@@ -291,6 +76,96 @@ bool InsnUsesGpr(uint32_t w, uint32_t pinfo, uint32_t reg) {
     return true;
   }
   return false;
+}
+
+// Mirrors `tc-mips.c:1208-1251`: `insn_uses_reg(ip, reg, /*fpr=*/1)` (`mips_isa = 3`).
+bool InsnUsesFpr(uint32_t w, uint32_t pinfo, uint32_t reg) {
+  const uint32_t reg_even = reg & ~1u;
+  const uint32_t fr = ((w >> 21) & 0x1fu) & ~1u;
+  const uint32_t ft = ((w >> 16) & 0x1fu) & ~1u;
+  const uint32_t fs = ((w >> 11) & 0x1fu) & ~1u;
+  if ((pinfo & kInsnReadFprS) != 0u && fs == reg_even) {
+    return true;
+  }
+  if ((pinfo & kInsnReadFprT) != 0u && ft == reg_even) {
+    return true;
+  }
+  if ((pinfo & kInsnReadFprR) != 0u && fr == reg_even) {
+    return true;
+  }
+  return false;
+}
+
+// Mirrors `tc-mips.c:1768-1816`: number of `nop` words emitted by
+// `mips_emit_delays()` when turning on `.set noreorder` or defining a label.
+size_t MipsEmitDelaysNops(uint32_t prev_w, uint32_t prev_prev_w) {
+  const uint32_t prev_pinfo = GetInsnPinfo(prev_w);
+  const uint32_t prev_prev_pinfo = GetInsnPinfo(prev_prev_w);
+  if ((prev_pinfo & kReorderHazardPinfoMask) != 0u) {
+    if ((prev_pinfo & (kInsnWriteCondCode | kInsnReadLo | kInsnReadHi)) != 0u) {
+      return 2;
+    }
+    return 1;
+  }
+  if ((prev_prev_pinfo & (kInsnWriteCondCode | kInsnReadLo | kInsnReadHi)) != 0u) {
+    return 1;
+  }
+  return 0;
+}
+
+// Mirrors `tc-mips.c:1295-1425`: number of `nop` words emitted by
+// `append_insn` before instruction `cur_w` in `.set reorder` mode
+// (`mips_isa = 3`, `interlocks = 0`, `mips_optimize = 2`).
+size_t AppendInsnHazardNops(uint32_t prev_w, uint32_t prev_prev_w, uint32_t cur_w) {
+  const uint32_t prev_pinfo = GetInsnPinfo(prev_w);
+  const uint32_t prev_prev_pinfo = GetInsnPinfo(prev_prev_w);
+  const uint32_t cur_pinfo = GetInsnPinfo(cur_w);
+  size_t nops = 0;
+
+  if ((prev_pinfo & kInsnLoadCoprocDelay) != 0u) {
+    if (InsnUsesGpr(cur_w, cur_pinfo, (prev_w >> 16) & 0x1fu)) {
+      ++nops;
+    }
+  } else if ((prev_pinfo & kInsnCoprocMoveDelay) != 0u) {
+    if ((prev_pinfo & kInsnWriteFprT) != 0u) {
+      if (InsnUsesFpr(cur_w, cur_pinfo, (prev_w >> 16) & 0x1fu)) {
+        ++nops;
+      }
+    } else if ((prev_pinfo & kInsnWriteFprS) != 0u) {
+      if (InsnUsesFpr(cur_w, cur_pinfo, (prev_w >> 11) & 0x1fu)) {
+        ++nops;
+      }
+    } else {
+      if ((prev_pinfo & kInsnWriteCondCode) != 0u && (cur_pinfo & kInsnReadCondCode) != 0u) {
+        nops += 2;
+      } else if ((cur_pinfo & kInsnCop) != 0u) {
+        ++nops;
+      }
+    }
+  } else if ((prev_pinfo & kInsnWriteCondCode) != 0u) {
+    if ((cur_pinfo & kInsnReadCondCode) != 0u) {
+      ++nops;
+    }
+  } else if ((prev_pinfo & kInsnReadLo) != 0u) {
+    if ((cur_pinfo & kInsnWriteLo) != 0u) {
+      nops += 2;
+    }
+  } else if ((prev_pinfo & kInsnReadHi) != 0u) {
+    if ((cur_pinfo & kInsnWriteHi) != 0u) {
+      nops += 2;
+    }
+  }
+
+  if (nops == 0) {
+    if (((prev_prev_pinfo & kInsnCoprocMoveDelay) != 0u &&
+         (prev_prev_pinfo & kInsnWriteCondCode) != 0u && (cur_pinfo & kInsnReadCondCode) != 0u) ||
+        ((prev_prev_pinfo & kInsnReadLo) != 0u && (cur_pinfo & kInsnWriteLo) != 0u) ||
+        ((prev_prev_pinfo & kInsnReadHi) != 0u && (cur_pinfo & kInsnWriteHi) != 0u)) {
+      ++nops;
+    }
+  }
+
+  return nops;
 }
 
 // Mirrors `tc-mips.c:1530-1665`: returns true iff `append_insn` in `.set
@@ -357,6 +232,277 @@ std::string ReplaceTargetWithLabel(std::string_view insn_line, std::string_view 
 }
 
 }  // namespace
+
+uint32_t GetInsnPinfo(uint32_t w) {
+  if (w == 0x00000000u) {
+    return 0u;
+  }
+
+  const uint32_t op = (w >> 26) & 0x3fu;
+  const uint32_t rs = (w >> 21) & 0x1fu;
+  const uint32_t rt = (w >> 16) & 0x1fu;
+  const uint32_t funct = w & 0x3fu;
+
+  switch (op) {
+    case 0x00u: {
+      switch (funct) {
+        case 0x00u:
+        case 0x02u:
+        case 0x03u:
+        case 0x38u:
+        case 0x3au:
+        case 0x3bu:
+        case 0x3cu:
+        case 0x3eu:
+        case 0x3fu:
+          return kInsnWriteGprD | kInsnReadGprT;
+        case 0x04u:
+        case 0x06u:
+        case 0x07u:
+        case 0x14u:
+        case 0x16u:
+        case 0x17u:
+        case 0x20u:
+        case 0x21u:
+        case 0x22u:
+        case 0x23u:
+        case 0x24u:
+        case 0x25u:
+        case 0x26u:
+        case 0x27u:
+        case 0x2au:
+        case 0x2bu:
+        case 0x2cu:
+        case 0x2du:
+        case 0x2eu:
+        case 0x2fu:
+          return kInsnWriteGprD | kInsnReadGprS | kInsnReadGprT;
+        case 0x08u:
+          return kInsnUncondBranchDelay | kInsnReadGprS;
+        case 0x09u:
+          return kInsnUncondBranchDelay | kInsnWriteGprD | kInsnReadGprS;
+        case 0x0cu:
+        case 0x0du:
+          return kInsnTrap;
+        case 0x0fu:
+          return 0u;
+        case 0x10u:
+          return kInsnWriteGprD | kInsnReadHi;
+        case 0x11u:
+          return kInsnReadGprS | kInsnWriteHi;
+        case 0x12u:
+          return kInsnWriteGprD | kInsnReadLo;
+        case 0x13u:
+          return kInsnReadGprS | kInsnWriteLo;
+        case 0x18u:
+        case 0x19u:
+        case 0x1au:
+        case 0x1bu:
+        case 0x1cu:
+        case 0x1du:
+        case 0x1eu:
+        case 0x1fu:
+          return kInsnReadGprS | kInsnReadGprT | kInsnWriteLo | kInsnWriteHi;
+        case 0x30u:
+        case 0x31u:
+        case 0x32u:
+        case 0x33u:
+        case 0x34u:
+        case 0x36u:
+          return kInsnTrap | kInsnReadGprS | kInsnReadGprT;
+        default:
+          return 0u;
+      }
+    }
+    case 0x01u: {
+      switch (rt) {
+        case 0x00u:
+        case 0x01u:
+          return kInsnCondBranchDelay | kInsnReadGprS;
+        case 0x02u:
+        case 0x03u:
+          return kInsnCondBranchLikely | kInsnReadGprS;
+        case 0x08u:
+        case 0x09u:
+        case 0x0au:
+        case 0x0bu:
+        case 0x0cu:
+        case 0x0eu:
+          return kInsnTrap | kInsnReadGprS;
+        case 0x10u:
+        case 0x11u:
+          return kInsnCondBranchDelay | kInsnWriteGpr31 | kInsnReadGprS;
+        case 0x12u:
+        case 0x13u:
+          return kInsnCondBranchLikely | kInsnWriteGpr31 | kInsnReadGprS;
+        default:
+          return 0u;
+      }
+    }
+    case 0x02u:
+      return kInsnUncondBranchDelay;
+    case 0x03u:
+      return kInsnUncondBranchDelay | kInsnWriteGpr31;
+    case 0x04u:
+    case 0x05u:
+      return kInsnCondBranchDelay | kInsnReadGprS | kInsnReadGprT;
+    case 0x06u:
+    case 0x07u:
+      return kInsnCondBranchDelay | kInsnReadGprS;
+    case 0x08u:
+    case 0x09u:
+    case 0x0au:
+    case 0x0bu:
+    case 0x0cu:
+    case 0x0du:
+    case 0x0eu:
+    case 0x18u:
+    case 0x19u:
+    case 0x1au:
+    case 0x1bu:
+    case 0x37u:
+      return kInsnWriteGprT | kInsnReadGprS;
+    case 0x0fu:
+      return kInsnWriteGprT;
+    case 0x10u:
+    case 0x12u:
+    case 0x13u:
+      switch (rs) {
+        case 0x00u:
+        case 0x01u:
+        case 0x02u:
+          return kInsnLoadCoprocDelay | kInsnWriteGprT | kInsnCop;
+        case 0x04u:
+        case 0x05u:
+          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnCop;
+        case 0x06u:
+          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnWriteCondCode | kInsnCop;
+        case 0x08u:
+          return (rt < 0x02u) ? (kInsnCondBranchDelay | kInsnReadCondCode | kInsnCop)
+                              : (kInsnCondBranchLikely | kInsnReadCondCode | kInsnCop);
+        default:
+          return kInsnCop;
+      }
+    case 0x11u:
+      switch (rs) {
+        case 0x00u:
+        case 0x01u:
+        case 0x02u:
+          return kInsnLoadCoprocDelay | kInsnWriteGprT | kInsnReadFprS;
+        case 0x04u:
+        case 0x05u:
+          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnWriteFprS;
+        case 0x06u:
+          return kInsnCoprocMoveDelay | kInsnReadGprT | kInsnWriteCondCode | kInsnCop;
+        case 0x08u:
+          return (rt < 0x02u) ? (kInsnCondBranchDelay | kInsnReadCondCode)
+                              : (kInsnCondBranchLikely | kInsnReadCondCode);
+        case 0x10u:
+        case 0x11u:
+        case 0x14u:
+        case 0x15u:
+          if (funct >= 0x30u && funct <= 0x3fu) {
+            return kInsnReadFprS | kInsnReadFprT | kInsnWriteCondCode;
+          }
+          if (funct <= 0x03u) {
+            return kInsnWriteFprD | kInsnReadFprS | kInsnReadFprT;
+          }
+          return kInsnWriteFprD | kInsnReadFprS;
+        default:
+          return 0u;
+      }
+    case 0x14u:
+    case 0x15u:
+      return kInsnCondBranchLikely | kInsnReadGprS | kInsnReadGprT;
+    case 0x16u:
+    case 0x17u:
+      return kInsnCondBranchLikely | kInsnReadGprS;
+    case 0x20u:
+    case 0x21u:
+    case 0x22u:
+    case 0x23u:
+    case 0x24u:
+    case 0x25u:
+    case 0x26u:
+    case 0x27u:
+    case 0x30u:
+    case 0x34u:
+      return kInsnLoadMemoryDelay | kInsnReadGprS | kInsnWriteGprT;
+    case 0x28u:
+    case 0x29u:
+    case 0x2au:
+    case 0x2bu:
+    case 0x2cu:
+    case 0x2du:
+    case 0x2eu:
+    case 0x3fu:
+      return kInsnStoreMemory | kInsnReadGprS | kInsnReadGprT;
+    case 0x2fu:
+      return kInsnReadGprS;
+    case 0x31u:
+    case 0x35u:
+      return kInsnCoprocMemoryDelay | kInsnReadGprS | kInsnWriteFprT;
+    case 0x38u:
+    case 0x3cu:
+      return kInsnStoreMemory | kInsnReadGprS | kInsnReadGprT | kInsnWriteGprT;
+    case 0x39u:
+    case 0x3du:
+      return kInsnStoreMemory | kInsnReadGprS | kInsnReadFprT;
+    default:
+      return 0u;
+  }
+}
+
+bool IsBranchOrJumpWord(uint32_t w) {
+  const uint32_t pinfo = GetInsnPinfo(w);
+  return (pinfo & (kInsnUncondBranchDelay | kInsnCondBranchDelay | kInsnCondBranchLikely)) != 0u;
+}
+
+absl::Span<const uint32_t> StripSectionAlignmentPadding(
+    absl::Span<const uint32_t> machine_words_x) {
+  if (machine_words_x.size() < 4 || (machine_words_x.size() % 4) != 0) {
+    return machine_words_x;
+  }
+
+  size_t cand_len = machine_words_x.size();
+  while (cand_len > 2 && cand_len + 3 >= machine_words_x.size() &&
+         machine_words_x[cand_len - 1] == 0x00000000u &&
+         !IsBranchOrJumpWord(machine_words_x[cand_len - 2])) {
+    --cand_len;
+  }
+  if (cand_len == machine_words_x.size() || !IsBranchOrJumpWord(machine_words_x[cand_len - 2])) {
+    return machine_words_x;
+  }
+
+  // Ensure no branch or local jump in `0 .. cand_len - 2` targets `>= cand_len`.
+  for (size_t i = 0; i < cand_len;) {
+    const uint32_t w = machine_words_x[i];
+    if (IsBranchOrJumpWord(w)) {
+      if (i + 1 >= cand_len) {
+        return machine_words_x;
+      }
+      const uint32_t op = (w >> 26) & 0x3fu;
+      if (op == 0x02u) {
+        const size_t target_idx = static_cast<size_t>(w & 0x03ffffffu);
+        if (target_idx >= cand_len && target_idx < machine_words_x.size()) {
+          return machine_words_x;
+        }
+      } else if (IsPcRelativeBranchWord(w)) {
+        const int16_t simm = static_cast<int16_t>(w & 0xffffu);
+        const int64_t target_idx = static_cast<int64_t>(i) + 1 + static_cast<int64_t>(simm);
+        if (target_idx >= static_cast<int64_t>(cand_len) &&
+            target_idx < static_cast<int64_t>(machine_words_x.size())) {
+          return machine_words_x;
+        }
+      }
+      i += 2;
+    } else {
+      ++i;
+    }
+  }
+
+  return machine_words_x.subspan(0, cand_len);
+}
 
 std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) {
   if (words_x.empty()) {
@@ -517,4 +663,274 @@ std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x)
   return lines;
 }
 
-}  // namespace rom_nom_nom
+bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
+                                 absl::Span<const std::string> raw_lines,
+                                 std::vector<AsmItem>* out_items) {
+  out_items->clear();
+  size_t w_idx = 0;
+
+  for (size_t i = 0; i < raw_lines.size(); ++i) {
+    const std::string& line = raw_lines[i];
+    if (absl::EndsWith(line, ":")) {
+      AsmItem item;
+      item.kind = AsmItemKind::kLabel;
+      item.line = line;
+      out_items->push_back(std::move(item));
+      continue;
+    }
+
+    if (line == ".set\tnoreorder" || line == ".set noreorder") {
+      size_t end_nr = i + 1;
+      while (end_nr < raw_lines.size() && raw_lines[end_nr] != ".set\treorder" &&
+             raw_lines[end_nr] != ".set reorder") {
+        ++end_nr;
+      }
+      if (end_nr >= raw_lines.size()) {
+        return false;
+      }
+      const size_t body_len = end_nr - (i + 1);
+      if (body_len == 1) {
+        // 3-line `.set noreorder / <hazard_insn> / .set reorder` emitted by
+        // `InvertGasAppendInsn` for a single hazard instruction.
+        if (w_idx >= words.size()) {
+          return false;
+        }
+        AsmItem item;
+        item.kind = AsmItemKind::kReorderInsn;
+        item.line = raw_lines[i + 1];
+        item.word = words[w_idx++];
+        out_items->push_back(std::move(item));
+        i = end_nr;
+        continue;
+      }
+      if (body_len == 2) {
+        if (w_idx + 1 >= words.size()) {
+          return false;
+        }
+        AsmItem item;
+        item.kind = AsmItemKind::kNoreorderBranchSeq;
+        item.line = raw_lines[i + 1];
+        item.delay_line = raw_lines[i + 2];
+        item.word = words[w_idx];
+        item.delay_word = words[w_idx + 1];
+        w_idx += 2;
+        out_items->push_back(std::move(item));
+        i = end_nr;
+        continue;
+      }
+      if (body_len == 3 && absl::EndsWith(raw_lines[i + 2], ":")) {
+        if (w_idx + 1 >= words.size()) {
+          return false;
+        }
+        AsmItem item;
+        item.kind = AsmItemKind::kNoreorderBranchSeq;
+        item.line = raw_lines[i + 1];
+        item.delay_label = raw_lines[i + 2];
+        item.delay_line = raw_lines[i + 3];
+        item.word = words[w_idx];
+        item.delay_word = words[w_idx + 1];
+        w_idx += 2;
+        out_items->push_back(std::move(item));
+        i = end_nr;
+        continue;
+      }
+      return false;
+    }
+
+    if (w_idx >= words.size()) {
+      return false;
+    }
+    const uint32_t w = words[w_idx];
+    if (IsBranchOrJumpWord(w)) {
+      if (w_idx + 1 >= words.size()) {
+        return false;
+      }
+      const uint32_t delay_w = words[w_idx + 1];
+      if (delay_w == 0x00000000u) {
+        AsmItem item;
+        item.kind = AsmItemKind::kReorderInsn;
+        item.line = line;
+        item.word = w;
+        out_items->push_back(std::move(item));
+        w_idx += 2;
+      } else {
+        // `InvertGasAppendInsn` emitted `[delay_line, branch_line]` in `.set reorder`.
+        if (i + 1 >= raw_lines.size()) {
+          return false;
+        }
+        AsmItem delay_item;
+        delay_item.kind = AsmItemKind::kReorderInsn;
+        delay_item.line = line;
+        delay_item.word = delay_w;
+        delay_item.unswapped_from_branch = true;
+        out_items->push_back(std::move(delay_item));
+
+        AsmItem branch_item;
+        branch_item.kind = AsmItemKind::kReorderInsn;
+        branch_item.line = raw_lines[i + 1];
+        branch_item.word = w;
+        branch_item.unswapped_from_branch = true;
+        out_items->push_back(std::move(branch_item));
+
+        ++i;
+        w_idx += 2;
+      }
+    } else {
+      AsmItem item;
+      item.kind = AsmItemKind::kReorderInsn;
+      item.line = line;
+      item.word = w;
+      out_items->push_back(std::move(item));
+      ++w_idx;
+    }
+  }
+
+  return w_idx == words.size();
+}
+
+void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
+  std::vector<AsmItem> out;
+  out.reserve(items->size());
+
+  uint32_t prev_w = 0u;
+  uint32_t prev_prev_w = 0u;
+
+  for (size_t i = 0; i < items->size();) {
+    // Check if consecutive `nop` (`0x00000000u`) items starting at `i` were
+    // automatically inserted by `append_insn` or `mips_emit_delays()` due to
+    // `(prev_w, prev_prev_w)`.
+    if (((GetInsnPinfo(prev_w) & kReorderHazardPinfoMask) != 0u ||
+         (GetInsnPinfo(prev_prev_w) & kReorderHazardPinfoMask) != 0u) &&
+        (*items)[i].kind == AsmItemKind::kReorderInsn && (*items)[i].word == 0x00000000u) {
+      size_t nop_count = 0;
+      while (i + nop_count < items->size() &&
+             (*items)[i + nop_count].kind == AsmItemKind::kReorderInsn &&
+             (*items)[i + nop_count].word == 0x00000000u) {
+        ++nop_count;
+      }
+      const size_t next_idx = i + nop_count;
+      size_t expected_nops = 0;
+      if (next_idx >= items->size() || (*items)[next_idx].kind != AsmItemKind::kReorderInsn) {
+        expected_nops = MipsEmitDelaysNops(prev_w, prev_prev_w);
+      } else {
+        const AsmItem& next_item = (*items)[next_idx];
+        expected_nops = AppendInsnHazardNops(prev_w, prev_prev_w, next_item.word);
+        // If `next_item` was un-swapped from `[branch_w, delay_w]` and
+        // `AppendInsnHazardNops` does not account for `nop_count` whereas
+        // `MipsEmitDelaysNops` does, `[branch_w, delay_w]` was emitted as a
+        // `.set noreorder` `SEQUENCE` in `RunFinal()`.
+        if (expected_nops != nop_count && next_item.unswapped_from_branch &&
+            next_idx + 1 < items->size() && (*items)[next_idx + 1].unswapped_from_branch &&
+            IsBranchOrJumpWord((*items)[next_idx + 1].word)) {
+          const size_t emit_delays_nops = MipsEmitDelaysNops(prev_w, prev_prev_w);
+          if (emit_delays_nops == nop_count) {
+            AsmItem seq_item;
+            seq_item.kind = AsmItemKind::kNoreorderBranchSeq;
+            seq_item.line = (*items)[next_idx + 1].line;
+            seq_item.delay_line = next_item.line;
+            seq_item.word = (*items)[next_idx + 1].word;
+            seq_item.delay_word = next_item.word;
+            (*items)[next_idx] = std::move(seq_item);
+            items->erase(items->begin() + static_cast<ptrdiff_t>(next_idx + 1));
+            expected_nops = emit_delays_nops;
+          }
+        }
+        // Under `-Wa,-g` (`mips_optimize == 0`), `tc-mips.c:append_insn`
+        // unconditionally emits `MipsEmitDelaysNops(prev_w, prev_prev_w)`
+        // hazard `nop`s after coprocessor/HI/LO hazard instructions even when
+        // `next_item` does not read the hazard register. Since `RunFinal()`
+        // never emits explicit `nop`s after hazard instructions in `.set reorder`
+        // mode, any `nop_count <= MipsEmitDelaysNops(prev_w, prev_prev_w)` was
+        // inserted by GAS.
+        if (expected_nops == 0) {
+          const size_t max_emit_nops = MipsEmitDelaysNops(prev_w, prev_prev_w);
+          if (nop_count <= max_emit_nops) {
+            expected_nops = nop_count;
+          }
+        }
+      }
+
+      if (expected_nops > 0 && nop_count >= expected_nops) {
+        i += expected_nops;
+        if (expected_nops == 1) {
+          prev_prev_w = prev_w;
+          prev_w = 0u;
+        } else {
+          prev_prev_w = 0u;
+          prev_w = 0u;
+        }
+        continue;
+      }
+    }
+
+    AsmItem& cur = (*items)[i];
+    if (cur.kind == AsmItemKind::kLabel || cur.kind == AsmItemKind::kNoreorderBranchSeq) {
+      prev_w = 0u;
+      prev_prev_w = 0u;
+      out.push_back(std::move(cur));
+      ++i;
+      continue;
+    }
+
+    // `cur.kind == AsmItemKind::kReorderInsn`
+    if (MipsEmitDelaysNops(prev_w, prev_prev_w) > 0) {
+      cur.preceded_by_active_hazard = true;
+    }
+    if (IsBranchOrJumpWord(cur.word)) {
+      if (cur.unswapped_from_branch) {
+        const uint32_t branch_pinfo = GetInsnPinfo(cur.word);
+        if ((branch_pinfo & kInsnUncondBranchDelay) != 0u) {
+          prev_w = 0u;
+          prev_prev_w = 0u;
+        } else {
+          prev_prev_w = cur.word;
+        }
+      } else {
+        // Branch in `.set reorder` mode with `nop` delay slot.
+        prev_prev_w = cur.word;
+        prev_w = 0u;
+      }
+    } else {
+      const size_t auto_nops = AppendInsnHazardNops(prev_w, prev_prev_w, cur.word);
+      if (auto_nops > 0) {
+        prev_prev_w = 0u;
+      } else {
+        prev_prev_w = prev_w;
+      }
+      prev_w = cur.word;
+    }
+
+    out.push_back(std::move(cur));
+    ++i;
+  }
+
+  *items = std::move(out);
+}
+
+bool InvertGasAppendInsnToItems(absl::Span<const uint32_t> machine_words_x,
+                                std::vector<AsmItem>* out_items) {
+  out_items->clear();
+  if (machine_words_x.empty()) {
+    return false;
+  }
+
+  const absl::Span<const uint32_t> words = StripSectionAlignmentPadding(machine_words_x);
+  if (words.size() < 2 || !IsBranchOrJumpWord(words[words.size() - 2])) {
+    return false;
+  }
+
+  const std::vector<std::string> raw_lines = InvertGasAppendInsn(words);
+  if (raw_lines.empty()) {
+    return false;
+  }
+
+  if (!BuildAsmItemsFromAppendInsn(words, raw_lines, out_items)) {
+    out_items->clear();
+    return false;
+  }
+
+  StripGasInsertedHazardNops(out_items);
+  return !out_items->empty();
+}
+
+}  // namespace rom_nom_nom::lifter

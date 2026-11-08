@@ -71,7 +71,9 @@ cc_library(
     hdrs = ["invert_gas_macro.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":invert_gas_append_insn",
         ":invert_gas_mips_ip",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
     ],
@@ -104,8 +106,10 @@ cc_library(
     hdrs = ["invert_function_prologue_epilogue.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":invert_final_scan_insn",
         "//core:rtl_cfg",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -134,9 +138,12 @@ cc_library(
     hdrs = ["invert_final_scan_insn.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core:rtl_cfg",
         "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -169,12 +176,7 @@ cc_library(
         ":invert_function_prologue_epilogue",
         ":invert_gas_append_insn",
         ":invert_gas_macro",
-        ":invert_gas_mips_ip",
         "//core:rtl_cfg",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
     ],
 )

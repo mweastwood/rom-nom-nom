@@ -1,14 +1,22 @@
 #include "lifter/invert_gas_macro.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "lifter/invert_gas_append_insn.h"
 #include "lifter/invert_gas_mips_ip.h"
 
-namespace rom_nom_nom {
+namespace rom_nom_nom::lifter {
 namespace {
 
 uint32_t Opcode(uint32_t w) {
@@ -631,6 +639,146 @@ std::string InvertTwelveWords(absl::Span<const uint32_t> words) {
   return "";
 }
 
+int ParseLuiZeroReg(std::string_view line) {
+  if ((!absl::StartsWith(line, "lui $") && !absl::StartsWith(line, "lui\t$")) ||
+      !absl::EndsWith(line, ",0x0")) {
+    return -1;
+  }
+  int reg = -1;
+  if (!absl::SimpleAtoi(line.substr(5, line.size() - 9), &reg) || reg < 1 || reg > 31) {
+    return -1;
+  }
+  return reg;
+}
+
+bool ParseIndexedAddrAddu(std::string_view line, int expected_tempreg, int* out_base_reg) {
+  const size_t sep = line.find_first_of(" \t");
+  if (sep == std::string_view::npos) {
+    return false;
+  }
+  const std::string_view mnem = line.substr(0, sep);
+  if (mnem != "addu" && mnem != "daddu") {
+    return false;
+  }
+  const std::string_view rest = absl::StripAsciiWhitespace(line.substr(sep + 1));
+  const std::string prefix = absl::StrFormat("$%d,$%d,$", expected_tempreg, expected_tempreg);
+  if (!absl::StartsWith(rest, prefix)) {
+    return false;
+  }
+  int base_reg = -1;
+  if (!absl::SimpleAtoi(rest.substr(prefix.size()), &base_reg) || base_reg < 1 || base_reg > 31) {
+    return false;
+  }
+  *out_base_reg = base_reg;
+  return true;
+}
+
+bool ParseSameRegAddiuOffset(std::string_view line, int expected_reg, int32_t* out_off) {
+  const size_t sep = line.find_first_of(" \t");
+  if (sep == std::string_view::npos) {
+    return false;
+  }
+  const std::string_view mnem = line.substr(0, sep);
+  if (mnem != "addiu" && mnem != "daddiu") {
+    return false;
+  }
+  const std::string_view rest = absl::StripAsciiWhitespace(line.substr(sep + 1));
+  const std::string prefix = absl::StrFormat("$%d,$%d,", expected_reg, expected_reg);
+  if (!absl::StartsWith(rest, prefix)) {
+    return false;
+  }
+  const std::string_view off_str = rest.substr(prefix.size());
+  int32_t off = 0;
+  if (!absl::SimpleAtoi(off_str, &off)) {
+    return false;
+  }
+  *out_off = off;
+  return true;
+}
+
+bool ParseBaseMemInsn(std::string_view line, int expected_base_reg, std::string* out_mnem,
+                      std::string* out_reg, int32_t* out_off) {
+  const size_t sep = line.find_first_of(" \t");
+  if (sep == std::string_view::npos) {
+    return false;
+  }
+  std::string_view mnem = line.substr(0, sep);
+  if (mnem == "lwc1") mnem = "l.s";
+  if (mnem == "swc1") mnem = "s.s";
+  if (mnem == "ldc1") mnem = "l.d";
+  if (mnem == "sdc1") mnem = "s.d";
+  if (mnem != "lb" && mnem != "lbu" && mnem != "lh" && mnem != "lhu" && mnem != "lw" &&
+      mnem != "lwu" && mnem != "ld" && mnem != "sb" && mnem != "sh" && mnem != "sw" &&
+      mnem != "sd" && mnem != "l.s" && mnem != "s.s" && mnem != "l.d" && mnem != "s.d") {
+    return false;
+  }
+  const std::string_view rest = absl::StripAsciiWhitespace(line.substr(sep + 1));
+  const size_t comma = rest.find(',');
+  const std::string suffix = absl::StrFormat("($%d)", expected_base_reg);
+  if (comma == std::string_view::npos || !absl::EndsWith(rest, suffix)) {
+    return false;
+  }
+  const std::string_view reg = rest.substr(0, comma);
+  if (expected_base_reg != 1 && reg != absl::StrFormat("$%d", expected_base_reg)) {
+    return false;
+  }
+  const std::string_view off_str = rest.substr(comma + 1, rest.size() - comma - 1 - suffix.size());
+  int32_t off = 0;
+  if (!off_str.empty() && !absl::SimpleAtoi(off_str, &off)) {
+    return false;
+  }
+  *out_mnem = std::string(mnem);
+  *out_reg = std::string(reg);
+  *out_off = off;
+  return true;
+}
+
+std::string FormatSymOffset(int32_t off) {
+  if (off == 0) {
+    return "__sym_0";
+  }
+  if (off > 0) {
+    return absl::StrFormat("__sym_0+%d", off);
+  }
+  return absl::StrFormat("__sym_0%d", off);
+}
+
+bool IsPairedFpDoubleSecondHalf(std::string_view next_line, int expected_base_reg,
+                                std::string_view first_mnem, std::string_view first_reg,
+                                int32_t first_off) {
+  if ((first_mnem != "l.s" && first_mnem != "s.s") || !absl::StartsWith(first_reg, "$f")) {
+    return false;
+  }
+  int fpreg = -1;
+  if (!absl::SimpleAtoi(first_reg.substr(2), &fpreg) || (fpreg % 2) != 0) {
+    return false;
+  }
+  std::string next_mnem;
+  std::string next_reg;
+  int32_t next_off = 0;
+  if (!ParseBaseMemInsn(next_line, expected_base_reg, &next_mnem, &next_reg, &next_off)) {
+    return false;
+  }
+  return next_mnem == first_mnem && next_reg == absl::StrFormat("$f%d", fpreg + 1) &&
+         next_off == first_off + 4;
+}
+
+std::string NormalizeCop1LoadStoreMnemonic(std::string_view line) {
+  if (absl::StartsWith(line, "lwc1 ") || absl::StartsWith(line, "lwc1\t")) {
+    return absl::StrCat("l.s ", absl::StripAsciiWhitespace(line.substr(5)));
+  }
+  if (absl::StartsWith(line, "swc1 ") || absl::StartsWith(line, "swc1\t")) {
+    return absl::StrCat("s.s ", absl::StripAsciiWhitespace(line.substr(5)));
+  }
+  if (absl::StartsWith(line, "ldc1 ") || absl::StartsWith(line, "ldc1\t")) {
+    return absl::StrCat("l.d ", absl::StripAsciiWhitespace(line.substr(5)));
+  }
+  if (absl::StartsWith(line, "sdc1 ") || absl::StartsWith(line, "sdc1\t")) {
+    return absl::StrCat("s.d ", absl::StripAsciiWhitespace(line.substr(5)));
+  }
+  return std::string(line);
+}
+
 }  // namespace
 
 std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) {
@@ -668,4 +816,228 @@ std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) {
   }
 }
 
-}  // namespace rom_nom_nom
+std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmItem> raw_items) {
+  // Pass 1: collapse multi-word `InvertGasMacro` expansions (`M_DIV_3`,
+  // `M_REM_3`, `M_DIVU_3`, `M_REMU_3`, `M_LI`) and normalize single-instruction
+  // mnemonics (`lwc1`/`swc1`/`ldc1`/`sdc1`, `jal`).
+  std::vector<AsmItem> items;
+  items.reserve(raw_items.size());
+  const auto is_nop_delay_branch_or_reorder = [](const AsmItem& it) {
+    return it.kind == AsmItemKind::kReorderInsn ||
+           (it.kind == AsmItemKind::kNoreorderBranchSeq && it.delay_word == 0x00000000u &&
+            it.delay_label.empty());
+  };
+  for (size_t i = 0; i < raw_items.size(); ++i) {
+    AsmItem item = raw_items[i];
+    if (item.kind == AsmItemKind::kReorderInsn) {
+      // 11-word signed `div`/`rem` (`M_DIV_3` / `M_REM_3`) spanning 10 `AsmItem`s:
+      if (i + 9 < raw_items.size() && is_nop_delay_branch_or_reorder(raw_items[i + 1]) &&
+          raw_items[i + 2].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 2].word == 0x0007000du && raw_items[i + 3].kind == AsmItemKind::kLabel &&
+          raw_items[i + 4].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 5].kind == AsmItemKind::kNoreorderBranchSeq &&
+          is_nop_delay_branch_or_reorder(raw_items[i + 6]) &&
+          raw_items[i + 7].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 7].word == 0x0006000du && raw_items[i + 8].kind == AsmItemKind::kLabel &&
+          raw_items[i + 9].kind == AsmItemKind::kReorderInsn) {
+        const uint32_t macro11[11] = {
+            item.word,
+            raw_items[i + 1].word,
+            0x00000000u,
+            raw_items[i + 2].word,
+            raw_items[i + 4].word,
+            raw_items[i + 5].word,
+            raw_items[i + 5].delay_word,
+            raw_items[i + 6].word,
+            0x00000000u,
+            raw_items[i + 7].word,
+            raw_items[i + 9].word,
+        };
+        const std::string macro_asm = InvertGasMacro(macro11);
+        if (!macro_asm.empty()) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          item.preceded_by_active_hazard = false;
+          items.push_back(std::move(item));
+          i += 9;
+          continue;
+        }
+      }
+
+      // 5-word unsigned `divu`/`remu` (`M_DIVU_3` / `M_REMU_3`) spanning 5 `AsmItem`s:
+      if (i + 4 < raw_items.size() && is_nop_delay_branch_or_reorder(raw_items[i + 1]) &&
+          raw_items[i + 2].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 2].word == 0x0007000du && raw_items[i + 3].kind == AsmItemKind::kLabel &&
+          raw_items[i + 4].kind == AsmItemKind::kReorderInsn) {
+        const uint32_t macro5[5] = {
+            item.word,
+            raw_items[i + 1].word,
+            0x00000000u,
+            raw_items[i + 2].word,
+            raw_items[i + 4].word,
+        };
+        const std::string macro_asm = InvertGasMacro(macro5);
+        if (!macro_asm.empty()) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          item.preceded_by_active_hazard = false;
+          items.push_back(std::move(item));
+          i += 4;
+          continue;
+        }
+      }
+
+      if (i + 1 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
+          !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(raw_items[i + 1].word)) {
+        const uint32_t pair[2] = {item.word, raw_items[i + 1].word};
+        const std::string macro_asm = InvertGasMacro(pair);
+        if (!macro_asm.empty() &&
+            (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t"))) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          items.push_back(std::move(item));
+          ++i;
+          continue;
+        }
+      }
+      item.line = NormalizeCop1LoadStoreMnemonic(item.line);
+      if (item.line == "jal 0x0" || item.line == "jal\t0x0") {
+        item.line = "jal __callee_0";
+      }
+    } else if (item.kind == AsmItemKind::kNoreorderBranchSeq) {
+      item.line = NormalizeCop1LoadStoreMnemonic(item.line);
+      if (item.line == "jal 0x0" || item.line == "jal\t0x0") {
+        item.line = "jal __callee_0";
+      }
+      item.delay_line = NormalizeCop1LoadStoreMnemonic(item.delay_line);
+    }
+    items.push_back(std::move(item));
+  }
+
+  // Pass 2: collapse 2/3/4-instruction GAS symbolic macros (`lui $<tempreg>,0x0`
+  // followed by symbolic load/store or `daddiu`/`addiu` for `la`).
+  std::vector<AsmItem> collapsed;
+  collapsed.reserve(items.size());
+  for (size_t i = 0; i < items.size(); ++i) {
+    AsmItem item = items[i];
+    if (item.kind == AsmItemKind::kReorderInsn) {
+      const int tempreg = ParseLuiZeroReg(item.line);
+      if (tempreg >= 1) {
+        // 1) 3-instruction (or 4-instruction paired `l.d`/`s.d`) indexed symbolic load/store:
+        //    `lui $<tempreg>,0x0`
+        //    `addu/daddu $<tempreg>,$<tempreg>,$<breg>`
+        //    `<memop> <reg>,<off>($<tempreg>)`
+        int base_reg = -1;
+        if (i + 2 < items.size() && items[i + 1].kind == AsmItemKind::kReorderInsn &&
+            items[i + 2].kind == AsmItemKind::kReorderInsn &&
+            ParseIndexedAddrAddu(items[i + 1].line, tempreg, &base_reg)) {
+          std::string mnem;
+          std::string reg;
+          int32_t off = 0;
+          if (ParseBaseMemInsn(items[i + 2].line, tempreg, &mnem, &reg, &off)) {
+            if (i + 3 < items.size() && items[i + 3].kind == AsmItemKind::kReorderInsn &&
+                IsPairedFpDoubleSecondHalf(items[i + 3].line, tempreg, mnem, reg, off)) {
+              item.line = absl::StrFormat("%s %s,%s($%d)", mnem == "l.s" ? "l.d" : "s.d", reg,
+                                          FormatSymOffset(off), base_reg);
+              item.unswapped_from_branch = false;
+              collapsed.push_back(std::move(item));
+              i += 3;
+              continue;
+            }
+            item.line = absl::StrFormat("%s %s,%s($%d)", mnem, reg, FormatSymOffset(off), base_reg);
+            item.unswapped_from_branch = false;
+            collapsed.push_back(std::move(item));
+            i += 2;
+            continue;
+          }
+        }
+
+        // 2) 2-instruction (or 3-instruction paired `l.d`/`s.d`) absolute symbolic load/store:
+        //    `lui $<tempreg>,0x0`
+        //    `<memop> <reg>,<off>($<tempreg>)`
+        if (i + 1 < items.size() && items[i + 1].kind == AsmItemKind::kReorderInsn) {
+          std::string mnem;
+          std::string reg;
+          int32_t off = 0;
+          if (ParseBaseMemInsn(items[i + 1].line, tempreg, &mnem, &reg, &off)) {
+            if (i + 2 < items.size() && items[i + 2].kind == AsmItemKind::kReorderInsn &&
+                IsPairedFpDoubleSecondHalf(items[i + 2].line, tempreg, mnem, reg, off)) {
+              item.line = absl::StrFormat("%s %s,%s", mnem == "l.s" ? "l.d" : "s.d", reg,
+                                          FormatSymOffset(off));
+              item.unswapped_from_branch = false;
+              collapsed.push_back(std::move(item));
+              i += 2;
+              continue;
+            }
+            item.line = absl::StrFormat("%s %s,%s", mnem, reg, FormatSymOffset(off));
+            item.unswapped_from_branch = false;
+            collapsed.push_back(std::move(item));
+            ++i;
+            continue;
+          }
+
+          // 3) 2-instruction `la $<tempreg>,__sym_0+<off>` (`M_LA_AB`):
+          //    `lui $<tempreg>,0x0`
+          //    `daddiu/addiu $<tempreg>,$<tempreg>,<off>`
+          int32_t la_off = 0;
+          if (ParseSameRegAddiuOffset(items[i + 1].line, tempreg, &la_off)) {
+            item.line = absl::StrFormat("la $%d,%s", tempreg, FormatSymOffset(la_off));
+            item.unswapped_from_branch = false;
+            collapsed.push_back(std::move(item));
+            ++i;
+            continue;
+          }
+        }
+      }
+    }
+    collapsed.push_back(std::move(item));
+  }
+
+  // Pass 3: flatten into assembly lines, emitting any remaining non-hazard,
+  // non-multi-line un-swapped `[delay_item, branch_item]` pairs as
+  // `.set noreorder` `SEQUENCE`s.
+  std::vector<std::string> lines;
+  lines.reserve(collapsed.size() * 2);
+  for (size_t i = 0; i < collapsed.size(); ++i) {
+    const AsmItem& item = collapsed[i];
+    if (item.kind == AsmItemKind::kLabel) {
+      lines.push_back(item.line);
+      continue;
+    }
+    if (item.kind == AsmItemKind::kNoreorderBranchSeq) {
+      lines.push_back(".set\tnoreorder");
+      lines.push_back(item.line);
+      if (!item.delay_label.empty()) {
+        lines.push_back(item.delay_label);
+      }
+      lines.push_back(item.delay_line);
+      lines.push_back(".set\treorder");
+      continue;
+    }
+
+    if (item.unswapped_from_branch && i + 1 < collapsed.size() &&
+        collapsed[i + 1].kind == AsmItemKind::kReorderInsn &&
+        collapsed[i + 1].unswapped_from_branch && !IsBranchOrJumpWord(item.word) &&
+        IsBranchOrJumpWord(collapsed[i + 1].word)) {
+      const bool part_of_prev_float_si =
+          i > 0 && collapsed[i - 1].kind == AsmItemKind::kReorderInsn &&
+          (absl::StartsWith(collapsed[i - 1].line, "mtc1 ") ||
+           absl::StartsWith(collapsed[i - 1].line, "l.s ")) &&
+          (absl::StartsWith(item.line, "cvt.s.w ") || absl::StartsWith(item.line, "cvt.d.w "));
+      if (!item.preceded_by_active_hazard && !part_of_prev_float_si) {
+        lines.push_back(".set\tnoreorder");
+        lines.push_back(collapsed[i + 1].line);
+        lines.push_back(item.line);
+        lines.push_back(".set\treorder");
+        ++i;
+        continue;
+      }
+    }
+
+    lines.push_back(item.line);
+  }
+
+  return lines;
+}
+
+}  // namespace rom_nom_nom::lifter

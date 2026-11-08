@@ -197,6 +197,144 @@ TEST(InvertGasAppendInsnTest, NegativeInvalidWordsAndTruncatedBranchFailVerifica
   }
 }
 
+TEST(InvertGasAppendInsnTest, InvertGasAppendInsnToItemsPaddingBranchModesAndHazardNops) {
+  // 1. Section-alignment padding stripping (4-word aligned trailing `0x00000000u`
+  //    words after the final branch+delay slot).
+  {
+    const std::vector<uint32_t> padded_swapped = {
+        0x03e00008u,  // jr $31
+        0x24820005u,  // addiu $2,$4,5 (delay slot)
+        0x00000000u,  // section alignment padding
+        0x00000000u,  // section alignment padding
+    };
+    const absl::Span<const uint32_t> stripped = StripSectionAlignmentPadding(padded_swapped);
+    ASSERT_EQ(stripped.size(), 2u);
+    EXPECT_EQ(stripped[0], 0x03e00008u);
+    EXPECT_EQ(stripped[1], 0x24820005u);
+
+    std::vector<AsmItem> items;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(padded_swapped, &items));
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_EQ(items[0].kind, AsmItemKind::kReorderInsn);
+    EXPECT_EQ(items[0].line, "addiu $2,$4,5");
+    EXPECT_EQ(items[0].word, 0x24820005u);
+    EXPECT_TRUE(items[0].unswapped_from_branch);
+    EXPECT_EQ(items[1].kind, AsmItemKind::kReorderInsn);
+    EXPECT_EQ(items[1].line, "jr $31");
+    EXPECT_EQ(items[1].word, 0x03e00008u);
+    EXPECT_TRUE(items[1].unswapped_from_branch);
+
+    // When the branch's delay slot itself is `nop` (`0x00000000u`), only the
+    // trailing alignment `0x00000000u` after the delay slot is stripped.
+    const std::vector<uint32_t> padded_nop_delay = {
+        0x24820005u,  // addiu $2,$4,5
+        0x03e00008u,  // jr $31
+        0x00000000u,  // delay slot nop
+        0x00000000u,  // section alignment padding
+    };
+    const absl::Span<const uint32_t> stripped_nop = StripSectionAlignmentPadding(padded_nop_delay);
+    ASSERT_EQ(stripped_nop.size(), 3u);
+  }
+
+  // 2. `.set reorder` branch un-swapping vs `.set noreorder` branch delay slots.
+  {
+    const std::vector<uint32_t> words = {
+        0x10400002u,  // beq $2,$0,$L2 (targets word 3)
+        0x24820001u,  // addiu $2,$4,1 (modifies $2 read by beq -> .set noreorder)
+        0x24020000u,  // addiu $2,$0,0
+        0x03e00008u,  // $L2: jr $31 (labeled branch -> .set noreorder with non-nop delay)
+        0x24820009u,  // addiu $2,$4,9
+    };
+    std::vector<AsmItem> items;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(words, &items));
+    ASSERT_EQ(items.size(), 4u);
+    EXPECT_EQ(items[0].kind, AsmItemKind::kNoreorderBranchSeq);
+    EXPECT_EQ(items[0].line, "beq $2,$0,$L2");
+    EXPECT_EQ(items[0].delay_line, "addiu $2,$4,1");
+    EXPECT_EQ(items[1].kind, AsmItemKind::kReorderInsn);
+    EXPECT_EQ(items[1].line, "addiu $2,$0,0");
+    EXPECT_EQ(items[2].kind, AsmItemKind::kLabel);
+    EXPECT_EQ(items[2].line, "$L2:");
+    EXPECT_EQ(items[3].kind, AsmItemKind::kNoreorderBranchSeq);
+    EXPECT_EQ(items[3].line, "jr $31");
+    EXPECT_EQ(items[3].delay_line, "addiu $2,$4,9");
+  }
+
+  // 3. Hazard `nop` stripping after `mflo`, `mfhi`, `mfc1`, `mtc1`, and `c.<cond>.s/d`.
+  {
+    const std::vector<uint32_t> hazard_words = {
+        0x00850018u,  // mult $4,$5
+        0x00001012u,  // mflo $2
+        0x00000000u,  // hazard nop 1 (mflo -> mult)
+        0x00000000u,  // hazard nop 2 (mflo -> mult)
+        0x00850018u,  // mult $4,$5
+        0x00001810u,  // mfhi $3
+        0x00000000u,  // hazard nop 1 (mfhi -> mthi)
+        0x00000000u,  // hazard nop 2 (mfhi -> mthi)
+        0x00800011u,  // mthi $4
+        0x44840000u,  // mtc1 $4,$f0
+        0x00000000u,  // hazard nop (mtc1 -> add.s)
+        0x46000000u,  // add.s $f0,$f0,$f0
+        0x44050000u,  // mfc1 $5,$f0
+        0x00000000u,  // hazard nop (mfc1 -> addu reading $5)
+        0x00a21021u,  // addu $2,$5,$2
+        0x4600003cu,  // c.lt.s $f0,$f0
+        0x00000000u,  // hazard nop (c.lt.s -> bc1t)
+        0x45010001u,  // bc1t $L2 (targets jr $31)
+        0x00000000u,  // delay slot nop
+        0x03e00008u,  // $L2: jr $31
+        0x00000000u,  // delay slot nop
+    };
+    std::vector<AsmItem> items;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(hazard_words, &items));
+
+    std::vector<std::string> item_lines;
+    for (const AsmItem& item : items) {
+      item_lines.push_back(item.line);
+      EXPECT_NE(item.line, "nop") << "Unexpected unstripped hazard nop";
+    }
+    const std::vector<std::string> expected_lines = {
+        "mult $4,$5",    "mflo $2",        "mult $4,$5",        "mfhi $3",
+        "mthi $4",       "mtc1 $4,$f0",    "add.s $f0,$f0,$f0", "mfc1 $5,$f0",
+        "addu $2,$5,$2", "c.lt.s $f0,$f0", "bc1t $L2",          "$L2:",
+        "jr $31",
+    };
+    EXPECT_EQ(item_lines, expected_lines);
+  }
+
+  // 4. Negative cases for `InvertGasAppendInsnToItems` (empty span, invalid
+  //    word `0xffffffffu`, non-branch-terminated sequence).
+  {
+    std::vector<AsmItem> items;
+    EXPECT_FALSE(InvertGasAppendInsnToItems({}, &items));
+    EXPECT_TRUE(items.empty());
+
+    const std::vector<uint32_t> single_word = {0x03e00008u};
+    EXPECT_FALSE(InvertGasAppendInsnToItems(single_word, &items));
+    EXPECT_TRUE(items.empty());
+
+    const std::vector<uint32_t> invalid_word_seq = {
+        0xffffffffu,  // invalid word (sdc1 $f31,-1($31) is valid, so also test 0x7c000000u)
+        0x7c000000u,  // unallocated opcode 0x1f
+        0x03e00008u,
+        0x00000000u,
+    };
+    EXPECT_FALSE(InvertGasAppendInsnToItems(invalid_word_seq, &items));
+    EXPECT_TRUE(items.empty());
+
+    const std::vector<uint32_t> non_branch_terminated = {
+        0x24820001u,  // addiu $2,$4,1
+        0x24820002u,  // addiu $2,$4,2
+    };
+    EXPECT_FALSE(InvertGasAppendInsnToItems(non_branch_terminated, &items));
+    EXPECT_TRUE(items.empty());
+
+    const std::vector<uint32_t> only_ffffffff = {0xffffffffu};
+    EXPECT_FALSE(InvertGasAppendInsnToItems(only_ffffffff, &items));
+    EXPECT_TRUE(items.empty());
+  }
+}
+
 class InvertGasAppendInsnRoundTripCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {

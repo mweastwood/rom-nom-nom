@@ -3,10 +3,13 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "absl/types/span.h"
+#include "lifter/invert_gas_append_insn.h"
 
 namespace rom_nom_nom {
+namespace lifter {
 
 // Exact 1-to-1 right-inverse of GNU Binutils 2.6 `gas/config/tc-mips.c`:
 // `macro` (lines 2387-4785) and `load_register` (lines 2129-2314).
@@ -20,6 +23,17 @@ namespace rom_nom_nom {
 // a valid instruction in the image of `mips_ip` (`InvertGasMipsIp(w).empty()`),
 // or if a multi-word sequence is not in the image of `tc-mips.c:macro`.
 std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x);
+
+// Collapses multi-word GAS macros (`M_DIV_3`, `M_REM_3`, `M_DIVU_3`,
+// `M_REMU_3`, `M_LI`, `la`, paired `l.d`/`s.d`, and symbolic loads/stores)
+// across consecutive `kReorderInsn` items and flattens `raw_items` into
+// pre-`macro` assembly lines for epilogue extraction and `InvertFinalScanInsn`.
+std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmItem> raw_items);
+
+}  // namespace lifter
+
+using lifter::CollapseGasMacrosAndFlattenLines;
+using lifter::InvertGasMacro;
 
 }  // namespace rom_nom_nom
 

@@ -1,5 +1,7 @@
 #include "lifter/invert_function_prologue_epilogue.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -9,7 +11,11 @@
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "absl/types/span.h"
+#include "core/rtl_cfg.h"
+#include "lifter/invert_final_scan_insn.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -927,6 +933,213 @@ PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(std::string_view asm_te
       .var_size = var_size,
       .saved_gpr_mask = saved_gpr_mask,
   };
+}
+
+namespace {
+
+std::optional<int> ParseFprRestoreRegno(std::string_view line) {
+  if (!absl::StartsWith(line, "l.d $f") && !absl::StartsWith(line, "l.d\t$f") &&
+      !absl::StartsWith(line, "l.s $f") && !absl::StartsWith(line, "l.s\t$f")) {
+    return std::nullopt;
+  }
+  const size_t comma = line.find(',');
+  if (comma == std::string_view::npos || comma <= 6) {
+    return std::nullopt;
+  }
+  int fpreg = -1;
+  if (!absl::SimpleAtoi(line.substr(6, comma - 6), &fpreg) || fpreg < 20 || fpreg > 31) {
+    return std::nullopt;
+  }
+  return 32 + fpreg;
+}
+
+bool IsSpRestoreAdjustLine(std::string_view line) {
+  return absl::StartsWith(line, "addiu $29,$29,") || absl::StartsWith(line, "addiu\t$29,$29,") ||
+         line == "addu $29,$29,$12" || line == "addu\t$29,$29,$12";
+}
+
+bool IsReturnJr31Line(std::string_view line) {
+  return line == "jr $31" || line == "jr\t$31";
+}
+
+bool IsMoveSpFpLine(std::string_view line) {
+  return line == "move $29,$30" || line == "move\t$29,$30" || line == "addu $29,$30,$0" ||
+         line == "addu\t$29,$30,$0" || line == "or $29,$30,$0" || line == "or\t$29,$30,$0";
+}
+
+}  // namespace
+
+bool HasFramePointerMoveInPrologue(absl::Span<const std::string> asm_lines) {
+  for (const std::string& line : asm_lines) {
+    if (absl::EndsWith(line, ":")) {
+      break;
+    }
+    if (line == "move $30,$29" || line == "move\t$30,$29" || line == "addu $30,$29,$0" ||
+        line == "addu\t$30,$29,$0" || line == "or $30,$29,$0" || line == "or\t$30,$29,$0") {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
+                                        RtlSidebandState* sideband) {
+  const size_t n = asm_lines->size();
+  if (n < 2) {
+    return false;
+  }
+
+  // Every `tsize > 0` epilogue ends with either:
+  //   Pattern A (`.set reorder`, 2 lines at `[n - 2, n - 1]`):
+  //     `addiu $29,$29,<tsize>` (or `addu $29,$29,$12`)
+  //     `jr $31`
+  //   Pattern B (`.set noreorder`, 4 lines at `[n - 4 .. n - 1]`):
+  //     `.set\tnoreorder`
+  //     `jr $31`
+  //     `addiu $29,$29,<tsize>` (or `addu $29,$29,$12`)
+  //     `.set\treorder`
+  //   Pattern C (unscheduled `-Wa,-g` / `-O0` epilogue, 5 lines at `[n - 5 .. n - 1]`):
+  //     `addiu $29,$29,<tsize>` (or `addu $29,$29,$12`)
+  //     `.set\tnoreorder`
+  //     `jr $31`
+  //     `nop`
+  //     `.set\treorder`
+  size_t tail_start = n;
+  std::string sp_adjust_line;
+  if (IsReturnJr31Line((*asm_lines)[n - 1]) && IsSpRestoreAdjustLine((*asm_lines)[n - 2])) {
+    tail_start = n - 2;
+    sp_adjust_line = (*asm_lines)[n - 2];
+  } else if (n >= 4 &&
+             ((*asm_lines)[n - 4] == ".set\tnoreorder" ||
+              (*asm_lines)[n - 4] == ".set noreorder") &&
+             IsReturnJr31Line((*asm_lines)[n - 3]) && IsSpRestoreAdjustLine((*asm_lines)[n - 2]) &&
+             ((*asm_lines)[n - 1] == ".set\treorder" || (*asm_lines)[n - 1] == ".set reorder")) {
+    tail_start = n - 4;
+    sp_adjust_line = (*asm_lines)[n - 2];
+  } else if (n >= 5 && IsSpRestoreAdjustLine((*asm_lines)[n - 5]) &&
+             ((*asm_lines)[n - 4] == ".set\tnoreorder" ||
+              (*asm_lines)[n - 4] == ".set noreorder") &&
+             IsReturnJr31Line((*asm_lines)[n - 3]) && (*asm_lines)[n - 2] == "nop" &&
+             ((*asm_lines)[n - 1] == ".set\treorder" || (*asm_lines)[n - 1] == ".set reorder")) {
+    tail_start = n - 5;
+    sp_adjust_line = (*asm_lines)[n - 5];
+  } else {
+    return false;
+  }
+
+  // Normalize `addiu $29,$29,<tsize>` to `addu $29,$29,<tsize>` for
+  // `InvertFunctionPrologueEpilogue`.
+  std::string normalized_sp_adjust = sp_adjust_line;
+  if (absl::StartsWith(normalized_sp_adjust, "addiu\t") ||
+      absl::StartsWith(normalized_sp_adjust, "addiu ")) {
+    normalized_sp_adjust.replace(0, 5, "addu");
+  }
+
+  const bool has_fp_in_prologue = HasFramePointerMoveInPrologue(*asm_lines);
+
+  // Determine the earliest line index `min_start` after the prologue and after
+  // the last label / directive before `tail_start`.
+  size_t min_start = 1;
+  for (size_t i = tail_start; i > 0; --i) {
+    const std::string& l = (*asm_lines)[i - 1];
+    if (absl::EndsWith(l, ":") || l.front() == '.') {
+      min_start = i;
+      break;
+    }
+  }
+
+  // First check for `epilogue_delay != 0` with `load_only_r31`:
+  // Preceding `tail_start` is `[..., lw $31,<off>($29/$13), <epilogue_delay_insn>]`.
+  if (tail_start >= min_start + 2) {
+    const std::string& delay_cand = (*asm_lines)[tail_start - 1];
+    const std::string& lw_ra_cand = (*asm_lines)[tail_start - 2];
+    if ((absl::StartsWith(lw_ra_cand, "lw $31,") || absl::StartsWith(lw_ra_cand, "lw\t$31,")) &&
+        !absl::StartsWith(delay_cand, "lw ") && !absl::StartsWith(delay_cand, "lw\t") &&
+        !absl::StartsWith(delay_cand, "l.d ") && !absl::StartsWith(delay_cand, "l.d\t") &&
+        !absl::StartsWith(delay_cand, "l.s ") && !absl::StartsWith(delay_cand, "l.s\t")) {
+      for (size_t cand_start = min_start; cand_start <= tail_start - 2; ++cand_start) {
+        const std::string& first_l = (*asm_lines)[cand_start];
+        if (IsMoveSpFpLine(first_l) && !has_fp_in_prologue) {
+          continue;
+        }
+        std::vector<std::string> epilogue_lines;
+        epilogue_lines.push_back(".set\tnoreorder");
+        for (size_t k = cand_start; k < tail_start; ++k) {
+          epilogue_lines.push_back((*asm_lines)[k]);
+        }
+        epilogue_lines.push_back("j\t$31");
+        epilogue_lines.push_back(normalized_sp_adjust);
+        epilogue_lines.push_back(".set\treorder");
+
+        const PrologueEpilogueFrameSpec spec =
+            InvertFunctionPrologueEpilogue(absl::StrJoin(epilogue_lines, "\n"));
+        const std::string delay_pat = InvertFinalScanInsn(delay_cand);
+        if (spec.var_size >= 0 && !delay_pat.empty()) {
+          sideband->frame_size_bytes = spec.var_size;
+          sideband->saved_gpr_regnos.clear();
+          for (int r = 0; r < 32; ++r) {
+            if ((spec.saved_gpr_mask >> r) & 1u) {
+              sideband->saved_gpr_regnos.push_back(r);
+            }
+          }
+          sideband->epilogue_delay_pattern = delay_pat;
+          asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start),
+                           asm_lines->end());
+          return true;
+        }
+      }
+    }
+  }
+
+  // Standard `epilogue_delay == 0` epilogue: try the longest valid suffix
+  // `asm_lines[cand_start .. tail_start - 1]` + `[normalized_sp_adjust, "j\t$31"]`
+  // accepted by `InvertFunctionPrologueEpilogue`.
+  for (size_t cand_start = min_start; cand_start <= tail_start; ++cand_start) {
+    if (cand_start < tail_start) {
+      const std::string& first_l = (*asm_lines)[cand_start];
+      if (IsMoveSpFpLine(first_l) && !has_fp_in_prologue) {
+        continue;
+      }
+    }
+    std::vector<std::string> epilogue_lines;
+    for (size_t k = cand_start; k < tail_start; ++k) {
+      epilogue_lines.push_back((*asm_lines)[k]);
+    }
+    epilogue_lines.push_back(normalized_sp_adjust);
+    epilogue_lines.push_back("j\t$31");
+
+    const PrologueEpilogueFrameSpec spec =
+        InvertFunctionPrologueEpilogue(absl::StrJoin(epilogue_lines, "\n"));
+    if (spec.var_size >= 0) {
+      if (has_fp_in_prologue && ((spec.saved_gpr_mask >> 30) & 1u) == 0u) {
+        continue;
+      }
+      sideband->frame_size_bytes = spec.var_size;
+      sideband->saved_gpr_regnos.clear();
+      for (int r = 0; r < 32; ++r) {
+        if ((spec.saved_gpr_mask >> r) & 1u) {
+          sideband->saved_gpr_regnos.push_back(r);
+        }
+      }
+      sideband->saved_fpr_regnos.clear();
+      for (size_t k = cand_start; k < tail_start; ++k) {
+        if (const std::optional<int> fpr = ParseFprRestoreRegno((*asm_lines)[k]); fpr.has_value()) {
+          sideband->saved_fpr_regnos.push_back(*fpr);
+        }
+      }
+      std::sort(sideband->saved_fpr_regnos.begin(), sideband->saved_fpr_regnos.end());
+      asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start), asm_lines->end());
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void ExtractFunctionPrologueEpilogue(std::vector<std::string>* asm_lines,
+                                     RtlSidebandState* sideband) {
+  sideband->frame_pointer_needed = HasFramePointerMoveInPrologue(*asm_lines);
+  TryExtractAndStripTrailingEpilogue(asm_lines, sideband);
 }
 
 }  // namespace rom_nom_nom::lifter

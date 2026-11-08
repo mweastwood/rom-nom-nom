@@ -251,6 +251,100 @@ TEST(InvertFunctionPrologueEpilogueTest, SyntheticNegativeInputsRejected) {
   }
 }
 
+TEST(InvertFunctionPrologueEpilogueTest, ExtractFunctionPrologueEpilogueStreamTests) {
+  // 1. Leaf function with `tsize == 0`: `jr $31` is preserved in `asm_lines`,
+  //    `frame_size_bytes = 0`, `saved_gpr_regnos` empty.
+  {
+    std::vector<std::string> asm_lines = {
+        "addu $2,$4,$5",
+        "jr $31",
+    };
+    RtlSidebandState sideband;
+    EXPECT_FALSE(HasFramePointerMoveInPrologue(asm_lines));
+    ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
+    const std::vector<std::string> expected_lines = {
+        "addu $2,$4,$5",
+        "jr $31",
+    };
+    EXPECT_EQ(asm_lines, expected_lines);
+    EXPECT_FALSE(sideband.frame_pointer_needed);
+    EXPECT_EQ(sideband.frame_size_bytes, 0);
+    EXPECT_TRUE(sideband.saved_gpr_regnos.empty());
+    EXPECT_TRUE(sideband.saved_fpr_regnos.empty());
+    EXPECT_FALSE(sideband.epilogue_delay_pattern.has_value());
+  }
+
+  // 2. Standard `tsize > 0` epilogue with saved GPRs (`$16`, `$31`) and FPRs
+  //    (`$f20`): trailing epilogue lines are stripped from `asm_lines` and
+  //    `sideband` is populated.
+  {
+    std::vector<std::string> asm_lines = {
+        "addiu $29,$29,-32", "sw $31,20($29)", "sw $16,16($29)", "s.d $f20,24($29)",
+        "addu $2,$4,$5",     "lw $31,20($29)", "lw $16,16($29)", "l.d $f20,24($29)",
+        "addiu $29,$29,32",  "jr $31",
+    };
+    RtlSidebandState sideband;
+    ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
+    const std::vector<std::string> expected_lines = {
+        "addiu $29,$29,-32", "sw $31,20($29)", "sw $16,16($29)",
+        "s.d $f20,24($29)",  "addu $2,$4,$5",
+    };
+    EXPECT_EQ(asm_lines, expected_lines);
+    EXPECT_FALSE(sideband.frame_pointer_needed);
+    EXPECT_EQ(sideband.frame_size_bytes, 16);
+    const std::vector<int> expected_gprs = {16, 31};
+    EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
+    const std::vector<int> expected_fprs = {52};  // 32 + 20 ($f20)
+    EXPECT_EQ(sideband.saved_fpr_regnos, expected_fprs);
+    EXPECT_FALSE(sideband.epilogue_delay_pattern.has_value());
+  }
+
+  // 3. Frame pointer (`move $30,$29` in prologue and `move $29,$30` in
+  //    epilogue) setting `sideband.frame_pointer_needed = true`.
+  {
+    std::vector<std::string> asm_lines = {
+        "addiu $29,$29,-24", "sw $31,20($29)", "sw $30,16($29)", "move $30,$29",
+        "addu $2,$4,$5",     "move $29,$30",   "lw $31,20($29)", "lw $30,16($29)",
+        "addiu $29,$29,24",  "jr $31",
+    };
+    RtlSidebandState sideband;
+    EXPECT_TRUE(HasFramePointerMoveInPrologue(asm_lines));
+    ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
+    const std::vector<std::string> expected_lines = {
+        "addiu $29,$29,-24", "sw $31,20($29)", "sw $30,16($29)", "move $30,$29", "addu $2,$4,$5",
+    };
+    EXPECT_EQ(asm_lines, expected_lines);
+    EXPECT_TRUE(sideband.frame_pointer_needed);
+    EXPECT_EQ(sideband.frame_size_bytes, 16);
+    const std::vector<int> expected_gprs = {30, 31};
+    EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
+  }
+
+  // 4. Epilogue delay slot (`lw $31,...`, `<delay_insn>`, `.set noreorder`,
+  //    `jr $31`, `addiu $29,$29,<tsize>`, `.set reorder`) setting
+  //    `sideband.epilogue_delay_pattern`.
+  {
+    std::vector<std::string> asm_lines = {
+        "addiu $29,$29,-24", "sw $31,16($29)",  "jal __callee_0", "lw $31,16($29)",
+        "addu $2,$16,$0",    ".set\tnoreorder", "jr $31",         "addiu $29,$29,24",
+        ".set\treorder",
+    };
+    RtlSidebandState sideband;
+    ASSERT_TRUE(TryExtractAndStripTrailingEpilogue(&asm_lines, &sideband));
+    const std::vector<std::string> expected_lines = {
+        "addiu $29,$29,-24",
+        "sw $31,16($29)",
+        "jal __callee_0",
+    };
+    EXPECT_EQ(asm_lines, expected_lines);
+    EXPECT_EQ(sideband.frame_size_bytes, 16);
+    const std::vector<int> expected_gprs = {31};
+    EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
+    EXPECT_EQ(sideband.epilogue_delay_pattern,
+              "(set (reg:SI 2 v0) (plus:SI (reg:SI 16 s0) (reg:SI 0 $0)))");
+  }
+}
+
 class InvertFunctionPrologueEpilogueRoundTripCorpusTest
     : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:

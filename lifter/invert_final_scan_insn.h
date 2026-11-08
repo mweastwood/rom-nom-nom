@@ -4,6 +4,9 @@
 #include <string>
 #include <string_view>
 
+#include "absl/types/span.h"
+#include "core/rtl_cfg.h"
+
 namespace rom_nom_nom::lifter {
 
 // Right-inverse $g_{\text{final\_scan\_insn}}$ of GCC 2.7.2's
@@ -20,10 +23,18 @@ namespace rom_nom_nom::lifter {
 // malformed MIPS instruction.
 std::string InvertFinalScanInsn(std::string_view asm_line_x);
 
+// Whole-function stream inverse of `final.c:final_scan_insn`: converts the
+// pre-`final_scan_insn` assembly lines `asm_lines` (after epilogue extraction)
+// and `sideband` into a post-`dbr_schedule` `RtlControlFlowGraph`
+// (`RtlPassKind::kDbr`).
+RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> asm_lines,
+                                                  const RtlSidebandState& sideband);
+
 }  // namespace rom_nom_nom::lifter
 
 namespace rom_nom_nom {
 using lifter::InvertFinalScanInsn;
+using lifter::InvertFinalScanInsnLinesToCfg;
 }  // namespace rom_nom_nom
 
 #endif  // LIFTER_INVERT_FINAL_SCAN_INSN_H_

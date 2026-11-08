@@ -1,20 +1,27 @@
 #include "lifter/invert_final_scan_insn.h"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "absl/base/casts.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "absl/types/span.h"
+#include "core/rtl_cfg.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -1493,6 +1500,215 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
   }
 
   return "";
+}
+
+RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> asm_lines,
+                                                  const RtlSidebandState& sideband) {
+  if (asm_lines.empty()) {
+    return {};
+  }
+
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband = sideband;
+
+  std::vector<RtlBasicBlock> blocks;
+  absl::flat_hash_map<std::string, size_t> label_to_block;
+  RtlBasicBlock cur_blk;
+  cur_blk.id = 0;
+
+  for (size_t i = 0; i < asm_lines.size(); ++i) {
+    const std::string& line = asm_lines[i];
+    if (line == ".set\treorder" || line == ".set reorder") {
+      continue;
+    }
+    if (line == ".set\tnoreorder" || line == ".set noreorder") {
+      if (i + 2 < asm_lines.size() && asm_lines[i + 1] == "nop" &&
+          (asm_lines[i + 2] == ".set\treorder" || asm_lines[i + 2] == ".set reorder")) {
+        const std::string pat = InvertFinalScanInsn(asm_lines[i + 1]);
+        if (pat.empty()) {
+          return {};
+        }
+        cur_blk.AddPatternOnly(pat);
+        i += 2;
+        continue;
+      }
+      if (i + 3 < asm_lines.size() &&
+          (asm_lines[i + 3] == ".set\treorder" || asm_lines[i + 3] == ".set reorder")) {
+        const std::string pat0 = InvertFinalScanInsn(asm_lines[i + 1]);
+        const std::string pat1 = InvertFinalScanInsn(asm_lines[i + 2]);
+        if (pat0.empty() || pat1.empty()) {
+          return {};
+        }
+        const bool is_call_seq = absl::StrContains(pat0, "(call (mem:");
+        if (is_call_seq) {
+          cur_blk.AddPatternOnly(
+              absl::StrFormat("(sequence [(call_insn %s) (insn %s)])", pat0, pat1));
+        } else if (absl::StartsWith(pat0, "(jump_insn/u ")) {
+          cur_blk.AddPatternOnly(absl::StrFormat("(sequence [%s (insn/s %s)])", pat0, pat1));
+        } else {
+          cur_blk.AddPatternOnly(
+              absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
+        }
+        i += 3;
+        if (!is_call_seq && i + 1 < asm_lines.size() && !absl::EndsWith(asm_lines[i + 1], ":")) {
+          blocks.push_back(std::move(cur_blk));
+          cur_blk = RtlBasicBlock{};
+          cur_blk.id = blocks.size();
+        }
+        continue;
+      }
+      return {};
+    }
+
+    if (absl::EndsWith(line, ":")) {
+      std::string_view lbl(line.data(), line.size() - 1);
+      if (absl::StartsWith(lbl, "$L")) {
+        lbl.remove_prefix(1);
+      }
+      if (!cur_blk.instructions.empty() || cur_blk.has_label) {
+        blocks.push_back(std::move(cur_blk));
+        cur_blk = RtlBasicBlock{};
+        cur_blk.id = blocks.size();
+      }
+      cur_blk.has_label = true;
+      label_to_block[std::string(lbl)] = cur_blk.id;
+      continue;
+    }
+
+    std::string combined_line = line;
+    if (i + 1 < asm_lines.size() &&
+        (absl::StartsWith(line, "mtc1\t") || absl::StartsWith(line, "mtc1 ") ||
+         absl::StartsWith(line, "l.s\t") || absl::StartsWith(line, "l.s ")) &&
+        (absl::StartsWith(asm_lines[i + 1], "cvt.s.w\t") ||
+         absl::StartsWith(asm_lines[i + 1], "cvt.s.w ") ||
+         absl::StartsWith(asm_lines[i + 1], "cvt.d.w\t") ||
+         absl::StartsWith(asm_lines[i + 1], "cvt.d.w "))) {
+      combined_line = absl::StrCat(line, "\n", asm_lines[i + 1]);
+      ++i;
+    } else if (absl::StartsWith(line, "lwl\t") || absl::StartsWith(line, "lwl ")) {
+      const size_t max_len = std::min<size_t>(16, asm_lines.size() - i);
+      for (size_t len = max_len; len >= 3; --len) {
+        const std::string cand = absl::StrJoin(asm_lines.subspan(i, len), "\n");
+        if (!InvertFinalScanInsn(cand).empty()) {
+          combined_line = cand;
+          i += len - 1;
+          break;
+        }
+      }
+    }
+
+    const std::string pat = InvertFinalScanInsn(combined_line);
+    if (pat.empty()) {
+      return {};
+    }
+    cur_blk.AddPatternOnly(pat);
+    if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ") ||
+         absl::StartsWith(pat, "(jump_insn")) &&
+        i + 1 < asm_lines.size() && !absl::EndsWith(asm_lines[i + 1], ":")) {
+      blocks.push_back(std::move(cur_blk));
+      cur_blk = RtlBasicBlock{};
+      cur_blk.id = blocks.size();
+    }
+  }
+
+  if (!cur_blk.instructions.empty() || cur_blk.has_label || blocks.empty()) {
+    blocks.push_back(std::move(cur_blk));
+  }
+
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    bool modified_block = false;
+    for (size_t insn_idx = 0; insn_idx < blocks[b].instructions.size(); ++insn_idx) {
+      std::string& pat = blocks[b].instructions[insn_idx];
+      size_t pos = 0;
+      while ((pos = pat.find("(label_ref ", pos)) != std::string::npos) {
+        const size_t tok_start = pos + std::string_view("(label_ref ").size();
+        const size_t tok_end = pat.find(')', tok_start);
+        if (tok_end == std::string::npos) {
+          break;
+        }
+        const std::string lbl_tok(
+            absl::StripAsciiWhitespace(pat.substr(tok_start, tok_end - tok_start)));
+        const size_t delay_insn_pos = pat.find("(insn");
+        const bool is_jump_or_branch_insn = absl::StartsWith(pat, "(set (pc) ") ||
+                                            absl::StartsWith(pat, "(jump_insn") ||
+                                            absl::StartsWith(pat, "(sequence [(jump_insn");
+        const bool is_in_delay_slot = absl::StartsWith(pat, "(sequence [") &&
+                                      delay_insn_pos != std::string::npos && pos > delay_insn_pos;
+        const bool is_addr_hi_lo = !is_jump_or_branch_insn || is_in_delay_slot ||
+                                   absl::StrContains(pat.substr(0, pos), "(lo_sum:") ||
+                                   absl::StrContains(pat.substr(0, pos), "(high:");
+        if (insn_idx + 1 < blocks[b].instructions.size() || is_addr_hi_lo) {
+          auto it = label_to_block.find(lbl_tok);
+          if (it != label_to_block.end()) {
+            const std::string replacement = absl::StrFormat("(label_ref __blk_%zu)", it->second);
+            pat.replace(pos, tok_end - pos + 1, replacement);
+            pos += replacement.size();
+            modified_block = true;
+            continue;
+          }
+        }
+        pos = tok_end + 1;
+      }
+    }
+    if (modified_block) {
+      blocks[b].SyncRtlInsnsFromInstructions();
+    }
+
+    if (blocks[b].instructions.empty()) {
+      if (b + 1 < blocks.size()) {
+        blocks[b].successors = {b + 1};
+      }
+      continue;
+    }
+    const std::string& last_pat = blocks[b].instructions.back();
+    if (last_pat == "(return)" || absl::StartsWith(last_pat, "(sequence [(jump_insn (return))")) {
+      blocks[b].successors.clear();
+      continue;
+    }
+    size_t search_from = 0;
+    bool matched_branch_target = false;
+    while (search_from < last_pat.size()) {
+      const size_t lref_pos = last_pat.find("(label_ref ", search_from);
+      if (lref_pos == std::string::npos) {
+        break;
+      }
+      const size_t tok_start = lref_pos + std::string_view("(label_ref ").size();
+      const size_t tok_end = last_pat.find(')', tok_start);
+      if (tok_end == std::string::npos) {
+        break;
+      }
+      const std::string lbl_tok(
+          absl::StripAsciiWhitespace(last_pat.substr(tok_start, tok_end - tok_start)));
+      search_from = tok_end + 1;
+      if (absl::StartsWith(lbl_tok, "__blk_")) {
+        continue;
+      }
+      auto it = label_to_block.find(lbl_tok);
+      if (it != label_to_block.end()) {
+        if (absl::StrContains(last_pat, "(if_then_else ")) {
+          if (b + 1 < blocks.size()) {
+            blocks[b].successors = {b + 1, it->second};
+          } else {
+            blocks[b].successors = {it->second};
+          }
+        } else {
+          blocks[b].successors = {it->second};
+        }
+        matched_branch_target = true;
+        break;
+      }
+    }
+    if (matched_branch_target) {
+      continue;
+    }
+    if (b + 1 < blocks.size()) {
+      blocks[b].successors = {b + 1};
+    }
+  }
+
+  cfg.rpo_blocks = std::move(blocks);
+  return cfg;
 }
 
 }  // namespace rom_nom_nom::lifter

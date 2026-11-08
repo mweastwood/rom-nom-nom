@@ -212,6 +212,125 @@ TEST(InvertGasMacroTest, NegativeInvalidWordsAndNonMacroSequencesFailVerificatio
   }
 }
 
+TEST(InvertGasMacroTest, CollapseGasMacrosAndFlattenLinesStreamTests) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // 1. Collapsing multi-word `div`, `rem`, `divu`, `remu`, and 2-word `li`
+  //    macros from `InvertGasAppendInsnToItems` streams.
+  const std::vector<std::string> multi_word_macros = {
+      "div $2,$4,$5", "rem $2,$4,$5", "divu $2,$4,$5", "remu $2,$4,$5", "li $2,0x12345678",
+  };
+  for (const std::string& macro_line : multi_word_macros) {
+    const std::vector<uint32_t> words = hooks.RunGasMdAssemble(macro_line + "\njr $31\n");
+    ASSERT_GT(words.size(), 2u) << macro_line;
+    std::vector<AsmItem> items;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(words, &items)) << macro_line;
+    const std::vector<std::string> collapsed = CollapseGasMacrosAndFlattenLines(items);
+    const std::vector<std::string> expected = {macro_line, "jr $31"};
+    EXPECT_EQ(collapsed, expected) << "Failed collapsing: " << macro_line;
+  }
+
+  // 2. Symbolic `la` (`lui` + `addiu`), absolute & indexed symbolic loads/stores
+  //    (`lui` + `lw`/`sw`), and paired `l.d`/`s.d` (`lwc1`/`swc1` pairs).
+  {
+    const std::vector<AsmItem> sym_items = {
+        // `la $2,__sym_0+16`:
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $2,0x0"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "addiu $2,$2,16"},
+        // Absolute `lw $3,__sym_0`:
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $3,0x0"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "lw $3,0($3)"},
+        // Absolute `sw $4,__sym_0-4`:
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $1,0x0"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "sw $4,-4($1)"},
+        // Indexed `lw $5,__sym_0+8($6)`:
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $1,0x0"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "addu $1,$1,$6"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "lw $5,8($1)"},
+        // Absolute paired `l.d $f0,__sym_0` (GAS uses `$1` as `tempreg` for FPRs):
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $1,0x0"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "lwc1 $f0,0($1)"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "lwc1 $f1,4($1)"},
+        // Indexed paired `s.d $f2,__sym_0+16($4)`:
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $1,0x0"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "addu $1,$1,$4"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "swc1 $f2,16($1)"},
+        {.kind = AsmItemKind::kReorderInsn, .line = "swc1 $f3,20($1)"},
+    };
+    const std::vector<std::string> lines = CollapseGasMacrosAndFlattenLines(sym_items);
+    const std::vector<std::string> expected = {
+        "la $2,__sym_0+16",    "lw $3,__sym_0",   "sw $4,__sym_0-4",
+        "lw $5,__sym_0+8($6)", "l.d $f0,__sym_0", "s.d $f2,__sym_0+16($4)",
+    };
+    EXPECT_EQ(lines, expected);
+  }
+
+  // 3. `jal 0x0` -> `jal __callee_0` while leaving non-zero `jal 0x100`
+  //    untouched so it fails downstream; also test negative non-zero `lui`
+  //    (not collapsed into `la`).
+  {
+    const std::vector<AsmItem> jal_and_non_macro_items = {
+        {.kind = AsmItemKind::kReorderInsn, .line = "jal 0x0", .word = 0x0c000000u},
+        {.kind = AsmItemKind::kReorderInsn, .line = "jal 0x100", .word = 0x0c000040u},
+        {.kind = AsmItemKind::kReorderInsn, .line = "lui $2,0x1234", .word = 0x3c021234u},
+        {.kind = AsmItemKind::kReorderInsn, .line = "addiu $2,$2,16", .word = 0x24420010u},
+    };
+    const std::vector<std::string> lines =
+        CollapseGasMacrosAndFlattenLines(jal_and_non_macro_items);
+    const std::vector<std::string> expected = {
+        "jal __callee_0",
+        "jal 0x100",
+        "lui $2,0x1234",
+        "addiu $2,$2,16",
+    };
+    EXPECT_EQ(lines, expected);
+  }
+
+  // 4. Flattening `.set noreorder` (`kNoreorderBranchSeq` with/without
+  //    `delay_label`) and un-swapped branch items into assembly lines.
+  {
+    const std::vector<AsmItem> branch_items = {
+        // `kNoreorderBranchSeq` with `jal 0x0` and `delay_label`:
+        {.kind = AsmItemKind::kNoreorderBranchSeq,
+         .line = "jal 0x0",
+         .delay_line = "addiu $4,$0,1",
+         .delay_label = "$L2:",
+         .word = 0x0c000000u,
+         .delay_word = 0x24040001u},
+        // Un-swapped `[delay_item, branch_item]` without active hazard ->
+        // flattened into `.set noreorder / jr $31 / addiu $2,$4,5 / .set reorder`:
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "addiu $2,$4,5",
+         .word = 0x24820005u,
+         .unswapped_from_branch = true,
+         .preceded_by_active_hazard = false},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "jr $31",
+         .word = 0x03e00008u,
+         .unswapped_from_branch = true},
+        // Un-swapped `[delay_item, branch_item]` preceded by active hazard ->
+        // kept as reorder lines `[delay_line, branch_line]`:
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "addiu $2,$4,9",
+         .word = 0x24820009u,
+         .unswapped_from_branch = true,
+         .preceded_by_active_hazard = true},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "jr $31",
+         .word = 0x03e00008u,
+         .unswapped_from_branch = true},
+    };
+    const std::vector<std::string> lines = CollapseGasMacrosAndFlattenLines(branch_items);
+    const std::vector<std::string> expected = {
+        ".set\tnoreorder", "jal __callee_0",  "$L2:",   "addiu $4,$0,1",
+        ".set\treorder",   ".set\tnoreorder", "jr $31", "addiu $2,$4,5",
+        ".set\treorder",   "addiu $2,$4,9",   "jr $31",
+    };
+    EXPECT_EQ(lines, expected);
+  }
+}
+
 class InvertGasMacroRoundTripCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {
