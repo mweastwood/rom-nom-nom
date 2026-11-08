@@ -1064,25 +1064,53 @@ std::vector<uint32_t> FunctionHooks::RunGasMacro(std::string_view macro_asm_line
   constexpr int kGasOpAbsent = 1;
   frag_wane(frag_now);
   frag_new(0);
+  frag_grow(256);
+  GasFrag* const first_frag = frag_now;
   mips_noreorder = 1;
   prev_insn_valid = 0;
   imm_expr.X_op = kGasOpAbsent;
+  imm_expr.X_add_number = 0;
   offset_expr.X_op = kGasOpAbsent;
+  offset_expr.X_add_number = 0;
+  insn_error = nullptr;
 
   std::string mutable_line(absl::StripAsciiWhitespace(macro_asm_line));
+  if (mutable_line.empty()) {
+    return {};
+  }
   std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
   GasMipsClInsn insn{};
   mips_ip(mutable_line.data(), &insn);
-  if (insn.insn_mo != nullptr && insn.insn_mo->pinfo == 0xffffffffUL) {
+  if (insn_error != nullptr || insn.insn_mo == nullptr) {
+    return {};
+  }
+  // Route 16-bit `li` / `dli` forms through `M_LI` / `M_DLI` (`load_register`)
+  // so `RunGasMacro` executes `tc-mips.c:macro` for all `li` / `dli` inputs.
+  if (insn.insn_mo->pinfo != 0xffffffffUL &&
+      (std::strcmp(insn.insn_mo->name, "li") == 0 || std::strcmp(insn.insn_mo->name, "dli") == 0)) {
+    while (insn.insn_mo[1].name != nullptr &&
+           std::strcmp(insn.insn_mo->name, insn.insn_mo[1].name) == 0 &&
+           insn.insn_mo->pinfo != 0xffffffffUL) {
+      ++insn.insn_mo;
+    }
+  }
+  if (insn.insn_mo->pinfo == 0xffffffffUL) {
     macro(&insn);
   }
 
   std::vector<uint32_t> words;
-  const int nbytes = frag_now_fix();
-  if (frag_now != nullptr && nbytes >= 4) {
-    for (int off = 0; off + 4 <= nbytes; off += 4) {
-      words.push_back(ReadBigEndian32(frag_now->fr_literal + off));
+  for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
+    const long nbytes = (f == frag_now) ? frag_now_fix() : f->fr_fix;
+    for (long off = 0; off + 4 <= nbytes; off += 4) {
+      words.push_back(ReadBigEndian32(f->fr_literal + off));
     }
+    if (f == frag_now) {
+      break;
+    }
+  }
+  if (insn.insn_mo->pinfo == 0xffffffffUL && insn.insn_mo->args != nullptr &&
+      std::strcmp(insn.insn_mo->args, "a") == 0 && offset_expr.X_op == 3 && words.size() == 1) {
+    words[0] |= (static_cast<uint32_t>(offset_expr.X_add_number) >> 2) & 0x03ffffffu;
   }
   return words;
 }
@@ -1094,12 +1122,25 @@ uint32_t FunctionHooks::RunGasAppendInsn(std::string_view insn_asm_line) {
   mips_noreorder = 1;
   prev_insn_valid = 0;
   imm_expr.X_op = kGasOpAbsent;
+  imm_expr.X_add_number = 0;
   offset_expr.X_op = kGasOpAbsent;
+  offset_expr.X_add_number = 0;
+  insn_error = nullptr;
 
   std::string mutable_line(absl::StripAsciiWhitespace(insn_asm_line));
+  if (mutable_line.empty()) {
+    return 0;
+  }
   std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
   GasMipsClInsn insn{};
   mips_ip(mutable_line.data(), &insn);
+  if (insn_error != nullptr || insn.insn_mo == nullptr) {
+    return 0;
+  }
+  if (offset_expr.X_op == 3 && insn.insn_mo->args != nullptr &&
+      std::strchr(insn.insn_mo->args, 'p') != nullptr) {
+    insn.insn_opcode |= static_cast<uint32_t>(offset_expr.X_add_number) & 0xffffu;
+  }
   if (imm_expr.X_op != kGasOpAbsent) {
     append_insn(nullptr, &insn, &imm_expr, imm_reloc);
   } else if (offset_expr.X_op != kGasOpAbsent) {

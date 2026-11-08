@@ -116,6 +116,11 @@ RightInverseResult RightInverseVerifier::VerifyGasMacroRightInverse(
   result.expected_summary = FormatWordsSummary(macro_words_x);
 
   const std::string macro_asm_y = inverses_->InvertGasMacro(macro_words_x);
+  if (macro_words_x.empty() || absl::StripAsciiWhitespace(macro_asm_y).empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertGasMacro returned empty assembly string";
+    return result;
+  }
   result.actual_words = hooks_->RunGasMacro(macro_asm_y);
   result.actual_summary = FormatWordsSummary(result.actual_words);
   result.matches = (result.actual_words == result.expected_words);
@@ -1028,25 +1033,32 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       result.expected_words = snap.post_machine_words;
       result.expected_summary = FormatWordsSummary(snap.post_machine_words);
       std::vector<std::string> cand_asm_lines;
+      const auto words_span = absl::MakeConstSpan(snap.post_machine_words);
       size_t i = 0;
-      while (i < snap.post_machine_words.size()) {
-        if (i + 1 < snap.post_machine_words.size()) {
-          const uint32_t w0 = snap.post_machine_words[i];
-          const uint32_t w1 = snap.post_machine_words[i + 1];
-          const uint32_t op0 = (w0 >> 26) & 0x3fu;
-          const uint32_t rt0 = (w0 >> 16) & 0x1fu;
-          const uint32_t op1 = (w1 >> 26) & 0x3fu;
-          const uint32_t rs1 = (w1 >> 21) & 0x1fu;
-          const uint32_t rt1 = (w1 >> 16) & 0x1fu;
-          if (op0 == 0x0fu && (op1 == 0x0du || op1 == 0x09u) && rs1 == rt0 && rt1 == rt0) {
-            const uint32_t pair[2] = {w0, w1};
-            cand_asm_lines.push_back(inverses_->InvertGasMacro(pair));
-            i += 2;
-            continue;
+      while (i < words_span.size()) {
+        bool matched_multi = false;
+        const size_t max_len = std::min<size_t>(12, words_span.size() - i);
+        for (size_t len = max_len; len >= 2; --len) {
+          const auto slice = words_span.subspan(i, len);
+          const std::string macro_asm = inverses_->InvertGasMacro(slice);
+          if (!macro_asm.empty() && absl::MakeConstSpan(hooks_->RunGasMacro(macro_asm)) == slice) {
+            cand_asm_lines.push_back(macro_asm);
+            i += len;
+            matched_multi = true;
+            break;
           }
         }
-        const uint32_t single[1] = {snap.post_machine_words[i]};
-        cand_asm_lines.push_back(inverses_->InvertGasMacro(single));
+        if (matched_multi) {
+          continue;
+        }
+        const std::string single_asm = inverses_->InvertGasMacro(words_span.subspan(i, 1));
+        if (single_asm.empty()) {
+          result.matches = false;
+          result.diff_detail = absl::StrFormat(
+              "InvertGasMacro returned empty string at word index %zu (0x%08x)", i, words_span[i]);
+          return result;
+        }
+        cand_asm_lines.push_back(single_asm);
         ++i;
       }
       const SubfunctionBoundarySnapshot replayed =

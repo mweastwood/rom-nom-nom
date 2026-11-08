@@ -266,11 +266,11 @@ std::string ToySubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> ma
     const uint32_t rs1 = (w1 >> 21) & 0x1fu;
     const uint32_t rt1 = (w1 >> 16) & 0x1fu;
     const uint32_t lo16 = w1 & 0xffffu;
-    if (op0 == 0x0fu && op1 == 0x0du && rs1 == rt0 && rt1 == rt0) {
+    if (op0 == 0x0fu && hi16 != 0u && op1 == 0x0du && lo16 != 0u && rs1 == rt0 && rt1 == rt0) {
       const uint32_t imm32 = (hi16 << 16) | lo16;
       return absl::StrFormat("li $%u,0x%08x", rt0, imm32);
     }
-    if (op0 == 0x0fu && op1 == 0x09u && rs1 == rt0 && rt1 == rt0) {
+    if (op0 == 0x0fu && hi16 != 0u && op1 == 0x09u && lo16 != 0u && rs1 == rt0 && rt1 == rt0) {
       const int32_t imm32 =
           static_cast<int32_t>(hi16 << 16) + static_cast<int32_t>(static_cast<int16_t>(lo16));
       return absl::StrFormat("li $%u,%d", rt0, imm32);
@@ -289,7 +289,8 @@ std::string ToySubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> ma
     const uint32_t rt2 = (w2 >> 16) & 0x1fu;
     const uint32_t rd2 = (w2 >> 11) & 0x1fu;
     const uint32_t funct2 = w2 & 0x3fu;
-    if (op0 == 0x0fu && rt0 == 1 && op1 == 0x0du && op2 == 0x00u && rt2 == 1) {
+    if (op0 == 0x0fu && rt0 == 1 && hi16 != 0u && op1 == 0x0du && lo16 != 0u && op2 == 0x00u &&
+        rt2 == 1) {
       const uint32_t imm32 = (hi16 << 16) | lo16;
       if (funct2 == 0x21u) {
         return absl::StrFormat("addu $%u,$%u,0x%08x", rd2, rs2, imm32);
@@ -301,7 +302,7 @@ std::string ToySubfunctionInverses::InvertGasMacro(absl::Span<const uint32_t> ma
   } else if (macro_words_x.size() == 1) {
     return InvertGasMipsIp(macro_words_x[0]);
   }
-  return "nop";
+  return "";
 }
 
 std::vector<std::string> ToySubfunctionInverses::InvertGasAppendInsn(
