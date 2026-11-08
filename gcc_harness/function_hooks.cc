@@ -673,7 +673,9 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
     return "";
   }
   reload_completed = 1;
-  frame_pointer_needed = (flag_omit_frame_pointer == 0) ? 1 : 0;
+  if (frame_pointer_needed == 0 && flag_omit_frame_pointer == 0) {
+    frame_pointer_needed = 1;
+  }
   bool has_sequence = false;
   int max_line = 0;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
@@ -4602,7 +4604,8 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           }
         }
         if (!has_prologue_sp_adjust) {
-          frame_pointer_needed = (flag_omit_frame_pointer == 0) ? 1 : 0;
+          frame_pointer_needed =
+              (pre_state.sideband.frame_pointer_needed || flag_omit_frame_pointer == 0) ? 1 : 0;
           RunFindBasicBlocks(head, nullptr);
           RefreshJumpLabelsAndNuses(head);
           thread_prologue_and_epilogue_insns(head);

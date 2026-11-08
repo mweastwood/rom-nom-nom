@@ -141,6 +141,7 @@ extern int obey_regdecls;
 extern int flag_defer_pop;
 extern int flag_thread_jumps;
 extern int flag_omit_frame_pointer;
+extern int frame_pointer_needed;
 extern int flag_cse_follow_jumps;
 extern int flag_cse_skip_blocks;
 extern int flag_force_mem;
@@ -217,6 +218,7 @@ extern void* gas_text_section;
 extern void* gas_data_section;
 extern void* bss_section;
 extern int target_big_endian;
+extern int mips_optimize;
 
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
@@ -500,6 +502,7 @@ void GccContext::EnsureGlobalInit() {
     md_parse_option(181, nullptr);
     md_parse_option('G', const_cast<char*>("0"));
     mips_init_after_args();
+    mips_optimize = 2;
     hex_init();
     bfd_init();
     symbol_begin();
@@ -561,6 +564,7 @@ void GccContext::BeginFunction(std::string_view func_name) {
   regset_size = 0;
   regset_bytes = 0;
   reload_completed = 0;
+  frame_pointer_needed = 0;
   immediate_size_expand = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
@@ -731,6 +735,7 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   regset_size = 0;
   regset_bytes = 0;
   reload_completed = 0;
+  frame_pointer_needed = 0;
   immediate_size_expand = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
@@ -2276,6 +2281,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       cfg.pass == RtlPassKind::kJump2 || cfg.pass == RtlPassKind::kDbr) {
     reload_completed = 1;
   }
+  frame_pointer_needed = cfg.sideband.frame_pointer_needed ? 1 : 0;
   frame_offset = cfg.sideband.frame_size_bytes;
   current_function_outgoing_args_size = cfg.sideband.outgoing_args_size;
   compute_frame_size(cfg.sideband.frame_size_bytes);
@@ -2549,6 +2555,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   }
   cfg.sideband.frame_size_bytes = frame_offset;
   cfg.sideband.outgoing_args_size = current_function_outgoing_args_size;
+  cfg.sideband.frame_pointer_needed = (frame_pointer_needed != 0);
   for (int r = 0; r < 32; ++r) {
     if (regs_ever_live[r] != 0) {
       cfg.sideband.saved_gpr_regnos.push_back(r);

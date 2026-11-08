@@ -65,3 +65,16 @@ reverse chronological order:
      `/s`, `/i`, `/u`, `/f`), `REG_NOTES`, `NOTE_INSN_LOOP_*` notes,
      `(sequence [...])` bundles, `(use ...)`/`(clobber ...)`/`(return)` insns,
      or `(label_ref L<k>)` targets, and never coalesce or reorder basic blocks.
+9. **Self-Contained Subfunction Inverse Modules & Thin Pass Stitchers**:
+   - Each `lifter/invert_<func>.{h,cc}` module must be completely self-contained
+     for its GCC/GAS subfunction $f_{s,j}$: it must provide both any
+     element-level inverse and the full stream/function-level transformation
+     needed so its output matches the exact input domain of the upstream
+     subfunction $f_{s,j+1}$.
+   - Never defer stream-level lifting, hazard-`nop` stripping, macro collapsing,
+     epilogue extraction, or CFG reconstruction logic to a pass stitcher or hide
+     it inside `gcc_harness/right_inverse_verifier.cc`.
+   - Every pass stitcher (`lifter/pass00_...` through `lifter/pass13_...`) must
+     be a thin composition (~30–50 lines) that simply chains its constituent
+     `invert_<func>` functions in reverse compilation order with zero
+     pass-internal lifting logic or duplicated helpers.

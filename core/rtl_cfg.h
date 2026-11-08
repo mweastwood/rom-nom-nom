@@ -212,6 +212,7 @@ struct RtlSidebandState {
   int frame_size_bytes = 0;
   int outgoing_args_size = 0;
   bool is_leaf_function = false;
+  bool frame_pointer_needed = false;
   std::vector<int> saved_gpr_regnos;
   std::vector<int> saved_fpr_regnos;
   std::optional<std::string> epilogue_delay_pattern;
@@ -231,6 +232,7 @@ struct RtlSidebandState {
            frame_size_bytes == other.frame_size_bytes &&
            outgoing_args_size == other.outgoing_args_size &&
            is_leaf_function == other.is_leaf_function &&
+           frame_pointer_needed == other.frame_pointer_needed &&
            saved_gpr_regnos == other.saved_gpr_regnos &&
            saved_fpr_regnos == other.saved_fpr_regnos &&
            epilogue_delay_pattern == other.epilogue_delay_pattern &&

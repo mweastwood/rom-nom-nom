@@ -258,14 +258,22 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
   result.expected_summary = FormatWordsSummary(machine_words_x);
 
   const RtlControlFlowGraph lifted_dbr = inverses_->InvertFinalAndGasFunction(machine_words_x);
+  if (machine_words_x.empty() || lifted_dbr.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertFinalAndGasFunction returned empty RtlControlFlowGraph";
+    return result;
+  }
+
   ctx_->MaterializeFromCfg(lifted_dbr);
   const std::string combined_asm = hooks_->RunFinal();
   result.actual_words = hooks_->RunGasMdAssemble(combined_asm);
+
   result.actual_summary = FormatWordsSummary(result.actual_words);
   result.matches = (result.actual_words == result.expected_words);
   if (!result.matches) {
-    result.diff_detail = absl::StrFormat("Machine words got [%s] != expected [%s]",
-                                         result.actual_summary, result.expected_summary);
+    result.diff_detail =
+        absl::StrFormat("Machine words got [%s] != expected [%s]\nasm:\n%s", result.actual_summary,
+                        result.expected_summary, combined_asm);
   }
   return result;
 }
