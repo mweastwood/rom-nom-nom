@@ -141,6 +141,10 @@ void function_prologue(FILE* file, int size);
 void function_epilogue(FILE* file, int size);
 extern char* line_note_exists;
 extern rtx_def* last_ignored_compare;
+extern rtx_def* final_sequence;
+extern int set_noreorder;
+extern int set_nomacro;
+extern int mips_branch_likely;
 
 // Stage 0: Binutils 2.6 GAS.
 struct GasMipsOpcode {
@@ -663,7 +667,7 @@ FunctionHooks::FunctionHooks(GccContext* ctx) : ctx_(ctx) {}
 // Stage 0: Final & GAS
 // -----------------------------------------------------------------------------
 
-std::string FunctionHooks::RunFinal(Rtx first) {
+std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
   Rtx head = first != nullptr ? first : ctx_->GetInsns();
   if (head == nullptr) {
     return "";
@@ -685,6 +689,35 @@ std::string FunctionHooks::RunFinal(Rtx first) {
     restore_reg_data(head);
     reg_scan(head, max_reg_num(), 0);
   }
+  init_recog();
+  auto memoize_with_opt_fallback = [](Rtx r) {
+    if (r == nullptr || (r->code != kInsn && r->code != kJumpInsn && r->code != kCallInsn)) {
+      return;
+    }
+    if (r->fld[4].rtint < 0 && r->fld[3].rtx != nullptr && r->fld[3].rtx->code != kSequence) {
+      int code = recog(r->fld[3].rtx, r, nullptr);
+      if (code < 0) {
+        const int saved_opt = optimize;
+        optimize = (saved_opt == 0) ? 2 : 0;
+        code = recog(r->fld[3].rtx, r, nullptr);
+        optimize = saved_opt;
+      }
+      if (code >= 0) {
+        r->fld[4].rtint = code;
+      }
+    }
+  };
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    memoize_with_opt_fallback(insn);
+    if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+        insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence &&
+        insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+      Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+      for (int i = 0; i < vec->num_elem; ++i) {
+        memoize_with_opt_fallback(vec->elem[i].rtx);
+      }
+    }
+  }
   shorten_branches(head);
   compute_frame_size(get_frame_size());
 
@@ -695,7 +728,6 @@ std::string FunctionHooks::RunFinal(Rtx first) {
       line_note_exists[insn->fld[4].rtint] = 1;
     }
   }
-  init_recog();
 
   char* start_buf = nullptr;
   size_t start_len = 0;
@@ -705,7 +737,10 @@ std::string FunctionHooks::RunFinal(Rtx first) {
   final_start_function(head, start_fp, optimize);
   asm_out_file = saved_asm;
   std::fclose(start_fp);
-  std::string out(start_buf != nullptr ? start_buf : "", start_len);
+  std::string out;
+  if (include_prologue_epilogue && start_buf != nullptr && start_len > 0) {
+    out.assign(start_buf, start_len);
+  }
   std::free(start_buf);
 
   for (Rtx insn = head->fld[2].rtx; insn != nullptr;) {
@@ -719,7 +754,7 @@ std::string FunctionHooks::RunFinal(Rtx first) {
   final_end_function(head, end_fp, optimize);
   asm_out_file = saved_asm;
   std::fclose(end_fp);
-  if (end_buf != nullptr && end_len > 0) {
+  if (include_prologue_epilogue && end_buf != nullptr && end_len > 0) {
     out.append(end_buf, end_len);
   }
   std::free(end_buf);
@@ -737,6 +772,42 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
   if (line_note_exists == nullptr) {
     line_note_exists = AllocZeroed<char>(1024);
   }
+
+  auto memoize_with_opt_fallback = [](Rtx r) {
+    if (r == nullptr || (r->code != kInsn && r->code != kJumpInsn && r->code != kCallInsn)) {
+      return;
+    }
+    if (r->fld[4].rtint < 0 && r->fld[3].rtx != nullptr && r->fld[3].rtx->code != kSequence) {
+      int code = recog(r->fld[3].rtx, r, nullptr);
+      if (code < 0) {
+        const int saved_opt = optimize;
+        optimize = (saved_opt == 0) ? 2 : 0;
+        code = recog(r->fld[3].rtx, r, nullptr);
+        optimize = saved_opt;
+      }
+      if (code >= 0) {
+        r->fld[4].rtint = code;
+      }
+    }
+  };
+  memoize_with_opt_fallback(insn);
+  if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+      insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence &&
+      insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+    Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+    for (int i = 0; i < vec->num_elem; ++i) {
+      memoize_with_opt_fallback(vec->elem[i].rtx);
+    }
+  }
+
+  const bool standalone_annulled_branch =
+      (insn->code == kJumpInsn && insn->unchanging == 1 &&
+       (insn->fld[3].rtx == nullptr || insn->fld[3].rtx->code != kSequence) &&
+       final_sequence == nullptr);
+  if (standalone_annulled_branch) {
+    final_sequence = insn;
+  }
+
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
@@ -748,6 +819,13 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
   }
   asm_out_file = saved_asm;
   std::fclose(mem_fp);
+
+  if (standalone_annulled_branch) {
+    final_sequence = nullptr;
+    set_noreorder = 0;
+    set_nomacro = 0;
+    mips_branch_likely = 0;
+  }
 
   std::string out(buf != nullptr ? buf : "", len);
   std::free(buf);
@@ -4607,7 +4685,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kFinalScanInsn: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       snap.post_state = pre_state;
-      const std::string asm_text = RunFinal(head);
+      const std::string asm_text = RunFinal(head, /*include_prologue_epilogue=*/false);
       snap.post_asm_lines = ExtractAsmLinesWithLabels(asm_text);
       break;
     }
@@ -4745,6 +4823,7 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
         Rtx final_head = ctx_->MaterializeFromCfg(current_cfg);
         trace.final_asm_text = RunFinal(final_head);
         trace.final_insn_asm_lines = ExtractInstructionOnlyAsmLines(trace.final_asm_text);
+        current_asm_lines = ExtractAsmLinesWithLabels(trace.final_asm_text);
         break;
       }
       case SubfunctionId::kGasAppendInsn:

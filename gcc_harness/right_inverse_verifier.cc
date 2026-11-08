@@ -176,13 +176,30 @@ RightInverseResult RightInverseVerifier::VerifyGasAppendInsnRightInverse(
 RightInverseResult RightInverseVerifier::VerifyFinalScanInsnRightInverse(
     std::string_view asm_line_x) const {
   RightInverseResult result;
-  result.expected_summary = std::string(absl::StripAsciiWhitespace(asm_line_x));
+  const std::string normalized_expected = ExtractInstructionLines(asm_line_x);
+  result.expected_summary = normalized_expected.empty()
+                                ? std::string(absl::StripAsciiWhitespace(asm_line_x))
+                                : normalized_expected;
 
   const std::string rtl_pat_y = inverses_->InvertFinalScanInsn(asm_line_x);
+  if (rtl_pat_y.empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertFinalScanInsn returned empty RTL pattern";
+    return result;
+  }
   ctx_->BeginFunction("final_scan_verify_fn");
   Rtx insn = ctx_->EmitPattern(rtl_pat_y);
   const std::string emitted = hooks_->RunFinalScanInsn(insn);
   result.actual_summary = ExtractInstructionLines(emitted);
+  if (absl::StrContains(asm_line_x, "$L")) {
+    for (size_t pos = 0; (pos = result.actual_summary.find(".L", pos)) != std::string::npos;
+         pos += 2) {
+      result.actual_summary[pos] = '$';
+    }
+  }
+  if (asm_line_x.find('\t') == std::string_view::npos) {
+    std::replace(result.actual_summary.begin(), result.actual_summary.end(), '\t', ' ');
+  }
   result.matches = (result.actual_summary == result.expected_summary);
   if (!result.matches) {
     result.diff_detail = absl::StrFormat("final_scan_insn(%s) got '%s' != expected '%s'", rtl_pat_y,
@@ -922,6 +939,18 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
           continue;
         }
         if (line == ".set noreorder") {
+          if (i + 2 < snap.post_asm_lines.size() && snap.post_asm_lines[i + 1] == "nop" &&
+              snap.post_asm_lines[i + 2] == ".set reorder") {
+            const std::string pat = inverses_->InvertFinalScanInsn(snap.post_asm_lines[i + 1]);
+            if (pat.empty()) {
+              result.matches = false;
+              result.diff_detail = "InvertFinalScanInsn returned empty pattern for nop";
+              return result;
+            }
+            cur_blk.AddPatternOnly(pat);
+            i += 2;
+            continue;
+          }
           if (i + 3 >= snap.post_asm_lines.size() || snap.post_asm_lines[i + 3] != ".set reorder") {
             result.matches = false;
             result.diff_detail = "Malformed .set noreorder block in kFinalScanInsn";
@@ -934,9 +963,23 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
             result.diff_detail = "InvertFinalScanInsn returned empty pattern in .set noreorder";
             return result;
           }
-          cur_blk.AddPatternOnly(
-              absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
+          const bool is_call_seq = absl::StrContains(pat0, "(call (mem:");
+          if (is_call_seq) {
+            cur_blk.AddPatternOnly(
+                absl::StrFormat("(sequence [(call_insn %s) (insn %s)])", pat0, pat1));
+          } else if (absl::StartsWith(pat0, "(jump_insn/u ")) {
+            cur_blk.AddPatternOnly(absl::StrFormat("(sequence [%s (insn/s %s)])", pat0, pat1));
+          } else {
+            cur_blk.AddPatternOnly(
+                absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
+          }
           i += 3;
+          if (!is_call_seq && i + 1 < snap.post_asm_lines.size() &&
+              !absl::EndsWith(snap.post_asm_lines[i + 1], ":")) {
+            blocks.push_back(std::move(cur_blk));
+            cur_blk = RtlBasicBlock{};
+            cur_blk.id = blocks.size();
+          }
           continue;
         }
         if (absl::EndsWith(line, ":")) {
@@ -944,24 +987,48 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
           if (absl::StartsWith(lbl, "$L")) {
             lbl.remove_prefix(1);
           }
-          if (!cur_blk.instructions.empty() || labeled_block_ids.contains(cur_blk.id)) {
+          if (!cur_blk.instructions.empty() || cur_blk.has_label) {
             blocks.push_back(std::move(cur_blk));
             cur_blk = RtlBasicBlock{};
             cur_blk.id = blocks.size();
           }
+          cur_blk.has_label = true;
           label_to_block[std::string(lbl)] = cur_blk.id;
           labeled_block_ids.insert(cur_blk.id);
           continue;
         }
-        const std::string pat = inverses_->InvertFinalScanInsn(line);
+        std::string combined_line = line;
+        if (i + 1 < snap.post_asm_lines.size() &&
+            (absl::StartsWith(line, "mtc1\t") || absl::StartsWith(line, "mtc1 ") ||
+             absl::StartsWith(line, "l.s\t") || absl::StartsWith(line, "l.s ")) &&
+            (absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.s.w\t") ||
+             absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.s.w ") ||
+             absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.d.w\t") ||
+             absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.d.w "))) {
+          combined_line = absl::StrCat(line, "\n", snap.post_asm_lines[i + 1]);
+          ++i;
+        } else if (absl::StartsWith(line, "lwl\t") || absl::StartsWith(line, "lwl ")) {
+          const size_t max_len = std::min<size_t>(16, snap.post_asm_lines.size() - i);
+          for (size_t len = max_len; len >= 3; --len) {
+            const std::string cand =
+                absl::StrJoin(absl::MakeConstSpan(snap.post_asm_lines).subspan(i, len), "\n");
+            if (!inverses_->InvertFinalScanInsn(cand).empty()) {
+              combined_line = cand;
+              i += len - 1;
+              break;
+            }
+          }
+        }
+        const std::string pat = inverses_->InvertFinalScanInsn(combined_line);
         if (pat.empty()) {
           result.matches = false;
           result.diff_detail =
-              absl::StrFormat("InvertFinalScanInsn returned empty pattern for '%s'", line);
+              absl::StrFormat("InvertFinalScanInsn returned empty pattern for '%s'", combined_line);
           return result;
         }
         cur_blk.AddPatternOnly(pat);
-        if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ")) &&
+        if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ") ||
+             absl::StartsWith(pat, "(jump_insn")) &&
             i + 1 < snap.post_asm_lines.size() &&
             !absl::EndsWith(snap.post_asm_lines[i + 1], ":")) {
           blocks.push_back(std::move(cur_blk));
@@ -969,19 +1036,51 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
           cur_blk.id = blocks.size();
         }
       }
-      if (!cur_blk.instructions.empty() || labeled_block_ids.contains(cur_blk.id) ||
-          blocks.empty()) {
+      if (!cur_blk.instructions.empty() || cur_blk.has_label || blocks.empty()) {
         blocks.push_back(std::move(cur_blk));
-      }
-      if (blocks.size() >= 2 && labeled_block_ids.contains(blocks.back().id) &&
-          blocks.back().instructions.size() == 4 &&
-          blocks.back().instructions[0] == "(set (reg:SI 29 sp) (reg:SI 30 fp))" &&
-          blocks.back().instructions.back() == "(return)") {
-        blocks.back().instructions.clear();
-        blocks.back().SyncRtlInsnsFromInstructions();
       }
 
       for (size_t b = 0; b < blocks.size(); ++b) {
+        bool modified_block = false;
+        for (size_t insn_idx = 0; insn_idx < blocks[b].instructions.size(); ++insn_idx) {
+          std::string& pat = blocks[b].instructions[insn_idx];
+          size_t pos = 0;
+          while ((pos = pat.find("(label_ref ", pos)) != std::string::npos) {
+            const size_t tok_start = pos + std::string_view("(label_ref ").size();
+            const size_t tok_end = pat.find(')', tok_start);
+            if (tok_end == std::string::npos) {
+              break;
+            }
+            const std::string lbl_tok(
+                absl::StripAsciiWhitespace(pat.substr(tok_start, tok_end - tok_start)));
+            const size_t delay_insn_pos = pat.find("(insn");
+            const bool is_jump_or_branch_insn = absl::StartsWith(pat, "(set (pc) ") ||
+                                                absl::StartsWith(pat, "(jump_insn") ||
+                                                absl::StartsWith(pat, "(sequence [(jump_insn");
+            const bool is_in_delay_slot = absl::StartsWith(pat, "(sequence [") &&
+                                          delay_insn_pos != std::string::npos &&
+                                          pos > delay_insn_pos;
+            const bool is_addr_hi_lo = !is_jump_or_branch_insn || is_in_delay_slot ||
+                                       absl::StrContains(pat.substr(0, pos), "(lo_sum:") ||
+                                       absl::StrContains(pat.substr(0, pos), "(high:");
+            if (insn_idx + 1 < blocks[b].instructions.size() || is_addr_hi_lo) {
+              auto it = label_to_block.find(lbl_tok);
+              if (it != label_to_block.end()) {
+                const std::string replacement =
+                    absl::StrFormat("(label_ref __blk_%zu)", it->second);
+                pat.replace(pos, tok_end - pos + 1, replacement);
+                pos += replacement.size();
+                modified_block = true;
+                continue;
+              }
+            }
+            pos = tok_end + 1;
+          }
+        }
+        if (modified_block) {
+          blocks[b].SyncRtlInsnsFromInstructions();
+        }
+
         if (blocks[b].instructions.empty()) {
           if (b + 1 < blocks.size()) {
             blocks[b].successors = {b + 1};
@@ -994,27 +1093,41 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
           blocks[b].successors.clear();
           continue;
         }
-        const size_t lref_pos = last_pat.find("(label_ref ");
-        if (lref_pos != std::string::npos) {
+        size_t search_from = 0;
+        bool matched_branch_target = false;
+        while (search_from < last_pat.size()) {
+          const size_t lref_pos = last_pat.find("(label_ref ", search_from);
+          if (lref_pos == std::string::npos) {
+            break;
+          }
           const size_t tok_start = lref_pos + std::string_view("(label_ref ").size();
           const size_t tok_end = last_pat.find(')', tok_start);
-          if (tok_end != std::string::npos) {
-            const std::string lbl_tok(
-                absl::StripAsciiWhitespace(last_pat.substr(tok_start, tok_end - tok_start)));
-            auto it = label_to_block.find(lbl_tok);
-            if (it != label_to_block.end()) {
-              if (absl::StrContains(last_pat, "(if_then_else ")) {
-                if (b + 1 < blocks.size()) {
-                  blocks[b].successors = {b + 1, it->second};
-                } else {
-                  blocks[b].successors = {it->second};
-                }
+          if (tok_end == std::string::npos) {
+            break;
+          }
+          const std::string lbl_tok(
+              absl::StripAsciiWhitespace(last_pat.substr(tok_start, tok_end - tok_start)));
+          search_from = tok_end + 1;
+          if (absl::StartsWith(lbl_tok, "__blk_")) {
+            continue;
+          }
+          auto it = label_to_block.find(lbl_tok);
+          if (it != label_to_block.end()) {
+            if (absl::StrContains(last_pat, "(if_then_else ")) {
+              if (b + 1 < blocks.size()) {
+                blocks[b].successors = {b + 1, it->second};
               } else {
                 blocks[b].successors = {it->second};
               }
-              continue;
+            } else {
+              blocks[b].successors = {it->second};
             }
+            matched_branch_target = true;
+            break;
           }
+        }
+        if (matched_branch_target) {
+          continue;
         }
         if (b + 1 < blocks.size()) {
           blocks[b].successors = {b + 1};

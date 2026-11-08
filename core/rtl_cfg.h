@@ -108,6 +108,7 @@ struct RtlBasicBlock {
   std::vector<size_t> successors;
   std::vector<size_t> predecessors;
   std::vector<size_t> addr_vec_targets;
+  bool has_label = false;
 
   void AddInsn(RtlInsn insn) {
     instructions.push_back(insn.canonical_pattern);

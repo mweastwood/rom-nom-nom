@@ -1197,6 +1197,12 @@ Rtx GccContext::GetOrCreateLabel(std::string_view label_token) {
     return it->second;
   }
   Rtx lbl = gen_label_rtx();
+  if (absl::StartsWith(label_token, "L") && label_token.size() > 1) {
+    int explicit_num = 0;
+    if (absl::SimpleAtoi(label_token.substr(1), &explicit_num) && explicit_num > 0) {
+      lbl->fld[3].rtint = explicit_num;
+    }
+  }
   label_map_.emplace(std::move(key), lbl);
   return lbl;
 }
@@ -1796,6 +1802,9 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
 
   for (size_t b = 0; b < num_blocks; ++b) {
     const auto& blk = cfg.rpo_blocks[b];
+    if (blk.has_label) {
+      block_needs_label[b] = true;
+    }
     bool ends_with_uncond = false;
     if (!blk.instructions.empty()) {
       std::string_view last_pat = blk.instructions.back();
@@ -1890,6 +1899,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       emit_label(block_labels[b]);
     }
     bool emitted_uncond_jump_or_return = false;
+    bool emitted_any_jump = false;
     for (size_t insn_idx = 0; insn_idx < blk.instructions.size(); ++insn_idx) {
       const std::string& pat_str = blk.instructions[insn_idx];
       std::string resolved_pat = pat_str;
@@ -1909,7 +1919,8 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
           const std::string_view resolved_view = resolved_pat;
           const std::vector<std::string> sub_refs =
               ExtractLabelRefTokens(resolved_view.substr(pos, close - pos + 1));
-          if (!sub_refs.empty() && tablejump_label_tokens.contains(sub_refs[0])) {
+          if (!sub_refs.empty() && (tablejump_label_tokens.contains(sub_refs[0]) ||
+                                    absl::StartsWith(sub_refs[0], "__blk_"))) {
             pos = close + 1;
             continue;
           }
@@ -1922,6 +1933,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
         continue;
       }
       if (insn->code == kJumpInsn) {
+        emitted_any_jump = true;
         if (IsUnconditionalJumpOrReturnPatternText(pat_str) || is_tablejump_pattern_text(pat_str)) {
           emitted_uncond_jump_or_return = true;
         }
@@ -1930,6 +1942,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
         Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
         if (vec != nullptr && vec->num_elem > 0 && vec->elem[0].rtx != nullptr &&
             vec->elem[0].rtx->code == kJumpInsn) {
+          emitted_any_jump = true;
           std::string first_fmt = FormatRtx(vec->elem[0].rtx->fld[3].rtx);
           if (IsUnconditionalJumpOrReturnPatternText(first_fmt) ||
               is_tablejump_pattern_text(first_fmt)) {
@@ -1940,7 +1953,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     }
     // Emit an explicit unconditional jump if block `b` does not end with a jump
     // or return and its sole successor is not `b + 1`.
-    if (!emitted_uncond_jump_or_return && blk.successors.size() == 1 &&
+    if (!emitted_uncond_jump_or_return && !emitted_any_jump && blk.successors.size() == 1 &&
         blk.successors[0] != b + 1 && blk.successors[0] < num_blocks &&
         block_labels[blk.successors[0]] != nullptr) {
       Rtx target_lbl = block_labels[blk.successors[0]];

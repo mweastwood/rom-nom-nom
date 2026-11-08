@@ -137,7 +137,7 @@ class FunctionHooks {
   // ---------------------------------------------------------------------------
   // Stage 0: Final Assembly Emission (`final.c`, `mips.c`) & GAS (`tc-mips.c`)
   // ---------------------------------------------------------------------------
-  std::string RunFinal(Rtx first = nullptr);
+  std::string RunFinal(Rtx first = nullptr, bool include_prologue_epilogue = true);
   std::string RunFinalScanInsn(Rtx insn, int prescan = 0, Rtx* next_insn_out = nullptr);
   void RunShortenBranches(Rtx first = nullptr);
   std::string RunFunctionPrologue(int frame_size = 0, uint32_t saved_gpr_mask = 0);
