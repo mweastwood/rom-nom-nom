@@ -534,10 +534,12 @@ void PopulateInsnCodesWithVolatileOk(Rtx first) {
 bool IsBranchMnemonic(std::string_view mnemonic) {
   return mnemonic == "b" || mnemonic == "bal" || mnemonic == "beq" || mnemonic == "bne" ||
          mnemonic == "blez" || mnemonic == "bgtz" || mnemonic == "bltz" || mnemonic == "bgez" ||
-         mnemonic == "bltzal" || mnemonic == "bgezal" || mnemonic == "beql" || mnemonic == "bnel" ||
-         mnemonic == "blezl" || mnemonic == "bgtzl" || mnemonic == "bltzl" || mnemonic == "bgezl" ||
-         mnemonic == "bc1t" || mnemonic == "bc1f" || mnemonic == "bc1tl" || mnemonic == "bc1fl" ||
-         mnemonic == "beqz" || mnemonic == "bnez";
+         mnemonic == "bltzal" || mnemonic == "bgezal" || mnemonic == "bltzall" ||
+         mnemonic == "bgezall" || mnemonic == "beql" || mnemonic == "bnel" || mnemonic == "blezl" ||
+         mnemonic == "bgtzl" || mnemonic == "bltzl" || mnemonic == "bgezl" || mnemonic == "bc0t" ||
+         mnemonic == "bc0f" || mnemonic == "bc0tl" || mnemonic == "bc0fl" || mnemonic == "bc1t" ||
+         mnemonic == "bc1f" || mnemonic == "bc1tl" || mnemonic == "bc1fl" || mnemonic == "beqz" ||
+         mnemonic == "bnez" || mnemonic == "beqzl" || mnemonic == "bnezl";
 }
 
 Rtx FindTargetLabelInPattern(Rtx x) {
@@ -831,14 +833,21 @@ std::string FunctionHooks::RunFunctionPrologueEpilogue(int frame_size, uint32_t 
 }
 
 std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text) {
+  constexpr int kGasOpAbsent = 1;
   struct PendingBranch {
     size_t word_index = 0;
     std::string target_label;
     bool is_jump_26 = false;
   };
+  struct PendingNumericFixup {
+    size_t word_index = 0;
+    uint32_t mask = 0;
+    uint32_t value = 0;
+  };
 
   absl::flat_hash_map<std::string, size_t> label_word_index;
   std::vector<PendingBranch> pending_branches;
+  std::vector<PendingNumericFixup> pending_numeric_fixups;
   std::vector<uint32_t> words;
 
   frag_wane(frag_now);
@@ -858,9 +867,17 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     }
     return total;
   };
-  const bool has_directives =
-      absl::StrContains(asm_text, ".set") || absl::StrContains(asm_text, ".ent");
-  mips_noreorder = has_directives ? 0 : 1;
+  const bool is_bare_reorder_lines = !absl::StrContains(asm_text, ".ent") &&
+                                     !absl::StartsWith(asm_text, ".set reorder") &&
+                                     !absl::StartsWith(asm_text, "\t");
+  if (is_bare_reorder_lines) {
+    mips_optimize = 2;
+    mips_noreorder = 0;
+  } else {
+    const bool has_directives =
+        absl::StrContains(asm_text, ".set") || absl::StrContains(asm_text, ".ent");
+    mips_noreorder = has_directives ? 0 : 1;
+  }
   mips_no_prev_insn();
 
   uint64_t dummy_sym[8] = {};
@@ -912,15 +929,17 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
       continue;
     }
 
-    // Check if this is a branch or jump to a symbolic label.
+    // Check if this is a branch or jump to a symbolic label or numeric offset.
     size_t sp = 0;
     while (sp < line.size() && !absl::ascii_isspace(line[sp])) {
       ++sp;
     }
     std::string_view mnemonic = line.substr(0, sp);
     std::string target_lbl;
-    bool is_jump_26 = false;
-    if (IsBranchMnemonic(mnemonic) || mnemonic == "j" || mnemonic == "jal") {
+    const bool is_branch_or_jump =
+        IsBranchMnemonic(mnemonic) || mnemonic == "j" || mnemonic == "jal";
+    const bool is_jump_26 = (mnemonic == "j" || mnemonic == "jal");
+    if (is_branch_or_jump) {
       size_t last_comma = line.rfind(',');
       std::string_view last_arg = absl::StripAsciiWhitespace(
           last_comma != std::string_view::npos ? line.substr(last_comma + 1) : line.substr(sp));
@@ -928,7 +947,6 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
           !(last_arg.front() == '$' && last_arg.size() > 1 && last_arg[1] != 'L') &&
           !absl::ascii_isdigit(last_arg.front()) && last_arg.front() != '-') {
         target_lbl = std::string(last_arg);
-        is_jump_26 = (mnemonic == "j" || mnemonic == "jal");
       }
     }
 
@@ -938,18 +956,34 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     md_assemble(mutable_line.data());
     const size_t post_words = count_emitted_words();
 
-    if (!target_lbl.empty() && post_words > pre_words) {
+    if (post_words > pre_words) {
       size_t br_word = pre_words;
       if (mips_noreorder == 0 && post_words >= 2) {
         br_word = post_words - 2;
       } else if (mips_noreorder != 0 && post_words > pre_words) {
         br_word = post_words - 1;
       }
-      pending_branches.push_back(PendingBranch{
-          .word_index = br_word,
-          .target_label = target_lbl,
-          .is_jump_26 = is_jump_26,
-      });
+      if (!target_lbl.empty()) {
+        pending_branches.push_back(PendingBranch{
+            .word_index = br_word,
+            .target_label = target_lbl,
+            .is_jump_26 = is_jump_26,
+        });
+      } else if (is_branch_or_jump && offset_expr.X_op != kGasOpAbsent) {
+        if (is_jump_26) {
+          pending_numeric_fixups.push_back(PendingNumericFixup{
+              .word_index = br_word,
+              .mask = 0x03ffffffu,
+              .value = (static_cast<uint32_t>(offset_expr.X_add_number) >> 2) & 0x03ffffffu,
+          });
+        } else {
+          pending_numeric_fixups.push_back(PendingNumericFixup{
+              .word_index = br_word,
+              .mask = 0x0000ffffu,
+              .value = static_cast<uint32_t>(offset_expr.X_add_number) & 0xffffu,
+          });
+        }
+      }
     }
   }
 
@@ -961,6 +995,12 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     }
     if (f == frag_now) {
       break;
+    }
+  }
+
+  for (const auto& fix : pending_numeric_fixups) {
+    if (fix.word_index < words.size()) {
+      words[fix.word_index] = (words[fix.word_index] & ~fix.mask) | (fix.value & fix.mask);
     }
   }
 
@@ -1076,35 +1116,177 @@ uint32_t FunctionHooks::RunGasAppendInsn(std::string_view insn_asm_line) {
 
 std::vector<uint32_t> FunctionHooks::RunGasAppendInsnReorder(
     absl::Span<const std::string> insn_asm_lines) {
+  constexpr int kGasOpAbsent = 1;
+  struct PendingBranch {
+    size_t word_index = 0;
+    std::string target_label;
+    bool is_jump_26 = false;
+  };
+
+  absl::flat_hash_map<std::string, size_t> label_word_index;
+  std::vector<PendingBranch> pending_branches;
+  std::vector<uint32_t> words;
+
   frag_wane(frag_now);
   frag_new(0);
+  frag_grow(8192);
+  GasFrag* const first_frag = frag_now;
+  auto count_emitted_words = [first_frag]() -> size_t {
+    size_t total = 0;
+    for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
+      const long nbytes = (f == frag_now) ? frag_now_fix() : f->fr_fix;
+      if (nbytes >= 4) {
+        total += static_cast<size_t>(nbytes / 4);
+      }
+      if (f == frag_now) {
+        break;
+      }
+    }
+    return total;
+  };
+
+  mips_optimize = 2;
   mips_noreorder = 0;
   mips_no_prev_insn();
+  uint64_t dummy_sym[8] = {};
 
   for (const std::string& raw_line : insn_asm_lines) {
-    imm_expr.X_op = 0;
-    offset_expr.X_op = 0;
-    std::string mutable_line(absl::StripAsciiWhitespace(raw_line));
+    std::string_view line = absl::StripAsciiWhitespace(raw_line);
+    if (line.empty()) {
+      continue;
+    }
+
+    // Extract any leading `<label>:` definition on this line.
+    while (true) {
+      size_t colon_pos = line.find(':');
+      if (colon_pos == std::string_view::npos) {
+        break;
+      }
+      std::string_view before = line.substr(0, colon_pos);
+      if (before.find_first_of(" \t,()") != std::string_view::npos) {
+        break;
+      }
+      mips_emit_delays();
+      label_word_index[std::string(before)] = count_emitted_words();
+      mips_define_label(dummy_sym);
+      line = absl::StripAsciiWhitespace(line.substr(colon_pos + 1));
+    }
+    if (line.empty()) {
+      continue;
+    }
+
+    // Handle `.set noreorder` / `.set reorder` directives.
+    if (line.front() == '.') {
+      std::string_view rest = absl::StripAsciiWhitespace(line.substr(1));
+      if (absl::StartsWith(rest, "set") && (rest.size() == 3 || absl::ascii_isspace(rest[3]))) {
+        std::string_view opt = absl::StripAsciiWhitespace(rest.substr(3));
+        if (opt == "noreorder") {
+          mips_emit_delays();
+          mips_noreorder = 1;
+        } else if (opt == "reorder") {
+          if (mips_noreorder != 0) {
+            mips_no_prev_insn();
+          }
+          mips_noreorder = 0;
+        }
+      }
+      continue;
+    }
+
+    size_t sp = 0;
+    while (sp < line.size() && !absl::ascii_isspace(line[sp])) {
+      ++sp;
+    }
+    std::string_view mnemonic = line.substr(0, sp);
+    std::string target_lbl;
+    const bool is_branch_or_jump =
+        IsBranchMnemonic(mnemonic) || mnemonic == "j" || mnemonic == "jal";
+    const bool is_jump_26 = (mnemonic == "j" || mnemonic == "jal");
+    if (is_branch_or_jump) {
+      size_t last_comma = line.rfind(',');
+      std::string_view last_arg = absl::StripAsciiWhitespace(
+          last_comma != std::string_view::npos ? line.substr(last_comma + 1) : line.substr(sp));
+      if (!last_arg.empty() &&
+          !(last_arg.front() == '$' && last_arg.size() > 1 && last_arg[1] != 'L') &&
+          !absl::ascii_isdigit(last_arg.front()) && last_arg.front() != '-') {
+        target_lbl = std::string(last_arg);
+      }
+    }
+
+    imm_expr.X_op = kGasOpAbsent;
+    imm_expr.X_add_number = 0;
+    offset_expr.X_op = kGasOpAbsent;
+    offset_expr.X_add_number = 0;
+    insn_error = nullptr;
+
+    std::string mutable_line(line);
     std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
     GasMipsClInsn insn{};
     mips_ip(mutable_line.data(), &insn);
-    if (imm_expr.X_op != 0) {
+    if (insn.insn_mo != nullptr && insn.insn_mo->pinfo == 0xffffffffUL &&
+        insn.insn_mo->args != nullptr && std::strcmp(insn.insn_mo->args, "a") == 0) {
+      insn.insn_mo = &insn.insn_mo[1];
+      insn.insn_opcode = insn.insn_mo->match;
+    }
+    if (target_lbl.empty() && is_branch_or_jump && offset_expr.X_op != kGasOpAbsent) {
+      if (is_jump_26) {
+        insn.insn_opcode |= (static_cast<uint32_t>(offset_expr.X_add_number) >> 2) & 0x03ffffffu;
+      } else {
+        insn.insn_opcode |= static_cast<uint32_t>(offset_expr.X_add_number) & 0xffffu;
+      }
+    }
+
+    const size_t pre_words = count_emitted_words();
+    if (imm_expr.X_op != kGasOpAbsent) {
       append_insn(nullptr, &insn, &imm_expr, imm_reloc);
-    } else if (offset_expr.X_op != 0) {
+    } else if (offset_expr.X_op != kGasOpAbsent) {
       append_insn(nullptr, &insn, &offset_expr, offset_reloc);
     } else {
       append_insn(nullptr, &insn, nullptr, kBfdRelocUnused);
     }
+    const size_t post_words = count_emitted_words();
+
+    if (!target_lbl.empty() && post_words > pre_words) {
+      size_t br_word = pre_words;
+      if (mips_noreorder == 0 && post_words >= 2) {
+        br_word = post_words - 2;
+      } else if (mips_noreorder != 0 && post_words > pre_words) {
+        br_word = post_words - 1;
+      }
+      pending_branches.push_back(PendingBranch{
+          .word_index = br_word,
+          .target_label = target_lbl,
+          .is_jump_26 = is_jump_26,
+      });
+    }
   }
   mips_emit_delays();
 
-  std::vector<uint32_t> words;
-  const int nbytes = frag_now_fix();
-  if (frag_now != nullptr && nbytes >= 4) {
-    for (int off = 0; off + 4 <= nbytes; off += 4) {
-      words.push_back(ReadBigEndian32(frag_now->fr_literal + off));
+  for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
+    const long nbytes = (f == frag_now) ? frag_now_fix() : f->fr_fix;
+    for (long off = 0; off + 4 <= nbytes; off += 4) {
+      words.push_back(ReadBigEndian32(f->fr_literal + off));
+    }
+    if (f == frag_now) {
+      break;
     }
   }
+
+  for (const auto& br : pending_branches) {
+    auto it = label_word_index.find(br.target_label);
+    if (it != label_word_index.end() && br.word_index < words.size()) {
+      if (br.is_jump_26) {
+        words[br.word_index] = (words[br.word_index] & 0xfc000000u) |
+                               (static_cast<uint32_t>(it->second) & 0x03ffffffu);
+      } else {
+        const int32_t offset_words =
+            static_cast<int32_t>(it->second) - static_cast<int32_t>(br.word_index + 1);
+        words[br.word_index] =
+            (words[br.word_index] & 0xffff0000u) | (static_cast<uint32_t>(offset_words) & 0xffffu);
+      }
+    }
+  }
+
   return words;
 }
 
@@ -3245,6 +3427,8 @@ void SetGccFOption(std::string_view opt_name, int enabled) {
 }
 
 void ApplyOptimizeLevelFlags(int optimize_level) {
+  mips_debug = 0;
+  mips_optimize = (optimize_level <= 0) ? 1 : 2;
   if (optimize_level <= 0) {
     optimize = 0;
     obey_regdecls = 1;

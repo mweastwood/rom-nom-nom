@@ -134,6 +134,11 @@ RightInverseResult RightInverseVerifier::VerifyGasAppendInsnRightInverse(
   result.expected_summary = FormatWordsSummary(words_x);
 
   const std::vector<std::string> asm_lines_y = inverses_->InvertGasAppendInsn(words_x);
+  if (!words_x.empty() && asm_lines_y.empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertGasAppendInsn returned empty assembly lines";
+    return result;
+  }
   result.actual_words = hooks_->RunGasAppendInsnReorder(asm_lines_y);
   result.actual_summary = FormatWordsSummary(result.actual_words);
   result.matches = (result.actual_words == result.expected_words);
@@ -1061,46 +1066,13 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       result.expected_words = snap.post_machine_words;
       result.expected_summary = FormatWordsSummary(snap.post_machine_words);
 
-      size_t unpadded_len = snap.post_machine_words.size();
-      for (size_t i = 0; i + 1 < snap.post_machine_words.size(); ++i) {
-        if (snap.post_machine_words[i] == 0x03e00008u) {
-          bool all_trailing_nops = true;
-          for (size_t j = i + 2; j < snap.post_machine_words.size(); ++j) {
-            if (snap.post_machine_words[j] != 0x00000000u) {
-              all_trailing_nops = false;
-              break;
-            }
-          }
-          if (all_trailing_nops) {
-            unpadded_len = i + 2;
-            break;
-          }
-        }
+      const std::vector<std::string> cand_asm_lines =
+          inverses_->InvertGasAppendInsn(snap.post_machine_words);
+      if (!snap.post_machine_words.empty() && cand_asm_lines.empty()) {
+        result.matches = false;
+        result.diff_detail = "InvertGasAppendInsn returned empty assembly lines";
+        return result;
       }
-
-      const absl::Span<const uint32_t> unpadded_words =
-          absl::MakeConstSpan(snap.post_machine_words).subspan(0, unpadded_len);
-      std::vector<std::string> cand_asm_lines = inverses_->InvertGasAppendInsn(unpadded_words);
-      bool has_wa_g = false;
-      for (const std::string& flag : snap.c_flags) {
-        if (absl::StrContains(flag, "-Wa,-g")) {
-          has_wa_g = true;
-          break;
-        }
-      }
-      if (has_wa_g && unpadded_words.size() >= 2 &&
-          unpadded_words[unpadded_words.size() - 2] == 0x03e00008u &&
-          unpadded_words[unpadded_words.size() - 1] != 0x00000000u && cand_asm_lines.size() >= 2) {
-        std::string jump_line = std::move(cand_asm_lines.back());
-        cand_asm_lines.pop_back();
-        std::string delay_line = std::move(cand_asm_lines.back());
-        cand_asm_lines.pop_back();
-        cand_asm_lines.push_back(".set\tnoreorder");
-        cand_asm_lines.push_back(std::move(jump_line));
-        cand_asm_lines.push_back(std::move(delay_line));
-        cand_asm_lines.push_back(".set\treorder");
-      }
-      cand_asm_lines.insert(cand_asm_lines.begin(), ".set\treorder");
 
       const SubfunctionBoundarySnapshot replayed =
           hooks_->ExecuteSubfunctionBoundary(snap, snap.post_state, cand_asm_lines);

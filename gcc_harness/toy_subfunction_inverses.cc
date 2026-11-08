@@ -335,9 +335,16 @@ std::vector<std::string> ToySubfunctionInverses::InvertGasAppendInsn(
         }
       }
       if (delay_w == 0x00000000u) {
-        // `append_insn` emitted a delay-slot `nop` because no prior instruction
-        // could be swapped into the delay slot.
-        lines.push_back(std::move(jump_line));
+        if (i > 0) {
+          lines.push_back(".set\tnoreorder");
+          lines.push_back(std::move(jump_line));
+          lines.push_back("nop");
+          lines.push_back(".set\treorder");
+        } else {
+          // `append_insn` emitted a delay-slot `nop` because no prior instruction
+          // could be swapped into the delay slot.
+          lines.push_back(std::move(jump_line));
+        }
       } else {
         // `append_insn` swapped the preceding instruction into the delay slot;
         // restore the pre-`append_insn` order `[delay_insn, jump_insn]`.
