@@ -164,13 +164,31 @@ absl::StatusOr<RtlPatternAndNotes> ExtractSequenceSubInsn(const RtlExpr& sub_ins
   return ParsePatternAndNotes(combined);
 }
 
+std::string FormatTopLevelPatternAndNotes(const RtlPatternAndNotes& pn) {
+  std::string out = pn.ToSexprString();
+  if (pn.pattern.op == RtlOp::kParallel) {
+    const std::string pat_str = pn.pattern.ToSexprString();
+    std::string new_pat = "(parallel[ ";
+    for (size_t i = 0; i < pn.pattern.children.size(); ++i) {
+      if (i > 0) {
+        new_pat.push_back(' ');
+      }
+      new_pat.append(pn.pattern.children[i].ToSexprString());
+    }
+    new_pat.append(" ] )");
+    out.replace(0, pat_str.size(), new_pat);
+  }
+  return out;
+}
+
 std::string FormatSequenceString(RtlOp head_op, const RtlFlags& head_flags,
                                  const RtlPatternAndNotes& head_pat, const RtlFlags& slot_flags,
                                  const RtlPatternAndNotes& slot_pat) {
   return absl::StrCat("(", RtlExpr::OpToString(RtlOp::kSequence), " [(",
                       RtlExpr::OpToString(head_op), FormatFlagsSuffix(head_flags), " ",
-                      head_pat.ToSexprString(), ") (", RtlExpr::OpToString(RtlOp::kInsn),
-                      FormatFlagsSuffix(slot_flags), " ", slot_pat.ToSexprString(), ")])");
+                      FormatTopLevelPatternAndNotes(head_pat), ") (",
+                      RtlExpr::OpToString(RtlOp::kInsn), FormatFlagsSuffix(slot_flags), " ",
+                      FormatTopLevelPatternAndNotes(slot_pat), ")])");
 }
 
 bool IsAnyJumpOrReturnTopExpr(const RtlExpr& expr) {
@@ -253,9 +271,18 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
       auto parsed = ParsePatternAndNotes(blk.instructions.back());
       if (parsed.ok()) {
         ends_with_uncond = IsUncondJumpOrReturnOrTableJumpTopExpr(parsed->pattern);
+        const RtlExpr* tbl_expr = nullptr;
         if (IsTableJumpExpr(parsed->pattern)) {
+          tbl_expr = &parsed->pattern;
+        } else if (parsed->pattern.op == RtlOp::kSequence && !parsed->pattern.children.empty() &&
+                   parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
+                   !parsed->pattern.children[0].children.empty() &&
+                   IsTableJumpExpr(parsed->pattern.children[0].children[0])) {
+          tbl_expr = &parsed->pattern.children[0].children[0];
+        }
+        if (tbl_expr != nullptr) {
           block_has_tablejump[b] = true;
-          const RtlExpr& lbl_ref = parsed->pattern.children[1].children[0];
+          const RtlExpr& lbl_ref = tbl_expr->children[1].children[0];
           old_tablejump_token[b] = lbl_ref.str_val;
           for (size_t t : blk.addr_vec_targets) {
             if (t < num_blocks) {
@@ -337,7 +364,17 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
       if (modified) {
-        blk.instructions[i] = parsed->ToSexprString();
+        if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
+          auto sub_or = ExtractSequenceSubInsn(parsed->pattern.children[0]);
+          auto slot_or = ExtractSequenceSubInsn(parsed->pattern.children[1]);
+          if (sub_or.ok() && slot_or.ok()) {
+            blk.instructions[i] = FormatSequenceString(parsed->pattern.children[0].op,
+                                                       parsed->pattern.children[0].flags, *sub_or,
+                                                       parsed->pattern.children[1].flags, *slot_or);
+            continue;
+          }
+        }
+        blk.instructions[i] = FormatTopLevelPatternAndNotes(*parsed);
       }
     }
   }
@@ -560,7 +597,7 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       }
 
       // Unpack `b`'s conditional jump.
-      blk.instructions.back() = jump_pat_notes->ToSexprString();
+      blk.instructions.back() = FormatTopLevelPatternAndNotes(*jump_pat_notes);
 
       // If `fallthrough_b` ends with a bare unconditional jump or return from
       // which `slot_pat` was stolen via `steal_delay_list_from_fallthrough`,
@@ -570,13 +607,14 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
         ft_blk.instructions.back() = FormatSequenceString(
             RtlOp::kJumpInsn, RtlFlags{}, ft_bare_jump_pat_notes, RtlFlags{}, *slot_pat_notes);
       } else if (own_fallthrough) {
-        ft_blk.instructions.insert(ft_blk.instructions.begin(), slot_pat_notes->ToSexprString());
+        ft_blk.instructions.insert(ft_blk.instructions.begin(),
+                                   FormatTopLevelPatternAndNotes(*slot_pat_notes));
       } else {
         // `!own_fallthrough`: insert a new fallthrough block `b + 1` that holds
         // `slot_pat` and falls through to the old `fallthrough_b`.
         RtlBasicBlock new_ft;
         new_ft.has_label = false;
-        new_ft.instructions.push_back(slot_pat_notes->ToSexprString());
+        new_ft.instructions.push_back(FormatTopLevelPatternAndNotes(*slot_pat_notes));
         new_ft.successors = {fallthrough_b + 1};
         InsertBlockAt(&out, fallthrough_b, std::move(new_ft));
         // After inserting at `fallthrough_b = b + 1`, `InsertBlockAt` shifted
@@ -679,7 +717,7 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
           !p_last->pattern.children.empty()) {
         auto p_jump = ExtractSequenceSubInsn(p_last->pattern.children[0]);
         if (p_jump.ok()) {
-          p_block.instructions.back() = p_jump->ToSexprString();
+          p_block.instructions.back() = FormatTopLevelPatternAndNotes(*p_jump);
         }
       }
     }
@@ -721,6 +759,28 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
               for (size_t& succ : out.rpo_blocks[p_blk].successors) {
                 if (succ == target_b) {
                   succ = pred_b;
+                }
+              }
+              if (p_blk + 1 == pred_b && out.rpo_blocks[p_blk].successors.size() == 1 &&
+                  !out.rpo_blocks[p_blk].instructions.empty()) {
+                bool prev_inserts_before_pred = false;
+                if (p_blk > 0 && !out.rpo_blocks[p_blk - 1].instructions.empty() &&
+                    out.rpo_blocks[p_blk - 1].successors.size() == 2 &&
+                    (out.rpo_blocks[p_blk - 1].successors[0] == pred_b ||
+                     out.rpo_blocks[p_blk - 1].successors[1] == pred_b)) {
+                  auto prev_last =
+                      ParsePatternAndNotes(out.rpo_blocks[p_blk - 1].instructions.back());
+                  if (prev_last.ok() && prev_last->pattern.op == RtlOp::kSequence &&
+                      prev_last->pattern.children.size() == 2 &&
+                      prev_last->pattern.children[0].op == RtlOp::kJumpInsn &&
+                      prev_last->pattern.children[1].flags.in_struct) {
+                    prev_inserts_before_pred = true;
+                  }
+                }
+                auto p_last = ParsePatternAndNotes(out.rpo_blocks[p_blk].instructions.back());
+                if (!prev_inserts_before_pred && p_last.ok() &&
+                    IsSimpleUncondJumpExpr(p_last->pattern)) {
+                  out.rpo_blocks[p_blk].instructions.pop_back();
                 }
               }
             }
@@ -802,7 +862,8 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
     // predecessors of `target_b` are in `same_slot_jumpers`).
     if (!pred_falls_through_to_target && !has_other_jumpers) {
       auto& tgt_blk = out.rpo_blocks[target_b];
-      tgt_blk.instructions.insert(tgt_blk.instructions.begin(), slot_pat_notes->ToSexprString());
+      tgt_blk.instructions.insert(tgt_blk.instructions.begin(),
+                                  FormatTopLevelPatternAndNotes(*slot_pat_notes));
       tgt_blk.has_label = true;
       continue;
     }
@@ -813,7 +874,7 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       const size_t old_target_b = target_b;
       RtlBasicBlock tramp_blk;
       tramp_blk.has_label = true;
-      tramp_blk.instructions.push_back(slot_pat_notes->ToSexprString());
+      tramp_blk.instructions.push_back(FormatTopLevelPatternAndNotes(*slot_pat_notes));
       tramp_blk.successors = {old_target_b + 1};
       InsertBlockAt(&out, old_target_b, std::move(tramp_blk));
       if (b >= old_target_b) {

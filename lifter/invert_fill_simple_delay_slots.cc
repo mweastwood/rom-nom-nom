@@ -220,13 +220,31 @@ absl::StatusOr<RtlPatternAndNotes> ExtractSequenceSubInsn(const RtlExpr& sub_ins
   return ParsePatternAndNotes(combined);
 }
 
+std::string FormatTopLevelPatternAndNotes(const RtlPatternAndNotes& pn) {
+  std::string out = pn.ToSexprString();
+  if (pn.pattern.op == RtlOp::kParallel) {
+    const std::string pat_str = pn.pattern.ToSexprString();
+    std::string new_pat = "(parallel[ ";
+    for (size_t i = 0; i < pn.pattern.children.size(); ++i) {
+      if (i > 0) {
+        new_pat.push_back(' ');
+      }
+      new_pat.append(pn.pattern.children[i].ToSexprString());
+    }
+    new_pat.append(" ] )");
+    out.replace(0, pat_str.size(), new_pat);
+  }
+  return out;
+}
+
 std::string FormatSequenceString(RtlOp head_op, const RtlFlags& head_flags,
                                  const RtlPatternAndNotes& head_pat, const RtlFlags& slot_flags,
                                  const RtlPatternAndNotes& slot_pat) {
   return absl::StrCat("(", RtlExpr::OpToString(RtlOp::kSequence), " [(",
                       RtlExpr::OpToString(head_op), FormatFlagsSuffix(head_flags), " ",
-                      head_pat.ToSexprString(), ") (", RtlExpr::OpToString(RtlOp::kInsn),
-                      FormatFlagsSuffix(slot_flags), " ", slot_pat.ToSexprString(), ")])");
+                      FormatTopLevelPatternAndNotes(head_pat), ") (",
+                      RtlExpr::OpToString(RtlOp::kInsn), FormatFlagsSuffix(slot_flags), " ",
+                      FormatTopLevelPatternAndNotes(slot_pat), ")])");
 }
 
 bool IsAnyJumpOrReturnTopExpr(const RtlExpr& expr) {
@@ -275,9 +293,18 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
       auto parsed = ParsePatternAndNotes(blk.instructions.back());
       if (parsed.ok()) {
         ends_with_uncond = IsUncondJumpOrReturnOrTableJumpTopExpr(parsed->pattern);
+        const RtlExpr* tbl_expr = nullptr;
         if (IsTableJumpExpr(parsed->pattern)) {
+          tbl_expr = &parsed->pattern;
+        } else if (parsed->pattern.op == RtlOp::kSequence && !parsed->pattern.children.empty() &&
+                   parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
+                   !parsed->pattern.children[0].children.empty() &&
+                   IsTableJumpExpr(parsed->pattern.children[0].children[0])) {
+          tbl_expr = &parsed->pattern.children[0].children[0];
+        }
+        if (tbl_expr != nullptr) {
           block_has_tablejump[b] = true;
-          const RtlExpr& lbl_ref = parsed->pattern.children[1].children[0];
+          const RtlExpr& lbl_ref = tbl_expr->children[1].children[0];
           old_tablejump_token[b] = lbl_ref.str_val;
           for (size_t t : blk.addr_vec_targets) {
             if (t < num_blocks) {
@@ -335,6 +362,10 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
       }
       if (i + 1 == blk.instructions.size() && !block_has_tablejump[b] && !blk.successors.empty() &&
           IsAnyJumpOrReturnTopExpr(parsed->pattern)) {
+        if (blk.successors.size() == 2 && blk.successors[0] == b + 1 &&
+            blk.successors[1] != b + 1) {
+          std::swap(blk.successors[0], blk.successors[1]);
+        }
         size_t target_b = blk.successors[0];
         if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {
           target_b = blk.successors[1];
@@ -359,7 +390,17 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
       if (modified) {
-        blk.instructions[i] = parsed->ToSexprString();
+        if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
+          auto sub_or = ExtractSequenceSubInsn(parsed->pattern.children[0]);
+          auto slot_or = ExtractSequenceSubInsn(parsed->pattern.children[1]);
+          if (sub_or.ok() && slot_or.ok()) {
+            blk.instructions[i] = FormatSequenceString(parsed->pattern.children[0].op,
+                                                       parsed->pattern.children[0].flags, *sub_or,
+                                                       parsed->pattern.children[1].flags, *slot_or);
+            continue;
+          }
+        }
+        blk.instructions[i] = FormatTopLevelPatternAndNotes(*parsed);
       }
     }
   }
@@ -451,14 +492,14 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
           out.rpo_blocks[b].successors.size() == 2) {
         RtlPatternAndNotes uninverted_jump = *head_pat;
         if (TryInvertCondJumpExpr(&uninverted_jump.pattern)) {
-          new_insns.push_back(uninverted_jump.ToSexprString());
+          new_insns.push_back(FormatTopLevelPatternAndNotes(uninverted_jump));
           if (out.rpo_blocks[b].successors[0] == out.rpo_blocks[b].successors[1] &&
               b + 1 < out.rpo_blocks.size()) {
             out.rpo_blocks[b].instructions = std::move(new_insns);
             RtlBasicBlock ft_blk;
             ft_blk.id = static_cast<uint32_t>(b + 1);
             ft_blk.has_label = false;
-            ft_blk.instructions = {slot_pat->ToSexprString()};
+            ft_blk.instructions = {FormatTopLevelPatternAndNotes(*slot_pat)};
             ft_blk.successors = {b + 2};
             InsertBlockAt(&out, b + 1, std::move(ft_blk));
             out.rpo_blocks[b + 2].has_label = true;
@@ -469,7 +510,7 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
           if (out.rpo_blocks[b].successors[0] != out.rpo_blocks[b].successors[1] &&
               b + 1 < out.rpo_blocks.size()) {
             PrependInsnToBlockAfterLeadingLoopNotes(&out.rpo_blocks[b + 1],
-                                                    slot_pat->ToSexprString());
+                                                    FormatTopLevelPatternAndNotes(*slot_pat));
             continue;
           }
         }
@@ -490,8 +531,8 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
         }
       }
       new_insns.insert(new_insns.begin() + static_cast<ptrdiff_t>(slot_insert_pos),
-                       slot_pat->ToSexprString());
-      new_insns.push_back(head_pat->ToSexprString());
+                       FormatTopLevelPatternAndNotes(*slot_pat));
+      new_insns.push_back(FormatTopLevelPatternAndNotes(*head_pat));
     }
 
     if (inserted_optimize_skip_block) {
@@ -499,6 +540,13 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
     } else {
       out.rpo_blocks[b].instructions = std::move(new_insns);
     }
+  }
+
+  if (out.sideband.epilogue_delay_pattern.has_value() &&
+      !out.sideband.epilogue_delay_pattern->empty() && !out.rpo_blocks.empty() &&
+      out.rpo_blocks.back().instructions.empty()) {
+    out.rpo_blocks.back().instructions.push_back(*out.sideband.epilogue_delay_pattern);
+    out.sideband.epilogue_delay_pattern.reset();
   }
 
   SynchronizeCanonicalLabels(&out);

@@ -27,8 +27,8 @@ namespace rom_nom_nom::lifter {
 namespace {
 
 constexpr std::array<std::string_view, 32> kMipsGprRtlNames = {
-    "$0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
-    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra",
+    "$0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6",  "t7",
+    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "$fp", "ra",
 };
 
 int ParseGprNumber(std::string_view tok) {
@@ -40,7 +40,7 @@ int ParseGprNumber(std::string_view tok) {
   if (body == "zero") {
     return 0;
   }
-  if (body == "s8") {
+  if (body == "fp" || body == "s8") {
     return 30;
   }
   int regno = -1;
@@ -555,9 +555,9 @@ std::string InvertUnalignedBlockMove(std::string_view multi_line_asm) {
           : absl::StrFormat("(plus:SI %s (const_int %d))", FormatGprRtl(src_base, "SI"), src_off0);
   const int32_t total_bytes = static_cast<int32_t>(4 * word_regs.size() + byte_regs.size());
   return absl::StrFormat(
-      "(parallel [(set (mem:BLK %s) (mem:BLK %s)) "
+      "(parallel[ (set (mem:BLK %s) (mem:BLK %s)) "
       "(clobber %s) (clobber %s) (clobber %s) (clobber %s) "
-      "(use (const_int %d)) (use (const_int 1)) (use (const_int %d))])",
+      "(use (const_int %d)) (use (const_int 1)) (use (const_int %d)) ] )",
       dst_addr, src_addr, FormatGprRtl(clobber_regs[0], "SI"), FormatGprRtl(clobber_regs[1], "SI"),
       FormatGprRtl(clobber_regs[2], "SI"), FormatGprRtl(clobber_regs[3], "SI"), total_bytes,
       move_type);
@@ -665,13 +665,13 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     const int reg = ParseGprNumber(target_op);
     if (reg >= 0) {
       return absl::StrFormat(
-          "(parallel [(call (mem:SI %s) (const_int 0)) (clobber (reg:SI 31 ra))])",
+          "(parallel[ (call (mem:SI %s) (const_int 0)) (clobber (reg:SI 31 ra)) ] )",
           FormatGprRtl(reg, "SI"));
     }
     if (mnemonic == "jal" && IsValidSymbolOrLabelIdentifier(target_op)) {
       return absl::StrFormat(
-          "(parallel [(call (mem:SI (symbol_ref:SI (\"%s\"))) (const_int 0)) "
-          "(clobber (reg:SI 31 ra))])",
+          "(parallel[ (call (mem:SI (symbol_ref:SI (\"%s\"))) (const_int 0)) "
+          "(clobber (reg:SI 31 ra)) ] )",
           target_op);
     }
     return "";
@@ -1065,9 +1065,9 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     if (mnemonic == "mult" || mnemonic == "multu") {
       const std::string_view ext_op = (mnemonic == "multu") ? "zero_extend" : "sign_extend";
       return absl::StrFormat(
-          "(parallel [(set (reg:SI 64 hi) (truncate:SI (lshiftrt:DI "
+          "(parallel[ (set (reg:SI 64 hi) (truncate:SI (lshiftrt:DI "
           "(mult:DI (%s:DI %s) (%s:DI %s)) (const_int 32)))) "
-          "(clobber (reg:SI 65 lo)) (clobber (reg:SI 66 accum))])",
+          "(clobber (reg:SI 65 lo)) (clobber (reg:SI 66 accum)) ] )",
           ext_op, FormatGprRtl(rs, "SI"), ext_op, FormatGprRtl(rt, "SI"));
     }
     const std::string_view ext_op = (mnemonic == "dmultu") ? "zero_extend" : "sign_extend";
@@ -1092,8 +1092,8 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
       const std::string_view div_op = (base_mnem == "divu") ? "udiv" : "div";
       const std::string_view mod_op = (base_mnem == "divu") ? "umod" : "mod";
       return absl::StrFormat(
-          "(parallel [(set (reg:%s 65 lo) (%s:%s %s %s)) "
-          "(set (reg:%s 64 hi) (%s:%s %s %s)) (clobber (reg:%s 66 accum))])",
+          "(parallel[ (set (reg:%s 65 lo) (%s:%s %s %s)) "
+          "(set (reg:%s 64 hi) (%s:%s %s %s)) (clobber (reg:%s 66 accum)) ] )",
           mode, div_op, mode, FormatGprRtl(rs, mode), FormatGprRtl(rt, mode), mode, mod_op, mode,
           FormatGprRtl(rs, mode), FormatGprRtl(rt, mode), mode);
     }
@@ -1109,8 +1109,8 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
               ? "div"
               : (base_mnem == "divu" ? "udiv" : (base_mnem == "rem" ? "mod" : "umod"));
       return absl::StrFormat(
-          "(parallel [(set %s (%s:%s %s %s)) "
-          "(clobber (reg:%s 65 lo)) (clobber (reg:%s 64 hi)) (clobber (reg:%s 66 accum))])",
+          "(parallel[ (set %s (%s:%s %s %s)) "
+          "(clobber (reg:%s 65 lo)) (clobber (reg:%s 64 hi)) (clobber (reg:%s 66 accum)) ] )",
           FormatGprRtl(rd, mode), rtl_op, mode, FormatGprRtl(rs, mode), FormatGprRtl(rt, mode),
           mode, mode, mode);
     }
@@ -1233,9 +1233,9 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
             : absl::StrFormat("(plus:SI %s (const_int %d))", FormatGprRtl(base_reg, "SI"), dst_off);
     const std::string base_rtx = FormatGprRtl(base_reg, "SI");
     return absl::StrFormat(
-        "(parallel [(set (%s:BLK %s) (%s:BLK %s)) "
+        "(parallel[ (set (%s:BLK %s) (%s:BLK %s)) "
         "(clobber %s) (clobber %s) (clobber %s) (clobber %s) "
-        "(use (const_int 4)) (use (const_int 1)) (use (const_int 2))])",
+        "(use (const_int 4)) (use (const_int 1)) (use (const_int 2)) ] )",
         mem_tag, dst_addr, mem_tag, base_rtx, FormatGprRtl(rt, "SI"), base_rtx, base_rtx, base_rtx);
   }
 
@@ -1288,8 +1288,8 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     const uint64_t bits = absl::bit_cast<uint64_t>(d);
     const int32_t lo = static_cast<int32_t>(bits & 0xffffffffu);
     const int32_t hi = static_cast<int32_t>(bits >> 32);
-    return absl::StrFormat("(set %s (const_double:%s (const_int 0) %d %d))",
-                           FormatFprRtl(fpr, mode), mode, lo, hi);
+    return absl::StrFormat("(set %s (const_double:%s (cc0) %d %d))", FormatFprRtl(fpr, mode), mode,
+                           lo, hi);
   }
 
   if (mnemonic == "mov.s" || mnemonic == "mov.d") {
@@ -1329,8 +1329,7 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
       return "";
     }
     if (rt == 0 && mnemonic == "mtc1") {
-      return absl::StrFormat("(set %s (const_double:SF (const_int 0) 0 0))",
-                             FormatFprRtl(fs, "SF"));
+      return absl::StrFormat("(set %s (const_double:SF (cc0) 0 0))", FormatFprRtl(fs, "SF"));
     }
     return absl::StrFormat("(set %s %s)", FormatFprRtl(fs, mode), FormatGprRtl(rt, mode));
   }
@@ -1449,7 +1448,7 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
       if (fd < 0 || fs < 0 || scratch_gpr < 0) {
         return "";
       }
-      return absl::StrFormat("(parallel [(set %s (fix:SI %s)) (clobber %s) (clobber %s)])",
+      return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
                              FormatFprRtl(fd, "SI"), FormatFprRtl(fs, src_mode),
                              FormatGprRtl(scratch_gpr, "SI"), FormatFprRtl(fd, src_mode));
     }
@@ -1460,7 +1459,7 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
       if (fd < 0 || fs < 0) {
         return "";
       }
-      return absl::StrFormat("(parallel [(set %s (fix:SI %s)) (clobber %s) (clobber %s)])",
+      return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
                              FormatFprRtl(fd, "SI"), FormatFprRtl(fs, src_mode),
                              FormatGprRtl(1, "SI"), FormatFprRtl(fd, src_mode));
     }
@@ -1662,7 +1661,9 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
       continue;
     }
     const std::string& last_pat = blocks[b].instructions.back();
-    if (last_pat == "(return)" || absl::StartsWith(last_pat, "(sequence [(jump_insn (return))")) {
+    if (last_pat == "(return)" || absl::StartsWith(last_pat, "(sequence [(jump_insn (return))") ||
+        absl::StartsWith(last_pat, "(set (pc) (reg:SI ") ||
+        absl::StartsWith(last_pat, "(sequence [(jump_insn (set (pc) (reg:SI ")) {
       blocks[b].successors.clear();
       continue;
     }
@@ -1704,6 +1705,156 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
     }
     if (b + 1 < blocks.size()) {
       blocks[b].successors = {b + 1};
+    }
+  }
+
+  // Reconstruct switch `tablejump` `(parallel[ (set (pc) (reg:SI R)) (use (label_ref L)) ] )`
+  // and `addr_vec_targets` for indirect jumps.
+  std::vector<size_t> in_degree(blocks.size(), 0);
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    for (size_t succ : blocks[b].successors) {
+      if (succ < blocks.size()) {
+        ++in_degree[succ];
+      }
+    }
+  }
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    if (blocks[b].instructions.empty()) {
+      continue;
+    }
+    std::string& last_pat = blocks[b].instructions.back();
+    const bool is_bare_ind_jump = absl::StartsWith(last_pat, "(set (pc) (reg:SI ");
+    const bool is_seq_ind_jump =
+        absl::StartsWith(last_pat, "(sequence [(jump_insn (set (pc) (reg:SI ");
+    if (!is_bare_ind_jump && !is_seq_ind_jump) {
+      continue;
+    }
+    const std::string tbl_lbl = absl::StrFormat("__tbl_%zu", b);
+    if (is_bare_ind_jump) {
+      last_pat = absl::StrFormat("(parallel[ %s (use (label_ref %s)) ] )", last_pat, tbl_lbl);
+    } else {
+      const size_t close_set = last_pat.find("))) (insn");
+      if (close_set != std::string::npos) {
+        const std::string inner_set =
+            last_pat.substr(std::string_view("(sequence [(jump_insn ").size(),
+                            close_set + 2 - std::string_view("(sequence [(jump_insn ").size());
+        const std::string rest = last_pat.substr(close_set + 3);
+        last_pat =
+            absl::StrFormat("(sequence [(jump_insn (parallel[ %s (use (label_ref %s)) ] ))%s",
+                            inner_set, tbl_lbl, rest);
+      }
+    }
+    blocks[b].SyncRtlInsnsFromInstructions();
+    for (size_t k = b + 1; k < blocks.size(); ++k) {
+      if (blocks[k].instructions.empty()) {
+        continue;
+      }
+      if (k == b + 1 || in_degree[k] == 0) {
+        blocks[k].has_label = true;
+        blocks[b].addr_vec_targets.push_back(k);
+        blocks[b].successors.push_back(k);
+      }
+    }
+  }
+
+  // Mark target-stolen delay slots (`insn/s`) on unconditional `SEQUENCE` jumps
+  // when `target_b - 1` falls through to `target_b` and ends with the identical
+  // instruction, and `b` could not have filled its delay slot from its own body.
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    if (blocks[b].instructions.empty() || blocks[b].successors.size() != 1) {
+      continue;
+    }
+    const size_t target_b = blocks[b].successors[0];
+    if (target_b == 0 || target_b >= blocks.size() || target_b - 1 == b) {
+      continue;
+    }
+    const auto& pred_blk = blocks[target_b - 1];
+    if (pred_blk.instructions.empty() ||
+        std::find(pred_blk.successors.begin(), pred_blk.successors.end(), target_b) ==
+            pred_blk.successors.end()) {
+      continue;
+    }
+    std::string& last_pat = blocks[b].instructions.back();
+    if (!absl::StartsWith(last_pat, "(sequence [(jump_insn (set (pc) (label_ref ")) {
+      continue;
+    }
+    const size_t insn_pos = last_pat.find(")) (insn ");
+    if (insn_pos == std::string::npos ||
+        last_pat.size() < insn_pos + std::string_view(")) (insn ").size() + 3) {
+      continue;
+    }
+    const std::string slot_str =
+        last_pat.substr(insn_pos + std::string_view(")) (insn ").size(),
+                        last_pat.size() - 3 - (insn_pos + std::string_view(")) (insn ").size()));
+    if (pred_blk.instructions.back() != slot_str) {
+      continue;
+    }
+    bool could_fill_from_own_block = false;
+    if (blocks[b].instructions.size() >= 2) {
+      const std::string& prev_insn = blocks[b].instructions[blocks[b].instructions.size() - 2];
+      const bool prev_ineligible =
+          absl::StrContains(prev_insn, "(mem") || absl::StrContains(prev_insn, "(reg:SI 64 hi)") ||
+          absl::StrContains(prev_insn, "(reg:SI 65 lo)") || absl::StrContains(prev_insn, ":SF ") ||
+          absl::StrContains(prev_insn, ":DF ") || absl::StartsWith(prev_insn, "(parallel[");
+      if (!prev_ineligible) {
+        auto prev_parsed = ParsePatternAndNotes(prev_insn);
+        auto slot_parsed = ParsePatternAndNotes(slot_str);
+        bool reg_conflict = false;
+        if (prev_parsed.ok() && slot_parsed.ok()) {
+          prev_parsed->pattern.Visit([&](const RtlExpr& node) {
+            if (node.IsSet() && node.SetDest().IsReg() &&
+                slot_parsed->pattern.ContainsReg(node.SetDest().RegNo())) {
+              reg_conflict = true;
+            }
+          });
+          slot_parsed->pattern.Visit([&](const RtlExpr& node) {
+            if (node.IsSet() && node.SetDest().IsReg() &&
+                prev_parsed->pattern.ContainsReg(node.SetDest().RegNo())) {
+              reg_conflict = true;
+            }
+          });
+        }
+        if (!reg_conflict) {
+          could_fill_from_own_block = true;
+        }
+      }
+    }
+    if (!could_fill_from_own_block) {
+      last_pat.replace(insn_pos, std::string_view(")) (insn ").size(), ")) (insn/s ");
+      blocks[b].SyncRtlInsnsFromInstructions();
+    }
+  }
+
+  // In frameless leaf functions (`simple_epilogue_p() == 1`), the final return
+  // instruction comes from `gen_return()` (`(parallel[ (return) (use (reg:SI 31 ra)) ] )`).
+  bool has_call_insn = false;
+  for (const auto& blk : blocks) {
+    for (const std::string& pat : blk.instructions) {
+      if (absl::StrContains(pat, "(call ")) {
+        has_call_insn = true;
+        break;
+      }
+    }
+  }
+  const bool is_frameless_leaf = !has_call_insn && cfg.sideband.frame_size_bytes == 0 &&
+                                 cfg.sideband.saved_gpr_regnos.empty() &&
+                                 cfg.sideband.saved_fpr_regnos.empty() && !blocks.empty();
+  if (is_frameless_leaf) {
+    size_t last_nonempty_b = blocks.size() - 1;
+    if (blocks[last_nonempty_b].instructions.empty() && last_nonempty_b > 0) {
+      --last_nonempty_b;
+    }
+    if (!blocks[last_nonempty_b].instructions.empty()) {
+      std::string& last_pat = blocks[last_nonempty_b].instructions.back();
+      if (last_pat == "(return)") {
+        last_pat = "(parallel[ (return) (use (reg:SI 31 ra)) ] )";
+        blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
+      } else if (absl::StartsWith(last_pat, "(sequence [(jump_insn (return)) ")) {
+        last_pat = absl::StrCat(
+            "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) ",
+            last_pat.substr(std::string_view("(sequence [(jump_insn (return)) ").size()));
+        blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
+      }
     }
   }
 

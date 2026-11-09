@@ -422,6 +422,49 @@ cc_test(
 )
 
 cc_library(
+    name = "pass02_jump2_cross_jump",
+    srcs = ["pass02_jump2_cross_jump.cc"],
+    hdrs = ["pass02_jump2_cross_jump.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":invert_do_cross_jump",
+        "//core:rtl_cfg",
+    ],
+)
+
+cc_test(
+    name = "pass02_jump2_cross_jump_test",
+    size = "medium",
+    srcs = ["pass02_jump2_cross_jump_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":invert_do_cross_jump",
+        ":invert_fill_eager_delay_slots",
+        ":invert_fill_simple_delay_slots",
+        ":invert_final_scan_insn",
+        ":invert_function_prologue_epilogue",
+        ":invert_gas_append_insn",
+        ":invert_gas_macro",
+        ":invert_gas_mips_ip",
+        ":invert_make_return_insns",
+        ":invert_relax_delay_slots",
+        ":pass00_final_and_gas",
+        ":pass01_dbr_schedule",
+        ":pass02_jump2_cross_jump",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "dominator_tree",
     srcs = ["dominator_tree.cc"],
     hdrs = ["dominator_tree.h"],

@@ -254,6 +254,23 @@ bool IsAnyJumpOrReturnInsn(std::string_view pat) {
   return parsed.ok() && IsAnyJumpOrReturnTopExpr(parsed->pattern);
 }
 
+std::string FormatTopLevelPatternAndNotes(const RtlPatternAndNotes& pn) {
+  std::string out = pn.ToSexprString();
+  if (pn.pattern.op == RtlOp::kParallel) {
+    const std::string pat_str = pn.pattern.ToSexprString();
+    std::string new_pat = "(parallel[ ";
+    for (size_t i = 0; i < pn.pattern.children.size(); ++i) {
+      if (i > 0) {
+        new_pat.push_back(' ');
+      }
+      new_pat.append(pn.pattern.children[i].ToSexprString());
+    }
+    new_pat.append(" ] )");
+    out.replace(0, pat_str.size(), new_pat);
+  }
+  return out;
+}
+
 void RewriteJumpTargetLabelRef(RtlExpr* expr, std::string_view new_label_tok) {
   expr->Mutate([new_label_tok](RtlExpr& node) {
     if (node.op == RtlOp::kLabelRef) {
@@ -281,9 +298,18 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
       auto parsed = ParsePatternAndNotes(blk.instructions.back());
       if (parsed.ok()) {
         ends_with_uncond = IsUncondJumpOrReturnOrTableJumpTopExpr(parsed->pattern);
+        const RtlExpr* tbl_expr = nullptr;
         if (IsTableJumpExpr(parsed->pattern)) {
+          tbl_expr = &parsed->pattern;
+        } else if (parsed->pattern.op == RtlOp::kSequence && !parsed->pattern.children.empty() &&
+                   parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
+                   !parsed->pattern.children[0].children.empty() &&
+                   IsTableJumpExpr(parsed->pattern.children[0].children[0])) {
+          tbl_expr = &parsed->pattern.children[0].children[0];
+        }
+        if (tbl_expr != nullptr) {
           block_has_tablejump[b] = true;
-          const RtlExpr& lbl_ref = parsed->pattern.children[1].children[0];
+          const RtlExpr& lbl_ref = tbl_expr->children[1].children[0];
           old_tablejump_token[b] = lbl_ref.str_val;
           for (size_t t : blk.addr_vec_targets) {
             if (t < num_blocks) {
@@ -351,7 +377,7 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
       if (modified) {
-        blk.instructions[i] = parsed->ToSexprString();
+        blk.instructions[i] = FormatTopLevelPatternAndNotes(*parsed);
       }
     }
   }
@@ -539,7 +565,8 @@ void RestoreNoopMovesConsumedDeaths(RtlControlFlowGraph* cfg) {
 
     for (const FlatInsn& entry : run_insns) {
       if (entry.modified) {
-        cfg->rpo_blocks[entry.b].instructions[entry.i] = entry.parsed.ToSexprString();
+        cfg->rpo_blocks[entry.b].instructions[entry.i] =
+            FormatTopLevelPatternAndNotes(entry.parsed);
       }
     }
 

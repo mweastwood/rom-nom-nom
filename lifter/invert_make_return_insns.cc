@@ -213,7 +213,8 @@ bool IsAnyJumpOrReturnTopExpr(const RtlExpr& expr) {
 }
 
 // Returns true if `pat` is a stack-pointer adjustment instruction of the form
-// `(set (reg:M R) (minus:M (reg:M R) ...))`.
+// `(set (reg:M R) (minus:M (reg:M R) ...))` or
+// `(set (reg:M R) (plus:M (reg:M R) (const_int -N)))`.
 bool IsStackPointerDecrementInsn(std::string_view pat) {
   auto parsed = ParsePatternAndNotes(pat);
   if (!parsed.ok() || !parsed->pattern.IsSet()) {
@@ -221,11 +222,14 @@ bool IsStackPointerDecrementInsn(std::string_view pat) {
   }
   const RtlExpr& dst = parsed->pattern.SetDest();
   const RtlExpr& src = parsed->pattern.SetSrc();
-  if (!dst.IsReg() || src.op != RtlOp::kMinus || src.children.size() != 2 ||
-      !src.children[0].IsReg()) {
+  if (!dst.IsReg() || (dst.str_val != "sp" && dst.str_val != "$sp") || src.children.size() != 2 ||
+      !src.children[0].IsReg() || dst.RegNo() != src.children[0].RegNo()) {
     return false;
   }
-  return dst.RegNo() == src.children[0].RegNo() && dst.str_val == "sp";
+  if (src.op == RtlOp::kMinus) {
+    return true;
+  }
+  return src.op == RtlOp::kPlus && src.children[1].IsConstInt() && src.children[1].IntVal() < 0;
 }
 
 // Returns true if any basic block in `cfg` contains a `CALL_INSN` or a

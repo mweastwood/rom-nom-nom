@@ -271,7 +271,7 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
         << cfg.rpo_blocks[0].instructions[1];
     EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[0].instructions[2], "(mem:BLK "))
         << cfg.rpo_blocks[0].instructions[2];
-    EXPECT_EQ(cfg.rpo_blocks[0].instructions[3], "(return)");
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[3], "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   }
 
   // 4. Negative cases: empty input or invalid/unrecognized assembly line causes

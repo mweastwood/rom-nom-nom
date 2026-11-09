@@ -254,13 +254,31 @@ absl::StatusOr<RtlPatternAndNotes> ExtractSequenceSubInsn(const RtlExpr& sub_ins
   return ParsePatternAndNotes(combined);
 }
 
+std::string FormatTopLevelPatternAndNotes(const RtlPatternAndNotes& pn) {
+  std::string out = pn.ToSexprString();
+  if (pn.pattern.op == RtlOp::kParallel) {
+    const std::string pat_str = pn.pattern.ToSexprString();
+    std::string new_pat = "(parallel[ ";
+    for (size_t i = 0; i < pn.pattern.children.size(); ++i) {
+      if (i > 0) {
+        new_pat.push_back(' ');
+      }
+      new_pat.append(pn.pattern.children[i].ToSexprString());
+    }
+    new_pat.append(" ] )");
+    out.replace(0, pat_str.size(), new_pat);
+  }
+  return out;
+}
+
 std::string FormatSequenceString(RtlOp head_op, const RtlFlags& head_flags,
                                  const RtlPatternAndNotes& head_pat, const RtlFlags& slot_flags,
                                  const RtlPatternAndNotes& slot_pat) {
   return absl::StrCat("(", RtlExpr::OpToString(RtlOp::kSequence), " [(",
                       RtlExpr::OpToString(head_op), FormatFlagsSuffix(head_flags), " ",
-                      head_pat.ToSexprString(), ") (", RtlExpr::OpToString(RtlOp::kInsn),
-                      FormatFlagsSuffix(slot_flags), " ", slot_pat.ToSexprString(), ")])");
+                      FormatTopLevelPatternAndNotes(head_pat), ") (",
+                      RtlExpr::OpToString(RtlOp::kInsn), FormatFlagsSuffix(slot_flags), " ",
+                      FormatTopLevelPatternAndNotes(slot_pat), ")])");
 }
 
 bool HasRegDeadConstZeroNote(const RtlPatternAndNotes& pat_notes) {
@@ -418,9 +436,18 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
       auto parsed = ParsePatternAndNotes(blk.instructions.back());
       if (parsed.ok()) {
         ends_with_uncond = IsUncondJumpOrReturnOrTableJumpTopExpr(parsed->pattern);
+        const RtlExpr* tbl_expr = nullptr;
         if (IsTableJumpExpr(parsed->pattern)) {
+          tbl_expr = &parsed->pattern;
+        } else if (parsed->pattern.op == RtlOp::kSequence && !parsed->pattern.children.empty() &&
+                   parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
+                   !parsed->pattern.children[0].children.empty() &&
+                   IsTableJumpExpr(parsed->pattern.children[0].children[0])) {
+          tbl_expr = &parsed->pattern.children[0].children[0];
+        }
+        if (tbl_expr != nullptr) {
           block_has_tablejump[b] = true;
-          const RtlExpr& lbl_ref = parsed->pattern.children[1].children[0];
+          const RtlExpr& lbl_ref = tbl_expr->children[1].children[0];
           old_tablejump_token[b] = lbl_ref.str_val;
           for (size_t t : blk.addr_vec_targets) {
             if (t < num_blocks) {
@@ -502,7 +529,17 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
       if (modified) {
-        blk.instructions[i] = parsed->ToSexprString();
+        if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
+          auto sub_or = ExtractSequenceSubInsn(parsed->pattern.children[0]);
+          auto slot_or = ExtractSequenceSubInsn(parsed->pattern.children[1]);
+          if (sub_or.ok() && slot_or.ok()) {
+            blk.instructions[i] = FormatSequenceString(parsed->pattern.children[0].op,
+                                                       parsed->pattern.children[0].flags, *sub_or,
+                                                       parsed->pattern.children[1].flags, *slot_or);
+            continue;
+          }
+        }
+        blk.instructions[i] = FormatTopLevelPatternAndNotes(*parsed);
       }
     }
   }
@@ -694,7 +731,8 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
           const RtlExpr& prev_jump_pat = prev_last->pattern.children[0].children[0];
           // Subcase 1a: `b - 1` ends with an unconditional `SEQUENCE` jump to
           // `b + 1` (e.g. switch decision tree arms or shared epilogue jumps).
-          if (IsSimpleUncondJumpExpr(prev_jump_pat) && prev_blk.successors.size() == 1 &&
+          if (blk.instructions.size() == 1 && BlockStartsWithUseInsn(out.rpo_blocks[b + 1]) &&
+              IsSimpleUncondJumpExpr(prev_jump_pat) && prev_blk.successors.size() == 1 &&
               prev_blk.successors[0] == b + 1 && !HasRegDeadRegNote(*last_parsed)) {
             should_wrap_uncond_seq = true;
           }
@@ -1206,6 +1244,7 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
         if (!b_last.ok() || b_last->pattern.op != RtlOp::kSequence ||
             b_last->pattern.children.size() != 2 ||
             b_last->pattern.children[0].op != RtlOp::kJumpInsn ||
+            b_last->pattern.children[0].flags.unchanging ||
             b_last->pattern.children[0].children.empty() ||
             !IsCondJumpExpr(b_last->pattern.children[0].children[0])) {
           continue;
@@ -1328,14 +1367,17 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
           continue;
         }
       }
+      const bool target_is_trailing_empty =
+          (target_b + 1 == out.rpo_blocks.size() && out.rpo_blocks[target_b].instructions.empty());
+      if (!target_is_trailing_empty && !out.rpo_blocks[fallthrough_b].successors.empty()) {
+        continue;
+      }
       if (!TryInvertCondJumpExpr(&last_parsed->pattern)) {
         continue;
       }
       blk.instructions.back() = last_parsed->ToSexprString();
       out.rpo_blocks[fallthrough_b].has_label = true;
 
-      const bool target_is_trailing_empty =
-          (target_b + 1 == out.rpo_blocks.size() && out.rpo_blocks[target_b].instructions.empty());
       RtlBasicBlock tramp_blk;
       tramp_blk.id = static_cast<uint32_t>(b + 1);
       tramp_blk.has_label = false;

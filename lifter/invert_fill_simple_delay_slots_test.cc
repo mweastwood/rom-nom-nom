@@ -129,7 +129,7 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, UnpacksJumpDelaySlotAndVerifiesRightInv
             "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc)))");
   ASSERT_EQ(lifted.rpo_blocks[1].instructions.size(), 2u);
   EXPECT_EQ(lifted.rpo_blocks[1].instructions[0], "(set (reg:SI 2 v0) (const_int 1))");
-  EXPECT_EQ(lifted.rpo_blocks[1].instructions[1], "(parallel [(return) (use (reg:SI 31 ra))])");
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions[1], "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
   GccContext ctx;
   FunctionHooks hooks(&ctx);
@@ -158,8 +158,8 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, UnpacksCallAndJumpDelaySlotsAndVerifies
   ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0], "(set (reg:SI 4 a0) (const_int 42))");
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[1],
-            "(parallel [(set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"helper\"))) (const_int "
-            "0))) (clobber (reg:SI 31 ra))])");
+            "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"helper\"))) (const_int "
+            "0))) (clobber (reg:SI 31 ra)) ] )");
 
   GccContext ctx;
   FunctionHooks hooks(&ctx);
