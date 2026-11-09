@@ -476,8 +476,21 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
       }
 
       // Standard simple delay slot (`JUMP_INSN` or `CALL_INSN`): unpack `slot_pat`
-      // immediately before `head_pat`.
-      new_insns.push_back(slot_pat->ToSexprString());
+      // immediately before `head_pat` (and before any immediately preceding
+      // `(use ...)` or `(clobber ...)` pseudo-instructions in `new_insns` that
+      // `fill_simple_delay_slots` scanned backwards past).
+      size_t slot_insert_pos = new_insns.size();
+      while (slot_insert_pos > 0) {
+        auto prev_parsed = ParsePatternAndNotes(new_insns[slot_insert_pos - 1]);
+        if (prev_parsed.ok() && (prev_parsed->pattern.op == RtlOp::kUse ||
+                                 prev_parsed->pattern.op == RtlOp::kClobber)) {
+          --slot_insert_pos;
+        } else {
+          break;
+        }
+      }
+      new_insns.insert(new_insns.begin() + static_cast<ptrdiff_t>(slot_insert_pos),
+                       slot_pat->ToSexprString());
       new_insns.push_back(head_pat->ToSexprString());
     }
 

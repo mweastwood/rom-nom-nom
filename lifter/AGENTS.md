@@ -70,7 +70,15 @@ reverse chronological order:
      for its GCC/GAS subfunction $f_{s,j}$: it must provide both any
      element-level inverse and the full stream/function-level transformation
      needed so its output matches the exact input domain of the upstream
-     subfunction $f_{s,j+1}$.
+     subfunction $f_{s,j-1}$.
+   - **Pre-Image Fidelity When $f_{s,j}$ Is Many-to-One**: When designing
+     $g_{s,j}(x_j)$, do not merely pick an arbitrary synthetic pre-image that
+     satisfies $f_{s,j}(g_{s,j}(x_j)) = x_j$ in isolation—ensure $g_{s,j}(x_j)$
+     produces a pre-image in the canonical structural form of $x_{j-1}$ (the
+     image of the preceding forward subfunction $f_{s,j-1}$, preserving block
+     layout, barrier placement, and sideband indexing) so upstream inverse
+     modules $g_{s,j-1}$ do not encounter out-of-distribution CFG/RTL shapes
+     when stitched together.
    - Never defer stream-level lifting, hazard-`nop` stripping, macro collapsing,
      epilogue extraction, or CFG reconstruction logic to a pass stitcher or hide
      it inside `gcc_harness/right_inverse_verifier.cc`.

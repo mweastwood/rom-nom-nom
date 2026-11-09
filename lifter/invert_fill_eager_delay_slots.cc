@@ -832,7 +832,31 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       // `target_b - 1` falls through to `target_b`, so we cannot insert a block
       // directly before `target_b` without breaking `target_b - 1`'s fallthrough.
       // Instead, insert a block containing `(sequence [(jump_insn (set (pc)
-      // (label_ref L_target))) (insn <slot_pat_notes>)])` at the end of the CFG.
+      // (label_ref L_target))) (insn <slot_pat_notes>)])` immediately after a
+      // block ending with an unconditional jump or return (so `MaterializeFromCfg`
+      // emits a `BARRIER` before `tramp_blk` and `jump.c:delete_insn` deletes
+      // `tramp_blk` when its label becomes unused).
+      out.rpo_blocks[target_b].has_label = true;
+      size_t insert_pos = out.rpo_blocks.size();
+      bool found_barrier_pos = false;
+      for (size_t b_scan = out.rpo_blocks.size(); b_scan > 0; --b_scan) {
+        const auto& scan_blk = out.rpo_blocks[b_scan - 1];
+        if (scan_blk.instructions.empty()) {
+          continue;
+        }
+        auto scan_last = ParsePatternAndNotes(scan_blk.instructions.back());
+        if (scan_last.ok() && IsUncondJumpOrReturnOrTableJumpTopExpr(scan_last->pattern) &&
+            !IsTableJumpExpr(scan_last->pattern)) {
+          insert_pos = b_scan;
+          found_barrier_pos = true;
+          break;
+        }
+      }
+      if (!found_barrier_pos && !out.rpo_blocks.empty() &&
+          out.rpo_blocks.back().instructions.empty()) {
+        insert_pos = out.rpo_blocks.size() - 1;
+      }
+
       RtlPatternAndNotes uncond_jump;
       uncond_jump.pattern =
           RtlExpr::MakeSet(RtlExpr::MakePc(), RtlExpr::MakeSymbolicLabelRef("L0"));
@@ -840,13 +864,19 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       tramp_blk.has_label = true;
       tramp_blk.instructions.push_back(FormatSequenceString(
           RtlOp::kJumpInsn, RtlFlags{}, uncond_jump, RtlFlags{}, *slot_pat_notes));
-      tramp_blk.successors = {target_b};
-      out.rpo_blocks[target_b].has_label = true;
-      const size_t insert_pos = out.rpo_blocks.size();
-      out.rpo_blocks.push_back(std::move(tramp_blk));
+      const size_t shifted_target_b = (target_b >= insert_pos) ? (target_b + 1) : target_b;
+      tramp_blk.successors = {shifted_target_b};
+      InsertBlockAt(&out, insert_pos, std::move(tramp_blk));
+      if (insert_pos + 1 < out.rpo_blocks.size()) {
+        out.rpo_blocks[insert_pos + 1].has_label = true;
+      }
+      if (b >= insert_pos) {
+        ++rev_idx;
+      }
       for (size_t p_blk : same_slot_jumpers) {
-        for (size_t& succ : out.rpo_blocks[p_blk].successors) {
-          if (succ == target_b) {
+        const size_t new_p_blk = (p_blk >= insert_pos) ? (p_blk + 1) : p_blk;
+        for (size_t& succ : out.rpo_blocks[new_p_blk].successors) {
+          if (succ == shifted_target_b) {
             succ = insert_pos;
             break;
           }

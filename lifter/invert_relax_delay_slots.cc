@@ -586,9 +586,20 @@ bool BlockHasActiveNonNoteInsn(const RtlBasicBlock& blk) {
   return false;
 }
 
+bool CfgHasAnyReturnInsn(const RtlControlFlowGraph& cfg) {
+  for (const auto& blk : cfg.rpo_blocks) {
+    for (const std::string& s : blk.instructions) {
+      auto parsed = ParsePatternAndNotes(s);
+      if (parsed.ok() && IsReturnExpr(parsed->pattern)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool IsUnoptimizedO0Cfg(const RtlControlFlowGraph& cfg, bool cfg_has_any_sequence) {
-  return !cfg_has_any_sequence && cfg.sideband.basic_block_live_at_start.empty() &&
-         !cfg.sideband.reg_n_refs.empty();
+  return !cfg_has_any_sequence && !CfgHasAnyReturnInsn(cfg);
 }
 
 }  // namespace
@@ -684,7 +695,7 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
           // Subcase 1a: `b - 1` ends with an unconditional `SEQUENCE` jump to
           // `b + 1` (e.g. switch decision tree arms or shared epilogue jumps).
           if (IsSimpleUncondJumpExpr(prev_jump_pat) && prev_blk.successors.size() == 1 &&
-              prev_blk.successors[0] == b + 1) {
+              prev_blk.successors[0] == b + 1 && !HasRegDeadRegNote(*last_parsed)) {
             should_wrap_uncond_seq = true;
           }
           // Subcase 1b: `b` is a 1-instruction fallthrough block of a
@@ -763,12 +774,16 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       }
 
       // Flavour 4a: Fallthrough block `b + 1` (`!has_label`, single pred `b`)
-      // consists of a single bare conditional jump that also targets `target_b`
-      // (`reorg.c:1866-1884` on `next_to_match = next_active_insn(insn)`).
+      // consists of a single bare conditional jump whose branch target is also
+      // `target_b` (`reorg.c:1866-1884` on `next_to_match = next_active_insn(insn)`).
       auto& ft_blk = out.rpo_blocks[fallthrough_b];
+      const size_t ft_target_b =
+          (ft_blk.successors.size() == 2 && ft_blk.successors[0] == fallthrough_b + 1)
+              ? ft_blk.successors[1]
+              : (ft_blk.successors.empty() ? num_blocks : ft_blk.successors[0]);
       if (!ft_blk.has_label && preds[fallthrough_b].size() == 1 && preds[fallthrough_b][0] == b &&
           ft_blk.instructions.size() == 1 && ft_blk.successors.size() == 2 &&
-          (ft_blk.successors[0] == target_b || ft_blk.successors[1] == target_b)) {
+          ft_target_b == target_b) {
         auto ft_parsed = ParsePatternAndNotes(ft_blk.instructions[0]);
         if (ft_parsed.ok() && IsCondJumpExpr(ft_parsed->pattern) &&
             !ExprReferencesRegInSrcOrMem(ft_parsed->pattern, slot_dst_reg)) {
@@ -900,8 +915,7 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       }
       const RtlExpr& jump_sub = last_parsed->pattern.children[0];
       const RtlExpr& slot_sub = last_parsed->pattern.children[1];
-      if (jump_sub.op != RtlOp::kJumpInsn || jump_sub.flags.unchanging ||
-          !slot_sub.flags.in_struct) {
+      if (jump_sub.op != RtlOp::kJumpInsn || !slot_sub.flags.in_struct) {
         ++b;
         continue;
       }
@@ -919,16 +933,50 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
         continue;
       }
 
-      // Check whether `target_b` is:
+      // Check whether `target_b` is either:
       // (a) the trailing empty `end_of_function_label` block created by
       //     `find_end_label()` when `next` was a bare `(return)`, OR
       // (b) the shared return epilogue block starting with `(use ...)` where
       //     `ft_blk` does not end with an unconditional jump/`SEQUENCE` (and if
       //     `ft_blk` ends with a conditional `SEQUENCE`, `ft_blk` starts with
       //     loop notes).
+      if (jump_sub.flags.unchanging) {
+        ++b;
+        continue;
+      }
+      bool pred_of_target_starts_with_same_slot = false;
+      if (target_b > 0) {
+        const auto& pred_of_target = out.rpo_blocks[target_b - 1];
+        const bool pred_falls_through =
+            std::find(pred_of_target.successors.begin(), pred_of_target.successors.end(),
+                      target_b) != pred_of_target.successors.end();
+        if (pred_falls_through) {
+          for (const std::string& s : pred_of_target.instructions) {
+            auto p = ParsePatternAndNotes(s);
+            if (p.ok() && p->pattern.op != RtlOp::kNote && p->pattern.op != RtlOp::kUse &&
+                p->pattern.op != RtlOp::kClobber) {
+              if (p->pattern.ToSexprString() == slot_pat_notes->pattern.ToSexprString()) {
+                pred_of_target_starts_with_same_slot = true;
+              }
+              break;
+            }
+          }
+        }
+      }
+      bool pred_of_target_ends_with_use = false;
+      if (target_b > 0 && out.rpo_blocks[target_b - 1].instructions.size() >= 2) {
+        auto pred_last = ParsePatternAndNotes(out.rpo_blocks[target_b - 1].instructions.back());
+        if (pred_last.ok() &&
+            (pred_last->pattern.op == RtlOp::kUse || pred_last->pattern.op == RtlOp::kClobber)) {
+          pred_of_target_ends_with_use = true;
+        }
+      }
       const bool target_is_trailing_empty_return_label =
           (target_b + 1 == out.rpo_blocks.size() && out.rpo_blocks[target_b].instructions.empty() &&
-           out.rpo_blocks[fallthrough_b].successors.size() == 1);
+           (out.rpo_blocks[fallthrough_b].successors.size() == 1 ||
+            (out.rpo_blocks[fallthrough_b].successors.size() == 2 &&
+             pred_of_target_ends_with_use)) &&
+           !pred_of_target_starts_with_same_slot);
       bool target_is_shared_epilogue_jump = false;
       if (!target_is_trailing_empty_return_label &&
           BlockStartsWithUseInsn(out.rpo_blocks[target_b])) {
@@ -940,10 +988,24 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
           } else if (ft_first->pattern.op == RtlOp::kNote &&
                      !IsUncondJumpOrReturnOrTableJumpTopExpr(ft_last->pattern)) {
             target_is_shared_epilogue_jump = true;
+          } else if (HasRegDeadConstZeroNote(*slot_pat_notes) &&
+                     !IsUncondJumpOrReturnOrTableJumpTopExpr(ft_last->pattern)) {
+            target_is_shared_epilogue_jump = true;
+          } else if (target_b > 0 && target_b - 1 != b && !pred_of_target_starts_with_same_slot &&
+                     std::find(out.rpo_blocks[target_b - 1].successors.begin(),
+                               out.rpo_blocks[target_b - 1].successors.end(),
+                               target_b) != out.rpo_blocks[target_b - 1].successors.end() &&
+                     !out.rpo_blocks[target_b - 1].instructions.empty()) {
+            auto pred_last_parsed =
+                ParsePatternAndNotes(out.rpo_blocks[target_b - 1].instructions.back());
+            if (pred_last_parsed.ok() && !IsAnyJumpOrReturnTopExpr(pred_last_parsed->pattern) &&
+                pred_last_parsed->pattern.ToSexprString() !=
+                    slot_pat_notes->pattern.ToSexprString()) {
+              target_is_shared_epilogue_jump = true;
+            }
           }
         }
       }
-
       if (!target_is_trailing_empty_return_label && !target_is_shared_epilogue_jump) {
         ++b;
         continue;
@@ -1241,10 +1303,8 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
 
   // 7a: Standalone bare conditional branch inverted around a bare unconditional
   // jump (`reorg.c:3787-3818`, Subcase I.2) when the input CFG has no
-  // `SEQUENCE` wrappers and no compilation `reg_n_refs` sideband (i.e. a
-  // synthetic `VerifyRelaxDelaySlotsRightInverse` test case rather than an `-O0`
-  // compilation trace where `relax_delay_slots` does not run).
-  if (!cfg_has_any_sequence && out.sideband.reg_n_refs.empty()) {
+  // `SEQUENCE` wrappers.
+  if (!cfg_has_any_sequence) {
     for (size_t b = 0; b + 1 < out.rpo_blocks.size(); ++b) {
       auto& blk = out.rpo_blocks[b];
       if (blk.instructions.empty() || blk.successors.size() != 2) {
@@ -1280,18 +1340,34 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       tramp_blk.id = static_cast<uint32_t>(b + 1);
       tramp_blk.has_label = false;
       if (target_is_trailing_empty) {
+        size_t other_refs = 0;
+        for (size_t o = 0; o < out.rpo_blocks.size(); ++o) {
+          if (o == b || o == target_b - 1) {
+            continue;
+          }
+          const auto& oblk = out.rpo_blocks[o];
+          if (std::find(oblk.successors.begin(), oblk.successors.end(), target_b) !=
+                  oblk.successors.end() ||
+              std::find(oblk.addr_vec_targets.begin(), oblk.addr_vec_targets.end(), target_b) !=
+                  oblk.addr_vec_targets.end()) {
+            ++other_refs;
+          }
+        }
         tramp_blk.instructions = {RtlExpr::MakeReturn().ToSexprString()};
         tramp_blk.successors = {};
         InsertBlockAt(&out, b + 1, std::move(tramp_blk));
         out.rpo_blocks[b].successors = {b + 2, b + 1};
-        const size_t new_empty_idx = out.rpo_blocks.size() - 1;
-        if (new_empty_idx > 0) {
-          auto& pred_of_empty = out.rpo_blocks[new_empty_idx - 1];
-          pred_of_empty.successors.erase(std::remove(pred_of_empty.successors.begin(),
-                                                     pred_of_empty.successors.end(), new_empty_idx),
-                                         pred_of_empty.successors.end());
+        if (other_refs == 0) {
+          const size_t new_empty_idx = out.rpo_blocks.size() - 1;
+          if (new_empty_idx > 0) {
+            auto& pred_of_empty = out.rpo_blocks[new_empty_idx - 1];
+            pred_of_empty.successors.erase(
+                std::remove(pred_of_empty.successors.begin(), pred_of_empty.successors.end(),
+                            new_empty_idx),
+                pred_of_empty.successors.end());
+          }
+          EraseBlockAt(&out, new_empty_idx);
         }
-        EraseBlockAt(&out, new_empty_idx);
       } else {
         out.rpo_blocks[target_b].has_label = true;
         tramp_blk.instructions = {

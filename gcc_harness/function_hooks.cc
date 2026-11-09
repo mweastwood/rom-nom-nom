@@ -217,8 +217,8 @@ extern rtx_def* end_of_function_label;
 extern void** target_hash_table;
 extern int* bb_ticks;
 extern int reorg_pass_number;
-extern char end_of_function_needs[32];
-extern char start_of_epilogue_needs[32];
+extern char end_of_function_needs[16];
+extern char start_of_epilogue_needs[16];
 
 // Stage 2 & Stage 12: Jump (`jump.c`).
 void jump_optimize(rtx_def* f, int cross_jump, int noop_moves, int after_regscan);
