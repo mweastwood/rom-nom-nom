@@ -2256,6 +2256,7 @@ void FunctionHooks::PrepareCombineState(Rtx first) {
     }
   }
   nonzero_bits_mode = kSiMode;
+  nonzero_sign_valid = 0;
   label_tick = 1;
   subst_prev_insn = nullptr;
   subst_low_cuid = 1;
@@ -2434,9 +2435,42 @@ Rtx FunctionHooks::RunSubst(Rtx x, Rtx from, Rtx to, int in_dest, int unique_cop
 }
 
 Rtx FunctionHooks::RunSimplifyRtx(Rtx x, int op0_mode, int last, int in_dest) {
+  if (x == nullptr) {
+    return nullptr;
+  }
   Rtx head = ctx_->GetInsns();
   if (head != nullptr) {
     PrepareCombineState(head);
+  } else {
+    const int nregs = std::max(max_reg_num(), 256) + 16;
+    max_regno = max_reg_num();
+    combine_max_regno = nregs;
+    undobuf.num_undo = 0;
+    undobuf.other_insn = nullptr;
+    previous_num_undos = 0;
+    reg_n_sets = AllocZeroed<short>(nregs);
+    reg_nonzero_bits = AllocZeroed<uint64_t>(nregs);
+    reg_sign_bit_copies = AllocZeroed<char>(nregs);
+    reg_last_death = AllocZeroed<Rtx>(nregs);
+    reg_last_set = AllocZeroed<Rtx>(nregs);
+    reg_last_set_value = AllocZeroed<Rtx>(nregs);
+    reg_last_set_table_tick = AllocZeroed<int>(nregs);
+    reg_last_set_label = AllocZeroed<int>(nregs);
+    reg_last_set_invalid = AllocZeroed<char>(nregs);
+    reg_last_set_mode = AllocZeroed<int>(nregs);
+    reg_last_set_nonzero_bits = AllocZeroed<uint64_t>(nregs);
+    reg_last_set_sign_bit_copies = AllocZeroed<char>(nregs);
+    init_reg_last_arrays();
+    init_recog_no_volatile();
+    nonzero_bits_mode = kSiMode;
+    nonzero_sign_valid = 0;
+    label_tick = 1;
+    subst_prev_insn = nullptr;
+    subst_low_cuid = 1;
+  }
+  if (op0_mode == static_cast<int>(x->mode) && rtx_format[x->code][0] == 'e' &&
+      x->fld[0].rtx != nullptr && x->fld[0].rtx->mode != kVoidMode) {
+    op0_mode = static_cast<int>(x->fld[0].rtx->mode);
   }
   return simplify_rtx(x, op0_mode, last, in_dest);
 }
@@ -4431,9 +4465,10 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           undobuf.other_insn = nullptr;
           previous_num_undos = 0;
           subst_prev_insn = nullptr;
-          const int op0_mode = (rtx_format[src->code][0] == 'e' && src->fld[0].rtx != nullptr)
+          const int op0_mode = (rtx_format[src->code][0] == 'e' && src->fld[0].rtx != nullptr &&
+                                src->fld[0].rtx->mode != kVoidMode)
                                    ? static_cast<int>(src->fld[0].rtx->mode)
-                                   : static_cast<int>(kVoidMode);
+                                   : static_cast<int>(src->mode);
           Rtx simplified = simplify_rtx(src, op0_mode, /*last=*/1, /*in_dest=*/0);
           if (simplified != nullptr && simplified->code != kClobber) {
             pat->fld[1].rtx = simplified;

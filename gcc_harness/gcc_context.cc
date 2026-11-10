@@ -378,16 +378,17 @@ T* AllocSidebandArray(size_t count) {
 }
 
 char* CopyStringToRtlObstack(std::string_view str) {
-  GccObstack* ob = rtl_obstack;
-  const int len = static_cast<int>(str.size()) + 1;
-  if (ob->chunk_limit - ob->next_free < len) {
-    _obstack_newchunk(ob, len);
+  static auto* interned_strings = new absl::flat_hash_map<std::string, std::unique_ptr<char[]>>();
+  if (auto it = interned_strings->find(str); it != interned_strings->end()) {
+    return it->second.get();
   }
-  std::memcpy(ob->next_free, str.data(), str.size());
-  ob->next_free[str.size()] = '\0';
-  char* result = ob->object_base;
-  ob->next_free += len;
-  ob->object_base = ob->next_free;
+  auto buf = std::make_unique<char[]>(str.size() + 1);
+  if (!str.empty()) {
+    std::memcpy(buf.get(), str.data(), str.size());
+  }
+  buf[str.size()] = '\0';
+  char* result = buf.get();
+  interned_strings->emplace(std::string(str), std::move(buf));
   return result;
 }
 
