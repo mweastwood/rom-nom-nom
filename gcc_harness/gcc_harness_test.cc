@@ -711,6 +711,132 @@ TEST(RightInverseVerifierTest, Stage4And5AlterRegBlockAllocAndUpdateEquivRegsRig
 
   RightInverseResult lreg_res = verifier.VerifyLocalAllocStageRightInverse(equiv_cfg);
   EXPECT_TRUE(lreg_res.matches) << lreg_res.diff_detail;
+
+  // Verify exact reverse compilation order in Stage 4 & Stage 5 verifiers:
+  // - Stage 5 (`VerifyLocalAllocStageRightInverse`): `InvertBlockAlloc` BEFORE
+  // `InvertUpdateEquivRegs`
+  // - Stage 4 (`VerifyGlobalReloadStageRightInverse`): `InvertAlterReg` -> `InvertReload` ->
+  // `InvertGlobalAlloc`
+  class OrderRecordingProvider final : public ToySubfunctionInverses {
+   public:
+    mutable std::vector<std::string> calls;
+
+    RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x) const override {
+      calls.push_back("InvertBlockAlloc");
+      return ToySubfunctionInverses::InvertBlockAlloc(x);
+    }
+    RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& x) const override {
+      calls.push_back("InvertUpdateEquivRegs");
+      return ToySubfunctionInverses::InvertUpdateEquivRegs(x);
+    }
+    RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x,
+                                       int pseudo_regno) const override {
+      calls.push_back("InvertAlterReg");
+      return ToySubfunctionInverses::InvertAlterReg(x, pseudo_regno);
+    }
+    RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& x) const override {
+      calls.push_back("InvertReload");
+      return ToySubfunctionInverses::InvertReload(x);
+    }
+    RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& x) const override {
+      calls.push_back("InvertGlobalAlloc");
+      return ToySubfunctionInverses::InvertGlobalAlloc(x);
+    }
+  };
+
+  OrderRecordingProvider order_provider;
+  RightInverseVerifier order_verifier(&ctx, &hooks, &order_provider);
+  EXPECT_TRUE(order_verifier.VerifyLocalAllocStageRightInverse(equiv_cfg).matches);
+  EXPECT_EQ(order_provider.calls,
+            (std::vector<std::string>{"InvertBlockAlloc", "InvertUpdateEquivRegs"}));
+
+  order_provider.calls.clear();
+  EXPECT_TRUE(order_verifier.VerifyGlobalReloadStageRightInverse(greg_cfg).matches);
+  EXPECT_EQ(order_provider.calls,
+            (std::vector<std::string>{"InvertAlterReg", "InvertReload", "InvertGlobalAlloc"}));
+
+  // Verify `RunReload(first, /*global=*/1)` safely initializes `global.c` tables
+  // even when reload spills an eliminable/occupied hard register (`retry_global_alloc`)
+  // without relying on a live `global_alloc` stack frame.
+  ctx.BeginFunction("reload_global_one_fn");
+  RtlControlFlowGraph global_reload_cfg;
+  global_reload_cfg.pass = RtlPassKind::kGreg;
+  global_reload_cfg.sideband.max_regno = 74;
+  global_reload_cfg.sideband.reg_renumber[72] = 30;  // Allocated to `$fp`, spans diamond blocks.
+  global_reload_cfg.sideband.reg_renumber[73] = 2;
+  global_reload_cfg.rpo_blocks.resize(3);
+  global_reload_cfg.rpo_blocks[0].id = 0;
+  global_reload_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 3)))");
+  global_reload_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (pc) (if_then_else (gt:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc)))");
+  global_reload_cfg.rpo_blocks[0].successors = {1, 2};
+  global_reload_cfg.rpo_blocks[1].id = 1;
+  global_reload_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 10)))");
+  global_reload_cfg.rpo_blocks[1].successors = {2};
+  global_reload_cfg.rpo_blocks[2].id = 2;
+  global_reload_cfg.rpo_blocks[2].has_label = true;
+  global_reload_cfg.rpo_blocks[2].AddPatternOnly(
+      "(set (reg:SI 73) (plus:SI (reg:SI 72) (reg:SI 5 a1)))");
+  global_reload_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 73))");
+  global_reload_cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  SubfunctionBoundarySnapshot global_reload_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kReload, global_reload_cfg, {},
+                                       /*optimize_level=*/2, {"-O2", "-fno-omit-frame-pointer"});
+  ASSERT_EQ(global_reload_snap.post_state.BlockCount(), 3u);
+  // Because `global == 1` (`optimize_level > 0`) and `-fno-omit-frame-pointer`
+  // forced `spill_hard_reg(30, /*global=*/1, ...)`, `retry_global_alloc`
+  // reallocated pseudo `72` into another hard GPR instead of spilling to `mem`.
+  EXPECT_TRUE(global_reload_snap.post_state.sideband.reg_renumber.contains(72));
+  EXPECT_NE(global_reload_snap.post_state.sideband.reg_renumber.at(72), 30);
+  EXPECT_GE(global_reload_snap.post_state.sideband.reg_renumber.at(72), 0);
+
+  // Verify single-BB `global_alloc` pseudo classification in `PrepareGlobalReloadState`:
+  // `local_alloc` never allocates `$fp` (`30`), so a single-BB pseudo with
+  // `reg_renumber[72] = 30` must still receive a `reg_allocno` entry and be
+  // reallocated to a free GPR by `retry_global_alloc` under `-fno-omit-frame-pointer`.
+  ctx.BeginFunction("reload_global_single_bb_fp_fn");
+  RtlControlFlowGraph single_bb_fp_cfg;
+  single_bb_fp_cfg.pass = RtlPassKind::kGreg;
+  single_bb_fp_cfg.sideband.max_regno = 73;
+  single_bb_fp_cfg.sideband.reg_renumber[72] = 30;
+  single_bb_fp_cfg.rpo_blocks.resize(1);
+  single_bb_fp_cfg.rpo_blocks[0].id = 0;
+  single_bb_fp_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 5)))");
+  single_bb_fp_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (ashift:SI (reg:SI 72) (const_int 1)))");
+  single_bb_fp_cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  SubfunctionBoundarySnapshot single_bb_fp_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kReload, single_bb_fp_cfg, {},
+                                       /*optimize_level=*/2, {"-O2", "-fno-omit-frame-pointer"});
+  ASSERT_EQ(single_bb_fp_snap.post_state.BlockCount(), 1u);
+  EXPECT_TRUE(single_bb_fp_snap.post_state.sideband.reg_renumber.contains(72));
+  EXPECT_NE(single_bb_fp_snap.post_state.sideband.reg_renumber.at(72), 30);
+  EXPECT_GE(single_bb_fp_snap.post_state.sideband.reg_renumber.at(72), 0);
+
+  // Verify `-O0` (`optimize == 0`) stage-level right-inverse replay:
+  // - `VerifyLocalAllocStageRightInverse` skips `local_alloc` (`toplev.c:3048-3053`).
+  // - `VerifyGlobalReloadStageRightInverse` runs `stupid_life_analysis` +
+  //   `RunReload(nullptr, /*global=*/0)` (`toplev.c:3079-3083`), allocating
+  //   `register int acc` to `$s0` (`16`) rather than `global_alloc`'s `$v0` (`2`).
+  const FunctionCompilationTrace o0_stage_trace = hooks.TraceForwardCompilation(
+      "int add_two_reg(int a, int b) { register int acc = a + b; return acc; }\n", "add_two_reg",
+      {"-O0"}, "stage4_stage5_o0_verify");
+  ASSERT_EQ(optimize, 0);
+  ASSERT_TRUE(o0_stage_trace.pass_snapshots.contains(RtlPassKind::kLreg));
+  ASSERT_TRUE(o0_stage_trace.pass_snapshots.contains(RtlPassKind::kGreg));
+  RightInverseResult o0_lreg_res = verifier.VerifyLocalAllocStageRightInverse(
+      o0_stage_trace.pass_snapshots.at(RtlPassKind::kLreg));
+  EXPECT_TRUE(o0_lreg_res.matches) << o0_lreg_res.diff_detail;
+  RightInverseResult o0_greg_res = verifier.VerifyGlobalReloadStageRightInverse(
+      o0_stage_trace.pass_snapshots.at(RtlPassKind::kGreg));
+  EXPECT_TRUE(o0_greg_res.matches) << o0_greg_res.diff_detail;
+
+  // Restore default `-O2` compiler flags for subsequent tests in the suite.
+  hooks.ExecuteSubfunctionBoundary(SubfunctionId::kReload, reload_pre, {}, /*optimize_level=*/2,
+                                   {"-O2"});
 }
 
 TEST(RightInverseVerifierTest, Stage7SimplifyRtxSubstAndTryCombineRightInverse) {

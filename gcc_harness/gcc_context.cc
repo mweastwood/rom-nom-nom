@@ -226,7 +226,7 @@ extern int mips_optimize;
 namespace rom_nom_nom::gcc_harness {
 namespace {
 
-constexpr int kFirstPseudoRegister = 67;
+constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
 constexpr int kBlockCode = 5;
 constexpr int kVoidTypeCode = 6;
 constexpr int kIntegerTypeCode = 7;

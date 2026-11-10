@@ -278,6 +278,31 @@ TEST_F(InvertAlterRegTest, PreservesStructOrVolatileOrAddressTakenFpStackSlots) 
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+TEST_F(InvertAlterRegTest, PreservesFcr31StatusHardRegister67) {
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kGreg;
+  cfg.rpo_blocks.push_back(RtlBasicBlock{
+      .id = 0,
+      .instructions =
+          {
+              "(set (reg:CC 67 $fcr31) (eq:CC (reg:SF 44 $f12) (reg:SF 46 $f14)))",
+              "(set (reg:SI 2 v0) (const_int 1))",
+              "(use (reg/i:SI 2 v0))",
+          },
+  });
+  SyncAllBlocks(&cfg);
+
+  const RtlControlFlowGraph lifted = InvertAlterReg(cfg, 72);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
+            "(set (reg:CC 67 $fcr31) (eq:CC (reg:SF 44 $f12) (reg:SF 46 $f14)))");
+  EXPECT_FALSE(lifted.sideband.reg_renumber.contains(67));
+  for (const auto& [pseudo, hard] : lifted.sideband.reg_renumber) {
+    EXPECT_GE(pseudo, 72);
+    EXPECT_NE(hard, 67);
+  }
+}
+
 TEST_F(InvertAlterRegTest, RejectsInvalidAndMalformedInputs) {
   RtlControlFlowGraph empty_cfg;
   EXPECT_TRUE(InvertAlterReg(empty_cfg).rpo_blocks.empty());
@@ -290,7 +315,8 @@ TEST_F(InvertAlterRegTest, RejectsInvalidAndMalformedInputs) {
   });
   SyncAllBlocks(&valid_cfg);
 
-  // Reject `first_pseudo_regno < 67`.
+  // Reject `first_pseudo_regno < 68` (including `kMipsStatusRegnum == 67`).
+  EXPECT_TRUE(InvertAlterReg(valid_cfg, 67).rpo_blocks.empty());
   EXPECT_TRUE(InvertAlterReg(valid_cfg, 66).rpo_blocks.empty());
   EXPECT_TRUE(InvertAlterReg(valid_cfg, -1).rpo_blocks.empty());
 

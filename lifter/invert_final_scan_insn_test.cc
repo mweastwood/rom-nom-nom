@@ -20,6 +20,11 @@ class ProductionFinalScanInsnInverseProvider final
   std::string InvertFinalScanInsn(std::string_view asm_line_x) const override {
     return lifter::InvertFinalScanInsn(asm_line_x);
   }
+
+  RtlControlFlowGraph InvertFinalScanInsnStream(absl::Span<const std::string> asm_lines_x,
+                                                const RtlSidebandState& sideband) const override {
+    return lifter::InvertFinalScanInsnLinesToCfg(asm_lines_x, sideband);
+  }
 };
 
 class InvertFinalScanInsnTest : public ::testing::Test {

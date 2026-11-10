@@ -13,8 +13,6 @@
 namespace rom_nom_nom::lifter {
 namespace {
 
-constexpr int kStatusRegnum = 67;
-constexpr int kFirstPseudoRegister = 68;
 constexpr int kReturnAddressRegno = 31;
 
 struct RestoredScratchClobber {
@@ -71,7 +69,7 @@ bool RestoreScratchClobbersInInsn(RtlPatternAndNotes* parsed) {
     if (elem.op == RtlOp::kClobber && elem.children.size() == 1 && elem.children[0].IsReg()) {
       const int regno = elem.children[0].RegNo();
       const RtlMachineMode mode = elem.children[0].mode;
-      if (regno >= 0 && regno < kFirstPseudoRegister && regno != kReturnAddressRegno) {
+      if (regno >= 0 && regno < kMipsFirstPseudoRegister && regno != kReturnAddressRegno) {
         restored_scratches.push_back(RestoredScratchClobber{
             .regno = regno,
             .mode = mode,
@@ -108,11 +106,12 @@ bool RestoreScratchClobbersInInsn(RtlPatternAndNotes* parsed) {
 
 absl::Status ValidateSideband(const RtlSidebandState& sideband) {
   for (const auto& [pseudo, hard] : sideband.reg_renumber) {
-    if (pseudo < kStatusRegnum) {
+    if (pseudo < kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(absl::StrCat("InvertBlockAlloc: invalid reg_renumber key ",
-                                                     pseudo, " (< ", kStatusRegnum, ")"));
+                                                     pseudo, " (< ", kMipsFirstPseudoRegister,
+                                                     ")"));
     }
-    if (hard < -1 || hard >= kFirstPseudoRegister) {
+    if (hard < -1 || hard >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(absl::StrCat(
           "InvertBlockAlloc: invalid reg_renumber target ", hard, " for pseudo ", pseudo));
     }
@@ -165,13 +164,13 @@ absl::Status ValidateSideband(const RtlSidebandState& sideband) {
     }
   }
   for (int regno : sideband.saved_gpr_regnos) {
-    if (regno < 0 || regno >= kFirstPseudoRegister) {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(
           absl::StrCat("InvertBlockAlloc: invalid saved_gpr_regno ", regno));
     }
   }
   for (int regno : sideband.saved_fpr_regnos) {
-    if (regno < 0 || regno >= kFirstPseudoRegister) {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(
           absl::StrCat("InvertBlockAlloc: invalid saved_fpr_regno ", regno));
     }

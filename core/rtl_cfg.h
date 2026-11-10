@@ -18,6 +18,13 @@
 
 namespace rom_nom_nom {
 
+// KMC GCC 2.7.2 MIPS register numbering constants (`config/mips/mips.h` & `rtl.h`).
+inline constexpr int kMipsStatusRegnum = 67;             // `ST_REG_FIRST` (`$fcr31`)
+inline constexpr int kMipsFirstPseudoRegister = 68;      // `FIRST_PSEUDO_REGISTER`
+inline constexpr int kMipsFirstVirtualRegister = 68;     // `FIRST_VIRTUAL_REGISTER`
+inline constexpr int kMipsLastVirtualRegister = 71;      // `LAST_VIRTUAL_REGISTER`
+inline constexpr int kMipsFirstUserPseudoRegister = 72;  // `LAST_VIRTUAL_REGISTER + 1`
+
 // Frame parameters recovered by `InvertFunctionPrologueEpilogue` for
 // `mips.c:function_prologue` and `mips.c:function_epilogue`.
 struct PrologueEpilogueFrameSpec {
@@ -207,7 +214,7 @@ struct RtlSpillSlotInfo {
 // accompany an RTL instruction stream between optimization stages.
 struct RtlSidebandState {
   // Next available pseudo-register number (`max_regno` in GCC).
-  int max_regno = 67;
+  int max_regno = kMipsFirstPseudoRegister;
 
   // Pseudo-register -> hard-register assignment map (`reg_renumber` in GCC).
   // Unallocated pseudos map to -1 or are absent.

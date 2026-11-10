@@ -237,6 +237,10 @@ TEST_F(InvertUpdateEquivRegsTest, RejectsInvalidSidebandRegisterAndBlockNumbers)
   bad_renum_key.sideband.reg_renumber[2] = 4;
   EXPECT_FALSE(InvertUpdateEquivRegs(bad_renum_key).ok());
 
+  RtlControlFlowGraph bad_fcr31_key = base;
+  bad_fcr31_key.sideband.reg_renumber[kMipsStatusRegnum] = 2;
+  EXPECT_FALSE(InvertUpdateEquivRegs(bad_fcr31_key).ok());
+
   RtlControlFlowGraph bad_renum_val = base;
   bad_renum_val.sideband.reg_renumber[72] = 75;
   EXPECT_FALSE(InvertUpdateEquivRegs(bad_renum_val).ok());

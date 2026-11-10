@@ -217,7 +217,7 @@ struct RtlExpr {
 
   // Primary integer payload:
   // - kConstInt: constant value
-  // - kReg: register number (0..66 hard reg, >= 67 pseudo-reg)
+  // - kReg: register number (0..67 hard reg, >= 68 pseudo-reg)
   // - kSubreg: word offset
   // - kLabelRef / kInsnList: label or insn id
   // - kUnspec / kUnspecVolatile: unspec code
@@ -279,8 +279,8 @@ struct RtlExpr {
   // Structural queries and accessors.
   bool IsNil() const { return op == RtlOp::kNil; }
   bool IsReg() const { return op == RtlOp::kReg; }
-  bool IsPseudoReg() const { return op == RtlOp::kReg && int_val >= 67; }
-  bool IsHardReg() const { return op == RtlOp::kReg && int_val >= 0 && int_val < 67; }
+  bool IsPseudoReg() const { return op == RtlOp::kReg && int_val >= 68; }
+  bool IsHardReg() const { return op == RtlOp::kReg && int_val >= 0 && int_val < 68; }
   int RegNo() const { return static_cast<int>(int_val); }
   void SetRegNo(int new_regno);
 

@@ -337,12 +337,17 @@ TEST_F(InvertGlobalAllocTest, RejectsInvalidRegistersAndSidebandEntries) {
 
   RtlControlFlowGraph bad_renumber_key_cfg;
   bad_renumber_key_cfg.rpo_blocks.push_back(valid_bb);
-  bad_renumber_key_cfg.sideband.reg_renumber[12] = 2;  // Hard reg key (< 67).
+  bad_renumber_key_cfg.sideband.reg_renumber[12] = 2;  // Hard reg key (< 68).
   EXPECT_FALSE(InvertGlobalAlloc(bad_renumber_key_cfg).ok());
+
+  RtlControlFlowGraph fcr31_renumber_key_cfg;
+  fcr31_renumber_key_cfg.rpo_blocks.push_back(valid_bb);
+  fcr31_renumber_key_cfg.sideband.reg_renumber[67] = 2;  // $fcr31 (67) is a hard reg (< 68).
+  EXPECT_FALSE(InvertGlobalAlloc(fcr31_renumber_key_cfg).ok());
 
   RtlControlFlowGraph bad_renumber_val_cfg;
   bad_renumber_val_cfg.rpo_blocks.push_back(valid_bb);
-  bad_renumber_val_cfg.sideband.reg_renumber[72] = 80;  // Target not a hard reg (>= 67).
+  bad_renumber_val_cfg.sideband.reg_renumber[72] = 80;  // Target not a hard reg (>= 68).
   EXPECT_FALSE(InvertGlobalAlloc(bad_renumber_val_cfg).ok());
 
   RtlControlFlowGraph bad_live_bb_cfg;

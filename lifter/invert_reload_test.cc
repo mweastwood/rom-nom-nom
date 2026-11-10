@@ -145,7 +145,7 @@ TEST_F(InvertReloadTest, ReversesEarlyclobberClobberOutputReloadsOnParallel) {
   RtlControlFlowGraph reload_cfg;
   reload_cfg.pass = RtlPassKind::kGreg;
   reload_cfg.sideband.frame_pointer_needed = false;
-  reload_cfg.sideband.max_regno = 67;
+  reload_cfg.sideband.max_regno = 68;
   reload_cfg.sideband.saved_gpr_regnos = {2, 3, 4, 5, 6, 7};
   reload_cfg.sideband.basic_block_live_at_start[0] = {4, 5, 29};
   reload_cfg.sideband.reg_n_deaths[4] = 1;
@@ -274,8 +274,13 @@ TEST_F(InvertReloadTest, RejectsInvalidNegativeRegisterNumber) {
   valid_bb.id = 0;
   valid_bb.instructions = {"(set (reg:SI 2 $2) (const_int 0))"};
   bad_sideband_cfg.rpo_blocks.push_back(valid_bb);
-  bad_sideband_cfg.sideband.reg_renumber[10] = 2;  // Not a pseudo register (< 67).
+  bad_sideband_cfg.sideband.reg_renumber[10] = 2;  // Not a pseudo register (< 68).
   EXPECT_FALSE(InvertReload(bad_sideband_cfg).ok());
+
+  RtlControlFlowGraph fcr31_sideband_cfg = bad_sideband_cfg;
+  fcr31_sideband_cfg.sideband.reg_renumber.clear();
+  fcr31_sideband_cfg.sideband.reg_renumber[67] = 2;  // $fcr31 (67) is a hard register (< 68).
+  EXPECT_FALSE(InvertReload(fcr31_sideband_cfg).ok());
 }
 
 // Negative test 5: Verifies that `VerifyReloadRightInverse` rejects a corrupted inverse.

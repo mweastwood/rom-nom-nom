@@ -148,13 +148,14 @@ constexpr std::array<ModeEntry, 26> kModeTable = {{
     {RtlMachineMode::kRegDepOutput, "REG_DEP_OUTPUT"},
 }};
 
-constexpr std::array<std::string_view, 67> kHardRegNames = {{
-    "$0",   "at",   "v0",   "v1",   "a0",   "a1",   "a2",    "a3",   "t0",   "t1",   "t2",   "t3",
-    "t4",   "t5",   "t6",   "t7",   "s0",   "s1",   "s2",    "s3",   "s4",   "s5",   "s6",   "s7",
-    "t8",   "t9",   "k0",   "k1",   "gp",   "sp",   "fp",    "ra",   "$f0",  "$f1",  "$f2",  "$f3",
-    "$f4",  "$f5",  "$f6",  "$f7",  "$f8",  "$f9",  "$f10",  "$f11", "$f12", "$f13", "$f14", "$f15",
-    "$f16", "$f17", "$f18", "$f19", "$f20", "$f21", "$f22",  "$f23", "$f24", "$f25", "$f26", "$f27",
-    "$f28", "$f29", "$f30", "$f31", "hi",   "lo",   "accum",
+constexpr std::array<std::string_view, 68> kHardRegNames = {{
+    "$0",   "at",   "v0",   "v1",   "a0",   "a1",   "a2",    "a3",     "t0",   "t1",
+    "t2",   "t3",   "t4",   "t5",   "t6",   "t7",   "s0",    "s1",     "s2",   "s3",
+    "s4",   "s5",   "s6",   "s7",   "t8",   "t9",   "k0",    "k1",     "gp",   "sp",
+    "fp",   "ra",   "$f0",  "$f1",  "$f2",  "$f3",  "$f4",   "$f5",    "$f6",  "$f7",
+    "$f8",  "$f9",  "$f10", "$f11", "$f12", "$f13", "$f14",  "$f15",   "$f16", "$f17",
+    "$f18", "$f19", "$f20", "$f21", "$f22", "$f23", "$f24",  "$f25",   "$f26", "$f27",
+    "$f28", "$f29", "$f30", "$f31", "hi",   "lo",   "accum", "$fcr31",
 }};
 
 void SkipWhitespace(std::string_view text, size_t* pos) {
@@ -895,7 +896,7 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
       absl::StrAppend(out, " ", expr.int_val);
       if (!expr.str_val.empty()) {
         absl::StrAppend(out, " ", expr.str_val);
-      } else if (expr.int_val >= 0 && expr.int_val < 67) {
+      } else if (expr.int_val >= 0 && expr.int_val < 68) {
         std::string_view reg_name = RtlExpr::HardRegName(static_cast<int>(expr.int_val));
         if (!reg_name.empty()) {
           absl::StrAppend(out, " ", reg_name);
@@ -1212,7 +1213,7 @@ RtlExpr RtlExpr::MakeCall(RtlExpr mem_fn, RtlExpr arg_size) {
 
 void RtlExpr::SetRegNo(int new_regno) {
   int_val = new_regno;
-  if (new_regno >= 0 && new_regno < 67) {
+  if (new_regno >= 0 && new_regno < 68) {
     str_val = std::string(HardRegName(new_regno));
   } else {
     str_val.clear();

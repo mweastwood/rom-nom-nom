@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -21,6 +22,17 @@
 #include "core/rtl_sexpr_utils.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gcc_harness/toy_subfunction_inverses.h"
+
+// NOLINTBEGIN(readability-identifier-naming)
+extern "C" {
+extern int obey_regdecls;
+void restore_reg_data(rtx_def* first);
+void reg_scan(rtx_def* f, int nregs, int repeat);
+void regclass_init();
+void regclass(rtx_def* f, int nregs);
+void stupid_life_analysis(rtx_def* f, int nregs, FILE* file);
+}  // extern "C"
+// NOLINTEND(readability-identifier-naming)
 
 namespace rom_nom_nom::gcc_harness {
 namespace {
@@ -401,7 +413,7 @@ RightInverseResult RightInverseVerifier::VerifyAlterRegRightInverse(
         RtlControlFlowGraph lifted_y = inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
         altered_regnos.clear();
         for (const auto& [regno, _] : lifted_y.sideband.reg_renumber) {
-          if (regno >= 67) {
+          if (regno >= kMipsFirstPseudoRegister) {
             altered_regnos.push_back(regno);
           }
         }
@@ -469,9 +481,33 @@ RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
   return VerifyRtlPassRightInverse(
       greg_cfg_x,
       [this](const RtlControlFlowGraph& x) {
-        return inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
+        RtlControlFlowGraph pre_alter = inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
+        if (!x.rpo_blocks.empty() && pre_alter.rpo_blocks.empty()) {
+          return RtlControlFlowGraph{};
+        }
+        RtlControlFlowGraph pre_reload = inverses_->InvertReload(pre_alter);
+        if (!pre_alter.rpo_blocks.empty() && pre_reload.rpo_blocks.empty()) {
+          return RtlControlFlowGraph{};
+        }
+        return inverses_->InvertGlobalAlloc(pre_reload);
       },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunGlobalAlloc(); },
+      [](GccContext* ctx, FunctionHooks* hooks) {
+        if (optimize > 0) {
+          hooks->RunGlobalAlloc();
+        } else {
+          Rtx head = ctx->GetInsns();
+          if (head != nullptr) {
+            obey_regdecls = 1;
+            restore_reg_data(head);
+            max_regno = max_reg_num();
+            reg_scan(head, max_regno, 0);
+            regclass_init();
+            regclass(head, max_regno);
+            stupid_life_analysis(head, max_regno, nullptr);
+            hooks->RunReload(head, /*global=*/0);
+          }
+        }
+      },
       RtlPassKind::kGreg);
 }
 
@@ -514,9 +550,17 @@ RightInverseResult RightInverseVerifier::VerifyLocalAllocStageRightInverse(
   return VerifyRtlPassRightInverse(
       lreg_cfg_x,
       [this](const RtlControlFlowGraph& x) {
-        return inverses_->InvertBlockAlloc(inverses_->InvertUpdateEquivRegs(x));
+        RtlControlFlowGraph pre_block = inverses_->InvertBlockAlloc(x);
+        if (!x.rpo_blocks.empty() && pre_block.rpo_blocks.empty()) {
+          return RtlControlFlowGraph{};
+        }
+        return inverses_->InvertUpdateEquivRegs(pre_block);
       },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunLocalAlloc(); },
+      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
+        if (optimize > 0) {
+          hooks->RunLocalAlloc();
+        }
+      },
       RtlPassKind::kLreg);
 }
 
@@ -962,217 +1006,14 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
     case SubfunctionId::kFinalScanInsn: {
       RightInverseResult result;
       result.expected_summary = absl::StrJoin(snap.post_asm_lines, "\n");
-      RtlControlFlowGraph cand_pre;
+      RtlControlFlowGraph cand_pre =
+          inverses_->InvertFinalScanInsnStream(snap.post_asm_lines, snap.post_state.sideband);
+      if (!snap.post_asm_lines.empty() && cand_pre.rpo_blocks.empty()) {
+        result.matches = false;
+        result.diff_detail = "InvertFinalScanInsnStream returned empty RtlControlFlowGraph";
+        return result;
+      }
       cand_pre.pass = snap.post_state.pass;
-      cand_pre.sideband = snap.post_state.sideband;
-
-      std::vector<RtlBasicBlock> blocks;
-      absl::flat_hash_map<std::string, size_t> label_to_block;
-      absl::flat_hash_set<size_t> labeled_block_ids;
-      RtlBasicBlock cur_blk;
-      cur_blk.id = 0;
-
-      for (size_t i = 0; i < snap.post_asm_lines.size(); ++i) {
-        const std::string& line = snap.post_asm_lines[i];
-        if (line == ".set reorder") {
-          continue;
-        }
-        if (line == ".set noreorder") {
-          if (i + 2 < snap.post_asm_lines.size() && snap.post_asm_lines[i + 1] == "nop" &&
-              snap.post_asm_lines[i + 2] == ".set reorder") {
-            const std::string pat = inverses_->InvertFinalScanInsn(snap.post_asm_lines[i + 1]);
-            if (pat.empty()) {
-              result.matches = false;
-              result.diff_detail = "InvertFinalScanInsn returned empty pattern for nop";
-              return result;
-            }
-            cur_blk.AddPatternOnly(pat);
-            i += 2;
-            continue;
-          }
-          if (i + 3 >= snap.post_asm_lines.size() || snap.post_asm_lines[i + 3] != ".set reorder") {
-            result.matches = false;
-            result.diff_detail = "Malformed .set noreorder block in kFinalScanInsn";
-            return result;
-          }
-          const std::string pat0 = inverses_->InvertFinalScanInsn(snap.post_asm_lines[i + 1]);
-          const std::string pat1 = inverses_->InvertFinalScanInsn(snap.post_asm_lines[i + 2]);
-          if (pat0.empty() || pat1.empty()) {
-            result.matches = false;
-            result.diff_detail = "InvertFinalScanInsn returned empty pattern in .set noreorder";
-            return result;
-          }
-          const bool is_call_seq = absl::StrContains(pat0, "(call (mem:");
-          if (is_call_seq) {
-            cur_blk.AddPatternOnly(
-                absl::StrFormat("(sequence [(call_insn %s) (insn %s)])", pat0, pat1));
-          } else if (absl::StartsWith(pat0, "(jump_insn/u ")) {
-            cur_blk.AddPatternOnly(absl::StrFormat("(sequence [%s (insn/s %s)])", pat0, pat1));
-          } else {
-            cur_blk.AddPatternOnly(
-                absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
-          }
-          i += 3;
-          if (!is_call_seq && i + 1 < snap.post_asm_lines.size() &&
-              !absl::EndsWith(snap.post_asm_lines[i + 1], ":")) {
-            blocks.push_back(std::move(cur_blk));
-            cur_blk = RtlBasicBlock{};
-            cur_blk.id = blocks.size();
-          }
-          continue;
-        }
-        if (absl::EndsWith(line, ":")) {
-          std::string_view lbl(line.data(), line.size() - 1);
-          if (absl::StartsWith(lbl, "$L")) {
-            lbl.remove_prefix(1);
-          }
-          if (!cur_blk.instructions.empty() || cur_blk.has_label) {
-            blocks.push_back(std::move(cur_blk));
-            cur_blk = RtlBasicBlock{};
-            cur_blk.id = blocks.size();
-          }
-          cur_blk.has_label = true;
-          label_to_block[std::string(lbl)] = cur_blk.id;
-          labeled_block_ids.insert(cur_blk.id);
-          continue;
-        }
-        std::string combined_line = line;
-        if (i + 1 < snap.post_asm_lines.size() &&
-            (absl::StartsWith(line, "mtc1\t") || absl::StartsWith(line, "mtc1 ") ||
-             absl::StartsWith(line, "l.s\t") || absl::StartsWith(line, "l.s ")) &&
-            (absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.s.w\t") ||
-             absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.s.w ") ||
-             absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.d.w\t") ||
-             absl::StartsWith(snap.post_asm_lines[i + 1], "cvt.d.w "))) {
-          combined_line = absl::StrCat(line, "\n", snap.post_asm_lines[i + 1]);
-          ++i;
-        } else if (absl::StartsWith(line, "lwl\t") || absl::StartsWith(line, "lwl ")) {
-          const size_t max_len = std::min<size_t>(16, snap.post_asm_lines.size() - i);
-          for (size_t len = max_len; len >= 3; --len) {
-            const std::string cand =
-                absl::StrJoin(absl::MakeConstSpan(snap.post_asm_lines).subspan(i, len), "\n");
-            if (!inverses_->InvertFinalScanInsn(cand).empty()) {
-              combined_line = cand;
-              i += len - 1;
-              break;
-            }
-          }
-        }
-        const std::string pat = inverses_->InvertFinalScanInsn(combined_line);
-        if (pat.empty()) {
-          result.matches = false;
-          result.diff_detail =
-              absl::StrFormat("InvertFinalScanInsn returned empty pattern for '%s'", combined_line);
-          return result;
-        }
-        cur_blk.AddPatternOnly(pat);
-        if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ") ||
-             absl::StartsWith(pat, "(jump_insn")) &&
-            i + 1 < snap.post_asm_lines.size() &&
-            !absl::EndsWith(snap.post_asm_lines[i + 1], ":")) {
-          blocks.push_back(std::move(cur_blk));
-          cur_blk = RtlBasicBlock{};
-          cur_blk.id = blocks.size();
-        }
-      }
-      if (!cur_blk.instructions.empty() || cur_blk.has_label || blocks.empty()) {
-        blocks.push_back(std::move(cur_blk));
-      }
-
-      for (size_t b = 0; b < blocks.size(); ++b) {
-        bool modified_block = false;
-        for (size_t insn_idx = 0; insn_idx < blocks[b].instructions.size(); ++insn_idx) {
-          std::string& pat = blocks[b].instructions[insn_idx];
-          size_t pos = 0;
-          while ((pos = pat.find("(label_ref ", pos)) != std::string::npos) {
-            const size_t tok_start = pos + std::string_view("(label_ref ").size();
-            const size_t tok_end = pat.find(')', tok_start);
-            if (tok_end == std::string::npos) {
-              break;
-            }
-            const std::string lbl_tok(
-                absl::StripAsciiWhitespace(pat.substr(tok_start, tok_end - tok_start)));
-            const size_t delay_insn_pos = pat.find("(insn");
-            const bool is_jump_or_branch_insn = absl::StartsWith(pat, "(set (pc) ") ||
-                                                absl::StartsWith(pat, "(jump_insn") ||
-                                                absl::StartsWith(pat, "(sequence [(jump_insn");
-            const bool is_in_delay_slot = absl::StartsWith(pat, "(sequence [") &&
-                                          delay_insn_pos != std::string::npos &&
-                                          pos > delay_insn_pos;
-            const bool is_addr_hi_lo = !is_jump_or_branch_insn || is_in_delay_slot ||
-                                       absl::StrContains(pat.substr(0, pos), "(lo_sum:") ||
-                                       absl::StrContains(pat.substr(0, pos), "(high:");
-            if (insn_idx + 1 < blocks[b].instructions.size() || is_addr_hi_lo) {
-              auto it = label_to_block.find(lbl_tok);
-              if (it != label_to_block.end()) {
-                const std::string replacement =
-                    absl::StrFormat("(label_ref __blk_%zu)", it->second);
-                pat.replace(pos, tok_end - pos + 1, replacement);
-                pos += replacement.size();
-                modified_block = true;
-                continue;
-              }
-            }
-            pos = tok_end + 1;
-          }
-        }
-        if (modified_block) {
-          blocks[b].SyncRtlInsnsFromInstructions();
-        }
-
-        if (blocks[b].instructions.empty()) {
-          if (b + 1 < blocks.size()) {
-            blocks[b].successors = {b + 1};
-          }
-          continue;
-        }
-        const std::string& last_pat = blocks[b].instructions.back();
-        if (last_pat == "(return)" ||
-            absl::StartsWith(last_pat, "(sequence [(jump_insn (return))")) {
-          blocks[b].successors.clear();
-          continue;
-        }
-        size_t search_from = 0;
-        bool matched_branch_target = false;
-        while (search_from < last_pat.size()) {
-          const size_t lref_pos = last_pat.find("(label_ref ", search_from);
-          if (lref_pos == std::string::npos) {
-            break;
-          }
-          const size_t tok_start = lref_pos + std::string_view("(label_ref ").size();
-          const size_t tok_end = last_pat.find(')', tok_start);
-          if (tok_end == std::string::npos) {
-            break;
-          }
-          const std::string lbl_tok(
-              absl::StripAsciiWhitespace(last_pat.substr(tok_start, tok_end - tok_start)));
-          search_from = tok_end + 1;
-          if (absl::StartsWith(lbl_tok, "__blk_")) {
-            continue;
-          }
-          auto it = label_to_block.find(lbl_tok);
-          if (it != label_to_block.end()) {
-            if (absl::StrContains(last_pat, "(if_then_else ")) {
-              if (b + 1 < blocks.size()) {
-                blocks[b].successors = {b + 1, it->second};
-              } else {
-                blocks[b].successors = {it->second};
-              }
-            } else {
-              blocks[b].successors = {it->second};
-            }
-            matched_branch_target = true;
-            break;
-          }
-        }
-        if (matched_branch_target) {
-          continue;
-        }
-        if (b + 1 < blocks.size()) {
-          blocks[b].successors = {b + 1};
-        }
-      }
-      cand_pre.rpo_blocks = std::move(blocks);
 
       const SubfunctionBoundarySnapshot replayed =
           hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);

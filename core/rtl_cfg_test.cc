@@ -206,5 +206,24 @@ TEST(RtlCfgTest, RtlSidebandStateStoresRegisterAndLoopMetadata) {
   EXPECT_NE(copy.sideband, cfg.sideband);
 }
 
+TEST(RtlCfgTest, MipsFirstPseudoRegisterBoundaryAndFcr31HardReg) {
+  RtlControlFlowGraph default_cfg;
+  EXPECT_EQ(default_cfg.sideband.max_regno, kMipsFirstPseudoRegister);
+  EXPECT_EQ(kMipsStatusRegnum, 67);
+  EXPECT_EQ(kMipsFirstPseudoRegister, 68);
+
+  const RtlExpr fcr31 = RtlExpr::MakeReg(RtlMachineMode::kCc, 67);
+  EXPECT_TRUE(fcr31.IsHardReg());
+  EXPECT_FALSE(fcr31.IsPseudoReg());
+  EXPECT_EQ(RtlExpr::HardRegName(67), "$fcr31");
+  EXPECT_EQ(RtlExpr::ParseHardRegName("$fcr31"), 67);
+  EXPECT_EQ(fcr31.ToSexprString(), "(reg:CC 67 $fcr31)");
+
+  const RtlExpr virt_in = RtlExpr::MakeReg(RtlMachineMode::kSi, 68);
+  EXPECT_FALSE(virt_in.IsHardReg());
+  EXPECT_TRUE(virt_in.IsPseudoReg());
+  EXPECT_EQ(virt_in.ToSexprString(), "(reg:SI 68)");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

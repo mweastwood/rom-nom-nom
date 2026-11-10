@@ -35,6 +35,8 @@ class ToySubfunctionInverses : public SubfunctionInverseProvider {
   std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) const override;
   std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) const override;
   std::string InvertFinalScanInsn(std::string_view asm_line_x) const override;
+  RtlControlFlowGraph InvertFinalScanInsnStream(absl::Span<const std::string> asm_lines_x,
+                                                const RtlSidebandState& sideband) const override;
   PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(
       std::string_view asm_text_x) const override;
   RtlControlFlowGraph InvertFinalAndGasFunction(

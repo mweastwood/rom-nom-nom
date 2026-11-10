@@ -16,9 +16,6 @@
 namespace rom_nom_nom::lifter {
 namespace {
 
-constexpr int kStatusRegnum = 67;
-constexpr int kFirstPseudoRegister = 68;
-
 bool ContainsUnknownOp(const RtlExpr& expr) {
   if (expr.op == RtlOp::kUnknown) {
     return true;
@@ -47,11 +44,12 @@ absl::Status ValidateRegNumbers(const RtlExpr& expr) {
 
 absl::Status ValidateSideband(const RtlSidebandState& sideband) {
   for (const auto& [pseudo, hard] : sideband.reg_renumber) {
-    if (pseudo < kStatusRegnum) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "InvertUpdateEquivRegs: invalid reg_renumber key ", pseudo, " (< ", kStatusRegnum, ")"));
+    if (pseudo < kMipsFirstPseudoRegister) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("InvertUpdateEquivRegs: invalid reg_renumber key ", pseudo, " (< ",
+                       kMipsFirstPseudoRegister, ")"));
     }
-    if (hard < -1 || hard >= kFirstPseudoRegister) {
+    if (hard < -1 || hard >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(absl::StrCat(
           "InvertUpdateEquivRegs: invalid reg_renumber target ", hard, " for pseudo ", pseudo));
     }
@@ -104,13 +102,13 @@ absl::Status ValidateSideband(const RtlSidebandState& sideband) {
     }
   }
   for (int regno : sideband.saved_gpr_regnos) {
-    if (regno < 0 || regno >= kFirstPseudoRegister) {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(
           absl::StrCat("InvertUpdateEquivRegs: invalid saved_gpr_regno ", regno));
     }
   }
   for (int regno : sideband.saved_fpr_regnos) {
-    if (regno < 0 || regno >= kFirstPseudoRegister) {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(
           absl::StrCat("InvertUpdateEquivRegs: invalid saved_fpr_regno ", regno));
     }
@@ -478,7 +476,8 @@ absl::StatusOr<RtlControlFlowGraph> InvertUpdateEquivRegs(const RtlControlFlowGr
       }
       const int dregno = dest_reg.RegNo();
       const int sregno = src_reg.RegNo();
-      if (dregno < kFirstPseudoRegister || sregno < kFirstPseudoRegister || dregno == sregno) {
+      if (dregno < kMipsFirstPseudoRegister || sregno < kMipsFirstPseudoRegister ||
+          dregno == sregno) {
         continue;
       }
       const int dead_idx = FindRegDeadNoteIndex(asts[ii].reg_notes, sregno);
@@ -560,7 +559,7 @@ absl::StatusOr<RtlControlFlowGraph> InvertUpdateEquivRegs(const RtlControlFlowGr
         continue;
       }
       const int regno = dest.RegNo();
-      if (regno < kFirstPseudoRegister || get_num_sets(regno) != 1) {
+      if (regno < kMipsFirstPseudoRegister || get_num_sets(regno) != 1) {
         continue;
       }
 

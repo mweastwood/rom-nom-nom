@@ -150,6 +150,15 @@ class SubfunctionInverseProvider {
   // instruction emitted by `final_scan_insn` back into its RTL pattern `y`.
   virtual std::string InvertFinalScanInsn(std::string_view /*asm_line_x*/) const { return {}; }
 
+  // 4b. Stream-to-CFG inverse of `final.c:final_scan_insn`: lifts the sequence
+  // of emitted assembly lines `asm_lines_x` (plus `sideband`) back into a
+  // `.12.dbr` `RtlControlFlowGraph` `y` such that replaying `final_scan_insn`
+  // reproduces `asm_lines_x`.
+  virtual RtlControlFlowGraph InvertFinalScanInsnStream(
+      absl::Span<const std::string> /*asm_lines_x*/, const RtlSidebandState& /*sideband*/) const {
+    return {};
+  }
+
   // 5. Inverse of `mips.c:function_prologue` + `mips.c:function_epilogue`:
   // recovers `(var_size, saved_gpr_mask)` from emitted prologue/epilogue
   // assembly text `asm_text_x`.

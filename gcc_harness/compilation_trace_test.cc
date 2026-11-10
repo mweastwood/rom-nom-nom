@@ -53,7 +53,7 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
   }
 
   // Post-reload `.09.greg` through `.12.dbr` must have no remaining pseudo
-  // registers (`>= 67`) in executable instructions.
+  // registers (`>= 68`) in executable instructions.
   const RtlControlFlowGraph& dbr_cfg = trace.pass_snapshots.at(RtlPassKind::kDbr);
   for (const auto& blk : dbr_cfg.rpo_blocks) {
     for (const std::string& pat : blk.instructions) {
@@ -99,8 +99,8 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
         << " in " << trace.function_name;
 
     if (snap.subfunction_id == SubfunctionId::kGlobalAlloc &&
-        MaxPseudoRegInCfg(snap.pre_state) >= 67) {
-      EXPECT_GE(MaxPseudoRegInCfg(snap.post_state), 67)
+        MaxPseudoRegInCfg(snap.pre_state) >= 68) {
+      EXPECT_GE(MaxPseudoRegInCfg(snap.post_state), 68)
           << "Expected pseudo-registers to remain in kGlobalAlloc post_state for kReload/kAlterReg "
              "in "
           << trace.function_name;
@@ -111,10 +111,10 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
       }
     }
     if (snap.subfunction_id == SubfunctionId::kAlterReg &&
-        MaxPseudoRegInCfg(snap.pre_state) >= 67) {
-      EXPECT_LT(MaxPseudoRegInCfg(snap.post_state), 67)
-          << "Expected kAlterReg to rewrite all pseudo-registers (>= 67) into hard registers (< "
-             "67) in "
+        MaxPseudoRegInCfg(snap.pre_state) >= 68) {
+      EXPECT_LT(MaxPseudoRegInCfg(snap.post_state), 68)
+          << "Expected kAlterReg to rewrite all pseudo-registers (>= 68) into hard registers (< "
+             "68) in "
           << trace.function_name;
     }
     if (snap.subfunction_id == SubfunctionId::kFinalScanInsn) {
@@ -263,8 +263,8 @@ TEST(CompilationTraceTest, SubfunctionBoundariesExerciseFoldSimplifySubstReloadA
             "(set (reg:SI 72) (gt:SI (reg:SI 4 a0) (const_int 0))) "
             "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
 
-  // 4. `kGlobalAlloc` -> `kReload` -> `kAlterReg` rewrites pseudo-registers (`>= 67`)
-  // into hard registers (`< 67`).
+  // 4. `kGlobalAlloc` -> `kReload` -> `kAlterReg` rewrites pseudo-registers (`>= 68`)
+  // into hard registers (`< 68`).
   ctx.BeginFunction("alloc_reload_alter_boundary_fn");
   RtlControlFlowGraph alloc_pre;
   alloc_pre.pass = RtlPassKind::kLreg;
@@ -281,7 +281,7 @@ TEST(CompilationTraceTest, SubfunctionBoundariesExerciseFoldSimplifySubstReloadA
   EXPECT_GE(MaxPseudoRegInCfg(global_snap.post_state), 72);
   ASSERT_TRUE(global_snap.post_state.sideband.reg_renumber.contains(72));
   EXPECT_GE(global_snap.post_state.sideband.reg_renumber.at(72), 0);
-  EXPECT_LT(global_snap.post_state.sideband.reg_renumber.at(72), 67);
+  EXPECT_LT(global_snap.post_state.sideband.reg_renumber.at(72), 68);
 
   const SubfunctionBoundarySnapshot reload_snap = hooks.ExecuteSubfunctionBoundary(
       SubfunctionId::kReload, global_snap.post_state, {}, /*optimize_level=*/2);
@@ -290,7 +290,7 @@ TEST(CompilationTraceTest, SubfunctionBoundariesExerciseFoldSimplifySubstReloadA
   const SubfunctionBoundarySnapshot alter_snap = hooks.ExecuteSubfunctionBoundary(
       SubfunctionId::kAlterReg, reload_snap.post_state, {}, /*optimize_level=*/2);
   EXPECT_GE(MaxPseudoRegInCfg(alter_snap.pre_state), 72);
-  EXPECT_LT(MaxPseudoRegInCfg(alter_snap.post_state), 67);
+  EXPECT_LT(MaxPseudoRegInCfg(alter_snap.post_state), 68);
 
   // 5. `kUpdateEquivRegs` -> `kBlockAlloc` -> `kGlobalAlloc` preserves `reg_live_length`
   // without redundant `update_equiv_regs()` doubling and preserves `kBlockAlloc` `reg_renumber`.

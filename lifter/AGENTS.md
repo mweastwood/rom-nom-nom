@@ -99,12 +99,18 @@ reverse chronological order:
      be a thin composition (~30–50 lines) that simply chains its constituent
      `invert_<func>` functions in reverse compilation order with zero
      pass-internal lifting logic or duplicated helpers.
-10. **Functions-Before-Passes Ordering & Strict Module Isolation**:
-   - Implement and verify all individual 1-to-1 subfunction inverse modules
-     (`lifter/invert_<func>.{h,cc}`) across Stages 0–13 against their exact
-     subfunction boundary snapshots (`VerifySubfunctionBoundaryRightInverse`)
-     before implementing the remaining pass stitchers (`lifter/pass03_...`
-     through `lifter/pass13_...`).
-   - When implementing a step for `invert_<func>`, never modify existing
-     `invert_*.cc` modules belonging to other subfunctions or stages to paper
-     over a failure or inject cross-stage workarounds.
+10. **Strict Module Isolation & Cumulative Stage Suffix Verification**:
+   - Within each compilation stage $s$, implement and verify each constituent
+     1-to-1 subfunction inverse (`lifter/invert_<func>.{h,cc}`) against its
+     exact subfunction boundary snapshot (`VerifySubfunctionBoundaryRightInverse`),
+     and then immediately verify the stage stitcher (`lifter/pass<ss>_...`)
+     both at the stage boundary ($F_s(G_s(x_s)) = x_s$) and in **cumulative
+     end-to-end suffix composition from Stage 0** ($F_{0..s}(G_{s..0}(x_0)) = x_0$,
+     including `-O0`, `-O1`, `-O2`, `-O3`, `-Wa,-g`, and `-Wa,-O2` profiles) so
+     oracle forward-trace sidebands can never mask cross-stage composition gaps.
+   - Standardize MIPS register numbering everywhere (`kStatusRegnum = 67` for
+     `$fcr31`, `kFirstPseudoRegister = 68`, virtual registers `68..71`, and
+     first user pseudo-register `72`).
+   - When implementing a step for `invert_<func>`, never modify unrelated
+     `invert_*.cc` modules from other stages to paper over a failure or inject
+     cross-stage workarounds.

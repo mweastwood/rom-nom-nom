@@ -17,8 +17,6 @@ namespace rom_nom_nom::lifter {
 namespace {
 
 constexpr int kMipsZeroRegnum = 0;
-constexpr int kStatusRegnum = 67;
-constexpr int kFirstPseudoRegister = 68;
 
 bool IsIntegralMode(RtlMachineMode mode) {
   switch (mode) {
@@ -296,11 +294,12 @@ absl::Status ValidateExprNodeRecursively(const RtlExpr& expr) {
 
 absl::Status ValidateSideband(const RtlSidebandState& sideband) {
   for (const auto& [pseudo, hard] : sideband.reg_renumber) {
-    if (pseudo < kStatusRegnum) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "InvertSimplifyRtxCfg: invalid reg_renumber key ", pseudo, " (< ", kStatusRegnum, ")"));
+    if (pseudo < kMipsFirstPseudoRegister) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("InvertSimplifyRtxCfg: invalid reg_renumber key ", pseudo, " (< ",
+                       kMipsFirstPseudoRegister, ")"));
     }
-    if (hard < -1 || hard >= kFirstPseudoRegister) {
+    if (hard < -1 || hard >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(absl::StrCat(
           "InvertSimplifyRtxCfg: invalid reg_renumber target ", hard, " for pseudo ", pseudo));
     }
@@ -353,13 +352,13 @@ absl::Status ValidateSideband(const RtlSidebandState& sideband) {
     }
   }
   for (int regno : sideband.saved_gpr_regnos) {
-    if (regno < 0 || regno >= kFirstPseudoRegister) {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(
           absl::StrCat("InvertSimplifyRtxCfg: invalid saved_gpr_regno ", regno));
     }
   }
   for (int regno : sideband.saved_fpr_regnos) {
-    if (regno < 0 || regno >= kFirstPseudoRegister) {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
       return absl::InvalidArgumentError(
           absl::StrCat("InvertSimplifyRtxCfg: invalid saved_fpr_regno ", regno));
     }

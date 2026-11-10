@@ -21,7 +21,7 @@ namespace {
 
 constexpr int kStackPointerRegnum = 29;
 constexpr int kFramePointerRegnum = 30;
-constexpr int kFirstPseudoRegister = 67;
+constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
 
 // Recursively validates all `(reg ...)` nodes in `expr`.
 absl::Status ValidateRtlExprRegisters(const RtlExpr& expr) {

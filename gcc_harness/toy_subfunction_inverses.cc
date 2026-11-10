@@ -612,6 +612,120 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFinalAndGasFunction(
   return cfg;
 }
 
+RtlControlFlowGraph ToySubfunctionInverses::InvertFinalScanInsnStream(
+    absl::Span<const std::string> asm_lines_x, const RtlSidebandState& sideband) const {
+  if (asm_lines_x.empty()) {
+    return {};
+  }
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband = sideband;
+
+  std::vector<RtlBasicBlock> blocks;
+  absl::flat_hash_map<std::string, size_t> label_to_block;
+  RtlBasicBlock cur_blk;
+  cur_blk.id = 0;
+
+  for (size_t i = 0; i < asm_lines_x.size(); ++i) {
+    const std::string& line = asm_lines_x[i];
+    if (line == ".set reorder" || line == ".set\treorder") {
+      continue;
+    }
+    if (line == ".set noreorder" || line == ".set\tnoreorder") {
+      if (i + 2 < asm_lines_x.size() && asm_lines_x[i + 1] == "nop" &&
+          (asm_lines_x[i + 2] == ".set reorder" || asm_lines_x[i + 2] == ".set\treorder")) {
+        const std::string pat = InvertFinalScanInsn(asm_lines_x[i + 1]);
+        if (pat.empty()) {
+          return {};
+        }
+        cur_blk.AddPatternOnly(pat);
+        i += 2;
+        continue;
+      }
+      if (i + 3 >= asm_lines_x.size() ||
+          (asm_lines_x[i + 3] != ".set reorder" && asm_lines_x[i + 3] != ".set\treorder")) {
+        return {};
+      }
+      const std::string pat0 = InvertFinalScanInsn(asm_lines_x[i + 1]);
+      const std::string pat1 = InvertFinalScanInsn(asm_lines_x[i + 2]);
+      if (pat0.empty() || pat1.empty()) {
+        return {};
+      }
+      cur_blk.AddPatternOnly(absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
+      i += 3;
+      if (i + 1 < asm_lines_x.size() && !absl::EndsWith(asm_lines_x[i + 1], ":")) {
+        blocks.push_back(std::move(cur_blk));
+        cur_blk = RtlBasicBlock{};
+        cur_blk.id = blocks.size();
+      }
+      continue;
+    }
+    if (absl::EndsWith(line, ":")) {
+      std::string_view lbl(line.data(), line.size() - 1);
+      if (absl::StartsWith(lbl, "$L")) {
+        lbl.remove_prefix(1);
+      }
+      if (!cur_blk.instructions.empty() || cur_blk.has_label) {
+        blocks.push_back(std::move(cur_blk));
+        cur_blk = RtlBasicBlock{};
+        cur_blk.id = blocks.size();
+      }
+      cur_blk.has_label = true;
+      label_to_block[std::string(lbl)] = cur_blk.id;
+      continue;
+    }
+    const std::string pat = InvertFinalScanInsn(line);
+    if (pat.empty()) {
+      return {};
+    }
+    cur_blk.AddPatternOnly(pat);
+    if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ")) && i + 1 < asm_lines_x.size() &&
+        !absl::EndsWith(asm_lines_x[i + 1], ":")) {
+      blocks.push_back(std::move(cur_blk));
+      cur_blk = RtlBasicBlock{};
+      cur_blk.id = blocks.size();
+    }
+  }
+  if (!cur_blk.instructions.empty() || cur_blk.has_label || blocks.empty()) {
+    blocks.push_back(std::move(cur_blk));
+  }
+
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    if (blocks[b].instructions.empty()) {
+      if (b + 1 < blocks.size()) {
+        blocks[b].successors.push_back(b + 1);
+      }
+      continue;
+    }
+    const std::string& last = blocks[b].instructions.back();
+    const bool is_ret = (last == "(return)" || absl::StrContains(last, "(jump_insn (return))"));
+    const bool is_uncond = absl::StartsWith(last, "(set (pc) (label_ref ") ||
+                           absl::StartsWith(last, "(sequence [(jump_insn (set (pc) (label_ref ");
+    const bool is_cond = absl::StrContains(last, "(if_then_else ");
+    if (!is_ret && !is_uncond && b + 1 < blocks.size()) {
+      blocks[b].successors.push_back(b + 1);
+    }
+    if (is_uncond || is_cond) {
+      const size_t pos = last.find("(label_ref ");
+      if (pos != std::string::npos) {
+        const size_t start = pos + std::string_view("(label_ref ").size();
+        const size_t end = last.find(')', start);
+        if (end != std::string::npos) {
+          const std::string tok(absl::StripAsciiWhitespace(last.substr(start, end - start)));
+          auto it = label_to_block.find(tok);
+          if (it != label_to_block.end() &&
+              (blocks[b].successors.empty() || blocks[b].successors.back() != it->second)) {
+            blocks[b].successors.push_back(it->second);
+          }
+        }
+      }
+    }
+  }
+
+  cfg.rpo_blocks = std::move(blocks);
+  return cfg;
+}
+
 // -----------------------------------------------------------------------------
 // Stage 1: Delayed-Branch Scheduling (`reorg.c`)
 // -----------------------------------------------------------------------------
@@ -913,7 +1027,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertAlterReg(const RtlControlFlowG
   }
 
   for (const auto& [cand_pseudo, target_hard] : out.sideband.reg_renumber) {
-    if (cand_pseudo < 67 || target_hard < 0) {
+    if (cand_pseudo < 68 || target_hard < 0) {
       continue;
     }
     const int p_reg = cand_pseudo;
@@ -1001,7 +1115,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertGlobalAlloc(const RtlControlFl
         continue;
       }
       parsed->RewriteRegs([&pseudo_blocks, b](RtlExpr& reg) {
-        if (reg.RegNo() >= 67) {
+        if (reg.RegNo() >= 68) {
           pseudo_blocks[reg.RegNo()].insert(b);
         }
       });
@@ -1049,7 +1163,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertBlockAlloc(const RtlControlFlo
         pos += kClobberScratch.size();
         replaced_clobber = true;
       }
-      if (replaced_clobber || out.sideband.reg_n_deaths.empty()) {
+      if (replaced_clobber) {
         pat = StripTrailingRegNotesFromPattern(pat);
       }
     }

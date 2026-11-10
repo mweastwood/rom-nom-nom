@@ -21,8 +21,7 @@ constexpr int kFramePointerRegnum = 30;
 constexpr int kFirstFprRegnum = 32;
 constexpr int kLastFprRegnum = 63;
 constexpr int kHiRegnum = 64;
-constexpr int kStatusRegnum = 67;
-constexpr int kFirstPseudoRegister = 68;
+constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
 
 // Recursively validates all `(reg ...)` nodes in `expr` and updates `max_regno`.
 absl::Status ValidateRtlExprRegisters(const RtlExpr& expr, int* max_regno) {
@@ -148,7 +147,7 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
   int max_seen_regno = std::max(greg_cfg.sideband.max_regno, kFirstPseudoRegister);
 
   for (const auto& [regno, hard_reg] : greg_cfg.sideband.reg_renumber) {
-    if (regno < kStatusRegnum || hard_reg < -1 || hard_reg >= kFirstPseudoRegister) {
+    if (regno < kFirstPseudoRegister || hard_reg < -1 || hard_reg >= kFirstPseudoRegister) {
       return absl::InvalidArgumentError(absl::StrFormat(
           "InvertGlobalAlloc: invalid sideband reg_renumber entry (%d -> %d)", regno, hard_reg));
     }
@@ -297,13 +296,14 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
     return out;
   }
 
-  // In `-O0` (`stupid.c:stupid_life_analysis`), `local_alloc` does not run and
-  // `stupid_life_analysis` initializes `reg_renumber[i] = i` for all hard
-  // registers `0..67` (`FIRST_PSEUDO_REGISTER == 68` in `mips.h`), leaving the
-  // sentinel `(67 -> 67)` in `sideband.reg_renumber`. Every entry in
+  // In `-O0` (`stupid.c:stupid_life_analysis`), `flow_analysis` and
+  // `local_alloc` do not run; `stupid_life_analysis` (`stupid.c:186-187`)
+  // leaves `basic_block_live_at_start` empty and initializes
+  // `reg_n_deaths[i] = 1` for every register `0..max_regno - 1` (including
+  // fixed `$zero` register `0`, which `flow.c` never kills). Every entry in
   // `reg_renumber` at `-O0` was produced by `kGlobalAlloc`.
-  const bool is_stupid_alloc = out.sideband.reg_renumber.contains(kStatusRegnum) &&
-                               out.sideband.reg_renumber.at(kStatusRegnum) == kStatusRegnum;
+  const bool is_stupid_alloc =
+      out.sideband.reg_n_deaths.contains(0) && out.sideband.basic_block_live_at_start.empty();
 
   // Determine which pseudos in `sideband.reg_renumber` were allocated by
   // `global.c:global_alloc` rather than `local-alloc.c:block_alloc`.

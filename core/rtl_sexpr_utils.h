@@ -233,7 +233,7 @@ inline std::string FormatHardRegRtl(uint32_t regno, bool integrated) {
 // etc.) into its hardware register number `0..31`, or `-1` if invalid.
 int ParseMipsAsmRegNumber(std::string_view tok);
 
-// Scans all instruction patterns in `cfg` and returns the highest pseudo-register number (`>= 67`)
+// Scans all instruction patterns in `cfg` and returns the highest pseudo-register number (`>= 68`)
 // referenced in `(reg...:M <regno>)`, or `-1` if no pseudo-registers are present.
 int MaxPseudoRegInCfg(const RtlControlFlowGraph& cfg);
 

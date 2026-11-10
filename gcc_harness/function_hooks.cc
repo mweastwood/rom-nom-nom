@@ -269,10 +269,41 @@ void local_alloc();
 void block_alloc(int b);
 void update_equiv_regs();
 int global_alloc(FILE* file);
+void global_conflicts();
+void expand_preferences();
+void prune_preferences();
+int allocno_compare(const void* v1, const void* v2);
 int reload(rtx_def* first, int global, FILE* dumpfile);
 void alter_reg(int i, int from_reg);
 rtx_def* assign_stack_local(int mode, int size, int align);
 extern int mode_size[];
+extern int current_function_calls_alloca;
+extern int current_function_has_nonlocal_label;
+extern int max_parallel;
+
+using GccHardRegSet = uint32_t[3];
+extern int max_allocno;
+extern int* reg_allocno;
+extern int* allocno_reg;
+extern int* allocno_order;
+extern int* allocno_size;
+extern int* reg_may_share;
+extern int* conflicts;
+extern int allocno_row_words;
+extern GccHardRegSet* hard_reg_conflicts;
+extern GccHardRegSet* hard_reg_preferences;
+extern GccHardRegSet* hard_reg_copy_preferences;
+extern GccHardRegSet* hard_reg_full_preferences;
+extern GccHardRegSet* regs_someone_prefers;
+extern GccHardRegSet no_global_alloc_regs;
+extern GccHardRegSet regs_used_so_far;
+extern GccHardRegSet eliminable_regset;
+extern int* allocno_calls_crossed;
+extern int* allocno_n_refs;
+extern int* allocno_live_length;
+extern int local_reg_n_refs[68];
+extern int local_reg_live_length[68];
+extern int* allocnos_live;
 
 extern int max_scratch;
 extern int scratch_list_length;
@@ -497,7 +528,7 @@ void init_all_optabs();
 namespace rom_nom_nom::gcc_harness {
 namespace {
 
-constexpr int kFirstPseudoRegister = 67;
+constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
 constexpr int kBfdRelocUnused = 65;
 
 template <typename T>
@@ -2095,6 +2126,288 @@ void FunctionHooks::RunUpdateEquivRegs(Rtx first) {
   DeduplicateRegEquivNotes(head);
 }
 
+namespace {
+
+int MipsHardRegnoNregs(int regno, int mode) {
+  const int msize =
+      (mode >= 0 && mode < kNumMachineModes && mode_size[mode] > 0) ? mode_size[mode] : 4;
+  const bool is_fp_reg = (regno >= 32 && regno < 64);
+  const int unit_bytes = is_fp_reg ? ((target_flags & 0x00000200) != 0 ? 8 : 4)
+                                   : ((target_flags & 0x00002000) != 0 ? 8 : 4);
+  return std::max(1, (msize + unit_bytes - 1) / unit_bytes);
+}
+
+int MipsPseudoRegnoSize(int regno) {
+  const int mode = (regno_reg_rtx != nullptr && regno >= 0 && regno < max_regno &&
+                    regno_reg_rtx[regno] != nullptr)
+                       ? static_cast<int>(regno_reg_rtx[regno]->mode)
+                       : static_cast<int>(kSiMode);
+  const int msize =
+      (mode >= 0 && mode < kNumMachineModes && mode_size[mode] > 0) ? mode_size[mode] : 4;
+  const int word_bytes = (target_flags & 0x00002000) != 0 ? 8 : 4;
+  return std::max(1, (msize + word_bytes - 1) / word_bytes);
+}
+
+void SetHardRegBit(GccHardRegSet set, int regno) {
+  if (regno >= 0 && regno < kFirstPseudoRegister) {
+    set[regno / 32] |= (uint32_t{1} << (regno % 32));
+  }
+}
+
+// Initializes all `global.c` static tables read by `reload(..., /*global=*/1, ...)`
+// (`retry_global_alloc`, `find_reg`, `mark_elimination`) using heap-allocated
+// buffers so `RunReload(first, 1)` never dereferences dangling `alloca` frames
+// or uninitialized pointers.
+void PrepareGlobalReloadState() {
+  const int nregs = std::max({max_regno, max_reg_num(), kFirstPseudoRegister}) + 16;
+  if (reg_changes_size == nullptr) {
+    reg_changes_size = AllocZeroed<char>(nregs);
+  }
+  if (regno_reg_rtx != nullptr && reg_renumber != nullptr) {
+    for (int i = kFirstPseudoRegister; i < max_regno; ++i) {
+      if (reg_renumber[i] >= 0 && regno_reg_rtx[i] == nullptr) {
+        regno_reg_rtx[i] = gen_rtx(kReg, kSiMode, i);
+      }
+    }
+  }
+  max_allocno = 0;
+  std::memset(no_global_alloc_regs, 0, sizeof(GccHardRegSet));
+  std::memset(eliminable_regset, 0, sizeof(GccHardRegSet));
+  // `mips.h:1296-1305, 1734-1749`: `ELIMINABLE_REGS` pairs `ARG_POINTER_REGNUM`
+  // (`0`) and `FRAME_POINTER_REGNUM` (`30`) with `STACK_POINTER_REGNUM` (`29`),
+  // so `global.c:308-315` sets both `0` and `30` in `eliminable_regset` (and in
+  // `no_global_alloc_regs` whenever `need_fp` is true).
+  constexpr int kMipsArgPointerRegnum = 0;
+  constexpr int kMipsFramePointerRegnum = 30;
+  SetHardRegBit(eliminable_regset, kMipsArgPointerRegnum);
+  SetHardRegBit(eliminable_regset, kMipsFramePointerRegnum);
+  const bool need_fp = (flag_omit_frame_pointer == 0 || current_function_calls_alloca != 0 ||
+                        frame_pointer_needed != 0);
+  if (need_fp) {
+    SetHardRegBit(no_global_alloc_regs, kMipsArgPointerRegnum);
+    SetHardRegBit(no_global_alloc_regs, kMipsFramePointerRegnum);
+  }
+
+  std::memset(regs_used_so_far, 0, sizeof(GccHardRegSet));
+  for (int i = 0; i < kFirstPseudoRegister; ++i) {
+    if (regs_ever_live[i] != 0 || call_used_regs[i] != 0) {
+      SetHardRegBit(regs_used_so_far, i);
+    }
+  }
+  for (int i = kFirstPseudoRegister; i < max_regno; ++i) {
+    if (reg_renumber != nullptr && reg_renumber[i] >= 0) {
+      const int mode = (regno_reg_rtx != nullptr && regno_reg_rtx[i] != nullptr)
+                           ? static_cast<int>(regno_reg_rtx[i]->mode)
+                           : static_cast<int>(kSiMode);
+      const int lim = reg_renumber[i] + MipsHardRegnoNregs(reg_renumber[i], mode);
+      for (int r = reg_renumber[i]; r < lim; ++r) {
+        SetHardRegBit(regs_used_so_far, r);
+      }
+    }
+  }
+
+  reg_allocno = AllocZeroed<int>(nregs);
+  for (int i = 0; i < nregs; ++i) {
+    reg_allocno[i] = -1;
+  }
+  reg_may_share = AllocZeroed<int>(nregs);
+  for (Rtx x = regs_may_share; x != nullptr && x->fld[0].rtx != nullptr && x->fld[1].rtx != nullptr;
+       x = x->fld[1].rtx->fld[1].rtx) {
+    const int r1 = x->fld[0].rtx->fld[0].rtint;
+    const int r2 =
+        x->fld[1].rtx->fld[0].rtx != nullptr ? x->fld[1].rtx->fld[0].rtx->fld[0].rtint : -1;
+    if (r1 >= 0 && r2 >= 0 && r1 < nregs && r2 < nregs) {
+      if (r1 > r2) {
+        reg_may_share[r1] = r2;
+      } else {
+        reg_may_share[r2] = r1;
+      }
+    }
+  }
+
+  for (int i = kFirstPseudoRegister; i < max_regno; ++i) {
+    const bool is_global_candidate =
+        regno_reg_rtx != nullptr && regno_reg_rtx[i] != nullptr && regno_reg_rtx[i]->code == kReg &&
+        reg_n_refs != nullptr && reg_live_length != nullptr && reg_n_calls_crossed != nullptr &&
+        reg_n_refs[i] != 0 && reg_live_length[i] != -1 && reg_live_length[i] != 0 &&
+        (current_function_has_nonlocal_label == 0 || reg_n_calls_crossed[i] == 0) &&
+        (reg_renumber == nullptr || reg_renumber[i] < 0 || reg_basic_block == nullptr ||
+         reg_basic_block[i] < 0 || (lra_reg_qty != nullptr && lra_reg_qty[i] == -1) ||
+         reg_renumber[i] == kMipsArgPointerRegnum || reg_renumber[i] == kMipsFramePointerRegnum ||
+         reg_renumber[i] >= 64);
+    if (is_global_candidate) {
+      if (reg_may_share[i] != 0 && reg_allocno[reg_may_share[i]] >= 0) {
+        reg_allocno[i] = reg_allocno[reg_may_share[i]];
+      } else {
+        reg_allocno[i] = max_allocno++;
+      }
+    }
+  }
+
+  const int alloc_cap = std::max(1, max_allocno);
+  allocno_reg = AllocZeroed<int>(alloc_cap);
+  allocno_size = AllocZeroed<int>(alloc_cap);
+  allocno_calls_crossed = AllocZeroed<int>(alloc_cap);
+  allocno_n_refs = AllocZeroed<int>(alloc_cap);
+  allocno_live_length = AllocZeroed<int>(alloc_cap);
+  allocno_order = AllocZeroed<int>(alloc_cap);
+
+  for (int i = kFirstPseudoRegister; i < max_regno; ++i) {
+    if (reg_allocno[i] >= 0) {
+      const int a = reg_allocno[i];
+      allocno_reg[a] = i;
+      allocno_size[a] = MipsPseudoRegnoSize(i);
+      allocno_calls_crossed[a] += reg_n_calls_crossed[i];
+      allocno_n_refs[a] += reg_n_refs[i];
+      if (allocno_live_length[a] < reg_live_length[i]) {
+        allocno_live_length[a] = reg_live_length[i];
+      }
+    }
+  }
+
+  std::memset(local_reg_live_length, 0, sizeof(local_reg_live_length));
+  std::memset(local_reg_n_refs, 0, sizeof(local_reg_n_refs));
+  for (int i = kFirstPseudoRegister; i < max_regno; ++i) {
+    if (reg_allocno[i] < 0 && reg_renumber != nullptr && reg_renumber[i] >= 0) {
+      const int regno = reg_renumber[i];
+      const int mode = (regno_reg_rtx != nullptr && regno_reg_rtx[i] != nullptr)
+                           ? static_cast<int>(regno_reg_rtx[i]->mode)
+                           : static_cast<int>(kSiMode);
+      const int endregno = regno + MipsHardRegnoNregs(regno, mode);
+      for (int j = regno; j < endregno && j < kFirstPseudoRegister; ++j) {
+        local_reg_n_refs[j] += reg_n_refs[i];
+        local_reg_live_length[j] += reg_live_length[i];
+      }
+    }
+  }
+  for (int i = 0; i < kFirstPseudoRegister; ++i) {
+    if (regs_ever_live[i] != 0) {
+      local_reg_n_refs[i] = 0;
+    }
+  }
+  for (int i = 0; i < scratch_list_length; ++i) {
+    if (scratch_list != nullptr && scratch_list[i] != nullptr && scratch_list[i]->code == kReg) {
+      const int regno = scratch_list[i]->fld[0].rtint;
+      const int lim = regno + MipsHardRegnoNregs(regno, scratch_list[i]->mode);
+      for (int j = regno; j < lim && j < kFirstPseudoRegister; ++j) {
+        local_reg_n_refs[j] = 0;
+      }
+    }
+  }
+
+  hard_reg_conflicts = AllocZeroed<GccHardRegSet>(alloc_cap);
+  hard_reg_preferences = AllocZeroed<GccHardRegSet>(alloc_cap);
+  hard_reg_copy_preferences = AllocZeroed<GccHardRegSet>(alloc_cap);
+  hard_reg_full_preferences = AllocZeroed<GccHardRegSet>(alloc_cap);
+  regs_someone_prefers = AllocZeroed<GccHardRegSet>(alloc_cap);
+
+  allocno_row_words = std::max(1, (max_allocno + 31) / 32);
+  conflicts = AllocZeroed<int>(alloc_cap * allocno_row_words);
+  allocnos_live = AllocZeroed<int>(allocno_row_words);
+  if (max_parallel < 1) {
+    max_parallel = 16;
+  }
+
+  if (max_allocno > 0) {
+    // On MIPS (`PRESERVE_DEATH_INFO_REGNO_P` undefined), `reload` mutates
+    // spilled pseudo `REG` nodes in-place into `(mem ...)`, which can leave
+    // `(expr_list:REG_DEAD (mem ...) ...)` in `REG_NOTES` on partially-lifted
+    // CFGs; `global_conflicts()` assumes every `REG_DEAD`/`REG_INC` datum is a
+    // `REG` (`global.c:722, 734`). Temporarily filter out non-`REG` or
+    // out-of-range death/inc notes while computing conflicts and preferences.
+    std::vector<std::pair<Rtx, Rtx>> saved_insn_notes;
+    for (Rtx insn = get_insns(); insn != nullptr; insn = insn->fld[2].rtx) {
+      if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+          insn->fld[6].rtx != nullptr) {
+        bool has_non_reg_note = false;
+        for (Rtx link = insn->fld[6].rtx; link != nullptr; link = link->fld[1].rtx) {
+          const int kind = static_cast<int>(link->mode);
+          if (kind == kRegDead || kind == kRegInc) {
+            Rtx datum = link->fld[0].rtx;
+            if (datum == nullptr || datum->code != kReg || datum->fld[0].rtint < 0 ||
+                datum->fld[0].rtint >= nregs) {
+              has_non_reg_note = true;
+              break;
+            }
+          }
+        }
+        if (has_non_reg_note) {
+          saved_insn_notes.emplace_back(insn, insn->fld[6].rtx);
+          Rtx filtered = nullptr;
+          for (Rtx link = insn->fld[6].rtx; link != nullptr; link = link->fld[1].rtx) {
+            const int kind = static_cast<int>(link->mode);
+            Rtx datum = link->fld[0].rtx;
+            if ((kind == kRegDead || kind == kRegInc) &&
+                (datum == nullptr || datum->code != kReg || datum->fld[0].rtint < 0 ||
+                 datum->fld[0].rtint >= nregs)) {
+              continue;
+            }
+            filtered = gen_rtx(link->code, link->mode, datum, filtered);
+          }
+          insn->fld[6].rtx = filtered;
+        }
+      }
+    }
+
+    global_conflicts();
+    for (int a = 0; a < max_allocno; ++a) {
+      for (int w = 0; w < 3; ++w) {
+        hard_reg_conflicts[a][w] &= ~eliminable_regset[w];
+        hard_reg_copy_preferences[a][w] &= ~eliminable_regset[w];
+        hard_reg_preferences[a][w] &= ~eliminable_regset[w];
+      }
+    }
+    expand_preferences();
+
+    for (const auto& [insn, orig_notes] : saved_insn_notes) {
+      insn->fld[6].rtx = orig_notes;
+    }
+    for (int a = 0; a < max_allocno; ++a) {
+      allocno_order[a] = a;
+      if (allocno_size[a] == 0) {
+        allocno_size[a] = 1;
+      }
+      if (allocno_live_length[a] == 0) {
+        allocno_live_length[a] = -1;
+      }
+    }
+    std::qsort(allocno_order, max_allocno, sizeof(int), allocno_compare);
+    prune_preferences();
+
+    // Propagate already-allocated global hard registers into conflicting
+    // allocnos' `hard_reg_conflicts` sets (`global.c:find_reg` lines 1175-1191).
+    for (int a = 0; a < max_allocno; ++a) {
+      const int p_reg = allocno_reg[a];
+      if (reg_renumber != nullptr && p_reg >= kFirstPseudoRegister && p_reg < max_regno &&
+          reg_renumber[p_reg] >= 0) {
+        const int best_reg = reg_renumber[p_reg];
+        const int mode = (regno_reg_rtx != nullptr && regno_reg_rtx[p_reg] != nullptr)
+                             ? static_cast<int>(regno_reg_rtx[p_reg]->mode)
+                             : static_cast<int>(kSiMode);
+        const int lim = best_reg + MipsHardRegnoNregs(best_reg, mode);
+        GccHardRegSet this_reg = {0, 0, 0};
+        for (int r = best_reg; r < lim && r < kFirstPseudoRegister; ++r) {
+          SetHardRegBit(this_reg, r);
+          local_reg_n_refs[r] = 0;
+        }
+        for (int j = 0; j < max_allocno; ++j) {
+          const bool conflict_aj =
+              (conflicts[a * allocno_row_words + (j / 32)] & (1 << (j % 32))) != 0;
+          const bool conflict_ja =
+              (conflicts[j * allocno_row_words + (a / 32)] & (1 << (a % 32))) != 0;
+          if (conflict_aj || conflict_ja) {
+            for (int w = 0; w < 3; ++w) {
+              hard_reg_conflicts[j][w] |= this_reg[w];
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
+
 int FunctionHooks::RunGlobalAlloc(Rtx first) {
   Rtx head = first != nullptr ? first : ctx_->GetInsns();
   if (head == nullptr) {
@@ -2112,15 +2425,20 @@ int FunctionHooks::RunGlobalAlloc(Rtx first) {
       reg_renumber[i] = saved_renumber[i];
     }
   }
-  return global_alloc(nullptr);
+  const int res = global_alloc(nullptr);
+  // Clear `global_alloc`'s stack-allocated `alloca` pointers immediately on
+  // return so they never dangle across calls.
+  max_allocno = 0;
+  reg_allocno = nullptr;
+  return res;
 }
 
 int FunctionHooks::RunReload(Rtx first, int global) {
-  (void)global;
   Rtx head = first != nullptr ? first : ctx_->GetInsns();
   if (head == nullptr) {
     return 0;
   }
+  const int global_flag = (global != 0) ? 1 : 0;
   const int saved_max_regno = std::max(max_regno, max_reg_num());
   std::vector<short> saved_renumber;
   if (reg_renumber != nullptr && saved_max_regno > 0) {
@@ -2131,7 +2449,7 @@ int FunctionHooks::RunReload(Rtx first, int global) {
   std::memcpy(saved_regs_ever_live, regs_ever_live, sizeof(saved_regs_ever_live));
 
   reload_completed = 0;
-  if (obey_regdecls != 0) {
+  if ((obey_regdecls != 0 || optimize == 0) && global_flag == 0) {
     StripFlowGeneratedNotes(head);
     restore_reg_data(head);
     max_regno = max_reg_num();
@@ -2158,7 +2476,13 @@ int FunctionHooks::RunReload(Rtx first, int global) {
     }
   }
 
-  const int res = reload(head, /*global=*/0, nullptr);
+  if (global_flag != 0) {
+    PrepareGlobalReloadState();
+  }
+
+  const int res = reload(head, global_flag, nullptr);
+  max_allocno = 0;
+  reg_allocno = nullptr;
   reload_completed = 1;
   return res;
 }
@@ -2557,7 +2881,7 @@ void FunctionHooks::RunFindBasicBlocks(Rtx first, Rtx nonlocal_label_list) {
   basic_block_loop_depth = AllocZeroed<short>(alloc_blocks);
   uid_block_number = AllocZeroed<int>(max_uid_for_flow + 1);
   uid_volatile = AllocZeroed<char>(max_uid_for_flow + 1);
-  const int nregs = std::max(max_reg_num(), 67) + 16;
+  const int nregs = std::max(max_reg_num(), kFirstPseudoRegister) + 16;
   const int regset_words = (nregs / 32) + 2;
   regset_size = regset_words;
   regset_bytes = regset_words * static_cast<int>(sizeof(int));
@@ -2592,7 +2916,7 @@ namespace {
 
 void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
-  const int alloc_regs = std::max(nregs, 67) + 16;
+  const int alloc_regs = std::max(nregs, kFirstPseudoRegister) + 16;
   max_regno = nregs;
   reg_n_refs = AllocZeroed<int>(alloc_regs);
   reg_n_sets = AllocZeroed<short>(alloc_regs);

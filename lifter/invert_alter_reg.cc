@@ -19,7 +19,7 @@
 namespace rom_nom_nom::lifter {
 namespace {
 
-constexpr int kFirstPseudoRegister = 67;
+constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
 constexpr int kFramePointerRegno = 30;
 constexpr int kStackSlotAlignmentBytes = 8;
 

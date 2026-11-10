@@ -270,6 +270,12 @@ TEST_F(InvertSimplifyRtxTest, RejectsInvalidCfgStructuresAndSidebandEntries) {
   bad_sideband.rpo_blocks[0].AddPatternOnly("(return)");
   bad_sideband.sideband.reg_renumber[2] = 4;
   EXPECT_FALSE(InvertSimplifyRtxCfg(bad_sideband).ok());
+
+  RtlControlFlowGraph bad_fcr31_sideband;
+  bad_fcr31_sideband.rpo_blocks.resize(1);
+  bad_fcr31_sideband.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_fcr31_sideband.sideband.reg_renumber[kMipsStatusRegnum] = 2;
+  EXPECT_FALSE(InvertSimplifyRtxCfg(bad_fcr31_sideband).ok());
 }
 
 TEST_F(InvertSimplifyRtxTest, CorruptedInverseIsRejectedByRightInverseVerifier) {
