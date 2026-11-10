@@ -566,6 +566,42 @@ cc_test(
 )
 
 cc_library(
+    name = "invert_global_alloc",
+    srcs = ["invert_global_alloc.cc"],
+    hdrs = ["invert_global_alloc.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "invert_global_alloc_test",
+    size = "medium",
+    srcs = ["invert_global_alloc_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":invert_global_alloc",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "dominator_tree",
     srcs = ["dominator_tree.cc"],
     hdrs = ["dominator_tree.h"],
