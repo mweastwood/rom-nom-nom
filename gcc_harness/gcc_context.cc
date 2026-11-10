@@ -1744,6 +1744,36 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
 
   if (!notes_str.empty()) {
     insn->fld[6].rtx = ParseRtx(notes_str);
+    if (pat != nullptr && insn->fld[6].rtx != nullptr) {
+      std::vector<Rtx> clobber_scratches;
+      if (pat->code == kClobber && pat->fld[0].rtx != nullptr &&
+          pat->fld[0].rtx->code == kScratch) {
+        clobber_scratches.push_back(pat->fld[0].rtx);
+      } else if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
+        for (int i = 0; i < pat->fld[0].rtvec->num_elem; ++i) {
+          Rtx elem = pat->fld[0].rtvec->elem[i].rtx;
+          if (elem != nullptr && elem->code == kClobber && elem->fld[0].rtx != nullptr &&
+              elem->fld[0].rtx->code == kScratch) {
+            clobber_scratches.push_back(elem->fld[0].rtx);
+          }
+        }
+      }
+      if (!clobber_scratches.empty()) {
+        std::vector<bool> used(clobber_scratches.size(), false);
+        for (Rtx note = insn->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
+          if (note->code == kExprList && note->mode == kRegUnused && note->fld[0].rtx != nullptr &&
+              note->fld[0].rtx->code == kScratch) {
+            for (size_t i = 0; i < clobber_scratches.size(); ++i) {
+              if (!used[i] && clobber_scratches[i]->mode == note->fld[0].rtx->mode) {
+                note->fld[0].rtx = clobber_scratches[i];
+                used[i] = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   if (container_code == kJumpInsn) {

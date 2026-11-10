@@ -102,6 +102,7 @@ enum GccRtxCode {
   kConstDouble = 48,
   kPc = 51,
   kReg = 52,
+  kScratch = 53,
   kSubreg = 54,
   kMem = 57,
   kLabelRef = 58,

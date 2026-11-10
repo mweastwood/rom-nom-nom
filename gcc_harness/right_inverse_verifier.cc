@@ -477,10 +477,27 @@ RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyBlockAllocRightInverse(
     const RtlControlFlowGraph& lreg_cfg_x) const {
-  return VerifyRtlPassRightInverse(
-      lreg_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertBlockAlloc(x); },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunBlockAlloc(0); },
-      RtlPassKind::kLreg);
+  RightInverseResult result;
+  result.expected_summary = lreg_cfg_x.FormatSummary();
+
+  const RtlControlFlowGraph lifted_y = inverses_->InvertBlockAlloc(lreg_cfg_x);
+  if (!lreg_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
+    return result;
+  }
+  const SubfunctionBoundarySnapshot replayed =
+      hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kBlockAlloc, lifted_y);
+  result.actual_summary = replayed.post_state.FormatSummary();
+  result.cfg_comparison = replayed.post_state.CompareAgainst(lreg_cfg_x);
+  const bool reg_renumber_matches =
+      (replayed.post_state.sideband.reg_renumber == lreg_cfg_x.sideband.reg_renumber);
+  result.matches = result.cfg_comparison.MatchesExactly() && reg_renumber_matches;
+  result.diff_detail = result.cfg_comparison.mismatch_detail;
+  if (result.cfg_comparison.MatchesExactly() && !reg_renumber_matches) {
+    result.diff_detail = "sideband.reg_renumber mismatch after kBlockAlloc";
+  }
+  return result;
 }
 
 RightInverseResult RightInverseVerifier::VerifyUpdateEquivRegsRightInverse(
@@ -1492,10 +1509,14 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
 
   const SubfunctionBoundarySnapshot replayed = hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);
   RightInverseResult result = BuildCfgRightInverseResult(snap.post_state, replayed.post_state);
-  if (result.matches && snap.subfunction_id == SubfunctionId::kGlobalAlloc &&
+  if (result.matches &&
+      (snap.subfunction_id == SubfunctionId::kGlobalAlloc ||
+       snap.subfunction_id == SubfunctionId::kBlockAlloc) &&
       replayed.post_state.sideband.reg_renumber != snap.post_state.sideband.reg_renumber) {
     result.matches = false;
-    result.diff_detail = "sideband.reg_renumber mismatch after kGlobalAlloc";
+    result.diff_detail = snap.subfunction_id == SubfunctionId::kGlobalAlloc
+                             ? "sideband.reg_renumber mismatch after kGlobalAlloc"
+                             : "sideband.reg_renumber mismatch after kBlockAlloc";
   }
   return result;
 }
