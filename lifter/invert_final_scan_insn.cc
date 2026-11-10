@@ -1501,6 +1501,162 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
   return "";
 }
 
+bool ExprContainsCall(const RtlExpr& expr) {
+  bool found = false;
+  expr.Visit([&](const RtlExpr& node) {
+    if (node.op == RtlOp::kCall || node.op == RtlOp::kCallInsn) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+RtlExpr MakeInsnWrapperExpr(RtlOp wrapper_op, RtlFlags flags, RtlExpr inner) {
+  RtlExpr w;
+  w.op = wrapper_op;
+  w.flags = flags;
+  RtlExpr::GenericItem item;
+  item.kind = RtlExpr::GenericItem::Kind::kChildExpr;
+  item.child_index = 0;
+  w.children.push_back(std::move(inner));
+  w.generic_items.push_back(std::move(item));
+  return w;
+}
+
+RtlExpr MakeSequenceExpr(RtlExpr first, RtlExpr second) {
+  RtlExpr seq;
+  seq.op = RtlOp::kSequence;
+  seq.bracketed_children = true;
+  seq.children.push_back(std::move(first));
+  seq.children.push_back(std::move(second));
+  return seq;
+}
+
+std::string FormatAstExpr(const RtlExpr& expr) {
+  if (expr.op == RtlOp::kParallel) {
+    std::string out = "(parallel[ ";
+    for (size_t i = 0; i < expr.children.size(); ++i) {
+      if (i > 0) {
+        out.push_back(' ');
+      }
+      out.append(FormatAstExpr(expr.children[i]));
+    }
+    out.append(" ] )");
+    return out;
+  }
+  if (expr.op == RtlOp::kSequence && expr.bracketed_children) {
+    std::string out = "(sequence [";
+    for (size_t i = 0; i < expr.children.size(); ++i) {
+      if (i > 0) {
+        out.push_back(' ');
+      }
+      out.append(FormatAstExpr(expr.children[i]));
+    }
+    out.append("])");
+    return out;
+  }
+  if ((expr.op == RtlOp::kInsn || expr.op == RtlOp::kJumpInsn || expr.op == RtlOp::kCallInsn) &&
+      expr.children.size() == 1) {
+    std::string out = "(";
+    out.append(RtlExpr::OpToString(expr.op));
+    if (expr.flags.in_struct) out.append("/s");
+    if (expr.flags.volatil) out.append("/v");
+    if (expr.flags.unchanging) out.append("/u");
+    if (expr.flags.integrated) out.append("/i");
+    if (expr.flags.frame_related) out.append("/f");
+    out.push_back(' ');
+    out.append(FormatAstExpr(expr.children[0]));
+    out.push_back(')');
+    return out;
+  }
+  return expr.ToSexprString();
+}
+
+bool IsReturnOrJumpPattern(const RtlExpr& pat) {
+  if (pat.op == RtlOp::kReturn || pat.op == RtlOp::kJumpInsn) {
+    return true;
+  }
+  if (pat.IsSet() && pat.SetDest().op == RtlOp::kPc) {
+    return true;
+  }
+  if (pat.op == RtlOp::kParallel && !pat.children.empty()) {
+    return IsReturnOrJumpPattern(pat.children[0]);
+  }
+  return false;
+}
+
+const RtlExpr* UnwrapActiveControlPattern(const RtlExpr& pat) {
+  const RtlExpr* cur = &pat;
+  if (cur->op == RtlOp::kSequence && !cur->children.empty()) {
+    cur = &cur->children[0];
+  }
+  if ((cur->op == RtlOp::kJumpInsn || cur->op == RtlOp::kCallInsn || cur->op == RtlOp::kInsn) &&
+      !cur->children.empty()) {
+    cur = &cur->children[0];
+  }
+  return cur;
+}
+
+bool IsTerminalReturnOrIndirectJump(const RtlExpr& pat) {
+  const RtlExpr* core = UnwrapActiveControlPattern(pat);
+  if (core->op == RtlOp::kParallel && !core->children.empty()) {
+    core = &core->children[0];
+  }
+  if (core->op == RtlOp::kReturn) {
+    return true;
+  }
+  if (core->IsSet() && core->SetDest().op == RtlOp::kPc && core->SetSrc().IsReg()) {
+    return true;
+  }
+  return false;
+}
+
+std::optional<std::string> ExtractBranchTargetLabel(const RtlExpr& pat, bool* is_conditional) {
+  *is_conditional = false;
+  const RtlExpr* core = UnwrapActiveControlPattern(pat);
+  if (core->op == RtlOp::kParallel && !core->children.empty()) {
+    core = &core->children[0];
+  }
+  if (!core->IsSet() || core->SetDest().op != RtlOp::kPc) {
+    return std::nullopt;
+  }
+  const RtlExpr& src = core->SetSrc();
+  if (src.op == RtlOp::kLabelRef && !src.str_val.empty()) {
+    return src.str_val;
+  }
+  if (src.op == RtlOp::kIfThenElse && src.children.size() == 3) {
+    *is_conditional = true;
+    if (src.children[1].op == RtlOp::kLabelRef && !src.children[1].str_val.empty()) {
+      return src.children[1].str_val;
+    }
+    if (src.children[2].op == RtlOp::kLabelRef && !src.children[2].str_val.empty()) {
+      return src.children[2].str_val;
+    }
+  }
+  return std::nullopt;
+}
+
+void RewriteDataLabelRefsInAst(RtlExpr* expr,
+                               const absl::flat_hash_map<std::string, size_t>& label_to_block,
+                               bool allow_direct_label_ref, bool* modified) {
+  if (expr->op == RtlOp::kLabelRef && expr->children.empty() && allow_direct_label_ref) {
+    auto it = label_to_block.find(expr->str_val);
+    if (it != label_to_block.end()) {
+      *modified = true;
+      *expr = RtlExpr::MakeSymbolicLabelRef(absl::StrFormat("__blk_%zu", it->second), expr->mode);
+    }
+    return;
+  }
+
+  const bool child_allow_direct = allow_direct_label_ref || expr->op == RtlOp::kHigh ||
+                                  expr->op == RtlOp::kLoSum || expr->op == RtlOp::kInsn;
+
+  for (size_t idx = 0; idx < expr->children.size(); ++idx) {
+    const bool elem_allow = child_allow_direct || (expr->op == RtlOp::kSequence && idx > 0);
+    RewriteDataLabelRefsInAst(&expr->children[idx], label_to_block, elem_allow, modified);
+  }
+}
+
 RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> asm_lines,
                                                   const RtlSidebandState& sideband) {
   if (asm_lines.empty()) {
@@ -1539,16 +1695,23 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
         if (pat0.empty() || pat1.empty()) {
           return {};
         }
-        const bool is_call_seq = absl::StrContains(pat0, "(call (mem:");
-        if (is_call_seq) {
-          cur_blk.AddPatternOnly(
-              absl::StrFormat("(sequence [(call_insn %s) (insn %s)])", pat0, pat1));
-        } else if (absl::StartsWith(pat0, "(jump_insn/u ")) {
-          cur_blk.AddPatternOnly(absl::StrFormat("(sequence [%s (insn/s %s)])", pat0, pat1));
-        } else {
-          cur_blk.AddPatternOnly(
-              absl::StrFormat("(sequence [(jump_insn %s) (insn %s)])", pat0, pat1));
+        auto parsed0 = ParsePatternAndNotes(pat0);
+        auto parsed1 = ParsePatternAndNotes(pat1);
+        if (!parsed0.ok() || !parsed1.ok()) {
+          return {};
         }
+        const bool is_call_seq = ExprContainsCall(parsed0->pattern);
+        RtlExpr seq_first = is_call_seq
+                                ? MakeInsnWrapperExpr(RtlOp::kCallInsn, {}, parsed0->pattern)
+                            : parsed0->pattern.op == RtlOp::kJumpInsn
+                                ? parsed0->pattern
+                                : MakeInsnWrapperExpr(RtlOp::kJumpInsn, {}, parsed0->pattern);
+        RtlFlags slot_flags;
+        slot_flags.in_struct =
+            (parsed0->pattern.op == RtlOp::kJumpInsn && parsed0->pattern.flags.unchanging);
+        RtlExpr seq_second = MakeInsnWrapperExpr(RtlOp::kInsn, slot_flags, parsed1->pattern);
+        RtlExpr seq_expr = MakeSequenceExpr(std::move(seq_first), std::move(seq_second));
+        cur_blk.AddPatternOnly(FormatAstExpr(seq_expr));
         i += 3;
         if (!is_call_seq && i + 1 < asm_lines.size() && !absl::EndsWith(asm_lines[i + 1], ":")) {
           blocks.push_back(std::move(cur_blk));
@@ -1601,10 +1764,13 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
     if (pat.empty()) {
       return {};
     }
+    auto parsed_pat = ParsePatternAndNotes(pat);
+    if (!parsed_pat.ok()) {
+      return {};
+    }
     cur_blk.AddPatternOnly(pat);
-    if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ") ||
-         absl::StartsWith(pat, "(jump_insn")) &&
-        i + 1 < asm_lines.size() && !absl::EndsWith(asm_lines[i + 1], ":")) {
+    if (IsReturnOrJumpPattern(parsed_pat->pattern) && i + 1 < asm_lines.size() &&
+        !absl::EndsWith(asm_lines[i + 1], ":")) {
       blocks.push_back(std::move(cur_blk));
       cur_blk = RtlBasicBlock{};
       cur_blk.id = blocks.size();
@@ -1618,36 +1784,21 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
   for (size_t b = 0; b < blocks.size(); ++b) {
     bool modified_block = false;
     for (size_t insn_idx = 0; insn_idx < blocks[b].instructions.size(); ++insn_idx) {
-      std::string& pat = blocks[b].instructions[insn_idx];
-      size_t pos = 0;
-      while ((pos = pat.find("(label_ref ", pos)) != std::string::npos) {
-        const size_t tok_start = pos + std::string_view("(label_ref ").size();
-        const size_t tok_end = pat.find(')', tok_start);
-        if (tok_end == std::string::npos) {
-          break;
-        }
-        const std::string lbl_tok(
-            absl::StripAsciiWhitespace(pat.substr(tok_start, tok_end - tok_start)));
-        const size_t delay_insn_pos = pat.find("(insn");
-        const bool is_jump_or_branch_insn = absl::StartsWith(pat, "(set (pc) ") ||
-                                            absl::StartsWith(pat, "(jump_insn") ||
-                                            absl::StartsWith(pat, "(sequence [(jump_insn");
-        const bool is_in_delay_slot = absl::StartsWith(pat, "(sequence [") &&
-                                      delay_insn_pos != std::string::npos && pos > delay_insn_pos;
-        const bool is_addr_hi_lo = !is_jump_or_branch_insn || is_in_delay_slot ||
-                                   absl::StrContains(pat.substr(0, pos), "(lo_sum:") ||
-                                   absl::StrContains(pat.substr(0, pos), "(high:");
-        if (insn_idx + 1 < blocks[b].instructions.size() || is_addr_hi_lo) {
-          auto it = label_to_block.find(lbl_tok);
-          if (it != label_to_block.end()) {
-            const std::string replacement = absl::StrFormat("(label_ref __blk_%zu)", it->second);
-            pat.replace(pos, tok_end - pos + 1, replacement);
-            pos += replacement.size();
-            modified_block = true;
-            continue;
-          }
-        }
-        pos = tok_end + 1;
+      auto parsed = ParsePatternAndNotes(blocks[b].instructions[insn_idx]);
+      if (!parsed.ok()) {
+        continue;
+      }
+      const RtlExpr* active_ctrl = UnwrapActiveControlPattern(parsed->pattern);
+      const bool is_jump_or_branch_insn =
+          (active_ctrl->IsSet() && active_ctrl->SetDest().op == RtlOp::kPc) ||
+          active_ctrl->op == RtlOp::kReturn;
+      const bool allow_direct =
+          (insn_idx + 1 < blocks[b].instructions.size()) || !is_jump_or_branch_insn;
+      bool modified_insn = false;
+      RewriteDataLabelRefsInAst(&parsed->pattern, label_to_block, allow_direct, &modified_insn);
+      if (modified_insn) {
+        blocks[b].instructions[insn_idx] = FormatAstExpr(parsed->pattern);
+        modified_block = true;
       }
     }
     if (modified_block) {
@@ -1660,34 +1811,21 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
       }
       continue;
     }
-    const std::string& last_pat = blocks[b].instructions.back();
-    if (last_pat == "(return)" || absl::StartsWith(last_pat, "(sequence [(jump_insn (return))") ||
-        absl::StartsWith(last_pat, "(set (pc) (reg:SI ") ||
-        absl::StartsWith(last_pat, "(sequence [(jump_insn (set (pc) (reg:SI ")) {
+    auto last_parsed = ParsePatternAndNotes(blocks[b].instructions.back());
+    if (!last_parsed.ok()) {
+      continue;
+    }
+    const RtlExpr& last_expr = last_parsed->pattern;
+    if (IsTerminalReturnOrIndirectJump(last_expr)) {
       blocks[b].successors.clear();
       continue;
     }
-    size_t search_from = 0;
-    bool matched_branch_target = false;
-    while (search_from < last_pat.size()) {
-      const size_t lref_pos = last_pat.find("(label_ref ", search_from);
-      if (lref_pos == std::string::npos) {
-        break;
-      }
-      const size_t tok_start = lref_pos + std::string_view("(label_ref ").size();
-      const size_t tok_end = last_pat.find(')', tok_start);
-      if (tok_end == std::string::npos) {
-        break;
-      }
-      const std::string lbl_tok(
-          absl::StripAsciiWhitespace(last_pat.substr(tok_start, tok_end - tok_start)));
-      search_from = tok_end + 1;
-      if (absl::StartsWith(lbl_tok, "__blk_")) {
-        continue;
-      }
-      auto it = label_to_block.find(lbl_tok);
+    bool is_conditional = false;
+    if (auto target_lbl = ExtractBranchTargetLabel(last_expr, &is_conditional);
+        target_lbl.has_value()) {
+      auto it = label_to_block.find(*target_lbl);
       if (it != label_to_block.end()) {
-        if (absl::StrContains(last_pat, "(if_then_else ")) {
+        if (is_conditional) {
           if (b + 1 < blocks.size()) {
             blocks[b].successors = {b + 1, it->second};
           } else {
@@ -1696,12 +1834,8 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
         } else {
           blocks[b].successors = {it->second};
         }
-        matched_branch_target = true;
-        break;
+        continue;
       }
-    }
-    if (matched_branch_target) {
-      continue;
     }
     if (b + 1 < blocks.size()) {
       blocks[b].successors = {b + 1};
@@ -1709,119 +1843,40 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
   }
 
   // Reconstruct switch `tablejump` `(parallel[ (set (pc) (reg:SI R)) (use (label_ref L)) ] )`
-  // and `addr_vec_targets` for indirect jumps.
-  std::vector<size_t> in_degree(blocks.size(), 0);
+  // only when `addr_vec_targets` are explicitly populated on the block.
   for (size_t b = 0; b < blocks.size(); ++b) {
-    for (size_t succ : blocks[b].successors) {
-      if (succ < blocks.size()) {
-        ++in_degree[succ];
-      }
-    }
-  }
-  for (size_t b = 0; b < blocks.size(); ++b) {
-    if (blocks[b].instructions.empty()) {
+    if (blocks[b].instructions.empty() || blocks[b].addr_vec_targets.empty()) {
       continue;
     }
-    std::string& last_pat = blocks[b].instructions.back();
-    const bool is_bare_ind_jump = absl::StartsWith(last_pat, "(set (pc) (reg:SI ");
-    const bool is_seq_ind_jump =
-        absl::StartsWith(last_pat, "(sequence [(jump_insn (set (pc) (reg:SI ");
-    if (!is_bare_ind_jump && !is_seq_ind_jump) {
+    auto last_parsed = ParsePatternAndNotes(blocks[b].instructions.back());
+    if (!last_parsed.ok()) {
+      continue;
+    }
+    const RtlExpr* core = UnwrapActiveControlPattern(last_parsed->pattern);
+    if (!core->IsSet() || core->SetDest().op != RtlOp::kPc || !core->SetSrc().IsReg()) {
       continue;
     }
     const std::string tbl_lbl = absl::StrFormat("__tbl_%zu", b);
-    if (is_bare_ind_jump) {
-      last_pat = absl::StrFormat("(parallel[ %s (use (label_ref %s)) ] )", last_pat, tbl_lbl);
+    RtlExpr tablejump_par =
+        RtlExpr::MakeParallel({*core, RtlExpr::MakeUse(RtlExpr::MakeSymbolicLabelRef(tbl_lbl))});
+    if (last_parsed->pattern.op == RtlOp::kSequence && last_parsed->pattern.children.size() == 2) {
+      RtlExpr seq = MakeSequenceExpr(
+          MakeInsnWrapperExpr(RtlOp::kJumpInsn, last_parsed->pattern.children[0].flags,
+                              std::move(tablejump_par)),
+          last_parsed->pattern.children[1]);
+      blocks[b].instructions.back() = FormatAstExpr(seq);
     } else {
-      const size_t close_set = last_pat.find("))) (insn");
-      if (close_set != std::string::npos) {
-        const std::string inner_set =
-            last_pat.substr(std::string_view("(sequence [(jump_insn ").size(),
-                            close_set + 2 - std::string_view("(sequence [(jump_insn ").size());
-        const std::string rest = last_pat.substr(close_set + 3);
-        last_pat =
-            absl::StrFormat("(sequence [(jump_insn (parallel[ %s (use (label_ref %s)) ] ))%s",
-                            inner_set, tbl_lbl, rest);
-      }
+      blocks[b].instructions.back() = FormatAstExpr(tablejump_par);
     }
     blocks[b].SyncRtlInsnsFromInstructions();
-    for (size_t k = b + 1; k < blocks.size(); ++k) {
-      if (blocks[k].instructions.empty()) {
-        continue;
-      }
-      if (k == b + 1 || in_degree[k] == 0) {
-        blocks[k].has_label = true;
-        blocks[b].addr_vec_targets.push_back(k);
-        blocks[b].successors.push_back(k);
-      }
-    }
-  }
-
-  // Mark target-stolen delay slots (`insn/s`) on unconditional `SEQUENCE` jumps
-  // when `target_b - 1` falls through to `target_b` and ends with the identical
-  // instruction, and `b` could not have filled its delay slot from its own body.
-  for (size_t b = 0; b < blocks.size(); ++b) {
-    if (blocks[b].instructions.empty() || blocks[b].successors.size() != 1) {
-      continue;
-    }
-    const size_t target_b = blocks[b].successors[0];
-    if (target_b == 0 || target_b >= blocks.size() || target_b - 1 == b) {
-      continue;
-    }
-    const auto& pred_blk = blocks[target_b - 1];
-    if (pred_blk.instructions.empty() ||
-        std::find(pred_blk.successors.begin(), pred_blk.successors.end(), target_b) ==
-            pred_blk.successors.end()) {
-      continue;
-    }
-    std::string& last_pat = blocks[b].instructions.back();
-    if (!absl::StartsWith(last_pat, "(sequence [(jump_insn (set (pc) (label_ref ")) {
-      continue;
-    }
-    const size_t insn_pos = last_pat.find(")) (insn ");
-    if (insn_pos == std::string::npos ||
-        last_pat.size() < insn_pos + std::string_view(")) (insn ").size() + 3) {
-      continue;
-    }
-    const std::string slot_str =
-        last_pat.substr(insn_pos + std::string_view(")) (insn ").size(),
-                        last_pat.size() - 3 - (insn_pos + std::string_view(")) (insn ").size()));
-    if (pred_blk.instructions.back() != slot_str) {
-      continue;
-    }
-    bool could_fill_from_own_block = false;
-    if (blocks[b].instructions.size() >= 2) {
-      const std::string& prev_insn = blocks[b].instructions[blocks[b].instructions.size() - 2];
-      const bool prev_ineligible =
-          absl::StrContains(prev_insn, "(mem") || absl::StrContains(prev_insn, "(reg:SI 64 hi)") ||
-          absl::StrContains(prev_insn, "(reg:SI 65 lo)") || absl::StrContains(prev_insn, ":SF ") ||
-          absl::StrContains(prev_insn, ":DF ") || absl::StartsWith(prev_insn, "(parallel[");
-      if (!prev_ineligible) {
-        auto prev_parsed = ParsePatternAndNotes(prev_insn);
-        auto slot_parsed = ParsePatternAndNotes(slot_str);
-        bool reg_conflict = false;
-        if (prev_parsed.ok() && slot_parsed.ok()) {
-          prev_parsed->pattern.Visit([&](const RtlExpr& node) {
-            if (node.IsSet() && node.SetDest().IsReg() &&
-                slot_parsed->pattern.ContainsReg(node.SetDest().RegNo())) {
-              reg_conflict = true;
-            }
-          });
-          slot_parsed->pattern.Visit([&](const RtlExpr& node) {
-            if (node.IsSet() && node.SetDest().IsReg() &&
-                prev_parsed->pattern.ContainsReg(node.SetDest().RegNo())) {
-              reg_conflict = true;
-            }
-          });
-        }
-        if (!reg_conflict) {
-          could_fill_from_own_block = true;
+    for (size_t target_k : blocks[b].addr_vec_targets) {
+      if (target_k < blocks.size()) {
+        blocks[target_k].has_label = true;
+        if (std::find(blocks[b].successors.begin(), blocks[b].successors.end(), target_k) ==
+            blocks[b].successors.end()) {
+          blocks[b].successors.push_back(target_k);
         }
       }
-    }
-    if (!could_fill_from_own_block) {
-      last_pat.replace(insn_pos, std::string_view(")) (insn ").size(), ")) (insn/s ");
-      blocks[b].SyncRtlInsnsFromInstructions();
     }
   }
 
@@ -1830,7 +1885,8 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
   bool has_call_insn = false;
   for (const auto& blk : blocks) {
     for (const std::string& pat : blk.instructions) {
-      if (absl::StrContains(pat, "(call ")) {
+      auto parsed = ParsePatternAndNotes(pat);
+      if (parsed.ok() && ExprContainsCall(parsed->pattern)) {
         has_call_insn = true;
         break;
       }
@@ -1845,15 +1901,25 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
       --last_nonempty_b;
     }
     if (!blocks[last_nonempty_b].instructions.empty()) {
-      std::string& last_pat = blocks[last_nonempty_b].instructions.back();
-      if (last_pat == "(return)") {
-        last_pat = "(parallel[ (return) (use (reg:SI 31 ra)) ] )";
-        blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
-      } else if (absl::StartsWith(last_pat, "(sequence [(jump_insn (return)) ")) {
-        last_pat = absl::StrCat(
-            "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) ",
-            last_pat.substr(std::string_view("(sequence [(jump_insn (return)) ").size()));
-        blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
+      auto last_parsed = ParsePatternAndNotes(blocks[last_nonempty_b].instructions.back());
+      if (last_parsed.ok()) {
+        RtlExpr gen_return_par = RtlExpr::MakeParallel(
+            {RtlExpr::MakeReturn(), RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 31))});
+        if (last_parsed->pattern.op == RtlOp::kReturn) {
+          blocks[last_nonempty_b].instructions.back() = FormatAstExpr(gen_return_par);
+          blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
+        } else if (last_parsed->pattern.op == RtlOp::kSequence &&
+                   last_parsed->pattern.children.size() == 2 &&
+                   last_parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
+                   !last_parsed->pattern.children[0].children.empty() &&
+                   last_parsed->pattern.children[0].children[0].op == RtlOp::kReturn) {
+          RtlExpr seq = MakeSequenceExpr(
+              MakeInsnWrapperExpr(RtlOp::kJumpInsn, last_parsed->pattern.children[0].flags,
+                                  std::move(gen_return_par)),
+              last_parsed->pattern.children[1]);
+          blocks[last_nonempty_b].instructions.back() = FormatAstExpr(seq);
+          blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
+        }
       }
     }
   }

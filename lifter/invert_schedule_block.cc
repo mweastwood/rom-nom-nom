@@ -926,12 +926,6 @@ void PreserveBlockLabelsAndBarriers(RtlControlFlowGraph* cfg) {
     }
   }
 
-  RtlExpr barrier_expr;
-  barrier_expr.op = RtlOp::kBarrier;
-  const std::string barrier_sexpr = barrier_expr.ToSexprString();
-  RtlExpr code_label_expr;
-  code_label_expr.op = RtlOp::kCodeLabel;
-  const std::string code_label_sexpr = code_label_expr.ToSexprString();
   for (size_t b = 0; b + 1 < num_blocks; ++b) {
     RtlBasicBlock& blk = cfg->rpo_blocks[b];
     const bool materialize_synthesizes_uncond_jump =
@@ -939,15 +933,13 @@ void PreserveBlockLabelsAndBarriers(RtlControlFlowGraph* cfg) {
     if (!ends_with_uncond_jump[b] && !has_fallthrough_succ[b] &&
         !materialize_synthesizes_uncond_jump) {
       if (!ends_with_jump[b]) {
-        blk.instructions.push_back(barrier_sexpr);
-        blk.SyncRtlInsnsFromInstructions();
+        blk.has_trailing_barrier = true;
       } else if (!cfg->rpo_blocks[b + 1].has_label) {
+        blk.has_trailing_barrier = true;
         RtlBasicBlock& next_blk = cfg->rpo_blocks[b + 1];
         if (next_blk.predecessors.empty() && !starts_with_note[b + 1]) {
-          next_blk.instructions.insert(next_blk.instructions.begin(), code_label_sexpr);
+          next_blk.has_unreachable_entry_label = true;
         }
-        next_blk.instructions.insert(next_blk.instructions.begin(), barrier_sexpr);
-        next_blk.SyncRtlInsnsFromInstructions();
       }
     }
   }

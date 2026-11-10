@@ -49,13 +49,26 @@ reverse chronological order:
        `combine`, `cse`, or `loop` transformations).
      - No stage may be left as a no-op pass-through when the corresponding GCC
        pass transforms the RTL.
-7. **Zero Overspecialization / Zero Test-Corpus Cheating**:
+7. **Structured `RtlExpr` AST Manipulation & Zero Overspecialization / Heuristics**:
+   - All RTL pattern inspection, matching, and construction in `lifter/` must
+     operate on structured `RtlExpr` and `RtlPatternAndNotes` ASTs
+     (`core/rtl_expr.h`), never via raw substring scanning (`absl::StrContains`,
+     `absl::StartsWith`, `.find("...")`, `.substr(...)`, `.replace(...)`) on
+     serialized RTL S-expression strings.
+   - Never inject inter-block RTX boundary nodes (`(barrier)`, `(code_label)`)
+     as pseudo-instruction strings inside `RtlBasicBlock::instructions`. Block
+     boundary properties (such as `has_label` or trailing barrier metadata) must
+     be represented as structured fields on `RtlBasicBlock`.
    - Never hardcode register numbers, stack offsets, constant literals, loop
      bounds, or instruction sequences tailored to specific test cases in
-     `core/round_trip_test_cases.h`.
-   - Every transformation rule must be general over arbitrary registers, modes,
-     expressions, and CFG topologies, directly mirroring the general algebraic
-     or dataflow rule in GCC 2.7.2.
+     `core/round_trip_test_cases.h`, and never mention test-case names in code
+     or comments.
+   - Never use heuristic approximations when exact structural or dataflow rules
+     apply (e.g., never guess `switch` jump-table targets via `in_degree == 0`,
+     never guess implicit `CALL_INSN` register deaths from note-free call
+     instructions, and never branch on the presence/absence of `REG_DEAD` notes
+     or sideband fields to behave differently on synthetic tests vs. compiler
+     traces).
 8. **Uncompromised Exact RTL & Right-Inverse Verification**:
    - Never weaken `RtlControlFlowGraph::CompareAgainst`, `CanonicalizeRtlPattern`,
      or in-process `gcc_harness` right-inverse verification ($f_i(g_i(x)) = x$) to
@@ -86,3 +99,12 @@ reverse chronological order:
      be a thin composition (~30–50 lines) that simply chains its constituent
      `invert_<func>` functions in reverse compilation order with zero
      pass-internal lifting logic or duplicated helpers.
+10. **Functions-Before-Passes Ordering & Strict Module Isolation**:
+   - Implement and verify all individual 1-to-1 subfunction inverse modules
+     (`lifter/invert_<func>.{h,cc}`) across Stages 0–13 against their exact
+     subfunction boundary snapshots (`VerifySubfunctionBoundaryRightInverse`)
+     before implementing the remaining pass stitchers (`lifter/pass03_...`
+     through `lifter/pass13_...`).
+   - When implementing a step for `invert_<func>`, never modify existing
+     `invert_*.cc` modules belonging to other subfunctions or stages to paper
+     over a failure or inject cross-stage workarounds.

@@ -337,7 +337,7 @@ RightInverseResult RightInverseVerifier::VerifyDoCrossJumpRightInverse(
   return VerifyRtlPassRightInverse(
       jump2_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertDoCrossJump(x); },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
-        hooks->RunJumpOptimize(/*cross_jump=*/1, /*noop_moves=*/0,
+        hooks->RunJumpOptimize(/*cross_jump=*/1, /*noop_moves=*/1,
                                /*after_regscan=*/0);
       },
       RtlPassKind::kJump2);

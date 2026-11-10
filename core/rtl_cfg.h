@@ -109,6 +109,8 @@ struct RtlBasicBlock {
   std::vector<size_t> predecessors;
   std::vector<size_t> addr_vec_targets;
   bool has_label = false;
+  bool has_trailing_barrier = false;
+  bool has_unreachable_entry_label = false;
 
   void AddInsn(RtlInsn insn) {
     instructions.push_back(insn.canonical_pattern);

@@ -392,19 +392,26 @@ TEST_P(Pass02Jump2CrossJumpRoundTripTest, RoundTrip2480Cases) {
       << "Empty InvertPass02Jump2CrossJump for " << tc.test_name;
   EXPECT_EQ(pre_jump2.pass, RtlPassKind::kSched2);
 
-  const RtlControlFlowGraph replayed_jump2 =
-      hooks
-          ->ExecuteSubfunctionBoundary(SubfunctionId::kDoCrossJump, pre_jump2, {},
-                                       trace.optimize_level, trace.c_flags)
-          .post_state;
-  const auto cmp = replayed_jump2.CompareAgainst(post_jump2);
-  EXPECT_TRUE(cmp.MatchesExactly())
-      << "Stage 2 (.11.jump2) right-inverse mismatch for " << tc.test_name << ":\n"
-      << cmp.mismatch_detail << "\nexpected (.11.jump2):\n"
-      << post_jump2.FormatSummary() << "\nactual (.11.jump2):\n"
-      << replayed_jump2.FormatSummary();
+  const RightInverseResult stage2_res = verifier->VerifyJump2CrossJumpStageRightInverse(post_jump2);
+  EXPECT_TRUE(stage2_res.matches) << "Stage 2 (.11.jump2) right-inverse mismatch for "
+                                  << tc.test_name << ":\n"
+                                  << stage2_res.diff_detail << "\nexpected (.11.jump2):\n"
+                                  << stage2_res.expected_summary << "\nactual (.11.jump2):\n"
+                                  << stage2_res.actual_summary;
 
-  // 3. Chained Stage 0 + Stage 1 + Stage 2 composition across the 2,480 corpus cases.
+  // 3. Chained Stage 1 + Stage 2 composition on `.12.dbr` and Stage 0 + Stage 1 + Stage 2
+  // composition across the 2,480 corpus cases.
+  auto dbr_it = trace.pass_snapshots.find(RtlPassKind::kDbr);
+  ASSERT_NE(dbr_it, trace.pass_snapshots.end()) << "Missing .12.dbr for " << tc.test_name;
+  const RtlControlFlowGraph& post_dbr = dbr_it->second;
+
+  const RtlControlFlowGraph stage1_from_dbr = InvertPass01DbrSchedule(post_dbr);
+  ASSERT_FALSE(stage1_from_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
+  EXPECT_EQ(stage1_from_dbr.pass, RtlPassKind::kJump2);
+  const RtlControlFlowGraph stage2_from_dbr = InvertPass02Jump2CrossJump(stage1_from_dbr);
+  ASSERT_FALSE(stage2_from_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
+  EXPECT_EQ(stage2_from_dbr.pass, RtlPassKind::kSched2);
+
   ASSERT_FALSE(trace.final_machine_words.empty()) << "Test case: " << tc.test_name;
   const std::vector<uint32_t> unpadded_words = hooks->RunGasMdAssemble(trace.final_asm_text);
   ASSERT_FALSE(unpadded_words.empty()) << "Test case: " << tc.test_name;
@@ -416,15 +423,6 @@ TEST_P(Pass02Jump2CrossJumpRoundTripTest, RoundTrip2480Cases) {
   const RtlControlFlowGraph stage2_lifted_sched2 = InvertPass02Jump2CrossJump(stage1_lifted_jump2);
   ASSERT_FALSE(stage2_lifted_sched2.rpo_blocks.empty()) << "Test case: " << tc.test_name;
   EXPECT_EQ(stage2_lifted_sched2.pass, RtlPassKind::kSched2);
-
-  const RightInverseResult stage2_res =
-      verifier->VerifyJump2CrossJumpStageRightInverse(stage1_lifted_jump2);
-  EXPECT_TRUE(stage2_res.matches) << "Stage 2 right-inverse mismatch for " << tc.test_name << ":\n"
-                                  << stage2_res.diff_detail << "\nexpected:\n"
-                                  << stage2_res.expected_summary << "\nactual:\n"
-                                  << stage2_res.actual_summary << "\npost_jump2:\n"
-                                  << post_jump2.FormatSummary() << "\nfinal_asm:\n"
-                                  << trace.final_asm_text;
 }
 
 INSTANTIATE_TEST_SUITE_P(SharedRoundTripSuite, Pass02Jump2CrossJumpRoundTripTest,

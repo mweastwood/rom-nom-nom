@@ -1902,6 +1902,8 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     const auto& blk = cfg.rpo_blocks[b];
     if (block_labels[b] != nullptr) {
       emit_label(block_labels[b]);
+    } else if (blk.has_unreachable_entry_label) {
+      emit_label(gen_label_rtx());
     }
     bool emitted_uncond_jump_or_return = false;
     bool emitted_any_jump = false;
@@ -1968,7 +1970,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       target_lbl->fld[5].rtint += 1;
       emitted_uncond_jump_or_return = true;
     }
-    if (emitted_uncond_jump_or_return) {
+    if (emitted_uncond_jump_or_return || blk.has_trailing_barrier) {
       emit_barrier();
     }
     if (!block_tablejump_tokens[b].empty()) {

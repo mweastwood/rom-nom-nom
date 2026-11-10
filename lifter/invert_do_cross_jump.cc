@@ -444,6 +444,10 @@ bool IsNormalNonJumpNonCallInsn(const RtlExpr& expr) {
   return true;
 }
 
+bool IsMipsO32CallArgReg(int regno) {
+  return (regno >= 4 && regno <= 7) || (regno >= 44 && regno <= 47);
+}
+
 // In `jump.c:jump_optimize` (lines 434-465, `if (noop_moves)`), every normal
 // `INSN` whose body is `(set <dest> <src>)` with `sreg = true_regnum(src) >= 0`,
 // `dreg = true_regnum(dest) >= 0`, and `sreg != dreg` walks backward via
@@ -461,7 +465,7 @@ void RestoreNoopMovesConsumedDeaths(RtlControlFlowGraph* cfg) {
     RtlPatternAndNotes parsed;
     std::vector<int> original_dead_regnos;
     std::vector<RtlRegNote> original_dead_notes;
-    std::vector<int> implicit_call_dead_regnos;
+    std::vector<int> call_arg_dead_regnos;
     bool modified = false;
   };
 
@@ -496,8 +500,7 @@ void RestoreNoopMovesConsumedDeaths(RtlControlFlowGraph* cfg) {
     }
 
     for (size_t idx = 0; idx < run_insns.size(); ++idx) {
-      if (!ContainsCallInExpr(run_insns[idx].parsed.pattern) ||
-          !run_insns[idx].parsed.reg_notes.empty()) {
+      if (!ContainsCallInExpr(run_insns[idx].parsed.pattern)) {
         continue;
       }
       for (size_t prev = idx; prev > 0;) {
@@ -509,15 +512,18 @@ void RestoreNoopMovesConsumedDeaths(RtlControlFlowGraph* cfg) {
         if (IsNormalNonJumpNonCallInsn(prev_expr) && prev_expr.IsSet() &&
             prev_expr.SetDest().op == RtlOp::kReg) {
           const int dst_regno = prev_expr.SetDest().RegNo();
+          if (!IsMipsO32CallArgReg(dst_regno)) {
+            continue;
+          }
           bool already_added = false;
-          for (int existing : run_insns[idx].implicit_call_dead_regnos) {
+          for (int existing : run_insns[idx].call_arg_dead_regnos) {
             if (existing == dst_regno) {
               already_added = true;
               break;
             }
           }
           if (!already_added) {
-            run_insns[idx].implicit_call_dead_regnos.push_back(dst_regno);
+            run_insns[idx].call_arg_dead_regnos.push_back(dst_regno);
           }
         }
       }
@@ -535,16 +541,16 @@ void RestoreNoopMovesConsumedDeaths(RtlControlFlowGraph* cfg) {
       }
       for (size_t prev = idx; prev > 0;) {
         --prev;
-        bool matched_implicit = false;
-        for (size_t k = 0; k < run_insns[prev].implicit_call_dead_regnos.size(); ++k) {
-          if (run_insns[prev].implicit_call_dead_regnos[k] == dreg) {
-            run_insns[prev].implicit_call_dead_regnos.erase(
-                run_insns[prev].implicit_call_dead_regnos.begin() + static_cast<ptrdiff_t>(k));
-            matched_implicit = true;
+        bool matched_call_arg = false;
+        for (size_t k = 0; k < run_insns[prev].call_arg_dead_regnos.size(); ++k) {
+          if (run_insns[prev].call_arg_dead_regnos[k] == dreg) {
+            run_insns[prev].call_arg_dead_regnos.erase(
+                run_insns[prev].call_arg_dead_regnos.begin() + static_cast<ptrdiff_t>(k));
+            matched_call_arg = true;
             break;
           }
         }
-        if (matched_implicit) {
+        if (matched_call_arg) {
           break;
         }
         bool matched = false;
