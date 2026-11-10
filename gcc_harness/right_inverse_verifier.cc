@@ -394,13 +394,27 @@ RightInverseResult RightInverseVerifier::VerifySchedStageRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyAlterRegRightInverse(
     const RtlControlFlowGraph& allocated_cfg_x) const {
+  std::vector<int> altered_regnos;
   return VerifyRtlPassRightInverse(
       allocated_cfg_x,
-      [this](const RtlControlFlowGraph& x) {
-        return inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
+      [this, &altered_regnos](const RtlControlFlowGraph& x) {
+        RtlControlFlowGraph lifted_y = inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
+        altered_regnos.clear();
+        for (const auto& [regno, _] : lifted_y.sideband.reg_renumber) {
+          if (regno >= 67) {
+            altered_regnos.push_back(regno);
+          }
+        }
+        std::sort(altered_regnos.begin(), altered_regnos.end());
+        if (altered_regnos.empty()) {
+          altered_regnos.push_back(72);
+        }
+        return lifted_y;
       },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
-        hooks->RunAlterReg(/*regno=*/72, /*from_reg=*/-1);
+      [&altered_regnos](GccContext* /*ctx*/, FunctionHooks* hooks) {
+        for (int regno : altered_regnos) {
+          hooks->RunAlterReg(regno, /*from_reg=*/-1);
+        }
       },
       allocated_cfg_x.pass);
 }

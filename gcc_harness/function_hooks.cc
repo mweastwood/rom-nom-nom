@@ -271,6 +271,8 @@ void update_equiv_regs();
 int global_alloc(FILE* file);
 int reload(rtx_def* first, int global, FILE* dumpfile);
 void alter_reg(int i, int from_reg);
+rtx_def* assign_stack_local(int mode, int size, int align);
+extern int mode_size[];
 
 extern int max_scratch;
 extern int scratch_list_length;
@@ -2165,6 +2167,22 @@ void FunctionHooks::RunAlterReg(int regno, int from_reg) {
   Rtx head = ctx_->GetInsns();
   if (reg_renumber == nullptr && head != nullptr) {
     PrepareLocalAllocState(head);
+  }
+  if (reg_renumber != nullptr && regno >= kFirstPseudoRegister && reg_renumber[regno] < 0) {
+    if (regno_reg_rtx != nullptr && regno_reg_rtx[regno] != nullptr &&
+        regno_reg_rtx[regno]->code == kReg && (reg_n_refs == nullptr || reg_n_refs[regno] > 0)) {
+      Rtx reg = regno_reg_rtx[regno];
+      const int mode = reg->mode;
+      const int inherent_size =
+          (mode >= 0 && mode < kNumMachineModes && mode_size[mode] > 0) ? mode_size[mode] : 4;
+      virtuals_instantiated = 1;
+      Rtx slot = assign_stack_local(mode, inherent_size, -1);
+      if (slot != nullptr && slot->code == kMem) {
+        reg->code = kMem;
+        reg->fld[0].rtx = slot->fld[0].rtx;
+      }
+    }
+    return;
   }
   alter_reg(regno, from_reg);
 }
@@ -4580,10 +4598,16 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kAlterReg: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
       if (head != nullptr) {
-        for (const auto& [regno, hard_reg] : pre_state.sideband.reg_renumber) {
-          if (regno >= kFirstPseudoRegister && hard_reg >= 0) {
-            RunAlterReg(regno, -1);
+        std::vector<int> regnos;
+        regnos.reserve(pre_state.sideband.reg_renumber.size());
+        for (const auto& [regno, _] : pre_state.sideband.reg_renumber) {
+          if (regno >= kFirstPseudoRegister) {
+            regnos.push_back(regno);
           }
+        }
+        std::sort(regnos.begin(), regnos.end());
+        for (int regno : regnos) {
+          RunAlterReg(regno, -1);
         }
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kGreg);
