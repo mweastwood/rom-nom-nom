@@ -16,14 +16,8 @@
 namespace rom_nom_nom::gcc_harness {
 
 using PrologueEpilogueFrameSpec = ::rom_nom_nom::PrologueEpilogueFrameSpec;
-
-// Pre-substitution arguments `(target_expr, from_reg, to_expr)` recovered by
-// `InvertSubst` for `combine.c:subst`.
-struct SubstInverseSpec {
-  std::string target_expr;
-  std::string from_reg;
-  std::string to_expr;
-};
+using SubstInverseSpec = ::rom_nom_nom::SubstInverseSpec;
+using SubstPreImage = ::rom_nom_nom::SubstPreImage;
 
 // Input bundle recovered by `InvertExpandFunctionEnd` for
 // `function.c:expand_function_end`.

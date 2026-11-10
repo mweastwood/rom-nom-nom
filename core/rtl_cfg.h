@@ -30,6 +30,22 @@ struct PrologueEpilogueFrameSpec {
   bool operator!=(const PrologueEpilogueFrameSpec& other) const { return !(*this == other); }
 };
 
+// Pre-substitution arguments `(target_expr, from_reg, to_expr)` recovered by
+// `InvertSubst` for `combine.c:subst`.
+struct SubstInverseSpec {
+  std::string target_expr;
+  std::string from_reg;
+  std::string to_expr;
+
+  bool operator==(const SubstInverseSpec& other) const {
+    return target_expr == other.target_expr && from_reg == other.from_reg &&
+           to_expr == other.to_expr;
+  }
+  bool operator!=(const SubstInverseSpec& other) const { return !(*this == other); }
+};
+
+using SubstPreImage = SubstInverseSpec;
+
 // Identifies each RTL dump pass emitted by KMC GCC 2.7.2 (`toplev.c:rest_of_compilation`)
 // when invoked with `-da`, ordered chronologically along the forward compilation pipeline.
 enum class RtlPassKind {

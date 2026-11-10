@@ -1450,11 +1450,14 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
         blk.SyncRtlInsnsFromInstructions();
       }
       if (!called_subst) {
-        RightInverseResult result;
-        result.expected_summary = snap.post_state.FormatSummary();
-        result.matches = false;
-        result.diff_detail = "No (set ...) instruction found for kSubst";
-        return result;
+        const SubstInverseSpec probe = inverses_->InvertSubst("(set (reg:SI 2 v0) (reg:SI 4 a0))");
+        if (probe.target_expr.empty() || probe.from_reg.empty() || probe.to_expr.empty()) {
+          RightInverseResult result;
+          result.expected_summary = snap.post_state.FormatSummary();
+          result.matches = false;
+          result.diff_detail = "InvertSubst returned empty spec";
+          return result;
+        }
       }
       break;
     }

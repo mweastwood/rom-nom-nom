@@ -2192,9 +2192,10 @@ void FunctionHooks::RunAlterReg(int regno, int from_reg) {
 // -----------------------------------------------------------------------------
 
 void FunctionHooks::PrepareCombineState(Rtx first) {
+  const int prev_max_reg = max_reg_num();
   restore_reg_data(first);
-  const int nregs = max_reg_num() + 16;
-  max_regno = max_reg_num();
+  const int nregs = std::max({max_reg_num(), prev_max_reg, 256}) + 16;
+  max_regno = std::max(max_reg_num(), prev_max_reg);
   reg_scan(first, max_regno, 0);
 
   bool has_existing_log_links = false;
@@ -2427,9 +2428,36 @@ void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
 }
 
 Rtx FunctionHooks::RunSubst(Rtx x, Rtx from, Rtx to, int in_dest, int unique_copy) {
+  if (x == nullptr || from == nullptr || to == nullptr) {
+    return nullptr;
+  }
   Rtx head = ctx_->GetInsns();
   if (head != nullptr) {
     PrepareCombineState(head);
+  } else {
+    const int nregs = std::max(max_reg_num(), 256) + 16;
+    max_regno = max_reg_num();
+    combine_max_regno = nregs;
+    undobuf.num_undo = 0;
+    undobuf.other_insn = nullptr;
+    previous_num_undos = 0;
+    reg_nonzero_bits = AllocZeroed<uint64_t>(nregs);
+    reg_sign_bit_copies = AllocZeroed<char>(nregs);
+    reg_last_death = AllocZeroed<Rtx>(nregs);
+    reg_last_set = AllocZeroed<Rtx>(nregs);
+    reg_last_set_value = AllocZeroed<Rtx>(nregs);
+    reg_last_set_table_tick = AllocZeroed<int>(nregs);
+    reg_last_set_label = AllocZeroed<int>(nregs);
+    reg_last_set_invalid = AllocZeroed<char>(nregs);
+    reg_last_set_mode = AllocZeroed<int>(nregs);
+    reg_last_set_nonzero_bits = AllocZeroed<uint64_t>(nregs);
+    reg_last_set_sign_bit_copies = AllocZeroed<char>(nregs);
+    init_reg_last_arrays();
+    nonzero_bits_mode = kSiMode;
+    nonzero_sign_valid = 0;
+    label_tick = 1;
+    subst_prev_insn = nullptr;
+    subst_low_cuid = 1;
   }
   return subst(x, from, to, in_dest, unique_copy);
 }
