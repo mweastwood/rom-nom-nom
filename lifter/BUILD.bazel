@@ -465,6 +465,38 @@ cc_test(
 )
 
 cc_library(
+    name = "invert_schedule_block",
+    srcs = ["invert_schedule_block.cc"],
+    hdrs = ["invert_schedule_block.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "invert_schedule_block_test",
+    size = "medium",
+    srcs = ["invert_schedule_block_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":invert_schedule_block",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "dominator_tree",
     srcs = ["dominator_tree.cc"],
     hdrs = ["dominator_tree.h"],
