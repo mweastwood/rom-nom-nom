@@ -145,5 +145,113 @@ TEST(RtlSexprUtilsTest, MipsRegisterFormattingAndParsing) {
   EXPECT_EQ(ParseMipsAsmRegNumber("invalid"), -1);
 }
 
+TEST(RtlSexprUtilsTest, ConsecutiveCodeLabelsCoalesceExceptAcrossLoopNotesOrJumpTables) {
+  constexpr std::string_view kRawDump = R"(
+;; Function label_coalesce_fn
+
+(note 1 0 2 "" NOTE_INSN_FUNCTION_BEG)
+
+(jump_insn 2 1 3 (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref 10) (pc))) -1 (nil) (nil))
+
+(jump_insn 3 2 4 (set (pc) (label_ref 11)) -1 (nil) (nil))
+
+(barrier 4 3 10)
+
+(code_label 10 4 5 2 "" [num_refs: 1])
+
+(note 5 10 11 "" NOTE_INSN_DELETED)
+
+(code_label 11 5 12 3 "" [num_refs: 1])
+
+(insn 12 11 20 (set (reg:SI 2 v0) (const_int 7)) -1 (nil) (nil))
+
+(code_label 20 12 21 4 "" [num_refs: 1])
+
+(note 21 20 22 "" NOTE_INSN_LOOP_BEG)
+
+(code_label 22 21 23 5 "" [num_refs: 1])
+
+(jump_insn 23 22 24 (set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 1)) (label_ref 22) (pc))) -1 (nil) (nil))
+
+(note 24 23 30 "" NOTE_INSN_LOOP_END)
+
+(jump_insn 30 24 31 (parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref 32)) ] ) -1 (nil) (nil))
+
+(barrier 31 30 32)
+
+(code_label 32 31 33 6 "" [num_refs: 1])
+
+(jump_insn 33 32 34 (addr_vec:SI [(label_ref 10) (label_ref 35)]) -1 (nil) (nil))
+
+(barrier 34 33 35)
+
+(code_label 35 34 36 7 "" [num_refs: 1])
+
+(code_label 36 35 37 8 "" [num_refs: 1])
+
+(jump_insn 37 36 38 (addr_diff_vec:HI (label_ref 36) [(label_ref 10) (label_ref 20)] (const_int 0) (const_int 0)) -1 (nil) (nil))
+
+(barrier 38 37 39)
+
+(code_label 39 38 40 9 "" [num_refs: 1])
+
+(jump_insn 40 39 41 (return) -1 (nil) (nil))
+
+(barrier 41 40 0)
+)";
+
+  const RtlPassDump pass_dump = ParseRtlPassDump(RtlPassKind::kJump2, kRawDump);
+  const RtlFunctionDump* fn_dump = pass_dump.FindFunction("label_coalesce_fn");
+  ASSERT_NE(fn_dump, nullptr);
+
+  const absl::flat_hash_map<int, std::string> label_map = BuildSequentialLabelMap(*fn_dump);
+  // Adjacent `code_label`s 10 and 11 (separated only by non-loop `NOTE_INSN_DELETED`)
+  // coalesce onto the same canonical label `L0`.
+  ASSERT_TRUE(label_map.contains(10));
+  ASSERT_TRUE(label_map.contains(11));
+  EXPECT_EQ(label_map.at(10), "L0");
+  EXPECT_EQ(label_map.at(11), "L0");
+
+  // `code_label`s 20 and 22 are separated by `NOTE_INSN_LOOP_BEG`, so they must NOT coalesce.
+  ASSERT_TRUE(label_map.contains(20));
+  ASSERT_TRUE(label_map.contains(22));
+  EXPECT_EQ(label_map.at(20), "L1");
+  EXPECT_EQ(label_map.at(22), "L2");
+  EXPECT_NE(label_map.at(20), label_map.at(22));
+
+  // `code_label` 32 heads an `addr_vec` jump table, and `code_label` 36 heads an
+  // `addr_diff_vec` jump table immediately after `code_label` 35; neither jump-table
+  // label may coalesce onto neighboring `code_label`s (35 or 39).
+  ASSERT_TRUE(label_map.contains(32));
+  ASSERT_TRUE(label_map.contains(35));
+  ASSERT_TRUE(label_map.contains(36));
+  ASSERT_TRUE(label_map.contains(39));
+  EXPECT_EQ(label_map.at(32), "L3");
+  EXPECT_EQ(label_map.at(35), "L4");
+  EXPECT_EQ(label_map.at(36), "L5");
+  EXPECT_EQ(label_map.at(39), "L6");
+  EXPECT_NE(label_map.at(35), label_map.at(36));
+  EXPECT_NE(label_map.at(36), label_map.at(39));
+
+  // Verify `BuildCanonicalCfgFromRtlDump` rewrites both `(label_ref 10)` and
+  // `(label_ref 11)` to `(label_ref L0)`, merges block `L0` into a single RPO block
+  // (`rpo_blocks[2]`), and keeps `L1` (`rpo_blocks[3]`, containing `NOTE_INSN_LOOP_BEG`)
+  // separate from loop header `L2` (`rpo_blocks[4]`).
+  const RtlControlFlowGraph cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
+  ASSERT_GE(cfg.rpo_blocks.size(), 5u);
+  EXPECT_EQ(cfg.rpo_blocks[0].instructions.back(),
+            "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc)))");
+  EXPECT_EQ(cfg.rpo_blocks[1].instructions.back(), "(set (pc) (label_ref L0))");
+  EXPECT_EQ(cfg.rpo_blocks[0].successors, (std::vector<size_t>{2, 1}));
+  EXPECT_EQ(cfg.rpo_blocks[1].successors, (std::vector<size_t>{2}));
+  EXPECT_EQ(cfg.rpo_blocks[2].predecessors, (std::vector<size_t>{0, 1, 5}));
+  EXPECT_EQ(cfg.rpo_blocks[2].instructions,
+            (std::vector<std::string>{"(set (reg:SI 2 v0) (const_int 7))"}));
+  EXPECT_EQ(cfg.rpo_blocks[3].instructions,
+            (std::vector<std::string>{"(note NOTE_INSN_LOOP_BEG)"}));
+  EXPECT_EQ(cfg.rpo_blocks[4].instructions.front(),
+            "(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 1)) (label_ref L2) (pc)))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

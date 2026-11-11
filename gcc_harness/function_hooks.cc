@@ -1,6 +1,8 @@
 #include "gcc_harness/function_hooks.h"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +19,7 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
 #include "core/rtl_sexpr_utils.h"
 
@@ -144,12 +147,20 @@ void final_end_function(rtx_def* first, FILE* file, int optimize);
 rtx_def* final_scan_insn(rtx_def* insn, FILE* file, int optimize, int prescan, int nopeepholes);
 void function_prologue(FILE* file, int size);
 void function_epilogue(FILE* file, int size);
+int simple_epilogue_p();
 extern char* line_note_exists;
 extern rtx_def* last_ignored_compare;
 extern rtx_def* final_sequence;
 extern int set_noreorder;
 extern int set_nomacro;
 extern int mips_branch_likely;
+extern int const_labelno;
+int get_pool_size();
+void output_constant_pool(char* fnname, void* fndecl);
+void text_section();
+void function_section(void* decl);
+void save_varasm_status(void* p);
+void restore_varasm_status(void* p);
 
 // Stage 0: Binutils 2.6 GAS.
 struct GasMipsOpcode {
@@ -269,6 +280,9 @@ rtx_def* fill_slots_from_thread(rtx_def* insn, rtx_def* condition, rtx_def* thre
 void relax_delay_slots(rtx_def* first);
 void make_return_insns(rtx_def* first);
 rtx_def* find_end_label();
+void mark_target_live_regs(rtx_def* target, void* res);
+rtx_def* next_nonnote_insn(rtx_def* insn);
+rtx_def* emit_note_before(int subtype, rtx_def* before);
 
 extern int reorg_max_uid;
 extern int* uid_to_ruid;
@@ -793,16 +807,23 @@ void DeduplicateRegEquivNotes(Rtx first) {
     if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
       continue;
     }
-    bool seen_equiv = false;
+    std::vector<Rtx> seen_equiv_datums;
     Rtx* link = &insn->fld[6].rtx;
     while (*link != nullptr) {
       Rtx cur = *link;
       if (cur->mode == kRegEquiv) {
-        if (seen_equiv) {
+        bool duplicate = false;
+        for (Rtx prev_datum : seen_equiv_datums) {
+          if (rtx_equal_p(cur->fld[0].rtx, prev_datum) != 0) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) {
           *link = cur->fld[1].rtx;
           continue;
         }
-        seen_equiv = true;
+        seen_equiv_datums.push_back(cur->fld[0].rtx);
       }
       link = &cur->fld[1].rtx;
     }
@@ -933,7 +954,18 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
   FILE* start_fp = open_memstream(&start_buf, &start_len);
   FILE* saved_asm = asm_out_file;
   asm_out_file = start_fp;
+  alignas(16) uint8_t saved_fn_status[2048] = {};
+  const bool emit_pool = include_prologue_epilogue && get_pool_size() > 0;
+  if (emit_pool) {
+    save_varasm_status(saved_fn_status);
+    text_section();
+    output_constant_pool(const_cast<char*>("harness_func"), current_function_decl);
+    function_section(current_function_decl);
+  }
   final_start_function(head, start_fp, optimize);
+  if (emit_pool) {
+    restore_varasm_status(saved_fn_status);
+  }
   asm_out_file = saved_asm;
   std::fclose(start_fp);
   std::string out;
@@ -978,7 +1010,11 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
     }
     const std::string_view cname = rtx_name[e->code];
     if (cname == "symbol_ref" && e->fld[0].rtstr != nullptr) {
-      return e->fld[0].rtstr;
+      std::string sym(e->fld[0].rtstr);
+      if (!sym.empty() && sym.front() == '*') {
+        sym.erase(0, 1);
+      }
+      return sym;
     }
     if (cname == "label_ref" && e->fld[0].rtx != nullptr) {
       return absl::StrFormat("$L%d", e->fld[0].rtx->fld[3].rtint);
@@ -1190,12 +1226,16 @@ void FunctionHooks::RunShortenBranches(Rtx first) {
   }
 }
 
-std::string FunctionHooks::RunFunctionPrologue(int frame_size, uint32_t saved_gpr_mask) {
+std::string FunctionHooks::RunFunctionPrologue(int frame_size, uint32_t saved_gpr_mask,
+                                               uint32_t saved_fpr_mask) {
   reload_completed = 1;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   for (int r = 0; r < 32; ++r) {
     if ((saved_gpr_mask >> r) & 1u) {
       regs_ever_live[r] = 1;
+    }
+    if ((saved_fpr_mask >> r) & 1u) {
+      regs_ever_live[32 + r] = 1;
     }
   }
   compute_frame_size(frame_size);
@@ -1213,12 +1253,16 @@ std::string FunctionHooks::RunFunctionPrologue(int frame_size, uint32_t saved_gp
   return out;
 }
 
-std::string FunctionHooks::RunFunctionEpilogue(int frame_size, uint32_t saved_gpr_mask) {
+std::string FunctionHooks::RunFunctionEpilogue(int frame_size, uint32_t saved_gpr_mask,
+                                               uint32_t saved_fpr_mask) {
   reload_completed = 1;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   for (int r = 0; r < 32; ++r) {
     if ((saved_gpr_mask >> r) & 1u) {
       regs_ever_live[r] = 1;
+    }
+    if ((saved_fpr_mask >> r) & 1u) {
+      regs_ever_live[32 + r] = 1;
     }
   }
   compute_frame_size(frame_size);
@@ -1236,12 +1280,16 @@ std::string FunctionHooks::RunFunctionEpilogue(int frame_size, uint32_t saved_gp
   return out;
 }
 
-std::string FunctionHooks::RunFunctionPrologueEpilogue(int frame_size, uint32_t saved_gpr_mask) {
+std::string FunctionHooks::RunFunctionPrologueEpilogue(int frame_size, uint32_t saved_gpr_mask,
+                                                       uint32_t saved_fpr_mask) {
   reload_completed = 1;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   for (int r = 0; r < 32; ++r) {
     if ((saved_gpr_mask >> r) & 1u) {
       regs_ever_live[r] = 1;
+    }
+    if ((saved_fpr_mask >> r) & 1u) {
+      regs_ever_live[32 + r] = 1;
     }
   }
   compute_frame_size(frame_size);
@@ -1265,6 +1313,15 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
 }
 
 Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view asm_text) {
+  struct ScopedGasIsaGuard {
+    int saved = mips_isa;
+    ScopedGasIsaGuard() {
+      if (mips_isa < 2) {
+        mips_isa = 3;
+      }
+    }
+    ~ScopedGasIsaGuard() { mips_isa = saved; }
+  } gas_isa_guard;
   constexpr int kGasOpAbsent = 1;
   constexpr int kBfdReloc32 = 2;
   constexpr int kBfdReloc16PcrelS2 = 44;
@@ -1338,17 +1395,34 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
   std::string current_section = ".text";
   size_t active_data_idx = static_cast<size_t>(-1);
 
-  auto parse_int_word = [](std::string_view tok, uint32_t* out_word) -> bool {
+  auto parse_int64_or_uint64 = [](std::string_view tok, uint64_t* out_val) -> bool {
     std::string s(absl::StripAsciiWhitespace(tok));
     if (s.empty()) {
       return false;
     }
     char* endptr = nullptr;
-    const long long val = std::strtoll(s.c_str(), &endptr, 0);
-    if (endptr == s.c_str() || *endptr != '\0') {
+    errno = 0;
+    if (s.front() == '-') {
+      const long long val = std::strtoll(s.c_str(), &endptr, 0);
+      if (errno != 0 || endptr == s.c_str() || *endptr != '\0') {
+        return false;
+      }
+      *out_val = static_cast<uint64_t>(static_cast<int64_t>(val));
+      return true;
+    }
+    const unsigned long long val = std::strtoull(s.c_str(), &endptr, 0);
+    if (errno != 0 || endptr == s.c_str() || *endptr != '\0') {
       return false;
     }
-    *out_word = static_cast<uint32_t>(static_cast<int64_t>(val));
+    *out_val = static_cast<uint64_t>(val);
+    return true;
+  };
+  auto parse_int_word = [&](std::string_view tok, uint32_t* out_word) -> bool {
+    uint64_t val = 0;
+    if (!parse_int64_or_uint64(tok, &val)) {
+      return false;
+    }
+    *out_word = static_cast<uint32_t>(val);
     return true;
   };
 
@@ -1455,6 +1529,20 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
               raw_data_blocks[active_data_idx].int_words.push_back(w);
             } else {
               raw_data_blocks[active_data_idx].symbol_words.emplace_back(item);
+            }
+          }
+        } else if (match_dir("dword")) {
+          std::string_view args = absl::StripAsciiWhitespace(rest.substr(5));
+          for (std::string_view item : absl::StrSplit(args, ',')) {
+            item = absl::StripAsciiWhitespace(item);
+            if (item.empty()) {
+              continue;
+            }
+            uint64_t dw = 0;
+            if (parse_int64_or_uint64(item, &dw)) {
+              raw_data_blocks[active_data_idx].int_words.push_back(static_cast<uint32_t>(dw >> 32));
+              raw_data_blocks[active_data_idx].int_words.push_back(
+                  static_cast<uint32_t>(dw & 0xffffffffu));
             }
           }
         } else if (match_dir("float") || match_dir("single")) {
@@ -1690,7 +1778,7 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
       if (sym_name.find('\001') != std::string::npos) {
         auto lit_it = anon_literal_labels.find(fx->fx_addsy);
         if (lit_it == anon_literal_labels.end()) {
-          std::string synth_label = absl::StrCat("$LC_lit_", anon_literal_labels.size());
+          std::string synth_label = absl::StrCat(".Llit", anon_literal_labels.size());
           void* seg = S_GET_SEGMENT(fx->fx_addsy);
           const char* raw_sec =
               seg != nullptr ? *reinterpret_cast<const char* const*>(seg) : ".rdata";
@@ -2068,11 +2156,227 @@ std::vector<uint32_t> FunctionHooks::RunGasAppendInsnReorder(
 // Stage 1: Reorg (`reorg.c`)
 // -----------------------------------------------------------------------------
 
+namespace {
+
+struct GccReorgResources {
+  char memory;
+  char unch_memory;
+  char volatil;
+  char cc;
+  uint32_t regs[3];
+};
+static_assert(sizeof(GccReorgResources) == 16);
+
+void SetReorgHardRegRange(GccReorgResources* res, int regno, int mode) {
+  if (res == nullptr || regno < 0 || regno >= kFirstPseudoRegister) {
+    return;
+  }
+  const int msize =
+      (mode >= 0 && mode < kNumMachineModes && mode_size[mode] > 0) ? mode_size[mode] : 4;
+  const bool is_fp_reg = (regno >= 32 && regno < 64);
+  const int unit_bytes = is_fp_reg ? ((target_flags & 0x00000200) != 0 ? 8 : 4)
+                                   : ((target_flags & 0x00002000) != 0 ? 8 : 4);
+  const int nregs = std::max(1, (msize + unit_bytes - 1) / unit_bytes);
+  for (int r = regno; r < regno + nregs && r < kFirstPseudoRegister; ++r) {
+    res->regs[r / 32] |= (uint32_t{1} << (r % 32));
+  }
+}
+
+void MarkReferencedHardRegsInEpilogueDelay(Rtx x, GccReorgResources* res) {
+  if (x == nullptr) {
+    return;
+  }
+  const int code = x->code;
+  if (code == kReg) {
+    SetReorgHardRegRange(res, x->fld[0].rtint, x->mode);
+    return;
+  }
+  if (code == kSubreg && x->fld[0].rtx != nullptr && x->fld[0].rtx->code == kReg) {
+    SetReorgHardRegRange(res, x->fld[0].rtx->fld[0].rtint, x->mode);
+    return;
+  }
+  if (code == kSet) {
+    MarkReferencedHardRegsInEpilogueDelay(x->fld[1].rtx, res);
+    if (x->fld[0].rtx != nullptr && x->fld[0].rtx->code != kReg &&
+        !(x->fld[0].rtx->code == kSubreg && x->fld[0].rtx->fld[0].rtx != nullptr &&
+          x->fld[0].rtx->fld[0].rtx->code == kReg)) {
+      MarkReferencedHardRegsInEpilogueDelay(x->fld[0].rtx, res);
+    }
+    return;
+  }
+  if (code == kClobber) {
+    return;
+  }
+  if (code < 0 || code >= kNumRtxCode || rtx_format[code] == nullptr) {
+    return;
+  }
+  const char* fmt = rtx_format[code];
+  const int len = rtx_length[code];
+  for (int i = 0; i < len; ++i) {
+    if (fmt[i] == 'e') {
+      MarkReferencedHardRegsInEpilogueDelay(x->fld[i].rtx, res);
+    } else if (fmt[i] == 'E' && x->fld[i].rtvec != nullptr) {
+      Rtvec vec = x->fld[i].rtvec;
+      for (int j = 0; j < vec->num_elem; ++j) {
+        MarkReferencedHardRegsInEpilogueDelay(vec->elem[j].rtx, res);
+      }
+    }
+  }
+}
+
+void InitReorgEndOfFunctionNeeds() {
+  // Match `reorg.c:4255-4304` (`end_of_function_needs` and
+  // `start_of_epilogue_needs`) plus `reorg.c:3211` when an epilogue delay insn
+  // is already present in `current_function_epilogue_delay_list`.
+  GccReorgResources eof{};
+  eof.memory = 1;
+  SetReorgHardRegRange(&eof, 29, kSiMode);
+  if (frame_pointer_needed != 0) {
+    SetReorgHardRegRange(&eof, 30, kSiMode);
+  }
+  if (current_function_return_rtx != nullptr && current_function_return_rtx->code == kReg) {
+    SetReorgHardRegRange(&eof, current_function_return_rtx->fld[0].rtint,
+                         current_function_return_rtx->mode);
+  }
+  for (int i = 0; i < kFirstPseudoRegister; ++i) {
+    if (global_regs[i] != 0) {
+      eof.regs[i / 32] |= (uint32_t{1} << (i % 32));
+    }
+  }
+  std::memcpy(start_of_epilogue_needs, &eof, sizeof(GccReorgResources));
+  if (current_function_epilogue_delay_list != nullptr &&
+      current_function_epilogue_delay_list->fld[0].rtx != nullptr) {
+    Rtx ep_insn = current_function_epilogue_delay_list->fld[0].rtx;
+    Rtx ep_pat =
+        (ep_insn->code == kInsn || ep_insn->code == kJumpInsn || ep_insn->code == kCallInsn)
+            ? ep_insn->fld[3].rtx
+            : ep_insn;
+    MarkReferencedHardRegsInEpilogueDelay(ep_pat, &eof);
+  }
+  std::memcpy(end_of_function_needs, &eof, sizeof(GccReorgResources));
+}
+
+struct SavedBlockLiveState {
+  bool had_non_empty = false;
+  std::vector<std::vector<uint32_t>> by_rpo;
+  absl::flat_hash_map<int, std::vector<uint32_t>> by_head_uid;
+};
+
+SavedBlockLiveState SaveActiveBasicBlockLiveAtStart() {
+  SavedBlockLiveState saved;
+  if (basic_block_live_at_start == nullptr || n_basic_blocks <= 0 || regset_size <= 0) {
+    return saved;
+  }
+  saved.by_rpo.resize(n_basic_blocks);
+  for (int b = 0; b < n_basic_blocks; ++b) {
+    const auto* src = reinterpret_cast<const uint32_t*>(basic_block_live_at_start[b]);
+    if (src == nullptr) {
+      continue;
+    }
+    saved.by_rpo[b].assign(src, src + regset_size);
+    for (int w = 0; w < regset_size; ++w) {
+      if (src[w] != 0u) {
+        saved.had_non_empty = true;
+      }
+    }
+    if (basic_block_head != nullptr && basic_block_head[b] != nullptr &&
+        basic_block_head[b]->fld[0].rtint >= 0) {
+      saved.by_head_uid[basic_block_head[b]->fld[0].rtint] = saved.by_rpo[b];
+    }
+  }
+  return saved;
+}
+
+void RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(const SavedBlockLiveState& saved,
+                                                      const GccContext& ctx) {
+  if (!saved.had_non_empty || basic_block_live_at_start == nullptr || basic_block_head == nullptr ||
+      n_basic_blocks <= 0 || regset_size <= 0) {
+    return;
+  }
+  for (int b = 0; b < n_basic_blocks; ++b) {
+    auto* dst = reinterpret_cast<uint32_t*>(basic_block_live_at_start[b]);
+    if (dst == nullptr || basic_block_head[b] == nullptr) {
+      continue;
+    }
+    const std::vector<uint32_t>* src_vec = nullptr;
+    const int head_uid = basic_block_head[b]->fld[0].rtint;
+    if (auto it = saved.by_head_uid.find(head_uid); it != saved.by_head_uid.end()) {
+      src_vec = &it->second;
+    } else {
+      int rpo_b = ctx.LookupMaterializedRpoBlock(head_uid);
+      if (rpo_b < 0 && b == 0) {
+        rpo_b = 0;
+      }
+      if (rpo_b >= 0 && rpo_b < static_cast<int>(saved.by_rpo.size())) {
+        src_vec = &saved.by_rpo[rpo_b];
+      }
+    }
+    if (src_vec != nullptr) {
+      const int copy_words = std::min<int>(regset_size, static_cast<int>(src_vec->size()));
+      for (int w = 0; w < copy_words; ++w) {
+        dst[w] = (*src_vec)[w];
+      }
+    }
+  }
+}
+
+bool IsUpdateBlockUseMarkerInsn(Rtx insn) {
+  return insn != nullptr && insn->code == kInsn && insn->fld[3].rtx != nullptr &&
+         insn->fld[3].rtx->code == kUse && insn->fld[3].rtx->fld[0].rtx != nullptr &&
+         rtx_class[insn->fld[3].rtx->fld[0].rtx->code] == 'i';
+}
+
+bool IsLoopDematerializedNote(Rtx insn) {
+  if (insn == nullptr || insn->code != kNote) {
+    return false;
+  }
+  const int nk = insn->fld[4].rtint;
+  return nk == kNoteInsnLoopBeg || nk == kNoteInsnLoopCont || nk == kNoteInsnLoopEnd ||
+         nk == kNoteInsnLoopVtop;
+}
+
+Rtx EnsureReorgLeadingSentinelNote(Rtx first) {
+  Rtx head = get_insns();
+  if (head == nullptr) {
+    return first;
+  }
+  if (head->code != kNote) {
+    Rtx lead = emit_note_before(kNoteInsnDeleted, head);
+    if ((head->code == kInsn || head->code == kJumpInsn || head->code == kCallInsn) &&
+        head->fld[3].rtx != nullptr && head->fld[3].rtx->code == kSequence &&
+        head->fld[3].rtx->fld[0].rtvec != nullptr && head->fld[3].rtx->fld[0].rtvec->num_elem > 0 &&
+        head->fld[3].rtx->fld[0].rtvec->elem[0].rtx != nullptr) {
+      head->fld[3].rtx->fld[0].rtvec->elem[0].rtx->fld[1].rtx = lead;
+    }
+    if (first == head) {
+      first = lead;
+    }
+  }
+  return first;
+}
+
+}  // namespace
+
 void FunctionHooks::PrepareReorgState(Rtx first) {
+  first = EnsureReorgLeadingSentinelNote(first);
   reload_completed = 1;
+  max_regno = std::max(max_reg_num(), kFirstPseudoRegister);
+  if (reg_renumber == nullptr) {
+    const int alloc_regs = max_regno + 16;
+    reg_renumber = AllocZeroed<short>(alloc_regs);
+    for (int i = 0; i < alloc_regs; ++i) {
+      reg_renumber[i] = -1;
+    }
+  }
   init_insn_lengths();
   init_recog();
   RefreshJumpLabelsAndNuses(first);
+
+  // Save pre-existing `basic_block_live_at_start` populated by
+  // `MaterializeFromCfg` (or an immediately preceding `reorg.c` subpass) before
+  // `RunFindBasicBlocks` reallocates the block tables.
+  const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
+
   // Preserve `CODE_LABEL`s (`LABEL_PRESERVE_P(insn)` == `insn->in_struct`)
   // during `find_basic_blocks` so labels that are only targeted from inside
   // already-formed `SEQUENCE`s are not deleted as unreachable before `reorg.c`
@@ -2089,6 +2393,8 @@ void FunctionHooks::PrepareReorgState(Rtx first) {
     }
   }
   RefreshJumpLabelsAndNuses(first);
+  RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+
   const int max_uid = get_max_uid() + 64;
   reorg_max_uid = max_uid;
   uid_to_ruid = AllocZeroed<int>(max_uid + 1);
@@ -2108,19 +2414,170 @@ void FunctionHooks::PrepareReorgState(Rtx first) {
       PushInsnToObstack(&unfilled_slots_obstack, insn);
     }
   }
-  std::memset(end_of_function_needs, 0, sizeof(end_of_function_needs));
-  std::memset(start_of_epilogue_needs, 0, sizeof(start_of_epilogue_needs));
+  InitReorgEndOfFunctionNeeds();
   end_of_function_label = nullptr;
   target_hash_table = AllocZeroed<void*>(257);
   bb_ticks = AllocZeroed<int>(std::max(1, n_basic_blocks) + 4);
   reorg_pass_number = 0;
 }
 
+absl::flat_hash_map<int, absl::flat_hash_set<int>> FunctionHooks::CapturePostReorgLiveAtStart(
+    Rtx first) {
+  absl::flat_hash_map<int, absl::flat_hash_set<int>> post_live;
+  if (first == nullptr || basic_block_live_at_start == nullptr || n_basic_blocks <= 0) {
+    return post_live;
+  }
+
+  struct PostCfgItem {
+    RtlInsnKind kind = RtlInsnKind::kOther;
+    Rtx rtx = nullptr;
+  };
+  std::vector<PostCfgItem> items;
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (IsUpdateBlockUseMarkerInsn(insn)) {
+      continue;
+    }
+    const int code = insn->code;
+    if (code == kNote) {
+      if (IsLoopDematerializedNote(insn)) {
+        items.push_back(PostCfgItem{.kind = RtlInsnKind::kNote, .rtx = insn});
+      }
+      continue;
+    }
+    if (code == kCodeLabel && insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kJumpInsn) {
+      Rtx next_pat = insn->fld[2].rtx->fld[3].rtx;
+      if (next_pat != nullptr && (next_pat->code == kAddrVec || next_pat->code == kAddrDiffVec)) {
+        insn = insn->fld[2].rtx;
+        while (insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kBarrier) {
+          insn = insn->fld[2].rtx;
+        }
+        continue;
+      }
+    }
+    if (code == kCodeLabel) {
+      items.push_back(PostCfgItem{.kind = RtlInsnKind::kCodeLabel, .rtx = insn});
+      continue;
+    }
+    if (code == kBarrier) {
+      items.push_back(PostCfgItem{.kind = RtlInsnKind::kBarrier, .rtx = insn});
+      continue;
+    }
+    if (code != kInsn && code != kJumpInsn && code != kCallInsn) {
+      continue;
+    }
+    Rtx pat = insn->fld[3].rtx;
+    if (code == kJumpInsn && pat != nullptr &&
+        (pat->code == kAddrVec || pat->code == kAddrDiffVec)) {
+      continue;
+    }
+    RtlInsnKind eff_kind =
+        (code == kJumpInsn) ? RtlInsnKind::kJumpInsn
+                            : ((code == kCallInsn) ? RtlInsnKind::kCallInsn : RtlInsnKind::kInsn);
+    if (pat != nullptr && pat->code == kSequence && pat->fld[0].rtvec != nullptr) {
+      Rtvec vec = pat->fld[0].rtvec;
+      for (int j = 0; j < vec->num_elem; ++j) {
+        if (vec->elem[j].rtx != nullptr && vec->elem[j].rtx->code == kJumpInsn) {
+          eff_kind = RtlInsnKind::kJumpInsn;
+        }
+      }
+    }
+    items.push_back(PostCfgItem{.kind = eff_kind, .rtx = insn});
+  }
+
+  auto first_active_insn_from = [](Rtx start) -> Rtx {
+    for (Rtx scan = start; scan != nullptr; scan = scan->fld[2].rtx) {
+      if (IsUpdateBlockUseMarkerInsn(scan)) {
+        continue;
+      }
+      if (scan->code == kInsn || scan->code == kJumpInsn || scan->code == kCallInsn) {
+        Rtx pat = scan->fld[3].rtx;
+        if (pat != nullptr && pat->code != kAddrVec && pat->code != kAddrDiffVec &&
+            pat->code != kUse && pat->code != kClobber) {
+          return scan;
+        }
+      }
+    }
+    return nullptr;
+  };
+
+  int block_idx = 0;
+  size_t i = 0;
+  std::vector<std::pair<Rtx, std::array<uint32_t, 3>>> live_blocks;
+  while (i < items.size()) {
+    if (items[i].kind == RtlInsnKind::kBarrier) {
+      ++i;
+      continue;
+    }
+    Rtx target_rtx = nullptr;
+    bool has_label = false;
+    bool has_insn = false;
+    while (i < items.size() && items[i].kind == RtlInsnKind::kCodeLabel) {
+      if (target_rtx == nullptr) {
+        target_rtx = items[i].rtx;
+      }
+      has_label = true;
+      ++i;
+    }
+    while (i < items.size() && items[i].kind != RtlInsnKind::kCodeLabel &&
+           items[i].kind != RtlInsnKind::kBarrier) {
+      if (target_rtx == nullptr) {
+        target_rtx = items[i].rtx;
+      }
+      has_insn = true;
+      if (items[i].kind == RtlInsnKind::kJumpInsn) {
+        ++i;
+        break;
+      }
+      ++i;
+    }
+    while (i < items.size() && items[i].kind == RtlInsnKind::kBarrier) {
+      ++i;
+    }
+    if (!has_insn && !has_label) {
+      continue;
+    }
+    Rtx query_target = target_rtx != nullptr ? first_active_insn_from(target_rtx) : nullptr;
+    GccReorgResources res{};
+    mark_target_live_regs(query_target, &res);
+    auto& dst_set = post_live[block_idx];
+    for (int r = 1; r < kFirstPseudoRegister; ++r) {
+      if ((res.regs[r / 32] & (uint32_t{1} << (r % 32))) != 0u) {
+        dst_set.insert(r);
+      }
+    }
+    res.regs[0] &= ~uint32_t{1};
+    Rtx head_rtx = (target_rtx != nullptr && target_rtx->code == kNote && query_target != nullptr)
+                       ? query_target
+                       : target_rtx;
+    live_blocks.emplace_back(head_rtx,
+                             std::array<uint32_t, 3>{res.regs[0], res.regs[1], res.regs[2]});
+    ++block_idx;
+  }
+
+  if (!live_blocks.empty() && regset_size > 0) {
+    const int num_live = static_cast<int>(live_blocks.size());
+    const int alloc_blocks = num_live + 4;
+    n_basic_blocks = num_live;
+    basic_block_head = AllocZeroed<Rtx>(alloc_blocks);
+    basic_block_live_at_start = AllocZeroed<Rtx>(alloc_blocks);
+    for (int b = 0; b < alloc_blocks; ++b) {
+      auto* words = AllocZeroed<uint32_t>(regset_size);
+      basic_block_live_at_start[b] = reinterpret_cast<Rtx>(words);
+      if (b < num_live) {
+        basic_block_head[b] = live_blocks[b].first;
+        const int copy_words = std::min<int>(regset_size, 3);
+        for (int w = 0; w < copy_words; ++w) {
+          words[w] = live_blocks[b].second[w];
+        }
+      }
+    }
+  }
+  return post_live;
+}
+
 void CleanupReorgBlockMarkers(Rtx first) {
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
-    if (insn->code == kInsn && insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kUse &&
-        insn->fld[3].rtx->fld[0].rtx != nullptr &&
-        rtx_class[insn->fld[3].rtx->fld[0].rtx->code] == 'i') {
+    if (IsUpdateBlockUseMarkerInsn(insn)) {
       insn->code = kNote;
       insn->fld[3].rtstr = nullptr;
       insn->fld[4].rtint = kNoteInsnDeleted;
@@ -2133,12 +2590,24 @@ void FunctionHooks::RunDbrSchedule(Rtx first) {
   if (head == nullptr) {
     return;
   }
+  head = EnsureReorgLeadingSentinelNote(head);
   reload_completed = 1;
+  max_regno = std::max(max_reg_num(), kFirstPseudoRegister);
+  if (reg_renumber == nullptr) {
+    const int alloc_regs = max_regno + 16;
+    reg_renumber = AllocZeroed<short>(alloc_regs);
+    for (int i = 0; i < alloc_regs; ++i) {
+      reg_renumber[i] = -1;
+    }
+  }
+  const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
   restore_reg_data(head);
   reg_scan(head, max_reg_num(), 0);
   RunFindBasicBlocks(head, nullptr);
   RefreshJumpLabelsAndNuses(head);
+  RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
   dbr_schedule(head, nullptr);
+  CleanupReorgBlockMarkers(ctx_->GetInsns());
 }
 
 void FunctionHooks::RunFillSimpleDelaySlots(int non_jumps_p, Rtx first) {
@@ -2147,8 +2616,9 @@ void FunctionHooks::RunFillSimpleDelaySlots(int non_jumps_p, Rtx first) {
     return;
   }
   PrepareReorgState(head);
-  fill_simple_delay_slots(head, non_jumps_p);
-  CleanupReorgBlockMarkers(head);
+  fill_simple_delay_slots(ctx_->GetInsns(), non_jumps_p);
+  last_reorg_post_live_ = CapturePostReorgLiveAtStart(ctx_->GetInsns());
+  CleanupReorgBlockMarkers(ctx_->GetInsns());
 }
 
 void FunctionHooks::RunFillEagerDelaySlots(Rtx first) {
@@ -2157,8 +2627,9 @@ void FunctionHooks::RunFillEagerDelaySlots(Rtx first) {
     return;
   }
   PrepareReorgState(head);
-  fill_eager_delay_slots(head);
-  CleanupReorgBlockMarkers(head);
+  fill_eager_delay_slots(ctx_->GetInsns());
+  last_reorg_post_live_ = CapturePostReorgLiveAtStart(ctx_->GetInsns());
+  CleanupReorgBlockMarkers(ctx_->GetInsns());
 }
 
 Rtx FunctionHooks::RunFillSlotsFromThread(Rtx insn, Rtx condition, Rtx thread, Rtx opposite_thread,
@@ -2171,8 +2642,8 @@ Rtx FunctionHooks::RunFillSlotsFromThread(Rtx insn, Rtx condition, Rtx thread, R
   }
   Rtx res = fill_slots_from_thread(insn, condition, thread, opposite_thread, likely, thread_if_true,
                                    own_thread, own_opposite_thread, slots_to_fill, pslots_filled);
-  if (head != nullptr) {
-    CleanupReorgBlockMarkers(head);
+  if (ctx_->GetInsns() != nullptr) {
+    CleanupReorgBlockMarkers(ctx_->GetInsns());
   }
   return res;
 }
@@ -2183,8 +2654,9 @@ void FunctionHooks::RunRelaxDelaySlots(Rtx first) {
     return;
   }
   PrepareReorgState(head);
-  relax_delay_slots(head);
-  CleanupReorgBlockMarkers(head);
+  relax_delay_slots(ctx_->GetInsns());
+  last_reorg_post_live_ = CapturePostReorgLiveAtStart(ctx_->GetInsns());
+  CleanupReorgBlockMarkers(ctx_->GetInsns());
 }
 
 void FunctionHooks::RunMakeReturnInsns(Rtx first) {
@@ -2193,14 +2665,57 @@ void FunctionHooks::RunMakeReturnInsns(Rtx first) {
     return;
   }
   PrepareReorgState(head);
-  end_of_function_label = find_end_label();
-  if (end_of_function_label != nullptr && --end_of_function_label->fld[5].rtint == 0) {
+  head = ctx_->GetInsns();
+  // Match `reorg.c:4349-4355`: recover `end_of_function_label` if an earlier
+  // `reorg.c` subpass created one at the tail of the insn chain, delete it if
+  // unused (`LABEL_NUSES == 0` without `find_end_label()`'s temporary +1 pin),
+  // and run `make_return_insns` when `HAVE_return` (`simple_epilogue_p() != 0`)
+  // and `end_of_function_label != nullptr`.
+  Rtx tail = get_last_insn();
+  while (tail != nullptr &&
+         (tail->code == kNote || tail->volatil != 0 ||
+          (tail->code == kInsn && tail->fld[3].rtx != nullptr &&
+           (tail->fld[3].rtx->code == kUse || tail->fld[3].rtx->code == kClobber)))) {
+    tail = tail->fld[1].rtx;
+  }
+  if (tail != nullptr && tail->code == kCodeLabel) {
+    end_of_function_label = tail;
+  } else if (simple_epilogue_p() != 0 && tail != nullptr && tail->code == kBarrier) {
+    Rtx prev = tail->fld[1].rtx;
+    while (prev != nullptr && (prev->code == kNote || prev->volatil != 0)) {
+      prev = prev->fld[1].rtx;
+    }
+    bool is_ret_jump = false;
+    if (prev != nullptr && prev->code == kJumpInsn && prev->fld[3].rtx != nullptr &&
+        prev->fld[3].rtx->code == kParallel) {
+      is_ret_jump = true;
+    } else if (prev != nullptr && prev->code == kInsn && prev->fld[3].rtx != nullptr &&
+               prev->fld[3].rtx->code == kSequence && prev->fld[3].rtx->fld[0].rtvec != nullptr &&
+               prev->fld[3].rtx->fld[0].rtvec->num_elem >= 1) {
+      Rtx slot0 = prev->fld[3].rtx->fld[0].rtvec->elem[0].rtx;
+      if (slot0 != nullptr && slot0->code == kJumpInsn && slot0->fld[3].rtx != nullptr &&
+          slot0->fld[3].rtx->code == kParallel) {
+        is_ret_jump = true;
+      }
+    }
+    if (is_ret_jump) {
+      Rtx lbl = prev->fld[1].rtx;
+      while (lbl != nullptr && (lbl->code == kNote || lbl->volatil != 0)) {
+        lbl = lbl->fld[1].rtx;
+      }
+      if (lbl != nullptr && lbl->code == kCodeLabel && lbl->fld[5].rtint == 0) {
+        end_of_function_label = lbl;
+      }
+    }
+  }
+  if (end_of_function_label != nullptr && end_of_function_label->fld[5].rtint == 0) {
     delete_insn(end_of_function_label);
   }
-  if (end_of_function_label != nullptr) {
-    make_return_insns(head);
+  if (simple_epilogue_p() != 0 && end_of_function_label != nullptr) {
+    make_return_insns(ctx_->GetInsns());
   }
-  CleanupReorgBlockMarkers(head);
+  last_reorg_post_live_ = CapturePostReorgLiveAtStart(ctx_->GetInsns());
+  CleanupReorgBlockMarkers(ctx_->GetInsns());
 }
 
 Rtx FunctionHooks::RunFindEndLabel(Rtx first) {
@@ -2232,12 +2747,19 @@ void FunctionHooks::RunJumpOptimize(int cross_jump, int noop_moves, int after_re
       reg_renumber[i] = -1;
     }
   }
+  const bool temp_deaths = (reg_n_deaths == nullptr);
+  if (temp_deaths) {
+    reg_n_deaths = AllocZeroed<short>(nregs + 16);
+  }
   jump_optimize(head, cross_jump, noop_moves, after_regscan);
   // `jump.c:jump_optimize` returns early when `!optimize` without clearing the
   // stack-allocated `jump_chain` (`alloca`), which would leave a dangling pointer
   // for subsequent `delete_insn` calls.
   jump_chain = nullptr;
   max_jump_chain = 0;
+  if (temp_deaths) {
+    reg_n_deaths = nullptr;
+  }
   if (temp_renumber) {
     reg_renumber = nullptr;
   }
@@ -2336,7 +2858,8 @@ SavedFlowState CaptureExistingFlowState(Rtx first) {
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
     if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
       for (Rtx link = insn->fld[6].rtx; link != nullptr; link = link->fld[1].rtx) {
-        if (static_cast<int>(link->mode) == kRegDead) {
+        if (static_cast<int>(link->mode) == kRegDead ||
+            static_cast<int>(link->mode) == kRegUnused) {
           has_reg_dead = true;
         }
       }
@@ -2461,8 +2984,10 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
     if (n_basic_blocks == 0 || basic_block_head == nullptr || basic_block_end == nullptr) {
+      const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
       RunFindBasicBlocks(head, nullptr);
       RefreshJumpLabelsAndNuses(head);
+      RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
     }
   }
   init_alias_analysis();
@@ -2526,11 +3051,13 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
       }
     }
   } else {
+    const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
     restore_reg_data(head);
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
     RunFindBasicBlocks(head, nullptr);
     RefreshJumpLabelsAndNuses(head);
+    RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
   }
   init_alias_analysis();
   PopulateInsnCodesWithVolatileOk(head);
@@ -3511,6 +4038,10 @@ void FunctionHooks::RunFindBasicBlocks(Rtx first, Rtx nonlocal_label_list) {
     basic_block_live_at_start[b] = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_words));
   }
   find_basic_blocks(head, nonlocal_label_list);
+  if (n_basic_blocks == 0) {
+    basic_block_head[0] = head;
+    basic_block_end[0] = head;
+  }
 }
 
 void FunctionHooks::RunLifeAnalysis(Rtx first, int nregs) {
@@ -4627,12 +5158,12 @@ void ApplyOptimizeLevelFlags(int optimize_level) {
     flag_inline_functions = (optimize_level >= 3) ? 1 : 0;
     SetGccFOption("rerun-cse-after-loop", 1);
   }
-  constexpr int kCodeForNothing = 338;
   for (GccOptab* tab :
        {sdiv_optab, sdivmod_optab, udiv_optab, udivmod_optab, smod_optab, umod_optab}) {
     if (tab != nullptr) {
-      tab->handlers[kSiMode].insn_code = kCodeForNothing;
-      tab->handlers[kDiMode].insn_code = kCodeForNothing;
+      const int code_for_nothing = tab->handlers[kVoidMode].insn_code;
+      tab->handlers[kSiMode].insn_code = code_for_nothing;
+      tab->handlers[kDiMode].insn_code = code_for_nothing;
     }
   }
   init_all_optabs();
@@ -4649,7 +5180,8 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
   g_switch_set = 1;
   g_switch_value = 0;
 
-  for (std::string_view flag : c_flags) {
+  for (size_t i = 0; i < c_flags.size(); ++i) {
+    std::string_view flag = c_flags[i];
     if (flag == "-O0") {
       ApplyOptimizeLevelFlags(0);
     } else if (flag == "-O" || flag == "-O1") {
@@ -4658,6 +5190,19 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
       ApplyOptimizeLevelFlags(2);
     } else if (flag == "-O3") {
       ApplyOptimizeLevelFlags(3);
+    } else if (flag == "-G" && i + 1 < c_flags.size()) {
+      int gval = 0;
+      if (absl::SimpleAtoi(c_flags[i + 1], &gval) && gval >= 0) {
+        g_switch_set = 1;
+        g_switch_value = gval;
+      }
+      ++i;
+    } else if (absl::StartsWith(flag, "-G") && flag.size() > 2) {
+      int gval = 0;
+      if (absl::SimpleAtoi(flag.substr(2), &gval) && gval >= 0) {
+        g_switch_set = 1;
+        g_switch_value = gval;
+      }
     } else if (flag == "-funsigned-char") {
       flag_signed_char = 0;
     } else if (flag == "-fsigned-char") {
@@ -4905,7 +5450,32 @@ struct InProcessCc1CompilationResult {
   std::vector<int> saved_gpr_regnos;
   std::vector<int> saved_fpr_regnos;
   std::optional<std::string> epilogue_delay_pattern;
+  std::vector<Stage0ConstantPoolEntry> constant_pool;
 };
+
+std::vector<Stage0ConstantPoolEntry> FilterReferencedConstantPool(
+    const RtlControlFlowGraph& cfg, const std::vector<Stage0ConstantPoolEntry>& pool) {
+  std::vector<Stage0ConstantPoolEntry> out;
+  for (const auto& cp : pool) {
+    const std::string quoted = absl::StrCat("\"", cp.label_name, "\"");
+    bool found = false;
+    for (const auto& blk : cfg.rpo_blocks) {
+      for (const std::string& pat : blk.instructions) {
+        if (absl::StrContains(pat, quoted)) {
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        break;
+      }
+    }
+    if (found) {
+      out.push_back(cp);
+    }
+  }
+  return out;
+}
 
 std::string ExtractFunctionAssemblyBlock(std::string_view full_asm, std::string_view fn_name) {
   if (fn_name.empty()) {
@@ -4950,6 +5520,7 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   source_buf.push_back('\n');
 
   clear_const_double_mem();
+  const_labelno = 0;
   permanent_allocation(1);
   current_function_decl = nullptr;
   reload_completed = 0;
@@ -5002,7 +5573,9 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   quiet_flag = 1;
   rtl_dump_and_exit = stop_after_initial_rtl ? 1 : 0;
 
+  GccContext::SetCc1ConstantPoolCaptureTarget(&res.constant_pool);
   yyparse();
+  GccContext::SetCc1ConstantPoolCaptureTarget(nullptr);
   jump_chain = nullptr;
   max_jump_chain = 0;
 
@@ -5031,9 +5604,10 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
       FILE* delay_fp = open_memstream(&delay_buf, &delay_len);
       print_rtl(delay_fp, delay_pat);
       std::fclose(delay_fp);
-      res.epilogue_delay_pattern = CanonicalizeRtlPattern(
-          delay_buf != nullptr ? std::string_view(delay_buf, delay_len) : std::string_view());
+      std::string raw_delay(delay_buf != nullptr ? delay_buf : "", delay_len);
       std::free(delay_buf);
+      absl::StrReplaceAll({{"\"*$LC", "\"$LC"}, {"\"*.LC", "\".LC"}}, &raw_delay);
+      res.epilogue_delay_pattern = CanonicalizeRtlPattern(raw_delay);
     }
   }
 
@@ -5075,6 +5649,7 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
     if (stop_after_initial_rtl && s.kind != RtlPassKind::kRtl) {
       continue;
     }
+    absl::StrReplaceAll({{"\"*$LC", "\"$LC"}, {"\"*.LC", "\".LC"}}, &raw_dump);
     RtlPassDump pass_dump = ParseRtlPassDump(s.kind, raw_dump);
     const RtlFunctionDump* fn_dump = nullptr;
     if (!function_name.empty()) {
@@ -5166,6 +5741,11 @@ absl::Span<const SubfunctionId> AllSubfunctionIds() {
   return absl::MakeConstSpan(kAllSubfunctionIds);
 }
 
+void FunctionHooks::ApplyCompilationProfile(const CompilationProfile& profile) {
+  int opt = profile.optimize_level;
+  ApplyCompilerFlags(profile.c_flags, &opt);
+}
+
 RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(
     std::string_view c_source, std::string_view function_name,
     absl::Span<const std::string> c_flags) {
@@ -5178,6 +5758,7 @@ RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(
   cfg.pass = RtlPassKind::kRtl;
   cfg.sideband.frame_size_bytes = cc1_res.frame_size_bytes;
   cfg.sideband.outgoing_args_size = cc1_res.outgoing_args_size;
+  cfg.sideband.constant_pool = FilterReferencedConstantPool(cfg, cc1_res.constant_pool);
   InferStackFrameSidebandFromRtlCfg(&cfg);
 
   // Materialize into `ctx_`, run `unshare_all_rtl` and `instantiate_virtual_regs`
@@ -5205,12 +5786,8 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
   snap.pre_state = pre_state;
   snap.pre_asm_lines.assign(pre_asm_lines.begin(), pre_asm_lines.end());
 
-  if (!c_flags.empty()) {
-    ApplyCompilerFlags(c_flags, &optimize_level);
-    snap.optimize_level = optimize_level;
-  } else {
-    ApplyOptimizeLevelFlags(optimize_level);
-  }
+  ApplyCompilerFlags(c_flags, &optimize_level);
+  snap.optimize_level = optimize_level;
 
   switch (subfunction_id) {
     case SubfunctionId::kInstantiateVirtualRegs: {
@@ -5638,8 +6215,10 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
         if (!has_prologue_sp_adjust) {
           frame_pointer_needed =
               (pre_state.sideband.frame_pointer_needed || flag_omit_frame_pointer == 0) ? 1 : 0;
+          const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
           RunFindBasicBlocks(head, nullptr);
           RefreshJumpLabelsAndNuses(head);
+          RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
           thread_prologue_and_epilogue_insns(head);
           head = ctx_->GetInsns();
         }
@@ -5653,47 +6232,74 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kDoCrossJump: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      const bool had_live = !pre_state.sideband.basic_block_live_at_start.empty();
       if (head != nullptr && optimize_level > 0) {
+        if (had_live) {
+          PrepareReorgState(head);
+          head = ctx_->GetInsns();
+        }
         RunJumpOptimize(/*cross_jump=*/1, /*noop_moves=*/1, /*after_regscan=*/0, head);
+        if (had_live) {
+          last_reorg_post_live_ = CapturePostReorgLiveAtStart(ctx_->GetInsns());
+        }
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kJump2);
+      if (head != nullptr && optimize_level > 0 && had_live) {
+        snap.post_state.sideband.basic_block_live_at_start = last_reorg_post_live_;
+      }
       break;
     }
 
     case SubfunctionId::kFillSimpleDelaySlots: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0) {
+      const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
+      if (ran) {
         RunFillSimpleDelaySlots(/*non_jumps_p=*/0, head);
         RunFillSimpleDelaySlots(/*non_jumps_p=*/1, ctx_->GetInsns());
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kDbr);
+      if (ran && !pre_state.sideband.basic_block_live_at_start.empty()) {
+        snap.post_state.sideband.basic_block_live_at_start = last_reorg_post_live_;
+      }
       break;
     }
 
     case SubfunctionId::kFillEagerDelaySlots: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0) {
+      const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
+      if (ran) {
         RunFillEagerDelaySlots(head);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kDbr);
+      if (ran && !pre_state.sideband.basic_block_live_at_start.empty()) {
+        snap.post_state.sideband.basic_block_live_at_start = last_reorg_post_live_;
+      }
       break;
     }
 
     case SubfunctionId::kRelaxDelaySlots: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0) {
+      const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
+      if (ran) {
         RunRelaxDelaySlots(head);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kDbr);
+      if (ran && !pre_state.sideband.basic_block_live_at_start.empty()) {
+        snap.post_state.sideband.basic_block_live_at_start = last_reorg_post_live_;
+      }
       break;
     }
 
     case SubfunctionId::kMakeReturnInsns: {
       Rtx head = ctx_->MaterializeFromCfg(pre_state);
-      if (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0) {
+      const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
+      if (ran) {
         RunMakeReturnInsns(head);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kDbr);
+      if (ran && !pre_state.sideband.basic_block_live_at_start.empty()) {
+        snap.post_state.sideband.basic_block_live_at_start = last_reorg_post_live_;
+      }
       break;
     }
 
@@ -5705,8 +6311,14 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           saved_mask |= (1u << r);
         }
       }
-      const std::string asm_text =
-          RunFunctionPrologueEpilogue(pre_state.sideband.frame_size_bytes, saved_mask);
+      uint32_t saved_fpr_mask = 0;
+      for (int r : pre_state.sideband.saved_fpr_regnos) {
+        if (r >= 32 && r < 64) {
+          saved_fpr_mask |= (1u << (r - 32));
+        }
+      }
+      const std::string asm_text = RunFunctionPrologueEpilogue(pre_state.sideband.frame_size_bytes,
+                                                               saved_mask, saved_fpr_mask);
       snap.post_state = pre_state;
       for (std::string_view raw_line : absl::StrSplit(asm_text, '\n')) {
         std::string_view line = absl::StripAsciiWhitespace(raw_line);
@@ -5792,10 +6404,8 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
   trace.optimize_level = optimize_level;
   trace.c_flags.assign(c_flags.begin(), c_flags.end());
 
-  if (!c_flags.empty()) {
-    ApplyCompilerFlags(c_flags, &optimize_level);
-    trace.optimize_level = optimize_level;
-  }
+  ApplyCompilerFlags(c_flags, &optimize_level);
+  trace.optimize_level = optimize_level;
 
   if (!function_name.empty()) {
     ctx_->BeginFunction(function_name);
@@ -5864,6 +6474,8 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
       case SubfunctionId::kGasAppendInsn: {
         trace.final_machine_words = snap.post_machine_words;
         trace.stage0_input = RunGasMdAssembleWithMetadata(trace.final_asm_text);
+        trace.stage0_input.profile.optimize_level = trace.optimize_level;
+        trace.stage0_input.profile.c_flags = trace.c_flags;
         break;
       }
       default:
@@ -5893,6 +6505,8 @@ FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(
   rtl_00_cfg.pass = RtlPassKind::kRtl;
   rtl_00_cfg.sideband.frame_size_bytes = cc1_res.frame_size_bytes;
   rtl_00_cfg.sideband.outgoing_args_size = cc1_res.outgoing_args_size;
+  rtl_00_cfg.sideband.constant_pool =
+      FilterReferencedConstantPool(rtl_00_cfg, cc1_res.constant_pool);
   InferStackFrameSidebandFromRtlCfg(&rtl_00_cfg);
   return TraceRtlPipeline(rtl_00_cfg, optimize_level, function_name, test_name, c_flags);
 }

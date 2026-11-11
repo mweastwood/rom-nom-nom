@@ -43,7 +43,11 @@ class ProductionStage0InverseProvider final : public gcc_harness::SubfunctionInv
   gcc_harness::PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(
       std::string_view asm_text_x) const override {
     const auto spec = lifter::InvertFunctionPrologueEpilogue(asm_text_x);
-    return {.var_size = spec.var_size, .saved_gpr_mask = spec.saved_gpr_mask};
+    return {
+        .var_size = spec.var_size,
+        .saved_gpr_mask = spec.saved_gpr_mask,
+        .saved_fpr_mask = spec.saved_fpr_mask,
+    };
   }
 
   RtlControlFlowGraph InvertFinalAndGasFunction(
@@ -245,6 +249,8 @@ double eval_stage0(int op, int x) {
   //    including mapped `jal` (`AudioUpdate`), unmapped `jal` (`func_80025000`), and
   //    intra-function local `j 0x80020024` targeting the shared epilogue:
   Stage0FunctionInput rom_input;
+  rom_input.profile.optimize_level = 2;
+  rom_input.profile.c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"};
   rom_input.base_vram = 0x80020000u;
   rom_input.vram_to_symbol[0x80024000u] = "AudioUpdate";
   rom_input.vram_to_symbol[0x80028000u] = "OtherCallee";
@@ -311,6 +317,107 @@ double eval_stage0(int op, int x) {
   EXPECT_FALSE(wrong_unmapped_verifier.VerifyFinalAndGasStageRightInverse(rom_input).matches);
 }
 
+TEST_F(Pass00FinalAndGasTest, ConstantPoolsSavedFprMultiEpilogueAndO0LocalSeams) {
+  // 1. Constant pools across `SFmode`, `DFmode`, `-0.0`, `NaN`, and `-G 0` split `%hi`/`%lo`
+  //    vs `-G 8` `.sdata`, plus callee-saved FPR (`$f20`) preservation across calls:
+  constexpr std::string_view kFpPoolAndSavedFprSource = R"(
+extern double ext_fp_call(double);
+double compute_fp_pool(double x, int flag) {
+  double acc = x * 3.141592653589793116 + (-0.0);
+  double keep = acc + 2.718281828459045091;
+  double r = ext_fp_call(acc);
+  if (flag) {
+    return r + keep;
+  }
+  return r - keep * 1.414213562373095145;
+}
+)";
+  for (const std::vector<std::string>& flags :
+       {std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-G", "8", "-Wa,-g"},
+        std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-G", "0", "-Wa,-O2"},
+        std::vector<std::string>{"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    const auto trace = hooks_.TraceForwardCompilation(kFpPoolAndSavedFprSource, "compute_fp_pool",
+                                                      flags, "fp_pool_saved_fpr");
+    const auto res = verifier_.VerifyFinalAndGasStageRightInverse(trace.stage0_input);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+    const auto suffix_res =
+        verifier_.VerifySuffixRightInverse(RtlPassKind::kDbr, trace.stage0_input);
+    EXPECT_TRUE(suffix_res.matches) << suffix_res.diff_detail;
+
+    const RtlControlFlowGraph lifted = InvertFinalAndGasFunction(trace.stage0_input);
+    EXPECT_FALSE(lifted.sideband.constant_pool.empty());
+    bool saw_unchanging_pool_ref = false;
+    for (const auto& blk : lifted.rpo_blocks) {
+      for (const auto& pat : blk.instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (!parsed.ok()) {
+          continue;
+        }
+        parsed->pattern.Visit([&](const RtlExpr& node) {
+          if (node.op == RtlOp::kSymbolRef && node.flags.unchanging &&
+              node.mode == RtlMachineMode::kSi) {
+            saw_unchanging_pool_ref = true;
+          }
+        });
+      }
+    }
+    EXPECT_TRUE(saw_unchanging_pool_ref);
+  }
+
+  // 2. Explicit NaN (`0x7ff8000000000001`) and `-0.0` (`0x8000000000000000`) `.rdata` pool
+  //    entries assembled via GAS:
+  constexpr std::string_view kNanPoolAsm = R"(
+	.rdata
+	.align	3
+$LC0:
+	.word	0x7ff80000
+	.word	0x00000001
+$LC1:
+	.word	0x80000000
+	.word	0x00000000
+	.text
+	.align	2
+	.ent	nan_negzero
+nan_negzero:
+	.frame	$sp,0,$31
+	.mask	0x00000000,0
+	.fmask	0x00000000,0
+	l.d	$f2,$LC0
+	l.d	$f4,$LC1
+	add.d	$f0,$f2,$f4
+	j	$31
+	.end	nan_negzero
+)";
+  Stage0FunctionInput nan_stage0 = hooks_.RunGasMdAssembleWithMetadata(kNanPoolAsm);
+  nan_stage0.profile.optimize_level = 2;
+  nan_stage0.profile.c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-G", "0", "-Wa,-g"};
+  const auto nan_res = verifier_.VerifyFinalAndGasStageRightInverse(nan_stage0);
+  EXPECT_TRUE(nan_res.matches) << nan_res.diff_detail;
+
+  // 3. `-O0` local variables + post-call `volatile` local store must not inflate
+  //    `outgoing_args_size` beyond 16:
+  constexpr std::string_view kO0LocalsSource = R"(
+extern int one_arg_callee(int);
+int o0_locals_func(int a, int b) {
+  int local_x = a + 3;
+  int local_y = b * 5;
+  int c = one_arg_callee(local_x);
+  volatile int post_call_dead = c + local_y;
+  return c + local_y;
+}
+)";
+  for (const std::vector<std::string>& flags :
+       {std::vector<std::string>{"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+        std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    const auto trace =
+        hooks_.TraceForwardCompilation(kO0LocalsSource, "o0_locals_func", flags, "o0_locals_test");
+    const RtlControlFlowGraph lifted = InvertFinalAndGasFunction(trace.stage0_input);
+    EXPECT_EQ(lifted.sideband.outgoing_args_size, 16);
+    const auto res = verifier_.VerifyFinalAndGasStageRightInverse(trace.stage0_input);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
 class Pass00FinalAndGasRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {
@@ -347,6 +454,9 @@ TEST_P(Pass00FinalAndGasRoundTripTest, RoundTrip2480Cases) {
   const auto res_stage0 = verifier->VerifyFinalAndGasStageRightInverse(trace.stage0_input);
   EXPECT_TRUE(res_stage0.matches) << "Test case: " << tc.test_name << "\nDiff:\n"
                                   << res_stage0.diff_detail;
+  const auto res_suffix = verifier->VerifySuffixRightInverse(RtlPassKind::kDbr, trace.stage0_input);
+  EXPECT_TRUE(res_suffix.matches) << "Test case: " << tc.test_name << "\nSuffix diff:\n"
+                                  << res_suffix.diff_detail;
 
   Stage0FunctionInput padded_stage0 = trace.stage0_input;
   padded_stage0.machine_words = trace.final_machine_words;

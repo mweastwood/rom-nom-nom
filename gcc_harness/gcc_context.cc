@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
@@ -20,6 +22,9 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_replace.h"
+#include "absl/strings/str_split.h"
+#include "core/rtl_expr.h"
 #include "core/rtl_sexpr_utils.h"
 
 // NOLINTBEGIN(readability-identifier-naming)
@@ -221,10 +226,43 @@ extern void* bss_section;
 extern int target_big_endian;
 extern int mips_optimize;
 
+// GCC 2.7.2 `varasm.c` constant-pool & `real.c` floating-point conversion symbols.
+extern int const_labelno;
+int get_pool_size();
+rtx_def* get_pool_constant(rtx_def* addr);
+int get_pool_mode(rtx_def* addr);
+rtx_def* immed_double_const(int i0, int i1, int mode);
+rtx_def* immed_real_const_1(double d, int mode);
+rtx_def* force_const_mem(int mode, rtx_def* x);
+void output_constant_pool(char* fnname, void* fndecl);
+void text_section();
+void function_section(void* decl);
+void save_varasm_status(void* p);
+void restore_varasm_status(void* p);
+double ereal_from_float(int f);
+double ereal_from_double(int* d);
+long etarsingle(double r);
+void etardouble(double r, long* out);
+
 rom_nom_nom::gcc_harness::Rtx __real_immed_double_const(int i0, int i1, int mode);
 rom_nom_nom::gcc_harness::Rtx __real_immed_real_const(void* exp);
 rom_nom_nom::gcc_harness::Rtx __real_immed_real_const_1(double d, int mode);
 rom_nom_nom::gcc_harness::Rtx __real_force_const_mem(int mode, rom_nom_nom::gcc_harness::Rtx x);
+
+}  // extern "C"
+// NOLINTEND(readability-identifier-naming)
+
+namespace rom_nom_nom::gcc_harness {
+namespace {
+
+std::vector<Stage0ConstantPoolEntry>* g_cc1_pool_capture_target = nullptr;
+bool g_in_pool_snapshot = false;
+
+}  // namespace
+}  // namespace rom_nom_nom::gcc_harness
+
+// NOLINTBEGIN(readability-identifier-naming)
+extern "C" {
 
 // On LP64, `immed_double_const` allocates `(const_double:M 0 i0 i1)` via
 // `gen_rtx`, populating `fld[2].rtint = i0` and `fld[3].rtint = i1` while
@@ -261,7 +299,26 @@ rom_nom_nom::gcc_harness::Rtx __wrap_force_const_mem(int mode, rom_nom_nom::gcc_
   if (x != nullptr && x->code == kConstDouble) {
     (&x->fld[2].rtint)[1] = x->fld[3].rtint;
   }
-  return __real_force_const_mem(mode, x);
+  rom_nom_nom::gcc_harness::Rtx def = __real_force_const_mem(mode, x);
+  if (rom_nom_nom::gcc_harness::g_cc1_pool_capture_target != nullptr &&
+      !rom_nom_nom::gcc_harness::g_in_pool_snapshot && def != nullptr) {
+    std::vector<rom_nom_nom::Stage0ConstantPoolEntry> active =
+        rom_nom_nom::gcc_harness::GccContext::SnapshotActiveConstantPool();
+    for (const auto& entry : active) {
+      bool updated = false;
+      for (auto& existing : *rom_nom_nom::gcc_harness::g_cc1_pool_capture_target) {
+        if (existing.label_name == entry.label_name) {
+          existing = entry;
+          updated = true;
+          break;
+        }
+      }
+      if (!updated) {
+        rom_nom_nom::gcc_harness::g_cc1_pool_capture_target->push_back(entry);
+      }
+    }
+  }
+  return def;
 }
 
 }  // extern "C"
@@ -271,6 +328,232 @@ namespace rom_nom_nom::gcc_harness {
 namespace {
 
 constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
+constexpr int kArgPointerPrintSentinel = 1073741823;
+
+// Temporarily replaces `arg_pointer_rtx->fld[0].rtint` (`ARG_POINTER_REGNUM == 0`
+// on MIPS) with `kArgPointerPrintSentinel` during `print_rtl` so `arg_pointer_rtx`
+// is printed distinctly from hardware `$zero` (`(reg:SI 0 $0)`).
+class ScopedArgPointerSentinel {
+ public:
+  ScopedArgPointerSentinel() {
+    if (arg_pointer_rtx != nullptr && arg_pointer_rtx->code == kReg) {
+      saved_regno_ = arg_pointer_rtx->fld[0].rtint;
+      arg_pointer_rtx->fld[0].rtint = kArgPointerPrintSentinel;
+      active_ = true;
+    }
+  }
+  ~ScopedArgPointerSentinel() {
+    if (active_ && arg_pointer_rtx != nullptr) {
+      arg_pointer_rtx->fld[0].rtint = saved_regno_;
+    }
+  }
+
+ private:
+  int saved_regno_ = 0;
+  bool active_ = false;
+};
+
+void NormalizePrintedRtl(std::string* s) {
+  if (s == nullptr) {
+    return;
+  }
+  absl::StrReplaceAll({{" 1073741823)", " 0 argp)"}, {"\"*$LC", "\"$LC"}, {"\"*.LC", "\".LC"}}, s);
+}
+
+bool ParsePoolIntLiteral(std::string_view tok, uint64_t* out_val) {
+  std::string s(absl::StripAsciiWhitespace(tok));
+  if (s.empty()) {
+    return false;
+  }
+  char* endptr = nullptr;
+  errno = 0;
+  if (s.front() == '-') {
+    const long long v = std::strtoll(s.c_str(), &endptr, 0);
+    if (errno != 0 || endptr == s.c_str() || *endptr != '\0') {
+      return false;
+    }
+    *out_val = static_cast<uint64_t>(static_cast<int64_t>(v));
+    return true;
+  }
+  const unsigned long long v = std::strtoull(s.c_str(), &endptr, 0);
+  if (errno != 0 || endptr == s.c_str() || *endptr != '\0') {
+    return false;
+  }
+  *out_val = static_cast<uint64_t>(v);
+  return true;
+}
+
+std::vector<Stage0ConstantPoolEntry> ParseConstantPoolAsm(std::string_view asm_text) {
+  std::vector<Stage0ConstantPoolEntry> entries;
+  std::string current_section = ".rdata";
+  size_t active_idx = static_cast<size_t>(-1);
+
+  for (std::string_view raw_line : absl::StrSplit(asm_text, '\n')) {
+    const size_t comment_pos = raw_line.find('#');
+    if (comment_pos != std::string_view::npos) {
+      raw_line = raw_line.substr(0, comment_pos);
+    }
+    std::string_view line = absl::StripAsciiWhitespace(raw_line);
+    if (line.empty()) {
+      continue;
+    }
+    while (true) {
+      const size_t colon_pos = line.find(':');
+      if (colon_pos == std::string_view::npos) {
+        break;
+      }
+      std::string_view before = line.substr(0, colon_pos);
+      if (before.find_first_of(" \t,()") != std::string_view::npos) {
+        break;
+      }
+      if (!before.empty() && before.front() == '*') {
+        before.remove_prefix(1);
+      }
+      entries.push_back(Stage0ConstantPoolEntry{
+          .label_name = std::string(before),
+          .section_name = current_section,
+      });
+      active_idx = entries.size() - 1;
+      line = absl::StripAsciiWhitespace(line.substr(colon_pos + 1));
+    }
+    if (line.empty() || line.front() != '.') {
+      continue;
+    }
+    std::string_view rest = absl::StripAsciiWhitespace(line.substr(1));
+    auto match_dir = [&](std::string_view name) {
+      return absl::StartsWith(rest, name) &&
+             (rest.size() == name.size() ||
+              absl::ascii_isspace(static_cast<unsigned char>(rest[name.size()])) ||
+              rest[name.size()] == ',');
+    };
+    if (match_dir("rdata")) {
+      current_section = ".rdata";
+      active_idx = static_cast<size_t>(-1);
+    } else if (match_dir("rodata")) {
+      current_section = ".rodata";
+      active_idx = static_cast<size_t>(-1);
+    } else if (match_dir("sdata")) {
+      current_section = ".sdata";
+      active_idx = static_cast<size_t>(-1);
+    } else if (match_dir("text")) {
+      current_section = ".text";
+      active_idx = static_cast<size_t>(-1);
+    } else if (active_idx < entries.size()) {
+      if (match_dir("word")) {
+        std::string_view args = absl::StripAsciiWhitespace(rest.substr(4));
+        for (std::string_view item : absl::StrSplit(args, ',')) {
+          uint64_t val = 0;
+          if (ParsePoolIntLiteral(item, &val)) {
+            entries[active_idx].words.push_back(static_cast<uint32_t>(val));
+          }
+        }
+      } else if (match_dir("dword")) {
+        std::string_view args = absl::StripAsciiWhitespace(rest.substr(5));
+        for (std::string_view item : absl::StrSplit(args, ',')) {
+          uint64_t val = 0;
+          if (ParsePoolIntLiteral(item, &val)) {
+            entries[active_idx].words.push_back(static_cast<uint32_t>(val >> 32));
+            entries[active_idx].words.push_back(static_cast<uint32_t>(val & 0xffffffffu));
+          }
+        }
+      } else if (match_dir("float") || match_dir("single")) {
+        const size_t kw_len = match_dir("float") ? 5 : 6;
+        std::string_view args = absl::StripAsciiWhitespace(rest.substr(kw_len));
+        for (std::string_view item : absl::StrSplit(args, ',')) {
+          std::string s(absl::StripAsciiWhitespace(item));
+          char* endptr = nullptr;
+          const float fv = std::strtof(s.c_str(), &endptr);
+          if (!s.empty() && endptr != s.c_str() && *endptr == '\0') {
+            entries[active_idx].words.push_back(absl::bit_cast<uint32_t>(fv));
+          }
+        }
+      } else if (match_dir("double")) {
+        std::string_view args = absl::StripAsciiWhitespace(rest.substr(6));
+        for (std::string_view item : absl::StrSplit(args, ',')) {
+          std::string s(absl::StripAsciiWhitespace(item));
+          char* endptr = nullptr;
+          const double dv = std::strtod(s.c_str(), &endptr);
+          if (!s.empty() && endptr != s.c_str() && *endptr == '\0') {
+            const uint64_t bits = absl::bit_cast<uint64_t>(dv);
+            entries[active_idx].words.push_back(static_cast<uint32_t>(bits >> 32));
+            entries[active_idx].words.push_back(static_cast<uint32_t>(bits & 0xffffffffu));
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<Stage0ConstantPoolEntry> non_empty;
+  non_empty.reserve(entries.size());
+  for (auto& cp : entries) {
+    if (!cp.words.empty()) {
+      cp.byte_size = cp.words.size() * 4u;
+      non_empty.push_back(std::move(cp));
+    }
+  }
+  return non_empty;
+}
+
+bool ParseLcLabelNumber(std::string_view label, int* out_num) {
+  if (absl::StartsWith(label, "*")) {
+    label.remove_prefix(1);
+  }
+  if (!absl::StartsWith(label, "$LC") && !absl::StartsWith(label, ".LC")) {
+    return false;
+  }
+  label.remove_prefix(3);
+  return !label.empty() && absl::SimpleAtoi(label, out_num) && *out_num >= 0;
+}
+
+absl::flat_hash_map<int, int> InferPreferredPoolModesFromCfg(const RtlControlFlowGraph& cfg) {
+  absl::flat_hash_map<int, int> preferred;
+  auto mode_to_gcc = [](RtlMachineMode mode) -> int {
+    switch (mode) {
+      case RtlMachineMode::kSf:
+        return kSfMode;
+      case RtlMachineMode::kDf:
+        return kDfMode;
+      case RtlMachineMode::kDi:
+        return kDiMode;
+      case RtlMachineMode::kSi:
+        return kSiMode;
+      default:
+        return kVoidMode;
+    }
+  };
+  for (const auto& blk : cfg.rpo_blocks) {
+    for (const std::string& pat : blk.instructions) {
+      auto parsed = ParsePatternAndNotes(pat);
+      if (!parsed.ok()) {
+        continue;
+      }
+      parsed->pattern.Visit([&](const RtlExpr& node) {
+        if (node.op != RtlOp::kMem) {
+          return;
+        }
+        const int mem_mode = mode_to_gcc(node.mode);
+        if (mem_mode == kVoidMode) {
+          return;
+        }
+        node.Visit([&](const RtlExpr& sub) {
+          if (sub.op != RtlOp::kSymbolRef) {
+            return;
+          }
+          int lc_num = -1;
+          if (ParseLcLabelNumber(sub.SymbolName(), &lc_num)) {
+            // Prefer 8-byte/float modes over `SImode` if a split load accesses the same pool entry.
+            auto it = preferred.find(lc_num);
+            if (it == preferred.end() || (it->second == kSiMode && mem_mode != kSiMode)) {
+              preferred[lc_num] = mem_mode;
+            }
+          }
+        });
+      });
+    }
+  }
+  return preferred;
+}
+
 constexpr int kBlockCode = 5;
 constexpr int kVoidTypeCode = 6;
 constexpr int kIntegerTypeCode = 7;
@@ -576,6 +859,9 @@ void GccContext::BeginFunction(std::string_view func_name) {
   label_map_.clear();
   decl_map_.clear();
   c_label_decl_map_.clear();
+  pool_symbol_map_.clear();
+  insn_uid_to_rpo_block_.clear();
+  const_labelno = 0;
   ResetVirtualRegisterFlags();
   init_insn_lengths();
   clear_const_double_mem();
@@ -606,6 +892,8 @@ void GccContext::BeginFunction(std::string_view func_name) {
   reg_live_length = nullptr;
   reg_n_calls_crossed = nullptr;
   basic_block_live_at_start = nullptr;
+  basic_block_head = nullptr;
+  basic_block_end = nullptr;
   n_basic_blocks = 0;
   regset_size = 0;
   regset_bytes = 0;
@@ -614,6 +902,7 @@ void GccContext::BeginFunction(std::string_view func_name) {
   immediate_size_expand = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
+  current_function_return_rtx = nullptr;
   clear_const_double_mem();
   init_function_start(fn_decl, const_cast<char*>("harness.c"), 1);
   reg_scan(nullptr, max_reg_num(), 0);
@@ -711,6 +1000,9 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   label_map_.clear();
   decl_map_.clear();
   c_label_decl_map_.clear();
+  pool_symbol_map_.clear();
+  insn_uid_to_rpo_block_.clear();
+  const_labelno = 0;
   ResetVirtualRegisterFlags();
   init_insn_lengths();
   clear_const_double_mem();
@@ -778,6 +1070,8 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   reg_live_length = nullptr;
   reg_n_calls_crossed = nullptr;
   basic_block_live_at_start = nullptr;
+  basic_block_head = nullptr;
+  basic_block_end = nullptr;
   n_basic_blocks = 0;
   regset_size = 0;
   regset_bytes = 0;
@@ -786,6 +1080,7 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   immediate_size_expand = 0;
   std::memset(regs_ever_live, 0, kFirstPseudoRegister);
   current_function_epilogue_delay_list = nullptr;
+  current_function_return_rtx = nullptr;
 
   clear_const_double_mem();
   init_function_start(fn_decl, const_cast<char*>("gcc_harness.c"), 1);
@@ -1515,6 +1810,16 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     }
   }
 
+  // Capture any trailing register name token (`$0`, `argp`, `$arg`, `v0`, ...)
+  // on `(reg:M regno [name])` before skipping to the closing ')'.
+  std::string reg_name_tok;
+  if (rtx_code == kReg) {
+    SkipRtlWhitespace(text, pos);
+    if (*pos < text.size() && text[*pos] != ')' && text[*pos] != '(' && text[*pos] != '[') {
+      reg_name_tok = std::string(ReadRtlToken(text, pos));
+    }
+  }
+
   // Skip any trailing tokens inside this S-expression (such as `{insn_name}`
   // or `[num_refs]` on `code_label`) up to the matching ')'.
   int extra_depth = 0;
@@ -1555,9 +1860,12 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     rt->fld[0].rtx->fld[5].rtint += 1;
   }
 
-  // Canonicalize `(reg:M regno)` while preserving `/v`, `/i`, `/u`, `/s` flags.
+  // Canonicalize `(reg:M regno)` while preserving `/v`, `/i`, `/u`, `/s` flags
+  // and disambiguating `arg_pointer_rtx` (`(reg:SI 0 argp)`) from hardware
+  // `$zero` (`(reg:SI 0 $0)`).
   if (rtx_code == kReg) {
     const int regno = rt->fld[0].rtint;
+    const bool is_argp_tok = (reg_name_tok == "argp" || reg_name_tok == "$arg");
     if (regno >= kFirstPseudoRegister) {
       EnsurePseudoRegsUpTo(regno, mode);
       Rtx canon = regno_reg_rtx[regno];
@@ -1569,17 +1877,52 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
         if (flag_s) canon->in_struct = 1;
         return canon;
       }
-    } else if (!flag_v && !flag_i && !flag_u && !flag_s) {
-      if (arg_pointer_rtx != nullptr && regno == arg_pointer_rtx->fld[0].rtint && mode == kSiMode) {
+    } else if (regno == 0) {
+      if (is_argp_tok && !flag_v && !flag_i && !flag_u && !flag_s && arg_pointer_rtx != nullptr &&
+          mode == kSiMode) {
         return arg_pointer_rtx;
       }
+      // Hardware `$zero` (`$0`): return freshly allocated `rt` (`rt != arg_pointer_rtx`).
+      // Never call `gen_rtx(kReg, mode, 0)` here, because `emit-rtl.c:gen_rtx`
+      // returns `arg_pointer_rtx` when `regno == ARG_POINTER_REGNUM (0)` and
+      // `mode == Pmode && !reload_in_progress`.
+      return rt;
+    } else if (!flag_v && !flag_i && !flag_u && !flag_s) {
       return gen_rtx(kReg, mode, regno);
+    }
+  } else if (rtx_code == kSymbolRef) {
+    const std::string sym_str = rt->fld[0].rtstr != nullptr ? rt->fld[0].rtstr : "";
+    if (flag_u) {
+      auto it = pool_symbol_map_.find(sym_str);
+      if (it != pool_symbol_map_.end() && it->second != nullptr) {
+        return it->second;
+      }
+      int label_num = 0;
+      if (ParseLcLabelNumber(sym_str, &label_num)) {
+        Stage0ConstantPoolEntry synth_cp{
+            .label_name = absl::StrCat("$LC", label_num),
+            .section_name = ".rdata",
+            .byte_size = 4,
+            .words = {0},
+        };
+        Rtx registered = RegisterConstantPoolEntry(label_num, synth_cp, kSfMode);
+        if (registered != nullptr) {
+          return registered;
+        }
+      }
     }
   } else if (rtx_code == kConstInt) {
     return gen_rtx(kConstInt, kVoidMode, rt->fld[0].rtint);
   } else if (rtx_code == kConstDouble) {
+    if (rt->fld[0].rtx == nullptr && cc0_rtx != nullptr) {
+      rt->fld[0].rtx = cc0_rtx;
+    }
+    if (!flag_v && !flag_i && !flag_u && !flag_s && rt->fld[0].rtx == cc0_rtx &&
+        rt->fld[2].rtint == 0 && rt->fld[3].rtint == 0 && (mode == kSfMode || mode == kDfMode)) {
+      return immed_real_const_1(0.0, mode);
+    }
     (&rt->fld[2].rtint)[1] = rt->fld[3].rtint;
-    if (mode >= 0 && mode < kMaxMachineMode) {
+    if (rt->fld[0].rtx == cc0_rtx && mode >= 0 && mode < kMaxMachineMode) {
       for (int tiny_idx = 0; tiny_idx < 3; ++tiny_idx) {
         Rtx tiny = const_tiny_rtx[tiny_idx][mode];
         if (tiny != nullptr && tiny->code == kConstDouble &&
@@ -1604,12 +1947,15 @@ std::string GccContext::FormatRtx(Rtx rtx) const {
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
-  print_rtl(mem_fp, rtx);
+  {
+    ScopedArgPointerSentinel argp_guard;
+    print_rtl(mem_fp, rtx);
+  }
   std::fclose(mem_fp);
-  std::string result =
-      CanonicalizeRtlPattern(buf != nullptr ? std::string_view(buf, len) : std::string_view());
+  std::string raw(buf != nullptr ? buf : "", len);
   std::free(buf);
-  return result;
+  NormalizePrintedRtl(&raw);
+  return CanonicalizeRtlPattern(raw);
 }
 
 std::string GccContext::DumpInsnChain(Rtx first_insn) const {
@@ -1620,10 +1966,14 @@ std::string GccContext::DumpInsnChain(Rtx first_insn) const {
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
-  print_rtl(mem_fp, head);
+  {
+    ScopedArgPointerSentinel argp_guard;
+    print_rtl(mem_fp, head);
+  }
   std::fclose(mem_fp);
   std::string result(buf != nullptr ? buf : "", len);
   std::free(buf);
+  NormalizePrintedRtl(&result);
   return result;
 }
 
@@ -1793,28 +2143,43 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
     insn->fld[6].rtx = ParseRtx(notes_str);
     if (pat != nullptr && insn->fld[6].rtx != nullptr) {
       std::vector<Rtx> clobber_scratches;
+      std::vector<Rtx> set_dest_regs;
       if (pat->code == kClobber && pat->fld[0].rtx != nullptr &&
           pat->fld[0].rtx->code == kScratch) {
         clobber_scratches.push_back(pat->fld[0].rtx);
+      } else if (pat->code == kSet && pat->fld[0].rtx != nullptr && pat->fld[0].rtx->code == kReg) {
+        set_dest_regs.push_back(pat->fld[0].rtx);
       } else if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
         for (int i = 0; i < pat->fld[0].rtvec->num_elem; ++i) {
           Rtx elem = pat->fld[0].rtvec->elem[i].rtx;
           if (elem != nullptr && elem->code == kClobber && elem->fld[0].rtx != nullptr &&
               elem->fld[0].rtx->code == kScratch) {
             clobber_scratches.push_back(elem->fld[0].rtx);
+          } else if (elem != nullptr && elem->code == kSet && elem->fld[0].rtx != nullptr &&
+                     elem->fld[0].rtx->code == kReg) {
+            set_dest_regs.push_back(elem->fld[0].rtx);
           }
         }
       }
-      if (!clobber_scratches.empty()) {
+      if (!clobber_scratches.empty() || !set_dest_regs.empty()) {
         std::vector<bool> used(clobber_scratches.size(), false);
         for (Rtx note = insn->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
-          if (note->code == kExprList && note->mode == kRegUnused && note->fld[0].rtx != nullptr &&
-              note->fld[0].rtx->code == kScratch) {
-            for (size_t i = 0; i < clobber_scratches.size(); ++i) {
-              if (!used[i] && clobber_scratches[i]->mode == note->fld[0].rtx->mode) {
-                note->fld[0].rtx = clobber_scratches[i];
-                used[i] = true;
-                break;
+          if (note->code == kExprList && note->mode == kRegUnused && note->fld[0].rtx != nullptr) {
+            if (note->fld[0].rtx->code == kScratch) {
+              for (size_t i = 0; i < clobber_scratches.size(); ++i) {
+                if (!used[i] && clobber_scratches[i]->mode == note->fld[0].rtx->mode) {
+                  note->fld[0].rtx = clobber_scratches[i];
+                  used[i] = true;
+                  break;
+                }
+              }
+            } else if (note->fld[0].rtx->code == kReg) {
+              for (Rtx dst_reg : set_dest_regs) {
+                if (dst_reg->fld[0].rtint == note->fld[0].rtx->fld[0].rtint &&
+                    dst_reg->mode == note->fld[0].rtx->mode) {
+                  note->fld[0].rtx = dst_reg;
+                  break;
+                }
               }
             }
           }
@@ -1843,6 +2208,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   } else {
     init_insn_lengths();
     label_map_.clear();
+    insn_uid_to_rpo_block_.clear();
     Rtx head_note = get_insns();
     if (head_note != nullptr) {
       head_note->fld[2].rtx = nullptr;
@@ -1857,6 +2223,30 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       if (vreg != nullptr && vreg->fld[0].rtint >= 0) {
         regno_reg_rtx[vreg->fld[0].rtint] = vreg;
       }
+    }
+  }
+
+  // Register any per-function `varasm.c` constant-pool entries (`$LC<n>`) from
+  // `cfg.sideband.constant_pool` via `force_const_mem` BEFORE parsing RTL
+  // instructions so `(symbol_ref/u:SI ("$LC<n>"))` resolves directly to its
+  // active `const_rtx_sym_hash_table` `SYMBOL_REF` (`CONSTANT_POOL_ADDRESS_P == 1`).
+  if (!cfg.sideband.constant_pool.empty()) {
+    const absl::flat_hash_map<int, int> preferred_modes = InferPreferredPoolModesFromCfg(cfg);
+    int max_lc_num = -1;
+    for (const Stage0ConstantPoolEntry& cp : cfg.sideband.constant_pool) {
+      int lc_num = -1;
+      if (!ParseLcLabelNumber(cp.label_name, &lc_num)) {
+        continue;
+      }
+      int pref_mode = kVoidMode;
+      if (auto it = preferred_modes.find(lc_num); it != preferred_modes.end()) {
+        pref_mode = it->second;
+      }
+      RegisterConstantPoolEntry(lc_num, cp, pref_mode);
+      max_lc_num = std::max(max_lc_num, lc_num);
+    }
+    if (max_lc_num >= 0) {
+      const_labelno = std::max(const_labelno, max_lc_num + 1);
     }
   }
 
@@ -1977,6 +2367,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
 
   // Second pass: emit basic blocks in linear order.
   for (size_t b = 0; b < num_blocks; ++b) {
+    Rtx prev_tail = get_last_insn();
     const auto& blk = cfg.rpo_blocks[b];
     if (block_labels[b] != nullptr) {
       emit_label(block_labels[b]);
@@ -2050,6 +2441,22 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     }
     if (emitted_uncond_jump_or_return || blk.has_trailing_barrier) {
       emit_barrier();
+    }
+    for (Rtx scan = (prev_tail != nullptr ? prev_tail->fld[2].rtx : get_insns()); scan != nullptr;
+         scan = scan->fld[2].rtx) {
+      if (scan->fld[0].rtint >= 0) {
+        insn_uid_to_rpo_block_[scan->fld[0].rtint] = static_cast<int>(b);
+      }
+      if ((scan->code == kInsn || scan->code == kJumpInsn || scan->code == kCallInsn) &&
+          scan->fld[3].rtx != nullptr && scan->fld[3].rtx->code == kSequence &&
+          scan->fld[3].rtx->fld[0].rtvec != nullptr) {
+        Rtvec seq = scan->fld[3].rtx->fld[0].rtvec;
+        for (int k = 0; k < seq->num_elem; ++k) {
+          if (seq->elem[k].rtx != nullptr && seq->elem[k].rtx->fld[0].rtint >= 0) {
+            insn_uid_to_rpo_block_[seq->elem[k].rtx->fld[0].rtint] = static_cast<int>(b);
+          }
+        }
+      }
     }
     if (!block_tablejump_tokens[b].empty()) {
       Rtx tbl_lbl = GetOrCreateLabel(block_tablejump_tokens[b]);
@@ -2236,6 +2643,9 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     reg_renumber = nullptr;
   }
 
+  if (reg_n_sets == nullptr) {
+    reg_n_sets = AllocSidebandArray<short>(alloc_regs);
+  }
   if (!cfg.sideband.reg_n_sets.empty() && reg_n_sets != nullptr) {
     for (const auto& [regno, val] : cfg.sideband.reg_n_sets) {
       if (regno >= 0 && regno < max_regno) {
@@ -2244,32 +2654,41 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     }
   }
 
-  if (!cfg.sideband.reg_n_refs.empty() || !cfg.sideband.reg_n_deaths.empty() ||
-      !cfg.sideband.reg_live_length.empty() || !cfg.sideband.reg_n_calls_crossed.empty()) {
+  const bool has_any_flow_sideband =
+      !cfg.sideband.reg_n_refs.empty() || !cfg.sideband.reg_n_deaths.empty() ||
+      !cfg.sideband.reg_live_length.empty() || !cfg.sideband.reg_n_calls_crossed.empty() ||
+      !cfg.sideband.basic_block_live_at_start.empty();
+
+  if (has_any_flow_sideband) {
     reg_n_refs = AllocSidebandArray<int>(alloc_regs);
-    reg_n_deaths = AllocSidebandArray<short>(alloc_regs);
-    reg_live_length = AllocSidebandArray<int>(alloc_regs);
-    reg_n_calls_crossed = AllocSidebandArray<int>(alloc_regs);
     for (const auto& [regno, val] : cfg.sideband.reg_n_refs) {
       if (regno >= 0 && regno < alloc_regs) {
         reg_n_refs[regno] = val;
       }
     }
+    reg_n_deaths = AllocSidebandArray<short>(alloc_regs);
     for (const auto& [regno, val] : cfg.sideband.reg_n_deaths) {
       if (regno >= 0 && regno < alloc_regs) {
         reg_n_deaths[regno] = static_cast<short>(val);
       }
     }
+    reg_live_length = AllocSidebandArray<int>(alloc_regs);
     for (const auto& [regno, val] : cfg.sideband.reg_live_length) {
       if (regno >= 0 && regno < alloc_regs) {
         reg_live_length[regno] = val;
       }
     }
+    reg_n_calls_crossed = AllocSidebandArray<int>(alloc_regs);
     for (const auto& [regno, val] : cfg.sideband.reg_n_calls_crossed) {
       if (regno >= 0 && regno < alloc_regs) {
         reg_n_calls_crossed[regno] = val;
       }
     }
+  } else {
+    reg_n_refs = nullptr;
+    reg_n_deaths = nullptr;
+    reg_live_length = nullptr;
+    reg_n_calls_crossed = nullptr;
   }
 
   if (!cfg.sideband.basic_block_live_at_start.empty()) {
@@ -2374,6 +2793,70 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     }
   }
 
+  // Deserialize `REG_FUNCTION_VALUE_P` (`reg/i` on MIPS return registers
+  // `$2`/`$3` or `$f0`/`$f1`) into `current_function_return_rtx` (`reorg.c:4274`).
+  if (reset_function) {
+    uint64_t ret_mask = 0;
+    int ret_mode_2 = kSiMode;
+    int ret_mode_32 = kSfMode;
+    auto scan_rtx_for_ret_reg = [&](auto& self, Rtx x) -> void {
+      if (x == nullptr) {
+        return;
+      }
+      const int code = x->code;
+      if (code == kReg) {
+        const int r = x->fld[0].rtint;
+        if (x->integrated != 0 && (r == 2 || r == 3 || r == 32 || r == 33)) {
+          ret_mask |= (uint64_t{1} << r);
+          if (r == 2) {
+            ret_mode_2 = x->mode;
+          } else if (r == 32) {
+            ret_mode_32 = x->mode;
+          }
+        }
+        return;
+      }
+      if (code < 0 || code >= kNumRtxCode || rtx_format[code] == nullptr) {
+        return;
+      }
+      const char* fmt = rtx_format[code];
+      const int len = rtx_length[code];
+      for (int i = 0; i < len; ++i) {
+        if (fmt[i] == 'e') {
+          self(self, x->fld[i].rtx);
+        } else if (fmt[i] == 'E' && x->fld[i].rtvec != nullptr) {
+          Rtvec vec = x->fld[i].rtvec;
+          for (int j = 0; j < vec->num_elem; ++j) {
+            self(self, vec->elem[j].rtx);
+          }
+        }
+      }
+    };
+    for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+      if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
+        scan_rtx_for_ret_reg(scan_rtx_for_ret_reg, insn->fld[3].rtx);
+      }
+    }
+    if (current_function_epilogue_delay_list != nullptr &&
+        current_function_epilogue_delay_list->fld[0].rtx != nullptr) {
+      Rtx ep_insn = current_function_epilogue_delay_list->fld[0].rtx;
+      Rtx ep_pat =
+          (ep_insn->code == kInsn || ep_insn->code == kJumpInsn || ep_insn->code == kCallInsn)
+              ? ep_insn->fld[3].rtx
+              : ep_insn;
+      scan_rtx_for_ret_reg(scan_rtx_for_ret_reg, ep_pat);
+    }
+    if ((ret_mask & ((uint64_t{1} << 2) | (uint64_t{1} << 3))) != 0) {
+      const int mode = ((ret_mask & (uint64_t{1} << 3)) != 0) ? kDiMode : ret_mode_2;
+      current_function_return_rtx = gen_rtx(kReg, mode, 2);
+      current_function_return_rtx->integrated = 1;
+    } else if ((ret_mask & ((uint64_t{1} << 32) | (uint64_t{1} << 33))) != 0) {
+      const int mode = ((ret_mask & (uint64_t{1} << 33)) != 0) ? kDfMode : ret_mode_32;
+      current_function_return_rtx = gen_rtx(kReg, mode, 32);
+      current_function_return_rtx->integrated = 1;
+    }
+  }
+
   return first;
 }
 
@@ -2389,11 +2872,30 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   // `if_false_label` during isolated Stage 13 sub-hook expansion).
   absl::flat_hash_map<int, std::string> label_map;
   size_t next_lbl_idx = 0;
+  std::string current_group_label;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     if (insn->code == kCodeLabel && insn->fld[0].rtint >= 0) {
-      if (!label_map.contains(insn->fld[0].rtint)) {
-        label_map.emplace(insn->fld[0].rtint, absl::StrCat("L", next_lbl_idx++));
+      Rtx next_insn = insn->fld[2].rtx;
+      const bool is_tablejump_label = (next_insn != nullptr && next_insn->code == kJumpInsn &&
+                                       next_insn->fld[3].rtx != nullptr &&
+                                       (next_insn->fld[3].rtx->code == kAddrVec ||
+                                        next_insn->fld[3].rtx->code == kAddrDiffVec));
+      if (is_tablejump_label || current_group_label.empty()) {
+        current_group_label = absl::StrCat("L", next_lbl_idx++);
       }
+      if (!label_map.contains(insn->fld[0].rtint)) {
+        label_map.emplace(insn->fld[0].rtint, current_group_label);
+      }
+      if (is_tablejump_label) {
+        current_group_label.clear();
+      }
+    } else if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn ||
+               insn->code == kBarrier ||
+               (insn->code == kNote &&
+                (insn->fld[4].rtint == kNoteInsnLoopBeg || insn->fld[4].rtint == kNoteInsnLoopEnd ||
+                 insn->fld[4].rtint == kNoteInsnLoopCont ||
+                 insn->fld[4].rtint == kNoteInsnLoopVtop))) {
+      current_group_label.clear();
     }
   }
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
@@ -2615,9 +3117,70 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     }
   }
   if (basic_block_live_at_start != nullptr && n_basic_blocks > 0 && regset_size > 0) {
+    absl::flat_hash_map<int, int> uid_to_rpo;
+    if (basic_block_head != nullptr &&
+        cfg.rpo_blocks.size() != static_cast<size_t>(n_basic_blocks)) {
+      size_t idx = 0;
+      int cur_rpo = 0;
+      while (idx < items.size()) {
+        while (idx < items.size() && items[idx].kind == RtlInsnKind::kBarrier) {
+          ++idx;
+        }
+        if (idx >= items.size()) {
+          break;
+        }
+        bool has_content = false;
+        std::vector<int> blk_uids;
+        while (idx < items.size() && items[idx].kind == RtlInsnKind::kCodeLabel) {
+          blk_uids.push_back(items[idx].uid);
+          has_content = true;
+          ++idx;
+        }
+        while (idx < items.size() && items[idx].kind != RtlInsnKind::kCodeLabel &&
+               items[idx].kind != RtlInsnKind::kBarrier) {
+          const auto& it = items[idx];
+          blk_uids.push_back(it.uid);
+          if (it.kind == RtlInsnKind::kInsn || it.kind == RtlInsnKind::kCallInsn ||
+              it.kind == RtlInsnKind::kNote) {
+            has_content = true;
+            ++idx;
+          } else if (it.kind == RtlInsnKind::kJumpInsn) {
+            has_content = true;
+            ++idx;
+            break;
+          } else {
+            ++idx;
+          }
+        }
+        while (idx < items.size() && items[idx].kind == RtlInsnKind::kBarrier) {
+          ++idx;
+        }
+        if (!has_content) {
+          continue;
+        }
+        for (int u : blk_uids) {
+          if (u >= 0) {
+            uid_to_rpo[u] = cur_rpo;
+          }
+        }
+        ++cur_rpo;
+      }
+    }
+    std::vector<bool> assigned_rpo(cfg.rpo_blocks.size(), false);
     for (int b = 0; b < n_basic_blocks; ++b) {
       if (basic_block_live_at_start[b] == nullptr) {
         continue;
+      }
+      int dst_b = b;
+      if (!uid_to_rpo.empty() && basic_block_head != nullptr && basic_block_head[b] != nullptr) {
+        if (auto it = uid_to_rpo.find(basic_block_head[b]->fld[0].rtint); it != uid_to_rpo.end()) {
+          dst_b = it->second;
+        } else if (b == 0) {
+          dst_b = 0;
+        }
+      }
+      if (dst_b >= 0 && static_cast<size_t>(dst_b) < assigned_rpo.size()) {
+        assigned_rpo[dst_b] = true;
       }
       const auto* words = reinterpret_cast<const uint32_t*>(basic_block_live_at_start[b]);
       for (int w = 0; w < regset_size; ++w) {
@@ -2626,9 +3189,21 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
           const int bit = __builtin_ctz(mask);
           const int regno = w * 32 + bit;
           if (regno < nregs) {
-            cfg.sideband.basic_block_live_at_start[b].insert(regno);
+            cfg.sideband.basic_block_live_at_start[dst_b].insert(regno);
           }
           mask &= (mask - 1);
+        }
+      }
+    }
+    if (!uid_to_rpo.empty()) {
+      for (int r = static_cast<int>(cfg.rpo_blocks.size()) - 2; r >= 0; --r) {
+        if (!assigned_rpo[r] && cfg.rpo_blocks[r].successors.size() == 1) {
+          const int succ = static_cast<int>(cfg.rpo_blocks[r].successors[0]);
+          if (auto it = cfg.sideband.basic_block_live_at_start.find(succ);
+              it != cfg.sideband.basic_block_live_at_start.end()) {
+            auto live_copy = it->second;
+            cfg.sideband.basic_block_live_at_start[r] = std::move(live_copy);
+          }
         }
       }
     }
@@ -2658,8 +3233,126 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
           CanonicalizeRtlPattern(CanonicalizeLabelRefsInPattern(FormatRtx(delay_pat), label_map));
     }
   }
+  cfg.sideband.constant_pool = SnapshotActiveConstantPool();
 
   return cfg;
+}
+
+int GccContext::LookupMaterializedRpoBlock(int uid) const {
+  auto it = insn_uid_to_rpo_block_.find(uid);
+  return it != insn_uid_to_rpo_block_.end() ? it->second : -1;
+}
+
+std::vector<Stage0ConstantPoolEntry> GccContext::SnapshotActiveConstantPool() {
+  if (get_pool_size() <= 0) {
+    return {};
+  }
+  g_in_pool_snapshot = true;
+  alignas(16) uint8_t saved_fn_status[2048] = {};
+  save_varasm_status(saved_fn_status);
+
+  char* buf = nullptr;
+  size_t len = 0;
+  FILE* mem_fp = open_memstream(&buf, &len);
+  FILE* saved_asm = asm_out_file;
+  const int saved_optimize = optimize;
+  asm_out_file = mem_fp;
+  // Temporarily set `optimize = 0` so `output_constant_pool` snapshots all
+  // entries in `first_pool` (including entries currently held only in
+  // `CONST_DOUBLE_MEM` prior to `reload`) without mutating `pool->mark`; real
+  // `mark_constant_pool` pruning runs at `FunctionHooks::RunFinal` time.
+  optimize = 0;
+  text_section();
+  output_constant_pool(const_cast<char*>("harness_func"), current_function_decl);
+  text_section();
+  optimize = saved_optimize;
+  asm_out_file = saved_asm;
+  std::fclose(mem_fp);
+
+  restore_varasm_status(saved_fn_status);
+  g_in_pool_snapshot = false;
+
+  std::string asm_text(buf != nullptr ? buf : "", len);
+  std::free(buf);
+  return ParseConstantPoolAsm(asm_text);
+}
+
+void GccContext::SetCc1ConstantPoolCaptureTarget(std::vector<Stage0ConstantPoolEntry>* target) {
+  g_cc1_pool_capture_target = target;
+}
+
+Rtx GccContext::RegisterConstantPoolEntry(int label_num, const Stage0ConstantPoolEntry& cp,
+                                          int preferred_mode) {
+  const std::string canon_key = absl::StrCat("$LC", label_num);
+  if (auto it = pool_symbol_map_.find(canon_key);
+      it != pool_symbol_map_.end() && it->second != nullptr) {
+    return it->second;
+  }
+
+  int pool_mode = kSfMode;
+  Rtx val_rtx = nullptr;
+  if (cp.words.size() >= 2) {
+    const int hi_w = static_cast<int>(static_cast<int32_t>(cp.words[0]));
+    const int lo_w = static_cast<int>(static_cast<int32_t>(cp.words[1]));
+    if (preferred_mode == kDiMode) {
+      pool_mode = kDiMode;
+      val_rtx = immed_double_const(lo_w, hi_w, kVoidMode);
+    } else {
+      int d_in[2] = {hi_w, lo_w};
+      const double rv = ereal_from_double(d_in);
+      long d_out[2] = {0, 0};
+      etardouble(rv, d_out);
+      if (static_cast<uint32_t>(d_out[0]) == cp.words[0] &&
+          static_cast<uint32_t>(d_out[1]) == cp.words[1]) {
+        pool_mode = kDfMode;
+        val_rtx = immed_real_const_1(rv, kDfMode);
+      } else {
+        pool_mode = kDiMode;
+        val_rtx = immed_double_const(lo_w, hi_w, kVoidMode);
+      }
+    }
+  } else {
+    const uint32_t w0 = cp.words.empty() ? 0u : cp.words[0];
+    const int raw_w = static_cast<int>(static_cast<int32_t>(w0));
+    if (preferred_mode == kSiMode) {
+      pool_mode = kSiMode;
+      val_rtx = gen_rtx(kConstInt, kVoidMode, raw_w);
+    } else {
+      const double rv = ereal_from_float(raw_w);
+      const uint32_t rt_w = static_cast<uint32_t>(etarsingle(rv));
+      if (rt_w == w0) {
+        pool_mode = kSfMode;
+        val_rtx = immed_real_const_1(rv, kSfMode);
+      } else {
+        pool_mode = kSiMode;
+        val_rtx = gen_rtx(kConstInt, kVoidMode, raw_w);
+      }
+    }
+  }
+
+  if (val_rtx == nullptr) {
+    return nullptr;
+  }
+  const int saved_next_labelno = std::max(const_labelno, label_num + 1);
+  const_labelno = label_num;
+  Rtx mem_rtx = force_const_mem(pool_mode, val_rtx);
+  const_labelno = std::max(const_labelno, saved_next_labelno);
+  if (mem_rtx == nullptr || mem_rtx->code != kMem || mem_rtx->fld[0].rtx == nullptr ||
+      mem_rtx->fld[0].rtx->code != kSymbolRef) {
+    return nullptr;
+  }
+
+  Rtx sym_rtx = mem_rtx->fld[0].rtx;
+  pool_symbol_map_[canon_key] = sym_rtx;
+  pool_symbol_map_[absl::StrCat("*$LC", label_num)] = sym_rtx;
+  if (sym_rtx->fld[0].rtstr != nullptr) {
+    std::string actual_sym(sym_rtx->fld[0].rtstr);
+    pool_symbol_map_[actual_sym] = sym_rtx;
+    if (!actual_sym.empty() && actual_sym.front() == '*') {
+      pool_symbol_map_[actual_sym.substr(1)] = sym_rtx;
+    }
+  }
+  return sym_rtx;
 }
 
 Rtx GccContext::GetInsns() const {

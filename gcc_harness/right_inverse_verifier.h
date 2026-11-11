@@ -80,6 +80,13 @@ class RightInverseVerifier {
       absl::Span<const uint32_t> machine_words_x) const;
   RightInverseResult VerifyFinalAndGasStageRightInverse(const Stage0FunctionInput& input_x) const;
 
+  // Chained suffix right-inverse $F_{0..s}(G_{s..0}(x_0)) == x_0$ from
+  // `input_x` ($x_0$) up to `target_pass` ($y_s$) and forward back to `.text`
+  // machine words + metadata on a fresh `GccContext` + `FunctionHooks`
+  // configured solely from `input_x.profile`.
+  RightInverseResult VerifySuffixRightInverse(RtlPassKind target_pass,
+                                              const Stage0FunctionInput& input_x) const;
+
   // ---------------------------------------------------------------------------
   // Stage 1: Delayed-Branch Scheduling (`reorg.c`)
   // ---------------------------------------------------------------------------

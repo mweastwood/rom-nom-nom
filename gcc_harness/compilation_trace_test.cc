@@ -9,6 +9,7 @@
 
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_replace.h"
 #include "core/compiler.h"
 #include "core/elf_reader.h"
 #include "core/process.h"
@@ -383,7 +384,21 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
     }
     ++emitted_pass_dumps;
     const RtlControlFlowGraph real_cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
-    const RtlCfgPassComparison cmp = trace.pass_snapshots.at(pass).CompareAgainst(real_cfg);
+    RtlControlFlowGraph trace_cfg = trace.pass_snapshots.at(pass);
+    // Stock external `cc1` (`ARG_POINTER_REGNUM == 0`) prints `arg_pointer_rtx`
+    // as `(reg:SI 0 $0)` in pre-reload `-da` dumps, whereas in-process
+    // `TraceForwardCompilation` disambiguates `arg_pointer_rtx` as
+    // `(reg:SI 0 argp)`.
+    if (pass != RtlPassKind::kGreg && pass != RtlPassKind::kSched2 && pass != RtlPassKind::kJump2 &&
+        pass != RtlPassKind::kDbr) {
+      for (auto& blk : trace_cfg.rpo_blocks) {
+        for (std::string& insn : blk.instructions) {
+          absl::StrReplaceAll({{" 0 argp)", " 0 $0)"}}, &insn);
+        }
+        blk.SyncRtlInsnsFromInstructions();
+      }
+    }
+    const RtlCfgPassComparison cmp = trace_cfg.CompareAgainst(real_cfg);
     EXPECT_TRUE(cmp.MatchesExactly())
         << "Pass " << RtlPassExtension(pass) << " mismatch against real cc1 in " << fn_name << ": "
         << cmp.mismatch_detail;
@@ -501,6 +516,22 @@ TEST(CompilationTraceTest, TraceForwardCompilationCategories) {
               int first = ext_op(x + 1, y);
               int second = ext_op(first, z + x);
               return first + second + y;
+            }
+          )",
+      },
+      {
+          "multi_ret_void_leaf",
+          "multi_ret_void_leaf",
+          R"(
+            void multi_ret_void_leaf(int x, int y, int* p, int* q) {
+              if (x) {
+                *p = 1;
+                return;
+              }
+              if (y) {
+                *q = 2;
+                return;
+              }
             }
           )",
       },

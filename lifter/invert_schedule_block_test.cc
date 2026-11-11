@@ -319,7 +319,7 @@ TEST_F(InvertScheduleBlockTest, UpdateFlowInfoReMergesSplitLargeIntMoveAndUpdate
 TEST_F(InvertScheduleBlockTest, MultiBlockCfgUnschedulesEachBlockIndependently) {
   RtlControlFlowGraph multi_cfg;
   multi_cfg.pass = RtlPassKind::kSched2;
-  multi_cfg.rpo_blocks.resize(3);
+  multi_cfg.rpo_blocks.resize(4);
   multi_cfg.rpo_blocks[0].id = 0;
   multi_cfg.rpo_blocks[0].AddPatternOnly(
       "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc))) "
@@ -336,20 +336,22 @@ TEST_F(InvertScheduleBlockTest, MultiBlockCfgUnschedulesEachBlockIndependently) 
   multi_cfg.rpo_blocks[1].AddPatternOnly(
       "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 3 v1))) "
       "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))");
-  multi_cfg.rpo_blocks[1].AddPatternOnly(
-      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
-  multi_cfg.rpo_blocks[1].AddPatternOnly("(return)");
-  multi_cfg.rpo_blocks[1].successors = {};
+  multi_cfg.rpo_blocks[1].AddPatternOnly("(set (pc) (label_ref L1))");
+  multi_cfg.rpo_blocks[1].successors = {3};
 
   multi_cfg.rpo_blocks[2].id = 2;
+  multi_cfg.rpo_blocks[2].has_label = true;
   multi_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
-  multi_cfg.rpo_blocks[2].AddPatternOnly(
+  multi_cfg.rpo_blocks[2].successors = {3};
+
+  multi_cfg.rpo_blocks[3].id = 3;
+  multi_cfg.rpo_blocks[3].has_label = true;
+  multi_cfg.rpo_blocks[3].AddPatternOnly(
       "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
-  multi_cfg.rpo_blocks[2].AddPatternOnly("(return)");
-  multi_cfg.rpo_blocks[2].successors = {};
+  multi_cfg.rpo_blocks[3].successors = {};
 
   const RtlControlFlowGraph lifted = InvertScheduleBlock(multi_cfg);
-  ASSERT_EQ(lifted.BlockCount(), 3u);
+  ASSERT_EQ(lifted.BlockCount(), 4u);
   EXPECT_EQ(lifted.rpo_blocks[1].instructions[0],
             "(set (reg:SI 3 v1) (plus:SI (reg:SI 6 a2) (const_int 4))) "
             "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))");

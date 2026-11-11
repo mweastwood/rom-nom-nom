@@ -30,11 +30,25 @@ inline constexpr int kMipsFirstUserPseudoRegister = 72;  // `LAST_VIRTUAL_REGIST
 struct PrologueEpilogueFrameSpec {
   int var_size = 0;
   uint32_t saved_gpr_mask = 0;
+  uint32_t saved_fpr_mask = 0;
 
   bool operator==(const PrologueEpilogueFrameSpec& other) const {
-    return var_size == other.var_size && saved_gpr_mask == other.saved_gpr_mask;
+    return var_size == other.var_size && saved_gpr_mask == other.saved_gpr_mask &&
+           saved_fpr_mask == other.saved_fpr_mask;
   }
   bool operator!=(const PrologueEpilogueFrameSpec& other) const { return !(*this == other); }
+};
+
+// Module-level compiler and assembler flag profile (e.g., from `config/<game>.textproto`
+// or compilation trace invocation). Carries zero per-function oracle state.
+struct CompilationProfile {
+  int optimize_level = 2;
+  std::vector<std::string> c_flags;
+
+  bool operator==(const CompilationProfile& other) const {
+    return optimize_level == other.optimize_level && c_flags == other.c_flags;
+  }
+  bool operator!=(const CompilationProfile& other) const { return !(*this == other); }
 };
 
 // Stage 0 relocation kinds produced by GAS 2.6 (`fixS`) or object-file readers.
@@ -103,11 +117,13 @@ struct Stage0FunctionInput {
   std::vector<Stage0JumpTable> jump_tables;
   std::vector<Stage0ConstantPoolEntry> constant_pool;
   absl::flat_hash_map<uint32_t, std::string> vram_to_symbol;
+  CompilationProfile profile;
 
   bool operator==(const Stage0FunctionInput& other) const {
     return machine_words == other.machine_words && base_vram == other.base_vram &&
            relocations == other.relocations && jump_tables == other.jump_tables &&
-           constant_pool == other.constant_pool && vram_to_symbol == other.vram_to_symbol;
+           constant_pool == other.constant_pool && vram_to_symbol == other.vram_to_symbol &&
+           profile == other.profile;
   }
   bool operator!=(const Stage0FunctionInput& other) const { return !(*this == other); }
 };
@@ -323,6 +339,10 @@ struct RtlSidebandState {
   // Natural loop metadata recovered by InverseScanLoop.
   std::vector<RtlLoopInfo> loops;
 
+  // Function-scoped `.rdata`/`.rodata`/`.sdata` constant-pool entries (`$LC*`)
+  // carried alongside `/u` `SYMBOL_REF`s (`CONSTANT_POOL_ADDRESS_P`).
+  std::vector<Stage0ConstantPoolEntry> constant_pool;
+
   bool operator==(const RtlSidebandState& other) const {
     return max_regno == other.max_regno && reg_renumber == other.reg_renumber &&
            reg_n_refs == other.reg_n_refs && reg_n_sets == other.reg_n_sets &&
@@ -336,7 +356,8 @@ struct RtlSidebandState {
            saved_gpr_regnos == other.saved_gpr_regnos &&
            saved_fpr_regnos == other.saved_fpr_regnos &&
            epilogue_delay_pattern == other.epilogue_delay_pattern &&
-           spill_slots == other.spill_slots && loops == other.loops;
+           spill_slots == other.spill_slots && loops == other.loops &&
+           constant_pool == other.constant_pool;
   }
   bool operator!=(const RtlSidebandState& other) const { return !(*this == other); }
 };

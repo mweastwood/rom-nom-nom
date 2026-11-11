@@ -98,7 +98,7 @@ TEST(GccContextTest, MaterializeAndDematerializeMultiBlockCfgWithSequencesNotesA
   cfg.rpo_blocks[1].successors = {2};
 
   cfg.rpo_blocks[2].id = 2;
-  cfg.rpo_blocks[2].AddPatternOnly("(return)");
+  cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   cfg.rpo_blocks[2].successors = {};
 
   Rtx head = ctx.MaterializeFromCfg(cfg);
@@ -116,7 +116,7 @@ TEST(GccContextTest, MaterializeAndDematerializeSyncsRtlSidebandState) {
   cfg.rpo_blocks.resize(1);
   cfg.rpo_blocks[0].id = 0;
   cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1)))");
-  cfg.rpo_blocks[0].AddPatternOnly("(return)");
+  cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
   cfg.sideband.max_regno = 76;
   cfg.sideband.reg_renumber[72] = 2;
@@ -200,16 +200,16 @@ TEST(FunctionHooksTest, Stage1ReorgSubfunctionHooksFillDelaySlotsAndReturns) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
 
-  // Test `find_end_label` + genuine `make_return_insns`:
+  // Test `end_of_function_label` cleanup + genuine `make_return_insns`:
   ctx.BeginFunction("reorg_return_test");
-  ctx.EmitPattern(
-      "(sequence [(jump_insn (set (pc) (label_ref L0))) "
-      "(insn (set (reg/i:SI 2 v0) (const_int 7)))])");
+  ctx.EmitPattern("(set (reg/i:SI 2 v0) (const_int 7))");
+  ctx.EmitPattern("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   ctx.EmitPattern("(barrier)");
   ctx.EmitPattern("(code_label L0)");
 
   hooks.RunMakeReturnInsns();
   EXPECT_TRUE(absl::StrContains(ctx.DumpInsnChain(), "(return)")) << ctx.DumpInsnChain();
+  EXPECT_FALSE(absl::StrContains(ctx.DumpInsnChain(), "code_label")) << ctx.DumpInsnChain();
 
   // Test `fill_simple_delay_slots`:
   ctx.BeginFunction("reorg_simple_delay_test");
@@ -456,12 +456,12 @@ TEST(RightInverseVerifierTest, Stage1DbrScheduleAndSubfunctionsRightInverse) {
   FunctionHooks hooks(&ctx);
   RightInverseVerifier verifier(&ctx, &hooks);
 
-  // 6. `reorg.c:make_return_insns` + `find_end_label` right-inverse:
+  // 6. `reorg.c:make_return_insns` + `end_of_function_label` right-inverse:
   RtlControlFlowGraph ret_cfg;
   ret_cfg.pass = RtlPassKind::kDbr;
   ret_cfg.rpo_blocks.resize(1);
   ret_cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn (return)) "
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
       "(insn (set (reg/i:SI 2 v0) (const_int 42)))])");
   RightInverseResult ret_res = verifier.VerifyMakeReturnInsnsRightInverse(ret_cfg);
   EXPECT_TRUE(ret_res.matches) << ret_res.diff_detail;
@@ -478,10 +478,10 @@ TEST(RightInverseVerifierTest, Stage1DbrScheduleAndSubfunctionsRightInverse) {
       "(set (pc) (if_then_else (eq:SI (reg:SI 3 v1) (const_int 0)) "
       "(label_ref L1) (pc)))");
   relax_cfg.rpo_blocks[1].successors = {3, 2};
-  relax_cfg.rpo_blocks[2].AddPatternOnly("(set (reg:SI 2 v0) (const_int 1))");
-  relax_cfg.rpo_blocks[2].AddPatternOnly("(return)");
-  relax_cfg.rpo_blocks[3].AddPatternOnly("(set (reg:SI 2 v0) (const_int 2))");
-  relax_cfg.rpo_blocks[3].AddPatternOnly("(return)");
+  relax_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 1))");
+  relax_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+  relax_cfg.rpo_blocks[3].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 2))");
+  relax_cfg.rpo_blocks[3].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   RightInverseResult relax_res = verifier.VerifyRelaxDelaySlotsRightInverse(relax_cfg);
   EXPECT_TRUE(relax_res.matches) << relax_res.diff_detail;
 
@@ -496,11 +496,15 @@ TEST(RightInverseVerifierTest, Stage1DbrScheduleAndSubfunctionsRightInverse) {
       "(const_int 1)))])");
   eager_fallthrough_cfg.rpo_blocks[0].successors = {2, 1};
   eager_fallthrough_cfg.rpo_blocks[1].AddPatternOnly(
-      "(set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))");
+      "(set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1))) "
+      "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))");
   eager_fallthrough_cfg.rpo_blocks[1].successors = {2};
   eager_fallthrough_cfg.rpo_blocks[2].AddPatternOnly(
-      "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))");
-  eager_fallthrough_cfg.rpo_blocks[2].AddPatternOnly("(return)");
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))");
+  eager_fallthrough_cfg.rpo_blocks[2].AddPatternOnly(
+      "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+  eager_fallthrough_cfg.sideband.basic_block_live_at_start = {
+      {0, {2, 4, 5, 31}}, {1, {3, 4, 5, 31}}, {2, {2, 4, 31}}};
   RightInverseResult eager_ft_res =
       verifier.VerifyFillEagerDelaySlotsRightInverse(eager_fallthrough_cfg);
   EXPECT_TRUE(eager_ft_res.matches) << eager_ft_res.diff_detail;
@@ -514,11 +518,15 @@ TEST(RightInverseVerifierTest, Stage1DbrScheduleAndSubfunctionsRightInverse) {
       "(const_int 0)) (label_ref L0) (pc)))) (insn/s (set (reg:SI 3 v1) "
       "(const_int 9)))])");
   eager_target_cfg.rpo_blocks[0].successors = {2, 1};
-  eager_target_cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SI 2 v0) (reg:SI 4 a0))");
-  eager_target_cfg.rpo_blocks[1].AddPatternOnly("(return)");
+  eager_target_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 5 a1) (plus:SI (reg:SI 4 a0) (const_int 1)))");
+  eager_target_cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 5 a1))");
+  eager_target_cfg.rpo_blocks[1].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   eager_target_cfg.rpo_blocks[2].AddPatternOnly(
-      "(set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))");
-  eager_target_cfg.rpo_blocks[2].AddPatternOnly("(return)");
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))");
+  eager_target_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+  eager_target_cfg.sideband.basic_block_live_at_start = {
+      {0, {4, 5, 31}}, {1, {4, 31}}, {2, {3, 5, 31}}};
   RightInverseResult eager_tgt_res =
       verifier.VerifyFillEagerDelaySlotsRightInverse(eager_target_cfg);
   EXPECT_TRUE(eager_tgt_res.matches) << eager_tgt_res.diff_detail;
@@ -529,9 +537,9 @@ TEST(RightInverseVerifierTest, Stage1DbrScheduleAndSubfunctionsRightInverse) {
   simple_cfg.rpo_blocks.resize(2);
   simple_cfg.rpo_blocks[0].AddPatternOnly(
       "(sequence [(jump_insn (set (pc) (label_ref L0))) "
-      "(insn (set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 3))))])");
+      "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 3))))])");
   simple_cfg.rpo_blocks[0].successors = {1};
-  simple_cfg.rpo_blocks[1].AddPatternOnly("(return)");
+  simple_cfg.rpo_blocks[1].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   RightInverseResult simple_res = verifier.VerifyFillSimpleDelaySlotsRightInverse(simple_cfg);
   EXPECT_TRUE(simple_res.matches) << simple_res.diff_detail;
 
@@ -540,8 +548,8 @@ TEST(RightInverseVerifierTest, Stage1DbrScheduleAndSubfunctionsRightInverse) {
   dbr_cfg.pass = RtlPassKind::kDbr;
   dbr_cfg.rpo_blocks.resize(1);
   dbr_cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) "
-      "(plus:SI (reg:SI 4 a0) (const_int 1))))])");
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+      "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1))))])");
   RightInverseResult dbr_res = verifier.VerifyDbrStageRightInverse(dbr_cfg);
   EXPECT_TRUE(dbr_res.matches) << dbr_res.diff_detail;
 }
@@ -573,7 +581,7 @@ TEST(RightInverseVerifierTest, Stage2Jump2CrossJumpRightInverse) {
       "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))");
   jump2_cfg.rpo_blocks[3].AddPatternOnly("(set (reg:SI 2 v0) (reg:SI 3 v1))");
   jump2_cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
-  jump2_cfg.rpo_blocks[3].AddPatternOnly("(return)");
+  jump2_cfg.rpo_blocks[3].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   jump2_cfg.rpo_blocks[3].successors = {};
 
   RightInverseResult res = verifier.VerifyDoCrossJumpRightInverse(jump2_cfg);
@@ -882,7 +890,7 @@ TEST(RightInverseVerifierTest, Stage8FindBasicBlocksAndPropagateBlockRightInvers
   fbb_cfg.rpo_blocks.resize(1);
   fbb_cfg.rpo_blocks[0].AddPatternOnly(
       "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1)))");
-  fbb_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+  fbb_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
   RightInverseResult fbb_res = verifier.VerifyFindBasicBlocksRightInverse(fbb_cfg);
   EXPECT_TRUE(fbb_res.matches) << fbb_res.diff_detail;
@@ -906,7 +914,6 @@ TEST(RightInverseVerifierTest, Stage8FindBasicBlocksAndPropagateBlockRightInvers
       "(expr_list:REG_DEAD (reg:SI 74) (nil))");
   flow_cfg.rpo_blocks[0].AddPatternOnly(
       "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
-  flow_cfg.rpo_blocks[0].AddPatternOnly("(return)");
 
   RightInverseResult prop_res = verifier.VerifyPropagateBlockRightInverse(flow_cfg);
   EXPECT_TRUE(prop_res.matches) << prop_res.diff_detail;
@@ -1022,9 +1029,9 @@ TEST(RightInverseVerifierTest, Stage12JumpRedirectAndJump1OptimizeRightInverse) 
       "(label_ref L0) (pc)))");
   redirect_cfg.rpo_blocks[0].successors = {2, 1};
   redirect_cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 1))");
-  redirect_cfg.rpo_blocks[1].AddPatternOnly("(return)");
+  redirect_cfg.rpo_blocks[1].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   redirect_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 2))");
-  redirect_cfg.rpo_blocks[2].AddPatternOnly("(return)");
+  redirect_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
   RightInverseResult redir_res = verifier.VerifyJumpRedirectRightInverse(redirect_cfg);
   EXPECT_TRUE(redir_res.matches) << redir_res.diff_detail;
@@ -1580,6 +1587,157 @@ int dispatch_func(int kind, int x) {
   Stage0FunctionInput bad_pool_input = fp_trace.stage0_input;
   bad_pool_input.constant_pool[0].words[0] ^= 0x00000001u;
   EXPECT_FALSE(fp_verifier.VerifyFinalAndGasStageRightInverse(bad_pool_input).matches);
+}
+
+TEST(GccHarnessTest, ArgPointerRtxVsHardwareZeroDisambiguationAndReloadElimination) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  ctx.BeginFunction("argp_vs_zero_test");
+
+  // 1. Verify `(reg:SI 0 argp)` and `(reg:SI 0 $0)` round-trip distinctly
+  //    through `ParseRtx` and `FormatRtx`.
+  auto parsed_argp = ctx.ParseRtx("(reg:SI 0 argp)");
+  auto parsed_zero = ctx.ParseRtx("(reg:SI 0 $0)");
+  ASSERT_NE(parsed_argp, nullptr);
+  ASSERT_NE(parsed_zero, nullptr);
+  EXPECT_NE(parsed_argp, parsed_zero);
+  EXPECT_EQ(ctx.FormatRtx(parsed_argp), "(reg:SI 0 argp)");
+  EXPECT_EQ(ctx.FormatRtx(parsed_zero), "(reg:SI 0 $0)");
+
+  // 2. Verify `RunReload` (`eliminate_regs` with `global = 1`) eliminates
+  //    `(reg:SI 0 argp)` (`arg_pointer_rtx`) into `$sp`/`$fp` stack addressing
+  //    while leaving hardware `$zero` (`(reg:SI 0 $0)`) untouched.
+  RtlControlFlowGraph pre_reload;
+  pre_reload.pass = RtlPassKind::kLreg;
+  pre_reload.sideband.frame_size_bytes = 8;
+  RtlBasicBlock blk;
+  blk.id = 0;
+  blk.instructions = {
+      "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 0 argp) (const_int 16))))",
+      "(set (mem:SI (reg:SI 5 a1)) (reg:SI 0 $0))",
+      "(use (reg/i:SI 2 v0))",
+  };
+  blk.SyncRtlInsnsFromInstructions();
+  pre_reload.rpo_blocks = {blk};
+
+  auto first = ctx.MaterializeFromCfg(pre_reload);
+  ASSERT_NE(first, nullptr);
+  hooks.RunReload(first, /*global=*/1);
+  const RtlControlFlowGraph post_reload = ctx.DematerializeToCfg(first, RtlPassKind::kGreg);
+  ASSERT_EQ(post_reload.rpo_blocks.size(), 1u);
+  ASSERT_GE(post_reload.rpo_blocks[0].instructions.size(), 2u);
+
+  const std::string& reloaded_arg_load = post_reload.rpo_blocks[0].instructions[0];
+  const std::string& untouched_zero_store = post_reload.rpo_blocks[0].instructions[1];
+  EXPECT_EQ(reloaded_arg_load.find("argp"), std::string::npos) << reloaded_arg_load;
+  EXPECT_NE(reloaded_arg_load.find("(reg:SI 29 sp)"), std::string::npos) << reloaded_arg_load;
+  EXPECT_NE(untouched_zero_store.find("(reg:SI 0 $0)"), std::string::npos) << untouched_zero_store;
+}
+
+TEST(GccHarnessTest, ConstantPoolMaterializationAndVerifySuffixRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  constexpr std::string_view kPoolSource = R"(
+extern int sink_val(double);
+int pool_branch(int cond, double x) {
+  if (cond > 0) {
+    return sink_val(x * 3.141592653589793 + (-0.0));
+  }
+  return sink_val(x - 2.718281828459045);
+}
+)";
+
+  for (const std::vector<std::string>& flags :
+       {std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-G", "8", "-Wa,-g"},
+        std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-G", "0", "-Wa,-O2"},
+        std::vector<std::string>{"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    const FunctionCompilationTrace trace =
+        hooks.TraceForwardCompilation(kPoolSource, "pool_branch", flags, "pool_suffix_test");
+    ASSERT_FALSE(trace.stage0_input.constant_pool.empty());
+    ASSERT_FALSE(trace.pass_snapshots.at(RtlPassKind::kDbr).sideband.constant_pool.empty());
+    EXPECT_EQ(trace.stage0_input.profile.c_flags, flags);
+
+    class TraceSnapshotInverseProvider final : public SubfunctionInverseProvider {
+     public:
+      explicit TraceSnapshotInverseProvider(const FunctionCompilationTrace* t) : t_(t) {}
+      RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput&) const override {
+        return t_->pass_snapshots.at(RtlPassKind::kDbr);
+      }
+      RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph&) const override {
+        return t_->pass_snapshots.at(RtlPassKind::kJump2);
+      }
+      RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph&) const override {
+        return t_->pass_snapshots.at(RtlPassKind::kSched2);
+      }
+
+     private:
+      const FunctionCompilationTrace* t_;
+    };
+
+    TraceSnapshotInverseProvider provider(&trace);
+    RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+    for (RtlPassKind pass : {RtlPassKind::kDbr, RtlPassKind::kJump2, RtlPassKind::kSched2}) {
+      const RightInverseResult ok = verifier.VerifySuffixRightInverse(pass, trace.stage0_input);
+      EXPECT_TRUE(ok.matches) << "pass=" << static_cast<int>(pass) << " diff:\n" << ok.diff_detail;
+    }
+
+    // Negative check 1: Dropping `constant_pool` from lifted CFG must fail
+    // `VerifySuffixRightInverse` (no `unresolved_symbolic_pool_ref` loophole).
+    class DroppedPoolProvider final : public SubfunctionInverseProvider {
+     public:
+      explicit DroppedPoolProvider(RtlControlFlowGraph cfg) : cfg_(std::move(cfg)) {
+        cfg_.sideband.constant_pool.clear();
+      }
+      RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput&) const override {
+        return cfg_;
+      }
+
+     private:
+      RtlControlFlowGraph cfg_;
+    };
+    DroppedPoolProvider dropped_pool(trace.pass_snapshots.at(RtlPassKind::kDbr));
+    RightInverseVerifier bad_pool_verifier(&ctx, &hooks, &dropped_pool);
+    EXPECT_FALSE(
+        bad_pool_verifier.VerifySuffixRightInverse(RtlPassKind::kDbr, trace.stage0_input).matches);
+
+    // Negative check 2: Empty Stage 0 CFG must fail at every optimization level,
+    // and empty intermediate CFG at `kSched2` must fail when `optimize > 0`.
+    class EmptyDbrProvider final : public SubfunctionInverseProvider {
+     public:
+      RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput&) const override {
+        return {};
+      }
+    };
+    EmptyDbrProvider empty_dbr;
+    RightInverseVerifier empty_dbr_verifier(&ctx, &hooks, &empty_dbr);
+    EXPECT_FALSE(
+        empty_dbr_verifier.VerifySuffixRightInverse(RtlPassKind::kDbr, trace.stage0_input).matches);
+
+    if (trace.optimize_level > 0) {
+      class EmptySched2Provider final : public SubfunctionInverseProvider {
+       public:
+        explicit EmptySched2Provider(const FunctionCompilationTrace* t) : t_(t) {}
+        RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput&) const override {
+          return t_->pass_snapshots.at(RtlPassKind::kDbr);
+        }
+        RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph&) const override {
+          return t_->pass_snapshots.at(RtlPassKind::kJump2);
+        }
+        RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph&) const override {
+          return {};
+        }
+
+       private:
+        const FunctionCompilationTrace* t_;
+      };
+      EmptySched2Provider empty_sched2(&trace);
+      RightInverseVerifier empty_verifier(&ctx, &hooks, &empty_sched2);
+      EXPECT_FALSE(empty_verifier.VerifySuffixRightInverse(RtlPassKind::kSched2, trace.stage0_input)
+                       .matches);
+    }
+  }
 }
 
 }  // namespace

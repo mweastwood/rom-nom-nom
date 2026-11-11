@@ -51,8 +51,17 @@ void InsertRegSpan(int regno, RtlMachineMode mode, absl::flat_hash_set<int>* set
   }
 }
 
-bool ContainsUnknownOrMalformedOp(const RtlExpr& expr, size_t num_blocks) {
+bool IsReturnInternalExpr(const RtlExpr& pat) {
+  return pat.op == RtlOp::kParallel && !pat.children.empty() &&
+         pat.children[0].op == RtlOp::kReturn;
+}
+
+bool ContainsUnknownOrMalformedOp(const RtlExpr& expr, size_t num_blocks,
+                                  bool allow_return = false) {
   if (expr.op == RtlOp::kUnknown) {
+    return true;
+  }
+  if (expr.op == RtlOp::kReturn && !allow_return) {
     return true;
   }
   if (expr.op == RtlOp::kSequence) {
@@ -82,8 +91,9 @@ bool ContainsUnknownOrMalformedOp(const RtlExpr& expr, size_t num_blocks) {
       }
     }
   }
+  const bool child_allow_return = (expr.op == RtlOp::kParallel);
   for (const RtlExpr& child : expr.children) {
-    if (ContainsUnknownOrMalformedOp(child, num_blocks)) {
+    if (ContainsUnknownOrMalformedOp(child, num_blocks, child_allow_return)) {
       return true;
     }
   }
@@ -391,9 +401,9 @@ bool SetsAreDisjoint(const absl::flat_hash_set<int>& a, const absl::flat_hash_se
 
 bool IsRealConsumerInsn(const ParsedBlockInsn& insn) {
   const RtlOp op = insn.parsed.pattern.op;
-  if (op == RtlOp::kUse || op == RtlOp::kClobber || op == RtlOp::kReturn || op == RtlOp::kNote ||
-      op == RtlOp::kCodeLabel || op == RtlOp::kBarrier || op == RtlOp::kSequence ||
-      op == RtlOp::kCall) {
+  if (op == RtlOp::kUse || op == RtlOp::kClobber || op == RtlOp::kReturn ||
+      IsReturnInternalExpr(insn.parsed.pattern) || op == RtlOp::kNote || op == RtlOp::kCodeLabel ||
+      op == RtlOp::kBarrier || op == RtlOp::kSequence || op == RtlOp::kCall) {
     return false;
   }
   if (op == RtlOp::kSet && !insn.parsed.pattern.children.empty() &&
@@ -419,6 +429,7 @@ bool HasNoLaterDirectDependents(absl::Span<const ParsedBlockInsn> insns, size_t 
     if (later.writes_mem || later.has_side_effects) {
       const RtlOp op = later.parsed.pattern.op;
       if (op != RtlOp::kUse && op != RtlOp::kReturn &&
+          !IsReturnInternalExpr(later.parsed.pattern) &&
           !(op == RtlOp::kSet && !later.parsed.pattern.children.empty() &&
             later.parsed.pattern.children[0].op == RtlOp::kPc)) {
         return false;

@@ -141,9 +141,17 @@ class FunctionHooks {
   std::string RunFinal(Rtx first = nullptr, bool include_prologue_epilogue = true);
   std::string RunFinalScanInsn(Rtx insn, int prescan = 0, Rtx* next_insn_out = nullptr);
   void RunShortenBranches(Rtx first = nullptr);
-  std::string RunFunctionPrologue(int frame_size = 0, uint32_t saved_gpr_mask = 0);
-  std::string RunFunctionEpilogue(int frame_size = 0, uint32_t saved_gpr_mask = 0);
-  std::string RunFunctionPrologueEpilogue(int frame_size = 0, uint32_t saved_gpr_mask = 0);
+  std::string RunFunctionPrologue(int frame_size = 0, uint32_t saved_gpr_mask = 0,
+                                  uint32_t saved_fpr_mask = 0);
+  std::string RunFunctionEpilogue(int frame_size = 0, uint32_t saved_gpr_mask = 0,
+                                  uint32_t saved_fpr_mask = 0);
+  std::string RunFunctionPrologueEpilogue(int frame_size = 0, uint32_t saved_gpr_mask = 0,
+                                          uint32_t saved_fpr_mask = 0);
+
+  // Applies a module-level `CompilationProfile` (`optimize_level` and `c_flags`,
+  // including `-Wa,-g` / `-Wa,-O2` GAS options and `-G` threshold) to in-process
+  // GCC 2.7.2 and Binutils 2.6 globals.
+  void ApplyCompilationProfile(const CompilationProfile& profile);
 
   // Assembles one or more MIPS assembly lines in-process via Binutils 2.6 GAS
   // (`md_assemble`) and returns the emitted 32-bit big-endian machine words.
@@ -371,6 +379,7 @@ class FunctionHooks {
 
  private:
   void PrepareReorgState(Rtx first);
+  absl::flat_hash_map<int, absl::flat_hash_set<int>> CapturePostReorgLiveAtStart(Rtx first);
   void PrepareSchedState(Rtx first);
   void PrepareLocalAllocState(Rtx first);
   void PrepareCombineState(Rtx first);
@@ -383,6 +392,7 @@ class FunctionHooks {
   bool in_local_alloc_pass_ = false;
   bool in_combine_pass_ = false;
   bool in_loop_pass_ = false;
+  absl::flat_hash_map<int, absl::flat_hash_set<int>> last_reorg_post_live_;
 };
 
 }  // namespace rom_nom_nom::gcc_harness

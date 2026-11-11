@@ -838,7 +838,7 @@ absl::StatusOr<RtlExpr> ParseExprImpl(std::string_view text, size_t* pos) {
   }
 }
 
-void FormatExprImpl(const RtlExpr& expr, std::string* out) {
+void FormatExprImpl(const RtlExpr& expr, std::string* out, bool gcc_print_rtl = false) {
   out->push_back('(');
   AppendHeaderToken(expr, out);
 
@@ -847,7 +847,7 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
       out->push_back(' ');
       switch (item.kind) {
         case RtlExpr::GenericItem::Kind::kChildExpr:
-          FormatExprImpl(expr.children.at(item.child_index), out);
+          FormatExprImpl(expr.children.at(item.child_index), out, gcc_print_rtl);
           break;
         case RtlExpr::GenericItem::Kind::kBracketedChildSlice:
           out->push_back('[');
@@ -855,7 +855,7 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
             if (i > 0) {
               out->push_back(' ');
             }
-            FormatExprImpl(expr.children.at(item.child_index + i), out);
+            FormatExprImpl(expr.children.at(item.child_index + i), out, gcc_print_rtl);
           }
           out->push_back(']');
           break;
@@ -908,7 +908,7 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
     case RtlOp::kSubreg:
       if (!expr.children.empty()) {
         out->push_back(' ');
-        FormatExprImpl(expr.children[0], out);
+        FormatExprImpl(expr.children[0], out, gcc_print_rtl);
       }
       absl::StrAppend(out, " ", expr.int_val);
       break;
@@ -929,7 +929,7 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
     case RtlOp::kLabelRef:
       if (!expr.children.empty()) {
         out->push_back(' ');
-        FormatExprImpl(expr.children[0], out);
+        FormatExprImpl(expr.children[0], out, gcc_print_rtl);
       } else if (!expr.str_val.empty()) {
         absl::StrAppend(out, " ", expr.str_val);
       } else {
@@ -940,14 +940,14 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
     case RtlOp::kInsnList:
       if (expr.children.size() == 2) {
         out->push_back(' ');
-        FormatExprImpl(expr.children[0], out);
+        FormatExprImpl(expr.children[0], out, gcc_print_rtl);
         out->push_back(' ');
-        FormatExprImpl(expr.children[1], out);
+        FormatExprImpl(expr.children[1], out, gcc_print_rtl);
       } else {
         absl::StrAppend(out, " ", expr.int_val);
         if (!expr.children.empty()) {
           out->push_back(' ');
-          FormatExprImpl(expr.children[0], out);
+          FormatExprImpl(expr.children[0], out, gcc_print_rtl);
         }
       }
       break;
@@ -955,7 +955,7 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
     case RtlOp::kConstDouble:
       for (const auto& child : expr.children) {
         out->push_back(' ');
-        FormatExprImpl(child, out);
+        FormatExprImpl(child, out, gcc_print_rtl);
       }
       if (!expr.extra_ints.empty()) {
         for (int64_t val : expr.extra_ints) {
@@ -967,6 +967,18 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
       break;
 
     case RtlOp::kParallel:
+      if (gcc_print_rtl && expr.bracketed_children) {
+        out->append("[ ");
+        for (size_t i = 0; i < expr.children.size(); ++i) {
+          if (i > 0) {
+            out->push_back(' ');
+          }
+          FormatExprImpl(expr.children[i], out, gcc_print_rtl);
+        }
+        out->append(" ] ");
+        break;
+      }
+      [[fallthrough]];
     case RtlOp::kSequence:
     case RtlOp::kAddrVec:
       if (expr.bracketed_children) {
@@ -975,13 +987,13 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
           if (i > 0) {
             out->push_back(' ');
           }
-          FormatExprImpl(expr.children[i], out);
+          FormatExprImpl(expr.children[i], out, gcc_print_rtl);
         }
         out->push_back(']');
       } else {
         for (const auto& child : expr.children) {
           out->push_back(' ');
-          FormatExprImpl(child, out);
+          FormatExprImpl(child, out, gcc_print_rtl);
         }
       }
       break;
@@ -994,13 +1006,13 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
           if (i > 0) {
             out->push_back(' ');
           }
-          FormatExprImpl(expr.children[i], out);
+          FormatExprImpl(expr.children[i], out, gcc_print_rtl);
         }
         out->push_back(']');
       } else {
         for (const auto& child : expr.children) {
           out->push_back(' ');
-          FormatExprImpl(child, out);
+          FormatExprImpl(child, out, gcc_print_rtl);
         }
       }
       absl::StrAppend(out, " ", expr.int_val);
@@ -1009,12 +1021,68 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out) {
     default:
       for (const auto& child : expr.children) {
         out->push_back(' ');
-        FormatExprImpl(child, out);
+        FormatExprImpl(child, out, gcc_print_rtl);
       }
       break;
   }
 
   out->push_back(')');
+}
+
+absl::Status ParseRegNotesChainExpr(const RtlExpr& notes_expr, std::vector<RtlRegNote>* out_notes) {
+  const RtlExpr* cur = &notes_expr;
+  while (cur != nullptr && !cur->IsNil()) {
+    if (cur->op == RtlOp::kExprList) {
+      if (cur->children.size() != 2) {
+        return absl::InvalidArgumentError("Expected 2 children in REG_NOTES expr_list node");
+      }
+      RtlRegNote note;
+      note.kind = cur->mode;
+      note.raw_kind = cur->raw_mode;
+      note.list_op = RtlOp::kExprList;
+      note.datum = cur->children[0];
+      out_notes->push_back(std::move(note));
+      cur = &cur->children[1];
+    } else if (cur->op == RtlOp::kInsnList) {
+      RtlRegNote note;
+      note.kind = cur->mode;
+      note.raw_kind = cur->raw_mode;
+      note.list_op = RtlOp::kInsnList;
+      if (cur->children.size() == 2) {
+        note.datum = cur->children[0];
+        cur = &cur->children[1];
+      } else if (cur->children.size() == 1) {
+        note.insn_id = static_cast<int>(cur->int_val);
+        cur = &cur->children[0];
+      } else {
+        return absl::InvalidArgumentError("Malformed insn_list node in REG_NOTES");
+      }
+      out_notes->push_back(std::move(note));
+    } else {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unexpected node in REG_NOTES list: ", cur->ToSexprString()));
+    }
+  }
+  return absl::OkStatus();
+}
+
+RtlExpr BuildRegNotesChainExpr(absl::Span<const RtlRegNote> notes) {
+  RtlExpr chain = RtlExpr::MakeNil();
+  for (auto it = notes.rbegin(); it != notes.rend(); ++it) {
+    RtlExpr node;
+    node.op = it->list_op;
+    node.mode = it->kind;
+    node.raw_mode = it->raw_kind;
+    if (it->list_op == RtlOp::kInsnList && it->insn_id >= 0 && it->datum.IsNil()) {
+      node.int_val = it->insn_id;
+      node.children.push_back(std::move(chain));
+    } else {
+      node.children.push_back(it->datum);
+      node.children.push_back(std::move(chain));
+    }
+    chain = std::move(node);
+  }
+  return chain;
 }
 
 }  // namespace
@@ -1044,7 +1112,13 @@ absl::StatusOr<RtlExpr> RtlExpr::Parse(std::string_view sexpr) {
 
 std::string RtlExpr::ToSexprString() const {
   std::string out;
-  FormatExprImpl(*this, &out);
+  FormatExprImpl(*this, &out, /*gcc_print_rtl=*/false);
+  return out;
+}
+
+std::string RtlExpr::ToGccPrintRtlString() const {
+  std::string out;
+  FormatExprImpl(*this, &out, /*gcc_print_rtl=*/true);
   return out;
 }
 
@@ -1085,6 +1159,16 @@ RtlExpr RtlExpr::MakeReg(RtlMachineMode mode, int regno, RtlFlags flags) {
   expr.mode = mode;
   expr.flags = flags;
   expr.SetRegNo(regno);
+  return expr;
+}
+
+RtlExpr RtlExpr::MakeArgPointerReg(RtlMachineMode mode, RtlFlags flags) {
+  RtlExpr expr;
+  expr.op = RtlOp::kReg;
+  expr.mode = mode;
+  expr.flags = flags;
+  expr.int_val = 0;
+  expr.str_val = "argp";
   return expr;
 }
 
@@ -1179,6 +1263,51 @@ RtlExpr RtlExpr::MakeParallel(std::vector<RtlExpr> elements) {
   expr.op = RtlOp::kParallel;
   expr.bracketed_children = true;
   expr.children = std::move(elements);
+  return expr;
+}
+
+RtlExpr RtlExpr::MakeSequence(std::vector<RtlExpr> sub_insns) {
+  RtlExpr expr;
+  expr.op = RtlOp::kSequence;
+  expr.bracketed_children = true;
+  expr.children = std::move(sub_insns);
+  return expr;
+}
+
+RtlExpr RtlExpr::MakeInsnWrapper(RtlOp wrapper_op, RtlFlags flags, RtlExpr inner_pattern) {
+  RtlExpr expr;
+  expr.op = wrapper_op;
+  expr.flags = flags;
+  GenericItem pat_item;
+  pat_item.kind = GenericItem::Kind::kChildExpr;
+  pat_item.child_index = 0;
+  expr.children.push_back(std::move(inner_pattern));
+  expr.generic_items.push_back(std::move(pat_item));
+  return expr;
+}
+
+RtlExpr RtlExpr::MakeInsnWrapper(RtlOp wrapper_op, RtlFlags flags,
+                                 const RtlPatternAndNotes& inner) {
+  RtlExpr expr = MakeInsnWrapper(wrapper_op, flags, inner.pattern);
+  if (!inner.reg_notes.empty()) {
+    GenericItem notes_item;
+    notes_item.kind = GenericItem::Kind::kChildExpr;
+    notes_item.child_index = expr.children.size();
+    expr.children.push_back(BuildRegNotesChainExpr(inner.reg_notes));
+    expr.generic_items.push_back(std::move(notes_item));
+  }
+  return expr;
+}
+
+RtlExpr RtlExpr::MakeNote(std::string note_kind) {
+  RtlExpr expr;
+  expr.op = RtlOp::kNote;
+  if (!note_kind.empty()) {
+    GenericItem item;
+    item.kind = GenericItem::Kind::kBareAtom;
+    item.text = std::move(note_kind);
+    expr.generic_items.push_back(std::move(item));
+  }
   return expr;
 }
 
@@ -1282,7 +1411,7 @@ void RtlExpr::RewriteRegs(absl::FunctionRef<void(RtlExpr&)> mutator) {
 
 void RtlExpr::ReplaceRegNo(int from_regno, int to_regno) {
   RewriteRegs([from_regno, to_regno](RtlExpr& reg) {
-    if (reg.RegNo() == from_regno) {
+    if (!reg.IsArgPointerReg() && reg.RegNo() == from_regno) {
       reg.SetRegNo(to_regno);
     }
   });
@@ -1291,7 +1420,7 @@ void RtlExpr::ReplaceRegNo(int from_regno, int to_regno) {
 bool RtlExpr::ContainsReg(int regno) const {
   bool found = false;
   Visit([regno, &found](const RtlExpr& node) {
-    if (node.IsReg() && node.RegNo() == regno) {
+    if (node.IsReg() && !node.IsArgPointerReg() && node.RegNo() == regno) {
       found = true;
     }
   });
@@ -1353,8 +1482,46 @@ RtlMachineMode RtlExpr::ParseMode(std::string_view name) {
   return RtlMachineMode::kUnknown;
 }
 
+absl::StatusOr<RtlPatternAndNotes> RtlPatternAndNotes::FromSequenceSubInsn(
+    const RtlExpr& sub_insn) {
+  if ((sub_insn.op != RtlOp::kInsn && sub_insn.op != RtlOp::kJumpInsn &&
+       sub_insn.op != RtlOp::kCallInsn) ||
+      sub_insn.children.empty()) {
+    return absl::InvalidArgumentError(
+        "Expected non-empty insn, jump_insn, or call_insn wrapper in SEQUENCE");
+  }
+  RtlPatternAndNotes out;
+  out.pattern = sub_insn.children[0];
+  const bool has_leading_uid = !sub_insn.generic_items.empty() &&
+                               sub_insn.generic_items[0].kind == RtlExpr::GenericItem::Kind::kInt;
+  if (has_leading_uid) {
+    if (sub_insn.children.size() >= 3) {
+      absl::Status st = ParseRegNotesChainExpr(sub_insn.children.back(), &out.reg_notes);
+      if (!st.ok()) {
+        return st;
+      }
+    }
+  } else {
+    if (sub_insn.children.size() > 2) {
+      return absl::InvalidArgumentError(
+          "Unexpected extra child expressions in compact SEQUENCE sub-insn");
+    }
+    if (sub_insn.children.size() == 2) {
+      absl::Status st = ParseRegNotesChainExpr(sub_insn.children[1], &out.reg_notes);
+      if (!st.ok()) {
+        return st;
+      }
+    }
+  }
+  return out;
+}
+
 std::string RtlPatternAndNotes::ToSexprString() const {
   return FormatPatternAndNotes(pattern, reg_notes, bracketed_notes);
+}
+
+std::string RtlPatternAndNotes::ToGccPrintRtlString() const {
+  return FormatGccPrintRtlPatternAndNotes(pattern, reg_notes, bracketed_notes);
 }
 
 void RtlPatternAndNotes::RewriteRegs(absl::FunctionRef<void(RtlExpr&)> mutator) {
@@ -1366,7 +1533,7 @@ void RtlPatternAndNotes::RewriteRegs(absl::FunctionRef<void(RtlExpr&)> mutator) 
 
 void RtlPatternAndNotes::ReplaceRegNo(int from_regno, int to_regno) {
   RewriteRegs([from_regno, to_regno](RtlExpr& reg) {
-    if (reg.RegNo() == from_regno) {
+    if (!reg.IsArgPointerReg() && reg.RegNo() == from_regno) {
       reg.SetRegNo(to_regno);
     }
   });
@@ -1417,38 +1584,9 @@ absl::StatusOr<RtlPatternAndNotes> ParsePatternAndNotes(std::string_view pattern
     if (!notes_expr_or.ok()) {
       return notes_expr_or.status();
     }
-    const RtlExpr* cur = &(*notes_expr_or);
-    while (cur != nullptr && !cur->IsNil()) {
-      if (cur->op == RtlOp::kExprList) {
-        if (cur->children.size() != 2) {
-          return absl::InvalidArgumentError("Expected 2 children in REG_NOTES expr_list node");
-        }
-        RtlRegNote note;
-        note.kind = cur->mode;
-        note.raw_kind = cur->raw_mode;
-        note.list_op = RtlOp::kExprList;
-        note.datum = cur->children[0];
-        out.reg_notes.push_back(std::move(note));
-        cur = &cur->children[1];
-      } else if (cur->op == RtlOp::kInsnList) {
-        RtlRegNote note;
-        note.kind = cur->mode;
-        note.raw_kind = cur->raw_mode;
-        note.list_op = RtlOp::kInsnList;
-        if (cur->children.size() == 2) {
-          note.datum = cur->children[0];
-          cur = &cur->children[1];
-        } else if (cur->children.size() == 1) {
-          note.insn_id = static_cast<int>(cur->int_val);
-          cur = &cur->children[0];
-        } else {
-          return absl::InvalidArgumentError("Malformed insn_list node in REG_NOTES");
-        }
-        out.reg_notes.push_back(std::move(note));
-      } else {
-        return absl::InvalidArgumentError(
-            absl::StrCat("Unexpected node in REG_NOTES list: ", cur->ToSexprString()));
-      }
+    absl::Status st = ParseRegNotesChainExpr(*notes_expr_or, &out.reg_notes);
+    if (!st.ok()) {
+      return st;
     }
   }
 
@@ -1462,26 +1600,27 @@ std::string FormatPatternAndNotes(const RtlExpr& pattern, absl::Span<const RtlRe
     return out;
   }
 
-  RtlExpr chain = RtlExpr::MakeNil();
-  for (auto it = notes.rbegin(); it != notes.rend(); ++it) {
-    RtlExpr node;
-    node.op = it->list_op;
-    node.mode = it->kind;
-    node.raw_mode = it->raw_kind;
-    if (it->list_op == RtlOp::kInsnList && it->insn_id >= 0 && it->datum.IsNil()) {
-      node.int_val = it->insn_id;
-      node.children.push_back(std::move(chain));
-    } else {
-      node.children.push_back(it->datum);
-      node.children.push_back(std::move(chain));
-    }
-    chain = std::move(node);
-  }
-
+  const RtlExpr chain = BuildRegNotesChainExpr(notes);
   if (bracketed) {
     absl::StrAppend(&out, " [REG_NOTES: ", chain.ToSexprString(), "]");
   } else {
     absl::StrAppend(&out, " ", chain.ToSexprString());
+  }
+  return out;
+}
+
+std::string FormatGccPrintRtlPatternAndNotes(const RtlExpr& pattern,
+                                             absl::Span<const RtlRegNote> notes, bool bracketed) {
+  std::string out = pattern.ToGccPrintRtlString();
+  if (notes.empty()) {
+    return out;
+  }
+
+  const RtlExpr chain = BuildRegNotesChainExpr(notes);
+  if (bracketed) {
+    absl::StrAppend(&out, " [REG_NOTES: ", chain.ToGccPrintRtlString(), "]");
+  } else {
+    absl::StrAppend(&out, " ", chain.ToGccPrintRtlString());
   }
   return out;
 }

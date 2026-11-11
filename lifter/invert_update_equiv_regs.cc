@@ -587,6 +587,15 @@ absl::StatusOr<RtlControlFlowGraph> InvertUpdateEquivRegs(const RtlControlFlowGr
         }
 
         if (it->datum.op == RtlOp::kMem) {
+          if (is_block_local(regno, b) && !(src == it->datum) &&
+              HasSubsequentMatchingStore(asts, ii, regno, it->datum)) {
+            // Attached later by Rule A (`local-alloc.c:990-1000`) when a
+            // subsequent store `(set (mem ...) (reg regno))` in the same basic
+            // block was visited. Because `insn` had already passed line 1058,
+            // this note did not trigger `reg_live_length[regno]` doubling.
+            it = pn.reg_notes.erase(it);
+            continue;
+          }
           if (src.op == RtlOp::kMem) {
             // `note` was present at `local-alloc.c:1058` (either added at line
             // 1054 from `SET_SRC(set)` or pre-existing from `assign_parms`),
@@ -600,17 +609,6 @@ absl::StatusOr<RtlControlFlowGraph> InvertUpdateEquivRegs(const RtlControlFlowGr
             }
             if (is_block_local(regno, b) && src == it->datum &&
                 CanValidateEquivMem(asts, ii, regno, src)) {
-              it = pn.reg_notes.erase(it);
-              continue;
-            }
-          } else {
-            // `SET_SRC(set)` is not `MEM`, so this `REG_EQUIV (mem ...)` note
-            // was attached later by Rule A (`local-alloc.c:990-1000`) when a
-            // subsequent store `(set (mem ...) (reg regno))` in the same basic
-            // block was visited. Because `insn` had already been processed in
-            // the loop, `reg_live_length[regno]` was not doubled.
-            if (is_block_local(regno, b) &&
-                HasSubsequentMatchingStore(asts, ii, regno, it->datum)) {
               it = pn.reg_notes.erase(it);
               continue;
             }

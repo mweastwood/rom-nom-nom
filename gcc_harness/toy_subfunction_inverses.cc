@@ -49,7 +49,7 @@ std::string InvertWordToRtlSexpr(uint32_t w, bool is_return_value = false) {
   const uint16_t uimm = static_cast<uint16_t>(w & 0xffffu);
 
   if (w == 0x03e00008u) {
-    return "(return)";
+    return "(parallel[ (return) (use (reg:SI 31 ra)) ] )";
   }
   if (op == 0x00u) {
     const std::string dst = FormatHardRegRtl(rd, is_return_value && rd == 2);
@@ -371,7 +371,7 @@ std::string ToySubfunctionInverses::InvertFinalScanInsn(std::string_view asm_lin
     return "(const_int 0)";
   }
   if (line == "j\t$31" || line == "j $31" || line == "jr\t$31" || line == "jr $31") {
-    return "(return)";
+    return "(parallel[ (return) (use (reg:SI 31 ra)) ] )";
   }
 
   size_t sp = 0;
@@ -557,6 +557,13 @@ PrologueEpilogueFrameSpec ToySubfunctionInverses::InvertFunctionPrologueEpilogue
         rest = rest.substr(0, comma);
       }
       (void)absl::SimpleHexAtoi(absl::StripAsciiWhitespace(rest), &spec.saved_gpr_mask);
+    } else if (absl::StartsWith(line, ".fmask")) {
+      std::string_view rest = absl::StripAsciiWhitespace(line.substr(6));
+      const size_t comma = rest.find(',');
+      if (comma != std::string_view::npos) {
+        rest = rest.substr(0, comma);
+      }
+      (void)absl::SimpleHexAtoi(absl::StripAsciiWhitespace(rest), &spec.saved_fpr_mask);
     }
   }
   return spec;
@@ -575,11 +582,13 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFinalAndGasFunction(
     if (w == 0x03e00008u && i + 1 < machine_words_x.size()) {
       const uint32_t delay_w = machine_words_x[i + 1];
       if (delay_w == 0x00000000u) {
-        cfg.rpo_blocks[0].AddPatternOnly("(sequence [(jump_insn (return)) (insn (const_int 0))])");
-      } else {
         cfg.rpo_blocks[0].AddPatternOnly(
-            absl::StrFormat("(sequence [(jump_insn (return)) (insn %s)])",
-                            InvertWordToRtlSexpr(delay_w, /*is_return_value=*/true)));
+            "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+            "(insn (const_int 0))])");
+      } else {
+        cfg.rpo_blocks[0].AddPatternOnly(absl::StrFormat(
+            "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) (insn %s)])",
+            InvertWordToRtlSexpr(delay_w, /*is_return_value=*/true)));
       }
       i += 2;
       continue;
@@ -679,8 +688,9 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFinalScanInsnStream(
       return {};
     }
     cur_blk.AddPatternOnly(pat);
-    if ((pat == "(return)" || absl::StartsWith(pat, "(set (pc) ")) && i + 1 < asm_lines_x.size() &&
-        !absl::EndsWith(asm_lines_x[i + 1], ":")) {
+    if ((pat == "(parallel[ (return) (use (reg:SI 31 ra)) ] )" ||
+         absl::StartsWith(pat, "(set (pc) ")) &&
+        i + 1 < asm_lines_x.size() && !absl::EndsWith(asm_lines_x[i + 1], ":")) {
       blocks.push_back(std::move(cur_blk));
       cur_blk = RtlBasicBlock{};
       cur_blk.id = blocks.size();
@@ -698,7 +708,9 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFinalScanInsnStream(
       continue;
     }
     const std::string& last = blocks[b].instructions.back();
-    const bool is_ret = (last == "(return)" || absl::StrContains(last, "(jump_insn (return))"));
+    const bool is_ret =
+        (last == "(parallel[ (return) (use (reg:SI 31 ra)) ] )" ||
+         absl::StrContains(last, "(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))"));
     const bool is_uncond = absl::StartsWith(last, "(set (pc) (label_ref ") ||
                            absl::StartsWith(last, "(sequence [(jump_insn (set (pc) (label_ref ");
     const bool is_cond = absl::StrContains(last, "(if_then_else ");
@@ -733,36 +745,15 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFinalScanInsnStream(
 RtlControlFlowGraph ToySubfunctionInverses::InvertMakeReturnInsns(
     const RtlControlFlowGraph& x) const {
   RtlControlFlowGraph out = x;
-  const size_t end_block_id = out.rpo_blocks.size();
-  const std::string end_label = absl::StrFormat("L%zu", end_block_id);
-  const std::string jump_to_end = absl::StrFormat("(set (pc) (label_ref %s))", end_label);
-
-  bool converted_any = false;
-  for (auto& blk : out.rpo_blocks) {
-    for (size_t i = 0; i < blk.instructions.size(); ++i) {
-      std::string& pat = blk.instructions[i];
-      const size_t seq_ret_pos = pat.find("(jump_insn (return))");
-      if (seq_ret_pos != std::string::npos) {
-        pat.replace(seq_ret_pos, std::string_view("(jump_insn (return))").size(),
-                    absl::StrCat("(jump_insn ", jump_to_end, ")"));
-        if (blk.successors.empty()) {
-          blk.successors.push_back(end_block_id);
-        }
-        converted_any = true;
-      } else if (pat == "(return)") {
-        pat = jump_to_end;
-        if (blk.successors.empty()) {
-          blk.successors.push_back(end_block_id);
-        }
-        converted_any = true;
-      }
-    }
-    blk.SyncRtlInsnsFromInstructions();
+  if (out.rpo_blocks.empty()) {
+    return out;
   }
-
-  if (converted_any) {
+  const auto& last_blk = out.rpo_blocks.back();
+  if (!last_blk.instructions.empty() &&
+      absl::StartsWith(last_blk.instructions.back(), "(sequence [")) {
     RtlBasicBlock end_blk;
-    end_blk.id = end_block_id;
+    end_blk.id = out.rpo_blocks.size();
+    end_blk.has_label = true;
     out.rpo_blocks.push_back(std::move(end_blk));
   }
   return out;
@@ -866,6 +857,23 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFillEagerDelaySlots(
       auto& dest_blk = out.rpo_blocks[dest_b];
       dest_blk.instructions.insert(dest_blk.instructions.begin(), delay_pat);
       dest_blk.SyncRtlInsnsFromInstructions();
+      if (auto live_it = out.sideband.basic_block_live_at_start.find(static_cast<int>(dest_b));
+          live_it != out.sideband.basic_block_live_at_start.end()) {
+        auto parsed_delay = ParsePatternAndNotes(delay_pat);
+        if (parsed_delay.ok() && parsed_delay->pattern.IsSet() &&
+            parsed_delay->pattern.SetDest().IsReg()) {
+          const int dst_reg = parsed_delay->pattern.SetDest().RegNo();
+          bool read_in_src = false;
+          parsed_delay->pattern.SetSrc().Visit([&](const RtlExpr& n) {
+            if (n.IsReg() && n.RegNo() == dst_reg) {
+              read_in_src = true;
+            }
+          });
+          if (!read_in_src) {
+            live_it->second.erase(dst_reg);
+          }
+        }
+      }
     }
   }
   return out;
@@ -895,8 +903,7 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFillSimpleDelaySlots(
 }
 
 RtlControlFlowGraph ToySubfunctionInverses::InvertDbrSchedule(const RtlControlFlowGraph& x) const {
-  return InvertFillSimpleDelaySlots(
-      InvertFillEagerDelaySlots(InvertRelaxDelaySlots(InvertMakeReturnInsns(x))));
+  return InvertFillSimpleDelaySlots(InvertFillEagerDelaySlots(InvertRelaxDelaySlots(x)));
 }
 
 // -----------------------------------------------------------------------------
@@ -924,11 +931,11 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertDoCrossJump(const RtlControlFl
     }
 
     // Separate the shared non-jump tail instructions in `join_blk` from the
-    // trailing `(use ...)` / `(return)` epilogue.
+    // trailing `(use ...)` / `return_internal` epilogue.
     std::vector<std::string> shared_insns;
     std::vector<std::string> epilogue_insns;
     for (const std::string& pat : join_blk.instructions) {
-      if (absl::StartsWith(pat, "(use ") || pat == "(return)" ||
+      if (absl::StartsWith(pat, "(use ") || pat == "(parallel[ (return) (use (reg:SI 31 ra)) ] )" ||
           absl::StartsWith(pat, "(set (pc)")) {
         epilogue_insns.push_back(pat);
       } else if (epilogue_insns.empty()) {
@@ -964,7 +971,9 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertDoCrossJump(const RtlControlFl
       pred_blk.SyncRtlInsnsFromInstructions();
     }
     out.rpo_blocks[join_b].instructions =
-        epilogue_insns.empty() ? std::vector<std::string>{"(return)"} : std::move(epilogue_insns);
+        epilogue_insns.empty()
+            ? std::vector<std::string>{"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}
+            : std::move(epilogue_insns);
     out.rpo_blocks[join_b].SyncRtlInsnsFromInstructions();
     return out;
   }
@@ -1385,12 +1394,13 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertFindBasicBlocks(
   if (out.rpo_blocks.empty()) {
     return out;
   }
-  // Ensure the last block ends with an unconditional `(return)` so a `BARRIER`
+  // Ensure the last block ends with an unconditional `return_internal` so a `BARRIER`
   // is emitted before the unreachable block; `flow.c:find_basic_blocks` deletes
   // unreachable instructions and unused labels following a `BARRIER`.
   const auto& last_blk = out.rpo_blocks.back();
   if (last_blk.instructions.empty() ||
-      StripTrailingRegNotesFromPattern(last_blk.instructions.back()) != "(return)") {
+      StripTrailingRegNotesFromPattern(last_blk.instructions.back()) !=
+          "(parallel[ (return) (use (reg:SI 31 ra)) ] )") {
     return out;
   }
   RtlBasicBlock dead_blk;

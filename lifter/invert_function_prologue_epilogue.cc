@@ -4,13 +4,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
@@ -440,12 +443,17 @@ bool ParseSaveRestoreInsns(const std::vector<ParsedInsn>& insns, bool is_restore
     return false;
   }
 
-  // Optional FPR save/restore instructions (`l.d`/`l.s` or `s.d`/`s.s`).
-  const std::string_view fpr_double = is_restore ? "l.d" : "s.d";
-  const std::string_view fpr_single = is_restore ? "l.s" : "s.s";
+  // Optional FPR save/restore instructions (`l.d`/`ldc1`/`l.s`/`lwc1` or
+  // `s.d`/`sdc1`/`s.s`/`swc1`).
+  auto is_fpr_double_mnem = [&](std::string_view mnem) {
+    return is_restore ? (mnem == "l.d" || mnem == "ldc1") : (mnem == "s.d" || mnem == "sdc1");
+  };
+  auto is_fpr_single_mnem = [&](std::string_view mnem) {
+    return is_restore ? (mnem == "l.s" || mnem == "lwc1") : (mnem == "s.s" || mnem == "swc1");
+  };
   int last_fpreg = 32;
   while (*idx < insns.size() &&
-         (insns[*idx].mnemonic == fpr_double || insns[*idx].mnemonic == fpr_single)) {
+         (is_fpr_double_mnem(insns[*idx].mnemonic) || is_fpr_single_mnem(insns[*idx].mnemonic))) {
     const ParsedInsn& insn = insns[*idx];
     if (insn.ops.size() != 2) {
       return false;
@@ -457,7 +465,7 @@ bool ParseSaveRestoreInsns(const std::vector<ParsedInsn>& insns, bool is_restore
         *fpreg >= last_fpreg) {
       return false;
     }
-    const bool is_double = (insn.mnemonic == fpr_double);
+    const bool is_double = is_fpr_double_mnem(insn.mnemonic);
     if (is_double && (*fpreg % 2 != 0 || *fpreg + 1 >= 32)) {
       return false;
     }
@@ -914,7 +922,7 @@ PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(std::string_view asm_te
   }
 
   if (saved_fpr_mask != 0 && has_fmask_dir) {
-    const int64_t expected_fp_sp_offset = insn_tsize - fp_reg_rounded + fp_reg_size - 8;
+    const int64_t expected_fp_sp_offset = insn_tsize - fp_reg_rounded + fp_reg_size - 4;
     const int64_t expected_fp_save_offset = expected_fp_sp_offset - insn_tsize;
     if (dir_fp_save_offset != expected_fp_save_offset) {
       return kInvalid;
@@ -936,26 +944,11 @@ PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(std::string_view asm_te
   return PrologueEpilogueFrameSpec{
       .var_size = var_size,
       .saved_gpr_mask = saved_gpr_mask,
+      .saved_fpr_mask = saved_fpr_mask,
   };
 }
 
 namespace {
-
-std::optional<int> ParseFprRestoreRegno(std::string_view line) {
-  if (!absl::StartsWith(line, "l.d $f") && !absl::StartsWith(line, "l.d\t$f") &&
-      !absl::StartsWith(line, "l.s $f") && !absl::StartsWith(line, "l.s\t$f")) {
-    return std::nullopt;
-  }
-  const size_t comma = line.find(',');
-  if (comma == std::string_view::npos || comma <= 6) {
-    return std::nullopt;
-  }
-  int fpreg = -1;
-  if (!absl::SimpleAtoi(line.substr(6, comma - 6), &fpreg) || fpreg < 20 || fpreg > 31) {
-    return std::nullopt;
-  }
-  return 32 + fpreg;
-}
 
 bool IsSpRestoreAdjustLine(std::string_view line) {
   return absl::StartsWith(line, "addiu $29,$29,") || absl::StartsWith(line, "addiu\t$29,$29,") ||
@@ -1023,7 +1016,9 @@ bool TryMatchEpilogueEndingAt(absl::Span<const std::string> lines, size_t end_id
     if ((absl::StartsWith(lw_ra_cand, "lw $31,") || absl::StartsWith(lw_ra_cand, "lw\t$31,")) &&
         !absl::StartsWith(delay_cand, "lw ") && !absl::StartsWith(delay_cand, "lw\t") &&
         !absl::StartsWith(delay_cand, "l.d ") && !absl::StartsWith(delay_cand, "l.d\t") &&
-        !absl::StartsWith(delay_cand, "l.s ") && !absl::StartsWith(delay_cand, "l.s\t")) {
+        !absl::StartsWith(delay_cand, "ldc1 ") && !absl::StartsWith(delay_cand, "ldc1\t") &&
+        !absl::StartsWith(delay_cand, "l.s ") && !absl::StartsWith(delay_cand, "l.s\t") &&
+        !absl::StartsWith(delay_cand, "lwc1 ") && !absl::StartsWith(delay_cand, "lwc1\t")) {
       for (size_t cand_start = min_start; cand_start <= tail_start - 2; ++cand_start) {
         const std::string& first_l = lines[cand_start];
         if (IsMoveSpFpLine(first_l) && !has_fp_in_prologue) {
@@ -1050,6 +1045,11 @@ bool TryMatchEpilogueEndingAt(absl::Span<const std::string> lines, size_t end_id
             }
           }
           out_sideband->saved_fpr_regnos.clear();
+          for (int r = 0; r < 32; ++r) {
+            if ((spec.saved_fpr_mask >> r) & 1u) {
+              out_sideband->saved_fpr_regnos.push_back(32 + r);
+            }
+          }
           out_sideband->epilogue_delay_pattern = delay_pat;
           *out_cand_start = cand_start;
           if (out_delay_line != nullptr) {
@@ -1089,12 +1089,11 @@ bool TryMatchEpilogueEndingAt(absl::Span<const std::string> lines, size_t end_id
         }
       }
       out_sideband->saved_fpr_regnos.clear();
-      for (size_t k = cand_start; k < tail_start; ++k) {
-        if (const std::optional<int> fpr = ParseFprRestoreRegno(lines[k]); fpr.has_value()) {
-          out_sideband->saved_fpr_regnos.push_back(*fpr);
+      for (int r = 0; r < 32; ++r) {
+        if ((spec.saved_fpr_mask >> r) & 1u) {
+          out_sideband->saved_fpr_regnos.push_back(32 + r);
         }
       }
-      std::sort(out_sideband->saved_fpr_regnos.begin(), out_sideband->saved_fpr_regnos.end());
       out_sideband->epilogue_delay_pattern.reset();
       *out_cand_start = cand_start;
       if (out_delay_line != nullptr) {
@@ -1109,14 +1108,62 @@ bool TryMatchEpilogueEndingAt(absl::Span<const std::string> lines, size_t end_id
 
 void InferLeafAndOutgoingArgsSize(absl::Span<const std::string> asm_lines,
                                   RtlSidebandState* sideband) {
+  struct CfgNode {
+    ParsedInsn insn;
+    bool in_noreorder = false;
+    bool is_volatile = false;
+    bool is_call = false;
+  };
+  std::vector<CfgNode> nodes;
+  nodes.reserve(asm_lines.size());
+  absl::flat_hash_map<std::string, size_t> label_to_node;
+  std::vector<size_t> all_label_targets;
+  bool cur_noreorder = false;
   bool has_call = false;
-  for (const std::string& line : asm_lines) {
-    if (absl::StartsWith(line, "jal ") || absl::StartsWith(line, "jal\t") ||
-        absl::StartsWith(line, "jalr ") || absl::StartsWith(line, "jalr\t")) {
-      has_call = true;
-      break;
+
+  for (const std::string& raw_line : asm_lines) {
+    std::string_view line = absl::StripAsciiWhitespace(raw_line);
+    if (line.empty()) {
+      continue;
     }
+    if (line == ".set\tnoreorder" || line == ".set noreorder") {
+      cur_noreorder = true;
+      continue;
+    }
+    if (line == ".set\treorder" || line == ".set reorder") {
+      cur_noreorder = false;
+      continue;
+    }
+    if (line.front() == '.') {
+      continue;
+    }
+    if (absl::EndsWith(line, ":")) {
+      std::string lbl(line.substr(0, line.size() - 1));
+      label_to_node[lbl] = nodes.size();
+      all_label_targets.push_back(nodes.size());
+      continue;
+    }
+    bool is_vol = false;
+    if (absl::StartsWith(line, "%{") && absl::EndsWith(line, "%}")) {
+      line = absl::StripAsciiWhitespace(line.substr(2, line.size() - 4));
+      is_vol = true;
+    }
+    ParsedInsn parsed;
+    if (!ParseInsnLine(line, cur_noreorder, &parsed)) {
+      continue;
+    }
+    const bool is_call_insn = (parsed.mnemonic == "jal" || parsed.mnemonic == "jalr");
+    if (is_call_insn) {
+      has_call = true;
+    }
+    nodes.push_back(CfgNode{
+        .insn = std::move(parsed),
+        .in_noreorder = cur_noreorder,
+        .is_volatile = is_vol,
+        .is_call = is_call_insn,
+    });
   }
+
   const bool saves_ra =
       std::find(sideband->saved_gpr_regnos.begin(), sideband->saved_gpr_regnos.end(), kRegRa) !=
       sideband->saved_gpr_regnos.end();
@@ -1132,9 +1179,102 @@ void InferLeafAndOutgoingArgsSize(absl::Span<const std::string> asm_lines,
     return;
   }
 
-  // Identify `$sp`-relative slots in `[16, non_reg_size)` that are loaded from
-  // or have their address taken (`addiu/daddiu $r,$29,<off>` with `r != 29`);
-  // such slots are local variables / spills rather than outgoing call arguments.
+  // Build backward CFG edges and compute `can_reach_call[u]` so `$sp` stores
+  // that have no control-flow path to any `jal`/`jalr` (e.g., dead post-call
+  // local stores) are never misclassified as outgoing call arguments.
+  const size_t num_nodes = nodes.size();
+  std::vector<std::vector<size_t>> preds(num_nodes);
+  auto add_edge = [&](size_t u, size_t v) {
+    if (u < num_nodes && v < num_nodes) {
+      preds[v].push_back(u);
+    }
+  };
+  auto is_cond_branch_mnem = [](std::string_view m) {
+    return m == "beq" || m == "bne" || m == "beql" || m == "bnel" || m == "beqz" || m == "bnez" ||
+           m == "beqzl" || m == "bnezl" || m == "bgtz" || m == "blez" || m == "bltz" ||
+           m == "bgez" || m == "bgtzl" || m == "blezl" || m == "bltzl" || m == "bgezl" ||
+           m == "bc1t" || m == "bc1f" || m == "bc1tl" || m == "bc1fl";
+  };
+
+  std::vector<bool> can_reach_call(num_nodes, false);
+  std::queue<size_t> bfs;
+  for (size_t u = 0; u < num_nodes; ++u) {
+    const CfgNode& nd = nodes[u];
+    const std::string_view m = nd.insn.mnemonic;
+    const bool has_delay_slot =
+        nd.in_noreorder && (u + 1 < num_nodes) && nodes[u + 1].in_noreorder &&
+        (nd.is_call || m == "j" || m == "jr" || m == "b" || is_cond_branch_mnem(m));
+
+    if (nd.is_call) {
+      can_reach_call[u] = true;
+      bfs.push(u);
+      if (has_delay_slot) {
+        // Delay slot of `jal`/`jalr` executes before entering the callee!
+        can_reach_call[u + 1] = true;
+        bfs.push(u + 1);
+        add_edge(u, u + 1);
+        add_edge(u + 1, u + 2);
+        ++u;
+      } else {
+        add_edge(u, u + 1);
+      }
+      continue;
+    }
+
+    const size_t eff_src = has_delay_slot ? (u + 1) : u;
+    if (has_delay_slot) {
+      add_edge(u, u + 1);
+    }
+    if (m == "j" || m == "b") {
+      if (!nd.insn.ops.empty()) {
+        if (const auto reg = ParseGprName(nd.insn.ops[0]); reg.has_value()) {
+          if (*reg != kRegRa) {
+            for (size_t tgt : all_label_targets) {
+              add_edge(eff_src, tgt);
+            }
+          }
+        } else if (auto it = label_to_node.find(nd.insn.ops[0]); it != label_to_node.end()) {
+          add_edge(eff_src, it->second);
+        }
+      }
+    } else if (m == "jr") {
+      if (!nd.insn.ops.empty() && ParseGprName(nd.insn.ops[0]) != kRegRa) {
+        for (size_t tgt : all_label_targets) {
+          add_edge(eff_src, tgt);
+        }
+      }
+    } else if (is_cond_branch_mnem(m)) {
+      add_edge(eff_src, eff_src + 1);
+      if (!nd.insn.ops.empty()) {
+        if (auto it = label_to_node.find(nd.insn.ops.back()); it != label_to_node.end()) {
+          add_edge(eff_src, it->second);
+        }
+      }
+    } else {
+      add_edge(eff_src, eff_src + 1);
+    }
+
+    if (has_delay_slot) {
+      ++u;
+    }
+  }
+
+  while (!bfs.empty()) {
+    const size_t cur = bfs.front();
+    bfs.pop();
+    for (size_t p : preds[cur]) {
+      if (!can_reach_call[p]) {
+        can_reach_call[p] = true;
+        bfs.push(p);
+      }
+    }
+  }
+
+  // Identify stack slots in `[16, non_reg_size)` that are loaded from, have
+  // their address taken, are accessed via `$fp` (`$30`) when
+  // `frame_pointer_needed`, are `volatile`, or are written on a path that
+  // cannot reach any call; such slots are local variables / spills rather than
+  // outgoing call arguments.
   std::vector<bool> byte_read_or_addr_taken(static_cast<size_t>(non_reg_size), false);
   auto mark_local_range = [&](int64_t off, int bytes) {
     for (int b = 0; b < bytes; ++b) {
@@ -1151,23 +1291,19 @@ void InferLeafAndOutgoingArgsSize(absl::Span<const std::string> asm_lines,
   };
   std::vector<StoreRange> sp_arg_stores;
 
-  for (const std::string& line : asm_lines) {
-    if (line.empty() || line.front() == '.' || absl::EndsWith(line, ":")) {
-      continue;
-    }
-    ParsedInsn insn;
-    if (!ParseInsnLine(line, /*in_noreorder=*/false, &insn)) {
-      continue;
-    }
+  for (size_t u = 0; u < num_nodes; ++u) {
+    const CfgNode& nd = nodes[u];
+    const ParsedInsn& insn = nd.insn;
     if ((insn.mnemonic == "addiu" || insn.mnemonic == "daddiu" || insn.mnemonic == "addi") &&
         insn.ops.size() == 3) {
       const auto dreg = ParseGprName(insn.ops[0]);
       const auto sreg = ParseGprName(insn.ops[1]);
       int64_t off = 0;
-      if (dreg.has_value() && *dreg != kRegSp && sreg == kRegSp &&
+      const bool is_frame_base =
+          (sreg == kRegSp) || (sideband->frame_pointer_needed && sreg == kRegFp);
+      if (dreg.has_value() && *dreg != kRegSp &&
+          !(sideband->frame_pointer_needed && *dreg == kRegFp) && is_frame_base &&
           ParseSignedInt(insn.ops[2], &off) && off >= 16 && off < non_reg_size) {
-        // Address of `[off, non_reg_size)` taken from `$sp`: all bytes from `off`
-        // upward belong to the local variable frame.
         mark_local_range(off, non_reg_size - static_cast<int>(off));
       }
       continue;
@@ -1178,7 +1314,11 @@ void InferLeafAndOutgoingArgsSize(absl::Span<const std::string> asm_lines,
     }
     int64_t off = 0;
     int base_reg = -1;
-    if (!ParseMemOperand(insn.ops[1], &off, &base_reg) || base_reg != kRegSp) {
+    if (!ParseMemOperand(insn.ops[1], &off, &base_reg)) {
+      continue;
+    }
+    const bool is_fp_access = sideband->frame_pointer_needed && base_reg == kRegFp;
+    if (base_reg != kRegSp && !is_fp_access) {
       continue;
     }
 
@@ -1217,12 +1357,15 @@ void InferLeafAndOutgoingArgsSize(absl::Span<const std::string> asm_lines,
       is_store = true;
     }
 
-    if (is_load && off >= 16 && off < non_reg_size) {
+    if ((is_load || is_fp_access || nd.is_volatile) && (is_load || is_store) && off >= 16 &&
+        off < non_reg_size) {
       mark_local_range(off, access_bytes);
-    } else if (is_store && has_call && off >= 16 && off + access_bytes <= non_reg_size) {
-      // Ignore callee-saved register prologue stores (`sw $16..$23/$30/$31`),
-      // whose offsets are `>= non_reg_size` anyway.
-      sp_arg_stores.push_back(StoreRange{.start = static_cast<int>(off), .size = access_bytes});
+    } else if (is_store && base_reg == kRegSp && off >= 16 && off + access_bytes <= non_reg_size) {
+      if (!can_reach_call[u]) {
+        mark_local_range(off, access_bytes);
+      } else {
+        sp_arg_stores.push_back(StoreRange{.start = static_cast<int>(off), .size = access_bytes});
+      }
     }
   }
 
@@ -1284,12 +1427,42 @@ bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
 void ExtractFunctionPrologueEpilogue(std::vector<std::string>* asm_lines,
                                      RtlSidebandState* sideband) {
   sideband->frame_pointer_needed = HasFramePointerMoveInPrologue(*asm_lines);
-  bool has_epilogue_spec = TryExtractAndStripTrailingEpilogue(asm_lines, sideband);
+  size_t trailing_cand_start = 0;
+  std::optional<std::string> trailing_delay_line;
+  bool has_epilogue_spec =
+      TryMatchEpilogueEndingAt(*asm_lines, asm_lines->size(), sideband->frame_pointer_needed,
+                               &trailing_cand_start, sideband, &trailing_delay_line);
+  if (has_epilogue_spec) {
+    asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(trailing_cand_start),
+                     asm_lines->end());
+  }
+
+  int max_local_label = 1;
+  for (const std::string& l : *asm_lines) {
+    size_t pos = 0;
+    while ((pos = l.find("$L", pos)) != std::string::npos) {
+      pos += 2;
+      size_t end_digits = pos;
+      while (end_digits < l.size() &&
+             absl::ascii_isdigit(static_cast<unsigned char>(l[end_digits]))) {
+        ++end_digits;
+      }
+      int num = 0;
+      if (end_digits > pos &&
+          absl::SimpleAtoi(std::string_view{l}.substr(pos, end_digits - pos), &num)) {
+        max_local_label = std::max(max_local_label, num);
+      }
+      pos = end_digits;
+    }
+  }
 
   // Also detect any non-trailing or additional `tsize > 0` epilogues (e.g., IDO
   // early-return epilogues or epilogues followed by out-of-line loop blocks),
-  // populating `sideband` if no trailing epilogue existed and normalizing each
-  // interior epilogue into a `jr\t$31` return sequence.
+  // populating `sideband` if no trailing epilogue existed and rewriting each
+  // interior `tsize > 0` epilogue to jump (`j\t$L<exit>`) to a single canonical
+  // trailing exit label rather than emitting an illegal bare `jr\t$31` return.
+  std::string canonical_exit_label;
+  bool need_append_exit_label = false;
   for (size_t end_idx = asm_lines->size(); end_idx >= 2;) {
     size_t cand_start = 0;
     RtlSidebandState cand_sb;
@@ -1297,18 +1470,29 @@ void ExtractFunctionPrologueEpilogue(std::vector<std::string>* asm_lines,
     if (TryMatchEpilogueEndingAt(*asm_lines, end_idx, sideband->frame_pointer_needed, &cand_start,
                                  &cand_sb, &delay_line)) {
       if (!has_epilogue_spec || (cand_sb.frame_size_bytes == sideband->frame_size_bytes &&
-                                 cand_sb.saved_gpr_regnos == sideband->saved_gpr_regnos)) {
+                                 cand_sb.saved_gpr_regnos == sideband->saved_gpr_regnos &&
+                                 cand_sb.saved_fpr_regnos == sideband->saved_fpr_regnos)) {
         if (!has_epilogue_spec) {
           sideband->frame_size_bytes = cand_sb.frame_size_bytes;
           sideband->saved_gpr_regnos = cand_sb.saved_gpr_regnos;
           sideband->saved_fpr_regnos = cand_sb.saved_fpr_regnos;
           has_epilogue_spec = true;
         }
+        if (canonical_exit_label.empty()) {
+          if (!trailing_delay_line.has_value() && !asm_lines->empty() &&
+              absl::StartsWith(asm_lines->back(), "$L") && absl::EndsWith(asm_lines->back(), ":")) {
+            canonical_exit_label = asm_lines->back().substr(0, asm_lines->back().size() - 1);
+          } else {
+            canonical_exit_label = absl::StrCat("$L", max_local_label + 1);
+            need_append_exit_label = true;
+          }
+        }
         std::vector<std::string> replacement;
         if (delay_line.has_value()) {
-          replacement = {".set\tnoreorder", "jr\t$31", *delay_line, ".set\treorder"};
+          replacement = {".set\tnoreorder", absl::StrCat("j\t", canonical_exit_label), *delay_line,
+                         ".set\treorder"};
         } else {
-          replacement = {"jr\t$31"};
+          replacement = {absl::StrCat("j\t", canonical_exit_label)};
         }
         asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start),
                          asm_lines->begin() + static_cast<ptrdiff_t>(end_idx));
@@ -1319,6 +1503,14 @@ void ExtractFunctionPrologueEpilogue(std::vector<std::string>* asm_lines,
       }
     }
     --end_idx;
+  }
+
+  if (need_append_exit_label) {
+    if (trailing_delay_line.has_value()) {
+      asm_lines->push_back(*trailing_delay_line);
+      sideband->epilogue_delay_pattern.reset();
+    }
+    asm_lines->push_back(absl::StrCat(canonical_exit_label, ":"));
   }
 
   InferLeafAndOutgoingArgsSize(*asm_lines, sideband);

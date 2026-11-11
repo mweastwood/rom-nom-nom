@@ -9,12 +9,14 @@
 #include <queue>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -25,6 +27,7 @@
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
+#include "lifter/reconstruct_hard_reg_liveness.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -636,7 +639,7 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
         return "";
       }
       if (reg == 31) {
-        return "(return)";
+        return "(parallel[ (return) (use (reg:SI 31 ra)) ] )";
       }
       return absl::StrFormat("(set (pc) %s)", FormatGprRtl(reg, "SI"));
     }
@@ -1516,67 +1519,6 @@ bool ExprContainsCall(const RtlExpr& expr) {
   return found;
 }
 
-RtlExpr MakeInsnWrapperExpr(RtlOp wrapper_op, RtlFlags flags, RtlExpr inner) {
-  RtlExpr w;
-  w.op = wrapper_op;
-  w.flags = flags;
-  RtlExpr::GenericItem item;
-  item.kind = RtlExpr::GenericItem::Kind::kChildExpr;
-  item.child_index = 0;
-  w.children.push_back(std::move(inner));
-  w.generic_items.push_back(std::move(item));
-  return w;
-}
-
-RtlExpr MakeSequenceExpr(RtlExpr first, RtlExpr second) {
-  RtlExpr seq;
-  seq.op = RtlOp::kSequence;
-  seq.bracketed_children = true;
-  seq.children.push_back(std::move(first));
-  seq.children.push_back(std::move(second));
-  return seq;
-}
-
-std::string FormatAstExpr(const RtlExpr& expr) {
-  if (expr.op == RtlOp::kParallel) {
-    std::string out = "(parallel[ ";
-    for (size_t i = 0; i < expr.children.size(); ++i) {
-      if (i > 0) {
-        out.push_back(' ');
-      }
-      out.append(FormatAstExpr(expr.children[i]));
-    }
-    out.append(" ] )");
-    return out;
-  }
-  if (expr.op == RtlOp::kSequence && expr.bracketed_children) {
-    std::string out = "(sequence [";
-    for (size_t i = 0; i < expr.children.size(); ++i) {
-      if (i > 0) {
-        out.push_back(' ');
-      }
-      out.append(FormatAstExpr(expr.children[i]));
-    }
-    out.append("])");
-    return out;
-  }
-  if ((expr.op == RtlOp::kInsn || expr.op == RtlOp::kJumpInsn || expr.op == RtlOp::kCallInsn) &&
-      expr.children.size() == 1) {
-    std::string out = "(";
-    out.append(RtlExpr::OpToString(expr.op));
-    if (expr.flags.in_struct) out.append("/s");
-    if (expr.flags.volatil) out.append("/v");
-    if (expr.flags.unchanging) out.append("/u");
-    if (expr.flags.integrated) out.append("/i");
-    if (expr.flags.frame_related) out.append("/f");
-    out.push_back(' ');
-    out.append(FormatAstExpr(expr.children[0]));
-    out.push_back(')');
-    return out;
-  }
-  return expr.ToSexprString();
-}
-
 bool IsReturnOrJumpPattern(const RtlExpr& pat) {
   if (pat.op == RtlOp::kReturn || pat.op == RtlOp::kJumpInsn) {
     return true;
@@ -1686,6 +1628,175 @@ void RewriteSpecificLabelRefInAst(RtlExpr* expr, std::string_view from_token,
   }
 }
 
+bool IsTableJumpCoreExpr(const RtlExpr& core) {
+  return core.IsParallel() && core.children.size() == 2 && core.children[0].IsSet() &&
+         core.children[0].SetDest().op == RtlOp::kPc && core.children[0].SetSrc().IsReg() &&
+         core.children[1].op == RtlOp::kUse && core.children[1].children.size() == 1 &&
+         core.children[1].children[0].op == RtlOp::kLabelRef;
+}
+
+void RewriteBranchTargetLabelInAst(RtlExpr* pat, std::string_view new_label_tok, bool* modified) {
+  RtlExpr* cur = pat;
+  if (cur->op == RtlOp::kSequence && !cur->children.empty()) {
+    cur = &cur->children[0];
+  }
+  if ((cur->op == RtlOp::kJumpInsn || cur->op == RtlOp::kInsn) && !cur->children.empty()) {
+    cur = &cur->children[0];
+  }
+  if (cur->op == RtlOp::kParallel && !cur->children.empty()) {
+    cur = &cur->children[0];
+  }
+  if (!cur->IsSet() || cur->SetDest().op != RtlOp::kPc) {
+    return;
+  }
+  RtlExpr& src = cur->children[1];
+  if (src.op == RtlOp::kLabelRef && !src.str_val.empty()) {
+    if (src.str_val != new_label_tok) {
+      src = RtlExpr::MakeSymbolicLabelRef(std::string(new_label_tok), src.mode);
+      *modified = true;
+    }
+    return;
+  }
+  if (src.op == RtlOp::kIfThenElse && src.children.size() == 3) {
+    for (size_t arm : {size_t{1}, size_t{2}}) {
+      if (src.children[arm].op == RtlOp::kLabelRef && !src.children[arm].str_val.empty() &&
+          src.children[arm].str_val != new_label_tok) {
+        src.children[arm] =
+            RtlExpr::MakeSymbolicLabelRef(std::string(new_label_tok), src.children[arm].mode);
+        *modified = true;
+      }
+    }
+  }
+}
+
+void CanonicalizeCfgLabels(RtlControlFlowGraph* cfg) {
+  const size_t num_blocks = cfg->rpo_blocks.size();
+  if (num_blocks == 0) {
+    return;
+  }
+  std::vector<bool> block_needs_label(num_blocks, false);
+  std::vector<bool> block_has_tablejump(num_blocks, false);
+  std::vector<std::string> old_tablejump_token(num_blocks);
+
+  for (size_t b = 0; b < num_blocks; ++b) {
+    const auto& blk = cfg->rpo_blocks[b];
+    if (blk.has_label) {
+      block_needs_label[b] = true;
+    }
+    bool ends_with_uncond = false;
+    if (!blk.instructions.empty()) {
+      auto parsed = ParsePatternAndNotes(blk.instructions.back());
+      if (parsed.ok()) {
+        const RtlExpr* core = UnwrapActiveControlPattern(parsed->pattern);
+        if (IsTableJumpCoreExpr(*core)) {
+          ends_with_uncond = true;
+          block_has_tablejump[b] = true;
+          old_tablejump_token[b] = core->children[1].children[0].str_val;
+          for (size_t t : blk.addr_vec_targets) {
+            if (t < num_blocks) {
+              block_needs_label[t] = true;
+            }
+          }
+        } else {
+          bool is_cond = false;
+          if (ExtractBranchTargetLabel(parsed->pattern, &is_cond).has_value() && !is_cond) {
+            ends_with_uncond = true;
+          } else if (IsTerminalReturnOrIndirectJump(parsed->pattern)) {
+            ends_with_uncond = true;
+          }
+        }
+      }
+    }
+    for (size_t succ : blk.successors) {
+      if (succ < num_blocks && (succ != b + 1 || ends_with_uncond)) {
+        block_needs_label[succ] = true;
+      }
+    }
+  }
+
+  std::vector<std::string> block_label_token(num_blocks);
+  absl::flat_hash_map<std::string, std::string> tablejump_token_remap;
+  size_t next_lbl_idx = 0;
+  for (size_t b = 0; b < num_blocks; ++b) {
+    cfg->rpo_blocks[b].has_label = block_needs_label[b];
+    if (block_needs_label[b]) {
+      block_label_token[b] = absl::StrCat("L", next_lbl_idx++);
+    }
+    if (block_has_tablejump[b]) {
+      std::string new_tbl_tok = absl::StrCat("L", next_lbl_idx++);
+      if (!old_tablejump_token[b].empty()) {
+        tablejump_token_remap[old_tablejump_token[b]] = std::move(new_tbl_tok);
+      }
+    }
+  }
+
+  for (size_t b = 0; b < num_blocks; ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    bool modified_blk = false;
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+      if (!parsed.ok()) {
+        continue;
+      }
+      bool modified_insn = false;
+      if (!tablejump_token_remap.empty()) {
+        auto remap_fn = [&tablejump_token_remap, &modified_insn](RtlExpr& node) {
+          if (node.op == RtlOp::kLabelRef && node.children.empty() && !node.str_val.empty()) {
+            auto it = tablejump_token_remap.find(node.str_val);
+            if (it != tablejump_token_remap.end() && node.str_val != it->second) {
+              node = RtlExpr::MakeSymbolicLabelRef(it->second, node.mode);
+              modified_insn = true;
+            }
+          }
+        };
+        parsed->pattern.Mutate(remap_fn);
+        for (RtlRegNote& note : parsed->reg_notes) {
+          note.datum.Mutate(remap_fn);
+        }
+      }
+      if (i + 1 == blk.instructions.size() && !block_has_tablejump[b] && !blk.successors.empty()) {
+        const size_t target_b = blk.successors[0];
+        if (target_b < num_blocks && !block_label_token[target_b].empty()) {
+          RewriteBranchTargetLabelInAst(&parsed->pattern, block_label_token[target_b],
+                                        &modified_insn);
+        }
+      }
+      if (modified_insn) {
+        blk.instructions[i] = parsed->ToGccPrintRtlString();
+        modified_blk = true;
+      }
+    }
+    if (modified_blk) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+// Marks `SYMBOL_REF`s referencing constant-pool labels (`CONSTANT_POOL_ADDRESS_P`,
+// `/u`) and any enclosing `MEM` (`RTX_UNCHANGING_P`, `/u`) on the structured
+// `RtlExpr` AST.
+bool MarkConstantPoolRefsInAst(RtlExpr* expr, const absl::flat_hash_set<std::string>& pool_labels,
+                               bool* modified) {
+  if (expr->op == RtlOp::kSymbolRef && pool_labels.contains(expr->str_val)) {
+    if (!expr->flags.unchanging) {
+      expr->flags.unchanging = true;
+      *modified = true;
+    }
+    return true;
+  }
+  bool child_has_pool_sym = false;
+  for (RtlExpr& child : expr->children) {
+    if (MarkConstantPoolRefsInAst(&child, pool_labels, modified)) {
+      child_has_pool_sym = true;
+    }
+  }
+  if (expr->op == RtlOp::kMem && child_has_pool_sym && !expr->flags.unchanging) {
+    expr->flags.unchanging = true;
+    *modified = true;
+  }
+  return child_has_pool_sym;
+}
+
 bool IsUnassignedIndirectJumpBlock(const RtlBasicBlock& blk) {
   if (blk.instructions.empty() || !blk.addr_vec_targets.empty()) {
     return false;
@@ -1698,11 +1809,519 @@ bool IsUnassignedIndirectJumpBlock(const RtlBasicBlock& blk) {
   return core->IsSet() && core->SetDest().op == RtlOp::kPc && core->SetSrc().IsReg();
 }
 
+// In KMC GCC 2.7.2 `mips.md`, 3-operand `divsi3`/`modsi3`/`udivsi3`/`umodsi3`
+// (and `DI` counterparts) have condition `"!optimize"`, whereas `optimize > 0`
+// exclusively uses `divmodsi4`/`udivmodsi4` (`divmoddi4`/`udivmoddi4`) with a
+// `REG_UNUSED` note on the unused output (or fused with an adjacent `mfhi`).
+void UpgradeDivModInsnsForOptimize(RtlControlFlowGraph* cfg) {
+  for (RtlBasicBlock& blk : cfg->rpo_blocks) {
+    std::vector<std::string> upgraded;
+    upgraded.reserve(blk.instructions.size());
+    bool changed = false;
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+      if (!parsed.ok() || !parsed->pattern.IsParallel() || parsed->pattern.children.size() != 4 ||
+          !parsed->pattern.children[0].IsSet()) {
+        upgraded.push_back(blk.instructions[i]);
+        continue;
+      }
+      const RtlExpr& set0 = parsed->pattern.children[0];
+      const RtlExpr& dst = set0.SetDest();
+      const RtlExpr& src = set0.SetSrc();
+      const RtlOp op = src.op;
+      const bool is_signed_divmod = (op == RtlOp::kDiv || op == RtlOp::kMod);
+      const bool is_unsigned_divmod = (op == RtlOp::kUdiv || op == RtlOp::kUmod);
+      if ((!is_signed_divmod && !is_unsigned_divmod) ||
+          (src.mode != RtlMachineMode::kSi && src.mode != RtlMachineMode::kDi) ||
+          src.children.size() != 2 || !dst.IsReg() || !src.children[0].IsReg() ||
+          !src.children[1].IsReg()) {
+        upgraded.push_back(blk.instructions[i]);
+        continue;
+      }
+
+      const RtlMachineMode mode = src.mode;
+      const RtlOp div_op = is_signed_divmod ? RtlOp::kDiv : RtlOp::kUdiv;
+      const RtlOp mod_op = is_signed_divmod ? RtlOp::kMod : RtlOp::kUmod;
+      const bool is_quotient = (op == RtlOp::kDiv || op == RtlOp::kUdiv);
+      const RtlExpr& lhs = src.children[0];
+      const RtlExpr& rhs = src.children[1];
+
+      if (is_quotient && i + 1 < blk.instructions.size()) {
+        auto next_parsed = ParsePatternAndNotes(blk.instructions[i + 1]);
+        if (next_parsed.ok() && next_parsed->pattern.IsSet() &&
+            next_parsed->pattern.SetDest().IsReg() && next_parsed->pattern.SetDest().mode == mode &&
+            next_parsed->pattern.SetDest().RegNo() < 32 &&
+            next_parsed->pattern.SetDest().RegNo() != dst.RegNo() &&
+            next_parsed->pattern.SetSrc().IsReg() && next_parsed->pattern.SetSrc().RegNo() == 64) {
+          const RtlExpr& rem_dst = next_parsed->pattern.SetDest();
+          RtlExpr fused = RtlExpr::MakeParallel({
+              RtlExpr::MakeSet(dst, RtlExpr::MakeBinary(div_op, mode, lhs, rhs)),
+              RtlExpr::MakeSet(rem_dst, RtlExpr::MakeBinary(mod_op, mode, lhs, rhs)),
+              RtlExpr::MakeClobber(RtlExpr::MakeReg(mode, 65)),
+              RtlExpr::MakeClobber(RtlExpr::MakeReg(mode, 64)),
+              RtlExpr::MakeClobber(RtlExpr::MakeReg(mode, 66)),
+          });
+          std::vector<RtlRegNote> notes = parsed->reg_notes;
+          notes.insert(notes.end(), next_parsed->reg_notes.begin(), next_parsed->reg_notes.end());
+          upgraded.push_back(FormatPatternAndNotes(fused, notes, parsed->bracketed_notes));
+          changed = true;
+          ++i;
+          continue;
+        }
+      }
+
+      const RtlExpr scratch_at = RtlExpr::MakeReg(mode, 1);
+      const RtlExpr q_dst = is_quotient ? dst : scratch_at;
+      const RtlExpr r_dst = is_quotient ? scratch_at : dst;
+      RtlExpr divmod = RtlExpr::MakeParallel({
+          RtlExpr::MakeSet(q_dst, RtlExpr::MakeBinary(div_op, mode, lhs, rhs)),
+          RtlExpr::MakeSet(r_dst, RtlExpr::MakeBinary(mod_op, mode, lhs, rhs)),
+          RtlExpr::MakeClobber(RtlExpr::MakeReg(mode, 65)),
+          RtlExpr::MakeClobber(RtlExpr::MakeReg(mode, 64)),
+          RtlExpr::MakeClobber(RtlExpr::MakeReg(mode, 66)),
+      });
+      std::vector<RtlRegNote> notes = parsed->reg_notes;
+      notes.push_back(RtlRegNote{
+          .kind = RtlMachineMode::kRegUnused,
+          .list_op = RtlOp::kExprList,
+          .datum = scratch_at,
+      });
+      upgraded.push_back(FormatPatternAndNotes(divmod, notes, parsed->bracketed_notes));
+      changed = true;
+    }
+    if (changed) {
+      blk.instructions = std::move(upgraded);
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+// In KMC GCC 2.7.2 `reorg.c:3348-3368` (`fill_slots_from_thread`), a self-loop
+// polling block `[<reg> = <load>(<mem>), <cond_branch_to_self>]` with no memory
+// stores, calls, or modifications to the address registers would always have
+// its backedge redirected past `<load>` by `redundant_insn` unless the `MEM`
+// carried `MEM_VOLATILE_P` (`mem/v`).
+void MarkSelfLoopSpinWaitLoadsVolatile(RtlControlFlowGraph* cfg) {
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    bool has_self_edge = false;
+    for (size_t succ : blk.successors) {
+      if (succ == b) {
+        has_self_edge = true;
+        break;
+      }
+    }
+    if (!has_self_edge || blk.instructions.size() < 2) {
+      continue;
+    }
+
+    auto last_parsed = ParsePatternAndNotes(blk.instructions.back());
+    if (!last_parsed.ok() || last_parsed->pattern.op == RtlOp::kSequence ||
+        !last_parsed->pattern.IsSet() || last_parsed->pattern.SetDest().op != RtlOp::kPc ||
+        last_parsed->pattern.SetSrc().op != RtlOp::kIfThenElse) {
+      continue;
+    }
+
+    auto first_parsed = ParsePatternAndNotes(blk.instructions.front());
+    if (!first_parsed.ok() || !first_parsed->pattern.IsSet() ||
+        !first_parsed->pattern.SetDest().IsReg()) {
+      continue;
+    }
+    bool first_has_mem = false;
+    std::vector<int> addr_regs;
+    first_parsed->pattern.SetSrc().Visit([&](const RtlExpr& node) {
+      if (node.IsMem()) {
+        first_has_mem = true;
+        node.MemAddr().Visit([&](const RtlExpr& addr_node) {
+          if (addr_node.IsReg()) {
+            addr_regs.push_back(addr_node.RegNo());
+          }
+        });
+      }
+    });
+    if (!first_has_mem) {
+      continue;
+    }
+
+    bool invalidated_in_loop = false;
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      auto p = ParsePatternAndNotes(blk.instructions[i]);
+      if (!p.ok()) {
+        invalidated_in_loop = true;
+        break;
+      }
+      p->pattern.Visit([&](const RtlExpr& node) {
+        if (node.op == RtlOp::kCall || node.op == RtlOp::kUnspecVolatile ||
+            node.op == RtlOp::kAsmInput) {
+          invalidated_in_loop = true;
+        }
+        if (node.IsSet() || node.op == RtlOp::kClobber) {
+          const RtlExpr& d = node.children[0];
+          if (d.IsMem()) {
+            invalidated_in_loop = true;
+          } else if (d.IsReg()) {
+            for (int ar : addr_regs) {
+              if (d.RegNo() == ar) {
+                invalidated_in_loop = true;
+              }
+            }
+          }
+        }
+      });
+      if (invalidated_in_loop) {
+        break;
+      }
+    }
+    if (invalidated_in_loop) {
+      continue;
+    }
+
+    first_parsed->pattern.MutableSetSrc().Mutate([](RtlExpr& node) {
+      if (node.IsMem()) {
+        node.flags.volatil = true;
+      }
+    });
+    blk.instructions.front() = FormatPatternAndNotes(first_parsed->pattern, first_parsed->reg_notes,
+                                                     first_parsed->bracketed_notes);
+    blk.SyncRtlInsnsFromInstructions();
+  }
+}
+
+// Infers MIPS O32 `call_value` (`(set <ret_reg> (call ...))`) vs void `call`
+// (`(call ...)`) from post-call register uses across `cfg`.
+void UpgradeCallReturnValues(RtlControlFlowGraph* cfg) {
+  auto ret_reg_bit = [](int regno) -> uint32_t {
+    if (regno == 2) return 1u;
+    if (regno == 3) return 2u;
+    if (regno == 32) return 4u;
+    if (regno == 33) return 8u;
+    return 0u;
+  };
+
+  auto analyze_single_expr = [&](const RtlExpr& expr, uint32_t* read_mask, bool* read_r2_di,
+                                 bool* read_f0_df, uint32_t* kill_mask, uint32_t* pure_set_mask) {
+    *read_mask = 0u;
+    *kill_mask = 0u;
+    *pure_set_mask = 0u;
+    auto scan_reads = [&](const RtlExpr& sub) {
+      sub.Visit([&](const RtlExpr& node) {
+        if (node.IsReg()) {
+          const int r = node.RegNo();
+          *read_mask |= ret_reg_bit(r);
+          if (r == 2 && node.mode == RtlMachineMode::kDi) {
+            *read_r2_di = true;
+          } else if (r == 32 && node.mode == RtlMachineMode::kDf) {
+            *read_f0_df = true;
+          }
+        }
+      });
+    };
+    auto mark_def = [&](const RtlExpr& dst) {
+      if (!dst.IsReg()) {
+        return;
+      }
+      const int r = dst.RegNo();
+      *kill_mask |= ret_reg_bit(r);
+      if (dst.mode == RtlMachineMode::kDi || dst.mode == RtlMachineMode::kDf) {
+        *kill_mask |= ret_reg_bit(r + 1);
+      }
+    };
+    auto process_elem = [&](const RtlExpr& elem) {
+      if (elem.IsSet()) {
+        if (elem.SetDest().IsMem()) {
+          scan_reads(elem.SetDest());
+        }
+        scan_reads(elem.SetSrc());
+        if (elem.SetSrc().op == RtlOp::kCall) {
+          *kill_mask |= 0xfu;
+        } else {
+          mark_def(elem.SetDest());
+          if (elem.SetDest().IsReg()) {
+            const int r = elem.SetDest().RegNo();
+            *pure_set_mask |= ret_reg_bit(r);
+            if (elem.SetDest().mode == RtlMachineMode::kDi ||
+                elem.SetDest().mode == RtlMachineMode::kDf) {
+              *pure_set_mask |= ret_reg_bit(r + 1);
+            }
+          }
+        }
+      } else if (elem.op == RtlOp::kCall) {
+        scan_reads(elem);
+        *kill_mask |= 0xfu;
+      } else if (elem.op == RtlOp::kClobber) {
+        if (!elem.children.empty()) {
+          mark_def(elem.children[0]);
+        }
+      } else {
+        scan_reads(elem);
+      }
+    };
+    if (expr.IsParallel()) {
+      for (const RtlExpr& child : expr.children) {
+        process_elem(child);
+      }
+    } else {
+      process_elem(expr);
+    }
+  };
+
+  uint32_t fn_exit_ret_mask = 0u;
+  bool fn_exit_r2_di = false;
+  bool fn_exit_f0_df = false;
+  if (cfg->sideband.epilogue_delay_pattern.has_value()) {
+    auto ep = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
+    if (ep.ok()) {
+      uint32_t rm = 0, km = 0, pm = 0;
+      bool r2_di = false, f0_df = false;
+      analyze_single_expr(ep->pattern, &rm, &r2_di, &f0_df, &km, &pm);
+      fn_exit_ret_mask |= pm;
+      if ((pm & 2u) != 0u) fn_exit_r2_di = true;
+      if ((pm & 8u) != 0u) fn_exit_f0_df = true;
+    }
+  }
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    const auto& blk = cfg->rpo_blocks[b];
+    const bool exits_or_jumps_to_empty_exit =
+        blk.successors.empty() ||
+        (blk.successors.size() == 1 && blk.successors[0] < cfg->rpo_blocks.size() &&
+         cfg->rpo_blocks[blk.successors[0]].instructions.empty() &&
+         cfg->rpo_blocks[blk.successors[0]].successors.empty());
+    if (!exits_or_jumps_to_empty_exit || blk.instructions.empty()) {
+      continue;
+    }
+    uint32_t unread_set = 0u;
+    for (const std::string& s : blk.instructions) {
+      auto p = ParsePatternAndNotes(s);
+      if (!p.ok()) continue;
+      if (p->pattern.op == RtlOp::kSequence && p->pattern.children.size() == 2 &&
+          !p->pattern.children[0].children.empty() && !p->pattern.children[1].children.empty()) {
+        uint32_t r0 = 0, k0 = 0, p0 = 0, r1 = 0, k1 = 0, p1 = 0;
+        bool d0 = false, f0 = false, d1 = false, f1 = false;
+        analyze_single_expr(p->pattern.children[0].children[0], &r0, &d0, &f0, &k0, &p0);
+        analyze_single_expr(p->pattern.children[1].children[0], &r1, &d1, &f1, &k1, &p1);
+        if (p->pattern.children[0].op == RtlOp::kCallInsn) {
+          unread_set = 0u;
+        } else {
+          unread_set = ((unread_set & ~(r0 | k0)) | p0);
+          unread_set = ((unread_set & ~(r1 | k1)) | p1);
+        }
+      } else {
+        uint32_t rm = 0, km = 0, pm = 0;
+        bool rd = false, fd = false;
+        analyze_single_expr(p->pattern, &rm, &rd, &fd, &km, &pm);
+        unread_set = (unread_set & ~(rm | km)) | pm;
+      }
+    }
+    fn_exit_ret_mask |= unread_set;
+    if ((unread_set & 2u) != 0u) fn_exit_r2_di = true;
+    if ((unread_set & 8u) != 0u) fn_exit_f0_df = true;
+  }
+
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    bool blk_changed = false;
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+      if (!parsed.ok()) {
+        continue;
+      }
+      RtlExpr* call_par = nullptr;
+      if (parsed->pattern.IsParallel() && parsed->pattern.children.size() == 2 &&
+          parsed->pattern.children[0].op == RtlOp::kCall) {
+        call_par = &parsed->pattern;
+      } else if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2 &&
+                 parsed->pattern.children[0].op == RtlOp::kCallInsn &&
+                 parsed->pattern.children[0].children.size() == 1 &&
+                 parsed->pattern.children[0].children[0].IsParallel() &&
+                 parsed->pattern.children[0].children[0].children.size() == 2 &&
+                 parsed->pattern.children[0].children[0].children[0].op == RtlOp::kCall) {
+        call_par = &parsed->pattern.children[0].children[0];
+      }
+      if (call_par == nullptr) {
+        continue;
+      }
+
+      uint32_t used_ret_mask = 0u;
+      bool used_r2_di = false;
+      bool used_f0_df = false;
+
+      using State = std::tuple<size_t, size_t, uint32_t>;
+      std::queue<State> q;
+      absl::flat_hash_set<State> visited;
+      q.emplace(b, i + 1, 0xfu);
+      visited.emplace(b, i + 1, 0xfu);
+
+      while (!q.empty()) {
+        auto [cb, ci, alive] = q.front();
+        q.pop();
+        if (alive == 0u || cb >= cfg->rpo_blocks.size()) {
+          continue;
+        }
+        const auto& cblk = cfg->rpo_blocks[cb];
+        bool advanced_via_seq = false;
+        for (size_t idx = ci; idx < cblk.instructions.size() && alive != 0u; ++idx) {
+          auto cp = ParsePatternAndNotes(cblk.instructions[idx]);
+          if (!cp.ok()) {
+            continue;
+          }
+          if (cp->pattern.op == RtlOp::kSequence && cp->pattern.children.size() == 2 &&
+              !cp->pattern.children[0].children.empty() &&
+              !cp->pattern.children[1].children.empty()) {
+            const RtlExpr& h_wrap = cp->pattern.children[0];
+            const RtlExpr& s_wrap = cp->pattern.children[1];
+            uint32_t r0 = 0, k0 = 0, p0 = 0, r1 = 0, k1 = 0, p1 = 0;
+            bool d0 = false, f0 = false, d1 = false, f1 = false;
+            analyze_single_expr(h_wrap.children[0], &r0, &d0, &f0, &k0, &p0);
+            analyze_single_expr(s_wrap.children[0], &r1, &d1, &f1, &k1, &p1);
+            if (h_wrap.op == RtlOp::kCallInsn) {
+              used_ret_mask |= (r1 & alive);
+              if (d1 && (alive & 1u) != 0u) used_r2_di = true;
+              if (f1 && (alive & 4u) != 0u) used_f0_df = true;
+              alive &= ~k1;
+              used_ret_mask |= (r0 & alive);
+              alive = 0u;
+              break;
+            }
+            used_ret_mask |= (r0 & alive);
+            if (d0 && (alive & 1u) != 0u) used_r2_di = true;
+            if (f0 && (alive & 4u) != 0u) used_f0_df = true;
+            alive &= ~k0;
+            if (idx + 1 == cblk.instructions.size() && h_wrap.flags.unchanging &&
+                s_wrap.flags.in_struct) {
+              for (size_t succ : cblk.successors) {
+                uint32_t next_alive = alive;
+                if (succ != cb + 1) {
+                  used_ret_mask |= (r1 & next_alive);
+                  if (d1 && (next_alive & 1u) != 0u) used_r2_di = true;
+                  if (f1 && (next_alive & 4u) != 0u) used_f0_df = true;
+                  next_alive &= ~k1;
+                }
+                if (next_alive != 0u && visited.emplace(succ, 0, next_alive).second) {
+                  q.emplace(succ, 0, next_alive);
+                }
+              }
+              advanced_via_seq = true;
+              break;
+            }
+            used_ret_mask |= (r1 & alive);
+            if (d1 && (alive & 1u) != 0u) used_r2_di = true;
+            if (f1 && (alive & 4u) != 0u) used_f0_df = true;
+            alive &= ~k1;
+            continue;
+          }
+
+          uint32_t rm = 0, km = 0, pm = 0;
+          bool rd = false, fd = false;
+          analyze_single_expr(cp->pattern, &rm, &rd, &fd, &km, &pm);
+          used_ret_mask |= (rm & alive);
+          if (rd && (alive & 1u) != 0u) used_r2_di = true;
+          if (fd && (alive & 4u) != 0u) used_f0_df = true;
+          alive &= ~km;
+        }
+        if (advanced_via_seq || alive == 0u) {
+          continue;
+        }
+        if (cblk.successors.empty()) {
+          if (cfg->sideband.epilogue_delay_pattern.has_value()) {
+            auto ep = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
+            if (ep.ok()) {
+              uint32_t rm = 0, km = 0, pm = 0;
+              bool rd = false, fd = false;
+              analyze_single_expr(ep->pattern, &rm, &rd, &fd, &km, &pm);
+              used_ret_mask |= (rm & alive);
+              if (rd && (alive & 1u) != 0u) used_r2_di = true;
+              if (fd && (alive & 4u) != 0u) used_f0_df = true;
+              alive &= ~km;
+            }
+          }
+          used_ret_mask |= (alive & fn_exit_ret_mask);
+          if (fn_exit_r2_di && (alive & 2u) != 0u) used_r2_di = true;
+          if (fn_exit_f0_df && (alive & 8u) != 0u) used_f0_df = true;
+          continue;
+        }
+        for (size_t succ : cblk.successors) {
+          if (visited.emplace(succ, 0, alive).second) {
+            q.emplace(succ, 0, alive);
+          }
+        }
+      }
+
+      int ret_regno = -1;
+      RtlMachineMode ret_mode = RtlMachineMode::kSi;
+      if ((used_ret_mask & 2u) != 0u || ((used_ret_mask & 1u) != 0u && used_r2_di)) {
+        ret_regno = 2;
+        ret_mode = RtlMachineMode::kDi;
+      } else if ((used_ret_mask & 1u) != 0u) {
+        ret_regno = 2;
+        ret_mode = RtlMachineMode::kSi;
+      } else if ((used_ret_mask & 8u) != 0u || ((used_ret_mask & 4u) != 0u && used_f0_df)) {
+        ret_regno = 32;
+        ret_mode = RtlMachineMode::kDf;
+      } else if ((used_ret_mask & 4u) != 0u) {
+        ret_regno = 32;
+        ret_mode = RtlMachineMode::kSf;
+      }
+
+      if (ret_regno >= 0) {
+        call_par->children[0] =
+            RtlExpr::MakeSet(RtlExpr::MakeReg(ret_mode, ret_regno), call_par->children[0]);
+        blk.instructions[i] = parsed->ToGccPrintRtlString();
+        blk_changed = true;
+      }
+    }
+    if (blk_changed) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+void AttachReferencedConstantPoolEntries(absl::Span<const RtlBasicBlock> blocks,
+                                         absl::Span<const Stage0ConstantPoolEntry> constant_pool,
+                                         RtlSidebandState* sideband) {
+  if (constant_pool.empty()) {
+    return;
+  }
+  absl::flat_hash_set<std::string> referenced_symbols;
+  auto collect_syms = [&](std::string_view pat) {
+    auto parsed = ParsePatternAndNotes(pat);
+    if (!parsed.ok()) {
+      return;
+    }
+    parsed->pattern.Visit([&](const RtlExpr& node) {
+      if (node.op == RtlOp::kSymbolRef && !node.str_val.empty()) {
+        referenced_symbols.insert(node.str_val);
+      }
+    });
+  };
+  if (sideband->epilogue_delay_pattern.has_value()) {
+    collect_syms(*sideband->epilogue_delay_pattern);
+  }
+  for (const RtlBasicBlock& blk : blocks) {
+    for (const std::string& pat : blk.instructions) {
+      collect_syms(pat);
+    }
+  }
+  absl::flat_hash_set<std::string> existing_labels;
+  for (const Stage0ConstantPoolEntry& cp : sideband->constant_pool) {
+    existing_labels.insert(cp.label_name);
+  }
+  for (const Stage0ConstantPoolEntry& cp : constant_pool) {
+    if (cp.section_name == ".lit4" || cp.section_name == ".lit8") {
+      continue;
+    }
+    if (referenced_symbols.contains(cp.label_name) &&
+        existing_labels.insert(cp.label_name).second) {
+      sideband->constant_pool.push_back(cp);
+    }
+  }
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     absl::Span<const std::string> asm_lines, const RtlSidebandState& sideband,
-    absl::Span<const Stage0ResolvedJumpTable> jump_tables) {
+    absl::Span<const Stage0ResolvedJumpTable> jump_tables,
+    absl::Span<const Stage0ConstantPoolEntry> constant_pool, const CompilationProfile* profile) {
   if (asm_lines.empty()) {
     return {};
   }
@@ -1746,16 +2365,16 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
         }
         const bool is_call_seq = ExprContainsCall(parsed0->pattern);
         RtlExpr seq_first = is_call_seq
-                                ? MakeInsnWrapperExpr(RtlOp::kCallInsn, {}, parsed0->pattern)
+                                ? RtlExpr::MakeInsnWrapper(RtlOp::kCallInsn, {}, parsed0->pattern)
                             : parsed0->pattern.op == RtlOp::kJumpInsn
                                 ? parsed0->pattern
-                                : MakeInsnWrapperExpr(RtlOp::kJumpInsn, {}, parsed0->pattern);
+                                : RtlExpr::MakeInsnWrapper(RtlOp::kJumpInsn, {}, parsed0->pattern);
         RtlFlags slot_flags;
         slot_flags.in_struct =
             (parsed0->pattern.op == RtlOp::kJumpInsn && parsed0->pattern.flags.unchanging);
-        RtlExpr seq_second = MakeInsnWrapperExpr(RtlOp::kInsn, slot_flags, parsed1->pattern);
-        RtlExpr seq_expr = MakeSequenceExpr(std::move(seq_first), std::move(seq_second));
-        cur_blk.AddPatternOnly(FormatAstExpr(seq_expr));
+        RtlExpr seq_second = RtlExpr::MakeInsnWrapper(RtlOp::kInsn, slot_flags, parsed1->pattern);
+        RtlExpr seq_expr = RtlExpr::MakeSequence({std::move(seq_first), std::move(seq_second)});
+        cur_blk.AddPatternOnly(seq_expr.ToGccPrintRtlString());
         i += 3;
         if (!is_call_seq && i + 1 < asm_lines.size() && !absl::EndsWith(asm_lines[i + 1], ":")) {
           blocks.push_back(std::move(cur_blk));
@@ -1825,6 +2444,23 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     blocks.push_back(std::move(cur_blk));
   }
 
+  AttachReferencedConstantPoolEntries(blocks, constant_pool, &cfg.sideband);
+
+  absl::flat_hash_set<std::string> pool_labels;
+  for (const Stage0ConstantPoolEntry& cp : cfg.sideband.constant_pool) {
+    pool_labels.insert(cp.label_name);
+  }
+  if (!pool_labels.empty() && cfg.sideband.epilogue_delay_pattern.has_value()) {
+    auto delay_parsed = ParsePatternAndNotes(*cfg.sideband.epilogue_delay_pattern);
+    if (delay_parsed.ok()) {
+      bool modified_delay = false;
+      MarkConstantPoolRefsInAst(&delay_parsed->pattern, pool_labels, &modified_delay);
+      if (modified_delay) {
+        cfg.sideband.epilogue_delay_pattern = delay_parsed->ToGccPrintRtlString();
+      }
+    }
+  }
+
   for (size_t b = 0; b < blocks.size(); ++b) {
     bool modified_block = false;
     for (size_t insn_idx = 0; insn_idx < blocks[b].instructions.size(); ++insn_idx) {
@@ -1833,15 +2469,16 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
         continue;
       }
       const RtlExpr* active_ctrl = UnwrapActiveControlPattern(parsed->pattern);
-      const bool is_jump_or_branch_insn =
-          (active_ctrl->IsSet() && active_ctrl->SetDest().op == RtlOp::kPc) ||
-          active_ctrl->op == RtlOp::kReturn;
+      const bool is_jump_or_branch_insn = IsReturnOrJumpPattern(*active_ctrl);
       const bool allow_direct =
           (insn_idx + 1 < blocks[b].instructions.size()) || !is_jump_or_branch_insn;
       bool modified_insn = false;
       RewriteDataLabelRefsInAst(&parsed->pattern, label_to_block, allow_direct, &modified_insn);
+      if (!pool_labels.empty()) {
+        MarkConstantPoolRefsInAst(&parsed->pattern, pool_labels, &modified_insn);
+      }
       if (modified_insn) {
-        blocks[b].instructions[insn_idx] = FormatAstExpr(parsed->pattern);
+        blocks[b].instructions[insn_idx] = parsed->ToGccPrintRtlString();
         modified_block = true;
       }
     }
@@ -1871,7 +2508,7 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       if (it != label_to_block.end()) {
         if (is_conditional) {
           if (b + 1 < blocks.size()) {
-            blocks[b].successors = {b + 1, it->second};
+            blocks[b].successors = {it->second, b + 1};
           } else {
             blocks[b].successors = {it->second};
           }
@@ -1974,7 +2611,7 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
         RewriteSpecificLabelRefInAst(&parsed->pattern, jt.table_label_token, tbl_lbl,
                                      &modified_insn);
         if (modified_insn) {
-          pat = FormatAstExpr(parsed->pattern);
+          pat = parsed->ToGccPrintRtlString();
           modified_blk = true;
         }
       }
@@ -2002,13 +2639,14 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     RtlExpr tablejump_par =
         RtlExpr::MakeParallel({*core, RtlExpr::MakeUse(RtlExpr::MakeSymbolicLabelRef(tbl_lbl))});
     if (last_parsed->pattern.op == RtlOp::kSequence && last_parsed->pattern.children.size() == 2) {
-      RtlExpr seq = MakeSequenceExpr(
-          MakeInsnWrapperExpr(RtlOp::kJumpInsn, last_parsed->pattern.children[0].flags,
-                              std::move(tablejump_par)),
-          last_parsed->pattern.children[1]);
-      blocks[b].instructions.back() = FormatAstExpr(seq);
+      RtlExpr seq = RtlExpr::MakeSequence({
+          RtlExpr::MakeInsnWrapper(RtlOp::kJumpInsn, last_parsed->pattern.children[0].flags,
+                                   std::move(tablejump_par)),
+          last_parsed->pattern.children[1],
+      });
+      blocks[b].instructions.back() = seq.ToGccPrintRtlString();
     } else {
-      blocks[b].instructions.back() = FormatAstExpr(tablejump_par);
+      blocks[b].instructions.back() = tablejump_par.ToGccPrintRtlString();
     }
     blocks[b].SyncRtlInsnsFromInstructions();
     for (size_t target_k : blocks[b].addr_vec_targets) {
@@ -2022,51 +2660,37 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     }
   }
 
-  // In frameless leaf functions (`simple_epilogue_p() == 1`), the final return
-  // instruction comes from `gen_return()` (`(parallel[ (return) (use (reg:SI 31 ra)) ] )`).
-  bool has_call_insn = false;
-  for (const auto& blk : blocks) {
-    for (const std::string& pat : blk.instructions) {
-      auto parsed = ParsePatternAndNotes(pat);
-      if (parsed.ok() && ExprContainsCall(parsed->pattern)) {
-        has_call_insn = true;
-        break;
-      }
-    }
-  }
-  const bool is_frameless_leaf = !has_call_insn && cfg.sideband.frame_size_bytes == 0 &&
-                                 cfg.sideband.saved_gpr_regnos.empty() &&
-                                 cfg.sideband.saved_fpr_regnos.empty() && !blocks.empty();
-  if (is_frameless_leaf) {
-    size_t last_nonempty_b = blocks.size() - 1;
-    if (blocks[last_nonempty_b].instructions.empty() && last_nonempty_b > 0) {
-      --last_nonempty_b;
-    }
-    if (!blocks[last_nonempty_b].instructions.empty()) {
-      auto last_parsed = ParsePatternAndNotes(blocks[last_nonempty_b].instructions.back());
-      if (last_parsed.ok()) {
-        RtlExpr gen_return_par = RtlExpr::MakeParallel(
-            {RtlExpr::MakeReturn(), RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 31))});
-        if (last_parsed->pattern.op == RtlOp::kReturn) {
-          blocks[last_nonempty_b].instructions.back() = FormatAstExpr(gen_return_par);
-          blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
-        } else if (last_parsed->pattern.op == RtlOp::kSequence &&
-                   last_parsed->pattern.children.size() == 2 &&
-                   last_parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
-                   !last_parsed->pattern.children[0].children.empty() &&
-                   last_parsed->pattern.children[0].children[0].op == RtlOp::kReturn) {
-          RtlExpr seq = MakeSequenceExpr(
-              MakeInsnWrapperExpr(RtlOp::kJumpInsn, last_parsed->pattern.children[0].flags,
-                                  std::move(gen_return_par)),
-              last_parsed->pattern.children[1]);
-          blocks[last_nonempty_b].instructions.back() = FormatAstExpr(seq);
-          blocks[last_nonempty_b].SyncRtlInsnsFromInstructions();
+  cfg.rpo_blocks = std::move(blocks);
+
+  UpgradeCallReturnValues(&cfg);
+  if (profile != nullptr) {
+    const bool has_non_empty_frame =
+        cfg.sideband.frame_size_bytes > 0 || !cfg.sideband.saved_gpr_regnos.empty() ||
+        !cfg.sideband.saved_fpr_regnos.empty() || cfg.sideband.outgoing_args_size > 0 ||
+        !cfg.sideband.is_leaf_function;
+    if (has_non_empty_frame) {
+      for (const auto& blk : cfg.rpo_blocks) {
+        for (const std::string& pat : blk.instructions) {
+          auto parsed = ParsePatternAndNotes(pat);
+          if (!parsed.ok()) {
+            continue;
+          }
+          const RtlExpr* core = UnwrapActiveControlPattern(parsed->pattern);
+          if (core->op == RtlOp::kReturn ||
+              (core->op == RtlOp::kParallel && !core->children.empty() &&
+               core->children[0].op == RtlOp::kReturn)) {
+            return {};
+          }
         }
       }
     }
+    if (profile->optimize_level > 0) {
+      UpgradeDivModInsnsForOptimize(&cfg);
+      MarkSelfLoopSpinWaitLoadsVolatile(&cfg);
+    }
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
   }
-
-  cfg.rpo_blocks = std::move(blocks);
+  CanonicalizeCfgLabels(&cfg);
   return cfg;
 }
 

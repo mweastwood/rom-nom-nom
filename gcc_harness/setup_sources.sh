@@ -85,11 +85,13 @@ for path in sys.argv[1:]:
     f.write(text)
 PYEOF
 
-# Ensure bare `(return)` RTX created by `jump.c:redirect_exp` and
-# `reorg.c:make_return_insns` is recognized by `insn-recog.c` on MIPS alongside
-# `return_internal`, while keeping `(define_expand "return" ...)` intact so
-# `gen_return()` emits `(parallel [(return) (use (reg:SI 31))])`.
+# Ensure `mips.md` matches stock KMC GCC 2.7.2 (`define_expand "return"` and
+# `define_insn "return_internal"` only, with no synthetic `return_internal_bare`
+# pattern).
 python3 - "${GCC_SRC}/config/mips/mips.md" << 'PYEOF'
+import glob
+import os
+import re
 import sys
 
 path = sys.argv[1]
@@ -107,35 +109,23 @@ broken_expand = """(define_expand "return"
   "simple_epilogue_p ()"
   "")"""
 
-return_internal = """(define_insn "return_internal"
-  [(parallel [(return)
-              (use (match_operand:SI 0 "register_operand" "d"))])]
-  ""
-  "%*j\\\\t%0"
-  [(set_attr "type"\t"jump")
-   (set_attr "mode"\t"none")
-   (set_attr "length"\t"1")])"""
-
-return_internal_bare = """(define_insn "return_internal_bare"
-  [(return)]
-  "reload_completed"
-  "%*j\\\\t$31"
-  [(set_attr "type"\t"jump")
-   (set_attr "mode"\t"none")
-   (set_attr "length"\t"1")])"""
-
 updated = text
 if broken_expand in updated:
   updated = updated.replace(broken_expand, orig_expand, 1)
 
-if "return_internal_bare" not in updated and return_internal in updated:
-  updated = updated.replace(
-      return_internal, return_internal + "\n\n" + return_internal_bare, 1
-  )
+updated = re.sub(
+    r'\n*\(define_insn "return_internal_bare"[\s\S]*?\[(?:\(set_attr[^\]]*\)\s*)+\]\)\n*',
+    "\n\n",
+    updated,
+)
 
 if updated != text:
   with open(path, "w", encoding="latin-1") as f:
     f.write(updated)
+  gcc_dir = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+  for pat in ("*.o", "insn-*.c", "insn-*.h", "s-*"):
+    for fn in glob.glob(os.path.join(gcc_dir, pat)):
+      os.remove(fn)
 PYEOF
 
 

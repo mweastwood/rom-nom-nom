@@ -141,7 +141,7 @@ TEST(InvertFillEagerDelaySlotsUnitTest, TargetThreadMultipleJumpersShareOwnTarge
                 {2, 1}),
       MakeBlock(1, false,
                 {"(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int "
-                 "0)) (label_ref L2) (pc)))) (insn/s (set (reg:SI 2 v0) (const_int 9)))])"},
+                 "0)) (label_ref L1) (pc)))) (insn/s (set (reg:SI 2 v0) (const_int 9)))])"},
                 {4, 2}),
       MakeBlock(2, true,
                 {"(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int "
@@ -299,7 +299,7 @@ TEST(InvertFillEagerDelaySlotsUnitTest, TargetThreadSharedTargetNoFallthroughIns
       MakeBlock(1, false,
                 {"(set (mem:SI (reg:SI 5 a1)) (const_int 0))",
                  "(set (reg:SI 2 v0) (mem:SI (reg:SI 5 a1)))",
-                 "(sequence [(jump_insn (set (pc) (label_ref L1))) (insn (set (mem:SI (reg:SI 6 "
+                 "(sequence [(jump_insn (set (pc) (label_ref L0))) (insn (set (mem:SI (reg:SI 6 "
                  "a2)) (const_int 0)))])"},
                 {2}),
       MakeBlock(2, true,
@@ -491,12 +491,14 @@ TEST(InvertFillEagerDelaySlotsUnitTest, RejectsInvalidAndMalformedCfgs) {
 
   // 3. Out-of-bounds successor index.
   RtlControlFlowGraph bad_succ_cfg;
-  bad_succ_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {5}));
+  bad_succ_cfg.rpo_blocks.push_back(
+      MakeBlock(0, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {5}));
   EXPECT_TRUE(InvertFillEagerDelaySlots(bad_succ_cfg).rpo_blocks.empty());
 
   // 4. Out-of-bounds addr_vec_targets index.
   RtlControlFlowGraph bad_addr_vec_cfg;
-  RtlBasicBlock bad_addr_blk = MakeBlock(0, false, {"(return)"}, {});
+  RtlBasicBlock bad_addr_blk =
+      MakeBlock(0, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {});
   bad_addr_blk.addr_vec_targets = {3};
   bad_addr_vec_cfg.rpo_blocks.push_back(bad_addr_blk);
   EXPECT_TRUE(InvertFillEagerDelaySlots(bad_addr_vec_cfg).rpo_blocks.empty());
@@ -513,7 +515,8 @@ TEST(InvertFillEagerDelaySlotsUnitTest, RejectsInvalidAndMalformedCfgs) {
 
   // 7. Malformed sequence with fewer than 2 children.
   RtlControlFlowGraph bad_seq_cfg;
-  bad_seq_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(sequence [(jump_insn (return))])"}, {}));
+  bad_seq_cfg.rpo_blocks.push_back(MakeBlock(
+      0, false, {"(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))])"}, {}));
   EXPECT_TRUE(InvertFillEagerDelaySlots(bad_seq_cfg).rpo_blocks.empty());
 }
 

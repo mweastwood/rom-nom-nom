@@ -12,6 +12,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
 #include "lifter/invert_gas_mips_ip.h"
@@ -508,11 +509,41 @@ absl::Span<const uint32_t> StripSectionAlignmentPadding(
 
 namespace {
 
+bool DoesGasSwapBranchesForProfile(const CompilationProfile& profile) {
+  int opt = profile.optimize_level;
+  for (std::string_view flag : profile.c_flags) {
+    if (flag == "-O0") {
+      opt = 0;
+    } else if (flag == "-O" || flag == "-O1") {
+      opt = 1;
+    } else if (flag == "-O2") {
+      opt = 2;
+    } else if (flag == "-O3") {
+      opt = 3;
+    }
+  }
+  int mips_opt = (opt <= 0) ? 1 : 2;
+  for (std::string_view flag : profile.c_flags) {
+    if (absl::StartsWith(flag, "-Wa,")) {
+      for (std::string_view wa_opt : absl::StrSplit(flag.substr(4), ',')) {
+        if (wa_opt == "-g" || wa_opt == "-g2") {
+          mips_opt = 0;
+        } else if (wa_opt == "-O0") {
+          mips_opt = 1;
+        } else if (absl::StartsWith(wa_opt, "-O")) {
+          mips_opt = 2;
+        }
+      }
+    }
+  }
+  return mips_opt >= 2;
+}
+
 std::vector<std::string> InvertGasAppendInsnInternal(
     absl::Span<const uint32_t> words_x, uint32_t linked_base_vram,
     absl::Span<const size_t> extra_label_indices,
     const absl::flat_hash_set<size_t>& external_j_indices,
-    absl::flat_hash_map<size_t, std::string>* out_target_labels) {
+    absl::flat_hash_map<size_t, std::string>* out_target_labels, bool gas_swaps_branches = true) {
   if (words_x.empty()) {
     return {};
   }
@@ -628,7 +659,8 @@ std::vector<std::string> InvertGasAppendInsnInternal(
 
       const bool has_label_at_delay = target_labels.contains(i + 1);
       if (delay_w != 0x00000000u) {
-        if (!has_label_at_i && !has_label_at_delay && CanSwapBranchWithInsn(w, delay_w)) {
+        if (gas_swaps_branches && !has_label_at_i && !has_label_at_delay &&
+            CanSwapBranchWithInsn(w, delay_w)) {
           // Emit `[delay_insn, jump_insn]` in `.set reorder` mode so
           // `append_insn` swaps `delay_insn` into `jump_insn`'s delay slot.
           lines.push_back(base_disasm[i + 1]);
@@ -655,8 +687,9 @@ std::vector<std::string> InvertGasAppendInsnInternal(
         // `jump_line` in `.set reorder` mode would cause `append_insn` to
         // erroneously swap the preceding instruction into this branch's delay
         // slot.
-        const bool prev_would_swap = prev_insn_valid && !prev_insn_is_delay_slot &&
-                                     !has_label_at_i && CanSwapBranchWithInsn(w, prev_insn_word);
+        const bool prev_would_swap = gas_swaps_branches && prev_insn_valid &&
+                                     !prev_insn_is_delay_slot && !has_label_at_i &&
+                                     CanSwapBranchWithInsn(w, prev_insn_word);
         if (has_label_at_delay || prev_would_swap) {
           lines.push_back(".set\tnoreorder");
           lines.push_back(std::move(jump_line));
@@ -911,6 +944,15 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
       }
 
       if (expected_nops > 0 && nop_count >= expected_nops) {
+        if (nop_count == expected_nops && next_idx < items->size() &&
+            (*items)[next_idx].kind == AsmItemKind::kNoreorderBranchSeq &&
+            (*items)[next_idx].delay_word == 0x00000000u &&
+            (*items)[next_idx].delay_label.empty() &&
+            (GetInsnPinfo((*items)[next_idx].word) & kInsnCondBranchLikely) == 0u &&
+            !CanSwapBranchWithInsn((*items)[next_idx].word, prev_w)) {
+          (*items)[next_idx].kind = AsmItemKind::kReorderInsn;
+          (*items)[next_idx].delay_line.clear();
+        }
         i += expected_nops;
         if (expected_nops == 1) {
           prev_prev_w = prev_w;
@@ -1074,8 +1116,10 @@ bool InvertGasAppendInsnToItems(const Stage0FunctionInput& stage0_input,
   }
 
   absl::flat_hash_map<size_t, std::string> target_labels;
-  const std::vector<std::string> raw_lines = InvertGasAppendInsnInternal(
-      words, linked_base_vram, extra_label_indices, external_j_indices, &target_labels);
+  const bool gas_swaps_branches = DoesGasSwapBranchesForProfile(stage0_input.profile);
+  const std::vector<std::string> raw_lines =
+      InvertGasAppendInsnInternal(words, linked_base_vram, extra_label_indices, external_j_indices,
+                                  &target_labels, gas_swaps_branches);
   if (raw_lines.empty()) {
     return false;
   }

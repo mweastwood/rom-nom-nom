@@ -365,11 +365,28 @@ absl::flat_hash_map<int, std::string> BuildSequentialLabelMap(
     absl::Span<const RtlInsnEntry> insns) {
   absl::flat_hash_map<int, std::string> label_map;
   size_t next_idx = 0;
-  for (const auto& entry : insns) {
+  std::string current_group_label;
+  for (size_t i = 0; i < insns.size(); ++i) {
+    const auto& entry = insns[i];
     if (entry.kind == RtlInsnKind::kCodeLabel && entry.uid >= 0) {
-      if (!label_map.contains(entry.uid)) {
-        label_map.emplace(entry.uid, absl::StrCat("L", next_idx++));
+      const bool is_tablejump_label =
+          (i + 1 < insns.size() && insns[i + 1].kind == RtlInsnKind::kJumpInsn &&
+           (absl::StrContains(insns[i + 1].raw_sexpr, "(addr_vec:") ||
+            absl::StrContains(insns[i + 1].raw_sexpr, "(addr_diff_vec:")));
+      if (is_tablejump_label || current_group_label.empty()) {
+        current_group_label = absl::StrCat("L", next_idx++);
       }
+      if (!label_map.contains(entry.uid)) {
+        label_map.emplace(entry.uid, current_group_label);
+      }
+      if (is_tablejump_label) {
+        current_group_label.clear();
+      }
+    } else if (entry.kind == RtlInsnKind::kInsn || entry.kind == RtlInsnKind::kJumpInsn ||
+               entry.kind == RtlInsnKind::kCallInsn || entry.kind == RtlInsnKind::kBarrier ||
+               (entry.kind == RtlInsnKind::kNote &&
+                absl::StartsWith(entry.note_kind, "NOTE_INSN_LOOP_"))) {
+      current_group_label.clear();
     }
   }
   return label_map;

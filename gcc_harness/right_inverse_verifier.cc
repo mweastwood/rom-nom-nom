@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -27,7 +28,17 @@
 
 // NOLINTBEGIN(readability-identifier-naming)
 extern "C" {
+struct GccLangIndepOption {
+  const char* string;
+  int* variable;
+  int on_value;
+};
+extern GccLangIndepOption f_options[52];
 extern int obey_regdecls;
+extern int flag_delayed_branch;
+extern int flag_schedule_insns;
+extern int flag_schedule_insns_after_reload;
+extern int flag_expensive_optimizations;
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
 void regclass_init();
@@ -246,7 +257,7 @@ RightInverseResult RightInverseVerifier::VerifyFunctionPrologueEpilogueRightInve
   }
   ctx_->BeginFunction(fn_name);
   const std::string emitted =
-      hooks_->RunFunctionPrologueEpilogue(spec.var_size, spec.saved_gpr_mask);
+      hooks_->RunFunctionPrologueEpilogue(spec.var_size, spec.saved_gpr_mask, spec.saved_fpr_mask);
 
   if (absl::StrContains(asm_text_x, ".frame")) {
     result.expected_summary = StripFileDirectives(asm_text_x);
@@ -258,9 +269,10 @@ RightInverseResult RightInverseVerifier::VerifyFunctionPrologueEpilogueRightInve
   result.matches = (result.actual_summary == result.expected_summary);
   if (!result.matches) {
     result.diff_detail = absl::StrFormat(
-        "function_prologue/epilogue(var_size=%d, mask=0x%08x) got:\n%s\n!= "
+        "function_prologue/epilogue(var_size=%d, mask=0x%08x, fmask=0x%08x) got:\n%s\n!= "
         "expected:\n%s",
-        spec.var_size, spec.saved_gpr_mask, result.actual_summary, result.expected_summary);
+        spec.var_size, spec.saved_gpr_mask, spec.saved_fpr_mask, result.actual_summary,
+        result.expected_summary);
   }
   return result;
 }
@@ -292,23 +304,14 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
   return result;
 }
 
-RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
-    const Stage0FunctionInput& input_x) const {
+namespace {
+
+RightInverseResult CompareStage0FunctionInputs(const Stage0FunctionInput& input_x,
+                                               const Stage0FunctionInput& actual_stage0,
+                                               std::string_view combined_asm) {
   RightInverseResult result;
   result.expected_words = input_x.machine_words;
   result.expected_summary = FormatWordsSummary(result.expected_words);
-
-  const RtlControlFlowGraph lifted_dbr = inverses_->InvertFinalAndGasFunction(input_x);
-  if (input_x.machine_words.empty() || lifted_dbr.rpo_blocks.empty()) {
-    result.matches = false;
-    result.diff_detail = "InvertFinalAndGasFunction(Stage0FunctionInput) returned empty CFG";
-    return result;
-  }
-
-  ctx_->MaterializeFromCfg(lifted_dbr);
-  const std::string combined_asm = hooks_->RunFinal();
-  const Stage0FunctionInput actual_stage0 = hooks_->RunGasMdAssembleWithMetadata(combined_asm);
-
   result.actual_words = actual_stage0.machine_words;
 
   // If `input_x` represents a linked N64 ROM function (`base_vram != 0` with
@@ -419,6 +422,13 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
   }
 
   if (!is_linked_rom_input) {
+    if (actual_stage0.constant_pool.size() != input_x.constant_pool.size()) {
+      result.matches = false;
+      result.diff_detail = absl::StrFormat("Constant-pool count got %zu != expected %zu\nasm:\n%s",
+                                           actual_stage0.constant_pool.size(),
+                                           input_x.constant_pool.size(), combined_asm);
+      return result;
+    }
     if (actual_stage0.relocations.size() != input_x.relocations.size()) {
       result.matches = false;
       result.diff_detail = absl::StrFormat("Relocation count got %zu != expected %zu\nasm:\n%s",
@@ -436,13 +446,13 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
       actual_jt_by_label[actual_stage0.jump_tables[i].label_name] = i;
     }
 
-    absl::flat_hash_map<std::string, std::vector<uint32_t>> expected_cp_by_label;
+    absl::flat_hash_map<std::string, const Stage0ConstantPoolEntry*> expected_cp_by_label;
     for (const auto& cp : input_x.constant_pool) {
-      expected_cp_by_label[cp.label_name] = cp.words;
+      expected_cp_by_label[cp.label_name] = &cp;
     }
-    absl::flat_hash_map<std::string, std::vector<uint32_t>> actual_cp_by_label;
+    absl::flat_hash_map<std::string, const Stage0ConstantPoolEntry*> actual_cp_by_label;
     for (const auto& cp : actual_stage0.constant_pool) {
-      actual_cp_by_label[cp.label_name] = cp.words;
+      actual_cp_by_label[cp.label_name] = &cp;
     }
 
     for (size_t i = 0; i < input_x.relocations.size(); ++i) {
@@ -474,15 +484,10 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
       } else if (auto exp_cp = expected_cp_by_label.find(exp_r.symbol_name);
                  exp_cp != expected_cp_by_label.end()) {
         auto act_cp = actual_cp_by_label.find(act_r.symbol_name);
-        // When an explicit `$LC*` 4-byte float pool load round-trips as symbolic
-        // `l.s $fN, $LC*` (where `GccContext` emits `$LC*` as a symbolic reference),
-        // accept exact symbol match `$LC* == $LC*` as well as matching pool words.
-        const bool pool_words_match =
-            (act_cp != actual_cp_by_label.end() && act_cp->second == exp_cp->second);
-        const bool unresolved_symbolic_pool_ref =
-            (act_cp == actual_cp_by_label.end() && act_r.symbol_name == exp_r.symbol_name &&
-             !absl::StartsWith(exp_r.symbol_name, "$LC_lit_"));
-        if (!pool_words_match && !unresolved_symbolic_pool_ref) {
+        const bool pool_entry_matches = (act_cp != actual_cp_by_label.end() &&
+                                         act_cp->second->byte_size == exp_cp->second->byte_size &&
+                                         act_cp->second->words == exp_cp->second->words);
+        if (!pool_entry_matches) {
           result.matches = false;
           result.diff_detail =
               absl::StrFormat("Relocation %zu constant-pool mismatch for '%s' vs '%s'\nasm:\n%s", i,
@@ -501,6 +506,285 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
 
   result.matches = true;
   return result;
+}
+
+bool IsRerunCseAfterLoopEnabled() {
+  int rerun_cse = flag_expensive_optimizations;
+  for (const auto& opt : f_options) {
+    if (opt.string != nullptr && std::strcmp(opt.string, "rerun-cse-after-loop") == 0 &&
+        opt.variable != nullptr) {
+      rerun_cse = *opt.variable;
+      break;
+    }
+  }
+  return rerun_cse != 0;
+}
+
+int PassPipelineRank(RtlPassKind pass) {
+  switch (pass) {
+    case RtlPassKind::kRtl:
+      return 0;
+    case RtlPassKind::kJump:
+      return 1;
+    case RtlPassKind::kCse:
+      return 2;
+    case RtlPassKind::kLoop:
+      return 3;
+    case RtlPassKind::kCse2:
+      return 4;
+    case RtlPassKind::kFlow:
+      return 5;
+    case RtlPassKind::kCombine:
+      return 6;
+    case RtlPassKind::kSched:
+      return 7;
+    case RtlPassKind::kLreg:
+      return 8;
+    case RtlPassKind::kGreg:
+      return 9;
+    case RtlPassKind::kSched2:
+      return 10;
+    case RtlPassKind::kJump2:
+      return 11;
+    case RtlPassKind::kDbr:
+      return 12;
+  }
+  return 12;
+}
+
+int FirstReplaySubfunctionIndexAfterPass(RtlPassKind pass) {
+  const auto all_subs = AllSubfunctionIds();
+  auto index_of = [&](SubfunctionId target) -> int {
+    for (size_t i = 0; i < all_subs.size(); ++i) {
+      if (all_subs[i] == target) {
+        return static_cast<int>(i);
+      }
+    }
+    return static_cast<int>(all_subs.size());
+  };
+  switch (pass) {
+    case RtlPassKind::kRtl:
+      return index_of(SubfunctionId::kJumpRedirect);
+    case RtlPassKind::kJump:
+      return index_of(SubfunctionId::kFoldRtx);
+    case RtlPassKind::kCse:
+      return index_of(SubfunctionId::kScanLoop);
+    case RtlPassKind::kLoop:
+      return index_of(SubfunctionId::kCseBasicBlockCse2);
+    case RtlPassKind::kCse2:
+      return index_of(SubfunctionId::kFindBasicBlocks);
+    case RtlPassKind::kFlow:
+      return index_of(SubfunctionId::kSimplifyRtx);
+    case RtlPassKind::kCombine:
+      return index_of(SubfunctionId::kScheduleBlockSched1);
+    case RtlPassKind::kSched:
+      return index_of(SubfunctionId::kUpdateEquivRegs);
+    case RtlPassKind::kLreg:
+      return index_of(SubfunctionId::kGlobalAlloc);
+    case RtlPassKind::kGreg:
+      return index_of(SubfunctionId::kScheduleBlockSched2);
+    case RtlPassKind::kSched2:
+      return index_of(SubfunctionId::kDoCrossJump);
+    case RtlPassKind::kJump2:
+      return index_of(SubfunctionId::kFillSimpleDelaySlots);
+    case RtlPassKind::kDbr:
+      return index_of(SubfunctionId::kMakeReturnInsns) + 1;
+  }
+  return index_of(SubfunctionId::kMakeReturnInsns) + 1;
+}
+
+}  // namespace
+
+RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
+    const Stage0FunctionInput& input_x) const {
+  RightInverseResult result;
+  result.expected_words = input_x.machine_words;
+  result.expected_summary = FormatWordsSummary(result.expected_words);
+
+  const RtlControlFlowGraph lifted_dbr = inverses_->InvertFinalAndGasFunction(input_x);
+  if (input_x.machine_words.empty() || lifted_dbr.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertFinalAndGasFunction(Stage0FunctionInput) returned empty CFG";
+    return result;
+  }
+
+  hooks_->ApplyCompilationProfile(input_x.profile);
+  ctx_->MaterializeFromCfg(lifted_dbr);
+  const std::string combined_asm = hooks_->RunFinal();
+  const Stage0FunctionInput actual_stage0 = hooks_->RunGasMdAssembleWithMetadata(combined_asm);
+  return CompareStage0FunctionInputs(input_x, actual_stage0, combined_asm);
+}
+
+RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
+    RtlPassKind target_pass, const Stage0FunctionInput& input_x) const {
+  RightInverseResult fail_result;
+  fail_result.expected_words = input_x.machine_words;
+  fail_result.expected_summary = FormatWordsSummary(fail_result.expected_words);
+
+  if (input_x.machine_words.empty()) {
+    fail_result.matches = false;
+    fail_result.diff_detail = "VerifySuffixRightInverse given empty machine_words";
+    return fail_result;
+  }
+
+  // Instantiate a completely fresh `GccContext` and `FunctionHooks` configured
+  // solely from `input_x.profile` so zero forward-compilation oracle state leaks
+  // from the caller's `ctx_` / `hooks_`.
+  GccContext fresh_ctx;
+  FunctionHooks fresh_hooks(&fresh_ctx);
+  fresh_hooks.ApplyCompilationProfile(input_x.profile);
+
+  const bool opt_enabled = (optimize > 0);
+  const bool dbr_enabled = opt_enabled && (flag_delayed_branch != 0);
+  const bool sched2_enabled = opt_enabled && (flag_schedule_insns_after_reload != 0);
+  const bool sched1_enabled = opt_enabled && (flag_schedule_insns != 0);
+  const bool cse2_enabled = opt_enabled && IsRerunCseAfterLoopEnabled();
+
+  RtlControlFlowGraph y = inverses_->InvertFinalAndGasFunction(input_x);
+  if (y.rpo_blocks.empty()) {
+    fail_result.matches = false;
+    fail_result.diff_detail = "InvertFinalAndGasFunction returned empty CFG";
+    return fail_result;
+  }
+  y.pass = RtlPassKind::kDbr;
+
+  const int target_rank = PassPipelineRank(target_pass);
+  auto step_fail = [&](std::string_view step_name) -> RightInverseResult {
+    fail_result.matches = false;
+    fail_result.diff_detail = absl::StrCat(step_name, " returned empty RtlControlFlowGraph");
+    return fail_result;
+  };
+
+  if (target_rank <= PassPipelineRank(RtlPassKind::kJump2)) {
+    if (dbr_enabled) {
+      y = inverses_->InvertDbrSchedule(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertDbrSchedule");
+    }
+    y.pass = RtlPassKind::kJump2;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kSched2)) {
+    if (opt_enabled) {
+      y = inverses_->InvertDoCrossJump(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertDoCrossJump");
+    }
+    y.pass = RtlPassKind::kSched2;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kGreg)) {
+    if (sched2_enabled) {
+      y = inverses_->InvertScheduleBlock(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertScheduleBlock (sched2)");
+    }
+    y.pass = RtlPassKind::kGreg;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kLreg)) {
+    y = inverses_->InvertAlterReg(y);
+    if (y.rpo_blocks.empty()) return step_fail("InvertAlterReg");
+    y = inverses_->InvertReload(y);
+    if (y.rpo_blocks.empty()) return step_fail("InvertReload");
+    if (opt_enabled) {
+      y = inverses_->InvertGlobalAlloc(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertGlobalAlloc");
+    }
+    y.pass = RtlPassKind::kLreg;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kSched)) {
+    if (opt_enabled) {
+      y = inverses_->InvertBlockAlloc(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertBlockAlloc");
+      y = inverses_->InvertUpdateEquivRegs(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertUpdateEquivRegs");
+    }
+    y.pass = RtlPassKind::kSched;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kCombine)) {
+    if (sched1_enabled) {
+      y = inverses_->InvertScheduleBlock(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertScheduleBlock (sched1)");
+    }
+    y.pass = RtlPassKind::kCombine;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kFlow)) {
+    if (opt_enabled) {
+      y = inverses_->InvertTryCombine(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertTryCombine");
+    }
+    y.pass = RtlPassKind::kFlow;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kCse2)) {
+    if (opt_enabled) {
+      y = inverses_->InvertFindBasicBlocks(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertFindBasicBlocks");
+      y = inverses_->InvertPropagateBlock(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertPropagateBlock");
+    }
+    y.pass = RtlPassKind::kCse2;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kLoop)) {
+    if (cse2_enabled) {
+      y = inverses_->InvertCseBasicBlock(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertCseBasicBlock (cse2)");
+    }
+    y.pass = RtlPassKind::kLoop;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kCse)) {
+    if (opt_enabled) {
+      y = inverses_->InvertStrengthReduce(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertStrengthReduce");
+      y = inverses_->InvertScanLoop(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertScanLoop");
+    }
+    y.pass = RtlPassKind::kCse;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kJump)) {
+    if (opt_enabled) {
+      y = inverses_->InvertCseBasicBlock(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertCseBasicBlock (cse1)");
+    }
+    y.pass = RtlPassKind::kJump;
+  }
+  if (target_rank <= PassPipelineRank(RtlPassKind::kRtl)) {
+    y = inverses_->InvertJump1Optimize(y);
+    if (y.rpo_blocks.empty()) return step_fail("InvertJump1Optimize");
+    y = inverses_->InvertJumpRedirect(y);
+    if (y.rpo_blocks.empty()) return step_fail("InvertJumpRedirect");
+    y = inverses_->InvertInstantiateVirtualRegs(y);
+    if (y.rpo_blocks.empty()) return step_fail("InvertInstantiateVirtualRegs");
+    y.pass = RtlPassKind::kRtl;
+  }
+
+  // Reset `fresh_ctx` and replay forward passes $F_{0..s}(y_s)$ strictly under
+  // `input_x.profile`.
+  fresh_ctx.BeginFunction("harness_func");
+  fresh_hooks.ApplyCompilationProfile(input_x.profile);
+
+  RtlControlFlowGraph current_cfg = y;
+  const auto all_subs = AllSubfunctionIds();
+  const int start_sub_idx = FirstReplaySubfunctionIndexAfterPass(target_pass);
+  int end_sub_idx = 0;
+  for (size_t i = 0; i < all_subs.size(); ++i) {
+    if (all_subs[i] == SubfunctionId::kMakeReturnInsns) {
+      end_sub_idx = static_cast<int>(i);
+      break;
+    }
+  }
+  for (int idx = start_sub_idx; idx <= end_sub_idx; ++idx) {
+    current_cfg =
+        fresh_hooks
+            .ExecuteSubfunctionBoundary(all_subs[idx], current_cfg, {},
+                                        input_x.profile.optimize_level, input_x.profile.c_flags)
+            .post_state;
+  }
+
+  fresh_hooks.ApplyCompilationProfile(input_x.profile);
+  fresh_ctx.MaterializeFromCfg(current_cfg);
+  const std::string combined_asm = fresh_hooks.RunFinal();
+  const Stage0FunctionInput actual_stage0 = fresh_hooks.RunGasMdAssembleWithMetadata(combined_asm);
+  RightInverseResult res = CompareStage0FunctionInputs(input_x, actual_stage0, combined_asm);
+  if (!res.matches) {
+    absl::StrAppend(&res.diff_detail, "\nlifted y_s (", RtlPassExtension(target_pass), "):\n",
+                    y.FormatSummary());
+  }
+  return res;
 }
 
 // -----------------------------------------------------------------------------
@@ -1199,9 +1483,13 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       RtlControlFlowGraph cand_pre = snap.post_state;
       cand_pre.sideband.frame_size_bytes = spec.var_size;
       cand_pre.sideband.saved_gpr_regnos.clear();
+      cand_pre.sideband.saved_fpr_regnos.clear();
       for (int r = 0; r < 32; ++r) {
         if ((spec.saved_gpr_mask >> r) & 1u) {
           cand_pre.sideband.saved_gpr_regnos.push_back(r);
+        }
+        if ((spec.saved_fpr_mask >> r) & 1u) {
+          cand_pre.sideband.saved_fpr_regnos.push_back(32 + r);
         }
       }
       const SubfunctionBoundarySnapshot replayed =

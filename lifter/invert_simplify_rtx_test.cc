@@ -250,13 +250,13 @@ TEST_F(InvertSimplifyRtxTest, RejectsInvalidCfgStructuresAndSidebandEntries) {
 
   RtlControlFlowGraph bad_succ;
   bad_succ.rpo_blocks.resize(1);
-  bad_succ.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_succ.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_succ.rpo_blocks[0].successors = {2};
   EXPECT_FALSE(InvertSimplifyRtxCfg(bad_succ).ok());
 
   RtlControlFlowGraph bad_addr_vec;
   bad_addr_vec.rpo_blocks.resize(1);
-  bad_addr_vec.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_addr_vec.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_addr_vec.rpo_blocks[0].addr_vec_targets = {4};
   EXPECT_FALSE(InvertSimplifyRtxCfg(bad_addr_vec).ok());
 
@@ -267,13 +267,13 @@ TEST_F(InvertSimplifyRtxTest, RejectsInvalidCfgStructuresAndSidebandEntries) {
 
   RtlControlFlowGraph bad_sideband;
   bad_sideband.rpo_blocks.resize(1);
-  bad_sideband.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_sideband.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_sideband.sideband.reg_renumber[2] = 4;
   EXPECT_FALSE(InvertSimplifyRtxCfg(bad_sideband).ok());
 
   RtlControlFlowGraph bad_fcr31_sideband;
   bad_fcr31_sideband.rpo_blocks.resize(1);
-  bad_fcr31_sideband.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_fcr31_sideband.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_fcr31_sideband.sideband.reg_renumber[kMipsStatusRegnum] = 2;
   EXPECT_FALSE(InvertSimplifyRtxCfg(bad_fcr31_sideband).ok());
 }

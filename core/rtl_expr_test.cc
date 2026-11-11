@@ -204,5 +204,126 @@ TEST(RtlExprTest, RejectsMalformedSexpr) {
   EXPECT_FALSE(ParsePatternAndNotes("(set (reg:SI 2 v0) (const_int 1)) [REG_NOTES: (nil)").ok());
 }
 
+TEST(RtlExprTest, DisambiguatesArgPointerRegFromHardwareZeroReg) {
+  const RtlExpr zero_reg = RtlExpr::MakeReg(RtlMachineMode::kSI, 0);
+  const RtlExpr argp_reg = RtlExpr::MakeArgPointerReg(RtlMachineMode::kSI);
+
+  EXPECT_EQ(zero_reg.ToSexprString(), "(reg:SI 0 $0)");
+  EXPECT_EQ(argp_reg.ToSexprString(), "(reg:SI 0 argp)");
+  EXPECT_NE(zero_reg, argp_reg);
+
+  EXPECT_TRUE(zero_reg.IsHardReg());
+  EXPECT_FALSE(zero_reg.IsArgPointerReg());
+  EXPECT_TRUE(zero_reg.ContainsReg(0));
+
+  EXPECT_FALSE(argp_reg.IsHardReg());
+  EXPECT_TRUE(argp_reg.IsArgPointerReg());
+  EXPECT_FALSE(argp_reg.ContainsReg(0));
+
+  auto parsed_argp = RtlExpr::Parse("(reg:SI 0 argp)");
+  ASSERT_TRUE(parsed_argp.ok());
+  EXPECT_TRUE(parsed_argp->IsArgPointerReg());
+  EXPECT_FALSE(parsed_argp->IsHardReg());
+  EXPECT_EQ(*parsed_argp, argp_reg);
+
+  auto parsed_dollar_arg = RtlExpr::Parse("(reg:SI 0 $arg)");
+  ASSERT_TRUE(parsed_dollar_arg.ok());
+  EXPECT_TRUE(parsed_dollar_arg->IsArgPointerReg());
+  EXPECT_FALSE(parsed_dollar_arg->IsHardReg());
+
+  // ReplaceRegNo(0, 72) rewrites hardware $0 without touching argp.
+  RtlExpr sum =
+      RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kSI, 2),
+                       RtlExpr::MakeBinary(RtlOp::kPlus, RtlMachineMode::kSI, argp_reg, zero_reg));
+  sum.ReplaceRegNo(0, 72);
+  EXPECT_EQ(sum.ToSexprString(), "(set (reg:SI 2 v0) (plus:SI (reg:SI 0 argp) (reg:SI 72)))");
+}
+
+TEST(RtlExprTest, GccPrintRtlFormattingAndSequenceSubInsnAstHelpers) {
+  RtlExpr ret_par = RtlExpr::MakeParallel({
+      RtlExpr::MakeReturn(),
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSI, 31)),
+  });
+  EXPECT_EQ(ret_par.ToSexprString(), "(parallel [(return) (use (reg:SI 31 ra))])");
+  EXPECT_EQ(ret_par.ToGccPrintRtlString(), "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+  RtlPatternAndNotes slot_pn;
+  slot_pn.pattern = RtlExpr::MakeSet(
+      RtlExpr::MakeReg(RtlMachineMode::kSI, 2, RtlFlags{.integrated = true}),
+      RtlExpr::MakeBinary(RtlOp::kPlus, RtlMachineMode::kSI,
+                          RtlExpr::MakeReg(RtlMachineMode::kSI, 4), RtlExpr::MakeConstInt(1)));
+  slot_pn.reg_notes.push_back(RtlRegNote{
+      .kind = RtlMachineMode::kRegDead,
+      .list_op = RtlOp::kExprList,
+      .datum = RtlExpr::MakeReg(RtlMachineMode::kSI, 4),
+  });
+
+  RtlExpr seq = RtlExpr::MakeSequence({
+      RtlExpr::MakeInsnWrapper(RtlOp::kJumpInsn, RtlFlags{.unchanging = true}, ret_par),
+      RtlExpr::MakeInsnWrapper(RtlOp::kInsn, RtlFlags{.in_struct = true}, slot_pn),
+  });
+  EXPECT_EQ(seq.ToGccPrintRtlString(),
+            "(sequence [(jump_insn/u (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+            "(insn/s (set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil)))])");
+
+  auto reparsed_seq = RtlExpr::Parse(seq.ToGccPrintRtlString());
+  ASSERT_TRUE(reparsed_seq.ok()) << reparsed_seq.status().message();
+  ASSERT_EQ(reparsed_seq->children.size(), 2u);
+
+  auto head_extracted = RtlPatternAndNotes::FromSequenceSubInsn(reparsed_seq->children[0]);
+  ASSERT_TRUE(head_extracted.ok()) << head_extracted.status().message();
+  EXPECT_EQ(head_extracted->pattern, ret_par);
+  EXPECT_TRUE(head_extracted->reg_notes.empty());
+  EXPECT_EQ(head_extracted->ToGccPrintRtlString(), "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+  auto slot_extracted = RtlPatternAndNotes::FromSequenceSubInsn(reparsed_seq->children[1]);
+  ASSERT_TRUE(slot_extracted.ok()) << slot_extracted.status().message();
+  EXPECT_EQ(*slot_extracted, slot_pn);
+
+  // Also test `ToGccPrintRtlString` on top-level `PARALLEL` with trailing `REG_NOTES`.
+  RtlPatternAndNotes call_pn;
+  call_pn.pattern = RtlExpr::MakeParallel({
+      RtlExpr::MakeSet(
+          RtlExpr::MakeReg(RtlMachineMode::kSI, 2),
+          RtlExpr::MakeCall(RtlExpr::MakeMem(RtlMachineMode::kSI,
+                                             RtlExpr::MakeSymbolRef(RtlMachineMode::kSI, "callee")),
+                            RtlExpr::MakeConstInt(0))),
+      RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSI, 31)),
+  });
+  call_pn.reg_notes.push_back(RtlRegNote{
+      .kind = RtlMachineMode::kRegDead,
+      .list_op = RtlOp::kExprList,
+      .datum = RtlExpr::MakeReg(RtlMachineMode::kSI, 4),
+  });
+  EXPECT_EQ(call_pn.ToGccPrintRtlString(),
+            "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+            "(const_int 0))) (clobber (reg:SI 31 ra)) ] ) "
+            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+
+  // Full GCC dump sub-insn with UIDs and `REG_NOTES`.
+  auto full_sub = RtlExpr::Parse(
+      "(insn 10 9 11 (set (reg:SI 2 v0) (const_int 0)) -1 (nil) "
+      "(expr_list:REG_UNUSED (reg:SI 2 v0) (nil)))");
+  ASSERT_TRUE(full_sub.ok());
+  auto full_extracted = RtlPatternAndNotes::FromSequenceSubInsn(*full_sub);
+  ASSERT_TRUE(full_extracted.ok());
+  ASSERT_EQ(full_extracted->reg_notes.size(), 1u);
+  EXPECT_EQ(full_extracted->reg_notes[0].kind, RtlMachineMode::kRegUnused);
+
+  // Negative cases for `FromSequenceSubInsn`.
+  EXPECT_FALSE(RtlPatternAndNotes::FromSequenceSubInsn(ret_par).ok());
+  RtlExpr empty_insn;
+  empty_insn.op = RtlOp::kInsn;
+  EXPECT_FALSE(RtlPatternAndNotes::FromSequenceSubInsn(empty_insn).ok());
+
+  // `MakeNote` builder round-trip.
+  const RtlExpr vtop_note = RtlExpr::MakeNote("NOTE_INSN_LOOP_VTOP");
+  EXPECT_EQ(vtop_note.ToGccPrintRtlString(), "(note NOTE_INSN_LOOP_VTOP)");
+  auto parsed_vtop_note = RtlExpr::Parse(vtop_note.ToGccPrintRtlString());
+  ASSERT_TRUE(parsed_vtop_note.ok()) << parsed_vtop_note.status().message();
+  EXPECT_EQ(*parsed_vtop_note, vtop_note);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

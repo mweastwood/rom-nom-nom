@@ -43,8 +43,9 @@ bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
 // Extracts `frame_pointer_needed`, `is_leaf_function`, `outgoing_args_size`,
 // `frame_size_bytes` (`var_size`), `saved_gpr_regnos`, `saved_fpr_regnos`, and
 // `epilogue_delay_pattern` into `sideband`, strips any trailing
-// `mips.c:function_epilogue` sequence from `asm_lines`, and normalizes any
-// additional / non-trailing `tsize > 0` epilogues into `jr\t$31` returns.
+// `mips.c:function_epilogue` sequence from `asm_lines`, and rewrites any
+// additional / non-trailing `tsize > 0` epilogues into jumps (`j\t$L<exit>`)
+// to a single canonical trailing exit label.
 void ExtractFunctionPrologueEpilogue(std::vector<std::string>* asm_lines,
                                      RtlSidebandState* sideband);
 

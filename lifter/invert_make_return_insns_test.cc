@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 
-#include "absl/strings/match.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
@@ -35,7 +34,7 @@ class ProductionMakeReturnInsnsProvider final : public SubfunctionInverseProvide
   }
 };
 
-TEST(InvertMakeReturnInsnsTest, SingleBlockSequenceReturnRightInverse) {
+TEST(InvertMakeReturnInsnsTest, SingleBlockSequenceReturnInternalRightInverse) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
   ProductionMakeReturnInsnsProvider provider;
@@ -45,22 +44,22 @@ TEST(InvertMakeReturnInsnsTest, SingleBlockSequenceReturnRightInverse) {
   ret_cfg.pass = RtlPassKind::kDbr;
   ret_cfg.rpo_blocks.resize(1);
   ret_cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int 42)))])");
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+      "(insn (set (reg/i:SI 2 v0) (const_int 42)))])");
 
   const RtlControlFlowGraph lifted = InvertMakeReturnInsns(ret_cfg);
-  ASSERT_EQ(lifted.rpo_blocks.size(), 2u);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
   ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 1u);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
-            "(sequence [(jump_insn (set (pc) (label_ref L1))) "
+            "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
             "(insn (set (reg/i:SI 2 v0) (const_int 42)))])");
-  EXPECT_EQ(lifted.rpo_blocks[0].successors, std::vector<size_t>{1});
-  EXPECT_TRUE(lifted.rpo_blocks[1].instructions.empty());
+  EXPECT_TRUE(lifted.rpo_blocks[0].successors.empty());
 
   const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(ret_cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
-TEST(InvertMakeReturnInsnsTest, MultiBlockMultipleSequenceReturnsShareEndBlock) {
+TEST(InvertMakeReturnInsnsTest, MultiBlockMultipleSequenceReturnInternalRightInverse) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
   ProductionMakeReturnInsnsProvider provider;
@@ -74,118 +73,20 @@ TEST(InvertMakeReturnInsnsTest, MultiBlockMultipleSequenceReturnsShareEndBlock) 
       "(label_ref L0) (pc)))) (insn (set (reg:SI 2 v0) (const_int 1)))])");
   cfg.rpo_blocks[0].successors = {2, 1};
   cfg.rpo_blocks[1].AddPatternOnly(
-      "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int 10)))])");
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+      "(insn (set (reg/i:SI 2 v0) (const_int 10)))])");
   cfg.rpo_blocks[2].has_label = true;
   cfg.rpo_blocks[2].AddPatternOnly(
-      "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int 20)))])");
-
-  const RtlControlFlowGraph lifted = InvertMakeReturnInsns(cfg);
-  ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
-  EXPECT_EQ(lifted.rpo_blocks[1].successors, std::vector<size_t>{3});
-  EXPECT_EQ(lifted.rpo_blocks[2].successors, std::vector<size_t>{3});
-  EXPECT_TRUE(lifted.rpo_blocks[3].instructions.empty());
-
-  const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(cfg);
-  EXPECT_TRUE(res.matches) << res.diff_detail;
-}
-
-TEST(InvertMakeReturnInsnsTest, ReusesExistingTrailingEmptyBlockTargetedByConditionalBranch) {
-  GccContext ctx;
-  FunctionHooks hooks(&ctx);
-  ProductionMakeReturnInsnsProvider provider;
-  RightInverseVerifier verifier(&ctx, &hooks, &provider);
-
-  // Block 0 conditionally branches directly to the trailing empty return label
-  // block (Block 2, `L0`), while Block 1 returns via a delay-slot-filled
-  // `(sequence [(jump_insn (return)) ...])`.
-  RtlControlFlowGraph cfg;
-  cfg.pass = RtlPassKind::kDbr;
-  cfg.rpo_blocks.resize(3);
-  cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
-  cfg.rpo_blocks[0].AddPatternOnly(
-      "(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc)))");
-  cfg.rpo_blocks[0].successors = {2, 1};
-  cfg.rpo_blocks[1].AddPatternOnly(
-      "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int -1)))])");
-  cfg.rpo_blocks[2].has_label = true;
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+      "(insn (set (reg/i:SI 2 v0) (const_int 20)))])");
 
   const RtlControlFlowGraph lifted = InvertMakeReturnInsns(cfg);
   ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
-  EXPECT_EQ(lifted.rpo_blocks[1].successors, std::vector<size_t>{2});
-  EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[1].instructions[0], "(label_ref L0)"));
+  EXPECT_TRUE(lifted.rpo_blocks[1].successors.empty());
+  EXPECT_TRUE(lifted.rpo_blocks[2].successors.empty());
 
   const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
-}
-
-TEST(InvertMakeReturnInsnsTest,
-     FallthroughConditionalBranchBeforeTrailingEmptyBlockDoesNotStealLoopLabel) {
-  GccContext ctx;
-  FunctionHooks hooks(&ctx);
-  ProductionMakeReturnInsnsProvider provider;
-  RightInverseVerifier verifier(&ctx, &hooks, &provider);
-
-  // Case 1: No existing block explicitly jumps to the trailing empty block
-  // (Block 2); Block 1 (`b = last_idx - 1`) branches back to Block 0 (`L0`)
-  // and only falls through to Block 2 (`last_idx = 2`). `InvertMakeReturnInsns`
-  // must reuse Block 2, mark `has_label = true`, and synthesize a fresh label
-  // `L2` rather than stealing `L0` from Block 1's back-edge branch.
-  {
-    RtlControlFlowGraph cfg;
-    cfg.pass = RtlPassKind::kDbr;
-    cfg.rpo_blocks.resize(3);
-    cfg.rpo_blocks[0].has_label = true;
-    cfg.rpo_blocks[0].AddPatternOnly(
-        "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int -1)))])");
-    cfg.rpo_blocks[1].AddPatternOnly(
-        "(sequence [(jump_insn (set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 1)) "
-        "(label_ref L0) (pc)))) (insn (set (reg/i:SI 2 v0) (reg:SI 4 a0)))])");
-    cfg.rpo_blocks[1].successors = {0, 2};
-
-    const RtlControlFlowGraph lifted = InvertMakeReturnInsns(cfg);
-    ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
-    EXPECT_EQ(lifted.rpo_blocks[0].successors, std::vector<size_t>{2});
-    EXPECT_TRUE(lifted.rpo_blocks[2].has_label);
-    EXPECT_FALSE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(label_ref L0)"));
-    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(label_ref L2)"));
-  }
-
-  // Case 2: Full right-inverse round-trip where Block 3 (`b = last_idx - 1`)
-  // branches back to Block 0 (`L0`) and falls through into the trailing empty
-  // Block 4 (`last_idx = 4`), Block 1 returns via `(sequence [(jump_insn (return)) ...])`,
-  // and Block 2 has a bare conditional branch to Block 4 (`L2`) so that
-  // `end_of_function_label` remains live (`LABEL_NUSES > 0`) after `make_return_insns`.
-  {
-    RtlControlFlowGraph cfg;
-    cfg.pass = RtlPassKind::kDbr;
-    cfg.rpo_blocks.resize(5);
-    cfg.rpo_blocks[0].has_label = true;
-    cfg.rpo_blocks[0].AddPatternOnly(
-        "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 4 a0) (const_int 0)) "
-        "(label_ref L1) (pc)))) (insn (set (reg/i:SI 2 v0) (const_int 0)))])");
-    cfg.rpo_blocks[0].successors = {2, 1};
-    cfg.rpo_blocks[1].AddPatternOnly(
-        "(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int -1)))])");
-    cfg.rpo_blocks[2].has_label = true;
-    cfg.rpo_blocks[2].AddPatternOnly(
-        "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L2) (pc)))");
-    cfg.rpo_blocks[2].successors = {4, 3};
-    cfg.rpo_blocks[3].AddPatternOnly(
-        "(sequence [(jump_insn (set (pc) (if_then_else (ne:SI (reg:SI 5 a1) (const_int 0)) "
-        "(label_ref L0) (pc)))) (insn (set (reg/i:SI 2 v0) (reg:SI 4 a0)))])");
-    cfg.rpo_blocks[3].successors = {0, 4};
-    cfg.rpo_blocks[4].has_label = true;
-
-    const RtlControlFlowGraph lifted = InvertMakeReturnInsns(cfg);
-    ASSERT_EQ(lifted.rpo_blocks.size(), 5u);
-    EXPECT_EQ(lifted.rpo_blocks[1].successors, std::vector<size_t>{4});
-    EXPECT_TRUE(lifted.rpo_blocks[4].has_label);
-    EXPECT_FALSE(absl::StrContains(lifted.rpo_blocks[1].instructions[0], "(label_ref L0)"));
-    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[1].instructions[0], "(label_ref L2)"));
-
-    const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(cfg);
-    EXPECT_TRUE(res.matches) << res.diff_detail;
-  }
 }
 
 TEST(InvertMakeReturnInsnsTest, PreservesJumpInsnFlagsAndRegNotesInsideSequence) {
@@ -198,58 +99,40 @@ TEST(InvertMakeReturnInsnsTest, PreservesJumpInsnFlagsAndRegNotesInsideSequence)
   cfg.pass = RtlPassKind::kDbr;
   cfg.rpo_blocks.resize(1);
   cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn/u (return) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))) "
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ) "
+      "(expr_list:REG_DEAD (reg:SI 31 ra) (nil))) "
       "(insn (set (reg/i:SI 2 v0) (const_int 7)))])");
 
   const RtlControlFlowGraph lifted = InvertMakeReturnInsns(cfg);
-  ASSERT_EQ(lifted.rpo_blocks.size(), 2u);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
-            "(sequence [(jump_insn/u (set (pc) (label_ref L1)) "
-            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))) "
+            "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ) "
+            "(expr_list:REG_DEAD (reg:SI 31 ra) (nil))) "
             "(insn (set (reg/i:SI 2 v0) (const_int 7)))])");
 
   const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
-TEST(InvertMakeReturnInsnsTest, StandaloneReturnAndParallelReturnArePreserved) {
+TEST(InvertMakeReturnInsnsTest, StandaloneReturnInternalIsPreserved) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
   ProductionMakeReturnInsnsProvider provider;
   RightInverseVerifier verifier(&ctx, &hooks, &provider);
 
-  // 1. Standalone bare `(return)`:
-  {
-    RtlControlFlowGraph bare_ret_cfg;
-    bare_ret_cfg.pass = RtlPassKind::kDbr;
-    bare_ret_cfg.rpo_blocks.resize(1);
-    bare_ret_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
-    bare_ret_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+  RtlControlFlowGraph par_ret_cfg;
+  par_ret_cfg.pass = RtlPassKind::kDbr;
+  par_ret_cfg.rpo_blocks.resize(1);
+  par_ret_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 5))");
+  par_ret_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
-    const RtlControlFlowGraph lifted = InvertMakeReturnInsns(bare_ret_cfg);
-    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
-    EXPECT_EQ(lifted.rpo_blocks[0].instructions.back(), "(return)");
+  const RtlControlFlowGraph lifted = InvertMakeReturnInsns(par_ret_cfg);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions.back(),
+            "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
-    const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(bare_ret_cfg);
-    EXPECT_TRUE(res.matches) << res.diff_detail;
-  }
-
-  // 2. Standalone `(parallel[ (return) (use (reg:SI 31 ra)) ] )`:
-  {
-    RtlControlFlowGraph par_ret_cfg;
-    par_ret_cfg.pass = RtlPassKind::kDbr;
-    par_ret_cfg.rpo_blocks.resize(1);
-    par_ret_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 5))");
-    par_ret_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
-
-    const RtlControlFlowGraph lifted = InvertMakeReturnInsns(par_ret_cfg);
-    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
-    EXPECT_EQ(lifted.rpo_blocks[0].instructions.back(),
-              "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
-
-    const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(par_ret_cfg);
-    EXPECT_TRUE(res.matches) << res.diff_detail;
-  }
+  const RightInverseResult res = verifier.VerifyMakeReturnInsnsRightInverse(par_ret_cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
 TEST(InvertMakeReturnInsnsTest, NonLeafFunctionWithEndLabelUnchangedRightInverse) {
@@ -278,27 +161,34 @@ TEST(InvertMakeReturnInsnsTest, NonLeafFunctionWithEndLabelUnchangedRightInverse
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
-TEST(InvertMakeReturnInsnsTest, TrailingUseBlockWithEarlierReturnPreservesTargetsRightInverse) {
+TEST(InvertMakeReturnInsnsTest, UnreferencedTrailingUseLabelProtectedByAppendedEndLabel) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
   ProductionMakeReturnInsnsProvider provider;
   RightInverseVerifier verifier(&ctx, &hooks, &provider);
 
+  // Block 1 falls through into a labeled `(use ...)` block (`LABEL_NUSES == 0`
+  // on `B2`); `InvertMakeReturnInsns` appends a trailing unused
+  // `end_of_function_label` block (`B3`) so `RunMakeReturnInsns` deletes `B3`
+  // rather than `B2`'s label.
   RtlControlFlowGraph cfg;
   cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband.frame_size_bytes = 24;
+  cfg.sideband.saved_gpr_regnos = {31};
   cfg.rpo_blocks.resize(3);
+  cfg.rpo_blocks[0].has_label = true;
   cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
-      "(label_ref L0) (pc)))) (insn/s (set (reg/i:SI 2 v0) (const_int 0)))])");
-  cfg.rpo_blocks[0].successors = {2, 1};
-  cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
-  cfg.rpo_blocks[1].AddPatternOnly("(return)");
+      "(sequence [(jump_insn (set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 1)) "
+      "(label_ref L0) (pc)))) (insn (set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1))))])");
+  cfg.rpo_blocks[0].successors = {0, 1};
+  cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
+  cfg.rpo_blocks[1].successors = {2};
   cfg.rpo_blocks[2].has_label = true;
-  cfg.rpo_blocks[2].AddPatternOnly(
-      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
+  cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
 
   const RtlControlFlowGraph lifted = InvertMakeReturnInsns(cfg);
   ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
+  EXPECT_EQ(lifted.rpo_blocks[2].successors, std::vector<size_t>{3});
   EXPECT_TRUE(lifted.rpo_blocks[3].instructions.empty());
   EXPECT_TRUE(lifted.rpo_blocks[3].has_label);
 
@@ -306,7 +196,7 @@ TEST(InvertMakeReturnInsnsTest, TrailingUseBlockWithEarlierReturnPreservesTarget
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
-TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphs) {
+TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphsIncludingBareReturn) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
   ProductionMakeReturnInsnsProvider provider;
@@ -323,7 +213,7 @@ TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphs) {
   EXPECT_TRUE(InvertMakeReturnInsns(empty_block_cfg).rpo_blocks.empty());
   EXPECT_FALSE(verifier.VerifyMakeReturnInsnsRightInverse(empty_block_cfg).matches);
 
-  // 3. Unbalanced / malformed RTL pattern strings:
+  // 3. Unbalanced / malformed RTL pattern strings, including synthetic bare `(return)`:
   for (const std::string& bad_pat : std::vector<std::string>{
            "",
            "   ",
@@ -331,8 +221,11 @@ TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphs) {
            "(unknown_op (const_int 1))",
            "(set (reg:SI 2 v0) (const_int 1)",
            "(set (reg:SI 2 v0) (const_int 1)))",
-           "(sequence [(jump_insn (return))])",
-           "(sequence (jump_insn (return)) (insn (const_int 0)))",
+           "(return)",
+           "(sequence [(jump_insn (return)) (insn (const_int 0))])",
+           "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))])",
+           "(sequence (jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) (insn (const_int "
+           "0)))",
            "(set (reg:SI 2 v0) (const_int 1)) trailing_garbage",
        }) {
     RtlControlFlowGraph bad_cfg;
@@ -349,7 +242,7 @@ TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphs) {
     RtlControlFlowGraph bad_succ_cfg;
     bad_succ_cfg.pass = RtlPassKind::kDbr;
     bad_succ_cfg.rpo_blocks.resize(1);
-    bad_succ_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+    bad_succ_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
     bad_succ_cfg.rpo_blocks[0].successors = {5};
     EXPECT_TRUE(InvertMakeReturnInsns(bad_succ_cfg).rpo_blocks.empty());
     EXPECT_FALSE(verifier.VerifyMakeReturnInsnsRightInverse(bad_succ_cfg).matches);
@@ -360,7 +253,7 @@ TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphs) {
     RtlControlFlowGraph bad_addr_vec_cfg;
     bad_addr_vec_cfg.pass = RtlPassKind::kDbr;
     bad_addr_vec_cfg.rpo_blocks.resize(1);
-    bad_addr_vec_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+    bad_addr_vec_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
     bad_addr_vec_cfg.rpo_blocks[0].addr_vec_targets = {3};
     EXPECT_TRUE(InvertMakeReturnInsns(bad_addr_vec_cfg).rpo_blocks.empty());
     EXPECT_FALSE(verifier.VerifyMakeReturnInsnsRightInverse(bad_addr_vec_cfg).matches);
@@ -373,7 +266,7 @@ TEST(InvertMakeReturnInsnsTest, RejectsEmptyAndMalformedControlFlowGraphs) {
     bad_snap.optimize_level = 2;
     bad_snap.post_state.pass = RtlPassKind::kDbr;
     bad_snap.post_state.rpo_blocks.resize(1);
-    bad_snap.post_state.rpo_blocks[0].instructions.push_back("(unbalanced (return)");
+    bad_snap.post_state.rpo_blocks[0].instructions.push_back("(unbalanced (const_int 0)");
     EXPECT_FALSE(verifier.VerifySubfunctionBoundaryRightInverse(bad_snap).matches);
   }
 }

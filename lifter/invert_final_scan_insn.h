@@ -25,11 +25,14 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x);
 
 // Whole-function stream inverse of `final.c:final_scan_insn`: converts the
 // pre-`final_scan_insn` assembly lines `asm_lines` (after epilogue extraction),
-// `sideband`, and optional resolved `.rodata`/`.rdata` switch `jump_tables`
+// `sideband`, optional resolved `.rodata`/`.rdata` switch `jump_tables`,
+// optional Stage 0 `constant_pool` entries, and optional `CompilationProfile`
 // into a post-`dbr_schedule` `RtlControlFlowGraph` (`RtlPassKind::kDbr`).
 RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     absl::Span<const std::string> asm_lines, const RtlSidebandState& sideband,
-    absl::Span<const Stage0ResolvedJumpTable> jump_tables = {});
+    absl::Span<const Stage0ResolvedJumpTable> jump_tables = {},
+    absl::Span<const Stage0ConstantPoolEntry> constant_pool = {},
+    const CompilationProfile* profile = nullptr);
 
 }  // namespace rom_nom_nom::lifter
 

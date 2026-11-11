@@ -117,6 +117,7 @@ cc_library(
     deps = [
         ":invert_final_scan_insn",
         "//core:rtl_cfg",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
     ],
@@ -142,16 +143,66 @@ cc_test(
 )
 
 cc_library(
+    name = "reconstruct_hard_reg_liveness",
+    srcs = ["reconstruct_hard_reg_liveness.cc"],
+    hdrs = ["reconstruct_hard_reg_liveness.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "reconstruct_hard_reg_liveness_test",
+    size = "small",
+    srcs = ["reconstruct_hard_reg_liveness_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":invert_do_cross_jump",
+        ":invert_fill_eager_delay_slots",
+        ":invert_fill_simple_delay_slots",
+        ":invert_final_scan_insn",
+        ":invert_function_prologue_epilogue",
+        ":invert_gas_append_insn",
+        ":invert_gas_macro",
+        ":invert_gas_mips_ip",
+        ":invert_make_return_insns",
+        ":invert_relax_delay_slots",
+        ":pass00_final_and_gas",
+        ":pass01_dbr_schedule",
+        ":pass02_jump2_cross_jump",
+        ":reconstruct_hard_reg_liveness",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "invert_final_scan_insn",
     srcs = ["invert_final_scan_insn.cc"],
     hdrs = ["invert_final_scan_insn.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -224,11 +275,10 @@ cc_library(
     hdrs = ["invert_make_return_insns.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
         "//core:rtl_cfg",
         "//core:rtl_expr",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
@@ -246,7 +296,6 @@ cc_test(
         "//gcc_harness:gcc_context",
         "//gcc_harness:right_inverse_verifier",
         "//gcc_harness:subfunction_inverse_provider",
-        "@abseil-cpp//absl/strings",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -258,10 +307,10 @@ cc_library(
     hdrs = ["invert_relax_delay_slots.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
@@ -293,12 +342,13 @@ cc_library(
     hdrs = ["invert_fill_eager_delay_slots.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -316,7 +366,6 @@ cc_test(
         "//gcc_harness:gcc_context",
         "//gcc_harness:right_inverse_verifier",
         "//gcc_harness:subfunction_inverse_provider",
-        "@abseil-cpp//absl/strings",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -328,10 +377,10 @@ cc_library(
     hdrs = ["invert_fill_simple_delay_slots.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
@@ -351,7 +400,6 @@ cc_test(
         "//gcc_harness:gcc_context",
         "//gcc_harness:right_inverse_verifier",
         "//gcc_harness:subfunction_inverse_provider",
-        "@abseil-cpp//absl/strings",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -407,9 +455,11 @@ cc_library(
     hdrs = ["invert_do_cross_jump.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
 )

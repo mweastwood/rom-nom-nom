@@ -27,7 +27,8 @@ RtlControlFlowGraph InvertPass01DbrSchedule(const RtlControlFlowGraph& dbr_cfg_x
   if (cfg.rpo_blocks.empty()) {
     return {};
   }
-  return InvertFillSimpleDelaySlots(cfg);
+  cfg = InvertFillSimpleDelaySlots(cfg);
+  return cfg;
 }
 
 }  // namespace rom_nom_nom::lifter

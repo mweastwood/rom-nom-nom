@@ -1,5 +1,6 @@
 #include "lifter/invert_do_cross_jump.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -7,9 +8,11 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
+#include "lifter/reconstruct_hard_reg_liveness.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -18,6 +21,9 @@ namespace {
 // `(sequence [...])` node is a bracketed sequence of at least 2 valid inner
 // insn wrappers.
 bool IsValidRtlExprSubtree(const RtlExpr& root) {
+  if (root.op == RtlOp::kReturn) {
+    return false;
+  }
   bool valid = true;
   root.Visit([&valid](const RtlExpr& node) {
     if (!valid) {
@@ -26,6 +32,12 @@ bool IsValidRtlExprSubtree(const RtlExpr& root) {
     if (node.op == RtlOp::kUnknown) {
       valid = false;
       return;
+    }
+    for (const RtlExpr& child : node.children) {
+      if (child.op == RtlOp::kReturn && node.op != RtlOp::kParallel) {
+        valid = false;
+        return;
+      }
     }
     if (node.op == RtlOp::kSequence) {
       if (!node.bracketed_children || node.children.size() < 2) {
@@ -101,13 +113,8 @@ bool IsValidCfg(const RtlControlFlowGraph& cfg) {
 }
 
 bool IsReturnExpr(const RtlExpr& expr) {
-  if (expr.op == RtlOp::kReturn) {
-    return true;
-  }
-  if (expr.op == RtlOp::kParallel && !expr.children.empty()) {
-    return expr.children[0].op == RtlOp::kReturn;
-  }
-  return false;
+  return expr.op == RtlOp::kParallel && !expr.children.empty() &&
+         expr.children[0].op == RtlOp::kReturn;
 }
 
 bool IsSimpleUncondJumpExpr(const RtlExpr& expr) {
@@ -254,23 +261,6 @@ bool IsAnyJumpOrReturnInsn(std::string_view pat) {
   return parsed.ok() && IsAnyJumpOrReturnTopExpr(parsed->pattern);
 }
 
-std::string FormatTopLevelPatternAndNotes(const RtlPatternAndNotes& pn) {
-  std::string out = pn.ToSexprString();
-  if (pn.pattern.op == RtlOp::kParallel) {
-    const std::string pat_str = pn.pattern.ToSexprString();
-    std::string new_pat = "(parallel[ ";
-    for (size_t i = 0; i < pn.pattern.children.size(); ++i) {
-      if (i > 0) {
-        new_pat.push_back(' ');
-      }
-      new_pat.append(pn.pattern.children[i].ToSexprString());
-    }
-    new_pat.append(" ] )");
-    out.replace(0, pat_str.size(), new_pat);
-  }
-  return out;
-}
-
 void RewriteJumpTargetLabelRef(RtlExpr* expr, std::string_view new_label_tok) {
   expr->Mutate([new_label_tok](RtlExpr& node) {
     if (node.op == RtlOp::kLabelRef) {
@@ -377,20 +367,16 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
       if (modified) {
-        blk.instructions[i] = FormatTopLevelPatternAndNotes(*parsed);
+        blk.instructions[i] = parsed->ToGccPrintRtlString();
       }
     }
   }
 }
 
-// Unoptimized (`-O0`) CFGs do not run `flow_analysis` or `jump2`
-// (`jump_optimize` after reload) and have no `(return)` instruction, no
-// `REG_DEAD`/`REG_UNUSED` notes, or retain a trailing empty end-of-function
-// label block (`rpo_blocks.back()`).
-bool IsOptimizedJump2Cfg(const RtlControlFlowGraph& cfg) {
-  if (cfg.rpo_blocks.size() > 1 && cfg.rpo_blocks.back().instructions.empty()) {
-    return false;
-  }
+// Returns true when `cfg` was produced by `-O1`/`-O2`/`-O3` (`flow_analysis`
+// has attached `REG_DEAD`/`REG_UNUSED` notes or `jump` emitted `return_internal`).
+// Unoptimized (`-O0`) CFGs never run `flow_analysis` or `jump2`.
+bool HasPostFlowNotesOrReturn(const RtlControlFlowGraph& cfg) {
   for (const auto& blk : cfg.rpo_blocks) {
     for (const std::string& pat : blk.instructions) {
       auto parsed = ParsePatternAndNotes(pat);
@@ -408,6 +394,15 @@ bool IsOptimizedJump2Cfg(const RtlControlFlowGraph& cfg) {
     }
   }
   return false;
+}
+
+// `simple_epilogue_p ()` functions (`tsize == 0`) additionally replace the
+// trailing empty return-label block with a `return_internal` jump_insn.
+bool IsOptimizedJump2Cfg(const RtlControlFlowGraph& cfg) {
+  if (cfg.rpo_blocks.size() > 1 && cfg.rpo_blocks.back().instructions.empty()) {
+    return false;
+  }
+  return HasPostFlowNotesOrReturn(cfg);
 }
 
 int TrueRegnum(const RtlExpr& expr) {
@@ -571,8 +566,7 @@ void RestoreNoopMovesConsumedDeaths(RtlControlFlowGraph* cfg) {
 
     for (const FlatInsn& entry : run_insns) {
       if (entry.modified) {
-        cfg->rpo_blocks[entry.b].instructions[entry.i] =
-            FormatTopLevelPatternAndNotes(entry.parsed);
+        cfg->rpo_blocks[entry.b].instructions[entry.i] = entry.parsed.ToGccPrintRtlString();
       }
     }
 
@@ -709,6 +703,7 @@ RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) {
   for (auto& blk : out.rpo_blocks) {
     blk.SyncRtlInsnsFromInstructions();
   }
+  RecomputePostReloadLiveAtStart(&out);
   return out;
 }
 

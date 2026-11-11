@@ -37,7 +37,10 @@ class BrokenDoCrossJumpProvider final : public SubfunctionInverseProvider {
     RtlControlFlowGraph out = jump2_cfg_x;
     out.pass = RtlPassKind::kSched2;
     if (!out.rpo_blocks.empty()) {
-      out.rpo_blocks[0].instructions = {"(set (reg:SI 2 v0) (const_int 9999))", "(return)"};
+      out.rpo_blocks[0].instructions = {
+          "(set (reg:SI 2 v0) (const_int 9999))",
+          "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+      };
       out.rpo_blocks[0].successors.clear();
       out.rpo_blocks.resize(1);
       out.rpo_blocks[0].SyncRtlInsnsFromInstructions();
@@ -97,7 +100,7 @@ TEST_F(InvertDoCrossJumpTest, UnmergesCrossJumpedTailBeforeReturn) {
                     "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))",
                     "(set (reg:SI 2 v0) (reg:SI 3 v1))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -157,7 +160,7 @@ TEST_F(InvertDoCrossJumpTest, UnmergesCrossJumpedTailBeforeUnconditionalJump) {
                 {
                     "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 7 a3)))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -212,7 +215,7 @@ TEST_F(InvertDoCrossJumpTest, UnmergesMultiPredecessorCrossJumpedTail) {
                     "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2)))",
                     "(set (reg:SI 2 v0) (reg:SI 3 v1))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -256,9 +259,9 @@ TEST_F(InvertDoCrossJumpTest, UnmergesCrossJumpedCallAndPostCallTail) {
                 {
                     "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (reg:SI 25 t9)) "
                     "(const_int 0))) (clobber (reg:SI 31 ra)) ] )",
-                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0))) "
+                    "(expr_list:REG_DEAD (reg:SI 16 s0) (nil))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
                 },
                 {}),
   };
@@ -268,7 +271,7 @@ TEST_F(InvertDoCrossJumpTest, UnmergesCrossJumpedCallAndPostCallTail) {
   EXPECT_EQ(pre.pass, RtlPassKind::kSched2);
   EXPECT_EQ(pre.rpo_blocks[1].instructions.size(), 4u);
   EXPECT_EQ(pre.rpo_blocks[2].instructions.size(), 3u);
-  EXPECT_EQ(pre.rpo_blocks[3].instructions.size(), 3u);
+  EXPECT_EQ(pre.rpo_blocks[3].instructions.size(), 2u);
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail << "\nexpected:\n"
@@ -304,7 +307,7 @@ TEST_F(InvertDoCrossJumpTest, PreservesRegNotesAcrossCrossJumpUnmerge) {
                     "(set (reg:SI 2 v0) (reg:SI 3 v1)) "
                     "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -337,7 +340,7 @@ TEST_F(InvertDoCrossJumpTest, PreservesJoinBlockWhenPredecessorEndsWithCondition
                 {
                     "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1)))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -367,7 +370,7 @@ TEST_F(InvertDoCrossJumpTest, RejectsInvalidAndMalformedCfgs) {
   RtlControlFlowGraph mid_empty_blk_cfg;
   mid_empty_blk_cfg.rpo_blocks = {
       MakeBlock(0, false, {}, {1}),
-      MakeBlock(1, true, {"(return)"}, {}),
+      MakeBlock(1, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
   };
   EXPECT_TRUE(InvertDoCrossJump(mid_empty_blk_cfg).rpo_blocks.empty());
 
@@ -378,14 +381,19 @@ TEST_F(InvertDoCrossJumpTest, RejectsInvalidAndMalformedCfgs) {
 
   // 5. Out-of-bounds addr_vec_targets index.
   RtlControlFlowGraph bad_addr_vec_cfg;
-  bad_addr_vec_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {}));
+  bad_addr_vec_cfg.rpo_blocks.push_back(
+      MakeBlock(0, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}));
   bad_addr_vec_cfg.rpo_blocks[0].addr_vec_targets = {3};
   EXPECT_TRUE(InvertDoCrossJump(bad_addr_vec_cfg).rpo_blocks.empty());
 
-  // 6. Malformed S-expression.
+  // 6. Malformed S-expression and synthetic bare `(return)`.
   RtlControlFlowGraph bad_sexpr_cfg;
   bad_sexpr_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(set (reg:SI 2 v0) (plus:SI"}, {}));
   EXPECT_TRUE(InvertDoCrossJump(bad_sexpr_cfg).rpo_blocks.empty());
+
+  RtlControlFlowGraph bare_ret_cfg;
+  bare_ret_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {}));
+  EXPECT_TRUE(InvertDoCrossJump(bare_ret_cfg).rpo_blocks.empty());
 
   // 7. Unknown RTL opcode in instruction pattern.
   RtlControlFlowGraph unknown_op_cfg;
@@ -401,7 +409,8 @@ TEST_F(InvertDoCrossJumpTest, RejectsInvalidAndMalformedCfgs) {
 
   // 9. Malformed sequence with fewer than 2 children.
   RtlControlFlowGraph bad_seq_cfg;
-  bad_seq_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(sequence [(jump_insn (return))])"}, {}));
+  bad_seq_cfg.rpo_blocks.push_back(MakeBlock(
+      0, false, {"(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))])"}, {}));
   EXPECT_TRUE(InvertDoCrossJump(bad_seq_cfg).rpo_blocks.empty());
 }
 
@@ -431,7 +440,7 @@ TEST_F(InvertDoCrossJumpTest, VerifierRejectsCorruptedInverse) {
                     "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))",
                     "(set (reg:SI 2 v0) (reg:SI 3 v1))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };

@@ -69,14 +69,13 @@ TEST_F(InvertAlterRegTest, ReversesSingleGprAndPreservesIncomingArgAndReturnReg)
               "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
               "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
               "(use (reg/i:SI 2 v0))",
-              "(return)",
           },
   });
   SyncAllBlocks(&cfg);
 
   const RtlControlFlowGraph lifted = InvertAlterReg(cfg, 72);
   ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
-  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 3u);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
             "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1)))");
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[1], "(set (reg/i:SI 2 v0) (reg:SI 72))");
@@ -120,7 +119,6 @@ TEST_F(InvertAlterRegTest, ReversesMultipleGprsAndFprsAcrossBlocks) {
               {
                   "(set (reg/i:SI 2 v0) (reg/v:SI 16 s0))",
                   "(use (reg/i:SI 2 v0))",
-                  "(return)",
               },
           .successors = {},
       },
@@ -150,7 +148,6 @@ TEST_F(InvertAlterRegTest, SeparatesSameHardRegWithDistinctFlagsOrModesIntoDisti
               "(expr_list:REG_DEAD (reg/v:SI 2 v0) (nil))",
               "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
               "(use (reg/i:SI 2 v0))",
-              "(return)",
           },
   });
   SyncAllBlocks(&cfg);
@@ -186,7 +183,6 @@ TEST_F(InvertAlterRegTest, ReversesSingleStackSlotSpillToNegativeRegRenumber) {
               "(plus:SI (reg:SI 4 a0) (const_int 7)))",
               "(set (reg/i:SI 2 v0) (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 4))))",
               "(use (reg/i:SI 2 v0))",
-              "(return)",
           },
   });
   SyncAllBlocks(&cfg);
@@ -228,7 +224,6 @@ TEST_F(InvertAlterRegTest, ReversesMultipleContiguousStackSlotSpillsInOrder) {
               "(set (mem:DF (plus:SI (reg:SI 30 $fp) (const_int 8))) (reg:DF 44 $f12))",
               "(set (reg/i:SI 2 v0) (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 4))))",
               "(use (reg/i:SI 2 v0))",
-              "(return)",
           },
   });
   SyncAllBlocks(&cfg);
@@ -263,7 +258,6 @@ TEST_F(InvertAlterRegTest, PreservesStructOrVolatileOrAddressTakenFpStackSlots) 
               "(set (reg:SI 2 v0) (plus:SI (reg:SI 30 $fp) (const_int 4)))",
               "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
               "(use (reg/i:SI 2 v0))",
-              "(return)",
           },
   });
   SyncAllBlocks(&cfg);
@@ -372,7 +366,6 @@ TEST_F(InvertAlterRegTest, VerifierRejectsCorruptedInverseProvider) {
               "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
               "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
               "(use (reg/i:SI 2 v0))",
-              "(return)",
           },
   });
   SyncAllBlocks(&cfg);

@@ -159,6 +159,47 @@ TEST_F(InvertUpdateEquivRegsTest, StripsStoreDerivedMemEquivWithoutHalvingLiveLe
   EXPECT_TRUE(snap_res.matches) << snap_res.diff_detail;
 }
 
+TEST_F(InvertUpdateEquivRegsTest,
+       StripsBothUnchangingLoadEquivAndSubsequentStoreEquivHalvingLiveLengthOnce) {
+  UpdateEquivRegsOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+
+  RtlControlFlowGraph pre_cfg;
+  pre_cfg.pass = RtlPassKind::kSched;
+  pre_cfg.rpo_blocks.resize(1);
+  pre_cfg.rpo_blocks[0].id = 0;
+  pre_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SF 75) (mem/s/u:SF (plus:SI (reg/v:SI 73) (const_int 8))))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SF 75)) "
+      "(expr_list:REG_DEAD (reg:SF 75) (nil))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly(
+      "(use (reg/v:SI 73)) (expr_list:REG_DEAD (reg/v:SI 73) (nil))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  pre_cfg.sideband.reg_n_sets[73] = 1;
+  pre_cfg.sideband.reg_n_sets[75] = 1;
+  pre_cfg.sideband.reg_live_length[73] = 3;
+  pre_cfg.sideband.reg_live_length[75] = 2;
+
+  const SubfunctionBoundarySnapshot snap =
+      hooks->ExecuteSubfunctionBoundary(SubfunctionId::kUpdateEquivRegs, pre_cfg);
+  ASSERT_EQ(snap.post_state.BlockCount(), 1u);
+  EXPECT_EQ(snap.post_state.sideband.reg_live_length.at(75), 4);
+
+  absl::StatusOr<RtlControlFlowGraph> lifted = InvertUpdateEquivRegs(snap.post_state);
+  ASSERT_TRUE(lifted.ok()) << lifted.status();
+  EXPECT_EQ(lifted->sideband.reg_live_length.at(75), 2);
+  EXPECT_EQ(lifted->rpo_blocks[0].instructions[0],
+            "(set (reg:SF 75) (mem/s/u:SF (plus:SI (reg/v:SI 73) (const_int 8))))");
+
+  const RightInverseResult res = verifier.VerifyUpdateEquivRegsRightInverse(snap.post_state);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+
+  const RightInverseResult snap_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_TRUE(snap_res.matches) << snap_res.diff_detail;
+}
+
 TEST_F(InvertUpdateEquivRegsTest, ReversesOptimizeRegCopy1Propagation) {
   UpdateEquivRegsOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
@@ -217,13 +258,13 @@ TEST_F(InvertUpdateEquivRegsTest, RejectsMalformedSexprAndUnknownRtlOp) {
 TEST_F(InvertUpdateEquivRegsTest, RejectsOutOfBoundsSuccessorsAndAddrVecTargets) {
   RtlControlFlowGraph bad_succ;
   bad_succ.rpo_blocks.resize(1);
-  bad_succ.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_succ.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_succ.rpo_blocks[0].successors = {3};
   EXPECT_FALSE(InvertUpdateEquivRegs(bad_succ).ok());
 
   RtlControlFlowGraph bad_addr_vec;
   bad_addr_vec.rpo_blocks.resize(1);
-  bad_addr_vec.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_addr_vec.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_addr_vec.rpo_blocks[0].addr_vec_targets = {2};
   EXPECT_FALSE(InvertUpdateEquivRegs(bad_addr_vec).ok());
 }

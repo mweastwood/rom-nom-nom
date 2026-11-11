@@ -100,17 +100,22 @@ TEST(InvertFunctionPrologueEpilogueTest, SyntheticPositiveFrameConfigs) {
       {.var_size = 65536, .saved_gpr_mask = 0x00000000u},
       {.var_size = 65536, .saved_gpr_mask = 0x80030000u},
       {.var_size = 65536, .saved_gpr_mask = 0xc0ff0000u},
+      // 8. Callee-saved FPR masks (`.fmask` + `s.d`/`l.d` for `$f20..$f31`):
+      {.var_size = 0, .saved_gpr_mask = 0x80000000u, .saved_fpr_mask = 0x00300000u},
+      {.var_size = 16, .saved_gpr_mask = 0x80010000u, .saved_fpr_mask = 0x00f00000u},
+      {.var_size = 32, .saved_gpr_mask = 0xc0ff0000u, .saved_fpr_mask = 0xfff00000u},
   };
 
   for (const PrologueEpilogueFrameSpec& expected : test_specs) {
     ctx.BeginFunction("harness_func");
-    const std::string full_asm =
-        hooks.RunFunctionPrologueEpilogue(expected.var_size, expected.saved_gpr_mask);
+    const std::string full_asm = hooks.RunFunctionPrologueEpilogue(
+        expected.var_size, expected.saved_gpr_mask, expected.saved_fpr_mask);
 
     // 1. Full assembly text (with `.ent`, `.frame`, `.mask`, `.fmask`, `.end`):
     const PrologueEpilogueFrameSpec recovered_full = InvertFunctionPrologueEpilogue(full_asm);
     EXPECT_EQ(recovered_full.var_size, expected.var_size) << full_asm;
     EXPECT_EQ(recovered_full.saved_gpr_mask, expected.saved_gpr_mask) << full_asm;
+    EXPECT_EQ(recovered_full.saved_fpr_mask, expected.saved_fpr_mask) << full_asm;
 
     const RightInverseResult full_res =
         verifier.VerifyFunctionPrologueEpilogueRightInverse(full_asm);
@@ -122,6 +127,7 @@ TEST(InvertFunctionPrologueEpilogueTest, SyntheticPositiveFrameConfigs) {
     const PrologueEpilogueFrameSpec recovered_insns = InvertFunctionPrologueEpilogue(insn_only_asm);
     EXPECT_EQ(recovered_insns.var_size, expected.var_size) << insn_only_asm;
     EXPECT_EQ(recovered_insns.saved_gpr_mask, expected.saved_gpr_mask) << insn_only_asm;
+    EXPECT_EQ(recovered_insns.saved_fpr_mask, expected.saved_fpr_mask) << insn_only_asm;
 
     const RightInverseResult insn_res =
         verifier.VerifyFunctionPrologueEpilogueRightInverse(insn_only_asm);
@@ -294,7 +300,7 @@ TEST(InvertFunctionPrologueEpilogueTest, ExtractFunctionPrologueEpilogueStreamTe
     EXPECT_EQ(sideband.frame_size_bytes, 16);
     const std::vector<int> expected_gprs = {16, 31};
     EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
-    const std::vector<int> expected_fprs = {52};  // 32 + 20 ($f20)
+    const std::vector<int> expected_fprs = {52, 53};  // 32 + 20..21 ($f20/$f21 pair)
     EXPECT_EQ(sideband.saved_fpr_regnos, expected_fprs);
     EXPECT_FALSE(sideband.epilogue_delay_pattern.has_value());
   }
@@ -406,13 +412,60 @@ TEST(InvertFunctionPrologueEpilogueTest, ExtractFunctionPrologueEpilogueStreamTe
     EXPECT_EQ(sideband.frame_size_bytes, 0);
     const std::vector<int> expected_gprs = {31};
     EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
+    // 7. Interior early-return multi-epilogue + non-trailing epilogue followed by
+    //    an out-of-line loop block: rewrites interior `tsize > 0` epilogues into
+    //    `j\t$L4` targeting a canonical trailing `$L4:` exit label.
     const std::vector<std::string> expected_lines = {
-        "addiu $29,$29,-24", "sw $31,16($29)", "beq $4,$0,$L2",
-        "jal Foo",           "jr\t$31",        "$L2:",
-        "jal Bar",           "jr\t$31",        "$L3:",
-        "addiu $4,$4,-1",    "bne $4,$0,$L3",  "j $L2",
+        "addiu $29,$29,-24",
+        "sw $31,16($29)",
+        "beq $4,$0,$L2",
+        "jal Foo",
+        "j\t$L4",
+        "$L2:",
+        "jal Bar",
+        "j\t$L4",
+        "$L3:",
+        "addiu $4,$4,-1",
+        "bne $4,$0,$L3",
+        "j $L2",
+        "$L4:",
     };
     EXPECT_EQ(asm_lines, expected_lines);
+  }
+
+  // 8. `-O0` `$fp` (`$30`) local stores, `volatile` `$sp` stores, and dead
+  //    post-call `$sp` stores are classified as local frame slots (`var_size`),
+  //    while a `.set noreorder` `jal` delay-slot `$sp` store is classified as
+  //    an outgoing call argument.
+  {
+    std::vector<std::string> post_call_dead_store = {
+        "addiu $29,$29,-32", "sw $31,24($29)",   "jal Foo", "sw $2,16($29)",
+        "lw $31,24($29)",    "addiu $29,$29,32", "jr $31",
+    };
+    RtlSidebandState sb_dead;
+    ExtractFunctionPrologueEpilogue(&post_call_dead_store, &sb_dead);
+    EXPECT_EQ(sb_dead.outgoing_args_size, 16);
+    EXPECT_EQ(sb_dead.frame_size_bytes, 8);
+
+    std::vector<std::string> o0_fp_local_store = {
+        "addiu $29,$29,-32", "sw $31,28($29)",   "sw $30,24($29)", "move $30,$29",
+        "sw $4,16($30)",     "jal Foo",          "move $29,$30",   "lw $31,28($29)",
+        "lw $30,24($29)",    "addiu $29,$29,32", "jr $31",
+    };
+    RtlSidebandState sb_fp;
+    ExtractFunctionPrologueEpilogue(&o0_fp_local_store, &sb_fp);
+    EXPECT_TRUE(sb_fp.frame_pointer_needed);
+    EXPECT_EQ(sb_fp.outgoing_args_size, 16);
+    EXPECT_EQ(sb_fp.frame_size_bytes, 8);
+
+    std::vector<std::string> jal_delay_slot_arg = {
+        "addiu $29,$29,-32", "sw $31,24($29)", ".set\tnoreorder",  "jal Foo", "sw $4,16($29)",
+        ".set\treorder",     "lw $31,24($29)", "addiu $29,$29,32", "jr $31",
+    };
+    RtlSidebandState sb_delay_arg;
+    ExtractFunctionPrologueEpilogue(&jal_delay_slot_arg, &sb_delay_arg);
+    EXPECT_EQ(sb_delay_arg.outgoing_args_size, 24);
+    EXPECT_EQ(sb_delay_arg.frame_size_bytes, 0);
   }
 }
 

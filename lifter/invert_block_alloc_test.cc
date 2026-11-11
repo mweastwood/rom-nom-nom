@@ -254,13 +254,13 @@ TEST_F(InvertBlockAllocTest, RejectsMalformedSexprAndUnknownRtlOp) {
 TEST_F(InvertBlockAllocTest, RejectsOutOfBoundsSuccessorsAndAddrVecTargets) {
   RtlControlFlowGraph bad_succ;
   bad_succ.rpo_blocks.resize(1);
-  bad_succ.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_succ.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_succ.rpo_blocks[0].successors = {3};
   EXPECT_FALSE(InvertBlockAlloc(bad_succ).ok());
 
   RtlControlFlowGraph bad_addr_vec;
   bad_addr_vec.rpo_blocks.resize(1);
-  bad_addr_vec.rpo_blocks[0].AddPatternOnly("(return)");
+  bad_addr_vec.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
   bad_addr_vec.rpo_blocks[0].addr_vec_targets = {2};
   EXPECT_FALSE(InvertBlockAlloc(bad_addr_vec).ok());
 }

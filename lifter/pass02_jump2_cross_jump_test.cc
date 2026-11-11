@@ -60,7 +60,11 @@ class ProductionPass02InverseProvider final : public SubfunctionInverseProvider 
   PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(
       std::string_view asm_text_x) const override {
     const auto spec = lifter::InvertFunctionPrologueEpilogue(asm_text_x);
-    return {.var_size = spec.var_size, .saved_gpr_mask = spec.saved_gpr_mask};
+    return {
+        .var_size = spec.var_size,
+        .saved_gpr_mask = spec.saved_gpr_mask,
+        .saved_fpr_mask = spec.saved_fpr_mask,
+    };
   }
 
   RtlControlFlowGraph InvertFinalAndGasFunction(
@@ -152,7 +156,7 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticPositiveCrossJumpedJoinBeforeReturn) {
                     "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))",
                     "(set (reg:SI 2 v0) (reg:SI 3 v1))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -208,7 +212,7 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticPositiveMultiPredecessorCrossJumpedJoi
                     "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2)))",
                     "(set (reg:SI 2 v0) (reg:SI 3 v1))",
                     "(use (reg/i:SI 2 v0))",
-                    "(return)",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
                 },
                 {}),
   };
@@ -245,7 +249,8 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticPositiveChainedStage0Stage1Stage2Compo
                 {"(set (reg:SI 6 a2) (const_int 2))", "(set (reg:SI 3 v1) (const_int 20))"}, {3}),
       MakeBlock(3, true,
                 {"(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))",
-                 "(sequence [(jump_insn (return)) (insn (set (reg:SI 2 v0) (reg:SI 3 v1)))])"},
+                 "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg:SI 2 v0) (reg:SI 3 v1)))])"},
                 {}),
   };
 
@@ -298,15 +303,21 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticNegativeMalformedCfgAndCorruptedInvers
 
   // 3. Out-of-bounds successor edge.
   RtlControlFlowGraph bad_succ_cfg;
-  bad_succ_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {4}));
+  bad_succ_cfg.rpo_blocks.push_back(
+      MakeBlock(0, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {4}));
   EXPECT_TRUE(InvertPass02Jump2CrossJump(bad_succ_cfg).rpo_blocks.empty());
   EXPECT_FALSE(verifier_.VerifyJump2CrossJumpStageRightInverse(bad_succ_cfg).matches);
 
-  // 4. Malformed S-expression.
+  // 4. Malformed S-expression (and synthetic bare `(return)`).
   RtlControlFlowGraph bad_sexpr_cfg;
   bad_sexpr_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(set (reg:SI 2 v0)"}, {}));
   EXPECT_TRUE(InvertPass02Jump2CrossJump(bad_sexpr_cfg).rpo_blocks.empty());
   EXPECT_FALSE(verifier_.VerifyJump2CrossJumpStageRightInverse(bad_sexpr_cfg).matches);
+
+  RtlControlFlowGraph bare_ret_cfg;
+  bare_ret_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {}));
+  EXPECT_TRUE(InvertPass02Jump2CrossJump(bare_ret_cfg).rpo_blocks.empty());
+  EXPECT_FALSE(verifier_.VerifyJump2CrossJumpStageRightInverse(bare_ret_cfg).matches);
 
   // 5. Corrupted inverse provider rejected by `VerifyJump2CrossJumpStageRightInverse`.
   class BrokenJump2Provider final : public SubfunctionInverseProvider {
@@ -315,7 +326,10 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticNegativeMalformedCfgAndCorruptedInvers
       RtlControlFlowGraph bad = jump2_cfg_x;
       bad.pass = RtlPassKind::kSched2;
       if (!bad.rpo_blocks.empty()) {
-        bad.rpo_blocks[0].instructions = {"(set (reg/i:SI 2 v0) (const_int 999))", "(return)"};
+        bad.rpo_blocks[0].instructions = {
+            "(set (reg/i:SI 2 v0) (const_int 999))",
+            "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+        };
         bad.rpo_blocks[0].successors.clear();
         bad.rpo_blocks.resize(1);
         bad.rpo_blocks[0].SyncRtlInsnsFromInstructions();
@@ -327,7 +341,10 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticNegativeMalformedCfgAndCorruptedInvers
   RtlControlFlowGraph valid_cfg;
   valid_cfg.pass = RtlPassKind::kJump2;
   valid_cfg.rpo_blocks = {
-      MakeBlock(0, false, {"(set (reg/i:SI 2 v0) (const_int 42))", "(return)"}, {}),
+      MakeBlock(
+          0, false,
+          {"(set (reg/i:SI 2 v0) (const_int 42))", "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+          {}),
   };
   BrokenJump2Provider broken_provider;
   RightInverseVerifier broken_verifier(&ctx_, &hooks_, &broken_provider);
@@ -403,28 +420,41 @@ TEST_P(Pass02Jump2CrossJumpRoundTripTest, RoundTrip2480Cases) {
                                   << stage2_res.expected_summary << "\nactual (.11.jump2):\n"
                                   << stage2_res.actual_summary;
 
-  // 3. Chained Stage 1 + Stage 2 composition on `.12.dbr` and Stage 0 + Stage 1 + Stage 2
-  // composition across the 2,480 corpus cases.
-  auto dbr_it = trace.pass_snapshots.find(RtlPassKind::kDbr);
-  ASSERT_NE(dbr_it, trace.pass_snapshots.end()) << "Missing .12.dbr for " << tc.test_name;
-  const RtlControlFlowGraph& post_dbr = dbr_it->second;
-
-  const RtlControlFlowGraph stage1_from_dbr = InvertPass01DbrSchedule(post_dbr);
-  ASSERT_FALSE(stage1_from_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  EXPECT_EQ(stage1_from_dbr.pass, RtlPassKind::kJump2);
-  const RtlControlFlowGraph stage2_from_dbr = InvertPass02Jump2CrossJump(stage1_from_dbr);
-  ASSERT_FALSE(stage2_from_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  EXPECT_EQ(stage2_from_dbr.pass, RtlPassKind::kSched2);
-
+  // 3. Full fresh-context `VerifySuffixRightInverse` ($F_{0..2}(G_{2..0}(x_0)) = x_0$)
+  //    across all 2,480 corpus cases.
   ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << "Test case: " << tc.test_name;
 
-  const RtlControlFlowGraph stage0_lifted_dbr = InvertFinalAndGasFunction(trace.stage0_input);
-  ASSERT_FALSE(stage0_lifted_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  const RtlControlFlowGraph stage1_lifted_jump2 = InvertPass01DbrSchedule(stage0_lifted_dbr);
-  ASSERT_FALSE(stage1_lifted_jump2.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  const RtlControlFlowGraph stage2_lifted_sched2 = InvertPass02Jump2CrossJump(stage1_lifted_jump2);
-  ASSERT_FALSE(stage2_lifted_sched2.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  EXPECT_EQ(stage2_lifted_sched2.pass, RtlPassKind::kSched2);
+  const RightInverseResult suffix_res =
+      verifier->VerifySuffixRightInverse(RtlPassKind::kSched2, trace.stage0_input);
+  EXPECT_TRUE(suffix_res.matches) << "Stage 0..2 suffix right-inverse mismatch for " << tc.test_name
+                                  << ":\n"
+                                  << suffix_res.diff_detail << "\nexpected:\n"
+                                  << suffix_res.expected_summary << "\nactual:\n"
+                                  << suffix_res.actual_summary;
+}
+
+TEST_F(Pass02Jump2CrossJumpTest, SyntheticPositiveAndNegativeSuffixRightInverse) {
+  constexpr std::string_view kCrossJumpPoolSrc = R"(
+extern int sink_double(double, int);
+int branch_cross_jump(int sel, double x) {
+  if (sel == 0) {
+    return sink_double(x * 3.141592653589793, 42) + 7;
+  }
+  return sink_double(x + 2.718281828459045, 42) + 7;
+}
+)";
+  const auto trace = hooks_.TraceForwardCompilation(kCrossJumpPoolSrc, "branch_cross_jump",
+                                                    {"-O2", "-Wa,-g"}, "pass02_suffix_test");
+  const RightInverseResult ok_res =
+      verifier_.VerifySuffixRightInverse(RtlPassKind::kSched2, trace.stage0_input);
+  EXPECT_TRUE(ok_res.matches) << ok_res.diff_detail;
+
+  // Negative check: corrupting a machine word in `stage0_input` must fail
+  // `VerifySuffixRightInverse(RtlPassKind::kSched2, ...)`.
+  Stage0FunctionInput corrupted = trace.stage0_input;
+  ASSERT_FALSE(corrupted.machine_words.empty());
+  corrupted.machine_words.back() ^= 0x00000004u;
+  EXPECT_FALSE(verifier_.VerifySuffixRightInverse(RtlPassKind::kSched2, corrupted).matches);
 }
 
 INSTANTIATE_TEST_SUITE_P(SharedRoundTripSuite, Pass02Jump2CrossJumpRoundTripTest,

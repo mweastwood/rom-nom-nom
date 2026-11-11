@@ -42,7 +42,10 @@ class WrongRelaxDelaySlotsProvider final : public SubfunctionInverseProvider {
       const RtlControlFlowGraph& dbr_relaxed_cfg_x) const override {
     RtlControlFlowGraph bad = dbr_relaxed_cfg_x;
     if (!bad.rpo_blocks.empty()) {
-      bad.rpo_blocks[0].instructions = {"(set (reg/i:SI 2 v0) (const_int 999))", "(return)"};
+      bad.rpo_blocks[0].instructions = {
+          "(set (reg/i:SI 2 v0) (const_int 999))",
+          "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+      };
       bad.rpo_blocks[0].successors.clear();
     }
     return bad;
@@ -59,17 +62,16 @@ TEST(InvertRelaxDelaySlotsTest, BareConditionalBranchInvertedAroundUnconditional
 
   RtlControlFlowGraph relaxed_cfg;
   relaxed_cfg.pass = RtlPassKind::kDbr;
-  relaxed_cfg.sideband.saved_gpr_regnos = {31};
   relaxed_cfg.rpo_blocks.resize(3);
   relaxed_cfg.rpo_blocks[0].AddPatternOnly(
       "(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 0)) "
       "(label_ref L0) (pc)))");
   relaxed_cfg.rpo_blocks[0].successors = {2, 1};
   relaxed_cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 10))");
-  relaxed_cfg.rpo_blocks[1].AddPatternOnly("(return)");
+  relaxed_cfg.rpo_blocks[1].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   relaxed_cfg.rpo_blocks[2].has_label = true;
   relaxed_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 20))");
-  relaxed_cfg.rpo_blocks[2].AddPatternOnly("(return)");
+  relaxed_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
   const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(relaxed_cfg);
   ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
@@ -95,7 +97,6 @@ TEST(InvertRelaxDelaySlotsTest,
 
   RtlControlFlowGraph relaxed_cfg;
   relaxed_cfg.pass = RtlPassKind::kDbr;
-  relaxed_cfg.sideband.saved_gpr_regnos = {31};
   relaxed_cfg.rpo_blocks.resize(3);
   relaxed_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
   relaxed_cfg.rpo_blocks[0].AddPatternOnly(
@@ -103,7 +104,7 @@ TEST(InvertRelaxDelaySlotsTest,
       "(label_ref L0) (pc)))");
   relaxed_cfg.rpo_blocks[0].successors = {2, 1};
   relaxed_cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 1))");
-  relaxed_cfg.rpo_blocks[1].AddPatternOnly("(return)");
+  relaxed_cfg.rpo_blocks[1].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
   relaxed_cfg.rpo_blocks[2].has_label = true;
   relaxed_cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
   relaxed_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
@@ -249,8 +250,8 @@ TEST(InvertRelaxDelaySlotsTest,
 }
 
 // Subcase II.6 (`reorg.c:3993-4034`): Non-annulled `SEQUENCE` conditional
-// branch inverted around a bare `(return)` (removing the trailing empty
-// `end_of_function_label` block and restoring the `(return)` trampoline).
+// branch inverted around a bare unconditional jump to the trailing empty
+// `end_of_function_label` block.
 TEST(InvertRelaxDelaySlotsTest,
      NonAnnulledSequenceConditionalBranchInvertedAroundReturnRightInverse) {
   GccContext ctx;
@@ -274,15 +275,18 @@ TEST(InvertRelaxDelaySlotsTest,
   relaxed_cfg.rpo_blocks[2].has_label = true;
 
   const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(relaxed_cfg);
-  ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
             "(sequence [(jump_insn (set (pc) (if_then_else (ne:SI (reg:SI 4 a0) "
             "(const_int 0)) (label_ref L0) (pc)))) "
             "(insn (set (reg/i:SI 2 v0) (const_int 0)))])");
   EXPECT_EQ(lifted.rpo_blocks[0].successors, (std::vector<size_t>{2, 1}));
-  EXPECT_EQ(lifted.rpo_blocks[1].instructions, std::vector<std::string>{"(return)"});
-  EXPECT_TRUE(lifted.rpo_blocks[1].successors.empty());
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions,
+            std::vector<std::string>{"(set (pc) (label_ref L1))"});
+  EXPECT_EQ(lifted.rpo_blocks[1].successors, std::vector<size_t>{3});
   EXPECT_TRUE(lifted.rpo_blocks[2].has_label);
+  EXPECT_TRUE(lifted.rpo_blocks[3].has_label);
+  EXPECT_TRUE(lifted.rpo_blocks[3].instructions.empty());
 
   const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(relaxed_cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
@@ -581,7 +585,7 @@ TEST(InvertRelaxDelaySlotsTest, AlreadyUnrelaxedCfgPreservedRightInverse) {
   cfg.pass = RtlPassKind::kDbr;
   cfg.rpo_blocks.resize(1);
   cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn (return)) "
+      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
       "(insn (set (reg/i:SI 2 v0) (reg:SI 4 a0)))])");
 
   const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(cfg);
@@ -614,11 +618,11 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
     RtlControlFlowGraph mid_empty_cfg;
     mid_empty_cfg.pass = RtlPassKind::kDbr;
     mid_empty_cfg.rpo_blocks.resize(2);
-    mid_empty_cfg.rpo_blocks[1].AddPatternOnly("(return)");
+    mid_empty_cfg.rpo_blocks[1].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
     EXPECT_TRUE(InvertRelaxDelaySlots(mid_empty_cfg).rpo_blocks.empty());
   }
 
-  // 4. Unbalanced / malformed RTL pattern strings:
+  // 4. Unbalanced / malformed RTL pattern strings, including synthetic bare `(return)`:
   for (const std::string& bad_pat : std::vector<std::string>{
            "",
            "   ",
@@ -626,8 +630,11 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
            "(unknown_op (const_int 1))",
            "(set (reg:SI 2 v0) (const_int 1)",
            "(set (reg:SI 2 v0) (const_int 1)))",
-           "(sequence [(jump_insn (return))])",
-           "(sequence (jump_insn (return)) (insn (const_int 0)))",
+           "(return)",
+           "(sequence [(jump_insn (return)) (insn (const_int 0))])",
+           "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))])",
+           "(sequence (jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) (insn (const_int "
+           "0)))",
            "(set (reg:SI 2 v0) (const_int 1)) trailing_garbage",
        }) {
     RtlControlFlowGraph bad_cfg;
@@ -644,7 +651,7 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
     RtlControlFlowGraph bad_succ_cfg;
     bad_succ_cfg.pass = RtlPassKind::kDbr;
     bad_succ_cfg.rpo_blocks.resize(1);
-    bad_succ_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+    bad_succ_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
     bad_succ_cfg.rpo_blocks[0].successors = {5};
     EXPECT_TRUE(InvertRelaxDelaySlots(bad_succ_cfg).rpo_blocks.empty());
     EXPECT_FALSE(verifier.VerifyRelaxDelaySlotsRightInverse(bad_succ_cfg).matches);
@@ -655,7 +662,7 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
     RtlControlFlowGraph bad_addr_vec_cfg;
     bad_addr_vec_cfg.pass = RtlPassKind::kDbr;
     bad_addr_vec_cfg.rpo_blocks.resize(1);
-    bad_addr_vec_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+    bad_addr_vec_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
     bad_addr_vec_cfg.rpo_blocks[0].addr_vec_targets = {3};
     EXPECT_TRUE(InvertRelaxDelaySlots(bad_addr_vec_cfg).rpo_blocks.empty());
     EXPECT_FALSE(verifier.VerifyRelaxDelaySlotsRightInverse(bad_addr_vec_cfg).matches);
@@ -669,7 +676,7 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
     bad_snap.optimize_level = 2;
     bad_snap.post_state.pass = RtlPassKind::kDbr;
     bad_snap.post_state.rpo_blocks.resize(1);
-    bad_snap.post_state.rpo_blocks[0].instructions.push_back("(unbalanced (return)");
+    bad_snap.post_state.rpo_blocks[0].instructions.push_back("(unbalanced (const_int 0)");
     EXPECT_FALSE(verifier.VerifySubfunctionBoundaryRightInverse(bad_snap).matches);
   }
 
@@ -692,7 +699,7 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
     valid_cfg.rpo_blocks[1].successors = {2};
     valid_cfg.rpo_blocks[2].has_label = true;
     valid_cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
-    valid_cfg.rpo_blocks[2].AddPatternOnly("(return)");
+    valid_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
 
     EXPECT_FALSE(wrong_verifier.VerifyRelaxDelaySlotsRightInverse(valid_cfg).matches);
 

@@ -177,6 +177,7 @@ extern int optimize;
 extern int target_flags;
 extern int reload_completed;
 extern void* current_function_decl;
+extern rtx_def* current_function_return_rtx;
 extern FILE* asm_out_file;
 
 rtx_def* rtx_alloc(int code);
@@ -316,9 +317,24 @@ class GccContext {
   // Resolves or creates a `CODE_LABEL` `rtx` for a symbolic label name (`"L0"`, etc.).
   Rtx GetOrCreateLabel(std::string_view label_token);
 
+  // Returns the `cfg.rpo_blocks` index (`0 .. num_blocks - 1`) in which the
+  // instruction or label with `uid` was emitted during the most recent
+  // `MaterializeFromCfg` call, or `-1` if `uid` was not recorded.
+  int LookupMaterializedRpoBlock(int uid) const;
+
+  // Non-destructively snapshots the active GCC `varasm.c` per-function constant
+  // pool (`first_pool` .. `last_pool`) into `Stage0ConstantPoolEntry` records.
+  static std::vector<Stage0ConstantPoolEntry> SnapshotActiveConstantPool();
+
+  // Registers or clears an optional capture vector updated live whenever
+  // `force_const_mem` adds a constant-pool entry during `yyparse()`.
+  static void SetCc1ConstantPoolCaptureTarget(std::vector<Stage0ConstantPoolEntry>* target);
+
  private:
   static void EnsureGlobalInit();
 
+  Rtx RegisterConstantPoolEntry(int label_num, const Stage0ConstantPoolEntry& cp,
+                                int preferred_mode);
   Rtx ParseRtxImpl(std::string_view text, size_t* pos);
   Rtx BuildInsnFromContainerOrPattern(std::string_view item_text, bool emit_to_chain);
 
@@ -326,6 +342,8 @@ class GccContext {
   absl::flat_hash_map<std::string, Rtx> label_map_;
   absl::flat_hash_map<std::string, void*> decl_map_;
   absl::flat_hash_map<std::string, void*> c_label_decl_map_;
+  absl::flat_hash_map<std::string, Rtx> pool_symbol_map_;
+  absl::flat_hash_map<int, int> insn_uid_to_rpo_block_;
 };
 
 }  // namespace rom_nom_nom::gcc_harness

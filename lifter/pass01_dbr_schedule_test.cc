@@ -58,7 +58,11 @@ class ProductionPass01InverseProvider final : public SubfunctionInverseProvider 
   PrologueEpilogueFrameSpec InvertFunctionPrologueEpilogue(
       std::string_view asm_text_x) const override {
     const auto spec = lifter::InvertFunctionPrologueEpilogue(asm_text_x);
-    return {.var_size = spec.var_size, .saved_gpr_mask = spec.saved_gpr_mask};
+    return {
+        .var_size = spec.var_size,
+        .saved_gpr_mask = spec.saved_gpr_mask,
+        .saved_fpr_mask = spec.saved_fpr_mask,
+    };
   }
 
   RtlControlFlowGraph InvertFinalAndGasFunction(
@@ -120,7 +124,7 @@ class Pass01DbrScheduleTest : public ::testing::Test {
 };
 
 // Exercises all four Stage 1 subfunctions in composition:
-//   - `make_return_insns`: delay-slot-filled `(sequence [(jump_insn (return)) ...])`
+//   - `make_return_insns`: delay-slot-filled `return_internal` `SEQUENCE`
 //   - `relax_delay_slots`: branch inverted around unconditional jump (`insn/s`)
 //   - `fill_eager_delay_slots`: target-thread delay-slot stealing (`insn/s`)
 //   - `fill_simple_delay_slots`: same-block delay slot and `optimize_skip` (`jump_insn/u` +
@@ -134,10 +138,10 @@ TEST_F(Pass01DbrScheduleTest, SyntheticPositiveMultiSubfunctionComposition) {
                 {"(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int "
                  "0)) (label_ref L0) (pc)))) (insn/s (set (reg:SI 3 v1) (const_int 7)))])"},
                 {2, 1}),
-      // Block 1: `make_return_insns` return with same-block simple delay slot
+      // Block 1: `return_internal` with same-block simple delay slot
       MakeBlock(1, false,
-                {"(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 "
-                 "a0) (reg:SI 5 a1))))])"},
+                {"(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 5 a1))))])"},
                 {}),
       // Block 2 (`L0`): `optimize_skip` (`jump_insn/u` + `insn/s` with both edges to L1)
       MakeBlock(2, true,
@@ -173,7 +177,8 @@ TEST_F(Pass01DbrScheduleTest, SyntheticPositiveRelaxAndReturnComposition) {
                 {2}),
       MakeBlock(2, true,
                 {"(use (reg/i:SI 2 v0))",
-                 "(sequence [(jump_insn (return)) (insn (set (reg:SI 3 v1) (const_int 0)))])"},
+                 "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg:SI 3 v1) (const_int 0)))])"},
                 {}),
   };
 
@@ -202,13 +207,13 @@ TEST_F(Pass01DbrScheduleTest, SyntheticPositiveChainedStage0AndStage1Composition
                 {2, 1}),
       MakeBlock(1, false,
                 {"(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (reg:SI 5 a1)))",
-                 "(sequence [(jump_insn (return)) (insn (set (reg:SI 2 v0) (ashift:SI (reg:SI 3 "
-                 "v1) (const_int 2))))])"},
+                 "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg:SI 2 v0) (ashift:SI (reg:SI 3 v1) (const_int 2))))])"},
                 {}),
       MakeBlock(2, true,
                 {"(set (reg:SI 3 v1) (minus:SI (reg:SI 4 a0) (reg:SI 5 a1)))",
-                 "(sequence [(jump_insn (return)) (insn (set (reg:SI 2 v0) (ashift:SI (reg:SI 3 "
-                 "v1) (const_int 1))))])"},
+                 "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg:SI 2 v0) (ashift:SI (reg:SI 3 v1) (const_int 1))))])"},
                 {}),
   };
 
@@ -252,15 +257,21 @@ TEST_F(Pass01DbrScheduleTest, SyntheticNegativeMalformedCfgAndCorruptedInverse) 
 
   // 3. Out-of-bounds successor edge.
   RtlControlFlowGraph bad_succ_cfg;
-  bad_succ_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {4}));
+  bad_succ_cfg.rpo_blocks.push_back(
+      MakeBlock(0, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {4}));
   EXPECT_TRUE(InvertPass01DbrSchedule(bad_succ_cfg).rpo_blocks.empty());
   EXPECT_FALSE(verifier_.VerifyDbrStageRightInverse(bad_succ_cfg).matches);
 
-  // 4. Malformed S-expression.
+  // 4. Malformed S-expression (and synthetic bare `(return)`).
   RtlControlFlowGraph bad_sexpr_cfg;
   bad_sexpr_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(set (reg:SI 2 v0)"}, {}));
   EXPECT_TRUE(InvertPass01DbrSchedule(bad_sexpr_cfg).rpo_blocks.empty());
   EXPECT_FALSE(verifier_.VerifyDbrStageRightInverse(bad_sexpr_cfg).matches);
+
+  RtlControlFlowGraph bare_ret_cfg;
+  bare_ret_cfg.rpo_blocks.push_back(MakeBlock(0, false, {"(return)"}, {}));
+  EXPECT_TRUE(InvertPass01DbrSchedule(bare_ret_cfg).rpo_blocks.empty());
+  EXPECT_FALSE(verifier_.VerifyDbrStageRightInverse(bare_ret_cfg).matches);
 
   // 5. Corrupted inverse provider rejected by `VerifyDbrStageRightInverse`.
   class BrokenDbrProvider final : public SubfunctionInverseProvider {
@@ -268,7 +279,10 @@ TEST_F(Pass01DbrScheduleTest, SyntheticNegativeMalformedCfgAndCorruptedInverse) 
     RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) const override {
       RtlControlFlowGraph bad = dbr_cfg_x;
       if (!bad.rpo_blocks.empty()) {
-        bad.rpo_blocks[0].instructions = {"(set (reg/i:SI 2 v0) (const_int 999))", "(return)"};
+        bad.rpo_blocks[0].instructions = {
+            "(set (reg/i:SI 2 v0) (const_int 999))",
+            "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+        };
         bad.rpo_blocks[0].successors.clear();
       }
       return bad;
@@ -279,7 +293,8 @@ TEST_F(Pass01DbrScheduleTest, SyntheticNegativeMalformedCfgAndCorruptedInverse) 
   valid_cfg.pass = RtlPassKind::kDbr;
   valid_cfg.rpo_blocks = {
       MakeBlock(0, false,
-                {"(sequence [(jump_insn (return)) (insn (set (reg/i:SI 2 v0) (const_int 42)))])"},
+                {"(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg/i:SI 2 v0) (const_int 42)))])"},
                 {}),
   };
   BrokenDbrProvider broken_provider;
@@ -410,13 +425,18 @@ TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
                        .post_state;
   }
   const auto cmp = replayed_dbr.CompareAgainst(post_dbr);
+  const auto jump2_it = trace.pass_snapshots.find(RtlPassKind::kJump2);
   EXPECT_TRUE(cmp.MatchesExactly())
       << "Stage 1 (.12.dbr) right-inverse mismatch for " << tc.test_name << ":\n"
       << cmp.mismatch_detail << "\nexpected (.12.dbr):\n"
       << post_dbr.FormatSummary() << "\nactual (.12.dbr):\n"
-      << replayed_dbr.FormatSummary();
+      << replayed_dbr.FormatSummary() << "\nexpected (.11.jump2):\n"
+      << (jump2_it != trace.pass_snapshots.end() ? jump2_it->second.FormatSummary() : "<missing>")
+      << "\nlifted pre_dbr (.11.jump2):\n"
+      << pre_dbr.FormatSummary();
 
-  // 3. Chained Stage 0 + Stage 1 composition across the 2,480 corpus cases.
+  // 3. Full fresh-context `VerifySuffixRightInverse` ($F_{0..1}(G_{1..0}(x_0)) = x_0$)
+  //    across all 2,480 corpus cases.
   ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << "Test case: " << tc.test_name;
 
   const RightInverseResult stage0_res =
@@ -424,11 +444,93 @@ TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
   EXPECT_TRUE(stage0_res.matches) << "Stage 0 right-inverse mismatch for " << tc.test_name << ":\n"
                                   << stage0_res.diff_detail;
 
-  const RtlControlFlowGraph stage0_lifted_dbr = InvertFinalAndGasFunction(trace.stage0_input);
-  ASSERT_FALSE(stage0_lifted_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  const RtlControlFlowGraph stage1_lifted_jump2 = InvertPass01DbrSchedule(stage0_lifted_dbr);
-  ASSERT_FALSE(stage1_lifted_jump2.rpo_blocks.empty()) << "Test case: " << tc.test_name;
-  EXPECT_EQ(stage1_lifted_jump2.pass, RtlPassKind::kJump2);
+  const RightInverseResult suffix_res =
+      verifier->VerifySuffixRightInverse(RtlPassKind::kJump2, trace.stage0_input);
+  EXPECT_TRUE(suffix_res.matches) << "Stage 0..1 suffix right-inverse mismatch for " << tc.test_name
+                                  << ":\n"
+                                  << suffix_res.diff_detail << "\nexpected:\n"
+                                  << suffix_res.expected_summary << "\nactual:\n"
+                                  << suffix_res.actual_summary;
+}
+
+TEST_F(Pass01DbrScheduleTest, MultiEpilogueFrameNormalizesToLegalJumpAndReplaysThroughDbr) {
+  constexpr std::string_view kMultiEpilogueAsm = R"(
+	.text
+	.align	2
+	.ent	multi_epi
+multi_epi:
+	.frame	$sp,24,$31
+	.mask	0x80000000,-8
+	.fmask	0x00000000,0
+	subu	$sp,$sp,24
+	.set	noreorder
+	beq	$4,$0,$L2
+	sw	$31,16($sp)
+	.set	reorder
+	jal	callee_a
+	.set	noreorder
+	lw	$31,16($sp)
+	addiu	$2,$2,1
+	j	$31
+	addu	$sp,$sp,24
+	.set	reorder
+$L2:
+	jal	callee_b
+	lw	$31,16($sp)
+	addu	$sp,$sp,24
+	j	$31
+	.end	multi_epi
+)";
+  Stage0FunctionInput multi_epi = hooks_.RunGasMdAssembleWithMetadata(kMultiEpilogueAsm);
+  multi_epi.profile.optimize_level = 2;
+  multi_epi.profile.c_flags = {"-O2", "-Wa,-g"};
+  hooks_.ApplyCompilationProfile(multi_epi.profile);
+  const RtlControlFlowGraph dbr_cfg = InvertFinalAndGasFunction(multi_epi);
+  ASSERT_FALSE(dbr_cfg.rpo_blocks.empty());
+  const RightInverseResult dbr_res = verifier_.VerifyDbrStageRightInverse(dbr_cfg);
+  EXPECT_TRUE(dbr_res.matches) << dbr_res.diff_detail << "\nexpected:\n"
+                               << dbr_res.expected_summary << "\nactual:\n"
+                               << dbr_res.actual_summary;
+  const RtlControlFlowGraph jump2_cfg = InvertPass01DbrSchedule(dbr_cfg);
+  ASSERT_FALSE(jump2_cfg.rpo_blocks.empty());
+
+  // Forward replay through `dbr_schedule` + `final` on a fresh `GccContext` must
+  // never hit an illegal interior `(return)` with `tsize > 0`.
+  GccContext fresh_ctx;
+  FunctionHooks fresh_hooks(&fresh_ctx);
+  fresh_hooks.ApplyCompilationProfile(multi_epi.profile);
+  RtlControlFlowGraph replayed_dbr =
+      fresh_hooks
+          .ExecuteSubfunctionBoundary(
+              SubfunctionId::kMakeReturnInsns,
+              fresh_hooks
+                  .ExecuteSubfunctionBoundary(
+                      SubfunctionId::kRelaxDelaySlots,
+                      fresh_hooks
+                          .ExecuteSubfunctionBoundary(
+                              SubfunctionId::kFillEagerDelaySlots,
+                              fresh_hooks
+                                  .ExecuteSubfunctionBoundary(SubfunctionId::kFillSimpleDelaySlots,
+                                                              jump2_cfg, {}, 2, {"-O2", "-Wa,-g"})
+                                  .post_state,
+                              {}, 2, {"-O2", "-Wa,-g"})
+                          .post_state,
+                      {}, 2, {"-O2", "-Wa,-g"})
+                  .post_state,
+              {}, 2, {"-O2", "-Wa,-g"})
+          .post_state;
+  fresh_hooks.ApplyCompilationProfile(multi_epi.profile);
+  auto first = fresh_ctx.MaterializeFromCfg(replayed_dbr);
+  ASSERT_NE(first, nullptr);
+  const std::string emitted_asm = fresh_hooks.RunFinal();
+  Stage0FunctionInput reassembled = fresh_hooks.RunGasMdAssembleWithMetadata(emitted_asm);
+  ASSERT_FALSE(reassembled.machine_words.empty());
+  reassembled.profile = multi_epi.profile;
+  const RightInverseResult suffix_res =
+      verifier_.VerifySuffixRightInverse(RtlPassKind::kJump2, reassembled);
+  EXPECT_TRUE(suffix_res.matches) << suffix_res.diff_detail << "\nexpected:\n"
+                                  << suffix_res.expected_summary << "\nactual:\n"
+                                  << suffix_res.actual_summary;
 }
 
 INSTANTIATE_TEST_SUITE_P(SharedRoundTripSuite, Pass01DbrScheduleRoundTripTest,

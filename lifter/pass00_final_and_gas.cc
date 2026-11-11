@@ -1,6 +1,5 @@
 #include "lifter/pass00_final_and_gas.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -31,7 +30,8 @@ RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x
 
   RtlSidebandState sideband;
   ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
-  return InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables);
+  return InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables, input_x.constant_pool,
+                                       &input_x.profile);
 }
 
 RtlControlFlowGraph InvertFinalAndGasFunction(absl::Span<const uint32_t> machine_words_x) {

@@ -246,11 +246,23 @@ TEST(RtlCfgTest, Stage0FunctionInputEqualityAndMetadataFields) {
       .words = {0x3fc00000u},
   });
   input.vram_to_symbol[0x80246100u] = "helper_fn";
+  input.profile.optimize_level = 2;
+  input.profile.c_flags = {"-O2", "-G", "0"};
 
   Stage0FunctionInput copy = input;
   EXPECT_EQ(copy, input);
+  copy.profile.optimize_level = 0;
+  EXPECT_NE(copy, input);
+  copy = input;
   copy.relocations[0].symbol_name = "other_fn";
   EXPECT_NE(copy, input);
+
+  PrologueEpilogueFrameSpec frame_a{
+      .var_size = 16, .saved_gpr_mask = 0x80010000u, .saved_fpr_mask = 0x00300000u};
+  PrologueEpilogueFrameSpec frame_b = frame_a;
+  EXPECT_EQ(frame_a, frame_b);
+  frame_b.saved_fpr_mask = 0u;
+  EXPECT_NE(frame_a, frame_b);
 }
 
 }  // namespace

@@ -217,9 +217,9 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     EXPECT_EQ(cfg.pass, RtlPassKind::kDbr);
     ASSERT_EQ(cfg.rpo_blocks.size(), 4u);
 
-    // Block 0: conditional branch `beq $4,$0,$L2` -> fallthrough block 1, target block 2.
+    // Block 0: conditional branch `beq $4,$0,$L2` -> canonical `[target, fallthrough]` `{2, 1}`.
     EXPECT_FALSE(cfg.rpo_blocks[0].has_label);
-    const std::vector<size_t> expected_succ_0 = {1u, 2u};
+    const std::vector<size_t> expected_succ_0 = {2u, 1u};
     EXPECT_EQ(cfg.rpo_blocks[0].successors, expected_succ_0);
 
     // Block 1: fallthrough `addu $2,$4,$5` + unconditional `j $L3` -> target block 3.
@@ -232,7 +232,7 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     const std::vector<size_t> expected_succ_2 = {3u};
     EXPECT_EQ(cfg.rpo_blocks[2].successors, expected_succ_2);
 
-    // Block 3: `$L3:` `j $31` (`(return)`) -> no successors.
+    // Block 3: `$L3:` `j $31` (`return_internal`) -> no successors.
     EXPECT_TRUE(cfg.rpo_blocks[3].has_label);
     EXPECT_TRUE(cfg.rpo_blocks[3].successors.empty());
   }
@@ -254,7 +254,8 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     EXPECT_TRUE(absl::StartsWith(cfg.rpo_blocks[0].instructions[0], "(sequence [(call_insn "))
         << cfg.rpo_blocks[0].instructions[0];
     EXPECT_TRUE(
-        absl::StartsWith(cfg.rpo_blocks[0].instructions[1], "(sequence [(jump_insn (return))"))
+        absl::StartsWith(cfg.rpo_blocks[0].instructions[1],
+                         "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))"))
         << cfg.rpo_blocks[0].instructions[1];
     EXPECT_TRUE(cfg.rpo_blocks[0].successors.empty());
   }
@@ -302,7 +303,7 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
 
   // 5. Jump-table `Stage0ResolvedJumpTable` lifting (`tablejump` `PARALLEL`,
   //    `addr_vec_targets` preserving duplicates, deduplicated `successors`, and
-  //    `L100000` -> `__tbl_<b>` label rewrite).
+  //    canonical sequential `L0` table label rewrite).
   {
     const std::vector<std::string> asm_lines = {
         "lw\t$2,$L100000($4)", "j\t$2",  "$L2:", "addiu\t$2,$0,10", "j\t$31", "$L3:",
@@ -322,10 +323,10 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     EXPECT_EQ(cfg.rpo_blocks[0].addr_vec_targets, expected_addr_vec);
     EXPECT_EQ(cfg.rpo_blocks[0].successors, expected_succ);
     ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 2u);
-    EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[0].instructions[0], "(label_ref __tbl_0)"))
+    EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[0].instructions[0], "(label_ref L0)"))
         << cfg.rpo_blocks[0].instructions[0];
     EXPECT_EQ(cfg.rpo_blocks[0].instructions[1],
-              "(parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref __tbl_0)) ] )");
+              "(parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref L0)) ] )");
   }
 }
 

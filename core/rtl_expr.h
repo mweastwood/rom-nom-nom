@@ -251,6 +251,10 @@ struct RtlExpr {
   // Formats this RtlExpr back to a canonical GCC 2.7.2 RTL S-expression string.
   std::string ToSexprString() const;
 
+  // Formats this RtlExpr using GCC 2.7.2 `print_rtl` + `CanonicalizeRtlPattern`
+  // spacing (`(parallel[ <e0> <e1> ... ] )` for bracketed `PARALLEL` nodes).
+  std::string ToGccPrintRtlString() const;
+
   // Static factory builders.
   static RtlExpr MakeNil();
   static RtlExpr MakePc();
@@ -258,6 +262,7 @@ struct RtlExpr {
   static RtlExpr MakeReturn();
   static RtlExpr MakeConstInt(int64_t val);
   static RtlExpr MakeReg(RtlMachineMode mode, int regno, RtlFlags flags = {});
+  static RtlExpr MakeArgPointerReg(RtlMachineMode mode = RtlMachineMode::kSi, RtlFlags flags = {});
   static RtlExpr MakeSubreg(RtlMachineMode mode, RtlExpr inner, int word_num, RtlFlags flags = {});
   static RtlExpr MakeMem(RtlMachineMode mode, RtlExpr addr, RtlFlags flags = {});
   static RtlExpr MakeSymbolRef(RtlMachineMode mode, std::string symbol, bool paren_wrapped = true,
@@ -271,6 +276,11 @@ struct RtlExpr {
   static RtlExpr MakeIfThenElse(RtlExpr cond, RtlExpr then_expr, RtlExpr else_expr,
                                 RtlMachineMode mode = RtlMachineMode::kNone);
   static RtlExpr MakeParallel(std::vector<RtlExpr> elements);
+  static RtlExpr MakeSequence(std::vector<RtlExpr> sub_insns);
+  static RtlExpr MakeInsnWrapper(RtlOp wrapper_op, RtlFlags flags, RtlExpr inner_pattern);
+  static RtlExpr MakeInsnWrapper(RtlOp wrapper_op, RtlFlags flags,
+                                 const struct RtlPatternAndNotes& inner);
+  static RtlExpr MakeNote(std::string note_kind);
   static RtlExpr MakeUse(RtlExpr operand);
   static RtlExpr MakeClobber(RtlExpr operand);
   static RtlExpr MakeScratch(RtlMachineMode mode);
@@ -279,8 +289,13 @@ struct RtlExpr {
   // Structural queries and accessors.
   bool IsNil() const { return op == RtlOp::kNil; }
   bool IsReg() const { return op == RtlOp::kReg; }
+  bool IsArgPointerReg() const {
+    return op == RtlOp::kReg && int_val == 0 && (str_val == "argp" || str_val == "$arg");
+  }
   bool IsPseudoReg() const { return op == RtlOp::kReg && int_val >= 68; }
-  bool IsHardReg() const { return op == RtlOp::kReg && int_val >= 0 && int_val < 68; }
+  bool IsHardReg() const {
+    return op == RtlOp::kReg && int_val >= 0 && int_val < 68 && !IsArgPointerReg();
+  }
   int RegNo() const { return static_cast<int>(int_val); }
   void SetRegNo(int new_regno);
 
@@ -348,7 +363,13 @@ struct RtlPatternAndNotes {
   std::vector<RtlRegNote> reg_notes;
   bool bracketed_notes = false;
 
+  // Extracts `pattern` and optional `reg_notes` directly from a structured
+  // `(insn ...)`, `(jump_insn ...)`, or `(call_insn ...)` element inside a
+  // `(sequence [...])` without re-serializing child ASTs to strings.
+  static absl::StatusOr<RtlPatternAndNotes> FromSequenceSubInsn(const RtlExpr& sub_insn);
+
   std::string ToSexprString() const;
+  std::string ToGccPrintRtlString() const;
   void RewriteRegs(absl::FunctionRef<void(RtlExpr&)> mutator);
   void ReplaceRegNo(int from_regno, int to_regno);
 
@@ -368,6 +389,9 @@ absl::StatusOr<RtlPatternAndNotes> ParsePatternAndNotes(std::string_view pattern
 // canonical `RtlInsn` pattern representation.
 std::string FormatPatternAndNotes(const RtlExpr& pattern, absl::Span<const RtlRegNote> notes,
                                   bool bracketed = false);
+std::string FormatGccPrintRtlPatternAndNotes(const RtlExpr& pattern,
+                                             absl::Span<const RtlRegNote> notes,
+                                             bool bracketed = false);
 
 }  // namespace rom_nom_nom
 

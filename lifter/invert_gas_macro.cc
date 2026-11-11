@@ -226,6 +226,29 @@ std::string InvertTwoWords(uint32_t w0, uint32_t w1) {
     }
   }
 
+  // 2b. `M_LI_SS` 2-word inline single-precision float load (`tc-mips.c:3697-3704`
+  // when `g_switch_value < 4`): `load_register($1, bits)` + `mtc1 $1, $f<fs>`.
+  if ((w1 & 0xffe007ffu) == 0x44800000u && rt1 == 1u) {
+    uint32_t bits = 0u;
+    bool valid_bits = false;
+    if (op0 == 0x0fu && rs0 == 0u && rt0 == 1u && uimm0 != 0u) {
+      bits = (uimm0 << 16);
+      valid_bits = true;
+    } else if (op0 == 0x0du && rs0 == 0u && rt0 == 1u && uimm0 >= 0x8000u) {
+      bits = uimm0;
+      valid_bits = true;
+    } else if (op0 == 0x09u && rs0 == 0u && rt0 == 1u && simm0 > 0) {
+      bits = static_cast<uint32_t>(simm0);
+      valid_bits = true;
+    }
+    if (valid_bits && bits != 0x80000000u) {
+      const float fv = absl::bit_cast<float>(bits);
+      if (std::isfinite(fv)) {
+        return absl::StrFormat("li.s $f%u,%.9e", rd1, static_cast<double>(fv));
+      }
+    }
+  }
+
   // 3. `M_NOR_I` with 16-bit unsigned immediate (`ori $rt, $rs, uimm16` + `nor $rt, $rt, $0`).
   if (op0 == 0x0du && op1 == 0x00u && sa1 == 0u && funct1 == 0x27u && rd1 == rt0 && rs1 == rt0 &&
       rt1 == 0u) {
@@ -342,6 +365,16 @@ std::string InvertThreeWords(uint32_t w0, uint32_t w1, uint32_t w2) {
     const uint32_t imm32 = (uimm0 << 16) | uimm1;
     if (std::string alu = InvertImmediateAluTail(w2, imm32); !alu.empty()) {
       return alu;
+    }
+    // `M_LI_SS` 3-word inline single-precision float load (`tc-mips.c:3697-3704`):
+    //   lui $1, hi16
+    //   ori $1, $1, lo16
+    //   mtc1 $1, $f<fs>
+    if ((w2 & 0xffe007ffu) == 0x44800000u && rt2 == 1u) {
+      const float fv = absl::bit_cast<float>(imm32);
+      if (std::isfinite(fv)) {
+        return absl::StrFormat("li.s $f%u,%.9e", rd2, static_cast<double>(fv));
+      }
     }
   }
 
@@ -840,7 +873,7 @@ bool MatchPairedFpDoubleReloc(std::string_view next_line, int expected_base_reg,
                               const Stage0Relocation* rel_first, const Stage0Relocation* rel_next,
                               std::string* out_even_fpreg) {
   if ((first_mnem != "l.s" && first_mnem != "s.s") || !absl::StartsWith(first_reg, "$f") ||
-      rel_first == nullptr || rel_next == nullptr || rel_next->kind != Stage0RelocKind::kMipsLo16 ||
+      rel_first == nullptr || rel_next == nullptr || rel_next->kind != rel_first->kind ||
       rel_next->symbol_name != rel_first->symbol_name ||
       rel_next->addend != rel_first->addend + 4) {
     return false;
@@ -1065,12 +1098,28 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmIt
         }
       }
 
+      if (i + 2 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 2].kind == AsmItemKind::kReorderInsn && !IsBranchOrJumpWord(item.word) &&
+          !IsBranchOrJumpWord(raw_items[i + 1].word) &&
+          !IsBranchOrJumpWord(raw_items[i + 2].word)) {
+        const uint32_t triple[3] = {item.word, raw_items[i + 1].word, raw_items[i + 2].word};
+        const std::string macro_asm = InvertGasMacro(triple);
+        if (!macro_asm.empty() && absl::StartsWith(macro_asm, "li.s ")) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          items.push_back(std::move(item));
+          i += 2;
+          continue;
+        }
+      }
+
       if (i + 1 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
           !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(raw_items[i + 1].word)) {
         const uint32_t pair[2] = {item.word, raw_items[i + 1].word};
         const std::string macro_asm = InvertGasMacro(pair);
         if (!macro_asm.empty() &&
-            (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t"))) {
+            (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t") ||
+             absl::StartsWith(macro_asm, "li.s "))) {
           item.line = macro_asm;
           item.unswapped_from_branch = false;
           items.push_back(std::move(item));
@@ -1313,7 +1362,8 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
             if (mnem == "l.s" && cp->words.size() == 1 && absl::StartsWith(reg, "$f")) {
               const uint32_t bits = cp->words[0];
               const float fv = absl::bit_cast<float>(bits);
-              if (bits != 0u && std::isfinite(fv)) {
+              if (std::isfinite(fv) && (cp->section_name == ".lit4" ||
+                                        (std::abs(fv) > 1.0e-38f && std::abs(fv) < 1.0e38f))) {
                 return absl::StrFormat("li.s %s,%.9e", reg, static_cast<double>(fv));
               }
             }
@@ -1321,7 +1371,8 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
               const uint64_t bits =
                   (uint64_t{cp->words[0]} << 32) | static_cast<uint64_t>(cp->words[1]);
               const double dv = absl::bit_cast<double>(bits);
-              if (bits != 0u && std::isfinite(dv)) {
+              if (std::isfinite(dv) && (cp->section_name == ".lit8" ||
+                                        (std::abs(dv) > 1.0e-300 && std::abs(dv) < 1.0e300))) {
                 return absl::StrFormat("li.d %s,%.17e", reg, dv);
               }
             }
@@ -1462,19 +1513,83 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
         }
       }
 
-      if (i + 1 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
-          !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(raw_items[i + 1].word) &&
-          !reloc_by_word.contains(item.word_index) &&
-          !reloc_by_word.contains(raw_items[i + 1].word_index)) {
-        const uint32_t pair[2] = {item.word, raw_items[i + 1].word};
-        const std::string macro_asm = InvertGasMacro(pair);
-        if (!macro_asm.empty() &&
-            (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t"))) {
+      if (i + 2 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 2].kind == AsmItemKind::kReorderInsn && !IsBranchOrJumpWord(item.word) &&
+          !IsBranchOrJumpWord(raw_items[i + 1].word) &&
+          !IsBranchOrJumpWord(raw_items[i + 2].word) && !reloc_by_word.contains(item.word_index) &&
+          !reloc_by_word.contains(raw_items[i + 1].word_index) &&
+          !reloc_by_word.contains(raw_items[i + 2].word_index)) {
+        const uint32_t triple[3] = {item.word, raw_items[i + 1].word, raw_items[i + 2].word};
+        const std::string macro_asm = InvertGasMacro(triple);
+        if (!macro_asm.empty() && absl::StartsWith(macro_asm, "li.s ")) {
           item.line = macro_asm;
           item.unswapped_from_branch = false;
           items.push_back(std::move(item));
-          ++i;
+          i += 2;
           continue;
+        }
+      }
+
+      if (i + 1 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
+          !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(raw_items[i + 1].word)) {
+        if (!reloc_by_word.contains(item.word_index) &&
+            !reloc_by_word.contains(raw_items[i + 1].word_index)) {
+          const uint32_t pair[2] = {item.word, raw_items[i + 1].word};
+          const std::string macro_asm = InvertGasMacro(pair);
+          if (!macro_asm.empty() &&
+              (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t") ||
+               absl::StartsWith(macro_asm, "li.s "))) {
+            item.line = macro_asm;
+            item.unswapped_from_branch = false;
+            items.push_back(std::move(item));
+            ++i;
+            continue;
+          }
+        } else if (Rs(item.word) == 28u && Rs(raw_items[i + 1].word) == 28u) {
+          // Collapse MIPS1 2-word `$gp`-relative (`kMipsGpRel16` `.sdata`) or
+          // `.lit8` (`kMipsLiteral`) `l.d`/`s.d`/`li.d` expansions (`lwc1`/`swc1` pair).
+          auto r0_it = reloc_by_word.find(item.word_index);
+          auto r1_it = reloc_by_word.find(raw_items[i + 1].word_index);
+          const Stage0Relocation* r0 = (r0_it != reloc_by_word.end()) ? r0_it->second : nullptr;
+          const Stage0Relocation* r1 = (r1_it != reloc_by_word.end()) ? r1_it->second : nullptr;
+          if (r0 != nullptr && r1 != nullptr &&
+              (r0->kind == Stage0RelocKind::kMipsGpRel16 ||
+               r0->kind == Stage0RelocKind::kMipsLiteral) &&
+              r1->kind == r0->kind) {
+            const std::string line0 = NormalizeCop1LoadStoreMnemonic(item.line);
+            const std::string line1 = NormalizeCop1LoadStoreMnemonic(raw_items[i + 1].line);
+            std::string mnem0;
+            std::string reg0;
+            int32_t off0 = 0;
+            std::string even_fpreg;
+            if (ParseAnyMemInsnWithBase(line0, 28, &mnem0, &reg0, &off0) &&
+                MatchPairedFpDoubleReloc(line1, 28, mnem0, reg0, r0, r1, &even_fpreg)) {
+              if (r0->kind == Stage0RelocKind::kMipsLiteral && mnem0 == "l.s" && r0->addend == 0) {
+                auto cp_it = cp_by_label.find(r0->symbol_name);
+                const Stage0ConstantPoolEntry* cp =
+                    (cp_it != cp_by_label.end()) ? cp_it->second : nullptr;
+                if (cp != nullptr && cp->words.size() == 2) {
+                  const uint64_t bits =
+                      (uint64_t{cp->words[0]} << 32) | static_cast<uint64_t>(cp->words[1]);
+                  const double dv = absl::bit_cast<double>(bits);
+                  if (std::isfinite(dv) && (cp->section_name == ".lit8" ||
+                                            (std::abs(dv) > 1.0e-300 && std::abs(dv) < 1.0e300))) {
+                    item.line = absl::StrFormat("li.d %s,%.17e", even_fpreg, dv);
+                    item.unswapped_from_branch = false;
+                    items.push_back(std::move(item));
+                    ++i;
+                    continue;
+                  }
+                }
+              }
+              item.line = absl::StrFormat("%s %s,%s", mnem0 == "l.s" ? "l.d" : "s.d", even_fpreg,
+                                          format_sym_addend(r0->symbol_name, r0->addend));
+              item.unswapped_from_branch = false;
+              items.push_back(std::move(item));
+              ++i;
+              continue;
+            }
+          }
         }
       }
 
@@ -1585,8 +1700,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
                   const uint64_t bits =
                       (uint64_t{cp->words[0]} << 32) | static_cast<uint64_t>(cp->words[1]);
                   const double dv = absl::bit_cast<double>(bits);
-                  if (std::isfinite(dv) &&
-                      (bits != 0u || absl::StartsWith(rel_lo->symbol_name, "$LC_lit_"))) {
+                  if (std::isfinite(dv) && std::abs(dv) > 1.0e-300 && std::abs(dv) < 1.0e300) {
                     return absl::StrFormat("li.d %s,%.17e", target_fpreg, dv);
                   }
                 }
@@ -1624,7 +1738,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
               if (!IsTempregReusedByLaterLo16(items, i + 2, tempreg, rel_hi->symbol_name,
                                               reloc_by_word)) {
                 // Reconstruct `li.d $f<even>, <double>` (`M_LI_DD`) for 8-byte
-                // `.rdata`/`.rodata` finite non-zero double constant pool loads.
+                // `.rdata`/`.rodata` `mips_const_double_ok` double literal loads.
                 if (mnem == "l.d") {
                   if (std::string li_d_line = try_recover_li_d(reg); !li_d_line.empty()) {
                     item.line = std::move(li_d_line);

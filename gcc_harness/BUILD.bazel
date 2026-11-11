@@ -19,6 +19,7 @@ cc_library(
     deps = [
         "//core:c_ast",
         "//core:rtl_cfg",
+        "//core:rtl_expr",
         "//core:rtl_sexpr_utils",
         "//toolchain:gas26_harness_lib",
         "//toolchain:gcc272_harness_lib",
