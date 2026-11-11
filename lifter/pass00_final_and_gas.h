@@ -14,15 +14,15 @@ namespace rom_nom_nom::lifter {
 //   `mips.c:function_epilogue`) + `tc-mips.c:md_assemble` (`macro`,
 //   `append_insn`, `mips_ip`).
 //
-// Given a function's raw 32-bit big-endian MIPS machine words `machine_words_x`,
-// composes `InvertGasAppendInsn`, `InvertGasMacro`,
+// Given a function's `Stage0FunctionInput` (`.text` machine words plus optional
+// relocations, symbols, `.rodata` jump tables, constant-pool entries, and N64
+// VRAM base), composes `InvertGasAppendInsn`, `InvertGasMacro`,
 // `InvertFunctionPrologueEpilogue`, and `InvertFinalScanInsn` to recover a
-// post-`dbr_schedule` `RtlControlFlowGraph` (`RtlPassKind::kDbr`) such that
-// re-running `RunFinal()` and `RunGasMdAssemble()` reproduces `machine_words_x`
-// word-for-word.
+// post-`dbr_schedule` `RtlControlFlowGraph` (`RtlPassKind::kDbr`).
 //
-// Returns an empty `RtlControlFlowGraph` (`rpo_blocks.empty()`) if
-// `machine_words_x` is empty or contains invalid / malformed machine code.
+// Returns an empty `RtlControlFlowGraph` (`rpo_blocks.empty()`) if the input is
+// empty or contains invalid / malformed machine code.
+RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x);
 RtlControlFlowGraph InvertFinalAndGasFunction(absl::Span<const uint32_t> machine_words_x);
 
 }  // namespace rom_nom_nom::lifter

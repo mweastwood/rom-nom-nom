@@ -66,6 +66,10 @@ class ProductionPass01InverseProvider final : public SubfunctionInverseProvider 
     return lifter::InvertFinalAndGasFunction(machine_words_x);
   }
 
+  RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x) const override {
+    return lifter::InvertFinalAndGasFunction(input_x);
+  }
+
   RtlControlFlowGraph InvertMakeReturnInsns(
       const RtlControlFlowGraph& dbr_return_cfg_x) const override {
     return lifter::InvertMakeReturnInsns(dbr_return_cfg_x);
@@ -283,6 +287,56 @@ TEST_F(Pass01DbrScheduleTest, SyntheticNegativeMalformedCfgAndCorruptedInverse) 
   EXPECT_FALSE(broken_verifier.VerifyDbrStageRightInverse(valid_cfg).matches);
 }
 
+TEST_F(Pass01DbrScheduleTest,
+       OptimizeSkipForm2WithLeadingUseAtSharedTargetAndShortenBranchesReset) {
+  // Regression test for:
+  // 1. `reorg.c:optimize_skip` Form 2 (`jump_insn/u` + `insn/s` followed by a
+  //    bare unconditional jump to a shared target block beginning with `(use ...)`),
+  //    ensuring `InvertFillEagerDelaySlots` preserves it for `InvertFillSimpleDelaySlots`.
+  // 2. Resetting `final.c:insn_lengths` (`init_insn_lengths()`) before replaying
+  //    `reorg.c` after `shorten_branches` / `RunFinal` has populated `insn_lengths`.
+  constexpr std::string_view kSource = R"(
+extern float g_min_val;
+extern float g_clamp_val;
+extern float g_inner_val;
+extern float g_fallback_table[16];
+float clamp_or_lookup(int bypass, int idx, float x) {
+  float out = 0.0f;
+  if (!bypass) {
+    if (x >= g_min_val) {
+      if (x < g_clamp_val) {
+        if (x < g_inner_val) {
+          out = g_clamp_val;
+        }
+      } else {
+        out = g_clamp_val;
+      }
+    } else {
+      out = g_fallback_table[idx];
+    }
+  }
+  return out;
+}
+)";
+  const auto trace = hooks_.TraceForwardCompilation(kSource, "clamp_or_lookup",
+                                                    {"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+                                                    "optimize_skip_form2_regression");
+  for (const auto& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id != SubfunctionId::kFillSimpleDelaySlots &&
+        snap.subfunction_id != SubfunctionId::kFillEagerDelaySlots &&
+        snap.subfunction_id != SubfunctionId::kRelaxDelaySlots &&
+        snap.subfunction_id != SubfunctionId::kMakeReturnInsns) {
+      continue;
+    }
+    const RightInverseResult sub_res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(sub_res.matches) << SubfunctionIdName(snap.subfunction_id) << ": "
+                                 << sub_res.diff_detail;
+  }
+  const RightInverseResult stage0_res =
+      verifier_.VerifyFinalAndGasStageRightInverse(trace.stage0_input);
+  EXPECT_TRUE(stage0_res.matches) << stage0_res.diff_detail;
+}
+
 class Pass01DbrScheduleRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {
@@ -328,8 +382,11 @@ TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
       continue;
     }
     const RightInverseResult sub_res = verifier->VerifySubfunctionBoundaryRightInverse(snap);
-    EXPECT_TRUE(sub_res.matches) << "Stage 1 subfunction boundary mismatch for " << tc.test_name
-                                 << ": " << sub_res.diff_detail << "\nexpected:\n"
+    EXPECT_TRUE(sub_res.matches) << "Stage 1 subfunction boundary mismatch ("
+                                 << gcc_harness::SubfunctionIdName(snap.subfunction_id) << ") for "
+                                 << tc.test_name << ": " << sub_res.diff_detail
+                                 << "\nsnap.pre_state:\n"
+                                 << snap.pre_state.FormatSummary() << "\nexpected:\n"
                                  << sub_res.expected_summary << "\nactual:\n"
                                  << sub_res.actual_summary;
   }
@@ -360,16 +417,14 @@ TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
       << replayed_dbr.FormatSummary();
 
   // 3. Chained Stage 0 + Stage 1 composition across the 2,480 corpus cases.
-  ASSERT_FALSE(trace.final_machine_words.empty()) << "Test case: " << tc.test_name;
-  const std::vector<uint32_t> unpadded_words = hooks->RunGasMdAssemble(trace.final_asm_text);
-  ASSERT_FALSE(unpadded_words.empty()) << "Test case: " << tc.test_name;
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << "Test case: " << tc.test_name;
 
   const RightInverseResult stage0_res =
-      verifier->VerifyFinalAndGasStageRightInverse(unpadded_words);
+      verifier->VerifyFinalAndGasStageRightInverse(trace.stage0_input);
   EXPECT_TRUE(stage0_res.matches) << "Stage 0 right-inverse mismatch for " << tc.test_name << ":\n"
                                   << stage0_res.diff_detail;
 
-  const RtlControlFlowGraph stage0_lifted_dbr = InvertFinalAndGasFunction(unpadded_words);
+  const RtlControlFlowGraph stage0_lifted_dbr = InvertFinalAndGasFunction(trace.stage0_input);
   ASSERT_FALSE(stage0_lifted_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
   const RtlControlFlowGraph stage1_lifted_jump2 = InvertPass01DbrSchedule(stage0_lifted_dbr);
   ASSERT_FALSE(stage1_lifted_jump2.rpo_blocks.empty()) << "Test case: " << tc.test_name;

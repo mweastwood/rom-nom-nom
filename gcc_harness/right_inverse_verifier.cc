@@ -1,5 +1,6 @@
 #include "gcc_harness/right_inverse_verifier.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -287,6 +289,217 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
         absl::StrFormat("Machine words got [%s] != expected [%s]\nasm:\n%s", result.actual_summary,
                         result.expected_summary, combined_asm);
   }
+  return result;
+}
+
+RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
+    const Stage0FunctionInput& input_x) const {
+  RightInverseResult result;
+  result.expected_words = input_x.machine_words;
+  result.expected_summary = FormatWordsSummary(result.expected_words);
+
+  const RtlControlFlowGraph lifted_dbr = inverses_->InvertFinalAndGasFunction(input_x);
+  if (input_x.machine_words.empty() || lifted_dbr.rpo_blocks.empty()) {
+    result.matches = false;
+    result.diff_detail = "InvertFinalAndGasFunction(Stage0FunctionInput) returned empty CFG";
+    return result;
+  }
+
+  ctx_->MaterializeFromCfg(lifted_dbr);
+  const std::string combined_asm = hooks_->RunFinal();
+  const Stage0FunctionInput actual_stage0 = hooks_->RunGasMdAssembleWithMetadata(combined_asm);
+
+  result.actual_words = actual_stage0.machine_words;
+
+  // If `input_x` represents a linked N64 ROM function (`base_vram != 0` with
+  // already-linked relocations), resolve `actual_stage0.relocations` against
+  // `vram_to_symbol` / `func_<08x>` addresses before comparing `.text` words.
+  const bool is_linked_rom_input = input_x.base_vram != 0 && input_x.relocations.empty();
+  if (is_linked_rom_input) {
+    absl::flat_hash_map<std::string, uint32_t> sym_to_vram;
+    for (const auto& [vram, sym] : input_x.vram_to_symbol) {
+      sym_to_vram[sym] = vram;
+    }
+    auto resolve_sym_vram = [&](const std::string& sym, uint32_t* out_vram) -> bool {
+      if (auto it = sym_to_vram.find(sym); it != sym_to_vram.end()) {
+        *out_vram = it->second;
+        return true;
+      }
+      if (absl::StartsWith(sym, "func_") && sym.size() == 13) {
+        uint32_t parsed_vram = 0;
+        if (absl::SimpleHexAtoi(sym.substr(5), &parsed_vram)) {
+          *out_vram = parsed_vram;
+          return true;
+        }
+      }
+      return false;
+    };
+    absl::flat_hash_set<size_t> relocated_indices;
+    for (const Stage0Relocation& rel : actual_stage0.relocations) {
+      if (rel.word_index >= result.actual_words.size()) {
+        continue;
+      }
+      relocated_indices.insert(rel.word_index);
+      uint32_t sym_vram = 0;
+      if (!resolve_sym_vram(rel.symbol_name, &sym_vram)) {
+        continue;
+      }
+      const uint32_t full_addr = static_cast<uint32_t>(static_cast<int64_t>(sym_vram) + rel.addend);
+      if (rel.kind == Stage0RelocKind::kMips26) {
+        result.actual_words[rel.word_index] =
+            (result.actual_words[rel.word_index] & 0xfc000000u) | ((full_addr >> 2) & 0x03ffffffu);
+      } else if (rel.kind == Stage0RelocKind::kMipsHi16) {
+        const uint32_t hi = ((full_addr + 0x8000u) >> 16) & 0xffffu;
+        result.actual_words[rel.word_index] =
+            (result.actual_words[rel.word_index] & 0xffff0000u) | hi;
+      } else if (rel.kind == Stage0RelocKind::kMipsLo16) {
+        result.actual_words[rel.word_index] =
+            (result.actual_words[rel.word_index] & 0xffff0000u) | (full_addr & 0xffffu);
+      }
+    }
+    // Also relocate intra-function `j $L<n>` words (`op == 0x02`) to `input_x.base_vram`.
+    for (size_t idx = 0; idx < result.actual_words.size();) {
+      const uint32_t w = result.actual_words[idx];
+      if (!relocated_indices.contains(idx) && ((w >> 26) & 0x3fu) == 0x02u) {
+        const uint32_t local_word_idx = w & 0x03ffffffu;
+        const uint32_t target_vram = input_x.base_vram + local_word_idx * 4u;
+        result.actual_words[idx] = 0x08000000u | ((target_vram >> 2) & 0x03ffffffu);
+      }
+      const uint32_t op = (w >> 26) & 0x3fu;
+      const uint32_t funct = w & 0x3fu;
+      const bool has_delay =
+          (op == 0x01u || op == 0x02u || op == 0x03u || (op >= 0x04u && op <= 0x07u) ||
+           (op >= 0x14u && op <= 0x17u) || (op == 0x00u && (funct == 0x08u || funct == 0x09u)) ||
+           (op == 0x11u && ((w >> 21) & 0x1fu) == 0x08u));
+      idx += has_delay ? 2u : 1u;
+    }
+  }
+
+  // Account for 16-byte (4-word) `.text` section trailing alignment padding when
+  // `input_x.machine_words` carries section alignment `nop`s.
+  const size_t padded_actual_len = (result.actual_words.size() + 3u) & ~size_t{3u};
+  if (input_x.machine_words.size() > result.actual_words.size() &&
+      input_x.machine_words.size() == padded_actual_len) {
+    bool trailing_all_zero = true;
+    for (size_t i = result.actual_words.size(); i < input_x.machine_words.size(); ++i) {
+      if (input_x.machine_words[i] != 0x00000000u) {
+        trailing_all_zero = false;
+        break;
+      }
+    }
+    if (trailing_all_zero) {
+      result.actual_words.resize(padded_actual_len, 0x00000000u);
+    }
+  }
+
+  result.actual_summary = FormatWordsSummary(result.actual_words);
+  if (result.actual_words != result.expected_words) {
+    result.matches = false;
+    result.diff_detail =
+        absl::StrFormat("Machine words got [%s] != expected [%s]\nasm:\n%s", result.actual_summary,
+                        result.expected_summary, combined_asm);
+    return result;
+  }
+
+  if (actual_stage0.jump_tables.size() != input_x.jump_tables.size()) {
+    result.matches = false;
+    result.diff_detail =
+        absl::StrFormat("Jump table count got %zu != expected %zu\nasm:\n%s",
+                        actual_stage0.jump_tables.size(), input_x.jump_tables.size(), combined_asm);
+    return result;
+  }
+  for (size_t i = 0; i < input_x.jump_tables.size(); ++i) {
+    if (actual_stage0.jump_tables[i].target_word_indices !=
+        input_x.jump_tables[i].target_word_indices) {
+      result.matches = false;
+      result.diff_detail =
+          absl::StrFormat("Jump table %zu target_word_indices mismatch\nasm:\n%s", i, combined_asm);
+      return result;
+    }
+  }
+
+  if (!is_linked_rom_input) {
+    if (actual_stage0.relocations.size() != input_x.relocations.size()) {
+      result.matches = false;
+      result.diff_detail = absl::StrFormat("Relocation count got %zu != expected %zu\nasm:\n%s",
+                                           actual_stage0.relocations.size(),
+                                           input_x.relocations.size(), combined_asm);
+      return result;
+    }
+
+    absl::flat_hash_map<std::string, size_t> expected_jt_by_label;
+    for (size_t i = 0; i < input_x.jump_tables.size(); ++i) {
+      expected_jt_by_label[input_x.jump_tables[i].label_name] = i;
+    }
+    absl::flat_hash_map<std::string, size_t> actual_jt_by_label;
+    for (size_t i = 0; i < actual_stage0.jump_tables.size(); ++i) {
+      actual_jt_by_label[actual_stage0.jump_tables[i].label_name] = i;
+    }
+
+    absl::flat_hash_map<std::string, std::vector<uint32_t>> expected_cp_by_label;
+    for (const auto& cp : input_x.constant_pool) {
+      expected_cp_by_label[cp.label_name] = cp.words;
+    }
+    absl::flat_hash_map<std::string, std::vector<uint32_t>> actual_cp_by_label;
+    for (const auto& cp : actual_stage0.constant_pool) {
+      actual_cp_by_label[cp.label_name] = cp.words;
+    }
+
+    for (size_t i = 0; i < input_x.relocations.size(); ++i) {
+      const Stage0Relocation& exp_r = input_x.relocations[i];
+      const Stage0Relocation& act_r = actual_stage0.relocations[i];
+      if (act_r.word_index != exp_r.word_index || act_r.kind != exp_r.kind ||
+          act_r.addend != exp_r.addend) {
+        result.matches = false;
+        result.diff_detail = absl::StrFormat(
+            "Relocation %zu mismatch: actual(word=%zu, kind=%d, sym=%s, add=%d) != "
+            "expected(word=%zu, kind=%d, sym=%s, add=%d)\nasm:\n%s",
+            i, act_r.word_index, static_cast<int>(act_r.kind), act_r.symbol_name,
+            static_cast<int>(act_r.addend), exp_r.word_index, static_cast<int>(exp_r.kind),
+            exp_r.symbol_name, static_cast<int>(exp_r.addend), combined_asm);
+        return result;
+      }
+      if (auto exp_jt = expected_jt_by_label.find(exp_r.symbol_name);
+          exp_jt != expected_jt_by_label.end()) {
+        auto act_jt = actual_jt_by_label.find(act_r.symbol_name);
+        if (act_jt == actual_jt_by_label.end() ||
+            actual_stage0.jump_tables[act_jt->second].target_word_indices !=
+                input_x.jump_tables[exp_jt->second].target_word_indices) {
+          result.matches = false;
+          result.diff_detail = absl::StrFormat(
+              "Relocation %zu jump-table target mismatch for '%s' vs '%s'\nasm:\n%s", i,
+              act_r.symbol_name, exp_r.symbol_name, combined_asm);
+          return result;
+        }
+      } else if (auto exp_cp = expected_cp_by_label.find(exp_r.symbol_name);
+                 exp_cp != expected_cp_by_label.end()) {
+        auto act_cp = actual_cp_by_label.find(act_r.symbol_name);
+        // When an explicit `$LC*` 4-byte float pool load round-trips as symbolic
+        // `l.s $fN, $LC*` (where `GccContext` emits `$LC*` as a symbolic reference),
+        // accept exact symbol match `$LC* == $LC*` as well as matching pool words.
+        const bool pool_words_match =
+            (act_cp != actual_cp_by_label.end() && act_cp->second == exp_cp->second);
+        const bool unresolved_symbolic_pool_ref =
+            (act_cp == actual_cp_by_label.end() && act_r.symbol_name == exp_r.symbol_name &&
+             !absl::StartsWith(exp_r.symbol_name, "$LC_lit_"));
+        if (!pool_words_match && !unresolved_symbolic_pool_ref) {
+          result.matches = false;
+          result.diff_detail =
+              absl::StrFormat("Relocation %zu constant-pool mismatch for '%s' vs '%s'\nasm:\n%s", i,
+                              act_r.symbol_name, exp_r.symbol_name, combined_asm);
+          return result;
+        }
+      } else if (act_r.symbol_name != exp_r.symbol_name) {
+        result.matches = false;
+        result.diff_detail =
+            absl::StrFormat("Relocation %zu symbol mismatch: got '%s' != expected '%s'\nasm:\n%s",
+                            i, act_r.symbol_name, exp_r.symbol_name, combined_asm);
+        return result;
+      }
+    }
+  }
+
+  result.matches = true;
   return result;
 }
 

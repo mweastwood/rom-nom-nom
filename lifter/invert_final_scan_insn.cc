@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -13,6 +14,7 @@
 
 #include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -22,6 +24,7 @@
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -1501,6 +1504,8 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
   return "";
 }
 
+namespace {
+
 bool ExprContainsCall(const RtlExpr& expr) {
   bool found = false;
   expr.Visit([&](const RtlExpr& node) {
@@ -1657,8 +1662,47 @@ void RewriteDataLabelRefsInAst(RtlExpr* expr,
   }
 }
 
-RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> asm_lines,
-                                                  const RtlSidebandState& sideband) {
+bool ExprReferencesLabelToken(const RtlExpr& expr, std::string_view token) {
+  if (expr.op == RtlOp::kLabelRef && expr.str_val == token) {
+    return true;
+  }
+  for (const RtlExpr& child : expr.children) {
+    if (ExprReferencesLabelToken(child, token)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void RewriteSpecificLabelRefInAst(RtlExpr* expr, std::string_view from_token,
+                                  std::string_view to_token, bool* modified) {
+  if (expr->op == RtlOp::kLabelRef && expr->children.empty() && expr->str_val == from_token) {
+    *modified = true;
+    *expr = RtlExpr::MakeSymbolicLabelRef(std::string(to_token), expr->mode);
+    return;
+  }
+  for (RtlExpr& child : expr->children) {
+    RewriteSpecificLabelRefInAst(&child, from_token, to_token, modified);
+  }
+}
+
+bool IsUnassignedIndirectJumpBlock(const RtlBasicBlock& blk) {
+  if (blk.instructions.empty() || !blk.addr_vec_targets.empty()) {
+    return false;
+  }
+  auto last_parsed = ParsePatternAndNotes(blk.instructions.back());
+  if (!last_parsed.ok()) {
+    return false;
+  }
+  const RtlExpr* core = UnwrapActiveControlPattern(last_parsed->pattern);
+  return core->IsSet() && core->SetDest().op == RtlOp::kPc && core->SetSrc().IsReg();
+}
+
+}  // namespace
+
+RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
+    absl::Span<const std::string> asm_lines, const RtlSidebandState& sideband,
+    absl::Span<const Stage0ResolvedJumpTable> jump_tables) {
   if (asm_lines.empty()) {
     return {};
   }
@@ -1839,6 +1883,104 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(absl::Span<const std::string> 
     }
     if (b + 1 < blocks.size()) {
       blocks[b].successors = {b + 1};
+    }
+  }
+
+  for (const Stage0ResolvedJumpTable& jt : jump_tables) {
+    if (jt.table_label_token.empty() || jt.target_labels.empty()) {
+      continue;
+    }
+    std::vector<size_t> resolved_targets;
+    resolved_targets.reserve(jt.target_labels.size());
+    bool all_resolved = true;
+    for (const std::string& raw_lbl : jt.target_labels) {
+      std::string_view key = raw_lbl;
+      if (absl::StartsWith(key, "$L")) {
+        key.remove_prefix(1);
+      }
+      auto it = label_to_block.find(key);
+      if (it == label_to_block.end()) {
+        all_resolved = false;
+        break;
+      }
+      resolved_targets.push_back(it->second);
+    }
+    if (!all_resolved || resolved_targets.empty()) {
+      continue;
+    }
+
+    std::vector<size_t> ref_blocks;
+    for (size_t b = 0; b < blocks.size(); ++b) {
+      for (const std::string& pat : blocks[b].instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (parsed.ok() && ExprReferencesLabelToken(parsed->pattern, jt.table_label_token)) {
+          ref_blocks.push_back(b);
+          break;
+        }
+      }
+    }
+
+    std::optional<size_t> matched_block;
+    for (size_t b : ref_blocks) {
+      if (IsUnassignedIndirectJumpBlock(blocks[b])) {
+        matched_block = b;
+        break;
+      }
+    }
+    if (!matched_block.has_value() && !ref_blocks.empty()) {
+      std::queue<size_t> bfs;
+      absl::flat_hash_set<size_t> visited;
+      for (size_t b : ref_blocks) {
+        bfs.push(b);
+        visited.insert(b);
+      }
+      while (!bfs.empty()) {
+        const size_t cur = bfs.front();
+        bfs.pop();
+        if (IsUnassignedIndirectJumpBlock(blocks[cur])) {
+          matched_block = cur;
+          break;
+        }
+        for (size_t succ : blocks[cur].successors) {
+          if (succ < blocks.size() && visited.insert(succ).second) {
+            bfs.push(succ);
+          }
+        }
+      }
+    }
+    if (!matched_block.has_value()) {
+      for (size_t b = 0; b < blocks.size(); ++b) {
+        if (IsUnassignedIndirectJumpBlock(blocks[b])) {
+          matched_block = b;
+          break;
+        }
+      }
+    }
+    if (!matched_block.has_value()) {
+      continue;
+    }
+
+    const size_t disp_b = *matched_block;
+    blocks[disp_b].addr_vec_targets = std::move(resolved_targets);
+    const std::string tbl_lbl = absl::StrFormat("__tbl_%zu", disp_b);
+    for (size_t b = 0; b < blocks.size(); ++b) {
+      bool modified_blk = false;
+      for (std::string& pat : blocks[b].instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (!parsed.ok()) {
+          continue;
+        }
+        bool modified_insn = false;
+        RewriteSpecificLabelRefInAst(&parsed->pattern, jt.table_label_token, tbl_lbl,
+                                     &modified_insn);
+        if (modified_insn) {
+          pat = FormatAstExpr(parsed->pattern);
+          modified_blk = true;
+        }
+      }
+      if (modified_blk) {
+        blocks[b].SyncRtlInsnsFromInstructions();
+      }
     }
   }
 

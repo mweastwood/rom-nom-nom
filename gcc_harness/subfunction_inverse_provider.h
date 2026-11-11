@@ -168,10 +168,16 @@ class SubfunctionInverseProvider {
   }
 
   // Whole-stage inverse for `final` + `md_assemble`: lifts a sequence of
-  // 32-bit machine words `machine_words_x` into its `.dbr` `RtlControlFlowGraph`.
+  // 32-bit machine words `machine_words_x` (or full `Stage0FunctionInput`
+  // including relocations, `.rodata` jump tables, constant pools, and symbol
+  // maps) into its `.dbr` `RtlControlFlowGraph`.
   virtual RtlControlFlowGraph InvertFinalAndGasFunction(
       absl::Span<const uint32_t> /*machine_words_x*/) const {
     return {};
+  }
+
+  virtual RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x) const {
+    return InvertFinalAndGasFunction(absl::MakeConstSpan(input_x.machine_words));
   }
 
   // ---------------------------------------------------------------------------

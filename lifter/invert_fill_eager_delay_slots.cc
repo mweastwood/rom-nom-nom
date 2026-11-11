@@ -643,6 +643,46 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
 
     const std::string slot_pat_only_sexpr = slot_pat_notes->pattern.ToSexprString();
     const auto preds = BuildPredecessors(out);
+    if (is_cond_jump && jump_sub.flags.unchanging && blk.successors.size() == 2 &&
+        b + 1 < out.rpo_blocks.size() && preds[target_b].size() > 1) {
+      // In `reorg.c`, any non-owning target steal in `fill_eager_delay_slots`
+      // (`fill_slots_from_thread` with `own_target == 0` or
+      // `steal_delay_list_from_target`) redirects the branch to
+      // `get_label_before(new_thread)` where `new_thread` comes from
+      // `next_active_insn(...)`, which skips `USE` and `CLOBBER` insns.
+      // Thus if a shared `target_b` begins with `(use ...)` or `(clobber ...)`
+      // before a real active insn (and is not Case T1), `fill_eager_delay_slots`
+      // could never have redirected `b` to `target_b`: this `SEQUENCE` came
+      // from `fill_simple_delay_slots:optimize_skip` Form 2 (`reorg.c:1168-1172`).
+      const auto& ft_blk = out.rpo_blocks[b + 1];
+      const auto& tgt_blk = out.rpo_blocks[target_b];
+      bool tgt_starts_with_use_or_clobber_before_active = false;
+      bool saw_leading_use_or_clobber = false;
+      for (const std::string& t_insn : tgt_blk.instructions) {
+        auto tp = ParsePatternAndNotes(t_insn);
+        if (!tp.ok() || IsLoopHeaderNote(tp->pattern)) {
+          continue;
+        }
+        if (tp->pattern.op == RtlOp::kUse || tp->pattern.op == RtlOp::kClobber) {
+          saw_leading_use_or_clobber = true;
+          continue;
+        }
+        if (IsRealActiveInsn(tp->pattern)) {
+          tgt_starts_with_use_or_clobber_before_active = saw_leading_use_or_clobber;
+        }
+        break;
+      }
+      if (tgt_starts_with_use_or_clobber_before_active && !ft_blk.has_label &&
+          preds[b + 1].size() == 1 && preds[b + 1][0] == b && ft_blk.instructions.size() == 1) {
+        auto ft_parsed = ParsePatternAndNotes(ft_blk.instructions[0]);
+        if (ft_parsed.ok() &&
+            ((IsSimpleUncondJumpExpr(ft_parsed->pattern) && ft_blk.successors.size() == 1 &&
+              ft_blk.successors[0] == target_b) ||
+             (IsReturnExpr(ft_parsed->pattern) && ft_blk.successors.empty()))) {
+          continue;
+        }
+      }
+    }
     const bool pred_falls_through_to_target =
         target_b > 0 && (target_b - 1 != b) && BlockFallsThroughToNext(out, preds, target_b - 1);
 

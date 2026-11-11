@@ -37,6 +37,81 @@ struct PrologueEpilogueFrameSpec {
   bool operator!=(const PrologueEpilogueFrameSpec& other) const { return !(*this == other); }
 };
 
+// Stage 0 relocation kinds produced by GAS 2.6 (`fixS`) or object-file readers.
+enum class Stage0RelocKind {
+  kMips26,       // R_MIPS_26 (`jal` / external `j`)
+  kMipsHi16,     // R_MIPS_HI16 (`lui %hi(sym + addend)`)
+  kMipsLo16,     // R_MIPS_LO16 (`addiu` / load / store `%lo(sym + addend)`)
+  kMipsGpRel16,  // R_MIPS_GPREL16 (`$gp`-relative small data)
+  kMips32,       // R_MIPS_32 (`.word` data / jump-table entries)
+  kMipsLiteral,  // R_MIPS_LITERAL (`.lit4` / `.lit8` float literal section)
+};
+
+// Relocation targeting a 32-bit instruction word in `Stage0FunctionInput::machine_words`.
+struct Stage0Relocation {
+  size_t word_index = 0;
+  Stage0RelocKind kind = Stage0RelocKind::kMips32;
+  std::string symbol_name;
+  int64_t addend = 0;
+
+  bool operator==(const Stage0Relocation& other) const {
+    return word_index == other.word_index && kind == other.kind &&
+           symbol_name == other.symbol_name && addend == other.addend;
+  }
+  bool operator!=(const Stage0Relocation& other) const { return !(*this == other); }
+};
+
+// `.rodata`/`.rdata` switch jump table referencing word indices in `.text`.
+struct Stage0JumpTable {
+  std::string label_name;
+  std::vector<size_t> target_word_indices;
+
+  bool operator==(const Stage0JumpTable& other) const {
+    return label_name == other.label_name && target_word_indices == other.target_word_indices;
+  }
+  bool operator!=(const Stage0JumpTable& other) const { return !(*this == other); }
+};
+
+// Resolved `.rodata` switch jump table mapping its `.text` table-reference token
+// (e.g., `"L100000"`) to the ordered target local-label tokens (`"L2"`, `"L5"`, ...).
+struct Stage0ResolvedJumpTable {
+  std::string table_label_token;
+  std::vector<std::string> target_labels;
+};
+
+// Constant-pool entry in `.rdata`/`.rodata`/`.sdata`/`.lit4`/`.lit8` (e.g., `$LC*` or
+// `li.s`/`li.d`).
+struct Stage0ConstantPoolEntry {
+  std::string label_name;
+  std::string section_name;
+  size_t byte_size = 0;
+  std::vector<uint32_t> words;
+
+  bool operator==(const Stage0ConstantPoolEntry& other) const {
+    return label_name == other.label_name && section_name == other.section_name &&
+           byte_size == other.byte_size && words == other.words;
+  }
+  bool operator!=(const Stage0ConstantPoolEntry& other) const { return !(*this == other); }
+};
+
+// Full Stage 0 function input supporting both relocatable `.o` compilation traces
+// and linked N64 ROM binaries (`base_vram` + `vram_to_symbol` + `.rodata` slices).
+struct Stage0FunctionInput {
+  std::vector<uint32_t> machine_words;
+  uint32_t base_vram = 0;
+  std::vector<Stage0Relocation> relocations;
+  std::vector<Stage0JumpTable> jump_tables;
+  std::vector<Stage0ConstantPoolEntry> constant_pool;
+  absl::flat_hash_map<uint32_t, std::string> vram_to_symbol;
+
+  bool operator==(const Stage0FunctionInput& other) const {
+    return machine_words == other.machine_words && base_vram == other.base_vram &&
+           relocations == other.relocations && jump_tables == other.jump_tables &&
+           constant_pool == other.constant_pool && vram_to_symbol == other.vram_to_symbol;
+  }
+  bool operator!=(const Stage0FunctionInput& other) const { return !(*this == other); }
+};
+
 // Pre-substitution arguments `(target_expr, from_reg, to_expr)` recovered by
 // `InvertSubst` for `combine.c:subst`.
 struct SubstInverseSpec {

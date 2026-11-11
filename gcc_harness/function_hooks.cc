@@ -7,11 +7,15 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "core/rtl_sexpr_utils.h"
@@ -132,6 +136,7 @@ int num_delay_slots(rtx_def* insn);
 
 // Stage 0: Final & MIPS backend.
 void thread_prologue_and_epilogue_insns(rtx_def* f);
+void init_insn_lengths();
 void shorten_branches(rtx_def* first);
 void final_start_function(rtx_def* first, FILE* file, int optimize);
 void final(rtx_def* first, FILE* file, int optimize, int prescan);
@@ -169,6 +174,57 @@ struct GasExpressionS {
   char pad[23];
 };
 
+struct GasRealExpressionS {
+  int X_op;
+  void* X_add_symbol;
+  void* X_op_symbol;
+  long X_add_number;
+  int X_unsigned;
+};
+
+struct GasSymbol {
+  void* bsym;
+  GasRealExpressionS sy_value;
+  GasSymbol* sy_next;
+  GasSymbol* sy_previous;
+  GasFrag* sy_frag;
+  unsigned int flags;
+};
+
+struct GasFix {
+  char fx_pcrel_adjust;
+  unsigned char fx_size;
+  unsigned fx_pcrel : 1;
+  unsigned fx_plt : 1;
+  unsigned fx_im_disp : 2;
+  unsigned fx_tcbit : 1;
+  unsigned fx_done : 1;
+  unsigned fx_no_overflow : 1;
+  GasFrag* fx_frag;
+  long fx_where;
+  GasSymbol* fx_addsy;
+  GasSymbol* fx_subsy;
+  unsigned long fx_offset;
+  GasFix* fx_next;
+  void* fx_bit_fixP;
+  int fx_r_type;
+  unsigned long fx_addnumber;
+  char* fx_file;
+  unsigned fx_line;
+};
+
+struct GasFrchain {
+  GasFrag* frch_root;
+  GasFrag* frch_last;
+  GasFrchain* frch_next;
+  void* frch_seg;
+  int frch_subseg;
+  GasFix* fix_root;
+  GasFix* fix_tail;
+};
+
+extern void* gas_text_section;
+extern GasFrchain* frchain_now;
 extern GasFrag* frag_now;
 extern int mips_noreorder;
 extern int mips_optimize;
@@ -183,6 +239,11 @@ extern GasExpressionS offset_expr;
 extern int imm_reloc;
 extern int offset_reloc;
 
+void* subseg_new(const char* name, int subseg);
+void subseg_set(void* seg, int subseg);
+const char* S_GET_NAME(GasSymbol* s);
+void* S_GET_SEGMENT(GasSymbol* s);
+unsigned long S_GET_VALUE(GasSymbol* s);
 void frag_init();
 void frag_wane(GasFrag* frag);
 void frag_new(int old_frags_var_max_size);
@@ -606,11 +667,50 @@ Rtx FindTargetLabelInPattern(Rtx x) {
   return nullptr;
 }
 
+void IncrementAllLabelRefUsesInRtx(Rtx x) {
+  if (x == nullptr) {
+    return;
+  }
+  const int code = x->code;
+  if (code == kLabelRef) {
+    Rtx lbl = x->fld[0].rtx;
+    if (lbl != nullptr && lbl->code == kCodeLabel) {
+      lbl->fld[5].rtint += 1;
+    }
+    return;
+  }
+  if (code == kAddrVec || code == kAddrDiffVec) {
+    // Match `jump.c:mark_jump_label` (`case ADDR_VEC` / `case ADDR_DIFF_VEC`):
+    // walk the target vector elements (`eltnum = 0` for `ADDR_VEC`, `1` for
+    // `ADDR_DIFF_VEC`), not operand 0 of `ADDR_DIFF_VEC`.
+    const int elt_idx = (code == kAddrDiffVec) ? 1 : 0;
+    if (x->fld[elt_idx].rtvec != nullptr) {
+      Rtvec vec = x->fld[elt_idx].rtvec;
+      for (int j = 0; j < vec->num_elem; ++j) {
+        IncrementAllLabelRefUsesInRtx(vec->elem[j].rtx);
+      }
+    }
+    return;
+  }
+  const char* fmt = rtx_format[code];
+  const int len = rtx_length[code];
+  for (int i = 0; i < len && fmt[i] != '\0'; ++i) {
+    if (fmt[i] == 'e') {
+      IncrementAllLabelRefUsesInRtx(x->fld[i].rtx);
+    } else if (fmt[i] == 'E' && x->fld[i].rtvec != nullptr) {
+      Rtvec vec = x->fld[i].rtvec;
+      for (int j = 0; j < vec->num_elem; ++j) {
+        IncrementAllLabelRefUsesInRtx(vec->elem[j].rtx);
+      }
+    }
+  }
+}
+
 // Recomputes `JUMP_LABEL(insn)` (`insn->fld[7].rtx`) and `LABEL_NUSES(label)`
 // (`label->fld[5].rtint`) across the instruction chain. Note that
 // `flow.c:find_basic_blocks` overwrites `label->fld[5]` (`LABEL_REFS`) with a
-// pointer, so any pass that reads `LABEL_NUSES` (`jump.c`, `reorg.c`) requires
-// integer reference counts to be restored after `find_basic_blocks`.
+// pointer, so any pass that reads `LABEL_NUSES` (`jump.c`, `cse.c`, `reorg.c`)
+// requires integer reference counts to be restored after `find_basic_blocks`.
 void RefreshJumpLabelsAndNuses(Rtx first) {
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
     if (insn->code == kCodeLabel) {
@@ -619,24 +719,41 @@ void RefreshJumpLabelsAndNuses(Rtx first) {
   }
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
     if (insn->code == kJumpInsn) {
-      Rtx target = FindTargetLabelInPattern(insn->fld[3].rtx);
-      insn->fld[7].rtx = target;
-      if (target != nullptr && target->code == kCodeLabel) {
-        target->fld[5].rtint += 1;
+      Rtx pat = insn->fld[3].rtx;
+      if (pat != nullptr && (pat->code == kAddrVec || pat->code == kAddrDiffVec)) {
+        // `jump.c:3230`: never set `JUMP_LABEL` on an `ADDR_VEC` / `ADDR_DIFF_VEC`,
+        // and increment `LABEL_NUSES` for every element in the vector.
+        insn->fld[7].rtx = nullptr;
+        IncrementAllLabelRefUsesInRtx(pat);
+      } else {
+        Rtx target = FindTargetLabelInPattern(pat);
+        insn->fld[7].rtx = target;
+        IncrementAllLabelRefUsesInRtx(pat);
       }
     } else if (insn->code == kInsn && insn->fld[3].rtx != nullptr &&
                insn->fld[3].rtx->code == kSequence) {
       Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
-      if (vec != nullptr && vec->num_elem > 0) {
-        Rtx first_inner = vec->elem[0].rtx;
-        if (first_inner != nullptr && first_inner->code == kJumpInsn) {
-          Rtx target = FindTargetLabelInPattern(first_inner->fld[3].rtx);
-          first_inner->fld[7].rtx = target;
-          if (target != nullptr && target->code == kCodeLabel) {
-            target->fld[5].rtint += 1;
+      if (vec != nullptr) {
+        for (int i = 0; i < vec->num_elem; ++i) {
+          Rtx inner = vec->elem[i].rtx;
+          if (inner == nullptr) {
+            continue;
+          }
+          if (inner->code == kJumpInsn) {
+            Rtx pat = inner->fld[3].rtx;
+            if (pat != nullptr && (pat->code == kAddrVec || pat->code == kAddrDiffVec)) {
+              inner->fld[7].rtx = nullptr;
+            } else {
+              inner->fld[7].rtx = FindTargetLabelInPattern(pat);
+            }
+          }
+          if (inner->code == kInsn || inner->code == kJumpInsn || inner->code == kCallInsn) {
+            IncrementAllLabelRefUsesInRtx(inner->fld[3].rtx);
           }
         }
       }
+    } else if (insn->code == kInsn || insn->code == kCallInsn) {
+      IncrementAllLabelRefUsesInRtx(insn->fld[3].rtx);
     }
   }
 }
@@ -742,6 +859,49 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
       }
     }
   };
+  std::vector<std::pair<Rtx, Rtx>> saved_split_hilo_pats;
+  auto stash_if_split_hilo = [&](Rtx r) {
+    if (r == nullptr || r->code != kInsn || r->fld[3].rtx == nullptr) {
+      return;
+    }
+    Rtx pat = r->fld[3].rtx;
+    if (pat->code != kSet || pat->fld[0].rtx == nullptr || pat->fld[1].rtx == nullptr) {
+      return;
+    }
+    auto has_high_or_losum = [](Rtx e) {
+      if (e == nullptr || rtx_name[e->code] == nullptr) {
+        return false;
+      }
+      const std::string_view cname = rtx_name[e->code];
+      if (cname == "high" || cname == "lo_sum") {
+        return true;
+      }
+      if ((cname == "sign_extend" || cname == "zero_extend") && e->fld[0].rtx != nullptr) {
+        e = e->fld[0].rtx;
+      }
+      if (e->code == kMem && e->fld[0].rtx != nullptr && rtx_name[e->fld[0].rtx->code] != nullptr) {
+        return std::string_view(rtx_name[e->fld[0].rtx->code]) == "lo_sum";
+      }
+      return false;
+    };
+    if (has_high_or_losum(pat->fld[0].rtx) || has_high_or_losum(pat->fld[1].rtx)) {
+      saved_split_hilo_pats.emplace_back(r, pat);
+      r->fld[3].rtx = gen_rtx(kUse, kVoidMode, gen_rtx(kConstInt, kVoidMode, 0));
+      r->fld[4].rtint = -1;
+    }
+  };
+  for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    stash_if_split_hilo(insn);
+    if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+        insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence &&
+        insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+      Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+      for (int i = 0; i < vec->num_elem; ++i) {
+        stash_if_split_hilo(vec->elem[i].rtx);
+      }
+    }
+  }
+
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     memoize_with_opt_fallback(insn);
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
@@ -754,6 +914,10 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
     }
   }
   shorten_branches(head);
+  for (const auto& [r, orig_pat] : saved_split_hilo_pats) {
+    r->fld[3].rtx = orig_pat;
+    r->fld[4].rtint = -1;
+  }
   compute_frame_size(get_frame_size());
 
   last_ignored_compare = nullptr;
@@ -806,6 +970,149 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
   reload_completed = 1;
   if (line_note_exists == nullptr) {
     line_note_exists = AllocZeroed<char>(1024);
+  }
+
+  auto format_split_sym_expr = [](Rtx e, auto& self) -> std::string {
+    if (e == nullptr || rtx_name[e->code] == nullptr) {
+      return "";
+    }
+    const std::string_view cname = rtx_name[e->code];
+    if (cname == "symbol_ref" && e->fld[0].rtstr != nullptr) {
+      return e->fld[0].rtstr;
+    }
+    if (cname == "label_ref" && e->fld[0].rtx != nullptr) {
+      return absl::StrFormat("$L%d", e->fld[0].rtx->fld[3].rtint);
+    }
+    if (cname == "const" && e->fld[0].rtx != nullptr && rtx_name[e->fld[0].rtx->code] != nullptr &&
+        std::string_view(rtx_name[e->fld[0].rtx->code]) == "plus") {
+      Rtx p = e->fld[0].rtx;
+      const std::string base = self(p->fld[0].rtx, self);
+      if (!base.empty() && p->fld[1].rtx != nullptr && p->fld[1].rtx->code == kConstInt) {
+        const int off = p->fld[1].rtx->fld[0].rtint;
+        if (off == 0) return base;
+        if (off > 0) return absl::StrFormat("%s+%d", base, off);
+        return absl::StrFormat("%s%d", base, off);
+      }
+    }
+    return "";
+  };
+
+  auto format_split_hilo_pat = [&](Rtx pat) -> std::string {
+    if (pat == nullptr || pat->code != kSet || pat->fld[0].rtx == nullptr ||
+        pat->fld[1].rtx == nullptr) {
+      return "";
+    }
+    Rtx dst = pat->fld[0].rtx;
+    Rtx src = pat->fld[1].rtx;
+    auto unwrap_reg = [](Rtx r) -> int {
+      if (r == nullptr) return -1;
+      if (r->code == kSubreg && r->fld[0].rtx != nullptr) r = r->fld[0].rtx;
+      if (r->code == kReg) return r->fld[0].rtint;
+      return -1;
+    };
+    const std::string_view src_code = (rtx_name[src->code] != nullptr) ? rtx_name[src->code] : "";
+    if (dst->code == kReg && src_code == "high" && src->fld[0].rtx != nullptr) {
+      const std::string sym = format_split_sym_expr(src->fld[0].rtx, format_split_sym_expr);
+      if (!sym.empty()) {
+        return absl::StrFormat("lui\t$%d,%%hi(%s)", dst->fld[0].rtint, sym);
+      }
+    }
+    if (dst->code == kReg && src_code == "lo_sum" && src->fld[0].rtx != nullptr &&
+        src->fld[0].rtx->code == kReg && src->fld[1].rtx != nullptr) {
+      const std::string sym = format_split_sym_expr(src->fld[1].rtx, format_split_sym_expr);
+      if (!sym.empty()) {
+        const char* mnem = (dst->mode == kDiMode) ? "daddiu" : "addiu";
+        return absl::StrFormat("%s\t$%d,$%d,%%lo(%s)", mnem, dst->fld[0].rtint,
+                               src->fld[0].rtx->fld[0].rtint, sym);
+      }
+    }
+    bool is_sign_ext = (src_code == "sign_extend");
+    bool is_zero_ext = (src_code == "zero_extend");
+    Rtx load_mem = (is_sign_ext || is_zero_ext) ? src->fld[0].rtx : src;
+    if (dst->code == kReg && load_mem != nullptr && load_mem->code == kMem &&
+        load_mem->fld[0].rtx != nullptr && rtx_name[load_mem->fld[0].rtx->code] != nullptr &&
+        std::string_view(rtx_name[load_mem->fld[0].rtx->code]) == "lo_sum") {
+      Rtx losum = load_mem->fld[0].rtx;
+      const int breg = unwrap_reg(losum->fld[0].rtx);
+      const std::string sym = format_split_sym_expr(losum->fld[1].rtx, format_split_sym_expr);
+      const int dreg = dst->fld[0].rtint;
+      if (breg >= 0 && !sym.empty()) {
+        const std::string_view mname =
+            (mode_name[load_mem->mode] != nullptr) ? mode_name[load_mem->mode] : "";
+        if (dreg >= 32 && dreg < 64) {
+          return absl::StrFormat("%s\t$f%d,%%lo(%s)($%d)", mname == "DF" ? "l.d" : "l.s", dreg - 32,
+                                 sym, breg);
+        }
+        const char* mnem = "lw";
+        if (mname == "QI") {
+          mnem = is_sign_ext ? "lb" : "lbu";
+        } else if (mname == "HI") {
+          mnem = is_sign_ext ? "lh" : "lhu";
+        } else if (mname == "SI") {
+          mnem = (is_zero_ext && dst->mode == kDiMode) ? "lwu" : "lw";
+        } else if (mname == "DI") {
+          mnem = "ld";
+        }
+        return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", mnem, dreg, sym, breg);
+      }
+    }
+    if (dst->code == kMem && dst->fld[0].rtx != nullptr &&
+        rtx_name[dst->fld[0].rtx->code] != nullptr &&
+        std::string_view(rtx_name[dst->fld[0].rtx->code]) == "lo_sum") {
+      Rtx losum = dst->fld[0].rtx;
+      const int breg = unwrap_reg(losum->fld[0].rtx);
+      const std::string sym = format_split_sym_expr(losum->fld[1].rtx, format_split_sym_expr);
+      int sreg = unwrap_reg(src);
+      if (sreg < 0 && src->code == kConstInt && src->fld[0].rtint == 0) {
+        sreg = 0;
+      }
+      if (breg >= 0 && sreg >= 0 && !sym.empty()) {
+        const std::string_view mname =
+            (mode_name[dst->mode] != nullptr) ? mode_name[dst->mode] : "";
+        if (sreg >= 32 && sreg < 64) {
+          return absl::StrFormat("%s\t$f%d,%%lo(%s)($%d)", mname == "DF" ? "s.d" : "s.s", sreg - 32,
+                                 sym, breg);
+        }
+        const char* mnem = "sw";
+        if (mname == "QI") {
+          mnem = "sb";
+        } else if (mname == "HI") {
+          mnem = "sh";
+        } else if (mname == "DI" || mname == "DF") {
+          mnem = "sd";
+        }
+        return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", mnem, sreg, sym, breg);
+      }
+    }
+    return "";
+  };
+
+  if (insn->code == kInsn && insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code != kSequence) {
+    const std::string split_asm = format_split_hilo_pat(insn->fld[3].rtx);
+    if (!split_asm.empty()) {
+      if (next_insn_out != nullptr) {
+        *next_insn_out = insn->fld[2].rtx;
+      }
+      return (prescan > 0) ? "" : absl::StrCat("\t", split_asm, "\n");
+    }
+  }
+
+  Rtx seq_split_slot_insn = nullptr;
+  Rtx seq_split_slot_orig_pat = nullptr;
+  std::string seq_split_slot_asm;
+  if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+      insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence &&
+      insn->fld[3].rtx->fld[0].rtvec != nullptr && insn->fld[3].rtx->fld[0].rtvec->num_elem == 2) {
+    Rtx slot = insn->fld[3].rtx->fld[0].rtvec->elem[1].rtx;
+    if (slot != nullptr && slot->code == kInsn && slot->fld[3].rtx != nullptr) {
+      seq_split_slot_asm = format_split_hilo_pat(slot->fld[3].rtx);
+      if (!seq_split_slot_asm.empty()) {
+        seq_split_slot_insn = slot;
+        seq_split_slot_orig_pat = slot->fld[3].rtx;
+        slot->fld[3].rtx = gen_rtx(kUse, kVoidMode, gen_rtx(kConstInt, kVoidMode, 0));
+        slot->fld[4].rtint = -1;
+      }
+    }
   }
 
   auto memoize_with_opt_fallback = [](Rtx r) {
@@ -864,6 +1171,14 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
 
   std::string out(buf != nullptr ? buf : "", len);
   std::free(buf);
+  if (seq_split_slot_insn != nullptr) {
+    seq_split_slot_insn->fld[3].rtx = seq_split_slot_orig_pat;
+    seq_split_slot_insn->fld[4].rtint = -1;
+    const size_t nop_pos = out.rfind("\tnop\n");
+    if (nop_pos != std::string::npos) {
+      out.replace(nop_pos, 5, absl::StrCat("\t", seq_split_slot_asm, "\n"));
+    }
+  }
   return out;
 }
 
@@ -946,7 +1261,20 @@ std::string FunctionHooks::RunFunctionPrologueEpilogue(int frame_size, uint32_t 
 }
 
 std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text) {
+  return RunGasMdAssembleWithMetadata(asm_text).machine_words;
+}
+
+Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view asm_text) {
   constexpr int kGasOpAbsent = 1;
+  constexpr int kBfdReloc32 = 2;
+  constexpr int kBfdReloc16PcrelS2 = 44;
+  constexpr int kBfdRelocGpRel16 = 48;
+  constexpr int kBfdRelocMipsJmp = 86;
+  constexpr int kBfdRelocHi16 = 87;
+  constexpr int kBfdRelocHi16S = 88;
+  constexpr int kBfdRelocLo16 = 89;
+  constexpr int kBfdRelocMipsLiteral = 92;
+
   struct PendingBranch {
     size_t word_index = 0;
     std::string target_label;
@@ -957,15 +1285,28 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     uint32_t mask = 0;
     uint32_t value = 0;
   };
+  struct RawDataBlock {
+    std::string label_name;
+    std::string section_name;
+    std::vector<std::string> symbol_words;
+    std::vector<uint32_t> int_words;
+  };
 
+  Stage0FunctionInput out;
   absl::flat_hash_map<std::string, size_t> label_word_index;
   std::vector<PendingBranch> pending_branches;
   std::vector<PendingNumericFixup> pending_numeric_fixups;
-  std::vector<uint32_t> words;
+  std::vector<RawDataBlock> raw_data_blocks;
 
+  subseg_set(gas_text_section, 0);
   frag_wane(frag_now);
   frag_new(0);
   frag_grow(8192);
+  GasFrchain* const text_frchain = frchain_now;
+  if (text_frchain != nullptr) {
+    text_frchain->fix_root = nullptr;
+    text_frchain->fix_tail = nullptr;
+  }
   GasFrag* const first_frag = frag_now;
   auto count_emitted_words = [first_frag]() -> size_t {
     size_t total = 0;
@@ -994,6 +1335,22 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
   mips_no_prev_insn();
 
   uint64_t dummy_sym[8] = {};
+  std::string current_section = ".text";
+  size_t active_data_idx = static_cast<size_t>(-1);
+
+  auto parse_int_word = [](std::string_view tok, uint32_t* out_word) -> bool {
+    std::string s(absl::StripAsciiWhitespace(tok));
+    if (s.empty()) {
+      return false;
+    }
+    char* endptr = nullptr;
+    const long long val = std::strtoll(s.c_str(), &endptr, 0);
+    if (endptr == s.c_str() || *endptr != '\0') {
+      return false;
+    }
+    *out_word = static_cast<uint32_t>(static_cast<int64_t>(val));
+    return true;
+  };
 
   for (std::string_view raw_line : absl::StrSplit(asm_text, '\n')) {
     size_t comment_pos = raw_line.find('#');
@@ -1015,21 +1372,127 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
       if (before.find_first_of(" \t,()") != std::string_view::npos) {
         break;
       }
-      mips_emit_delays();
-      label_word_index[std::string(before)] = count_emitted_words();
-      mips_define_label(dummy_sym);
+      if (current_section == ".text") {
+        subseg_set(gas_text_section, 0);
+        mips_emit_delays();
+        label_word_index[std::string(before)] = count_emitted_words();
+        mips_define_label(dummy_sym);
+      } else {
+        raw_data_blocks.push_back(RawDataBlock{
+            .label_name = std::string(before),
+            .section_name = current_section,
+        });
+        active_data_idx = raw_data_blocks.size() - 1;
+      }
       line = absl::StripAsciiWhitespace(line.substr(colon_pos + 1));
     }
     if (line.empty()) {
       continue;
     }
 
-    // Handle assembler directives.
+    // Handle assembler directives (including section switches and `.word`/`.float`/`.double`).
     if (line.front() == '.') {
       std::string_view rest = absl::StripAsciiWhitespace(line.substr(1));
-      if (absl::StartsWith(rest, "set") && (rest.size() == 3 || absl::ascii_isspace(rest[3]))) {
+      auto match_dir = [&](std::string_view name) {
+        return absl::StartsWith(rest, name) &&
+               (rest.size() == name.size() ||
+                absl::ascii_isspace(static_cast<unsigned char>(rest[name.size()])) ||
+                rest[name.size()] == ',');
+      };
+      if (match_dir("text")) {
+        current_section = ".text";
+        active_data_idx = static_cast<size_t>(-1);
+        subseg_set(gas_text_section, 0);
+      } else if (match_dir("rdata")) {
+        mips_emit_delays();
+        current_section = ".rdata";
+        active_data_idx = static_cast<size_t>(-1);
+      } else if (match_dir("rodata")) {
+        mips_emit_delays();
+        current_section = ".rodata";
+        active_data_idx = static_cast<size_t>(-1);
+      } else if (match_dir("sdata")) {
+        mips_emit_delays();
+        current_section = ".sdata";
+        active_data_idx = static_cast<size_t>(-1);
+      } else if (match_dir("lit4")) {
+        mips_emit_delays();
+        current_section = ".lit4";
+        active_data_idx = static_cast<size_t>(-1);
+      } else if (match_dir("lit8")) {
+        mips_emit_delays();
+        current_section = ".lit8";
+        active_data_idx = static_cast<size_t>(-1);
+      } else if (match_dir("data") || match_dir("bss") || match_dir("sbss")) {
+        mips_emit_delays();
+        current_section = std::string(line.substr(0, line.find_first_of(" \t")));
+        active_data_idx = static_cast<size_t>(-1);
+      } else if (match_dir("section")) {
+        mips_emit_delays();
+        std::string_view sec_arg = absl::StripAsciiWhitespace(rest.substr(7));
+        const size_t comma = sec_arg.find_first_of(", \t");
+        std::string_view sec_tok =
+            (comma == std::string_view::npos) ? sec_arg : sec_arg.substr(0, comma);
+        if (!sec_tok.empty() && sec_tok.front() == '"' && sec_tok.back() == '"' &&
+            sec_tok.size() >= 2) {
+          sec_tok = sec_tok.substr(1, sec_tok.size() - 2);
+        }
+        current_section = sec_tok.empty() ? ".data" : std::string(sec_tok);
+        active_data_idx = static_cast<size_t>(-1);
+        if (current_section == ".text") {
+          subseg_set(gas_text_section, 0);
+        }
+      } else if (current_section != ".text" && active_data_idx < raw_data_blocks.size()) {
+        if (match_dir("word")) {
+          std::string_view args = absl::StripAsciiWhitespace(rest.substr(4));
+          for (std::string_view item : absl::StrSplit(args, ',')) {
+            item = absl::StripAsciiWhitespace(item);
+            if (item.empty()) {
+              continue;
+            }
+            uint32_t w = 0;
+            if (parse_int_word(item, &w)) {
+              raw_data_blocks[active_data_idx].int_words.push_back(w);
+            } else {
+              raw_data_blocks[active_data_idx].symbol_words.emplace_back(item);
+            }
+          }
+        } else if (match_dir("float") || match_dir("single")) {
+          const size_t kw_len = match_dir("float") ? 5 : 6;
+          std::string_view args = absl::StripAsciiWhitespace(rest.substr(kw_len));
+          for (std::string_view item : absl::StrSplit(args, ',')) {
+            std::string s(absl::StripAsciiWhitespace(item));
+            if (s.empty()) {
+              continue;
+            }
+            char* endptr = nullptr;
+            const float fv = std::strtof(s.c_str(), &endptr);
+            if (endptr != s.c_str() && *endptr == '\0') {
+              raw_data_blocks[active_data_idx].int_words.push_back(absl::bit_cast<uint32_t>(fv));
+            }
+          }
+        } else if (match_dir("double")) {
+          std::string_view args = absl::StripAsciiWhitespace(rest.substr(6));
+          for (std::string_view item : absl::StrSplit(args, ',')) {
+            std::string s(absl::StripAsciiWhitespace(item));
+            if (s.empty()) {
+              continue;
+            }
+            char* endptr = nullptr;
+            const double dv = std::strtod(s.c_str(), &endptr);
+            if (endptr != s.c_str() && *endptr == '\0') {
+              const uint64_t bits = absl::bit_cast<uint64_t>(dv);
+              raw_data_blocks[active_data_idx].int_words.push_back(
+                  static_cast<uint32_t>(bits >> 32));
+              raw_data_blocks[active_data_idx].int_words.push_back(
+                  static_cast<uint32_t>(bits & 0xffffffffu));
+            }
+          }
+        }
+      } else if (match_dir("set")) {
         std::string_view opt = absl::StripAsciiWhitespace(rest.substr(3));
         if (opt == "noreorder") {
+          subseg_set(gas_text_section, 0);
           mips_emit_delays();
           mips_noreorder = 1;
         } else if (opt == "reorder") {
@@ -1042,6 +1505,12 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
       continue;
     }
 
+    if (current_section != ".text") {
+      continue;
+    }
+
+    subseg_set(gas_text_section, 0);
+
     // Check if this is a branch or jump to a symbolic label or numeric offset.
     size_t sp = 0;
     while (sp < line.size() && !absl::ascii_isspace(line[sp])) {
@@ -1052,7 +1521,7 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     const bool is_branch_or_jump =
         IsBranchMnemonic(mnemonic) || mnemonic == "j" || mnemonic == "jal";
     const bool is_jump_26 = (mnemonic == "j" || mnemonic == "jal");
-    if (is_branch_or_jump) {
+    if (is_branch_or_jump && mnemonic != "jal") {
       size_t last_comma = line.rfind(',');
       std::string_view last_arg = absl::StripAsciiWhitespace(
           last_comma != std::string_view::npos ? line.substr(last_comma + 1) : line.substr(sp));
@@ -1067,6 +1536,7 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     std::string mutable_line(line);
     std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
     md_assemble(mutable_line.data());
+    subseg_set(gas_text_section, 0);
     const size_t post_words = count_emitted_words();
 
     if (post_words > pre_words) {
@@ -1082,7 +1552,8 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
             .target_label = target_lbl,
             .is_jump_26 = is_jump_26,
         });
-      } else if (is_branch_or_jump && offset_expr.X_op != kGasOpAbsent) {
+      } else if (is_branch_or_jump && offset_expr.X_op != kGasOpAbsent &&
+                 offset_expr.X_add_symbol == nullptr) {
         if (is_jump_26) {
           pending_numeric_fixups.push_back(PendingNumericFixup{
               .word_index = br_word,
@@ -1100,11 +1571,14 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
     }
   }
 
+  subseg_set(gas_text_section, 0);
   mips_emit_delays();
+  absl::flat_hash_map<const GasFrag*, size_t> frag_word_base;
   for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
+    frag_word_base[f] = out.machine_words.size();
     const long nbytes = (f == frag_now) ? frag_now_fix() : f->fr_fix;
     for (long off = 0; off + 4 <= nbytes; off += 4) {
-      words.push_back(ReadBigEndian32(f->fr_literal + off));
+      out.machine_words.push_back(ReadBigEndian32(f->fr_literal + off));
     }
     if (f == frag_now) {
       break;
@@ -1112,29 +1586,175 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
   }
 
   for (const auto& fix : pending_numeric_fixups) {
-    if (fix.word_index < words.size()) {
-      words[fix.word_index] = (words[fix.word_index] & ~fix.mask) | (fix.value & fix.mask);
+    if (fix.word_index < out.machine_words.size()) {
+      out.machine_words[fix.word_index] =
+          (out.machine_words[fix.word_index] & ~fix.mask) | (fix.value & fix.mask);
     }
   }
 
+  auto find_local_or_exact_label = [&](std::string_view sym) -> std::optional<size_t> {
+    if (auto it = label_word_index.find(sym); it != label_word_index.end()) {
+      return it->second;
+    }
+    if (absl::StartsWith(sym, "$L")) {
+      const std::string alt = absl::StrCat(".L", sym.substr(2));
+      if (auto it = label_word_index.find(alt); it != label_word_index.end()) {
+        return it->second;
+      }
+    } else if (absl::StartsWith(sym, ".L")) {
+      const std::string alt = absl::StrCat("$L", sym.substr(2));
+      if (auto it = label_word_index.find(alt); it != label_word_index.end()) {
+        return it->second;
+      }
+    }
+    return std::nullopt;
+  };
+
   // Apply PC-relative branch offsets (`BFD_RELOC_16_PCREL_S2`) and local jump
-  // target offsets (`BFD_RELOC_MIPS_JMP`).
+  // target offsets (`BFD_RELOC_MIPS_JMP` for intra-function `j`).
   for (const auto& br : pending_branches) {
-    auto it = label_word_index.find(br.target_label);
-    if (it != label_word_index.end() && br.word_index < words.size()) {
+    const auto target_idx = find_local_or_exact_label(br.target_label);
+    if (target_idx.has_value() && br.word_index < out.machine_words.size()) {
       if (br.is_jump_26) {
-        words[br.word_index] = (words[br.word_index] & 0xfc000000u) |
-                               (static_cast<uint32_t>(it->second) & 0x03ffffffu);
+        out.machine_words[br.word_index] = (out.machine_words[br.word_index] & 0xfc000000u) |
+                                           (static_cast<uint32_t>(*target_idx) & 0x03ffffffu);
       } else {
         const int32_t offset_words =
-            static_cast<int32_t>(it->second) - static_cast<int32_t>(br.word_index + 1);
-        words[br.word_index] =
-            (words[br.word_index] & 0xffff0000u) | (static_cast<uint32_t>(offset_words) & 0xffffu);
+            static_cast<int32_t>(*target_idx) - static_cast<int32_t>(br.word_index + 1);
+        out.machine_words[br.word_index] = (out.machine_words[br.word_index] & 0xffff0000u) |
+                                           (static_cast<uint32_t>(offset_words) & 0xffffu);
       }
     }
   }
 
-  return words;
+  // Resolve `.rdata`/`.rodata`/`.sdata` jump tables and explicit constant-pool entries.
+  for (const RawDataBlock& block : raw_data_blocks) {
+    if (!block.symbol_words.empty()) {
+      Stage0JumpTable jt;
+      jt.label_name = block.label_name;
+      bool all_resolved = true;
+      for (const std::string& sym : block.symbol_words) {
+        const auto target_idx = find_local_or_exact_label(sym);
+        if (!target_idx.has_value()) {
+          all_resolved = false;
+          break;
+        }
+        jt.target_word_indices.push_back(*target_idx);
+      }
+      if (all_resolved && !jt.target_word_indices.empty()) {
+        out.jump_tables.push_back(std::move(jt));
+      }
+    } else if (!block.int_words.empty()) {
+      out.constant_pool.push_back(Stage0ConstantPoolEntry{
+          .label_name = block.label_name,
+          .section_name = block.section_name,
+          .byte_size = block.int_words.size() * 4,
+          .words = block.int_words,
+      });
+    }
+  }
+
+  // Extract GAS `fixS` relocations from `.text` (and anonymous `li.s`/`li.d` literals).
+  absl::flat_hash_map<const GasSymbol*, std::string> anon_literal_labels;
+  if (text_frchain != nullptr) {
+    for (GasFix* fx = text_frchain->fix_root; fx != nullptr; fx = fx->fx_next) {
+      if (fx->fx_addsy == nullptr || fx->fx_frag == nullptr || fx->fx_where < 0) {
+        continue;
+      }
+      auto frag_it = frag_word_base.find(fx->fx_frag);
+      if (frag_it == frag_word_base.end()) {
+        continue;
+      }
+      const size_t word_index = frag_it->second + static_cast<size_t>(fx->fx_where) / 4;
+      if (word_index >= out.machine_words.size()) {
+        continue;
+      }
+      if (fx->fx_r_type == kBfdReloc16PcrelS2) {
+        continue;
+      }
+
+      const char* raw_name = S_GET_NAME(fx->fx_addsy);
+      std::string sym_name = raw_name != nullptr ? raw_name : "";
+      if (sym_name.empty()) {
+        continue;
+      }
+
+      if (fx->fx_r_type == kBfdRelocMipsJmp) {
+        const uint32_t opcode = (out.machine_words[word_index] >> 26) & 0x3fu;
+        if (opcode == 0x02u && find_local_or_exact_label(sym_name).has_value()) {
+          continue;
+        }
+      }
+
+      // Capture anonymous GAS `li.s`/`li.d` literal pool entries (`"L0\001"`).
+      if (sym_name.find('\001') != std::string::npos) {
+        auto lit_it = anon_literal_labels.find(fx->fx_addsy);
+        if (lit_it == anon_literal_labels.end()) {
+          std::string synth_label = absl::StrCat("$LC_lit_", anon_literal_labels.size());
+          void* seg = S_GET_SEGMENT(fx->fx_addsy);
+          const char* raw_sec =
+              seg != nullptr ? *reinterpret_cast<const char* const*>(seg) : ".rdata";
+          std::string sec_name = raw_sec != nullptr ? raw_sec : ".rdata";
+          const size_t byte_size = (sec_name == ".lit4") ? 4u : 8u;
+          std::vector<uint32_t> lit_words;
+          if (fx->fx_addsy->sy_frag != nullptr) {
+            const unsigned long lit_off = S_GET_VALUE(fx->fx_addsy);
+            for (size_t off = 0; off + 4 <= byte_size; off += 4) {
+              lit_words.push_back(
+                  ReadBigEndian32(fx->fx_addsy->sy_frag->fr_literal + lit_off + off));
+            }
+          }
+          out.constant_pool.push_back(Stage0ConstantPoolEntry{
+              .label_name = synth_label,
+              .section_name = std::move(sec_name),
+              .byte_size = byte_size,
+              .words = std::move(lit_words),
+          });
+          lit_it = anon_literal_labels.emplace(fx->fx_addsy, std::move(synth_label)).first;
+        }
+        sym_name = lit_it->second;
+      }
+
+      Stage0RelocKind reloc_kind = Stage0RelocKind::kMips32;
+      switch (fx->fx_r_type) {
+        case kBfdRelocMipsJmp:
+          reloc_kind = Stage0RelocKind::kMips26;
+          break;
+        case kBfdRelocHi16:
+        case kBfdRelocHi16S:
+          reloc_kind = Stage0RelocKind::kMipsHi16;
+          break;
+        case kBfdRelocLo16:
+          reloc_kind = Stage0RelocKind::kMipsLo16;
+          break;
+        case kBfdRelocGpRel16:
+          reloc_kind = Stage0RelocKind::kMipsGpRel16;
+          break;
+        case kBfdReloc32:
+          reloc_kind = Stage0RelocKind::kMips32;
+          break;
+        case kBfdRelocMipsLiteral:
+          reloc_kind = Stage0RelocKind::kMipsLiteral;
+          break;
+        default:
+          continue;
+      }
+
+      out.relocations.push_back(Stage0Relocation{
+          .word_index = word_index,
+          .kind = reloc_kind,
+          .symbol_name = std::move(sym_name),
+          .addend = static_cast<int64_t>(static_cast<long>(fx->fx_offset)),
+      });
+    }
+  }
+
+  std::stable_sort(out.relocations.begin(), out.relocations.end(),
+                   [](const Stage0Relocation& a, const Stage0Relocation& b) {
+                     return a.word_index < b.word_index;
+                   });
+
+  return out;
 }
 
 uint32_t FunctionHooks::RunGasMipsIp(std::string_view insn_asm_line) {
@@ -1450,6 +2070,7 @@ std::vector<uint32_t> FunctionHooks::RunGasAppendInsnReorder(
 
 void FunctionHooks::PrepareReorgState(Rtx first) {
   reload_completed = 1;
+  init_insn_lengths();
   init_recog();
   RefreshJumpLabelsAndNuses(first);
   // Preserve `CODE_LABEL`s (`LABEL_PRESERVE_P(insn)` == `insn->in_struct`)
@@ -5240,9 +5861,11 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
         current_asm_lines = ExtractAsmLinesWithLabels(trace.final_asm_text);
         break;
       }
-      case SubfunctionId::kGasAppendInsn:
+      case SubfunctionId::kGasAppendInsn: {
         trace.final_machine_words = snap.post_machine_words;
+        trace.stage0_input = RunGasMdAssembleWithMetadata(trace.final_asm_text);
         break;
+      }
       default:
         break;
     }

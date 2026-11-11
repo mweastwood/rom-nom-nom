@@ -1,12 +1,15 @@
 #include "lifter/invert_gas_append_insn.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
+#include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -332,6 +335,145 @@ TEST(InvertGasAppendInsnTest, InvertGasAppendInsnToItemsPaddingBranchModesAndHaz
     const std::vector<uint32_t> only_ffffffff = {0xffffffffu};
     EXPECT_FALSE(InvertGasAppendInsnToItems(only_ffffffff, &items));
     EXPECT_TRUE(items.empty());
+  }
+}
+
+TEST(InvertGasAppendInsnTest, Stage0InputJumpTablesExternalJumpRelocsAndLinkedVram) {
+  gcc_harness::GccContext ctx;
+  gcc_harness::FunctionHooks hooks(&ctx);
+  LifterGasAppendInsnInverseProvider provider;
+  gcc_harness::RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // 1. `.rodata` jump-table `target_word_indices` (`extra_label_indices`) +
+  //    `out_word_to_label` mapping + trailing section-alignment padding strip:
+  {
+    Stage0FunctionInput jt_input;
+    jt_input.machine_words = {
+        0x00400008u,  // 0: jr $2
+        0x00000000u,  // 1: nop
+        0x03e00008u,  // 2: jr $31 (arm 0)
+        0x2482000au,  // 3: addiu $2,$4,10 (delay slot)
+        0x03e00008u,  // 4: jr $31 (arm 1)
+        0x24820014u,  // 5: addiu $2,$4,20 (delay slot)
+        0x00000000u,  // 6: alignment padding
+        0x00000000u,  // 7: alignment padding
+    };
+    jt_input.jump_tables.push_back(Stage0JumpTable{
+        .label_name = ".L10",
+        .target_word_indices = {2u, 4u},
+    });
+
+    std::vector<AsmItem> items;
+    absl::flat_hash_map<size_t, std::string> word_to_label;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(jt_input, &items, &word_to_label));
+    ASSERT_EQ(word_to_label.size(), 2u);
+    EXPECT_EQ(word_to_label[2u], "$L2");
+    EXPECT_EQ(word_to_label[4u], "$L3");
+
+    std::vector<std::string> item_lines;
+    for (const AsmItem& it : items) {
+      if (it.kind == AsmItemKind::kNoreorderBranchSeq) {
+        item_lines.push_back(".set noreorder");
+        item_lines.push_back(it.line);
+        item_lines.push_back(it.delay_line);
+        item_lines.push_back(".set reorder");
+      } else {
+        item_lines.push_back(it.line);
+      }
+    }
+    const std::vector<uint32_t> unpadded_words(jt_input.machine_words.begin(),
+                                               jt_input.machine_words.begin() + 6);
+    EXPECT_EQ(hooks.RunGasMdAssemble(absl::StrJoin(item_lines, "\n")), unpadded_words);
+    const auto res = verifier.VerifyGasAppendInsnRightInverse(unpadded_words);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. External `j` tail-call relocation (`external_j_indices` via `kMips26`):
+  //    prevents an external `j` word (`op == 0x02`) from being misclassified as
+  //    a local `.text` label jump, while un-relocated `j 0x8` IS resolved locally.
+  {
+    Stage0FunctionInput local_j_input;
+    local_j_input.machine_words = {
+        0x08000002u,  // 0: j 0x8 (local target word 2 when un-relocated)
+        0x00000000u,  // 1: nop
+        0x03e00008u,  // 2: jr $31
+        0x00000000u,  // 3: nop
+    };
+    std::vector<AsmItem> local_items;
+    absl::flat_hash_map<size_t, std::string> local_labels;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(local_j_input, &local_items, &local_labels));
+    ASSERT_EQ(local_labels.size(), 1u);
+    EXPECT_EQ(local_labels[2u], "$L2");
+    EXPECT_EQ(local_items[0].line, "j $L2");
+    const auto local_res = verifier.VerifyGasAppendInsnRightInverse(local_j_input.machine_words);
+    EXPECT_TRUE(local_res.matches) << local_res.diff_detail;
+
+    Stage0FunctionInput ext_j_input = local_j_input;
+    ext_j_input.relocations.push_back(Stage0Relocation{
+        .word_index = 0u,
+        .kind = Stage0RelocKind::kMips26,
+        .symbol_name = "ExternalTail",
+        .addend = 0,
+    });
+    std::vector<AsmItem> ext_items;
+    absl::flat_hash_map<size_t, std::string> ext_labels;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(ext_j_input, &ext_items, &ext_labels));
+    EXPECT_TRUE(ext_labels.empty());
+    ASSERT_FALSE(ext_items.empty());
+    EXPECT_EQ(ext_items[0].word_index, 0u);
+    EXPECT_NE(ext_items[0].line, "j $L2");
+  }
+
+  // 3. Linked-ROM `base_vram != 0` local `j` target resolution vs external `j`:
+  {
+    Stage0FunctionInput linked_input;
+    linked_input.base_vram = 0x80020000u;
+    linked_input.machine_words = {
+        0x08008003u,  // 0 (0x80020000): j 0x8002000c (local word 3)
+        0x00000000u,  // 1 (0x80020004): nop
+        0x24820001u,  // 2 (0x80020008): addiu $2,$4,1
+        0x03e00008u,  // 3 (0x8002000c): jr $31
+        0x24820007u,  // 4 (0x80020010): addiu $2,$4,7
+    };
+    std::vector<AsmItem> linked_items;
+    absl::flat_hash_map<size_t, std::string> linked_labels;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(linked_input, &linked_items, &linked_labels));
+    ASSERT_EQ(linked_labels.size(), 1u);
+    EXPECT_EQ(linked_labels[3u], "$L2");
+    ASSERT_FALSE(linked_items.empty());
+    EXPECT_EQ(linked_items[0].line, "j $L2");
+
+    // Re-assembling `linked_items` at address 0 produces the exact local-offset
+    // twin (`0x08000003u` at word 0), which passes `VerifyGasAppendInsnRightInverse`.
+    std::vector<uint32_t> expected_zero_based = linked_input.machine_words;
+    expected_zero_based[0] = 0x08000003u;
+    const auto zero_res = verifier.VerifyGasAppendInsnRightInverse(expected_zero_based);
+    EXPECT_TRUE(zero_res.matches) << zero_res.diff_detail;
+
+    // Out-of-function `j 0x80024000` is preserved as external rather than local:
+    Stage0FunctionInput ext_linked = linked_input;
+    ext_linked.machine_words[0] = 0x08009000u;  // j 0x80024000
+    std::vector<AsmItem> ext_linked_items;
+    absl::flat_hash_map<size_t, std::string> ext_linked_labels;
+    ASSERT_TRUE(InvertGasAppendInsnToItems(ext_linked, &ext_linked_items, &ext_linked_labels));
+    EXPECT_TRUE(ext_linked_labels.empty());
+    EXPECT_NE(ext_linked_items[0].line, "j $L2");
+  }
+
+  // 4. Negative checks on `Stage0FunctionInput` overload:
+  {
+    std::vector<AsmItem> items;
+    absl::flat_hash_map<size_t, std::string> labels;
+    EXPECT_FALSE(InvertGasAppendInsnToItems(Stage0FunctionInput{}, &items, &labels));
+    EXPECT_TRUE(items.empty());
+
+    Stage0FunctionInput truncated;
+    truncated.machine_words = {0x03e00008u};
+    EXPECT_FALSE(InvertGasAppendInsnToItems(truncated, &items, /*out_word_to_label=*/nullptr));
+
+    Stage0FunctionInput invalid;
+    invalid.machine_words = {0x00000001u, 0x00000000u};
+    EXPECT_FALSE(InvertGasAppendInsnToItems(invalid, &items, &labels));
   }
 }
 

@@ -1,11 +1,14 @@
 #ifndef ROM_NOM_NOM_LIFTER_INVERT_GAS_APPEND_INSN_H_
 #define ROM_NOM_NOM_LIFTER_INVERT_GAS_APPEND_INSN_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
+#include "core/rtl_cfg.h"
 
 namespace rom_nom_nom {
 namespace lifter {
@@ -23,6 +26,8 @@ struct AsmItem {
   std::string delay_label;
   uint32_t word = 0u;
   uint32_t delay_word = 0u;
+  size_t word_index = 0u;
+  size_t delay_word_index = 0u;
   bool unswapped_from_branch = false;
   bool preceded_by_active_hazard = false;
 };
@@ -76,6 +81,14 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items);
 // `nop`s.
 bool InvertGasAppendInsnToItems(absl::Span<const uint32_t> machine_words_x,
                                 std::vector<AsmItem>* out_items);
+
+// Relocatable / linked-ROM Stage 0 overload of `InvertGasAppendInsnToItems`:
+// also injects `.text` labels at `Stage0JumpTable::target_word_indices`,
+// resolves intra-function `j` targets relative to `stage0_input.base_vram`, and
+// populates `*out_word_to_label` (`word_index -> "$L<n>"`) when non-null.
+bool InvertGasAppendInsnToItems(const Stage0FunctionInput& stage0_input,
+                                std::vector<AsmItem>* out_items,
+                                absl::flat_hash_map<size_t, std::string>* out_word_to_label);
 
 }  // namespace lifter
 

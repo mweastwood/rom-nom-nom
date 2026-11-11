@@ -682,5 +682,45 @@ TEST(CompilationTraceTest, SubfunctionBoundaryRightInverseAndPersistedCFlagsAcro
   }
 }
 
+TEST(CompilationTraceTest, Stage0InputCapturesRelocationsJumpTablesAndConstantPool) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  constexpr std::string_view kSource = R"(
+extern int helper_a(int);
+extern int helper_b(int, int, int, int, int, int);
+extern int g_bias;
+double compute_entry(int tag, int x) {
+  switch (tag) {
+    case 0: return (double)helper_a(x) + 1.25;
+    case 1: return (double)helper_b(x, 1, 2, 3, 4, 5) + 3.141592653589793;
+    case 2: return (double)(x + g_bias);
+    case 3: return (double)(x - g_bias);
+    case 4: return (double)(x * 5);
+    default: return 0.0;
+  }
+}
+)";
+  const FunctionCompilationTrace trace =
+      hooks.TraceForwardCompilation(kSource, "compute_entry", {"-O2"}, "stage0_trace_metadata");
+  EXPECT_EQ(trace.function_name, "compute_entry");
+  EXPECT_FALSE(trace.stage0_input.machine_words.empty());
+  EXPECT_EQ(trace.stage0_input.jump_tables.size(), 1u);
+  EXPECT_FALSE(trace.stage0_input.constant_pool.empty());
+  EXPECT_EQ(trace.pass_snapshots.at(RtlPassKind::kDbr).sideband.outgoing_args_size, 24);
+
+  bool saw_helper_a = false;
+  bool saw_helper_b = false;
+  bool saw_g_bias = false;
+  for (const auto& r : trace.stage0_input.relocations) {
+    if (r.kind == Stage0RelocKind::kMips26 && r.symbol_name == "helper_a") saw_helper_a = true;
+    if (r.kind == Stage0RelocKind::kMips26 && r.symbol_name == "helper_b") saw_helper_b = true;
+    if (r.symbol_name == "g_bias") saw_g_bias = true;
+  }
+  EXPECT_TRUE(saw_helper_a);
+  EXPECT_TRUE(saw_helper_b);
+  EXPECT_TRUE(saw_g_bias);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness

@@ -8,10 +8,12 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/rtl_cfg.h"
 #include "lifter/invert_gas_mips_ip.h"
 
 namespace rom_nom_nom::lifter {
@@ -504,7 +506,13 @@ absl::Span<const uint32_t> StripSectionAlignmentPadding(
   return machine_words_x.subspan(0, cand_len);
 }
 
-std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) {
+namespace {
+
+std::vector<std::string> InvertGasAppendInsnInternal(
+    absl::Span<const uint32_t> words_x, uint32_t linked_base_vram,
+    absl::Span<const size_t> extra_label_indices,
+    const absl::flat_hash_set<size_t>& external_j_indices,
+    absl::flat_hash_map<size_t, std::string>* out_target_labels) {
   if (words_x.empty()) {
     return {};
   }
@@ -517,8 +525,30 @@ std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x)
     }
   }
 
+  auto resolve_local_j_target = [&](size_t insn_idx, uint32_t w, size_t* out_idx) -> bool {
+    if (external_j_indices.contains(insn_idx)) {
+      return false;
+    }
+    if (linked_base_vram != 0u) {
+      const uint32_t target_vram = (linked_base_vram & 0xf0000000u) | ((w & 0x03ffffffu) << 2);
+      if (target_vram >= linked_base_vram &&
+          target_vram < linked_base_vram + static_cast<uint32_t>(words_x.size()) * 4u &&
+          ((target_vram - linked_base_vram) & 3u) == 0u) {
+        *out_idx = static_cast<size_t>((target_vram - linked_base_vram) >> 2);
+        return true;
+      }
+      return false;
+    }
+    const size_t target_idx = static_cast<size_t>(w & 0x03ffffffu);
+    if (target_idx > 0 && target_idx < words_x.size()) {
+      *out_idx = target_idx;
+      return true;
+    }
+    return false;
+  };
+
   // Pass 1: Validate branch/delay-slot structure and assign local `$L<N>`
-  // labels to in-bounds branch and local `j` targets.
+  // labels to in-bounds branch, local `j`, and `.rodata` jump-table targets.
   absl::flat_hash_map<size_t, std::string> target_labels;
   int next_label_id = 2;
   for (size_t i = 0; i < words_x.size();) {
@@ -529,8 +559,8 @@ std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x)
       }
       const uint32_t op = (w >> 26) & 0x3fu;
       if (op == 0x02u) {
-        const size_t target_idx = static_cast<size_t>(w & 0x03ffffffu);
-        if (target_idx > 0 && target_idx < words_x.size() && !target_labels.contains(target_idx)) {
+        size_t target_idx = 0;
+        if (resolve_local_j_target(i, w, &target_idx) && !target_labels.contains(target_idx)) {
           target_labels[target_idx] = absl::StrFormat("$L%d", next_label_id++);
         }
       } else if (IsPcRelativeBranchWord(w)) {
@@ -546,6 +576,11 @@ std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x)
       i += 2;
     } else {
       ++i;
+    }
+  }
+  for (size_t extra_idx : extra_label_indices) {
+    if (extra_idx < words_x.size() && !target_labels.contains(extra_idx)) {
+      target_labels[extra_idx] = absl::StrFormat("$L%d", next_label_id++);
     }
   }
 
@@ -574,9 +609,11 @@ std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x)
       std::string jump_line = base_disasm[i];
       const uint32_t op = (w >> 26) & 0x3fu;
       if (op == 0x02u) {
-        const size_t target_idx = static_cast<size_t>(w & 0x03ffffffu);
-        if (auto it = target_labels.find(target_idx); it != target_labels.end()) {
-          jump_line = ReplaceTargetWithLabel(jump_line, it->second);
+        size_t target_idx = 0;
+        if (resolve_local_j_target(i, w, &target_idx)) {
+          if (auto it = target_labels.find(target_idx); it != target_labels.end()) {
+            jump_line = ReplaceTargetWithLabel(jump_line, it->second);
+          }
         }
       } else if (IsPcRelativeBranchWord(w)) {
         const int16_t simm = static_cast<int16_t>(w & 0xffffu);
@@ -660,7 +697,17 @@ std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x)
     ++i;
   }
 
+  if (out_target_labels != nullptr) {
+    *out_target_labels = std::move(target_labels);
+  }
   return lines;
+}
+
+}  // namespace
+
+std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) {
+  return InvertGasAppendInsnInternal(words_x, /*linked_base_vram=*/0u, /*extra_label_indices=*/{},
+                                     /*external_j_indices=*/{}, /*out_target_labels=*/nullptr);
 }
 
 bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
@@ -698,6 +745,7 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
         AsmItem item;
         item.kind = AsmItemKind::kReorderInsn;
         item.line = raw_lines[i + 1];
+        item.word_index = w_idx;
         item.word = words[w_idx++];
         out_items->push_back(std::move(item));
         i = end_nr;
@@ -713,6 +761,8 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
         item.delay_line = raw_lines[i + 2];
         item.word = words[w_idx];
         item.delay_word = words[w_idx + 1];
+        item.word_index = w_idx;
+        item.delay_word_index = w_idx + 1;
         w_idx += 2;
         out_items->push_back(std::move(item));
         i = end_nr;
@@ -729,6 +779,8 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
         item.delay_line = raw_lines[i + 3];
         item.word = words[w_idx];
         item.delay_word = words[w_idx + 1];
+        item.word_index = w_idx;
+        item.delay_word_index = w_idx + 1;
         w_idx += 2;
         out_items->push_back(std::move(item));
         i = end_nr;
@@ -751,6 +803,8 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
         item.kind = AsmItemKind::kReorderInsn;
         item.line = line;
         item.word = w;
+        item.word_index = w_idx;
+        item.delay_word_index = w_idx + 1;
         out_items->push_back(std::move(item));
         w_idx += 2;
       } else {
@@ -762,6 +816,7 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
         delay_item.kind = AsmItemKind::kReorderInsn;
         delay_item.line = line;
         delay_item.word = delay_w;
+        delay_item.word_index = w_idx + 1;
         delay_item.unswapped_from_branch = true;
         out_items->push_back(std::move(delay_item));
 
@@ -769,6 +824,8 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
         branch_item.kind = AsmItemKind::kReorderInsn;
         branch_item.line = raw_lines[i + 1];
         branch_item.word = w;
+        branch_item.word_index = w_idx;
+        branch_item.delay_word_index = w_idx + 1;
         branch_item.unswapped_from_branch = true;
         out_items->push_back(std::move(branch_item));
 
@@ -780,6 +837,7 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
       item.kind = AsmItemKind::kReorderInsn;
       item.line = line;
       item.word = w;
+      item.word_index = w_idx;
       out_items->push_back(std::move(item));
       ++w_idx;
     }
@@ -830,6 +888,8 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
             seq_item.delay_line = next_item.line;
             seq_item.word = (*items)[next_idx + 1].word;
             seq_item.delay_word = next_item.word;
+            seq_item.word_index = (*items)[next_idx + 1].word_index;
+            seq_item.delay_word_index = next_item.word_index;
             (*items)[next_idx] = std::move(seq_item);
             items->erase(items->begin() + static_cast<ptrdiff_t>(next_idx + 1));
             expected_nops = emit_delays_nops;
@@ -930,6 +990,105 @@ bool InvertGasAppendInsnToItems(absl::Span<const uint32_t> machine_words_x,
   }
 
   StripGasInsertedHazardNops(out_items);
+  return !out_items->empty();
+}
+
+bool InvertGasAppendInsnToItems(const Stage0FunctionInput& stage0_input,
+                                std::vector<AsmItem>* out_items,
+                                absl::flat_hash_map<size_t, std::string>* out_word_to_label) {
+  out_items->clear();
+  if (out_word_to_label != nullptr) {
+    out_word_to_label->clear();
+  }
+  const absl::Span<const uint32_t> full_words(stage0_input.machine_words);
+  if (full_words.empty()) {
+    return false;
+  }
+
+  const uint32_t linked_base_vram =
+      (stage0_input.base_vram != 0u && stage0_input.relocations.empty()) ? stage0_input.base_vram
+                                                                         : 0u;
+
+  absl::flat_hash_set<size_t> external_j_indices;
+  for (const Stage0Relocation& rel : stage0_input.relocations) {
+    if (rel.kind == Stage0RelocKind::kMips26 && rel.word_index < full_words.size() &&
+        ((full_words[rel.word_index] >> 26) & 0x3fu) == 0x02u && rel.symbol_name != ".text") {
+      external_j_indices.insert(rel.word_index);
+    }
+  }
+
+  std::vector<size_t> extra_label_indices;
+  for (const Stage0JumpTable& jt : stage0_input.jump_tables) {
+    for (size_t target_idx : jt.target_word_indices) {
+      extra_label_indices.push_back(target_idx);
+    }
+  }
+
+  absl::Span<const uint32_t> words = StripSectionAlignmentPadding(full_words);
+  bool keep_full = false;
+  for (const Stage0Relocation& rel : stage0_input.relocations) {
+    if (rel.word_index >= words.size() && rel.word_index < full_words.size()) {
+      keep_full = true;
+      break;
+    }
+  }
+  for (size_t idx : extra_label_indices) {
+    if (idx >= words.size() && idx < full_words.size()) {
+      keep_full = true;
+      break;
+    }
+  }
+  if (linked_base_vram != 0u) {
+    for (size_t i = 0; i < words.size();) {
+      const uint32_t w = words[i];
+      if (IsBranchOrJumpWord(w)) {
+        if (((w >> 26) & 0x3fu) == 0x02u) {
+          const uint32_t target_vram = (linked_base_vram & 0xf0000000u) | ((w & 0x03ffffffu) << 2);
+          if (target_vram >= linked_base_vram + static_cast<uint32_t>(words.size()) * 4u &&
+              target_vram < linked_base_vram + static_cast<uint32_t>(full_words.size()) * 4u) {
+            keep_full = true;
+            break;
+          }
+        }
+        i += 2;
+      } else {
+        ++i;
+      }
+    }
+  }
+  if (keep_full) {
+    words = full_words;
+  }
+
+  if (words.size() < 2) {
+    return false;
+  }
+  // A function may end either with `[branch_or_jump, delay_slot]` or with an
+  // out-of-line loop/jump-table block whose trailing branch was stripped or
+  // padded; require only that no branch is missing its architectural delay slot
+  // (enforced inside `InvertGasAppendInsnInternal`) and that the function has
+  // at least one return/jump when no jump tables/relocations are present.
+  if (stage0_input.jump_tables.empty() && stage0_input.relocations.empty() &&
+      linked_base_vram == 0u && !IsBranchOrJumpWord(words[words.size() - 2])) {
+    return false;
+  }
+
+  absl::flat_hash_map<size_t, std::string> target_labels;
+  const std::vector<std::string> raw_lines = InvertGasAppendInsnInternal(
+      words, linked_base_vram, extra_label_indices, external_j_indices, &target_labels);
+  if (raw_lines.empty()) {
+    return false;
+  }
+
+  if (!BuildAsmItemsFromAppendInsn(words, raw_lines, out_items)) {
+    out_items->clear();
+    return false;
+  }
+
+  StripGasInsertedHazardNops(out_items);
+  if (out_word_to_label != nullptr) {
+    *out_word_to_label = std::move(target_labels);
+  }
   return !out_items->empty();
 }
 

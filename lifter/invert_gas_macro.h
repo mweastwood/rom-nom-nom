@@ -1,11 +1,14 @@
 #ifndef ROM_NOM_NOM_LIFTER_INVERT_GAS_MACRO_H_
 #define ROM_NOM_NOM_LIFTER_INVERT_GAS_MACRO_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
+#include "core/rtl_cfg.h"
 #include "lifter/invert_gas_append_insn.h"
 
 namespace rom_nom_nom {
@@ -29,6 +32,16 @@ std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x);
 // across consecutive `kReorderInsn` items and flattens `raw_items` into
 // pre-`macro` assembly lines for epilogue extraction and `InvertFinalScanInsn`.
 std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmItem> raw_items);
+
+// Relocatable / linked-ROM Stage 0 overload of `CollapseGasMacrosAndFlattenLines`:
+// resolves `jal` callees, distinct global symbols + addends, `.rodata`/`.lit4`/
+// `.lit8` float/double constant pools (`li.s`/`li.d`/`$LC*`), `.rodata` switch
+// jump tables, and preserves non-GAS-macro split `%hi`/`%lo` pairs as explicit
+// `lui $r,%hi(sym+off)` and `%lo(sym+off)` instructions.
+std::vector<std::string> CollapseGasMacrosAndFlattenLines(
+    absl::Span<const AsmItem> raw_items, const Stage0FunctionInput& stage0_input,
+    const absl::flat_hash_map<size_t, std::string>& word_to_label,
+    std::vector<Stage0ResolvedJumpTable>* out_jump_tables = nullptr);
 
 }  // namespace lifter
 

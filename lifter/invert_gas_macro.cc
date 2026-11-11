@@ -1,18 +1,24 @@
 #include "lifter/invert_gas_macro.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/base/casts.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/rtl_cfg.h"
 #include "lifter/invert_gas_append_insn.h"
 #include "lifter/invert_gas_mips_ip.h"
 
@@ -779,6 +785,178 @@ std::string NormalizeCop1LoadStoreMnemonic(std::string_view line) {
   return std::string(line);
 }
 
+bool ParseAnyMemInsnWithBase(std::string_view line, int expected_base_reg, std::string* out_mnem,
+                             std::string* out_reg, int32_t* out_off) {
+  const size_t sep = line.find_first_of(" \t");
+  if (sep == std::string_view::npos) {
+    return false;
+  }
+  std::string_view mnem = line.substr(0, sep);
+  if (mnem == "lwc1") mnem = "l.s";
+  if (mnem == "swc1") mnem = "s.s";
+  if (mnem == "ldc1") mnem = "l.d";
+  if (mnem == "sdc1") mnem = "s.d";
+  if (mnem != "lb" && mnem != "lbu" && mnem != "lh" && mnem != "lhu" && mnem != "lw" &&
+      mnem != "lwu" && mnem != "ld" && mnem != "sb" && mnem != "sh" && mnem != "sw" &&
+      mnem != "sd" && mnem != "l.s" && mnem != "s.s" && mnem != "l.d" && mnem != "s.d") {
+    return false;
+  }
+  const std::string_view rest = absl::StripAsciiWhitespace(line.substr(sep + 1));
+  const size_t comma = rest.find(',');
+  const std::string suffix = absl::StrFormat("($%d)", expected_base_reg);
+  if (comma == std::string_view::npos || !absl::EndsWith(rest, suffix)) {
+    return false;
+  }
+  const std::string_view reg = rest.substr(0, comma);
+  const std::string_view off_str = rest.substr(comma + 1, rest.size() - comma - 1 - suffix.size());
+  int32_t off = 0;
+  if (!off_str.empty() && !absl::SimpleAtoi(off_str, &off)) {
+    return false;
+  }
+  *out_mnem = std::string(mnem);
+  *out_reg = std::string(reg);
+  *out_off = off;
+  return true;
+}
+
+bool MatchesGasMacroTempreg(std::string_view mnem, std::string_view reg, int breg, int tempreg) {
+  if (mnem == "sb" || mnem == "sh" || mnem == "sw" || mnem == "sd" || mnem == "s.s" ||
+      mnem == "s.d" || mnem == "l.s" || mnem == "l.d") {
+    return tempreg == 1;
+  }
+  if (!absl::StartsWith(reg, "$")) {
+    return false;
+  }
+  int treg = -1;
+  if (!absl::SimpleAtoi(reg.substr(1), &treg) || treg < 0 || treg > 31) {
+    return false;
+  }
+  const int expected = (breg == treg || treg == 0) ? 1 : treg;
+  return tempreg == expected;
+}
+
+bool MatchPairedFpDoubleReloc(std::string_view next_line, int expected_base_reg,
+                              std::string_view first_mnem, std::string_view first_reg,
+                              const Stage0Relocation* rel_first, const Stage0Relocation* rel_next,
+                              std::string* out_even_fpreg) {
+  if ((first_mnem != "l.s" && first_mnem != "s.s") || !absl::StartsWith(first_reg, "$f") ||
+      rel_first == nullptr || rel_next == nullptr || rel_next->kind != Stage0RelocKind::kMipsLo16 ||
+      rel_next->symbol_name != rel_first->symbol_name ||
+      rel_next->addend != rel_first->addend + 4) {
+    return false;
+  }
+  int first_fp = -1;
+  if (!absl::SimpleAtoi(first_reg.substr(2), &first_fp) || first_fp < 0 || first_fp > 31) {
+    return false;
+  }
+  std::string next_mnem;
+  std::string next_reg;
+  int32_t next_off = 0;
+  if (!ParseAnyMemInsnWithBase(next_line, expected_base_reg, &next_mnem, &next_reg, &next_off) ||
+      next_mnem != first_mnem || !absl::StartsWith(next_reg, "$f")) {
+    return false;
+  }
+  int next_fp = -1;
+  if (!absl::SimpleAtoi(next_reg.substr(2), &next_fp) || next_fp < 0 || next_fp > 31) {
+    return false;
+  }
+  if ((first_fp % 2) == 0 && next_fp == first_fp + 1) {
+    *out_even_fpreg = absl::StrFormat("$f%d", first_fp);
+    return true;
+  }
+  if ((first_fp % 2) == 1 && next_fp == first_fp - 1) {
+    *out_even_fpreg = absl::StrFormat("$f%d", next_fp);
+    return true;
+  }
+  return false;
+}
+
+bool WordWritesGpr(uint32_t w, uint32_t reg) {
+  if (reg == 0u) {
+    return false;
+  }
+  const uint32_t pinfo = GetInsnPinfo(w);
+  if ((pinfo & 0x00000001u) != 0u && Rd(w) == reg) {
+    return true;
+  }
+  if ((pinfo & 0x00000002u) != 0u && Rt(w) == reg) {
+    return true;
+  }
+  if ((pinfo & 0x01000000u) != 0u && reg == 31u) {
+    return true;
+  }
+  return false;
+}
+
+bool IsTempregReusedByLaterLo16(
+    absl::Span<const AsmItem> items, size_t start_idx, int tempreg, std::string_view hi_symbol,
+    const absl::flat_hash_map<size_t, const Stage0Relocation*>& reloc_by_word) {
+  // `$1` (`$at`) is strictly GAS's macro scratch register (`FIXED_REGISTERS[1] == 1`
+  // in `mips.h`) and is never CSE'd or allocated across instructions by GCC.
+  if (tempreg <= 1) {
+    return false;
+  }
+  const uint32_t treg = static_cast<uint32_t>(tempreg);
+  bool saw_control_flow = false;
+  for (size_t j = start_idx; j < items.size(); ++j) {
+    const AsmItem& it = items[j];
+    if (it.kind == AsmItemKind::kLabel) {
+      saw_control_flow = true;
+      continue;
+    }
+    auto check_word_uses_lo16_base = [&](uint32_t w, size_t w_idx, size_t prev_item_idx) -> bool {
+      auto rel_it = reloc_by_word.find(w_idx);
+      if (rel_it == reloc_by_word.end() || rel_it->second->kind != Stage0RelocKind::kMipsLo16 ||
+          rel_it->second->symbol_name != hi_symbol) {
+        return false;
+      }
+      if (Rs(w) != treg) {
+        return false;
+      }
+      // Check if this `%lo` was preceded immediately by its own `lui $tempreg`
+      // (or `lui $tempreg` + `addu $tempreg,$tempreg,$breg` for indexed access).
+      auto is_own_hi16_lui = [&](size_t idx) -> bool {
+        if (idx >= items.size() || idx < start_idx ||
+            items[idx].kind != AsmItemKind::kReorderInsn || Opcode(items[idx].word) != 0x0fu ||
+            Rt(items[idx].word) != treg) {
+          return false;
+        }
+        auto hi_it = reloc_by_word.find(items[idx].word_index);
+        return hi_it != reloc_by_word.end() && hi_it->second->kind == Stage0RelocKind::kMipsHi16;
+      };
+      if (is_own_hi16_lui(prev_item_idx)) {
+        return false;
+      }
+      int dummy_base = -1;
+      return !(prev_item_idx < items.size() && prev_item_idx > start_idx &&
+               items[prev_item_idx].kind == AsmItemKind::kReorderInsn &&
+               ParseIndexedAddrAddu(items[prev_item_idx].line, tempreg, &dummy_base) &&
+               is_own_hi16_lui(prev_item_idx - 1));
+    };
+
+    if (it.kind == AsmItemKind::kNoreorderBranchSeq) {
+      if (check_word_uses_lo16_base(it.delay_word, it.delay_word_index,
+                                    j > 0 ? j - 1 : items.size())) {
+        return true;
+      }
+      saw_control_flow = true;
+      continue;
+    }
+
+    if (check_word_uses_lo16_base(it.word, it.word_index, j > 0 ? j - 1 : items.size())) {
+      return true;
+    }
+    if (IsBranchOrJumpWord(it.word)) {
+      saw_control_flow = true;
+      continue;
+    }
+    if (!saw_control_flow && WordWritesGpr(it.word, treg)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) {
@@ -996,6 +1174,501 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmIt
   // Pass 3: flatten into assembly lines, emitting any remaining non-hazard,
   // non-multi-line un-swapped `[delay_item, branch_item]` pairs as
   // `.set noreorder` `SEQUENCE`s.
+  std::vector<std::string> lines;
+  lines.reserve(collapsed.size() * 2);
+  for (size_t i = 0; i < collapsed.size(); ++i) {
+    const AsmItem& item = collapsed[i];
+    if (item.kind == AsmItemKind::kLabel) {
+      lines.push_back(item.line);
+      continue;
+    }
+    if (item.kind == AsmItemKind::kNoreorderBranchSeq) {
+      lines.push_back(".set\tnoreorder");
+      lines.push_back(item.line);
+      if (!item.delay_label.empty()) {
+        lines.push_back(item.delay_label);
+      }
+      lines.push_back(item.delay_line);
+      lines.push_back(".set\treorder");
+      continue;
+    }
+
+    if (item.unswapped_from_branch && i + 1 < collapsed.size() &&
+        collapsed[i + 1].kind == AsmItemKind::kReorderInsn &&
+        collapsed[i + 1].unswapped_from_branch && !IsBranchOrJumpWord(item.word) &&
+        IsBranchOrJumpWord(collapsed[i + 1].word)) {
+      const bool part_of_prev_float_si =
+          i > 0 && collapsed[i - 1].kind == AsmItemKind::kReorderInsn &&
+          (absl::StartsWith(collapsed[i - 1].line, "mtc1 ") ||
+           absl::StartsWith(collapsed[i - 1].line, "l.s ")) &&
+          (absl::StartsWith(item.line, "cvt.s.w ") || absl::StartsWith(item.line, "cvt.d.w "));
+      if (!item.preceded_by_active_hazard && !part_of_prev_float_si) {
+        lines.push_back(".set\tnoreorder");
+        lines.push_back(collapsed[i + 1].line);
+        lines.push_back(item.line);
+        lines.push_back(".set\treorder");
+        ++i;
+        continue;
+      }
+    }
+
+    lines.push_back(item.line);
+  }
+
+  return lines;
+}
+
+std::vector<std::string> CollapseGasMacrosAndFlattenLines(
+    absl::Span<const AsmItem> raw_items, const Stage0FunctionInput& stage0_input,
+    const absl::flat_hash_map<size_t, std::string>& word_to_label,
+    std::vector<Stage0ResolvedJumpTable>* out_jump_tables) {
+  if (out_jump_tables != nullptr) {
+    out_jump_tables->clear();
+  }
+
+  // Build jump-table symbol -> synthetic local label (`$L<100000 + jt_idx>`) map.
+  absl::flat_hash_map<std::string, std::string> jt_sym_to_label;
+  for (size_t jt_idx = 0; jt_idx < stage0_input.jump_tables.size(); ++jt_idx) {
+    const Stage0JumpTable& jt = stage0_input.jump_tables[jt_idx];
+    const std::string tbl_tok = absl::StrFormat("L%zu", 100000 + jt_idx);
+    jt_sym_to_label[jt.label_name] = absl::StrCat("$", tbl_tok);
+    if (out_jump_tables != nullptr) {
+      Stage0ResolvedJumpTable resolved;
+      resolved.table_label_token = tbl_tok;
+      resolved.target_labels.reserve(jt.target_word_indices.size());
+      for (size_t target_w_idx : jt.target_word_indices) {
+        auto it = word_to_label.find(target_w_idx);
+        if (it == word_to_label.end()) {
+          return {};
+        }
+        std::string_view lbl = it->second;
+        if (absl::StartsWith(lbl, "$")) {
+          lbl.remove_prefix(1);
+        }
+        resolved.target_labels.emplace_back(lbl);
+      }
+      out_jump_tables->push_back(std::move(resolved));
+    }
+  }
+
+  // If no relocations, jump tables, constant pool entries, or linked `base_vram`
+  // are present, delegate to the pure-word macro collapse path.
+  if (stage0_input.relocations.empty() && stage0_input.jump_tables.empty() &&
+      stage0_input.constant_pool.empty() && stage0_input.base_vram == 0u) {
+    return CollapseGasMacrosAndFlattenLines(raw_items);
+  }
+
+  absl::flat_hash_map<size_t, const Stage0Relocation*> reloc_by_word;
+  for (const Stage0Relocation& rel : stage0_input.relocations) {
+    reloc_by_word[rel.word_index] = &rel;
+  }
+
+  absl::flat_hash_map<std::string, const Stage0ConstantPoolEntry*> cp_by_label;
+  for (const Stage0ConstantPoolEntry& cp : stage0_input.constant_pool) {
+    cp_by_label[cp.label_name] = &cp;
+  }
+
+  auto map_symbol = [&](std::string_view sym) -> std::string {
+    if (auto it = jt_sym_to_label.find(sym); it != jt_sym_to_label.end()) {
+      return it->second;
+    }
+    return std::string(sym);
+  };
+
+  auto format_sym_addend = [&](std::string_view sym, int64_t addend) -> std::string {
+    const std::string base = map_symbol(sym);
+    if (addend == 0) {
+      return base;
+    }
+    if (addend > 0) {
+      return absl::StrFormat("%s+%d", base, static_cast<int32_t>(addend));
+    }
+    return absl::StrFormat("%s%d", base, static_cast<int32_t>(addend));
+  };
+
+  const bool is_linked_rom = stage0_input.base_vram != 0u && stage0_input.relocations.empty();
+  auto rewrite_single_insn = [&](std::string line, uint32_t w, size_t w_idx) -> std::string {
+    line = NormalizeCop1LoadStoreMnemonic(line);
+    const uint32_t op = Opcode(w);
+    auto rel_it = reloc_by_word.find(w_idx);
+    const Stage0Relocation* rel = (rel_it != reloc_by_word.end()) ? rel_it->second : nullptr;
+
+    if (rel != nullptr) {
+      if (rel->kind == Stage0RelocKind::kMips26) {
+        if (op == 0x03u) {
+          return absl::StrFormat("jal %s", format_sym_addend(rel->symbol_name, rel->addend));
+        }
+        if (op == 0x02u && rel->symbol_name != ".text") {
+          return absl::StrFormat("j %s", format_sym_addend(rel->symbol_name, rel->addend));
+        }
+      } else if (rel->kind == Stage0RelocKind::kMipsLiteral) {
+        std::string mnem;
+        std::string reg;
+        int32_t off = 0;
+        if (ParseAnyMemInsnWithBase(line, static_cast<int>(Rs(w)), &mnem, &reg, &off)) {
+          auto cp_it = cp_by_label.find(rel->symbol_name);
+          const Stage0ConstantPoolEntry* cp =
+              (cp_it != cp_by_label.end()) ? cp_it->second : nullptr;
+          if (cp != nullptr && rel->addend == 0) {
+            if (mnem == "l.s" && cp->words.size() == 1 && absl::StartsWith(reg, "$f")) {
+              const uint32_t bits = cp->words[0];
+              const float fv = absl::bit_cast<float>(bits);
+              if (bits != 0u && std::isfinite(fv)) {
+                return absl::StrFormat("li.s %s,%.9e", reg, static_cast<double>(fv));
+              }
+            }
+            if (mnem == "l.d" && cp->words.size() == 2 && absl::StartsWith(reg, "$f")) {
+              const uint64_t bits =
+                  (uint64_t{cp->words[0]} << 32) | static_cast<uint64_t>(cp->words[1]);
+              const double dv = absl::bit_cast<double>(bits);
+              if (bits != 0u && std::isfinite(dv)) {
+                return absl::StrFormat("li.d %s,%.17e", reg, dv);
+              }
+            }
+          }
+          return absl::StrFormat("%s %s,%s", mnem, reg,
+                                 format_sym_addend(rel->symbol_name, rel->addend));
+        }
+      } else if (rel->kind == Stage0RelocKind::kMipsGpRel16) {
+        if ((op == 0x09u || op == 0x19u) && Rs(w) == 28u) {
+          return absl::StrFormat("%s $%u,%s", op == 0x19u ? "dla" : "la", Rt(w),
+                                 format_sym_addend(rel->symbol_name, rel->addend));
+        }
+        std::string mnem;
+        std::string reg;
+        int32_t off = 0;
+        if (ParseAnyMemInsnWithBase(line, static_cast<int>(Rs(w)), &mnem, &reg, &off)) {
+          if (Rs(w) == 28u) {
+            return absl::StrFormat("%s %s,%s", mnem, reg,
+                                   format_sym_addend(rel->symbol_name, rel->addend));
+          }
+          return absl::StrFormat("%s %s,%s($%u)", mnem, reg,
+                                 format_sym_addend(rel->symbol_name, rel->addend), Rs(w));
+        }
+      }
+      return line;
+    }
+
+    if (is_linked_rom && (op == 0x03u || op == 0x02u)) {
+      if (op == 0x02u && (absl::StartsWith(line, "j $L") || absl::StartsWith(line, "j\t$L"))) {
+        return line;
+      }
+      const uint32_t target_vram =
+          (stage0_input.base_vram & 0xf0000000u) | ((w & 0x03ffffffu) << 2);
+      auto sym_it = stage0_input.vram_to_symbol.find(target_vram);
+      const std::string sym = (sym_it != stage0_input.vram_to_symbol.end())
+                                  ? sym_it->second
+                                  : absl::StrFormat("func_%08x", target_vram);
+      return absl::StrFormat("%s %s", op == 0x03u ? "jal" : "j", sym);
+    }
+
+    if (line == "jal 0x0" || line == "jal\t0x0") {
+      return "jal __callee_0";
+    }
+    return line;
+  };
+
+  auto rewrite_uncollapsed_hilo = [&](std::string line, uint32_t w, size_t w_idx) -> std::string {
+    auto rel_it = reloc_by_word.find(w_idx);
+    if (rel_it == reloc_by_word.end()) {
+      return line;
+    }
+    const Stage0Relocation* rel = rel_it->second;
+    const std::string sym_expr = format_sym_addend(rel->symbol_name, rel->addend);
+    if (rel->kind == Stage0RelocKind::kMipsHi16 && Opcode(w) == 0x0fu) {
+      return absl::StrFormat("lui $%u,%%hi(%s)", Rt(w), sym_expr);
+    }
+    if (rel->kind == Stage0RelocKind::kMipsLo16) {
+      const uint32_t op = Opcode(w);
+      if (op == 0x09u || op == 0x19u) {
+        return absl::StrFormat("%s $%u,$%u,%%lo(%s)", op == 0x19u ? "daddiu" : "addiu", Rt(w),
+                               Rs(w), sym_expr);
+      }
+      std::string mnem;
+      std::string reg;
+      int32_t off = 0;
+      if (ParseAnyMemInsnWithBase(line, static_cast<int>(Rs(w)), &mnem, &reg, &off)) {
+        return absl::StrFormat("%s %s,%%lo(%s)($%u)", mnem, reg, sym_expr, Rs(w));
+      }
+    }
+    return line;
+  };
+
+  // Pass 1: collapse relocation-free multi-word `InvertGasMacro` expansions
+  // (`M_DIV_3`, `M_REM_3`, `M_DIVU_3`, `M_REMU_3`, `M_LI`) and resolve `jal` /
+  // `$gp`-relative / literal relocations.
+  std::vector<AsmItem> items;
+  items.reserve(raw_items.size());
+  const auto is_nop_delay_branch_or_reorder = [](const AsmItem& it) {
+    return it.kind == AsmItemKind::kReorderInsn ||
+           (it.kind == AsmItemKind::kNoreorderBranchSeq && it.delay_word == 0x00000000u &&
+            it.delay_label.empty());
+  };
+  for (size_t i = 0; i < raw_items.size(); ++i) {
+    AsmItem item = raw_items[i];
+    if (item.kind == AsmItemKind::kReorderInsn) {
+      if (i + 9 < raw_items.size() && is_nop_delay_branch_or_reorder(raw_items[i + 1]) &&
+          raw_items[i + 2].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 2].word == 0x0007000du && raw_items[i + 3].kind == AsmItemKind::kLabel &&
+          raw_items[i + 4].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 5].kind == AsmItemKind::kNoreorderBranchSeq &&
+          is_nop_delay_branch_or_reorder(raw_items[i + 6]) &&
+          raw_items[i + 7].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 7].word == 0x0006000du && raw_items[i + 8].kind == AsmItemKind::kLabel &&
+          raw_items[i + 9].kind == AsmItemKind::kReorderInsn) {
+        const uint32_t macro11[11] = {
+            item.word,
+            raw_items[i + 1].word,
+            0x00000000u,
+            raw_items[i + 2].word,
+            raw_items[i + 4].word,
+            raw_items[i + 5].word,
+            raw_items[i + 5].delay_word,
+            raw_items[i + 6].word,
+            0x00000000u,
+            raw_items[i + 7].word,
+            raw_items[i + 9].word,
+        };
+        const std::string macro_asm = InvertGasMacro(macro11);
+        if (!macro_asm.empty()) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          item.preceded_by_active_hazard = false;
+          items.push_back(std::move(item));
+          i += 9;
+          continue;
+        }
+      }
+
+      if (i + 4 < raw_items.size() && is_nop_delay_branch_or_reorder(raw_items[i + 1]) &&
+          raw_items[i + 2].kind == AsmItemKind::kReorderInsn &&
+          raw_items[i + 2].word == 0x0007000du && raw_items[i + 3].kind == AsmItemKind::kLabel &&
+          raw_items[i + 4].kind == AsmItemKind::kReorderInsn) {
+        const uint32_t macro5[5] = {
+            item.word,
+            raw_items[i + 1].word,
+            0x00000000u,
+            raw_items[i + 2].word,
+            raw_items[i + 4].word,
+        };
+        const std::string macro_asm = InvertGasMacro(macro5);
+        if (!macro_asm.empty()) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          item.preceded_by_active_hazard = false;
+          items.push_back(std::move(item));
+          i += 4;
+          continue;
+        }
+      }
+
+      if (i + 1 < raw_items.size() && raw_items[i + 1].kind == AsmItemKind::kReorderInsn &&
+          !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(raw_items[i + 1].word) &&
+          !reloc_by_word.contains(item.word_index) &&
+          !reloc_by_word.contains(raw_items[i + 1].word_index)) {
+        const uint32_t pair[2] = {item.word, raw_items[i + 1].word};
+        const std::string macro_asm = InvertGasMacro(pair);
+        if (!macro_asm.empty() &&
+            (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t"))) {
+          item.line = macro_asm;
+          item.unswapped_from_branch = false;
+          items.push_back(std::move(item));
+          ++i;
+          continue;
+        }
+      }
+
+      item.line = rewrite_single_insn(item.line, item.word, item.word_index);
+    } else if (item.kind == AsmItemKind::kNoreorderBranchSeq) {
+      item.line = rewrite_single_insn(item.line, item.word, item.word_index);
+      item.delay_line =
+          rewrite_single_insn(item.delay_line, item.delay_word, item.delay_word_index);
+      item.delay_line =
+          rewrite_uncollapsed_hilo(item.delay_line, item.delay_word, item.delay_word_index);
+    }
+    items.push_back(std::move(item));
+  }
+
+  // Pass 2: collapse adjacent GAS symbolic macros (`la`, `li.d`, direct/indexed
+  // symbolic loads & stores, paired `l.d`/`s.d`) when matching GAS `tempreg`
+  // rules, and rewrite remaining split `%hi`/`%lo` instructions explicitly.
+  std::vector<AsmItem> collapsed;
+  collapsed.reserve(items.size());
+  for (size_t i = 0; i < items.size(); ++i) {
+    AsmItem item = items[i];
+    if (item.kind == AsmItemKind::kReorderInsn) {
+      auto hi_it = reloc_by_word.find(item.word_index);
+      const Stage0Relocation* rel_hi =
+          (hi_it != reloc_by_word.end() && hi_it->second->kind == Stage0RelocKind::kMipsHi16 &&
+           Opcode(item.word) == 0x0fu && Rs(item.word) == 0u)
+              ? hi_it->second
+              : nullptr;
+      const int tempreg = (rel_hi != nullptr) ? static_cast<int>(Rt(item.word)) : -1;
+
+      if (tempreg >= 1 && !item.unswapped_from_branch) {
+        // 1) Indexed symbolic load/store:
+        //    `lui $<tempreg>, %hi(sym+add)`
+        //    `addu/daddu $<tempreg>, $<tempreg>, $<breg>`
+        //    `<memop> <reg>, %lo(sym+add)($<tempreg>)`
+        int base_reg = -1;
+        if (i + 2 < items.size() && items[i + 1].kind == AsmItemKind::kReorderInsn &&
+            items[i + 2].kind == AsmItemKind::kReorderInsn &&
+            !reloc_by_word.contains(items[i + 1].word_index) &&
+            ParseIndexedAddrAddu(items[i + 1].line, tempreg, &base_reg)) {
+          auto lo_it = reloc_by_word.find(items[i + 2].word_index);
+          const Stage0Relocation* rel_lo =
+              (lo_it != reloc_by_word.end() && lo_it->second->kind == Stage0RelocKind::kMipsLo16 &&
+               lo_it->second->symbol_name == rel_hi->symbol_name &&
+               lo_it->second->addend == rel_hi->addend)
+                  ? lo_it->second
+                  : nullptr;
+          std::string mnem;
+          std::string reg;
+          int32_t off = 0;
+          if (rel_lo != nullptr &&
+              ParseAnyMemInsnWithBase(items[i + 2].line, tempreg, &mnem, &reg, &off) &&
+              MatchesGasMacroTempreg(mnem, reg, base_reg, tempreg)) {
+            const std::string sym_expr = format_sym_addend(rel_lo->symbol_name, rel_lo->addend);
+            if (i + 3 < items.size() && items[i + 3].kind == AsmItemKind::kReorderInsn) {
+              auto lo2_it = reloc_by_word.find(items[i + 3].word_index);
+              const Stage0Relocation* rel_lo2 =
+                  (lo2_it != reloc_by_word.end()) ? lo2_it->second : nullptr;
+              std::string even_fpreg;
+              if (MatchPairedFpDoubleReloc(items[i + 3].line, tempreg, mnem, reg, rel_lo, rel_lo2,
+                                           &even_fpreg) &&
+                  !IsTempregReusedByLaterLo16(items, i + 4, tempreg, rel_hi->symbol_name,
+                                              reloc_by_word)) {
+                item.line = absl::StrFormat("%s %s,%s($%d)", mnem == "l.s" ? "l.d" : "s.d",
+                                            even_fpreg, sym_expr, base_reg);
+                item.unswapped_from_branch = false;
+                collapsed.push_back(std::move(item));
+                i += 3;
+                continue;
+              }
+            }
+            if (!IsTempregReusedByLaterLo16(items, i + 3, tempreg, rel_hi->symbol_name,
+                                            reloc_by_word)) {
+              item.line = absl::StrFormat("%s %s,%s($%d)", mnem, reg, sym_expr, base_reg);
+              item.unswapped_from_branch = false;
+              collapsed.push_back(std::move(item));
+              i += 2;
+              continue;
+            }
+          }
+        }
+
+        // 2) Direct symbolic load/store or `la` / `li.d`:
+        if (i + 1 < items.size() && items[i + 1].kind == AsmItemKind::kReorderInsn) {
+          auto lo_it = reloc_by_word.find(items[i + 1].word_index);
+          const Stage0Relocation* rel_lo =
+              (lo_it != reloc_by_word.end() && lo_it->second->kind == Stage0RelocKind::kMipsLo16 &&
+               lo_it->second->symbol_name == rel_hi->symbol_name &&
+               lo_it->second->addend == rel_hi->addend)
+                  ? lo_it->second
+                  : nullptr;
+          if (rel_lo != nullptr) {
+            const std::string sym_expr = format_sym_addend(rel_lo->symbol_name, rel_lo->addend);
+            std::string mnem;
+            std::string reg;
+            int32_t off = 0;
+            if (ParseAnyMemInsnWithBase(items[i + 1].line, tempreg, &mnem, &reg, &off) &&
+                MatchesGasMacroTempreg(mnem, reg, /*breg=*/0, tempreg)) {
+              auto try_recover_li_d = [&](std::string_view target_fpreg) -> std::string {
+                if (tempreg != 1 || rel_lo->addend != 0 || !absl::StartsWith(target_fpreg, "$f")) {
+                  return "";
+                }
+                auto cp_it = cp_by_label.find(rel_lo->symbol_name);
+                const Stage0ConstantPoolEntry* cp =
+                    (cp_it != cp_by_label.end()) ? cp_it->second : nullptr;
+                if (cp != nullptr && cp->words.size() == 2 &&
+                    (cp->section_name == ".rdata" || cp->section_name == ".rodata")) {
+                  const uint64_t bits =
+                      (uint64_t{cp->words[0]} << 32) | static_cast<uint64_t>(cp->words[1]);
+                  const double dv = absl::bit_cast<double>(bits);
+                  if (std::isfinite(dv) &&
+                      (bits != 0u || absl::StartsWith(rel_lo->symbol_name, "$LC_lit_"))) {
+                    return absl::StrFormat("li.d %s,%.17e", target_fpreg, dv);
+                  }
+                }
+                return "";
+              };
+
+              // Paired 3-word `l.d` / `s.d` (`mips_isa == 1`).
+              if (i + 2 < items.size() && items[i + 2].kind == AsmItemKind::kReorderInsn) {
+                auto lo2_it = reloc_by_word.find(items[i + 2].word_index);
+                const Stage0Relocation* rel_lo2 =
+                    (lo2_it != reloc_by_word.end()) ? lo2_it->second : nullptr;
+                std::string even_fpreg;
+                if (MatchPairedFpDoubleReloc(items[i + 2].line, tempreg, mnem, reg, rel_lo, rel_lo2,
+                                             &even_fpreg) &&
+                    !IsTempregReusedByLaterLo16(items, i + 3, tempreg, rel_hi->symbol_name,
+                                                reloc_by_word)) {
+                  if (mnem == "l.s") {
+                    if (std::string li_d_line = try_recover_li_d(even_fpreg); !li_d_line.empty()) {
+                      item.line = std::move(li_d_line);
+                      item.unswapped_from_branch = false;
+                      collapsed.push_back(std::move(item));
+                      i += 2;
+                      continue;
+                    }
+                  }
+                  item.line = absl::StrFormat("%s %s,%s", mnem == "l.s" ? "l.d" : "s.d", even_fpreg,
+                                              sym_expr);
+                  item.unswapped_from_branch = false;
+                  collapsed.push_back(std::move(item));
+                  i += 2;
+                  continue;
+                }
+              }
+
+              if (!IsTempregReusedByLaterLo16(items, i + 2, tempreg, rel_hi->symbol_name,
+                                              reloc_by_word)) {
+                // Reconstruct `li.d $f<even>, <double>` (`M_LI_DD`) for 8-byte
+                // `.rdata`/`.rodata` finite non-zero double constant pool loads.
+                if (mnem == "l.d") {
+                  if (std::string li_d_line = try_recover_li_d(reg); !li_d_line.empty()) {
+                    item.line = std::move(li_d_line);
+                    item.unswapped_from_branch = false;
+                    collapsed.push_back(std::move(item));
+                    ++i;
+                    continue;
+                  }
+                }
+
+                item.line = absl::StrFormat("%s %s,%s", mnem, reg, sym_expr);
+                item.unswapped_from_branch = false;
+                collapsed.push_back(std::move(item));
+                ++i;
+                continue;
+              }
+            }
+
+            // `la` / `dla` (`M_LA_AB`): `lui $<tempreg>` + `addiu/daddiu $<tempreg>,$<tempreg>`.
+            const uint32_t lo_op = Opcode(items[i + 1].word);
+            if ((lo_op == 0x09u || lo_op == 0x19u) &&
+                static_cast<int>(Rs(items[i + 1].word)) == tempreg &&
+                static_cast<int>(Rt(items[i + 1].word)) == tempreg &&
+                !IsTempregReusedByLaterLo16(items, i + 2, tempreg, rel_hi->symbol_name,
+                                            reloc_by_word)) {
+              item.line =
+                  absl::StrFormat("%s $%d,%s", lo_op == 0x19u ? "dla" : "la", tempreg, sym_expr);
+              item.unswapped_from_branch = false;
+              collapsed.push_back(std::move(item));
+              ++i;
+              continue;
+            }
+          }
+        }
+      }
+
+      // Not collapsed into a GAS macro: emit explicit `%hi(...)` / `%lo(...)` if relocated.
+      item.line = rewrite_uncollapsed_hilo(item.line, item.word, item.word_index);
+    }
+    collapsed.push_back(std::move(item));
+  }
+
+  // Pass 3: flatten into assembly lines, preserving `.set noreorder` branch
+  // sequences and any remaining un-swapped `[delay_item, branch_item]` pairs.
   std::vector<std::string> lines;
   lines.reserve(collapsed.size() * 2);
   for (size_t i = 0; i < collapsed.size(); ++i) {

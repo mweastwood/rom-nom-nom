@@ -294,8 +294,10 @@ bool IsMoveSpFp(const ParsedInsn& insn) {
     return ParseGprName(insn.ops[0]) == kRegSp && ParseGprName(insn.ops[1]) == kRegFp;
   }
   if ((insn.mnemonic == "addu" || insn.mnemonic == "or") && insn.ops.size() == 3) {
-    return ParseGprName(insn.ops[0]) == kRegSp && ParseGprName(insn.ops[1]) == kRegFp &&
-           ParseGprName(insn.ops[2]) == kRegZero;
+    const auto d = ParseGprName(insn.ops[0]);
+    const auto s1 = ParseGprName(insn.ops[1]);
+    const auto s2 = ParseGprName(insn.ops[2]);
+    return d == kRegSp && ((s1 == kRegFp && s2 == kRegZero) || (s1 == kRegZero && s2 == kRegFp));
   }
   return false;
 }
@@ -305,8 +307,10 @@ bool IsMoveFpSp(const ParsedInsn& insn) {
     return ParseGprName(insn.ops[0]) == kRegFp && ParseGprName(insn.ops[1]) == kRegSp;
   }
   if ((insn.mnemonic == "addu" || insn.mnemonic == "or") && insn.ops.size() == 3) {
-    return ParseGprName(insn.ops[0]) == kRegFp && ParseGprName(insn.ops[1]) == kRegSp &&
-           ParseGprName(insn.ops[2]) == kRegZero;
+    const auto d = ParseGprName(insn.ops[0]);
+    const auto s1 = ParseGprName(insn.ops[1]);
+    const auto s2 = ParseGprName(insn.ops[2]);
+    return d == kRegFp && ((s1 == kRegSp && s2 == kRegZero) || (s1 == kRegZero && s2 == kRegSp));
   }
   return false;
 }
@@ -964,108 +968,71 @@ bool IsReturnJr31Line(std::string_view line) {
 
 bool IsMoveSpFpLine(std::string_view line) {
   return line == "move $29,$30" || line == "move\t$29,$30" || line == "addu $29,$30,$0" ||
-         line == "addu\t$29,$30,$0" || line == "or $29,$30,$0" || line == "or\t$29,$30,$0";
+         line == "addu\t$29,$30,$0" || line == "or $29,$30,$0" || line == "or\t$29,$30,$0" ||
+         line == "addu $29,$0,$30" || line == "addu\t$29,$0,$30" || line == "or $29,$0,$30" ||
+         line == "or\t$29,$0,$30";
 }
 
-}  // namespace
-
-bool HasFramePointerMoveInPrologue(absl::Span<const std::string> asm_lines) {
-  for (const std::string& line : asm_lines) {
-    if (absl::EndsWith(line, ":")) {
-      break;
-    }
-    if (line == "move $30,$29" || line == "move\t$30,$29" || line == "addu $30,$29,$0" ||
-        line == "addu\t$30,$29,$0" || line == "or $30,$29,$0" || line == "or\t$30,$29,$0") {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
-                                        RtlSidebandState* sideband) {
-  const size_t n = asm_lines->size();
-  if (n < 2) {
+bool TryMatchEpilogueEndingAt(absl::Span<const std::string> lines, size_t end_idx,
+                              bool has_fp_in_prologue, size_t* out_cand_start,
+                              RtlSidebandState* out_sideband,
+                              std::optional<std::string>* out_delay_line) {
+  if (end_idx < 2 || end_idx > lines.size()) {
     return false;
   }
 
-  // Every `tsize > 0` epilogue ends with either:
-  //   Pattern A (`.set reorder`, 2 lines at `[n - 2, n - 1]`):
-  //     `addiu $29,$29,<tsize>` (or `addu $29,$29,$12`)
-  //     `jr $31`
-  //   Pattern B (`.set noreorder`, 4 lines at `[n - 4 .. n - 1]`):
-  //     `.set\tnoreorder`
-  //     `jr $31`
-  //     `addiu $29,$29,<tsize>` (or `addu $29,$29,$12`)
-  //     `.set\treorder`
-  //   Pattern C (unscheduled `-Wa,-g` / `-O0` epilogue, 5 lines at `[n - 5 .. n - 1]`):
-  //     `addiu $29,$29,<tsize>` (or `addu $29,$29,$12`)
-  //     `.set\tnoreorder`
-  //     `jr $31`
-  //     `nop`
-  //     `.set\treorder`
-  size_t tail_start = n;
+  size_t tail_start = end_idx;
   std::string sp_adjust_line;
-  if (IsReturnJr31Line((*asm_lines)[n - 1]) && IsSpRestoreAdjustLine((*asm_lines)[n - 2])) {
-    tail_start = n - 2;
-    sp_adjust_line = (*asm_lines)[n - 2];
-  } else if (n >= 4 &&
-             ((*asm_lines)[n - 4] == ".set\tnoreorder" ||
-              (*asm_lines)[n - 4] == ".set noreorder") &&
-             IsReturnJr31Line((*asm_lines)[n - 3]) && IsSpRestoreAdjustLine((*asm_lines)[n - 2]) &&
-             ((*asm_lines)[n - 1] == ".set\treorder" || (*asm_lines)[n - 1] == ".set reorder")) {
-    tail_start = n - 4;
-    sp_adjust_line = (*asm_lines)[n - 2];
-  } else if (n >= 5 && IsSpRestoreAdjustLine((*asm_lines)[n - 5]) &&
-             ((*asm_lines)[n - 4] == ".set\tnoreorder" ||
-              (*asm_lines)[n - 4] == ".set noreorder") &&
-             IsReturnJr31Line((*asm_lines)[n - 3]) && (*asm_lines)[n - 2] == "nop" &&
-             ((*asm_lines)[n - 1] == ".set\treorder" || (*asm_lines)[n - 1] == ".set reorder")) {
-    tail_start = n - 5;
-    sp_adjust_line = (*asm_lines)[n - 5];
+  if (IsReturnJr31Line(lines[end_idx - 1]) && IsSpRestoreAdjustLine(lines[end_idx - 2])) {
+    tail_start = end_idx - 2;
+    sp_adjust_line = lines[end_idx - 2];
+  } else if (end_idx >= 4 &&
+             (lines[end_idx - 4] == ".set\tnoreorder" || lines[end_idx - 4] == ".set noreorder") &&
+             IsReturnJr31Line(lines[end_idx - 3]) && IsSpRestoreAdjustLine(lines[end_idx - 2]) &&
+             (lines[end_idx - 1] == ".set\treorder" || lines[end_idx - 1] == ".set reorder")) {
+    tail_start = end_idx - 4;
+    sp_adjust_line = lines[end_idx - 2];
+  } else if (end_idx >= 5 && IsSpRestoreAdjustLine(lines[end_idx - 5]) &&
+             (lines[end_idx - 4] == ".set\tnoreorder" || lines[end_idx - 4] == ".set noreorder") &&
+             IsReturnJr31Line(lines[end_idx - 3]) && lines[end_idx - 2] == "nop" &&
+             (lines[end_idx - 1] == ".set\treorder" || lines[end_idx - 1] == ".set reorder")) {
+    tail_start = end_idx - 5;
+    sp_adjust_line = lines[end_idx - 5];
   } else {
     return false;
   }
 
-  // Normalize `addiu $29,$29,<tsize>` to `addu $29,$29,<tsize>` for
-  // `InvertFunctionPrologueEpilogue`.
   std::string normalized_sp_adjust = sp_adjust_line;
   if (absl::StartsWith(normalized_sp_adjust, "addiu\t") ||
       absl::StartsWith(normalized_sp_adjust, "addiu ")) {
     normalized_sp_adjust.replace(0, 5, "addu");
   }
 
-  const bool has_fp_in_prologue = HasFramePointerMoveInPrologue(*asm_lines);
-
-  // Determine the earliest line index `min_start` after the prologue and after
-  // the last label / directive before `tail_start`.
   size_t min_start = 1;
   for (size_t i = tail_start; i > 0; --i) {
-    const std::string& l = (*asm_lines)[i - 1];
-    if (absl::EndsWith(l, ":") || l.front() == '.') {
+    const std::string& l = lines[i - 1];
+    if (absl::EndsWith(l, ":") || (!l.empty() && l.front() == '.')) {
       min_start = i;
       break;
     }
   }
 
-  // First check for `epilogue_delay != 0` with `load_only_r31`:
-  // Preceding `tail_start` is `[..., lw $31,<off>($29/$13), <epilogue_delay_insn>]`.
   if (tail_start >= min_start + 2) {
-    const std::string& delay_cand = (*asm_lines)[tail_start - 1];
-    const std::string& lw_ra_cand = (*asm_lines)[tail_start - 2];
+    const std::string& delay_cand = lines[tail_start - 1];
+    const std::string& lw_ra_cand = lines[tail_start - 2];
     if ((absl::StartsWith(lw_ra_cand, "lw $31,") || absl::StartsWith(lw_ra_cand, "lw\t$31,")) &&
         !absl::StartsWith(delay_cand, "lw ") && !absl::StartsWith(delay_cand, "lw\t") &&
         !absl::StartsWith(delay_cand, "l.d ") && !absl::StartsWith(delay_cand, "l.d\t") &&
         !absl::StartsWith(delay_cand, "l.s ") && !absl::StartsWith(delay_cand, "l.s\t")) {
       for (size_t cand_start = min_start; cand_start <= tail_start - 2; ++cand_start) {
-        const std::string& first_l = (*asm_lines)[cand_start];
+        const std::string& first_l = lines[cand_start];
         if (IsMoveSpFpLine(first_l) && !has_fp_in_prologue) {
           continue;
         }
         std::vector<std::string> epilogue_lines;
         epilogue_lines.push_back(".set\tnoreorder");
         for (size_t k = cand_start; k < tail_start; ++k) {
-          epilogue_lines.push_back((*asm_lines)[k]);
+          epilogue_lines.push_back(lines[k]);
         }
         epilogue_lines.push_back("j\t$31");
         epilogue_lines.push_back(normalized_sp_adjust);
@@ -1075,35 +1042,35 @@ bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
             InvertFunctionPrologueEpilogue(absl::StrJoin(epilogue_lines, "\n"));
         const std::string delay_pat = InvertFinalScanInsn(delay_cand);
         if (spec.var_size >= 0 && !delay_pat.empty()) {
-          sideband->frame_size_bytes = spec.var_size;
-          sideband->saved_gpr_regnos.clear();
+          out_sideband->frame_size_bytes = spec.var_size;
+          out_sideband->saved_gpr_regnos.clear();
           for (int r = 0; r < 32; ++r) {
             if ((spec.saved_gpr_mask >> r) & 1u) {
-              sideband->saved_gpr_regnos.push_back(r);
+              out_sideband->saved_gpr_regnos.push_back(r);
             }
           }
-          sideband->epilogue_delay_pattern = delay_pat;
-          asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start),
-                           asm_lines->end());
+          out_sideband->saved_fpr_regnos.clear();
+          out_sideband->epilogue_delay_pattern = delay_pat;
+          *out_cand_start = cand_start;
+          if (out_delay_line != nullptr) {
+            *out_delay_line = delay_cand;
+          }
           return true;
         }
       }
     }
   }
 
-  // Standard `epilogue_delay == 0` epilogue: try the longest valid suffix
-  // `asm_lines[cand_start .. tail_start - 1]` + `[normalized_sp_adjust, "j\t$31"]`
-  // accepted by `InvertFunctionPrologueEpilogue`.
   for (size_t cand_start = min_start; cand_start <= tail_start; ++cand_start) {
     if (cand_start < tail_start) {
-      const std::string& first_l = (*asm_lines)[cand_start];
+      const std::string& first_l = lines[cand_start];
       if (IsMoveSpFpLine(first_l) && !has_fp_in_prologue) {
         continue;
       }
     }
     std::vector<std::string> epilogue_lines;
     for (size_t k = cand_start; k < tail_start; ++k) {
-      epilogue_lines.push_back((*asm_lines)[k]);
+      epilogue_lines.push_back(lines[k]);
     }
     epilogue_lines.push_back(normalized_sp_adjust);
     epilogue_lines.push_back("j\t$31");
@@ -1114,21 +1081,25 @@ bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
       if (has_fp_in_prologue && ((spec.saved_gpr_mask >> 30) & 1u) == 0u) {
         continue;
       }
-      sideband->frame_size_bytes = spec.var_size;
-      sideband->saved_gpr_regnos.clear();
+      out_sideband->frame_size_bytes = spec.var_size;
+      out_sideband->saved_gpr_regnos.clear();
       for (int r = 0; r < 32; ++r) {
         if ((spec.saved_gpr_mask >> r) & 1u) {
-          sideband->saved_gpr_regnos.push_back(r);
+          out_sideband->saved_gpr_regnos.push_back(r);
         }
       }
-      sideband->saved_fpr_regnos.clear();
+      out_sideband->saved_fpr_regnos.clear();
       for (size_t k = cand_start; k < tail_start; ++k) {
-        if (const std::optional<int> fpr = ParseFprRestoreRegno((*asm_lines)[k]); fpr.has_value()) {
-          sideband->saved_fpr_regnos.push_back(*fpr);
+        if (const std::optional<int> fpr = ParseFprRestoreRegno(lines[k]); fpr.has_value()) {
+          out_sideband->saved_fpr_regnos.push_back(*fpr);
         }
       }
-      std::sort(sideband->saved_fpr_regnos.begin(), sideband->saved_fpr_regnos.end());
-      asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start), asm_lines->end());
+      std::sort(out_sideband->saved_fpr_regnos.begin(), out_sideband->saved_fpr_regnos.end());
+      out_sideband->epilogue_delay_pattern.reset();
+      *out_cand_start = cand_start;
+      if (out_delay_line != nullptr) {
+        out_delay_line->reset();
+      }
       return true;
     }
   }
@@ -1136,10 +1107,221 @@ bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
   return false;
 }
 
+void InferLeafAndOutgoingArgsSize(absl::Span<const std::string> asm_lines,
+                                  RtlSidebandState* sideband) {
+  bool has_call = false;
+  for (const std::string& line : asm_lines) {
+    if (absl::StartsWith(line, "jal ") || absl::StartsWith(line, "jal\t") ||
+        absl::StartsWith(line, "jalr ") || absl::StartsWith(line, "jalr\t")) {
+      has_call = true;
+      break;
+    }
+  }
+  const bool saves_ra =
+      std::find(sideband->saved_gpr_regnos.begin(), sideband->saved_gpr_regnos.end(), kRegRa) !=
+      sideband->saved_gpr_regnos.end();
+  sideband->is_leaf_function = !has_call && !saves_ra;
+  if (!has_call) {
+    sideband->outgoing_args_size = 0;
+    return;
+  }
+
+  const int non_reg_size = sideband->frame_size_bytes;
+  if (non_reg_size <= 0) {
+    sideband->outgoing_args_size = 0;
+    return;
+  }
+
+  // Identify `$sp`-relative slots in `[16, non_reg_size)` that are loaded from
+  // or have their address taken (`addiu/daddiu $r,$29,<off>` with `r != 29`);
+  // such slots are local variables / spills rather than outgoing call arguments.
+  std::vector<bool> byte_read_or_addr_taken(static_cast<size_t>(non_reg_size), false);
+  auto mark_local_range = [&](int64_t off, int bytes) {
+    for (int b = 0; b < bytes; ++b) {
+      const int64_t idx = off + b;
+      if (idx >= 0 && idx < non_reg_size) {
+        byte_read_or_addr_taken[static_cast<size_t>(idx)] = true;
+      }
+    }
+  };
+
+  struct StoreRange {
+    int start = 0;
+    int size = 0;
+  };
+  std::vector<StoreRange> sp_arg_stores;
+
+  for (const std::string& line : asm_lines) {
+    if (line.empty() || line.front() == '.' || absl::EndsWith(line, ":")) {
+      continue;
+    }
+    ParsedInsn insn;
+    if (!ParseInsnLine(line, /*in_noreorder=*/false, &insn)) {
+      continue;
+    }
+    if ((insn.mnemonic == "addiu" || insn.mnemonic == "daddiu" || insn.mnemonic == "addi") &&
+        insn.ops.size() == 3) {
+      const auto dreg = ParseGprName(insn.ops[0]);
+      const auto sreg = ParseGprName(insn.ops[1]);
+      int64_t off = 0;
+      if (dreg.has_value() && *dreg != kRegSp && sreg == kRegSp &&
+          ParseSignedInt(insn.ops[2], &off) && off >= 16 && off < non_reg_size) {
+        // Address of `[off, non_reg_size)` taken from `$sp`: all bytes from `off`
+        // upward belong to the local variable frame.
+        mark_local_range(off, non_reg_size - static_cast<int>(off));
+      }
+      continue;
+    }
+
+    if (insn.ops.size() != 2) {
+      continue;
+    }
+    int64_t off = 0;
+    int base_reg = -1;
+    if (!ParseMemOperand(insn.ops[1], &off, &base_reg) || base_reg != kRegSp) {
+      continue;
+    }
+
+    int access_bytes = 0;
+    bool is_load = false;
+    bool is_store = false;
+    if (insn.mnemonic == "lb" || insn.mnemonic == "lbu") {
+      access_bytes = 1;
+      is_load = true;
+    } else if (insn.mnemonic == "lh" || insn.mnemonic == "lhu" || insn.mnemonic == "ulh" ||
+               insn.mnemonic == "ulhu") {
+      access_bytes = 2;
+      is_load = true;
+    } else if (insn.mnemonic == "lw" || insn.mnemonic == "lwu" || insn.mnemonic == "l.s" ||
+               insn.mnemonic == "lwc1" || insn.mnemonic == "lwl" || insn.mnemonic == "lwr" ||
+               insn.mnemonic == "ulw") {
+      access_bytes = 4;
+      is_load = true;
+    } else if (insn.mnemonic == "ld" || insn.mnemonic == "l.d" || insn.mnemonic == "ldc1" ||
+               insn.mnemonic == "ldl" || insn.mnemonic == "ldr" || insn.mnemonic == "uld") {
+      access_bytes = 8;
+      is_load = true;
+    } else if (insn.mnemonic == "sb") {
+      access_bytes = 1;
+      is_store = true;
+    } else if (insn.mnemonic == "sh" || insn.mnemonic == "ush") {
+      access_bytes = 2;
+      is_store = true;
+    } else if (insn.mnemonic == "sw" || insn.mnemonic == "s.s" || insn.mnemonic == "swc1" ||
+               insn.mnemonic == "swl" || insn.mnemonic == "swr" || insn.mnemonic == "usw") {
+      access_bytes = 4;
+      is_store = true;
+    } else if (insn.mnemonic == "sd" || insn.mnemonic == "s.d" || insn.mnemonic == "sdc1" ||
+               insn.mnemonic == "sdl" || insn.mnemonic == "sdr" || insn.mnemonic == "usd") {
+      access_bytes = 8;
+      is_store = true;
+    }
+
+    if (is_load && off >= 16 && off < non_reg_size) {
+      mark_local_range(off, access_bytes);
+    } else if (is_store && has_call && off >= 16 && off + access_bytes <= non_reg_size) {
+      // Ignore callee-saved register prologue stores (`sw $16..$23/$30/$31`),
+      // whose offsets are `>= non_reg_size` anyway.
+      sp_arg_stores.push_back(StoreRange{.start = static_cast<int>(off), .size = access_bytes});
+    }
+  }
+
+  std::sort(sp_arg_stores.begin(), sp_arg_stores.end(),
+            [](const StoreRange& a, const StoreRange& b) { return a.start < b.start; });
+
+  int max_arg_end = 16;
+  for (const StoreRange& st : sp_arg_stores) {
+    bool overlaps_local = false;
+    for (int b = 0; b < st.size; ++b) {
+      if (byte_read_or_addr_taken[static_cast<size_t>(st.start + b)]) {
+        overlaps_local = true;
+        break;
+      }
+    }
+    if (overlaps_local) {
+      continue;
+    }
+    // Outgoing O32 stack arguments grow contiguously from offset 16 (allowing
+    // up to 4 bytes of alignment padding before an 8-byte `double`/`long long`).
+    if (st.start <= max_arg_end + 4) {
+      max_arg_end = std::max(max_arg_end, st.start + st.size);
+    }
+  }
+
+  sideband->outgoing_args_size = std::min(non_reg_size, AlignStack8(max_arg_end));
+  sideband->frame_size_bytes = non_reg_size - sideband->outgoing_args_size;
+}
+
+}  // namespace
+
+bool HasFramePointerMoveInPrologue(absl::Span<const std::string> asm_lines) {
+  for (const std::string& line : asm_lines) {
+    if (absl::EndsWith(line, ":")) {
+      break;
+    }
+    if (line == "move $30,$29" || line == "move\t$30,$29" || line == "addu $30,$29,$0" ||
+        line == "addu\t$30,$29,$0" || line == "or $30,$29,$0" || line == "or\t$30,$29,$0" ||
+        line == "addu $30,$0,$29" || line == "addu\t$30,$0,$29" || line == "or $30,$0,$29" ||
+        line == "or\t$30,$0,$29") {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TryExtractAndStripTrailingEpilogue(std::vector<std::string>* asm_lines,
+                                        RtlSidebandState* sideband) {
+  const bool has_fp_in_prologue = HasFramePointerMoveInPrologue(*asm_lines);
+  size_t cand_start = 0;
+  if (!TryMatchEpilogueEndingAt(*asm_lines, asm_lines->size(), has_fp_in_prologue, &cand_start,
+                                sideband, /*out_delay_line=*/nullptr)) {
+    return false;
+  }
+  asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start), asm_lines->end());
+  return true;
+}
+
 void ExtractFunctionPrologueEpilogue(std::vector<std::string>* asm_lines,
                                      RtlSidebandState* sideband) {
   sideband->frame_pointer_needed = HasFramePointerMoveInPrologue(*asm_lines);
-  TryExtractAndStripTrailingEpilogue(asm_lines, sideband);
+  bool has_epilogue_spec = TryExtractAndStripTrailingEpilogue(asm_lines, sideband);
+
+  // Also detect any non-trailing or additional `tsize > 0` epilogues (e.g., IDO
+  // early-return epilogues or epilogues followed by out-of-line loop blocks),
+  // populating `sideband` if no trailing epilogue existed and normalizing each
+  // interior epilogue into a `jr\t$31` return sequence.
+  for (size_t end_idx = asm_lines->size(); end_idx >= 2;) {
+    size_t cand_start = 0;
+    RtlSidebandState cand_sb;
+    std::optional<std::string> delay_line;
+    if (TryMatchEpilogueEndingAt(*asm_lines, end_idx, sideband->frame_pointer_needed, &cand_start,
+                                 &cand_sb, &delay_line)) {
+      if (!has_epilogue_spec || (cand_sb.frame_size_bytes == sideband->frame_size_bytes &&
+                                 cand_sb.saved_gpr_regnos == sideband->saved_gpr_regnos)) {
+        if (!has_epilogue_spec) {
+          sideband->frame_size_bytes = cand_sb.frame_size_bytes;
+          sideband->saved_gpr_regnos = cand_sb.saved_gpr_regnos;
+          sideband->saved_fpr_regnos = cand_sb.saved_fpr_regnos;
+          has_epilogue_spec = true;
+        }
+        std::vector<std::string> replacement;
+        if (delay_line.has_value()) {
+          replacement = {".set\tnoreorder", "jr\t$31", *delay_line, ".set\treorder"};
+        } else {
+          replacement = {"jr\t$31"};
+        }
+        asm_lines->erase(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start),
+                         asm_lines->begin() + static_cast<ptrdiff_t>(end_idx));
+        asm_lines->insert(asm_lines->begin() + static_cast<ptrdiff_t>(cand_start),
+                          replacement.begin(), replacement.end());
+        end_idx = cand_start;
+        continue;
+      }
+    }
+    --end_idx;
+  }
+
+  InferLeafAndOutgoingArgsSize(*asm_lines, sideband);
 }
 
 }  // namespace rom_nom_nom::lifter

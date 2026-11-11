@@ -50,6 +50,10 @@ class ProductionStage0InverseProvider final : public gcc_harness::SubfunctionInv
       absl::Span<const uint32_t> machine_words_x) const override {
     return lifter::InvertFinalAndGasFunction(machine_words_x);
   }
+
+  RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x) const override {
+    return lifter::InvertFinalAndGasFunction(input_x);
+  }
 };
 
 class Pass00FinalAndGasTest : public ::testing::Test {
@@ -144,8 +148,10 @@ TEST_F(Pass00FinalAndGasTest, SyntheticPositiveLargeConstantMacroAndFloatingPoin
 }
 
 TEST_F(Pass00FinalAndGasTest, SyntheticNegativeInvalidAndMalformedWords) {
-  EXPECT_TRUE(InvertFinalAndGasFunction({}).rpo_blocks.empty());
-  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse({}).matches);
+  EXPECT_TRUE(InvertFinalAndGasFunction(absl::Span<const uint32_t>{}).rpo_blocks.empty());
+  EXPECT_TRUE(InvertFinalAndGasFunction(Stage0FunctionInput{}).rpo_blocks.empty());
+  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(absl::Span<const uint32_t>{}).matches);
+  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(Stage0FunctionInput{}).matches);
 
   const std::vector<uint32_t> bad1 = {0x7fffffffu};
   EXPECT_TRUE(InvertFinalAndGasFunction(bad1).rpo_blocks.empty());
@@ -167,6 +173,142 @@ TEST_F(Pass00FinalAndGasTest, SyntheticNegativeInvalidAndMalformedWords) {
   };
   EXPECT_TRUE(InvertFinalAndGasFunction(bad_jal_nonzero).rpo_blocks.empty());
   EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(bad_jal_nonzero).matches);
+}
+
+TEST_F(Pass00FinalAndGasTest, Stage0EndToEndRelocationsJumpTablesFloatPoolsAndLinkedRom) {
+  // 1. Multi-callee `jal`, distinct globals with addends, 6-arg `outgoing_args_size == 24`,
+  //    `.rodata`/`.rdata` switch jump table, and constant-pool `double`s.
+  constexpr std::string_view kComplexSource = R"(
+extern int call_alpha(int);
+extern int call_beta(int, int, int, int, int, int);
+extern int g_arr_a[8];
+extern int g_arr_b[8];
+double eval_stage0(int op, int x) {
+  switch (op) {
+    case 0: return (double)call_alpha(x + g_arr_a[2]) * 3.141592653589793;
+    case 1: return (double)call_beta(x, g_arr_b[3], 2, 3, 4, 5) + 1.5;
+    case 2: return (double)(g_arr_a[1] - g_arr_b[4]);
+    case 3: return (double)(x * 7);
+    case 4: return (double)(x + 9);
+    default: return 0.0;
+  }
+}
+)";
+  for (const std::vector<std::string>& flags :
+       {std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+        std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"}}) {
+    const auto trace =
+        hooks_.TraceForwardCompilation(kComplexSource, "eval_stage0", flags, "eval_stage0");
+    const auto res = verifier_.VerifyFinalAndGasStageRightInverse(trace.stage0_input);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+
+    const RtlControlFlowGraph lifted = InvertFinalAndGasFunction(trace.stage0_input);
+    EXPECT_EQ(lifted.sideband.outgoing_args_size, 24);
+  }
+
+  const auto trace = hooks_.TraceForwardCompilation(
+      kComplexSource, "eval_stage0", {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"}, "eval_stage0");
+
+  // Negative checks: corrupting relocation symbol recovery, jump-table target,
+  // or constant-pool literal words must fail `VerifyFinalAndGasStageRightInverse`.
+  class WrongSymbolStage0Provider final : public gcc_harness::SubfunctionInverseProvider {
+   public:
+    RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& x) const override {
+      RtlControlFlowGraph cfg = rom_nom_nom::lifter::InvertFinalAndGasFunction(x);
+      for (auto& blk : cfg.rpo_blocks) {
+        for (auto& pat : blk.instructions) {
+          const size_t pos = pat.find("\"call_alpha\"");
+          if (pos != std::string::npos) {
+            pat.replace(pos, 12, "\"__callee_0\"");
+          }
+        }
+        blk.SyncRtlInsnsFromInstructions();
+      }
+      return cfg;
+    }
+  };
+  WrongSymbolStage0Provider wrong_sym_provider;
+  gcc_harness::RightInverseVerifier wrong_sym_verifier(&ctx_, &hooks_, &wrong_sym_provider);
+  EXPECT_FALSE(wrong_sym_verifier.VerifyFinalAndGasStageRightInverse(trace.stage0_input).matches);
+
+  Stage0FunctionInput bad_jt = trace.stage0_input;
+  ASSERT_FALSE(bad_jt.jump_tables.empty());
+  bad_jt.jump_tables[0].target_word_indices[0] = 99999u;
+  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(bad_jt).matches);
+
+  Stage0FunctionInput bad_pool = trace.stage0_input;
+  ASSERT_FALSE(bad_pool.constant_pool.empty());
+  bad_pool.constant_pool[0].words = {0x7ff80000u, 0x00000000u};
+  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(bad_pool).matches);
+
+  // 2. Linked N64 ROM slice (`base_vram != 0` + `vram_to_symbol` without relocations),
+  //    including mapped `jal` (`AudioUpdate`), unmapped `jal` (`func_80025000`), and
+  //    intra-function local `j 0x80020024` targeting the shared epilogue:
+  Stage0FunctionInput rom_input;
+  rom_input.base_vram = 0x80020000u;
+  rom_input.vram_to_symbol[0x80024000u] = "AudioUpdate";
+  rom_input.vram_to_symbol[0x80028000u] = "OtherCallee";
+  rom_input.machine_words = {
+      0x27bdffe8u,  // 0 (0x80020000): addiu $sp, $sp, -24
+      0x10800005u,  // 1 (0x80020004): beq $a0, $zero, +5 -> word 7 (0x8002001c)
+      0xafbf0010u,  // 2 (0x80020008): sw $ra, 16($sp) (delay slot)
+      0x0c009000u,  // 3 (0x8002000c): jal 0x80024000 (AudioUpdate)
+      0x00000000u,  // 4 (0x80020010): nop
+      0x08008009u,  // 5 (0x80020014): j 0x80020024 (intra-function jump -> word 9)
+      0x00000000u,  // 6 (0x80020018): nop
+      0x0c009400u,  // 7 (0x8002001c): jal 0x80025000 (unmapped func_80025000)
+      0x00000000u,  // 8 (0x80020020): nop
+      0x8fbf0010u,  // 9 (0x80020024): lw $ra, 16($sp)
+      0x03e00008u,  // 10 (0x80020028): jr $ra
+      0x27bd0018u,  // 11 (0x8002002c): addiu $sp, $sp, 24
+  };
+  const auto rom_res = verifier_.VerifyFinalAndGasStageRightInverse(rom_input);
+  EXPECT_TRUE(rom_res.matches) << rom_res.diff_detail;
+
+  const RtlControlFlowGraph rom_cfg = InvertFinalAndGasFunction(rom_input);
+  ASSERT_EQ(rom_cfg.rpo_blocks.size(), 4u);
+  EXPECT_EQ(rom_cfg.sideband.outgoing_args_size, 16);
+  EXPECT_EQ(rom_cfg.sideband.frame_size_bytes, 0);
+  ASSERT_GE(rom_cfg.rpo_blocks[1].instructions.size(), 1u);
+  EXPECT_NE(rom_cfg.rpo_blocks[1].instructions[0].find("AudioUpdate"), std::string::npos)
+      << rom_cfg.rpo_blocks[1].instructions[0];
+  ASSERT_GE(rom_cfg.rpo_blocks[2].instructions.size(), 1u);
+  EXPECT_NE(rom_cfg.rpo_blocks[2].instructions[0].find("func_80025000"), std::string::npos)
+      << rom_cfg.rpo_blocks[2].instructions[0];
+
+  // Linked-ROM negative checks: rewriting `"AudioUpdate"` to either a symbol
+  // mapped at a different VRAM (`"OtherCallee"` @ `0x80028000`) or an unmapped
+  // symbol (`"UnmappedCallee"`) must fail `VerifyFinalAndGasStageRightInverse`.
+  class WrongLinkedRomSymbolProvider final : public gcc_harness::SubfunctionInverseProvider {
+   public:
+    explicit WrongLinkedRomSymbolProvider(std::string replacement_sym)
+        : replacement_sym_(std::move(replacement_sym)) {}
+
+    RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& x) const override {
+      RtlControlFlowGraph cfg = rom_nom_nom::lifter::InvertFinalAndGasFunction(x);
+      for (auto& blk : cfg.rpo_blocks) {
+        for (auto& pat : blk.instructions) {
+          const size_t pos = pat.find("\"AudioUpdate\"");
+          if (pos != std::string::npos) {
+            pat.replace(pos, 13, "\"" + replacement_sym_ + "\"");
+          }
+        }
+        blk.SyncRtlInsnsFromInstructions();
+      }
+      return cfg;
+    }
+
+   private:
+    std::string replacement_sym_;
+  };
+  WrongLinkedRomSymbolProvider wrong_mapped_provider("OtherCallee");
+  gcc_harness::RightInverseVerifier wrong_mapped_verifier(&ctx_, &hooks_, &wrong_mapped_provider);
+  EXPECT_FALSE(wrong_mapped_verifier.VerifyFinalAndGasStageRightInverse(rom_input).matches);
+
+  WrongLinkedRomSymbolProvider wrong_unmapped_provider("UnmappedCallee");
+  gcc_harness::RightInverseVerifier wrong_unmapped_verifier(&ctx_, &hooks_,
+                                                            &wrong_unmapped_provider);
+  EXPECT_FALSE(wrong_unmapped_verifier.VerifyFinalAndGasStageRightInverse(rom_input).matches);
 }
 
 class Pass00FinalAndGasRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {
@@ -200,17 +342,21 @@ TEST_P(Pass00FinalAndGasRoundTripTest, RoundTrip2480Cases) {
   const RoundTripTestCase& tc = GetParam();
   const auto trace = hooks->TraceForwardCompilation(tc);
   ASSERT_FALSE(trace.final_machine_words.empty()) << "Test case: " << tc.test_name;
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << "Test case: " << tc.test_name;
 
-  const std::vector<uint32_t> unpadded_words = hooks->RunGasMdAssemble(trace.final_asm_text);
-  ASSERT_FALSE(unpadded_words.empty()) << "Test case: " << tc.test_name;
-  const auto res = verifier->VerifyFinalAndGasStageRightInverse(unpadded_words);
-  EXPECT_TRUE(res.matches) << "Test case: " << tc.test_name << "\nDiff:\n" << res.diff_detail;
+  const auto res_stage0 = verifier->VerifyFinalAndGasStageRightInverse(trace.stage0_input);
+  EXPECT_TRUE(res_stage0.matches) << "Test case: " << tc.test_name << "\nDiff:\n"
+                                  << res_stage0.diff_detail;
 
-  const RtlControlFlowGraph lifted_unpadded = InvertFinalAndGasFunction(unpadded_words);
-  const RtlControlFlowGraph lifted_padded = InvertFinalAndGasFunction(trace.final_machine_words);
-  const auto cmp = lifted_padded.CompareAgainst(lifted_unpadded);
-  EXPECT_TRUE(cmp.MatchesExactly()) << "Test case: " << tc.test_name << "\n" << cmp.mismatch_detail;
-  EXPECT_EQ(lifted_padded.sideband, lifted_unpadded.sideband) << "Test case: " << tc.test_name;
+  Stage0FunctionInput padded_stage0 = trace.stage0_input;
+  padded_stage0.machine_words = trace.final_machine_words;
+  const RtlControlFlowGraph lifted_stage0_unpadded = InvertFinalAndGasFunction(trace.stage0_input);
+  const RtlControlFlowGraph lifted_stage0_padded = InvertFinalAndGasFunction(padded_stage0);
+  const auto cmp_stage0 = lifted_stage0_padded.CompareAgainst(lifted_stage0_unpadded);
+  EXPECT_TRUE(cmp_stage0.MatchesExactly()) << "Test case: " << tc.test_name << "\n"
+                                           << cmp_stage0.mismatch_detail;
+  EXPECT_EQ(lifted_stage0_padded.sideband, lifted_stage0_unpadded.sideband)
+      << "Test case: " << tc.test_name;
 }
 
 INSTANTIATE_TEST_SUITE_P(SharedRoundTripSuite, Pass00FinalAndGasRoundTripTest,

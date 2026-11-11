@@ -343,6 +343,77 @@ TEST(InvertFunctionPrologueEpilogueTest, ExtractFunctionPrologueEpilogueStreamTe
     EXPECT_EQ(sideband.epilogue_delay_pattern,
               "(set (reg:SI 2 v0) (plus:SI (reg:SI 16 s0) (reg:SI 0 $0)))");
   }
+
+  // 5. `or $30,$29,$0` / `addu $30,$29,$0` prologue FP moves and `or $29,$30,$0`
+  //    epilogue FP restore, plus `outgoing_args_size == 24` when the function
+  //    writes a 5th/6th call argument at `16($29)` and `20($29)` without reading
+  //    from `[16, 24)` or taking `&sp + off`.
+  {
+    std::vector<std::string> asm_lines = {
+        "addiu $29,$29,-32", "sw $31,28($29)", "sw $30,24($29)",   "or $30,$29,$0",
+        "sw $4,16($29)",     "sw $5,20($29)",  "jal Foo",          "or $29,$30,$0",
+        "lw $31,28($29)",    "lw $30,24($29)", "addiu $29,$29,32", "jr $31",
+    };
+    RtlSidebandState sideband;
+    EXPECT_TRUE(HasFramePointerMoveInPrologue(asm_lines));
+    ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
+    EXPECT_TRUE(sideband.frame_pointer_needed);
+    EXPECT_EQ(sideband.outgoing_args_size, 24);
+    EXPECT_EQ(sideband.frame_size_bytes, 0);
+    const std::vector<int> expected_gprs = {30, 31};
+    EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
+  }
+
+  // 6. Local variable read at `16($29)` prevents mistaking local frame space
+  //    for `outgoing_args_size > 16` (`outgoing_args_size == 16`, `frame_size_bytes == 8`).
+  {
+    std::vector<std::string> asm_lines = {
+        "addiu $29,$29,-32", "sw $31,24($29)", "sw $4,16($29)",    "jal Foo",
+        "lw $2,16($29)",     "lw $31,24($29)", "addiu $29,$29,32", "jr $31",
+    };
+    RtlSidebandState sideband;
+    ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
+    EXPECT_EQ(sideband.outgoing_args_size, 16);
+    EXPECT_EQ(sideband.frame_size_bytes, 8);
+  }
+
+  // 7. Interior early-return multi-epilogue + non-trailing epilogue followed by
+  //    an out-of-line loop block.
+  {
+    std::vector<std::string> asm_lines = {
+        "addiu $29,$29,-24",
+        "sw $31,16($29)",
+        "beq $4,$0,$L2",
+        "jal Foo",
+        // Interior early-return epilogue:
+        "lw $31,16($29)",
+        "addiu $29,$29,24",
+        "jr $31",
+        "$L2:",
+        "jal Bar",
+        // Non-trailing main epilogue followed by out-of-line loop block `$L3`:
+        "lw $31,16($29)",
+        "addiu $29,$29,24",
+        "jr $31",
+        "$L3:",
+        "addiu $4,$4,-1",
+        "bne $4,$0,$L3",
+        "j $L2",
+    };
+    RtlSidebandState sideband;
+    ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
+    EXPECT_EQ(sideband.outgoing_args_size, 16);
+    EXPECT_EQ(sideband.frame_size_bytes, 0);
+    const std::vector<int> expected_gprs = {31};
+    EXPECT_EQ(sideband.saved_gpr_regnos, expected_gprs);
+    const std::vector<std::string> expected_lines = {
+        "addiu $29,$29,-24", "sw $31,16($29)", "beq $4,$0,$L2",
+        "jal Foo",           "jr\t$31",        "$L2:",
+        "jal Bar",           "jr\t$31",        "$L3:",
+        "addiu $4,$4,-1",    "bne $4,$0,$L3",  "j $L2",
+    };
+    EXPECT_EQ(asm_lines, expected_lines);
+  }
 }
 
 class InvertFunctionPrologueEpilogueRoundTripCorpusTest

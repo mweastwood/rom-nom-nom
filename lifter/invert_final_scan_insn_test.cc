@@ -299,6 +299,34 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     };
     EXPECT_TRUE(InvertFinalScanInsnLinesToCfg(unclosed_noreorder, sideband).rpo_blocks.empty());
   }
+
+  // 5. Jump-table `Stage0ResolvedJumpTable` lifting (`tablejump` `PARALLEL`,
+  //    `addr_vec_targets` preserving duplicates, deduplicated `successors`, and
+  //    `L100000` -> `__tbl_<b>` label rewrite).
+  {
+    const std::vector<std::string> asm_lines = {
+        "lw\t$2,$L100000($4)", "j\t$2",  "$L2:", "addiu\t$2,$0,10", "j\t$31", "$L3:",
+        "addiu\t$2,$0,20",     "j\t$31",
+    };
+    const std::vector<Stage0ResolvedJumpTable> jump_tables = {
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100000",
+            .target_labels = {"$L2", "$L3", "$L2"},
+        },
+    };
+    RtlSidebandState sideband;
+    const RtlControlFlowGraph cfg = InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables);
+    ASSERT_EQ(cfg.rpo_blocks.size(), 3u);
+    const std::vector<size_t> expected_addr_vec = {1u, 2u, 1u};
+    const std::vector<size_t> expected_succ = {1u, 2u};
+    EXPECT_EQ(cfg.rpo_blocks[0].addr_vec_targets, expected_addr_vec);
+    EXPECT_EQ(cfg.rpo_blocks[0].successors, expected_succ);
+    ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 2u);
+    EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[0].instructions[0], "(label_ref __tbl_0)"))
+        << cfg.rpo_blocks[0].instructions[0];
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[1],
+              "(parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref __tbl_0)) ] )");
+  }
 }
 
 class InvertFinalScanInsnRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {

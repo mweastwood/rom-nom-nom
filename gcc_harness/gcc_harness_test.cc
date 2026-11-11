@@ -1427,5 +1427,160 @@ TEST(RightInverseVerifierTest, SingleMethodSubfunctionInverseProviderSubclassAnd
   }
 }
 
+TEST(RightInverseVerifierTest, Stage0MetadataExtractionAndRightInverseVerification) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // 1. Verify `RunGasMdAssembleWithMetadata` extracts relocations (`kMips26`,
+  //    `kMipsHi16`, `kMipsLo16`), `.rdata` jump tables, and `.rdata` float/double
+  //    constant pools (`$LC*` and GAS `li.d`).
+  constexpr std::string_view kRichAsm = R"(
+	.rdata
+	.align	3
+$LC0:
+	.word	0x400921fb
+	.word	0x54442d18
+	.align	2
+$L10:
+	.word	$L2
+	.word	$L3
+	.word	$L4
+	.word	$L2
+	.word	$L3
+	.text
+	.align	2
+	.ent	rich_stage0
+rich_stage0:
+	.frame	$sp,24,$31
+	.mask	0x80000000,-8
+	subu	$sp,$sp,24
+	sw	$31,16($sp)
+	sltiu	$2,$4,5
+	beq	$2,$0,$L4
+	sll	$2,$4,2
+	lw	$2,$L10($2)
+	j	$2
+$L2:
+	jal	callee_alpha
+	lw	$3,g_counter+4
+	j	$L5
+$L3:
+	jal	callee_beta
+	l.d	$f0,$LC0
+	mfc1	$3,$f0
+	j	$L5
+$L4:
+	li.d	$f2,1.5
+	mfc1	$3,$f2
+$L5:
+	move	$2,$3
+	lw	$31,16($sp)
+	addu	$sp,$sp,24
+	j	$31
+	.end	rich_stage0
+)";
+  const Stage0FunctionInput stage0 = hooks.RunGasMdAssembleWithMetadata(kRichAsm);
+  ASSERT_FALSE(stage0.machine_words.empty());
+  ASSERT_EQ(stage0.jump_tables.size(), 1u);
+  EXPECT_EQ(stage0.jump_tables[0].label_name, "$L10");
+  EXPECT_EQ(stage0.jump_tables[0].target_word_indices.size(), 5u);
+  EXPECT_GE(stage0.constant_pool.size(), 2u);
+
+  bool saw_callee_alpha = false;
+  bool saw_callee_beta = false;
+  bool saw_counter_hi = false;
+  bool saw_counter_lo = false;
+  for (const auto& reloc : stage0.relocations) {
+    if (reloc.kind == Stage0RelocKind::kMips26 && reloc.symbol_name == "callee_alpha") {
+      saw_callee_alpha = true;
+    }
+    if (reloc.kind == Stage0RelocKind::kMips26 && reloc.symbol_name == "callee_beta") {
+      saw_callee_beta = true;
+    }
+    if (reloc.kind == Stage0RelocKind::kMipsHi16 && reloc.symbol_name == "g_counter" &&
+        reloc.addend == 4) {
+      saw_counter_hi = true;
+    }
+    if (reloc.kind == Stage0RelocKind::kMipsLo16 && reloc.symbol_name == "g_counter" &&
+        reloc.addend == 4) {
+      saw_counter_lo = true;
+    }
+  }
+  EXPECT_TRUE(saw_callee_alpha);
+  EXPECT_TRUE(saw_callee_beta);
+  EXPECT_TRUE(saw_counter_hi);
+  EXPECT_TRUE(saw_counter_lo);
+
+  // 2. Verify `VerifyFinalAndGasStageRightInverse(const Stage0FunctionInput&)`
+  //    accepts an exact inverse and rejects symbol/addend/jump-table/pool mismatches.
+  constexpr std::string_view kSource = R"(
+extern int callee_one(int);
+extern int callee_two(int);
+extern int g_table[8];
+int dispatch_func(int kind, int x) {
+  switch (kind) {
+    case 0: return callee_one(x) + g_table[1];
+    case 1: return callee_two(x) + g_table[3];
+    case 2: return x * 3;
+    case 3: return x - 7;
+    case 4: return x + 11;
+    default: return 0;
+  }
+}
+)";
+  const FunctionCompilationTrace trace =
+      hooks.TraceForwardCompilation(kSource, "dispatch_func", {"-O2"}, "stage0_verifier_test");
+  const RtlControlFlowGraph exact_dbr = trace.pass_snapshots.at(RtlPassKind::kDbr);
+
+  class ConfigurableStage0Provider final : public SubfunctionInverseProvider {
+   public:
+    explicit ConfigurableStage0Provider(RtlControlFlowGraph cfg) : cfg_(std::move(cfg)) {}
+    RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput&) const override {
+      return cfg_;
+    }
+
+   private:
+    RtlControlFlowGraph cfg_;
+  };
+
+  ConfigurableStage0Provider exact_provider(exact_dbr);
+  RightInverseVerifier exact_verifier(&ctx, &hooks, &exact_provider);
+  const RightInverseResult ok_res =
+      exact_verifier.VerifyFinalAndGasStageRightInverse(trace.stage0_input);
+  EXPECT_TRUE(ok_res.matches) << ok_res.diff_detail;
+
+  // Negative case A: wrong relocation symbol name in expected `Stage0FunctionInput`.
+  Stage0FunctionInput bad_sym_input = trace.stage0_input;
+  ASSERT_FALSE(bad_sym_input.relocations.empty());
+  bad_sym_input.relocations[0].symbol_name = "wrong_symbol_name";
+  EXPECT_FALSE(exact_verifier.VerifyFinalAndGasStageRightInverse(bad_sym_input).matches);
+
+  // Negative case B: wrong relocation addend in expected `Stage0FunctionInput`.
+  Stage0FunctionInput bad_addend_input = trace.stage0_input;
+  bad_addend_input.relocations[0].addend += 16;
+  EXPECT_FALSE(exact_verifier.VerifyFinalAndGasStageRightInverse(bad_addend_input).matches);
+
+  // Negative case C: wrong jump-table target index in expected `Stage0FunctionInput`.
+  Stage0FunctionInput bad_jt_input = trace.stage0_input;
+  ASSERT_FALSE(bad_jt_input.jump_tables.empty());
+  ASSERT_FALSE(bad_jt_input.jump_tables[0].target_word_indices.empty());
+  bad_jt_input.jump_tables[0].target_word_indices[0] += 1;
+  EXPECT_FALSE(exact_verifier.VerifyFinalAndGasStageRightInverse(bad_jt_input).matches);
+
+  // Negative case D: wrong constant-pool word when constant pool is present.
+  constexpr std::string_view kFloatSource =
+      "double scale_pi(double x) { return x * 3.141592653589793 + 2.718281828459045; }\n";
+  const FunctionCompilationTrace fp_trace =
+      hooks.TraceForwardCompilation(kFloatSource, "scale_pi", {"-O2"}, "stage0_fp_pool_test");
+  ASSERT_FALSE(fp_trace.stage0_input.constant_pool.empty());
+  ConfigurableStage0Provider fp_provider(fp_trace.pass_snapshots.at(RtlPassKind::kDbr));
+  RightInverseVerifier fp_verifier(&ctx, &hooks, &fp_provider);
+  EXPECT_TRUE(fp_verifier.VerifyFinalAndGasStageRightInverse(fp_trace.stage0_input).matches);
+
+  Stage0FunctionInput bad_pool_input = fp_trace.stage0_input;
+  bad_pool_input.constant_pool[0].words[0] ^= 0x00000001u;
+  EXPECT_FALSE(fp_verifier.VerifyFinalAndGasStageRightInverse(bad_pool_input).matches);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness

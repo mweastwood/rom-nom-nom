@@ -329,6 +329,103 @@ TEST(InvertGasMacroTest, CollapseGasMacrosAndFlattenLinesStreamTests) {
     };
     EXPECT_EQ(lines, expected);
   }
+
+  // 4a. Relocated ELF `Stage0FunctionInput` recovery:
+  //     - Distinct `jal` callees via relocations (`Foo` vs `Bar`)
+  //     - Distinct globals with addends (`g_alpha+8`) and split `%hi`/`%lo` when
+  //       `$tempreg` is reused by a second `%lo`
+  {
+    Stage0FunctionInput stage0;
+    stage0.relocations = {
+        {.word_index = 0, .kind = Stage0RelocKind::kMips26, .symbol_name = "Foo", .addend = 0},
+        {.word_index = 1, .kind = Stage0RelocKind::kMips26, .symbol_name = "Bar", .addend = 0},
+        {.word_index = 2,
+         .kind = Stage0RelocKind::kMipsHi16,
+         .symbol_name = "g_alpha",
+         .addend = 8},
+        {.word_index = 3,
+         .kind = Stage0RelocKind::kMipsLo16,
+         .symbol_name = "g_alpha",
+         .addend = 8},
+        // Split `%hi`/`%lo` where `$3` is reused for a second `%lo` load:
+        {.word_index = 4, .kind = Stage0RelocKind::kMipsHi16, .symbol_name = "g_pair", .addend = 0},
+        {.word_index = 5, .kind = Stage0RelocKind::kMipsLo16, .symbol_name = "g_pair", .addend = 0},
+        {.word_index = 6, .kind = Stage0RelocKind::kMipsLo16, .symbol_name = "g_pair", .addend = 4},
+    };
+    const std::vector<AsmItem> reloc_items = {
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "jal __callee_0",
+         .word = 0x0c000000u,
+         .word_index = 0},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "jal __callee_0",
+         .word = 0x0c000000u,
+         .word_index = 1},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "lui $2,0x0",
+         .word = 0x3c020000u,
+         .word_index = 2},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "lw $2,8($2)",
+         .word = 0x8c420008u,
+         .word_index = 3},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "lui $3,0x0",
+         .word = 0x3c030000u,
+         .word_index = 4},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "lw $4,0($3)",
+         .word = 0x8c640000u,
+         .word_index = 5},
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "lw $5,4($3)",
+         .word = 0x8c650004u,
+         .word_index = 6},
+    };
+    const absl::flat_hash_map<size_t, std::string> word_to_label;
+    std::vector<Stage0ResolvedJumpTable> resolved_jts;
+    const std::vector<std::string> lines =
+        CollapseGasMacrosAndFlattenLines(reloc_items, stage0, word_to_label, &resolved_jts);
+    const std::vector<std::string> expected = {
+        "jal Foo",
+        "jal Bar",
+        "lw $2,g_alpha+8",
+        "lui $3,%hi(g_pair)",
+        "lw $4,%lo(g_pair)($3)",
+        "lw $5,%lo(g_pair+4)($3)",
+    };
+    EXPECT_EQ(lines, expected);
+    EXPECT_TRUE(resolved_jts.empty());
+  }
+
+  // 4b. Linked N64 ROM `Stage0FunctionInput` (`base_vram != 0`, empty relocations):
+  //     - Resolves `jal` via `vram_to_symbol` (`RomHelper`) or fallback `func_<08x>`
+  {
+    Stage0FunctionInput rom_stage0;
+    rom_stage0.base_vram = 0x80040000u;
+    rom_stage0.vram_to_symbol[0x80051234u] = "RomHelper";
+    const std::vector<AsmItem> rom_items = {
+        // Linked ROM `jal 0x80051234` (`target26 = (0x80051234 >> 2) & 0x03ffffff = 0x0001448d`):
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "jal 0x51234",
+         .word = 0x0c01448du,
+         .word_index = 0},
+        // Linked ROM `jal 0x80060000` without symbol entry -> `func_80060000`:
+        {.kind = AsmItemKind::kReorderInsn,
+         .line = "jal 0x60000",
+         .word = 0x0c018000u,
+         .word_index = 1},
+    };
+    const absl::flat_hash_map<size_t, std::string> word_to_label;
+    std::vector<Stage0ResolvedJumpTable> resolved_jts;
+    const std::vector<std::string> lines =
+        CollapseGasMacrosAndFlattenLines(rom_items, rom_stage0, word_to_label, &resolved_jts);
+    const std::vector<std::string> expected = {
+        "jal RomHelper",
+        "jal func_80060000",
+    };
+    EXPECT_EQ(lines, expected);
+  }
 }
 
 class InvertGasMacroRoundTripCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

@@ -121,6 +121,7 @@ struct FunctionCompilationTrace {
   std::string final_asm_text;
   std::vector<std::string> final_insn_asm_lines;
   std::vector<uint32_t> final_machine_words;
+  Stage0FunctionInput stage0_input;
 };
 
 struct CrossJumpSearchResult {
@@ -147,6 +148,12 @@ class FunctionHooks {
   // Assembles one or more MIPS assembly lines in-process via Binutils 2.6 GAS
   // (`md_assemble`) and returns the emitted 32-bit big-endian machine words.
   std::vector<uint32_t> RunGasMdAssemble(std::string_view asm_text);
+
+  // Assembles MIPS assembly text in-process via Binutils 2.6 GAS (`md_assemble`)
+  // and captures `.text` machine words, `fixS` relocations, `.rdata`/`.rodata`
+  // switch jump tables, and constant-pool entries (`$LC*` and `li.s`/`li.d`
+  // literals).
+  Stage0FunctionInput RunGasMdAssembleWithMetadata(std::string_view asm_text);
 
   // Parses a single MIPS instruction in-process via GAS `mips_ip` (`tc-mips.c`)
   // and returns the raw 32-bit opcode word (`insn.insn_opcode`).

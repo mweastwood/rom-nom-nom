@@ -129,6 +129,7 @@ void expand_end_case(void* orig_index);
 void expand_label(void* body);
 void expand_goto(void* body);
 void* _obstack_newchunk(GccObstack* ob, int length);
+void init_insn_lengths();
 
 struct GccLangIndepOption {
   const char* string;
@@ -219,6 +220,49 @@ extern void* gas_data_section;
 extern void* bss_section;
 extern int target_big_endian;
 extern int mips_optimize;
+
+rom_nom_nom::gcc_harness::Rtx __real_immed_double_const(int i0, int i1, int mode);
+rom_nom_nom::gcc_harness::Rtx __real_immed_real_const(void* exp);
+rom_nom_nom::gcc_harness::Rtx __real_immed_real_const_1(double d, int mode);
+rom_nom_nom::gcc_harness::Rtx __real_force_const_mem(int mode, rom_nom_nom::gcc_harness::Rtx x);
+
+// On LP64, `immed_double_const` allocates `(const_double:M 0 i0 i1)` via
+// `gen_rtx`, populating `fld[2].rtint = i0` and `fld[3].rtint = i1` while
+// leaving the upper 32 bits of 8-byte `fld[2]` (`(&fld[2].rtint)[1]`)
+// uninitialized. Meanwhile `decode_rtx_const` and `REAL_VALUE_FROM_CONST_DOUBLE`
+// read 8 contiguous bytes starting at `&fld[2].rtint`. Mirror `fld[3].rtint`
+// into `(&fld[2].rtint)[1]` across all `varasm.o` entrypoints so floating-point
+// constant hashing and extraction are deterministic across functions.
+rom_nom_nom::gcc_harness::Rtx __wrap_immed_double_const(int i0, int i1, int mode) {
+  rom_nom_nom::gcc_harness::Rtx r = __real_immed_double_const(i0, i1, mode);
+  if (r != nullptr && r->code == kConstDouble) {
+    (&r->fld[2].rtint)[1] = r->fld[3].rtint;
+  }
+  return r;
+}
+
+rom_nom_nom::gcc_harness::Rtx __wrap_immed_real_const(void* exp) {
+  rom_nom_nom::gcc_harness::Rtx r = __real_immed_real_const(exp);
+  if (r != nullptr && r->code == kConstDouble) {
+    (&r->fld[2].rtint)[1] = r->fld[3].rtint;
+  }
+  return r;
+}
+
+rom_nom_nom::gcc_harness::Rtx __wrap_immed_real_const_1(double d, int mode) {
+  rom_nom_nom::gcc_harness::Rtx r = __real_immed_real_const_1(d, mode);
+  if (r != nullptr && r->code == kConstDouble) {
+    (&r->fld[2].rtint)[1] = r->fld[3].rtint;
+  }
+  return r;
+}
+
+rom_nom_nom::gcc_harness::Rtx __wrap_force_const_mem(int mode, rom_nom_nom::gcc_harness::Rtx x) {
+  if (x != nullptr && x->code == kConstDouble) {
+    (&x->fld[2].rtint)[1] = x->fld[3].rtint;
+  }
+  return __real_force_const_mem(mode, x);
+}
 
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
@@ -533,6 +577,7 @@ void GccContext::BeginFunction(std::string_view func_name) {
   decl_map_.clear();
   c_label_decl_map_.clear();
   ResetVirtualRegisterFlags();
+  init_insn_lengths();
   clear_const_double_mem();
   temporary_allocation();
 
@@ -667,6 +712,7 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   decl_map_.clear();
   c_label_decl_map_.clear();
   ResetVirtualRegisterFlags();
+  init_insn_lengths();
   clear_const_double_mem();
   temporary_allocation();
 
@@ -1795,6 +1841,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   if (reset_function) {
     BeginFunction(current_func_name_);
   } else {
+    init_insn_lengths();
     label_map_.clear();
     Rtx head_note = get_insns();
     if (head_note != nullptr) {

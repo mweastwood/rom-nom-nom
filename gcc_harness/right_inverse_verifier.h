@@ -73,9 +73,12 @@ class RightInverseVerifier {
   // f(g(asm_text_x)) == asm_text_x.
   RightInverseResult VerifyFunctionPrologueEpilogueRightInverse(std::string_view asm_text_x) const;
 
-  // Whole-stage `final` + `md_assemble` right-inverse on `machine_words_x`.
+  // Whole-stage `final` + `md_assemble` right-inverse on `machine_words_x` or
+  // full `Stage0FunctionInput` (verifying `.text` words, relocations, jump
+  // tables, and constant pools).
   RightInverseResult VerifyFinalAndGasStageRightInverse(
       absl::Span<const uint32_t> machine_words_x) const;
+  RightInverseResult VerifyFinalAndGasStageRightInverse(const Stage0FunctionInput& input_x) const;
 
   // ---------------------------------------------------------------------------
   // Stage 1: Delayed-Branch Scheduling (`reorg.c`)

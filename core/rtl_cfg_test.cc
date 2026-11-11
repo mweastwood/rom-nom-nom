@@ -225,5 +225,33 @@ TEST(RtlCfgTest, MipsFirstPseudoRegisterBoundaryAndFcr31HardReg) {
   EXPECT_EQ(virt_in.ToSexprString(), "(reg:SI 68)");
 }
 
+TEST(RtlCfgTest, Stage0FunctionInputEqualityAndMetadataFields) {
+  Stage0FunctionInput input;
+  input.machine_words = {0x0c000000u, 0x00000000u, 0x03e00008u, 0x00000000u};
+  input.base_vram = 0x80246000u;
+  input.relocations.push_back(Stage0Relocation{
+      .word_index = 0,
+      .kind = Stage0RelocKind::kMips26,
+      .symbol_name = "callee_fn",
+      .addend = 0,
+  });
+  input.jump_tables.push_back(Stage0JumpTable{
+      .label_name = "$L8",
+      .target_word_indices = {2, 3},
+  });
+  input.constant_pool.push_back(Stage0ConstantPoolEntry{
+      .label_name = "$LC0",
+      .section_name = ".lit4",
+      .byte_size = 4,
+      .words = {0x3fc00000u},
+  });
+  input.vram_to_symbol[0x80246100u] = "helper_fn";
+
+  Stage0FunctionInput copy = input;
+  EXPECT_EQ(copy, input);
+  copy.relocations[0].symbol_name = "other_fn";
+  EXPECT_NE(copy, input);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

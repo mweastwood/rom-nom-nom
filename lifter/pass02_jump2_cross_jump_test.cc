@@ -68,6 +68,10 @@ class ProductionPass02InverseProvider final : public SubfunctionInverseProvider 
     return lifter::InvertFinalAndGasFunction(machine_words_x);
   }
 
+  RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x) const override {
+    return lifter::InvertFinalAndGasFunction(input_x);
+  }
+
   RtlControlFlowGraph InvertMakeReturnInsns(
       const RtlControlFlowGraph& dbr_return_cfg_x) const override {
     return lifter::InvertMakeReturnInsns(dbr_return_cfg_x);
@@ -412,11 +416,9 @@ TEST_P(Pass02Jump2CrossJumpRoundTripTest, RoundTrip2480Cases) {
   ASSERT_FALSE(stage2_from_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
   EXPECT_EQ(stage2_from_dbr.pass, RtlPassKind::kSched2);
 
-  ASSERT_FALSE(trace.final_machine_words.empty()) << "Test case: " << tc.test_name;
-  const std::vector<uint32_t> unpadded_words = hooks->RunGasMdAssemble(trace.final_asm_text);
-  ASSERT_FALSE(unpadded_words.empty()) << "Test case: " << tc.test_name;
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << "Test case: " << tc.test_name;
 
-  const RtlControlFlowGraph stage0_lifted_dbr = InvertFinalAndGasFunction(unpadded_words);
+  const RtlControlFlowGraph stage0_lifted_dbr = InvertFinalAndGasFunction(trace.stage0_input);
   ASSERT_FALSE(stage0_lifted_dbr.rpo_blocks.empty()) << "Test case: " << tc.test_name;
   const RtlControlFlowGraph stage1_lifted_jump2 = InvertPass01DbrSchedule(stage0_lifted_dbr);
   ASSERT_FALSE(stage1_lifted_jump2.rpo_blocks.empty()) << "Test case: " << tc.test_name;
