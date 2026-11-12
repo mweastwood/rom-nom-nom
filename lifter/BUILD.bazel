@@ -37,6 +37,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":invert_gas_mips_ip",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -98,6 +99,7 @@ cc_test(
         ":invert_gas_macro",
         ":invert_gas_mips_ip",
         ":pass00_final_and_gas",
+        "//core:compiler_flags",
         "//core:round_trip_test_cases",
         "//core:rtl_cfg",
         "//gcc_harness:function_hooks",

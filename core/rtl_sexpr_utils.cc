@@ -704,6 +704,20 @@ std::string CanonicalizeLabelRefsInPattern(std::string_view pattern,
       i = (close_pos != std::string_view::npos) ? close_pos + 1 : p;
       continue;
     }
+    if (pattern[i] == '(' && absl::StartsWith(pattern.substr(i + 1), "insn_list")) {
+      out.push_back('(');
+      ++i;
+      while (i < pattern.size() && !absl::ascii_isspace(pattern[i]) && pattern[i] != ')') {
+        out.push_back(pattern[i++]);
+      }
+      while (i < pattern.size() && absl::ascii_isspace(pattern[i])) {
+        ++i;
+      }
+      while (i < pattern.size() && absl::ascii_isdigit(pattern[i])) {
+        ++i;
+      }
+      continue;
+    }
     out.push_back(pattern[i++]);
   }
   return out;
@@ -979,6 +993,9 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
   for (size_t b = 0; b < raw_blocks.size(); ++b) {
     RtlBasicBlock out_blk;
     out_blk.id = static_cast<uint32_t>(b);
+    if (pass == RtlPassKind::kRtl) {
+      out_blk.has_label = !raw_blocks[b].label_uids.empty();
+    }
     for (const auto& pat : raw_blocks[b].instructions) {
       out_blk.AddPatternOnly(pat);
     }
@@ -1041,7 +1058,10 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
       RtlInsnKind effective_kind = entry.kind;
       std::string jump_raw_pat;
       for (const auto& sub : inner_entries) {
-        const std::string tag = ExtractInsnTagWithFlags(sub.raw_sexpr);
+        std::string tag = ExtractInsnTagWithFlags(sub.raw_sexpr);
+        if (const size_t colon_pos = tag.find(':'); colon_pos != std::string::npos) {
+          tag.erase(colon_pos);
+        }
         const std::string sub_pat = ExtractPatternAndNotesFromInsnSexpr(sub.raw_sexpr, label_map);
         formatted_inner.push_back(absl::StrCat("(", tag, " ", sub_pat, ")"));
         if (sub.kind == RtlInsnKind::kJumpInsn) {
@@ -1183,22 +1203,22 @@ int MaxPseudoRegInCfg(const RtlControlFlowGraph& cfg) {
   int max_pseudo = -1;
   for (const auto& blk : cfg.rpo_blocks) {
     for (const std::string& pat : blk.instructions) {
+      const std::string clean = StripTrailingRegNotesFromPattern(pat);
       size_t pos = 0;
-      while ((pos = pat.find("(reg", pos)) != std::string::npos) {
+      while ((pos = clean.find("(reg", pos)) != std::string_view::npos) {
         size_t p = pos + 4;
-        while (p < pat.size() && !absl::ascii_isspace(pat[p]) && pat[p] != ')') {
+        while (p < clean.size() && !absl::ascii_isspace(clean[p]) && clean[p] != ')') {
           ++p;
         }
-        while (p < pat.size() && absl::ascii_isspace(pat[p])) {
+        while (p < clean.size() && absl::ascii_isspace(clean[p])) {
           ++p;
         }
         const size_t num_start = p;
-        while (p < pat.size() && absl::ascii_isdigit(pat[p])) {
+        while (p < clean.size() && absl::ascii_isdigit(clean[p])) {
           ++p;
         }
         int regno = -1;
-        if (p > num_start &&
-            absl::SimpleAtoi(std::string_view{pat}.substr(num_start, p - num_start), &regno) &&
+        if (p > num_start && absl::SimpleAtoi(clean.substr(num_start, p - num_start), &regno) &&
             regno >= kFirstMipsPseudoRegister) {
           max_pseudo = std::max(max_pseudo, regno);
         }

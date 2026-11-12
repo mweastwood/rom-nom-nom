@@ -26,11 +26,13 @@ struct RoundTripCompilerFlagProfile {
 };
 
 // Returns the compiler/assembler flag profiles swept across every round-trip C test case:
-//   - O0_WaG:  -O0 -mips2 -mcpu=r4000 -Wa,-g
-//   - O1_WaG:  -O1 -mips2 -mcpu=r4000 -Wa,-g
-//   - O2_WaG:  -O2 -mips2 -mcpu=r4000 -Wa,-g
-//   - O2_WaO2: -O2 -mips2 -mcpu=r4000 -Wa,-O2
-//   - O3_WaG:  -O3 -mips2 -mcpu=r4000 -Wa,-g
+//   - O0_WaG:                   -O0 -mips2 -mcpu=r4000 -Wa,-g
+//   - O1_WaG:                   -O1 -mips2 -mcpu=r4000 -Wa,-g
+//   - O2_WaG:                   -O2 -mips2 -mcpu=r4000 -Wa,-g
+//   - O2_WaO2:                  -O2 -mips2 -mcpu=r4000 -Wa,-O2
+//   - O3_WaG:                   -O3 -mips2 -mcpu=r4000 -Wa,-g
+//   - O2_G8_WaO1:               -O2 -G 8 -mips2 -mcpu=r4000 -Wa,-O1
+//   - O2_Mips1_UnsignedChar_WaO2: -O2 -mips1 -funsigned-char -Wa,-O2
 const std::vector<RoundTripCompilerFlagProfile>& GetRoundTripCompilerFlagProfiles();
 
 // Returns the base library of unexpanded C test cases (one entry per C function).

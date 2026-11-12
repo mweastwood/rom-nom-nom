@@ -419,6 +419,84 @@ void PrependInsnToBlockAfterLeadingLoopNotes(RtlBasicBlock* blk, std::string ins
                            std::move(insn_str));
 }
 
+bool ExprHasMem(const RtlExpr& expr) {
+  bool has_mem = false;
+  expr.Visit([&has_mem](const RtlExpr& node) {
+    if (node.IsMem()) {
+      has_mem = true;
+    }
+  });
+  return has_mem;
+}
+
+void CollectDefinedRegs(const RtlExpr& expr, std::vector<int>* out) {
+  expr.Visit([out](const RtlExpr& node) {
+    if (node.IsSet() || node.op == RtlOp::kClobber) {
+      const RtlExpr& dst = node.children[0];
+      if (dst.IsReg()) {
+        const int r = dst.RegNo();
+        out->push_back(r);
+        if (dst.mode == RtlMachineMode::kDi || dst.mode == RtlMachineMode::kDf) {
+          out->push_back(r + 1);
+        }
+      } else if (dst.IsSubreg() && !dst.children.empty() && dst.children[0].IsReg()) {
+        out->push_back(dst.children[0].RegNo() + static_cast<int>(dst.int_val));
+      }
+    }
+  });
+}
+
+bool ExpressionsConflict(const RtlExpr& a, const RtlExpr& b) {
+  std::vector<int> a_defs;
+  CollectDefinedRegs(a, &a_defs);
+  for (int r : a_defs) {
+    if (b.ContainsReg(r)) {
+      return true;
+    }
+  }
+  std::vector<int> b_defs;
+  CollectDefinedRegs(b, &b_defs);
+  for (int r : b_defs) {
+    if (a.ContainsReg(r)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TargetFallthroughPredEndsWithSlotPat(const RtlControlFlowGraph& cfg, size_t jumper_b,
+                                          size_t target_b, const RtlExpr& slot_pat) {
+  if (target_b == 0 || target_b >= cfg.rpo_blocks.size() || target_b - 1 == jumper_b) {
+    return false;
+  }
+  const auto& pred_blk = cfg.rpo_blocks[target_b - 1];
+  bool has_ft_edge = false;
+  for (size_t s : pred_blk.successors) {
+    if (s == target_b) {
+      has_ft_edge = true;
+      break;
+    }
+  }
+  if (!has_ft_edge || pred_blk.instructions.empty()) {
+    return false;
+  }
+  for (size_t idx = pred_blk.instructions.size(); idx > 0; --idx) {
+    auto p = ParsePatternAndNotes(pred_blk.instructions[idx - 1]);
+    if (!p.ok()) {
+      return false;
+    }
+    if (p->pattern.op == RtlOp::kNote || p->pattern.op == RtlOp::kUse ||
+        p->pattern.op == RtlOp::kClobber) {
+      continue;
+    }
+    if (IsUncondJumpOrReturnOrTableJumpTopExpr(p->pattern)) {
+      return false;
+    }
+    return p->pattern == slot_pat;
+  }
+  return false;
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_simple_cfg_x) {
@@ -495,6 +573,18 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
           --slot_insert_pos;
         } else {
           break;
+        }
+      }
+      if (is_last_insn && head_sub.op == RtlOp::kJumpInsn &&
+          IsSimpleUncondJumpExpr(head_pat->pattern) && out.rpo_blocks[b].successors.size() == 1 &&
+          slot_insert_pos > 0 && !ExprHasMem(slot_pat->pattern) &&
+          TargetFallthroughPredEndsWithSlotPat(out, b, out.rpo_blocks[b].successors[0],
+                                               slot_pat->pattern)) {
+        auto prev_parsed = ParsePatternAndNotes(new_insns[slot_insert_pos - 1]);
+        if (prev_parsed.ok() && prev_parsed->pattern.IsSet() &&
+            prev_parsed->pattern.SetDest().IsReg() && ExprHasMem(prev_parsed->pattern.SetSrc()) &&
+            !ExpressionsConflict(prev_parsed->pattern, slot_pat->pattern)) {
+          --slot_insert_pos;
         }
       }
       new_insns.insert(new_insns.begin() + static_cast<ptrdiff_t>(slot_insert_pos),

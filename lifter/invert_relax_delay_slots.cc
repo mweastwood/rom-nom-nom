@@ -264,7 +264,7 @@ int GetSingleSetDestRegNo(const RtlExpr& pat) {
     return dst.RegNo();
   }
   if (dst.IsSubreg() && !dst.children.empty() && dst.children[0].IsReg()) {
-    return dst.children[0].RegNo();
+    return dst.children[0].RegNo() + static_cast<int>(dst.int_val);
   }
   return -1;
 }
@@ -288,6 +288,23 @@ bool IsUncondJumpOrReturnOrTableJumpTopExpr(const RtlExpr& expr) {
   return IsReturnExpr(expr) || IsSimpleUncondJumpExpr(expr) || IsTableJumpExpr(expr);
 }
 
+bool SubtreeReferencesHardReg(const RtlExpr& node, int regno) {
+  if (node.IsSubreg() && !node.children.empty() && node.children[0].IsReg()) {
+    return node.children[0].RegNo() + static_cast<int>(node.int_val) == regno;
+  }
+  if (node.IsReg()) {
+    const int r = node.RegNo();
+    const int n = (node.mode == RtlMachineMode::kDi || node.mode == RtlMachineMode::kDf) ? 2 : 1;
+    return regno >= r && regno < r + n;
+  }
+  for (const RtlExpr& child : node.children) {
+    if (SubtreeReferencesHardReg(child, regno)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ExprSetsOrClobbersReg(const RtlExpr& expr, int regno) {
   bool found = false;
   expr.Visit([&found, regno](const RtlExpr& node) {
@@ -296,10 +313,14 @@ bool ExprSetsOrClobbersReg(const RtlExpr& expr, int regno) {
     }
     if (node.IsSet() || node.op == RtlOp::kClobber) {
       const RtlExpr& dst = node.children[0];
-      if (dst.IsReg() && dst.RegNo() == regno) {
-        found = true;
+      if (dst.IsReg()) {
+        const int r = dst.RegNo();
+        const int n = (dst.mode == RtlMachineMode::kDi || dst.mode == RtlMachineMode::kDf) ? 2 : 1;
+        if (regno >= r && regno < r + n) {
+          found = true;
+        }
       } else if (dst.IsSubreg() && !dst.children.empty() && dst.children[0].IsReg() &&
-                 dst.children[0].RegNo() == regno) {
+                 dst.children[0].RegNo() + static_cast<int>(dst.int_val) == regno) {
         found = true;
       }
     }
@@ -308,11 +329,15 @@ bool ExprSetsOrClobbersReg(const RtlExpr& expr, int regno) {
 }
 
 bool ExprReferencesRegInSrcOrMem(const RtlExpr& expr, int regno) {
+  if (expr.op == RtlOp::kClobber) {
+    return !expr.children.empty() && expr.children[0].IsMem() &&
+           SubtreeReferencesHardReg(expr.children[0], regno);
+  }
   if (expr.IsSet()) {
-    if (expr.SetSrc().ContainsReg(regno)) {
+    if (SubtreeReferencesHardReg(expr.SetSrc(), regno)) {
       return true;
     }
-    if (expr.SetDest().IsMem() && expr.SetDest().ContainsReg(regno)) {
+    if (expr.SetDest().IsMem() && SubtreeReferencesHardReg(expr.SetDest(), regno)) {
       return true;
     }
     return false;
@@ -325,7 +350,7 @@ bool ExprReferencesRegInSrcOrMem(const RtlExpr& expr, int regno) {
     }
     return false;
   }
-  return expr.ContainsReg(regno);
+  return SubtreeReferencesHardReg(expr, regno);
 }
 
 bool ExprHasMem(const RtlExpr& expr) {
@@ -550,6 +575,233 @@ void InsertBlockAt(RtlControlFlowGraph* cfg, size_t insert_idx, RtlBasicBlock ne
   }
 }
 
+bool BlockHasOnlyUseOrClobberInsns(const RtlBasicBlock& blk) {
+  bool saw_use_or_clobber = false;
+  for (const std::string& s : blk.instructions) {
+    auto parsed = ParsePatternAndNotes(s);
+    if (!parsed.ok()) {
+      return false;
+    }
+    if (parsed->pattern.op == RtlOp::kNote) {
+      continue;
+    }
+    if (parsed->pattern.op != RtlOp::kUse && parsed->pattern.op != RtlOp::kClobber) {
+      return false;
+    }
+    saw_use_or_clobber = true;
+  }
+  return saw_use_or_clobber;
+}
+
+bool IsEligibleForMipsUncondJumpDelaySlot(const RtlExpr& pat) {
+  if (!pat.IsSet() || IsAnyJumpOrReturnTopExpr(pat)) {
+    return false;
+  }
+  const RtlExpr& dst = pat.SetDest();
+  const RtlExpr& src = pat.SetSrc();
+  if (src.op == RtlOp::kCall || ExprHasMem(src)) {
+    return false;
+  }
+  bool has_special_reg = false;
+  pat.Visit([&has_special_reg](const RtlExpr& node) {
+    if (node.IsReg() && node.RegNo() >= 64) {
+      has_special_reg = true;
+    }
+  });
+  if (has_special_reg) {
+    return false;
+  }
+  if (dst.IsMem()) {
+    if (dst.mode != RtlMachineMode::kQi && dst.mode != RtlMachineMode::kHi &&
+        dst.mode != RtlMachineMode::kSi && dst.mode != RtlMachineMode::kSf) {
+      return false;
+    }
+    const bool valid_store_src = (src.IsReg() && src.RegNo() >= 0 && src.RegNo() < 64) ||
+                                 (src.IsConstInt() && src.IntVal() == 0);
+    if (!valid_store_src || dst.children.empty()) {
+      return false;
+    }
+    const RtlExpr& addr = dst.children[0];
+    if (addr.IsReg()) {
+      return addr.RegNo() >= 0 && addr.RegNo() < 32;
+    }
+    if (addr.IsConstInt()) {
+      return addr.IntVal() >= -32768 && addr.IntVal() <= 32767;
+    }
+    if (addr.op == RtlOp::kPlus && addr.children.size() == 2 && addr.children[0].IsReg() &&
+        addr.children[1].IsConstInt()) {
+      return addr.children[1].IntVal() >= -32768 && addr.children[1].IntVal() <= 32767;
+    }
+    return addr.op == RtlOp::kLoSum;
+  }
+
+  const int dst_reg = GetSingleSetDestRegNo(pat);
+  if (dst_reg < 0 || dst_reg >= 64) {
+    return false;
+  }
+  if (dst_reg >= 32) {
+    bool touches_gpr_or_const_double = false;
+    src.Visit([&touches_gpr_or_const_double](const RtlExpr& node) {
+      if ((node.IsReg() && node.RegNo() >= 0 && node.RegNo() < 32) ||
+          node.op == RtlOp::kConstDouble || node.op == RtlOp::kFix ||
+          node.op == RtlOp::kUnsignedFix) {
+        touches_gpr_or_const_double = true;
+      }
+    });
+    return !touches_gpr_or_const_double;
+  }
+
+  const RtlMachineMode dst_mode = dst.mode;
+  if (dst_mode != RtlMachineMode::kQi && dst_mode != RtlMachineMode::kHi &&
+      dst_mode != RtlMachineMode::kSi && dst_mode != RtlMachineMode::kSf) {
+    return false;
+  }
+  bool touches_fpr = false;
+  src.Visit([&touches_fpr](const RtlExpr& node) {
+    if (node.IsReg() && node.RegNo() >= 32 && node.RegNo() < 64) {
+      touches_fpr = true;
+    }
+  });
+  if (touches_fpr || src.op == RtlOp::kMult || src.op == RtlOp::kDiv || src.op == RtlOp::kMod ||
+      src.op == RtlOp::kUdiv || src.op == RtlOp::kUmod) {
+    return false;
+  }
+  if (src.op == RtlOp::kHigh || src.op == RtlOp::kLoSum) {
+    return true;
+  }
+  bool has_sym_or_label = false;
+  src.Visit([&has_sym_or_label](const RtlExpr& node) {
+    if (node.op == RtlOp::kSymbolRef || node.op == RtlOp::kLabelRef || node.op == RtlOp::kConst ||
+        node.op == RtlOp::kConstDouble) {
+      has_sym_or_label = true;
+    }
+  });
+  if (has_sym_or_label) {
+    return false;
+  }
+  if (src.IsConstInt()) {
+    const int64_t v = src.IntVal();
+    return (v >= -32768 && v <= 65535) ||
+           ((v & 0xffff) == 0 && v >= -2147483648LL && v <= 2147483647LL);
+  }
+  if (src.children.size() == 2 && (src.children[0].IsConstInt() || src.children[1].IsConstInt())) {
+    if (src.children[0].IsConstInt()) {
+      return false;
+    }
+    const int64_t v = src.children[1].IntVal();
+    switch (src.op) {
+      case RtlOp::kAnd:
+      case RtlOp::kIor:
+      case RtlOp::kXor:
+        return v >= 0 && v <= 65535;
+      case RtlOp::kPlus:
+      case RtlOp::kLt:
+      case RtlOp::kLtu:
+        return v >= -32768 && v <= 32767;
+      case RtlOp::kMinus:
+        return v >= -32767 && v <= 32768;
+      case RtlOp::kAshift:
+      case RtlOp::kAshiftrt:
+      case RtlOp::kLshiftrt:
+        return v >= 0 && v <= 31;
+      case RtlOp::kEq:
+      case RtlOp::kNe:
+      case RtlOp::kGt:
+      case RtlOp::kGtu:
+        return v == 0;
+      default:
+        return false;
+    }
+  }
+  return src.op != RtlOp::kLe && src.op != RtlOp::kGe && src.op != RtlOp::kGeu;
+}
+
+void RewrapSharedUseBridgePredecessors(RtlControlFlowGraph* out_ptr) {
+  RtlControlFlowGraph& out = *out_ptr;
+  const auto preds = BuildPredecessors(out);
+  const size_t num_blocks = out.rpo_blocks.size();
+  for (size_t b = 0; b + 2 < num_blocks; ++b) {
+    auto& blk = out.rpo_blocks[b];
+    if (blk.instructions.empty() || blk.successors.size() != 1 || blk.successors[0] != b + 1) {
+      continue;
+    }
+    const auto& bridge_blk = out.rpo_blocks[b + 1];
+    if (!bridge_blk.has_label || bridge_blk.successors.size() != 1 ||
+        bridge_blk.successors[0] != b + 2 || !BlockHasOnlyUseOrClobberInsns(bridge_blk)) {
+      continue;
+    }
+    auto last_parsed = ParsePatternAndNotes(blk.instructions.back());
+    if (!last_parsed.ok() || IsAnyJumpOrReturnTopExpr(last_parsed->pattern)) {
+      continue;
+    }
+
+    bool shared_target_slot_across_bridge = false;
+    for (size_t p1 : preds[b + 1]) {
+      if (p1 == b || out.rpo_blocks[p1].instructions.empty()) {
+        continue;
+      }
+      auto p1_last = ParsePatternAndNotes(out.rpo_blocks[p1].instructions.back());
+      if (!p1_last.ok() || p1_last->pattern.op != RtlOp::kSequence ||
+          p1_last->pattern.children.size() != 2 ||
+          p1_last->pattern.children[0].op != RtlOp::kJumpInsn ||
+          !p1_last->pattern.children[1].flags.in_struct) {
+        continue;
+      }
+      auto j1 = RtlPatternAndNotes::FromSequenceSubInsn(p1_last->pattern.children[0]);
+      auto s1 = RtlPatternAndNotes::FromSequenceSubInsn(p1_last->pattern.children[1]);
+      if (!j1.ok() || !s1.ok() || !IsCondJumpExpr(j1->pattern)) {
+        continue;
+      }
+      for (size_t p2 : preds[b + 2]) {
+        if (p2 == b + 1 || out.rpo_blocks[p2].instructions.empty()) {
+          continue;
+        }
+        auto p2_last = ParsePatternAndNotes(out.rpo_blocks[p2].instructions.back());
+        if (!p2_last.ok() || p2_last->pattern.op != RtlOp::kSequence ||
+            p2_last->pattern.children.size() != 2 ||
+            p2_last->pattern.children[0].op != RtlOp::kJumpInsn ||
+            !p2_last->pattern.children[1].flags.in_struct) {
+          continue;
+        }
+        auto j2 = RtlPatternAndNotes::FromSequenceSubInsn(p2_last->pattern.children[0]);
+        auto s2 = RtlPatternAndNotes::FromSequenceSubInsn(p2_last->pattern.children[1]);
+        if (j2.ok() && s2.ok() && IsCondJumpExpr(j2->pattern) && s2->pattern == s1->pattern) {
+          shared_target_slot_across_bridge = true;
+          break;
+        }
+      }
+      if (shared_target_slot_across_bridge) {
+        break;
+      }
+    }
+    if (!shared_target_slot_across_bridge) {
+      continue;
+    }
+
+    if (IsEligibleForMipsUncondJumpDelaySlot(last_parsed->pattern)) {
+      for (RtlRegNote& note : last_parsed->reg_notes) {
+        if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg()) {
+          note.datum = RtlExpr::MakeConstInt(0);
+        }
+      }
+      RtlPatternAndNotes jump_pat_notes;
+      jump_pat_notes.pattern =
+          RtlExpr::MakeSet(RtlExpr::MakePc(), RtlExpr::MakeSymbolicLabelRef("L0"));
+      blk.instructions.back() =
+          RtlExpr::MakeSequence(
+              {
+                  RtlExpr::MakeInsnWrapper(RtlOp::kJumpInsn, RtlFlags{}, jump_pat_notes),
+                  RtlExpr::MakeInsnWrapper(RtlOp::kInsn, RtlFlags{}, *last_parsed),
+              })
+              .ToGccPrintRtlString();
+    } else {
+      RtlExpr jump_expr = RtlExpr::MakeSet(RtlExpr::MakePc(), RtlExpr::MakeSymbolicLabelRef("L0"));
+      blk.instructions.push_back(jump_expr.ToGccPrintRtlString());
+    }
+    out.rpo_blocks[b + 1].has_label = true;
+  }
+}
+
 bool BlockStartsWithUseInsn(const RtlBasicBlock& blk) {
   for (const std::string& s : blk.instructions) {
     auto parsed = ParsePatternAndNotes(s);
@@ -590,38 +842,10 @@ bool IsUnoptimizedO0Cfg(const RtlControlFlowGraph& cfg, bool cfg_has_any_sequenc
   return !cfg_has_any_sequence && !CfgHasAnyReturnInsn(cfg);
 }
 
-}  // namespace
-
-RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x) {
-  if (!IsValidCfg(dbr_relaxed_cfg_x)) {
-    return {};
-  }
-
-  RtlControlFlowGraph out = dbr_relaxed_cfg_x;
-  out.pass = RtlPassKind::kDbr;
-
-  bool cfg_has_any_sequence = false;
-  for (const auto& blk : out.rpo_blocks) {
-    for (const std::string& s : blk.instructions) {
-      auto parsed = ParsePatternAndNotes(s);
-      if (parsed.ok() && parsed->pattern.op == RtlOp::kSequence) {
-        cfg_has_any_sequence = true;
-        break;
-      }
-    }
-    if (cfg_has_any_sequence) {
-      break;
-    }
-  }
-
-  if (IsUnoptimizedO0Cfg(out, cfg_has_any_sequence)) {
-    SynchronizeCanonicalLabels(&out);
-    for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
-      out.rpo_blocks[b].id = static_cast<uint32_t>(b);
-      out.rpo_blocks[b].SyncRtlInsnsFromInstructions();
-    }
-    return out;
-  }
+void InvertRelaxUncondAndMergedDelaySlots(RtlControlFlowGraph* out_ptr,
+                                          std::vector<bool>* flavour_4a_restored_blocks_ptr) {
+  RtlControlFlowGraph& out = *out_ptr;
+  std::vector<bool>& flavour_4a_restored_blocks = *flavour_4a_restored_blocks_ptr;
 
   // Pass 1: Invert Category 1 (non-annulled `SEQUENCE` unconditional jump to
   // `b + 1` unwrapped by `reorg.c:3939-3973`, Subcase II.5) and Category 2
@@ -702,6 +926,10 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
             if (prev_slot_dst == last_dst_reg &&
                 (HasRegDeadConstZeroNote(*last_parsed) ||
                  prev_last->pattern.children[0].flags.unchanging ||
+                 (!HasRegDeadRegNote(*last_parsed) && !ExprHasMem(last_parsed->pattern) &&
+                  !ExprHasMem(prev_last->pattern.children[1].children[0]) &&
+                  !ExprReferencesRegInSrcOrMem(prev_last->pattern.children[1].children[0],
+                                               last_dst_reg)) ||
                  (!HasRegDeadRegNote(*last_parsed) &&
                   !BlockStartsWithUseInsn(out.rpo_blocks[b + 1])))) {
               should_wrap_uncond_seq = true;
@@ -732,6 +960,9 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
     const auto preds = BuildPredecessors(out);
     const size_t num_blocks = out.rpo_blocks.size();
     for (size_t b = 0; b < num_blocks; ++b) {
+      if (flavour_4a_restored_blocks[b]) {
+        continue;
+      }
       auto& blk = out.rpo_blocks[b];
       if (blk.instructions.empty() || blk.successors.size() != 2) {
         continue;
@@ -781,8 +1012,15 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
         auto ft_parsed = ParsePatternAndNotes(ft_blk.instructions[0]);
         if (ft_parsed.ok() && IsCondJumpExpr(ft_parsed->pattern) &&
             !ExprReferencesRegInSrcOrMem(ft_parsed->pattern, slot_dst_reg)) {
+          bool slot_dst_live_on_ft_fallthrough = ExprHasMem(slot_pat_notes->pattern);
+          if (!slot_dst_live_on_ft_fallthrough && fallthrough_b + 1 < out.rpo_blocks.size()) {
+            slot_dst_live_on_ft_fallthrough = IsAnyDefinedHardRegLiveAtBlockEntry(
+                out, slot_pat_notes->pattern, fallthrough_b + 1);
+          }
           RtlFlags new_b_jump_flags = jump_sub.flags;
-          new_b_jump_flags.unchanging = true;
+          if (slot_dst_live_on_ft_fallthrough) {
+            new_b_jump_flags.unchanging = true;
+          }
           RtlFlags new_b_slot_flags = slot_sub.flags;
           new_b_slot_flags.in_struct = true;
           blk.instructions.back() =
@@ -802,6 +1040,8 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
                       RtlExpr::MakeInsnWrapper(RtlOp::kInsn, ft_slot_flags, *slot_pat_notes),
                   })
                   .ToGccPrintRtlString();
+          flavour_4a_restored_blocks[b] = true;
+          flavour_4a_restored_blocks[fallthrough_b] = true;
           continue;
         }
       }
@@ -827,6 +1067,8 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
                       RtlExpr::MakeInsnWrapper(RtlOp::kInsn, RtlFlags{}, *slot_pat_notes),
                   })
                   .ToGccPrintRtlString();
+          flavour_4a_restored_blocks[b] = true;
+          flavour_4a_restored_blocks[target_b] = true;
           continue;
         }
       }
@@ -836,24 +1078,20 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       // `try_merge_delay_insns` (`reorg.c:1816-1853`).
       if (!ft_blk.has_label && preds[fallthrough_b].size() == 1 && preds[fallthrough_b][0] == b &&
           !ft_blk.instructions.empty()) {
-        // Subcase 4c-i: `target_b == b + 2`, `ft_blk` falls through to `b + 2`
-        // and ends with a `(note ...)` instruction (because the trailing active
-        // instruction after the note was deleted by `try_merge_delay_insns`),
-        // and no remaining instruction in `ft_blk` references or modifies
-        // `slot_dst_reg`.
         auto ft_last = ParsePatternAndNotes(ft_blk.instructions.back());
         if (target_b == b + 2 && ft_blk.successors.size() == 1 && ft_blk.successors[0] == b + 2 &&
-            ft_last.ok() && ft_last->pattern.op == RtlOp::kNote) {
+            ft_last.ok()) {
           bool conflict = false;
           for (const std::string& s : ft_blk.instructions) {
             auto p = ParsePatternAndNotes(s);
-            if (p.ok() && (p->pattern.ContainsReg(slot_dst_reg) ||
+            if (p.ok() && (p->pattern.op == RtlOp::kSequence ||
+                           ExprReferencesRegInSrcOrMem(p->pattern, slot_dst_reg) ||
                            ExprSetsOrClobbersReg(p->pattern, slot_dst_reg))) {
               conflict = true;
               break;
             }
           }
-          if (!conflict) {
+          if (!conflict && ft_last->pattern.op == RtlOp::kNote) {
             RtlFlags new_b_jump_flags = jump_sub.flags;
             new_b_jump_flags.unchanging = true;
             RtlFlags new_b_slot_flags = slot_sub.flags;
@@ -867,14 +1105,45 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
                     })
                     .ToGccPrintRtlString();
             ft_blk.instructions.push_back(slot_pat_notes->ToGccPrintRtlString());
+            flavour_4a_restored_blocks[b] = true;
             continue;
+          }
+          if (!conflict && ft_last->pattern.op != RtlOp::kNote &&
+              !ExprHasMem(slot_pat_notes->pattern) &&
+              (ExprReferencesRegInSrcOrMem(jump_pat_notes->pattern, slot_dst_reg) ||
+               (blk.has_label && blk.instructions.size() == 1))) {
+            bool tgt_reads_slot_dst_first = false;
+            for (const std::string& ts : tgt_blk.instructions) {
+              auto tp = ParsePatternAndNotes(ts);
+              if (!tp.ok()) {
+                break;
+              }
+              if (ExprReferencesRegInSrcOrMem(tp->pattern, slot_dst_reg)) {
+                tgt_reads_slot_dst_first = true;
+                break;
+              }
+              if (ExprSetsOrClobbersReg(tp->pattern, slot_dst_reg)) {
+                break;
+              }
+            }
+            if (tgt_reads_slot_dst_first) {
+              RtlFlags new_b_slot_flags = slot_sub.flags;
+              new_b_slot_flags.in_struct = true;
+              blk.instructions.back() =
+                  RtlExpr::MakeSequence(
+                      {
+                          RtlExpr::MakeInsnWrapper(RtlOp::kJumpInsn, jump_sub.flags,
+                                                   *jump_pat_notes),
+                          RtlExpr::MakeInsnWrapper(RtlOp::kInsn, new_b_slot_flags, *slot_pat_notes),
+                      })
+                      .ToGccPrintRtlString();
+              ft_blk.instructions.push_back(slot_pat_notes->ToGccPrintRtlString());
+              flavour_4a_restored_blocks[b] = true;
+              continue;
+            }
           }
         }
 
-        // Subcase 4c-ii: `target_b == b + 2`, and `ft_blk` starts with a call
-        // to the same function as `target_b` after `try_merge_delay_insns`
-        // merged the leading register-setup instruction in `ft_blk` with `b`'s
-        // target-stolen delay slot (`insn/s`).
         if (target_b == b + 2 && !tgt_blk.instructions.empty()) {
           auto ft_first = ParsePatternAndNotes(ft_blk.instructions.front());
           auto tgt_first = ParsePatternAndNotes(tgt_blk.instructions.front());
@@ -902,6 +1171,43 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       }
     }
   }
+}
+
+}  // namespace
+
+RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x) {
+  if (!IsValidCfg(dbr_relaxed_cfg_x)) {
+    return {};
+  }
+
+  RtlControlFlowGraph out = dbr_relaxed_cfg_x;
+  out.pass = RtlPassKind::kDbr;
+
+  bool cfg_has_any_sequence = false;
+  for (const auto& blk : out.rpo_blocks) {
+    for (const std::string& s : blk.instructions) {
+      auto parsed = ParsePatternAndNotes(s);
+      if (parsed.ok() && parsed->pattern.op == RtlOp::kSequence) {
+        cfg_has_any_sequence = true;
+        break;
+      }
+    }
+    if (cfg_has_any_sequence) {
+      break;
+    }
+  }
+
+  if (IsUnoptimizedO0Cfg(out, cfg_has_any_sequence)) {
+    SynchronizeCanonicalLabels(&out);
+    for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
+      out.rpo_blocks[b].id = static_cast<uint32_t>(b);
+      out.rpo_blocks[b].SyncRtlInsnsFromInstructions();
+    }
+    return out;
+  }
+
+  std::vector<bool> flavour_4a_restored_blocks(out.rpo_blocks.size(), false);
+  InvertRelaxUncondAndMergedDelaySlots(&out, &flavour_4a_restored_blocks);
 
   // Pass 3: Invert Category 3 (non-annulled `SEQUENCE` conditional branch
   // inverted around a bare unconditional jump to the end-of-function or shared
@@ -946,10 +1252,42 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       }
 
       const auto& ft_blk = out.rpo_blocks[fallthrough_b];
-      if (ft_blk.has_label || !BlockHasActiveNonNoteInsn(ft_blk)) {
+      bool ft_only_from_b = true;
+      for (size_t pb = 0; pb < out.rpo_blocks.size(); ++pb) {
+        if (pb == b) {
+          continue;
+        }
+        const auto& psuccs = out.rpo_blocks[pb].successors;
+        if (std::find(psuccs.begin(), psuccs.end(), fallthrough_b) != psuccs.end()) {
+          ft_only_from_b = false;
+          break;
+        }
+      }
+      bool ft_has_note_only_bridge = false;
+      if ((!ft_blk.has_label || ft_only_from_b) && !ft_blk.instructions.empty() &&
+          !BlockHasActiveNonNoteInsn(ft_blk) && ft_blk.successors.size() == 1 &&
+          ft_blk.successors[0] == fallthrough_b + 1 && fallthrough_b + 1 < out.rpo_blocks.size() &&
+          BlockHasActiveNonNoteInsn(out.rpo_blocks[fallthrough_b + 1])) {
+        bool next_has_label_or_jump_pred = out.rpo_blocks[fallthrough_b + 1].has_label;
+        for (size_t pb = 0; !next_has_label_or_jump_pred && pb < out.rpo_blocks.size(); ++pb) {
+          if (pb == fallthrough_b) {
+            continue;
+          }
+          const auto& psuccs = out.rpo_blocks[pb].successors;
+          if (std::find(psuccs.begin(), psuccs.end(), fallthrough_b + 1) != psuccs.end()) {
+            next_has_label_or_jump_pred = true;
+          }
+        }
+        if (next_has_label_or_jump_pred) {
+          ft_has_note_only_bridge = true;
+        }
+      }
+      if (!ft_has_note_only_bridge && (ft_blk.has_label || !BlockHasActiveNonNoteInsn(ft_blk))) {
         ++b;
         continue;
       }
+      const size_t eff_ft_b = ft_has_note_only_bridge ? (fallthrough_b + 1) : fallthrough_b;
+      const auto& eff_ft_blk = out.rpo_blocks[eff_ft_b];
 
       // Check whether `target_b` is either:
       // (a) the trailing empty `end_of_function_label` block targeted by the
@@ -982,29 +1320,61 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
         }
       }
       bool pred_of_target_ends_with_use = false;
-      if (target_b > 0 && out.rpo_blocks[target_b - 1].instructions.size() >= 2) {
+      if (target_b > 0 && out.rpo_blocks[target_b - 1].instructions.size() >= 2 &&
+          std::find(out.rpo_blocks[target_b - 1].successors.begin(),
+                    out.rpo_blocks[target_b - 1].successors.end(),
+                    target_b) != out.rpo_blocks[target_b - 1].successors.end()) {
         auto pred_last = ParsePatternAndNotes(out.rpo_blocks[target_b - 1].instructions.back());
         if (pred_last.ok() &&
             (pred_last->pattern.op == RtlOp::kUse || pred_last->pattern.op == RtlOp::kClobber)) {
           pred_of_target_ends_with_use = true;
         }
       }
+      bool only_b_and_prev_jump_to_target = target_b > 0;
+      for (size_t pb = 0; only_b_and_prev_jump_to_target && pb < out.rpo_blocks.size(); ++pb) {
+        const auto& pblk = out.rpo_blocks[pb];
+        if (std::find(pblk.addr_vec_targets.begin(), pblk.addr_vec_targets.end(), target_b) !=
+            pblk.addr_vec_targets.end()) {
+          only_b_and_prev_jump_to_target = false;
+          break;
+        }
+        if (pb == b || pb + 1 == target_b) {
+          continue;
+        }
+        if (std::find(pblk.successors.begin(), pblk.successors.end(), target_b) !=
+            pblk.successors.end()) {
+          only_b_and_prev_jump_to_target = false;
+          break;
+        }
+      }
+      const bool is_flavour_4a_restored =
+          b < flavour_4a_restored_blocks.size() && flavour_4a_restored_blocks[b];
       const bool target_is_trailing_empty_return_label =
-          slot_sub.flags.in_struct &&
+          !is_flavour_4a_restored && slot_sub.flags.in_struct && !ft_has_note_only_bridge &&
           (target_b + 1 == out.rpo_blocks.size() && out.rpo_blocks[target_b].instructions.empty() &&
            (out.rpo_blocks[fallthrough_b].successors.size() == 1 ||
             (out.rpo_blocks[fallthrough_b].successors.size() == 2 &&
              pred_of_target_ends_with_use)) &&
            !pred_of_target_starts_with_same_slot);
+      const bool target_is_return_after_use =
+          target_b > 0 && out.rpo_blocks[target_b].successors.empty() &&
+          out.rpo_blocks[target_b].instructions.size() == 1 && pred_of_target_ends_with_use &&
+          only_b_and_prev_jump_to_target && [&]() {
+            auto ft_l = ParsePatternAndNotes(eff_ft_blk.instructions.back());
+            auto tp = ParsePatternAndNotes(out.rpo_blocks[target_b].instructions[0]);
+            return ft_l.ok() && !IsUncondJumpOrReturnOrTableJumpTopExpr(ft_l.value().pattern) &&
+                   tp.ok() && IsReturnExpr(tp->pattern);
+          }();
       bool target_is_shared_epilogue_jump = false;
-      if (slot_sub.flags.in_struct && !target_is_trailing_empty_return_label &&
-          BlockStartsWithUseInsn(out.rpo_blocks[target_b])) {
-        auto ft_last = ParsePatternAndNotes(ft_blk.instructions.back());
-        auto ft_first = ParsePatternAndNotes(ft_blk.instructions.front());
+      if (!is_flavour_4a_restored && slot_sub.flags.in_struct &&
+          !target_is_trailing_empty_return_label &&
+          (BlockStartsWithUseInsn(out.rpo_blocks[target_b]) || target_is_return_after_use)) {
+        auto ft_last = ParsePatternAndNotes(eff_ft_blk.instructions.back());
+        auto ft_first = ParsePatternAndNotes(eff_ft_blk.instructions.front());
         if (ft_last.ok() && ft_first.ok()) {
           if (!IsAnyJumpOrReturnTopExpr(ft_last->pattern)) {
             target_is_shared_epilogue_jump = true;
-          } else if (ft_first->pattern.op == RtlOp::kNote &&
+          } else if ((ft_has_note_only_bridge || ft_first->pattern.op == RtlOp::kNote) &&
                      !IsUncondJumpOrReturnOrTableJumpTopExpr(ft_last->pattern)) {
             target_is_shared_epilogue_jump = true;
           } else if (HasRegDeadConstZeroNote(*slot_pat_notes) &&
@@ -1019,33 +1389,88 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
                 ParsePatternAndNotes(out.rpo_blocks[target_b - 1].instructions.back());
             if (pred_last_parsed.ok() && !IsAnyJumpOrReturnTopExpr(pred_last_parsed->pattern) &&
                 pred_last_parsed->pattern != slot_pat_notes->pattern) {
-              target_is_shared_epilogue_jump = true;
+              bool other_jumper_has_same_target_slot = false;
+              const bool prev_last_has_reg_dead_reg_note = HasRegDeadRegNote(*pred_last_parsed);
+              const bool target_is_use_bridge =
+                  !prev_last_has_reg_dead_reg_note &&
+                  !IsUncondJumpOrReturnOrTableJumpTopExpr(ft_last->pattern) &&
+                  out.rpo_blocks[target_b].successors.size() == 1 &&
+                  out.rpo_blocks[target_b].successors[0] == target_b + 1;
+              if (!IsUncondJumpOrReturnOrTableJumpTopExpr(ft_last->pattern)) {
+                for (size_t ob = 0; ob < out.rpo_blocks.size(); ++ob) {
+                  if (ob == b || out.rpo_blocks[ob].instructions.empty()) {
+                    continue;
+                  }
+                  const auto& oblk = out.rpo_blocks[ob];
+                  bool jumps_to_shared_ret = false;
+                  for (size_t s : oblk.successors) {
+                    if (s != ob + 1 &&
+                        (s == target_b || (target_is_use_bridge && s == target_b + 1))) {
+                      jumps_to_shared_ret = true;
+                      break;
+                    }
+                  }
+                  if (!jumps_to_shared_ret) {
+                    continue;
+                  }
+                  auto ol = ParsePatternAndNotes(oblk.instructions.back());
+                  if (ol.ok() && ol->pattern.op == RtlOp::kSequence &&
+                      ol->pattern.children.size() == 2 &&
+                      ol->pattern.children[0].op == RtlOp::kJumpInsn &&
+                      ol->pattern.children[1].flags.in_struct) {
+                    auto os = RtlPatternAndNotes::FromSequenceSubInsn(ol->pattern.children[1]);
+                    if (os.ok() && os->pattern == slot_pat_notes->pattern) {
+                      other_jumper_has_same_target_slot = true;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (!other_jumper_has_same_target_slot) {
+                target_is_shared_epilogue_jump = true;
+              }
             }
           }
         }
-      } else if (!slot_sub.flags.in_struct && out.rpo_blocks[target_b].successors.empty() &&
-                 !pred_of_target_starts_with_same_slot && ft_blk.successors.size() == 2 &&
-                 !ft_blk.instructions.empty()) {
-        // When `blk` defines `slot_dst_reg` earlier, `blk`'s branch reads
-        // `slot_dst_reg`, and unlabeled `ft_blk` does not touch `slot_dst_reg`
-        // before a non-annulled conditional `SEQUENCE` whose delay slot
-        // unconditionally overwrites `slot_dst_reg`, `slot_pat` is dead on
-        // `ft_blk` (so it came from `target_b`), yet a direct target steal
-        // would have kept `slot_dst_reg` in `pending_dead_regs` across
-        // unlabeled `ft_blk` and emitted an annulled branch (`jump_insn/u`).
-        // Thus `reorg.c:3993-4034` Category 3 is the unique forward source.
+      } else if (!is_flavour_4a_restored && !ft_has_note_only_bridge &&
+                 !jump_sub.flags.unchanging && !pred_of_target_starts_with_same_slot &&
+                 ft_blk.successors.size() == 2 && !ft_blk.instructions.empty() &&
+                 (out.rpo_blocks[target_b].successors.empty() ||
+                  (slot_sub.flags.in_struct && target_b == b + 2 && !ft_blk.has_label))) {
         const int slot_dst_reg = GetSingleSetDestRegNo(slot_pat_notes->pattern);
+        const bool is_adjacent_in_struct =
+            slot_sub.flags.in_struct && target_b == b + 2 && !ft_blk.has_label;
+        const bool is_return_cond_ref =
+            out.rpo_blocks[target_b].successors.empty() &&
+            ExprReferencesRegInSrcOrMem(jump_pat_notes->pattern, slot_dst_reg);
         if (slot_dst_reg > 0 && !ExprHasMem(slot_pat_notes->pattern) &&
-            ExprReferencesRegInSrcOrMem(jump_pat_notes->pattern, slot_dst_reg)) {
-          bool blk_defines_slot_reg_earlier = false;
-          for (size_t i = 0; i + 1 < blk.instructions.size(); ++i) {
+            (is_adjacent_in_struct || is_return_cond_ref)) {
+          bool blk_defines_slot_reg_earlier = is_adjacent_in_struct && !is_return_cond_ref;
+          for (size_t i = 0; !blk_defines_slot_reg_earlier && i + 1 < blk.instructions.size();
+               ++i) {
             auto bp = ParsePatternAndNotes(blk.instructions[i]);
             if (bp.ok() && ExprSetsOrClobbersReg(bp->pattern, slot_dst_reg)) {
               blk_defines_slot_reg_earlier = true;
               break;
             }
           }
-          bool ft_prefix_clean = blk_defines_slot_reg_earlier;
+          bool tgt_reads_slot_reg_first = is_return_cond_ref;
+          if (!tgt_reads_slot_reg_first) {
+            for (const std::string& ts : out.rpo_blocks[target_b].instructions) {
+              auto tp = ParsePatternAndNotes(ts);
+              if (!tp.ok()) {
+                break;
+              }
+              if (ExprReferencesRegInSrcOrMem(tp->pattern, slot_dst_reg)) {
+                tgt_reads_slot_reg_first = true;
+                break;
+              }
+              if (ExprSetsOrClobbersReg(tp->pattern, slot_dst_reg)) {
+                break;
+              }
+            }
+          }
+          bool ft_prefix_clean = blk_defines_slot_reg_earlier && tgt_reads_slot_reg_first;
           for (size_t i = 0; ft_prefix_clean && i + 1 < ft_blk.instructions.size(); ++i) {
             auto fp = ParsePatternAndNotes(ft_blk.instructions[i]);
             if (!fp.ok() || IsAnyJumpOrReturnTopExpr(fp->pattern) ||
@@ -1110,13 +1535,16 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       }
       auto ft_last_check = ParsePatternAndNotes(out.rpo_blocks[fallthrough_b].instructions.back());
       const bool split_leading_notes =
-          (!target_is_trailing_empty_return_label && leading_notes >= 2 &&
+          (!ft_has_note_only_bridge && !target_is_trailing_empty_return_label &&
+           leading_notes >= 2 &&
            leading_notes < out.rpo_blocks[fallthrough_b].instructions.size() &&
            ft_last_check.ok() && ft_last_check->pattern.op == RtlOp::kSequence &&
            IsCondJumpExpr(ft_last_check->pattern.children[0].children[0]));
 
       out.rpo_blocks[target_b].has_label = true;
-      out.rpo_blocks[fallthrough_b].has_label = true;
+      if (!ft_has_note_only_bridge) {
+        out.rpo_blocks[fallthrough_b].has_label = true;
+      }
 
       RtlBasicBlock tramp_blk;
       tramp_blk.id = static_cast<uint32_t>(b + 1);
@@ -1127,6 +1555,15 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       const size_t shifted_target_b = (target_b >= b + 1) ? (target_b + 1) : target_b;
       tramp_blk.successors = {shifted_target_b};
       InsertBlockAt(&out, b + 1, std::move(tramp_blk));
+      flavour_4a_restored_blocks.insert(
+          flavour_4a_restored_blocks.begin() + static_cast<ptrdiff_t>(b + 1), false);
+      if (ft_has_note_only_bridge) {
+        out.rpo_blocks[b + 2].has_label = false;
+        out.rpo_blocks[b + 3].has_label = true;
+        out.rpo_blocks[b].successors = {b + 3, b + 1};
+        b += 3;
+        continue;
+      }
       out.rpo_blocks[b].successors = {b + 2, b + 1};
 
       if (split_leading_notes) {
@@ -1144,6 +1581,8 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
         note_blk.instructions = std::move(note_insns);
         note_blk.successors = {b + 3};
         InsertBlockAt(&out, b + 2, std::move(note_blk));
+        flavour_4a_restored_blocks.insert(
+            flavour_4a_restored_blocks.begin() + static_cast<ptrdiff_t>(b + 2), false);
         out.rpo_blocks[b + 3].has_label = true;
         out.rpo_blocks[b].successors = {b + 3, b + 1};
         b += 3;
@@ -1271,27 +1710,36 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       if (!last_parsed.ok() || last_parsed->pattern.op != RtlOp::kSequence ||
           last_parsed->pattern.children.size() != 2 ||
           last_parsed->pattern.children[0].op != RtlOp::kJumpInsn ||
-          last_parsed->pattern.children[0].flags.unchanging ||
-          last_parsed->pattern.children[0].children.empty()) {
+          last_parsed->pattern.children[0].children.empty() ||
+          last_parsed->pattern.children[1].children.empty()) {
         continue;
       }
 
       if (target_b == b + 2 && IsCondJumpExpr(last_parsed->pattern.children[0].children[0])) {
         auto& ft_blk = out.rpo_blocks[b + 1];
         auto& tgt_blk = out.rpo_blocks[target_b];
+        const size_t min_ft_insns = last_parsed->pattern.children[0].flags.unchanging ? 1 : 2;
         if (!ft_blk.has_label && preds[b + 1].size() == 1 && preds[b + 1][0] == b &&
-            ft_blk.instructions.size() >= 2 && ft_blk.successors.size() == 1 &&
+            ft_blk.instructions.size() >= min_ft_insns && ft_blk.successors.size() == 1 &&
             ft_blk.successors[0] == target_b && tgt_blk.has_label && preds[target_b].size() == 2 &&
             !tgt_blk.instructions.empty() && !BlockStartsWithUseInsn(tgt_blk)) {
           auto tgt_first = ParsePatternAndNotes(tgt_blk.instructions.front());
           auto cand_parsed = ParsePatternAndNotes(ft_blk.instructions.back());
+          const RtlOp cand_src_op = (cand_parsed.ok() && cand_parsed->pattern.IsSet())
+                                        ? cand_parsed->pattern.SetSrc().op
+                                        : RtlOp::kUnknown;
+          const bool cand_is_const_src =
+              cand_src_op == RtlOp::kConstInt || cand_src_op == RtlOp::kConstDouble ||
+              cand_src_op == RtlOp::kConst || cand_src_op == RtlOp::kSymbolRef ||
+              cand_src_op == RtlOp::kLabelRef;
           if (tgt_first.ok() && tgt_first->pattern.op != RtlOp::kNote && cand_parsed.ok() &&
               cand_parsed->pattern.IsSet() && !ExprHasMem(cand_parsed->pattern) &&
-              (cand_parsed->pattern.SetSrc().op == RtlOp::kConstInt ||
-               cand_parsed->pattern.SetSrc().op == RtlOp::kConstDouble)) {
+              cand_is_const_src) {
             const int cand_dst = GetSingleSetDestRegNo(cand_parsed->pattern);
-            if (cand_dst >= 0 && !ExprReferencesRegInSrcOrMem(
-                                     last_parsed->pattern.children[0].children[0], cand_dst)) {
+            if (cand_dst >= 0 &&
+                !ExprReferencesRegInSrcOrMem(last_parsed->pattern.children[0].children[0],
+                                             cand_dst) &&
+                !ExprSetsOrClobbersReg(last_parsed->pattern.children[1].children[0], cand_dst)) {
               bool ft_conflict = false;
               for (size_t fi = 0; fi + 1 < ft_blk.instructions.size(); ++fi) {
                 auto fp = ParsePatternAndNotes(ft_blk.instructions[fi]);
@@ -1352,12 +1800,33 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
                   std::string moved_insn = std::move(ft_blk.instructions.back());
                   ft_blk.instructions.pop_back();
                   tgt_blk.instructions.insert(tgt_blk.instructions.begin(), std::move(moved_insn));
+                  if (ft_blk.instructions.empty()) {
+                    out.rpo_blocks.erase(out.rpo_blocks.begin() + static_cast<ptrdiff_t>(b + 1));
+                    for (size_t rb = 0; rb < out.rpo_blocks.size(); ++rb) {
+                      out.rpo_blocks[rb].id = static_cast<uint32_t>(rb);
+                      for (size_t& s : out.rpo_blocks[rb].successors) {
+                        if (s > b + 1) {
+                          --s;
+                        }
+                      }
+                      for (size_t& t : out.rpo_blocks[rb].addr_vec_targets) {
+                        if (t > b + 1) {
+                          --t;
+                        }
+                      }
+                    }
+                    out.rpo_blocks[b].successors = {b + 1, b + 1};
+                  }
                   continue;
                 }
               }
             }
           }
         }
+      }
+
+      if (last_parsed->pattern.children[0].flags.unchanging) {
+        continue;
       }
 
       const size_t cand_b = target_b - 1;
@@ -1422,6 +1891,8 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
     }
   }
 
+  RewrapSharedUseBridgePredecessors(&out);
+
   // 7a: Standalone bare conditional branch inverted around a bare unconditional
   // jump (`reorg.c:3787-3818`, Subcase I.2) when the input CFG has no
   // `SEQUENCE` wrappers.
@@ -1434,7 +1905,7 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       const size_t fallthrough_b = b + 1;
       const size_t target_b =
           (blk.successors[0] == fallthrough_b) ? blk.successors[1] : blk.successors[0];
-      if (target_b == fallthrough_b || target_b >= out.rpo_blocks.size()) {
+      if (target_b <= b || target_b == fallthrough_b || target_b >= out.rpo_blocks.size()) {
         continue;
       }
       auto last_parsed = ParsePatternAndNotes(blk.instructions.back());

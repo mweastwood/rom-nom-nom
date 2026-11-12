@@ -615,6 +615,35 @@ std::string InvertEightWords(absl::Span<const uint32_t> words) {
   return "";
 }
 
+std::string InvertTenWords(absl::Span<const uint32_t> words) {
+  const uint32_t w0 = words[0];
+  // `M_TRUNCWS` / `M_TRUNCWD` (`tc-mips.c:4549-4578`, `mips_isa < 2`):
+  //   0: cfc1 $treg, $31        (0x4440f800 | (treg << 16), treg in 2..31)
+  //   1: cfc1 $treg, $31
+  //   2: nop
+  //   3: ori  $1, $treg, 3      (0x34010003 | (treg << 21))
+  //   4: xori $1, $1, 2         (0x38210002)
+  //   5: ctc1 $1, $31           (0x44c1f800)
+  //   6: nop
+  //   7: cvt.w.[sd] $fd, $fs    (0x46000024 / 0x46200024)
+  //   8: ctc1 $treg, $31        (0x44c0f800 | (treg << 16))
+  //   9: nop
+  if ((w0 & 0xffe0ffffu) == 0x4440f800u) {
+    const uint32_t treg = Rt(w0);
+    const uint32_t w7 = words[7];
+    if (treg >= 2u && treg <= 31u && words[1] == w0 && words[2] == 0x00000000u &&
+        words[3] == (0x34010003u | (treg << 21)) && words[4] == 0x38210002u &&
+        words[5] == 0x44c1f800u && words[6] == 0x00000000u && (w7 & 0xffdf003fu) == 0x46000024u &&
+        words[8] == (0x44c0f800u | (treg << 16)) && words[9] == 0x00000000u) {
+      const bool is_double = ((w7 & 0x00200000u) != 0u);
+      const uint32_t sreg = (w7 >> 11) & 0x1fu;
+      const uint32_t dreg = (w7 >> 6) & 0x1fu;
+      return absl::StrFormat("trunc.w.%c $f%u,$f%u,$%u", is_double ? 'd' : 's', dreg, sreg, treg);
+    }
+  }
+  return "";
+}
+
 std::string InvertElevenWords(absl::Span<const uint32_t> words) {
   const uint32_t w0 = words[0];
   // `M_DIV_3` / `M_REM_3` (`tc-mips.c:2869-2933`):
@@ -992,6 +1021,77 @@ bool IsTempregReusedByLaterLo16(
   return false;
 }
 
+bool TryCollapseMips1TruncMacroItems(
+    absl::Span<const AsmItem> raw_items, size_t start_idx,
+    const absl::flat_hash_map<size_t, const Stage0Relocation*>* reloc_by_word,
+    std::string* out_macro_asm, size_t* out_consumed_items) {
+  auto valid_reorder_item = [&](size_t idx) -> bool {
+    if (idx >= raw_items.size() || raw_items[idx].kind != AsmItemKind::kReorderInsn ||
+        raw_items[idx].unswapped_from_branch) {
+      return false;
+    }
+    return reloc_by_word == nullptr || !reloc_by_word->contains(raw_items[idx].word_index);
+  };
+  if (!valid_reorder_item(start_idx)) {
+    return false;
+  }
+  const uint32_t w0 = raw_items[start_idx].word;
+  if ((w0 & 0xffe0ffffu) != 0x4440f800u) {
+    return false;
+  }
+  const uint32_t treg = Rt(w0);
+  if (treg < 2u || treg > 31u) {
+    return false;
+  }
+  size_t cur = start_idx + 1;
+  if (!valid_reorder_item(cur) || raw_items[cur].word != w0) {
+    return false;
+  }
+  ++cur;
+  if (valid_reorder_item(cur) && raw_items[cur].word == 0x00000000u) {
+    ++cur;
+  }
+  if (!valid_reorder_item(cur) || raw_items[cur].word != (0x34010003u | (treg << 21))) {
+    return false;
+  }
+  const uint32_t w3 = raw_items[cur].word;
+  ++cur;
+  if (!valid_reorder_item(cur) || raw_items[cur].word != 0x38210002u) {
+    return false;
+  }
+  const uint32_t w4 = raw_items[cur].word;
+  ++cur;
+  if (!valid_reorder_item(cur) || raw_items[cur].word != 0x44c1f800u) {
+    return false;
+  }
+  const uint32_t w5 = raw_items[cur].word;
+  ++cur;
+  if (valid_reorder_item(cur) && raw_items[cur].word == 0x00000000u) {
+    ++cur;
+  }
+  if (!valid_reorder_item(cur) || (raw_items[cur].word & 0xffdf003fu) != 0x46000024u) {
+    return false;
+  }
+  const uint32_t w7 = raw_items[cur].word;
+  ++cur;
+  if (!valid_reorder_item(cur) || raw_items[cur].word != (0x44c0f800u | (treg << 16))) {
+    return false;
+  }
+  const uint32_t w8 = raw_items[cur].word;
+  ++cur;
+  if (valid_reorder_item(cur) && raw_items[cur].word == 0x00000000u) {
+    ++cur;
+  }
+  const uint32_t macro10[10] = {w0, w0, 0x00000000u, w3, w4, w5, 0x00000000u, w7, w8, 0x00000000u};
+  const std::string macro_asm = InvertGasMacro(macro10);
+  if (macro_asm.empty()) {
+    return false;
+  }
+  *out_macro_asm = macro_asm;
+  *out_consumed_items = cur - start_idx;
+  return true;
+}
+
 }  // namespace
 
 std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) {
@@ -1020,6 +1120,8 @@ std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x) {
       return InvertSixWords(macro_words_x);
     case 8:
       return InvertEightWords(macro_words_x);
+    case 10:
+      return InvertTenWords(macro_words_x);
     case 11:
       return InvertElevenWords(macro_words_x);
     case 12:
@@ -1043,6 +1145,18 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmIt
   for (size_t i = 0; i < raw_items.size(); ++i) {
     AsmItem item = raw_items[i];
     if (item.kind == AsmItemKind::kReorderInsn) {
+      std::string trunc_macro_asm;
+      size_t trunc_consumed = 0;
+      if (TryCollapseMips1TruncMacroItems(raw_items, i, nullptr, &trunc_macro_asm,
+                                          &trunc_consumed)) {
+        item.line = std::move(trunc_macro_asm);
+        item.unswapped_from_branch = false;
+        item.preceded_by_active_hazard = false;
+        items.push_back(std::move(item));
+        i += trunc_consumed - 1;
+        continue;
+      }
+
       // 11-word signed `div`/`rem` (`M_DIV_3` / `M_REM_3`) spanning 10 `AsmItem`s:
       if (i + 9 < raw_items.size() && is_nop_delay_branch_or_reorder(raw_items[i + 1]) &&
           raw_items[i + 2].kind == AsmItemKind::kReorderInsn &&
@@ -2241,6 +2355,18 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
   for (size_t i = 0; i < raw_items.size(); ++i) {
     AsmItem item = raw_items[i];
     if (item.kind == AsmItemKind::kReorderInsn) {
+      std::string trunc_macro_asm;
+      size_t trunc_consumed = 0;
+      if (TryCollapseMips1TruncMacroItems(raw_items, i, &reloc_by_word, &trunc_macro_asm,
+                                          &trunc_consumed)) {
+        item.line = std::move(trunc_macro_asm);
+        item.unswapped_from_branch = false;
+        item.preceded_by_active_hazard = false;
+        items.push_back(std::move(item));
+        i += trunc_consumed - 1;
+        continue;
+      }
+
       if (i + 9 < raw_items.size() && is_nop_delay_branch_or_reorder(raw_items[i + 1]) &&
           raw_items[i + 2].kind == AsmItemKind::kReorderInsn &&
           raw_items[i + 2].word == 0x0007000du && raw_items[i + 3].kind == AsmItemKind::kLabel &&

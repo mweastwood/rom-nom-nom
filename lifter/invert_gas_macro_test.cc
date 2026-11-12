@@ -7,6 +7,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
+#include "core/compiler_flags.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
@@ -44,6 +45,11 @@ class ProductionGasMacroInverseProvider : public SubfunctionInverseProvider {
 
   std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) const override {
     return ::rom_nom_nom::InvertGasAppendInsn(words_x);
+  }
+
+  std::vector<std::string> InvertGasAppendInsn(
+      absl::Span<const uint32_t> words_x, absl::Span<const std::string> c_flags) const override {
+    return ::rom_nom_nom::InvertGasAppendInsn(words_x, c_flags);
   }
 
   RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x) const override {
@@ -172,6 +178,43 @@ TEST(InvertGasMacroTest, SyntheticMacroCategoriesRightInverse) {
     const RightInverseResult res = verifier.VerifyGasMacroRightInverse(words_x);
     EXPECT_TRUE(res.matches) << "Failed on '" << asm_line << "': " << res.diff_detail;
   }
+}
+
+TEST(InvertGasMacroTest, Mips1TruncMacroRightInverseAndStreamCollapse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  ProductionGasMacroInverseProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  CompilationProfile mips1_profile;
+  mips1_profile.optimize_level = 2;
+  mips1_profile.c_flags = {"-O2", "-mips1", "-Wa,-g"};
+  hooks.ApplyCompilationProfile(mips1_profile);
+
+  const std::vector<std::string> macro_lines = {"trunc.w.s $f0,$f12,$2", "trunc.w.d $f0,$f12,$6"};
+  for (const std::string& macro_line : macro_lines) {
+    const std::vector<uint32_t> words_x = hooks.RunGasMacro(macro_line);
+    ASSERT_EQ(words_x.size(), 10u) << macro_line;
+    const RightInverseResult res = verifier.VerifyGasMacroRightInverse(words_x);
+    EXPECT_TRUE(res.matches) << "Failed on '" << macro_line << "': " << res.diff_detail;
+
+    // Followed by a COP1 instruction (`mfc1`, where `InvertGasAppendInsnToItems` strips `w[9]`).
+    const std::vector<uint32_t> cop1_stream =
+        hooks.RunGasMdAssemble(macro_line + "\nmfc1 $2,$f0\njr $31\n");
+    std::vector<lifter::AsmItem> cop1_items;
+    ASSERT_TRUE(lifter::InvertGasAppendInsnToItems(cop1_stream, &cop1_items));
+    EXPECT_EQ(lifter::CollapseGasMacrosAndFlattenLines(cop1_items),
+              (std::vector<std::string>{macro_line, "mfc1 $2,$f0", "jr $31"}));
+
+    // Followed by a non-COP1 ALU instruction (`addu`, where `w[9]` remains a trailing `nop` item).
+    const std::vector<uint32_t> gpr_stream =
+        hooks.RunGasMdAssemble(macro_line + "\naddu $3,$4,$5\njr $31\n");
+    std::vector<lifter::AsmItem> gpr_items;
+    ASSERT_TRUE(lifter::InvertGasAppendInsnToItems(gpr_stream, &gpr_items));
+    EXPECT_EQ(lifter::CollapseGasMacrosAndFlattenLines(gpr_items),
+              (std::vector<std::string>{macro_line, "addu $3,$4,$5", "jr $31"}));
+  }
+  hooks.ApplyCompilationProfile(CompilationProfile{});
 }
 
 TEST(InvertGasMacroTest, NegativeInvalidWordsAndNonMacroSequencesFailVerification) {

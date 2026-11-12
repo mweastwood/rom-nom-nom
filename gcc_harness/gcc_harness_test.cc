@@ -1749,6 +1749,7 @@ Stage0FunctionInput LinkStage0InputForTest(const Stage0FunctionInput& reloc_in) 
   linked.base_vram = 0x80020000u;
   linked.gp_vram = 0x80060000u;
   linked.profile = reloc_in.profile;
+  linked.profile.gp_symbol_sizes.clear();
   linked.jump_tables = reloc_in.jump_tables;
   linked.constant_pool = reloc_in.constant_pool;
 
@@ -1819,7 +1820,10 @@ Stage0FunctionInput LinkStage0InputForTest(const Stage0FunctionInput& reloc_in) 
     }
     sym_vrams.emplace_back(rel.symbol_name, assigned);
     linked.vram_to_symbol[assigned] = rel.symbol_name;
-    if (max_addend > 0) {
+    const auto gp_sz_it = reloc_in.profile.gp_symbol_sizes.find(rel.symbol_name);
+    if (gp_sz_it != reloc_in.profile.gp_symbol_sizes.end() && gp_sz_it->second > 0) {
+      linked.vram_to_symbol_size[assigned] = gp_sz_it->second;
+    } else if (max_addend > 0) {
       linked.vram_to_symbol_size[assigned] = span_bytes;
     }
   }
@@ -1880,7 +1884,7 @@ struct ActorState {
   int z;
 };
 extern struct ActorState g_actor;
-extern int g_small_counter;
+int g_small_counter;
 extern double sink_step(double, int);
 
 int multi_switch_gp(int n, const int* ops, const int* modes, double base) {
@@ -1913,6 +1917,14 @@ int multi_switch_gp(int n, const int* ops, const int* modes, double base) {
       {"-O2", "-mips2", "-mcpu=r4000", "-G", "8", "-Wa,-g"}, "linked_rom_verifier_test");
   ASSERT_GE(trace.stage0_input.jump_tables.size(), 2u);
   ASSERT_FALSE(trace.stage0_input.constant_pool.empty());
+  bool saw_gp_reloc_for_small_counter = false;
+  for (const Stage0Relocation& rel : trace.stage0_input.relocations) {
+    if (rel.symbol_name == "g_small_counter" && rel.kind == Stage0RelocKind::kMipsGpRel16) {
+      saw_gp_reloc_for_small_counter = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(saw_gp_reloc_for_small_counter);
 
   class ExactTraceProvider final : public SubfunctionInverseProvider {
    public:
@@ -1935,8 +1947,34 @@ int multi_switch_gp(int n, const int* ops, const int* modes, double base) {
   RightInverseVerifier verifier(&ctx, &hooks, &exact_provider);
 
   const Stage0FunctionInput linked_ok = LinkStage0InputForTest(trace.stage0_input);
+  ASSERT_TRUE(linked_ok.profile.gp_symbol_sizes.empty());
   EXPECT_TRUE(verifier.VerifyFinalAndGasStageRightInverse(linked_ok).matches);
   EXPECT_TRUE(verifier.VerifySuffixRightInverse(RtlPassKind::kSched2, linked_ok).matches);
+
+  // Adversarial Negative A0: Omitting or inflating `vram_to_symbol_size` on `-G 8` `$gp` scalar
+  // `g_small_counter` causes GAS to emit 2-word `%hi`/`%lo` instead of 1-word `$gp`-relative insns.
+  {
+    uint32_t small_vram = 0;
+    for (const auto& [vram, name] : linked_ok.vram_to_symbol) {
+      if (name == "g_small_counter") {
+        small_vram = vram;
+        break;
+      }
+    }
+    ASSERT_NE(small_vram, 0u);
+    ASSERT_TRUE(linked_ok.vram_to_symbol_size.contains(small_vram));
+    ASSERT_EQ(linked_ok.vram_to_symbol_size.at(small_vram), 4u);
+
+    Stage0FunctionInput missing_gp_size = linked_ok;
+    missing_gp_size.vram_to_symbol_size.erase(small_vram);
+    EXPECT_FALSE(verifier.VerifyFinalAndGasStageRightInverse(missing_gp_size).matches);
+    EXPECT_FALSE(verifier.VerifySuffixRightInverse(RtlPassKind::kSched2, missing_gp_size).matches);
+
+    Stage0FunctionInput oversized_gp_sym = linked_ok;
+    oversized_gp_sym.vram_to_symbol_size[small_vram] = 16u;
+    EXPECT_FALSE(verifier.VerifyFinalAndGasStageRightInverse(oversized_gp_sym).matches);
+    EXPECT_FALSE(verifier.VerifySuffixRightInverse(RtlPassKind::kSched2, oversized_gp_sym).matches);
+  }
 
   // Reversed `.rodata` jump-table layout in `linked_ok` (preserving each table's
   // true `table_vram` and `target_word_indices`) must also pass!
@@ -2229,6 +2267,116 @@ int multi_switch_gp(int n, const int* ops, const int* modes, double base) {
       EXPECT_TRUE(absl::StrContains(bad_res.diff_detail, "Unrecognizable RTL insn"))
           << bad_pat << ": " << bad_res.diff_detail;
     }
+  }
+}
+
+TEST(GccHarnessTest, InProcessTargetSwitchingAcrossMips3Mips2R4000AndMips1UnsignedChar) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  const std::string c_src = R"(
+typedef long long s64;
+typedef int s32;
+typedef float f32;
+s64 TargetSwitchProbe(s64 a, s64 b, s32 scale, f32 f, char* p) {
+  s64 prod = (a * b) + ((s64)scale * 13LL);
+  s32 trunc_i = (s32)f + (s32)(*p);
+  return (prod << (scale & 7)) + (s64)trunc_i;
+}
+)";
+
+  const FunctionCompilationTrace mips3_trace = hooks.TraceForwardCompilation(
+      c_src, "TargetSwitchProbe", {"-O2", "-mips3"}, "TargetSwitchProbe_Mips3");
+  EXPECT_TRUE(absl::StrContains(mips3_trace.final_asm_text, "dmult")) << mips3_trace.final_asm_text;
+  EXPECT_TRUE(absl::StrContains(mips3_trace.final_asm_text, "lb\t")) << mips3_trace.final_asm_text;
+  EXPECT_FALSE(mips3_trace.final_machine_words.empty());
+
+  // Immediately switch in-process to `-O1 -mips2 -mcpu=r4000` (32-bit GPRs/FPRs,
+  // `mulsi3_r4000` scratch `hi`/`lo` clobbers + `umulsidi3_internal` `=x` reload).
+  const FunctionCompilationTrace mips2_o1_trace = hooks.TraceForwardCompilation(
+      c_src, "TargetSwitchProbe", {"-O1", "-mips2", "-mcpu=r4000"}, "TargetSwitchProbe_Mips2O1");
+  EXPECT_FALSE(absl::StrContains(mips2_o1_trace.final_asm_text, "dmult"))
+      << mips2_o1_trace.final_asm_text;
+  EXPECT_TRUE(absl::StrContains(mips2_o1_trace.final_asm_text, "multu\t"))
+      << mips2_o1_trace.final_asm_text;
+  EXPECT_FALSE(mips2_o1_trace.final_machine_words.empty());
+
+  // Switch in-process to `-O2 -mips1 -funsigned-char -Wa,-O2` (3-operand
+  // `trunc.w.s`, unsigned `char` -> `lbu`, and 1-slot COP1 load hazard NOPs).
+  const FunctionCompilationTrace mips1_uchar_trace = hooks.TraceForwardCompilation(
+      c_src, "TargetSwitchProbe", {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"},
+      "TargetSwitchProbe_Mips1UnsignedChar");
+  EXPECT_TRUE(absl::StrContains(mips1_uchar_trace.final_asm_text, "lbu\t"))
+      << mips1_uchar_trace.final_asm_text;
+  EXPECT_FALSE(mips1_uchar_trace.final_machine_words.empty());
+
+  // Switch back to default signed `char` (`-O2 -mips2 -mcpu=r4000`) and verify
+  // `char_type_node` is restored to signed (`lb`).
+  const FunctionCompilationTrace mips2_o2_trace = hooks.TraceForwardCompilation(
+      c_src, "TargetSwitchProbe", {"-O2", "-mips2", "-mcpu=r4000"}, "TargetSwitchProbe_Mips2O2");
+  EXPECT_TRUE(absl::StrContains(mips2_o2_trace.final_asm_text, "lb\t"))
+      << mips2_o2_trace.final_asm_text;
+  EXPECT_FALSE(mips2_o2_trace.final_machine_words.empty());
+}
+
+TEST(GccHarnessTest, GasDirectionalNumericLabelsMatchExternalAssembler) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // 1. Multiple `!TARGET_64BIT` 64-bit variable shifts in one function reuse
+  //    GAS directional numeric local labels `1:`, `2:`, `3:` with `1f`, `2f`, `3f`.
+  const std::string c_src = R"(
+typedef long long s64;
+typedef unsigned long long u64;
+s64 VarShiftPair(s64 a, u64 b, int n, int m) {
+  return (a << (n & 63)) ^ (s64)(b >> (m & 63));
+}
+)";
+  const FunctionCompilationTrace trace = hooks.TraceForwardCompilation(
+      c_src, "VarShiftPair", {"-O2", "-mips1"}, "VarShiftPair_O2_Mips1");
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty());
+  ASSERT_LE(trace.stage0_input.machine_words.size(), trace.final_machine_words.size());
+  for (size_t i = 0; i < trace.stage0_input.machine_words.size(); ++i) {
+    EXPECT_EQ(trace.stage0_input.machine_words[i], trace.final_machine_words[i])
+        << "Mismatch at word " << i << ":\n"
+        << trace.final_asm_text;
+  }
+
+  // 2. Explicit forward (`1f`) and backward (`1b`) directional numeric labels.
+  const std::vector<uint32_t> fb_words = hooks.RunGasMdAssemble(
+      "\tbeq\t$4,$0,1f\n"
+      "\tnop\n"
+      "1:\n"
+      "\taddiu\t$4,$4,-1\n"
+      "\tbne\t$4,$0,1b\n"
+      "\tnop\n"
+      "1:\n"
+      "\tj\t$31\n"
+      "\tnop\n");
+  ASSERT_EQ(fb_words.size(), 7u);
+  // Word 0 (`beq $4,$0,1f` -> Word 2): offset = 2 - (0 + 1) = +1 (`0x10800001`).
+  EXPECT_EQ(fb_words[0], 0x10800001u);
+  // Word 3 (`bne $4,$0,1b` -> Word 2): offset = 2 - (3 + 1) = -2 (`0x1480fffe`).
+  EXPECT_EQ(fb_words[3], 0x1480fffeu);
+}
+
+TEST(GccHarnessTest, RepeatedLit8LiteralPoolAssemblyAcrossFragChunkBoundaries) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-G", "8", "-mips2"}});
+
+  constexpr std::string_view kLit8Asm =
+      "\t.set\treorder\n"
+      "\tli.d\t$f6,4.503599627370496e+15\n"
+      "\tj\t$31\n";
+  // `4.503599627370496e+15` (`2^52`) in IEEE-754 big-endian double is `0x43300000_00000000`.
+  const std::vector<uint32_t> expected_words = {0x43300000u, 0x00000000u};
+  for (int iter = 0; iter < 400; ++iter) {
+    const Stage0FunctionInput in = hooks.RunGasMdAssembleWithMetadata(kLit8Asm);
+    ASSERT_EQ(in.constant_pool.size(), 1u) << "iter=" << iter;
+    EXPECT_EQ(in.constant_pool[0].section_name, ".lit8") << "iter=" << iter;
+    EXPECT_EQ(in.constant_pool[0].words, expected_words) << "iter=" << iter;
   }
 }
 

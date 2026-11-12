@@ -40,6 +40,11 @@ class ProductionStage0InverseProvider final : public gcc_harness::SubfunctionInv
     return rom_nom_nom::InvertGasAppendInsn(words_x);
   }
 
+  std::vector<std::string> InvertGasAppendInsn(
+      absl::Span<const uint32_t> words_x, absl::Span<const std::string> c_flags) const override {
+    return rom_nom_nom::InvertGasAppendInsn(words_x, c_flags);
+  }
+
   std::string InvertFinalScanInsn(std::string_view asm_line_x) const override {
     return lifter::InvertFinalScanInsn(asm_line_x);
   }
@@ -429,6 +434,7 @@ Stage0FunctionInput SimulateLinkedRomStage0Input(const Stage0FunctionInput& relo
   linked.base_vram = 0x80020000u;
   linked.gp_vram = 0x80060000u;
   linked.profile = reloc_in.profile;
+  linked.profile.gp_symbol_sizes.clear();
   linked.jump_tables = reloc_in.jump_tables;
   linked.constant_pool = reloc_in.constant_pool;
 
@@ -499,7 +505,10 @@ Stage0FunctionInput SimulateLinkedRomStage0Input(const Stage0FunctionInput& relo
     }
     sym_vrams.emplace_back(rel.symbol_name, assigned);
     linked.vram_to_symbol[assigned] = rel.symbol_name;
-    if (max_addend > 0) {
+    const auto gp_sz_it = reloc_in.profile.gp_symbol_sizes.find(rel.symbol_name);
+    if (gp_sz_it != reloc_in.profile.gp_symbol_sizes.end() && gp_sz_it->second > 0) {
+      linked.vram_to_symbol_size[assigned] = gp_sz_it->second;
+    } else if (max_addend > 0) {
       linked.vram_to_symbol_size[assigned] = span_bytes;
     }
   }
@@ -562,7 +571,7 @@ struct WorldState {
 extern struct WorldState g_world;
 extern int g_table_a[16];
 extern int g_table_b[16];
-extern int g_small_flag;
+int g_small_flag;
 extern int step_callback(int, double);
 
 int update_world(int n, int idx) {
@@ -712,6 +721,75 @@ int run_dual_vm(int count, const int* opcodes, const int* operands) {
   std::swap(vm_swapped_jt.jump_tables[0].table_vram, vm_swapped_jt.jump_tables[1].table_vram);
   EXPECT_FALSE(
       InvertFinalAndGasFunction(vm_swapped_jt).CompareAgainst(lifted_vm_reloc).MatchesExactly());
+}
+
+TEST_F(Pass00FinalAndGasTest, LinkedRomG8SmallDataDerivesGpSymbolSizesFromVramSymbolSizes) {
+  constexpr std::string_view kG8ScalarsSrc = R"(
+int g_gp_tempo;
+short g_gp_transpose;
+unsigned char g_gp_mute_mask;
+double g_gp_scale;
+extern int g_large_channel_table[32];
+
+int small_data_probe(int ch) {
+  int idx = ch & 31;
+  if ((g_gp_mute_mask & (1u << (ch & 7))) != 0u) {
+    return 0;
+  }
+  return g_large_channel_table[idx] + g_gp_tempo + (int)g_gp_transpose + (int)(g_gp_scale * (double)ch);
+}
+)";
+  const auto trace = hooks_.TraceForwardCompilation(
+      kG8ScalarsSrc, "small_data_probe", {"-O2", "-G", "8", "-mips2", "-mcpu=r4000", "-Wa,-O1"},
+      "linked_rom_g8_scalars");
+  auto has_gp_reloc = [&](std::string_view sym_name) {
+    for (const Stage0Relocation& rel : trace.stage0_input.relocations) {
+      if (rel.symbol_name == sym_name && rel.kind == Stage0RelocKind::kMipsGpRel16) {
+        return true;
+      }
+    }
+    return false;
+  };
+  ASSERT_TRUE(has_gp_reloc("g_gp_tempo"));
+  ASSERT_TRUE(has_gp_reloc("g_gp_transpose"));
+  ASSERT_TRUE(has_gp_reloc("g_gp_mute_mask"));
+  ASSERT_TRUE(has_gp_reloc("g_gp_scale"));
+
+  Stage0FunctionInput linked = SimulateLinkedRomStage0Input(trace.stage0_input);
+  ASSERT_TRUE(linked.profile.gp_symbol_sizes.empty());
+
+  uint32_t tempo_vram = 0;
+  uint32_t scale_vram = 0;
+  for (const auto& [vram, sym] : linked.vram_to_symbol) {
+    if (sym == "g_gp_tempo") {
+      tempo_vram = vram;
+    } else if (sym == "g_gp_scale") {
+      scale_vram = vram;
+    }
+  }
+  ASSERT_NE(tempo_vram, 0u);
+  ASSERT_NE(scale_vram, 0u);
+  ASSERT_TRUE(linked.vram_to_symbol_size.contains(tempo_vram));
+  ASSERT_TRUE(linked.vram_to_symbol_size.contains(scale_vram));
+  ASSERT_EQ(linked.vram_to_symbol_size.at(tempo_vram), 4u);
+  ASSERT_EQ(linked.vram_to_symbol_size.at(scale_vram), 8u);
+
+  const auto ok_stage0 = verifier_.VerifyFinalAndGasStageRightInverse(linked);
+  EXPECT_TRUE(ok_stage0.matches) << ok_stage0.diff_detail;
+  const auto ok_suffix = verifier_.VerifySuffixRightInverse(RtlPassKind::kDbr, linked);
+  EXPECT_TRUE(ok_suffix.matches) << ok_suffix.diff_detail;
+
+  // Omitting or inflating `vram_to_symbol_size` on `g_gp_tempo` causes GAS to relax the `$gp`
+  // access into a 2-word `%hi`/`%lo` sequence and must fail verification.
+  Stage0FunctionInput missing_size = linked;
+  missing_size.vram_to_symbol_size.erase(tempo_vram);
+  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(missing_size).matches);
+  EXPECT_FALSE(verifier_.VerifySuffixRightInverse(RtlPassKind::kDbr, missing_size).matches);
+
+  Stage0FunctionInput oversized = linked;
+  oversized.vram_to_symbol_size[tempo_vram] = 16u;
+  EXPECT_FALSE(verifier_.VerifyFinalAndGasStageRightInverse(oversized).matches);
+  EXPECT_FALSE(verifier_.VerifySuffixRightInverse(RtlPassKind::kDbr, oversized).matches);
 }
 
 class Pass00FinalAndGasRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {

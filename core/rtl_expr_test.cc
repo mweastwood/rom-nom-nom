@@ -325,5 +325,22 @@ TEST(RtlExprTest, GccPrintRtlFormattingAndSequenceSubInsnAstHelpers) {
   EXPECT_EQ(*parsed_vtop_note, vtop_note);
 }
 
+TEST(RtlExprTest, ParsesAndFormatsUidElidedInsnListNotesLosslessly) {
+  const std::string pat_text =
+      "(set (reg:SI 2 v0) (const_int 0)) "
+      "(insn_list:REG_WAS_0 (insn_list:REG_LIBCALL (expr_list:REG_EQUAL (const_int 0) (nil))))";
+  auto parsed = ParsePatternAndNotes(pat_text);
+  ASSERT_TRUE(parsed.ok()) << parsed.status().message();
+  ASSERT_EQ(parsed->reg_notes.size(), 3u);
+  EXPECT_EQ(parsed->reg_notes[0].list_op, RtlOp::kInsnList);
+  EXPECT_EQ(parsed->reg_notes[0].insn_id, -1);
+  EXPECT_TRUE(parsed->reg_notes[0].datum.IsNil());
+  EXPECT_EQ(parsed->reg_notes[1].list_op, RtlOp::kInsnList);
+  EXPECT_EQ(parsed->reg_notes[1].insn_id, -1);
+  EXPECT_EQ(parsed->reg_notes[2].list_op, RtlOp::kExprList);
+  EXPECT_EQ(parsed->ToSexprString(), pat_text);
+  EXPECT_EQ(parsed->ToGccPrintRtlString(), pat_text);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -33,6 +33,11 @@ class ProductionFinalScanInsnInverseProvider final
 
 class InvertFinalScanInsnTest : public ::testing::Test {
  protected:
+  void SetUp() override {
+    hooks_.ApplyCompilationProfile(
+        CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips3", "-Wa,-g"}});
+  }
+
   gcc_harness::GccContext ctx_;
   gcc_harness::FunctionHooks hooks_{&ctx_};
   ProductionFinalScanInsnInverseProvider provider_;
@@ -71,11 +76,17 @@ TEST_F(InvertFinalScanInsnTest, SyntheticPositiveIntegerAluAndShifts) {
       "sra\t$2,$4,$5",
       "srl\t$2,$4,1",
       "srl\t$2,$4,$5",
+      "dsll\t$2,$4,37",
+      "dsrl\t$2,$4,37",
+      "dsra\t$2,$4,37",
   };
   for (std::string_view insn : kInstructions) {
     const auto res = verifier_.VerifyFinalScanInsnRightInverse(insn);
     EXPECT_TRUE(res.matches) << "insn: " << insn << " diff: " << res.diff_detail;
   }
+  EXPECT_EQ(InvertFinalScanInsn("dsll32\t$2,$4,5"), InvertFinalScanInsn("dsll\t$2,$4,37"));
+  EXPECT_EQ(InvertFinalScanInsn("dsrl32\t$2,$4,5"), InvertFinalScanInsn("dsrl\t$2,$4,37"));
+  EXPECT_EQ(InvertFinalScanInsn("dsra32\t$2,$4,5"), InvertFinalScanInsn("dsra\t$2,$4,37"));
 }
 
 TEST_F(InvertFinalScanInsnTest, SyntheticPositiveMultiplyDivideAndHiLo) {
@@ -144,6 +155,8 @@ TEST_F(InvertFinalScanInsnTest, SyntheticPositiveFloatingPoint) {
       "s.s\t$f0,4($4)",
       "l.d\t$f0,0($4)",
       "s.d\t$f0,8($4)",
+      "li.s\t$2,1.50000000000000000000e0",
+      "li.d\t$2,2.25000000000000000000e0",
       "mov.s\t$f0,$f12",
       "mov.d\t$f0,$f12",
       "mfc1\t$2,$f0",
@@ -535,6 +548,89 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
     EXPECT_TRUE(res.matches) << res.diff_detail;
   }
+
+  // 9. `.o`-disassembled `!TARGET_64BIT` 64-bit variable shift (`$L2:`, `$L3:`, `$L4:`)
+  //    where `$L4:` is ALSO referenced by an earlier conditional branch (`beq $6,$0,$L4`),
+  //    plus 2-line `trunc.w.s` + `mfc1` and 2-line `DImode` `li`.
+  {
+    const std::vector<std::string> asm_lines = {
+        "li\t$2,0",
+        "li\t$3,1",
+        "beq\t$6,$0,$L4",
+        "sll\t$7,$6,26",
+        "bgez\t$7,$L2",
+        "sllv\t$2,$5,$6",
+        ".set\tnoreorder",
+        "beq\t$0,$0,$L4",
+        "addu\t$3,$0,$0",
+        ".set\treorder",
+        "$L2:",
+        ".set\tnoreorder",
+        "beq\t$7,$0,$L3",
+        "sllv\t$2,$4,$6",
+        ".set\treorder",
+        "subu\t$7,$0,$6",
+        "srlv\t$7,$5,$7",
+        "or\t$2,$2,$7",
+        "$L3:",
+        "sllv\t$3,$5,$6",
+        "$L4:",
+        "trunc.w.s\t$f2,$f12",
+        "mfc1\t$4,$f2",
+        "addu\t$2,$2,$4",
+        "j\t$31",
+    };
+    RtlSidebandState sideband;
+    const RtlControlFlowGraph cfg = InvertFinalScanInsnLinesToCfg(asm_lines, sideband);
+    // Block 0 (`li` DImode + `beq $6,$0,$L4`), Block 1 (collapsed `ashift:DI`),
+    // Block 2 (`$L4:` `fix_truncsfsi2` + `addu` + `return`).
+    ASSERT_EQ(cfg.rpo_blocks.size(), 3u);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[0], "(set (reg:DI 2 v0) (const_int 1))");
+    EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[1].instructions[0], "(ashift:DI "))
+        << cfg.rpo_blocks[1].instructions[0];
+    EXPECT_TRUE(cfg.rpo_blocks[2].has_label);
+    EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[2].instructions[0], "(fix:SI "))
+        << cfg.rpo_blocks[2].instructions[0];
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(
+        gcc_harness::SubfunctionId::kFinalScanInsn, cfg, {}, 2, {"-O2", "-mips2", "-mcpu=r4000"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 10. `UpgradeR4000Mulsi3Insns` + `NarrowDuplicateConstLoadsInBlocks`: on `-mcpu=r4000`,
+  //     consecutive `mult` + `mflo` (with dead `hi`/`lo`) fuse into single-insn `mulsi3_r4000`,
+  //     while duplicate same-block constant loads `li $6,1` before a `QI` byte store (`sb`) and a
+  //     subsequent `SI` word store (`sw`) recover `(set (reg:QI 6 a2) (const_int 1))` vs
+  //     `(set (reg:SI 6 a2) (const_int 1))` and satisfy `VerifySubfunctionBoundaryRightInverse`.
+  {
+    const std::vector<std::string> asm_lines = {
+        "mult\t$4,$5", "mflo\t$2", "li\t$6,1", "sb\t$6,0($7)", "li\t$6,1", "sw\t$6,4($7)", "j\t$31",
+    };
+    RtlSidebandState sideband;
+    sideband.is_leaf_function = true;
+    const CompilationProfile profile_r4000{
+        .optimize_level = 2,
+        .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
+    };
+    const RtlControlFlowGraph cfg =
+        InvertFinalScanInsnLinesToCfg(asm_lines, sideband, {}, {}, &profile_r4000);
+    ASSERT_EQ(cfg.rpo_blocks.size(), 1u);
+    EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[0].instructions[0],
+                                  "(set (reg/i:SI 2 v0) (mult:SI (reg:SI 4 a0) (reg:SI 5 a1)))"))
+        << cfg.rpo_blocks[0].instructions[0];
+    EXPECT_TRUE(
+        absl::StrContains(cfg.rpo_blocks[0].instructions[1], "(set (reg:QI 6 a2) (const_int 1))"))
+        << cfg.rpo_blocks[0].instructions[1];
+    EXPECT_TRUE(
+        absl::StrContains(cfg.rpo_blocks[0].instructions[3], "(set (reg:SI 6 a2) (const_int 1))"))
+        << cfg.rpo_blocks[0].instructions[3];
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(
+        gcc_harness::SubfunctionId::kFinalScanInsn, cfg, {}, 2, {"-O2", "-mips2", "-mcpu=r4000"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
 }
 
 TEST_F(InvertFinalScanInsnTest, MultiSwitchAndHoistedGlobalsBoundaryRightInverse) {
@@ -624,7 +720,9 @@ TEST_P(InvertFinalScanInsnRoundTripTest, RoundTrip2480Cases) {
     }
     found_snapshot = true;
     const auto res = verifier->VerifySubfunctionBoundaryRightInverse(snap);
-    EXPECT_TRUE(res.matches) << "Test case: " << tc.test_name << "\nDiff:\n" << res.diff_detail;
+    EXPECT_TRUE(res.matches) << "Test case: " << tc.test_name << "\nDiff:\n"
+                             << res.diff_detail << "\nExpected asm:\n"
+                             << res.expected_summary;
   }
   EXPECT_TRUE(found_snapshot) << "Missing kFinalScanInsn snapshot for " << tc.test_name;
 }

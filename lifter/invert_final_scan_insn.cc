@@ -361,6 +361,397 @@ std::string InvertTwoLineFloatSi(std::string_view line0, std::string_view line1)
   return "";
 }
 
+std::string InvertTwoLineTruncW(std::string_view line0, std::string_view line1) {
+  auto strip_comment = [](std::string_view s) {
+    const size_t hash_pos = s.find('#');
+    if (hash_pos != std::string_view::npos) {
+      s = s.substr(0, hash_pos);
+    }
+    return absl::StripAsciiWhitespace(s);
+  };
+  line0 = strip_comment(line0);
+  line1 = strip_comment(line1);
+  if (line0.empty() || line1.empty()) {
+    return "";
+  }
+  auto split_mnemonic = [](std::string_view line) -> std::pair<std::string_view, std::string_view> {
+    size_t sp = 0;
+    while (sp < line.size() && !absl::ascii_isspace(static_cast<unsigned char>(line[sp]))) {
+      ++sp;
+    }
+    return {line.substr(0, sp), absl::StripAsciiWhitespace(line.substr(sp))};
+  };
+
+  const auto [m0, a0_str] = split_mnemonic(line0);
+  if (m0 != "trunc.w.s" && m0 != "trunc.w.d") {
+    return "";
+  }
+  const std::string_view src_mode = (m0 == "trunc.w.d") ? "DF" : "SF";
+  const std::vector<std::string_view> ops0 = SplitOperands(a0_str);
+  if (ops0.size() != 2 && ops0.size() != 3) {
+    return "";
+  }
+  const int fscratch = ParseFprNumber(ops0[0]);
+  const int fsrc = ParseFprNumber(ops0[1]);
+  const int gscratch = (ops0.size() == 3) ? ParseGprNumber(ops0[2]) : 1;
+  if (fscratch < 0 || fsrc < 0 || gscratch < 1) {
+    return "";
+  }
+  if (src_mode == "DF" && ((fscratch % 2) != 0 || (fsrc % 2) != 0)) {
+    return "";
+  }
+
+  bool is_volatile_mem = false;
+  if (absl::StartsWith(line1, "%{") && absl::EndsWith(line1, "%}")) {
+    line1 = absl::StripAsciiWhitespace(line1.substr(2, line1.size() - 4));
+    is_volatile_mem = true;
+  }
+  const auto [m1, a1_str] = split_mnemonic(line1);
+  const std::vector<std::string_view> ops1 = SplitOperands(a1_str);
+  if (ops1.size() != 2) {
+    return "";
+  }
+  if (!is_volatile_mem && m1 == "mfc1") {
+    const int gdst = ParseGprNumber(ops1[0]);
+    const int xfer_fpr = ParseFprNumber(ops1[1]);
+    if (gdst < 1 || xfer_fpr != fscratch) {
+      return "";
+    }
+    return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
+                           FormatGprRtl(gdst, "SI"), FormatFprRtl(fsrc, src_mode),
+                           FormatGprRtl(gscratch, "SI"), FormatFprRtl(fscratch, src_mode));
+  }
+  if (m1 == "s.s" || m1 == "swc1") {
+    const int store_fpr = ParseFprNumber(ops1[0]);
+    const std::string addr_rtx = FormatMemAddressRtl(ops1[1], "SI");
+    if (store_fpr != fscratch || addr_rtx.empty()) {
+      return "";
+    }
+    auto parsed_addr = RtlExpr::Parse(addr_rtx);
+    if (!parsed_addr.ok()) {
+      return "";
+    }
+    bool overlaps_earlyclobber = false;
+    parsed_addr->Visit([&](const RtlExpr& node) {
+      if (node.IsReg() && node.RegNo() == gscratch) {
+        overlaps_earlyclobber = true;
+      }
+    });
+    if (overlaps_earlyclobber) {
+      return "";
+    }
+    const std::string_view mem_tag = is_volatile_mem ? "mem/v" : "mem";
+    return absl::StrFormat("(parallel[ (set (%s:SI %s) (fix:SI %s)) (clobber %s) (clobber %s) ] )",
+                           mem_tag, addr_rtx, FormatFprRtl(fsrc, src_mode),
+                           FormatGprRtl(gscratch, "SI"), FormatFprRtl(fscratch, src_mode));
+  }
+  return "";
+}
+
+std::string InvertTwoLineDiConstLoad(std::string_view line0, std::string_view line1,
+                                     bool require_nonneg_decimal) {
+  auto strip_comment = [](std::string_view s) {
+    const size_t hash_pos = s.find('#');
+    if (hash_pos != std::string_view::npos) {
+      s = s.substr(0, hash_pos);
+    }
+    return absl::StripAsciiWhitespace(s);
+  };
+  line0 = strip_comment(line0);
+  line1 = strip_comment(line1);
+  auto parse_decimal_li = [](std::string_view line, int* out_rd, int64_t* out_val) -> bool {
+    size_t sp = 0;
+    while (sp < line.size() && !absl::ascii_isspace(static_cast<unsigned char>(line[sp]))) {
+      ++sp;
+    }
+    if (line.substr(0, sp) != "li") {
+      return false;
+    }
+    const std::vector<std::string_view> ops = SplitOperands(line.substr(sp));
+    if (ops.size() != 2 || absl::StrContains(ops[1], 'x') || absl::StrContains(ops[1], 'X')) {
+      return false;
+    }
+    const int rd = ParseGprNumber(ops[0]);
+    const auto val = ParseIntImmediate(ops[1]);
+    if (rd < 2 || rd > 31 || !val.has_value()) {
+      return false;
+    }
+    *out_rd = rd;
+    *out_val = *val;
+    return true;
+  };
+
+  int rd0 = -1;
+  int rd1 = -1;
+  int64_t hi = 0;
+  int64_t lo = 0;
+  if (!parse_decimal_li(line0, &rd0, &hi) || !parse_decimal_li(line1, &rd1, &lo)) {
+    return "";
+  }
+  if ((rd0 % 2) != 0 || rd1 != rd0 + 1 || (hi == 0 && lo == 0)) {
+    return "";
+  }
+  if (require_nonneg_decimal && hi < 0 && lo < 0) {
+    return "";
+  }
+  const int32_t hi32 = static_cast<int32_t>(hi);
+  const int32_t lo32 = static_cast<int32_t>(lo);
+  if ((hi32 == 0 && lo32 > 0) || (hi32 == -1 && lo32 < 0)) {
+    return absl::StrFormat("(set %s (const_int %d))", FormatGprRtl(rd0, "DI"), lo32);
+  }
+  return absl::StrFormat("(set %s (const_double:VOID (cc0) %d %d))", FormatGprRtl(rd0, "DI"), lo32,
+                         hi32);
+}
+
+std::string InvertMips1DiShift(std::string_view multi_line_asm) {
+  std::vector<std::string_view> insns;
+  for (std::string_view raw : absl::StrSplit(multi_line_asm, '\n')) {
+    const size_t hash_pos = raw.find('#');
+    if (hash_pos != std::string_view::npos) {
+      raw = raw.substr(0, hash_pos);
+    }
+    raw = absl::StripAsciiWhitespace(raw);
+    if (raw.empty() || absl::StartsWith(raw, ".set")) {
+      continue;
+    }
+    insns.push_back(raw);
+  }
+
+  auto split_op = [](std::string_view line, std::string_view* out_mnem,
+                     std::vector<std::string_view>* out_ops) {
+    size_t sp = 0;
+    while (sp < line.size() && !absl::ascii_isspace(static_cast<unsigned char>(line[sp]))) {
+      ++sp;
+    }
+    *out_mnem = line.substr(0, sp);
+    *out_ops = SplitOperands(line.substr(sp));
+  };
+
+  // 1. `*_internal2` (2-line constant shift by 32..63).
+  if (insns.size() == 2) {
+    std::string_view m0, m1;
+    std::vector<std::string_view> o0, o1;
+    split_op(insns[0], &m0, &o0);
+    split_op(insns[1], &m1, &o1);
+    if (o0.size() != 3 || (m1 == "move" ? o1.size() != 2 : o1.size() != 3)) {
+      return "";
+    }
+    const int r0_dst = ParseGprNumber(o0[0]);
+    const int r0_src = ParseGprNumber(o0[1]);
+    const auto amt_mod32 = ParseIntImmediate(o0[2]);
+    const int r1_dst = ParseGprNumber(o1[0]);
+    if (r0_dst < 2 || r0_src < 2 || r1_dst < 2 || !amt_mod32.has_value() || *amt_mod32 < 0 ||
+        *amt_mod32 > 31) {
+      return "";
+    }
+    const int32_t full_amt = static_cast<int32_t>(32 + *amt_mod32);
+    if (m0 == "sll" && m1 == "move" && (r0_dst % 2) == 0 && (r0_src % 2) == 1 &&
+        r1_dst == r0_dst + 1 && ParseGprNumber(o1[1]) == 0) {
+      return absl::StrFormat(
+          "(parallel[ (set %s (ashift:DI %s (const_int %d))) (clobber (reg:SI 1 at)) ] )",
+          FormatGprRtl(r0_dst, "DI"), FormatGprRtl(r0_src - 1, "DI"), full_amt);
+    }
+    if (m0 == "srl" && m1 == "move" && (r0_dst % 2) == 1 && (r0_src % 2) == 0 &&
+        r1_dst == r0_dst - 1 && ParseGprNumber(o1[1]) == 0) {
+      return absl::StrFormat(
+          "(parallel[ (set %s (lshiftrt:DI %s (const_int %d))) (clobber (reg:SI 1 at)) ] )",
+          FormatGprRtl(r1_dst, "DI"), FormatGprRtl(r0_src, "DI"), full_amt);
+    }
+    const auto sra_imm = (o1.size() == 3) ? ParseIntImmediate(o1[2]) : std::nullopt;
+    if (m0 == "sra" && m1 == "sra" && (r0_dst % 2) == 1 && (r0_src % 2) == 0 &&
+        r1_dst == r0_dst - 1 && ParseGprNumber(o1[1]) == r0_src && sra_imm.has_value() &&
+        *sra_imm == 31) {
+      return absl::StrFormat(
+          "(parallel[ (set %s (ashiftrt:DI %s (const_int %d))) (clobber (reg:SI 1 at)) ] )",
+          FormatGprRtl(r1_dst, "DI"), FormatGprRtl(r0_src, "DI"), full_amt);
+    }
+    return "";
+  }
+
+  // 2. `*_internal3` (4-line constant shift by 1..31).
+  if (insns.size() == 4) {
+    std::string_view m[4];
+    std::vector<std::string_view> o[4];
+    for (int k = 0; k < 4; ++k) {
+      split_op(insns[k], &m[k], &o[k]);
+      if (o[k].size() != 3) {
+        return "";
+      }
+    }
+    const auto amt0 = ParseIntImmediate(o[0][2]);
+    const auto amt1 = ParseIntImmediate(o[1][2]);
+    const auto amt3 = ParseIntImmediate(o[3][2]);
+    if (!amt0.has_value() || !amt1.has_value() || !amt3.has_value() || *amt0 < 1 || *amt0 > 31 ||
+        *amt0 != *amt3 || *amt1 != (32 - *amt0) || m[2] != "or") {
+      return "";
+    }
+    const int r_scr = ParseGprNumber(o[1][0]);
+    if (r_scr < 1 || ParseGprNumber(o[2][2]) != r_scr) {
+      return "";
+    }
+    if (m[0] == "sll" && m[1] == "srl" && m[3] == "sll") {
+      const int d0 = ParseGprNumber(o[0][0]);
+      const int s1 = ParseGprNumber(o[0][1]);
+      if (d0 >= 2 && (d0 % 2) == 0 && s1 >= 2 && (s1 % 2) == 0 &&
+          ParseGprNumber(o[1][1]) == s1 + 1 && ParseGprNumber(o[2][0]) == d0 &&
+          ParseGprNumber(o[2][1]) == d0 && ParseGprNumber(o[3][0]) == d0 + 1 &&
+          ParseGprNumber(o[3][1]) == s1 + 1) {
+        return absl::StrFormat("(parallel[ (set %s (ashift:DI %s (const_int %d))) (clobber %s) ] )",
+                               FormatGprRtl(d0, "DI"), FormatGprRtl(s1, "DI"),
+                               static_cast<int32_t>(*amt0), FormatGprRtl(r_scr, "SI"));
+      }
+    }
+    if (m[0] == "srl" && m[1] == "sll" && (m[3] == "sra" || m[3] == "srl")) {
+      const int d0_lo = ParseGprNumber(o[0][0]);
+      const int s1_lo = ParseGprNumber(o[0][1]);
+      const int d0 = d0_lo - 1;
+      const int s1 = s1_lo - 1;
+      if (d0 >= 2 && (d0_lo % 2) == 1 && s1 >= 2 && (s1_lo % 2) == 1 &&
+          ParseGprNumber(o[1][1]) == s1 && ParseGprNumber(o[2][0]) == d0_lo &&
+          ParseGprNumber(o[2][1]) == d0_lo && ParseGprNumber(o[3][0]) == d0 &&
+          ParseGprNumber(o[3][1]) == s1) {
+        const std::string_view rtl_op = (m[3] == "sra") ? "ashiftrt" : "lshiftrt";
+        return absl::StrFormat("(parallel[ (set %s (%s:DI %s (const_int %d))) (clobber %s) ] )",
+                               FormatGprRtl(d0, "DI"), rtl_op, FormatGprRtl(s1, "DI"),
+                               static_cast<int32_t>(*amt0), FormatGprRtl(r_scr, "SI"));
+      }
+    }
+    return "";
+  }
+
+  // 3. `*_internal` (14-item variable 64-bit shift with `1:`, `2:`, `3:` or
+  // `.o`-disassembled `$L<a>:`, `$L<b>:`, `$L<c>:` labels).
+  if (insns.size() == 15 && insns[2] == "nop") {
+    insns.erase(insns.begin() + 2);
+  }
+  if (insns.size() == 14 && absl::EndsWith(insns[5], ":") && absl::EndsWith(insns[11], ":") &&
+      absl::EndsWith(insns[13], ":")) {
+    const bool is_numeric_local = (insns[5] == "1:" && insns[11] == "2:" && insns[13] == "3:");
+    const std::string_view lbl_a = insns[5].substr(0, insns[5].size() - 1);
+    const std::string_view lbl_b = insns[11].substr(0, insns[11].size() - 1);
+    const std::string_view lbl_c = insns[13].substr(0, insns[13].size() - 1);
+    auto is_local_sym_lbl = [](std::string_view s) {
+      return (absl::StartsWith(s, "$L") || absl::StartsWith(s, ".L")) && s.size() > 2;
+    };
+    if (!is_numeric_local &&
+        (!is_local_sym_lbl(lbl_a) || !is_local_sym_lbl(lbl_b) || !is_local_sym_lbl(lbl_c) ||
+         lbl_a == lbl_b || lbl_b == lbl_c || lbl_a == lbl_c)) {
+      return "";
+    }
+    const std::string_view exp_t_a = is_numeric_local ? std::string_view("1f") : lbl_a;
+    const std::string_view exp_t_b = is_numeric_local ? std::string_view("2f") : lbl_b;
+    const std::string_view exp_t_c = is_numeric_local ? std::string_view("3f") : lbl_c;
+
+    std::string_view m0, m1, m2, m3, m4, m6, m7, m8, m9, m10, m12;
+    std::vector<std::string_view> o0, o1, o2, o3, o4, o6, o7, o8, o9, o10, o12;
+    split_op(insns[0], &m0, &o0);
+    split_op(insns[1], &m1, &o1);
+    split_op(insns[2], &m2, &o2);
+    split_op(insns[3], &m3, &o3);
+    split_op(insns[4], &m4, &o4);
+    split_op(insns[6], &m6, &o6);
+    split_op(insns[7], &m7, &o7);
+    split_op(insns[8], &m8, &o8);
+    split_op(insns[9], &m9, &o9);
+    split_op(insns[10], &m10, &o10);
+    split_op(insns[12], &m12, &o12);
+
+    auto norm_var_shift = [](std::string_view m) -> std::string_view {
+      if (m == "sllv") return "sll";
+      if (m == "srlv") return "srl";
+      if (m == "srav") return "sra";
+      return m;
+    };
+    m2 = norm_var_shift(m2);
+    m7 = norm_var_shift(m7);
+    m9 = norm_var_shift(m9);
+    m12 = norm_var_shift(m12);
+
+    auto is_uncond_branch_to = [&](std::string_view m, absl::Span<const std::string_view> ops,
+                                   std::string_view target) {
+      if (m == "b" && ops.size() == 1 && ops[0] == target) {
+        return true;
+      }
+      if (!is_numeric_local && m == "beq" && ops.size() == 3 && ParseGprNumber(ops[0]) == 0 &&
+          ParseGprNumber(ops[1]) == 0 && ops[2] == target) {
+        return true;
+      }
+      return false;
+    };
+    auto is_zero_move_to = [](std::string_view m, absl::Span<const std::string_view> ops,
+                              int dst_reg) {
+      if (m == "move" && ops.size() == 2) {
+        return ParseGprNumber(ops[0]) == dst_reg && ParseGprNumber(ops[1]) == 0;
+      }
+      if ((m == "addu" || m == "or") && ops.size() == 3) {
+        return ParseGprNumber(ops[0]) == dst_reg && ParseGprNumber(ops[1]) == 0 &&
+               ParseGprNumber(ops[2]) == 0;
+      }
+      return false;
+    };
+
+    const auto c26 = (o0.size() == 3) ? ParseIntImmediate(o0[2]) : std::nullopt;
+    if (m0 != "sll" || o0.size() != 3 || !c26.has_value() || *c26 != 26 || m1 != "bgez" ||
+        o1.size() != 2 || o1[1] != exp_t_a || !is_uncond_branch_to(m3, o3, exp_t_c) ||
+        m6 != "beq" || o6.size() != 3 || ParseGprNumber(o6[1]) != 0 || o6[2] != exp_t_b ||
+        m8 != "subu" || o8.size() != 3 || ParseGprNumber(o8[1]) != 0 || m10 != "or" ||
+        o10.size() != 3 || o2.size() != 3 || o7.size() != 3 || o9.size() != 3 || o12.size() != 3) {
+      return "";
+    }
+    const int r3 = ParseGprNumber(o0[0]);
+    const int r2 = ParseGprNumber(o0[1]);
+    if (r3 < 1 || r2 < 1 || ParseGprNumber(o1[0]) != r3 || ParseGprNumber(o6[0]) != r3 ||
+        ParseGprNumber(o8[0]) != r3 || ParseGprNumber(o8[2]) != r2 || ParseGprNumber(o9[0]) != r3 ||
+        ParseGprNumber(o9[2]) != r3 || ParseGprNumber(o10[2]) != r3 ||
+        ParseGprNumber(o2[2]) != r2 || ParseGprNumber(o7[2]) != r2 ||
+        ParseGprNumber(o12[2]) != r2) {
+      return "";
+    }
+
+    if (m2 == "sll" && m7 == "sll" && m9 == "srl" && m12 == "sll") {
+      const int d0 = ParseGprNumber(o2[0]);
+      const int s1_lo = ParseGprNumber(o2[1]);
+      const int s1 = s1_lo - 1;
+      if (d0 >= 2 && (d0 % 2) == 0 && s1 >= 2 && (s1_lo % 2) == 1 && d0 != s1 && r2 != d0 &&
+          r2 != d0 + 1 && r3 != d0 && r3 != d0 + 1 && is_zero_move_to(m4, o4, d0 + 1) &&
+          ParseGprNumber(o7[0]) == d0 && ParseGprNumber(o7[1]) == s1 &&
+          ParseGprNumber(o9[1]) == s1_lo && ParseGprNumber(o10[0]) == d0 &&
+          ParseGprNumber(o10[1]) == d0 && ParseGprNumber(o12[0]) == d0 + 1 &&
+          ParseGprNumber(o12[1]) == s1_lo) {
+        return absl::StrFormat("(parallel[ (set %s (ashift:DI %s %s)) (clobber %s) ] )",
+                               FormatGprRtl(d0, "DI"), FormatGprRtl(s1, "DI"),
+                               FormatGprRtl(r2, "SI"), FormatGprRtl(r3, "SI"));
+      }
+    }
+
+    if ((m2 == "sra" || m2 == "srl") && m7 == "srl" && m9 == "sll" && m12 == m2) {
+      const bool is_arith = (m2 == "sra");
+      const int d0_lo = ParseGprNumber(o2[0]);
+      const int s1 = ParseGprNumber(o2[1]);
+      const int d0 = d0_lo - 1;
+      bool fill_ok = false;
+      if (is_arith) {
+        const auto c31 = (o4.size() == 3) ? ParseIntImmediate(o4[2]) : std::nullopt;
+        fill_ok = (m4 == "sra" && o4.size() == 3 && ParseGprNumber(o4[0]) == d0 &&
+                   ParseGprNumber(o4[1]) == s1 && c31.has_value() && *c31 == 31);
+      } else {
+        fill_ok = is_zero_move_to(m4, o4, d0);
+      }
+      if (fill_ok && d0 >= 2 && (d0_lo % 2) == 1 && s1 >= 2 && (s1 % 2) == 0 && d0 != s1 &&
+          r2 != d0 && r2 != d0 + 1 && r3 != d0 && r3 != d0 + 1 && ParseGprNumber(o7[0]) == d0_lo &&
+          ParseGprNumber(o7[1]) == s1 + 1 && ParseGprNumber(o9[1]) == s1 &&
+          ParseGprNumber(o10[0]) == d0_lo && ParseGprNumber(o10[1]) == d0_lo &&
+          ParseGprNumber(o12[0]) == d0 && ParseGprNumber(o12[1]) == s1) {
+        const std::string_view rtl_op = is_arith ? "ashiftrt" : "lshiftrt";
+        return absl::StrFormat("(parallel[ (set %s (%s:DI %s %s)) (clobber %s) ] )",
+                               FormatGprRtl(d0, "DI"), rtl_op, FormatGprRtl(s1, "DI"),
+                               FormatGprRtl(r2, "SI"), FormatGprRtl(r3, "SI"));
+      }
+    }
+  }
+  return "";
+}
+
 bool ParseIntOffsetAndBaseReg(std::string_view mem_arg, int* out_base_reg, int32_t* out_offset) {
   mem_arg = absl::StripAsciiWhitespace(mem_arg);
   const size_t lparen = mem_arg.find('(');
@@ -577,7 +968,8 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     return "";
   }
 
-  // Check for multi-line instruction outputs (`floatsisf2`/`floatsidf2` or `movstrsi`).
+  // Check for multi-line instruction outputs (`floatsisf2`/`floatsidf2`, `fix_trunc*`,
+  // `!TARGET_64BIT` `DImode` loads/shifts, or `movstrsi`).
   if (const size_t nl_pos = trimmed_full.find('\n'); nl_pos != std::string_view::npos) {
     const std::string_view first_line = trimmed_full.substr(0, nl_pos);
     const std::string_view second_line = trimmed_full.substr(nl_pos + 1);
@@ -585,6 +977,17 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
       if (std::string float_si = InvertTwoLineFloatSi(first_line, second_line); !float_si.empty()) {
         return float_si;
       }
+      if (std::string trunc_w = InvertTwoLineTruncW(first_line, second_line); !trunc_w.empty()) {
+        return trunc_w;
+      }
+      if (std::string di_li =
+              InvertTwoLineDiConstLoad(first_line, second_line, /*require_nonneg_decimal=*/false);
+          !di_li.empty()) {
+        return di_li;
+      }
+    }
+    if (std::string di_shift = InvertMips1DiShift(trimmed_full); !di_shift.empty()) {
+      return di_shift;
     }
     return InvertUnalignedBlockMove(trimmed_full);
   }
@@ -1026,12 +1429,14 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
   // 7. Shifts (`sll`, `sllv`, `sra`, `srav`, `srl`, `srlv`, `dsll`, `dsra`, `dsrl`)
   // ---------------------------------------------------------------------------
   if (mnemonic == "sll" || mnemonic == "sllv" || mnemonic == "sra" || mnemonic == "srav" ||
-      mnemonic == "srl" || mnemonic == "srlv" || mnemonic == "dsll" || mnemonic == "dsllv" ||
-      mnemonic == "dsra" || mnemonic == "dsrav" || mnemonic == "dsrl" || mnemonic == "dsrlv") {
+      mnemonic == "srl" || mnemonic == "srlv" || mnemonic == "dsll" || mnemonic == "dsll32" ||
+      mnemonic == "dsllv" || mnemonic == "dsra" || mnemonic == "dsra32" || mnemonic == "dsrav" ||
+      mnemonic == "dsrl" || mnemonic == "dsrl32" || mnemonic == "dsrlv") {
     if (ops.size() != 3) {
       return "";
     }
     const bool is_64 = absl::StartsWith(mnemonic, "d");
+    const bool plus_32 = absl::EndsWith(mnemonic, "32");
     const std::string_view mode = is_64 ? "DI" : "SI";
     const std::string_view base_mnem = is_64 ? mnemonic.substr(1) : mnemonic;
     const std::string_view rtl_op =
@@ -1044,13 +1449,14 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
       return "";
     }
     const int rs = ParseGprNumber(ops[2]);
-    if (rs >= 0) {
+    if (rs >= 0 && !plus_32) {
       return absl::StrFormat("(set %s (%s:%s %s %s))", FormatGprRtl(rd, mode), rtl_op, mode,
                              FormatGprRtl(rt, mode), FormatGprRtl(rs, "SI"));
     }
     if (const auto sa = ParseIntImmediate(ops[2]); sa.has_value()) {
+      const int32_t shift_amt = static_cast<int32_t>(*sa) + (plus_32 ? 32 : 0);
       return absl::StrFormat("(set %s (%s:%s %s (const_int %d)))", FormatGprRtl(rd, mode), rtl_op,
-                             mode, FormatGprRtl(rt, mode), static_cast<int32_t>(*sa));
+                             mode, FormatGprRtl(rt, mode), shift_amt);
     }
     return "";
   }
@@ -1282,9 +1688,11 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     }
     const std::string_view mode = (mnemonic == "li.d") ? "DF" : "SF";
     const int fpr = ParseFprNumber(ops[0]);
-    if (fpr < 0) {
+    const int gpr = (fpr < 0) ? ParseGprNumber(ops[0]) : -1;
+    if (fpr < 0 && gpr < 1) {
       return "";
     }
+    const std::string dst_rtx = (fpr >= 0) ? FormatFprRtl(fpr, mode) : FormatGprRtl(gpr, mode);
     const std::string val_str(ops[1]);
     char* endptr = nullptr;
     const double d = std::strtod(val_str.c_str(), &endptr);
@@ -1294,8 +1702,7 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     const uint64_t bits = absl::bit_cast<uint64_t>(d);
     const int32_t lo = static_cast<int32_t>(bits & 0xffffffffu);
     const int32_t hi = static_cast<int32_t>(bits >> 32);
-    return absl::StrFormat("(set %s (const_double:%s (cc0) %d %d))", FormatFprRtl(fpr, mode), mode,
-                           lo, hi);
+    return absl::StrFormat("(set %s (const_double:%s (cc0) %d %d))", dst_rtx, mode, lo, hi);
   }
 
   if (mnemonic == "mov.s" || mnemonic == "mov.d") {
@@ -1585,12 +1992,25 @@ std::optional<std::string> ExtractBranchTargetLabel(const RtlExpr& pat, bool* is
 
 void RewriteDataLabelRefsInAst(RtlExpr* expr,
                                const absl::flat_hash_map<std::string, size_t>& label_to_block,
+                               const absl::flat_hash_set<std::string>& jt_tokens,
                                bool allow_direct_label_ref, bool* modified) {
   if (expr->op == RtlOp::kLabelRef && expr->children.empty() && allow_direct_label_ref) {
     auto it = label_to_block.find(expr->str_val);
     if (it != label_to_block.end()) {
       *modified = true;
       *expr = RtlExpr::MakeSymbolicLabelRef(absl::StrFormat("__blk_%zu", it->second), expr->mode);
+      return;
+    }
+    if (!jt_tokens.contains(expr->str_val)) {
+      std::string_view num_part = expr->str_val;
+      if (absl::StartsWith(num_part, "L")) {
+        num_part.remove_prefix(1);
+        int32_t lbl_num = 0;
+        if (absl::SimpleAtoi(num_part, &lbl_num) && lbl_num >= 0 && lbl_num < 100000) {
+          *modified = true;
+          *expr = RtlExpr::MakeSymbolicLabelRef(absl::StrCat("L", 100000 + lbl_num), expr->mode);
+        }
+      }
     }
     return;
   }
@@ -1600,7 +2020,8 @@ void RewriteDataLabelRefsInAst(RtlExpr* expr,
 
   for (size_t idx = 0; idx < expr->children.size(); ++idx) {
     const bool elem_allow = child_allow_direct || (expr->op == RtlOp::kSequence && idx > 0);
-    RewriteDataLabelRefsInAst(&expr->children[idx], label_to_block, elem_allow, modified);
+    RewriteDataLabelRefsInAst(&expr->children[idx], label_to_block, jt_tokens, elem_allow,
+                              modified);
   }
 }
 
@@ -2214,6 +2635,375 @@ void UpgradeDivModInsnsForOptimize(RtlControlFlowGraph* cfg) {
   }
 }
 
+bool IsMipsCpuR4000(const CompilationProfile& profile) {
+  int mips_isa = 3;
+  std::string mcpu;
+  for (size_t i = 0; i < profile.c_flags.size(); ++i) {
+    const std::string& f = profile.c_flags[i];
+    if (f == "-mips1") {
+      mips_isa = 1;
+    } else if (f == "-mips2") {
+      mips_isa = 2;
+    } else if (f == "-mips3") {
+      mips_isa = 3;
+    } else if (f == "-mips4") {
+      mips_isa = 4;
+    } else if (absl::StartsWith(f, "-mcpu=")) {
+      mcpu = f.substr(6);
+    } else if (f == "-mcpu" && i + 1 < profile.c_flags.size()) {
+      mcpu = profile.c_flags[++i];
+    }
+  }
+  if (mcpu.empty() || mcpu == "default" || mcpu == "DEFAULT") {
+    return mips_isa == 3;
+  }
+  std::string_view p = mcpu;
+  if (!p.empty() && (p[0] == 'r' || p[0] == 'R')) {
+    p.remove_prefix(1);
+  }
+  return p == "4000" || p == "4k" || p == "4K" || p == "4400";
+}
+
+// On `mips_cpu == PROCESSOR_R4000` (`mips.md:860-881`), 32-bit signed/unsigned
+// integer multiplication (`mulsi3`) is emitted as the single RTL instruction
+// `mulsi3_r4000`, whose output template emits consecutive `mult $rs,$rt` +
+// `mflo $rd`. Fuse consecutive `mult` + `mflo` pairs back into `mulsi3_r4000`
+// whenever neither `hi` (`reg 64`) nor `lo` (`reg 65`) is read afterwards.
+void UpgradeR4000Mulsi3Insns(RtlControlFlowGraph* cfg) {
+  auto analyze_hilo_expr = [](const RtlExpr& expr, uint32_t* reads, uint32_t* kills) {
+    *reads = 0u;
+    *kills = 0u;
+    auto hilo_bit = [](int r) -> uint32_t { return (r == 64) ? 1u : ((r == 65) ? 2u : 0u); };
+    auto scan_reads = [&](const RtlExpr& sub) {
+      sub.Visit([&](const RtlExpr& n) {
+        if (n.IsReg()) {
+          *reads |= hilo_bit(n.RegNo());
+        }
+      });
+    };
+    auto process_elem = [&](const RtlExpr& elem) {
+      if (elem.IsSet()) {
+        if (elem.SetDest().IsMem()) {
+          scan_reads(elem.SetDest());
+        }
+        scan_reads(elem.SetSrc());
+        if (elem.SetSrc().op == RtlOp::kCall) {
+          *kills |= 3u;
+        } else if (elem.SetDest().IsReg()) {
+          *kills |= hilo_bit(elem.SetDest().RegNo());
+          if (elem.SetDest().RegNo() == 64 && (elem.SetDest().mode == RtlMachineMode::kDi ||
+                                               elem.SetDest().mode == RtlMachineMode::kTi)) {
+            *kills |= 3u;
+          }
+        }
+      } else if (elem.op == RtlOp::kCall) {
+        scan_reads(elem);
+        *kills |= 3u;
+      } else if (elem.op == RtlOp::kClobber) {
+        if (!elem.children.empty() && elem.children[0].IsReg()) {
+          *kills |= hilo_bit(elem.children[0].RegNo());
+        }
+      } else {
+        scan_reads(elem);
+      }
+    };
+    if (expr.IsParallel()) {
+      for (const RtlExpr& c : expr.children) {
+        process_elem(c);
+      }
+    } else {
+      process_elem(expr);
+    }
+  };
+
+  auto hilo_read_after = [&](size_t start_b, size_t start_i) -> bool {
+    using State = std::tuple<size_t, size_t, uint32_t>;
+    std::queue<State> q;
+    absl::flat_hash_set<State> visited;
+    q.emplace(start_b, start_i, 3u);
+    visited.emplace(start_b, start_i, 3u);
+    while (!q.empty()) {
+      auto [cb, ci, alive] = q.front();
+      q.pop();
+      if (alive == 0u || cb >= cfg->rpo_blocks.size()) {
+        continue;
+      }
+      const auto& cblk = cfg->rpo_blocks[cb];
+      for (size_t idx = ci; idx < cblk.instructions.size() && alive != 0u; ++idx) {
+        auto cp = ParsePatternAndNotes(cblk.instructions[idx]);
+        if (!cp.ok()) {
+          continue;
+        }
+        if (cp->pattern.op == RtlOp::kSequence && cp->pattern.children.size() == 2 &&
+            !cp->pattern.children[0].children.empty() &&
+            !cp->pattern.children[1].children.empty()) {
+          uint32_t r0 = 0, k0 = 0, r1 = 0, k1 = 0;
+          analyze_hilo_expr(cp->pattern.children[0].children[0], &r0, &k0);
+          analyze_hilo_expr(cp->pattern.children[1].children[0], &r1, &k1);
+          if (cp->pattern.children[0].op == RtlOp::kCallInsn) {
+            if ((r1 & alive) != 0u) return true;
+            alive &= ~k1;
+            if ((r0 & alive) != 0u) return true;
+            alive = 0u;
+          } else {
+            if ((r0 & alive) != 0u) return true;
+            alive &= ~k0;
+            if ((r1 & alive) != 0u) return true;
+            alive &= ~k1;
+          }
+        } else {
+          uint32_t rm = 0, km = 0;
+          analyze_hilo_expr(cp->pattern, &rm, &km);
+          if ((rm & alive) != 0u) return true;
+          alive &= ~km;
+        }
+      }
+      if (alive == 0u) {
+        continue;
+      }
+      for (size_t succ : cblk.successors) {
+        if (visited.emplace(succ, 0, alive).second) {
+          q.emplace(succ, 0, alive);
+        }
+      }
+    }
+    return false;
+  };
+
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    std::vector<std::string> upgraded;
+    upgraded.reserve(blk.instructions.size());
+    bool changed = false;
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      if (i + 1 >= blk.instructions.size()) {
+        upgraded.push_back(blk.instructions[i]);
+        continue;
+      }
+      auto p0 = ParsePatternAndNotes(blk.instructions[i]);
+      auto p1 = ParsePatternAndNotes(blk.instructions[i + 1]);
+      int rs = -1;
+      int rt = -1;
+      int rd = -1;
+      if (p0.ok() && p1.ok() && p0->pattern.IsParallel() && p0->pattern.children.size() == 3 &&
+          p0->pattern.children[0].IsSet() && p0->pattern.children[0].SetDest().IsReg() &&
+          p0->pattern.children[0].SetDest().RegNo() == 64 &&
+          p0->pattern.children[0].SetDest().mode == RtlMachineMode::kSi &&
+          p0->pattern.children[0].SetSrc().op == RtlOp::kTruncate &&
+          p0->pattern.children[0].SetSrc().children.size() == 1 &&
+          p0->pattern.children[0].SetSrc().children[0].op == RtlOp::kLshiftrt &&
+          p0->pattern.children[0].SetSrc().children[0].children.size() == 2 &&
+          p0->pattern.children[0].SetSrc().children[0].children[0].op == RtlOp::kMult &&
+          p0->pattern.children[0].SetSrc().children[0].children[0].children.size() == 2) {
+        const RtlExpr& ext0 = p0->pattern.children[0].SetSrc().children[0].children[0].children[0];
+        const RtlExpr& ext1 = p0->pattern.children[0].SetSrc().children[0].children[0].children[1];
+        if (ext0.op == RtlOp::kSignExtend && ext1.op == RtlOp::kSignExtend &&
+            ext0.children.size() == 1 && ext1.children.size() == 1 && ext0.children[0].IsReg() &&
+            ext1.children[0].IsReg() && ext0.children[0].mode == RtlMachineMode::kSi &&
+            ext1.children[0].mode == RtlMachineMode::kSi) {
+          rs = ext0.children[0].RegNo();
+          rt = ext1.children[0].RegNo();
+        }
+      }
+      if (p1.ok() && p1->pattern.IsSet() && p1->pattern.SetDest().IsReg() &&
+          p1->pattern.SetDest().mode == RtlMachineMode::kSi && p1->pattern.SetDest().RegNo() >= 1 &&
+          p1->pattern.SetDest().RegNo() < 32 && p1->pattern.SetSrc().IsReg() &&
+          p1->pattern.SetSrc().RegNo() == 65 && p1->pattern.SetSrc().mode == RtlMachineMode::kSi) {
+        rd = p1->pattern.SetDest().RegNo();
+      }
+      if (rs >= 0 && rs < 32 && rt >= 0 && rt < 32 && rd >= 1 && !hilo_read_after(b, i + 2)) {
+        RtlExpr fused = RtlExpr::MakeParallel({
+            RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kSi, rd),
+                             RtlExpr::MakeBinary(RtlOp::kMult, RtlMachineMode::kSi,
+                                                 RtlExpr::MakeReg(RtlMachineMode::kSi, rs),
+                                                 RtlExpr::MakeReg(RtlMachineMode::kSi, rt))),
+            RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, 64)),
+            RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, 65)),
+            RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, 66)),
+        });
+        std::vector<RtlRegNote> notes = p0->reg_notes;
+        notes.insert(notes.end(), p1->reg_notes.begin(), p1->reg_notes.end());
+        upgraded.push_back(FormatPatternAndNotes(fused, notes, p0->bracketed_notes));
+        changed = true;
+        ++i;
+        continue;
+      }
+      upgraded.push_back(blk.instructions[i]);
+    }
+    if (changed) {
+      blk.instructions = std::move(upgraded);
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+// When a single basic block contains two `(set (reg:SI R) (const_int C))`
+// instructions with the same register `R` and constant `C` without an
+// intervening overwrite of `R`, `jump2` (`jump.c:delete_noop_moves`) only
+// preserved the second load because their destination modes differed (`QI` vs
+// `HI` vs `SI`). Recover the narrower `QI`/`HI` destination mode on each such
+// load when all reads before `R`'s next overwrite in the block use that mode.
+void NarrowDuplicateConstLoadsInBlocks(RtlControlFlowGraph* cfg) {
+  auto is_caller_saved_gpr = [](int r) {
+    return (r >= 1 && r <= 15) || r == 24 || r == 25 || r == 31;
+  };
+  auto analyze_reg_in_expr = [&](const RtlExpr& expr, int target_r,
+                                 std::vector<RtlMachineMode>* read_modes, bool* killed) {
+    auto scan_reads = [&](const RtlExpr& sub) {
+      sub.Visit([&](const RtlExpr& n) {
+        if (n.IsReg() && n.RegNo() == target_r) {
+          read_modes->push_back(n.mode);
+        }
+      });
+    };
+    auto process_elem = [&](const RtlExpr& elem) {
+      if (elem.IsSet()) {
+        if (elem.SetDest().IsMem()) {
+          scan_reads(elem.SetDest());
+        }
+        scan_reads(elem.SetSrc());
+        if (elem.SetSrc().op == RtlOp::kCall && is_caller_saved_gpr(target_r)) {
+          *killed = true;
+        }
+        if (elem.SetDest().IsReg()) {
+          const int dr = elem.SetDest().RegNo();
+          if (dr == target_r ||
+              (elem.SetDest().mode == RtlMachineMode::kDi && dr + 1 == target_r)) {
+            *killed = true;
+          }
+        }
+      } else if (elem.op == RtlOp::kCall) {
+        scan_reads(elem);
+        if (is_caller_saved_gpr(target_r)) {
+          *killed = true;
+        }
+      } else if (elem.op == RtlOp::kClobber) {
+        if (!elem.children.empty() && elem.children[0].IsReg() &&
+            elem.children[0].RegNo() == target_r) {
+          *killed = true;
+        }
+      } else {
+        scan_reads(elem);
+      }
+    };
+    if (expr.op == RtlOp::kSequence && expr.children.size() == 2 &&
+        !expr.children[0].children.empty() && !expr.children[1].children.empty()) {
+      if (expr.children[0].op == RtlOp::kCallInsn) {
+        process_elem(expr.children[1].children[0]);
+        if (!*killed) {
+          process_elem(expr.children[0].children[0]);
+        }
+      } else {
+        process_elem(expr.children[0].children[0]);
+        if (!*killed) {
+          process_elem(expr.children[1].children[0]);
+        }
+      }
+    } else if (expr.IsParallel()) {
+      for (const RtlExpr& c : expr.children) {
+        process_elem(c);
+      }
+    } else {
+      process_elem(expr);
+    }
+  };
+
+  for (RtlBasicBlock& blk : cfg->rpo_blocks) {
+    const size_t n = blk.instructions.size();
+    std::vector<RtlPatternAndNotes> parsed(n);
+    std::vector<bool> ok(n, false);
+    for (size_t i = 0; i < n; ++i) {
+      auto p = ParsePatternAndNotes(blk.instructions[i]);
+      if (p.ok()) {
+        parsed[i] = std::move(*p);
+        ok[i] = true;
+      }
+    }
+    auto is_si_const_load = [&](size_t idx, int* out_r, int64_t* out_c) -> bool {
+      if (!ok[idx] || !parsed[idx].pattern.IsSet() || !parsed[idx].pattern.SetDest().IsReg() ||
+          parsed[idx].pattern.SetDest().mode != RtlMachineMode::kSi ||
+          !parsed[idx].pattern.SetSrc().IsConstInt()) {
+        return false;
+      }
+      const int r = parsed[idx].pattern.SetDest().RegNo();
+      if (r < 1 || r >= 32) {
+        return false;
+      }
+      *out_r = r;
+      *out_c = parsed[idx].pattern.SetSrc().int_val;
+      return true;
+    };
+
+    std::vector<bool> is_dup_candidate(n, false);
+    for (size_t i = 0; i < n; ++i) {
+      int r_i = -1;
+      int64_t c_i = 0;
+      if (!is_si_const_load(i, &r_i, &c_i)) {
+        continue;
+      }
+      for (size_t j = i + 1; j < n; ++j) {
+        if (!ok[j]) {
+          continue;
+        }
+        int r_j = -1;
+        int64_t c_j = 0;
+        if (is_si_const_load(j, &r_j, &c_j) && r_j == r_i && c_j == c_i) {
+          is_dup_candidate[i] = true;
+          is_dup_candidate[j] = true;
+          break;
+        }
+        std::vector<RtlMachineMode> dummy_reads;
+        bool killed = false;
+        analyze_reg_in_expr(parsed[j].pattern, r_i, &dummy_reads, &killed);
+        if (killed) {
+          break;
+        }
+      }
+    }
+
+    bool changed = false;
+    for (size_t i = 0; i < n; ++i) {
+      if (!is_dup_candidate[i]) {
+        continue;
+      }
+      int r_i = -1;
+      int64_t c_i = 0;
+      if (!is_si_const_load(i, &r_i, &c_i)) {
+        continue;
+      }
+      std::vector<RtlMachineMode> read_modes;
+      for (size_t j = i + 1; j < n; ++j) {
+        if (!ok[j]) {
+          continue;
+        }
+        bool killed = false;
+        analyze_reg_in_expr(parsed[j].pattern, r_i, &read_modes, &killed);
+        if (killed) {
+          break;
+        }
+      }
+      if (read_modes.empty()) {
+        continue;
+      }
+      const RtlMachineMode m0 = read_modes[0];
+      const bool all_same = std::all_of(read_modes.begin(), read_modes.end(),
+                                        [&](RtlMachineMode m) { return m == m0; });
+      if (!all_same) {
+        continue;
+      }
+      if ((m0 == RtlMachineMode::kQi && c_i >= -128 && c_i <= 255) ||
+          (m0 == RtlMachineMode::kHi && c_i >= -32768 && c_i <= 65535)) {
+        parsed[i].pattern.MutableSetDest().mode = m0;
+        blk.instructions[i] = parsed[i].ToGccPrintRtlString();
+        changed = true;
+      }
+    }
+    if (changed) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
 // In KMC GCC 2.7.2 `reorg.c:3348-3368` (`fill_slots_from_thread`), a self-loop
 // polling block `[<reg> = <load>(<mem>), <cond_branch_to_self>]` with no memory
 // stores, calls, or modifications to the address registers would always have
@@ -2397,18 +3187,33 @@ void UpgradeCallReturnValues(RtlControlFlowGraph* cfg) {
       if ((pm & 8u) != 0u) fn_exit_f0_df = true;
     }
   }
+  auto is_empty_exit_block = [&](size_t sb) {
+    return sb < cfg->rpo_blocks.size() && cfg->rpo_blocks[sb].instructions.empty() &&
+           cfg->rpo_blocks[sb].successors.empty();
+  };
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
     const auto& blk = cfg->rpo_blocks[b];
-    const bool exits_or_jumps_to_empty_exit =
-        blk.successors.empty() ||
-        (blk.successors.size() == 1 && blk.successors[0] < cfg->rpo_blocks.size() &&
-         cfg->rpo_blocks[blk.successors[0]].instructions.empty() &&
-         cfg->rpo_blocks[blk.successors[0]].successors.empty());
-    if (!exits_or_jumps_to_empty_exit || blk.instructions.empty()) {
+    bool reaches_exit_directly = blk.successors.empty();
+    bool reaches_exit_on_ft = false;
+    bool reaches_exit_on_taken = false;
+    for (size_t sb : blk.successors) {
+      if (is_empty_exit_block(sb)) {
+        if (blk.successors.size() == 1) {
+          reaches_exit_directly = true;
+        } else if (sb == b + 1) {
+          reaches_exit_on_ft = true;
+        } else {
+          reaches_exit_on_taken = true;
+        }
+      }
+    }
+    if ((!reaches_exit_directly && !reaches_exit_on_ft && !reaches_exit_on_taken) ||
+        blk.instructions.empty()) {
       continue;
     }
     uint32_t unread_set = 0u;
-    for (const std::string& s : blk.instructions) {
+    for (size_t idx = 0; idx < blk.instructions.size(); ++idx) {
+      const std::string& s = blk.instructions[idx];
       auto p = ParsePatternAndNotes(s);
       if (!p.ok()) continue;
       if (p->pattern.op == RtlOp::kSequence && p->pattern.children.size() == 2 &&
@@ -2420,8 +3225,22 @@ void UpgradeCallReturnValues(RtlControlFlowGraph* cfg) {
         if (p->pattern.children[0].op == RtlOp::kCallInsn) {
           unread_set = 0u;
         } else {
-          unread_set = ((unread_set & ~(r0 | k0)) | p0);
-          unread_set = ((unread_set & ~(r1 | k1)) | p1);
+          const uint32_t after_head = (unread_set & ~(r0 | k0)) | p0;
+          const uint32_t after_slot = (after_head & ~(r1 | k1)) | p1;
+          if (!reaches_exit_directly && idx + 1 == blk.instructions.size()) {
+            uint32_t exit_unread = 0u;
+            if (reaches_exit_on_taken) {
+              exit_unread |= after_slot;
+            }
+            if (reaches_exit_on_ft) {
+              const bool annulled_target =
+                  p->pattern.children[0].flags.unchanging && p->pattern.children[1].flags.in_struct;
+              exit_unread |= annulled_target ? after_head : after_slot;
+            }
+            unread_set = exit_unread;
+          } else {
+            unread_set = after_slot;
+          }
         }
       } else {
         uint32_t rm = 0, km = 0, pm = 0;
@@ -2634,6 +3453,74 @@ void AttachReferencedConstantPoolEntries(absl::Span<const RtlBasicBlock> blocks,
   }
 }
 
+void NormalizeSingleAdduZeroSet(RtlExpr* expr, bool* changed) {
+  if (!expr->IsSet() || !expr->SetDest().IsReg() || expr->SetDest().mode != RtlMachineMode::kSi) {
+    return;
+  }
+  const int rd = expr->SetDest().RegNo();
+  if (rd <= 0 || rd >= 32) {
+    return;
+  }
+  const RtlExpr& src = expr->SetSrc();
+  if (src.op != RtlOp::kPlus || src.mode != RtlMachineMode::kSi || src.children.size() != 2 ||
+      !src.children[0].IsReg() || src.children[0].mode != RtlMachineMode::kSi ||
+      !src.children[1].IsReg() || src.children[1].mode != RtlMachineMode::kSi) {
+    return;
+  }
+  const int rs = src.children[0].RegNo();
+  const int rt = src.children[1].RegNo();
+  if (rs == 0 && rt == 0) {
+    expr->MutableSetSrc() = RtlExpr::MakeConstInt(0);
+    *changed = true;
+  } else if (rt == 0 && rs > 0 && rs < 32) {
+    RtlExpr replacement = src.children[0];
+    expr->MutableSetSrc() = std::move(replacement);
+    *changed = true;
+  } else if (rs == 0 && rt > 0 && rt < 32) {
+    RtlExpr replacement = src.children[1];
+    expr->MutableSetSrc() = std::move(replacement);
+    *changed = true;
+  }
+}
+
+void NormalizeMips12AdduZeroMoves(RtlControlFlowGraph* cfg) {
+  auto normalize_pat_str = [](std::string* pat_str) -> bool {
+    auto parsed = ParsePatternAndNotes(*pat_str);
+    if (!parsed.ok()) {
+      return false;
+    }
+    bool changed = false;
+    if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
+      if (!parsed->pattern.children[0].children.empty()) {
+        NormalizeSingleAdduZeroSet(&parsed->pattern.children[0].children[0], &changed);
+      }
+      if (!parsed->pattern.children[1].children.empty()) {
+        NormalizeSingleAdduZeroSet(&parsed->pattern.children[1].children[0], &changed);
+      }
+    } else {
+      NormalizeSingleAdduZeroSet(&parsed->pattern, &changed);
+    }
+    if (changed) {
+      *pat_str = parsed->ToGccPrintRtlString();
+    }
+    return changed;
+  };
+  if (cfg->sideband.epilogue_delay_pattern.has_value()) {
+    normalize_pat_str(&*cfg->sideband.epilogue_delay_pattern);
+  }
+  for (auto& blk : cfg->rpo_blocks) {
+    bool blk_changed = false;
+    for (std::string& pat : blk.instructions) {
+      if (normalize_pat_str(&pat)) {
+        blk_changed = true;
+      }
+    }
+    if (blk_changed) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
@@ -2720,6 +3607,7 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     }
 
     std::string combined_line = line;
+    std::string precomputed_pat;
     if (i + 1 < asm_lines.size() &&
         (absl::StartsWith(line, "mtc1\t") || absl::StartsWith(line, "mtc1 ") ||
          absl::StartsWith(line, "l.s\t") || absl::StartsWith(line, "l.s ")) &&
@@ -2729,6 +3617,155 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
          absl::StartsWith(asm_lines[i + 1], "cvt.d.w "))) {
       combined_line = absl::StrCat(line, "\n", asm_lines[i + 1]);
       ++i;
+    } else if (i + 1 < asm_lines.size() &&
+               (absl::StartsWith(line, "trunc.w.s\t") || absl::StartsWith(line, "trunc.w.s ") ||
+                absl::StartsWith(line, "trunc.w.d\t") || absl::StartsWith(line, "trunc.w.d "))) {
+      if (std::string trunc_w = InvertTwoLineTruncW(line, asm_lines[i + 1]); !trunc_w.empty()) {
+        precomputed_pat = std::move(trunc_w);
+        ++i;
+      }
+    } else if (i + 1 < asm_lines.size() &&
+               (absl::StartsWith(line, "li\t") || absl::StartsWith(line, "li ")) &&
+               (absl::StartsWith(asm_lines[i + 1], "li\t") ||
+                absl::StartsWith(asm_lines[i + 1], "li "))) {
+      if (std::string di_li =
+              InvertTwoLineDiConstLoad(line, asm_lines[i + 1], /*require_nonneg_decimal=*/true);
+          !di_li.empty()) {
+        precomputed_pat = std::move(di_li);
+        ++i;
+      }
+    } else if ([&]() -> bool {
+                 if (i + 2 >= asm_lines.size()) {
+                   return false;
+                 }
+                 auto parse_zero_clear_dest = [](std::string_view ln) -> int {
+                   if (absl::StartsWith(ln, "move\t") || absl::StartsWith(ln, "move ")) {
+                     const auto ops = SplitOperands(ln.substr(4));
+                     if (ops.size() == 2 && ParseGprNumber(ops[1]) == 0) {
+                       return ParseGprNumber(ops[0]);
+                     }
+                   } else if (absl::StartsWith(ln, "addu\t") || absl::StartsWith(ln, "addu ") ||
+                              absl::StartsWith(ln, "or\t") || absl::StartsWith(ln, "or ")) {
+                     const size_t sp = ln.find_first_of(" \t");
+                     const auto ops = SplitOperands(ln.substr(sp));
+                     if (ops.size() == 3 && ParseGprNumber(ops[1]) == 0 &&
+                         ParseGprNumber(ops[2]) == 0) {
+                       return ParseGprNumber(ops[0]);
+                     }
+                   }
+                   return -1;
+                 };
+                 const int rd0 = parse_zero_clear_dest(line);
+                 const int rd1 = parse_zero_clear_dest(asm_lines[i + 1]);
+                 if (rd0 < 2 || (rd0 % 2) != 0 || rd1 != rd0 + 1) {
+                   return false;
+                 }
+                 const std::string_view jln = asm_lines[i + 2];
+                 bool unfilled_jump = absl::StartsWith(jln, "j\t") || absl::StartsWith(jln, "j ") ||
+                                      absl::StartsWith(jln, "b\t") || absl::StartsWith(jln, "b ");
+                 if (!unfilled_jump && (jln == ".set\tnoreorder" || jln == ".set noreorder")) {
+                   size_t k = i + 3;
+                   if (k < asm_lines.size() &&
+                       (asm_lines[k] == ".set\tnomacro" || asm_lines[k] == ".set nomacro")) {
+                     ++k;
+                   }
+                   if (k + 1 < asm_lines.size() &&
+                       (absl::StartsWith(asm_lines[k], "j\t") ||
+                        absl::StartsWith(asm_lines[k], "j ") ||
+                        absl::StartsWith(asm_lines[k], "b\t") ||
+                        absl::StartsWith(asm_lines[k], "b ")) &&
+                       asm_lines[k + 1] == "nop") {
+                     unfilled_jump = true;
+                   }
+                 }
+                 if (!unfilled_jump) {
+                   return false;
+                 }
+                 precomputed_pat =
+                     absl::StrFormat("(set %s (const_int 0))", FormatGprRtl(rd0, "DI"));
+                 return true;
+               }()) {
+      ++i;
+    } else if ((absl::StartsWith(line, "sll\t") || absl::StartsWith(line, "sll ")) &&
+               absl::EndsWith(line, ",26") && i + 13 < asm_lines.size()) {
+      const size_t bgez_idx =
+          (asm_lines[i + 1] == ".set\tnoreorder" || asm_lines[i + 1] == ".set noreorder") ? (i + 2)
+                                                                                          : (i + 1);
+      if (bgez_idx < asm_lines.size() && (absl::StartsWith(asm_lines[bgez_idx], "bgez\t") ||
+                                          absl::StartsWith(asm_lines[bgez_idx], "bgez "))) {
+        auto strip_lbl_prefix = [](std::string_view s) {
+          if (absl::StartsWith(s, "$L") || absl::StartsWith(s, ".L")) {
+            s.remove_prefix(1);
+          }
+          return s;
+        };
+        auto label_ref_outside_span = [&](size_t span_begin, size_t span_end,
+                                          std::string_view raw_lbl) {
+          const std::string_view core_lbl = strip_lbl_prefix(raw_lbl);
+          if (core_lbl.empty()) {
+            return false;
+          }
+          for (const Stage0ResolvedJumpTable& jt : jump_tables) {
+            for (const std::string& t : jt.target_labels) {
+              if (strip_lbl_prefix(t) == core_lbl) {
+                return true;
+              }
+            }
+          }
+          for (size_t k = 0; k < asm_lines.size(); ++k) {
+            if (k >= span_begin && k <= span_end) {
+              continue;
+            }
+            const std::string_view ln = asm_lines[k];
+            if (absl::EndsWith(ln, ":")) {
+              continue;
+            }
+            for (size_t pos = 0; (pos = ln.find(core_lbl, pos)) != std::string_view::npos;
+                 pos += core_lbl.size()) {
+              if (pos == 0 || (ln[pos - 1] != '$' && ln[pos - 1] != '.')) {
+                continue;
+              }
+              const size_t after = pos + core_lbl.size();
+              if (after == ln.size() ||
+                  (!absl::ascii_isalnum(static_cast<unsigned char>(ln[after])) &&
+                   ln[after] != '_')) {
+                return true;
+              }
+            }
+          }
+          return false;
+        };
+
+        const size_t max_end = std::min<size_t>(asm_lines.size() - 1, i + 22);
+        for (size_t end_idx = i + 13; end_idx <= max_end; ++end_idx) {
+          if (!absl::EndsWith(asm_lines[end_idx], ":")) {
+            continue;
+          }
+          const std::string cand = absl::StrJoin(asm_lines.subspan(i, end_idx - i + 1), "\n");
+          std::string di_shift = InvertMips1DiShift(cand);
+          if (di_shift.empty()) {
+            continue;
+          }
+          if (asm_lines[end_idx] == "3:") {
+            precomputed_pat = std::move(di_shift);
+            i = end_idx;
+            break;
+          }
+          std::vector<std::string_view> span_labels;
+          for (size_t k = i; k <= end_idx; ++k) {
+            if (absl::EndsWith(asm_lines[k], ":")) {
+              span_labels.emplace_back(asm_lines[k].data(), asm_lines[k].size() - 1);
+            }
+          }
+          if (span_labels.size() == 3 && !label_ref_outside_span(i, end_idx, span_labels[0]) &&
+              !label_ref_outside_span(i, end_idx, span_labels[1])) {
+            precomputed_pat = std::move(di_shift);
+            const bool c_ref_outside = label_ref_outside_span(i, end_idx, span_labels[2]);
+            i = c_ref_outside ? (end_idx - 1) : end_idx;
+            break;
+          }
+        }
+      }
     } else if (absl::StartsWith(line, "lwl\t") || absl::StartsWith(line, "lwl ")) {
       const size_t max_len = std::min<size_t>(16, asm_lines.size() - i);
       for (size_t len = max_len; len >= 3; --len) {
@@ -2741,7 +3778,8 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       }
     }
 
-    const std::string pat = InvertFinalScanInsn(combined_line);
+    const std::string pat =
+        !precomputed_pat.empty() ? std::move(precomputed_pat) : InvertFinalScanInsn(combined_line);
     if (pat.empty()) {
       return {};
     }
@@ -2764,15 +3802,26 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
 
   AttachReferencedConstantPoolEntries(blocks, constant_pool, &cfg.sideband);
 
+  absl::flat_hash_set<std::string> jt_tokens;
+  for (const Stage0ResolvedJumpTable& jt : jump_tables) {
+    if (!jt.table_label_token.empty()) {
+      jt_tokens.insert(jt.table_label_token);
+    }
+  }
+
   absl::flat_hash_set<std::string> pool_labels;
   for (const Stage0ConstantPoolEntry& cp : cfg.sideband.constant_pool) {
     pool_labels.insert(cp.label_name);
   }
-  if (!pool_labels.empty() && cfg.sideband.epilogue_delay_pattern.has_value()) {
+  if (cfg.sideband.epilogue_delay_pattern.has_value()) {
     auto delay_parsed = ParsePatternAndNotes(*cfg.sideband.epilogue_delay_pattern);
     if (delay_parsed.ok()) {
       bool modified_delay = false;
-      MarkConstantPoolRefsInAst(&delay_parsed->pattern, pool_labels, &modified_delay);
+      RewriteDataLabelRefsInAst(&delay_parsed->pattern, label_to_block, jt_tokens,
+                                /*allow_direct_label_ref=*/true, &modified_delay);
+      if (!pool_labels.empty()) {
+        MarkConstantPoolRefsInAst(&delay_parsed->pattern, pool_labels, &modified_delay);
+      }
       if (modified_delay) {
         cfg.sideband.epilogue_delay_pattern = delay_parsed->ToGccPrintRtlString();
       }
@@ -2791,7 +3840,8 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       const bool allow_direct =
           (insn_idx + 1 < blocks[b].instructions.size()) || !is_jump_or_branch_insn;
       bool modified_insn = false;
-      RewriteDataLabelRefsInAst(&parsed->pattern, label_to_block, allow_direct, &modified_insn);
+      RewriteDataLabelRefsInAst(&parsed->pattern, label_to_block, jt_tokens, allow_direct,
+                                &modified_insn);
       if (!pool_labels.empty()) {
         MarkConstantPoolRefsInAst(&parsed->pattern, pool_labels, &modified_insn);
       }
@@ -2884,6 +3934,9 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
 
   cfg.rpo_blocks = std::move(blocks);
 
+  if (profile != nullptr) {
+    NormalizeMips12AdduZeroMoves(&cfg);
+  }
   UpgradeCallReturnValues(&cfg);
   if (profile != nullptr) {
     const bool has_non_empty_frame =
@@ -2906,8 +3959,12 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
         }
       }
     }
+    if (IsMipsCpuR4000(*profile)) {
+      UpgradeR4000Mulsi3Insns(&cfg);
+    }
     if (profile->optimize_level > 0) {
       UpgradeDivModInsnsForOptimize(&cfg);
+      NarrowDuplicateConstLoadsInBlocks(&cfg);
       MarkSelfLoopSpinWaitLoadsVolatile(&cfg);
     }
     ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);

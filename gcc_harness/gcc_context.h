@@ -179,6 +179,8 @@ extern int reload_completed;
 extern void* current_function_decl;
 extern rtx_def* current_function_return_rtx;
 extern FILE* asm_out_file;
+extern FILE* asm_out_data_file;
+extern FILE* asm_out_text_file;
 
 rtx_def* rtx_alloc(int code);
 rtvec_def* rtvec_alloc(int n);
@@ -339,6 +341,10 @@ class GccContext {
   Rtx BuildInsnFromContainerOrPattern(std::string_view item_text, bool emit_to_chain);
 
   std::string current_func_name_;
+  RtlPassKind active_pass_ = RtlPassKind::kRtl;
+  bool active_is_variadic_ = false;
+  bool active_returns_aggregate_in_memory_ = false;
+  std::vector<MipsPrologueArgSpec> active_prologue_args_;
   absl::flat_hash_map<std::string, Rtx> label_map_;
   absl::flat_hash_map<std::string, void*> decl_map_;
   absl::flat_hash_map<std::string, void*> c_label_decl_map_;

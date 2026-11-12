@@ -253,5 +253,28 @@ TEST(RtlSexprUtilsTest, ConsecutiveCodeLabelsCoalesceExceptAcrossLoopNotesOrJump
             "(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 1)) (label_ref L2) (pc)))");
 }
 
+TEST(RtlSexprUtilsTest, CanonicalizesInsnListUidsAndMaxPseudoIgnoresTrailingNotes) {
+  constexpr std::string_view kRtlDump = R"(
+;; Function libcall_uid_test
+
+(insn 14 12 15 (clobber (reg:DI 73)) -1 (nil)
+    (insn_list:REG_LIBCALL 16 (nil)))
+
+(insn 16 15 17 (set (reg:DI 73) (reg:DI 2 v0)) -1 (nil)
+    (insn_list:REG_RETVAL 14 (expr_list:REG_EQUAL (fix:DI (reg:DF 80)) (nil))))
+)";
+  const RtlPassDump dump = ParseRtlPassDump(RtlPassKind::kRtl, kRtlDump);
+  ASSERT_EQ(dump.Functions().size(), 1u);
+  const RtlControlFlowGraph cfg = BuildCanonicalCfgFromRtlDump(dump.Functions()[0]);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 1u);
+  ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 2u);
+  EXPECT_EQ(cfg.rpo_blocks[0].instructions[0],
+            "(clobber (reg:DI 73)) (insn_list:REG_LIBCALL (nil))");
+  EXPECT_EQ(cfg.rpo_blocks[0].instructions[1],
+            "(set (reg:DI 73) (reg:DI 2 v0)) "
+            "(insn_list:REG_RETVAL (expr_list:REG_EQUAL (fix:DI (reg:DF 80)) (nil)))");
+  EXPECT_EQ(MaxPseudoRegInCfg(cfg), 73);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

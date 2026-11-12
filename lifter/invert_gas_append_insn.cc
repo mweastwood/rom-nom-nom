@@ -14,6 +14,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
+#include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "lifter/invert_gas_mips_ip.h"
 
@@ -51,11 +52,16 @@ constexpr uint32_t kInsnStoreMemory = 0x02000000u;
 constexpr uint32_t kInsnTrap = 0x04000000u;
 
 // Instructions whose `pinfo` causes `append_insn` / `mips_emit_delays` in
-// `.set reorder` mode (`mips_isa = 3`, `interlocks = 0`) to insert automatic
-// hazard `nop`s when followed by a dependent instruction, label, `.set
-// noreorder`, or end of assembly (`tc-mips.c:1310-1425, 1768-1816`).
+// `.set reorder` mode (`interlocks = 0`) to insert automatic hazard `nop`s when
+// followed by a dependent instruction, label, `.set noreorder`, or end of
+// assembly (`tc-mips.c:1295-1425, 1768-1816`).
 constexpr uint32_t kReorderHazardPinfoMask =
     kInsnLoadCoprocDelay | kInsnCoprocMoveDelay | kInsnWriteCondCode | kInsnReadLo | kInsnReadHi;
+
+uint32_t ReorderHazardPinfoMask(int mips_isa) {
+  return kReorderHazardPinfoMask |
+         (mips_isa < 2 ? (kInsnLoadMemoryDelay | kInsnCoprocMemoryDelay) : 0u);
+}
 
 bool IsPcRelativeBranchWord(uint32_t w) {
   const uint32_t op = (w >> 26) & 0x3fu;
@@ -81,19 +87,15 @@ bool InsnUsesGpr(uint32_t w, uint32_t pinfo, uint32_t reg) {
   return false;
 }
 
-// Mirrors `tc-mips.c:1208-1251`: `insn_uses_reg(ip, reg, /*fpr=*/1)` (`mips_isa = 3`).
+// Mirrors `tc-mips.c:1217-1234`: `insn_uses_reg(ip, reg, /*fpr=*/1)`.
 bool InsnUsesFpr(uint32_t w, uint32_t pinfo, uint32_t reg) {
   const uint32_t reg_even = reg & ~1u;
-  const uint32_t fr = ((w >> 21) & 0x1fu) & ~1u;
-  const uint32_t ft = ((w >> 16) & 0x1fu) & ~1u;
-  const uint32_t fs = ((w >> 11) & 0x1fu) & ~1u;
+  const uint32_t ft = (w >> 16) & 0x1fu;
+  const uint32_t fs = (w >> 11) & 0x1fu;
   if ((pinfo & kInsnReadFprS) != 0u && fs == reg_even) {
     return true;
   }
   if ((pinfo & kInsnReadFprT) != 0u && ft == reg_even) {
-    return true;
-  }
-  if ((pinfo & kInsnReadFprR) != 0u && fr == reg_even) {
     return true;
   }
   return false;
@@ -101,10 +103,10 @@ bool InsnUsesFpr(uint32_t w, uint32_t pinfo, uint32_t reg) {
 
 // Mirrors `tc-mips.c:1768-1816`: number of `nop` words emitted by
 // `mips_emit_delays()` when turning on `.set noreorder` or defining a label.
-size_t MipsEmitDelaysNops(uint32_t prev_w, uint32_t prev_prev_w) {
+size_t MipsEmitDelaysNops(uint32_t prev_w, uint32_t prev_prev_w, int mips_isa = 3) {
   const uint32_t prev_pinfo = GetInsnPinfo(prev_w);
   const uint32_t prev_prev_pinfo = GetInsnPinfo(prev_prev_w);
-  if ((prev_pinfo & kReorderHazardPinfoMask) != 0u) {
+  if ((prev_pinfo & ReorderHazardPinfoMask(mips_isa)) != 0u) {
     if ((prev_pinfo & (kInsnWriteCondCode | kInsnReadLo | kInsnReadHi)) != 0u) {
       return 2;
     }
@@ -118,18 +120,21 @@ size_t MipsEmitDelaysNops(uint32_t prev_w, uint32_t prev_prev_w) {
 
 // Mirrors `tc-mips.c:1295-1425`: number of `nop` words emitted by
 // `append_insn` before instruction `cur_w` in `.set reorder` mode
-// (`mips_isa = 3`, `interlocks = 0`, `mips_optimize = 2`).
-size_t AppendInsnHazardNops(uint32_t prev_w, uint32_t prev_prev_w, uint32_t cur_w) {
+// (`interlocks = 0`, `mips_optimize = 2`).
+size_t AppendInsnHazardNops(uint32_t prev_w, uint32_t prev_prev_w, uint32_t cur_w,
+                            int mips_isa = 3) {
   const uint32_t prev_pinfo = GetInsnPinfo(prev_w);
   const uint32_t prev_prev_pinfo = GetInsnPinfo(prev_prev_w);
   const uint32_t cur_pinfo = GetInsnPinfo(cur_w);
   size_t nops = 0;
 
-  if ((prev_pinfo & kInsnLoadCoprocDelay) != 0u) {
+  if ((prev_pinfo & kInsnLoadCoprocDelay) != 0u ||
+      (mips_isa < 2 && (prev_pinfo & kInsnLoadMemoryDelay) != 0u)) {
     if (InsnUsesGpr(cur_w, cur_pinfo, (prev_w >> 16) & 0x1fu)) {
       ++nops;
     }
-  } else if ((prev_pinfo & kInsnCoprocMoveDelay) != 0u) {
+  } else if ((prev_pinfo & kInsnCoprocMoveDelay) != 0u ||
+             (mips_isa < 2 && (prev_pinfo & kInsnCoprocMemoryDelay) != 0u)) {
     if ((prev_pinfo & kInsnWriteFprT) != 0u) {
       if (InsnUsesFpr(cur_w, cur_pinfo, (prev_w >> 16) & 0x1fu)) {
         ++nops;
@@ -172,11 +177,12 @@ size_t AppendInsnHazardNops(uint32_t prev_w, uint32_t prev_prev_w, uint32_t cur_
 }
 
 // Mirrors `tc-mips.c:1530-1665`: returns true iff `append_insn` in `.set
-// reorder` mode (`mips_optimize >= 2`, `mips_isa = 3`, `interlocks = 0`,
-// `mips_pic = NO_PIC`, `prev_prev_insn_unreordered = 0`, `insn_label = NULL`)
-// will swap a preceding instruction `delay_w` into the delay slot of
+// reorder` mode (`mips_optimize >= 2`, `interlocks = 0`, `mips_pic = NO_PIC`,
+// `prev_prev_insn_unreordered = 0`, `insn_label = NULL`) will swap a preceding
+// instruction `delay_w` (preceded by `prev_prev_w`) into the delay slot of
 // `branch_w`.
-bool CanSwapBranchWithInsn(uint32_t branch_w, uint32_t delay_w) {
+bool CanSwapBranchWithInsn(uint32_t branch_w, uint32_t delay_w, uint32_t prev_prev_w = 0u,
+                           int mips_isa = 3) {
   const uint32_t branch_pinfo = GetInsnPinfo(branch_w);
   const uint32_t delay_pinfo = GetInsnPinfo(delay_w);
 
@@ -187,10 +193,11 @@ bool CanSwapBranchWithInsn(uint32_t branch_w, uint32_t delay_w) {
     return false;
   }
 
-  constexpr uint32_t kUnswappableDelayMask =
+  const uint32_t unswappable_delay_mask =
       kInsnLoadCoprocDelay | kInsnCoprocMoveDelay | kInsnWriteCondCode | kInsnReadLo | kInsnReadHi |
-      kInsnUncondBranchDelay | kInsnCondBranchDelay | kInsnCondBranchLikely | kInsnTrap;
-  if ((delay_pinfo & kUnswappableDelayMask) != 0u) {
+      kInsnUncondBranchDelay | kInsnCondBranchDelay | kInsnCondBranchLikely | kInsnTrap |
+      (mips_isa < 2 ? (kInsnLoadMemoryDelay | kInsnCoprocMemoryDelay) : 0u);
+  if ((delay_pinfo & unswappable_delay_mask) != 0u) {
     return false;
   }
 
@@ -215,6 +222,15 @@ bool CanSwapBranchWithInsn(uint32_t branch_w, uint32_t delay_w) {
     if (((delay_pinfo & kInsnWriteGprT) != 0u && delay_rt == 31u) ||
         ((delay_pinfo & kInsnWriteGprD) != 0u && delay_rd == 31u) ||
         InsnUsesGpr(delay_w, delay_pinfo, 31u)) {
+      return false;
+    }
+  }
+
+  if (prev_prev_w != 0u) {
+    const uint32_t prev_prev_pinfo = GetInsnPinfo(prev_prev_w);
+    if (((prev_prev_pinfo & kInsnLoadCoprocDelay) != 0u ||
+         (mips_isa < 2 && (prev_prev_pinfo & kInsnLoadMemoryDelay) != 0u)) &&
+        InsnUsesGpr(branch_w, branch_pinfo, (prev_prev_w >> 16) & 0x1fu)) {
       return false;
     }
   }
@@ -543,7 +559,8 @@ std::vector<std::string> InvertGasAppendInsnInternal(
     absl::Span<const uint32_t> words_x, uint32_t linked_base_vram,
     absl::Span<const size_t> extra_label_indices,
     const absl::flat_hash_set<size_t>& external_j_indices,
-    absl::flat_hash_map<size_t, std::string>* out_target_labels, bool gas_swaps_branches = true) {
+    absl::flat_hash_map<size_t, std::string>* out_target_labels, bool gas_swaps_branches = true,
+    int mips_isa = 3) {
   if (words_x.empty()) {
     return {};
   }
@@ -616,13 +633,15 @@ std::vector<std::string> InvertGasAppendInsnInternal(
   }
 
   // Pass 2: Emit pre-`append_insn` assembly lines, tracking `prev_insn_valid`,
-  // `prev_insn_is_delay_slot`, and `prev_insn_word` across `.set reorder`
-  // segments.
+  // `prev_insn_is_delay_slot`, `prev_insn_word`, and `prev_prev_insn_word`
+  // across `.set reorder` segments.
+  const uint32_t hazard_pinfo_mask = ReorderHazardPinfoMask(mips_isa);
   std::vector<std::string> lines;
   lines.reserve(words_x.size() + target_labels.size());
   bool prev_insn_valid = false;
   bool prev_insn_is_delay_slot = false;
   uint32_t prev_insn_word = 0u;
+  uint32_t prev_prev_insn_word = 0u;
 
   for (size_t i = 0; i < words_x.size();) {
     const bool has_label_at_i = target_labels.contains(i);
@@ -632,10 +651,13 @@ std::vector<std::string> InvertGasAppendInsnInternal(
       // and `mips_define_label()` (`insn_label != NULL`).
       prev_insn_valid = false;
       prev_insn_is_delay_slot = false;
+      prev_insn_word = 0u;
+      prev_prev_insn_word = 0u;
     }
 
     const uint32_t w = words_x[i];
     if (IsBranchOrJumpWord(w)) {
+      const uint32_t branch_pinfo = GetInsnPinfo(w);
       const uint32_t delay_w = words_x[i + 1];
       std::string jump_line = base_disasm[i];
       const uint32_t op = (w >> 26) & 0x3fu;
@@ -660,14 +682,20 @@ std::vector<std::string> InvertGasAppendInsnInternal(
       const bool has_label_at_delay = target_labels.contains(i + 1);
       if (delay_w != 0x00000000u) {
         if (gas_swaps_branches && !has_label_at_i && !has_label_at_delay &&
-            CanSwapBranchWithInsn(w, delay_w)) {
+            CanSwapBranchWithInsn(w, delay_w, prev_insn_valid ? prev_insn_word : 0u, mips_isa)) {
           // Emit `[delay_insn, jump_insn]` in `.set reorder` mode so
           // `append_insn` swaps `delay_insn` into `jump_insn`'s delay slot.
           lines.push_back(base_disasm[i + 1]);
           lines.push_back(std::move(jump_line));
           prev_insn_valid = true;
           prev_insn_is_delay_slot = true;
-          prev_insn_word = delay_w;
+          if ((branch_pinfo & kInsnUncondBranchDelay) != 0u) {
+            prev_insn_word = 0u;
+            prev_prev_insn_word = 0u;
+          } else {
+            prev_prev_insn_word = w;
+            prev_insn_word = delay_w;
+          }
         } else {
           // Delay slot was filled by GCC (`dbr_schedule`) with an instruction
           // that `append_insn` would not swap (or across a label); preserve in
@@ -681,16 +709,18 @@ std::vector<std::string> InvertGasAppendInsnInternal(
           lines.push_back(".set\treorder");
           prev_insn_valid = false;
           prev_insn_is_delay_slot = false;
+          prev_insn_word = 0u;
+          prev_prev_insn_word = 0u;
         }
       } else {
         // Delay slot is `nop` (`0x00000000`). Check if emitting bare
         // `jump_line` in `.set reorder` mode would cause `append_insn` to
         // erroneously swap the preceding instruction into this branch's delay
-        // slot.
-        const bool prev_would_swap = gas_swaps_branches && prev_insn_valid &&
-                                     !prev_insn_is_delay_slot && !has_label_at_i &&
-                                     CanSwapBranchWithInsn(w, prev_insn_word);
-        if (has_label_at_delay || prev_would_swap) {
+        // slot (or leave `prev_insn_is_delay_slot` unset after branch-likely).
+        const bool prev_would_swap =
+            gas_swaps_branches && prev_insn_valid && !prev_insn_is_delay_slot && !has_label_at_i &&
+            CanSwapBranchWithInsn(w, prev_insn_word, prev_prev_insn_word, mips_isa);
+        if (has_label_at_delay || prev_would_swap || (branch_pinfo & kInsnCondBranchLikely) != 0u) {
           lines.push_back(".set\tnoreorder");
           lines.push_back(std::move(jump_line));
           if (has_label_at_delay) {
@@ -700,11 +730,19 @@ std::vector<std::string> InvertGasAppendInsnInternal(
           lines.push_back(".set\treorder");
           prev_insn_valid = false;
           prev_insn_is_delay_slot = false;
+          prev_insn_word = 0u;
+          prev_prev_insn_word = 0u;
         } else {
           lines.push_back(std::move(jump_line));
           prev_insn_valid = true;
           prev_insn_is_delay_slot = true;
-          prev_insn_word = 0x00000000u;
+          if ((branch_pinfo & kInsnUncondBranchDelay) != 0u) {
+            prev_insn_word = 0u;
+            prev_prev_insn_word = 0u;
+          } else {
+            prev_prev_insn_word = w;
+            prev_insn_word = 0x00000000u;
+          }
         }
       }
       i += 2;
@@ -712,7 +750,7 @@ std::vector<std::string> InvertGasAppendInsnInternal(
     }
 
     const uint32_t pinfo = GetInsnPinfo(w);
-    if ((pinfo & kReorderHazardPinfoMask) != 0u) {
+    if ((pinfo & hazard_pinfo_mask) != 0u) {
       // Wrap hazard-producing instructions in `.set noreorder` / `.set reorder`
       // so `append_insn` and `mips_emit_delays()` do not inject extra `nop`
       // words beyond those explicitly present in `words_x`.
@@ -721,11 +759,14 @@ std::vector<std::string> InvertGasAppendInsnInternal(
       lines.push_back(".set\treorder");
       prev_insn_valid = false;
       prev_insn_is_delay_slot = false;
+      prev_insn_word = 0u;
+      prev_prev_insn_word = 0u;
     } else {
       lines.push_back(base_disasm[i]);
+      prev_prev_insn_word = prev_insn_valid ? prev_insn_word : 0u;
+      prev_insn_word = w;
       prev_insn_valid = true;
       prev_insn_is_delay_slot = false;
-      prev_insn_word = w;
     }
     ++i;
   }
@@ -741,6 +782,18 @@ std::vector<std::string> InvertGasAppendInsnInternal(
 std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) {
   return InvertGasAppendInsnInternal(words_x, /*linked_base_vram=*/0u, /*extra_label_indices=*/{},
                                      /*external_j_indices=*/{}, /*out_target_labels=*/nullptr);
+}
+
+std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x,
+                                             absl::Span<const std::string> c_flags) {
+  // Bare assembly lines verified at the `kGasAppendInsn` subfunction boundary
+  // are re-assembled by `RunGasMdAssembleWithMetadata` with `mips_optimize = 2`
+  // (`gas_swaps_branches = true`), while `.ent` full-function assembly in
+  // `InvertGasAppendInsnToItems` uses `DoesGasSwapBranchesForProfile(profile)`.
+  const int mips_isa = ParsedCompilerFlags::Parse(c_flags).mips_isa;
+  return InvertGasAppendInsnInternal(words_x, /*linked_base_vram=*/0u, /*extra_label_indices=*/{},
+                                     /*external_j_indices=*/{}, /*out_target_labels=*/nullptr,
+                                     /*gas_swaps_branches=*/true, mips_isa);
 }
 
 bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
@@ -879,19 +932,21 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
   return w_idx == words.size();
 }
 
-void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
+void StripGasInsertedHazardNops(std::vector<AsmItem>* items, int mips_isa) {
   std::vector<AsmItem> out;
   out.reserve(items->size());
 
+  const uint32_t hazard_pinfo_mask = ReorderHazardPinfoMask(mips_isa);
   uint32_t prev_w = 0u;
   uint32_t prev_prev_w = 0u;
+  bool prev_w_is_delay_slot = false;
 
   for (size_t i = 0; i < items->size();) {
     // Check if consecutive `nop` (`0x00000000u`) items starting at `i` were
     // automatically inserted by `append_insn` or `mips_emit_delays()` due to
     // `(prev_w, prev_prev_w)`.
-    if (((GetInsnPinfo(prev_w) & kReorderHazardPinfoMask) != 0u ||
-         (GetInsnPinfo(prev_prev_w) & kReorderHazardPinfoMask) != 0u) &&
+    if (((GetInsnPinfo(prev_w) & hazard_pinfo_mask) != 0u ||
+         (GetInsnPinfo(prev_prev_w) & hazard_pinfo_mask) != 0u) &&
         (*items)[i].kind == AsmItemKind::kReorderInsn && (*items)[i].word == 0x00000000u) {
       size_t nop_count = 0;
       while (i + nop_count < items->size() &&
@@ -902,10 +957,10 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
       const size_t next_idx = i + nop_count;
       size_t expected_nops = 0;
       if (next_idx >= items->size() || (*items)[next_idx].kind != AsmItemKind::kReorderInsn) {
-        expected_nops = MipsEmitDelaysNops(prev_w, prev_prev_w);
+        expected_nops = MipsEmitDelaysNops(prev_w, prev_prev_w, mips_isa);
       } else {
         const AsmItem& next_item = (*items)[next_idx];
-        expected_nops = AppendInsnHazardNops(prev_w, prev_prev_w, next_item.word);
+        expected_nops = AppendInsnHazardNops(prev_w, prev_prev_w, next_item.word, mips_isa);
         // If `next_item` was un-swapped from `[branch_w, delay_w]` and
         // `AppendInsnHazardNops` does not account for `nop_count` whereas
         // `MipsEmitDelaysNops` does, `[branch_w, delay_w]` was emitted as a
@@ -913,7 +968,7 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
         if (expected_nops != nop_count && next_item.unswapped_from_branch &&
             next_idx + 1 < items->size() && (*items)[next_idx + 1].unswapped_from_branch &&
             IsBranchOrJumpWord((*items)[next_idx + 1].word)) {
-          const size_t emit_delays_nops = MipsEmitDelaysNops(prev_w, prev_prev_w);
+          const size_t emit_delays_nops = MipsEmitDelaysNops(prev_w, prev_prev_w, mips_isa);
           if (emit_delays_nops == nop_count) {
             AsmItem seq_item;
             seq_item.kind = AsmItemKind::kNoreorderBranchSeq;
@@ -930,13 +985,13 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
         }
         // Under `-Wa,-g` (`mips_optimize == 0`), `tc-mips.c:append_insn`
         // unconditionally emits `MipsEmitDelaysNops(prev_w, prev_prev_w)`
-        // hazard `nop`s after coprocessor/HI/LO hazard instructions even when
-        // `next_item` does not read the hazard register. Since `RunFinal()`
-        // never emits explicit `nop`s after hazard instructions in `.set reorder`
-        // mode, any `nop_count <= MipsEmitDelaysNops(prev_w, prev_prev_w)` was
+        // hazard `nop`s after coprocessor/HI/LO/MIPS-I-load hazard instructions
+        // even when `next_item` does not read the hazard register. Since
+        // `RunFinal()` never emits explicit `nop`s after hazard instructions in
+        // `.set reorder` mode, any `nop_count <= MipsEmitDelaysNops(...)` was
         // inserted by GAS.
         if (expected_nops == 0) {
-          const size_t max_emit_nops = MipsEmitDelaysNops(prev_w, prev_prev_w);
+          const size_t max_emit_nops = MipsEmitDelaysNops(prev_w, prev_prev_w, mips_isa);
           if (nop_count <= max_emit_nops) {
             expected_nops = nop_count;
           }
@@ -949,7 +1004,7 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
             (*items)[next_idx].delay_word == 0x00000000u &&
             (*items)[next_idx].delay_label.empty() &&
             (GetInsnPinfo((*items)[next_idx].word) & kInsnCondBranchLikely) == 0u &&
-            !CanSwapBranchWithInsn((*items)[next_idx].word, prev_w)) {
+            !CanSwapBranchWithInsn((*items)[next_idx].word, prev_w, prev_prev_w, mips_isa)) {
           (*items)[next_idx].kind = AsmItemKind::kReorderInsn;
           (*items)[next_idx].delay_line.clear();
         }
@@ -961,45 +1016,60 @@ void StripGasInsertedHazardNops(std::vector<AsmItem>* items) {
           prev_prev_w = 0u;
           prev_w = 0u;
         }
+        prev_w_is_delay_slot = false;
         continue;
       }
     }
 
     AsmItem& cur = (*items)[i];
+    // If `InvertGasAppendInsnInternal` wrapped `[branch, nop]` in
+    // `.set noreorder` only because an earlier `.set noreorder / <load> /
+    // .set reorder` hid `prev_prev_w` (`tc-mips.c:1656-1664`), unwrap `cur`
+    // back to a `.set reorder` branch item.
+    if (cur.kind == AsmItemKind::kNoreorderBranchSeq && cur.delay_word == 0x00000000u &&
+        cur.delay_label.empty() && (GetInsnPinfo(cur.word) & kInsnCondBranchLikely) == 0u &&
+        prev_w != 0u && !prev_w_is_delay_slot &&
+        CanSwapBranchWithInsn(cur.word, prev_w, 0u, mips_isa) &&
+        !CanSwapBranchWithInsn(cur.word, prev_w, prev_prev_w, mips_isa)) {
+      cur.kind = AsmItemKind::kReorderInsn;
+      cur.delay_line.clear();
+    }
+
     if (cur.kind == AsmItemKind::kLabel || cur.kind == AsmItemKind::kNoreorderBranchSeq) {
       prev_w = 0u;
       prev_prev_w = 0u;
+      prev_w_is_delay_slot = false;
       out.push_back(std::move(cur));
       ++i;
       continue;
     }
 
     // `cur.kind == AsmItemKind::kReorderInsn`
-    if (MipsEmitDelaysNops(prev_w, prev_prev_w) > 0) {
+    if (MipsEmitDelaysNops(prev_w, prev_prev_w, mips_isa) > 0) {
       cur.preceded_by_active_hazard = true;
     }
     if (IsBranchOrJumpWord(cur.word)) {
-      if (cur.unswapped_from_branch) {
-        const uint32_t branch_pinfo = GetInsnPinfo(cur.word);
-        if ((branch_pinfo & kInsnUncondBranchDelay) != 0u) {
-          prev_w = 0u;
-          prev_prev_w = 0u;
-        } else {
-          prev_prev_w = cur.word;
-        }
+      const uint32_t branch_pinfo = GetInsnPinfo(cur.word);
+      if ((branch_pinfo & kInsnUncondBranchDelay) != 0u) {
+        prev_w = 0u;
+        prev_prev_w = 0u;
+      } else if (cur.unswapped_from_branch) {
+        prev_prev_w = cur.word;
       } else {
         // Branch in `.set reorder` mode with `nop` delay slot.
         prev_prev_w = cur.word;
         prev_w = 0u;
       }
+      prev_w_is_delay_slot = true;
     } else {
-      const size_t auto_nops = AppendInsnHazardNops(prev_w, prev_prev_w, cur.word);
+      const size_t auto_nops = AppendInsnHazardNops(prev_w, prev_prev_w, cur.word, mips_isa);
       if (auto_nops > 0) {
         prev_prev_w = 0u;
       } else {
         prev_prev_w = prev_w;
       }
       prev_w = cur.word;
+      prev_w_is_delay_slot = false;
     }
 
     out.push_back(std::move(cur));
@@ -1117,9 +1187,10 @@ bool InvertGasAppendInsnToItems(const Stage0FunctionInput& stage0_input,
 
   absl::flat_hash_map<size_t, std::string> target_labels;
   const bool gas_swaps_branches = DoesGasSwapBranchesForProfile(stage0_input.profile);
+  const int mips_isa = ParsedCompilerFlags::Parse(stage0_input.profile.c_flags).mips_isa;
   const std::vector<std::string> raw_lines =
       InvertGasAppendInsnInternal(words, linked_base_vram, extra_label_indices, external_j_indices,
-                                  &target_labels, gas_swaps_branches);
+                                  &target_labels, gas_swaps_branches, mips_isa);
   if (raw_lines.empty()) {
     return false;
   }
@@ -1129,7 +1200,7 @@ bool InvertGasAppendInsnToItems(const Stage0FunctionInput& stage0_input,
     return false;
   }
 
-  StripGasInsertedHazardNops(out_items);
+  StripGasInsertedHazardNops(out_items, mips_isa);
   if (out_word_to_label != nullptr) {
     *out_word_to_label = std::move(target_labels);
   }

@@ -207,14 +207,30 @@ std::vector<std::string> Toolchain::BuildGcc272CompileArgs(
   args.push_back("c");
   args.push_back("-S");
 
-  for (const auto& f : opt_flags) {
-    if (!absl::StartsWith(f, "-Wa,")) {
-      args.push_back(f);
+  bool has_explicit_g = false;
+  for (size_t i = 0; i < opt_flags.size(); ++i) {
+    const auto& f = opt_flags[i];
+    if (absl::StartsWith(f, "-Wa,")) {
+      continue;
     }
+    if (f == "-G") {
+      has_explicit_g = true;
+      args.push_back(f);
+      if (i + 1 < opt_flags.size()) {
+        args.push_back(opt_flags[++i]);
+      }
+      continue;
+    }
+    if (absl::StartsWith(f, "-G") && f.size() > 2) {
+      has_explicit_g = true;
+    }
+    args.push_back(f);
   }
 
-  args.push_back("-G");
-  args.push_back("0");
+  if (!has_explicit_g) {
+    args.push_back("-G");
+    args.push_back("0");
+  }
 
   for (const auto& inc : include_dirs) {
     args.push_back(absl::StrCat("-I", inc.string()));
@@ -233,16 +249,22 @@ std::vector<std::string> Toolchain::BuildKmcAsArgs(
     const std::filesystem::path& in_s272, const std::filesystem::path& out_obj) const {
   std::vector<std::string> args;
 
-  std::string mcpu = "-mcpu=vr4300";
+  std::string mcpu;
   std::string mips_isa = "-mips3";
+  std::string g_size = "0";
   bool is_o0 = false;
   std::vector<std::string> as_extra_flags;
 
-  for (const auto& f : opt_flags) {
+  for (size_t i = 0; i < opt_flags.size(); ++i) {
+    const auto& f = opt_flags[i];
     if (absl::StartsWith(f, "-mcpu=")) {
       mcpu = f;
-    } else if (f == "-mips2") {
-      mips_isa = "-mips2";
+    } else if (f == "-mips1" || f == "-mips2" || f == "-mips3" || f == "-mips4") {
+      mips_isa = f;
+    } else if (f == "-G" && i + 1 < opt_flags.size()) {
+      g_size = opt_flags[++i];
+    } else if (absl::StartsWith(f, "-G") && f.size() > 2) {
+      g_size = f.substr(2);
     } else if (f == "-O0") {
       is_o0 = true;
     } else if (absl::StartsWith(f, "-Wa,")) {
@@ -256,11 +278,15 @@ std::vector<std::string> Toolchain::BuildKmcAsArgs(
     }
   }
 
+  if (mcpu.empty()) {
+    mcpu = (mips_isa == "-mips1") ? "-mcpu=r3000" : "-mcpu=vr4300";
+  }
+
   args.push_back(mcpu);
   args.push_back(mips_isa);
   args.push_back("-EB");
   args.push_back("-G");
-  args.push_back("0");
+  args.push_back(g_size);
   args.push_back("-N");
 
   if (is_o0) {

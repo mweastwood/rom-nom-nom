@@ -365,44 +365,92 @@ TEST(InvertRelaxDelaySlotsTest,
 }
 
 // Subcase II.7 (`reorg.c:4038-4040` & `1866-1884`): `try_merge_delay_insns`
-// merging a duplicate delay slot from a fallthrough `SEQUENCE` conditional jump.
+// merging a duplicate delay slot from a fallthrough `SEQUENCE` conditional jump,
+// covering both killed-on-fallthrough (`jump_insn`) and live-on-fallthrough
+// (`jump_insn/u`) CFGs with empty `basic_block_live_at_start`.
 TEST(InvertRelaxDelaySlotsTest, TryMergeDelayInsnsFallthroughSequenceBranchMergedRightInverse) {
   GccContext ctx;
   FunctionHooks hooks(&ctx);
   ProductionRelaxDelaySlotsProvider provider;
   RightInverseVerifier verifier(&ctx, &hooks, &provider);
 
-  RtlControlFlowGraph relaxed_cfg;
-  relaxed_cfg.pass = RtlPassKind::kDbr;
-  relaxed_cfg.rpo_blocks.resize(4);
-  relaxed_cfg.rpo_blocks[0].AddPatternOnly(
-      "(sequence [(jump_insn (set (pc) (if_then_else (lt:SI (reg:SI 4 a0) "
-      "(const_int 0)) (label_ref L0) (pc)))) "
-      "(insn (set (reg:SI 2 v0) (const_int -1)))])");
-  relaxed_cfg.rpo_blocks[0].successors = {3, 1};
-  relaxed_cfg.rpo_blocks[1].AddPatternOnly(
-      "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
-      "(label_ref L0) (pc)))");
-  relaxed_cfg.rpo_blocks[1].successors = {3, 2};
-  relaxed_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
-  relaxed_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
-  relaxed_cfg.rpo_blocks[3].has_label = true;
-  relaxed_cfg.rpo_blocks[3].AddPatternOnly("(use (reg:SI 2 v0))");
-  relaxed_cfg.rpo_blocks[3].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+  // 1. Killed on fallthrough (`B2` overwrites `v0` before reading it):
+  //    `B0` and `B1` both recover non-annulled `jump_insn`.
+  {
+    RtlControlFlowGraph killed_cfg;
+    killed_cfg.pass = RtlPassKind::kDbr;
+    killed_cfg.rpo_blocks.resize(4);
+    killed_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (lt:SI (reg:SI 4 a0) "
+        "(const_int 0)) (label_ref L0) (pc)))) "
+        "(insn (set (reg:SI 2 v0) (const_int -1)))])");
+    killed_cfg.rpo_blocks[0].successors = {3, 1};
+    killed_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+        "(label_ref L0) (pc)))");
+    killed_cfg.rpo_blocks[1].successors = {3, 2};
+    killed_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
+    killed_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    killed_cfg.rpo_blocks[3].has_label = true;
+    killed_cfg.rpo_blocks[3].AddPatternOnly("(use (reg:SI 2 v0))");
+    killed_cfg.rpo_blocks[3].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    ASSERT_TRUE(killed_cfg.sideband.basic_block_live_at_start.empty());
 
-  const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(relaxed_cfg);
-  ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
-  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
-            "(sequence [(jump_insn/u (set (pc) (if_then_else (lt:SI (reg:SI 4 a0) "
-            "(const_int 0)) (label_ref L0) (pc)))) "
-            "(insn/s (set (reg:SI 2 v0) (const_int -1)))])");
-  EXPECT_EQ(lifted.rpo_blocks[1].instructions[0],
-            "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) "
-            "(const_int 0)) (label_ref L0) (pc)))) "
-            "(insn/s (set (reg:SI 2 v0) (const_int -1)))])");
+    const RtlControlFlowGraph lifted_killed = InvertRelaxDelaySlots(killed_cfg);
+    ASSERT_EQ(lifted_killed.rpo_blocks.size(), 4u);
+    EXPECT_EQ(lifted_killed.rpo_blocks[0].instructions[0],
+              "(sequence [(jump_insn (set (pc) (if_then_else (lt:SI (reg:SI 4 a0) "
+              "(const_int 0)) (label_ref L0) (pc)))) "
+              "(insn/s (set (reg:SI 2 v0) (const_int -1)))])");
+    EXPECT_EQ(lifted_killed.rpo_blocks[1].instructions[0],
+              "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) "
+              "(const_int 0)) (label_ref L0) (pc)))) "
+              "(insn/s (set (reg:SI 2 v0) (const_int -1)))])");
 
-  const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(relaxed_cfg);
-  EXPECT_TRUE(res.matches) << res.diff_detail;
+    const RightInverseResult res_killed = verifier.VerifyRelaxDelaySlotsRightInverse(killed_cfg);
+    EXPECT_TRUE(res_killed.matches) << res_killed.diff_detail;
+  }
+
+  // 2. Live on fallthrough (`B0` initializes `v0` and `B2` reads `v0`):
+  //    `B0` recovers annulled `jump_insn/u` while `B1` recovers `jump_insn`,
+  //    and `relax_delay_slots` (`try_merge_delay_insns`) clears `/u` on `B0`
+  //    while merging `B1`'s duplicate delay slot.
+  {
+    RtlControlFlowGraph live_cfg;
+    live_cfg.pass = RtlPassKind::kDbr;
+    live_cfg.rpo_blocks.resize(4);
+    live_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 5 a1))");
+    live_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (lt:SI (reg:SI 4 a0) "
+        "(const_int 0)) (label_ref L0) (pc)))) "
+        "(insn (set (reg/i:SI 2 v0) (const_int -1)))])");
+    live_cfg.rpo_blocks[0].successors = {3, 1};
+    live_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+        "(label_ref L0) (pc)))");
+    live_cfg.rpo_blocks[1].successors = {3, 2};
+    live_cfg.rpo_blocks[2].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (const_int 1)))");
+    live_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    live_cfg.rpo_blocks[3].has_label = true;
+    live_cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    live_cfg.rpo_blocks[3].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    ASSERT_TRUE(live_cfg.sideband.basic_block_live_at_start.empty());
+
+    const RtlControlFlowGraph lifted_live = InvertRelaxDelaySlots(live_cfg);
+    ASSERT_EQ(lifted_live.rpo_blocks.size(), 4u);
+    EXPECT_EQ(lifted_live.rpo_blocks[0].instructions[1],
+              "(sequence [(jump_insn/u (set (pc) (if_then_else (lt:SI (reg:SI 4 a0) "
+              "(const_int 0)) (label_ref L0) (pc)))) "
+              "(insn/s (set (reg/i:SI 2 v0) (const_int -1)))])");
+    EXPECT_EQ(lifted_live.rpo_blocks[1].instructions[0],
+              "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) "
+              "(const_int 0)) (label_ref L0) (pc)))) "
+              "(insn/s (set (reg/i:SI 2 v0) (const_int -1)))])");
+
+    const RightInverseResult res_live = verifier.VerifyRelaxDelaySlotsRightInverse(live_cfg);
+    EXPECT_TRUE(res_live.matches) << res_live.diff_detail;
+  }
 }
 
 // Subcase II.7 (`reorg.c:4041-4043` & `1866-1884`): `try_merge_delay_insns`
@@ -708,6 +756,223 @@ TEST(InvertRelaxDelaySlotsTest, RejectsEmptyAndMalformedControlFlowGraphsAndBadI
     snap.optimize_level = 2;
     snap.post_state = valid_cfg;
     EXPECT_FALSE(wrong_verifier.VerifySubfunctionBoundaryRightInverse(snap).matches);
+  }
+}
+
+TEST(InvertRelaxDelaySlotsTest, FallthroughSequenceStopsTryMergeDelayInsnsSearch) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}});
+  ProductionRelaxDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // `B0` ends with a non-annulled conditional `SEQUENCE` incrementing `$17`,
+  // while fallthrough `B1` contains a filled `call_insn` `SEQUENCE` followed by
+  // `(note NOTE_INSN_LOOP_CONT)` and falls through to `B2`. Because `reorg.c`
+  // `stop_search_p(trial, 1)` stops at any `SEQUENCE` (`B1`'s filled call),
+  // `try_merge_delay_insns` could NOT have deleted a trailing `$17` increment
+  // past that `SEQUENCE` in `B1`.
+  RtlControlFlowGraph post_cfg;
+  post_cfg.pass = RtlPassKind::kDbr;
+  post_cfg.sideband.saved_gpr_regnos = {17, 31};
+  post_cfg.rpo_blocks.resize(3);
+  post_cfg.rpo_blocks[0].id = 0;
+  post_cfg.rpo_blocks[0].AddPatternOnly(
+      "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+      "(label_ref L0) (pc)))) "
+      "(insn (set (reg/v:SI 17 s1) (plus:SI (reg/v:SI 17 s1) (const_int 1))))])");
+  post_cfg.rpo_blocks[0].successors = {2, 1};
+
+  post_cfg.rpo_blocks[1].id = 1;
+  post_cfg.rpo_blocks[1].AddPatternOnly(
+      "(sequence [(call_insn (parallel[ (call (mem:SI (symbol_ref:SI (\"sink_fn\"))) "
+      "(const_int 16)) (clobber (reg:SI 31 ra)) ] )) "
+      "(insn (set (reg:SI 4 a0) (const_int 1)))])");
+  post_cfg.rpo_blocks[1].AddPatternOnly("(note NOTE_INSN_LOOP_CONT)");
+  post_cfg.rpo_blocks[1].successors = {2};
+
+  post_cfg.rpo_blocks[2].id = 2;
+  post_cfg.rpo_blocks[2].has_label = true;
+  post_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (reg/v:SI 17 s1))");
+  post_cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  post_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+  EXPECT_EQ(InvertRelaxDelaySlots(post_cfg).rpo_blocks[1].instructions.size(), 2u);
+  EXPECT_TRUE(verifier.VerifyRelaxDelaySlotsRightInverse(post_cfg).matches);
+}
+
+TEST(InvertRelaxDelaySlotsTest, NoteOnlyLoopContBridgeAndSharedReturnSlotSuppressionRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips1"}});
+  ProductionRelaxDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // 1. `ft_has_note_only_bridge`: `B0` jumps into loop test `B3`, while `B1` ends with a
+  // non-annulled `SEQUENCE` (`jump_insn` + `insn/s`) around note-only `B2` (`NOTE_INSN_LOOP_CONT`)
+  // falling through to `B3` (even when `B3.has_label` was cleared in snapshot normalization).
+  // `InvertRelaxDelaySlots` inverts `B1`'s branch around a new jump block and passes
+  // `VerifyRelaxDelaySlotsRightInverse`.
+  {
+    RtlControlFlowGraph loop_cont_cfg;
+    loop_cont_cfg.pass = RtlPassKind::kDbr;
+    loop_cont_cfg.rpo_blocks.resize(6);
+    loop_cont_cfg.rpo_blocks[0].id = 0;
+    loop_cont_cfg.rpo_blocks[0].AddPatternOnly("(set (pc) (label_ref L0))");
+    loop_cont_cfg.rpo_blocks[0].successors = {3};
+
+    loop_cont_cfg.rpo_blocks[1].id = 1;
+    loop_cont_cfg.rpo_blocks[1].has_label = true;
+    loop_cont_cfg.rpo_blocks[1].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+        "(label_ref L1) (pc)))) (insn/s (set (reg/i:SI 2 v0) (const_int -1)))])");
+    loop_cont_cfg.rpo_blocks[1].successors = {5, 2};
+
+    loop_cont_cfg.rpo_blocks[2].id = 2;
+    loop_cont_cfg.rpo_blocks[2].AddPatternOnly("(note NOTE_INSN_LOOP_CONT)");
+    loop_cont_cfg.rpo_blocks[2].successors = {3};
+
+    loop_cont_cfg.rpo_blocks[3].id = 3;
+    loop_cont_cfg.rpo_blocks[3].has_label = false;
+    loop_cont_cfg.rpo_blocks[3].AddPatternOnly("(note NOTE_INSN_LOOP_VTOP)");
+    loop_cont_cfg.rpo_blocks[3].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 5 a1) (const_int 0)) "
+        "(label_ref L0) (pc)))) (insn (set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int "
+        "-1))))])");
+    loop_cont_cfg.rpo_blocks[3].successors = {1, 4};
+
+    loop_cont_cfg.rpo_blocks[4].id = 4;
+    loop_cont_cfg.rpo_blocks[4].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
+    loop_cont_cfg.rpo_blocks[4].successors = {5};
+
+    loop_cont_cfg.rpo_blocks[5].id = 5;
+    loop_cont_cfg.rpo_blocks[5].has_label = true;
+    loop_cont_cfg.rpo_blocks[5].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    loop_cont_cfg.rpo_blocks[5].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(loop_cont_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 7u);
+    EXPECT_EQ(lifted.rpo_blocks[1].successors, (std::vector<size_t>{4, 2}));
+    RtlControlFlowGraph canonical_post = loop_cont_cfg;
+    canonical_post.rpo_blocks[3].has_label = true;
+    canonical_post.rpo_blocks[0].instructions[0] = "(set (pc) (label_ref L1))";
+    canonical_post.rpo_blocks[1].instructions[0] =
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+        "(label_ref L2) (pc)))) (insn/s (set (reg/i:SI 2 v0) (const_int -1)))])";
+    const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(canonical_post);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. Shared-epilogue `(use v0)` + `return`: `B3` (`v0 = 0` -> `B5: (use v0)`, followed by `B4:
+  // gt -> B5` with `v0 = 2`) was NOT inverted because `B1` (`v0 = 0` -> `B6: return`) shares the
+  // same stolen `v0 = 0` slot, whereas `B4` (`v0 = 2` -> `B5: (use v0)`, followed by `B5_ft` with
+  // `REG_DEAD` reg note) WAS inverted by `relax_delay_slots`!
+  {
+    RtlControlFlowGraph shared_cfg;
+    shared_cfg.pass = RtlPassKind::kDbr;
+    shared_cfg.rpo_blocks.resize(7);
+    shared_cfg.rpo_blocks[0].id = 0;
+    shared_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn/u (set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+        "(label_ref L2) (pc)))) (insn/s (set (reg/i:SI 2 v0) (const_int 0)))])");
+    shared_cfg.rpo_blocks[0].successors = {6, 1};
+
+    shared_cfg.rpo_blocks[1].id = 1;
+    shared_cfg.rpo_blocks[1].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (label_ref L2))) "
+        "(insn (set (reg/i:SI 2 v0) (const_int -1)))])");
+    shared_cfg.rpo_blocks[1].successors = {6};
+
+    shared_cfg.rpo_blocks[2].id = 2;
+    shared_cfg.rpo_blocks[2].has_label = true;
+    shared_cfg.rpo_blocks[2].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) "
+        "(label_ref L1) (pc)))) (insn/s (set (reg/i:SI 2 v0) (const_int 0)))])");
+    shared_cfg.rpo_blocks[2].successors = {5, 3};
+
+    shared_cfg.rpo_blocks[3].id = 3;
+    shared_cfg.rpo_blocks[3].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 7 a3) (const_int 0)) "
+        "(label_ref L1) (pc)))) (insn/s (set (reg/i:SI 2 v0) (const_int 2)))])");
+    shared_cfg.rpo_blocks[3].successors = {5, 4};
+
+    shared_cfg.rpo_blocks[4].id = 4;
+    shared_cfg.rpo_blocks[4].AddPatternOnly("(set (reg:SI 8 t0) (const_int 31))");
+    shared_cfg.rpo_blocks[4].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (ashiftrt:SI (reg:SI 7 a3) (reg:SI 8 t0))) "
+        "(expr_list:REG_DEAD (const_int 0) (nil))");
+    shared_cfg.rpo_blocks[4].successors = {5};
+
+    shared_cfg.rpo_blocks[5].id = 5;
+    shared_cfg.rpo_blocks[5].has_label = true;
+    shared_cfg.rpo_blocks[5].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    shared_cfg.rpo_blocks[5].successors = {6};
+
+    shared_cfg.rpo_blocks[6].id = 6;
+    shared_cfg.rpo_blocks[6].has_label = true;
+    shared_cfg.rpo_blocks[6].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(shared_cfg);
+    // `B2` (`v0 = 0`) stayed un-inverted (`eq`), while `B3` (`v0 = 2`) un-inverted (`gt` -> `le`)!
+    ASSERT_EQ(lifted.rpo_blocks.size(), 8u);
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[2].instructions[0], "(eq:SI "));
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[3].instructions[0], "(le:SI "));
+
+    const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(shared_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+
+    // When `B4` retains an intact `REG_DEAD (reg:SI 8 t0)` note (`B4` never ended with `j L_use`),
+    // `B2` could not have stolen `v0 = 0` from a fallthrough block before `B5` and MUST also be
+    // un-inverted (`eq` -> `ne`) by `InvertRelaxDelaySlots`.
+    shared_cfg.rpo_blocks[4].instructions[1] =
+        "(set (reg/i:SI 2 v0) (ashiftrt:SI (reg:SI 7 a3) (reg:SI 8 t0))) "
+        "(expr_list:REG_DEAD (reg:SI 8 t0) (nil))";
+    const RtlControlFlowGraph lifted_reg_dead = InvertRelaxDelaySlots(shared_cfg);
+    ASSERT_EQ(lifted_reg_dead.rpo_blocks.size(), 9u);
+    EXPECT_TRUE(absl::StrContains(lifted_reg_dead.rpo_blocks[2].instructions[0], "(ne:SI "));
+    const RightInverseResult res_reg_dead = verifier.VerifyRelaxDelaySlotsRightInverse(shared_cfg);
+    EXPECT_TRUE(res_reg_dead.matches) << res_reg_dead.diff_detail;
+  }
+
+  // 3. Multi-instruction predecessor `B2` before a shared `(use ...)` bridge (`B0 -> B4: return`
+  //    and `B1 -> B3: (use v0)` sharing `insn/s (set (reg/i:SI 2 v0) (const_int 0))`):
+  //    `InvertRelaxDelaySlots` re-wraps `B2`'s trailing instruction into an unconditional
+  //    `SEQUENCE` jump to `B3` (matching `reorg.c:3940-3973` Subcase II.5) and satisfies
+  //    `VerifyRelaxDelaySlotsRightInverse` directly.
+  {
+    RtlControlFlowGraph bridge_cfg;
+    bridge_cfg.pass = RtlPassKind::kDbr;
+    bridge_cfg.rpo_blocks.resize(5);
+    bridge_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 6 a2))");
+    bridge_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg/i:SI 2 v0) "
+        "(reg:SI 4 a0)) (label_ref L1) (pc)))) "
+        "(insn/s (set (reg/i:SI 2 v0) (const_int 0)))])");
+    bridge_cfg.rpo_blocks[0].successors = {4, 1};
+    bridge_cfg.rpo_blocks[1].AddPatternOnly(
+        "(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg:SI 5 a1) "
+        "(const_int 0)) (label_ref L0) (pc)))) "
+        "(insn/s (set (reg/i:SI 2 v0) (const_int 0)))])");
+    bridge_cfg.rpo_blocks[1].successors = {3, 2};
+    bridge_cfg.rpo_blocks[2].AddPatternOnly("(set (reg:SI 8 t0) (const_int 1))");
+    bridge_cfg.rpo_blocks[2].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 8 t0)))");
+    bridge_cfg.rpo_blocks[2].successors = {3};
+    bridge_cfg.rpo_blocks[3].has_label = true;
+    bridge_cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    bridge_cfg.rpo_blocks[3].successors = {4};
+    bridge_cfg.rpo_blocks[4].has_label = true;
+    bridge_cfg.rpo_blocks[4].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const RtlControlFlowGraph lifted_bridge = InvertRelaxDelaySlots(bridge_cfg);
+    ASSERT_EQ(lifted_bridge.rpo_blocks.size(), 5u);
+    EXPECT_EQ(lifted_bridge.rpo_blocks[2].instructions.back(),
+              "(sequence [(jump_insn (set (pc) (label_ref L0))) "
+              "(insn (set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 8 t0))))])");
+    const RightInverseResult res_bridge = verifier.VerifyRelaxDelaySlotsRightInverse(bridge_cfg);
+    EXPECT_TRUE(res_bridge.matches) << res_bridge.diff_detail;
   }
 }
 

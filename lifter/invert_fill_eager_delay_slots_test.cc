@@ -479,6 +479,182 @@ TEST(InvertFillEagerDelaySlotsUnitTest, PreservesOptimizeSkipAndSimpleDelaySlots
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+TEST(InvertFillEagerDelaySlotsUnitTest, DiamondSubregSplitAndUseBridgeBeforeReturnRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}});
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // 1. Diamond `try_split` `DImode` `subreg:SI` register-move recombination: `B0` stole the high
+  // word `(set (subreg:SI (reg:DI 2 v0) 0) (subreg:SI (reg:DI 6 a2) 0))` from `B2` where `(set
+  // (subreg:SI (reg:DI 2 v0) 1) (subreg:SI (reg:DI 6 a2) 1))` remains, while `B1` writes `(set
+  // (reg:DI 2 v0) (const_int 1))` and jumps to `B3`. `InvertFillEagerDelaySlots` recombines `B2`'s
+  // split halves into `(set (reg:DI 2 v0) (reg:DI 6 a2))` and satisfies
+  // `VerifyFillEagerDelaySlotsRightInverse`.
+  {
+    RtlControlFlowGraph diamond_di_cfg;
+    diamond_di_cfg.pass = RtlPassKind::kDbr;
+    diamond_di_cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {"(set (reg:DI 2 v0) (reg:DI 4 a0))",
+                   "(sequence [(jump_insn/u (set (pc) (if_then_else (eq:SI (reg:SI 8 t0) "
+                   "(const_int 0)) (label_ref L0) (pc)))) "
+                   "(insn/s (set (subreg:SI (reg:DI 2 v0) 0) (subreg:SI (reg:DI 6 a2) 0)))])"},
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {"(set (mem:DI (reg:SI 9 t1)) (reg:DI 2 v0))", "(set (pc) (label_ref L1))"}, {3}),
+        MakeBlock(2, true, {"(set (subreg:SI (reg:DI 2 v0) 1) (subreg:SI (reg:DI 6 a2) 1))"}, {3}),
+        MakeBlock(3, true,
+                  {"(use (reg/i:DI 2 v0))", "(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+    };
+
+    const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(diamond_di_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
+    ASSERT_EQ(lifted.rpo_blocks[2].instructions.size(), 1u);
+    EXPECT_EQ(lifted.rpo_blocks[2].instructions[0], "(set (reg:DI 2 v0) (reg:DI 6 a2))");
+
+    const RightInverseResult res = verifier.VerifyFillEagerDelaySlotsRightInverse(diamond_di_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                             << lifted.FormatSummary() << "\nactual:\n"
+                             << res.actual_summary;
+  }
+
+  // 2. Shared `(use v0)` bridge in `Im(fill_eager_delay_slots)`: `B0` (`v0 = 0` -> `B4: return`)
+  // and `B1` (`v0 = 0` -> `B3: (use v0)`) share `slot_pat = (set (reg/i:SI 2 v0) (const_int 0))`,
+  // while `B2` ends with a `fill_simple_delay_slots` unconditional `SEQUENCE` jump over the
+  // trampoline to `B3`. `InvertFillEagerDelaySlots` reconstructs `[L0: v0 = 0]` between `B2` and
+  // `[L1: (use v0), (return)]` and satisfies `VerifyFillEagerDelaySlotsRightInverse` directly.
+  {
+    RtlControlFlowGraph bridge_eager_cfg;
+    bridge_eager_cfg.pass = RtlPassKind::kDbr;
+    bridge_eager_cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {"(set (reg/i:SI 2 v0) (reg:SI 6 a2))",
+                   "(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg/i:SI 2 v0) "
+                   "(reg:SI 4 a0)) (label_ref L1) (pc)))) "
+                   "(insn/s (set (reg/i:SI 2 v0) (const_int 0)))])"},
+                  {4, 1}),
+        MakeBlock(1, false,
+                  {"(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg:SI 5 a1) "
+                   "(const_int 0)) (label_ref L0) (pc)))) "
+                   "(insn/s (set (reg/i:SI 2 v0) (const_int 0)))])"},
+                  {3, 2}),
+        MakeBlock(2, false,
+                  {"(set (reg:SI 8 t0) (const_int 1))",
+                   "(sequence [(jump_insn (set (pc) (label_ref L0))) "
+                   "(insn (set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 8 t0))))])"},
+                  {3}),
+        MakeBlock(3, true, {"(use (reg/i:SI 2 v0))"}, {4}),
+        MakeBlock(4, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+    };
+
+    const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(bridge_eager_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 5u);
+    EXPECT_EQ(lifted.rpo_blocks[3].instructions,
+              std::vector<std::string>{"(set (reg/i:SI 2 v0) (const_int 0))"});
+    EXPECT_EQ(lifted.rpo_blocks[3].successors, std::vector<size_t>{4u});
+
+    const RightInverseResult res = verifier.VerifyFillEagerDelaySlotsRightInverse(bridge_eager_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                             << lifted.FormatSummary() << "\nactual:\n"
+                             << res.actual_summary;
+  }
+}
+
+TEST(InvertFillEagerDelaySlotsUnitTest, FallthroughUseBridgePlacesTrampolineAfterBarrier) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}});
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // When `B2` genuinely falls through into `B3: L0: (use v0)` -> `B4: L1: return` without a jump
+  // barrier, `B0` and `B1` stole from after-barrier `[L_tramp: j L_use; v0 = ...]` blocks and
+  // target `B4` (`L1: return`); `InvertFillEagerDelaySlots` places the trampolines after the
+  // return barrier and satisfies `VerifyFillEagerDelaySlotsRightInverse` directly on the unmutated
+  // input.
+  RtlControlFlowGraph after_barrier_eager_cfg;
+  after_barrier_eager_cfg.pass = RtlPassKind::kDbr;
+  after_barrier_eager_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (reg/i:SI 2 v0) (reg:SI 6 a2))",
+                 "(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg/i:SI 2 v0) "
+                 "(reg:SI 4 a0)) (label_ref L1) (pc)))) "
+                 "(insn/s (set (reg/i:SI 2 v0) (const_int -1)))])"},
+                {4, 1}),
+      MakeBlock(1, false,
+                {"(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg:SI 5 a1) "
+                 "(const_int 0)) (label_ref L1) (pc)))) "
+                 "(insn/s (set (reg/i:SI 2 v0) (const_int 0)))])"},
+                {4, 2}),
+      MakeBlock(2, false,
+                {"(set (reg:SI 8 t0) (const_int 1))",
+                 "(set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 8 t0))) "
+                 "(expr_list:REG_DEAD (reg:SI 8 t0) (nil))"},
+                {3}),
+      MakeBlock(3, true, {"(use (reg/i:SI 2 v0))"}, {4}),
+      MakeBlock(4, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(after_barrier_eager_cfg);
+  ASSERT_GE(lifted.rpo_blocks.size(), 6u);
+  EXPECT_NE(lifted.rpo_blocks[2].instructions.back(), "(set (pc) (label_ref L1))");
+
+  const RightInverseResult res =
+      verifier.VerifyFillEagerDelaySlotsRightInverse(after_barrier_eager_cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nactual:\n" << res.actual_summary;
+}
+
+TEST(InvertFillEagerDelaySlotsUnitTest, RedundantPrefixTargetStealRedirectsWithoutSplitting) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}});
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  RtlControlFlowGraph redundant_prefix_cfg;
+  redundant_prefix_cfg.pass = RtlPassKind::kDbr;
+  redundant_prefix_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (reg:SI 8 t0) (reg:SI 4 a0))", "(set (reg:SI 9 t1) (const_int 100))",
+                 "(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg:SI 6 a2) "
+                 "(const_int 0)) (label_ref L0) (pc)))) "
+                 "(insn/s (set (reg:SI 8 t0) (reg:SI 9 t1)))])"},
+                {3, 1}),
+      MakeBlock(1, false,
+                {"(set (reg:SI 9 t1) (const_int -100))", "(set (reg:SI 10 t2) (reg:SI 8 t0))",
+                 "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 7 a3) "
+                 "(const_int 0)) (label_ref L1) (pc)))) "
+                 "(insn/s (set (reg:SI 11 t3) (plus:SI (reg:SI 10 t2) (reg:SI 5 a1))))])"},
+                {4, 2}),
+      MakeBlock(2, false, {"(set (reg:SI 8 t0) (reg:SI 9 t1))"}, {3}),
+      MakeBlock(
+          3, true,
+          {"(set (reg:SI 10 t2) (reg:SI 8 t0))",
+           "(set (reg:SI 11 t3) (plus:SI (reg:SI 10 t2) (reg:SI 5 a1)))", "(use (reg/i:SI 2 v0))"},
+          {4}),
+      MakeBlock(4, true,
+                {"(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 11 t3) (const_int 1))))])"},
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(redundant_prefix_cfg);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
+  EXPECT_EQ(lifted.rpo_blocks[0].successors, (std::vector<size_t>{2u, 1u}));
+  EXPECT_EQ(lifted.rpo_blocks[1].successors, (std::vector<size_t>{3u, 2u}));
+
+  const RightInverseResult res =
+      verifier.VerifyFillEagerDelaySlotsRightInverse(redundant_prefix_cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                           << lifted.FormatSummary() << "\nactual:\n"
+                           << res.actual_summary;
+}
+
 TEST(InvertFillEagerDelaySlotsUnitTest, RejectsInvalidAndMalformedCfgs) {
   // 1. Empty CFG.
   RtlControlFlowGraph empty_cfg;

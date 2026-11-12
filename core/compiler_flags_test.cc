@@ -52,6 +52,26 @@ TEST(CompilerFlagsTest, ParsesFiveStandardProfilesAndStagePredicates) {
   EXPECT_TRUE(o3.SplitsMultiInsnMovesBeforeDbr());
   EXPECT_TRUE(o3.flag_inline_functions);
   EXPECT_EQ(o3.ProfileKey(), "O3_WaG");
+
+  const ParsedCompilerFlags o2_g8_wao1 =
+      ParsedCompilerFlags::Parse("-O2 -G 8 -mips2 -mcpu=r4000 -Wa,-O1");
+  EXPECT_EQ(o2_g8_wao1.opt_level, 2);
+  EXPECT_EQ(o2_g8_wao1.small_data_threshold, 8);
+  EXPECT_EQ(o2_g8_wao1.mips_isa, 2);
+  EXPECT_EQ(o2_g8_wao1.mcpu, "r4000");
+  EXPECT_EQ(o2_g8_wao1.gas_opt_level, 1);
+  EXPECT_FALSE(o2_g8_wao1.gas_debug);
+  EXPECT_TRUE(o2_g8_wao1.GasOptimizesAndReordersInsns());
+  EXPECT_EQ(o2_g8_wao1.ProfileKey(), "O2_WaO1");
+
+  const ParsedCompilerFlags o2_mips1_uchar_wao2 =
+      ParsedCompilerFlags::Parse("-O2 -mips1 -funsigned-char -Wa,-O2");
+  EXPECT_EQ(o2_mips1_uchar_wao2.opt_level, 2);
+  EXPECT_EQ(o2_mips1_uchar_wao2.mips_isa, 1);
+  EXPECT_FALSE(o2_mips1_uchar_wao2.signed_char);
+  EXPECT_EQ(o2_mips1_uchar_wao2.gas_opt_level, 2);
+  EXPECT_TRUE(o2_mips1_uchar_wao2.GasOptimizesAndReordersInsns());
+  EXPECT_EQ(o2_mips1_uchar_wao2.ProfileKey(), "O2_WaO2");
 }
 
 TEST(CompilerFlagsTest, RespectsExplicitPassAndTargetFlagOverrides) {

@@ -44,9 +44,11 @@ struct PrologueEpilogueFrameSpec {
 struct CompilationProfile {
   int optimize_level = 2;
   std::vector<std::string> c_flags;
+  absl::flat_hash_map<std::string, uint32_t> gp_symbol_sizes;
 
   bool operator==(const CompilationProfile& other) const {
-    return optimize_level == other.optimize_level && c_flags == other.c_flags;
+    return optimize_level == other.optimize_level && c_flags == other.c_flags &&
+           gp_symbol_sizes == other.gp_symbol_sizes;
   }
   bool operator!=(const CompilationProfile& other) const { return !(*this == other); }
 };
@@ -307,6 +309,30 @@ struct RtlSpillSlotInfo {
   bool operator!=(const RtlSpillSlotInfo& other) const { return !(*this == other); }
 };
 
+// Argument register-passing descriptor consumed by `mips.c:mips_expand_prologue`
+// prior to `sched2` when a function is variadic (`...`) or passes `< 4`-byte
+// structs/unions by value in registers.
+enum class MipsPrologueArgKind {
+  kGeneralWord,
+  kInt64,
+  kFloat32,
+  kFloat64,
+  kStructOrUnion,
+};
+
+struct MipsPrologueArgSpec {
+  MipsPrologueArgKind kind = MipsPrologueArgKind::kGeneralWord;
+  int byte_size = 4;
+  int align_bits = 32;
+  int gcc_mode = 4;
+
+  bool operator==(const MipsPrologueArgSpec& other) const {
+    return kind == other.kind && byte_size == other.byte_size && align_bits == other.align_bits &&
+           gcc_mode == other.gcc_mode;
+  }
+  bool operator!=(const MipsPrologueArgSpec& other) const { return !(*this == other); }
+};
+
 // Explicit representation of the GCC 2.7.2 global side-band arrays that
 // accompany an RTL instruction stream between optimization stages.
 struct RtlSidebandState {
@@ -339,6 +365,12 @@ struct RtlSidebandState {
   std::vector<int> saved_fpr_regnos;
   std::optional<std::string> epilogue_delay_pattern;
 
+  // Pre-`sched2` argument metadata consumed by `mips_expand_prologue` when
+  // `is_variadic` is true or a `< 4`-byte struct/union is passed by value.
+  bool is_variadic = false;
+  bool returns_aggregate_in_memory = false;
+  std::vector<MipsPrologueArgSpec> prologue_args;
+
   // Spill slots recovered by InverseReload.
   std::vector<RtlSpillSlotInfo> spill_slots;
 
@@ -362,8 +394,10 @@ struct RtlSidebandState {
            saved_gpr_regnos == other.saved_gpr_regnos &&
            saved_fpr_regnos == other.saved_fpr_regnos &&
            epilogue_delay_pattern == other.epilogue_delay_pattern &&
-           spill_slots == other.spill_slots && loops == other.loops &&
-           constant_pool == other.constant_pool;
+           is_variadic == other.is_variadic &&
+           returns_aggregate_in_memory == other.returns_aggregate_in_memory &&
+           prologue_args == other.prologue_args && spill_slots == other.spill_slots &&
+           loops == other.loops && constant_pool == other.constant_pool;
   }
   bool operator!=(const RtlSidebandState& other) const { return !(*this == other); }
 };

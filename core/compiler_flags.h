@@ -84,9 +84,9 @@ struct ParsedCompilerFlags {
   // True if GCC Stage 2/3/6 (`cse1`, `loop`, `combine`) run (`optimize > 0`).
   bool RunsOptimizerPasses() const { return opt_level > 0; }
 
-  // True if KMC GAS (`-Wa,-O2` without `-Wa,-g`) performs post-`final.c` instruction scheduling,
-  // `jal` delay-slot filling, and coprocessor `nop` elimination.
-  bool GasOptimizesAndReordersInsns() const { return gas_opt_level >= 2 && !gas_debug; }
+  // True if KMC GAS (`-Wa,-O1` / `-Wa,-O2` without `-Wa,-g`) performs post-`final.c` instruction
+  // scheduling, `jal` delay-slot filling, and coprocessor `nop` elimination.
+  bool GasOptimizesAndReordersInsns() const { return gas_opt_level >= 1 && !gas_debug; }
 
   // Returns a canonical short profile identifier (e.g. "O0_WaG", "O1_WaG", "O2_WaG", "O2_WaO2",
   // "O3_WaG").

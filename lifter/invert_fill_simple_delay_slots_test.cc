@@ -293,6 +293,55 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, OptimizeSkipOverUnconditionalJumpToSame
                            << res.actual_summary;
 }
 
+TEST(InvertFillSimpleDelaySlotsUnitTest,
+     UnpacksDelaySlotBeforeSkippedMips1MemoryLoadWhenFallthroughPredEndsWithSameSet) {
+  // On `-mips1`, memory loads cannot occupy a branch delay slot, so `fill_simple_delay_slots`
+  // skips `(set (reg:SI 4 a0) (sign_extend:SI (mem:HI ...)))` and pulls `(set (reg:SI 5 a1)
+  // (const_int 0))` from BEFORE the load into `j L0`'s delay slot. When `target_b - 1` (`B1`)
+  // falls through to `target_b` (`B2`) and also ends with `(set (reg:SI 5 a1) (const_int 0))`,
+  // unpacking `(set (reg:SI 5 a1) (const_int 0))` BEFORE the load in `B0` avoids creating a false
+  // cross-jump suffix match with `B1` while re-filling identically under `-mips1` `reorg.c`.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (reg:SI 4 a0) (sign_extend:SI (mem:HI (plus:SI (reg:SI 4 a0) (const_int "
+                 "4)))))",
+                 "(sequence [(jump_insn (set (pc) (label_ref L1))) "
+                 "(insn (set (reg:SI 5 a1) (const_int 0)))])"},
+                {2}),
+      MakeBlock(1, true,
+                {"(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                 "(set (reg:SI 5 a1) (const_int 0))"},
+                {2}),
+      MakeBlock(2, true,
+                {"(use (reg/i:SI 2 v0))",
+                 "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                 "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 5 a1))))])"},
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertFillSimpleDelaySlots(cfg);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 3u);
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0], "(set (reg:SI 5 a1) (const_int 0))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[1],
+            "(set (reg:SI 4 a0) (sign_extend:SI (mem:HI (plus:SI (reg:SI 4 a0) (const_int 4)))))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[2], "(set (pc) (label_ref L1))");
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  RtlControlFlowGraph dummy;
+  hooks.ExecuteSubfunctionBoundary(SubfunctionId::kFillSimpleDelaySlots, dummy, {}, 2,
+                                   {"-O2", "-mips1", "-Wa,-O2"});
+  ProductionFillSimpleDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult res = verifier.VerifyFillSimpleDelaySlotsRightInverse(cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                           << lifted.FormatSummary() << "\nactual:\n"
+                           << res.actual_summary;
+}
+
 TEST(InvertFillSimpleDelaySlotsUnitTest, RejectsInvalidAndMalformedCfgs) {
   // 1. Empty CFG.
   RtlControlFlowGraph empty_cfg;

@@ -1168,6 +1168,22 @@ int FirstReplaySubfunctionIndexAfterPass(RtlPassKind pass) {
   return index_of(SubfunctionId::kMakeReturnInsns) + 1;
 }
 
+CompilationProfile BuildEffectiveStage0CompilationProfile(const Stage0FunctionInput& input_x) {
+  CompilationProfile effective_profile = input_x.profile;
+  if (input_x.base_vram != 0 && input_x.relocations.empty()) {
+    for (const auto& [vram, sym] : input_x.vram_to_symbol) {
+      if (sym.empty()) {
+        continue;
+      }
+      const auto sz_it = input_x.vram_to_symbol_size.find(vram);
+      if (sz_it != input_x.vram_to_symbol_size.end() && sz_it->second > 0) {
+        effective_profile.gp_symbol_sizes.try_emplace(sym, sz_it->second);
+      }
+    }
+  }
+  return effective_profile;
+}
+
 }  // namespace
 
 RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
@@ -1183,7 +1199,8 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
     return result;
   }
 
-  hooks_->ApplyCompilationProfile(input_x.profile);
+  const CompilationProfile effective_profile = BuildEffectiveStage0CompilationProfile(input_x);
+  hooks_->ApplyCompilationProfile(effective_profile);
   ctx_->MaterializeFromCfg(lifted_dbr);
   std::string bad_insn;
   if (!hooks_->ValidateMaterializedInsnsRecognizable(&bad_insn)) {
@@ -1210,11 +1227,12 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   }
 
   // Instantiate a completely fresh `GccContext` and `FunctionHooks` configured
-  // solely from `input_x.profile` so zero forward-compilation oracle state leaks
-  // from the caller's `ctx_` / `hooks_`.
+  // solely from `effective_profile` so zero forward-compilation oracle state
+  // leaks from the caller's `ctx_` / `hooks_`.
+  const CompilationProfile effective_profile = BuildEffectiveStage0CompilationProfile(input_x);
   GccContext fresh_ctx;
   FunctionHooks fresh_hooks(&fresh_ctx);
-  fresh_hooks.ApplyCompilationProfile(input_x.profile);
+  fresh_hooks.ApplyCompilationProfile(effective_profile);
 
   const bool opt_enabled = (optimize > 0);
   const bool dbr_enabled = opt_enabled && (flag_delayed_branch != 0);
@@ -1335,9 +1353,9 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   }
 
   // Reset `fresh_ctx` and replay forward passes $F_{0..s}(y_s)$ strictly under
-  // `input_x.profile`.
+  // `effective_profile`.
   fresh_ctx.BeginFunction("harness_func");
-  fresh_hooks.ApplyCompilationProfile(input_x.profile);
+  fresh_hooks.ApplyCompilationProfile(effective_profile);
   fresh_ctx.MaterializeFromCfg(y);
   {
     std::string bad_insn;
@@ -1363,11 +1381,11 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     current_cfg =
         fresh_hooks
             .ExecuteSubfunctionBoundary(all_subs[idx], current_cfg, {},
-                                        input_x.profile.optimize_level, input_x.profile.c_flags)
+                                        effective_profile.optimize_level, effective_profile.c_flags)
             .post_state;
   }
 
-  fresh_hooks.ApplyCompilationProfile(input_x.profile);
+  fresh_hooks.ApplyCompilationProfile(effective_profile);
   fresh_ctx.MaterializeFromCfg(current_cfg);
   {
     std::string bad_insn;
@@ -2206,7 +2224,7 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       result.expected_summary = FormatWordsSummary(snap.post_machine_words);
 
       const std::vector<std::string> cand_asm_lines =
-          inverses_->InvertGasAppendInsn(snap.post_machine_words);
+          inverses_->InvertGasAppendInsn(snap.post_machine_words, snap.c_flags);
       if (!snap.post_machine_words.empty() && cand_asm_lines.empty()) {
         result.matches = false;
         result.diff_detail = "InvertGasAppendInsn returned empty assembly lines";

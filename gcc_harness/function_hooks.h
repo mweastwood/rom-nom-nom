@@ -94,6 +94,7 @@ struct SubfunctionBoundarySnapshot {
   SubfunctionId subfunction_id = SubfunctionId::kJump1Optimize;
   int optimize_level = 2;
   std::vector<std::string> c_flags;
+  absl::flat_hash_map<std::string, uint32_t> gp_symbol_sizes;
   RtlControlFlowGraph pre_state;
   RtlControlFlowGraph post_state;
 
@@ -110,6 +111,7 @@ struct FunctionCompilationTrace {
   std::string function_name;
   int optimize_level = 2;
   std::vector<std::string> c_flags;
+  absl::flat_hash_map<std::string, uint32_t> gp_symbol_sizes;
 
   // Pass-level canonical CFGs (`.00.rtl` through `.12.dbr`), each carrying its
   // populated `RtlSidebandState`.
@@ -353,7 +355,8 @@ class FunctionHooks {
   SubfunctionBoundarySnapshot ExecuteSubfunctionBoundary(
       SubfunctionId subfunction_id, const RtlControlFlowGraph& pre_state,
       absl::Span<const std::string> pre_asm_lines = {}, int optimize_level = 2,
-      absl::Span<const std::string> c_flags = {});
+      absl::Span<const std::string> c_flags = {},
+      const absl::flat_hash_map<std::string, uint32_t>& gp_symbol_sizes = {});
 
   // Convenience overload re-executing the subfunction boundary described by
   // `snap_template` (including its `subfunction_id`, `optimize_level`, and
@@ -367,11 +370,11 @@ class FunctionHooks {
   // Steps 100% in-process from `rtl_00_cfg` (`.00.rtl`) through every GCC 2.7.2
   // RTL pass (`.01.jump` .. `.12.dbr`), `final`, and Binutils 2.6 GAS,
   // capturing all 13 `pass_snapshots` and all 30 `SubfunctionBoundarySnapshot`s.
-  FunctionCompilationTrace TraceRtlPipeline(const RtlControlFlowGraph& rtl_00_cfg,
-                                            int optimize_level = 2,
-                                            std::string_view function_name = "harness_func",
-                                            std::string_view test_name = "",
-                                            absl::Span<const std::string> c_flags = {});
+  FunctionCompilationTrace TraceRtlPipeline(
+      const RtlControlFlowGraph& rtl_00_cfg, int optimize_level = 2,
+      std::string_view function_name = "harness_func", std::string_view test_name = "",
+      absl::Span<const std::string> c_flags = {},
+      const absl::flat_hash_map<std::string, uint32_t>& gp_symbol_sizes = {});
 
   // Compiles `c_source` for `function_name` 100% in-process and traces its
   // forward execution across all 13 RTL passes, 26 subfunctions, `final`, and

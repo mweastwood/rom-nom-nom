@@ -673,6 +673,12 @@ absl::StatusOr<RtlExpr> ParseExprImpl(std::string_view text, size_t* pos) {
           return first_or.status();
         }
         expr.children.push_back(std::move(*first_or));
+        SkipWhitespace(text, pos);
+        if (*pos < text.size() && text[*pos] == ')') {
+          expr.int_val = -1;
+          ++(*pos);
+          return expr;
+        }
       } else {
         std::string_view id_tok = ReadAtom(text, pos);
         if (!absl::SimpleAtoi(id_tok, &expr.int_val)) {
@@ -944,7 +950,9 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out, bool gcc_print_rtl = 
         out->push_back(' ');
         FormatExprImpl(expr.children[1], out, gcc_print_rtl);
       } else {
-        absl::StrAppend(out, " ", expr.int_val);
+        if (expr.int_val >= 0) {
+          absl::StrAppend(out, " ", expr.int_val);
+        }
         if (!expr.children.empty()) {
           out->push_back(' ');
           FormatExprImpl(expr.children[0], out, gcc_print_rtl);
@@ -1073,7 +1081,7 @@ RtlExpr BuildRegNotesChainExpr(absl::Span<const RtlRegNote> notes) {
     node.op = it->list_op;
     node.mode = it->kind;
     node.raw_mode = it->raw_kind;
-    if (it->list_op == RtlOp::kInsnList && it->insn_id >= 0 && it->datum.IsNil()) {
+    if (it->list_op == RtlOp::kInsnList && it->datum.IsNil()) {
       node.int_val = it->insn_id;
       node.children.push_back(std::move(chain));
     } else {

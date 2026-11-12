@@ -376,7 +376,9 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
     ASSERT_TRUE(dump_in.good()) << "Missing dump file: " << dump_path;
     std::ostringstream ss;
     ss << dump_in.rdbuf();
-    RtlPassDump pass_dump = ParseRtlPassDump(pass, ss.str());
+    std::string dump_text = ss.str();
+    absl::StrReplaceAll({{"\"*$LC", "\"$LC"}, {"\"*.LC", "\".LC"}}, &dump_text);
+    RtlPassDump pass_dump = ParseRtlPassDump(pass, dump_text);
     const RtlFunctionDump* fn_dump = pass_dump.FindFunction(fn_name);
     if (fn_dump == nullptr) {
       // At `-O0` and `-O1`, `cc1` leaves dump files empty for skipped passes.
@@ -386,17 +388,14 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
     const RtlControlFlowGraph real_cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
     RtlControlFlowGraph trace_cfg = trace.pass_snapshots.at(pass);
     // Stock external `cc1` (`ARG_POINTER_REGNUM == 0`) prints `arg_pointer_rtx`
-    // as `(reg:SI 0 $0)` in pre-reload `-da` dumps, whereas in-process
-    // `TraceForwardCompilation` disambiguates `arg_pointer_rtx` as
-    // `(reg:SI 0 argp)`.
-    if (pass != RtlPassKind::kGreg && pass != RtlPassKind::kSched2 && pass != RtlPassKind::kJump2 &&
-        pass != RtlPassKind::kDbr) {
-      for (auto& blk : trace_cfg.rpo_blocks) {
-        for (std::string& insn : blk.instructions) {
-          absl::StrReplaceAll({{" 0 argp)", " 0 $0)"}}, &insn);
-        }
-        blk.SyncRtlInsnsFromInstructions();
+    // as `(reg:SI 0 $0)` in `-da` dumps (including inside `REG_EQUIV` notes on
+    // post-reload dumps), whereas in-process `TraceForwardCompilation`
+    // disambiguates `arg_pointer_rtx` as `(reg:SI 0 argp)`.
+    for (auto& blk : trace_cfg.rpo_blocks) {
+      for (std::string& insn : blk.instructions) {
+        absl::StrReplaceAll({{" 0 argp)", " 0 $0)"}}, &insn);
       }
+      blk.SyncRtlInsnsFromInstructions();
     }
     const RtlCfgPassComparison cmp = trace_cfg.CompareAgainst(real_cfg);
     EXPECT_TRUE(cmp.MatchesExactly())
@@ -409,7 +408,32 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
   ASSERT_TRUE(elf_or.ok()) << elf_or.status();
   const auto elf_fn_or = elf_or->ExtractFunction(fn_name);
   ASSERT_TRUE(elf_fn_or.ok()) << elf_fn_or.status();
-  EXPECT_EQ(trace.final_machine_words, elf_fn_or->raw_words)
+
+  std::vector<uint32_t> trace_words = trace.final_machine_words;
+  std::vector<uint32_t> elf_words = elf_fn_or->raw_words;
+  // Normalize `.text` trailing 16-byte section-alignment `nop` (`0x00000000`)
+  // padding when the full TU contains multiple symbols or section switches.
+  while (trace_words.size() > elf_words.size() && trace_words.back() == 0u) {
+    trace_words.pop_back();
+  }
+  while (elf_words.size() > trace_words.size() && elf_words.back() == 0u) {
+    elf_words.pop_back();
+  }
+  // When the full TU defines multiple `.rdata`/`.data`/`.bss` objects before
+  // `fn_name`, section-relative `R_MIPS_HI16` (`5`), `R_MIPS_LO16` (`6`), and
+  // `R_MIPS_LITERAL` (`8`) relocations in `elf_words` embed the TU-wide section
+  // offset in the low 16 bits, whereas single-function `trace_words` starts its
+  // local constant pool at offset 0. Verify matching relocation opcodes and
+  // mask the relocation immediate field on those section-relative words.
+  for (const ElfRelocation& rel : elf_fn_or->relocations) {
+    const size_t w = rel.function_offset / 4;
+    if (w < trace_words.size() && w < elf_words.size() && !rel.symbol_name.empty() &&
+        rel.symbol_name.front() == '.' && (rel.type == 5u || rel.type == 6u || rel.type == 8u)) {
+      trace_words[w] &= 0xffff0000u;
+      elf_words[w] &= 0xffff0000u;
+    }
+  }
+  EXPECT_EQ(trace_words, elf_words)
       << "Machine words mismatch against real KMC AS in " << fn_name << "; trace asm:\n"
       << trace.final_asm_text;
 
@@ -658,7 +682,7 @@ typedef struct { u8 b[16]; } UnalignedBlock16;
 )";
 
   const auto profiles = GetRoundTripCompilerFlagProfiles();
-  ASSERT_EQ(profiles.size(), 5u);
+  ASSERT_EQ(profiles.size(), 7u);
 
   const std::vector<RoundTripTestCase> base_cases = GetBaseRoundTripTestCases();
   ASSERT_GE(base_cases.size(), 10u);
@@ -695,7 +719,7 @@ TEST(CompilationTraceTest, SubfunctionBoundaryRightInverseAndPersistedCFlagsAcro
 
   constexpr std::string_view kSource = "int add_shift(int a, int b) { return (a + b) << 2; }\n";
   const auto profiles = GetRoundTripCompilerFlagProfiles();
-  ASSERT_EQ(profiles.size(), 5u);
+  ASSERT_EQ(profiles.size(), 7u);
 
   for (const auto& profile : profiles) {
     SCOPED_TRACE(profile.suffix);
@@ -751,6 +775,93 @@ double compute_entry(int tag, int x) {
   EXPECT_TRUE(saw_helper_a);
   EXPECT_TRUE(saw_helper_b);
   EXPECT_TRUE(saw_g_bias);
+}
+
+TEST(CompilationTraceTest, NewConstructCategoriesAndRetailFlagProfilesMatchActualToolchain) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  const auto toolchain_or = Toolchain::Discover(ToolchainOptions{.mode = ToolchainMode::kOriginal});
+  ASSERT_TRUE(toolchain_or.ok()) << toolchain_or.status();
+
+  static constexpr std::string_view kBaseTypesPreamble = R"(
+typedef signed char s8;
+typedef unsigned char u8;
+typedef signed short s16;
+typedef unsigned short u16;
+typedef signed int s32;
+typedef unsigned int u32;
+typedef signed long long s64;
+typedef unsigned long long u64;
+typedef float f32;
+typedef double f64;
+typedef struct { u8 b[4]; } UnalignedWord;
+typedef struct { u8 b[6]; } UnalignedBlock6;
+typedef struct { u8 b[8]; } UnalignedBlock8;
+typedef struct { u8 b[12]; } UnalignedBlock12;
+typedef struct { u8 b[16]; } UnalignedBlock16;
+)";
+
+  const std::vector<RoundTripTestCase>& base_cases = GetBaseRoundTripTestCases();
+  EXPECT_GE(base_cases.size(), 592u);
+
+  const std::string_view target_names[] = {
+      "Int64AddSubAccum",
+      "PlainCharLoadPromoteAndCompare",
+      "BitfieldReadModifyWriteFlags",
+      "UnionTaggedVariantEval",
+      "StructByVal2ByteArg",
+      "StructReturnSmall2ByteAndByValArg",
+      "HighPressureGpr14LiveAcrossTwoCalls",
+      "HighPressureSpillsPlus8OutgoingArgs",
+      "VariadicSumCountedInts",
+      "VolatileStructHardwareRegs",
+      "StringLiteralPassToLogger",
+      "StaticBssScalarCounterStep",
+      "StaticDataInitializedScalars",
+      "StaticRodataConstLookupTable",
+      "SmallDataTentativeCommGlobals",
+      "SmallDataExternScalarGlobals",
+      "SmallDataSdataEightBytePair",
+      "IndirectCallVtableStructOps",
+      "TwoDenseSwitchesSequential",
+      "BackwardGotoCrossedTwoLabelCycle",
+  };
+
+  const RoundTripCompilerFlagProfile retail_profiles[] = {
+      {"O2_WaG", {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}},
+      {"O2_G8_WaO1", {"-O2", "-G", "8", "-mips2", "-mcpu=r4000", "-Wa,-O1"}},
+      {"O2_Mips1_UnsignedChar_WaO2", {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"}},
+  };
+
+  for (std::string_view target_name : target_names) {
+    const RoundTripTestCase* found = nullptr;
+    for (const auto& tc : base_cases) {
+      if (tc.test_name == target_name) {
+        found = &tc;
+        break;
+      }
+    }
+    ASSERT_NE(found, nullptr) << "Missing base test case: " << target_name;
+
+    for (const auto& prof : retail_profiles) {
+      RoundTripTestCase tc = *found;
+      tc.test_name = absl::StrCat(found->test_name, "_", prof.suffix);
+      tc.options.c_flags = prof.c_flags;
+      SCOPED_TRACE(tc.test_name);
+
+      const FunctionCompilationTrace trace = hooks.TraceForwardCompilation(tc);
+      VerifyTraceCompletenessAndReplayability(&ctx, &hooks, trace, /*optimize_level=*/2);
+
+      std::string full_source = absl::StrCat(kBaseTypesPreamble, "\n");
+      if (!tc.options.extra_types_header.empty()) {
+        absl::StrAppend(&full_source, tc.options.extra_types_header, "\n");
+      }
+      absl::StrAppend(&full_source, tc.original_c);
+      VerifyTraceMatchesActualToolchain(*toolchain_or, full_source, tc.function_name,
+                                        tc.options.c_flags, trace);
+    }
+  }
 }
 
 }  // namespace

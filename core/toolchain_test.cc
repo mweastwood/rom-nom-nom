@@ -124,6 +124,36 @@ TEST(ToolchainTest, BuildsKmcAsArgsWithO0Default) {
   EXPECT_THAT(args, Contains("-O0"));
 }
 
+TEST(ToolchainTest, HonorsExplicitSmallDataThresholdInGcc272AndKmcAsArgs) {
+  ToolchainOptions options;
+  auto toolchain_or = Toolchain::Discover(options);
+  ASSERT_TRUE(toolchain_or.ok()) << toolchain_or.status();
+
+  std::vector<std::string> opt_flags = {"-O2", "-G", "8", "-mips2", "-mcpu=r4000", "-Wa,-O1"};
+  auto cc_args = toolchain_or->BuildGcc272CompileArgs(opt_flags, {}, "in.c", "out.s272");
+  EXPECT_THAT(cc_args, Contains("8"));
+  EXPECT_THAT(cc_args, Not(Contains("0")));
+
+  auto as_args = toolchain_or->BuildKmcAsArgs(opt_flags, {}, {}, "out.s272", "out.o");
+  EXPECT_THAT(as_args,
+              IsSupersetOf(std::vector<std::string>{"-mcpu=r4000", "-mips2", "-G", "8", "-O1"}));
+  EXPECT_THAT(as_args, Not(Contains("0")));
+}
+
+TEST(ToolchainTest, HonorsMips1IsaInGcc272AndKmcAsArgs) {
+  ToolchainOptions options;
+  auto toolchain_or = Toolchain::Discover(options);
+  ASSERT_TRUE(toolchain_or.ok()) << toolchain_or.status();
+
+  std::vector<std::string> opt_flags = {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"};
+  auto cc_args = toolchain_or->BuildGcc272CompileArgs(opt_flags, {}, "in.c", "out.s272");
+  EXPECT_THAT(cc_args, IsSupersetOf(std::vector<std::string>{"-O2", "-mips1", "-funsigned-char"}));
+
+  auto as_args = toolchain_or->BuildKmcAsArgs(opt_flags, {}, {}, "out.s272", "out.o");
+  EXPECT_THAT(as_args,
+              IsSupersetOf(std::vector<std::string>{"-mcpu=r3000", "-mips1", "-G", "0", "-O2"}));
+}
+
 TEST(ToolchainTest, BuildsGnuAsArgsCorrectly) {
   ToolchainOptions options;
   auto toolchain_or = Toolchain::Discover(options);

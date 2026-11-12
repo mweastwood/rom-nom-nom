@@ -467,7 +467,7 @@ struct StateBox {
   int c;
 };
 extern struct StateBox g_box;
-extern int g_small_val;
+int g_small_val;
 extern int mix_fn(int, double);
 
 int dual_switch_crossjump(int n, const int* s1, const int* s2, double v) {
@@ -501,6 +501,14 @@ int dual_switch_crossjump(int n, const int* s1, const int* s2, double v) {
     const auto ms_trace = hooks_.TraceForwardCompilation(
         kLinkedMultiSwitchSched2Src, "dual_switch_crossjump", flags, "pass02_linked_multi_switch");
     ASSERT_GE(ms_trace.stage0_input.jump_tables.size(), 2u);
+    bool saw_gp_small_val = false;
+    for (const Stage0Relocation& rel : ms_trace.stage0_input.relocations) {
+      if (rel.symbol_name == "g_small_val" && rel.kind == Stage0RelocKind::kMipsGpRel16) {
+        saw_gp_small_val = true;
+        break;
+      }
+    }
+    ASSERT_TRUE(saw_gp_small_val);
 
     // 1. Relocatable `.o` `VerifySuffixRightInverse(RtlPassKind::kSched2, ...)`:
     const RightInverseResult reloc_res =
@@ -513,6 +521,7 @@ int dual_switch_crossjump(int n, const int* s1, const int* s2, double v) {
     linked.base_vram = 0x80020000u;
     linked.gp_vram = 0x80060000u;
     linked.profile = ms_trace.stage0_input.profile;
+    linked.profile.gp_symbol_sizes.clear();
     linked.jump_tables = ms_trace.stage0_input.jump_tables;
     linked.constant_pool = ms_trace.stage0_input.constant_pool;
 
@@ -582,7 +591,10 @@ int dual_switch_crossjump(int n, const int* s1, const int* s2, double v) {
       }
       sym_vrams.emplace_back(rel.symbol_name, assigned);
       linked.vram_to_symbol[assigned] = rel.symbol_name;
-      if (max_add > 0) {
+      const auto gp_sz_it = ms_trace.stage0_input.profile.gp_symbol_sizes.find(rel.symbol_name);
+      if (gp_sz_it != ms_trace.stage0_input.profile.gp_symbol_sizes.end() && gp_sz_it->second > 0) {
+        linked.vram_to_symbol_size[assigned] = gp_sz_it->second;
+      } else if (max_add > 0) {
         linked.vram_to_symbol_size[assigned] = span_bytes;
       }
     }

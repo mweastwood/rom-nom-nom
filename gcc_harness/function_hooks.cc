@@ -81,6 +81,7 @@ extern int flag_cse_skip_blocks;
 extern int flag_force_mem;
 extern int flag_inline_functions;
 extern int flag_caller_saves;
+extern int caller_save_needed;
 extern int flag_expensive_optimizations;
 extern int flag_strength_reduce;
 extern int flag_schedule_insns;
@@ -89,6 +90,7 @@ extern int flag_delayed_branch;
 extern int flag_omit_frame_pointer;
 extern int frame_pointer_needed;
 extern int cse_not_expected;
+extern int rtx_equal_function_value_matters;
 extern const char* mips_cpu_string;
 extern const char* mips_isa_string;
 extern int g_switch_set;
@@ -122,6 +124,12 @@ void init_recog();
 void init_recog_no_volatile();
 void clear_const_double_mem();
 int recog(rtx_def* x0, rtx_def* insn, int* pnum_clobbers);
+int recog_memoized(rtx_def* insn);
+void insn_extract(rtx_def* insn);
+int scratch_operand(rtx_def* op, int mode);
+extern rtx_def* recog_operand[];
+extern const int insn_n_operands[];
+extern int (*const insn_operand_predicate[][10])();
 void allocate_for_life_analysis();
 void regclass_init();
 void regclass(rtx_def* f, int nregs);
@@ -160,6 +168,21 @@ extern int set_noreorder;
 extern int set_nomacro;
 extern int mips_branch_likely;
 extern int const_labelno;
+extern void* const_hash_table[1009];
+extern int in_section;
+struct GccExternList {
+  GccExternList* next;
+  char* name;
+  int size;
+};
+extern GccExternList* extern_head;
+extern void* char_type_node;
+extern void* signed_char_type_node;
+extern void* unsigned_char_type_node;
+extern void* void_type_node;
+extern void* error_mark_node;
+int int_size_in_bytes(void* type);
+int aggregate_value_p(void* exp);
 int get_pool_size();
 void output_constant_pool(char* fnname, void* fndecl);
 void text_section();
@@ -240,14 +263,17 @@ struct GasFrchain {
 };
 
 extern void* gas_text_section;
+extern char bfd_und_section[];
 extern GasFrchain* frchain_now;
 extern GasFrag* frag_now;
 extern int mips_noreorder;
 extern int mips_optimize;
 extern int mips_debug;
-extern int mips_isa;
-extern int file_mips_isa;
-extern int mips_cpu;
+extern int gas_mips_isa;
+extern int gas_file_mips_isa;
+extern int gas_mips_cpu;
+extern int gas_g_switch_value;
+extern int gas_g_switch_seen;
 extern int prev_insn_valid;
 extern char* insn_error;
 extern GasExpressionS imm_expr;
@@ -257,9 +283,12 @@ extern int offset_reloc;
 
 void* subseg_new(const char* name, int subseg);
 void subseg_set(void* seg, int subseg);
+GasSymbol* symbol_find_or_make(const char* name);
 const char* S_GET_NAME(GasSymbol* s);
 void* S_GET_SEGMENT(GasSymbol* s);
+void S_SET_SEGMENT(GasSymbol* s, void* seg);
 unsigned long S_GET_VALUE(GasSymbol* s);
+void S_SET_VALUE(GasSymbol* s, unsigned long val);
 void frag_init();
 void frag_wane(GasFrag* frag);
 void frag_new(int old_frags_var_max_size);
@@ -494,7 +523,7 @@ struct CseBasicBlockData {
   int nsets;
   rtx_def* last;
   int path_size;
-  CseBranchPathEntry path[10];
+  CseBranchPathEntry path[11];
 };
 
 int cse_main(rtx_def* f, int nregs, int after_loop, FILE* file);
@@ -592,15 +621,75 @@ struct GccOptabHandler {
 };
 struct GccOptab {
   int code;
-  GccOptabHandler handlers[28];
+  GccOptabHandler handlers[32];
 };
+extern GccOptab* add_optab;
+extern GccOptab* sub_optab;
+extern GccOptab* smul_optab;
+extern GccOptab* smul_highpart_optab;
+extern GccOptab* umul_highpart_optab;
+extern GccOptab* smul_widen_optab;
+extern GccOptab* umul_widen_optab;
 extern GccOptab* sdiv_optab;
 extern GccOptab* sdivmod_optab;
 extern GccOptab* udiv_optab;
 extern GccOptab* udivmod_optab;
 extern GccOptab* smod_optab;
 extern GccOptab* umod_optab;
+extern GccOptab* flodiv_optab;
+extern GccOptab* ftrunc_optab;
+extern GccOptab* and_optab;
+extern GccOptab* ior_optab;
+extern GccOptab* xor_optab;
+extern GccOptab* ashl_optab;
+extern GccOptab* lshr_optab;
+extern GccOptab* ashr_optab;
+extern GccOptab* rotl_optab;
+extern GccOptab* rotr_optab;
+extern GccOptab* smin_optab;
+extern GccOptab* smax_optab;
+extern GccOptab* umin_optab;
+extern GccOptab* umax_optab;
+extern GccOptab* mov_optab;
+extern GccOptab* movstrict_optab;
+extern GccOptab* neg_optab;
+extern GccOptab* abs_optab;
+extern GccOptab* one_cmpl_optab;
+extern GccOptab* ffs_optab;
+extern GccOptab* sqrt_optab;
+extern GccOptab* sin_optab;
+extern GccOptab* cos_optab;
+extern GccOptab* cmp_optab;
+extern GccOptab* ucmp_optab;
+extern GccOptab* tst_optab;
+extern GccOptab* strlen_optab;
+extern int extendtab[32][32][2];
+extern int fixtab[32][32][2];
+extern int fixtrunctab[32][32][2];
+extern int floattab[32][32][2];
+extern int movstr_optab[32];
+extern int reload_in_optab[32];
+extern int reload_out_optab[32];
+extern int movcc_gen_code[32];
+extern int setcc_gen_code[116];
+extern void* bcc_gen_fctn[116];
+extern int word_mode;
+extern int ptr_mode;
+extern int mips_isa;
+extern int mips_cpu;
+extern GccObstack permanent_obstack;
+extern GccObstack* current_obstack;
+extern GccObstack* saveable_obstack;
+extern GccObstack* expression_obstack;
+void save_emit_status(void* p);
+void restore_emit_status(void* p);
+void init_reg_sets();
+void init_regs();
 void init_all_optabs();
+void init_mov_optab();
+void init_expmed();
+void init_expr_once();
+void init_caller_save();
 
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
@@ -624,6 +713,60 @@ uint32_t ReadBigEndian32(const char* p) {
   const auto* u = reinterpret_cast<const unsigned char*>(p);
   return (static_cast<uint32_t>(u[0]) << 24) | (static_cast<uint32_t>(u[1]) << 16) |
          (static_cast<uint32_t>(u[2]) << 8) | static_cast<uint32_t>(u[3]);
+}
+
+struct ScopedAsmOutStream {
+  FILE* saved_asm_out_file = asm_out_file;
+  FILE* saved_asm_out_data_file = asm_out_data_file;
+  FILE* saved_asm_out_text_file = asm_out_text_file;
+
+  explicit ScopedAsmOutStream(FILE* fp) {
+    asm_out_file = fp;
+    asm_out_data_file = fp;
+    asm_out_text_file = fp;
+  }
+
+  ~ScopedAsmOutStream() {
+    asm_out_file = saved_asm_out_file;
+    asm_out_data_file = saved_asm_out_data_file;
+    asm_out_text_file = saved_asm_out_text_file;
+  }
+};
+
+std::vector<GasSymbol*>& TouchedGasSymbols() {
+  static auto* syms = new std::vector<GasSymbol*>();
+  return *syms;
+}
+
+void RecordTouchedGasSymbol(GasSymbol* sym) {
+  if (sym == nullptr) {
+    return;
+  }
+  auto& touched = TouchedGasSymbols();
+  if (std::find(touched.begin(), touched.end(), sym) == touched.end()) {
+    touched.push_back(sym);
+  }
+}
+
+void SyncGasGpSymbols(const absl::flat_hash_map<std::string, uint32_t>& gp_symbol_sizes) {
+  for (GasSymbol* prev : TouchedGasSymbols()) {
+    if (prev != nullptr) {
+      S_SET_SEGMENT(prev, static_cast<void*>(bfd_und_section));
+      S_SET_VALUE(prev, 0);
+    }
+  }
+  TouchedGasSymbols().clear();
+  for (const auto& [name, byte_size] : gp_symbol_sizes) {
+    if (name.empty() || byte_size == 0) {
+      continue;
+    }
+    GasSymbol* sym = symbol_find_or_make(name.c_str());
+    if (sym != nullptr) {
+      S_SET_SEGMENT(sym, static_cast<void*>(bfd_und_section));
+      S_SET_VALUE(sym, static_cast<unsigned long>(byte_size));
+      RecordTouchedGasSymbol(sym);
+    }
+  }
 }
 
 void PopulateInsnCodesWithVolatileOk(Rtx first) {
@@ -1083,21 +1226,22 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
   char* start_buf = nullptr;
   size_t start_len = 0;
   FILE* start_fp = open_memstream(&start_buf, &start_len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = start_fp;
-  alignas(16) uint8_t saved_fn_status[2048] = {};
-  const bool emit_pool = include_prologue_epilogue && get_pool_size() > 0;
-  if (emit_pool) {
-    save_varasm_status(saved_fn_status);
-    text_section();
-    output_constant_pool(const_cast<char*>("harness_func"), current_function_decl);
-    function_section(current_function_decl);
+  {
+    ScopedAsmOutStream start_stream(start_fp);
+    alignas(16) uint8_t saved_fn_status[2048] = {};
+    const bool emit_pool = include_prologue_epilogue && get_pool_size() > 0;
+    if (emit_pool) {
+      save_varasm_status(saved_fn_status);
+      in_section = 0;
+      text_section();
+      output_constant_pool(const_cast<char*>("harness_func"), current_function_decl);
+      function_section(current_function_decl);
+    }
+    final_start_function(head, start_fp, optimize);
+    if (emit_pool) {
+      restore_varasm_status(saved_fn_status);
+    }
   }
-  final_start_function(head, start_fp, optimize);
-  if (emit_pool) {
-    restore_varasm_status(saved_fn_status);
-  }
-  asm_out_file = saved_asm;
   std::fclose(start_fp);
   std::string out;
   if (include_prologue_epilogue && start_buf != nullptr && start_len > 0) {
@@ -1112,9 +1256,10 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
   char* end_buf = nullptr;
   size_t end_len = 0;
   FILE* end_fp = open_memstream(&end_buf, &end_len);
-  asm_out_file = end_fp;
-  final_end_function(head, end_fp, optimize);
-  asm_out_file = saved_asm;
+  {
+    ScopedAsmOutStream end_stream(end_fp);
+    final_end_function(head, end_fp, optimize);
+  }
   std::fclose(end_fp);
   if (include_prologue_epilogue && end_buf != nullptr && end_len > 0) {
     out.append(end_buf, end_len);
@@ -1201,13 +1346,13 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = mem_fp;
-  Rtx next = final_scan_insn(insn, mem_fp, optimize, prescan, 0);
-  if (next_insn_out != nullptr) {
-    *next_insn_out = next;
+  {
+    ScopedAsmOutStream scan_stream(mem_fp);
+    Rtx next = final_scan_insn(insn, mem_fp, optimize, prescan, 0);
+    if (next_insn_out != nullptr) {
+      *next_insn_out = next;
+    }
   }
-  asm_out_file = saved_asm;
   std::fclose(mem_fp);
 
   if (standalone_annulled_branch) {
@@ -1254,10 +1399,10 @@ std::string FunctionHooks::RunFunctionPrologue(int frame_size, uint32_t saved_gp
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = mem_fp;
-  function_prologue(mem_fp, frame_size);
-  asm_out_file = saved_asm;
+  {
+    ScopedAsmOutStream prologue_stream(mem_fp);
+    function_prologue(mem_fp, frame_size);
+  }
   std::fclose(mem_fp);
 
   std::string out(buf != nullptr ? buf : "", len);
@@ -1281,10 +1426,10 @@ std::string FunctionHooks::RunFunctionEpilogue(int frame_size, uint32_t saved_gp
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = mem_fp;
-  function_epilogue(mem_fp, frame_size);
-  asm_out_file = saved_asm;
+  {
+    ScopedAsmOutStream epilogue_stream(mem_fp);
+    function_epilogue(mem_fp, frame_size);
+  }
   std::fclose(mem_fp);
 
   std::string out(buf != nullptr ? buf : "", len);
@@ -1308,11 +1453,11 @@ std::string FunctionHooks::RunFunctionPrologueEpilogue(int frame_size, uint32_t 
   char* buf = nullptr;
   size_t len = 0;
   FILE* mem_fp = open_memstream(&buf, &len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = mem_fp;
-  function_prologue(mem_fp, frame_size);
-  function_epilogue(mem_fp, frame_size);
-  asm_out_file = saved_asm;
+  {
+    ScopedAsmOutStream pe_stream(mem_fp);
+    function_prologue(mem_fp, frame_size);
+    function_epilogue(mem_fp, frame_size);
+  }
   std::fclose(mem_fp);
 
   std::string out(buf != nullptr ? buf : "", len);
@@ -1326,13 +1471,13 @@ std::vector<uint32_t> FunctionHooks::RunGasMdAssemble(std::string_view asm_text)
 
 Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view asm_text) {
   struct ScopedGasIsaGuard {
-    int saved = mips_isa;
+    int saved = gas_mips_isa;
     ScopedGasIsaGuard() {
-      if (mips_isa < 2) {
-        mips_isa = 3;
+      if (gas_mips_isa <= 0) {
+        gas_mips_isa = 3;
       }
     }
-    ~ScopedGasIsaGuard() { mips_isa = saved; }
+    ~ScopedGasIsaGuard() { gas_mips_isa = saved; }
   } gas_isa_guard;
   constexpr int kGasOpAbsent = 1;
   constexpr int kBfdReloc32 = 2;
@@ -1367,6 +1512,12 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
   std::vector<PendingNumericFixup> pending_numeric_fixups;
   std::vector<RawDataBlock> raw_data_blocks;
 
+  for (const char* lit_sec : {".rdata", ".lit4", ".lit8"}) {
+    subseg_new(lit_sec, 0);
+    frag_wane(frag_now);
+    frag_new(0);
+    frag_grow(256);
+  }
   subseg_set(gas_text_section, 0);
   frag_wane(frag_now);
   frag_new(0);
@@ -1403,9 +1554,38 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
   }
   mips_no_prev_insn();
 
-  uint64_t dummy_sym[8] = {};
+  GasSymbol* const label_probe_sym = symbol_find_or_make("__rnn_text_label_probe__");
+  if (label_probe_sym != nullptr) {
+    S_SET_SEGMENT(label_probe_sym, gas_text_section);
+    label_probe_sym->sy_frag = frag_now;
+    S_SET_VALUE(label_probe_sym, 0);
+  }
+  struct PendingTextLabel {
+    std::vector<std::string> names;
+    GasFrag* frag = nullptr;
+    unsigned long byte_offset = 0;
+  };
+  std::vector<PendingTextLabel> resolved_text_labels;
+  std::vector<std::string> pending_text_label_names;
+  auto flush_pending_text_labels = [&]() {
+    if (!pending_text_label_names.empty() && label_probe_sym != nullptr) {
+      resolved_text_labels.push_back(PendingTextLabel{
+          .names = std::move(pending_text_label_names),
+          .frag = label_probe_sym->sy_frag,
+          .byte_offset = S_GET_VALUE(label_probe_sym),
+      });
+      pending_text_label_names.clear();
+    }
+  };
+  auto flush_text_delays_and_labels = [&]() {
+    subseg_set(gas_text_section, 0);
+    mips_emit_delays();
+    flush_pending_text_labels();
+    mips_define_label(nullptr);
+  };
   std::string current_section = ".text";
   size_t active_data_idx = static_cast<size_t>(-1);
+  absl::flat_hash_map<int, int> numeric_label_instance;
 
   auto parse_int64_or_uint64 = [](std::string_view tok, uint64_t* out_val) -> bool {
     std::string s(absl::StripAsciiWhitespace(tok));
@@ -1459,13 +1639,37 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
         break;
       }
       if (current_section == ".text") {
+        std::string resolved_lbl(before);
+        int num_lbl = 0;
+        if (!before.empty() &&
+            std::all_of(before.begin(), before.end(),
+                        [](unsigned char c) { return absl::ascii_isdigit(c); }) &&
+            absl::SimpleAtoi(before, &num_lbl)) {
+          const int inst = ++numeric_label_instance[num_lbl];
+          resolved_lbl = absl::StrFormat("__numlbl_%d_%d", num_lbl, inst);
+        }
         subseg_set(gas_text_section, 0);
-        mips_emit_delays();
-        label_word_index[std::string(before)] = count_emitted_words();
-        mips_define_label(dummy_sym);
+        if (label_probe_sym != nullptr) {
+          S_SET_SEGMENT(label_probe_sym, gas_text_section);
+          label_probe_sym->sy_frag = frag_now;
+          S_SET_VALUE(label_probe_sym, static_cast<unsigned long>(frag_now_fix()));
+          pending_text_label_names.push_back(std::move(resolved_lbl));
+          mips_define_label(label_probe_sym);
+        } else {
+          label_word_index[std::move(resolved_lbl)] = count_emitted_words();
+        }
       } else {
+        const std::string data_label(before);
+        void* data_seg = subseg_new(current_section.c_str(), 0);
+        GasSymbol* sym = symbol_find_or_make(data_label.c_str());
+        if (sym != nullptr && data_seg != nullptr) {
+          S_SET_SEGMENT(sym, data_seg);
+          S_SET_VALUE(sym, 0);
+          RecordTouchedGasSymbol(sym);
+        }
+        subseg_set(gas_text_section, 0);
         raw_data_blocks.push_back(RawDataBlock{
-            .label_name = std::string(before),
+            .label_name = data_label,
             .section_name = current_section,
         });
         active_data_idx = raw_data_blocks.size() - 1;
@@ -1490,31 +1694,31 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
         active_data_idx = static_cast<size_t>(-1);
         subseg_set(gas_text_section, 0);
       } else if (match_dir("rdata")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         current_section = ".rdata";
         active_data_idx = static_cast<size_t>(-1);
       } else if (match_dir("rodata")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         current_section = ".rodata";
         active_data_idx = static_cast<size_t>(-1);
       } else if (match_dir("sdata")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         current_section = ".sdata";
         active_data_idx = static_cast<size_t>(-1);
       } else if (match_dir("lit4")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         current_section = ".lit4";
         active_data_idx = static_cast<size_t>(-1);
       } else if (match_dir("lit8")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         current_section = ".lit8";
         active_data_idx = static_cast<size_t>(-1);
       } else if (match_dir("data") || match_dir("bss") || match_dir("sbss")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         current_section = std::string(line.substr(0, line.find_first_of(" \t")));
         active_data_idx = static_cast<size_t>(-1);
       } else if (match_dir("section")) {
-        mips_emit_delays();
+        flush_text_delays_and_labels();
         std::string_view sec_arg = absl::StripAsciiWhitespace(rest.substr(7));
         const size_t comma = sec_arg.find_first_of(", \t");
         std::string_view sec_tok =
@@ -1594,6 +1798,7 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
         if (opt == "noreorder") {
           subseg_set(gas_text_section, 0);
           mips_emit_delays();
+          flush_pending_text_labels();
           mips_noreorder = 1;
         } else if (opt == "reorder") {
           if (mips_noreorder != 0) {
@@ -1625,7 +1830,19 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
       size_t last_comma = line.rfind(',');
       std::string_view last_arg = absl::StripAsciiWhitespace(
           last_comma != std::string_view::npos ? line.substr(last_comma + 1) : line.substr(sp));
-      if (!last_arg.empty() &&
+      if (last_arg.size() >= 2 && (last_arg.back() == 'f' || last_arg.back() == 'b')) {
+        std::string_view digits = last_arg.substr(0, last_arg.size() - 1);
+        int num_lbl = 0;
+        if (!digits.empty() &&
+            std::all_of(digits.begin(), digits.end(),
+                        [](unsigned char c) { return absl::ascii_isdigit(c); }) &&
+            absl::SimpleAtoi(digits, &num_lbl)) {
+          const int cur_inst = numeric_label_instance[num_lbl];
+          const int target_inst = (last_arg.back() == 'f') ? (cur_inst + 1) : cur_inst;
+          target_lbl = absl::StrFormat("__numlbl_%d_%d", num_lbl, target_inst);
+        }
+      }
+      if (target_lbl.empty() && !last_arg.empty() &&
           !(last_arg.front() == '$' && last_arg.size() > 1 && last_arg[1] != 'L') &&
           !absl::ascii_isdigit(last_arg.front()) && last_arg.front() != '-') {
         target_lbl = std::string(last_arg);
@@ -1637,6 +1854,7 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
     std::replace(mutable_line.begin(), mutable_line.end(), '\t', ' ');
     md_assemble(mutable_line.data());
     subseg_set(gas_text_section, 0);
+    flush_pending_text_labels();
     const size_t post_words = count_emitted_words();
 
     if (post_words > pre_words) {
@@ -1671,8 +1889,7 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
     }
   }
 
-  subseg_set(gas_text_section, 0);
-  mips_emit_delays();
+  flush_text_delays_and_labels();
   absl::flat_hash_map<const GasFrag*, size_t> frag_word_base;
   for (GasFrag* f = first_frag; f != nullptr; f = f->fr_next) {
     frag_word_base[f] = out.machine_words.size();
@@ -1682,6 +1899,14 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
     }
     if (f == frag_now) {
       break;
+    }
+  }
+  for (const PendingTextLabel& pl : resolved_text_labels) {
+    const size_t base_words =
+        (pl.frag != nullptr && frag_word_base.contains(pl.frag)) ? frag_word_base.at(pl.frag) : 0;
+    const size_t word_idx = base_words + static_cast<size_t>(pl.byte_offset / 4);
+    for (const std::string& lbl_name : pl.names) {
+      label_word_index[lbl_name] = word_idx;
     }
   }
 
@@ -1781,7 +2006,8 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
 
       if (fx->fx_r_type == kBfdRelocMipsJmp) {
         const uint32_t opcode = (out.machine_words[word_index] >> 26) & 0x3fu;
-        if (opcode == 0x02u && find_local_or_exact_label(sym_name).has_value()) {
+        if (opcode == 0x02u && (sym_name.find('\002') != std::string::npos ||
+                                find_local_or_exact_label(sym_name).has_value())) {
           continue;
         }
       }
@@ -1798,10 +2024,23 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
           const size_t byte_size = (sec_name == ".lit4") ? 4u : 8u;
           std::vector<uint32_t> lit_words;
           if (fx->fx_addsy->sy_frag != nullptr) {
-            const unsigned long lit_off = S_GET_VALUE(fx->fx_addsy);
-            for (size_t off = 0; off + 4 <= byte_size; off += 4) {
-              lit_words.push_back(
-                  ReadBigEndian32(fx->fx_addsy->sy_frag->fr_literal + lit_off + off));
+            GasFrag* lit_frag = fx->fx_addsy->sy_frag;
+            unsigned long lit_off = S_GET_VALUE(fx->fx_addsy);
+            while (lit_frag != nullptr && lit_frag->fr_next != nullptr &&
+                   lit_off >= static_cast<unsigned long>(lit_frag->fr_fix)) {
+              lit_off -= static_cast<unsigned long>(lit_frag->fr_fix);
+              lit_frag = lit_frag->fr_next;
+            }
+            for (size_t off = 0; lit_frag != nullptr && off + 4 <= byte_size; off += 4) {
+              while (lit_frag != nullptr && lit_frag->fr_next != nullptr &&
+                     lit_off + off >= static_cast<unsigned long>(lit_frag->fr_fix)) {
+                const unsigned long consumed = static_cast<unsigned long>(lit_frag->fr_fix);
+                lit_off = (lit_off >= consumed) ? (lit_off - consumed) : 0;
+                lit_frag = lit_frag->fr_next;
+              }
+              if (lit_frag != nullptr) {
+                lit_words.push_back(ReadBigEndian32(lit_frag->fr_literal + lit_off + off));
+              }
             }
           }
           out.constant_pool.push_back(Stage0ConstantPoolEntry{
@@ -1815,27 +2054,44 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
         sym_name = lit_it->second;
       }
 
+      const int64_t addend = static_cast<int64_t>(static_cast<long>(fx->fx_offset));
       Stage0RelocKind reloc_kind = Stage0RelocKind::kMips32;
       switch (fx->fx_r_type) {
         case kBfdRelocMipsJmp:
           reloc_kind = Stage0RelocKind::kMips26;
           break;
         case kBfdRelocHi16:
+          reloc_kind = Stage0RelocKind::kMipsHi16;
+          out.machine_words[word_index] = (out.machine_words[word_index] & 0xffff0000u) |
+                                          (static_cast<uint32_t>(addend >> 16) & 0xffffu);
+          break;
         case kBfdRelocHi16S:
           reloc_kind = Stage0RelocKind::kMipsHi16;
+          out.machine_words[word_index] =
+              (out.machine_words[word_index] & 0xffff0000u) |
+              (static_cast<uint32_t>((addend + 0x8000) >> 16) & 0xffffu);
           break;
         case kBfdRelocLo16:
           reloc_kind = Stage0RelocKind::kMipsLo16;
+          out.machine_words[word_index] = (out.machine_words[word_index] & 0xffff0000u) |
+                                          (static_cast<uint32_t>(addend) & 0xffffu);
           break;
         case kBfdRelocGpRel16:
           reloc_kind = Stage0RelocKind::kMipsGpRel16;
+          out.machine_words[word_index] = (out.machine_words[word_index] & 0xffff0000u) |
+                                          (static_cast<uint32_t>(addend) & 0xffffu);
           break;
         case kBfdReloc32:
           reloc_kind = Stage0RelocKind::kMips32;
+          out.machine_words[word_index] = static_cast<uint32_t>(addend);
           break;
-        case kBfdRelocMipsLiteral:
+        case kBfdRelocMipsLiteral: {
           reloc_kind = Stage0RelocKind::kMipsLiteral;
+          const int64_t lit_val = static_cast<int64_t>(S_GET_VALUE(fx->fx_addsy)) + addend - 0x4000;
+          out.machine_words[word_index] = (out.machine_words[word_index] & 0xffff0000u) |
+                                          (static_cast<uint32_t>(lit_val) & 0xffffu);
           break;
+        }
         default:
           continue;
       }
@@ -1844,7 +2100,7 @@ Stage0FunctionInput FunctionHooks::RunGasMdAssembleWithMetadata(std::string_view
           .word_index = word_index,
           .kind = reloc_kind,
           .symbol_name = std::move(sym_name),
-          .addend = static_cast<int64_t>(static_cast<long>(fx->fx_offset)),
+          .addend = addend,
       });
     }
   }
@@ -1895,6 +2151,7 @@ uint32_t FunctionHooks::RunGasMipsIp(std::string_view insn_asm_line) {
 
 std::vector<uint32_t> FunctionHooks::RunGasMacro(std::string_view macro_asm_line) {
   constexpr int kGasOpAbsent = 1;
+  subseg_set(gas_text_section, 0);
   frag_wane(frag_now);
   frag_new(0);
   frag_grow(256);
@@ -1950,6 +2207,7 @@ std::vector<uint32_t> FunctionHooks::RunGasMacro(std::string_view macro_asm_line
 
 uint32_t FunctionHooks::RunGasAppendInsn(std::string_view insn_asm_line) {
   constexpr int kGasOpAbsent = 1;
+  subseg_set(gas_text_section, 0);
   frag_wane(frag_now);
   frag_new(0);
   mips_noreorder = 1;
@@ -2001,6 +2259,7 @@ std::vector<uint32_t> FunctionHooks::RunGasAppendInsnReorder(
   std::vector<PendingBranch> pending_branches;
   std::vector<uint32_t> words;
 
+  subseg_set(gas_text_section, 0);
   frag_wane(frag_now);
   frag_new(0);
   frag_grow(8192);
@@ -2019,6 +2278,11 @@ std::vector<uint32_t> FunctionHooks::RunGasAppendInsnReorder(
     return total;
   };
 
+  struct ScopedReorderIsaGuard {
+    int saved_isa = gas_mips_isa;
+    ScopedReorderIsaGuard() { gas_mips_isa = 3; }
+    ~ScopedReorderIsaGuard() { gas_mips_isa = saved_isa; }
+  } reorder_isa_guard;
   mips_optimize = 2;
   mips_noreorder = 0;
   mips_no_prev_insn();
@@ -2849,9 +3113,17 @@ void FunctionHooks::PrepareSchedState(Rtx first) {
 
 namespace {
 
+struct SavedInsnFlowSnapshot {
+  Rtx insn = nullptr;
+  int code = 0;
+  Rtx pattern = nullptr;
+  int insn_code = -1;
+  Rtx reg_notes = nullptr;
+};
+
 struct SavedFlowState {
   bool valid = false;
-  std::vector<std::pair<Rtx, Rtx>> insn_reg_notes;
+  std::vector<SavedInsnFlowSnapshot> insns;
   std::vector<int> saved_n_refs;
   std::vector<short> saved_n_sets;
   std::vector<short> saved_n_deaths;
@@ -2889,7 +3161,13 @@ SavedFlowState CaptureExistingFlowState(Rtx first) {
   }
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
     if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
-      state.insn_reg_notes.emplace_back(insn, insn->fld[6].rtx);
+      state.insns.push_back(SavedInsnFlowSnapshot{
+          .insn = insn,
+          .code = insn->code,
+          .pattern = insn->fld[3].rtx,
+          .insn_code = insn->fld[4].rtint,
+          .reg_notes = insn->fld[6].rtx,
+      });
       insn->fld[6].rtx = nullptr;
     }
   }
@@ -2914,8 +3192,15 @@ void RestoreExistingFlowState(const SavedFlowState& state) {
   if (!state.valid) {
     return;
   }
-  for (const auto& [insn, notes] : state.insn_reg_notes) {
-    insn->fld[6].rtx = notes;
+  for (const SavedInsnFlowSnapshot& snap : state.insns) {
+    if (snap.insn->code == kNote && snap.insn->fld[4].rtint == kNoteInsnDeleted) {
+      snap.insn->code = snap.code;
+      snap.insn->fld[3].rtx = snap.pattern;
+      snap.insn->fld[4].rtint = snap.insn_code;
+    }
+    if (snap.code != kCallInsn || snap.insn->fld[6].rtx == nullptr) {
+      snap.insn->fld[6].rtx = snap.reg_notes;
+    }
   }
   const int nregs = std::min<int>(state.saved_live_length.size(), max_regno);
   for (int r = 0; r < nregs; ++r) {
@@ -2972,11 +3257,13 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
         saved_live_length.assign(reg_live_length, reg_live_length + saved_nregs);
       }
     }
+    const SavedFlowState saved_flow = CaptureExistingFlowState(head);
     StripFlowGeneratedNotes(head);
     restore_reg_data(head);
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
     flow_analysis(head, max_regno, nullptr);
+    RestoreExistingFlowState(saved_flow);
     if (!saved_n_refs.empty() && reg_n_refs != nullptr) {
       const int limit = std::min<int>(saved_n_refs.size(), max_regno);
       for (int r = 0; r < limit; ++r) {
@@ -3043,11 +3330,13 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
         saved_live_length.assign(reg_live_length, reg_live_length + saved_nregs);
       }
     }
+    const SavedFlowState saved_flow = CaptureExistingFlowState(head);
     StripFlowGeneratedNotes(head);
     restore_reg_data(head);
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
     flow_analysis(head, max_regno, nullptr);
+    RestoreExistingFlowState(saved_flow);
     if (!saved_n_refs.empty() && reg_n_refs != nullptr) {
       const int limit = std::min<int>(saved_n_refs.size(), max_regno);
       for (int r = 0; r < limit; ++r) {
@@ -3178,6 +3467,37 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
 }
 
 void FunctionHooks::PrepareLocalAllocState(Rtx first) {
+  struct PreAllocatedScratch {
+    Rtx insn;
+    Rtx op;
+    int hard_regno;
+  };
+  std::vector<PreAllocatedScratch> pre_scratches;
+  init_recog();
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
+      continue;
+    }
+    if (insn->fld[3].rtx == nullptr || insn->fld[3].rtx->code == kSequence) {
+      continue;
+    }
+    const int icode = recog_memoized(insn);
+    if (icode < 0) {
+      continue;
+    }
+    insn_extract(insn);
+    const int nops = insn_n_operands[icode];
+    for (int op_idx = 0; op_idx < nops; ++op_idx) {
+      if (insn_operand_predicate[icode][op_idx] == reinterpret_cast<int (*)()>(scratch_operand) &&
+          recog_operand[op_idx] != nullptr && recog_operand[op_idx]->code == kReg &&
+          recog_operand[op_idx]->fld[0].rtint >= 0 &&
+          recog_operand[op_idx]->fld[0].rtint < kFirstPseudoRegister) {
+        pre_scratches.push_back({insn, recog_operand[op_idx], recog_operand[op_idx]->fld[0].rtint});
+        recog_operand[op_idx]->code = kScratch;
+      }
+    }
+  }
+
   const SavedFlowState saved_flow = CaptureExistingFlowState(first);
   StripFlowGeneratedNotes(first);
   restore_reg_data(first);
@@ -3187,11 +3507,34 @@ void FunctionHooks::PrepareLocalAllocState(Rtx first) {
   RestoreExistingFlowState(saved_flow);
   regclass(first, max_regno);
 
-  const int max_qty_val = std::max(32, (max_regno - kFirstPseudoRegister) * 2 + max_scratch + 16);
+  const int max_qty_val = std::max(32, (max_regno - kFirstPseudoRegister) * 2 + max_scratch +
+                                           static_cast<int>(pre_scratches.size()) + 16);
   scratch_list_length = max_qty_val;
   scratch_index = 0;
-  scratch_list = AllocZeroed<Rtx>(max_qty_val);
-  scratch_block = AllocZeroed<int>(max_qty_val);
+  if (scratch_list != nullptr) {
+    std::free(scratch_list);
+    scratch_list = nullptr;
+  }
+  if (scratch_block != nullptr) {
+    std::free(scratch_block);
+    scratch_block = nullptr;
+  }
+  scratch_list = static_cast<Rtx*>(std::calloc(max_qty_val, sizeof(Rtx)));
+  scratch_block = static_cast<int*>(std::calloc(max_qty_val, sizeof(int)));
+  for (const PreAllocatedScratch& ps : pre_scratches) {
+    ps.op->code = kReg;
+    ps.op->fld[0].rtint = ps.hard_regno;
+    ps.op->used = 0;
+    if (scratch_index < scratch_list_length) {
+      const int uid = ps.insn->fld[0].rtint;
+      const int b = (uid >= 0 && uid <= max_uid_for_flow && uid_block_number != nullptr &&
+                     uid_block_number[uid] >= 0)
+                        ? uid_block_number[uid]
+                        : 0;
+      scratch_block[scratch_index] = b;
+      scratch_list[scratch_index++] = ps.op;
+    }
+  }
   qty_phys_reg = AllocZeroed<short>(max_qty_val);
   qty_phys_copy_sugg = AllocZeroed<uint64_t>(max_qty_val * 2);
   qty_phys_num_copy_sugg = AllocZeroed<short>(max_qty_val);
@@ -3605,8 +3948,7 @@ int FunctionHooks::RunReload(Rtx first, int global) {
     saved_renumber.assign(reg_renumber, reg_renumber + saved_max_regno);
   }
   const int saved_frame_offset = frame_offset;
-  char saved_regs_ever_live[kFirstPseudoRegister];
-  std::memcpy(saved_regs_ever_live, regs_ever_live, sizeof(saved_regs_ever_live));
+  const bool saved_ra_live = (regs_ever_live[31] != 0);
 
   reload_completed = 0;
   if ((obey_regdecls != 0 || optimize == 0) && global_flag == 0) {
@@ -3617,8 +3959,15 @@ int FunctionHooks::RunReload(Rtx first, int global) {
     regclass_init();
     regclass(head, max_regno);
     stupid_life_analysis(head, max_regno, nullptr);
+    if (scratch_list != nullptr) {
+      std::free(scratch_list);
+      scratch_list = nullptr;
+    }
+    if (scratch_block != nullptr) {
+      std::free(scratch_block);
+      scratch_block = nullptr;
+    }
     scratch_list_length = 0;
-    scratch_list = nullptr;
   } else {
     PrepareLocalAllocState(head);
   }
@@ -3630,9 +3979,20 @@ int FunctionHooks::RunReload(Rtx first, int global) {
     }
   }
   frame_offset = saved_frame_offset;
-  for (int i = 0; i < kFirstPseudoRegister; ++i) {
-    if (saved_regs_ever_live[i] != 0) {
-      regs_ever_live[i] = 1;
+  if (saved_ra_live) {
+    regs_ever_live[31] = 1;
+  }
+
+  caller_save_needed = 0;
+  if (flag_caller_saves != 0 && reg_renumber != nullptr && reg_n_calls_crossed != nullptr) {
+    const int nregs = std::max(max_regno, max_reg_num());
+    for (int r = kFirstPseudoRegister; r < nregs; ++r) {
+      const int hr = reg_renumber[r];
+      if (hr >= 0 && hr < kFirstPseudoRegister && reg_n_calls_crossed[r] > 0 &&
+          call_used_regs[hr] != 0) {
+        caller_save_needed = 1;
+        break;
+      }
     }
   }
 
@@ -3766,8 +4126,10 @@ void FunctionHooks::RunCombineInstructions(Rtx first, int nregs) {
     }
   }
   if (!has_existing_log_links) {
+    const SavedFlowState saved_flow = CaptureExistingFlowState(head);
     StripFlowGeneratedNotes(head);
     flow_analysis(head, num_regs, nullptr);
+    RestoreExistingFlowState(saved_flow);
   } else {
     PrepareCombineState(head);
   }
@@ -3787,6 +4149,7 @@ void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
   if (head == nullptr) {
     return;
   }
+  const SavedFlowState saved_flow = CaptureExistingFlowState(head);
   restore_reg_data(head);
   const int num_regs = nregs > 0 ? nregs : max_reg_num();
   max_regno = num_regs;
@@ -3803,6 +4166,7 @@ void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
   if (!has_existing_log_links) {
     StripFlowGeneratedNotes(head);
     flow_analysis(head, num_regs, nullptr);
+    RestoreExistingFlowState(saved_flow);
   }
 
   const int alloc_regs = std::max(num_regs, max_reg_num()) + 16;
@@ -4423,18 +4787,19 @@ int ExecuteCsePassGranular(FunctionHooks* hooks, GccContext* ctx, Rtx f, int nre
   init_recog();
 
   max_reg = nregs;
-  all_minus_one = AllocZeroed<int>(nregs);
-  consec_ints = AllocZeroed<int>(nregs);
-  for (i = 0; i < nregs; ++i) {
+  const int alloc_regs = std::max(256, nregs + 64);
+  all_minus_one = AllocZeroed<int>(alloc_regs);
+  consec_ints = AllocZeroed<int>(alloc_regs);
+  for (i = 0; i < alloc_regs; ++i) {
     all_minus_one[i] = -1;
     consec_ints[i] = i;
   }
 
-  reg_qty = AllocZeroed<int>(nregs);
-  reg_in_table = AllocZeroed<int>(nregs);
-  reg_tick = AllocZeroed<int>(nregs);
-  reg_next_eqv = AllocZeroed<int>(nregs);
-  reg_prev_eqv = AllocZeroed<int>(nregs);
+  reg_qty = AllocZeroed<int>(alloc_regs);
+  reg_in_table = AllocZeroed<int>(alloc_regs);
+  reg_tick = AllocZeroed<int>(alloc_regs);
+  reg_next_eqv = AllocZeroed<int>(alloc_regs);
+  reg_prev_eqv = AllocZeroed<int>(alloc_regs);
 
   memory_extend_rtx = ctx->ParseRtx("(zero_extend (nil))");
   std::memset(cse_table, 0, sizeof(cse_table));
@@ -5170,27 +5535,60 @@ void ApplyOptimizeLevelFlags(int optimize_level) {
     flag_inline_functions = (optimize_level >= 3) ? 1 : 0;
     SetGccFOption("rerun-cse-after-loop", 1);
   }
-  for (GccOptab* tab :
-       {sdiv_optab, sdivmod_optab, udiv_optab, udivmod_optab, smod_optab, umod_optab}) {
-    if (tab != nullptr) {
-      const int code_for_nothing = tab->handlers[kVoidMode].insn_code;
-      tab->handlers[kSiMode].insn_code = code_for_nothing;
-      tab->handlers[kDiMode].insn_code = code_for_nothing;
-    }
-  }
-  init_all_optabs();
 }
 
 void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize_level) {
   flag_signed_char = 1;
   ApplyOptimizeLevelFlags(out_optimize_level != nullptr ? *out_optimize_level : 2);
 
+  init_reg_sets();
   target_flags = 0;
   mips_cpu_string = nullptr;
   mips_isa_string = nullptr;
   set_target_switch(const_cast<char*>(""));
   g_switch_set = 1;
   g_switch_value = 0;
+
+  // Mirror the KMC `gcc` driver `CC1_SPEC` defaults prepended before user `-m*`
+  // switches (`-mips1`/`-mips2` -> `-mfp32 -mgp32`; `-mips3`/`-mips4` ->
+  // `%{!msingle-float:%{!m4650:-mfp64}} -mgp64`; `-m4650` -> `-mcpu=r4650`).
+  int cc1_isa = 0;
+  bool has_msingle_float = false;
+  bool has_m4650 = false;
+  for (std::string_view flag : c_flags) {
+    if (flag == "-mips1") {
+      cc1_isa = 1;
+    } else if (flag == "-mips2") {
+      cc1_isa = 2;
+    } else if (flag == "-mips3") {
+      cc1_isa = 3;
+    } else if (flag == "-mips4") {
+      cc1_isa = 4;
+    } else if (flag == "-msingle-float") {
+      has_msingle_float = true;
+    } else if (flag == "-mdouble-float") {
+      has_msingle_float = false;
+    } else if (flag == "-m4650") {
+      has_m4650 = true;
+    } else if (flag == "-mno-4650") {
+      has_m4650 = false;
+    }
+  }
+  if (cc1_isa == 1 || cc1_isa == 2) {
+    set_target_switch(const_cast<char*>("fp32"));
+    set_target_switch(const_cast<char*>("gp32"));
+  } else if (cc1_isa == 3 || cc1_isa == 4) {
+    if (!has_msingle_float && !has_m4650) {
+      set_target_switch(const_cast<char*>("fp64"));
+    }
+    set_target_switch(const_cast<char*>("gp64"));
+  }
+  static std::string cpu_storage;
+  static std::string isa_storage;
+  if (has_m4650) {
+    cpu_storage = "r4650";
+    mips_cpu_string = cpu_storage.c_str();
+  }
 
   for (size_t i = 0; i < c_flags.size(); ++i) {
     std::string_view flag = c_flags[i];
@@ -5224,11 +5622,9 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
     } else if (absl::StartsWith(flag, "-f")) {
       SetGccFOption(flag.substr(2), 1);
     } else if (absl::StartsWith(flag, "-mcpu=")) {
-      static std::string cpu_storage;
       cpu_storage = std::string(flag.substr(6));
       mips_cpu_string = cpu_storage.c_str();
     } else if (absl::StartsWith(flag, "-mips")) {
-      static std::string isa_storage;
       isa_storage = std::string(flag.substr(5));
       mips_isa_string = isa_storage.c_str();
     } else if (absl::StartsWith(flag, "-m")) {
@@ -5238,12 +5634,176 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
   }
   override_options();
 
+  // Re-initialize target-flag-dependent `word_mode`/`ptr_mode`, register modes,
+  // optabs, expmed costs, direct load/store tables, and caller-save templates
+  // (`toplev.c:compile_file`) whenever the active target/ABI configuration
+  // changes, keeping all four GCC obstacks pointed at `permanent_obstack` and
+  // preserving active `emit-rtl.c` sequence/UID state and `reload_completed`.
+  word_mode = (target_flags & 0x2000) != 0 ? kDiMode : kSiMode;
+  ptr_mode = (target_flags & 0x0002) != 0 ? kDiMode : kSiMode;
+  init_regs();
+  static bool has_cached_backend_init = false;
+  static std::tuple<int, int, int, int, int> cached_backend_key{};
+  const auto cur_backend_key =
+      std::make_tuple(target_flags, mips_isa, mips_cpu, optimize > 0 ? 1 : 0, flag_caller_saves);
+  if (add_optab != nullptr && (!has_cached_backend_init || cur_backend_key != cached_backend_key)) {
+    has_cached_backend_init = true;
+    cached_backend_key = cur_backend_key;
+
+    GccObstack* const saved_current_obstack = current_obstack;
+    GccObstack* const saved_saveable_obstack = saveable_obstack;
+    GccObstack* const saved_rtl_obstack = rtl_obstack;
+    GccObstack* const saved_expression_obstack = expression_obstack;
+    current_obstack = &permanent_obstack;
+    saveable_obstack = &permanent_obstack;
+    rtl_obstack = &permanent_obstack;
+    expression_obstack = &permanent_obstack;
+
+    const int saved_reload_completed = reload_completed;
+    alignas(16) char saved_emit_status[2048] = {};
+    save_emit_status(saved_emit_status);
+    reload_completed = 0;
+
+    const int code_for_nothing = add_optab->handlers[kVoidMode].insn_code;
+    for (GccOptab* tab :
+         {add_optab,        sub_optab,        smul_optab, smul_highpart_optab, umul_highpart_optab,
+          smul_widen_optab, umul_widen_optab, sdiv_optab, sdivmod_optab,       udiv_optab,
+          udivmod_optab,    smod_optab,       umod_optab, flodiv_optab,        ftrunc_optab,
+          and_optab,        ior_optab,        xor_optab,  ashl_optab,          lshr_optab,
+          ashr_optab,       rotl_optab,       rotr_optab, smin_optab,          smax_optab,
+          umin_optab,       umax_optab,       mov_optab,  movstrict_optab,     neg_optab,
+          abs_optab,        one_cmpl_optab,   ffs_optab,  sqrt_optab,          sin_optab,
+          cos_optab,        cmp_optab,        ucmp_optab, tst_optab,           strlen_optab}) {
+      if (tab != nullptr) {
+        for (int m = 0; m < kNumMachineModes; ++m) {
+          tab->handlers[m].insn_code = code_for_nothing;
+        }
+      }
+    }
+    for (int m1 = 0; m1 < kNumMachineModes; ++m1) {
+      movstr_optab[m1] = code_for_nothing;
+      reload_in_optab[m1] = code_for_nothing;
+      reload_out_optab[m1] = code_for_nothing;
+      movcc_gen_code[m1] = code_for_nothing;
+      for (int m2 = 0; m2 < kNumMachineModes; ++m2) {
+        for (int u = 0; u < 2; ++u) {
+          extendtab[m1][m2][u] = code_for_nothing;
+          fixtab[m1][m2][u] = code_for_nothing;
+          fixtrunctab[m1][m2][u] = code_for_nothing;
+          floattab[m1][m2][u] = code_for_nothing;
+        }
+      }
+    }
+    for (int c = 0; c < kNumRtxCode; ++c) {
+      setcc_gen_code[c] = code_for_nothing;
+      bcc_gen_fctn[c] = nullptr;
+    }
+    init_all_optabs();
+    for (int m1 = 0; m1 < kNumMachineModes; ++m1) {
+      for (int m2 = 0; m2 < kNumMachineModes; ++m2) {
+        fixtrunctab[m1][m2][1] = fixtrunctab[m1][m2][0];
+      }
+    }
+    init_mov_optab();
+    init_expmed();
+    init_expr_once();
+    if (flag_caller_saves != 0) {
+      init_caller_save();
+    }
+
+    restore_emit_status(saved_emit_status);
+    reload_completed = saved_reload_completed;
+    current_obstack = saved_current_obstack;
+    saveable_obstack = saved_saveable_obstack;
+    rtl_obstack = saved_rtl_obstack;
+    expression_obstack = saved_expression_obstack;
+  }
+
+  // Synchronize `char_type_node` (and any qualified variants on its
+  // `TYPE_NEXT_VARIANT` chain) with `flag_signed_char`, since `init_lex()` only
+  // initializes `char_type_node` once at process startup.
+  if (char_type_node != nullptr && signed_char_type_node != nullptr &&
+      unsigned_char_type_node != nullptr) {
+    void* src_char = (flag_signed_char != 0) ? signed_char_type_node : unsigned_char_type_node;
+    void* min_val = *reinterpret_cast<void**>(static_cast<char*>(src_char) + 96);
+    void* max_val = *reinterpret_cast<void**>(static_cast<char*>(src_char) + 104);
+    for (void* v = char_type_node; v != nullptr;
+         v = *reinterpret_cast<void**>(static_cast<char*>(v) + 112)) {
+      uint32_t& flags = *reinterpret_cast<uint32_t*>(static_cast<char*>(v) + 16);
+      if (flag_signed_char != 0) {
+        flags &= ~(1u << 14);
+      } else {
+        flags |= (1u << 14);
+      }
+      *reinterpret_cast<void**>(static_cast<char*>(v) + 96) = min_val;
+      *reinterpret_cast<void**>(static_cast<char*>(v) + 104) = max_val;
+    }
+  }
+
   // Configure in-process Binutils 2.6 GAS globals (`tc-mips.c:md_parse_option`)
   // to match `Toolchain::BuildKmcAsArgs`:
+  // - Default `gas_mips_isa` is 3 (`-mips3`), overridden by `-mips1..4`.
+  // - Default `gas_mips_cpu` is 3000 (`-mcpu=r3000`) for `-mips1` or 4300
+  //   (`-mcpu=vr4300`) otherwise, overridden by explicit `-mcpu=*`.
+  // - `gas_g_switch_value` mirrors `-G` (`0` by default).
   // - Default `mips_optimize` is 1 at `-O0` and 2 at `-O1`/`-O2`/`-O3`.
   // - `-Wa,-g` / `-Wa,-g2` sets `mips_debug = 2` and `mips_optimize = 0`.
   // - `-Wa,-O0` sets `mips_optimize = 1`; `-Wa,-O` / `-Wa,-O1` / `-Wa,-O2` /
   //   `-Wa,-O3` sets `mips_optimize = 2`.
+  auto parse_gas_cpu = [](std::string_view arg) -> int {
+    if (arg.empty() || arg == "default" || arg == "DEFAULT") {
+      return -1;
+    }
+    if (arg.front() == 'v' || arg.front() == 'V') {
+      arg.remove_prefix(1);
+    }
+    if (!arg.empty() && (arg.front() == 'r' || arg.front() == 'R')) {
+      arg.remove_prefix(1);
+    }
+    if (arg == "2000" || arg == "2k" || arg == "2K") return 2000;
+    if (arg == "3000" || arg == "3k" || arg == "3K") return 3000;
+    if (arg == "4000" || arg == "4k" || arg == "4K") return 4000;
+    if (arg == "4010") return 4010;
+    if (arg == "4100") return 4100;
+    if (arg == "4300") return 4300;
+    if (arg == "4400") return 4400;
+    if (arg == "4600" || arg == "orion") return 4600;
+    if (arg == "4650") return 4650;
+    if (arg == "6000" || arg == "6k" || arg == "6K") return 6000;
+    if (arg == "8000" || arg == "8k" || arg == "8K") return 8000;
+    if (arg == "10000" || arg == "10k" || arg == "10K") return 10000;
+    return -1;
+  };
+
+  int gas_isa = 3;
+  std::string_view explicit_mcpu;
+  for (std::string_view flag : c_flags) {
+    if (flag == "-mips1") {
+      gas_isa = 1;
+    } else if (flag == "-mips2") {
+      gas_isa = 2;
+    } else if (flag == "-mips3") {
+      gas_isa = 3;
+    } else if (flag == "-mips4") {
+      gas_isa = 4;
+    } else if (absl::StartsWith(flag, "-mcpu=")) {
+      explicit_mcpu = flag.substr(6);
+    }
+  }
+  int gas_cpu = (gas_isa == 1) ? 3000 : 4300;
+  if (!explicit_mcpu.empty()) {
+    const int parsed_cpu = parse_gas_cpu(explicit_mcpu);
+    if (parsed_cpu != -1) {
+      gas_cpu = parsed_cpu;
+    }
+  }
+
+  gas_mips_isa = gas_isa;
+  gas_file_mips_isa = gas_isa;
+  gas_mips_cpu = gas_cpu;
+  gas_g_switch_value = g_switch_value;
+  gas_g_switch_seen = 1;
+
   mips_debug = 0;
   mips_optimize = (optimize == 0) ? 1 : 2;
   for (std::string_view flag : c_flags) {
@@ -5256,6 +5816,19 @@ void ApplyCompilerFlags(absl::Span<const std::string> c_flags, int* out_optimize
           mips_optimize = 1;
         } else if (absl::StartsWith(wa_opt, "-O")) {
           mips_optimize = 2;
+        } else if (wa_opt == "-mips1") {
+          gas_mips_isa = gas_file_mips_isa = 1;
+        } else if (wa_opt == "-mips2") {
+          gas_mips_isa = gas_file_mips_isa = 2;
+        } else if (wa_opt == "-mips3") {
+          gas_mips_isa = gas_file_mips_isa = 3;
+        } else if (wa_opt == "-mips4") {
+          gas_mips_isa = gas_file_mips_isa = 4;
+        } else if (absl::StartsWith(wa_opt, "-mcpu=")) {
+          const int parsed_cpu = parse_gas_cpu(wa_opt.substr(6));
+          if (parsed_cpu != -1) {
+            gas_mips_cpu = parsed_cpu;
+          }
         }
       }
     }
@@ -5342,6 +5915,7 @@ std::vector<std::string> ExtractAsmLinesWithLabels(std::string_view asm_text) {
     raw_out.push_back(".set reorder");
   }
 
+  bool in_text_section = true;
   for (std::string_view raw_line : absl::StrSplit(asm_text, '\n')) {
     size_t comment_pos = raw_line.find('#');
     if (comment_pos != std::string_view::npos) {
@@ -5353,7 +5927,22 @@ std::vector<std::string> ExtractAsmLinesWithLabels(std::string_view asm_text) {
     }
     if (line.front() == '.' && !absl::EndsWith(line, ":")) {
       std::string_view rest = absl::StripAsciiWhitespace(line.substr(1));
-      if (absl::StartsWith(rest, "set") && (rest.size() == 3 || absl::ascii_isspace(rest[3]))) {
+      auto match_dir = [&](std::string_view kw) {
+        return absl::StartsWith(rest, kw) &&
+               (rest.size() == kw.size() ||
+                absl::ascii_isspace(static_cast<unsigned char>(rest[kw.size()])) ||
+                rest[kw.size()] == ',');
+      };
+      if (match_dir("text")) {
+        in_text_section = true;
+      } else if (match_dir("rdata") || match_dir("rodata") || match_dir("sdata") ||
+                 match_dir("data") || match_dir("bss") || match_dir("sbss") || match_dir("lit4") ||
+                 match_dir("lit8")) {
+        in_text_section = false;
+      } else if (match_dir("section")) {
+        std::string_view sec_arg = absl::StripAsciiWhitespace(rest.substr(7));
+        in_text_section = absl::StartsWith(sec_arg, ".text");
+      } else if (in_text_section && match_dir("set")) {
         std::string_view opt = absl::StripAsciiWhitespace(rest.substr(3));
         if (opt == "noreorder" || opt == "reorder") {
           raw_out.push_back(absl::StrCat(".set ", opt));
@@ -5361,11 +5950,26 @@ std::vector<std::string> ExtractAsmLinesWithLabels(std::string_view asm_text) {
       }
       continue;
     }
+    if (!in_text_section) {
+      continue;
+    }
     std::string normalized(line);
     std::replace(normalized.begin(), normalized.end(), '\t', ' ');
     // Strip the function entry label `<fn_name>:` while keeping local labels
-    // `$L<n>:` / `.L<n>:`.
-    if (absl::EndsWith(normalized, ":") && !is_local_label_prefix(normalized, 0)) {
+    // `$L<n>:` / `.L<n>:` and numeric directional labels `1:` / `2:` / `3:`.
+    auto is_numeric_local_label = [](std::string_view s) {
+      if (s.size() < 2 || s.back() != ':') {
+        return false;
+      }
+      for (size_t k = 0; k + 1 < s.size(); ++k) {
+        if (!absl::ascii_isdigit(static_cast<unsigned char>(s[k]))) {
+          return false;
+        }
+      }
+      return true;
+    };
+    if (absl::EndsWith(normalized, ":") && !is_local_label_prefix(normalized, 0) &&
+        !is_numeric_local_label(normalized)) {
       continue;
     }
     record_labels(normalized);
@@ -5399,6 +6003,7 @@ std::vector<std::string> ExtractAsmLinesWithLabels(std::string_view asm_text) {
 
 std::vector<std::string> ExtractInstructionOnlyAsmLines(std::string_view asm_text) {
   std::vector<std::string> out;
+  bool in_text_section = true;
   for (std::string_view raw_line : absl::StrSplit(asm_text, '\n')) {
     size_t comment_pos = raw_line.find('#');
     if (comment_pos != std::string_view::npos) {
@@ -5416,7 +6021,30 @@ std::vector<std::string> ExtractInstructionOnlyAsmLines(std::string_view asm_tex
       }
       line = absl::StripAsciiWhitespace(line.substr(colon_pos + 1));
     }
-    if (line.empty() || line.front() == '.') {
+    if (line.empty()) {
+      continue;
+    }
+    if (line.front() == '.') {
+      std::string_view rest = absl::StripAsciiWhitespace(line.substr(1));
+      auto match_dir = [&](std::string_view kw) {
+        return absl::StartsWith(rest, kw) &&
+               (rest.size() == kw.size() ||
+                absl::ascii_isspace(static_cast<unsigned char>(rest[kw.size()])) ||
+                rest[kw.size()] == ',');
+      };
+      if (match_dir("text")) {
+        in_text_section = true;
+      } else if (match_dir("rdata") || match_dir("rodata") || match_dir("sdata") ||
+                 match_dir("data") || match_dir("bss") || match_dir("sbss") || match_dir("lit4") ||
+                 match_dir("lit8")) {
+        in_text_section = false;
+      } else if (match_dir("section")) {
+        std::string_view sec_arg = absl::StripAsciiWhitespace(rest.substr(7));
+        in_text_section = absl::StartsWith(sec_arg, ".text");
+      }
+      continue;
+    }
+    if (!in_text_section) {
       continue;
     }
     std::string normalized(line);
@@ -5459,10 +6087,14 @@ struct InProcessCc1CompilationResult {
   std::string fn_asm_text;
   int frame_size_bytes = 0;
   int outgoing_args_size = 0;
+  bool is_variadic = false;
+  bool returns_aggregate_in_memory = false;
+  std::vector<MipsPrologueArgSpec> prologue_args;
   std::vector<int> saved_gpr_regnos;
   std::vector<int> saved_fpr_regnos;
   std::optional<std::string> epilogue_delay_pattern;
   std::vector<Stage0ConstantPoolEntry> constant_pool;
+  absl::flat_hash_map<std::string, uint32_t> gp_symbol_sizes;
 };
 
 std::vector<Stage0ConstantPoolEntry> FilterReferencedConstantPool(
@@ -5532,6 +6164,9 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   source_buf.push_back('\n');
 
   clear_const_double_mem();
+  std::memset(const_hash_table, 0, sizeof(const_hash_table));
+  in_section = 0;
+  extern_head = nullptr;
   const_labelno = 0;
   permanent_allocation(1);
   current_function_decl = nullptr;
@@ -5573,9 +6208,6 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   char* asm_buf = nullptr;
   size_t asm_len = 0;
   FILE* asm_fp = open_memstream(&asm_buf, &asm_len);
-  FILE* saved_asm = asm_out_file;
-  asm_out_file = asm_fp;
-
   FILE* in_fp = fmemopen(source_buf.data(), source_buf.size(), "r");
   FILE* saved_finput = finput;
   finput = in_fp;
@@ -5585,9 +6217,12 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   quiet_flag = 1;
   rtl_dump_and_exit = stop_after_initial_rtl ? 1 : 0;
 
-  GccContext::SetCc1ConstantPoolCaptureTarget(&res.constant_pool);
-  yyparse();
-  GccContext::SetCc1ConstantPoolCaptureTarget(nullptr);
+  {
+    ScopedAsmOutStream asm_stream(asm_fp);
+    GccContext::SetCc1ConstantPoolCaptureTarget(&res.constant_pool);
+    yyparse();
+    GccContext::SetCc1ConstantPoolCaptureTarget(nullptr);
+  }
   jump_chain = nullptr;
   max_jump_chain = 0;
 
@@ -5625,7 +6260,6 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
 
   rtl_dump_and_exit = 0;
   finput = saved_finput;
-  asm_out_file = saved_asm;
   std::fclose(in_fp);
   std::fclose(asm_fp);
 
@@ -5633,6 +6267,256 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
     *s.dump_flag = 0;
     *s.dump_file_ptr = nullptr;
     std::fclose(s.fp);
+  }
+
+  std::string raw_asm(asm_buf != nullptr ? asm_buf : "", asm_len);
+  std::free(asm_buf);
+
+  auto strip_leading_star = [](std::string_view sv) -> std::string_view {
+    if (!sv.empty() && sv.front() == '*') {
+      sv.remove_prefix(1);
+    }
+    return sv;
+  };
+  auto get_decl_name_str = [](void* decl, int field_offset) -> std::string_view {
+    if (decl == nullptr) {
+      return "";
+    }
+    void* id = *reinterpret_cast<void**>(static_cast<char*>(decl) + field_offset);
+    if (id == nullptr) {
+      return "";
+    }
+    const char* ptr = *reinterpret_cast<const char**>(static_cast<char*>(id) + 32);
+    return ptr != nullptr ? std::string_view(ptr) : std::string_view();
+  };
+
+  // Capture `FUNCTION_DECL` prologue sideband metadata (`mips_expand_prologue`,
+  // `mips.c:4891-5020`) when variadic or when a `<4`-byte `struct`/`union`
+  // parameter is passed by value.
+  constexpr uint8_t kRealTypeCode = 8;
+  constexpr uint8_t kRecordTypeCode = 20;
+  constexpr uint8_t kUnionTypeCode = 21;
+  constexpr uint8_t kQualUnionTypeCode = 22;
+  constexpr uint8_t kFunctionTypeCode = 23;
+  constexpr uint8_t kFunctionDeclCode = 29;
+  constexpr uint8_t kVarDeclCode = 33;
+
+  void* target_fndecl = nullptr;
+  for (void* d = getdecls(); d != nullptr && d != saved_decls; d = *reinterpret_cast<void**>(d)) {
+    const uint8_t code = *reinterpret_cast<uint8_t*>(static_cast<char*>(d) + 16);
+    if (code != kFunctionDeclCode) {
+      continue;
+    }
+    const std::string_view dname = get_decl_name_str(d, 56);
+    void* decl_init = *reinterpret_cast<void**>(static_cast<char*>(d) + 88);
+    if (!function_name.empty()) {
+      if (dname == function_name && (target_fndecl == nullptr || decl_init != nullptr)) {
+        target_fndecl = d;
+      }
+    } else if (decl_init != nullptr) {
+      target_fndecl = d;
+    }
+  }
+  if (target_fndecl == nullptr && current_function_decl != nullptr) {
+    target_fndecl = current_function_decl;
+  }
+
+  if (target_fndecl != nullptr) {
+    void* fntype = *reinterpret_cast<void**>(static_cast<char*>(target_fndecl) + 8);
+    if (fntype != nullptr &&
+        *reinterpret_cast<uint8_t*>(static_cast<char*>(fntype) + 16) == kFunctionTypeCode) {
+      void* ret_type = *reinterpret_cast<void**>(static_cast<char*>(fntype) + 8);
+      void* res_decl = *reinterpret_cast<void**>(static_cast<char*>(target_fndecl) + 80);
+      const bool returns_agg = (res_decl != nullptr && aggregate_value_p(res_decl) != 0) ||
+                               (ret_type != nullptr && aggregate_value_p(ret_type) != 0);
+
+      bool is_variadic = false;
+      void* type_arg_types = *reinterpret_cast<void**>(static_cast<char*>(fntype) + 24);
+      if (type_arg_types != nullptr) {
+        void* last_node = type_arg_types;
+        while (*reinterpret_cast<void**>(last_node) != nullptr) {
+          last_node = *reinterpret_cast<void**>(last_node);
+        }
+        void* last_val = *reinterpret_cast<void**>(static_cast<char*>(last_node) + 32);
+        if (last_val != void_type_node) {
+          is_variadic = true;
+        }
+      }
+
+      bool has_small_struct_arg = false;
+      std::vector<MipsPrologueArgSpec> cand_args;
+      auto append_arg_spec_from_type = [&](void* passed_type) {
+        if (passed_type == nullptr || passed_type == void_type_node) {
+          return;
+        }
+        const uint8_t tcode = *reinterpret_cast<uint8_t*>(static_cast<char*>(passed_type) + 16);
+        const uint8_t tmode = *reinterpret_cast<uint8_t*>(static_cast<char*>(passed_type) + 53);
+        const int talign =
+            static_cast<int>(*reinterpret_cast<uint32_t*>(static_cast<char*>(passed_type) + 56));
+        const int tsz = int_size_in_bytes(passed_type);
+
+        MipsPrologueArgSpec spec;
+        if (tcode == kRecordTypeCode || tcode == kUnionTypeCode || tcode == kQualUnionTypeCode) {
+          spec.kind = MipsPrologueArgKind::kStructOrUnion;
+          spec.byte_size = std::max(0, tsz);
+          spec.align_bits = std::max(8, talign);
+          spec.gcc_mode = static_cast<int>(tmode);
+          if (tsz > 0 && tsz < 4) {
+            has_small_struct_arg = true;
+          }
+        } else if (tcode == kRealTypeCode) {
+          spec.kind = (tsz == 4) ? MipsPrologueArgKind::kFloat32 : MipsPrologueArgKind::kFloat64;
+          spec.byte_size = (tsz == 4) ? 4 : 8;
+          spec.align_bits = std::max(32, talign);
+          spec.gcc_mode = static_cast<int>(tmode);
+        } else if (tsz == 8) {
+          spec.kind = MipsPrologueArgKind::kInt64;
+          spec.byte_size = 8;
+          spec.align_bits = 64;
+          spec.gcc_mode = kDiMode;
+        } else {
+          spec.kind = MipsPrologueArgKind::kGeneralWord;
+          spec.byte_size = 4;
+          spec.align_bits = 32;
+          spec.gcc_mode = kSiMode;
+        }
+        cand_args.push_back(spec);
+      };
+
+      void* first_parm = *reinterpret_cast<void**>(static_cast<char*>(target_fndecl) + 72);
+      if (first_parm != nullptr) {
+        for (void* parm = first_parm; parm != nullptr; parm = *reinterpret_cast<void**>(parm)) {
+          const std::string_view pname = get_decl_name_str(parm, 56);
+          if (*reinterpret_cast<void**>(parm) == nullptr &&
+              (pname == "__builtin_va_alist" || pname == "va_alist")) {
+            is_variadic = true;
+          }
+          void* passed_type = *reinterpret_cast<void**>(static_cast<char*>(parm) + 88);
+          if (passed_type == nullptr) {
+            passed_type = *reinterpret_cast<void**>(static_cast<char*>(parm) + 8);
+          }
+          append_arg_spec_from_type(passed_type);
+        }
+      } else {
+        // `c-decl.c:finish_function` clears `DECL_ARGUMENTS(fndecl) = 0;` (`+72`),
+        // so recover the parameter list from `TYPE_ARG_TYPES(fntype)` (`+24`, value `+32`).
+        for (void* node = type_arg_types; node != nullptr; node = *reinterpret_cast<void**>(node)) {
+          void* arg_type = *reinterpret_cast<void**>(static_cast<char*>(node) + 32);
+          if (arg_type == void_type_node) {
+            break;
+          }
+          append_arg_spec_from_type(arg_type);
+        }
+      }
+
+      if (is_variadic || has_small_struct_arg) {
+        res.is_variadic = is_variadic;
+        res.returns_aggregate_in_memory = returns_agg;
+        res.prologue_args = std::move(cand_args);
+      }
+    }
+  }
+
+  // Capture GP-relative symbol sizes (`<= g_switch_value`) when `-G <N>` is
+  // active so in-process GAS (`tc-mips.c:macro`) emits `R_MIPS_GPREL16`
+  // identically to `KmcAs` (`mips-kmc-elf`), which places non-`.local` `.comm`
+  // tentative definitions and explicit `.sdata`/`.sbss` symbols in GP-relative
+  // small-data sections.
+  if (g_switch_value > 0) {
+    absl::flat_hash_map<std::string, uint32_t> var_decl_sizes;
+    for (void* d = getdecls(); d != nullptr && d != saved_decls; d = *reinterpret_cast<void**>(d)) {
+      const uint8_t code = *reinterpret_cast<uint8_t*>(static_cast<char*>(d) + 16);
+      if (code != kVarDeclCode) {
+        continue;
+      }
+      std::string_view sym_name = strip_leading_star(get_decl_name_str(d, 104));
+      if (sym_name.empty()) {
+        sym_name = strip_leading_star(get_decl_name_str(d, 56));
+      }
+      if (sym_name.empty()) {
+        continue;
+      }
+      void* dtype = *reinterpret_cast<void**>(static_cast<char*>(d) + 8);
+      if (dtype == nullptr) {
+        continue;
+      }
+      const int sz = int_size_in_bytes(dtype);
+      if (sz >= 0 && sz <= g_switch_value) {
+        var_decl_sizes[std::string(sym_name)] = static_cast<uint32_t>(std::max(1, sz));
+      }
+      const uint32_t common_flags = *reinterpret_cast<uint32_t*>(static_cast<char*>(d) + 16);
+      const uint8_t decl_flags0 = *reinterpret_cast<uint8_t*>(static_cast<char*>(d) + 53);
+      const bool is_external = (decl_flags0 & 1u) != 0;
+      const bool is_public = (common_flags & (1u << 19)) != 0;
+      void* decl_init = *reinterpret_cast<void**>(static_cast<char*>(d) + 88);
+      if (is_public && !is_external && decl_init == nullptr && sz >= 0 && sz <= g_switch_value) {
+        res.gp_symbol_sizes[std::string(sym_name)] = static_cast<uint32_t>(std::max(1, sz));
+      }
+    }
+    absl::flat_hash_set<std::string> local_comm_syms;
+    std::string active_sec = ".text";
+    for (std::string_view raw_line : absl::StrSplit(raw_asm, '\n')) {
+      const size_t hash_pos = raw_line.find('#');
+      if (hash_pos != std::string_view::npos) {
+        raw_line = raw_line.substr(0, hash_pos);
+      }
+      std::string_view line = absl::StripAsciiWhitespace(raw_line);
+      if (line.empty()) {
+        continue;
+      }
+      if (line.front() == '.' && !absl::EndsWith(line, ":")) {
+        std::string_view rest = absl::StripAsciiWhitespace(line.substr(1));
+        auto match_dir = [&](std::string_view kw) {
+          return absl::StartsWith(rest, kw) &&
+                 (rest.size() == kw.size() ||
+                  absl::ascii_isspace(static_cast<unsigned char>(rest[kw.size()])) ||
+                  rest[kw.size()] == ',');
+        };
+        if (match_dir("sdata")) {
+          active_sec = ".sdata";
+        } else if (match_dir("sbss")) {
+          active_sec = ".sbss";
+        } else if (match_dir("text") || match_dir("data") || match_dir("rdata") ||
+                   match_dir("rodata") || match_dir("bss")) {
+          active_sec = absl::StrCat(".", rest.substr(0, rest.find_first_of(" \t,")));
+        } else if (match_dir("local")) {
+          std::string_view args = absl::StripAsciiWhitespace(rest.substr(5));
+          for (std::string_view item : absl::StrSplit(args, ',')) {
+            std::string_view sym = strip_leading_star(absl::StripAsciiWhitespace(item));
+            if (!sym.empty()) {
+              local_comm_syms.emplace(sym);
+            }
+          }
+        } else if (match_dir("comm")) {
+          std::string_view args = absl::StripAsciiWhitespace(rest.substr(4));
+          const size_t comma_pos = args.find(',');
+          if (comma_pos != std::string_view::npos) {
+            std::string_view sym =
+                strip_leading_star(absl::StripAsciiWhitespace(args.substr(0, comma_pos)));
+            std::string_view sz_tok = absl::StripAsciiWhitespace(args.substr(comma_pos + 1));
+            const size_t second_comma = sz_tok.find(',');
+            if (second_comma != std::string_view::npos) {
+              sz_tok = absl::StripAsciiWhitespace(sz_tok.substr(0, second_comma));
+            }
+            int comm_sz = -1;
+            if (!sym.empty() && !local_comm_syms.contains(sym) &&
+                absl::SimpleAtoi(sz_tok, &comm_sz) && comm_sz >= 0 && comm_sz <= g_switch_value) {
+              res.gp_symbol_sizes[std::string(sym)] = static_cast<uint32_t>(std::max(1, comm_sz));
+            }
+          }
+        }
+        continue;
+      }
+      if ((active_sec == ".sdata" || active_sec == ".sbss") && absl::EndsWith(line, ":") &&
+          line.find_first_of(" \t,()") == std::string_view::npos) {
+        std::string_view sym = strip_leading_star(line.substr(0, line.size() - 1));
+        if (!sym.empty() && !res.gp_symbol_sizes.contains(sym)) {
+          const auto sz_it = var_decl_sizes.find(sym);
+          res.gp_symbol_sizes[std::string(sym)] =
+              (sz_it != var_decl_sizes.end()) ? sz_it->second : 1u;
+        }
+      }
+    }
   }
 
   // Clean up any top-level declarations and struct/union/enum tags added during
@@ -5651,8 +6535,6 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
     *reinterpret_cast<void**>(static_cast<char*>(t) + 0x18) = nullptr;
   }
 
-  std::string raw_asm(asm_buf != nullptr ? asm_buf : "", asm_len);
-  std::free(asm_buf);
   res.fn_asm_text = ExtractFunctionAssemblyBlock(raw_asm, function_name);
 
   for (auto& s : streams) {
@@ -5756,6 +6638,7 @@ absl::Span<const SubfunctionId> AllSubfunctionIds() {
 void FunctionHooks::ApplyCompilationProfile(const CompilationProfile& profile) {
   int opt = profile.optimize_level;
   ApplyCompilerFlags(profile.c_flags, &opt);
+  SyncGasGpSymbols(profile.gp_symbol_sizes);
 }
 
 bool FunctionHooks::ValidateMaterializedInsnsRecognizable(std::string* out_bad_insn) const {
@@ -5837,6 +6720,9 @@ RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(
   cfg.pass = RtlPassKind::kRtl;
   cfg.sideband.frame_size_bytes = cc1_res.frame_size_bytes;
   cfg.sideband.outgoing_args_size = cc1_res.outgoing_args_size;
+  cfg.sideband.is_variadic = cc1_res.is_variadic;
+  cfg.sideband.returns_aggregate_in_memory = cc1_res.returns_aggregate_in_memory;
+  cfg.sideband.prologue_args = cc1_res.prologue_args;
   cfg.sideband.constant_pool = FilterReferencedConstantPool(cfg, cc1_res.constant_pool);
   InferStackFrameSidebandFromRtlCfg(&cfg);
 
@@ -5857,16 +6743,24 @@ RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(
 SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     SubfunctionId subfunction_id, const RtlControlFlowGraph& pre_state,
     absl::Span<const std::string> pre_asm_lines, int optimize_level,
-    absl::Span<const std::string> c_flags) {
+    absl::Span<const std::string> c_flags,
+    const absl::flat_hash_map<std::string, uint32_t>& gp_symbol_sizes) {
   SubfunctionBoundarySnapshot snap;
   snap.subfunction_id = subfunction_id;
   snap.optimize_level = optimize_level;
   snap.c_flags.assign(c_flags.begin(), c_flags.end());
+  snap.gp_symbol_sizes = gp_symbol_sizes;
   snap.pre_state = pre_state;
   snap.pre_asm_lines.assign(pre_asm_lines.begin(), pre_asm_lines.end());
 
   ApplyCompilerFlags(c_flags, &optimize_level);
+  SyncGasGpSymbols(gp_symbol_sizes);
   snap.optimize_level = optimize_level;
+  auto materialize_post_expand = [&]() -> Rtx {
+    Rtx h = ctx_->MaterializeFromCfg(pre_state);
+    rtx_equal_function_value_matters = 0;
+    return h;
+  };
 
   switch (subfunction_id) {
     case SubfunctionId::kInstantiateVirtualRegs: {
@@ -5876,7 +6770,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kJumpRedirect: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         unshare_all_rtl(head);
         instantiate_virtual_regs(current_function_decl, head);
@@ -5898,12 +6792,12 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           }
         }
       }
-      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kJump);
+      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kRtl);
       break;
     }
 
     case SubfunctionId::kJump1Optimize: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         unshare_all_rtl(head);
         instantiate_virtual_regs(current_function_decl, head);
@@ -5914,7 +6808,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kFoldRtx: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         PrepareCseFoldState(ctx_, head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
@@ -5933,7 +6827,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kCseBasicBlockCse1: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         cse_not_expected = 0;
         RefreshJumpLabelsAndNuses(head);
@@ -5960,7 +6854,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kScanLoop: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         PrepareLoopState(head);
         in_loop_pass_ = true;
@@ -5978,7 +6872,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kStrengthReduce: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0 && flag_strength_reduce != 0) {
         PrepareLoopState(head);
         in_loop_pass_ = true;
@@ -5997,7 +6891,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kCseBasicBlockCse2: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         cse_not_expected = 0;
         int rerun_cse = flag_expensive_optimizations;
@@ -6038,7 +6932,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kFindBasicBlocks: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         RunFindBasicBlocks(head, nullptr);
       }
@@ -6047,7 +6941,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kPropagateBlock: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         if (optimize_level > 0) {
           StripFlowGeneratedNotes(head);
@@ -6072,7 +6966,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kSimplifyRtx: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         PrepareCombineState(head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
@@ -6121,7 +7015,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kSubst: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         PrepareCombineState(head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
@@ -6162,7 +7056,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kTryCombine: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         ExecuteCombinePassGranular(head, 0);
       }
@@ -6171,7 +7065,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kScheduleBlockSched1: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0 && flag_schedule_insns != 0) {
         reload_completed = 0;
         ExecuteSchedPassGranular(head);
@@ -6181,7 +7075,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kUpdateEquivRegs: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
         RunUpdateEquivRegs(head);
       }
@@ -6190,7 +7084,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kBlockAlloc: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         if (optimize_level > 0) {
           PrepareLocalAllocState(head);
@@ -6214,7 +7108,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kGlobalAlloc: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       snap.post_state = pre_state;
       snap.post_state.pass = RtlPassKind::kGreg;
       if (head != nullptr) {
@@ -6244,7 +7138,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kReload: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         RunReload(head, /*global=*/optimize_level > 0 ? 1 : 0);
         for (const auto& [regno, hard_reg] : pre_state.sideband.reg_renumber) {
@@ -6260,7 +7154,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kAlterReg: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         std::vector<int> regnos;
         regnos.reserve(pre_state.sideband.reg_renumber.size());
@@ -6279,7 +7173,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kScheduleBlockSched2: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       if (head != nullptr) {
         reload_completed = 1;
         bool has_prologue_sp_adjust = false;
@@ -6310,7 +7204,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kDoCrossJump: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       const bool had_live = !pre_state.sideband.basic_block_live_at_start.empty();
       if (head != nullptr && optimize_level > 0) {
         if (had_live) {
@@ -6330,11 +7224,11 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kFillSimpleDelaySlots: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
       if (ran) {
-        RunFillSimpleDelaySlots(/*non_jumps_p=*/0, head);
-        RunFillSimpleDelaySlots(/*non_jumps_p=*/1, ctx_->GetInsns());
+        RunFillSimpleDelaySlots(/*non_jumps_p=*/1, head);
+        RunFillSimpleDelaySlots(/*non_jumps_p=*/0, ctx_->GetInsns());
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kDbr);
       if (ran && !pre_state.sideband.basic_block_live_at_start.empty()) {
@@ -6344,7 +7238,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kFillEagerDelaySlots: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
       if (ran) {
         RunFillEagerDelaySlots(head);
@@ -6357,7 +7251,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kRelaxDelaySlots: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
       if (ran) {
         RunRelaxDelaySlots(head);
@@ -6370,7 +7264,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kMakeReturnInsns: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       const bool ran = (head != nullptr && optimize_level > 0 && flag_delayed_branch != 0);
       if (ran) {
         RunMakeReturnInsns(head);
@@ -6383,7 +7277,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kFunctionPrologueEpilogue: {
-      ctx_->MaterializeFromCfg(pre_state);
+      materialize_post_expand();
       uint32_t saved_mask = 0;
       for (int r : pre_state.sideband.saved_gpr_regnos) {
         if (r >= 0 && r < 32) {
@@ -6409,7 +7303,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     }
 
     case SubfunctionId::kFinalScanInsn: {
-      Rtx head = ctx_->MaterializeFromCfg(pre_state);
+      Rtx head = materialize_post_expand();
       snap.post_state = pre_state;
       const std::string asm_text = RunFinal(head, /*include_prologue_epilogue=*/false);
       snap.post_asm_lines = ExtractAsmLinesWithLabels(asm_text);
@@ -6469,21 +7363,23 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       !candidate_pre_asm_lines.empty() ? candidate_pre_asm_lines
                                        : absl::MakeConstSpan(snap_template.pre_asm_lines);
   return ExecuteSubfunctionBoundary(snap_template.subfunction_id, candidate_pre_state, asm_lines,
-                                    snap_template.optimize_level, snap_template.c_flags);
+                                    snap_template.optimize_level, snap_template.c_flags,
+                                    snap_template.gp_symbol_sizes);
 }
 
-FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGraph& rtl_00_cfg,
-                                                         int optimize_level,
-                                                         std::string_view function_name,
-                                                         std::string_view test_name,
-                                                         absl::Span<const std::string> c_flags) {
+FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(
+    const RtlControlFlowGraph& rtl_00_cfg, int optimize_level, std::string_view function_name,
+    std::string_view test_name, absl::Span<const std::string> c_flags,
+    const absl::flat_hash_map<std::string, uint32_t>& gp_symbol_sizes) {
   FunctionCompilationTrace trace;
   trace.test_name = std::string(test_name);
   trace.function_name = std::string(function_name);
   trace.optimize_level = optimize_level;
   trace.c_flags.assign(c_flags.begin(), c_flags.end());
+  trace.gp_symbol_sizes = gp_symbol_sizes;
 
   ApplyCompilerFlags(c_flags, &optimize_level);
+  SyncGasGpSymbols(gp_symbol_sizes);
   trace.optimize_level = optimize_level;
 
   if (!function_name.empty()) {
@@ -6499,8 +7395,8 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
   std::vector<std::string> current_asm_lines;
 
   for (SubfunctionId sub_id : AllSubfunctionIds()) {
-    SubfunctionBoundarySnapshot snap =
-        ExecuteSubfunctionBoundary(sub_id, current_cfg, current_asm_lines, optimize_level, c_flags);
+    SubfunctionBoundarySnapshot snap = ExecuteSubfunctionBoundary(
+        sub_id, current_cfg, current_asm_lines, optimize_level, c_flags, gp_symbol_sizes);
     current_cfg = snap.post_state;
     if (sub_id != SubfunctionId::kFunctionPrologueEpilogue && !snap.post_asm_lines.empty()) {
       current_asm_lines = snap.post_asm_lines;
@@ -6551,10 +7447,14 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(const RtlControlFlowGra
         break;
       }
       case SubfunctionId::kGasAppendInsn: {
-        trace.final_machine_words = snap.post_machine_words;
         trace.stage0_input = RunGasMdAssembleWithMetadata(trace.final_asm_text);
         trace.stage0_input.profile.optimize_level = trace.optimize_level;
         trace.stage0_input.profile.c_flags = trace.c_flags;
+        trace.stage0_input.profile.gp_symbol_sizes = trace.gp_symbol_sizes;
+        trace.final_machine_words = trace.stage0_input.machine_words;
+        while (trace.final_machine_words.size() % 4 != 0) {
+          trace.final_machine_words.push_back(0x00000000u);
+        }
         break;
       }
       default:
@@ -6584,10 +7484,14 @@ FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(
   rtl_00_cfg.pass = RtlPassKind::kRtl;
   rtl_00_cfg.sideband.frame_size_bytes = cc1_res.frame_size_bytes;
   rtl_00_cfg.sideband.outgoing_args_size = cc1_res.outgoing_args_size;
+  rtl_00_cfg.sideband.is_variadic = cc1_res.is_variadic;
+  rtl_00_cfg.sideband.returns_aggregate_in_memory = cc1_res.returns_aggregate_in_memory;
+  rtl_00_cfg.sideband.prologue_args = cc1_res.prologue_args;
   rtl_00_cfg.sideband.constant_pool =
       FilterReferencedConstantPool(rtl_00_cfg, cc1_res.constant_pool);
   InferStackFrameSidebandFromRtlCfg(&rtl_00_cfg);
-  return TraceRtlPipeline(rtl_00_cfg, optimize_level, function_name, test_name, c_flags);
+  return TraceRtlPipeline(rtl_00_cfg, optimize_level, function_name, test_name, c_flags,
+                          cc1_res.gp_symbol_sizes);
 }
 
 FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(

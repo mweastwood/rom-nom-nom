@@ -1,7 +1,10 @@
 #ifndef LIFTER_RECONSTRUCT_HARD_REG_LIVENESS_H_
 #define LIFTER_RECONSTRUCT_HARD_REG_LIVENESS_H_
 
+#include <cstddef>
+
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 
 namespace rom_nom_nom::lifter {
 
@@ -27,6 +30,14 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
 // `basic_block_live_at_start` with no post-flow/reorg indicators) and
 // pre-reload CFGs untouched.
 void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg);
+
+// Computes post-reload hard-register live-in sets purely from `cfg`'s
+// instructions, control-flow edges, and frame/epilogue metadata (ignoring
+// `cfg.sideband.basic_block_live_at_start`), returning true if any hard
+// register defined by `def_pat` (accounting for multi-word modes such as
+// `DImode`/`DFmode`) is live at entry to `block_idx`.
+bool IsAnyDefinedHardRegLiveAtBlockEntry(const RtlControlFlowGraph& cfg, const RtlExpr& def_pat,
+                                         size_t block_idx);
 
 }  // namespace rom_nom_nom::lifter
 

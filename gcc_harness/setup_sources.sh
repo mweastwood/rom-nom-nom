@@ -85,6 +85,37 @@ for path in sys.argv[1:]:
     f.write(text)
 PYEOF
 
+# Declare pointer-returning helpers in 1995 K&R C files (`reorg.c:negate_rtx`,
+# `stor-layout.c:expand_expr`, `expr.c`/`function.c:bc_xstrdup`) so 64-bit host
+# compilation never truncates 64-bit `rtx`/`char*` return values via implicit
+# `int` declarations.
+python3 - "${GCC_SRC}" << 'PYEOF'
+import os
+import sys
+
+gcc_src = sys.argv[1]
+patches = [
+    ("reorg.c", '#include "rtl.h"\n', '#include "rtl.h"\nextern rtx negate_rtx ();\n'),
+    ("stor-layout.c", '#include "tree.h"\n', '#include "tree.h"\n#include "rtl.h"\nextern rtx expand_expr ();\n'),
+    ("expr.c", '#include "expr.h"\n', '#include "expr.h"\nextern char *bc_xstrdup ();\n'),
+    ("function.c", '#include "expr.h"\n', '#include "expr.h"\nextern char *bc_xstrdup ();\n'),
+]
+for rel_path, anchor, replacement in patches:
+  full_path = os.path.join(gcc_src, rel_path)
+  with open(full_path, "r", encoding="latin-1") as f:
+    text = f.read()
+  decl_line = replacement.splitlines()[-1]
+  if decl_line not in text:
+    if anchor not in text:
+      raise RuntimeError(f"Missing anchor in {full_path}")
+    text = text.replace(anchor, replacement, 1)
+    with open(full_path, "w", encoding="latin-1") as f:
+      f.write(text)
+    obj_path = os.path.join(gcc_src, rel_path[:-2] + ".o")
+    if os.path.exists(obj_path):
+      os.remove(obj_path)
+PYEOF
+
 # Ensure `mips.md` matches stock KMC GCC 2.7.2 (`define_expand "return"` and
 # `define_insn "return_internal"` only, with no synthetic `return_internal_bare`
 # pattern).
@@ -441,6 +472,8 @@ update_flow_info
 line_note_exists
 last_ignored_compare
 elim_reg_set
+const_hash_table
+in_section
 EOF
 
 for obj in "${GCC_OBJS[@]}"; do
@@ -506,6 +539,8 @@ mips_isa
 file_mips_isa
 mips_cpu
 mips_trap
+g_switch_value
+g_switch_seen
 EOF
 
 cat << 'EOF' > "${GAS_STAGE_DIR}/gas_redefine.txt"
@@ -516,6 +551,11 @@ get_run_time gas_get_run_time
 spaces gas_spaces
 xmalloc gas_xmalloc
 xrealloc gas_xrealloc
+mips_isa gas_mips_isa
+file_mips_isa gas_file_mips_isa
+mips_cpu gas_mips_cpu
+g_switch_value gas_g_switch_value
+g_switch_seen gas_g_switch_seen
 EOF
 
 for obj in "${GAS_OBJS[@]}"; do

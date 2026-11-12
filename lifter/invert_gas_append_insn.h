@@ -62,6 +62,11 @@ absl::Span<const uint32_t> StripSectionAlignmentPadding(absl::Span<const uint32_
 // on a branch/jump instruction without a trailing delay-slot word.
 std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x);
 
+// Overload of `InvertGasAppendInsn` parameterized by compiler/assembler flags
+// (e.g., `-mips1` vs `-mips2`/`-mips3`, `-Wa,-g` vs `-Wa,-O2`).
+std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x,
+                                             absl::Span<const std::string> c_flags);
+
 // Parses `InvertGasAppendInsn(words)` output into structured `AsmItem`s paired
 // with their exact source machine words from `words`, unwrapping 3-line
 // `.set noreorder / <hazard_insn> / .set reorder` blocks back into
@@ -73,7 +78,7 @@ bool BuildAsmItemsFromAppendInsn(absl::Span<const uint32_t> words,
 // Strips `nop` items (`0x00000000u`) that `RunGasMdAssemble` automatically
 // inserts via `append_insn` hazard checks or `mips_emit_delays()` when hazard
 // instructions are emitted in `.set reorder` mode by `RunFinal()`.
-void StripGasInsertedHazardNops(std::vector<AsmItem>* items);
+void StripGasInsertedHazardNops(std::vector<AsmItem>* items, int mips_isa = 3);
 
 // High-level stream inverse of `append_insn` for a whole function's machine
 // words: strips trailing section-alignment padding, runs `InvertGasAppendInsn`,

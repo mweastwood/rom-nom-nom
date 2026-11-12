@@ -29,6 +29,11 @@ class LifterGasAppendInsnInverseProvider : public gcc_harness::SubfunctionInvers
   std::vector<std::string> InvertGasAppendInsn(absl::Span<const uint32_t> words_x) const override {
     return rom_nom_nom::InvertGasAppendInsn(words_x);
   }
+
+  std::vector<std::string> InvertGasAppendInsn(
+      absl::Span<const uint32_t> words_x, absl::Span<const std::string> c_flags) const override {
+    return rom_nom_nom::InvertGasAppendInsn(words_x, c_flags);
+  }
 };
 
 TEST(InvertGasAppendInsnTest, SyntheticReorderSwapAndNopDelaySlotTests) {
@@ -475,6 +480,59 @@ TEST(InvertGasAppendInsnTest, Stage0InputJumpTablesExternalJumpRelocsAndLinkedVr
     invalid.machine_words = {0x00000001u, 0x00000000u};
     EXPECT_FALSE(InvertGasAppendInsnToItems(invalid, &items, &labels));
   }
+}
+
+TEST(InvertGasAppendInsnTest, Mips1LoadDelayHazardNopsAndPrevPrevLoadBranchNonSwap) {
+  gcc_harness::GccContext ctx;
+  gcc_harness::FunctionHooks hooks(&ctx);
+  LifterGasAppendInsnInverseProvider provider;
+  gcc_harness::RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  const std::vector<std::string> mips1_flags = {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"};
+
+  // 1. `-mips1` load-delay `nop`s after `lw` (GPR) and `lwc1` (FPR), plus
+  //    `-mips1` epilogue `lw $31,16($29); addiu $29,$29,24; jr $31; nop` where
+  //    `prev_prev_insn` (`lw $31`) prevents `append_insn` from swapping `addiu`
+  //    into `jr $31`'s delay slot (`tc-mips.c:1656-1664`).
+  Stage0FunctionInput mips1_input;
+  mips1_input.profile.optimize_level = 2;
+  mips1_input.profile.c_flags = mips1_flags;
+  mips1_input.machine_words = {
+      0x8c820000u,  // 0: lw $2,0($4)
+      0x00000000u,  // 1: -mips1 load-delay nop (lw $2 -> addu reading $2)
+      0x00451021u,  // 2: addu $2,$2,$5
+      0xc4800004u,  // 3: lwc1 $f0,4($4)
+      0x00000000u,  // 4: -mips1 coproc-load-delay nop (lwc1 $f0 -> add.s reading $f0)
+      0x46020000u,  // 5: add.s $f0,$f0,$f2
+      0x8fbf0010u,  // 6: lw $31,16($29)
+      0x27bd0018u,  // 7: addiu $29,$29,24
+      0x03e00008u,  // 8: jr $31
+      0x00000000u,  // 9: unfilled delay slot nop (prev_prev lw $31 blocked swap)
+      0x00000000u,  // 10: section alignment padding
+      0x00000000u,  // 11: section alignment padding
+  };
+
+  gcc_harness::SubfunctionBoundarySnapshot snap;
+  snap.subfunction_id = gcc_harness::SubfunctionId::kGasAppendInsn;
+  snap.optimize_level = 2;
+  snap.c_flags = mips1_flags;
+  snap.post_machine_words = mips1_input.machine_words;
+  const auto boundary_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_TRUE(boundary_res.matches) << boundary_res.diff_detail;
+
+  std::vector<AsmItem> items;
+  ASSERT_TRUE(InvertGasAppendInsnToItems(mips1_input, &items, /*out_word_to_label=*/nullptr));
+  std::vector<std::string> item_lines;
+  for (const AsmItem& item : items) {
+    EXPECT_EQ(item.kind, AsmItemKind::kReorderInsn) << item.line;
+    EXPECT_NE(item.line, "nop");
+    item_lines.push_back(item.line);
+  }
+  const std::vector<std::string> expected_lines = {
+      "lw $2,0($4)",    "addu $2,$2,$5",    "lwc1 $f0,4($4)", "add.s $f0,$f0,$f2",
+      "lw $31,16($29)", "addiu $29,$29,24", "jr $31",
+  };
+  EXPECT_EQ(item_lines, expected_lines);
 }
 
 class InvertGasAppendInsnRoundTripCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

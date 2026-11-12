@@ -146,6 +146,11 @@ class SubfunctionInverseProvider {
     return {};
   }
 
+  virtual std::vector<std::string> InvertGasAppendInsn(
+      absl::Span<const uint32_t> words_x, absl::Span<const std::string> /*c_flags*/) const {
+    return InvertGasAppendInsn(words_x);
+  }
+
   // 4. Inverse of `final.c:final_scan_insn`: lifts a single MIPS assembly
   // instruction emitted by `final_scan_insn` back into its RTL pattern `y`.
   virtual std::string InvertFinalScanInsn(std::string_view /*asm_line_x*/) const { return {}; }

@@ -56,6 +56,11 @@ class ProductionHardRegLivenessInverseProvider final : public SubfunctionInverse
     return rom_nom_nom::InvertGasAppendInsn(words_x);
   }
 
+  std::vector<std::string> InvertGasAppendInsn(
+      absl::Span<const uint32_t> words_x, absl::Span<const std::string> c_flags) const override {
+    return rom_nom_nom::InvertGasAppendInsn(words_x, c_flags);
+  }
+
   std::string InvertFinalScanInsn(std::string_view asm_line_x) const override {
     return lifter::InvertFinalScanInsn(asm_line_x);
   }
@@ -913,6 +918,156 @@ TEST(ReconstructHardRegLivenessTest, Stage0Stage1AndStage2RightInverseVerificati
   EXPECT_TRUE(cross_jump_res.matches) << cross_jump_res.diff_detail << "\nexpected:\n"
                                       << cross_jump_res.expected_summary << "\nactual:\n"
                                       << cross_jump_res.actual_summary;
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     UncondJumpInStructRecoveryDiCallReturnAndSharedLeafReturnUsePlacement) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // 1a. `(I4)`: When `B0` ends with a mostly-false forward conditional `SEQUENCE` (`eq:SI` +
+  // `insn/s`) jumping past `u + 1` (`b_target = 3 > u + 1`) and falling through to bare `SEQUENCE`
+  // block `B1` (`u = 1`) whose delay slot defines `$2` (`v0`) (dead at `B3` before `B0`'s slot),
+  // `(I4)` marks `B1`'s delay slot `insn/s` (`in_struct = true`).
+  RtlControlFlowGraph i4_steal_cfg;
+  i4_steal_cfg.pass = RtlPassKind::kDbr;
+  i4_steal_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int "
+                 "0)) (label_ref L1) (pc)))) (insn/s (set (reg:SI 6 a2) (const_int 1)))])"},
+                {3, 1}),
+      MakeBlock(1, false,
+                {"(sequence [(jump_insn (set (pc) (label_ref L2))) "
+                 "(insn (set (reg:SI 2 v0) (const_int 0)))])"},
+                {4}),
+      MakeBlock(2, true, {"(set (reg:SI 6 a2) (const_int 2))"}, {3}),
+      MakeBlock(3, true, {"(set (reg:SI 2 v0) (plus:SI (reg:SI 6 a2) (const_int 5)))"}, {4}),
+      MakeBlock(4, true,
+                {"(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))",
+                 "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&i4_steal_cfg, profile_o2);
+  {
+    const auto parsed = ParsePatternAndNotes(i4_steal_cfg.rpo_blocks[1].instructions[0]);
+    ASSERT_TRUE(parsed.ok());
+    ASSERT_EQ(parsed->pattern.op, RtlOp::kSequence);
+    EXPECT_TRUE(parsed->pattern.children[1].flags.in_struct)
+        << i4_steal_cfg.rpo_blocks[1].instructions[0];
+  }
+
+  // 1b. Contrast: when `B0`'s forward branch targets `B2` (`b_target = 2 == u + 1`) immediately
+  // after bare `SEQUENCE` block `B1` (`u = 1`), `B0` could not have survived `jump_optimize`
+  // uninverted around `B1`, so `(I4)` MUST keep `B1`'s `in_struct` `false`!
+  RtlControlFlowGraph i4_adj_cfg;
+  i4_adj_cfg.pass = RtlPassKind::kDbr;
+  i4_adj_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int "
+                 "0)) (label_ref L0) (pc)))) (insn/s (set (reg:SI 6 a2) (const_int 1)))])"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {"(sequence [(jump_insn (set (pc) (label_ref L1))) "
+                 "(insn (set (reg:SI 2 v0) (const_int 0)))])"},
+                {3}),
+      MakeBlock(2, true, {"(set (reg:SI 2 v0) (plus:SI (reg:SI 6 a2) (const_int 5)))"}, {3}),
+      MakeBlock(3, true,
+                {"(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))",
+                 "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&i4_adj_cfg, profile_o2);
+  {
+    const auto parsed = ParsePatternAndNotes(i4_adj_cfg.rpo_blocks[1].instructions[0]);
+    ASSERT_TRUE(parsed.ok());
+    ASSERT_EQ(parsed->pattern.op, RtlOp::kSequence);
+    EXPECT_FALSE(parsed->pattern.children[1].flags.in_struct)
+        << i4_adj_cfg.rpo_blocks[1].instructions[0];
+  }
+
+  // 2. `DImode` call return `(set (reg:DI 2 v0) (call ...))`: defines both `$2` (`v0`) and `$3`
+  // (`v1`), so a post-call `SImode` read of `$3` receives `REG_DEAD` on `$3` while `reg/i:DI 2 v0`
+  // return upgrades `(use (reg/i:DI 2 v0))`.
+  RtlControlFlowGraph di_call_cfg;
+  di_call_cfg.pass = RtlPassKind::kDbr;
+  di_call_cfg.sideband.saved_gpr_regnos = {16, 31};
+  di_call_cfg.sideband.frame_size_bytes = 24;
+  di_call_cfg.rpo_blocks = {
+      MakeBlock(
+          0, false,
+          {"(parallel[ (set (reg:DI 2 v0) (call (mem:SI (symbol_ref \"__divdi3\")) "
+           "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+           "(set (mem:SI (reg:SI 16 s0)) (reg:SI 3 v1))", "(set (reg:DI 2 v0) (const_int 9))"},
+          {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&di_call_cfg, profile_o2);
+  ASSERT_EQ(di_call_cfg.rpo_blocks[0].instructions.size(), 4u);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(di_call_cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 3));
+  EXPECT_TRUE(
+      IsReturnValueUseInsn(di_call_cfg.rpo_blocks[0].instructions[3], 2, RtlMachineMode::kDi));
+
+  // 3. Shared leaf return block (`B2`, `has_label = true`) whose jumping predecessor (`B0`) is a
+  // non-T1 annulled conditional `SEQUENCE` (`v0 = 0`, where `v0` is live into `B1`'s `v0 + t0` so
+  // `reorg.c` annuls `B0` as `jump_insn/u`): `(use (reg/i:SI 2 v0))` MUST be placed inside `B2`
+  // before `(parallel [(return) (use (reg:SI 31 ra))])` so `VerifyDbrStageRightInverse` replays
+  // `reorg.c` cleanly.
+  RtlControlFlowGraph shared_ret_cfg;
+  shared_ret_cfg.pass = RtlPassKind::kDbr;
+  shared_ret_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (reg:SI 2 v0) (reg:SI 6 a2))",
+                 "(sequence [(jump_insn/u (set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (reg:SI 4 "
+                 "a0)) (label_ref L0) (pc)))) (insn/s (set (reg:SI 2 v0) (const_int 0)))])"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {"(set (mem:SI (reg:SI 29 sp)) (const_int 0))",
+                 "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))"},
+                {2}),
+      MakeBlock(2, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&shared_ret_cfg, profile_o2);
+  ASSERT_EQ(shared_ret_cfg.rpo_blocks[2].instructions.size(), 2u);
+  EXPECT_TRUE(
+      IsReturnValueUseInsn(shared_ret_cfg.rpo_blocks[2].instructions[0], 2, RtlMachineMode::kSi));
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  RtlControlFlowGraph dummy;
+  hooks.ExecuteSubfunctionBoundary(SubfunctionId::kFillSimpleDelaySlots, dummy, {}, 2,
+                                   {"-O2", "-mips2", "-mcpu=r4000"});
+  ProductionHardRegLivenessInverseProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult dbr_res = verifier.VerifyDbrStageRightInverse(shared_ret_cfg);
+  EXPECT_TRUE(dbr_res.matches) << dbr_res.diff_detail;
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     IsAnyDefinedHardRegLiveAtBlockEntryIgnoresSidebandAndHandlesMultiWord) {
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false, {"(set (reg:DI 2 v0) (const_int 0))"}, {1}),
+      // `B1` overwrites `$2` (`v0`) in `SImode` before reading `$3` (`v1`), so `$2` is dead at
+      // entry to `B1` while `$3` (the second word of `reg:DI 2`) is live at entry to `B1`.
+      MakeBlock(1, false,
+                {"(set (reg:SI 2 v0) (reg:SI 4 a0))",
+                 "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 3 v1)))",
+                 "(use (reg/i:SI 2 v0))", "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+                {}),
+  };
+  // Deliberately poison `basic_block_live_at_start[1]` to mark `$2` live and omit `$3`:
+  // `IsAnyDefinedHardRegLiveAtBlockEntry` must compute liveness purely from CFG dataflow.
+  cfg.sideband.basic_block_live_at_start[1] = {2};
+
+  const auto si_v0 = ParsePatternAndNotes("(set (reg:SI 2 v0) (const_int -1))");
+  const auto di_v0 = ParsePatternAndNotes("(set (reg:DI 2 v0) (const_int -1))");
+  const auto sp_set =
+      ParsePatternAndNotes("(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 8)))");
+  ASSERT_TRUE(si_v0.ok() && di_v0.ok() && sp_set.ok());
+
+  EXPECT_FALSE(IsAnyDefinedHardRegLiveAtBlockEntry(cfg, si_v0->pattern, 1));
+  EXPECT_TRUE(IsAnyDefinedHardRegLiveAtBlockEntry(cfg, di_v0->pattern, 1));
+  EXPECT_TRUE(IsAnyDefinedHardRegLiveAtBlockEntry(cfg, sp_set->pattern, 1));
 }
 
 }  // namespace

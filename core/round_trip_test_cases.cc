@@ -27,6 +27,14 @@ const std::vector<RoundTripCompilerFlagProfile>& GetRoundTripCompilerFlagProfile
           .suffix = "O3_WaG",
           .c_flags = {"-O3", "-mips2", "-mcpu=r4000", "-Wa,-g"},
       },
+      RoundTripCompilerFlagProfile{
+          .suffix = "O2_G8_WaO1",
+          .c_flags = {"-O2", "-G", "8", "-mips2", "-mcpu=r4000", "-Wa,-O1"},
+      },
+      RoundTripCompilerFlagProfile{
+          .suffix = "O2_Mips1_UnsignedChar_WaO2",
+          .c_flags = {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"},
+      },
   };
   return *k_profiles;
 }
@@ -7704,6 +7712,2101 @@ s32 TwoCalleeSavedLocalsDeclaredInReverseAppearanceOrder(s32 x, s32 y) {
     first_saved = StepFirst(x);
     second_saved = StepSecond(y);
     return CombineSteps(first_saved, second_saved);
+}
+)",
+      },
+      // Category 1: 64-bit Integers (s64/u64, DImode) & Plain char Sign/Zero-Extension
+      RoundTripTestCase{
+          .test_name = "Int64AddSubAccum",
+          .function_name = "Int64AddSubAccum",
+          .original_c = R"(
+s64 Int64AddSubAccum(s64 a, s64 b, s64 c) {
+    s64 sum = a + b;
+    return (sum - c) + 0x100000005LL;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64BitwiseOps",
+          .function_name = "Int64BitwiseOps",
+          .original_c = R"(
+u64 Int64BitwiseOps(u64 a, u64 b, u64 mask) {
+    u64 x = (a & mask) | (b & ~mask);
+    return x ^ 0x00ff00ff55aa55aaULL;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64ShiftLeftConstAndVar",
+          .function_name = "Int64ShiftLeftConstAndVar",
+          .original_c = R"(
+u64 Int64ShiftLeftConstAndVar(u64 x, s32 sh) {
+    u64 fixed_hi = x << 37;
+    u64 fixed_lo = x << 5;
+    u64 dyn = x << (sh & 63);
+    return (fixed_hi ^ fixed_lo) + dyn;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64ShiftRightSignedAndUnsigned",
+          .function_name = "Int64ShiftRightSignedAndUnsigned",
+          .original_c = R"(
+s64 Int64ShiftRightSignedAndUnsigned(s64 sx, u64 ux, s32 sh) {
+    s64 s_dyn = sx >> (sh & 63);
+    s64 s_wide = sx >> 35;
+    u64 u_narrow = ux >> 13;
+    return s_dyn + s_wide + (s64)u_narrow;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64SignedCompareSelect",
+          .function_name = "Int64SignedCompareSelect",
+          .original_c = R"(
+s32 Int64SignedCompareSelect(s64 a, s64 b) {
+    if (a < b) {
+        return (a < -10000000000LL) ? -2 : -1;
+    }
+    if (a > b) {
+        return (a >= 10000000000LL) ? 2 : 1;
+    }
+    return 0;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64UnsignedCompareRange",
+          .function_name = "Int64UnsignedCompareRange",
+          .original_c = R"(
+s32 Int64UnsignedCompareRange(u64 val, u64 lo, u64 hi) {
+    if (val < lo) {
+        return -1;
+    }
+    if (val > hi) {
+        return 1;
+    }
+    return (val == lo || val == hi) ? 2 : 0;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64MulLibcall",
+          .function_name = "Int64MulLibcall",
+          .original_c = R"(
+s64 Int64MulLibcall(s64 a, s64 b, s32 scale) {
+    s64 prod = a * b;
+    return prod + ((s64)scale * 13LL);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64SignedDivModLibcall",
+          .function_name = "Int64SignedDivModLibcall",
+          .original_c = R"(
+s64 Int64SignedDivModLibcall(s64 num, s64 den) {
+    s64 q;
+    s64 r;
+    if (den == 0LL) {
+        return 0LL;
+    }
+    q = num / den;
+    r = num % den;
+    return (q << 2) + r;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64UnsignedDivModLibcall",
+          .function_name = "Int64UnsignedDivModLibcall",
+          .original_c = R"(
+u64 Int64UnsignedDivModLibcall(u64 num, u64 den) {
+    u64 q;
+    u64 r;
+    if (den == 0ULL) {
+        return num;
+    }
+    q = num / den;
+    r = num % den;
+    return q ^ (r << 8);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64SignAndZeroExtendFrom32",
+          .function_name = "Int64SignAndZeroExtendFrom32",
+          .original_c = R"(
+s64 Int64SignAndZeroExtendFrom32(s32 s, u32 u, s16 h) {
+    s64 se = (s64)s;
+    u64 ze = (u64)u;
+    s64 he = (s64)h;
+    return (se << 4) + (s64)ze - he;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64FloatConversions",
+          .function_name = "Int64FloatConversions",
+          .original_c = R"(
+s64 Int64FloatConversions(s64 ticks, f64 rate) {
+    f64 scaled = (f64)ticks * rate;
+    f32 approx = (f32)ticks * 0.5f;
+    return (s64)scaled + (s64)approx;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "Int64StructArraySum",
+          .function_name = "Int64StructArraySum",
+          .original_c = R"(
+s64 Int64StructArraySum(const s64* vals, s32 count, s64* out_max) {
+    s64 sum = 0LL;
+    s64 best = -9000000000000LL;
+    s32 i;
+    for (i = 0; i < count; i++) {
+        s64 v = vals[i];
+        sum += v;
+        if (v > best) {
+            best = v;
+        }
+    }
+    if (out_max != 0) {
+        *out_max = best;
+    }
+    return sum;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "PlainCharLoadPromoteAndCompare",
+          .function_name = "PlainCharLoadPromoteAndCompare",
+          .original_c = R"(
+s32 PlainCharLoadPromoteAndCompare(const char* buf, s32 len, char limit) {
+    s32 acc = 0;
+    s32 i;
+    for (i = 0; i < len; i++) {
+        char c = buf[i];
+        if (c > limit) {
+            acc += (s32)c * 3;
+        } else {
+            acc -= (s32)c;
+        }
+    }
+    return acc;
+}
+)",
+      },
+      // Category 2: C Bitfields (ZERO_EXTRACT / SIGN_EXTRACT, lwl/lwr)
+      RoundTripTestCase{
+          .test_name = "BitfieldUnsignedReadExtract",
+          .function_name = "BitfieldUnsignedReadExtract",
+          .original_c = R"(
+struct InsnFields {
+    u32 opcode : 6;
+    u32 rs : 5;
+    u32 rt : 5;
+    u32 imm : 16;
+};
+
+u32 BitfieldUnsignedReadExtract(const struct InsnFields* f) {
+    return (f->opcode << 16) + (f->rs * 33u) + f->rt + f->imm;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldSignedReadSignExtend",
+          .function_name = "BitfieldSignedReadSignExtend",
+          .original_c = R"(
+struct DeltaVec {
+    s32 dx : 10;
+    s32 dy : 10;
+    s32 dz : 12;
+};
+
+s32 BitfieldSignedReadSignExtend(const struct DeltaVec* v, s32 weight) {
+    return (v->dx * weight) + (v->dy * 2) - v->dz;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldReadModifyWriteFlags",
+          .function_name = "BitfieldReadModifyWriteFlags",
+          .original_c = R"(
+struct ChannelHeader {
+    u32 active : 1;
+    u32 mode : 3;
+    u32 count : 12;
+    u32 prio : 4;
+    u32 reserved : 12;
+};
+
+u32 BitfieldReadModifyWriteFlags(struct ChannelHeader* ch, u32 new_mode, u32 step) {
+    if (ch->active) {
+        ch->count = ch->count + step;
+        ch->mode = new_mode;
+        if (ch->prio < 15u) {
+            ch->prio = ch->prio + 1u;
+        }
+    } else {
+        ch->active = 1u;
+        ch->count = 1u;
+    }
+    return ch->count + (ch->prio << 12);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldCrossByteUnalignedSpan",
+          .function_name = "BitfieldCrossByteUnalignedSpan",
+          .original_c = R"(
+struct SpanRecord {
+    u32 lead : 3;
+    u32 payload : 19;
+    s32 offset : 10;
+};
+
+s32 BitfieldCrossByteUnalignedSpan(struct SpanRecord* r, u32 add_payload, s32 bias) {
+    u32 next_payload = (r->payload + add_payload) & 0x7ffffu;
+    r->payload = next_payload;
+    r->offset = r->offset + bias;
+    return (s32)next_payload + r->offset + (s32)r->lead;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldSingleBitFlagPredicates",
+          .function_name = "BitfieldSingleBitFlagPredicates",
+          .original_c = R"(
+struct FlagByte {
+    u32 f0 : 1;
+    u32 f1 : 1;
+    u32 f2 : 1;
+    u32 f3 : 1;
+    u32 f4 : 1;
+    u32 f5 : 1;
+    u32 f6 : 1;
+    u32 f7 : 1;
+    u32 code : 24;
+};
+
+s32 BitfieldSingleBitFlagPredicates(struct FlagByte* fb) {
+    s32 score = 0;
+    if (fb->f0 && !fb->f1) {
+        score += 10;
+        fb->f2 = 1u;
+    }
+    if (fb->f3 || fb->f4) {
+        score += 25;
+        fb->f5 = 0u;
+    }
+    if (fb->f6 ^ fb->f7) {
+        score += (s32)fb->code;
+    }
+    return score;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldMixedWidthPacketEncode",
+          .function_name = "BitfieldMixedWidthPacketEncode",
+          .original_c = R"(
+struct AudioCmd {
+    u32 cmd : 4;
+    u32 voice : 5;
+    s32 pan : 7;
+    u32 pitch : 16;
+    s32 gain : 11;
+    u32 dry : 10;
+    u32 wet : 11;
+};
+
+void BitfieldMixedWidthPacketEncode(struct AudioCmd* out, u32 cmd, u32 voice, s32 pan,
+                                    u32 pitch, s32 gain) {
+    out->cmd = cmd;
+    out->voice = voice;
+    out->pan = pan;
+    out->pitch = pitch;
+    out->gain = gain;
+    out->dry = (gain > 0) ? (u32)gain : 0u;
+    out->wet = (u32)(voice * 16u);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldHalfwordBackedContainer",
+          .function_name = "BitfieldHalfwordBackedContainer",
+          .original_c = R"(
+struct TileAttr {
+    u16 pal : 4;
+    u16 flip_x : 1;
+    u16 flip_y : 1;
+    s16 depth : 10;
+    u16 tile_id;
+};
+
+s32 BitfieldHalfwordBackedContainer(struct TileAttr* t, s32 z_delta) {
+    t->depth = (s16)(t->depth + z_delta);
+    t->flip_x = !t->flip_x;
+    return (s32)t->tile_id + ((s32)t->pal << 4) + (s32)t->depth;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldByteBackedStatus",
+          .function_name = "BitfieldByteBackedStatus",
+          .original_c = R"(
+struct RegStatus8 {
+    u8 ready : 1;
+    u8 err : 2;
+    u8 chan : 3;
+    s8 trim : 2;
+};
+
+s32 BitfieldByteBackedStatus(struct RegStatus8* st, u8 new_chan) {
+    if (!st->ready || st->err != 0u) {
+        st->err = 0u;
+        st->ready = 1u;
+        return -1;
+    }
+    st->chan = new_chan;
+    return (s32)st->chan * 8 + (s32)st->trim;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldArrayFilterAccumulate",
+          .function_name = "BitfieldArrayFilterAccumulate",
+          .original_c = R"(
+struct ParticleSlot {
+    u32 alive : 1;
+    u32 group : 4;
+    s32 vel : 13;
+    u32 life : 14;
+};
+
+s32 BitfieldArrayFilterAccumulate(struct ParticleSlot* slots, s32 n, u32 target_group) {
+    s32 sum_vel = 0;
+    s32 i;
+    for (i = 0; i < n; i++) {
+        if (slots[i].alive && slots[i].group == target_group) {
+            sum_vel += slots[i].vel;
+            if (slots[i].life > 1u) {
+                slots[i].life = slots[i].life - 1u;
+            } else {
+                slots[i].alive = 0u;
+            }
+        }
+    }
+    return sum_vel;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BitfieldPackedStructCopyModify",
+          .function_name = "BitfieldPackedStructCopyModify",
+          .original_c = R"(
+struct PackedKey {
+    u8 kind : 3;
+    u8 bank : 5;
+    u8 sub : 4;
+    s8 adj : 4;
+    u8 seq;
+};
+
+s32 BitfieldPackedStructCopyModify(struct PackedKey* dst, const struct PackedKey* src, u8 inc) {
+    *dst = *src;
+    dst->seq = (u8)(dst->seq + inc);
+    dst->bank = (u8)(dst->bank ^ 3u);
+    return (s32)dst->kind + (s32)dst->bank + (s32)dst->adj + (s32)dst->seq;
+}
+)",
+      },
+      // Category 3: union Types & Type Punning
+      RoundTripTestCase{
+          .test_name = "UnionFloatToU32RawBits",
+          .function_name = "UnionFloatToU32RawBits",
+          .original_c = R"(
+union FloatBits {
+    f32 f;
+    u32 u;
+};
+
+s32 UnionFloatToU32RawBits(f32 x) {
+    union FloatBits fb;
+    u32 exp_bits;
+    u32 mant_bits;
+    fb.f = x;
+    exp_bits = (fb.u >> 23) & 0xffu;
+    mant_bits = fb.u & 0x7fffffu;
+    return (s32)exp_bits - 127 + (mant_bits != 0u ? 1 : 0);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "UnionU32ToFloatScale",
+          .function_name = "UnionU32ToFloatScale",
+          .original_c = R"(
+union BitsFloat {
+    u32 u;
+    f32 f;
+};
+
+f32 UnionU32ToFloatScale(f32 val, s32 exp_shift) {
+    union BitsFloat bf;
+    s32 biased;
+    biased = (127 + exp_shift) & 0xff;
+    bf.u = (u32)biased << 23;
+    return val * bf.f;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "UnionDoubleSplitWords",
+          .function_name = "UnionDoubleSplitWords",
+          .original_c = R"(
+union DoubleWords {
+    f64 d;
+    struct {
+        u32 hi;
+        u32 lo;
+    } w;
+};
+
+u32 UnionDoubleSplitWords(f64 x, u32 clear_mask) {
+    union DoubleWords dw;
+    dw.d = x * 1.5;
+    dw.w.lo = dw.w.lo & ~clear_mask;
+    return dw.w.hi ^ dw.w.lo;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "UnionByteHalfWordView",
+          .function_name = "UnionByteHalfWordView",
+          .original_c = R"(
+union LaneView {
+    u32 word;
+    u16 half[2];
+    u8 byte[4];
+};
+
+u32 UnionByteHalfWordView(u8 b0, u8 b1, u16 h1) {
+    union LaneView v;
+    v.byte[0] = b0;
+    v.byte[1] = b1;
+    v.half[1] = h1;
+    return v.word + (u32)v.half[0];
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "UnionTaggedVariantEval",
+          .function_name = "UnionTaggedVariantEval",
+          .original_c = R"(
+struct TaggedVal {
+    s32 tag;
+    union {
+        s32 i_val;
+        f32 f_val;
+        struct {
+            s16 lo;
+            s16 hi;
+        } pair;
+    } data;
+};
+
+s32 UnionTaggedVariantEval(const struct TaggedVal* tv, s32 scale) {
+    if (tv->tag == 0) {
+        return tv->data.i_val * scale;
+    }
+    if (tv->tag == 1) {
+        return (s32)(tv->data.f_val * (f32)scale);
+    }
+    return ((s32)tv->data.pair.lo + (s32)tv->data.pair.hi) * scale;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "UnionSubwordOverwriteModify",
+          .function_name = "UnionSubwordOverwriteModify",
+          .original_c = R"(
+union RegCell {
+    u32 full;
+    u16 h[2];
+    u8 b[4];
+};
+
+u32 UnionSubwordOverwriteModify(u32 init, const u8* patches, s32 count) {
+    union RegCell cell;
+    s32 i;
+    cell.full = init;
+    for (i = 0; i < count; i++) {
+        cell.b[i & 3] = (u8)(cell.b[i & 3] ^ patches[i]);
+        cell.h[1] = (u16)(cell.h[1] + 3u);
+    }
+    return cell.full;
+}
+)",
+      },
+      // Category 4: By-Value struct Args, struct Returns (struct_value_rtx), & Stack Locals
+      RoundTripTestCase{
+          .test_name = "StructByVal1ByteArg",
+          .function_name = "StructByVal1ByteArg",
+          .original_c = R"(
+typedef struct {
+    u8 val;
+} Tiny1;
+
+s32 StructByVal1ByteArg(Tiny1 a, s32 scale) {
+    return (s32)a.val * scale + 7;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructByVal2ByteArg",
+          .function_name = "StructByVal2ByteArg",
+          .original_c = R"(
+typedef struct {
+    u8 hi;
+    s8 lo;
+} Tiny2;
+
+s32 StructByVal2ByteArg(Tiny2 a, Tiny2 b) {
+    s32 sum_hi = (s32)a.hi + (s32)b.hi;
+    s32 diff_lo = (s32)a.lo - (s32)b.lo;
+    return (sum_hi << 4) + diff_lo;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructByVal3ByteArg",
+          .function_name = "StructByVal3ByteArg",
+          .original_c = R"(
+typedef struct {
+    u8 r;
+    u8 g;
+    u8 b;
+} Color3;
+
+s32 StructByVal3ByteArg(Color3 c, s32 weight) {
+    return ((s32)c.r * 3 + (s32)c.g * 6 + (s32)c.b) * weight;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructByVal8ByteTwoWords",
+          .function_name = "StructByVal8ByteTwoWords",
+          .original_c = R"(
+typedef struct {
+    s32 x;
+    s32 y;
+} Vec2i;
+
+s32 StructByVal8ByteTwoWords(Vec2i a, Vec2i b) {
+    return (a.x * b.x) + (a.y * b.y);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructByVal20ByteStraddlingStack",
+          .function_name = "StructByVal20ByteStraddlingStack",
+          .original_c = R"(
+typedef struct {
+    s32 v[5];
+} Vec5i;
+
+s32 StructByVal20ByteStraddlingStack(s32 bias, Vec5i item) {
+    return bias + item.v[0] + item.v[1] * 2 + item.v[2] * 3 + item.v[3] * 4 + item.v[4] * 5;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructByValFloatVec3",
+          .function_name = "StructByValFloatVec3",
+          .original_c = R"(
+typedef struct {
+    f32 x;
+    f32 y;
+    f32 z;
+} Vec3f;
+
+f32 StructByValFloatVec3(Vec3f a, Vec3f b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructReturnVec2iByValue",
+          .function_name = "StructReturnVec2iByValue",
+          .original_c = R"(
+typedef struct {
+    s32 x;
+    s32 y;
+} Pair2i;
+
+Pair2i StructReturnVec2iByValue(s32 x, s32 y, s32 scale) {
+    Pair2i out;
+    out.x = x * scale + y;
+    out.y = y * scale - x;
+    return out;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructReturnMat2x2ByValue",
+          .function_name = "StructReturnMat2x2ByValue",
+          .original_c = R"(
+typedef struct {
+    f32 m00;
+    f32 m01;
+    f32 m10;
+    f32 m11;
+} Mat2x2;
+
+Mat2x2 StructReturnMat2x2ByValue(const Mat2x2* a, const Mat2x2* b) {
+    Mat2x2 r;
+    r.m00 = a->m00 * b->m00 + a->m01 * b->m10;
+    r.m01 = a->m00 * b->m01 + a->m01 * b->m11;
+    r.m10 = a->m10 * b->m00 + a->m11 * b->m10;
+    r.m11 = a->m10 * b->m01 + a->m11 * b->m11;
+    return r;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructReturnSmall2ByteAndByValArg",
+          .function_name = "StructReturnSmall2ByteAndByValArg",
+          .original_c = R"(
+typedef struct {
+    u8 lo;
+    u8 hi;
+} BytePair;
+
+BytePair StructReturnSmall2ByteAndByValArg(BytePair in, u8 step) {
+    BytePair res;
+    res.lo = (u8)(in.lo + step);
+    res.hi = (u8)(in.hi ^ step);
+    return res;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StructCallerConsumingReturnedStruct",
+          .function_name = "StructCallerConsumingReturnedStruct",
+          .original_c = R"(
+typedef struct {
+    s32 px;
+    s32 py;
+    s32 pz;
+} Pos3i;
+
+extern Pos3i FetchEntityPos(s32 entity_id);
+
+s32 StructCallerConsumingReturnedStruct(s32 id_a, s32 id_b) {
+    Pos3i a = FetchEntityPos(id_a);
+    Pos3i b = FetchEntityPos(id_b);
+    return (a.px - b.px) + (a.py - b.py) + (a.pz - b.pz);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StackLocalArrayHistogram",
+          .function_name = "StackLocalArrayHistogram",
+          .original_c = R"(
+s32 StackLocalArrayHistogram(const u8* samples, s32 len) {
+    s32 hist[16];
+    s32 i;
+    s32 best_idx = 0;
+    for (i = 0; i < 16; i++) {
+        hist[i] = 0;
+    }
+    for (i = 0; i < len; i++) {
+        u32 bucket = (u32)samples[i] & 15u;
+        hist[bucket] += 1;
+    }
+    for (i = 1; i < 16; i++) {
+        if (hist[i] > hist[best_idx]) {
+            best_idx = i;
+        }
+    }
+    return (best_idx << 16) | hist[best_idx];
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StackLocalNestedStructAddressTaken",
+          .function_name = "StackLocalNestedStructAddressTaken",
+          .original_c = R"(
+struct PacketBounds {
+    s16 min_x;
+    s16 max_x;
+};
+
+struct LocalFrameDesc {
+    s32 magic;
+    struct PacketBounds bounds;
+    s32 flags;
+};
+
+extern s32 PopulateFrameDesc(struct LocalFrameDesc* desc, s32 seq);
+
+s32 StackLocalNestedStructAddressTaken(s32 seq, s16 pad) {
+    struct LocalFrameDesc desc;
+    s32 rc;
+    desc.magic = 0x1234;
+    desc.bounds.min_x = (s16)(-pad);
+    desc.bounds.max_x = pad;
+    desc.flags = seq & 7;
+    rc = PopulateFrameDesc(&desc, seq);
+    return rc + desc.flags + (s32)desc.bounds.max_x - (s32)desc.bounds.min_x;
+}
+)",
+      },
+      // Category 5: High Register Pressure Forcing Real reload Spills & caller-save.c Saves
+      RoundTripTestCase{
+          .test_name = "HighPressureGpr16LiveLeaf",
+          .function_name = "HighPressureGpr16LiveLeaf",
+          .original_c = R"(
+s32 HighPressureGpr16LiveLeaf(const s32* v, s32* out) {
+    s32 a0 = v[0] + 1;
+    s32 a1 = v[1] + 3;
+    s32 a2 = v[2] ^ 5;
+    s32 a3 = v[3] - 7;
+    s32 a4 = v[4] + 11;
+    s32 a5 = v[5] ^ 13;
+    s32 a6 = v[6] - 17;
+    s32 a7 = v[7] + 19;
+    s32 b0 = v[8] ^ 23;
+    s32 b1 = v[9] + 29;
+    s32 b2 = v[10] - 31;
+    s32 b3 = v[11] ^ 37;
+    s32 b4 = v[12] + 41;
+    s32 b5 = v[13] - 43;
+    s32 b6 = v[14] ^ 47;
+    s32 b7 = v[15] + 53;
+    s32 m0 = (a0 ^ b7) + (a1 ^ b6) + (a2 ^ b5) + (a3 ^ b4);
+    s32 m1 = (a4 ^ b3) + (a5 ^ b2) + (a6 ^ b1) + (a7 ^ b0);
+    out[0] = (a0 + b0) ^ (a4 + b4) ^ m1;
+    out[1] = (a1 + b1) ^ (a5 + b5) ^ m0;
+    out[2] = (a2 + b2) ^ (a6 + b6) + (a3 - b3) + (a7 - b7);
+    return m0 + m1 + a0 + a7 + b0 + b7;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureGpr20LiveMatrixStencil",
+          .function_name = "HighPressureGpr20LiveMatrixStencil",
+          .original_c = R"(
+s32 HighPressureGpr20LiveMatrixStencil(const s32* p, s32 stride) {
+    const s32* r0 = p;
+    const s32* r1 = p + stride;
+    const s32* r2 = r1 + stride;
+    const s32* r3 = r2 + stride;
+    s32 x00 = r0[0] + 1, x01 = r0[1] + 2, x02 = r0[2] + 3, x03 = r0[3] + 4, x04 = r0[4] + 5;
+    s32 x10 = r1[0] ^ 6, x11 = r1[1] ^ 7, x12 = r1[2] ^ 8, x13 = r1[3] ^ 9, x14 = r1[4] ^ 10;
+    s32 x20 = r2[0] - 11, x21 = r2[1] - 12, x22 = r2[2] - 13, x23 = r2[3] - 14, x24 = r2[4] - 15;
+    s32 x30 = r3[0] + 16, x31 = r3[1] + 17, x32 = r3[2] + 18, x33 = r3[3] + 19, x34 = r3[4] + 20;
+    s32 d0 = (x00 ^ x34) + (x01 ^ x33) + (x02 ^ x32) + (x03 ^ x31) + (x04 ^ x30);
+    s32 d1 = (x10 ^ x24) + (x11 ^ x23) + (x12 ^ x22) + (x13 ^ x21) + (x14 ^ x20);
+    s32 c0 = (x00 + x10 + x20 + x30) ^ (x04 + x14 + x24 + x34);
+    s32 c1 = (x01 + x11 + x21 + x31) ^ (x03 + x13 + x23 + x33);
+    s32 c2 = (x02 - x12) + (x22 - x32);
+    return d0 + d1 + c0 + c1 + c2;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureGpr14LiveAcrossTwoCalls",
+          .function_name = "HighPressureGpr14LiveAcrossTwoCalls",
+          .original_c = R"(
+extern s32 TransformStage(s32 x, s32 y);
+
+s32 HighPressureGpr14LiveAcrossTwoCalls(const s32* in) {
+    s32 v0 = in[0] + 3;
+    s32 v1 = in[1] ^ 5;
+    s32 v2 = in[2] - 7;
+    s32 v3 = in[3] + 11;
+    s32 v4 = in[4] ^ 13;
+    s32 v5 = in[5] - 17;
+    s32 v6 = in[6] + 19;
+    s32 v7 = in[7] ^ 23;
+    s32 v8 = in[8] - 29;
+    s32 v9 = in[9] + 31;
+    s32 v10 = in[10] ^ 37;
+    s32 v11 = in[11] - 41;
+    s32 v12 = in[12] + 43;
+    s32 v13 = in[13] ^ 47;
+    s32 c1 = TransformStage(v0 + v7, v1 + v8);
+    s32 c2 = TransformStage(c1 ^ v2, v3 + v9);
+    return c1 + c2 + (v0 ^ v13) + (v1 ^ v12) + (v2 ^ v11) + (v3 ^ v10) +
+           (v4 ^ v9) + (v5 ^ v8) + (v6 ^ v7);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureGpr18LiveInLoopWithCall",
+          .function_name = "HighPressureGpr18LiveInLoopWithCall",
+          .original_c = R"(
+extern s32 SampleProbe(s32 iter, s32 acc);
+
+s32 HighPressureGpr18LiveInLoopWithCall(const s32* base, s32 steps) {
+    s32 k0 = base[0], k1 = base[1], k2 = base[2], k3 = base[3], k4 = base[4], k5 = base[5];
+    s32 a0 = 1, a1 = 2, a2 = 3, a3 = 4, a4 = 5, a5 = 6;
+    s32 b0 = 7, b1 = 8, b2 = 9, b3 = 10, b4 = 11, b5 = 12;
+    s32 i;
+    for (i = 0; i < steps; i++) {
+        s32 p = SampleProbe(i, a0 + b5);
+        a0 = (a0 + k0) ^ p;
+        a1 = (a1 + k1) + a0;
+        a2 = (a2 ^ k2) + a1;
+        a3 = (a3 + k3) ^ a2;
+        a4 = (a4 - k4) + a3;
+        a5 = (a5 + k5) ^ a4;
+        b0 = (b0 ^ a5) + k5;
+        b1 = (b1 + b0) ^ k4;
+        b2 = (b2 - b1) + k3;
+        b3 = (b3 ^ b2) + k2;
+        b4 = (b4 + b3) ^ k1;
+        b5 = (b5 - b4) + k0;
+    }
+    return a0 + a1 + a2 + a3 + a4 + a5 + b0 + b1 + b2 + b3 + b4 + b5;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureFpr10SingleFloatLiveLeaf",
+          .function_name = "HighPressureFpr10SingleFloatLiveLeaf",
+          .original_c = R"(
+f32 HighPressureFpr10SingleFloatLiveLeaf(const f32* f, f32* out) {
+    f32 x0 = f[0] * 1.25f + 0.5f;
+    f32 x1 = f[1] * 1.5f - 0.25f;
+    f32 x2 = f[2] * 0.75f + 1.0f;
+    f32 x3 = f[3] * 2.0f - 1.5f;
+    f32 x4 = f[4] + x0 * 0.125f;
+    f32 x5 = f[5] - x1 * 0.125f;
+    f32 x6 = f[6] + x2 * 0.25f;
+    f32 x7 = f[7] - x3 * 0.25f;
+    f32 x8 = f[8] * x4 + x5;
+    f32 x9 = f[9] * x6 - x7;
+    f32 cross = (x0 * x9) + (x1 * x8) + (x2 * x7) + (x3 * x6) + (x4 * x5);
+    out[0] = (x0 + x5) * (x1 + x6) + (x2 + x7) * (x3 + x8);
+    out[1] = (x4 - x9) + (x0 - x8) + (x1 - x7);
+    return cross + x0 + x9;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureFpr10DoubleFloatLiveLeaf",
+          .function_name = "HighPressureFpr10DoubleFloatLiveLeaf",
+          .original_c = R"(
+f64 HighPressureFpr10DoubleFloatLiveLeaf(const f64* d, f64* out) {
+    f64 d0 = d[0] + 1.5;
+    f64 d1 = d[1] - 0.5;
+    f64 d2 = d[2] * 2.25;
+    f64 d3 = d[3] * 0.75;
+    f64 d4 = d[4] + d0 * 0.5;
+    f64 d5 = d[5] - d1 * 0.5;
+    f64 d6 = d[6] + d2 * 0.25;
+    f64 d7 = d[7] - d3 * 0.25;
+    f64 d8 = d[8] * d4 + d5;
+    f64 d9 = d[9] * d6 - d7;
+    f64 mix = (d0 * d9) + (d1 * d8) + (d2 * d7) + (d3 * d6) + (d4 * d5);
+    out[0] = (d0 + d4 + d8) - (d1 + d5 + d9);
+    out[1] = (d2 + d6) * (d3 + d7);
+    return mix;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureFpr8LiveAcrossCalls",
+          .function_name = "HighPressureFpr8LiveAcrossCalls",
+          .original_c = R"(
+extern f32 EvalSplineNode(f32 t, s32 idx);
+
+f32 HighPressureFpr8LiveAcrossCalls(const f32* knots, f32 t) {
+    f32 k0 = knots[0] + t;
+    f32 k1 = knots[1] - t;
+    f32 k2 = knots[2] * t;
+    f32 k3 = knots[3] + 0.5f;
+    f32 k4 = knots[4] - 0.25f;
+    f32 k5 = knots[5] * 1.5f;
+    f32 k6 = knots[6] + k0;
+    f32 k7 = knots[7] + k1;
+    f32 s0 = EvalSplineNode(k0 + k7, 0);
+    f32 s1 = EvalSplineNode(s0 + k2, 1);
+    return s0 * (k0 + k4) + s1 * (k1 + k5) + (k2 * k6) + (k3 * k7);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureMixedGprAndFprAcrossCalls",
+          .function_name = "HighPressureMixedGprAndFprAcrossCalls",
+          .original_c = R"(
+extern f32 StepPhysicsAxis(s32 id, f32 pos, f32 vel);
+
+f32 HighPressureMixedGprAndFprAcrossCalls(const s32* ids, const f32* pv) {
+    s32 i0 = ids[0] + 1, i1 = ids[1] + 2, i2 = ids[2] + 3, i3 = ids[3] + 4;
+    s32 i4 = ids[4] ^ 5, i5 = ids[5] ^ 6, i6 = ids[6] ^ 7, i7 = ids[7] ^ 8;
+    s32 i8 = ids[8] - 9, i9 = ids[9] - 10, i10 = ids[10] + 11, i11 = ids[11] + 12;
+    f32 f0 = pv[0] + 1.0f, f1 = pv[1] - 1.0f, f2 = pv[2] * 2.0f, f3 = pv[3] * 0.5f;
+    f32 f4 = pv[4] + f0, f5 = pv[5] + f1, f6 = pv[6] + f2, f7 = pv[7] + f3;
+    f32 r0 = StepPhysicsAxis(i0 + i11, f0, f7);
+    f32 r1 = StepPhysicsAxis(i1 + i10, r0 + f1, f6);
+    s32 tag = (i0 ^ i6) + (i1 ^ i7) + (i2 ^ i8) + (i3 ^ i9) + (i4 ^ i10) + (i5 ^ i11);
+    return r0 + r1 + (f2 * f5) + (f3 * f4) + (f32)tag;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureSpillsPlusLocalStackArray",
+          .function_name = "HighPressureSpillsPlusLocalStackArray",
+          .original_c = R"(
+extern void PermuteScratch8(s32* buf, s32 seed);
+
+s32 HighPressureSpillsPlusLocalStackArray(const s32* src, s32 seed) {
+    s32 buf[8];
+    s32 s0 = src[0] + 1, s1 = src[1] + 2, s2 = src[2] + 3, s3 = src[3] + 4;
+    s32 s4 = src[4] ^ 5, s5 = src[5] ^ 6, s6 = src[6] ^ 7, s7 = src[7] ^ 8;
+    s32 s8 = src[8] - 9, s9 = src[9] - 10, s10 = src[10] + 11, s11 = src[11] + 12;
+    s32 s12 = src[12] ^ 13, s13 = src[13] ^ 14;
+    buf[0] = s0;
+    buf[1] = s1;
+    buf[2] = s2;
+    buf[3] = s3;
+    buf[4] = s4;
+    buf[5] = s5;
+    buf[6] = s6;
+    buf[7] = s7;
+    PermuteScratch8(buf, seed + s13);
+    return (buf[0] ^ s13) + (buf[1] ^ s12) + (buf[2] ^ s11) + (buf[3] ^ s10) +
+           (buf[4] ^ s9) + (buf[5] ^ s8) + (buf[6] + s7 + s0) + (buf[7] + s6 + s1) +
+           s2 + s3 + s4 + s5;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureSpillsPlus8OutgoingArgs",
+          .function_name = "HighPressureSpillsPlus8OutgoingArgs",
+          .original_c = R"(
+extern s32 Dispatch8Args(s32 a0, s32 a1, s32 a2, s32 a3, s32 a4, s32 a5, s32 a6, s32 a7);
+
+s32 HighPressureSpillsPlus8OutgoingArgs(const s32* in) {
+    s32 x0 = in[0] + 10, x1 = in[1] + 20, x2 = in[2] + 30, x3 = in[3] + 40;
+    s32 x4 = in[4] ^ 15, x5 = in[5] ^ 25, x6 = in[6] ^ 35, x7 = in[7] ^ 45;
+    s32 x8 = in[8] - 5, x9 = in[9] - 15, x10 = in[10] - 25, x11 = in[11] - 35;
+    s32 x12 = in[12] + 99, x13 = in[13] ^ 77;
+    s32 res1 = Dispatch8Args(x0, x1, x2, x3, x4, x5, x6, x7);
+    s32 res2 = Dispatch8Args(x13, x12, x11, x10, x9, x8, res1, x0 + x7);
+    return res1 + res2 + (x1 ^ x12) + (x2 ^ x11) + (x3 ^ x10) + (x4 ^ x9) + (x5 ^ x8) + x6 + x13;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureSpillsPlusMixedFpStackArgs",
+          .function_name = "HighPressureSpillsPlusMixedFpStackArgs",
+          .original_c = R"(
+extern f64 BlendMixed7Args(s32 tag, f64 a, s32 mode, f64 b, s32 mask, f64 c, s32 bias);
+
+f64 HighPressureSpillsPlusMixedFpStackArgs(const s32* iv, const f64* dv) {
+    s32 i0 = iv[0] + 1, i1 = iv[1] + 2, i2 = iv[2] + 3, i3 = iv[3] + 4;
+    s32 i4 = iv[4] ^ 5, i5 = iv[5] ^ 6, i6 = iv[6] ^ 7, i7 = iv[7] ^ 8;
+    s32 i8 = iv[8] - 9, i9 = iv[9] - 10, i10 = iv[10] + 11, i11 = iv[11] + 12;
+    f64 d0 = dv[0] + 1.0, d1 = dv[1] * 2.0, d2 = dv[2] - 0.5;
+    f64 d3 = dv[3] + d0, d4 = dv[4] + d1, d5 = dv[5] + d2;
+    f64 call_out = BlendMixed7Args(i0 + i11, d0, i1 + i10, d1, i2 + i9, d2, i3 + i8);
+    s32 tail = (i4 ^ i7) + (i5 ^ i6) + i0 + i1 + i2 + i3 + i8 + i9 + i10 + i11;
+    return call_out + d3 * d5 - d4 + (f64)tail;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "HighPressureDiamondBranchesWithLiveValues",
+          .function_name = "HighPressureDiamondBranchesWithLiveValues",
+          .original_c = R"(
+extern s32 BranchHook(s32 v);
+
+s32 HighPressureDiamondBranchesWithLiveValues(const s32* p, s32 sel) {
+    s32 r0 = p[0] + 1, r1 = p[1] + 2, r2 = p[2] + 3, r3 = p[3] + 4;
+    s32 r4 = p[4] ^ 5, r5 = p[5] ^ 6, r6 = p[6] ^ 7, r7 = p[7] ^ 8;
+    s32 r8 = p[8] - 9, r9 = p[9] - 10, r10 = p[10] + 11, r11 = p[11] + 12;
+    s32 r12 = p[12] ^ 13, r13 = p[13] ^ 14, r14 = p[14] + 15, r15 = p[15] + 16;
+    s32 mid;
+    if (sel > 0) {
+        mid = BranchHook(r0 + r15) + (r1 ^ r14) - (r2 + r13);
+    } else if (sel < 0) {
+        mid = BranchHook(r3 ^ r12) - (r4 + r11) + (r5 ^ r10);
+    } else {
+        mid = (r6 + r9) ^ (r7 + r8);
+    }
+    return mid + (r0 ^ r8) + (r1 ^ r9) + (r2 ^ r10) + (r3 ^ r11) +
+           (r4 ^ r12) + (r5 ^ r13) + (r6 ^ r14) + (r7 ^ r15);
+}
+)",
+      },
+      // Category 6: Variadic Functions (... / __builtin_next_arg without #defines)
+      RoundTripTestCase{
+          .test_name = "VariadicSumCountedInts",
+          .function_name = "VariadicSumCountedInts",
+          .original_c = R"(
+s32 VariadicSumCountedInts(s32 count, ...) {
+    char* ap = (char*)__builtin_next_arg(count);
+    s32 total = 0;
+    s32 i;
+    for (i = 0; i < count; i++) {
+        s32 v;
+        ap = (char*)(((s32)ap + 3) & -4);
+        v = *(s32*)(void*)ap;
+        ap += 4;
+        total += v;
+    }
+    return total;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VariadicWeightedPairAccum",
+          .function_name = "VariadicWeightedPairAccum",
+          .original_c = R"(
+s32 VariadicWeightedPairAccum(s32 base, s32 pairs, ...) {
+    char* ap = (char*)__builtin_next_arg(pairs);
+    s32 acc = base;
+    s32 i;
+    for (i = 0; i < pairs; i++) {
+        s32 weight;
+        s32 sample;
+        ap = (char*)(((s32)ap + 3) & -4);
+        weight = *(s32*)(void*)ap;
+        ap += 4;
+        ap = (char*)(((s32)ap + 3) & -4);
+        sample = *(s32*)(void*)ap;
+        ap += 4;
+        acc += weight * sample;
+    }
+    return acc;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VariadicTaggedMixedIntAndDouble",
+          .function_name = "VariadicTaggedMixedIntAndDouble",
+          .original_c = R"(
+s32 VariadicTaggedMixedIntAndDouble(u32 type_mask, s32 count, ...) {
+    char* ap = (char*)__builtin_next_arg(count);
+    s32 sum = 0;
+    s32 i;
+    for (i = 0; i < count; i++) {
+        if ((type_mask >> i) & 1u) {
+            f64 dv;
+            ap = (char*)(((s32)ap + 7) & -8);
+            dv = *(f64*)(void*)ap;
+            ap += 8;
+            sum += (s32)(dv * 10.0);
+        } else {
+            s32 iv;
+            ap = (char*)(((s32)ap + 3) & -4);
+            iv = *(s32*)(void*)ap;
+            ap += 4;
+            sum += iv;
+        }
+    }
+    return sum;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VariadicFormatDispatchToSink",
+          .function_name = "VariadicFormatDispatchToSink",
+          .original_c = R"(
+extern void EmitFormattedField(s32 spec, s32 val);
+
+s32 VariadicFormatDispatchToSink(const char* fmt, ...) {
+    char* ap = (char*)__builtin_next_arg(fmt);
+    s32 emitted = 0;
+    while (*fmt != 0) {
+        char ch = *fmt++;
+        if (ch == 'd' || ch == 'x') {
+            s32 arg_val;
+            ap = (char*)(((s32)ap + 3) & -4);
+            arg_val = *(s32*)(void*)ap;
+            ap += 4;
+            EmitFormattedField((s32)ch, arg_val);
+            emitted += 1;
+        }
+    }
+    return emitted;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VariadicCallerManyArguments",
+          .function_name = "VariadicCallerManyArguments",
+          .original_c = R"(
+extern s32 FormatPacketSink(s32 channel, s32 tag, ...);
+
+s32 VariadicCallerManyArguments(s32 a, s32 b, s32 c) {
+    s32 r1 = FormatPacketSink(1, 10, a, b);
+    s32 r2 = FormatPacketSink(2, 20, a + 1, b + 2, c + 3, a ^ b, b ^ c, 99);
+    return r1 + r2;
+}
+)",
+      },
+      // Category 7: volatile Loads, Stores, Locals, & MMIO Structs
+      RoundTripTestCase{
+          .test_name = "VolatileMmioPollAndAck",
+          .function_name = "VolatileMmioPollAndAck",
+          .original_c = R"(
+s32 VolatileMmioPollAndAck(volatile u32* status_reg, volatile u32* ack_reg, u32 busy_mask,
+                           s32 max_spins) {
+    s32 spins = 0;
+    while ((*status_reg & busy_mask) != 0u) {
+        spins += 1;
+        if (spins >= max_spins) {
+            return -1;
+        }
+    }
+    *ack_reg = busy_mask | 1u;
+    return spins;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VolatileSubwordByteHalfwordAccess",
+          .function_name = "VolatileSubwordByteHalfwordAccess",
+          .original_c = R"(
+u32 VolatileSubwordByteHalfwordAccess(volatile u8* port8, volatile u16* port16, u8 cmd) {
+    u8 s0;
+    u16 h0;
+    *port8 = cmd;
+    s0 = *port8;
+    *port16 = (u16)(((u16)s0 << 8) | 0x5au);
+    h0 = *port16;
+    return ((u32)h0 << 4) ^ (u32)s0;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VolatileStructHardwareRegs",
+          .function_name = "VolatileStructHardwareRegs",
+          .original_c = R"(
+struct PiDmaHw {
+    volatile u32 dram_addr;
+    volatile u32 cart_addr;
+    volatile u32 rd_len;
+    volatile u32 wr_len;
+    volatile u32 status;
+};
+
+u32 VolatileStructHardwareRegs(struct PiDmaHw* hw, u32 dram, u32 cart, u32 len) {
+    while ((hw->status & 3u) != 0u) {
+    }
+    hw->dram_addr = dram & 0x00ffffffu;
+    hw->cart_addr = cart;
+    hw->wr_len = len - 1u;
+    return hw->status;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VolatileStackLocalAcrossCall",
+          .function_name = "VolatileStackLocalAcrossCall",
+          .original_c = R"(
+extern s32 TriggerStep(s32 code);
+
+s32 VolatileStackLocalAcrossCall(s32 seed) {
+    volatile s32 checkpoint = seed + 4;
+    s32 r = TriggerStep(checkpoint);
+    checkpoint = checkpoint + r;
+    checkpoint = checkpoint ^ 0x55;
+    return checkpoint;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VolatileBitmaskReadModifyWrite",
+          .function_name = "VolatileBitmaskReadModifyWrite",
+          .original_c = R"(
+u32 VolatileBitmaskReadModifyWrite(volatile u32* ctrl, u32 set_bits, u32 clr_bits) {
+    *ctrl = *ctrl | set_bits;
+    *ctrl = *ctrl & ~clr_bits;
+    *ctrl = *ctrl ^ 0x00000080u;
+    return *ctrl;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "VolatileFloatSensorSample",
+          .function_name = "VolatileFloatSensorSample",
+          .original_c = R"(
+f32 VolatileFloatSensorSample(const volatile f32* adc_a, const volatile f32* adc_b,
+                              volatile f32* dac_out) {
+    f32 a = *adc_a;
+    f32 b = *adc_b;
+    f32 avg = (a + b) * 0.5f;
+    *dac_out = avg;
+    return avg + *adc_a;
+}
+)",
+      },
+      // Category 8: String Literals ("..." in .rodata / .rdata / .sdata)
+      RoundTripTestCase{
+          .test_name = "StringLiteralPassToLogger",
+          .function_name = "StringLiteralPassToLogger",
+          .original_c = R"(
+extern s32 WriteBootTrace(const char* tag, const char* detail, s32 code);
+
+s32 StringLiteralPassToLogger(s32 status_code) {
+    if (status_code == 0) {
+        return WriteBootTrace("OK", "AUDIO_DMA_READY_COMPLETE", 0);
+    }
+    return WriteBootTrace("ERR", "AUDIO_DMA_TIMEOUT_FAILURE", status_code);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StringLiteralTableSelectByIndex",
+          .function_name = "StringLiteralTableSelectByIndex",
+          .original_c = R"(
+s32 StringLiteralTableSelectByIndex(s32 mode) {
+    const char* label;
+    s32 hash = 0;
+    if (mode == 0) {
+        label = "IDLE";
+    } else if (mode == 1) {
+        label = "ACTIVE_RUN";
+    } else if (mode == 2) {
+        label = "SUSPENDED_WAIT";
+    } else {
+        label = "ERR_OVERRUN_STATE";
+    }
+    while (*label != 0) {
+        hash = (hash * 31) + (u8)(*label);
+        label++;
+    }
+    return hash;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StringLiteralInlinePrefixMatch",
+          .function_name = "StringLiteralInlinePrefixMatch",
+          .original_c = R"(
+s32 StringLiteralInlinePrefixMatch(const char* header) {
+    const char* magic = "N64_SAVE_SLOT_V2";
+    s32 idx = 0;
+    while (magic[idx] != 0) {
+        if (header[idx] != magic[idx]) {
+            return -idx - 1;
+        }
+        idx++;
+    }
+    return idx;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StringLiteralCopyWithBounds",
+          .function_name = "StringLiteralCopyWithBounds",
+          .original_c = R"(
+s32 StringLiteralCopyWithBounds(char* dst, s32 capacity, s32 alt) {
+    const char* src = alt ? "FALLBACK_PROFILE_NAME" : "DEFAULT";
+    s32 i = 0;
+    if (capacity <= 0) {
+        return 0;
+    }
+    while (i + 1 < capacity && src[i] != 0) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+    return i;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StringLiteralShortVsLongPair",
+          .function_name = "StringLiteralShortVsLongPair",
+          .original_c = R"(
+extern s32 RegisterAssetKey(const char* short_ns, const char* full_path);
+
+s32 StringLiteralShortVsLongPair(s32 bank) {
+    if (bank < 4) {
+        return RegisterAssetKey("BGM", "banks/sequence/castle_courtyard_theme");
+    }
+    return RegisterAssetKey("SFX", "banks/effects/player_footstep_stone");
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StringLiteralSwitchNameChecksum",
+          .function_name = "StringLiteralSwitchNameChecksum",
+          .original_c = R"(
+u32 StringLiteralSwitchNameChecksum(s32 op) {
+    const char* name;
+    u32 sum = 2166136261u;
+    switch (op) {
+        case 0: name = "NOP"; break;
+        case 1: name = "LOAD_VERTEX_BATCH"; break;
+        case 2: name = "CULL_DISPLAY_LIST"; break;
+        case 3: name = "SET_COMBINE_MODE"; break;
+        case 4: name = "SYNC_PIPE"; break;
+        default: name = "UNKNOWN_GFX_OPCODE"; break;
+    }
+    while (*name != 0) {
+        sum = (sum ^ (u8)(*name)) * 16777619u;
+        name++;
+    }
+    return sum;
+}
+)",
+      },
+      // Category 9: static Module-Internal Globals & Small-Data (-G 8 R_MIPS_GPREL16) Globals
+      RoundTripTestCase{
+          .test_name = "StaticBssScalarCounterStep",
+          .function_name = "StaticBssScalarCounterStep",
+          .original_c = R"(
+static s32 s_tick_counter;
+static s32 s_wrap_count;
+
+s32 StaticBssScalarCounterStep(s32 delta, s32 period) {
+    s_tick_counter += delta;
+    if (s_tick_counter >= period) {
+        s_tick_counter -= period;
+        s_wrap_count += 1;
+    }
+    return (s_wrap_count << 16) ^ s_tick_counter;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StaticDataInitializedScalars",
+          .function_name = "StaticDataInitializedScalars",
+          .original_c = R"(
+static s32 s_rng_state = 0x13572468;
+static s16 s_gain_bias = -24;
+
+s32 StaticDataInitializedScalars(s32 input) {
+    s_rng_state = (s_rng_state * 1103515245) + 12345;
+    s_gain_bias = (s16)(s_gain_bias + (input & 7));
+    return ((s_rng_state >> 16) & 0x7fff) + (s32)s_gain_bias;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StaticRodataConstLookupTable",
+          .function_name = "StaticRodataConstLookupTable",
+          .original_c = R"(
+static const s16 kAttenuationLut[12] = {
+    1024, 960, 896, 820, 740, 650, 560, 470, 380, 290, 190, 96
+};
+
+s32 StaticRodataConstLookupTable(s32 dist_idx, s32 base_vol) {
+    s32 clamped = dist_idx;
+    if (clamped < 0) {
+        clamped = 0;
+    } else if (clamped > 11) {
+        clamped = 11;
+    }
+    return (base_vol * (s32)kAttenuationLut[clamped]) >> 10;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StaticStructModuleStateUpdate",
+          .function_name = "StaticStructModuleStateUpdate",
+          .original_c = R"(
+struct MixerModuleState {
+    s32 initialized;
+    s32 active_voices;
+    s32 master_vol;
+    s32 peak_level;
+};
+
+static struct MixerModuleState s_mixer = {1, 0, 127, 0};
+
+s32 StaticStructModuleStateUpdate(s32 voice_delta, s32 sample_peak) {
+    if (!s_mixer.initialized) {
+        s_mixer.initialized = 1;
+        s_mixer.master_vol = 100;
+    }
+    s_mixer.active_voices += voice_delta;
+    if (sample_peak > s_mixer.peak_level) {
+        s_mixer.peak_level = sample_peak;
+    }
+    return s_mixer.active_voices * s_mixer.master_vol + s_mixer.peak_level;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "FunctionLocalStaticSequenceId",
+          .function_name = "FunctionLocalStaticSequenceId",
+          .original_c = R"(
+s32 FunctionLocalStaticSequenceId(s32 reset_flag, s32 stride) {
+    static s32 s_next_id = 1000;
+    static s32 s_invocations;
+    if (reset_flag) {
+        s_next_id = 1000;
+    } else {
+        s_next_id += stride;
+    }
+    s_invocations += 1;
+    return s_next_id + s_invocations;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "SmallDataTentativeCommGlobals",
+          .function_name = "SmallDataTentativeCommGlobals",
+          .original_c = R"(
+s32 g_comm_frame_idx;
+s16 g_comm_substep;
+u8 g_comm_ready_flag;
+
+s32 SmallDataTentativeCommGlobals(s32 step) {
+    if (!g_comm_ready_flag) {
+        g_comm_ready_flag = 1u;
+        g_comm_frame_idx = 0;
+        g_comm_substep = 1;
+    }
+    g_comm_frame_idx += step;
+    g_comm_substep = (s16)(g_comm_substep + 2);
+    return g_comm_frame_idx + (s32)g_comm_substep;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "SmallDataExternScalarGlobals",
+          .function_name = "SmallDataExternScalarGlobals",
+          .original_c = R"(
+extern s32 g_gp_tempo;
+extern s16 g_gp_transpose;
+extern u8 g_gp_mute_mask;
+extern s32 g_large_channel_table[32];
+
+s32 SmallDataExternScalarGlobals(s32 ch) {
+    s32 idx = ch & 31;
+    if ((g_gp_mute_mask & (1u << (ch & 7))) != 0u) {
+        return 0;
+    }
+    return g_large_channel_table[idx] + g_gp_tempo + (s32)g_gp_transpose;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "SmallDataSdataEightBytePair",
+          .function_name = "SmallDataSdataEightBytePair",
+          .original_c = R"(
+s64 g_sdata_clock = 0x0000000200000010LL;
+static f64 s_sdata_ratio = 0.25;
+
+s64 SmallDataSdataEightBytePair(s32 ticks) {
+    g_sdata_clock += (s64)ticks;
+    return g_sdata_clock + (s64)((f64)ticks * s_sdata_ratio);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "StaticLargeBssRingBuffer",
+          .function_name = "StaticLargeBssRingBuffer",
+          .original_c = R"(
+static s32 s_ring_buf[16];
+static s32 s_ring_write_idx;
+
+s32 StaticLargeBssRingBuffer(s32 sample) {
+    s32 pos = s_ring_write_idx & 15;
+    s32 prev = s_ring_buf[(pos - 1) & 15];
+    s_ring_buf[pos] = sample;
+    s_ring_write_idx = (pos + 1) & 15;
+    return sample + prev;
+}
+)",
+      },
+      // Category 10: Indirect Function-Pointer Calls (jalr)
+      RoundTripTestCase{
+          .test_name = "IndirectCallBinaryCallback",
+          .function_name = "IndirectCallBinaryCallback",
+          .original_c = R"(
+typedef s32 (*BinOpFn)(s32, s32);
+
+s32 IndirectCallBinaryCallback(BinOpFn fn, const s32* vals, s32 n, s32 init) {
+    s32 acc = init;
+    s32 i;
+    for (i = 0; i < n; i++) {
+        acc = fn(acc, vals[i]);
+    }
+    return acc;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "IndirectCallVtableStructOps",
+          .function_name = "IndirectCallVtableStructOps",
+          .original_c = R"(
+struct StreamDecoderVtable {
+    s32 (*open)(void* ctx, s32 flags);
+    s32 (*read_chunk)(void* ctx, u8* dst, s32 max_bytes);
+    void (*close)(void* ctx);
+};
+
+s32 IndirectCallVtableStructOps(const struct StreamDecoderVtable* vt, void* ctx, u8* dst,
+                                s32 len) {
+    s32 rc = vt->open(ctx, 1);
+    s32 got;
+    if (rc < 0) {
+        return rc;
+    }
+    got = vt->read_chunk(ctx, dst, len);
+    vt->close(ctx);
+    return got;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "IndirectCallDispatchArray",
+          .function_name = "IndirectCallDispatchArray",
+          .original_c = R"(
+typedef s32 (*ActionHandler)(s32 entity_id, s32 arg);
+
+s32 IndirectCallDispatchArray(const ActionHandler* table, s32 table_len, s32 idx, s32 entity_id,
+                              s32 arg) {
+    ActionHandler fn;
+    if (idx < 0 || idx >= table_len) {
+        return -1;
+    }
+    fn = table[idx];
+    if (fn == 0) {
+        return 0;
+    }
+    return fn(entity_id, arg + idx);
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "IndirectCallFloatTransformChain",
+          .function_name = "IndirectCallFloatTransformChain",
+          .original_c = R"(
+typedef f32 (*FilterStepFn)(f32 sample, f32 coeff);
+
+f32 IndirectCallFloatTransformChain(FilterStepFn step_a, FilterStepFn step_b, f32 x, f32 c0,
+                                    f32 c1) {
+    f32 y = step_a(x, c0);
+    f32 z = step_b(y, c1);
+    return y * 0.25f + z * 0.75f;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "IndirectCallConditionalFallback",
+          .function_name = "IndirectCallConditionalFallback",
+          .original_c = R"(
+typedef s32 (*ValidatorFn)(const u8* buf, s32 len);
+
+s32 IndirectCallConditionalFallback(ValidatorFn primary, ValidatorFn fallback, const u8* buf,
+                                    s32 len) {
+    ValidatorFn chosen = (primary != 0) ? primary : fallback;
+    s32 first = chosen(buf, len);
+    if (first < 0 && fallback != 0 && chosen != fallback) {
+        return fallback(buf, len);
+    }
+    return first;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "IndirectCallReturnedFunctionPointer",
+          .function_name = "IndirectCallReturnedFunctionPointer",
+          .original_c = R"(
+typedef s32 (*KernelOpFn)(s32 a, s32 b, s32 c);
+extern KernelOpFn ResolveKernelOp(s32 op_code);
+
+s32 IndirectCallReturnedFunctionPointer(s32 op_code, s32 a, s32 b, s32 c) {
+    KernelOpFn fn = ResolveKernelOp(op_code);
+    if (fn == 0) {
+        return -99;
+    }
+    return fn(a, b, c) + op_code;
+}
+)",
+      },
+      // Category 11: Multiple .rdata switch Jump Tables in One Function (>= 2 dense switches)
+      RoundTripTestCase{
+          .test_name = "TwoDenseSwitchesSequential",
+          .function_name = "TwoDenseSwitchesSequential",
+          .original_c = R"(
+s32 TwoDenseSwitchesSequential(s32 cmd_a, s32 cmd_b, s32 val) {
+    s32 stage1;
+    s32 stage2;
+    switch (cmd_a) {
+        case 0: stage1 = val + 10; break;
+        case 1: stage1 = val - 7; break;
+        case 2: stage1 = val * 3; break;
+        case 3: stage1 = val ^ 0x55; break;
+        case 4: stage1 = val << 2; break;
+        case 5: stage1 = val >> 1; break;
+        case 6: stage1 = -val; break;
+        default: stage1 = val; break;
+    }
+    switch (cmd_b) {
+        case 0: stage2 = stage1 + 1; break;
+        case 1: stage2 = stage1 + 4; break;
+        case 2: stage2 = stage1 * 5; break;
+        case 3: stage2 = stage1 ^ 0xaa; break;
+        case 4: stage2 = stage1 - 19; break;
+        case 5: stage2 = (stage1 << 1) + val; break;
+        case 6: stage2 = stage1 & 0xfff; break;
+        default: stage2 = 0; break;
+    }
+    return stage2;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "ThreeDenseSwitchesPipeline",
+          .function_name = "ThreeDenseSwitchesPipeline",
+          .original_c = R"(
+s32 ThreeDenseSwitchesPipeline(s32 k0, s32 k1, s32 k2, s32 seed) {
+    s32 x = seed;
+    switch (k0) {
+        case 0: x += 3; break;
+        case 1: x -= 5; break;
+        case 2: x ^= 11; break;
+        case 3: x *= 7; break;
+        case 4: x <<= 1; break;
+        case 5: x >>= 2; break;
+        default: x = 1; break;
+    }
+    switch (k1) {
+        case 0: x = x + seed; break;
+        case 1: x = x - seed; break;
+        case 2: x = x ^ 0x33; break;
+        case 3: x = x * 9; break;
+        case 4: x = x + 42; break;
+        case 5: x = ~x; break;
+        default: x = 2; break;
+    }
+    switch (k2) {
+        case 0: return x + 100;
+        case 1: return x - 100;
+        case 2: return x ^ 0xff;
+        case 3: return x << 3;
+        case 4: return x >> 1;
+        case 5: return x * 3;
+        default: return x;
+    }
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "NestedDenseSwitchOuterAndInner",
+          .function_name = "NestedDenseSwitchOuterAndInner",
+          .original_c = R"(
+s32 NestedDenseSwitchOuterAndInner(s32 group, s32 sub, s32 arg) {
+    switch (group) {
+        case 0:
+            return arg + 1;
+        case 1:
+            switch (sub) {
+                case 0: return arg * 2 + 1;
+                case 1: return arg * 3 + 2;
+                case 2: return arg * 5 + 3;
+                case 3: return arg ^ 0x1f;
+                case 4: return arg - 17;
+                case 5: return (arg << 2) - 9;
+                default: return -1;
+            }
+        case 2:
+            return arg - 4;
+        case 3:
+            return arg ^ 0x77;
+        case 4:
+            return arg << 1;
+        case 5:
+            return arg >> 2;
+        default:
+            return 0;
+    }
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "TwoDenseSwitchesInsideWhileLoop",
+          .function_name = "TwoDenseSwitchesInsideWhileLoop",
+          .original_c = R"(
+s32 TwoDenseSwitchesInsideWhileLoop(const u8* code, s32 len, s32 init) {
+    s32 acc = init;
+    s32 pc = 0;
+    while (pc + 1 < len) {
+        u8 op1 = code[pc];
+        u8 op2 = code[pc + 1];
+        pc += 2;
+        switch (op1) {
+            case 0: acc += 1; break;
+            case 1: acc += 5; break;
+            case 2: acc -= 3; break;
+            case 3: acc ^= 9; break;
+            case 4: acc <<= 1; break;
+            case 5: acc >>= 1; break;
+            default: acc += (s32)op1; break;
+        }
+        switch (op2) {
+            case 0: acc ^= 0x11; break;
+            case 1: acc += 13; break;
+            case 2: acc -= 7; break;
+            case 3: acc *= 3; break;
+            case 4: acc &= 0xffff; break;
+            case 5: acc |= 4; break;
+            default: break;
+        }
+    }
+    return acc;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "TwoDenseSwitchesSharingHoistedGlobals",
+          .function_name = "TwoDenseSwitchesSharingHoistedGlobals",
+          .original_c = R"(
+extern s32 g_switch_table_bias[8];
+extern s32 NotifySwitchStage(s32 v);
+
+s32 TwoDenseSwitchesSharingHoistedGlobals(s32 s0, s32 s1, s32 x) {
+    s32 v;
+    switch (s0) {
+        case 0: v = x + g_switch_table_bias[0]; break;
+        case 1: v = x + g_switch_table_bias[1]; break;
+        case 2: v = x - g_switch_table_bias[2]; break;
+        case 3: v = x ^ g_switch_table_bias[3]; break;
+        case 4: v = NotifySwitchStage(x); break;
+        case 5: v = x + g_switch_table_bias[5]; break;
+        default: v = g_switch_table_bias[7]; break;
+    }
+    switch (s1) {
+        case 0: return v + g_switch_table_bias[0];
+        case 1: return v - g_switch_table_bias[1];
+        case 2: return v ^ g_switch_table_bias[2];
+        case 3: return NotifySwitchStage(v);
+        case 4: return v + g_switch_table_bias[4];
+        case 5: return v * 3 + g_switch_table_bias[6];
+        default: return v;
+    }
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "TwoDenseSwitchesWithShiftedBaseIndex",
+          .function_name = "TwoDenseSwitchesWithShiftedBaseIndex",
+          .original_c = R"(
+s32 TwoDenseSwitchesWithShiftedBaseIndex(s32 msg_a, s32 msg_b, s32 payload) {
+    s32 r = payload;
+    switch (msg_a) {
+        case 100: r += 10; break;
+        case 101: r -= 20; break;
+        case 102: r ^= 30; break;
+        case 103: r *= 3; break;
+        case 104: r <<= 2; break;
+        case 105: r >>= 1; break;
+        case 106: r = ~r; break;
+        default: r = -1; break;
+    }
+    switch (msg_b) {
+        case 200: r += 1; break;
+        case 201: r += 2; break;
+        case 202: r -= 4; break;
+        case 203: r ^= 8; break;
+        case 204: r += 16; break;
+        case 205: r -= 32; break;
+        case 206: r ^= 64; break;
+        default: break;
+    }
+    return r;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "TwoDenseSwitchesWithFallthroughAndEarlyReturn",
+          .function_name = "TwoDenseSwitchesWithFallthroughAndEarlyReturn",
+          .original_c = R"(
+s32 TwoDenseSwitchesWithFallthroughAndEarlyReturn(s32 a, s32 b, s32 x) {
+    s32 acc = x;
+    switch (a) {
+        case 0:
+            acc += 4;
+        case 1:
+            acc *= 2;
+            break;
+        case 2:
+            return -10;
+        case 3:
+            acc -= 9;
+            break;
+        case 4:
+            acc ^= 0x3c;
+            break;
+        case 5:
+            acc += 21;
+            break;
+        default:
+            acc = 0;
+            break;
+    }
+    switch (b) {
+        case 0:
+            acc += 1;
+            break;
+        case 1:
+            acc += 2;
+        case 2:
+            acc += 3;
+            break;
+        case 3:
+            return acc ^ 0xff;
+        case 4:
+            acc -= 11;
+            break;
+        case 5:
+            acc <<= 1;
+            break;
+        default:
+            break;
+    }
+    return acc;
+}
+)",
+      },
+      // Category 12: Unstructured Backward goto & Multi-Entry / Irreducible Control Flow
+      RoundTripTestCase{
+          .test_name = "BackwardGotoRetryLoop",
+          .function_name = "BackwardGotoRetryLoop",
+          .original_c = R"(
+extern s32 TryAcquireSlot(s32 key, s32 attempt);
+
+s32 BackwardGotoRetryLoop(s32 key, s32 max_retries) {
+    s32 attempt = 0;
+    s32 rc;
+retry_acquire:
+    rc = TryAcquireSlot(key + attempt, attempt);
+    if (rc < 0) {
+        attempt += 1;
+        if (attempt <= max_retries) {
+            goto retry_acquire;
+        }
+        return -1;
+    }
+    return rc + attempt;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BackwardGotoCrossedTwoLabelCycle",
+          .function_name = "BackwardGotoCrossedTwoLabelCycle",
+          .original_c = R"(
+s32 BackwardGotoCrossedTwoLabelCycle(s32 start_in_b, s32 x, s32 limit) {
+    s32 steps = 0;
+    if (start_in_b) {
+        goto state_b;
+    }
+state_a:
+    x = (x * 3) + 1;
+    steps += 1;
+    if (steps >= limit) {
+        return x;
+    }
+state_b:
+    x = (x >> 1) ^ steps;
+    steps += 1;
+    if (steps < limit && (x & 1) != 0) {
+        goto state_a;
+    }
+    if (steps < limit) {
+        goto state_b;
+    }
+    return x + steps;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BackwardGotoNestedErrorCleanupAndRestart",
+          .function_name = "BackwardGotoNestedErrorCleanupAndRestart",
+          .original_c = R"(
+extern void ReleaseLock(s32 handle);
+extern s32 StepChunk(s32 handle, s32 idx);
+
+s32 BackwardGotoNestedErrorCleanupAndRestart(s32 handle, s32 count) {
+    s32 resets = 0;
+    s32 sum;
+    s32 i;
+restart_batch:
+    sum = 0;
+    for (i = 0; i < count; i++) {
+        s32 v = StepChunk(handle, i);
+        if (v == -2 && resets < 2) {
+            resets += 1;
+            goto restart_batch;
+        }
+        if (v < 0) {
+            goto fail_cleanup;
+        }
+        sum += v;
+    }
+    ReleaseLock(handle);
+    return sum;
+
+fail_cleanup:
+    ReleaseLock(handle);
+    return -1;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BackwardGotoThreeStateTokenizer",
+          .function_name = "BackwardGotoThreeStateTokenizer",
+          .original_c = R"(
+s32 BackwardGotoThreeStateTokenizer(const u8* src, s32 len) {
+    s32 i = 0;
+    s32 tokens = 0;
+scan_space:
+    if (i >= len) {
+        return tokens;
+    }
+    if (src[i] <= 32u) {
+        i += 1;
+        goto scan_space;
+    }
+    tokens += 1;
+    if (src[i] >= 48u && src[i] <= 57u) {
+        goto scan_digits;
+    }
+scan_word:
+    i += 1;
+    if (i < len && src[i] > 32u) {
+        goto scan_word;
+    }
+    goto scan_space;
+
+scan_digits:
+    i += 1;
+    if (i < len && src[i] >= 48u && src[i] <= 57u) {
+        goto scan_digits;
+    }
+    goto scan_space;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "MultiEntryLoopJumpIntoMiddle",
+          .function_name = "MultiEntryLoopJumpIntoMiddle",
+          .original_c = R"(
+s32 MultiEntryLoopJumpIntoMiddle(const s32* data, s32 n, s32 warm_start) {
+    s32 i = 0;
+    s32 acc = 0;
+    if (n <= 0) {
+        return 0;
+    }
+    if (warm_start) {
+        acc = data[0];
+        goto middle_of_loop;
+    }
+    while (i < n) {
+        acc = (acc << 1) ^ data[i];
+middle_of_loop:
+        acc += i * 3;
+        i += 1;
+    }
+    return acc;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BackwardGotoWithCalleeCallsInBothArms",
+          .function_name = "BackwardGotoWithCalleeCallsInBothArms",
+          .original_c = R"(
+extern s32 StepEvenArm(s32 x);
+extern s32 StepOddArm(s32 x);
+
+s32 BackwardGotoWithCalleeCallsInBothArms(s32 x, s32 max_iters) {
+    s32 iter = 0;
+    if ((x & 1) != 0) {
+        goto odd_arm;
+    }
+even_arm:
+    x = StepEvenArm(x);
+    iter += 1;
+    if (iter >= max_iters) {
+        return x;
+    }
+    if ((x & 1) == 0) {
+        goto even_arm;
+    }
+odd_arm:
+    x = StepOddArm(x);
+    iter += 1;
+    if (iter < max_iters) {
+        goto even_arm;
+    }
+    return x;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "BackwardGotoComputedCountdown",
+          .function_name = "BackwardGotoComputedCountdown",
+          .original_c = R"(
+s32 BackwardGotoComputedCountdown(s32 outer, s32 inner, s32 seed) {
+    s32 acc = seed;
+    s32 o = outer;
+    s32 j;
+    if (o <= 0) {
+        return acc;
+    }
+outer_head:
+    j = inner;
+inner_head:
+    if (j > 0) {
+        acc = (acc + o) ^ j;
+        j -= 1;
+        goto inner_head;
+    }
+    o -= 1;
+    if (o > 0) {
+        goto outer_head;
+    }
+    return acc;
+}
+)",
+      },
+      RoundTripTestCase{
+          .test_name = "SwitchJumpingBackViaGotoDispatcher",
+          .function_name = "SwitchJumpingBackViaGotoDispatcher",
+          .original_c = R"(
+s32 SwitchJumpingBackViaGotoDispatcher(s32 op, s32 val) {
+    s32 hops = 0;
+redispatch:
+    hops += 1;
+    if (hops > 8) {
+        return val;
+    }
+    switch (op) {
+        case 0:
+            val += 5;
+            op = 3;
+            goto redispatch;
+        case 1:
+            val *= 2;
+            op = 4;
+            goto redispatch;
+        case 2:
+            val -= 7;
+            op = 5;
+            goto redispatch;
+        case 3:
+            return val + hops;
+        case 4:
+            return val ^ hops;
+        case 5:
+            return val - hops;
+        default:
+            op = 0;
+            goto redispatch;
+    }
 }
 )",
       },
