@@ -2259,6 +2259,11 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   auto is_tablejump_pattern_text = [](std::string_view pat) {
     return absl::StrContains(pat, "(set (pc) (reg:") && absl::StrContains(pat, "(use (label_ref");
   };
+  auto is_control_branch_or_jump_text = [](std::string_view pat) {
+    const std::string_view s = absl::StripAsciiWhitespace(pat);
+    return IsJumpPatternText(s) || absl::StartsWith(s, "(jump_insn") ||
+           (absl::StartsWith(s, "(sequence") && absl::StrContains(s, "(jump_insn"));
+  };
   auto extract_tablejump_label_token = [](std::string_view pat) -> std::string {
     const size_t use_pos = pat.find("(use (label_ref");
     if (use_pos == std::string_view::npos) {
@@ -2294,7 +2299,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
             block_needs_label[succ] = true;
           }
         }
-      } else {
+      } else if (is_control_branch_or_jump_text(last_pat)) {
         std::vector<std::string> refs = ExtractLabelRefTokens(last_pat);
         if ((!refs.empty() || absl::StrContains(last_pat, "(label_ref)")) &&
             !blk.successors.empty()) {
@@ -2304,7 +2309,8 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
           }
           if (target_b < num_blocks) {
             block_needs_label[target_b] = true;
-            if (!refs.empty() && !token_to_block.contains(refs[0])) {
+            if (!refs.empty() && !absl::StartsWith(refs[0], "__blk_") &&
+                !token_to_block.contains(refs[0])) {
               token_to_block.emplace(refs[0], target_b);
               ordered_tokens.push_back(refs[0]);
             }
@@ -2379,7 +2385,8 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     for (size_t insn_idx = 0; insn_idx < blk.instructions.size(); ++insn_idx) {
       const std::string& pat_str = blk.instructions[insn_idx];
       std::string resolved_pat = pat_str;
-      if (insn_idx + 1 == blk.instructions.size() && !is_tablejump_pattern_text(resolved_pat) &&
+      if (insn_idx + 1 == blk.instructions.size() && is_control_branch_or_jump_text(resolved_pat) &&
+          !is_tablejump_pattern_text(resolved_pat) &&
           absl::StrContains(resolved_pat, "(label_ref") && !blk.successors.empty()) {
         size_t target_b = blk.successors[0];
         if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {

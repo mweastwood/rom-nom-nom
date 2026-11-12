@@ -1604,18 +1604,6 @@ void RewriteDataLabelRefsInAst(RtlExpr* expr,
   }
 }
 
-bool ExprReferencesLabelToken(const RtlExpr& expr, std::string_view token) {
-  if (expr.op == RtlOp::kLabelRef && expr.str_val == token) {
-    return true;
-  }
-  for (const RtlExpr& child : expr.children) {
-    if (ExprReferencesLabelToken(child, token)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 void RewriteSpecificLabelRefInAst(RtlExpr* expr, std::string_view from_token,
                                   std::string_view to_token, bool* modified) {
   if (expr->op == RtlOp::kLabelRef && expr->children.empty() && expr->str_val == from_token) {
@@ -1807,6 +1795,336 @@ bool IsUnassignedIndirectJumpBlock(const RtlBasicBlock& blk) {
   }
   const RtlExpr* core = UnwrapActiveControlPattern(last_parsed->pattern);
   return core->IsSet() && core->SetDest().op == RtlOp::kPc && core->SetSrc().IsReg();
+}
+
+using RegJtTaint = std::array<absl::flat_hash_set<size_t>, 32>;
+
+absl::flat_hash_set<size_t> EvalExprJtTaint(
+    const RtlExpr& expr, const RegJtTaint& state,
+    const absl::flat_hash_map<std::string, size_t>& token_to_jt_idx) {
+  if (expr.op == RtlOp::kLabelRef && !expr.str_val.empty()) {
+    if (const auto it = token_to_jt_idx.find(expr.str_val); it != token_to_jt_idx.end()) {
+      return {it->second};
+    }
+    return {};
+  }
+  if (expr.IsReg()) {
+    const int r = expr.RegNo();
+    if (r > 0 && r < 32) {
+      return state[r];
+    }
+    return {};
+  }
+  if (expr.op == RtlOp::kLoSum && expr.children.size() == 2) {
+    return EvalExprJtTaint(expr.children[1], state, token_to_jt_idx);
+  }
+  absl::flat_hash_set<size_t> out;
+  for (const RtlExpr& child : expr.children) {
+    const absl::flat_hash_set<size_t> child_taint = EvalExprJtTaint(child, state, token_to_jt_idx);
+    out.insert(child_taint.begin(), child_taint.end());
+  }
+  return out;
+}
+
+void ClobberCallerSavedJtTaint(RegJtTaint* state) {
+  for (int r = 1; r <= 15; ++r) {
+    (*state)[r].clear();
+  }
+  (*state)[24].clear();
+  (*state)[25].clear();
+  (*state)[31].clear();
+}
+
+void StepSinglePatternJtTaint(const RtlExpr& pat, RegJtTaint* state,
+                              const absl::flat_hash_map<std::string, size_t>& token_to_jt_idx) {
+  if (ExprContainsCall(pat)) {
+    ClobberCallerSavedJtTaint(state);
+    if (pat.IsSet() && pat.SetDest().IsReg()) {
+      const int dst = pat.SetDest().RegNo();
+      if (dst > 0 && dst < 32) {
+        (*state)[dst].clear();
+      }
+    }
+    return;
+  }
+  if (pat.IsSet()) {
+    if (pat.SetDest().IsReg()) {
+      const int dst = pat.SetDest().RegNo();
+      if (dst > 0 && dst < 32) {
+        (*state)[dst] = EvalExprJtTaint(pat.SetSrc(), *state, token_to_jt_idx);
+      }
+    }
+    return;
+  }
+  if (pat.IsParallel()) {
+    const RegJtTaint pre = *state;
+    for (const RtlExpr& elem : pat.children) {
+      if (elem.op == RtlOp::kClobber && !elem.children.empty() && elem.children[0].IsReg()) {
+        const int dst = elem.children[0].RegNo();
+        if (dst > 0 && dst < 32) {
+          (*state)[dst].clear();
+        }
+      }
+    }
+    for (const RtlExpr& elem : pat.children) {
+      if (elem.IsSet() && elem.SetDest().IsReg()) {
+        const int dst = elem.SetDest().RegNo();
+        if (dst > 0 && dst < 32) {
+          (*state)[dst] = EvalExprJtTaint(elem.SetSrc(), pre, token_to_jt_idx);
+        }
+      }
+    }
+    return;
+  }
+  if (pat.op == RtlOp::kClobber && !pat.children.empty() && pat.children[0].IsReg()) {
+    const int dst = pat.children[0].RegNo();
+    if (dst > 0 && dst < 32) {
+      (*state)[dst].clear();
+    }
+  }
+}
+
+void DisambiguateAndAttachJumpTables(absl::Span<const Stage0ResolvedJumpTable> jump_tables,
+                                     const absl::flat_hash_map<std::string, size_t>& label_to_block,
+                                     std::vector<RtlBasicBlock>* blocks_ptr) {
+  std::vector<RtlBasicBlock>& blocks = *blocks_ptr;
+  if (jump_tables.empty() || blocks.empty()) {
+    return;
+  }
+
+  struct ValidJumpTable {
+    std::string table_label_token;
+    std::vector<size_t> resolved_targets;
+  };
+  std::vector<ValidJumpTable> valid_jts;
+  absl::flat_hash_map<std::string, size_t> token_to_jt_idx;
+  for (const Stage0ResolvedJumpTable& jt : jump_tables) {
+    if (jt.table_label_token.empty() || jt.target_labels.empty()) {
+      continue;
+    }
+    std::vector<size_t> resolved_targets;
+    resolved_targets.reserve(jt.target_labels.size());
+    bool all_resolved = true;
+    for (const std::string& raw_lbl : jt.target_labels) {
+      std::string_view key = raw_lbl;
+      if (absl::StartsWith(key, "$L")) {
+        key.remove_prefix(1);
+      }
+      const auto it = label_to_block.find(key);
+      if (it == label_to_block.end()) {
+        all_resolved = false;
+        break;
+      }
+      resolved_targets.push_back(it->second);
+    }
+    if (!all_resolved || resolved_targets.empty()) {
+      continue;
+    }
+    const size_t idx = valid_jts.size();
+    token_to_jt_idx[jt.table_label_token] = idx;
+    valid_jts.push_back(ValidJumpTable{
+        .table_label_token = jt.table_label_token,
+        .resolved_targets = std::move(resolved_targets),
+    });
+  }
+  if (valid_jts.empty()) {
+    return;
+  }
+
+  const size_t num_blocks = blocks.size();
+  std::vector<std::vector<std::optional<RtlExpr>>> parsed_blocks(num_blocks);
+  std::vector<int> indirect_jump_reg(num_blocks, -1);
+  for (size_t b = 0; b < num_blocks; ++b) {
+    parsed_blocks[b].resize(blocks[b].instructions.size());
+    for (size_t i = 0; i < blocks[b].instructions.size(); ++i) {
+      auto parsed = ParsePatternAndNotes(blocks[b].instructions[i]);
+      if (parsed.ok()) {
+        parsed_blocks[b][i] = std::move(parsed->pattern);
+      }
+    }
+    if (IsUnassignedIndirectJumpBlock(blocks[b]) && !parsed_blocks[b].empty() &&
+        parsed_blocks[b].back().has_value()) {
+      const RtlExpr* core = UnwrapActiveControlPattern(*parsed_blocks[b].back());
+      if (core->IsSet() && core->SetDest().op == RtlOp::kPc && core->SetSrc().IsReg()) {
+        const int r = core->SetSrc().RegNo();
+        if (r > 0 && r < 32) {
+          indirect_jump_reg[b] = r;
+        }
+      }
+    }
+  }
+
+  std::vector<std::optional<size_t>> jt_bound_block(valid_jts.size());
+  std::vector<bool> block_bound(num_blocks, false);
+
+  auto bind_jt_to_block = [&](size_t jt_idx, size_t disp_b) {
+    jt_bound_block[jt_idx] = disp_b;
+    block_bound[disp_b] = true;
+    blocks[disp_b].addr_vec_targets = valid_jts[jt_idx].resolved_targets;
+    for (size_t target_k : blocks[disp_b].addr_vec_targets) {
+      if (target_k < num_blocks &&
+          std::find(blocks[disp_b].successors.begin(), blocks[disp_b].successors.end(), target_k) ==
+              blocks[disp_b].successors.end()) {
+        blocks[disp_b].successors.push_back(target_k);
+      }
+    }
+  };
+
+  auto run_dataflow_and_bind = [&](bool seed_all_blocks) -> bool {
+    std::vector<bool> reachable(num_blocks, false);
+    std::vector<RegJtTaint> in_taint(num_blocks);
+    std::vector<RegJtTaint> pre_jump_taint(num_blocks);
+    std::queue<size_t> worklist;
+    std::vector<bool> in_queue(num_blocks, false);
+
+    if (seed_all_blocks) {
+      for (size_t b = 0; b < num_blocks; ++b) {
+        reachable[b] = true;
+        in_queue[b] = true;
+        worklist.push(b);
+      }
+    } else {
+      reachable[0] = true;
+      in_queue[0] = true;
+      worklist.push(0);
+    }
+
+    auto propagate = [&](size_t succ, const RegJtTaint& src) {
+      if (succ >= num_blocks) {
+        return;
+      }
+      bool changed = !reachable[succ];
+      reachable[succ] = true;
+      for (size_t r = 1; r < 32; ++r) {
+        for (size_t jt_i : src[r]) {
+          if (in_taint[succ][r].insert(jt_i).second) {
+            changed = true;
+          }
+        }
+      }
+      if (changed && !in_queue[succ]) {
+        in_queue[succ] = true;
+        worklist.push(succ);
+      }
+    };
+
+    while (!worklist.empty()) {
+      const size_t b = worklist.front();
+      worklist.pop();
+      in_queue[b] = false;
+
+      RegJtTaint cur_state = in_taint[b];
+      const auto& p_insns = parsed_blocks[b];
+      if (p_insns.empty()) {
+        for (size_t succ : blocks[b].successors) {
+          propagate(succ, cur_state);
+        }
+        continue;
+      }
+
+      for (size_t i = 0; i + 1 < p_insns.size(); ++i) {
+        if (p_insns[i].has_value()) {
+          StepSinglePatternJtTaint(*p_insns[i], &cur_state, token_to_jt_idx);
+        }
+      }
+
+      if (!p_insns.back().has_value()) {
+        pre_jump_taint[b] = cur_state;
+        for (size_t succ : blocks[b].successors) {
+          propagate(succ, cur_state);
+        }
+        continue;
+      }
+
+      const RtlExpr& last_pat = *p_insns.back();
+      if (last_pat.op == RtlOp::kSequence && last_pat.children.size() == 2 &&
+          !last_pat.children[0].children.empty() && !last_pat.children[1].children.empty()) {
+        const RtlExpr& wrap0 = last_pat.children[0];
+        const RtlExpr& wrap1 = last_pat.children[1];
+        const RtlExpr& ctrl = wrap0.children[0];
+        const RtlExpr& slot = wrap1.children[0];
+        if (wrap0.op == RtlOp::kCallInsn) {
+          StepSinglePatternJtTaint(slot, &cur_state, token_to_jt_idx);
+          StepSinglePatternJtTaint(ctrl, &cur_state, token_to_jt_idx);
+          pre_jump_taint[b] = cur_state;
+          for (size_t succ : blocks[b].successors) {
+            propagate(succ, cur_state);
+          }
+        } else {
+          pre_jump_taint[b] = cur_state;
+          StepSinglePatternJtTaint(ctrl, &cur_state, token_to_jt_idx);
+          if (wrap1.flags.in_struct && blocks[b].successors.size() == 2) {
+            RegJtTaint taken_state = cur_state;
+            StepSinglePatternJtTaint(slot, &taken_state, token_to_jt_idx);
+            propagate(blocks[b].successors[0], taken_state);
+            propagate(blocks[b].successors[1], cur_state);
+          } else {
+            StepSinglePatternJtTaint(slot, &cur_state, token_to_jt_idx);
+            for (size_t succ : blocks[b].successors) {
+              propagate(succ, cur_state);
+            }
+          }
+        }
+      } else {
+        pre_jump_taint[b] = cur_state;
+        StepSinglePatternJtTaint(last_pat, &cur_state, token_to_jt_idx);
+        for (size_t succ : blocks[b].successors) {
+          propagate(succ, cur_state);
+        }
+      }
+    }
+
+    bool any_bound = false;
+    for (size_t b = 0; b < num_blocks; ++b) {
+      if (block_bound[b] || !reachable[b] || indirect_jump_reg[b] <= 0) {
+        continue;
+      }
+      const int jreg = indirect_jump_reg[b];
+      std::vector<size_t> cands;
+      for (size_t jt_i : pre_jump_taint[b][jreg]) {
+        if (!jt_bound_block[jt_i].has_value()) {
+          cands.push_back(jt_i);
+        }
+      }
+      if (cands.size() == 1) {
+        bind_jt_to_block(cands[0], b);
+        any_bound = true;
+      }
+    }
+    return any_bound;
+  };
+
+  while (run_dataflow_and_bind(/*seed_all_blocks=*/false)) {
+  }
+  while (run_dataflow_and_bind(/*seed_all_blocks=*/true)) {
+  }
+
+  for (size_t jt_idx = 0; jt_idx < valid_jts.size(); ++jt_idx) {
+    if (!jt_bound_block[jt_idx].has_value()) {
+      continue;
+    }
+    const size_t disp_b = *jt_bound_block[jt_idx];
+    const std::string tbl_lbl = absl::StrFormat("__tbl_%zu", disp_b);
+    for (size_t b = 0; b < num_blocks; ++b) {
+      bool modified_blk = false;
+      for (std::string& pat : blocks[b].instructions) {
+        auto parsed = ParsePatternAndNotes(pat);
+        if (!parsed.ok()) {
+          continue;
+        }
+        bool modified_insn = false;
+        RewriteSpecificLabelRefInAst(&parsed->pattern, valid_jts[jt_idx].table_label_token, tbl_lbl,
+                                     &modified_insn);
+        if (modified_insn) {
+          pat = parsed->ToGccPrintRtlString();
+          modified_blk = true;
+        }
+      }
+      if (modified_blk) {
+        blocks[b].SyncRtlInsnsFromInstructions();
+      }
+    }
+  }
 }
 
 // In KMC GCC 2.7.2 `mips.md`, 3-operand `divsi3`/`modsi3`/`udivsi3`/`umodsi3`
@@ -2523,103 +2841,7 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     }
   }
 
-  for (const Stage0ResolvedJumpTable& jt : jump_tables) {
-    if (jt.table_label_token.empty() || jt.target_labels.empty()) {
-      continue;
-    }
-    std::vector<size_t> resolved_targets;
-    resolved_targets.reserve(jt.target_labels.size());
-    bool all_resolved = true;
-    for (const std::string& raw_lbl : jt.target_labels) {
-      std::string_view key = raw_lbl;
-      if (absl::StartsWith(key, "$L")) {
-        key.remove_prefix(1);
-      }
-      auto it = label_to_block.find(key);
-      if (it == label_to_block.end()) {
-        all_resolved = false;
-        break;
-      }
-      resolved_targets.push_back(it->second);
-    }
-    if (!all_resolved || resolved_targets.empty()) {
-      continue;
-    }
-
-    std::vector<size_t> ref_blocks;
-    for (size_t b = 0; b < blocks.size(); ++b) {
-      for (const std::string& pat : blocks[b].instructions) {
-        auto parsed = ParsePatternAndNotes(pat);
-        if (parsed.ok() && ExprReferencesLabelToken(parsed->pattern, jt.table_label_token)) {
-          ref_blocks.push_back(b);
-          break;
-        }
-      }
-    }
-
-    std::optional<size_t> matched_block;
-    for (size_t b : ref_blocks) {
-      if (IsUnassignedIndirectJumpBlock(blocks[b])) {
-        matched_block = b;
-        break;
-      }
-    }
-    if (!matched_block.has_value() && !ref_blocks.empty()) {
-      std::queue<size_t> bfs;
-      absl::flat_hash_set<size_t> visited;
-      for (size_t b : ref_blocks) {
-        bfs.push(b);
-        visited.insert(b);
-      }
-      while (!bfs.empty()) {
-        const size_t cur = bfs.front();
-        bfs.pop();
-        if (IsUnassignedIndirectJumpBlock(blocks[cur])) {
-          matched_block = cur;
-          break;
-        }
-        for (size_t succ : blocks[cur].successors) {
-          if (succ < blocks.size() && visited.insert(succ).second) {
-            bfs.push(succ);
-          }
-        }
-      }
-    }
-    if (!matched_block.has_value()) {
-      for (size_t b = 0; b < blocks.size(); ++b) {
-        if (IsUnassignedIndirectJumpBlock(blocks[b])) {
-          matched_block = b;
-          break;
-        }
-      }
-    }
-    if (!matched_block.has_value()) {
-      continue;
-    }
-
-    const size_t disp_b = *matched_block;
-    blocks[disp_b].addr_vec_targets = std::move(resolved_targets);
-    const std::string tbl_lbl = absl::StrFormat("__tbl_%zu", disp_b);
-    for (size_t b = 0; b < blocks.size(); ++b) {
-      bool modified_blk = false;
-      for (std::string& pat : blocks[b].instructions) {
-        auto parsed = ParsePatternAndNotes(pat);
-        if (!parsed.ok()) {
-          continue;
-        }
-        bool modified_insn = false;
-        RewriteSpecificLabelRefInAst(&parsed->pattern, jt.table_label_token, tbl_lbl,
-                                     &modified_insn);
-        if (modified_insn) {
-          pat = parsed->ToGccPrintRtlString();
-          modified_blk = true;
-        }
-      }
-      if (modified_blk) {
-        blocks[b].SyncRtlInsnsFromInstructions();
-      }
-    }
-  }
+  DisambiguateAndAttachJumpTables(jump_tables, label_to_block, &blocks);
 
   // Reconstruct switch `tablejump` `(parallel[ (set (pc) (reg:SI R)) (use (label_ref L)) ] )`
   // only when `addr_vec_targets` are explicitly populated on the block.

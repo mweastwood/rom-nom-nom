@@ -1,10 +1,14 @@
 #include "lifter/invert_final_scan_insn.h"
 
+#include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/strings/match.h"
+#include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
+#include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -117,6 +121,21 @@ TEST_F(InvertFinalScanInsnTest, SyntheticPositiveLoadsStoresAndAddresses) {
   // Verify numeric aliases `$29`/`$30` also lift to identical stack/frame RTL.
   EXPECT_EQ(InvertFinalScanInsn("lw\t$2,16($29)"), InvertFinalScanInsn("lw\t$2,16($sp)"));
   EXPECT_EQ(InvertFinalScanInsn("lw\t$2,-8($30)"), InvertFinalScanInsn("lw\t$2,-8($fp)"));
+}
+
+TEST_F(InvertFinalScanInsnTest, SyntheticPositiveSplitHiLoInstructions) {
+  constexpr std::string_view kInstructions[] = {
+      "lui\t$16,%hi(g_foo)",       "lui\t$16,%hi(g_foo+16)",       "lui\t$16,%hi($L2)",
+      "addiu\t$16,$16,%lo(g_foo)", "addiu\t$17,$16,%lo(g_foo+16)", "addiu\t$16,$16,%lo($L2)",
+      "daddiu\t$16,$16,%lo($L2)",  "lw\t$2,%lo(g_foo+8)($16)",     "sw\t$4,%lo(g_foo)($16)",
+      "lh\t$2,%lo(g_short)($16)",  "lhu\t$2,%lo(g_ushort)($16)",   "sh\t$4,%lo(g_short)($16)",
+      "lb\t$2,%lo(g_byte)($16)",   "lbu\t$2,%lo(g_ubyte)($16)",    "sb\t$4,%lo(g_byte)($16)",
+      "l.s\t$f0,%lo(g_flt)($16)",  "s.s\t$f0,%lo(g_flt)($16)",
+  };
+  for (std::string_view insn : kInstructions) {
+    const auto res = verifier_.VerifyFinalScanInsnRightInverse(insn);
+    EXPECT_TRUE(res.matches) << "insn: " << insn << " diff: " << res.diff_detail;
+  }
 }
 
 TEST_F(InvertFinalScanInsnTest, SyntheticPositiveFloatingPoint) {
@@ -235,6 +254,11 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     // Block 3: `$L3:` `j $31` (`return_internal`) -> no successors.
     EXPECT_TRUE(cfg.rpo_blocks[3].has_label);
     EXPECT_TRUE(cfg.rpo_blocks[3].successors.empty());
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        cfg, {}, 2, {"-O2", "-mips1"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
   }
 
   // 2. `.set noreorder` delay-slot `(sequence [(jump_insn ...) (insn ...)])`
@@ -258,6 +282,11 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
                          "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] ))"))
         << cfg.rpo_blocks[0].instructions[1];
     EXPECT_TRUE(cfg.rpo_blocks[0].successors.empty());
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        cfg, {}, 2, {"-O2", "-mips1"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
   }
 
   // 3. 2-line `mtc1` + `cvt.s.w` / `cvt.d.w` and multi-line `lwl`/`lwr`/`swl`/`swr`
@@ -278,6 +307,11 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
     EXPECT_TRUE(absl::StrContains(cfg.rpo_blocks[0].instructions[2], "(mem:BLK "))
         << cfg.rpo_blocks[0].instructions[2];
     EXPECT_EQ(cfg.rpo_blocks[0].instructions[3], "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        cfg, {}, 2, {"-O2", "-mips1"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
   }
 
   // 4. Negative cases: empty input or invalid/unrecognized assembly line causes
@@ -327,6 +361,228 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
         << cfg.rpo_blocks[0].instructions[0];
     EXPECT_EQ(cfg.rpo_blocks[0].instructions[1],
               "(parallel[ (set (pc) (reg:SI 2 v0)) (use (label_ref L0)) ] )");
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        cfg, {}, 2, {"-O2", "-mips1"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 6. Multi-jump-table GPR dataflow disambiguation inside a loop with hoisted
+  //    callee-saved table bases (`$16`/`$17`), CSE-shared `%hi`, a `jal` call,
+  //    and REVERSED `.rodata` jump-table order (`L100000` is the SECOND `jr`,
+  //    `L100001` is the FIRST `jr`!).
+  {
+    const std::vector<std::string> asm_lines = {
+        // Block 0 (preheader): hoist both jump table bases with shared `%hi` and reversed order!
+        "lui\t$16,%hi($L100000)",
+        "addiu\t$17,$16,%lo($L100001)",  // $17 ($s1) = base of FIRST switch (L100001)
+        "addiu\t$16,$16,%lo($L100000)",  // $16 ($s0) = base of SECOND switch (L100000)
+        // Block 1 (loop header + call + first switch dispatch via $17):
+        "$L2:",
+        "jal\thelper_fn",
+        "sll\t$2,$4,2",
+        "addu\t$2,$2,$17",
+        "lw\t$2,0($2)",
+        "j\t$2",
+        // Block 2 & 3 (cases of first switch, flowing to second switch `$L5:`):
+        "$L3:",
+        "addiu\t$5,$5,1",
+        "j\t$L5",
+        "$L4:",
+        "addiu\t$5,$5,2",
+        // Block 4 (`$L5:`: second switch dispatch via $16):
+        "$L5:",
+        "sll\t$3,$6,2",
+        "addu\t$3,$16,$3",
+        "lw\t$3,0($3)",
+        "j\t$3",
+        // Block 5 & 6 (cases of second switch, looping back to `$L2:` or returning):
+        "$L6:",
+        "bne\t$5,$0,$L2",
+        "j\t$31",
+        "$L7:",
+        "j\t$31",
+    };
+    // Reversed `.rodata` order: `L100000` (for second switch: `$L6, $L7`) comes BEFORE
+    // `L100001` (for first switch: `$L3, $L4, $L3`)!
+    const std::vector<Stage0ResolvedJumpTable> jump_tables = {
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100000",
+            .target_labels = {"$L6", "$L7"},
+        },
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100001",
+            .target_labels = {"$L3", "$L4", "$L3"},
+        },
+    };
+    RtlSidebandState sideband;
+    sideband.saved_gpr_regnos = {16, 17, 31};
+    sideband.frame_size_bytes = 32;
+    sideband.is_leaf_function = false;
+    const RtlControlFlowGraph cfg = InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables);
+    ASSERT_GE(cfg.rpo_blocks.size(), 7u);
+
+    // Block 1 (first switch `jr $2` fed by `$17` = `L100001`) MUST bind to `{2, 3, 2}` (`$L3, $L4,
+    // $L3`), NOT `{5, 6}`!
+    const std::vector<size_t> expected_first_targets = {2u, 3u, 2u};
+    EXPECT_EQ(cfg.rpo_blocks[1].addr_vec_targets, expected_first_targets);
+
+    // Block 4 (second switch `jr $3` fed by `$16` = `L100000`) MUST bind to `{5, 7}` (`$L6, $L7`;
+    // Block 6 is the fallthrough `j $31` after `bne $5,$0,$L2`)!
+    const std::vector<size_t> expected_second_targets = {5u, 7u};
+    EXPECT_EQ(cfg.rpo_blocks[4].addr_vec_targets, expected_second_targets);
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        cfg, {}, 2, {"-O2", "-mips1"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 7. Shared `%hi` 64KB page between jump table `L100000` and global function pointer
+  //    `g_fn_ptr` (`lw $25,%lo(g_fn_ptr)($16); j $25`), plus an unreferenced jump table
+  //    `L100099`: `kLoSum` must NEVER leak `$16`'s `%hi(L100000)` taint into `$25`, and
+  //    no positional fallback may attach `L100099` to the function-pointer tail call `j $25`!
+  {
+    const std::vector<std::string> asm_lines = {
+        "lui\t$16,%hi($L100000)",
+        "beq\t$4,$0,$L2",
+        "lw\t$25,%lo(g_fn_ptr)($16)",
+        "j\t$25",
+        "$L2:",
+        "addiu\t$16,$16,%lo($L100000)",
+        "sll\t$2,$5,2",
+        "addu\t$2,$2,$16",
+        "lw\t$2,0($2)",
+        "j\t$2",
+        "$L3:",
+        "addiu\t$2,$0,10",
+        "j\t$31",
+        "$L4:",
+        "addiu\t$2,$0,20",
+        "j\t$31",
+    };
+    const std::vector<Stage0ResolvedJumpTable> jump_tables = {
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100000",
+            .target_labels = {"$L3", "$L4"},
+        },
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100099",
+            .target_labels = {"$L4", "$L3"},
+        },
+    };
+    RtlSidebandState sideband;
+    sideband.saved_gpr_regnos = {16};
+    const RtlControlFlowGraph cfg = InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables);
+    ASSERT_EQ(cfg.rpo_blocks.size(), 5u);
+
+    // Block 1 (`lw $25,%lo(g_fn_ptr)($16); j $25`) is a function-pointer tail call, NOT a switch!
+    EXPECT_TRUE(cfg.rpo_blocks[1].addr_vec_targets.empty());
+    EXPECT_TRUE(cfg.rpo_blocks[1].successors.empty());
+
+    // Block 2 (`j $2` fed by `L100000`) binds cleanly to `{3, 4}`.
+    const std::vector<size_t> expected_switch_targets = {3u, 4u};
+    EXPECT_EQ(cfg.rpo_blocks[2].addr_vec_targets, expected_switch_targets);
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        cfg, {}, 2, {"-O2", "-mips1"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 8. Adjacent 64-bit `dla` macro table bases (`dla $20, $L100000` followed by
+  //    `dla $19, $L100001`) must NOT clobber `$20` (`dst + 1`) when writing `DImode` `$19`!
+  {
+    const std::vector<std::string> asm_lines = {
+        "dla\t$20,$L100000",
+        "dla\t$19,$L100001",
+        "sll\t$2,$4,2",
+        "addu\t$2,$2,$20",
+        "lw\t$2,0($2)",
+        "j\t$2",
+        "$L2:",
+        "sll\t$3,$5,2",
+        "addu\t$3,$3,$19",
+        "lw\t$3,0($3)",
+        "j\t$3",
+        "$L3:",
+        "j\t$31",
+        "$L4:",
+        "j\t$31",
+    };
+    const std::vector<Stage0ResolvedJumpTable> jump_tables = {
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100000",
+            .target_labels = {"$L2", "$L3"},
+        },
+        Stage0ResolvedJumpTable{
+            .table_label_token = "L100001",
+            .target_labels = {"$L3", "$L4"},
+        },
+    };
+    RtlSidebandState sideband;
+    sideband.saved_gpr_regnos = {19, 20};
+    const RtlControlFlowGraph cfg = InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables);
+    ASSERT_EQ(cfg.rpo_blocks.size(), 4u);
+    const std::vector<size_t> expected_jt0 = {1u, 2u};
+    const std::vector<size_t> expected_jt1 = {2u, 3u};
+    EXPECT_EQ(cfg.rpo_blocks[0].addr_vec_targets, expected_jt0);
+    EXPECT_EQ(cfg.rpo_blocks[1].addr_vec_targets, expected_jt1);
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(
+        gcc_harness::SubfunctionId::kFinalScanInsn, cfg, {}, 2, {"-O2", "-mips2", "-mcpu=r4000"});
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertFinalScanInsnTest, MultiSwitchAndHoistedGlobalsBoundaryRightInverse) {
+  constexpr const char* kMultiSwitchSrc = R"(
+extern int g_arr_a[16];
+extern int g_arr_b[16];
+int step_fn(int);
+int multi_switch_final_scan(int n, int x, int y) {
+  int acc = 0;
+  int i;
+  for (i = 0; i < n; ++i) {
+    x = step_fn(x + i);
+    switch (x & 7) {
+      case 0: acc += g_arr_a[0]; break;
+      case 1: acc += g_arr_a[3]; break;
+      case 2: acc -= g_arr_b[1]; break;
+      case 3: acc ^= g_arr_b[5]; break;
+      case 4: acc += 17; break;
+      default: acc -= 3; break;
+    }
+    switch ((y + i) & 7) {
+      case 0: g_arr_a[2] = acc; break;
+      case 1: g_arr_b[4] = acc + 1; break;
+      case 2: acc += g_arr_b[7]; break;
+      case 3: acc -= g_arr_a[6]; break;
+      case 4: acc ^= 99; break;
+      default: break;
+    }
+  }
+  return acc;
+}
+)";
+  for (const std::vector<std::string>& flags :
+       {std::vector<std::string>{"-O2", "-mips1", "-G", "0", "-Wa,-g"},
+        std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-G", "0", "-Wa,-g"}}) {
+    const auto trace = hooks_.TraceForwardCompilation(kMultiSwitchSrc, "multi_switch_final_scan",
+                                                      flags, "multi_switch_final_scan");
+    ASSERT_GE(trace.stage0_input.jump_tables.size(), 2u);
+    bool found_snapshot = false;
+    for (const auto& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id != gcc_harness::SubfunctionId::kFinalScanInsn) {
+        continue;
+      }
+      found_snapshot = true;
+      const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(res.matches) << res.diff_detail;
+    }
+    EXPECT_TRUE(found_snapshot);
   }
 }
 

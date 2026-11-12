@@ -238,14 +238,19 @@ TEST(RtlCfgTest, Stage0FunctionInputEqualityAndMetadataFields) {
   input.jump_tables.push_back(Stage0JumpTable{
       .label_name = "$L8",
       .target_word_indices = {2, 3},
+      .table_vram = 0x80250000u,
   });
   input.constant_pool.push_back(Stage0ConstantPoolEntry{
       .label_name = "$LC0",
       .section_name = ".lit4",
       .byte_size = 4,
       .words = {0x3fc00000u},
+      .entry_vram = 0x80250020u,
   });
   input.vram_to_symbol[0x80246100u] = "helper_fn";
+  input.vram_to_symbol[0x80260000u] = "g_actor_state";
+  input.vram_to_symbol_size[0x80260000u] = 64u;
+  input.gp_vram = 0x80268000u;
   input.profile.optimize_level = 2;
   input.profile.c_flags = {"-O2", "-G", "0"};
 
@@ -255,6 +260,18 @@ TEST(RtlCfgTest, Stage0FunctionInputEqualityAndMetadataFields) {
   EXPECT_NE(copy, input);
   copy = input;
   copy.relocations[0].symbol_name = "other_fn";
+  EXPECT_NE(copy, input);
+  copy = input;
+  copy.jump_tables[0].table_vram = 0x80250004u;
+  EXPECT_NE(copy, input);
+  copy = input;
+  copy.constant_pool[0].entry_vram = 0x80250024u;
+  EXPECT_NE(copy, input);
+  copy = input;
+  copy.vram_to_symbol_size[0x80260000u] = 128u;
+  EXPECT_NE(copy, input);
+  copy = input;
+  copy.gp_vram = 0x80269000u;
   EXPECT_NE(copy, input);
 
   PrologueEpilogueFrameSpec frame_a{

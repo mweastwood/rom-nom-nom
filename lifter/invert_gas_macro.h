@@ -33,6 +33,17 @@ std::string InvertGasMacro(absl::Span<const uint32_t> macro_words_x);
 // pre-`macro` assembly lines for epilogue extraction and `InvertFinalScanInsn`.
 std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmItem> raw_items);
 
+// Synthesizes `Stage0Relocation` entries (`kMipsHi16`, `kMipsLo16`,
+// `kMipsGpRel16`, `kMipsLiteral`) for a linked-ROM `Stage0FunctionInput`
+// (`base_vram != 0 && relocations.empty()`) using CFG-aware GPR reaching-
+// definitions dataflow over `stage0_input.machine_words`, and populates
+// normalized jump-table and constant-pool entries when output pointers are
+// non-null.
+std::vector<Stage0Relocation> SynthesizeLinkedRomRelocations(
+    const Stage0FunctionInput& stage0_input,
+    std::vector<Stage0JumpTable>* out_jump_tables = nullptr,
+    std::vector<Stage0ConstantPoolEntry>* out_constant_pool = nullptr);
+
 // Relocatable / linked-ROM Stage 0 overload of `CollapseGasMacrosAndFlattenLines`:
 // resolves `jal` callees, distinct global symbols + addends, `.rodata`/`.lit4`/
 // `.lit8` float/double constant pools (`li.s`/`li.d`/`$LC*`), `.rodata` switch
@@ -41,12 +52,14 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmIt
 std::vector<std::string> CollapseGasMacrosAndFlattenLines(
     absl::Span<const AsmItem> raw_items, const Stage0FunctionInput& stage0_input,
     const absl::flat_hash_map<size_t, std::string>& word_to_label,
-    std::vector<Stage0ResolvedJumpTable>* out_jump_tables = nullptr);
+    std::vector<Stage0ResolvedJumpTable>* out_jump_tables = nullptr,
+    std::vector<Stage0ConstantPoolEntry>* out_constant_pool = nullptr);
 
 }  // namespace lifter
 
 using lifter::CollapseGasMacrosAndFlattenLines;
 using lifter::InvertGasMacro;
+using lifter::SynthesizeLinkedRomRelocations;
 
 }  // namespace rom_nom_nom
 

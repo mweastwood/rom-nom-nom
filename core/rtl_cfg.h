@@ -79,9 +79,11 @@ struct Stage0Relocation {
 struct Stage0JumpTable {
   std::string label_name;
   std::vector<size_t> target_word_indices;
+  uint32_t table_vram = 0;
 
   bool operator==(const Stage0JumpTable& other) const {
-    return label_name == other.label_name && target_word_indices == other.target_word_indices;
+    return label_name == other.label_name && target_word_indices == other.target_word_indices &&
+           table_vram == other.table_vram;
   }
   bool operator!=(const Stage0JumpTable& other) const { return !(*this == other); }
 };
@@ -100,10 +102,11 @@ struct Stage0ConstantPoolEntry {
   std::string section_name;
   size_t byte_size = 0;
   std::vector<uint32_t> words;
+  uint32_t entry_vram = 0;
 
   bool operator==(const Stage0ConstantPoolEntry& other) const {
     return label_name == other.label_name && section_name == other.section_name &&
-           byte_size == other.byte_size && words == other.words;
+           byte_size == other.byte_size && words == other.words && entry_vram == other.entry_vram;
   }
   bool operator!=(const Stage0ConstantPoolEntry& other) const { return !(*this == other); }
 };
@@ -117,12 +120,15 @@ struct Stage0FunctionInput {
   std::vector<Stage0JumpTable> jump_tables;
   std::vector<Stage0ConstantPoolEntry> constant_pool;
   absl::flat_hash_map<uint32_t, std::string> vram_to_symbol;
+  absl::flat_hash_map<uint32_t, uint32_t> vram_to_symbol_size;
+  uint32_t gp_vram = 0;
   CompilationProfile profile;
 
   bool operator==(const Stage0FunctionInput& other) const {
     return machine_words == other.machine_words && base_vram == other.base_vram &&
            relocations == other.relocations && jump_tables == other.jump_tables &&
            constant_pool == other.constant_pool && vram_to_symbol == other.vram_to_symbol &&
+           vram_to_symbol_size == other.vram_to_symbol_size && gp_vram == other.gp_vram &&
            profile == other.profile;
   }
   bool operator!=(const Stage0FunctionInput& other) const { return !(*this == other); }

@@ -1,11 +1,13 @@
 #include "gcc_harness/right_inverse_verifier.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -306,6 +308,37 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
 
 namespace {
 
+bool RelocImmediateMatchesExpected(const Stage0Relocation& rel, uint32_t sym_vram, uint32_t gp_vram,
+                                   const std::vector<uint32_t>& expected_words) {
+  if (rel.word_index >= expected_words.size()) {
+    return false;
+  }
+  const uint32_t full_addr = static_cast<uint32_t>(static_cast<int64_t>(sym_vram) + rel.addend);
+  const uint32_t exp_word = expected_words[rel.word_index];
+  switch (rel.kind) {
+    case Stage0RelocKind::kMips26:
+      return (exp_word & 0x03ffffffu) == ((full_addr >> 2) & 0x03ffffffu);
+    case Stage0RelocKind::kMipsHi16:
+      return (exp_word & 0xffffu) == (((full_addr + 0x8000u) >> 16) & 0xffffu);
+    case Stage0RelocKind::kMipsLo16:
+      return (exp_word & 0xffffu) == (full_addr & 0xffffu);
+    case Stage0RelocKind::kMipsGpRel16:
+    case Stage0RelocKind::kMipsLiteral: {
+      if (gp_vram == 0u) {
+        return false;
+      }
+      const int32_t gp_delta = static_cast<int32_t>(full_addr - gp_vram);
+      if (gp_delta < -32768 || gp_delta > 32767) {
+        return false;
+      }
+      return (exp_word & 0xffffu) == (static_cast<uint32_t>(gp_delta) & 0xffffu);
+    }
+    case Stage0RelocKind::kMips32:
+      return exp_word == full_addr;
+  }
+  return false;
+}
+
 RightInverseResult CompareStage0FunctionInputs(const Stage0FunctionInput& input_x,
                                                const Stage0FunctionInput& actual_stage0,
                                                std::string_view combined_asm) {
@@ -314,15 +347,172 @@ RightInverseResult CompareStage0FunctionInputs(const Stage0FunctionInput& input_
   result.expected_summary = FormatWordsSummary(result.expected_words);
   result.actual_words = actual_stage0.machine_words;
 
+  if (actual_stage0.jump_tables.size() != input_x.jump_tables.size()) {
+    result.matches = false;
+    result.diff_detail =
+        absl::StrFormat("Jump table count got %zu != expected %zu\nasm:\n%s",
+                        actual_stage0.jump_tables.size(), input_x.jump_tables.size(), combined_asm);
+    return result;
+  }
+
   // If `input_x` represents a linked N64 ROM function (`base_vram != 0` with
   // already-linked relocations), resolve `actual_stage0.relocations` against
-  // `vram_to_symbol` / `func_<08x>` addresses before comparing `.text` words.
+  // `vram_to_symbol`, `func_<08x>`, jump-table `table_vram`, and constant-pool
+  // `entry_vram` addresses before comparing `.text` words.
   const bool is_linked_rom_input = input_x.base_vram != 0 && input_x.relocations.empty();
   if (is_linked_rom_input) {
+    if (actual_stage0.constant_pool.size() != input_x.constant_pool.size()) {
+      result.matches = false;
+      result.diff_detail = absl::StrFormat("Constant-pool count got %zu != expected %zu\nasm:\n%s",
+                                           actual_stage0.constant_pool.size(),
+                                           input_x.constant_pool.size(), combined_asm);
+      return result;
+    }
+
+    // Enforce MIPS O32 ABI rule: every `R_MIPS_HI16` relocation must have a
+    // matching `R_MIPS_LO16` relocation for the same `(symbol_name, addend)`.
+    for (const Stage0Relocation& rel : actual_stage0.relocations) {
+      if (rel.kind != Stage0RelocKind::kMipsHi16) {
+        continue;
+      }
+      bool has_matching_lo16 = false;
+      for (const Stage0Relocation& cand : actual_stage0.relocations) {
+        if (cand.kind == Stage0RelocKind::kMipsLo16 && cand.symbol_name == rel.symbol_name &&
+            cand.addend == rel.addend) {
+          has_matching_lo16 = true;
+          break;
+        }
+      }
+      if (!has_matching_lo16) {
+        result.matches = false;
+        result.diff_detail = absl::StrFormat(
+            "Orphaned R_MIPS_HI16 relocation for '%s'+%d at word %zu without matching "
+            "R_MIPS_LO16\nasm:\n%s",
+            rel.symbol_name, static_cast<int>(rel.addend), rel.word_index, combined_asm);
+        return result;
+      }
+    }
+
+    absl::flat_hash_map<std::string, std::vector<const Stage0Relocation*>> relocs_by_sym;
+    for (const Stage0Relocation& rel : actual_stage0.relocations) {
+      relocs_by_sym[rel.symbol_name].push_back(&rel);
+    }
+
     absl::flat_hash_map<std::string, uint32_t> sym_to_vram;
     for (const auto& [vram, sym] : input_x.vram_to_symbol) {
       sym_to_vram[sym] = vram;
     }
+
+    // Bijectively match `actual_stage0.jump_tables` to `input_x.jump_tables` by
+    // exact `target_word_indices` AND concrete `table_vram` relocation match.
+    const size_t num_jts = actual_stage0.jump_tables.size();
+    std::vector<bool> used_exp_jt(num_jts, false);
+    std::vector<size_t> matched_exp_jt(num_jts, 0);
+    std::function<bool(size_t)> match_jts = [&](size_t act_idx) -> bool {
+      if (act_idx == num_jts) {
+        return true;
+      }
+      const Stage0JumpTable& act_jt = actual_stage0.jump_tables[act_idx];
+      const auto rel_it = relocs_by_sym.find(act_jt.label_name);
+      if (rel_it == relocs_by_sym.end() || rel_it->second.empty()) {
+        return false;
+      }
+      for (size_t exp_idx = 0; exp_idx < num_jts; ++exp_idx) {
+        if (used_exp_jt[exp_idx]) {
+          continue;
+        }
+        const Stage0JumpTable& exp_jt = input_x.jump_tables[exp_idx];
+        if (exp_jt.table_vram == 0u || act_jt.target_word_indices != exp_jt.target_word_indices) {
+          continue;
+        }
+        bool relocs_compatible = true;
+        for (const Stage0Relocation* rel : rel_it->second) {
+          if (!RelocImmediateMatchesExpected(*rel, exp_jt.table_vram, input_x.gp_vram,
+                                             input_x.machine_words)) {
+            relocs_compatible = false;
+            break;
+          }
+        }
+        if (!relocs_compatible) {
+          continue;
+        }
+        used_exp_jt[exp_idx] = true;
+        matched_exp_jt[act_idx] = exp_idx;
+        if (match_jts(act_idx + 1)) {
+          return true;
+        }
+        used_exp_jt[exp_idx] = false;
+      }
+      return false;
+    };
+    if (!match_jts(0)) {
+      result.matches = false;
+      result.diff_detail = absl::StrFormat(
+          "Jump table target_word_indices / table_vram mismatch in linked-ROM "
+          "verification\nasm:\n%s",
+          combined_asm);
+      return result;
+    }
+    for (size_t act_idx = 0; act_idx < num_jts; ++act_idx) {
+      sym_to_vram[actual_stage0.jump_tables[act_idx].label_name] =
+          input_x.jump_tables[matched_exp_jt[act_idx]].table_vram;
+    }
+
+    // Bijectively match `actual_stage0.constant_pool` to `input_x.constant_pool`
+    // by exact `(byte_size, words)` AND concrete `entry_vram` relocation match.
+    const size_t num_cps = actual_stage0.constant_pool.size();
+    std::vector<bool> used_exp_cp(num_cps, false);
+    std::vector<size_t> matched_exp_cp(num_cps, 0);
+    std::function<bool(size_t)> match_cps = [&](size_t act_idx) -> bool {
+      if (act_idx == num_cps) {
+        return true;
+      }
+      const Stage0ConstantPoolEntry& act_cp = actual_stage0.constant_pool[act_idx];
+      const auto rel_it = relocs_by_sym.find(act_cp.label_name);
+      if (rel_it == relocs_by_sym.end() || rel_it->second.empty()) {
+        return false;
+      }
+      for (size_t exp_idx = 0; exp_idx < num_cps; ++exp_idx) {
+        if (used_exp_cp[exp_idx]) {
+          continue;
+        }
+        const Stage0ConstantPoolEntry& exp_cp = input_x.constant_pool[exp_idx];
+        if (exp_cp.entry_vram == 0u || act_cp.byte_size != exp_cp.byte_size ||
+            act_cp.words != exp_cp.words) {
+          continue;
+        }
+        bool relocs_compatible = true;
+        for (const Stage0Relocation* rel : rel_it->second) {
+          if (!RelocImmediateMatchesExpected(*rel, exp_cp.entry_vram, input_x.gp_vram,
+                                             input_x.machine_words)) {
+            relocs_compatible = false;
+            break;
+          }
+        }
+        if (!relocs_compatible) {
+          continue;
+        }
+        used_exp_cp[exp_idx] = true;
+        matched_exp_cp[act_idx] = exp_idx;
+        if (match_cps(act_idx + 1)) {
+          return true;
+        }
+        used_exp_cp[exp_idx] = false;
+      }
+      return false;
+    };
+    if (!match_cps(0)) {
+      result.matches = false;
+      result.diff_detail = absl::StrFormat(
+          "Constant-pool entry / entry_vram mismatch in linked-ROM verification\nasm:\n%s",
+          combined_asm);
+      return result;
+    }
+    for (size_t act_idx = 0; act_idx < num_cps; ++act_idx) {
+      sym_to_vram[actual_stage0.constant_pool[act_idx].label_name] =
+          input_x.constant_pool[matched_exp_cp[act_idx]].entry_vram;
+    }
+
     auto resolve_sym_vram = [&](const std::string& sym, uint32_t* out_vram) -> bool {
       if (auto it = sym_to_vram.find(sym); it != sym_to_vram.end()) {
         *out_vram = it->second;
@@ -338,15 +528,373 @@ RightInverseResult CompareStage0FunctionInputs(const Stage0FunctionInput& input_
       return false;
     };
     absl::flat_hash_set<size_t> relocated_indices;
+    absl::flat_hash_map<size_t, uint32_t> hi16_page_by_word;
+    absl::flat_hash_map<std::string, size_t> jt_sym_to_idx;
+    for (size_t jt_i = 0; jt_i < actual_stage0.jump_tables.size(); ++jt_i) {
+      if (!actual_stage0.jump_tables[jt_i].label_name.empty()) {
+        jt_sym_to_idx[actual_stage0.jump_tables[jt_i].label_name] = jt_i;
+      }
+    }
+    absl::flat_hash_map<size_t, size_t> word_to_jt_idx;
+
     for (const Stage0Relocation& rel : actual_stage0.relocations) {
       if (rel.word_index >= result.actual_words.size()) {
-        continue;
+        result.matches = false;
+        result.diff_detail =
+            absl::StrFormat("Relocation word_index %zu out of range (%zu)\nasm:\n%s",
+                            rel.word_index, result.actual_words.size(), combined_asm);
+        return result;
       }
       relocated_indices.insert(rel.word_index);
       uint32_t sym_vram = 0;
       if (!resolve_sym_vram(rel.symbol_name, &sym_vram)) {
-        continue;
+        result.matches = false;
+        result.diff_detail = absl::StrFormat(
+            "Unresolved relocation symbol '%s' at word %zu in linked-ROM verification\nasm:\n%s",
+            rel.symbol_name, rel.word_index, combined_asm);
+        return result;
       }
+      if (rel.kind == Stage0RelocKind::kMipsHi16) {
+        const uint32_t hi_w = result.actual_words[rel.word_index];
+        if (((hi_w >> 26) & 0x3fu) != 0x0fu || ((hi_w >> 21) & 0x1fu) != 0u ||
+            ((hi_w >> 16) & 0x1fu) == 0u) {
+          result.matches = false;
+          result.diff_detail = absl::StrFormat(
+              "R_MIPS_HI16 relocation for '%s' at word %zu is not on a valid lui instruction\n"
+              "asm:\n%s",
+              rel.symbol_name, rel.word_index, combined_asm);
+          return result;
+        }
+        const uint32_t full_addr =
+            static_cast<uint32_t>(static_cast<int64_t>(sym_vram) + rel.addend);
+        hi16_page_by_word[rel.word_index] = ((full_addr + 0x8000u) >> 16) & 0xffffu;
+      } else if (const auto jt_it = jt_sym_to_idx.find(rel.symbol_name);
+                 jt_it != jt_sym_to_idx.end()) {
+        word_to_jt_idx[rel.word_index] = jt_it->second;
+      }
+    }
+
+    // Compute CFG- and GPR-level must-equal `R_MIPS_HI16` 64KB page provenance over
+    // `result.actual_words` + `actual_stage0.jump_tables` so every `R_MIPS_LO16` base
+    // register `rs` is guaranteed to hold a matching `R_MIPS_HI16`-backed page on all
+    // reaching paths.
+    struct HiProvState {
+      bool reachable = false;
+      std::array<std::optional<uint32_t>, 32> hi_page{};
+      std::array<std::vector<size_t>, 32> jt_indices{};
+    };
+    const size_t num_words = result.actual_words.size();
+    std::vector<HiProvState> in_state(num_words);
+    std::vector<HiProvState> pre_exec_state(num_words);
+
+    auto kill_gpr = [](HiProvState* st, uint32_t reg) {
+      if (reg > 0u && reg < 32u) {
+        st->hi_page[reg] = std::nullopt;
+        st->jt_indices[reg].clear();
+      }
+    };
+
+    auto merge_state = [](const HiProvState& src, HiProvState* dst) -> bool {
+      if (!src.reachable) {
+        return false;
+      }
+      if (!dst->reachable) {
+        *dst = src;
+        return true;
+      }
+      bool changed = false;
+      for (size_t r = 1; r < 32; ++r) {
+        if (dst->hi_page[r].has_value() &&
+            (!src.hi_page[r].has_value() || *src.hi_page[r] != *dst->hi_page[r])) {
+          dst->hi_page[r] = std::nullopt;
+          changed = true;
+        }
+        for (size_t jt_i : src.jt_indices[r]) {
+          if (std::find(dst->jt_indices[r].begin(), dst->jt_indices[r].end(), jt_i) ==
+              dst->jt_indices[r].end()) {
+            dst->jt_indices[r].push_back(jt_i);
+            changed = true;
+          }
+        }
+      }
+      return changed;
+    };
+
+    auto is_branch_or_jump_word = [](uint32_t w) -> bool {
+      const uint32_t op = (w >> 26) & 0x3fu;
+      const uint32_t rs = (w >> 21) & 0x1fu;
+      const uint32_t rt = (w >> 16) & 0x1fu;
+      const uint32_t funct = w & 0x3fu;
+      if (op == 0x02u || op == 0x03u || (op >= 0x04u && op <= 0x07u) ||
+          (op >= 0x14u && op <= 0x17u)) {
+        return true;
+      }
+      if (op == 0x00u && (funct == 0x08u || funct == 0x09u)) {
+        return true;
+      }
+      if (op == 0x01u && (rt <= 0x03u || (rt >= 0x10u && rt <= 0x13u))) {
+        return true;
+      }
+      if (op == 0x11u && rs == 0x08u && rt <= 0x03u) {
+        return true;
+      }
+      return false;
+    };
+
+    auto exec_word = [&](uint32_t w, size_t w_idx, HiProvState* st) {
+      const uint32_t op = (w >> 26) & 0x3fu;
+      const uint32_t rs = (w >> 21) & 0x1fu;
+      const uint32_t rt = (w >> 16) & 0x1fu;
+      const uint32_t rd = (w >> 11) & 0x1fu;
+      const uint32_t sa = (w >> 6) & 0x1fu;
+      const uint32_t funct = w & 0x3fu;
+      const int16_t simm = static_cast<int16_t>(w & 0xffffu);
+
+      if (op == 0x0fu) {
+        if (rt != 0u) {
+          if (const auto hi_it = hi16_page_by_word.find(w_idx); hi_it != hi16_page_by_word.end()) {
+            st->hi_page[rt] = hi_it->second;
+            st->jt_indices[rt].clear();
+          } else {
+            kill_gpr(st, rt);
+          }
+        }
+        return;
+      }
+
+      if (op == 0x00u) {
+        if (sa == 0u && (funct == 0x21u || funct == 0x2du || funct == 0x25u) &&
+            (rs == 0u || rt == 0u)) {
+          if (rd != 0u) {
+            const uint32_t src = (rs != 0u) ? rs : rt;
+            if (src == 0u) {
+              kill_gpr(st, rd);
+            } else {
+              st->hi_page[rd] = st->hi_page[src];
+              st->jt_indices[rd] = st->jt_indices[src];
+            }
+          }
+          return;
+        }
+        if (sa == 0u && (funct == 0x21u || funct == 0x2du) && rs != 0u && rt != 0u) {
+          if (rd != 0u) {
+            const bool rs_has_jt = !st->jt_indices[rs].empty();
+            const bool rt_has_jt = !st->jt_indices[rt].empty();
+            const bool rs_has_hi = st->hi_page[rs].has_value();
+            const bool rt_has_hi = st->hi_page[rt].has_value();
+            if (rs != rt && (rs_has_jt != rt_has_jt)) {
+              std::vector<size_t> next_jts = rs_has_jt ? st->jt_indices[rs] : st->jt_indices[rt];
+              kill_gpr(st, rd);
+              st->jt_indices[rd] = std::move(next_jts);
+            } else if (rs != rt && (rs_has_hi != rt_has_hi)) {
+              const uint32_t page = rs_has_hi ? *st->hi_page[rs] : *st->hi_page[rt];
+              kill_gpr(st, rd);
+              st->hi_page[rd] = page;
+            } else {
+              kill_gpr(st, rd);
+            }
+          }
+          return;
+        }
+        if (funct == 0x08u || funct == 0x0cu || funct == 0x0du || funct == 0x0fu ||
+            funct == 0x11u || funct == 0x13u || (funct >= 0x18u && funct <= 0x1fu) ||
+            (funct >= 0x30u && funct <= 0x37u)) {
+          return;
+        }
+        kill_gpr(st, rd);
+        return;
+      }
+
+      if (op == 0x09u || op == 0x19u) {
+        if (rt != 0u) {
+          if (const auto jt_it = word_to_jt_idx.find(w_idx); jt_it != word_to_jt_idx.end()) {
+            kill_gpr(st, rt);
+            st->jt_indices[rt] = {jt_it->second};
+          } else if (!relocated_indices.contains(w_idx) && simm == 0 && rs != 0u) {
+            st->hi_page[rt] = st->hi_page[rs];
+            st->jt_indices[rt] = st->jt_indices[rs];
+          } else {
+            kill_gpr(st, rt);
+          }
+        }
+        return;
+      }
+
+      if ((op >= 0x08u && op <= 0x0eu) || op == 0x18u) {
+        kill_gpr(st, rt);
+        return;
+      }
+
+      if (op >= 0x10u && op <= 0x12u) {
+        if (rs <= 0x02u) {
+          kill_gpr(st, rt);
+        }
+        return;
+      }
+
+      if (op == 0x23u || op == 0x27u || op == 0x37u) {
+        if (rt != 0u) {
+          if (const auto jt_it = word_to_jt_idx.find(w_idx); jt_it != word_to_jt_idx.end()) {
+            kill_gpr(st, rt);
+            st->jt_indices[rt] = {jt_it->second};
+          } else if (rs != 0u && !st->jt_indices[rs].empty()) {
+            std::vector<size_t> next_jts = st->jt_indices[rs];
+            kill_gpr(st, rt);
+            st->jt_indices[rt] = std::move(next_jts);
+          } else {
+            kill_gpr(st, rt);
+          }
+        }
+        return;
+      }
+
+      if ((op >= 0x20u && op <= 0x26u) || op == 0x1au || op == 0x1bu || op == 0x30u ||
+          op == 0x34u || op == 0x38u || op == 0x3cu) {
+        kill_gpr(st, rt);
+      }
+    };
+
+    std::vector<bool> is_delay_slot(num_words, false);
+    for (size_t pc = 0; pc < num_words;) {
+      if (is_branch_or_jump_word(result.actual_words[pc]) && pc + 1 < num_words) {
+        is_delay_slot[pc + 1] = true;
+        pc += 2;
+      } else {
+        ++pc;
+      }
+    }
+
+    auto run_provenance_from_seed = [&](size_t seed_pc,
+                                        const std::vector<bool>* forbidden_targets) {
+      if (seed_pc >= num_words) {
+        return;
+      }
+      in_state[seed_pc].reachable = true;
+      std::vector<size_t> worklist = {seed_pc};
+      std::vector<bool> in_queue(num_words, false);
+      in_queue[seed_pc] = true;
+      size_t q_head = 0;
+
+      auto propagate = [&](size_t target_pc, const HiProvState& st) {
+        if (target_pc >= num_words ||
+            (forbidden_targets != nullptr && (*forbidden_targets)[target_pc])) {
+          return;
+        }
+        if (merge_state(st, &in_state[target_pc]) && !in_queue[target_pc]) {
+          in_queue[target_pc] = true;
+          worklist.push_back(target_pc);
+        }
+      };
+
+      while (q_head < worklist.size()) {
+        const size_t pc = worklist[q_head++];
+        in_queue[pc] = false;
+        merge_state(in_state[pc], &pre_exec_state[pc]);
+        const uint32_t w = result.actual_words[pc];
+
+        if (!is_branch_or_jump_word(w)) {
+          HiProvState next_st = in_state[pc];
+          exec_word(w, pc, &next_st);
+          propagate(pc + 1, next_st);
+          continue;
+        }
+        if (pc + 1 >= num_words) {
+          continue;
+        }
+
+        const size_t d_pc = pc + 1;
+        const uint32_t d_w = result.actual_words[d_pc];
+        const uint32_t op = (w >> 26) & 0x3fu;
+        const uint32_t rs = (w >> 21) & 0x1fu;
+        const uint32_t rt = (w >> 16) & 0x1fu;
+        const uint32_t rd = (w >> 11) & 0x1fu;
+        const uint32_t funct = w & 0x3fu;
+        const int16_t simm = static_cast<int16_t>(w & 0xffffu);
+
+        HiProvState slot_in = in_state[pc];
+        if (op == 0x03u || (op == 0x01u && (rt & 0x1cu) == 0x10u)) {
+          kill_gpr(&slot_in, 31u);
+        } else if (op == 0x00u && funct == 0x09u) {
+          kill_gpr(&slot_in, rd);
+        }
+        merge_state(slot_in, &pre_exec_state[d_pc]);
+
+        const bool is_likely =
+            (op >= 0x14u && op <= 0x17u) ||
+            (op == 0x01u && (rt == 0x02u || rt == 0x03u || rt == 0x12u || rt == 0x13u)) ||
+            (op == 0x11u && rs == 0x08u && (rt == 0x02u || rt == 0x03u));
+        const bool is_cond_branch = is_likely || (op >= 0x04u && op <= 0x07u) ||
+                                    (op == 0x01u && (rt <= 0x01u || rt == 0x10u || rt == 0x11u)) ||
+                                    (op == 0x11u && rs == 0x08u && rt <= 0x01u);
+
+        if (is_likely) {
+          HiProvState taken_st = slot_in;
+          exec_word(d_w, d_pc, &taken_st);
+          const int64_t target_pc = static_cast<int64_t>(pc) + 1 + static_cast<int64_t>(simm);
+          if (target_pc >= 0 && static_cast<size_t>(target_pc) < num_words) {
+            propagate(static_cast<size_t>(target_pc), taken_st);
+          }
+          propagate(pc + 2, slot_in);
+        } else if (is_cond_branch) {
+          HiProvState after_d = slot_in;
+          exec_word(d_w, d_pc, &after_d);
+          const int64_t target_pc = static_cast<int64_t>(pc) + 1 + static_cast<int64_t>(simm);
+          if (target_pc >= 0 && static_cast<size_t>(target_pc) < num_words) {
+            propagate(static_cast<size_t>(target_pc), after_d);
+          }
+          const bool is_uncond_branch = (op == 0x04u && rs == rt) ||
+                                        (op == 0x01u && rs == 0u && (rt == 0x01u || rt == 0x11u));
+          if (!is_uncond_branch) {
+            propagate(pc + 2, after_d);
+          }
+        } else if (op == 0x03u || (op == 0x00u && funct == 0x09u)) {
+          HiProvState after_call = slot_in;
+          exec_word(d_w, d_pc, &after_call);
+          for (uint32_t caller_reg = 1; caller_reg <= 15; ++caller_reg) {
+            kill_gpr(&after_call, caller_reg);
+          }
+          kill_gpr(&after_call, 24u);
+          kill_gpr(&after_call, 25u);
+          kill_gpr(&after_call, 31u);
+          propagate(pc + 2, after_call);
+        } else if (op == 0x02u) {
+          HiProvState after_d = slot_in;
+          exec_word(d_w, d_pc, &after_d);
+          if (!relocated_indices.contains(pc)) {
+            const size_t target_pc = static_cast<size_t>(w & 0x03ffffffu);
+            propagate(target_pc, after_d);
+          }
+        } else if (op == 0x00u && funct == 0x08u && rs != 31u) {
+          const std::vector<size_t> target_jts = in_state[pc].jt_indices[rs];
+          HiProvState after_d = slot_in;
+          exec_word(d_w, d_pc, &after_d);
+          for (size_t jt_i : target_jts) {
+            if (jt_i < actual_stage0.jump_tables.size()) {
+              for (size_t target_pc : actual_stage0.jump_tables[jt_i].target_word_indices) {
+                propagate(target_pc, after_d);
+              }
+            }
+          }
+        }
+      }
+    };
+
+    if (num_words > 0) {
+      run_provenance_from_seed(/*seed_pc=*/0, /*forbidden_targets=*/nullptr);
+      std::vector<bool> entry_reachable(num_words, false);
+      for (size_t i = 0; i < num_words; ++i) {
+        entry_reachable[i] = pre_exec_state[i].reachable;
+      }
+      for (size_t i = 0; i < num_words; ++i) {
+        if (!pre_exec_state[i].reachable && !is_delay_slot[i]) {
+          run_provenance_from_seed(i, &entry_reachable);
+        }
+      }
+    }
+
+    for (const Stage0Relocation& rel : actual_stage0.relocations) {
+      uint32_t sym_vram = 0;
+      resolve_sym_vram(rel.symbol_name, &sym_vram);
       const uint32_t full_addr = static_cast<uint32_t>(static_cast<int64_t>(sym_vram) + rel.addend);
       if (rel.kind == Stage0RelocKind::kMips26) {
         result.actual_words[rel.word_index] =
@@ -356,8 +904,43 @@ RightInverseResult CompareStage0FunctionInputs(const Stage0FunctionInput& input_
         result.actual_words[rel.word_index] =
             (result.actual_words[rel.word_index] & 0xffff0000u) | hi;
       } else if (rel.kind == Stage0RelocKind::kMipsLo16) {
+        const uint32_t req_hi = ((full_addr + 0x8000u) >> 16) & 0xffffu;
+        const uint32_t lo_w = result.actual_words[rel.word_index];
+        const uint32_t base_rs = (lo_w >> 21) & 0x1fu;
+        const HiProvState& pre_st = pre_exec_state[rel.word_index];
+        if (base_rs == 0u || !pre_st.reachable || !pre_st.hi_page[base_rs].has_value() ||
+            *pre_st.hi_page[base_rs] != req_hi) {
+          result.matches = false;
+          result.diff_detail = absl::StrFormat(
+              "Orphaned R_MIPS_LO16 relocation for '%s'+%d at word %zu: base register $%u lacks "
+              "R_MIPS_HI16 backing on page 0x%04x\nasm:\n%s",
+              rel.symbol_name, static_cast<int>(rel.addend), rel.word_index, base_rs, req_hi,
+              combined_asm);
+          return result;
+        }
         result.actual_words[rel.word_index] =
             (result.actual_words[rel.word_index] & 0xffff0000u) | (full_addr & 0xffffu);
+      } else if (rel.kind == Stage0RelocKind::kMipsGpRel16 ||
+                 rel.kind == Stage0RelocKind::kMipsLiteral) {
+        if (input_x.gp_vram == 0u) {
+          result.matches = false;
+          result.diff_detail =
+              absl::StrFormat("GP-relative relocation for '%s' requires non-zero gp_vram\nasm:\n%s",
+                              rel.symbol_name, combined_asm);
+          return result;
+        }
+        const int32_t gp_delta = static_cast<int32_t>(full_addr - input_x.gp_vram);
+        if (gp_delta < -32768 || gp_delta > 32767) {
+          result.matches = false;
+          result.diff_detail =
+              absl::StrFormat("GP-relative offset %d out of 16-bit signed range for '%s'\nasm:\n%s",
+                              gp_delta, rel.symbol_name, combined_asm);
+          return result;
+        }
+        result.actual_words[rel.word_index] = (result.actual_words[rel.word_index] & 0xffff0000u) |
+                                              (static_cast<uint32_t>(gp_delta) & 0xffffu);
+      } else if (rel.kind == Stage0RelocKind::kMips32) {
+        result.actual_words[rel.word_index] = full_addr;
       }
     }
     // Also relocate intra-function `j $L<n>` words (`op == 0x02`) to `input_x.base_vram`.
@@ -404,24 +987,16 @@ RightInverseResult CompareStage0FunctionInputs(const Stage0FunctionInput& input_
     return result;
   }
 
-  if (actual_stage0.jump_tables.size() != input_x.jump_tables.size()) {
-    result.matches = false;
-    result.diff_detail =
-        absl::StrFormat("Jump table count got %zu != expected %zu\nasm:\n%s",
-                        actual_stage0.jump_tables.size(), input_x.jump_tables.size(), combined_asm);
-    return result;
-  }
-  for (size_t i = 0; i < input_x.jump_tables.size(); ++i) {
-    if (actual_stage0.jump_tables[i].target_word_indices !=
-        input_x.jump_tables[i].target_word_indices) {
-      result.matches = false;
-      result.diff_detail =
-          absl::StrFormat("Jump table %zu target_word_indices mismatch\nasm:\n%s", i, combined_asm);
-      return result;
-    }
-  }
-
   if (!is_linked_rom_input) {
+    for (size_t i = 0; i < input_x.jump_tables.size(); ++i) {
+      if (actual_stage0.jump_tables[i].target_word_indices !=
+          input_x.jump_tables[i].target_word_indices) {
+        result.matches = false;
+        result.diff_detail = absl::StrFormat(
+            "Jump table %zu target_word_indices mismatch\nasm:\n%s", i, combined_asm);
+        return result;
+      }
+    }
     if (actual_stage0.constant_pool.size() != input_x.constant_pool.size()) {
       result.matches = false;
       result.diff_detail = absl::StrFormat("Constant-pool count got %zu != expected %zu\nasm:\n%s",
@@ -610,6 +1185,13 @@ RightInverseResult RightInverseVerifier::VerifyFinalAndGasStageRightInverse(
 
   hooks_->ApplyCompilationProfile(input_x.profile);
   ctx_->MaterializeFromCfg(lifted_dbr);
+  std::string bad_insn;
+  if (!hooks_->ValidateMaterializedInsnsRecognizable(&bad_insn)) {
+    result.matches = false;
+    result.diff_detail =
+        absl::StrCat("Unrecognizable RTL insn under compilation profile: ", bad_insn);
+    return result;
+  }
   const std::string combined_asm = hooks_->RunFinal();
   const Stage0FunctionInput actual_stage0 = hooks_->RunGasMdAssembleWithMetadata(combined_asm);
   return CompareStage0FunctionInputs(input_x, actual_stage0, combined_asm);
@@ -756,6 +1338,16 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   // `input_x.profile`.
   fresh_ctx.BeginFunction("harness_func");
   fresh_hooks.ApplyCompilationProfile(input_x.profile);
+  fresh_ctx.MaterializeFromCfg(y);
+  {
+    std::string bad_insn;
+    if (!fresh_hooks.ValidateMaterializedInsnsRecognizable(&bad_insn)) {
+      fail_result.matches = false;
+      fail_result.diff_detail =
+          absl::StrCat("Unrecognizable lifted RTL insn under compilation profile: ", bad_insn);
+      return fail_result;
+    }
+  }
 
   RtlControlFlowGraph current_cfg = y;
   const auto all_subs = AllSubfunctionIds();
@@ -777,6 +1369,15 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
 
   fresh_hooks.ApplyCompilationProfile(input_x.profile);
   fresh_ctx.MaterializeFromCfg(current_cfg);
+  {
+    std::string bad_insn;
+    if (!fresh_hooks.ValidateMaterializedInsnsRecognizable(&bad_insn)) {
+      fail_result.matches = false;
+      fail_result.diff_detail =
+          absl::StrCat("Unrecognizable post-replay RTL insn under compilation profile: ", bad_insn);
+      return fail_result;
+    }
+  }
   const std::string combined_asm = fresh_hooks.RunFinal();
   const Stage0FunctionInput actual_stage0 = fresh_hooks.RunGasMdAssembleWithMetadata(combined_asm);
   RightInverseResult res = CompareStage0FunctionInputs(input_x, actual_stage0, combined_asm);

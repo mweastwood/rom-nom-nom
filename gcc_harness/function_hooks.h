@@ -1,12 +1,14 @@
 #ifndef GCC_HARNESS_FUNCTION_HOOKS_H_
 #define GCC_HARNESS_FUNCTION_HOOKS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
@@ -152,6 +154,11 @@ class FunctionHooks {
   // including `-Wa,-g` / `-Wa,-O2` GAS options and `-G` threshold) to in-process
   // GCC 2.7.2 and Binutils 2.6 globals.
   void ApplyCompilationProfile(const CompilationProfile& profile);
+
+  // Checks that every materialized `INSN`/`JUMP_INSN`/`CALL_INSN` in `ctx_` is
+  // recognizable by GCC 2.7.2 `recog` under the active compilation profile
+  // (preventing `fatal_insn` `abort()`s on invalid/adversarial lifted RTL).
+  bool ValidateMaterializedInsnsRecognizable(std::string* out_bad_insn = nullptr) const;
 
   // Assembles one or more MIPS assembly lines in-process via Binutils 2.6 GAS
   // (`md_assemble`) and returns the emitted 32-bit big-endian machine words.

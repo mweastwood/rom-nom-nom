@@ -1,9 +1,12 @@
 #include "lifter/invert_gas_macro.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -922,7 +925,7 @@ bool WordWritesGpr(uint32_t w, uint32_t reg) {
 }
 
 bool IsTempregReusedByLaterLo16(
-    absl::Span<const AsmItem> items, size_t start_idx, int tempreg, std::string_view hi_symbol,
+    absl::Span<const AsmItem> items, size_t start_idx, int tempreg,
     const absl::flat_hash_map<size_t, const Stage0Relocation*>& reloc_by_word) {
   // `$1` (`$at`) is strictly GAS's macro scratch register (`FIXED_REGISTERS[1] == 1`
   // in `mips.h`) and is never CSE'd or allocated across instructions by GCC.
@@ -939,8 +942,7 @@ bool IsTempregReusedByLaterLo16(
     }
     auto check_word_uses_lo16_base = [&](uint32_t w, size_t w_idx, size_t prev_item_idx) -> bool {
       auto rel_it = reloc_by_word.find(w_idx);
-      if (rel_it == reloc_by_word.end() || rel_it->second->kind != Stage0RelocKind::kMipsLo16 ||
-          rel_it->second->symbol_name != hi_symbol) {
+      if (rel_it == reloc_by_word.end() || rel_it->second->kind != Stage0RelocKind::kMipsLo16) {
         return false;
       }
       if (Rs(w) != treg) {
@@ -1267,18 +1269,812 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(absl::Span<const AsmIt
   return lines;
 }
 
+std::vector<Stage0Relocation> SynthesizeLinkedRomRelocations(
+    const Stage0FunctionInput& stage0_input, std::vector<Stage0JumpTable>* out_jump_tables,
+    std::vector<Stage0ConstantPoolEntry>* out_constant_pool) {
+  std::vector<Stage0JumpTable> norm_jts = stage0_input.jump_tables;
+  std::vector<Stage0ConstantPoolEntry> norm_cps = stage0_input.constant_pool;
+
+  if (stage0_input.base_vram == 0u || !stage0_input.relocations.empty()) {
+    if (out_jump_tables != nullptr) {
+      *out_jump_tables = std::move(norm_jts);
+    }
+    if (out_constant_pool != nullptr) {
+      *out_constant_pool = std::move(norm_cps);
+    }
+    return stage0_input.relocations;
+  }
+
+  absl::flat_hash_set<std::string> used_sym_names;
+  for (const auto& [vram, sym] : stage0_input.vram_to_symbol) {
+    (void)vram;
+    if (!sym.empty()) {
+      used_sym_names.insert(sym);
+    }
+  }
+
+  for (size_t i = 0; i < norm_jts.size(); ++i) {
+    if (norm_jts[i].label_name.empty() || used_sym_names.contains(norm_jts[i].label_name)) {
+      norm_jts[i].label_name = absl::StrFormat("__jt_%zu", i);
+    }
+    used_sym_names.insert(norm_jts[i].label_name);
+  }
+
+  auto parse_lc_num = [](std::string_view label, int* out_num) -> bool {
+    if (absl::StartsWith(label, "*")) {
+      label.remove_prefix(1);
+    }
+    if (!absl::StartsWith(label, "$LC") && !absl::StartsWith(label, ".LC")) {
+      return false;
+    }
+    label.remove_prefix(3);
+    return !label.empty() && absl::SimpleAtoi(label, out_num) && *out_num >= 0;
+  };
+
+  int next_lc_num = 0;
+  int next_lit_num = 0;
+  for (const Stage0ConstantPoolEntry& cp : norm_cps) {
+    int lc = -1;
+    if (parse_lc_num(cp.label_name, &lc)) {
+      next_lc_num = std::max(next_lc_num, lc + 1);
+    } else if (absl::StartsWith(cp.label_name, ".Llit")) {
+      int lit = -1;
+      if (absl::SimpleAtoi(cp.label_name.substr(5), &lit) && lit >= 0) {
+        next_lit_num = std::max(next_lit_num, lit + 1);
+      }
+    }
+  }
+  for (Stage0ConstantPoolEntry& cp : norm_cps) {
+    const bool is_lit_sec = (cp.section_name == ".lit4" || cp.section_name == ".lit8");
+    int lc = -1;
+    if (is_lit_sec) {
+      if (!absl::StartsWith(cp.label_name, ".Llit") || used_sym_names.contains(cp.label_name)) {
+        do {
+          cp.label_name = absl::StrFormat(".Llit%d", next_lit_num++);
+        } while (used_sym_names.contains(cp.label_name));
+      }
+    } else {
+      if (!parse_lc_num(cp.label_name, &lc) || used_sym_names.contains(cp.label_name)) {
+        do {
+          cp.label_name = absl::StrFormat("$LC%d", next_lc_num++);
+        } while (used_sym_names.contains(cp.label_name));
+      }
+    }
+    used_sym_names.insert(cp.label_name);
+  }
+
+  const absl::Span<const uint32_t> full_words(stage0_input.machine_words);
+  if (full_words.empty()) {
+    if (out_jump_tables != nullptr) {
+      *out_jump_tables = std::move(norm_jts);
+    }
+    if (out_constant_pool != nullptr) {
+      *out_constant_pool = std::move(norm_cps);
+    }
+    return {};
+  }
+
+  absl::Span<const uint32_t> words = StripSectionAlignmentPadding(full_words);
+  bool keep_full = false;
+  for (const Stage0JumpTable& jt : norm_jts) {
+    for (size_t target_idx : jt.target_word_indices) {
+      if (target_idx >= words.size() && target_idx < full_words.size()) {
+        keep_full = true;
+        break;
+      }
+    }
+  }
+  if (!keep_full) {
+    for (size_t i = 0; i < words.size();) {
+      const uint32_t w = words[i];
+      if (IsBranchOrJumpWord(w)) {
+        if (Opcode(w) == 0x02u) {
+          const uint32_t target_vram =
+              (stage0_input.base_vram & 0xf0000000u) | ((w & 0x03ffffffu) << 2);
+          if (target_vram >= stage0_input.base_vram + static_cast<uint32_t>(words.size()) * 4u &&
+              target_vram <
+                  stage0_input.base_vram + static_cast<uint32_t>(full_words.size()) * 4u) {
+            keep_full = true;
+            break;
+          }
+        }
+        i += 2;
+      } else {
+        ++i;
+      }
+    }
+  }
+  if (keep_full) {
+    words = full_words;
+  }
+  const size_t num_words = words.size();
+
+  struct ResolvedSymTarget {
+    std::string symbol_name;
+    int64_t addend = 0;
+    bool is_literal_sec = false;
+  };
+  absl::flat_hash_map<uint32_t, ResolvedSymTarget> exact_targets;
+  absl::flat_hash_map<uint32_t, std::vector<size_t>> vram_to_jt_indices;
+  for (size_t jt_idx = 0; jt_idx < norm_jts.size(); ++jt_idx) {
+    const Stage0JumpTable& jt = norm_jts[jt_idx];
+    if (jt.table_vram != 0u) {
+      vram_to_jt_indices[jt.table_vram].push_back(jt_idx);
+      exact_targets[jt.table_vram] = ResolvedSymTarget{
+          .symbol_name = jt.label_name,
+          .addend = 0,
+          .is_literal_sec = false,
+      };
+    }
+  }
+  for (const Stage0ConstantPoolEntry& cp : norm_cps) {
+    if (cp.entry_vram != 0u) {
+      const bool is_lit = (cp.section_name == ".lit4" || cp.section_name == ".lit8");
+      exact_targets[cp.entry_vram] = ResolvedSymTarget{
+          .symbol_name = cp.label_name,
+          .addend = 0,
+          .is_literal_sec = is_lit,
+      };
+      if (cp.byte_size == 8u || cp.words.size() == 2u) {
+        exact_targets.try_emplace(cp.entry_vram + 4u, ResolvedSymTarget{
+                                                          .symbol_name = cp.label_name,
+                                                          .addend = 4,
+                                                          .is_literal_sec = is_lit,
+                                                      });
+      }
+    }
+  }
+  for (const auto& [sym_vram, sym_name] : stage0_input.vram_to_symbol) {
+    if (!sym_name.empty()) {
+      exact_targets.try_emplace(sym_vram, ResolvedSymTarget{
+                                              .symbol_name = sym_name,
+                                              .addend = 0,
+                                              .is_literal_sec = false,
+                                          });
+    }
+  }
+
+  struct SizedSymRange {
+    uint32_t start_vram = 0;
+    uint32_t end_vram = 0;
+    std::string symbol_name;
+  };
+  std::vector<SizedSymRange> sized_ranges;
+  for (const auto& [sym_vram, byte_size] : stage0_input.vram_to_symbol_size) {
+    if (byte_size == 0u) {
+      continue;
+    }
+    const auto sym_it = stage0_input.vram_to_symbol.find(sym_vram);
+    if (sym_it == stage0_input.vram_to_symbol.end() || sym_it->second.empty()) {
+      continue;
+    }
+    const uint64_t end64 = static_cast<uint64_t>(sym_vram) + static_cast<uint64_t>(byte_size);
+    const uint32_t end_vram = end64 > 0xffffffffULL ? 0xffffffffu : static_cast<uint32_t>(end64);
+    sized_ranges.push_back(SizedSymRange{
+        .start_vram = sym_vram,
+        .end_vram = end_vram,
+        .symbol_name = sym_it->second,
+    });
+  }
+  std::sort(
+      sized_ranges.begin(), sized_ranges.end(),
+      [](const SizedSymRange& a, const SizedSymRange& b) { return a.start_vram < b.start_vram; });
+
+  auto resolve_address = [&](uint32_t addr, ResolvedSymTarget* out) -> bool {
+    if (const auto it = exact_targets.find(addr); it != exact_targets.end()) {
+      *out = it->second;
+      return true;
+    }
+    for (const SizedSymRange& r : sized_ranges) {
+      if (addr >= r.start_vram && addr < r.end_vram) {
+        *out = ResolvedSymTarget{
+            .symbol_name = r.symbol_name,
+            .addend = static_cast<int64_t>(addr - r.start_vram),
+            .is_literal_sec = false,
+        };
+        return true;
+      }
+    }
+    return false;
+  };
+
+  struct HiDef {
+    size_t lui_word_index = 0;
+    uint16_t hi16 = 0;
+    bool is_indexed = false;
+    bool operator==(const HiDef& other) const {
+      return lui_word_index == other.lui_word_index && hi16 == other.hi16 &&
+             is_indexed == other.is_indexed;
+    }
+  };
+  struct GprLattice {
+    bool has_non_hi_def = false;
+    std::vector<HiDef> hi_defs;
+    std::vector<size_t> jt_indices;
+  };
+  struct WordInState {
+    bool reachable = false;
+    bool gp_intact = false;
+    std::array<GprLattice, 32> regs;
+  };
+
+  auto append_unique_jts = [](const std::vector<size_t>& src, std::vector<size_t>* dst) {
+    for (size_t jt_idx : src) {
+      if (std::find(dst->begin(), dst->end(), jt_idx) == dst->end()) {
+        dst->push_back(jt_idx);
+      }
+    }
+  };
+
+  auto kill_gpr = [](WordInState* st, uint32_t reg) {
+    if (reg == 0u || reg >= 32u) {
+      return;
+    }
+    st->regs[reg].has_non_hi_def = true;
+    st->regs[reg].hi_defs.clear();
+    st->regs[reg].jt_indices.clear();
+    if (reg == 28u) {
+      st->gp_intact = false;
+    }
+  };
+
+  auto exec_word = [&](uint32_t w, size_t w_idx, WordInState* st) {
+    const uint32_t op = Opcode(w);
+    if (op == 0x0fu && Rs(w) == 0u) {
+      const uint32_t rt = Rt(w);
+      if (rt != 0u) {
+        st->regs[rt].has_non_hi_def = false;
+        st->regs[rt].hi_defs = {HiDef{
+            .lui_word_index = w_idx,
+            .hi16 = static_cast<uint16_t>(Uimm16(w)),
+            .is_indexed = false,
+        }};
+        st->regs[rt].jt_indices.clear();
+        if (rt == 28u) {
+          st->gp_intact = false;
+        }
+      }
+      return;
+    }
+
+    if (op == 0x00u && Sa(w) == 0u) {
+      const uint32_t funct = Funct(w);
+      const uint32_t rs = Rs(w);
+      const uint32_t rt = Rt(w);
+      const uint32_t rd = Rd(w);
+      if ((funct == 0x21u || funct == 0x2du || funct == 0x25u) && (rs == 0u || rt == 0u)) {
+        if (rd != 0u) {
+          const uint32_t src = (rs != 0u) ? rs : rt;
+          if (src == 0u) {
+            kill_gpr(st, rd);
+          } else {
+            st->regs[rd] = st->regs[src];
+            if (rd == 28u && src != 28u) {
+              st->gp_intact = false;
+            }
+          }
+        }
+        return;
+      }
+      if ((funct == 0x21u || funct == 0x2du) && rs != 0u && rt != 0u) {
+        if (rd != 0u) {
+          const bool rs_has_jt = !st->regs[rs].jt_indices.empty();
+          const bool rt_has_jt = !st->regs[rt].jt_indices.empty();
+          const bool rs_is_hi = !st->regs[rs].has_non_hi_def && !st->regs[rs].hi_defs.empty();
+          const bool rt_is_hi = !st->regs[rt].has_non_hi_def && !st->regs[rt].hi_defs.empty();
+          if (rs != rt && (rs_has_jt != rt_has_jt)) {
+            std::vector<size_t> next_jts =
+                rs_has_jt ? st->regs[rs].jt_indices : st->regs[rt].jt_indices;
+            kill_gpr(st, rd);
+            st->regs[rd].jt_indices = std::move(next_jts);
+          } else if (rs != rt && (rs_is_hi != rt_is_hi)) {
+            const GprLattice& hi_src = rs_is_hi ? st->regs[rs] : st->regs[rt];
+            std::vector<HiDef> indexed_defs = hi_src.hi_defs;
+            for (HiDef& d : indexed_defs) {
+              d.is_indexed = true;
+            }
+            st->regs[rd].has_non_hi_def = false;
+            st->regs[rd].hi_defs = std::move(indexed_defs);
+            st->regs[rd].jt_indices.clear();
+            if (rd == 28u) {
+              st->gp_intact = false;
+            }
+          } else {
+            kill_gpr(st, rd);
+          }
+        }
+        return;
+      }
+    }
+
+    if (op == 0x09u || op == 0x19u) {
+      const uint32_t rs = Rs(w);
+      const uint32_t rt = Rt(w);
+      const int16_t simm = Simm16(w);
+      std::vector<size_t> next_jts;
+      if (rs != 0u && rs != 28u && rs != 29u && !st->regs[rs].has_non_hi_def &&
+          !st->regs[rs].hi_defs.empty()) {
+        for (const HiDef& d : st->regs[rs].hi_defs) {
+          if (!d.is_indexed) {
+            const uint32_t addr = (static_cast<uint32_t>(d.hi16) << 16) +
+                                  static_cast<uint32_t>(static_cast<int32_t>(simm));
+            if (const auto jt_it = vram_to_jt_indices.find(addr);
+                jt_it != vram_to_jt_indices.end()) {
+              append_unique_jts(jt_it->second, &next_jts);
+            }
+          }
+        }
+      } else if (rs == 28u && st->gp_intact && stage0_input.gp_vram != 0u) {
+        const uint32_t addr =
+            stage0_input.gp_vram + static_cast<uint32_t>(static_cast<int32_t>(simm));
+        if (const auto jt_it = vram_to_jt_indices.find(addr); jt_it != vram_to_jt_indices.end()) {
+          append_unique_jts(jt_it->second, &next_jts);
+        }
+      } else if (rs != 0u && simm == 0 && !st->regs[rs].jt_indices.empty()) {
+        next_jts = st->regs[rs].jt_indices;
+      }
+      kill_gpr(st, rt);
+      if (rt != 0u && !next_jts.empty()) {
+        st->regs[rt].jt_indices = std::move(next_jts);
+      }
+      return;
+    }
+
+    if (op == 0x23u || op == 0x27u || op == 0x37u) {
+      const uint32_t rs = Rs(w);
+      const uint32_t rt = Rt(w);
+      const int16_t simm = Simm16(w);
+      std::vector<size_t> next_jts;
+      if (rs != 0u && !st->regs[rs].jt_indices.empty()) {
+        next_jts = st->regs[rs].jt_indices;
+      } else if (rs != 0u && rs != 28u && rs != 29u && !st->regs[rs].has_non_hi_def &&
+                 !st->regs[rs].hi_defs.empty()) {
+        for (const HiDef& d : st->regs[rs].hi_defs) {
+          const uint32_t addr = (static_cast<uint32_t>(d.hi16) << 16) +
+                                static_cast<uint32_t>(static_cast<int32_t>(simm));
+          if (const auto jt_it = vram_to_jt_indices.find(addr); jt_it != vram_to_jt_indices.end()) {
+            append_unique_jts(jt_it->second, &next_jts);
+          }
+        }
+      } else if (rs == 28u && st->gp_intact && stage0_input.gp_vram != 0u) {
+        const uint32_t addr =
+            stage0_input.gp_vram + static_cast<uint32_t>(static_cast<int32_t>(simm));
+        if (const auto jt_it = vram_to_jt_indices.find(addr); jt_it != vram_to_jt_indices.end()) {
+          append_unique_jts(jt_it->second, &next_jts);
+        }
+      }
+      kill_gpr(st, rt);
+      if (rt != 0u && !next_jts.empty()) {
+        st->regs[rt].jt_indices = std::move(next_jts);
+      }
+      return;
+    }
+
+    const uint32_t pinfo = GetInsnPinfo(w);
+    if ((pinfo & 0x00000001u) != 0u) {
+      kill_gpr(st, Rd(w));
+    }
+    if ((pinfo & 0x00000002u) != 0u) {
+      kill_gpr(st, Rt(w));
+    }
+    if ((pinfo & 0x01000000u) != 0u) {
+      kill_gpr(st, 31u);
+    }
+  };
+
+  auto merge_state = [](const WordInState& src, WordInState* dst) -> bool {
+    if (!src.reachable) {
+      return false;
+    }
+    if (!dst->reachable) {
+      *dst = src;
+      return true;
+    }
+    bool changed = false;
+    if (dst->gp_intact && !src.gp_intact) {
+      dst->gp_intact = false;
+      changed = true;
+    }
+    for (size_t r = 1; r < 32; ++r) {
+      GprLattice& d_lat = dst->regs[r];
+      const GprLattice& s_lat = src.regs[r];
+      if (!d_lat.has_non_hi_def && s_lat.has_non_hi_def) {
+        d_lat.has_non_hi_def = true;
+        d_lat.hi_defs.clear();
+        changed = true;
+      } else if (!d_lat.has_non_hi_def) {
+        for (const HiDef& def : s_lat.hi_defs) {
+          if (std::find(d_lat.hi_defs.begin(), d_lat.hi_defs.end(), def) == d_lat.hi_defs.end()) {
+            if (d_lat.hi_defs.size() < 16u) {
+              d_lat.hi_defs.push_back(def);
+              changed = true;
+            } else {
+              d_lat.has_non_hi_def = true;
+              d_lat.hi_defs.clear();
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
+      for (size_t jt_idx : s_lat.jt_indices) {
+        if (std::find(d_lat.jt_indices.begin(), d_lat.jt_indices.end(), jt_idx) ==
+            d_lat.jt_indices.end()) {
+          d_lat.jt_indices.push_back(jt_idx);
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  };
+
+  std::vector<std::optional<size_t>> delay_owner(num_words);
+  for (size_t pc = 0; pc < num_words;) {
+    if (IsBranchOrJumpWord(words[pc]) && pc + 1 < num_words) {
+      delay_owner[pc + 1] = pc;
+      pc += 2;
+    } else {
+      ++pc;
+    }
+  }
+
+  std::vector<WordInState> in_state(num_words);
+  in_state[0].reachable = true;
+  in_state[0].gp_intact = (stage0_input.gp_vram != 0u);
+  for (size_t r = 1; r < 32; ++r) {
+    in_state[0].regs[r].has_non_hi_def = true;
+  }
+
+  std::vector<size_t> worklist = {0};
+  std::vector<bool> in_queue(num_words, false);
+  in_queue[0] = true;
+  size_t q_head = 0;
+
+  auto propagate = [&](size_t target_pc, const WordInState& st) {
+    if (target_pc < num_words && merge_state(st, &in_state[target_pc]) && !in_queue[target_pc]) {
+      in_queue[target_pc] = true;
+      worklist.push_back(target_pc);
+    }
+  };
+
+  while (q_head < worklist.size()) {
+    const size_t pc = worklist[q_head++];
+    in_queue[pc] = false;
+    const uint32_t w = words[pc];
+    if (IsBranchOrJumpWord(w)) {
+      if (pc + 1 >= num_words) {
+        continue;
+      }
+      const size_t d_pc = pc + 1;
+      const uint32_t d_w = words[d_pc];
+      const uint32_t pinfo = GetInsnPinfo(w);
+      const uint32_t op = Opcode(w);
+
+      if ((pinfo & 0x00080000u) != 0u) {
+        // `INSN_COND_BRANCH_LIKELY`: delay slot executes only on the taken edge.
+        WordInState taken_st = in_state[pc];
+        if ((pinfo & 0x01000000u) != 0u) {
+          kill_gpr(&taken_st, 31u);
+        }
+        exec_word(d_w, d_pc, &taken_st);
+        const int64_t target_pc = static_cast<int64_t>(pc) + 1 + static_cast<int64_t>(Simm16(w));
+        if (target_pc >= 0 && static_cast<size_t>(target_pc) < num_words) {
+          propagate(static_cast<size_t>(target_pc), taken_st);
+        }
+
+        WordInState fall_st = in_state[pc];
+        if ((pinfo & 0x01000000u) != 0u) {
+          kill_gpr(&fall_st, 31u);
+        }
+        propagate(pc + 2, fall_st);
+      } else if ((pinfo & 0x00040000u) != 0u) {
+        // `INSN_COND_BRANCH_DELAY`: delay slot executes on both edges.
+        WordInState after_d = in_state[pc];
+        if ((pinfo & 0x01000000u) != 0u) {
+          kill_gpr(&after_d, 31u);
+        }
+        exec_word(d_w, d_pc, &after_d);
+        const int64_t target_pc = static_cast<int64_t>(pc) + 1 + static_cast<int64_t>(Simm16(w));
+        if (target_pc >= 0 && static_cast<size_t>(target_pc) < num_words) {
+          propagate(static_cast<size_t>(target_pc), after_d);
+        }
+        propagate(pc + 2, after_d);
+      } else {
+        // `INSN_UNCOND_BRANCH_DELAY`: `jal`, `jalr`, `j`, `jr`.
+        if (op == 0x03u || (op == 0x00u && Funct(w) == 0x09u)) {
+          WordInState after_call = in_state[pc];
+          kill_gpr(&after_call, op == 0x03u ? 31u : Rd(w));
+          exec_word(d_w, d_pc, &after_call);
+          // Clobber MIPS O32/N32 caller-saved GPRs (`$1..$15`, `$24..$25`, `$31`),
+          // preserving callee-saved `$s0..$s7` (`$16..$23`), `$gp`, `$sp`, `$fp`.
+          for (uint32_t caller_reg = 1; caller_reg <= 15; ++caller_reg) {
+            kill_gpr(&after_call, caller_reg);
+          }
+          kill_gpr(&after_call, 24u);
+          kill_gpr(&after_call, 25u);
+          kill_gpr(&after_call, 31u);
+          propagate(pc + 2, after_call);
+        } else if (op == 0x02u) {
+          WordInState after_d = in_state[pc];
+          exec_word(d_w, d_pc, &after_d);
+          const uint32_t target_vram =
+              (stage0_input.base_vram & 0xf0000000u) | ((w & 0x03ffffffu) << 2);
+          if (target_vram >= stage0_input.base_vram &&
+              ((target_vram - stage0_input.base_vram) & 3u) == 0u) {
+            const size_t target_pc = (target_vram - stage0_input.base_vram) / 4u;
+            propagate(target_pc, after_d);
+          }
+        } else if (op == 0x00u && Funct(w) == 0x08u && Rs(w) != 31u) {
+          const std::vector<size_t> target_jts = in_state[pc].regs[Rs(w)].jt_indices;
+          WordInState after_d = in_state[pc];
+          exec_word(d_w, d_pc, &after_d);
+          for (size_t jt_idx : target_jts) {
+            if (jt_idx < norm_jts.size()) {
+              for (size_t target_pc : norm_jts[jt_idx].target_word_indices) {
+                propagate(target_pc, after_d);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      WordInState next_st = in_state[pc];
+      exec_word(w, pc, &next_st);
+      propagate(pc + 1, next_st);
+    }
+  }
+
+  auto is_mem_lo_opcode = [](uint32_t op) -> bool {
+    return (op >= 0x20u && op <= 0x2eu) || op == 0x31u || op == 0x35u || op == 0x37u ||
+           op == 0x39u || op == 0x3du || op == 0x3fu;
+  };
+  auto is_addiu_opcode = [](uint32_t op) -> bool { return op == 0x09u || op == 0x19u; };
+
+  struct CandidateAccess {
+    size_t word_index = 0;
+    uint32_t full_addr = 0;
+    bool is_mem = false;
+    bool is_gp_rel = false;
+    std::vector<size_t> lui_word_indices;
+    bool resolved = false;
+    ResolvedSymTarget target;
+  };
+  std::vector<CandidateAccess> candidates;
+  absl::flat_hash_set<uint32_t> resolved_mem_addrs;
+
+  for (size_t w_idx = 0; w_idx < num_words; ++w_idx) {
+    const uint32_t w = words[w_idx];
+    if (IsBranchOrJumpWord(w)) {
+      continue;
+    }
+    const uint32_t op = Opcode(w);
+    const bool is_mem = is_mem_lo_opcode(op);
+    const bool is_addiu = is_addiu_opcode(op);
+    if (!is_mem && !is_addiu) {
+      continue;
+    }
+
+    WordInState eff_state = in_state[w_idx];
+    if (delay_owner[w_idx].has_value()) {
+      const size_t br_pc = *delay_owner[w_idx];
+      if (in_state[br_pc].reachable) {
+        WordInState br_st = in_state[br_pc];
+        const uint32_t br_w = words[br_pc];
+        const uint32_t br_op = Opcode(br_w);
+        if (br_op == 0x03u) {
+          kill_gpr(&br_st, 31u);
+        } else if (br_op == 0x00u && Funct(br_w) == 0x09u) {
+          kill_gpr(&br_st, Rd(br_w));
+        } else if ((GetInsnPinfo(br_w) & 0x01000000u) != 0u) {
+          kill_gpr(&br_st, 31u);
+        }
+        merge_state(br_st, &eff_state);
+      }
+    }
+    if (!eff_state.reachable) {
+      continue;
+    }
+
+    const uint32_t rs = Rs(w);
+    const int16_t simm = Simm16(w);
+    if (rs == 28u && eff_state.gp_intact && stage0_input.gp_vram != 0u) {
+      CandidateAccess cand;
+      cand.word_index = w_idx;
+      cand.full_addr = stage0_input.gp_vram + static_cast<uint32_t>(static_cast<int32_t>(simm));
+      cand.is_mem = is_mem;
+      cand.is_gp_rel = true;
+      if (resolve_address(cand.full_addr, &cand.target)) {
+        cand.resolved = true;
+        if (is_mem) {
+          resolved_mem_addrs.insert(cand.full_addr);
+        }
+      }
+      candidates.push_back(std::move(cand));
+    } else if (rs != 0u && rs != 28u && rs != 29u) {
+      const GprLattice& lat = eff_state.regs[rs];
+      if (lat.has_non_hi_def || lat.hi_defs.empty()) {
+        continue;
+      }
+      const uint16_t common_hi16 = lat.hi_defs[0].hi16;
+      bool all_agree = true;
+      for (const HiDef& d : lat.hi_defs) {
+        if (d.hi16 != common_hi16 || (is_addiu && d.is_indexed)) {
+          all_agree = false;
+          break;
+        }
+      }
+      if (!all_agree) {
+        continue;
+      }
+      CandidateAccess cand;
+      cand.word_index = w_idx;
+      cand.full_addr = (static_cast<uint32_t>(common_hi16) << 16) +
+                       static_cast<uint32_t>(static_cast<int32_t>(simm));
+      cand.is_mem = is_mem;
+      cand.is_gp_rel = false;
+      for (const HiDef& d : lat.hi_defs) {
+        cand.lui_word_indices.push_back(d.lui_word_index);
+      }
+      if (resolve_address(cand.full_addr, &cand.target)) {
+        cand.resolved = true;
+        if (is_mem) {
+          resolved_mem_addrs.insert(cand.full_addr);
+        }
+      }
+      candidates.push_back(std::move(cand));
+    }
+  }
+
+  // Second pass for paired 8-byte (`double` / `long long`) memory accesses at
+  // `sym + 4` when `vram_to_symbol_size` was omitted on `sym` and `sym + 0` was
+  // also accessed by a memory instruction in this function.
+  for (CandidateAccess& cand : candidates) {
+    if (cand.resolved || !cand.is_mem || cand.full_addr < 4u) {
+      continue;
+    }
+    const uint32_t base_addr = cand.full_addr - 4u;
+    if (!resolved_mem_addrs.contains(base_addr) ||
+        stage0_input.vram_to_symbol_size.contains(base_addr)) {
+      continue;
+    }
+    const auto sym_it = stage0_input.vram_to_symbol.find(base_addr);
+    if (sym_it != stage0_input.vram_to_symbol.end() && !sym_it->second.empty()) {
+      cand.resolved = true;
+      cand.target = ResolvedSymTarget{
+          .symbol_name = sym_it->second,
+          .addend = 4,
+          .is_literal_sec = false,
+      };
+    }
+  }
+
+  struct LuiUser {
+    size_t word_index = 0;
+    ResolvedSymTarget target;
+  };
+  std::vector<Stage0Relocation> relocs;
+  absl::flat_hash_map<size_t, std::vector<LuiUser>> lui_users;
+  for (const CandidateAccess& cand : candidates) {
+    if (!cand.resolved) {
+      continue;
+    }
+    if (cand.is_gp_rel) {
+      relocs.push_back(Stage0Relocation{
+          .word_index = cand.word_index,
+          .kind = cand.target.is_literal_sec ? Stage0RelocKind::kMipsLiteral
+                                             : Stage0RelocKind::kMipsGpRel16,
+          .symbol_name = cand.target.symbol_name,
+          .addend = cand.target.addend,
+      });
+    } else {
+      relocs.push_back(Stage0Relocation{
+          .word_index = cand.word_index,
+          .kind = Stage0RelocKind::kMipsLo16,
+          .symbol_name = cand.target.symbol_name,
+          .addend = cand.target.addend,
+      });
+      for (size_t lui_idx : cand.lui_word_indices) {
+        lui_users[lui_idx].push_back(LuiUser{
+            .word_index = cand.word_index,
+            .target = cand.target,
+        });
+      }
+    }
+  }
+
+  for (const auto& [lui_idx, users] : lui_users) {
+    if (users.empty()) {
+      continue;
+    }
+    const LuiUser* best = nullptr;
+    for (const LuiUser& u : users) {
+      if (u.word_index > lui_idx && (best == nullptr || u.word_index < best->word_index)) {
+        best = &u;
+      }
+    }
+    if (best == nullptr) {
+      for (const LuiUser& u : users) {
+        if (best == nullptr || u.word_index < best->word_index) {
+          best = &u;
+        }
+      }
+    }
+    relocs.push_back(Stage0Relocation{
+        .word_index = lui_idx,
+        .kind = Stage0RelocKind::kMipsHi16,
+        .symbol_name = best->target.symbol_name,
+        .addend = best->target.addend,
+    });
+  }
+
+  std::stable_sort(relocs.begin(), relocs.end(),
+                   [](const Stage0Relocation& a, const Stage0Relocation& b) {
+                     return a.word_index < b.word_index;
+                   });
+
+  if (out_jump_tables != nullptr) {
+    *out_jump_tables = std::move(norm_jts);
+  }
+  if (out_constant_pool != nullptr) {
+    *out_constant_pool = std::move(norm_cps);
+  }
+  return relocs;
+}
+
 std::vector<std::string> CollapseGasMacrosAndFlattenLines(
     absl::Span<const AsmItem> raw_items, const Stage0FunctionInput& stage0_input,
     const absl::flat_hash_map<size_t, std::string>& word_to_label,
-    std::vector<Stage0ResolvedJumpTable>* out_jump_tables) {
+    std::vector<Stage0ResolvedJumpTable>* out_jump_tables,
+    std::vector<Stage0ConstantPoolEntry>* out_constant_pool) {
   if (out_jump_tables != nullptr) {
     out_jump_tables->clear();
   }
+  if (out_constant_pool != nullptr) {
+    *out_constant_pool = stage0_input.constant_pool;
+  }
 
-  // Build jump-table symbol -> synthetic local label (`$L<100000 + jt_idx>`) map.
+  // If no relocations, jump tables, constant pool entries, or linked `base_vram`
+  // are present, delegate to the pure-word macro collapse path.
+  if (stage0_input.relocations.empty() && stage0_input.jump_tables.empty() &&
+      stage0_input.constant_pool.empty() && stage0_input.base_vram == 0u) {
+    return CollapseGasMacrosAndFlattenLines(raw_items);
+  }
+
+  const bool is_linked_rom = stage0_input.base_vram != 0u && stage0_input.relocations.empty();
+  std::vector<Stage0JumpTable> active_jump_tables;
+  std::vector<Stage0ConstantPoolEntry> active_constant_pool;
+  std::vector<Stage0Relocation> synthesized_relocs;
+  if (is_linked_rom) {
+    synthesized_relocs =
+        SynthesizeLinkedRomRelocations(stage0_input, &active_jump_tables, &active_constant_pool);
+  } else {
+    active_jump_tables = stage0_input.jump_tables;
+    active_constant_pool = stage0_input.constant_pool;
+  }
+  if (out_constant_pool != nullptr) {
+    *out_constant_pool = active_constant_pool;
+  }
+
+  const absl::Span<const Stage0Relocation> active_relocs =
+      is_linked_rom ? absl::MakeConstSpan(synthesized_relocs)
+                    : absl::MakeConstSpan(stage0_input.relocations);
+  absl::flat_hash_map<size_t, const Stage0Relocation*> reloc_by_word;
+  absl::flat_hash_set<std::string> referenced_reloc_syms;
+  for (const Stage0Relocation& rel : active_relocs) {
+    reloc_by_word[rel.word_index] = &rel;
+    if (!rel.symbol_name.empty()) {
+      referenced_reloc_syms.insert(rel.symbol_name);
+    }
+  }
+
+  // Build jump-table symbol -> synthetic local label (`$L<100000 + jt_idx>`) map
+  // exclusively for jump tables referenced by at least one relocation.
   absl::flat_hash_map<std::string, std::string> jt_sym_to_label;
-  for (size_t jt_idx = 0; jt_idx < stage0_input.jump_tables.size(); ++jt_idx) {
-    const Stage0JumpTable& jt = stage0_input.jump_tables[jt_idx];
+  for (size_t jt_idx = 0; jt_idx < active_jump_tables.size(); ++jt_idx) {
+    const Stage0JumpTable& jt = active_jump_tables[jt_idx];
+    if (!referenced_reloc_syms.contains(jt.label_name)) {
+      continue;
+    }
     const std::string tbl_tok = absl::StrFormat("L%zu", 100000 + jt_idx);
     jt_sym_to_label[jt.label_name] = absl::StrCat("$", tbl_tok);
     if (out_jump_tables != nullptr) {
@@ -1300,20 +2096,8 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
     }
   }
 
-  // If no relocations, jump tables, constant pool entries, or linked `base_vram`
-  // are present, delegate to the pure-word macro collapse path.
-  if (stage0_input.relocations.empty() && stage0_input.jump_tables.empty() &&
-      stage0_input.constant_pool.empty() && stage0_input.base_vram == 0u) {
-    return CollapseGasMacrosAndFlattenLines(raw_items);
-  }
-
-  absl::flat_hash_map<size_t, const Stage0Relocation*> reloc_by_word;
-  for (const Stage0Relocation& rel : stage0_input.relocations) {
-    reloc_by_word[rel.word_index] = &rel;
-  }
-
   absl::flat_hash_map<std::string, const Stage0ConstantPoolEntry*> cp_by_label;
-  for (const Stage0ConstantPoolEntry& cp : stage0_input.constant_pool) {
+  for (const Stage0ConstantPoolEntry& cp : active_constant_pool) {
     cp_by_label[cp.label_name] = &cp;
   }
 
@@ -1335,7 +2119,6 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
     return absl::StrFormat("%s%d", base, static_cast<int32_t>(addend));
   };
 
-  const bool is_linked_rom = stage0_input.base_vram != 0u && stage0_input.relocations.empty();
   auto rewrite_single_insn = [&](std::string line, uint32_t w, size_t w_idx) -> std::string {
     line = NormalizeCop1LoadStoreMnemonic(line);
     const uint32_t op = Opcode(w);
@@ -1651,8 +2434,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
               std::string even_fpreg;
               if (MatchPairedFpDoubleReloc(items[i + 3].line, tempreg, mnem, reg, rel_lo, rel_lo2,
                                            &even_fpreg) &&
-                  !IsTempregReusedByLaterLo16(items, i + 4, tempreg, rel_hi->symbol_name,
-                                              reloc_by_word)) {
+                  !IsTempregReusedByLaterLo16(items, i + 4, tempreg, reloc_by_word)) {
                 item.line = absl::StrFormat("%s %s,%s($%d)", mnem == "l.s" ? "l.d" : "s.d",
                                             even_fpreg, sym_expr, base_reg);
                 item.unswapped_from_branch = false;
@@ -1661,8 +2443,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
                 continue;
               }
             }
-            if (!IsTempregReusedByLaterLo16(items, i + 3, tempreg, rel_hi->symbol_name,
-                                            reloc_by_word)) {
+            if (!IsTempregReusedByLaterLo16(items, i + 3, tempreg, reloc_by_word)) {
               item.line = absl::StrFormat("%s %s,%s($%d)", mnem, reg, sym_expr, base_reg);
               item.unswapped_from_branch = false;
               collapsed.push_back(std::move(item));
@@ -1715,8 +2496,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
                 std::string even_fpreg;
                 if (MatchPairedFpDoubleReloc(items[i + 2].line, tempreg, mnem, reg, rel_lo, rel_lo2,
                                              &even_fpreg) &&
-                    !IsTempregReusedByLaterLo16(items, i + 3, tempreg, rel_hi->symbol_name,
-                                                reloc_by_word)) {
+                    !IsTempregReusedByLaterLo16(items, i + 3, tempreg, reloc_by_word)) {
                   if (mnem == "l.s") {
                     if (std::string li_d_line = try_recover_li_d(even_fpreg); !li_d_line.empty()) {
                       item.line = std::move(li_d_line);
@@ -1735,8 +2515,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
                 }
               }
 
-              if (!IsTempregReusedByLaterLo16(items, i + 2, tempreg, rel_hi->symbol_name,
-                                              reloc_by_word)) {
+              if (!IsTempregReusedByLaterLo16(items, i + 2, tempreg, reloc_by_word)) {
                 // Reconstruct `li.d $f<even>, <double>` (`M_LI_DD`) for 8-byte
                 // `.rdata`/`.rodata` `mips_const_double_ok` double literal loads.
                 if (mnem == "l.d") {
@@ -1762,8 +2541,7 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
             if ((lo_op == 0x09u || lo_op == 0x19u) &&
                 static_cast<int>(Rs(items[i + 1].word)) == tempreg &&
                 static_cast<int>(Rt(items[i + 1].word)) == tempreg &&
-                !IsTempregReusedByLaterLo16(items, i + 2, tempreg, rel_hi->symbol_name,
-                                            reloc_by_word)) {
+                !IsTempregReusedByLaterLo16(items, i + 2, tempreg, reloc_by_word)) {
               item.line =
                   absl::StrFormat("%s $%d,%s", lo_op == 0x19u ? "dla" : "la", tempreg, sym_expr);
               item.unswapped_from_branch = false;

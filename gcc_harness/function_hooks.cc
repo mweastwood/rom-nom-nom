@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -14,13 +16,16 @@
 
 #include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
+#include "core/rtl_cfg.h"
 #include "core/rtl_sexpr_utils.h"
 
 // NOLINTBEGIN(readability-identifier-naming)
@@ -830,6 +835,150 @@ void DeduplicateRegEquivNotes(Rtx first) {
   }
 }
 
+std::string FormatSplitSymExpr(Rtx e) {
+  if (e == nullptr || rtx_name[e->code] == nullptr) {
+    return "";
+  }
+  const std::string_view cname = rtx_name[e->code];
+  if (cname == "symbol_ref" && e->fld[0].rtstr != nullptr) {
+    std::string sym(e->fld[0].rtstr);
+    if (!sym.empty() && sym.front() == '*') {
+      sym.erase(0, 1);
+    }
+    return sym;
+  }
+  if (cname == "label_ref" && e->fld[0].rtx != nullptr) {
+    return absl::StrFormat("$L%d", e->fld[0].rtx->fld[3].rtint);
+  }
+  if (cname == "const" && e->fld[0].rtx != nullptr && rtx_name[e->fld[0].rtx->code] != nullptr &&
+      std::string_view(rtx_name[e->fld[0].rtx->code]) == "plus") {
+    Rtx p = e->fld[0].rtx;
+    const std::string base = FormatSplitSymExpr(p->fld[0].rtx);
+    if (!base.empty() && p->fld[1].rtx != nullptr && p->fld[1].rtx->code == kConstInt) {
+      const int off = p->fld[1].rtx->fld[0].rtint;
+      if (off == 0) return base;
+      if (off > 0) return absl::StrFormat("%s+%d", base, off);
+      return absl::StrFormat("%s%d", base, off);
+    }
+  }
+  return "";
+}
+
+std::string FormatSplitHiLoPattern(Rtx pat) {
+  if (pat == nullptr || pat->code != kSet || pat->fld[0].rtx == nullptr ||
+      pat->fld[1].rtx == nullptr) {
+    return "";
+  }
+  Rtx dst = pat->fld[0].rtx;
+  Rtx src = pat->fld[1].rtx;
+  auto unwrap_reg = [](Rtx r) -> int {
+    if (r == nullptr) return -1;
+    if (r->code == kSubreg && r->fld[0].rtx != nullptr) r = r->fld[0].rtx;
+    if (r->code == kReg) return r->fld[0].rtint;
+    return -1;
+  };
+  auto is_hard_gpr = [](int r) -> bool { return r >= 1 && r <= 31; };
+  const std::string_view src_code = (rtx_name[src->code] != nullptr) ? rtx_name[src->code] : "";
+  if (dst->code == kReg && is_hard_gpr(dst->fld[0].rtint) &&
+      (dst->mode == kSiMode || dst->mode == kDiMode) && src_code == "high" &&
+      src->fld[0].rtx != nullptr) {
+    const std::string sym = FormatSplitSymExpr(src->fld[0].rtx);
+    if (!sym.empty()) {
+      return absl::StrFormat("lui\t$%d,%%hi(%s)", dst->fld[0].rtint, sym);
+    }
+  }
+  if (dst->code == kReg && is_hard_gpr(dst->fld[0].rtint) &&
+      (dst->mode == kSiMode || dst->mode == kDiMode) && src_code == "lo_sum" &&
+      src->fld[0].rtx != nullptr && src->fld[0].rtx->code == kReg &&
+      is_hard_gpr(src->fld[0].rtx->fld[0].rtint) && src->fld[1].rtx != nullptr) {
+    const std::string sym = FormatSplitSymExpr(src->fld[1].rtx);
+    if (!sym.empty()) {
+      const char* mnem = (dst->mode == kDiMode) ? "daddiu" : "addiu";
+      return absl::StrFormat("%s\t$%d,$%d,%%lo(%s)", mnem, dst->fld[0].rtint,
+                             src->fld[0].rtx->fld[0].rtint, sym);
+    }
+  }
+  const bool is_sign_ext = (src_code == "sign_extend");
+  const bool is_zero_ext = (src_code == "zero_extend");
+  Rtx load_mem = (is_sign_ext || is_zero_ext) ? src->fld[0].rtx : src;
+  if (dst->code == kReg && load_mem != nullptr && load_mem->code == kMem &&
+      load_mem->fld[0].rtx != nullptr && rtx_name[load_mem->fld[0].rtx->code] != nullptr &&
+      std::string_view(rtx_name[load_mem->fld[0].rtx->code]) == "lo_sum") {
+    Rtx losum = load_mem->fld[0].rtx;
+    const int breg = unwrap_reg(losum->fld[0].rtx);
+    const std::string sym = FormatSplitSymExpr(losum->fld[1].rtx);
+    const int dreg = dst->fld[0].rtint;
+    if (is_hard_gpr(breg) && !sym.empty()) {
+      const std::string_view mname =
+          (mode_name[load_mem->mode] != nullptr) ? mode_name[load_mem->mode] : "";
+      if (dreg >= 32 && dreg < 64) {
+        if (!is_sign_ext && !is_zero_ext &&
+            (mname == "SF" || mname == "DF" || mname == "SI" || mname == "DI")) {
+          return absl::StrFormat("%s\t$f%d,%%lo(%s)($%d)", mname == "DF" ? "l.d" : "l.s", dreg - 32,
+                                 sym, breg);
+        }
+        return "";
+      }
+      if (is_hard_gpr(dreg)) {
+        if ((is_sign_ext || is_zero_ext) && mname != "QI" && mname != "HI" && mname != "SI") {
+          return "";
+        }
+        if (mname == "QI") {
+          return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", is_sign_ext ? "lb" : "lbu", dreg, sym,
+                                 breg);
+        }
+        if (mname == "HI") {
+          return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", is_sign_ext ? "lh" : "lhu", dreg, sym,
+                                 breg);
+        }
+        if (mname == "SI" || mname == "SF") {
+          const char* mnem = (is_zero_ext && dst->mode == kDiMode) ? "lwu" : "lw";
+          return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", mnem, dreg, sym, breg);
+        }
+        if (mname == "DI" || mname == "DF") {
+          return absl::StrFormat("ld\t$%d,%%lo(%s)($%d)", dreg, sym, breg);
+        }
+      }
+    }
+  }
+  if (dst->code == kMem && dst->fld[0].rtx != nullptr &&
+      rtx_name[dst->fld[0].rtx->code] != nullptr &&
+      std::string_view(rtx_name[dst->fld[0].rtx->code]) == "lo_sum") {
+    Rtx losum = dst->fld[0].rtx;
+    const int breg = unwrap_reg(losum->fld[0].rtx);
+    const std::string sym = FormatSplitSymExpr(losum->fld[1].rtx);
+    int sreg = unwrap_reg(src);
+    if (sreg < 0 && src->code == kConstInt && src->fld[0].rtint == 0) {
+      sreg = 0;
+    }
+    if (is_hard_gpr(breg) && !sym.empty()) {
+      const std::string_view mname = (mode_name[dst->mode] != nullptr) ? mode_name[dst->mode] : "";
+      if (sreg >= 32 && sreg < 64) {
+        if (mname == "SF" || mname == "DF" || mname == "SI" || mname == "DI") {
+          return absl::StrFormat("%s\t$f%d,%%lo(%s)($%d)", mname == "DF" ? "s.d" : "s.s", sreg - 32,
+                                 sym, breg);
+        }
+        return "";
+      }
+      if (sreg >= 0 && sreg <= 31) {
+        if (mname == "QI") {
+          return absl::StrFormat("sb\t$%d,%%lo(%s)($%d)", sreg, sym, breg);
+        }
+        if (mname == "HI") {
+          return absl::StrFormat("sh\t$%d,%%lo(%s)($%d)", sreg, sym, breg);
+        }
+        if (mname == "SI" || mname == "SF") {
+          return absl::StrFormat("sw\t$%d,%%lo(%s)($%d)", sreg, sym, breg);
+        }
+        if (mname == "DI" || mname == "DF") {
+          return absl::StrFormat("sd\t$%d,%%lo(%s)($%d)", sreg, sym, breg);
+        }
+      }
+    }
+  }
+  return "";
+}
+
 }  // namespace
 
 FunctionHooks::FunctionHooks(GccContext* ctx) : ctx_(ctx) {}
@@ -882,32 +1031,14 @@ std::string FunctionHooks::RunFinal(Rtx first, bool include_prologue_epilogue) {
   };
   std::vector<std::pair<Rtx, Rtx>> saved_split_hilo_pats;
   auto stash_if_split_hilo = [&](Rtx r) {
-    if (r == nullptr || r->code != kInsn || r->fld[3].rtx == nullptr) {
+    if (r == nullptr || r->code != kInsn || r->fld[3].rtx == nullptr ||
+        r->fld[3].rtx->code == kSequence) {
       return;
     }
     Rtx pat = r->fld[3].rtx;
-    if (pat->code != kSet || pat->fld[0].rtx == nullptr || pat->fld[1].rtx == nullptr) {
-      return;
-    }
-    auto has_high_or_losum = [](Rtx e) {
-      if (e == nullptr || rtx_name[e->code] == nullptr) {
-        return false;
-      }
-      const std::string_view cname = rtx_name[e->code];
-      if (cname == "high" || cname == "lo_sum") {
-        return true;
-      }
-      if ((cname == "sign_extend" || cname == "zero_extend") && e->fld[0].rtx != nullptr) {
-        e = e->fld[0].rtx;
-      }
-      if (e->code == kMem && e->fld[0].rtx != nullptr && rtx_name[e->fld[0].rtx->code] != nullptr) {
-        return std::string_view(rtx_name[e->fld[0].rtx->code]) == "lo_sum";
-      }
-      return false;
-    };
-    if (has_high_or_losum(pat->fld[0].rtx) || has_high_or_losum(pat->fld[1].rtx)) {
+    if (!FormatSplitHiLoPattern(pat).empty()) {
       saved_split_hilo_pats.emplace_back(r, pat);
-      r->fld[3].rtx = gen_rtx(kUse, kVoidMode, gen_rtx(kConstInt, kVoidMode, 0));
+      r->fld[3].rtx = gen_rtx(kConstInt, kVoidMode, 0);
       r->fld[4].rtint = -1;
     }
   };
@@ -1004,127 +1135,8 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
     line_note_exists = AllocZeroed<char>(1024);
   }
 
-  auto format_split_sym_expr = [](Rtx e, auto& self) -> std::string {
-    if (e == nullptr || rtx_name[e->code] == nullptr) {
-      return "";
-    }
-    const std::string_view cname = rtx_name[e->code];
-    if (cname == "symbol_ref" && e->fld[0].rtstr != nullptr) {
-      std::string sym(e->fld[0].rtstr);
-      if (!sym.empty() && sym.front() == '*') {
-        sym.erase(0, 1);
-      }
-      return sym;
-    }
-    if (cname == "label_ref" && e->fld[0].rtx != nullptr) {
-      return absl::StrFormat("$L%d", e->fld[0].rtx->fld[3].rtint);
-    }
-    if (cname == "const" && e->fld[0].rtx != nullptr && rtx_name[e->fld[0].rtx->code] != nullptr &&
-        std::string_view(rtx_name[e->fld[0].rtx->code]) == "plus") {
-      Rtx p = e->fld[0].rtx;
-      const std::string base = self(p->fld[0].rtx, self);
-      if (!base.empty() && p->fld[1].rtx != nullptr && p->fld[1].rtx->code == kConstInt) {
-        const int off = p->fld[1].rtx->fld[0].rtint;
-        if (off == 0) return base;
-        if (off > 0) return absl::StrFormat("%s+%d", base, off);
-        return absl::StrFormat("%s%d", base, off);
-      }
-    }
-    return "";
-  };
-
-  auto format_split_hilo_pat = [&](Rtx pat) -> std::string {
-    if (pat == nullptr || pat->code != kSet || pat->fld[0].rtx == nullptr ||
-        pat->fld[1].rtx == nullptr) {
-      return "";
-    }
-    Rtx dst = pat->fld[0].rtx;
-    Rtx src = pat->fld[1].rtx;
-    auto unwrap_reg = [](Rtx r) -> int {
-      if (r == nullptr) return -1;
-      if (r->code == kSubreg && r->fld[0].rtx != nullptr) r = r->fld[0].rtx;
-      if (r->code == kReg) return r->fld[0].rtint;
-      return -1;
-    };
-    const std::string_view src_code = (rtx_name[src->code] != nullptr) ? rtx_name[src->code] : "";
-    if (dst->code == kReg && src_code == "high" && src->fld[0].rtx != nullptr) {
-      const std::string sym = format_split_sym_expr(src->fld[0].rtx, format_split_sym_expr);
-      if (!sym.empty()) {
-        return absl::StrFormat("lui\t$%d,%%hi(%s)", dst->fld[0].rtint, sym);
-      }
-    }
-    if (dst->code == kReg && src_code == "lo_sum" && src->fld[0].rtx != nullptr &&
-        src->fld[0].rtx->code == kReg && src->fld[1].rtx != nullptr) {
-      const std::string sym = format_split_sym_expr(src->fld[1].rtx, format_split_sym_expr);
-      if (!sym.empty()) {
-        const char* mnem = (dst->mode == kDiMode) ? "daddiu" : "addiu";
-        return absl::StrFormat("%s\t$%d,$%d,%%lo(%s)", mnem, dst->fld[0].rtint,
-                               src->fld[0].rtx->fld[0].rtint, sym);
-      }
-    }
-    bool is_sign_ext = (src_code == "sign_extend");
-    bool is_zero_ext = (src_code == "zero_extend");
-    Rtx load_mem = (is_sign_ext || is_zero_ext) ? src->fld[0].rtx : src;
-    if (dst->code == kReg && load_mem != nullptr && load_mem->code == kMem &&
-        load_mem->fld[0].rtx != nullptr && rtx_name[load_mem->fld[0].rtx->code] != nullptr &&
-        std::string_view(rtx_name[load_mem->fld[0].rtx->code]) == "lo_sum") {
-      Rtx losum = load_mem->fld[0].rtx;
-      const int breg = unwrap_reg(losum->fld[0].rtx);
-      const std::string sym = format_split_sym_expr(losum->fld[1].rtx, format_split_sym_expr);
-      const int dreg = dst->fld[0].rtint;
-      if (breg >= 0 && !sym.empty()) {
-        const std::string_view mname =
-            (mode_name[load_mem->mode] != nullptr) ? mode_name[load_mem->mode] : "";
-        if (dreg >= 32 && dreg < 64) {
-          return absl::StrFormat("%s\t$f%d,%%lo(%s)($%d)", mname == "DF" ? "l.d" : "l.s", dreg - 32,
-                                 sym, breg);
-        }
-        const char* mnem = "lw";
-        if (mname == "QI") {
-          mnem = is_sign_ext ? "lb" : "lbu";
-        } else if (mname == "HI") {
-          mnem = is_sign_ext ? "lh" : "lhu";
-        } else if (mname == "SI") {
-          mnem = (is_zero_ext && dst->mode == kDiMode) ? "lwu" : "lw";
-        } else if (mname == "DI") {
-          mnem = "ld";
-        }
-        return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", mnem, dreg, sym, breg);
-      }
-    }
-    if (dst->code == kMem && dst->fld[0].rtx != nullptr &&
-        rtx_name[dst->fld[0].rtx->code] != nullptr &&
-        std::string_view(rtx_name[dst->fld[0].rtx->code]) == "lo_sum") {
-      Rtx losum = dst->fld[0].rtx;
-      const int breg = unwrap_reg(losum->fld[0].rtx);
-      const std::string sym = format_split_sym_expr(losum->fld[1].rtx, format_split_sym_expr);
-      int sreg = unwrap_reg(src);
-      if (sreg < 0 && src->code == kConstInt && src->fld[0].rtint == 0) {
-        sreg = 0;
-      }
-      if (breg >= 0 && sreg >= 0 && !sym.empty()) {
-        const std::string_view mname =
-            (mode_name[dst->mode] != nullptr) ? mode_name[dst->mode] : "";
-        if (sreg >= 32 && sreg < 64) {
-          return absl::StrFormat("%s\t$f%d,%%lo(%s)($%d)", mname == "DF" ? "s.d" : "s.s", sreg - 32,
-                                 sym, breg);
-        }
-        const char* mnem = "sw";
-        if (mname == "QI") {
-          mnem = "sb";
-        } else if (mname == "HI") {
-          mnem = "sh";
-        } else if (mname == "DI" || mname == "DF") {
-          mnem = "sd";
-        }
-        return absl::StrFormat("%s\t$%d,%%lo(%s)($%d)", mnem, sreg, sym, breg);
-      }
-    }
-    return "";
-  };
-
   if (insn->code == kInsn && insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code != kSequence) {
-    const std::string split_asm = format_split_hilo_pat(insn->fld[3].rtx);
+    const std::string split_asm = FormatSplitHiLoPattern(insn->fld[3].rtx);
     if (!split_asm.empty()) {
       if (next_insn_out != nullptr) {
         *next_insn_out = insn->fld[2].rtx;
@@ -1141,11 +1153,11 @@ std::string FunctionHooks::RunFinalScanInsn(Rtx insn, int prescan, Rtx* next_ins
       insn->fld[3].rtx->fld[0].rtvec != nullptr && insn->fld[3].rtx->fld[0].rtvec->num_elem == 2) {
     Rtx slot = insn->fld[3].rtx->fld[0].rtvec->elem[1].rtx;
     if (slot != nullptr && slot->code == kInsn && slot->fld[3].rtx != nullptr) {
-      seq_split_slot_asm = format_split_hilo_pat(slot->fld[3].rtx);
+      seq_split_slot_asm = FormatSplitHiLoPattern(slot->fld[3].rtx);
       if (!seq_split_slot_asm.empty()) {
         seq_split_slot_insn = slot;
         seq_split_slot_orig_pat = slot->fld[3].rtx;
-        slot->fld[3].rtx = gen_rtx(kUse, kVoidMode, gen_rtx(kConstInt, kVoidMode, 0));
+        slot->fld[3].rtx = gen_rtx(kConstInt, kVoidMode, 0);
         slot->fld[4].rtint = -1;
       }
     }
@@ -5744,6 +5756,73 @@ absl::Span<const SubfunctionId> AllSubfunctionIds() {
 void FunctionHooks::ApplyCompilationProfile(const CompilationProfile& profile) {
   int opt = profile.optimize_level;
   ApplyCompilerFlags(profile.c_flags, &opt);
+}
+
+bool FunctionHooks::ValidateMaterializedInsnsRecognizable(std::string* out_bad_insn) const {
+  init_recog();
+  auto check_single = [&](Rtx r) -> bool {
+    if (r == nullptr || (r->code != kInsn && r->code != kJumpInsn && r->code != kCallInsn)) {
+      return true;
+    }
+    Rtx pat = r->fld[3].rtx;
+    if (pat == nullptr || pat->code == kSequence) {
+      return true;
+    }
+    const std::string_view cname =
+        (rtx_name[pat->code] != nullptr) ? std::string_view(rtx_name[pat->code]) : "";
+    if (cname == "use" || cname == "clobber" || cname == "addr_vec" || cname == "addr_diff_vec" ||
+        cname == "return" || cname == "asm_input" || cname == "asm_operands" ||
+        cname == "trap_if") {
+      return true;
+    }
+    if (cname == "parallel" && pat->fld[0].rtvec != nullptr) {
+      Rtvec pvec = pat->fld[0].rtvec;
+      for (int i = 0; i < pvec->num_elem; ++i) {
+        Rtx elem = pvec->elem[i].rtx;
+        if (elem != nullptr && rtx_name[elem->code] != nullptr) {
+          const std::string_view ec = rtx_name[elem->code];
+          if (ec == "return" || ec == "asm_operands" || ec == "asm_input") {
+            return true;
+          }
+        }
+      }
+    }
+    if (r->code == kInsn && !FormatSplitHiLoPattern(pat).empty()) {
+      return true;
+    }
+    int clobbers = 0;
+    int code = recog(pat, r, &clobbers);
+    if (code < 0) {
+      const int saved_opt = optimize;
+      optimize = (saved_opt == 0) ? 2 : 0;
+      code = recog(pat, r, &clobbers);
+      optimize = saved_opt;
+    }
+    if (code < 0) {
+      if (out_bad_insn != nullptr) {
+        *out_bad_insn = ctx_->FormatRtx(pat);
+      }
+      return false;
+    }
+    return true;
+  };
+
+  for (Rtx insn = get_insns(); insn != nullptr; insn = insn->fld[2].rtx) {
+    if (!check_single(insn)) {
+      return false;
+    }
+    if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
+        insn->fld[3].rtx != nullptr && insn->fld[3].rtx->code == kSequence &&
+        insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+      Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+      for (int i = 0; i < vec->num_elem; ++i) {
+        if (!check_single(vec->elem[i].rtx)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(

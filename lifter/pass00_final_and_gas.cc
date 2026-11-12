@@ -22,15 +22,16 @@ RtlControlFlowGraph InvertFinalAndGasFunction(const Stage0FunctionInput& input_x
   }
 
   std::vector<Stage0ResolvedJumpTable> jump_tables;
+  std::vector<Stage0ConstantPoolEntry> constant_pool = input_x.constant_pool;
   std::vector<std::string> asm_lines =
-      CollapseGasMacrosAndFlattenLines(items, input_x, word_to_label, &jump_tables);
+      CollapseGasMacrosAndFlattenLines(items, input_x, word_to_label, &jump_tables, &constant_pool);
   if (asm_lines.empty()) {
     return {};
   }
 
   RtlSidebandState sideband;
   ExtractFunctionPrologueEpilogue(&asm_lines, &sideband);
-  return InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables, input_x.constant_pool,
+  return InvertFinalScanInsnLinesToCfg(asm_lines, sideband, jump_tables, constant_pool,
                                        &input_x.profile);
 }
 
