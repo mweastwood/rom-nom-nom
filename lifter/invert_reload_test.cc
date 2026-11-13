@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -28,7 +29,7 @@ class ReloadOnlyInverseProvider : public SubfunctionInverseProvider {
  public:
   RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& reload_cfg) const override {
     absl::StatusOr<RtlControlFlowGraph> res = ::rom_nom_nom::lifter::InvertReload(reload_cfg);
-    return res.ok() ? *res : reload_cfg;
+    return res.ok() ? *res : RtlControlFlowGraph{};
   }
 };
 
@@ -300,6 +301,157 @@ TEST_F(InvertReloadTest, VerifierRejectsCorruptedInverseProvider) {
   RightInverseVerifier verifier(ctx, hooks, &bad_provider);
   RightInverseResult vres = verifier.VerifyReloadRightInverse(reload_cfg);
   EXPECT_FALSE(vres.matches);
+}
+
+TEST_F(InvertReloadTest, ReversesCallerSaveSaveRestorePairsAndRestoresFrameOffset) {
+  RtlControlFlowGraph pre_reload_cfg;
+  pre_reload_cfg.pass = RtlPassKind::kLreg;
+  pre_reload_cfg.sideband.frame_pointer_needed = false;
+  pre_reload_cfg.sideband.outgoing_args_size = 16;
+  pre_reload_cfg.sideband.frame_size_bytes = 16;
+  pre_reload_cfg.sideband.reg_renumber[72] = 8;  // $t0 (call-clobbered)
+  pre_reload_cfg.sideband.reg_n_calls_crossed[72] = 1;
+  pre_reload_cfg.sideband.reg_n_refs[72] = 4;
+  pre_reload_cfg.sideband.reg_live_length[72] = 4;
+
+  RtlBasicBlock bb0;
+  bb0.id = 0;
+  bb0.AddPatternOnly("(set (reg:SI 72) (const_int 11))");
+  RtlInsn call_insn;
+  call_insn.canonical_pattern =
+      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"Helper\"))) (const_int 16))) "
+      "(clobber (reg:SI 31 ra)) ] )";
+  call_insn.has_explicit_call_fusage = true;
+  call_insn.call_fusage = {};
+  bb0.AddInsn(std::move(call_insn));
+  bb0.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 72))) "
+      "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  bb0.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  pre_reload_cfg.rpo_blocks.push_back(std::move(bb0));
+
+  const SubfunctionBoundarySnapshot reload_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kReload, pre_reload_cfg, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+  ASSERT_GT(reload_snap.post_state.rpo_blocks[0].instructions.size(), 4u)
+      << reload_snap.post_state.FormatSummary();
+  EXPECT_GT(reload_snap.post_state.sideband.frame_size_bytes, 16);
+
+  absl::StatusOr<RtlControlFlowGraph> pre_or = InvertReload(reload_snap.post_state);
+  ASSERT_TRUE(pre_or.ok()) << pre_or.status();
+  EXPECT_EQ(pre_or->rpo_blocks[0].instructions.size(), 4u);
+  EXPECT_EQ(pre_or->sideband.frame_size_bytes, 16);
+
+  ReloadOnlyInverseProvider good_provider;
+  RightInverseVerifier good_verifier(ctx, hooks, &good_provider);
+  const RightInverseResult pos_sub_res =
+      good_verifier.VerifySubfunctionBoundaryRightInverse(reload_snap);
+  EXPECT_TRUE(pos_sub_res.matches) << pos_sub_res.diff_detail;
+  const RightInverseResult pos_stage_res =
+      good_verifier.VerifyReloadRightInverse(reload_snap.post_state);
+  EXPECT_TRUE(pos_stage_res.matches) << pos_stage_res.diff_detail;
+
+  // Adversarial negative: failing to strip the caller-save save/restore pairs or corrupting the
+  // pre-image must fail `RightInverseVerifier`.
+  class NoOpCallerSaveReloadProvider final : public SubfunctionInverseProvider {
+   public:
+    RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& x) const override { return x; }
+  };
+  NoOpCallerSaveReloadProvider noop_provider;
+  RightInverseVerifier noop_verifier(ctx, hooks, &noop_provider);
+  EXPECT_FALSE(noop_verifier.VerifySubfunctionBoundaryRightInverse(reload_snap).matches);
+}
+
+TEST_F(InvertReloadTest, ReconstructsSpilledPseudosAlongsideCallerSaveAcrossOutgoingArgCall) {
+  FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+      "int Dispatch8Args(int a, int b, int c, int d, int e, int f, int g, int h);\n"
+      "int SpillAndCallerSave(int* p) {\n"
+      "  int v0 = p[0], v1 = p[1], v2 = p[2], v3 = p[3], v4 = p[4], v5 = p[5];\n"
+      "  int v6 = p[6], v7 = p[7], v8 = p[8], v9 = p[9], v10 = p[10], v11 = p[11];\n"
+      "  int c0 = v0 ^ v1, c1 = v2 ^ v3, c2 = v4 ^ v5, c3 = v6 ^ v7;\n"
+      "  int r = Dispatch8Args(c0, c1, c2, c3, v8 ^ v9, v10 ^ v11, v0 + v6, v1 + v7);\n"
+      "  return r + v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11;\n"
+      "}\n",
+      "SpillAndCallerSave", {"-O2", "-mips2", "-mcpu=r4000"});
+
+  ReloadOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  bool found_reload = false;
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kReload) {
+      found_reload = true;
+      RightInverseResult vres = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(vres.matches) << vres.diff_detail;
+    }
+  }
+  EXPECT_TRUE(found_reload);
+}
+
+TEST_F(InvertReloadTest, ReconstructsActiveSpilledPseudoAlongsidePhantomAlterRegPseudos) {
+  FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+      "int ProbeStep(int iter, int acc);\n"
+      "int LoopSpillAndCallerSave(const int* base, int unused_arg, int steps) {\n"
+      "  int k0 = base[0], k1 = base[1], k2 = base[2], k3 = base[3], k4 = base[4], k5 = base[5];\n"
+      "  int a0 = 1, a1 = 2, a2 = 3, a3 = 4, a4 = 5, a5 = 6;\n"
+      "  int b0 = 7, b1 = 8, b2 = 9, b3 = 10, b4 = 11, b5 = 12;\n"
+      "  int i;\n"
+      "  for (i = 0; i < steps; i++) {\n"
+      "    int p = ProbeStep(i, a0 + b5);\n"
+      "    a0 = (a0 + k0) ^ p; a1 = (a1 + k1) + a0; a2 = (a2 ^ k2) + a1;\n"
+      "    a3 = (a3 + k3) ^ a2; a4 = (a4 - k4) + a3; a5 = (a5 + k5) ^ a4;\n"
+      "    b0 = (b0 ^ a5) + k5; b1 = (b1 + b0) ^ k4; b2 = (b2 - b1) + k3;\n"
+      "    b3 = (b3 ^ b2) + k2; b4 = (b4 + b3) ^ k1; b5 = (b5 - b4) + k0;\n"
+      "  }\n"
+      "  return a0 + a1 + a2 + a3 + a4 + a5 + b0 + b1 + b2 + b3 + b4 + b5;\n"
+      "}\n",
+      "LoopSpillAndCallerSave", {"-O2", "-mips2", "-mcpu=r4000"});
+
+  const SubfunctionBoundarySnapshot* base_reload = nullptr;
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kReload) {
+      base_reload = &snap;
+      break;
+    }
+  }
+  ASSERT_NE(base_reload, nullptr);
+
+  // Inject both a lower-numbered phantom pseudo (`73 > LAST_VIRTUAL_REGISTER`
+  // and `< 74`, exercising `phantoms_before_min_active`) and an additional
+  // higher-numbered phantom pseudo (`max_regno + 2`, exercising trailing
+  // phantom `alter_reg` slots).
+  RtlControlFlowGraph pre_cfg = base_reload->pre_state;
+  const int base_frame = pre_cfg.sideband.frame_size_bytes;
+  constexpr int kLowPhantomPseudo = 73;
+  ASSERT_FALSE(pre_cfg.sideband.reg_renumber.contains(kLowPhantomPseudo));
+  const int high_phantom_pseudo = pre_cfg.sideband.max_regno + 2;
+  pre_cfg.sideband.max_regno = high_phantom_pseudo + 1;
+  pre_cfg.sideband.reg_n_refs[kLowPhantomPseudo] = 2;
+  pre_cfg.sideband.reg_live_length[kLowPhantomPseudo] = 2;
+  pre_cfg.sideband.reg_n_sets.erase(kLowPhantomPseudo);
+  pre_cfg.sideband.reg_n_deaths.erase(kLowPhantomPseudo);
+
+  pre_cfg.sideband.reg_n_refs[high_phantom_pseudo] = 2;
+  pre_cfg.sideband.reg_live_length[high_phantom_pseudo] = 2;
+
+  const SubfunctionBoundarySnapshot reload_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kReload, pre_cfg, {}, /*optimize_level=*/2, {"-O2", "-mips2", "-mcpu=r4000"});
+  // Two extra 8-byte `alter_reg` stack slots (`kLowPhantomPseudo` + `high_phantom_pseudo`).
+  EXPECT_EQ(reload_snap.post_state.sideband.frame_size_bytes,
+            base_reload->post_state.sideband.frame_size_bytes + 16);
+
+  absl::StatusOr<RtlControlFlowGraph> lifted = InvertReload(reload_snap.post_state);
+  ASSERT_TRUE(lifted.ok()) << lifted.status();
+  EXPECT_EQ(lifted->sideband.frame_size_bytes, base_frame);
+  ASSERT_TRUE(lifted->sideband.reg_n_refs.contains(kLowPhantomPseudo));
+  ASSERT_TRUE(lifted->sideband.reg_n_refs.contains(high_phantom_pseudo));
+  EXPECT_EQ(lifted->sideband.reg_n_refs[kLowPhantomPseudo], 2);
+  EXPECT_EQ(lifted->sideband.reg_n_refs[high_phantom_pseudo], 2);
+
+  ReloadOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  const RightInverseResult sub_res = verifier.VerifySubfunctionBoundaryRightInverse(reload_snap);
+  EXPECT_TRUE(sub_res.matches) << sub_res.diff_detail;
+  const RightInverseResult stage_res = verifier.VerifyReloadRightInverse(reload_snap.post_state);
+  EXPECT_TRUE(stage_res.matches) << stage_res.diff_detail;
 }
 
 class InvertReloadCorpusTest : public InvertReloadTest,

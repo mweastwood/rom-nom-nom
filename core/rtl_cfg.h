@@ -195,6 +195,18 @@ enum class RtlFusedIdiomKind {
   kSplitLargeIntHiLo,
 };
 
+// Identifies GCC 2.7.2 loop marker `NOTE` kinds (`rtl.h:NOTE_INSN_LOOP_*`).
+enum class RtlLoopNoteKind {
+  kLoopBeg,   // NOTE_INSN_LOOP_BEG
+  kLoopVtop,  // NOTE_INSN_LOOP_VTOP
+  kLoopCont,  // NOTE_INSN_LOOP_CONT
+  kLoopEnd,   // NOTE_INSN_LOOP_END
+};
+
+std::optional<RtlLoopNoteKind> ParseRtlLoopNoteKind(std::string_view pattern_or_note_name);
+std::string_view RtlLoopNoteKindToName(RtlLoopNoteKind kind);
+std::string_view RtlLoopNoteKindToSexpr(RtlLoopNoteKind kind);
+
 // Represents a single atomic RTL instruction in the RTL Control Flow Graph.
 // Preserves both the canonical GCC 2.7.2 RTL pattern and the underlying machine instruction span
 // (including symbol relocations, register operands, and immediate values).
@@ -205,13 +217,17 @@ struct RtlInsn {
   uint32_t vram = 0;
   bool is_prologue_insn = false;
   bool is_synthetic_rtl_expansion = false;
+  std::optional<RtlLoopNoteKind> loop_note_kind;
+  bool has_explicit_call_fusage = false;
+  std::vector<RtlExpr> call_fusage;
   std::vector<Instruction> machine_instructions;
 
   // Parses the core instruction pattern (stripping any trailing `REG_NOTES`)
   // into a structured `RtlExpr`.
   absl::StatusOr<RtlExpr> ParseExpr() const;
 
-  // Parses both the core instruction pattern and any trailing `REG_NOTES`.
+  // Parses both the core instruction pattern, any trailing `REG_NOTES`, and
+  // any explicit `call_fusage`.
   absl::StatusOr<RtlPatternAndNotes> ParseExprAndNotes() const;
 
   // Updates `canonical_pattern` from a structured `RtlExpr` and optional
@@ -235,6 +251,9 @@ struct RtlBasicBlock {
   bool has_unreachable_entry_label = false;
 
   void AddInsn(RtlInsn insn) {
+    if (!insn.loop_note_kind.has_value()) {
+      insn.loop_note_kind = ParseRtlLoopNoteKind(insn.canonical_pattern);
+    }
     instructions.push_back(insn.canonical_pattern);
     rtl_insns.push_back(std::move(insn));
   }
@@ -243,9 +262,22 @@ struct RtlBasicBlock {
     RtlInsn insn;
     insn.canonical_pattern = pattern;
     insn.is_synthetic_rtl_expansion = true;
+    insn.loop_note_kind = ParseRtlLoopNoteKind(pattern);
     rtl_insns.push_back(std::move(insn));
     instructions.push_back(std::move(pattern));
   }
+
+  void AddLoopNote(RtlLoopNoteKind kind) {
+    RtlInsn insn;
+    insn.canonical_pattern = std::string(RtlLoopNoteKindToSexpr(kind));
+    insn.is_synthetic_rtl_expansion = true;
+    insn.loop_note_kind = kind;
+    instructions.push_back(insn.canonical_pattern);
+    rtl_insns.push_back(std::move(insn));
+  }
+
+  bool HasLoopNotes() const;
+  std::vector<RtlLoopNoteKind> LoopNotes() const;
 
   // Synchronizes `rtl_insns` with `instructions` while preserving existing `machine_instructions`
   // payloads and `RtlInsn` metadata.
@@ -259,6 +291,9 @@ struct RtlCfgPassComparison {
   bool successors_match = false;
   bool insn_counts_match = false;
   bool instructions_match = false;
+  bool loop_notes_match = false;
+  bool call_fusage_match = false;
+  bool pointer_regnos_match = false;
   size_t actual_block_count = 0;
   size_t expected_block_count = 0;
   size_t actual_insn_count = 0;
@@ -270,11 +305,11 @@ struct RtlCfgPassComparison {
     return pass_present && block_count_matches && successors_match && insn_counts_match;
   }
 
-  // Returns true if topology, instruction counts, and every instruction pattern string match
-  // verbatim.
+  // Returns true if topology, instruction counts, every instruction pattern string, loop notes,
+  // explicit CALL_INSN_FUNCTION_USAGE metadata, and sideband pointer_regnos match verbatim.
   bool MatchesExactly() const {
     return pass_present && block_count_matches && successors_match && insn_counts_match &&
-           instructions_match;
+           instructions_match && loop_notes_match && call_fusage_match && pointer_regnos_match;
   }
 };
 
@@ -381,6 +416,15 @@ struct RtlSidebandState {
   // carried alongside `/u` `SYMBOL_REF`s (`CONSTANT_POOL_ADDRESS_P`).
   std::vector<Stage0ConstantPoolEntry> constant_pool;
 
+  // Sorted pseudo-register numbers (`>= kMipsFirstPseudoRegister`) marked with
+  // `REGNO_POINTER_FLAG` (`mark_reg_pointer` in `emit-rtl.c`).
+  std::vector<int> pointer_regnos;
+
+  // Tracks whether atomic `cse_main` altered jumps (`tem != 0` in `toplev.c`)
+  // so the subsequent `jump_optimize` sub-boundary reproduces `toplev.c`'s
+  // exact gating (`if (tem || optimize > 1)` in `cse1`, `if (tem)` in `cse2`).
+  bool cse_jumps_altered = false;
+
   bool operator==(const RtlSidebandState& other) const {
     return max_regno == other.max_regno && reg_renumber == other.reg_renumber &&
            reg_n_refs == other.reg_n_refs && reg_n_sets == other.reg_n_sets &&
@@ -397,7 +441,8 @@ struct RtlSidebandState {
            is_variadic == other.is_variadic &&
            returns_aggregate_in_memory == other.returns_aggregate_in_memory &&
            prologue_args == other.prologue_args && spill_slots == other.spill_slots &&
-           loops == other.loops && constant_pool == other.constant_pool;
+           loops == other.loops && constant_pool == other.constant_pool &&
+           pointer_regnos == other.pointer_regnos && cse_jumps_altered == other.cse_jumps_altered;
   }
   bool operator!=(const RtlSidebandState& other) const { return !(*this == other); }
 };

@@ -389,6 +389,28 @@ TEST_F(InvertGlobalAllocTest, VerifierRejectsCorruptedInverseProvider) {
   EXPECT_FALSE(vres.matches);
 }
 
+TEST_F(InvertGlobalAllocTest, RestoresBlockAllocatedMdRegsPseudoSpilledByReloadInGlobalAlloc) {
+  FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+      "long long mul64_pair(int a, int b, int c, int d) {\n"
+      "  long long p0 = (long long)a * (long long)b;\n"
+      "  long long p1 = (long long)c * (long long)d;\n"
+      "  return p0 * p1 + p0;\n"
+      "}\n",
+      "mul64_pair", {"-O2", "-mips2", "-mcpu=r4000"});
+
+  GlobalAllocOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  bool found_global_alloc = false;
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kGlobalAlloc) {
+      found_global_alloc = true;
+      RightInverseResult vres = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(vres.matches) << vres.diff_detail;
+    }
+  }
+  EXPECT_TRUE(found_global_alloc);
+}
+
 class InvertGlobalAllocCorpusTest : public InvertGlobalAllocTest,
                                     public ::testing::WithParamInterface<RoundTripTestCase> {};
 

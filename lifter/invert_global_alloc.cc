@@ -115,8 +115,48 @@ struct PseudoLivenessSummary {
   bool has_set_in_block = false;
   bool used_before_set = false;
   bool alive_after_redef = false;
+  bool defined_by_di_mult = false;
+  int def_count_in_block = 0;
+  size_t def_insn_idx = 0;
+  size_t death_insn_idx = 0;
   int note_deaths = 0;
 };
+
+void CollectDiMultDestRegs(const RtlExpr& pat, absl::flat_hash_set<int>* mult_di_dests) {
+  auto check_elem = [&](const RtlExpr& elem) {
+    if (elem.op == RtlOp::kSet && elem.children.size() == 2 && elem.children[0].op == RtlOp::kReg &&
+        elem.children[0].mode == RtlMachineMode::kDi && elem.children[1].op == RtlOp::kMult &&
+        elem.children[1].mode == RtlMachineMode::kDi &&
+        elem.children[0].RegNo() >= kFirstPseudoRegister) {
+      mult_di_dests->insert(elem.children[0].RegNo());
+    }
+  };
+  if (pat.op == RtlOp::kParallel) {
+    for (const RtlExpr& sub : pat.children) {
+      check_elem(sub);
+    }
+  } else {
+    check_elem(pat);
+  }
+}
+
+bool InsnTouchesMdRegsOrCall(const RtlExpr& pat) {
+  bool touches = false;
+  pat.Visit([&](const RtlExpr& expr) {
+    if (touches) {
+      return;
+    }
+    if (expr.op == RtlOp::kCall || expr.op == RtlOp::kMult || expr.op == RtlOp::kDiv ||
+        expr.op == RtlOp::kMod || expr.op == RtlOp::kUdiv || expr.op == RtlOp::kUmod) {
+      touches = true;
+      return;
+    }
+    if (expr.op == RtlOp::kReg && expr.RegNo() >= kHiRegnum && expr.RegNo() <= kHiRegnum + 2) {
+      touches = true;
+    }
+  });
+  return touches;
+}
 
 }  // namespace
 
@@ -224,11 +264,14 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
   out.pass = RtlPassKind::kLreg;
 
   absl::flat_hash_map<int, PseudoLivenessSummary> pseudo_summaries;
+  absl::flat_hash_set<int> all_di_mult_pseudos;
+  std::vector<std::vector<bool>> block_insn_clobbers_md(out.rpo_blocks.size());
 
   for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
     RtlBasicBlock& blk = out.rpo_blocks[b];
     absl::flat_hash_set<int> defined_so_far_in_block;
     absl::flat_hash_set<int> died_in_block;
+    block_insn_clobbers_md[b].resize(blk.instructions.size(), false);
 
     for (size_t i = 0; i < blk.instructions.size(); ++i) {
       absl::StatusOr<RtlPatternAndNotes> parsed = ParsePatternAndNotes(blk.instructions[i]);
@@ -250,6 +293,13 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
         }
       }
 
+      block_insn_clobbers_md[b][i] = InsnTouchesMdRegsOrCall(parsed->pattern);
+      absl::flat_hash_set<int> insn_di_mult_dests;
+      CollectDiMultDestRegs(parsed->pattern, &insn_di_mult_dests);
+      for (int p : insn_di_mult_dests) {
+        all_di_mult_pseudos.insert(p);
+      }
+
       absl::flat_hash_set<int> insn_used_pseudos;
       absl::flat_hash_set<int> insn_defined_pseudos;
       CollectInsnElementUsesAndDefs(parsed->pattern, &insn_used_pseudos, &insn_defined_pseudos);
@@ -266,6 +316,11 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
         PseudoLivenessSummary& summary = pseudo_summaries[regno];
         summary.blocks_referenced.insert(b);
         summary.has_set_in_block = true;
+        ++summary.def_count_in_block;
+        summary.def_insn_idx = i;
+        if (insn_di_mult_dests.contains(regno)) {
+          summary.defined_by_di_mult = true;
+        }
         defined_so_far_in_block.insert(regno);
         if (died_in_block.contains(regno)) {
           summary.alive_after_redef = true;
@@ -283,6 +338,7 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
           const int dead_regno = note.datum.RegNo();
           PseudoLivenessSummary& summary = pseudo_summaries[dead_regno];
           ++summary.note_deaths;
+          summary.death_insn_idx = i;
           died_in_block.insert(dead_regno);
           summary.alive_after_redef = false;
         }
@@ -291,10 +347,6 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
   }
 
   out.sideband.max_regno = max_seen_regno;
-
-  if (out.sideband.reg_renumber.empty()) {
-    return out;
-  }
 
   // In `-O0` (`stupid.c:stupid_life_analysis`), `flow_analysis` and
   // `local_alloc` do not run; `stupid_life_analysis` (`stupid.c:186-187`)
@@ -341,6 +393,67 @@ absl::StatusOr<RtlControlFlowGraph> InvertGlobalAlloc(const RtlControlFlowGraph&
 
   for (int regno : global_pseudos_to_erase) {
     out.sideband.reg_renumber.erase(regno);
+  }
+
+  // Restore `MD_REGS` (`kHiRegnum == 64`) assignments made by `block_alloc` for
+  // single-block `DImode` widening-multiply pseudos (`mulsidi3`/`umulsidi3`,
+  // output constraint `"=x"`) that `reload()` inside `global_alloc`
+  // (`global.c:580`, `reload1.c:spill_hard_reg`) spilled back to `-1` without
+  // `retry_global_alloc` (`reg_allocno[p] == -1`) when another `DImode`
+  // widening multiply required `MD_REGS` as an output reload register.
+  if (!is_stupid_alloc && all_di_mult_pseudos.size() >= 2) {
+    for (int p : all_di_mult_pseudos) {
+      if (greg_cfg.sideband.reg_renumber.contains(p) || live_at_any_block_start.contains(p)) {
+        continue;
+      }
+      if (auto d_it = out.sideband.reg_n_deaths.find(p);
+          d_it != out.sideband.reg_n_deaths.end() && d_it->second != 1) {
+        continue;
+      }
+      if (auto s_it = out.sideband.reg_n_sets.find(p);
+          s_it != out.sideband.reg_n_sets.end() && s_it->second != 1) {
+        continue;
+      }
+      if (auto c_it = out.sideband.reg_n_calls_crossed.find(p);
+          c_it != out.sideband.reg_n_calls_crossed.end() && c_it->second != 0) {
+        continue;
+      }
+      auto sum_it = pseudo_summaries.find(p);
+      if (sum_it == pseudo_summaries.end()) {
+        continue;
+      }
+      const PseudoLivenessSummary& sum = sum_it->second;
+      if (sum.blocks_referenced.size() != 1 || !sum.has_set_in_block ||
+          sum.def_count_in_block != 1 || !sum.defined_by_di_mult || sum.used_before_set ||
+          sum.alive_after_redef || sum.note_deaths != 1 || sum.death_insn_idx <= sum.def_insn_idx) {
+        continue;
+      }
+      const size_t bb_idx = *sum.blocks_referenced.begin();
+      bool md_conflict_in_range = false;
+      for (size_t k = sum.def_insn_idx + 1; k < sum.death_insn_idx; ++k) {
+        if (block_insn_clobbers_md[bb_idx][k]) {
+          md_conflict_in_range = true;
+          break;
+        }
+      }
+      if (md_conflict_in_range) {
+        continue;
+      }
+      bool other_mult_needs_md_reload = false;
+      for (int q : all_di_mult_pseudos) {
+        if (q == p) {
+          continue;
+        }
+        auto q_it = greg_cfg.sideband.reg_renumber.find(q);
+        if (q_it == greg_cfg.sideband.reg_renumber.end() || q_it->second != kHiRegnum) {
+          other_mult_needs_md_reload = true;
+          break;
+        }
+      }
+      if (other_mult_needs_md_reload) {
+        out.sideband.reg_renumber[p] = kHiRegnum;
+      }
+    }
   }
 
   return out;

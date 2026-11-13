@@ -7,6 +7,7 @@
 #include "absl/strings/match.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -789,6 +790,10 @@ TEST(InvertRelaxDelaySlotsTest, FallthroughSequenceStopsTryMergeDelayInsnsSearch
       "(sequence [(call_insn (parallel[ (call (mem:SI (symbol_ref:SI (\"sink_fn\"))) "
       "(const_int 16)) (clobber (reg:SI 31 ra)) ] )) "
       "(insn (set (reg:SI 4 a0) (const_int 1)))])");
+  post_cfg.rpo_blocks[1].rtl_insns[0].has_explicit_call_fusage = true;
+  post_cfg.rpo_blocks[1].rtl_insns[0].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
   post_cfg.rpo_blocks[1].AddPatternOnly("(note NOTE_INSN_LOOP_CONT)");
   post_cfg.rpo_blocks[1].successors = {2};
 

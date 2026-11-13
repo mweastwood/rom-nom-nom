@@ -1,6 +1,7 @@
 #include "gcc_harness/gcc_context.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
@@ -1602,11 +1603,12 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     return nullptr;
   }
 
-  // Parse optional `/v`, `/i`, `/u`, `/s` flags immediately following code name.
+  // Parse optional `/v`, `/i`, `/u`, `/s`, `/f` flags immediately following code name.
   bool flag_v = false;
   bool flag_i = false;
   bool flag_u = false;
   bool flag_s = false;
+  bool flag_f = false;
   while (*pos < text.size() && text[*pos] == '/') {
     ++(*pos);
     if (*pos >= text.size()) {
@@ -1617,6 +1619,7 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     if (f == 'i') flag_i = true;
     if (f == 'u') flag_u = true;
     if (f == 's') flag_s = true;
+    if (f == 'f') flag_f = true;
   }
 
   // Parse optional `:mode` (either machine mode or `REG_NOTE` name).
@@ -1884,23 +1887,30 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
     rt->fld[0].rtx->fld[5].rtint += 1;
   }
 
-  // Canonicalize `(reg:M regno)` while preserving `/v`, `/i`, `/u`, `/s` flags
-  // and disambiguating `arg_pointer_rtx` (`(reg:SI 0 argp)`) from hardware
+  // Canonicalize `(reg:M regno)` while preserving `/v`, `/i`, `/u`, `/s`, `/f`
+  // flags and disambiguating `arg_pointer_rtx` (`(reg:SI 0 argp)`) from hardware
   // `$zero` (`(reg:SI 0 $0)`).
   if (rtx_code == kReg) {
     const int regno = rt->fld[0].rtint;
     const bool is_argp_tok = (reg_name_tok == "argp" || reg_name_tok == "$arg");
     if (regno >= kFirstPseudoRegister) {
-      EnsurePseudoRegsUpTo(regno, mode);
-      Rtx canon = regno_reg_rtx[regno];
-      if (canon != nullptr) {
-        canon->mode = mode;
-        if (flag_v) canon->volatil = 1;
-        if (flag_i) canon->integrated = 1;
-        if (flag_u) canon->unchanging = 1;
-        if (flag_s) canon->in_struct = 1;
-        return canon;
+      if (regno_reg_rtx != nullptr) {
+        EnsurePseudoRegsUpTo(regno, mode);
+        Rtx canon = regno_reg_rtx[regno];
+        if (canon != nullptr) {
+          canon->mode = mode;
+          if (flag_v) canon->volatil = 1;
+          if (flag_i) canon->integrated = 1;
+          if (flag_u) canon->unchanging = 1;
+          if (flag_s) canon->in_struct = 1;
+          if (flag_f && regno_pointer_flag != nullptr && regno >= 0 &&
+              regno < regno_pointer_flag_length) {
+            mark_reg_pointer(canon);
+          }
+          return canon;
+        }
       }
+      return rt;
     } else if (regno == 0) {
       if (is_argp_tok && !flag_v && !flag_i && !flag_u && !flag_s && arg_pointer_rtx != nullptr &&
           mode == kSiMode) {
@@ -1911,8 +1921,18 @@ Rtx GccContext::ParseRtxImpl(std::string_view text, size_t* pos) {
       // returns `arg_pointer_rtx` when `regno == ARG_POINTER_REGNUM (0)` and
       // `mode == Pmode && !reload_in_progress`.
       return rt;
-    } else if (!flag_v && !flag_i && !flag_u && !flag_s) {
-      return gen_rtx(kReg, mode, regno);
+    } else {
+      if (flag_f && regno >= 0 && regno_pointer_flag != nullptr) {
+        if (regno >= regno_pointer_flag_length) {
+          EnsurePseudoRegsUpTo(regno, mode);
+        }
+        if (regno < regno_pointer_flag_length) {
+          mark_reg_pointer(rt);
+        }
+      }
+      if (!flag_v && !flag_i && !flag_u && !flag_s) {
+        return gen_rtx(kReg, mode, regno);
+      }
     }
   } else if (rtx_code == kSymbolRef) {
     const std::string sym_str = rt->fld[0].rtstr != nullptr ? rt->fld[0].rtstr : "";
@@ -2112,7 +2132,52 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
     }
   }
 
-  auto [pat_str, notes_str] = SplitPatternAndTrailingRegNotes(body_and_notes);
+  std::string_view pat_str = body_and_notes;
+  std::string_view notes_str;
+  std::string_view call_fusage_str;
+  if (!body_and_notes.empty() && body_and_notes.front() == '(') {
+    const size_t pat_close = FindMatchingCloseParen(body_and_notes, 0);
+    if (pat_close != std::string_view::npos) {
+      pat_str = body_and_notes.substr(0, pat_close + 1);
+      size_t rpos = pat_close + 1;
+      while (rpos < body_and_notes.size()) {
+        SkipRtlWhitespace(body_and_notes, &rpos);
+        if (rpos >= body_and_notes.size()) {
+          break;
+        }
+        if (body_and_notes[rpos] == '{') {
+          while (rpos < body_and_notes.size() && body_and_notes[rpos] != '}') {
+            ++rpos;
+          }
+          if (rpos < body_and_notes.size()) {
+            ++rpos;
+          }
+          continue;
+        }
+        if (body_and_notes[rpos] != '(') {
+          ReadRtlToken(body_and_notes, &rpos);
+          continue;
+        }
+        const size_t sub_close = FindMatchingCloseParen(body_and_notes, rpos);
+        if (sub_close == std::string_view::npos) {
+          break;
+        }
+        std::string_view sub_sexpr = body_and_notes.substr(rpos, sub_close - rpos + 1);
+        rpos = sub_close + 1;
+        if (absl::StartsWith(sub_sexpr, "(expr_list:") ||
+            absl::StartsWith(sub_sexpr, "(insn_list:")) {
+          notes_str = sub_sexpr;
+        } else if (absl::StartsWith(sub_sexpr, "(expr_list") ||
+                   absl::StartsWith(sub_sexpr, "(insn_list")) {
+          if (container_code == kCallInsn || (!is_container && IsCallPatternText(pat_str))) {
+            call_fusage_str = sub_sexpr;
+          } else if (notes_str.empty()) {
+            notes_str = sub_sexpr;
+          }
+        }
+      }
+    }
+  }
   Rtx pat = ParseRtx(pat_str);
   if (pat == nullptr) {
     return nullptr;
@@ -2236,6 +2301,10 @@ Rtx GccContext::BuildInsnFromContainerOrPattern(std::string_view item_text, bool
     }
   }
 
+  if (container_code == kCallInsn && !call_fusage_str.empty()) {
+    insn->fld[7].rtx = ParseRtx(call_fusage_str);
+  }
+
   if (container_code == kJumpInsn) {
     if (Rtx target_lbl = FindCodeLabelInRtx(pat); target_lbl != nullptr) {
       insn->fld[7].rtx = target_lbl;
@@ -2252,58 +2321,87 @@ Rtx GccContext::EmitPattern(std::string_view pattern_rtl) {
 
 namespace {
 
+constexpr std::array<int, 8> kMipsArgRegnos = {4, 5, 6, 7, 44, 45, 46, 47};
+
+int ArgRegIndex(int regno) {
+  if (regno >= 4 && regno <= 7) {
+    return regno - 4;
+  }
+  if (regno >= 44 && regno <= 47) {
+    return 4 + (regno - 44);
+  }
+  return -1;
+}
+
+void PopulateMissingPostFlowCallRegDeadNotes(const RtlControlFlowGraph& cfg, Rtx c_insn) {
+  if (c_insn == nullptr || c_insn->code != kCallInsn || c_insn->fld[6].rtx != nullptr ||
+      c_insn->fld[7].rtx == nullptr) {
+    return;
+  }
+  const bool is_post_flow_pass = (cfg.pass != RtlPassKind::kRtl && cfg.pass != RtlPassKind::kJump &&
+                                  cfg.pass != RtlPassKind::kCse && cfg.pass != RtlPassKind::kLoop &&
+                                  cfg.pass != RtlPassKind::kCse2);
+  if (!is_post_flow_pass && cfg.sideband.basic_block_live_at_start.empty()) {
+    return;
+  }
+  absl::flat_hash_map<int, Rtx> used_arg_regs;
+  for (Rtx node = c_insn->fld[7].rtx; node != nullptr; node = node->fld[1].rtx) {
+    if (node->code == kExprList && node->fld[0].rtx != nullptr && node->fld[0].rtx->code == kUse &&
+        node->fld[0].rtx->fld[0].rtx != nullptr && node->fld[0].rtx->fld[0].rtx->code == kReg) {
+      Rtx reg = node->fld[0].rtx->fld[0].rtx;
+      const int regno = reg->fld[0].rtint;
+      if (ArgRegIndex(regno) >= 0 && !used_arg_regs.contains(regno)) {
+        used_arg_regs.emplace(regno, gen_rtx(kReg, reg->mode, regno));
+      }
+    }
+  }
+  if (used_arg_regs.empty()) {
+    return;
+  }
+  std::vector<int> sorted_regnos;
+  sorted_regnos.reserve(used_arg_regs.size());
+  for (const auto& [regno, _] : used_arg_regs) {
+    sorted_regnos.push_back(regno);
+  }
+  std::sort(sorted_regnos.begin(), sorted_regnos.end());
+  Rtx notes = nullptr;
+  for (int regno : sorted_regnos) {
+    notes = gen_rtx(kExprList, kRegDead, used_arg_regs.at(regno), notes);
+  }
+  c_insn->fld[6].rtx = notes;
+}
+
 void ReconstructCallInsnFunctionUsage(const RtlControlFlowGraph& cfg, Rtx first,
-                                      const absl::flat_hash_map<int, int>& insn_uid_to_rpo_block) {
+                                      const absl::flat_hash_map<int, int>& insn_uid_to_rpo_block,
+                                      const absl::flat_hash_set<Rtx>& explicit_fusage_calls) {
+  using ArgState = std::array<int, 8>;
+  constexpr ArgState kEmptyState = {-1, -1, -1, -1, -1, -1, -1, -1};
+
   const size_t num_blocks = cfg.rpo_blocks.size();
-  auto is_arg_regno = [](int regno) {
-    return (regno >= 4 && regno <= 7) || (regno >= 44 && regno <= 47);
-  };
-  auto extract_arg_set_from_insn = [&](Rtx r, absl::flat_hash_map<int, Rtx>* out_regs,
-                                       absl::flat_hash_set<int>* killed_regs) {
-    if (r == nullptr || (r->code != kInsn && r->code != kJumpInsn) || r->fld[3].rtx == nullptr) {
-      return;
-    }
-    if (r->code == kInsn) {
-      auto check_one = [&](Rtx x) {
-        if (x != nullptr && x->code == kSet && x->fld[0].rtx != nullptr &&
-            x->fld[0].rtx->code == kReg) {
-          Rtx dst = x->fld[0].rtx;
-          const int regno = dst->fld[0].rtint;
-          if (is_arg_regno(regno) && !out_regs->contains(regno) &&
-              (killed_regs == nullptr || !killed_regs->contains(regno))) {
-            out_regs->emplace(regno, gen_rtx(kReg, dst->mode, regno));
-          }
-        } else if (x != nullptr && x->code == kClobber && x->fld[0].rtx != nullptr &&
-                   x->fld[0].rtx->code == kReg && killed_regs != nullptr) {
-          const int regno = x->fld[0].rtx->fld[0].rtint;
-          if (is_arg_regno(regno) && !out_regs->contains(regno)) {
-            killed_regs->insert(regno);
-          }
-        }
-      };
-      if (r->fld[3].rtx->code == kParallel && r->fld[3].rtx->fld[0].rtvec != nullptr) {
-        Rtvec pvec = r->fld[3].rtx->fld[0].rtvec;
-        for (int k = 0; k < pvec->num_elem; ++k) {
-          check_one(pvec->elem[k].rtx);
-        }
-      } else {
-        check_one(r->fld[3].rtx);
-      }
-    }
-    if (killed_regs != nullptr) {
-      for (Rtx note = r->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
-        if ((note->mode == kRegDead || note->mode == kRegUnused) && note->fld[0].rtx != nullptr &&
-            note->fld[0].rtx->code == kReg) {
-          const int regno = note->fld[0].rtx->fld[0].rtint;
-          if (is_arg_regno(regno) && !out_regs->contains(regno)) {
-            killed_regs->insert(regno);
-          }
-        }
-      }
-    }
-  };
+  if (num_blocks == 0) {
+    return;
+  }
+
   std::vector<std::vector<Rtx>> block_insns_ordered(num_blocks);
+  bool has_unpopulated_call = false;
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code == kCallInsn) {
+      if (explicit_fusage_calls.contains(insn) || insn->fld[7].rtx != nullptr) {
+        PopulateMissingPostFlowCallRegDeadNotes(cfg, insn);
+      } else {
+        has_unpopulated_call = true;
+      }
+    } else if (insn->code == kInsn && insn->fld[3].rtx != nullptr &&
+               insn->fld[3].rtx->code == kSequence && insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+      Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+      for (int j = 0; j < vec->num_elem; ++j) {
+        Rtx sub = vec->elem[j].rtx;
+        if (sub != nullptr && sub->code == kCallInsn && !explicit_fusage_calls.contains(sub) &&
+            sub->fld[7].rtx == nullptr) {
+          has_unpopulated_call = true;
+        }
+      }
+    }
     if (insn->fld[0].rtint >= 0) {
       auto blk_it = insn_uid_to_rpo_block.find(insn->fld[0].rtint);
       if (blk_it != insn_uid_to_rpo_block.end() && blk_it->second >= 0 &&
@@ -2312,149 +2410,412 @@ void ReconstructCallInsnFunctionUsage(const RtlControlFlowGraph& cfg, Rtx first,
       }
     }
   }
+  if (!has_unpopulated_call) {
+    return;
+  }
 
-  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
-    if (insn->code != kCallInsn) {
+  auto kill_arg_reg = [](ArgState* st, int regno, int mode) {
+    const int idx = ArgRegIndex(regno);
+    if (idx >= 0) {
+      (*st)[idx] = -1;
+      if ((mode == kDiMode || mode == kDfMode) && (regno % 2 == 0) && idx + 1 < 8) {
+        (*st)[idx + 1] = -1;
+      }
+    }
+    if ((regno % 2 == 1) && idx > 0 && ((*st)[idx - 1] == kDiMode || (*st)[idx - 1] == kDfMode)) {
+      (*st)[idx - 1] = (regno >= 44) ? kSfMode : kSiMode;
+    }
+  };
+
+  auto def_arg_reg = [&](ArgState* st, int regno, int mode) {
+    const int idx = ArgRegIndex(regno);
+    if (idx < 0) {
+      return;
+    }
+    if ((regno % 2 == 1) && idx > 0 && ((*st)[idx - 1] == kDiMode || (*st)[idx - 1] == kDfMode)) {
+      (*st)[idx - 1] = (regno >= 44) ? kSfMode : kSiMode;
+    }
+    (*st)[idx] = mode;
+    if ((mode == kDiMode || mode == kDfMode) && (regno % 2 == 0) && idx + 1 < 8) {
+      (*st)[idx + 1] = -1;
+    }
+  };
+
+  auto step_non_call_insn = [&](Rtx r, ArgState* st) {
+    if (r == nullptr || (r->code != kInsn && r->code != kJumpInsn) || r->fld[3].rtx == nullptr) {
+      return;
+    }
+    // 1. Input `REG_DEAD` notes kill reaching argument values consumed by `r`.
+    for (Rtx note = r->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
+      if (note->mode == kRegDead && note->fld[0].rtx != nullptr && note->fld[0].rtx->code == kReg) {
+        kill_arg_reg(st, note->fld[0].rtx->fld[0].rtint, note->fld[0].rtx->mode);
+      }
+    }
+    // 2. Pattern `CLOBBER`s and `SET`s update `st`.
+    if (r->code == kInsn) {
+      auto apply_elem = [&](Rtx x) {
+        if (x == nullptr) {
+          return;
+        }
+        if (x->code == kClobber && x->fld[0].rtx != nullptr) {
+          Rtx dst = x->fld[0].rtx;
+          if (dst->code == kSubreg && dst->fld[0].rtx != nullptr) {
+            dst = dst->fld[0].rtx;
+          }
+          if (dst->code == kReg) {
+            kill_arg_reg(st, dst->fld[0].rtint, dst->mode);
+          }
+        } else if (x->code == kSet && x->fld[0].rtx != nullptr) {
+          Rtx dst = x->fld[0].rtx;
+          if (dst->code == kReg) {
+            def_arg_reg(st, dst->fld[0].rtint, dst->mode);
+          } else if (dst->code == kSubreg && dst->fld[0].rtx != nullptr &&
+                     dst->fld[0].rtx->code == kReg) {
+            const int base_regno = dst->fld[0].rtx->fld[0].rtint + dst->fld[1].rtint;
+            def_arg_reg(st, base_regno, dst->mode);
+          }
+        }
+      };
+      Rtx pat = r->fld[3].rtx;
+      if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
+        Rtvec pvec = pat->fld[0].rtvec;
+        for (int k = 0; k < pvec->num_elem; ++k) {
+          apply_elem(pvec->elem[k].rtx);
+        }
+      } else {
+        apply_elem(pat);
+      }
+    }
+    // 3. Output `REG_UNUSED` notes kill dead outputs immediately.
+    for (Rtx note = r->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
+      if (note->mode == kRegUnused && note->fld[0].rtx != nullptr &&
+          note->fld[0].rtx->code == kReg) {
+        kill_arg_reg(st, note->fld[0].rtx->fld[0].rtint, note->fld[0].rtx->mode);
+      }
+    }
+  };
+
+  auto step_top_insn = [&](Rtx insn, ArgState* st, const auto& on_call_cb) {
+    if (insn == nullptr) {
+      return;
+    }
+    if (insn->code == kCallInsn) {
+      on_call_cb(insn, *st);
+      *st = kEmptyState;
+      return;
+    }
+    if ((insn->code == kInsn || insn->code == kJumpInsn) && insn->fld[3].rtx != nullptr &&
+        insn->fld[3].rtx->code == kSequence && insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+      Rtvec vec = insn->fld[3].rtx->fld[0].rtvec;
+      if (vec->num_elem > 0 && vec->elem[0].rtx != nullptr && vec->elem[0].rtx->code == kCallInsn) {
+        for (int j = 1; j < vec->num_elem; ++j) {
+          step_non_call_insn(vec->elem[j].rtx, st);
+        }
+        on_call_cb(vec->elem[0].rtx, *st);
+        *st = kEmptyState;
+      } else {
+        for (int j = 0; j < vec->num_elem; ++j) {
+          step_non_call_insn(vec->elem[j].rtx, st);
+        }
+      }
+      return;
+    }
+    step_non_call_insn(insn, st);
+  };
+
+  // Seed `basic_block_live_at_start` entry states where explicitly provided.
+  const bool post_alter_reg_pass =
+      (cfg.pass == RtlPassKind::kSched2 || cfg.pass == RtlPassKind::kJump2 ||
+       cfg.pass == RtlPassKind::kDbr);
+  std::vector<ArgState> seed_in(num_blocks, kEmptyState);
+  std::vector<bool> has_explicit_seed(num_blocks, false);
+  for (size_t b = 0; b < num_blocks; ++b) {
+    auto live_it = cfg.sideband.basic_block_live_at_start.find(static_cast<int>(b));
+    if (live_it == cfg.sideband.basic_block_live_at_start.end()) {
       continue;
     }
-    absl::flat_hash_map<int, Rtx> arg_regs;
-    absl::flat_hash_set<int> killed_regs;
-    bool hit_earlier_call_in_block = false;
-    for (Rtx prev = insn->fld[1].rtx; prev != nullptr; prev = prev->fld[1].rtx) {
-      if (prev->code == kCallInsn) {
-        hit_earlier_call_in_block = true;
-        break;
+    has_explicit_seed[b] = true;
+    absl::flat_hash_set<int> eff_live_hard_regs;
+    for (int raw_r : live_it->second) {
+      if (raw_r >= kFirstPseudoRegister) {
+        if (!post_alter_reg_pass) {
+          continue;
+        }
+        auto ren_it = cfg.sideband.reg_renumber.find(raw_r);
+        if (ren_it == cfg.sideband.reg_renumber.end() || ren_it->second < 0) {
+          continue;
+        }
+        eff_live_hard_regs.insert(ren_it->second);
+      } else {
+        eff_live_hard_regs.insert(raw_r);
       }
-      if (prev->code == kJumpInsn || prev->code == kCodeLabel || prev->code == kBarrier) {
-        break;
-      }
-      extract_arg_set_from_insn(prev, &arg_regs, &killed_regs);
     }
+    for (int r : eff_live_hard_regs) {
+      const int idx = ArgRegIndex(r);
+      if (idx < 0) {
+        continue;
+      }
+      if (r >= 44) {
+        if ((r % 2 == 1) && eff_live_hard_regs.contains(r - 1)) {
+          continue;
+        }
+        seed_in[b][idx] = eff_live_hard_regs.contains(r + 1) && (r % 2 == 0) ? kDfMode : kSfMode;
+      } else {
+        seed_in[b][idx] = kSiMode;
+      }
+    }
+  }
 
-    if (!hit_earlier_call_in_block && insn->fld[0].rtint >= 0) {
-      auto blk_it = insn_uid_to_rpo_block.find(insn->fld[0].rtint);
-      if (blk_it != insn_uid_to_rpo_block.end() && blk_it->second >= 0 &&
-          static_cast<size_t>(blk_it->second) < num_blocks) {
-        const int b_idx = blk_it->second;
-        if (auto live_it = cfg.sideband.basic_block_live_at_start.find(b_idx);
-            live_it != cfg.sideband.basic_block_live_at_start.end()) {
-          const bool post_alter_reg_pass =
-              (cfg.pass == RtlPassKind::kSched2 || cfg.pass == RtlPassKind::kJump2 ||
-               cfg.pass == RtlPassKind::kDbr);
-          absl::flat_hash_set<int> eff_live_hard_regs;
-          for (int raw_r : live_it->second) {
-            if (raw_r >= kFirstPseudoRegister) {
-              if (!post_alter_reg_pass) {
-                continue;
-              }
-              auto ren_it = cfg.sideband.reg_renumber.find(raw_r);
-              if (ren_it == cfg.sideband.reg_renumber.end() || ren_it->second < 0) {
-                continue;
-              }
-              eff_live_hard_regs.insert(ren_it->second);
-            } else {
-              eff_live_hard_regs.insert(raw_r);
-            }
-          }
-          for (int r : eff_live_hard_regs) {
-            if (!is_arg_regno(r) || arg_regs.contains(r) || killed_regs.contains(r)) {
-              continue;
-            }
-            bool still_live_at_call = true;
-            for (Rtx scan : block_insns_ordered[b_idx]) {
-              if (scan == insn) {
-                break;
-              }
-              if (scan->code != kInsn && scan->code != kJumpInsn) {
-                continue;
-              }
-              for (Rtx note = scan->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
-                if (note->mode == kRegDead && note->fld[0].rtx != nullptr &&
-                    note->fld[0].rtx->code == kReg && note->fld[0].rtx->fld[0].rtint == r) {
-                  still_live_at_call = false;
-                }
-              }
-              if (scan->fld[3].rtx != nullptr && scan->fld[3].rtx->code == kClobber &&
-                  scan->fld[3].rtx->fld[0].rtx != nullptr &&
-                  scan->fld[3].rtx->fld[0].rtx->code == kReg &&
-                  scan->fld[3].rtx->fld[0].rtx->fld[0].rtint == r) {
-                still_live_at_call = false;
-              }
-            }
-            if (still_live_at_call) {
-              const int r_mode =
-                  (r >= 44)
-                      ? (eff_live_hard_regs.contains(r ^ 1) && (r % 2 == 0) ? kDfMode : kSfMode)
-                      : kSiMode;
-              if (r >= 44 && (r % 2 == 1) && eff_live_hard_regs.contains(r - 1)) {
-                continue;
-              }
-              arg_regs.emplace(r, gen_rtx(kReg, r_mode, r));
-            }
-          }
-        } else if (cfg.sideband.basic_block_live_at_start.empty()) {
-          absl::flat_hash_set<size_t> visited;
-          std::vector<std::pair<size_t, absl::flat_hash_set<int>>> worklist;
-          for (size_t pred_b : cfg.rpo_blocks[b_idx].predecessors) {
-            worklist.emplace_back(pred_b, killed_regs);
-          }
-          while (!worklist.empty()) {
-            auto [pred_b, path_killed] = std::move(worklist.back());
-            worklist.pop_back();
-            if (pred_b >= num_blocks || !visited.insert(pred_b).second) {
-              continue;
-            }
-            bool pred_has_call = false;
-            const auto& p_insns = block_insns_ordered[pred_b];
-            for (auto it = p_insns.rbegin(); it != p_insns.rend(); ++it) {
-              if ((*it)->code == kCallInsn) {
-                pred_has_call = true;
-                break;
-              }
-              extract_arg_set_from_insn(*it, &arg_regs, &path_killed);
-            }
-            if (!pred_has_call) {
-              for (size_t gp : cfg.rpo_blocks[pred_b].predecessors) {
-                worklist.emplace_back(gp, path_killed);
-              }
-            }
-          }
+  // Forward fixed-point reaching-definitions analysis across `cfg.rpo_blocks`.
+  std::vector<ArgState> in_state = seed_in;
+  std::vector<ArgState> out_state(num_blocks, kEmptyState);
+  auto join_states = [](const ArgState& a, const ArgState& b_st) -> ArgState {
+    ArgState joined = a;
+    for (size_t i = 0; i < 8; ++i) {
+      if (b_st[i] < 0) {
+        continue;
+      }
+      if (joined[i] < 0 || b_st[i] == kDiMode || b_st[i] == kDfMode) {
+        joined[i] = b_st[i];
+        if ((b_st[i] == kDiMode || b_st[i] == kDfMode) && (i % 2 == 0) && i + 1 < 8) {
+          joined[i + 1] = -1;
         }
       }
     }
+    for (size_t i = 0; i < 8; i += 2) {
+      if (joined[i] == kDiMode || joined[i] == kDfMode) {
+        joined[i + 1] = -1;
+      }
+    }
+    return joined;
+  };
 
-    for (Rtx note = insn->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
-      if (note->mode == kRegDead && note->fld[0].rtx != nullptr && note->fld[0].rtx->code == kReg) {
-        Rtx reg = note->fld[0].rtx;
-        if (is_arg_regno(reg->fld[0].rtint) && !arg_regs.contains(reg->fld[0].rtint)) {
-          arg_regs.emplace(reg->fld[0].rtint, gen_rtx(kReg, reg->mode, reg->fld[0].rtint));
+  // Derive predecessor lists directly from `successors` so hand-built CFGs
+  // that omit `.predecessors` still propagate reaching definitions.
+  std::vector<std::vector<size_t>> preds(num_blocks);
+  for (size_t p = 0; p < num_blocks; ++p) {
+    for (size_t succ : cfg.rpo_blocks[p].successors) {
+      if (succ < num_blocks) {
+        preds[succ].push_back(p);
+      }
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t b = 0; b < num_blocks; ++b) {
+      ArgState cur_in = seed_in[b];
+      if (!has_explicit_seed[b]) {
+        for (size_t pred_b : preds[b]) {
+          cur_in = join_states(cur_in, out_state[pred_b]);
+        }
+      }
+      if (cur_in != in_state[b]) {
+        in_state[b] = cur_in;
+        changed = true;
+      }
+      ArgState cur = cur_in;
+      for (Rtx insn : block_insns_ordered[b]) {
+        step_top_insn(insn, &cur, [](Rtx, const ArgState&) {});
+      }
+      if (cur != out_state[b]) {
+        out_state[b] = cur;
+        changed = true;
+      }
+    }
+  }
+
+  // Final pass: materialize `CALL_INSN_FUNCTION_USAGE` (`fld[7]`) on synthetic calls.
+  for (size_t b = 0; b < num_blocks; ++b) {
+    ArgState cur = in_state[b];
+    for (Rtx insn : block_insns_ordered[b]) {
+      const bool is_top_call = (insn->code == kCallInsn);
+      step_top_insn(insn, &cur, [&](Rtx c_insn, const ArgState& live_args) {
+        if (explicit_fusage_calls.contains(c_insn) || c_insn->fld[7].rtx != nullptr) {
+          return;
+        }
+        absl::flat_hash_map<int, Rtx> arg_regs;
+        for (size_t i = 0; i < 8; ++i) {
+          if (live_args[i] >= 0) {
+            const int regno = kMipsArgRegnos[i];
+            arg_regs.emplace(regno, gen_rtx(kReg, live_args[i], regno));
+          }
+        }
+        for (Rtx note = c_insn->fld[6].rtx; note != nullptr; note = note->fld[1].rtx) {
+          if (note->mode == kRegDead && note->fld[0].rtx != nullptr &&
+              note->fld[0].rtx->code == kReg) {
+            Rtx reg = note->fld[0].rtx;
+            if (ArgRegIndex(reg->fld[0].rtint) >= 0 && !arg_regs.contains(reg->fld[0].rtint)) {
+              arg_regs.emplace(reg->fld[0].rtint, gen_rtx(kReg, reg->mode, reg->fld[0].rtint));
+            }
+          }
+        }
+        std::vector<int> sorted_arg_regnos;
+        sorted_arg_regnos.reserve(arg_regs.size());
+        for (const auto& [regno, _] : arg_regs) {
+          sorted_arg_regnos.push_back(regno);
+        }
+        std::sort(sorted_arg_regnos.begin(), sorted_arg_regnos.end());
+        Rtx fusage = nullptr;
+        for (int regno : sorted_arg_regnos) {
+          Rtx use_rtx = gen_rtx(kUse, kVoidMode, arg_regs.at(regno));
+          fusage = gen_rtx(kExprList, kVoidMode, use_rtx, fusage);
+        }
+        c_insn->fld[7].rtx = fusage;
+        if (is_top_call) {
+          PopulateMissingPostFlowCallRegDeadNotes(cfg, c_insn);
+        }
+      });
+    }
+  }
+}
+
+void PopulateMaterializedSidebandState(const RtlControlFlowGraph& cfg, Rtx first, size_t num_blocks,
+                                       int alloc_regs) {
+  if (!cfg.sideband.reg_renumber.empty()) {
+    reg_renumber = AllocSidebandArray<short>(alloc_regs);
+    for (int i = 0; i < alloc_regs; ++i) {
+      reg_renumber[i] = -1;
+    }
+    for (const auto& [regno, hard_reg] : cfg.sideband.reg_renumber) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_renumber[regno] = static_cast<short>(hard_reg);
+      }
+    }
+  } else {
+    reg_renumber = nullptr;
+  }
+
+  if (reg_n_sets == nullptr) {
+    reg_n_sets = AllocSidebandArray<short>(alloc_regs);
+  }
+  if (!cfg.sideband.reg_n_sets.empty() && reg_n_sets != nullptr) {
+    for (const auto& [regno, val] : cfg.sideband.reg_n_sets) {
+      if (regno >= 0 && regno < max_regno) {
+        reg_n_sets[regno] = static_cast<short>(val);
+      }
+    }
+  }
+
+  const bool has_any_flow_sideband =
+      !cfg.sideband.reg_n_refs.empty() || !cfg.sideband.reg_n_deaths.empty() ||
+      !cfg.sideband.reg_live_length.empty() || !cfg.sideband.reg_n_calls_crossed.empty() ||
+      !cfg.sideband.basic_block_live_at_start.empty();
+
+  if (has_any_flow_sideband) {
+    reg_n_refs = AllocSidebandArray<int>(alloc_regs);
+    for (const auto& [regno, val] : cfg.sideband.reg_n_refs) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_n_refs[regno] = val;
+      }
+    }
+    reg_n_deaths = AllocSidebandArray<short>(alloc_regs);
+    for (const auto& [regno, val] : cfg.sideband.reg_n_deaths) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_n_deaths[regno] = static_cast<short>(val);
+      }
+    }
+    reg_live_length = AllocSidebandArray<int>(alloc_regs);
+    for (const auto& [regno, val] : cfg.sideband.reg_live_length) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_live_length[regno] = val;
+      }
+    }
+    reg_n_calls_crossed = AllocSidebandArray<int>(alloc_regs);
+    for (const auto& [regno, val] : cfg.sideband.reg_n_calls_crossed) {
+      if (regno >= 0 && regno < alloc_regs) {
+        reg_n_calls_crossed[regno] = val;
+      }
+    }
+  } else {
+    reg_n_refs = nullptr;
+    reg_n_deaths = nullptr;
+    reg_live_length = nullptr;
+    reg_n_calls_crossed = nullptr;
+  }
+
+  if (!cfg.sideband.basic_block_live_at_start.empty()) {
+    int max_bb = static_cast<int>(num_blocks);
+    for (const auto& [bb_idx, _] : cfg.sideband.basic_block_live_at_start) {
+      max_bb = std::max(max_bb, bb_idx + 1);
+    }
+    n_basic_blocks = max_bb;
+    regset_size = (alloc_regs / 32) + 2;
+    regset_bytes = regset_size * static_cast<int>(sizeof(uint32_t));
+    basic_block_live_at_start = AllocSidebandArray<Rtx>(max_bb + 4);
+    for (int b = 0; b < max_bb + 4; ++b) {
+      basic_block_live_at_start[b] =
+          reinterpret_cast<Rtx>(AllocSidebandArray<uint32_t>(regset_size));
+    }
+    for (const auto& [bb_idx, live_set] : cfg.sideband.basic_block_live_at_start) {
+      if (bb_idx < 0 || bb_idx >= max_bb) {
+        continue;
+      }
+      auto* words = reinterpret_cast<uint32_t*>(basic_block_live_at_start[bb_idx]);
+      for (int regno : live_set) {
+        if (regno >= 0 && (regno / 32) < regset_size) {
+          words[regno / 32] |= (1u << (regno % 32));
         }
       }
     }
-    std::vector<int> sorted_arg_regnos;
-    sorted_arg_regnos.reserve(arg_regs.size());
-    for (const auto& [regno, _] : arg_regs) {
-      sorted_arg_regnos.push_back(regno);
+  }
+
+  for (int gpr : cfg.sideband.saved_gpr_regnos) {
+    if (gpr >= 0 && gpr < kFirstPseudoRegister) {
+      regs_ever_live[gpr] = 1;
     }
-    std::sort(sorted_arg_regnos.begin(), sorted_arg_regnos.end());
-    Rtx fusage = insn->fld[7].rtx;
-    for (int regno : sorted_arg_regnos) {
-      Rtx use_rtx = gen_rtx(kUse, kVoidMode, arg_regs.at(regno));
-      fusage = gen_rtx(kExprList, kVoidMode, use_rtx, fusage);
+  }
+  for (int fpr : cfg.sideband.saved_fpr_regnos) {
+    if (fpr >= 0 && fpr < kFirstPseudoRegister) {
+      regs_ever_live[fpr] = 1;
     }
-    const bool is_post_flow_pass =
-        (cfg.pass != RtlPassKind::kRtl && cfg.pass != RtlPassKind::kJump &&
-         cfg.pass != RtlPassKind::kCse && cfg.pass != RtlPassKind::kLoop &&
-         cfg.pass != RtlPassKind::kCse2);
-    if ((is_post_flow_pass || !cfg.sideband.basic_block_live_at_start.empty()) &&
-        insn->fld[6].rtx == nullptr) {
-      Rtx notes = nullptr;
-      for (int regno : sorted_arg_regnos) {
-        notes = gen_rtx(kExprList, kRegDead, arg_regs.at(regno), notes);
+  }
+  for (const auto& [_, hard_reg] : cfg.sideband.reg_renumber) {
+    if (hard_reg >= 0 && hard_reg < kFirstPseudoRegister) {
+      regs_ever_live[hard_reg] = 1;
+    }
+  }
+  auto mark_set_hard_regs = [](Rtx pat) {
+    if (pat == nullptr) {
+      return;
+    }
+    auto mark_one = [](Rtx x) {
+      if (x == nullptr || (x->code != kSet && x->code != kClobber)) {
+        return;
       }
-      insn->fld[6].rtx = notes;
+      Rtx dst = x->fld[0].rtx;
+      if (dst != nullptr && dst->code == kSubreg) {
+        dst = dst->fld[0].rtx;
+      }
+      if (dst != nullptr && dst->code == kReg && dst->fld[0].rtint >= 0 &&
+          dst->fld[0].rtint < kFirstPseudoRegister) {
+        regs_ever_live[dst->fld[0].rtint] = 1;
+      }
+    };
+    if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
+      Rtvec vec = pat->fld[0].rtvec;
+      for (int i = 0; i < vec->num_elem; ++i) {
+        mark_one(vec->elem[i].rtx);
+      }
+    } else {
+      mark_one(pat);
     }
-    insn->fld[7].rtx = fusage;
+  };
+  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
+      Rtx pat = insn->fld[3].rtx;
+      if (pat != nullptr && pat->code == kSequence && pat->fld[0].rtvec != nullptr) {
+        Rtvec seq = pat->fld[0].rtvec;
+        for (int i = 0; i < seq->num_elem; ++i) {
+          if (seq->elem[i].rtx != nullptr) {
+            mark_set_hard_regs(seq->elem[i].rtx->fld[3].rtx);
+          }
+        }
+      } else {
+        mark_set_hard_regs(pat);
+      }
+    }
   }
 }
 
@@ -2549,6 +2910,11 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     emit_note(nullptr, kNoteInsnFunctionBeg);
   }
   ResetVirtualRegisterFlags();
+  if (regno_pointer_flag != nullptr) {
+    for (int r = kFirstPseudoRegister + 4; r < regno_pointer_flag_length; ++r) {
+      regno_pointer_flag[r] = 0;
+    }
+  }
   if (regno_reg_rtx != nullptr) {
     for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
                      virtual_outgoing_args_rtx}) {
@@ -2704,6 +3070,7 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   }
 
   // Second pass: emit basic blocks in linear order.
+  absl::flat_hash_set<Rtx> explicit_fusage_calls;
   for (size_t b = 0; b < num_blocks; ++b) {
     Rtx prev_tail = get_last_insn();
     const auto& blk = cfg.rpo_blocks[b];
@@ -2773,6 +3140,30 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       Rtx insn = EmitPattern(resolved_pat);
       if (insn == nullptr) {
         continue;
+      }
+      const RtlInsn* rinsn = (insn_idx < blk.rtl_insns.size()) ? &blk.rtl_insns[insn_idx] : nullptr;
+      auto apply_explicit_call_fusage = [&](Rtx c_insn) {
+        if (c_insn == nullptr || c_insn->code != kCallInsn) {
+          return;
+        }
+        if (rinsn != nullptr && rinsn->has_explicit_call_fusage) {
+          c_insn->fld[7].rtx =
+              rinsn->call_fusage.empty()
+                  ? nullptr
+                  : ParseRtx(BuildCallFusageChainExpr(rinsn->call_fusage).ToGccPrintRtlString());
+          explicit_fusage_calls.insert(c_insn);
+        } else if (c_insn->fld[7].rtx != nullptr) {
+          explicit_fusage_calls.insert(c_insn);
+        }
+      };
+      if (insn->code == kCallInsn) {
+        apply_explicit_call_fusage(insn);
+      } else if (insn->code == kInsn && insn->fld[3].rtx != nullptr &&
+                 insn->fld[3].rtx->code == kSequence && insn->fld[3].rtx->fld[0].rtvec != nullptr) {
+        Rtvec cvec = insn->fld[3].rtx->fld[0].rtvec;
+        for (int j = 0; j < cvec->num_elem; ++j) {
+          apply_explicit_call_fusage(cvec->elem[j].rtx);
+        }
       }
       if (insn->code == kJumpInsn) {
         emitted_any_jump = true;
@@ -2997,13 +3388,15 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     }
   }
 
-  // Reconstruct `CALL_INSN_FUNCTION_USAGE` (`call_insn->fld[7].rtx`) for every
-  // `CALL_INSN` from argument-register setup instructions (`$4..$7`, `$f12..$f15`)
-  // preceding the call, block entry liveness (`basic_block_live_at_start`),
-  // pre-flow predecessor blocks, and any existing `REG_DEAD` notes on the call.
-  ReconstructCallInsnFunctionUsage(cfg, first, insn_uid_to_rpo_block_);
+  // Reconstruct `CALL_INSN_FUNCTION_USAGE` (`call_insn->fld[7].rtx`) for any
+  // synthetic `CALL_INSN` lacking explicit `call_fusage`, using inter-block
+  // reaching-definitions dataflow across `cfg.rpo_blocks`.
+  ReconstructCallInsnFunctionUsage(cfg, first, insn_uid_to_rpo_block_, explicit_fusage_calls);
   // Synchronize `cfg.sideband` into GCC 2.7.2 global side-band arrays.
   int target_max_regno = std::max(max_reg_num(), cfg.sideband.max_regno);
+  for (int regno : cfg.sideband.pointer_regnos) {
+    target_max_regno = std::max(target_max_regno, regno + 1);
+  }
   for (const auto& [regno, _] : cfg.sideband.reg_renumber) {
     target_max_regno = std::max(target_max_regno, regno + 1);
   }
@@ -3034,6 +3427,14 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   const int alloc_regs = std::max(max_regno, target_max_regno) + 16;
 
   if (!has_sequence) {
+    std::vector<int> explicit_ptr_regnos;
+    if (regno_pointer_flag != nullptr) {
+      for (int r = 0; r < regno_pointer_flag_length; ++r) {
+        if (regno_pointer_flag[r] != 0) {
+          explicit_ptr_regnos.push_back(r);
+        }
+      }
+    }
     restore_reg_data(first);
     if (regno_reg_rtx != nullptr) {
       for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
@@ -3044,154 +3445,32 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       }
     }
     reg_scan(first, max_reg_num(), 0);
+    if (regno_pointer_flag != nullptr) {
+      std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+      for (int regno : explicit_ptr_regnos) {
+        if (regno >= 0 && regno < regno_pointer_flag_length) {
+          regno_pointer_flag[regno] = 1;
+        }
+      }
+      for (int regno : cfg.sideband.pointer_regnos) {
+        if (regno >= 0 && regno < regno_pointer_flag_length) {
+          regno_pointer_flag[regno] = 1;
+        }
+      }
+    }
   } else {
+    if (regno_pointer_flag != nullptr) {
+      for (int regno : cfg.sideband.pointer_regnos) {
+        if (regno >= 0 && regno < regno_pointer_flag_length) {
+          regno_pointer_flag[regno] = 1;
+        }
+      }
+    }
     reg_scan(nullptr, max_reg_num(), 0);
   }
 
-  if (!cfg.sideband.reg_renumber.empty()) {
-    reg_renumber = AllocSidebandArray<short>(alloc_regs);
-    for (int i = 0; i < alloc_regs; ++i) {
-      reg_renumber[i] = -1;
-    }
-    for (const auto& [regno, hard_reg] : cfg.sideband.reg_renumber) {
-      if (regno >= 0 && regno < alloc_regs) {
-        reg_renumber[regno] = static_cast<short>(hard_reg);
-      }
-    }
-  } else {
-    reg_renumber = nullptr;
-  }
+  PopulateMaterializedSidebandState(cfg, first, num_blocks, alloc_regs);
 
-  if (reg_n_sets == nullptr) {
-    reg_n_sets = AllocSidebandArray<short>(alloc_regs);
-  }
-  if (!cfg.sideband.reg_n_sets.empty() && reg_n_sets != nullptr) {
-    for (const auto& [regno, val] : cfg.sideband.reg_n_sets) {
-      if (regno >= 0 && regno < max_regno) {
-        reg_n_sets[regno] = static_cast<short>(val);
-      }
-    }
-  }
-
-  const bool has_any_flow_sideband =
-      !cfg.sideband.reg_n_refs.empty() || !cfg.sideband.reg_n_deaths.empty() ||
-      !cfg.sideband.reg_live_length.empty() || !cfg.sideband.reg_n_calls_crossed.empty() ||
-      !cfg.sideband.basic_block_live_at_start.empty();
-
-  if (has_any_flow_sideband) {
-    reg_n_refs = AllocSidebandArray<int>(alloc_regs);
-    for (const auto& [regno, val] : cfg.sideband.reg_n_refs) {
-      if (regno >= 0 && regno < alloc_regs) {
-        reg_n_refs[regno] = val;
-      }
-    }
-    reg_n_deaths = AllocSidebandArray<short>(alloc_regs);
-    for (const auto& [regno, val] : cfg.sideband.reg_n_deaths) {
-      if (regno >= 0 && regno < alloc_regs) {
-        reg_n_deaths[regno] = static_cast<short>(val);
-      }
-    }
-    reg_live_length = AllocSidebandArray<int>(alloc_regs);
-    for (const auto& [regno, val] : cfg.sideband.reg_live_length) {
-      if (regno >= 0 && regno < alloc_regs) {
-        reg_live_length[regno] = val;
-      }
-    }
-    reg_n_calls_crossed = AllocSidebandArray<int>(alloc_regs);
-    for (const auto& [regno, val] : cfg.sideband.reg_n_calls_crossed) {
-      if (regno >= 0 && regno < alloc_regs) {
-        reg_n_calls_crossed[regno] = val;
-      }
-    }
-  } else {
-    reg_n_refs = nullptr;
-    reg_n_deaths = nullptr;
-    reg_live_length = nullptr;
-    reg_n_calls_crossed = nullptr;
-  }
-
-  if (!cfg.sideband.basic_block_live_at_start.empty()) {
-    int max_bb = static_cast<int>(num_blocks);
-    for (const auto& [bb_idx, _] : cfg.sideband.basic_block_live_at_start) {
-      max_bb = std::max(max_bb, bb_idx + 1);
-    }
-    n_basic_blocks = max_bb;
-    regset_size = (alloc_regs / 32) + 2;
-    regset_bytes = regset_size * static_cast<int>(sizeof(uint32_t));
-    basic_block_live_at_start = AllocSidebandArray<Rtx>(max_bb + 4);
-    for (int b = 0; b < max_bb + 4; ++b) {
-      basic_block_live_at_start[b] =
-          reinterpret_cast<Rtx>(AllocSidebandArray<uint32_t>(regset_size));
-    }
-    for (const auto& [bb_idx, live_set] : cfg.sideband.basic_block_live_at_start) {
-      if (bb_idx < 0 || bb_idx >= max_bb) {
-        continue;
-      }
-      auto* words = reinterpret_cast<uint32_t*>(basic_block_live_at_start[bb_idx]);
-      for (int regno : live_set) {
-        if (regno >= 0 && (regno / 32) < regset_size) {
-          words[regno / 32] |= (1u << (regno % 32));
-        }
-      }
-    }
-  }
-
-  for (int gpr : cfg.sideband.saved_gpr_regnos) {
-    if (gpr >= 0 && gpr < kFirstPseudoRegister) {
-      regs_ever_live[gpr] = 1;
-    }
-  }
-  for (int fpr : cfg.sideband.saved_fpr_regnos) {
-    if (fpr >= 0 && fpr < kFirstPseudoRegister) {
-      regs_ever_live[fpr] = 1;
-    }
-  }
-  for (const auto& [_, hard_reg] : cfg.sideband.reg_renumber) {
-    if (hard_reg >= 0 && hard_reg < kFirstPseudoRegister) {
-      regs_ever_live[hard_reg] = 1;
-    }
-  }
-  auto mark_set_hard_regs = [](Rtx pat) {
-    if (pat == nullptr) {
-      return;
-    }
-    auto mark_one = [](Rtx x) {
-      if (x == nullptr || (x->code != kSet && x->code != kClobber)) {
-        return;
-      }
-      Rtx dst = x->fld[0].rtx;
-      if (dst != nullptr && dst->code == kSubreg) {
-        dst = dst->fld[0].rtx;
-      }
-      if (dst != nullptr && dst->code == kReg && dst->fld[0].rtint >= 0 &&
-          dst->fld[0].rtint < kFirstPseudoRegister) {
-        regs_ever_live[dst->fld[0].rtint] = 1;
-      }
-    };
-    if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
-      Rtvec vec = pat->fld[0].rtvec;
-      for (int i = 0; i < vec->num_elem; ++i) {
-        mark_one(vec->elem[i].rtx);
-      }
-    } else {
-      mark_one(pat);
-    }
-  };
-  for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
-    if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
-      Rtx pat = insn->fld[3].rtx;
-      if (pat != nullptr && pat->code == kSequence && pat->fld[0].rtvec != nullptr) {
-        Rtvec seq = pat->fld[0].rtvec;
-        for (int i = 0; i < seq->num_elem; ++i) {
-          if (seq->elem[i].rtx != nullptr) {
-            mark_set_hard_regs(seq->elem[i].rtx->fld[3].rtx);
-          }
-        }
-      } else {
-        mark_set_hard_regs(pat);
-      }
-    }
-  }
   if (cfg.pass != RtlPassKind::kRtl && current_function_decl != nullptr) {
     instantiate_virtual_regs(current_function_decl, nullptr);
   }
@@ -3289,12 +3568,32 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   // all `CODE_LABEL` nodes in linear chain order, followed by any un-emitted
   // label UIDs referenced by `(label_ref <uid>)` (e.g. `return_label` or
   // `if_false_label` during isolated Stage 13 sub-hook expansion).
+  auto is_deleted_chain_entry = [](Rtx r) -> bool {
+    return r != nullptr &&
+           (r->code == kInsn || r->code == kJumpInsn || r->code == kCallInsn ||
+            r->code == kCodeLabel || r->code == kBarrier) &&
+           r->volatil != 0;
+  };
+  auto next_non_deleted = [&](Rtx r) -> Rtx {
+    Rtx cur = r != nullptr ? r->fld[2].rtx : nullptr;
+    while (cur != nullptr && is_deleted_chain_entry(cur)) {
+      cur = cur->fld[2].rtx;
+    }
+    return cur;
+  };
+
   absl::flat_hash_map<int, std::string> label_map;
   size_t next_lbl_idx = 0;
   std::string current_group_label;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+    if (is_deleted_chain_entry(insn)) {
+      // `rtl.h:277`: `#define INSN_DELETED_P(INSN) ((INSN)->volatil)`. When
+      // `optimize == 0`, `delete_insn` marks unreachable labels/barriers/insns
+      // deleted via `volatil = 1` without unlinking them from `NEXT_INSN`.
+      continue;
+    }
     if (insn->code == kCodeLabel && insn->fld[0].rtint >= 0) {
-      Rtx next_insn = insn->fld[2].rtx;
+      Rtx next_insn = next_non_deleted(insn);
       const bool is_tablejump_label = (next_insn != nullptr && next_insn->code == kJumpInsn &&
                                        next_insn->fld[3].rtx != nullptr &&
                                        (next_insn->fld[3].rtx->code == kAddrVec ||
@@ -3318,7 +3617,8 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
     }
   }
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
-    if (insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) {
+    if ((insn->code != kInsn && insn->code != kJumpInsn && insn->code != kCallInsn) ||
+        insn->volatil != 0) {
       continue;
     }
     Rtx pat = insn->fld[3].rtx;
@@ -3374,6 +3674,9 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   std::vector<RtlInsnEntry> raw_tablejump_entries;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     const int code = insn->code;
+    if (is_deleted_chain_entry(insn)) {
+      continue;
+    }
     if (code == kNote) {
       const int note_kind = insn->fld[4].rtint;
       if (note_kind == kNoteInsnLoopBeg) {
@@ -3403,25 +3706,31 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
       }
       continue;
     }
-    if (code == kCodeLabel && insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kJumpInsn) {
-      Rtx next_insn = insn->fld[2].rtx;
-      Rtx next_pat = next_insn->fld[3].rtx;
-      if (next_pat != nullptr && (next_pat->code == kAddrVec || next_pat->code == kAddrDiffVec)) {
-        raw_tablejump_entries.push_back(RtlInsnEntry{
-            .kind = RtlInsnKind::kCodeLabel,
-            .uid = insn->fld[0].rtint,
-        });
-        raw_tablejump_entries.push_back(RtlInsnEntry{
-            .kind = RtlInsnKind::kJumpInsn,
-            .uid = next_insn->fld[0].rtint,
-            .raw_sexpr = absl::StrCat("(jump_insn ", next_insn->fld[0].rtint, " 0 0 ",
-                                      FormatRtx(next_pat), ")"),
-        });
-        insn = next_insn;
-        while (insn->fld[2].rtx != nullptr && insn->fld[2].rtx->code == kBarrier) {
-          insn = insn->fld[2].rtx;
+    if (code == kCodeLabel) {
+      Rtx next_insn = next_non_deleted(insn);
+      if (next_insn != nullptr && next_insn->code == kJumpInsn) {
+        Rtx next_pat = next_insn->fld[3].rtx;
+        if (next_pat != nullptr && (next_pat->code == kAddrVec || next_pat->code == kAddrDiffVec)) {
+          raw_tablejump_entries.push_back(RtlInsnEntry{
+              .kind = RtlInsnKind::kCodeLabel,
+              .uid = insn->fld[0].rtint,
+          });
+          raw_tablejump_entries.push_back(RtlInsnEntry{
+              .kind = RtlInsnKind::kJumpInsn,
+              .uid = next_insn->fld[0].rtint,
+              .raw_sexpr = absl::StrCat("(jump_insn ", next_insn->fld[0].rtint, " 0 0 ",
+                                        FormatRtx(next_pat), ")"),
+          });
+          insn = next_insn;
+          while (true) {
+            Rtx maybe_barrier = next_non_deleted(insn);
+            if (maybe_barrier == nullptr || maybe_barrier->code != kBarrier) {
+              break;
+            }
+            insn = maybe_barrier;
+          }
+          continue;
         }
-        continue;
       }
     }
     if (code == kCodeLabel || code == kBarrier) {
@@ -3451,6 +3760,8 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
       formatted_inner.reserve(vec->num_elem);
       RtlInsnKind effective_kind = code_to_kind(code);
       std::string jump_raw_pat;
+      bool seq_has_explicit_call_fusage = false;
+      std::vector<RtlExpr> seq_call_fusage;
       for (int j = 0; j < vec->num_elem; ++j) {
         Rtx sub = vec->elem[j].rtx;
         if (sub == nullptr) {
@@ -3461,6 +3772,16 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
         if (sub->code != kCallInsn && sub->fld[6].rtx != nullptr) {
           absl::StrAppend(&sub_pat, " ",
                           CanonicalizeLabelRefsInPattern(FormatRtx(sub->fld[6].rtx), label_map));
+        }
+        if (sub->code == kCallInsn) {
+          seq_has_explicit_call_fusage = true;
+          if (sub->fld[7].rtx != nullptr) {
+            if (auto parsed_fu = ParseCallFusageChainSexpr(
+                    CanonicalizeLabelRefsInPattern(FormatRtx(sub->fld[7].rtx), label_map));
+                parsed_fu.ok()) {
+              seq_call_fusage = std::move(*parsed_fu);
+            }
+          }
         }
         formatted_inner.push_back(
             absl::StrCat("(", tag, " ", CanonicalizeRtlPattern(sub_pat), ")"));
@@ -3474,6 +3795,8 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
           .uid = insn->fld[0].rtint,
           .raw_pattern_for_targets = jump_raw_pat,
           .pattern = absl::StrCat("(sequence [", absl::StrJoin(formatted_inner, " "), "])"),
+          .has_explicit_call_fusage = seq_has_explicit_call_fusage,
+          .call_fusage = std::move(seq_call_fusage),
       });
       continue;
     }
@@ -3484,11 +3807,25 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
       absl::StrAppend(&canon_pat, " ",
                       CanonicalizeLabelRefsInPattern(FormatRtx(insn->fld[6].rtx), label_map));
     }
+    bool item_has_explicit_call_fusage = false;
+    std::vector<RtlExpr> item_call_fusage;
+    if (code == kCallInsn) {
+      item_has_explicit_call_fusage = true;
+      if (insn->fld[7].rtx != nullptr) {
+        if (auto parsed_fu = ParseCallFusageChainSexpr(
+                CanonicalizeLabelRefsInPattern(FormatRtx(insn->fld[7].rtx), label_map));
+            parsed_fu.ok()) {
+          item_call_fusage = std::move(*parsed_fu);
+        }
+      }
+    }
     items.push_back(FlatRtlItem{
         .kind = code_to_kind(code),
         .uid = insn->fld[0].rtint,
         .raw_pattern_for_targets = raw_pat,
         .pattern = CanonicalizeRtlPattern(canon_pat),
+        .has_explicit_call_fusage = item_has_explicit_call_fusage,
+        .call_fusage = std::move(item_call_fusage),
     });
   }
 
@@ -3497,6 +3834,14 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   // Dematerialize GCC 2.7.2 global side-band arrays into `cfg.sideband`.
   const int nregs = std::max(max_reg_num(), max_regno);
   cfg.sideband.max_regno = nregs;
+  if (regno_pointer_flag != nullptr) {
+    const int ptr_limit = std::min(nregs, regno_pointer_flag_length);
+    for (int r = kFirstPseudoRegister + 4; r < ptr_limit; ++r) {
+      if (regno_pointer_flag[r] != 0) {
+        cfg.sideband.pointer_regnos.push_back(r);
+      }
+    }
+  }
 
   if (reg_renumber != nullptr) {
     for (int r = kFirstPseudoRegister; r < nregs; ++r) {

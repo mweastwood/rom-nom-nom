@@ -173,6 +173,7 @@ cc_library(
     copts = ["-std=c++20"],
     deps = [
         ":rtl_cfg",
+        ":rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
@@ -186,6 +187,7 @@ cc_test(
     copts = ["-std=c++20"],
     deps = [
         ":rtl_cfg",
+        ":rtl_expr",
         ":rtl_sexpr_utils",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@googletest//:gtest_main",

@@ -8,6 +8,7 @@
 #include "absl/strings/match.h"
 #include "core/c_ast.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -940,7 +941,10 @@ TEST(RightInverseVerifierTest, Stage9And11FoldRtxAndCseBasicBlockRightInverse) {
   cse_cfg.rpo_blocks.resize(1);
   cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1)))");
   cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 73) (reg:SI 72))");
-  cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 72) (reg:SI 72)))");
+  cse_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (ashift:SI (reg:SI 72) (const_int 1)))");
+  cse_cfg.rpo_blocks[0].AddPatternOnly("(use (reg:SI 73))");
+  cse_cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
 
   RightInverseResult cse_bb_res = verifier.VerifyCseBasicBlockRightInverse(cse_cfg);
   EXPECT_TRUE(cse_bb_res.matches) << cse_bb_res.diff_detail;
@@ -990,6 +994,7 @@ TEST(RightInverseVerifierTest, Stage10ScanLoopAndStrengthReduceRightInverse) {
   // 24. `loop.c:strength_reduce` right-inverse:
   RtlControlFlowGraph sr_cfg;
   sr_cfg.pass = RtlPassKind::kLoop;
+  sr_cfg.sideband.pointer_regnos = {79};
   sr_cfg.rpo_blocks.resize(3);
   sr_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
   sr_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 73) (const_int 0))");
@@ -2378,6 +2383,683 @@ TEST(GccHarnessTest, RepeatedLit8LiteralPoolAssemblyAcrossFragChunkBoundaries) {
     EXPECT_EQ(in.constant_pool[0].section_name, ".lit8") << "iter=" << iter;
     EXPECT_EQ(in.constant_pool[0].words, expected_words) << "iter=" << iter;
   }
+}
+
+TEST(GccHarnessTest, LoopNotesMaterializeRoundTripAndDriveLoopOptimizeHoisting) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  ctx.BeginFunction("loop_notes_probe");
+
+  auto make_loop_cfg = [](bool with_loop_notes) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kCse;
+    cfg.rpo_blocks.resize(3);
+
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg/v:SI 72) (const_int 0))");
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg/v:SI 73) (reg:SI 4 a0))");
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg/v:SI 74) (const_int 0))");
+    if (with_loop_notes) {
+      cfg.rpo_blocks[0].AddLoopNote(RtlLoopNoteKind::kLoopBeg);
+    }
+    cfg.rpo_blocks[0].successors = {1};
+
+    cfg.rpo_blocks[1].id = 1;
+    cfg.rpo_blocks[1].has_label = true;
+    cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SI 75) (plus:SI (reg/v:SI 73) (const_int 100)))");
+    cfg.rpo_blocks[1].AddPatternOnly("(set (reg/v:SI 74) (plus:SI (reg/v:SI 74) (reg:SI 75)))");
+    if (with_loop_notes) {
+      cfg.rpo_blocks[1].AddLoopNote(RtlLoopNoteKind::kLoopCont);
+    }
+    cfg.rpo_blocks[1].AddPatternOnly("(set (reg/v:SI 72) (plus:SI (reg/v:SI 72) (const_int 1)))");
+    if (with_loop_notes) {
+      cfg.rpo_blocks[1].AddLoopNote(RtlLoopNoteKind::kLoopVtop);
+    }
+    cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (pc) (if_then_else (lt:SI (reg/v:SI 72) (const_int 8)) (label_ref L0) (pc)))");
+    cfg.rpo_blocks[1].successors = {1, 2};
+
+    cfg.rpo_blocks[2].id = 2;
+    if (with_loop_notes) {
+      cfg.rpo_blocks[2].AddLoopNote(RtlLoopNoteKind::kLoopEnd);
+    }
+    cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (reg/v:SI 74))");
+    cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    return cfg;
+  };
+
+  const RtlControlFlowGraph with_notes = make_loop_cfg(/*with_loop_notes=*/true);
+  Rtx head = ctx.MaterializeFromCfg(with_notes);
+  ASSERT_NE(head, nullptr);
+  const RtlControlFlowGraph round_tripped = ctx.DematerializeToCfg(head, RtlPassKind::kCse);
+  ASSERT_EQ(round_tripped.rpo_blocks.size(), 3u);
+  EXPECT_EQ(round_tripped.rpo_blocks[0].LoopNotes(),
+            (std::vector<RtlLoopNoteKind>{RtlLoopNoteKind::kLoopBeg}));
+  EXPECT_EQ(round_tripped.rpo_blocks[1].LoopNotes(),
+            (std::vector<RtlLoopNoteKind>{RtlLoopNoteKind::kLoopCont, RtlLoopNoteKind::kLoopVtop}));
+  EXPECT_EQ(round_tripped.rpo_blocks[2].LoopNotes(),
+            (std::vector<RtlLoopNoteKind>{RtlLoopNoteKind::kLoopEnd}));
+
+  const auto scan_with_notes = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kScanLoop, with_notes, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+  bool hoisted_to_preheader = false;
+  for (const std::string& pat : scan_with_notes.post_state.rpo_blocks[0].instructions) {
+    if (absl::StrContains(pat, "(plus:SI (reg/v:SI 73) (const_int 100))")) {
+      hoisted_to_preheader = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(hoisted_to_preheader) << scan_with_notes.post_state.FormatSummary();
+
+  // Without `NOTE_INSN_LOOP_*` markers, `loop.c` sees `max_loop_num == 0` and cannot hoist.
+  const RtlControlFlowGraph without_notes = make_loop_cfg(/*with_loop_notes=*/false);
+  const auto scan_without_notes = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kScanLoop, without_notes, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+  bool hoisted_without_notes = false;
+  for (const std::string& pat : scan_without_notes.post_state.rpo_blocks[0].instructions) {
+    if (absl::StrContains(pat, "(plus:SI (reg/v:SI 73) (const_int 100))")) {
+      hoisted_without_notes = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(hoisted_without_notes);
+}
+
+TEST(GccHarnessTest, InterBlockCallFusageSynthesisAndExplicitEmptyFusageFidelity) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  ctx.BeginFunction("call_fusage_probe");
+
+  // 1. Diamond CFG without explicit `call_fusage`: `$5` (`a1`) defined in `B0`, `$4` (`a0`)
+  // defined on both arms `B1` and `B2`, reaching a `call_insn` in `B3`. Inter-block reaching
+  // definitions must synthesize `(use (reg:SI 5 a1))` and `(use (reg:SI 4 a0))`.
+  RtlControlFlowGraph diamond_cfg;
+  diamond_cfg.pass = RtlPassKind::kRtl;
+  diamond_cfg.rpo_blocks.resize(4);
+  diamond_cfg.rpo_blocks[0].id = 0;
+  diamond_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 5 a1) (const_int 7))");
+  diamond_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) (label_ref L0) (pc)))");
+  diamond_cfg.rpo_blocks[0].successors = {2, 1};
+
+  diamond_cfg.rpo_blocks[1].id = 1;
+  diamond_cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SI 4 a0) (const_int 11))");
+  diamond_cfg.rpo_blocks[1].AddPatternOnly("(set (pc) (label_ref L1))");
+  diamond_cfg.rpo_blocks[1].successors = {3};
+
+  diamond_cfg.rpo_blocks[2].id = 2;
+  diamond_cfg.rpo_blocks[2].has_label = true;
+  diamond_cfg.rpo_blocks[2].AddPatternOnly("(set (reg:SI 4 a0) (const_int 22))");
+  diamond_cfg.rpo_blocks[2].successors = {3};
+
+  diamond_cfg.rpo_blocks[3].id = 3;
+  diamond_cfg.rpo_blocks[3].has_label = true;
+  diamond_cfg.rpo_blocks[3].AddPatternOnly(
+      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"two_arg_callee\"))) "
+      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+  diamond_cfg.rpo_blocks[3].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 2 v0))");
+  diamond_cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
+
+  Rtx diamond_head = ctx.MaterializeFromCfg(diamond_cfg);
+  ASSERT_NE(diamond_head, nullptr);
+  const RtlControlFlowGraph diamond_demat = ctx.DematerializeToCfg(diamond_head, RtlPassKind::kRtl);
+  ASSERT_EQ(diamond_demat.rpo_blocks.size(), 4u);
+  ASSERT_FALSE(diamond_demat.rpo_blocks[3].rtl_insns.empty());
+  const RtlInsn& synth_call = diamond_demat.rpo_blocks[3].rtl_insns[0];
+  EXPECT_TRUE(synth_call.has_explicit_call_fusage);
+  ASSERT_EQ(synth_call.call_fusage.size(), 2u);
+  EXPECT_EQ(synth_call.call_fusage[0].ToGccPrintRtlString(), "(use (reg:SI 5 a1))");
+  EXPECT_EQ(synth_call.call_fusage[1].ToGccPrintRtlString(), "(use (reg:SI 4 a0))");
+
+  // 2. Explicit empty `call_fusage` (`has_explicit_call_fusage = true`, `call_fusage = {}`) on a
+  // 0-arg call preceded by a scratch `$4` write must NOT synthesize `(use (reg:SI 4 a0))`, so
+  // `flow.c` marks the dead `$4` write with `REG_UNUSED` (and deletes it).
+  RtlControlFlowGraph zero_arg_cfg;
+  zero_arg_cfg.pass = RtlPassKind::kCse2;
+  zero_arg_cfg.rpo_blocks.resize(1);
+  zero_arg_cfg.rpo_blocks[0].id = 0;
+  zero_arg_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 4 a0) (const_int 999))");
+  RtlInsn zero_call;
+  zero_call.canonical_pattern =
+      "(parallel[ (call (mem:SI (symbol_ref:SI (\"zero_arg_callee\"))) (const_int 16)) "
+      "(clobber (reg:SI 31 ra)) ] )";
+  zero_call.has_explicit_call_fusage = true;
+  zero_call.call_fusage.clear();
+  zero_arg_cfg.rpo_blocks[0].AddInsn(std::move(zero_call));
+
+  Rtx zero_head = ctx.MaterializeFromCfg(zero_arg_cfg);
+  ASSERT_NE(zero_head, nullptr);
+  const RtlControlFlowGraph zero_demat = ctx.DematerializeToCfg(zero_head, RtlPassKind::kCse2);
+  ASSERT_EQ(zero_demat.rpo_blocks[0].rtl_insns.size(), 2u);
+  EXPECT_TRUE(zero_demat.rpo_blocks[0].rtl_insns[1].has_explicit_call_fusage);
+  EXPECT_TRUE(zero_demat.rpo_blocks[0].rtl_insns[1].call_fusage.empty());
+
+  const auto flow_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kPropagateBlock, zero_arg_cfg, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+  ASSERT_EQ(flow_snap.post_state.rpo_blocks.size(), 1u);
+  // Because `zero_arg_callee` has empty `CALL_INSN_FUNCTION_USAGE`, `propagate_block` deletes the
+  // dead `(set (reg:SI 4 a0) (const_int 999))` instruction completely!
+  EXPECT_EQ(flow_snap.post_state.rpo_blocks[0].instructions.size(), 1u)
+      << flow_snap.post_state.FormatSummary();
+}
+
+TEST(GccHarnessTest, RegPointerUserVarInStructAndUnchangingFlagsRoundTripLosslessly) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  const std::string c_src = R"(
+struct Pair {
+  int a;
+  int b;
+};
+int LoadStructAndScale(struct Pair* p, const int* k_tbl, int idx) {
+  int local_acc = p->a + p->b;
+  return local_acc + k_tbl[idx];
+}
+)";
+  const RtlControlFlowGraph initial_cfg =
+      hooks.CompileCSourceToInitialRtlCfg(c_src, "LoadStructAndScale", {"-O2", "-mips2"});
+  EXPECT_FALSE(initial_cfg.sideband.pointer_regnos.empty());
+
+  Rtx head = ctx.MaterializeFromCfg(initial_cfg);
+  ASSERT_NE(head, nullptr);
+  const RtlControlFlowGraph demat_cfg = ctx.DematerializeToCfg(head, RtlPassKind::kRtl);
+  EXPECT_EQ(demat_cfg.sideband.pointer_regnos, initial_cfg.sideband.pointer_regnos);
+
+  bool saw_user_var_reg = false;
+  bool saw_in_struct_mem = false;
+  for (const auto& blk : demat_cfg.rpo_blocks) {
+    for (const std::string& pat : blk.instructions) {
+      if (absl::StrContains(pat, "(reg/v:")) saw_user_var_reg = true;
+      if (absl::StrContains(pat, "(mem/s:")) saw_in_struct_mem = true;
+    }
+  }
+  EXPECT_TRUE(saw_user_var_reg) << demat_cfg.FormatSummary();
+  EXPECT_TRUE(saw_in_struct_mem) << demat_cfg.FormatSummary();
+
+  const RtlCfgPassComparison cmp = demat_cfg.CompareAgainst(initial_cfg);
+  EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+}
+
+TEST(GccHarnessTest, UnbundledAtomicCseMainThreadJumpsAndVerifyThreadJumpsRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // Build a 6-block CFG:
+  //   B0: redundant `(73 + 4)` twice, sets `reg 72 = reg 5 (a1)`, branches on `reg 72 != 0` to
+  //       `L0` (`B2`) or falls through to `B1`.
+  //   B1: sets `reg 72 = reg 4 (a0)` and falls through to join block `B2` (`L0`).
+  //   B2 (`L0`): branches on `(ne:SI (reg:SI 72) (const_int 0))` to `L1` (`B4`) or falls through
+  //       to `B3`.
+  //   B3: sets `v0 = reg 74` and jumps to exit `B5` (`L2`).
+  //   B4 (`L1`): sets `v0 = reg 74 + reg 75` and falls through to exit `B5` (`L2`).
+  //   B5 (`L2`): `(use (reg/i:SI 2 v0))`.
+  // Per `toplev.c:2857-2871`, CSE1 runs `thread_jumps(..., 1)` *before* `cse_main(..., 0)` +
+  // `delete_dead_from_cse` + `jump_optimize`; per `toplev.c:2915-2936`, CSE2 runs
+  // `jump_optimize` -> `cse_main(..., 1)` -> conditional `jump_optimize` *before*
+  // `thread_jumps(..., 0)`.
+  RtlControlFlowGraph pre_cse_cfg;
+  pre_cse_cfg.pass = RtlPassKind::kJump;
+  pre_cse_cfg.rpo_blocks.resize(6);
+
+  pre_cse_cfg.rpo_blocks[0].id = 0;
+  pre_cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 73) (reg:SI 4 a0))");
+  pre_cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 74) (plus:SI (reg:SI 73) (const_int 4)))");
+  pre_cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 75) (plus:SI (reg:SI 73) (const_int 4)))");
+  pre_cse_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (reg:SI 5 a1))");
+  pre_cse_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (pc) (if_then_else (ne:SI (reg:SI 72) (const_int 0)) (label_ref L0) (pc)))");
+  pre_cse_cfg.rpo_blocks[0].successors = {2, 1};
+
+  pre_cse_cfg.rpo_blocks[1].id = 1;
+  pre_cse_cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  pre_cse_cfg.rpo_blocks[1].successors = {2};
+
+  pre_cse_cfg.rpo_blocks[2].id = 2;
+  pre_cse_cfg.rpo_blocks[2].has_label = true;
+  pre_cse_cfg.rpo_blocks[2].AddPatternOnly(
+      "(set (pc) (if_then_else (ne:SI (reg:SI 72) (const_int 0)) (label_ref L1) (pc)))");
+  pre_cse_cfg.rpo_blocks[2].successors = {4, 3};
+
+  pre_cse_cfg.rpo_blocks[3].id = 3;
+  pre_cse_cfg.rpo_blocks[3].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 74))");
+  pre_cse_cfg.rpo_blocks[3].AddPatternOnly("(set (pc) (label_ref L2))");
+  pre_cse_cfg.rpo_blocks[3].successors = {5};
+
+  pre_cse_cfg.rpo_blocks[4].id = 4;
+  pre_cse_cfg.rpo_blocks[4].has_label = true;
+  pre_cse_cfg.rpo_blocks[4].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 74) (reg:SI 75)))");
+  pre_cse_cfg.rpo_blocks[4].successors = {5};
+
+  pre_cse_cfg.rpo_blocks[5].id = 5;
+  pre_cse_cfg.rpo_blocks[5].has_label = true;
+  pre_cse_cfg.rpo_blocks[5].AddPatternOnly("(use (reg/i:SI 2 v0))");
+
+  // 1. Atomic `kCseBasicBlockCse1` eliminates the duplicate `(plus:SI (reg:SI 73) (const_int 4))`
+  // inside `B0`, WITHOUT running `thread_jumps` (`B0` still branches to `B2`!).
+  const auto atomic_cse_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kCseBasicBlockCse1, pre_cse_cfg, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+  EXPECT_EQ(atomic_cse_snap.post_state.rpo_blocks[0].successors, (std::vector<size_t>{2, 1}));
+  size_t plus4_count = 0;
+  for (const std::string& pat : atomic_cse_snap.post_state.rpo_blocks[0].instructions) {
+    if (absl::StrContains(pat, "(plus:SI")) {
+      ++plus4_count;
+    }
+  }
+  EXPECT_EQ(plus4_count, 1u) << atomic_cse_snap.post_state.FormatSummary();
+
+  // 2. CSE1 pipeline order (`toplev.c:2857-2871`): `kThreadJumpsCse1` BEFORE `kCseBasicBlockCse1`
+  // -> `kJumpOptimizeCse1`!
+  const auto cse1_thread_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kThreadJumpsCse1, pre_cse_cfg, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+  ASSERT_FALSE(
+      cse1_thread_snap.post_state.CompareAgainst(cse1_thread_snap.pre_state).MatchesExactly());
+  EXPECT_EQ(cse1_thread_snap.post_state.rpo_blocks[0].successors, (std::vector<size_t>{3, 1}));
+
+  const auto cse1_main_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kCseBasicBlockCse1, cse1_thread_snap.post_state, {}, 2, {"-O2", "-mips2"});
+  const auto cse1_post_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kJumpOptimizeCse1, cse1_main_snap.post_state, {}, 2, {"-O2", "-mips2"});
+
+  // 3. CSE2 pipeline order (`toplev.c:2915-2936`): `kJumpOptimizeCse2Pre` -> `kCseBasicBlockCse2`
+  // -> `kJumpOptimizeCse2` BEFORE `kThreadJumpsCse2`!
+  const auto cse2_pre_j =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kJumpOptimizeCse2Pre, pre_cse_cfg, {},
+                                       /*optimize_level=*/2, {"-O2", "-mips2"});
+  const auto cse2_main = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kCseBasicBlockCse2, cse2_pre_j.post_state, {}, 2, {"-O2", "-mips2"});
+  const auto cse2_post_j = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kJumpOptimizeCse2, cse2_main.post_state, {}, 2, {"-O2", "-mips2"});
+  const auto cse2_thread_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kThreadJumpsCse2, cse2_post_j.post_state, {}, 2, {"-O2", "-mips2"});
+  ASSERT_FALSE(
+      cse2_thread_snap.post_state.CompareAgainst(cse2_thread_snap.pre_state).MatchesExactly());
+
+  // 4. `VerifyThreadJumpsRightInverse`, `VerifyCse1StageRightInverse`, and
+  // `VerifyCse2StageRightInverse` with `thread_jumps` active (positive + adversarial negative).
+  class UnthreadingStageProvider final : public ToySubfunctionInverses {
+   public:
+    UnthreadingStageProvider(RtlControlFlowGraph cse1_pre_tj, RtlControlFlowGraph cse1_pre_cse,
+                             RtlControlFlowGraph cse2_tj_out,
+                             RtlControlFlowGraph expected_cse2_pre_tj,
+                             RtlControlFlowGraph cse2_pre_cse)
+        : cse1_pre_tj_(std::move(cse1_pre_tj)),
+          cse1_pre_cse_(std::move(cse1_pre_cse)),
+          cse2_tj_out_(std::move(cse2_tj_out)),
+          expected_cse2_pre_tj_(std::move(expected_cse2_pre_tj)),
+          cse2_pre_cse_(std::move(cse2_pre_cse)) {}
+    RtlControlFlowGraph InvertThreadJumps(const RtlControlFlowGraph&,
+                                          bool before_loop) const override {
+      return before_loop ? cse1_pre_tj_ : cse2_tj_out_;
+    }
+    RtlControlFlowGraph InvertCseBasicBlock(const RtlControlFlowGraph& x) const override {
+      if (x.pass == RtlPassKind::kCse) {
+        return cse1_pre_cse_;
+      }
+      if (x.CompareAgainst(expected_cse2_pre_tj_).MatchesExactly()) {
+        return cse2_pre_cse_;
+      }
+      RtlControlFlowGraph pass_thru = x;
+      pass_thru.pass = RtlPassKind::kLoop;
+      return pass_thru;
+    }
+    RtlControlFlowGraph InvertJump1Optimize(const RtlControlFlowGraph& x) const override {
+      return x;
+    }
+
+   private:
+    RtlControlFlowGraph cse1_pre_tj_;
+    RtlControlFlowGraph cse1_pre_cse_;
+    RtlControlFlowGraph cse2_tj_out_;
+    RtlControlFlowGraph expected_cse2_pre_tj_;
+    RtlControlFlowGraph cse2_pre_cse_;
+  };
+
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}});
+  UnthreadingStageProvider good_prov(cse1_thread_snap.pre_state, cse1_main_snap.pre_state,
+                                     cse2_thread_snap.pre_state, cse2_thread_snap.pre_state,
+                                     cse2_main.pre_state);
+  RightInverseVerifier good_verifier(&ctx, &hooks, &good_prov);
+  const RightInverseResult pos_tj_res = good_verifier.VerifyThreadJumpsRightInverse(
+      cse1_thread_snap.post_state, /*before_loop=*/true);
+  EXPECT_TRUE(pos_tj_res.matches) << pos_tj_res.diff_detail;
+
+  const RightInverseResult pos_cse1_res =
+      good_verifier.VerifyCse1StageRightInverse(cse1_post_snap.post_state);
+  EXPECT_TRUE(pos_cse1_res.matches) << pos_cse1_res.diff_detail;
+
+  const RightInverseResult pos_cse2_res =
+      good_verifier.VerifyCse2StageRightInverse(cse2_thread_snap.post_state);
+  EXPECT_TRUE(pos_cse2_res.matches) << pos_cse2_res.diff_detail;
+
+  // Adversarial negative: an `InvertThreadJumps` that corrupts `rpo_blocks[3]` in CSE1/CSE2 must
+  // fail `VerifyThreadJumpsRightInverse`, `VerifyCse1StageRightInverse`, and
+  // `VerifyCse2StageRightInverse`.
+  RtlControlFlowGraph bad_unthreaded = cse1_thread_snap.pre_state;
+  bad_unthreaded.rpo_blocks[3].instructions[0] = "(set (reg/i:SI 2 v0) (const_int 12345))";
+  bad_unthreaded.rpo_blocks[3].SyncRtlInsnsFromInstructions();
+  RtlControlFlowGraph bad_cse2_unthreaded = cse2_thread_snap.pre_state;
+  bad_cse2_unthreaded.rpo_blocks[3].instructions[0] = "(set (reg/i:SI 2 v0) (const_int 12345))";
+  bad_cse2_unthreaded.rpo_blocks[3].SyncRtlInsnsFromInstructions();
+
+  UnthreadingStageProvider bad_prov(bad_unthreaded, cse1_main_snap.pre_state, bad_cse2_unthreaded,
+                                    cse2_thread_snap.pre_state, cse2_main.pre_state);
+  RightInverseVerifier bad_verifier(&ctx, &hooks, &bad_prov);
+  EXPECT_FALSE(
+      bad_verifier.VerifyThreadJumpsRightInverse(cse1_thread_snap.post_state, /*before_loop=*/true)
+          .matches);
+  EXPECT_FALSE(bad_verifier.VerifyCse1StageRightInverse(cse1_post_snap.post_state).matches);
+  EXPECT_FALSE(bad_verifier.VerifyCse2StageRightInverse(cse2_thread_snap.post_state).matches);
+}
+
+TEST(GccContextTest, ParseRtxPointerFlagBeforeBeginFunctionAndResetFunctionFalseHygiene) {
+  // 1. `ParseRtx` on `(reg/f:SI ...)` BEFORE `BeginFunction` and with high pseudo regno must be
+  // completely memory-safe.
+  GccContext fresh_ctx;
+  Rtx pre_begin_ptr = fresh_ctx.ParseRtx("(reg/f:SI 72)");
+  ASSERT_NE(pre_begin_ptr, nullptr);
+  EXPECT_EQ(pre_begin_ptr->code, kReg);
+  EXPECT_EQ(pre_begin_ptr->fld[0].rtint, 72);
+
+  fresh_ctx.BeginFunction("ptr_hygiene_test");
+  Rtx high_pseudo_ptr = fresh_ctx.ParseRtx("(reg/f:SI 512)");
+  ASSERT_NE(high_pseudo_ptr, nullptr);
+  EXPECT_EQ(high_pseudo_ptr->code, kReg);
+  EXPECT_EQ(high_pseudo_ptr->fld[0].rtint, 512);
+
+  // 2. `MaterializeFromCfg(..., /*reset_function=*/false)` must clear stale `regno_pointer_flag`
+  // entries from an earlier state in the same `BeginFunction` scope.
+  RtlControlFlowGraph ptr_cfg;
+  ptr_cfg.pass = RtlPassKind::kRtl;
+  ptr_cfg.rpo_blocks.resize(1);
+  ptr_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  ptr_cfg.rpo_blocks[0].AddPatternOnly("(return)");
+  ptr_cfg.sideband.pointer_regnos = {72};
+
+  Rtx head1 = fresh_ctx.MaterializeFromCfg(ptr_cfg, /*reset_function=*/true);
+  ASSERT_NE(head1, nullptr);
+  RtlControlFlowGraph demat1 = fresh_ctx.DematerializeToCfg(head1, RtlPassKind::kRtl);
+  EXPECT_EQ(demat1.sideband.pointer_regnos, (std::vector<int>{72}));
+
+  RtlControlFlowGraph non_ptr_cfg = ptr_cfg;
+  non_ptr_cfg.sideband.pointer_regnos.clear();
+  non_ptr_cfg.rpo_blocks[0].instructions.insert(non_ptr_cfg.rpo_blocks[0].instructions.begin() + 1,
+                                                "(set (reg/i:SI 2 v0) (mem:SI (reg:SI 72)))");
+  non_ptr_cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+  Rtx head2 = fresh_ctx.MaterializeFromCfg(non_ptr_cfg, /*reset_function=*/false);
+  ASSERT_NE(head2, nullptr);
+  RtlControlFlowGraph demat2 = fresh_ctx.DematerializeToCfg(head2, RtlPassKind::kRtl);
+  EXPECT_TRUE(demat2.sideband.pointer_regnos.empty());
+}
+
+TEST(RightInverseVerifierTest,
+     AdversarialNegativeRejectsDroppedLoopNotesCallFusageAndPointerRegnos) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // Build a valid `SubfunctionId::kDoCrossJump` snapshot carrying:
+  //   - `NOTE_INSN_LOOP_BEG` / `NOTE_INSN_LOOP_END`
+  //   - `CALL_INSN` with explicit 1-arg `call_fusage` (`(use (reg:SI 4 a0))`)
+  //   - `sideband.pointer_regnos = {72}`
+  RtlControlFlowGraph base_cfg;
+  base_cfg.pass = RtlPassKind::kSched2;
+  base_cfg.sideband.pointer_regnos = {72};
+  base_cfg.rpo_blocks.resize(1);
+  base_cfg.rpo_blocks[0].AddLoopNote(RtlLoopNoteKind::kLoopBeg);
+  RtlInsn call_insn;
+  call_insn.canonical_pattern =
+      "(parallel[ (call (mem:SI (symbol_ref:SI (\"callee_one_arg\"))) (const_int 16)) "
+      "(clobber (reg:SI 31 ra)) ] )";
+  call_insn.has_explicit_call_fusage = true;
+  call_insn.call_fusage = {RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4))};
+  base_cfg.rpo_blocks[0].AddInsn(std::move(call_insn));
+  base_cfg.rpo_blocks[0].AddLoopNote(RtlLoopNoteKind::kLoopEnd);
+  base_cfg.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+  const SubfunctionBoundarySnapshot snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kDoCrossJump, base_cfg, {}, /*optimize_level=*/2, {"-O2", "-mips2"});
+
+  RightInverseVerifier ok_verifier(&ctx, &hooks);
+  const RightInverseResult ok_res = ok_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  ASSERT_TRUE(ok_res.matches) << ok_res.diff_detail;
+
+  // (a) Dropping `NOTE_INSN_LOOP_*` must fail `RightInverseVerifier` (`.matches == false`).
+  class DropLoopNotesProvider final : public ToySubfunctionInverses {
+   public:
+    RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x) const override {
+      RtlControlFlowGraph bad = x;
+      auto& insns = bad.rpo_blocks[0].instructions;
+      insns.erase(
+          std::remove_if(insns.begin(), insns.end(),
+                         [](const std::string& p) { return ParseRtlLoopNoteKind(p).has_value(); }),
+          insns.end());
+      bad.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+      return bad;
+    }
+  };
+  DropLoopNotesProvider drop_loop_prov;
+  RightInverseVerifier drop_loop_verifier(&ctx, &hooks, &drop_loop_prov);
+  EXPECT_FALSE(drop_loop_verifier.VerifySubfunctionBoundaryRightInverse(snap).matches);
+
+  // (b1) Dropping `has_explicit_call_fusage = false` must fail `RightInverseVerifier` even if
+  // `MaterializeFromCfg` would have synthesized a fallback.
+  class DropExplicitFusageFlagProvider final : public ToySubfunctionInverses {
+   public:
+    RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x) const override {
+      RtlControlFlowGraph bad = x;
+      for (auto& rinsn : bad.rpo_blocks[0].rtl_insns) {
+        rinsn.has_explicit_call_fusage = false;
+        rinsn.call_fusage.clear();
+      }
+      return bad;
+    }
+  };
+  DropExplicitFusageFlagProvider drop_fusage_flag_prov;
+  RightInverseVerifier drop_fusage_flag_verifier(&ctx, &hooks, &drop_fusage_flag_prov);
+  EXPECT_FALSE(drop_fusage_flag_verifier.VerifySubfunctionBoundaryRightInverse(snap).matches);
+
+  // (b2) Corrupting `call_fusage` (clearing `(use (reg:SI 4 a0))` while keeping
+  // `has_explicit_call_fusage = true`) must fail `RightInverseVerifier` via `CompareAgainst`.
+  class CorruptCallFusageArgsProvider final : public ToySubfunctionInverses {
+   public:
+    RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x) const override {
+      RtlControlFlowGraph bad = x;
+      for (auto& rinsn : bad.rpo_blocks[0].rtl_insns) {
+        if (rinsn.has_explicit_call_fusage) {
+          rinsn.call_fusage.clear();
+        }
+      }
+      return bad;
+    }
+  };
+  CorruptCallFusageArgsProvider corrupt_fusage_prov;
+  RightInverseVerifier corrupt_fusage_verifier(&ctx, &hooks, &corrupt_fusage_prov);
+  const RightInverseResult corrupt_fusage_res =
+      corrupt_fusage_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_FALSE(corrupt_fusage_res.matches);
+  EXPECT_FALSE(corrupt_fusage_res.cfg_comparison.call_fusage_match);
+
+  // (c) Dropping or corrupting `sideband.pointer_regnos` must fail `RightInverseVerifier`.
+  class DropPointerRegnosProvider final : public ToySubfunctionInverses {
+   public:
+    RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x) const override {
+      RtlControlFlowGraph bad = x;
+      bad.sideband.pointer_regnos.clear();
+      return bad;
+    }
+  };
+  DropPointerRegnosProvider drop_ptr_prov;
+  RightInverseVerifier drop_ptr_verifier(&ctx, &hooks, &drop_ptr_prov);
+  const RightInverseResult drop_ptr_res =
+      drop_ptr_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_FALSE(drop_ptr_res.matches);
+  EXPECT_FALSE(drop_ptr_res.cfg_comparison.pointer_regnos_match);
+}
+
+TEST(RightInverseVerifierTest, AdversarialNegativePostCseJumpAndCseJumpsAlteredVerification) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // 1. `InvertJumpOptimizePostCse` must be invoked without any `snap.pre_state` oracle access and
+  // its candidate pre-image must NEVER be silently discarded on `kJumpOptimizeCse1` (`-O1`) or
+  // `kJumpOptimizeCse2` (`-O2`), even when `cse_jumps_altered == false`.
+  const FunctionCompilationTrace trace_o1 = hooks.TraceForwardCompilation(
+      "int add_two(int a, int b) { return a + b; }\n", "add_two", {"-O1"}, "post_cse_jump_neg_o1");
+  const FunctionCompilationTrace trace_o2 = hooks.TraceForwardCompilation(
+      "int add_two(int a, int b) { return a + b; }\n", "add_two", {"-O2"}, "post_cse_jump_neg_o2");
+
+  const SubfunctionBoundarySnapshot* cse1_j_o1_ptr = nullptr;
+  for (const auto& s : trace_o1.subfunction_snapshots) {
+    if (s.subfunction_id == SubfunctionId::kJumpOptimizeCse1) {
+      cse1_j_o1_ptr = &s;
+      break;
+    }
+  }
+  const SubfunctionBoundarySnapshot* cse2_j_o2_ptr = nullptr;
+  for (const auto& s : trace_o2.subfunction_snapshots) {
+    if (s.subfunction_id == SubfunctionId::kJumpOptimizeCse2) {
+      cse2_j_o2_ptr = &s;
+      break;
+    }
+  }
+  ASSERT_NE(cse1_j_o1_ptr, nullptr);
+  ASSERT_NE(cse2_j_o2_ptr, nullptr);
+  ASSERT_FALSE(cse1_j_o1_ptr->pre_state.sideband.cse_jumps_altered);
+  ASSERT_FALSE(cse1_j_o1_ptr->post_state.sideband.cse_jumps_altered);
+  ASSERT_FALSE(cse2_j_o2_ptr->pre_state.sideband.cse_jumps_altered);
+  ASSERT_FALSE(cse2_j_o2_ptr->post_state.sideband.cse_jumps_altered);
+
+  // Strip `pre_state` completely to prove `VerifySubfunctionBoundaryRightInverse` is oracle-free.
+  SubfunctionBoundarySnapshot oracle_free_cse1_j = *cse1_j_o1_ptr;
+  oracle_free_cse1_j.pre_state = {};
+  SubfunctionBoundarySnapshot oracle_free_cse2_j = *cse2_j_o2_ptr;
+  oracle_free_cse2_j.pre_state = {};
+
+  RightInverseVerifier ok_verifier(&ctx, &hooks);
+  EXPECT_TRUE(ok_verifier.VerifySubfunctionBoundaryRightInverse(oracle_free_cse1_j).matches);
+  EXPECT_TRUE(ok_verifier.VerifySubfunctionBoundaryRightInverse(oracle_free_cse2_j).matches);
+
+  class CorruptedJumpOptimizePostCseProvider final : public ToySubfunctionInverses {
+   public:
+    RtlControlFlowGraph InvertJumpOptimizePostCse(const RtlControlFlowGraph& x,
+                                                  bool /*after_loop*/) const override {
+      RtlControlFlowGraph bad = x;
+      if (!bad.rpo_blocks.empty() && !bad.rpo_blocks[0].instructions.empty()) {
+        bad.rpo_blocks[0].instructions[0] = "(set (reg:SI 72) (const_int 99999))";
+        bad.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+      }
+      bad.sideband.cse_jumps_altered = false;
+      return bad;
+    }
+  };
+  CorruptedJumpOptimizePostCseProvider bad_post_cse_jump_prov;
+  RightInverseVerifier bad_post_cse_jump_verifier(&ctx, &hooks, &bad_post_cse_jump_prov);
+  EXPECT_FALSE(
+      bad_post_cse_jump_verifier.VerifySubfunctionBoundaryRightInverse(oracle_free_cse1_j).matches);
+  EXPECT_FALSE(
+      bad_post_cse_jump_verifier.VerifySubfunctionBoundaryRightInverse(oracle_free_cse2_j).matches);
+
+  hooks.ApplyCompilationProfile({.optimize_level = 1, .c_flags = {"-O1"}});
+  EXPECT_TRUE(ok_verifier.VerifyCse1StageRightInverse(trace_o1.pass_snapshots.at(RtlPassKind::kCse))
+                  .matches);
+  EXPECT_FALSE(bad_post_cse_jump_verifier
+                   .VerifyCse1StageRightInverse(trace_o1.pass_snapshots.at(RtlPassKind::kCse))
+                   .matches);
+
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
+  EXPECT_TRUE(
+      ok_verifier.VerifyCse2StageRightInverse(trace_o2.pass_snapshots.at(RtlPassKind::kCse2))
+          .matches);
+  EXPECT_FALSE(bad_post_cse_jump_verifier
+                   .VerifyCse2StageRightInverse(trace_o2.pass_snapshots.at(RtlPassKind::kCse2))
+                   .matches);
+
+  // 2. `kCseBasicBlockCse1`, `kCseBasicBlockCse2`, and `VerifyCseBasicBlockRightInverse` must
+  // reject any candidate pre-image whose forward replay mismatches `sideband.cse_jumps_altered`.
+  RtlControlFlowGraph pre_fold_branch_cfg;
+  pre_fold_branch_cfg.pass = RtlPassKind::kJump;
+  pre_fold_branch_cfg.rpo_blocks.resize(4);
+  pre_fold_branch_cfg.rpo_blocks[0].id = 0;
+  pre_fold_branch_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (const_int 0))");
+  pre_fold_branch_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (pc) (if_then_else (eq:SI (reg:SI 72) (const_int 0)) (label_ref L0) (pc)))");
+  pre_fold_branch_cfg.rpo_blocks[0].successors = {2, 1};
+
+  pre_fold_branch_cfg.rpo_blocks[1].id = 1;
+  pre_fold_branch_cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 10))");
+  pre_fold_branch_cfg.rpo_blocks[1].AddPatternOnly("(set (pc) (label_ref L1))");
+  pre_fold_branch_cfg.rpo_blocks[1].successors = {3};
+
+  pre_fold_branch_cfg.rpo_blocks[2].id = 2;
+  pre_fold_branch_cfg.rpo_blocks[2].has_label = true;
+  pre_fold_branch_cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 20))");
+  pre_fold_branch_cfg.rpo_blocks[2].successors = {3};
+
+  pre_fold_branch_cfg.rpo_blocks[3].id = 3;
+  pre_fold_branch_cfg.rpo_blocks[3].has_label = true;
+  pre_fold_branch_cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
+
+  const SubfunctionBoundarySnapshot cse1_altered_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kCseBasicBlockCse1, pre_fold_branch_cfg, {}, 2, {"-O2", "-mips2"});
+  RtlControlFlowGraph pre_fold_cse2_cfg = pre_fold_branch_cfg;
+  pre_fold_cse2_cfg.pass = RtlPassKind::kLoop;
+  const SubfunctionBoundarySnapshot cse2_altered_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kCseBasicBlockCse2, pre_fold_cse2_cfg, {}, 2, {"-O2", "-mips2"});
+  ASSERT_TRUE(cse1_altered_snap.post_state.sideband.cse_jumps_altered);
+  ASSERT_TRUE(cse2_altered_snap.post_state.sideband.cse_jumps_altered);
+
+  // A broken `InvertCseBasicBlock` that leaves the branch already folded reproduces the post-CSE
+  // instructions structurally, but produces `replayed.post_state.sideband.cse_jumps_altered ==
+  // false != true` and must be rejected.
+  class IdentityCseBasicBlockProvider final : public ToySubfunctionInverses {
+   public:
+    RtlControlFlowGraph InvertCseBasicBlock(const RtlControlFlowGraph& x) const override {
+      RtlControlFlowGraph out = x;
+      out.sideband.cse_jumps_altered = false;
+      return out;
+    }
+  };
+  IdentityCseBasicBlockProvider id_cse_prov;
+  RightInverseVerifier id_cse_verifier(&ctx, &hooks, &id_cse_prov);
+
+  const RightInverseResult bad_cse1_res =
+      id_cse_verifier.VerifySubfunctionBoundaryRightInverse(cse1_altered_snap);
+  EXPECT_FALSE(bad_cse1_res.matches);
+  EXPECT_TRUE(absl::StrContains(bad_cse1_res.diff_detail, "sideband.cse_jumps_altered"))
+      << bad_cse1_res.diff_detail;
+
+  const RightInverseResult bad_cse2_res =
+      id_cse_verifier.VerifySubfunctionBoundaryRightInverse(cse2_altered_snap);
+  EXPECT_FALSE(bad_cse2_res.matches);
+  EXPECT_TRUE(absl::StrContains(bad_cse2_res.diff_detail, "sideband.cse_jumps_altered"))
+      << bad_cse2_res.diff_detail;
+
+  const RightInverseResult bad_cse_bb_res =
+      id_cse_verifier.VerifyCseBasicBlockRightInverse(cse2_altered_snap.post_state);
+  EXPECT_FALSE(bad_cse_bb_res.matches);
+  EXPECT_TRUE(absl::StrContains(bad_cse_bb_res.diff_detail, "sideband.cse_jumps_altered"))
+      << bad_cse_bb_res.diff_detail;
+
+  // Conversely, an inverse that unfolds the constant-folded branch reproduces both the post-CSE
+  // CFG and `sideband.cse_jumps_altered == true`.
+  class UnfoldBranchCseProvider final : public ToySubfunctionInverses {
+   public:
+    UnfoldBranchCseProvider(RtlControlFlowGraph pre_cse1, RtlControlFlowGraph pre_cse2)
+        : pre_cse1_(std::move(pre_cse1)), pre_cse2_(std::move(pre_cse2)) {}
+    RtlControlFlowGraph InvertCseBasicBlock(const RtlControlFlowGraph& x) const override {
+      return x.pass == RtlPassKind::kCse ? pre_cse1_ : pre_cse2_;
+    }
+
+   private:
+    RtlControlFlowGraph pre_cse1_;
+    RtlControlFlowGraph pre_cse2_;
+  };
+  UnfoldBranchCseProvider unfold_prov(pre_fold_branch_cfg, pre_fold_cse2_cfg);
+  RightInverseVerifier unfold_verifier(&ctx, &hooks, &unfold_prov);
+  EXPECT_TRUE(unfold_verifier.VerifySubfunctionBoundaryRightInverse(cse1_altered_snap).matches);
+  EXPECT_TRUE(unfold_verifier.VerifySubfunctionBoundaryRightInverse(cse2_altered_snap).matches);
 }
 
 }  // namespace

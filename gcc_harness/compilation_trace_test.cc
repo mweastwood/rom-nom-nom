@@ -63,13 +63,13 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
     }
   }
 
-  // 2. All 30 subfunction boundary snapshots (covering all 27 unique Stage 0..12
+  // 2. All 35 subfunction boundary snapshots (covering all 28 unique Stage 0..12
   // + `instantiate_virtual_regs` subfunctions) must be present and replayable:
   // materializing `pre_state` into `GccContext` and running the corresponding
   // forward hook must reproduce `post_state`, `post_asm_lines`, and
   // `post_machine_words` identically.
   const auto all_ids = AllSubfunctionIds();
-  ASSERT_EQ(all_ids.size(), 30u);
+  ASSERT_EQ(all_ids.size(), 35u);
   ASSERT_EQ(trace.subfunction_snapshots.size(), all_ids.size());
   EXPECT_EQ(trace.optimize_level, optimize_level);
 
@@ -138,13 +138,13 @@ void VerifyTraceCompletenessAndReplayability(GccContext* /*ctx*/, FunctionHooks*
       case SubfunctionId::kJump1Optimize:
         check_pass_match(RtlPassKind::kJump);
         break;
-      case SubfunctionId::kCseBasicBlockCse1:
+      case SubfunctionId::kJumpOptimizeCse1:
         check_pass_match(RtlPassKind::kCse);
         break;
       case SubfunctionId::kStrengthReduce:
         check_pass_match(RtlPassKind::kLoop);
         break;
-      case SubfunctionId::kCseBasicBlockCse2:
+      case SubfunctionId::kThreadJumpsCse2:
         check_pass_match(RtlPassKind::kCse2);
         break;
       case SubfunctionId::kPropagateBlock:
@@ -385,8 +385,17 @@ void VerifyTraceMatchesActualToolchain(const Toolchain& toolchain, std::string_v
       continue;
     }
     ++emitted_pass_dumps;
-    const RtlControlFlowGraph real_cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
+    RtlControlFlowGraph real_cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
     RtlControlFlowGraph trace_cfg = trace.pass_snapshots.at(pass);
+    if (fn_name == "sum_scaled_array" || fn_name == "swap_and_accumulate") {
+      EXPECT_FALSE(trace_cfg.sideband.pointer_regnos.empty())
+          << "Expected non-empty sideband.pointer_regnos in " << fn_name << " pass "
+          << RtlPassExtension(pass);
+    }
+    // External `cc1 -da` text dumps (`print-rtl.c`) do not print `regno_pointer_flag[]`,
+    // whereas `RtlControlFlowGraph::CompareAgainst` strictly and unconditionally compares
+    // `sideband.pointer_regnos`.
+    real_cfg.sideband.pointer_regnos = trace_cfg.sideband.pointer_regnos;
     // Stock external `cc1` (`ARG_POINTER_REGNUM == 0`) prints `arg_pointer_rtx`
     // as `(reg:SI 0 $0)` in `-da` dumps (including inside `REG_EQUIV` notes on
     // post-reload dumps), whereas in-process `TraceForwardCompilation`
@@ -862,6 +871,72 @@ typedef struct { u8 b[16]; } UnalignedBlock16;
                                         tc.options.c_flags, trace);
     }
   }
+}
+
+TEST(CompilationTraceTest,
+     FreshlyMaterializedLoopDiamondCallPointerStructMatchesToolchainAcrossAll35Subfunctions) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  const auto toolchain_or = Toolchain::Discover(ToolchainOptions{.mode = ToolchainMode::kOriginal});
+  ASSERT_TRUE(toolchain_or.ok()) << toolchain_or.status();
+
+  constexpr std::string_view kSource = R"(
+struct Elem {
+  int val;
+  int weight;
+};
+extern int combine_pair(int a, int b);
+extern void tick_barrier(void);
+
+int step31_end_to_end_probe(struct Elem* items, int n, int bias, int mode_flag) {
+  int acc = 0;
+  int i;
+  for (i = 0; i < n; i++) {
+    int inv = bias * 3 + 7;
+    int arg0;
+    if (mode_flag > 0) {
+      arg0 = items[i].val + inv;
+    } else {
+      arg0 = items[i].weight - inv;
+    }
+    acc += combine_pair(arg0, i);
+  }
+  if (acc == 0) {
+    tick_barrier();
+  }
+  return acc;
+}
+)";
+
+  const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  const FunctionCompilationTrace forward_trace = hooks.TraceForwardCompilation(
+      kSource, "step31_end_to_end_probe", flags, "step31_end_to_end_probe_O2");
+  ASSERT_EQ(forward_trace.subfunction_snapshots.size(), 35u);
+  VerifyTraceCompletenessAndReplayability(&ctx, &hooks, forward_trace, /*optimize_level=*/2);
+  VerifyTraceMatchesActualToolchain(*toolchain_or, kSource, "step31_end_to_end_probe", flags,
+                                    forward_trace);
+
+  // Also round-trip `.00.rtl` through `MaterializeFromCfg` -> `DematerializeToCfg` in a fresh
+  // function context and replay `TraceRtlPipeline` from scratch, verifying every pass `.00.rtl` ..
+  // `.12.dbr` and assembled machine words match `forward_trace` identically.
+  RtlControlFlowGraph rtl00 = forward_trace.pass_snapshots.at(RtlPassKind::kRtl);
+  ctx.BeginFunction("step31_end_to_end_probe");
+  Rtx mat_head = ctx.MaterializeFromCfg(rtl00);
+  ASSERT_NE(mat_head, nullptr);
+  RtlControlFlowGraph demat_rtl00 = ctx.DematerializeToCfg(mat_head, RtlPassKind::kRtl);
+  demat_rtl00.sideband = rtl00.sideband;
+
+  const FunctionCompilationTrace replayed_trace = hooks.TraceRtlPipeline(
+      demat_rtl00, /*optimize_level=*/2, "step31_end_to_end_probe",
+      "step31_end_to_end_probe_replayed", flags, forward_trace.gp_symbol_sizes);
+  for (RtlPassKind pass : AllRtlPasses()) {
+    const RtlCfgPassComparison cmp = replayed_trace.pass_snapshots.at(pass).CompareAgainst(
+        forward_trace.pass_snapshots.at(pass));
+    EXPECT_TRUE(cmp.MatchesExactly())
+        << "Pass " << RtlPassExtension(pass) << " mismatch: " << cmp.mismatch_detail;
+  }
+  EXPECT_EQ(replayed_trace.final_machine_words, forward_trace.final_machine_words);
 }
 
 }  // namespace

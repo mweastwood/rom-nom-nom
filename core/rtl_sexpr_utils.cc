@@ -19,6 +19,7 @@
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 
 namespace rom_nom_nom {
 namespace {
@@ -35,6 +36,9 @@ constexpr int kFirstMipsPseudoRegister = kMipsFirstPseudoRegister;
 size_t RtlFunctionDump::ActiveInsnCount() const {
   size_t count = 0;
   for (const auto& insn : insns) {
+    if (insn.is_deleted) {
+      continue;
+    }
     if (insn.kind == RtlInsnKind::kInsn || insn.kind == RtlInsnKind::kJumpInsn ||
         insn.kind == RtlInsnKind::kCallInsn) {
       ++count;
@@ -46,7 +50,7 @@ size_t RtlFunctionDump::ActiveInsnCount() const {
 size_t RtlFunctionDump::SequenceCount() const {
   size_t count = 0;
   for (const auto& insn : insns) {
-    if (insn.is_sequence) {
+    if (!insn.is_deleted && insn.is_sequence) {
       ++count;
     }
   }
@@ -212,12 +216,20 @@ RtlInsnEntry ParseRtlSexprEntry(std::string raw_sexpr) {
 
   const std::string_view tag_with_flags = next_token();
   std::string_view base_tag = tag_with_flags;
+  bool has_top_level_v_flag = false;
   if (const size_t sep_pos = tag_with_flags.find_first_of("/:");
       sep_pos != std::string_view::npos) {
     base_tag = tag_with_flags.substr(0, sep_pos);
-    const std::string_view rest_flags = tag_with_flags.substr(sep_pos);
-    if (absl::StrContains(rest_flags, "/s")) {
-      entry.in_annulled_branch_delay = true;
+    std::string_view rest_flags = tag_with_flags.substr(sep_pos);
+    if (const size_t colon_pos = rest_flags.find(':'); colon_pos != std::string_view::npos) {
+      rest_flags = rest_flags.substr(0, colon_pos);
+    }
+    for (std::string_view flag_tok : absl::StrSplit(rest_flags, '/', absl::SkipEmpty())) {
+      if (flag_tok == "s") {
+        entry.in_annulled_branch_delay = true;
+      } else if (flag_tok == "v") {
+        has_top_level_v_flag = true;
+      }
     }
   }
 
@@ -235,6 +247,15 @@ RtlInsnEntry ParseRtlSexprEntry(std::string raw_sexpr) {
     entry.kind = RtlInsnKind::kNote;
   } else {
     entry.kind = RtlInsnKind::kOther;
+  }
+
+  // `rtl.h:277`: `#define INSN_DELETED_P(INSN) ((INSN)->volatil)` applies to
+  // `INSN`, `JUMP_INSN`, `CALL_INSN`, `CODE_LABEL`, and `BARRIER` entries.
+  if (has_top_level_v_flag &&
+      (entry.kind == RtlInsnKind::kInsn || entry.kind == RtlInsnKind::kJumpInsn ||
+       entry.kind == RtlInsnKind::kCallInsn || entry.kind == RtlInsnKind::kCodeLabel ||
+       entry.kind == RtlInsnKind::kBarrier)) {
+    entry.is_deleted = true;
   }
 
   int uid = -1;
@@ -368,11 +389,18 @@ absl::flat_hash_map<int, std::string> BuildSequentialLabelMap(
   std::string current_group_label;
   for (size_t i = 0; i < insns.size(); ++i) {
     const auto& entry = insns[i];
+    if (entry.is_deleted) {
+      continue;
+    }
     if (entry.kind == RtlInsnKind::kCodeLabel && entry.uid >= 0) {
+      size_t next_active = i + 1;
+      while (next_active < insns.size() && insns[next_active].is_deleted) {
+        ++next_active;
+      }
       const bool is_tablejump_label =
-          (i + 1 < insns.size() && insns[i + 1].kind == RtlInsnKind::kJumpInsn &&
-           (absl::StrContains(insns[i + 1].raw_sexpr, "(addr_vec:") ||
-            absl::StrContains(insns[i + 1].raw_sexpr, "(addr_diff_vec:")));
+          (next_active < insns.size() && insns[next_active].kind == RtlInsnKind::kJumpInsn &&
+           (absl::StrContains(insns[next_active].raw_sexpr, "(addr_vec:") ||
+            absl::StrContains(insns[next_active].raw_sexpr, "(addr_diff_vec:")));
       if (is_tablejump_label || current_group_label.empty()) {
         current_group_label = absl::StrCat("L", next_idx++);
       }
@@ -570,14 +598,12 @@ std::string ExtractTopLevelPatternFromInsnSexpr(std::string_view sexpr) {
   return std::string(s.substr(pos));
 }
 
-std::string ExtractRegNotesFromInsnSexpr(std::string_view sexpr) {
-  std::string_view s = absl::StripAsciiWhitespace(sexpr);
+namespace {
+
+std::string_view PeelLastSexprFromPrefix(std::string_view* prefix) {
+  std::string_view s = absl::StripAsciiWhitespace(*prefix);
   if (s.empty() || s.back() != ')') {
-    return "";
-  }
-  s = absl::StripAsciiWhitespace(s.substr(0, s.size() - 1));
-  if (s.empty() || s.back() != ')') {
-    return "";
+    return {};
   }
   int depth = 0;
   bool in_quotes = false;
@@ -595,16 +621,61 @@ std::string ExtractRegNotesFromInsnSexpr(std::string_view sexpr) {
     } else if (c == '(') {
       --depth;
       if (depth == 0) {
-        const std::string_view notes = s.substr(idx - 1);
-        if (notes == "(nil)") {
-          return "";
-        }
-        if (absl::StartsWith(notes, "(expr_list:") || absl::StartsWith(notes, "(insn_list:")) {
-          return std::string(notes);
-        }
-        return "";
+        const std::string_view last = s.substr(idx - 1);
+        *prefix = absl::StripAsciiWhitespace(s.substr(0, idx - 1));
+        return last;
       }
     }
+  }
+  return {};
+}
+
+bool IsCallInsnContainerSexpr(std::string_view sexpr) {
+  std::string_view s = absl::StripAsciiWhitespace(sexpr);
+  if (s.size() < 10 || s.front() != '(') {
+    return false;
+  }
+  s.remove_prefix(1);
+  if (!absl::StartsWith(s, "call_insn")) {
+    return false;
+  }
+  const size_t n = std::string_view("call_insn").size();
+  return s.size() == n || absl::ascii_isspace(s[n]) || s[n] == '/' || s[n] == ':';
+}
+
+}  // namespace
+
+std::string ExtractRegNotesFromInsnSexpr(std::string_view sexpr) {
+  std::string_view s = absl::StripAsciiWhitespace(sexpr);
+  if (s.empty() || s.back() != ')') {
+    return "";
+  }
+  const bool is_call_insn = IsCallInsnContainerSexpr(s);
+  s = absl::StripAsciiWhitespace(s.substr(0, s.size() - 1));
+  std::string_view candidate = PeelLastSexprFromPrefix(&s);
+  if (candidate.empty()) {
+    return "";
+  }
+  if (is_call_insn && (candidate == "(nil)" || absl::StartsWith(candidate, "(expr_list ") ||
+                       absl::StartsWith(candidate, "(expr_list("))) {
+    candidate = PeelLastSexprFromPrefix(&s);
+  }
+  if (absl::StartsWith(candidate, "(expr_list:") || absl::StartsWith(candidate, "(insn_list:")) {
+    return std::string(candidate);
+  }
+  return "";
+}
+
+std::string ExtractCallFusageFromInsnSexpr(std::string_view sexpr) {
+  std::string_view s = absl::StripAsciiWhitespace(sexpr);
+  if (!IsCallInsnContainerSexpr(s) || s.back() != ')') {
+    return "";
+  }
+  s = absl::StripAsciiWhitespace(s.substr(0, s.size() - 1));
+  const std::string_view last = PeelLastSexprFromPrefix(&s);
+  if (last == "(nil)" || absl::StartsWith(last, "(expr_list ") ||
+      absl::StartsWith(last, "(expr_list(")) {
+    return std::string(last);
   }
   return "";
 }
@@ -628,24 +699,11 @@ std::pair<std::string_view, std::string_view> SplitPatternAndTrailingRegNotes(
 }
 
 std::string StripTrailingRegNotesFromPattern(std::string_view pat) {
-  std::string_view s = absl::StripAsciiWhitespace(pat);
-  while (true) {
-    const size_t expr_pos = s.rfind(" (expr_list:");
-    const size_t insn_pos = s.rfind(" (insn_list:");
-    size_t cut_pos = std::string_view::npos;
-    if (expr_pos != std::string_view::npos && insn_pos != std::string_view::npos) {
-      cut_pos = std::max(expr_pos, insn_pos);
-    } else if (expr_pos != std::string_view::npos) {
-      cut_pos = expr_pos;
-    } else if (insn_pos != std::string_view::npos) {
-      cut_pos = insn_pos;
-    }
-    if (cut_pos == std::string_view::npos) {
-      break;
-    }
-    s = absl::StripAsciiWhitespace(s.substr(0, cut_pos));
+  auto [core, notes] = SplitPatternAndTrailingRegNotes(pat);
+  if (!notes.empty()) {
+    return std::string(core);
   }
-  return std::string(s);
+  return std::string(absl::StripAsciiWhitespace(pat));
 }
 
 std::string CanonicalizeLabelRefsInPattern(std::string_view pattern,
@@ -727,10 +785,12 @@ std::string ExtractPatternAndNotesFromInsnSexpr(
     std::string_view sexpr, const absl::flat_hash_map<int, std::string>& label_map) {
   std::string pat =
       CanonicalizeLabelRefsInPattern(ExtractTopLevelPatternFromInsnSexpr(sexpr), label_map);
-  const std::string notes =
-      CanonicalizeLabelRefsInPattern(ExtractRegNotesFromInsnSexpr(sexpr), label_map);
-  if (!notes.empty()) {
-    absl::StrAppend(&pat, " ", notes);
+  if (!IsCallInsnContainerSexpr(sexpr)) {
+    const std::string notes =
+        CanonicalizeLabelRefsInPattern(ExtractRegNotesFromInsnSexpr(sexpr), label_map);
+    if (!notes.empty()) {
+      absl::StrAppend(&pat, " ", notes);
+    }
   }
   return CanonicalizeRtlPattern(pat);
 }
@@ -868,13 +928,25 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
 
   struct RawRtlBlock {
     std::vector<int> label_uids;
-    std::vector<std::string> instructions;
+    std::vector<RtlInsn> rtl_insns;
     std::vector<int> jump_target_labels;
     std::vector<int> addr_vec_target_labels;
     bool ends_with_jump = false;
     bool ends_with_uncond_jump = false;
     bool ends_with_return = false;
     bool followed_by_barrier = false;
+  };
+
+  auto make_rtl_insn = [](const FlatRtlItem& item, std::string canon_pat) {
+    RtlInsn insn;
+    insn.canonical_pattern = std::move(canon_pat);
+    insn.is_synthetic_rtl_expansion = true;
+    insn.loop_note_kind = ParseRtlLoopNoteKind(insn.canonical_pattern);
+    if (item.has_explicit_call_fusage) {
+      insn.has_explicit_call_fusage = true;
+      insn.call_fusage = item.call_fusage;
+    }
+    return insn;
   };
 
   std::vector<RawRtlBlock> raw_blocks;
@@ -902,12 +974,12 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
       const auto& it = items[i];
       if (it.kind == RtlInsnKind::kInsn || it.kind == RtlInsnKind::kCallInsn ||
           it.kind == RtlInsnKind::kNote) {
-        blk.instructions.push_back(CanonicalizeRtlPattern(it.pattern));
+        blk.rtl_insns.push_back(make_rtl_insn(it, CanonicalizeRtlPattern(it.pattern)));
         ++i;
       } else if (it.kind == RtlInsnKind::kJumpInsn) {
         blk.ends_with_jump = true;
-        const std::string canon_pat = CanonicalizeRtlPattern(it.pattern);
-        blk.instructions.push_back(canon_pat);
+        std::string canon_pat = CanonicalizeRtlPattern(it.pattern);
+        blk.rtl_insns.push_back(make_rtl_insn(it, std::move(canon_pat)));
         const std::string raw_jump_pat = CanonicalizeRtlPattern(it.raw_pattern_for_targets);
         if (absl::StrContains(raw_jump_pat, "(return)")) {
           blk.ends_with_return = true;
@@ -923,6 +995,9 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
             const int table_uid = table_refs[0];
             bool found_table_label = false;
             for (const auto& e : raw_insns_for_tablejumps) {
+              if (e.is_deleted) {
+                continue;
+              }
               if (e.kind == RtlInsnKind::kCodeLabel && e.uid == table_uid) {
                 found_table_label = true;
                 continue;
@@ -958,7 +1033,7 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
       ++i;
     }
 
-    if (blk.instructions.empty() && blk.label_uids.empty() && !blk.ends_with_return) {
+    if (blk.rtl_insns.empty() && blk.label_uids.empty() && !blk.ends_with_return) {
       continue;
     }
     raw_blocks.push_back(std::move(blk));
@@ -996,8 +1071,9 @@ RtlControlFlowGraph BuildCanonicalCfgFromFlatRtlItems(
     if (pass == RtlPassKind::kRtl) {
       out_blk.has_label = !raw_blocks[b].label_uids.empty();
     }
-    for (const auto& pat : raw_blocks[b].instructions) {
-      out_blk.AddPatternOnly(pat);
+    out_blk.has_trailing_barrier = raw_blocks[b].followed_by_barrier;
+    for (auto& rinsn : raw_blocks[b].rtl_insns) {
+      out_blk.AddInsn(std::move(rinsn));
     }
     for (int target_lbl : raw_blocks[b].addr_vec_target_labels) {
       auto it = label_to_block.find(target_lbl);
@@ -1024,7 +1100,7 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
   std::vector<FlatRtlItem> items;
   for (size_t idx = 0; idx < dump.insns.size(); ++idx) {
     const auto& entry = dump.insns[idx];
-    if (entry.kind == RtlInsnKind::kOther) {
+    if (entry.is_deleted || entry.kind == RtlInsnKind::kOther) {
       continue;
     }
     if (entry.kind == RtlInsnKind::kNote) {
@@ -1038,17 +1114,25 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
       }
       continue;
     }
-    if (entry.kind == RtlInsnKind::kCodeLabel && idx + 1 < dump.insns.size() &&
-        dump.insns[idx + 1].kind == RtlInsnKind::kJumpInsn) {
-      const std::string next_pat =
-          ExtractTopLevelPatternFromInsnSexpr(dump.insns[idx + 1].raw_sexpr);
-      if (absl::StartsWith(next_pat, "(addr_vec:") ||
-          absl::StartsWith(next_pat, "(addr_diff_vec:")) {
-        ++idx;
-        while (idx + 1 < dump.insns.size() && dump.insns[idx + 1].kind == RtlInsnKind::kBarrier) {
-          ++idx;
+    if (entry.kind == RtlInsnKind::kCodeLabel) {
+      size_t next_active = idx + 1;
+      while (next_active < dump.insns.size() && dump.insns[next_active].is_deleted) {
+        ++next_active;
+      }
+      if (next_active < dump.insns.size() &&
+          dump.insns[next_active].kind == RtlInsnKind::kJumpInsn) {
+        const std::string next_pat =
+            ExtractTopLevelPatternFromInsnSexpr(dump.insns[next_active].raw_sexpr);
+        if (absl::StartsWith(next_pat, "(addr_vec:") ||
+            absl::StartsWith(next_pat, "(addr_diff_vec:")) {
+          idx = next_active;
+          while (idx + 1 < dump.insns.size() &&
+                 (dump.insns[idx + 1].is_deleted ||
+                  dump.insns[idx + 1].kind == RtlInsnKind::kBarrier)) {
+            ++idx;
+          }
+          continue;
         }
-        continue;
       }
     }
     if (entry.is_sequence) {
@@ -1057,7 +1141,12 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
       formatted_inner.reserve(inner_entries.size());
       RtlInsnKind effective_kind = entry.kind;
       std::string jump_raw_pat;
+      bool has_explicit_call_fusage = false;
+      std::vector<RtlExpr> call_fusage;
       for (const auto& sub : inner_entries) {
+        if (sub.is_deleted) {
+          continue;
+        }
         std::string tag = ExtractInsnTagWithFlags(sub.raw_sexpr);
         if (const size_t colon_pos = tag.find(':'); colon_pos != std::string::npos) {
           tag.erase(colon_pos);
@@ -1067,6 +1156,15 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
         if (sub.kind == RtlInsnKind::kJumpInsn) {
           effective_kind = RtlInsnKind::kJumpInsn;
           jump_raw_pat = ExtractTopLevelPatternFromInsnSexpr(sub.raw_sexpr);
+        } else if (sub.kind == RtlInsnKind::kCallInsn) {
+          const std::string fusage_str = CanonicalizeLabelRefsInPattern(
+              ExtractCallFusageFromInsnSexpr(sub.raw_sexpr), label_map);
+          if (!fusage_str.empty()) {
+            if (auto parsed_fusage = ParseCallFusageChainSexpr(fusage_str); parsed_fusage.ok()) {
+              has_explicit_call_fusage = true;
+              call_fusage = std::move(*parsed_fusage);
+            }
+          }
         }
       }
       items.push_back(FlatRtlItem{
@@ -1074,6 +1172,8 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
           .uid = entry.uid,
           .raw_pattern_for_targets = jump_raw_pat,
           .pattern = absl::StrCat("(sequence [", absl::StrJoin(formatted_inner, " "), "])"),
+          .has_explicit_call_fusage = has_explicit_call_fusage,
+          .call_fusage = std::move(call_fusage),
       });
       continue;
     }
@@ -1083,6 +1183,18 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
         (absl::StartsWith(raw_pat, "(addr_vec:") || absl::StartsWith(raw_pat, "(addr_diff_vec:"))) {
       continue;
     }
+    bool has_explicit_call_fusage = false;
+    std::vector<RtlExpr> call_fusage;
+    if (entry.kind == RtlInsnKind::kCallInsn) {
+      const std::string fusage_str = CanonicalizeLabelRefsInPattern(
+          ExtractCallFusageFromInsnSexpr(entry.raw_sexpr), label_map);
+      if (!fusage_str.empty()) {
+        if (auto parsed_fusage = ParseCallFusageChainSexpr(fusage_str); parsed_fusage.ok()) {
+          has_explicit_call_fusage = true;
+          call_fusage = std::move(*parsed_fusage);
+        }
+      }
+    }
     items.push_back(FlatRtlItem{
         .kind = entry.kind,
         .uid = entry.uid,
@@ -1091,6 +1203,8 @@ RtlControlFlowGraph BuildCanonicalCfgFromRtlDump(const RtlFunctionDump& dump) {
                     entry.kind == RtlInsnKind::kCallInsn)
                        ? ExtractPatternAndNotesFromInsnSexpr(entry.raw_sexpr, label_map)
                        : raw_pat,
+        .has_explicit_call_fusage = has_explicit_call_fusage,
+        .call_fusage = std::move(call_fusage),
     });
   }
 

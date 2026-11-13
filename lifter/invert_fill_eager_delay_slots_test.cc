@@ -95,6 +95,7 @@ RtlBasicBlock MakeBlock(uint32_t id, bool has_label, std::vector<std::string> in
   blk.has_label = has_label;
   blk.instructions = std::move(instructions);
   blk.successors = std::move(successors);
+  blk.SyncRtlInsnsFromInstructions();
   return blk;
 }
 
@@ -732,6 +733,42 @@ TEST(InvertFillEagerDelaySlotsUnitTest, VerifierRejectsCorruptedInverse) {
   RightInverseVerifier verifier(&ctx, &hooks, &broken_provider);
   const RightInverseResult res = verifier.VerifyFillEagerDelaySlotsRightInverse(cfg);
   EXPECT_FALSE(res.matches);
+}
+
+TEST(InvertFillEagerDelaySlotsUnitTest, PreservesDiModeLibcallFusageAcrossMergedTargetBlock) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const auto trace = hooks.TraceForwardCompilation(
+      "long long DivModCombine(long long a, long long b) {\n"
+      "  if (b == 0) return 0;\n"
+      "  return ((a / b) << 2) + (a % b);\n"
+      "}\n",
+      "DivModCombine", {"-O2", "-mips2", "-mcpu=r4000"});
+
+  const SubfunctionBoundarySnapshot* eager_snap = nullptr;
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kFillEagerDelaySlots) {
+      eager_snap = &snap;
+      break;
+    }
+  }
+  ASSERT_NE(eager_snap, nullptr);
+
+  const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(eager_snap->post_state);
+  size_t explicit_fusage_calls = 0;
+  for (const RtlBasicBlock& blk : lifted.rpo_blocks) {
+    for (const RtlInsn& rinsn : blk.rtl_insns) {
+      if (rinsn.has_explicit_call_fusage) {
+        ++explicit_fusage_calls;
+      }
+    }
+  }
+  EXPECT_EQ(explicit_fusage_calls, 2u);
+
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(*eager_snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
 }  // namespace

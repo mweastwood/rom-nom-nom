@@ -16,10 +16,10 @@
 
 namespace rom_nom_nom::gcc_harness {
 
-// Identifies each of the 27 subfunctions (30 boundary transitions including
-// multi-pass CSE/Sched/Jump instances) across KMC GCC 2.7.2 (`cc1`) and GNU
-// Binutils 2.6 (`as`) whose exact boundary (`pre_state` -> `post_state`) is
-// captured during forward compilation tracing.
+// Identifies each of the 28 subfunctions (35 boundary transitions including
+// multi-pass CSE/Sched/Jump/ThreadJumps instances) across KMC GCC 2.7.2 (`cc1`)
+// and GNU Binutils 2.6 (`as`) whose exact boundary (`pre_state` -> `post_state`)
+// is captured during forward compilation tracing.
 enum class SubfunctionId {
   // Stage 13 (`function.c:instantiate_virtual_regs`, `.00.rtl` virtual-reg instantiation):
   kInstantiateVirtualRegs,
@@ -29,15 +29,20 @@ enum class SubfunctionId {
   kJump1Optimize,
 
   // Stage 11 (`cse1`, `.01.jump` -> `.02.cse`):
+  kThreadJumpsCse1,
   kFoldRtx,
   kCseBasicBlockCse1,
+  kJumpOptimizeCse1,
 
   // Stage 10 (`loop`, `.02.cse` -> `.03.loop`):
   kScanLoop,
   kStrengthReduce,
 
   // Stage 9 (`cse2`, `.03.loop` -> `.04.cse2`):
+  kJumpOptimizeCse2Pre,
   kCseBasicBlockCse2,
+  kJumpOptimizeCse2,
+  kThreadJumpsCse2,
 
   // Stage 8 (`flow`, `.04.cse2` -> `.05.flow`):
   kFindBasicBlocks,
@@ -83,7 +88,7 @@ enum class SubfunctionId {
 // Returns a human-readable name for `id`.
 std::string_view SubfunctionIdName(SubfunctionId id);
 
-// Returns the ordered sequence of all 30 `SubfunctionId`s in forward
+// Returns the ordered sequence of all 35 `SubfunctionId`s in forward
 // compilation order (`kInstantiateVirtualRegs` through `kGasAppendInsn`).
 absl::Span<const SubfunctionId> AllSubfunctionIds();
 
@@ -207,6 +212,7 @@ class FunctionHooks {
   // Stage 2 & Stage 12: Jump Optimization & Cross-Jumping (`jump.c`)
   // ---------------------------------------------------------------------------
   void RunJumpOptimize(int cross_jump, int noop_moves, int after_regscan, Rtx first = nullptr);
+  void RunThreadJumps(Rtx f = nullptr, int max_reg = 0, int flag_before_loop = 1);
   CrossJumpSearchResult RunFindCrossJump(Rtx e1, Rtx e2, int minimum);
   void RunDoCrossJump(Rtx insn, Rtx newjpos, Rtx newlpos);
   int RunRedirectJump(Rtx jump, Rtx nlabel);

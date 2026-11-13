@@ -357,15 +357,19 @@ struct RtlRegNote {
 
 // Parsed representation of an `RtlInsn` pattern string, separating the core
 // instruction pattern from any trailing `REG_NOTES` list (`(expr_list:...)` or
-// `[REG_NOTES: ...]`).
+// `[REG_NOTES: ...]`) and optional `CALL_INSN_FUNCTION_USAGE` list
+// (`(expr_list (use ...) ...)`).
 struct RtlPatternAndNotes {
   RtlExpr pattern;
   std::vector<RtlRegNote> reg_notes;
+  std::vector<RtlExpr> call_fusage;
+  bool has_explicit_call_fusage = false;
   bool bracketed_notes = false;
 
-  // Extracts `pattern` and optional `reg_notes` directly from a structured
-  // `(insn ...)`, `(jump_insn ...)`, or `(call_insn ...)` element inside a
-  // `(sequence [...])` without re-serializing child ASTs to strings.
+  // Extracts `pattern`, optional `reg_notes`, and optional `call_fusage`
+  // directly from a structured `(insn ...)`, `(jump_insn ...)`, or
+  // `(call_insn ...)` element inside a `(sequence [...])` without
+  // re-serializing child ASTs to strings.
   static absl::StatusOr<RtlPatternAndNotes> FromSequenceSubInsn(const RtlExpr& sub_insn);
 
   std::string ToSexprString() const;
@@ -375,23 +379,34 @@ struct RtlPatternAndNotes {
 
   bool operator==(const RtlPatternAndNotes& other) const {
     return pattern == other.pattern && reg_notes == other.reg_notes &&
+           call_fusage == other.call_fusage &&
+           has_explicit_call_fusage == other.has_explicit_call_fusage &&
            bracketed_notes == other.bracketed_notes;
   }
   bool operator!=(const RtlPatternAndNotes& other) const { return !(*this == other); }
 };
 
+// Parses a `(expr_list (use ...) ... (nil))` `CALL_INSN_FUNCTION_USAGE` S-expression
+// (or `(nil)`) into structured `(use ...)` / `(clobber ...)` elements.
+absl::Status ParseCallFusageChainExpr(const RtlExpr& fusage_expr, std::vector<RtlExpr>* out_fusage);
+absl::StatusOr<std::vector<RtlExpr>> ParseCallFusageChainSexpr(std::string_view fusage_sexpr);
+RtlExpr BuildCallFusageChainExpr(absl::Span<const RtlExpr> call_fusage);
+
 // Splits `pattern_with_notes` (either `<pattern> (expr_list:...)` or
-// `<pattern> [REG_NOTES: (expr_list:...)]`) into its structured pattern and
-// `REG_NOTES` list.
+// `<pattern> [REG_NOTES: (expr_list:...)]`, optionally followed by untyped
+// `CALL_INSN_FUNCTION_USAGE` `(expr_list (use ...) ...)`) into its structured
+// pattern, `REG_NOTES` list, and `call_fusage` list.
 absl::StatusOr<RtlPatternAndNotes> ParsePatternAndNotes(std::string_view pattern_with_notes);
 
-// Formats a structured pattern and optional `REG_NOTES` list back into the
-// canonical `RtlInsn` pattern representation.
+// Formats a structured pattern, optional `REG_NOTES` list, and optional
+// `call_fusage` list back into the canonical `RtlInsn` pattern representation.
 std::string FormatPatternAndNotes(const RtlExpr& pattern, absl::Span<const RtlRegNote> notes,
-                                  bool bracketed = false);
+                                  bool bracketed = false,
+                                  absl::Span<const RtlExpr> call_fusage = {});
 std::string FormatGccPrintRtlPatternAndNotes(const RtlExpr& pattern,
                                              absl::Span<const RtlRegNote> notes,
-                                             bool bracketed = false);
+                                             bool bracketed = false,
+                                             absl::Span<const RtlExpr> call_fusage = {});
 
 }  // namespace rom_nom_nom
 

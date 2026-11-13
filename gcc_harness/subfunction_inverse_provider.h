@@ -304,6 +304,20 @@ class SubfunctionInverseProvider {
     return {};
   }
 
+  // 22b. Inverse of `jump.c:thread_jumps`.
+  virtual RtlControlFlowGraph InvertThreadJumps(const RtlControlFlowGraph& /*x*/,
+                                                bool /*before_loop*/) const {
+    return {};
+  }
+
+  // 22c. Inverse of post-CSE `jump.c:jump_optimize` (`cross_jump=0, noop_moves=0`).
+  // `after_loop == false` corresponds to post-CSE1 (`SubfunctionId::kJumpOptimizeCse1`);
+  // `after_loop == true` corresponds to post-CSE2 (`SubfunctionId::kJumpOptimizeCse2`).
+  virtual RtlControlFlowGraph InvertJumpOptimizePostCse(
+      const RtlControlFlowGraph& /*post_jump_cfg_x*/, bool /*after_loop*/) const {
+    return {};
+  }
+
   // ---------------------------------------------------------------------------
   // Stage 10: Loop Optimization (`loop.c`)
   // ---------------------------------------------------------------------------

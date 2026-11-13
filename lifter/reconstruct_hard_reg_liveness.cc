@@ -198,6 +198,7 @@ bool HasExistingReturnUse(const RtlControlFlowGraph& cfg) {
 
 struct ElemSummary {
   RegMask uses = 0;
+  RegMask arg_fusage_uses = 0;
   RegMask defs = 0;
   RegMask explicit_sets = 0;
   RegMask integrated_ret_regs = 0;
@@ -324,13 +325,25 @@ ElemSummary SummarizeSingleElem(const RtlPatternAndNotes& pn, bool force_call, b
   AnalyzePatternAst(pat, gp64, fp64, &s);
 
   if (s.is_call) {
-    s.uses |= *pending_arg_defs;
-    for (const RtlRegNote& note : pn.reg_notes) {
-      if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg()) {
-        const int r = note.datum.RegNo();
-        const RegMask m = RegBitMask(r, note.datum.mode, gp64, fp64) & kArgRegMask;
-        s.uses |= m;
+    if (pn.has_explicit_call_fusage) {
+      for (const RtlExpr& item : pn.call_fusage) {
+        if (item.op == RtlOp::kUse && !item.children.empty() && item.children[0].IsReg()) {
+          const int r = item.children[0].RegNo();
+          const RegMask m = RegBitMask(r, item.children[0].mode, gp64, fp64) & kArgRegMask;
+          s.arg_fusage_uses |= m;
+        }
       }
+      s.uses |= s.arg_fusage_uses;
+    } else {
+      s.arg_fusage_uses |= *pending_arg_defs;
+      for (const RtlRegNote& note : pn.reg_notes) {
+        if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg()) {
+          const int r = note.datum.RegNo();
+          const RegMask m = RegBitMask(r, note.datum.mode, gp64, fp64) & kArgRegMask;
+          s.arg_fusage_uses |= m;
+        }
+      }
+      s.uses |= s.arg_fusage_uses;
     }
     s.defs |= kCallClobberedMask;
     *pending_arg_defs = 0;
@@ -417,6 +430,7 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
       }
       isum.valid = true;
       isum.top_pn = std::move(*pn);
+      const RtlInsn* src_rinsn = (i < blk.rtl_insns.size()) ? &blk.rtl_insns[i] : nullptr;
       if (isum.top_pn.pattern.op == RtlOp::kSequence && isum.top_pn.pattern.children.size() == 2) {
         auto h_pn = RtlPatternAndNotes::FromSequenceSubInsn(isum.top_pn.pattern.children[0]);
         auto s_pn = RtlPatternAndNotes::FromSequenceSubInsn(isum.top_pn.pattern.children[1]);
@@ -427,6 +441,11 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
           isum.head_pn = std::move(*h_pn);
           isum.slot_pn = std::move(*s_pn);
           isum.is_call_seq = (isum.seq_head_wrap.op == RtlOp::kCallInsn);
+          if (isum.is_call_seq && !isum.head_pn.has_explicit_call_fusage && src_rinsn != nullptr &&
+              src_rinsn->has_explicit_call_fusage) {
+            isum.head_pn.has_explicit_call_fusage = true;
+            isum.head_pn.call_fusage = src_rinsn->call_fusage;
+          }
           isum.is_annulled_target_seq =
               (isum.seq_head_wrap.op == RtlOp::kJumpInsn && isum.seq_head_wrap.flags.unchanging &&
                isum.seq_slot_wrap.flags.in_struct && i + 1 == blk.instructions.size());
@@ -444,6 +463,11 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
           any_integrated_ret |= isum.head.integrated_ret_regs | isum.slot.integrated_ret_regs;
           continue;
         }
+      }
+      if (!isum.top_pn.has_explicit_call_fusage && src_rinsn != nullptr &&
+          src_rinsn->has_explicit_call_fusage) {
+        isum.top_pn.has_explicit_call_fusage = true;
+        isum.top_pn.call_fusage = src_rinsn->call_fusage;
       }
       isum.single = SummarizeSingleElem(isum.top_pn, /*force_call=*/false, res.gp64, res.fp64,
                                         &pending_arg_defs);
@@ -696,9 +720,12 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
           InsnSummary& isum = res.block_summaries[b][i];
           if (!isum.valid) continue;
           auto process_call = [&](ElemSummary* call_elem, const RtlPatternAndNotes& call_pn) {
+            if (call_pn.has_explicit_call_fusage) {
+              step_arg_elem(*call_elem, call_pn, &cur_valid, &cur_explicit);
+              return;
+            }
             const std::string sym = extract_callee_sym(call_pn.pattern);
-            const RegMask base_explicit =
-                (call_elem->uses & kArgRegMask) | (cur_valid & cur_explicit);
+            const RegMask base_explicit = call_elem->arg_fusage_uses | (cur_valid & cur_explicit);
             const RegMask closed_explicit = close_o32_arg_prefix(base_explicit, cur_valid);
             if (pass_idx == 0) {
               if (!sym.empty()) {
@@ -711,6 +738,7 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
                   inferred |= (cur_valid & it->second);
                 }
               }
+              call_elem->arg_fusage_uses |= inferred;
               call_elem->uses |= inferred;
             }
             step_arg_elem(*call_elem, call_pn, &cur_valid, &cur_explicit);
@@ -1333,6 +1361,56 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
   const RegMask exit_ret_mask = df.live_at_exit & kRetCandMask;
   const size_t n_blocks = cfg->rpo_blocks.size();
 
+  auto build_call_fusage_exprs = [&](RegMask arg_mask) -> std::vector<RtlExpr> {
+    std::vector<RtlExpr> fusage;
+    const RtlMachineMode gpr_mode = df.gp64 ? RtlMachineMode::kDi : RtlMachineMode::kSi;
+    for (int r = 7; r >= 4; --r) {
+      if ((arg_mask & (RegMask{1} << r)) != 0) {
+        fusage.push_back(RtlExpr::MakeUse(RtlExpr::MakeReg(gpr_mode, r)));
+      }
+    }
+    if (!df.fp64) {
+      for (int r : {46, 44}) {
+        const bool lo = (arg_mask & (RegMask{1} << r)) != 0;
+        const bool hi = (arg_mask & (RegMask{1} << (r + 1))) != 0;
+        if (lo || hi) {
+          fusage.push_back(RtlExpr::MakeUse(
+              RtlExpr::MakeReg(hi ? RtlMachineMode::kDf : RtlMachineMode::kSf, r)));
+        }
+      }
+    } else {
+      for (int r : {47, 46, 45, 44}) {
+        if ((arg_mask & (RegMask{1} << r)) != 0) {
+          fusage.push_back(RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kDf, r)));
+        }
+      }
+    }
+    return fusage;
+  };
+
+  auto apply_call_fusage_to_blocks = [&]() {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      RtlBasicBlock& blk = cfg->rpo_blocks[b];
+      if (blk.rtl_insns.size() != blk.instructions.size()) {
+        blk.SyncRtlInsnsFromInstructions();
+      }
+      const size_t limit = std::min(blk.rtl_insns.size(), df.block_summaries[b].size());
+      for (size_t i = 0; i < limit; ++i) {
+        const InsnSummary& isum = df.block_summaries[b][i];
+        if (!isum.valid || !(isum.is_call_seq || (!isum.is_sequence && isum.single.is_call))) {
+          continue;
+        }
+        RtlInsn& rinsn = blk.rtl_insns[i];
+        if (!rinsn.has_explicit_call_fusage) {
+          const RegMask fusage_mask =
+              isum.is_call_seq ? isum.head.arg_fusage_uses : isum.single.arg_fusage_uses;
+          rinsn.has_explicit_call_fusage = true;
+          rinsn.call_fusage = build_call_fusage_exprs(fusage_mask);
+        }
+      }
+    }
+  };
+
   // Backward propagation of exit-reaching return register values (`exit_ret_mask`)
   // so only genuine return-value `SET`s receive `REG_FUNCTION_VALUE_P` (`reg/i`).
   std::vector<RegMask> ret_need_in(n_blocks, 0);
@@ -1379,6 +1457,7 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
   }
 
   if (exit_ret_mask == 0 && !attach_notes) {
+    apply_call_fusage_to_blocks();
     return;
   }
 
@@ -1831,6 +1910,7 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
       cfg->rpo_blocks[b].SyncRtlInsnsFromInstructions();
     }
   }
+  apply_call_fusage_to_blocks();
 
   // Insert the trailing `(use (reg/i:<mode> <regno>))` pseudo-instruction when
   // the function returns a value and the final RPO block can reach exit.

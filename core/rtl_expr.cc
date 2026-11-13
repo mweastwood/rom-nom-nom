@@ -1093,7 +1093,55 @@ RtlExpr BuildRegNotesChainExpr(absl::Span<const RtlRegNote> notes) {
   return chain;
 }
 
+bool IsUntypedCallFusageListExpr(const RtlExpr& expr) {
+  return expr.op == RtlOp::kExprList && expr.mode == RtlMachineMode::kNone && expr.raw_mode.empty();
+}
+
 }  // namespace
+
+absl::Status ParseCallFusageChainExpr(const RtlExpr& fusage_expr,
+                                      std::vector<RtlExpr>* out_fusage) {
+  const RtlExpr* cur = &fusage_expr;
+  while (cur != nullptr && !cur->IsNil()) {
+    if (cur->op != RtlOp::kExprList || cur->children.size() != 2) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Expected 2-child expr_list node in CALL_INSN_FUNCTION_USAGE: ", cur->ToSexprString()));
+    }
+    out_fusage->push_back(cur->children[0]);
+    cur = &cur->children[1];
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::vector<RtlExpr>> ParseCallFusageChainSexpr(std::string_view fusage_sexpr) {
+  std::string_view trimmed = absl::StripAsciiWhitespace(fusage_sexpr);
+  std::vector<RtlExpr> out;
+  if (trimmed.empty() || trimmed == "(nil)") {
+    return out;
+  }
+  auto parsed_or = RtlExpr::Parse(trimmed);
+  if (!parsed_or.ok()) {
+    return parsed_or.status();
+  }
+  absl::Status st = ParseCallFusageChainExpr(*parsed_or, &out);
+  if (!st.ok()) {
+    return st;
+  }
+  return out;
+}
+
+RtlExpr BuildCallFusageChainExpr(absl::Span<const RtlExpr> call_fusage) {
+  RtlExpr chain = RtlExpr::MakeNil();
+  for (auto it = call_fusage.rbegin(); it != call_fusage.rend(); ++it) {
+    RtlExpr node;
+    node.op = RtlOp::kExprList;
+    node.mode = RtlMachineMode::kNone;
+    node.children.push_back(*it);
+    node.children.push_back(std::move(chain));
+    chain = std::move(node);
+  }
+  return chain;
+}
 
 bool RtlExpr::operator==(const RtlExpr& other) const {
   return op == other.op && mode == other.mode && flags == other.flags && int_val == other.int_val &&
@@ -1304,6 +1352,13 @@ RtlExpr RtlExpr::MakeInsnWrapper(RtlOp wrapper_op, RtlFlags flags,
     expr.children.push_back(BuildRegNotesChainExpr(inner.reg_notes));
     expr.generic_items.push_back(std::move(notes_item));
   }
+  if (!inner.call_fusage.empty()) {
+    GenericItem fusage_item;
+    fusage_item.kind = GenericItem::Kind::kChildExpr;
+    fusage_item.child_index = expr.children.size();
+    expr.children.push_back(BuildCallFusageChainExpr(inner.call_fusage));
+    expr.generic_items.push_back(std::move(fusage_item));
+  }
   return expr;
 }
 
@@ -1503,21 +1558,44 @@ absl::StatusOr<RtlPatternAndNotes> RtlPatternAndNotes::FromSequenceSubInsn(
   const bool has_leading_uid = !sub_insn.generic_items.empty() &&
                                sub_insn.generic_items[0].kind == RtlExpr::GenericItem::Kind::kInt;
   if (has_leading_uid) {
-    if (sub_insn.children.size() >= 3) {
+    if (sub_insn.op == RtlOp::kCallInsn) {
+      if (sub_insn.children.size() >= 3) {
+        absl::Status st = ParseRegNotesChainExpr(sub_insn.children[2], &out.reg_notes);
+        if (!st.ok()) {
+          return st;
+        }
+      }
+      if (sub_insn.children.size() >= 4) {
+        absl::Status st = ParseCallFusageChainExpr(sub_insn.children[3], &out.call_fusage);
+        if (!st.ok()) {
+          return st;
+        }
+        out.has_explicit_call_fusage = true;
+      }
+    } else if (sub_insn.children.size() >= 3) {
       absl::Status st = ParseRegNotesChainExpr(sub_insn.children.back(), &out.reg_notes);
       if (!st.ok()) {
         return st;
       }
     }
   } else {
-    if (sub_insn.children.size() > 2) {
+    if (sub_insn.children.size() > 3) {
       return absl::InvalidArgumentError(
           "Unexpected extra child expressions in compact SEQUENCE sub-insn");
     }
-    if (sub_insn.children.size() == 2) {
-      absl::Status st = ParseRegNotesChainExpr(sub_insn.children[1], &out.reg_notes);
-      if (!st.ok()) {
-        return st;
+    for (size_t idx = 1; idx < sub_insn.children.size(); ++idx) {
+      const RtlExpr& extra = sub_insn.children[idx];
+      if (IsUntypedCallFusageListExpr(extra)) {
+        absl::Status st = ParseCallFusageChainExpr(extra, &out.call_fusage);
+        if (!st.ok()) {
+          return st;
+        }
+        out.has_explicit_call_fusage = true;
+      } else {
+        absl::Status st = ParseRegNotesChainExpr(extra, &out.reg_notes);
+        if (!st.ok()) {
+          return st;
+        }
       }
     }
   }
@@ -1525,17 +1603,20 @@ absl::StatusOr<RtlPatternAndNotes> RtlPatternAndNotes::FromSequenceSubInsn(
 }
 
 std::string RtlPatternAndNotes::ToSexprString() const {
-  return FormatPatternAndNotes(pattern, reg_notes, bracketed_notes);
+  return FormatPatternAndNotes(pattern, reg_notes, bracketed_notes, call_fusage);
 }
 
 std::string RtlPatternAndNotes::ToGccPrintRtlString() const {
-  return FormatGccPrintRtlPatternAndNotes(pattern, reg_notes, bracketed_notes);
+  return FormatGccPrintRtlPatternAndNotes(pattern, reg_notes, bracketed_notes, call_fusage);
 }
 
 void RtlPatternAndNotes::RewriteRegs(absl::FunctionRef<void(RtlExpr&)> mutator) {
   pattern.RewriteRegs(mutator);
   for (auto& note : reg_notes) {
     note.datum.RewriteRegs(mutator);
+  }
+  for (auto& fusage_item : call_fusage) {
+    fusage_item.RewriteRegs(mutator);
   }
 }
 
@@ -1551,20 +1632,21 @@ absl::StatusOr<RtlPatternAndNotes> ParsePatternAndNotes(std::string_view pattern
   constexpr std::string_view kNotesTag = " [REG_NOTES: ";
   std::string_view core_str = pattern_with_notes;
   std::string_view notes_str;
+  std::string_view tail_after_bracket;
   bool bracketed = false;
 
   size_t tag_pos = pattern_with_notes.find(kNotesTag);
   if (tag_pos != std::string_view::npos) {
     bracketed = true;
     core_str = pattern_with_notes.substr(0, tag_pos);
-    notes_str = pattern_with_notes.substr(tag_pos + kNotesTag.size());
-    while (!notes_str.empty() && std::isspace(static_cast<unsigned char>(notes_str.back())) != 0) {
-      notes_str.remove_suffix(1);
-    }
-    if (!absl::ConsumeSuffix(&notes_str, "]")) {
+    std::string_view rest = pattern_with_notes.substr(tag_pos + kNotesTag.size());
+    size_t close_bracket = rest.find(']');
+    if (close_bracket == std::string_view::npos) {
       return absl::InvalidArgumentError(
           absl::StrCat("Malformed [REG_NOTES: ...] suffix in: ", pattern_with_notes));
     }
+    notes_str = rest.substr(0, close_bracket);
+    tail_after_bracket = absl::StripAsciiWhitespace(rest.substr(close_bracket + 1));
   } else {
     size_t pos = 0;
     auto first_or = ParseExprImpl(pattern_with_notes, &pos);
@@ -1574,7 +1656,7 @@ absl::StatusOr<RtlPatternAndNotes> ParsePatternAndNotes(std::string_view pattern
     SkipWhitespace(pattern_with_notes, &pos);
     if (pos < pattern_with_notes.size()) {
       core_str = pattern_with_notes.substr(0, pos);
-      notes_str = pattern_with_notes.substr(pos);
+      tail_after_bracket = pattern_with_notes.substr(pos);
     }
   }
 
@@ -1598,37 +1680,65 @@ absl::StatusOr<RtlPatternAndNotes> ParsePatternAndNotes(std::string_view pattern
     }
   }
 
+  if (!tail_after_bracket.empty()) {
+    size_t pos = 0;
+    while (pos < tail_after_bracket.size()) {
+      auto extra_or = ParseExprImpl(tail_after_bracket, &pos);
+      if (!extra_or.ok()) {
+        return extra_or.status();
+      }
+      SkipWhitespace(tail_after_bracket, &pos);
+      if (IsUntypedCallFusageListExpr(*extra_or)) {
+        absl::Status st = ParseCallFusageChainExpr(*extra_or, &out.call_fusage);
+        if (!st.ok()) {
+          return st;
+        }
+        out.has_explicit_call_fusage = true;
+      } else {
+        absl::Status st = ParseRegNotesChainExpr(*extra_or, &out.reg_notes);
+        if (!st.ok()) {
+          return st;
+        }
+      }
+    }
+  }
+
   return out;
 }
 
 std::string FormatPatternAndNotes(const RtlExpr& pattern, absl::Span<const RtlRegNote> notes,
-                                  bool bracketed) {
+                                  bool bracketed, absl::Span<const RtlExpr> call_fusage) {
   std::string out = pattern.ToSexprString();
-  if (notes.empty()) {
-    return out;
+  if (!notes.empty()) {
+    const RtlExpr chain = BuildRegNotesChainExpr(notes);
+    if (bracketed) {
+      absl::StrAppend(&out, " [REG_NOTES: ", chain.ToSexprString(), "]");
+    } else {
+      absl::StrAppend(&out, " ", chain.ToSexprString());
+    }
   }
-
-  const RtlExpr chain = BuildRegNotesChainExpr(notes);
-  if (bracketed) {
-    absl::StrAppend(&out, " [REG_NOTES: ", chain.ToSexprString(), "]");
-  } else {
-    absl::StrAppend(&out, " ", chain.ToSexprString());
+  if (!call_fusage.empty()) {
+    const RtlExpr fusage_chain = BuildCallFusageChainExpr(call_fusage);
+    absl::StrAppend(&out, " ", fusage_chain.ToSexprString());
   }
   return out;
 }
 
 std::string FormatGccPrintRtlPatternAndNotes(const RtlExpr& pattern,
-                                             absl::Span<const RtlRegNote> notes, bool bracketed) {
+                                             absl::Span<const RtlRegNote> notes, bool bracketed,
+                                             absl::Span<const RtlExpr> call_fusage) {
   std::string out = pattern.ToGccPrintRtlString();
-  if (notes.empty()) {
-    return out;
+  if (!notes.empty()) {
+    const RtlExpr chain = BuildRegNotesChainExpr(notes);
+    if (bracketed) {
+      absl::StrAppend(&out, " [REG_NOTES: ", chain.ToGccPrintRtlString(), "]");
+    } else {
+      absl::StrAppend(&out, " ", chain.ToGccPrintRtlString());
+    }
   }
-
-  const RtlExpr chain = BuildRegNotesChainExpr(notes);
-  if (bracketed) {
-    absl::StrAppend(&out, " [REG_NOTES: ", chain.ToGccPrintRtlString(), "]");
-  } else {
-    absl::StrAppend(&out, " ", chain.ToGccPrintRtlString());
+  if (!call_fusage.empty()) {
+    const RtlExpr fusage_chain = BuildCallFusageChainExpr(call_fusage);
+    absl::StrAppend(&out, " ", fusage_chain.ToGccPrintRtlString());
   }
   return out;
 }

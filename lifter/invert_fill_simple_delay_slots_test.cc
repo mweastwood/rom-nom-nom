@@ -8,6 +8,7 @@
 
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -94,6 +95,7 @@ RtlBasicBlock MakeBlock(uint32_t id, bool has_label, std::vector<std::string> in
   blk.id = id;
   blk.has_label = has_label;
   blk.instructions = std::move(instructions);
+  blk.SyncRtlInsnsFromInstructions();
   blk.successors = std::move(successors);
   return blk;
 }
@@ -152,6 +154,10 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, UnpacksCallAndJumpDelaySlotsAndVerifies
            "(use (reg/i:SI 2 v0))", "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
           {}),
   };
+  call_cfg.rpo_blocks[0].rtl_insns[0].has_explicit_call_fusage = true;
+  call_cfg.rpo_blocks[0].rtl_insns[0].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
 
   const RtlControlFlowGraph lifted = InvertFillSimpleDelaySlots(call_cfg);
   ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
@@ -188,6 +194,8 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, UnpacksCallAndJumpDelaySlotsAndVerifies
                  "(reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1))))])"},
                 {}),
   };
+  jump_after_call_cfg.rpo_blocks[0].rtl_insns[0].has_explicit_call_fusage = true;
+  jump_after_call_cfg.rpo_blocks[0].rtl_insns[0].call_fusage.clear();
   const RightInverseResult jump_res =
       verifier.VerifyFillSimpleDelaySlotsRightInverse(jump_after_call_cfg);
   EXPECT_TRUE(jump_res.matches) << jump_res.diff_detail;

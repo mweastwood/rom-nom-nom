@@ -96,6 +96,10 @@ class ToySubfunctionInverses : public SubfunctionInverseProvider {
 
   std::string InvertFoldRtx(std::string_view folded_rtx_x) const override;
   RtlControlFlowGraph InvertCseBasicBlock(const RtlControlFlowGraph& x) const override;
+  RtlControlFlowGraph InvertThreadJumps(const RtlControlFlowGraph& x,
+                                        bool before_loop) const override;
+  RtlControlFlowGraph InvertJumpOptimizePostCse(const RtlControlFlowGraph& x,
+                                                bool after_loop) const override;
 
   // ---------------------------------------------------------------------------
   // Stage 10: Loop Optimization (`loop.c`)

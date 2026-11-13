@@ -342,5 +342,56 @@ TEST(RtlExprTest, ParsesAndFormatsUidElidedInsnListNotesLosslessly) {
   EXPECT_EQ(parsed->ToGccPrintRtlString(), pat_text);
 }
 
+TEST(RtlExprTest, CallFusageAndFrameRelatedFlagsRoundTripInTopLevelAndSequence) {
+  auto frame_reg = RtlExpr::Parse("(reg/f/v/u:SI 72)");
+  ASSERT_TRUE(frame_reg.ok()) << frame_reg.status().message();
+  EXPECT_TRUE(frame_reg->flags.frame_related);
+  EXPECT_TRUE(frame_reg->flags.volatil);
+  EXPECT_TRUE(frame_reg->flags.unchanging);
+  EXPECT_EQ(frame_reg->ToGccPrintRtlString(), "(reg/v/u/f:SI 72)");
+
+  auto empty_fusage = ParseCallFusageChainSexpr("(nil)");
+  ASSERT_TRUE(empty_fusage.ok()) << empty_fusage.status().message();
+  EXPECT_TRUE(empty_fusage->empty());
+  EXPECT_EQ(BuildCallFusageChainExpr(*empty_fusage).ToGccPrintRtlString(), "(nil)");
+
+  const std::string fusage_text =
+      "(expr_list (use (reg:SI 5 a1)) (expr_list (use (reg:SI 4 a0)) (nil)))";
+  auto parsed_fusage = ParseCallFusageChainSexpr(fusage_text);
+  ASSERT_TRUE(parsed_fusage.ok()) << parsed_fusage.status().message();
+  ASSERT_EQ(parsed_fusage->size(), 2u);
+  EXPECT_EQ(BuildCallFusageChainExpr(*parsed_fusage).ToGccPrintRtlString(), fusage_text);
+
+  const std::string call_with_notes_and_fusage =
+      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 16))) "
+      "(clobber (reg:SI 31 ra)) ] ) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))) " +
+      fusage_text;
+  auto parsed_call = ParsePatternAndNotes(call_with_notes_and_fusage);
+  ASSERT_TRUE(parsed_call.ok()) << parsed_call.status().message();
+  EXPECT_TRUE(parsed_call->has_explicit_call_fusage);
+  ASSERT_EQ(parsed_call->reg_notes.size(), 2u);
+  ASSERT_EQ(parsed_call->call_fusage.size(), 2u);
+
+  parsed_call->ReplaceRegNo(4, 6);
+  EXPECT_EQ(parsed_call->call_fusage[1].children[0].RegNo(), 6);
+
+  RtlPatternAndNotes slot_pn;
+  slot_pn.pattern =
+      RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kSI, 6), RtlExpr::MakeConstInt(9));
+  RtlExpr seq = RtlExpr::MakeSequence({
+      RtlExpr::MakeInsnWrapper(RtlOp::kCallInsn, RtlFlags{}, *parsed_call),
+      RtlExpr::MakeInsnWrapper(RtlOp::kInsn, RtlFlags{}, slot_pn),
+  });
+  auto reparsed_seq = RtlExpr::Parse(seq.ToGccPrintRtlString());
+  ASSERT_TRUE(reparsed_seq.ok()) << reparsed_seq.status().message();
+  ASSERT_EQ(reparsed_seq->children.size(), 2u);
+  auto extracted_call = RtlPatternAndNotes::FromSequenceSubInsn(reparsed_seq->children[0]);
+  ASSERT_TRUE(extracted_call.ok()) << extracted_call.status().message();
+  EXPECT_TRUE(extracted_call->has_explicit_call_fusage);
+  EXPECT_EQ(extracted_call->call_fusage, parsed_call->call_fusage);
+  EXPECT_EQ(extracted_call->reg_notes, parsed_call->reg_notes);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom

@@ -26,6 +26,7 @@
 #include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "core/rtl_sexpr_utils.h"
 
 // NOLINTBEGIN(readability-identifier-naming)
@@ -3041,6 +3042,29 @@ void FunctionHooks::RunJumpOptimize(int cross_jump, int noop_moves, int after_re
   }
 }
 
+void FunctionHooks::RunThreadJumps(Rtx f, int max_reg_arg, int flag_before_loop) {
+  Rtx head = f != nullptr ? f : ctx_->GetInsns();
+  if (head == nullptr) {
+    return;
+  }
+  RefreshJumpLabelsAndNuses(head);
+  restore_reg_data(head);
+  const int nregs = max_reg_arg > 0 ? max_reg_arg : max_reg_num();
+  reg_scan(head, nregs, flag_before_loop != 0 ? 1 : 0);
+  const bool temp_deaths = (reg_n_deaths == nullptr);
+  if (temp_deaths) {
+    reg_n_deaths = AllocZeroed<short>(nregs + 16);
+  }
+  jump_chain = nullptr;
+  max_jump_chain = 0;
+  thread_jumps(head, nregs, flag_before_loop);
+  jump_chain = nullptr;
+  max_jump_chain = 0;
+  if (temp_deaths) {
+    reg_n_deaths = nullptr;
+  }
+}
+
 CrossJumpSearchResult FunctionHooks::RunFindCrossJump(Rtx e1, Rtx e2, int minimum) {
   Rtx head = ctx_->GetInsns();
   if (head != nullptr) {
@@ -3262,6 +3286,7 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
     restore_reg_data(head);
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
+    RefreshJumpLabelsAndNuses(head);
     flow_analysis(head, max_regno, nullptr);
     RestoreExistingFlowState(saved_flow);
     if (!saved_n_refs.empty() && reg_n_refs != nullptr) {
@@ -3335,6 +3360,7 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
     restore_reg_data(head);
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
+    RefreshJumpLabelsAndNuses(head);
     flow_analysis(head, max_regno, nullptr);
     RestoreExistingFlowState(saved_flow);
     if (!saved_n_refs.empty() && reg_n_refs != nullptr) {
@@ -4053,21 +4079,35 @@ void FunctionHooks::PrepareCombineState(Rtx first) {
 
   if (!has_existing_log_links && reg_n_deaths == nullptr) {
     StripFlowGeneratedNotes(first);
+    RefreshJumpLabelsAndNuses(first);
     flow_analysis(first, max_regno, nullptr);
   } else {
+    const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
+    RefreshJumpLabelsAndNuses(first);
     RunFindBasicBlocks(first, nullptr);
-    reg_n_refs = AllocZeroed<int>(nregs);
-    reg_n_sets = AllocZeroed<short>(nregs);
-    reg_n_deaths = AllocZeroed<short>(nregs);
-    reg_n_calls_crossed = AllocZeroed<int>(nregs);
-    reg_live_length = AllocZeroed<int>(nregs);
+    RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+    const int copy_regs = std::min(max_regno, nregs);
+    auto expand_reg_array = [&]<typename Elem>(Elem*& ptr) {
+      Elem* expanded = AllocZeroed<Elem>(nregs);
+      if (ptr != nullptr && copy_regs > 0) {
+        std::memcpy(expanded, ptr, static_cast<size_t>(copy_regs) * sizeof(Elem));
+      }
+      ptr = expanded;
+    };
+    expand_reg_array(reg_n_refs);
+    expand_reg_array(reg_n_sets);
+    expand_reg_array(reg_n_deaths);
+    expand_reg_array(reg_n_calls_crossed);
+    expand_reg_array(reg_live_length);
     reg_changes_size = AllocZeroed<char>(nregs);
     reg_basic_block = AllocZeroed<int>(nregs);
-    const int n_blocks = n_basic_blocks > 0 ? n_basic_blocks : 1;
-    const int regset_words = (nregs / 32) + 2;
-    basic_block_live_at_start = AllocZeroed<Rtx>(n_blocks);
-    for (int b = 0; b < n_blocks; ++b) {
-      basic_block_live_at_start[b] = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_words));
+    if (basic_block_live_at_start == nullptr) {
+      const int n_blocks = n_basic_blocks > 0 ? n_basic_blocks : 1;
+      const int regset_words = (nregs / 32) + 2;
+      basic_block_live_at_start = AllocZeroed<Rtx>(n_blocks);
+      for (int b = 0; b < n_blocks; ++b) {
+        basic_block_live_at_start[b] = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_words));
+      }
     }
   }
 
@@ -4365,6 +4405,7 @@ void FunctionHooks::RunFlowAnalysis(Rtx first, int nregs) {
   const int num_regs = nregs > 0 ? nregs : max_reg_num();
   max_regno = num_regs;
   reg_scan(head, num_regs, 0);
+  RefreshJumpLabelsAndNuses(head);
   flow_analysis(head, num_regs, nullptr);
 }
 
@@ -4373,6 +4414,7 @@ void FunctionHooks::RunFindBasicBlocks(Rtx first, Rtx nonlocal_label_list) {
   if (head == nullptr) {
     return;
   }
+  RefreshJumpLabelsAndNuses(head);
   // `flow_analysis` initializes `elim_reg_set` from `eliminables` (`$fp` = 30
   // and `$arg` = 66 on MIPS) so `mark_used_regs` does not prematurely mark `$fp`
   // in `regs_ever_live` before reload decides whether a frame pointer is needed.
@@ -4715,9 +4757,11 @@ int FunctionHooks::RunCseMain(Rtx first, int nregs, int after_loop) {
   if (head == nullptr) {
     return 0;
   }
+  cse_not_expected = 0;
+  RefreshJumpLabelsAndNuses(head);
   restore_reg_data(head);
   const int num_regs = nregs > 0 ? nregs : max_reg_num();
-  reg_scan(head, num_regs, 1);
+  reg_scan(head, num_regs, after_loop == 0 ? 1 : 0);
   return cse_main(head, num_regs, after_loop, nullptr);
 }
 
@@ -4746,6 +4790,7 @@ Rtx FunctionHooks::RunCseBasicBlock(Rtx from, Rtx to, void* next_branch, int aro
       consec_ints[i] = i;
     }
     std::memset(cse_table, 0, sizeof(cse_table));
+    cse_jumps_altered = 0;
     free_element_chain = nullptr;
     n_elements_made = 0;
     memory_extend_rtx = ctx_->ParseRtx("(zero_extend (nil))");
@@ -5437,11 +5482,16 @@ constexpr SubfunctionId kAllSubfunctionIds[] = {
     SubfunctionId::kInstantiateVirtualRegs,
     SubfunctionId::kJumpRedirect,
     SubfunctionId::kJump1Optimize,
+    SubfunctionId::kThreadJumpsCse1,
     SubfunctionId::kFoldRtx,
     SubfunctionId::kCseBasicBlockCse1,
+    SubfunctionId::kJumpOptimizeCse1,
     SubfunctionId::kScanLoop,
     SubfunctionId::kStrengthReduce,
+    SubfunctionId::kJumpOptimizeCse2Pre,
     SubfunctionId::kCseBasicBlockCse2,
+    SubfunctionId::kJumpOptimizeCse2,
+    SubfunctionId::kThreadJumpsCse2,
     SubfunctionId::kFindBasicBlocks,
     SubfunctionId::kPropagateBlock,
     SubfunctionId::kSimplifyRtx,
@@ -6092,6 +6142,7 @@ struct InProcessCc1CompilationResult {
   std::vector<MipsPrologueArgSpec> prologue_args;
   std::vector<int> saved_gpr_regnos;
   std::vector<int> saved_fpr_regnos;
+  std::vector<int> pointer_regnos;
   std::optional<std::string> epilogue_delay_pattern;
   std::vector<Stage0ConstantPoolEntry> constant_pool;
   absl::flat_hash_map<std::string, uint32_t> gp_symbol_sizes;
@@ -6236,6 +6287,14 @@ InProcessCc1CompilationResult RunInProcessCc1Compilation(std::string_view c_sour
   for (int r = 32; r < 64; ++r) {
     if (regs_ever_live[r] != 0) {
       res.saved_fpr_regnos.push_back(r);
+    }
+  }
+  if (regno_pointer_flag != nullptr) {
+    const int ptr_limit = std::min(max_reg_num(), regno_pointer_flag_length);
+    for (int r = kFirstPseudoRegister + 4; r < ptr_limit; ++r) {
+      if (regno_pointer_flag[r] != 0) {
+        res.pointer_regnos.push_back(r);
+      }
     }
   }
   if (current_function_epilogue_delay_list != nullptr &&
@@ -6573,16 +6632,26 @@ std::string_view SubfunctionIdName(SubfunctionId id) {
       return "redirect_jump";
     case SubfunctionId::kJump1Optimize:
       return "jump_optimize (jump1)";
+    case SubfunctionId::kThreadJumpsCse1:
+      return "thread_jumps (cse1)";
     case SubfunctionId::kFoldRtx:
       return "fold_rtx";
     case SubfunctionId::kCseBasicBlockCse1:
       return "cse_basic_block (cse1)";
+    case SubfunctionId::kJumpOptimizeCse1:
+      return "jump_optimize (cse1)";
     case SubfunctionId::kScanLoop:
       return "scan_loop";
     case SubfunctionId::kStrengthReduce:
       return "strength_reduce";
+    case SubfunctionId::kJumpOptimizeCse2Pre:
+      return "jump_optimize (cse2 pre)";
     case SubfunctionId::kCseBasicBlockCse2:
       return "cse_basic_block (cse2)";
+    case SubfunctionId::kJumpOptimizeCse2:
+      return "jump_optimize (cse2)";
+    case SubfunctionId::kThreadJumpsCse2:
+      return "thread_jumps (cse2)";
     case SubfunctionId::kFindBasicBlocks:
       return "find_basic_blocks";
     case SubfunctionId::kPropagateBlock:
@@ -6723,6 +6792,7 @@ RtlControlFlowGraph FunctionHooks::CompileCSourceToInitialRtlCfg(
   cfg.sideband.is_variadic = cc1_res.is_variadic;
   cfg.sideband.returns_aggregate_in_memory = cc1_res.returns_aggregate_in_memory;
   cfg.sideband.prologue_args = cc1_res.prologue_args;
+  cfg.sideband.pointer_regnos = cc1_res.pointer_regnos;
   cfg.sideband.constant_pool = FilterReferencedConstantPool(cfg, cc1_res.constant_pool);
   InferStackFrameSidebandFromRtlCfg(&cfg);
 
@@ -6775,19 +6845,21 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
         unshare_all_rtl(head);
         instantiate_virtual_regs(current_function_decl, head);
         RefreshJumpLabelsAndNuses(head);
-        for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
-          if (insn->code == kJumpInsn && insn->fld[7].rtx != nullptr) {
-            Rtx target_lbl = insn->fld[7].rtx;
-            Rtx next = target_lbl->fld[2].rtx;
-            while (next != nullptr && next->code == kNote) {
-              next = next->fld[2].rtx;
-            }
-            if (next != nullptr && next->code == kJumpInsn && next->fld[3].rtx != nullptr &&
-                next->fld[3].rtx->code == kSet && next->fld[3].rtx->fld[0].rtx == pc_rtx &&
-                next->fld[3].rtx->fld[1].rtx != nullptr &&
-                next->fld[3].rtx->fld[1].rtx->code == kLabelRef && next->fld[7].rtx != nullptr &&
-                next->fld[7].rtx != target_lbl) {
-              redirect_jump(insn, next->fld[7].rtx);
+        if (optimize_level > 0) {
+          for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
+            if (insn->code == kJumpInsn && insn->fld[7].rtx != nullptr) {
+              Rtx target_lbl = insn->fld[7].rtx;
+              Rtx next = target_lbl->fld[2].rtx;
+              while (next != nullptr && next->code == kNote) {
+                next = next->fld[2].rtx;
+              }
+              if (next != nullptr && next->code == kJumpInsn && next->fld[3].rtx != nullptr &&
+                  next->fld[3].rtx->code == kSet && next->fld[3].rtx->fld[0].rtx == pc_rtx &&
+                  next->fld[3].rtx->fld[1].rtx != nullptr &&
+                  next->fld[3].rtx->fld[1].rtx->code == kLabelRef && next->fld[7].rtx != nullptr &&
+                  next->fld[7].rtx != target_lbl) {
+                redirect_jump(insn, next->fld[7].rtx);
+              }
             }
           }
         }
@@ -6799,6 +6871,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
     case SubfunctionId::kJump1Optimize: {
       Rtx head = materialize_post_expand();
       if (head != nullptr) {
+        cse_not_expected = (optimize_level <= 0) ? 1 : 0;
         unshare_all_rtl(head);
         instantiate_virtual_regs(current_function_decl, head);
         RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/1, head);
@@ -6807,9 +6880,20 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       break;
     }
 
+    case SubfunctionId::kThreadJumpsCse1: {
+      Rtx head = materialize_post_expand();
+      if (head != nullptr && optimize_level > 0 && flag_thread_jumps != 0) {
+        cse_not_expected = 0;
+        RunThreadJumps(head, max_reg_num(), /*flag_before_loop=*/1);
+      }
+      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse);
+      break;
+    }
+
     case SubfunctionId::kFoldRtx: {
       Rtx head = materialize_post_expand();
       if (head != nullptr && optimize_level > 0) {
+        cse_not_expected = 0;
         PrepareCseFoldState(ctx_, head);
         for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
           if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
@@ -6828,28 +6912,32 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
 
     case SubfunctionId::kCseBasicBlockCse1: {
       Rtx head = materialize_post_expand();
+      bool jumps_altered = false;
       if (head != nullptr && optimize_level > 0) {
         cse_not_expected = 0;
         RefreshJumpLabelsAndNuses(head);
         restore_reg_data(head);
         reg_scan(head, max_reg_num(), 1);
-        if (flag_thread_jumps != 0) {
-          thread_jumps(head, max_reg_num(), 1);
-          head = ctx_->GetInsns();
-          RefreshJumpLabelsAndNuses(head);
-          restore_reg_data(head);
-          reg_scan(head, max_reg_num(), 1);
-        }
         const int tem = ExecuteCsePassGranular(this, ctx_, head, max_reg_num(), /*after_loop=*/0);
         head = ctx_->GetInsns();
         delete_dead_from_cse(head, max_reg_num());
-        if (tem != 0 || optimize_level > 1) {
-          head = ctx_->GetInsns();
-          RefreshJumpLabelsAndNuses(head);
-          jump_optimize(head, /*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/0);
-        }
+        jumps_altered = (tem != 0);
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse);
+      snap.post_state.sideband.cse_jumps_altered = jumps_altered;
+      break;
+    }
+
+    case SubfunctionId::kJumpOptimizeCse1: {
+      Rtx head = materialize_post_expand();
+      if (head != nullptr && optimize_level > 0 &&
+          (pre_state.sideband.cse_jumps_altered || optimize_level > 1)) {
+        cse_not_expected = 0;
+        RefreshJumpLabelsAndNuses(head);
+        RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/0, head);
+      }
+      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse);
+      snap.post_state.sideband.cse_jumps_altered = false;
       break;
     }
 
@@ -6890,8 +6978,30 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       break;
     }
 
+    case SubfunctionId::kJumpOptimizeCse2Pre: {
+      Rtx head = materialize_post_expand();
+      if (head != nullptr && optimize_level > 0) {
+        cse_not_expected = 0;
+        int rerun_cse = flag_expensive_optimizations;
+        for (const auto& opt : f_options) {
+          if (opt.string != nullptr && std::strcmp(opt.string, "rerun-cse-after-loop") == 0 &&
+              opt.variable != nullptr) {
+            rerun_cse = *opt.variable;
+            break;
+          }
+        }
+        if (rerun_cse != 0) {
+          RefreshJumpLabelsAndNuses(head);
+          RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/1, head);
+        }
+      }
+      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse2);
+      break;
+    }
+
     case SubfunctionId::kCseBasicBlockCse2: {
       Rtx head = materialize_post_expand();
+      bool jumps_altered = false;
       if (head != nullptr && optimize_level > 0) {
         cse_not_expected = 0;
         int rerun_cse = flag_expensive_optimizations;
@@ -6906,28 +7016,48 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           RefreshJumpLabelsAndNuses(head);
           restore_reg_data(head);
           reg_scan(head, max_reg_num(), 0);
-          jump_optimize(head, /*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/1);
-          head = ctx_->GetInsns();
-          RefreshJumpLabelsAndNuses(head);
-          restore_reg_data(head);
-          reg_scan(head, max_reg_num(), 0);
           const int tem = ExecuteCsePassGranular(this, ctx_, head, max_reg_num(), /*after_loop=*/1);
-          if (tem != 0) {
-            head = ctx_->GetInsns();
-            RefreshJumpLabelsAndNuses(head);
-            jump_optimize(head, /*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/0);
+          jumps_altered = (tem != 0);
+        }
+      }
+      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse2);
+      snap.post_state.sideband.cse_jumps_altered = jumps_altered;
+      break;
+    }
+
+    case SubfunctionId::kJumpOptimizeCse2: {
+      Rtx head = materialize_post_expand();
+      if (head != nullptr && optimize_level > 0) {
+        cse_not_expected = 0;
+        int rerun_cse = flag_expensive_optimizations;
+        for (const auto& opt : f_options) {
+          if (opt.string != nullptr && std::strcmp(opt.string, "rerun-cse-after-loop") == 0 &&
+              opt.variable != nullptr) {
+            rerun_cse = *opt.variable;
+            break;
           }
         }
-        if (flag_thread_jumps != 0) {
-          head = ctx_->GetInsns();
+        if (rerun_cse != 0 && pre_state.sideband.cse_jumps_altered) {
           RefreshJumpLabelsAndNuses(head);
-          restore_reg_data(head);
-          reg_scan(head, max_reg_num(), 0);
-          thread_jumps(head, max_reg_num(), 0);
+          RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/0, head);
+        }
+      }
+      snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse2);
+      snap.post_state.sideband.cse_jumps_altered = false;
+      break;
+    }
+
+    case SubfunctionId::kThreadJumpsCse2: {
+      Rtx head = materialize_post_expand();
+      if (head != nullptr && optimize_level > 0) {
+        cse_not_expected = 0;
+        if (flag_thread_jumps != 0) {
+          RunThreadJumps(head, max_reg_num(), /*flag_before_loop=*/0);
         }
         cse_not_expected = 1;
       }
       snap.post_state = ctx_->DematerializeToCfg(ctx_->GetInsns(), RtlPassKind::kCse2);
+      snap.post_state.sideband.cse_jumps_altered = false;
       break;
     }
 
@@ -7179,7 +7309,16 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
         bool has_prologue_sp_adjust = false;
         if (!pre_state.rpo_blocks.empty()) {
           for (const std::string& pat : pre_state.rpo_blocks[0].instructions) {
-            if (absl::StartsWith(pat, "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp)")) {
+            auto parsed = ParsePatternAndNotes(pat);
+            if (!parsed.ok() || !parsed->pattern.IsSet()) {
+              continue;
+            }
+            const RtlExpr& dst = parsed->pattern.SetDest();
+            const RtlExpr& src = parsed->pattern.SetSrc();
+            if (dst.IsReg() && dst.mode == RtlMachineMode::kSi && dst.RegNo() == 29 &&
+                src.op == RtlOp::kMinus && src.mode == RtlMachineMode::kSi &&
+                src.children.size() == 2 && src.children[0].IsReg() &&
+                src.children[0].mode == RtlMachineMode::kSi && src.children[0].RegNo() == 29) {
               has_prologue_sp_adjust = true;
               break;
             }
@@ -7188,10 +7327,18 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
         if (!has_prologue_sp_adjust) {
           frame_pointer_needed =
               (pre_state.sideband.frame_pointer_needed || flag_omit_frame_pointer == 0) ? 1 : 0;
-          const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
-          RunFindBasicBlocks(head, nullptr);
-          RefreshJumpLabelsAndNuses(head);
-          RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+          if (optimize_level > 0) {
+            const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
+            RefreshJumpLabelsAndNuses(head);
+            RunFindBasicBlocks(head, nullptr);
+            RefreshJumpLabelsAndNuses(head);
+            RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+          } else {
+            n_basic_blocks = 0;
+            basic_block_head = nullptr;
+            basic_block_end = nullptr;
+            RefreshJumpLabelsAndNuses(head);
+          }
           thread_prologue_and_epilogue_insns(head);
           head = ctx_->GetInsns();
         }
@@ -7406,13 +7553,13 @@ FunctionCompilationTrace FunctionHooks::TraceRtlPipeline(
       case SubfunctionId::kJump1Optimize:
         trace.pass_snapshots[RtlPassKind::kJump] = current_cfg;
         break;
-      case SubfunctionId::kCseBasicBlockCse1:
+      case SubfunctionId::kJumpOptimizeCse1:
         trace.pass_snapshots[RtlPassKind::kCse] = current_cfg;
         break;
       case SubfunctionId::kStrengthReduce:
         trace.pass_snapshots[RtlPassKind::kLoop] = current_cfg;
         break;
-      case SubfunctionId::kCseBasicBlockCse2:
+      case SubfunctionId::kThreadJumpsCse2:
         trace.pass_snapshots[RtlPassKind::kCse2] = current_cfg;
         break;
       case SubfunctionId::kPropagateBlock:
@@ -7487,6 +7634,7 @@ FunctionCompilationTrace FunctionHooks::TraceForwardCompilation(
   rtl_00_cfg.sideband.is_variadic = cc1_res.is_variadic;
   rtl_00_cfg.sideband.returns_aggregate_in_memory = cc1_res.returns_aggregate_in_memory;
   rtl_00_cfg.sideband.prologue_args = cc1_res.prologue_args;
+  rtl_00_cfg.sideband.pointer_regnos = cc1_res.pointer_regnos;
   rtl_00_cfg.sideband.constant_pool =
       FilterReferencedConstantPool(rtl_00_cfg, cc1_res.constant_pool);
   InferStackFrameSidebandFromRtlCfg(&rtl_00_cfg);

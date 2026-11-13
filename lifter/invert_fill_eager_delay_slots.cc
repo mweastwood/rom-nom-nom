@@ -274,6 +274,15 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
     }
+    if (blk.successors.size() >= 2 && blk.addr_vec_targets.empty()) {
+      size_t target_b = blk.successors[0];
+      if (target_b == b + 1) {
+        target_b = blk.successors[1];
+      }
+      if (target_b < num_blocks) {
+        block_needs_label[target_b] = true;
+      }
+    }
     for (size_t succ : blk.successors) {
       if (succ < num_blocks && (succ != b + 1 || ends_with_uncond)) {
         block_needs_label[succ] = true;
@@ -3038,10 +3047,7 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
   ApplyPostEagerDelaySlotNormalizations(&out);
 
   SynchronizeCanonicalLabels(&out);
-  for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
-    out.rpo_blocks[b].id = static_cast<uint32_t>(b);
-    out.rpo_blocks[b].SyncRtlInsnsFromInstructions();
-  }
+  out.SyncAllBlocksPreservingMachineInsns(dbr_eager_cfg_x.rpo_blocks);
   RecomputePostReloadLiveAtStart(&out);
   return out;
 }

@@ -265,6 +265,8 @@ TEST_F(InvertDoCrossJumpTest, UnmergesCrossJumpedCallAndPostCallTail) {
                 },
                 {}),
   };
+  cfg.rpo_blocks[3].rtl_insns[0].has_explicit_call_fusage = true;
+  cfg.rpo_blocks[3].rtl_insns[0].call_fusage.clear();
 
   const RtlControlFlowGraph pre = InvertDoCrossJump(cfg);
   ASSERT_EQ(pre.rpo_blocks.size(), 4u);

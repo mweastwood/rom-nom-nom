@@ -189,6 +189,10 @@ class RightInverseVerifier {
   RightInverseResult VerifyCse1StageRightInverse(const RtlControlFlowGraph& cse_cfg_x) const;
   RightInverseResult VerifyCse2StageRightInverse(const RtlControlFlowGraph& cse2_cfg_x) const;
 
+  // 22b. `jump.c:thread_jumps` right-inverse.
+  RightInverseResult VerifyThreadJumpsRightInverse(const RtlControlFlowGraph& post_thread_cfg_x,
+                                                   bool before_loop = true) const;
+
   // ---------------------------------------------------------------------------
   // Stage 10: Loop Optimization (`loop.c`)
   // ---------------------------------------------------------------------------

@@ -309,6 +309,15 @@ void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
         }
       }
     }
+    if (blk.successors.size() >= 2 && blk.addr_vec_targets.empty()) {
+      size_t target_b = blk.successors[0];
+      if (target_b == b + 1) {
+        target_b = blk.successors[1];
+      }
+      if (target_b < num_blocks) {
+        block_needs_label[target_b] = true;
+      }
+    }
     for (size_t succ : blk.successors) {
       if (succ < num_blocks && (succ != b + 1 || ends_with_uncond)) {
         block_needs_label[succ] = true;
@@ -660,40 +669,60 @@ RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) {
       // instruction at the head of `join_b` (preventing `jump_optimize` from
       // redirecting jumps to `RETURN` or threading them past `join_b` before
       // `find_cross_jump` runs).
+      if (out.rpo_blocks[join_b].rtl_insns.size() != out.rpo_blocks[join_b].instructions.size()) {
+        out.rpo_blocks[join_b].SyncRtlInsnsFromInstructions();
+      }
       std::vector<std::string> shared_insns;
+      std::vector<RtlInsn> shared_rtl_insns;
       std::vector<std::string> epilogue_insns;
-      for (const std::string& pat : join_blk.instructions) {
+      std::vector<RtlInsn> epilogue_rtl_insns;
+      for (size_t idx = 0; idx < join_blk.instructions.size(); ++idx) {
+        const std::string& pat = join_blk.instructions[idx];
+        const RtlInsn& rinsn = join_blk.rtl_insns[idx];
         if (epilogue_insns.empty() && IsShareableCrossJumpInsn(pat)) {
           shared_insns.push_back(pat);
+          shared_rtl_insns.push_back(rinsn);
         } else {
           epilogue_insns.push_back(pat);
+          epilogue_rtl_insns.push_back(rinsn);
         }
       }
       if (shared_insns.size() < 2) {
         continue;
       }
       epilogue_insns.insert(epilogue_insns.begin(), shared_insns.back());
+      epilogue_rtl_insns.insert(epilogue_rtl_insns.begin(), shared_rtl_insns.back());
       shared_insns.pop_back();
+      shared_rtl_insns.pop_back();
       if (shared_insns.empty() || epilogue_insns.empty()) {
         continue;
       }
 
       for (size_t pred_b : preds[join_b]) {
         auto& pred_blk = out.rpo_blocks[pred_b];
+        if (pred_blk.rtl_insns.size() != pred_blk.instructions.size()) {
+          pred_blk.SyncRtlInsnsFromInstructions();
+        }
         if (IsSimpleUncondJumpInsn(pred_blk.instructions.back())) {
           std::string jmp = std::move(pred_blk.instructions.back());
+          RtlInsn jmp_rinsn = std::move(pred_blk.rtl_insns.back());
           pred_blk.instructions.pop_back();
-          for (const std::string& s_pat : shared_insns) {
-            pred_blk.instructions.push_back(s_pat);
+          pred_blk.rtl_insns.pop_back();
+          for (size_t k = 0; k < shared_insns.size(); ++k) {
+            pred_blk.instructions.push_back(shared_insns[k]);
+            pred_blk.rtl_insns.push_back(shared_rtl_insns[k]);
           }
           pred_blk.instructions.push_back(std::move(jmp));
+          pred_blk.rtl_insns.push_back(std::move(jmp_rinsn));
         } else {
-          for (const std::string& s_pat : shared_insns) {
-            pred_blk.instructions.push_back(s_pat);
+          for (size_t k = 0; k < shared_insns.size(); ++k) {
+            pred_blk.instructions.push_back(shared_insns[k]);
+            pred_blk.rtl_insns.push_back(shared_rtl_insns[k]);
           }
         }
       }
       out.rpo_blocks[join_b].instructions = std::move(epilogue_insns);
+      out.rpo_blocks[join_b].rtl_insns = std::move(epilogue_rtl_insns);
       break;
     }
   }

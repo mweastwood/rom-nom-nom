@@ -4,7 +4,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <optional>
@@ -24,6 +23,7 @@
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "core/rtl_sexpr_utils.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gcc_harness/toy_subfunction_inverses.h"
@@ -37,20 +37,87 @@ struct GccLangIndepOption {
 };
 extern GccLangIndepOption f_options[52];
 extern int obey_regdecls;
+extern int flag_thread_jumps;
 extern int flag_delayed_branch;
 extern int flag_schedule_insns;
 extern int flag_schedule_insns_after_reload;
 extern int flag_expensive_optimizations;
+extern int rtx_equal_function_value_matters;
+extern int cse_jumps_altered;
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
 void regclass_init();
 void regclass(rtx_def* f, int nregs);
 void stupid_life_analysis(rtx_def* f, int nregs, FILE* file);
+void delete_dead_from_cse(rtx_def* insns, int nregs);
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
 
 namespace rom_nom_nom::gcc_harness {
 namespace {
+
+bool PatternHasCallAst(std::string_view pat) {
+  auto parsed = ParsePatternAndNotes(pat);
+  if (!parsed.ok()) {
+    return false;
+  }
+  bool has_call = false;
+  parsed->pattern.Visit([&](const RtlExpr& node) {
+    if (node.op == RtlOp::kCall || node.op == RtlOp::kCallInsn) {
+      has_call = true;
+    }
+  });
+  return has_call;
+}
+
+bool BlockInsnHasExplicitCallFusage(const RtlBasicBlock& blk, size_t k) {
+  if (k < blk.rtl_insns.size() && blk.rtl_insns[k].has_explicit_call_fusage) {
+    return true;
+  }
+  if (k < blk.instructions.size()) {
+    if (auto parsed = ParsePatternAndNotes(blk.instructions[k]);
+        parsed.ok() && parsed->has_explicit_call_fusage) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Ensures that when `expected_x` carries explicit `CALL_INSN_FUNCTION_USAGE` on
+// all call-bearing instructions, `cand_y` also carries explicit `call_fusage` on
+// all call-bearing instructions so `MaterializeFromCfg`'s synthetic fallback
+// can never mask a buggy inverse that dropped `has_explicit_call_fusage`.
+bool VerifyCandidatePreservesExplicitCallFusage(const RtlControlFlowGraph& expected_x,
+                                                const RtlControlFlowGraph& cand_y,
+                                                std::string* out_err) {
+  bool expected_has_any_call = false;
+  for (const auto& blk : expected_x.rpo_blocks) {
+    for (size_t k = 0; k < blk.instructions.size(); ++k) {
+      if (PatternHasCallAst(blk.instructions[k])) {
+        expected_has_any_call = true;
+        if (!BlockInsnHasExplicitCallFusage(blk, k)) {
+          return true;
+        }
+      }
+    }
+  }
+  if (!expected_has_any_call) {
+    return true;
+  }
+  for (size_t b = 0; b < cand_y.rpo_blocks.size(); ++b) {
+    const auto& blk = cand_y.rpo_blocks[b];
+    for (size_t k = 0; k < blk.instructions.size(); ++k) {
+      if (PatternHasCallAst(blk.instructions[k]) && !BlockInsnHasExplicitCallFusage(blk, k)) {
+        if (out_err != nullptr) {
+          *out_err = absl::StrFormat(
+              "Candidate pre-image dropped explicit call_fusage on RPO blk %zu insn %zu", b, k);
+        }
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 const SubfunctionInverseProvider* DefaultInverseProvider() {
   static const auto* const default_toy_inverses = new ToySubfunctionInverses();
@@ -117,7 +184,16 @@ RightInverseResult RightInverseVerifier::VerifyRtlPassRightInverse(
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
   }
+  std::string fusage_err;
+  if (!VerifyCandidatePreservesExplicitCallFusage(target_x, lifted_y, &fusage_err)) {
+    result.matches = false;
+    result.diff_detail = std::move(fusage_err);
+    return result;
+  }
   ctx_->MaterializeFromCfg(lifted_y);
+  if (target_pass != RtlPassKind::kRtl) {
+    rtx_equal_function_value_matters = 0;
+  }
   forward_f(ctx_, hooks_);
 
   const RtlControlFlowGraph actual_fx = ctx_->DematerializeToCfg(ctx_->GetInsns(), target_pass);
@@ -1141,11 +1217,11 @@ int FirstReplaySubfunctionIndexAfterPass(RtlPassKind pass) {
     case RtlPassKind::kRtl:
       return index_of(SubfunctionId::kJumpRedirect);
     case RtlPassKind::kJump:
-      return index_of(SubfunctionId::kFoldRtx);
+      return index_of(SubfunctionId::kThreadJumpsCse1);
     case RtlPassKind::kCse:
       return index_of(SubfunctionId::kScanLoop);
     case RtlPassKind::kLoop:
-      return index_of(SubfunctionId::kCseBasicBlockCse2);
+      return index_of(SubfunctionId::kJumpOptimizeCse2Pre);
     case RtlPassKind::kCse2:
       return index_of(SubfunctionId::kFindBasicBlocks);
     case RtlPassKind::kFlow:
@@ -1320,9 +1396,17 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     y.pass = RtlPassKind::kCse2;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kLoop)) {
+    if (opt_enabled && flag_thread_jumps != 0) {
+      y = inverses_->InvertThreadJumps(y, /*before_loop=*/false);
+      if (y.rpo_blocks.empty()) return step_fail("InvertThreadJumps (cse2)");
+    }
     if (cse2_enabled) {
+      y = inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/true);
+      if (y.rpo_blocks.empty()) return step_fail("InvertJumpOptimizePostCse (cse2)");
       y = inverses_->InvertCseBasicBlock(y);
       if (y.rpo_blocks.empty()) return step_fail("InvertCseBasicBlock (cse2)");
+      y = inverses_->InvertJump1Optimize(y);
+      if (y.rpo_blocks.empty()) return step_fail("InvertJump1Optimize (cse2 pre)");
     }
     y.pass = RtlPassKind::kLoop;
   }
@@ -1337,16 +1421,27 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kJump)) {
     if (opt_enabled) {
+      y = inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/false);
+      if (y.rpo_blocks.empty()) return step_fail("InvertJumpOptimizePostCse (cse1)");
       y = inverses_->InvertCseBasicBlock(y);
       if (y.rpo_blocks.empty()) return step_fail("InvertCseBasicBlock (cse1)");
+      if (flag_thread_jumps != 0) {
+        y = inverses_->InvertThreadJumps(y, /*before_loop=*/true);
+        if (y.rpo_blocks.empty()) return step_fail("InvertThreadJumps (cse1)");
+      }
     }
     y.pass = RtlPassKind::kJump;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kRtl)) {
     y = inverses_->InvertJump1Optimize(y);
     if (y.rpo_blocks.empty()) return step_fail("InvertJump1Optimize");
-    y = inverses_->InvertJumpRedirect(y);
-    if (y.rpo_blocks.empty()) return step_fail("InvertJumpRedirect");
+    {
+      RtlControlFlowGraph probed_redir = inverses_->InvertJumpRedirect(y);
+      if (probed_redir.rpo_blocks.empty()) return step_fail("InvertJumpRedirect");
+      if (opt_enabled) {
+        y = std::move(probed_redir);
+      }
+    }
     y = inverses_->InvertInstantiateVirtualRegs(y);
     if (y.rpo_blocks.empty()) return step_fail("InvertInstantiateVirtualRegs");
     y.pass = RtlPassKind::kRtl;
@@ -1558,6 +1653,14 @@ RightInverseResult RightInverseVerifier::VerifyReloadRightInverse(
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
   }
+  {
+    std::string fusage_err;
+    if (!VerifyCandidatePreservesExplicitCallFusage(reload_cfg_x, lifted_y, &fusage_err)) {
+      result.matches = false;
+      result.diff_detail = std::move(fusage_err);
+      return result;
+    }
+  }
   const SubfunctionBoundarySnapshot replayed =
       hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kReload, lifted_y);
   result.actual_summary = replayed.post_state.FormatSummary();
@@ -1578,6 +1681,14 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
   }
+  {
+    std::string fusage_err;
+    if (!VerifyCandidatePreservesExplicitCallFusage(greg_cfg_x, lifted_y, &fusage_err)) {
+      result.matches = false;
+      result.diff_detail = std::move(fusage_err);
+      return result;
+    }
+  }
   const SubfunctionBoundarySnapshot replayed =
       hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kGlobalAlloc, lifted_y);
   result.actual_summary = replayed.post_state.FormatSummary();
@@ -1587,7 +1698,21 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
   result.matches = result.cfg_comparison.MatchesExactly() && reg_renumber_matches;
   result.diff_detail = result.cfg_comparison.mismatch_detail;
   if (result.cfg_comparison.MatchesExactly() && !reg_renumber_matches) {
-    result.diff_detail = "sideband.reg_renumber mismatch after kGlobalAlloc";
+    std::vector<std::string> diffs;
+    for (const auto& [r, exp_hr] : greg_cfg_x.sideband.reg_renumber) {
+      auto it = replayed.post_state.sideband.reg_renumber.find(r);
+      const int got_hr = (it != replayed.post_state.sideband.reg_renumber.end()) ? it->second : -1;
+      if (got_hr != exp_hr) {
+        diffs.push_back(absl::StrFormat("r%d: got %d != exp %d", r, got_hr, exp_hr));
+      }
+    }
+    for (const auto& [r, got_hr] : replayed.post_state.sideband.reg_renumber) {
+      if (!greg_cfg_x.sideband.reg_renumber.contains(r)) {
+        diffs.push_back(absl::StrFormat("r%d: got %d != exp -1", r, got_hr));
+      }
+    }
+    result.diff_detail = absl::StrCat("sideband.reg_renumber mismatch after kGlobalAlloc: ",
+                                      absl::StrJoin(diffs, ", "));
   }
   return result;
 }
@@ -1637,6 +1762,14 @@ RightInverseResult RightInverseVerifier::VerifyBlockAllocRightInverse(
     result.matches = false;
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
+  }
+  {
+    std::string fusage_err;
+    if (!VerifyCandidatePreservesExplicitCallFusage(lreg_cfg_x, lifted_y, &fusage_err)) {
+      result.matches = false;
+      result.diff_detail = std::move(fusage_err);
+      return result;
+    }
   }
   const SubfunctionBoundarySnapshot replayed =
       hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kBlockAlloc, lifted_y);
@@ -1807,21 +1940,79 @@ RightInverseResult RightInverseVerifier::VerifyFoldRtxRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyCseBasicBlockRightInverse(
     const RtlControlFlowGraph& cse_cfg_x) const {
-  return VerifyRtlPassRightInverse(
+  bool replayed_jumps_altered = false;
+  RightInverseResult result = VerifyRtlPassRightInverse(
       cse_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertCseBasicBlock(x); },
-      [](GccContext* ctx, FunctionHooks* hooks) {
+      [&replayed_jumps_altered](GccContext* ctx, FunctionHooks* hooks) {
+        cse_jumps_altered = 0;
         hooks->RunCseBasicBlock(ctx->GetInsns(), /*to=*/nullptr,
                                 /*next_branch=*/nullptr, /*around_loop=*/0);
+        replayed_jumps_altered = (cse_jumps_altered != 0);
       },
       cse_cfg_x.pass);
+  if (result.matches && replayed_jumps_altered != cse_cfg_x.sideband.cse_jumps_altered) {
+    result.matches = false;
+    result.diff_detail = absl::StrFormat(
+        "sideband.cse_jumps_altered mismatch after cse_basic_block: got %s != exp %s",
+        replayed_jumps_altered ? "true" : "false",
+        cse_cfg_x.sideband.cse_jumps_altered ? "true" : "false");
+  }
+  return result;
 }
 
 RightInverseResult RightInverseVerifier::VerifyCse1StageRightInverse(
     const RtlControlFlowGraph& cse_cfg_x) const {
   return VerifyRtlPassRightInverse(
-      cse_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertCseBasicBlock(x); },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
-        hooks->RunCseMain(/*first=*/nullptr, /*nregs=*/0, /*after_loop=*/0);
+      cse_cfg_x,
+      [this](const RtlControlFlowGraph& x) {
+        if (x.rpo_blocks.empty()) {
+          return RtlControlFlowGraph{};
+        }
+        if (inverses_->InvertFoldRtx("(const_int 0)").empty()) {
+          return RtlControlFlowGraph{};
+        }
+        RtlControlFlowGraph y = x;
+        if (optimize > 0) {
+          y = inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/false);
+          if (y.rpo_blocks.empty()) {
+            return RtlControlFlowGraph{};
+          }
+          y = inverses_->InvertCseBasicBlock(y);
+          if (y.rpo_blocks.empty()) {
+            return RtlControlFlowGraph{};
+          }
+          RtlControlFlowGraph probed_tj = inverses_->InvertThreadJumps(y, /*before_loop=*/true);
+          if (probed_tj.rpo_blocks.empty()) {
+            return RtlControlFlowGraph{};
+          }
+          if (flag_thread_jumps != 0) {
+            y = std::move(probed_tj);
+          }
+        } else {
+          if (inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/false).rpo_blocks.empty() ||
+              inverses_->InvertCseBasicBlock(y).rpo_blocks.empty()) {
+            return RtlControlFlowGraph{};
+          }
+        }
+        y.pass = RtlPassKind::kJump;
+        return y;
+      },
+      [](GccContext* ctx, FunctionHooks* hooks) {
+        if (optimize > 0) {
+          Rtx head = ctx->GetInsns();
+          if (head != nullptr) {
+            if (flag_thread_jumps != 0) {
+              hooks->RunThreadJumps(head, max_reg_num(), /*before_loop=*/1);
+            }
+            head = ctx->GetInsns();
+            const int tem = hooks->RunCseMain(head, max_reg_num(), /*after_loop=*/0);
+            head = ctx->GetInsns();
+            delete_dead_from_cse(head, max_reg_num());
+            if (tem != 0 || optimize > 1) {
+              hooks->RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/0);
+            }
+          }
+        }
       },
       RtlPassKind::kCse);
 }
@@ -1830,11 +2021,80 @@ RightInverseResult RightInverseVerifier::VerifyCse2StageRightInverse(
     const RtlControlFlowGraph& cse2_cfg_x) const {
   return VerifyRtlPassRightInverse(
       cse2_cfg_x,
-      [this](const RtlControlFlowGraph& x) { return inverses_->InvertCseBasicBlock(x); },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
-        hooks->RunCseMain(/*first=*/nullptr, /*nregs=*/0, /*after_loop=*/1);
+      [this](const RtlControlFlowGraph& x) {
+        if (x.rpo_blocks.empty()) {
+          return RtlControlFlowGraph{};
+        }
+        RtlControlFlowGraph y = x;
+        if (optimize > 0) {
+          RtlControlFlowGraph probed_tj = inverses_->InvertThreadJumps(y, /*before_loop=*/false);
+          if (probed_tj.rpo_blocks.empty()) {
+            return RtlControlFlowGraph{};
+          }
+          if (flag_thread_jumps != 0) {
+            y = std::move(probed_tj);
+          }
+          if (IsRerunCseAfterLoopEnabled()) {
+            y = inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/true);
+            if (y.rpo_blocks.empty()) {
+              return RtlControlFlowGraph{};
+            }
+            y = inverses_->InvertCseBasicBlock(y);
+            if (y.rpo_blocks.empty()) {
+              return RtlControlFlowGraph{};
+            }
+            y = inverses_->InvertJump1Optimize(y);
+            if (y.rpo_blocks.empty()) {
+              return RtlControlFlowGraph{};
+            }
+          } else {
+            if (inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/true).rpo_blocks.empty() ||
+                inverses_->InvertCseBasicBlock(y).rpo_blocks.empty()) {
+              return RtlControlFlowGraph{};
+            }
+          }
+        } else {
+          if (inverses_->InvertJumpOptimizePostCse(y, /*after_loop=*/true).rpo_blocks.empty() ||
+              inverses_->InvertCseBasicBlock(y).rpo_blocks.empty()) {
+            return RtlControlFlowGraph{};
+          }
+        }
+        y.pass = RtlPassKind::kLoop;
+        return y;
+      },
+      [](GccContext* ctx, FunctionHooks* hooks) {
+        if (optimize > 0) {
+          Rtx head = ctx->GetInsns();
+          if (head != nullptr && IsRerunCseAfterLoopEnabled()) {
+            restore_reg_data(head);
+            reg_scan(head, max_reg_num(), 0);
+            hooks->RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/1);
+            head = ctx->GetInsns();
+            const int tem = hooks->RunCseMain(head, max_reg_num(), /*after_loop=*/1);
+            if (tem != 0) {
+              hooks->RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0, /*after_regscan=*/0);
+            }
+          }
+          head = ctx->GetInsns();
+          if (head != nullptr && flag_thread_jumps != 0) {
+            hooks->RunThreadJumps(head, max_reg_num(), /*before_loop=*/0);
+          }
+        }
       },
       RtlPassKind::kCse2);
+}
+
+RightInverseResult RightInverseVerifier::VerifyThreadJumpsRightInverse(
+    const RtlControlFlowGraph& post_thread_cfg_x, bool before_loop) const {
+  return VerifyRtlPassRightInverse(
+      post_thread_cfg_x,
+      [this, before_loop](const RtlControlFlowGraph& x) {
+        return inverses_->InvertThreadJumps(x, before_loop);
+      },
+      [before_loop](GccContext* /*ctx*/, FunctionHooks* hooks) {
+        hooks->RunThreadJumps(/*f=*/nullptr, /*max_reg=*/0, before_loop ? 1 : 0);
+      },
+      post_thread_cfg_x.pass);
 }
 
 // -----------------------------------------------------------------------------
@@ -1880,17 +2140,19 @@ RightInverseResult RightInverseVerifier::VerifyJumpRedirectRightInverse(
   return VerifyRtlPassRightInverse(
       jump_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertJumpRedirect(x); },
       [](GccContext* ctx, FunctionHooks* hooks) {
-        Rtx first_jump = nullptr;
-        Rtx last_label = nullptr;
-        for (Rtx insn = ctx->GetInsns(); insn != nullptr; insn = insn->fld[2].rtx) {
-          if (insn->code == kJumpInsn && first_jump == nullptr) {
-            first_jump = insn;
-          } else if (insn->code == kCodeLabel) {
-            last_label = insn;
+        if (optimize > 0) {
+          Rtx first_jump = nullptr;
+          Rtx last_label = nullptr;
+          for (Rtx insn = ctx->GetInsns(); insn != nullptr; insn = insn->fld[2].rtx) {
+            if (insn->code == kJumpInsn && first_jump == nullptr) {
+              first_jump = insn;
+            } else if (insn->code == kCodeLabel) {
+              last_label = insn;
+            }
           }
-        }
-        if (first_jump != nullptr && last_label != nullptr) {
-          hooks->RunRedirectJump(first_jump, last_label);
+          if (first_jump != nullptr && last_label != nullptr) {
+            hooks->RunRedirectJump(first_jump, last_label);
+          }
         }
         hooks->RunJumpOptimize(/*cross_jump=*/0, /*noop_moves=*/0,
                                /*after_regscan=*/1);
@@ -1947,6 +2209,16 @@ RightInverseResult RightInverseVerifier::VerifyInstantiateVirtualRegsRightInvers
     result.matches = false;
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
+  }
+  {
+    std::string fusage_err;
+    if (!VerifyCandidatePreservesExplicitCallFusage(post_cfg_x, pre_y, &fusage_err)) {
+      RightInverseResult result;
+      result.expected_summary = post_cfg_x.FormatSummary();
+      result.matches = false;
+      result.diff_detail = std::move(fusage_err);
+      return result;
+    }
   }
   const RtlControlFlowGraph actual_fx = hooks_->RunInstantiateVirtualRegs(*ctx_, pre_y);
   return BuildCfgRightInverseResult(post_cfg_x, actual_fx);
@@ -2247,17 +2519,36 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       break;
   }
 
+  hooks_->ApplyCompilationProfile(
+      CompilationProfile{snap.optimize_level, snap.c_flags, snap.gp_symbol_sizes});
+
   RtlControlFlowGraph cand_pre = snap.post_state;
   switch (snap.subfunction_id) {
     case SubfunctionId::kInstantiateVirtualRegs:
       cand_pre = inverses_->InvertInstantiateVirtualRegs(snap.post_state);
       break;
-    case SubfunctionId::kJumpRedirect:
-      cand_pre = inverses_->InvertJumpRedirect(snap.post_state);
+    case SubfunctionId::kJumpRedirect: {
+      RtlControlFlowGraph probed = inverses_->InvertJumpRedirect(snap.post_state);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0) {
+        cand_pre = std::move(probed);
+      }
       break;
+    }
     case SubfunctionId::kJump1Optimize:
       cand_pre = inverses_->InvertJump1Optimize(snap.post_state);
       break;
+    case SubfunctionId::kThreadJumpsCse1: {
+      RtlControlFlowGraph probed =
+          inverses_->InvertThreadJumps(snap.post_state, /*before_loop=*/true);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0 && flag_thread_jumps != 0) {
+        cand_pre = std::move(probed);
+      }
+      break;
+    }
     case SubfunctionId::kFoldRtx: {
       bool called_fold = false;
       for (auto& blk : cand_pre.rpo_blocks) {
@@ -2292,16 +2583,69 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       }
       break;
     }
-    case SubfunctionId::kCseBasicBlockCse1:
-    case SubfunctionId::kCseBasicBlockCse2:
-      cand_pre = inverses_->InvertCseBasicBlock(snap.post_state);
+    case SubfunctionId::kCseBasicBlockCse1: {
+      RtlControlFlowGraph probed = inverses_->InvertCseBasicBlock(snap.post_state);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0) {
+        cand_pre = std::move(probed);
+      }
       break;
+    }
+    case SubfunctionId::kJumpOptimizeCse1: {
+      RtlControlFlowGraph probed =
+          inverses_->InvertJumpOptimizePostCse(snap.post_state, /*after_loop=*/false);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0) {
+        cand_pre = std::move(probed);
+      }
+      break;
+    }
     case SubfunctionId::kScanLoop:
       cand_pre = inverses_->InvertScanLoop(snap.post_state);
       break;
     case SubfunctionId::kStrengthReduce:
       cand_pre = inverses_->InvertStrengthReduce(snap.post_state);
       break;
+    case SubfunctionId::kJumpOptimizeCse2Pre: {
+      RtlControlFlowGraph probed = inverses_->InvertJump1Optimize(snap.post_state);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0 && IsRerunCseAfterLoopEnabled()) {
+        cand_pre = std::move(probed);
+      }
+      break;
+    }
+    case SubfunctionId::kCseBasicBlockCse2: {
+      RtlControlFlowGraph probed = inverses_->InvertCseBasicBlock(snap.post_state);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0 && IsRerunCseAfterLoopEnabled()) {
+        cand_pre = std::move(probed);
+      }
+      break;
+    }
+    case SubfunctionId::kJumpOptimizeCse2: {
+      RtlControlFlowGraph probed =
+          inverses_->InvertJumpOptimizePostCse(snap.post_state, /*after_loop=*/true);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0 && IsRerunCseAfterLoopEnabled()) {
+        cand_pre = std::move(probed);
+      }
+      break;
+    }
+    case SubfunctionId::kThreadJumpsCse2: {
+      RtlControlFlowGraph probed =
+          inverses_->InvertThreadJumps(snap.post_state, /*before_loop=*/false);
+      if (!snap.post_state.rpo_blocks.empty() && probed.rpo_blocks.empty()) {
+        cand_pre = {};
+      } else if (snap.optimize_level > 0 && flag_thread_jumps != 0) {
+        cand_pre = std::move(probed);
+      }
+      break;
+    }
     case SubfunctionId::kFindBasicBlocks:
       cand_pre = inverses_->InvertFindBasicBlocks(snap.post_state);
       break;
@@ -2470,6 +2814,16 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
   }
+  {
+    std::string fusage_err;
+    if (!VerifyCandidatePreservesExplicitCallFusage(snap.post_state, cand_pre, &fusage_err)) {
+      RightInverseResult result;
+      result.expected_summary = snap.post_state.FormatSummary();
+      result.matches = false;
+      result.diff_detail = std::move(fusage_err);
+      return result;
+    }
+  }
 
   const SubfunctionBoundarySnapshot replayed = hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);
   RightInverseResult result = BuildCfgRightInverseResult(snap.post_state, replayed.post_state);
@@ -2478,9 +2832,35 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
        snap.subfunction_id == SubfunctionId::kBlockAlloc) &&
       replayed.post_state.sideband.reg_renumber != snap.post_state.sideband.reg_renumber) {
     result.matches = false;
-    result.diff_detail = snap.subfunction_id == SubfunctionId::kGlobalAlloc
-                             ? "sideband.reg_renumber mismatch after kGlobalAlloc"
-                             : "sideband.reg_renumber mismatch after kBlockAlloc";
+    std::vector<std::string> diffs;
+    for (const auto& [r, exp_hr] : snap.post_state.sideband.reg_renumber) {
+      auto it = replayed.post_state.sideband.reg_renumber.find(r);
+      const int got_hr = (it != replayed.post_state.sideband.reg_renumber.end()) ? it->second : -1;
+      if (got_hr != exp_hr) {
+        diffs.push_back(absl::StrFormat("r%d: got %d != exp %d", r, got_hr, exp_hr));
+      }
+    }
+    for (const auto& [r, got_hr] : replayed.post_state.sideband.reg_renumber) {
+      if (!snap.post_state.sideband.reg_renumber.contains(r)) {
+        diffs.push_back(absl::StrFormat("r%d: got %d != exp -1", r, got_hr));
+      }
+    }
+    result.diff_detail = absl::StrCat(snap.subfunction_id == SubfunctionId::kGlobalAlloc
+                                          ? "sideband.reg_renumber mismatch after kGlobalAlloc: "
+                                          : "sideband.reg_renumber mismatch after kBlockAlloc: ",
+                                      absl::StrJoin(diffs, ", "));
+  }
+  if (result.matches &&
+      (snap.subfunction_id == SubfunctionId::kCseBasicBlockCse1 ||
+       snap.subfunction_id == SubfunctionId::kCseBasicBlockCse2) &&
+      replayed.post_state.sideband.cse_jumps_altered !=
+          snap.post_state.sideband.cse_jumps_altered) {
+    result.matches = false;
+    result.diff_detail =
+        absl::StrFormat("sideband.cse_jumps_altered mismatch after %s: got %s != exp %s",
+                        SubfunctionIdName(snap.subfunction_id),
+                        replayed.post_state.sideband.cse_jumps_altered ? "true" : "false",
+                        snap.post_state.sideband.cse_jumps_altered ? "true" : "false");
   }
   return result;
 }

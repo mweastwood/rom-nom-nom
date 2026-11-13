@@ -1070,5 +1070,85 @@ TEST(ReconstructHardRegLivenessTest,
   EXPECT_TRUE(IsAnyDefinedHardRegLiveAtBlockEntry(cfg, sp_set->pattern, 1));
 }
 
+TEST(ReconstructHardRegLivenessTest,
+     PopulatesExplicitCallFusageAcrossDiamondZeroArgAndSequenceCalls) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // 1. Multi-block diamond reaching a call (`$5` set in `B0`, `$4` set in both `B1` and `B2`),
+  // followed by a 0-arg call in `B3` (where `$4` and `$5` were clobbered by the first call),
+  // followed by a `SEQUENCE`-wrapped call whose second argument `$5` is filled in the delay slot.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband.frame_size_bytes = 24;
+  cfg.sideband.saved_gpr_regnos = {31};
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (reg:SI 5 a1) (const_int 10))",
+                 "(set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) (label_ref L0) "
+                 "(pc)))"},
+                {2, 1}),
+      MakeBlock(1, false, {"(set (reg:SI 4 a0) (const_int 1))", "(set (pc) (label_ref L1))"}, {3}),
+      MakeBlock(2, true, {"(set (reg:SI 4 a0) (const_int 2))"}, {3}),
+      MakeBlock(3, true,
+                {
+                    "(parallel[ (call (mem:SI (symbol_ref \"two_arg_fn\")) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                    "(parallel[ (call (mem:SI (symbol_ref \"zero_arg_fn\")) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 4 a0) (const_int 7))",
+                    "(sequence [(call_insn (parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref "
+                    "\"seq_two_arg_fn\")) (const_int 16))) (clobber (reg:SI 31 ra)) ] )) "
+                    "(insn (set (reg:SI 5 a1) (const_int 42)))])",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+
+  ASSERT_GE(cfg.rpo_blocks[3].rtl_insns.size(), 4u);
+  const RtlInsn& two_arg_call = cfg.rpo_blocks[3].rtl_insns[0];
+  EXPECT_TRUE(two_arg_call.has_explicit_call_fusage);
+  ASSERT_EQ(two_arg_call.call_fusage.size(), 2u);
+  EXPECT_EQ(two_arg_call.call_fusage[0].ToGccPrintRtlString(), "(use (reg:SI 5 a1))");
+  EXPECT_EQ(two_arg_call.call_fusage[1].ToGccPrintRtlString(), "(use (reg:SI 4 a0))");
+
+  const RtlInsn& zero_arg_call = cfg.rpo_blocks[3].rtl_insns[1];
+  EXPECT_TRUE(zero_arg_call.has_explicit_call_fusage);
+  EXPECT_TRUE(zero_arg_call.call_fusage.empty());
+
+  const RtlInsn& seq_call = cfg.rpo_blocks[3].rtl_insns[3];
+  EXPECT_TRUE(seq_call.has_explicit_call_fusage);
+  ASSERT_EQ(seq_call.call_fusage.size(), 2u);
+  EXPECT_EQ(seq_call.call_fusage[0].ToGccPrintRtlString(), "(use (reg:SI 5 a1))");
+  EXPECT_EQ(seq_call.call_fusage[1].ToGccPrintRtlString(), "(use (reg:SI 4 a0))");
+
+  // 2. Pre-populated `has_explicit_call_fusage = true` with empty `call_fusage` (e.g. a 0-arg
+  // call preceded by a scratch write to `$4` that was used as a memory base) must be preserved
+  // verbatim without synthesizing a bogus `(use (reg:SI 4 a0))`.
+  RtlControlFlowGraph explicit_zero_arg_cfg;
+  explicit_zero_arg_cfg.pass = RtlPassKind::kDbr;
+  explicit_zero_arg_cfg.sideband.frame_size_bytes = 24;
+  explicit_zero_arg_cfg.sideband.saved_gpr_regnos = {31};
+  explicit_zero_arg_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 29 sp) (const_int 16)))",
+                    "(set (mem:SI (reg:SI 4 a0)) (const_int 0))",
+                    "(parallel[ (call (mem:SI (symbol_ref \"no_args_callee\")) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  explicit_zero_arg_cfg.rpo_blocks[0].rtl_insns[2].has_explicit_call_fusage = true;
+  explicit_zero_arg_cfg.rpo_blocks[0].rtl_insns[2].call_fusage.clear();
+
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&explicit_zero_arg_cfg, profile_o2);
+  EXPECT_TRUE(explicit_zero_arg_cfg.rpo_blocks[0].rtl_insns[2].has_explicit_call_fusage);
+  EXPECT_TRUE(explicit_zero_arg_cfg.rpo_blocks[0].rtl_insns[2].call_fusage.empty());
+  EXPECT_TRUE(TopLevelInsnHasNote(explicit_zero_arg_cfg.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 4));
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

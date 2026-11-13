@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 
 namespace rom_nom_nom {
 
@@ -31,6 +32,7 @@ struct RtlInsnEntry {
   int uid = -1;
   int prev_uid = -1;
   int next_uid = -1;
+  bool is_deleted = false;
   bool is_sequence = false;
   bool in_annulled_branch_delay = false;
   std::string note_kind;
@@ -88,6 +90,8 @@ struct FlatRtlItem {
   int uid = -1;
   std::string raw_pattern_for_targets;
   std::string pattern;
+  bool has_explicit_call_fusage = false;
+  std::vector<RtlExpr> call_fusage;
 };
 
 // -----------------------------------------------------------------------------
@@ -144,9 +148,14 @@ std::string ExtractInsnTagWithFlags(std::string_view sexpr);
 std::string ExtractTopLevelPatternFromInsnSexpr(std::string_view sexpr);
 
 // Extracts the trailing `REG_NOTES` S-expression (`(expr_list:...)` or `(insn_list:...)`) from a
-// full `(insn UID PREV NEXT PATTERN CODE {name} LOG_LINKS REG_NOTES)` dump entry, or returns `""`
-// if `REG_NOTES` is `(nil)` or absent.
+// full `(insn UID PREV NEXT PATTERN CODE {name} LOG_LINKS REG_NOTES)` or `(call_insn ...)` dump
+// entry, or returns `""` if `REG_NOTES` is `(nil)` or absent.
 std::string ExtractRegNotesFromInsnSexpr(std::string_view sexpr);
+
+// Extracts the trailing `CALL_INSN_FUNCTION_USAGE` S-expression (`"(nil)"` or
+// `"(expr_list (use ...) ...)"`) from a full `(call_insn ...)` dump entry, or
+// returns `""` if `sexpr` is not a `call_insn` or lacks a usage field.
+std::string ExtractCallFusageFromInsnSexpr(std::string_view sexpr);
 
 // Splits `<main_pattern> <trailing_reg_notes>` when `(expr_list:...` or `(insn_list:...` is
 // appended after the primary pattern S-expression.

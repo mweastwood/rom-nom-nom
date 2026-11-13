@@ -6,6 +6,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gtest/gtest.h"
 
 namespace rom_nom_nom {
@@ -274,6 +275,102 @@ TEST(RtlSexprUtilsTest, CanonicalizesInsnListUidsAndMaxPseudoIgnoresTrailingNote
             "(set (reg:DI 73) (reg:DI 2 v0)) "
             "(insn_list:REG_RETVAL (expr_list:REG_EQUAL (fix:DI (reg:DF 80)) (nil)))");
   EXPECT_EQ(MaxPseudoRegInCfg(cfg), 73);
+}
+
+TEST(RtlSexprUtilsTest, ExtractsAllFourLoopNoteKindsIntoCfgAndRtlInsns) {
+  constexpr std::string_view kLoopDump = R"(
+;; Function full_loop_notes
+
+(note 1 0 2 "" NOTE_INSN_FUNCTION_BEG)
+
+(note 2 1 3 "" NOTE_INSN_LOOP_BEG)
+
+(code_label 3 2 4 2 "" [num_refs: 1])
+
+(insn 4 3 5 (set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 1))) -1 (nil) (nil))
+
+(note 5 4 6 "" NOTE_INSN_LOOP_CONT)
+
+(note 6 5 7 "" NOTE_INSN_LOOP_VTOP)
+
+(jump_insn 7 6 8 (set (pc) (if_then_else (lt:SI (reg:SI 72) (const_int 10)) (label_ref 3) (pc))) -1 (nil) (nil))
+
+(note 8 7 9 "" NOTE_INSN_LOOP_END)
+
+(jump_insn 9 8 10 (return) -1 (nil) (nil))
+
+(barrier 10 9 0)
+)";
+
+  const RtlPassDump dump = ParseRtlPassDump(RtlPassKind::kLoop, kLoopDump);
+  ASSERT_EQ(dump.Functions().size(), 1u);
+  const RtlControlFlowGraph cfg = BuildCanonicalCfgFromRtlDump(dump.Functions()[0]);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 3u);
+  EXPECT_EQ(cfg.rpo_blocks[0].LoopNotes(),
+            (std::vector<RtlLoopNoteKind>{RtlLoopNoteKind::kLoopBeg}));
+  EXPECT_EQ(cfg.rpo_blocks[1].LoopNotes(),
+            (std::vector<RtlLoopNoteKind>{RtlLoopNoteKind::kLoopCont, RtlLoopNoteKind::kLoopVtop}));
+  EXPECT_EQ(cfg.rpo_blocks[2].LoopNotes(),
+            (std::vector<RtlLoopNoteKind>{RtlLoopNoteKind::kLoopEnd}));
+}
+
+TEST(RtlSexprUtilsTest, SkipsTopLevelInsnDeletedEntriesWhilePreservingUserVarRegs) {
+  constexpr std::string_view kO0DeletedDump = R"(
+;; Function o0_deleted_entries
+
+(note 1 0 2 "" NOTE_INSN_FUNCTION_BEG)
+
+(insn 2 1 3 (set (reg/v:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1))) -1 (nil) (nil))
+
+(insn/v 3 2 4 (set (reg:SI 73) (const_int 99)) -1 (nil) (nil))
+
+(call_insn/v 4 3 5 (parallel[ (call (mem:SI (symbol_ref:SI ("dead_fn"))) (const_int 16)) (clobber (reg:SI 31 ra)) ] ) -1 (nil) (nil)
+    (expr_list (use (reg:SI 4 a0)) (nil)))
+
+(jump_insn 5 4 6 (set (pc) (label_ref 12)) -1 (nil) (nil))
+
+(barrier 6 5 7)
+
+(code_label/v 7 6 8 2 "" [num_refs: 0])
+
+(jump_insn/v 8 7 9 (set (pc) (label_ref 12)) -1 (nil) (nil))
+
+(barrier/v 9 8 12)
+
+(code_label 12 9 13 3 "" [num_refs: 1])
+
+(insn 13 12 14 (set (reg/i:SI 2 v0) (reg/v:SI 72)) -1 (nil) (nil))
+
+(jump_insn 14 13 15 (return) -1 (nil) (nil))
+
+(barrier 15 14 0)
+)";
+
+  const RtlPassDump dump = ParseRtlPassDump(RtlPassKind::kJump, kO0DeletedDump);
+  const RtlFunctionDump* fn_dump = dump.FindFunction("o0_deleted_entries");
+  ASSERT_NE(fn_dump, nullptr);
+  EXPECT_EQ(fn_dump->ActiveInsnCount(), 4u);
+
+  const absl::flat_hash_map<int, std::string> label_map = BuildSequentialLabelMap(*fn_dump);
+  EXPECT_FALSE(label_map.contains(7));
+  ASSERT_TRUE(label_map.contains(12));
+  EXPECT_EQ(label_map.at(12), "L0");
+
+  const RtlControlFlowGraph cfg = BuildCanonicalCfgFromRtlDump(*fn_dump);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 2u);
+  EXPECT_EQ(cfg.rpo_blocks[0].instructions,
+            (std::vector<std::string>{
+                "(set (reg/v:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                "(set (pc) (label_ref L0))",
+            }));
+  EXPECT_EQ(cfg.rpo_blocks[0].successors, (std::vector<size_t>{1}));
+  EXPECT_EQ(cfg.rpo_blocks[1].instructions, (std::vector<std::string>{
+                                                "(set (reg/i:SI 2 v0) (reg/v:SI 72))",
+                                                "(return)",
+                                            }));
+  auto parsed_first = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[0]);
+  ASSERT_TRUE(parsed_first.ok());
+  EXPECT_TRUE(parsed_first->pattern.SetDest().flags.volatil);
 }
 
 }  // namespace

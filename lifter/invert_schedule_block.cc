@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -210,6 +211,7 @@ void AnalyzeSourceExpr(const RtlExpr& expr, absl::flat_hash_set<int>* reads, boo
 
 struct ParsedBlockInsn {
   RtlPatternAndNotes parsed;
+  std::optional<RtlInsn> orig_rtl_insn;
   absl::flat_hash_set<int> read_regs;
   absl::flat_hash_set<int> write_regs;
   bool reads_mem = false;
@@ -249,11 +251,39 @@ void AnalyzeStatementNode(const RtlExpr& stmt, ParsedBlockInsn* info) {
   AnalyzeSourceExpr(stmt, &info->read_regs, &info->reads_mem, &info->has_side_effects);
 }
 
-ParsedBlockInsn BuildParsedBlockInsn(RtlPatternAndNotes parsed) {
+ParsedBlockInsn BuildParsedBlockInsn(RtlPatternAndNotes parsed,
+                                     std::optional<RtlInsn> orig_insn = std::nullopt) {
   ParsedBlockInsn info;
   info.parsed = std::move(parsed);
+  info.orig_rtl_insn = std::move(orig_insn);
   AnalyzeStatementNode(info.parsed.pattern, &info);
   return info;
+}
+
+bool FusageListReadsReg(absl::Span<const RtlExpr> call_fusage, int regno) {
+  for (const RtlExpr& usage_elem : call_fusage) {
+    if (usage_elem.op == RtlOp::kUse) {
+      absl::flat_hash_set<int> fusage_reads;
+      CollectReadRegsFromExpr(usage_elem, &fusage_reads);
+      if (fusage_reads.contains(regno)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool CallInsnReadsArgReg(const ParsedBlockInsn& call_insn, int regno) {
+  if (call_insn.read_regs.contains(regno)) {
+    return true;
+  }
+  if (call_insn.orig_rtl_insn.has_value() && call_insn.orig_rtl_insn->has_explicit_call_fusage) {
+    return FusageListReadsReg(call_insn.orig_rtl_insn->call_fusage, regno);
+  }
+  if (call_insn.parsed.has_explicit_call_fusage) {
+    return FusageListReadsReg(call_insn.parsed.call_fusage, regno);
+  }
+  return false;
 }
 
 // Returns true if `insn` is a single-set non-volatile memory load into a scalar
@@ -285,6 +315,34 @@ bool IsSchedulableLoadInsn(const ParsedBlockInsn& insn, int* out_dest_regno) {
   }
   *out_dest_regno = dst_regno;
   return true;
+}
+
+bool IsDirectSymbolLoadInsn(const ParsedBlockInsn& insn) {
+  const RtlExpr& pat = insn.parsed.pattern;
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr* src = &pat.children[1];
+  if ((src->op == RtlOp::kSignExtend || src->op == RtlOp::kZeroExtend) &&
+      src->children.size() == 1) {
+    src = &src->children[0];
+  }
+  if (src->op != RtlOp::kMem || src->children.size() != 1) {
+    return false;
+  }
+  const RtlExpr& addr = src->children[0];
+  return addr.op == RtlOp::kSymbolRef || addr.op == RtlOp::kConst;
+}
+
+bool IsConstIntMoveInsn(const ParsedBlockInsn& insn) {
+  const RtlExpr& pat = insn.parsed.pattern;
+  return pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[0].op == RtlOp::kReg &&
+         pat.children[1].op == RtlOp::kConstInt;
+}
+
+bool IsCalleeSavedMipsHardReg(int regno) {
+  return (regno >= kMipsFirstCalleeSavedGpr && regno <= kMipsLastCalleeSavedGpr) ||
+         regno == kMipsFpRegno || (regno >= kMipsFirstCalleeSavedFpr && regno <= kMipsLastFpr);
 }
 
 // Checks `mips.c:large_int(val)`: true when `(val & 0xffff0000) != 0`,
@@ -511,9 +569,11 @@ bool IsMultiCycleFpAluInsn(const ParsedBlockInsn& insn, int* out_dst_regno) {
   return *out_dst_regno >= 0;
 }
 
-// Reverses `schedule_block` hoisting of multi-cycle FP arithmetic producers and
-// independent 1-cycle ALU setup instructions across a contiguous sequence of
-// memory stores immediately preceding a `CALL_INSN`.
+// Reverses `schedule_block` hoisting/interleaving of multi-cycle FP arithmetic
+// producers and outgoing call-argument 1-cycle ALU setup instructions across
+// memory stores preceding a `CALL_INSN` (covering both R4000 full hoisting
+// ahead of all stores and R3000/-mips1 interleaving of FP producers with
+// independent stores).
 bool UnscheduleHoistedFpStoresAndCallArgs(std::vector<ParsedBlockInsn>* insns_ptr) {
   std::vector<ParsedBlockInsn>& insns = *insns_ptr;
   bool any_modified = false;
@@ -523,65 +583,70 @@ bool UnscheduleHoistedFpStoresAndCallArgs(std::vector<ParsedBlockInsn>* insns_pt
       continue;
     }
 
-    size_t store_start = call_idx;
-    while (store_start > 0) {
+    size_t trailing_store_start = call_idx;
+    while (trailing_store_start > 0) {
       int store_src_reg = -1;
-      if (!IsSimpleRegMemStoreInsn(insns[store_start - 1], &store_src_reg)) {
+      if (!IsSimpleRegMemStoreInsn(insns[trailing_store_start - 1], &store_src_reg)) {
         break;
       }
-      --store_start;
+      --trailing_store_start;
     }
-    if (call_idx - store_start < 2 || store_start == 0) {
+    if (call_idx - trailing_store_start < 2) {
       continue;
     }
 
-    // Scan backward from `store_start` for hoisted multi-cycle FP producers
-    // whose result dies in one of `[store_start .. call_idx - 1]` and
-    // independent 1-cycle ALU setup instructions.
-    size_t hoist_start = store_start;
-    while (hoist_start > 0) {
-      const ParsedBlockInsn& cand = insns[hoist_start - 1];
-      int dst_reg = -1;
-      if (IsMultiCycleFpAluInsn(cand, &dst_reg) || IsSingleCycleIntAluInsn(cand, &dst_reg)) {
-        --hoist_start;
+    // Scan backward across the contiguous pre-call region of simple stores,
+    // multi-cycle FP producers, and 1-cycle integer ALU instructions.
+    size_t window_start = trailing_store_start;
+    while (window_start > 0) {
+      const ParsedBlockInsn& cand = insns[window_start - 1];
+      int reg = -1;
+      if (IsSimpleRegMemStoreInsn(cand, &reg) || IsMultiCycleFpAluInsn(cand, &reg) ||
+          IsSingleCycleIntAluInsn(cand, &reg)) {
+        --window_start;
       } else {
         break;
       }
     }
-    if (hoist_start == store_start) {
+    if (window_start == trailing_store_start) {
       continue;
     }
 
-    // Validate each instruction in `[hoist_start .. store_start - 1]`. If the
-    // earliest candidates are unrelated to the stores/call, advance
-    // `hoist_start` until the window `[hoist_start .. store_start - 1]` is valid.
+    // Validate `[window_start .. call_idx - 1]`, advancing `window_start`
+    // past any unrelated earlier instructions until the window is self-contained.
     bool window_valid = false;
-    std::vector<int> fp_consumer_store_for_hoist;
-    while (hoist_start < store_start) {
-      const size_t hoist_len = store_start - hoist_start;
-      fp_consumer_store_for_hoist.assign(hoist_len, -1);
+    std::vector<int> kind_in_window;  // 0 = store, 1 = fp_prod, 2 = int_alu
+    std::vector<int> fp_consumer_store;
+    while (window_start < trailing_store_start) {
+      const size_t win_len = call_idx - window_start;
+      kind_in_window.assign(win_len, -1);
+      fp_consumer_store.assign(win_len, -1);
       bool ok = true;
-      int num_fp_producers = 0;
+      int num_stores = 0;
+      int num_hoisted_fp_producers = 0;
 
-      for (size_t h = hoist_start; h < store_start; ++h) {
+      for (size_t h = window_start; h < call_idx; ++h) {
         const ParsedBlockInsn& cand = insns[h];
+        int store_src = -1;
         int fp_dst = -1;
         int alu_dst = -1;
-        // Input registers of `cand` must not be modified anywhere in
-        // `[hoist_start .. call_idx - 1]`.
-        for (size_t k = hoist_start; k < call_idx; ++k) {
-          if (k != h && !SetsAreDisjoint(cand.read_regs, insns[k].write_regs)) {
-            ok = false;
+
+        if (IsSimpleRegMemStoreInsn(cand, &store_src)) {
+          kind_in_window[h - window_start] = 0;
+          ++num_stores;
+        } else if (IsMultiCycleFpAluInsn(cand, &fp_dst)) {
+          kind_in_window[h - window_start] = 1;
+          for (size_t k = window_start; k < call_idx; ++k) {
+            if (k != h && !SetsAreDisjoint(cand.read_regs, insns[k].write_regs)) {
+              ok = false;
+              break;
+            }
+          }
+          if (!ok) {
             break;
           }
-        }
-        if (!ok) {
-          break;
-        }
-
-        if (IsMultiCycleFpAluInsn(cand, &fp_dst)) {
           int matched_store = -1;
-          for (size_t k = hoist_start; k < call_idx; ++k) {
+          for (size_t k = window_start; k < call_idx; ++k) {
             if (k == h) {
               continue;
             }
@@ -590,14 +655,10 @@ bool UnscheduleHoistedFpStoresAndCallArgs(std::vector<ParsedBlockInsn>* insns_pt
               break;
             }
             if (insns[k].read_regs.contains(fp_dst)) {
-              if (k >= store_start && matched_store == -1 && HasRegDeadNoteFor(insns[k], fp_dst)) {
-                int store_src = -1;
-                if (IsSimpleRegMemStoreInsn(insns[k], &store_src) && store_src == fp_dst) {
-                  matched_store = static_cast<int>(k);
-                } else {
-                  ok = false;
-                  break;
-                }
+              int k_store_src = -1;
+              if (k > h && matched_store == -1 && HasRegDeadNoteFor(insns[k], fp_dst) &&
+                  IsSimpleRegMemStoreInsn(insns[k], &k_store_src) && k_store_src == fp_dst) {
+                matched_store = static_cast<int>(k);
               } else {
                 ok = false;
                 break;
@@ -608,14 +669,22 @@ bool UnscheduleHoistedFpStoresAndCallArgs(std::vector<ParsedBlockInsn>* insns_pt
             ok = false;
             break;
           }
-          fp_consumer_store_for_hoist[h - hoist_start] = matched_store;
-          ++num_fp_producers;
+          fp_consumer_store[h - window_start] = matched_store;
+          if (matched_store > static_cast<int>(h) + 1) {
+            ++num_hoisted_fp_producers;
+          }
         } else if (IsSingleCycleIntAluInsn(cand, &alu_dst)) {
-          for (size_t k = hoist_start; k < call_idx; ++k) {
+          kind_in_window[h - window_start] = 2;
+          if (!CallInsnReadsArgReg(insns[call_idx], alu_dst)) {
+            ok = false;
+            break;
+          }
+          for (size_t k = window_start; k < call_idx; ++k) {
             if (k == h) {
               continue;
             }
-            if (insns[k].read_regs.contains(alu_dst) || insns[k].write_regs.contains(alu_dst)) {
+            if (!SetsAreDisjoint(cand.read_regs, insns[k].write_regs) ||
+                insns[k].read_regs.contains(alu_dst) || insns[k].write_regs.contains(alu_dst)) {
               ok = false;
               break;
             }
@@ -629,37 +698,177 @@ bool UnscheduleHoistedFpStoresAndCallArgs(std::vector<ParsedBlockInsn>* insns_pt
         }
       }
 
-      if (ok && num_fp_producers > 0) {
+      if (ok && num_stores >= 2 && num_hoisted_fp_producers > 0) {
+        // Verify that every store's address and value registers are not written
+        // anywhere in `[window_start .. call_idx - 1]` except by that store's
+        // matched `MultiCycleFpAluInsn` producer.
+        for (size_t s = window_start; s < call_idx && ok; ++s) {
+          if (kind_in_window[s - window_start] != 0) {
+            continue;
+          }
+          for (size_t k = window_start; k < call_idx; ++k) {
+            if (k == s) {
+              continue;
+            }
+            if (kind_in_window[k - window_start] == 1 &&
+                fp_consumer_store[k - window_start] == static_cast<int>(s)) {
+              // Address registers of `insns[s]` must still be disjoint from `insns[k].write_regs`.
+              int s_src = -1;
+              IsSimpleRegMemStoreInsn(insns[s], &s_src);
+              for (int r : insns[s].read_regs) {
+                if (r != s_src && insns[k].write_regs.contains(r)) {
+                  ok = false;
+                  break;
+                }
+              }
+              if (!ok) {
+                break;
+              }
+              continue;
+            }
+            if (!SetsAreDisjoint(insns[s].read_regs, insns[k].write_regs)) {
+              ok = false;
+              break;
+            }
+          }
+        }
+      } else {
+        ok = false;
+      }
+
+      if (ok) {
         window_valid = true;
         break;
       }
-      ++hoist_start;
+      ++window_start;
     }
 
     if (!window_valid) {
       continue;
     }
 
-    std::vector<ParsedBlockInsn> reordered;
-    reordered.reserve(call_idx - hoist_start);
-    for (size_t s = store_start; s < call_idx; ++s) {
-      for (size_t h = hoist_start; h < store_start; ++h) {
-        if (fp_consumer_store_for_hoist[h - hoist_start] == static_cast<int>(s)) {
-          reordered.push_back(std::move(insns[h]));
+    std::vector<size_t> new_order;
+    new_order.reserve(call_idx - window_start);
+    for (size_t s = window_start; s < call_idx; ++s) {
+      if (kind_in_window[s - window_start] != 0) {
+        continue;
+      }
+      for (size_t h = window_start; h < call_idx; ++h) {
+        if (kind_in_window[h - window_start] == 1 &&
+            fp_consumer_store[h - window_start] == static_cast<int>(s)) {
+          new_order.push_back(h);
         }
       }
-      reordered.push_back(std::move(insns[s]));
+      new_order.push_back(s);
     }
-    for (size_t h = hoist_start; h < store_start; ++h) {
-      if (fp_consumer_store_for_hoist[h - hoist_start] == -1) {
-        reordered.push_back(std::move(insns[h]));
+    for (size_t h = window_start; h < call_idx; ++h) {
+      if (kind_in_window[h - window_start] == 2) {
+        new_order.push_back(h);
       }
     }
 
+    bool changed = false;
+    for (size_t i = 0; i < new_order.size(); ++i) {
+      if (new_order[i] != window_start + i) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) {
+      continue;
+    }
+
+    std::vector<ParsedBlockInsn> reordered;
+    reordered.reserve(new_order.size());
+    for (size_t idx : new_order) {
+      reordered.push_back(std::move(insns[idx]));
+    }
     for (size_t i = 0; i < reordered.size(); ++i) {
-      insns[hoist_start + i] = std::move(reordered[i]);
+      insns[window_start + i] = std::move(reordered[i]);
     }
     any_modified = true;
+  }
+
+  return any_modified;
+}
+
+// Reverses `schedule_block` sinking of a callee-saved multi-cycle FP ALU
+// instruction across an earlier `CALL_INSN` into the argument setup of a later
+// `CALL_INSN`. In GCC 2.7.2 (`sched.c:1704`), `sched_analyze_1` checks
+// `call_used_regs[i]` instead of `call_used_regs[regno + i]` (where `i = 0` has
+// `call_used_regs[0] == 1`), attaching a spurious `REG_DEP_ANTI` edge to
+// `last_function_call` whenever the instruction starts after `CALL_INSN #1`.
+bool UnscheduleCalleeSavedFpAluSunkAcrossCall(std::vector<ParsedBlockInsn>* insns_ptr) {
+  std::vector<ParsedBlockInsn>& insns = *insns_ptr;
+  bool any_modified = false;
+
+  for (size_t idx = 1; idx + 2 < insns.size(); ++idx) {
+    const ParsedBlockInsn& cand = insns[idx];
+    int fp_dst = -1;
+    int alu_dst = -1;
+    if (!IsMultiCycleFpAluInsn(cand, &fp_dst) || cand.read_regs.empty() ||
+        cand.write_regs.empty() || !IsSingleCycleIntAluInsn(insns[idx + 1], &alu_dst)) {
+      continue;
+    }
+    bool all_callee_saved = true;
+    for (int r : cand.write_regs) {
+      if (!IsCalleeSavedMipsHardReg(r)) {
+        all_callee_saved = false;
+        break;
+      }
+    }
+    for (int r : cand.read_regs) {
+      if (!IsCalleeSavedMipsHardReg(r)) {
+        all_callee_saved = false;
+        break;
+      }
+    }
+    if (!all_callee_saved) {
+      continue;
+    }
+    if (!SetsAreDisjoint(cand.read_regs, insns[idx + 1].read_regs) ||
+        !SetsAreDisjoint(cand.read_regs, insns[idx + 1].write_regs) ||
+        !SetsAreDisjoint(cand.write_regs, insns[idx + 1].read_regs) ||
+        !SetsAreDisjoint(cand.write_regs, insns[idx + 1].write_regs)) {
+      continue;
+    }
+    if (!IsCallExpr(insns[idx + 2].parsed.pattern) ||
+        !CallInsnReadsArgReg(insns[idx + 2], alu_dst)) {
+      continue;
+    }
+
+    size_t earliest_valid_call = idx;
+    for (size_t back = idx; back > 0; --back) {
+      const ParsedBlockInsn& prev = insns[back - 1];
+      if (!SetsAreDisjoint(prev.read_regs, cand.write_regs) ||
+          !SetsAreDisjoint(prev.write_regs, cand.read_regs) ||
+          !SetsAreDisjoint(prev.write_regs, cand.write_regs)) {
+        break;
+      }
+      bool note_conflict = false;
+      for (const RtlRegNote& note : prev.parsed.reg_notes) {
+        if (note.datum.op == RtlOp::kReg && (cand.read_regs.contains(note.datum.RegNo()) ||
+                                             cand.write_regs.contains(note.datum.RegNo()))) {
+          note_conflict = true;
+          break;
+        }
+      }
+      if (note_conflict) {
+        break;
+      }
+      if (IsCallExpr(prev.parsed.pattern)) {
+        earliest_valid_call = back - 1;
+      }
+    }
+
+    if (earliest_valid_call < idx) {
+      ParsedBlockInsn hoisted = std::move(insns[idx]);
+      for (size_t m = idx; m > earliest_valid_call; --m) {
+        insns[m] = std::move(insns[m - 1]);
+      }
+      insns[earliest_valid_call] = std::move(hoisted);
+      any_modified = true;
+    }
   }
 
   return any_modified;
@@ -684,18 +893,26 @@ void UnscheduleBlockInstructions(RtlBasicBlock* blk) {
         has_flow_liveness_notes = true;
       }
     }
-    insns.push_back(BuildParsedBlockInsn(std::move(*parsed_or)));
+    std::optional<RtlInsn> orig_insn;
+    if (i < blk->rtl_insns.size()) {
+      orig_insn = blk->rtl_insns[i];
+    }
+    insns.push_back(BuildParsedBlockInsn(std::move(*parsed_or), std::move(orig_insn)));
   }
   if (!has_flow_liveness_notes) {
     return;
   }
 
   bool modified = UnscheduleHoistedFpStoresAndCallArgs(&insns);
+  if (UnscheduleCalleeSavedFpAluSunkAcrossCall(&insns)) {
+    modified = true;
+  }
   for (size_t i = 0; i + 2 < insns.size(); ++i) {
     int load_regno = -1;
     int alu_regno = -1;
     if (!IsSchedulableLoadInsn(insns[i], &load_regno) ||
-        !IsSingleCycleIntAluInsn(insns[i + 1], &alu_regno)) {
+        !IsSingleCycleIntAluInsn(insns[i + 1], &alu_regno) || IsDirectSymbolLoadInsn(insns[i]) ||
+        IsConstIntMoveInsn(insns[i + 1])) {
       continue;
     }
 
@@ -746,10 +963,22 @@ void UnscheduleBlockInstructions(RtlBasicBlock* blk) {
   }
 
   if (modified) {
+    bool all_have_orig_rtl = true;
     for (size_t i = 0; i < insns.size(); ++i) {
       blk->instructions[i] = insns[i].parsed.ToSexprString();
+      if (!insns[i].orig_rtl_insn.has_value()) {
+        all_have_orig_rtl = false;
+      }
     }
-    blk->SyncRtlInsnsFromInstructions();
+    if (all_have_orig_rtl && blk->rtl_insns.size() == insns.size()) {
+      for (size_t i = 0; i < insns.size(); ++i) {
+        RtlInsn moved = std::move(*insns[i].orig_rtl_insn);
+        moved.canonical_pattern = blk->instructions[i];
+        blk->rtl_insns[i] = std::move(moved);
+      }
+    } else {
+      blk->SyncRtlInsnsFromInstructions();
+    }
   }
 }
 
@@ -963,6 +1192,12 @@ RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg
     return {};
   }
 
+  // At `-O0` (`toplev.c:3025-3044`), `stupid_life_analysis` (`stupid.c:186-187`)
+  // initializes `reg_n_deaths[0] = 1` while leaving `basic_block_live_at_start`
+  // empty, and neither `schedule_insns` nor `find_basic_blocks` executes.
+  const bool is_stupid_alloc = scheduled_cfg.sideband.reg_n_deaths.contains(0) &&
+                               scheduled_cfg.sideband.basic_block_live_at_start.empty();
+
   RtlControlFlowGraph out = scheduled_cfg;
   if (scheduled_cfg.pass == RtlPassKind::kSched2) {
     out.pass = RtlPassKind::kGreg;
@@ -976,12 +1211,16 @@ RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg
       }
     }
     if (has_prologue) {
-      for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
-        out.sideband.basic_block_live_at_start[static_cast<int>(b)].insert(kMipsSpRegno);
+      for (auto& [_, live_set] : out.sideband.basic_block_live_at_start) {
+        live_set.insert(kMipsSpRegno);
       }
     }
   } else if (scheduled_cfg.pass == RtlPassKind::kSched) {
     out.pass = RtlPassKind::kCombine;
+  }
+
+  if (is_stupid_alloc) {
+    return out;
   }
 
   for (RtlBasicBlock& blk : out.rpo_blocks) {
